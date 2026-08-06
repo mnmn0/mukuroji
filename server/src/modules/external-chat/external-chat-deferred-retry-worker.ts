@@ -11,7 +11,7 @@ export const EXTERNAL_CHAT_DEFERRED_RETRY_MAX_BATCH_SIZE = 100
 /** Persistence capabilities required by the deferred retry worker. */
 export type ExternalChatDeferredRetryStorePort = Pick<
   ExternalChatStore,
-  'listDueDeferredEvents' | 'deleteDeferredEvent'
+  'listDeferredEvents' | 'deleteDeferredEvent'
 >
 
 /** Provider-neutral inbound processor used by the deferred retry worker. */
@@ -48,6 +48,7 @@ export type ExternalChatDeferredRetryBatchInput = {
 /** Reason a retry worker stopped before every selected event became terminal. */
 export type ExternalChatDeferredRetryStopReason =
   | 'batch-complete'
+  | 'not-due'
   | 'deferred'
   | 'retryable-failure'
   | 'busy'
@@ -101,22 +102,32 @@ export class ExternalChatDeferredRetryWorker {
     const linkId = requireIdentifier(input.linkId, 'external chat link ID')
     const dueAt = requireTimestamp(input.dueAt, 'deferred retry due timestamp')
     const limit = requireBatchLimit(input.limit)
-    const dueEvents = await this.store.listDueDeferredEvents(
+    const deferredEvents = await this.store.listDeferredEvents(
       workspaceId,
       linkId,
-      dueAt,
       limit,
     )
     const outcomes: ExternalChatSyncOutcome[] = []
     let removedEventCount = 0
     let attemptedEventCount = 0
-    for (const deferred of dueEvents) {
+    for (const deferred of deferredEvents) {
+      if (requireTimestamp(deferred.retryAt, 'deferred retry timestamp') > dueAt) {
+        return {
+          attemptedEventCount,
+          removedEventCount,
+          outcomes,
+          stopReason: 'not-due',
+        }
+      }
       attemptedEventCount += 1
       let outcome: ExternalChatSyncOutcome
       try {
         outcome = await this.processor.processInbound({
           workspaceId,
           event: deferred.event,
+          ...(deferred.authorizationRevision === undefined
+            ? {}
+            : { authorizationRevision: deferred.authorizationRevision }),
         })
       } catch (error: unknown) {
         if (error instanceof ExternalChatError && error.retryable) {
@@ -181,12 +192,13 @@ function requireIdentifier(value: unknown, label: string): string {
   return value
 }
 
-/** Reads one parseable ISO 8601 timestamp. */
+/** Reads one canonical UTC timestamp safe for ordinal FIFO comparisons. */
 function requireTimestamp(value: unknown, label: string): string {
   const timestamp = requireIdentifier(value, label)
+  const parsed = Date.parse(timestamp)
   if (
-    !/^\d{4}-\d{2}-\d{2}T/u.test(timestamp) ||
-    !Number.isFinite(Date.parse(timestamp))
+    !Number.isFinite(parsed) ||
+    new Date(parsed).toISOString() !== timestamp
   ) {
     throw new ExternalChatError(
       'ExternalChatValidationFailed',

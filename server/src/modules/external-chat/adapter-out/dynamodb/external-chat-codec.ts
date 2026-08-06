@@ -20,13 +20,22 @@ import type {
   DeferredExternalChatEvent,
   DeferredExternalChatOutboundEvent,
   ExternalChatInboundReceipt,
+  ExternalChatLifecycleObservation,
+  ExternalChatLinkLifecycleState,
   ExternalChatOutboundReceipt,
+  ExternalChatOutboundRetryPermit,
+  ExternalChatParentLifecycleFence,
+  ExternalChatParentLifecycleFenceSnapshot,
   ExternalChatSyncOutboundEvent,
   StoredExternalChatLink,
   StoredExternalChatMessageBinding,
   StoredExternalChatThreadLifecycle,
 } from '../../external-chat'
-import { ExternalChatError } from '../../external-chat'
+import {
+  createInitialExternalChatLinkLifecycleState,
+  externalChatLifecycleBlocksSynchronization,
+  ExternalChatError,
+} from '../../external-chat'
 
 /** Maximum text size accepted from one durable identifier or metadata field. */
 const MAX_STORED_TEXT_BYTES = 64 * 1024
@@ -46,6 +55,7 @@ export function decodeStoredExternalChatLink(value: unknown): StoredExternalChat
     'link',
     'sourceDigest',
     'sourceAuthorizationRevision',
+    'lifecycleState',
     'active',
     'unlinkedAt',
   ], 'stored external chat link')
@@ -57,16 +67,71 @@ export function decodeStoredExternalChatLink(value: unknown): StoredExternalChat
   if (active === (unlinkedAt !== undefined)) {
     invalidStoredValue('stored external chat link lifecycle')
   }
+  const link = decodeExternalChatLink(record.link)
+  const sourceAuthorizationRevision = readPositiveInteger(
+    record.sourceAuthorizationRevision,
+    'source authorization revision',
+  )
+  const lifecycleState = record.lifecycleState === undefined
+    ? createInitialExternalChatLinkLifecycleState(link, sourceAuthorizationRevision)
+    : decodeExternalChatLinkLifecycleState(record.lifecycleState)
   return {
     workspaceId: readIdentifier(record.workspaceId, 'Workspace ID'),
-    link: decodeExternalChatLink(record.link),
+    link,
     sourceDigest: readDigest(record.sourceDigest, 'external chat source digest'),
-    sourceAuthorizationRevision: readPositiveInteger(
-      record.sourceAuthorizationRevision,
-      'source authorization revision',
-    ),
+    sourceAuthorizationRevision,
+    lifecycleState,
     active,
     ...(unlinkedAt === undefined ? {} : { unlinkedAt }),
+  }
+}
+
+/**
+ * Decodes private scope-local lifecycle watermarks retained with one link.
+ *
+ * @param value - Untrusted persisted lifecycle state.
+ * @returns Exact validated per-link lifecycle state.
+ */
+function decodeExternalChatLinkLifecycleState(value: unknown): ExternalChatLinkLifecycleState {
+  const record = readObject(
+    value,
+    ['workspace', 'conversation', 'thread'],
+    'external chat link lifecycle state',
+  )
+  return {
+    ...(record.workspace === undefined
+      ? {}
+      : { workspace: decodeExternalChatLifecycleObservation(record.workspace) }),
+    ...(record.conversation === undefined
+      ? {}
+      : { conversation: decodeExternalChatLifecycleObservation(record.conversation) }),
+    thread: decodeExternalChatLifecycleObservation(record.thread),
+  }
+}
+
+/**
+ * Decodes one monotonically ordered lifecycle observation.
+ *
+ * @param value - Untrusted persisted observation.
+ * @returns Exact validated lifecycle observation.
+ */
+function decodeExternalChatLifecycleObservation(value: unknown): ExternalChatLifecycleObservation {
+  const record = readObject(value, [
+    'authorizationRevision',
+    'availability',
+    'state',
+    'occurredAt',
+    'eventId',
+  ], 'external chat lifecycle observation')
+  return {
+    authorizationRevision: readPositiveInteger(
+      record.authorizationRevision,
+      'lifecycle authorization revision',
+    ),
+    availability: decodeAvailability(record.availability),
+    state: decodeSourceState(record.state),
+    occurredAt: readTimestamp(record.occurredAt, 'lifecycle occurrence timestamp'),
+    eventId: readIdentifier(record.eventId, 'lifecycle event ID'),
   }
 }
 
@@ -144,21 +209,59 @@ export function decodeExternalChatOutboundReceipt(value: unknown): ExternalChatO
     'attempt',
     'leaseExpiresAt',
     'outcome',
+    'deadLetterReason',
+    'deadLetteredAt',
     'createdAt',
     'updatedAt',
   ], 'external chat outbound receipt')
-  const state = readEnum(record.state, ['processing', 'completed'], 'outbound receipt state')
+  const state = readEnum(
+    record.state,
+    ['processing', 'completed', 'dead-lettering', 'dead-lettered'],
+    'outbound receipt state',
+  )
   const outcome = record.outcome === undefined
     ? undefined
     : decodeExternalChatSyncOutcome(record.outcome)
+  const deadLetterReason = record.deadLetterReason === undefined
+    ? undefined
+    : readEnum(
+      record.deadLetterReason,
+      ['max-attempts', 'max-age'],
+      'outbound receipt dead-letter reason',
+    )
+  const deadLetteredAt = readOptionalTimestamp(
+    record.deadLetteredAt,
+    'outbound receipt dead-letter timestamp',
+  )
   const operationId = readIdentifier(record.operationId, 'outbound operation ID')
-  if ((state === 'completed') !== (outcome !== undefined)) {
+  if (
+    (state === 'processing' && outcome !== undefined) ||
+    (state === 'completed' && outcome === undefined) ||
+    (
+      state === 'dead-lettering' &&
+      outcome !== undefined &&
+      outcome.kind !== 'deferred' &&
+      !(outcome.kind === 'failed' && outcome.retryable)
+    )
+  ) {
     invalidStoredValue('external chat outbound receipt completion state')
   }
   if (
     outcome !== undefined &&
     (outcome.operationId !== operationId || outcome.eventId !== undefined)
   ) invalidStoredValue('external chat outbound receipt outcome scope')
+  if (
+    state === 'dead-lettered'
+      ? deadLetterReason === undefined ||
+        deadLetteredAt === undefined ||
+        outcome?.kind !== 'failed' ||
+        outcome.retryable ||
+        outcome.errorCode !== 'ExternalChatRetryExhausted' ||
+        outcome.occurredAt !== deadLetteredAt
+      : state === 'dead-lettering'
+        ? deadLetterReason === undefined || deadLetteredAt === undefined
+        : deadLetterReason !== undefined || deadLetteredAt !== undefined
+  ) invalidStoredValue('external chat outbound receipt dead-letter state')
   return {
     workspaceId: readIdentifier(record.workspaceId, 'Workspace ID'),
     linkId: readIdentifier(record.linkId, 'external chat link ID'),
@@ -168,8 +271,47 @@ export function decodeExternalChatOutboundReceipt(value: unknown): ExternalChatO
     attempt: readPositiveInteger(record.attempt, 'outbound receipt attempt'),
     leaseExpiresAt: readTimestamp(record.leaseExpiresAt, 'outbound receipt lease expiry'),
     ...(outcome === undefined ? {} : { outcome }),
+    ...(deadLetterReason === undefined ? {} : { deadLetterReason }),
+    ...(deadLetteredAt === undefined ? {} : { deadLetteredAt }),
     createdAt: readTimestamp(record.createdAt, 'outbound receipt creation timestamp'),
     updatedAt: readTimestamp(record.updatedAt, 'outbound receipt update timestamp'),
+  }
+}
+
+/**
+ * Decodes one durable installation-scoped outbound retry permit.
+ *
+ * @param value - Untrusted persisted value.
+ * @returns Exact validated permit ownership and fencing state.
+ */
+export function decodeExternalChatOutboundRetryPermit(
+  value: unknown,
+): ExternalChatOutboundRetryPermit {
+  const record = readObject(value, [
+    'workspaceId',
+    'provider',
+    'installationId',
+    'ownerId',
+    'fenceToken',
+    'acquiredAt',
+    'leaseExpiresAt',
+    'updatedAt',
+  ], 'external chat outbound retry permit')
+  const acquiredAt = readTimestamp(record.acquiredAt, 'outbound retry permit acquisition')
+  const leaseExpiresAt = readTimestamp(record.leaseExpiresAt, 'outbound retry permit expiry')
+  const updatedAt = readTimestamp(record.updatedAt, 'outbound retry permit update')
+  if (updatedAt < acquiredAt) {
+    invalidStoredValue('external chat outbound retry permit chronology')
+  }
+  return {
+    workspaceId: readIdentifier(record.workspaceId, 'Workspace ID'),
+    provider: decodeProvider(record.provider),
+    installationId: readIdentifier(record.installationId, 'connector installation ID'),
+    ownerId: readIdentifier(record.ownerId, 'outbound retry permit owner ID'),
+    fenceToken: readPositiveInteger(record.fenceToken, 'outbound retry fencing token'),
+    acquiredAt,
+    leaseExpiresAt,
+    updatedAt,
   }
 }
 
@@ -326,8 +468,10 @@ export function decodeExternalChatSyncCursor(value: unknown): ExternalChatSyncCu
     'mode',
     'status',
     'ownerLinkRevision',
+    'authorizationRevision',
     'observedSourceAvailability',
     'observedSourceState',
+    'observedSourceAt',
     'completionSyncStatus',
     'providerCursor',
     'revision',
@@ -364,6 +508,10 @@ export function decodeExternalChatSyncCursor(value: unknown): ExternalChatSyncCu
       record.ownerLinkRevision,
       'sync cursor owner link revision',
     ),
+    authorizationRevision: readPositiveInteger(
+      record.authorizationRevision,
+      'sync cursor authorization revision',
+    ),
     ...(record.observedSourceAvailability === undefined
       ? {}
       : {
@@ -374,6 +522,9 @@ export function decodeExternalChatSyncCursor(value: unknown): ExternalChatSyncCu
     ...(record.observedSourceState === undefined
       ? {}
       : { observedSourceState: decodeSourceState(record.observedSourceState) }),
+    ...(record.observedSourceAt === undefined
+      ? {}
+      : { observedSourceAt: readTimestamp(record.observedSourceAt, 'observed source timestamp') }),
     ...(record.completionSyncStatus === undefined
       ? {}
       : {
@@ -408,6 +559,8 @@ export function decodeDeferredExternalChatEvent(value: unknown): DeferredExterna
     'workspaceId',
     'linkId',
     'event',
+    'authorizationRevision',
+    'expectedParentLifecycleFences',
     'fingerprint',
     'reason',
     'attempt',
@@ -415,10 +568,34 @@ export function decodeDeferredExternalChatEvent(value: unknown): DeferredExterna
     'createdAt',
     'updatedAt',
   ], 'deferred external chat event')
+  const event = decodeExternalChatInboundEvent(record.event)
+  const expectedParentLifecycleFences = record.expectedParentLifecycleFences === undefined
+    ? undefined
+    : decodeExternalChatParentLifecycleFenceSnapshot(record.expectedParentLifecycleFences)
+  if (
+    expectedParentLifecycleFences === undefined &&
+    !(
+      event.type === 'source.lifecycle-changed' &&
+      (event.resourceType === 'workspace' || event.resourceType === 'conversation')
+    )
+  ) {
+    invalidStoredValue('deferred external chat parent authority snapshot')
+  }
   return {
     workspaceId: readIdentifier(record.workspaceId, 'Workspace ID'),
     linkId: readIdentifier(record.linkId, 'external chat link ID'),
-    event: decodeExternalChatInboundEvent(record.event),
+    event,
+    ...(record.authorizationRevision === undefined
+      ? {}
+      : {
+          authorizationRevision: readPositiveInteger(
+            record.authorizationRevision,
+            'deferred lifecycle authorization revision',
+          ),
+        }),
+    ...(expectedParentLifecycleFences === undefined
+      ? {}
+      : { expectedParentLifecycleFences }),
     fingerprint: readDigest(record.fingerprint, 'deferred event fingerprint'),
     reason: readEnum(
       record.reason,
@@ -444,6 +621,10 @@ export function decodeDeferredExternalChatOutboundEvent(
   const record = readObject(value, [
     'workspaceId',
     'linkId',
+    'ownerTeamId',
+    'ownerWorkItemId',
+    'ownerLinkRevision',
+    'expectedParentLifecycleFences',
     'event',
     'fingerprint',
     'operationId',
@@ -455,6 +636,18 @@ export function decodeDeferredExternalChatOutboundEvent(
   return {
     workspaceId: readIdentifier(record.workspaceId, 'Workspace ID'),
     linkId: readIdentifier(record.linkId, 'external chat link ID'),
+    ownerTeamId: readIdentifier(record.ownerTeamId, 'deferred outbound owner Team ID'),
+    ownerWorkItemId: readIdentifier(
+      record.ownerWorkItemId,
+      'deferred outbound owner Work Item ID',
+    ),
+    ownerLinkRevision: readPositiveInteger(
+      record.ownerLinkRevision,
+      'deferred outbound owner link revision',
+    ),
+    expectedParentLifecycleFences: decodeExternalChatParentLifecycleFenceSnapshot(
+      record.expectedParentLifecycleFences,
+    ),
     event: decodeExternalChatSyncOutboundEvent(record.event),
     fingerprint: readDigest(record.fingerprint, 'deferred outbound event fingerprint'),
     operationId: readIdentifier(record.operationId, 'outbound operation ID'),
@@ -462,6 +655,89 @@ export function decodeDeferredExternalChatOutboundEvent(
     retryAt: readTimestamp(record.retryAt, 'deferred outbound event retry timestamp'),
     createdAt: readTimestamp(record.createdAt, 'deferred outbound event creation timestamp'),
     updatedAt: readTimestamp(record.updatedAt, 'deferred outbound event update timestamp'),
+  }
+}
+
+/**
+ * Decodes an exact present-or-absent parent lifecycle authority snapshot.
+ *
+ * @param value - Untrusted durable snapshot value.
+ * @returns Validated workspace and conversation parent authorities.
+ */
+function decodeExternalChatParentLifecycleFenceSnapshot(
+  value: unknown,
+): ExternalChatParentLifecycleFenceSnapshot {
+  const record = readObject(
+    value,
+    ['workspace', 'conversation'],
+    'external chat parent lifecycle fence snapshot',
+  )
+  return {
+    workspace: record.workspace === undefined
+      ? undefined
+      : decodeExternalChatParentLifecycleFence(record.workspace, false),
+    conversation: record.conversation === undefined
+      ? undefined
+      : decodeExternalChatParentLifecycleFence(record.conversation, true),
+  }
+}
+
+/**
+ * Decodes one exact provider-parent lifecycle fence from a queue payload.
+ *
+ * @param value - Untrusted durable fence value.
+ * @param conversationScoped - Whether the enclosing snapshot slot requires a conversation ID.
+ * @returns Validated provider parent authority.
+ */
+function decodeExternalChatParentLifecycleFence(
+  value: unknown,
+  conversationScoped: boolean,
+): ExternalChatParentLifecycleFence {
+  const record = readObject(value, [
+    'workspaceId',
+    'provider',
+    'installationId',
+    'externalWorkspaceId',
+    'conversationExternalId',
+    'authorizationRevision',
+    'availability',
+    'state',
+    'restrictive',
+    'eventId',
+    'operationId',
+    'occurredAt',
+  ], 'external chat parent lifecycle fence')
+  const availability = decodeAvailability(record.availability)
+  const state = decodeSourceState(record.state)
+  const restrictive = readBoolean(record.restrictive, 'parent lifecycle restrictive state')
+  const conversationExternalId = record.conversationExternalId === undefined
+    ? undefined
+    : readIdentifier(record.conversationExternalId, 'parent lifecycle conversation ID')
+  if (
+    restrictive !== externalChatLifecycleBlocksSynchronization(availability, state) ||
+    conversationScoped === (conversationExternalId === undefined)
+  ) {
+    invalidStoredValue('external chat parent lifecycle fence')
+  }
+  return {
+    workspaceId: readIdentifier(record.workspaceId, 'parent lifecycle Workspace ID'),
+    provider: decodeProvider(record.provider),
+    installationId: readIdentifier(record.installationId, 'parent lifecycle installation ID'),
+    externalWorkspaceId: readIdentifier(
+      record.externalWorkspaceId,
+      'parent lifecycle external Workspace ID',
+    ),
+    ...(conversationExternalId === undefined ? {} : { conversationExternalId }),
+    authorizationRevision: readPositiveInteger(
+      record.authorizationRevision,
+      'parent lifecycle authorization revision',
+    ),
+    availability,
+    state,
+    restrictive,
+    eventId: readIdentifier(record.eventId, 'parent lifecycle event ID'),
+    operationId: readIdentifier(record.operationId, 'parent lifecycle operation ID'),
+    occurredAt: readTimestamp(record.occurredAt, 'parent lifecycle occurrence timestamp'),
   }
 }
 
@@ -921,24 +1197,23 @@ function decodeExternalChatInboundEvent(value: unknown): ExternalChatInboundEven
     'installationId',
     'provider',
     'externalWorkspaceId',
-    'conversationExternalId',
-    'threadExternalId',
     'occurredAt',
     'externalSequence',
     'originOperationId',
     'type',
   ]
   const base = decodeInboundEventBase(candidate)
+  const threadBaseKeys = [...baseKeys, 'conversationExternalId', 'threadExternalId']
   if (type === 'message.created' || type === 'message.edited') {
-    const record = readObject(value, [...baseKeys, 'message'], 'external chat message event')
-    return { ...base, type, message: decodeMessage(record.message) }
+    const record = readObject(value, [...threadBaseKeys, 'message'], 'external chat message event')
+    return { ...decodeThreadInboundEventBase(candidate), type, message: decodeMessage(record.message) }
   }
   if (type === 'message.deleted') {
     const record = readObject(value, [
-      ...baseKeys, 'externalMessageId', 'externalVersion', 'sourcePermalink', 'deletedAt',
+      ...threadBaseKeys, 'externalMessageId', 'externalVersion', 'sourcePermalink', 'deletedAt',
     ], 'external chat message deletion event')
     return {
-      ...base,
+      ...decodeThreadInboundEventBase(candidate),
       type,
       externalMessageId: readIdentifier(record.externalMessageId, 'external message ID'),
       externalVersion: readText(record.externalVersion, 'external message version'),
@@ -950,10 +1225,10 @@ function decodeExternalChatInboundEvent(value: unknown): ExternalChatInboundEven
   }
   if (type === 'thread.completed') {
     const record = readObject(value, [
-      ...baseKeys, 'externalVersion', 'sourcePermalink', 'completedAt',
+      ...threadBaseKeys, 'externalVersion', 'sourcePermalink', 'completedAt',
     ], 'external chat thread completion event')
     return {
-      ...base,
+      ...decodeThreadInboundEventBase(candidate),
       type,
       externalVersion: readText(record.externalVersion, 'external thread version'),
       ...(record.sourcePermalink === undefined
@@ -964,10 +1239,10 @@ function decodeExternalChatInboundEvent(value: unknown): ExternalChatInboundEven
   }
   if (type === 'thread.reopened') {
     const record = readObject(value, [
-      ...baseKeys, 'externalVersion', 'sourcePermalink', 'reopenedAt',
+      ...threadBaseKeys, 'externalVersion', 'sourcePermalink', 'reopenedAt',
     ], 'external chat thread reopen event')
     return {
-      ...base,
+      ...decodeThreadInboundEventBase(candidate),
       type,
       externalVersion: readText(record.externalVersion, 'external thread version'),
       ...(record.sourcePermalink === undefined
@@ -977,30 +1252,80 @@ function decodeExternalChatInboundEvent(value: unknown): ExternalChatInboundEven
     }
   }
   if (type === 'source.lifecycle-changed') {
-    const record = readObject(value, [
-      ...baseKeys,
+    const resourceType = readEnum(
+      candidate.resourceType,
+      ['workspace', 'conversation', 'thread', 'message', 'attachment'],
+      'external resource type',
+    )
+    const lifecycleKeys = [
       'resourceType',
-      'resourceExternalId',
       'availability',
       'state',
       'reasonCode',
       'sourcePermalink',
-    ], 'external chat source lifecycle event')
-    return {
+    ]
+    const scopedKeys = resourceType === 'workspace'
+      ? baseKeys
+      : resourceType === 'conversation'
+      ? [...baseKeys, 'conversationExternalId']
+      : resourceType === 'thread'
+      ? threadBaseKeys
+      : [...threadBaseKeys, 'resourceExternalId']
+    const record = readObject(
+      value,
+      [...scopedKeys, ...lifecycleKeys],
+      'external chat source lifecycle event',
+    )
+    const availability = decodeAvailability(record.availability)
+    const state = decodeSourceState(record.state)
+    if (state === 'completed' && resourceType !== 'thread') {
+      invalidStoredValue('external chat source lifecycle completion scope')
+    }
+    const lifecycle = {
       ...base,
-      type,
-      resourceType: readEnum(
-        record.resourceType,
-        ['workspace', 'conversation', 'thread', 'message', 'attachment'],
-        'external resource type',
-      ),
-      resourceExternalId: readIdentifier(record.resourceExternalId, 'external resource ID'),
-      availability: decodeAvailability(record.availability),
-      state: decodeSourceState(record.state),
+      availability,
+      state,
       reasonCode: readIdentifier(record.reasonCode, 'source lifecycle reason code'),
       ...(record.sourcePermalink === undefined
         ? {}
         : { sourcePermalink: readHttpsUrl(record.sourcePermalink, 'source permalink') }),
+    }
+    if (resourceType === 'workspace') {
+      return { ...lifecycle, type: 'source.lifecycle-changed', resourceType }
+    }
+    const conversationExternalId = readIdentifier(
+      record.conversationExternalId,
+      'external conversation ID',
+    )
+    if (resourceType === 'conversation') {
+      return {
+        ...lifecycle,
+        type: 'source.lifecycle-changed',
+        resourceType,
+        conversationExternalId,
+      }
+    }
+    const threadExternalId = readIdentifier(record.threadExternalId, 'external thread ID')
+    if (resourceType === 'thread') {
+      return {
+        ...lifecycle,
+        type: 'source.lifecycle-changed',
+        resourceType,
+        conversationExternalId,
+        threadExternalId,
+      }
+    }
+    const resourceExternalId = readIdentifier(
+      record.resourceExternalId,
+      'external resource ID',
+    )
+    return {
+      ...lifecycle,
+      type: 'source.lifecycle-changed',
+      resourceType,
+      conversationExternalId,
+      threadExternalId,
+      resourceExternalId,
     }
   }
   invalidStoredValue('external chat inbound event type')
@@ -1020,16 +1345,20 @@ type DecodedInboundEventBase = {
   provider: ExternalChatProvider
   /** Provider workspace identifier. */
   externalWorkspaceId: string
-  /** Provider conversation identifier. */
-  conversationExternalId: string
-  /** Provider thread identifier. */
-  threadExternalId: string
   /** Provider occurrence timestamp. */
   occurredAt: string
   /** Optional provider ordering token. */
   externalSequence?: string
   /** Optional authenticated echo marker. */
   originOperationId?: string
+}
+
+/** Decoded fields shared by normalized events contained by one provider thread. */
+type DecodedThreadInboundEventBase = DecodedInboundEventBase & {
+  /** Provider conversation identifier. */
+  conversationExternalId: string
+  /** Provider thread identifier. */
+  threadExternalId: string
 }
 
 /** Decodes common inbound event fields. */
@@ -1041,11 +1370,6 @@ function decodeInboundEventBase(record: UnknownRecord): DecodedInboundEventBase 
     installationId: readIdentifier(record.installationId, 'connector installation ID'),
     provider: decodeProvider(record.provider),
     externalWorkspaceId: readIdentifier(record.externalWorkspaceId, 'external workspace ID'),
-    conversationExternalId: readIdentifier(
-      record.conversationExternalId,
-      'external conversation ID',
-    ),
-    threadExternalId: readIdentifier(record.threadExternalId, 'external thread ID'),
     occurredAt: readTimestamp(record.occurredAt, 'provider event timestamp'),
     ...(record.externalSequence === undefined
       ? {}
@@ -1058,6 +1382,23 @@ function decodeInboundEventBase(record: UnknownRecord): DecodedInboundEventBase 
             'origin operation ID',
           ),
         }),
+  }
+}
+
+/**
+ * Decodes the required conversation and thread scope for one contained inbound event.
+ *
+ * @param record - Untrusted persisted event record.
+ * @returns Validated common and thread scope fields.
+ */
+function decodeThreadInboundEventBase(record: UnknownRecord): DecodedThreadInboundEventBase {
+  return {
+    ...decodeInboundEventBase(record),
+    conversationExternalId: readIdentifier(
+      record.conversationExternalId,
+      'external conversation ID',
+    ),
+    threadExternalId: readIdentifier(record.threadExternalId, 'external thread ID'),
   }
 }
 
@@ -1106,7 +1447,9 @@ function decodeMessage(value: unknown): ExternalChatMessage {
             'parent external message ID',
           ),
         }),
-    permalink: readHttpsUrl(record.permalink, 'external message permalink'),
+    ...(record.permalink === undefined
+      ? {}
+      : { permalink: readHttpsUrl(record.permalink, 'external message permalink') }),
     availability: decodeAvailability(record.availability),
     state,
     ...(record.actor === undefined ? {} : { actor: decodeActor(record.actor) }),

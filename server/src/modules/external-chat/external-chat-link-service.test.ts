@@ -48,6 +48,7 @@ import {
   type ExternalChatLinkTransactionPort,
   type LinkExistingWorkItemToExternalChatTransactionInput,
   type MergeWorkItemsAndExternalChatLinksTransactionInput,
+  type MergeWorkItemsAndExternalChatLinksTransactionResult,
   type UnlinkExternalChatLinkTransactionInput,
   type UnlinkExternalChatLinkTransactionResult,
   type UpdateExternalChatLinkTransactionInput,
@@ -78,7 +79,7 @@ type RecordedMergeReceipt = {
   /** Digest of the complete normalized merge command. */
   requestFingerprint: string
   /** Exact first-commit cross-domain merge result. */
-  result: MergeExternalChatWorkItemLinksResult
+  result: MergeWorkItemsAndExternalChatLinksTransactionResult
 }
 
 /** Recorded Work Item/link creation receipt owned by the raw idempotency key digest. */
@@ -228,6 +229,9 @@ class RecordingLinkAccessPort implements ExternalChatLinkAccessPort {
   /** Whether existing Work Item authorization must fail closed. */
   denyWorkItemWrite = false
 
+  /** Current provider authorization generation returned by installation resolution. */
+  authorizationRevision = 4
+
   /** Former duplicate routes resolved to their canonical authorization target. */
   private readonly canonicalRoutes = new Map<string, {
     /** Canonical Team identifier. */
@@ -295,7 +299,7 @@ class RecordingLinkAccessPort implements ExternalChatLinkAccessPort {
       authorization: {
         installationId,
         externalWorkspaceId,
-        authorizationRevision: 4,
+        authorizationRevision: this.authorizationRevision,
       },
     }
   }
@@ -336,11 +340,17 @@ class RecordingLinkTransactionPort implements ExternalChatLinkTransactionPort {
   /** Whether the next first-commit update should simulate response loss. */
   failUpdateAfterCommitOnce = false
 
+  /** Optional one-shot concurrent mutation invoked before the settings store commit. */
+  updateBeforeCommitHook?: () => Promise<void>
+
   /** Whether the next first-commit unlink should simulate response loss. */
   failUnlinkAfterCommitOnce = false
 
   /** Whether the next first-commit merge should simulate response loss. */
   failMergeAfterCommitOnce = false
+
+  /** Optional malformed redirect result returned after a valid durable merge. */
+  mergeResultCorruption?: 'duplicate-redirect' | 'provider'
 
   /** Optional invalid update result returned without corrupting durable state. */
   updateResultCorruption?: UpdateResultCorruption
@@ -444,10 +454,16 @@ class RecordingLinkTransactionPort implements ExternalChatLinkTransactionPort {
     }
     const current = await this.store.getLink(input.workspaceId, input.link.id)
     if (!current || !current.active) throw transactionNotFound()
+    if (this.updateBeforeCommitHook) {
+      const hook = this.updateBeforeCommitHook
+      this.updateBeforeCommitHook = undefined
+      await hook()
+    }
     const stored = await this.store.updateLink({
       workspaceId: input.workspaceId,
       link: input.link,
       expectedRevision: input.expectedRevision,
+      expectedParentLifecycleFences: input.expectedParentLifecycleFences,
     })
     if (stored.kind === 'not-found') throw transactionNotFound()
     if (stored.kind === 'conflict') throw transactionRevisionConflict()
@@ -516,13 +532,24 @@ class RecordingLinkTransactionPort implements ExternalChatLinkTransactionPort {
       if (receipt.requestFingerprint !== input.requestFingerprint) throw idempotencyConflict()
       return receipt.result
     }
+    const current = await this.store.getLink(input.workspaceId, input.link.id)
+    if (
+      !current ||
+      current.sourceAuthorizationRevision !== input.expectedSourceAuthorizationRevision ||
+      input.authorizationRevision < current.sourceAuthorizationRevision ||
+      input.job.authorizationRevision !== input.authorizationRevision
+    ) {
+      throw transactionRevisionConflict()
+    }
     const stored = await this.store.updateLink({
       workspaceId: input.workspaceId,
       link: input.link,
       expectedRevision: input.expectedRevision,
+      expectedParentLifecycleFences: input.expectedParentLifecycleFences,
     })
     if (stored.kind === 'not-found') throw transactionNotFound()
     if (stored.kind === 'conflict') throw transactionRevisionConflict()
+    if (stored.kind === 'parent-stale') throw transactionRevisionConflict()
     this.commitAudit(input.audit)
     const result = {
       link: input.link,
@@ -539,7 +566,7 @@ class RecordingLinkTransactionPort implements ExternalChatLinkTransactionPort {
   /** Atomically moves duplicate link state and replays the first merge receipt. */
   async mergeWorkItemsAndLinks(
     input: MergeWorkItemsAndExternalChatLinksTransactionInput,
-  ): Promise<MergeExternalChatWorkItemLinksResult> {
+  ): Promise<MergeWorkItemsAndExternalChatLinksTransactionResult> {
     this.mergeInputs.push(input)
     const receipt = this.mergeReceipts.get(input.idempotencyKeyHash)
     if (receipt) {
@@ -552,7 +579,7 @@ class RecordingLinkTransactionPort implements ExternalChatLinkTransactionPort {
       input.command.canonicalWorkItemId,
       createWorkItemCommand(),
     )
-    const result: MergeExternalChatWorkItemLinksResult = {
+    const result: MergeWorkItemsAndExternalChatLinksTransactionResult = {
       canonicalWorkItem: {
         ...baseWorkItem,
         id: input.command.canonicalWorkItemId,
@@ -561,13 +588,7 @@ class RecordingLinkTransactionPort implements ExternalChatLinkTransactionPort {
         updatedAt: input.storeMutation.mergedAt,
       },
       movedLinks: merged.movedLinks.map(toFixtureLinkSummary),
-      redirects: merged.redirects.map((redirect) => ({
-        fromTeamId: redirect.fromTeamId,
-        fromWorkItemId: redirect.fromWorkItemId,
-        canonicalTeamId: redirect.canonicalTeamId,
-        canonicalWorkItemId: redirect.canonicalWorkItemId,
-        createdAt: redirect.createdAt,
-      })),
+      redirects: merged.redirects,
       movedFileCount: merged.movedFileIds.length,
       movedMessageBindingCount: merged.movedMessageBindingCount,
       mergedAt: input.storeMutation.mergedAt,
@@ -587,7 +608,7 @@ class RecordingLinkTransactionPort implements ExternalChatLinkTransactionPort {
       this.failMergeAfterCommitOnce = false
       throw new Error('Simulated response loss after atomic duplicate merge commit.')
     }
-    return result
+    return this.corruptMergeResult(result)
   }
 
   /** Commits one final audit outbox record idempotently by logical operation. */
@@ -595,6 +616,32 @@ class RecordingLinkTransactionPort implements ExternalChatLinkTransactionPort {
     if (this.committedAuditOperations.has(record.operationId)) return
     this.committedAuditOperations.add(record.operationId)
     this.committedAudits.push(record)
+  }
+
+  /**
+   * Applies one deliberate merge redirect corruption for fail-closed service validation.
+   *
+   * @param result - Valid internal merge transaction result.
+   * @returns Valid result or one deliberately malformed redirect set.
+   */
+  private corruptMergeResult(
+    result: MergeWorkItemsAndExternalChatLinksTransactionResult,
+  ): MergeWorkItemsAndExternalChatLinksTransactionResult {
+    const first = result.redirects[0]
+    if (!first) return result
+    if (this.mergeResultCorruption === 'duplicate-redirect') {
+      return { ...result, redirects: [first, first] }
+    }
+    if (this.mergeResultCorruption === 'provider') {
+      return {
+        ...result,
+        redirects: [{
+          ...first,
+          provider: first.provider === 'slack' ? 'microsoft-teams' : 'slack',
+        }],
+      }
+    }
+    return result
   }
 
   /**
@@ -870,10 +917,13 @@ describe('ExternalChatLinkService', () => {
     expect(input.job).toMatchObject({
       linkId: original.id,
       linkRevision: 2,
+      authorizationRevision: 4,
       mode: 'full',
       operationId: input.operationId,
     })
     expect(input.idempotencyKeyHash).toHaveLength(64)
+    expect(input.expectedSourceAuthorizationRevision).toBe(4)
+    expect(input.authorizationRevision).toBe(4)
     expect(input.requestFingerprint).toHaveLength(64)
     expect(input.audit).toMatchObject({
       action: 'resync',
@@ -889,6 +939,20 @@ describe('ExternalChatLinkService', () => {
     expect(result.link).not.toHaveProperty('conversation')
     expect(result.link).not.toHaveProperty('source')
     expect(fixture.transactions.committedAudits).toEqual([input.audit])
+  })
+
+  test('rejects resync acceptance from an older connector authorization generation', async () => {
+    const fixture = createLinkServiceFixture()
+    const original = createStoredLink()
+    await seedStoredLink(fixture.store, original)
+    fixture.access.authorizationRevision = 3
+
+    await expect(fixture.service.resyncLink(
+      createCommandContext('resync-old-authorization-key'),
+      original.id,
+      { expectedRevision: original.revision, mode: 'full' },
+    )).rejects.toMatchObject({ code: 'ExternalChatAuthorizationFailed' })
+    expect(fixture.transactions.resyncInputs).toHaveLength(0)
   })
 
   test('redacts provider source metadata from settings update results', async () => {
@@ -912,6 +976,98 @@ describe('ExternalChatLinkService', () => {
     expect(result.link).not.toHaveProperty('workspace')
     expect(result.link).not.toHaveProperty('conversation')
     expect(result.link).not.toHaveProperty('source')
+  })
+
+  test('keeps restrictive deleted links paused when synchronization settings are enabled', async () => {
+    const fixture = createLinkServiceFixture()
+    const original: ExternalChatWorkItemLink = {
+      ...createStoredLink(),
+      sourceAvailability: 'permission-lost',
+      sourceState: 'deleted',
+      syncStatus: 'paused',
+    }
+    await seedStoredLink(fixture.store, original)
+
+    const result = await fixture.service.updateLink(
+      createCommandContext('update-restrictive-key'),
+      original.id,
+      { expectedRevision: original.revision, syncDirection: 'bidirectional' },
+    )
+
+    expect(result.link).toMatchObject({
+      syncDirection: 'bidirectional',
+      syncStatus: 'paused',
+      sourceAvailability: 'permission-lost',
+      sourceState: 'deleted',
+    })
+    const input = fixture.transactions.updateInputs[0]
+    expect(input?.link.workspace).not.toHaveProperty('displayName')
+    expect(input?.link.conversation).not.toHaveProperty('displayName')
+    expect(input?.link.source).not.toHaveProperty('sourcePermalink')
+  })
+
+  test('settings update respects a restrictive parent fence published before child fan-out', async () => {
+    const fixture = createLinkServiceFixture()
+    const original = createStoredLink()
+    await seedStoredLink(fixture.store, original)
+    await fixture.store.fenceParentLifecycle({
+      workspaceId: 'workspace-1',
+      provider: 'slack',
+      installationId: original.installationId,
+      externalWorkspaceId: original.source.externalWorkspaceId,
+      authorizationRevision: 4,
+      availability: 'permission-lost',
+      state: 'active',
+      restrictive: true,
+      eventId: 'workspace-restricted',
+      operationId: 'workspace-restricted-operation',
+      occurredAt: retryOccurredAt,
+    })
+
+    const result = await fixture.service.updateLink(
+      createCommandContext('update-parent-restricted-key'),
+      original.id,
+      { expectedRevision: original.revision, syncDirection: 'inbound' },
+    )
+
+    expect(result.link).toMatchObject({
+      syncDirection: 'inbound',
+      syncStatus: 'paused',
+      sourceAvailability: 'permission-lost',
+    })
+    expect(fixture.transactions.updateInputs[0]?.expectedParentLifecycleFences.workspace)
+      .toMatchObject({ eventId: 'workspace-restricted', restrictive: true })
+  })
+
+  test('settings update cannot commit pending after a concurrent restrictive parent fence', async () => {
+    const fixture = createLinkServiceFixture()
+    const original = createStoredLink()
+    await seedStoredLink(fixture.store, original)
+    fixture.transactions.updateBeforeCommitHook = async () => {
+      await fixture.store.fenceParentLifecycle({
+        workspaceId: 'workspace-1',
+        provider: 'slack',
+        installationId: original.installationId,
+        externalWorkspaceId: original.source.externalWorkspaceId,
+        authorizationRevision: 4,
+        availability: 'permission-lost',
+        state: 'active',
+        restrictive: true,
+        eventId: 'workspace-concurrent-restriction',
+        operationId: 'workspace-concurrent-restriction-operation',
+        occurredAt: retryOccurredAt,
+      })
+    }
+
+    await expect(fixture.service.updateLink(
+      createCommandContext('update-concurrent-parent-key'),
+      original.id,
+      { expectedRevision: original.revision, syncDirection: 'inbound' },
+    )).rejects.toMatchObject({ code: 'ExternalChatPersistenceFailed' })
+    expect((await fixture.store.getLink('workspace-1', original.id))?.link).toMatchObject({
+      revision: 1,
+      syncStatus: 'synced',
+    })
   })
 
   test('replays the exact update after response loss with one atomic final audit', async () => {
@@ -1076,6 +1232,10 @@ describe('ExternalChatLinkService', () => {
     const input = fixture.transactions.mergeInputs[0]
     expect(input?.idempotencyKeyHash).toHaveLength(64)
     expect(input?.requestFingerprint).toHaveLength(64)
+    expect(input?.storeMutation).toMatchObject({
+      expectedDuplicateLinkGeneration: 1,
+      expectedDuplicateLinkCount: 1,
+    })
     expect(input?.audit).toMatchObject({
       action: 'merge',
       outcome: 'applied',
@@ -1102,6 +1262,36 @@ describe('ExternalChatLinkService', () => {
     expect(fixture.transactions.committedAudits).toHaveLength(1)
   })
 
+  test('rejects a duplicate redirect set returned by the merge transaction', async () => {
+    const fixture = createLinkServiceFixture()
+    const duplicateLink: ExternalChatWorkItemLink = {
+      ...createStoredLink(),
+      workItemId: 'work-item-duplicate',
+    }
+    await seedStoredLink(fixture.store, duplicateLink)
+    fixture.transactions.mergeResultCorruption = 'duplicate-redirect'
+
+    await expect(fixture.service.mergeDuplicateLinks(
+      createCommandContext('merge-duplicate-redirect-key'),
+      createMergeCommand(duplicateLink),
+    )).rejects.toMatchObject({ code: 'ExternalChatPersistenceFailed' })
+  })
+
+  test('rejects a redirect whose provider differs from its moved link', async () => {
+    const fixture = createLinkServiceFixture()
+    const duplicateLink: ExternalChatWorkItemLink = {
+      ...createStoredLink(),
+      workItemId: 'work-item-duplicate',
+    }
+    await seedStoredLink(fixture.store, duplicateLink)
+    fixture.transactions.mergeResultCorruption = 'provider'
+
+    await expect(fixture.service.mergeDuplicateLinks(
+      createCommandContext('merge-provider-redirect-key'),
+      createMergeCommand(duplicateLink),
+    )).rejects.toMatchObject({ code: 'ExternalChatPersistenceFailed' })
+  })
+
   test('resolves a former duplicate to a source-redacted canonical Work Item route', async () => {
     const fixture = createLinkServiceFixture()
     const original: ExternalChatWorkItemLink = {
@@ -1109,6 +1299,12 @@ describe('ExternalChatLinkService', () => {
       workItemId: 'work-item-duplicate',
     }
     await seedStoredLink(fixture.store, original)
+    const duplicateManifest = await fixture.store.getWorkItemLinkManifest(
+      'workspace-1',
+      original.teamId,
+      original.workItemId,
+    )
+    if (!duplicateManifest) throw new Error('Expected the duplicate owner manifest.')
     const merged = await fixture.store.mergeLinks({
       workspaceId: 'workspace-1',
       canonicalTeamId: 'team-1',
@@ -1116,6 +1312,8 @@ describe('ExternalChatLinkService', () => {
       duplicateTeamId: original.teamId,
       duplicateWorkItemId: original.workItemId,
       links: [{ linkId: original.id, expectedRevision: original.revision }],
+      expectedDuplicateLinkGeneration: duplicateManifest.generation,
+      expectedDuplicateLinkCount: duplicateManifest.activeLinkCount,
       mergedAt: occurredAt,
     })
     if (merged.kind !== 'merged') throw new Error('Expected the redirect fixture to merge.')

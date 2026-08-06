@@ -10,6 +10,7 @@ import {
 } from '@mukuroji/contracts'
 import {
   CHAT_PROVIDER_WEBHOOK_MAX_BYTES,
+  CHAT_PROVIDER_WEBHOOK_MAX_HEADER_BYTES,
   ChatProviderAdapterError,
   ChatProviderAdapterRegistry,
   createChatProviderOriginMarker,
@@ -35,6 +36,10 @@ const fixtureDeletedAt = '2026-08-06T03:02:00.000Z'
 const fixtureRetryAt = '2026-08-06T03:05:00.000Z'
 const fixtureMarkerSecret = 'marker-secret-with-at-least-thirty-two-bytes'
 const fixtureWebhookSecret = 'provider-webhook-secret-with-at-least-thirty-two-bytes'
+const fixtureSignal = new AbortController().signal
+
+/** Accepts the unchanged synthetic internal authority used by direct adapter contract calls. */
+async function acceptFixtureProviderAuthority(): Promise<void> {}
 
 /** Mutable state exposed only to the shared synthetic adapter contract fixture. */
 type SyntheticAdapterState = {
@@ -185,26 +190,13 @@ class SyntheticChatProviderAdapter implements ChatProviderAdapter {
         'The verified webhook does not belong to the authorized chat source.',
       )
     }
-    const event: ExternalChatInboundEvent = {
-      schemaVersion: EXTERNAL_CHAT_SCHEMA_VERSION,
-      type: 'message.created',
-      eventId: envelope.eventId,
-      correlationId: `correlation-${envelope.eventId}`,
-      installationId: authorization.installationId,
-      provider: this.definition.provider,
-      externalWorkspaceId: authorization.externalWorkspaceId,
-      conversationExternalId: this.state.source.conversationExternalId,
-      threadExternalId: this.state.source.threadExternalId,
-      occurredAt: timestamp,
-      externalSequence: envelope.externalSequence,
-      originOperationId: envelope.originOperationId,
-      message: createFixtureMessage(
-        this.definition.provider,
-        'webhook',
-        this.state.source.rootMessageExternalId,
-        'Webhook reply',
-      ),
-    }
+    const event = createSyntheticInboundEvent(
+      this.definition.provider,
+      authorization,
+      this.state.source,
+      envelope,
+      timestamp,
+    )
     return {
       deliveryId: requireHeader(request.headers, 'x-chat-delivery-id'),
       events: [event],
@@ -266,7 +258,9 @@ class SyntheticChatProviderAdapter implements ChatProviderAdapter {
 
   /** Creates one reply and replays the same result for the same operation ID. */
   async createReply(input: CreateChatProviderReplyInput): Promise<ExternalChatMessage> {
+    this.requireActiveSignal(input.signal)
     this.requireSource(input.authorization, input.source)
+    await input.assertCurrentAuthority()
     this.throwForSyntheticOperation(input.operationId)
     const replay = this.replyByOperationId.get(input.operationId)
     if (replay) return replay
@@ -285,7 +279,9 @@ class SyntheticChatProviderAdapter implements ChatProviderAdapter {
 
   /** Edits or reconciles one provider message by stable operation ID. */
   async editMessage(input: EditChatProviderMessageInput): Promise<ExternalChatMessage> {
+    this.requireActiveSignal(input.signal)
     this.requireSource(input.authorization, input.source)
+    await input.assertCurrentAuthority()
     this.throwForSyntheticOperation(input.operationId)
     const replay = this.editByOperationId.get(input.operationId)
     if (replay) return replay
@@ -306,7 +302,9 @@ class SyntheticChatProviderAdapter implements ChatProviderAdapter {
 
   /** Deletes or reconciles one provider message into an explicit tombstone. */
   async deleteMessage(input: DeleteChatProviderMessageInput): Promise<ExternalChatMessage> {
+    this.requireActiveSignal(input.signal)
     this.requireSource(input.authorization, input.source)
+    await input.assertCurrentAuthority()
     this.throwForSyntheticOperation(input.operationId)
     const replay = this.deletionByOperationId.get(input.operationId)
     if (replay) return replay
@@ -335,7 +333,9 @@ class SyntheticChatProviderAdapter implements ChatProviderAdapter {
   async setThreadCompletion(
     input: SetChatProviderThreadCompletionInput,
   ): Promise<ChatProviderThreadMutationResult> {
+    this.requireActiveSignal(input.signal)
     this.requireSource(input.authorization, input.source)
+    await input.assertCurrentAuthority()
     this.throwForSyntheticOperation(input.operationId)
     const replay = this.completionByOperationId.get(input.operationId)
     if (replay) return replay
@@ -368,12 +368,38 @@ class SyntheticChatProviderAdapter implements ChatProviderAdapter {
     )
   }
 
+  /**
+   * Rejects a provider mutation before any side effect after its caller loses authority.
+   *
+   * @param signal - Cancellation fence supplied with the provider mutation.
+   */
+  private requireActiveSignal(signal: AbortSignal): void {
+    if (!signal.aborted) return
+    throw new ChatProviderAdapterError(
+      'ChatProviderTransientFailure',
+      'The synthetic provider mutation was cancelled before commit.',
+      { retryable: true },
+    )
+  }
+
   /** Rejects authorization and tenant mismatches before provider access. */
   private requireAuthorization(authorization: ChatProviderAuthorization): void {
     if (authorization.installationId === 'permission-denied') {
       throw new ChatProviderAdapterError(
         'ChatProviderPermissionDenied',
         'The installation no longer permits this chat operation.',
+      )
+    }
+    if (authorization.installationId === 'reauthorization-required') {
+      throw new ChatProviderAdapterError(
+        'ChatProviderReauthorizationRequired',
+        'The installation requires renewed provider consent.',
+      )
+    }
+    if (authorization.installationId === 'disconnected') {
+      throw new ChatProviderAdapterError(
+        'ChatProviderDisconnected',
+        'The provider installation is disconnected.',
       )
     }
     if (
@@ -428,8 +454,23 @@ class SyntheticChatProviderAdapter implements ChatProviderAdapter {
         { retryable: true, retryAt: fixtureRetryAt },
       )
     }
+    if (operationId === 'transient-5xx') {
+      throw new ChatProviderAdapterError(
+        'ChatProviderTransientFailure',
+        'The provider returned a transient server failure.',
+        { retryable: true },
+      )
+    }
   }
 }
+
+/** Provider event variants modeled by the shared synthetic contract fixture. */
+type SyntheticWebhookEventType =
+  | 'message.created'
+  | 'message.deleted'
+  | 'source.installation-disconnected'
+  | 'source.scope-changed'
+  | 'source.retention-expired'
 
 /** Parsed, allowlisted fields from one synthetic raw webhook body. */
 type SyntheticWebhookEnvelope = {
@@ -445,12 +486,102 @@ type SyntheticWebhookEnvelope = {
   threadExternalId: string
   /** Stable provider event ID. */
   eventId: string
+  /** Synthetic provider event variant. */
+  eventType: SyntheticWebhookEventType
   /** Opaque provider ordering token. */
   externalSequence: string
   /** Echoed logical operation ID when present. */
   originOperationId?: string
   /** Provider-returned opaque authenticated origin marker when present. */
   originMarker?: string
+}
+
+/**
+ * Creates one provider-neutral event from an authenticated synthetic provider envelope.
+ *
+ * @param provider - Provider represented by the shared fixture.
+ * @param authorization - Installation scope that authenticated the event.
+ * @param source - Provider-neutral linked source.
+ * @param envelope - Allowlisted signed provider fields.
+ * @param occurredAt - Canonical provider occurrence timestamp.
+ * @returns One normalized inbound event variant.
+ */
+function createSyntheticInboundEvent(
+  provider: ExternalChatProvider,
+  authorization: ChatProviderAuthorization,
+  source: ExternalChatThreadReference,
+  envelope: SyntheticWebhookEnvelope,
+  occurredAt: string,
+): ExternalChatInboundEvent {
+  const base = Object.freeze({
+    schemaVersion: EXTERNAL_CHAT_SCHEMA_VERSION,
+    eventId: envelope.eventId,
+    correlationId: `correlation-${envelope.eventId}`,
+    installationId: authorization.installationId,
+    provider,
+    externalWorkspaceId: authorization.externalWorkspaceId,
+    occurredAt,
+    externalSequence: envelope.externalSequence,
+    ...(envelope.originOperationId === undefined
+      ? {}
+      : { originOperationId: envelope.originOperationId }),
+  })
+  if (envelope.eventType === 'message.created') {
+    return {
+      ...base,
+      type: 'message.created',
+      conversationExternalId: source.conversationExternalId,
+      threadExternalId: source.threadExternalId,
+      message: createFixtureMessage(
+        provider,
+        'webhook',
+        source.rootMessageExternalId,
+        'Webhook reply',
+      ),
+    }
+  }
+  if (envelope.eventType === 'message.deleted') {
+    return {
+      ...base,
+      type: 'message.deleted',
+      conversationExternalId: source.conversationExternalId,
+      threadExternalId: source.threadExternalId,
+      externalMessageId: source.sourceMessageExternalId ?? source.rootMessageExternalId,
+      externalVersion: `${envelope.eventId}-deleted`,
+      deletedAt: occurredAt,
+    }
+  }
+  if (envelope.eventType === 'source.installation-disconnected') {
+    return {
+      ...base,
+      type: 'source.lifecycle-changed',
+      resourceType: 'workspace',
+      availability: 'installation-disconnected',
+      state: 'active',
+      reasonCode: 'installation-disconnected',
+    }
+  }
+  if (envelope.eventType === 'source.scope-changed') {
+    return {
+      ...base,
+      type: 'source.lifecycle-changed',
+      resourceType: 'conversation',
+      conversationExternalId: source.conversationExternalId,
+      availability: 'scope-changed',
+      state: 'active',
+      reasonCode: 'conversation-scope-changed',
+    }
+  }
+  return {
+    ...base,
+    type: 'source.lifecycle-changed',
+    resourceType: 'thread',
+    conversationExternalId: source.conversationExternalId,
+    threadExternalId: source.threadExternalId,
+    availability: 'available',
+    state: 'retention-expired',
+    reasonCode: 'provider-retention-expired',
+  }
 }
 
 /** Creates one fully populated normalized provider message fixture. */
@@ -482,16 +613,28 @@ function createFixtureMessage(
       endOffset: 6,
       text: 'quoted',
     }],
-    attachments: [{
-      externalId: `${externalId}-attachment`,
-      fileName: 'evidence.txt',
-      contentType: 'text/plain',
-      sizeBytes: 128,
-      permalink: `https://chat.example.test/${provider}/attachments/evidence`,
-      availability: 'available',
-      state: 'active',
-      createdAt: fixtureNow,
-    }],
+    attachments: [
+      {
+        externalId: `${externalId}-attachment-evidence`,
+        fileName: 'evidence.txt',
+        contentType: 'text/plain',
+        sizeBytes: 128,
+        permalink: `https://chat.example.test/${provider}/attachments/${externalId}-evidence`,
+        availability: 'available',
+        state: 'active',
+        createdAt: fixtureNow,
+      },
+      {
+        externalId: `${externalId}-attachment-screenshot`,
+        fileName: 'screenshot.png',
+        contentType: 'image/png',
+        sizeBytes: 1_024,
+        permalink: `https://chat.example.test/${provider}/attachments/${externalId}-screenshot`,
+        availability: 'available',
+        state: 'active',
+        createdAt: fixtureNow,
+      },
+    ],
     postedAt: fixtureNow,
     updatedAt: fixtureNow,
   }
@@ -538,6 +681,10 @@ function runChatProviderAdapterContract(provider: ExternalChatProvider): void {
           fileName: 'evidence.txt',
           contentType: 'text/plain',
           sizeBytes: 128,
+        }, {
+          fileName: 'screenshot.png',
+          contentType: 'image/png',
+          sizeBytes: 1_024,
         }],
       })
     })
@@ -577,6 +724,8 @@ function runChatProviderAdapterContract(provider: ExternalChatProvider): void {
         bodyMarkdown: 'Created once',
         operationId: 'reply-operation',
         originMarker: marker,
+        signal: fixtureSignal,
+        assertCurrentAuthority: acceptFixtureProviderAuthority,
       }
       const created = await adapter.createReply(replyInput)
       await expect(adapter.createReply(replyInput)).resolves.toEqual(created)
@@ -588,6 +737,8 @@ function runChatProviderAdapterContract(provider: ExternalChatProvider): void {
         bodyMarkdown: 'Edited once',
         operationId: 'edit-operation',
         originMarker: marker,
+        signal: fixtureSignal,
+        assertCurrentAuthority: acceptFixtureProviderAuthority,
       }
       const edited = await adapter.editMessage(editInput)
       expect(edited).toMatchObject({ bodyMarkdown: 'Edited once', editedAt: fixtureEditedAt })
@@ -599,6 +750,8 @@ function runChatProviderAdapterContract(provider: ExternalChatProvider): void {
         expectedExternalVersion: edited.externalVersion,
         operationId: 'delete-operation',
         originMarker: marker,
+        signal: fixtureSignal,
+        assertCurrentAuthority: acceptFixtureProviderAuthority,
       }
       const deleted = await adapter.deleteMessage(deleteInput)
       expect(deleted).toMatchObject({ state: 'deleted', deletedAt: fixtureDeletedAt })
@@ -614,6 +767,8 @@ function runChatProviderAdapterContract(provider: ExternalChatProvider): void {
         completed: true,
         operationId: 'complete-operation',
         originMarker: marker,
+        signal: fixtureSignal,
+        assertCurrentAuthority: acceptFixtureProviderAuthority,
       }
       const completion = await adapter.setThreadCompletion(completionInput)
       expect(completion).toMatchObject({ completed: true })
@@ -642,6 +797,8 @@ function runChatProviderAdapterContract(provider: ExternalChatProvider): void {
         bodyMarkdown: 'Response-loss reply',
         operationId: operationIds.create,
         originMarker: marker,
+        signal: fixtureSignal,
+        assertCurrentAuthority: acceptFixtureProviderAuthority,
       }
       adapter.loseFirstResponseFor(operationIds.create)
       await expect(adapter.createReply(createInput)).rejects.toMatchObject({
@@ -658,6 +815,8 @@ function runChatProviderAdapterContract(provider: ExternalChatProvider): void {
         bodyMarkdown: 'Recovered edit',
         operationId: operationIds.edit,
         originMarker: marker,
+        signal: fixtureSignal,
+        assertCurrentAuthority: acceptFixtureProviderAuthority,
       }
       adapter.loseFirstResponseFor(operationIds.edit)
       await expect(adapter.editMessage(editInput)).rejects.toMatchObject({
@@ -672,6 +831,8 @@ function runChatProviderAdapterContract(provider: ExternalChatProvider): void {
         expectedExternalVersion: edited.externalVersion,
         operationId: operationIds.delete,
         originMarker: marker,
+        signal: fixtureSignal,
+        assertCurrentAuthority: acceptFixtureProviderAuthority,
       }
       adapter.loseFirstResponseFor(operationIds.delete)
       await expect(adapter.deleteMessage(deleteInput)).rejects.toMatchObject({
@@ -686,6 +847,8 @@ function runChatProviderAdapterContract(provider: ExternalChatProvider): void {
         completed: true,
         operationId: operationIds.complete,
         originMarker: marker,
+        signal: fixtureSignal,
+        assertCurrentAuthority: acceptFixtureProviderAuthority,
       }
       adapter.loseFirstResponseFor(operationIds.complete)
       await expect(adapter.setThreadCompletion(completionInput)).rejects.toMatchObject({
@@ -696,6 +859,25 @@ function runChatProviderAdapterContract(provider: ExternalChatProvider): void {
       for (const operationId of Object.values(operationIds)) {
         expect(adapter.committedMutationCount(operationId)).toBe(1)
       }
+    })
+
+    test('cancels provider mutations before committing a side effect', async () => {
+      const controller = new AbortController()
+      controller.abort()
+      const operationId = `${provider}-cancelled-create`
+      await expect(adapter.createReply({
+        authorization: adapter.state.authorization,
+        source: adapter.state.source,
+        bodyMarkdown: 'Must not be created',
+        operationId,
+        originMarker: 'not-sent',
+        signal: controller.signal,
+        assertCurrentAuthority: acceptFixtureProviderAuthority,
+      })).rejects.toMatchObject({
+        code: 'ChatProviderTransientFailure',
+        retryable: true,
+      })
+      expect(adapter.committedMutationCount(operationId)).toBe(0)
     })
 
     test('authenticates echo markers and rejects tampering, scope changes, and expiry', () => {
@@ -783,7 +965,90 @@ function runChatProviderAdapterContract(provider: ExternalChatProvider): void {
       )).rejects.toMatchObject({ code: 'ChatProviderScopeMismatch' })
     })
 
-    test('fails closed on raw bounds and classifies permission and rate limits', async () => {
+    test('preserves duplicate and out-of-order identities for durable runtime ordering', async () => {
+      const newestBody = createWebhookBody(provider, adapter.state.authorization, {
+        eventId: `${provider}-ordered-event-2`,
+        externalSequence: '42',
+      })
+      const newestRequest = createSignedWebhookRequest(
+        newestBody,
+        fixtureNow,
+        fixtureWebhookSecret,
+      )
+      const first = await adapter.normalizeWebhook(newestRequest, adapter.state.authorization)
+      const duplicate = await adapter.normalizeWebhook(newestRequest, adapter.state.authorization)
+      const olderBody = createWebhookBody(provider, adapter.state.authorization, {
+        eventId: `${provider}-ordered-event-1`,
+        externalSequence: '41',
+      })
+      const older = await adapter.normalizeWebhook(
+        createSignedWebhookRequest(olderBody, fixtureNow, fixtureWebhookSecret),
+        adapter.state.authorization,
+      )
+
+      expect(duplicate).toEqual(first)
+      expect(first.events[0]).toMatchObject({
+        eventId: `${provider}-ordered-event-2`,
+        externalSequence: '42',
+      })
+      expect(older.events[0]).toMatchObject({
+        eventId: `${provider}-ordered-event-1`,
+        externalSequence: '41',
+      })
+    })
+
+    test('normalizes deletion, disconnect, scope, and retention lifecycle events', async () => {
+      /** Resolves one signed synthetic lifecycle or deletion event. */
+      const normalizeEvent = async (
+        eventType: SyntheticWebhookEventType,
+      ): Promise<ExternalChatInboundEvent> => {
+        const body = createWebhookBody(provider, adapter.state.authorization, {
+          eventId: `${provider}-${eventType}`,
+          eventType,
+        })
+        const webhook = await adapter.normalizeWebhook(
+          createSignedWebhookRequest(body, fixtureNow, fixtureWebhookSecret),
+          adapter.state.authorization,
+        )
+        const event = webhook.events[0]
+        if (!event) throw new Error('Synthetic webhook did not return its event.')
+        return event
+      }
+
+      const deletion = await normalizeEvent('message.deleted')
+      expect(deletion).toMatchObject({
+        type: 'message.deleted',
+        externalMessageId: adapter.state.source.sourceMessageExternalId,
+        deletedAt: fixtureNow,
+      })
+
+      const disconnect = await normalizeEvent('source.installation-disconnected')
+      expect(disconnect).toMatchObject({
+        type: 'source.lifecycle-changed',
+        resourceType: 'workspace',
+        availability: 'installation-disconnected',
+      })
+      expect(disconnect).not.toHaveProperty('conversationExternalId')
+      expect(disconnect).not.toHaveProperty('threadExternalId')
+
+      const scopeChange = await normalizeEvent('source.scope-changed')
+      expect(scopeChange).toMatchObject({
+        type: 'source.lifecycle-changed',
+        resourceType: 'conversation',
+        conversationExternalId: adapter.state.source.conversationExternalId,
+        availability: 'scope-changed',
+      })
+      expect(scopeChange).not.toHaveProperty('threadExternalId')
+
+      await expect(normalizeEvent('source.retention-expired')).resolves.toMatchObject({
+        type: 'source.lifecycle-changed',
+        resourceType: 'thread',
+        availability: 'available',
+        state: 'retention-expired',
+      })
+    })
+
+    test('fails closed on webhook transport bounds before provider parsing', async () => {
       expect(() => validateChatProviderWebhookRequest({
         headers: {},
         rawBody: new Uint8Array(),
@@ -794,11 +1059,67 @@ function runChatProviderAdapterContract(provider: ExternalChatProvider): void {
         rawBody: new Uint8Array(CHAT_PROVIDER_WEBHOOK_MAX_BYTES + 1),
         receivedAt: fixtureNow,
       })).toThrow(ChatProviderAdapterError)
+      for (const headers of [
+        { 'X-Chat-Signature': 'not-case-normalized' },
+        { 'x-chat-signature': 'valid-prefix\r\nx-injected: true' },
+        { 'x-chat-signature': 'valid-prefix\u0085next-line' },
+        { 'x-chat-signature': 'x'.repeat(CHAT_PROVIDER_WEBHOOK_MAX_HEADER_BYTES) },
+      ]) {
+        expect(() => validateChatProviderWebhookRequest({
+          headers,
+          rawBody: new Uint8Array([1]),
+          receivedAt: fixtureNow,
+        })).toThrow(ChatProviderAdapterError)
+      }
+      const body = createWebhookBody(provider, adapter.state.authorization, {})
+      const request = createSignedWebhookRequest(body, fixtureNow, fixtureWebhookSecret)
+      await expect(adapter.normalizeWebhook({
+        ...request,
+        headers: { ...request.headers, 'x-injected': 'first\r\nsecond' },
+      }, adapter.state.authorization)).rejects.toMatchObject({
+        code: 'ChatProviderInvalidWebhook',
+      })
+    })
+
+    test('classifies retryable and terminal provider failures without false success', async () => {
       await expect(adapter.resolveThread({
         ...adapter.state.authorization,
         installationId: 'permission-denied',
       }, adapter.state.source)).rejects.toMatchObject({
         code: 'ChatProviderPermissionDenied',
+        retryable: false,
+      })
+      await expect(adapter.resolveThread({
+        ...adapter.state.authorization,
+        installationId: 'reauthorization-required',
+      }, adapter.state.source)).rejects.toMatchObject({
+        code: 'ChatProviderReauthorizationRequired',
+        retryable: false,
+      })
+      await expect(adapter.resolveThread({
+        ...adapter.state.authorization,
+        installationId: 'disconnected',
+      }, adapter.state.source)).rejects.toMatchObject({
+        code: 'ChatProviderDisconnected',
+        retryable: false,
+      })
+      await expect(adapter.resolveThread(
+        adapter.state.authorization,
+        { ...adapter.state.source, threadExternalId: 'another-thread' },
+      )).rejects.toMatchObject({
+        code: 'ChatProviderScopeMismatch',
+        retryable: false,
+      })
+      await expect(adapter.deleteMessage({
+        authorization: adapter.state.authorization,
+        source: adapter.state.source,
+        externalMessageId: 'deleted-at-provider',
+        operationId: `${provider}-source-deleted`,
+        originMarker: 'not-sent',
+        signal: fixtureSignal,
+        assertCurrentAuthority: acceptFixtureProviderAuthority,
+      })).rejects.toMatchObject({
+        code: 'ChatProviderSourceNotFound',
         retryable: false,
       })
       await expect(adapter.createReply({
@@ -807,10 +1128,24 @@ function runChatProviderAdapterContract(provider: ExternalChatProvider): void {
         bodyMarkdown: 'Rate limited',
         operationId: 'rate-limited',
         originMarker: 'not-sent',
+        signal: fixtureSignal,
+        assertCurrentAuthority: acceptFixtureProviderAuthority,
       })).rejects.toMatchObject({
         code: 'ChatProviderRateLimited',
         retryable: true,
         retryAt: fixtureRetryAt,
+      })
+      await expect(adapter.createReply({
+        authorization: adapter.state.authorization,
+        source: adapter.state.source,
+        bodyMarkdown: 'Provider server error',
+        operationId: 'transient-5xx',
+        originMarker: 'not-sent',
+        signal: fixtureSignal,
+        assertCurrentAuthority: acceptFixtureProviderAuthority,
+      })).rejects.toMatchObject({
+        code: 'ChatProviderTransientFailure',
+        retryable: true,
       })
     })
   })
@@ -877,6 +1212,9 @@ function parseWebhookEnvelope(rawBody: Uint8Array): SyntheticWebhookEnvelope {
     conversationExternalId: readText(parsed.conversationExternalId),
     threadExternalId: readText(parsed.threadExternalId),
     eventId: readText(parsed.eventId),
+    eventType: parsed.eventType === undefined
+      ? 'message.created'
+      : readSyntheticWebhookEventType(parsed.eventType),
     externalSequence: readText(parsed.externalSequence),
     ...(typeof parsed.originOperationId === 'string'
       ? { originOperationId: readText(parsed.originOperationId) }
@@ -885,6 +1223,23 @@ function parseWebhookEnvelope(rawBody: Uint8Array): SyntheticWebhookEnvelope {
       ? { originMarker: readText(parsed.originMarker) }
       : {}),
   }
+}
+
+/**
+ * Reads one supported event variant from an untrusted synthetic provider envelope.
+ *
+ * @param value - Candidate event discriminator.
+ * @returns Supported synthetic event type.
+ */
+function readSyntheticWebhookEventType(value: unknown): SyntheticWebhookEventType {
+  if (
+    value === 'message.created' ||
+    value === 'message.deleted' ||
+    value === 'source.installation-disconnected' ||
+    value === 'source.scope-changed' ||
+    value === 'source.retention-expired'
+  ) return value
+  throw invalidWebhook()
 }
 
 /** Reads one required normalized webhook header. */

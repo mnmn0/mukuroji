@@ -4,6 +4,8 @@ import type {
   ExternalChatInboundEvent,
   ExternalChatMessageBinding,
   ExternalChatProvider,
+  ExternalChatSourceAvailability,
+  ExternalChatSourceState,
   ExternalChatSyncCursor,
   ExternalChatSyncOutcome,
   ExternalChatWorkItemLink,
@@ -142,6 +144,30 @@ export type ExternalChatSourceIdentity = {
   threadExternalId: string
 }
 
+/** One durable, monotonically ordered lifecycle observation for a provider source scope. */
+export type ExternalChatLifecycleObservation = {
+  /** Provider authorization generation under which the lifecycle event was verified. */
+  authorizationRevision: number
+  /** Current reachability reported for this exact lifecycle scope. */
+  availability: ExternalChatSourceAvailability
+  /** Current provider lifecycle state reported for this exact scope. */
+  state: ExternalChatSourceState
+  /** Provider occurrence timestamp used for deterministic ordering within the scope. */
+  occurredAt: string
+  /** Stable provider event identifier used as the final deterministic ordering tie-breaker. */
+  eventId: string
+}
+
+/** Private per-link lifecycle observations composed into the public effective source state. */
+export type ExternalChatLinkLifecycleState = {
+  /** Latest workspace-scoped observation, when one has been received. */
+  workspace?: ExternalChatLifecycleObservation
+  /** Latest conversation-scoped observation, when one has been received. */
+  conversation?: ExternalChatLifecycleObservation
+  /** Latest thread-scoped observation, including the source-resolution baseline. */
+  thread: ExternalChatLifecycleObservation
+}
+
 /** Stored external chat link with tenant and lifecycle metadata. */
 export type StoredExternalChatLink = ExternalChatTenantScope & {
   /** Public provider-neutral link snapshot. */
@@ -150,10 +176,24 @@ export type StoredExternalChatLink = ExternalChatTenantScope & {
   sourceDigest: string
   /** Provider authorization generation used to resolve this immutable source claim. */
   sourceAuthorizationRevision: number
+  /** Private scope-local lifecycle watermarks used to derive effective availability and state. */
+  lifecycleState: ExternalChatLinkLifecycleState
   /** Whether the link still accepts synchronization operations. */
   active: boolean
   /** Timestamp at which the link was detached. */
   unlinkedAt?: string
+}
+
+/** Durable owner generation and count used to fence Work Item link membership changes. */
+export type ExternalChatWorkItemLinkManifest = ExternalChatTenantScope & {
+  /** Team that owns the active links counted by this manifest. */
+  teamId: string
+  /** Work Item that owns the active links counted by this manifest. */
+  workItemId: string
+  /** Exact number of active links currently owned by the Work Item. */
+  activeLinkCount: number
+  /** Monotonic membership generation advanced by create, unlink, and duplicate merge. */
+  generation: number
 }
 
 /** Durable normalized inbound webhook receipt. */
@@ -313,7 +353,11 @@ export type ExternalChatParentLifecycleFence = ExternalChatTenantScope & {
   conversationExternalId?: string
   /** Provider authorization generation current when the event was verified. */
   authorizationRevision: number
-  /** Whether new links at this generation must fail closed. */
+  /** Exact provider reachability observed for this parent scope. */
+  availability: ExternalChatSourceAvailability
+  /** Exact provider lifecycle state observed for this parent scope. */
+  state: ExternalChatSourceState
+  /** Whether new links and synchronization work at this generation must fail closed. */
   restrictive: boolean
   /** Stable provider event identifier. */
   eventId: string
@@ -321,6 +365,35 @@ export type ExternalChatParentLifecycleFence = ExternalChatTenantScope & {
   operationId: string
   /** Provider occurrence timestamp used for deterministic same-generation ordering. */
   occurredAt: string
+}
+
+/** Strongly read workspace and conversation lifecycle authorities governing one link. */
+export type ExternalChatParentLifecycleFenceSnapshot = {
+  /** Exact workspace-scoped fence, or explicit absence at snapshot time. */
+  workspace: ExternalChatParentLifecycleFence | undefined
+  /** Exact conversation-scoped fence, or explicit absence at snapshot time. */
+  conversation: ExternalChatParentLifecycleFence | undefined
+}
+
+/**
+ * Determines whether one exact lifecycle state forbids new synchronization work.
+ *
+ * Temporary authorization failures block work without necessarily erasing retained display
+ * metadata, while retained/deleted source states block content even when reachability is reported
+ * as available.
+ *
+ * @param availability - Current provider reachability.
+ * @param state - Current provider lifecycle state.
+ * @returns Whether links, reads, imports, and provider mutations must fail closed.
+ */
+export function externalChatLifecycleBlocksSynchronization(
+  availability: ExternalChatSourceAvailability,
+  state: ExternalChatSourceState,
+): boolean {
+  return availability !== 'available' ||
+    state === 'retained-metadata' ||
+    state === 'deleted' ||
+    state === 'retention-expired'
 }
 
 /** Input for publishing one provider-parent lifecycle fence before fan-out. */
@@ -364,14 +437,18 @@ export type ExternalChatOutboundReceipt = ExternalChatTenantScope & {
   operationId: string
   /** Digest of the complete normalized outbound mutation. */
   fingerprint: string
-  /** Current receipt processing state. */
-  state: 'processing' | 'completed'
+  /** Current receipt processing state, including durable DLQ preparation and terminal states. */
+  state: 'processing' | 'completed' | 'dead-lettering' | 'dead-lettered'
   /** Number of claims made for this logical mutation. */
   attempt: number
   /** Lease expiry used to recover an interrupted processor. */
   leaseExpiresAt: string
   /** Final outcome once processing completes. */
   outcome?: ExternalChatSyncOutcome
+  /** Exhaustion policy that transferred this receipt to the DLQ. */
+  deadLetterReason?: ExternalChatOutboundDeadLetterReason
+  /** Timestamp at which the receipt and active queue entry atomically entered the DLQ. */
+  deadLetteredAt?: string
   /** Receipt creation timestamp. */
   createdAt: string
   /** Receipt update timestamp. */
@@ -437,6 +514,102 @@ export type CompleteExternalChatOutboundOperationInput = ExternalChatTenantScope
   outcome: ExternalChatSyncOutcome
   /** Completion timestamp. */
   completedAt: string
+}
+
+/** Reason one permanently exhausted outbound mutation enters the DLQ. */
+export type ExternalChatOutboundDeadLetterReason = 'max-attempts' | 'max-age'
+
+/** Input for atomically terminalizing one exhausted outbound receipt and active queue entry. */
+export type DeadLetterExternalChatOutboundOperationInput = ExternalChatTenantScope & {
+  /** External chat link that owns the mutation. */
+  linkId: string
+  /** Stable operation identifier shared by the receipt and queue entry. */
+  operationId: string
+  /** Completed receipt attempt whose exhaustion was evaluated. */
+  expectedAttempt: number
+  /** Exhaustion policy that moved the mutation to the DLQ. */
+  reason: ExternalChatOutboundDeadLetterReason
+  /** Timestamp at which active retry ownership moved to the DLQ. */
+  deadLetteredAt: string
+}
+
+/** Result of durably preparing one exhausted outbound operation for external DLQ delivery. */
+export type PrepareExternalChatOutboundDeadLetterResult =
+  | {
+    /** The receipt now prevents provider replay and is ready for idempotent DLQ delivery. */
+    kind: 'prepared'
+    /** Authoritative queue payload reconciled to the latest receipt attempt. */
+    deferred: DeferredExternalChatOutboundEvent
+    /** Stable exhaustion policy retained by the prepared receipt. */
+    reason: ExternalChatOutboundDeadLetterReason
+    /** Stable preparation timestamp retained across crash replay. */
+    deadLetteredAt: string
+  }
+  | {
+    /** A newer processor still owns an unexpired receipt lease. */
+    kind: 'busy'
+  }
+  | {
+    /** The operation was already terminal and any stale active queue rows are absent. */
+    kind: 'terminal'
+  }
+
+/** Durable installation-scoped permit fencing one outbound retry worker attempt. */
+export type ExternalChatOutboundRetryPermit = ExternalChatTenantScope & {
+  /** Provider whose installation capacity is fenced. */
+  provider: ExternalChatProvider
+  /** Connector installation whose capacity is fenced. */
+  installationId: string
+  /** Unique worker-attempt identity that owns this permit. */
+  ownerId: string
+  /** Monotonic fencing token advanced on every successful acquisition. */
+  fenceToken: number
+  /** Timestamp at which this worker attempt acquired the permit. */
+  acquiredAt: string
+  /** Timestamp after which the permit must no longer authorize provider calls. */
+  leaseExpiresAt: string
+  /** Timestamp of the most recent acquisition, renewal, or release. */
+  updatedAt: string
+}
+
+/** Input for acquiring one non-blocking installation-scoped outbound retry permit. */
+export type AcquireExternalChatOutboundRetryPermitInput = ExternalChatTenantScope & {
+  /** Provider whose installation capacity is requested. */
+  provider: ExternalChatProvider
+  /** Connector installation whose capacity is requested. */
+  installationId: string
+  /** Unique worker-attempt identity requesting the permit. */
+  ownerId: string
+  /** Canonical acquisition timestamp. */
+  acquiredAt: string
+  /** Requested lease expiry after acquisition. */
+  leaseExpiresAt: string
+}
+
+/** Input for renewing a still-current outbound retry permit. */
+export type RenewExternalChatOutboundRetryPermitInput = {
+  /** Exact owner and fencing token returned by acquisition or the prior renewal. */
+  permit: ExternalChatOutboundRetryPermit
+  /** Canonical time at which current ownership is revalidated. */
+  renewedAt: string
+  /** Requested replacement lease expiry. */
+  leaseExpiresAt: string
+}
+
+/** Input for validating a permit immediately before one provider call. */
+export type ValidateExternalChatOutboundRetryPermitInput = {
+  /** Exact owner and fencing token to validate. */
+  permit: ExternalChatOutboundRetryPermit
+  /** Canonical validation timestamp. */
+  checkedAt: string
+}
+
+/** Input for releasing one exact outbound retry permit without resetting its fence. */
+export type ReleaseExternalChatOutboundRetryPermitInput = {
+  /** Exact owner and fencing token to release. */
+  permit: ExternalChatOutboundRetryPermit
+  /** Canonical release timestamp. */
+  releasedAt: string
 }
 
 /** Last committed completion state for one linked provider thread. */
@@ -607,10 +780,16 @@ export type UpdateExternalChatLinkInput = ExternalChatTenantScope & {
   link: ExternalChatWorkItemLink
   /** Previously observed link revision. */
   expectedRevision: number
+  /** Provider authorization generation to retain after a successful verified recovery. */
+  sourceAuthorizationRevision?: number
+  /** Replacement private lifecycle state when this update commits a lifecycle observation. */
+  lifecycleState?: ExternalChatLinkLifecycleState
   /** Lifecycle owner authorizing a post-completion projection update. */
   lifecycleOperationId?: string
   /** Exact parent lifecycle authority that must still own an atomic fan-out projection. */
   expectedParentLifecycleFence?: ExternalChatParentLifecycleFence
+  /** Exact present-or-absent parent authorities that must remain unchanged at commit. */
+  expectedParentLifecycleFences?: ExternalChatParentLifecycleFenceSnapshot
 }
 
 /** Result of an optimistic external chat link update. */
@@ -691,6 +870,8 @@ export type PutExternalChatMessageBindingInput = ExternalChatTenantScope & {
   expectedWorkItemId: string
   /** Public link revision observed before the internal or provider side effect. */
   expectedLinkRevision: number
+  /** Exact parent lifecycle authorities that authorized the side effect and binding commit. */
+  expectedParentLifecycleFences: ExternalChatParentLifecycleFenceSnapshot
   /** Previously observed persistence revision, omitted for a create. */
   expectedStorageRevision?: number
 }
@@ -728,6 +909,13 @@ export type DeferredExternalChatEvent = ExternalChatTenantScope & {
   linkId: string
   /** Complete normalized event. */
   event: ExternalChatInboundEvent
+  /** Verified provider authorization generation retained for lifecycle ordering retries. */
+  authorizationRevision?: number
+  /**
+   * Exact parent authorities observed before retaining thread-scoped content. Parent lifecycle
+   * control events omit this field so a later recovery event can still be retried.
+   */
+  expectedParentLifecycleFences?: ExternalChatParentLifecycleFenceSnapshot
   /** Digest of the normalized event. */
   fingerprint: string
   /** Stable defer reason. */
@@ -746,6 +934,14 @@ export type DeferredExternalChatEvent = ExternalChatTenantScope & {
 export type DeferredExternalChatOutboundEvent = ExternalChatTenantScope & {
   /** Link whose FIFO owns the deferred mutation. */
   linkId: string
+  /** Current Team owner that must still match when the payload is retained. */
+  ownerTeamId: string
+  /** Current Work Item owner that must still match when the payload is retained. */
+  ownerWorkItemId: string
+  /** Exact active link revision that must still authorize payload retention. */
+  ownerLinkRevision: number
+  /** Exact parent authorities observed before retaining the internal mutation payload. */
+  expectedParentLifecycleFences: ExternalChatParentLifecycleFenceSnapshot
   /** Complete normalized internal mutation. */
   event: ExternalChatSyncOutboundEvent
   /** Digest of the complete normalized mutation. */
@@ -772,13 +968,17 @@ export type MergeExternalChatLinksStoreInput = ExternalChatTenantScope & {
   duplicateTeamId: string
   /** Duplicate Work Item identifier. */
   duplicateWorkItemId: string
-  /** Link identifiers and revisions selected by the caller. */
+  /** Exact complete active-link set and revisions observed for the duplicate owner. */
   links: ReadonlyArray<{
     /** Link identifier to move. */
     linkId: string
     /** Previously observed link revision. */
     expectedRevision: number
   }>
+  /** Duplicate owner's durable membership generation observed before the merge transaction. */
+  expectedDuplicateLinkGeneration: number
+  /** Duplicate owner's exact active-link count observed before the merge transaction. */
+  expectedDuplicateLinkCount: number
   /** Merge completion timestamp. */
   mergedAt: string
 }
@@ -801,10 +1001,16 @@ export type MergeExternalChatLinksStoreResult =
     /** A selected link or revision no longer matched. */
     kind: 'conflict'
   }
+  | {
+    /** The requested duplicate set exceeds the atomic merge action budget. */
+    kind: 'too-large'
+    /** Maximum duplicate links supported by one atomic store merge. */
+    maximumLinks: number
+  }
 
 /** Durable tenant-scoped persistence required by external chat synchronization. */
 export interface ExternalChatStore {
-  /** Creates a link, source claim, and idempotency receipt atomically. */
+  /** Creates a link, source claim, receipt, and incremented owner manifest atomically. */
   createLink(input: CreateExternalChatLinkInput): Promise<CreateExternalChatLinkResult>
   /** Reads one link without crossing its tenant partition. */
   getLink(workspaceId: string, linkId: string): Promise<StoredExternalChatLink | undefined>
@@ -813,9 +1019,15 @@ export interface ExternalChatStore {
     workspaceId: string,
     source: ExternalChatSourceIdentity,
   ): Promise<StoredExternalChatLink | undefined>
+  /** Reads the active-link owner generation and count used to prepare a duplicate merge. */
+  getWorkItemLinkManifest(
+    workspaceId: string,
+    teamId: string,
+    workItemId: string,
+  ): Promise<ExternalChatWorkItemLinkManifest | undefined>
   /** Replaces one link when its optimistic revision still matches. */
   updateLink(input: UpdateExternalChatLinkInput): Promise<UpdateExternalChatLinkResult>
-  /** Detaches one link and releases its active source claim. */
+  /** Detaches one link while releasing its source claim and decrementing its owner manifest. */
   unlinkLink(input: UnlinkExternalChatLinkInput): Promise<UnlinkExternalChatLinkResult>
   /** Claims or recovers one inbound event receipt. */
   claimInboundEvent(
@@ -829,6 +1041,11 @@ export interface ExternalChatStore {
   fenceParentLifecycle(
     input: FenceExternalChatParentLifecycleInput,
   ): Promise<FenceExternalChatParentLifecycleResult>
+  /** Strongly reads exact present-or-absent parent lifecycle authorities governing one link. */
+  getParentLifecycleFences(
+    workspaceId: string,
+    linkId: string,
+  ): Promise<ExternalChatParentLifecycleFenceSnapshot | undefined>
   /** Lists active links owned by one provider workspace or conversation parent. */
   listParentLinks(
     input: ListExternalChatParentLinksInput,
@@ -840,6 +1057,30 @@ export interface ExternalChatStore {
   /** Commits the final outcome for the operation that owns an outbound receipt. */
   completeOutboundOperation(
     input: CompleteExternalChatOutboundOperationInput,
+  ): Promise<boolean>
+  /** Fences an exhausted receipt before its payload is sent to the external DLQ. */
+  prepareOutboundDeadLetterOperation(
+    input: DeadLetterExternalChatOutboundOperationInput,
+  ): Promise<PrepareExternalChatOutboundDeadLetterResult>
+  /** Atomically terminalizes an exhausted receipt and removes its active queue entry. */
+  deadLetterOutboundOperation(
+    input: DeadLetterExternalChatOutboundOperationInput,
+  ): Promise<boolean>
+  /** Acquires one installation-scoped outbound retry permit without blocking. */
+  acquireOutboundRetryPermit(
+    input: AcquireExternalChatOutboundRetryPermitInput,
+  ): Promise<ExternalChatOutboundRetryPermit | undefined>
+  /** Renews one still-current installation-scoped outbound retry permit. */
+  renewOutboundRetryPermit(
+    input: RenewExternalChatOutboundRetryPermitInput,
+  ): Promise<ExternalChatOutboundRetryPermit | undefined>
+  /** Validates exact permit ownership and expiry immediately before provider work. */
+  validateOutboundRetryPermit(
+    input: ValidateExternalChatOutboundRetryPermitInput,
+  ): Promise<boolean>
+  /** Releases an exact permit while retaining its monotonic fencing token. */
+  releaseOutboundRetryPermit(
+    input: ReleaseExternalChatOutboundRetryPermitInput,
   ): Promise<boolean>
   /** Checks whether an authenticated echoed operation already completed outbound. */
   hasCompletedOutboundOperation(
@@ -889,11 +1130,10 @@ export interface ExternalChatStore {
   ): Promise<boolean>
   /** Idempotently retains one deferred normalized event. */
   deferEvent(event: DeferredExternalChatEvent): Promise<void>
-  /** Lists due deferred events for one link in deterministic occurrence order. */
-  listDueDeferredEvents(
+  /** Lists the strict deferred FIFO head page, including entries that are not yet due. */
+  listDeferredEvents(
     workspaceId: string,
     linkId: string,
-    dueAt: string,
     limit: number,
   ): Promise<DeferredExternalChatEvent[]>
   /** Removes one provider- and installation-scoped deferred event after its outcome commits. */
@@ -908,7 +1148,9 @@ export interface ExternalChatStore {
     workspaceId: string,
     linkId: string,
     excludedEventId?: string,
-  ): Promise<number>
+    expectedLinkRevision?: number,
+    expectedParentLifecycleFences?: ExternalChatParentLifecycleFenceSnapshot,
+  ): Promise<number | undefined>
   /** Idempotently retains one deferred outbound mutation before its receipt completes. */
   deferOutboundEvent(event: DeferredExternalChatOutboundEvent): Promise<void>
   /** Lists one link FIFO in deterministic internal occurrence order without skipping its head. */
@@ -923,7 +1165,14 @@ export interface ExternalChatStore {
     linkId: string,
     operationId: string,
   ): Promise<void>
-  /** Atomically retargets link-owned state and creates canonical redirects. */
+  /** Purges every retained outbound payload owned by one restrictive or unlinked link. */
+  purgeDeferredOutboundEventsForLink(
+    workspaceId: string,
+    linkId: string,
+    expectedLinkRevision?: number,
+    expectedParentLifecycleFences?: ExternalChatParentLifecycleFenceSnapshot,
+  ): Promise<number | undefined>
+  /** Atomically retargets the exact fenced owner set and advances both owner manifests. */
   mergeLinks(input: MergeExternalChatLinksStoreInput): Promise<MergeExternalChatLinksStoreResult>
   /** Resolves a former duplicate Work Item to its canonical target. */
   getCanonicalRedirect(
@@ -956,6 +1205,9 @@ export class InMemoryExternalChatStore implements ExternalChatStore {
   /** Outbound provider mutation receipts. */
   private readonly outboundReceipts = new Map<string, ExternalChatOutboundReceipt>()
 
+  /** Durable installation permits retaining monotonic fencing tokens across releases. */
+  private readonly outboundRetryPermits = new Map<string, ExternalChatOutboundRetryPermit>()
+
   /** Provider- and link-scoped thread lifecycle records. */
   private readonly threadLifecycles = new Map<string, StoredExternalChatThreadLifecycle>()
 
@@ -985,6 +1237,9 @@ export class InMemoryExternalChatStore implements ExternalChatStore {
     string,
     ExternalChatParentLifecycleFence
   >()
+
+  /** Active-link membership generations by canonical Workspace, Team, and Work Item owner. */
+  private readonly workItemLinkManifests = new Map<string, ExternalChatWorkItemLinkManifest>()
 
   /** Creates a link, source claim, and idempotency receipt atomically in memory. */
   async createLink(input: CreateExternalChatLinkInput): Promise<CreateExternalChatLinkResult> {
@@ -1042,15 +1297,30 @@ export class InMemoryExternalChatStore implements ExternalChatStore {
       return { kind: 'source-conflict', record: claimed }
     }
 
+    const ownerManifestKey = workItemLinkManifestKey(
+      input.workspaceId,
+      input.link.teamId,
+      input.link.workItemId,
+    )
+    const currentOwnerManifest = this.workItemLinkManifests.get(ownerManifestKey)
+    const nextOwnerManifest = incrementWorkItemLinkManifest(
+      currentOwnerManifest,
+      input.workspaceId,
+      input.link.teamId,
+      input.link.workItemId,
+    )
+
     const record: StoredExternalChatLink = {
       workspaceId: input.workspaceId,
       link: input.link,
       sourceDigest,
       sourceAuthorizationRevision: authorizationRevision,
+      lifecycleState: createInitialExternalChatLinkLifecycleState(input.link, authorizationRevision),
       active: true,
     }
     this.links.set(key(input.workspaceId, input.link.id), record)
     this.sourceClaims.set(sourceClaimKey, input.link.id)
+    this.workItemLinkManifests.set(ownerManifestKey, nextOwnerManifest)
     this.linkReceipts.set(receiptKey, {
       requestFingerprint: input.requestFingerprint,
       linkId: input.link.id,
@@ -1070,6 +1340,17 @@ export class InMemoryExternalChatStore implements ExternalChatStore {
   ): Promise<StoredExternalChatLink | undefined> {
     const linkId = this.sourceClaims.get(key(workspaceId, createExternalChatSourceDigest(source)))
     return linkId ? this.links.get(key(workspaceId, linkId)) : undefined
+  }
+
+  /** Reads one in-memory active-link owner generation and count. */
+  async getWorkItemLinkManifest(
+    workspaceId: string,
+    teamId: string,
+    workItemId: string,
+  ): Promise<ExternalChatWorkItemLinkManifest | undefined> {
+    return this.workItemLinkManifests.get(
+      workItemLinkManifestKey(workspaceId, teamId, workItemId),
+    )
   }
 
   /** Publishes one authoritative provider-parent lifecycle generation before child fan-out. */
@@ -1106,6 +1387,18 @@ export class InMemoryExternalChatStore implements ExternalChatStore {
     }
     this.parentLifecycleFences.set(fenceKey, candidate)
     return { kind: 'applied', fence: candidate }
+  }
+
+  /** Strongly reads both present-or-absent parent lifecycle authorities governing one link. */
+  async getParentLifecycleFences(
+    workspaceIdValue: string,
+    linkIdValue: string,
+  ): Promise<ExternalChatParentLifecycleFenceSnapshot | undefined> {
+    const workspaceId = requireLifecycleIdentifier(workspaceIdValue, 'Workspace ID')
+    const linkId = requireLifecycleIdentifier(linkIdValue, 'external chat link ID')
+    const record = this.links.get(key(workspaceId, linkId))
+    if (!record) return undefined
+    return parentLifecycleFenceSnapshotForLink(this.parentLifecycleFences, record)
   }
 
   /** Lists active links under one provider workspace or conversation parent. */
@@ -1146,6 +1439,15 @@ export class InMemoryExternalChatStore implements ExternalChatStore {
     const recordKey = key(input.workspaceId, input.link.id)
     const current = this.links.get(recordKey)
     if (!current) return { kind: 'not-found' }
+    if (
+      input.expectedParentLifecycleFence !== undefined &&
+      input.expectedParentLifecycleFences !== undefined
+    ) {
+      throw new ExternalChatError(
+        'ExternalChatValidationFailed',
+        'A link update cannot provide both singular and complete parent lifecycle expectations.',
+      )
+    }
     if (input.expectedParentLifecycleFence !== undefined) {
       const expectedFence = normalizeExpectedParentLifecycleFenceForLink(
         input.expectedParentLifecycleFence,
@@ -1159,6 +1461,19 @@ export class InMemoryExternalChatStore implements ExternalChatStore {
         expectedFence.conversationExternalId,
       ))
       if (!currentFence || !sameParentLifecycleFence(currentFence, expectedFence)) {
+        return { kind: 'parent-stale' }
+      }
+    }
+    if (input.expectedParentLifecycleFences !== undefined) {
+      const expectedFences = normalizeExpectedParentLifecycleFenceSnapshotForLink(
+        input.expectedParentLifecycleFences,
+        current,
+      )
+      const currentFences = parentLifecycleFenceSnapshotForLink(
+        this.parentLifecycleFences,
+        current,
+      )
+      if (!sameParentLifecycleFenceSnapshot(currentFences, expectedFences)) {
         return { kind: 'parent-stale' }
       }
     }
@@ -1198,6 +1513,15 @@ export class InMemoryExternalChatStore implements ExternalChatStore {
     const updated: StoredExternalChatLink = {
       ...current,
       link: input.link,
+      sourceAuthorizationRevision: input.sourceAuthorizationRevision === undefined
+        ? current.sourceAuthorizationRevision
+        : requireNondecreasingSourceAuthorizationRevision(
+          input.sourceAuthorizationRevision,
+          current.sourceAuthorizationRevision,
+        ),
+      lifecycleState: input.lifecycleState === undefined
+        ? current.lifecycleState
+        : normalizeExternalChatLinkLifecycleState(input.lifecycleState),
     }
     this.links.set(recordKey, updated)
     if (lifecycle) {
@@ -1209,12 +1533,15 @@ export class InMemoryExternalChatStore implements ExternalChatStore {
     return { kind: 'updated', record: updated }
   }
 
-  /** Detaches one link and releases its active source claim. */
+  /** Detaches one link, releases its source claim, and advances its owner manifest. */
   async unlinkLink(input: UnlinkExternalChatLinkInput): Promise<UnlinkExternalChatLinkResult> {
     const recordKey = key(input.workspaceId, input.linkId)
     const current = this.links.get(recordKey)
     if (!current) return { kind: 'not-found' }
-    if (!current.active) return { kind: 'replayed', record: current }
+    if (!current.active) {
+      await this.purgeDeferredOutboundEventsForLink(input.workspaceId, input.linkId)
+      return { kind: 'replayed', record: current }
+    }
     if (current.link.revision !== input.expectedRevision) {
       return { kind: 'conflict', record: current }
     }
@@ -1243,8 +1570,23 @@ export class InMemoryExternalChatStore implements ExternalChatStore {
       active: false,
       unlinkedAt: input.unlinkedAt,
     }
+    const ownerManifestKey = workItemLinkManifestKey(
+      input.workspaceId,
+      current.link.teamId,
+      current.link.workItemId,
+    )
+    const currentOwnerManifest = this.workItemLinkManifests.get(ownerManifestKey)
+    if (!currentOwnerManifest) {
+      throw new ExternalChatError(
+        'ExternalChatPersistenceFailed',
+        'The active link owner manifest is missing.',
+      )
+    }
+    const nextOwnerManifest = decrementWorkItemLinkManifest(currentOwnerManifest)
     this.links.set(recordKey, unlinked)
     this.sourceClaims.delete(key(input.workspaceId, current.sourceDigest))
+    this.workItemLinkManifests.set(ownerManifestKey, nextOwnerManifest)
+    await this.purgeDeferredOutboundEventsForLink(input.workspaceId, input.linkId)
     return { kind: 'unlinked', record: unlinked }
   }
 
@@ -1334,6 +1676,175 @@ export class InMemoryExternalChatStore implements ExternalChatStore {
     return true
   }
 
+  /** Durably prepares one exhausted outbound receipt before external DLQ delivery. */
+  async prepareOutboundDeadLetterOperation(
+    input: DeadLetterExternalChatOutboundOperationInput,
+  ): Promise<PrepareExternalChatOutboundDeadLetterResult> {
+    const receiptKey = key(input.workspaceId, input.linkId, input.operationId)
+    const current = this.outboundReceipts.get(receiptKey)
+    const deferred = this.deferredOutboundEvents.get(receiptKey)
+    if (!current) {
+      throw new ExternalChatError(
+        'ExternalChatPersistenceFailed',
+        'The exhausted outbound queue entry has no receipt.',
+      )
+    }
+    if (current.state === 'dead-lettered') {
+      if (deferred) this.deferredOutboundEvents.delete(receiptKey)
+      return { kind: 'terminal' }
+    }
+    if (!deferred || current.fingerprint !== deferred.fingerprint) {
+      throw new ExternalChatError(
+        'ExternalChatPersistenceFailed',
+        'The exhausted outbound receipt and queue entry do not match.',
+      )
+    }
+    if (current.state === 'dead-lettering') {
+      if (current.deadLetterReason === undefined || current.deadLetteredAt === undefined) {
+        throw new ExternalChatError(
+          'ExternalChatPersistenceFailed',
+          'The prepared outbound dead-letter receipt is incomplete.',
+        )
+      }
+      return {
+        kind: 'prepared',
+        deferred,
+        reason: current.deadLetterReason,
+        deadLetteredAt: current.deadLetteredAt,
+      }
+    }
+    if (current.state === 'completed' && !isRetryableSyncOutcome(current.outcome)) {
+      this.deferredOutboundEvents.delete(receiptKey)
+      return { kind: 'terminal' }
+    }
+    if (
+      current.state === 'processing' &&
+      Date.parse(current.leaseExpiresAt) > Date.parse(input.deadLetteredAt)
+    ) return { kind: 'busy' }
+
+    const preparedAttempt = Math.max(deferred.attempt, current.attempt)
+    const preparedDeferred: DeferredExternalChatOutboundEvent = {
+      ...deferred,
+      attempt: preparedAttempt,
+      updatedAt: input.deadLetteredAt,
+    }
+    this.deferredOutboundEvents.set(receiptKey, preparedDeferred)
+    this.outboundReceipts.set(receiptKey, {
+      ...current,
+      state: 'dead-lettering',
+      attempt: preparedAttempt,
+      deadLetterReason: input.reason,
+      deadLetteredAt: input.deadLetteredAt,
+      updatedAt: input.deadLetteredAt,
+    })
+    return {
+      kind: 'prepared',
+      deferred: preparedDeferred,
+      reason: input.reason,
+      deadLetteredAt: input.deadLetteredAt,
+    }
+  }
+
+  /** Atomically terminalizes one prepared outbound receipt and removes its active queue row. */
+  async deadLetterOutboundOperation(
+    input: DeadLetterExternalChatOutboundOperationInput,
+  ): Promise<boolean> {
+    const receiptKey = key(input.workspaceId, input.linkId, input.operationId)
+    const current = this.outboundReceipts.get(receiptKey)
+    if (!current) return false
+    if (current.state === 'dead-lettered') {
+      return current.deadLetterReason === input.reason &&
+        current.deadLetteredAt === input.deadLetteredAt
+    }
+    if (
+      current.state !== 'dead-lettering' ||
+      current.attempt !== input.expectedAttempt ||
+      current.deadLetterReason !== input.reason ||
+      current.deadLetteredAt !== input.deadLetteredAt
+    ) return false
+    this.outboundReceipts.set(receiptKey, {
+      ...current,
+      state: 'dead-lettered',
+      outcome: {
+        kind: 'failed',
+        operationId: input.operationId,
+        errorCode: 'ExternalChatRetryExhausted',
+        retryable: false,
+        occurredAt: input.deadLetteredAt,
+      },
+      deadLetterReason: input.reason,
+      deadLetteredAt: input.deadLetteredAt,
+      updatedAt: input.deadLetteredAt,
+    })
+    this.deferredOutboundEvents.delete(receiptKey)
+    return true
+  }
+
+  /** Acquires one installation permit and advances its monotonic fence after expiry. */
+  async acquireOutboundRetryPermit(
+    input: AcquireExternalChatOutboundRetryPermitInput,
+  ): Promise<ExternalChatOutboundRetryPermit | undefined> {
+    const permitKey = key(
+      input.workspaceId,
+      input.provider,
+      input.installationId,
+    )
+    const current = this.outboundRetryPermits.get(permitKey)
+    if (current && current.leaseExpiresAt > input.acquiredAt) return undefined
+    const permit: ExternalChatOutboundRetryPermit = {
+      ...input,
+      fenceToken: (current?.fenceToken ?? 0) + 1,
+      updatedAt: input.acquiredAt,
+    }
+    this.outboundRetryPermits.set(permitKey, permit)
+    return permit
+  }
+
+  /** Renews one exact unexpired in-memory installation permit. */
+  async renewOutboundRetryPermit(
+    input: RenewExternalChatOutboundRetryPermitInput,
+  ): Promise<ExternalChatOutboundRetryPermit | undefined> {
+    const permitKey = outboundRetryPermitKey(input.permit)
+    const current = this.outboundRetryPermits.get(permitKey)
+    if (
+      !current ||
+      !outboundRetryPermitsMatch(current, input.permit) ||
+      current.leaseExpiresAt <= input.renewedAt
+    ) return undefined
+    const renewed: ExternalChatOutboundRetryPermit = {
+      ...current,
+      leaseExpiresAt: input.leaseExpiresAt,
+      updatedAt: input.renewedAt,
+    }
+    this.outboundRetryPermits.set(permitKey, renewed)
+    return renewed
+  }
+
+  /** Validates one exact unexpired in-memory installation permit. */
+  async validateOutboundRetryPermit(
+    input: ValidateExternalChatOutboundRetryPermitInput,
+  ): Promise<boolean> {
+    const current = this.outboundRetryPermits.get(outboundRetryPermitKey(input.permit))
+    return current !== undefined &&
+      outboundRetryPermitsMatch(current, input.permit) &&
+      current.leaseExpiresAt > input.checkedAt
+  }
+
+  /** Releases one exact permit while preserving its latest fencing token. */
+  async releaseOutboundRetryPermit(
+    input: ReleaseExternalChatOutboundRetryPermitInput,
+  ): Promise<boolean> {
+    const permitKey = outboundRetryPermitKey(input.permit)
+    const current = this.outboundRetryPermits.get(permitKey)
+    if (!current || !outboundRetryPermitsMatch(current, input.permit)) return false
+    this.outboundRetryPermits.set(permitKey, {
+      ...current,
+      leaseExpiresAt: input.releasedAt,
+      updatedAt: input.releasedAt,
+    })
+    return true
+  }
+
   /** Checkpoints and renews one claimed parent lifecycle fan-out receipt. */
   async checkpointInboundEvent(
     input: CheckpointExternalChatInboundEventInput,
@@ -1386,6 +1897,12 @@ export class InMemoryExternalChatStore implements ExternalChatStore {
     if (current.fingerprint !== input.fingerprint) {
       return { kind: 'conflict', receipt: current }
     }
+    if (current.state === 'dead-lettered') {
+      return { kind: 'duplicate', receipt: current }
+    }
+    if (current.state === 'dead-lettering') {
+      return { kind: 'busy', receipt: current }
+    }
     if (current.state === 'completed') {
       if (
         current.outcome?.kind !== 'deferred' ||
@@ -1429,6 +1946,7 @@ export class InMemoryExternalChatStore implements ExternalChatStore {
     const receiptKey = key(input.workspaceId, input.linkId, input.operationId)
     const current = this.outboundReceipts.get(receiptKey)
     if (!current || current.attempt !== input.expectedAttempt) return false
+    if (current.state === 'dead-lettering' || current.state === 'dead-lettered') return false
     if (current.state === 'completed') {
       return syncOutcomesEqual(current.outcome, input.outcome)
     }
@@ -1673,6 +2191,17 @@ export class InMemoryExternalChatStore implements ExternalChatStore {
     ) {
       return owner ? { kind: 'owner-conflict', record: owner } : { kind: 'owner-conflict' }
     }
+    const expectedParentFences = normalizeExpectedParentLifecycleFenceSnapshotForLink(
+      input.expectedParentLifecycleFences,
+      owner,
+    )
+    const currentParentFences = parentLifecycleFenceSnapshotForLink(
+      this.parentLifecycleFences,
+      owner,
+    )
+    if (!sameParentLifecycleFenceSnapshot(currentParentFences, expectedParentFences)) {
+      return { kind: 'owner-conflict', record: owner }
+    }
     const externalKey = key(
       input.workspaceId,
       input.binding.linkId,
@@ -1747,10 +2276,40 @@ export class InMemoryExternalChatStore implements ExternalChatStore {
   /** Idempotently stores one deferred event. */
   async deferEvent(event: DeferredExternalChatEvent): Promise<void> {
     const link = this.links.get(key(event.workspaceId, event.linkId))
-    if (
-      event.event.type !== 'source.lifecycle-changed' &&
-      (!link || !link.active || linkRejectsDeferredContent(link.link))
-    ) return
+    if (!isParentLifecycleDeferredEvent(event.event)) {
+      if (
+        !link ||
+        !link.active ||
+        linkRejectsDeferredContent(link.link)
+      ) return
+      if (event.expectedParentLifecycleFences === undefined) {
+        throw new ExternalChatError(
+          'ExternalChatValidationFailed',
+          'A thread-scoped deferred event requires exact parent lifecycle authorities.',
+        )
+      }
+      const expectedParentFences = normalizeExpectedParentLifecycleFenceSnapshotForLink(
+        event.expectedParentLifecycleFences,
+        link,
+      )
+      const currentParentFences = parentLifecycleFenceSnapshotForLink(
+        this.parentLifecycleFences,
+        link,
+      )
+      if (
+        !sameParentLifecycleFenceSnapshot(currentParentFences, expectedParentFences) ||
+        parentLifecycleFencesRejectDeferredContent(
+          currentParentFences,
+          link.sourceAuthorizationRevision,
+        )
+      ) {
+        throw new ExternalChatError(
+          'ExternalChatOperationConflict',
+          'The external chat parent authority changed before inbound retry persistence.',
+          true,
+        )
+      }
+    }
     const eventKey = key(
       event.workspaceId,
       event.event.provider,
@@ -1767,24 +2326,25 @@ export class InMemoryExternalChatStore implements ExternalChatStore {
     this.deferredEvents.set(eventKey, current
       ? {
         ...event,
+        ...(current.authorizationRevision === undefined
+          ? {}
+          : { authorizationRevision: current.authorizationRevision }),
         attempt: Math.max(current.attempt, event.attempt),
         createdAt: current.createdAt,
       }
       : event)
   }
 
-  /** Lists due deferred events in deterministic occurrence order. */
-  async listDueDeferredEvents(
+  /** Lists the strict deferred FIFO head page, including entries that are not yet due. */
+  async listDeferredEvents(
     workspaceId: string,
     linkId: string,
-    dueAt: string,
     limit: number,
   ): Promise<DeferredExternalChatEvent[]> {
     return [...this.deferredEvents.values()]
       .filter((event) =>
         event.workspaceId === workspaceId &&
-        event.linkId === linkId &&
-        event.retryAt <= dueAt
+        event.linkId === linkId
       )
       .sort(compareDeferredEvents)
       .slice(0, Math.max(0, limit))
@@ -1805,12 +2365,31 @@ export class InMemoryExternalChatStore implements ExternalChatStore {
     workspaceId: string,
     linkId: string,
     excludedEventId?: string,
-  ): Promise<number> {
+    expectedLinkRevision?: number,
+    expectedParentLifecycleFences?: ExternalChatParentLifecycleFenceSnapshot,
+  ): Promise<number | undefined> {
+    if ((expectedLinkRevision === undefined) !== (expectedParentLifecycleFences === undefined)) {
+      throw new ExternalChatError(
+        'ExternalChatValidationFailed',
+        'A deferred purge must provide both link and parent authority expectations.',
+      )
+    }
+    if (expectedLinkRevision !== undefined && expectedParentLifecycleFences !== undefined) {
+      const owner = this.links.get(key(workspaceId, linkId))
+      if (!owner || owner.link.revision !== expectedLinkRevision) return undefined
+      const expected = normalizeExpectedParentLifecycleFenceSnapshotForLink(
+        expectedParentLifecycleFences,
+        owner,
+      )
+      const current = parentLifecycleFenceSnapshotForLink(this.parentLifecycleFences, owner)
+      if (!sameParentLifecycleFenceSnapshot(current, expected)) return undefined
+    }
     let deleted = 0
     for (const [eventKey, event] of this.deferredEvents) {
       if (
         event.workspaceId !== workspaceId ||
         event.linkId !== linkId ||
+        event.event.type === 'source.lifecycle-changed' ||
         event.event.eventId === excludedEventId
       ) continue
       this.deferredEvents.delete(eventKey)
@@ -1829,6 +2408,42 @@ export class InMemoryExternalChatStore implements ExternalChatStore {
       throw new ExternalChatError(
         'ExternalChatValidationFailed',
         'The deferred outbound event does not match its queue scope or fingerprint.',
+      )
+    }
+    const owner = this.links.get(key(event.workspaceId, event.linkId))
+    if (
+      !owner ||
+      !owner.active ||
+      owner.link.teamId !== event.ownerTeamId ||
+      owner.link.workItemId !== event.ownerWorkItemId ||
+      owner.link.revision !== event.ownerLinkRevision ||
+      linkRejectsDeferredContent(owner.link)
+    ) {
+      throw new ExternalChatError(
+        'ExternalChatOperationConflict',
+        'The external chat link changed before outbound retry persistence.',
+        true,
+      )
+    }
+    const expectedParentFences = normalizeExpectedParentLifecycleFenceSnapshotForLink(
+      event.expectedParentLifecycleFences,
+      owner,
+    )
+    const currentParentFences = parentLifecycleFenceSnapshotForLink(
+      this.parentLifecycleFences,
+      owner,
+    )
+    if (
+      !sameParentLifecycleFenceSnapshot(currentParentFences, expectedParentFences) ||
+      parentLifecycleFencesRejectDeferredContent(
+        currentParentFences,
+        owner.sourceAuthorizationRevision,
+      )
+    ) {
+      throw new ExternalChatError(
+        'ExternalChatOperationConflict',
+        'The external chat parent authority changed before outbound retry persistence.',
+        true,
       )
     }
     const eventKey = key(event.workspaceId, event.linkId, event.operationId)
@@ -1876,10 +2491,96 @@ export class InMemoryExternalChatStore implements ExternalChatStore {
     this.deferredOutboundEvents.delete(key(workspaceId, linkId, operationId))
   }
 
-  /** Atomically retargets selected link-owned records and creates redirects. */
+  /** Purges every in-memory outbound payload retained for one link. */
+  async purgeDeferredOutboundEventsForLink(
+    workspaceId: string,
+    linkId: string,
+    expectedLinkRevision?: number,
+    expectedParentLifecycleFences?: ExternalChatParentLifecycleFenceSnapshot,
+  ): Promise<number | undefined> {
+    if ((expectedLinkRevision === undefined) !== (expectedParentLifecycleFences === undefined)) {
+      throw new ExternalChatError(
+        'ExternalChatValidationFailed',
+        'A deferred purge must provide both link and parent authority expectations.',
+      )
+    }
+    if (expectedLinkRevision !== undefined && expectedParentLifecycleFences !== undefined) {
+      const owner = this.links.get(key(workspaceId, linkId))
+      if (!owner || owner.link.revision !== expectedLinkRevision) return undefined
+      const expected = normalizeExpectedParentLifecycleFenceSnapshotForLink(
+        expectedParentLifecycleFences,
+        owner,
+      )
+      const current = parentLifecycleFenceSnapshotForLink(this.parentLifecycleFences, owner)
+      if (!sameParentLifecycleFenceSnapshot(current, expected)) return undefined
+    }
+    let deleted = 0
+    for (const [eventKey, event] of this.deferredOutboundEvents) {
+      if (event.workspaceId !== workspaceId || event.linkId !== linkId) continue
+      this.deferredOutboundEvents.delete(eventKey)
+      deleted += 1
+    }
+    return deleted
+  }
+
+  /** Atomically retargets the exact fenced owner set and advances both owner manifests. */
   async mergeLinks(
     input: MergeExternalChatLinksStoreInput,
   ): Promise<MergeExternalChatLinksStoreResult> {
+    const duplicateManifestKey = workItemLinkManifestKey(
+      input.workspaceId,
+      input.duplicateTeamId,
+      input.duplicateWorkItemId,
+    )
+    const duplicateManifest = this.workItemLinkManifests.get(duplicateManifestKey)
+    const completeDuplicateLinkIds = [...this.links.values()]
+      .filter((record) =>
+        record.workspaceId === input.workspaceId &&
+        record.active &&
+        record.link.teamId === input.duplicateTeamId &&
+        record.link.workItemId === input.duplicateWorkItemId
+      )
+      .map((record) => record.link.id)
+      .sort(compareOrdinal)
+    if (
+      !duplicateManifest ||
+      duplicateManifest.generation !== input.expectedDuplicateLinkGeneration ||
+      duplicateManifest.activeLinkCount !== input.expectedDuplicateLinkCount ||
+      duplicateManifest.activeLinkCount !== completeDuplicateLinkIds.length ||
+      !sameLinkIdSet(completeDuplicateLinkIds, input.links.map((candidate) => candidate.linkId))
+    ) return { kind: 'conflict' }
+
+    const canonicalManifestKey = workItemLinkManifestKey(
+      input.workspaceId,
+      input.canonicalTeamId,
+      input.canonicalWorkItemId,
+    )
+    const canonicalManifest = this.workItemLinkManifests.get(canonicalManifestKey)
+    validateWorkItemLinkManifestScope(
+      duplicateManifest,
+      input.workspaceId,
+      input.duplicateTeamId,
+      input.duplicateWorkItemId,
+    )
+    if (canonicalManifest) {
+      validateWorkItemLinkManifestScope(
+        canonicalManifest,
+        input.workspaceId,
+        input.canonicalTeamId,
+        input.canonicalWorkItemId,
+      )
+    }
+    if (
+      duplicateManifest.generation >= Number.MAX_SAFE_INTEGER ||
+      (canonicalManifest?.generation ?? 0) >= Number.MAX_SAFE_INTEGER ||
+      (canonicalManifest?.activeLinkCount ?? 0) >
+        Number.MAX_SAFE_INTEGER - duplicateManifest.activeLinkCount
+    ) {
+      throw new ExternalChatError(
+        'ExternalChatPersistenceFailed',
+        'The active link owner manifest reached its safe numeric capacity.',
+      )
+    }
     const selected: StoredExternalChatLink[] = []
     for (const candidate of input.links) {
       const current = this.links.get(key(input.workspaceId, candidate.linkId))
@@ -1972,6 +2673,19 @@ export class InMemoryExternalChatStore implements ExternalChatStore {
         routeRedirect,
       )
     }
+    this.workItemLinkManifests.set(duplicateManifestKey, {
+      ...duplicateManifest,
+      activeLinkCount: 0,
+      generation: duplicateManifest.generation + 1,
+    })
+    this.workItemLinkManifests.set(canonicalManifestKey, {
+      workspaceId: input.workspaceId,
+      teamId: input.canonicalTeamId,
+      workItemId: input.canonicalWorkItemId,
+      activeLinkCount:
+        (canonicalManifest?.activeLinkCount ?? 0) + duplicateManifest.activeLinkCount,
+      generation: (canonicalManifest?.generation ?? 0) + 1,
+    })
     return {
       kind: 'merged',
       movedLinks,
@@ -1995,6 +2709,137 @@ export class InMemoryExternalChatStore implements ExternalChatStore {
 }
 
 /**
+ * Validates a source authorization generation that may advance but never move backward.
+ *
+ * @param value - Candidate replacement authorization generation.
+ * @param current - Current durable source authorization generation.
+ * @returns Validated nondecreasing authorization generation.
+ */
+function requireNondecreasingSourceAuthorizationRevision(value: unknown, current: number): number {
+  const revision = requireLifecyclePositiveInteger(value, 'source authorization revision')
+  if (revision < current) {
+    throw new ExternalChatError(
+      'ExternalChatValidationFailed',
+      'The source authorization revision cannot move backward.',
+    )
+  }
+  return revision
+}
+
+/**
+ * Advances one Work Item owner manifest after an active link is created.
+ *
+ * @param current - Current owner manifest, when one exists.
+ * @param workspaceId - Canonical tenant identifier.
+ * @param teamId - Owning Team identifier.
+ * @param workItemId - Owning Work Item identifier.
+ * @returns Next owner generation and count.
+ */
+function incrementWorkItemLinkManifest(
+  current: ExternalChatWorkItemLinkManifest | undefined,
+  workspaceId: string,
+  teamId: string,
+  workItemId: string,
+): ExternalChatWorkItemLinkManifest {
+  if (current) validateWorkItemLinkManifestScope(current, workspaceId, teamId, workItemId)
+  if (
+    current &&
+    (current.activeLinkCount >= Number.MAX_SAFE_INTEGER ||
+      current.generation >= Number.MAX_SAFE_INTEGER)
+  ) {
+    throw new ExternalChatError(
+      'ExternalChatPersistenceFailed',
+      'The active link owner manifest reached its safe numeric capacity.',
+    )
+  }
+  return {
+    workspaceId,
+    teamId,
+    workItemId,
+    activeLinkCount: (current?.activeLinkCount ?? 0) + 1,
+    generation: (current?.generation ?? 0) + 1,
+  }
+}
+
+/**
+ * Advances one Work Item owner manifest after an active link is removed.
+ *
+ * @param current - Current owner manifest.
+ * @returns Next owner generation.
+ */
+function decrementWorkItemLinkManifest(
+  current: ExternalChatWorkItemLinkManifest,
+): ExternalChatWorkItemLinkManifest {
+  if (current.activeLinkCount <= 0 || current.generation >= Number.MAX_SAFE_INTEGER) {
+    throw new ExternalChatError(
+      'ExternalChatPersistenceFailed',
+      'The active link owner manifest count is invalid.',
+    )
+  }
+  return {
+    ...current,
+    activeLinkCount: current.activeLinkCount - 1,
+    generation: current.generation + 1,
+  }
+}
+
+/**
+ * Validates one owner manifest against its storage address.
+ *
+ * @param manifest - Durable owner manifest.
+ * @param workspaceId - Expected tenant identifier.
+ * @param teamId - Expected Team identifier.
+ * @param workItemId - Expected Work Item identifier.
+ */
+function validateWorkItemLinkManifestScope(
+  manifest: ExternalChatWorkItemLinkManifest,
+  workspaceId: string,
+  teamId: string,
+  workItemId: string,
+): void {
+  if (
+    manifest.workspaceId !== workspaceId ||
+    manifest.teamId !== teamId ||
+    manifest.workItemId !== workItemId
+  ) {
+    throw new ExternalChatError(
+      'ExternalChatPersistenceFailed',
+      'The active link owner manifest escaped its canonical scope.',
+    )
+  }
+}
+
+/**
+ * Compares two link identifier collections as canonical unique sets.
+ *
+ * @param left - First link identifier collection.
+ * @param right - Second link identifier collection.
+ * @returns Whether both collections contain the same unique identifiers.
+ */
+function sameLinkIdSet(left: readonly string[], right: readonly string[]): boolean {
+  if (
+    left.length !== right.length ||
+    new Set(left).size !== left.length ||
+    new Set(right).size !== right.length
+  ) return false
+  const sortedLeft = [...left].sort(compareOrdinal)
+  const sortedRight = [...right].sort(compareOrdinal)
+  return sortedLeft.every((linkId, index) => linkId === sortedRight[index])
+}
+
+/**
+ * Creates an in-memory key for one Work Item's active-link owner manifest.
+ *
+ * @param workspaceId - Canonical tenant identifier.
+ * @param teamId - Owning Team identifier.
+ * @param workItemId - Owning Work Item identifier.
+ * @returns Collision-free owner-manifest key.
+ */
+function workItemLinkManifestKey(workspaceId: string, teamId: string, workItemId: string): string {
+  return key(workspaceId, 'work-item-link-manifest', teamId, workItemId)
+}
+
+/**
  * Creates a stable digest for a provider thread without retaining its raw identifiers in audit keys.
  *
  * @param source - Provider-neutral source identity.
@@ -2010,6 +2855,33 @@ export function createExternalChatSourceDigest(source: ExternalChatSourceIdentit
       source.threadExternalId,
     ].join('\0'))
     .digest('hex')
+}
+
+/**
+ * Creates the private thread baseline retained with a newly resolved external chat link.
+ *
+ * @param link - Newly resolved public link snapshot.
+ * @param authorizationRevision - Provider authorization generation used for source resolution.
+ * @returns Initial per-scope lifecycle state whose baseline sorts before the link creation time.
+ */
+export function createInitialExternalChatLinkLifecycleState(
+  link: ExternalChatWorkItemLink,
+  authorizationRevision: number,
+): ExternalChatLinkLifecycleState {
+  const createdAt = requireLifecycleTimestamp(link.createdAt, 'external chat link creation timestamp')
+  const baselineTime = new Date(Date.parse(createdAt) - 1).toISOString()
+  return {
+    thread: {
+      authorizationRevision: requireLifecyclePositiveInteger(
+        authorizationRevision,
+        'provider authorization revision',
+      ),
+      availability: link.sourceAvailability,
+      state: link.sourceState,
+      occurredAt: baselineTime,
+      eventId: 'external-chat-link-baseline',
+    },
+  }
 }
 
 /**
@@ -2158,6 +3030,82 @@ function requireLifecycleTimestamp(value: unknown, label: string): string {
     )
   }
   return timestamp
+}
+
+/**
+ * Normalizes one private per-link lifecycle state at the in-memory persistence boundary.
+ *
+ * @param state - Candidate scope-local lifecycle observations.
+ * @returns Exact validated private lifecycle state.
+ */
+function normalizeExternalChatLinkLifecycleState(
+  state: ExternalChatLinkLifecycleState,
+): ExternalChatLinkLifecycleState {
+  return {
+    ...(state.workspace === undefined
+      ? {}
+      : { workspace: normalizeExternalChatLifecycleObservation(state.workspace) }),
+    ...(state.conversation === undefined
+      ? {}
+      : { conversation: normalizeExternalChatLifecycleObservation(state.conversation) }),
+    thread: normalizeExternalChatLifecycleObservation(state.thread),
+  }
+}
+
+/**
+ * Normalizes one scope-local lifecycle observation at the persistence boundary.
+ *
+ * @param observation - Candidate provider lifecycle observation.
+ * @returns Exact validated lifecycle observation.
+ */
+function normalizeExternalChatLifecycleObservation(
+  observation: ExternalChatLifecycleObservation,
+): ExternalChatLifecycleObservation {
+  return {
+    authorizationRevision: requireLifecyclePositiveInteger(
+      observation.authorizationRevision,
+      'lifecycle authorization revision',
+    ),
+    availability: requireLifecycleAvailability(observation.availability),
+    state: requireLifecycleSourceState(observation.state),
+    occurredAt: requireLifecycleTimestamp(observation.occurredAt, 'lifecycle occurrence timestamp'),
+    eventId: requireLifecycleIdentifier(observation.eventId, 'lifecycle event ID'),
+  }
+}
+
+/**
+ * Reads one supported source availability value.
+ *
+ * @param value - Candidate provider reachability value.
+ * @returns Validated source availability.
+ */
+function requireLifecycleAvailability(value: unknown): ExternalChatSourceAvailability {
+  if (
+    value === 'available' || value === 'temporarily-unavailable' ||
+    value === 'installation-disconnected' || value === 'needs-reauth' ||
+    value === 'scope-changed' || value === 'permission-lost'
+  ) return value
+  throw new ExternalChatError(
+    'ExternalChatValidationFailed',
+    'The lifecycle source availability is invalid.',
+  )
+}
+
+/**
+ * Reads one supported provider lifecycle state.
+ *
+ * @param value - Candidate provider lifecycle state.
+ * @returns Validated source lifecycle state.
+ */
+function requireLifecycleSourceState(value: unknown): ExternalChatSourceState {
+  if (
+    value === 'active' || value === 'completed' || value === 'deleted' ||
+    value === 'retained-metadata' || value === 'retention-expired'
+  ) return value
+  throw new ExternalChatError(
+    'ExternalChatValidationFailed',
+    'The lifecycle source state is invalid.',
+  )
 }
 
 /**
@@ -2424,7 +3372,19 @@ function normalizeParentLifecycleFenceInput(
   const provider = input.provider === 'slack' || input.provider === 'microsoft-teams'
     ? input.provider
     : undefined
-  if (!provider || typeof input.restrictive !== 'boolean') {
+  const availability = isExternalChatSourceAvailability(input.availability)
+    ? input.availability
+    : undefined
+  const state = isExternalChatSourceState(input.state) && input.state !== 'completed'
+    ? input.state
+    : undefined
+  if (
+    !provider ||
+    availability === undefined ||
+    state === undefined ||
+    typeof input.restrictive !== 'boolean' ||
+    input.restrictive !== externalChatLifecycleBlocksSynchronization(availability, state)
+  ) {
     throw new ExternalChatError(
       'ExternalChatValidationFailed',
       'The provider parent lifecycle fence is invalid.',
@@ -2453,11 +3413,44 @@ function normalizeParentLifecycleFenceInput(
           'provider authorization revision',
         ),
       }),
+    availability,
+    state,
     restrictive: input.restrictive,
     eventId: requireLifecycleIdentifier(input.eventId, 'provider event ID'),
     operationId: requireLifecycleIdentifier(input.operationId, 'operation ID'),
     occurredAt: requireLifecycleTimestamp(input.occurredAt, 'parent occurrence timestamp'),
   }
+}
+
+/**
+ * Checks one untrusted source availability value.
+ *
+ * @param value - Candidate provider reachability.
+ * @returns Whether the value is a supported source availability.
+ */
+function isExternalChatSourceAvailability(
+  value: unknown,
+): value is ExternalChatSourceAvailability {
+  return value === 'available' ||
+    value === 'temporarily-unavailable' ||
+    value === 'needs-reauth' ||
+    value === 'installation-disconnected' ||
+    value === 'scope-changed' ||
+    value === 'permission-lost'
+}
+
+/**
+ * Checks one untrusted provider lifecycle state value.
+ *
+ * @param value - Candidate provider lifecycle state.
+ * @returns Whether the value is a supported source state.
+ */
+function isExternalChatSourceState(value: unknown): value is ExternalChatSourceState {
+  return value === 'active' ||
+    value === 'completed' ||
+    value === 'deleted' ||
+    value === 'retained-metadata' ||
+    value === 'retention-expired'
 }
 
 /**
@@ -2480,6 +3473,8 @@ function createParentLifecycleFence(
       ? {}
       : { conversationExternalId: input.conversationExternalId }),
     authorizationRevision,
+    availability: input.availability,
+    state: input.state,
     restrictive: input.restrictive,
     eventId: input.eventId,
     operationId: input.operationId,
@@ -2523,6 +3518,93 @@ function normalizeExpectedParentLifecycleFenceForLink(
     )
   }
   return normalized
+}
+
+/**
+ * Normalizes both exact present-or-absent parent authorities expected by one link update.
+ *
+ * @param snapshot - Candidate workspace and conversation parent snapshot.
+ * @param record - Link whose immutable provider scope owns both expectations.
+ * @returns Exact validated parent fence snapshot.
+ */
+function normalizeExpectedParentLifecycleFenceSnapshotForLink(
+  snapshot: ExternalChatParentLifecycleFenceSnapshot,
+  record: StoredExternalChatLink,
+): ExternalChatParentLifecycleFenceSnapshot {
+  const workspace = snapshot.workspace === undefined
+    ? undefined
+    : normalizeExpectedParentLifecycleFenceForLink(snapshot.workspace, record)
+  const conversation = snapshot.conversation === undefined
+    ? undefined
+    : normalizeExpectedParentLifecycleFenceForLink(snapshot.conversation, record)
+  if (workspace?.conversationExternalId !== undefined) {
+    throw new ExternalChatError(
+      'ExternalChatValidationFailed',
+      'The expected workspace lifecycle fence must be workspace-scoped.',
+    )
+  }
+  if (
+    conversation !== undefined &&
+    conversation.conversationExternalId !== record.link.source.conversationExternalId
+  ) {
+    throw new ExternalChatError(
+      'ExternalChatValidationFailed',
+      'The expected conversation lifecycle fence must be conversation-scoped.',
+    )
+  }
+  return { workspace, conversation }
+}
+
+/**
+ * Reads both parent lifecycle scopes that govern one stored link from an in-memory fence map.
+ *
+ * @param fences - Authoritative parent lifecycle rows indexed by their exact scope.
+ * @param record - Link whose workspace and conversation parents are requested.
+ * @returns Exact present-or-absent parent lifecycle snapshot.
+ */
+function parentLifecycleFenceSnapshotForLink(
+  fences: ReadonlyMap<string, ExternalChatParentLifecycleFence>,
+  record: StoredExternalChatLink,
+): ExternalChatParentLifecycleFenceSnapshot {
+  return {
+    workspace: fences.get(parentLifecycleFenceKey(
+      record.workspaceId,
+      record.link.provider,
+      record.link.installationId,
+      record.link.source.externalWorkspaceId,
+      undefined,
+    )),
+    conversation: fences.get(parentLifecycleFenceKey(
+      record.workspaceId,
+      record.link.provider,
+      record.link.installationId,
+      record.link.source.externalWorkspaceId,
+      record.link.source.conversationExternalId,
+    )),
+  }
+}
+
+/**
+ * Compares exact workspace and conversation parent lifecycle snapshot authority.
+ *
+ * @param left - Current present-or-absent snapshot.
+ * @param right - Expected present-or-absent snapshot.
+ * @returns Whether both parent rows are exactly equal, including absence.
+ */
+function sameParentLifecycleFenceSnapshot(
+  left: ExternalChatParentLifecycleFenceSnapshot,
+  right: ExternalChatParentLifecycleFenceSnapshot,
+): boolean {
+  return (
+    left.workspace === undefined
+      ? right.workspace === undefined
+      : right.workspace !== undefined && sameParentLifecycleFence(left.workspace, right.workspace)
+  ) && (
+    left.conversation === undefined
+      ? right.conversation === undefined
+      : right.conversation !== undefined &&
+        sameParentLifecycleFence(left.conversation, right.conversation)
+  )
 }
 
 /**
@@ -2641,8 +3723,77 @@ function parentLinkCursor(record: StoredExternalChatLink): string {
 function linkRejectsDeferredContent(link: ExternalChatWorkItemLink): boolean {
   return link.sourceAvailability === 'permission-lost' ||
     link.sourceAvailability === 'scope-changed' ||
+    link.sourceState === 'retained-metadata' ||
     link.sourceState === 'deleted' ||
     link.sourceState === 'retention-expired'
+}
+
+/**
+ * Identifies a parent lifecycle control event that may remain retryable without a child snapshot.
+ *
+ * @param event - Normalized inbound provider event.
+ * @returns Whether the event publishes workspace or conversation parent authority.
+ */
+function isParentLifecycleDeferredEvent(event: ExternalChatInboundEvent): boolean {
+  return event.type === 'source.lifecycle-changed' &&
+    (event.resourceType === 'workspace' || event.resourceType === 'conversation')
+}
+
+/**
+ * Checks whether an exact parent snapshot permanently forbids retaining content payloads.
+ *
+ * @param snapshot - Current workspace and conversation parent authorities.
+ * @param sourceAuthorizationRevision - Authorization generation that resolved the linked source.
+ * @returns Whether an applicable parent fence requires content erasure instead of deferral.
+ */
+function parentLifecycleFencesRejectDeferredContent(
+  snapshot: ExternalChatParentLifecycleFenceSnapshot,
+  sourceAuthorizationRevision: number,
+): boolean {
+  return [snapshot.workspace, snapshot.conversation].some((fence) =>
+    fence !== undefined &&
+    fence.authorizationRevision >= sourceAuthorizationRevision &&
+    (
+      fence.availability === 'permission-lost' ||
+      fence.availability === 'scope-changed' ||
+      fence.state === 'retained-metadata' ||
+      fence.state === 'deleted' ||
+      fence.state === 'retention-expired'
+    )
+  )
+}
+
+/**
+ * Creates the in-memory address for one installation-scoped retry permit.
+ *
+ * @param permit - Permit whose canonical installation scope is addressed.
+ * @returns Collision-free in-memory permit key.
+ */
+function outboundRetryPermitKey(permit: ExternalChatOutboundRetryPermit): string {
+  return key(
+    permit.workspaceId,
+    permit.provider,
+    permit.installationId,
+  )
+}
+
+/**
+ * Compares the complete ownership fence of two retry permits.
+ *
+ * @param left - Current durable permit.
+ * @param right - Caller-provided permit capability.
+ * @returns Whether the caller still owns the exact current fence and lease.
+ */
+function outboundRetryPermitsMatch(
+  left: ExternalChatOutboundRetryPermit,
+  right: ExternalChatOutboundRetryPermit,
+): boolean {
+  return left.workspaceId === right.workspaceId &&
+    left.provider === right.provider &&
+    left.installationId === right.installationId &&
+    left.ownerId === right.ownerId &&
+    left.fenceToken === right.fenceToken &&
+    left.leaseExpiresAt === right.leaseExpiresAt
 }
 
 /**
@@ -2762,6 +3913,17 @@ function isRetryableOutboundReceiptDue(
   return outcome?.kind === 'deferred' &&
     outcome.retryAt !== undefined &&
     outcome.retryAt <= claimedAt
+}
+
+/**
+ * Checks whether an outcome still owns active retry work.
+ *
+ * @param outcome - Previously committed synchronization result.
+ * @returns Whether the result is deferred or retryably failed.
+ */
+function isRetryableSyncOutcome(outcome: ExternalChatSyncOutcome | undefined): boolean {
+  return outcome?.kind === 'deferred' ||
+    (outcome?.kind === 'failed' && outcome.retryable)
 }
 
 /**

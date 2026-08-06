@@ -18,6 +18,9 @@ import { normalizeChatProviderThreadPage } from './chat-provider-normalizer'
 import { normalizeExternalChatRetryAt } from './external-chat-retry-schedule'
 import {
   ExternalChatError,
+  type ExternalChatLifecycleObservation,
+  type ExternalChatLinkLifecycleState,
+  type ExternalChatParentLifecycleFenceSnapshot,
   type ExternalChatStore,
   type StoredExternalChatLink,
 } from './external-chat'
@@ -82,6 +85,66 @@ export interface ExternalChatResyncSnapshotProcessorPort {
   processResyncSnapshot(input: ExternalChatSyncInboundInput): Promise<ExternalChatSyncOutcome>
 }
 
+/** Operation-scoped authorization and ownership boundary shared by resynchronization side effects. */
+export type ExternalChatResyncOperationBoundary = {
+  /** Canonical Workspace identifier. */
+  workspaceId: string
+  /** Link whose existing imported bindings are being reconciled. */
+  linkId: string
+  /** Stable accepted operation that owns all seen markers and reconciliation. */
+  operationId: string
+  /** Exact accepted public link revision. */
+  ownerLinkRevision: number
+  /** Exact accepted provider authorization generation. */
+  authorizationRevision: number
+}
+
+/** Durable manifest generation boundary for one authoritative full provider traversal. */
+export type ExternalChatFullResyncBoundary = ExternalChatResyncOperationBoundary
+
+/** One provider message proven present in an operation-owned full traversal. */
+export type ExternalChatFullResyncSeenMessageInput = ExternalChatFullResyncBoundary & {
+  /** Provider-scoped message identity observed in the authoritative traversal. */
+  externalMessageId: string
+}
+
+/** Restrictive terminal projection whose imported resources must be redacted before exposure. */
+export type ExternalChatResyncRedactionInput = ExternalChatResyncOperationBoundary & {
+  /** Team that still owns the link at the redaction boundary. */
+  teamId: string
+  /** Work Item that still owns the link at the redaction boundary. */
+  workItemId: string
+  /** Exact parent authorities that must still authorize destructive cleanup at commit. */
+  expectedParentLifecycleFences: ExternalChatParentLifecycleFenceSnapshot
+  /** Effective restrictive provider reachability. */
+  availability: ExternalChatSourceAvailability
+  /** Effective restrictive provider lifecycle state. */
+  state: ExternalChatSourceState
+  /** Correlation identifier retained by the accepted job. */
+  correlationId: string
+  /** Stable terminal observation timestamp. */
+  occurredAt: string
+}
+
+/**
+ * Durable reconciliation boundary for full resynchronization and restrictive resource cleanup.
+ *
+ * Implementations must keep an operation-owned manifest, idempotently record each seen message,
+ * and atomically tombstone every existing link binding absent from that manifest before returning
+ * true from `reconcileFullResync`. All methods must return false when the exact link revision,
+ * authorization generation, or supplied parent lifecycle snapshot no longer owns the operation.
+ */
+export interface ExternalChatResyncReconciliationPort {
+  /** Creates or replays the durable seen-generation manifest before provider traversal. */
+  beginFullResync(input: ExternalChatFullResyncBoundary): Promise<boolean>
+  /** Durably records one seen provider message after its snapshot reaches a terminal outcome. */
+  recordFullResyncMessageSeen(input: ExternalChatFullResyncSeenMessageInput): Promise<boolean>
+  /** Reconciles unseen existing bindings and durably marks the manifest completed. */
+  reconcileFullResync(input: ExternalChatFullResyncBoundary): Promise<boolean>
+  /** Idempotently redacts every imported projection owned by a restrictive link. */
+  redactRestrictiveResyncResources(input: ExternalChatResyncRedactionInput): Promise<boolean>
+}
+
 /** Dependencies required by the provider-neutral resynchronization worker. */
 export type ExternalChatResyncWorkerDependencies = {
   /** Durable tenant-scoped external chat store. */
@@ -92,6 +155,8 @@ export type ExternalChatResyncWorkerDependencies = {
   access: ExternalChatSyncAccessPort
   /** Existing durable inbound synchronization processor. */
   processor: ExternalChatResyncSnapshotProcessorPort
+  /** Durable full-traversal manifest and restrictive resource cleanup boundary. */
+  reconciliation: ExternalChatResyncReconciliationPort
   /** Deterministic worker clock. */
   clock: ExternalChatSyncClockPort
 }
@@ -166,6 +231,9 @@ export class ExternalChatResyncWorker {
   /** Existing inbound snapshot processor. */
   private readonly processor: ExternalChatResyncSnapshotProcessorPort
 
+  /** Durable full-traversal manifest and resource cleanup boundary. */
+  private readonly reconciliation: ExternalChatResyncReconciliationPort
+
   /** Deterministic clock. */
   private readonly clock: ExternalChatSyncClockPort
 
@@ -192,6 +260,7 @@ export class ExternalChatResyncWorker {
     this.adapters = dependencies.adapters
     this.access = dependencies.access
     this.processor = dependencies.processor
+    this.reconciliation = dependencies.reconciliation
     this.clock = dependencies.clock
     this.pageSize = requireBoundedInteger(
       options.pageSize,
@@ -243,6 +312,14 @@ export class ExternalChatResyncWorker {
       return stoppedResult(job.operationId, processedPageCount, processedMessageCount, 'unlinked')
     }
     if (initialRecord.link.revision !== job.linkRevision) {
+      return stoppedResult(
+        job.operationId,
+        processedPageCount,
+        processedMessageCount,
+        'superseded',
+      )
+    }
+    if (initialRecord.sourceAuthorizationRevision > job.authorizationRevision) {
       return stoppedResult(
         job.operationId,
         processedPageCount,
@@ -306,6 +383,7 @@ export class ExternalChatResyncWorker {
       )
     }
 
+    let fullResyncBoundaryReady = false
     while (true) {
       if (
         processedPageCount >= this.maximumPagesPerRun ||
@@ -344,6 +422,20 @@ export class ExternalChatResyncWorker {
           processedMessageCount,
           authorized.reason,
         )
+      }
+
+      if (job.mode === 'full' && !fullResyncBoundaryReady) {
+        fullResyncBoundaryReady = await this.reconciliation.beginFullResync(
+          createResyncOperationBoundary(job),
+        )
+        if (!fullResyncBoundaryReady) {
+          return stoppedResult(
+            job.operationId,
+            processedPageCount,
+            processedMessageCount,
+            'superseded',
+          )
+        }
       }
 
       const remainingMessages = this.maximumMessagesPerRun - processedMessageCount
@@ -482,6 +574,7 @@ export class ExternalChatResyncWorker {
             workspaceId: job.workspaceId,
             event,
             expectedLinkRevision: job.linkRevision,
+            authorizationRevision: job.authorizationRevision,
           })
         } catch (error: unknown) {
           if (error instanceof ExternalChatError && error.retryable) {
@@ -543,10 +636,36 @@ export class ExternalChatResyncWorker {
             'inbound-paused',
           )
         }
+        if (
+          job.mode === 'full' &&
+          !await this.reconciliation.recordFullResyncMessageSeen({
+            ...createResyncOperationBoundary(job),
+            externalMessageId: message.externalId,
+          })
+        ) {
+          return stoppedResult(
+            job.operationId,
+            processedPageCount,
+            processedMessageCount,
+            'superseded',
+          )
+        }
         lastEventId = event.eventId
         lastEventAt = message.postedAt
       }
 
+      if (
+        job.mode === 'full' &&
+        page.providerCursor === undefined &&
+        !await this.reconciliation.reconcileFullResync(createResyncOperationBoundary(job))
+      ) {
+        return stoppedResult(
+          job.operationId,
+          processedPageCount,
+          processedMessageCount,
+          'superseded',
+        )
+      }
       const nextCursor = createAdvancedCheckpoint(
         cursor,
         page,
@@ -627,6 +746,9 @@ export class ExternalChatResyncWorker {
     if (record.link.revision !== job.linkRevision) {
       return { kind: 'stopped', record, reason: 'superseded' }
     }
+    if (record.sourceAuthorizationRevision > job.authorizationRevision) {
+      return { kind: 'stopped', record, reason: 'superseded' }
+    }
     validateJobLinkScope(job, record)
     const authorization = await this.access.getInstallationProviderAuthorization(
       job.workspaceId,
@@ -634,6 +756,15 @@ export class ExternalChatResyncWorker {
     )
     if (!authorization || !authorizationMatchesLink(authorization, record.link)) {
       return { kind: 'stopped', record, reason: 'authorization-lost' }
+    }
+    if (authorization.authorizationRevision !== job.authorizationRevision) {
+      return {
+        kind: 'stopped',
+        record,
+        reason: authorization.authorizationRevision > job.authorizationRevision
+          ? 'superseded'
+          : 'authorization-lost',
+      }
     }
     return { kind: 'authorized', scope: { record, authorization } }
   }
@@ -721,31 +852,258 @@ export class ExternalChatResyncWorker {
     if (!isMatchingCompletedCursor(latestCursor, job)) return true
     const current = await this.store.getLink(job.workspaceId, job.linkId)
     if (!current || !current.active || current.link.revision !== job.linkRevision) return true
+    if (current.sourceAuthorizationRevision > job.authorizationRevision) return true
+    const parentFences = await this.store.getParentLifecycleFences(job.workspaceId, job.linkId)
+    if (parentFences === undefined) return true
     const projectedAt = this.clock.now()
+    const lifecycleState = projectResyncThreadObservation(current.lifecycleState, cursor, job)
+    const effective = effectiveResyncLifecycleState(
+      lifecycleState,
+      parentFences,
+      job.authorizationRevision,
+    )
+    const effectiveSyncStatus = terminalResyncSyncStatus(cursor.completionSyncStatus, effective)
+    const projected = mustRedactResyncSourceMetadata(effective.availability, effective.state)
+      ? redactResyncSourceMetadata(current.link)
+      : current.link
     const link: ExternalChatWorkItemLink = {
-      ...current.link,
-      sourceAvailability: cursor.observedSourceAvailability,
-      sourceState: cursor.observedSourceState,
-      syncStatus: cursor.completionSyncStatus,
-      ...(cursor.completionSyncStatus === 'synced'
-        ? { lastSyncedAt: projectedAt, lastSourceObservedAt: projectedAt }
+      ...projected,
+      sourceAvailability: effective.availability,
+      sourceState: effective.state,
+      syncStatus: effectiveSyncStatus,
+      ...(effectiveSyncStatus === 'synced'
+        ? {
+            lastSyncedAt: projectedAt,
+            lastSourceObservedAt: cursor.observedSourceAt ?? projectedAt,
+          }
         : {}),
       revision: current.link.revision + 1,
       updatedAt: projectedAt,
+    }
+    if (mustRedactResyncSourceMetadata(effective.availability, effective.state)) {
+      const redacted = await this.reconciliation.redactRestrictiveResyncResources({
+        ...createResyncOperationBoundary(job),
+        teamId: current.link.teamId,
+        workItemId: current.link.workItemId,
+        expectedParentLifecycleFences: parentFences,
+        availability: effective.availability,
+        state: effective.state,
+        correlationId: job.correlationId,
+        occurredAt: cursor.observedSourceAt ?? cursor.updatedAt,
+      })
+      if (!redacted) return false
     }
     const result = await this.store.updateLink({
       workspaceId: job.workspaceId,
       link,
       expectedRevision: job.linkRevision,
+      lifecycleState,
+      ...(effectiveSyncStatus === 'synced'
+        ? { sourceAuthorizationRevision: job.authorizationRevision }
+        : {}),
+      expectedParentLifecycleFences: parentFences,
     })
     if (result.kind === 'updated' || result.kind === 'not-found') return true
-    if (result.kind === 'parent-stale') {
-      throw new ExternalChatError(
-        'ExternalChatPersistenceFailed',
-        'A non-parent resynchronization update returned a parent fence conflict.',
-      )
-    }
+    if (result.kind === 'parent-stale') return false
     return result.record.link.revision !== job.linkRevision
+  }
+}
+
+/** Effective lifecycle projection derived from private watermarks and parent authorities. */
+type ExternalChatResyncEffectiveLifecycle = {
+  /** Most restrictive current source reachability. */
+  availability: ExternalChatSourceAvailability
+  /** Most restrictive current source lifecycle state. */
+  state: ExternalChatSourceState
+}
+
+/**
+ * Creates the exact accepted operation boundary used by durable resynchronization side effects.
+ *
+ * @param job - Accepted resynchronization job.
+ * @returns Stable link, operation, revision, and authorization ownership fields.
+ */
+function createResyncOperationBoundary(
+  job: ExternalChatResyncJob,
+): ExternalChatResyncOperationBoundary {
+  return {
+    workspaceId: job.workspaceId,
+    linkId: job.linkId,
+    operationId: job.operationId,
+    ownerLinkRevision: job.linkRevision,
+    authorizationRevision: job.authorizationRevision,
+  }
+}
+
+/**
+ * Advances the private thread lifecycle observation only when the authoritative read is newer.
+ *
+ * @param current - Current durable per-scope lifecycle watermarks.
+ * @param cursor - Completed authoritative provider traversal.
+ * @param job - Accepted operation owning the provider authorization generation.
+ * @returns Private lifecycle state retaining any newer concurrent observation.
+ */
+function projectResyncThreadObservation(
+  current: ExternalChatLinkLifecycleState,
+  cursor: ExternalChatSyncCursor,
+  job: ExternalChatResyncJob,
+): ExternalChatLinkLifecycleState {
+  if (
+    cursor.observedSourceAvailability === undefined ||
+    cursor.observedSourceState === undefined
+  ) return current
+  const candidate: ExternalChatLifecycleObservation = {
+    authorizationRevision: job.authorizationRevision,
+    availability: cursor.observedSourceAvailability,
+    state: cursor.observedSourceState,
+    occurredAt: cursor.observedSourceAt ?? cursor.updatedAt,
+    eventId: `resync-${job.operationId}`,
+  }
+  if (compareResyncLifecycleObservations(candidate, current.thread) <= 0) return current
+  return { ...current, thread: candidate }
+}
+
+/**
+ * Compares lifecycle observations by authorization generation, occurrence, then stable event ID.
+ *
+ * @param left - Candidate observation.
+ * @param right - Current durable observation.
+ * @returns Negative, zero, or positive deterministic ordering.
+ */
+function compareResyncLifecycleObservations(
+  left: ExternalChatLifecycleObservation,
+  right: ExternalChatLifecycleObservation,
+): number {
+  if (left.authorizationRevision !== right.authorizationRevision) {
+    return left.authorizationRevision - right.authorizationRevision
+  }
+  const occurredAt = left.occurredAt.localeCompare(right.occurredAt)
+  return occurredAt === 0 ? left.eventId.localeCompare(right.eventId) : occurredAt
+}
+
+/**
+ * Composes every private lifecycle scope with fail-closed current parent fence publication.
+ *
+ * @param state - Current private lifecycle watermarks after the resync observation.
+ * @param parentFences - Strongly read exact parent lifecycle authorities.
+ * @param acceptedAuthorizationRevision - Generation accepted for the authoritative traversal.
+ * @returns Most restrictive effective lifecycle projection.
+ */
+function effectiveResyncLifecycleState(
+  state: ExternalChatLinkLifecycleState,
+  parentFences: ExternalChatParentLifecycleFenceSnapshot,
+  acceptedAuthorizationRevision: number,
+): ExternalChatResyncEffectiveLifecycle {
+  let availability: ExternalChatSourceAvailability = 'available'
+  let sourceState: ExternalChatSourceState = 'active'
+  for (const observation of [state.workspace, state.conversation, state.thread]) {
+    if (
+      observation === undefined ||
+      observation.authorizationRevision < acceptedAuthorizationRevision
+    ) continue
+    if (
+      resyncAvailabilityRank(observation.availability) > resyncAvailabilityRank(availability)
+    ) availability = observation.availability
+    if (resyncSourceStateRank(observation.state) > resyncSourceStateRank(sourceState)) {
+      sourceState = observation.state
+    }
+  }
+  for (const fence of [parentFences.workspace, parentFences.conversation]) {
+    if (
+      fence?.restrictive !== true ||
+      fence.authorizationRevision < acceptedAuthorizationRevision
+    ) continue
+    if (resyncAvailabilityRank(fence.availability) > resyncAvailabilityRank(availability)) {
+      availability = fence.availability
+    }
+    if (resyncSourceStateRank(fence.state) > resyncSourceStateRank(sourceState)) {
+      sourceState = fence.state
+    }
+  }
+  return { availability, state: sourceState }
+}
+
+/**
+ * Applies the terminal traversal outcome without allowing a lifecycle restriction to become synced.
+ *
+ * @param completion - Terminal checkpoint status derived from the provider traversal.
+ * @param lifecycle - Effective private and parent lifecycle projection.
+ * @returns Honest public synchronization status.
+ */
+function terminalResyncSyncStatus(
+  completion: ExternalChatWorkItemLink['syncStatus'],
+  lifecycle: ExternalChatResyncEffectiveLifecycle,
+): ExternalChatWorkItemLink['syncStatus'] {
+  if (
+    lifecycle.availability !== 'available' ||
+    lifecycle.state === 'deleted' ||
+    lifecycle.state === 'retained-metadata' ||
+    lifecycle.state === 'retention-expired'
+  ) return 'paused'
+  return completion
+}
+
+/** Returns the fail-closed rank of one source availability. */
+function resyncAvailabilityRank(value: ExternalChatSourceAvailability): number {
+  if (value === 'available') return 0
+  if (value === 'temporarily-unavailable') return 1
+  if (value === 'needs-reauth') return 2
+  if (value === 'installation-disconnected') return 3
+  if (value === 'scope-changed') return 4
+  return 5
+}
+
+/** Returns the fail-closed rank of one source lifecycle state. */
+function resyncSourceStateRank(value: ExternalChatSourceState): number {
+  if (value === 'active') return 0
+  if (value === 'completed') return 1
+  if (value === 'retained-metadata') return 2
+  if (value === 'deleted') return 3
+  return 4
+}
+
+/**
+ * Checks whether a restrictive effective lifecycle forbids retaining provider metadata.
+ *
+ * @param availability - Effective source reachability.
+ * @param state - Effective source lifecycle state.
+ * @returns Whether policy-controlled metadata and resources must be redacted.
+ */
+function mustRedactResyncSourceMetadata(
+  availability: ExternalChatSourceAvailability,
+  state: ExternalChatSourceState,
+): boolean {
+  return availability === 'permission-lost' || availability === 'scope-changed' ||
+    state === 'deleted' || state === 'retention-expired'
+}
+
+/**
+ * Removes provider display, permalink, and quote metadata while retaining immutable source IDs.
+ *
+ * @param link - Current public link projection.
+ * @returns Source-redacted link projection.
+ */
+function redactResyncSourceMetadata(link: ExternalChatWorkItemLink): ExternalChatWorkItemLink {
+  return {
+    ...link,
+    workspace: {
+      provider: link.workspace.provider,
+      externalId: link.workspace.externalId,
+    },
+    conversation: {
+      externalId: link.conversation.externalId,
+      externalWorkspaceId: link.conversation.externalWorkspaceId,
+      kind: link.conversation.kind,
+    },
+    source: {
+      externalWorkspaceId: link.source.externalWorkspaceId,
+      conversationExternalId: link.source.conversationExternalId,
+      threadExternalId: link.source.threadExternalId,
+      rootMessageExternalId: link.source.rootMessageExternalId,
+      ...(link.source.sourceMessageExternalId === undefined
+        ? {}
+        : { sourceMessageExternalId: link.source.sourceMessageExternalId }),
+    },
   }
 }
 
@@ -764,7 +1122,9 @@ function createClaimedCheckpoint(
   current: ExternalChatSyncCursor | undefined,
   now: string,
 ): ExternalChatSyncCursor {
-  const resumesPartialTraversal = job.mode === 'resume' && current?.status === 'processing'
+  const resumesPartialTraversal = job.mode === 'resume' &&
+    current?.status === 'processing' &&
+    current.authorizationRevision === job.authorizationRevision
   return {
     schemaVersion: 1,
     linkId: job.linkId,
@@ -773,6 +1133,7 @@ function createClaimedCheckpoint(
     mode: job.mode,
     status: 'processing',
     ownerLinkRevision: job.linkRevision,
+    authorizationRevision: job.authorizationRevision,
     ...(resumesPartialTraversal && current?.observedSourceAvailability !== undefined
       ? { observedSourceAvailability: current.observedSourceAvailability }
       : {}),
@@ -820,6 +1181,7 @@ function createAdvancedCheckpoint(
     status: completed ? 'completed' : 'processing',
     observedSourceAvailability: page.thread.availability,
     observedSourceState: page.thread.state,
+    observedSourceAt: page.thread.updatedAt,
     ...(completed ? { completionSyncStatus } : { completionSyncStatus: undefined }),
     ...(page.providerCursor === undefined
       ? { providerCursor: undefined }
@@ -967,6 +1329,7 @@ function validateOwnedCursor(cursor: ExternalChatSyncCursor, job: ExternalChatRe
     cursor.operationId !== job.operationId ||
     cursor.mode !== job.mode ||
     cursor.ownerLinkRevision !== job.linkRevision
+    || cursor.authorizationRevision !== job.authorizationRevision
   ) {
     throw new ExternalChatError(
       'ExternalChatPersistenceFailed',
@@ -989,6 +1352,7 @@ function isMatchingCompletedCursor(
   return cursor?.operationId === job.operationId &&
     cursor.mode === job.mode &&
     cursor.ownerLinkRevision === job.linkRevision &&
+    cursor.authorizationRevision === job.authorizationRevision &&
     cursor.status === 'completed'
 }
 
@@ -1006,6 +1370,8 @@ function validateResyncJob(job: ExternalChatResyncJob): void {
     (job.mode !== 'resume' && job.mode !== 'full') ||
     !Number.isSafeInteger(job.linkRevision) ||
     job.linkRevision < 1 ||
+    !Number.isSafeInteger(job.authorizationRevision) ||
+    job.authorizationRevision < 1 ||
     !isCanonicalTimestamp(job.acceptedAt)
   ) {
     throw new ExternalChatError(

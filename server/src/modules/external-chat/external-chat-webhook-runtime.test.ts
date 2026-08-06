@@ -24,6 +24,7 @@ import {
   ExternalChatSyncService,
   type ExternalChatSyncAccessPort,
   type ExternalChatSyncApplyResourceLifecycleInput,
+  type ExternalChatSyncApplyResourceLifecycleResult,
   type ExternalChatSyncAttachmentPort,
   type ExternalChatSyncAuditPort,
   type ExternalChatSyncAuditRecord,
@@ -230,7 +231,7 @@ class UnreachableSyncPorts implements
   /** Rejects imported resource lifecycle changes because no link resolves. */
   async applyExternalResourceLifecycle(
     _input: ExternalChatSyncApplyResourceLifecycleInput,
-  ): Promise<void> {
+  ): Promise<ExternalChatSyncApplyResourceLifecycleResult> {
     throw new Error('Resource lifecycle handling is outside this fixture.')
   }
 
@@ -479,7 +480,6 @@ function createLifecycleEvent(
     threadExternalId: 'thread-1',
     occurredAt: runtimeNow,
     resourceType: 'thread',
-    resourceExternalId: 'thread-1',
     availability: 'available',
     state: 'active',
     reasonCode: 'ThreadObserved',

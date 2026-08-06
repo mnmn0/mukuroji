@@ -65,6 +65,8 @@ test('a restrictive parent fence closes the source-resolution to link-commit rac
     externalWorkspaceId: resolvedLink.source.externalWorkspaceId,
     conversationExternalId: resolvedLink.source.conversationExternalId,
     authorizationRevision: resolvedLink.authorizationRevision,
+    availability: 'permission-lost',
+    state: 'retained-metadata',
     restrictive: true,
     eventId: 'parent-event-after-resolution',
     operationId: 'parent-operation-after-resolution',
@@ -92,6 +94,8 @@ test('parent lifecycle fences replay exactly and reject stale generations', asyn
     externalWorkspaceId: 'external-workspace-1',
     conversationExternalId: 'conversation-1',
     authorizationRevision: 2,
+    availability: 'permission-lost',
+    state: 'retained-metadata',
     restrictive: true,
     eventId: 'parent-event-current',
     operationId: 'parent-operation-current',
@@ -107,6 +111,8 @@ test('parent lifecycle fences replay exactly and reject stale generations', asyn
     installationId: fence.installationId,
     externalWorkspaceId: fence.externalWorkspaceId,
     conversationExternalId: fence.conversationExternalId,
+    availability: fence.availability,
+    state: fence.state,
     restrictive: fence.restrictive,
     eventId: fence.eventId,
     operationId: fence.operationId,
@@ -124,6 +130,73 @@ test('parent lifecycle fences replay exactly and reject stale generations', asyn
   expect(stale.kind).toBe('stale')
   if (stale.kind !== 'stale') throw new Error('Expected a stale parent lifecycle fence.')
   expect(stale.fence).toEqual(applied.fence)
+})
+
+test('deferred enqueue rejects a stale snapshot after a permanent parent restriction', async () => {
+  const store = new InMemoryExternalChatStore()
+  const input = createLinkInput('workspace-1', 'link-1', 'work-item-1', 'idempotency-a')
+  expect((await store.createLink(input)).kind).toBe('created')
+  const observed = await store.getParentLifecycleFences(input.workspaceId, input.link.id)
+  if (!observed) throw new Error('Expected the initial parent lifecycle snapshot.')
+  expect((await store.fenceParentLifecycle({
+    workspaceId: input.workspaceId,
+    provider: input.link.provider,
+    installationId: input.link.installationId,
+    externalWorkspaceId: input.link.source.externalWorkspaceId,
+    authorizationRevision: input.authorizationRevision,
+    availability: 'permission-lost',
+    state: 'retained-metadata',
+    restrictive: true,
+    eventId: 'parent-event-before-deferred-enqueue',
+    operationId: 'parent-operation-before-deferred-enqueue',
+    occurredAt: later,
+  })).kind).toBe('applied')
+
+  const inboundEvent = createInboundEvent('event-after-parent-restriction')
+  await expect(store.deferEvent({
+    workspaceId: input.workspaceId,
+    linkId: input.link.id,
+    event: inboundEvent,
+    expectedParentLifecycleFences: observed,
+    fingerprint: createExternalChatFingerprint(inboundEvent),
+    reason: 'source-unavailable',
+    attempt: 1,
+    retryAt,
+    createdAt: later,
+    updatedAt: later,
+  })).rejects.toMatchObject({ code: 'ExternalChatOperationConflict', retryable: true })
+
+  const outboundEvent = {
+    type: 'comment.created',
+    workspaceId: input.workspaceId,
+    linkId: input.link.id,
+    teamId: input.link.teamId,
+    workItemId: input.link.workItemId,
+    principalId: 'principal-1',
+    correlationId: 'correlation-after-parent-restriction',
+    occurredAt: later,
+    externalSyncEligible: true,
+    internalCommentId: 'comment-after-parent-restriction',
+    internalCommentVersion: 1,
+    bodyMarkdown: 'Must not be retained after the parent restriction.',
+  } satisfies Parameters<InMemoryExternalChatStore['deferOutboundEvent']>[0]['event']
+  await expect(store.deferOutboundEvent({
+    workspaceId: input.workspaceId,
+    linkId: input.link.id,
+    ownerTeamId: input.link.teamId,
+    ownerWorkItemId: input.link.workItemId,
+    ownerLinkRevision: input.link.revision,
+    expectedParentLifecycleFences: observed,
+    event: outboundEvent,
+    fingerprint: createExternalChatFingerprint(outboundEvent),
+    operationId: 'operation-after-parent-restriction',
+    attempt: 1,
+    retryAt,
+    createdAt: later,
+    updatedAt: later,
+  })).rejects.toMatchObject({ code: 'ExternalChatOperationConflict', retryable: true })
+  expect(await store.listDeferredEvents(input.workspaceId, input.link.id, 10)).toEqual([])
+  expect(await store.listDeferredOutboundEvents(input.workspaceId, input.link.id, 10)).toEqual([])
 })
 
 test('link updates use CAS and unlink releases only the active source claim', async () => {
@@ -165,6 +238,57 @@ test('link updates use CAS and unlink releases only the active source claim', as
     createLinkInput('workspace-1', 'link-2', 'work-item-2', 'idempotency-b'),
   )
   expect(relinked.kind).toBe('created')
+})
+
+test('rejects outbound payload retention after a link becomes retained metadata only', async () => {
+  const store = new InMemoryExternalChatStore()
+  const input = createLinkInput('workspace-1', 'link-1', 'work-item-1', 'idempotency-a')
+  await store.createLink(input)
+  await expect(store.updateLink({
+    workspaceId: input.workspaceId,
+    expectedRevision: input.link.revision,
+    link: {
+      ...input.link,
+      sourceAvailability: 'available',
+      sourceState: 'retained-metadata',
+      syncStatus: 'paused',
+      revision: 2,
+      updatedAt: later,
+    },
+  })).resolves.toMatchObject({ kind: 'updated' })
+  const event = {
+    type: 'comment.created',
+    workspaceId: input.workspaceId,
+    linkId: input.link.id,
+    teamId: input.link.teamId,
+    workItemId: input.link.workItemId,
+    principalId: 'principal-1',
+    correlationId: 'correlation-retained-metadata',
+    occurredAt: later,
+    externalSyncEligible: true,
+    internalCommentId: 'comment-retained-metadata',
+    internalCommentVersion: 1,
+    bodyMarkdown: 'Must not remain durable.',
+  } satisfies Parameters<InMemoryExternalChatStore['deferOutboundEvent']>[0]['event']
+
+  await expect(store.deferOutboundEvent({
+    workspaceId: event.workspaceId,
+    linkId: event.linkId,
+    ownerTeamId: event.teamId,
+    ownerWorkItemId: event.workItemId,
+    ownerLinkRevision: 2,
+    expectedParentLifecycleFences: { workspace: undefined, conversation: undefined },
+    event,
+    fingerprint: createExternalChatFingerprint(event),
+    operationId: 'operation-retained-metadata',
+    attempt: 1,
+    retryAt,
+    createdAt: later,
+    updatedAt: later,
+  })).rejects.toMatchObject({
+    code: 'ExternalChatOperationConflict',
+    retryable: true,
+  })
 })
 
 test('inbound receipts reject payload conflicts and recover deferred work only when due', async () => {
@@ -484,6 +608,12 @@ test('thread lifecycle leases order completion and reopening while fencing dupli
   await store.createLink(
     createLinkInput('workspace-1', 'link-1', 'duplicate-item', 'idempotency-a'),
   )
+  const duplicateManifest = await store.getWorkItemLinkManifest(
+    'workspace-1',
+    'team-1',
+    'duplicate-item',
+  )
+  if (!duplicateManifest) throw new Error('Expected the duplicate owner manifest.')
   const claimed = await store.claimThreadLifecycle({
     workspaceId: 'workspace-1',
     linkId: 'link-1',
@@ -604,6 +734,8 @@ test('thread lifecycle leases order completion and reopening while fencing dupli
     duplicateTeamId: 'team-1',
     duplicateWorkItemId: 'duplicate-item',
     links: [{ linkId: 'link-1', expectedRevision: 1 }],
+    expectedDuplicateLinkGeneration: duplicateManifest.generation,
+    expectedDuplicateLinkCount: duplicateManifest.activeLinkCount,
     mergedAt: '2026-08-06T04:02:30.000Z',
   })).kind).toBe('conflict')
 
@@ -647,6 +779,8 @@ test('thread lifecycle leases order completion and reopening while fencing dupli
     duplicateTeamId: 'team-1',
     duplicateWorkItemId: 'duplicate-item',
     links: [{ linkId: 'link-1', expectedRevision: 1 }],
+    expectedDuplicateLinkGeneration: duplicateManifest.generation,
+    expectedDuplicateLinkCount: duplicateManifest.activeLinkCount,
     mergedAt: '2026-08-06T04:03:00.000Z',
   })).kind).toBe('conflict')
   expect(await store.acknowledgeThreadLifecycle({
@@ -663,6 +797,8 @@ test('thread lifecycle leases order completion and reopening while fencing dupli
     duplicateTeamId: 'team-1',
     duplicateWorkItemId: 'duplicate-item',
     links: [{ linkId: 'link-1', expectedRevision: 1 }],
+    expectedDuplicateLinkGeneration: duplicateManifest.generation,
+    expectedDuplicateLinkCount: duplicateManifest.activeLinkCount,
     mergedAt: '2026-08-06T04:03:00.000Z',
   })).kind).toBe('merged')
   expect(await store.getThreadLifecycle('workspace-1', 'link-1', 'slack')).toMatchObject({
@@ -1030,11 +1166,28 @@ test('parent lookup, receipt checkpoints, and restrictive deferred purge stay sc
 
   const retainedEvent = createInboundEvent('retained-current-event')
   const purgedEvent = createInboundEvent('purged-sensitive-event')
-  for (const event of [retainedEvent, purgedEvent]) {
+  const retainedLifecycleEvent = {
+    schemaVersion: EXTERNAL_CHAT_SCHEMA_VERSION,
+    type: 'source.lifecycle-changed',
+    eventId: 'retained-lifecycle-control-event',
+    correlationId: 'correlation-retained-lifecycle-control-event',
+    installationId: 'installation-1',
+    provider: 'slack',
+    externalWorkspaceId: 'external-workspace-1',
+    conversationExternalId: 'conversation-1',
+    threadExternalId: 'thread-1',
+    resourceType: 'thread',
+    availability: 'permission-lost',
+    state: 'retained-metadata',
+    reasonCode: 'provider_thread_permission_lost',
+    occurredAt: now,
+  } satisfies ExternalChatInboundEvent
+  for (const event of [retainedEvent, purgedEvent, retainedLifecycleEvent]) {
     await store.deferEvent({
       workspaceId: 'workspace-1',
       linkId: first.link.id,
       event,
+      expectedParentLifecycleFences: { workspace: undefined, conversation: undefined },
       fingerprint: createExternalChatFingerprint(event),
       reason: 'out-of-order',
       attempt: 1,
@@ -1048,12 +1201,14 @@ test('parent lookup, receipt checkpoints, and restrictive deferred purge stay sc
     first.link.id,
     retainedEvent.eventId,
   )).toBe(1)
-  expect((await store.listDueDeferredEvents(
+  expect((await store.listDeferredEvents(
     'workspace-1',
     first.link.id,
-    retryAt,
     10,
-  )).map((event) => event.event.eventId)).toEqual([retainedEvent.eventId])
+  )).map((event) => event.event.eventId).sort()).toEqual([
+    retainedEvent.eventId,
+    retainedLifecycleEvent.eventId,
+  ].sort())
   expect((await store.unlinkLink({
     workspaceId: 'workspace-1',
     linkId: second.link.id,
@@ -1079,6 +1234,10 @@ test('message bindings enforce one-to-one identities and optimistic replacement'
     expectedTeamId: 'team-1',
     expectedWorkItemId: 'work-item-1',
     expectedLinkRevision: 1,
+    expectedParentLifecycleFences: {
+      workspace: undefined,
+      conversation: undefined,
+    },
   }
   const first = createBinding('external-1', 'comment-1', ['file-1'])
   const stored = await store.putMessageBinding({
@@ -1111,6 +1270,59 @@ test('message bindings enforce one-to-one identities and optimistic replacement'
     'link-1',
     'comment-1',
   ))?.binding.externalVersion).toBe('2')
+})
+
+test('message binding commits reject a parent lifecycle authority that changed after observation', async () => {
+  const store = new InMemoryExternalChatStore()
+  const input = createLinkInput(
+    'workspace-1',
+    'link-1',
+    'work-item-1',
+    'binding-parent-authority',
+  )
+  await store.createLink(input)
+  const observedParentLifecycleFences = await store.getParentLifecycleFences(
+    input.workspaceId,
+    input.link.id,
+  )
+  expect(observedParentLifecycleFences).toEqual({
+    workspace: undefined,
+    conversation: undefined,
+  })
+  if (!observedParentLifecycleFences) {
+    throw new Error('Expected the initial parent lifecycle authority snapshot.')
+  }
+
+  const fence = await store.fenceParentLifecycle({
+    workspaceId: input.workspaceId,
+    provider: input.source.provider,
+    installationId: input.link.installationId,
+    externalWorkspaceId: input.source.externalWorkspaceId,
+    conversationExternalId: input.source.conversationExternalId,
+    authorizationRevision: input.authorizationRevision,
+    availability: 'permission-lost',
+    state: 'retained-metadata',
+    restrictive: true,
+    eventId: 'parent-event-after-side-effect-authorization',
+    operationId: 'parent-operation-after-side-effect-authorization',
+    occurredAt: later,
+  })
+  expect(fence.kind).toBe('applied')
+
+  const rejected = await store.putMessageBinding({
+    workspaceId: input.workspaceId,
+    binding: createBinding('external-after-parent-fence', 'comment-after-parent-fence', []),
+    expectedTeamId: input.link.teamId,
+    expectedWorkItemId: input.link.workItemId,
+    expectedLinkRevision: input.link.revision,
+    expectedParentLifecycleFences: observedParentLifecycleFences,
+  })
+  expect(rejected.kind).toBe('owner-conflict')
+  expect(await store.getMessageBindingByExternalId(
+    input.workspaceId,
+    input.link.id,
+    'external-after-parent-fence',
+  )).toBeUndefined()
 })
 
 test('duplicate merge retargets links while retaining bindings, files, and canonical redirect', async () => {
@@ -1146,7 +1358,28 @@ test('duplicate merge retargets links while retaining bindings, files, and canon
     expectedTeamId: 'team-1',
     expectedWorkItemId: 'duplicate-item',
     expectedLinkRevision: 1,
+    expectedParentLifecycleFences: {
+      workspace: undefined,
+      conversation: undefined,
+    },
   })
+  const duplicateManifest = await store.getWorkItemLinkManifest(
+    'workspace-1',
+    'team-1',
+    'duplicate-item',
+  )
+  if (!duplicateManifest) throw new Error('Expected the duplicate owner manifest.')
+  await expect(store.mergeLinks({
+    workspaceId: 'workspace-1',
+    canonicalTeamId: 'team-1',
+    canonicalWorkItemId: 'canonical-item',
+    duplicateTeamId: 'team-1',
+    duplicateWorkItemId: 'duplicate-item',
+    links: [{ linkId: 'link-1', expectedRevision: 1 }],
+    expectedDuplicateLinkGeneration: duplicateManifest.generation,
+    expectedDuplicateLinkCount: duplicateManifest.activeLinkCount,
+    mergedAt: later,
+  })).resolves.toEqual({ kind: 'conflict' })
   const merged = await store.mergeLinks({
     workspaceId: 'workspace-1',
     canonicalTeamId: 'team-1',
@@ -1157,6 +1390,8 @@ test('duplicate merge retargets links while retaining bindings, files, and canon
       { linkId: 'link-1', expectedRevision: 1 },
       { linkId: 'link-2', expectedRevision: 1 },
     ],
+    expectedDuplicateLinkGeneration: duplicateManifest.generation,
+    expectedDuplicateLinkCount: duplicateManifest.activeLinkCount,
     mergedAt: later,
   })
   expect(merged.kind).toBe('merged')
@@ -1165,6 +1400,16 @@ test('duplicate merge retargets links while retaining bindings, files, and canon
   expect(merged.movedLinks).toHaveLength(2)
   expect(merged.movedFileIds).toEqual(['file-1', 'file-2'])
   expect(merged.movedMessageBindingCount).toBe(1)
+  expect(await store.getWorkItemLinkManifest(
+    'workspace-1',
+    'team-1',
+    'duplicate-item',
+  )).toMatchObject({ activeLinkCount: 0, generation: 3 })
+  expect(await store.getWorkItemLinkManifest(
+    'workspace-1',
+    'team-1',
+    'canonical-item',
+  )).toMatchObject({ activeLinkCount: 2, generation: 1 })
   expect((await store.getCanonicalRedirect(
     'workspace-1',
     'team-1',
@@ -1178,6 +1423,55 @@ test('duplicate merge retargets links while retaining bindings, files, and canon
       movedLinkId,
     ))?.linkId).toBe(movedLinkId)
   }
+})
+
+test('duplicate merge rejects a stale owner manifest after a concurrent link is created', async () => {
+  const store = new InMemoryExternalChatStore()
+  await store.createLink(
+    createLinkInput('workspace-1', 'link-1', 'duplicate-item', 'idempotency-a'),
+  )
+  const preparedManifest = await store.getWorkItemLinkManifest(
+    'workspace-1',
+    'team-1',
+    'duplicate-item',
+  )
+  if (!preparedManifest) throw new Error('Expected the prepared owner manifest.')
+  const concurrentInput = createLinkInput(
+    'workspace-1',
+    'link-2',
+    'duplicate-item',
+    'idempotency-b',
+  )
+  const concurrentThreadExternalId = 'thread-2'
+  await store.createLink({
+    ...concurrentInput,
+    source: {
+      ...concurrentInput.source,
+      threadExternalId: concurrentThreadExternalId,
+    },
+    link: {
+      ...concurrentInput.link,
+      source: {
+        ...concurrentInput.link.source,
+        threadExternalId: concurrentThreadExternalId,
+        rootMessageExternalId: 'root-message-2',
+      },
+    },
+  })
+
+  await expect(store.mergeLinks({
+    workspaceId: 'workspace-1',
+    canonicalTeamId: 'team-1',
+    canonicalWorkItemId: 'canonical-item',
+    duplicateTeamId: 'team-1',
+    duplicateWorkItemId: 'duplicate-item',
+    links: [{ linkId: 'link-1', expectedRevision: 1 }],
+    expectedDuplicateLinkGeneration: preparedManifest.generation,
+    expectedDuplicateLinkCount: preparedManifest.activeLinkCount,
+    mergedAt: later,
+  })).resolves.toEqual({ kind: 'conflict' })
+  expect((await store.getLink('workspace-1', 'link-1'))?.link.workItemId).toBe('duplicate-item')
+  expect((await store.getLink('workspace-1', 'link-2'))?.link.workItemId).toBe('duplicate-item')
 })
 
 /**

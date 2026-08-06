@@ -23,10 +23,14 @@ import {
   ChatProviderAdapterRegistry,
   type ChatProviderAdapter,
 } from './chat-provider-adapter'
-import { InMemoryExternalChatStore } from './external-chat'
+import { createExternalChatFingerprint, InMemoryExternalChatStore } from './external-chat'
 import type { ExternalChatResyncJob } from './external-chat-link-service'
 import {
   ExternalChatResyncWorker,
+  type ExternalChatFullResyncBoundary,
+  type ExternalChatFullResyncSeenMessageInput,
+  type ExternalChatResyncReconciliationPort,
+  type ExternalChatResyncRedactionInput,
   type ExternalChatResyncSnapshotProcessorPort,
 } from './external-chat-resync-worker'
 import type {
@@ -37,6 +41,7 @@ import type {
 
 const NOW = '2026-08-06T06:00:00.000Z'
 const LATER = '2026-08-06T06:01:00.000Z'
+const AFTER = '2026-08-06T06:02:00.000Z'
 
 test('full resync processes multiple pages chronologically and hides provider cursors', async () => {
   const firstPage = createPage([createMessage('message-1', 1), createMessage('message-2', 2)], 'page-2')
@@ -56,11 +61,23 @@ test('full resync processes multiple pages chronologically and hides provider cu
   })
   expect(result).not.toHaveProperty('providerCursor')
   expect(fixture.processor.messageIds()).toEqual(['message-1', 'message-2', 'message-3'])
+  expect(fixture.reconciliation.seenMessageIds('operation-full')).toEqual([
+    'message-1',
+    'message-2',
+    'message-3',
+  ])
+  expect(fixture.reconciliation.remainingBindingIds()).toEqual([
+    'message-1',
+    'message-2',
+    'message-3',
+  ])
+  expect(fixture.reconciliation.reconciledOperations).toEqual(['operation-full'])
   expect(fixture.provider.requestedCursors).toEqual([undefined, 'page-2'])
   expect(await fixture.store.getSyncCursor('workspace-1', 'link-1')).toMatchObject({
     operationId: 'operation-full',
     status: 'completed',
     ownerLinkRevision: 2,
+    authorizationRevision: 1,
     revision: 3,
   })
   expect((await fixture.store.getLink('workspace-1', 'link-1'))?.link).toMatchObject({
@@ -82,6 +99,7 @@ test('resume carries only an interrupted private continuation', async () => {
     mode: 'full',
     status: 'processing',
     ownerLinkRevision: 1,
+    authorizationRevision: 1,
     providerCursor: 'page-2',
     revision: 1,
     lastEventId: 'event-message-1',
@@ -102,6 +120,37 @@ test('resume carries only an interrupted private continuation', async () => {
   })
 })
 
+test('resume does not reuse a continuation issued under an older authorization generation', async () => {
+  const provider = new FakeProvider([
+    { page: createPage([createMessage('message-new-generation', 2)]) },
+  ])
+  const fixture = await createFixture(provider)
+  await fixture.store.putSyncCursor('workspace-1', {
+    schemaVersion: 1,
+    linkId: 'link-1',
+    provider: 'slack',
+    operationId: 'operation-old-generation',
+    mode: 'full',
+    status: 'processing',
+    ownerLinkRevision: 1,
+    authorizationRevision: 1,
+    providerCursor: 'old-generation-cursor',
+    revision: 1,
+    updatedAt: NOW,
+  })
+  fixture.access.authorization = {
+    installationId: 'installation-1',
+    externalWorkspaceId: 'external-workspace-1',
+    authorizationRevision: 2,
+  }
+
+  const result = await fixture.worker.process(createJob('operation-new-generation', 'resume', 2))
+
+  expect(result.kind).toBe('completed')
+  expect(provider.requestedCursors).toEqual([undefined])
+  expect(fixture.processor.messageIds()).toEqual(['message-new-generation'])
+})
+
 test('resume after a completed operation restarts traversal and observes new snapshots', async () => {
   const provider = new FakeProvider([
     { page: createPage([createMessage('message-new', 4)]) },
@@ -115,6 +164,7 @@ test('resume after a completed operation restarts traversal and observes new sna
     mode: 'full',
     status: 'completed',
     ownerLinkRevision: 1,
+    authorizationRevision: 1,
     observedSourceAvailability: 'available',
     observedSourceState: 'active',
     completionSyncStatus: 'synced',
@@ -222,6 +272,325 @@ test('provider source deletion completes the operation with an honest deleted st
     sourceState: 'deleted',
     syncStatus: 'paused',
   })
+  expect(fixture.reconciliation.redactions).toHaveLength(1)
+})
+
+test('successful current-generation resync advances the private source authorization revision', async () => {
+  const fixture = await createFixture(new FakeProvider([
+    { page: createPage([createMessage('message-1', 1)]) },
+  ]))
+  fixture.access.authorization = {
+    installationId: 'installation-1',
+    externalWorkspaceId: 'external-workspace-1',
+    authorizationRevision: 2,
+  }
+
+  const result = await fixture.worker.process(createJob('operation-reauthorized', 'full', 2))
+
+  expect(result.kind).toBe('completed')
+  expect(await fixture.store.getSyncCursor('workspace-1', 'link-1')).toMatchObject({
+    authorizationRevision: 2,
+  })
+  expect(await fixture.store.getLink('workspace-1', 'link-1')).toMatchObject({
+    sourceAuthorizationRevision: 2,
+  })
+})
+
+test('a successful newer authorization generation supersedes older lifecycle restrictions', async () => {
+  const fixture = await createFixture(new FakeProvider([
+    { page: createPage([]) },
+  ]))
+  const current = await fixture.store.getLink('workspace-1', 'link-1')
+  if (!current) throw new Error('Expected a seeded link.')
+  const restricted = await fixture.store.updateLink({
+    workspaceId: 'workspace-1',
+    expectedRevision: current.link.revision,
+    lifecycleState: {
+      ...current.lifecycleState,
+      workspace: {
+        authorizationRevision: 1,
+        availability: 'permission-lost',
+        state: 'active',
+        occurredAt: AFTER,
+        eventId: 'workspace-permission-lost-generation-1',
+      },
+    },
+    link: {
+      ...current.link,
+      sourceAvailability: 'permission-lost',
+      syncStatus: 'paused',
+      revision: current.link.revision + 1,
+      updatedAt: AFTER,
+    },
+  })
+  if (restricted.kind !== 'updated') throw new Error('Expected a restrictive link update.')
+  const fenced = await fixture.store.fenceParentLifecycle({
+    workspaceId: 'workspace-1',
+    provider: 'slack',
+    installationId: 'installation-1',
+    externalWorkspaceId: 'external-workspace-1',
+    authorizationRevision: 1,
+    availability: 'permission-lost',
+    state: 'active',
+    restrictive: true,
+    eventId: 'workspace-fence-generation-1',
+    operationId: 'workspace-fence-operation-generation-1',
+    occurredAt: AFTER,
+  })
+  if (fenced.kind !== 'applied') throw new Error('Expected a restrictive parent fence.')
+  fixture.access.authorization = {
+    installationId: 'installation-1',
+    externalWorkspaceId: 'external-workspace-1',
+    authorizationRevision: 2,
+  }
+
+  const result = await fixture.worker.process(createJob(
+    'operation-generation-2-recovery',
+    'full',
+    2,
+    restricted.record.link.revision,
+  ))
+
+  expect(result.kind).toBe('completed')
+  const recovered = await fixture.store.getLink('workspace-1', 'link-1')
+  expect(recovered).toMatchObject({
+    sourceAuthorizationRevision: 2,
+    lifecycleState: {
+      workspace: {
+        authorizationRevision: 1,
+        availability: 'permission-lost',
+      },
+      thread: {
+        authorizationRevision: 2,
+        availability: 'available',
+        state: 'active',
+      },
+    },
+    link: {
+      sourceAvailability: 'available',
+      sourceState: 'active',
+      syncStatus: 'synced',
+    },
+  })
+  expect(fixture.reconciliation.redactions).toHaveLength(0)
+})
+
+test('equal and newer lifecycle restrictions cannot be downgraded by a resync success', async () => {
+  for (const restrictionRevision of [2, 3]) {
+    const fixture = await createFixture(new FakeProvider([
+      { page: createPage([]) },
+    ]))
+    const current = await fixture.store.getLink('workspace-1', 'link-1')
+    if (!current) throw new Error('Expected a seeded link.')
+    const restricted = await fixture.store.updateLink({
+      workspaceId: 'workspace-1',
+      expectedRevision: current.link.revision,
+      lifecycleState: {
+        ...current.lifecycleState,
+        thread: {
+          authorizationRevision: restrictionRevision,
+          availability: 'permission-lost',
+          state: 'active',
+          occurredAt: AFTER,
+          eventId: `thread-permission-lost-generation-${restrictionRevision}`,
+        },
+      },
+      link: {
+        ...current.link,
+        sourceAvailability: 'permission-lost',
+        syncStatus: 'paused',
+        revision: current.link.revision + 1,
+        updatedAt: AFTER,
+      },
+    })
+    if (restricted.kind !== 'updated') throw new Error('Expected a restrictive link update.')
+    fixture.access.authorization = {
+      installationId: 'installation-1',
+      externalWorkspaceId: 'external-workspace-1',
+      authorizationRevision: 2,
+    }
+
+    const result = await fixture.worker.process(createJob(
+      `operation-generation-2-restricted-by-${restrictionRevision}`,
+      'full',
+      2,
+      restricted.record.link.revision,
+    ))
+
+    expect(result.kind).toBe('completed')
+    expect(await fixture.store.getLink('workspace-1', 'link-1')).toMatchObject({
+      sourceAuthorizationRevision: 1,
+      lifecycleState: {
+        thread: {
+          authorizationRevision: restrictionRevision,
+          availability: 'permission-lost',
+        },
+      },
+      link: {
+        sourceAvailability: 'permission-lost',
+        syncStatus: 'paused',
+      },
+    })
+    expect(fixture.reconciliation.redactions).toHaveLength(1)
+  }
+})
+
+test('an older accepted authorization generation cannot traverse or overwrite the source', async () => {
+  const fixture = await createFixture(new FakeProvider([
+    { page: createPage([createMessage('message-1', 1)]) },
+  ]))
+  const current = await fixture.store.getLink('workspace-1', 'link-1')
+  if (!current) throw new Error('Expected a seeded link.')
+  const advanced = await fixture.store.updateLink({
+    workspaceId: 'workspace-1',
+    expectedRevision: current.link.revision,
+    sourceAuthorizationRevision: 2,
+    lifecycleState: {
+      ...current.lifecycleState,
+      thread: {
+        authorizationRevision: 2,
+        availability: 'permission-lost',
+        state: 'active',
+        occurredAt: LATER,
+        eventId: 'thread-permission-lost-generation-2',
+      },
+    },
+    link: {
+      ...current.link,
+      sourceAvailability: 'permission-lost',
+      syncStatus: 'paused',
+      revision: 3,
+      updatedAt: LATER,
+    },
+  })
+  if (advanced.kind !== 'updated') throw new Error('Expected authorization generation update.')
+
+  const result = await fixture.worker.process(createJob('operation-old-auth', 'full', 1, 3))
+
+  expect(result).toMatchObject({ kind: 'stopped', reason: 'superseded' })
+  expect(fixture.provider.requestedCursors).toHaveLength(0)
+  expect(await fixture.store.getLink('workspace-1', 'link-1')).toMatchObject({
+    sourceAuthorizationRevision: 2,
+    lifecycleState: {
+      thread: {
+        authorizationRevision: 2,
+        availability: 'permission-lost',
+      },
+    },
+    link: {
+      sourceAvailability: 'permission-lost',
+      syncStatus: 'paused',
+      revision: 3,
+    },
+  })
+})
+
+test('terminal projection respects a restrictive parent fence and redacts source resources', async () => {
+  const fixture = await createFixture(new FakeProvider([
+    { page: createPage([createMessage('message-1', 1)]) },
+  ]))
+  await fixture.store.fenceParentLifecycle({
+    workspaceId: 'workspace-1',
+    provider: 'slack',
+    installationId: 'installation-1',
+    externalWorkspaceId: 'external-workspace-1',
+    authorizationRevision: 1,
+    availability: 'permission-lost',
+    state: 'active',
+    restrictive: true,
+    eventId: 'workspace-restricted',
+    operationId: 'workspace-restricted-operation',
+    occurredAt: LATER,
+  })
+
+  const result = await fixture.worker.process(createJob('operation-parent-restricted', 'full'))
+
+  expect(result.kind).toBe('completed')
+  const record = await fixture.store.getLink('workspace-1', 'link-1')
+  expect(record?.link).toMatchObject({
+    sourceAvailability: 'permission-lost',
+    syncStatus: 'paused',
+    workspace: { provider: 'slack', externalId: 'external-workspace-1' },
+  })
+  expect(record?.link.workspace).not.toHaveProperty('displayName')
+  expect(record?.link.source).not.toHaveProperty('sourcePermalink')
+  expect(fixture.reconciliation.redactions).toHaveLength(1)
+  expect(fixture.reconciliation.redactions[0]?.expectedParentLifecycleFences).toMatchObject({
+    workspace: { eventId: 'workspace-restricted' },
+    conversation: undefined,
+  })
+})
+
+test('restrictive resource cleanup must succeed before the terminal link projection commits', async () => {
+  const fixture = await createFixture(new FakeProvider([
+    { page: createPage([createMessage('message-1', 1)]) },
+  ]))
+  await fixture.store.fenceParentLifecycle({
+    workspaceId: 'workspace-1',
+    provider: 'slack',
+    installationId: 'installation-1',
+    externalWorkspaceId: 'external-workspace-1',
+    authorizationRevision: 1,
+    availability: 'permission-lost',
+    state: 'active',
+    restrictive: true,
+    eventId: 'workspace-restricted',
+    operationId: 'workspace-restricted-operation',
+    occurredAt: LATER,
+  })
+  fixture.reconciliation.rejectNextRedaction = true
+
+  const result = await fixture.worker.process(createJob('operation-redaction-fenced', 'full'))
+
+  expect(result).toMatchObject({ kind: 'deferred', reason: 'concurrent' })
+  expect((await fixture.store.getLink('workspace-1', 'link-1'))?.link).toMatchObject({
+    revision: 2,
+    syncStatus: 'pending',
+  })
+  expect(fixture.reconciliation.redactions).toHaveLength(0)
+})
+
+test('terminal projection retries when the exact parent fence changes after redaction', async () => {
+  const fixture = await createFixture(new FakeProvider([
+    { page: createPage([createMessage('message-1', 1)]) },
+  ]))
+  await fixture.store.fenceParentLifecycle({
+    workspaceId: 'workspace-1',
+    provider: 'slack',
+    installationId: 'installation-1',
+    externalWorkspaceId: 'external-workspace-1',
+    authorizationRevision: 1,
+    availability: 'permission-lost',
+    state: 'active',
+    restrictive: true,
+    eventId: 'workspace-restricted-1',
+    operationId: 'workspace-restricted-operation-1',
+    occurredAt: LATER,
+  })
+  fixture.reconciliation.redactionHook = async () => {
+    await fixture.store.fenceParentLifecycle({
+      workspaceId: 'workspace-1',
+      provider: 'slack',
+      installationId: 'installation-1',
+      externalWorkspaceId: 'external-workspace-1',
+      authorizationRevision: 1,
+      availability: 'permission-lost',
+      state: 'deleted',
+      restrictive: true,
+      eventId: 'workspace-restricted-2',
+      operationId: 'workspace-restricted-operation-2',
+      occurredAt: AFTER,
+    })
+  }
+
+  const result = await fixture.worker.process(createJob('operation-parent-race', 'full'))
+
+  expect(result).toMatchObject({ kind: 'deferred', reason: 'concurrent' })
+  expect((await fixture.store.getLink('workspace-1', 'link-1'))?.link).toMatchObject({
+    revision: 2,
+    syncStatus: 'pending',
+  })
+  expect(fixture.reconciliation.redactions).toHaveLength(0)
 })
 
 test('a superseded job cannot read the provider or overwrite the newer link revision', async () => {
@@ -423,6 +792,145 @@ class FakeSnapshotProcessor implements ExternalChatResyncSnapshotProcessorPort {
   }
 }
 
+/** Durable operation-owned full-resync manifest retained across worker retries. */
+type FakeFullResyncManifest = {
+  /** Exact operation boundary that created the manifest. */
+  boundary: ExternalChatFullResyncBoundary
+  /** Provider message identities seen in the authoritative traversal. */
+  seen: Set<string>
+  /** Whether unseen bindings were reconciled terminally. */
+  reconciled: boolean
+}
+
+/** Deterministic durable reconciliation boundary for worker acceptance tests. */
+class FakeResyncReconciliation implements ExternalChatResyncReconciliationPort {
+  /** Durable link and parent lifecycle state used to validate destructive cleanup authority. */
+  private readonly store: InMemoryExternalChatStore
+
+  /** Durable manifests keyed by accepted operation ID. */
+  private readonly manifests = new Map<string, FakeFullResyncManifest>()
+
+  /** Existing imported binding identities reconciled by a full traversal. */
+  private readonly bindings = new Set(['message-stale', 'message-1', 'message-2', 'message-3'])
+
+  /** Full operations that completed unseen-binding reconciliation. */
+  readonly reconciledOperations: string[] = []
+
+  /** Restrictive terminal resource-redaction requests. */
+  readonly redactions: ExternalChatResyncRedactionInput[] = []
+
+  /** Whether the next redaction should lose its exact operation fence. */
+  rejectNextRedaction = false
+
+  /** Optional one-shot concurrent mutation invoked between redaction and link projection. */
+  redactionHook?: () => Promise<void>
+
+  /**
+   * Creates an exact-snapshot reconciliation fixture.
+   *
+   * @param store - Durable state re-read at the destructive redaction boundary.
+   */
+  constructor(store: InMemoryExternalChatStore) {
+    this.store = store
+  }
+
+  /** Creates or replays one exact operation-owned manifest. */
+  async beginFullResync(input: ExternalChatFullResyncBoundary): Promise<boolean> {
+    const current = this.manifests.get(input.operationId)
+    if (current) return sameFullResyncBoundary(current.boundary, input)
+    this.manifests.set(input.operationId, { boundary: input, seen: new Set(), reconciled: false })
+    return true
+  }
+
+  /** Records one provider message in its exact operation-owned manifest. */
+  async recordFullResyncMessageSeen(
+    input: ExternalChatFullResyncSeenMessageInput,
+  ): Promise<boolean> {
+    const manifest = this.manifests.get(input.operationId)
+    if (!manifest || !sameFullResyncBoundary(manifest.boundary, input)) return false
+    manifest.seen.add(input.externalMessageId)
+    this.bindings.add(input.externalMessageId)
+    return true
+  }
+
+  /** Removes every pre-existing binding absent from the authoritative seen manifest. */
+  async reconcileFullResync(input: ExternalChatFullResyncBoundary): Promise<boolean> {
+    const manifest = this.manifests.get(input.operationId)
+    if (!manifest || !sameFullResyncBoundary(manifest.boundary, input)) return false
+    if (!manifest.reconciled) {
+      for (const bindingId of this.bindings) {
+        if (!manifest.seen.has(bindingId)) this.bindings.delete(bindingId)
+      }
+      manifest.reconciled = true
+      this.reconciledOperations.push(input.operationId)
+    }
+    return true
+  }
+
+  /** Records restrictive cleanup only while the exact accepted operation still owns the link. */
+  async redactRestrictiveResyncResources(
+    input: ExternalChatResyncRedactionInput,
+  ): Promise<boolean> {
+    if (this.redactionHook) {
+      const hook = this.redactionHook
+      this.redactionHook = undefined
+      await hook()
+    }
+    if (this.rejectNextRedaction) {
+      this.rejectNextRedaction = false
+      return false
+    }
+    const current = await this.store.getLink(input.workspaceId, input.linkId)
+    if (
+      !current ||
+      !current.active ||
+      current.link.revision !== input.ownerLinkRevision ||
+      current.link.teamId !== input.teamId ||
+      current.link.workItemId !== input.workItemId ||
+      current.sourceAuthorizationRevision > input.authorizationRevision
+    ) return false
+    const parentFences = await this.store.getParentLifecycleFences(
+      input.workspaceId,
+      input.linkId,
+    )
+    if (
+      parentFences === undefined ||
+      createExternalChatFingerprint(parentFences) !==
+        createExternalChatFingerprint(input.expectedParentLifecycleFences)
+    ) return false
+    this.redactions.push(input)
+    return true
+  }
+
+  /** Returns seen message IDs for one operation in deterministic provider order. */
+  seenMessageIds(operationId: string): string[] {
+    return [...(this.manifests.get(operationId)?.seen ?? [])]
+  }
+
+  /** Returns remaining imported binding identities after reconciliation. */
+  remainingBindingIds(): string[] {
+    return [...this.bindings].sort((left, right) => left.localeCompare(right))
+  }
+}
+
+/**
+ * Compares every immutable field of two operation-owned full-resync boundaries.
+ *
+ * @param left - Existing durable manifest boundary.
+ * @param right - Candidate replay boundary.
+ * @returns Whether both inputs name the exact same accepted operation generation.
+ */
+function sameFullResyncBoundary(
+  left: ExternalChatFullResyncBoundary,
+  right: ExternalChatFullResyncBoundary,
+): boolean {
+  return left.workspaceId === right.workspaceId &&
+    left.linkId === right.linkId &&
+    left.operationId === right.operationId &&
+    left.ownerLinkRevision === right.ownerLinkRevision &&
+    left.authorizationRevision === right.authorizationRevision
+}
+
 /** Fixed deterministic worker clock. */
 class FakeClock implements ExternalChatSyncClockPort {
   /** Returns the fixture timestamp. */
@@ -462,18 +970,20 @@ async function createFixture(provider: FakeProvider) {
   if (accepted.kind !== 'updated') throw new Error('Expected the pending link to be accepted.')
   const access = new FakeAccess()
   const processor = new FakeSnapshotProcessor()
+  const reconciliation = new FakeResyncReconciliation(store)
   const worker = new ExternalChatResyncWorker({
     store,
     adapters: new ChatProviderAdapterRegistry([provider]),
     access,
     processor,
+    reconciliation,
     clock: new FakeClock(),
   }, {
     pageSize: 2,
     maximumPagesPerRun: 5,
     maximumMessagesPerRun: 10,
   })
-  return { store, provider, access, processor, worker }
+  return { store, provider, access, processor, reconciliation, worker }
 }
 
 /**
@@ -483,12 +993,18 @@ async function createFixture(provider: FakeProvider) {
  * @param mode - Resume or full traversal mode.
  * @returns Accepted durable job.
  */
-function createJob(operationId: string, mode: 'resume' | 'full'): ExternalChatResyncJob {
+function createJob(
+  operationId: string,
+  mode: 'resume' | 'full',
+  authorizationRevision = 1,
+  linkRevision = 2,
+): ExternalChatResyncJob {
   return {
     workspaceId: 'workspace-1',
     linkId: 'link-1',
     mode,
-    linkRevision: 2,
+    linkRevision,
+    authorizationRevision,
     operationId,
     correlationId: `correlation-${operationId}`,
     acceptedAt: NOW,

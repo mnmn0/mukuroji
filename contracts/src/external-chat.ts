@@ -544,6 +544,10 @@ export type ExternalChatSyncCursor = {
    */
   ownerLinkRevision: number
   /**
+   * Provider authorization generation accepted for the owning resynchronization operation.
+   */
+  authorizationRevision: number
+  /**
    * Last permission-filtered source availability observed on a committed provider page.
    */
   observedSourceAvailability?: ExternalChatSourceAvailability
@@ -551,6 +555,10 @@ export type ExternalChatSyncCursor = {
    * Last provider thread lifecycle state observed on a committed provider page.
    */
   observedSourceState?: ExternalChatSourceState
+  /**
+   * Provider timestamp for the latest authoritative thread snapshot in this traversal.
+   */
+  observedSourceAt?: string
   /**
    * Honest link synchronization status to project after a terminal operation checkpoint.
    */
@@ -796,14 +804,6 @@ type ExternalChatInboundEventBase = {
    */
   externalWorkspaceId: string
   /**
-   * External conversation ID in the event scope.
-   */
-  conversationExternalId: string
-  /**
-   * External thread ID in the event scope.
-   */
-  threadExternalId: string
-  /**
    * Provider occurrence timestamp in ISO 8601 format.
    */
   occurredAt: string
@@ -818,9 +818,49 @@ type ExternalChatInboundEventBase = {
 }
 
 /**
+ * Fields shared by normalized events that are contained by one external thread.
+ */
+type ExternalChatThreadScopedInboundEventBase = ExternalChatInboundEventBase & {
+  /**
+   * External conversation ID that contains the thread.
+   */
+  conversationExternalId: string
+  /**
+   * External thread ID that contains the event resource.
+   */
+  threadExternalId: string
+}
+
+/**
+ * Fields shared by every normalized source lifecycle transition.
+ */
+type ExternalChatSourceLifecycleEventBase = ExternalChatInboundEventBase & {
+  /**
+   * Event discriminator.
+   */
+  type: 'source.lifecycle-changed'
+  /**
+   * Current ability to access the affected source.
+   */
+  availability: ExternalChatSourceAvailability
+  /**
+   * Last known lifecycle state of the affected source.
+   */
+  state: ExternalChatSourceState
+  /**
+   * Stable secret-free reason code supplied by the adapter or runtime.
+   */
+  reasonCode: string
+  /**
+   * Stable source permalink retained when policy allows it.
+   */
+  sourcePermalink?: string
+}
+
+/**
  * Normalized event emitted when an external chat message is created.
  */
-export type ExternalChatMessageCreatedEvent = ExternalChatInboundEventBase & {
+export type ExternalChatMessageCreatedEvent = ExternalChatThreadScopedInboundEventBase & {
   /**
    * Event discriminator.
    */
@@ -834,7 +874,7 @@ export type ExternalChatMessageCreatedEvent = ExternalChatInboundEventBase & {
 /**
  * Normalized event emitted when an external chat message is edited.
  */
-export type ExternalChatMessageEditedEvent = ExternalChatInboundEventBase & {
+export type ExternalChatMessageEditedEvent = ExternalChatThreadScopedInboundEventBase & {
   /**
    * Event discriminator.
    */
@@ -848,7 +888,7 @@ export type ExternalChatMessageEditedEvent = ExternalChatInboundEventBase & {
 /**
  * Normalized event emitted when an external chat message is deleted.
  */
-export type ExternalChatMessageDeletedEvent = ExternalChatInboundEventBase & {
+export type ExternalChatMessageDeletedEvent = ExternalChatThreadScopedInboundEventBase & {
   /**
    * Event discriminator.
    */
@@ -874,7 +914,7 @@ export type ExternalChatMessageDeletedEvent = ExternalChatInboundEventBase & {
 /**
  * Normalized event emitted when a provider thread is completed.
  */
-export type ExternalChatThreadCompletedEvent = ExternalChatInboundEventBase & {
+export type ExternalChatThreadCompletedEvent = ExternalChatThreadScopedInboundEventBase & {
   /**
    * Event discriminator.
    */
@@ -896,7 +936,7 @@ export type ExternalChatThreadCompletedEvent = ExternalChatInboundEventBase & {
 /**
  * Normalized event emitted when a completed provider thread is reopened.
  */
-export type ExternalChatThreadReopenedEvent = ExternalChatInboundEventBase & {
+export type ExternalChatThreadReopenedEvent = ExternalChatThreadScopedInboundEventBase & {
   /**
    * Event discriminator.
    */
@@ -918,36 +958,73 @@ export type ExternalChatThreadReopenedEvent = ExternalChatInboundEventBase & {
 /**
  * Normalized event for permission, retention, deletion, or installation lifecycle changes.
  */
-export type ExternalChatSourceLifecycleEvent = ExternalChatInboundEventBase & {
-  /**
-   * Event discriminator.
-   */
-  type: 'source.lifecycle-changed'
-  /**
-   * Kind of external resource whose lifecycle changed.
-   */
-  resourceType: 'workspace' | 'conversation' | 'thread' | 'message' | 'attachment'
-  /**
-   * Provider-scoped ID of the affected external resource.
-   */
-  resourceExternalId: string
-  /**
-   * Current ability to access the affected source.
-   */
-  availability: ExternalChatSourceAvailability
-  /**
-   * Last known lifecycle state of the affected source.
-   */
-  state: ExternalChatSourceState
-  /**
-   * Stable secret-free reason code supplied by the adapter or runtime.
-   */
-  reasonCode: string
-  /**
-   * Stable source permalink retained when policy allows it.
-   */
-  sourcePermalink?: string
-}
+export type ExternalChatSourceLifecycleEvent =
+  | ExternalChatSourceLifecycleEventBase & {
+    /**
+     * Workspace-scoped lifecycle transition with no fabricated child identifiers.
+     */
+    resourceType: 'workspace'
+  }
+  | ExternalChatSourceLifecycleEventBase & {
+    /**
+     * Conversation-scoped lifecycle transition.
+     */
+    resourceType: 'conversation'
+    /**
+     * External conversation ID affected by the transition.
+     */
+    conversationExternalId: string
+  }
+  | ExternalChatSourceLifecycleEventBase & {
+    /**
+     * Thread-scoped lifecycle transition.
+     */
+    resourceType: 'thread'
+    /**
+     * External conversation ID that contains the thread.
+     */
+    conversationExternalId: string
+    /**
+     * External thread ID affected by the transition.
+     */
+    threadExternalId: string
+  }
+  | ExternalChatSourceLifecycleEventBase & {
+    /**
+     * Message-scoped lifecycle transition.
+     */
+    resourceType: 'message'
+    /**
+     * External conversation ID that contains the message.
+     */
+    conversationExternalId: string
+    /**
+     * External thread ID that contains the message.
+     */
+    threadExternalId: string
+    /**
+     * Provider-scoped message ID affected by the transition.
+     */
+    resourceExternalId: string
+  }
+  | ExternalChatSourceLifecycleEventBase & {
+    /**
+     * Attachment-scoped lifecycle transition.
+     */
+    resourceType: 'attachment'
+    /**
+     * External conversation ID that contains the attachment.
+     */
+    conversationExternalId: string
+    /**
+     * External thread ID that contains the attachment.
+     */
+    threadExternalId: string
+    /**
+     * Provider-scoped attachment ID affected by the transition.
+     */
+    resourceExternalId: string
+  }
 
 /**
  * Provider-neutral inbound chat event accepted by the synchronization runtime.
@@ -1159,7 +1236,8 @@ export type MergeExternalChatWorkItemLinksInput = {
    */
   expectedDuplicateWorkItemRevision: number
   /**
-   * Revision-fenced links selected for the atomic move.
+   * Complete active link set owned by the duplicate, with every observed link revision.
+   * The server rejects omissions and concurrent membership changes before tombstoning the duplicate.
    */
   links: ExternalChatLinkMergeCandidate[]
 }

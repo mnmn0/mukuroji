@@ -234,6 +234,8 @@ function createParentLifecycleFence(): ExternalChatParentLifecycleFence {
     installationId: 'installation-1',
     externalWorkspaceId: 'workspace-external-1',
     authorizationRevision: 1,
+    availability: 'permission-lost',
+    state: 'retained-metadata',
     restrictive: true,
     eventId: 'parent-event-1',
     operationId: 'parent-operation-1',
@@ -305,6 +307,10 @@ function createDeferredOutboundEvent(
     operationId,
     attempt: 1,
     retryAt: LEASE,
+    ownerTeamId: 'team-1',
+    ownerWorkItemId: 'work-item-1',
+    ownerLinkRevision: 1,
+    expectedParentLifecycleFences: { workspace: undefined, conversation: undefined },
     createdAt: NOW,
     updatedAt: NOW,
   }
@@ -417,6 +423,53 @@ function sourceDigest(): string {
 /** Creates the SHA-256 component used by opaque DynamoDB record and lookup keys. */
 function keyDigest(value: string): string {
   return createHash('sha256').update(value).digest('hex')
+}
+
+/** Creates one persisted active-link row for merge scan fixtures. */
+function createActiveLinkRowFixture(
+  link: ExternalChatWorkItemLink,
+  storedValue?: unknown,
+): UnknownRecord {
+  return {
+    workspaceId: 'workspace-1',
+    recordKey: `CHAT_LINK#${keyDigest(link.id)}`,
+    entryType: 'external-chat-link',
+    value: storedValue ?? {
+      workspaceId: 'workspace-1',
+      link,
+      sourceDigest: createExternalChatSourceDigest({
+        provider: link.provider,
+        externalWorkspaceId: link.source.externalWorkspaceId,
+        conversationExternalId: link.source.conversationExternalId,
+        threadExternalId: link.source.threadExternalId,
+      }),
+      sourceAuthorizationRevision: 1,
+      active: true,
+    },
+    storageRevision: link.revision,
+  }
+}
+
+/** Creates one persisted Work Item owner-manifest row. */
+function createWorkItemLinkManifestRow(
+  teamId: string,
+  workItemId: string,
+  activeLinkCount: number,
+  generation: number,
+): UnknownRecord {
+  return {
+    workspaceId: 'workspace-1',
+    recordKey: `CHAT_WORK_ITEM_LINKS#${keyDigest(teamId)}#${keyDigest(workItemId)}`,
+    entryType: 'external-chat-work-item-link-manifest',
+    value: {
+      workspaceId: 'workspace-1',
+      teamId,
+      workItemId,
+      activeLinkCount,
+      generation,
+    },
+    storageRevision: generation,
+  }
 }
 
 test('strongly queries eligible parent links and excludes inactive or newer-generation rows', async () => {
@@ -611,12 +664,14 @@ test('checkpoints parent fan-out receipts through operation and attempt fences',
 })
 
 test('purges deferred link payloads while retaining the active coordinator event', async () => {
+  const owner = createLink()
   const retained = createInboundEvent('parent-event-retained')
   const purged = createInboundEvent('content-event-purged')
   const deferredValue = (event: ExternalChatInboundEvent) => ({
     workspaceId: 'workspace-1',
     linkId: 'link-1',
     event,
+    expectedParentLifecycleFences: { workspace: undefined, conversation: undefined },
     fingerprint: createExternalChatFingerprint(event),
     reason: 'source-unavailable',
     attempt: 1,
@@ -631,14 +686,33 @@ test('purges deferred link payloads while retaining the active coordinator event
         return {
           Items: [retained, purged].map((event) => ({
             workspaceId: 'workspace-1',
-            recordKey: `CHAT_DEFERRED#${keyDigest(event.eventId)}`,
+            recordKey:
+              `CHAT_DEFERRED_FIFO#${keyDigest('link-1')}#${event.occurredAt}#${keyDigest(event.eventId)}`,
             entryType: 'external-chat-deferred-event',
             value: deferredValue(event),
             storageRevision: 1,
           })),
         }
       }
-      if (inspected.name === 'DeleteCommand') return {}
+      if (inspected.name === 'GetCommand') {
+        const key = readRecord(inspected.input.Key, 'deferred purge key')
+        const recordKey = key.recordKey
+        if (typeof recordKey !== 'string') throw new TypeError('Expected deferred purge key.')
+        if (recordKey === `CHAT_LINK#${keyDigest(owner.id)}`) {
+          return { Item: createActiveLinkRowFixture(owner) }
+        }
+        if (recordKey.startsWith('CHAT_PARENT_STATE#')) return {}
+        return {
+          Item: {
+            workspaceId: 'workspace-1',
+            recordKey,
+            entryType: 'external-chat-deferred-event',
+            value: deferredValue(purged),
+            storageRevision: 1,
+          },
+        }
+      }
+      if (inspected.name === 'TransactWriteCommand') return {}
       throw new TypeError(`Unexpected command: ${inspected.name}`)
     },
   })
@@ -647,13 +721,40 @@ test('purges deferred link payloads while retaining the active coordinator event
       'workspace-1',
       'link-1',
       retained.eventId,
+      owner.revision,
+      { workspace: undefined, conversation: undefined },
     )).resolves.toBe(1)
-    const deletes = harness.calls.filter((call) => call.name === 'DeleteCommand')
-    expect(deletes).toHaveLength(1)
-    expect(deletes[0]?.input.Key).toEqual({
-      workspaceId: 'workspace-1',
-      recordKey: `CHAT_DEFERRED#${keyDigest(purged.eventId)}`,
-    })
+    const transaction = harness.calls.find((call) => call.name === 'TransactWriteCommand')
+    const items = transaction?.input.TransactItems
+    if (!Array.isArray(items)) throw new TypeError('Expected deferred purge transaction items.')
+    expect(items).toHaveLength(5)
+    expect(items.slice(0, 2).map((item) => readRecord(
+      readRecord(item, 'deferred purge action').Delete,
+      'deferred purge delete',
+    ).Key)).toEqual([
+      {
+        workspaceId: 'workspace-1',
+        recordKey:
+          `CHAT_DEFERRED#${purged.provider}#${keyDigest(purged.installationId)}#${keyDigest(purged.eventId)}`,
+      },
+      {
+        workspaceId: 'workspace-1',
+        recordKey:
+          `CHAT_DEFERRED_FIFO#${keyDigest('link-1')}#${purged.occurredAt}#${keyDigest(purged.eventId)}`,
+      },
+    ])
+    const ownerCondition = readRecord(
+      readRecord(items[2], 'deferred purge owner action').ConditionCheck,
+      'deferred purge owner condition',
+    )
+    expect(ownerCondition.ExpressionAttributeValues).toMatchObject({ ':linkRevision': 1 })
+    for (const parentAction of items.slice(3)) {
+      const condition = readRecord(
+        readRecord(parentAction, 'deferred purge parent action').ConditionCheck,
+        'deferred purge parent condition',
+      )
+      expect(condition.ConditionExpression).toBe('attribute_not_exists(#workspaceId)')
+    }
   } finally {
     harness.restore()
   }
@@ -681,12 +782,14 @@ test('creates a link, source claim, and idempotency receipt in one conditional t
     })
 
     expect(result.kind).toBe('created')
-    expect(harness.calls).toHaveLength(1)
-    expect(harness.calls[0]?.name).toBe('TransactWriteCommand')
-    const transactItems = harness.calls[0]?.input.TransactItems
+    expect(harness.calls).toHaveLength(2)
+    expect(harness.calls[0]?.name).toBe('GetCommand')
+    expect(harness.calls[0]?.input.ConsistentRead).toBe(true)
+    expect(harness.calls[1]?.name).toBe('TransactWriteCommand')
+    const transactItems = harness.calls[1]?.input.TransactItems
     expect(Array.isArray(transactItems)).toBe(true)
     if (!Array.isArray(transactItems)) throw new TypeError('Expected transaction items.')
-    expect(transactItems).toHaveLength(5)
+    expect(transactItems).toHaveLength(6)
     const entryTypes = transactItems.slice(0, 3).map((item) => {
       const put = readRecord(readRecord(item, 'transaction item').Put, 'transaction Put')
       const storedItem = readRecord(put.Item, 'transaction Put item')
@@ -704,7 +807,7 @@ test('creates a link, source claim, and idempotency receipt in one conditional t
       `CHAT_PARENT_STATE#slack#${keyDigest('installation-1')}#${keyDigest('workspace-external-1')}#WORKSPACE`,
       `CHAT_PARENT_STATE#slack#${keyDigest('installation-1')}#${keyDigest('workspace-external-1')}#CONVERSATION#${keyDigest('conversation-external-1')}`,
     ]
-    const conditionKeys = transactItems.slice(3).map((item) => {
+    const conditionKeys = transactItems.slice(3, 5).map((item) => {
       const condition = readRecord(
         readRecord(item, 'parent fence transaction item').ConditionCheck,
         'parent fence condition',
@@ -729,6 +832,18 @@ test('creates a link, source claim, and idempotency receipt in one conditional t
       return key.recordKey
     })
     expect(conditionKeys).toEqual(expectedFenceKeys)
+    const manifestPut = readRecord(
+      readRecord(transactItems[5], 'owner manifest transaction item').Put,
+      'owner manifest Put',
+    )
+    const manifestItem = readRecord(manifestPut.Item, 'owner manifest item')
+    expect(manifestItem.entryType).toBe('external-chat-work-item-link-manifest')
+    expect(manifestItem.value).toMatchObject({
+      teamId: 'team-1',
+      workItemId: 'work-item-1',
+      activeLinkCount: 1,
+      generation: 1,
+    })
   } finally {
     harness.restore()
   }
@@ -757,6 +872,8 @@ test('classifies a conditional link write as parent-restricted after a lifecycle
             installationId: 'installation-1',
             externalWorkspaceId: 'workspace-external-1',
             authorizationRevision: 1,
+            availability: 'permission-lost',
+            state: 'retained-metadata',
             restrictive: true,
             eventId: 'parent-event-after-resolution',
             operationId: 'parent-operation-after-resolution',
@@ -784,13 +901,55 @@ test('classifies a conditional link write as parent-restricted after a lifecycle
 
     expect(result).toEqual({ kind: 'parent-restricted' })
     expect(harness.calls.map((call) => call.name)).toEqual([
+      'GetCommand',
       'TransactWriteCommand',
       'GetCommand',
       'GetCommand',
       'GetCommand',
       'GetCommand',
     ])
-    for (const call of harness.calls.slice(1)) expect(call.input.ConsistentRead).toBe(true)
+    for (const call of harness.calls.filter((call) => call.name === 'GetCommand')) {
+      expect(call.input.ConsistentRead).toBe(true)
+    }
+  } finally {
+    harness.restore()
+  }
+})
+
+test('does not misclassify a transaction cancellation without explicit reasons', async () => {
+  const harness = createHarness({
+    async respond(command) {
+      const inspected = inspectCommand(command)
+      if (inspected.name === 'GetCommand') return {}
+      if (inspected.name === 'TransactWriteCommand') {
+        const error = new Error('transaction canceled without modeled reasons')
+        error.name = 'TransactionCanceledException'
+        throw error
+      }
+      throw new TypeError(`Unexpected command: ${inspected.name}`)
+    },
+  })
+  try {
+    await expect(harness.store.createLink({
+      workspaceId: 'workspace-1',
+      link: createLink(),
+      authorizationRevision: 1,
+      source: {
+        provider: 'slack',
+        externalWorkspaceId: 'workspace-external-1',
+        conversationExternalId: 'conversation-external-1',
+        threadExternalId: 'thread-external-1',
+      },
+      idempotencyKeyHash: DIGEST,
+      requestFingerprint: 'b'.repeat(64),
+    })).rejects.toMatchObject({
+      code: 'ExternalChatPersistenceFailed',
+      retryable: true,
+    })
+    expect(harness.calls.map((call) => call.name)).toEqual([
+      'GetCommand',
+      'TransactWriteCommand',
+    ])
   } finally {
     harness.restore()
   }
@@ -799,11 +958,15 @@ test('classifies a conditional link write as parent-restricted after a lifecycle
 test('classifies a conditional link write as an idempotent replay through strong reads', async () => {
   const link = createLink()
   const harness = createHarness({
-    async respond(command, callIndex) {
+    async respond(command) {
       const inspected = inspectCommand(command)
-      if (callIndex === 0) throw transactionConditionalFailure()
+      if (inspected.name === 'TransactWriteCommand') throw transactionConditionalFailure()
+      if (inspected.name !== 'GetCommand') {
+        throw new TypeError(`Unexpected command: ${inspected.name}`)
+      }
       const key = readRecord(inspected.input.Key, 'Get key')
-      if (callIndex === 1) {
+      if (String(key.recordKey).startsWith('CHAT_WORK_ITEM_LINKS#')) return {}
+      if (String(key.recordKey).startsWith('CHAT_LINK_RECEIPT#')) {
         return {
           Item: {
             workspaceId: key.workspaceId,
@@ -817,21 +980,7 @@ test('classifies a conditional link write as an idempotent replay through strong
           },
         }
       }
-      return {
-        Item: {
-          workspaceId: key.workspaceId,
-          recordKey: key.recordKey,
-          entryType: 'external-chat-link',
-          value: {
-            workspaceId: 'workspace-1',
-            link,
-            sourceDigest: sourceDigest(),
-            sourceAuthorizationRevision: 1,
-            active: true,
-          },
-          storageRevision: 1,
-        },
-      }
+      return { Item: createActiveLinkRowFixture(link) }
     },
   })
   try {
@@ -850,11 +999,13 @@ test('classifies a conditional link write as an idempotent replay through strong
     })
 
     expect(result).toMatchObject({ kind: 'replayed', record: { link } })
-    expect(harness.calls.slice(1).map((call) => call.name)).toEqual([
+    expect(harness.calls.map((call) => call.name)).toEqual([
+      'GetCommand',
+      'TransactWriteCommand',
       'GetCommand',
       'GetCommand',
     ])
-    for (const call of harness.calls.slice(1)) {
+    for (const call of harness.calls.filter((call) => call.name === 'GetCommand')) {
       expect(call.input.ConsistentRead).toBe(true)
     }
   } finally {
@@ -1289,6 +1440,191 @@ test('resumes a completed retryable outbound failure for its durable queue worke
   }
 })
 
+test('persists monotonic installation retry fences across renew, release, and reacquire', async () => {
+  let storedRow: UnknownRecord | undefined
+  const harness = createHarness({
+    async respond(command) {
+      const inspected = inspectCommand(command)
+      if (inspected.name === 'GetCommand') {
+        return storedRow === undefined ? {} : { Item: structuredClone(storedRow) }
+      }
+      if (inspected.name === 'PutCommand') {
+        storedRow = readRecord(inspected.input.Item, 'outbound retry permit row')
+        return {}
+      }
+      throw new TypeError(`Unexpected command: ${inspected.name}`)
+    },
+  })
+  try {
+    const acquired = await harness.store.acquireOutboundRetryPermit({
+      workspaceId: 'workspace-1',
+      provider: 'slack',
+      installationId: 'installation-1',
+      ownerId: 'worker-attempt-1',
+      acquiredAt: NOW,
+      leaseExpiresAt: LEASE,
+    })
+    if (!acquired) throw new Error('Expected the first outbound retry permit.')
+    expect(acquired.fenceToken).toBe(1)
+    await expect(harness.store.acquireOutboundRetryPermit({
+      workspaceId: 'workspace-1',
+      provider: 'slack',
+      installationId: 'installation-1',
+      ownerId: 'worker-attempt-busy',
+      acquiredAt: '2026-08-06T00:01:00.000Z',
+      leaseExpiresAt: '2026-08-06T00:06:00.000Z',
+    })).resolves.toBeUndefined()
+    const renewed = await harness.store.renewOutboundRetryPermit({
+      permit: acquired,
+      renewedAt: '2026-08-06T00:01:00.000Z',
+      leaseExpiresAt: '2026-08-06T00:06:00.000Z',
+    })
+    if (!renewed) throw new Error('Expected the outbound retry permit renewal.')
+    await expect(harness.store.validateOutboundRetryPermit({
+      permit: renewed,
+      checkedAt: '2026-08-06T00:02:00.000Z',
+    })).resolves.toBe(true)
+    await expect(harness.store.releaseOutboundRetryPermit({
+      permit: renewed,
+      releasedAt: '2026-08-06T00:02:00.000Z',
+    })).resolves.toBe(true)
+    await expect(harness.store.validateOutboundRetryPermit({
+      permit: renewed,
+      checkedAt: '2026-08-06T00:02:00.000Z',
+    })).resolves.toBe(false)
+    await expect(harness.store.acquireOutboundRetryPermit({
+      workspaceId: 'workspace-1',
+      provider: 'slack',
+      installationId: 'installation-1',
+      ownerId: 'worker-attempt-2',
+      acquiredAt: '2026-08-06T00:02:00.000Z',
+      leaseExpiresAt: '2026-08-06T00:07:00.000Z',
+    })).resolves.toMatchObject({ fenceToken: 2, ownerId: 'worker-attempt-2' })
+  } finally {
+    harness.restore()
+  }
+})
+
+test('prepares then atomically terminalizes an exhausted receipt and both queue rows', async () => {
+  const deferred = createDeferredOutboundEvent()
+  const identityKey =
+    `CHAT_DEFERRED_OUTBOUND#${keyDigest(deferred.linkId)}#${keyDigest(deferred.operationId)}`
+  const fifoKey =
+    `CHAT_DEFERRED_OUTBOUND_FIFO#${keyDigest(deferred.linkId)}#${deferred.event.occurredAt}#${keyDigest(deferred.operationId)}`
+  const receiptKey =
+    `CHAT_OUTBOUND#${keyDigest(deferred.linkId)}#${keyDigest(deferred.operationId)}`
+  let receipt: unknown = {
+    workspaceId: deferred.workspaceId,
+    linkId: deferred.linkId,
+    operationId: deferred.operationId,
+    fingerprint: deferred.fingerprint,
+    state: 'completed',
+    attempt: deferred.attempt,
+    leaseExpiresAt: LEASE,
+    outcome: {
+      kind: 'deferred',
+      operationId: deferred.operationId,
+      reason: 'rate-limited',
+      retryAt: deferred.retryAt,
+      occurredAt: NOW,
+    },
+    createdAt: NOW,
+    updatedAt: NOW,
+  }
+  const harness = createHarness({
+    async respond(command) {
+      const inspected = inspectCommand(command)
+      if (inspected.name === 'GetCommand') {
+        const key = readRecord(inspected.input.Key, 'outbound DLQ row key')
+        if (key.recordKey === receiptKey) {
+          return {
+            Item: {
+              workspaceId: deferred.workspaceId,
+              recordKey: receiptKey,
+              entryType: 'external-chat-outbound-receipt',
+              value: structuredClone(receipt),
+              storageRevision: 1,
+            },
+          }
+        }
+        if (key.recordKey === identityKey || key.recordKey === fifoKey) {
+          return {
+            Item: {
+              workspaceId: deferred.workspaceId,
+              recordKey: key.recordKey,
+              entryType: 'external-chat-deferred-outbound-event',
+              value: deferred,
+              storageRevision: 1,
+            },
+          }
+        }
+      }
+      if (inspected.name === 'TransactWriteCommand') {
+        const items = inspected.input.TransactItems
+        if (!Array.isArray(items)) throw new TypeError('Expected outbound DLQ transaction items.')
+        for (const item of items) {
+          const putValue = readRecord(item, 'outbound DLQ transaction item').Put
+          if (putValue === undefined) continue
+          const put = readRecord(putValue, 'outbound DLQ transaction Put')
+          const row = readRecord(put.Item, 'outbound DLQ transaction row')
+          if (row.entryType === 'external-chat-outbound-receipt') {
+            receipt = structuredClone(row.value)
+          }
+        }
+        return {}
+      }
+      throw new TypeError(`Unexpected command: ${inspected.name}`)
+    },
+  })
+  try {
+    await expect(harness.store.prepareOutboundDeadLetterOperation({
+      workspaceId: deferred.workspaceId,
+      linkId: deferred.linkId,
+      operationId: deferred.operationId,
+      expectedAttempt: deferred.attempt,
+      reason: 'max-attempts',
+      deadLetteredAt: '2026-08-06T00:10:00.000Z',
+    })).resolves.toMatchObject({
+      kind: 'prepared',
+      deferred: { attempt: deferred.attempt },
+      reason: 'max-attempts',
+    })
+    await expect(harness.store.deadLetterOutboundOperation({
+      workspaceId: deferred.workspaceId,
+      linkId: deferred.linkId,
+      operationId: deferred.operationId,
+      expectedAttempt: deferred.attempt,
+      reason: 'max-attempts',
+      deadLetteredAt: '2026-08-06T00:10:00.000Z',
+    })).resolves.toBe(true)
+    const transactions = harness.calls.filter((call) => call.name === 'TransactWriteCommand')
+    const transaction = transactions[transactions.length - 1]
+    const items = transaction?.input.TransactItems
+    if (!Array.isArray(items)) throw new TypeError('Expected outbound DLQ transaction items.')
+    expect(items).toHaveLength(3)
+    const put = readRecord(readRecord(items[0], 'outbound DLQ receipt action').Put, 'receipt put')
+    const terminalRow = readRecord(put.Item, 'terminal outbound receipt row')
+    expect(terminalRow.value).toMatchObject({
+      state: 'dead-lettered',
+      deadLetterReason: 'max-attempts',
+      outcome: {
+        kind: 'failed',
+        errorCode: 'ExternalChatRetryExhausted',
+        retryable: false,
+      },
+    })
+    expect(items.slice(1).map((item) => readRecord(
+      readRecord(item, 'outbound DLQ delete action').Delete,
+      'outbound DLQ delete',
+    ).Key)).toEqual([
+      { workspaceId: deferred.workspaceId, recordKey: identityKey },
+      { workspaceId: deferred.workspaceId, recordKey: fifoKey },
+    ])
+  } finally {
+    harness.restore()
+  }
+})
+
 test('transactionally fences thread lifecycle claims, completion replay, and duplicate merge', async () => {
   let linkValue: unknown = {
     workspaceId: 'workspace-1',
@@ -1319,9 +1655,28 @@ test('transactionally fences thread lifecycle claims, completion replay, and dup
         if (recordKey.startsWith('CHAT_THREAD_LIFECYCLE#')) {
           return lifecycleRow === undefined ? {} : { Item: structuredClone(lifecycleRow) }
         }
+        if (recordKey.startsWith('CHAT_WORK_ITEM_LINKS#')) {
+          const duplicateManifestKey =
+            `CHAT_WORK_ITEM_LINKS#${keyDigest('team-1')}#${keyDigest('work-item-1')}`
+          return recordKey === duplicateManifestKey
+            ? { Item: createWorkItemLinkManifestRow('team-1', 'work-item-1', 1, 1) }
+            : {}
+        }
         return {}
       }
-      if (inspected.name === 'QueryCommand') return { Items: [] }
+      if (inspected.name === 'QueryCommand') {
+        const values = readRecord(
+          inspected.input.ExpressionAttributeValues,
+          'merge scan values',
+        )
+        if (values[':recordPrefix'] !== 'CHAT_LINK#') return { Items: [] }
+        return {
+          Items: [{
+            ...createActiveLinkRowFixture(createLink(), structuredClone(linkValue)),
+            storageRevision: linkStorageRevision,
+          }],
+        }
+      }
       if (inspected.name === 'PutCommand') {
         lifecycleRow = structuredClone(inspected.input.Item)
         return {}
@@ -1465,6 +1820,8 @@ test('transactionally fences thread lifecycle claims, completion replay, and dup
       duplicateTeamId: 'team-1',
       duplicateWorkItemId: 'work-item-1',
       links: [{ linkId: 'link-1', expectedRevision: 1 }],
+      expectedDuplicateLinkGeneration: 1,
+      expectedDuplicateLinkCount: 1,
       mergedAt: '2026-08-06T00:07:00.000Z',
     })).resolves.toEqual({ kind: 'conflict' })
     expect(harness.calls.filter(
@@ -1501,6 +1858,8 @@ test('transactionally fences thread lifecycle claims, completion replay, and dup
       duplicateTeamId: 'team-1',
       duplicateWorkItemId: 'work-item-1',
       links: [{ linkId: 'link-1', expectedRevision: 1 }],
+      expectedDuplicateLinkGeneration: 1,
+      expectedDuplicateLinkCount: 1,
       mergedAt: '2026-08-06T00:08:00.000Z',
     })).resolves.toEqual({ kind: 'conflict' })
     await expect(harness.store.acknowledgeThreadLifecycle({
@@ -1517,6 +1876,8 @@ test('transactionally fences thread lifecycle claims, completion replay, and dup
       duplicateTeamId: 'team-1',
       duplicateWorkItemId: 'work-item-1',
       links: [{ linkId: 'link-1', expectedRevision: 1 }],
+      expectedDuplicateLinkGeneration: 1,
+      expectedDuplicateLinkCount: 1,
       mergedAt: '2026-08-06T00:08:00.000Z',
     })).resolves.toMatchObject({ kind: 'merged' })
     await expect(harness.store.getThreadLifecycle(
@@ -1601,6 +1962,9 @@ test('atomically fences link updates and unlinking with lifecycle ownership', as
             },
           }
         }
+        if (recordKey.startsWith('CHAT_WORK_ITEM_LINKS#')) {
+          return { Item: createWorkItemLinkManifestRow('team-1', 'work-item-1', 1, 1) }
+        }
         return {}
       }
       if (inspected.name === 'TransactWriteCommand') {
@@ -1624,6 +1988,7 @@ test('atomically fences link updates and unlinking with lifecycle ownership', as
         }
         return {}
       }
+      if (inspected.name === 'QueryCommand') return { Items: [] }
       throw new TypeError(`Unexpected command: ${inspected.name}`)
     },
   })
@@ -1643,6 +2008,7 @@ test('atomically fences link updates and unlinking with lifecycle ownership', as
       workspaceId: 'workspace-1',
       link: replacement,
       expectedRevision: 1,
+      sourceAuthorizationRevision: 2,
       lifecycleOperationId: 'lifecycle-1',
     })).resolves.toMatchObject({ kind: 'updated' })
     const updateTransaction = [...harness.calls]
@@ -1651,6 +2017,13 @@ test('atomically fences link updates and unlinking with lifecycle ownership', as
     const updateItems = updateTransaction?.input.TransactItems
     if (!Array.isArray(updateItems)) throw new TypeError('Expected update transaction items.')
     expect(updateItems).toHaveLength(2)
+    const linkPut = readRecord(
+      readRecord(updateItems[0], 'updated link transaction item').Put,
+      'updated link Put',
+    )
+    expect(readRecord(linkPut.Item, 'updated link row').value).toMatchObject({
+      sourceAuthorizationRevision: 2,
+    })
     const lifecyclePut = readRecord(
       readRecord(updateItems[1], 'update lifecycle item').Put,
       'update lifecycle Put',
@@ -1677,8 +2050,16 @@ test('atomically fences link updates and unlinking with lifecycle ownership', as
       .find((call) => call.name === 'TransactWriteCommand')
     const unlinkItems = unlinkTransaction?.input.TransactItems
     if (!Array.isArray(unlinkItems)) throw new TypeError('Expected unlink transaction items.')
-    expect(unlinkItems).toHaveLength(3)
+    expect(unlinkItems).toHaveLength(4)
     expect(readRecord(unlinkItems[2], 'unlink lifecycle fence').ConditionCheck).toBeDefined()
+    const manifestPut = readRecord(
+      readRecord(unlinkItems[3], 'unlink owner manifest item').Put,
+      'unlink owner manifest Put',
+    )
+    expect(readRecord(manifestPut.Item, 'unlink owner manifest row').value).toMatchObject({
+      activeLinkCount: 0,
+      generation: 2,
+    })
   } finally {
     harness.restore()
   }
@@ -1774,6 +2155,8 @@ test('classifies a failed parent-fenced update as stale when a newer fence won',
   const newerFence: ExternalChatParentLifecycleFence = {
     ...expectedFence,
     authorizationRevision: 2,
+    availability: 'available',
+    state: 'active',
     restrictive: false,
     eventId: 'parent-event-2',
     operationId: 'parent-operation-2',
@@ -1878,6 +2261,10 @@ test('writes both message identity projections in one revision-fenced transactio
       expectedTeamId: owner.teamId,
       expectedWorkItemId: owner.workItemId,
       expectedLinkRevision: owner.revision,
+      expectedParentLifecycleFences: {
+        workspace: undefined,
+        conversation: undefined,
+      },
     })
     expect(result).toMatchObject({
       kind: 'stored',
@@ -1887,11 +2274,13 @@ test('writes both message identity projections in one revision-fenced transactio
       'GetCommand',
       'GetCommand',
       'GetCommand',
+      'GetCommand',
+      'GetCommand',
       'TransactWriteCommand',
     ])
-    const transactItems = harness.calls[3]?.input.TransactItems
+    const transactItems = harness.calls[5]?.input.TransactItems
     if (!Array.isArray(transactItems)) throw new TypeError('Expected binding transaction items.')
-    expect(transactItems).toHaveLength(3)
+    expect(transactItems).toHaveLength(5)
     const entryTypes = transactItems.slice(0, 2).map((item) => {
       const put = readRecord(readRecord(item, 'binding transaction item').Put, 'binding Put')
       const storedItem = readRecord(put.Item, 'binding Put item')
@@ -1933,6 +2322,7 @@ test('advances private sync cursors with create and update CAS conditions', asyn
       mode: 'full',
       status: 'processing',
       ownerLinkRevision: 2,
+      authorizationRevision: 1,
       providerCursor: 'opaque-provider-cursor',
       revision: 1,
       updatedAt: NOW,
@@ -1945,6 +2335,7 @@ test('advances private sync cursors with create and update CAS conditions', asyn
       mode: 'full',
       status: 'processing',
       ownerLinkRevision: 2,
+      authorizationRevision: 1,
       providerCursor: 'opaque-provider-cursor-2',
       revision: 2,
       updatedAt: '2026-08-06T00:01:00.000Z',
@@ -1958,6 +2349,7 @@ test('advances private sync cursors with create and update CAS conditions', asyn
       mode: 'full',
       status: 'completed',
       ownerLinkRevision: 2,
+      authorizationRevision: 1,
       observedSourceAvailability: 'available',
       observedSourceState: 'active',
       completionSyncStatus: 'synced',
@@ -1973,34 +2365,73 @@ test('advances private sync cursors with create and update CAS conditions', asyn
   }
 })
 
-test('exhausts deferred-event lookup pages and preserves provider occurrence order', async () => {
+test('transactionally fences inbound deferred enqueue on both absent parent authorities', async () => {
+  const link = createLink()
+  const event = createInboundEvent('event-parent-fenced-defer')
+  const harness = createHarness({
+    async respond(command) {
+      const inspected = inspectCommand(command)
+      if (inspected.name === 'GetCommand') {
+        const key = readRecord(inspected.input.Key, 'parent-fenced deferred key')
+        return key.recordKey === `CHAT_LINK#${keyDigest(link.id)}`
+          ? { Item: createActiveLinkRowFixture(link) }
+          : {}
+      }
+      if (inspected.name === 'TransactWriteCommand') return {}
+      throw new TypeError(`Unexpected command: ${inspected.name}`)
+    },
+  })
+  try {
+    await expect(harness.store.deferEvent({
+      workspaceId: 'workspace-1',
+      linkId: link.id,
+      event,
+      expectedParentLifecycleFences: { workspace: undefined, conversation: undefined },
+      fingerprint: createExternalChatFingerprint(event),
+      reason: 'source-unavailable',
+      attempt: 1,
+      retryAt: LEASE,
+      createdAt: NOW,
+      updatedAt: NOW,
+    })).resolves.toBeUndefined()
+    const transaction = harness.calls.find((call) => call.name === 'TransactWriteCommand')
+    const items = transaction?.input.TransactItems
+    if (!Array.isArray(items)) throw new TypeError('Expected deferred inbound transaction items.')
+    expect(items).toHaveLength(5)
+    for (const parentAction of items.slice(3)) {
+      const condition = readRecord(
+        readRecord(parentAction, 'deferred inbound parent action').ConditionCheck,
+        'deferred inbound parent condition',
+      )
+      const key = readRecord(condition.Key, 'deferred inbound parent key')
+      expect(String(key.recordKey)).toStartWith('CHAT_PARENT_STATE#')
+      expect(condition.ConditionExpression).toBe('attribute_not_exists(#workspaceId)')
+    }
+  } finally {
+    harness.restore()
+  }
+})
+
+test('reads one strongly consistent bounded deferred-event FIFO page', async () => {
   const firstEvent = createInboundEvent('event-1')
   const secondEvent = {
     ...createInboundEvent('event-2'),
     occurredAt: '2026-08-06T00:01:00.000Z',
   }
   const harness = createHarness({
-    async respond(command, callIndex) {
+    async respond(command) {
       const inspected = inspectCommand(command)
-      const values = readRecord(
-        inspected.input.ExpressionAttributeValues,
-        'query expression values',
-      )
-      const event = callIndex === 0 ? firstEvent : secondEvent
-      const installationDigest = createHash('sha256')
-        .update(event.installationId)
-        .digest('hex')
-      const eventDigest = createHash('sha256').update(event.eventId).digest('hex')
-      const recordKey = `CHAT_DEFERRED#${event.provider}#${installationDigest}#${eventDigest}`
-      const lookupSortKey = `${event.occurredAt}\0${eventDigest}`
-      const item = {
+      expect(inspected.name).toBe('QueryCommand')
+      const linkDigest = createHash('sha256').update('link-1').digest('hex')
+      const createItem = (event: ExternalChatInboundEvent): UnknownRecord => ({
         workspaceId: 'workspace-1',
-        recordKey,
+        recordKey: `CHAT_DEFERRED_FIFO#${linkDigest}#${event.occurredAt}#${createHash('sha256').update(event.eventId).digest('hex')}`,
         entryType: 'external-chat-deferred-event',
         value: {
           workspaceId: 'workspace-1',
           linkId: 'link-1',
           event,
+          expectedParentLifecycleFences: { workspace: undefined, conversation: undefined },
           fingerprint: createExternalChatFingerprint(event),
           reason: 'out-of-order',
           attempt: 1,
@@ -2009,48 +2440,63 @@ test('exhausts deferred-event lookup pages and preserves provider occurrence ord
           updatedAt: NOW,
         },
         storageRevision: 1,
-        lookupKey: values[':lookupKey'],
-        lookupSortKey,
-      }
-      return callIndex === 0
-        ? {
-            Items: [item],
-            LastEvaluatedKey: {
-              workspaceId: item.workspaceId,
-              recordKey,
-              lookupKey: item.lookupKey,
-              lookupSortKey,
-            },
-          }
-        : { Items: [item] }
+      })
+      return { Items: [createItem(firstEvent), createItem(secondEvent)] }
     },
   })
   try {
-    const events = await harness.store.listDueDeferredEvents(
+    const events = await harness.store.listDeferredEvents(
       'workspace-1',
       'link-1',
-      '2026-08-06T00:10:00.000Z',
       2,
     )
     expect(events.map((event) => event.event.eventId)).toEqual(['event-1', 'event-2'])
-    expect(harness.calls).toHaveLength(2)
-    expect(harness.calls[1]?.input.ExclusiveStartKey).toBeDefined()
-    expect(harness.calls.every((call) => call.input.IndexName === 'LookupKeyIndex')).toBe(true)
+    expect(harness.calls).toHaveLength(1)
+    expect(harness.calls[0]?.input).toMatchObject({
+      ConsistentRead: true,
+      Limit: 2,
+      ScanIndexForward: true,
+    })
+    expect(harness.calls[0]?.input).not.toHaveProperty('IndexName')
+    expect(readRecord(
+      harness.calls[0]?.input.ExpressionAttributeValues,
+      'query expression values',
+    )[':recordPrefix']).toStartWith('CHAT_DEFERRED_FIFO#')
   } finally {
     harness.restore()
   }
 })
 
 test('idempotently persists the complete deferred outbound mutation and retry schedule', async () => {
-  let storedRow: unknown
+  const storedRows = new Map<string, UnknownRecord>()
+  let ownerLink = createLink()
   const harness = createHarness({
     async respond(command) {
       const inspected = inspectCommand(command)
       if (inspected.name === 'GetCommand') {
-        return storedRow === undefined ? {} : { Item: structuredClone(storedRow) }
+        const key = readRecord(inspected.input.Key, 'deferred outbound key')
+        if (typeof key.recordKey !== 'string') {
+          throw new TypeError('Expected a deferred outbound record key.')
+        }
+        if (key.recordKey === `CHAT_LINK#${keyDigest('link-1')}`) {
+          return { Item: createActiveLinkRowFixture(ownerLink) }
+        }
+        const row = storedRows.get(key.recordKey)
+        return row === undefined ? {} : { Item: structuredClone(row) }
       }
-      if (inspected.name === 'PutCommand') {
-        storedRow = structuredClone(inspected.input.Item)
+      if (inspected.name === 'TransactWriteCommand') {
+        const items = inspected.input.TransactItems
+        if (!Array.isArray(items)) throw new TypeError('Expected deferred outbound puts.')
+        for (const item of items) {
+          const putValue = readRecord(item, 'deferred outbound action').Put
+          if (putValue === undefined) continue
+          const put = readRecord(putValue, 'queue put')
+          const row = readRecord(put.Item, 'deferred outbound row')
+          if (typeof row.recordKey !== 'string') {
+            throw new TypeError('Expected a deferred outbound row key.')
+          }
+          storedRows.set(row.recordKey, structuredClone(row))
+        }
         return {}
       }
       throw new TypeError(`Unexpected command: ${inspected.name}`)
@@ -2069,7 +2515,9 @@ test('idempotently persists the complete deferred outbound mutation and retry sc
       updatedAt,
     })).resolves.toBeUndefined()
 
-    const row = readRecord(storedRow, 'deferred outbound stored row')
+    const identityKey =
+      `CHAT_DEFERRED_OUTBOUND#${keyDigest(initial.linkId)}#${keyDigest(initial.operationId)}`
+    const row = readRecord(storedRows.get(identityKey), 'deferred outbound stored row')
     const value = decodeDeferredExternalChatOutboundEvent(row.value)
     expect(value).toEqual({
       ...initial,
@@ -2079,21 +2527,49 @@ test('idempotently persists the complete deferred outbound mutation and retry sc
     })
     expect(row).toMatchObject({
       workspaceId: initial.workspaceId,
-      recordKey:
-        `CHAT_DEFERRED_OUTBOUND#${keyDigest(initial.linkId)}#${keyDigest(initial.operationId)}`,
+      recordKey: identityKey,
       entryType: 'external-chat-deferred-outbound-event',
       storageRevision: 2,
-      lookupKey:
-        `CHAT_DEFERRED_OUTBOUND#${keyDigest(initial.workspaceId)}#${keyDigest(initial.linkId)}`,
-      lookupSortKey: `${initial.event.occurredAt}\0${keyDigest(initial.operationId)}`,
     })
-    expect(harness.calls.filter((call) => call.name === 'GetCommand')).toHaveLength(2)
-    const putCalls = harness.calls.filter((call) => call.name === 'PutCommand')
-    expect(putCalls).toHaveLength(2)
-    expect(putCalls[0]?.input.ConditionExpression).toBe('attribute_not_exists(#workspaceId)')
-    expect(putCalls[1]?.input.ExpressionAttributeValues).toMatchObject({
-      ':storageRevision': 1,
+    expect(row).not.toHaveProperty('lookupKey')
+    expect(storedRows).toHaveProperty('size', 2)
+    const transactions = harness.calls.filter((call) => call.name === 'TransactWriteCommand')
+    expect(transactions).toHaveLength(2)
+    const replacementItems = transactions[1]?.input.TransactItems
+    if (!Array.isArray(replacementItems)) {
+      throw new TypeError('Expected deferred outbound replacement transaction.')
+    }
+    expect(replacementItems).toHaveLength(5)
+    expect(replacementItems.slice(0, 2).every((item) => readRecord(
+      readRecord(item, 'deferred replacement action').Put,
+      'deferred replacement put',
+    ).ExpressionAttributeValues !== undefined)).toBe(true)
+    expect(readRecord(
+      replacementItems[2],
+      'deferred replacement link fence',
+    ).ConditionCheck).toBeDefined()
+    const linkCondition = readRecord(
+      readRecord(
+        replacementItems[2],
+        'deferred replacement link fence',
+      ).ConditionCheck,
+      'deferred replacement link condition',
+    )
+    expect(linkCondition.ConditionExpression).toContain(
+      '#value.#link.#sourceState <> :retainedMetadata',
+    )
+    expect(linkCondition.ExpressionAttributeValues).toMatchObject({
+      ':retainedMetadata': 'retained-metadata',
     })
+    for (const parentAction of replacementItems.slice(3)) {
+      const condition = readRecord(
+        readRecord(parentAction, 'deferred outbound parent action').ConditionCheck,
+        'deferred outbound parent condition',
+      )
+      const key = readRecord(condition.Key, 'deferred outbound parent key')
+      expect(String(key.recordKey)).toStartWith('CHAT_PARENT_STATE#')
+      expect(condition.ConditionExpression).toBe('attribute_not_exists(#workspaceId)')
+    }
 
     if (initial.event.type !== 'comment.created') {
       throw new TypeError('Expected a comment-created outbound fixture.')
@@ -2107,6 +2583,22 @@ test('idempotently persists the complete deferred outbound mutation and retry sc
       event: conflictingEvent,
       fingerprint: createExternalChatFingerprint(conflictingEvent),
     })).rejects.toMatchObject({ code: 'ExternalChatOperationConflict' })
+
+    ownerLink = {
+      ...ownerLink,
+      sourceAvailability: 'available',
+      sourceState: 'retained-metadata',
+      syncStatus: 'paused',
+      revision: 2,
+      updatedAt,
+    }
+    await expect(harness.store.deferOutboundEvent({
+      ...initial,
+      ownerLinkRevision: 2,
+    })).rejects.toMatchObject({
+      code: 'ExternalChatOperationConflict',
+      retryable: true,
+    })
   } finally {
     harness.restore()
   }
@@ -2127,36 +2619,30 @@ test('lists the exact outbound link FIFO without bypassing a not-due head and de
     ),
     retryAt: NOW,
   }
-  let queryIndex = 0
+  const fifoKey = (event: DeferredExternalChatOutboundEvent): string =>
+    `CHAT_DEFERRED_OUTBOUND_FIFO#${keyDigest(event.linkId)}#${event.event.occurredAt}#${keyDigest(event.operationId)}`
+  const queueRow = (event: DeferredExternalChatOutboundEvent, recordKey: string): UnknownRecord => ({
+    workspaceId: event.workspaceId,
+    recordKey,
+    entryType: 'external-chat-deferred-outbound-event',
+    value: event,
+    storageRevision: 1,
+  })
   const harness = createHarness({
     async respond(command) {
       const inspected = inspectCommand(command)
-      if (inspected.name === 'DeleteCommand') return {}
-      if (inspected.name !== 'QueryCommand') {
-        throw new TypeError(`Unexpected command: ${inspected.name}`)
+      if (inspected.name === 'QueryCommand') {
+        return { Items: [queueRow(first, fifoKey(first)), queueRow(second, fifoKey(second))] }
       }
-      const event = queryIndex === 0 ? second : first
-      queryIndex += 1
-      const item = {
-        workspaceId: event.workspaceId,
-        recordKey:
-          `CHAT_DEFERRED_OUTBOUND#${keyDigest(event.linkId)}#${keyDigest(event.operationId)}`,
-        entryType: 'external-chat-deferred-outbound-event',
-        value: event,
-        storageRevision: 1,
-        lookupKey:
-          `CHAT_DEFERRED_OUTBOUND#${keyDigest(event.workspaceId)}#${keyDigest(event.linkId)}`,
-        lookupSortKey: `${event.event.occurredAt}\0${keyDigest(event.operationId)}`,
+      if (inspected.name === 'GetCommand') {
+        const key = readRecord(inspected.input.Key, 'deferred outbound deletion key')
+        if (typeof key.recordKey !== 'string') {
+          throw new TypeError('Expected deferred outbound deletion key.')
+        }
+        return { Item: queueRow(first, key.recordKey) }
       }
-      return queryIndex === 1
-        ? {
-            Items: [item],
-            LastEvaluatedKey: {
-              workspaceId: item.workspaceId,
-              recordKey: item.recordKey,
-            },
-          }
-        : { Items: [item] }
+      if (inspected.name === 'TransactWriteCommand') return {}
+      throw new TypeError(`Unexpected command: ${inspected.name}`)
     },
   })
   try {
@@ -2166,35 +2652,132 @@ test('lists the exact outbound link FIFO without bypassing a not-due head and de
       2,
     )).resolves.toEqual([first, second])
     const queries = harness.calls.filter((call) => call.name === 'QueryCommand')
-    expect(queries).toHaveLength(2)
+    expect(queries).toHaveLength(1)
     expect(queries.every((call) => call.input.IndexName === undefined)).toBe(true)
     expect(queries.every((call) => call.input.ConsistentRead === true)).toBe(true)
     expect(queries.every((call) => call.input.FilterExpression === undefined)).toBe(true)
     expect(queries[0]?.input.ExpressionAttributeValues).toEqual({
       ':workspaceId': first.workspaceId,
-      ':recordPrefix': `CHAT_DEFERRED_OUTBOUND#${keyDigest(first.linkId)}#`,
+      ':recordPrefix': `CHAT_DEFERRED_OUTBOUND_FIFO#${keyDigest(first.linkId)}#`,
     })
+    expect(queries[0]?.input.Limit).toBe(2)
 
     await expect(harness.store.deleteDeferredOutboundEvent(
       first.workspaceId,
       first.linkId,
       first.operationId,
     )).resolves.toBeUndefined()
-    const deletion = harness.calls.find((call) => call.name === 'DeleteCommand')
-    expect(deletion?.input.Key).toEqual({
-      workspaceId: first.workspaceId,
-      recordKey:
-        `CHAT_DEFERRED_OUTBOUND#${keyDigest(first.linkId)}#${keyDigest(first.operationId)}`,
+    const transaction = harness.calls.find((call) => call.name === 'TransactWriteCommand')
+    const deletes = transaction?.input.TransactItems
+    if (!Array.isArray(deletes)) throw new TypeError('Expected outbound deletion transaction.')
+    expect(deletes.map((item) => readRecord(
+      readRecord(item, 'outbound deletion action').Delete,
+      'outbound queue delete',
+    ).Key)).toEqual([
+      {
+        workspaceId: first.workspaceId,
+        recordKey:
+          `CHAT_DEFERRED_OUTBOUND#${keyDigest(first.linkId)}#${keyDigest(first.operationId)}`,
+      },
+      { workspaceId: first.workspaceId, recordKey: fifoKey(first) },
+    ])
+  } finally {
+    harness.restore()
+  }
+})
+
+test('strongly purges every identity and FIFO payload row for one outbound link', async () => {
+  const owner = createLink()
+  const events = [
+    createDeferredOutboundEvent(
+      'operation-outbound-purge-1',
+      createOutboundEvent(NOW, 'comment-outbound-purge-1'),
+    ),
+    createDeferredOutboundEvent(
+      'operation-outbound-purge-2',
+      createOutboundEvent('2026-08-06T00:01:00.000Z', 'comment-outbound-purge-2'),
+    ),
+  ]
+  const rows = new Map<string, UnknownRecord>()
+  for (const event of events) {
+    const identityKey =
+      `CHAT_DEFERRED_OUTBOUND#${keyDigest(event.linkId)}#${keyDigest(event.operationId)}`
+    const fifoKey =
+      `CHAT_DEFERRED_OUTBOUND_FIFO#${keyDigest(event.linkId)}#${event.event.occurredAt}#${keyDigest(event.operationId)}`
+    for (const recordKey of [identityKey, fifoKey]) {
+      rows.set(recordKey, {
+        workspaceId: event.workspaceId,
+        recordKey,
+        entryType: 'external-chat-deferred-outbound-event',
+        value: event,
+        storageRevision: 1,
+      })
+    }
+  }
+  const harness = createHarness({
+    async respond(command) {
+      const inspected = inspectCommand(command)
+      if (inspected.name === 'QueryCommand') {
+        return {
+          Items: [...rows.values()].filter((row) =>
+            String(row.recordKey).startsWith('CHAT_DEFERRED_OUTBOUND_FIFO#')
+          ),
+        }
+      }
+      if (inspected.name === 'GetCommand') {
+        const key = readRecord(inspected.input.Key, 'outbound purge Get key')
+        if (key.recordKey === `CHAT_LINK#${keyDigest(owner.id)}`) {
+          return { Item: createActiveLinkRowFixture(owner) }
+        }
+        if (typeof key.recordKey === 'string' && key.recordKey.startsWith('CHAT_PARENT_STATE#')) {
+          return {}
+        }
+        return typeof key.recordKey === 'string' && rows.has(key.recordKey)
+          ? { Item: structuredClone(rows.get(key.recordKey)) }
+          : {}
+      }
+      if (inspected.name === 'TransactWriteCommand') {
+        const items = inspected.input.TransactItems
+        if (!Array.isArray(items)) throw new TypeError('Expected outbound purge deletes.')
+        for (const item of items) {
+          const action = readRecord(item, 'outbound purge transaction item')
+          if (action.Delete === undefined) continue
+          const deletion = readRecord(
+            action.Delete,
+            'outbound purge Delete',
+          )
+          const key = readRecord(deletion.Key, 'outbound purge delete key')
+          if (typeof key.recordKey !== 'string') {
+            throw new TypeError('Expected one outbound purge record key.')
+          }
+          rows.delete(key.recordKey)
+        }
+        return {}
+      }
+      throw new TypeError(`Unexpected command: ${inspected.name}`)
+    },
+  })
+  try {
+    await expect(harness.store.purgeDeferredOutboundEventsForLink(
+      'workspace-1',
+      'link-1',
+      owner.revision,
+      { workspace: undefined, conversation: undefined },
+    )).resolves.toBe(2)
+    expect(rows.size).toBe(0)
+    const query = harness.calls.find((call) => call.name === 'QueryCommand')
+    expect(query?.input).toMatchObject({
+      ConsistentRead: true,
+      ExpressionAttributeValues: {
+        ':workspaceId': 'workspace-1',
+        ':recordPrefix': `CHAT_DEFERRED_OUTBOUND_FIFO#${keyDigest('link-1')}#`,
+      },
     })
-    expect(deletion?.input.ConditionExpression).toContain('#value.#workspaceId = :workspaceId')
-    expect(deletion?.input.ConditionExpression).toContain('#value.#linkId = :linkId')
-    expect(deletion?.input.ConditionExpression).toContain('#value.#operationId = :operationId')
-    expect(deletion?.input.ExpressionAttributeValues).toMatchObject({
-      ':entryType': 'external-chat-deferred-outbound-event',
-      ':workspaceId': first.workspaceId,
-      ':linkId': first.linkId,
-      ':operationId': first.operationId,
-    })
+    const transactions = harness.calls.filter((call) => call.name === 'TransactWriteCommand')
+    expect(transactions).toHaveLength(2)
+    for (const transaction of transactions) {
+      expect(transaction.input.TransactItems).toHaveLength(5)
+    }
   } finally {
     harness.restore()
   }
@@ -2204,37 +2787,29 @@ test('merges link-owned bindings without rewriting their identity rows', async (
   const link = createLink()
   const binding = createBinding()
   const harness = createHarness({
-    async respond(command, callIndex) {
+    async respond(command) {
       const inspected = inspectCommand(command)
-      if (callIndex === 0) {
-        const key = readRecord(inspected.input.Key, 'link Get key')
-        return {
-          Item: {
-            workspaceId: key.workspaceId,
-            recordKey: key.recordKey,
-            entryType: 'external-chat-link',
-            value: {
-              workspaceId: 'workspace-1',
-              link,
-              sourceDigest: createExternalChatSourceDigest({
-                provider: link.provider,
-                externalWorkspaceId: link.source.externalWorkspaceId,
-                conversationExternalId: link.source.conversationExternalId,
-                threadExternalId: link.source.threadExternalId,
-              }),
-              sourceAuthorizationRevision: 1,
-              active: true,
-            },
-            storageRevision: 1,
-          },
+      if (inspected.name === 'GetCommand') {
+        const key = readRecord(inspected.input.Key, 'merge Get key')
+        if (key.recordKey === `CHAT_LINK#${keyDigest(link.id)}`) {
+          return { Item: createActiveLinkRowFixture(link) }
         }
+        if (
+          key.recordKey ===
+            `CHAT_WORK_ITEM_LINKS#${keyDigest('team-1')}#${keyDigest('work-item-1')}`
+        ) {
+          return { Item: createWorkItemLinkManifestRow('team-1', 'work-item-1', 1, 1) }
+        }
+        return {}
       }
-      if (callIndex === 1) return {}
-      if (callIndex === 2) {
+      if (inspected.name === 'QueryCommand') {
         const values = readRecord(
           inspected.input.ExpressionAttributeValues,
-          'binding query values',
+          'merge query values',
         )
+        if (values[':recordPrefix'] === 'CHAT_LINK#') {
+          return { Items: [createActiveLinkRowFixture(link)] }
+        }
         return {
           Items: [{
             workspaceId: 'workspace-1',
@@ -2249,8 +2824,8 @@ test('merges link-owned bindings without rewriting their identity rows', async (
           }],
         }
       }
-      if (callIndex === 3) return {}
-      return {}
+      if (inspected.name === 'TransactWriteCommand') return {}
+      throw new TypeError(`Unexpected command: ${inspected.name}`)
     },
   })
   try {
@@ -2261,6 +2836,8 @@ test('merges link-owned bindings without rewriting their identity rows', async (
       duplicateTeamId: 'team-1',
       duplicateWorkItemId: 'work-item-1',
       links: [{ linkId: 'link-1', expectedRevision: 1 }],
+      expectedDuplicateLinkGeneration: 1,
+      expectedDuplicateLinkCount: 1,
       mergedAt: '2026-08-06T00:10:00.000Z',
     })
     expect(result).toMatchObject({
@@ -2273,11 +2850,11 @@ test('merges link-owned bindings without rewriting their identity rows', async (
         revision: 2,
       }],
     })
-    const transaction = harness.calls[4]
+    const transaction = harness.calls.at(-1)
     expect(transaction?.name).toBe('TransactWriteCommand')
     const transactItems = transaction?.input.TransactItems
     if (!Array.isArray(transactItems)) throw new TypeError('Expected merge transaction items.')
-    expect(transactItems).toHaveLength(3)
+    expect(transactItems).toHaveLength(5)
     const putItems = transactItems.filter((item) =>
       readRecord(item, 'merge transaction item').Put !== undefined
     )
@@ -2288,9 +2865,44 @@ test('merges link-owned bindings without rewriting their identity rows', async (
     expect(entryTypes).toEqual([
       'external-chat-link',
       'external-chat-canonical-redirect',
+      'external-chat-work-item-link-manifest',
+      'external-chat-work-item-link-manifest',
     ])
     const lifecycleFence = readRecord(transactItems[1], 'lifecycle merge fence')
     expect(lifecycleFence.ConditionCheck).toBeDefined()
+    const ownerScan = harness.calls.find((call) =>
+      call.name === 'QueryCommand' &&
+      readRecord(call.input.ExpressionAttributeValues, 'owner scan values')[':recordPrefix'] ===
+        'CHAT_LINK#'
+    )
+    expect(ownerScan?.input.ConsistentRead).toBe(true)
+  } finally {
+    harness.restore()
+  }
+})
+
+test('returns an explicit capacity result before an oversized merge transaction', async () => {
+  const harness = createHarness({
+    async respond(command) {
+      throw new TypeError(`Unexpected command: ${inspectCommand(command).name}`)
+    },
+  })
+  try {
+    await expect(harness.store.mergeLinks({
+      workspaceId: 'workspace-1',
+      canonicalTeamId: 'team-canonical',
+      canonicalWorkItemId: 'work-item-canonical',
+      duplicateTeamId: 'team-1',
+      duplicateWorkItemId: 'work-item-1',
+      links: Array.from({ length: 33 }, (_, index) => ({
+        linkId: `link-${index + 1}`,
+        expectedRevision: 1,
+      })),
+      expectedDuplicateLinkGeneration: 33,
+      expectedDuplicateLinkCount: 33,
+      mergedAt: '2026-08-06T00:10:00.000Z',
+    })).resolves.toEqual({ kind: 'too-large', maximumLinks: 32 })
+    expect(harness.calls).toHaveLength(0)
   } finally {
     harness.restore()
   }
@@ -2315,29 +2927,23 @@ test('persists one canonical lineage redirect for every moved link', async () =>
         const link = links.find((candidate) =>
           key.recordKey === `CHAT_LINK#${keyDigest(candidate.id)}`
         )
-        if (!link) return {}
-        return {
-          Item: {
-            workspaceId: 'workspace-1',
-            recordKey: key.recordKey,
-            entryType: 'external-chat-link',
-            value: {
-              workspaceId: 'workspace-1',
-              link,
-              sourceDigest: createExternalChatSourceDigest({
-                provider: link.provider,
-                externalWorkspaceId: link.source.externalWorkspaceId,
-                conversationExternalId: link.source.conversationExternalId,
-                threadExternalId: link.source.threadExternalId,
-              }),
-              sourceAuthorizationRevision: 1,
-              active: true,
-            },
-            storageRevision: 1,
-          },
+        if (link) return { Item: createActiveLinkRowFixture(link) }
+        if (
+          key.recordKey ===
+            `CHAT_WORK_ITEM_LINKS#${keyDigest('team-1')}#${keyDigest('work-item-1')}`
+        ) {
+          return {
+            Item: createWorkItemLinkManifestRow('team-1', 'work-item-1', 2, 2),
+          }
         }
+        return {}
       }
-      if (inspected.name === 'QueryCommand') return { Items: [] }
+      if (inspected.name === 'QueryCommand') {
+        const values = readRecord(inspected.input.ExpressionAttributeValues, 'merge query values')
+        return values[':recordPrefix'] === 'CHAT_LINK#'
+          ? { Items: links.map((link) => createActiveLinkRowFixture(link)) }
+          : { Items: [] }
+      }
       if (inspected.name === 'TransactWriteCommand') return {}
       throw new TypeError(`Unexpected command: ${inspected.name}`)
     },
@@ -2350,6 +2956,8 @@ test('persists one canonical lineage redirect for every moved link', async () =>
       duplicateTeamId: 'team-1',
       duplicateWorkItemId: 'work-item-1',
       links: links.map((link) => ({ linkId: link.id, expectedRevision: link.revision })),
+      expectedDuplicateLinkGeneration: 2,
+      expectedDuplicateLinkCount: 2,
       mergedAt: '2026-08-06T00:10:00.000Z',
     })
     expect(result).toMatchObject({ kind: 'merged' })
@@ -2359,6 +2967,7 @@ test('persists one canonical lineage redirect for every moved link', async () =>
     expect(transaction?.name).toBe('TransactWriteCommand')
     const transactItems = transaction?.input.TransactItems
     if (!Array.isArray(transactItems)) throw new TypeError('Expected merge transaction items.')
+    expect(transactItems).toHaveLength(8)
     const redirectRows = transactItems.flatMap((item) => {
       const put = readRecord(item, 'merge transaction item').Put
       if (put === undefined) return []
@@ -2370,6 +2979,13 @@ test('persists one canonical lineage redirect for every moved link', async () =>
       `CHAT_REDIRECT#${keyDigest('team-1')}#${keyDigest('work-item-1')}#${keyDigest('link-1')}`,
       `CHAT_REDIRECT#${keyDigest('team-1')}#${keyDigest('work-item-1')}#${keyDigest('link-2')}`,
     ])
+    const manifestRows = transactItems.flatMap((item) => {
+      const put = readRecord(item, 'merge transaction item').Put
+      if (put === undefined) return []
+      const stored = readRecord(readRecord(put, 'merge Put').Item, 'merge Put item')
+      return stored.entryType === 'external-chat-work-item-link-manifest' ? [stored] : []
+    })
+    expect(manifestRows).toHaveLength(2)
   } finally {
     harness.restore()
   }
@@ -2382,24 +2998,23 @@ test('rejects a merge when a binding commit advances the owner after its scan', 
       const inspected = inspectCommand(command)
       if (inspected.name === 'GetCommand') {
         const key = readRecord(inspected.input.Key, 'merge race Get key')
-        if (key.recordKey !== `CHAT_LINK#${keyDigest(link.id)}`) return {}
-        return {
-          Item: {
-            workspaceId: 'workspace-1',
-            recordKey: key.recordKey,
-            entryType: 'external-chat-link',
-            value: {
-              workspaceId: 'workspace-1',
-              link,
-              sourceDigest: sourceDigest(),
-              sourceAuthorizationRevision: 1,
-              active: true,
-            },
-            storageRevision: 1,
-          },
+        if (key.recordKey === `CHAT_LINK#${keyDigest(link.id)}`) {
+          return { Item: createActiveLinkRowFixture(link) }
         }
+        if (
+          key.recordKey ===
+            `CHAT_WORK_ITEM_LINKS#${keyDigest('team-1')}#${keyDigest('work-item-1')}`
+        ) {
+          return { Item: createWorkItemLinkManifestRow('team-1', 'work-item-1', 1, 1) }
+        }
+        return {}
       }
-      if (inspected.name === 'QueryCommand') return { Items: [] }
+      if (inspected.name === 'QueryCommand') {
+        const values = readRecord(inspected.input.ExpressionAttributeValues, 'merge query values')
+        return values[':recordPrefix'] === 'CHAT_LINK#'
+          ? { Items: [createActiveLinkRowFixture(link)] }
+          : { Items: [] }
+      }
       if (inspected.name === 'TransactWriteCommand') {
         const transactItems = inspected.input.TransactItems
         if (!Array.isArray(transactItems)) throw new TypeError('Expected merge transaction items.')
@@ -2424,6 +3039,8 @@ test('rejects a merge when a binding commit advances the owner after its scan', 
       duplicateTeamId: 'team-1',
       duplicateWorkItemId: 'work-item-1',
       links: [{ linkId: link.id, expectedRevision: link.revision }],
+      expectedDuplicateLinkGeneration: 1,
+      expectedDuplicateLinkCount: 1,
       mergedAt: '2026-08-06T00:10:00.000Z',
     })).resolves.toEqual({ kind: 'conflict' })
   } finally {

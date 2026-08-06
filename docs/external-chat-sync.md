@@ -17,6 +17,19 @@ chat thread は独立した `ExternalChatWorkItemLink` を使い、既存 enum �
 `ExternalChatMessageBinding` に明示する。provider の raw webhook、access token、refresh token、
 一時 download URL、provider cursor はこの contract と public response に流さない。
 
+### この変更が提供する範囲
+
+この変更は provider-neutral contract、DynamoDB 永続化境界、link 単位の inbound/outbound retry
+executor、provider 共通 fixture を提供する。Slack/Teams の実 adapter、production ingress/command、
+application composition は登録しない。また、全 link を横断する due queue discovery、具体的な DLQ、
+Lambda、schedule、IAM、alarm も有効化しない。そのため、この変更単独では production の webhook 受付、
+自動 retry、運用 alert が稼働すると主張しない。
+
+provider integration の follow-up では、adapter と cross-domain port を composition root へ接続し、
+shard された bounded due projection から対象 link を発見する dispatcher、idempotent な DLQ、retry
+handler、least-privilege IAM、queue age/DLQ alarm を一体で追加する。dispatcher は eventual な候補だけを
+発見し、最終的な順序と実行可否は、この変更で提供する strong link-local FIFO executor が再検証する。
+
 ## 正規化モデル
 
 - `ExternalChatWorkspace` は Slack workspace または Teams tenant を表す。
@@ -44,8 +57,9 @@ deep allowlist で再構築し、canonical timestamp、bounded text/array、cred
 resource state ごとの disclosure rule を検証する。余剰 field、provider SDK object、`importedFileId`、
 一時 URL はこの再構築で破棄し、削除・retention tombstone に本文を残した応答は失敗として扱う。
 各 adapter は provider が所有する permalink host を宣言し、runtime は URL credential、port、fragment、
-localhost/IP literal、token・signature・authorization などの一時 credential query を拒否する。redirect や
-短縮 URL を許可する場合も、adapter が最終 URL を解決してから同じ host policy を通す。
+localhost/IP literal、token・signature・authorization に加えて Slack `pub_secret`、AWS `X-Amz-*`、
+Google `X-Goog-*` などの一時 credential query を正規化した key で拒否する。redirect や短縮 URL を
+許可する場合も、adapter が最終 URL を解決してから同じ host policy を通す。
 
 ## 作成、link、unlink、同期設定
 
@@ -66,9 +80,12 @@ claim し、別 Work Item へ無言で再割当てしない。同期方向の更
 表示しない。
 
 resync worker は operation ID、mode、受付時 link revision を所有する private cursor を CAS で claim
-する。provider page は deep normalization と source scope 検証後、message occurrence 順で処理し、page
-内の全 message が terminal outcome になった場合だけ provider continuation を checkpoint する。job の
-terminal cursor を先に commit してから link 表示を投影するため、投影直前の crash も replay で修復できる。
+し、受付時の authorization generation も固定する。provider page は deep normalization と source scope
+検証後、message occurrence 順で処理し、page 内の全 message が terminal outcome になった場合だけ provider
+continuation と観測時刻を checkpoint する。古い generation の job/cursor は再認証後に再利用しない。`full`
+は traversal 中に durable seen manifest を構築し、最後まで到達した後で未観測 binding を tombstone/reconcile
+してからだけ成功にする。job の terminal cursor を先に commit してから、private lifecycle、exact parent
+fence、authorization generation を条件に link 表示を投影するため、投影直前の crash も replay で修復できる。
 以前完了した `resume` 受付は古い cursor を即成功にせず page 1 から fresh traversal を開始し、新着を確認する。
 
 ## 双方向 message と thread state
@@ -79,11 +96,17 @@ message binding は external message ID、external version、internal comment ID
 origin、最後の inbound event と outbound operation を保持する。
 
 comment、File import、resource redaction、Work Item lifecycle、message binding の各 port は、link ID と
-副作用前に観測した link revision/Team/Work Item owner を同じ commit で条件確認する。message binding の
-DynamoDB transaction も link row を ConditionCheck するため、duplicate merge と同期が競合した場合は
+副作用前に観測した link revision/Team/Work Item owner に加え、workspace/conversation の exact
+present-or-absent parent fence snapshot を同じ commit で条件確認する。message binding の DynamoDB
+transaction も link row と両 parent fence row を ConditionCheck するため、duplicate merge、親 lifecycle、同期が競合した場合は
 旧 Work Item に確定せず retry される。binding commit は link row の private storage revision も同じ
 transaction で進めるため、merge が binding を事前走査した後の commit は merge の最終 CAS を失敗させる。
 副作用が merge より先に commit した場合は link provenance により merge transaction/manifest の移動対象となる。
+
+outbound adapter は provider request の準備後、不可逆な provider I/O の直前に service が渡す exact
+authority guard を await する。guard は link owner/revision、parent fence snapshot、effective lifecycle、
+retry cancellation signal を再検証する。provider transport は同じ `AbortSignal` を実 request へ伝播し、
+guard rejection または permit lease loss 後に新しい provider/persistence side effect を開始しない。
 
 外部 actor の ID と表示名は external identity snapshot として保存し、`authorMemberKey` を偽造しない。
 内部側の表示では source kind と provider permalink を併記する。内部 member が外部へ送った reply は
@@ -115,7 +138,8 @@ actor、attachment metadata は projection から省略する。email、raw prof
 Authorization header、temporary URL を Work Item、comment、audit metadata に保存しない。
 
 source view は provider read の前後で link owner/revision、現在の Work Item 閲覧権限、installation の
-authorization generation を照合する。外部 read 中に unlink、merge、権限剥奪、再認証が発生した場合は
+authorization generation、exact parent fence snapshot と effective lifecycle を照合する。外部 read 中に
+unlink、merge、親 restriction、権限剥奪、再認証が発生した場合は
 取得済み内容を返さず、現在の canonical route と認可で明示的に再試行する。
 
 表示 pagination cursor は application が AES-256-GCM で暗号化・認証する opaque token とし、Workspace、
@@ -134,6 +158,20 @@ scan と既存の File authorization を通過した後に pipeline が返した
 
 `sourceAvailability` は「いま接続できるか」、`sourceState` は「最後に確認した lifecycle」を表し、
 両者を混同しない。
+
+同期を止める判定と metadata を消去する判定も分離する。temporary unavailable、needs-reauth、installation
+disconnect は新しい read/import/mutation を止めるが、直ちに保持済み display metadata を消去する理由には
+しない。`retained-metadata` は許可された metadata を保持したまま content 同期と retry payload を止める。
+permission loss、scope change、deleted、retention-expired のときだけ policy-controlled metadata と
+imported projection の redaction cascade を行う。
+
+lifecycle event は workspace、conversation、thread、message、attachment の scope ごとに異なる
+discriminated contract とし、親 scope の event に架空の conversation/thread ID を補わない。link の
+private lifecycle projection は workspace/conversation/thread ごとの観測値を保持し、authorization
+revision、発生時刻、event ID の順で stale event を拒否する。表示状態は各 scope のうち最も制限の強い
+availability/state を採用するため、古い child event や通常の content 同期成功が親の restriction を
+解除しない。message/attachment の redaction port も同じ発生時刻と event ID を durable に比較し、古い
+更新を `stale` として扱う。
 
 - installation disconnect または reauthorization 必要時は同期を pause し、復旧後に明示的な resync を
   行う。古い credential で成功したように見せない。
@@ -159,13 +197,15 @@ link record prefix から strongly consistent な bounded base-table page で列
 できない DynamoDB condition を置き、redaction と retry payload 保存の競合でも内容を復活させない。
 
 親 lifecycle event は fan-out の列挙前に workspace または conversation 単位の durable fence として
-authorization generation、event/operation ID、発生時刻、restrictive 判定を確定する。create/link transaction は
+authorization generation、availability/state、event/operation ID、発生時刻、同期 block 判定を確定する。
+この block 判定は metadata redaction 判定とは別である。create/link transaction は
 source resolve 時の authorization generation と workspace/conversation 両方の fence を condition-check する。
 したがって restrictive fence と link 作成が競合しても、link が strong scan に見えるか、古い generation の
 link commit が拒否されるかのどちらかになり、scan 直後の取りこぼしを作らない。再認証後の新しい generation
 だけが古い restrictive fence を越えられる。link の private record は source resolve 時 generation を保持し、
 fan-out page は自身の fence generation より新しい link を除外する。各 child の link projection transaction も
-同じ parent fence の generation、event/operation ID、発生時刻、restrictive 判定を condition-check するため、
+同じ parent fence の generation、availability/state、event/operation ID、発生時刻、block 判定を
+condition-check するため、
 後続 parent event が先に勝った古い child は `stale` となり redaction cascade を開始しない。復旧した metadata は
 明示 resync の fresh read で再構築する。
 
@@ -180,8 +220,11 @@ runtime-only origin marker の fingerprint を receipt に保存し、同じ ID/
 を返す。同じ ID/異なる入力は conflict として隔離する。deferred row は origin marker を永続化しないため、
 その fingerprint は正規化 event だけから計算し、receipt fingerprint と混用しない。最後の event ID
 一個だけで重複排除せず、保持期間内の receipt と message/thread ごとの version binding を使う。
-webhook request の raw body、header 数・名前・値、event DTO のサイズ上限は adapter 呼出し前に runtime が
-共通検証し、provider 固有 parser が無制限入力を受け取らないようにする。
+各 adapter は `normalizeWebhook` の先頭で共通 validator を呼び、provider 固有 parser より前に webhook
+request の raw body、header 数、case-normalized header 名、値、header 合計 byte 数を検証する。deep
+normalization 後の各 inbound event は JSON UTF-8 で 180 KiB 以下に制限する。deferred identity/FIFO の
+両 row に同じ event を保持しても、各 DynamoDB item の key と envelope に 400 KiB 上限まで十分な余白を
+残す。
 
 順序判定は provider adapter が `externalSequence` と external version を解釈する。古い編集や削除は
 `stale` として skip し、前提となる message が未着なら `out-of-order` として defer して bounded fetch
@@ -219,11 +262,29 @@ applied、skipped、non-retryable failure の terminal outcome だけを provide
 queue row の削除は terminal receipt と replay-safe audit の commit 後にだけ行う。したがって副作用後の
 crash でも row が receipt lease の再取得を駆動し、先に row だけを失うことはない。
 
+inbound/outbound の deferred record は identity row と occurrence-ordered FIFO row を同じ transaction で
+保存し、worker は FIFO row を strongly consistent な bounded Query で読む。先頭の `retryAt` が未来なら
+後続が due でも停止する。outbound worker は attempt ごとに固有 owner と単調増加 fence token を持つ
+installation permit を取得し、provider 呼出し直前に renew/validate した後も、provider promise が settle
+するまで lease の 1/3 間隔で heartbeat を続ける。adapter の provider-I/O guard と completion の各
+persistence side effect は、その時点の exact permit owner/fence/expiry を durable store で再検証する。
+heartbeat scheduler、renew、validate の失敗を含めて permit を確認できない worker は transport へ渡した
+`AbortSignal` を中断し、processor の停止を待ってから permit を解放する。deferred outbound row は
+enqueue 時の Team、Work Item、link revision と exact parent fence snapshot を保持し、unlink、merge、
+restrictive lifecycle と競合した stale queue write を transactionally 拒否する。restrictive purge は同じ
+link revision と parent fence snapshot を条件に inbound content と outbound queue の両方を消去するが、
+再開に必要な lifecycle control event は残す。期限超過時は注入された idempotent dead-letter port への記録を
+先に確定し、receipt を `dead-lettered` へ終端化して identity/FIFO row を同じ transaction で除去する。
+crash replay は終端 receipt を返し、provider を再呼び出さない。
+
 ## Duplicate merge と canonical redirect
 
 duplicate Work Item の統合は canonical/duplicate Work Item revision と全 link revision を fence した
-一つの論理 transaction とする。次を不可分に移すか、transaction size を超える場合は merge lock と
-再開可能な manifest を保存して段階的に収束させる。
+一つの論理 transaction とする。caller は duplicate owner の active link を完全な集合として渡し、store は
+strong scan の結果に加えて owner manifest の generation と件数を照合する。link の追加・unlink は同じ
+transaction で manifest を進めるため、準備後に link が増減した merge は conflict になる。DynamoDB の
+100 action 上限に収まらない場合は `too-large` として一切変更せず拒否し、別の段階的 merge 設計なしに
+部分移動しない。上限内では次を不可分に移す。
 
 - external chat link と一意な source claim
 - message binding と inbound/outbound idempotency receipt

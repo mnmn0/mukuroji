@@ -34,6 +34,14 @@ const MAX_MESSAGE_QUOTES = 100
 const MAX_WEBHOOK_EVENTS = 100
 
 /**
+ * Maximum UTF-8 JSON size of one normalized inbound event.
+ *
+ * Deferred events are retained in both identity and FIFO rows. Keeping each event below 180 KiB
+ * leaves substantial key and envelope headroom below DynamoDB's 400 KiB per-item limit.
+ */
+export const EXTERNAL_CHAT_NORMALIZED_INBOUND_EVENT_MAX_BYTES = 184_320
+
+/**
  * Deeply validates and allowlists one normalized webhook returned by a provider adapter.
  *
  * @param value - Untrusted adapter result.
@@ -61,8 +69,8 @@ export function normalizeChatProviderWebhook(
       'The normalized webhook must contain at least one event.',
     )
   }
-  const events = rawEvents.map((event) => normalizeInboundEventWithCode(
-    event,
+  const events = rawEvents.map((event) => requireBoundedInboundEvent(
+    normalizeInboundEventWithCode(event, 'ChatProviderInvalidWebhook'),
     'ChatProviderInvalidWebhook',
   ))
   const originMarkers = normalizeOriginMarkers(record.originMarkers)
@@ -92,7 +100,10 @@ export function normalizeChatProviderInboundEvent(
   permalinkHosts: readonly string[] = [],
 ): ExternalChatInboundEvent {
   return requireProviderOwnedPermalinks(
-    normalizeInboundEventWithCode(value, 'ChatProviderInvalidResponse'),
+    requireBoundedInboundEvent(
+      normalizeInboundEventWithCode(value, 'ChatProviderInvalidResponse'),
+      'ChatProviderInvalidResponse',
+    ),
     permalinkHosts,
     'ChatProviderInvalidResponse',
   )
@@ -390,6 +401,26 @@ export function normalizeChatProviderThreadMutationResult(
 }
 
 /**
+ * Rejects a complete normalized inbound event that cannot be safely retained in durable queues.
+ *
+ * @param event - Exact provider-neutral event after deep normalization.
+ * @param code - Error code used by the calling adapter boundary.
+ * @returns The unchanged event when its UTF-8 JSON representation is within the durable bound.
+ */
+function requireBoundedInboundEvent(
+  event: ExternalChatInboundEvent,
+  code: 'ChatProviderInvalidWebhook' | 'ChatProviderInvalidResponse',
+): ExternalChatInboundEvent {
+  if (
+    Buffer.byteLength(JSON.stringify(event), 'utf8') >
+      EXTERNAL_CHAT_NORMALIZED_INBOUND_EVENT_MAX_BYTES
+  ) {
+    invalidAdapterValue(code, 'The normalized provider event exceeds the durable size limit.')
+  }
+  return event
+}
+
+/**
  * Normalizes one inbound event using the requested boundary error classification.
  *
  * @param value - Candidate event.
@@ -414,16 +445,6 @@ function normalizeInboundEventWithCode(
     'external Workspace ID',
     code,
   )
-  const conversationExternalId = readIdentifier(
-    record.conversationExternalId,
-    'external conversation ID',
-    code,
-  )
-  const threadExternalId = readIdentifier(
-    record.threadExternalId,
-    'external thread ID',
-    code,
-  )
   const occurredAt = readTimestamp(record.occurredAt, 'provider event timestamp', code)
   const externalSequence = readOptionalBoundedText(
     record.externalSequence,
@@ -444,19 +465,112 @@ function normalizeInboundEventWithCode(
     installationId,
     provider,
     externalWorkspaceId,
-    conversationExternalId,
-    threadExternalId,
     occurredAt,
     ...(externalSequence === undefined ? {} : { externalSequence }),
     ...(originOperationId === undefined ? {} : { originOperationId }),
   }
+  if (type === 'source.lifecycle-changed') {
+    const resourceType = readResourceType(record.resourceType, code)
+    const availability = readAvailability(record.availability, code)
+    const state = readSourceState(record.state, code)
+    if (state === 'completed' && resourceType !== 'thread') {
+      invalidAdapterValue(code, 'Only a thread lifecycle resource may be completed.')
+    }
+    const sourcePermalink = readOptionalHttpsPermalink(
+      record.sourcePermalink,
+      'lifecycle source permalink',
+      code,
+    )
+    if (
+      (mustOmitSourceContent(availability, state) || state === 'deleted') &&
+      sourcePermalink !== undefined
+    ) {
+      invalidAdapterValue(code, 'A restrictive source lifecycle event contains a permalink.')
+    }
+    const lifecycle = {
+      ...base,
+      schemaVersion: EXTERNAL_CHAT_SCHEMA_VERSION,
+      type,
+      availability,
+      state,
+      reasonCode: readBoundedText(
+        record.reasonCode,
+        'source lifecycle reason code',
+        MAX_DISPLAY_TEXT_BYTES,
+        code,
+      ),
+      ...(sourcePermalink === undefined ? {} : { sourcePermalink }),
+    }
+    if (resourceType === 'workspace') {
+      return { ...lifecycle, schemaVersion: EXTERNAL_CHAT_SCHEMA_VERSION, resourceType }
+    }
+    const conversationExternalId = readIdentifier(
+      record.conversationExternalId,
+      'external conversation ID',
+      code,
+    )
+    if (resourceType === 'conversation') {
+      return {
+        ...lifecycle,
+        schemaVersion: EXTERNAL_CHAT_SCHEMA_VERSION,
+        resourceType,
+        conversationExternalId,
+      }
+    }
+    const threadExternalId = readIdentifier(
+      record.threadExternalId,
+      'external thread ID',
+      code,
+    )
+    if (resourceType === 'thread') {
+      return {
+        ...lifecycle,
+        schemaVersion: EXTERNAL_CHAT_SCHEMA_VERSION,
+        resourceType,
+        conversationExternalId,
+        threadExternalId,
+      }
+    }
+    const resourceExternalId = readIdentifier(
+      record.resourceExternalId,
+      'external lifecycle resource ID',
+      code,
+    )
+    if (resourceType === 'message') return {
+      ...lifecycle,
+      schemaVersion: EXTERNAL_CHAT_SCHEMA_VERSION,
+      resourceType,
+      conversationExternalId,
+      threadExternalId,
+      resourceExternalId,
+    }
+    return {
+      ...lifecycle,
+      schemaVersion: EXTERNAL_CHAT_SCHEMA_VERSION,
+      resourceType,
+      conversationExternalId,
+      threadExternalId,
+      resourceExternalId,
+    }
+  }
+  const conversationExternalId = readIdentifier(
+    record.conversationExternalId,
+    'external conversation ID',
+    code,
+  )
+  const threadExternalId = readIdentifier(
+    record.threadExternalId,
+    'external thread ID',
+    code,
+  )
+  const threadBase = { ...base, conversationExternalId, threadExternalId }
   if (type === 'message.created') {
     const message = normalizeChatProviderMessage(record.message)
-    return { ...base, schemaVersion: EXTERNAL_CHAT_SCHEMA_VERSION, type, message }
+    return { ...threadBase, schemaVersion: EXTERNAL_CHAT_SCHEMA_VERSION, type, message }
   }
   if (type === 'message.edited') {
     const message = normalizeChatProviderMessage(record.message)
-    return { ...base, schemaVersion: EXTERNAL_CHAT_SCHEMA_VERSION, type, message }
+    return { ...threadBase, schemaVersion: EXTERNAL_CHAT_SCHEMA_VERSION, type, message }
   }
   if (type === 'message.deleted') {
     const sourcePermalink = readOptionalHttpsPermalink(
@@ -465,7 +579,7 @@ function normalizeInboundEventWithCode(
       code,
     )
     return {
-      ...base,
+      ...threadBase,
       schemaVersion: EXTERNAL_CHAT_SCHEMA_VERSION,
       type,
       externalMessageId: readIdentifier(record.externalMessageId, 'external message ID', code),
@@ -486,7 +600,7 @@ function normalizeInboundEventWithCode(
       code,
     )
     return {
-      ...base,
+      ...threadBase,
       schemaVersion: EXTERNAL_CHAT_SCHEMA_VERSION,
       type,
       externalVersion: readBoundedText(
@@ -506,7 +620,7 @@ function normalizeInboundEventWithCode(
       code,
     )
     return {
-      ...base,
+      ...threadBase,
       schemaVersion: EXTERNAL_CHAT_SCHEMA_VERSION,
       type,
       externalVersion: readBoundedText(
@@ -519,43 +633,7 @@ function normalizeInboundEventWithCode(
       reopenedAt: readTimestamp(record.reopenedAt, 'thread reopen timestamp', code),
     }
   }
-  const resourceType = readResourceType(record.resourceType, code)
-  const availability = readAvailability(record.availability, code)
-  const state = readSourceState(record.state, code)
-  if (state === 'completed' && resourceType !== 'thread') {
-    invalidAdapterValue(code, 'Only a thread lifecycle resource may be completed.')
-  }
-  const sourcePermalink = readOptionalHttpsPermalink(
-    record.sourcePermalink,
-    'lifecycle source permalink',
-    code,
-  )
-  if (
-    (mustOmitSourceContent(availability, state) || state === 'deleted') &&
-    sourcePermalink !== undefined
-  ) {
-    invalidAdapterValue(code, 'A restrictive source lifecycle event contains a permalink.')
-  }
-  return {
-    ...base,
-    schemaVersion: EXTERNAL_CHAT_SCHEMA_VERSION,
-    type,
-    resourceType,
-    resourceExternalId: readIdentifier(
-      record.resourceExternalId,
-      'external lifecycle resource ID',
-      code,
-    ),
-    availability,
-    state,
-    reasonCode: readBoundedText(
-      record.reasonCode,
-      'source lifecycle reason code',
-      MAX_DISPLAY_TEXT_BYTES,
-      code,
-    ),
-    ...(sourcePermalink === undefined ? {} : { sourcePermalink }),
-  }
+  invalidAdapterValue(code, 'The provider returned an unsupported event type.')
 }
 
 /**
@@ -1211,7 +1289,10 @@ function isLocalOrIpHost(hostname: string): boolean {
  */
 function isSensitivePermalinkQueryKey(key: string): boolean {
   const normalized = key.toLowerCase().replaceAll(/[^a-z0-9]/gu, '')
-  return normalized === 'token' ||
+  return normalized.startsWith('xamz') ||
+    normalized.startsWith('xgoog') ||
+    normalized.endsWith('pubsecret') ||
+    normalized === 'token' ||
     normalized === 'accesstoken' ||
     normalized === 'refreshtoken' ||
     normalized === 'signature' ||

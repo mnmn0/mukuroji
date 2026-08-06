@@ -30,13 +30,18 @@ import {
   createExternalChatFingerprint,
   type DeferredExternalChatEvent,
   ExternalChatError,
+  type ExternalChatOutboundRetryPermit,
   InMemoryExternalChatStore,
+  type ReleaseExternalChatOutboundRetryPermitInput,
+  type RenewExternalChatOutboundRetryPermitInput,
+  type ValidateExternalChatOutboundRetryPermitInput,
 } from './external-chat'
 import {
   ExternalChatSyncPortError,
   ExternalChatSyncService,
   type ExternalChatSyncAccessPort,
   type ExternalChatSyncApplyResourceLifecycleInput,
+  type ExternalChatSyncApplyResourceLifecycleResult,
   type ExternalChatSyncAttachmentPort,
   type ExternalChatSyncAuditPort,
   type ExternalChatSyncAuditRecord,
@@ -59,6 +64,13 @@ import {
   type ExternalChatSyncUpdateCommentInput,
   type ExternalChatSyncWorkItemPort,
 } from './external-chat-sync-service'
+import {
+  ExternalChatResyncWorker,
+  type ExternalChatFullResyncBoundary,
+  type ExternalChatFullResyncSeenMessageInput,
+  type ExternalChatResyncReconciliationPort,
+  type ExternalChatResyncRedactionInput,
+} from './external-chat-resync-worker'
 import {
   type ExternalChatOutboundDeadLetterInput,
   type ExternalChatOutboundRetryConcurrencyInput,
@@ -190,17 +202,39 @@ class SyntheticOutboundRetryConcurrencyPort {
   readonly acquisitions: ExternalChatOutboundRetryConcurrencyInput[] = []
 
   /** Permit release scopes in call order. */
-  readonly releases: ExternalChatOutboundRetryConcurrencyInput[] = []
+  readonly releases: ReleaseExternalChatOutboundRetryPermitInput[] = []
+
+  /** In-memory durable permit semantics exercised by the worker integration tests. */
+  private readonly store = new InMemoryExternalChatStore()
 
   /** Acquires every synthetic installation permit immediately. */
-  async acquire(input: ExternalChatOutboundRetryConcurrencyInput): Promise<boolean> {
+  async acquireOutboundRetryPermit(
+    input: ExternalChatOutboundRetryConcurrencyInput,
+  ): Promise<ExternalChatOutboundRetryPermit | undefined> {
     this.acquisitions.push(input)
-    return true
+    return await this.store.acquireOutboundRetryPermit(input)
+  }
+
+  /** Renews one exact synthetic installation permit. */
+  async renewOutboundRetryPermit(
+    input: RenewExternalChatOutboundRetryPermitInput,
+  ): Promise<ExternalChatOutboundRetryPermit | undefined> {
+    return await this.store.renewOutboundRetryPermit(input)
+  }
+
+  /** Validates one exact synthetic installation permit immediately before provider work. */
+  async validateOutboundRetryPermit(
+    input: ValidateExternalChatOutboundRetryPermitInput,
+  ): Promise<boolean> {
+    return await this.store.validateOutboundRetryPermit(input)
   }
 
   /** Releases one previously acquired synthetic permit. */
-  async release(input: ExternalChatOutboundRetryConcurrencyInput): Promise<void> {
+  async releaseOutboundRetryPermit(
+    input: ReleaseExternalChatOutboundRetryPermitInput,
+  ): Promise<boolean> {
     this.releases.push(input)
+    return await this.store.releaseOutboundRetryPermit(input)
   }
 }
 
@@ -223,6 +257,9 @@ class StrictDeferredFingerprintStore extends InMemoryExternalChatStore {
   /** Queue size observed immediately before the injected receipt completion failure. */
   outboundQueueSizeBeforeCompletionFailure?: number
 
+  /** Optional one-shot interleaving invoked after an outbound retry row becomes durable. */
+  afterNextOutboundDefer?: () => Promise<void>
+
   /** Optional one-shot interleaving invoked immediately before a binding write. */
   beforePutBinding?: () => Promise<void>
 
@@ -238,6 +275,15 @@ class StrictDeferredFingerprintStore extends InMemoryExternalChatStore {
   /** Optional one-shot interleaving immediately before a parent-fenced link update. */
   beforeNextParentFencedUpdate?: () => Promise<void>
 
+  /** Optional one-shot interleaving immediately before a restrictive deferred-content purge. */
+  beforeNextRestrictivePurge?: () => Promise<void>
+
+  /** Optional one-shot interleaving after a completed thread lifecycle is read for acknowledgement. */
+  afterNextThreadLifecycleRead?: () => Promise<void>
+
+  /** Number of outbound restrictive purge boundaries reached by the service. */
+  outboundRestrictivePurgeCallCount = 0
+
   /** Rejects a deferred row whose fingerprint includes receipt-only authentication material. */
   override async deferEvent(event: DeferredExternalChatEvent): Promise<void> {
     if (event.fingerprint !== createExternalChatFingerprint(event.event)) {
@@ -247,6 +293,16 @@ class StrictDeferredFingerprintStore extends InMemoryExternalChatStore {
       )
     }
     await super.deferEvent(event)
+  }
+
+  /** Runs one permit-loss interleaving after a deferred outbound row commits. */
+  override async deferOutboundEvent(
+    event: Parameters<InMemoryExternalChatStore['deferOutboundEvent']>[0],
+  ): Promise<void> {
+    await super.deferOutboundEvent(event)
+    const hook = this.afterNextOutboundDefer
+    this.afterNextOutboundDefer = undefined
+    if (hook) await hook()
   }
 
   /** Records that a durable parent fence is published before child enumeration. */
@@ -272,7 +328,8 @@ class StrictDeferredFingerprintStore extends InMemoryExternalChatStore {
   override async updateLink(
     input: Parameters<InMemoryExternalChatStore['updateLink']>[0],
   ): ReturnType<InMemoryExternalChatStore['updateLink']> {
-    const hook = input.expectedParentLifecycleFence === undefined
+    const hook = input.expectedParentLifecycleFence === undefined &&
+        input.expectedParentLifecycleFences === undefined
       ? undefined
       : this.beforeNextParentFencedUpdate
     if (hook) {
@@ -280,6 +337,35 @@ class StrictDeferredFingerprintStore extends InMemoryExternalChatStore {
       await hook()
     }
     return await super.updateLink(input)
+  }
+
+  /** Runs one lifecycle recovery interleaving before delegating a destructive queue purge. */
+  override async purgeDeferredEventsForLink(
+    ...input: Parameters<InMemoryExternalChatStore['purgeDeferredEventsForLink']>
+  ): ReturnType<InMemoryExternalChatStore['purgeDeferredEventsForLink']> {
+    const hook = this.beforeNextRestrictivePurge
+    this.beforeNextRestrictivePurge = undefined
+    if (hook) await hook()
+    return await super.purgeDeferredEventsForLink(...input)
+  }
+
+  /** Records whether cancellation stopped the second destructive purge boundary. */
+  override async purgeDeferredOutboundEventsForLink(
+    ...input: Parameters<InMemoryExternalChatStore['purgeDeferredOutboundEventsForLink']>
+  ): ReturnType<InMemoryExternalChatStore['purgeDeferredOutboundEventsForLink']> {
+    this.outboundRestrictivePurgeCallCount += 1
+    return await super.purgeDeferredOutboundEventsForLink(...input)
+  }
+
+  /** Runs one permit-loss interleaving after reading a lifecycle and before acknowledgement. */
+  override async getThreadLifecycle(
+    ...input: Parameters<InMemoryExternalChatStore['getThreadLifecycle']>
+  ): ReturnType<InMemoryExternalChatStore['getThreadLifecycle']> {
+    const lifecycle = await super.getThreadLifecycle(...input)
+    const hook = this.afterNextThreadLifecycleRead
+    this.afterNextThreadLifecycleRead = undefined
+    if (hook) await hook()
+    return lifecycle
   }
 
   /** Fails once after verifying durable outbound work preceded receipt completion. */
@@ -583,9 +669,12 @@ class SyntheticCollaborationPort implements ExternalChatSyncCollaborationPort {
   /** Idempotently records redaction and lifecycle changes for imported resources. */
   async applyExternalResourceLifecycle(
     input: ExternalChatSyncApplyResourceLifecycleInput,
-  ): Promise<void> {
-    if (this.lifecycleInputs.some((current) => current.operationId === input.operationId)) return
+  ): Promise<ExternalChatSyncApplyResourceLifecycleResult> {
+    if (this.lifecycleInputs.some((current) => current.operationId === input.operationId)) {
+      return { kind: 'stale' }
+    }
     this.lifecycleInputs.push(input)
+    return { kind: 'applied' }
   }
 
   /** Idempotently redacts every imported projection owned by a restrictive parent link. */
@@ -720,6 +809,102 @@ class SyntheticAuditPort implements ExternalChatSyncAuditPort {
   }
 }
 
+/** Operation-owned reconciliation boundary used by resynchronization integration scenarios. */
+class SyntheticResyncReconciliationPort implements ExternalChatResyncReconciliationPort {
+  /** Durable link and parent lifecycle state used to validate restrictive cleanup authority. */
+  private readonly store: StrictDeferredFingerprintStore
+
+  /** Exact accepted full-resync operation boundary. */
+  private boundary?: ExternalChatFullResyncBoundary
+
+  /** Provider message identities seen by the authoritative traversal. */
+  readonly seenMessageIds: string[] = []
+
+  /** Whether the authoritative full traversal reached reconciliation. */
+  reconciled = false
+
+  /** Restrictive cleanup requests that retained their exact lifecycle authority. */
+  readonly redactions: ExternalChatResyncRedactionInput[] = []
+
+  /**
+   * Creates a synthetic durable reconciliation boundary.
+   *
+   * @param store - Durable link and parent lifecycle state.
+   */
+  constructor(store: StrictDeferredFingerprintStore) {
+    this.store = store
+  }
+
+  /** Creates or idempotently replays one exact full-resync manifest. */
+  async beginFullResync(input: ExternalChatFullResyncBoundary): Promise<boolean> {
+    if (this.boundary) return sameSyntheticResyncBoundary(this.boundary, input)
+    this.boundary = { ...input }
+    return true
+  }
+
+  /** Records one provider message under the exact accepted operation boundary. */
+  async recordFullResyncMessageSeen(
+    input: ExternalChatFullResyncSeenMessageInput,
+  ): Promise<boolean> {
+    if (!this.boundary || !sameSyntheticResyncBoundary(this.boundary, input)) return false
+    if (!this.seenMessageIds.includes(input.externalMessageId)) {
+      this.seenMessageIds.push(input.externalMessageId)
+    }
+    return true
+  }
+
+  /** Marks unseen-binding reconciliation complete for the exact accepted operation. */
+  async reconcileFullResync(input: ExternalChatFullResyncBoundary): Promise<boolean> {
+    if (!this.boundary || !sameSyntheticResyncBoundary(this.boundary, input)) return false
+    this.reconciled = true
+    return true
+  }
+
+  /** Records restrictive cleanup only while its link and parent authority remain exact. */
+  async redactRestrictiveResyncResources(
+    input: ExternalChatResyncRedactionInput,
+  ): Promise<boolean> {
+    const current = await this.store.getLink(input.workspaceId, input.linkId)
+    if (
+      !current ||
+      !current.active ||
+      current.link.revision !== input.ownerLinkRevision ||
+      current.link.teamId !== input.teamId ||
+      current.link.workItemId !== input.workItemId ||
+      current.sourceAuthorizationRevision > input.authorizationRevision
+    ) return false
+    const parentFences = await this.store.getParentLifecycleFences(
+      input.workspaceId,
+      input.linkId,
+    )
+    if (
+      parentFences === undefined ||
+      createExternalChatFingerprint(parentFences) !==
+        createExternalChatFingerprint(input.expectedParentLifecycleFences)
+    ) return false
+    this.redactions.push(input)
+    return true
+  }
+}
+
+/**
+ * Compares every immutable field of two synthetic resynchronization boundaries.
+ *
+ * @param left - Existing accepted operation boundary.
+ * @param right - Candidate replay boundary.
+ * @returns Whether both values identify the exact same operation generation.
+ */
+function sameSyntheticResyncBoundary(
+  left: ExternalChatFullResyncBoundary,
+  right: ExternalChatFullResyncBoundary,
+): boolean {
+  return left.workspaceId === right.workspaceId &&
+    left.linkId === right.linkId &&
+    left.operationId === right.operationId &&
+    left.ownerLinkRevision === right.ownerLinkRevision &&
+    left.authorizationRevision === right.authorizationRevision
+}
+
 /** Synthetic Slack implementation that retains every provider-side mutation. */
 class SyntheticChatProviderAdapter implements ChatProviderAdapter {
   /** Immutable provider capability declaration. */
@@ -775,6 +960,9 @@ class SyntheticChatProviderAdapter implements ChatProviderAdapter {
 
   /** Optional one-shot callback executed after a provider page is read but before it returns. */
   afterNextThreadPageRead?: () => Promise<void>
+
+  /** Optional one-shot interleaving immediately before a provider mutation authority guard. */
+  beforeNextMutationAuthorityCheck?: () => Promise<void>
 
   /** Optional signature-verified normalized webhook returned by the next raw request. */
   nextNormalizedWebhook?: ChatProviderNormalizedWebhook
@@ -919,7 +1107,9 @@ class SyntheticChatProviderAdapter implements ChatProviderAdapter {
 
   /** Creates or idempotently recovers one provider reply. */
   async createReply(input: CreateChatProviderReplyInput): Promise<ExternalChatMessage> {
+    this.requireActiveSignal(input.signal)
     this.requireScope(input.authorization, input.source)
+    await this.assertMutationAuthority(input.assertCurrentAuthority)
     const replayed = this.repliesByOperation.get(input.operationId)
     if (replayed) return replayed
     if (this.rateLimitNextReplyAt) {
@@ -957,9 +1147,11 @@ class SyntheticChatProviderAdapter implements ChatProviderAdapter {
 
   /** Applies one provider message edit. */
   async editMessage(input: EditChatProviderMessageInput): Promise<ExternalChatMessage> {
+    this.requireActiveSignal(input.signal)
+    this.requireScope(input.authorization, input.source)
+    await this.assertMutationAuthority(input.assertCurrentAuthority)
     const replayed = this.editResultsByOperation.get(input.operationId)
     if (replayed) return replayed
-    this.requireScope(input.authorization, input.source)
     const queued = this.nextEditResults.shift()
     if (queued) {
       this.editInputs.push(input)
@@ -990,9 +1182,11 @@ class SyntheticChatProviderAdapter implements ChatProviderAdapter {
 
   /** Applies one provider message tombstone. */
   async deleteMessage(input: DeleteChatProviderMessageInput): Promise<ExternalChatMessage> {
+    this.requireActiveSignal(input.signal)
+    this.requireScope(input.authorization, input.source)
+    await this.assertMutationAuthority(input.assertCurrentAuthority)
     const replayed = this.deleteResultsByOperation.get(input.operationId)
     if (replayed) return replayed
-    this.requireScope(input.authorization, input.source)
     const queued = this.nextDeleteResults.shift()
     if (queued) {
       this.deleteInputs.push(input)
@@ -1030,9 +1224,11 @@ class SyntheticChatProviderAdapter implements ChatProviderAdapter {
   async setThreadCompletion(
     input: SetChatProviderThreadCompletionInput,
   ): Promise<ChatProviderThreadMutationResult> {
+    this.requireActiveSignal(input.signal)
+    this.requireScope(input.authorization, input.source)
+    await this.assertMutationAuthority(input.assertCurrentAuthority)
     const replayed = this.completionResultsByOperation.get(input.operationId)
     if (replayed) return replayed
-    this.requireScope(input.authorization, input.source)
     this.completionInputs.push(input)
     const result = this.nextCompletionResults.shift() ?? {
       externalVersion: String(this.completionInputs.length + 1),
@@ -1065,6 +1261,34 @@ class SyntheticChatProviderAdapter implements ChatProviderAdapter {
     }
   }
 
+  /**
+   * Rejects a provider mutation before commit after its retry owner loses authority.
+   *
+   * @param signal - Cancellation fence supplied by the synchronization service.
+   */
+  private requireActiveSignal(signal: AbortSignal): void {
+    if (!signal.aborted) return
+    throw new ChatProviderAdapterError(
+      'ChatProviderTransientFailure',
+      'The synthetic provider mutation was cancelled before commit.',
+      { retryable: true },
+    )
+  }
+
+  /**
+   * Runs a configured race interleaving before the adapter's provider-I/O authority check.
+   *
+   * @param assertCurrentAuthority - Exact guard supplied by the synchronization service.
+   */
+  private async assertMutationAuthority(
+    assertCurrentAuthority: () => Promise<void>,
+  ): Promise<void> {
+    const beforeCheck = this.beforeNextMutationAuthorityCheck
+    this.beforeNextMutationAuthorityCheck = undefined
+    if (beforeCheck) await beforeCheck()
+    await assertCurrentAuthority()
+  }
+
   /** Reads a provider message or raises a classified missing-source error. */
   private requireMessage(externalMessageId: string): ExternalChatMessage {
     const message = this.messages.get(externalMessageId)
@@ -1079,6 +1303,109 @@ class SyntheticChatProviderAdapter implements ChatProviderAdapter {
 }
 
 describe('external chat synchronization end-to-end fixture', () => {
+  test('imports a non-empty restricted source under the newer accepted resync generation', async () => {
+    const fixture = await createSyntheticFixture()
+    const current = await fixture.store.getLink(workspaceId, linkId)
+    if (!current) throw new Error('Expected the seeded link before resynchronization.')
+    const restricted = await fixture.store.updateLink({
+      workspaceId,
+      expectedRevision: current.link.revision,
+      lifecycleState: {
+        ...current.lifecycleState,
+        workspace: {
+          authorizationRevision: 1,
+          availability: 'permission-lost',
+          state: 'active',
+          occurredAt: '2026-08-06T03:00:02.000Z',
+          eventId: 'event-old-workspace-permission-loss',
+        },
+      },
+      link: {
+        ...current.link,
+        sourceAvailability: 'permission-lost',
+        syncStatus: 'paused',
+        revision: current.link.revision + 1,
+        updatedAt: '2026-08-06T03:00:02.000Z',
+      },
+    })
+    if (restricted.kind !== 'updated') {
+      throw new Error('Expected the old authorization restriction to be persisted.')
+    }
+    const fenced = await fixture.store.fenceParentLifecycle({
+      workspaceId,
+      provider: fixture.link.provider,
+      installationId,
+      externalWorkspaceId: fixture.link.source.externalWorkspaceId,
+      authorizationRevision: 1,
+      availability: 'permission-lost',
+      state: 'active',
+      restrictive: true,
+      eventId: 'event-old-workspace-permission-loss-fence',
+      operationId: 'operation-old-workspace-permission-loss-fence',
+      occurredAt: '2026-08-06T03:00:02.000Z',
+    })
+    if (fenced.kind !== 'applied') {
+      throw new Error('Expected the old authorization parent fence to be persisted.')
+    }
+    fixture.provider.authorization.authorizationRevision = 2
+    const reconciliation = new SyntheticResyncReconciliationPort(fixture.store)
+    const worker = new ExternalChatResyncWorker(
+      {
+        store: fixture.store,
+        adapters: new ChatProviderAdapterRegistry([fixture.provider]),
+        access: fixture.access,
+        processor: fixture.service,
+        reconciliation,
+        clock: fixture.clock,
+      },
+      {
+        pageSize: 10,
+        maximumPagesPerRun: 5,
+        maximumMessagesPerRun: 10,
+      },
+    )
+
+    const result = await worker.process({
+      workspaceId,
+      linkId,
+      mode: 'full',
+      linkRevision: restricted.record.link.revision,
+      authorizationRevision: 2,
+      operationId: 'operation-nonempty-reauthorized-resync',
+      correlationId: 'correlation-nonempty-reauthorized-resync',
+      acceptedAt: fixture.clock.now(),
+    })
+
+    expect(result).toMatchObject({
+      kind: 'completed',
+      processedPageCount: 1,
+      processedMessageCount: 1,
+    })
+    expect(reconciliation.seenMessageIds).toEqual(['root-message'])
+    expect(reconciliation.reconciled).toBe(true)
+    expect(reconciliation.redactions).toHaveLength(0)
+    expect(fixture.collaboration.createInputs).toHaveLength(1)
+    expect(await fixture.store.getLink(workspaceId, linkId)).toMatchObject({
+      sourceAuthorizationRevision: 2,
+      lifecycleState: {
+        workspace: {
+          authorizationRevision: 1,
+          availability: 'permission-lost',
+        },
+        thread: {
+          authorizationRevision: 2,
+          availability: 'available',
+          state: 'active',
+        },
+      },
+      link: {
+        sourceAvailability: 'available',
+        sourceState: 'active',
+        syncStatus: 'synced',
+      },
+    })
+  })
+
   test('deduplicates inbound replies and drains an out-of-order edit before edit and delete', async () => {
     const fixture = await createSyntheticFixture()
     const attachment = Object.assign(createProviderAttachmentWithClaimedFileId(
@@ -1117,6 +1444,14 @@ describe('external chat synchronization end-to-end fixture', () => {
     )
     expect(parentBinding?.binding.importedFileIds).toEqual(['file-main'])
     expect(fixture.attachments.inputs[0]?.authorization).toEqual(fixture.provider.authorization)
+    expect(fixture.attachments.inputs[0]?.expectedParentLifecycleFences).toEqual({
+      workspace: undefined,
+      conversation: undefined,
+    })
+    expect(fixture.collaboration.createInputs[0]?.expectedParentLifecycleFences).toEqual({
+      workspace: undefined,
+      conversation: undefined,
+    })
     expect(fixture.attachments.inputs[0]?.attachments[0]).not.toHaveProperty('importedFileId')
     expect(fixture.attachments.inputs[0]?.attachments[0]).not.toHaveProperty(
       'temporaryDownloadUrl',
@@ -1176,7 +1511,7 @@ describe('external chat synchronization end-to-end fixture', () => {
       version: 2,
     })
     expect(
-      await fixture.store.listDueDeferredEvents(workspaceId, linkId, fixture.clock.now(), 10),
+      await fixture.store.listDeferredEvents(workspaceId, linkId, 10),
     ).toHaveLength(0)
 
     const mainEdit = createMessage(
@@ -1530,14 +1865,14 @@ describe('external chat synchronization end-to-end fixture', () => {
       syncStatus: 'pending',
     })
     expect(
-      await fixture.store.listDueDeferredEvents(workspaceId, linkId, leaseExpiresAt, 10),
+      await fixture.store.listDeferredEvents(workspaceId, linkId, 10),
     ).toHaveLength(1)
 
     fixture.clock.set(leaseExpiresAt)
     expect((await fixture.service.processInbound({ workspaceId, event })).kind).toBe('applied')
     expect(fixture.workItems.inputs).toHaveLength(1)
     expect(
-      await fixture.store.listDueDeferredEvents(workspaceId, linkId, fixture.clock.now(), 10),
+      await fixture.store.listDeferredEvents(workspaceId, linkId, 10),
     ).toHaveLength(0)
   })
 
@@ -1598,6 +1933,10 @@ describe('external chat synchronization end-to-end fixture', () => {
       workspaceId,
       linkId,
       expectedLinkRevision: 1,
+      expectedParentLifecycleFences: {
+        workspace: undefined,
+        conversation: undefined,
+      },
       teamId: duplicateTeamId,
       workItemId: duplicateWorkItemId,
       completed: true,
@@ -1920,6 +2259,7 @@ describe('external chat synchronization end-to-end fixture', () => {
       processor: fixture.service,
       concurrency,
       deadLetter,
+      clock: fixture.clock,
     })
     await expect(worker.processDueBatch({
       workspaceId,
@@ -1976,6 +2316,7 @@ describe('external chat synchronization end-to-end fixture', () => {
       processor: fixture.service,
       concurrency: new SyntheticOutboundRetryConcurrencyPort(),
       deadLetter: new SyntheticOutboundDeadLetterPort(),
+      clock: fixture.clock,
     })
     await expect(worker.processDueBatch({
       workspaceId,
@@ -1991,6 +2332,130 @@ describe('external chat synchronization end-to-end fixture', () => {
       event.bodyMarkdown,
     ])
     expect(await fixture.store.listDeferredOutboundEvents(workspaceId, linkId, 10)).toEqual([])
+  })
+
+  test('stops outbound completion after its durable retry permit is lost', async () => {
+    const fixture = await createSyntheticFixture()
+    fixture.provider.rateLimitNextReplyAt = providerRetryAt
+    const abortController = new AbortController()
+    let permitCurrent = true
+    fixture.store.afterNextOutboundDefer = async () => {
+      permitCurrent = false
+    }
+    /** Revalidates the synthetic retry permit and propagates loss through the shared signal. */
+    const assertCurrentPermit = async (): Promise<void> => {
+      if (permitCurrent) return
+      abortController.abort()
+      throw new ExternalChatError(
+        'ExternalChatOperationConflict',
+        'Synthetic outbound retry permit loss.',
+        true,
+      )
+    }
+    const event = {
+      type: 'comment.created',
+      workspaceId,
+      linkId,
+      teamId: duplicateTeamId,
+      workItemId: duplicateWorkItemId,
+      principalId,
+      correlationId: 'correlation-outbound-completion-permit-loss',
+      occurredAt: fixture.clock.now(),
+      externalSyncEligible: true,
+      internalCommentId: 'internal-outbound-completion-permit-loss',
+      internalCommentVersion: 1,
+      bodyMarkdown: 'Permit-fenced queued outbound mutation',
+    } satisfies Parameters<ExternalChatSyncService['processOutbound']>[0]
+
+    await expect(fixture.service.processOutbound(event, {
+      signal: abortController.signal,
+      assertCurrentPermit,
+    })).rejects.toThrow('Synthetic outbound retry permit loss.')
+
+    const queued = await fixture.store.listDeferredOutboundEvents(workspaceId, linkId, 10)
+    expect(queued).toHaveLength(1)
+    const deferred = queued[0]
+    if (!deferred) throw new Error('Expected the permit-fenced outbound queue entry.')
+    expect(await fixture.store.claimOutboundOperation({
+      workspaceId,
+      linkId,
+      operationId: deferred.operationId,
+      fingerprint: deferred.fingerprint,
+      claimedAt: fixture.clock.now(),
+      leaseExpiresAt: '2026-08-06T03:01:00.000Z',
+    })).toMatchObject({ kind: 'busy' })
+    expect(fixture.audit.records.size).toBe(0)
+  })
+
+  test('stops a restrictive outbound cascade after permit loss during its first purge', async () => {
+    const fixture = await createSyntheticFixture()
+    await fixture.store.fenceParentLifecycle({
+      workspaceId,
+      provider: fixture.link.provider,
+      installationId: fixture.link.installationId,
+      externalWorkspaceId: fixture.link.source.externalWorkspaceId,
+      authorizationRevision: 1,
+      availability: 'permission-lost',
+      state: 'retained-metadata',
+      restrictive: true,
+      eventId: 'event-outbound-purge-permit-loss',
+      operationId: 'operation-outbound-purge-permit-loss',
+      occurredAt: '2026-08-06T03:00:01.000Z',
+    })
+    const abortController = new AbortController()
+    let permitCurrent = true
+    fixture.store.beforeNextRestrictivePurge = async () => {
+      permitCurrent = false
+      abortController.abort()
+    }
+    /** Revalidates the synthetic permit at every destructive cascade boundary. */
+    const assertCurrentPermit = async (): Promise<void> => {
+      if (permitCurrent) return
+      throw new ExternalChatError(
+        'ExternalChatOperationConflict',
+        'Synthetic restrictive purge permit loss.',
+        true,
+      )
+    }
+
+    await expect(fixture.service.processOutbound(
+      createOutboundCommentCreatedEvent(
+        'internal-comment-purge-permit-loss',
+        'correlation-purge-permit-loss',
+      ),
+      { signal: abortController.signal, assertCurrentPermit },
+    )).rejects.toThrow('outbound retry authority expired')
+    expect(fixture.store.outboundRestrictivePurgeCallCount).toBe(0)
+    expect(fixture.collaboration.redactionAttempts).toBe(0)
+    expect(fixture.provider.replyInputs).toHaveLength(0)
+  })
+
+  test('does not acknowledge a completed lifecycle after permit loss during its read', async () => {
+    const fixture = await createSyntheticFixture()
+    const abortController = new AbortController()
+    let permitCurrent = true
+    fixture.store.afterNextThreadLifecycleRead = async () => {
+      permitCurrent = false
+      abortController.abort()
+    }
+    /** Revalidates the synthetic permit before lifecycle acknowledgement persistence. */
+    const assertCurrentPermit = async (): Promise<void> => {
+      if (permitCurrent) return
+      throw new ExternalChatError(
+        'ExternalChatOperationConflict',
+        'Synthetic lifecycle acknowledgement permit loss.',
+        true,
+      )
+    }
+
+    await expect(fixture.service.processOutbound(
+      createWorkItemCompletionEvent(true, 1),
+      { signal: abortController.signal, assertCurrentPermit },
+    )).rejects.toThrow('outbound retry authority expired')
+    expect(await fixture.store.getThreadLifecycle(workspaceId, linkId, 'slack'))
+      .toMatchObject({ lease: { status: 'completed' } })
+    expect(fixture.provider.completionInputs).toHaveLength(1)
+    expect(fixture.audit.records.size).toBe(0)
   })
 
   test('recovers exact edit delete and completion results after provider response loss', async () => {
@@ -2016,6 +2481,7 @@ describe('external chat synchronization end-to-end fixture', () => {
       processor: fixture.service,
       concurrency: new SyntheticOutboundRetryConcurrencyPort(),
       deadLetter: new SyntheticOutboundDeadLetterPort(),
+      clock: fixture.clock,
     })
     fixture.provider.loseNextEditResponse = true
     const edited = {
@@ -2117,10 +2583,9 @@ describe('external chat synchronization end-to-end fixture', () => {
     )
     expect(await fixture.service.processInbound({ workspaceId, event: deferredEvent }))
       .toMatchObject({ kind: 'deferred', reason: 'out-of-order' })
-    expect(await fixture.store.listDueDeferredEvents(
+    expect(await fixture.store.listDeferredEvents(
       workspaceId,
       linkId,
-      '2026-08-06T04:00:00.000Z',
       10,
     )).toHaveLength(1)
 
@@ -2156,16 +2621,16 @@ describe('external chat synchronization end-to-end fixture', () => {
       workItemId: duplicateWorkItemId,
       linkId,
       expectedLinkRevision: 2,
+      expectedParentLifecycleFences: { workspace: undefined, conversation: undefined },
       availability: 'permission-lost',
       state: 'active',
       operationId: outcome.operationId,
       correlationId: outboundEvent.correlationId,
       occurredAt: outboundEvent.occurredAt,
     }])
-    expect(await fixture.store.listDueDeferredEvents(
+    expect(await fixture.store.listDeferredEvents(
       workspaceId,
       linkId,
-      '2026-08-06T04:00:00.000Z',
       10,
     )).toHaveLength(0)
   })
@@ -2245,6 +2710,52 @@ describe('external chat synchronization end-to-end fixture', () => {
         errorCode: 'ExternalChatAuthorizationFailed',
       },
     })
+  })
+
+  test('rejects source views before and during a restrictive parent fence', async () => {
+    const alreadyFenced = await createSyntheticFixture()
+    await alreadyFenced.store.fenceParentLifecycle({
+      workspaceId,
+      provider: alreadyFenced.link.provider,
+      installationId: alreadyFenced.link.installationId,
+      externalWorkspaceId: alreadyFenced.link.source.externalWorkspaceId,
+      authorizationRevision: 1,
+      availability: 'permission-lost',
+      state: 'retained-metadata',
+      restrictive: true,
+      eventId: 'event-source-view-fenced-before-read',
+      operationId: 'operation-source-view-fenced-before-read',
+      occurredAt: '2026-08-06T03:00:01.000Z',
+    })
+    await expect(alreadyFenced.service.getSourceView({
+      principal: { workspaceId, principalId },
+      linkId,
+      limit: 1,
+    })).rejects.toMatchObject({ code: 'ExternalChatAuthorizationFailed' })
+    expect(alreadyFenced.provider.readThreadPageCount).toBe(0)
+
+    const fencedDuringRead = await createSyntheticFixture()
+    fencedDuringRead.provider.afterNextThreadPageRead = async () => {
+      await fencedDuringRead.store.fenceParentLifecycle({
+        workspaceId,
+        provider: fencedDuringRead.link.provider,
+        installationId: fencedDuringRead.link.installationId,
+        externalWorkspaceId: fencedDuringRead.link.source.externalWorkspaceId,
+        authorizationRevision: 1,
+        availability: 'scope-changed',
+        state: 'active',
+        restrictive: true,
+        eventId: 'event-source-view-fenced-during-read',
+        operationId: 'operation-source-view-fenced-during-read',
+        occurredAt: '2026-08-06T03:00:02.000Z',
+      })
+    }
+    await expect(fencedDuringRead.service.getSourceView({
+      principal: { workspaceId, principalId },
+      linkId,
+      limit: 1,
+    })).rejects.toMatchObject({ code: 'ExternalChatAuthorizationFailed' })
+    expect(fencedDuringRead.provider.readThreadPageCount).toBe(1)
   })
 
   test('rejects unbounded, unsafe, redacted-content, duplicate, and cursor-leaking pages', async () => {
@@ -2377,7 +2888,7 @@ describe('external chat synchronization end-to-end fixture', () => {
     expect(fixture.collaboration.redactionAttempts).toBe(2)
     expect(fixture.collaboration.redactionInputs).toHaveLength(1)
     expect(
-      await fixture.store.listDueDeferredEvents(workspaceId, linkId, fixture.clock.now(), 10),
+      await fixture.store.listDeferredEvents(workspaceId, linkId, 10),
     ).toHaveLength(0)
   })
 
@@ -2411,6 +2922,7 @@ describe('external chat synchronization end-to-end fixture', () => {
         workspaceId,
         linkId: link.id,
         event: pendingEvent,
+        expectedParentLifecycleFences: { workspace: undefined, conversation: undefined },
         fingerprint: createExternalChatFingerprint(pendingEvent),
         reason: 'out-of-order',
         attempt: 1,
@@ -2458,10 +2970,9 @@ describe('external chat synchronization end-to-end fixture', () => {
         syncStatus: 'paused',
       })
       expect(
-        await fixture.store.listDueDeferredEvents(
+        await fixture.store.listDeferredEvents(
           workspaceId,
           link.id,
-          '2026-08-06T03:10:00.000Z',
           10,
         ),
       ).toHaveLength(0)
@@ -2469,10 +2980,9 @@ describe('external chat synchronization end-to-end fixture', () => {
     expect((await fixture.store.getLink(workspaceId, otherInstallation.id))?.link)
       .toMatchObject({ sourceAvailability: 'available', sourceState: 'active' })
     expect(
-      await fixture.store.listDueDeferredEvents(
+      await fixture.store.listDeferredEvents(
         workspaceId,
         otherInstallation.id,
-        '2026-08-06T03:10:00.000Z',
         10,
       ),
     ).toHaveLength(1)
@@ -2517,6 +3027,33 @@ describe('external chat synchronization end-to-end fixture', () => {
     })
     expect(fixture.collaboration.redactionInputs.map((input) => input.linkId))
       .not.toContain(newerLinkId)
+
+    const currentGenerationThreadEvent: Extract<
+      ExternalChatInboundEvent,
+      { type: 'source.lifecycle-changed' }
+    > = {
+      ...createParentEventScope(
+        'event-current-thread-after-old-workspace-fence',
+        '2026-08-06T03:00:01.000Z',
+      ),
+      type: 'source.lifecycle-changed',
+      resourceType: 'thread',
+      conversationExternalId: 'fanout-conversation-newer-authorization',
+      threadExternalId: 'fanout-thread-newer-authorization',
+      availability: 'available',
+      state: 'active',
+      reasonCode: 'provider_thread_available',
+    }
+    expect((await fixture.service.processInbound({
+      workspaceId,
+      event: currentGenerationThreadEvent,
+      authorizationRevision: 2,
+    })).kind).toBe('applied')
+    expect((await fixture.store.getLink(workspaceId, newerLinkId))?.link).toMatchObject({
+      sourceAvailability: 'available',
+      sourceState: 'active',
+      syncStatus: 'synced',
+    })
   })
 
   test('skips a child projection when a newer parent fence wins after enumeration', async () => {
@@ -2528,6 +3065,8 @@ describe('external chat synchronization end-to-end fixture', () => {
         installationId: fixture.link.installationId,
         externalWorkspaceId: fixture.link.source.externalWorkspaceId,
         authorizationRevision: 2,
+        availability: 'available',
+        state: 'active',
         restrictive: false,
         eventId: 'event-newer-parent-availability',
         operationId: 'operation-newer-parent-availability',
@@ -2565,6 +3104,104 @@ describe('external chat synchronization end-to-end fixture', () => {
     expect(fixture.collaboration.redactionInputs).toHaveLength(0)
   })
 
+  test('retries a parent projection when only its sibling authority changes', async () => {
+    const fixture = await createSyntheticFixture()
+    fixture.store.beforeNextParentFencedUpdate = async () => {
+      const siblingFence = await fixture.store.fenceParentLifecycle({
+        workspaceId,
+        provider: fixture.link.provider,
+        installationId: fixture.link.installationId,
+        externalWorkspaceId: fixture.link.source.externalWorkspaceId,
+        conversationExternalId: fixture.link.source.conversationExternalId,
+        authorizationRevision: 1,
+        availability: 'available',
+        state: 'active',
+        restrictive: false,
+        eventId: 'event-conversation-sibling-authority',
+        operationId: 'operation-conversation-sibling-authority',
+        occurredAt: '2026-08-06T03:00:01.500Z',
+      })
+      if (siblingFence.kind !== 'applied') {
+        throw new Error('Expected the conversation sibling fence to become authoritative.')
+      }
+    }
+
+    const outcome = await fixture.service.processInbound({
+      workspaceId,
+      event: createParentLifecycleEvent(
+        'event-workspace-restriction-with-sibling-race',
+        'workspace',
+      ),
+      authorizationRevision: 1,
+    })
+
+    expect(outcome.kind).toBe('applied')
+    expect(await fixture.store.getLink(workspaceId, fixture.link.id)).toMatchObject({
+      link: {
+        sourceAvailability: 'permission-lost',
+        sourceState: 'retained-metadata',
+      },
+    })
+    expect(fixture.collaboration.redactionInputs).toHaveLength(1)
+    expect(fixture.collaboration.redactionInputs[0]?.expectedParentLifecycleFences)
+      .toMatchObject({
+        workspace: { eventId: 'event-workspace-restriction-with-sibling-race' },
+        conversation: { eventId: 'event-conversation-sibling-authority' },
+      })
+  })
+
+  test('stops a restrictive cascade when parent recovery wins before purge', async () => {
+    const fixture = await createSyntheticFixture()
+    const sensitiveEvent = createMessageCreatedEvent(
+      'event-sensitive-before-parent-recovery',
+      createMessage('message-sensitive-before-parent-recovery', '1', 'Sensitive body'),
+    )
+    await fixture.store.deferEvent({
+      workspaceId,
+      linkId,
+      event: sensitiveEvent,
+      expectedParentLifecycleFences: { workspace: undefined, conversation: undefined },
+      fingerprint: createExternalChatFingerprint(sensitiveEvent),
+      reason: 'out-of-order',
+      attempt: 1,
+      retryAt: '2026-08-06T03:00:03.000Z',
+      createdAt: initialNow,
+      updatedAt: initialNow,
+    })
+    fixture.store.beforeNextRestrictivePurge = async () => {
+      const recovery = await fixture.store.fenceParentLifecycle({
+        workspaceId,
+        provider: fixture.link.provider,
+        installationId: fixture.link.installationId,
+        externalWorkspaceId: fixture.link.source.externalWorkspaceId,
+        authorizationRevision: 1,
+        availability: 'available',
+        state: 'active',
+        restrictive: false,
+        eventId: 'event-workspace-recovery-before-purge',
+        operationId: 'operation-workspace-recovery-before-purge',
+        occurredAt: '2026-08-06T03:00:03.000Z',
+      })
+      if (recovery.kind !== 'applied') {
+        throw new Error('Expected parent recovery to supersede restrictive cleanup.')
+      }
+    }
+
+    const outcome = await fixture.service.processInbound({
+      workspaceId,
+      event: createParentLifecycleEvent(
+        'event-workspace-restriction-before-purge',
+        'workspace',
+      ),
+      authorizationRevision: 1,
+    })
+
+    expect(outcome).toMatchObject({ kind: 'deferred', reason: 'out-of-order' })
+    expect(fixture.collaboration.redactionInputs).toHaveLength(0)
+    expect((await fixture.store.listDeferredEvents(workspaceId, linkId, 10))
+      .map((deferred) => deferred.event.eventId)).toContain(sensitiveEvent.eventId)
+  })
+
   test('limits a conversation restriction to matching installation-owned links', async () => {
     const fixture = await createSyntheticFixture()
     const sameConversation = await createSiblingLink(fixture, {
@@ -2595,6 +3232,204 @@ describe('external chat synchronization end-to-end fixture', () => {
     expect((await fixture.store.getLink(workspaceId, otherConversation.id))?.link.sourceAvailability)
       .toBe('available')
     expect(fixture.collaboration.redactionInputs).toHaveLength(2)
+  })
+
+  test('does not let an older permissive conversation observation lift a workspace restriction', async () => {
+    const fixture = await createSyntheticFixture()
+    const restricted = createParentLifecycleEvent(
+      'event-workspace-restrictive-t2',
+      'workspace',
+      'slack-channel-e2e',
+      'permission-lost',
+      'retained-metadata',
+      '2026-08-06T03:00:02.000Z',
+    )
+    const permissive = createParentLifecycleEvent(
+      'event-conversation-active-t1',
+      'conversation',
+      'slack-channel-e2e',
+      'available',
+      'active',
+      '2026-08-06T03:00:01.000Z',
+    )
+
+    expect((await fixture.service.processInbound({
+      workspaceId,
+      event: restricted,
+      authorizationRevision: 1,
+    })).kind).toBe('applied')
+    expect((await fixture.service.processInbound({
+      workspaceId,
+      event: permissive,
+      authorizationRevision: 1,
+    })).kind).toBe('applied')
+
+    expect((await fixture.store.getLink(workspaceId, linkId))?.link).toMatchObject({
+      sourceAvailability: 'permission-lost',
+      sourceState: 'retained-metadata',
+      syncStatus: 'paused',
+    })
+  })
+
+  test('does not let a newer active thread observation lift a conversation restriction', async () => {
+    const fixture = await createSyntheticFixture()
+    const restricted = createParentLifecycleEvent(
+      'event-conversation-restrictive-t1',
+      'conversation',
+      'slack-channel-e2e',
+      'permission-lost',
+      'retained-metadata',
+      '2026-08-06T03:00:01.000Z',
+    )
+    const activeThread = createSourceLifecycleEvent(
+      'event-thread-active-t2',
+      'available',
+      'active',
+      '2026-08-06T03:00:02.000Z',
+    )
+
+    expect((await fixture.service.processInbound({
+      workspaceId,
+      event: restricted,
+      authorizationRevision: 1,
+    })).kind).toBe('applied')
+    expect((await fixture.service.processInbound({
+      workspaceId,
+      event: activeThread,
+      authorizationRevision: 1,
+    })).kind).toBe('applied')
+
+    expect((await fixture.store.getLink(workspaceId, linkId))?.link).toMatchObject({
+      sourceAvailability: 'permission-lost',
+      sourceState: 'retained-metadata',
+      syncStatus: 'paused',
+    })
+  })
+
+  test('rejects a stale active thread observation after a restrictive thread watermark', async () => {
+    const fixture = await createSyntheticFixture()
+    const restricted = createSourceLifecycleEvent(
+      'event-thread-restrictive-t2',
+      'permission-lost',
+      'retained-metadata',
+      '2026-08-06T03:00:02.000Z',
+    )
+    const staleActive = createSourceLifecycleEvent(
+      'event-thread-active-t1',
+      'available',
+      'active',
+      '2026-08-06T03:00:01.000Z',
+    )
+
+    expect((await fixture.service.processInbound({
+      workspaceId,
+      event: restricted,
+      authorizationRevision: 1,
+    })).kind).toBe('applied')
+    expect(await fixture.service.processInbound({
+      workspaceId,
+      event: staleActive,
+      authorizationRevision: 1,
+    })).toMatchObject({ kind: 'skipped', reason: 'stale' })
+
+    expect((await fixture.store.getLink(workspaceId, linkId))?.link).toMatchObject({
+      sourceAvailability: 'permission-lost',
+      sourceState: 'retained-metadata',
+      syncStatus: 'paused',
+    })
+  })
+
+  test('keeps a link fail-closed between a workspace fence commit and delayed child fan-out', async () => {
+    const fixture = await createSyntheticFixture()
+    const fenced = await fixture.store.fenceParentLifecycle({
+      workspaceId,
+      provider: fixture.link.provider,
+      installationId: fixture.link.installationId,
+      externalWorkspaceId: fixture.link.source.externalWorkspaceId,
+      authorizationRevision: 1,
+      availability: 'permission-lost',
+      state: 'retained-metadata',
+      restrictive: true,
+      eventId: 'event-workspace-fence-before-child',
+      operationId: 'operation-workspace-fence-before-child',
+      occurredAt: '2026-08-06T03:00:02.000Z',
+    })
+    expect(fenced.kind).toBe('applied')
+    const olderConversationRecovery = createParentLifecycleEvent(
+      'event-conversation-recovery-during-workspace-gap',
+      'conversation',
+      'slack-channel-e2e',
+      'available',
+      'active',
+      '2026-08-06T03:00:01.000Z',
+    )
+
+    expect((await fixture.service.processInbound({
+      workspaceId,
+      event: olderConversationRecovery,
+      authorizationRevision: 1,
+    })).kind).toBe('applied')
+
+    const record = await fixture.store.getLink(workspaceId, linkId)
+    expect(record?.lifecycleState.workspace).toBeUndefined()
+    expect(record?.link).toMatchObject({
+      sourceAvailability: 'permission-lost',
+      sourceState: 'retained-metadata',
+      syncStatus: 'paused',
+    })
+
+    const blockedMessage = createMessageCreatedEvent(
+      'event-message-during-workspace-fanout-gap',
+      createMessage(
+        'external-message-during-workspace-fanout-gap',
+        '1',
+        'This content must not cross a restrictive parent fence.',
+      ),
+    )
+    expect(await fixture.service.processInbound({ workspaceId, event: blockedMessage }))
+      .toMatchObject({ kind: 'skipped', reason: 'paused' })
+    expect(fixture.collaboration.createInputs).toHaveLength(0)
+    expect(fixture.collaboration.updateInputs).toHaveLength(0)
+    expect(fixture.collaboration.deleteInputs).toHaveLength(0)
+    expect(fixture.attachments.inputs).toHaveLength(0)
+
+    const blockedOutbound = await fixture.service.processOutbound(
+      createOutboundCommentCreatedEvent(
+        'internal-comment-during-workspace-fanout-gap',
+        'correlation-outbound-during-workspace-fanout-gap',
+      ),
+    )
+    expect(blockedOutbound).toMatchObject({ kind: 'skipped', reason: 'paused' })
+    expect(fixture.provider.replyInputs).toHaveLength(0)
+  })
+
+  test('rejects a provider mutation when a parent fence wins at adapter I/O time', async () => {
+    const fixture = await createSyntheticFixture()
+    fixture.provider.beforeNextMutationAuthorityCheck = async () => {
+      await fixture.store.fenceParentLifecycle({
+        workspaceId,
+        provider: fixture.link.provider,
+        installationId: fixture.link.installationId,
+        externalWorkspaceId: fixture.link.source.externalWorkspaceId,
+        authorizationRevision: 1,
+        availability: 'scope-changed',
+        state: 'active',
+        restrictive: true,
+        eventId: 'event-parent-fence-at-provider-io',
+        operationId: 'operation-parent-fence-at-provider-io',
+        occurredAt: '2026-08-06T03:00:03.000Z',
+      })
+    }
+
+    const outcome = await fixture.service.processOutbound(
+      createOutboundCommentCreatedEvent(
+        'internal-comment-parent-fence-at-provider-io',
+        'correlation-parent-fence-at-provider-io',
+      ),
+    )
+
+    expect(outcome).toMatchObject({ kind: 'skipped', reason: 'paused' })
+    expect(fixture.provider.replyInputs).toHaveLength(0)
   })
 
   test('applies message and attachment redaction lifecycle exactly once with bounded scope', async () => {
@@ -2651,11 +3486,16 @@ describe('external chat synchronization end-to-end fixture', () => {
         workItemId: duplicateWorkItemId,
         linkId,
         expectedLinkRevision: 2,
+        expectedParentLifecycleFences: {
+          workspace: undefined,
+          conversation: undefined,
+        },
         resourceType: 'message',
         resourceExternalId: 'external-message-redacted',
         availability: 'permission-lost',
         state: 'retained-metadata',
         operationId: messageOutcome.operationId,
+        eventId: messageEvent.eventId,
         correlationId: expectedInboundCorrelationId(messageEvent.correlationId),
         occurredAt: messageEvent.occurredAt,
       },
@@ -2665,11 +3505,16 @@ describe('external chat synchronization end-to-end fixture', () => {
         workItemId: duplicateWorkItemId,
         linkId,
         expectedLinkRevision: 2,
+        expectedParentLifecycleFences: {
+          workspace: undefined,
+          conversation: undefined,
+        },
         resourceType: 'attachment',
         resourceExternalId: 'external-attachment-redacted',
         availability: 'available',
         state: 'retention-expired',
         operationId: attachmentOutcome.operationId,
+        eventId: attachmentEvent.eventId,
         correlationId: expectedInboundCorrelationId(attachmentEvent.correlationId),
         occurredAt: attachmentEvent.occurredAt,
       },
@@ -2680,6 +3525,7 @@ describe('external chat synchronization end-to-end fixture', () => {
       workItemId: duplicateWorkItemId,
       linkId,
       expectedLinkRevision: 3,
+      expectedParentLifecycleFences: { workspace: undefined, conversation: undefined },
       availability: 'available',
       state: 'retention-expired',
       operationId: threadOutcome.operationId,
@@ -2725,6 +3571,12 @@ describe('external chat synchronization end-to-end fixture', () => {
     fixture.store.beforePutBinding = async () => {
       const current = await fixture.store.getLink(workspaceId, linkId)
       if (!current) throw new Error('Expected the duplicate-owned link before merge.')
+      const duplicateManifest = await fixture.store.getWorkItemLinkManifest(
+        workspaceId,
+        duplicateTeamId,
+        duplicateWorkItemId,
+      )
+      if (!duplicateManifest) throw new Error('Expected the duplicate owner manifest.')
       const merged = await fixture.store.mergeLinks({
         workspaceId,
         canonicalTeamId,
@@ -2732,6 +3584,8 @@ describe('external chat synchronization end-to-end fixture', () => {
         duplicateTeamId,
         duplicateWorkItemId,
         links: [{ linkId, expectedRevision: current.link.revision }],
+        expectedDuplicateLinkGeneration: duplicateManifest.generation,
+        expectedDuplicateLinkCount: duplicateManifest.activeLinkCount,
         mergedAt: fixture.clock.now(),
       })
       if (merged.kind !== 'merged') throw new Error('Expected the interleaved merge to win.')
@@ -2856,6 +3710,12 @@ describe('external chat synchronization end-to-end fixture', () => {
     })
     const beforeMerge = await fixture.store.getLink(workspaceId, linkId)
     if (!beforeMerge) throw new Error('Expected the link before duplicate merge.')
+    const duplicateManifest = await fixture.store.getWorkItemLinkManifest(
+      workspaceId,
+      duplicateTeamId,
+      duplicateWorkItemId,
+    )
+    if (!duplicateManifest) throw new Error('Expected the duplicate owner manifest.')
 
     const merged = await fixture.store.mergeLinks({
       workspaceId,
@@ -2867,6 +3727,8 @@ describe('external chat synchronization end-to-end fixture', () => {
         { linkId, expectedRevision: beforeMerge.link.revision },
         { linkId: secondLink.id, expectedRevision: secondLink.revision },
       ],
+      expectedDuplicateLinkGeneration: duplicateManifest.generation,
+      expectedDuplicateLinkCount: duplicateManifest.activeLinkCount,
       mergedAt: fixture.clock.now(),
     })
     expect(merged).toMatchObject({
@@ -3007,25 +3869,43 @@ function syntheticSourceKey(source: ExternalChatThreadReference): string {
  * @param eventId - Stable provider event identifier.
  * @param resourceType - Shared provider parent kind.
  * @param conversationExternalId - Conversation target for a narrow fan-out.
+ * @param availability - Current parent source availability.
+ * @param state - Current parent lifecycle state.
+ * @param occurredAt - Provider occurrence timestamp used for deterministic ordering.
  * @returns Provider-neutral parent lifecycle event.
  */
 function createParentLifecycleEvent(
   eventId: string,
   resourceType: 'workspace' | 'conversation',
   conversationExternalId = 'slack-channel-e2e',
+  availability: Extract<
+    ExternalChatInboundEvent,
+    { type: 'source.lifecycle-changed' }
+  >['availability'] = 'permission-lost',
+  state: Extract<
+    ExternalChatInboundEvent,
+    { type: 'source.lifecycle-changed' }
+  >['state'] = 'retained-metadata',
+  occurredAt = initialNow,
 ): Extract<ExternalChatInboundEvent, { type: 'source.lifecycle-changed' }> {
-  return {
-    ...createEventScope(eventId),
-    conversationExternalId,
-    type: 'source.lifecycle-changed',
-    resourceType,
-    resourceExternalId: resourceType === 'workspace'
-      ? 'slack-workspace-e2e'
-      : conversationExternalId,
-    availability: 'permission-lost',
-    state: 'retained-metadata',
-    reasonCode: 'provider_parent_permission_revoked',
-  }
+  return resourceType === 'workspace'
+    ? {
+        ...createParentEventScope(eventId, occurredAt),
+        type: 'source.lifecycle-changed',
+        resourceType,
+        availability,
+        state,
+        reasonCode: 'provider_parent_permission_revoked',
+      }
+    : {
+        ...createParentEventScope(eventId, occurredAt),
+        type: 'source.lifecycle-changed',
+        resourceType,
+        conversationExternalId,
+        availability,
+        state,
+        reasonCode: 'provider_parent_permission_revoked',
+      }
 }
 
 /** Creates one complete in-memory synchronization runtime and an active bidirectional link. */
@@ -3350,18 +4230,29 @@ function createWorkItemCompletionEvent(
  * @param eventId - Stable provider event identifier.
  * @param availability - Current source availability.
  * @param state - Last visible source lifecycle state.
+ * @param occurredAt - Provider occurrence timestamp used for deterministic ordering.
  * @returns Provider-neutral lifecycle event.
  */
 function createSourceLifecycleEvent(
   eventId: string,
-  availability: 'permission-lost',
-  state: 'retained-metadata',
-): Extract<ExternalChatInboundEvent, { type: 'source.lifecycle-changed' }> {
+  availability: Extract<
+    ExternalChatInboundEvent,
+    { type: 'source.lifecycle-changed' }
+  >['availability'],
+  state: Extract<
+    ExternalChatInboundEvent,
+    { type: 'source.lifecycle-changed' }
+  >['state'],
+  occurredAt = initialNow,
+): Extract<
+  ExternalChatInboundEvent,
+  { type: 'source.lifecycle-changed'; resourceType: 'thread' }
+> {
   return {
     ...createEventScope(eventId),
+    occurredAt,
     type: 'source.lifecycle-changed',
     resourceType: 'thread',
-    resourceExternalId: 'slack-thread-e2e',
     availability,
     state,
     reasonCode: 'provider_permission_revoked',
@@ -3415,10 +4306,43 @@ function createThreadRetentionExpiredEvent(
     ...createEventScope(eventId),
     type: 'source.lifecycle-changed',
     resourceType: 'thread',
-    resourceExternalId: 'slack-thread-e2e',
     availability: 'available',
     state: 'retention-expired',
     reasonCode: 'provider_retention_expired',
+  }
+}
+
+/**
+ * Creates fields shared by normalized workspace- and conversation-scoped provider events.
+ *
+ * @param eventId - Stable provider event identifier.
+ * @param occurredAt - Provider occurrence timestamp.
+ * @returns Provider event scope without fabricated thread or conversation identifiers.
+ */
+function createParentEventScope(eventId: string, occurredAt: string): {
+  /** External chat contract schema version. */
+  schemaVersion: typeof EXTERNAL_CHAT_SCHEMA_VERSION
+  /** Stable provider event identifier. */
+  eventId: string
+  /** Correlation identifier propagated through synchronization. */
+  correlationId: string
+  /** Installation that authenticated the event. */
+  installationId: string
+  /** Provider that emitted the event. */
+  provider: 'slack'
+  /** Provider workspace in the event scope. */
+  externalWorkspaceId: string
+  /** Provider occurrence timestamp. */
+  occurredAt: string
+} {
+  return {
+    schemaVersion: EXTERNAL_CHAT_SCHEMA_VERSION,
+    eventId,
+    correlationId: `correlation-${eventId}`,
+    installationId,
+    provider: 'slack',
+    externalWorkspaceId: 'slack-workspace-e2e',
+    occurredAt,
   }
 }
 

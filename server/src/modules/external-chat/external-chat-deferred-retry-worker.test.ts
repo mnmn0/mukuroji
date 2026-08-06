@@ -53,16 +53,18 @@ function createEvent(eventId: string, minute: number): ExternalChatInboundEvent 
 async function deferEvent(
   store: InMemoryExternalChatStore,
   event: ExternalChatInboundEvent,
+  retryAt = event.occurredAt,
 ): Promise<void> {
   await seedActiveLink(store)
   await store.deferEvent({
     workspaceId: 'workspace-1',
     linkId: 'link-1',
     event,
+    expectedParentLifecycleFences: { workspace: undefined, conversation: undefined },
     fingerprint: createExternalChatFingerprint(event),
     reason: 'out-of-order',
     attempt: 1,
-    retryAt: event.occurredAt,
+    retryAt,
     createdAt: event.occurredAt,
     updatedAt: event.occurredAt,
   })
@@ -129,12 +131,11 @@ function appliedOutcome(event: ExternalChatInboundEvent): ExternalChatSyncOutcom
   }
 }
 
-/** Lists every currently due test event. */
+/** Lists every retained test event from the strict FIFO head. */
 async function listDueEventIds(store: InMemoryExternalChatStore): Promise<string[]> {
-  const events = await store.listDueDeferredEvents(
+  const events = await store.listDeferredEvents(
     'workspace-1',
     'link-1',
-    DUE_AT,
     100,
   )
   return events.map((event) => event.event.eventId)
@@ -230,6 +231,39 @@ test('stops at a still-deferred FIFO head and retains it and later events', asyn
   expect(await listDueEventIds(store)).toEqual(['event-2', 'event-3'])
 })
 
+test('does not overtake a non-due inbound FIFO head with a later due event', async () => {
+  const store = new InMemoryExternalChatStore()
+  await deferEvent(
+    store,
+    createEvent('event-head', 1),
+    '2026-08-06T00:20:00.000Z',
+  )
+  await deferEvent(store, createEvent('event-later', 2), DUE_AT)
+  const processed: string[] = []
+  const worker = new ExternalChatDeferredRetryWorker({
+    store,
+    processor: {
+      async processInbound(input) {
+        processed.push(input.event.eventId)
+        return appliedOutcome(input.event)
+      },
+    },
+  })
+
+  await expect(worker.processDueBatch({
+    workspaceId: 'workspace-1',
+    linkId: 'link-1',
+    dueAt: DUE_AT,
+    limit: 10,
+  })).resolves.toMatchObject({
+    attemptedEventCount: 0,
+    removedEventCount: 0,
+    stopReason: 'not-due',
+  })
+  expect(processed).toEqual([])
+  expect(await listDueEventIds(store)).toEqual(['event-head', 'event-later'])
+})
+
 test('stops without deleting a retryable failed outcome', async () => {
   const store = new InMemoryExternalChatStore()
   await deferEvent(store, createEvent('event-1', 1))
@@ -323,6 +357,14 @@ test('honors the bounded batch limit and validates worker input', async () => {
     linkId: 'link-1',
     dueAt: DUE_AT,
     limit: 0,
+  })).rejects.toMatchObject({
+    code: 'ExternalChatValidationFailed',
+  })
+  await expect(worker.processDueBatch({
+    workspaceId: 'workspace-1',
+    linkId: 'link-1',
+    dueAt: '2026-08-06T09:10:00.000+09:00',
+    limit: 1,
   })).rejects.toMatchObject({
     code: 'ExternalChatValidationFailed',
   })

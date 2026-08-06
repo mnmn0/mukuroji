@@ -32,10 +32,13 @@ import { normalizeExternalChatRetryAt } from './external-chat-retry-schedule'
 import {
   createExternalChatFingerprint,
   createExternalChatInboundOperationId,
-  createExternalChatSourceDigest,
+  externalChatLifecycleBlocksSynchronization,
   ExternalChatError,
   type ExternalChatInboundReceipt,
+  type ExternalChatLifecycleObservation,
+  type ExternalChatLinkLifecycleState,
   type ExternalChatParentLifecycleFence,
+  type ExternalChatParentLifecycleFenceSnapshot,
   type ExternalChatSyncCommentCreatedEvent,
   type ExternalChatSyncCommentDeletedEvent,
   type ExternalChatSyncCommentEditedEvent,
@@ -62,13 +65,71 @@ export type {
 /** Maximum active links processed before one durable parent fan-out checkpoint. */
 const PARENT_LIFECYCLE_FANOUT_PAGE_SIZE = 25
 
-/** Provider parent lifecycle event that must fan out independently of one thread locator. */
-type ExternalChatParentLifecycleEvent = Extract<
+/** Any discriminated provider source lifecycle event. */
+type ExternalChatLifecycleEvent = Extract<
   ExternalChatInboundEvent,
   { type: 'source.lifecycle-changed' }
-> & {
-  /** Parent resource kind shared by every affected active link. */
-  resourceType: 'workspace' | 'conversation'
+>
+
+/** Provider parent lifecycle event that must fan out independently of one thread locator. */
+type ExternalChatParentLifecycleEvent = Extract<
+  ExternalChatLifecycleEvent,
+  { resourceType: 'workspace' | 'conversation' }
+>
+
+/** Link-projecting lifecycle event governed by a per-link scope-local watermark. */
+type ExternalChatLinkLifecycleEvent = Extract<
+  ExternalChatLifecycleEvent,
+  { resourceType: 'workspace' | 'conversation' | 'thread' }
+>
+
+/** Inbound event whose normalized scope includes one concrete provider thread. */
+type ExternalChatThreadScopedInboundEvent = Exclude<
+  ExternalChatInboundEvent,
+  ExternalChatParentLifecycleEvent
+>
+
+/** Result of committing or rejecting one scope-local link lifecycle observation. */
+type ExternalChatLinkLifecycleProjectionResult =
+  | {
+    /** The incoming observation advanced its exact scope and the effective link projection. */
+    kind: 'updated'
+    /** Link record containing the committed private watermarks and effective public state. */
+    record: StoredExternalChatLink
+    /** Exact parent authorities that participated in the projection commit. */
+    parentLifecycleFences: ExternalChatParentLifecycleFenceSnapshot
+  }
+  | {
+    /** The exact lifecycle scope already contains a deterministically newer observation. */
+    kind: 'stale'
+    /** Current link record retained without mutation. */
+    record: StoredExternalChatLink
+    /** Exact parent authorities observed while classifying the event as stale. */
+    parentLifecycleFences: ExternalChatParentLifecycleFenceSnapshot
+  }
+  | {
+    /** The exact lifecycle observation already committed before a resumable cascade failed. */
+    kind: 'replayed'
+    /** Current link record reused to resume required downstream redaction. */
+    record: StoredExternalChatLink
+    /** Exact parent authorities authorizing the resumed downstream cascade. */
+    parentLifecycleFences: ExternalChatParentLifecycleFenceSnapshot
+  }
+
+/** One optimistic link projection plus the exact parent authority used by its commit. */
+type ExternalChatLinkProjectionCommit = {
+  /** Updated active external chat link. */
+  record: StoredExternalChatLink
+  /** Exact workspace and conversation authorities participating in the transaction. */
+  parentLifecycleFences: ExternalChatParentLifecycleFenceSnapshot
+}
+
+/** Effective public source state composed from every current scope-local lifecycle observation. */
+type ExternalChatEffectiveLifecycleState = {
+  /** Most restrictive current reachability across workspace, conversation, and thread scopes. */
+  availability: ExternalChatSourceAvailability
+  /** Most restrictive current lifecycle state across workspace, conversation, and thread scopes. */
+  state: ExternalChatSourceState
 }
 
 /** Authenticated internal principal passed to external chat synchronization use cases. */
@@ -233,6 +294,8 @@ export type ExternalChatSyncCommentMutationContext = {
   linkId: string
   /** Link revision that must still own the target Work Item when the mutation commits. */
   expectedLinkRevision: number
+  /** Exact parent lifecycle authorities that must remain unchanged at mutation commit. */
+  expectedParentLifecycleFences: ExternalChatParentLifecycleFenceSnapshot
   /** Team that owns the Work Item. */
   teamId: string
   /** Canonical Work Item identifier. */
@@ -287,6 +350,8 @@ export type ExternalChatSyncApplyResourceLifecycleInput = {
   linkId: string
   /** Link revision that must still own the target Work Item when redaction commits. */
   expectedLinkRevision: number
+  /** Exact parent authorities plus ancestor lifecycle floor governing this resource update. */
+  expectedParentLifecycleFences: ExternalChatParentLifecycleFenceSnapshot
   /** Kind of imported external resource whose projection must change. */
   resourceType: 'message' | 'attachment'
   /** Provider-scoped resource identifier used to find imported provenance. */
@@ -297,10 +362,20 @@ export type ExternalChatSyncApplyResourceLifecycleInput = {
   state: ExternalChatSourceState
   /** Stable retry-safe synchronization operation identifier. */
   operationId: string
+  /** Stable provider event identifier used as the deterministic ordering tie-breaker. */
+  eventId: string
+  /** Optional provider-defined ordering token retained by the owning collaboration adapter. */
+  externalSequence?: string
   /** Correlation identifier propagated from the provider event. */
   correlationId: string
   /** Provider lifecycle occurrence timestamp. */
   occurredAt: string
+}
+
+/** Explicit monotonic ordering result for one imported message or attachment lifecycle update. */
+export type ExternalChatSyncApplyResourceLifecycleResult = {
+  /** Whether the collaboration transaction applied the event or rejected it as stale. */
+  kind: 'applied' | 'stale'
 }
 
 /** Input for redacting every imported projection owned by one restrictive parent link. */
@@ -315,6 +390,8 @@ export type ExternalChatSyncRedactLinkResourcesInput = {
   linkId: string
   /** Link revision that must still own the target Work Item when redaction commits. */
   expectedLinkRevision: number
+  /** Exact parent authorities that must still authorize destructive redaction at commit. */
+  expectedParentLifecycleFences: ExternalChatParentLifecycleFenceSnapshot
   /** Restrictive provider reachability observed for the parent resource. */
   availability: ExternalChatSourceAvailability
   /** Restrictive provider lifecycle state observed for the parent resource. */
@@ -339,7 +416,9 @@ export type ExternalChatSyncCommentMutationResult = {
  * Collaboration boundary used for inbound external message mutations.
  *
  * Implementations must condition the link ID, expected link revision, Team, and Work Item in the
- * same transaction as the comment mutation so duplicate merge cannot commit a stale owner.
+ * same transaction as the comment mutation so duplicate merge cannot commit a stale owner. They
+ * must also condition every exact present-or-absent parent lifecycle fence supplied by the caller,
+ * so a workspace/conversation restriction cannot race a comment or resource recovery commit.
  */
 export interface ExternalChatSyncCollaborationPort {
   /** Idempotently creates an internal comment from an external message. */
@@ -354,10 +433,13 @@ export interface ExternalChatSyncCollaborationPort {
   deleteExternalComment(
     input: ExternalChatSyncDeleteCommentInput,
   ): Promise<ExternalChatSyncCommentMutationResult>
-  /** Idempotently applies redaction or lifecycle state to imported message/file projections. */
+  /**
+   * Atomically compares occurredAt/eventId within the exact imported resource scope and applies
+   * only a newer lifecycle state. Implementations must durably retain the winning watermark.
+   */
   applyExternalResourceLifecycle(
     input: ExternalChatSyncApplyResourceLifecycleInput,
-  ): Promise<void>
+  ): Promise<ExternalChatSyncApplyResourceLifecycleResult>
   /** Idempotently and resumably redacts every imported comment/file projection owned by a link. */
   redactExternalLinkResources(input: ExternalChatSyncRedactLinkResourcesInput): Promise<void>
 }
@@ -374,6 +456,8 @@ export type ExternalChatSyncImportAttachmentsInput = {
   linkId: string
   /** Link revision that must still own the target Work Item when the import commits. */
   expectedLinkRevision: number
+  /** Exact parent lifecycle authorities that must remain unchanged at File ownership commit. */
+  expectedParentLifecycleFences: ExternalChatParentLifecycleFenceSnapshot
   /** Provider that owns the attachment identities. */
   provider: ExternalChatProvider
   /** Current installation authorization used to read provider attachment content. */
@@ -400,7 +484,8 @@ export type ExternalChatSyncImportAttachmentsResult = {
  * Private Files pipeline boundary for authorized and idempotent external attachment imports.
  *
  * Implementations must condition the supplied link owner in the same transaction as File
- * ownership, and merge must move any import that committed before its owner revision changed.
+ * ownership and exact parent lifecycle authorities, and merge must move any import that committed
+ * before its owner revision changed.
  */
 export interface ExternalChatSyncAttachmentPort {
   /** Imports authorized attachments and returns only server-issued scanned File IDs. */
@@ -417,6 +502,8 @@ export type ExternalChatSyncSetWorkItemCompletionInput = {
   linkId: string
   /** Link revision that must still own the target Work Item when the transition commits. */
   expectedLinkRevision: number
+  /** Exact parent lifecycle authorities that must remain unchanged at Work Item commit. */
+  expectedParentLifecycleFences: ExternalChatParentLifecycleFenceSnapshot
   /** Team that owns the Work Item. */
   teamId: string
   /** Canonical Work Item identifier. */
@@ -461,7 +548,10 @@ export type ExternalChatSyncSetWorkItemCompletionResult =
  * transition. The external-chat lifecycle lease supplies the corresponding merge fence.
  */
 export interface ExternalChatSyncWorkItemPort {
-  /** Idempotently completes or reopens the linked canonical Work Item with explicit conflicts. */
+  /**
+   * Idempotently completes or reopens the linked canonical Work Item with explicit conflicts.
+   * The Work Item commit must condition the link owner and exact parent lifecycle authorities.
+   */
   setCompletion(
     input: ExternalChatSyncSetWorkItemCompletionInput,
   ): Promise<ExternalChatSyncSetWorkItemCompletionResult>
@@ -586,6 +676,14 @@ export type ExternalChatSyncInboundInput = {
   originMarker?: string
   /** Exact accepted link revision required by a durable resynchronization job. */
   expectedLinkRevision?: number
+}
+
+/** Cancellation fence supplied by a durable outbound retry owner. */
+export type ExternalChatSyncOutboundExecutionContext = {
+  /** Signal aborted when the caller loses authority to continue provider or persistence work. */
+  signal: AbortSignal
+  /** Revalidates the caller's exact durable retry permit at each side-effect boundary. */
+  assertCurrentPermit?: () => Promise<void>
 }
 
 /** Clock boundary used to make leases, outcomes, and markers deterministic in tests. */
@@ -733,6 +831,21 @@ export class ExternalChatSyncService {
       startedAt,
     )
     try {
+    const parentLifecycleFences = await this.requireParentLifecycleFences(
+      input.principal.workspaceId,
+      record.link.id,
+    )
+    const effectiveLifecycle = effectiveLinkLifecycleStateWithParentFences(
+      record.lifecycleState,
+      parentLifecycleFences,
+      record.sourceAuthorizationRevision,
+    )
+    if (externalChatLifecycleBlocksSynchronization(
+      effectiveLifecycle.availability,
+      effectiveLifecycle.state,
+    )) {
+      throw sourceViewAuthorizationChanged()
+    }
     const scope = accessScope(record)
     if (!await this.access.canViewWorkItem(input.principal, scope)) {
       throw new ExternalChatError(
@@ -789,7 +902,24 @@ export class ExternalChatSyncService {
       throw error
     }
     const currentRecord = await this.requireActiveLink(input.principal.workspaceId, input.linkId)
+    const currentParentLifecycleFences = await this.requireParentLifecycleFences(
+      input.principal.workspaceId,
+      currentRecord.link.id,
+    )
+    const currentEffectiveLifecycle = effectiveLinkLifecycleStateWithParentFences(
+      currentRecord.lifecycleState,
+      currentParentLifecycleFences,
+      currentRecord.sourceAuthorizationRevision,
+    )
     if (!sameSourceViewOwner(record, currentRecord) ||
+      !parentLifecycleFenceSnapshotsEqual(
+        parentLifecycleFences,
+        currentParentLifecycleFences,
+      ) ||
+      externalChatLifecycleBlocksSynchronization(
+        currentEffectiveLifecycle.availability,
+        currentEffectiveLifecycle.state,
+      ) ||
       !await this.access.canViewWorkItem(input.principal, accessScope(currentRecord))) {
       throw sourceViewAuthorizationChanged()
     }
@@ -932,8 +1062,8 @@ export class ExternalChatSyncService {
           'The completed inbound receipt has no outcome.',
         )
       }
-      const duplicateSource = sourceIdentity(event)
-      const duplicateRecord = isParentLifecycleEvent(event)
+      const duplicateSource = isParentLifecycleEvent(event) ? undefined : sourceIdentity(event)
+      const duplicateRecord = duplicateSource === undefined
         ? undefined
         : await this.store.getLinkBySource(input.workspaceId, duplicateSource)
       if (duplicateRecord) {
@@ -947,7 +1077,6 @@ export class ExternalChatSyncService {
         input.workspaceId,
         event,
         operationId,
-        duplicateSource,
         duplicateRecord,
         claim.receipt.outcome,
       )
@@ -992,13 +1121,32 @@ export class ExternalChatSyncService {
           { retryable: true },
         )
       }
+      const parentLifecycleFences = await this.requireParentLifecycleFences(
+        input.workspaceId,
+        record.link.id,
+      )
+      const lifecycleAuthorizationRevision = preserveResyncProjection
+        ? Math.max(
+            record.sourceAuthorizationRevision,
+            input.authorizationRevision ?? record.sourceAuthorizationRevision,
+          )
+        : record.sourceAuthorizationRevision
+      const effectiveLifecycle = effectiveLinkLifecycleStateWithParentFences(
+        record.lifecycleState,
+        parentLifecycleFences,
+        lifecycleAuthorizationRevision,
+      )
       if (event.type !== 'source.lifecycle-changed') {
-        if (linkForbidsContentSynchronization(record.link)) {
+        if (lifecycleForbidsContentSynchronization(
+          effectiveLifecycle.availability,
+          effectiveLifecycle.state,
+        )) {
           await this.redactRestrictiveLinkResources(
             input.workspaceId,
             record,
-            record.link.sourceAvailability,
-            record.link.sourceState,
+            effectiveLifecycle.availability,
+            effectiveLifecycle.state,
+            parentLifecycleFences,
             operationId,
             inboundCorrelationId(event.correlationId),
             event.occurredAt,
@@ -1030,7 +1178,7 @@ export class ExternalChatSyncService {
       }
       if (
         event.type !== 'source.lifecycle-changed' &&
-        record.link.sourceAvailability !== 'available'
+        effectiveLifecycle.availability !== 'available'
       ) {
         return this.deferInbound(
           input.workspaceId,
@@ -1039,6 +1187,7 @@ export class ExternalChatSyncService {
           deferredFingerprint,
           record,
           claim.receipt.attempt,
+          parentLifecycleFences,
         )
       }
       const echoOutcome = await this.handleInboundEcho({
@@ -1068,6 +1217,7 @@ export class ExternalChatSyncService {
           deferredFingerprint,
           record,
           claim.receipt.attempt,
+          parentLifecycleFences,
         )
       }
 
@@ -1077,12 +1227,21 @@ export class ExternalChatSyncService {
         event,
         operationId,
         preserveResyncProjection,
+        input.authorizationRevision ?? record.sourceAuthorizationRevision,
+        parentLifecycleFences,
       )
       if (outcome.kind === 'deferred') {
         await this.store.deferEvent({
           workspaceId: input.workspaceId,
           linkId: record.link.id,
           event,
+          expectedParentLifecycleFences: parentLifecycleFences,
+          ...(event.type === 'source.lifecycle-changed'
+            ? {
+                authorizationRevision:
+                  input.authorizationRevision ?? record.sourceAuthorizationRevision,
+              }
+            : {}),
           fingerprint: deferredFingerprint,
           reason: outcome.reason,
           attempt: claim.receipt.attempt,
@@ -1130,10 +1289,21 @@ export class ExternalChatSyncService {
         }
       }
       if (outcome.kind === 'deferred') {
+        const deferredParentLifecycleFences = await this.requireParentLifecycleFences(
+          input.workspaceId,
+          record.link.id,
+        )
         await this.store.deferEvent({
           workspaceId: input.workspaceId,
           linkId: record.link.id,
           event,
+          expectedParentLifecycleFences: deferredParentLifecycleFences,
+          ...(event.type === 'source.lifecycle-changed'
+            ? {
+                authorizationRevision:
+                  input.authorizationRevision ?? record.sourceAuthorizationRevision,
+              }
+            : {}),
           fingerprint: deferredFingerprint,
           reason: outcome.reason,
           attempt: claim.receipt.attempt,
@@ -1178,6 +1348,7 @@ export class ExternalChatSyncService {
     let cursor = receipt.parentLifecycleCursor
     let processedLinkCount = 0
     let retryLink: StoredExternalChatLink | undefined
+    let durableAuthorizationRevision = authorizationRevision
     try {
       validateParentLifecycleEventScope(event)
       const fence = await this.store.fenceParentLifecycle({
@@ -1189,7 +1360,12 @@ export class ExternalChatSyncService {
           ? { conversationExternalId: event.conversationExternalId }
           : {}),
         ...(authorizationRevision === undefined ? {} : { authorizationRevision }),
-        restrictive: mustRedactLifecycleMetadata(event),
+        availability: event.availability,
+        state: event.state,
+        restrictive: externalChatLifecycleBlocksSynchronization(
+          event.availability,
+          event.state,
+        ),
         eventId: event.eventId,
         operationId,
         occurredAt: event.occurredAt,
@@ -1200,11 +1376,12 @@ export class ExternalChatSyncService {
           event,
           operationId,
           receipt.attempt,
-          sourceIdentity(event),
+          undefined,
           undefined,
           skippedOutcome(operationId, event.eventId, 'stale', this.clock.now()),
         )
       }
+      durableAuthorizationRevision = fence.fence.authorizationRevision
       for (;;) {
         const page = await this.store.listParentLinks({
           workspaceId,
@@ -1235,6 +1412,7 @@ export class ExternalChatSyncService {
               workspaceId,
               listed,
               event,
+              fence.fence.authorizationRevision,
               receipt.attempt,
               childOutcome.reason,
               retryAt,
@@ -1245,7 +1423,7 @@ export class ExternalChatSyncService {
               event,
               operationId,
               receipt.attempt,
-              sourceIdentity(event),
+              undefined,
               undefined,
               deferredOutcome(
                 operationId,
@@ -1277,6 +1455,7 @@ export class ExternalChatSyncService {
                 workspaceId,
                 listed,
                 event,
+                fence.fence.authorizationRevision,
                 receipt.attempt,
                 outcome.reason,
                 outcome.retryAt ?? addMilliseconds(this.clock.now(), this.deferDelayMs),
@@ -1288,7 +1467,7 @@ export class ExternalChatSyncService {
               event,
               operationId,
               receipt.attempt,
-              sourceIdentity(event),
+              undefined,
               undefined,
               outcome,
             )
@@ -1326,7 +1505,7 @@ export class ExternalChatSyncService {
         event,
         operationId,
         receipt.attempt,
-        sourceIdentity(event),
+        undefined,
         undefined,
         outcome,
       )
@@ -1343,6 +1522,7 @@ export class ExternalChatSyncService {
           workspaceId,
           retryLink,
           event,
+          durableAuthorizationRevision ?? retryLink.sourceAuthorizationRevision,
           receipt.attempt,
           outcome.reason,
           outcome.retryAt ?? addMilliseconds(this.clock.now(), this.deferDelayMs),
@@ -1354,7 +1534,7 @@ export class ExternalChatSyncService {
         event,
         operationId,
         receipt.attempt,
-        sourceIdentity(event),
+        undefined,
         undefined,
         outcome,
       )
@@ -1416,7 +1596,6 @@ export class ExternalChatSyncService {
         workspaceId,
         event,
         operationId,
-        source,
         listed,
         claim.receipt.outcome,
       )
@@ -1433,11 +1612,17 @@ export class ExternalChatSyncService {
     } else {
       try {
         validateParentLifecycleLinkScope(current.link, parentEvent)
+        const parentLifecycleFences = await this.requireParentLifecycleFences(
+          workspaceId,
+          current.link.id,
+        )
         outcome = await this.applyInboundLifecycle(
           workspaceId,
           current,
           event,
           operationId,
+          parentFence.authorizationRevision,
+          parentLifecycleFences,
           parentEvent.eventId,
           parentFence,
         )
@@ -1470,6 +1655,7 @@ export class ExternalChatSyncService {
    * @param workspaceId - Canonical Workspace identifier.
    * @param record - Link used as the durable retry-worker anchor.
    * @param event - Parent lifecycle event.
+   * @param authorizationRevision - Verified provider generation retained across retries.
    * @param attempt - Current outer receipt attempt.
    * @param reason - Honest retry classification.
    * @param retryAt - Earliest safe retry timestamp.
@@ -1479,6 +1665,7 @@ export class ExternalChatSyncService {
     workspaceId: string,
     record: StoredExternalChatLink,
     event: ExternalChatParentLifecycleEvent,
+    authorizationRevision: number,
     attempt: number,
     reason: Extract<ExternalChatSyncOutcome, { kind: 'deferred' }>['reason'],
     retryAt: string,
@@ -1488,6 +1675,7 @@ export class ExternalChatSyncService {
       workspaceId,
       linkId: record.link.id,
       event,
+      authorizationRevision,
       fingerprint: createExternalChatFingerprint(event),
       reason,
       attempt,
@@ -1501,9 +1689,16 @@ export class ExternalChatSyncService {
    * Applies, deduplicates, or honestly defers one explicitly eligible internal mutation.
    *
    * @param event - Trusted internal collaboration or Work Item event.
+   * @param context - Optional durable retry cancellation fence.
    * @returns Durable synchronization outcome.
    */
-  async processOutbound(event: ExternalChatSyncOutboundEvent): Promise<ExternalChatSyncOutcome> {
+  async processOutbound(
+    event: ExternalChatSyncOutboundEvent,
+    context?: ExternalChatSyncOutboundExecutionContext,
+  ): Promise<ExternalChatSyncOutcome> {
+    const signal = context?.signal ?? new AbortController().signal
+    const assertCurrentPermit = context?.assertCurrentPermit
+    await assertOutboundExecutionAuthority(signal, assertCurrentPermit)
     const operationId = createOutboundOperationId(event)
     const fingerprint = createExternalChatFingerprint(event)
     const claimedAt = this.clock.now()
@@ -1511,6 +1706,7 @@ export class ExternalChatSyncService {
     if (!record) {
       return skippedOutcome(operationId, undefined, 'unlinked', claimedAt)
     }
+    await assertOutboundExecutionAuthority(signal, assertCurrentPermit)
     const claim = await this.store.claimOutboundOperation({
       workspaceId: event.workspaceId,
       linkId: event.linkId,
@@ -1539,8 +1735,16 @@ export class ExternalChatSyncService {
           'The completed outbound receipt has no outcome.',
         )
       }
-      await this.acknowledgeCompletedThreadLifecycle(event.workspaceId, record, operationId)
+      await assertOutboundExecutionAuthority(signal, assertCurrentPermit)
+      await this.acknowledgeCompletedThreadLifecycle(
+        event.workspaceId,
+        record,
+        operationId,
+        async () => assertOutboundExecutionAuthority(signal, assertCurrentPermit),
+      )
+      await assertOutboundExecutionAuthority(signal, assertCurrentPermit)
       await this.recordOutboundAudit(event, record, operationId, claim.receipt.outcome)
+      await assertOutboundExecutionAuthority(signal, assertCurrentPermit)
       await this.deleteTerminalDeferredOutboundEvent(event, operationId, claim.receipt.outcome)
       return claim.receipt.outcome
     }
@@ -1552,6 +1756,8 @@ export class ExternalChatSyncService {
         operationId,
         claim.receipt.attempt,
         skippedOutcome(operationId, undefined, 'unlinked', claimedAt),
+        signal,
+        assertCurrentPermit,
       )
     }
 
@@ -1562,17 +1768,32 @@ export class ExternalChatSyncService {
     ))[0]
     let outcome: ExternalChatSyncOutcome
     try {
+      const parentLifecycleFences = await this.requireParentLifecycleFences(
+        event.workspaceId,
+        record.link.id,
+      )
+      const effectiveLifecycle = effectiveLinkLifecycleStateWithParentFences(
+        record.lifecycleState,
+        parentLifecycleFences,
+        record.sourceAuthorizationRevision,
+      )
       if (!event.externalSyncEligible) {
         outcome = skippedOutcome(operationId, undefined, 'not-eligible', claimedAt)
-      } else if (linkForbidsContentSynchronization(record.link)) {
+      } else if (lifecycleForbidsContentSynchronization(
+        effectiveLifecycle.availability,
+        effectiveLifecycle.state,
+      )) {
         await this.redactRestrictiveLinkResources(
           event.workspaceId,
           record,
-          record.link.sourceAvailability,
-          record.link.sourceState,
+          effectiveLifecycle.availability,
+          effectiveLifecycle.state,
+          parentLifecycleFences,
           operationId,
           event.correlationId,
           event.occurredAt,
+          undefined,
+          async () => assertOutboundExecutionAuthority(signal, assertCurrentPermit),
         )
         outcome = skippedOutcome(operationId, undefined, 'paused', claimedAt)
       } else if (!allowsOutbound(record.link.syncDirection)) {
@@ -1585,26 +1806,7 @@ export class ExternalChatSyncService {
           claimedAt,
           queuedHead.retryAt,
         )
-      } else if (
-        record.link.sourceAvailability === 'temporarily-unavailable' &&
-        queuedHead?.operationId !== operationId
-      ) {
-        outcome = deferredOutcome(
-          operationId,
-          undefined,
-          'source-unavailable',
-          claimedAt,
-          normalizeExternalChatRetryAt(
-            claimedAt,
-            operationId,
-            undefined,
-            this.deferDelayMs,
-          ),
-        )
-      } else if (
-        record.link.sourceState === 'deleted' ||
-        record.link.sourceState === 'retention-expired'
-      ) {
+      } else if (effectiveLifecycle.availability !== 'available') {
         outcome = deferredOutcome(
           operationId,
           undefined,
@@ -1623,7 +1825,14 @@ export class ExternalChatSyncService {
           principalId: event.principalId,
         }
         outcome = await this.access.canSyncOutbound(principal, accessScope(record))
-          ? await this.applyOutboundEvent(record, event, operationId)
+          ? await this.applyOutboundEvent(
+              record,
+              event,
+              operationId,
+              parentLifecycleFences,
+              signal,
+              assertCurrentPermit,
+            )
           : failedOutcome(
             operationId,
             undefined,
@@ -1633,6 +1842,7 @@ export class ExternalChatSyncService {
           )
       }
     } catch (error: unknown) {
+      await assertOutboundExecutionAuthority(signal, assertCurrentPermit)
       outcome = classifyFailure(
         error,
         operationId,
@@ -1641,6 +1851,7 @@ export class ExternalChatSyncService {
         this.deferDelayMs,
       )
       try {
+        await assertOutboundExecutionAuthority(signal, assertCurrentPermit)
         await this.reflectProviderFailure(
           event.workspaceId,
           record,
@@ -1648,6 +1859,8 @@ export class ExternalChatSyncService {
           operationId,
           event.correlationId,
           event.occurredAt,
+          undefined,
+          async () => assertOutboundExecutionAuthority(signal, assertCurrentPermit),
         )
       } catch (projectionError: unknown) {
         outcome = classifyFailure(
@@ -1659,7 +1872,16 @@ export class ExternalChatSyncService {
         )
       }
     }
-    return this.completeOutbound(event, record, operationId, claim.receipt.attempt, outcome)
+    await assertOutboundExecutionAuthority(signal, assertCurrentPermit)
+    return this.completeOutbound(
+      event,
+      record,
+      operationId,
+      claim.receipt.attempt,
+      outcome,
+      signal,
+      assertCurrentPermit,
+    )
   }
 
   /**
@@ -1802,14 +2024,18 @@ export class ExternalChatSyncService {
    * @param event - Verified provider-neutral event.
    * @param operationId - Stable inbound operation identifier.
    * @param preserveResyncProjection - Whether the resync worker owns the pending link status.
+   * @param authorizationRevision - Verified provider generation used for lifecycle ordering.
+   * @param parentLifecycleFences - Exact parent authorities governing every side-effect commit.
    * @returns Applied, skipped, or deferred outcome.
    */
   private async applyInboundEvent(
     workspaceId: string,
     record: StoredExternalChatLink,
-    event: ExternalChatInboundEvent,
+    event: ExternalChatThreadScopedInboundEvent,
     operationId: string,
     preserveResyncProjection: boolean,
+    authorizationRevision: number,
+    parentLifecycleFences: ExternalChatParentLifecycleFenceSnapshot,
   ): Promise<ExternalChatSyncOutcome> {
     let authorization: ChatProviderAuthorization | undefined
     if (event.type !== 'source.lifecycle-changed') {
@@ -1837,9 +2063,16 @@ export class ExternalChatSyncService {
           operationId,
           authorization,
           preserveResyncProjection,
+          parentLifecycleFences,
         )
       case 'message.deleted':
-        return this.applyInboundMessageDeletion(workspaceId, record, event, operationId)
+        return this.applyInboundMessageDeletion(
+          workspaceId,
+          record,
+          event,
+          operationId,
+          parentLifecycleFences,
+        )
       case 'thread.completed':
         return this.applyInboundThreadCompletion(
           workspaceId,
@@ -1848,6 +2081,7 @@ export class ExternalChatSyncService {
           event.completedAt,
           event,
           operationId,
+          parentLifecycleFences,
         )
       case 'thread.reopened':
         return this.applyInboundThreadCompletion(
@@ -1857,9 +2091,17 @@ export class ExternalChatSyncService {
           event.reopenedAt,
           event,
           operationId,
+          parentLifecycleFences,
         )
       case 'source.lifecycle-changed':
-        return this.applyInboundLifecycle(workspaceId, record, event, operationId)
+        return this.applyInboundLifecycle(
+          workspaceId,
+          record,
+          event,
+          operationId,
+          authorizationRevision,
+          parentLifecycleFences,
+        )
     }
   }
 
@@ -1872,6 +2114,7 @@ export class ExternalChatSyncService {
    * @param operationId - Stable inbound operation identifier.
    * @param authorization - Current matching installation authorization.
    * @param preserveResyncProjection - Whether the resync worker owns the pending link status.
+   * @param parentLifecycleFences - Exact parent authorities governing every side-effect commit.
    * @returns Synchronization outcome.
    */
   private async applyInboundMessage(
@@ -1881,6 +2124,7 @@ export class ExternalChatSyncService {
     operationId: string,
     authorization: ChatProviderAuthorization,
     preserveResyncProjection: boolean,
+    parentLifecycleFences: ExternalChatParentLifecycleFenceSnapshot,
   ): Promise<ExternalChatSyncOutcome> {
     validateMessageScope(record.link, event.message)
     const now = this.clock.now()
@@ -1963,6 +2207,7 @@ export class ExternalChatSyncService {
       workItemId: record.link.workItemId,
       linkId: record.link.id,
       expectedLinkRevision: record.link.revision,
+      expectedParentLifecycleFences: parentLifecycleFences,
       provider: record.link.provider,
       authorization,
       externalMessageId: event.message.externalId,
@@ -1983,6 +2228,7 @@ export class ExternalChatSyncService {
         workspaceId,
         linkId: record.link.id,
         expectedLinkRevision: record.link.revision,
+        expectedParentLifecycleFences: parentLifecycleFences,
         teamId: record.link.teamId,
         workItemId: record.link.workItemId,
         operationId,
@@ -1997,6 +2243,7 @@ export class ExternalChatSyncService {
         workspaceId,
         linkId: record.link.id,
         expectedLinkRevision: record.link.revision,
+        expectedParentLifecycleFences: parentLifecycleFences,
         teamId: record.link.teamId,
         workItemId: record.link.workItemId,
         operationId,
@@ -2031,7 +2278,7 @@ export class ExternalChatSyncService {
         createdAt: now,
         updatedAt: now,
       }
-    await this.putBinding(workspaceId, record, binding, current)
+    await this.putBinding(workspaceId, record, binding, current, parentLifecycleFences)
     if (!preserveResyncProjection) {
       await this.markLinkSynchronized(workspaceId, record, now)
     }
@@ -2045,6 +2292,7 @@ export class ExternalChatSyncService {
    * @param record - Active source-owning link.
    * @param event - External message deletion event.
    * @param operationId - Stable inbound operation identifier.
+   * @param parentLifecycleFences - Exact parent authorities governing the mutation commit.
    * @returns Synchronization outcome.
    */
   private async applyInboundMessageDeletion(
@@ -2052,6 +2300,7 @@ export class ExternalChatSyncService {
     record: StoredExternalChatLink,
     event: Extract<ExternalChatInboundEvent, { type: 'message.deleted' }>,
     operationId: string,
+    parentLifecycleFences: ExternalChatParentLifecycleFenceSnapshot,
   ): Promise<ExternalChatSyncOutcome> {
     const now = this.clock.now()
     const current = await this.store.getMessageBindingByExternalId(
@@ -2097,6 +2346,7 @@ export class ExternalChatSyncService {
       workspaceId,
       linkId: record.link.id,
       expectedLinkRevision: record.link.revision,
+      expectedParentLifecycleFences: parentLifecycleFences,
       teamId: record.link.teamId,
       workItemId: record.link.workItemId,
       operationId,
@@ -2113,7 +2363,7 @@ export class ExternalChatSyncService {
       deletedAt: event.deletedAt,
       updatedAt: now,
     }
-    await this.putBinding(workspaceId, record, binding, current)
+    await this.putBinding(workspaceId, record, binding, current, parentLifecycleFences)
     await this.markLinkSynchronized(workspaceId, record, now)
     return appliedOutcome(operationId, event.eventId, 'inbound', now)
   }
@@ -2127,6 +2377,7 @@ export class ExternalChatSyncService {
    * @param occurredAt - Provider transition timestamp.
    * @param event - Provider completion or reopen event.
    * @param operationId - Stable inbound operation identifier.
+   * @param parentLifecycleFences - Exact parent authorities governing the Work Item mutation.
    * @returns Applied outcome.
    */
   private async applyInboundThreadCompletion(
@@ -2138,6 +2389,7 @@ export class ExternalChatSyncService {
       type: 'thread.completed' | 'thread.reopened'
     }>,
     operationId: string,
+    parentLifecycleFences: ExternalChatParentLifecycleFenceSnapshot,
   ): Promise<ExternalChatSyncOutcome> {
     const claimedAt = this.clock.now()
     const claim = await this.store.claimThreadLifecycle({
@@ -2195,6 +2447,7 @@ export class ExternalChatSyncService {
       workspaceId,
       linkId: record.link.id,
       expectedLinkRevision: record.link.revision,
+      expectedParentLifecycleFences: parentLifecycleFences,
       teamId: record.link.teamId,
       workItemId: record.link.workItemId,
       completed,
@@ -2235,6 +2488,8 @@ export class ExternalChatSyncService {
    * @param record - Active source-owning link.
    * @param event - Provider lifecycle event.
    * @param operationId - Stable inbound operation identifier.
+   * @param authorizationRevision - Verified provider generation used by the scope watermark.
+   * @param parentLifecycleFences - Exact current parent authorities governing the operation.
    * @param excludedDeferredEventId - Current parent retry event retained until outer completion.
    * @param expectedParentLifecycleFence - Exact parent authority required at projection commit.
    * @returns Applied outcome.
@@ -2242,65 +2497,82 @@ export class ExternalChatSyncService {
   private async applyInboundLifecycle(
     workspaceId: string,
     record: StoredExternalChatLink,
-    event: Extract<ExternalChatInboundEvent, { type: 'source.lifecycle-changed' }>,
+    event: ExternalChatLifecycleEvent,
     operationId: string,
+    authorizationRevision: number,
+    parentLifecycleFences: ExternalChatParentLifecycleFenceSnapshot,
     excludedDeferredEventId = event.eventId,
     expectedParentLifecycleFence?: ExternalChatParentLifecycleFence,
   ): Promise<ExternalChatSyncOutcome> {
     const now = this.clock.now()
     if (event.resourceType === 'message' || event.resourceType === 'attachment') {
-      await this.collaboration.applyExternalResourceLifecycle({
+      const ancestor = effectiveLinkLifecycleStateWithParentFences(
+        record.lifecycleState,
+        parentLifecycleFences,
+        record.sourceAuthorizationRevision,
+      )
+      const ancestorBlocks = externalChatLifecycleBlocksSynchronization(
+        ancestor.availability,
+        ancestor.state,
+      )
+      const availability = ancestorBlocks &&
+          lifecycleAvailabilityRank(ancestor.availability) >
+            lifecycleAvailabilityRank(event.availability)
+        ? ancestor.availability
+        : event.availability
+      const state = ancestorBlocks &&
+          lifecycleSourceStateRank(ancestor.state) > lifecycleSourceStateRank(event.state)
+        ? ancestor.state
+        : event.state
+      const result = await this.collaboration.applyExternalResourceLifecycle({
         workspaceId,
         teamId: record.link.teamId,
         workItemId: record.link.workItemId,
         linkId: record.link.id,
         expectedLinkRevision: record.link.revision,
+        expectedParentLifecycleFences: parentLifecycleFences,
         resourceType: event.resourceType,
         resourceExternalId: event.resourceExternalId,
-        availability: event.availability,
-        state: event.state,
+        availability,
+        state,
         operationId,
+        eventId: event.eventId,
+        ...(event.externalSequence === undefined
+          ? {}
+          : { externalSequence: event.externalSequence }),
         correlationId: inboundCorrelationId(event.correlationId),
         occurredAt: event.occurredAt,
       })
-    } else if (
-      event.resourceType === 'workspace' ||
-      event.resourceType === 'conversation' ||
-      event.resourceType === 'thread'
-    ) {
-      validateParentLifecycleResourceScope(record.link, event)
-      const projectedRecord = await this.updateLinkProjection(
+      return result.kind === 'stale'
+        ? skippedOutcome(operationId, event.eventId, 'stale', now)
+        : appliedOutcome(operationId, event.eventId, 'inbound', now)
+    }
+    validateParentLifecycleResourceScope(record.link, event)
+    const projection = await this.updateLinkLifecycleProjection(
+      workspaceId,
+      record.link.id,
+      event,
+      authorizationRevision,
+      expectedParentLifecycleFence,
+    )
+    if (projection.kind === 'stale') {
+      return skippedOutcome(operationId, event.eventId, 'stale', now)
+    }
+    if (lifecycleForbidsContentSynchronization(
+      projection.record.link.sourceAvailability,
+      projection.record.link.sourceState,
+    )) {
+      await this.redactRestrictiveLinkResources(
         workspaceId,
-        record.link.id,
-        (link) => {
-        const projected = mustRedactLifecycleMetadata(event)
-          ? redactLinkSourceMetadata(link)
-          : link
-        return {
-          ...projected,
-          sourceAvailability: event.availability,
-          sourceState: event.state,
-          syncStatus: statusForSource(event.availability, event.state),
-          lastSourceObservedAt: event.availability === 'available'
-            ? event.occurredAt
-            : link.lastSourceObservedAt,
-        }
-        },
-        undefined,
-        expectedParentLifecycleFence,
+        projection.record,
+        projection.record.link.sourceAvailability,
+        projection.record.link.sourceState,
+        projection.parentLifecycleFences,
+        operationId,
+        inboundCorrelationId(event.correlationId),
+        event.occurredAt,
+        excludedDeferredEventId,
       )
-      if (mustRedactLifecycleMetadata(event)) {
-        await this.redactRestrictiveLinkResources(
-          workspaceId,
-          projectedRecord,
-          event.availability,
-          event.state,
-          operationId,
-          inboundCorrelationId(event.correlationId),
-          event.occurredAt,
-          excludedDeferredEventId,
-        )
-      }
     }
     return appliedOutcome(operationId, event.eventId, 'inbound', now)
   }
@@ -2311,12 +2583,18 @@ export class ExternalChatSyncService {
    * @param record - Active source-owning link.
    * @param event - Eligible trusted internal event.
    * @param operationId - Stable outbound operation identifier.
+   * @param parentLifecycleFences - Exact parent authorities governing the provider mutation.
+   * @param signal - Cancellation fence propagated through provider transport.
+   * @param assertCurrentPermit - Optional exact durable retry permit validator.
    * @returns Applied, skipped, or deferred outcome.
    */
   private async applyOutboundEvent(
     record: StoredExternalChatLink,
     event: ExternalChatSyncOutboundEvent,
     operationId: string,
+    parentLifecycleFences: ExternalChatParentLifecycleFenceSnapshot,
+    signal: AbortSignal,
+    assertCurrentPermit: (() => Promise<void>) | undefined,
   ): Promise<ExternalChatSyncOutcome> {
     const authorization = await this.access.getInstallationProviderAuthorization(
       event.workspaceId,
@@ -2356,13 +2634,40 @@ export class ExternalChatSyncService {
     }, secret)
 
     if (event.type === 'comment.created') {
-      return this.createOutboundReply(record, event, operationId, authorization, originMarker)
+      return this.createOutboundReply(
+        record,
+        event,
+        operationId,
+        authorization,
+        originMarker,
+        parentLifecycleFences,
+        signal,
+        assertCurrentPermit,
+      )
     }
     if (event.type === 'comment.edited') {
-      return this.editOutboundMessage(record, event, operationId, authorization, originMarker)
+      return this.editOutboundMessage(
+        record,
+        event,
+        operationId,
+        authorization,
+        originMarker,
+        parentLifecycleFences,
+        signal,
+        assertCurrentPermit,
+      )
     }
     if (event.type === 'comment.deleted') {
-      return this.deleteOutboundMessage(record, event, operationId, authorization, originMarker)
+      return this.deleteOutboundMessage(
+        record,
+        event,
+        operationId,
+        authorization,
+        originMarker,
+        parentLifecycleFences,
+        signal,
+        assertCurrentPermit,
+      )
     }
     return this.applyOutboundThreadCompletion(
       record,
@@ -2370,6 +2675,9 @@ export class ExternalChatSyncService {
       operationId,
       authorization,
       originMarker,
+      parentLifecycleFences,
+      signal,
+      assertCurrentPermit,
     )
   }
 
@@ -2381,6 +2689,9 @@ export class ExternalChatSyncService {
    * @param operationId - Stable outbound operation identifier.
    * @param authorization - Current installation authorization.
    * @param originMarker - Authenticated provider echo marker.
+   * @param parentLifecycleFences - Exact parent authorities governing the provider mutation.
+   * @param signal - Cancellation fence propagated through provider transport.
+   * @param assertCurrentPermit - Optional exact durable retry permit validator.
    * @returns Applied, skipped, deferred, or failed synchronization outcome.
    */
   private async applyOutboundThreadCompletion(
@@ -2389,8 +2700,12 @@ export class ExternalChatSyncService {
     operationId: string,
     authorization: ChatProviderAuthorization,
     originMarker: string,
+    parentLifecycleFences: ExternalChatParentLifecycleFenceSnapshot,
+    signal: AbortSignal,
+    assertCurrentPermit: (() => Promise<void>) | undefined,
   ): Promise<ExternalChatSyncOutcome> {
     const claimedAt = this.clock.now()
+    await assertOutboundExecutionAuthority(signal, assertCurrentPermit)
     const claim = await this.store.claimThreadLifecycle({
       workspaceId: event.workspaceId,
       linkId: record.link.id,
@@ -2420,6 +2735,7 @@ export class ExternalChatSyncService {
         record.link.id,
         claim.record,
         operationId,
+        async () => assertOutboundExecutionAuthority(signal, assertCurrentPermit),
       )
     }
 
@@ -2429,6 +2745,7 @@ export class ExternalChatSyncService {
     )
     if (internalOrder === 'stale') {
       const outcome = skippedOutcome(operationId, undefined, 'stale', claimedAt)
+      await assertOutboundExecutionAuthority(signal, assertCurrentPermit)
       await this.completeThreadLifecycleClaim(
         claim.record,
         advanceThreadLifecycleState(claim.record.state, claimedAt),
@@ -2450,17 +2767,27 @@ export class ExternalChatSyncService {
         ),
       )
       const nextState = advanceThreadLifecycleState(claim.record.state, claimedAt)
+      await assertOutboundExecutionAuthority(signal, assertCurrentPermit)
       await this.completeThreadLifecycleClaim(claim.record, nextState, outcome)
+      await assertOutboundExecutionAuthority(signal, assertCurrentPermit)
       await this.projectThreadLifecycleOutcome(
         event.workspaceId,
         record.link.id,
         nextState,
         outcome,
+        async () => assertOutboundExecutionAuthority(signal, assertCurrentPermit),
       )
       return outcome
     }
 
     const requestedCompleted = event.type === 'work-item.completed'
+    const assertCurrentAuthority = this.createOutboundSideEffectAuthorityGuard(
+      record,
+      parentLifecycleFences,
+      signal,
+      assertCurrentPermit,
+    )
+    await assertCurrentAuthority()
     const mutation = normalizeChatProviderThreadMutationResult(
       await this.adapters.get(record.link.provider).setThreadCompletion({
         authorization,
@@ -2468,8 +2795,11 @@ export class ExternalChatSyncService {
         completed: requestedCompleted,
         operationId,
         originMarker,
+        signal,
+        assertCurrentAuthority,
       }),
     )
+    await assertOutboundExecutionAuthority(signal, assertCurrentPermit)
     const committedAt = this.clock.now()
     const nextState = createThreadLifecycleState(
       claim.record.state,
@@ -2486,13 +2816,15 @@ export class ExternalChatSyncService {
         'ExternalChatSyncInvalidMutation',
         false,
         committedAt,
-      )
+    )
     await this.completeThreadLifecycleClaim(claim.record, nextState, outcome)
+    await assertOutboundExecutionAuthority(signal, assertCurrentPermit)
     await this.projectThreadLifecycleOutcome(
       event.workspaceId,
       record.link.id,
       nextState,
       outcome,
+      assertCurrentAuthority,
     )
     return outcome
   }
@@ -2505,6 +2837,9 @@ export class ExternalChatSyncService {
    * @param operationId - Stable outbound operation identifier.
    * @param authorization - Current installation authorization.
    * @param originMarker - Authenticated provider echo marker.
+   * @param parentLifecycleFences - Exact parent authorities governing the provider mutation.
+   * @param signal - Cancellation fence propagated through provider transport.
+   * @param assertCurrentPermit - Optional exact durable retry permit validator.
    * @returns Synchronization outcome.
    */
   private async createOutboundReply(
@@ -2513,6 +2848,9 @@ export class ExternalChatSyncService {
     operationId: string,
     authorization: ChatProviderAuthorization,
     originMarker: string,
+    parentLifecycleFences: ExternalChatParentLifecycleFenceSnapshot,
+    signal: AbortSignal,
+    assertCurrentPermit: (() => Promise<void>) | undefined,
   ): Promise<ExternalChatSyncOutcome> {
     const current = await this.store.getMessageBindingByInternalId(
       event.workspaceId,
@@ -2522,12 +2860,25 @@ export class ExternalChatSyncService {
     if (current) {
       if (current.binding.lastOutboundOperationId === operationId) {
         const now = this.clock.now()
-        await this.markLinkSynchronized(event.workspaceId, record, now)
+        await assertOutboundExecutionAuthority(signal, assertCurrentPermit)
+        await this.markLinkSynchronized(
+          event.workspaceId,
+          record,
+          now,
+          async () => assertOutboundExecutionAuthority(signal, assertCurrentPermit),
+        )
         return appliedOutcome(operationId, undefined, 'outbound', now)
       }
       return skippedOutcome(operationId, undefined, 'stale', this.clock.now())
     }
     const adapter = this.adapters.get(record.link.provider)
+    const assertCurrentAuthority = this.createOutboundSideEffectAuthorityGuard(
+      record,
+      parentLifecycleFences,
+      signal,
+      assertCurrentPermit,
+    )
+    await assertCurrentAuthority()
     const message = normalizeChatProviderMessage(
       await adapter.createReply({
         authorization,
@@ -2535,9 +2886,12 @@ export class ExternalChatSyncService {
         bodyMarkdown: event.bodyMarkdown,
         operationId,
         originMarker,
+        signal,
+        assertCurrentAuthority,
       }),
       adapter.definition.permalinkHosts,
     )
+    await assertOutboundExecutionAuthority(signal, assertCurrentPermit)
     validateMessageScope(record.link, message)
     validateCreatedMessageResult(message)
     const now = this.clock.now()
@@ -2554,8 +2908,20 @@ export class ExternalChatSyncService {
       createdAt: now,
       updatedAt: now,
     }
-    await this.putBinding(event.workspaceId, record, binding, undefined)
-    await this.markLinkSynchronized(event.workspaceId, record, now)
+    await this.putBinding(
+      event.workspaceId,
+      record,
+      binding,
+      undefined,
+      parentLifecycleFences,
+    )
+    await assertOutboundExecutionAuthority(signal, assertCurrentPermit)
+        await this.markLinkSynchronized(
+          event.workspaceId,
+          record,
+          now,
+          async () => assertOutboundExecutionAuthority(signal, assertCurrentPermit),
+        )
     return appliedOutcome(operationId, undefined, 'outbound', now)
   }
 
@@ -2567,6 +2933,9 @@ export class ExternalChatSyncService {
    * @param operationId - Stable outbound operation identifier.
    * @param authorization - Current installation authorization.
    * @param originMarker - Authenticated provider echo marker.
+   * @param parentLifecycleFences - Exact parent authorities governing the provider mutation.
+   * @param signal - Cancellation fence propagated through provider transport.
+   * @param assertCurrentPermit - Optional exact durable retry permit validator.
    * @returns Synchronization outcome.
    */
   private async editOutboundMessage(
@@ -2575,6 +2944,9 @@ export class ExternalChatSyncService {
     operationId: string,
     authorization: ChatProviderAuthorization,
     originMarker: string,
+    parentLifecycleFences: ExternalChatParentLifecycleFenceSnapshot,
+    signal: AbortSignal,
+    assertCurrentPermit: (() => Promise<void>) | undefined,
   ): Promise<ExternalChatSyncOutcome> {
     const current = await this.store.getMessageBindingByInternalId(
       event.workspaceId,
@@ -2593,7 +2965,13 @@ export class ExternalChatSyncService {
     }
     if (current.binding.lastOutboundOperationId === operationId) {
       const now = this.clock.now()
-      await this.markLinkSynchronized(event.workspaceId, record, now)
+      await assertOutboundExecutionAuthority(signal, assertCurrentPermit)
+        await this.markLinkSynchronized(
+          event.workspaceId,
+          record,
+          now,
+          async () => assertOutboundExecutionAuthority(signal, assertCurrentPermit),
+        )
       return appliedOutcome(operationId, undefined, 'outbound', now)
     }
     const order = internalVersionOrder(current, event.internalCommentVersion)
@@ -2611,6 +2989,13 @@ export class ExternalChatSyncService {
       return skippedOutcome(operationId, undefined, 'stale', this.clock.now())
     }
     const adapter = this.adapters.get(record.link.provider)
+    const assertCurrentAuthority = this.createOutboundSideEffectAuthorityGuard(
+      record,
+      parentLifecycleFences,
+      signal,
+      assertCurrentPermit,
+    )
+    await assertCurrentAuthority()
     const message = normalizeChatProviderMessage(
       await adapter.editMessage({
         authorization,
@@ -2620,9 +3005,12 @@ export class ExternalChatSyncService {
         bodyMarkdown: event.bodyMarkdown,
         operationId,
         originMarker,
+        signal,
+        assertCurrentAuthority,
       }),
       adapter.definition.permalinkHosts,
     )
+    await assertOutboundExecutionAuthority(signal, assertCurrentPermit)
     validateMessageMutationIdentity(current.binding.externalMessageId, message)
     validateMessageScope(record.link, message)
     validateEditedMessageResult(current.binding.externalVersion, message)
@@ -2634,8 +3022,20 @@ export class ExternalChatSyncService {
       lastOutboundOperationId: operationId,
       updatedAt: now,
     }
-    await this.putBinding(event.workspaceId, record, binding, current)
-    await this.markLinkSynchronized(event.workspaceId, record, now)
+    await this.putBinding(
+      event.workspaceId,
+      record,
+      binding,
+      current,
+      parentLifecycleFences,
+    )
+    await assertOutboundExecutionAuthority(signal, assertCurrentPermit)
+        await this.markLinkSynchronized(
+          event.workspaceId,
+          record,
+          now,
+          async () => assertOutboundExecutionAuthority(signal, assertCurrentPermit),
+        )
     return appliedOutcome(operationId, undefined, 'outbound', now)
   }
 
@@ -2647,6 +3047,9 @@ export class ExternalChatSyncService {
    * @param operationId - Stable outbound operation identifier.
    * @param authorization - Current installation authorization.
    * @param originMarker - Authenticated provider echo marker.
+   * @param parentLifecycleFences - Exact parent authorities governing the provider mutation.
+   * @param signal - Cancellation fence propagated through provider transport.
+   * @param assertCurrentPermit - Optional exact durable retry permit validator.
    * @returns Synchronization outcome.
    */
   private async deleteOutboundMessage(
@@ -2655,6 +3058,9 @@ export class ExternalChatSyncService {
     operationId: string,
     authorization: ChatProviderAuthorization,
     originMarker: string,
+    parentLifecycleFences: ExternalChatParentLifecycleFenceSnapshot,
+    signal: AbortSignal,
+    assertCurrentPermit: (() => Promise<void>) | undefined,
   ): Promise<ExternalChatSyncOutcome> {
     const current = await this.store.getMessageBindingByInternalId(
       event.workspaceId,
@@ -2673,7 +3079,13 @@ export class ExternalChatSyncService {
     }
     if (current.binding.lastOutboundOperationId === operationId) {
       const now = this.clock.now()
-      await this.markLinkSynchronized(event.workspaceId, record, now)
+      await assertOutboundExecutionAuthority(signal, assertCurrentPermit)
+      await this.markLinkSynchronized(
+        event.workspaceId,
+        record,
+        now,
+        async () => assertOutboundExecutionAuthority(signal, assertCurrentPermit),
+      )
       return appliedOutcome(operationId, undefined, 'outbound', now)
     }
     const order = internalVersionOrder(current, event.internalCommentVersion)
@@ -2691,6 +3103,13 @@ export class ExternalChatSyncService {
       return skippedOutcome(operationId, undefined, 'stale', this.clock.now())
     }
     const adapter = this.adapters.get(record.link.provider)
+    const assertCurrentAuthority = this.createOutboundSideEffectAuthorityGuard(
+      record,
+      parentLifecycleFences,
+      signal,
+      assertCurrentPermit,
+    )
+    await assertCurrentAuthority()
     const message = normalizeChatProviderMessage(
       await adapter.deleteMessage({
         authorization,
@@ -2699,9 +3118,12 @@ export class ExternalChatSyncService {
         expectedExternalVersion: current.binding.externalVersion,
         operationId,
         originMarker,
+        signal,
+        assertCurrentAuthority,
       }),
       adapter.definition.permalinkHosts,
     )
+    await assertOutboundExecutionAuthority(signal, assertCurrentPermit)
     validateMessageMutationIdentity(current.binding.externalMessageId, message)
     validateMessageScope(record.link, message)
     const deletedAt = validateDeletedMessageResult(current.binding.externalVersion, message)
@@ -2714,8 +3136,20 @@ export class ExternalChatSyncService {
       deletedAt,
       updatedAt: now,
     }
-    await this.putBinding(event.workspaceId, record, binding, current)
-    await this.markLinkSynchronized(event.workspaceId, record, now)
+    await this.putBinding(
+      event.workspaceId,
+      record,
+      binding,
+      current,
+      parentLifecycleFences,
+    )
+    await assertOutboundExecutionAuthority(signal, assertCurrentPermit)
+    await this.markLinkSynchronized(
+      event.workspaceId,
+      record,
+      now,
+      async () => assertOutboundExecutionAuthority(signal, assertCurrentPermit),
+    )
     return appliedOutcome(operationId, undefined, 'outbound', now)
   }
 
@@ -2786,6 +3220,7 @@ export class ExternalChatSyncService {
    * @param linkId - External chat link identifier.
    * @param lifecycle - Completed authoritative lifecycle record.
    * @param operationId - Operation expected to own the completed lease.
+   * @param assertCurrentAuthority - Optional retry permit guard for repair persistence.
    * @returns Exact durable lifecycle outcome.
    */
   private async replayCompletedThreadLifecycle(
@@ -2793,6 +3228,7 @@ export class ExternalChatSyncService {
     linkId: string,
     lifecycle: StoredExternalChatThreadLifecycle,
     operationId: string,
+    assertCurrentAuthority?: () => Promise<void>,
   ): Promise<ExternalChatSyncOutcome> {
     const outcome = lifecycle.lease.completedOutcome
     if (
@@ -2806,7 +3242,13 @@ export class ExternalChatSyncService {
         'The completed thread lifecycle lease has no matching outcome.',
       )
     }
-    await this.projectThreadLifecycleOutcome(workspaceId, linkId, lifecycle.state, outcome)
+    await this.projectThreadLifecycleOutcome(
+      workspaceId,
+      linkId,
+      lifecycle.state,
+      outcome,
+      assertCurrentAuthority,
+    )
     return outcome
   }
 
@@ -2817,16 +3259,19 @@ export class ExternalChatSyncService {
    * @param linkId - External chat link identifier.
    * @param state - Authoritative committed provider thread state.
    * @param outcome - Exact outcome that determines synced, pending, paused, or conflict status.
+   * @param assertCurrentAuthority - Optional retry permit guard checked before each store call.
    */
   private async projectThreadLifecycleOutcome(
     workspaceId: string,
     linkId: string,
     state: ExternalChatThreadLifecycleState,
     outcome: ExternalChatSyncOutcome,
+    assertCurrentAuthority?: () => Promise<void>,
   ): Promise<void> {
     const syncStatus = threadLifecycleSyncStatus(outcome)
     if (syncStatus === undefined) return
     const sourceState: ExternalChatSourceState = state.completed ? 'completed' : 'active'
+    if (assertCurrentAuthority) await assertCurrentAuthority()
     const current = await this.store.getLink(workspaceId, linkId)
     if (!current || !current.active) return
     if (
@@ -2848,6 +3293,8 @@ export class ExternalChatSyncService {
         lastSourceObservedAt: state.updatedAt,
       }),
       outcome.operationId,
+      undefined,
+      assertCurrentAuthority,
     )
   }
 
@@ -2883,12 +3330,14 @@ export class ExternalChatSyncService {
    * @param owner - Exact link ownership observed before the external/internal side effect.
    * @param binding - Complete replacement message binding.
    * @param current - Previously observed stored binding.
+   * @param parentLifecycleFences - Exact parent authorities observed before the side effect.
    */
   private async putBinding(
     workspaceId: string,
     owner: StoredExternalChatLink,
     binding: ExternalChatMessageBinding,
     current: StoredExternalChatMessageBinding | undefined,
+    parentLifecycleFences: ExternalChatParentLifecycleFenceSnapshot,
   ): Promise<void> {
     const result = await this.store.putMessageBinding({
       workspaceId,
@@ -2896,6 +3345,7 @@ export class ExternalChatSyncService {
       expectedTeamId: owner.link.teamId,
       expectedWorkItemId: owner.link.workItemId,
       expectedLinkRevision: owner.link.revision,
+      expectedParentLifecycleFences: parentLifecycleFences,
       expectedStorageRevision: current?.storageRevision,
     })
     if (result.kind === 'stored') return
@@ -2917,11 +3367,13 @@ export class ExternalChatSyncService {
    * @param workspaceId - Canonical Workspace identifier.
    * @param record - Link observed before applying the mutation.
    * @param synchronizedAt - Synchronization completion timestamp.
+   * @param assertCurrentAuthority - Optional retry permit guard checked before the projection write.
    */
   private async markLinkSynchronized(
     workspaceId: string,
     record: StoredExternalChatLink,
     synchronizedAt: string,
+    assertCurrentAuthority?: () => Promise<void>,
   ): Promise<void> {
     await this.updateLinkProjection(workspaceId, record.link.id, (link) => {
       const sourceState = link.sourceState === 'deleted' ||
@@ -2936,7 +3388,140 @@ export class ExternalChatSyncService {
         lastSyncedAt: synchronizedAt,
         lastSourceObservedAt: synchronizedAt,
       }
-    })
+    }, undefined, undefined, assertCurrentAuthority)
+  }
+
+  /**
+   * Commits one scope-local lifecycle watermark and its composed public link projection.
+   *
+   * Each optimistic retry recomputes from the latest private workspace/conversation/thread state,
+   * so a concurrent child recovery cannot erase a restrictive ancestor and vice versa.
+   *
+   * @param workspaceId - Canonical Workspace identifier.
+   * @param linkId - External chat link receiving the lifecycle observation.
+   * @param event - Workspace, conversation, or thread lifecycle event.
+   * @param authorizationRevision - Verified provider generation for deterministic ordering.
+   * @param expectedParentLifecycleFence - Exact parent fan-out authority, when applicable.
+   * @returns Updated record or an explicit stale decision without side effects.
+   */
+  private async updateLinkLifecycleProjection(
+    workspaceId: string,
+    linkId: string,
+    event: ExternalChatLinkLifecycleEvent,
+    authorizationRevision: number,
+    expectedParentLifecycleFence?: ExternalChatParentLifecycleFence,
+  ): Promise<ExternalChatLinkLifecycleProjectionResult> {
+    const observation = lifecycleObservation(
+      event,
+      authorizationRevision,
+      expectedParentLifecycleFence?.eventId,
+    )
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const current = await this.store.getLink(workspaceId, linkId)
+      if (!current || !current.active) {
+        throw new ExternalChatError(
+          'ExternalChatNotFound',
+          'The external chat link is no longer active.',
+        )
+      }
+      const parentFences = await this.store.getParentLifecycleFences(workspaceId, linkId)
+      if (parentFences === undefined) {
+        throw new ExternalChatError(
+          'ExternalChatNotFound',
+          'The external chat link no longer exists.',
+        )
+      }
+      if (
+        expectedParentLifecycleFence !== undefined &&
+        !parentLifecycleFenceSnapshotContains(parentFences, expectedParentLifecycleFence)
+      ) {
+        throw new ParentLifecycleFenceSupersededError(
+          'A newer provider parent lifecycle event superseded this projection.',
+        )
+      }
+      const previous = lifecycleObservationForScope(current.lifecycleState, event.resourceType)
+      let replayed = false
+      if (previous) {
+        const ordering = compareLifecycleObservations(observation, previous)
+        if (ordering < 0) {
+          return { kind: 'stale', record: current, parentLifecycleFences: parentFences }
+        }
+        if (ordering === 0) {
+          if (!lifecycleObservationsEqual(observation, previous)) {
+            throw new ExternalChatError(
+              'ExternalChatEventConflict',
+              'A lifecycle event identity was reused with another source state.',
+            )
+          }
+          replayed = true
+        }
+      }
+      const lifecycleState = replayed
+        ? current.lifecycleState
+        : replaceLifecycleObservation(
+          current.lifecycleState,
+          event.resourceType,
+          observation,
+        )
+      const effective = effectiveLinkLifecycleStateWithParentFences(
+        lifecycleState,
+        parentFences,
+        current.sourceAuthorizationRevision,
+      )
+      const redacted = mustRedactSourceMetadata(effective.availability, effective.state)
+        ? redactLinkSourceMetadata(current.link)
+        : current.link
+      const syncStatus = statusForSource(effective.availability, effective.state)
+      const candidate: ExternalChatWorkItemLink = {
+        ...redacted,
+        sourceAvailability: effective.availability,
+        sourceState: effective.state,
+        syncStatus,
+        ...(syncStatus === 'synced'
+          ? {
+              lastSourceObservedAt: laterTimestamp(
+                current.link.lastSourceObservedAt,
+                event.occurredAt,
+              ),
+            }
+          : {}),
+      }
+      if (
+        replayed &&
+        createExternalChatFingerprint(candidate) === createExternalChatFingerprint(current.link)
+      ) {
+        return { kind: 'replayed', record: current, parentLifecycleFences: parentFences }
+      }
+      const link = restoreImmutableLinkIdentity(current.link, candidate, this.clock.now())
+      const updated = await this.store.updateLink({
+        workspaceId,
+        link,
+        lifecycleState,
+        expectedRevision: current.link.revision,
+        expectedParentLifecycleFences: parentFences,
+      })
+      if (updated.kind === 'updated') {
+        return {
+          kind: replayed ? 'replayed' : 'updated',
+          record: updated.record,
+          parentLifecycleFences: parentFences,
+        }
+      }
+      if (updated.kind === 'parent-stale') {
+        continue
+      }
+      if (updated.kind === 'not-found') {
+        throw new ExternalChatError(
+          'ExternalChatNotFound',
+          'The external chat link no longer exists.',
+        )
+      }
+    }
+    throw new ExternalChatSyncPortError(
+      'ExternalChatSyncRevisionConflict',
+      'The external chat link changed repeatedly during lifecycle synchronization.',
+      { retryable: true },
+    )
   }
 
   /**
@@ -2949,7 +3534,8 @@ export class ExternalChatSyncService {
    * @param project - Pure projection applied to the latest public link.
    * @param lifecycleOperationId - Completed lifecycle owner permitted to project before ack.
    * @param expectedParentLifecycleFence - Exact parent authority required at atomic commit.
-   * @returns Updated stored link.
+   * @param assertCurrentAuthority - Optional retry permit guard checked before each link write.
+   * @returns Updated stored link and the exact parent snapshot used by its transaction.
    */
   private async updateLinkProjection(
     workspaceId: string,
@@ -2957,7 +3543,8 @@ export class ExternalChatSyncService {
     project: (link: ExternalChatWorkItemLink) => ExternalChatWorkItemLink,
     lifecycleOperationId?: string,
     expectedParentLifecycleFence?: ExternalChatParentLifecycleFence,
-  ): Promise<StoredExternalChatLink> {
+    assertCurrentAuthority?: () => Promise<void>,
+  ): Promise<ExternalChatLinkProjectionCommit> {
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const current = await this.store.getLink(workspaceId, linkId)
       if (!current || !current.active) {
@@ -2966,23 +3553,45 @@ export class ExternalChatSyncService {
           'The external chat link is no longer active.',
         )
       }
+      const parentFences = await this.store.getParentLifecycleFences(workspaceId, linkId)
+      if (parentFences === undefined) {
+        throw new ExternalChatError(
+          'ExternalChatNotFound',
+          'The external chat link no longer exists.',
+        )
+      }
+      if (
+        expectedParentLifecycleFence !== undefined &&
+        !parentLifecycleFenceSnapshotContains(parentFences, expectedParentLifecycleFence)
+      ) {
+        throw new ParentLifecycleFenceSupersededError(
+          'A newer provider parent lifecycle event superseded this projection.',
+        )
+      }
       const now = this.clock.now()
-      const candidate = project(current.link)
+      const projected = project(current.link)
+      const candidate = composeLinkProjectionWithLifecycleFloor(
+        projected,
+        effectiveLinkLifecycleStateWithParentFences(
+          current.lifecycleState,
+          parentFences,
+          current.sourceAuthorizationRevision,
+        ),
+      )
       const link = restoreImmutableLinkIdentity(current.link, candidate, now)
+      if (assertCurrentAuthority) await assertCurrentAuthority()
       const updated = await this.store.updateLink({
         workspaceId,
         link,
         expectedRevision: current.link.revision,
         ...(lifecycleOperationId === undefined ? {} : { lifecycleOperationId }),
-        ...(expectedParentLifecycleFence === undefined
-          ? {}
-          : { expectedParentLifecycleFence }),
+        expectedParentLifecycleFences: parentFences,
       })
-      if (updated.kind === 'updated') return updated.record
+      if (updated.kind === 'updated') {
+        return { record: updated.record, parentLifecycleFences: parentFences }
+      }
       if (updated.kind === 'parent-stale') {
-        throw new ParentLifecycleFenceSupersededError(
-          'A newer provider parent lifecycle event superseded this projection.',
-        )
+        continue
       }
       if (updated.kind === 'not-found') {
         throw new ExternalChatError(
@@ -3007,15 +3616,17 @@ export class ExternalChatSyncService {
    * @param fingerprint - Normalized event fingerprint.
    * @param record - Active source-owning link.
    * @param attempt - Current durable receipt attempt count.
+   * @param parentLifecycleFences - Exact parent authorities observed before deferral.
    * @returns Durable deferred outcome.
    */
   private async deferInbound(
     workspaceId: string,
-    event: ExternalChatInboundEvent,
+    event: ExternalChatThreadScopedInboundEvent,
     operationId: string,
     fingerprint: string,
     record: StoredExternalChatLink,
     attempt: number,
+    parentLifecycleFences: ExternalChatParentLifecycleFenceSnapshot,
   ): Promise<ExternalChatSyncOutcome> {
     const now = this.clock.now()
     const retryAt = addMilliseconds(now, this.deferDelayMs)
@@ -3030,6 +3641,7 @@ export class ExternalChatSyncService {
       workspaceId,
       linkId: record.link.id,
       event,
+      expectedParentLifecycleFences: parentLifecycleFences,
       fingerprint,
       reason: 'source-unavailable',
       attempt,
@@ -3065,7 +3677,7 @@ export class ExternalChatSyncService {
     event: ExternalChatInboundEvent,
     operationId: string,
     expectedAttempt: number,
-    source: ExternalChatSourceIdentity,
+    _source: ExternalChatSourceIdentity | undefined,
     record: StoredExternalChatLink | undefined,
     outcome: ExternalChatSyncOutcome,
   ): Promise<ExternalChatSyncOutcome> {
@@ -3089,7 +3701,7 @@ export class ExternalChatSyncService {
     if (record) {
       await this.acknowledgeCompletedThreadLifecycle(workspaceId, record, operationId)
     }
-    await this.recordInboundAudit(workspaceId, event, operationId, source, record, outcome)
+    await this.recordInboundAudit(workspaceId, event, operationId, record, outcome)
     await this.deleteTerminalDeferredEvent(workspaceId, event, outcome)
     return outcome
   }
@@ -3121,7 +3733,6 @@ export class ExternalChatSyncService {
    * @param workspaceId - Canonical Workspace identifier.
    * @param event - Verified normalized provider event.
    * @param operationId - Stable inbound operation identifier.
-   * @param source - Provider source identity used only to derive a digest.
    * @param record - Resolved link, when one exists.
    * @param outcome - Durable inbound outcome.
    */
@@ -3129,7 +3740,6 @@ export class ExternalChatSyncService {
     workspaceId: string,
     event: ExternalChatInboundEvent,
     operationId: string,
-    source: ExternalChatSourceIdentity,
     record: StoredExternalChatLink | undefined,
     outcome: ExternalChatSyncOutcome,
   ): Promise<void> {
@@ -3137,7 +3747,7 @@ export class ExternalChatSyncService {
       workspaceId,
       provider: event.provider,
       linkId: record?.link.id,
-      sourceDigest: createExternalChatSourceDigest(source),
+      sourceDigest: createInboundScopeDigest(event),
       operationId,
       eventId: event.eventId,
       correlationId: inboundCorrelationId(event.correlationId),
@@ -3157,6 +3767,8 @@ export class ExternalChatSyncService {
    * @param operationId - Stable outbound operation identifier.
    * @param expectedAttempt - Receipt lease attempt that owns completion.
    * @param outcome - Final outbound decision.
+   * @param signal - Cancellation fence owned by the current retry processor.
+   * @param assertCurrentPermit - Optional exact durable retry permit validator.
    * @returns The committed outcome.
    */
   private async completeOutbound(
@@ -3165,28 +3777,85 @@ export class ExternalChatSyncService {
     operationId: string,
     expectedAttempt: number,
     outcome: ExternalChatSyncOutcome,
+    signal: AbortSignal,
+    assertCurrentPermit: (() => Promise<void>) | undefined,
   ): Promise<ExternalChatSyncOutcome> {
     const completedAt = this.clock.now()
     const retryAt = outboundRetryAt(outcome, completedAt, this.deferDelayMs)
+    let committedOutcome = outcome
     if (retryAt) {
-      await this.store.deferOutboundEvent({
-        workspaceId: event.workspaceId,
-        linkId: event.linkId,
-        event,
-        fingerprint: createExternalChatFingerprint(event),
-        operationId,
-        attempt: expectedAttempt,
-        retryAt,
-        createdAt: completedAt,
-        updatedAt: completedAt,
-      })
+      await assertOutboundExecutionAuthority(signal, assertCurrentPermit)
+      const current = await this.store.getLink(event.workspaceId, event.linkId)
+      if (!current || !current.active) {
+        committedOutcome = skippedOutcome(
+          operationId,
+          undefined,
+          'unlinked',
+          completedAt,
+        )
+      } else {
+        const parentLifecycleFences = await this.requireParentLifecycleFences(
+          event.workspaceId,
+          current.link.id,
+        )
+        const effectiveLifecycle = effectiveLinkLifecycleStateWithParentFences(
+          current.lifecycleState,
+          parentLifecycleFences,
+          current.sourceAuthorizationRevision,
+        )
+        if (
+          !allowsOutbound(current.link.syncDirection) ||
+          lifecycleForbidsContentSynchronization(
+            effectiveLifecycle.availability,
+            effectiveLifecycle.state,
+          )
+        ) {
+          await assertOutboundExecutionAuthority(signal, assertCurrentPermit)
+          await this.redactRestrictiveLinkResources(
+            event.workspaceId,
+            current,
+            effectiveLifecycle.availability,
+            effectiveLifecycle.state,
+            parentLifecycleFences,
+            operationId,
+            event.correlationId,
+            event.occurredAt,
+            undefined,
+            async () => assertOutboundExecutionAuthority(signal, assertCurrentPermit),
+          )
+          committedOutcome = skippedOutcome(
+            operationId,
+            undefined,
+            'paused',
+            completedAt,
+          )
+        } else {
+          await assertOutboundExecutionAuthority(signal, assertCurrentPermit)
+          await this.store.deferOutboundEvent({
+            workspaceId: event.workspaceId,
+            linkId: event.linkId,
+            ownerTeamId: current.link.teamId,
+            ownerWorkItemId: current.link.workItemId,
+            ownerLinkRevision: current.link.revision,
+            expectedParentLifecycleFences: parentLifecycleFences,
+            event,
+            fingerprint: createExternalChatFingerprint(event),
+            operationId,
+            attempt: expectedAttempt,
+            retryAt,
+            createdAt: completedAt,
+            updatedAt: completedAt,
+          })
+        }
+      }
     }
+    await assertOutboundExecutionAuthority(signal, assertCurrentPermit)
     const completed = await this.store.completeOutboundOperation({
       workspaceId: event.workspaceId,
       linkId: event.linkId,
       operationId,
       expectedAttempt,
-      outcome,
+      outcome: committedOutcome,
       completedAt,
     })
     if (!completed) {
@@ -3196,10 +3865,18 @@ export class ExternalChatSyncService {
         true,
       )
     }
-    await this.acknowledgeCompletedThreadLifecycle(event.workspaceId, record, operationId)
-    await this.recordOutboundAudit(event, record, operationId, outcome)
-    await this.deleteTerminalDeferredOutboundEvent(event, operationId, outcome)
-    return outcome
+    await assertOutboundExecutionAuthority(signal, assertCurrentPermit)
+    await this.acknowledgeCompletedThreadLifecycle(
+      event.workspaceId,
+      record,
+      operationId,
+      async () => assertOutboundExecutionAuthority(signal, assertCurrentPermit),
+    )
+    await assertOutboundExecutionAuthority(signal, assertCurrentPermit)
+    await this.recordOutboundAudit(event, record, operationId, committedOutcome)
+    await assertOutboundExecutionAuthority(signal, assertCurrentPermit)
+    await this.deleteTerminalDeferredOutboundEvent(event, operationId, committedOutcome)
+    return committedOutcome
   }
 
   /**
@@ -3231,12 +3908,15 @@ export class ExternalChatSyncService {
    * @param workspaceId - Canonical Workspace identifier.
    * @param record - Link that may own the lifecycle handoff.
    * @param operationId - Stable inbound or outbound operation identifier.
+   * @param assertCurrentAuthority - Optional retry permit guard checked before each store call.
    */
   private async acknowledgeCompletedThreadLifecycle(
     workspaceId: string,
     record: StoredExternalChatLink,
     operationId: string,
+    assertCurrentAuthority?: () => Promise<void>,
   ): Promise<void> {
+    if (assertCurrentAuthority) await assertCurrentAuthority()
     const lifecycle = await this.store.getThreadLifecycle(
       workspaceId,
       record.link.id,
@@ -3247,6 +3927,7 @@ export class ExternalChatSyncService {
       lifecycle.lease.operationId !== operationId ||
       lifecycle.lease.status !== 'completed'
     ) return
+    if (assertCurrentAuthority) await assertCurrentAuthority()
     const acknowledged = await this.store.acknowledgeThreadLifecycle({
       workspaceId,
       linkId: record.link.id,
@@ -3301,6 +3982,7 @@ export class ExternalChatSyncService {
    * @param correlationId - Stable trace identifier.
    * @param occurredAt - Stable provider or internal event occurrence time.
    * @param excludedDeferredEventId - Current retry event retained until receipt completion.
+   * @param assertCurrentAuthority - Optional retry permit and cancellation guard.
    */
   private async reflectProviderFailure(
     workspaceId: string,
@@ -3310,10 +3992,12 @@ export class ExternalChatSyncService {
     correlationId: string,
     occurredAt: string,
     excludedDeferredEventId?: string,
+    assertCurrentAuthority?: () => Promise<void>,
   ): Promise<void> {
     const projection = providerFailureProjection(error)
     if (!projection) return
-    const projectedRecord = await this.updateLinkProjection(
+    if (assertCurrentAuthority) await assertCurrentAuthority()
+    const projected = await this.updateLinkProjection(
       workspaceId,
       record.link.id,
       (link) => {
@@ -3328,54 +4012,78 @@ export class ExternalChatSyncService {
         syncStatus: projection.status,
       }
       },
+      undefined,
+      undefined,
+      assertCurrentAuthority,
     )
-    const state = projection.state ?? projectedRecord.link.sourceState
+    const state = projection.state ?? projected.record.link.sourceState
     await this.redactRestrictiveLinkResources(
       workspaceId,
-      projectedRecord,
+      projected.record,
       projection.availability,
       state,
+      projected.parentLifecycleFences,
       operationId,
       correlationId,
       occurredAt,
       excludedDeferredEventId,
+      assertCurrentAuthority,
     )
   }
 
   /**
-   * Purges retained payloads before resuming the idempotent collaboration redaction cascade.
+   * Purges blocked content work before optionally resuming the collaboration redaction cascade.
    *
    * @param workspaceId - Canonical Workspace identifier.
    * @param record - Link whose collaboration resources are being restricted.
    * @param availability - Effective provider availability.
    * @param state - Effective provider lifecycle state.
+   * @param parentLifecycleFences - Exact parent authorities authorizing destructive work.
    * @param operationId - Stable operation identifier used by collaboration idempotency.
    * @param correlationId - Stable trace identifier.
    * @param occurredAt - Stable source occurrence time.
    * @param excludedDeferredEventId - Retry coordinator event retained until outer completion.
+   * @param assertCurrentAuthority - Optional retry permit and cancellation guard.
    */
   private async redactRestrictiveLinkResources(
     workspaceId: string,
     record: StoredExternalChatLink,
     availability: ExternalChatWorkItemLink['sourceAvailability'],
     state: ExternalChatWorkItemLink['sourceState'],
+    parentLifecycleFences: ExternalChatParentLifecycleFenceSnapshot,
     operationId: string,
     correlationId: string,
     occurredAt: string,
     excludedDeferredEventId?: string,
+    assertCurrentAuthority?: () => Promise<void>,
   ): Promise<void> {
-    if (!mustRedactSourceMetadata(availability, state)) return
-    await this.store.purgeDeferredEventsForLink(
+    if (!lifecycleForbidsContentSynchronization(availability, state)) return
+    if (assertCurrentAuthority) await assertCurrentAuthority()
+    const inboundPurged = await this.store.purgeDeferredEventsForLink(
       workspaceId,
       record.link.id,
       excludedDeferredEventId,
+      record.link.revision,
+      parentLifecycleFences,
     )
+    if (inboundPurged === undefined) throw staleRestrictiveCascadeError()
+    if (assertCurrentAuthority) await assertCurrentAuthority()
+    const outboundPurged = await this.store.purgeDeferredOutboundEventsForLink(
+      workspaceId,
+      record.link.id,
+      record.link.revision,
+      parentLifecycleFences,
+    )
+    if (outboundPurged === undefined) throw staleRestrictiveCascadeError()
+    if (!mustRedactSourceMetadata(availability, state)) return
+    if (assertCurrentAuthority) await assertCurrentAuthority()
     await this.collaboration.redactExternalLinkResources({
       workspaceId,
       teamId: record.link.teamId,
       workItemId: record.link.workItemId,
       linkId: record.link.id,
       expectedLinkRevision: record.link.revision,
+      expectedParentLifecycleFences: parentLifecycleFences,
       availability,
       state,
       operationId,
@@ -3417,6 +4125,94 @@ export class ExternalChatSyncService {
   }
 
   /**
+   * Creates the guard an adapter must await at its provider-request linearization point.
+   *
+   * @param owner - Link snapshot that authorized the outbound operation.
+   * @param expectedParentLifecycleFences - Parent authorities observed before processing began.
+   * @param signal - Durable retry cancellation fence propagated through provider transport.
+   * @param assertCurrentPermit - Optional exact durable retry permit validator.
+   * @returns Reusable exact authority check for idempotent provider request attempts.
+   */
+  private createOutboundSideEffectAuthorityGuard(
+    owner: StoredExternalChatLink,
+    expectedParentLifecycleFences: ExternalChatParentLifecycleFenceSnapshot,
+    signal: AbortSignal,
+    assertCurrentPermit: (() => Promise<void>) | undefined,
+  ): () => Promise<void> {
+    return async () => {
+      assertOutboundExecutionActive(signal)
+      await this.assertOutboundSideEffectAuthority(owner, expectedParentLifecycleFences)
+      await assertOutboundExecutionAuthority(signal, assertCurrentPermit)
+    }
+  }
+
+  /**
+   * Revalidates exact link ownership and parent lifecycle authority immediately before provider I/O.
+   *
+   * @param owner - Link snapshot that authorized the outbound operation.
+   * @param expectedParentLifecycleFences - Parent authorities observed before processing began.
+   */
+  private async assertOutboundSideEffectAuthority(
+    owner: StoredExternalChatLink,
+    expectedParentLifecycleFences: ExternalChatParentLifecycleFenceSnapshot,
+  ): Promise<void> {
+    const current = await this.store.getLink(owner.workspaceId, owner.link.id)
+    if (!current || !sameSourceViewOwner(owner, current)) {
+      throw new ExternalChatSyncPortError(
+        'ExternalChatSyncRevisionConflict',
+        'The external chat link ownership changed before the provider mutation.',
+        { retryable: true },
+      )
+    }
+    const currentParentLifecycleFences = await this.requireParentLifecycleFences(
+      owner.workspaceId,
+      owner.link.id,
+    )
+    const effectiveLifecycle = effectiveLinkLifecycleStateWithParentFences(
+      current.lifecycleState,
+      currentParentLifecycleFences,
+      current.sourceAuthorizationRevision,
+    )
+    if (
+      !parentLifecycleFenceSnapshotsEqual(
+        expectedParentLifecycleFences,
+        currentParentLifecycleFences,
+      ) ||
+      externalChatLifecycleBlocksSynchronization(
+        effectiveLifecycle.availability,
+        effectiveLifecycle.state,
+      )
+    ) {
+      throw new ExternalChatSyncPortError(
+        'ExternalChatSyncSourceUnavailable',
+        'Provider lifecycle authority changed before the provider mutation.',
+        { retryable: true },
+      )
+    }
+  }
+
+  /**
+   * Strongly reads the exact workspace and conversation lifecycle authorities for one link.
+   *
+   * @param workspaceId - Canonical Workspace identifier.
+   * @param linkId - External chat link identifier.
+   * @returns Present-or-absent parent authorities current at read time.
+   */
+  private async requireParentLifecycleFences(
+    workspaceId: string,
+    linkId: string,
+  ): Promise<ExternalChatParentLifecycleFenceSnapshot> {
+    const snapshot = await this.store.getParentLifecycleFences(workspaceId, linkId)
+    if (snapshot === undefined) {
+      throw new ExternalChatError(
+        'ExternalChatNotFound',
+        'The external chat link no longer exists.',
+      )
+    }
+    return snapshot
+  }
+
+  /**
    * Reads one active link without crossing its Workspace partition.
    *
    * @param workspaceId - Canonical Workspace identifier.
@@ -3439,6 +4235,305 @@ export class ExternalChatSyncService {
 }
 
 /**
+ * Creates one validated scope-local lifecycle watermark from a normalized provider event.
+ *
+ * @param event - Workspace, conversation, or thread lifecycle event.
+ * @param authorizationRevision - Verified provider authorization generation.
+ * @param orderingEventId - Original provider parent event ID when a child receipt uses a digest.
+ * @returns Complete durable lifecycle observation.
+ */
+function lifecycleObservation(
+  event: ExternalChatLinkLifecycleEvent,
+  authorizationRevision: number,
+  orderingEventId = event.eventId,
+): ExternalChatLifecycleObservation {
+  if (!Number.isSafeInteger(authorizationRevision) || authorizationRevision < 1) {
+    throw new ExternalChatError(
+      'ExternalChatValidationFailed',
+      'The lifecycle authorization revision is invalid.',
+    )
+  }
+  return {
+    authorizationRevision,
+    availability: event.availability,
+    state: event.state,
+    occurredAt: event.occurredAt,
+    eventId: orderingEventId,
+  }
+}
+
+/**
+ * Reads the current observation for one exact link lifecycle scope.
+ *
+ * @param state - Current private per-link lifecycle state.
+ * @param resourceType - Exact lifecycle scope being compared.
+ * @returns Current scope-local observation, when one exists.
+ */
+function lifecycleObservationForScope(
+  state: ExternalChatLinkLifecycleState,
+  resourceType: ExternalChatLinkLifecycleEvent['resourceType'],
+): ExternalChatLifecycleObservation | undefined {
+  if (resourceType === 'workspace') return state.workspace
+  if (resourceType === 'conversation') return state.conversation
+  return state.thread
+}
+
+/**
+ * Replaces only the exact scope named by one lifecycle event.
+ *
+ * @param state - Current private per-link lifecycle state.
+ * @param resourceType - Exact lifecycle scope to advance.
+ * @param observation - Newer validated observation for that scope.
+ * @returns Private lifecycle state preserving every sibling and ancestor observation.
+ */
+function replaceLifecycleObservation(
+  state: ExternalChatLinkLifecycleState,
+  resourceType: ExternalChatLinkLifecycleEvent['resourceType'],
+  observation: ExternalChatLifecycleObservation,
+): ExternalChatLinkLifecycleState {
+  if (resourceType === 'workspace') return { ...state, workspace: observation }
+  if (resourceType === 'conversation') return { ...state, conversation: observation }
+  return { ...state, thread: observation }
+}
+
+/**
+ * Orders two observations within one exact lifecycle scope.
+ *
+ * @param left - Incoming observation.
+ * @param right - Current durable observation.
+ * @returns Standard comparator result ordered by authorization generation, time, then event ID.
+ */
+function compareLifecycleObservations(
+  left: ExternalChatLifecycleObservation,
+  right: ExternalChatLifecycleObservation,
+): number {
+  if (left.authorizationRevision !== right.authorizationRevision) {
+    return left.authorizationRevision < right.authorizationRevision ? -1 : 1
+  }
+  if (left.occurredAt !== right.occurredAt) return left.occurredAt < right.occurredAt ? -1 : 1
+  if (left.eventId === right.eventId) return 0
+  return left.eventId < right.eventId ? -1 : 1
+}
+
+/**
+ * Compares every durable field of two scope-local lifecycle observations.
+ *
+ * @param left - First lifecycle observation.
+ * @param right - Second lifecycle observation.
+ * @returns Whether both observations carry the exact same ordered source state.
+ */
+function lifecycleObservationsEqual(
+  left: ExternalChatLifecycleObservation,
+  right: ExternalChatLifecycleObservation,
+): boolean {
+  return left.authorizationRevision === right.authorizationRevision &&
+    left.availability === right.availability &&
+    left.state === right.state &&
+    left.occurredAt === right.occurredAt &&
+    left.eventId === right.eventId
+}
+
+/**
+ * Composes workspace, conversation, and thread observations into a fail-closed public state.
+ *
+ * @param state - Current private scope-local observations.
+ * @param minimumAuthorizationRevision - Oldest provider authorization generation still applicable.
+ * @returns Most restrictive current reachability and lifecycle values.
+ */
+function effectiveLinkLifecycleState(
+  state: ExternalChatLinkLifecycleState,
+  minimumAuthorizationRevision: number,
+): ExternalChatEffectiveLifecycleState {
+  let availability: ExternalChatSourceAvailability = 'available'
+  let sourceState: ExternalChatSourceState = 'active'
+  const observations = [state.workspace, state.conversation, state.thread]
+  for (const observation of observations) {
+    if (
+      !observation ||
+      observation.authorizationRevision < minimumAuthorizationRevision
+    ) continue
+    if (lifecycleAvailabilityRank(observation.availability) > lifecycleAvailabilityRank(availability)) {
+      availability = observation.availability
+    }
+    if (lifecycleSourceStateRank(observation.state) > lifecycleSourceStateRank(sourceState)) {
+      sourceState = observation.state
+    }
+  }
+  return { availability, state: sourceState }
+}
+
+/**
+ * Composes private link watermarks with restrictive parent fences already published for fan-out.
+ *
+ * A restrictive fence is a fail-closed availability floor until its exact child projection
+ * catches up. Nonrestrictive recovery fences intentionally do not lift a previously committed
+ * private restriction before their child event is applied.
+ *
+ * @param state - Current private scope-local observations.
+ * @param parentFences - Strongly read workspace and conversation authorities.
+ * @param sourceAuthorizationRevision - Generation under which this link source was resolved.
+ * @returns Effective state including any fence-to-child publication gap.
+ */
+function effectiveLinkLifecycleStateWithParentFences(
+  state: ExternalChatLinkLifecycleState,
+  parentFences: ExternalChatParentLifecycleFenceSnapshot,
+  sourceAuthorizationRevision: number,
+): ExternalChatEffectiveLifecycleState {
+  const effective = effectiveLinkLifecycleState(state, sourceAuthorizationRevision)
+  let availability = effective.availability
+  let stateValue = effective.state
+  for (const fence of [parentFences.workspace, parentFences.conversation]) {
+    if (
+      fence === undefined ||
+      !fence.restrictive ||
+      fence.authorizationRevision < sourceAuthorizationRevision
+    ) continue
+    if (lifecycleAvailabilityRank(fence.availability) > lifecycleAvailabilityRank(availability)) {
+      availability = fence.availability
+    }
+    if (lifecycleSourceStateRank(fence.state) > lifecycleSourceStateRank(stateValue)) {
+      stateValue = fence.state
+    }
+  }
+  return { availability, state: stateValue }
+}
+
+/**
+ * Applies a private lifecycle state as a fail-closed floor to one generic public projection.
+ *
+ * @param candidate - Content, lifecycle, or provider-failure projection being committed.
+ * @param floor - Effective lifecycle restriction that the candidate may not relax.
+ * @returns Candidate with any more restrictive lifecycle values and required redaction applied.
+ */
+function composeLinkProjectionWithLifecycleFloor(
+  candidate: ExternalChatWorkItemLink,
+  floor: ExternalChatEffectiveLifecycleState,
+): ExternalChatWorkItemLink {
+  const availability = lifecycleAvailabilityRank(candidate.sourceAvailability) >=
+      lifecycleAvailabilityRank(floor.availability)
+    ? candidate.sourceAvailability
+    : floor.availability
+  const state = lifecycleSourceStateRank(candidate.sourceState) >=
+      lifecycleSourceStateRank(floor.state)
+    ? candidate.sourceState
+    : floor.state
+  if (availability === candidate.sourceAvailability && state === candidate.sourceState) {
+    return candidate
+  }
+  const projected = mustRedactSourceMetadata(availability, state)
+    ? redactLinkSourceMetadata(candidate)
+    : candidate
+  return {
+    ...projected,
+    sourceAvailability: availability,
+    sourceState: state,
+    syncStatus: statusForSource(availability, state),
+  }
+}
+
+/**
+ * Checks whether a strong parent snapshot still contains one exact fan-out authority.
+ *
+ * @param snapshot - Current workspace and conversation parent authorities.
+ * @param expected - Exact fence that authorized the fan-out child.
+ * @returns Whether the corresponding scope is still owned by the exact expected fence.
+ */
+function parentLifecycleFenceSnapshotContains(
+  snapshot: ExternalChatParentLifecycleFenceSnapshot,
+  expected: ExternalChatParentLifecycleFence,
+): boolean {
+  const current = expected.conversationExternalId === undefined
+    ? snapshot.workspace
+    : snapshot.conversation
+  return current !== undefined && parentLifecycleFencesEqual(current, expected)
+}
+
+/**
+ * Compares every authoritative field of two provider-parent lifecycle fences.
+ *
+ * @param left - First durable parent authority.
+ * @param right - Second durable parent authority.
+ * @returns Whether both fences are exactly identical.
+ */
+function parentLifecycleFencesEqual(
+  left: ExternalChatParentLifecycleFence,
+  right: ExternalChatParentLifecycleFence,
+): boolean {
+  return left.workspaceId === right.workspaceId &&
+    left.provider === right.provider &&
+    left.installationId === right.installationId &&
+    left.externalWorkspaceId === right.externalWorkspaceId &&
+    left.conversationExternalId === right.conversationExternalId &&
+    left.authorizationRevision === right.authorizationRevision &&
+    left.availability === right.availability &&
+    left.state === right.state &&
+    left.restrictive === right.restrictive &&
+    left.eventId === right.eventId &&
+    left.operationId === right.operationId &&
+    left.occurredAt === right.occurredAt
+}
+
+/**
+ * Compares exact present-or-absent workspace and conversation lifecycle authorities.
+ *
+ * @param left - First strongly read parent authority snapshot.
+ * @param right - Second strongly read parent authority snapshot.
+ * @returns Whether neither parent scope changed between the reads.
+ */
+function parentLifecycleFenceSnapshotsEqual(
+  left: ExternalChatParentLifecycleFenceSnapshot,
+  right: ExternalChatParentLifecycleFenceSnapshot,
+): boolean {
+  return optionalParentLifecycleFencesEqual(left.workspace, right.workspace) &&
+    optionalParentLifecycleFencesEqual(left.conversation, right.conversation)
+}
+
+/**
+ * Compares one optional exact parent lifecycle authority.
+ *
+ * @param left - First parent authority or explicit absence.
+ * @param right - Second parent authority or explicit absence.
+ * @returns Whether both values are absent or exactly identical.
+ */
+function optionalParentLifecycleFencesEqual(
+  left: ExternalChatParentLifecycleFence | undefined,
+  right: ExternalChatParentLifecycleFence | undefined,
+): boolean {
+  if (left === undefined || right === undefined) return left === right
+  return parentLifecycleFencesEqual(left, right)
+}
+
+/** Returns the fail-closed rank of one source availability value. */
+function lifecycleAvailabilityRank(value: ExternalChatSourceAvailability): number {
+  if (value === 'available') return 0
+  if (value === 'temporarily-unavailable') return 1
+  if (value === 'needs-reauth') return 2
+  if (value === 'installation-disconnected') return 3
+  if (value === 'scope-changed') return 4
+  return 5
+}
+
+/** Returns the fail-closed rank of one provider lifecycle state. */
+function lifecycleSourceStateRank(value: ExternalChatSourceState): number {
+  if (value === 'active') return 0
+  if (value === 'completed') return 1
+  if (value === 'retained-metadata') return 2
+  if (value === 'deleted') return 3
+  return 4
+}
+
+/**
+ * Returns the later of a current optional timestamp and one normalized provider timestamp.
+ *
+ * @param current - Current observed source timestamp, when one exists.
+ * @param incoming - Incoming normalized provider timestamp.
+ * @returns Monotonically nondecreasing source observation timestamp.
+ */
+function laterTimestamp(current: string | undefined, incoming: string): string {
+  return current === undefined || current < incoming ? incoming : current
+}
+
+/**
  * Rejects a parent lifecycle event whose resource ID does not own the linked source.
  *
  * @param link - Link whose immutable provider scope owns the cascade.
@@ -3446,39 +4541,24 @@ export class ExternalChatSyncService {
  */
 function validateParentLifecycleResourceScope(
   link: ExternalChatWorkItemLink,
-  event: Extract<ExternalChatInboundEvent, { type: 'source.lifecycle-changed' }>,
+  event: ExternalChatLinkLifecycleEvent,
 ): void {
-  const expectedResourceId = event.resourceType === 'workspace'
-    ? link.source.externalWorkspaceId
-    : event.resourceType === 'conversation'
-    ? link.source.conversationExternalId
-    : event.resourceType === 'thread'
-    ? link.source.threadExternalId
-    : undefined
-  if (expectedResourceId === undefined) {
-    throw new ChatProviderAdapterError(
-      'ChatProviderInvalidResponse',
-      'Only parent lifecycle resources can trigger a link-wide cascade.',
+  if (
+    link.source.externalWorkspaceId !== event.externalWorkspaceId ||
+    (
+      event.resourceType !== 'workspace' &&
+      link.source.conversationExternalId !== event.conversationExternalId
+    ) ||
+    (
+      event.resourceType === 'thread' &&
+      link.source.threadExternalId !== event.threadExternalId
     )
-  }
-  if (event.resourceExternalId !== expectedResourceId) {
+  ) {
     throw new ChatProviderAdapterError(
       'ChatProviderScopeMismatch',
       'The provider lifecycle resource does not own the linked source.',
     )
   }
-}
-
-/**
- * Checks whether a provider lifecycle transition forbids retaining optional source metadata.
- *
- * @param event - Verified provider lifecycle event.
- * @returns Whether display names, permalinks, and quoted source text must be removed.
- */
-function mustRedactLifecycleMetadata(
-  event: Extract<ExternalChatInboundEvent, { type: 'source.lifecycle-changed' }>,
-): boolean {
-  return mustRedactSourceMetadata(event.availability, event.state)
 }
 
 /**
@@ -3727,6 +4807,35 @@ function sourceViewAuthorizationChanged(): ExternalChatError {
 }
 
 /**
+ * Rejects work after a durable retry caller loses its provider-side-effect authority.
+ *
+ * @param signal - Cancellation fence propagated by the current outbound retry owner.
+ */
+function assertOutboundExecutionActive(signal: AbortSignal): void {
+  if (!signal.aborted) return
+  throw new ExternalChatSyncPortError(
+    'ExternalChatSyncSourceUnavailable',
+    'The outbound retry authority expired before synchronization completed.',
+    { retryable: true },
+  )
+}
+
+/**
+ * Revalidates both in-process cancellation and an optional exact durable retry permit.
+ *
+ * @param signal - Cancellation fence propagated by the current outbound retry owner.
+ * @param assertCurrentPermit - Optional durable permit validator supplied by the retry worker.
+ */
+async function assertOutboundExecutionAuthority(
+  signal: AbortSignal,
+  assertCurrentPermit: (() => Promise<void>) | undefined,
+): Promise<void> {
+  assertOutboundExecutionActive(signal)
+  await assertCurrentPermit?.()
+  assertOutboundExecutionActive(signal)
+}
+
+/**
  * Rejects a provider page that escaped the immutable linked source scope.
  *
  * @param link - Linked external source.
@@ -3800,10 +4909,10 @@ function isParentLifecycleEvent(
  * @param event - Workspace or conversation lifecycle event.
  */
 function validateParentLifecycleEventScope(event: ExternalChatParentLifecycleEvent): void {
-  const expectedResourceId = event.resourceType === 'workspace'
-    ? event.externalWorkspaceId
-    : event.conversationExternalId
-  if (event.resourceExternalId !== expectedResourceId) {
+  if (
+    event.externalWorkspaceId.length === 0 ||
+    (event.resourceType === 'conversation' && event.conversationExternalId.length === 0)
+  ) {
     throw new ChatProviderAdapterError(
       'ChatProviderScopeMismatch',
       'The parent lifecycle resource does not match its authenticated envelope scope.',
@@ -3860,6 +4969,63 @@ function createParentLifecycleChildEvent(
 }
 
 /**
+ * Creates a one-way audit digest from the event's true discriminated provider scope.
+ *
+ * Workspace and conversation events intentionally omit child identifiers that do not exist in
+ * their authenticated scope; resource-specific message and attachment IDs remain digest-only.
+ *
+ * @param event - Verified normalized provider event.
+ * @returns Stable secret-free scope digest.
+ */
+function createInboundScopeDigest(event: ExternalChatInboundEvent): string {
+  if (event.type !== 'source.lifecycle-changed') {
+    return createExternalChatFingerprint({
+      namespace: 'external-chat-inbound-scope-v2',
+      provider: event.provider,
+      externalWorkspaceId: event.externalWorkspaceId,
+      conversationExternalId: event.conversationExternalId,
+      threadExternalId: event.threadExternalId,
+    })
+  }
+  if (event.resourceType === 'workspace') {
+    return createExternalChatFingerprint({
+      namespace: 'external-chat-inbound-scope-v2',
+      provider: event.provider,
+      resourceType: event.resourceType,
+      externalWorkspaceId: event.externalWorkspaceId,
+    })
+  }
+  if (event.resourceType === 'conversation') {
+    return createExternalChatFingerprint({
+      namespace: 'external-chat-inbound-scope-v2',
+      provider: event.provider,
+      resourceType: event.resourceType,
+      externalWorkspaceId: event.externalWorkspaceId,
+      conversationExternalId: event.conversationExternalId,
+    })
+  }
+  if (event.resourceType === 'thread') {
+    return createExternalChatFingerprint({
+      namespace: 'external-chat-inbound-scope-v2',
+      provider: event.provider,
+      resourceType: event.resourceType,
+      externalWorkspaceId: event.externalWorkspaceId,
+      conversationExternalId: event.conversationExternalId,
+      threadExternalId: event.threadExternalId,
+    })
+  }
+  return createExternalChatFingerprint({
+    namespace: 'external-chat-inbound-scope-v2',
+    provider: event.provider,
+    resourceType: event.resourceType,
+    externalWorkspaceId: event.externalWorkspaceId,
+    conversationExternalId: event.conversationExternalId,
+    threadExternalId: event.threadExternalId,
+    resourceExternalId: event.resourceExternalId,
+  })
+}
+
+/**
  * Builds the exact provider thread identity owned by one link.
  *
  * @param link - Provider-neutral external chat link.
@@ -3875,17 +5041,34 @@ function linkSourceIdentity(link: ExternalChatWorkItemLink): ExternalChatSourceI
 }
 
 /**
- * Checks whether a restrictive link state permanently blocks non-lifecycle content processing.
+ * Checks whether one lifecycle state permanently blocks non-lifecycle content processing.
  *
- * @param link - Current provider-neutral link.
+ * @param availability - Effective provider reachability.
+ * @param state - Effective provider lifecycle state.
  * @returns Whether content must be skipped and any deferred payload discarded.
  */
-function linkForbidsContentSynchronization(link: ExternalChatWorkItemLink): boolean {
-  return link.sourceAvailability === 'permission-lost' ||
-    link.sourceAvailability === 'scope-changed' ||
-    link.sourceState === 'retained-metadata' ||
-    link.sourceState === 'deleted' ||
-    link.sourceState === 'retention-expired'
+function lifecycleForbidsContentSynchronization(
+  availability: ExternalChatSourceAvailability,
+  state: ExternalChatSourceState,
+): boolean {
+  return availability === 'permission-lost' ||
+    availability === 'scope-changed' ||
+    state === 'retained-metadata' ||
+    state === 'deleted' ||
+    state === 'retention-expired'
+}
+
+/**
+ * Creates a retryable conflict after restrictive destructive authority becomes stale.
+ *
+ * @returns Stable application-port error used to resume against current lifecycle authority.
+ */
+function staleRestrictiveCascadeError(): ExternalChatSyncPortError {
+  return new ExternalChatSyncPortError(
+    'ExternalChatSyncRevisionConflict',
+    'The external chat lifecycle authority changed before restrictive cleanup completed.',
+    { retryable: true },
+  )
 }
 
 /**
@@ -3894,7 +5077,7 @@ function linkForbidsContentSynchronization(link: ExternalChatWorkItemLink): bool
  * @param event - Provider-neutral inbound event.
  * @returns Source identity used by the tenant-scoped unique claim.
  */
-function sourceIdentity(event: ExternalChatInboundEvent): ExternalChatSourceIdentity {
+function sourceIdentity(event: ExternalChatThreadScopedInboundEvent): ExternalChatSourceIdentity {
   return {
     provider: event.provider,
     externalWorkspaceId: event.externalWorkspaceId,
@@ -3911,7 +5094,7 @@ function sourceIdentity(event: ExternalChatInboundEvent): ExternalChatSourceIden
  */
 function validateInboundScope(
   record: StoredExternalChatLink,
-  event: ExternalChatInboundEvent,
+  event: ExternalChatThreadScopedInboundEvent,
 ): void {
   if (
     record.workspaceId.length === 0 ||

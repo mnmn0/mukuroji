@@ -10,6 +10,12 @@ import type {
 /** Maximum raw webhook payload accepted by the provider adapter boundary. */
 export const CHAT_PROVIDER_WEBHOOK_MAX_BYTES = 1_048_576
 
+/** Maximum aggregate UTF-8 bytes accepted for normalized webhook header names and values. */
+export const CHAT_PROVIDER_WEBHOOK_MAX_HEADER_BYTES = 65_536
+
+const CHAT_PROVIDER_WEBHOOK_MAX_HEADERS = 100
+const CHAT_PROVIDER_WEBHOOK_MAX_HEADER_NAME_BYTES = 256
+
 /** Stable provider adapter error categories understood by the synchronization runtime. */
 export type ChatProviderAdapterErrorCode =
   | 'ChatProviderInvalidWebhook'
@@ -147,6 +153,14 @@ export type CreateChatProviderReplyInput = {
   operationId: string
   /** Authenticated marker used to recognize the provider echo. */
   originMarker: string
+  /** Cancellation fence that provider transport must propagate to its request. */
+  signal: AbortSignal
+  /**
+   * Revalidates current link/parent authority and any durable retry permit immediately before an
+   * irreversible provider request. The adapter must await this guard after request preparation and
+   * before provider I/O.
+   */
+  assertCurrentAuthority: () => Promise<void>
 }
 
 /** Input used to edit one provider message. */
@@ -165,6 +179,14 @@ export type EditChatProviderMessageInput = {
   operationId: string
   /** Authenticated marker used to recognize the provider echo. */
   originMarker: string
+  /** Cancellation fence that provider transport must propagate to its request. */
+  signal: AbortSignal
+  /**
+   * Revalidates current link/parent authority and any durable retry permit immediately before an
+   * irreversible provider request. The adapter must await this guard after request preparation and
+   * before provider I/O.
+   */
+  assertCurrentAuthority: () => Promise<void>
 }
 
 /** Input used to delete one provider message. */
@@ -181,6 +203,14 @@ export type DeleteChatProviderMessageInput = {
   operationId: string
   /** Authenticated marker used to recognize the provider echo. */
   originMarker: string
+  /** Cancellation fence that provider transport must propagate to its request. */
+  signal: AbortSignal
+  /**
+   * Revalidates current link/parent authority and any durable retry permit immediately before an
+   * irreversible provider request. The adapter must await this guard after request preparation and
+   * before provider I/O.
+   */
+  assertCurrentAuthority: () => Promise<void>
 }
 
 /** Input used to complete or reopen one provider thread. */
@@ -195,6 +225,14 @@ export type SetChatProviderThreadCompletionInput = {
   operationId: string
   /** Authenticated marker used to recognize the provider echo. */
   originMarker: string
+  /** Cancellation fence that provider transport must propagate to its request. */
+  signal: AbortSignal
+  /**
+   * Revalidates current link/parent authority and any durable retry permit immediately before an
+   * irreversible provider request. The adapter must await this guard after request preparation and
+   * before provider I/O.
+   */
+  assertCurrentAuthority: () => Promise<void>
 }
 
 /** Provider result for a thread completion or reopen mutation. */
@@ -211,7 +249,11 @@ export type ChatProviderThreadMutationResult = {
 export interface ChatProviderAdapter {
   /** Immutable provider and capability metadata. */
   readonly definition: ChatProviderDefinition
-  /** Verifies and normalizes one raw provider webhook without returning raw payload data. */
+  /**
+   * Verifies and normalizes one raw provider webhook without returning raw payload data.
+   *
+   * Implementations must call `validateChatProviderWebhookRequest` before provider-specific parsing.
+   */
   normalizeWebhook(
     request: ChatProviderWebhookRequest,
     authorization: ChatProviderAuthorization,
@@ -223,13 +265,13 @@ export interface ChatProviderAdapter {
   ): Promise<ExternalChatThreadSnapshot>
   /** Reads one bounded thread page and a private provider continuation. */
   readThreadPage(input: ReadChatProviderThreadPageInput): Promise<ChatProviderThreadPage>
-  /** Creates or idempotently recovers one provider reply. */
+  /** Creates or recovers one reply after awaiting its authority guard at provider-I/O time. */
   createReply(input: CreateChatProviderReplyInput): Promise<ExternalChatMessage>
-  /** Idempotently applies or reconciles one edit by stable operation ID. */
+  /** Applies or reconciles one edit after awaiting its authority guard at provider-I/O time. */
   editMessage(input: EditChatProviderMessageInput): Promise<ExternalChatMessage>
-  /** Idempotently applies or reconciles one deletion by stable operation ID. */
+  /** Applies or reconciles one deletion after awaiting its authority guard at provider-I/O time. */
   deleteMessage(input: DeleteChatProviderMessageInput): Promise<ExternalChatMessage>
-  /** Idempotently applies or reconciles one completion transition by stable operation ID. */
+  /** Applies or reconciles completion after awaiting its authority guard at provider-I/O time. */
   setThreadCompletion(
     input: SetChatProviderThreadCompletionInput,
   ): Promise<ChatProviderThreadMutationResult>
@@ -403,6 +445,7 @@ export function validateChatProviderWebhookRequest(
   request: ChatProviderWebhookRequest,
 ): void {
   if (
+    !(request.rawBody instanceof Uint8Array) ||
     request.rawBody.byteLength === 0 ||
     request.rawBody.byteLength > CHAT_PROVIDER_WEBHOOK_MAX_BYTES
   ) {
@@ -417,12 +460,68 @@ export function validateChatProviderWebhookRequest(
       'The chat webhook receipt timestamp is invalid.',
     )
   }
-  if (Object.keys(request.headers).length > 100) {
+  if (!isRecord(request.headers)) {
+    throw new ChatProviderAdapterError(
+      'ChatProviderInvalidWebhook',
+      'The chat webhook headers are invalid.',
+    )
+  }
+  const headerEntries = Object.entries(request.headers)
+  if (headerEntries.length > CHAT_PROVIDER_WEBHOOK_MAX_HEADERS) {
     throw new ChatProviderAdapterError(
       'ChatProviderInvalidWebhook',
       'The chat webhook contains too many headers.',
     )
   }
+  let aggregateBytes = 0
+  for (const [name, value] of headerEntries) {
+    if (
+      Buffer.byteLength(name, 'utf8') > CHAT_PROVIDER_WEBHOOK_MAX_HEADER_NAME_BYTES ||
+      !/^[!#$%&'*+.^_`|~0-9a-z-]+$/u.test(name)
+    ) {
+      throw new ChatProviderAdapterError(
+        'ChatProviderInvalidWebhook',
+        'The chat webhook contains an invalid header name.',
+      )
+    }
+    if (
+      value !== undefined &&
+      (typeof value !== 'string' || containsHeaderControlCharacter(value))
+    ) {
+      throw new ChatProviderAdapterError(
+        'ChatProviderInvalidWebhook',
+        'The chat webhook contains an invalid header value.',
+      )
+    }
+    aggregateBytes += Buffer.byteLength(name, 'utf8') +
+      (value === undefined ? 0 : Buffer.byteLength(value, 'utf8')) +
+      4
+    if (aggregateBytes > CHAT_PROVIDER_WEBHOOK_MAX_HEADER_BYTES) {
+      throw new ChatProviderAdapterError(
+        'ChatProviderInvalidWebhook',
+        'The chat webhook headers exceed the aggregate size limit.',
+      )
+    }
+  }
+}
+
+/**
+ * Detects transport control characters that cannot appear in a normalized header value.
+ *
+ * @param value - Candidate header value.
+ * @returns Whether the value contains a C0/C1 control or Unicode line separator.
+ */
+function containsHeaderControlCharacter(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index)
+    if (
+      codeUnit <= 31 ||
+      (codeUnit >= 127 && codeUnit <= 159) ||
+      codeUnit === 0x2028 ||
+      codeUnit === 0x2029
+    ) return true
+  }
+  return false
 }
 
 /**

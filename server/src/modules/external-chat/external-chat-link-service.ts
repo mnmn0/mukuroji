@@ -8,8 +8,11 @@ import {
   type CreateWorkItemFromExternalChatThreadInput,
   type CreateWorkItemFromExternalChatThreadResult,
   type CustomFieldValue,
+  type ExternalChatCanonicalRedirect,
   type ExternalChatCanonicalRoute,
   type ExternalChatProvider,
+  type ExternalChatSourceAvailability,
+  type ExternalChatSourceState,
   type ExternalChatThreadSnapshot,
   type ExternalChatWorkItemLink,
   type ExternalChatWorkItemLinkSummary,
@@ -39,6 +42,8 @@ import {
   type CreateExternalChatLinkInput,
   createExternalChatFingerprint,
   ExternalChatError,
+  type ExternalChatLinkLifecycleState,
+  type ExternalChatParentLifecycleFenceSnapshot,
   type ExternalChatStore,
   type MergeExternalChatLinksStoreInput,
   type StoredExternalChatLink,
@@ -205,6 +210,8 @@ export type UpdateExternalChatLinkTransactionInput = {
   link: ExternalChatWorkItemLink
   /** Link revision read by the caller before the update. */
   expectedRevision: number
+  /** Exact present-or-absent parent lifecycle authorities observed before the update. */
+  expectedParentLifecycleFences: ExternalChatParentLifecycleFenceSnapshot
   /** Digest of the tenant- and actor-scoped idempotency key. */
   idempotencyKeyHash: string
   /** Digest of the link ID and complete normalized update command. */
@@ -281,6 +288,8 @@ export type ExternalChatResyncJob = {
   mode: 'resume' | 'full'
   /** Link revision committed with the queue outbox entry. */
   linkRevision: number
+  /** Provider authorization generation accepted for this exact operation. */
+  authorizationRevision: number
   /** Stable operation identifier shared by every retry. */
   operationId: string
   /** Correlation identifier retained by the worker. */
@@ -297,6 +306,12 @@ export type AcceptExternalChatResyncTransactionInput = {
   link: ExternalChatWorkItemLink
   /** Link revision read before command acceptance. */
   expectedRevision: number
+  /** Private source authorization generation read before command acceptance. */
+  expectedSourceAuthorizationRevision: number
+  /** Current provider authorization generation retained by the accepted job. */
+  authorizationRevision: number
+  /** Exact present-or-absent parent lifecycle authorities observed before command acceptance. */
+  expectedParentLifecycleFences: ExternalChatParentLifecycleFenceSnapshot
   /** Digest of the tenant-scoped idempotency key. */
   idempotencyKeyHash: string
   /** Digest of the complete normalized command. */
@@ -312,7 +327,7 @@ export type AcceptExternalChatResyncTransactionInput = {
 /** Cross-domain transaction boundary for canonical Work Item and external chat ownership. */
 export interface ExternalChatLinkTransactionPort {
   /**
-   * Creates the Work Item, link, source claim, receipt, audit, and outbox atomically.
+   * Creates the Work Item, link, source claim, owner manifest, receipt, audit, and outbox atomically.
    * The commit must condition-check the current connector authorization generation and both
    * durable workspace/conversation parent lifecycle fences from the supplied link draft, then
    * retain that generation with the private immutable source claim.
@@ -321,7 +336,7 @@ export interface ExternalChatLinkTransactionPort {
     input: CreateWorkItemAndExternalChatLinkTransactionInput,
   ): Promise<CreateWorkItemFromExternalChatThreadResult>
   /**
-   * Links an existing revision-fenced Work Item and source atomically.
+   * Links an existing revision-fenced Work Item, source, and incremented owner manifest atomically.
    * The commit must condition-check the current connector authorization generation and both
    * durable workspace/conversation parent lifecycle fences from the supplied link input, then
    * retain that generation with the private immutable source claim.
@@ -329,25 +344,47 @@ export interface ExternalChatLinkTransactionPort {
   linkExistingWorkItem(
     input: LinkExistingWorkItemToExternalChatTransactionInput,
   ): Promise<LinkExternalChatThreadResult>
-  /** Atomically commits link settings, idempotency receipt, and final redacted audit outbox. */
+  /**
+   * Atomically commits link settings, idempotency receipt, and final redacted audit outbox.
+   * The commit must condition-check the exact supplied parent lifecycle snapshot so a published
+   * restrictive fence cannot be overwritten by a stale pending settings projection.
+   */
   updateLink(
     input: UpdateExternalChatLinkTransactionInput,
   ): Promise<UpdateExternalChatLinkTransactionResult>
-  /** Atomically commits unlink state, idempotency receipt, and final redacted audit outbox. */
+  /** Atomically commits unlink state, decremented owner manifest, receipt, and redacted audit. */
   unlinkLink(
     input: UnlinkExternalChatLinkTransactionInput,
   ): Promise<UnlinkExternalChatLinkTransactionResult>
   /**
    * Accepts a resynchronization by atomically committing link, receipt, audit, and outbox state.
-   * The commit must also reject a processing or completed-unacknowledged thread lifecycle lease.
+   * The commit must also reject a processing or completed-unacknowledged thread lifecycle lease,
+   * a changed connector authorization generation, a changed private source authorization
+   * generation, or a changed exact parent lifecycle snapshot.
    */
   acceptResync(
     input: AcceptExternalChatResyncTransactionInput,
   ): Promise<ResyncExternalChatWorkItemLinkResult>
-  /** Merges Work Items and every link-owned record under one transaction or resumable manifest. */
+  /**
+   * Merges Work Items and every link-owned record under one transaction or resumable manifest.
+   * The commit must strongly enumerate the duplicate owner's complete active link set, compare it
+   * exactly with the command, condition-check the supplied membership generation/count, and
+   * advance both duplicate and canonical owner manifests atomically with Work Item tombstoning.
+   * An existing idempotency receipt must be replayed before those current-state checks so a
+   * response-loss retry still succeeds after the first commit advances the duplicate manifest.
+   */
   mergeWorkItemsAndLinks(
     input: MergeWorkItemsAndExternalChatLinksTransactionInput,
-  ): Promise<MergeExternalChatWorkItemLinksResult>
+  ): Promise<MergeWorkItemsAndExternalChatLinksTransactionResult>
+}
+
+/** Internal duplicate-merge result retaining link-scoped redirects for fail-closed validation. */
+export type MergeWorkItemsAndExternalChatLinksTransactionResult = Omit<
+  MergeExternalChatWorkItemLinksResult,
+  'redirects'
+> & {
+  /** Exact redirect created for every moved link before public route redaction. */
+  redirects: ExternalChatCanonicalRedirect[]
 }
 
 /** Durable queue used for explicit external chat resynchronization. */
@@ -568,14 +605,25 @@ export class ExternalChatLinkService {
     }, async () => {
     validateUpdateCommand(linkId, command)
     const current = await this.requireAuthorizedLink(context.principal, linkId, 'write')
+    const parentLifecycleFences = await this.store.getParentLifecycleFences(
+      context.principal.workspaceId,
+      current.link.id,
+    )
+    if (parentLifecycleFences === undefined) throw notFoundError()
     const operationId = createLinkCommandOperationId(context, 'update', { linkId, command })
-    const replacement: ExternalChatWorkItemLink = {
+    const requested: ExternalChatWorkItemLink = {
       ...current.link,
       syncDirection: command.syncDirection,
       syncStatus: command.syncDirection === 'none' ? 'paused' : 'pending',
       revision: command.expectedRevision + 1,
       updatedAt: context.occurredAt,
     }
+    const replacement = composeCommandProjectionWithLifecycleFloor(
+      requested,
+      current.lifecycleState,
+      parentLifecycleFences,
+      current.sourceAuthorizationRevision,
+    )
     const audit = createAuditRecord(
       context,
       operationId,
@@ -592,6 +640,7 @@ export class ExternalChatLinkService {
       workspaceId: context.principal.workspaceId,
       link: replacement,
       expectedRevision: command.expectedRevision,
+      expectedParentLifecycleFences: parentLifecycleFences,
       actorMemberKey: context.principal.memberKey,
       idempotencyKeyHash: hashIdempotencyKey(context, 'update'),
       requestFingerprint: createExternalChatFingerprint({ linkId, command }),
@@ -701,6 +750,17 @@ export class ExternalChatLinkService {
         'The connector installation provider does not match the linked source.',
       )
     }
+    if (installation.authorization.authorizationRevision < current.sourceAuthorizationRevision) {
+      throw new ExternalChatError(
+        'ExternalChatAuthorizationFailed',
+        'The connector authorization generation is older than the linked source.',
+      )
+    }
+    const parentLifecycleFences = await this.store.getParentLifecycleFences(
+      context.principal.workspaceId,
+      current.link.id,
+    )
+    if (parentLifecycleFences === undefined) throw notFoundError()
     const operationId = createLinkCommandOperationId(context, 'resync', { linkId, command })
     const replacement: ExternalChatWorkItemLink = {
       ...current.link,
@@ -713,6 +773,7 @@ export class ExternalChatLinkService {
       linkId: replacement.id,
       mode: command.mode,
       linkRevision: replacement.revision,
+      authorizationRevision: installation.authorization.authorizationRevision,
       operationId,
       correlationId: context.correlationId,
       acceptedAt: context.occurredAt,
@@ -733,6 +794,9 @@ export class ExternalChatLinkService {
       workspaceId: context.principal.workspaceId,
       link: replacement,
       expectedRevision: command.expectedRevision,
+      expectedSourceAuthorizationRevision: current.sourceAuthorizationRevision,
+      authorizationRevision: installation.authorization.authorizationRevision,
+      expectedParentLifecycleFences: parentLifecycleFences,
       idempotencyKeyHash: hashIdempotencyKey(context, 'resync'),
       requestFingerprint: createExternalChatFingerprint({ linkId, command }),
       operationId,
@@ -777,6 +841,16 @@ export class ExternalChatLinkService {
       command.duplicateWorkItemId,
       'write',
     )
+    const duplicateLinkManifest = await this.store.getWorkItemLinkManifest(
+      context.principal.workspaceId,
+      command.duplicateTeamId,
+      command.duplicateWorkItemId,
+    )
+    const expectedLinks = new Map<string, StoredExternalChatLink>()
+    for (const candidate of command.links) {
+      const record = await this.store.getLink(context.principal.workspaceId, candidate.linkId)
+      if (record !== undefined) expectedLinks.set(candidate.linkId, record)
+    }
     const operationId = createLinkCommandOperationId(context, 'merge', command)
     const storeMutation: MergeExternalChatLinksStoreInput = {
       workspaceId: context.principal.workspaceId,
@@ -785,6 +859,8 @@ export class ExternalChatLinkService {
       duplicateTeamId: command.duplicateTeamId,
       duplicateWorkItemId: command.duplicateWorkItemId,
       links: command.links,
+      expectedDuplicateLinkGeneration: duplicateLinkManifest?.generation ?? 0,
+      expectedDuplicateLinkCount: duplicateLinkManifest?.activeLinkCount ?? 0,
       mergedAt: context.occurredAt,
     }
     const audit = createAuditRecord(
@@ -808,11 +884,11 @@ export class ExternalChatLinkService {
       requestFingerprint: createExternalChatFingerprint(command),
       audit,
     })
-    const canonicalWorkItem = validateMergeTransactionResult(command, result)
+    const canonicalWorkItem = validateMergeTransactionResult(command, expectedLinks, result)
     return {
       canonicalWorkItem,
       movedLinks: result.movedLinks.map(toExternalChatWorkItemLinkSummary),
-      redirects: result.redirects.map(toExternalChatCanonicalRoute),
+      redirects: uniqueCanonicalRoutes(result.redirects),
       movedFileCount: result.movedFileCount,
       movedMessageBindingCount: result.movedMessageBindingCount,
       mergedAt: result.mergedAt,
@@ -1256,11 +1332,13 @@ function validateResyncTransactionResult(
  * Verifies canonical ownership, revisions, counts, and redirects returned by a merge transaction.
  *
  * @param command - Authorized revision-fenced duplicate merge.
+ * @param expectedLinks - Strongly read link identities used to validate provider redirects.
  * @param result - Cross-domain merge result to verify before response projection.
  */
 function validateMergeTransactionResult(
   command: MergeExternalChatWorkItemLinksInput,
-  result: MergeExternalChatWorkItemLinksResult,
+  expectedLinks: ReadonlyMap<string, StoredExternalChatLink>,
+  result: MergeWorkItemsAndExternalChatLinksTransactionResult,
 ): CanonicalWorkItem {
   const canonicalWorkItem = normalizeCanonicalWorkItemResult(result.canonicalWorkItem)
   requireValidTransactionWorkItemScope(
@@ -1281,29 +1359,39 @@ function validateMergeTransactionResult(
     invalidTransactionResult('external chat duplicate merge result')
   }
   const candidates = new Map(command.links.map((candidate) => [candidate.linkId, candidate]))
-  if (result.movedLinks.length !== candidates.size) {
+  if (result.movedLinks.length !== candidates.size || expectedLinks.size !== candidates.size) {
     invalidTransactionResult('external chat duplicate merge link count')
   }
   const movedIds = new Set<string>()
   for (const rawLink of result.movedLinks) {
     const link = normalizeExternalChatLinkSummaryResult(rawLink)
     const candidate = candidates.get(link.id)
+    const expected = expectedLinks.get(link.id)
     if (
       !candidate ||
+      !expected ||
       movedIds.has(link.id) ||
       link.teamId !== command.canonicalTeamId ||
       link.workItemId !== command.canonicalWorkItemId ||
+      link.provider !== expected.link.provider ||
       link.revision !== candidate.expectedRevision + 1
     ) {
       invalidTransactionResult('external chat duplicate merge link ownership')
     }
     movedIds.add(link.id)
   }
-  if (result.redirects.length === 0) {
+  if (result.redirects.length !== candidates.size) {
     invalidTransactionResult('external chat duplicate merge redirect count')
   }
+  const redirectedIds = new Set<string>()
   for (const redirect of result.redirects) {
+    const expected = expectedLinks.get(redirect.linkId)
     if (
+      !expected ||
+      !movedIds.has(redirect.linkId) ||
+      redirectedIds.has(redirect.linkId) ||
+      redirect.provider !== expected.link.provider ||
+      redirect.threadExternalId !== expected.link.source.threadExternalId ||
       redirect.fromTeamId !== command.duplicateTeamId ||
       redirect.fromWorkItemId !== command.duplicateWorkItemId ||
       redirect.canonicalTeamId !== command.canonicalTeamId ||
@@ -1312,6 +1400,10 @@ function validateMergeTransactionResult(
     ) {
       invalidTransactionResult('external chat duplicate merge redirect scope')
     }
+    redirectedIds.add(redirect.linkId)
+  }
+  if (redirectedIds.size !== movedIds.size) {
+    invalidTransactionResult('external chat duplicate merge redirect set')
   }
   return canonicalWorkItem
 }
@@ -1734,6 +1826,148 @@ function toExternalChatCanonicalRoute(
     canonicalTeamId: redirect.canonicalTeamId,
     canonicalWorkItemId: redirect.canonicalWorkItemId,
     createdAt: redirect.createdAt,
+  }
+}
+
+/**
+ * Redacts link-scoped redirects into a unique former-to-canonical navigation route set.
+ *
+ * @param redirects - Exact validated per-link redirects returned by the transaction boundary.
+ * @returns Unique source-redacted canonical routes in deterministic transaction order.
+ */
+function uniqueCanonicalRoutes(
+  redirects: readonly ExternalChatCanonicalRedirect[],
+): ExternalChatCanonicalRoute[] {
+  const routes: ExternalChatCanonicalRoute[] = []
+  const identities = new Set<string>()
+  for (const redirect of redirects) {
+    const route = toExternalChatCanonicalRoute(redirect)
+    const identity = createExternalChatFingerprint(route)
+    if (identities.has(identity)) continue
+    identities.add(identity)
+    routes.push(route)
+  }
+  return routes
+}
+
+/**
+ * Applies private lifecycle watermarks and current parent fences as a fail-closed command floor.
+ *
+ * @param candidate - Requested settings projection before lifecycle composition.
+ * @param lifecycleState - Durable workspace, conversation, and thread observations.
+ * @param parentFences - Strongly read exact parent authorities.
+ * @param sourceAuthorizationRevision - Authorization generation that resolved the source.
+ * @returns Honest, optionally redacted settings projection.
+ */
+function composeCommandProjectionWithLifecycleFloor(
+  candidate: ExternalChatWorkItemLink,
+  lifecycleState: ExternalChatLinkLifecycleState,
+  parentFences: ExternalChatParentLifecycleFenceSnapshot,
+  sourceAuthorizationRevision: number,
+): ExternalChatWorkItemLink {
+  let availability: ExternalChatSourceAvailability = 'available'
+  let state: ExternalChatSourceState = 'active'
+  for (const observation of [
+    lifecycleState.workspace,
+    lifecycleState.conversation,
+    lifecycleState.thread,
+  ]) {
+    if (observation === undefined) continue
+    if (sourceAvailabilityRank(observation.availability) > sourceAvailabilityRank(availability)) {
+      availability = observation.availability
+    }
+    if (sourceStateRank(observation.state) > sourceStateRank(state)) state = observation.state
+  }
+  for (const fence of [parentFences.workspace, parentFences.conversation]) {
+    if (
+      fence?.restrictive !== true ||
+      fence.authorizationRevision < sourceAuthorizationRevision
+    ) continue
+    if (sourceAvailabilityRank(fence.availability) > sourceAvailabilityRank(availability)) {
+      availability = fence.availability
+    }
+    if (sourceStateRank(fence.state) > sourceStateRank(state)) state = fence.state
+  }
+  if (sourceAvailabilityRank(candidate.sourceAvailability) > sourceAvailabilityRank(availability)) {
+    availability = candidate.sourceAvailability
+  }
+  if (sourceStateRank(candidate.sourceState) > sourceStateRank(state)) state = candidate.sourceState
+  const redacted = mustRedactCommandSourceMetadata(availability, state)
+    ? redactCommandSourceMetadata(candidate)
+    : candidate
+  const restrictive = availability !== 'available' ||
+    state === 'deleted' || state === 'retained-metadata' || state === 'retention-expired'
+  return {
+    ...redacted,
+    sourceAvailability: availability,
+    sourceState: state,
+    syncStatus: restrictive || candidate.syncDirection === 'none' ? 'paused' : candidate.syncStatus,
+  }
+}
+
+/** Returns the fail-closed ordering rank of one source availability. */
+function sourceAvailabilityRank(value: ExternalChatSourceAvailability): number {
+  if (value === 'available') return 0
+  if (value === 'temporarily-unavailable') return 1
+  if (value === 'needs-reauth') return 2
+  if (value === 'installation-disconnected') return 3
+  if (value === 'scope-changed') return 4
+  return 5
+}
+
+/** Returns the fail-closed ordering rank of one source lifecycle state. */
+function sourceStateRank(value: ExternalChatSourceState): number {
+  if (value === 'active') return 0
+  if (value === 'completed') return 1
+  if (value === 'retained-metadata') return 2
+  if (value === 'deleted') return 3
+  return 4
+}
+
+/**
+ * Checks whether policy-controlled provider metadata must be removed from a command result.
+ *
+ * @param availability - Effective provider reachability.
+ * @param state - Effective provider lifecycle state.
+ * @returns Whether display and permalink metadata must be removed.
+ */
+function mustRedactCommandSourceMetadata(
+  availability: ExternalChatSourceAvailability,
+  state: ExternalChatSourceState,
+): boolean {
+  return availability === 'permission-lost' || availability === 'scope-changed' ||
+    state === 'deleted' || state === 'retention-expired'
+}
+
+/**
+ * Removes policy-controlled provider display, permalink, and quote metadata.
+ *
+ * @param link - Current durable link projection.
+ * @returns Link retaining only immutable provider identities.
+ */
+function redactCommandSourceMetadata(
+  link: ExternalChatWorkItemLink,
+): ExternalChatWorkItemLink {
+  return {
+    ...link,
+    workspace: {
+      provider: link.workspace.provider,
+      externalId: link.workspace.externalId,
+    },
+    conversation: {
+      externalId: link.conversation.externalId,
+      externalWorkspaceId: link.conversation.externalWorkspaceId,
+      kind: link.conversation.kind,
+    },
+    source: {
+      externalWorkspaceId: link.source.externalWorkspaceId,
+      conversationExternalId: link.source.conversationExternalId,
+      threadExternalId: link.source.threadExternalId,
+      rootMessageExternalId: link.source.rootMessageExternalId,
+      ...(link.source.sourceMessageExternalId === undefined
+        ? {}
+        : { sourceMessageExternalId: link.source.sourceMessageExternalId }),
+    },
   }
 }
 

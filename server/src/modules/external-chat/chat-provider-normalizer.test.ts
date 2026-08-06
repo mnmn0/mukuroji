@@ -7,6 +7,8 @@ import {
   type ExternalChatThreadSnapshot,
 } from '@mukuroji/contracts'
 import {
+  EXTERNAL_CHAT_NORMALIZED_INBOUND_EVENT_MAX_BYTES,
+  normalizeChatProviderInboundEvent,
   normalizeChatProviderMessage,
   normalizeChatProviderThreadMutationResult,
   normalizeChatProviderThreadSnapshot,
@@ -46,6 +48,13 @@ describe('chat provider output normalizer', () => {
       'http://chat.example.test/messages/message-1',
       'https://user:password@chat.example.test/messages/message-1',
       'https://chat.example.test/messages/message-1?token=secret',
+      'https://chat.example.test/messages/message-1?pub_secret=slack-secret',
+      'https://chat.example.test/messages/message-1?Pub-Secret=slack-secret',
+      'https://chat.example.test/messages/message-1?slack_pub_secret=slack-secret',
+      'https://chat.example.test/messages/message-1?X-Amz-Algorithm=AWS4-HMAC-SHA256',
+      'https://chat.example.test/messages/message-1?x_amz_custom=credential',
+      'https://chat.example.test/messages/message-1?X-Goog-Credential=credential',
+      'https://chat.example.test/messages/message-1?x.goog.custom=credential',
       'https://chat.example.test/messages/message-1#temporary-secret',
       'https://chat.example.test:8443/messages/message-1',
       'https://localhost/messages/message-1',
@@ -91,6 +100,36 @@ describe('chat provider output normalizer', () => {
       createActiveMessage(),
       ['chat.example.test'],
     ).permalink).toBe('https://chat.example.test/messages/message-1')
+    expect(normalizeChatProviderMessage({
+      ...createActiveMessage(),
+      permalink: 'https://chat.example.test/messages/message-1?thread_ts=42&channel=C123',
+    }).permalink).toBe(
+      'https://chat.example.test/messages/message-1?thread_ts=42&channel=C123',
+    )
+  })
+
+  test('rejects a complete normalized event that is too large for duplicated durable rows', () => {
+    const attachments = Array.from({ length: 8 }, (_, index) => ({
+      ...createAttachment(`large-attachment-${index}`),
+      fileName: `${index}-${'f'.repeat(4_080)}`,
+    }))
+    const event: ExternalChatInboundEvent = {
+      ...createMessageCreatedEvent(),
+      message: {
+        ...createActiveMessage(),
+        bodyMarkdown: 'b'.repeat(160_000),
+        attachments,
+      },
+    }
+
+    expect(Buffer.byteLength(JSON.stringify(event), 'utf8')).toBeGreaterThan(
+      EXTERNAL_CHAT_NORMALIZED_INBOUND_EVENT_MAX_BYTES,
+    )
+    expectInvalidResponse(() => normalizeChatProviderInboundEvent(event))
+    expectInvalidWebhook(() => normalizeChatProviderWebhook({
+      deliveryId: 'large-delivery',
+      events: [event],
+    }))
   })
 
   test('enforces restrictive deletion and retention projections while preserving allowed metadata', () => {
@@ -315,4 +354,19 @@ function expectInvalidResponse(callback: () => unknown): void {
     return
   }
   throw new Error('Expected provider response normalization to fail.')
+}
+
+/**
+ * Requires a callback to fail at the strict provider webhook boundary.
+ *
+ * @param callback - Synchronous normalization attempt.
+ */
+function expectInvalidWebhook(callback: () => unknown): void {
+  try {
+    callback()
+  } catch (error: unknown) {
+    expect(error).toMatchObject({ code: 'ChatProviderInvalidWebhook' })
+    return
+  }
+  throw new Error('Expected provider webhook normalization to fail.')
 }
