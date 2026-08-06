@@ -218,6 +218,10 @@ export type ExternalChatInboundReceipt = ExternalChatTenantScope & {
   outcome?: ExternalChatSyncOutcome
   /** Opaque next-page cursor for a durable workspace/conversation lifecycle fan-out. */
   parentLifecycleCursor?: string
+  /** Whether at least one child lifecycle projection has committed before a checkpoint. */
+  parentLifecycleApplied?: boolean
+  /** Terminal child failure code retained while the parent fan-out continues. */
+  parentLifecycleFailureCode?: string
   /** Receipt creation timestamp. */
   createdAt: string
   /** Receipt update timestamp. */
@@ -309,6 +313,10 @@ export type CheckpointExternalChatInboundEventInput = ExternalChatTenantScope & 
   expectedCursor?: string
   /** Opaque next-page cursor returned by the parent link lookup. */
   nextCursor: string
+  /** Whether any child projection has committed through this checkpoint. */
+  parentLifecycleApplied?: boolean
+  /** Terminal child failure code retained through this checkpoint, when present. */
+  parentLifecycleFailureCode?: string
   /** Checkpoint timestamp. */
   checkpointedAt: string
   /** Renewed lease expiry for continued fan-out processing. */
@@ -1243,10 +1251,18 @@ export class InMemoryExternalChatStore implements ExternalChatStore {
 
   /** Creates a link, source claim, and idempotency receipt atomically in memory. */
   async createLink(input: CreateExternalChatLinkInput): Promise<CreateExternalChatLinkResult> {
-    const receiptKey = key(input.workspaceId, input.idempotencyKeyHash)
+    const idempotencyKeyHash = requireExternalChatDigest(
+      input.idempotencyKeyHash,
+      'link idempotency key hash',
+    )
+    const requestFingerprint = requireExternalChatDigest(
+      input.requestFingerprint,
+      'link request fingerprint',
+    )
+    const receiptKey = key(input.workspaceId, idempotencyKeyHash)
     const receipt = this.linkReceipts.get(receiptKey)
     if (receipt) {
-      if (receipt.requestFingerprint !== input.requestFingerprint) {
+      if (receipt.requestFingerprint !== requestFingerprint) {
         return { kind: 'idempotency-conflict' }
       }
       const replayed = this.links.get(key(input.workspaceId, receipt.linkId))
@@ -1322,7 +1338,7 @@ export class InMemoryExternalChatStore implements ExternalChatStore {
     this.sourceClaims.set(sourceClaimKey, input.link.id)
     this.workItemLinkManifests.set(ownerManifestKey, nextOwnerManifest)
     this.linkReceipts.set(receiptKey, {
-      requestFingerprint: input.requestFingerprint,
+      requestFingerprint,
       linkId: input.link.id,
     })
     return { kind: 'created', record }
@@ -1617,9 +1633,7 @@ export class InMemoryExternalChatStore implements ExternalChatStore {
       return { kind: 'conflict', receipt: current }
     }
     if (current.state === 'completed') {
-      if (
-        !isRetryableOutboundReceiptDue(current.outcome, input.claimedAt)
-      ) {
+      if (!isRetryableInboundReceiptDue(current.outcome, input.claimedAt)) {
         return { kind: 'duplicate', receipt: current }
       }
       const resumed: ExternalChatInboundReceipt = {
@@ -1862,11 +1876,23 @@ export class InMemoryExternalChatStore implements ExternalChatStore {
       current.operationId !== input.operationId ||
       current.attempt !== input.expectedAttempt
     ) return false
-    if (current.parentLifecycleCursor === input.nextCursor) return true
+    if (
+      current.parentLifecycleCursor === input.nextCursor &&
+      (input.parentLifecycleApplied === undefined ||
+        current.parentLifecycleApplied === input.parentLifecycleApplied) &&
+      (input.parentLifecycleFailureCode === undefined ||
+        current.parentLifecycleFailureCode === input.parentLifecycleFailureCode)
+    ) return true
     if (current.parentLifecycleCursor !== input.expectedCursor) return false
     this.inboundReceipts.set(receiptKey, {
       ...current,
       parentLifecycleCursor: input.nextCursor,
+      ...(input.parentLifecycleApplied === undefined
+        ? {}
+        : { parentLifecycleApplied: input.parentLifecycleApplied }),
+      ...(input.parentLifecycleFailureCode === undefined
+        ? {}
+        : { parentLifecycleFailureCode: input.parentLifecycleFailureCode }),
       leaseExpiresAt: input.leaseExpiresAt,
       updatedAt: input.checkpointedAt,
     })
@@ -3454,6 +3480,108 @@ function isExternalChatSourceState(value: unknown): value is ExternalChatSourceS
 }
 
 /**
+ * Checks one non-thread parent lifecycle state value.
+ *
+ * Parent lifecycle fences never use the thread-only `completed` state.
+ *
+ * @param value - Candidate provider lifecycle state.
+ * @returns Whether the value is valid for a durable parent fence.
+ */
+export function isExternalChatParentLifecycleState(
+  value: unknown,
+): value is Exclude<ExternalChatSourceState, 'completed'> {
+  return value === 'active' ||
+    value === 'deleted' ||
+    value === 'retained-metadata' ||
+    value === 'retention-expired'
+}
+
+/**
+ * Validates one bounded non-empty external chat identifier.
+ *
+ * @param value - Untrusted candidate identifier.
+ * @param label - Secret-free diagnostic label.
+ * @returns The validated identifier.
+ */
+export function requireExternalChatIdentifier(value: unknown, label: string): string {
+  if (
+    typeof value !== 'string' ||
+    value.length === 0 ||
+    value.trim() !== value ||
+    Buffer.byteLength(value, 'utf8') > 2_048
+  ) {
+    throw new ExternalChatError(
+      'ExternalChatValidationFailed',
+      `The ${label} is invalid.`,
+    )
+  }
+  return value
+}
+
+/**
+ * Validates one canonical UTC timestamp.
+ *
+ * @param value - Untrusted candidate timestamp.
+ * @param label - Secret-free diagnostic label.
+ * @returns The validated timestamp.
+ */
+export function requireExternalChatTimestamp(value: unknown, label: string): string {
+  const timestamp = requireExternalChatIdentifier(value, label)
+  const parsed = Date.parse(timestamp)
+  if (!Number.isFinite(parsed) || new Date(parsed).toISOString() !== timestamp) {
+    throw new ExternalChatError(
+      'ExternalChatValidationFailed',
+      `The ${label} is invalid.`,
+    )
+  }
+  return timestamp
+}
+
+/**
+ * Validates one bounded retry batch limit.
+ *
+ * @param value - Untrusted candidate batch limit.
+ * @param maximum - Maximum entries the caller may process.
+ * @param label - Secret-free diagnostic label.
+ * @returns The validated positive batch limit.
+ */
+export function requireExternalChatBatchLimit(
+  value: unknown,
+  maximum: number,
+  label: string,
+): number {
+  if (
+    typeof value !== 'number' ||
+    !Number.isSafeInteger(value) ||
+    value < 1 ||
+    value > maximum
+  ) {
+    throw new ExternalChatError(
+      'ExternalChatValidationFailed',
+      `The ${label} must be between 1 and ${maximum}.`,
+    )
+  }
+  return value
+}
+
+/**
+ * Validates one lowercase SHA-256 digest used as a durable idempotency key.
+ *
+ * @param value - Untrusted digest candidate.
+ * @param label - Secret-free diagnostic label.
+ * @returns The validated digest.
+ */
+function requireExternalChatDigest(value: unknown, label: string): string {
+  if (typeof value !== 'string' || !/^[0-9a-f]{64}$/u.test(value)) {
+    throw new ExternalChatError(
+      'ExternalChatValidationFailed',
+      `The ${label} is invalid.`,
+    )
+  }
+  return value
+}
+
+/**
  * Builds one complete authoritative parent lifecycle fence.
  *
  * @param input - Normalized fence input.
@@ -3899,17 +4027,19 @@ function syncOutcomesEqual(
 }
 
 /**
- * Checks whether a completed outbound receipt may be reclaimed by its durable queue worker.
+ * Checks whether a completed inbound receipt has a due deferred continuation.
  *
- * @param outcome - Previously committed outbound result.
+ * Retryable failures are intentionally not resumed here: inbound terminal failures are
+ * represented by their completed receipt and must be replayed as duplicates.
+ *
+ * @param outcome - Previously committed inbound result.
  * @param claimedAt - Timestamp of the proposed retry claim.
- * @returns Whether retry policy allows a new receipt attempt.
+ * @returns Whether the inbound fan-out or deferred event may resume.
  */
-function isRetryableOutboundReceiptDue(
+function isRetryableInboundReceiptDue(
   outcome: ExternalChatSyncOutcome | undefined,
   claimedAt: string,
 ): boolean {
-  if (outcome?.kind === 'failed') return outcome.retryable
   return outcome?.kind === 'deferred' &&
     outcome.retryAt !== undefined &&
     outcome.retryAt <= claimedAt

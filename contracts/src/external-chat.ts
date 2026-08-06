@@ -959,13 +959,13 @@ export type ExternalChatThreadReopenedEvent = ExternalChatThreadScopedInboundEve
  * Normalized event for permission, retention, deletion, or installation lifecycle changes.
  */
 export type ExternalChatSourceLifecycleEvent =
-  | ExternalChatSourceLifecycleEventBase & {
+  | (ExternalChatSourceLifecycleEventBase & {
     /**
      * Workspace-scoped lifecycle transition with no fabricated child identifiers.
      */
     resourceType: 'workspace'
-  }
-  | ExternalChatSourceLifecycleEventBase & {
+  })
+  | (ExternalChatSourceLifecycleEventBase & {
     /**
      * Conversation-scoped lifecycle transition.
      */
@@ -974,8 +974,8 @@ export type ExternalChatSourceLifecycleEvent =
      * External conversation ID affected by the transition.
      */
     conversationExternalId: string
-  }
-  | ExternalChatSourceLifecycleEventBase & {
+  })
+  | (ExternalChatSourceLifecycleEventBase & {
     /**
      * Thread-scoped lifecycle transition.
      */
@@ -988,8 +988,8 @@ export type ExternalChatSourceLifecycleEvent =
      * External thread ID affected by the transition.
      */
     threadExternalId: string
-  }
-  | ExternalChatSourceLifecycleEventBase & {
+  })
+  | (ExternalChatSourceLifecycleEventBase & {
     /**
      * Message-scoped lifecycle transition.
      */
@@ -1006,8 +1006,8 @@ export type ExternalChatSourceLifecycleEvent =
      * Provider-scoped message ID affected by the transition.
      */
     resourceExternalId: string
-  }
-  | ExternalChatSourceLifecycleEventBase & {
+  })
+  | (ExternalChatSourceLifecycleEventBase & {
     /**
      * Attachment-scoped lifecycle transition.
      */
@@ -1024,7 +1024,7 @@ export type ExternalChatSourceLifecycleEvent =
      * Provider-scoped attachment ID affected by the transition.
      */
     resourceExternalId: string
-  }
+  })
 
 /**
  * Provider-neutral inbound chat event accepted by the synchronization runtime.

@@ -1,6 +1,9 @@
 import type { ExternalChatSyncOutcome } from '@mukuroji/contracts'
 import {
   ExternalChatError,
+  requireExternalChatBatchLimit,
+  requireExternalChatIdentifier,
+  requireExternalChatTimestamp,
   type ExternalChatStore,
 } from './external-chat'
 import type { ExternalChatSyncInboundInput } from './external-chat-sync-service'
@@ -98,10 +101,14 @@ export class ExternalChatDeferredRetryWorker {
   async processDueBatch(
     input: ExternalChatDeferredRetryBatchInput,
   ): Promise<ExternalChatDeferredRetryBatchResult> {
-    const workspaceId = requireIdentifier(input.workspaceId, 'Workspace ID')
-    const linkId = requireIdentifier(input.linkId, 'external chat link ID')
-    const dueAt = requireTimestamp(input.dueAt, 'deferred retry due timestamp')
-    const limit = requireBatchLimit(input.limit)
+    const workspaceId = requireExternalChatIdentifier(input.workspaceId, 'Workspace ID')
+    const linkId = requireExternalChatIdentifier(input.linkId, 'external chat link ID')
+    const dueAt = requireExternalChatTimestamp(input.dueAt, 'deferred retry due timestamp')
+    const limit = requireExternalChatBatchLimit(
+      input.limit,
+      EXTERNAL_CHAT_DEFERRED_RETRY_MAX_BATCH_SIZE,
+      'deferred retry batch limit',
+    )
     const deferredEvents = await this.store.listDeferredEvents(
       workspaceId,
       linkId,
@@ -111,7 +118,7 @@ export class ExternalChatDeferredRetryWorker {
     let removedEventCount = 0
     let attemptedEventCount = 0
     for (const deferred of deferredEvents) {
-      if (requireTimestamp(deferred.retryAt, 'deferred retry timestamp') > dueAt) {
+      if (requireExternalChatTimestamp(deferred.retryAt, 'deferred retry timestamp') > dueAt) {
         return {
           attemptedEventCount,
           removedEventCount,
@@ -174,52 +181,4 @@ export class ExternalChatDeferredRetryWorker {
       stopReason: 'batch-complete',
     }
   }
-}
-
-/** Reads a bounded nonempty identifier. */
-function requireIdentifier(value: unknown, label: string): string {
-  if (
-    typeof value !== 'string' ||
-    value.length === 0 ||
-    value.trim() !== value ||
-    Buffer.byteLength(value, 'utf8') > 2_048
-  ) {
-    throw new ExternalChatError(
-      'ExternalChatValidationFailed',
-      `The ${label} is invalid.`,
-    )
-  }
-  return value
-}
-
-/** Reads one canonical UTC timestamp safe for ordinal FIFO comparisons. */
-function requireTimestamp(value: unknown, label: string): string {
-  const timestamp = requireIdentifier(value, label)
-  const parsed = Date.parse(timestamp)
-  if (
-    !Number.isFinite(parsed) ||
-    new Date(parsed).toISOString() !== timestamp
-  ) {
-    throw new ExternalChatError(
-      'ExternalChatValidationFailed',
-      `The ${label} is invalid.`,
-    )
-  }
-  return timestamp
-}
-
-/** Reads a positive bounded deferred retry batch size. */
-function requireBatchLimit(value: unknown): number {
-  if (
-    typeof value !== 'number' ||
-    !Number.isSafeInteger(value) ||
-    value < 1 ||
-    value > EXTERNAL_CHAT_DEFERRED_RETRY_MAX_BATCH_SIZE
-  ) {
-    throw new ExternalChatError(
-      'ExternalChatValidationFailed',
-      `The deferred retry batch limit must be between 1 and ${EXTERNAL_CHAT_DEFERRED_RETRY_MAX_BATCH_SIZE}.`,
-    )
-  }
-  return value
 }

@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { ExternalChatError } from './external-chat'
 
 /** Default retry delay used when a provider schedule is absent or invalid. */
 const DEFAULT_RETRY_DELAY_MS = 30_000
@@ -55,7 +56,12 @@ export function normalizeExternalChatRetryAt(
  */
 function canonicalTimestampMilliseconds(value: string): number {
   const parsed = optionalCanonicalTimestampMilliseconds(value)
-  if (parsed === undefined) throw new TypeError('The retry scheduler clock is invalid.')
+  if (parsed === undefined) {
+    throw new ExternalChatError(
+      'ExternalChatValidationFailed',
+      'The retry scheduler clock is invalid.',
+    )
+  }
   return parsed
 }
 

@@ -8,14 +8,71 @@ import {
 } from '@mukuroji/contracts'
 import {
   EXTERNAL_CHAT_NORMALIZED_INBOUND_EVENT_MAX_BYTES,
-  normalizeChatProviderInboundEvent,
-  normalizeChatProviderMessage,
+  normalizeChatProviderInboundEvent as normalizeProviderInboundEvent,
+  normalizeChatProviderMessage as normalizeProviderMessage,
   normalizeChatProviderThreadMutationResult,
-  normalizeChatProviderThreadSnapshot,
-  normalizeChatProviderWebhook,
+  normalizeChatProviderThreadSnapshot as normalizeProviderThreadSnapshot,
+  normalizeChatProviderWebhook as normalizeProviderWebhook,
 } from './chat-provider-normalizer'
 
 const observedAt = '2026-08-06T03:00:00.000Z'
+const permalinkHosts = ['chat.example.test'] as const
+
+/**
+ * Normalizes a test message against the synthetic provider host allowlist.
+ *
+ * @param value - Untrusted synthetic provider message.
+ * @param hosts - Provider-owned host allowlist, defaulting to the synthetic host.
+ * @returns Normalized provider-neutral message.
+ */
+function normalizeChatProviderMessage(
+  value: unknown,
+  hosts: readonly string[] = permalinkHosts,
+) {
+  return normalizeProviderMessage(value, hosts)
+}
+
+/**
+ * Normalizes a test inbound event against the synthetic provider host allowlist.
+ *
+ * @param value - Untrusted synthetic provider event.
+ * @param hosts - Provider-owned host allowlist, defaulting to the synthetic host.
+ * @returns Normalized provider-neutral event.
+ */
+function normalizeChatProviderInboundEvent(
+  value: unknown,
+  hosts: readonly string[] = permalinkHosts,
+) {
+  return normalizeProviderInboundEvent(value, hosts)
+}
+
+/**
+ * Normalizes a test thread snapshot against the synthetic provider host allowlist.
+ *
+ * @param value - Untrusted synthetic provider snapshot.
+ * @param hosts - Provider-owned host allowlist, defaulting to the synthetic host.
+ * @returns Normalized provider-neutral thread snapshot.
+ */
+function normalizeChatProviderThreadSnapshot(
+  value: unknown,
+  hosts: readonly string[] = permalinkHosts,
+) {
+  return normalizeProviderThreadSnapshot(value, hosts)
+}
+
+/**
+ * Normalizes a test webhook against the synthetic provider host allowlist.
+ *
+ * @param value - Untrusted synthetic provider webhook.
+ * @param hosts - Provider-owned host allowlist, defaulting to the synthetic host.
+ * @returns Normalized provider-neutral webhook.
+ */
+function normalizeChatProviderWebhook(
+  value: unknown,
+  hosts: readonly string[] = permalinkHosts,
+) {
+  return normalizeProviderWebhook(value, hosts)
+}
 
 describe('chat provider output normalizer', () => {
   test('deeply projects messages and removes provider runtime properties and internal File claims', () => {
@@ -66,6 +123,7 @@ describe('chat provider output normalizer', () => {
         permalink,
       }))
     }
+    expectInvalidResponse(() => normalizeChatProviderMessage(createActiveMessage(), []))
     expectInvalidResponse(() => normalizeChatProviderMessage({
       ...createActiveMessage(),
       bodyMarkdown: 'x'.repeat(262_145),

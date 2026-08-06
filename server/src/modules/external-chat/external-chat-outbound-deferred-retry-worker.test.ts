@@ -61,7 +61,7 @@ async function seedLink(store: InMemoryExternalChatStore): Promise<void> {
       conversationExternalId: link.source.conversationExternalId,
       threadExternalId: link.source.threadExternalId,
     },
-    idempotencyKeyHash: 'worker-link-idempotency',
+    idempotencyKeyHash: createExternalChatFingerprint('worker-link-idempotency'),
     requestFingerprint: createExternalChatFingerprint(link),
   })
 }

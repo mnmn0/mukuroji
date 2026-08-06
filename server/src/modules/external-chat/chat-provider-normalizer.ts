@@ -45,11 +45,12 @@ export const EXTERNAL_CHAT_NORMALIZED_INBOUND_EVENT_MAX_BYTES = 184_320
  * Deeply validates and allowlists one normalized webhook returned by a provider adapter.
  *
  * @param value - Untrusted adapter result.
+ * @param permalinkHosts - Canonical provider-owned hosts declared by the adapter definition.
  * @returns Exact provider-neutral webhook data without unknown runtime properties.
  */
 export function normalizeChatProviderWebhook(
   value: unknown,
-  permalinkHosts: readonly string[] = [],
+  permalinkHosts: readonly string[],
 ): ChatProviderNormalizedWebhook {
   const record = requireRecord(value, 'normalized webhook', 'ChatProviderInvalidWebhook')
   const deliveryId = readIdentifier(
@@ -70,7 +71,7 @@ export function normalizeChatProviderWebhook(
     )
   }
   const events = rawEvents.map((event) => requireBoundedInboundEvent(
-    normalizeInboundEventWithCode(event, 'ChatProviderInvalidWebhook'),
+    normalizeInboundEventWithCode(event, 'ChatProviderInvalidWebhook', permalinkHosts),
     'ChatProviderInvalidWebhook',
   ))
   const originMarkers = normalizeOriginMarkers(record.originMarkers)
@@ -93,15 +94,16 @@ export function normalizeChatProviderWebhook(
  * so stored data never bypasses the adapter response boundary.
  *
  * @param value - Untrusted adapter or persistence value.
+ * @param permalinkHosts - Canonical provider-owned hosts declared by the adapter definition.
  * @returns Exact provider-neutral event without unknown runtime properties.
  */
 export function normalizeChatProviderInboundEvent(
   value: unknown,
-  permalinkHosts: readonly string[] = [],
+  permalinkHosts: readonly string[],
 ): ExternalChatInboundEvent {
   return requireProviderOwnedPermalinks(
     requireBoundedInboundEvent(
-      normalizeInboundEventWithCode(value, 'ChatProviderInvalidResponse'),
+      normalizeInboundEventWithCode(value, 'ChatProviderInvalidResponse', permalinkHosts),
       'ChatProviderInvalidResponse',
     ),
     permalinkHosts,
@@ -113,11 +115,12 @@ export function normalizeChatProviderInboundEvent(
  * Deeply validates and allowlists a provider thread snapshot.
  *
  * @param value - Untrusted adapter result.
+ * @param permalinkHosts - Canonical provider-owned hosts declared by the adapter definition.
  * @returns Exact provider-neutral thread snapshot.
  */
 export function normalizeChatProviderThreadSnapshot(
   value: unknown,
-  permalinkHosts: readonly string[] = [],
+  permalinkHosts: readonly string[],
 ): ExternalChatThreadSnapshot {
   const record = requireRecord(value, 'thread snapshot', 'ChatProviderInvalidResponse')
   if (record.schemaVersion !== EXTERNAL_CHAT_SCHEMA_VERSION) {
@@ -153,7 +156,7 @@ export function normalizeChatProviderThreadSnapshot(
   if (availability === 'available' && (state === 'active' || state === 'completed') && !permalink) {
     invalidResponse('An available provider thread snapshot requires an HTTPS permalink.')
   }
-  const messages = rawMessages.map((message) => normalizeChatProviderMessage(message))
+  const messages = rawMessages.map((message) => normalizeChatProviderMessage(message, permalinkHosts))
   if (
     state === 'retained-metadata' &&
     messages.some((message) =>
@@ -222,11 +225,12 @@ export function normalizeChatProviderThreadSnapshot(
  * Deeply validates and allowlists one bounded provider thread page.
  *
  * @param value - Untrusted adapter result.
+ * @param permalinkHosts - Canonical provider-owned hosts declared by the adapter definition.
  * @returns Exact provider page with its private continuation separated from public data.
  */
 export function normalizeChatProviderThreadPage(
   value: unknown,
-  permalinkHosts: readonly string[] = [],
+  permalinkHosts: readonly string[],
 ): ChatProviderThreadPage {
   const record = requireRecord(value, 'thread page', 'ChatProviderInvalidResponse')
   const providerCursor = readOptionalBoundedText(
@@ -247,11 +251,12 @@ export function normalizeChatProviderThreadPage(
  * Provider-supplied internal File IDs and unknown attachment properties are intentionally omitted.
  *
  * @param value - Untrusted adapter result.
+ * @param permalinkHosts - Canonical provider-owned hosts declared by the adapter definition.
  * @returns Exact provider-neutral message.
  */
 export function normalizeChatProviderMessage(
   value: unknown,
-  permalinkHosts: readonly string[] = [],
+  permalinkHosts: readonly string[],
 ): ExternalChatMessage {
   const record = requireRecord(value, 'message', 'ChatProviderInvalidResponse')
   const availability = readAvailability(record.availability, 'ChatProviderInvalidResponse')
@@ -430,6 +435,7 @@ function requireBoundedInboundEvent(
 function normalizeInboundEventWithCode(
   value: unknown,
   code: 'ChatProviderInvalidWebhook' | 'ChatProviderInvalidResponse',
+  permalinkHosts: readonly string[],
 ): ExternalChatInboundEvent {
   const record = requireRecord(value, 'provider event', code)
   if (record.schemaVersion !== EXTERNAL_CHAT_SCHEMA_VERSION) {
@@ -536,14 +542,6 @@ function normalizeInboundEventWithCode(
       'external lifecycle resource ID',
       code,
     )
-    if (resourceType === 'message') return {
-      ...lifecycle,
-      schemaVersion: EXTERNAL_CHAT_SCHEMA_VERSION,
-      resourceType,
-      conversationExternalId,
-      threadExternalId,
-      resourceExternalId,
-    }
     return {
       ...lifecycle,
       schemaVersion: EXTERNAL_CHAT_SCHEMA_VERSION,
@@ -565,11 +563,11 @@ function normalizeInboundEventWithCode(
   )
   const threadBase = { ...base, conversationExternalId, threadExternalId }
   if (type === 'message.created') {
-    const message = normalizeChatProviderMessage(record.message)
+    const message = normalizeChatProviderMessage(record.message, permalinkHosts)
     return { ...threadBase, schemaVersion: EXTERNAL_CHAT_SCHEMA_VERSION, type, message }
   }
   if (type === 'message.edited') {
-    const message = normalizeChatProviderMessage(record.message)
+    const message = normalizeChatProviderMessage(record.message, permalinkHosts)
     return { ...threadBase, schemaVersion: EXTERNAL_CHAT_SCHEMA_VERSION, type, message }
   }
   if (type === 'message.deleted') {
@@ -1221,7 +1219,9 @@ function requireProviderOwnedPermalinks<T>(
   permalinkHosts: readonly string[],
   code: 'ChatProviderInvalidWebhook' | 'ChatProviderInvalidResponse',
 ): T {
-  if (permalinkHosts.length === 0) return value
+  if (permalinkHosts.length === 0) {
+    invalidAdapterValue(code, 'The adapter must declare at least one provider permalink host.')
+  }
   visitProviderPermalinks(value, permalinkHosts, code)
   return value
 }

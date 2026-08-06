@@ -42,6 +42,7 @@ import {
   type CreateExternalChatLinkInput,
   createExternalChatFingerprint,
   ExternalChatError,
+  externalChatLifecycleBlocksSynchronization,
   type ExternalChatLinkLifecycleState,
   type ExternalChatParentLifecycleFenceSnapshot,
   type ExternalChatStore,
@@ -605,6 +606,7 @@ export class ExternalChatLinkService {
     }, async () => {
     validateUpdateCommand(linkId, command)
     const current = await this.requireAuthorizedLink(context.principal, linkId, 'write')
+    if (!current.active) throw notFoundError()
     const parentLifecycleFences = await this.store.getParentLifecycleFences(
       context.principal.workspaceId,
       current.link.id,
@@ -829,6 +831,11 @@ export class ExternalChatLinkService {
       workItemId: safeFailureIdentifier(command.canonicalWorkItemId),
     }, async () => {
     validateMergeCommand(command)
+    const duplicateRoute = await this.resolveCanonicalWorkItemRoute(
+      context.principal.workspaceId,
+      command.duplicateTeamId,
+      command.duplicateWorkItemId,
+    )
     await this.access.authorizeWorkItem(
       context.principal,
       command.canonicalTeamId,
@@ -837,8 +844,8 @@ export class ExternalChatLinkService {
     )
     await this.access.authorizeWorkItem(
       context.principal,
-      command.duplicateTeamId,
-      command.duplicateWorkItemId,
+      duplicateRoute.teamId,
+      duplicateRoute.workItemId,
       'write',
     )
     const duplicateLinkManifest = await this.store.getWorkItemLinkManifest(
@@ -916,19 +923,27 @@ export class ExternalChatLinkService {
     try {
       return await execute()
     } catch (error: unknown) {
-      await this.failureAudit.record({
-        workspaceId: context.principal.workspaceId,
-        actorMemberKey: context.principal.memberKey,
-        correlationId: context.correlationId,
-        operationId: createLinkCommandOperationId(context, action, payload),
-        action,
-        ...(scope.teamId === undefined ? {} : { teamId: scope.teamId }),
-        ...(scope.workItemId === undefined ? {} : { workItemId: scope.workItemId }),
-        ...(scope.linkId === undefined ? {} : { linkId: scope.linkId }),
-        outcome: 'failed',
-        reasonCode: linkCommandFailureReason(error),
-        occurredAt: context.occurredAt,
-      })
+      try {
+        await this.failureAudit.record({
+          workspaceId: context.principal.workspaceId,
+          actorMemberKey: context.principal.memberKey,
+          correlationId: context.correlationId,
+          operationId: createLinkCommandOperationId(context, action, payload),
+          action,
+          ...(scope.teamId === undefined ? {} : { teamId: scope.teamId }),
+          ...(scope.workItemId === undefined ? {} : { workItemId: scope.workItemId }),
+          ...(scope.linkId === undefined ? {} : { linkId: scope.linkId }),
+          outcome: 'failed',
+          reasonCode: linkCommandFailureReason(error),
+          occurredAt: context.occurredAt,
+        })
+      } catch (auditError: unknown) {
+        console.error('external chat command failure audit failed', {
+          correlationId: context.correlationId,
+          action,
+          errorCode: linkCommandFailureReason(auditError),
+        })
+      }
       throw error
     }
   }
@@ -948,19 +963,27 @@ export class ExternalChatLinkService {
   ): Promise<ExternalChatCanonicalRoute | undefined> {
     requireIdentifier(principal.workspaceId)
     requireIdentifier(principal.memberKey)
-    const redirect = await this.store.getCanonicalRedirect(
+    const fromTeamId = requireIdentifier(formerTeamId)
+    const fromWorkItemId = requireIdentifier(formerWorkItemId)
+    const route = await this.resolveCanonicalWorkItemRoute(
       principal.workspaceId,
-      requireIdentifier(formerTeamId),
-      requireIdentifier(formerWorkItemId),
+      fromTeamId,
+      fromWorkItemId,
     )
-    if (!redirect) return undefined
+    if (route.teamId === fromTeamId && route.workItemId === fromWorkItemId) return undefined
     await this.access.authorizeWorkItem(
       principal,
-      redirect.canonicalTeamId,
-      redirect.canonicalWorkItemId,
+      route.teamId,
+      route.workItemId,
       'read',
     )
-    return toExternalChatCanonicalRoute(redirect)
+    return {
+      fromTeamId,
+      fromWorkItemId,
+      canonicalTeamId: route.teamId,
+      canonicalWorkItemId: route.workItemId,
+      createdAt: route.createdAt,
+    }
   }
 
   /**
@@ -1007,6 +1030,55 @@ export class ExternalChatLinkService {
   }
 
   /**
+   * Follows durable former-duplicate redirects to an authorized Work Item route.
+   *
+   * @param workspaceId - Canonical Workspace identifier.
+   * @param teamId - Starting Team identifier.
+   * @param workItemId - Starting Work Item identifier.
+   * @returns Terminal route and the first redirect timestamp.
+   * @throws ExternalChatError when a redirect cycle or unbounded chain is stored.
+   */
+  private async resolveCanonicalWorkItemRoute(
+    workspaceId: string,
+    teamId: string,
+    workItemId: string,
+  ): Promise<ExternalChatCanonicalWorkItemRoute> {
+    let currentTeamId = teamId
+    let currentWorkItemId = workItemId
+    let createdAt: string | undefined
+    const seen = new Set<string>()
+    for (let hop = 0; hop < MAX_CANONICAL_REDIRECT_HOPS; hop += 1) {
+      const identity = `${currentTeamId}\u0000${currentWorkItemId}`
+      if (seen.has(identity)) {
+        throw new ExternalChatError(
+          'ExternalChatPersistenceFailed',
+          'The external chat canonical redirect graph contains a cycle.',
+        )
+      }
+      seen.add(identity)
+      const redirect = await this.store.getCanonicalRedirect(
+        workspaceId,
+        currentTeamId,
+        currentWorkItemId,
+      )
+      if (!redirect) {
+        return {
+          teamId: currentTeamId,
+          workItemId: currentWorkItemId,
+          createdAt: createdAt ?? '',
+        }
+      }
+      createdAt ??= redirect.createdAt
+      currentTeamId = redirect.canonicalTeamId
+      currentWorkItemId = redirect.canonicalWorkItemId
+    }
+    throw new ExternalChatError(
+      'ExternalChatPersistenceFailed',
+      'The external chat canonical redirect chain exceeded its safety bound.',
+    )
+  }
+
+  /**
    * Loads a tenant-scoped link and authorizes its current Work Item.
    *
    * @param principal - Authenticated caller.
@@ -1030,6 +1102,19 @@ export class ExternalChatLinkService {
     return current
   }
 }
+
+/** Terminal Work Item route obtained after bounded canonical redirect resolution. */
+type ExternalChatCanonicalWorkItemRoute = {
+  /** Team that owns the terminal Work Item. */
+  teamId: string
+  /** Terminal Work Item identifier. */
+  workItemId: string
+  /** First redirect creation timestamp, or an empty value for an active route. */
+  createdAt: string
+}
+
+/** Maximum number of canonical redirect hops followed by one authorization check. */
+const MAX_CANONICAL_REDIRECT_HOPS = 16
 
 /**
  * Verifies that a cross-domain create transaction returned the exact authorized link scope.
@@ -1895,8 +1980,7 @@ function composeCommandProjectionWithLifecycleFloor(
   const redacted = mustRedactCommandSourceMetadata(availability, state)
     ? redactCommandSourceMetadata(candidate)
     : candidate
-  const restrictive = availability !== 'available' ||
-    state === 'deleted' || state === 'retained-metadata' || state === 'retention-expired'
+  const restrictive = externalChatLifecycleBlocksSynchronization(availability, state)
   return {
     ...redacted,
     sourceAvailability: availability,

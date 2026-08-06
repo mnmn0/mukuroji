@@ -266,7 +266,7 @@ class SyntheticChatProviderAdapter implements ChatProviderAdapter {
     if (replay) return replay
     const created = createFixtureMessage(
       this.definition.provider,
-      `created-${this.replyByOperationId.size + 1}`,
+      `created-${input.operationId}`,
       input.source.rootMessageExternalId,
       input.bodyMarkdown,
     )

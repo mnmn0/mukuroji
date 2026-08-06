@@ -12,6 +12,12 @@ test('keeps retry jitter deterministic while honoring a valid provider floor', (
   expect(first <= '2026-08-07T03:00:00.000Z').toBe(true)
 })
 
+test('clamps a provider schedule at the maximum horizon after jitter', () => {
+  const providerRetryAt = '2026-08-07T03:00:00.000Z'
+  const retryAt = normalizeExternalChatRetryAt(now, 'operation-clamp', providerRetryAt)
+  expect(retryAt).toBe(providerRetryAt)
+})
+
 test('replaces malformed, past, and unbounded provider schedules with a safe local delay', () => {
   for (const candidate of [
     'not-a-timestamp',
@@ -28,5 +34,5 @@ test('bounds invalid local fallbacks and rejects an invalid scheduler clock', ()
   const retryAt = normalizeExternalChatRetryAt(now, 'operation-invalid-fallback', undefined, 0)
   expect(retryAt > '2026-08-06T03:00:30.000Z').toBe(true)
   expect(() => normalizeExternalChatRetryAt('invalid', 'operation-invalid-clock'))
-    .toThrow(TypeError)
+    .toThrow('The retry scheduler clock is invalid.')
 })

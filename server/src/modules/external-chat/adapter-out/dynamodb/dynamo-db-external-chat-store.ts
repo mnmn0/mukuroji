@@ -69,6 +69,7 @@ import {
   createInitialExternalChatLinkLifecycleState,
   externalChatLifecycleBlocksSynchronization,
   ExternalChatError,
+  isExternalChatParentLifecycleState,
 } from '../../external-chat'
 import {
   decodeDeferredExternalChatEvent,
@@ -1018,6 +1019,19 @@ export class DynamoDbExternalChatStore implements ExternalChatStore {
         ? undefined
         : requireIdentifier(input.expectedCursor, 'expected parent lifecycle cursor')
       const nextCursor = requireIdentifier(input.nextCursor, 'next parent lifecycle cursor')
+      if (
+        input.parentLifecycleApplied !== undefined &&
+        typeof input.parentLifecycleApplied !== 'boolean'
+      ) {
+        throw new ExternalChatError(
+          'ExternalChatValidationFailed',
+          'Parent lifecycle applied marker must be boolean.',
+          false,
+        )
+      }
+      const parentLifecycleFailureCode = input.parentLifecycleFailureCode === undefined
+        ? undefined
+        : requireIdentifier(input.parentLifecycleFailureCode, 'parent lifecycle failure code')
       const checkpointedAt = requireTimestamp(
         input.checkpointedAt,
         'parent lifecycle checkpoint timestamp',
@@ -1049,11 +1063,23 @@ export class DynamoDbExternalChatStore implements ExternalChatStore {
           current.attempt !== expectedAttempt ||
           current.state !== 'processing'
         ) return false
-        if (current.parentLifecycleCursor === nextCursor) return true
+        if (
+          current.parentLifecycleCursor === nextCursor &&
+          (input.parentLifecycleApplied === undefined ||
+            current.parentLifecycleApplied === input.parentLifecycleApplied) &&
+          (parentLifecycleFailureCode === undefined ||
+            current.parentLifecycleFailureCode === parentLifecycleFailureCode)
+        ) return true
         if (current.parentLifecycleCursor !== expectedCursor) return false
         const replacement = decodeExternalChatInboundReceipt({
           ...current,
           parentLifecycleCursor: nextCursor,
+          ...(input.parentLifecycleApplied === undefined
+            ? {}
+            : { parentLifecycleApplied: input.parentLifecycleApplied }),
+          ...(parentLifecycleFailureCode === undefined
+            ? {}
+            : { parentLifecycleFailureCode }),
           leaseExpiresAt,
           updatedAt: checkpointedAt,
         })
@@ -1830,7 +1856,7 @@ export class DynamoDbExternalChatStore implements ExternalChatStore {
           if (!isConditionalWriteFailure(error)) throw error
         }
       }
-      return false
+      throw concurrentPersistenceFailure('thread lifecycle completion')
     })
   }
 
@@ -1891,7 +1917,7 @@ export class DynamoDbExternalChatStore implements ExternalChatStore {
           if (!isConditionalWriteFailure(error)) throw error
         }
       }
-      return false
+      throw concurrentPersistenceFailure('thread lifecycle acknowledgement')
     })
   }
 
@@ -2141,21 +2167,24 @@ export class DynamoDbExternalChatStore implements ExternalChatStore {
           )
           : undefined
         if (contentEvent && !linkRow) return
+        const ownerRow = linkRow
+        let owner: StoredExternalChatLink | undefined
+        let expectedParentFences: ExternalChatParentLifecycleFenceSnapshot | undefined
         if (linkRow) {
-          const link = decodeScopedLinkRow(linkRow, event.workspaceId, event.linkId)
+          owner = decodeScopedLinkRow(linkRow, event.workspaceId, event.linkId)
           if (
-            !link.active ||
-            linkRejectsDeferredContent(link.link)
+            !owner.active ||
+            linkRejectsDeferredContent(owner.link)
           ) return
           if (event.expectedParentLifecycleFences === undefined) {
             invalidInput('A thread-scoped deferred event requires exact parent authorities.')
           }
-          const expectedParentFences = requireDeferredParentLifecycleFences(event, link)
+          expectedParentFences = requireDeferredParentLifecycleFences(event, owner)
           if (
-            !await this.isParentLifecycleFenceSnapshotCurrent(link, expectedParentFences) ||
+            !await this.isParentLifecycleFenceSnapshotCurrent(owner, expectedParentFences) ||
             parentLifecycleFencesRejectDeferredContent(
               expectedParentFences,
-              link.sourceAuthorizationRevision,
+              owner.sourceAuthorizationRevision,
             )
           ) {
             throw new ExternalChatError(
@@ -2227,17 +2256,14 @@ export class DynamoDbExternalChatStore implements ExternalChatStore {
                   ),
                   currentFifoRow.storageRevision,
                 ),
-                ...(linkRow === undefined
+                ...(owner === undefined || ownerRow === undefined || expectedParentFences === undefined
                   ? []
                   : [
-                      createDeferredContentLinkCondition(this.tableName, linkRow),
+                      createDeferredContentLinkCondition(this.tableName, ownerRow),
                       ...createExpectedParentLifecycleFenceSnapshotConditions(
                         this.tableName,
-                        decodeScopedLinkRow(linkRow, event.workspaceId, event.linkId),
-                        requireDeferredParentLifecycleFences(
-                          event,
-                          decodeScopedLinkRow(linkRow, event.workspaceId, event.linkId),
-                        ),
+                        owner,
+                        expectedParentFences,
                       ),
                     ]),
               ],
@@ -2267,17 +2293,14 @@ export class DynamoDbExternalChatStore implements ExternalChatStore {
                   ExpressionAttributeNames: { '#workspaceId': 'workspaceId' },
                 },
               },
-              ...(linkRow === undefined
+              ...(owner === undefined || ownerRow === undefined || expectedParentFences === undefined
                 ? []
                 : [
-                    createDeferredContentLinkCondition(this.tableName, linkRow),
+                    createDeferredContentLinkCondition(this.tableName, ownerRow),
                     ...createExpectedParentLifecycleFenceSnapshotConditions(
                       this.tableName,
-                      decodeScopedLinkRow(linkRow, event.workspaceId, event.linkId),
-                      requireDeferredParentLifecycleFences(
-                        event,
-                        decodeScopedLinkRow(linkRow, event.workspaceId, event.linkId),
-                      ),
+                      owner,
+                      expectedParentFences,
                     ),
                   ]),
             ],
@@ -3175,6 +3198,7 @@ export class DynamoDbExternalChatStore implements ExternalChatStore {
           ':recordPrefix': externalChatLinkRecordPrefix(),
         },
         ConsistentRead: true,
+        Limit: MAX_MERGE_LINKS + 1,
         ExclusiveStartKey: exclusiveStartKey,
       }))
       for (const item of response.Items ?? []) {
@@ -3190,7 +3214,10 @@ export class DynamoDbExternalChatStore implements ExternalChatStore {
           record.active &&
           record.link.teamId === teamId &&
           record.link.workItemId === workItemId
-        ) records.push(record)
+        ) {
+          records.push(record)
+          if (records.length > MAX_MERGE_LINKS) return records
+        }
       }
       exclusiveStartKey = decodeExclusiveStartKey(response.LastEvaluatedKey)
     } while (exclusiveStartKey !== undefined)
@@ -5615,12 +5642,7 @@ function requireSourceAvailability(value: unknown): ExternalChatSourceAvailabili
 
 /** Reads one non-thread parent source state at an application input boundary. */
 function requireParentSourceState(value: unknown): Exclude<ExternalChatSourceState, 'completed'> {
-  if (
-    value === 'active' ||
-    value === 'deleted' ||
-    value === 'retained-metadata' ||
-    value === 'retention-expired'
-  ) return value
+  if (isExternalChatParentLifecycleState(value)) return value
   invalidInput('The external chat parent source state is invalid.')
 }
 
@@ -5641,12 +5663,7 @@ function readStoredSourceAvailability(value: unknown): ExternalChatSourceAvailab
 function readStoredParentSourceState(
   value: unknown,
 ): Exclude<ExternalChatSourceState, 'completed'> {
-  if (
-    value === 'active' ||
-    value === 'deleted' ||
-    value === 'retained-metadata' ||
-    value === 'retention-expired'
-  ) return value
+  if (isExternalChatParentLifecycleState(value)) return value
   invalidStoredRow('external chat parent source state')
 }
 

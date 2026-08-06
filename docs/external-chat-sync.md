@@ -44,7 +44,7 @@ handler、least-privilege IAM、queue age/DLQ alarm を一体で追加する。d
 - `ExternalChatMessage` は actor、permalink、時刻、quoted range、attachment、編集・削除状態を持つ。
   本文や actor を開示できない場合は optional field を省略し、空文字や架空の actor で補完しない。
 - `ExternalChatThreadSnapshot` は認可済み message の bounded page である。`hasMoreMessages` と
-  application 発行の署名付き `nextMessageCursor` で続きを取得し、provider cursor は返さない。
+  application 発行の暗号化・認証済み opaque token である `nextMessageCursor` で続きを取得し、provider cursor は返さない。
 - `ExternalChatSyncCursor` は同期 runtime だけが読む durable checkpoint であり、provider cursor と
   最後に commit した event を保持する。表示 pagination cursor と兼用しない。
 

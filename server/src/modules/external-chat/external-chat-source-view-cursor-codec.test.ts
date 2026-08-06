@@ -109,6 +109,28 @@ describe('AuthenticatedExternalChatSyncCursorCodec', () => {
       code: 'ExternalChatValidationFailed',
     })
   })
+
+  test('rejects malformed envelopes, noncanonical tokens, and oversized TTL policies', async () => {
+    const fixture = createCodecFixture()
+    const scope = createCursorScope()
+    const cursor = await fixture.codec.encode(scope, 'private-page-two')
+    const parts = cursor.split('.')
+    const invalidCursors = [
+      parts.slice(0, 4).join('.'),
+      ['v2', ...parts.slice(1)].join('.'),
+      [parts[0], parts[1], 'AA', parts[3], parts[4]].join('.'),
+      [parts[0], parts[1], parts[2], parts[3], 'AA'].join('.'),
+      [parts[0], parts[1], `${parts[2]}=`, parts[3], parts[4]].join('.'),
+    ]
+    for (const invalid of invalidCursors) {
+      await expect(fixture.codec.decode(scope, invalid)).rejects.toMatchObject({
+        code: 'ExternalChatValidationFailed',
+      })
+    }
+    expect(() => createCodecFixture(24 * 60 * 60 * 1_000 + 1)).toThrow(
+      'The external chat cursor lifetime is invalid.',
+    )
+  })
 })
 
 /** Complete cursor codec fixture. */

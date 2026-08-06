@@ -21,6 +21,10 @@ const retryAt = '2026-08-06T04:02:00.000Z'
 test('link creation is tenant-scoped, source-unique, and payload-bound idempotent', async () => {
   const store = new InMemoryExternalChatStore()
   const input = createLinkInput('workspace-1', 'link-1', 'work-item-1', 'idempotency-a')
+  await expect(store.createLink({
+    ...input,
+    idempotencyKeyHash: 'not-a-sha256-digest',
+  })).rejects.toMatchObject({ code: 'ExternalChatValidationFailed' })
   const created = await store.createLink(input)
   expect(created.kind).toBe('created')
   if (created.kind !== 'created') throw new Error('Expected a created link.')
@@ -471,6 +475,41 @@ test('inbound receipts reject payload conflicts and recover deferred work only w
     outcome: appliedOutcome('operation-1', 'inbound'),
     completedAt: '2026-08-06T04:02:30.000Z',
   })).toBeTrue()
+})
+
+test('does not resume a completed retryable inbound failure', async () => {
+  const store = new InMemoryExternalChatStore()
+  const event = createInboundEvent('event-retryable-failure')
+  const claim = {
+    workspaceId: 'workspace-1',
+    installationId: event.installationId,
+    provider: event.provider,
+    eventId: event.eventId,
+    fingerprint: createExternalChatFingerprint(event),
+    operationId: 'operation-retryable-failure',
+    claimedAt: now,
+    leaseExpiresAt: later,
+  }
+  await expect(store.claimInboundEvent(claim)).resolves.toMatchObject({ kind: 'claimed' })
+  const outcome: ExternalChatSyncOutcome = {
+    kind: 'failed',
+    operationId: claim.operationId,
+    eventId: event.eventId,
+    errorCode: 'ExternalChatSourceUnavailable',
+    retryable: true,
+    occurredAt: later,
+  }
+  await expect(store.completeInboundEvent({
+    ...claim,
+    expectedAttempt: 1,
+    outcome,
+    completedAt: later,
+  })).resolves.toBe(true)
+  await expect(store.claimInboundEvent({
+    ...claim,
+    claimedAt: '2026-08-06T04:03:00.000Z',
+    leaseExpiresAt: '2026-08-06T04:04:00.000Z',
+  })).resolves.toMatchObject({ kind: 'duplicate' })
 })
 
 test('outbound receipts make provider mutations exactly-once and authenticate echo lookup', async () => {
@@ -1542,7 +1581,7 @@ function createLinkInput(
     link,
     source: identity,
     authorizationRevision: 1,
-    idempotencyKeyHash,
+    idempotencyKeyHash: createExternalChatFingerprint({ idempotencyKeyHash }),
     requestFingerprint: createExternalChatFingerprint({ linkId, workItemId }),
   }
 }

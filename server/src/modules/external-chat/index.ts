@@ -1,12 +1,255 @@
-export * from './chat-provider-adapter'
-export * from './chat-provider-normalizer'
-export * from './adapter-out/dynamodb/dynamo-db-external-chat-store'
-export * from './external-chat'
-export * from './external-chat-deferred-retry-worker'
-export * from './external-chat-link-service'
-export * from './external-chat-outbound-deferred-retry-worker'
-export * from './external-chat-resync-worker'
-export * from './external-chat-retry-schedule'
-export * from './external-chat-source-view-cursor-codec'
-export * from './external-chat-sync-service'
-export * from './external-chat-webhook-runtime'
+export {
+  CHAT_PROVIDER_WEBHOOK_MAX_BYTES,
+  CHAT_PROVIDER_WEBHOOK_MAX_HEADER_BYTES,
+  ChatProviderAdapterError,
+  ChatProviderAdapterRegistry,
+  createChatProviderOriginMarker,
+  validateChatProviderDefinition,
+  validateChatProviderWebhookRequest,
+  verifyChatProviderOriginMarker,
+} from './chat-provider-adapter'
+export type {
+  ChatProviderAdapter,
+  ChatProviderAdapterErrorCode,
+  ChatProviderAuthorization,
+  ChatProviderCapabilities,
+  ChatProviderDefinition,
+  ChatProviderNormalizedWebhook,
+  ChatProviderOriginAction,
+  ChatProviderOriginMarker,
+  ChatProviderThreadMutationResult,
+  ChatProviderThreadPage,
+  ChatProviderWebhookRequest,
+  CreateChatProviderReplyInput,
+  DeleteChatProviderMessageInput,
+  EditChatProviderMessageInput,
+  ReadChatProviderThreadPageInput,
+  SetChatProviderThreadCompletionInput,
+  VerifyChatProviderOriginMarkerInput,
+} from './chat-provider-adapter'
+
+export {
+  EXTERNAL_CHAT_NORMALIZED_INBOUND_EVENT_MAX_BYTES,
+  normalizeChatProviderInboundEvent,
+  normalizeChatProviderMessage,
+  normalizeChatProviderThreadMutationResult,
+  normalizeChatProviderThreadPage,
+  normalizeChatProviderThreadSnapshot,
+  normalizeChatProviderWebhook,
+} from './chat-provider-normalizer'
+
+export {
+  ExternalChatError,
+  InMemoryExternalChatStore,
+  createExternalChatFingerprint,
+  createExternalChatInboundOperationId,
+  createExternalChatLinkId,
+  createExternalChatSourceDigest,
+  createInitialExternalChatLinkLifecycleState,
+  externalChatLifecycleBlocksSynchronization,
+  isExternalChatParentLifecycleState,
+  requireExternalChatBatchLimit,
+  requireExternalChatIdentifier,
+  requireExternalChatTimestamp,
+} from './external-chat'
+export type {
+  AcquireExternalChatOutboundRetryPermitInput,
+  AcknowledgeExternalChatThreadLifecycleInput,
+  ClaimExternalChatInboundEventInput,
+  ClaimExternalChatInboundEventResult,
+  ClaimExternalChatOutboundOperationInput,
+  ClaimExternalChatOutboundOperationResult,
+  ClaimExternalChatThreadLifecycleInput,
+  ClaimExternalChatThreadLifecycleResult,
+  CheckpointExternalChatInboundEventInput,
+  CompleteExternalChatInboundEventInput,
+  CompleteExternalChatOutboundOperationInput,
+  CompleteExternalChatThreadLifecycleInput,
+  CreateExternalChatLinkInput,
+  CreateExternalChatLinkResult,
+  DeadLetterExternalChatOutboundOperationInput,
+  DeferredExternalChatEvent,
+  DeferredExternalChatOutboundEvent,
+  ExternalChatErrorCode,
+  ExternalChatInboundReceipt,
+  ExternalChatLifecycleObservation,
+  ExternalChatLinkLifecycleState,
+  ExternalChatOutboundDeadLetterReason,
+  ExternalChatOutboundReceipt,
+  ExternalChatOutboundRetryPermit,
+  ExternalChatParentLifecycleFence,
+  ExternalChatParentLifecycleFenceSnapshot,
+  ExternalChatStore,
+  ExternalChatSyncCommentCreatedEvent,
+  ExternalChatSyncCommentDeletedEvent,
+  ExternalChatSyncCommentEditedEvent,
+  ExternalChatSyncOutboundEvent,
+  ExternalChatSyncWorkItemCompletedEvent,
+  ExternalChatSyncWorkItemReopenedEvent,
+  ExternalChatTenantScope,
+  ExternalChatThreadLifecycleLease,
+  ExternalChatThreadLifecycleState,
+  ExternalChatWorkItemLinkManifest,
+  FenceExternalChatParentLifecycleInput,
+  FenceExternalChatParentLifecycleResult,
+  ListExternalChatParentLinksInput,
+  ListExternalChatParentLinksResult,
+  MergeExternalChatLinksStoreInput,
+  MergeExternalChatLinksStoreResult,
+  PrepareExternalChatOutboundDeadLetterResult,
+  PutExternalChatMessageBindingInput,
+  PutExternalChatMessageBindingResult,
+  ReleaseExternalChatOutboundRetryPermitInput,
+  RenewExternalChatOutboundRetryPermitInput,
+  StoredExternalChatLink,
+  StoredExternalChatMessageBinding,
+  StoredExternalChatThreadLifecycle,
+  UnlinkExternalChatLinkInput,
+  UnlinkExternalChatLinkResult,
+  UpdateExternalChatLinkInput,
+  UpdateExternalChatLinkResult,
+  ValidateExternalChatOutboundRetryPermitInput,
+} from './external-chat'
+
+export {
+  EXTERNAL_CHAT_DEFERRED_RETRY_MAX_BATCH_SIZE,
+  ExternalChatDeferredRetryWorker,
+} from './external-chat-deferred-retry-worker'
+export type {
+  ExternalChatDeferredInboundProcessorPort,
+  ExternalChatDeferredRetryBatchInput,
+  ExternalChatDeferredRetryBatchResult,
+  ExternalChatDeferredRetryStorePort,
+  ExternalChatDeferredRetryStopReason,
+  ExternalChatDeferredRetryWorkerDependencies,
+} from './external-chat-deferred-retry-worker'
+
+export {
+  ExternalChatLinkService,
+} from './external-chat-link-service'
+export type {
+  AcceptExternalChatResyncTransactionInput,
+  AuthorizedExternalChatInstallation,
+  CreateWorkItemAndExternalChatLinkTransactionInput,
+  CreateWorkItemExternalChatLinkDraft,
+  ExternalChatLinkAccessPort,
+  ExternalChatLinkAuditRecord,
+  ExternalChatLinkCommandContext,
+  ExternalChatLinkFailureAuditPort,
+  ExternalChatLinkPrincipal,
+  ExternalChatLinkServiceDependencies,
+  ExternalChatLinkTransactionPort,
+  ExternalChatResyncJob,
+  ExternalChatResyncQueuePort,
+  LinkExistingWorkItemToExternalChatTransactionInput,
+  MergeWorkItemsAndExternalChatLinksTransactionInput,
+  MergeWorkItemsAndExternalChatLinksTransactionResult,
+  UnlinkExternalChatLinkTransactionInput,
+  UnlinkExternalChatLinkTransactionResult,
+  UpdateExternalChatLinkTransactionInput,
+  UpdateExternalChatLinkTransactionResult,
+} from './external-chat-link-service'
+
+export {
+  EXTERNAL_CHAT_OUTBOUND_RETRY_MAX_BATCH_SIZE,
+  ExternalChatOutboundDeferredRetryWorker,
+} from './external-chat-outbound-deferred-retry-worker'
+export type {
+  ExternalChatDeferredOutboundProcessorPort,
+  ExternalChatOutboundDeadLetterInput,
+  ExternalChatOutboundDeadLetterPort,
+  ExternalChatOutboundRetryBatchInput,
+  ExternalChatOutboundRetryBatchResult,
+  ExternalChatOutboundRetryClockPort,
+  ExternalChatOutboundRetryConcurrencyInput,
+  ExternalChatOutboundRetryConcurrencyPort,
+  ExternalChatOutboundRetryHeartbeatPort,
+  ExternalChatOutboundRetryStopReason,
+  ExternalChatOutboundRetryStorePort,
+  ExternalChatOutboundRetryWorkerDependencies,
+  ExternalChatOutboundRetryWorkerOptions,
+  ExternalChatOutboundRetryExecutionContext,
+} from './external-chat-outbound-deferred-retry-worker'
+
+export {
+  ExternalChatResyncWorker,
+} from './external-chat-resync-worker'
+export type {
+  ExternalChatFullResyncBoundary,
+  ExternalChatFullResyncSeenMessageInput,
+  ExternalChatResyncOperationBoundary,
+  ExternalChatResyncRedactionInput,
+  ExternalChatResyncReconciliationPort,
+  ExternalChatResyncSnapshotProcessorPort,
+  ExternalChatResyncWorkerStopReason,
+  ExternalChatResyncWorkerDependencies,
+  ExternalChatResyncWorkerOptions,
+  ExternalChatResyncWorkerResult,
+} from './external-chat-resync-worker'
+
+export { normalizeExternalChatRetryAt } from './external-chat-retry-schedule'
+
+export { AuthenticatedExternalChatSyncCursorCodec } from './external-chat-source-view-cursor-codec'
+export type {
+  AuthenticatedExternalChatSyncCursorCodecDependencies,
+  AuthenticatedExternalChatSyncCursorCodecOptions,
+  ExternalChatSourceViewCursorKey,
+  ExternalChatSourceViewCursorKeyPort,
+  ExternalChatSourceViewCursorClockPort,
+} from './external-chat-source-view-cursor-codec'
+
+export {
+  ExternalChatSyncPortError,
+  ExternalChatSyncService,
+} from './external-chat-sync-service'
+export type {
+  ExternalChatSyncAccessPort,
+  ExternalChatSyncApplyResourceLifecycleInput,
+  ExternalChatSyncApplyResourceLifecycleResult,
+  ExternalChatSyncAttachmentPort,
+  ExternalChatSyncAuditAction,
+  ExternalChatSyncAuditPort,
+  ExternalChatSyncAuditRecord,
+  ExternalChatSyncClockPort,
+  ExternalChatSyncCollaborationPort,
+  ExternalChatSyncCommentMutationContext,
+  ExternalChatSyncCommentMutationResult,
+  ExternalChatSyncCommentSource,
+  ExternalChatSyncCreateCommentInput,
+  ExternalChatSyncCursorCodecPort,
+  ExternalChatSyncCursorScope,
+  ExternalChatSyncDeleteCommentInput,
+  ExternalChatSyncGetSourceViewInput,
+  ExternalChatSyncImportAttachmentsInput,
+  ExternalChatSyncImportAttachmentsResult,
+  ExternalChatSyncInboundInput,
+  ExternalChatSyncMessageOrderDecision,
+  ExternalChatSyncMessageOrderInput,
+  ExternalChatSyncMessageOrderPort,
+  ExternalChatSyncOriginSecretPort,
+  ExternalChatSyncOutboundExecutionContext,
+  ExternalChatSyncPortErrorCode,
+  ExternalChatSyncPrincipal,
+  ExternalChatSyncRedactLinkResourcesInput,
+  ExternalChatSyncSetWorkItemCompletionInput,
+  ExternalChatSyncSetWorkItemCompletionResult,
+  ExternalChatSyncSourceAccessScope,
+  ExternalChatSyncThreadOrderDecision,
+  ExternalChatSyncThreadOrderInput,
+  ExternalChatSyncThreadOrderPort,
+  ExternalChatSyncUpdateCommentInput,
+  ExternalChatSyncWorkItemPort,
+  ExternalChatSyncServiceDependencies,
+  ExternalChatSyncServiceOptions,
+} from './external-chat-sync-service'
+
+export {
+  EXTERNAL_CHAT_WEBHOOK_MAX_EVENTS,
+  ExternalChatWebhookRuntime,
+} from './external-chat-webhook-runtime'
+export type {
+  ExternalChatWebhookRuntimeDependencies,
+  ExternalChatWebhookScope,
+  ProcessExternalChatWebhookInput,
+  ProcessExternalChatWebhookResult,
+} from './external-chat-webhook-runtime'

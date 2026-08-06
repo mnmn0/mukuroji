@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto'
 import type {
   ExternalChatInboundEvent,
   ExternalChatMessage,
@@ -17,6 +16,7 @@ import {
 import { normalizeChatProviderThreadPage } from './chat-provider-normalizer'
 import { normalizeExternalChatRetryAt } from './external-chat-retry-schedule'
 import {
+  createExternalChatFingerprint,
   ExternalChatError,
   type ExternalChatLifecycleObservation,
   type ExternalChatLinkLifecycleState,
@@ -24,6 +24,13 @@ import {
   type ExternalChatStore,
   type StoredExternalChatLink,
 } from './external-chat'
+import {
+  effectiveExternalChatLifecycleState,
+  mustRedactExternalChatSourceMetadata,
+  mustRedactExternalChatSourceMetadata as mustRedactResyncSourceMetadata,
+  redactExternalChatSourceMetadata as redactResyncSourceMetadata,
+  type ExternalChatEffectiveLifecycleState,
+} from './external-chat-lifecycle'
 import type { ExternalChatResyncJob } from './external-chat-link-service'
 import type {
   ExternalChatSyncAccessPort,
@@ -547,27 +554,27 @@ export class ExternalChatResyncWorker {
         )
       }
 
+      const pageRecord = await this.store.getLink(job.workspaceId, job.linkId)
+      if (!pageRecord || !pageRecord.active) {
+        return stoppedResult(
+          job.operationId,
+          processedPageCount,
+          processedMessageCount,
+          'unlinked',
+        )
+      }
+      if (pageRecord.link.revision !== job.linkRevision) {
+        return stoppedResult(
+          job.operationId,
+          processedPageCount,
+          processedMessageCount,
+          'superseded',
+        )
+      }
       let lastEventId = cursor.lastEventId
       let lastEventAt = cursor.lastEventAt
       for (const message of page.thread.messages) {
-        const currentRecord = await this.store.getLink(job.workspaceId, job.linkId)
-        if (!currentRecord || !currentRecord.active) {
-          return stoppedResult(
-            job.operationId,
-            processedPageCount,
-            processedMessageCount,
-            'unlinked',
-          )
-        }
-        if (currentRecord.link.revision !== job.linkRevision) {
-          return stoppedResult(
-            job.operationId,
-            processedPageCount,
-            processedMessageCount,
-            'superseded',
-          )
-        }
-        const event = createSnapshotEvent(job, currentRecord.link, message)
+        const event = createSnapshotEvent(job, pageRecord.link, message)
         let outcome: ExternalChatSyncOutcome
         try {
           outcome = await this.processor.processResyncSnapshot({
@@ -910,12 +917,7 @@ export class ExternalChatResyncWorker {
 }
 
 /** Effective lifecycle projection derived from private watermarks and parent authorities. */
-type ExternalChatResyncEffectiveLifecycle = {
-  /** Most restrictive current source reachability. */
-  availability: ExternalChatSourceAvailability
-  /** Most restrictive current source lifecycle state. */
-  state: ExternalChatSourceState
-}
+type ExternalChatResyncEffectiveLifecycle = ExternalChatEffectiveLifecycleState
 
 /**
  * Creates the exact accepted operation boundary used by durable resynchronization side effects.
@@ -994,33 +996,11 @@ function effectiveResyncLifecycleState(
   parentFences: ExternalChatParentLifecycleFenceSnapshot,
   acceptedAuthorizationRevision: number,
 ): ExternalChatResyncEffectiveLifecycle {
-  let availability: ExternalChatSourceAvailability = 'available'
-  let sourceState: ExternalChatSourceState = 'active'
-  for (const observation of [state.workspace, state.conversation, state.thread]) {
-    if (
-      observation === undefined ||
-      observation.authorizationRevision < acceptedAuthorizationRevision
-    ) continue
-    if (
-      resyncAvailabilityRank(observation.availability) > resyncAvailabilityRank(availability)
-    ) availability = observation.availability
-    if (resyncSourceStateRank(observation.state) > resyncSourceStateRank(sourceState)) {
-      sourceState = observation.state
-    }
-  }
-  for (const fence of [parentFences.workspace, parentFences.conversation]) {
-    if (
-      fence?.restrictive !== true ||
-      fence.authorizationRevision < acceptedAuthorizationRevision
-    ) continue
-    if (resyncAvailabilityRank(fence.availability) > resyncAvailabilityRank(availability)) {
-      availability = fence.availability
-    }
-    if (resyncSourceStateRank(fence.state) > resyncSourceStateRank(sourceState)) {
-      sourceState = fence.state
-    }
-  }
-  return { availability, state: sourceState }
+  return effectiveExternalChatLifecycleState(
+    state,
+    parentFences,
+    acceptedAuthorizationRevision,
+  )
 }
 
 /**
@@ -1034,77 +1014,9 @@ function terminalResyncSyncStatus(
   completion: ExternalChatWorkItemLink['syncStatus'],
   lifecycle: ExternalChatResyncEffectiveLifecycle,
 ): ExternalChatWorkItemLink['syncStatus'] {
-  if (
-    lifecycle.availability !== 'available' ||
-    lifecycle.state === 'deleted' ||
-    lifecycle.state === 'retained-metadata' ||
-    lifecycle.state === 'retention-expired'
-  ) return 'paused'
+  if (lifecycle.availability !== 'available' ||
+    mustRedactExternalChatSourceMetadata(lifecycle.availability, lifecycle.state)) return 'paused'
   return completion
-}
-
-/** Returns the fail-closed rank of one source availability. */
-function resyncAvailabilityRank(value: ExternalChatSourceAvailability): number {
-  if (value === 'available') return 0
-  if (value === 'temporarily-unavailable') return 1
-  if (value === 'needs-reauth') return 2
-  if (value === 'installation-disconnected') return 3
-  if (value === 'scope-changed') return 4
-  return 5
-}
-
-/** Returns the fail-closed rank of one source lifecycle state. */
-function resyncSourceStateRank(value: ExternalChatSourceState): number {
-  if (value === 'active') return 0
-  if (value === 'completed') return 1
-  if (value === 'retained-metadata') return 2
-  if (value === 'deleted') return 3
-  return 4
-}
-
-/**
- * Checks whether a restrictive effective lifecycle forbids retaining provider metadata.
- *
- * @param availability - Effective source reachability.
- * @param state - Effective source lifecycle state.
- * @returns Whether policy-controlled metadata and resources must be redacted.
- */
-function mustRedactResyncSourceMetadata(
-  availability: ExternalChatSourceAvailability,
-  state: ExternalChatSourceState,
-): boolean {
-  return availability === 'permission-lost' || availability === 'scope-changed' ||
-    state === 'deleted' || state === 'retention-expired'
-}
-
-/**
- * Removes provider display, permalink, and quote metadata while retaining immutable source IDs.
- *
- * @param link - Current public link projection.
- * @returns Source-redacted link projection.
- */
-function redactResyncSourceMetadata(link: ExternalChatWorkItemLink): ExternalChatWorkItemLink {
-  return {
-    ...link,
-    workspace: {
-      provider: link.workspace.provider,
-      externalId: link.workspace.externalId,
-    },
-    conversation: {
-      externalId: link.conversation.externalId,
-      externalWorkspaceId: link.conversation.externalWorkspaceId,
-      kind: link.conversation.kind,
-    },
-    source: {
-      externalWorkspaceId: link.source.externalWorkspaceId,
-      conversationExternalId: link.source.conversationExternalId,
-      threadExternalId: link.source.threadExternalId,
-      rootMessageExternalId: link.source.rootMessageExternalId,
-      ...(link.source.sourceMessageExternalId === undefined
-        ? {}
-        : { sourceMessageExternalId: link.source.sourceMessageExternalId }),
-    },
-  }
 }
 
 /**
@@ -1206,14 +1118,14 @@ function createSnapshotEvent(
   link: ExternalChatWorkItemLink,
   message: ExternalChatMessage,
 ): ExternalChatInboundEvent {
-  const eventId = `resync-${createHash('sha256').update(JSON.stringify({
+  const eventId = `resync-${createExternalChatFingerprint({
     version: 1,
     operationId: job.operationId,
     provider: link.provider,
     externalMessageId: message.externalId,
     externalVersion: message.externalVersion,
     state: message.state,
-  })).digest('hex')}`
+  })}`
   if (message.state === 'active') {
     return {
       schemaVersion: 1,

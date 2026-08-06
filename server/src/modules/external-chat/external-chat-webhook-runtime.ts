@@ -10,6 +10,10 @@ import {
   validateChatProviderWebhookRequest,
 } from './chat-provider-adapter'
 import { normalizeChatProviderWebhook } from './chat-provider-normalizer'
+import {
+  createExternalChatInboundOperationId,
+  ExternalChatError,
+} from './external-chat'
 import type { ExternalChatSyncService } from './external-chat-sync-service'
 
 /** Maximum normalized provider events accepted from one verified webhook envelope. */
@@ -131,12 +135,30 @@ export class ExternalChatWebhookRuntime {
     const outcomes: ExternalChatSyncOutcome[] = []
     for (const event of normalized.events) {
       const originMarker = ownOriginMarker(normalized.originMarkers, event.eventId)
-      outcomes.push(await this.sync.processInbound({
-        workspaceId: input.scope.workspaceId,
-        event,
-        authorizationRevision: input.scope.authorization.authorizationRevision,
-        ...(originMarker === undefined ? {} : { originMarker }),
-      }))
+      try {
+        outcomes.push(await this.sync.processInbound({
+          workspaceId: input.scope.workspaceId,
+          event,
+          authorizationRevision: input.scope.authorization.authorizationRevision,
+          ...(originMarker === undefined ? {} : { originMarker }),
+        }))
+      } catch (error: unknown) {
+        if (!(error instanceof ExternalChatError) || error.retryable) throw error
+        const outcome: ExternalChatSyncOutcome = {
+          kind: 'failed',
+          operationId: createExternalChatInboundOperationId(input.scope.workspaceId, event),
+          eventId: event.eventId,
+          errorCode: error.code,
+          retryable: false,
+          occurredAt: event.occurredAt,
+        }
+        console.error('external chat webhook terminal event failed', {
+          eventId: event.eventId,
+          correlationId: event.correlationId,
+          errorCode: error.code,
+        })
+        outcomes.push(outcome)
+      }
     }
     return { deliveryId: normalized.deliveryId, outcomes }
   }

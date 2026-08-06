@@ -409,15 +409,12 @@ function transactionConditionalFailure(): Error {
 
 /** Creates the canonical source digest used by persisted link fixtures. */
 function sourceDigest(): string {
-  return createHash('sha256')
-    .update([
-      'external-chat-source-v1',
-      'slack',
-      'workspace-external-1',
-      'conversation-external-1',
-      'thread-external-1',
-    ].join('\0'))
-    .digest('hex')
+  return createExternalChatSourceDigest({
+    provider: 'slack',
+    externalWorkspaceId: 'workspace-external-1',
+    conversationExternalId: 'conversation-external-1',
+    threadExternalId: 'thread-external-1',
+  })
 }
 
 /** Creates the SHA-256 component used by opaque DynamoDB record and lookup keys. */
@@ -1073,6 +1070,57 @@ test('keeps inbound receipts exactly once through lease, completion, and echo ch
     expect(putCalls).toHaveLength(2)
     expect(putCalls[0]?.input.ConditionExpression).toBe('attribute_not_exists(#workspaceId)')
     expect(putCalls[1]?.input.ConditionExpression).toContain('#storageRevision')
+  } finally {
+    harness.restore()
+  }
+})
+
+test('does not resume a completed retryable inbound failure', async () => {
+  let storedRow: unknown
+  const harness = createHarness({
+    async respond(command) {
+      const inspected = inspectCommand(command)
+      if (inspected.name === 'GetCommand') {
+        return storedRow === undefined ? {} : { Item: structuredClone(storedRow) }
+      }
+      if (inspected.name === 'PutCommand') {
+        storedRow = structuredClone(inspected.input.Item)
+        return {}
+      }
+      throw new TypeError(`Unexpected command: ${inspected.name}`)
+    },
+  })
+  const claim: ClaimExternalChatInboundEventInput = {
+    workspaceId: 'workspace-1',
+    installationId: 'installation-1',
+    provider: 'slack',
+    eventId: 'event-retryable-failure',
+    fingerprint: DIGEST,
+    operationId: 'operation-inbound-retryable-failure',
+    claimedAt: NOW,
+    leaseExpiresAt: LEASE,
+  }
+  const outcome: ExternalChatSyncOutcome = {
+    kind: 'failed',
+    operationId: claim.operationId,
+    eventId: claim.eventId,
+    errorCode: 'ExternalChatSourceUnavailable',
+    retryable: true,
+    occurredAt: '2026-08-06T00:01:00.000Z',
+  }
+  try {
+    await expect(harness.store.claimInboundEvent(claim)).resolves.toMatchObject({ kind: 'claimed' })
+    await expect(harness.store.completeInboundEvent({
+      ...claim,
+      expectedAttempt: 1,
+      outcome,
+      completedAt: outcome.occurredAt,
+    })).resolves.toBe(true)
+    await expect(harness.store.claimInboundEvent({
+      ...claim,
+      claimedAt: '2026-08-06T00:10:00.000Z',
+      leaseExpiresAt: '2026-08-06T00:15:00.000Z',
+    })).resolves.toMatchObject({ kind: 'duplicate' })
   } finally {
     harness.restore()
   }

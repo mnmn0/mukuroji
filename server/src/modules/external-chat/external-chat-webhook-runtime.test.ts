@@ -335,13 +335,22 @@ describe('ExternalChatWebhookRuntime', () => {
 
     fixture.adapter.setNormalized({
       deliveryId: 'delivery-conflicting-marker',
-      events: [event],
+      events: [event, createLifecycleEvent('event-after-conflict')],
       originMarkers: { 'event-replayed': 'origin-marker-two' },
     })
-    await expect(fixture.runtime.process(createWebhookInput())).rejects.toMatchObject({
-      code: 'ExternalChatEventConflict',
+    const terminal = await fixture.runtime.process(createWebhookInput())
+    expect(terminal.outcomes[0]).toMatchObject({
+      kind: 'failed',
+      eventId: 'event-replayed',
+      errorCode: 'ExternalChatEventConflict',
+      retryable: false,
     })
-    expect(fixture.audit.records).toHaveLength(2)
+    expect(terminal.outcomes[1]).toMatchObject({
+      kind: 'skipped',
+      eventId: 'event-after-conflict',
+      reason: 'unlinked',
+    })
+    expect(fixture.audit.records).toHaveLength(3)
 
     fixture.adapter.setNormalized({
       deliveryId: 'delivery-original-marker-again',
@@ -350,7 +359,7 @@ describe('ExternalChatWebhookRuntime', () => {
     })
     const recoveredReplay = await fixture.runtime.process(createWebhookInput())
     expect(recoveredReplay.outcomes).toEqual(first.outcomes)
-    expect(fixture.audit.records).toHaveLength(3)
+    expect(fixture.audit.records).toHaveLength(4)
   })
 
   test('rejects empty and oversized verified envelopes before synchronization', async () => {
@@ -378,13 +387,19 @@ describe('ExternalChatWebhookRuntime', () => {
   test('treats prototype-shaped event IDs as markerless own keys and bounds raw input first', async () => {
     const fixture = createWebhookRuntimeFixture({
       deliveryId: 'delivery-prototype-event-id',
-      events: [createLifecycleEvent('toString')],
+      events: [createLifecycleEvent('toString'), createLifecycleEvent('event-other')],
+      originMarkers: { 'event-other': 'origin-marker-other' },
     })
 
     const processed = await fixture.runtime.process(createWebhookInput())
     expect(processed.outcomes[0]).toMatchObject({
       kind: 'skipped',
       eventId: 'toString',
+      reason: 'unlinked',
+    })
+    expect(processed.outcomes[1]).toMatchObject({
+      kind: 'skipped',
+      eventId: 'event-other',
       reason: 'unlinked',
     })
 

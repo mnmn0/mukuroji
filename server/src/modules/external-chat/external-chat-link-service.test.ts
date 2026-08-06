@@ -34,6 +34,7 @@ import {
   type SetChatProviderThreadCompletionInput,
 } from './chat-provider-adapter'
 import {
+  createExternalChatFingerprint,
   ExternalChatError,
   InMemoryExternalChatStore,
 } from './external-chat'
@@ -442,7 +443,12 @@ class RecordingLinkTransactionPort implements ExternalChatLinkTransactionPort {
     return result
   }
 
-  /** Atomically updates one link and replays its exact transaction-owned receipt. */
+  /**
+   * Atomically updates one link and replays its exact transaction-owned receipt.
+   *
+   * A parent-stale result is classified as a transaction failure so callers cannot mistake a
+   * restrictive lifecycle race for a successful settings update.
+   */
   async updateLink(
     input: UpdateExternalChatLinkTransactionInput,
   ): Promise<UpdateExternalChatLinkTransactionResult> {
@@ -522,7 +528,11 @@ class RecordingLinkTransactionPort implements ExternalChatLinkTransactionPort {
     return this.corruptUnlinkResult(result)
   }
 
-  /** Records an atomically accepted resynchronization command. */
+  /**
+   * Records an atomically accepted resynchronization command.
+   *
+   * A parent-stale result is surfaced as a revision conflict and never queues a stale job.
+   */
   async acceptResync(
     input: AcceptExternalChatResyncTransactionInput,
   ): Promise<ResyncExternalChatWorkItemLinkResult> {
@@ -1463,8 +1473,8 @@ async function seedStoredLink(
       conversationExternalId: link.source.conversationExternalId,
       threadExternalId: link.source.threadExternalId,
     },
-    idempotencyKeyHash: `seed-idempotency-hash-${link.id}`,
-    requestFingerprint: `seed-request-fingerprint-${link.id}`,
+    idempotencyKeyHash: createExternalChatFingerprint(`seed-idempotency-hash-${link.id}`),
+    requestFingerprint: createExternalChatFingerprint(`seed-request-fingerprint-${link.id}`),
   })
   if (result.kind !== 'created') throw new Error('Expected the link fixture to be created.')
 }

@@ -558,8 +558,15 @@ export function validateChatProviderDefinition(
       'Chat provider permalink hosts must be a bounded unique canonical domain allowlist.',
     )
   }
-  for (const capability of Object.values(definition.capabilities)) {
-    if (typeof capability !== 'boolean') {
+  const capabilities: unknown = definition.capabilities
+  if (!isRecord(capabilities)) {
+    throw new ChatProviderAdapterError(
+      'ChatProviderAdapterDefinitionMismatch',
+      'Chat provider capabilities must be an explicit record.',
+    )
+  }
+  for (const name of ['edits', 'deletion', 'threadCompletion', 'nativeIdempotency'] as const) {
+    if (typeof capabilities[name] !== 'boolean') {
       throw new ChatProviderAdapterError(
         'ChatProviderAdapterDefinitionMismatch',
         'Chat provider capabilities must be explicit booleans.',

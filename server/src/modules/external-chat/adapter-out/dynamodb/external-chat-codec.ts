@@ -34,6 +34,7 @@ import type {
 import {
   createInitialExternalChatLinkLifecycleState,
   externalChatLifecycleBlocksSynchronization,
+  isExternalChatParentLifecycleState,
   ExternalChatError,
 } from '../../external-chat'
 
@@ -154,6 +155,8 @@ export function decodeExternalChatInboundReceipt(value: unknown): ExternalChatIn
     'leaseExpiresAt',
     'outcome',
     'parentLifecycleCursor',
+    'parentLifecycleApplied',
+    'parentLifecycleFailureCode',
     'createdAt',
     'updatedAt',
   ], 'external chat inbound receipt')
@@ -166,6 +169,12 @@ export function decodeExternalChatInboundReceipt(value: unknown): ExternalChatIn
   const parentLifecycleCursor = record.parentLifecycleCursor === undefined
     ? undefined
     : readIdentifier(record.parentLifecycleCursor, 'parent lifecycle fan-out cursor')
+  const parentLifecycleApplied = record.parentLifecycleApplied === undefined
+    ? undefined
+    : readBoolean(record.parentLifecycleApplied, 'parent lifecycle applied marker')
+  const parentLifecycleFailureCode = record.parentLifecycleFailureCode === undefined
+    ? undefined
+    : readIdentifier(record.parentLifecycleFailureCode, 'parent lifecycle failure code')
   if ((state === 'completed') !== (outcome !== undefined)) {
     invalidStoredValue('external chat inbound receipt completion state')
   }
@@ -188,6 +197,8 @@ export function decodeExternalChatInboundReceipt(value: unknown): ExternalChatIn
     leaseExpiresAt: readTimestamp(record.leaseExpiresAt, 'inbound receipt lease expiry'),
     ...(outcome === undefined ? {} : { outcome }),
     ...(parentLifecycleCursor === undefined ? {} : { parentLifecycleCursor }),
+    ...(parentLifecycleApplied === undefined ? {} : { parentLifecycleApplied }),
+    ...(parentLifecycleFailureCode === undefined ? {} : { parentLifecycleFailureCode }),
     createdAt: readTimestamp(record.createdAt, 'inbound receipt creation timestamp'),
     updatedAt: readTimestamp(record.updatedAt, 'inbound receipt update timestamp'),
   }
@@ -485,7 +496,7 @@ export function decodeExternalChatSyncCursor(value: unknown): ExternalChatSyncCu
     'sync cursor status',
   )
   if (status === 'completed' && record.providerCursor !== undefined) {
-    invalidStoredValue('A completed external chat sync cursor cannot retain a provider cursor.')
+    invalidStoredValue('completed external chat sync cursor provider cursor')
   }
   if (
     status === 'completed' &&
@@ -495,7 +506,7 @@ export function decodeExternalChatSyncCursor(value: unknown): ExternalChatSyncCu
       record.completionSyncStatus === undefined
     )
   ) {
-    invalidStoredValue('A completed external chat sync cursor must retain terminal source state.')
+    invalidStoredValue('completed external chat sync cursor terminal source state')
   }
   return {
     schemaVersion: readSchemaVersion(record.schemaVersion),
@@ -708,7 +719,9 @@ function decodeExternalChatParentLifecycleFence(
     'occurredAt',
   ], 'external chat parent lifecycle fence')
   const availability = decodeAvailability(record.availability)
-  const state = decodeSourceState(record.state)
+  const state = isExternalChatParentLifecycleState(record.state)
+    ? record.state
+    : invalidStoredValue('external chat parent lifecycle state')
   const restrictive = readBoolean(record.restrictive, 'parent lifecycle restrictive state')
   const conversationExternalId = record.conversationExternalId === undefined
     ? undefined

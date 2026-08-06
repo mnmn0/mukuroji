@@ -115,7 +115,7 @@ async function seedActiveLink(store: InMemoryExternalChatStore): Promise<void> {
       conversationExternalId: 'conversation-external-1',
       threadExternalId: 'thread-external-1',
     },
-    idempotencyKeyHash: 'deferred-worker-link',
+    idempotencyKeyHash: createExternalChatFingerprint('deferred-worker-link'),
     requestFingerprint: createExternalChatFingerprint(link),
   })
 }

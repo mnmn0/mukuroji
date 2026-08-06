@@ -4,6 +4,9 @@ import {
   type AcquireExternalChatOutboundRetryPermitInput,
   type DeferredExternalChatOutboundEvent,
   ExternalChatError,
+  requireExternalChatBatchLimit,
+  requireExternalChatIdentifier,
+  requireExternalChatTimestamp,
   type ExternalChatOutboundDeadLetterReason,
   type ExternalChatOutboundRetryPermit,
   type ExternalChatStore,
@@ -204,14 +207,8 @@ type ExternalChatOutboundProcessorSettlement =
 
 /** Result of monitoring one installation permit until processing stops or ownership is lost. */
 type ExternalChatOutboundPermitMonitorResult =
-  | {
-    /** The private processing signal stopped the heartbeat after provider settlement. */
-    kind: 'heartbeat-stopped'
-  }
-  | {
-    /** A renewal or exact validation proved the worker no longer owns the permit. */
-    kind: 'lease-lost'
-  }
+  /** A renewal or exact validation proved the worker no longer owns the permit. */
+  { kind: 'lease-lost' }
 
 /** Combined provider settlement or permit-loss result for one awaited mutation. */
 type ExternalChatOutboundFencedProcessingResult =
@@ -289,10 +286,14 @@ export class ExternalChatOutboundDeferredRetryWorker {
   async processDueBatch(
     input: ExternalChatOutboundRetryBatchInput,
   ): Promise<ExternalChatOutboundRetryBatchResult> {
-    const workspaceId = requireIdentifier(input.workspaceId, 'Workspace ID')
-    const linkId = requireIdentifier(input.linkId, 'external chat link ID')
-    const dueAt = requireTimestamp(input.dueAt, 'outbound retry due timestamp')
-    const limit = requireBatchLimit(input.limit)
+    const workspaceId = requireExternalChatIdentifier(input.workspaceId, 'Workspace ID')
+    const linkId = requireExternalChatIdentifier(input.linkId, 'external chat link ID')
+    const dueAt = requireExternalChatTimestamp(input.dueAt, 'outbound retry due timestamp')
+    const limit = requireExternalChatBatchLimit(
+      input.limit,
+      EXTERNAL_CHAT_OUTBOUND_RETRY_MAX_BATCH_SIZE,
+      'outbound retry batch limit',
+    )
     const deferredEvents = await this.store.listDeferredOutboundEvents(
       workspaceId,
       linkId,
@@ -301,7 +302,10 @@ export class ExternalChatOutboundDeferredRetryWorker {
     const initial = createEmptyResult()
     const head = deferredEvents[0]
     if (!head) return initial
-    const headRetryAt = requireTimestamp(head.retryAt, 'deferred outbound retry timestamp')
+    const headRetryAt = requireExternalChatTimestamp(
+      head.retryAt,
+      'deferred outbound retry timestamp',
+    )
     if (headRetryAt > dueAt) return { ...initial, stopReason: 'not-due' }
 
     const link = await this.store.getLink(workspaceId, linkId)
@@ -312,7 +316,10 @@ export class ExternalChatOutboundDeferredRetryWorker {
         true,
       )
     }
-    const acquiredAt = requireTimestamp(this.clock.now(), 'outbound retry acquisition timestamp')
+    const acquiredAt = requireExternalChatTimestamp(
+      this.clock.now(),
+      'outbound retry acquisition timestamp',
+    )
     const concurrencyInput: ExternalChatOutboundRetryConcurrencyInput = {
       workspaceId,
       provider: link.link.provider,
@@ -326,20 +333,54 @@ export class ExternalChatOutboundDeferredRetryWorker {
       return { ...initial, stopReason: 'installation-busy' }
     }
     const permitHolder: ExternalChatOutboundRetryPermitHolder = { permit }
+    let processingFailed = false
+    let processingError: unknown
+    let result: ExternalChatOutboundRetryBatchResult | undefined
+    let releaseError: unknown
     try {
-      return await this.processAcquiredBatch(
+      result = await this.processAcquiredBatch(
         workspaceId,
         linkId,
         dueAt,
         deferredEvents,
         permitHolder,
       )
-    } finally {
-      await this.concurrency.releaseOutboundRetryPermit({
+    } catch (error: unknown) {
+      processingFailed = true
+      processingError = error
+    }
+    try {
+      const released = await this.concurrency.releaseOutboundRetryPermit({
         permit: permitHolder.permit,
-        releasedAt: requireTimestamp(this.clock.now(), 'outbound retry release timestamp'),
+        releasedAt: requireExternalChatTimestamp(
+          this.clock.now(),
+          'outbound retry release timestamp',
+        ),
+      })
+      if (!released) {
+        throw new ExternalChatError(
+          'ExternalChatPersistenceFailed',
+          'The outbound retry permit could not be released by its owner.',
+          true,
+        )
+      }
+    } catch (error: unknown) {
+      releaseError = error
+      console.error('external chat outbound retry permit release failed', {
+        workspaceId,
+        linkId,
+        errorCode: error instanceof ExternalChatError ? error.code : 'UnknownError',
       })
     }
+    if (processingFailed) throw processingError
+    if (releaseError !== undefined) throw releaseError
+    if (result === undefined) {
+      throw new ExternalChatError(
+        'ExternalChatPersistenceFailed',
+        'The outbound retry worker completed without a batch result.',
+      )
+    }
+    return result
   }
 
   /**
@@ -364,7 +405,10 @@ export class ExternalChatOutboundDeferredRetryWorker {
     let removedEventCount = 0
     let deadLetteredEventCount = 0
     for (const deferred of deferredEvents) {
-      const retryAt = requireTimestamp(deferred.retryAt, 'deferred outbound retry timestamp')
+      const retryAt = requireExternalChatTimestamp(
+        deferred.retryAt,
+        'deferred outbound retry timestamp',
+      )
       if (retryAt > dueAt) {
         return {
           attemptedEventCount,
@@ -504,7 +548,10 @@ export class ExternalChatOutboundDeferredRetryWorker {
   private async renewAndValidatePermit(
     permitHolder: ExternalChatOutboundRetryPermitHolder,
   ): Promise<boolean> {
-    const renewedAt = requireTimestamp(this.clock.now(), 'outbound retry renewal timestamp')
+    const renewedAt = requireExternalChatTimestamp(
+      this.clock.now(),
+      'outbound retry renewal timestamp',
+    )
     const renewed = await this.concurrency.renewOutboundRetryPermit({
       permit: permitHolder.permit,
       renewedAt,
@@ -514,7 +561,10 @@ export class ExternalChatOutboundDeferredRetryWorker {
     permitHolder.permit = renewed
     return await this.concurrency.validateOutboundRetryPermit({
       permit: renewed,
-      checkedAt: requireTimestamp(this.clock.now(), 'outbound retry validation timestamp'),
+      checkedAt: requireExternalChatTimestamp(
+        this.clock.now(),
+        'outbound retry validation timestamp',
+      ),
     })
   }
 
@@ -539,23 +589,22 @@ export class ExternalChatOutboundDeferredRetryWorker {
       abortController.signal,
       assertCurrentPermit,
     )
-    const monitoring = this.monitorPermit(permitHolder, abortController.signal)
+    let monitorLostPermit = false
+    const monitoring = this.monitorPermit(
+      permitHolder,
+      abortController.signal,
+      () => { monitorLostPermit = true },
+    )
     const first = await Promise.race([processing, monitoring])
     if (first.kind === 'outcome' || first.kind === 'error') {
       const permitWasLost = abortController.signal.aborted
       abortController.abort()
-      const monitorResult = await monitoring
-      return permitWasLost || monitorResult.kind === 'lease-lost'
-        ? { kind: 'lease-lost' }
-        : first
+      await monitoring
+      return permitWasLost || monitorLostPermit ? { kind: 'lease-lost' } : first
     }
-    if (first.kind === 'lease-lost') {
-      abortController.abort()
-      await processing
-      return first
-    }
-    const settled = await processing
-    return abortController.signal.aborted ? { kind: 'lease-lost' } : settled
+    abortController.abort()
+    await processing
+    return first
   }
 
   /**
@@ -589,22 +638,26 @@ export class ExternalChatOutboundDeferredRetryWorker {
    *
    * @param permitHolder - Mutable latest durable permit capability.
    * @param signal - Private processor cancellation signal.
+   * @param onPermitLoss - Callback invoked when renewal or heartbeat fails before cancellation.
    * @returns Whether the provider settled normally or the durable permit was lost.
    */
   private async monitorPermit(
     permitHolder: ExternalChatOutboundRetryPermitHolder,
     signal: AbortSignal,
+    onPermitLoss: () => void,
   ): Promise<ExternalChatOutboundPermitMonitorResult> {
     try {
       while (!signal.aborted) {
         await this.heartbeat.wait(this.heartbeatIntervalMs, signal)
-        if (signal.aborted) return { kind: 'heartbeat-stopped' }
+        if (signal.aborted) return { kind: 'lease-lost' }
         if (!await this.renewAndValidatePermit(permitHolder)) {
+          onPermitLoss()
           return { kind: 'lease-lost' }
         }
       }
-      return { kind: 'heartbeat-stopped' }
+      return { kind: 'lease-lost' }
     } catch {
+      if (!signal.aborted) onPermitLoss()
       return { kind: 'lease-lost' }
     }
   }
@@ -627,7 +680,7 @@ export class ExternalChatOutboundDeferredRetryWorker {
       try {
         const valid = await this.concurrency.validateOutboundRetryPermit({
           permit: permitHolder.permit,
-          checkedAt: requireTimestamp(
+          checkedAt: requireExternalChatTimestamp(
             this.clock.now(),
             'outbound retry side-effect validation timestamp',
           ),
@@ -654,7 +707,7 @@ export class ExternalChatOutboundDeferredRetryWorker {
     dueAt: string,
   ): ExternalChatOutboundDeadLetterReason | undefined {
     if (deferred.attempt >= this.maxAttempts) return 'max-attempts'
-    const createdAtMs = Date.parse(requireTimestamp(
+    const createdAtMs = Date.parse(requireExternalChatTimestamp(
       deferred.createdAt,
       'deferred outbound creation timestamp',
     ))
@@ -710,60 +763,12 @@ function createOutboundRetryPermitLostError(): ExternalChatError {
   )
 }
 
-/** Reads a bounded nonempty identifier. */
-function requireIdentifier(value: unknown, label: string): string {
-  if (
-    typeof value !== 'string' ||
-    value.length === 0 ||
-    value.trim() !== value ||
-    Buffer.byteLength(value, 'utf8') > 2_048
-  ) {
-    throw new ExternalChatError(
-      'ExternalChatValidationFailed',
-      `The ${label} is invalid.`,
-    )
-  }
-  return value
-}
-
-/** Reads one parseable ISO 8601 timestamp. */
-function requireTimestamp(value: unknown, label: string): string {
-  const timestamp = requireIdentifier(value, label)
-  const parsed = Date.parse(timestamp)
-  if (
-    !Number.isFinite(parsed) ||
-    new Date(parsed).toISOString() !== timestamp
-  ) {
-    throw new ExternalChatError(
-      'ExternalChatValidationFailed',
-      `The ${label} is invalid.`,
-    )
-  }
-  return timestamp
-}
-
 /** Reads one positive safe integer option. */
 function requirePositiveInteger(value: unknown, label: string): number {
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) {
     throw new ExternalChatError(
       'ExternalChatValidationFailed',
       `The ${label} is invalid.`,
-    )
-  }
-  return value
-}
-
-/** Reads a positive bounded outbound retry batch size. */
-function requireBatchLimit(value: unknown): number {
-  if (
-    typeof value !== 'number' ||
-    !Number.isSafeInteger(value) ||
-    value < 1 ||
-    value > EXTERNAL_CHAT_OUTBOUND_RETRY_MAX_BATCH_SIZE
-  ) {
-    throw new ExternalChatError(
-      'ExternalChatValidationFailed',
-      `The outbound retry batch limit must be between 1 and ${EXTERNAL_CHAT_OUTBOUND_RETRY_MAX_BATCH_SIZE}.`,
     )
   }
   return value

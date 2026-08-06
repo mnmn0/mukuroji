@@ -328,8 +328,7 @@ class StrictDeferredFingerprintStore extends InMemoryExternalChatStore {
   override async updateLink(
     input: Parameters<InMemoryExternalChatStore['updateLink']>[0],
   ): ReturnType<InMemoryExternalChatStore['updateLink']> {
-    const hook = input.expectedParentLifecycleFence === undefined &&
-        input.expectedParentLifecycleFences === undefined
+    const hook = input.expectedParentLifecycleFences === undefined
       ? undefined
       : this.beforeNextParentFencedUpdate
     if (hook) {
@@ -1430,7 +1429,7 @@ describe('external chat synchronization end-to-end fixture', () => {
     expect(applied.kind).toBe('applied')
     expect(replayed).toEqual(applied)
     expect(fixture.collaboration.createInputs).toHaveLength(1)
-    expect(fixture.collaboration.comments).toHaveLength(1)
+    expect(fixture.collaboration.comments.size).toBe(1)
     const internalCorrelationId = fixture.collaboration.createInputs[0]?.correlationId
     expect(internalCorrelationId).toStartWith('chat_corr_')
     expect(internalCorrelationId).not.toBe(createdEvent.correlationId)
@@ -3954,8 +3953,8 @@ async function createSyntheticFixture(): Promise<SyntheticFixture> {
       conversationExternalId: source.conversationExternalId,
       threadExternalId: source.threadExternalId,
     },
-    idempotencyKeyHash: 'fixture-link-idempotency-key',
-    requestFingerprint: 'fixture-link-request-fingerprint',
+    idempotencyKeyHash: createExternalChatFingerprint('fixture-link-idempotency-key'),
+    requestFingerprint: createExternalChatFingerprint('fixture-link-request-fingerprint'),
   })
   if (created.kind !== 'created') throw new Error('Expected the fixture link to be created.')
 

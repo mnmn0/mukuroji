@@ -958,8 +958,8 @@ async function createFixture(provider: FakeProvider) {
       conversationExternalId: link.source.conversationExternalId,
       threadExternalId: link.source.threadExternalId,
     },
-    idempotencyKeyHash: 'resync-worker-fixture-idempotency',
-    requestFingerprint: 'resync-worker-fixture-request',
+    idempotencyKeyHash: createExternalChatFingerprint('resync-worker-fixture-idempotency'),
+    requestFingerprint: createExternalChatFingerprint('resync-worker-fixture-request'),
   })
   if (created.kind !== 'created') throw new Error('Expected the fixture link to be created.')
   const accepted = await store.updateLink({
@@ -991,6 +991,8 @@ async function createFixture(provider: FakeProvider) {
  *
  * @param operationId - Stable operation identity.
  * @param mode - Resume or full traversal mode.
+ * @param authorizationRevision - Provider authorization generation accepted by the job.
+ * @param linkRevision - Link revision that owns the resynchronization checkpoint.
  * @returns Accepted durable job.
  */
 function createJob(
