@@ -5,7 +5,7 @@ import type {
   UpdateWorkItemScheduleDependencyInput,
 } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
-import { isPlanningSnapshot } from '../../shared/api/contractValidation'
+import { isPlanningSnapshot } from './contractValidation'
 import { PlanningApiError } from './errors'
 
 const planningApiBaseUrl = trimTrailingSlash(import.meta.env.VITE_API_BASE_URL ?? '/api')

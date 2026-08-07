@@ -1,5 +1,5 @@
 import type { PlanningSnapshot } from '@mukuroji/contracts'
-import { isPlanningSnapshot } from '../../shared/api/contractValidation'
+import { isPlanningSnapshot } from './contractValidation'
 import { PlanningApiError } from './errors'
 
 const planningApiBaseUrl = trimTrailingSlash(

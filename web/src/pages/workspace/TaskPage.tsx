@@ -93,8 +93,10 @@ import {
 import {
   applyConfirmedSchedulesToPlanningSnapshot,
   applyConfirmedSchedulesToTasks,
-  revalidateScheduleConfirmationCachesBestEffort,
 } from '../../tasks/model/scheduleConfirmation'
+import {
+  revalidateScheduleConfirmationCachesBestEffort,
+} from '../../tasks/mutations/scheduleConfirmationCache'
 import { applyTaskPatchOptimistically, type TaskCreateContext } from '../../tasks/model/taskView'
 import { TaskScreen } from '../../tasks/ui/TaskScreen'
 import type { WorkspaceMember } from '../../workspace/api'

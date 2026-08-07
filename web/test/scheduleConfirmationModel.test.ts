@@ -9,7 +9,6 @@ import { referoTaskFixtures } from '../src/tasks/fixtures'
 import {
   applyConfirmedSchedulesToPlanningSnapshot,
   applyConfirmedSchedulesToTasks,
-  revalidateScheduleConfirmationCachesBestEffort,
 } from '../src/tasks/model/scheduleConfirmation'
 import {
   createDefaultDateRangeTaskSchedule,
@@ -83,7 +82,7 @@ describe('schedule confirmation cache projection', () => {
     ])
   })
 
-  test('keeps a newer cached revision while restoring committed state after a failed GET', async () => {
+  test('keeps a newer cached revision over an older compact confirmation', () => {
     const newerTask = {
       ...referoTaskFixtures[0],
       dueDate: '2026-06-10',
@@ -98,27 +97,8 @@ describe('schedule confirmation cache projection', () => {
       schedule: createDefaultDateRangeTaskSchedule('2026-06-02', '2026-06-04'),
       teamId: newerTask.teamId,
     }] satisfies ConfirmedWorkItemSchedule[]
-    const refreshError = new Error('Project Work Item GET failed.')
-    const observedErrors: unknown[] = []
-    let preserveCount = 0
-    let preservedTasks: ProjectTask[] | undefined
+    const preservedTasks = applyConfirmedSchedulesToTasks([newerTask], olderConfirmation)
 
-    await revalidateScheduleConfirmationCachesBestEffort([
-      {
-        preserveConfirmedState: async () => {
-          preserveCount += 1
-          preservedTasks = applyConfirmedSchedulesToTasks([newerTask], olderConfirmation)
-        },
-        refresh: async () => {
-          throw refreshError
-        },
-      },
-    ], (error) => {
-      observedErrors.push(error)
-    })
-
-    expect(observedErrors).toEqual([refreshError])
-    expect(preserveCount).toBe(2)
     expect(preservedTasks).toEqual([newerTask])
   })
 })

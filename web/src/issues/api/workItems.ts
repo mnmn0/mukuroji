@@ -12,7 +12,7 @@ import { createMutationHeaders, type MutationRequestContext } from '../../shared
 import {
   isConfirmWorkItemScheduleChangeResponse,
   isWorkItemScheduleChangePreview,
-} from '../../shared/api/contractValidation'
+} from '../../work-items/api/contractValidation'
 import type { TeamIssueActivity } from './activity'
 import type { TeamIssueComment } from './comments'
 import { TeamIssuesApiError } from './errors'
