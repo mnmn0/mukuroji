@@ -156,10 +156,15 @@ export function composeExternalChatLinkProjectionWithLifecycleFloor(
       lifecycleSourceStateRank(floor.state)
     ? candidate.sourceState
     : floor.state
-  if (availability === candidate.sourceAvailability && state === candidate.sourceState) {
+  const mustRedact = mustRedactExternalChatSourceMetadata(availability, state)
+  if (
+    availability === candidate.sourceAvailability &&
+    state === candidate.sourceState &&
+    !mustRedact
+  ) {
     return candidate
   }
-  const projected = mustRedactExternalChatSourceMetadata(availability, state)
+  const projected = mustRedact
     ? redactExternalChatSourceMetadata(candidate)
     : candidate
   return {

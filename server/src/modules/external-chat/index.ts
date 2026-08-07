@@ -40,7 +40,6 @@ export {
 
 export {
   ExternalChatError,
-  InMemoryExternalChatStore,
   createExternalChatFingerprint,
   createExternalChatInboundOperationId,
   createExternalChatLinkId,
