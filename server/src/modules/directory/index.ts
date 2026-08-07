@@ -17,6 +17,7 @@ export {
   type ProjectDirectoryProjectResponse,
   type ProjectDirectoryResponse,
   type ProjectDirectoryTeamResponse,
+  type ProjectArchiveWorkItemRevisionGuard,
   type ProjectMemberResponseItem,
   type ProjectMembersResponse,
   type ProjectRole,

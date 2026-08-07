@@ -10,6 +10,8 @@ import { isIP } from 'node:net'
 import {
   PUBLIC_API_OPENAPI_DOCUMENT,
   ENTERPRISE_PERMISSION_IDS,
+  WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS,
+  WORK_ITEM_SCHEDULE_MIN_YEAR,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   type AnalyticsQueryInput,
   type AnalyticsReport,
@@ -28,8 +30,11 @@ import {
   type ApprovalSummary,
   type ApiProblem,
   type CanonicalWorkItem,
+  type ConfirmedWorkItemSchedule,
+  type ConfirmWorkItemScheduleChangeResponse,
   type CreateWorkItemInput,
   type CreatePlanningDependencyInput,
+  type CreateWorkItemScheduleDependencyInput,
   type CreatePlanningEntityInput,
   type CreateSavedWorkspaceViewInput,
   type CustomFieldDefinition,
@@ -38,6 +43,7 @@ import {
   type RequestFormField,
   type RequestFormRoutingTarget,
   type RequestSubmissionActionInput,
+  type ScheduleDependencyConstraint,
   type CustomFieldValue,
   type CycleRolloverInput,
   type DuplicatePlanningEntityInput,
@@ -60,12 +66,17 @@ import {
   type UpdateAnalyticsReportInput,
   type UpdateRecurringWorkInput,
   type UpdatePlanningEntityInput,
+  type UpdateWorkItemScheduleDependencyInput,
   type UpdateProjectQuickAccessPreferencesInput,
   type UpdateSavedWorkspaceViewInput,
   type WorkItemConfiguration,
   type WorkItemRelation,
   type WorkItemRelationType,
+  type WorkItemDependencyEndpoint,
+  type WorkItemScheduleDependency,
+  type WorkItemScheduleEvaluationRevision,
   type WorkItemScheduleImpact,
+  type WorkItemScheduleOperation,
   type WorkspaceSearchFilters,
   type EnterpriseBreakGlassAccount,
   type EnterpriseCustomRole,
@@ -156,6 +167,7 @@ import {
   type ProjectDirectoryProjectResponse,
   type ProjectDirectoryResponse,
   type ProjectDirectoryTeamResponse,
+  type ProjectArchiveWorkItemRevisionGuard,
   type ProjectMemberResponseItem,
   type ProjectMembersResponse,
   type ProjectRole,
@@ -189,11 +201,16 @@ import {
 import {
   createTeamIssueAuditEntityId,
   createTeamIssueDeepLink,
+  collectWorkItemScheduleEvaluationEndpoints,
+  createWorkItemDependencyKey,
   createWorkItemAuthorizationChangedError,
+  createWorkItemRelationGraphRevisionConditionCheck,
   customFieldValueRecordsEqual,
+  deriveWorkItemScheduleDueDate,
   isTeamIssueNotFoundError,
+  normalizeWorkItemSchedule,
   normalizeWorkItemScheduleOperation,
-  previewWorkItemScheduleChange,
+  previewWorkItemDependencyScheduleChange,
   readAssignedProjectId,
   readRequiredCommentBody,
   readRequiredString,
@@ -201,6 +218,7 @@ import {
   readWorkItemExpectedRevision,
   toTeamIssueResponseItem,
   WorkItemScheduleError,
+  WORK_ITEM_SCHEDULE_CASCADE_LIMIT,
   type CreateTeamIssueCommentRequestBody,
   type CreateTeamIssueRequestBody,
   type CreateTeamIssueResponse,
@@ -218,6 +236,7 @@ import {
   type WorkItemIdempotencyTransaction,
   type WorkItemListReadOptions,
   type WorkItemAuthorizationSnapshot,
+  type WorkItemDependencyScheduleState,
 } from '../modules/work-items'
 
 export {
@@ -373,11 +392,21 @@ import {
   type AutomationRuleTemplatePort,
   type BulkOperationAdapter,
 } from '../modules/automation'
-import { PlanningError, type PlanningWorkItemState } from '../modules/planning/planning'
+import {
+  createPlanningWorkItemDependencySummary,
+  PlanningError,
+  requirePlanningWorkItemHasNoScheduleDependencies,
+  type PlanningCallerAuthorizationConditionCheck,
+  type PlanningMutationTransaction,
+  type PlanningWorkItemState,
+} from '../modules/planning'
 import type {
   AuthenticatedDeveloperCredential,
   IdempotencyMutationToken,
+  ReleaseIdempotencyRequest,
+  ReserveIdempotencyRequest,
 } from '../modules/developer-platform/application/ports'
+import { DeveloperPlatformError } from '../modules/developer-platform'
 import { createDefaultSecretProtector } from '../modules/developer-platform/adapter-out/shared/developer-platform-store'
 import {
   ConnectorAuthorizationRuntime,
@@ -1178,6 +1207,8 @@ const documentProjectRolesCacheTtlMs = 1_000
 const DOCUMENT_AUTHORIZATION_SNAPSHOT_RETRY_LIMIT = 3
 /** Work Item authorization snapshot を安定化する再読込回数です。 */
 const WORK_ITEM_AUTHORIZATION_SNAPSHOT_RETRY_LIMIT = 3
+/** Schedule dependency graph and authorization snapshot stabilization attempts. */
+const WORK_ITEM_SCHEDULE_SNAPSHOT_RETRY_LIMIT = 3
 /** Relation target の source read を同時実行する最大数です。 */
 const DOCUMENT_RELATION_TARGET_VALIDATION_CONCURRENCY = 8
 const projectDirectoryIdPrefix = 'user#'
@@ -1404,6 +1435,11 @@ const enterpriseRoutePermissionRules = [
     permission: 'planning.manage',
   },
   { method: '*', pathPattern: '/api/planning/dependencies*', permission: 'planning.manage' },
+  {
+    method: '*',
+    pathPattern: '/api/planning/work-item-dependencies*',
+    permission: 'planning.manage',
+  },
   { method: '*', pathPattern: '/api/planning/cycles*', permission: 'planning.manage' },
   { method: '*', pathPattern: '/api/planning*', permission: 'planning.write' },
   { method: 'GET', pathPattern: '/api/request-forms*', permission: 'requests.read' },
@@ -5473,7 +5509,7 @@ routeApp.patch('/api/teams/:teamId/projects/:projectId/archive', async (c) => {
   try {
     const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
     requireWorkspaceAdministration(principal)
-    const expectedPlanningRevision = await requirePlanningProjectScopeIsUnused(
+    const archiveGuard = await requirePlanningProjectScopeIsUnused(
       principal.directoryId,
       teamId,
       projectId,
@@ -5484,7 +5520,8 @@ routeApp.patch('/api/teams/:teamId/projects/:projectId/archive', async (c) => {
       teamId,
       projectId,
       createApiMutationContext(c, principal, { teamId, projectId }),
-      expectedPlanningRevision,
+      archiveGuard.expectedPlanningRevision,
+      archiveGuard.workItemRevisionGuards,
     )
     await deleteWorkspaceSearchDocumentBestEffort(
       principal.directoryId,
@@ -6118,6 +6155,311 @@ routeApp.delete('/api/planning/dependencies/:dependencyId', async (c) => {
   }
 })
 
+/** Creates one canonical schedule dependency between authorized Work Item endpoints. */
+routeApp.post('/api/planning/work-item-dependencies', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  let reservationToRelease: ReleaseIdempotencyRequest | undefined
+  let mutationCommitted = false
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+    requireWorkspaceBusinessWrite(principal)
+    const idempotencyKey = readRequiredPlanningWorkItemDependencyIdempotencyKey(
+      c.req.header('Idempotency-Key'),
+    )
+    const input = await readPlanningJson<CreateWorkItemScheduleDependencyInput>(c.req)
+    const dependencyId = readPlanningIdentifier(input.id, 'Work Item dependency ID')
+    const predecessor = readPlanningWorkItemDependencyEndpoint(
+      input.predecessor,
+      'Predecessor',
+    )
+    const successor = readPlanningWorkItemDependencyEndpoint(input.successor, 'Successor')
+    const reservationRequest = createPlanningWorkItemDependencyReservationRequest(
+      principal,
+      idempotencyKey,
+      c.req.method,
+      '/api/planning/work-item-dependencies',
+      input,
+    )
+    const reservation = await reservePlanningWorkItemDependencyMutation(reservationRequest)
+    if (reservation.status === 'in-progress') {
+      throw new PlanningError(
+        409,
+        'PlanningWorkItemDependencyIdempotencyInProgress',
+        'The same Work Item dependency mutation is still in progress.',
+      )
+    }
+    if (reservation.status === 'replay') {
+      const replay = readStoredPlanningWorkItemDependencyMutationReceipt(
+        reservation.response,
+        reservationRequest.workspaceId,
+        'create',
+        dependencyId,
+      )
+      const planning = await readPlanningWorkItemDependencyReplaySnapshot(
+        principal,
+        replay.dependency,
+        'create',
+        replay.revision,
+      )
+      c.header('Idempotency-Replayed', 'true')
+      return c.json(planning, replay.status)
+    }
+    reservationToRelease = {
+      ...reservationRequest,
+      reservationId: reservation.reservationId,
+    }
+    const transaction = createPlanningWorkItemDependencyIdempotencyTransaction(
+      reservationRequest.workspaceId,
+      {
+        credentialId: reservationRequest.credentialId,
+        idempotencyKey,
+        requestFingerprint: reservationRequest.requestFingerprint,
+        reservationId: reservation.reservationId,
+      },
+      'create',
+      dependencyId,
+    )
+    if (!transaction) throw planningWorkItemDependencyIdempotencyUnavailable()
+    const workItemState = await readPlanningWorkItemState(principal)
+    const snapshot = await workItemDependencies.planning.get(principal.directoryId, workItemState)
+    requirePlanningAuthorizationRevision(snapshot.revision, input.expectedRevision)
+    await Promise.all([
+      requirePlanningWorkItemEndpointPermission(principal, predecessor, 'manager'),
+      requirePlanningWorkItemEndpointPermission(principal, successor, 'manager'),
+    ])
+    const response = await workItemDependencies.planning.createWorkItemDependency(
+      principal.directoryId,
+      { ...input, predecessor, successor },
+      workItemState,
+      createPlanningCallerAuthorizationConditionChecks(principal),
+      transaction,
+    )
+    mutationCommitted = true
+    return c.json(filterPlanningSnapshotForPrincipal(principal, response.planning), 201)
+  } catch (error) {
+    if (reservationToRelease && !mutationCommitted) {
+      await releasePlanningWorkItemDependencyReservation(reservationToRelease)
+    }
+    return toPlanningErrorResponse(c, error)
+  }
+})
+
+/** Updates one canonical Work Item schedule dependency after authorizing both endpoints. */
+routeApp.patch('/api/planning/work-item-dependencies/:dependencyId', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  let reservationToRelease: ReleaseIdempotencyRequest | undefined
+  let mutationCommitted = false
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+    requireWorkspaceBusinessWrite(principal)
+    const idempotencyKey = readRequiredPlanningWorkItemDependencyIdempotencyKey(
+      c.req.header('Idempotency-Key'),
+    )
+    const dependencyId = readPlanningRouteId(
+      c.req.param('dependencyId'),
+      'Work Item dependency ID',
+    )
+    const input = await readPlanningJson<UpdateWorkItemScheduleDependencyInput>(c.req)
+    const canonicalPath = `/api/planning/work-item-dependencies/${dependencyId}`
+    const reservationRequest = createPlanningWorkItemDependencyReservationRequest(
+      principal,
+      idempotencyKey,
+      c.req.method,
+      canonicalPath,
+      input,
+    )
+    const reservation = await reservePlanningWorkItemDependencyMutation(reservationRequest)
+    if (reservation.status === 'in-progress') {
+      throw new PlanningError(
+        409,
+        'PlanningWorkItemDependencyIdempotencyInProgress',
+        'The same Work Item dependency mutation is still in progress.',
+      )
+    }
+    if (reservation.status === 'replay') {
+      const replay = readStoredPlanningWorkItemDependencyMutationReceipt(
+        reservation.response,
+        reservationRequest.workspaceId,
+        'update',
+        dependencyId,
+      )
+      const planning = await readPlanningWorkItemDependencyReplaySnapshot(
+        principal,
+        replay.dependency,
+        'update',
+        replay.revision,
+      )
+      c.header('Idempotency-Replayed', 'true')
+      return c.json(planning, replay.status)
+    }
+    reservationToRelease = {
+      ...reservationRequest,
+      reservationId: reservation.reservationId,
+    }
+    const transaction = createPlanningWorkItemDependencyIdempotencyTransaction(
+      reservationRequest.workspaceId,
+      {
+        credentialId: reservationRequest.credentialId,
+        idempotencyKey,
+        requestFingerprint: reservationRequest.requestFingerprint,
+        reservationId: reservation.reservationId,
+      },
+      'update',
+      dependencyId,
+    )
+    if (!transaction) throw planningWorkItemDependencyIdempotencyUnavailable()
+    const workItemState = await readPlanningWorkItemState(principal)
+    const snapshot = filterPlanningSnapshotForPrincipal(
+      principal,
+      await workItemDependencies.planning.get(principal.directoryId, workItemState),
+    )
+    requirePlanningAuthorizationRevision(snapshot.revision, input.expectedRevision)
+    const dependency = snapshot.workItemDependencies.find((candidate) =>
+      candidate.id === dependencyId
+    )
+    if (!dependency) {
+      throw new PlanningError(
+        404,
+        'PlanningWorkItemDependencyNotFound',
+        'Work Item dependency was not found.',
+      )
+    }
+    await Promise.all([
+      requirePlanningWorkItemEndpointPermission(principal, dependency.predecessor, 'manager'),
+      requirePlanningWorkItemEndpointPermission(principal, dependency.successor, 'manager'),
+    ])
+    const response = await workItemDependencies.planning.updateWorkItemDependency(
+      principal.directoryId,
+      dependencyId,
+      input,
+      workItemState,
+      createPlanningCallerAuthorizationConditionChecks(principal),
+      transaction,
+    )
+    mutationCommitted = true
+    return c.json(filterPlanningSnapshotForPrincipal(principal, response.planning))
+  } catch (error) {
+    if (reservationToRelease && !mutationCommitted) {
+      await releasePlanningWorkItemDependencyReservation(reservationToRelease)
+    }
+    return toPlanningErrorResponse(c, error)
+  }
+})
+
+/** Deletes one canonical Work Item schedule dependency after authorizing both endpoints. */
+routeApp.delete('/api/planning/work-item-dependencies/:dependencyId', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  let reservationToRelease: ReleaseIdempotencyRequest | undefined
+  let mutationCommitted = false
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+    requireWorkspaceBusinessWrite(principal)
+    const idempotencyKey = readRequiredPlanningWorkItemDependencyIdempotencyKey(
+      c.req.header('Idempotency-Key'),
+    )
+    const dependencyId = readPlanningRouteId(
+      c.req.param('dependencyId'),
+      'Work Item dependency ID',
+    )
+    const input = await readPlanningJson<PlanningRevisionInput>(c.req)
+    const canonicalPath = `/api/planning/work-item-dependencies/${dependencyId}`
+    const reservationRequest = createPlanningWorkItemDependencyReservationRequest(
+      principal,
+      idempotencyKey,
+      c.req.method,
+      canonicalPath,
+      input,
+    )
+    const reservation = await reservePlanningWorkItemDependencyMutation(reservationRequest)
+    if (reservation.status === 'in-progress') {
+      throw new PlanningError(
+        409,
+        'PlanningWorkItemDependencyIdempotencyInProgress',
+        'The same Work Item dependency mutation is still in progress.',
+      )
+    }
+    if (reservation.status === 'replay') {
+      const replay = readStoredPlanningWorkItemDependencyMutationReceipt(
+        reservation.response,
+        reservationRequest.workspaceId,
+        'delete',
+        dependencyId,
+      )
+      const planning = await readPlanningWorkItemDependencyReplaySnapshot(
+        principal,
+        replay.dependency,
+        'delete',
+        replay.revision,
+      )
+      c.header('Idempotency-Replayed', 'true')
+      return c.json(planning, replay.status)
+    }
+    reservationToRelease = {
+      ...reservationRequest,
+      reservationId: reservation.reservationId,
+    }
+    const transaction = createPlanningWorkItemDependencyIdempotencyTransaction(
+      reservationRequest.workspaceId,
+      {
+        credentialId: reservationRequest.credentialId,
+        idempotencyKey,
+        requestFingerprint: reservationRequest.requestFingerprint,
+        reservationId: reservation.reservationId,
+      },
+      'delete',
+      dependencyId,
+    )
+    if (!transaction) throw planningWorkItemDependencyIdempotencyUnavailable()
+    const workItemState = await readPlanningWorkItemState(principal)
+    const snapshot = filterPlanningSnapshotForPrincipal(
+      principal,
+      await workItemDependencies.planning.get(principal.directoryId, workItemState),
+    )
+    requirePlanningAuthorizationRevision(snapshot.revision, input.expectedRevision)
+    const dependency = snapshot.workItemDependencies.find((candidate) =>
+      candidate.id === dependencyId
+    )
+    if (!dependency) {
+      throw new PlanningError(
+        404,
+        'PlanningWorkItemDependencyNotFound',
+        'Work Item dependency was not found.',
+      )
+    }
+    await Promise.all([
+      requirePlanningWorkItemEndpointPermission(principal, dependency.predecessor, 'manager'),
+      requirePlanningWorkItemEndpointPermission(principal, dependency.successor, 'manager'),
+    ])
+    const response = await workItemDependencies.planning.deleteWorkItemDependency(
+      principal.directoryId,
+      dependencyId,
+      input,
+      workItemState,
+      createPlanningCallerAuthorizationConditionChecks(principal),
+      transaction,
+    )
+    mutationCommitted = true
+    return c.json(filterPlanningSnapshotForPrincipal(principal, response.planning))
+  } catch (error) {
+    if (reservationToRelease && !mutationCommitted) {
+      await releasePlanningWorkItemDependencyReservation(reservationToRelease)
+    }
+    return toPlanningErrorResponse(c, error)
+  }
+})
+
 /** Canonical Work Item と Cycle / Milestone / Goal の link を作成または置換します。 */
 routeApp.put('/api/planning/work-item-links/:teamId/:workItemId', async (c) => {
   const accessToken = readBearerAccessToken(c)
@@ -6655,8 +6997,7 @@ routeApp.post('/api/teams/:teamId/issues', async (c) => {
     if (!requestBody) {
       throw new ProjectDataError(400, 'InvalidProjectWrite', 'Work Item body is required.')
     }
-    rejectDerivedWorkItemScheduleFields(requestBody)
-    delete requestBody.idempotencyResourceId
+    rejectInternalWorkItemCreateFields(requestBody)
     const body = normalizeTeamIssueInput(
       requestBody,
       context.team,
@@ -6865,51 +7206,252 @@ routeApp.post('/api/teams/:teamId/issues/:issueId/schedule/preview', async (c) =
       )
     }
 
-    const directPreview = previewWorkItemScheduleChange(
-      teamId,
-      issueId,
-      expectedRevision,
-      detail.issue.schedule,
-      operation,
-    )
-    const dependencyTargetIds = [...new Set(relationPage.relations.flatMap((relation) =>
-      relation.sourceWorkItemId === issueId && relation.type === 'blocks'
-        ? [relation.targetWorkItemId]
-        : []
-    ))]
-    const dependencyTargets = await readRelationTargets(
+    const visibleRelations = await filterVisibleWorkItemRelations(
       principal,
+      context,
       teamId,
-      dependencyTargetIds,
+      relationPage.relations,
     )
-    const visibleDependencyTargets = dependencyTargets.filter(([, target]) =>
-      canAccessAssignedProject(
-        principal,
-        context,
-        target.assignedProjectId,
-        'viewer',
-      )
+    const recomputed = await recomputeWorkItemScheduleDependencyPreview(
+      principal,
+      detail.issue,
+      operation,
+      relationPage.graphRevision,
+      visibleRelations.filter((relation) =>
+        relation.sourceWorkItemId === issueId &&
+        (relation.type === 'blocks' || relation.type === 'blockedBy')
+      ).length,
+      'viewer',
     )
-
-    return c.json({
-      ...directPreview,
-      impacts: [
-        ...directPreview.impacts,
-        ...visibleDependencyTargets.map(([targetWorkItemId, target]): WorkItemScheduleImpact => ({
-          after: target.schedule,
-          before: target.schedule,
-          expectedRevision: target.revision,
-          kind: 'dependency',
-          teamId,
-          workItemId: targetWorkItemId,
-        })),
-      ],
-      relationGraphRevision: relationPage.graphRevision,
-      warnings: visibleDependencyTargets.length > 0
-        ? ['DependencyRippleRequiresReview']
-        : [],
-    })
+    return c.json(recomputed.preview)
   } catch (error) {
+    return toWorkItemConfigurationErrorResponse(c, error)
+  }
+})
+
+/**
+ * Recomputes and atomically persists an explicitly confirmed schedule dependency cascade.
+ */
+routeApp.post('/api/teams/:teamId/issues/:issueId/schedule/confirm', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  const teamId = c.req.param('teamId')
+  const issueId = c.req.param('issueId')
+  let reservationToRelease: ReleaseIdempotencyRequest | undefined
+  let mutationCommitted = false
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+  if (!teamId || !issueId) {
+    return c.json({ message: 'Team ID and issue ID are required.' }, 400)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+    requireWorkspaceBusinessWrite(principal)
+    const context = await requireTeamPermission(principal, teamId, 'member')
+    const idempotencyKey = readRequiredWorkItemScheduleIdempotencyKey(
+      c.req.header('Idempotency-Key'),
+    )
+    const body = await readJson<Record<string, unknown>>(c.req) ?? {}
+    if (body.confirmed !== true) {
+      throw new WorkItemScheduleError(
+        400,
+        'WorkItemScheduleConfirmationRequired',
+        'Schedule dependency changes require explicit confirmation.',
+      )
+    }
+    const expectedRevision = readWorkItemExpectedRevision(body.expectedRevision)
+    const expectedPlanningRevision = readWorkItemScheduleGraphRevision(
+      body.expectedPlanningRevision,
+      'Planning revision',
+    )
+    const expectedRelationGraphRevision = readWorkItemScheduleGraphRevision(
+      body.expectedRelationGraphRevision,
+      'Relation graph revision',
+    )
+    const expectedEvaluatedRevisions = readWorkItemScheduleEvaluationRevisions(
+      body.expectedEvaluatedRevisions,
+    )
+    const expectedImpacts = readWorkItemScheduleImpacts(body.expectedImpacts)
+    const operation = normalizeWorkItemScheduleOperation(body.operation)
+    const reservationRequest: ReserveIdempotencyRequest = {
+      workspaceId: createWorkItemScheduleIdempotencyWorkspaceId(principal.directoryId),
+      credentialId: createWorkItemScheduleIdempotencyUserId(
+        principal.directoryId,
+        principal.actorId,
+      ),
+      idempotencyKey,
+      requestFingerprint: createWorkItemScheduleConfirmationFingerprint(
+        c.req.method,
+        new URL(c.req.url).pathname,
+        body,
+      ),
+    }
+    const reservation = await reserveWorkItemScheduleConfirmation(reservationRequest)
+    if (reservation.status === 'in-progress') {
+      throw new WorkItemScheduleError(
+        409,
+        'WorkItemScheduleIdempotencyInProgress',
+        'The same schedule confirmation is still in progress.',
+      )
+    }
+    if (reservation.status === 'replay') {
+      const replay = readStoredWorkItemScheduleConfirmationResponse(
+        reservation.response,
+        teamId,
+        issueId,
+      )
+      await requireWorkItemScheduleConfirmationReplayAuthorization(
+        principal,
+        replay.authorizationEndpoints,
+      )
+      c.header('Idempotency-Replayed', 'true')
+      return c.json(replay.response)
+    }
+    reservationToRelease = {
+      ...reservationRequest,
+      reservationId: reservation.reservationId,
+    }
+    const idempotency: IdempotencyMutationToken = {
+      credentialId: reservationRequest.credentialId,
+      idempotencyKey,
+      requestFingerprint: reservationRequest.requestFingerprint,
+      reservationId: reservation.reservationId,
+    }
+    const [detail, relationPage] = await Promise.all([
+      workItemDependencies.teamIssues.getTeamIssueDetail(
+        principal.directoryId,
+        teamId,
+        issueId,
+        { consistentIssueRead: true, eventLimit: 0 },
+      ),
+      workItemDependencies.workItemConfigurations.listRelations(
+        principal.directoryId,
+        teamId,
+        issueId,
+      ),
+    ])
+    requireAssignedProjectPermission(principal, context, detail.issue.assignedProjectId, 'member')
+    if (relationPage.graphRevision !== expectedRelationGraphRevision) {
+      throw new ProjectDataError(
+        409,
+        'WorkItemRelationGraphConflict',
+        'Work Item relations changed. Reload and try again.',
+      )
+    }
+    const visibleRelations = await filterVisibleWorkItemRelations(
+      principal,
+      context,
+      teamId,
+      relationPage.relations,
+    )
+    const recomputed = await recomputeWorkItemScheduleDependencyPreview(
+      principal,
+      detail.issue,
+      operation,
+      relationPage.graphRevision,
+      visibleRelations.filter((relation) =>
+        relation.sourceWorkItemId === issueId &&
+        (relation.type === 'blocks' || relation.type === 'blockedBy')
+      ).length,
+      'member',
+      expectedPlanningRevision,
+    )
+    requireMatchingWorkItemScheduleEvaluationRevisions(
+      recomputed.preview.evaluatedRevisions,
+      expectedEvaluatedRevisions,
+      recomputed.preview.expectedRevision,
+      expectedRevision,
+    )
+    requireMatchingWorkItemScheduleImpacts(
+      recomputed.preview.impacts,
+      expectedImpacts,
+    )
+    if (recomputed.preview.conflicts.length > 0) {
+      throw new ProjectDataError(
+        409,
+        'WorkItemScheduleDependencyConflict',
+        'Resolve schedule dependency conflicts before confirming this change.',
+      )
+    }
+    const updateSchedules = workItemDependencies.teamIssues.updateTeamIssueSchedules
+    if (!updateSchedules) {
+      throw new ProjectDataError(
+        503,
+        'WorkItemScheduleCascadeUnavailable',
+        'Atomic schedule cascade persistence is not configured.',
+      )
+    }
+    const impactKeys = new Set(recomputed.preview.impacts.map((impact) =>
+      createWorkItemDependencyKey({ teamId: impact.teamId, workItemId: impact.workItemId })
+    ))
+    const confirmedRevisions = new Map(expectedEvaluatedRevisions.map((revision) => [
+      createWorkItemDependencyKey(revision),
+      revision.expectedRevision,
+    ]))
+    const idempotencyTransaction = createWorkItemScheduleConfirmationIdempotencyTransaction(
+      reservationRequest.workspaceId,
+      idempotency,
+      recomputed.preview.evaluatedRevisions,
+    )
+    if (!idempotencyTransaction) {
+      throw new WorkItemScheduleError(
+        503,
+        'WorkItemScheduleIdempotencyUnavailable',
+        'Durable schedule confirmation receipts are not configured.',
+      )
+    }
+    const result = await updateSchedules.call(
+      workItemDependencies.teamIssues,
+      principal.directoryId,
+      recomputed.preview.impacts.map((impact) => ({
+        teamId: impact.teamId,
+        workItemId: impact.workItemId,
+        expectedRevision: confirmedRevisions.get(createWorkItemDependencyKey(impact)) ??
+          impact.expectedRevision,
+        schedule: impact.after,
+      })),
+      expectedEvaluatedRevisions.flatMap((revision) =>
+        impactKeys.has(createWorkItemDependencyKey(revision))
+          ? []
+          : [{
+              teamId: revision.teamId,
+              workItemId: revision.workItemId,
+              expectedRevision: revision.expectedRevision,
+            }]
+      ),
+      principal.userKey,
+      createApiMutationContext(c, principal, {
+        teamId,
+        issueId,
+        ...body,
+      }),
+      [createWorkItemRelationGraphRevisionConditionCheck(
+        getWorkItemConfigurationTableName(),
+        principal.directoryId,
+        teamId,
+        expectedRelationGraphRevision,
+      )],
+      createWorkItemAuthorizationSnapshot(principal, expectedPlanningRevision),
+      idempotencyTransaction,
+    )
+    mutationCommitted = true
+    await Promise.all(result.issues.map((issue) =>
+      projectWorkItemMutationSearchDocumentBestEffort(
+        principal.directoryId,
+        issue,
+        'Work Item schedule dependency cascade',
+      )
+    ))
+    return c.json({ workItems: result.confirmedSchedules })
+  } catch (error) {
+    if (reservationToRelease && !mutationCommitted) {
+      // The port leaves an atomically completed receipt intact when a commit response was lost.
+      await developerPlatformDependencies.idempotency
+        .releaseIdempotency(reservationToRelease)
+        .catch(() => undefined)
+    }
     return toWorkItemConfigurationErrorResponse(c, error)
   }
 })
@@ -6967,6 +7509,42 @@ routeApp.patch('/api/teams/:teamId/issues/:issueId', async (c) => {
       resolvedConfiguration,
     )
 
+    let authorizationSnapshot: WorkItemAuthorizationSnapshot | undefined
+    const changesSchedule =
+      'schedule' in configuredBody &&
+      configuredBody.schedule !== undefined &&
+      stableDigestStringify(configuredBody.schedule) !==
+        stableDigestStringify(detail.issue.schedule)
+    const changesAssignedProject =
+      'assignedProjectId' in configuredBody &&
+      readAssignedProjectId(configuredBody.assignedProjectId) !== detail.issue.assignedProjectId
+    if (changesSchedule) {
+      try {
+        authorizationSnapshot = await createDependencyFencedWorkItemAuthorizationSnapshot(
+          principal,
+          teamId,
+          issueId,
+        )
+      } catch (error) {
+        if (
+          error instanceof PlanningError &&
+          error.code === 'PlanningWorkItemDependencyInUse'
+        ) {
+          throw new WorkItemScheduleError(
+            409,
+            'WorkItemScheduleConfirmationRequired',
+            'Preview and explicitly confirm schedule changes for Work Items with dependencies.',
+          )
+        }
+        if (error instanceof PlanningError) {
+          throw new WorkItemScheduleError(error.status, error.code, error.message)
+        }
+        throw error
+      }
+    } else if (changesAssignedProject) {
+      authorizationSnapshot = await createPlanningFencedWorkItemAuthorizationSnapshot(principal)
+    }
+
     if ('assigneeUserId' in configuredBody) {
       await requireActiveWorkspaceAssignee(
         principal.directoryId,
@@ -6979,7 +7557,11 @@ routeApp.patch('/api/teams/:teamId/issues/:issueId', async (c) => {
         principal.directoryId,
         teamId,
         issueId,
-        { ...configuredBody, expectedRevision },
+        {
+          ...configuredBody,
+          expectedRevision,
+          ...(authorizationSnapshot ? { authorizationSnapshot } : {}),
+        },
         principal.userKey,
         createApiMutationContext(c, principal, {
           teamId,
@@ -10025,10 +10607,31 @@ function createApiBulkOperationAdapter(
         'member',
       )
     } else if (action.type === 'archive') {
+      let authorizationSnapshot: WorkItemAuthorizationSnapshot | undefined
+      if (action.archived) {
+        try {
+          authorizationSnapshot = await createDependencyFencedWorkItemAuthorizationSnapshot(
+            principal,
+            loaded.item.teamId,
+            loaded.item.workItemId,
+          )
+        } catch (error) {
+          if (error instanceof PlanningError) {
+            throw new AutomationError(
+              error.status === 409 ? 'conflict' : 'unavailable',
+              error.code,
+              error.message,
+              error.status >= 500,
+            )
+          }
+          throw error
+        }
+      }
       body = {
         archivedAt: action.archived ? new Date().toISOString() : null,
         archivedBy: action.archived ? principal.userKey : null,
         expectedRevision: loaded.item.expectedRevision,
+        ...(authorizationSnapshot ? { authorizationSnapshot } : {}),
       }
     } else {
       body = normalizeTeamIssueInput(
@@ -10063,6 +10666,65 @@ function createApiBulkOperationAdapter(
         principal.directoryId,
         readTeamIssueAssigneeUserId(configuredBody),
       )
+    }
+    const changesAssignedProject =
+      action.type !== 'archive' &&
+      'assignedProjectId' in configuredBody &&
+      readAssignedProjectId(configuredBody.assignedProjectId) !==
+        loaded.detail.issue.assignedProjectId
+    if (
+      action.type !== 'archive' &&
+      'schedule' in configuredBody &&
+      configuredBody.schedule !== undefined &&
+      stableDigestStringify(configuredBody.schedule) !==
+        stableDigestStringify(loaded.detail.issue.schedule)
+    ) {
+      try {
+        const authorizationSnapshot =
+          await createDependencyFencedWorkItemAuthorizationSnapshot(
+            principal,
+            loaded.item.teamId,
+            loaded.item.workItemId,
+          )
+        return {
+          ...loaded,
+          body: { ...configuredBody, authorizationSnapshot },
+        }
+      } catch (error) {
+        if (error instanceof PlanningError) {
+          throw new AutomationError(
+            error.status === 409 ? 'conflict' : 'unavailable',
+            error.code === 'PlanningWorkItemDependencyInUse'
+              ? 'WorkItemScheduleConfirmationRequired'
+              : error.code,
+            error.code === 'PlanningWorkItemDependencyInUse'
+              ? 'Preview and explicitly confirm schedule changes for Work Items with dependencies.'
+              : error.message,
+            error.status >= 500,
+          )
+        }
+        throw error
+      }
+    }
+    if (changesAssignedProject) {
+      try {
+        const authorizationSnapshot =
+          await createPlanningFencedWorkItemAuthorizationSnapshot(principal)
+        return {
+          ...loaded,
+          body: { ...configuredBody, authorizationSnapshot },
+        }
+      } catch (error) {
+        if (error instanceof PlanningError) {
+          throw new AutomationError(
+            error.status === 409 ? 'conflict' : 'unavailable',
+            error.code,
+            error.message,
+            error.status >= 500,
+          )
+        }
+        throw error
+      }
     }
     return { ...loaded, body: configuredBody }
   }
@@ -10251,13 +10913,51 @@ function createApiBulkOperationAdapter(
           readTeamIssueAssigneeUserId(configuredBody),
         )
       }
+      const changesSchedule = 'schedule' in configuredBody &&
+        configuredBody.schedule !== undefined &&
+        stableDigestStringify(configuredBody.schedule) !==
+          stableDigestStringify(loaded.detail.issue.schedule)
+      const changesAssignedProject = 'assignedProjectId' in configuredBody &&
+        readAssignedProjectId(configuredBody.assignedProjectId) !==
+          loaded.detail.issue.assignedProjectId
+      const restoresArchive = typeof configuredBody.archivedAt === 'string'
+      let mutationBody = configuredBody
+      if (changesSchedule || restoresArchive || changesAssignedProject) {
+        try {
+          mutationBody = {
+            ...configuredBody,
+            authorizationSnapshot:
+              changesSchedule || restoresArchive
+                ? await createDependencyFencedWorkItemAuthorizationSnapshot(
+                    principal,
+                    item.teamId,
+                    item.workItemId,
+                  )
+                : await createPlanningFencedWorkItemAuthorizationSnapshot(principal),
+          }
+        } catch (error) {
+          if (error instanceof PlanningError) {
+            throw new AutomationError(
+              error.status === 409 ? 'conflict' : 'unavailable',
+              changesSchedule && error.code === 'PlanningWorkItemDependencyInUse'
+                ? 'WorkItemScheduleConfirmationRequired'
+                : error.code,
+              changesSchedule && error.code === 'PlanningWorkItemDependencyInUse'
+                ? 'Preview and explicitly confirm schedule changes for Work Items with dependencies.'
+                : error.message,
+              error.status >= 500,
+            )
+          }
+          throw error
+        }
+      }
       let response: UpdateTeamIssueResponse
       try {
         response = await workItemDependencies.teamIssues.updateTeamIssue(
           principal.directoryId,
           item.teamId,
           item.workItemId,
-          configuredBody,
+          mutationBody,
           principal.userKey,
           createBulkMutationContext(
             {
@@ -10435,6 +11135,8 @@ export interface AutomationActionExecutorDependencies {
   teamIssues: WorkItemDependencies['teamIssues']
   /** Provides Work Item workflow and relation configuration. */
   workItemConfigurations: WorkItemDependencies['workItemConfigurations']
+  /** Provides unfiltered Planning dependency state for schedule mutation fencing. */
+  planning: WorkItemDependencies['planning']
   /** Provides Work Item approval persistence. */
   fileProofing: WorkItemDependencies['fileProofing']
   /** Provides Workspace search projection persistence. */
@@ -10463,6 +11165,9 @@ const ambientAutomationActionExecutorDependencies: AutomationActionExecutorDepen
   },
   get workItemConfigurations() {
     return workItemDependencies.workItemConfigurations
+  },
+  get planning() {
+    return workItemDependencies.planning
   },
   get fileProofing() {
     return workItemDependencies.fileProofing
@@ -10588,6 +11293,27 @@ async function executeAutomationWorkItemUpdate(
       dependencies,
     )
   }
+  const changesSchedule =
+    'schedule' in configuredBody &&
+    configuredBody.schedule !== undefined &&
+    stableDigestStringify(configuredBody.schedule) !==
+      stableDigestStringify(detail.issue.schedule)
+  const changesAssignedProject =
+    'assignedProjectId' in configuredBody &&
+    readAssignedProjectId(configuredBody.assignedProjectId) !== detail.issue.assignedProjectId
+  const planningRevisionFence = changesSchedule
+    ? await createAutomationSchedulePlanningRevisionFence(
+        context.execution.workspaceId,
+        target.teamId,
+        target.workItemId,
+        dependencies,
+      )
+    : changesAssignedProject
+      ? await createAutomationPlanningRevisionFence(
+          context.execution.workspaceId,
+          dependencies,
+        )
+      : undefined
   const mutationContext = createAutomationMutationContext(context, patch)
   let updatedIssue: TeamIssueResponseItem
   try {
@@ -10595,7 +11321,10 @@ async function executeAutomationWorkItemUpdate(
       context.execution.workspaceId,
       target.teamId,
       target.workItemId,
-      configuredBody,
+      {
+        ...configuredBody,
+        ...(planningRevisionFence ? { planningRevisionFence } : {}),
+      },
       `automation:${context.execution.ruleId}`,
       mutationContext,
     )
@@ -10630,6 +11359,67 @@ async function executeAutomationWorkItemUpdate(
     undefined,
     dependencies,
   )
+}
+
+/**
+ * Verifies that one Automation schedule update is isolated and captures its Planning fence.
+ *
+ * @param workspaceId - Workspace containing the target Work Item.
+ * @param teamId - Owning Team identifier.
+ * @param workItemId - Team-local Work Item identifier.
+ * @param dependencies - Ports used by the Automation execution.
+ * @returns Exact Planning revision that must still hold in the update transaction.
+ */
+async function createAutomationSchedulePlanningRevisionFence(
+  workspaceId: string,
+  teamId: string,
+  workItemId: string,
+  dependencies: AutomationActionExecutorDependencies,
+) {
+  const state = await dependencies.planning.getAuthorizationState(workspaceId)
+  if (!Array.isArray(state.workItemDependencies)) {
+    throw new AutomationError(
+      'unavailable',
+      'PlanningWorkItemDependencyStateUnavailable',
+      'Work Item dependency state is unavailable for mutation validation.',
+      true,
+    )
+  }
+  try {
+    requirePlanningWorkItemHasNoScheduleDependencies(
+      state.workItemDependencies,
+      teamId,
+      workItemId,
+    )
+  } catch (error) {
+    if (
+      error instanceof PlanningError &&
+      error.code === 'PlanningWorkItemDependencyInUse'
+    ) {
+      throw new AutomationError(
+        'conflict',
+        'WorkItemScheduleConfirmationRequired',
+        'Preview and explicitly confirm schedule changes for Work Items with dependencies.',
+      )
+    }
+    throw error
+  }
+  return { expectedRevision: state.revision }
+}
+
+/**
+ * Captures the Planning revision that serializes an Automation Project move with archive.
+ *
+ * @param workspaceId - Workspace containing the target Work Item.
+ * @param dependencies - Ports used by the Automation execution.
+ * @returns Exact Planning revision that must still hold in the update transaction.
+ */
+async function createAutomationPlanningRevisionFence(
+  workspaceId: string,
+  dependencies: AutomationActionExecutorDependencies,
+) {
+  const state = await dependencies.planning.getAuthorizationState(workspaceId)
+  return { expectedRevision: state.revision }
 }
 
 /**
@@ -15964,7 +16754,14 @@ function toWorkItemConfigurationErrorResponse(c: Context, error: unknown) {
     return toProjectDataErrorResponse(c, error)
   }
   if (error instanceof WorkItemScheduleError) {
-    return c.json({ code: error.code, message: error.message }, 400)
+    const status = error.status === 400 ||
+        error.status === 403 ||
+        error.status === 409 ||
+        error.status === 413 ||
+        error.status === 503
+      ? error.status
+      : 500
+    return c.json({ code: error.code, message: error.message }, status)
   }
   if (!(error instanceof WorkItemConfigurationError)) {
     console.error(error)
@@ -16450,6 +17247,198 @@ async function requirePlanningActiveOwner(
       'PlanningOwnerInactive',
       'Planning owner must be an active Workspace member.',
     )
+  }
+}
+
+/**
+ * Validates one qualified Work Item endpoint before it is used for authorization.
+ *
+ * @param value - Untrusted endpoint object from a Planning request.
+ * @param label - Human-readable endpoint role.
+ * @returns Canonical Team and Work Item identifiers.
+ */
+function readPlanningWorkItemDependencyEndpoint(
+  value: unknown,
+  label: string,
+): WorkItemDependencyEndpoint {
+  if (!isRecord(value) || Object.keys(value).some((key) =>
+    key !== 'teamId' && key !== 'workItemId'
+  )) {
+    throw new PlanningError(
+      400,
+      'InvalidPlanningInput',
+      `${label} Work Item endpoint is invalid.`,
+    )
+  }
+  return {
+    teamId: readPlanningIdentifier(value.teamId, `${label} Team ID`),
+    workItemId: readPlanningIdentifier(value.workItemId, `${label} Work Item ID`),
+  }
+}
+
+/**
+ * Requires Team and assigned-Project permission for one Work Item dependency endpoint.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param endpoint - Qualified Work Item endpoint.
+ * @param minimumRole - Required role at both Team and assigned Project scopes.
+ * @returns Strongly read authorized Work Item detail.
+ */
+async function requirePlanningWorkItemEndpointPermission(
+  principal: WorkspacePrincipal,
+  endpoint: WorkItemDependencyEndpoint,
+  minimumRole: Extract<ProjectRole, 'viewer' | 'member' | 'manager'>,
+) {
+  const evaluation = principal.enterpriseAuthorizationEvaluation
+  if (evaluation && !principal.isSystemAdmin) {
+    const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(
+      principal.directoryId,
+      'ja',
+    )
+    const team = directory.teams.find((candidate) => candidate.id === endpoint.teamId)
+    if (!team) {
+      throw new ProjectDataError(404, 'TeamNotFound', 'Schedule dependency Team was not found.')
+    }
+    const detail = await workItemDependencies.teamIssues.getTeamIssueDetail(
+      principal.directoryId,
+      endpoint.teamId,
+      endpoint.workItemId,
+      { consistentIssueRead: true, eventLimit: 0 },
+    )
+    const assignedProjectId = detail.issue.assignedProjectId
+    if (
+      assignedProjectId &&
+      !team.projects.some((project) => project.id === assignedProjectId)
+    ) {
+      throw new ProjectDataError(
+        409,
+        'PlanningWorkItemScopeMismatch',
+        'Schedule dependency Work Item assignment does not match its owning Team.',
+      )
+    }
+    const permission: EnterprisePermissionId = minimumRole === 'viewer'
+      ? 'work-items.read'
+      : minimumRole === 'member'
+        ? 'work-items.write'
+        : 'planning.manage'
+    const allowed = evaluateEnterpriseAccess({
+      permission,
+      principal: evaluation.principal,
+      assignments: evaluation.assignments,
+      customRoles: evaluation.snapshot.customRoles,
+      groupMappings: evaluation.groupMappings,
+      resource: assignedProjectId
+        ? {
+            workspaceId: principal.directoryId,
+            kind: 'project',
+            targetId: assignedProjectId,
+            parentTeamId: endpoint.teamId,
+          }
+        : {
+            workspaceId: principal.directoryId,
+            kind: 'team',
+            targetId: endpoint.teamId,
+          },
+    }).allowed
+    if (!allowed) {
+      throw new ProjectDataError(
+        403,
+        'WorkItemScheduleDependencyAccessDenied',
+        'Schedule dependency impact cannot be evaluated within the current access scope.',
+      )
+    }
+    const role = minimumRole
+    return {
+      context: {
+        team,
+        directory,
+        projectAccesses: assignedProjectId
+          ? [{ projectId: assignedProjectId, teamId: endpoint.teamId, role }]
+          : [],
+      } satisfies TeamPermissionContext,
+      detail,
+    }
+  }
+  return loadAuthorizedTeamIssue(
+    principal,
+    endpoint.teamId,
+    endpoint.workItemId,
+    minimumRole,
+  )
+}
+
+/**
+ * Re-evaluates schedule permissions independently of the root route resource.
+ *
+ * @remarks
+ * A schedule dependency graph may cross Team and Project boundaries. Enterprise route
+ * authorization is intentionally bound to the root Work Item, so graph evaluation must derive a
+ * separate principal from the authentication-time authoritative snapshot before checking each
+ * server-owned endpoint.
+ *
+ * @param principal - Authenticated Workspace principal for the root schedule route.
+ * @param minimumRole - Schedule permission required on every evaluated endpoint.
+ * @returns Principal restricted to every currently authorized Team and Project for that permission.
+ */
+async function createWorkItemScheduleScopedPrincipal(
+  principal: WorkspacePrincipal,
+  minimumRole: Extract<ProjectRole, 'viewer' | 'member'>,
+): Promise<WorkspacePrincipal> {
+  const evaluation = principal.enterpriseAuthorizationEvaluation
+  if (!evaluation || principal.isSystemAdmin) return principal
+
+  const permission: EnterprisePermissionId = minimumRole === 'viewer'
+    ? 'work-items.read'
+    : 'work-items.write'
+  const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(
+    principal.directoryId,
+    'ja',
+  )
+  const evaluateResource = (resource: EnterpriseAuthorizationResource) =>
+    evaluateEnterpriseAccess({
+      permission,
+      principal: evaluation.principal,
+      assignments: evaluation.assignments,
+      customRoles: evaluation.snapshot.customRoles,
+      groupMappings: evaluation.groupMappings,
+      resource,
+    }).allowed
+  const enterpriseProjectAccesses: ProjectAccessEntry[] = []
+  const enterpriseAuthorizedTeamIds: string[] = []
+  const enterpriseTeamAccesses: EnterpriseTeamAccess[] = []
+
+  for (const team of directory.teams) {
+    if (evaluateResource({
+      workspaceId: principal.directoryId,
+      kind: 'team',
+      targetId: team.id,
+    })) {
+      enterpriseAuthorizedTeamIds.push(team.id)
+      enterpriseTeamAccesses.push({ teamId: team.id, permissions: [permission] })
+    }
+    for (const project of team.projects) {
+      if (!evaluateResource({
+        workspaceId: principal.directoryId,
+        kind: 'project',
+        targetId: project.id,
+        parentTeamId: team.id,
+      })) {
+        continue
+      }
+      enterpriseProjectAccesses.push({
+        projectId: project.id,
+        teamId: team.id,
+        role: minimumRole,
+      })
+    }
+  }
+
+  return {
+    ...principal,
+    enterpriseProjectAccesses,
+    enterpriseAuthorizedTeamIds,
+    enterpriseTeamAccesses,
+    enterpriseRouteAuthorizedAtResource: false,
   }
 }
 
@@ -17052,22 +18041,47 @@ async function requireWorkspaceMemberHasNoOwnedPlanningEntities(
   return authorizationState.revision
 }
 
+/** Maximum dependency endpoints that leave room for archive, audit, and Planning actions. */
+const PROJECT_ARCHIVE_DEPENDENCY_ENDPOINT_LIMIT = 96
+
+/**
+ * Verifies that a Team owns no active Planning scope or dependency endpoint.
+ *
+ * @param directoryId - Workspace whose Planning graph is checked.
+ * @param teamId - Team being archived.
+ * @returns Planning revision that must still hold in the archive transaction.
+ */
 async function requirePlanningTeamScopeIsUnused(directoryId: string, teamId: string) {
   const authorizationState = await workItemDependencies.planning.getAuthorizationState(directoryId)
   const scopedEntity = authorizationState.entities.find((entity) =>
     !entity.archivedAt && entity.teamId === teamId
   )
   const scopedLink = authorizationState.workItemLinks.find((link) => link.teamId === teamId)
-  if (scopedEntity || scopedLink) {
+  const scopedDependency = authorizationState.workItemDependencies.find((dependency) =>
+    dependency.predecessor.teamId === teamId || dependency.successor.teamId === teamId
+  )
+  if (scopedEntity || scopedLink || scopedDependency) {
     throw new WorkspaceAccessError(
       409,
       'PlanningTeamScopeInUse',
-      'Move or archive active Planning entities and remove Work Item links before archiving this Team.',
+      'Move or archive active Planning entities and remove Work Item links and dependencies before archiving this Team.',
     )
   }
   return authorizationState.revision
 }
 
+/**
+ * Verifies that a Project owns no active Planning scope or dependency endpoint assignment.
+ *
+ * The returned Work Item revisions close the race between the canonical assignment reads and
+ * the directory archive transaction. Planning's global revision separately serializes graph
+ * mutations with the archive.
+ *
+ * @param directoryId - Workspace whose Planning graph and Work Items are checked.
+ * @param teamId - Team that owns the Project.
+ * @param projectId - Project being archived.
+ * @returns Planning and canonical Work Item revisions required by the archive transaction.
+ */
 async function requirePlanningProjectScopeIsUnused(
   directoryId: string,
   teamId: string,
@@ -17088,7 +18102,61 @@ async function requirePlanningProjectScopeIsUnused(
       'Move or archive active Planning entities and remove Work Item links before archiving this Project.',
     )
   }
-  return authorizationState.revision
+
+  const endpointByKey = new Map<string, { teamId: string; workItemId: string }>()
+  for (const dependency of authorizationState.workItemDependencies) {
+    for (const endpoint of [dependency.predecessor, dependency.successor]) {
+      if (endpoint.teamId !== teamId) continue
+      endpointByKey.set(createWorkItemDependencyKey(endpoint), endpoint)
+    }
+  }
+  const endpoints = [...endpointByKey.values()].sort((left, right) =>
+    createWorkItemDependencyKey(left).localeCompare(createWorkItemDependencyKey(right))
+  )
+  if (endpoints.length > PROJECT_ARCHIVE_DEPENDENCY_ENDPOINT_LIMIT) {
+    throw new WorkspaceAccessError(
+      413,
+      'PlanningProjectScopeDependencyLimitExceeded',
+      'The Project has too many dependency endpoints to archive atomically.',
+    )
+  }
+
+  const workItemRevisionGuards: ProjectArchiveWorkItemRevisionGuard[] = await Promise.all(
+    endpoints.map(async (endpoint) => {
+      let detail: TeamIssueDetailResponse
+      try {
+        detail = await workItemDependencies.teamIssues.getTeamIssueDetail(
+          directoryId,
+          endpoint.teamId,
+          endpoint.workItemId,
+          { consistentIssueRead: true, eventLimit: 0 },
+        )
+      } catch (error) {
+        if (!isTeamIssueNotFoundError(error)) throw error
+        throw new WorkspaceAccessError(
+          409,
+          'PlanningProjectScopeInUse',
+          'Remove unresolved Work Item dependencies before archiving this Project.',
+        )
+      }
+      if (detail.issue.assignedProjectId === projectId) {
+        throw new WorkspaceAccessError(
+          409,
+          'PlanningProjectScopeInUse',
+          'Move dependency Work Items to another Project or remove their dependencies before archiving this Project.',
+        )
+      }
+      return {
+        teamId: endpoint.teamId,
+        workItemId: endpoint.workItemId,
+        expectedRevision: detail.issue.revision,
+      }
+    }),
+  )
+  return {
+    expectedPlanningRevision: authorizationState.revision,
+    workItemRevisionGuards,
+  }
 }
 
 function toCollaborationErrorResponse(c: Context, error: unknown) {
@@ -17409,6 +18477,14 @@ function toProjectDataErrorResponse(c: Context, error: unknown) {
     return c.json({ code: error.code, message: error.message }, 413)
   }
 
+  if (error.code === 'WorkItemScheduleCascadeLimitExceeded') {
+    return c.json({ code: error.code, message: error.message }, 413)
+  }
+
+  if (error.code === 'PlanningProjectScopeDependencyLimitExceeded') {
+    return c.json({ code: error.code, message: error.message }, 413)
+  }
+
   if (error.code === 'InvalidProjectWrite' ||
     error.code === 'InvalidWorkItemConfiguration' ||
     error.code === 'InvalidCustomFieldValue' ||
@@ -17457,6 +18533,24 @@ function toProjectDataErrorResponse(c: Context, error: unknown) {
     return c.json({ code: error.code, message: error.message }, 409)
   }
 
+  if (
+    error.code === 'WorkItemRelationGraphConflict' ||
+    error.code === 'WorkItemScheduleDependencyConflict' ||
+    error.code === 'WorkItemScheduleCascadeConflict' ||
+    error.code === 'PlanningWorkItemArchived' ||
+    error.code === 'WorkItemAuthorizationChanged'
+  ) {
+    return c.json({ code: error.code, message: error.message }, 409)
+  }
+
+  if (
+    error.code === 'WorkItemScheduleCascadeUnavailable' ||
+    error.code === 'WorkItemScheduleCascadeTransactionUnavailable'
+  ) {
+    console.error(error)
+    return c.json({ code: error.code, message: error.message }, 503)
+  }
+
   if (error.code === 'ProjectQuickAccessConflict') {
     return c.json({ code: error.code, message: error.message }, 409)
   }
@@ -17501,6 +18595,13 @@ function toProjectDataErrorResponse(c: Context, error: unknown) {
 
   if (error.code === 'ProjectPrincipalMissing' || error.code === 'ProjectAccessDenied') {
     return c.json({ message: 'Project access is denied.' }, 403)
+  }
+
+  if (error.code === 'WorkItemScheduleDependencyAccessDenied') {
+    return c.json({
+      code: error.code,
+      message: 'Schedule dependency impact cannot be evaluated within the current access scope.',
+    }, 403)
   }
 
   console.error(error)
@@ -18850,6 +19951,1090 @@ async function readPlanningWorkItemState(
   }
 }
 
+/**
+ * Recomputes one schedule preview from stable Planning data and strongly read endpoint schedules.
+ *
+ * The unfiltered Planning authorization graph is used only to fail closed when any root-reachable
+ * successor or incoming bound predecessor is outside the principal's visible Work Item state.
+ * No hidden endpoint identity is returned in that failure.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param rootWorkItem - Strongly read direct Work Item.
+ * @param operation - Validated direct schedule operation.
+ * @param relationGraphRevision - Separately observed semantic relation graph revision.
+ * @param semanticBlockerCount - Visible semantic blocker count used only for warnings.
+ * @param endpointRole - Minimum role required on every evaluated endpoint.
+ * @param expectedPlanningRevision - Optional preview revision required by confirmation.
+ * @returns Server-authoritative preview plus every revision participating in recomputation.
+ */
+async function recomputeWorkItemScheduleDependencyPreview(
+  principal: WorkspacePrincipal,
+  rootWorkItem: TeamIssueResponseItem,
+  operation: WorkItemScheduleOperation,
+  relationGraphRevision: number,
+  semanticBlockerCount: number,
+  endpointRole: Extract<ProjectRole, 'viewer' | 'member'>,
+  expectedPlanningRevision?: number,
+) {
+  const scopedPrincipal = await createWorkItemScheduleScopedPrincipal(principal, endpointRole)
+  const planning = await readStableWorkItemSchedulePlanningSnapshot(scopedPrincipal)
+  if (
+    expectedPlanningRevision !== undefined &&
+    planning.authorizationState.revision !== expectedPlanningRevision
+  ) {
+    throw new ProjectDataError(
+      409,
+      'PlanningRevisionConflict',
+      'Planning changed. Reload and try again.',
+    )
+  }
+  const rootEndpoint = {
+    teamId: rootWorkItem.teamId,
+    workItemId: rootWorkItem.id,
+  } satisfies WorkItemDependencyEndpoint
+  const dependencies = planning.authorizationState.workItemDependencies
+  if (dependencies === undefined) {
+    throw new WorkItemScheduleError(
+      503,
+      'WorkItemScheduleDependencyStateUnavailable',
+      'Work Item dependency state is unavailable for schedule evaluation.',
+    )
+  }
+  const evaluationEndpoints = collectWorkItemScheduleEvaluationEndpoints(
+    rootEndpoint,
+    dependencies,
+  )
+  const accessibleKeys = new Set(planning.workItemState.workItems.map((workItem) =>
+    createWorkItemDependencyKey({ teamId: workItem.teamId, workItemId: workItem.id })
+  ))
+  accessibleKeys.add(createWorkItemDependencyKey(rootEndpoint))
+  if (evaluationEndpoints.some((endpoint) =>
+    !accessibleKeys.has(createWorkItemDependencyKey(endpoint))
+  )) {
+    throw new ProjectDataError(
+      403,
+      'WorkItemScheduleDependencyAccessDenied',
+      'Schedule dependency impact cannot be evaluated within the current access scope.',
+    )
+  }
+  if (evaluationEndpoints.length > WORK_ITEM_SCHEDULE_CASCADE_LIMIT) {
+    throw new WorkItemScheduleError(
+      413,
+      'WorkItemScheduleCascadeLimitExceeded',
+      `A schedule cascade cannot evaluate more than ${WORK_ITEM_SCHEDULE_CASCADE_LIMIT} Work Items.`,
+    )
+  }
+  const rootKey = createWorkItemDependencyKey(rootEndpoint)
+  const states = await Promise.all(evaluationEndpoints.map(async (endpoint) => {
+    const key = createWorkItemDependencyKey(endpoint)
+    const issue = key === rootKey
+      ? rootWorkItem
+      : (await requirePlanningWorkItemEndpointPermission(
+          scopedPrincipal,
+          endpoint,
+          endpointRole,
+        )).detail.issue
+    if (issue.archivedAt) {
+      throw new ProjectDataError(
+        409,
+        'PlanningWorkItemArchived',
+        'Archived Work Items cannot participate in schedule dependency changes.',
+      )
+    }
+    const milestoneIds = [...new Set(planning.snapshot.workItemLinks.flatMap((link) =>
+      link.teamId === endpoint.teamId &&
+        link.workItemId === endpoint.workItemId &&
+        link.milestoneId
+        ? [link.milestoneId]
+        : []
+    ))].sort()
+    return {
+      endpoint,
+      revision: issue.revision,
+      schedule: issue.schedule,
+      ...(issue.assignedProjectId ? { projectId: issue.assignedProjectId } : {}),
+      milestoneIds,
+    } satisfies WorkItemDependencyScheduleState
+  }))
+  const root = states.find((state) => createWorkItemDependencyKey(state.endpoint) === rootKey)
+  if (!root) {
+    throw new ProjectDataError(
+      403,
+      'WorkItemScheduleDependencyAccessDenied',
+      'Schedule dependency impact cannot be evaluated within the current access scope.',
+    )
+  }
+  return {
+    preview: previewWorkItemDependencyScheduleChange({
+      root,
+      operation,
+      workItems: states,
+      dependencies,
+      planningRevision: planning.authorizationState.revision,
+      relationGraphRevision,
+      semanticBlockerCount,
+    }),
+    states,
+  }
+}
+
+/**
+ * Reads matching filtered and unfiltered Planning views at one global revision.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @returns Stable visible Work Item state, filtered snapshot, and unfiltered authorization state.
+ */
+async function readStableWorkItemSchedulePlanningSnapshot(
+  principal: WorkspacePrincipal,
+) {
+  for (
+    let attempt = 0;
+    attempt < WORK_ITEM_SCHEDULE_SNAPSHOT_RETRY_LIMIT;
+    attempt += 1
+  ) {
+    const authorizationState = await workItemDependencies.planning.getAuthorizationState(
+      principal.directoryId,
+    )
+    const workItemState = await readPlanningWorkItemState(principal)
+    const snapshot = filterPlanningSnapshotForPrincipal(
+      principal,
+      await workItemDependencies.planning.get(principal.directoryId, workItemState),
+    )
+    const finalRevision = await workItemDependencies.planning.getAuthorizationRevision(
+      principal.directoryId,
+    )
+    if (
+      authorizationState.revision === snapshot.revision &&
+      snapshot.revision === finalRevision
+    ) {
+      return { authorizationState, workItemState, snapshot }
+    }
+  }
+  throw new ProjectDataError(
+    409,
+    'PlanningRevisionConflict',
+    'Planning changed. Reload and try again.',
+  )
+}
+
+/**
+ * Reads a non-negative graph revision from an untrusted confirmation request.
+ *
+ * @param value - Candidate revision.
+ * @param label - Human-readable graph kind.
+ * @returns Validated non-negative safe integer.
+ */
+function readWorkItemScheduleGraphRevision(value: unknown, label: string): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+    throw new WorkItemScheduleError(
+      400,
+      'InvalidWorkItemScheduleConfirmation',
+      `${label} is required.`,
+    )
+  }
+  return value
+}
+
+/**
+ * Reads and canonicalizes the complete Work Item revision snapshot returned by preview.
+ *
+ * @param value - Candidate revision snapshot from a confirmation request.
+ * @returns Qualified revisions in deterministic endpoint order.
+ */
+function readWorkItemScheduleEvaluationRevisions(
+  value: unknown,
+): WorkItemScheduleEvaluationRevision[] {
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.length > WORK_ITEM_SCHEDULE_CASCADE_LIMIT
+  ) {
+    throw new WorkItemScheduleError(
+      400,
+      'InvalidWorkItemScheduleConfirmation',
+      'Expected evaluated Work Item revisions are required.',
+    )
+  }
+  const revisions = value.map((entry) => {
+    if (
+      !isRecord(entry) ||
+      typeof entry.teamId !== 'string' ||
+      !entry.teamId.trim() ||
+      typeof entry.workItemId !== 'string' ||
+      !entry.workItemId.trim() ||
+      typeof entry.expectedRevision !== 'number' ||
+      !Number.isSafeInteger(entry.expectedRevision) ||
+      entry.expectedRevision < 1
+    ) {
+      throw new WorkItemScheduleError(
+        400,
+        'InvalidWorkItemScheduleConfirmation',
+        'Every evaluated Work Item revision must contain a Team ID, Work Item ID, and positive revision.',
+      )
+    }
+    return {
+      teamId: entry.teamId.trim(),
+      workItemId: entry.workItemId.trim(),
+      expectedRevision: entry.expectedRevision,
+    } satisfies WorkItemScheduleEvaluationRevision
+  }).sort(compareWorkItemScheduleEvaluationRevisions)
+  const keys = revisions.map((revision) => createWorkItemDependencyKey(revision))
+  if (new Set(keys).size !== keys.length) {
+    throw new WorkItemScheduleError(
+      400,
+      'InvalidWorkItemScheduleConfirmation',
+      'Expected evaluated Work Item revisions must identify distinct Work Items.',
+    )
+  }
+  return revisions
+}
+
+/**
+ * Reads and canonicalizes the exact impact list returned by a schedule preview.
+ *
+ * @param value - Candidate impacts copied into a confirmation request.
+ * @returns Canonical impacts in the preview's deterministic order.
+ */
+function readWorkItemScheduleImpacts(value: unknown): WorkItemScheduleImpact[] {
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.length > WORK_ITEM_SCHEDULE_CASCADE_LIMIT
+  ) {
+    throw new WorkItemScheduleError(
+      400,
+      'InvalidWorkItemScheduleConfirmation',
+      'Expected schedule preview impacts are required.',
+    )
+  }
+  return value.map((entry) => {
+    if (
+      !isRecord(entry) ||
+      typeof entry.teamId !== 'string' ||
+      !entry.teamId.trim() ||
+      typeof entry.workItemId !== 'string' ||
+      !entry.workItemId.trim() ||
+      (entry.kind !== 'direct' && entry.kind !== 'dependency') ||
+      typeof entry.expectedRevision !== 'number' ||
+      !Number.isSafeInteger(entry.expectedRevision) ||
+      entry.expectedRevision < 1 ||
+      typeof entry.dateDeltaDays !== 'number' ||
+      !Number.isSafeInteger(entry.dateDeltaDays) ||
+      (entry.dependencyId !== undefined &&
+        (typeof entry.dependencyId !== 'string' || !entry.dependencyId.trim()))
+    ) {
+      throw new WorkItemScheduleError(
+        400,
+        'InvalidWorkItemScheduleConfirmation',
+        'Every expected schedule impact must match the preview impact contract.',
+      )
+    }
+    try {
+      return {
+        teamId: entry.teamId.trim(),
+        workItemId: entry.workItemId.trim(),
+        kind: entry.kind,
+        expectedRevision: entry.expectedRevision,
+        before: normalizeWorkItemSchedule(entry.before),
+        after: normalizeWorkItemSchedule(entry.after),
+        dateDeltaDays: entry.dateDeltaDays,
+        ...(entry.dependencyId === undefined
+          ? {}
+          : { dependencyId: entry.dependencyId.trim() }),
+      } satisfies WorkItemScheduleImpact
+    } catch (error) {
+      if (error instanceof WorkItemScheduleError) {
+        throw new WorkItemScheduleError(
+          400,
+          'InvalidWorkItemScheduleConfirmation',
+          'Expected schedule preview impacts contain an invalid schedule.',
+        )
+      }
+      throw error
+    }
+  })
+}
+
+/**
+ * Requires recomputation to reproduce the exact direct and propagated preview impacts.
+ *
+ * @param actual - Canonical impacts from current server recomputation.
+ * @param expected - Canonical impacts copied from the user-visible preview.
+ */
+function requireMatchingWorkItemScheduleImpacts(
+  actual: readonly WorkItemScheduleImpact[],
+  expected: readonly WorkItemScheduleImpact[],
+) {
+  if (stableDigestStringify(actual) !== stableDigestStringify(expected)) {
+    throw new WorkItemScheduleError(
+      409,
+      'WorkItemSchedulePreviewStale',
+      'The confirmed schedule operation does not match the preview. Preview the change again.',
+    )
+  }
+}
+
+/**
+ * Requires confirmation to name the exact Work Item revisions used by recomputation.
+ *
+ * @param actual - Revisions participating in the current server recomputation.
+ * @param expected - Revisions copied from the user-visible preview.
+ * @param actualRootRevision - Direct revision observed during recomputation.
+ * @param expectedRootRevision - Direct revision copied from the user-visible preview.
+ */
+function requireMatchingWorkItemScheduleEvaluationRevisions(
+  actual: readonly WorkItemScheduleEvaluationRevision[],
+  expected: readonly WorkItemScheduleEvaluationRevision[],
+  actualRootRevision: number,
+  expectedRootRevision: number,
+) {
+  const canonicalActual = [...actual].sort(compareWorkItemScheduleEvaluationRevisions)
+  const matches = canonicalActual.length === expected.length &&
+    canonicalActual.every((revision, index) => {
+      const expectedRevision = expected[index]
+      return expectedRevision !== undefined &&
+        revision.teamId === expectedRevision.teamId &&
+        revision.workItemId === expectedRevision.workItemId &&
+        revision.expectedRevision === expectedRevision.expectedRevision
+    }) && actualRootRevision === expectedRootRevision
+  if (!matches) {
+    throw new WorkItemScheduleError(
+      409,
+      'WorkItemSchedulePreviewStale',
+      'A Work Item evaluated by the schedule preview changed. Preview the change again.',
+    )
+  }
+}
+
+/**
+ * Derives a Developer Platform-safe partition from an internal Workspace directory key.
+ *
+ * @param directoryId - Internal Workspace directory partition key.
+ * @returns Stable opaque Developer Platform Workspace identifier.
+ */
+function createWorkItemScheduleIdempotencyWorkspaceId(directoryId: string): string {
+  return `directory:${createHash('sha256').update(directoryId).digest('hex').slice(0, 48)}`
+}
+
+/**
+ * Derives a user-scoped credential namespace without persisting the Cognito identity.
+ *
+ * @param directoryId - Internal Workspace directory partition key.
+ * @param actorId - Immutable Cognito subject or username.
+ * @returns Stable opaque user credential identifier.
+ */
+function createWorkItemScheduleIdempotencyUserId(
+  directoryId: string,
+  actorId: string,
+): string {
+  const digest = createHash('sha256')
+    .update(`${directoryId}\0${actorId}`)
+    .digest('hex')
+    .slice(0, 48)
+  return `user:${digest}`
+}
+
+/**
+ * Validates the required user-provided key for one schedule confirmation.
+ *
+ * @param value - Raw `Idempotency-Key` header value.
+ * @returns A trimmed key safe for the Developer Platform idempotency port.
+ */
+function readRequiredWorkItemScheduleIdempotencyKey(value: string | undefined): string {
+  const key = value?.trim() ?? ''
+  const hasControlCharacter = [...key].some((character) => {
+    const codePoint = character.codePointAt(0)
+    return codePoint !== undefined && (codePoint <= 31 || codePoint === 127)
+  })
+  if (!key || key.length > 256 || hasControlCharacter) {
+    throw new WorkItemScheduleError(
+      400,
+      'InvalidWorkItemScheduleIdempotencyKey',
+      'Idempotency-Key must contain 1 to 256 characters without control characters.',
+    )
+  }
+  return key
+}
+
+/**
+ * Binds a schedule confirmation key to its exact HTTP method, path, and JSON body.
+ *
+ * @param method - Incoming HTTP method.
+ * @param path - Canonical request path.
+ * @param body - Parsed confirmation body.
+ * @returns Stable SHA-256 request fingerprint.
+ */
+function createWorkItemScheduleConfirmationFingerprint(
+  method: string,
+  path: string,
+  body: unknown,
+): string {
+  return createHash('sha256')
+    .update(`${method.toUpperCase()}\n${path}\n${stableDigestStringify(body)}`)
+    .digest('hex')
+}
+
+/**
+ * Reserves a schedule confirmation and maps persistence failures to its stable API contract.
+ *
+ * @param request - User-scoped idempotency reservation identity.
+ * @returns Reservation, in-progress, or completed replay decision.
+ */
+async function reserveWorkItemScheduleConfirmation(request: ReserveIdempotencyRequest) {
+  try {
+    return await developerPlatformDependencies.idempotency.reserveIdempotency(request)
+  } catch (error) {
+    if (error instanceof DeveloperPlatformError && error.code === 'IdempotencyKeyConflict') {
+      throw new WorkItemScheduleError(
+        409,
+        'WorkItemScheduleIdempotencyConflict',
+        'Idempotency-Key was already used for a different schedule confirmation.',
+      )
+    }
+    throw new WorkItemScheduleError(
+      503,
+      'WorkItemScheduleIdempotencyUnavailable',
+      'Schedule confirmation idempotency is unavailable.',
+    )
+  }
+}
+
+/** Mutation represented by one durable Planning Work Item dependency receipt. */
+type PlanningWorkItemDependencyReceiptOperation = 'create' | 'update' | 'delete'
+
+/** Stable schema discriminator for compact Planning Work Item dependency receipts. */
+const PLANNING_WORK_ITEM_DEPENDENCY_RECEIPT_SCHEMA =
+  'planning-work-item-dependency-mutation'
+
+/** Current compact Planning Work Item dependency receipt version. */
+const PLANNING_WORK_ITEM_DEPENDENCY_RECEIPT_VERSION = 1
+
+/**
+ * Validates the required request key for one Planning Work Item dependency mutation.
+ *
+ * @param value - Raw `Idempotency-Key` header value.
+ * @returns Trimmed key safe for the durable reservation port.
+ */
+function readRequiredPlanningWorkItemDependencyIdempotencyKey(
+  value: string | undefined,
+): string {
+  const key = value?.trim() ?? ''
+  const hasControlCharacter = [...key].some((character) => {
+    const codePoint = character.codePointAt(0)
+    return codePoint !== undefined && (codePoint <= 31 || codePoint === 127)
+  })
+  if (!key || key.length > 256 || hasControlCharacter) {
+    throw new PlanningError(
+      400,
+      'InvalidPlanningWorkItemDependencyIdempotencyKey',
+      'Idempotency-Key must contain 1 to 256 characters without control characters.',
+    )
+  }
+  return key
+}
+
+/**
+ * Creates the user-scoped reservation identity for one dependency mutation.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @param idempotencyKey - Validated caller-provided request key.
+ * @param method - Canonical HTTP method.
+ * @param path - Canonical API path, including the dependency ID when present.
+ * @param body - Parsed JSON body bound to the reservation.
+ * @returns Reservation request bound to the user, method, path, and stable body digest.
+ */
+function createPlanningWorkItemDependencyReservationRequest(
+  principal: WorkspacePrincipal,
+  idempotencyKey: string,
+  method: string,
+  path: string,
+  body: unknown,
+): ReserveIdempotencyRequest {
+  return {
+    workspaceId: createWorkItemScheduleIdempotencyWorkspaceId(principal.directoryId),
+    credentialId: createWorkItemScheduleIdempotencyUserId(
+      principal.directoryId,
+      principal.actorId,
+    ),
+    idempotencyKey,
+    requestFingerprint: createPlanningWorkItemDependencyFingerprint(method, path, body),
+  }
+}
+
+/**
+ * Binds one dependency mutation to its exact method, canonical path, and stable JSON body.
+ *
+ * @param method - Incoming HTTP method.
+ * @param path - Canonical API path.
+ * @param body - Parsed request body.
+ * @returns Stable SHA-256 request fingerprint.
+ */
+function createPlanningWorkItemDependencyFingerprint(
+  method: string,
+  path: string,
+  body: unknown,
+): string {
+  return createHash('sha256')
+    .update(`${method.toUpperCase()}\n${path}\n${stableDigestStringify(body)}`)
+    .digest('hex')
+}
+
+/**
+ * Reserves one dependency mutation and maps persistence failures to stable Planning errors.
+ *
+ * @param request - User-scoped reservation identity.
+ * @returns Reservation, in-progress, or completed replay decision.
+ */
+async function reservePlanningWorkItemDependencyMutation(request: ReserveIdempotencyRequest) {
+  try {
+    return await developerPlatformDependencies.idempotency.reserveIdempotency(request)
+  } catch (error) {
+    if (error instanceof DeveloperPlatformError && error.code === 'IdempotencyKeyConflict') {
+      throw new PlanningError(
+        409,
+        'PlanningWorkItemDependencyIdempotencyConflict',
+        'Idempotency-Key was already used for a different Work Item dependency mutation.',
+      )
+    }
+    throw planningWorkItemDependencyIdempotencyUnavailable()
+  }
+}
+
+/** Creates the stable failure used when dependency idempotency persistence is unavailable. */
+function planningWorkItemDependencyIdempotencyUnavailable(): PlanningError {
+  return new PlanningError(
+    503,
+    'PlanningWorkItemDependencyIdempotencyUnavailable',
+    'Work Item dependency idempotency is unavailable.',
+  )
+}
+
+/**
+ * Releases an incomplete dependency reservation without masking the route's original failure.
+ *
+ * @param request - Caller-owned incomplete reservation.
+ */
+async function releasePlanningWorkItemDependencyReservation(
+  request: ReleaseIdempotencyRequest,
+): Promise<void> {
+  await developerPlatformDependencies.idempotency
+    .releaseIdempotency(request)
+    .catch(() => undefined)
+}
+
+/** Creates the stable failure used when a durable dependency replay receipt is malformed. */
+function invalidStoredPlanningWorkItemDependencyMutationReceipt(): PlanningError {
+  return new PlanningError(
+    503,
+    'InvalidStoredPlanningWorkItemDependencyMutationReceipt',
+    'The stored Work Item dependency mutation receipt is invalid.',
+  )
+}
+
+/**
+ * Reads one identifier from an encrypted dependency receipt.
+ *
+ * @param value - Candidate identifier.
+ * @returns Validated non-empty identifier.
+ */
+function readStoredPlanningWorkItemDependencyIdentifier(value: unknown): string {
+  if (
+    typeof value !== 'string' ||
+    !value.trim() ||
+    value !== value.trim() ||
+    value.length > 256
+  ) {
+    throw invalidStoredPlanningWorkItemDependencyMutationReceipt()
+  }
+  return value
+}
+
+/**
+ * Reads one exact qualified endpoint from an encrypted dependency receipt.
+ *
+ * @param value - Candidate endpoint.
+ * @returns Validated detached endpoint.
+ */
+function readStoredPlanningWorkItemDependencyEndpoint(
+  value: unknown,
+): WorkItemDependencyEndpoint {
+  if (!isRecord(value)) {
+    throw invalidStoredPlanningWorkItemDependencyMutationReceipt()
+  }
+  const endpoint = {
+    teamId: readStoredPlanningWorkItemDependencyIdentifier(value.teamId),
+    workItemId: readStoredPlanningWorkItemDependencyIdentifier(value.workItemId),
+  }
+  if (stableDigestStringify(endpoint) !== stableDigestStringify(value)) {
+    throw invalidStoredPlanningWorkItemDependencyMutationReceipt()
+  }
+  return endpoint
+}
+
+/**
+ * Tests whether a receipt value is one canonical supported schedule date.
+ *
+ * @param value - Candidate date.
+ * @returns Whether the value is a real `YYYY-MM-DD` date within supported years.
+ */
+function isStoredPlanningWorkItemDependencyDate(value: unknown): value is string {
+  if (
+    typeof value !== 'string' ||
+    !/^\d{4}-\d{2}-\d{2}$/u.test(value) ||
+    Number(value.slice(0, 4)) < WORK_ITEM_SCHEDULE_MIN_YEAR
+  ) {
+    return false
+  }
+  const date = new Date(`${value}T00:00:00.000Z`)
+  return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value
+}
+
+/**
+ * Reads one exact dependency constraint from an encrypted receipt.
+ *
+ * @param value - Candidate constraint.
+ * @returns Validated detached constraint.
+ */
+function readStoredPlanningWorkItemDependencyConstraint(
+  value: unknown,
+): ScheduleDependencyConstraint {
+  if (
+    !isRecord(value) ||
+    (value.anchor !== 'start' && value.anchor !== 'finish') ||
+    (value.kind !== 'on' && value.kind !== 'not-before' && value.kind !== 'not-after') ||
+    !isStoredPlanningWorkItemDependencyDate(value.date)
+  ) {
+    throw invalidStoredPlanningWorkItemDependencyMutationReceipt()
+  }
+  const constraint: ScheduleDependencyConstraint = {
+    anchor: value.anchor,
+    kind: value.kind,
+    date: value.date,
+  }
+  if (stableDigestStringify(constraint) !== stableDigestStringify(value)) {
+    throw invalidStoredPlanningWorkItemDependencyMutationReceipt()
+  }
+  return constraint
+}
+
+/**
+ * Reads one canonical ISO timestamp from an encrypted dependency receipt.
+ *
+ * @param value - Candidate timestamp.
+ * @returns Validated timestamp.
+ */
+function readStoredPlanningWorkItemDependencyTimestamp(value: unknown): string {
+  if (typeof value !== 'string') {
+    throw invalidStoredPlanningWorkItemDependencyMutationReceipt()
+  }
+  const epoch = Date.parse(value)
+  if (!Number.isFinite(epoch) || new Date(epoch).toISOString() !== value) {
+    throw invalidStoredPlanningWorkItemDependencyMutationReceipt()
+  }
+  return value
+}
+
+/**
+ * Reads one exact canonical dependency from an encrypted replay receipt.
+ *
+ * @param value - Candidate dependency.
+ * @returns Validated detached dependency.
+ */
+function readStoredPlanningWorkItemDependency(
+  value: unknown,
+): WorkItemScheduleDependency {
+  if (!isRecord(value)) {
+    throw invalidStoredPlanningWorkItemDependencyMutationReceipt()
+  }
+  const type = value.type
+  if (
+    type !== 'finish-to-start' &&
+    type !== 'start-to-start' &&
+    type !== 'finish-to-finish' &&
+    type !== 'start-to-finish'
+  ) {
+    throw invalidStoredPlanningWorkItemDependencyMutationReceipt()
+  }
+  if (
+    typeof value.lagDays !== 'number' ||
+    !Number.isSafeInteger(value.lagDays) ||
+    Math.abs(value.lagDays) > WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS
+  ) {
+    throw invalidStoredPlanningWorkItemDependencyMutationReceipt()
+  }
+  const createdAt = readStoredPlanningWorkItemDependencyTimestamp(value.createdAt)
+  const updatedAt = readStoredPlanningWorkItemDependencyTimestamp(value.updatedAt)
+  if (updatedAt < createdAt) {
+    throw invalidStoredPlanningWorkItemDependencyMutationReceipt()
+  }
+  const dependency: WorkItemScheduleDependency = {
+    id: readStoredPlanningWorkItemDependencyIdentifier(value.id),
+    predecessor: readStoredPlanningWorkItemDependencyEndpoint(value.predecessor),
+    successor: readStoredPlanningWorkItemDependencyEndpoint(value.successor),
+    type,
+    lagDays: value.lagDays,
+    ...(value.constraint === undefined
+      ? {}
+      : { constraint: readStoredPlanningWorkItemDependencyConstraint(value.constraint) }),
+    createdAt,
+    updatedAt,
+  }
+  if (stableDigestStringify(dependency) !== stableDigestStringify(value)) {
+    throw invalidStoredPlanningWorkItemDependencyMutationReceipt()
+  }
+  return dependency
+}
+
+/**
+ * Resolves the original successful status for one dependency mutation operation.
+ *
+ * @param operation - Receipt operation.
+ * @returns `201` for create and `200` for update or delete.
+ */
+function resolvePlanningWorkItemDependencyReceiptStatus(
+  operation: PlanningWorkItemDependencyReceiptOperation,
+): 200 | 201 {
+  return operation === 'create' ? 201 : 200
+}
+
+/**
+ * Strictly validates one compact dependency mutation replay receipt.
+ *
+ * @param value - Candidate Developer Platform replay response.
+ * @param workspaceId - Opaque Workspace reservation identity expected by the route.
+ * @param operation - Expected mutation operation.
+ * @param dependencyId - Dependency identity bound to the canonical path or create body.
+ * @returns Validated dependency, committed revision, and original response status.
+ */
+function readStoredPlanningWorkItemDependencyMutationReceipt(
+  value: unknown,
+  workspaceId: string,
+  operation: PlanningWorkItemDependencyReceiptOperation,
+  dependencyId: string,
+) {
+  if (!isRecord(value) || !isRecord(value.body)) {
+    throw invalidStoredPlanningWorkItemDependencyMutationReceipt()
+  }
+  const status = resolvePlanningWorkItemDependencyReceiptStatus(operation)
+  const body = value.body
+  const revision = body.revision
+  if (
+    body.schema !== PLANNING_WORK_ITEM_DEPENDENCY_RECEIPT_SCHEMA ||
+    body.version !== PLANNING_WORK_ITEM_DEPENDENCY_RECEIPT_VERSION ||
+    body.workspaceId !== workspaceId ||
+    body.operation !== operation ||
+    body.status !== status ||
+    value.status !== status ||
+    typeof revision !== 'number' ||
+    !Number.isSafeInteger(revision) ||
+    revision < 1
+  ) {
+    throw invalidStoredPlanningWorkItemDependencyMutationReceipt()
+  }
+  const dependency = readStoredPlanningWorkItemDependency(body.dependency)
+  if (dependency.id !== dependencyId) {
+    throw invalidStoredPlanningWorkItemDependencyMutationReceipt()
+  }
+  const receipt = {
+    schema: PLANNING_WORK_ITEM_DEPENDENCY_RECEIPT_SCHEMA,
+    version: PLANNING_WORK_ITEM_DEPENDENCY_RECEIPT_VERSION,
+    workspaceId,
+    operation,
+    dependency,
+    revision,
+    status,
+  }
+  if (stableDigestStringify({ status, body: receipt }) !== stableDigestStringify(value)) {
+    throw invalidStoredPlanningWorkItemDependencyMutationReceipt()
+  }
+  return { dependency, revision, status }
+}
+
+/**
+ * Reauthorizes both stored endpoints and loads the current filtered Planning snapshot.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @param dependency - Strictly validated stored dependency.
+ * @param operation - Stored mutation operation.
+ * @param committedRevision - Planning revision atomically committed with the receipt.
+ * @returns Current Planning snapshot visible to the principal.
+ */
+async function readPlanningWorkItemDependencyReplaySnapshot(
+  principal: WorkspacePrincipal,
+  dependency: WorkItemScheduleDependency,
+  operation: PlanningWorkItemDependencyReceiptOperation,
+  committedRevision: number,
+): Promise<PlanningSnapshot> {
+  await Promise.all([
+    requirePlanningWorkItemEndpointPermission(principal, dependency.predecessor, 'manager'),
+    requirePlanningWorkItemEndpointPermission(principal, dependency.successor, 'manager'),
+  ])
+  const workItemState = await readPlanningWorkItemState(principal)
+  const snapshot = await workItemDependencies.planning.get(principal.directoryId, workItemState)
+  if (snapshot.revision < committedRevision) {
+    throw invalidStoredPlanningWorkItemDependencyMutationReceipt()
+  }
+  if (snapshot.revision === committedRevision) {
+    const current = snapshot.workItemDependencies.find((candidate) =>
+      candidate.id === dependency.id
+    )
+    const stateMatches = operation === 'delete'
+      ? current === undefined
+      : current !== undefined &&
+        stableDigestStringify(current) === stableDigestStringify(dependency)
+    if (!stateMatches) {
+      throw invalidStoredPlanningWorkItemDependencyMutationReceipt()
+    }
+  }
+  return filterPlanningSnapshotForPrincipal(principal, snapshot)
+}
+
+/**
+ * Copies exactly the canonical dependency fields allowed in a compact receipt.
+ *
+ * @param dependency - Domain-produced committed dependency.
+ * @returns Detached receipt-safe dependency.
+ */
+function createPlanningWorkItemDependencyReceiptValue(
+  dependency: WorkItemScheduleDependency,
+): WorkItemScheduleDependency {
+  return {
+    id: dependency.id,
+    predecessor: { ...dependency.predecessor },
+    successor: { ...dependency.successor },
+    type: dependency.type,
+    lagDays: dependency.lagDays,
+    ...(dependency.constraint === undefined
+      ? {}
+      : { constraint: { ...dependency.constraint } }),
+    createdAt: dependency.createdAt,
+    updatedAt: dependency.updatedAt,
+  }
+}
+
+/**
+ * Creates the atomic compact receipt contribution for one dependency mutation.
+ *
+ * @param workspaceId - Opaque Workspace reservation identity.
+ * @param token - Reservation token owned by this request.
+ * @param operation - Mutation operation persisted in the receipt.
+ * @param dependencyId - Expected committed dependency identity.
+ * @returns Planning transaction contribution, or undefined when persistence is unavailable.
+ */
+function createPlanningWorkItemDependencyIdempotencyTransaction(
+  workspaceId: string,
+  token: IdempotencyMutationToken,
+  operation: PlanningWorkItemDependencyReceiptOperation,
+  dependencyId: string,
+): PlanningMutationTransaction | undefined {
+  const prepare = developerPlatformDependencies.transactions
+    .prepareIdempotencyCompletionTransactWrite
+  if (!prepare) return undefined
+  const status = resolvePlanningWorkItemDependencyReceiptStatus(operation)
+  return {
+    async prepare(result) {
+      const expectedKind = operation === 'delete' ? 'delete' : 'upsert'
+      if (
+        result.kind !== expectedKind ||
+        result.dependency.id !== dependencyId ||
+        !Number.isSafeInteger(result.revision) ||
+        result.revision < 1
+      ) {
+        throw invalidStoredPlanningWorkItemDependencyMutationReceipt()
+      }
+      const receipt = {
+        schema: PLANNING_WORK_ITEM_DEPENDENCY_RECEIPT_SCHEMA,
+        version: PLANNING_WORK_ITEM_DEPENDENCY_RECEIPT_VERSION,
+        workspaceId,
+        operation,
+        dependency: createPlanningWorkItemDependencyReceiptValue(result.dependency),
+        revision: result.revision,
+        status,
+      }
+      return prepare.call(developerPlatformDependencies.transactions, {
+        workspaceId,
+        credentialId: token.credentialId,
+        idempotencyKey: token.idempotencyKey,
+        requestFingerprint: token.requestFingerprint,
+        reservationId: token.reservationId,
+        response: { status, body: receipt },
+      })
+    },
+  }
+}
+
+/** Creates the stable failure used when a durable schedule replay receipt is malformed. */
+function invalidStoredWorkItemScheduleConfirmationResponse(): WorkItemScheduleError {
+  return new WorkItemScheduleError(
+    503,
+    'InvalidStoredWorkItemScheduleConfirmationResponse',
+    'The stored schedule confirmation response is invalid.',
+  )
+}
+
+/** Validated compact schedule replay receipt and its current-authorization fence. */
+type StoredWorkItemScheduleConfirmation = {
+  /** Exact public response committed by the original confirmation. */
+  response: ConfirmWorkItemScheduleChangeResponse
+  /** Every server-derived Work Item endpoint that influenced the original confirmation. */
+  authorizationEndpoints: WorkItemScheduleEvaluationRevision[]
+}
+
+/**
+ * Revalidates one compact schedule result stored in an encrypted replay receipt.
+ *
+ * @param value - Candidate compact result.
+ * @returns Exact validated schedule result.
+ */
+function readStoredWorkItemScheduleConfirmationWorkItem(
+  value: unknown,
+): ConfirmedWorkItemSchedule {
+  if (!isRecord(value)) {
+    throw invalidStoredWorkItemScheduleConfirmationResponse()
+  }
+  try {
+    const id = readPlanningIdentifier(value.id, 'Stored Work Item ID')
+    const teamId = readPlanningIdentifier(value.teamId, 'Stored Team ID')
+    const revision = readWorkItemExpectedRevision(value.revision)
+    const schedule = normalizeWorkItemSchedule(value.schedule)
+    const dueDate = typeof value.dueDate === 'string' ? value.dueDate : ''
+    const assignedProjectId = value.assignedProjectId === undefined
+      ? undefined
+      : readPlanningIdentifier(value.assignedProjectId, 'Stored Project ID')
+    const item: ConfirmedWorkItemSchedule = {
+      id,
+      teamId,
+      revision,
+      schedule,
+      dueDate,
+      ...(assignedProjectId ? { assignedProjectId } : {}),
+    }
+    if (stableDigestStringify(item) !== stableDigestStringify(value)) {
+      throw invalidStoredWorkItemScheduleConfirmationResponse()
+    }
+    if (dueDate !== deriveWorkItemScheduleDueDate(schedule)) {
+      throw invalidStoredWorkItemScheduleConfirmationResponse()
+    }
+    return item
+  } catch (error) {
+    if (
+      error instanceof WorkItemScheduleError &&
+      error.code === 'InvalidStoredWorkItemScheduleConfirmationResponse'
+    ) {
+      throw error
+    }
+    throw invalidStoredWorkItemScheduleConfirmationResponse()
+  }
+}
+
+/**
+ * Reads and cross-checks the exact response committed with a schedule cascade.
+ *
+ * @param value - Candidate Developer Platform replay payload.
+ * @param rootTeamId - Team from the replay request path.
+ * @param rootWorkItemId - Work Item from the replay request path.
+ * @returns Exact successful response body and every endpoint that must be reauthorized.
+ */
+function readStoredWorkItemScheduleConfirmationResponse(
+  value: unknown,
+  rootTeamId: string,
+  rootWorkItemId: string,
+): StoredWorkItemScheduleConfirmation {
+  if (!isRecord(value) || value.status !== 200 || !isRecord(value.body)) {
+    throw invalidStoredWorkItemScheduleConfirmationResponse()
+  }
+  if (
+    !Array.isArray(value.body.workItems) ||
+    value.body.workItems.length === 0 ||
+    value.body.workItems.length > WORK_ITEM_SCHEDULE_CASCADE_LIMIT
+  ) {
+    throw invalidStoredWorkItemScheduleConfirmationResponse()
+  }
+  const workItems = value.body.workItems.map((item) =>
+    readStoredWorkItemScheduleConfirmationWorkItem(item)
+  )
+  let authorizationEndpoints: WorkItemScheduleEvaluationRevision[]
+  try {
+    authorizationEndpoints = readWorkItemScheduleEvaluationRevisions(
+      value.body.authorizationEndpoints,
+    )
+  } catch {
+    throw invalidStoredWorkItemScheduleConfirmationResponse()
+  }
+  const response: ConfirmWorkItemScheduleChangeResponse = { workItems }
+  const endpointKeys = workItems.map((item) => createWorkItemDependencyKey({
+    teamId: item.teamId,
+    workItemId: item.id,
+  }))
+  const authorizationRevisions = new Map(authorizationEndpoints.map((endpoint) => [
+    createWorkItemDependencyKey(endpoint),
+    endpoint.expectedRevision,
+  ]))
+  const root = workItems[0]
+  if (
+    root?.teamId !== rootTeamId ||
+    root.id !== rootWorkItemId ||
+    new Set(endpointKeys).size !== endpointKeys.length ||
+    workItems.some((item) =>
+      authorizationRevisions.get(createWorkItemDependencyKey({
+        teamId: item.teamId,
+        workItemId: item.id,
+      })) !== item.revision - 1
+    ) ||
+    stableDigestStringify({
+      status: 200,
+      body: { workItems, authorizationEndpoints },
+    }) !== stableDigestStringify(value)
+  ) {
+    throw invalidStoredWorkItemScheduleConfirmationResponse()
+  }
+  return { response, authorizationEndpoints }
+}
+
+/**
+ * Re-evaluates current write access for every endpoint contained in a replay receipt.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @param authorizationEndpoints - Validated endpoints that influenced the stored confirmation.
+ */
+async function requireWorkItemScheduleConfirmationReplayAuthorization(
+  principal: WorkspacePrincipal,
+  authorizationEndpoints: readonly WorkItemScheduleEvaluationRevision[],
+): Promise<void> {
+  const scopedPrincipal = await createWorkItemScheduleScopedPrincipal(principal, 'member')
+  for (const endpoint of authorizationEndpoints) {
+    await requirePlanningWorkItemEndpointPermission(scopedPrincipal, {
+      teamId: endpoint.teamId,
+      workItemId: endpoint.workItemId,
+    }, 'member')
+  }
+}
+
+/**
+ * Orders evaluated Work Item revisions by their qualified endpoint key.
+ *
+ * @param left - Left revision.
+ * @param right - Right revision.
+ * @returns Locale comparison result for deterministic ordering.
+ */
+function compareWorkItemScheduleEvaluationRevisions(
+  left: WorkItemScheduleEvaluationRevision,
+  right: WorkItemScheduleEvaluationRevision,
+) {
+  return createWorkItemDependencyKey(left).localeCompare(createWorkItemDependencyKey(right))
+}
+
+/**
+ * Creates an unambiguous Team-owned Project scope key for authorization filtering.
+ *
+ * @param teamId - Canonical owner Team identifier.
+ * @param projectId - Team-local Project identifier.
+ * @returns Qualified key that does not collide across Teams.
+ */
+function createPlanningProjectScopeKey(teamId: string, projectId: string): string {
+  return `${teamId}\0${projectId}`
+}
+
 function filterPlanningSnapshotForPrincipal(
   principal: ProjectPrincipal,
   snapshot: PlanningSnapshot,
@@ -18863,13 +21048,19 @@ function filterPlanningSnapshotForPrincipal(
     return snapshot
   }
 
-  const projectIds = new Set(
-    (principal.enterpriseProjectAccesses ?? []).map((access) => access.projectId),
+  const projectScopeKeys = new Set(
+    (principal.enterpriseProjectAccesses ?? []).flatMap((access) =>
+      access.teamId
+        ? [createPlanningProjectScopeKey(access.teamId, access.projectId)]
+        : []
+    ),
   )
   const teamIds = new Set(principal.enterpriseAuthorizedTeamIds ?? [])
   const entities = snapshot.entities
     .filter((entity) => entity.projectId !== undefined
-      ? projectIds.has(entity.projectId)
+      ? entity.teamId !== undefined && projectScopeKeys.has(
+          createPlanningProjectScopeKey(entity.teamId, entity.projectId),
+        )
       : entity.teamId !== undefined && teamIds.has(entity.teamId))
   const entityIds = new Set(entities.map((entity) => entity.id))
   const scopedEntities = entities.map((entity) => (
@@ -18880,10 +21071,30 @@ function filterPlanningSnapshotForPrincipal(
   const dependencies = snapshot.dependencies.filter((dependency) =>
     entityIds.has(dependency.predecessorId) && entityIds.has(dependency.successorId)
   )
+  const workItems = snapshot.workItems.filter((workItem) =>
+    workItem.projectId !== undefined
+      ? projectScopeKeys.has(
+          createPlanningProjectScopeKey(workItem.teamId, workItem.projectId),
+        )
+      : teamIds.has(workItem.teamId)
+  )
+  const workItemKeys = new Set(workItems.map((workItem) =>
+    createWorkItemDependencyKey({ teamId: workItem.teamId, workItemId: workItem.id })
+  ))
+  const workItemDependencies = snapshot.workItemDependencies.filter((dependency) =>
+    workItemKeys.has(createWorkItemDependencyKey(dependency.predecessor)) &&
+    workItemKeys.has(createWorkItemDependencyKey(dependency.successor))
+  )
   const workItemLinks = snapshot.workItemLinks
     .filter((link) => link.projectId !== undefined
-      ? projectIds.has(link.projectId)
+      ? projectScopeKeys.has(
+          createPlanningProjectScopeKey(link.teamId, link.projectId),
+        )
       : teamIds.has(link.teamId))
+    .filter((link) => workItemKeys.has(createWorkItemDependencyKey({
+      teamId: link.teamId,
+      workItemId: link.workItemId,
+    })))
     .map((link) => ({
       ...link,
       ...(link.cycleId && entityIds.has(link.cycleId)
@@ -18906,12 +21117,9 @@ function filterPlanningSnapshotForPrincipal(
     ...snapshot,
     entities: scopedEntities,
     dependencies,
+    workItemDependencies,
     workItemLinks,
-    workItems: snapshot.workItems.filter((workItem) =>
-      workItem.projectId !== undefined
-        ? projectIds.has(workItem.projectId)
-        : teamIds.has(workItem.teamId)
-    ),
+    workItems,
     criticalPath: {
       entityIds: criticalEntityIds,
       totalDurationDays: criticalEntityIds.length === snapshot.criticalPath.entityIds.length
@@ -18919,6 +21127,11 @@ function filterPlanningSnapshotForPrincipal(
         : 0,
       slackByEntityId,
     },
+    workItemDependencySummary: createPlanningWorkItemDependencySummary(
+      workItemDependencies,
+      workItems,
+      workItemLinks,
+    ),
   }
 }
 
@@ -19243,6 +21456,60 @@ function rejectInternalWorkItemUpdateFields(input: PublicUpdateTeamIssueRequestB
       400,
       'InvalidWorkItemArchiveUpdate',
       'Work Item archive fields cannot be updated through this endpoint.',
+    )
+  }
+  rejectWorkItemInternalFields(input, [
+    'authorizationConditionChecks',
+    'authorizationSnapshot',
+    'configurationConditionChecks',
+    'planningRevisionFence',
+    'statusCategory',
+    'workflowSchemaVersion',
+  ])
+}
+
+/**
+ * Rejects adapter-owned fields at an untrusted Work Item create boundary.
+ *
+ * @param input - Untrusted create body.
+ */
+function rejectInternalWorkItemCreateFields(input: unknown): void {
+  rejectDerivedWorkItemScheduleFields(input)
+  rejectWorkItemInternalFields(input, [
+    'authorizationConditionChecks',
+    'authorizationSnapshot',
+    'configurationConditionChecks',
+    'idempotencyResourceId',
+    'idempotentIssueId',
+    'idempotentRequestDigest',
+    'statusCategory',
+    'workflowSchemaVersion',
+  ])
+}
+
+/**
+ * Rejects named internal fields before normalization can spread an untrusted object.
+ *
+ * @param input - Untrusted Work Item body already narrowed to a record.
+ * @param fields - Adapter-owned field names forbidden at the boundary.
+ */
+function rejectWorkItemInternalFields(
+  input: unknown,
+  fields: readonly string[],
+): void {
+  if (!isRecord(input)) {
+    throw new ProjectDataError(
+      400,
+      'InvalidProjectWrite',
+      'Work Item body must be an object.',
+    )
+  }
+  const suppliedFields = fields.filter((field) => field in input)
+  if (suppliedFields.length > 0) {
+    throw new ProjectDataError(
+      400,
+      'InvalidProjectWrite',
+      `Work Item body contains internal fields: ${suppliedFields.join(', ')}.`,
     )
   }
 }
@@ -20138,6 +22405,119 @@ function createWorkItemAuthorizationSnapshot(
   }
 }
 
+/**
+ * Captures the Planning revision that serializes a Work Item Project assignment with archive.
+ *
+ * @param principal - Principal authorized to mutate the Work Item.
+ * @returns Authorization snapshot bound to the current unfiltered Planning revision.
+ */
+async function createPlanningFencedWorkItemAuthorizationSnapshot(
+  principal: WorkspacePrincipal,
+): Promise<WorkItemAuthorizationSnapshot> {
+  const planningState = await workItemDependencies.planning.getAuthorizationState(
+    principal.directoryId,
+  )
+  return createWorkItemAuthorizationSnapshot(principal, planningState.revision)
+}
+
+/**
+ * Validates that a Work Item has no incident schedule dependency and captures mutation fences.
+ *
+ * @param principal - Principal authorized to mutate the Work Item.
+ * @param teamId - Owning Team identifier.
+ * @param workItemId - Team-local Work Item identifier.
+ * @returns Authorization snapshot bound to the exact unfiltered Planning revision checked.
+ */
+async function createDependencyFencedWorkItemAuthorizationSnapshot(
+  principal: WorkspacePrincipal,
+  teamId: string,
+  workItemId: string,
+): Promise<WorkItemAuthorizationSnapshot> {
+  const planningState = await workItemDependencies.planning.getAuthorizationState(
+    principal.directoryId,
+  )
+  if (planningState.workItemDependencies === undefined) {
+    throw new PlanningError(
+      503,
+      'PlanningWorkItemDependencyStateUnavailable',
+      'Work Item dependency state is unavailable for mutation validation.',
+    )
+  }
+  requirePlanningWorkItemHasNoScheduleDependencies(
+    planningState.workItemDependencies,
+    teamId,
+    workItemId,
+  )
+  return createWorkItemAuthorizationSnapshot(principal, planningState.revision)
+}
+
+/**
+ * Creates transaction checks for caller authorization sources outside the Planning graph.
+ *
+ * Planning META is intentionally excluded because the Planning client's own revision CAS already
+ * fences it. Project ACL writes advance the active Workspace member version, while enterprise
+ * role and assignment writes advance the optional CONTROL revision.
+ *
+ * @param principal - Principal whose endpoint-manager permissions were evaluated.
+ * @returns Workspace member and optional enterprise CONTROL condition checks.
+ */
+function createPlanningCallerAuthorizationConditionChecks(
+  principal: WorkspacePrincipal,
+): PlanningCallerAuthorizationConditionCheck[] {
+  const workspaceMemberCheck = {
+    ConditionCheck: {
+      TableName:
+        getEnv('MUKUROJI_WORKSPACE_ACCESS_TABLE') ??
+        getEnv('WORKSPACE_ACCESS_TABLE_NAME') ??
+        'mukuroji-workspace-access-local',
+      Key: {
+        workspaceId: principal.directoryId,
+        recordKey: `MEMBER#${normalizeProjectMemberKey(principal.userKey)}`,
+      },
+      ConditionExpression:
+        '#entryType = :memberEntryType AND #status = :active AND #version = :expectedVersion',
+      ExpressionAttributeNames: {
+        '#entryType': 'entryType',
+        '#status': 'status',
+        '#version': 'version',
+      },
+      ExpressionAttributeValues: {
+        ':memberEntryType': 'workspace-member',
+        ':active': 'active',
+        ':expectedVersion': principal.workspaceMember.version,
+      },
+    },
+  } satisfies PlanningCallerAuthorizationConditionCheck
+  const enterpriseTableName = getEnv('ENTERPRISE_IDENTITY_TABLE_NAME')?.trim()
+  const controlRevision = principal.enterpriseIdentityControlRevision
+  if (!enterpriseTableName || controlRevision === undefined) return [workspaceMemberCheck]
+
+  const expressionAttributeNames: Record<string, string> = {
+    '#controlRevision': 'controlRevision',
+    '#entryType': 'entryType',
+  }
+  if (controlRevision === 0) expressionAttributeNames['#scopeKey'] = 'scopeKey'
+  const enterpriseControlCheck = {
+    ConditionCheck: {
+      TableName: enterpriseTableName,
+      Key: {
+        scopeKey: `WORKSPACE#${principal.directoryId}`,
+        recordKey: 'CONTROL',
+      },
+      ConditionExpression: controlRevision === 0
+        ? '(attribute_not_exists(#scopeKey) OR ' +
+          '(#entryType = :controlEntryType AND #controlRevision = :expectedControlRevision))'
+        : '#entryType = :controlEntryType AND #controlRevision = :expectedControlRevision',
+      ExpressionAttributeNames: expressionAttributeNames,
+      ExpressionAttributeValues: {
+        ':controlEntryType': 'enterprise-identity-control',
+        ':expectedControlRevision': controlRevision,
+      },
+    },
+  } satisfies PlanningCallerAuthorizationConditionCheck
+  return [workspaceMemberCheck, enterpriseControlCheck]
+}
+
 async function resolveStableWorkItemAuthorization<T>(
   workspaceId: string,
   resolvePrincipal: () => Promise<WorkspacePrincipal>,
@@ -20229,6 +22609,45 @@ function createWorkItemIdempotencyTransaction(
 }
 
 /**
+ * Persists the adapter-produced compact schedule result as the exact replay response.
+ *
+ * @param workspaceId - Workspace that owns the idempotency reservation.
+ * @param token - Reservation token bound to the confirmation request.
+ * @param authorizationEndpoints - Server-derived endpoints that influenced the confirmation.
+ * @returns Transaction contribution that stores the compact HTTP response.
+ */
+function createWorkItemScheduleConfirmationIdempotencyTransaction(
+  workspaceId: string,
+  token: IdempotencyMutationToken,
+  authorizationEndpoints: readonly WorkItemScheduleEvaluationRevision[],
+): WorkItemIdempotencyTransaction | undefined {
+  const transaction = createWorkItemIdempotencyTransaction(workspaceId, token)
+  if (!transaction) return undefined
+  return {
+    async prepare(response) {
+      if (
+        response.status !== 200 ||
+        !isRecord(response.body) ||
+        !Array.isArray(response.body.workItems)
+      ) {
+        throw new WorkItemScheduleError(
+          503,
+          'InvalidWorkItemScheduleCascadeReceipt',
+          'The schedule cascade produced an invalid durable receipt.',
+        )
+      }
+      return transaction.prepare({
+        status: 200,
+        body: {
+          workItems: response.body.workItems,
+          authorizationEndpoints,
+        },
+      })
+    },
+  }
+}
+
+/**
  * Canonical Work Item を一度だけ materialize する identity です。
  */
 export type IdempotentWorkItemCreate = {
@@ -20247,6 +22666,7 @@ async function createCanonicalPublicWorkItem(
   idempotentCreate?: IdempotentWorkItemCreate,
   authorizationSnapshot?: WorkItemAuthorizationSnapshot,
 ) {
+  rejectInternalWorkItemCreateFields(input)
   requireWorkspaceBusinessWrite(principal)
   const permission = await requireTeamPermission(principal, teamId, 'member')
   const body = normalizeTeamIssueInput(input, permission.team)
@@ -20374,6 +22794,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
 
     async authorizeCreate(credential, input) {
       const { teamId, ...workItemInput } = input
+      rejectInternalWorkItemCreateFields(workItemInput)
       const principal = await resolveDeveloperCredentialPrincipal(credential, {
         permission: 'work-items.write',
         teamId,
@@ -20395,6 +22816,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
 
     async create(credential, input, context) {
       const { teamId, ...workItemInput } = input
+      rejectInternalWorkItemCreateFields(workItemInput)
       const authorization = await resolveStableWorkItemAuthorization(
         credential.workspaceId,
         async () => await resolveDeveloperCredentialPrincipal(credential, {
@@ -20435,6 +22857,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
     },
 
     async authorizeUpdate(credential, teamId, workItemId, input) {
+      rejectInternalWorkItemUpdateFields(input)
       const principal = await resolveDeveloperCredentialPrincipal(credential, {
         permission: 'work-items.write',
         teamId,
@@ -20471,6 +22894,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
       mutationContext,
       idempotency,
     ) {
+      rejectInternalWorkItemUpdateFields(input)
       const authorization = await resolveStableWorkItemAuthorization(
         credential.workspaceId,
         async () => await resolveDeveloperCredentialPrincipal(credential, {
@@ -20500,11 +22924,29 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
             readAssignedProjectId(body.assignedProjectId),
             'member',
           )
-          return { body, detail }
+          const dependencyAuthorizationSnapshot =
+            'schedule' in body &&
+              body.schedule !== undefined &&
+              stableDigestStringify(body.schedule) !==
+                stableDigestStringify(detail.issue.schedule)
+              ? await createDependencyFencedWorkItemAuthorizationSnapshot(
+                  principal,
+                  teamId,
+                  workItemId,
+                )
+              : undefined
+          return { body, detail, dependencyAuthorizationSnapshot }
         },
       )
       const { principal, authorizationSnapshot } = authorization
-      const { body, detail } = authorization.value
+      const { body, detail, dependencyAuthorizationSnapshot } = authorization.value
+      if (
+        dependencyAuthorizationSnapshot &&
+        dependencyAuthorizationSnapshot.planningRevision !==
+          authorizationSnapshot.planningRevision
+      ) {
+        throw createWorkItemAuthorizationChangedError()
+      }
       const expectedRevision = readWorkItemExpectedRevision(body.expectedRevision)
       const resolvedConfiguration = await workItemDependencies.workItemConfigurations.getTeamConfiguration(
         principal.directoryId,
@@ -20598,9 +23040,20 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
         async (principal) => {
           requireWorkspaceBusinessWrite(principal)
           await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'member')
+          return await createDependencyFencedWorkItemAuthorizationSnapshot(
+            principal,
+            teamId,
+            workItemId,
+          )
         },
       )
       const { principal, authorizationSnapshot } = authorization
+      if (
+        authorization.value.planningRevision !==
+          authorizationSnapshot.planningRevision
+      ) {
+        throw createWorkItemAuthorizationChangedError()
+      }
       const externalLinks = await developerPlatformDependencies.externalLinks.listExternalWorkItemLinks({
         workspaceId: principal.directoryId,
         teamId,
@@ -22069,6 +24522,7 @@ function mapPublicApiAdapterError(error: unknown) {
     error instanceof ProjectDataError ||
     error instanceof WorkspaceAccessError ||
     error instanceof WorkItemConfigurationError ||
+    error instanceof PlanningError ||
     error instanceof DocumentError ||
     error instanceof CognitoServiceError
   ) {

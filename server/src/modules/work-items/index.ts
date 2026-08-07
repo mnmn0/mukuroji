@@ -7,6 +7,7 @@ export {
   addWorkItemScheduleCalendarDays,
   applyWorkItemScheduleOperation,
   calculateWorkItemScheduleDurationDays,
+  calculateWorkItemScheduleDateDeltaDays,
   calculateWorkItemScheduleEndDate,
   deriveWorkItemScheduleDueDate,
   isCanonicalWorkItemSchedule,
@@ -17,6 +18,14 @@ export {
   workItemScheduleInstantToLocalDate,
 } from './domain/work-item-schedule'
 export {
+  WORK_ITEM_SCHEDULE_CASCADE_LIMIT,
+  collectWorkItemScheduleEvaluationEndpoints,
+  createWorkItemDependencyKey,
+  previewWorkItemDependencyScheduleChange,
+  type PreviewWorkItemDependencyScheduleChangeInput,
+  type WorkItemDependencyScheduleState,
+} from './domain/work-item-schedule-dependencies'
+export {
   isCanonicalWorkItemRecord,
   isCanonicalWorkItemRelationIds,
   type CanonicalWorkItemRecord,
@@ -25,6 +34,7 @@ export {
   WorkItemConfigurationError,
   assertWorkflowTransitionAllowed,
   createWorkItemConfigurationGuardConditionChecks,
+  createWorkItemRelationGraphRevisionConditionCheck,
   createWorkItemConfigurationScopeKey,
   createWorkItemRelationIds,
   isWorkflowTransitionAllowed,
@@ -111,6 +121,9 @@ export {
   type TeamIssuesResponse,
   type UpdateTeamIssueRequestBody,
   type UpdateTeamIssueResponse,
+  type WorkItemScheduleCascadeResponse,
+  type WorkItemScheduleCascadeGuard,
+  type WorkItemScheduleCascadeUpdate,
   type WorkItemIdempotencyTransaction,
   type WorkItemListReadOptions,
   type WorkItemAuthorizationSnapshot,

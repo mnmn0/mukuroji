@@ -49,6 +49,40 @@ function createDueDateSchedule(dueDate: string): DueDateWorkItemSchedule {
   }
 }
 
+/**
+ * Creates one strict persisted Work Item used by schedule cascade transaction tests.
+ *
+ * @param teamId - Owning Team identifier.
+ * @param issueId - Team-local Work Item identifier.
+ * @returns Canonical DynamoDB fixture row at revision one.
+ */
+function createScheduleCascadeIssue(teamId: string, issueId: string) {
+  return {
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+    revision: 1,
+    directoryId: 'workspace-1',
+    directoryTeamId: `workspace-1#team#${teamId}`,
+    directoryProjectId: 'workspace-1#project#refero',
+    teamId,
+    assignedProjectId: 'refero',
+    issueId,
+    sortOrder: 10,
+    title: `Cascade ${issueId}`,
+    assigneeUserId: 'demo@example.com',
+    creatorMemberKey: 'demo@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026-07-20',
+    schedule: createDueDateSchedule('2026-07-20'),
+    priority: 'medium',
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+  }
+}
+
 /** Checks a mock AWS command fragment before reading nested transaction values. */
 function isUnknownRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -1578,6 +1612,82 @@ test('DynamoDB Work Item client compiles authorization snapshots inside the adap
   })
 })
 
+test('DynamoDB Work Item updates compile and classify app-owned Planning revision fences', async () => {
+  await withTestEnvironment({ PLANNING_TABLE_NAME: 'PlanningTable' }, async () => {
+    const currentIssue = createScheduleCascadeIssue('core-team', 'planning-fence')
+
+    for (const shouldFail of [false, true]) {
+      let planningConditionIndex = -1
+      const documentClient = {
+        async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+          if (command.constructor.name === 'GetCommand') return { Item: currentIssue }
+          if (command.constructor.name === 'TransactWriteCommand') {
+            const transactItems = command.input.TransactItems as Array<{
+              ConditionCheck?: { TableName?: string }
+            }>
+            planningConditionIndex = transactItems.findIndex((item) =>
+              item.ConditionCheck?.TableName === 'PlanningTable'
+            )
+            expect(transactItems.filter((item) => item.ConditionCheck)).toHaveLength(1)
+            expect(transactItems[planningConditionIndex]).toEqual({
+              ConditionCheck: expect.objectContaining({
+                TableName: 'PlanningTable',
+                Key: { workspaceId: 'workspace-1', recordKey: 'META' },
+                ExpressionAttributeValues: expect.objectContaining({
+                  ':authorization1': 4,
+                }),
+              }),
+            })
+            if (shouldFail) {
+              const error = new Error('Transaction was canceled.')
+              error.name = 'TransactionCanceledException'
+              Object.assign(error, {
+                CancellationReasons: transactItems.map((_, index) => ({
+                  Code: index === planningConditionIndex
+                    ? 'ConditionalCheckFailed'
+                    : 'None',
+                })),
+              })
+              throw error
+            }
+          }
+          return {}
+        },
+      } as unknown as DynamoDBDocumentClient
+      const client = new DynamoDbTeamIssuesClient(
+        'IssuesTable',
+        'IssueEventsTable',
+        documentClient,
+        {} as DynamoDBClient,
+        false,
+      )
+      const mutation = client.updateTeamIssue(
+        'workspace-1',
+        'core-team',
+        'planning-fence',
+        {
+          expectedRevision: 1,
+          schedule: createDueDateSchedule('2026-07-21'),
+          planningRevisionFence: { expectedRevision: 4 },
+        },
+        'automation:rule-1',
+      )
+
+      if (shouldFail) {
+        await expect(mutation).rejects.toMatchObject({
+          code: 'WorkItemAuthorizationChanged',
+          status: 409,
+        })
+      } else {
+        await expect(mutation).resolves.toMatchObject({
+          issue: { revision: 2, dueDate: '2026-07-21' },
+        })
+      }
+      expect(planningConditionIndex).toBe(2)
+    }
+  })
+})
+
 test('DynamoDB Work Item mutations classify authorization snapshot races separately', async () => {
   const currentIssue = {
     schemaVersion: WORK_ITEM_SCHEMA_VERSION,
@@ -1617,9 +1727,21 @@ test('DynamoDB Work Item mutations classify authorization snapshot races separat
       ExpressionAttributeValues: { ':expectedVersion': 1 },
     },
   }]
+  const configurationConditionChecks: NonNullable<
+    TransactWriteCommandInput['TransactItems']
+  > = [{
+    ConditionCheck: {
+      TableName: 'ConfigurationTable',
+      Key: { workspaceId: 'workspace-1', recordKey: 'CONFIGURATION#core-team' },
+      ConditionExpression: '#revision = :expectedRevision',
+      ExpressionAttributeNames: { '#revision': 'revision' },
+      ExpressionAttributeValues: { ':expectedRevision': 1 },
+    },
+  }]
 
   for (const operation of ['create', 'update'] as const) {
     let authorizationConditionIndex = -1
+    let configurationConditionIndex = -1
     const documentClient = {
       async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
         if (command.constructor.name === 'QueryCommand') return { Items: [] }
@@ -1631,11 +1753,15 @@ test('DynamoDB Work Item mutations classify authorization snapshot races separat
           authorizationConditionIndex = transactItems.findIndex((item) =>
             item.ConditionCheck?.TableName === 'WorkspaceAccessTable'
           )
+          configurationConditionIndex = transactItems.findIndex((item) =>
+            item.ConditionCheck?.TableName === 'ConfigurationTable'
+          )
           const error = new Error('Transaction was canceled.')
           error.name = 'TransactionCanceledException'
           Object.assign(error, {
             CancellationReasons: transactItems.map((_, index) => ({
-              Code: index === authorizationConditionIndex
+              Code: index === authorizationConditionIndex ||
+                  index === configurationConditionIndex
                 ? 'ConditionalCheckFailed'
                 : 'None',
             })),
@@ -1665,6 +1791,7 @@ test('DynamoDB Work Item mutations classify authorization snapshot races separat
             customFieldValues: {},
             schedule: createDueDateSchedule('2026-07-20'),
             priority: 'medium',
+            configurationConditionChecks,
             authorizationConditionChecks,
           },
           'demo@example.com',
@@ -1679,6 +1806,7 @@ test('DynamoDB Work Item mutations classify authorization snapshot races separat
             statusCategory: 'completed',
             customFieldValues: {},
             expectedRevision: 1,
+            configurationConditionChecks,
             authorizationConditionChecks,
           },
           'demo@example.com',
@@ -1688,7 +1816,8 @@ test('DynamoDB Work Item mutations classify authorization snapshot races separat
       code: 'WorkItemAuthorizationChanged',
       status: 409,
     })
-    expect(authorizationConditionIndex).toBe(2)
+    expect(configurationConditionIndex).toBe(2)
+    expect(authorizationConditionIndex).toBe(3)
   }
 
   let deleteAuthorizationConditionIndex = -1
@@ -1983,6 +2112,386 @@ test('DynamoDB Work Item delete prioritizes authorization failure over deletion 
   )).rejects.toMatchObject({
     code: 'WorkItemAuthorizationChanged',
     status: 409,
+  })
+})
+
+test('DynamoDB Work Item schedule cascade writes one bounded transaction with unique events', async () => {
+  await withTestEnvironment({
+    MUKUROJI_WORKSPACE_ACCESS_TABLE: 'WorkspaceAccessTable',
+    PLANNING_TABLE_NAME: 'PlanningTable',
+    ENTERPRISE_IDENTITY_TABLE_NAME: 'EnterpriseIdentityTable',
+  }, async () => {
+    const issues = new Map([
+      ['core-team\0root', createScheduleCascadeIssue('core-team', 'root')],
+      ['other-team\0successor', createScheduleCascadeIssue('other-team', 'successor')],
+    ])
+    const auditContext = createMutationAuditContext({
+      workspaceId: 'workspace-1',
+      actor: { id: 'demo@example.com', kind: 'user' },
+      idempotencyKey: 'cascade-shape',
+      occurredAt: '2026-07-12T00:00:00.000Z',
+      request: { method: 'POST', path: '/schedule/confirm' },
+      source: { kind: 'api', requestId: 'cascade-shape' },
+    })
+    const relationChecks: NonNullable<TransactWriteCommandInput['TransactItems']> = [{
+      ConditionCheck: {
+        TableName: 'ConfigurationTable',
+        Key: { workspaceId: 'workspace-1', recordKey: 'RELATION#core-team' },
+        ConditionExpression: '#revision = :expectedRevision',
+        ExpressionAttributeNames: { '#revision': 'revision' },
+        ExpressionAttributeValues: { ':expectedRevision': 4 },
+      },
+    }]
+
+    for (const auditEnabled of [false, true]) {
+      const transactions: NonNullable<TransactWriteCommandInput['TransactItems']>[] = []
+      let preparedResponse: unknown
+      const documentClient = {
+        async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+          if (command.constructor.name === 'GetCommand') {
+            const key = isUnknownRecord(command.input.Key) ? command.input.Key : {}
+            const directoryTeamId = typeof key.directoryTeamId === 'string'
+              ? key.directoryTeamId
+              : ''
+            const teamId = directoryTeamId.split('#team#')[1] ?? ''
+            const issueId = typeof key.issueId === 'string' ? key.issueId : ''
+            return { Item: issues.get(`${teamId}\0${issueId}`) }
+          }
+          if (command.constructor.name === 'TransactWriteCommand') {
+            const items = command.input.TransactItems
+            if (Array.isArray(items)) {
+              transactions.push(items as NonNullable<TransactWriteCommandInput['TransactItems']>)
+            }
+          }
+          return {}
+        },
+      } as unknown as DynamoDBDocumentClient
+      const client = new DynamoDbTeamIssuesClient(
+        'IssuesTable',
+        'IssueEventsTable',
+        documentClient,
+        {} as DynamoDBClient,
+        false,
+        auditEnabled ? 'AuditTable' : undefined,
+      )
+
+      await client.updateTeamIssueSchedules(
+        'workspace-1',
+        [
+          {
+            teamId: 'core-team',
+            workItemId: 'root',
+            expectedRevision: 1,
+            schedule: createDueDateSchedule('2026-07-21'),
+          },
+          {
+            teamId: 'other-team',
+            workItemId: 'successor',
+            expectedRevision: 1,
+            schedule: createDueDateSchedule('2026-07-22'),
+          },
+        ],
+        [{ teamId: 'guard-team', workItemId: 'fan-in', expectedRevision: 7 }],
+        'demo@example.com',
+        auditEnabled ? auditContext : undefined,
+        relationChecks,
+        {
+          workspaceId: 'workspace-1',
+          memberKey: 'demo@example.com',
+          workspaceMemberVersion: 3,
+          planningRevision: 8,
+          enterpriseControlRevision: 5,
+        },
+        {
+          async prepare(response) {
+            preparedResponse = response
+            return {
+              transactWriteItem: {
+                Put: {
+                  TableName: 'DeveloperPlatformTable',
+                  Item: { entryType: 'idempotency', state: 'completed' },
+                },
+              },
+            }
+          },
+        },
+      )
+
+      expect(transactions).toHaveLength(1)
+      const transactItems = transactions[0] ?? []
+      expect(transactItems).toHaveLength(auditEnabled ? 12 : 10)
+      expect(transactItems.filter((item) => item.Update?.TableName === 'IssuesTable'))
+        .toHaveLength(2)
+      expect(transactItems).toContainEqual(expect.objectContaining({
+        ConditionCheck: expect.objectContaining({
+          TableName: 'IssuesTable',
+          Key: { directoryTeamId: 'workspace-1#team#guard-team', issueId: 'fan-in' },
+        }),
+      }))
+      for (const tableName of [
+        'ConfigurationTable',
+        'WorkspaceAccessTable',
+        'PlanningTable',
+        'EnterpriseIdentityTable',
+      ]) {
+        expect(transactItems).toContainEqual(expect.objectContaining({
+          ConditionCheck: expect.objectContaining({ TableName: tableName }),
+        }))
+      }
+      const eventItems = transactItems.flatMap((item) =>
+        item.Put?.TableName === 'IssueEventsTable' && item.Put.Item
+          ? [item.Put.Item]
+          : []
+      )
+      expect(eventItems).toHaveLength(2)
+      expect(new Set(eventItems.map((item) => item.eventId)).size).toBe(2)
+      const auditItems = transactItems.flatMap((item) =>
+        item.Put?.TableName === 'AuditTable' && item.Put.Item
+          ? [item.Put.Item]
+          : []
+      )
+      expect(auditItems).toHaveLength(auditEnabled ? 2 : 0)
+      expect(new Set(auditItems.map((item) => item.eventId)).size).toBe(auditItems.length)
+      expect(transactItems.at(-1)).toMatchObject({
+        Put: { TableName: 'DeveloperPlatformTable' },
+      })
+      expect(preparedResponse).toMatchObject({
+        status: 200,
+        body: {
+          workItems: [
+            { id: 'root', revision: 2, dueDate: '2026-07-21' },
+            { id: 'successor', revision: 2, dueDate: '2026-07-22' },
+          ],
+        },
+      })
+    }
+  })
+})
+
+test('DynamoDB Work Item schedule cascade keeps the maximum valid receipt compact', async () => {
+  const updates = Array.from({ length: 24 }, (_, index) => ({
+    teamId: `team-${index}`,
+    workItemId: `work-item-${index}`,
+    expectedRevision: 1,
+    schedule: createDueDateSchedule('2026-07-21'),
+  }))
+  const largeText = 'あ'.repeat(10_000)
+  const issues = new Map(updates.map((update) => [
+    `${update.teamId}\0${update.workItemId}`,
+    {
+      ...createScheduleCascadeIssue(update.teamId, update.workItemId),
+      description: largeText,
+      customFieldValues: { notes: largeText },
+    },
+  ]))
+  let preparedResponse: unknown
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      if (command.constructor.name === 'GetCommand') {
+        const key = isUnknownRecord(command.input.Key) ? command.input.Key : {}
+        const directoryTeamId = typeof key.directoryTeamId === 'string'
+          ? key.directoryTeamId
+          : ''
+        const teamId = directoryTeamId.split('#team#')[1] ?? ''
+        const issueId = typeof key.issueId === 'string' ? key.issueId : ''
+        return { Item: issues.get(`${teamId}\0${issueId}`) }
+      }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'IssuesTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  const result = await client.updateTeamIssueSchedules(
+    'workspace-1',
+    updates,
+    [],
+    'demo@example.com',
+    undefined,
+    [],
+    undefined,
+    {
+      async prepare(response) {
+        preparedResponse = response
+        return {
+          transactWriteItem: {
+            Put: {
+              TableName: 'DeveloperPlatformTable',
+              Item: { entryType: 'idempotency', state: 'completed' },
+            },
+          },
+        }
+      },
+    },
+  )
+
+  const serializedReceipt = JSON.stringify(preparedResponse)
+  expect(result.issues).toHaveLength(24)
+  expect(result.issues.every((issue) => issue.description === largeText)).toBeTrue()
+  expect(Buffer.byteLength(serializedReceipt, 'utf8')).toBeLessThanOrEqual(256 * 1024)
+  expect(serializedReceipt).not.toContain('description')
+  expect(serializedReceipt).not.toContain(largeText)
+})
+
+test('DynamoDB Work Item schedule cascade classifies cancellation indexes by safe priority', async () => {
+  await withTestEnvironment({
+    MUKUROJI_WORKSPACE_ACCESS_TABLE: 'WorkspaceAccessTable',
+    PLANNING_TABLE_NAME: 'PlanningTable',
+    ENTERPRISE_IDENTITY_TABLE_NAME: 'EnterpriseIdentityTable',
+  }, async () => {
+    const issues = new Map([
+      ['core-team\0root', createScheduleCascadeIssue('core-team', 'root')],
+      ['other-team\0successor', createScheduleCascadeIssue('other-team', 'successor')],
+    ])
+    const relationChecks: NonNullable<TransactWriteCommandInput['TransactItems']> = [{
+      ConditionCheck: {
+        TableName: 'ConfigurationTable',
+        Key: { workspaceId: 'workspace-1', recordKey: 'RELATION#core-team' },
+        ConditionExpression: '#revision = :expectedRevision',
+        ExpressionAttributeNames: { '#revision': 'revision' },
+        ExpressionAttributeValues: { ':expectedRevision': 4 },
+      },
+    }]
+
+    /**
+     * Runs one cascade whose transaction cancellation is selected by semantic item labels.
+     *
+     * @param failedLabels - Transaction item kinds that report conditional failure.
+     * @param reasonMode - Whether cancellation reasons are indexed, missing, empty, or unknown.
+     * @returns Rejected cascade mutation.
+     */
+    const runCascade = (
+      failedLabels: readonly string[],
+      reasonMode: 'indexed' | 'missing' | 'empty' | 'unknown' = 'indexed',
+    ) => {
+      const documentClient = {
+        async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+          if (command.constructor.name === 'GetCommand') {
+            const key = isUnknownRecord(command.input.Key) ? command.input.Key : {}
+            const directoryTeamId = typeof key.directoryTeamId === 'string'
+              ? key.directoryTeamId
+              : ''
+            const teamId = directoryTeamId.split('#team#')[1] ?? ''
+            const issueId = typeof key.issueId === 'string' ? key.issueId : ''
+            return { Item: issues.get(`${teamId}\0${issueId}`) }
+          }
+          if (command.constructor.name === 'TransactWriteCommand') {
+            const transactItems = Array.isArray(command.input.TransactItems)
+              ? command.input.TransactItems
+              : []
+            const labels = transactItems.map((item) => {
+              if (!isUnknownRecord(item)) return 'unknown'
+              if (isUnknownRecord(item.Update)) return 'update'
+              if (isUnknownRecord(item.Put)) return 'event'
+              if (!isUnknownRecord(item.ConditionCheck)) return 'unknown'
+              const tableName = item.ConditionCheck.TableName
+              if (tableName === 'IssuesTable') return 'guard'
+              if (tableName === 'ConfigurationTable') return 'relation'
+              if (tableName === 'WorkspaceAccessTable') return 'workspace-member'
+              if (tableName === 'PlanningTable') return 'planning'
+              if (tableName === 'EnterpriseIdentityTable') return 'enterprise-control'
+              return 'unknown'
+            })
+            const error = Object.assign(new Error('Transaction was canceled.'), {
+              name: 'TransactionCanceledException',
+              $metadata: { httpStatusCode: 400 },
+            })
+            if (reasonMode === 'indexed') {
+              Object.assign(error, {
+                CancellationReasons: labels.map((label) => ({
+                  Code: failedLabels.includes(label) ? 'ConditionalCheckFailed' : 'None',
+                })),
+              })
+            } else if (reasonMode === 'empty') {
+              Object.assign(error, { CancellationReasons: [] })
+            } else if (reasonMode === 'unknown') {
+              Object.assign(error, { CancellationReasons: [{ Code: 'TransactionConflict' }] })
+            }
+            throw error
+          }
+          return {}
+        },
+      } as unknown as DynamoDBDocumentClient
+      const client = new DynamoDbTeamIssuesClient(
+        'IssuesTable',
+        'IssueEventsTable',
+        documentClient,
+        {} as DynamoDBClient,
+        false,
+      )
+      return client.updateTeamIssueSchedules(
+        'workspace-1',
+        [
+          {
+            teamId: 'core-team',
+            workItemId: 'root',
+            expectedRevision: 1,
+            schedule: createDueDateSchedule('2026-07-21'),
+          },
+          {
+            teamId: 'other-team',
+            workItemId: 'successor',
+            expectedRevision: 1,
+            schedule: createDueDateSchedule('2026-07-22'),
+          },
+        ],
+        [{ teamId: 'guard-team', workItemId: 'fan-in', expectedRevision: 7 }],
+        'demo@example.com',
+        undefined,
+        relationChecks,
+        {
+          workspaceId: 'workspace-1',
+          memberKey: 'demo@example.com',
+          workspaceMemberVersion: 3,
+          planningRevision: 8,
+          enterpriseControlRevision: 5,
+        },
+      )
+    }
+
+    for (const scenario of [
+      {
+        failedLabels: ['update', 'workspace-member'],
+        expectedCode: 'WorkItemAuthorizationChanged',
+      },
+      {
+        failedLabels: ['planning', 'enterprise-control'],
+        expectedCode: 'WorkItemAuthorizationChanged',
+      },
+      {
+        failedLabels: ['update', 'relation', 'planning'],
+        expectedCode: 'PlanningRevisionConflict',
+      },
+      {
+        failedLabels: ['update', 'relation'],
+        expectedCode: 'WorkItemRevisionConflict',
+      },
+      {
+        failedLabels: ['relation'],
+        expectedCode: 'WorkItemRelationGraphConflict',
+      },
+      {
+        failedLabels: ['event'],
+        expectedCode: 'WorkItemScheduleCascadeConflict',
+      },
+    ]) {
+      await expect(runCascade(scenario.failedLabels)).rejects.toMatchObject({
+        code: scenario.expectedCode,
+        status: 409,
+      })
+    }
+
+    for (const reasonMode of ['missing', 'empty', 'unknown'] as const) {
+      await expect(runCascade([], reasonMode)).rejects.toMatchObject({
+        code: 'WorkItemScheduleCascadeTransactionUnavailable',
+        status: 503,
+      })
+    }
   })
 })
 

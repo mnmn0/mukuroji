@@ -35,6 +35,10 @@ import type {
 import {
   DEFAULT_WORK_ITEM_CONFIGURATION,
 } from '../../../work-items/work-item-configuration'
+import {
+  createWorkItemAuthorizationChangedError,
+} from '../../../work-items'
+import { InMemoryPlanningClient } from '../../../planning/planning'
 import type {
   AutomationActionExecutionContext,
 } from '../../automation'
@@ -55,6 +59,7 @@ import type {
 } from '@mukuroji/contracts'
 import {
   AUTOMATION_SCHEMA_VERSION,
+  createDefaultDueDateWorkItemSchedule,
 } from '@mukuroji/contracts'
 import {
   afterEach,
@@ -102,6 +107,53 @@ type TestTeamIssuesClient = NonNullable<
  */
 function unexpectedAutomationPortCall(): never {
   throw new Error('Unexpected Automation test port call.')
+}
+
+/**
+ * Creates unfiltered Planning state with one incident schedule dependency.
+ *
+ * @param workspaceId - Workspace owning the dependency graph.
+ * @param targetRevision - Current revision of the dependency target.
+ * @returns In-memory Planning client containing the incident edge.
+ */
+async function createIncidentSchedulePlanning(
+  workspaceId: string,
+  targetRevision = 1,
+) {
+  const planning = new InMemoryPlanningClient()
+  const schedule = createDefaultDueDateWorkItemSchedule('2026-06-18')
+  await planning.createWorkItemDependency(workspaceId, {
+    id: `incident-dependency-${targetRevision}`,
+    predecessor: { teamId: 'core-team', workItemId: 'onboarding-friction' },
+    successor: { teamId: 'core-team', workItemId: 'work-item-1' },
+    type: 'finish-to-finish',
+    lagDays: 0,
+    expectedRevision: 0,
+  }, {
+    workItems: [
+      {
+        id: 'onboarding-friction',
+        revision: targetRevision,
+        teamId: 'core-team',
+        title: 'Dependency target',
+        projectId: 'refero',
+        statusCategory: 'started',
+        dueDate: '2026-06-18',
+        schedule,
+      },
+      {
+        id: 'work-item-1',
+        revision: 1,
+        teamId: 'core-team',
+        title: 'Dependency successor',
+        projectId: 'refero',
+        statusCategory: 'started',
+        dueDate: '2026-06-18',
+        schedule,
+      },
+    ],
+  })
+  return planning
 }
 
 /**
@@ -462,6 +514,507 @@ test('enforces Bulk operation ownership and redacts durable undo snapshots', () 
   }
   expect(toBulkOperationResponse(operation).items[0]).not.toHaveProperty('undoPayload')
   expect(operation.items[0]?.undoPayload).toEqual({ assignedProjectId: 'project-1' })
+})
+
+test('fences a bulk Project move with the Planning revision', async () => {
+  const calls = configureFakeProjectClients(true, {
+    projectAccesses: [
+      { teamId: 'core-team', projectId: 'refero', role: 'manager' },
+      { teamId: 'core-team', projectId: 'project-2', role: 'manager' },
+    ],
+    teamProjects: [
+      { id: 'refero', name: 'Refero', tone: 'blue' },
+      { id: 'project-2', name: 'Project 2', tone: 'green' },
+    ],
+  })
+  const automationFake = createBulkOperationAutomationFake()
+  setTestAppDependencies({
+    bulkOperations: automationFake.client,
+    planning: new InMemoryPlanningClient(),
+  })
+  const request = {
+    action: { type: 'move', targetProjectId: 'project-2' },
+    items: [{
+      teamId: 'core-team',
+      workItemId: 'onboarding-friction',
+      expectedRevision: 1,
+    }],
+  }
+  const headers = {
+    Authorization: 'Bearer test-token',
+    'Content-Type': 'application/json',
+  }
+  const previewResponse = await app.request('/api/bulk-operations/preview', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(request),
+  })
+  const preview: unknown = await previewResponse.json()
+  if (
+    typeof preview !== 'object' ||
+    preview === null ||
+    !('operationToken' in preview) ||
+    typeof preview.operationToken !== 'string'
+  ) {
+    throw new Error('Expected a bulk operation token.')
+  }
+  const applyResponse = await app.request('/api/bulk-operations', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ ...request, operationToken: preview.operationToken }),
+  })
+
+  expect(previewResponse.status).toBe(200)
+  expect(applyResponse.status).toBe(201)
+  expect(await applyResponse.json()).toMatchObject({ status: 'succeeded' })
+  expect(calls.issueUpdates).toHaveLength(1)
+  expect(calls.issueUpdates[0]?.authorizationSnapshot).toMatchObject({ planningRevision: 0 })
+})
+
+test('fences bulk Project-move undo with the Planning revision', async () => {
+  const calls = configureFakeProjectClients(true, {
+    detailAssignedProjectId: 'project-2',
+    detailRevisions: { ['core-team\0onboarding-friction']: 2 },
+    projectAccesses: [
+      { teamId: 'core-team', projectId: 'refero', role: 'manager' },
+      { teamId: 'core-team', projectId: 'project-2', role: 'manager' },
+    ],
+    teamProjects: [
+      { id: 'refero', name: 'Refero', tone: 'blue' },
+      { id: 'project-2', name: 'Project 2', tone: 'green' },
+    ],
+  })
+  const operation: BulkOperation = {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    id: 'bulk-project-move-undo',
+    workspaceId: 'user#demo@example.com',
+    actorMemberKey: 'demo@example.com',
+    revision: 1,
+    status: 'succeeded',
+    action: { type: 'move', targetProjectId: 'project-2' },
+    items: [{
+      teamId: 'core-team',
+      workItemId: 'onboarding-friction',
+      expectedRevision: 1,
+      resultingRevision: 2,
+      status: 'succeeded',
+      retryable: false,
+      undoable: true,
+      undoPayload: { assignedProjectId: 'refero' },
+    }],
+    createdAt: '2026-07-16T00:00:00.000Z',
+    updatedAt: '2026-07-16T00:01:00.000Z',
+  }
+  const automationFake = createBulkOperationAutomationFake(operation)
+  setTestAppDependencies({
+    bulkOperations: automationFake.client,
+    planning: new InMemoryPlanningClient(),
+  })
+
+  const response = await app.request(`/api/bulk-operations/${operation.id}/undo`, {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+  })
+
+  expect(response.status).toBe(200)
+  expect(calls.issueUpdates).toHaveLength(1)
+  expect(calls.issueUpdates[0]?.authorizationSnapshot).toMatchObject({ planningRevision: 0 })
+})
+
+test('rejects bulk archive preview while an incident schedule dependency exists', async () => {
+  const calls = configureFakeProjectClients(true, { teamIssueCount: 2 })
+  const planning = new InMemoryPlanningClient()
+  const schedule = createDefaultDueDateWorkItemSchedule('2026-06-18')
+  const workItemState = {
+    workItems: [
+      {
+        id: 'onboarding-friction',
+        revision: 1,
+        teamId: 'core-team',
+        title: 'Archive target',
+        projectId: 'refero',
+        statusCategory: 'started' as const,
+        dueDate: '2026-06-18',
+        schedule,
+      },
+      {
+        id: 'work-item-1',
+        revision: 1,
+        teamId: 'core-team',
+        title: 'Successor',
+        projectId: 'refero',
+        statusCategory: 'started' as const,
+        dueDate: '2026-06-18',
+        schedule,
+      },
+    ],
+  }
+  await planning.createWorkItemDependency('user#demo@example.com', {
+    id: 'archive-dependency',
+    predecessor: { teamId: 'core-team', workItemId: 'onboarding-friction' },
+    successor: { teamId: 'core-team', workItemId: 'work-item-1' },
+    type: 'finish-to-finish',
+    lagDays: 0,
+    expectedRevision: 0,
+  }, workItemState)
+  setTestAppDependencies({ planning })
+
+  const response = await app.request('/api/bulk-operations/preview', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      action: { type: 'archive', archived: true },
+      items: [{
+        teamId: 'core-team',
+        workItemId: 'onboarding-friction',
+        expectedRevision: 1,
+      }],
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({
+    canApply: false,
+    items: [{
+      status: 'failed',
+      errorCode: 'PlanningWorkItemDependencyInUse',
+      retryable: false,
+    }],
+  })
+  expect(calls.issueUpdates).toEqual([])
+})
+
+test('rejects bulk archive when a dependency is created after its incident-edge check', async () => {
+  const planning = new InMemoryPlanningClient()
+  const schedule = createDefaultDueDateWorkItemSchedule('2026-06-18')
+  const workItemState = {
+    workItems: [
+      {
+        id: 'onboarding-friction',
+        revision: 1,
+        teamId: 'core-team',
+        title: 'Archive target',
+        projectId: 'refero',
+        statusCategory: 'started' as const,
+        dueDate: '2026-06-18',
+        schedule,
+      },
+      {
+        id: 'work-item-1',
+        revision: 1,
+        teamId: 'core-team',
+        title: 'Successor',
+        projectId: 'refero',
+        statusCategory: 'started' as const,
+        dueDate: '2026-06-18',
+        schedule,
+      },
+    ],
+  }
+  const calls = configureFakeProjectClients(true, {
+    teamIssueCount: 2,
+    async issueUpdateHook({ authorizationSnapshot }) {
+      expect(authorizationSnapshot?.planningRevision).toBe(0)
+      await planning.createWorkItemDependency('user#demo@example.com', {
+        id: 'archive-race-dependency',
+        predecessor: { teamId: 'core-team', workItemId: 'onboarding-friction' },
+        successor: { teamId: 'core-team', workItemId: 'work-item-1' },
+        type: 'finish-to-finish',
+        lagDays: 0,
+        expectedRevision: 0,
+      }, workItemState)
+      throw createWorkItemAuthorizationChangedError()
+    },
+  })
+  const automationFake = createBulkOperationAutomationFake()
+  setTestAppDependencies({
+    bulkOperations: automationFake.client,
+    planning,
+  })
+  const request = {
+    action: { type: 'archive', archived: true },
+    items: [{
+      teamId: 'core-team',
+      workItemId: 'onboarding-friction',
+      expectedRevision: 1,
+    }],
+  }
+  const headers = {
+    Authorization: 'Bearer test-token',
+    'Content-Type': 'application/json',
+  }
+  const previewResponse = await app.request('/api/bulk-operations/preview', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(request),
+  })
+  const preview = await previewResponse.json() as { operationToken: string }
+  expect(previewResponse.status).toBe(200)
+
+  const applyResponse = await app.request('/api/bulk-operations', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ ...request, operationToken: preview.operationToken }),
+  })
+
+  expect(applyResponse.status).toBe(201)
+  expect(await applyResponse.json()).toMatchObject({
+    status: 'failed',
+    items: [{
+      status: 'failed',
+      errorCode: 'WorkItemAuthorizationChanged',
+      retryable: false,
+    }],
+  })
+  expect(calls.issueUpdates).toEqual([])
+})
+
+test('rejects bulk undo that would re-archive a Work Item with a dependency', async () => {
+  const calls = configureFakeProjectClients(true, {
+    detailRevisions: { ['core-team\0onboarding-friction']: 2 },
+    teamIssueCount: 2,
+  })
+  const planning = new InMemoryPlanningClient()
+  const schedule = createDefaultDueDateWorkItemSchedule('2026-06-18')
+  const workItemState = {
+    workItems: [
+      {
+        id: 'onboarding-friction',
+        revision: 2,
+        teamId: 'core-team',
+        title: 'Archive target',
+        projectId: 'refero',
+        statusCategory: 'started' as const,
+        dueDate: '2026-06-18',
+        schedule,
+      },
+      {
+        id: 'work-item-1',
+        revision: 1,
+        teamId: 'core-team',
+        title: 'Successor',
+        projectId: 'refero',
+        statusCategory: 'started' as const,
+        dueDate: '2026-06-18',
+        schedule,
+      },
+    ],
+  }
+  await planning.createWorkItemDependency('user#demo@example.com', {
+    id: 'archive-undo-dependency',
+    predecessor: { teamId: 'core-team', workItemId: 'onboarding-friction' },
+    successor: { teamId: 'core-team', workItemId: 'work-item-1' },
+    type: 'finish-to-finish',
+    lagDays: 0,
+    expectedRevision: 0,
+  }, workItemState)
+  const operation: BulkOperation = {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    id: 'bulk-unarchive-undo',
+    workspaceId: 'user#demo@example.com',
+    actorMemberKey: 'demo@example.com',
+    revision: 1,
+    status: 'succeeded',
+    action: { type: 'archive', archived: false },
+    items: [{
+      teamId: 'core-team',
+      workItemId: 'onboarding-friction',
+      expectedRevision: 1,
+      resultingRevision: 2,
+      status: 'succeeded',
+      retryable: false,
+      undoable: true,
+      undoPayload: {
+        archivedAt: '2026-07-16T00:00:00.000Z',
+        archivedBy: 'demo@example.com',
+      },
+    }],
+    createdAt: '2026-07-16T00:00:00.000Z',
+    updatedAt: '2026-07-16T00:01:00.000Z',
+  }
+  const automationFake = createBulkOperationAutomationFake(operation)
+  setTestAppDependencies({
+    bulkOperations: automationFake.client,
+    planning,
+  })
+
+  const response = await app.request(`/api/bulk-operations/${operation.id}/undo`, {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({
+    status: 'partial',
+    items: [{
+      status: 'failed',
+      errorCode: 'PlanningWorkItemDependencyInUse',
+      resultingRevision: 2,
+      retryable: false,
+    }],
+  })
+  expect(calls.issueUpdates).toEqual([])
+})
+
+test('rejects bulk schedule preview while an incident dependency exists', async () => {
+  const calls = configureFakeProjectClients(true, { teamIssueCount: 2 })
+  setTestAppDependencies({
+    planning: await createIncidentSchedulePlanning('user#demo@example.com'),
+  })
+
+  const response = await app.request('/api/bulk-operations/preview', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      action: {
+        type: 'edit',
+        patch: {
+          schedule: createDefaultDueDateWorkItemSchedule('2026-06-24'),
+        },
+      },
+      items: [{
+        teamId: 'core-team',
+        workItemId: 'onboarding-friction',
+        expectedRevision: 1,
+      }],
+    }),
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({
+    canApply: false,
+    items: [{
+      status: 'failed',
+      errorCode: 'WorkItemScheduleConfirmationRequired',
+      retryable: false,
+    }],
+  })
+  expect(calls.issueUpdates).toEqual([])
+})
+
+test('rechecks schedule dependencies when retrying a Bulk edit', async () => {
+  const schedule = createDefaultDueDateWorkItemSchedule('2026-06-24')
+  const operation: BulkOperation = {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    id: 'bulk-schedule-retry',
+    workspaceId: 'user#demo@example.com',
+    actorMemberKey: 'demo@example.com',
+    revision: 1,
+    status: 'partial',
+    action: { type: 'edit', patch: { schedule } },
+    items: [{
+      teamId: 'core-team',
+      workItemId: 'onboarding-friction',
+      expectedRevision: 1,
+      status: 'failed',
+      errorCode: 'WorkItemAuthorizationChanged',
+      errorMessage: 'Planning changed during the first attempt.',
+      retryable: true,
+      undoable: false,
+      undoPayload: {
+        schedule: createDefaultDueDateWorkItemSchedule('2026-06-18'),
+      },
+    }],
+    createdAt: '2026-07-16T00:00:00.000Z',
+    updatedAt: '2026-07-16T00:01:00.000Z',
+  }
+  const calls = configureFakeProjectClients(true, { teamIssueCount: 2 })
+  const automationFake = createBulkOperationAutomationFake(operation)
+  setTestAppDependencies({
+    bulkOperations: automationFake.client,
+    planning: await createIncidentSchedulePlanning('user#demo@example.com'),
+  })
+
+  const response = await app.request(`/api/bulk-operations/${operation.id}/retry`, {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({
+    status: 'failed',
+    items: [{
+      status: 'failed',
+      errorCode: 'WorkItemScheduleConfirmationRequired',
+      retryable: false,
+    }],
+  })
+  expect(calls.issueUpdates).toEqual([])
+})
+
+test('rechecks schedule dependencies before undoing a Bulk edit', async () => {
+  const previousSchedule = createDefaultDueDateWorkItemSchedule('2026-06-18')
+  const operation: BulkOperation = {
+    schemaVersion: AUTOMATION_SCHEMA_VERSION,
+    id: 'bulk-schedule-undo',
+    workspaceId: 'user#demo@example.com',
+    actorMemberKey: 'demo@example.com',
+    revision: 1,
+    status: 'succeeded',
+    action: {
+      type: 'edit',
+      patch: {
+        schedule: createDefaultDueDateWorkItemSchedule('2026-06-24'),
+      },
+    },
+    items: [{
+      teamId: 'core-team',
+      workItemId: 'onboarding-friction',
+      expectedRevision: 1,
+      resultingRevision: 2,
+      status: 'succeeded',
+      retryable: false,
+      undoable: true,
+      undoPayload: { schedule: previousSchedule },
+    }],
+    createdAt: '2026-07-16T00:00:00.000Z',
+    updatedAt: '2026-07-16T00:01:00.000Z',
+  }
+  const calls = configureFakeProjectClients(true, {
+    detailRevisions: { ['core-team\0onboarding-friction']: 2 },
+    detailSchedule: createDefaultDueDateWorkItemSchedule('2026-06-24'),
+    teamIssueCount: 2,
+  })
+  const automationFake = createBulkOperationAutomationFake(operation)
+  setTestAppDependencies({
+    bulkOperations: automationFake.client,
+    planning: await createIncidentSchedulePlanning('user#demo@example.com', 2),
+  })
+
+  const response = await app.request(`/api/bulk-operations/${operation.id}/undo`, {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+  })
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({
+    status: 'partial',
+    items: [{
+      status: 'failed',
+      errorCode: 'WorkItemScheduleConfirmationRequired',
+      resultingRevision: 2,
+      retryable: false,
+    }],
+  })
+  expect(calls.issueUpdates).toEqual([])
 })
 
 test('does not recover a Bulk apply from a competing actor state without its audit proof', async () => {
@@ -1207,6 +1760,175 @@ test('recovers an automation Work Item update only from its deterministic audit 
 
   await runResponseLoss(false)
   await runResponseLoss(true)
+})
+
+test('fences isolated automation schedule updates and rejects dependency races', async () => {
+  const currentSchedule = createDefaultDueDateWorkItemSchedule('2026-06-18')
+  const nextSchedule = createDefaultDueDateWorkItemSchedule('2026-07-31')
+  const workItemState = {
+    workItems: [
+      {
+        id: 'onboarding-friction',
+        revision: 1,
+        teamId: 'core-team',
+        title: 'Automation target',
+        projectId: 'refero',
+        statusCategory: 'started' as const,
+        dueDate: '2026-06-18',
+        schedule: currentSchedule,
+      },
+      {
+        id: 'work-item-1',
+        revision: 1,
+        teamId: 'core-team',
+        title: 'Successor',
+        projectId: 'refero',
+        statusCategory: 'started' as const,
+        dueDate: '2026-06-18',
+        schedule: currentSchedule,
+      },
+    ],
+  }
+  const context = {
+    execution: {
+      schemaVersion: AUTOMATION_SCHEMA_VERSION,
+      id: 'automation-schedule-fenced',
+      workspaceId: 'workspace-1',
+      ruleId: 'rule-1',
+      ruleVersion: 1,
+      triggerEventId: 'event-1',
+      status: 'running',
+      attempts: 1,
+      actions: [],
+      startedAt: '2026-07-16T00:00:00.000Z',
+      retryable: false,
+    },
+    event: {
+      eventId: 'event-1',
+      eventType: 'work-item.updated',
+      workspaceId: 'workspace-1',
+      occurredAt: '2026-07-16T00:00:00.000Z',
+      changes: [],
+      metadata: { teamId: 'core-team', issueId: 'onboarding-friction' },
+    },
+    actionIndex: 0,
+    idempotencyKey: 'automation-schedule-fenced:action:0000',
+  } satisfies AutomationActionExecutionContext
+  const action = {
+    type: 'update' as const,
+    patch: { schedule: nextSchedule },
+  }
+
+  let observedPlanningRevision: number | undefined
+  const isolatedPlanning = new InMemoryPlanningClient()
+  const isolatedCalls = configureFakeProjectClients(true, {
+    async issueUpdateHook({ planningRevisionFence }) {
+      observedPlanningRevision = planningRevisionFence?.expectedRevision
+    },
+  })
+  setTestAppDependencies({ planning: isolatedPlanning })
+  await expect(runWithTestAppDependencies(() =>
+    createAutomationActionExecutor().execute(action, context)
+  )).resolves.toBeUndefined()
+  expect(observedPlanningRevision).toBe(0)
+  expect(isolatedCalls.issueUpdates).toHaveLength(1)
+
+  const incidentPlanning = new InMemoryPlanningClient()
+  await incidentPlanning.createWorkItemDependency('workspace-1', {
+    id: 'automation-schedule-dependency',
+    predecessor: { teamId: 'core-team', workItemId: 'onboarding-friction' },
+    successor: { teamId: 'core-team', workItemId: 'work-item-1' },
+    type: 'finish-to-finish',
+    lagDays: 0,
+    expectedRevision: 0,
+  }, workItemState)
+  const incidentCalls = configureFakeProjectClients(true)
+  setTestAppDependencies({ planning: incidentPlanning })
+  await expect(runWithTestAppDependencies(() =>
+    createAutomationActionExecutor().execute(action, context)
+  )).rejects.toMatchObject({
+    category: 'conflict',
+    code: 'WorkItemScheduleConfirmationRequired',
+    retryable: false,
+  })
+  expect(incidentCalls.issueUpdates).toHaveLength(0)
+
+  const racingPlanning = new InMemoryPlanningClient()
+  const racingCalls = configureFakeProjectClients(true, {
+    async issueUpdateHook({ planningRevisionFence }) {
+      expect(planningRevisionFence?.expectedRevision).toBe(0)
+      await racingPlanning.createWorkItemDependency('workspace-1', {
+        id: 'automation-schedule-race',
+        predecessor: { teamId: 'core-team', workItemId: 'onboarding-friction' },
+        successor: { teamId: 'core-team', workItemId: 'work-item-1' },
+        type: 'finish-to-finish',
+        lagDays: 0,
+        expectedRevision: 0,
+      }, workItemState)
+      throw createWorkItemAuthorizationChangedError()
+    },
+  })
+  setTestAppDependencies({ planning: racingPlanning })
+
+  await expect(runWithTestAppDependencies(() =>
+    createAutomationActionExecutor().execute(action, context)
+  )).rejects.toMatchObject({
+    code: 'WorkItemAuthorizationChanged',
+    status: 409,
+  })
+  await expect(runWithTestAppDependencies(() =>
+    createAutomationActionExecutor().execute(action, context)
+  )).rejects.toMatchObject({
+    category: 'conflict',
+    code: 'WorkItemScheduleConfirmationRequired',
+  })
+  expect(racingCalls.issueUpdates).toHaveLength(0)
+})
+
+test('fences an Automation Project move with the Planning revision', async () => {
+  const calls = configureFakeProjectClients(true, {
+    teamProjects: [
+      { id: 'refero', name: 'Refero', tone: 'blue' },
+      { id: 'project-2', name: 'Project 2', tone: 'green' },
+    ],
+  })
+  const planning = new InMemoryPlanningClient()
+  setTestAppDependencies({ planning })
+  const context = {
+    execution: {
+      schemaVersion: AUTOMATION_SCHEMA_VERSION,
+      id: 'automation-project-move-fenced',
+      workspaceId: 'workspace-1',
+      ruleId: 'rule-1',
+      ruleVersion: 1,
+      triggerEventId: 'event-1',
+      status: 'running',
+      attempts: 1,
+      actions: [],
+      startedAt: '2026-07-16T00:00:00.000Z',
+      retryable: false,
+    },
+    event: {
+      eventId: 'event-1',
+      eventType: 'work-item.updated',
+      workspaceId: 'workspace-1',
+      occurredAt: '2026-07-16T00:00:00.000Z',
+      changes: [],
+      metadata: { teamId: 'core-team', issueId: 'onboarding-friction' },
+    },
+    actionIndex: 0,
+    idempotencyKey: 'automation-project-move-fenced:action:0000',
+  } satisfies AutomationActionExecutionContext
+
+  await expect(runWithTestAppDependencies(() =>
+    createAutomationActionExecutor().execute({
+      type: 'move',
+      targetProjectId: 'project-2',
+    }, context)
+  )).resolves.toBeUndefined()
+
+  expect(calls.issueUpdates).toHaveLength(1)
+  expect(calls.issueUpdates[0]?.planningRevisionFence).toEqual({ expectedRevision: 0 })
 })
 
 test('fails closed when automation targets a Project outside the owner Team', async () => {

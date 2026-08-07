@@ -386,7 +386,17 @@ test('derives deadline projections and builds a self-only preview', () => {
         endDate: '2026-03-13',
         durationDays: 2,
       },
+      dateDeltaDays: 3,
     }],
+    evaluatedRevisions: [{
+      teamId: 'team-1',
+      workItemId: 'work-item-1',
+      expectedRevision: 7,
+    }],
+    conflicts: [],
+    affectedProjectIds: [],
+    affectedMilestoneIds: [],
+    requiresConfirmation: false,
     warnings: [],
   })
   expect(deriveWorkItemScheduleDueDate({

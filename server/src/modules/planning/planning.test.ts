@@ -7,11 +7,17 @@ import type {
   PlanningEntityType,
   PlanningWorkItemSummary,
   UpdatePlanningEntityInput,
+  WorkItemSchedule,
+  WorkItemScheduleDependency,
 } from '@mukuroji/contracts'
 import { createDefaultDueDateWorkItemSchedule } from '@mukuroji/contracts'
 import {
   DynamoDbPlanningClient,
   InMemoryPlanningClient,
+  createPlanningWorkItemDependencySummary,
+  requirePlanningWorkItemHasNoScheduleDependencies,
+  type PlanningCallerAuthorizationConditionCheck,
+  type PlanningMutationTransaction,
   type PlanningWorkItemState,
 } from './planning'
 
@@ -87,9 +93,18 @@ function getEntity(entities: readonly PlanningEntity[], id: string) {
   return entity
 }
 
+/**
+ * Creates a canonical Work Item summary for Planning domain tests.
+ *
+ * @param id - Team-local Work Item identifier.
+ * @param statusCategory - Canonical workflow status category.
+ * @param overrides - Fields replaced for the scenario under test.
+ * @returns A complete Planning Work Item summary.
+ */
 function createWorkItem(
   id: string,
   statusCategory: PlanningWorkItemSummary['statusCategory'],
+  overrides: Partial<PlanningWorkItemSummary> = {},
 ): PlanningWorkItemSummary {
   return {
     id,
@@ -100,6 +115,27 @@ function createWorkItem(
     statusCategory,
     dueDate: '2026-08-31',
     schedule: createDefaultDueDateWorkItemSchedule('2026-08-31'),
+    ...overrides,
+  }
+}
+
+/**
+ * Creates an inclusive date-range schedule for dependency graph tests.
+ *
+ * @param startDate - Inclusive local start date.
+ * @param endDate - Inclusive local finish date.
+ * @returns A canonical date-range schedule using the default calendar policy.
+ */
+function createDateRangeSchedule(startDate: string, endDate: string): WorkItemSchedule {
+  const calendarPolicy = createDefaultDueDateWorkItemSchedule(endDate).calendarPolicy
+  const start = Date.parse(`${startDate}T00:00:00.000Z`)
+  const end = Date.parse(`${endDate}T00:00:00.000Z`)
+  return {
+    mode: 'date-range',
+    startDate,
+    endDate,
+    durationDays: Math.floor((end - start) / 86_400_000) + 1,
+    calendarPolicy,
   }
 }
 
@@ -508,6 +544,620 @@ describe('planning domain', () => {
         'b-successor': 0,
       },
     })
+  })
+
+  test('uses inclusive finish arithmetic for a binding start-to-finish dependency', async () => {
+    const client = new InMemoryPlanningClient(() => NOW)
+    await client.create('workspace-1', createCycleInput('sf-predecessor', 0, {
+      baseline: { startDate: '2026-08-01', endDate: '2026-08-01' },
+      forecast: { startDate: '2026-08-01', endDate: '2026-08-01' },
+    }), EMPTY_WORK_ITEMS)
+    await client.create('workspace-1', createCycleInput('sf-successor', 1, {
+      baseline: { startDate: '2026-08-01', endDate: '2026-08-01' },
+      forecast: { startDate: '2026-08-01', endDate: '2026-08-01' },
+    }), EMPTY_WORK_ITEMS)
+
+    const response = await client.createDependency('workspace-1', {
+      id: 'dependency-sf',
+      predecessorId: 'sf-predecessor',
+      successorId: 'sf-successor',
+      type: 'start-to-finish',
+      lagDays: 5,
+      expectedRevision: 2,
+    }, EMPTY_WORK_ITEMS)
+
+    expect(response.planning.criticalPath).toEqual({
+      entityIds: ['sf-predecessor', 'sf-successor'],
+      totalDurationDays: 6,
+      slackByEntityId: {
+        'sf-predecessor': 0,
+        'sf-successor': 0,
+      },
+    })
+  })
+
+  test('manages canonical cross-Team Work Item dependencies and derived summary', async () => {
+    const client = new InMemoryPlanningClient(() => NOW)
+    const workItemState: PlanningWorkItemState = {
+      workItems: [
+        createWorkItem('work-a', 'started', {
+          teamId: 'team-a',
+          projectId: 'project-a',
+          dueDate: '2026-08-03',
+          schedule: createDateRangeSchedule('2026-08-01', '2026-08-03'),
+        }),
+        createWorkItem('work-b', 'unstarted', {
+          teamId: 'team-b',
+          projectId: 'project-b',
+          dueDate: '2026-08-06',
+          schedule: createDateRangeSchedule('2026-08-05', '2026-08-06'),
+        }),
+        createWorkItem('work-c', 'completed', {
+          teamId: 'team-b',
+          projectId: 'project-b',
+          dueDate: '2026-08-08',
+          schedule: {
+            mode: 'milestone',
+            startDate: '2026-08-08',
+            endDate: '2026-08-08',
+            durationDays: 0,
+            calendarPolicy: createDefaultDueDateWorkItemSchedule('2026-08-08').calendarPolicy,
+          },
+        }),
+      ],
+    }
+
+    await client.createWorkItemDependency('workspace-1', {
+      id: 'dependency-a-b',
+      predecessor: { teamId: 'team-a', workItemId: 'work-a' },
+      successor: { teamId: 'team-b', workItemId: 'work-b' },
+      type: 'finish-to-start',
+      lagDays: -1,
+      constraint: { anchor: 'finish', kind: 'not-after', date: '2026-08-06' },
+      expectedRevision: 0,
+    }, workItemState)
+    const authorizationState = await client.getAuthorizationState('workspace-1')
+    expect(() => requirePlanningWorkItemHasNoScheduleDependencies(
+      authorizationState.workItemDependencies,
+      'team-a',
+      'work-a',
+    )).toThrow('Remove all incoming and outgoing schedule dependencies')
+    expect(() => requirePlanningWorkItemHasNoScheduleDependencies(
+      authorizationState.workItemDependencies,
+      'team-c',
+      'unrelated',
+    )).not.toThrow()
+    await client.updateWorkItemDependency('workspace-1', 'dependency-a-b', {
+      expectedRevision: 1,
+      patch: { type: 'start-to-finish', lagDays: 5 },
+    }, workItemState)
+    const response = await client.createWorkItemDependency('workspace-1', {
+      id: 'dependency-b-c',
+      predecessor: { teamId: 'team-b', workItemId: 'work-b' },
+      successor: { teamId: 'team-b', workItemId: 'work-c' },
+      type: 'finish-to-start',
+      lagDays: 0,
+      expectedRevision: 2,
+    }, workItemState)
+
+    expect(response.planning.workItemDependencies).toEqual([
+      expect.objectContaining({
+        id: 'dependency-a-b',
+        type: 'start-to-finish',
+        lagDays: 5,
+        createdAt: NOW.toISOString(),
+        updatedAt: NOW.toISOString(),
+      }),
+      expect.objectContaining({ id: 'dependency-b-c' }),
+    ])
+    expect(response.planning.workItemDependencySummary).toEqual({
+      criticalPath: {
+        workItems: [
+          { teamId: 'team-a', workItemId: 'work-a' },
+          { teamId: 'team-b', workItemId: 'work-b' },
+          { teamId: 'team-b', workItemId: 'work-c' },
+        ],
+        totalDurationDays: 6,
+        slackByWorkItemKey: {
+          'team-a/work-a': 0,
+          'team-b/work-b': 0,
+          'team-b/work-c': 0,
+        },
+      },
+      conflicts: [],
+      unresolvedBlockerCount: 2,
+      affectedProjectIds: ['project-a', 'project-b'],
+      affectedMilestoneIds: [],
+    })
+
+    const partiallyVisible = await client.get('workspace-1', {
+      workItems: workItemState.workItems.slice(0, 2),
+    })
+    expect(partiallyVisible.workItemDependencies.map((dependency) => dependency.id)).toEqual([
+      'dependency-a-b',
+    ])
+    expect(partiallyVisible.workItemDependencySummary.criticalPath.workItems).toEqual([
+      { teamId: 'team-a', workItemId: 'work-a' },
+      { teamId: 'team-b', workItemId: 'work-b' },
+    ])
+
+    const hidden = await client.get('workspace-1', {
+      workItems: workItemState.workItems.slice(0, 1),
+    })
+    expect(hidden.workItemDependencies).toEqual([])
+    expect(hidden.workItemDependencySummary).toEqual({
+      criticalPath: { workItems: [], totalDurationDays: 0, slackByWorkItemKey: {} },
+      conflicts: [],
+      unresolvedBlockerCount: 0,
+      affectedProjectIds: [],
+      affectedMilestoneIds: [],
+    })
+
+    const deleted = await client.deleteWorkItemDependency(
+      'workspace-1',
+      'dependency-a-b',
+      { expectedRevision: 3 },
+      workItemState,
+    )
+    expect(deleted.planning.workItemDependencies.map((dependency) => dependency.id)).toEqual([
+      'dependency-b-c',
+    ])
+  })
+
+  test('prepares minimal durable results for Work Item dependency mutations', async () => {
+    const client = new InMemoryPlanningClient(() => NOW)
+    const workItemState: PlanningWorkItemState = {
+      workItems: [
+        createWorkItem('work-a', 'unstarted', {
+          teamId: 'team-a',
+          dueDate: '2026-08-03',
+          schedule: createDefaultDueDateWorkItemSchedule('2026-08-03'),
+        }),
+        createWorkItem('work-b', 'unstarted', {
+          teamId: 'team-b',
+          dueDate: '2026-08-06',
+          schedule: createDefaultDueDateWorkItemSchedule('2026-08-06'),
+        }),
+      ],
+    }
+    const preparedResults: unknown[] = []
+    const transaction = {
+      async prepare(result) {
+        preparedResults.push(structuredClone(result))
+        return {
+          transactWriteItem: {
+            Put: {
+              TableName: 'DeveloperPlatformTable',
+              Item: { workspaceId: 'workspace-1', recordKey: `RECEIPT#${result.revision}` },
+              ConditionExpression: 'attribute_not_exists(workspaceId)',
+            },
+          },
+        }
+      },
+    } satisfies PlanningMutationTransaction
+
+    await client.createWorkItemDependency('workspace-1', {
+      id: 'dependency-a-b',
+      predecessor: { teamId: 'team-a', workItemId: 'work-a' },
+      successor: { teamId: 'team-b', workItemId: 'work-b' },
+      type: 'finish-to-finish',
+      lagDays: 0,
+      expectedRevision: 0,
+    }, workItemState, [], transaction)
+    await client.updateWorkItemDependency('workspace-1', 'dependency-a-b', {
+      expectedRevision: 1,
+      patch: { lagDays: 2 },
+    }, workItemState, [], transaction)
+    await client.deleteWorkItemDependency(
+      'workspace-1',
+      'dependency-a-b',
+      { expectedRevision: 2 },
+      workItemState,
+      [],
+      transaction,
+    )
+
+    const createdDependency = {
+      id: 'dependency-a-b',
+      predecessor: { teamId: 'team-a', workItemId: 'work-a' },
+      successor: { teamId: 'team-b', workItemId: 'work-b' },
+      type: 'finish-to-finish',
+      lagDays: 0,
+      createdAt: NOW.toISOString(),
+      updatedAt: NOW.toISOString(),
+    }
+    const updatedDependency = {
+      ...createdDependency,
+      lagDays: 2,
+    }
+    expect(preparedResults).toEqual([
+      { kind: 'upsert', revision: 1, dependency: createdDependency },
+      { kind: 'upsert', revision: 2, dependency: updatedDependency },
+      { kind: 'delete', revision: 3, dependency: updatedDependency },
+    ])
+  })
+
+  test('fails closed before an in-memory dependency mutation when receipt preparation is unavailable', async () => {
+    const client = new InMemoryPlanningClient(() => NOW)
+    const workItemState: PlanningWorkItemState = {
+      workItems: [
+        createWorkItem('work-a', 'unstarted', { teamId: 'team-a' }),
+        createWorkItem('work-b', 'unstarted', { teamId: 'team-b' }),
+      ],
+    }
+    const transaction = {
+      async prepare() {
+        return undefined
+      },
+    } satisfies PlanningMutationTransaction
+
+    await expect(client.createWorkItemDependency('workspace-1', {
+      id: 'dependency-a-b',
+      predecessor: { teamId: 'team-a', workItemId: 'work-a' },
+      successor: { teamId: 'team-b', workItemId: 'work-b' },
+      type: 'finish-to-finish',
+      lagDays: 0,
+      expectedRevision: 0,
+    }, workItemState, [], transaction)).rejects.toMatchObject({
+      status: 503,
+      code: 'PlanningIdempotencyUnavailable',
+    })
+    expect(await client.getAuthorizationRevision('workspace-1')).toBe(0)
+  })
+
+  test('keeps critical-path slack keys distinct when endpoint IDs contain slashes', () => {
+    const workItems = [
+      createWorkItem('c', 'started', {
+        teamId: 'a/b',
+        schedule: createDateRangeSchedule('2026-08-01', '2026-08-01'),
+      }),
+      createWorkItem('b/c', 'started', {
+        teamId: 'a',
+        schedule: createDateRangeSchedule('2026-08-01', '2026-08-01'),
+      }),
+      createWorkItem('successor-one', 'unstarted', {
+        teamId: 'team-one',
+        schedule: createDateRangeSchedule('2026-08-02', '2026-08-02'),
+      }),
+      createWorkItem('successor-two', 'unstarted', {
+        teamId: 'team-two',
+        schedule: createDateRangeSchedule('2026-08-02', '2026-08-02'),
+      }),
+    ]
+    const dependencies: WorkItemScheduleDependency[] = [
+      {
+        id: 'dependency-one',
+        predecessor: { teamId: 'a/b', workItemId: 'c' },
+        successor: { teamId: 'team-one', workItemId: 'successor-one' },
+        type: 'finish-to-start',
+        lagDays: 0,
+        createdAt: NOW.toISOString(),
+        updatedAt: NOW.toISOString(),
+      },
+      {
+        id: 'dependency-two',
+        predecessor: { teamId: 'a', workItemId: 'b/c' },
+        successor: { teamId: 'team-two', workItemId: 'successor-two' },
+        type: 'finish-to-start',
+        lagDays: 0,
+        createdAt: NOW.toISOString(),
+        updatedAt: NOW.toISOString(),
+      },
+    ]
+
+    const summary = createPlanningWorkItemDependencySummary(dependencies, workItems, [])
+
+    expect(summary.criticalPath.slackByWorkItemKey).toEqual({
+      'a%2Fb/c': 0,
+      'a/b%2Fc': 0,
+      'team-one/successor-one': 0,
+      'team-two/successor-two': 0,
+    })
+  })
+
+  test('rejects self, duplicate, cycle, and invalid Work Item dependency fields', async () => {
+    const client = new InMemoryPlanningClient(() => NOW)
+    const workItemState: PlanningWorkItemState = {
+      workItems: [
+        createWorkItem('shared', 'unstarted', {
+          teamId: 'team-a',
+          dueDate: '2026-08-02',
+          schedule: createDateRangeSchedule('2026-08-01', '2026-08-02'),
+        }),
+        createWorkItem('shared', 'unstarted', {
+          teamId: 'team-b',
+          dueDate: '2026-08-02',
+          schedule: createDateRangeSchedule('2026-08-01', '2026-08-02'),
+        }),
+      ],
+    }
+
+    await client.createWorkItemDependency('workspace-1', {
+      id: 'cross-team',
+      predecessor: { teamId: 'team-a', workItemId: 'shared' },
+      successor: { teamId: 'team-b', workItemId: 'shared' },
+      type: 'start-to-finish',
+      lagDays: -2,
+      expectedRevision: 0,
+    }, workItemState)
+    await expect(client.createWorkItemDependency('workspace-1', {
+      id: 'duplicate',
+      predecessor: { teamId: 'team-a', workItemId: 'shared' },
+      successor: { teamId: 'team-b', workItemId: 'shared' },
+      type: 'finish-to-start',
+      lagDays: 0,
+      expectedRevision: 1,
+    }, workItemState)).rejects.toMatchObject({
+      status: 409,
+      code: 'PlanningWorkItemDependencyDuplicate',
+    })
+    await expect(client.createWorkItemDependency('workspace-1', {
+      id: 'self',
+      predecessor: { teamId: 'team-a', workItemId: 'shared' },
+      successor: { teamId: 'team-a', workItemId: 'shared' },
+      type: 'finish-to-start',
+      lagDays: 0,
+      expectedRevision: 1,
+    }, workItemState)).rejects.toMatchObject({
+      status: 400,
+      code: 'PlanningWorkItemDependencySelf',
+    })
+    await expect(client.createWorkItemDependency('workspace-1', {
+      id: 'cycle',
+      predecessor: { teamId: 'team-b', workItemId: 'shared' },
+      successor: { teamId: 'team-a', workItemId: 'shared' },
+      type: 'finish-to-start',
+      lagDays: 0,
+      expectedRevision: 1,
+    }, workItemState)).rejects.toMatchObject({
+      status: 409,
+      code: 'PlanningWorkItemDependencyCycle',
+    })
+    await expect(client.createWorkItemDependency('workspace-1', {
+      id: 'invalid-lag',
+      predecessor: { teamId: 'team-b', workItemId: 'shared' },
+      successor: { teamId: 'team-a', workItemId: 'shared' },
+      type: 'finish-to-start',
+      lagDays: 36_601,
+      expectedRevision: 1,
+    }, workItemState)).rejects.toMatchObject({
+      status: 400,
+      code: 'PlanningDependencyLagInvalid',
+    })
+    await expect(client.createWorkItemDependency('workspace-1', {
+      id: 'invalid-constraint',
+      predecessor: { teamId: 'team-b', workItemId: 'shared' },
+      successor: { teamId: 'team-a', workItemId: 'shared' },
+      type: 'finish-to-start',
+      lagDays: 0,
+      constraint: { anchor: 'start', kind: 'on', date: '2026-02-30' },
+      expectedRevision: 1,
+    }, workItemState)).rejects.toMatchObject({ status: 400 })
+    await expect(client.updateWorkItemDependency('workspace-1', 'cross-team', {
+      expectedRevision: 1,
+      patch: {},
+    }, workItemState)).rejects.toMatchObject({
+      status: 400,
+      code: 'PlanningWorkItemDependencyPatchInvalid',
+    })
+  })
+
+  test('rejects candidate schedule conflicts while reporting conflicts caused by later drift', async () => {
+    const client = new InMemoryPlanningClient(() => NOW)
+    const workItemState: PlanningWorkItemState = {
+      workItems: [
+        createWorkItem('predecessor', 'started', {
+          teamId: 'team-a',
+          dueDate: '2026-08-03',
+          schedule: createDateRangeSchedule('2026-08-01', '2026-08-03'),
+        }),
+        createWorkItem('successor', 'unstarted', {
+          teamId: 'team-b',
+          dueDate: '2026-08-06',
+          schedule: createDateRangeSchedule('2026-08-05', '2026-08-06'),
+        }),
+      ],
+    }
+    const endpoints = {
+      predecessor: { teamId: 'team-a', workItemId: 'predecessor' },
+      successor: { teamId: 'team-b', workItemId: 'successor' },
+    }
+
+    await expect(client.createWorkItemDependency('workspace-1', {
+      id: 'dependency-violation',
+      ...endpoints,
+      type: 'finish-to-start',
+      lagDays: 2,
+      expectedRevision: 0,
+    }, workItemState)).rejects.toMatchObject({
+      status: 409,
+      code: 'PlanningWorkItemDependencyConflict',
+    })
+    await expect(client.createWorkItemDependency('workspace-1', {
+      id: 'constraint-violation',
+      ...endpoints,
+      type: 'finish-to-start',
+      lagDays: 0,
+      constraint: { anchor: 'finish', kind: 'not-after', date: '2026-08-05' },
+      expectedRevision: 0,
+    }, workItemState)).rejects.toMatchObject({
+      status: 409,
+      code: 'PlanningWorkItemDependencyConflict',
+    })
+
+    await client.createWorkItemDependency('workspace-1', {
+      id: 'valid-dependency',
+      ...endpoints,
+      type: 'finish-to-start',
+      lagDays: 0,
+      constraint: { anchor: 'finish', kind: 'not-after', date: '2026-08-06' },
+      expectedRevision: 0,
+    }, workItemState)
+    await expect(client.updateWorkItemDependency('workspace-1', 'valid-dependency', {
+      expectedRevision: 1,
+      patch: { lagDays: 2 },
+    }, workItemState)).rejects.toMatchObject({
+      status: 409,
+      code: 'PlanningWorkItemDependencyConflict',
+    })
+
+    const unchanged = await client.get('workspace-1', workItemState)
+    expect(unchanged.revision).toBe(1)
+    expect(unchanged.workItemDependencies).toEqual([
+      expect.objectContaining({ id: 'valid-dependency', lagDays: 0 }),
+    ])
+
+    const drifted = await client.get('workspace-1', {
+      workItems: workItemState.workItems.map((workItem) =>
+        workItem.id === 'predecessor'
+          ? {
+              ...workItem,
+              dueDate: '2026-08-06',
+              schedule: createDateRangeSchedule('2026-08-04', '2026-08-06'),
+            }
+          : workItem
+      ),
+    })
+    expect(drifted.workItemDependencySummary.conflicts).toEqual([{
+      code: 'dependency-violation',
+      dependencyId: 'valid-dependency',
+      workItem: { teamId: 'team-b', workItemId: 'successor' },
+      requiredDate: '2026-08-07',
+      actualDate: '2026-08-05',
+    }])
+  })
+
+  test('rejects dependencies whose lead or lag leaves the supported schedule date range', async () => {
+    const client = new InMemoryPlanningClient(() => NOW)
+    const workItemState: PlanningWorkItemState = {
+      workItems: [
+        createWorkItem('maximum-predecessor', 'started', {
+          teamId: 'maximum-team',
+          dueDate: '9999-12-31',
+          schedule: createDateRangeSchedule('9999-12-31', '9999-12-31'),
+        }),
+        createWorkItem('maximum-successor', 'unstarted', {
+          teamId: 'maximum-team',
+          dueDate: '9999-12-31',
+          schedule: createDateRangeSchedule('9999-12-31', '9999-12-31'),
+        }),
+        createWorkItem('minimum-predecessor', 'started', {
+          teamId: 'minimum-team',
+          dueDate: '1000-01-01',
+          schedule: createDateRangeSchedule('1000-01-01', '1000-01-01'),
+        }),
+        createWorkItem('minimum-successor', 'unstarted', {
+          teamId: 'minimum-team',
+          dueDate: '1000-01-01',
+          schedule: createDateRangeSchedule('1000-01-01', '1000-01-01'),
+        }),
+      ],
+    }
+
+    await expect(client.createWorkItemDependency('workspace-1', {
+      id: 'overflowing-fs',
+      predecessor: { teamId: 'maximum-team', workItemId: 'maximum-predecessor' },
+      successor: { teamId: 'maximum-team', workItemId: 'maximum-successor' },
+      type: 'finish-to-start',
+      lagDays: 0,
+      expectedRevision: 0,
+    }, workItemState)).rejects.toMatchObject({
+      status: 409,
+      code: 'PlanningWorkItemDependencyConflict',
+    })
+    await expect(client.createWorkItemDependency('workspace-1', {
+      id: 'underflowing-ss',
+      predecessor: { teamId: 'minimum-team', workItemId: 'minimum-predecessor' },
+      successor: { teamId: 'minimum-team', workItemId: 'minimum-successor' },
+      type: 'start-to-start',
+      lagDays: -1,
+      expectedRevision: 0,
+    }, workItemState)).rejects.toMatchObject({
+      status: 409,
+      code: 'PlanningWorkItemDependencyConflict',
+    })
+    await expect(client.createWorkItemDependency('workspace-1', {
+      id: 'underflowing-constraint',
+      predecessor: { teamId: 'minimum-team', workItemId: 'minimum-predecessor' },
+      successor: { teamId: 'minimum-team', workItemId: 'minimum-successor' },
+      type: 'start-to-start',
+      lagDays: 0,
+      constraint: {
+        anchor: 'start',
+        kind: 'not-before',
+        date: '0999-12-31',
+      },
+      expectedRevision: 0,
+    }, workItemState)).rejects.toMatchObject({
+      status: 400,
+      code: 'PlanningDependencyConstraintInvalid',
+    })
+
+    expect((await client.get('workspace-1', workItemState)).workItemDependencies).toEqual([])
+  })
+
+  test('does not infer due-date starts for dependency conflict checks', () => {
+    const dueDateItems = ['due-predecessor-ss', 'due-predecessor-sf', 'due-successor-fs',
+      'due-successor-ss'].map((id) => createWorkItem(id, 'unstarted', {
+        teamId: 'team-due',
+        dueDate: '2026-08-10',
+        schedule: createDefaultDueDateWorkItemSchedule('2026-08-10'),
+      }))
+    const rangedItems = ['range-successor-ss', 'range-successor-sf', 'range-predecessor-fs',
+      'range-predecessor-ss'].map((id) => createWorkItem(id, 'unstarted', {
+        teamId: 'team-range',
+        dueDate: '2026-08-12',
+        schedule: createDateRangeSchedule('2026-08-11', '2026-08-12'),
+      }))
+    const dependencyDefinitions: Array<Pick<
+      WorkItemScheduleDependency,
+      'id' | 'predecessor' | 'successor' | 'type'
+    >> = [
+      {
+        id: 'ss-predecessor',
+        predecessor: { teamId: 'team-due', workItemId: 'due-predecessor-ss' },
+        successor: { teamId: 'team-range', workItemId: 'range-successor-ss' },
+        type: 'start-to-start',
+      },
+      {
+        id: 'sf-predecessor',
+        predecessor: { teamId: 'team-due', workItemId: 'due-predecessor-sf' },
+        successor: { teamId: 'team-range', workItemId: 'range-successor-sf' },
+        type: 'start-to-finish',
+      },
+      {
+        id: 'fs-successor',
+        predecessor: { teamId: 'team-range', workItemId: 'range-predecessor-fs' },
+        successor: { teamId: 'team-due', workItemId: 'due-successor-fs' },
+        type: 'finish-to-start',
+      },
+      {
+        id: 'ss-successor',
+        predecessor: { teamId: 'team-range', workItemId: 'range-predecessor-ss' },
+        successor: { teamId: 'team-due', workItemId: 'due-successor-ss' },
+        type: 'start-to-start',
+      },
+    ]
+    const dependencies = dependencyDefinitions.map((dependency) => ({
+      ...dependency,
+      lagDays: 0,
+      createdAt: NOW.toISOString(),
+      updatedAt: NOW.toISOString(),
+    }))
+
+    const summary = createPlanningWorkItemDependencySummary(
+      dependencies,
+      [...dueDateItems, ...rangedItems],
+      [],
+    )
+
+    expect(summary.conflicts).toHaveLength(4)
+    expect(summary.conflicts.map((conflict) => [conflict.dependencyId, conflict.code])).toEqual([
+      ['fs-successor', 'missing-schedule'],
+      ['sf-predecessor', 'missing-schedule'],
+      ['ss-predecessor', 'missing-schedule'],
+      ['ss-successor', 'missing-schedule'],
+    ])
   })
 
   test('rolls over only incomplete Work Items according to the Cycle policy', async () => {
@@ -1276,6 +1926,213 @@ describe('planning persistence', () => {
     ])
   })
 
+  test('persists Work Item dependency rows with both endpoint revision conditions', async () => {
+    let transaction: Record<string, unknown> | undefined
+    let transactionCalls = 0
+    const preparedResults: unknown[] = []
+    const documentClient = {
+      async send(command: {
+        /** AWS SDK command constructor. */
+        constructor: { name: string }
+        /** AWS SDK command input. */
+        input: Record<string, unknown>
+      }) {
+        if (command.constructor.name === 'QueryCommand') return { Items: [] }
+        if (command.constructor.name === 'TransactWriteCommand') {
+          transactionCalls += 1
+          transaction = command.input
+        }
+        return {}
+      },
+    } as unknown as DynamoDBDocumentClient
+    const client = new DynamoDbPlanningClient(
+      'PlanningTable',
+      documentClient,
+      {} as DynamoDBClient,
+      false,
+      () => NOW,
+      'WorkItemsTable',
+    )
+    const workItemState: PlanningWorkItemState = {
+      workItems: [
+        createWorkItem('work-a', 'unstarted', { teamId: 'team-a', revision: 7 }),
+        createWorkItem('work-b', 'unstarted', { teamId: 'team-b', revision: 9 }),
+      ],
+    }
+    const workspaceAuthorizationCheck: PlanningCallerAuthorizationConditionCheck = {
+      ConditionCheck: {
+        TableName: 'WorkspaceAccessTable',
+        Key: { workspaceId: 'workspace-1', recordKey: 'MEMBER#manager@example.com' },
+        ConditionExpression: '#version = :expectedVersion',
+        ExpressionAttributeNames: { '#version': 'version' },
+        ExpressionAttributeValues: { ':expectedVersion': 4 },
+      },
+    }
+    const enterpriseAuthorizationCheck: PlanningCallerAuthorizationConditionCheck = {
+      ConditionCheck: {
+        TableName: 'EnterpriseIdentityTable',
+        Key: { scopeKey: 'WORKSPACE#workspace-1', recordKey: 'CONTROL' },
+        ConditionExpression: '#revision = :expectedRevision',
+        ExpressionAttributeNames: { '#revision': 'controlRevision' },
+        ExpressionAttributeValues: { ':expectedRevision': 6 },
+      },
+    }
+    const authorizationConditionChecks = [
+      workspaceAuthorizationCheck,
+      enterpriseAuthorizationCheck,
+    ]
+    const mutationTransaction = {
+      async prepare(result) {
+        preparedResults.push(structuredClone(result))
+        return {
+          transactWriteItem: {
+            Put: {
+              TableName: 'DeveloperPlatformTable',
+              Item: {
+                workspaceId: 'workspace-1',
+                recordKey: 'COMPLETION#request-1',
+                revision: result.revision,
+              },
+              ConditionExpression: 'attribute_not_exists(workspaceId)',
+            },
+          },
+        }
+      },
+    } satisfies PlanningMutationTransaction
+
+    const response = await client.createWorkItemDependency('workspace-1', {
+      id: 'dependency-a-b',
+      predecessor: { teamId: 'team-a', workItemId: 'work-a' },
+      successor: { teamId: 'team-b', workItemId: 'work-b' },
+      type: 'finish-to-finish',
+      lagDays: -3,
+      expectedRevision: 0,
+    }, workItemState, authorizationConditionChecks, mutationTransaction)
+
+    expect(response.planning.revision).toBe(1)
+    expect(transaction?.TransactItems).toEqual([
+      expect.objectContaining({ Put: expect.any(Object) }),
+      {
+        ConditionCheck: expect.objectContaining({
+          TableName: 'WorkItemsTable',
+          Key: {
+            directoryTeamId: 'workspace-1#team#team-a',
+            issueId: 'work-a',
+          },
+          ExpressionAttributeValues: { ':expectedRevision': 7 },
+        }),
+      },
+      {
+        ConditionCheck: expect.objectContaining({
+          TableName: 'WorkItemsTable',
+          Key: {
+            directoryTeamId: 'workspace-1#team#team-b',
+            issueId: 'work-b',
+          },
+          ExpressionAttributeValues: { ':expectedRevision': 9 },
+        }),
+      },
+      {
+        ConditionCheck: expect.objectContaining({
+          TableName: 'WorkspaceAccessTable',
+          Key: {
+            workspaceId: 'workspace-1',
+            recordKey: 'MEMBER#manager@example.com',
+          },
+          ExpressionAttributeValues: { ':expectedVersion': 4 },
+        }),
+      },
+      {
+        ConditionCheck: expect.objectContaining({
+          TableName: 'EnterpriseIdentityTable',
+          Key: { scopeKey: 'WORKSPACE#workspace-1', recordKey: 'CONTROL' },
+          ExpressionAttributeValues: { ':expectedRevision': 6 },
+        }),
+      },
+      {
+        Put: expect.objectContaining({
+          Item: expect.objectContaining({
+            recordKey: 'WORK_ITEM_DEPENDENCY#dependency-a-b',
+            entryType: 'planning-work-item-dependency',
+            lagDays: -3,
+          }),
+        }),
+      },
+      {
+        Put: {
+          TableName: 'DeveloperPlatformTable',
+          Item: {
+            workspaceId: 'workspace-1',
+            recordKey: 'COMPLETION#request-1',
+            revision: 1,
+          },
+          ConditionExpression: 'attribute_not_exists(workspaceId)',
+        },
+      },
+    ])
+    expect(preparedResults).toEqual([{
+      kind: 'upsert',
+      revision: 1,
+      dependency: expect.objectContaining({
+        id: 'dependency-a-b',
+        predecessor: { teamId: 'team-a', workItemId: 'work-a' },
+        successor: { teamId: 'team-b', workItemId: 'work-b' },
+      }),
+    }])
+
+    const authorizationLimitChecks = Array.from({ length: 96 }, (_, index) => ({
+      ConditionCheck: {
+        TableName: 'WorkspaceAccessTable',
+        Key: { workspaceId: 'workspace-limit', recordKey: `GUARD#${index}` },
+        ConditionExpression: '#version = :expectedVersion',
+        ExpressionAttributeNames: { '#version': 'version' },
+        ExpressionAttributeValues: { ':expectedVersion': 1 },
+      },
+    })) satisfies PlanningCallerAuthorizationConditionCheck[]
+    await expect(client.createWorkItemDependency('workspace-limit', {
+      id: 'dependency-limit',
+      predecessor: { teamId: 'team-a', workItemId: 'work-a' },
+      successor: { teamId: 'team-b', workItemId: 'work-b' },
+      type: 'finish-to-finish',
+      lagDays: -3,
+      expectedRevision: 0,
+    }, workItemState, authorizationLimitChecks, mutationTransaction)).rejects.toMatchObject({
+      status: 413,
+      code: 'PlanningMutationLimitExceeded',
+    })
+    expect(transactionCalls).toBe(1)
+
+    const oversizedTransaction = {
+      async prepare(result) {
+        return {
+          transactWriteItem: {
+            Put: {
+              TableName: 'DeveloperPlatformTable',
+              Item: {
+                workspaceId: 'workspace-size',
+                recordKey: 'COMPLETION#request-size',
+                revision: result.revision,
+                payload: 'x'.repeat(3_000_000),
+              },
+            },
+          },
+        }
+      },
+    } satisfies PlanningMutationTransaction
+    await expect(client.createWorkItemDependency('workspace-size', {
+      id: 'dependency-size',
+      predecessor: { teamId: 'team-a', workItemId: 'work-a' },
+      successor: { teamId: 'team-b', workItemId: 'work-b' },
+      type: 'finish-to-finish',
+      lagDays: -3,
+      expectedRevision: 0,
+    }, workItemState, [], oversizedTransaction)).rejects.toMatchObject({
+      status: 413,
+      code: 'PlanningMutationSizeLimitExceeded',
+    })
+    expect(transactionCalls).toBe(1)
+  })
+
   test('condition-checks completed Work Item revisions when archiving a Cycle', async () => {
     let transaction: Record<string, unknown> | undefined
     const storedCycle = createStoredCycle('cycle-1')
@@ -1358,6 +2215,124 @@ describe('planning persistence', () => {
         }),
       }),
     ])
+  })
+
+  test('classifies authorization, revision, endpoint, and receipt cancellations by priority', async () => {
+    const authorizationConditionChecks = [{
+      ConditionCheck: {
+        TableName: 'WorkspaceAccessTable',
+        Key: { workspaceId: 'workspace-1', recordKey: 'MEMBER#manager@example.com' },
+        ConditionExpression: '#version = :expectedVersion',
+        ExpressionAttributeNames: { '#version': 'version' },
+        ExpressionAttributeValues: { ':expectedVersion': 4 },
+      },
+    }] satisfies PlanningCallerAuthorizationConditionCheck[]
+    const workItemState: PlanningWorkItemState = {
+      workItems: [
+        createWorkItem('work-a', 'unstarted', { teamId: 'team-a', revision: 7 }),
+        createWorkItem('work-b', 'unstarted', { teamId: 'team-b', revision: 9 }),
+      ],
+    }
+    const transaction = {
+      async prepare(result) {
+        return {
+          transactWriteItem: {
+            Put: {
+              TableName: 'DeveloperPlatformTable',
+              Item: {
+                workspaceId: 'workspace-1',
+                recordKey: 'COMPLETION#request-1',
+                revision: result.revision,
+              },
+              ConditionExpression: 'attribute_not_exists(workspaceId)',
+            },
+          },
+        }
+      },
+    } satisfies PlanningMutationTransaction
+
+    for (const scenario of [
+      {
+        reasons: [
+          { Code: 'ConditionalCheckFailed' },
+          { Code: 'ConditionalCheckFailed' },
+          { Code: 'None' },
+          { Code: 'ConditionalCheckFailed' },
+          { Code: 'None' },
+          { Code: 'ConditionalCheckFailed' },
+        ],
+        code: 'PlanningAuthorizationChanged',
+      },
+      {
+        reasons: [
+          { Code: 'ConditionalCheckFailed' },
+          { Code: 'ConditionalCheckFailed' },
+          { Code: 'None' },
+          { Code: 'None' },
+          { Code: 'None' },
+          { Code: 'ConditionalCheckFailed' },
+        ],
+        code: 'PlanningRevisionConflict',
+      },
+      {
+        reasons: [
+          { Code: 'None' },
+          { Code: 'ConditionalCheckFailed' },
+          { Code: 'None' },
+          { Code: 'None' },
+          { Code: 'None' },
+          { Code: 'ConditionalCheckFailed' },
+        ],
+        code: 'PlanningWorkItemChanged',
+      },
+      {
+        reasons: [
+          { Code: 'None' },
+          { Code: 'None' },
+          { Code: 'None' },
+          { Code: 'None' },
+          { Code: 'None' },
+          { Code: 'ConditionalCheckFailed' },
+        ],
+        code: 'PlanningIdempotencyConflict',
+      },
+    ]) {
+      const documentClient = {
+        async send(command: {
+          /** AWS SDK command constructor. */
+          constructor: { name: string }
+        }) {
+          if (command.constructor.name === 'QueryCommand') return { Items: [] }
+          if (command.constructor.name === 'TransactWriteCommand') {
+            throw {
+              name: 'TransactionCanceledException',
+              CancellationReasons: scenario.reasons,
+            }
+          }
+          return {}
+        },
+      } as unknown as DynamoDBDocumentClient
+      const client = new DynamoDbPlanningClient(
+        'PlanningTable',
+        documentClient,
+        {} as DynamoDBClient,
+        false,
+        () => NOW,
+        'WorkItemsTable',
+      )
+
+      await expect(client.createWorkItemDependency('workspace-1', {
+        id: 'dependency-a-b',
+        predecessor: { teamId: 'team-a', workItemId: 'work-a' },
+        successor: { teamId: 'team-b', workItemId: 'work-b' },
+        type: 'finish-to-finish',
+        lagDays: -3,
+        expectedRevision: 0,
+      }, workItemState, authorizationConditionChecks, transaction)).rejects.toMatchObject({
+        status: 409,
+        code: scenario.code,
+      })
+    }
   })
 
   test('rejects an oversized mutation response before committing it', async () => {

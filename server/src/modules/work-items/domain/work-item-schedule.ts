@@ -379,9 +379,55 @@ export function previewWorkItemScheduleChange(
       expectedRevision,
       before: normalizedBefore,
       after,
+      dateDeltaDays: calculateWorkItemScheduleDateDeltaDays(normalizedBefore, after),
     }],
+    evaluatedRevisions: [{
+      teamId: normalizedTeamId,
+      workItemId: normalizedWorkItemId,
+      expectedRevision,
+    }],
+    conflicts: [],
+    affectedProjectIds: [],
+    affectedMilestoneIds: [],
+    requiresConfirmation: false,
     warnings: [],
   }
+}
+
+/**
+ * Calculates the signed calendar-day movement of a schedule's primary date.
+ *
+ * Date ranges and milestones use their end date, while due-date schedules use
+ * their due date. This matches the canonical deadline projection used by task
+ * surfaces. A transition to or from an unscheduled value has no comparable date
+ * and therefore reports zero.
+ *
+ * @param before - Canonical schedule before a proposed change.
+ * @param after - Canonical schedule after a proposed change.
+ * @returns Signed calendar days from the before primary date to the after date.
+ */
+export function calculateWorkItemScheduleDateDeltaDays(
+  before: WorkItemSchedule,
+  after: WorkItemSchedule,
+): number {
+  const beforeDate = readWorkItemSchedulePrimaryDate(normalizeWorkItemSchedule(before))
+  const afterDate = readWorkItemSchedulePrimaryDate(normalizeWorkItemSchedule(after))
+  if (!beforeDate || !afterDate) return 0
+  return parseIsoDate(afterDate).epochDay - parseIsoDate(beforeDate).epochDay
+}
+
+/**
+ * Reads the date used to summarize movement for one canonical schedule.
+ *
+ * @param schedule - Canonical Work Item schedule.
+ * @returns The primary local date, or undefined for an unscheduled item.
+ */
+function readWorkItemSchedulePrimaryDate(
+  schedule: WorkItemSchedule,
+): string | undefined {
+  if (schedule.mode === 'unscheduled') return undefined
+  if (schedule.mode === 'due-date') return schedule.dueDate
+  return schedule.endDate
 }
 
 /**

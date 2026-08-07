@@ -3,6 +3,7 @@ import {
   type CustomFieldValue,
   type WorkflowStatusCategory,
 } from './work-item-configuration'
+import type { WorkItemScheduleDependencyConflict } from './schedule-dependencies'
 
 /**
  * 現在の canonical Work Item schema version です。
@@ -226,6 +227,20 @@ export type WorkItemScheduleImpact = {
   before: WorkItemSchedule
   /** Schedule after the proposed operation. */
   after: WorkItemSchedule
+  /** Signed calendar-day movement of the affected schedule's primary date. */
+  dateDeltaDays: number
+  /** Canonical dependency that caused a propagated impact. */
+  dependencyId?: string
+}
+
+/** One Work Item revision whose schedule participated in a server preview evaluation. */
+export type WorkItemScheduleEvaluationRevision = {
+  /** Team that owns the evaluated Work Item. */
+  teamId: string
+  /** Team-local Work Item identifier. */
+  workItemId: string
+  /** Exact canonical revision observed while evaluating the preview. */
+  expectedRevision: number
 }
 
 /** Server-validated preview shared by every schedule editing surface. */
@@ -234,10 +249,58 @@ export type WorkItemScheduleChangePreview = {
   expectedRevision: number
   /** Target Work Item followed by any dependency-propagated impacts. */
   impacts: WorkItemScheduleImpact[]
+  /** Sorted revisions for every Work Item schedule that influenced this preview. */
+  evaluatedRevisions: WorkItemScheduleEvaluationRevision[]
   /** Relation graph revision used to enumerate dependency impacts, when evaluated. */
   relationGraphRevision?: number
+  /** Planning graph revision used to enumerate canonical schedule dependencies. */
+  planningRevision?: number
+  /** Conflicts that prevent automatic dependency propagation from being applied. */
+  conflicts: WorkItemScheduleDependencyConflict[]
+  /** Projects reached by the direct or propagated impacts. */
+  affectedProjectIds: string[]
+  /** Milestones reached through Planning Work Item links. */
+  affectedMilestoneIds: string[]
+  /** Whether applying this preview requires an explicit confirmation request. */
+  requiresConfirmation: boolean
   /** Stable warning codes suitable for localized presentation. */
   warnings: string[]
+}
+
+/** Explicit confirmation request for a server-recomputed schedule change preview. */
+export type ConfirmWorkItemScheduleChangeInput = PreviewWorkItemScheduleInput & {
+  /** Planning graph revision returned by the preview. */
+  expectedPlanningRevision: number
+  /** Relation graph revision returned by the preview. */
+  expectedRelationGraphRevision: number
+  /** Exact evaluated Work Item revisions returned by the preview. */
+  expectedEvaluatedRevisions: WorkItemScheduleEvaluationRevision[]
+  /** Exact direct and propagated impacts returned by the preview. */
+  expectedImpacts: WorkItemScheduleImpact[]
+  /** Literal acknowledgement that the previewed ripple should be persisted. */
+  confirmed: true
+}
+
+/** Result of applying every revision-bound schedule impact after confirmation. */
+export type ConfirmWorkItemScheduleChangeResponse = {
+  /** Compact, deterministic schedule results committed by the confirmed dependency cascade. */
+  workItems: ConfirmedWorkItemSchedule[]
+}
+
+/** Compact canonical projection of one Work Item changed by schedule confirmation. */
+export type ConfirmedWorkItemSchedule = {
+  /** Team-local Work Item identifier. */
+  id: string
+  /** Team that owns the Work Item. */
+  teamId: string
+  /** Revision committed by the schedule cascade. */
+  revision: number
+  /** Complete canonical schedule committed by the cascade. */
+  schedule: WorkItemSchedule
+  /** Deadline projection derived from the committed schedule. */
+  dueDate: string
+  /** Assigned Project at the instant the schedule result was committed. */
+  assignedProjectId?: string
 }
 
 /**

@@ -471,6 +471,16 @@ export type ArchiveProjectResponse = {
   archivedAt: string
 }
 
+/** Canonical Work Item revision that must remain unchanged while archiving a Project. */
+export type ProjectArchiveWorkItemRevisionGuard = {
+  /** Team that owns the dependency endpoint. */
+  teamId: string
+  /** Team-local canonical Work Item identifier. */
+  workItemId: string
+  /** Revision observed while checking the Work Item's assigned Project. */
+  expectedRevision: number
+}
+
 /**
  * プロジェクト権限管理画面に表示する member 行です。
  */
@@ -697,6 +707,7 @@ export type ProjectDirectoryClient = {
     projectId: string,
     auditContext: MutationAuditContext | undefined,
     expectedPlanningRevision: number,
+    workItemRevisionGuards: readonly ProjectArchiveWorkItemRevisionGuard[],
   ): Promise<ArchiveProjectResponse>
 }
 
@@ -767,6 +778,10 @@ export class DynamoDbProjectDirectoryClient {
    * Team / Project archive と直列化する Planning table 名です。
    */
   private readonly planningTableName: string
+  /**
+   * Canonical Work Item table used to fence dependency endpoint Project assignments.
+   */
+  private readonly workItemsTableName: string
 
   constructor(
     tableName =
@@ -782,6 +797,12 @@ export class DynamoDbProjectDirectoryClient {
       getEnv('WORKSPACE_ACCESS_TABLE_NAME') ??
       'mukuroji-workspace-access-local',
     planningTableName = getEnv('PLANNING_TABLE_NAME') ?? 'mukuroji-planning-local',
+    workItemsTableName =
+      getEnv('MUKUROJI_WORK_ITEMS_TABLE') ??
+      getEnv('WORK_ITEMS_TABLE_NAME') ??
+      getEnv('MUKUROJI_TEAM_ISSUES_TABLE') ??
+      getEnv('TEAM_ISSUES_TABLE_NAME') ??
+      'mukuroji-team-issues-local',
   ) {
     this.tableName = tableName
     this.documentClient = documentClient
@@ -790,6 +811,7 @@ export class DynamoDbProjectDirectoryClient {
     this.auditTableName = auditTableName
     this.workspaceAccessTableName = workspaceAccessTableName
     this.planningTableName = planningTableName
+    this.workItemsTableName = workItemsTableName
   }
 
   /**
@@ -1847,9 +1869,11 @@ export class DynamoDbProjectDirectoryClient {
     projectId: string,
     auditContext: MutationAuditContext | undefined,
     expectedPlanningRevision: number,
+    workItemRevisionGuards: readonly ProjectArchiveWorkItemRevisionGuard[] = [],
   ) {
     await this.ensureLocalAuditTable()
     let planningRevisionItemIndex: number | undefined
+    let workItemRevisionGuardStartIndex: number | undefined
     try {
       const items = await this.readValidDirectoryItems(directoryId)
       const team = items.find((item) =>
@@ -1904,10 +1928,38 @@ export class DynamoDbProjectDirectoryClient {
         archivedAt,
       )
       planningRevisionItemIndex = 1 + auditItems.length
+      const workItemRevisionConditions = workItemRevisionGuards.map((guard) => ({
+        ConditionCheck: {
+          TableName: this.workItemsTableName,
+          Key: {
+            directoryTeamId: `${directoryId}#team#${guard.teamId}`,
+            issueId: guard.workItemId,
+          },
+          ConditionExpression:
+            'attribute_exists(directoryTeamId) AND attribute_exists(issueId) AND ' +
+            '#revision = :expectedRevision',
+          ExpressionAttributeNames: { '#revision': 'revision' },
+          ExpressionAttributeValues: { ':expectedRevision': guard.expectedRevision },
+        },
+      }))
+      workItemRevisionGuardStartIndex = planningRevisionItemIndex + 1
+      const transactItems = [
+        stateUpdate,
+        ...auditItems,
+        planningRevisionMutation,
+        ...workItemRevisionConditions,
+      ]
+      if (transactItems.length > DYNAMODB_TRANSACTION_MAX_ACTIONS) {
+        throw new ProjectDataError(
+          413,
+          'PlanningProjectScopeDependencyLimitExceeded',
+          'The Project has too many dependency endpoints to archive atomically.',
+        )
+      }
 
       await this.documentClient.send(
         new TransactWriteCommand({
-          TransactItems: [stateUpdate, ...auditItems, planningRevisionMutation],
+          TransactItems: transactItems,
         }),
       )
 
@@ -1926,7 +1978,6 @@ export class DynamoDbProjectDirectoryClient {
         )
       }
 
-
       if (
         planningRevisionItemIndex !== undefined &&
         isTransactionConditionalFailureAt(error, planningRevisionItemIndex)
@@ -1935,6 +1986,20 @@ export class DynamoDbProjectDirectoryClient {
           409,
           'PlanningRevisionConflict',
           'Planning changed. Reload and try again.',
+        )
+      }
+
+      const guardStartIndex = workItemRevisionGuardStartIndex
+      if (
+        guardStartIndex !== undefined &&
+        workItemRevisionGuards.some((_, index) =>
+          isTransactionConditionalFailureAt(error, guardStartIndex + index)
+        )
+      ) {
+        throw new ProjectDataError(
+          409,
+          'WorkItemRevisionConflict',
+          'Work Item changed. Reload and try again.',
         )
       }
 

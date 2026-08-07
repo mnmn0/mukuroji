@@ -43,6 +43,7 @@ import {
 } from '../api-router'
 import {
   DynamoDbProjectDirectoryClient,
+  type ProjectArchiveWorkItemRevisionGuard,
   type ProjectRole,
 } from '../../modules/directory'
 import type {
@@ -71,6 +72,7 @@ import {
   isWorkItemSchedule,
   type CreateTeamIssueRequestBody,
   type TeamIssuesClient,
+  type UpdateTeamIssueRequestBody,
   type WorkItemAuthorizationSnapshot,
 } from '../../modules/work-items'
 import { type DocumentClient } from '../../modules/documents'
@@ -698,6 +700,7 @@ function createTeamIssuesFake(
     getTeamIssueDetail: unsupported,
     createTeamIssue: unsupported,
     updateTeamIssue: unsupported,
+    updateTeamIssueSchedules: unsupported,
     deleteTeamIssue: unsupported,
     createTeamIssueComment: unsupported,
     ...overrides,
@@ -1294,10 +1297,16 @@ function configureFakeProjectClients(
     detailAssignedProjectId?: string
     /** Work Item ID ごとに detail fake が返す現在 assigned Project ID です。 */
     detailAssignedProjectIds?: Record<string, string>
+    /** Qualified Team/Work Item key ごとに detail fake が返す current revision です。 */
+    detailRevisions?: Record<string, number>
     /** Notification 認可で再取得する Work Item の現在担当者です。 */
     detailAssigneeUserId?: string
     /** Detail fake が返す現在の設定済み custom field values です。 */
     detailCustomFieldValues?: Record<string, CustomFieldValue>
+    /** Detail fake が返す現在の canonical schedule です。 */
+    detailSchedule?: WorkItemSchedule
+    /** Work Item ID ごとに detail fake が返す現在の canonical schedule です。 */
+    detailSchedules?: Record<string, WorkItemSchedule>
     /** Detail fake が返す legacy search custom fields です。 */
     /** Detail fake が TeamIssueNotFound を返す Work Item ID です。 */
     detailMissingIssueIds?: string[]
@@ -1320,8 +1329,24 @@ function configureFakeProjectClients(
       input: Record<string, unknown>,
       completionTransactItems: NonNullable<TransactWriteCommandInput['TransactItems']>,
     ) => Promise<void> | void
+    /** Project archive transaction guards observed after scope validation. */
+    projectArchiveHook?: (input: {
+      /** Planning revision that the directory transaction must advance. */
+      expectedPlanningRevision: number
+      /** Canonical dependency endpoint revisions checked by the transaction. */
+      workItemRevisionGuards: readonly ProjectArchiveWorkItemRevisionGuard[]
+    }) => Promise<void> | void
     /** Canonical Work Item create transaction 直前の競合を再現する hook です。 */
     issueCreateHook?: (input: CreateTeamIssueRequestBody) => Promise<void> | void
+    /** Canonical Work Item update transaction 直前の認可競合を再現する hook です。 */
+    issueUpdateHook?: (input: {
+      /** Application-level authorization generations supplied to the adapter. */
+      authorizationSnapshot?: WorkItemAuthorizationSnapshot
+      /** App-owned Planning revision fence supplied to the adapter. */
+      planningRevisionFence?: UpdateTeamIssueRequestBody['planningRevisionFence']
+      /** Updated Team-local Work Item identifier. */
+      issueId: string
+    }) => Promise<void> | void
     /** Canonical Work Item delete の transaction 配線を観測する hook です。 */
     issueDeleteHook?: (input: {
       /** Authorization generation checks です。 */
@@ -1402,6 +1427,7 @@ function configureFakeProjectClients(
       expectedPlanningRevision: number
       teamId: string
       projectId: string
+      workItemRevisionGuards?: ProjectArchiveWorkItemRevisionGuard[]
     }>,
     projectCreates: [] as Array<{
       creatorUserKey: string
@@ -1453,9 +1479,16 @@ function configureFakeProjectClients(
     issueUpdates: [] as Array<{
       actorUserId: string
       assignedProjectId?: unknown
+      authorizationSnapshot?: WorkItemAuthorizationSnapshot
+      planningRevisionFence?: UpdateTeamIssueRequestBody['planningRevisionFence']
       directoryId: string
       issueId: string
       teamId: string
+    }>,
+    scheduleCascades: [] as Array<{
+      directoryId: string
+      guardedWorkItemIds: string[]
+      updatedWorkItemIds: string[]
     }>,
     issueDeletes: [] as Array<{
       actorUserId: string
@@ -1525,9 +1558,11 @@ function configureFakeProjectClients(
       revision: 1,
       id: index === 0 ? 'onboarding-friction' : `work-item-${index}`,
       teamId,
-      assignedProjectId: index < (options.inaccessibleTeamIssueCount ?? 0)
+      assignedProjectId: options.detailAssignedProjectIds?.[
+        index === 0 ? 'onboarding-friction' : `work-item-${index}`
+      ] ?? (index < (options.inaccessibleTeamIssueCount ?? 0)
         ? 'private-project'
-        : options.unassignedIssue ? undefined : 'refero',
+        : options.unassignedIssue ? undefined : 'refero'),
       title: index === 0
         ? '初回オンボーディングの離脱要因を減らす'
         : `Work Item ${index}`,
@@ -1991,8 +2026,22 @@ function configureFakeProjectClients(
         projectId,
         _auditContext,
         expectedPlanningRevision,
+        workItemRevisionGuards,
       ) {
-        calls.projectArchives.push({ directoryId, expectedPlanningRevision, teamId, projectId })
+        const detachedGuards = workItemRevisionGuards.map((guard) => ({ ...guard }))
+        calls.projectArchives.push({
+          directoryId,
+          expectedPlanningRevision,
+          teamId,
+          projectId,
+          ...(detachedGuards.length === 0
+            ? {}
+            : { workItemRevisionGuards: detachedGuards }),
+        })
+        await options.projectArchiveHook?.({
+          expectedPlanningRevision,
+          workItemRevisionGuards: detachedGuards,
+        })
 
         return {
           teamId,
@@ -2368,11 +2417,13 @@ function configureFakeProjectClients(
         const workflowStatusId = options.detailWorkflowStatusIds?.[detailReadIndex] ??
           options.detailWorkflowStatusId ??
           'in-progress'
+        const detailSchedule = options.detailSchedules?.[issueId] ?? options.detailSchedule ??
+          createDefaultDueDateWorkItemSchedule('2026-06-18')
 
         return {
           issue: {
             schemaVersion: WORK_ITEM_SCHEMA_VERSION,
-            revision: 1,
+            revision: options.detailRevisions?.[`${teamId}\0${issueId}`] ?? 1,
             id: issueId,
             teamId,
             assignedProjectId: options.detailAssignedProjectIds?.[issueId] ??
@@ -2391,8 +2442,8 @@ function configureFakeProjectClients(
                 : 'started',
             customFieldValues: options.detailCustomFieldValues ?? {},
             relationIds: [],
-            dueDate: '2026-06-18',
-            schedule: createDefaultDueDateWorkItemSchedule('2026-06-18'),
+            dueDate: deriveWorkItemScheduleDueDate(detailSchedule),
+            schedule: detailSchedule,
             priority: 'high',
             createdAt: '2026-06-08T00:00:00.000Z',
             updatedAt: options.detailUpdatedAts?.[detailReadIndex] ??
@@ -2469,9 +2520,20 @@ function configureFakeProjectClients(
         }
       },
       async updateTeamIssue(directoryId, teamId, issueId, input, actorUserId) {
+        await options.issueUpdateHook?.({
+          authorizationSnapshot: input.authorizationSnapshot,
+          planningRevisionFence: input.planningRevisionFence,
+          issueId,
+        })
         calls.issueUpdates.push({
           actorUserId,
           assignedProjectId: input.assignedProjectId,
+          ...(input.authorizationSnapshot
+            ? { authorizationSnapshot: input.authorizationSnapshot }
+            : {}),
+          ...(input.planningRevisionFence
+            ? { planningRevisionFence: input.planningRevisionFence }
+            : {}),
           directoryId,
           issueId,
           teamId,
@@ -2514,6 +2576,51 @@ function configureFakeProjectClients(
             source: 'dynamodb',
           },
         }
+      },
+      async updateTeamIssueSchedules(
+        directoryId,
+        updates,
+        guardedRevisions,
+        _actorUserId,
+        _auditContext,
+        _relationGraphConditionChecks,
+        _authorizationSnapshot,
+        idempotency,
+      ) {
+        const issues = updates.map((update) => ({
+            ...createFakeTeamIssues(update.teamId)[0]!,
+            id: update.workItemId,
+            assignedProjectId: options.detailAssignedProjectIds?.[update.workItemId] ??
+              options.detailAssignedProjectId ??
+              createFakeTeamIssues(update.teamId)[0]!.assignedProjectId,
+            revision: update.expectedRevision + 1,
+            schedule: update.schedule,
+            dueDate: deriveWorkItemScheduleDueDate(update.schedule),
+            updatedAt: '2026-06-08T02:00:00.000Z',
+          }))
+        const response = {
+          issues,
+          confirmedSchedules: issues.map((issue) => ({
+            id: issue.id,
+            teamId: issue.teamId,
+            revision: issue.revision,
+            schedule: issue.schedule,
+            dueDate: issue.dueDate,
+            ...(issue.assignedProjectId
+              ? { assignedProjectId: issue.assignedProjectId }
+              : {}),
+          })),
+        }
+        await idempotency?.prepare({
+          status: 200,
+          body: { workItems: response.confirmedSchedules },
+        })
+        calls.scheduleCascades.push({
+          directoryId,
+          guardedWorkItemIds: guardedRevisions.map((guard) => guard.workItemId),
+          updatedWorkItemIds: updates.map((update) => update.workItemId),
+        })
+        return response
       },
       async deleteTeamIssue(
         directoryId,
@@ -2995,17 +3102,29 @@ function createAccessToken(groups: string[] = [], claims: Record<string, unknown
   return `header.${payload}.signature`
 }
 
+/**
+ * Sends one authenticated Planning API request through the suite-owned application.
+ *
+ * @param state - Mutable harness state.
+ * @param path - Planning API path.
+ * @param method - HTTP method.
+ * @param body - Optional JSON request body.
+ * @param idempotencyKey - Optional raw idempotency header value.
+ * @returns Pending HTTP response.
+ */
 function planningApiRequest(
   state: ApiTestHarnessState,
   path: string,
   method = 'GET',
   body?: unknown,
+  idempotencyKey?: string,
 ) {
   return state.application.request(path, {
     method,
     headers: {
       Authorization: 'Bearer test-token',
       ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+      ...(idempotencyKey === undefined ? {} : { 'Idempotency-Key': idempotencyKey }),
     },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   })
@@ -3135,8 +3254,12 @@ export function createApiTestHarness() {
     enterpriseScimGroupJobProcessors,
     expectStableWorkspaceMutationAuditContexts,
     originalBulkRecoveryTitle,
-    planningApiRequest: (path: string, method = 'GET', body?: unknown) =>
-      planningApiRequest(state, path, method, body),
+    planningApiRequest: (
+      path: string,
+      method = 'GET',
+      body?: unknown,
+      idempotencyKey?: string,
+    ) => planningApiRequest(state, path, method, body, idempotencyKey),
     processEnterpriseScimGroupJobPage,
     putAppliedHeadlessScimUser,
     putHeadlessEnterpriseIdentityProvider,

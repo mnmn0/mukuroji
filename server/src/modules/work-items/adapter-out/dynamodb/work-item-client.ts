@@ -46,6 +46,9 @@ import {
   WorkItemScheduleError,
 } from '../../domain/work-item-schedule'
 import {
+  WORK_ITEM_SCHEDULE_CASCADE_LIMIT,
+} from '../../domain/work-item-schedule-dependencies'
+import {
   CreateTableCommand,
   DescribeTableCommand,
   DynamoDBClient,
@@ -70,6 +73,7 @@ import {
 } from '@mukuroji/contracts'
 import type {
   CanonicalWorkItem,
+  ConfirmedWorkItemSchedule,
   CustomFieldValue,
   RequestSubmissionEvent,
   ResolvedWorkItemConfiguration,
@@ -106,6 +110,8 @@ export type WorkItemAuthorizationSnapshot = {
 
 /** Source-of-truth row converted only inside the DynamoDB adapter. */
 type WorkItemAuthorizationGenerationGuard = {
+  /** Stable semantic purpose used to classify transaction cancellations safely. */
+  kind: 'workspace-member' | 'planning' | 'enterprise-control'
   /** DynamoDB table containing the authorization row. */
   tableName: string
   /** Complete primary key of the authorization row. */
@@ -172,11 +178,72 @@ function createDynamoDbWorkItemAuthorizationConditionChecks(
 function createAuthorizationSnapshotConditionChecks(
   snapshot: WorkItemAuthorizationSnapshot | undefined,
 ): NonNullable<TransactWriteCommandInput['TransactItems']> {
+  return createAuthorizationSnapshotConditionEntries(snapshot)
+    .map((entry) => entry.transactWriteItem)
+}
+
+/**
+ * Creates the app-owned Planning META fence used by Automation schedule updates.
+ *
+ * @param workspaceId - Workspace whose Planning state was checked.
+ * @param fence - Exact Planning revision observed before the mutation.
+ * @returns A single Planning META condition check, or no check when absent.
+ */
+function createPlanningRevisionFenceConditionChecks(
+  workspaceId: string,
+  fence: UpdateTeamIssueRequestBody['planningRevisionFence'],
+): NonNullable<TransactWriteCommandInput['TransactItems']> {
+  if (!fence) return []
+  if (!Number.isSafeInteger(fence.expectedRevision) || fence.expectedRevision < 0) {
+    throw new ProjectDataError(
+      500,
+      'InvalidWorkItemAuthorizationFence',
+      'Planning revision fence is invalid.',
+    )
+  }
+  const environment = loadServerConfig().environment
+  return createDynamoDbWorkItemAuthorizationConditionChecks([{
+    kind: 'planning',
+    tableName: environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
+    key: {
+      workspaceId,
+      recordKey: 'META',
+    },
+    generationAttribute: 'revision',
+    expectedGeneration: fence.expectedRevision,
+    requiredAttributes: {
+      entryType: 'planning-meta',
+      schemaVersion: PLANNING_SCHEMA_VERSION,
+    },
+    ...(fence.expectedRevision === 0
+      ? { allowMissingWhenExpectedZero: true }
+      : {}),
+  }])
+}
+
+/** One named authorization check in a canonical Work Item transaction. */
+type WorkItemAuthorizationConditionEntry = {
+  /** Authorization source guarded by this transaction item. */
+  kind: WorkItemAuthorizationGenerationGuard['kind']
+  /** DynamoDB condition check for the source-of-truth authorization row. */
+  transactWriteItem: NonNullable<TransactWriteCommandInput['TransactItems']>[number]
+}
+
+/**
+ * Creates named physical authorization checks from an application-level snapshot.
+ *
+ * @param snapshot - Authorization generations observed by the application layer.
+ * @returns Ordered checks whose semantic kinds remain available for error classification.
+ */
+function createAuthorizationSnapshotConditionEntries(
+  snapshot: WorkItemAuthorizationSnapshot | undefined,
+): WorkItemAuthorizationConditionEntry[] {
   if (!snapshot) return []
   const environment = loadServerConfig().environment
   const enterpriseTableName = environment.ENTERPRISE_IDENTITY_TABLE_NAME?.trim()
   const guards: WorkItemAuthorizationGenerationGuard[] = [
     {
+      kind: 'workspace-member',
       tableName:
         environment.MUKUROJI_WORKSPACE_ACCESS_TABLE ??
         environment.WORKSPACE_ACCESS_TABLE_NAME ??
@@ -193,6 +260,7 @@ function createAuthorizationSnapshotConditionChecks(
       },
     },
     {
+      kind: 'planning',
       tableName: environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
       key: {
         workspaceId: snapshot.workspaceId,
@@ -213,6 +281,7 @@ function createAuthorizationSnapshotConditionChecks(
         Number.isSafeInteger(snapshot.enterpriseControlRevision) &&
         snapshot.enterpriseControlRevision >= 0
       ? [{
+          kind: 'enterprise-control',
           tableName: enterpriseTableName,
           key: {
             scopeKey: `WORKSPACE#${snapshot.workspaceId}`,
@@ -229,7 +298,13 @@ function createAuthorizationSnapshotConditionChecks(
         } satisfies WorkItemAuthorizationGenerationGuard]
       : []),
   ]
-  return createDynamoDbWorkItemAuthorizationConditionChecks(guards)
+  const transactWriteItems = createDynamoDbWorkItemAuthorizationConditionChecks(guards)
+  return guards.flatMap((guard, index) => {
+    const transactWriteItem = transactWriteItems[index]
+    return transactWriteItem
+      ? [{ kind: guard.kind, transactWriteItem }]
+      : []
+  })
 }
 
 /**
@@ -801,6 +876,11 @@ export type UpdateTeamIssueRequestBody = PublicUpdateTeamIssueRequestBody & {
   authorizationConditionChecks?: NonNullable<TransactWriteCommandInput['TransactItems']>
   /** Application layer が認可時に読み込んだ source-of-truth generations です。 */
   authorizationSnapshot?: WorkItemAuthorizationSnapshot
+  /** App-owned Automation が schedule 検証時に読み込んだ Planning META revision です。 */
+  planningRevisionFence?: {
+    /** Mutation transaction が一致を要求する Planning revision です。 */
+    expectedRevision: number
+  }
   /** Internal bulk operation が設定または解除する archive timestamp です。 */
   archivedAt?: unknown
   /** Internal bulk operation が記録する archive actor member key です。 */
@@ -849,6 +929,36 @@ export type UpdateTeamIssueResponse = {
    * 更新した Issue 行です。
    */
   issue: TeamIssueResponseItem
+}
+
+/** One revision-bound schedule write in an atomic dependency cascade. */
+export type WorkItemScheduleCascadeUpdate = {
+  /** Team that owns the affected Work Item. */
+  teamId: string
+  /** Team-local Work Item identifier. */
+  workItemId: string
+  /** Revision observed while recomputing the confirmed preview. */
+  expectedRevision: number
+  /** Complete canonical replacement schedule. */
+  schedule: WorkItemSchedule
+}
+
+/** One non-mutated Work Item revision that contributed to cascade recomputation. */
+export type WorkItemScheduleCascadeGuard = {
+  /** Team that owns the guarded Work Item. */
+  teamId: string
+  /** Team-local Work Item identifier. */
+  workItemId: string
+  /** Revision used by dependency schedule arithmetic. */
+  expectedRevision: number
+}
+
+/** Result of atomically persisting a Work Item schedule cascade. */
+export type WorkItemScheduleCascadeResponse = {
+  /** Updated canonical Work Items in the requested deterministic order. */
+  issues: TeamIssueResponseItem[]
+  /** Compact schedule results safe to persist in the atomic replay receipt. */
+  confirmedSchedules: ConfirmedWorkItemSchedule[]
 }
 
 /**
@@ -961,6 +1071,19 @@ export type TeamIssuesClient = {
     auditContext?: MutationAuditContext,
     idempotency?: WorkItemIdempotencyTransaction,
   ): Promise<UpdateTeamIssueResponse>
+  /**
+   * Atomically updates every revision-bound Work Item schedule in one dependency cascade.
+   */
+  updateTeamIssueSchedules?(
+    directoryId: string,
+    updates: readonly WorkItemScheduleCascadeUpdate[],
+    guardedRevisions: readonly WorkItemScheduleCascadeGuard[],
+    actorUserId: string,
+    auditContext?: MutationAuditContext,
+    relationGraphConditionChecks?: NonNullable<TransactWriteCommandInput['TransactItems']>,
+    authorizationSnapshot?: WorkItemAuthorizationSnapshot,
+    idempotency?: WorkItemIdempotencyTransaction,
+  ): Promise<WorkItemScheduleCascadeResponse>
   /**
    * DynamoDB の canonical Work Item を revision 条件付きで削除します。
    */
@@ -1730,11 +1853,6 @@ export class DynamoDbTeamIssuesClient {
         2,
         auditPut,
       )
-      if (configurationConditionChecks.some((_, index) =>
-        isTransactionConditionalFailureAt(error, configurationConditionStartIndex + index)
-      )) {
-        throw createWorkItemConfigurationRevisionConflictError()
-      }
       const authorizationConditionChecks = [
         ...(input.authorizationConditionChecks ?? []),
         ...createAuthorizationSnapshotConditionChecks(input.authorizationSnapshot),
@@ -1745,6 +1863,11 @@ export class DynamoDbTeamIssuesClient {
         isTransactionConditionalFailureAt(error, authorizationConditionStartIndex + index)
       )) {
         throw createWorkItemAuthorizationChangedError()
+      }
+      if (configurationConditionChecks.some((_, index) =>
+        isTransactionConditionalFailureAt(error, configurationConditionStartIndex + index)
+      )) {
+        throw createWorkItemConfigurationRevisionConflictError()
       }
       if (
         isAwsNamedError(error, 'TransactionCanceledException') &&
@@ -1821,6 +1944,304 @@ export class DynamoDbTeamIssuesClient {
   }
 
   /**
+   * Persists a bounded schedule cascade in one revision- and graph-guarded transaction.
+   *
+   * @param directoryId - Owning Workspace directory identifier.
+   * @param updates - Deterministically ordered replacement schedules.
+   * @param guardedRevisions - Non-mutated endpoint revisions used during recomputation.
+   * @param actorUserId - Workspace member that confirmed the cascade.
+   * @param auditContext - Optional immutable audit context shared by every impact.
+   * @param relationGraphConditionChecks - Semantic relation revision guards.
+   * @param authorizationSnapshot - Workspace and Planning generations observed at confirmation.
+   * @param idempotency - Optional completion receipt committed with the cascade.
+   * @returns Every updated canonical Work Item in input order.
+   */
+  async updateTeamIssueSchedules(
+    directoryId: string,
+    updates: readonly WorkItemScheduleCascadeUpdate[],
+    guardedRevisions: readonly WorkItemScheduleCascadeGuard[],
+    actorUserId: string,
+    auditContext?: MutationAuditContext,
+    relationGraphConditionChecks:
+      NonNullable<TransactWriteCommandInput['TransactItems']> = [],
+    authorizationSnapshot?: WorkItemAuthorizationSnapshot,
+    idempotency?: WorkItemIdempotencyTransaction,
+  ): Promise<WorkItemScheduleCascadeResponse> {
+    await this.ensureLocalTables()
+    if (updates.length === 0) {
+      throw new ProjectDataError(
+        400,
+        'InvalidWorkItemScheduleCascade',
+        'A schedule cascade must contain at least one Work Item.',
+      )
+    }
+    if (updates.length > WORK_ITEM_SCHEDULE_CASCADE_LIMIT) {
+      throw new ProjectDataError(
+        413,
+        'WorkItemScheduleCascadeLimitExceeded',
+        `A schedule cascade cannot exceed ${WORK_ITEM_SCHEDULE_CASCADE_LIMIT} Work Items.`,
+      )
+    }
+    const duplicateKeys = new Set<string>()
+    for (const update of updates) {
+      const key = `${update.teamId}\0${update.workItemId}`
+      if (duplicateKeys.has(key)) {
+        throw new ProjectDataError(
+          400,
+          'InvalidWorkItemScheduleCascade',
+          'A schedule cascade cannot update the same Work Item twice.',
+        )
+      }
+      duplicateKeys.add(key)
+    }
+    const guardedKeys = new Set<string>()
+    for (const guard of guardedRevisions) {
+      const key = `${guard.teamId}\0${guard.workItemId}`
+      readWorkItemExpectedRevision(guard.expectedRevision)
+      if (duplicateKeys.has(key) || guardedKeys.has(key)) {
+        throw new ProjectDataError(
+          400,
+          'InvalidWorkItemScheduleCascade',
+          'Cascade revision guards must be unique and cannot duplicate updated Work Items.',
+        )
+      }
+      guardedKeys.add(key)
+    }
+
+    const occurredAt = new Date().toISOString()
+    const prepared = await Promise.all(updates.map(async (update, sequence) => {
+      const expectedRevision = readWorkItemExpectedRevision(update.expectedRevision)
+      const beforeIssue = await this.getRequiredTeamIssueItem(
+        directoryId,
+        update.teamId,
+        update.workItemId,
+        true,
+      )
+      if (beforeIssue.revision !== expectedRevision) {
+        throw createWorkItemRevisionConflictError()
+      }
+      const schedule = readWorkItemScheduleInput(update.schedule)
+      const afterIssue: TeamIssueItem = {
+        ...beforeIssue,
+        schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+        revision: expectedRevision + 1,
+        schedule,
+        dueDate: deriveWorkItemScheduleDueDate(schedule),
+        updatedAt: occurredAt,
+      }
+      const eventItem = this.createIssueEventItem({
+        directoryId,
+        teamId: update.teamId,
+        issueId: update.workItemId,
+        eventType: 'updated',
+        actorUserId,
+        summary: 'Issue schedule was updated by a dependency cascade.',
+        createdAt: occurredAt,
+      })
+      const auditPut = createMutationAuditEventPut(this.auditTableName, auditContext, {
+        directoryId,
+        eventType: 'work-item.schedule-cascade-updated',
+        entityType: 'work-item',
+        entityId: createTeamIssueAuditEntityId(update.teamId, update.workItemId),
+        action: 'schedule-cascade-updated',
+        sequence,
+        occurredAt,
+        summary: createWorkItemNotificationSummary(beforeIssue, afterIssue),
+        changes: createAuditFieldChanges(beforeIssue, afterIssue, ['dueDate', 'schedule']),
+        metadata: {
+          adapter: 'canonical-work-item',
+          actorMemberKey: actorUserId,
+          teamId: update.teamId,
+          issueId: update.workItemId,
+          projectId: afterIssue.assignedProjectId,
+          deepLink: createTeamIssueDeepLink(update.teamId, update.workItemId),
+          notificationTitle: afterIssue.title,
+          notificationCandidates: createWorkItemNotificationCandidates(beforeIssue, afterIssue),
+          beforeRevision: expectedRevision,
+          afterRevision: expectedRevision + 1,
+          cascadeSize: updates.length,
+        },
+      })
+      return { update, expectedRevision, afterIssue, eventItem, auditPut }
+    }))
+    const authorizationConditionEntries = createAuthorizationSnapshotConditionEntries(
+      authorizationSnapshot,
+    )
+    const authorizationConditionChecks = authorizationConditionEntries.map((entry) =>
+      entry.transactWriteItem
+    )
+    const issues = prepared.map((entry) => toTeamIssueResponseItem(entry.afterIssue))
+    const response: WorkItemScheduleCascadeResponse = {
+      issues,
+      confirmedSchedules: issues.map((issue) => ({
+        id: issue.id,
+        teamId: issue.teamId,
+        revision: issue.revision,
+        schedule: issue.schedule,
+        dueDate: issue.dueDate,
+        ...(issue.assignedProjectId
+          ? { assignedProjectId: issue.assignedProjectId }
+          : {}),
+      } satisfies ConfirmedWorkItemSchedule)),
+    }
+    let idempotencyCompletion: IdempotencyCompletionTransactWrite | undefined
+    try {
+      idempotencyCompletion = await idempotency?.prepare({
+        status: 200,
+        body: { workItems: response.confirmedSchedules },
+      })
+    } catch {
+      throw new ProjectDataError(
+        503,
+        'WorkItemScheduleCascadeTransactionUnavailable',
+        'The durable schedule confirmation receipt could not be prepared.',
+      )
+    }
+    if (idempotency && !idempotencyCompletion) {
+      throw new ProjectDataError(
+        503,
+        'WorkItemScheduleCascadeTransactionUnavailable',
+        'The durable schedule confirmation receipt is not configured.',
+      )
+    }
+    const transactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = []
+    const updateConditionIndexes: number[] = []
+    for (const entry of prepared) {
+      updateConditionIndexes.push(transactItems.length)
+      transactItems.push({
+        Update: {
+          TableName: this.issueTableName,
+          Key: {
+            directoryTeamId: createDirectoryTeamId(directoryId, entry.update.teamId),
+            issueId: entry.update.workItemId,
+          },
+          UpdateExpression:
+            'SET #schemaVersion = :schemaVersion, #revision = :nextRevision, ' +
+            '#schedule = :schedule, #dueDate = :dueDate, #updatedAt = :updatedAt',
+          ExpressionAttributeNames: {
+            '#schemaVersion': 'schemaVersion',
+            '#revision': 'revision',
+            '#schedule': 'schedule',
+            '#dueDate': 'dueDate',
+            '#updatedAt': 'updatedAt',
+          },
+          ExpressionAttributeValues: {
+            ':schemaVersion': WORK_ITEM_SCHEMA_VERSION,
+            ':expectedRevision': entry.expectedRevision,
+            ':nextRevision': entry.expectedRevision + 1,
+            ':schedule': entry.afterIssue.schedule,
+            ':dueDate': entry.afterIssue.dueDate,
+            ':updatedAt': occurredAt,
+          },
+          ConditionExpression:
+            'attribute_exists(directoryTeamId) AND attribute_exists(issueId) AND ' +
+            '#revision = :expectedRevision',
+        },
+      })
+      transactItems.push({
+        Put: {
+          TableName: this.eventTableName,
+          Item: entry.eventItem,
+          ConditionExpression:
+            'attribute_not_exists(directoryTeamIssueId) AND attribute_not_exists(eventId)',
+        },
+      })
+      if (entry.auditPut) transactItems.push(entry.auditPut)
+    }
+    const guardedRevisionStartIndex = transactItems.length
+    for (const guard of guardedRevisions) {
+      transactItems.push({
+        ConditionCheck: {
+          TableName: this.issueTableName,
+          Key: {
+            directoryTeamId: createDirectoryTeamId(directoryId, guard.teamId),
+            issueId: guard.workItemId,
+          },
+          ConditionExpression:
+            'attribute_exists(directoryTeamId) AND attribute_exists(issueId) AND ' +
+            '#revision = :expectedRevision',
+          ExpressionAttributeNames: { '#revision': 'revision' },
+          ExpressionAttributeValues: { ':expectedRevision': guard.expectedRevision },
+        },
+      })
+    }
+    const relationConditionStartIndex = transactItems.length
+    transactItems.push(...relationGraphConditionChecks)
+    const authorizationConditionStartIndex = transactItems.length
+    transactItems.push(...authorizationConditionChecks)
+    if (idempotencyCompletion) {
+      transactItems.push(idempotencyCompletion.transactWriteItem)
+    }
+    if (transactItems.length > 100) {
+      throw new ProjectDataError(
+        413,
+        'WorkItemScheduleCascadeLimitExceeded',
+        'The schedule cascade exceeds the DynamoDB transaction item limit.',
+      )
+    }
+
+    try {
+      await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactItems }))
+    } catch (error) {
+      const authorizationFailureKinds = new Set(
+        authorizationConditionEntries.flatMap((entry, index) =>
+          isTransactionConditionalFailureAt(error, authorizationConditionStartIndex + index)
+            ? [entry.kind]
+            : []
+        ),
+      )
+      if (
+        authorizationFailureKinds.has('workspace-member') ||
+        authorizationFailureKinds.has('enterprise-control')
+      ) {
+        throw createWorkItemAuthorizationChangedError()
+      }
+      if (authorizationFailureKinds.has('planning')) {
+        throw new ProjectDataError(
+          409,
+          'PlanningRevisionConflict',
+          'Planning changed. Reload and try again.',
+        )
+      }
+      if (updateConditionIndexes.some((index) => isTransactionConditionalFailureAt(error, index))) {
+        throw createWorkItemRevisionConflictError()
+      }
+      if (guardedRevisions.some((_, index) =>
+        isTransactionConditionalFailureAt(error, guardedRevisionStartIndex + index)
+      )) {
+        throw createWorkItemRevisionConflictError()
+      }
+      if (relationGraphConditionChecks.some((_, index) =>
+        isTransactionConditionalFailureAt(error, relationConditionStartIndex + index)
+      )) {
+        throw new ProjectDataError(
+          409,
+          'WorkItemRelationGraphConflict',
+          'Work Item relations changed. Reload and try again.',
+        )
+      }
+      if (hasTransactionConditionalFailure(error)) {
+        throw new ProjectDataError(
+          409,
+          'WorkItemScheduleCascadeConflict',
+          'The schedule cascade changed during confirmation. Reload and try again.',
+        )
+      }
+      if (isAwsNamedError(error, 'TransactionCanceledException')) {
+        throw new ProjectDataError(
+          503,
+          'WorkItemScheduleCascadeTransactionUnavailable',
+          'The schedule cascade transaction could not be classified safely. Retry the request.',
+        )
+      }
+      if (error instanceof ProjectDataError) throw error
+      throw toProjectDataError(error)
+    }
+
+    return response
+  }
+
+  /**
    * DynamoDB の team issue を更新します。
    */
   async updateTeamIssue(
@@ -1836,6 +2257,19 @@ export class DynamoDbTeamIssuesClient {
     let auditPut: ReturnType<typeof createMutationAuditEventPut> = undefined
     const expectedRevision = readWorkItemExpectedRevision(input.expectedRevision)
     const nextRevision = expectedRevision + 1
+    if (input.authorizationSnapshot && input.planningRevisionFence) {
+      throw new ProjectDataError(
+        500,
+        'InvalidWorkItemAuthorizationFence',
+        'A Work Item update cannot contain overlapping authorization fences.',
+      )
+    }
+    const configurationConditionChecks = input.configurationConditionChecks ?? []
+    const authorizationConditionChecks = [
+      ...(input.authorizationConditionChecks ?? []),
+      ...createAuthorizationSnapshotConditionChecks(input.authorizationSnapshot),
+      ...createPlanningRevisionFenceConditionChecks(directoryId, input.planningRevisionFence),
+    ]
     if ('schedule' in input) readWorkItemScheduleInput(input.schedule)
     const directoryTeamId = createDirectoryTeamId(directoryId, teamId)
     const expressionAttributeNames: Record<string, string> = {
@@ -2045,11 +2479,6 @@ export class DynamoDbTeamIssuesClient {
           afterRevision: nextRevision,
         },
       })
-      const configurationConditionChecks = input.configurationConditionChecks ?? []
-      const authorizationConditionChecks = [
-        ...(input.authorizationConditionChecks ?? []),
-        ...createAuthorizationSnapshotConditionChecks(input.authorizationSnapshot),
-      ]
       const idempotencyCompletion = await idempotency?.prepare({
         status: 200,
         body: toTeamIssueResponseItem(afterIssue),
@@ -2105,26 +2534,21 @@ export class DynamoDbTeamIssuesClient {
           error.CancellationReasons.length === 0
         )
 
-      const configurationConditionChecks = input.configurationConditionChecks ?? []
       const configurationConditionStartIndex = resolveConfigurationConditionStartIndex(
         2,
         auditPut,
       )
-      if (configurationConditionChecks.some((_, index) =>
-        isTransactionConditionalFailureAt(error, configurationConditionStartIndex + index)
-      )) {
-        throw createWorkItemConfigurationRevisionConflictError()
-      }
-      const authorizationConditionChecks = [
-        ...(input.authorizationConditionChecks ?? []),
-        ...createAuthorizationSnapshotConditionChecks(input.authorizationSnapshot),
-      ]
       const authorizationConditionStartIndex =
         configurationConditionStartIndex + configurationConditionChecks.length
       if (authorizationConditionChecks.some((_, index) =>
         isTransactionConditionalFailureAt(error, authorizationConditionStartIndex + index)
       )) {
         throw createWorkItemAuthorizationChangedError()
+      }
+      if (configurationConditionChecks.some((_, index) =>
+        isTransactionConditionalFailureAt(error, configurationConditionStartIndex + index)
+      )) {
+        throw createWorkItemConfigurationRevisionConflictError()
       }
 
       if (isTransactionConditionalFailureAt(error, 0) || cancellationReasonsMissing) {

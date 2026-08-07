@@ -1,5 +1,12 @@
 import type { WorkflowStatusCategory } from './work-item-configuration'
 import type { WorkItemSchedule } from './work-items'
+import type {
+  PlanningWorkItemDependencySummary,
+  ScheduleDependencyConstraint,
+  ScheduleDependencyType,
+  WorkItemDependencyEndpoint,
+  WorkItemScheduleDependency,
+} from './schedule-dependencies'
 
 /** Planning domain の現行 schema version です。 */
 export const PLANNING_SCHEMA_VERSION = 1 as const
@@ -127,11 +134,8 @@ export type PlanningEntity = {
   updatedAt: string
 }
 
-/** Planning dependency の scheduling 制約です。 */
-export type PlanningDependencyType =
-  | 'finish-to-start'
-  | 'start-to-start'
-  | 'finish-to-finish'
+/** Backwards-compatible name for a planning-entity dependency type. */
+export type PlanningDependencyType = ScheduleDependencyType
 
 /** Planning entity 間の directed dependency です。 */
 export type PlanningDependency = {
@@ -143,8 +147,10 @@ export type PlanningDependency = {
   successorId: string
   /** Scheduling 制約の種別です。 */
   type: PlanningDependencyType
-  /** 制約へ加算する calendar day 数です。 */
+  /** Signed calendar-day offset; positive values are lag and negative values are lead. */
   lagDays: number
+  /** Optional explicit date constraint on the successor planning entity. */
+  constraint?: ScheduleDependencyConstraint
   /** 作成日時の ISO 8601 timestamp です。 */
   createdAt: string
 }
@@ -207,12 +213,16 @@ export type PlanningSnapshot = {
   entities: PlanningEntity[]
   /** Entity 間 dependency 一覧です。 */
   dependencies: PlanningDependency[]
+  /** Canonical schedule dependencies between visible Work Items. */
+  workItemDependencies: WorkItemScheduleDependency[]
   /** Planning entity と Work Item の link 一覧です。 */
   workItemLinks: PlanningWorkItemLink[]
   /** Roll-up に利用した Work Item projection 一覧です。 */
   workItems: PlanningWorkItemSummary[]
   /** Snapshot から算出した critical path です。 */
   criticalPath: PlanningCriticalPath
+  /** Work Item dependency graph summary derived from this exact snapshot. */
+  workItemDependencySummary: PlanningWorkItemDependencySummary
   /** 永続化済み graph の最終更新日時です。 */
   updatedAt?: string
 }
@@ -311,10 +321,48 @@ export type CreatePlanningDependencyInput = {
   successorId: string
   /** Scheduling 制約の種別です。 */
   type: PlanningDependencyType
-  /** 制約へ加算する非負 calendar day 数です。 */
+  /** Signed calendar-day lead or lag. */
   lagDays: number
+  /** Optional explicit date constraint on the successor planning entity. */
+  constraint?: ScheduleDependencyConstraint
   /** 読み込み時点の planning graph revision です。 */
   expectedRevision: number
+}
+
+/** Input used to create one canonical cross-Team Work Item schedule dependency. */
+export type CreateWorkItemScheduleDependencyInput = {
+  /** New Workspace-local dependency identifier. */
+  id: string
+  /** Work Item whose schedule drives the dependency. */
+  predecessor: WorkItemDependencyEndpoint
+  /** Work Item whose schedule is constrained. */
+  successor: WorkItemDependencyEndpoint
+  /** Start/finish boundary relationship. */
+  type: ScheduleDependencyType
+  /** Signed calendar-day lead or lag. */
+  lagDays: number
+  /** Optional explicit date constraint on the successor schedule. */
+  constraint?: ScheduleDependencyConstraint
+  /** Planning graph revision observed before the mutation. */
+  expectedRevision: number
+}
+
+/** Editable fields of a canonical Work Item schedule dependency. */
+export type WorkItemScheduleDependencyPatch = {
+  /** Replacement start/finish boundary relationship. */
+  type?: ScheduleDependencyType
+  /** Replacement signed calendar-day lead or lag. */
+  lagDays?: number
+  /** Replacement constraint, or null to remove the current constraint. */
+  constraint?: ScheduleDependencyConstraint | null
+}
+
+/** Input used to update a canonical Work Item schedule dependency. */
+export type UpdateWorkItemScheduleDependencyInput = {
+  /** Planning graph revision observed before the mutation. */
+  expectedRevision: number
+  /** Dependency fields to replace. */
+  patch: WorkItemScheduleDependencyPatch
 }
 
 /** ID を path で指定する planning mutation の revision 入力です。 */
