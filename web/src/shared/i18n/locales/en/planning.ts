@@ -95,6 +95,7 @@ export const planningMessages = {
   'planning.dependency.finish-to-start': 'Finish to start',
   'planning.dependency.start-to-start': 'Start to start',
   'planning.dependency.finish-to-finish': 'Finish to finish',
+  'planning.dependency.start-to-finish': 'Start to finish',
   'planning.readOnly': 'You can view this plan, but cannot change it.',
   'planning.conflict': 'Someone else updated this plan. Reload it and try again.',
 } as const

@@ -95,6 +95,7 @@ export const planningMessages = {
   'planning.dependency.finish-to-start': '終了から開始',
   'planning.dependency.start-to-start': '開始から開始',
   'planning.dependency.finish-to-finish': '終了から終了',
+  'planning.dependency.start-to-finish': '開始から終了',
   'planning.readOnly': 'この計画は参照のみ可能です。',
   'planning.conflict': '他のユーザーが計画を更新しました。再読み込みしてください。',
 } as const

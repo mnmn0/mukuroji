@@ -1,10 +1,14 @@
 import type {
+  PlanningSnapshot,
+  WorkItemDependencyEndpoint,
   WorkItemConfiguration,
   WorkItemRelation,
   WorkItemSchedule,
   WorkItemScheduleCalendarPolicy,
+  WorkItemScheduleDependency,
+  WorkItemScheduleDependencyPatch,
 } from '@mukuroji/contracts'
-import { useState } from 'react'
+import { useId, useState } from 'react'
 import { RelatedDocuments } from '../../documents/ui/RelatedDocuments'
 import type { FileArtifactsController } from '../../files/mutations/useFileArtifacts'
 import { IssueArtifactsPanel } from '../../files/ui/IssueArtifactsPanel'
@@ -33,6 +37,10 @@ import {
 } from '../../work-items/model/workItemDisplay'
 import { WorkItemFieldsEditor } from '../../work-items/ui/WorkItemFieldsEditor'
 import {
+  WorkItemDependencyPanel,
+  type WorkItemDependencyCreateDraft,
+} from '../../work-items/ui/WorkItemDependencyPanel'
+import {
   WorkItemRelationsEditor,
   type WorkItemRelationEditorInput,
 } from '../../work-items/ui/WorkItemRelationsEditor'
@@ -52,6 +60,8 @@ import { TaskPriorityBadge } from './TaskViewPrimitives'
 
 /** Props accepted by the selected task detail pane. */
 export type TaskDetailPaneProps = {
+  /** Determines whether the current user may manage one canonical dependency endpoint. */
+  canManageScheduleDependencyEndpoint?: (endpoint: WorkItemDependencyEndpoint) => boolean
   /** Access token used by the related-document panel. */
   accessToken?: string
   /** Active project members available as assignees. */
@@ -78,10 +88,16 @@ export type TaskDetailPaneProps = {
   isRelationCandidatesLoading: boolean
   /** Locale used by form controls and nested panels. */
   locale: Locale
+  /** Authoritative canonical Work Item dependency graph. */
+  planningSnapshot?: PlanningSnapshot
   /** Creates a relation from the selected Work Item. */
   onAddRelation?: (issueId: string, input: WorkItemRelationEditorInput) => Promise<void>
   /** Deletes a relation from the selected Work Item. */
   onDeleteRelation?: (issueId: string, relation: WorkItemRelation) => Promise<void>
+  /** Creates a canonical schedule dependency involving any visible Work Item. */
+  onCreateScheduleDependency?: (input: WorkItemDependencyCreateDraft) => void | Promise<void>
+  /** Deletes a canonical schedule dependency. */
+  onDeleteScheduleDependency?: (dependency: WorkItemScheduleDependency) => void | Promise<void>
   /** Closes the detail pane while keeping the list selection and scroll position. */
   onClose?: () => void
   /** Saves editable fields on the selected Work Item. */
@@ -90,6 +106,11 @@ export type TaskDetailPaneProps = {
     issueId: string,
     input: UpdateTeamIssueInput,
   ) => Promise<void>
+  /** Updates a canonical schedule dependency rule. */
+  onUpdateScheduleDependency?: (
+    dependency: WorkItemScheduleDependency,
+    patch: WorkItemScheduleDependencyPatch,
+  ) => void | Promise<void>
   /** Projects in the selected Work Item's owning Team. */
   projects: ProjectDirectoryTeam['projects']
   /** Same-Team Work Items available as relation targets. */
@@ -114,6 +135,7 @@ export function TaskDetailPane({
   accessToken,
   assigneeOptions,
   artifacts,
+  canManageScheduleDependencyEndpoint,
   collaboration,
   configuration,
   currentWorkspaceMemberKey,
@@ -124,10 +146,14 @@ export function TaskDetailPane({
   isLoading,
   isRelationCandidatesLoading,
   locale,
+  planningSnapshot,
   onAddRelation,
+  onCreateScheduleDependency,
   onClose,
   onDeleteRelation,
+  onDeleteScheduleDependency,
   onUpdateIssue,
+  onUpdateScheduleDependency,
   projects,
   relationCandidates,
   relationCandidatesErrorMessage,
@@ -136,6 +162,7 @@ export function TaskDetailPane({
   workspaceMembers,
 }: TaskDetailPaneProps) {
   const [fieldErrors, setFieldErrors] = useState<Readonly<Record<string, string | undefined>>>({})
+  const scheduleFormId = useId()
   const hasMatchingIssueDetail = Boolean(
     task && detail?.issue.id === task.id && detail.issue.teamId === task.teamId,
   )
@@ -230,17 +257,12 @@ export function TaskDetailPane({
                 projectId: nextAssignedProjectId || undefined,
               })
             : { errors: [], values: {} }
-          const nextSchedule = createDetailSchedule(formData, schedule)
-
-          if (parsedCustomFields.errors.length > 0 || !nextSchedule) {
-            setFieldErrors({
-              ...createCustomFieldErrorMessages(
+          if (parsedCustomFields.errors.length > 0) {
+            setFieldErrors(createCustomFieldErrorMessages(
               parsedCustomFields.errors,
               resolvedConfiguration?.customFields ?? [],
               locale,
-              ),
-              ...(!nextSchedule ? { schedule: t('tasks.schedule.invalid') } : {}),
-            })
+            ))
             return
           }
 
@@ -255,9 +277,6 @@ export function TaskDetailPane({
             ),
             description: String(formData.get('description') ?? '').trim(),
             priority: resolveTaskPriority(formData.get('priority')),
-            ...(!areTaskSchedulesEqual(schedule, nextSchedule)
-              ? { schedule: nextSchedule }
-              : {}),
             title: String(formData.get('title') ?? '').trim(),
             workflowStatusId,
           }
@@ -373,6 +392,7 @@ export function TaskDetailPane({
               {t('tasks.schedule.mode')}
               <select
                 className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
+                form={scheduleFormId}
                 name="scheduleMode"
                 onChange={(event) => setScheduleSelection({
                   identity: scheduleSelectionIdentity,
@@ -389,6 +409,7 @@ export function TaskDetailPane({
             {selectedScheduleMode === 'due-date' ? (
               <DetailScheduleDateInput
                 defaultValue={resolveTaskScheduleEndDate(schedule) ?? ''}
+                formId={scheduleFormId}
                 label={t('tasks.schedule.dueDate')}
                 name="scheduleDueDate"
               />
@@ -397,11 +418,13 @@ export function TaskDetailPane({
               <>
                 <DetailScheduleDateInput
                   defaultValue={resolveTaskScheduleStartDate(schedule) ?? ''}
+                  formId={scheduleFormId}
                   label={t('tasks.schedule.startDate')}
                   name="scheduleStartDate"
                 />
                 <DetailScheduleDateInput
                   defaultValue={resolveTaskScheduleEndDate(schedule) ?? ''}
+                  formId={scheduleFormId}
                   label={t('tasks.schedule.endDate')}
                   name="scheduleEndDate"
                 />
@@ -410,6 +433,7 @@ export function TaskDetailPane({
             {selectedScheduleMode === 'milestone' ? (
               <DetailScheduleDateInput
                 defaultValue={resolveTaskScheduleStartDate(schedule) ?? ''}
+                formId={scheduleFormId}
                 label={t('tasks.schedule.milestoneDate')}
                 name="scheduleMilestoneDate"
               />
@@ -419,6 +443,7 @@ export function TaskDetailPane({
               <input
                 className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
                 defaultValue={schedule.plannedEffortMinutes}
+                form={scheduleFormId}
                 min="0"
                 name="scheduleEffortMinutes"
                 type="number"
@@ -435,6 +460,14 @@ export function TaskDetailPane({
                 {fieldErrors.schedule}
               </p>
             ) : null}
+            <button
+              className="workbench-button-secondary h-9 px-3 disabled:border-slate-300 disabled:bg-slate-300"
+              disabled={isReadOnly}
+              form={scheduleFormId}
+              type="submit"
+            >
+              {t('issues.detail.save')}
+            </button>
           </div>
           {hasCustomFields ? (
             <div className="workbench-panel-muted p-4">
@@ -463,6 +496,30 @@ export function TaskDetailPane({
         ) : null}
         {errorMessage ? <p className="text-sm font-semibold text-red-700">{errorMessage}</p> : null}
       </form>
+      <form
+        aria-label={t('tasks.schedule.title')}
+        className="hidden"
+        id={scheduleFormId}
+        onSubmit={(event) => {
+          event.preventDefault()
+          if (isReadOnly || !task.teamId) return
+          const nextSchedule = createDetailSchedule(new FormData(event.currentTarget), schedule)
+          if (!nextSchedule) {
+            setFieldErrors((current) => ({
+              ...current,
+              schedule: t('tasks.schedule.invalid'),
+            }))
+            return
+          }
+          setFieldErrors((current) => ({ ...current, schedule: undefined }))
+          if (areTaskSchedulesEqual(schedule, nextSchedule)) return
+          void onUpdateIssue?.(
+            task.teamId,
+            task.id,
+            { schedule: nextSchedule },
+          ).catch(() => undefined)
+        }}
+      />
       {artifacts ? (
         <IssueArtifactsPanel
           completionTransitions={workflowStatuses.filter(
@@ -494,6 +551,17 @@ export function TaskDetailPane({
           relations={relations}
         />
       </div>
+      <div className="border-b border-[var(--workbench-border)] bg-white px-5 py-5">
+        <WorkItemDependencyPanel
+          canManageEndpoint={canManageScheduleDependencyEndpoint}
+          currentEndpoint={{ teamId: task.teamId, workItemId: task.id }}
+          onCreate={onCreateScheduleDependency}
+          onDelete={onDeleteScheduleDependency}
+          onUpdate={onUpdateScheduleDependency}
+          snapshot={planningSnapshot}
+          t={t}
+        />
+      </div>
       <RelatedDocuments
         accessToken={accessToken}
         t={t}
@@ -520,6 +588,8 @@ export function TaskDetailPane({
 type DetailScheduleDateInputProps = {
   /** Current ISO date shown by the input. */
   defaultValue: string
+  /** Identifier of the standalone schedule form that owns this control. */
+  formId: string
   /** Visible and accessible input label. */
   label: string
   /** Form field name used to construct the schedule patch. */
@@ -534,6 +604,7 @@ type DetailScheduleDateInputProps = {
  */
 function DetailScheduleDateInput({
   defaultValue,
+  formId,
   label,
   name,
 }: DetailScheduleDateInputProps) {
@@ -543,6 +614,7 @@ function DetailScheduleDateInput({
       <input
         className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
         defaultValue={defaultValue}
+        form={formId}
         name={name}
         required
         type="date"

@@ -225,6 +225,22 @@ export const planningSnapshotFixture = {
       createdAt: '2026-07-10T00:00:00.000Z',
     },
   ],
+  workItemDependencies: [
+    {
+      id: 'work-item-dependency-copy-events',
+      predecessor: { teamId: 'core-team', workItemId: 'journey-copy' },
+      successor: { teamId: 'core-team', workItemId: 'journey-events' },
+      type: 'finish-to-start',
+      lagDays: 1,
+      constraint: {
+        anchor: 'start',
+        kind: 'not-before',
+        date: '2026-07-23',
+      },
+      createdAt: '2026-07-12T00:00:00.000Z',
+      updatedAt: '2026-07-16T03:00:00.000Z',
+    },
+  ],
   workItemLinks: [
     {
       teamId: 'core-team',
@@ -276,6 +292,23 @@ export const planningSnapshotFixture = {
       'release-autumn': 0,
     },
   },
+  workItemDependencySummary: {
+    criticalPath: {
+      workItems: [
+        { teamId: 'core-team', workItemId: 'journey-copy' },
+        { teamId: 'core-team', workItemId: 'journey-events' },
+      ],
+      totalDurationDays: 4,
+      slackByWorkItemKey: {
+        'core-team/journey-copy': 0,
+        'core-team/journey-events': 0,
+      },
+    },
+    conflicts: [],
+    unresolvedBlockerCount: 1,
+    affectedProjectIds: ['refero'],
+    affectedMilestoneIds: ['milestone-beta'],
+  },
 } satisfies PlanningSnapshot
 
 /**
@@ -286,11 +319,23 @@ export const emptyPlanningSnapshotFixture = {
   revision: 0,
   entities: [],
   dependencies: [],
+  workItemDependencies: [],
   workItemLinks: [],
   workItems: [],
   criticalPath: {
     entityIds: [],
     totalDurationDays: 0,
     slackByEntityId: {},
+  },
+  workItemDependencySummary: {
+    criticalPath: {
+      workItems: [],
+      totalDurationDays: 0,
+      slackByWorkItemKey: {},
+    },
+    conflicts: [],
+    unresolvedBlockerCount: 0,
+    affectedProjectIds: [],
+    affectedMilestoneIds: [],
   },
 } satisfies PlanningSnapshot

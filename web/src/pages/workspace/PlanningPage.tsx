@@ -24,25 +24,31 @@ import {
   addPlanningStatusUpdate,
   createPlanningDependency,
   createPlanningEntity,
+  createWorkItemScheduleDependency,
   deletePlanningDependency,
   deletePlanningWorkItemLink,
+  deleteWorkItemScheduleDependency,
   duplicatePlanningEntity,
   movePlanningEntity,
   putPlanningWorkItemLink,
   resolvePlanningErrorMessageKey,
   rolloverPlanningCycle,
   updatePlanningEntity,
+  updateWorkItemScheduleDependency,
 } from '../../planning/api'
 import { usePlanningSnapshot } from '../../planning/queries/usePlanningSnapshot'
 import {
   canLinkPlanningEntity,
   canManageAnyPlanningScope,
   canManagePlanningScope,
+  canManagePlanningWorkItemDependency,
+  canManagePlanningWorkItemDependencyEndpoint,
   canUpdatePlanningEntityStatus,
   canUpdatePlanningWorkItemLink,
   createPlanningAccessSnapshot,
   filterManageablePlanningScopeTeams,
 } from '../../planning/model/permissions'
+import { resolvePlanningProjectNavigationPath } from '../../planning/model/navigation'
 import {
   PlanningScreen,
 } from '../../planning/ui/PlanningScreen'
@@ -53,6 +59,7 @@ import {
 } from '../../projects/api'
 import { usePlanningProjectRoles } from '../../projects/queries/useProjectMembers'
 import { useProjectDirectory } from '../../projects/queries/useProjectDirectory'
+import { createWorkItemDependencyMutationId } from '../../work-items/model/workItemDependencies'
 import {
   createPlanningPath,
   createProjectIssuesPath,
@@ -234,6 +241,13 @@ export function PlanningPage() {
           canLinkEntity={(entity) => canLinkPlanningEntity(user, entity, planningAccess)}
           canCreateInScope={(scope) => canManagePlanningScope(user, scope, planningAccess)}
           canManageEntity={(entity) => canManagePlanningScope(user, entity, planningAccess)}
+          canManageWorkItemDependencyEndpoint={(endpoint) =>
+            canManagePlanningWorkItemDependencyEndpoint(
+              user,
+              endpoint,
+              snapshot?.workItems ?? [],
+              planningAccess,
+            )}
           canUpdateEntityStatus={(entity) =>
             canUpdatePlanningEntityStatus(user, entity, planningAccess)}
           canUpdateWorkItemLink={(workItem) =>
@@ -247,6 +261,10 @@ export function PlanningPage() {
             workItem.projectId
               ? createProjectIssuesPath(workItem.projectId, workItem.teamId, workItem.id)
               : createTeamIssuesPath(workItem.teamId, workItem.id),
+          )}
+          onOpenMilestone={(milestoneId) => navigate(createPlanningPath('timeline', milestoneId))}
+          onOpenProject={(projectId) => navigate(
+            resolvePlanningProjectNavigationPath(teams, projectId),
           )}
           onCreateEntity={canManagePlanning && snapshot && accessToken
             ? (input) => {
@@ -274,13 +292,14 @@ export function PlanningPage() {
               )
             : undefined}
           onCreateDependency={canManagePlanning && snapshot && accessToken
-            ? (predecessorId, successorId, type, lagDays) => {
+            ? (predecessorId, successorId, type, lagDays, constraint) => {
                 const input = {
                   id: createPlanningClientId('dependency'),
                   predecessorId,
                   successorId,
                   type,
                   lagDays,
+                  constraint,
                   expectedRevision: snapshot.revision,
                 }
                 return runMutation(
@@ -298,6 +317,57 @@ export function PlanningPage() {
                   expectedRevision: snapshot.revision,
                 }, context),
               )
+            : undefined}
+          onCreateWorkItemDependency={canManagePlanning && snapshot && accessToken
+            ? (draft) => {
+                if (!canManagePlanningWorkItemDependency(user, draft, snapshot.workItems, planningAccess)) {
+                  return
+                }
+                return runMutation(
+                  'planning:work-item-dependency:create',
+                  [snapshot.revision, draft],
+                  (context) => createWorkItemScheduleDependency(accessToken, {
+                    ...draft,
+                    expectedRevision: snapshot.revision,
+                    id: createWorkItemDependencyMutationId(context.idempotencyKey),
+                  }, context),
+                )
+              }
+            : undefined}
+          onUpdateWorkItemDependency={canManagePlanning && snapshot && accessToken
+            ? (dependency, patch) => {
+                if (!canManagePlanningWorkItemDependency(
+                  user,
+                  dependency,
+                  snapshot.workItems,
+                  planningAccess,
+                )) return
+                return runMutation(
+                  `planning:work-item-dependency:${dependency.id}:update`,
+                  [snapshot.revision, patch],
+                  (context) => updateWorkItemScheduleDependency(accessToken, dependency.id, {
+                    expectedRevision: snapshot.revision,
+                    patch,
+                  }, context),
+                )
+              }
+            : undefined}
+          onDeleteWorkItemDependency={canManagePlanning && snapshot && accessToken
+            ? (dependency) => {
+                if (!canManagePlanningWorkItemDependency(
+                  user,
+                  dependency,
+                  snapshot.workItems,
+                  planningAccess,
+                )) return
+                return runMutation(
+                  `planning:work-item-dependency:${dependency.id}:delete`,
+                  snapshot.revision,
+                  (context) => deleteWorkItemScheduleDependency(accessToken, dependency.id, {
+                    expectedRevision: snapshot.revision,
+                  }, context),
+                )
+              }
             : undefined}
           onRolloverCycle={canManagePlanning && snapshot && accessToken
             ? (sourceCycle, targetCycleId) => runMutation(

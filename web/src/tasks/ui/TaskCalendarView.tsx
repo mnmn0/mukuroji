@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent } from 'react'
 import type {
-  WorkItemPatch,
   WorkItemSchedule,
   WorkItemScheduleChangePreview,
   WorkItemScheduleOperation,
@@ -27,6 +26,7 @@ import {
 } from '../model/taskSchedule'
 import { createTaskKey, type TaskCreateContext } from '../model/taskView'
 import { TaskViewHeading } from './TaskViewPrimitives'
+import { TaskSchedulePreviewMetadata } from './TaskSchedulePreviewMetadata'
 
 /** Resolves a localized task-calendar message. */
 type TaskCalendarTranslator = (key: MessageKey) => string
@@ -67,6 +67,8 @@ type PendingCalendarScheduleChange = {
   task: ProjectTask
   /** Authoritative before/after preview. */
   preview: WorkItemScheduleChangePreview
+  /** Original operation confirmed against the preview's graph revisions. */
+  operation: WorkItemScheduleOperation
 }
 
 /** Props for the independent project task calendar view. */
@@ -86,8 +88,12 @@ export type TaskCalendarViewProps = {
     task: ProjectTask,
     operation: WorkItemScheduleOperation,
   ) => Promise<WorkItemScheduleChangePreview>
-  /** Applies the confirmed canonical schedule replacement. */
-  onUpdateTask?: (task: ProjectTask, patch: WorkItemPatch) => Promise<ProjectTask>
+  /** Atomically confirms the original operation and its dependency ripple. */
+  onConfirmScheduleChange?: (
+    task: ProjectTask,
+    operation: WorkItemScheduleOperation,
+    preview: WorkItemScheduleChangePreview,
+  ) => Promise<ProjectTask>
 }
 
 /** Props for the Calendar schedule-preview dialog. */
@@ -114,10 +120,10 @@ type CalendarSchedulePreviewProps = {
  * @returns The independent project task calendar view.
  */
 export function TaskCalendarView({
+  onConfirmScheduleChange,
   onCreateTaskOpen,
   onPreviewScheduleChange,
   onSelectTask,
-  onUpdateTask,
   projectId,
   t,
   tasks,
@@ -131,7 +137,8 @@ export function TaskCalendarView({
   const [errorMessage, setErrorMessage] = useState<string>()
   const calendarSectionRef = useRef<HTMLElement>(null)
   const pendingFocusTaskKeyRef = useRef<string | undefined>(undefined)
-  const canEditSchedule = onPreviewScheduleChange !== undefined && onUpdateTask !== undefined
+  const canEditSchedule = onPreviewScheduleChange !== undefined &&
+    onConfirmScheduleChange !== undefined
   const entries = [...calendar.days.flatMap((day) => day.entries), ...calendar.unscheduledEntries]
 
   useEffect(() => {
@@ -149,7 +156,7 @@ export function TaskCalendarView({
     task: ProjectTask,
     operation: WorkItemScheduleOperation,
   ) => {
-    if (!onPreviewScheduleChange || !onUpdateTask) {
+    if (!onPreviewScheduleChange || !onConfirmScheduleChange) {
       return
     }
 
@@ -158,7 +165,7 @@ export function TaskCalendarView({
     setErrorMessage(undefined)
     try {
       const preview = await onPreviewScheduleChange(task, operation)
-      setPendingChange({ preview, task })
+      setPendingChange({ operation, preview, task })
     } catch (error) {
       setErrorMessage(resolveCalendarScheduleError(error, t))
     } finally {
@@ -168,7 +175,7 @@ export function TaskCalendarView({
 
   /** Persists the direct canonical result from the current preview. */
   const confirmScheduleChange = async () => {
-    if (!pendingChange || !onUpdateTask) {
+    if (!pendingChange || !onConfirmScheduleChange) {
       return
     }
 
@@ -183,7 +190,11 @@ export function TaskCalendarView({
     setErrorMessage(undefined)
     const taskToFocus = pendingChange.task
     try {
-      await onUpdateTask(pendingChange.task, { schedule })
+      await onConfirmScheduleChange(
+        pendingChange.task,
+        pendingChange.operation,
+        pendingChange.preview,
+      )
       setPendingChange(undefined)
     } catch (error) {
       setPendingChange(undefined)
@@ -584,6 +595,7 @@ function CalendarSchedulePreview({
             </li>
           ))}
         </ul>
+        <TaskSchedulePreviewMetadata preview={pending.preview} t={t} />
         {pending.preview.warnings.length > 0 ? (
           <div className="mt-4 rounded-lg border border-[#f4d38b] bg-[#fffaeb] p-3" role="status">
             <p className="text-xs font-bold uppercase tracking-wide text-[#93370d]">
@@ -608,7 +620,7 @@ function CalendarSchedulePreview({
           <button
             className="rounded-md bg-[var(--workbench-primary)] px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
             data-modal-initial-focus
-            disabled={isApplying}
+            disabled={isApplying || pending.preview.conflicts.length > 0}
             onClick={onConfirm}
             type="button"
           >
@@ -831,8 +843,11 @@ function resolveCalendarScheduleWarning(
   warning: string,
   t: TaskCalendarTranslator,
 ): string {
-  return warning === 'DependencyRippleRequiresReview'
-    ? t('tasks.schedule.warning.dependencyRipple')
+  if (warning === 'DependencyRippleRequiresReview') {
+    return t('tasks.schedule.warning.dependencyRipple')
+  }
+  return warning === 'SemanticBlockRelationsDoNotReschedule'
+    ? t('tasks.schedule.warning.semanticBlocks')
     : t('tasks.schedule.warning.generic')
 }
 

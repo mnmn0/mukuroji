@@ -9,6 +9,11 @@ import type { ProjectMember } from '../../projects/api'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import type { WorkItemPersonOption } from '../../work-items/ui/WorkItemFieldsEditor'
 import {
+  resolveWorkItemDependencySummary,
+  type WorkItemDependencySummary,
+} from '../../work-items/model/workItemDependencies'
+import { WorkItemDependencyChips } from '../../work-items/ui/WorkItemDependencyChips'
+import {
   resolveWorkItemAssignee,
   resolveWorkItemTitle,
 } from '../../work-items/model/workItemDisplay'
@@ -56,6 +61,8 @@ export type TaskBoardViewProps = {
   configurationsByTeam: Record<string, ResolvedWorkItemConfiguration>
   /** Locale used to format custom-field values. */
   locale: Locale
+  /** Dependency summaries keyed by canonical Team/Work Item identity. */
+  dependencySummaries?: Readonly<Record<string, WorkItemDependencySummary>>
   /** Mapping from person identifiers to display names. */
   personLabels: Readonly<Record<string, string>>
   /** Person options available to custom-field editors. */
@@ -89,6 +96,7 @@ export function TaskBoardView({
   configuration,
   configurationsByTeam,
   configurationFailedTeamIds,
+  dependencySummaries = {},
   locale,
   personLabels,
   personOptions = [],
@@ -248,6 +256,10 @@ export function TaskBoardView({
                   )
                   const editableStatuses = resolveEditableWorkflowStatuses(task, taskConfiguration)
                   const isMoving = movingTaskKeys.has(taskKey)
+                  const dependencySummary = resolveWorkItemDependencySummary(
+                    dependencySummaries,
+                    { teamId: task.teamId, workItemId: task.id },
+                  )
                   const memberOptions = assigneeOptions.map((member) => ({
                     label: `${member.name ?? member.email} / ${member.email}`,
                     value: member.id,
@@ -311,6 +323,11 @@ export function TaskBoardView({
                           </button>
                         ) : null}
                       </div>
+                      <WorkItemDependencyChips
+                        className="mt-2"
+                        summary={dependencySummary}
+                        t={t}
+                      />
                       {onUpdateTask && editableStatuses.length > 0 ? (
                         <TaskInlineField
                           ariaLabel={`${t('tasks.inline.edit')}: ${t('tasks.column.status')}`}

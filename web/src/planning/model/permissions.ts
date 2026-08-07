@@ -1,4 +1,9 @@
-import type { PlanningEntity, PlanningWorkItemSummary } from '@mukuroji/contracts'
+import type {
+  PlanningEntity,
+  PlanningWorkItemSummary,
+  WorkItemDependencyEndpoint,
+  WorkItemScheduleDependency,
+} from '@mukuroji/contracts'
 import type { CurrentUser } from '../../auth/api'
 import type {
   ProjectDirectoryTeam,
@@ -90,6 +95,55 @@ export function canUpdatePlanningWorkItemLink(
   access: PlanningAccessSnapshot,
 ) {
   return canUsePlanningScope(user, workItem, access, 'member', false)
+}
+
+/**
+ * Determines whether the current user can manage one canonical dependency endpoint.
+ *
+ * @param user - Current authenticated user.
+ * @param endpoint - Team-qualified Work Item endpoint to authorize.
+ * @param workItems - Visible Work Item projections from the authoritative Planning snapshot.
+ * @param access - Current user's Project role snapshot.
+ * @returns True when the endpoint is visible and its Team and assigned Project scopes satisfy the manager requirement.
+ */
+export function canManagePlanningWorkItemDependencyEndpoint(
+  user: CurrentUser | null | undefined,
+  endpoint: WorkItemDependencyEndpoint,
+  workItems: readonly PlanningWorkItemSummary[],
+  access: PlanningAccessSnapshot,
+) {
+  const workItem = workItems.find((candidate) =>
+    candidate.teamId === endpoint.teamId && candidate.id === endpoint.workItemId
+  )
+  return workItem ? canManagePlanningScope(user, workItem, access) : false
+}
+
+/**
+ * Determines whether the current user can mutate a dependency whose two endpoints are server-authorized independently.
+ *
+ * @param user - Current authenticated user.
+ * @param dependency - Canonical Work Item dependency to authorize.
+ * @param workItems - Visible Work Item projections from the authoritative Planning snapshot.
+ * @param access - Current user's Project role snapshot.
+ * @returns True only when both predecessor and successor satisfy the manager requirement.
+ */
+export function canManagePlanningWorkItemDependency(
+  user: CurrentUser | null | undefined,
+  dependency: Pick<WorkItemScheduleDependency, 'predecessor' | 'successor'>,
+  workItems: readonly PlanningWorkItemSummary[],
+  access: PlanningAccessSnapshot,
+) {
+  return canManagePlanningWorkItemDependencyEndpoint(
+    user,
+    dependency.predecessor,
+    workItems,
+    access,
+  ) && canManagePlanningWorkItemDependencyEndpoint(
+    user,
+    dependency.successor,
+    workItems,
+    access,
+  )
 }
 
 /**

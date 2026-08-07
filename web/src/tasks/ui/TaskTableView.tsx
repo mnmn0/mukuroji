@@ -12,6 +12,11 @@ import type { ProjectMember } from '../../projects/api'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import type { WorkItemPersonOption } from '../../work-items/ui/WorkItemFieldsEditor'
 import {
+  resolveWorkItemDependencySummary,
+  type WorkItemDependencySummary,
+} from '../../work-items/model/workItemDependencies'
+import { WorkItemDependencyChips } from '../../work-items/ui/WorkItemDependencyChips'
+import {
   resolveWorkItemAssignee,
   resolveWorkItemTitle,
   resolveEditableWorkflowStatuses,
@@ -63,6 +68,8 @@ export type TaskTableViewProps = {
   configurationsByTeam: Record<string, ResolvedWorkItemConfiguration>
   /** Locale used to format custom-field values. */
   locale: Locale
+  /** Dependency summaries keyed by canonical Team/Work Item identity. */
+  dependencySummaries?: Readonly<Record<string, WorkItemDependencySummary>>
   /** Person options available to custom-field editors. */
   personOptions?: WorkItemPersonOption[]
   /** Mapping from person identifiers to display names. */
@@ -116,6 +123,8 @@ type TaskTableRowProps = {
   configuration?: WorkItemConfiguration
   /** Locale used to format custom-field values. */
   locale: Locale
+  /** Canonical dependency state for this row. */
+  dependencySummary?: WorkItemDependencySummary
   /** Person options available to custom-field editors. */
   personOptions: WorkItemPersonOption[]
   /** Mapping from person identifiers to display names. */
@@ -156,6 +165,7 @@ export function TaskTableView({
   bulkWorkspaceId,
   configuration,
   configurationsByTeam,
+  dependencySummaries = {},
   locale,
   personOptions = [],
   personLabels,
@@ -412,6 +422,10 @@ export function TaskTableView({
                     )}
                     key={createTaskKey(task)}
                     locale={locale}
+                    dependencySummary={resolveWorkItemDependencySummary(
+                      dependencySummaries,
+                      { teamId: task.teamId, workItemId: task.id },
+                    )}
                     personOptions={personOptions}
                     personLabels={personLabels}
                     projectId={projectId}
@@ -470,6 +484,7 @@ export function TaskTableView({
 function TaskTableRow({
   assigneeOptions,
   configuration,
+  dependencySummary,
   locale,
   personOptions,
   personLabels,
@@ -593,6 +608,7 @@ function TaskTableRow({
               {t('tasks.row.selected')}
             </span>
           ) : null}
+          <WorkItemDependencyChips summary={dependencySummary} t={t} />
         </div>
       </td>
       <td className="truncate px-3 py-2.5 text-[#505967]">

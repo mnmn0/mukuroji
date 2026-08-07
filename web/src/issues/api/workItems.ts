@@ -1,14 +1,18 @@
 import type {
   CanonicalWorkItem,
+  ConfirmWorkItemScheduleChangeInput,
   CreateWorkItemInput,
   PreviewWorkItemScheduleInput,
   ResolvedWorkItemConfiguration,
   UpdateWorkItemInput,
   WorkItemPatch,
   WorkItemRelation,
-  WorkItemScheduleChangePreview,
 } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
+import {
+  isConfirmWorkItemScheduleChangeResponse,
+  isWorkItemScheduleChangePreview,
+} from '../../shared/api/contractValidation'
 import type { TeamIssueActivity } from './activity'
 import type { TeamIssueComment } from './comments'
 import { TeamIssuesApiError } from './errors'
@@ -243,7 +247,7 @@ export async function previewTeamIssueSchedule(
   accessToken: string,
   input: PreviewWorkItemScheduleInput,
 ) {
-  return requestJson<WorkItemScheduleChangePreview>(
+  return requestValidatedJson(
     `${issuesApiBaseUrl}/teams/${encodeURIComponent(teamId)}/issues/${encodeURIComponent(issueId)}/schedule/preview`,
     accessToken,
     {
@@ -251,7 +255,57 @@ export async function previewTeamIssueSchedule(
       headers: { 'Content-Type': 'application/json' },
       method: 'POST',
     },
+    isWorkItemScheduleChangePreview,
+    'InvalidWorkItemSchedulePreview',
   )
+}
+
+/**
+ * Confirms and atomically applies a server-recomputed dependency schedule cascade.
+ *
+ * @param teamId - Team that owns the directly edited Work Item.
+ * @param issueId - Team-local Work Item identifier.
+ * @param accessToken - Session bearer token.
+ * @param input - Original operation, graph revisions, and explicit acknowledgement.
+ * @param mutationContext - Stable idempotency and correlation identifiers.
+ * @returns Compact canonical schedule projections for every changed Work Item.
+ */
+export async function confirmTeamIssueSchedule(
+  teamId: string,
+  issueId: string,
+  accessToken: string,
+  input: ConfirmWorkItemScheduleChangeInput,
+  mutationContext: MutationRequestContext,
+) {
+  return requestValidatedJson(
+    `${issuesApiBaseUrl}/teams/${encodeURIComponent(teamId)}/issues/${encodeURIComponent(issueId)}/schedule/confirm`,
+    accessToken,
+    {
+      body: JSON.stringify(input),
+      headers: {
+        'Content-Type': 'application/json',
+        ...createMutationHeaders(mutationContext),
+      },
+      method: 'POST',
+    },
+    isConfirmWorkItemScheduleChangeResponse,
+    'InvalidWorkItemScheduleConfirmationResponse',
+  )
+}
+
+/** Fetches JSON and rejects a successful response that violates its contract. */
+async function requestValidatedJson<TResponse>(
+  url: string,
+  accessToken: string | undefined,
+  init: RequestInit,
+  validate: (value: unknown) => value is TResponse,
+  invalidCode: string,
+): Promise<TResponse> {
+  const data = await requestJson<unknown>(url, accessToken, init)
+  if (!validate(data)) {
+    throw new TeamIssuesApiError(502, defaultIssuesApiErrorMessage, invalidCode)
+  }
+  return data
 }
 
 async function requestJson<TResponse>(

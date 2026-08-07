@@ -1,15 +1,20 @@
 import type {
+  PlanningSnapshot,
   ResolvedWorkItemConfiguration,
   WorkflowStatusDefinition,
   WorkItemConfiguration,
   WorkItemRelation,
+  WorkItemDependencyEndpoint,
   WorkItemSchedule,
+  WorkItemScheduleDependency,
+  WorkItemScheduleDependencyPatch,
 } from '@mukuroji/contracts'
 import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
 import { useLocation, useNavigate, useParams, useSearchParams } from 'react-router'
 import {
   canManageWorkspaceStructure,
   canMutateWorkspaceContent,
+  type CurrentUser,
 } from '../../auth/api'
 import { useCurrentUser } from '../../auth/queries/useCurrentUser'
 import { resolveEnterpriseSessionErrorsAction } from '../../auth/enterpriseSessionErrors'
@@ -48,11 +53,27 @@ import {
   useIssueCollaboration,
 } from '../../issues/mutations/useIssueCollaboration'
 import {
+  createWorkItemScheduleDependency,
+  deleteWorkItemScheduleDependency,
+  isPlanningSnapshotConflict,
+  updateWorkItemScheduleDependency,
+} from '../../planning/api'
+import {
+  canManagePlanningWorkItemDependency,
+  canManagePlanningWorkItemDependencyEndpoint,
+  createPlanningAccessSnapshot,
+} from '../../planning/model/permissions'
+import { usePlanningSnapshot } from '../../planning/queries/usePlanningSnapshot'
+import {
   type ProjectDirectoryTeam,
   type ProjectMember,
+  type ProjectMemberRole,
 } from '../../projects/api'
 import { useProjectDirectory } from '../../projects/queries/useProjectDirectory'
-import { useActiveProjectMembers } from '../../projects/queries/useProjectMembers'
+import {
+  useActiveProjectMembers,
+  usePlanningProjectRoles,
+} from '../../projects/queries/useProjectMembers'
 import {
   createTeamIssuesPath,
 } from '../../shared/routing/paths'
@@ -75,12 +96,24 @@ import {
 } from '../../work-items/queries/useWorkItemConfigurations'
 import { WorkItemExternalLinksPanelContainer } from '../../work-items/ui/WorkItemExternalLinksPanel'
 import {
+  createWorkItemDependencyMutationId,
+  createWorkItemDependencySummaries,
+  resolveWorkItemDependencySummary,
+  type WorkItemDependencySummary,
+} from '../../work-items/model/workItemDependencies'
+import {
   createDefaultCustomFieldValues,
   isCustomFieldApplicable,
   parseCustomFieldFormData,
   sortCustomFieldDefinitions,
 } from '../../work-items/model/customFields'
 import { WorkItemFieldsEditor } from '../../work-items/ui/WorkItemFieldsEditor'
+import { WorkItemDependencyChips } from '../../work-items/ui/WorkItemDependencyChips'
+import {
+  WorkItemDependencyPanel,
+  type WorkItemDependencyCreateDraft,
+  type WorkItemDependencyPanelProps,
+} from '../../work-items/ui/WorkItemDependencyPanel'
 import {
   WorkItemDefinitionFilters,
 } from '../../work-items/ui/WorkItemDefinitionFilters'
@@ -117,6 +150,7 @@ const emptyTeams: ProjectDirectoryTeam[] = []
 const emptyIssues: TeamIssue[] = []
 const emptyMembers: ProjectMember[] = []
 const emptyWorkspaceMembers: WorkspaceMember[] = []
+const emptyProjectRoles: Readonly<Record<string, ProjectMemberRole>> = {}
 /**
  * TeamIssueScreen で切り替える Issue 表示モードです。
  */
@@ -160,6 +194,25 @@ type TeamIssueScreenProps = {
    * 選択中 Work Item から見た relation 一覧です。
    */
   relations?: readonly WorkItemRelation[]
+  /** Authoritative Planning snapshot used by every canonical dependency surface. */
+  planningSnapshot?: PlanningSnapshot
+  /** Whether canonical Planning dependency data is loading. */
+  isPlanningLoading?: boolean
+  /** Planning dependency load error shown without hiding Team Issues. */
+  planningErrorMessage?: string
+  /** Retries the canonical Planning dependency query. */
+  onRetryPlanning?: () => void
+  /** Determines whether the current user may manage one canonical dependency endpoint. */
+  canManageDependencyEndpoint?: WorkItemDependencyPanelProps['canManageEndpoint']
+  /** Creates a canonical Work Item schedule dependency. */
+  onCreateScheduleDependency?: (input: WorkItemDependencyCreateDraft) => void | Promise<void>
+  /** Deletes a canonical Work Item schedule dependency. */
+  onDeleteScheduleDependency?: (dependency: WorkItemScheduleDependency) => void | Promise<void>
+  /** Updates a canonical Work Item schedule dependency. */
+  onUpdateScheduleDependency?: (
+    dependency: WorkItemScheduleDependency,
+    patch: WorkItemScheduleDependencyPatch,
+  ) => void | Promise<void>
   /**
    * 選択中 Issue の comment thread、watcher、presence です。
    */
@@ -283,6 +336,13 @@ export function TeamIssuePage() {
     Boolean(user && !currentUserError),
   )
   const {
+    data: planningSnapshot,
+    error: planningError,
+    isLoading: isPlanningSnapshotLoading,
+    key: planningKey,
+    mutate: mutatePlanning,
+  } = usePlanningSnapshot(accessToken, Boolean(user && !currentUserError))
+  const {
     data: teams = emptyTeams,
     error: projectDirectoryError,
     isLoading: isProjectDirectoryLoading,
@@ -291,6 +351,34 @@ export function TeamIssuePage() {
     enabled: Boolean(user && !currentUserError),
     locale,
   })
+  const projectIds = useMemo(
+    () => [...new Set(teams.flatMap((team) => team.projects.map((project) => project.id)))],
+    [teams],
+  )
+  const currentUserProjectKey = resolveCurrentUserProjectKey(user)
+  const {
+    data: projectRolesResult,
+    error: projectRolesError,
+    isLoading: isProjectRolesLoading,
+    key: projectRolesKey,
+    mutate: mutateProjectRoles,
+  } = usePlanningProjectRoles(
+    accessToken,
+    currentUserProjectKey,
+    projectIds,
+    Boolean(
+      user &&
+      !currentUserError &&
+      !isProjectDirectoryLoading &&
+      !user.isSystemAdmin &&
+      canMutateWorkspaceContent(user)
+    ),
+  )
+  const projectRoles = projectRolesResult?.roles ?? emptyProjectRoles
+  const planningAccess = useMemo(
+    () => createPlanningAccessSnapshot(teams, projectRoles),
+    [projectRoles, teams],
+  )
   const activeTeam = teams.find((team) => team.id === teamId)
   const {
     data: issues = emptyIssues,
@@ -358,7 +446,10 @@ export function TeamIssuePage() {
     currentUserError,
     [
       workspaceAccessError,
+      planningError,
       projectDirectoryError,
+      projectRolesError,
+      ...(projectRolesResult?.errors ?? []),
       issueError,
       workItemConfigurationError,
       detailError,
@@ -394,6 +485,21 @@ export function TeamIssuePage() {
   const configurationErrorMessage = workItemConfigurationError
     ? t('workItems.configuration.loadError')
     : undefined
+  const planningErrorMessage = planningError || projectRolesError ||
+    (projectRolesResult?.errors.length ?? 0) > 0
+    ? t('planning.error')
+    : undefined
+  const isPlanningLoading = Boolean(planningKey && isPlanningSnapshotLoading) ||
+    Boolean(projectRolesKey && isProjectRolesLoading)
+
+  /** Mirrors the server's manager check for one visible dependency endpoint. */
+  const canManageDependencyEndpoint = (endpoint: WorkItemDependencyEndpoint) =>
+    canManagePlanningWorkItemDependencyEndpoint(
+      user,
+      endpoint,
+      planningSnapshot?.workItems ?? [],
+      planningAccess,
+    )
 
   useEffect(() => {
     document.documentElement.lang = locale
@@ -542,11 +648,107 @@ export function TeamIssuePage() {
     }
   }
 
+  /** Persists one dependency mutation and refreshes stale Planning authority on conflicts. */
+  const runScheduleDependencyMutation = async (
+    request: () => Promise<PlanningSnapshot>,
+  ): Promise<void> => {
+    try {
+      const result = await request()
+      await mutatePlanning(result, { revalidate: false })
+    } catch (error) {
+      if (isPlanningSnapshotConflict(error)) {
+        await mutatePlanning()
+      }
+      throw error
+    }
+  }
+
+  /** Creates one revision-bound canonical Work Item schedule dependency. */
+  const handleCreateScheduleDependency = async (
+    input: WorkItemDependencyCreateDraft,
+  ): Promise<void> => {
+    if (
+      !accessToken ||
+      !planningSnapshot ||
+      !canManagePlanningWorkItemDependency(user, input, planningSnapshot.workItems, planningAccess)
+    ) {
+      throw new Error(t('planning.error'))
+    }
+    await runScheduleDependencyMutation(() => guardEnterpriseSession(
+      mutationRequestRunner.run(
+        'planning:work-item-dependency:create',
+        JSON.stringify([planningSnapshot.revision, input]),
+        (context) => createWorkItemScheduleDependency(accessToken, {
+          ...input,
+          expectedRevision: planningSnapshot.revision,
+          id: createWorkItemDependencyMutationId(context.idempotencyKey),
+        }, context),
+      ),
+    ))
+  }
+
+  /** Updates one revision-bound canonical Work Item schedule dependency. */
+  const handleUpdateScheduleDependency = async (
+    dependency: WorkItemScheduleDependency,
+    patch: WorkItemScheduleDependencyPatch,
+  ): Promise<void> => {
+    if (
+      !accessToken ||
+      !planningSnapshot ||
+      !canManagePlanningWorkItemDependency(
+        user,
+        dependency,
+        planningSnapshot.workItems,
+        planningAccess,
+      )
+    ) {
+      throw new Error(t('planning.error'))
+    }
+    await runScheduleDependencyMutation(() => guardEnterpriseSession(
+      mutationRequestRunner.run(
+        `planning:work-item-dependency:${dependency.id}:update`,
+        JSON.stringify([planningSnapshot.revision, patch]),
+        (context) => updateWorkItemScheduleDependency(accessToken, dependency.id, {
+          expectedRevision: planningSnapshot.revision,
+          patch,
+        }, context),
+      ),
+    ))
+  }
+
+  /** Deletes one revision-bound canonical Work Item schedule dependency. */
+  const handleDeleteScheduleDependency = async (
+    dependency: WorkItemScheduleDependency,
+  ): Promise<void> => {
+    if (
+      !accessToken ||
+      !planningSnapshot ||
+      !canManagePlanningWorkItemDependency(
+        user,
+        dependency,
+        planningSnapshot.workItems,
+        planningAccess,
+      )
+    ) {
+      throw new Error(t('planning.error'))
+    }
+    await runScheduleDependencyMutation(() => guardEnterpriseSession(
+      mutationRequestRunner.run(
+        `planning:work-item-dependency:${dependency.id}:delete`,
+        String(planningSnapshot.revision),
+        (context) => deleteWorkItemScheduleDependency(accessToken, dependency.id, {
+          expectedRevision: planningSnapshot.revision,
+        }, context),
+      ),
+    ))
+  }
+
   return (
     <TeamIssueScreen
       accessToken={accessToken}
       assigneeOptions={assigneeOptions}
       artifacts={artifacts}
+      canManageDependencyEndpoint={canManageDependencyEndpoint}
       collaboration={collaboration}
       canManageExternalLinks={canManageStructure}
       configurationErrorMessage={configurationErrorMessage}
@@ -559,14 +761,29 @@ export function TeamIssuePage() {
       issueErrorMessage={issueErrorMessage}
       issues={screenIssues}
       isLoading={isLoading}
+      isPlanningLoading={isPlanningLoading}
       isRelationsLoading={Boolean(detailKey && isIssueDetailLoading)}
       key={teamId}
       locale={locale}
       onAddRelation={canMutateContent ? handleAddRelation : undefined}
       onCreateIssue={canMutateContent && !workItemConfigurationError ? handleCreateIssue : undefined}
+      onCreateScheduleDependency={accessToken && planningSnapshot
+        ? handleCreateScheduleDependency
+        : undefined}
       onDeleteRelation={canMutateContent ? handleDeleteRelation : undefined}
+      onDeleteScheduleDependency={accessToken && planningSnapshot
+        ? handleDeleteScheduleDependency
+        : undefined}
+      onRetryPlanning={planningErrorMessage
+        ? () => void Promise.all([mutatePlanning(), mutateProjectRoles()])
+        : undefined}
       onSelectIssue={(issueId) => navigate(createTeamIssuesPath(teamId, issueId))}
       onUpdateIssue={canMutateContent && !workItemConfigurationError ? handleUpdateIssue : undefined}
+      onUpdateScheduleDependency={accessToken && planningSnapshot
+        ? handleUpdateScheduleDependency
+        : undefined}
+      planningErrorMessage={planningErrorMessage}
+      planningSnapshot={planningSnapshot}
       selectedIssueId={resolvedSelectedIssueId}
       relations={issueDetail && issueDetail.issue.id === resolvedSelectedIssueId
         ? issueDetail.relations ?? []
@@ -588,6 +805,7 @@ export function TeamIssueScreen({
   accessToken,
   assigneeOptions = [],
   artifacts,
+  canManageDependencyEndpoint,
   canManageExternalLinks = false,
   collaboration,
   configurationErrorMessage,
@@ -601,13 +819,20 @@ export function TeamIssueScreen({
   issueErrorMessage,
   issues = [],
   isLoading = false,
+  isPlanningLoading = false,
   isRelationsLoading = false,
   locale,
   onAddRelation,
   onCreateIssue,
+  onCreateScheduleDependency,
   onDeleteRelation,
+  onDeleteScheduleDependency,
+  onRetryPlanning,
   onSelectIssue,
   onUpdateIssue,
+  onUpdateScheduleDependency,
+  planningErrorMessage,
+  planningSnapshot,
   relations = [],
   resolvedConfiguration,
   selectedIssueId,
@@ -632,6 +857,10 @@ export function TeamIssueScreen({
   const [detailUpdateError, setDetailUpdateError] = useState<readonly [string, string] | undefined>()
   const activeTeam = teams.find((team) => team.id === teamId)
   const selectedIssue = issues.find((issue) => issue.id === selectedIssueId)
+  const dependencySummaries = useMemo(
+    () => createWorkItemDependencySummaries(planningSnapshot),
+    [planningSnapshot],
+  )
 
   useEffect(() => {
     if (defaultCreateIssueOpen) {
@@ -842,6 +1071,20 @@ export function TeamIssueScreen({
                     {issueErrorMessage}
                   </p>
                 ) : null}
+                {planningErrorMessage ? (
+                  <div className="mt-5 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3" role="alert">
+                    <p className="text-sm font-bold text-red-700">{planningErrorMessage}</p>
+                    {onRetryPlanning ? (
+                      <button className="workbench-button-secondary min-h-9 px-3" onClick={onRetryPlanning} type="button">
+                        {t('planning.action.retry')}
+                      </button>
+                    ) : null}
+                  </div>
+                ) : isPlanningLoading ? (
+                  <p className="mt-5 text-sm font-semibold text-[var(--workbench-muted)]">
+                    {t('planning.loading')}
+                  </p>
+                ) : null}
                 <div
                   aria-label={t(`issues.view.${viewMode}`)}
                   id={issueViewPanelId}
@@ -851,6 +1094,7 @@ export function TeamIssueScreen({
                     <IssueTable
                       activeTeam={activeTeam}
                       configuration={configuration}
+                      dependencySummaries={dependencySummaries}
                       issues={visibleIssues}
                       locale={locale}
                       onSelectIssue={(issueId) => {
@@ -865,6 +1109,7 @@ export function TeamIssueScreen({
                     <IssueBoard
                       activeTeam={activeTeam}
                       configuration={configuration}
+                      dependencySummaries={dependencySummaries}
                       issues={visibleIssues}
                       locale={locale}
                       onCreateIssueOpen={onCreateIssue ? openCreateIssue : undefined}
@@ -885,6 +1130,7 @@ export function TeamIssueScreen({
                 accessToken={accessToken}
                 assigneeOptions={assigneeOptions}
                 artifacts={artifacts}
+                canManageDependencyEndpoint={canManageDependencyEndpoint}
                 canManageExternalLinks={canManageExternalLinks}
                 collaboration={collaboration}
                 configuration={configuration}
@@ -897,7 +1143,9 @@ export function TeamIssueScreen({
                 isRelationsLoading={isRelationsLoading}
                 locale={locale}
                 onAddRelation={onAddRelation}
+                onCreateScheduleDependency={onCreateScheduleDependency}
                 onDeleteRelation={onDeleteRelation}
+                onDeleteScheduleDependency={onDeleteScheduleDependency}
                 onUpdateIssue={onUpdateIssue ? async (issueId, input) => {
                   setDetailUpdateError(undefined)
 
@@ -912,6 +1160,8 @@ export function TeamIssueScreen({
                     }
                   }
                 } : undefined}
+                onUpdateScheduleDependency={onUpdateScheduleDependency}
+                planningSnapshot={planningSnapshot}
                 projects={activeTeam?.projects ?? []}
                 relationCandidates={issues}
                 relations={relations}
@@ -1213,6 +1463,7 @@ function CreateIssuePanel({
 function IssueTable({
   activeTeam,
   configuration,
+  dependencySummaries,
   issues,
   locale,
   onSelectIssue,
@@ -1222,6 +1473,7 @@ function IssueTable({
 }: {
   activeTeam?: ProjectDirectoryTeam
   configuration?: WorkItemConfiguration
+  dependencySummaries: Readonly<Record<string, WorkItemDependencySummary>>
   issues: TeamIssue[]
   locale: Locale
   onSelectIssue?: (issueId: string) => void
@@ -1267,6 +1519,14 @@ function IssueTable({
                       type="button"
                     >
                       {resolveIssueTitle(issue, t)}
+                      <WorkItemDependencyChips
+                        className="mt-2"
+                        summary={resolveWorkItemDependencySummary(
+                          dependencySummaries,
+                          { teamId: issue.teamId, workItemId: issue.id },
+                        )}
+                        t={t}
+                      />
                     </button>
                   </td>
                   <td className="px-4 py-3 text-sm font-medium text-[var(--workbench-muted)]">{resolveAssignedProjectName(issue, activeTeam, t)}</td>
@@ -1306,6 +1566,7 @@ function IssueTable({
 function IssueBoard({
   activeTeam,
   configuration,
+  dependencySummaries,
   issues,
   locale,
   onCreateIssueOpen,
@@ -1318,6 +1579,7 @@ function IssueBoard({
 }: {
   activeTeam?: ProjectDirectoryTeam
   configuration?: WorkItemConfiguration
+  dependencySummaries: Readonly<Record<string, WorkItemDependencySummary>>
   issues: TeamIssue[]
   locale: Locale
   onCreateIssueOpen?: (workflowStatusId: string) => void
@@ -1482,6 +1744,14 @@ function IssueBoard({
                         >
                           {resolveIssueTitle(issue, t)}
                         </button>
+                        <WorkItemDependencyChips
+                          className="mt-2"
+                          summary={resolveWorkItemDependencySummary(
+                            dependencySummaries,
+                            { teamId: issue.teamId, workItemId: issue.id },
+                          )}
+                          t={t}
+                        />
                         <p className="mt-2 text-xs font-medium text-[var(--workbench-muted)]">{resolveAssignedProjectName(issue, activeTeam, t)}</p>
                         <div className="mt-3">
                           <IssueCustomFieldSummary
@@ -1536,6 +1806,7 @@ function IssueDetailPane({
   accessToken,
   assigneeOptions,
   artifacts,
+  canManageDependencyEndpoint,
   canManageExternalLinks,
   collaboration,
   configuration,
@@ -1548,8 +1819,12 @@ function IssueDetailPane({
   isRelationsLoading,
   locale,
   onAddRelation,
+  onCreateScheduleDependency,
   onDeleteRelation,
+  onDeleteScheduleDependency,
   onUpdateIssue,
+  onUpdateScheduleDependency,
+  planningSnapshot,
   projects,
   relationCandidates,
   relations,
@@ -1559,6 +1834,8 @@ function IssueDetailPane({
   accessToken?: string
   assigneeOptions: ProjectMember[]
   artifacts?: FileArtifactsController
+  /** Determines whether the current user may manage one canonical dependency endpoint. */
+  canManageDependencyEndpoint?: WorkItemDependencyPanelProps['canManageEndpoint']
   canManageExternalLinks: boolean
   collaboration?: IssueCollaborationController
   configuration?: WorkItemConfiguration
@@ -1571,8 +1848,16 @@ function IssueDetailPane({
   isRelationsLoading: boolean
   locale: Locale
   onAddRelation?: (issueId: string, input: WorkItemRelationEditorInput) => Promise<void>
+  /** Creates a canonical schedule dependency. */
+  onCreateScheduleDependency?: TeamIssueScreenProps['onCreateScheduleDependency']
   onDeleteRelation?: (issueId: string, relation: WorkItemRelation) => Promise<void>
+  /** Deletes a canonical schedule dependency. */
+  onDeleteScheduleDependency?: TeamIssueScreenProps['onDeleteScheduleDependency']
   onUpdateIssue?: (issueId: string, input: UpdateTeamIssueInput) => Promise<void>
+  /** Updates a canonical schedule dependency. */
+  onUpdateScheduleDependency?: TeamIssueScreenProps['onUpdateScheduleDependency']
+  /** Authoritative canonical dependency graph. */
+  planningSnapshot?: PlanningSnapshot
   projects: ProjectDirectoryTeam['projects']
   relationCandidates: TeamIssue[]
   relations: readonly WorkItemRelation[]
@@ -1592,6 +1877,7 @@ function IssueDetailPane({
       accessToken={accessToken}
       assigneeOptions={assigneeOptions}
       artifacts={artifacts}
+      canManageDependencyEndpoint={canManageDependencyEndpoint}
       canManageExternalLinks={canManageExternalLinks}
       collaboration={collaboration}
       configuration={configuration}
@@ -1605,8 +1891,12 @@ function IssueDetailPane({
       key={issue.id}
       locale={locale}
       onAddRelation={onAddRelation}
+      onCreateScheduleDependency={onCreateScheduleDependency}
       onDeleteRelation={onDeleteRelation}
+      onDeleteScheduleDependency={onDeleteScheduleDependency}
       onUpdateIssue={onUpdateIssue}
+      onUpdateScheduleDependency={onUpdateScheduleDependency}
+      planningSnapshot={planningSnapshot}
       projects={projects}
       relationCandidates={relationCandidates}
       relations={relations}
@@ -1620,6 +1910,7 @@ function IssueDetailContent({
   accessToken,
   assigneeOptions,
   artifacts,
+  canManageDependencyEndpoint,
   canManageExternalLinks,
   collaboration,
   configuration,
@@ -1632,8 +1923,12 @@ function IssueDetailContent({
   isRelationsLoading,
   locale,
   onAddRelation,
+  onCreateScheduleDependency,
   onDeleteRelation,
+  onDeleteScheduleDependency,
   onUpdateIssue,
+  onUpdateScheduleDependency,
+  planningSnapshot,
   projects,
   relationCandidates,
   relations,
@@ -1646,6 +1941,8 @@ function IssueDetailContent({
   assigneeOptions: ProjectMember[]
   /** 選択中 Issue の file/version/annotation/approval controller です。 */
   artifacts?: FileArtifactsController
+  /** Determines whether the current user may manage one canonical dependency endpoint. */
+  canManageDependencyEndpoint?: WorkItemDependencyPanelProps['canManageEndpoint']
   /** External link の作成、更新、解除が許可されているかどうかです。 */
   canManageExternalLinks: boolean
   /** 選択中 Issue の discussion controller です。 */
@@ -1670,10 +1967,18 @@ function IssueDetailContent({
   locale: Locale
   /** Relation 追加 callback です。 */
   onAddRelation?: (issueId: string, input: WorkItemRelationEditorInput) => Promise<void>
+  /** Creates a canonical schedule dependency. */
+  onCreateScheduleDependency?: TeamIssueScreenProps['onCreateScheduleDependency']
   /** Relation 解除 callback です。 */
   onDeleteRelation?: (issueId: string, relation: WorkItemRelation) => Promise<void>
+  /** Deletes a canonical schedule dependency. */
+  onDeleteScheduleDependency?: TeamIssueScreenProps['onDeleteScheduleDependency']
   /** Issue 更新 callback です。 */
   onUpdateIssue?: (issueId: string, input: UpdateTeamIssueInput) => Promise<void>
+  /** Updates a canonical schedule dependency. */
+  onUpdateScheduleDependency?: TeamIssueScreenProps['onUpdateScheduleDependency']
+  /** Authoritative canonical dependency graph. */
+  planningSnapshot?: PlanningSnapshot
   /** Project selector の候補です。 */
   projects: ProjectDirectoryTeam['projects']
   /** Relation target の候補です。 */
@@ -1858,6 +2163,19 @@ function IssueDetailContent({
         ) : null}
         {detailErrorMessage ? <p className="text-sm font-bold text-red-600">{detailErrorMessage}</p> : null}
       </form>
+      {planningSnapshot ? (
+        <div className="border-t border-[var(--workbench-border)] bg-white px-6 py-6">
+          <WorkItemDependencyPanel
+            canManageEndpoint={canManageDependencyEndpoint}
+            currentEndpoint={{ teamId: issue.teamId, workItemId: issue.id }}
+            onCreate={onCreateScheduleDependency}
+            onDelete={onDeleteScheduleDependency}
+            onUpdate={onUpdateScheduleDependency}
+            snapshot={planningSnapshot}
+            t={t}
+          />
+        </div>
+      ) : null}
       {artifacts ? (
         <IssueArtifactsPanel
           completionTransitions={workflowStatuses.filter(
@@ -1925,6 +2243,11 @@ function formatLocalDateInputValue(date = new Date()) {
   const day = String(date.getDate()).padStart(2, '0')
 
   return `${year}-${month}-${day}`
+}
+
+/** Resolves the normalized directory key used to match the current user to Project roles. */
+function resolveCurrentUserProjectKey(user: CurrentUser | undefined) {
+  return (user?.attributes.email ?? user?.username ?? '').trim().toLowerCase()
 }
 
 function resolveIssueTitle(issue: TeamIssue, t: (key: MessageKey) => string) {

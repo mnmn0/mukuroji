@@ -2,9 +2,13 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import {
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
+  type WorkItemSchedule,
+  type WorkItemScheduleImpact,
 } from '@mukuroji/contracts'
 import {
+  confirmTeamIssueSchedule,
   getWorkspaceWorkItems,
+  previewTeamIssueSchedule,
   TeamIssuesApiError,
   updateTeamIssue,
 } from '../src/issues/api'
@@ -90,6 +94,122 @@ describe('canonical Work Item API', () => {
     }
   })
 
+  test('confirms the original schedule operation with evaluated and graph revisions', async () => {
+    const schedule = {
+      calendarPolicy: {
+        holidays: [],
+        timeZone: 'UTC',
+        workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+      },
+      dueDate: '2026-08-03',
+      mode: 'due-date',
+    } satisfies WorkItemSchedule
+    const previousSchedule = {
+      ...schedule,
+      dueDate: '2026-08-02',
+    } satisfies WorkItemSchedule
+    const impacts = [{
+      after: schedule,
+      before: previousSchedule,
+      dateDeltaDays: 1,
+      expectedRevision: 3,
+      kind: 'direct',
+      teamId: 'core team',
+      workItemId: 'issue/1',
+    }] satisfies WorkItemScheduleImpact[]
+    const compactResponse = {
+      workItems: [{
+        assignedProjectId: 'refero',
+        dueDate: '2026-08-03',
+        id: 'issue/1',
+        revision: 4,
+        schedule,
+        teamId: 'core team',
+      }],
+    }
+    const requests = installFetchRecorder(compactResponse)
+
+    await expect(confirmTeamIssueSchedule('core team', 'issue/1', 'access-token', {
+      confirmed: true,
+      expectedEvaluatedRevisions: [{
+        expectedRevision: 3,
+        teamId: 'core team',
+        workItemId: 'issue/1',
+      }],
+      expectedImpacts: impacts,
+      expectedPlanningRevision: 12,
+      expectedRelationGraphRevision: 8,
+      expectedRevision: 3,
+      operation: { schedule, type: 'replace' },
+    }, mutationContext)).resolves.toEqual(compactResponse)
+
+    expect(requests[0]?.url).toBe('/api/teams/core%20team/issues/issue%2F1/schedule/confirm')
+    expect(requests[0]?.init.method).toBe('POST')
+    expect(requests[0]?.init.headers).toMatchObject({
+      'Idempotency-Key': 'idempotency-1',
+      'X-Correlation-Id': 'correlation-1',
+    })
+    expect(JSON.parse(String(requests[0]?.init.body))).toMatchObject({
+      confirmed: true,
+      expectedEvaluatedRevisions: [{
+        expectedRevision: 3,
+        teamId: 'core team',
+        workItemId: 'issue/1',
+      }],
+      expectedImpacts: impacts,
+      expectedPlanningRevision: 12,
+      expectedRelationGraphRevision: 8,
+      expectedRevision: 3,
+    })
+    expect(requests).toHaveLength(1)
+  })
+
+  test('rejects malformed successful schedule preview and confirmation responses', async () => {
+    installFetchRecorder({ expectedRevision: 3, impacts: [], warnings: [] })
+
+    await expect(previewTeamIssueSchedule(
+      'core-team',
+      'issue-1',
+      'access-token',
+      { expectedRevision: 3, operation: { targetDate: '2026-08-03', type: 'move' } },
+    )).rejects.toMatchObject({ code: 'InvalidWorkItemSchedulePreview', status: 502 })
+
+    installFetchRecorder({
+      preview: {},
+      workItems: [{
+        dueDate: '2026-08-03',
+        id: 'issue-1',
+        revision: 4,
+        schedule: createDefaultTestSchedule('2026-08-03'),
+        teamId: 'core-team',
+      }],
+    })
+    await expect(confirmTeamIssueSchedule('core-team', 'issue-1', 'access-token', {
+      confirmed: true,
+      expectedEvaluatedRevisions: [{
+        expectedRevision: 3,
+        teamId: 'core-team',
+        workItemId: 'issue-1',
+      }],
+      expectedImpacts: [{
+        after: createDefaultTestSchedule('2026-08-03'),
+        before: createDefaultTestSchedule('2026-08-02'),
+        dateDeltaDays: 1,
+        expectedRevision: 3,
+        kind: 'direct',
+        teamId: 'core-team',
+        workItemId: 'issue-1',
+      }],
+      expectedPlanningRevision: 1,
+      expectedRelationGraphRevision: 1,
+      expectedRevision: 3,
+      operation: { targetDate: '2026-08-03', type: 'move' },
+    }, mutationContext)).rejects.toMatchObject({
+      code: 'InvalidWorkItemScheduleConfirmationResponse',
+      status: 502,
+    })
+  })
+
   test('uses readable fallback text for a non-JSON error response', async () => {
     globalThis.fetch = (async () => new Response('<html>Bad Gateway</html>', {
       headers: { 'Content-Type': 'text/html' },
@@ -168,6 +288,19 @@ function createWorkItem(overrides: Record<string, unknown> = {}) {
     createdAt: '2026-07-12T00:00:00.000Z',
     updatedAt: '2026-07-12T00:00:00.000Z',
     ...overrides,
+  }
+}
+
+/** Creates a canonical due-date schedule for API boundary tests. */
+function createDefaultTestSchedule(dueDate: string): WorkItemSchedule {
+  return {
+    calendarPolicy: {
+      holidays: [],
+      timeZone: 'UTC',
+      workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+    },
+    dueDate,
+    mode: 'due-date',
   }
 }
 

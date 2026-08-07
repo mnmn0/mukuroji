@@ -2,11 +2,15 @@ import type {
   BulkOperation,
   BulkOperationPreview,
   BulkOperationRequest,
+  PlanningSnapshot,
   ResolvedWorkItemConfiguration,
+  WorkItemDependencyEndpoint,
   WorkItemRelation,
   WorkItemSchedule,
   WorkItemScheduleChangePreview,
   WorkItemScheduleOperation,
+  WorkItemScheduleDependency,
+  WorkItemScheduleDependencyPatch,
 } from '@mukuroji/contracts'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
@@ -35,6 +39,7 @@ import { useWorkspaceSidebarController } from '../../shared/ui/sidebar'
 import type { WorkItemDefinitionFilter } from '../../work-items/model/workItemFilters'
 import { resolveWorkItemPersonOptions } from '../../work-items/model/workItemDisplay'
 import type { WorkItemRelationEditorInput } from '../../work-items/ui/WorkItemRelationsEditor'
+import type { WorkItemDependencyCreateDraft } from '../../work-items/ui/WorkItemDependencyPanel'
 import type { CreateProjectTaskInput, ProjectTask } from '../api/tasks'
 import {
   createBulkOperationSelection,
@@ -66,6 +71,7 @@ import { TaskActionFeedback } from './TaskActionFeedback'
 import { TaskDetailPane } from './TaskDetailPane'
 import { TaskHeader } from './TaskHeader'
 import { TaskWorkspace } from './TaskWorkspace'
+import { TaskSchedulePreviewMetadata } from './TaskSchedulePreviewMetadata'
 import { createTaskTabId, taskTabPanelId } from './taskTabAccessibility'
 
 const emptyProjectMembers: ProjectMember[] = []
@@ -120,8 +126,8 @@ type TaskUpdateResult = {
 
 /** One revision-bound schedule update waiting for explicit user confirmation. */
 type PendingTaskScheduleUpdate = {
-  /** Complete patch whose schedule was validated by the preview endpoint. */
-  input: UpdateTeamIssueInput
+  /** Original schedule operation confirmed against the preview's graph revisions. */
+  operation: WorkItemScheduleOperation
   /** Server-owned direct and dependency impacts shown before applying. */
   preview: WorkItemScheduleChangePreview
   /** Rejects the originating edit when persistence fails. */
@@ -188,6 +194,16 @@ export type TaskScreenProps = {
   projectMembersErrorMessage?: string
   /** Error shown when Project tasks could not be loaded. */
   taskErrorMessage?: string
+  /** Authoritative canonical Work Item dependency graph shared by all task views. */
+  planningSnapshot?: PlanningSnapshot
+  /** Whether canonical Planning dependency data or its permission projection is loading. */
+  isPlanningLoading?: boolean
+  /** Planning dependency load error shown without hiding Project tasks. */
+  planningErrorMessage?: string
+  /** Retries the canonical Planning dependency and permission queries. */
+  onRetryPlanning?: () => void
+  /** Determines whether the current user may manage one canonical dependency endpoint. */
+  canManageScheduleDependencyEndpoint?: (endpoint: WorkItemDependencyEndpoint) => boolean
   /** Task view selected when the screen first mounts. */
   initialTab?: TaskTab
   /** Whether the inline create form should open on initial render. */
@@ -250,6 +266,21 @@ export type TaskScreenProps = {
     task: ProjectTask,
     operation: WorkItemScheduleOperation,
   ) => Promise<WorkItemScheduleChangePreview>
+  /** Atomically confirms the original schedule operation and every dependency ripple. */
+  onConfirmScheduleChange?: (
+    task: ProjectTask,
+    operation: WorkItemScheduleOperation,
+    preview: WorkItemScheduleChangePreview,
+  ) => Promise<ProjectTask>
+  /** Creates a canonical Work Item schedule dependency. */
+  onCreateScheduleDependency?: (input: WorkItemDependencyCreateDraft) => void | Promise<void>
+  /** Deletes a canonical Work Item schedule dependency. */
+  onDeleteScheduleDependency?: (dependency: WorkItemScheduleDependency) => void | Promise<void>
+  /** Updates a canonical Work Item schedule dependency rule. */
+  onUpdateScheduleDependency?: (
+    dependency: WorkItemScheduleDependency,
+    patch: WorkItemScheduleDependencyPatch,
+  ) => void | Promise<void>
   /** Creates a relation from the selected Work Item. */
   onAddRelation?: (issueId: string, input: WorkItemRelationEditorInput) => Promise<void>
   /** Deletes a relation from the selected Work Item. */
@@ -302,6 +333,7 @@ export function TaskScreen({
   assigneeErrorMessage,
   assigneeOptions = emptyProjectMembers,
   canManageProjectMembers = false,
+  canManageScheduleDependencyEndpoint,
   collaboration,
   artifacts,
   configurationErrorMessage,
@@ -314,6 +346,7 @@ export function TaskScreen({
   initialTab = 'table',
   isAssigneeOptionsLoading = false,
   isProjectUsersLoading = false,
+  isPlanningLoading = false,
   isRelationCandidatesLoading = false,
   isSelectedIssueDetailLoading = false,
   isSystemAdmin = false,
@@ -333,6 +366,8 @@ export function TaskScreen({
   selectedIssueDetail,
   tasks = [],
   taskErrorMessage,
+  planningErrorMessage,
+  planningSnapshot,
   onLoadMoreProjectUsers,
   onAddRelation,
   onDeleteRelation,
@@ -341,10 +376,15 @@ export function TaskScreen({
   onSelectedIssueChange,
   onProjectQuickAccessToggle,
   onCreateTask,
+  onRetryPlanning,
   onRetryConfigurations,
   onUpdateIssue,
   onUpdateTask,
   onPreviewScheduleChange,
+  onConfirmScheduleChange,
+  onCreateScheduleDependency,
+  onDeleteScheduleDependency,
+  onUpdateScheduleDependency,
   onUpdateProjectMember,
   onBulkPreview,
   onBulkApply,
@@ -654,22 +694,29 @@ export function TaskScreen({
     task: ProjectTask,
     input: UpdateTeamIssueInput,
   ): Promise<TaskUpdateResult> => {
-    if (!input.schedule || !onPreviewScheduleChange) {
+    if (!input.schedule) {
       return {
         applied: true,
         task: await persistTaskUpdate(task, input),
       }
     }
+    if (Object.keys(input).some((field) => field !== 'schedule')) {
+      throw new Error(t('tasks.action.updateError'))
+    }
+    if (!onPreviewScheduleChange || !onConfirmScheduleChange) {
+      throw new Error(t('tasks.action.updateError'))
+    }
 
     const requestedSchedule = input.schedule
+    const operation: WorkItemScheduleOperation = {
+      schedule: requestedSchedule,
+      type: 'replace',
+    }
     const sequence = nextSchedulePreviewSequenceRef.current
     nextSchedulePreviewSequenceRef.current += 1
     const queuedUpdate = scheduleUpdateChainRef.current.then(async (): Promise<TaskUpdateResult> => {
       try {
-        const preview = await onPreviewScheduleChange(task, {
-          schedule: requestedSchedule,
-          type: 'replace',
-        })
+        const preview = await onPreviewScheduleChange(task, operation)
         const schedule = findDirectScheduleImpact(preview, task)
         if (!schedule) {
           throw new Error('Schedule preview did not contain the target Work Item.')
@@ -677,7 +724,7 @@ export function TaskScreen({
 
         return await new Promise<TaskUpdateResult>((resolve, reject) => {
           setScheduleUpdateQueue((current) => [...current, {
-            input: { ...input, schedule },
+            operation,
             preview,
             reject,
             resolve,
@@ -722,11 +769,16 @@ export function TaskScreen({
 
     setIsApplyingScheduleUpdate(true)
     try {
-      const updatedTask = await persistTaskUpdate(
+      const confirmedTask = await onConfirmScheduleChange?.(
         pendingScheduleUpdate.task,
-        pendingScheduleUpdate.input,
+        pendingScheduleUpdate.operation,
+        pendingScheduleUpdate.preview,
       )
-      pendingScheduleUpdate.resolve({ applied: true, task: updatedTask })
+      if (!confirmedTask) throw new Error(t('tasks.action.updateError'))
+      setTaskUndo(undefined)
+      setTaskRedo(undefined)
+      setTaskAction({ kind: 'success', message: t('tasks.action.saved') })
+      pendingScheduleUpdate.resolve({ applied: true, task: confirmedTask })
     } catch (error) {
       pendingScheduleUpdate.reject(error)
     } finally {
@@ -746,6 +798,54 @@ export function TaskScreen({
     setScheduleUpdateQueue((current) => current.filter(
       (candidate) => candidate.sequence !== pendingScheduleUpdate.sequence,
     ))
+  }
+
+  /**
+   * Confirms a Gantt or Calendar operation and retains its direct schedule for undo/redo.
+   *
+   * @param task - Revision-bound Work Item that initiated the timeline operation.
+   * @param operation - Original move, resize, or replacement operation.
+   * @param preview - Authoritative direct and dependency-cascade preview.
+   * @returns Updated direct Work Item returned by the atomic confirmation.
+   */
+  const handleConfirmTimelineScheduleChange = async (
+    task: ProjectTask,
+    operation: WorkItemScheduleOperation,
+    preview: WorkItemScheduleChangePreview,
+  ): Promise<ProjectTask> => {
+    if (!onConfirmScheduleChange) {
+      throw new Error(t('tasks.action.updateError'))
+    }
+
+    setTaskAction(undefined)
+    try {
+      const updatedTask = await onConfirmScheduleChange(task, operation, preview)
+      const directImpact = preview.impacts.find((impact) =>
+        impact.kind === 'direct' &&
+        impact.teamId === task.teamId &&
+        impact.workItemId === task.id
+      )
+      if (directImpact) {
+        setTaskUndo({
+          forwardPatch: { schedule: structuredClone(directImpact.after) },
+          inversePatch: { schedule: structuredClone(directImpact.before) },
+          task: updatedTask,
+        })
+        setTaskRedo(undefined)
+      }
+      setTaskAction({ kind: 'success', message: t('tasks.action.saved') })
+      return updatedTask
+    } catch (error) {
+      if (isTaskRevisionConflict(error)) {
+        setTaskUndo(undefined)
+        setTaskRedo(undefined)
+      }
+      setTaskAction({
+        kind: 'error',
+        message: resolveTaskMutationErrorMessage(error, t),
+      })
+      throw error
+    }
   }
 
   /** Reverses the most recent successful inline task update. */
@@ -896,6 +996,32 @@ export function TaskScreen({
                 ) : null}
               </div>
             ) : null}
+            {planningErrorMessage ? (
+              <div
+                className="mx-[clamp(20px,3vw,34px)] mt-5 flex flex-wrap items-center justify-between gap-3 rounded-md border border-red-200 bg-red-50 px-5 py-4"
+                data-testid="project-planning-error"
+                role="alert"
+              >
+                <span className="text-sm font-semibold text-red-700">{planningErrorMessage}</span>
+                {onRetryPlanning ? (
+                  <button
+                    className="workbench-button-secondary min-h-9 px-3"
+                    onClick={onRetryPlanning}
+                    type="button"
+                  >
+                    {t('planning.action.retry')}
+                  </button>
+                ) : null}
+              </div>
+            ) : isPlanningLoading ? (
+              <p
+                className="mx-[clamp(20px,3vw,34px)] mt-5 text-sm font-semibold text-[var(--workbench-muted)]"
+                data-testid="project-planning-loading"
+                role="status"
+              >
+                {t('planning.loading')}
+              </p>
+            ) : null}
             {taskAction ? (
               <TaskActionFeedback
                 dismissLabel={t('tasks.action.dismiss')}
@@ -979,6 +1105,7 @@ export function TaskScreen({
                 bulkProjectOptions={bulkProjectOptions}
                 bulkWorkspaceId={workspaceId}
                 canManageProjectMembers={canManageProjectMembers}
+                canManageScheduleDependencyEndpoint={canManageScheduleDependencyEndpoint}
                 configuration={configuration}
                 configurationFailedTeamIds={configurationFailedTeamIds}
                 configurationsByTeam={resolvedConfigurationsByTeam}
@@ -996,6 +1123,8 @@ export function TaskScreen({
                 onBulkRetry={onBulkRetry}
                 onBulkUndo={onBulkUndo}
                 onCreateTaskOpen={onCreateTask ? handleCreateTaskOpen : undefined}
+                onCreateScheduleDependency={onCreateScheduleDependency}
+                onDeleteScheduleDependency={onDeleteScheduleDependency}
                 onDefinitionFilterChange={setDefinitionFilter}
                 onDueDateFilterChange={setDueDateFilter}
                 onLoadMoreProjectUsers={onLoadMoreProjectUsers}
@@ -1008,7 +1137,10 @@ export function TaskScreen({
                 onStatusFilterChange={setStatusFilter}
                 onTaskSelectionChange={updateTaskSelection}
                 onUpdateProjectMember={onUpdateProjectMember}
-                onApplyPreviewedScheduleChange={onUpdateTask ? persistTaskUpdate : undefined}
+                onUpdateScheduleDependency={onUpdateScheduleDependency}
+                onConfirmScheduleChange={onConfirmScheduleChange
+                  ? handleConfirmTimelineScheduleChange
+                  : undefined}
                 onUpdateTask={onUpdateTask ? handleUpdateTask : undefined}
                 onPreviewScheduleChange={onPreviewScheduleChange}
                 onVisibleTaskSelectionChange={updateVisibleTaskSelection}
@@ -1020,6 +1152,7 @@ export function TaskScreen({
                 projectMembers={projectMembers}
                 projectMembersErrorMessage={projectMembersErrorMessage}
                 projectName={resolvedProjectName}
+                planningSnapshot={planningSnapshot}
                 projectUserQuery={projectUserQuery}
                 projectUsers={projectUsers}
                 projectUsersErrorMessage={projectUsersErrorMessage}
@@ -1042,6 +1175,7 @@ export function TaskScreen({
                   accessToken={accessToken}
                   assigneeOptions={assigneeOptions}
                   artifacts={artifacts}
+                  canManageScheduleDependencyEndpoint={canManageScheduleDependencyEndpoint}
                   collaboration={collaboration}
                   configuration={detailTask
                     ? resolveProjectTaskConfiguration(
@@ -1059,6 +1193,8 @@ export function TaskScreen({
                   isRelationCandidatesLoading={isRelationCandidatesLoading}
                   key={`${detailTask?.teamId ?? ''}:${detailTask?.id ?? ''}`}
                   locale={locale}
+                  onCreateScheduleDependency={onCreateScheduleDependency}
+                  onDeleteScheduleDependency={onDeleteScheduleDependency}
                   onAddRelation={onAddRelation}
                   onClose={handleCloseDetail}
                   onDeleteRelation={onDeleteRelation}
@@ -1066,6 +1202,8 @@ export function TaskScreen({
                       configurationFailedTeamIds.includes(detailTask.teamId)
                     ? undefined
                     : handleUpdateDetailIssue}
+                  onUpdateScheduleDependency={onUpdateScheduleDependency}
+                  planningSnapshot={planningSnapshot}
                   projects={selectedDetailTeamProjects}
                   relationCandidates={relationCandidates}
                   relationCandidatesErrorMessage={relationCandidatesErrorMessage}
@@ -1157,6 +1295,7 @@ function TaskScheduleUpdatePreview({
             </li>
           ))}
         </ul>
+        <TaskSchedulePreviewMetadata preview={pending.preview} t={t} />
         {pending.preview.warnings.length > 0 ? (
           <div className="mt-4 rounded-lg border border-[#f4d38b] bg-[#fffaeb] p-3" role="status">
             <p className="text-sm font-bold text-[#93370d]">{t('tasks.schedule.warnings')}</p>
@@ -1179,7 +1318,7 @@ function TaskScheduleUpdatePreview({
           <button
             className="rounded-lg bg-[var(--workbench-primary)] px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
             data-testid="task-schedule-update-confirm"
-            disabled={isApplying}
+            disabled={isApplying || pending.preview.conflicts.length > 0}
             onClick={onConfirm}
             type="button"
           >
@@ -1236,6 +1375,9 @@ function resolveTaskMutationErrorMessage(
   t: (key: MessageKey) => string,
 ): string {
   if (error instanceof TeamIssuesApiError) {
+    if (isTaskSchedulePreviewStaleCode(error.code)) {
+      return t('tasks.schedule.previewStale')
+    }
     if (error.code === 'WorkItemRevisionConflict') {
       return t('tasks.action.conflict')
     }
@@ -1247,6 +1389,16 @@ function resolveTaskMutationErrorMessage(
     }
   }
   return t('tasks.action.updateError')
+}
+
+/** Returns whether a stable API code invalidates a previously displayed schedule preview. */
+function isTaskSchedulePreviewStaleCode(code: string | undefined): boolean {
+  return code === 'WorkItemSchedulePreviewStale' ||
+    code === 'PlanningRevisionConflict' ||
+    code === 'WorkItemRelationGraphConflict' ||
+    code === 'WorkItemAuthorizationChanged' ||
+    code === 'WorkItemScheduleDependencyConflict' ||
+    code === 'WorkItemScheduleCascadeConflict'
 }
 
 /**
@@ -1270,8 +1422,11 @@ function resolveTaskScheduleWarning(
   warning: string,
   t: (key: MessageKey) => string,
 ): string {
-  return warning === 'DependencyRippleRequiresReview'
-    ? t('tasks.schedule.warning.dependencyRipple')
+  if (warning === 'DependencyRippleRequiresReview') {
+    return t('tasks.schedule.warning.dependencyRipple')
+  }
+  return warning === 'SemanticBlockRelationsDoNotReschedule'
+    ? t('tasks.schedule.warning.semanticBlocks')
     : t('tasks.schedule.warning.generic')
 }
 

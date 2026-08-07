@@ -9,6 +9,7 @@ import { HomePage } from '../src/pages/workspace/HomePage'
 import { InboxPage } from '../src/pages/workspace/InboxPage'
 import { MyTasksPage } from '../src/pages/workspace/MyTasksPage'
 import { PlanningPage } from '../src/pages/workspace/PlanningPage'
+import { resolvePlanningProjectNavigationPath } from '../src/planning/model/navigation'
 import { ProjectsPage } from '../src/pages/workspace/ProjectsPage'
 import { ReportsPage } from '../src/pages/workspace/ReportsPage'
 import { SettingsPage } from '../src/pages/workspace/SettingsPage'
@@ -135,6 +136,34 @@ describe('Planning paths', () => {
     }
 
     expect(matchRoutes(appRoutes, '/planning/invalid')?.at(-1)?.route.path).toBe('*')
+  })
+
+  test('opens only uniquely owned Projects directly from Planning', () => {
+    const teams = [
+      {
+        id: 'core/team',
+        name: 'Core team',
+        projects: [
+          { id: 'unique/project', name: 'Unique Project' },
+          { id: 'shared project', name: 'Shared Project' },
+        ],
+      },
+      {
+        id: 'design-team',
+        name: 'Design team',
+        projects: [{ id: 'shared project', name: 'Shared Project' }],
+      },
+    ]
+
+    expect(resolvePlanningProjectNavigationPath(teams, 'unique/project')).toBe(
+      '/projects/unique%2Fproject/tasks?teamId=core%2Fteam',
+    )
+    expect(resolvePlanningProjectNavigationPath(teams, 'shared project')).toBe(
+      '/search?q=shared+project&type=project',
+    )
+    expect(resolvePlanningProjectNavigationPath(teams, 'missing-project')).toBe(
+      '/search?q=missing-project&type=project',
+    )
   })
 })
 

@@ -3,8 +3,10 @@ import {
   archivePlanningEntity,
   createPlanningDependency,
   createPlanningEntity,
+  createWorkItemScheduleDependency,
   deletePlanningDependency,
   deletePlanningWorkItemLink,
+  deleteWorkItemScheduleDependency,
   duplicatePlanningEntity,
   getPlanningSnapshot,
   movePlanningEntity,
@@ -13,6 +15,7 @@ import {
   resolvePlanningErrorMessageKey,
   rolloverPlanningCycle,
   updatePlanningEntity,
+  updateWorkItemScheduleDependency,
 } from '../src/planning/api'
 import { planningSnapshotFixture } from '../src/planning/fixtures'
 
@@ -133,6 +136,63 @@ describe('Planning API', () => {
     })
   })
 
+  test('creates, updates, and deletes canonical cross-Team Work Item dependencies', async () => {
+    const requests = installFetchRecorder(planningSnapshotFixture)
+
+    await createWorkItemScheduleDependency('access-token', {
+      expectedRevision: 12,
+      id: 'edge/1',
+      predecessor: { teamId: 'team/a', workItemId: 'item/a' },
+      successor: { teamId: 'team/b', workItemId: 'item/b' },
+      type: 'start-to-finish',
+      lagDays: -2,
+      constraint: { anchor: 'finish', date: '2026-08-01', kind: 'not-after' },
+    }, mutationContext)
+    await updateWorkItemScheduleDependency('access-token', 'edge/1', {
+      expectedRevision: 13,
+      patch: { constraint: null, lagDays: 3 },
+    }, mutationContext)
+    await deleteWorkItemScheduleDependency('access-token', 'edge/1', {
+      expectedRevision: 14,
+    }, mutationContext)
+
+    expect(requests.map((request) => [request.init.method, request.url])).toEqual([
+      ['POST', '/api/planning/work-item-dependencies'],
+      ['PATCH', '/api/planning/work-item-dependencies/edge%2F1'],
+      ['DELETE', '/api/planning/work-item-dependencies/edge%2F1'],
+    ])
+    expect(JSON.parse(String(requests[0]?.init.body))).toMatchObject({
+      lagDays: -2,
+      type: 'start-to-finish',
+    })
+    expect(JSON.parse(String(requests[1]?.init.body))).toEqual({
+      expectedRevision: 13,
+      patch: { constraint: null, lagDays: 3 },
+    })
+  })
+
+  test('rejects a malformed successful dependency mutation response at the API boundary', async () => {
+    installFetchRecorder({ revision: 13 })
+
+    await expect(deleteWorkItemScheduleDependency('access-token', 'edge', {
+      expectedRevision: 12,
+    }, mutationContext)).rejects.toMatchObject({ code: 'InvalidPlanningSnapshot' })
+  })
+
+  test('rejects malformed nested dependency summary data at the API boundary', async () => {
+    installFetchRecorder({
+      ...planningSnapshotFixture,
+      workItemDependencySummary: {
+        ...planningSnapshotFixture.workItemDependencySummary,
+        criticalPath: { workItems: [] },
+      },
+    })
+
+    await expect(getPlanningSnapshot('access-token')).rejects.toMatchObject({
+      code: 'InvalidPlanningSnapshot',
+    })
+  })
+
   test('preserves stable conflict codes and readable fallback messages', async () => {
     globalThis.fetch = (async () => new Response(JSON.stringify({
       code: 'PlanningRevisionConflict',
@@ -150,6 +210,10 @@ describe('Planning API', () => {
       status: 409,
     })
     expect(resolvePlanningErrorMessageKey(error)).toBe('planning.conflict')
+    expect(resolvePlanningErrorMessageKey(
+      new PlanningApiError(403, 'raw authorization detail', 'PlanningAuthorizationChanged'),
+      'mutation',
+    )).toBe('planning.conflict')
     expect(resolvePlanningErrorMessageKey(
       new PlanningApiError(409, 'Entity already exists.', 'PlanningEntityExists'),
       'mutation',
