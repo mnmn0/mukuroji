@@ -40,6 +40,7 @@ export const workItemsMessages = {
   'tasks.schedule.endDate': '終了日',
   'tasks.schedule.milestoneDate': 'マイルストーン日',
   'tasks.schedule.effortMinutes': '予定工数（分）',
+  'tasks.schedule.save': '日程変更を確認',
   'tasks.schedule.reviewChange': '日程変更を確認',
   'tasks.schedule.invalid': '有効なスケジュールを入力してください。期間には稼働日が必要です。',
   'tasks.schedule.rangeStart': '期間の開始日は {date} です。終了日を選択してください。',

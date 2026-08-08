@@ -464,7 +464,7 @@ export function TaskDetailPane({
               form={scheduleFormId}
               type="submit"
             >
-              {t('tasks.schedule.reviewChange')}
+              {t('tasks.schedule.save')}
             </button>
           </div>
           {hasCustomFields ? (

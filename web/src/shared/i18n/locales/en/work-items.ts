@@ -40,6 +40,7 @@ export const workItemsMessages = {
   'tasks.schedule.endDate': 'End date',
   'tasks.schedule.milestoneDate': 'Milestone date',
   'tasks.schedule.effortMinutes': 'Planned effort (minutes)',
+  'tasks.schedule.save': 'Review schedule change',
   'tasks.schedule.reviewChange': 'Review schedule change',
   'tasks.schedule.invalid': 'Enter a valid schedule. A date range must include a working day.',
   'tasks.schedule.rangeStart': 'Range start: {date}. Select the range end.',
