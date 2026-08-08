@@ -494,6 +494,7 @@ test('rejects missing, non-Goal, archived, and invisible Planning Goal relation 
             },
           ],
           workItemLinks: [],
+          workItemDependencies: [],
         }
       },
     } as unknown as PlanningClient,
@@ -586,6 +587,7 @@ test('revalidates archived Planning Goal targets before restoring a Document ver
             archivedAt: '2026-07-18T00:00:00.000Z',
           }],
           workItemLinks: [],
+          workItemDependencies: [],
         }
       },
     } as unknown as PlanningClient,

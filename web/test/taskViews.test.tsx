@@ -1,4 +1,9 @@
 import { describe, expect, test } from 'bun:test'
+import type {
+  PlanningSnapshot,
+  WorkItemScheduleChangePreview,
+  WorkItemScheduleDependency,
+} from '@mukuroji/contracts'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { createTranslator } from '../src/shared/i18n/i18n'
 import { collaborationWorkspaceMemberFixtures } from '../src/issues/fixtures'
@@ -12,6 +17,7 @@ import { TaskDetailPane } from '../src/tasks/ui/TaskDetailPane'
 import { TaskFileView } from '../src/tasks/ui/TaskFileView'
 import { TaskGanttView } from '../src/tasks/ui/TaskGanttView'
 import { TaskPermissionsView } from '../src/tasks/ui/TaskPermissionsView'
+import { TaskSchedulePreviewMetadata } from '../src/tasks/ui/TaskSchedulePreviewMetadata'
 import { TaskTableView } from '../src/tasks/ui/TaskTableView'
 import { TaskStatusBadge } from '../src/tasks/ui/TaskViewPrimitives'
 import {
@@ -19,6 +25,7 @@ import {
   taskViewStoryProjectFiles,
   taskViewStoryProjectMembers,
   taskViewStoryProjectUsers,
+  taskViewStoryPlanningSnapshot,
   taskViewStorySelectedIssueDetail,
   taskViewStoryStatusColumns,
   taskViewStoryTasks,
@@ -31,6 +38,40 @@ const personLabels = {
 }
 
 describe('independent task views', () => {
+  test('shows legacy affected Project IDs without inventing Team-qualified links', () => {
+    const schedule = createDefaultDueDateTaskSchedule('2026-08-08')
+    const preview = {
+      affectedMilestoneIds: [],
+      affectedProjectIds: ['shared-project'],
+      affectedProjects: [],
+      conflicts: [],
+      evaluatedRevisions: [{
+        expectedRevision: 4,
+        teamId: 'core-team',
+        workItemId: 'wireframe',
+      }],
+      expectedRevision: 4,
+      impacts: [{
+        after: schedule,
+        before: schedule,
+        dateDeltaDays: 0,
+        expectedRevision: 4,
+        kind: 'direct',
+        teamId: 'core-team',
+        workItemId: 'wireframe',
+      }],
+      planningRevision: 12,
+      relationGraphRevision: 8,
+      requiresConfirmation: true,
+      warnings: [],
+    } satisfies WorkItemScheduleChangePreview
+
+    const html = renderToStaticMarkup(<TaskSchedulePreviewMetadata preview={preview} t={t} />)
+
+    expect(html).toContain('shared-project')
+    expect(html).not.toContain('core-team / shared-project')
+  })
+
   test('preserves table row, selection, count, empty, and error contracts', () => {
     const selectedTask = taskViewStoryTasks[0]
     const selectedTaskKey = createTaskKey(selectedTask)
@@ -150,6 +191,7 @@ describe('independent task views', () => {
         configuration={teamWorkItemConfigurationFixture}
         configurationsByTeam={taskViewStoryConfigurationsByTeam}
         onCreateTaskOpen={() => undefined}
+        planningSnapshot={taskViewStoryPlanningSnapshot}
         projectId="refero"
         t={t}
         tasks={[...taskViewStoryTasks].reverse()}
@@ -160,6 +202,8 @@ describe('independent task views', () => {
     expect(html).toContain('data-testid="task-gantt-add-wireframe"')
     expect(html).toContain('data-testid="task-gantt-bar-wireframe"')
     expect(html).toContain('data-testid="task-gantt-resize-wireframe"')
+    expect(html).toContain('data-testid="task-gantt-dependencies"')
+    expect(html).toContain(t('workItems.dependencies.type.start-to-finish'))
     expect(html).toContain('value="milestone"')
     expect(html).toContain('value="unscheduled"')
     expect(html.indexOf('ワイヤーフレームを確認する')).toBeLessThan(
@@ -168,6 +212,59 @@ describe('independent task views', () => {
     expect(html.indexOf('SEOリサーチをまとめる')).toBeLessThan(
       html.indexOf('競合調査レポートを完成する'),
     )
+  })
+
+  test('distinguishes filtered Project tasks from external dependency endpoints', () => {
+    const sourceWorkItem = taskViewStoryPlanningSnapshot.workItems.find((item) =>
+      item.id === 'wireframe'
+    )
+    const sourceDependency = taskViewStoryPlanningSnapshot.workItemDependencies[0]
+    if (!sourceWorkItem || !sourceDependency) {
+      throw new Error('Expected the Gantt dependency fixture.')
+    }
+    const externalPredecessor = {
+      ...sourceWorkItem,
+      id: 'other-project-a',
+      projectId: 'other-project',
+      title: 'Other project A',
+    }
+    const externalSuccessor = {
+      ...sourceWorkItem,
+      id: 'other-project-b',
+      projectId: 'other-project',
+      title: 'Other project B',
+    }
+    const unrelatedDependency = {
+      ...sourceDependency,
+      id: 'other-project-only-dependency',
+      predecessor: { teamId: externalPredecessor.teamId, workItemId: externalPredecessor.id },
+      successor: { teamId: externalSuccessor.teamId, workItemId: externalSuccessor.id },
+    } satisfies WorkItemScheduleDependency
+    const snapshot = {
+      ...taskViewStoryPlanningSnapshot,
+      workItemDependencies: [sourceDependency, unrelatedDependency],
+      workItems: [
+        ...taskViewStoryPlanningSnapshot.workItems,
+        externalPredecessor,
+        externalSuccessor,
+      ],
+    } satisfies PlanningSnapshot
+    const html = renderToStaticMarkup(
+      <TaskGanttView
+        allProjectTasks={taskViewStoryTasks}
+        configurationsByTeam={taskViewStoryConfigurationsByTeam}
+        planningSnapshot={snapshot}
+        t={t}
+        tasks={taskViewStoryTasks.slice(0, 1)}
+      />,
+    )
+
+    expect(html).toContain('task-gantt-dependency-story-wireframe-brand')
+    expect(html).not.toContain(t('workItems.dependencies.external'))
+    expect(html).not.toContain('task-gantt-external-lane')
+    expect(html).not.toContain(unrelatedDependency.id)
+    expect(html).toContain(`${t('workItems.dependencies.predecessor')}: `)
+    expect(html).toContain(`${t('workItems.dependencies.successor')}: `)
   })
 
   test('bounds timeline views across the complete ISO planning horizon', () => {
@@ -412,6 +509,15 @@ describe('independent task views', () => {
     expect(editableHtml).toContain('name="custom-field:customer-impact"')
     expect(editableHtml).toContain('Enterprise customers can complete setup')
     expect(editableHtml).not.toContain('disabled="" type="submit"')
+    const scheduleFormId = editableHtml.match(
+      /<form aria-label="[^"]+" class="hidden" id="([^"]+)"/u,
+    )?.[1]
+    expect(scheduleFormId).toBeDefined()
+    expect(editableHtml).toContain(`form="${scheduleFormId}" name="scheduleMode"`)
+    expect(editableHtml).toMatch(new RegExp(
+      `<input[^>]+form="${scheduleFormId}"[^>]+name="scheduleEffortMinutes"`,
+      'u',
+    ))
     expect(errorHtml).toContain('Lambda returned 500.')
     expect(errorHtml).toContain('disabled="" type="submit"')
     expect(emptyHtml).toContain(t('tasks.detail.empty'))

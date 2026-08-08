@@ -141,6 +141,8 @@ number         = digit , { digit } , [ "." , digit , { digit } ] ;
 
 ## Work Item relation
 
+この graph は意味上の relation を所有する。`blocks` / `blockedBy` も blocker の意味と検索・表示を表すだけで、Work Item の日付を暗黙に移動しない。Cross-Team / cross-Project の日程制約、lead / lag、constraint、cascade preview は PlanningTable の canonical Work Item schedule dependency が所有する。
+
 Relation は同じ Team が所有する Work Item 間だけで作成できる。API は source / target を Team partition の strongly consistent read で確認し、同名 ID が別 Team に存在しても参照しない。
 
 Reciprocal type は次のとおりである。

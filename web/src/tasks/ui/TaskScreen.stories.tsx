@@ -149,6 +149,7 @@ const selectedIssueDetail: TeamIssueDetail = {
 }
 
 const onProjectQuickAccessToggle = fn()
+const onRetryPlanning = fn()
 
 const meta = {
   title: 'Application/Projects/Task Screen',
@@ -332,6 +333,25 @@ export const Loading: Story = {
 
     await expect(status).toHaveTextContent('タスク一覧を確認しています。')
     await expect(busyRegion).toHaveAttribute('aria-busy', 'true')
+  },
+}
+
+/** Planning dependency failure that leaves the primary task table usable and retryable. */
+export const PlanningUnavailable: Story = {
+  args: {
+    onRetryPlanning,
+    planningErrorMessage: 'Planning の依存関係を取得できませんでした。',
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    onRetryPlanning.mockClear()
+
+    await expect(canvas.getByTestId('task-row-wireframe')).toBeVisible()
+    await expect(canvas.getByRole('alert')).toHaveTextContent(
+      'Planning の依存関係を取得できませんでした。',
+    )
+    await userEvent.click(canvas.getByRole('button', { name: '再試行' }))
+    await expect(onRetryPlanning).toHaveBeenCalledTimes(1)
   },
 }
 

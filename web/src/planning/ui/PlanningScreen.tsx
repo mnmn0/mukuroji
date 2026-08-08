@@ -9,11 +9,19 @@ import type {
   PlanningHealth,
   PlanningRisk,
   PlanningSnapshot,
+  ScheduleDependencyConstraint,
+  WorkItemDependencyEndpoint,
+  WorkItemScheduleDependency,
+  WorkItemScheduleDependencyPatch,
   PlanningWorkItemLink,
   PlanningWorkItemSummary,
+  WorkItemAffectedProject,
 } from '@mukuroji/contracts'
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import type { ProjectDirectoryTeam } from '../../projects/api'
+import type { MessageKey } from '../../shared/i18n/i18n'
+import type { WorkItemDependencyCreateDraft } from '../../work-items/model/workItemDependencies'
+import { WorkItemDependencyPanel } from '../../work-items/ui/WorkItemDependencyPanel'
 import {
   resolvePlanningViewTabTarget,
   type PlanningViewId,
@@ -219,6 +227,8 @@ export type PlanningLabels = {
   riskValues: Record<PlanningRisk, string>
   /** Dependency type ごとの文言です。 */
   dependencyTypes: Record<PlanningDependencyType, string>
+  /** Work Item dependency editor の locale 済み文言を解決します。 */
+  workItemDependencyT: (key: MessageKey) => string
   /** Goal / OKR framework ごとの文言です。 */
   goalFrameworkValues: Record<PlanningGoalFramework, string>
 }
@@ -249,6 +259,8 @@ export type PlanningScreenProps = {
   canUpdateEntityStatus?: (entity: PlanningEntity) => boolean
   /** Current user が canonical Work Item の Planning link を更新できるか判定する callback です。 */
   canUpdateWorkItemLink?: (workItem: PlanningWorkItemSummary) => boolean
+  /** Current user が canonical dependency endpoint を管理できるか判定する callback です。 */
+  canManageWorkItemDependencyEndpoint?: (endpoint: WorkItemDependencyEndpoint) => boolean
   /** Current user が Work Item link から entity を参照できるか判定する callback です。 */
   canLinkEntity?: (entity: PlanningEntity) => boolean
   /** View tab 選択時の callback です。 */
@@ -267,9 +279,23 @@ export type PlanningScreenProps = {
     successorId: string,
     type: PlanningDependencyType,
     lagDays: number,
+    constraint?: ScheduleDependencyConstraint,
   ) => void | Promise<void>
   /** Dependency 削除 callback です。 */
   onDeleteDependency?: (dependency: PlanningDependency) => void | Promise<void>
+  /** Canonical Work Item schedule dependency 作成 callback です。 */
+  onCreateWorkItemDependency?: (
+    input: WorkItemDependencyCreateDraft,
+  ) => void | Promise<void>
+  /** Canonical Work Item schedule dependency 削除 callback です。 */
+  onDeleteWorkItemDependency?: (
+    dependency: WorkItemScheduleDependency,
+  ) => void | Promise<void>
+  /** Canonical Work Item schedule dependency 更新 callback です。 */
+  onUpdateWorkItemDependency?: (
+    dependency: WorkItemScheduleDependency,
+    patch: WorkItemScheduleDependencyPatch,
+  ) => void | Promise<void>
   /** Cycle rollover callback です。 */
   onRolloverCycle?: (
     sourceCycle: PlanningEntity,
@@ -302,6 +328,10 @@ export type PlanningScreenProps = {
   onDeleteWorkItemLink?: (workItem: PlanningWorkItemSummary) => void | Promise<void>
   /** Goal から Work Item を開く callback です。 */
   onOpenWorkItem?: (workItem: PlanningWorkItemSummary) => void
+  /** Dependency summary から影響 Project を開く callback です。 */
+  onOpenProject?: (project: WorkItemAffectedProject) => void
+  /** Dependency summary から影響 Milestone を開く callback です。 */
+  onOpenMilestone?: (milestoneId: string) => void
 }
 
 const timelineEntityTypes = new Set<PlanningEntityType>([
@@ -320,6 +350,7 @@ export function PlanningScreen({
   canCreateInScope,
   canLinkEntity,
   canManageEntity,
+  canManageWorkItemDependencyEndpoint,
   canUpdateEntityStatus,
   canUpdateWorkItemLink,
   createScopeTeams = [],
@@ -331,16 +362,21 @@ export function PlanningScreen({
   onArchiveEntity,
   onChangeMilestoneDate,
   onCreateDependency,
+  onCreateWorkItemDependency,
   onCreateEntity,
   onDeleteDependency,
+  onDeleteWorkItemDependency,
   onDeleteWorkItemLink,
   onDuplicateEntity,
   onMoveEntity,
+  onOpenMilestone,
+  onOpenProject,
   onOpenWorkItem,
   onSaveWorkItemLink,
   onRetry,
   onRolloverCycle,
   onViewChange,
+  onUpdateWorkItemDependency,
   snapshot,
 }: PlanningScreenProps) {
   const activeEntities = useMemo(
@@ -446,6 +482,7 @@ export function PlanningScreen({
             {activeView === 'timeline' ? (
               <TimelineView
                 canManageEntity={canManageEntity}
+                canManageWorkItemDependencyEndpoint={canManageWorkItemDependencyEndpoint}
                 canUpdateEntityStatus={canUpdateEntityStatus}
                 labels={labels}
                 selectedEntity={selectedEntity}
@@ -454,11 +491,17 @@ export function PlanningScreen({
                 onArchiveEntity={onArchiveEntity}
                 onChangeMilestoneDate={onChangeMilestoneDate}
                 onCreateDependency={onCreateDependency}
+                onCreateWorkItemDependency={onCreateWorkItemDependency}
                 onDeleteDependency={onDeleteDependency}
+                onDeleteWorkItemDependency={onDeleteWorkItemDependency}
                 onDuplicateEntity={onDuplicateEntity}
                 onMoveEntity={onMoveEntity}
+                onOpenMilestone={onOpenMilestone}
+                onOpenProject={onOpenProject}
+                onOpenWorkItem={onOpenWorkItem}
                 onRolloverCycle={onRolloverCycle}
                 onSelectEntity={setSelectedEntityId}
+                onUpdateWorkItemDependency={onUpdateWorkItemDependency}
               />
             ) : null}
             {activeView === 'roadmap' ? (
@@ -500,31 +543,45 @@ export function PlanningScreen({
 
 function TimelineView({
   canManageEntity,
+  canManageWorkItemDependencyEndpoint,
   canUpdateEntityStatus,
   labels,
   onAddStatusUpdate,
   onArchiveEntity,
   onChangeMilestoneDate,
   onCreateDependency,
+  onCreateWorkItemDependency,
   onDeleteDependency,
+  onDeleteWorkItemDependency,
   onDuplicateEntity,
   onMoveEntity,
+  onOpenMilestone,
+  onOpenProject,
+  onOpenWorkItem,
   onRolloverCycle,
+  onUpdateWorkItemDependency,
   onSelectEntity,
   selectedEntity,
   snapshot,
 }: {
   canManageEntity?: PlanningScreenProps['canManageEntity']
+  canManageWorkItemDependencyEndpoint?: PlanningScreenProps['canManageWorkItemDependencyEndpoint']
   canUpdateEntityStatus?: PlanningScreenProps['canUpdateEntityStatus']
   labels: PlanningLabels
   onAddStatusUpdate?: PlanningScreenProps['onAddStatusUpdate']
   onArchiveEntity?: PlanningScreenProps['onArchiveEntity']
   onChangeMilestoneDate?: PlanningScreenProps['onChangeMilestoneDate']
   onCreateDependency?: PlanningScreenProps['onCreateDependency']
+  onCreateWorkItemDependency?: PlanningScreenProps['onCreateWorkItemDependency']
   onDeleteDependency?: PlanningScreenProps['onDeleteDependency']
+  onDeleteWorkItemDependency?: PlanningScreenProps['onDeleteWorkItemDependency']
   onDuplicateEntity?: PlanningScreenProps['onDuplicateEntity']
   onMoveEntity?: PlanningScreenProps['onMoveEntity']
+  onOpenMilestone?: PlanningScreenProps['onOpenMilestone']
+  onOpenProject?: PlanningScreenProps['onOpenProject']
+  onOpenWorkItem?: PlanningScreenProps['onOpenWorkItem']
   onRolloverCycle?: PlanningScreenProps['onRolloverCycle']
+  onUpdateWorkItemDependency?: PlanningScreenProps['onUpdateWorkItemDependency']
   onSelectEntity: (entityId: string) => void
   selectedEntity?: PlanningEntity
   snapshot: PlanningSnapshot
@@ -644,6 +701,19 @@ function TimelineView({
           ))}
         </div>
       </section>
+      <section className="workbench-panel p-5" data-testid="planning-work-item-dependencies">
+        <WorkItemDependencyPanel
+          canManageEndpoint={canManageWorkItemDependencyEndpoint}
+          onCreate={onCreateWorkItemDependency}
+          onDelete={onDeleteWorkItemDependency}
+          onOpenMilestone={onOpenMilestone}
+          onOpenProject={onOpenProject}
+          onOpenWorkItem={onOpenWorkItem}
+          onUpdate={onUpdateWorkItemDependency}
+          snapshot={snapshot}
+          t={labels.workItemDependencyT}
+        />
+      </section>
       {detailEntity ? (
         <div
           className="grid grid-cols-2 items-start gap-5 max-[900px]:grid-cols-1"
@@ -723,6 +793,7 @@ function DependencyEditor({
   labels: PlanningLabels
   onCreate?: PlanningScreenProps['onCreateDependency']
 }) {
+  const [constraintValidationMessage, setConstraintValidationMessage] = useState<string>()
   return (
     <form
       className="workbench-panel grid content-start gap-4 p-5"
@@ -733,9 +804,17 @@ function DependencyEditor({
         const predecessorId = String(data.get('predecessorId') ?? '')
         const successorId = String(data.get('successorId') ?? '')
         const type = readDependencyType(data.get('dependencyType'))
-        const lagDays = Math.max(0, Math.trunc(Number(data.get('lagDays')) || 0))
+        const lagDays = Math.trunc(Number(data.get('lagDays')) || 0)
+        const constraint = readPlanningDependencyConstraint(data)
+        if (data.get('constraintKind') && !constraint) {
+          setConstraintValidationMessage(
+            labels.workItemDependencyT('workItems.dependencies.invalid'),
+          )
+          return
+        }
+        setConstraintValidationMessage(undefined)
         if (predecessorId && successorId && predecessorId !== successorId) {
-          void onCreate?.(predecessorId, successorId, type, lagDays)
+          void onCreate?.(predecessorId, successorId, type, lagDays, constraint)
         }
       }}
     >
@@ -751,6 +830,28 @@ function DependencyEditor({
         </select>
       </label>
       <PlanningInput defaultValue="0" label={labels.dependencyLag} name="lagDays" type="number" />
+      <label className="grid gap-2 text-sm font-semibold text-[var(--workbench-text)]">
+        {labels.workItemDependencyT('workItems.dependencies.constraint.kind')}
+        <select className="workbench-input h-10 px-3" name="constraintKind">
+          <option value="">{labels.workItemDependencyT('workItems.dependencies.constraint.none')}</option>
+          <option value="on">{labels.workItemDependencyT('workItems.dependencies.constraint.kind.on')}</option>
+          <option value="not-before">{labels.workItemDependencyT('workItems.dependencies.constraint.kind.not-before')}</option>
+          <option value="not-after">{labels.workItemDependencyT('workItems.dependencies.constraint.kind.not-after')}</option>
+        </select>
+      </label>
+      <label className="grid gap-2 text-sm font-semibold text-[var(--workbench-text)]">
+        {labels.workItemDependencyT('workItems.dependencies.constraint.anchor')}
+        <select className="workbench-input h-10 px-3" name="constraintAnchor">
+          <option value="start">{labels.workItemDependencyT('workItems.dependencies.constraint.anchor.start')}</option>
+          <option value="finish">{labels.workItemDependencyT('workItems.dependencies.constraint.anchor.finish')}</option>
+        </select>
+      </label>
+      <PlanningInput label={labels.workItemDependencyT('workItems.dependencies.constraint.date')} name="constraintDate" type="date" />
+      {constraintValidationMessage ? (
+        <p className="text-sm font-semibold text-red-700" role="alert">
+          {constraintValidationMessage}
+        </p>
+      ) : null}
       <button className="workbench-button-primary min-h-10 px-4 disabled:opacity-50" disabled={!onCreate || entities.length < 2} type="submit">
         {labels.addDependency}
       </button>
@@ -1585,8 +1686,32 @@ function formatRange(range: PlanningEntity['forecast']) {
   return range.startDate === range.endDate ? range.endDate : `${range.startDate} – ${range.endDate}`
 }
 
+/** Narrows a dependency type while retaining all four start/finish relationships. */
 function readDependencyType(value: FormDataEntryValue | null): PlanningDependencyType {
-  return value === 'start-to-start' || value === 'finish-to-finish' ? value : 'finish-to-start'
+  return value === 'start-to-start' ||
+    value === 'finish-to-finish' ||
+    value === 'start-to-finish'
+    ? value
+    : 'finish-to-start'
+}
+
+/** Reads a complete optional Planning dependency date constraint. */
+function readPlanningDependencyConstraint(
+  data: FormData,
+): ScheduleDependencyConstraint | undefined {
+  const kindValue = String(data.get('constraintKind') ?? '')
+  if (!kindValue) return undefined
+  const kind = kindValue === 'on' || kindValue === 'not-before' || kindValue === 'not-after'
+    ? kindValue
+    : undefined
+  const anchorValue = String(data.get('constraintAnchor') ?? '')
+  const anchor = anchorValue === 'start' || anchorValue === 'finish'
+    ? anchorValue
+    : undefined
+  const date = String(data.get('constraintDate') ?? '')
+  return kind && anchor && /^\d{4}-\d{2}-\d{2}$/.test(date)
+    ? { anchor, date, kind }
+    : undefined
 }
 
 function readHealth(value: FormDataEntryValue | null): PlanningHealth {

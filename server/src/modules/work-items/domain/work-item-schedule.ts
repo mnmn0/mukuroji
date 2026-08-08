@@ -264,13 +264,7 @@ function hasCanonicalPlannedEffort(
  */
 export function deriveWorkItemScheduleDueDate(schedule: WorkItemSchedule): string {
   const normalized = normalizeWorkItemSchedule(schedule)
-  if (normalized.mode === 'unscheduled') {
-    return ''
-  }
-  if (normalized.mode === 'due-date') {
-    return normalized.dueDate
-  }
-  return normalized.endDate
+  return readWorkItemSchedulePrimaryDate(normalized) ?? ''
 }
 
 /**
@@ -379,9 +373,56 @@ export function previewWorkItemScheduleChange(
       expectedRevision,
       before: normalizedBefore,
       after,
+      dateDeltaDays: calculateWorkItemScheduleDateDeltaDays(normalizedBefore, after),
     }],
+    evaluatedRevisions: [{
+      teamId: normalizedTeamId,
+      workItemId: normalizedWorkItemId,
+      expectedRevision,
+    }],
+    conflicts: [],
+    affectedProjects: [],
+    affectedProjectIds: [],
+    affectedMilestoneIds: [],
+    requiresConfirmation: false,
     warnings: [],
   }
+}
+
+/**
+ * Calculates the signed calendar-day movement of a schedule's primary date.
+ *
+ * Date ranges and milestones use their end date, while due-date schedules use
+ * their due date. This matches the canonical deadline projection used by task
+ * surfaces. A transition to or from an unscheduled value has no comparable date
+ * and therefore reports zero.
+ *
+ * @param before - Canonical schedule before a proposed change.
+ * @param after - Canonical schedule after a proposed change.
+ * @returns Signed calendar days from the before primary date to the after date.
+ */
+export function calculateWorkItemScheduleDateDeltaDays(
+  before: WorkItemSchedule,
+  after: WorkItemSchedule,
+): number {
+  const beforeDate = readWorkItemSchedulePrimaryDate(normalizeWorkItemSchedule(before))
+  const afterDate = readWorkItemSchedulePrimaryDate(normalizeWorkItemSchedule(after))
+  if (!beforeDate || !afterDate) return 0
+  return parseIsoDate(afterDate).epochDay - parseIsoDate(beforeDate).epochDay
+}
+
+/**
+ * Reads the date used to summarize movement for one canonical schedule.
+ *
+ * @param schedule - Canonical Work Item schedule.
+ * @returns The primary local date, or undefined for an unscheduled item.
+ */
+function readWorkItemSchedulePrimaryDate(
+  schedule: WorkItemSchedule,
+): string | undefined {
+  if (schedule.mode === 'unscheduled') return undefined
+  if (schedule.mode === 'due-date') return schedule.dueDate
+  return schedule.endDate
 }
 
 /**
@@ -445,6 +486,46 @@ export function calculateWorkItemScheduleEndDate(
     let epochDay = start.epochDay;
     epochDay - start.epochDay < WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS;
     epochDay += 1
+  ) {
+    const date = formatEpochDay(epochDay)
+    if (
+      workingWeekdays.has(weekdayForEpochDay(epochDay)) &&
+      !holidays.has(date)
+    ) {
+      remainingDays -= 1
+      if (remainingDays === 0) {
+        return date
+      }
+    }
+  }
+
+  return invalidRange('Schedule duration exceeds the supported ISO date range.')
+}
+
+/**
+ * Resolves an inclusive range start while preserving a positive working-day duration.
+ *
+ * @param endDate - Inclusive local range end in `YYYY-MM-DD` form.
+ * @param durationDays - Positive number of working dates to occupy.
+ * @param policy - Calendar policy defining working weekdays and holidays.
+ * @returns The local date containing the first counted working date.
+ */
+export function calculateWorkItemScheduleStartDate(
+  endDate: string,
+  durationDays: number,
+  policy: WorkItemScheduleCalendarPolicy,
+): string {
+  const end = parseIsoDate(endDate)
+  const normalizedDurationDays = normalizePositiveDuration(durationDays)
+  const normalizedPolicy = normalizeCalendarPolicy(policy)
+  const workingWeekdays = new Set(normalizedPolicy.workingWeekdays)
+  const holidays = new Set(normalizedPolicy.holidays)
+  let remainingDays = normalizedDurationDays
+
+  for (
+    let epochDay = end.epochDay;
+    end.epochDay - epochDay < WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS;
+    epochDay -= 1
   ) {
     const date = formatEpochDay(epochDay)
     if (

@@ -29,7 +29,7 @@ export function activateModalFocus(
     ? document.activeElement
     : undefined
   const initialFocus = container.querySelector<HTMLElement>(
-    '[data-modal-initial-focus]',
+    '[data-modal-initial-focus]:not([disabled])',
   ) ?? getFocusableElements(container)[0] ?? container
 
   initialFocus.focus()

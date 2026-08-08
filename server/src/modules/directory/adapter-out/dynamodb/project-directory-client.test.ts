@@ -1251,7 +1251,17 @@ test('DynamoDB directory client archives teams and projects with conditional upd
     archivedAt: expect.any(String),
   })
   await expect(
-    client.archiveProject('user#demo@example.com', 'core-team', 'refero', undefined, 1),
+    client.archiveProject(
+      'user#demo@example.com',
+      'core-team',
+      'refero',
+      undefined,
+      1,
+      [
+        { teamId: 'core-team', workItemId: 'onboarding-friction', expectedRevision: 7 },
+        { teamId: 'core-team', workItemId: 'work-item-1', expectedRevision: 9 },
+      ],
+    ),
   ).resolves.toEqual({
     teamId: 'core-team',
     projectId: 'refero',
@@ -1294,7 +1304,31 @@ test('DynamoDB directory client archives teams and projects with conditional upd
         ConditionExpression:
           'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)',
       },
-    }, {}],
+    }, {}, {
+      ConditionCheck: {
+        TableName: 'mukuroji-team-issues-local',
+        Key: {
+          directoryTeamId: 'user#demo@example.com#team#core-team',
+          issueId: 'onboarding-friction',
+        },
+        ConditionExpression:
+          'attribute_exists(directoryTeamId) AND attribute_exists(issueId) AND ' +
+          '#revision = :expectedRevision',
+        ExpressionAttributeValues: { ':expectedRevision': 7 },
+      },
+    }, {
+      ConditionCheck: {
+        TableName: 'mukuroji-team-issues-local',
+        Key: {
+          directoryTeamId: 'user#demo@example.com#team#core-team',
+          issueId: 'work-item-1',
+        },
+        ConditionExpression:
+          'attribute_exists(directoryTeamId) AND attribute_exists(issueId) AND ' +
+          '#revision = :expectedRevision',
+        ExpressionAttributeValues: { ':expectedRevision': 9 },
+      },
+    }],
   })
 })
 
@@ -1418,6 +1452,134 @@ test('classifies a Planning revision race during directory archive', async () =>
     status: 409,
     code: 'PlanningRevisionConflict',
   })
+})
+
+test('classifies a dependency endpoint Project-move race during directory archive', async () => {
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      if ('KeyConditionExpression' in command.input) {
+        return {
+          Items: [
+            {
+              directoryId: 'user#demo@example.com',
+              entryKey: '000010#000000#TEAM#core-team',
+              entryType: 'team',
+              teamId: 'core-team',
+              teamSortOrder: 10,
+              nameJa: 'コアチーム',
+              nameEn: 'Core Team',
+              expanded: true,
+            },
+            {
+              directoryId: 'user#demo@example.com',
+              entryKey: '000010#000010#PROJECT#refero',
+              entryType: 'project',
+              teamId: 'core-team',
+              teamSortOrder: 10,
+              projectId: 'refero',
+              projectSortOrder: 10,
+              nameJa: 'Refero',
+              nameEn: 'Refero',
+              tone: 'blue',
+            },
+          ],
+        }
+      }
+      if (command.constructor.name === 'TransactWriteCommand') {
+        const error = new Error('canceled')
+        error.name = 'TransactionCanceledException'
+        Object.assign(error, {
+          CancellationReasons: [
+            { Code: 'None' },
+            { Code: 'None' },
+            { Code: 'ConditionalCheckFailed' },
+          ],
+        })
+        throw error
+      }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbProjectDirectoryClient(
+    'DirectoryTable',
+    documentClient,
+    undefined,
+    false,
+    undefined,
+    'WorkspaceAccessTable',
+    'PlanningTable',
+    'WorkItemsTable',
+  )
+
+  await expect(client.archiveProject(
+    'user#demo@example.com',
+    'core-team',
+    'refero',
+    undefined,
+    4,
+    [{ teamId: 'core-team', workItemId: 'onboarding-friction', expectedRevision: 7 }],
+  )).rejects.toMatchObject({
+    status: 409,
+    code: 'WorkItemRevisionConflict',
+  })
+})
+
+test('rejects a Project archive whose dependency guards exceed transaction capacity', async () => {
+  let transactWrites = 0
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      if ('KeyConditionExpression' in command.input) {
+        return {
+          Items: [
+            {
+              directoryId: 'user#demo@example.com',
+              entryKey: '000010#000000#TEAM#core-team',
+              entryType: 'team',
+              teamId: 'core-team',
+              teamSortOrder: 10,
+              nameJa: 'コアチーム',
+              nameEn: 'Core Team',
+              expanded: true,
+            },
+            {
+              directoryId: 'user#demo@example.com',
+              entryKey: '000010#000010#PROJECT#refero',
+              entryType: 'project',
+              teamId: 'core-team',
+              teamSortOrder: 10,
+              projectId: 'refero',
+              projectSortOrder: 10,
+              nameJa: 'Refero',
+              nameEn: 'Refero',
+              tone: 'blue',
+            },
+          ],
+        }
+      }
+      if (command.constructor.name === 'TransactWriteCommand') transactWrites += 1
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbProjectDirectoryClient('DirectoryTable', documentClient)
+  // DynamoDB's 100-item transaction limit leaves 98 slots after the two directory writes.
+  const guards = Array.from({ length: 98 }, (_, index) => ({
+    teamId: 'core-team',
+    workItemId: `work-item-${index}`,
+    expectedRevision: 1,
+  }))
+
+  await expect(client.archiveProject(
+    'user#demo@example.com',
+    'core-team',
+    'refero',
+    undefined,
+    4,
+    guards,
+  )).rejects.toMatchObject({
+    status: 413,
+    code: 'PlanningProjectScopeDependencyLimitExceeded',
+  })
+  expect(transactWrites).toBe(0)
 })
 
 test('DynamoDB directory client manages project member roles', async () => {

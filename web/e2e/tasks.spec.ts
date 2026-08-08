@@ -2,21 +2,28 @@ import { expect, test } from '@playwright/test'
 import type { Locator, Page } from '@playwright/test'
 import {
   DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY,
+  PLANNING_SCHEMA_VERSION,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
   type AnalyticsExportInput,
   type AnalyticsQueryInput,
   type ApprovalRequest,
+  type ConfirmWorkItemScheduleChangeInput,
   type CustomFieldValue,
   type FileAnnotation,
   type FileAttachment,
   type FileVersion,
   type ProjectQuickAccessPreferences,
+  type PlanningSnapshot,
   type PreviewWorkItemScheduleInput,
   type WorkItemConfiguration,
   type WorkItemRelation,
   type WorkItemRelationType,
   type WorkItemSchedule,
+  type WorkItemScheduleChangePreview,
+  type WorkItemScheduleDependency,
+  type WorkItemScheduleDependencyConflict,
+  type WorkItemScheduleImpact,
   type WorkItemScheduleOperation,
 } from '@mukuroji/contracts'
 import { readFile } from 'node:fs/promises'
@@ -26,15 +33,16 @@ import {
 } from '../src/analytics/fixtures'
 import type { TeamIssue, TeamIssueActivity, TeamIssueComment } from '../src/issues/api'
 import type { InboxNotification, NotificationPreferences } from '../src/notifications/api'
-import { projectDirectoryFixtures } from '../src/projects/fixtures'
+import { planningSnapshotFixture } from '../src/planning/fixtures'
 import type { ProjectDirectoryTeam, ProjectMember, ProjectMemberRole, ProjectUser } from '../src/projects/api'
+import { projectDirectoryFixtures } from '../src/projects/fixtures'
 import type { ProjectTask } from '../src/tasks/api'
-import type { WorkspaceAccess } from '../src/workspace/api'
 import { referoTaskFixtures } from '../src/tasks/fixtures'
 import {
   teamWorkItemConfigurationFixture,
   workspaceWorkItemConfigurationFixture,
 } from '../src/work-items/fixtures'
+import type { WorkspaceAccess } from '../src/workspace/api'
 
 const authSession = {
   accessToken: 'test-access-token',
@@ -166,6 +174,10 @@ type MockRequestCounts = {
    */
   schedulePreviews: number
   /**
+   * Work Item schedule confirm API の request 数です。
+   */
+  scheduleConfirms: number
+  /**
    * チーム Issue コメント API の request 数です。
    */
   issueComments: number
@@ -235,6 +247,19 @@ async function mockCurrentUser(
  */
 type MockAuthenticatedTaskPageOptions = {
   /**
+   * `/api/auth/me` が返す現在ユーザーの上書きです。
+   */
+  currentUser?: {
+    /** Cognito username と project member key です。 */
+    username: string
+    /** 画面に表示するユーザー名です。 */
+    name: string
+    /** Workspace 全体を管理できる system admin かどうかです。 */
+    isSystemAdmin: boolean
+    /** Workspace 内の content mutation を制御する role です。 */
+    workspaceRole: 'guest' | 'member' | 'admin' | 'owner'
+  }
+  /**
    * Team ID ごとに Sidebar の初期展開状態を上書きする値です。
    */
   teamExpandedById?: Partial<Record<string, boolean>>
@@ -242,6 +267,10 @@ type MockAuthenticatedTaskPageOptions = {
    * Team と Project ID ごとに directory 表示名を上書きする値です。
    */
   projectNamesByTeam?: Partial<Record<string, Partial<Record<string, string>>>>
+  /**
+   * Project ごとの role 判定に使う member 一覧の上書きです。
+   */
+  projectMembersByProject?: Partial<Record<string, readonly ProjectMember[]>>
   /**
    * チーム Issue API が初期状態として返す保存済み Issue 一覧です。
    */
@@ -254,6 +283,18 @@ type MockAuthenticatedTaskPageOptions = {
    * Schedule preview を permission error にする `teamId\0issueId` key の一覧です。
    */
   forbiddenSchedulePreviewIssueKeys?: readonly string[]
+  /**
+   * Planning snapshot と schedule preview に使う canonical dependency 一覧です。
+   */
+  workItemScheduleDependencies?: readonly WorkItemScheduleDependency[]
+  /**
+   * Planning snapshot と schedule preview に表示する blocking conflict 一覧です。
+   */
+  workItemScheduleDependencyConflicts?: readonly WorkItemScheduleDependencyConflict[]
+  /** Number of initial Planning snapshot requests that should fail before retry succeeds. */
+  planningFailureCount?: number
+  /** Number of Project Work Item GET requests to fail after schedule confirmation commits. */
+  postConfirmProjectIssueFailureCount?: number
   /**
    * Notification API が初期状態として返す recipient 通知です。
    */
@@ -312,6 +353,7 @@ async function mockAuthenticatedTaskPage(
     issueCreates: 0,
     issueUpdates: 0,
     schedulePreviews: 0,
+    scheduleConfirms: 0,
     issueComments: 0,
     taskCreates: 0,
     taskStatusUpdates: 0,
@@ -360,6 +402,24 @@ async function mockAuthenticatedTaskPage(
   const pendingRevisionConflictIssueKeys = new Set(options.revisionConflictIssueKeys ?? [])
   const forbiddenSchedulePreviewIssueKeys = new Set(
     options.forbiddenSchedulePreviewIssueKeys ?? [],
+  )
+  const workItemScheduleDependencies = structuredClone([
+    ...(options.workItemScheduleDependencies ?? []),
+  ])
+  const workItemScheduleDependencyConflicts = structuredClone([
+    ...(options.workItemScheduleDependencyConflicts ?? []),
+  ])
+  const currentUser = options.currentUser ?? {
+    username: 'demo@example.com',
+    name: 'Demo User',
+    isSystemAdmin: true,
+    workspaceRole: 'owner' as const,
+  }
+  const planningRevision = 1
+  let remainingPlanningFailures = Math.max(0, options.planningFailureCount ?? 0)
+  let remainingPostConfirmProjectIssueFailures = Math.max(
+    0,
+    options.postConfirmProjectIssueFailureCount ?? 0,
   )
   const failedWorkItemConfigurationTeamIds = new Set(
     options.failedWorkItemConfigurationTeamIds ?? [],
@@ -439,6 +499,11 @@ async function mockAuthenticatedTaskPage(
         workspaceStatus: 'active',
       },
     ],
+  }
+  for (const [projectId, members] of Object.entries(options.projectMembersByProject ?? {})) {
+    if (members) {
+      projectMembersByProject[projectId] = structuredClone([...members])
+    }
   }
   const projectUsers: ProjectUser[] = [
     {
@@ -559,16 +624,16 @@ async function mockAuthenticatedTaskPage(
   await page.route('**/api/auth/me', async (route) => {
     await route.fulfill({
       json: {
-        username: 'demo@example.com',
+        username: currentUser.username,
         attributes: {
           'custom:workspace_id': 'workspace-demo',
-          email: 'demo@example.com',
-          name: 'Demo User',
+          email: currentUser.username,
+          name: currentUser.name,
         },
-        groups: ['mukuroji-system-admins'],
-        isSystemAdmin: true,
+        groups: currentUser.isSystemAdmin ? ['mukuroji-system-admins'] : [],
+        isSystemAdmin: currentUser.isSystemAdmin,
         workspaceMemberStatus: 'active',
-        workspaceRole: 'owner',
+        workspaceRole: currentUser.workspaceRole,
       },
     })
   })
@@ -822,6 +887,18 @@ async function mockAuthenticatedTaskPage(
 
     expect(route.request().headers().authorization).toBe('Bearer test-access-token')
 
+    if (requestCounts.scheduleConfirms > 0 && remainingPostConfirmProjectIssueFailures > 0) {
+      remainingPostConfirmProjectIssueFailures -= 1
+      await route.fulfill({
+        json: {
+          code: 'ProjectIssuesUnavailable',
+          message: 'issues.error.loading',
+        },
+        status: 503,
+      })
+      return
+    }
+
     const projectIssues = taskResponsesByProject[projectId] ?? []
     const assignedIssues = Object.values(teamIssuesByTeam)
       .flat()
@@ -845,6 +922,33 @@ async function mockAuthenticatedTaskPage(
       json: {
         workItems: [...projectWorkItems, ...Object.values(teamIssuesByTeam).flat()],
       },
+    })
+  })
+
+  await page.route('**/api/planning', async (route) => {
+    expect(route.request().headers().authorization).toBe('Bearer test-access-token')
+    expect(route.request().method()).toBe('GET')
+
+    if (remainingPlanningFailures > 0) {
+      remainingPlanningFailures -= 1
+      await route.fulfill({
+        json: {
+          code: 'PlanningUnavailable',
+          message: 'Planning dependency data is temporarily unavailable.',
+        },
+        status: 503,
+      })
+      return
+    }
+
+    await route.fulfill({
+      json: createMockPlanningSnapshot(
+        taskResponsesByProject,
+        teamIssuesByTeam,
+        workItemScheduleDependencies,
+        workItemScheduleDependencyConflicts,
+        planningRevision,
+      ),
     })
   })
 
@@ -1105,19 +1209,135 @@ async function mockAuthenticatedTaskPage(
       return
     }
 
-    const before = structuredClone(issue.schedule)
+    const preview = createMockScheduleChangePreview(
+      taskResponsesByProject,
+      teamIssuesByTeam,
+      workItemScheduleDependencies,
+      workItemScheduleDependencyConflicts,
+      relationGraphRevisionByTeam[teamId] ?? 0,
+      planningRevision,
+      teamId,
+      issueId,
+      body.operation,
+    )
+
+    await route.fulfill({
+      json: preview,
+    })
+  })
+
+  await page.route(/.*\/api\/teams\/[^/]+\/issues\/[^/]+\/schedule\/confirm$/, async (route) => {
+    requestCounts.scheduleConfirms += 1
+    expect(route.request().headers().authorization).toBe('Bearer test-access-token')
+    expect(route.request().method()).toBe('POST')
+
+    const pathSegments = new URL(route.request().url()).pathname.split('/')
+    const teamId = decodeURIComponent(pathSegments[3] ?? '')
+    const issueId = decodeURIComponent(pathSegments[5] ?? '')
+    const issue = findStoredWorkItem(taskResponsesByProject, teamIssuesByTeam, teamId, issueId)
+    const body: ConfirmWorkItemScheduleChangeInput = route.request().postDataJSON()
+
+    if (!issue) {
+      await route.fulfill({ status: 404, json: { message: 'Issue was not found.' } })
+      return
+    }
+    if (body.expectedRevision !== issue.revision) {
+      await route.fulfill({
+        status: 409,
+        json: {
+          code: 'WorkItemRevisionConflict',
+          message: 'Work Item changed after it was loaded.',
+        },
+      })
+      return
+    }
+    const conflictIssueKey = createIssueCollaborationKey(teamId, issueId)
+    if (pendingRevisionConflictIssueKeys.delete(conflictIssueKey)) {
+      replaceStoredWorkItem(taskResponsesByProject, teamIssuesByTeam, teamId, {
+        ...issue,
+        description: '別のメンバーが更新した最新内容です。',
+        revision: issue.revision + 1,
+        statusCategory: 'started',
+        workflowStatusId: 'review',
+        updatedAt: '2026-06-08T02:30:00.000Z',
+      })
+      await route.fulfill({
+        status: 409,
+        json: {
+          code: 'WorkItemRevisionConflict',
+          message: 'Work Item changed after it was loaded.',
+        },
+      })
+      return
+    }
+    if (
+      body.expectedPlanningRevision !== planningRevision ||
+      body.expectedRelationGraphRevision !== (relationGraphRevisionByTeam[teamId] ?? 0)
+    ) {
+      await route.fulfill({
+        status: 409,
+        json: {
+          code: 'PlanningRevisionConflict',
+          message: 'Planning changed after the preview was loaded.',
+        },
+      })
+      return
+    }
+
+    const preview = createMockScheduleChangePreview(
+      taskResponsesByProject,
+      teamIssuesByTeam,
+      workItemScheduleDependencies,
+      workItemScheduleDependencyConflicts,
+      relationGraphRevisionByTeam[teamId] ?? 0,
+      planningRevision,
+      teamId,
+      issueId,
+      body.operation,
+    )
+    expect(body.confirmed).toBe(true)
+    expect(body.expectedEvaluatedRevisions).toEqual(preview.evaluatedRevisions)
+    expect(body.expectedImpacts).toEqual(preview.impacts)
+
+    const updatedIssues = preview.impacts.flatMap((impact) => {
+      const currentIssue = findStoredWorkItem(
+        taskResponsesByProject,
+        teamIssuesByTeam,
+        impact.teamId,
+        impact.workItemId,
+      )
+
+      if (!currentIssue) {
+        return []
+      }
+      const updatedIssue = {
+        ...currentIssue,
+        dueDate: projectMockScheduleDueDate(impact.after),
+        revision: currentIssue.revision + 1,
+        schedule: structuredClone(impact.after),
+        updatedAt: '2026-06-08T02:00:00.000Z',
+      } satisfies TeamIssue
+      replaceStoredWorkItem(
+        taskResponsesByProject,
+        teamIssuesByTeam,
+        impact.teamId,
+        updatedIssue,
+      )
+      return [updatedIssue]
+    })
+
     await route.fulfill({
       json: {
-        expectedRevision: body.expectedRevision,
-        impacts: [{
-          after: applyMockWorkItemScheduleOperation(before, body.operation),
-          before,
-          expectedRevision: issue.revision,
-          kind: 'direct',
-          teamId,
-          workItemId: issueId,
-        }],
-        warnings: [],
+        workItems: updatedIssues.map((updatedIssue) => ({
+          id: updatedIssue.id,
+          teamId: updatedIssue.teamId,
+          revision: updatedIssue.revision,
+          schedule: updatedIssue.schedule,
+          dueDate: updatedIssue.dueDate,
+          ...(updatedIssue.assignedProjectId
+            ? { assignedProjectId: updatedIssue.assignedProjectId }
+            : {}),
+        })),
       },
     })
   })
@@ -2019,6 +2239,401 @@ function findTeamIssue(
 }
 
 /**
+ * Finds one canonical Work Item across project and unassigned Team stores.
+ *
+ * @param taskResponsesByProject - Project-scoped canonical Work Item stores.
+ * @param teamIssuesByTeam - Team-scoped canonical Work Item stores.
+ * @param teamId - Owning Team identifier.
+ * @param issueId - Team-local Work Item identifier.
+ * @returns Matching canonical Work Item when the mock contains one.
+ */
+function findStoredWorkItem(
+  taskResponsesByProject: Record<string, ProjectTask[]>,
+  teamIssuesByTeam: Record<string, TeamIssue[]>,
+  teamId: string,
+  issueId: string,
+): TeamIssue | ProjectTask | undefined {
+  return findTeamIssue(teamIssuesByTeam, teamId, issueId)
+    ?? Object.values(taskResponsesByProject)
+      .flat()
+      .find((candidate) => candidate.teamId === teamId && candidate.id === issueId)
+}
+
+/**
+ * Lists each canonical Work Item once across the E2E mock's backing stores.
+ *
+ * @param taskResponsesByProject - Project-scoped canonical Work Item stores.
+ * @param teamIssuesByTeam - Team-scoped canonical Work Item stores.
+ * @returns Stable insertion-ordered canonical Work Items keyed by Team and ID.
+ */
+function listStoredWorkItems(
+  taskResponsesByProject: Record<string, ProjectTask[]>,
+  teamIssuesByTeam: Record<string, TeamIssue[]>,
+): Array<TeamIssue | ProjectTask> {
+  const workItemsByKey = new Map<string, TeamIssue | ProjectTask>()
+
+  for (const workItem of [
+    ...Object.values(taskResponsesByProject).flat(),
+    ...Object.values(teamIssuesByTeam).flat(),
+  ]) {
+    workItemsByKey.set(createIssueCollaborationKey(workItem.teamId, workItem.id), workItem)
+  }
+  return [...workItemsByKey.values()]
+}
+
+/**
+ * Creates the exact Planning snapshot consumed by task and Team Issue dependency surfaces.
+ *
+ * @param taskResponsesByProject - Project-scoped canonical Work Item stores.
+ * @param teamIssuesByTeam - Team-scoped canonical Work Item stores.
+ * @param dependencies - Canonical dependency graph configured for the test.
+ * @param conflicts - Authoritative dependency conflicts configured for the test.
+ * @param revision - Planning graph revision exposed to preview/confirm calls.
+ * @returns Contract-valid Planning snapshot projected from current mock state.
+ */
+function createMockPlanningSnapshot(
+  taskResponsesByProject: Record<string, ProjectTask[]>,
+  teamIssuesByTeam: Record<string, TeamIssue[]>,
+  dependencies: readonly WorkItemScheduleDependency[],
+  conflicts: readonly WorkItemScheduleDependencyConflict[],
+  revision: number,
+): PlanningSnapshot {
+  const storedWorkItems = listStoredWorkItems(taskResponsesByProject, teamIssuesByTeam)
+  const workItemByKey = new Map(storedWorkItems.map((workItem) => [
+    createIssueCollaborationKey(workItem.teamId, workItem.id),
+    workItem,
+  ]))
+  const criticalWorkItems = dependencies.flatMap((dependency) => [
+    dependency.predecessor,
+    dependency.successor,
+  ]).filter((endpoint, index, endpoints) =>
+    endpoints.findIndex((candidate) =>
+      candidate.teamId === endpoint.teamId && candidate.workItemId === endpoint.workItemId
+    ) === index
+  )
+  const affectedProjectIds = criticalWorkItems.flatMap((endpoint) => {
+    const workItem = workItemByKey.get(
+      createIssueCollaborationKey(endpoint.teamId, endpoint.workItemId),
+    )
+    return workItem?.assignedProjectId ? [workItem.assignedProjectId] : []
+  }).filter((projectId, index, projectIds) => projectIds.indexOf(projectId) === index)
+  const affectedProjects = criticalWorkItems.flatMap((endpoint) => {
+    const workItem = workItemByKey.get(
+      createIssueCollaborationKey(endpoint.teamId, endpoint.workItemId),
+    )
+    return workItem?.assignedProjectId
+      ? [{ projectId: workItem.assignedProjectId, teamId: workItem.teamId }]
+      : []
+  }).filter((project, index, projects) => projects.findIndex((candidate) =>
+    candidate.teamId === project.teamId && candidate.projectId === project.projectId
+  ) === index)
+
+  return {
+    schemaVersion: PLANNING_SCHEMA_VERSION,
+    revision,
+    entities: [],
+    dependencies: [],
+    workItemDependencies: structuredClone([...dependencies]),
+    workItemLinks: [],
+    workItems: storedWorkItems.map((workItem) => ({
+      dueDate: workItem.dueDate,
+      id: workItem.id,
+      projectId: workItem.assignedProjectId,
+      revision: workItem.revision,
+      schedule: structuredClone(workItem.schedule),
+      statusCategory: workItem.statusCategory,
+      teamId: workItem.teamId,
+      title: workItem.title,
+    })),
+    criticalPath: {
+      entityIds: [],
+      slackByEntityId: {},
+      totalDurationDays: 0,
+    },
+    workItemDependencySummary: {
+      affectedMilestoneIds: [],
+      affectedProjectIds,
+      affectedProjects,
+      conflicts: structuredClone([...conflicts]),
+      criticalPath: {
+        slackByWorkItemKey: Object.fromEntries(criticalWorkItems.map((endpoint) => [
+          `${endpoint.teamId}/${endpoint.workItemId}`,
+          0,
+        ])),
+        totalDurationDays: 0,
+        workItems: structuredClone(criticalWorkItems),
+      },
+      unresolvedBlockerCount: dependencies.filter((dependency) => {
+        const predecessor = workItemByKey.get(createIssueCollaborationKey(
+          dependency.predecessor.teamId,
+          dependency.predecessor.workItemId,
+        ))
+        return predecessor?.statusCategory !== 'completed'
+      }).length,
+    },
+    updatedAt: '2026-07-12T12:00:00.000Z',
+  }
+}
+
+/**
+ * Creates one revision-bound direct plus dependency-cascade schedule preview.
+ *
+ * @param taskResponsesByProject - Project-scoped canonical Work Item stores.
+ * @param teamIssuesByTeam - Team-scoped canonical Work Item stores.
+ * @param dependencies - Canonical dependency graph used for propagation.
+ * @param conflicts - Authoritative conflicts that block confirmation.
+ * @param relationGraphRevision - Team relation graph revision observed by the preview.
+ * @param planningRevision - Planning graph revision observed by the preview.
+ * @param teamId - Team that owns the direct Work Item.
+ * @param issueId - Direct Work Item identifier.
+ * @param operation - Schedule operation being previewed.
+ * @returns Contract-valid preview used by both preview and confirm E2E routes.
+ */
+function createMockScheduleChangePreview(
+  taskResponsesByProject: Record<string, ProjectTask[]>,
+  teamIssuesByTeam: Record<string, TeamIssue[]>,
+  dependencies: readonly WorkItemScheduleDependency[],
+  conflicts: readonly WorkItemScheduleDependencyConflict[],
+  relationGraphRevision: number,
+  planningRevision: number,
+  teamId: string,
+  issueId: string,
+  operation: WorkItemScheduleOperation,
+): WorkItemScheduleChangePreview {
+  const directWorkItem = findStoredWorkItem(
+    taskResponsesByProject,
+    teamIssuesByTeam,
+    teamId,
+    issueId,
+  )
+  if (!directWorkItem) {
+    throw new Error(`Missing mocked Work Item: ${teamId}/${issueId}`)
+  }
+
+  const directAfter = applyMockWorkItemScheduleOperation(directWorkItem.schedule, operation)
+  const impacts: WorkItemScheduleImpact[] = [{
+    after: directAfter,
+    before: structuredClone(directWorkItem.schedule),
+    dateDeltaDays: calculateMockScheduleDelta(directWorkItem.schedule, directAfter),
+    expectedRevision: directWorkItem.revision,
+    kind: 'direct',
+    teamId,
+    workItemId: issueId,
+  }]
+  const pendingImpacts = [...impacts]
+  const impactedKeys = new Set([createIssueCollaborationKey(teamId, issueId)])
+
+  while (pendingImpacts.length > 0) {
+    const predecessorImpact = pendingImpacts.shift()
+    if (!predecessorImpact) {
+      continue
+    }
+    const outgoingDependencies = dependencies.filter((dependency) =>
+      dependency.predecessor.teamId === predecessorImpact.teamId &&
+      dependency.predecessor.workItemId === predecessorImpact.workItemId
+    )
+
+    for (const dependency of outgoingDependencies) {
+      const successorKey = createIssueCollaborationKey(
+        dependency.successor.teamId,
+        dependency.successor.workItemId,
+      )
+      if (impactedKeys.has(successorKey)) {
+        continue
+      }
+      const successor = findStoredWorkItem(
+        taskResponsesByProject,
+        teamIssuesByTeam,
+        dependency.successor.teamId,
+        dependency.successor.workItemId,
+      )
+      if (!successor) {
+        continue
+      }
+      const successorAfter = applyMockDependencyCascade(
+        predecessorImpact.after,
+        successor.schedule,
+        dependency,
+      )
+      if (!successorAfter || schedulesAreEqual(successor.schedule, successorAfter)) {
+        continue
+      }
+      const successorImpact = {
+        after: successorAfter,
+        before: structuredClone(successor.schedule),
+        dateDeltaDays: calculateMockScheduleDelta(successor.schedule, successorAfter),
+        dependencyId: dependency.id,
+        expectedRevision: successor.revision,
+        kind: 'dependency' as const,
+        teamId: successor.teamId,
+        workItemId: successor.id,
+      }
+      impacts.push(successorImpact)
+      pendingImpacts.push(successorImpact)
+      impactedKeys.add(successorKey)
+    }
+  }
+
+  const affectedProjects = impacts.flatMap((impact) => {
+    const workItem = findStoredWorkItem(
+      taskResponsesByProject,
+      teamIssuesByTeam,
+      impact.teamId,
+      impact.workItemId,
+    )
+    return workItem?.assignedProjectId
+      ? [{ projectId: workItem.assignedProjectId, teamId: impact.teamId }]
+      : []
+  }).filter((project, index, projects) => projects.findIndex((candidate) =>
+    candidate.projectId === project.projectId && candidate.teamId === project.teamId
+  ) === index)
+  const affectedProjectIds = affectedProjects.map((project) => project.projectId)
+    .filter((projectId, index, projectIds) => projectIds.indexOf(projectId) === index)
+
+  return {
+    affectedMilestoneIds: [],
+    affectedProjectIds,
+    affectedProjects,
+    conflicts: structuredClone([...conflicts]),
+    evaluatedRevisions: impacts.map((impact) => ({
+      expectedRevision: impact.expectedRevision,
+      teamId: impact.teamId,
+      workItemId: impact.workItemId,
+    })),
+    expectedRevision: directWorkItem.revision,
+    impacts,
+    planningRevision,
+    relationGraphRevision,
+    requiresConfirmation: true,
+    warnings: [],
+  }
+}
+
+/**
+ * Applies one dependency anchor rule to a successor schedule for deterministic E2E propagation.
+ *
+ * @param predecessorSchedule - Proposed predecessor schedule.
+ * @param successorSchedule - Current successor schedule.
+ * @param dependency - Dependency whose type and lead/lag select the anchors.
+ * @returns Shifted successor schedule, or no value when either anchor is unscheduled.
+ */
+function applyMockDependencyCascade(
+  predecessorSchedule: WorkItemSchedule,
+  successorSchedule: WorkItemSchedule,
+  dependency: WorkItemScheduleDependency,
+): WorkItemSchedule | undefined {
+  const predecessorAnchor = dependency.type === 'start-to-start' ||
+      dependency.type === 'start-to-finish'
+    ? 'start'
+    : 'finish'
+  const successorAnchor = dependency.type === 'finish-to-finish' ||
+      dependency.type === 'start-to-finish'
+    ? 'finish'
+    : 'start'
+  const predecessorDate = resolveMockScheduleAnchor(predecessorSchedule, predecessorAnchor)
+  const successorDate = resolveMockScheduleAnchor(successorSchedule, successorAnchor)
+
+  if (!predecessorDate || !successorDate) {
+    return undefined
+  }
+  const dependencyDate = addMockScheduleDays(predecessorDate, dependency.lagDays)
+  const targetDate = applyMockScheduleConstraint(
+    dependencyDate,
+    dependency.constraint?.anchor === successorAnchor ? dependency.constraint : undefined,
+  )
+  const offsetDays = differenceMockScheduleDays(successorDate, targetDate)
+
+  switch (successorSchedule.mode) {
+    case 'unscheduled':
+      return undefined
+    case 'due-date':
+      return { ...structuredClone(successorSchedule), dueDate: targetDate }
+    case 'milestone':
+      return {
+        ...structuredClone(successorSchedule),
+        endDate: targetDate,
+        startDate: targetDate,
+      }
+    case 'date-range':
+      return {
+        ...structuredClone(successorSchedule),
+        endDate: addMockScheduleDays(successorSchedule.endDate, offsetDays),
+        startDate: addMockScheduleDays(successorSchedule.startDate, offsetDays),
+      }
+  }
+}
+
+/**
+ * Applies a matching explicit constraint to one dependency-derived date.
+ *
+ * @param dependencyDate - Date selected by dependency anchors and lead/lag.
+ * @param constraint - Optional constraint for the same successor anchor.
+ * @returns Date after enforcing the constraint kind.
+ */
+function applyMockScheduleConstraint(
+  dependencyDate: string,
+  constraint: WorkItemScheduleDependency['constraint'],
+): string {
+  if (!constraint || constraint.kind === 'on') {
+    return constraint?.date ?? dependencyDate
+  }
+  if (constraint.kind === 'not-before') {
+    return dependencyDate.localeCompare(constraint.date) < 0 ? constraint.date : dependencyDate
+  }
+  return dependencyDate.localeCompare(constraint.date) > 0 ? constraint.date : dependencyDate
+}
+
+/**
+ * Resolves a scheduled Work Item's start or finish anchor.
+ *
+ * @param schedule - Canonical schedule to inspect.
+ * @param anchor - Boundary required by a dependency type.
+ * @returns ISO date-only boundary, or no value for an unscheduled Work Item.
+ */
+function resolveMockScheduleAnchor(
+  schedule: WorkItemSchedule,
+  anchor: 'start' | 'finish',
+): string | undefined {
+  switch (schedule.mode) {
+    case 'unscheduled':
+      return undefined
+    case 'due-date':
+      return schedule.dueDate
+    case 'milestone':
+      return schedule.startDate
+    case 'date-range':
+      return anchor === 'start' ? schedule.startDate : schedule.endDate
+  }
+}
+
+/**
+ * Calculates primary-date movement between two schedules for preview metadata.
+ *
+ * @param before - Schedule before the operation.
+ * @param after - Schedule after the operation.
+ * @returns Signed calendar-day delta, or zero when either schedule is unscheduled.
+ */
+function calculateMockScheduleDelta(
+  before: WorkItemSchedule,
+  after: WorkItemSchedule,
+): number {
+  const beforeDate = resolveMockScheduleAnchor(before, 'finish')
+  const afterDate = resolveMockScheduleAnchor(after, 'finish')
+  return beforeDate && afterDate ? differenceMockScheduleDays(beforeDate, afterDate) : 0
+}
+
+/**
+ * Compares two detached schedule values in deterministic mock code.
+ *
+ * @param left - First canonical schedule.
+ * @param right - Second canonical schedule.
+ * @returns True when both serialized schedules are structurally equal.
+ */
+function schedulesAreEqual(left: WorkItemSchedule, right: WorkItemSchedule): boolean {
+  return JSON.stringify(left) === JSON.stringify(right)
+}
+
+/**
  * E2E mock の Team Issue を同じ team/id の最新 revision へ置き換えます。
  *
  * @param teamIssuesByTeam - team ごとの保存済み Issue mock です。
@@ -2164,6 +2779,8 @@ async function dragScheduleCard(page: Page, source: Locator, target: Locator): P
   }
 }
 
+const ganttDropBottomOffset = 12
+
 /**
  * Uses Playwright's real pointer drag sequence to drop a Gantt control on one visible date.
  *
@@ -2193,7 +2810,7 @@ async function dragGanttControlToDate(
   const sourceX = sourceBounds.x + sourceBounds.width / 2
   const sourceY = sourceBounds.y + sourceBounds.height / 2
   const targetX = columnBounds.x + columnBounds.width / 2
-  const targetY = timelineBounds.y + timelineBounds.height / 2
+  const targetY = timelineBounds.y + timelineBounds.height - ganttDropBottomOffset
   const sourceReceivesPointer = await source.evaluate((element, point) => {
     const hitTarget = document.elementFromPoint(point.x, point.y)
     return element === hitTarget || (hitTarget !== null && element.contains(hitTarget))
@@ -2202,16 +2819,35 @@ async function dragGanttControlToDate(
     throw new Error(`Gantt drag source is covered: ${date}`)
   }
 
-  await source.dragTo(timeline, {
-    sourcePosition: {
-      x: sourceBounds.width / 2,
-      y: sourceBounds.height / 2,
-    },
-    targetPosition: {
-      x: targetX - timelineBounds.x,
-      y: targetY - timelineBounds.y,
-    },
-  })
+  const dataTransfer = await page.evaluateHandle(() => new DataTransfer())
+
+  try {
+    await source.dispatchEvent('dragstart', {
+      clientX: sourceX,
+      clientY: sourceY,
+      dataTransfer,
+    })
+    await page.evaluate(() => new Promise<void>((resolve) => {
+      requestAnimationFrame(() => resolve())
+    }))
+    await timeline.dispatchEvent('dragover', {
+      clientX: targetX,
+      clientY: targetY,
+      dataTransfer,
+    })
+    await timeline.dispatchEvent('drop', {
+      clientX: targetX,
+      clientY: targetY,
+      dataTransfer,
+    })
+    await source.dispatchEvent('dragend', {
+      clientX: targetX,
+      clientY: targetY,
+      dataTransfer,
+    })
+  } finally {
+    await dataTransfer.dispose()
+  }
 }
 
 /**
@@ -2459,6 +3095,340 @@ test.describe('authenticated task page', () => {
     await expect(page.getByRole('tabpanel')).toContainText('ボードビュー')
   })
 
+  test('Issue #190: Planning 障害でも Task を表示し dependency だけ再試行する', async ({ page }) => {
+    const dependency = {
+      id: 'dependency-planning-retry',
+      predecessor: { teamId: 'core-team', workItemId: 'wireframe' },
+      successor: { teamId: 'core-team', workItemId: 'brand-guideline' },
+      type: 'finish-to-start',
+      lagDays: 1,
+      createdAt: '2026-06-01T00:00:00.000Z',
+      updatedAt: '2026-06-01T00:00:00.000Z',
+    } satisfies WorkItemScheduleDependency
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      planningFailureCount: 1,
+      workItemScheduleDependencies: [dependency],
+    })
+    await page.goto('/projects/refero/tasks')
+
+    await expect(page.getByTestId('task-row-wireframe')).toBeVisible()
+    const planningError = page.getByTestId('project-planning-error')
+    await expect(planningError).toContainText('計画を取得できませんでした。')
+    await planningError.getByRole('button', { name: '再試行' }).click()
+
+    await expect(planningError).toHaveCount(0)
+    await expect(page.getByTestId('task-row-wireframe')).toContainText('1 件をブロック')
+  })
+
+  test('Issue #190: Planning の Project 導線は Team-qualified scope を直接開く', async ({ page }) => {
+    const snapshot: PlanningSnapshot = {
+      ...structuredClone(planningSnapshotFixture),
+      workItemDependencySummary: {
+        ...structuredClone(planningSnapshotFixture.workItemDependencySummary),
+        affectedProjectIds: ['refero', 'shared-launch'],
+        affectedProjects: [
+          { projectId: 'refero', teamId: 'core-team' },
+          { projectId: 'shared-launch', teamId: 'design-team' },
+        ],
+      },
+    }
+    await page.unroute('**/api/planning')
+    await page.route('**/api/planning', async (route) => {
+      await route.fulfill({ json: snapshot })
+    })
+    await page.goto('/planning/timeline')
+
+    const dependencyPanel = page.getByTestId('planning-work-item-dependencies')
+    await dependencyPanel.getByRole('button', {
+      name: '影響する Project 2 件: design-team / shared-launch',
+    }).click()
+    await expect(page).toHaveURL('/projects/shared-launch/issues?teamId=design-team')
+
+    await page.goto('/planning/timeline')
+    await dependencyPanel.getByRole('button', {
+      name: '影響する Project 2 件: core-team / refero',
+    }).click()
+    await expect(page).toHaveURL('/projects/refero/issues?teamId=core-team')
+  })
+
+  test('Issue #190: filter で隠れた同一 Project endpoint を外部扱いしない', async ({ page }) => {
+    const dependency = {
+      id: 'dependency-filtered-local',
+      predecessor: { teamId: 'core-team', workItemId: 'wireframe' },
+      successor: { teamId: 'core-team', workItemId: 'brand-guideline' },
+      type: 'finish-to-start',
+      lagDays: 1,
+      createdAt: '2026-06-01T00:00:00.000Z',
+      updatedAt: '2026-06-01T00:00:00.000Z',
+    } satisfies WorkItemScheduleDependency
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      workItemScheduleDependencies: [dependency],
+    })
+    await page.goto('/projects/refero/tasks')
+
+    await page.getByRole('searchbox', { name: '検索...' }).fill('ワイヤーフレーム')
+    await page.getByRole('tab', { name: '期限順', exact: true }).click()
+    const dependencySummary = page.getByTestId(`task-gantt-dependency-${dependency.id}`)
+
+    await expect(dependencySummary).toBeVisible()
+    await expect(dependencySummary).not.toContainText('外部 Project')
+    await expect(page.getByTestId('task-gantt-external-lane')).toHaveCount(0)
+    await expect(dependencySummary).toContainText('先行 Work Item')
+    await expect(dependencySummary).toContainText('後続 Work Item')
+  })
+
+  test('Issue #190: 依存先への日程波及を preview 後の confirm で一括保存する', async ({ page }) => {
+    const dependency = {
+      id: 'dependency-wireframe-brand',
+      predecessor: { teamId: 'core-team', workItemId: 'wireframe' },
+      successor: { teamId: 'core-team', workItemId: 'brand-guideline' },
+      type: 'finish-to-start',
+      lagDays: 2,
+      createdAt: '2026-06-01T00:00:00.000Z',
+      updatedAt: '2026-06-01T00:00:00.000Z',
+    } satisfies WorkItemScheduleDependency
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      workItemScheduleDependencies: [dependency],
+    })
+    await page.goto('/projects/refero/tasks')
+    const requestCounts = getMockRequestCounts(page)
+
+    await page.getByRole('tab', { name: '期限順', exact: true }).click()
+    const dependencySummary = page.getByTestId(`task-gantt-dependency-${dependency.id}`)
+
+    await expect(dependencySummary).toContainText('終了から開始')
+    await expect(dependencySummary).toContainText('+2日')
+    await expect(page.getByTestId(`task-gantt-connector-${dependency.id}`)).toBeVisible()
+
+    const wireframeBar = page.getByTestId('task-gantt-bar-wireframe')
+    await wireframeBar.focus()
+    await page.keyboard.press('ArrowRight')
+
+    const preview = page.getByRole('dialog', { name: '一括操作の事前確認' })
+
+    await expect(preview).toContainText('wireframe')
+    await expect(preview).toContainText('brand-guideline')
+    await expect(preview).toContainText('依存関係')
+    await expect(preview).toContainText(`依存関係 ${dependency.id} による変更`)
+    await expect(preview).toContainText('2026-06-06')
+    expect(requestCounts.issueUpdates).toBe(0)
+    expect(requestCounts.scheduleConfirms).toBe(0)
+
+    await preview.getByRole('button', { name: '適用', exact: true }).click()
+
+    const wireframeRow = page.locator('article').filter({
+      has: page.getByTestId('task-gantt-bar-wireframe'),
+    })
+    const brandRow = page.locator('article').filter({
+      has: page.getByTestId('task-gantt-bar-brand-guideline'),
+    })
+    await expect(wireframeRow.locator('input[id^="gantt-start-"]')).toHaveValue('2026-06-02')
+    await expect(brandRow.locator('input[id^="gantt-date-"]')).toHaveValue('2026-06-06')
+    await expect.poll(() => requestCounts.scheduleConfirms).toBe(1)
+    expect(requestCounts.issueUpdates).toBe(0)
+
+  })
+
+  test('Issue #190: confirm 後の GET 失敗でも全日程を成功状態へ反映する', async ({ page }) => {
+    const dependency = {
+      id: 'dependency-wireframe-brand-refresh-failure',
+      predecessor: { teamId: 'core-team', workItemId: 'wireframe' },
+      successor: { teamId: 'core-team', workItemId: 'brand-guideline' },
+      type: 'finish-to-start',
+      lagDays: 2,
+      createdAt: '2026-06-01T00:00:00.000Z',
+      updatedAt: '2026-06-01T00:00:00.000Z',
+    } satisfies WorkItemScheduleDependency
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      postConfirmProjectIssueFailureCount: 1,
+      workItemScheduleDependencies: [dependency],
+    })
+    await page.goto('/projects/refero/tasks')
+    const requestCounts = getMockRequestCounts(page)
+
+    await page.getByRole('tab', { name: '期限順', exact: true }).click()
+    const wireframeBar = page.getByTestId('task-gantt-bar-wireframe')
+
+    await wireframeBar.focus()
+    await page.keyboard.press('ArrowRight')
+
+    const preview = page.getByRole('dialog', { name: '一括操作の事前確認' })
+
+    await preview.getByRole('button', { name: '適用', exact: true }).click()
+    await expect.poll(() => requestCounts.scheduleConfirms).toBe(1)
+    await expect.poll(() => requestCounts.projectTasks.refero ?? 0).toBe(3)
+
+    const wireframeRow = page.locator('article').filter({
+      has: page.getByTestId('task-gantt-bar-wireframe'),
+    })
+    const brandRow = page.locator('article').filter({
+      has: page.getByTestId('task-gantt-bar-brand-guideline'),
+    })
+
+    await expect(page.getByTestId('task-action-feedback')).toContainText('変更を保存しました。')
+    await expect(wireframeRow.locator('input[id^="gantt-start-"]')).toHaveValue('2026-06-02')
+    await expect(wireframeRow.locator('input[id^="gantt-end-"]')).toHaveValue('2026-06-04')
+    await expect(brandRow.locator('input[id^="gantt-date-"]')).toHaveValue('2026-06-06')
+    await expect(page.getByTestId('tasks-error')).toHaveCount(0)
+    expect(requestCounts.scheduleConfirms).toBe(1)
+  })
+
+  test('Issue #190: dependency conflict preview は Gantt と Calendar で Cancel に focus する', async ({ page }) => {
+    const dependency = {
+      id: 'dependency-wireframe-brand-conflict',
+      predecessor: { teamId: 'core-team', workItemId: 'wireframe' },
+      successor: { teamId: 'core-team', workItemId: 'brand-guideline' },
+      type: 'finish-to-start',
+      lagDays: 2,
+      createdAt: '2026-06-01T00:00:00.000Z',
+      updatedAt: '2026-06-01T00:00:00.000Z',
+    } satisfies WorkItemScheduleDependency
+    const conflict = {
+      code: 'dependency-violation',
+      dependencyId: dependency.id,
+      workItem: dependency.successor,
+      requiredDate: '2026-06-06',
+      actualDate: '2026-06-05',
+    } satisfies WorkItemScheduleDependencyConflict
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      workItemScheduleDependencies: [dependency],
+      workItemScheduleDependencyConflicts: [conflict],
+    })
+    await page.goto('/projects/refero/tasks')
+    const requestCounts = getMockRequestCounts(page)
+
+    await page.getByRole('tab', { name: '期限順', exact: true }).click()
+    const wireframeBar = page.getByTestId('task-gantt-bar-wireframe')
+    await wireframeBar.focus()
+    await page.keyboard.press('ArrowRight')
+
+    const preview = page.getByRole('dialog', { name: '一括操作の事前確認' })
+    await expect(preview.getByRole('alert')).toContainText('依存関係のルールを満たせません。')
+    await expect(preview).toContainText('日程変更を確定する前に競合を解消してください。')
+    await expect(preview.getByRole('button', { name: '適用', exact: true })).toBeDisabled()
+    const ganttCancel = preview.getByRole('button', { name: 'キャンセル', exact: true })
+    await expect(ganttCancel).toBeFocused()
+    await ganttCancel.click()
+
+    await page.getByRole('tab', { name: '期限カレンダー', exact: true }).click()
+    await dragScheduleCard(
+      page,
+      page.getByTestId('task-calendar-item-wireframe'),
+      page.getByTestId('task-calendar-day-2026-06-07'),
+    )
+
+    const calendarPreview = page.getByRole('dialog', { name: '一括操作の事前確認' })
+    await expect(calendarPreview.getByRole('alert')).toContainText(
+      '依存関係のルールを満たせません。',
+    )
+    await expect(
+      calendarPreview.getByRole('button', { name: '適用', exact: true }),
+    ).toBeDisabled()
+    await expect(
+      calendarPreview.getByRole('button', { name: 'キャンセル', exact: true }),
+    ).toBeFocused()
+    expect(requestCounts.scheduleConfirms).toBe(0)
+    expect(requestCounts.issueUpdates).toBe(0)
+  })
+
+  test('Issue #190: 外部 Project 依存の connector と lead/lag を示し両端管理者以外は参照専用にする', async ({ page }) => {
+    const externalIssue = createStoredTeamIssue({
+      assignedProjectId: 'product-roadmap',
+      dueDate: '2026-06-08',
+      id: 'external-launch',
+      schedule: {
+        calendarPolicy: DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY,
+        dueDate: '2026-06-08',
+        mode: 'due-date',
+      },
+      title: '外部ローンチ準備',
+    })
+    const dependency = {
+      id: 'dependency-wireframe-external',
+      predecessor: { teamId: 'core-team', workItemId: 'wireframe' },
+      successor: { teamId: 'core-team', workItemId: externalIssue.id },
+      type: 'start-to-finish',
+      lagDays: -2,
+      createdAt: '2026-06-01T00:00:00.000Z',
+      updatedAt: '2026-06-01T00:00:00.000Z',
+    } satisfies WorkItemScheduleDependency
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      currentUser: {
+        username: 'demo@example.com',
+        name: 'Demo User',
+        isSystemAdmin: false,
+        workspaceRole: 'member',
+      },
+      projectMembersByProject: {
+        'product-roadmap': [{
+          id: 'demo@example.com',
+          email: 'demo@example.com',
+          name: 'Demo User',
+          role: 'viewer',
+          updatedAt: '2026-06-08T00:00:00.000Z',
+          workspaceStatus: 'active',
+        }],
+      },
+      teamIssuesByTeam: { 'core-team': [externalIssue] },
+      workItemScheduleDependencies: [dependency],
+    })
+    await page.goto('/projects/refero/tasks')
+
+    await page.getByRole('tab', { name: '期限順', exact: true }).click()
+    const dependencySummary = page.getByTestId(`task-gantt-dependency-${dependency.id}`)
+
+    await expect(dependencySummary).toContainText('外部 Project')
+    await expect(dependencySummary).toContainText('開始から終了')
+    await expect(dependencySummary).toContainText('-2日')
+    await expect(page.getByTestId('task-gantt-external-lane')).toBeVisible()
+    await expect(page.getByTestId(`task-gantt-external-${dependency.id}`)).toContainText(
+      '外部: 外部ローンチ準備',
+    )
+    await expect(page.getByTestId(`task-gantt-connector-${dependency.id}`)).toBeVisible()
+
+    const dependencyDetails = page.locator('details').filter({
+      hasText: 'スケジュール依存関係',
+    }).first()
+    await dependencyDetails.locator('summary').click()
+    const dependencyRow = dependencyDetails.getByTestId(`work-item-dependency-${dependency.id}`)
+    await expect(dependencyRow).toContainText('外部ローンチ準備')
+    await expect(dependencyRow).toContainText('スケジュール依存関係は参照専用です。')
+    await expect(dependencyRow.getByRole('button', { name: /^更新/u })).toHaveCount(0)
+    await expect(dependencyRow.getByRole('button', { name: /^削除/u })).toHaveCount(0)
+  })
+
+  test('Issue #190: Team Issue の Table・Board・詳細で同じ依存関係を示す', async ({ page }) => {
+    const dependency = {
+      id: 'dependency-team-surface',
+      predecessor: { teamId: 'core-team', workItemId: 'wireframe' },
+      successor: { teamId: 'core-team', workItemId: 'brand-guideline' },
+      type: 'finish-to-start',
+      lagDays: 1,
+      createdAt: '2026-06-01T00:00:00.000Z',
+      updatedAt: '2026-06-01T00:00:00.000Z',
+    } satisfies WorkItemScheduleDependency
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      workItemScheduleDependencies: [dependency],
+    })
+    await page.goto('/teams/core-team/issues')
+
+    const tableRow = page.locator('tr').filter({ has: page.getByTestId('issue-row-wireframe') })
+    await expect(tableRow).toContainText('1 件をブロック')
+    await page.getByRole('button', { name: 'ボード', exact: true }).click()
+    await expect(page.getByTestId('team-issue-card-wireframe')).toContainText('1 件をブロック')
+
+    await page.getByRole('button', { name: 'テーブル', exact: true }).click()
+    await page.getByTestId('issue-row-wireframe').click()
+    const detailPanel = page.locator('aside').getByTestId('work-item-dependency-panel')
+
+    await expect(detailPanel.getByTestId(`work-item-dependency-${dependency.id}`)).toContainText(
+      '新しいランディングページのワイヤーフレーム作成',
+    )
+    await expect(detailPanel.getByTestId(`work-item-dependency-${dependency.id}`)).toContainText(
+      'ブランドガイドラインの更新',
+    )
+  })
+
   test('Issue #188: Table の期限編集も共通 preview を確認してから保存する', async ({ page }) => {
     await page.goto('/projects/refero/tasks')
     const requestCounts = getMockRequestCounts(page)
@@ -2478,13 +3448,15 @@ test.describe('authenticated task page', () => {
     await expect(preview).toContainText('変更後: 期限のみ: 2026-06-10')
     await expect.poll(() => requestCounts.schedulePreviews).toBe(1)
     expect(requestCounts.issueUpdates).toBe(0)
+    expect(requestCounts.scheduleConfirms).toBe(0)
 
     await preview.getByRole('button', { name: '適用', exact: true }).click()
 
     await expect(page.getByTestId('task-inline-due-date-seo-research')).toContainText(
       '期限のみ: 2026-06-10',
     )
-    await expect.poll(() => requestCounts.issueUpdates).toBe(1)
+    await expect.poll(() => requestCounts.scheduleConfirms).toBe(1)
+    expect(requestCounts.issueUpdates).toBe(0)
   })
 
   test('Issue #188: Gantt はキーボード移動を事前確認し undo・redo・resize できる', async ({ page }) => {
@@ -2512,7 +3484,7 @@ test.describe('authenticated task page', () => {
     await expect(startDate).toHaveValue('2026-06-02')
     await expect(endDate).toHaveValue('2026-06-04')
     await expect.poll(() => requestCounts.schedulePreviews).toBe(1)
-    await expect.poll(() => requestCounts.issueUpdates).toBe(1)
+    await expect.poll(() => requestCounts.scheduleConfirms).toBe(1)
 
     const feedback = page.getByTestId('task-action-feedback')
 
@@ -2524,7 +3496,7 @@ test.describe('authenticated task page', () => {
     await expect(startDate).toHaveValue('2026-06-01')
     await expect(endDate).toHaveValue('2026-06-03')
     await expect.poll(() => requestCounts.schedulePreviews).toBe(2)
-    await expect.poll(() => requestCounts.issueUpdates).toBe(2)
+    await expect.poll(() => requestCounts.scheduleConfirms).toBe(2)
 
     await feedback.getByRole('button', { name: 'やり直す', exact: true }).click()
     const redoPreview = page.getByTestId('task-schedule-update-preview')
@@ -2534,7 +3506,7 @@ test.describe('authenticated task page', () => {
     await expect(startDate).toHaveValue('2026-06-02')
     await expect(endDate).toHaveValue('2026-06-04')
     await expect.poll(() => requestCounts.schedulePreviews).toBe(3)
-    await expect.poll(() => requestCounts.issueUpdates).toBe(3)
+    await expect.poll(() => requestCounts.scheduleConfirms).toBe(3)
 
     const resizeHandle = page.getByTestId('task-gantt-resize-wireframe')
 
@@ -2549,7 +3521,7 @@ test.describe('authenticated task page', () => {
 
     await expect(endDate).toHaveValue('2026-06-05')
     await expect.poll(() => requestCounts.schedulePreviews).toBe(4)
-    await expect.poll(() => requestCounts.issueUpdates).toBe(4)
+    await expect.poll(() => requestCounts.scheduleConfirms).toBe(4)
     await expect(resizePreview).toHaveCount(0)
 
     await expectWireframeScheduleAcrossTaskViews(page, '2026-06-02', '2026-06-05')
@@ -2567,7 +3539,7 @@ test.describe('authenticated task page', () => {
 
     await expect(row.locator('input[id^="gantt-date-"]')).toHaveValue('2026-06-05')
     await expect.poll(() => requestCounts.schedulePreviews).toBe(5)
-    await expect.poll(() => requestCounts.issueUpdates).toBe(5)
+    await expect.poll(() => requestCounts.scheduleConfirms).toBe(5)
   })
 
   test('Issue #188: Gantt は既存 bar と重なる日へ pointer drag で移動・短縮できる', async ({ page }) => {
@@ -2609,7 +3581,7 @@ test.describe('authenticated task page', () => {
     await expect(movedRow.locator('input[id^="gantt-start-"]')).toHaveValue('2026-06-02')
     await expect(movedRow.locator('input[id^="gantt-end-"]')).toHaveValue('2026-06-03')
     await expect.poll(() => requestCounts.schedulePreviews).toBe(2)
-    await expect.poll(() => requestCounts.issueUpdates).toBe(2)
+    await expect.poll(() => requestCounts.scheduleConfirms).toBe(2)
   })
 
   test('Issue #188: Gantt は未計画 row の明示日付から bar を作成し再読込後も保持する', async ({ page }) => {
@@ -2634,7 +3606,7 @@ test.describe('authenticated task page', () => {
     await expect(unscheduledRow.locator('input[id^="gantt-start-"]')).toHaveValue('2026-06-08')
     await expect(unscheduledRow.locator('input[id^="gantt-end-"]')).toHaveValue('2026-06-08')
     await expect.poll(() => requestCounts.schedulePreviews).toBe(1)
-    await expect.poll(() => requestCounts.issueUpdates).toBe(1)
+    await expect.poll(() => requestCounts.scheduleConfirms).toBe(1)
 
     await page.reload()
     await page.getByRole('tab', { name: '期限順', exact: true }).click()
@@ -2670,7 +3642,7 @@ test.describe('authenticated task page', () => {
     await expect(unscheduledCard).toBeVisible()
     await expect(unscheduledCard).toBeFocused()
     await expect.poll(() => requestCounts.schedulePreviews).toBe(1)
-    await expect.poll(() => requestCounts.issueUpdates).toBe(1)
+    await expect.poll(() => requestCounts.scheduleConfirms).toBe(1)
 
     const targetDay = page.getByTestId('task-calendar-day-2026-06-07')
 
@@ -2692,7 +3664,7 @@ test.describe('authenticated task page', () => {
     await expect(rescheduledCard).toBeFocused()
     await expect(unscheduledBucket.getByTestId('task-calendar-item-wireframe')).toHaveCount(0)
     await expect.poll(() => requestCounts.schedulePreviews).toBe(2)
-    await expect.poll(() => requestCounts.issueUpdates).toBe(2)
+    await expect.poll(() => requestCounts.scheduleConfirms).toBe(2)
 
     await page.reload()
     await page.getByRole('tab', { name: '期限カレンダー', exact: true }).click()
@@ -2758,6 +3730,7 @@ test.describe('authenticated task page', () => {
     })).toBeVisible()
     await expect.poll(() => requestCounts.schedulePreviews).toBe(1)
     expect(requestCounts.issueUpdates).toBe(0)
+    expect(requestCounts.scheduleConfirms).toBe(0)
     await expect(page.getByRole('dialog', { name: '一括操作の事前確認' })).toHaveCount(0)
   })
 
@@ -2792,7 +3765,7 @@ test.describe('authenticated task page', () => {
       '別の変更と競合しました。最新の内容を確認してください。',
     )
     await expect.poll(() => requestCounts.schedulePreviews).toBe(1)
-    await expect.poll(() => requestCounts.issueUpdates).toBe(1)
+    await expect.poll(() => requestCounts.scheduleConfirms).toBe(1)
   })
 
   test('低速なタスクAPIを読み上げて一度だけ取得し、キーボード操作を保ったまま復帰する', async ({

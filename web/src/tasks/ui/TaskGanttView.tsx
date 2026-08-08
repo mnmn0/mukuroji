@@ -1,11 +1,14 @@
-import { useMemo, useState, type DragEvent, type KeyboardEvent } from 'react'
+import { useMemo, useRef, useState, type DragEvent, type KeyboardEvent } from 'react'
 import type {
+  PlanningSnapshot,
   ResolvedWorkItemConfiguration,
+  WorkItemDependencyEndpoint,
   WorkItemConfiguration,
-  WorkItemPatch,
   WorkItemSchedule,
   WorkItemScheduleChangePreview,
   WorkItemScheduleOperation,
+  WorkItemScheduleDependency,
+  WorkItemScheduleDependencyPatch,
 } from '@mukuroji/contracts'
 import type { ProjectTask } from '../api/tasks'
 import { TeamIssuesApiError } from '../../issues/api'
@@ -15,6 +18,18 @@ import {
   resolveWorkItemAssignee,
   resolveWorkItemTitle,
 } from '../../work-items/model/workItemDisplay'
+import {
+  createWorkItemDependencyEndpointKey,
+  createWorkItemDependencyRows,
+  createWorkItemDependencySummaries,
+  resolveWorkItemDependencySummary,
+  type WorkItemDependencyCreateDraft,
+  type WorkItemDependencyRow,
+} from '../../work-items/model/workItemDependencies'
+import { WorkItemDependencyChips } from '../../work-items/ui/WorkItemDependencyChips'
+import {
+  WorkItemDependencyPanel,
+} from '../../work-items/ui/WorkItemDependencyPanel'
 import {
   addTaskTimelineDays,
   createMoveTaskScheduleOperation,
@@ -37,11 +52,20 @@ import {
   TaskStatusBadge,
   TaskViewHeading,
 } from './TaskViewPrimitives'
+import { TaskSchedulePreviewMetadata } from './TaskSchedulePreviewMetadata'
 
 const GANTT_DAY_WIDTH = 42
 const GANTT_TABLE_WIDTH = 360
+const GANTT_ROW_HEIGHT = 124
+const GANTT_BAR_CENTER_OFFSET = 46
+const GANTT_EXTERNAL_STUB_HEIGHT = 44
 const MAX_GANTT_TIMELINE_COLUMNS = 180
 const MILLISECONDS_PER_CALENDAR_DAY = 86_400_000
+
+/** Formats a signed dependency offset without losing lead semantics. */
+function formatSignedLag(lagDays: number, t: TaskGanttTranslator): string {
+  return `${lagDays > 0 ? '+' : ''}${lagDays}${t('workItems.dependencies.daySuffix')}`
+}
 
 /** Resolves a localized task Gantt-view message. */
 type TaskGanttTranslator = (key: MessageKey) => string
@@ -76,6 +100,8 @@ type PendingGanttScheduleChange = {
   task: ProjectTask
   /** Authoritative server preview. */
   preview: WorkItemScheduleChangePreview
+  /** Original operation confirmed against the preview's graph revisions. */
+  operation: WorkItemScheduleOperation
 }
 
 /** Drag operation carried from a Gantt bar or resize handle to a date cell. */
@@ -86,8 +112,46 @@ type GanttDragChange = {
   type: 'move' | 'resize'
 }
 
+/** One external endpoint rendered in the dedicated cross-Project lane. */
+type GanttExternalEndpointStub = {
+  /** Dependency that owns the external endpoint. */
+  dependencyId: string
+  /** Visible endpoint title or identifier fallback. */
+  label: string
+  /** Horizontal anchor on the timeline. */
+  x: number
+  /** Vertical center inside the external lane. */
+  y: number
+}
+
+/** SVG connector joining two local bars or one local bar and an external stub. */
+type GanttDependencyConnector = {
+  /** Whether the edge belongs to the authoritative critical path. */
+  critical: boolean
+  /** Number of authoritative conflicts reported for this edge. */
+  conflictCount: number
+  /** Canonical dependency identifier. */
+  dependencyId: string
+  /** Orthogonal SVG path between endpoint anchors. */
+  path: string
+}
+
+/** Complete overlay layout for dependency connectors and external endpoint stubs. */
+type GanttDependencyLayout = {
+  /** In-chart dependency connectors. */
+  connectors: GanttDependencyConnector[]
+  /** Height reserved above local task rows for cross-Project endpoints. */
+  externalLaneHeight: number
+  /** External endpoint labels rendered in the reserved lane. */
+  externalStubs: GanttExternalEndpointStub[]
+}
+
 /** Props for the independent project task Gantt view. */
 export type TaskGanttViewProps = {
+  /** Unfiltered tasks used to distinguish Project membership from the rendered filter result. */
+  allProjectTasks?: ProjectTask[]
+  /** Determines whether the current user may manage one canonical dependency endpoint. */
+  canManageScheduleDependencyEndpoint?: (endpoint: WorkItemDependencyEndpoint) => boolean
   /** Project receiving contextual Gantt creates. */
   projectId?: string
   /** Fallback configuration used for a single-team project view. */
@@ -96,10 +160,16 @@ export type TaskGanttViewProps = {
   configurationsByTeam: Readonly<Record<string, ResolvedWorkItemConfiguration>>
   /** Tasks displayed in schedule order. */
   tasks: ProjectTask[]
+  /** Authoritative dependency graph used for lines and row indicators. */
+  planningSnapshot?: PlanningSnapshot
   /** Translator used for Gantt-view labels. */
   t: TaskGanttTranslator
   /** Opens the create panel with a planning-date context. */
   onCreateTaskOpen?: (context?: TaskScheduleCreateContext) => void
+  /** Creates a canonical Work Item schedule dependency. */
+  onCreateScheduleDependency?: (input: WorkItemDependencyCreateDraft) => void | Promise<void>
+  /** Deletes a canonical Work Item schedule dependency. */
+  onDeleteScheduleDependency?: (dependency: WorkItemScheduleDependency) => void | Promise<void>
   /** Selects a task in the shared detail pane. */
   onSelectTask?: (task: ProjectTask) => void
   /** Requests an authoritative preview before a schedule mutation. */
@@ -107,8 +177,17 @@ export type TaskGanttViewProps = {
     task: ProjectTask,
     operation: WorkItemScheduleOperation,
   ) => Promise<WorkItemScheduleChangePreview>
-  /** Applies the confirmed canonical schedule replacement. */
-  onUpdateTask?: (task: ProjectTask, patch: WorkItemPatch) => Promise<ProjectTask>
+  /** Atomically confirms the original operation and its dependency ripple. */
+  onConfirmScheduleChange?: (
+    task: ProjectTask,
+    operation: WorkItemScheduleOperation,
+    preview: WorkItemScheduleChangePreview,
+  ) => Promise<ProjectTask>
+  /** Updates a canonical Work Item schedule dependency rule. */
+  onUpdateScheduleDependency?: (
+    dependency: WorkItemScheduleDependency,
+    patch: WorkItemScheduleDependencyPatch,
+  ) => void | Promise<void>
 }
 
 /** Props for the Gantt schedule-preview dialog. */
@@ -135,34 +214,78 @@ type GanttSchedulePreviewProps = {
  * @returns The independent project task Gantt view.
  */
 export function TaskGanttView({
+  allProjectTasks,
+  canManageScheduleDependencyEndpoint,
   configuration,
   configurationsByTeam,
+  onConfirmScheduleChange,
   onCreateTaskOpen,
+  onCreateScheduleDependency,
+  onDeleteScheduleDependency,
   onPreviewScheduleChange,
   onSelectTask,
-  onUpdateTask,
+  onUpdateScheduleDependency,
+  planningSnapshot,
   projectId,
   t,
   tasks,
 }: TaskGanttViewProps) {
+  const projectTasks = allProjectTasks ?? tasks
   const rows = useMemo(() => createGanttRows(tasks), [tasks])
+  const dependencySummaries = useMemo(
+    () => createWorkItemDependencySummaries(planningSnapshot),
+    [planningSnapshot],
+  )
+  const visibleTaskKeys = useMemo(() => new Set(tasks.map((task) =>
+    createWorkItemDependencyEndpointKey({ teamId: task.teamId, workItemId: task.id })
+  )), [tasks])
+  const projectTaskKeys = useMemo(() => new Set(projectTasks.map((task) =>
+    createWorkItemDependencyEndpointKey({ teamId: task.teamId, workItemId: task.id })
+  )), [projectTasks])
+  const projectScopeEndpoints = useMemo(() => projectTasks.map((task) => ({
+    teamId: task.teamId,
+    workItemId: task.id,
+  })), [projectTasks])
+  const dependencyRows = useMemo(() => {
+    return createWorkItemDependencyRows(planningSnapshot).filter((row) =>
+      visibleTaskKeys.has(createWorkItemDependencyEndpointKey(row.dependency.predecessor)) ||
+      visibleTaskKeys.has(createWorkItemDependencyEndpointKey(row.dependency.successor))
+    )
+  }, [planningSnapshot, visibleTaskKeys])
   const timelineColumns = useMemo(
-    () => createGanttTimelineColumns(rows.map((row) => row.schedule)),
-    [rows],
+    () => createGanttTimelineColumns([
+      ...rows.map((row) => row.schedule),
+      ...dependencyRows.flatMap((row) => [
+        ...(row.predecessor ? [row.predecessor.schedule] : []),
+        ...(row.successor ? [row.successor.schedule] : []),
+      ]),
+    ]),
+    [dependencyRows, rows],
+  )
+  const dependencyLayout = useMemo(
+    () => createGanttDependencyLayout(
+      dependencyRows,
+      rows,
+      timelineColumns,
+      projectTaskKeys,
+    ),
+    [dependencyRows, projectTaskKeys, rows, timelineColumns],
   )
   const [dragChange, setDragChange] = useState<GanttDragChange>()
+  const dragChangeRef = useRef<GanttDragChange | undefined>(undefined)
   const [busyTaskKey, setBusyTaskKey] = useState<string>()
   const [pendingChange, setPendingChange] = useState<PendingGanttScheduleChange>()
   const [isApplying, setIsApplying] = useState(false)
   const [errorMessage, setErrorMessage] = useState<string>()
-  const canEditSchedule = onPreviewScheduleChange !== undefined && onUpdateTask !== undefined
+  const canEditSchedule = onPreviewScheduleChange !== undefined &&
+    onConfirmScheduleChange !== undefined
 
   /** Requests the server-owned before/after schedule preview. */
   const previewScheduleChange = async (
     task: ProjectTask,
     operation: WorkItemScheduleOperation,
   ) => {
-    if (!onPreviewScheduleChange || !onUpdateTask) {
+    if (!onPreviewScheduleChange || !onConfirmScheduleChange) {
       return
     }
 
@@ -171,7 +294,7 @@ export function TaskGanttView({
     setErrorMessage(undefined)
     try {
       const preview = await onPreviewScheduleChange(task, operation)
-      setPendingChange({ preview, task })
+      setPendingChange({ operation, preview, task })
     } catch (error) {
       setErrorMessage(resolveScheduleActionError(error, t))
     } finally {
@@ -181,7 +304,7 @@ export function TaskGanttView({
 
   /** Persists the direct canonical result from the current preview. */
   const confirmScheduleChange = async () => {
-    if (!pendingChange || !onUpdateTask) {
+    if (!pendingChange || !onConfirmScheduleChange) {
       return
     }
 
@@ -195,7 +318,11 @@ export function TaskGanttView({
     setIsApplying(true)
     setErrorMessage(undefined)
     try {
-      await onUpdateTask(pendingChange.task, { schedule })
+      await onConfirmScheduleChange(
+        pendingChange.task,
+        pendingChange.operation,
+        pendingChange.preview,
+      )
       setPendingChange(undefined)
     } catch (error) {
       setPendingChange(undefined)
@@ -233,20 +360,35 @@ export function TaskGanttView({
     type: GanttDragChange['type'],
   ) => {
     const nextDragChange = { taskKey: createTaskKey(row.task), type }
+    dragChangeRef.current = nextDragChange
     setDragChange(nextDragChange)
     event.dataTransfer.effectAllowed = 'move'
     event.dataTransfer.setData('text/plain', nextDragChange.taskKey)
+    event.dataTransfer.setData('application/x-mukuroji-gantt-change', type)
   }
 
   /** Previews the drag operation against the date beneath the pointer. */
-  const dropOnDate = (row: GanttTaskRow, date: string) => {
-    if (!dragChange || dragChange.taskKey !== createTaskKey(row.task)) {
+  const dropOnDate = (
+    row: GanttTaskRow,
+    date: string,
+    transferredTaskKey: string,
+    transferredType: string,
+  ) => {
+    const taskKey = createTaskKey(row.task)
+    const activeDragChange = dragChangeRef.current ?? dragChange
+    const type = activeDragChange?.taskKey === taskKey
+      ? activeDragChange.type
+      : transferredTaskKey === taskKey
+        ? readGanttDragChangeType(transferredType)
+        : undefined
+    if (!type) {
       return
     }
 
-    const operation = dragChange.type === 'resize'
+    const operation = type === 'resize'
       ? createResizeTaskScheduleOperation(date)
       : createMoveTaskScheduleOperation(date)
+    dragChangeRef.current = undefined
     setDragChange(undefined)
     void previewScheduleChange(row.task, operation)
   }
@@ -262,6 +404,90 @@ export function TaskGanttView({
         t={t}
         titleKey="tasks.view.gantt"
       />
+      {dependencyRows.length > 0 ? (
+        <ul
+          aria-label={t('workItems.dependencies.title')}
+          className="grid gap-1 border-b border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-4 py-3"
+          data-testid="task-gantt-dependencies"
+        >
+          {dependencyRows.map((row) => {
+            const hasExternalEndpoint = !projectTaskKeys.has(
+              createWorkItemDependencyEndpointKey(row.dependency.predecessor),
+            ) || !projectTaskKeys.has(
+              createWorkItemDependencyEndpointKey(row.dependency.successor),
+            )
+            return (
+              <li
+                className={`flex flex-wrap items-center gap-2 rounded-md border bg-white px-3 py-2 text-xs font-semibold ${row.conflicts.length > 0
+                  ? 'border-red-300 text-red-700'
+                  : row.critical
+                    ? 'border-amber-300 text-amber-800'
+                    : 'border-[var(--workbench-border)] text-[var(--workbench-text)]'}`}
+                data-testid={`task-gantt-dependency-${row.dependency.id}`}
+                key={row.dependency.id}
+              >
+                <svg aria-hidden="true" className="h-4 w-10 shrink-0" viewBox="0 0 40 16">
+                  <path d="M1 8h33" fill="none" stroke="currentColor" strokeWidth="2" />
+                  <path d="m30 3 7 5-7 5" fill="none" stroke="currentColor" strokeWidth="2" />
+                </svg>
+                <span>
+                  <span className="sr-only">{t('workItems.dependencies.predecessor')}: </span>
+                  {row.predecessor?.title ?? row.dependency.predecessor.workItemId}
+                </span>
+                <span aria-hidden="true">→</span>
+                <span>
+                  <span className="sr-only">{t('workItems.dependencies.successor')}: </span>
+                  {row.successor?.title ?? row.dependency.successor.workItemId}
+                </span>
+                {hasExternalEndpoint ? (
+                  <span className="workbench-badge">{t('workItems.dependencies.external')}</span>
+                ) : null}
+                {row.critical ? (
+                  <span className="workbench-badge-danger">{t('workItems.dependencies.critical')}</span>
+                ) : null}
+                {row.conflicts.length > 0 ? (
+                  <span className="workbench-badge-danger">
+                    {t('workItems.dependencies.conflictsCount').replace(
+                      '{count}',
+                      String(row.conflicts.length),
+                    )}
+                  </span>
+                ) : null}
+                <span className="workbench-badge">
+                  {t('workItems.dependencies.type')}: {t(`workItems.dependencies.type.${row.dependency.type}`)}
+                </span>
+                <span className="workbench-badge">
+                  {t('workItems.dependencies.lagDays')}: {formatSignedLag(row.dependency.lagDays, t)}
+                </span>
+                <span className="workbench-badge">
+                  {t('workItems.dependencies.constraint')}:{' '}
+                  {row.dependency.constraint
+                    ? `${t(`workItems.dependencies.constraint.kind.${row.dependency.constraint.kind}`)} · ${t(`workItems.dependencies.constraint.anchor.${row.dependency.constraint.anchor}`)} · ${row.dependency.constraint.date}`
+                    : t('workItems.dependencies.constraint.none')}
+                </span>
+              </li>
+            )
+          })}
+        </ul>
+      ) : null}
+      {planningSnapshot ? (
+        <details className="border-b border-[var(--workbench-border)] bg-white px-4 py-3">
+          <summary className="cursor-pointer text-sm font-semibold text-[var(--workbench-primary)]">
+            {t('workItems.dependencies.title')}
+          </summary>
+          <div className="mt-4">
+            <WorkItemDependencyPanel
+              canManageEndpoint={canManageScheduleDependencyEndpoint}
+              onCreate={onCreateScheduleDependency}
+              onDelete={onDeleteScheduleDependency}
+              onUpdate={onUpdateScheduleDependency}
+              scopeEndpoints={projectScopeEndpoints}
+              snapshot={planningSnapshot}
+              t={t}
+            />
+          </div>
+        </details>
+      ) : null}
       {onCreateTaskOpen ? (
         <div className="flex justify-end border-b border-[#e4e7ec] px-4 py-2">
           <button
@@ -312,6 +538,34 @@ export function TaskGanttView({
               ))}
             </div>
           </div>
+          <div className="relative min-w-max">
+            {dependencyLayout.externalLaneHeight > 0 ? (
+              <div
+                className="grid min-w-max border-b border-[#d8dde5] bg-[#f8fafb]"
+                data-testid="task-gantt-external-lane"
+                style={{
+                  gridTemplateColumns: `${GANTT_TABLE_WIDTH}px ${timelineColumns.length * GANTT_DAY_WIDTH}px`,
+                  height: `${dependencyLayout.externalLaneHeight}px`,
+                }}
+              >
+                <div className="sticky left-0 z-10 border-r border-[#d8dde5] bg-[#f8fafb] px-4 py-3 text-xs font-bold uppercase tracking-wide text-[#667085]">
+                  {t('workItems.dependencies.externalLane')}
+                </div>
+                <div className="relative bg-white">
+                  {dependencyLayout.externalStubs.map((stub) => (
+                    <div
+                      className="absolute z-[2] max-w-[220px] -translate-x-1/2 truncate rounded-full border border-[#98a2b3] bg-white px-2 py-1 text-[11px] font-bold text-[#344054] shadow-sm"
+                      data-testid={`task-gantt-external-${stub.dependencyId}`}
+                      key={stub.dependencyId}
+                      style={{ left: `${stub.x}px`, top: `${stub.y - 14}px` }}
+                      title={t('workItems.dependencies.externalEndpoint').replace('{title}', stub.label)}
+                    >
+                      {t('workItems.dependencies.externalEndpoint').replace('{title}', stub.label)}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
           {rows.map((row) => {
             const taskKey = createTaskKey(row.task)
             const isBusy = busyTaskKey === taskKey
@@ -321,9 +575,12 @@ export function TaskGanttView({
                 className="grid min-w-max border-b border-[#e4e7ec] last:border-b-0"
                 key={taskKey}
                 role="row"
-                style={{ gridTemplateColumns: `${GANTT_TABLE_WIDTH}px ${timelineColumns.length * GANTT_DAY_WIDTH}px` }}
+                style={{
+                  gridTemplateColumns: `${GANTT_TABLE_WIDTH}px ${timelineColumns.length * GANTT_DAY_WIDTH}px`,
+                  height: `${GANTT_ROW_HEIGHT}px`,
+                }}
               >
-                <div className="sticky left-0 z-10 grid min-h-[92px] gap-2 border-r border-[#d8dde5] bg-white px-4 py-3" role="gridcell">
+                <div className="sticky left-0 z-10 grid min-h-0 gap-2 overflow-y-auto border-r border-[#d8dde5] bg-white px-4 py-3" role="gridcell">
                   <div className="flex min-w-0 items-start justify-between gap-3">
                     <div className="min-w-0">
                       {onSelectTask ? (
@@ -340,6 +597,14 @@ export function TaskGanttView({
                       <p className="mt-1 truncate text-xs font-medium text-[#5f6874]">
                         {resolveWorkItemAssignee(row.task)}
                       </p>
+                      <WorkItemDependencyChips
+                        className="mt-1"
+                        summary={resolveWorkItemDependencySummary(
+                          dependencySummaries,
+                          { teamId: row.task.teamId, workItemId: row.task.id },
+                        )}
+                        t={t}
+                      />
                     </div>
                     <span className="flex items-center gap-2">
                       {onCreateTaskOpen ? (
@@ -401,10 +666,10 @@ export function TaskGanttView({
                 </div>
                 <div
                   aria-label={`${resolveWorkItemTitle(row.task)}: ${describeSchedule(row.schedule, t)}`}
-                  className="relative min-h-[92px] bg-white"
+                  className="relative min-h-0 bg-white"
                   data-testid={`task-gantt-timeline-${row.task.id}`}
                   onDragOver={(event) => {
-                    if (dragChange?.taskKey === taskKey) {
+                    if ((dragChangeRef.current ?? dragChange)?.taskKey === taskKey) {
                       event.preventDefault()
                       event.dataTransfer.dropEffect = 'move'
                     }
@@ -413,7 +678,12 @@ export function TaskGanttView({
                     event.preventDefault()
                     const date = resolveGanttDropDate(event, timelineColumns)
                     if (date) {
-                      dropOnDate(row, date)
+                      dropOnDate(
+                        row,
+                        date,
+                        event.dataTransfer.getData('text/plain'),
+                        event.dataTransfer.getData('application/x-mukuroji-gantt-change'),
+                      )
                     }
                   }}
                   role="gridcell"
@@ -423,7 +693,7 @@ export function TaskGanttView({
                 >
                   {bar ? (
                     <div
-                      className={`absolute top-7 z-[1] h-9 overflow-visible text-xs font-bold shadow-sm ${resolveGanttBarClass(row.schedule.mode)}`}
+                      className={`absolute top-7 z-[2] h-9 overflow-visible text-xs font-bold shadow-sm ${resolveGanttBarClass(row.schedule.mode)}`}
                       style={{
                         left: `${bar.left}px`,
                         width: `${bar.width}px`,
@@ -440,7 +710,10 @@ export function TaskGanttView({
                         data-testid={`task-gantt-bar-${row.task.id}`}
                         draggable={canEditSchedule && !isBusy}
                         onClick={() => onSelectTask?.(row.task)}
-                        onDragEnd={() => setDragChange(undefined)}
+                        onDragEnd={() => {
+                          dragChangeRef.current = undefined
+                          setDragChange(undefined)
+                        }}
                         onDragStart={(event) => startDrag(event, row, 'move')}
                         onKeyDown={(event) => {
                           if (canEditSchedule && !isBusy) {
@@ -464,7 +737,10 @@ export function TaskGanttView({
                           disabled={!canEditSchedule || isBusy}
                           draggable={canEditSchedule && !isBusy}
                           onClick={(event) => event.stopPropagation()}
-                          onDragEnd={() => setDragChange(undefined)}
+                          onDragEnd={() => {
+                            dragChangeRef.current = undefined
+                            setDragChange(undefined)
+                          }}
                           onDragStart={(event) => {
                             event.stopPropagation()
                             startDrag(event, row, 'resize')
@@ -485,6 +761,51 @@ export function TaskGanttView({
               </article>
             )
           })}
+            <svg
+              aria-hidden="true"
+              className="pointer-events-none absolute top-0 z-[1] overflow-visible"
+              data-testid="task-gantt-connector-overlay"
+              height={dependencyLayout.externalLaneHeight + rows.length * GANTT_ROW_HEIGHT}
+              style={{ left: `${GANTT_TABLE_WIDTH}px` }}
+              width={timelineColumns.length * GANTT_DAY_WIDTH}
+            >
+              <defs>
+                <marker id="gantt-dependency-arrow" markerHeight="7" markerWidth="7" orient="auto" refX="6" refY="3.5">
+                  <path d="M0 0 L7 3.5 L0 7 Z" fill="#475467" />
+                </marker>
+                <marker id="gantt-dependency-arrow-critical" markerHeight="7" markerWidth="7" orient="auto" refX="6" refY="3.5">
+                  <path d="M0 0 L7 3.5 L0 7 Z" fill="#b54708" />
+                </marker>
+                <marker id="gantt-dependency-arrow-conflict" markerHeight="7" markerWidth="7" orient="auto" refX="6" refY="3.5">
+                  <path d="M0 0 L7 3.5 L0 7 Z" fill="#b42318" />
+                </marker>
+              </defs>
+              {dependencyLayout.connectors.map((connector) => (
+                <path
+                  d={connector.path}
+                  data-critical={connector.critical ? 'true' : 'false'}
+                  data-conflict={connector.conflictCount > 0 ? 'true' : 'false'}
+                  data-testid={`task-gantt-connector-${connector.dependencyId}`}
+                  fill="none"
+                  key={connector.dependencyId}
+                  markerEnd={`url(#${connector.conflictCount > 0
+                    ? 'gantt-dependency-arrow-conflict'
+                    : connector.critical
+                      ? 'gantt-dependency-arrow-critical'
+                      : 'gantt-dependency-arrow'})`}
+                  stroke={connector.conflictCount > 0
+                    ? '#b42318'
+                    : connector.critical
+                      ? '#b54708'
+                      : '#475467'}
+                  strokeDasharray={connector.conflictCount > 0 ? '5 3' : undefined}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={connector.critical || connector.conflictCount > 0 ? 2.5 : 2}
+                />
+              ))}
+            </svg>
+          </div>
         </div>
       ) : (
         <p className="border-t border-[var(--workbench-border)] px-4 py-8 text-center text-sm font-medium text-[var(--workbench-muted)]">
@@ -658,6 +979,7 @@ function GanttSchedulePreview({
             </li>
           ))}
         </ul>
+        <TaskSchedulePreviewMetadata preview={pending.preview} t={t} />
         {pending.preview.warnings.length > 0 ? (
           <div className="mt-4 rounded-lg border border-[#f4d38b] bg-[#fffaeb] p-3" role="status">
             <p className="text-xs font-bold uppercase tracking-wide text-[#93370d]">
@@ -682,7 +1004,7 @@ function GanttSchedulePreview({
           <button
             className="rounded-md bg-[var(--workbench-primary)] px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
             data-modal-initial-focus
-            disabled={isApplying}
+            disabled={isApplying || pending.preview.conflicts.length > 0}
             onClick={onConfirm}
             type="button"
           >
@@ -742,6 +1064,141 @@ function createGanttTimelineColumns(
       startDate,
     }
   })
+}
+
+/**
+ * Builds deterministic connector geometry for local bars and one-sided cross-Project edges.
+ *
+ * @param dependencies - Dependency rows touching at least one local task.
+ * @param rows - Local Gantt task rows in their rendered order.
+ * @param columns - Current bounded timeline columns.
+ * @param projectTaskKeys - Unfiltered task identities that belong to the current Project.
+ * @returns Overlay paths, external stubs, and the lane height required above local rows.
+ */
+function createGanttDependencyLayout(
+  dependencies: readonly WorkItemDependencyRow[],
+  rows: readonly GanttTaskRow[],
+  columns: readonly GanttTimelineColumn[],
+  projectTaskKeys: ReadonlySet<string>,
+): GanttDependencyLayout {
+  const chartWidth = Math.max(GANTT_DAY_WIDTH, columns.length * GANTT_DAY_WIDTH)
+  const localRowsByKey = new Map(rows.map((row, rowIndex) => [
+    createWorkItemDependencyEndpointKey({ teamId: row.task.teamId, workItemId: row.task.id }),
+    { bar: createGanttBar(row.schedule, columns), rowIndex },
+  ]))
+  const externalDependencies = dependencies.filter((row) => {
+    const predecessorKey = createWorkItemDependencyEndpointKey(row.dependency.predecessor)
+    const successorKey = createWorkItemDependencyEndpointKey(row.dependency.successor)
+    const predecessorIsVisible = localRowsByKey.has(
+      predecessorKey,
+    )
+    const successorIsVisible = localRowsByKey.has(
+      successorKey,
+    )
+    return (predecessorIsVisible && !projectTaskKeys.has(successorKey)) ||
+      (successorIsVisible && !projectTaskKeys.has(predecessorKey))
+  })
+  const externalLaneHeight = externalDependencies.length > 0
+    ? externalDependencies.length * GANTT_EXTERNAL_STUB_HEIGHT + 8
+    : 0
+  const externalIndexByDependencyId = new Map(
+    externalDependencies.map((row, index) => [row.dependency.id, index]),
+  )
+  const externalStubs: GanttExternalEndpointStub[] = []
+  const connectors: GanttDependencyConnector[] = []
+
+  for (const row of dependencies) {
+    const predecessorKey = createWorkItemDependencyEndpointKey(row.dependency.predecessor)
+    const successorKey = createWorkItemDependencyEndpointKey(row.dependency.successor)
+    const localPredecessor = localRowsByKey.get(predecessorKey)
+    const localSuccessor = localRowsByKey.get(successorKey)
+    if (!localPredecessor && !localSuccessor) continue
+
+    const predecessorBar = localPredecessor?.bar ?? (
+      row.predecessor ? createGanttBar(row.predecessor.schedule, columns) : undefined
+    )
+    const successorBar = localSuccessor?.bar ?? (
+      row.successor ? createGanttBar(row.successor.schedule, columns) : undefined
+    )
+    const localFallbackX = localPredecessor
+      ? resolveGanttDependencyAnchorX(row.dependency, 'predecessor', predecessorBar, 12)
+      : resolveGanttDependencyAnchorX(
+          row.dependency,
+          'successor',
+          successorBar,
+          Math.max(12, chartWidth - 12),
+        )
+    const predecessorX = clampGanttConnectorX(
+      resolveGanttDependencyAnchorX(
+        row.dependency,
+        'predecessor',
+        predecessorBar,
+        localPredecessor ? 12 : localFallbackX - GANTT_DAY_WIDTH * 2,
+      ),
+      chartWidth,
+    )
+    const successorX = clampGanttConnectorX(
+      resolveGanttDependencyAnchorX(
+        row.dependency,
+        'successor',
+        successorBar,
+        localSuccessor ? chartWidth - 12 : localFallbackX + GANTT_DAY_WIDTH * 2,
+      ),
+      chartWidth,
+    )
+    const externalIndex = externalIndexByDependencyId.get(row.dependency.id)
+    const externalY = externalIndex === undefined
+      ? undefined
+      : externalIndex * GANTT_EXTERNAL_STUB_HEIGHT + GANTT_EXTERNAL_STUB_HEIGHT / 2
+    const predecessorY = localPredecessor
+      ? externalLaneHeight + localPredecessor.rowIndex * GANTT_ROW_HEIGHT + GANTT_BAR_CENTER_OFFSET
+      : externalY
+    const successorY = localSuccessor
+      ? externalLaneHeight + localSuccessor.rowIndex * GANTT_ROW_HEIGHT + GANTT_BAR_CENTER_OFFSET
+      : externalY
+    if (predecessorY === undefined || successorY === undefined) continue
+
+    if (externalY !== undefined) {
+      const externalIsPredecessor = !localPredecessor
+      externalStubs.push({
+        dependencyId: row.dependency.id,
+        label: externalIsPredecessor
+          ? row.predecessor?.title ?? row.dependency.predecessor.workItemId
+          : row.successor?.title ?? row.dependency.successor.workItemId,
+        x: externalIsPredecessor ? predecessorX : successorX,
+        y: externalY,
+      })
+    }
+
+    const middleX = predecessorX + (successorX - predecessorX) / 2
+    connectors.push({
+      conflictCount: row.conflicts.length,
+      critical: row.critical,
+      dependencyId: row.dependency.id,
+      path: `M ${predecessorX} ${predecessorY} H ${middleX} V ${successorY} H ${successorX}`,
+    })
+  }
+
+  return { connectors, externalLaneHeight, externalStubs }
+}
+
+/** Resolves the schedule boundary used by one dependency endpoint. */
+function resolveGanttDependencyAnchorX(
+  dependency: WorkItemScheduleDependency,
+  endpoint: 'predecessor' | 'successor',
+  bar: GanttBar | undefined,
+  fallback: number,
+): number {
+  if (!bar) return fallback
+  const useStart = endpoint === 'predecessor'
+    ? dependency.type === 'start-to-start' || dependency.type === 'start-to-finish'
+    : dependency.type === 'finish-to-start' || dependency.type === 'start-to-start'
+  return useStart ? bar.left : bar.left + bar.width
+}
+
+/** Keeps one SVG or external-stub anchor inside the visible timeline. */
+function clampGanttConnectorX(value: number, chartWidth: number): number {
+  return Math.min(Math.max(value, 12), Math.max(12, chartWidth - 12))
 }
 
 /** Pixel geometry for a schedule bar on the current date axis. */
@@ -820,6 +1277,16 @@ function resolveGanttDropDate(
     Math.floor((offsetWithinColumn / renderedColumnWidth) * columnDayCount),
   )
   return addTaskTimelineDays(column.startDate, dayOffset)
+}
+
+/**
+ * Narrows the serialized HTML drag payload to a supported Gantt operation.
+ *
+ * @param value - Serialized drag type from `DataTransfer`.
+ * @returns Supported move or resize type, or no value for an unrelated drag.
+ */
+function readGanttDragChangeType(value: string): GanttDragChange['type'] | undefined {
+  return value === 'move' || value === 'resize' ? value : undefined
 }
 
 /**
@@ -1088,6 +1555,9 @@ function findDirectPreviewSchedule(
  */
 function resolveScheduleActionError(error: unknown, t: TaskGanttTranslator): string {
   if (error instanceof TeamIssuesApiError) {
+    if (isSchedulePreviewStaleCode(error.code)) {
+      return t('tasks.schedule.previewStale')
+    }
     if (error.code === 'WorkItemRevisionConflict') {
       return t('tasks.action.conflict')
     }
@@ -1101,6 +1571,16 @@ function resolveScheduleActionError(error: unknown, t: TaskGanttTranslator): str
   return t('tasks.action.updateError')
 }
 
+/** Returns whether a stable API code means the user must obtain a new preview. */
+function isSchedulePreviewStaleCode(code: string | undefined): boolean {
+  return code === 'WorkItemSchedulePreviewStale' ||
+    code === 'PlanningRevisionConflict' ||
+    code === 'WorkItemRelationGraphConflict' ||
+    code === 'WorkItemAuthorizationChanged' ||
+    code === 'WorkItemScheduleDependencyConflict' ||
+    code === 'WorkItemScheduleCascadeConflict'
+}
+
 /**
  * Maps stable server warning codes to localized review guidance.
  *
@@ -1109,7 +1589,10 @@ function resolveScheduleActionError(error: unknown, t: TaskGanttTranslator): str
  * @returns Localized warning copy without exposing raw server identifiers.
  */
 function resolveScheduleWarning(warning: string, t: TaskGanttTranslator): string {
-  return warning === 'DependencyRippleRequiresReview'
-    ? t('tasks.schedule.warning.dependencyRipple')
+  if (warning === 'DependencyRippleRequiresReview') {
+    return t('tasks.schedule.warning.dependencyRipple')
+  }
+  return warning === 'SemanticBlockRelationsDoNotReschedule'
+    ? t('tasks.schedule.warning.semanticBlocks')
     : t('tasks.schedule.warning.generic')
 }

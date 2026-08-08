@@ -7,6 +7,7 @@ import {
   createAuditEventsClient,
   createAutomationInboundWebhookSecretStore,
   createAutomationClient,
+  createPlanningClient,
   createWorkItemConfigurationClient,
 } from './api-dependencies'
 import {
@@ -51,6 +52,7 @@ function createAutomationActionDependencies(
     auditEvents: createAuditEventsClient(),
     teamIssues,
     workItemConfigurations: createWorkItemConfigurationClient(),
+    planning: createPlanningClient(),
     fileProofing: createDefaultFileProofingClient(),
     workspaceSearch: new DynamoDbWorkspaceSearchClient(),
     workspaceSearchProjectionEnabled: shouldEnableWorkspaceSearchProjection(),

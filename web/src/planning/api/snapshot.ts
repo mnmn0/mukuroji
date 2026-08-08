@@ -1,4 +1,5 @@
 import type { PlanningSnapshot } from '@mukuroji/contracts'
+import { readPlanningSnapshot } from './contractValidation'
 import { PlanningApiError } from './errors'
 
 const planningApiBaseUrl = trimTrailingSlash(
@@ -14,10 +15,15 @@ const defaultPlanningApiErrorMessage = 'Unable to complete the planning request.
  * @returns Entity、dependency、Work Item link、critical path を含む snapshot です。
  */
 export function getPlanningSnapshot(accessToken: string) {
-  return requestJson<PlanningSnapshot>(`${planningApiBaseUrl}/planning`, accessToken)
+  return requestPlanningSnapshot(`${planningApiBaseUrl}/planning`, accessToken)
 }
 
-async function requestJson<T>(path: string, accessToken: string, init: RequestInit = {}) {
+/** Fetches and validates one authoritative Planning snapshot. */
+async function requestPlanningSnapshot(
+  path: string,
+  accessToken: string,
+  init: RequestInit = {},
+): Promise<PlanningSnapshot> {
   const response = await fetch(path, {
     ...init,
     headers: {
@@ -25,7 +31,7 @@ async function requestJson<T>(path: string, accessToken: string, init: RequestIn
       ...init.headers,
     },
   })
-  const data = await readJson<unknown>(response)
+  const data = await readJson(response)
 
   if (!response.ok) {
     const errorData = isErrorResponse(data) ? data : undefined
@@ -37,7 +43,15 @@ async function requestJson<T>(path: string, accessToken: string, init: RequestIn
     )
   }
 
-  return data as T
+  const snapshot = readPlanningSnapshot(data)
+  if (!snapshot) {
+    throw new PlanningApiError(
+      response.status,
+      defaultPlanningApiErrorMessage,
+      'InvalidPlanningSnapshot',
+    )
+  }
+  return snapshot
 }
 
 function isErrorResponse(value: unknown): value is { code?: string; message?: string } {
@@ -48,17 +62,19 @@ function isErrorResponse(value: unknown): value is { code?: string; message?: st
   return hasValidCode && hasValidMessage
 }
 
-async function readJson<T>(response: Response): Promise<T> {
+/** Reads a JSON response without trusting its runtime shape. */
+async function readJson(response: Response): Promise<unknown> {
   const text = await response.text()
 
   if (!text) {
-    return {} as T
+    return undefined
   }
 
   try {
-    return JSON.parse(text) as T
+    const parsed: unknown = JSON.parse(text)
+    return parsed
   } catch {
-    return {} as T
+    return undefined
   }
 }
 

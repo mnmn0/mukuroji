@@ -1,7 +1,9 @@
 import {
+  PLANNING_SCHEMA_VERSION,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
   type ResolvedWorkItemConfiguration,
+  type PlanningSnapshot,
 } from '@mukuroji/contracts'
 import type { TeamIssueDetail } from '../../issues/api'
 import type { ProjectTask } from '../api/tasks'
@@ -110,6 +112,57 @@ export const taskViewStoryTasks = [
     source: 'dynamodb',
   },
 ] satisfies ProjectTask[]
+
+/** Planning graph aligned with task-view stories for dependency chips and Gantt lines. */
+export const taskViewStoryPlanningSnapshot = {
+  schemaVersion: PLANNING_SCHEMA_VERSION,
+  revision: 4,
+  entities: [],
+  dependencies: [],
+  workItemDependencies: [
+    {
+      id: 'story-wireframe-brand',
+      predecessor: { teamId: 'core-team', workItemId: 'wireframe' },
+      successor: { teamId: 'core-team', workItemId: 'brand-guideline' },
+      type: 'start-to-finish',
+      lagDays: -1,
+      constraint: { anchor: 'finish', kind: 'not-after', date: '2026-06-05' },
+      createdAt: '2026-06-01T00:00:00.000Z',
+      updatedAt: '2026-06-01T00:00:00.000Z',
+    },
+  ],
+  workItemLinks: [],
+  workItems: taskViewStoryTasks.map((task) => ({
+    dueDate: task.dueDate,
+    id: task.id,
+    projectId: task.assignedProjectId,
+    revision: task.revision,
+    schedule: task.schedule,
+    statusCategory: task.statusCategory,
+    teamId: task.teamId,
+    title: task.title,
+  })),
+  criticalPath: { entityIds: [], slackByEntityId: {}, totalDurationDays: 0 },
+  workItemDependencySummary: {
+    affectedMilestoneIds: [],
+    affectedProjectIds: ['refero'],
+    affectedProjects: [{ projectId: 'refero', teamId: 'core-team' }],
+    conflicts: [],
+    criticalPath: {
+      slackByWorkItemKey: {
+        'core-team/brand-guideline': 0,
+        'core-team/wireframe': 0,
+      },
+      totalDurationDays: 5,
+      workItems: [
+        { teamId: 'core-team', workItemId: 'wireframe' },
+        { teamId: 'core-team', workItemId: 'brand-guideline' },
+      ],
+    },
+    unresolvedBlockerCount: 1,
+  },
+  updatedAt: '2026-06-01T00:00:00.000Z',
+} satisfies PlanningSnapshot
 
 /** Matching detail response used by the independent selected-task story. */
 export const taskViewStorySelectedIssueDetail = {

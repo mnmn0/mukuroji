@@ -1,9 +1,11 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { teamWorkItemConfigurationFixture } from '../../work-items/fixtures'
+import { createWorkItemDependencySummaries } from '../../work-items/model/workItemDependencies'
 import { TaskBoardView } from './TaskBoardView'
 import {
   taskViewStoryConfigurationsByTeam,
+  taskViewStoryPlanningSnapshot,
   taskViewStoryStatusColumns,
   taskViewStoryTasks,
 } from './TaskView.stories.fixtures'
@@ -28,6 +30,7 @@ const meta = {
     configuration: teamWorkItemConfigurationFixture,
     configurationFailedTeamIds: [],
     configurationsByTeam: taskViewStoryConfigurationsByTeam,
+    dependencySummaries: createWorkItemDependencySummaries(taskViewStoryPlanningSnapshot),
     locale: 'ja',
     personLabels: {
       'sato@example.com': '佐藤 花子',

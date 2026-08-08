@@ -14,6 +14,8 @@ const retryableAwsErrorCodes = new Set([
 const trustedExternalAutomationFailureCodes = new Set([
   ...retryableAwsErrorCodes,
   'ConditionalCheckFailedException',
+  'PlanningWorkItemDependencyInUse',
+  'WorkItemAuthorizationChanged',
   'WorkItemRevisionConflict',
 ])
 

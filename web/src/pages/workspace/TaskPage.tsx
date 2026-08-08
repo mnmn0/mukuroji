@@ -2,11 +2,10 @@ import type {
   BulkOperationPreview,
   BulkOperationRequest,
   ResolvedWorkItemConfiguration,
+  WorkItemDependencyEndpoint,
   WorkItemRelation,
-  WorkItemScheduleChangePreview,
-  WorkItemScheduleOperation,
 } from '@mukuroji/contracts'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useLocation, useNavigate, useParams, useSearchParams } from 'react-router'
 import { canMutateWorkspaceContent } from '../../auth/api'
 import { useCurrentUser } from '../../auth/queries/useCurrentUser'
@@ -32,6 +31,7 @@ import {
   getProjectUsers,
   isActiveProjectAssignmentCandidate,
   type ProjectMember,
+  type ProjectMemberRole,
   type ProjectUser,
   type UpdateProjectMemberInput,
   removeProjectMember,
@@ -39,17 +39,22 @@ import {
 } from '../../projects/api'
 import { useProjectDirectory } from '../../projects/queries/useProjectDirectory'
 import {
+  usePlanningProjectRoles,
   useProjectMembers,
   useProjectUsers,
 } from '../../projects/queries/useProjectMembers'
 import {
   createTeamIssue,
-  previewTeamIssueSchedule,
   TeamIssuesApiError,
   type TeamIssue,
   type UpdateTeamIssueInput,
   updateTeamIssue,
 } from '../../issues/api'
+import { usePlanningSnapshot } from '../../planning/queries/usePlanningSnapshot'
+import {
+  canManagePlanningWorkItemDependencyEndpoint,
+  createPlanningAccessSnapshot,
+} from '../../planning/model/permissions'
 import {
   useProjectIssues,
   useTeamIssueDetail,
@@ -71,6 +76,7 @@ import {
   resolveCurrentUserProjectKey,
   resolveProjectTaskRouteContext,
 } from '../../tasks/model/taskRoute'
+import { createTaskScheduleMutationController } from '../../tasks/mutations/createTaskScheduleMutationController'
 import { applyTaskPatchOptimistically, type TaskCreateContext } from '../../tasks/model/taskView'
 import { TaskScreen } from '../../tasks/ui/TaskScreen'
 import type { WorkspaceMember } from '../../workspace/api'
@@ -100,6 +106,7 @@ type ProjectWorkItemConfigurationLoadResult = {
 }
 
 const emptyProjectMembers: ProjectMember[] = []
+const emptyProjectRoles: Readonly<Record<string, ProjectMemberRole>> = {}
 const emptyProjectUsers: ProjectUser[] = []
 const emptyTeamIssues: TeamIssue[] = []
 const emptyWorkspaceMembers: WorkspaceMember[] = []
@@ -156,7 +163,7 @@ export function TaskPage() {
     isQuickAccessSaving,
     onToggleProjectQuickAccess,
   } = useWorkspaceRouteContext()
-  const mutationRequestRunner = useRef(createMutationRequestRunner()).current
+  const [mutationRequestRunner] = useState(() => createMutationRequestRunner())
   const [searchParams, setSearchParams] = useSearchParams()
   const projectId = params.projectId ?? 'refero'
   const selectedTeamId = searchParams.get('teamId') ?? undefined
@@ -184,8 +191,17 @@ export function TaskPage() {
     Boolean(user && !currentUserError),
   )
   const {
+    data: planningSnapshot,
+    error: planningError,
+    isLoading: isPlanningLoading,
+    key: planningKey,
+    mutate: mutatePlanning,
+  } = usePlanningSnapshot(accessToken, Boolean(user && !currentUserError))
+  const {
     data: teams = [],
     error: projectDirectoryError,
+    isLoading: isProjectDirectoryLoading,
+    key: projectDirectoryKey,
   } = useProjectDirectory({
     accessToken,
     enabled: Boolean(user && !currentUserError),
@@ -220,6 +236,27 @@ export function TaskPage() {
   )
   const currentUserProjectKey = resolveCurrentUserProjectKey(user)
   const canMutateContent = canMutateWorkspaceContent(user)
+  const planningProjectIds = useMemo(
+    () => [...new Set(teams.flatMap((team) => team.projects.map((project) => project.id)))],
+    [teams],
+  )
+  const {
+    data: planningProjectRolesResult,
+    error: planningProjectRolesError,
+    isLoading: isPlanningProjectRolesLoading,
+    key: planningProjectRolesKey,
+    mutate: mutatePlanningProjectRoles,
+  } = usePlanningProjectRoles(
+    accessToken,
+    currentUserProjectKey,
+    planningProjectIds,
+    Boolean(user && !currentUserError && !user.isSystemAdmin && canMutateContent),
+  )
+  const planningProjectRoles = planningProjectRolesResult?.roles ?? emptyProjectRoles
+  const planningAccess = useMemo(
+    () => createPlanningAccessSnapshot(teams, planningProjectRoles),
+    [planningProjectRoles, teams],
+  )
   const canManageProjectMembers =
     canMutateContent && (
       Boolean(user?.isSystemAdmin) ||
@@ -342,6 +379,7 @@ export function TaskPage() {
     'project-issue-detail',
   )
   const [issueUpdateError, setIssueUpdateError] = useState<readonly [string, string] | undefined>()
+  const [scheduleRefreshError, setScheduleRefreshError] = useState<unknown>()
   const selectedIssueUpdateErrorKey = resolvedSelectedIssue
     ? JSON.stringify([
         resolvedSelectedIssue.teamId,
@@ -383,6 +421,9 @@ export function TaskPage() {
     currentUserError,
     [
       workspaceAccessError,
+      planningError,
+      planningProjectRolesError,
+      ...(planningProjectRolesResult?.errors ?? []),
       projectDirectoryError,
       taskError,
       projectMembersError,
@@ -422,6 +463,23 @@ export function TaskPage() {
       throw error
     }
   }
+  const scheduleMutations = createTaskScheduleMutationController({
+    accessToken,
+    guardEnterpriseSession,
+    mutatePlanning,
+    mutateProjectTasks,
+    mutateSelectedIssueDetail,
+    mutationRequestRunner,
+    onBackgroundRefreshError: (error) => {
+      redirectEnterpriseSessionError(error)
+      setScheduleRefreshError(error)
+    },
+    planningAccess,
+    planningSnapshot,
+    projectId,
+    t,
+    user,
+  })
   const taskErrorMessage = useMemo(() => {
     if (currentUserErrorAction?.kind === 'stay') {
       return t('tasks.error.loading')
@@ -434,7 +492,18 @@ export function TaskPage() {
     const message = taskError instanceof Error ? taskError.message : 'tasks.error.loading'
 
     return message === 'tasks.error.loading' ? t('tasks.error.loading') : message
-  }, [currentUserErrorAction?.kind, taskError, t])
+  }, [
+    currentUserErrorAction?.kind,
+    taskError,
+    t,
+  ])
+  const planningErrorMessage = planningError || planningProjectRolesError || scheduleRefreshError ||
+    (planningProjectRolesResult?.errors.length ?? 0) > 0
+    ? t('planning.error')
+    : undefined
+  const isPlanningDependencyLoading = Boolean(planningKey && isPlanningLoading) ||
+    Boolean(planningProjectRolesKey && isPlanningProjectRolesLoading) ||
+    Boolean(projectDirectoryKey && isProjectDirectoryLoading)
   const detailErrorMessage = issueUpdateErrorMessage ?? (
     detailError ? t('tasks.detail.error') : undefined
   )
@@ -520,6 +589,15 @@ export function TaskPage() {
     user?.attributes['custom:directory_id'] ??
     ''
   ).trim()
+
+  /** Mirrors the server's manager check for one visible dependency endpoint. */
+  const canManageScheduleDependencyEndpoint = (endpoint: WorkItemDependencyEndpoint) =>
+    canManagePlanningWorkItemDependencyEndpoint(
+      user,
+      endpoint,
+      planningSnapshot?.workItems ?? [],
+      planningAccess,
+    )
 
   const handleCreateTask = async (
     input: CreateProjectTaskInput,
@@ -744,31 +822,6 @@ export function TaskPage() {
     }
   }
 
-  /** Validates one interactive schedule operation against its observed revision. */
-  const handlePreviewScheduleChange = async (
-    task: ProjectTask,
-    operation: WorkItemScheduleOperation,
-  ): Promise<WorkItemScheduleChangePreview> => {
-    if (!accessToken) {
-      throw new Error(t('tasks.action.updateError'))
-    }
-
-    try {
-      return await guardEnterpriseSession(previewTeamIssueSchedule(
-        task.teamId,
-        task.id,
-        accessToken,
-        { expectedRevision: task.revision, operation },
-      ))
-    } catch (error) {
-      redirectEnterpriseSessionError(error)
-      if (error instanceof TeamIssuesApiError && error.code === 'WorkItemRevisionConflict') {
-        await Promise.all([mutateProjectTasks(), mutateSelectedIssueDetail()])
-      }
-      throw error
-    }
-  }
-
   const revalidateAfterBulkOperation = async () => {
     await Promise.all([
       mutateProjectTasks(),
@@ -924,6 +977,7 @@ export function TaskPage() {
         : false}
       isProjectQuickAccessSaving={isQuickAccessLoading || isQuickAccessSaving}
       isRelationCandidatesLoading={Boolean(relationCandidatesKey && isRelationCandidatesLoading)}
+      isPlanningLoading={isPlanningDependencyLoading}
       locale={locale}
       activeProjectTeamId={interactionTeamId}
       onCreateTask={canCreateProjectTask ? handleCreateTask : undefined}
@@ -931,6 +985,7 @@ export function TaskPage() {
       assigneeErrorMessage={projectMembersErrorMessage}
       assigneeOptions={activeProjectMembers}
       canManageProjectMembers={canManageProjectMembers}
+      canManageScheduleDependencyEndpoint={canManageScheduleDependencyEndpoint}
       collaboration={collaboration}
       artifacts={issueArtifacts}
       currentWorkspaceMemberKey={workspaceAccess?.currentMember.memberKey}
@@ -951,7 +1006,33 @@ export function TaskPage() {
       onSelectedIssueChange={handleSelectedIssueChange}
       onUpdateIssue={canMutateContent ? handleUpdateIssue : undefined}
       onUpdateTask={canMutateContent ? handleUpdateTask : undefined}
-      onPreviewScheduleChange={canMutateContent ? handlePreviewScheduleChange : undefined}
+      onPreviewScheduleChange={canMutateContent
+        ? scheduleMutations.previewScheduleChange
+        : undefined}
+      onConfirmScheduleChange={canMutateContent
+        ? scheduleMutations.confirmScheduleChange
+        : undefined}
+      onCreateScheduleDependency={accessToken && planningSnapshot &&
+          !planningErrorMessage && !isPlanningDependencyLoading
+        ? scheduleMutations.createScheduleDependency
+        : undefined}
+      onDeleteScheduleDependency={accessToken && planningSnapshot &&
+          !planningErrorMessage && !isPlanningDependencyLoading
+        ? scheduleMutations.deleteScheduleDependency
+        : undefined}
+      onRetryPlanning={planningErrorMessage
+        ? () => void Promise.all([mutatePlanning(), mutatePlanningProjectRoles()])
+            .then(() => {
+              setScheduleRefreshError(undefined)
+            })
+            .catch(() => undefined)
+        : undefined}
+      onUpdateScheduleDependency={accessToken && planningSnapshot &&
+          !planningErrorMessage && !isPlanningDependencyLoading
+        ? scheduleMutations.updateScheduleDependency
+        : undefined}
+      planningErrorMessage={planningErrorMessage}
+      planningSnapshot={planningSnapshot}
       onUpdateProjectMember={canManageProjectMembers ? handleUpdateProjectMember : undefined}
       onBulkApply={canMutateContent && workspaceId ? handleBulkApply : undefined}
       onBulkPreview={canMutateContent && workspaceId ? handleBulkPreview : undefined}

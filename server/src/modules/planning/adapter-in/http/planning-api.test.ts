@@ -4,6 +4,7 @@ import {
 const {
   configureFakeProjectClients,
   createCyclePlanningInput,
+  getTestAppDependencies,
   planningApiRequest,
   resetTestApp,
   seedPlanningWorkspaceParentAndScopedChild,
@@ -12,11 +13,16 @@ const {
 import {
   InMemoryPlanningClient,
 } from '../../planning'
+import { createInMemoryDeveloperPlatformAdapters } from '../../../developer-platform/adapter-out/in-memory/developer-platform-adapters'
+import type { CompleteIdempotencyRequest } from '../../../developer-platform/application/ports'
 import type {
   PlanningMutationResponse,
   PlanningSnapshot,
 } from '@mukuroji/contracts'
-import { createDefaultDueDateWorkItemSchedule } from '@mukuroji/contracts'
+import {
+  PLANNING_SCHEMA_VERSION,
+  createDefaultDueDateWorkItemSchedule,
+} from '@mukuroji/contracts'
 import {
   afterEach,
   expect,
@@ -27,6 +33,84 @@ afterEach(() => {
   resetTestApp()
 })
 
+/** Creates the canonical two-endpoint dependency input shared by API idempotency tests. */
+function createWorkItemDependencyInput(expectedRevision = 0) {
+  return {
+    id: 'dependency-onboarding-work-item-1',
+    predecessor: { teamId: 'core-team', workItemId: 'onboarding-friction' },
+    successor: { teamId: 'core-team', workItemId: 'work-item-1' },
+    type: 'finish-to-finish',
+    lagDays: 0,
+    expectedRevision,
+  }
+}
+
+/**
+ * Configures an in-memory reservation store whose prepared completion simulates atomic commit.
+ *
+ * @param planning - Planning client retained across retries.
+ * @returns Captured compact receipt responses and the configured Planning client.
+ */
+function configureWorkItemDependencyIdempotency(
+  planning = new InMemoryPlanningClient(() => new Date('2026-08-07T00:00:00.000Z')),
+) {
+  const platform = createInMemoryDeveloperPlatformAdapters()
+  const preparedResponses: unknown[] = []
+  const preparedCompletions: CompleteIdempotencyRequest[] = []
+
+  /** Completes exactly one staged receipt only after the simulated Planning commit succeeds. */
+  async function completePreparedMutation<Result>(
+    operation: () => Promise<Result>,
+  ): Promise<Result> {
+    const firstPendingIndex = preparedCompletions.length
+    try {
+      const result = await operation()
+      const completions = preparedCompletions.splice(firstPendingIndex)
+      const completion = completions[0]
+      if (!completion || completions.length !== 1) {
+        throw new Error('Expected exactly one staged dependency receipt completion.')
+      }
+      await platform.idempotency.completeIdempotency(completion)
+      return result
+    } catch (error) {
+      preparedCompletions.splice(firstPendingIndex)
+      throw error
+    }
+  }
+
+  const createDependency = planning.createWorkItemDependency.bind(planning)
+  planning.createWorkItemDependency = (...input) => completePreparedMutation(
+    () => createDependency(...input),
+  )
+  const updateDependency = planning.updateWorkItemDependency.bind(planning)
+  planning.updateWorkItemDependency = (...input) => completePreparedMutation(
+    () => updateDependency(...input),
+  )
+  const deleteDependency = planning.deleteWorkItemDependency.bind(planning)
+  planning.deleteWorkItemDependency = (...input) => completePreparedMutation(
+    () => deleteDependency(...input),
+  )
+  setTestAppDependencies({
+    planning,
+    idempotency: platform.idempotency,
+    transactions: {
+      async prepareIdempotencyCompletionTransactWrite(request) {
+        preparedResponses.push(request.response)
+        preparedCompletions.push(request)
+        return {
+          transactWriteItem: {
+            Put: {
+              TableName: 'DeveloperPlatformTable',
+              Item: { entryType: 'idempotency', state: 'completed' },
+            },
+          },
+        }
+      },
+    },
+  })
+  return { planning, preparedResponses }
+}
+
 test('returns an authenticated empty Planning graph with accessible Work Item projections', async () => {
   configureFakeProjectClients(true, { role: 'member', workspaceRole: 'member' })
   setTestAppDependencies({ planning: new InMemoryPlanningClient() })
@@ -36,7 +120,7 @@ test('returns an authenticated empty Planning graph with accessible Work Item pr
   expect(response.status).toBe(200)
   const planning = await response.json() as PlanningSnapshot
   expect(planning).toMatchObject({
-    schemaVersion: 1,
+    schemaVersion: PLANNING_SCHEMA_VERSION,
     revision: 0,
     entities: [],
     dependencies: [],
@@ -110,6 +194,348 @@ test('lets managers build a scoped hierarchy and dependency graph', async () => 
       successorId: 'roadmap-b',
     }),
   ])
+})
+
+test('replays POST, PATCH, and DELETE dependency mutations without a second revision increment', async () => {
+  configureFakeProjectClients(true, {
+    role: 'manager',
+    workspaceRole: 'member',
+    teamIssueCount: 2,
+  })
+  const { preparedResponses } = configureWorkItemDependencyIdempotency()
+  const createInput = createWorkItemDependencyInput()
+
+  const created = await planningApiRequest(
+    '/api/planning/work-item-dependencies',
+    'POST',
+    createInput,
+    'dependency-create-response-loss',
+  )
+  expect(created.status).toBe(201)
+  expect(await created.json()).toMatchObject({ revision: 1 })
+  const replayedCreate = await planningApiRequest(
+    '/api/planning/work-item-dependencies',
+    'POST',
+    createInput,
+    'dependency-create-response-loss',
+  )
+  expect(replayedCreate.status).toBe(201)
+  expect(replayedCreate.headers.get('Idempotency-Replayed')).toBe('true')
+  expect(await replayedCreate.json()).toMatchObject({ revision: 1 })
+
+  const updateInput = {
+    expectedRevision: 1,
+    patch: {
+      constraint: {
+        anchor: 'finish',
+        kind: 'not-before',
+        date: '2026-06-18',
+      },
+    },
+  }
+  const updated = await planningApiRequest(
+    '/api/planning/work-item-dependencies/dependency-onboarding-work-item-1',
+    'PATCH',
+    updateInput,
+    'dependency-update-response-loss',
+  )
+  const updatedBody = await updated.json()
+  expect({ body: updatedBody, status: updated.status }).toMatchObject({
+    status: 200,
+    body: {
+      revision: 2,
+      workItemDependencies: [{
+        id: 'dependency-onboarding-work-item-1',
+        constraint: {
+          anchor: 'finish',
+          kind: 'not-before',
+          date: '2026-06-18',
+        },
+      }],
+    },
+  })
+  const replayedUpdate = await planningApiRequest(
+    '/api/planning/work-item-dependencies/dependency-onboarding-work-item-1',
+    'PATCH',
+    updateInput,
+    'dependency-update-response-loss',
+  )
+  expect(replayedUpdate.status).toBe(200)
+  expect(replayedUpdate.headers.get('Idempotency-Replayed')).toBe('true')
+  expect(await replayedUpdate.json()).toMatchObject({ revision: 2 })
+
+  const deleteInput = { expectedRevision: 2 }
+  const deleted = await planningApiRequest(
+    '/api/planning/work-item-dependencies/dependency-onboarding-work-item-1',
+    'DELETE',
+    deleteInput,
+    'dependency-delete-response-loss',
+  )
+  expect(deleted.status).toBe(200)
+  expect(await deleted.json()).toMatchObject({ revision: 3, workItemDependencies: [] })
+  const replayedDelete = await planningApiRequest(
+    '/api/planning/work-item-dependencies/dependency-onboarding-work-item-1',
+    'DELETE',
+    deleteInput,
+    'dependency-delete-response-loss',
+  )
+  expect(replayedDelete.status).toBe(200)
+  expect(replayedDelete.headers.get('Idempotency-Replayed')).toBe('true')
+  expect(await replayedDelete.json()).toMatchObject({
+    revision: 3,
+    workItemDependencies: [],
+  })
+  expect(preparedResponses).toHaveLength(3)
+})
+
+test('binds dependency idempotency keys to the canonical method, path, and stable body', async () => {
+  configureFakeProjectClients(true, {
+    role: 'manager',
+    workspaceRole: 'member',
+    teamIssueCount: 2,
+  })
+  configureWorkItemDependencyIdempotency()
+  const createInput = createWorkItemDependencyInput()
+  const first = await planningApiRequest(
+    '/api/planning/work-item-dependencies',
+    'POST',
+    createInput,
+    'dependency-fingerprint',
+  )
+  expect(first.status).toBe(201)
+
+  const differentBody = await planningApiRequest(
+    '/api/planning/work-item-dependencies',
+    'POST',
+    { ...createInput, lagDays: 1 },
+    'dependency-fingerprint',
+  )
+  expect(differentBody.status).toBe(409)
+  expect(await differentBody.json()).toMatchObject({
+    code: 'PlanningWorkItemDependencyIdempotencyConflict',
+  })
+
+  const differentMethodAndPath = await planningApiRequest(
+    '/api/planning/work-item-dependencies/dependency-onboarding-work-item-1',
+    'PATCH',
+    { expectedRevision: 1, patch: { lagDays: 2 } },
+    'dependency-fingerprint',
+  )
+  expect(differentMethodAndPath.status).toBe(409)
+  expect(await differentMethodAndPath.json()).toMatchObject({
+    code: 'PlanningWorkItemDependencyIdempotencyConflict',
+  })
+})
+
+test('passes only canonical dependency fields across the Planning application boundary', async () => {
+  configureFakeProjectClients(true, {
+    role: 'manager',
+    workspaceRole: 'member',
+    teamIssueCount: 2,
+  })
+  const planning = new InMemoryPlanningClient()
+  const createDependency = planning.createWorkItemDependency.bind(planning)
+  let receivedInput: unknown
+  planning.createWorkItemDependency = (...input) => {
+    receivedInput = input[1]
+    return createDependency(...input)
+  }
+  configureWorkItemDependencyIdempotency(planning)
+
+  const response = await planningApiRequest(
+    '/api/planning/work-item-dependencies',
+    'POST',
+    {
+      ...createWorkItemDependencyInput(),
+      adapterOwnedField: 'must-not-cross-boundary',
+    },
+    'dependency-canonical-input',
+  )
+
+  expect(response.status).toBe(201)
+  expect(receivedInput).toEqual(createWorkItemDependencyInput())
+})
+
+test('returns stable validation and in-progress errors for dependency idempotency keys', async () => {
+  configureFakeProjectClients(true, {
+    role: 'manager',
+    workspaceRole: 'member',
+    teamIssueCount: 2,
+  })
+  configureWorkItemDependencyIdempotency()
+
+  for (const key of [undefined, 'x'.repeat(257)]) {
+    const response = await planningApiRequest(
+      '/api/planning/work-item-dependencies',
+      'POST',
+      createWorkItemDependencyInput(),
+      key,
+    )
+    expect(response.status).toBe(400)
+    expect(await response.json()).toMatchObject({
+      code: 'InvalidPlanningWorkItemDependencyIdempotencyKey',
+    })
+  }
+
+  const currentIdempotency = getTestAppDependencies().developerPlatform.idempotency
+  setTestAppDependencies({
+    idempotency: {
+      reserveIdempotency: async () => ({ status: 'in-progress' }),
+      completeIdempotency: (request) => currentIdempotency.completeIdempotency(request),
+      releaseIdempotency: (request) => currentIdempotency.releaseIdempotency(request),
+    },
+  })
+  const inProgress = await planningApiRequest(
+    '/api/planning/work-item-dependencies',
+    'POST',
+    createWorkItemDependencyInput(),
+    'dependency-in-progress',
+  )
+  expect(inProgress.status).toBe(409)
+  expect(await inProgress.json()).toMatchObject({
+    code: 'PlanningWorkItemDependencyIdempotencyInProgress',
+  })
+})
+
+test('reauthorizes both stored dependency endpoints before replaying a receipt', async () => {
+  const projects = [
+    { id: 'refero', name: 'Refero', tone: 'blue' },
+    { id: 'project-b', name: 'Project B', tone: 'green' },
+  ] satisfies Array<{
+    id: string
+    name: string
+    tone: 'blue' | 'green'
+  }>
+  const assignedProjects = {
+    'onboarding-friction': 'refero',
+    'work-item-1': 'project-b',
+  }
+  configureFakeProjectClients(true, {
+    role: 'manager',
+    workspaceRole: 'member',
+    teamIssueCount: 2,
+    teamProjects: projects,
+    detailAssignedProjectIds: assignedProjects,
+    projectAccesses: [
+      { projectId: 'refero', role: 'manager' },
+      { projectId: 'project-b', role: 'manager' },
+    ],
+  })
+  configureWorkItemDependencyIdempotency()
+  const input = createWorkItemDependencyInput()
+  const first = await planningApiRequest(
+    '/api/planning/work-item-dependencies',
+    'POST',
+    input,
+    'dependency-revoked-endpoint',
+  )
+  expect(first.status).toBe(201)
+
+  configureFakeProjectClients(true, {
+    role: 'manager',
+    workspaceRole: 'member',
+    teamIssueCount: 2,
+    teamProjects: projects,
+    detailAssignedProjectIds: assignedProjects,
+    projectAccesses: [
+      { projectId: 'refero', role: 'manager' },
+      { projectId: 'project-b', role: 'member' },
+    ],
+  })
+  const replay = await planningApiRequest(
+    '/api/planning/work-item-dependencies',
+    'POST',
+    input,
+    'dependency-revoked-endpoint',
+  )
+  expect(replay.status).toBe(403)
+  expect(replay.headers.get('Idempotency-Replayed')).toBeNull()
+})
+
+test('stores only a compact dependency receipt when the current Planning snapshot is large', async () => {
+  configureFakeProjectClients(true, {
+    role: 'manager',
+    workspaceRole: 'member',
+    teamIssueCount: 180,
+  })
+  const { preparedResponses } = configureWorkItemDependencyIdempotency()
+  const response = await planningApiRequest(
+    '/api/planning/work-item-dependencies',
+    'POST',
+    createWorkItemDependencyInput(),
+    'dependency-compact-receipt',
+  )
+  expect(response.status).toBe(201)
+  const responsePayload = JSON.stringify(await response.json())
+  const receiptPayload = JSON.stringify(preparedResponses[0])
+  expect(responsePayload.length).toBeGreaterThan(receiptPayload.length * 20)
+  expect(receiptPayload.length).toBeLessThan(1_500)
+  expect(receiptPayload).not.toContain('workItems')
+  expect(receiptPayload).not.toContain('初回オンボーディング')
+  expect(receiptPayload).toContain('"operation":"create"')
+})
+
+test('fails closed when a valid replay receipt is ahead of current Planning state', async () => {
+  configureFakeProjectClients(true, {
+    role: 'manager',
+    workspaceRole: 'member',
+    teamIssueCount: 2,
+  })
+  configureWorkItemDependencyIdempotency()
+  const input = createWorkItemDependencyInput()
+  const first = await planningApiRequest(
+    '/api/planning/work-item-dependencies',
+    'POST',
+    input,
+    'dependency-restored-state',
+  )
+  expect(first.status).toBe(201)
+
+  setTestAppDependencies({
+    planning: new InMemoryPlanningClient(() => new Date('2026-08-07T00:00:00.000Z')),
+  })
+  const replay = await planningApiRequest(
+    '/api/planning/work-item-dependencies',
+    'POST',
+    input,
+    'dependency-restored-state',
+  )
+  expect(replay.status).toBe(503)
+  expect(await replay.json()).toMatchObject({
+    code: 'InvalidStoredPlanningWorkItemDependencyMutationReceipt',
+  })
+})
+
+test('releases a dependency reservation after a precommit revision conflict', async () => {
+  configureFakeProjectClients(true, {
+    role: 'manager',
+    workspaceRole: 'member',
+    teamIssueCount: 2,
+  })
+  configureWorkItemDependencyIdempotency()
+  const input = createWorkItemDependencyInput(1)
+  const stale = await planningApiRequest(
+    '/api/planning/work-item-dependencies',
+    'POST',
+    input,
+    'dependency-release-precommit',
+  )
+  expect(stale.status).toBe(409)
+
+  const advanced = await planningApiRequest(
+    '/api/planning/entities',
+    'POST',
+    createCyclePlanningInput('cycle-before-dependency', 0),
+  )
+  expect(advanced.status).toBe(201)
+  const retried = await planningApiRequest(
+    '/api/planning/work-item-dependencies',
+    'POST',
+    input,
+    'dependency-release-precommit',
+  )
+  expect(retried.status).toBe(201)
+  expect(await retried.json()).toMatchObject({ revision: 2 })
 })
 
 test('requires parent scope permission when creating a Planning child', async () => {

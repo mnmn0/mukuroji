@@ -13,6 +13,7 @@ import {
   applyWorkItemScheduleOperation,
   calculateWorkItemScheduleDurationDays,
   calculateWorkItemScheduleEndDate,
+  calculateWorkItemScheduleStartDate,
   deriveWorkItemScheduleDueDate,
   isWorkItemSchedule,
   normalizeWorkItemSchedule,
@@ -232,6 +233,11 @@ test('counts inclusive working dates and resolves an end across holidays', () =>
     2,
     calendarPolicy,
   )).toBe('2026-03-10')
+  expect(calculateWorkItemScheduleStartDate(
+    '2026-03-10',
+    2,
+    calendarPolicy,
+  )).toBe('2026-03-06')
   expectScheduleError(
     () => calculateWorkItemScheduleDurationDays(
       '2026-03-10',
@@ -386,7 +392,18 @@ test('derives deadline projections and builds a self-only preview', () => {
         endDate: '2026-03-13',
         durationDays: 2,
       },
+      dateDeltaDays: 3,
     }],
+    evaluatedRevisions: [{
+      teamId: 'team-1',
+      workItemId: 'work-item-1',
+      expectedRevision: 7,
+    }],
+    conflicts: [],
+    affectedProjects: [],
+    affectedProjectIds: [],
+    affectedMilestoneIds: [],
+    requiresConfirmation: false,
     warnings: [],
   })
   expect(deriveWorkItemScheduleDueDate({

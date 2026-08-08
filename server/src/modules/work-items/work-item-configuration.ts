@@ -75,6 +75,67 @@ export type WorkItemConfigurationGuard = {
   revision: number
 }
 
+/**
+ * Creates a DynamoDB guard for the semantic relation graph revision observed by a schedule preview.
+ *
+ * Schedule dependencies are owned by Planning, but a confirmed preview also preserves the
+ * separately displayed semantic-block warning. The guard prevents that warning context from
+ * changing between preview and the atomic schedule transaction.
+ *
+ * @param tableName - Work Item configuration table containing relation metadata.
+ * @param workspaceId - Owning Workspace identifier.
+ * @param teamId - Team whose semantic relation graph was read.
+ * @param expectedRevision - Non-negative graph revision returned by the preview.
+ * @returns One DynamoDB ConditionCheck ready for the schedule cascade transaction.
+ */
+export function createWorkItemRelationGraphRevisionConditionCheck(
+  tableName: string,
+  workspaceId: string,
+  teamId: string,
+  expectedRevision: number,
+): NonNullable<TransactWriteCommandInput['TransactItems']>[number] {
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
+    throw new WorkItemConfigurationError(
+      400,
+      'InvalidWorkItemRelationGraphRevision',
+      'Work Item relation graph revision must be a non-negative safe integer.',
+    )
+  }
+  const key = {
+    scopeKey: createWorkItemConfigurationScopeKey(workspaceId, 'team', teamId),
+    recordKey: RELATION_GRAPH_RECORD_KEY,
+  }
+  if (expectedRevision === 0) {
+    return {
+      ConditionCheck: {
+        TableName: tableName,
+        Key: key,
+        ConditionExpression:
+          'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
+      },
+    }
+  }
+  return {
+    ConditionCheck: {
+      TableName: tableName,
+      Key: key,
+      ConditionExpression:
+        '#entryType = :entryType AND #schemaVersion = :schemaVersion AND ' +
+        '#revision = :expectedRevision',
+      ExpressionAttributeNames: {
+        '#entryType': 'entryType',
+        '#schemaVersion': 'schemaVersion',
+        '#revision': 'revision',
+      },
+      ExpressionAttributeValues: {
+        ':entryType': 'relation-graph',
+        ':schemaVersion': WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+        ':expectedRevision': expectedRevision,
+      },
+    },
+  }
+}
+
 /** Configuration lock 取得後に実行する既存 Work Item の参照整合性検査です。 */
 export type WorkItemConfigurationUsageCheck = () => Promise<void>
 

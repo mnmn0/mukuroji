@@ -2,14 +2,19 @@ import type {
   BulkOperation,
   BulkOperationPreview,
   BulkOperationRequest,
+  PlanningSnapshot,
   ResolvedWorkItemConfiguration,
+  WorkItemDependencyEndpoint,
   WorkItemConfiguration,
   WorkItemPatch,
   WorkItemScheduleChangePreview,
+  WorkItemScheduleDependency,
+  WorkItemScheduleDependencyPatch,
   WorkItemScheduleOperation,
 } from '@mukuroji/contracts'
 import {
   useEffect,
+  useMemo,
   useRef,
   useState,
   type FocusEvent,
@@ -30,7 +35,11 @@ import { ChevronIcon } from '../../shared/ui/icons'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import type { WorkspaceMember } from '../../workspace/api'
 import type { WorkItemDefinitionFilter } from '../../work-items/model/workItemFilters'
+import {
+  createWorkItemDependencySummaries,
+} from '../../work-items/model/workItemDependencies'
 import { WorkItemDefinitionFilters } from '../../work-items/ui/WorkItemDefinitionFilters'
+import type { WorkItemDependencyCreateDraft } from '../../work-items/model/workItemDependencies'
 import type { WorkItemPersonOption } from '../../work-items/ui/WorkItemFieldsEditor'
 import type { ProjectTask } from '../api/tasks'
 import {
@@ -74,6 +83,8 @@ export type TaskWorkspaceProps = {
   assigneeOptions: ProjectMember[]
   /** Whether the current user may manage project members. */
   canManageProjectMembers: boolean
+  /** Determines whether the current user may manage one canonical dependency endpoint. */
+  canManageScheduleDependencyEndpoint?: (endpoint: WorkItemDependencyEndpoint) => boolean
   /** Single-Team fallback Work Item configuration. */
   configuration?: WorkItemConfiguration
   /** Team-scoped Work Item configurations. */
@@ -100,6 +111,8 @@ export type TaskWorkspaceProps = {
   priorityFilter: PriorityFilter
   /** Current project id. */
   projectId: string
+  /** Authoritative canonical Work Item dependency graph. */
+  planningSnapshot?: PlanningSnapshot
   /** File controller scoped to the current project and Team. */
   projectFiles?: FileArtifactsController
   /** Current project members. */
@@ -143,6 +156,10 @@ export type TaskWorkspaceProps = {
   onLoadMoreProjectUsers?: () => Promise<void>
   /** Opens the inline task creation panel. */
   onCreateTaskOpen?: (context?: TaskCreateContext) => void
+  /** Creates a canonical Work Item schedule dependency. */
+  onCreateScheduleDependency?: (input: WorkItemDependencyCreateDraft) => void | Promise<void>
+  /** Deletes a canonical Work Item schedule dependency. */
+  onDeleteScheduleDependency?: (dependency: WorkItemScheduleDependency) => void | Promise<void>
   /** Changes the selected priority filter. */
   onPriorityFilterChange: (priorityFilter: PriorityFilter) => void
   /** Changes the project user search query. */
@@ -163,10 +180,11 @@ export type TaskWorkspaceProps = {
   onVisibleTaskSelectionChange: (selectionKeys: string[], selected: boolean) => void
   /** Updates a task through the shared Work Item mutation. */
   onUpdateTask?: (task: ProjectTask, input: WorkItemPatch) => Promise<ProjectTask>
-  /** Applies a schedule already confirmed by the Gantt or Calendar preview dialog. */
-  onApplyPreviewedScheduleChange?: (
+  /** Atomically confirms a previewed schedule operation and its dependency ripple. */
+  onConfirmScheduleChange?: (
     task: ProjectTask,
-    input: WorkItemPatch,
+    operation: WorkItemScheduleOperation,
+    preview: WorkItemScheduleChangePreview,
   ) => Promise<ProjectTask>
   /** Previews a schedule move, resize, or replacement before it is applied. */
   onPreviewScheduleChange?: (
@@ -179,6 +197,11 @@ export type TaskWorkspaceProps = {
     memberKey: string,
     input: UpdateProjectMemberInput,
   ) => Promise<void>
+  /** Updates a canonical Work Item schedule dependency rule. */
+  onUpdateScheduleDependency?: (
+    dependency: WorkItemScheduleDependency,
+    patch: WorkItemScheduleDependencyPatch,
+  ) => void | Promise<void>
   /** Current task search query. */
   searchQuery: string
   /** Composite keys of tasks selected for bulk operations. */
@@ -217,6 +240,7 @@ export function TaskWorkspace({
   assigneeFilter,
   assigneeOptions,
   canManageProjectMembers,
+  canManageScheduleDependencyEndpoint,
   configuration,
   configurationsByTeam,
   configurationFailedTeamIds,
@@ -230,6 +254,7 @@ export function TaskWorkspace({
   personOptions,
   priorityFilter,
   projectId,
+  planningSnapshot,
   projectFiles,
   projectMembers,
   projectMembersErrorMessage,
@@ -250,6 +275,8 @@ export function TaskWorkspace({
   onDefinitionFilterChange,
   onLoadMoreProjectUsers,
   onCreateTaskOpen,
+  onCreateScheduleDependency,
+  onDeleteScheduleDependency,
   onPriorityFilterChange,
   onProjectUserQueryChange,
   onRemoveProjectMember,
@@ -260,7 +287,8 @@ export function TaskWorkspace({
   onTaskSelectionChange,
   onVisibleTaskSelectionChange,
   onUpdateProjectMember,
-  onApplyPreviewedScheduleChange,
+  onUpdateScheduleDependency,
+  onConfirmScheduleChange,
   onUpdateTask,
   onPreviewScheduleChange,
   searchQuery,
@@ -281,6 +309,10 @@ export function TaskWorkspace({
   const [isDueDateMenuOpen, setIsDueDateMenuOpen] = useState(false)
   const [isSortMenuOpen, setIsSortMenuOpen] = useState(false)
   const assigneeFilterOptions = createAssigneeFilterOptions(allTasks, t)
+  const dependencySummaries = useMemo(
+    () => createWorkItemDependencySummaries(planningSnapshot),
+    [planningSnapshot],
+  )
 
   if (activeTab === 'permissions') {
     return (
@@ -498,6 +530,7 @@ export function TaskWorkspace({
           bulkWorkspaceId={bulkWorkspaceId}
           configuration={configuration}
           configurationsByTeam={configurationsByTeam}
+          dependencySummaries={dependencySummaries}
           locale={locale}
           onBulkApply={onBulkApply}
           onBulkOperationComplete={onBulkOperationComplete}
@@ -527,6 +560,7 @@ export function TaskWorkspace({
           configuration={configuration}
           configurationsByTeam={configurationsByTeam}
           configurationFailedTeamIds={configurationFailedTeamIds}
+          dependencySummaries={dependencySummaries}
           locale={locale}
           onSelectTask={onSelectTask}
           onCreateTaskOpen={onCreateTaskOpen}
@@ -542,12 +576,18 @@ export function TaskWorkspace({
       ) : null}
       {activeTab === 'gantt' && !taskErrorMessage ? (
         <TaskGanttView
+          allProjectTasks={allTasks}
+          canManageScheduleDependencyEndpoint={canManageScheduleDependencyEndpoint}
           configuration={configuration}
           configurationsByTeam={configurationsByTeam}
+          planningSnapshot={planningSnapshot}
+          onConfirmScheduleChange={onConfirmScheduleChange}
           onCreateTaskOpen={onCreateTaskOpen}
+          onCreateScheduleDependency={onCreateScheduleDependency}
+          onDeleteScheduleDependency={onDeleteScheduleDependency}
           onPreviewScheduleChange={onPreviewScheduleChange}
           onSelectTask={onSelectTask}
-          onUpdateTask={onApplyPreviewedScheduleChange ?? onUpdateTask}
+          onUpdateScheduleDependency={onUpdateScheduleDependency}
           projectId={projectId}
           t={t}
           tasks={tasks}
@@ -555,10 +595,10 @@ export function TaskWorkspace({
       ) : null}
       {activeTab === 'calendar' && !taskErrorMessage ? (
         <TaskCalendarView
+          onConfirmScheduleChange={onConfirmScheduleChange}
           onCreateTaskOpen={onCreateTaskOpen}
           onPreviewScheduleChange={onPreviewScheduleChange}
           onSelectTask={onSelectTask}
-          onUpdateTask={onApplyPreviewedScheduleChange ?? onUpdateTask}
           projectId={projectId}
           t={t}
           tasks={tasks}

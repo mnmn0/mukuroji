@@ -60,6 +60,10 @@ Create は完全な `schedule` を必須とし、update は完全な `schedule` 
 | `date-range` | 両端含む `startDate` / `endDate` と正の `durationDays`。 | schedule の `endDate` |
 | `milestone` | 同一の `startDate` / `endDate` と `durationDays=0`。 | schedule の `endDate` |
 
+Interactive な schedule 操作は、保存前に server preview を取得する。PlanningTable の canonical Work Item dependency が downstream にある場合、preview は各 Work Item の revision-bound before / after と signed date delta を返す。保存には preview の Planning revision を含む明示 confirm が必要で、server は graph と対象 Work Item revisions を再読して impact を再計算する。Constraint conflict、cycle、権限不足、stale revision がある場合は cascade 全体を拒否する。
+
+Work Item Relation Graph の `blocks` / `blockedBy` は意味上の blocker であり、単独では schedule を変更しない。自動 reschedule が必要な関係は PlanningTable の qualified Work Item schedule dependency として別に作成する。
+
 日付は `1000-01-01` から `9999-12-31` までの実在する `YYYY-MM-DD` に正規化する。`date-range.durationDays` は開始・終了を含む範囲で `calendarPolicy.workingWeekdays` に属し、`calendarPolicy.holidays` に含まれない日の数と完全に一致させる。`calendarPolicy.timeZone` は IANA timezone、稼働曜日は1件以上7件以下、祝日は重複のない local calendar date として最大512件まで保存する。通知と Web の due/overdue 判定は、現在時刻をこの time zone の local calendar date へ変換して同じ期限境界を使用する。`plannedEffortMinutes` は任意の非負の整数（分）であり、calendar duration とは別に扱う。
 
 Relation の正本は `WorkItemConfigurationTable` の Relation Graph row であり、Work Item row の `relationIds` は検索と backfill のための派生 projection である。Relation の作成・削除 transaction は、graph metadata と reciprocal row に加えて source / target 両方の `relationIds` を同時に更新する。この projection 更新では Work Item の `revision` と `updatedAt` を進めない。
