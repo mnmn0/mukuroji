@@ -8,7 +8,7 @@ import type {
   WorkItemScheduleDependency,
   WorkItemScheduleDependencyPatch,
 } from '@mukuroji/contracts'
-import { useMemo, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import {
   createWorkItemDependencyEndpointKey,
@@ -390,6 +390,10 @@ function DependencyRow({
 }: DependencyRowProps) {
   const hasConflicts = conflictCount > 0
   const [isDeleteConfirmationOpen, setIsDeleteConfirmationOpen] = useState(false)
+  /** Focuses the confirmation action when it is mounted after the delete trigger. */
+  const focusDeleteConfirmation = useCallback((node: HTMLButtonElement | null) => {
+    node?.focus()
+  }, [])
   const deleteConfirmation = t('workItems.dependencies.removeConfirm')
     .replace('{predecessor}', predecessorTitle)
     .replace('{successor}', successorTitle)
@@ -494,6 +498,7 @@ function DependencyRow({
                 className="workbench-button-secondary min-h-9 border-red-300 px-3 text-red-700"
                 disabled={busy}
                 onClick={() => void onDelete()}
+                ref={focusDeleteConfirmation}
                 type="button"
               >
                 {t('workItems.dependencies.removeConfirmAction')}
@@ -593,7 +598,7 @@ function DependencyCreateForm({
           <>
             <label className="grid gap-1.5 text-sm font-semibold">
               {t('workItems.dependencies.direction')}
-              <select className="workbench-input h-10 px-3" name="direction">
+              <select className="workbench-input h-10 w-full min-w-0 px-3" name="direction">
                 <option value="outgoing">{t('workItems.dependencies.outgoing')}</option>
                 <option value="incoming">{t('workItems.dependencies.incoming')}</option>
               </select>
@@ -659,7 +664,7 @@ function DependencyTypeSelect({ defaultValue = 'finish-to-start', t }: Dependenc
   return (
     <label className="grid gap-1.5 text-sm font-semibold">
       {t('workItems.dependencies.type')}
-      <select className="workbench-input h-10 px-3" defaultValue={defaultValue} name="dependencyType">
+      <select className="workbench-input h-10 w-full min-w-0 px-3" defaultValue={defaultValue} name="dependencyType">
         {dependencyTypes.map((type) => (
           <option key={type} value={type}>{t(`workItems.dependencies.type.${type}`)}</option>
         ))}
@@ -681,7 +686,7 @@ function DependencyLagInput({ defaultValue, t }: DependencyLagInputProps) {
   return (
     <label className="grid gap-1.5 text-sm font-semibold">
       {t('workItems.dependencies.lagDays')}
-      <input className="workbench-input h-10 px-3" defaultValue={defaultValue} name="lagDays" step="1" type="number" />
+      <input className="workbench-input h-10 w-full min-w-0 px-3" defaultValue={defaultValue} name="lagDays" step="1" type="number" />
       <span className="text-xs font-medium text-[var(--workbench-muted)]">{t('workItems.dependencies.lagHint')}</span>
     </label>
   )
@@ -708,7 +713,7 @@ function DependencyConstraintFields({
       <legend className="sr-only">{t('workItems.dependencies.constraint')}</legend>
       <label className="grid gap-1.5 text-sm font-semibold">
         {t('workItems.dependencies.constraint.kind')}
-        <select className="workbench-input h-10 px-3" defaultValue={constraint?.kind ?? ''} name="constraintKind">
+        <select className="workbench-input h-10 w-full min-w-0 px-3" defaultValue={constraint?.kind ?? ''} name="constraintKind">
           <option value="">{t('workItems.dependencies.constraint.none')}</option>
           <option value="on">{t('workItems.dependencies.constraint.kind.on')}</option>
           <option value="not-before">{t('workItems.dependencies.constraint.kind.not-before')}</option>
@@ -717,14 +722,14 @@ function DependencyConstraintFields({
       </label>
       <label className="grid gap-1.5 text-sm font-semibold">
         {t('workItems.dependencies.constraint.anchor')}
-        <select className="workbench-input h-10 px-3" defaultValue={constraint?.anchor ?? 'start'} name="constraintAnchor">
+        <select className="workbench-input h-10 w-full min-w-0 px-3" defaultValue={constraint?.anchor ?? 'start'} name="constraintAnchor">
           <option value="start">{t('workItems.dependencies.constraint.anchor.start')}</option>
           <option value="finish">{t('workItems.dependencies.constraint.anchor.finish')}</option>
         </select>
       </label>
       <label className="grid gap-1.5 text-sm font-semibold">
         {t('workItems.dependencies.constraint.date')}
-        <input className="workbench-input h-10 px-3" defaultValue={constraint?.date ?? ''} name="constraintDate" type="date" />
+        <input className="workbench-input h-10 w-full min-w-0 px-3" defaultValue={constraint?.date ?? ''} name="constraintDate" type="date" />
       </label>
     </fieldset>
   )

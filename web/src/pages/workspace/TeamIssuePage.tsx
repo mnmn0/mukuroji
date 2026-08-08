@@ -684,6 +684,7 @@ export function TeamIssuePage() {
         : undefined}
       onRetryPlanning={planningErrorMessage
         ? () => void Promise.all([mutatePlanning(), mutateProjectRoles()])
+            .catch(() => undefined)
         : undefined}
       onSelectIssue={(issueId) => navigate(createTeamIssuesPath(teamId, issueId))}
       onUpdateIssue={canMutateContent && !workItemConfigurationError ? handleUpdateIssue : undefined}

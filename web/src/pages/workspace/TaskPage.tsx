@@ -1021,9 +1021,11 @@ export function TaskPage() {
         ? scheduleMutations.deleteScheduleDependency
         : undefined}
       onRetryPlanning={planningErrorMessage
-        ? () => void Promise.all([mutatePlanning(), mutatePlanningProjectRoles()]).then(() => {
-            setScheduleRefreshError(undefined)
-          })
+        ? () => void Promise.all([mutatePlanning(), mutatePlanningProjectRoles()])
+            .then(() => {
+              setScheduleRefreshError(undefined)
+            })
+            .catch(() => undefined)
         : undefined}
       onUpdateScheduleDependency={accessToken && planningSnapshot &&
           !planningErrorMessage && !isPlanningDependencyLoading

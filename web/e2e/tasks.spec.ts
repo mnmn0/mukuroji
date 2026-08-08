@@ -2317,6 +2317,16 @@ function createMockPlanningSnapshot(
     )
     return workItem?.assignedProjectId ? [workItem.assignedProjectId] : []
   }).filter((projectId, index, projectIds) => projectIds.indexOf(projectId) === index)
+  const affectedProjects = criticalWorkItems.flatMap((endpoint) => {
+    const workItem = workItemByKey.get(
+      createIssueCollaborationKey(endpoint.teamId, endpoint.workItemId),
+    )
+    return workItem?.assignedProjectId
+      ? [{ projectId: workItem.assignedProjectId, teamId: workItem.teamId }]
+      : []
+  }).filter((project, index, projects) => projects.findIndex((candidate) =>
+    candidate.teamId === project.teamId && candidate.projectId === project.projectId
+  ) === index)
 
   return {
     schemaVersion: PLANNING_SCHEMA_VERSION,
@@ -2343,6 +2353,7 @@ function createMockPlanningSnapshot(
     workItemDependencySummary: {
       affectedMilestoneIds: [],
       affectedProjectIds,
+      affectedProjects,
       conflicts: structuredClone([...conflicts]),
       criticalPath: {
         slackByWorkItemKey: Object.fromEntries(criticalWorkItems.map((endpoint) => [
@@ -3131,13 +3142,13 @@ test.describe('authenticated task page', () => {
     await dependencyPanel.getByRole('button', {
       name: '影響する Project 2 件: design-team / shared-launch',
     }).click()
-    await expect(page).toHaveURL('/projects/shared-launch/tasks?teamId=design-team')
+    await expect(page).toHaveURL('/projects/shared-launch/issues?teamId=design-team')
 
     await page.goto('/planning/timeline')
     await dependencyPanel.getByRole('button', {
       name: '影響する Project 2 件: core-team / refero',
     }).click()
-    await expect(page).toHaveURL('/projects/refero/tasks?teamId=core-team')
+    await expect(page).toHaveURL('/projects/refero/issues?teamId=core-team')
   })
 
   test('Issue #190: filter で隠れた同一 Project endpoint を外部扱いしない', async ({ page }) => {
@@ -3186,7 +3197,7 @@ test.describe('authenticated task page', () => {
     const dependencySummary = page.getByTestId(`task-gantt-dependency-${dependency.id}`)
 
     await expect(dependencySummary).toContainText('終了から開始')
-    await expect(dependencySummary).toContainText('+2d')
+    await expect(dependencySummary).toContainText('+2日')
     await expect(page.getByTestId(`task-gantt-connector-${dependency.id}`)).toBeVisible()
 
     const wireframeBar = page.getByTestId('task-gantt-bar-wireframe')
@@ -3245,7 +3256,7 @@ test.describe('authenticated task page', () => {
 
     await preview.getByRole('button', { name: '適用', exact: true }).click()
     await expect.poll(() => requestCounts.scheduleConfirms).toBe(1)
-    await expect.poll(() => requestCounts.projectTasks.refero ?? 0).toBe(2)
+    await expect.poll(() => requestCounts.projectTasks.refero ?? 0).toBe(3)
 
     const wireframeRow = page.locator('article').filter({
       has: page.getByTestId('task-gantt-bar-wireframe'),
@@ -3368,7 +3379,7 @@ test.describe('authenticated task page', () => {
 
     await expect(dependencySummary).toContainText('外部 Project')
     await expect(dependencySummary).toContainText('開始から終了')
-    await expect(dependencySummary).toContainText('-2d')
+    await expect(dependencySummary).toContainText('-2日')
     await expect(page.getByTestId('task-gantt-external-lane')).toBeVisible()
     await expect(page.getByTestId(`task-gantt-external-${dependency.id}`)).toContainText(
       '外部: 外部ローンチ準備',
@@ -3401,7 +3412,7 @@ test.describe('authenticated task page', () => {
     })
     await page.goto('/teams/core-team/issues')
 
-    const tableRow = page.getByTestId('issue-row-wireframe')
+    const tableRow = page.locator('tr').filter({ has: page.getByTestId('issue-row-wireframe') })
     await expect(tableRow).toContainText('1 件をブロック')
     await page.getByRole('button', { name: 'ボード', exact: true }).click()
     await expect(page.getByTestId('team-issue-card-wireframe')).toContainText('1 件をブロック')
