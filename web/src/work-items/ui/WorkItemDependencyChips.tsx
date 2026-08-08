@@ -57,7 +57,7 @@ export function WorkItemDependencyChips({
         <span className="workbench-badge-warning">
           {t('workItems.dependencies.delayedDays').replace(
             '{count}',
-            String(summary.requiredShiftDays),
+            formatSignedNumber(summary.requiredShiftDays),
           )}
         </span>
       ) : null}
@@ -74,4 +74,9 @@ export function WorkItemDependencyChips({
       ) : null}
     </span>
   )
+}
+
+/** Formats a numeric delay with an explicit plus sign for positive movement. */
+function formatSignedNumber(value: number): string {
+  return value > 0 ? `+${value}` : String(value)
 }

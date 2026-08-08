@@ -1,5 +1,14 @@
 /** Work Items module public application and domain surface. */
 export {
+  confirmWorkItemScheduleChange,
+  type ConfirmWorkItemScheduleChangeCommand,
+  type ConfirmWorkItemScheduleChangeDependencies,
+  type ConfirmWorkItemScheduleUpdate,
+  type PersistConfirmedWorkItemScheduleChange,
+  type WorkItemScheduleConfirmationReservation,
+  type WorkItemScheduleConfirmationReservationRequest,
+} from './application/use-cases/confirm-work-item-schedule-change'
+export {
   createResourceId,
 } from './domain/resource-id'
 export {

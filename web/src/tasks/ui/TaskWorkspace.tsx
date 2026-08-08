@@ -39,7 +39,7 @@ import {
   createWorkItemDependencySummaries,
 } from '../../work-items/model/workItemDependencies'
 import { WorkItemDefinitionFilters } from '../../work-items/ui/WorkItemDefinitionFilters'
-import type { WorkItemDependencyCreateDraft } from '../../work-items/ui/WorkItemDependencyPanel'
+import type { WorkItemDependencyCreateDraft } from '../../work-items/model/workItemDependencies'
 import type { WorkItemPersonOption } from '../../work-items/ui/WorkItemFieldsEditor'
 import type { ProjectTask } from '../api/tasks'
 import {

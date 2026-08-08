@@ -264,13 +264,7 @@ function hasCanonicalPlannedEffort(
  */
 export function deriveWorkItemScheduleDueDate(schedule: WorkItemSchedule): string {
   const normalized = normalizeWorkItemSchedule(schedule)
-  if (normalized.mode === 'unscheduled') {
-    return ''
-  }
-  if (normalized.mode === 'due-date') {
-    return normalized.dueDate
-  }
-  return normalized.endDate
+  return readWorkItemSchedulePrimaryDate(normalized) ?? ''
 }
 
 /**
@@ -387,6 +381,7 @@ export function previewWorkItemScheduleChange(
       expectedRevision,
     }],
     conflicts: [],
+    affectedProjects: [],
     affectedProjectIds: [],
     affectedMilestoneIds: [],
     requiresConfirmation: false,
@@ -491,6 +486,46 @@ export function calculateWorkItemScheduleEndDate(
     let epochDay = start.epochDay;
     epochDay - start.epochDay < WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS;
     epochDay += 1
+  ) {
+    const date = formatEpochDay(epochDay)
+    if (
+      workingWeekdays.has(weekdayForEpochDay(epochDay)) &&
+      !holidays.has(date)
+    ) {
+      remainingDays -= 1
+      if (remainingDays === 0) {
+        return date
+      }
+    }
+  }
+
+  return invalidRange('Schedule duration exceeds the supported ISO date range.')
+}
+
+/**
+ * Resolves an inclusive range start while preserving a positive working-day duration.
+ *
+ * @param endDate - Inclusive local range end in `YYYY-MM-DD` form.
+ * @param durationDays - Positive number of working dates to occupy.
+ * @param policy - Calendar policy defining working weekdays and holidays.
+ * @returns The local date containing the first counted working date.
+ */
+export function calculateWorkItemScheduleStartDate(
+  endDate: string,
+  durationDays: number,
+  policy: WorkItemScheduleCalendarPolicy,
+): string {
+  const end = parseIsoDate(endDate)
+  const normalizedDurationDays = normalizePositiveDuration(durationDays)
+  const normalizedPolicy = normalizeCalendarPolicy(policy)
+  const workingWeekdays = new Set(normalizedPolicy.workingWeekdays)
+  const holidays = new Set(normalizedPolicy.holidays)
+  let remainingDays = normalizedDurationDays
+
+  for (
+    let epochDay = end.epochDay;
+    end.epochDay - epochDay < WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS;
+    epochDay -= 1
   ) {
     const date = formatEpochDay(epochDay)
     if (

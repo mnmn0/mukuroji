@@ -23,7 +23,6 @@ import {
 } from '@aws-sdk/lib-dynamodb'
 import {
   DOCUMENT_SCHEMA_VERSION,
-  PLANNING_SCHEMA_VERSION,
   type ApplyDocumentOperationsResponse,
   type DocumentBlock,
   type DocumentCapabilities,
@@ -42,6 +41,7 @@ import {
   type DocumentVersionsResponse,
   type WhiteboardContent,
 } from '@mukuroji/contracts'
+import { PLANNING_STORAGE_SCHEMA_VERSION } from '../../../planning'
 import {
   createDynamoDbClient as createConfiguredDynamoDbClient,
   createWorkspaceSearchWriterDynamoDbDocumentClient,
@@ -6553,7 +6553,7 @@ function authorizationSnapshotGuards(
         expectedGeneration: snapshot.planningRevision,
         requiredAttributes: {
           entryType: 'planning-meta',
-          schemaVersion: PLANNING_SCHEMA_VERSION,
+          schemaVersion: PLANNING_STORAGE_SCHEMA_VERSION,
         },
         ...(snapshot.planningRevision === 0
           ? { allowMissingWhenExpectedZero: true }

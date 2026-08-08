@@ -58,12 +58,12 @@ import type {
   TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
 import {
-  PLANNING_SCHEMA_VERSION,
   PROJECT_QUICK_ACCESS_MAX_REVISION,
   type ProjectQuickAccessItem,
   type ProjectQuickAccessPreferences,
   type UpdateProjectQuickAccessPreferencesInput,
 } from '@mukuroji/contracts'
+import { PLANNING_STORAGE_SCHEMA_VERSION } from '../../../planning'
 
 /**
  * プロジェクトごとの権限ロールです。
@@ -2757,7 +2757,7 @@ function createPlanningRevisionBump(
         workspaceId,
         recordKey: 'META',
         entryType: 'planning-meta',
-        schemaVersion: PLANNING_SCHEMA_VERSION,
+        schemaVersion: PLANNING_STORAGE_SCHEMA_VERSION,
         revision: expectedRevision + 1,
         updatedAt,
       },

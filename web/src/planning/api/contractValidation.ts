@@ -1,4 +1,5 @@
 import {
+  LEGACY_PLANNING_SCHEMA_VERSION,
   PLANNING_SCHEMA_VERSION,
   type PlanningSnapshot,
 } from '@mukuroji/contracts'
@@ -175,6 +176,15 @@ function isPlanningCriticalPath(value: unknown): boolean {
     isNumberRecord(value.slackByEntityId)
 }
 
+/** Returns whether a value is one Team-qualified affected Project. */
+function isAffectedProject(value: unknown): boolean {
+  return isRecord(value) &&
+    typeof value.teamId === 'string' &&
+    value.teamId.length > 0 &&
+    typeof value.projectId === 'string' &&
+    value.projectId.length > 0
+}
+
 /** Returns whether a value is the Work Item dependency management summary. */
 function isWorkItemDependencySummary(value: unknown): boolean {
   if (!isRecord(value) || !isRecord(value.criticalPath)) return false
@@ -185,6 +195,8 @@ function isWorkItemDependencySummary(value: unknown): boolean {
     Array.isArray(value.conflicts) &&
     value.conflicts.every(isWorkItemScheduleDependencyConflict) &&
     isNonnegativeSafeInteger(value.unresolvedBlockerCount) &&
+    Array.isArray(value.affectedProjects) &&
+    value.affectedProjects.every(isAffectedProject) &&
     isStringArray(value.affectedProjectIds) &&
     isStringArray(value.affectedMilestoneIds)
 }
@@ -212,4 +224,107 @@ export function isPlanningSnapshot(value: unknown): value is PlanningSnapshot {
     isPlanningCriticalPath(value.criticalPath) &&
     isWorkItemDependencySummary(value.workItemDependencySummary) &&
     isOptionalString(value.updatedAt)
+}
+
+/**
+ * Decodes a current Planning snapshot or upgrades a dependency-free v1 snapshot.
+ *
+ * The rollout-compatible v1 shape predates canonical Work Item schedule dependencies. Missing
+ * graph fields therefore normalize to an empty dependency graph while all existing nested data
+ * still passes the same runtime validators as a current response.
+ *
+ * @param value - Unknown Planning API response candidate.
+ * @returns A current Planning snapshot, or undefined when either schema is malformed.
+ */
+export function readPlanningSnapshot(value: unknown): PlanningSnapshot | undefined {
+  if (isPlanningSnapshot(value)) return value
+  if (!isLegacyPlanningSnapshot(value)) return undefined
+
+  const normalized = {
+    ...value,
+    schemaVersion: PLANNING_SCHEMA_VERSION,
+    workItemDependencies: value.workItemDependencies ?? [],
+    workItemDependencySummary: normalizeLegacyWorkItemDependencySummary(
+      value.workItemDependencySummary,
+      value.workItems,
+    ),
+  }
+  return isPlanningSnapshot(normalized) ? normalized : undefined
+}
+
+/** Returns whether a response matches the dependency-free Planning v1 snapshot shape. */
+function isLegacyPlanningSnapshot(value: unknown): value is Record<string, unknown> {
+  return isRecord(value) &&
+    value.schemaVersion === LEGACY_PLANNING_SCHEMA_VERSION &&
+    isNonnegativeSafeInteger(value.revision) &&
+    Array.isArray(value.entities) &&
+    value.entities.every(isPlanningEntity) &&
+    Array.isArray(value.dependencies) &&
+    value.dependencies.every(isPlanningDependency) &&
+    Array.isArray(value.workItemLinks) &&
+    value.workItemLinks.every(isPlanningWorkItemLink) &&
+    Array.isArray(value.workItems) &&
+    value.workItems.every(isPlanningWorkItem) &&
+    isPlanningCriticalPath(value.criticalPath) &&
+    isOptionalString(value.updatedAt)
+}
+
+/** Adds v2 affected Project identities or creates the empty pre-dependency summary. */
+function normalizeLegacyWorkItemDependencySummary(
+  value: unknown,
+  workItems: unknown,
+): unknown {
+  if (value === undefined) {
+    return {
+      affectedMilestoneIds: [],
+      affectedProjectIds: [],
+      affectedProjects: [],
+      conflicts: [],
+      criticalPath: {
+        slackByWorkItemKey: {},
+        totalDurationDays: 0,
+        workItems: [],
+      },
+      unresolvedBlockerCount: 0,
+    }
+  }
+  if (!isRecord(value) || value.affectedProjects !== undefined) return value
+  return {
+    ...value,
+    affectedProjects: deriveLegacyAffectedProjects(workItems, value.affectedProjectIds),
+  }
+}
+
+/**
+ * Derives unambiguous Team-qualified Project references from legacy IDs and visible Work Items.
+ *
+ * IDs with no visible owner or more than one visible owner remain only in the unchanged legacy
+ * ID list so callers can use permission-aware search without inventing a Team-scoped route.
+ */
+function deriveLegacyAffectedProjects(
+  workItems: unknown,
+  affectedProjectIds: unknown,
+): Array<{ projectId: string; teamId: string }> {
+  if (!Array.isArray(workItems) || !isStringArray(affectedProjectIds)) return []
+  const affectedProjectIdSet = new Set(affectedProjectIds)
+  const teamIdsByProjectId = new Map<string, Set<string>>()
+  for (const workItem of workItems) {
+    if (!isRecord(workItem) ||
+      typeof workItem.teamId !== 'string' ||
+      workItem.teamId.length === 0 ||
+      typeof workItem.projectId !== 'string' ||
+      workItem.projectId.length === 0 ||
+      !affectedProjectIdSet.has(workItem.projectId)) continue
+    const teamIds = teamIdsByProjectId.get(workItem.projectId) ?? new Set<string>()
+    teamIds.add(workItem.teamId)
+    teamIdsByProjectId.set(workItem.projectId, teamIds)
+  }
+
+  return affectedProjectIds.flatMap((projectId, index) => {
+    if (affectedProjectIds.indexOf(projectId) !== index) return []
+    const teamIds = teamIdsByProjectId.get(projectId)
+    if (teamIds?.size !== 1) return []
+    const teamId = [...teamIds][0]
+    return teamId === undefined ? [] : [{ projectId, teamId }]
+  })
 }

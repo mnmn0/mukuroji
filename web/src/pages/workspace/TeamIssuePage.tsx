@@ -9,7 +9,7 @@ import type {
   WorkItemScheduleDependency,
   WorkItemScheduleDependencyPatch,
 } from '@mukuroji/contracts'
-import { useEffect, useMemo, useRef, useState, type DragEvent } from 'react'
+import { useEffect, useMemo, useState, type DragEvent } from 'react'
 import { useLocation, useNavigate, useParams, useSearchParams } from 'react-router'
 import {
   canManageWorkspaceStructure,
@@ -53,16 +53,10 @@ import {
   useIssueCollaboration,
 } from '../../issues/mutations/useIssueCollaboration'
 import {
-  createWorkItemScheduleDependency,
-  deleteWorkItemScheduleDependency,
-  isPlanningSnapshotConflict,
-  updateWorkItemScheduleDependency,
-} from '../../planning/api'
-import {
-  canManagePlanningWorkItemDependency,
   canManagePlanningWorkItemDependencyEndpoint,
   createPlanningAccessSnapshot,
 } from '../../planning/model/permissions'
+import { createWorkItemDependencyMutationController } from '../../planning/mutations/createWorkItemDependencyMutationController'
 import { usePlanningSnapshot } from '../../planning/queries/usePlanningSnapshot'
 import {
   type ProjectDirectoryTeam,
@@ -96,9 +90,9 @@ import {
 } from '../../work-items/queries/useWorkItemConfigurations'
 import { WorkItemExternalLinksPanelContainer } from '../../work-items/ui/WorkItemExternalLinksPanel'
 import {
-  createWorkItemDependencyMutationId,
   createWorkItemDependencySummaries,
   resolveWorkItemDependencySummary,
+  type WorkItemDependencyCreateDraft,
   type WorkItemDependencySummary,
 } from '../../work-items/model/workItemDependencies'
 import {
@@ -111,7 +105,6 @@ import { WorkItemFieldsEditor } from '../../work-items/ui/WorkItemFieldsEditor'
 import { WorkItemDependencyChips } from '../../work-items/ui/WorkItemDependencyChips'
 import {
   WorkItemDependencyPanel,
-  type WorkItemDependencyCreateDraft,
   type WorkItemDependencyPanelProps,
 } from '../../work-items/ui/WorkItemDependencyPanel'
 import {
@@ -315,7 +308,7 @@ export function TeamIssuePage() {
   const navigate = useNavigate()
   const params = useParams()
   const [searchParams, setSearchParams] = useSearchParams()
-  const mutationRequestRunner = useRef(createMutationRequestRunner()).current
+  const [mutationRequestRunner] = useState(() => createMutationRequestRunner())
   const teamId = params.teamId ?? 'core-team'
   const [session] = useState(() => getAuthSession())
   const [locale] = useState<Locale>(() => getInitialLocale())
@@ -469,6 +462,16 @@ export function TeamIssuePage() {
       throw error
     }
   }
+  const dependencyMutations = createWorkItemDependencyMutationController({
+    accessToken,
+    guardEnterpriseSession,
+    mutatePlanning,
+    mutationRequestRunner,
+    planningAccess,
+    planningSnapshot,
+    t,
+    user,
+  })
   const isLoading =
     !session ||
     isCurrentUserLoading ||
@@ -648,101 +651,6 @@ export function TeamIssuePage() {
     }
   }
 
-  /** Persists one dependency mutation and refreshes stale Planning authority on conflicts. */
-  const runScheduleDependencyMutation = async (
-    request: () => Promise<PlanningSnapshot>,
-  ): Promise<void> => {
-    try {
-      const result = await request()
-      await mutatePlanning(result, { revalidate: false })
-    } catch (error) {
-      if (isPlanningSnapshotConflict(error)) {
-        await mutatePlanning()
-      }
-      throw error
-    }
-  }
-
-  /** Creates one revision-bound canonical Work Item schedule dependency. */
-  const handleCreateScheduleDependency = async (
-    input: WorkItemDependencyCreateDraft,
-  ): Promise<void> => {
-    if (
-      !accessToken ||
-      !planningSnapshot ||
-      !canManagePlanningWorkItemDependency(user, input, planningSnapshot.workItems, planningAccess)
-    ) {
-      throw new Error(t('planning.error'))
-    }
-    await runScheduleDependencyMutation(() => guardEnterpriseSession(
-      mutationRequestRunner.run(
-        'planning:work-item-dependency:create',
-        JSON.stringify([planningSnapshot.revision, input]),
-        (context) => createWorkItemScheduleDependency(accessToken, {
-          ...input,
-          expectedRevision: planningSnapshot.revision,
-          id: createWorkItemDependencyMutationId(context.idempotencyKey),
-        }, context),
-      ),
-    ))
-  }
-
-  /** Updates one revision-bound canonical Work Item schedule dependency. */
-  const handleUpdateScheduleDependency = async (
-    dependency: WorkItemScheduleDependency,
-    patch: WorkItemScheduleDependencyPatch,
-  ): Promise<void> => {
-    if (
-      !accessToken ||
-      !planningSnapshot ||
-      !canManagePlanningWorkItemDependency(
-        user,
-        dependency,
-        planningSnapshot.workItems,
-        planningAccess,
-      )
-    ) {
-      throw new Error(t('planning.error'))
-    }
-    await runScheduleDependencyMutation(() => guardEnterpriseSession(
-      mutationRequestRunner.run(
-        `planning:work-item-dependency:${dependency.id}:update`,
-        JSON.stringify([planningSnapshot.revision, patch]),
-        (context) => updateWorkItemScheduleDependency(accessToken, dependency.id, {
-          expectedRevision: planningSnapshot.revision,
-          patch,
-        }, context),
-      ),
-    ))
-  }
-
-  /** Deletes one revision-bound canonical Work Item schedule dependency. */
-  const handleDeleteScheduleDependency = async (
-    dependency: WorkItemScheduleDependency,
-  ): Promise<void> => {
-    if (
-      !accessToken ||
-      !planningSnapshot ||
-      !canManagePlanningWorkItemDependency(
-        user,
-        dependency,
-        planningSnapshot.workItems,
-        planningAccess,
-      )
-    ) {
-      throw new Error(t('planning.error'))
-    }
-    await runScheduleDependencyMutation(() => guardEnterpriseSession(
-      mutationRequestRunner.run(
-        `planning:work-item-dependency:${dependency.id}:delete`,
-        String(planningSnapshot.revision),
-        (context) => deleteWorkItemScheduleDependency(accessToken, dependency.id, {
-          expectedRevision: planningSnapshot.revision,
-        }, context),
-      ),
-    ))
-  }
-
   return (
     <TeamIssueScreen
       accessToken={accessToken}
@@ -768,11 +676,11 @@ export function TeamIssuePage() {
       onAddRelation={canMutateContent ? handleAddRelation : undefined}
       onCreateIssue={canMutateContent && !workItemConfigurationError ? handleCreateIssue : undefined}
       onCreateScheduleDependency={accessToken && planningSnapshot
-        ? handleCreateScheduleDependency
+        ? dependencyMutations.create
         : undefined}
       onDeleteRelation={canMutateContent ? handleDeleteRelation : undefined}
       onDeleteScheduleDependency={accessToken && planningSnapshot
-        ? handleDeleteScheduleDependency
+        ? dependencyMutations.delete
         : undefined}
       onRetryPlanning={planningErrorMessage
         ? () => void Promise.all([mutatePlanning(), mutateProjectRoles()])
@@ -780,7 +688,7 @@ export function TeamIssuePage() {
       onSelectIssue={(issueId) => navigate(createTeamIssuesPath(teamId, issueId))}
       onUpdateIssue={canMutateContent && !workItemConfigurationError ? handleUpdateIssue : undefined}
       onUpdateScheduleDependency={accessToken && planningSnapshot
-        ? handleUpdateScheduleDependency
+        ? dependencyMutations.update
         : undefined}
       planningErrorMessage={planningErrorMessage}
       planningSnapshot={planningSnapshot}
@@ -1519,15 +1427,15 @@ function IssueTable({
                       type="button"
                     >
                       {resolveIssueTitle(issue, t)}
-                      <WorkItemDependencyChips
-                        className="mt-2"
-                        summary={resolveWorkItemDependencySummary(
-                          dependencySummaries,
-                          { teamId: issue.teamId, workItemId: issue.id },
-                        )}
-                        t={t}
-                      />
                     </button>
+                    <WorkItemDependencyChips
+                      className="px-5 pb-3"
+                      summary={resolveWorkItemDependencySummary(
+                        dependencySummaries,
+                        { teamId: issue.teamId, workItemId: issue.id },
+                      )}
+                      t={t}
+                    />
                   </td>
                   <td className="px-4 py-3 text-sm font-medium text-[var(--workbench-muted)]">{resolveAssignedProjectName(issue, activeTeam, t)}</td>
                   <td className="px-4 py-3 text-sm font-medium text-[var(--workbench-muted)]">{resolveWorkItemAssignee(issue)}</td>

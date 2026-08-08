@@ -201,6 +201,7 @@ import {
 import {
   createTeamIssueAuditEntityId,
   createTeamIssueDeepLink,
+  confirmWorkItemScheduleChange,
   collectWorkItemScheduleEvaluationEndpoints,
   createWorkItemDependencyKey,
   createWorkItemAuthorizationChangedError,
@@ -222,6 +223,7 @@ import {
   type CreateTeamIssueCommentRequestBody,
   type CreateTeamIssueRequestBody,
   type CreateTeamIssueResponse,
+  type ConfirmWorkItemScheduleChangeCommand,
   type ProjectIssuesResponse,
   type ProjectTaskResponseItem,
   type ProjectTasksResponse,
@@ -6233,7 +6235,17 @@ routeApp.post('/api/planning/work-item-dependencies', async (c) => {
     ])
     const response = await workItemDependencies.planning.createWorkItemDependency(
       principal.directoryId,
-      { ...input, predecessor, successor },
+      {
+        id: dependencyId,
+        predecessor,
+        successor,
+        type: input.type,
+        lagDays: input.lagDays,
+        ...(input.constraint === undefined
+          ? {}
+          : { constraint: input.constraint }),
+        expectedRevision: input.expectedRevision,
+      },
       workItemState,
       createPlanningCallerAuthorizationConditionChecks(principal),
       transaction,
@@ -7236,8 +7248,6 @@ routeApp.post('/api/teams/:teamId/issues/:issueId/schedule/confirm', async (c) =
   const accessToken = readBearerAccessToken(c)
   const teamId = c.req.param('teamId')
   const issueId = c.req.param('issueId')
-  let reservationToRelease: ReleaseIdempotencyRequest | undefined
-  let mutationCommitted = false
 
   if (!accessToken) {
     return c.json({ message: 'Bearer token is required.' }, 401)
@@ -7288,170 +7298,25 @@ routeApp.post('/api/teams/:teamId/issues/:issueId/schedule/confirm', async (c) =
         body,
       ),
     }
-    const reservation = await reserveWorkItemScheduleConfirmation(reservationRequest)
-    if (reservation.status === 'in-progress') {
-      throw new WorkItemScheduleError(
-        409,
-        'WorkItemScheduleIdempotencyInProgress',
-        'The same schedule confirmation is still in progress.',
-      )
-    }
-    if (reservation.status === 'replay') {
-      const replay = readStoredWorkItemScheduleConfirmationResponse(
-        reservation.response,
-        teamId,
-        issueId,
-      )
-      await requireWorkItemScheduleConfirmationReplayAuthorization(
-        principal,
-        replay.authorizationEndpoints,
-      )
-      c.header('Idempotency-Replayed', 'true')
-      return c.json(replay.response)
-    }
-    reservationToRelease = {
-      ...reservationRequest,
-      reservationId: reservation.reservationId,
-    }
-    const idempotency: IdempotencyMutationToken = {
-      credentialId: reservationRequest.credentialId,
-      idempotencyKey,
-      requestFingerprint: reservationRequest.requestFingerprint,
-      reservationId: reservation.reservationId,
-    }
-    const [detail, relationPage] = await Promise.all([
-      workItemDependencies.teamIssues.getTeamIssueDetail(
-        principal.directoryId,
-        teamId,
-        issueId,
-        { consistentIssueRead: true, eventLimit: 0 },
-      ),
-      workItemDependencies.workItemConfigurations.listRelations(
-        principal.directoryId,
-        teamId,
-        issueId,
-      ),
-    ])
-    requireAssignedProjectPermission(principal, context, detail.issue.assignedProjectId, 'member')
-    if (relationPage.graphRevision !== expectedRelationGraphRevision) {
-      throw new ProjectDataError(
-        409,
-        'WorkItemRelationGraphConflict',
-        'Work Item relations changed. Reload and try again.',
-      )
-    }
-    const visibleRelations = await filterVisibleWorkItemRelations(
+    const response = await executeConfirmedWorkItemScheduleChange(
+      c,
       principal,
       context,
-      teamId,
-      relationPage.relations,
-    )
-    const recomputed = await recomputeWorkItemScheduleDependencyPreview(
-      principal,
-      detail.issue,
-      operation,
-      relationPage.graphRevision,
-      visibleRelations.filter((relation) =>
-        relation.sourceWorkItemId === issueId &&
-        (relation.type === 'blocks' || relation.type === 'blockedBy')
-      ).length,
-      'member',
-      expectedPlanningRevision,
-    )
-    requireMatchingWorkItemScheduleEvaluationRevisions(
-      recomputed.preview.evaluatedRevisions,
-      expectedEvaluatedRevisions,
-      recomputed.preview.expectedRevision,
-      expectedRevision,
-    )
-    requireMatchingWorkItemScheduleImpacts(
-      recomputed.preview.impacts,
-      expectedImpacts,
-    )
-    if (recomputed.preview.conflicts.length > 0) {
-      throw new ProjectDataError(
-        409,
-        'WorkItemScheduleDependencyConflict',
-        'Resolve schedule dependency conflicts before confirming this change.',
-      )
-    }
-    const updateSchedules = workItemDependencies.teamIssues.updateTeamIssueSchedules
-    if (!updateSchedules) {
-      throw new ProjectDataError(
-        503,
-        'WorkItemScheduleCascadeUnavailable',
-        'Atomic schedule cascade persistence is not configured.',
-      )
-    }
-    const impactKeys = new Set(recomputed.preview.impacts.map((impact) =>
-      createWorkItemDependencyKey({ teamId: impact.teamId, workItemId: impact.workItemId })
-    ))
-    const confirmedRevisions = new Map(expectedEvaluatedRevisions.map((revision) => [
-      createWorkItemDependencyKey(revision),
-      revision.expectedRevision,
-    ]))
-    const idempotencyTransaction = createWorkItemScheduleConfirmationIdempotencyTransaction(
-      reservationRequest.workspaceId,
-      idempotency,
-      recomputed.preview.evaluatedRevisions,
-    )
-    if (!idempotencyTransaction) {
-      throw new WorkItemScheduleError(
-        503,
-        'WorkItemScheduleIdempotencyUnavailable',
-        'Durable schedule confirmation receipts are not configured.',
-      )
-    }
-    const result = await updateSchedules.call(
-      workItemDependencies.teamIssues,
-      principal.directoryId,
-      recomputed.preview.impacts.map((impact) => ({
-        teamId: impact.teamId,
-        workItemId: impact.workItemId,
-        expectedRevision: confirmedRevisions.get(createWorkItemDependencyKey(impact)) ??
-          impact.expectedRevision,
-        schedule: impact.after,
-      })),
-      expectedEvaluatedRevisions.flatMap((revision) =>
-        impactKeys.has(createWorkItemDependencyKey(revision))
-          ? []
-          : [{
-              teamId: revision.teamId,
-              workItemId: revision.workItemId,
-              expectedRevision: revision.expectedRevision,
-            }]
-      ),
-      principal.userKey,
-      createApiMutationContext(c, principal, {
+      body,
+      {
         teamId,
-        issueId,
-        ...body,
-      }),
-      [createWorkItemRelationGraphRevisionConditionCheck(
-        getWorkItemConfigurationTableName(),
-        principal.directoryId,
-        teamId,
+        workItemId: issueId,
+        expectedRevision,
+        expectedPlanningRevision,
         expectedRelationGraphRevision,
-      )],
-      createWorkItemAuthorizationSnapshot(principal, expectedPlanningRevision),
-      idempotencyTransaction,
+        expectedEvaluatedRevisions,
+        expectedImpacts,
+        operation,
+        reservationRequest,
+      },
     )
-    mutationCommitted = true
-    await Promise.all(result.issues.map((issue) =>
-      projectWorkItemMutationSearchDocumentBestEffort(
-        principal.directoryId,
-        issue,
-        'Work Item schedule dependency cascade',
-      )
-    ))
-    return c.json({ workItems: result.confirmedSchedules })
+    return c.json(response)
   } catch (error) {
-    if (reservationToRelease && !mutationCommitted) {
-      // The port leaves an atomically completed receipt intact when a commit response was lost.
-      await developerPlatformDependencies.idempotency
-        .releaseIdempotency(reservationToRelease)
-        .catch(() => undefined)
-    }
     return toWorkItemConfigurationErrorResponse(c, error)
   }
 })
@@ -10506,6 +10371,29 @@ function isTerminalTemplateApplicationError(
     error.status < 500
 }
 
+/**
+ * Converts Planning failures into the stable Automation action error contract.
+ *
+ * @param error - Planning failure raised while preparing one bulk mutation.
+ * @param requireScheduleConfirmation - Whether dependency-in-use must become the schedule confirmation contract.
+ * @returns Equivalent Automation error with conflict and retryability preserved.
+ */
+function toBulkAutomationPlanningError(
+  error: PlanningError,
+  requireScheduleConfirmation = false,
+): AutomationError {
+  const requiresConfirmation = requireScheduleConfirmation &&
+    error.code === 'PlanningWorkItemDependencyInUse'
+  return new AutomationError(
+    error.status === 409 ? 'conflict' : 'unavailable',
+    requiresConfirmation ? 'WorkItemScheduleConfirmationRequired' : error.code,
+    requiresConfirmation
+      ? 'Preview and explicitly confirm schedule changes for Work Items with dependencies.'
+      : error.message,
+    error.status >= 500,
+  )
+}
+
 function createApiBulkOperationAdapter(
   principal: WorkspacePrincipal,
   c: Context,
@@ -10617,12 +10505,7 @@ function createApiBulkOperationAdapter(
           )
         } catch (error) {
           if (error instanceof PlanningError) {
-            throw new AutomationError(
-              error.status === 409 ? 'conflict' : 'unavailable',
-              error.code,
-              error.message,
-              error.status >= 500,
-            )
+            throw toBulkAutomationPlanningError(error)
           }
           throw error
         }
@@ -10692,16 +10575,7 @@ function createApiBulkOperationAdapter(
         }
       } catch (error) {
         if (error instanceof PlanningError) {
-          throw new AutomationError(
-            error.status === 409 ? 'conflict' : 'unavailable',
-            error.code === 'PlanningWorkItemDependencyInUse'
-              ? 'WorkItemScheduleConfirmationRequired'
-              : error.code,
-            error.code === 'PlanningWorkItemDependencyInUse'
-              ? 'Preview and explicitly confirm schedule changes for Work Items with dependencies.'
-              : error.message,
-            error.status >= 500,
-          )
+          throw toBulkAutomationPlanningError(error, true)
         }
         throw error
       }
@@ -10716,12 +10590,7 @@ function createApiBulkOperationAdapter(
         }
       } catch (error) {
         if (error instanceof PlanningError) {
-          throw new AutomationError(
-            error.status === 409 ? 'conflict' : 'unavailable',
-            error.code,
-            error.message,
-            error.status >= 500,
-          )
+          throw toBulkAutomationPlanningError(error)
         }
         throw error
       }
@@ -18533,6 +18402,10 @@ function toProjectDataErrorResponse(c: Context, error: unknown) {
     return c.json({ code: error.code, message: error.message }, 409)
   }
 
+  if (error.code === 'PlanningWorkItemScopeMismatch') {
+    return c.json({ code: error.code, message: error.message }, 409)
+  }
+
   if (
     error.code === 'WorkItemRelationGraphConflict' ||
     error.code === 'WorkItemScheduleDependencyConflict' ||
@@ -20256,57 +20129,6 @@ function readWorkItemScheduleImpacts(value: unknown): WorkItemScheduleImpact[] {
 }
 
 /**
- * Requires recomputation to reproduce the exact direct and propagated preview impacts.
- *
- * @param actual - Canonical impacts from current server recomputation.
- * @param expected - Canonical impacts copied from the user-visible preview.
- */
-function requireMatchingWorkItemScheduleImpacts(
-  actual: readonly WorkItemScheduleImpact[],
-  expected: readonly WorkItemScheduleImpact[],
-) {
-  if (stableDigestStringify(actual) !== stableDigestStringify(expected)) {
-    throw new WorkItemScheduleError(
-      409,
-      'WorkItemSchedulePreviewStale',
-      'The confirmed schedule operation does not match the preview. Preview the change again.',
-    )
-  }
-}
-
-/**
- * Requires confirmation to name the exact Work Item revisions used by recomputation.
- *
- * @param actual - Revisions participating in the current server recomputation.
- * @param expected - Revisions copied from the user-visible preview.
- * @param actualRootRevision - Direct revision observed during recomputation.
- * @param expectedRootRevision - Direct revision copied from the user-visible preview.
- */
-function requireMatchingWorkItemScheduleEvaluationRevisions(
-  actual: readonly WorkItemScheduleEvaluationRevision[],
-  expected: readonly WorkItemScheduleEvaluationRevision[],
-  actualRootRevision: number,
-  expectedRootRevision: number,
-) {
-  const canonicalActual = [...actual].sort(compareWorkItemScheduleEvaluationRevisions)
-  const matches = canonicalActual.length === expected.length &&
-    canonicalActual.every((revision, index) => {
-      const expectedRevision = expected[index]
-      return expectedRevision !== undefined &&
-        revision.teamId === expectedRevision.teamId &&
-        revision.workItemId === expectedRevision.workItemId &&
-        revision.expectedRevision === expectedRevision.expectedRevision
-    }) && actualRootRevision === expectedRootRevision
-  if (!matches) {
-    throw new WorkItemScheduleError(
-      409,
-      'WorkItemSchedulePreviewStale',
-      'A Work Item evaluated by the schedule preview changed. Preview the change again.',
-    )
-  }
-}
-
-/**
  * Derives a Developer Platform-safe partition from an internal Workspace directory key.
  *
  * @param directoryId - Internal Workspace directory partition key.
@@ -20397,6 +20219,144 @@ async function reserveWorkItemScheduleConfirmation(request: ReserveIdempotencyRe
       'Schedule confirmation idempotency is unavailable.',
     )
   }
+}
+
+/**
+ * Adapts the Work Item schedule confirmation use case to authenticated API dependencies.
+ *
+ * @param c - Current Hono request context used only for replay metadata and audit context.
+ * @param principal - Authenticated Workspace principal.
+ * @param context - Authorized Team and Project access snapshot for the root Work Item.
+ * @param body - Parsed request body recorded in the immutable audit context.
+ * @param command - Fully validated application command.
+ * @returns Compact schedules committed or replayed by the confirmation use case.
+ */
+async function executeConfirmedWorkItemScheduleChange(
+  c: Context,
+  principal: WorkspacePrincipal,
+  context: TeamPermissionContext,
+  body: Readonly<Record<string, unknown>>,
+  command: ConfirmWorkItemScheduleChangeCommand,
+) {
+  return confirmWorkItemScheduleChange(command, {
+    reserve: reserveWorkItemScheduleConfirmation,
+    release: (request) =>
+      developerPlatformDependencies.idempotency.releaseIdempotency(request),
+    async replay(value, replayCommand) {
+      const replay = readStoredWorkItemScheduleConfirmationResponse(
+        value,
+        replayCommand.teamId,
+        replayCommand.workItemId,
+      )
+      await requireWorkItemScheduleConfirmationReplayAuthorization(
+        principal,
+        replay.authorizationEndpoints,
+      )
+      c.header('Idempotency-Replayed', 'true')
+      return replay.response
+    },
+    async recompute(recomputeCommand) {
+      const [detail, relationPage] = await Promise.all([
+        workItemDependencies.teamIssues.getTeamIssueDetail(
+          principal.directoryId,
+          recomputeCommand.teamId,
+          recomputeCommand.workItemId,
+          { consistentIssueRead: true, eventLimit: 0 },
+        ),
+        workItemDependencies.workItemConfigurations.listRelations(
+          principal.directoryId,
+          recomputeCommand.teamId,
+          recomputeCommand.workItemId,
+        ),
+      ])
+      requireAssignedProjectPermission(
+        principal,
+        context,
+        detail.issue.assignedProjectId,
+        'member',
+      )
+      if (relationPage.graphRevision !== recomputeCommand.expectedRelationGraphRevision) {
+        throw new ProjectDataError(
+          409,
+          'WorkItemRelationGraphConflict',
+          'Work Item relations changed. Reload and try again.',
+        )
+      }
+      const visibleRelations = await filterVisibleWorkItemRelations(
+        principal,
+        context,
+        recomputeCommand.teamId,
+        relationPage.relations,
+      )
+      const recomputed = await recomputeWorkItemScheduleDependencyPreview(
+        principal,
+        detail.issue,
+        recomputeCommand.operation,
+        relationPage.graphRevision,
+        visibleRelations.filter((relation) =>
+          relation.sourceWorkItemId === recomputeCommand.workItemId &&
+          (relation.type === 'blocks' || relation.type === 'blockedBy')
+        ).length,
+        'member',
+        recomputeCommand.expectedPlanningRevision,
+      )
+      return recomputed.preview
+    },
+    async persist(input) {
+      const updateSchedules = workItemDependencies.teamIssues.updateTeamIssueSchedules
+      if (!updateSchedules) {
+        throw new ProjectDataError(
+          503,
+          'WorkItemScheduleCascadeUnavailable',
+          'Atomic schedule cascade persistence is not configured.',
+        )
+      }
+      const idempotencyTransaction =
+        createWorkItemScheduleConfirmationIdempotencyTransaction(
+          input.reservation.workspaceId,
+          input.reservation,
+          input.authorizationEndpoints,
+        )
+      if (!idempotencyTransaction) {
+        throw new WorkItemScheduleError(
+          503,
+          'WorkItemScheduleIdempotencyUnavailable',
+          'Durable schedule confirmation receipts are not configured.',
+        )
+      }
+      const result = await updateSchedules.call(
+        workItemDependencies.teamIssues,
+        principal.directoryId,
+        input.updates,
+        input.guardedRevisions,
+        principal.userKey,
+        createApiMutationContext(c, principal, {
+          teamId: command.teamId,
+          issueId: command.workItemId,
+          ...body,
+        }),
+        [createWorkItemRelationGraphRevisionConditionCheck(
+          getWorkItemConfigurationTableName(),
+          principal.directoryId,
+          command.teamId,
+          input.expectedRelationGraphRevision,
+        )],
+        createWorkItemAuthorizationSnapshot(
+          principal,
+          input.expectedPlanningRevision,
+        ),
+        idempotencyTransaction,
+      )
+      await Promise.all(result.issues.map((issue) =>
+        projectWorkItemMutationSearchDocumentBestEffort(
+          principal.directoryId,
+          issue,
+          'Work Item schedule dependency cascade',
+        )
+      ))
+      return { workItems: result.confirmedSchedules }
+    },
+  })
 }
 
 /** Mutation represented by one durable Planning Work Item dependency receipt. */
@@ -21035,6 +20995,13 @@ function createPlanningProjectScopeKey(teamId: string, projectId: string): strin
   return `${teamId}\0${projectId}`
 }
 
+/**
+ * Removes Planning records outside the principal's current Team and Project scope.
+ *
+ * @param principal - Authenticated principal whose current access bounds the response.
+ * @param snapshot - Complete Planning snapshot loaded from the canonical store.
+ * @returns A detached snapshot containing only authorized Planning and Work Item records.
+ */
 function filterPlanningSnapshotForPrincipal(
   principal: ProjectPrincipal,
   snapshot: PlanningSnapshot,

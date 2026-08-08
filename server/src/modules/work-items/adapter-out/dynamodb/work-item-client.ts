@@ -67,10 +67,10 @@ import type {
   TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
 import {
-  PLANNING_SCHEMA_VERSION,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
 } from '@mukuroji/contracts'
+import { PLANNING_STORAGE_SCHEMA_VERSION } from '../../../planning'
 import type {
   CanonicalWorkItem,
   ConfirmedWorkItemSchedule,
@@ -189,10 +189,10 @@ function createAuthorizationSnapshotConditionChecks(
  * @param fence - Exact Planning revision observed before the mutation.
  * @returns A single Planning META condition check, or no check when absent.
  */
-function createPlanningRevisionFenceConditionChecks(
+function createPlanningRevisionFenceConditionEntries(
   workspaceId: string,
   fence: UpdateTeamIssueRequestBody['planningRevisionFence'],
-): NonNullable<TransactWriteCommandInput['TransactItems']> {
+): WorkItemAuthorizationConditionEntry[] {
   if (!fence) return []
   if (!Number.isSafeInteger(fence.expectedRevision) || fence.expectedRevision < 0) {
     throw new ProjectDataError(
@@ -202,7 +202,7 @@ function createPlanningRevisionFenceConditionChecks(
     )
   }
   const environment = loadServerConfig().environment
-  return createDynamoDbWorkItemAuthorizationConditionChecks([{
+  const guard: WorkItemAuthorizationGenerationGuard = {
     kind: 'planning',
     tableName: environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
     key: {
@@ -213,12 +213,16 @@ function createPlanningRevisionFenceConditionChecks(
     expectedGeneration: fence.expectedRevision,
     requiredAttributes: {
       entryType: 'planning-meta',
-      schemaVersion: PLANNING_SCHEMA_VERSION,
+      schemaVersion: PLANNING_STORAGE_SCHEMA_VERSION,
     },
     ...(fence.expectedRevision === 0
       ? { allowMissingWhenExpectedZero: true }
       : {}),
-  }])
+  }
+  const [transactWriteItem] = createDynamoDbWorkItemAuthorizationConditionChecks([guard])
+  return transactWriteItem
+    ? [{ kind: guard.kind, transactWriteItem }]
+    : []
 }
 
 /** One named authorization check in a canonical Work Item transaction. */
@@ -270,7 +274,7 @@ function createAuthorizationSnapshotConditionEntries(
       expectedGeneration: snapshot.planningRevision,
       requiredAttributes: {
         entryType: 'planning-meta',
-        schemaVersion: PLANNING_SCHEMA_VERSION,
+        schemaVersion: PLANNING_STORAGE_SCHEMA_VERSION,
       },
       ...(snapshot.planningRevision === 0
         ? { allowMissingWhenExpectedZero: true }
@@ -305,6 +309,53 @@ function createAuthorizationSnapshotConditionEntries(
       ? [{ kind: guard.kind, transactWriteItem }]
       : []
   })
+}
+
+/**
+ * Names caller-provided authorization checks so transaction failures remain classifiable.
+ *
+ * @param checks - Existing authorization checks supplied by a trusted application caller.
+ * @returns Named authorization entries preserving their transaction order.
+ */
+function createCallerAuthorizationConditionEntries(
+  checks: NonNullable<TransactWriteCommandInput['TransactItems']> | undefined,
+): WorkItemAuthorizationConditionEntry[] {
+  return (checks ?? []).map((transactWriteItem) => ({
+    kind: 'workspace-member',
+    transactWriteItem,
+  }))
+}
+
+/**
+ * Raises a stable domain error for a failed named authorization transaction check.
+ *
+ * @param error - DynamoDB transaction failure candidate.
+ * @param startIndex - Index of the first authorization check in the transaction.
+ * @param entries - Ordered named authorization checks included in the transaction.
+ */
+function throwAuthorizationConditionFailureIfPresent(
+  error: unknown,
+  startIndex: number,
+  entries: readonly WorkItemAuthorizationConditionEntry[],
+): void {
+  const failureKinds = new Set(entries.flatMap((entry, index) =>
+    isTransactionConditionalFailureAt(error, startIndex + index)
+      ? [entry.kind]
+      : []
+  ))
+  if (
+    failureKinds.has('workspace-member') ||
+    failureKinds.has('enterprise-control')
+  ) {
+    throw createWorkItemAuthorizationChangedError()
+  }
+  if (failureKinds.has('planning')) {
+    throw new ProjectDataError(
+      409,
+      'PlanningRevisionConflict',
+      'Planning changed. Reload and try again.',
+    )
+  }
 }
 
 /**
@@ -1700,6 +1751,14 @@ export class DynamoDbTeamIssuesClient {
     }
     const directoryTeamId = createDirectoryTeamId(directoryId, teamId)
     const now = new Date().toISOString()
+    const configurationConditionChecks = input.configurationConditionChecks ?? []
+    const authorizationConditionEntries = [
+      ...createCallerAuthorizationConditionEntries(input.authorizationConditionChecks),
+      ...createAuthorizationSnapshotConditionEntries(input.authorizationSnapshot),
+    ]
+    const authorizationConditionChecks = authorizationConditionEntries.map((entry) =>
+      entry.transactWriteItem
+    )
 
     try {
       const currentIssues = await this.getTeamIssues(
@@ -1805,11 +1864,6 @@ export class DynamoDbTeamIssuesClient {
           afterRevision: item.revision,
         },
       })
-      const configurationConditionChecks = input.configurationConditionChecks ?? []
-      const authorizationConditionChecks = [
-        ...(input.authorizationConditionChecks ?? []),
-        ...createAuthorizationSnapshotConditionChecks(input.authorizationSnapshot),
-      ]
       const requestConversionItems = requestConversion
         ? createRequestConversionTransactionItems(
             requestConversion,
@@ -1848,22 +1902,17 @@ export class DynamoDbTeamIssuesClient {
         issue: toTeamIssueResponseItem(item),
       } satisfies CreateTeamIssueResponse
     } catch (error) {
-      const configurationConditionChecks = input.configurationConditionChecks ?? []
       const configurationConditionStartIndex = resolveConfigurationConditionStartIndex(
         2,
         auditPut,
       )
-      const authorizationConditionChecks = [
-        ...(input.authorizationConditionChecks ?? []),
-        ...createAuthorizationSnapshotConditionChecks(input.authorizationSnapshot),
-      ]
       const authorizationConditionStartIndex =
         configurationConditionStartIndex + configurationConditionChecks.length
-      if (authorizationConditionChecks.some((_, index) =>
-        isTransactionConditionalFailureAt(error, authorizationConditionStartIndex + index)
-      )) {
-        throw createWorkItemAuthorizationChangedError()
-      }
+      throwAuthorizationConditionFailureIfPresent(
+        error,
+        authorizationConditionStartIndex,
+        authorizationConditionEntries,
+      )
       if (configurationConditionChecks.some((_, index) =>
         isTransactionConditionalFailureAt(error, configurationConditionStartIndex + index)
       )) {
@@ -2090,7 +2139,8 @@ export class DynamoDbTeamIssuesClient {
         status: 200,
         body: { workItems: response.confirmedSchedules },
       })
-    } catch {
+    } catch (error) {
+      if (error instanceof ProjectDataError) throw error
       throw new ProjectDataError(
         503,
         'WorkItemScheduleCascadeTransactionUnavailable',
@@ -2183,26 +2233,11 @@ export class DynamoDbTeamIssuesClient {
     try {
       await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactItems }))
     } catch (error) {
-      const authorizationFailureKinds = new Set(
-        authorizationConditionEntries.flatMap((entry, index) =>
-          isTransactionConditionalFailureAt(error, authorizationConditionStartIndex + index)
-            ? [entry.kind]
-            : []
-        ),
+      throwAuthorizationConditionFailureIfPresent(
+        error,
+        authorizationConditionStartIndex,
+        authorizationConditionEntries,
       )
-      if (
-        authorizationFailureKinds.has('workspace-member') ||
-        authorizationFailureKinds.has('enterprise-control')
-      ) {
-        throw createWorkItemAuthorizationChangedError()
-      }
-      if (authorizationFailureKinds.has('planning')) {
-        throw new ProjectDataError(
-          409,
-          'PlanningRevisionConflict',
-          'Planning changed. Reload and try again.',
-        )
-      }
       if (updateConditionIndexes.some((index) => isTransactionConditionalFailureAt(error, index))) {
         throw createWorkItemRevisionConflictError()
       }
@@ -2265,11 +2300,14 @@ export class DynamoDbTeamIssuesClient {
       )
     }
     const configurationConditionChecks = input.configurationConditionChecks ?? []
-    const authorizationConditionChecks = [
-      ...(input.authorizationConditionChecks ?? []),
-      ...createAuthorizationSnapshotConditionChecks(input.authorizationSnapshot),
-      ...createPlanningRevisionFenceConditionChecks(directoryId, input.planningRevisionFence),
+    const authorizationConditionEntries = [
+      ...createCallerAuthorizationConditionEntries(input.authorizationConditionChecks),
+      ...createAuthorizationSnapshotConditionEntries(input.authorizationSnapshot),
+      ...createPlanningRevisionFenceConditionEntries(directoryId, input.planningRevisionFence),
     ]
+    const authorizationConditionChecks = authorizationConditionEntries.map((entry) =>
+      entry.transactWriteItem
+    )
     if ('schedule' in input) readWorkItemScheduleInput(input.schedule)
     const directoryTeamId = createDirectoryTeamId(directoryId, teamId)
     const expressionAttributeNames: Record<string, string> = {
@@ -2540,11 +2578,11 @@ export class DynamoDbTeamIssuesClient {
       )
       const authorizationConditionStartIndex =
         configurationConditionStartIndex + configurationConditionChecks.length
-      if (authorizationConditionChecks.some((_, index) =>
-        isTransactionConditionalFailureAt(error, authorizationConditionStartIndex + index)
-      )) {
-        throw createWorkItemAuthorizationChangedError()
-      }
+      throwAuthorizationConditionFailureIfPresent(
+        error,
+        authorizationConditionStartIndex,
+        authorizationConditionEntries,
+      )
       if (configurationConditionChecks.some((_, index) =>
         isTransactionConditionalFailureAt(error, configurationConditionStartIndex + index)
       )) {

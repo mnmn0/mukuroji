@@ -56,5 +56,7 @@ export function resolvePlanningErrorMessageKey(
 export function isPlanningSnapshotConflict(error: unknown): boolean {
   if (typeof error !== 'object' || error === null) return false
   const code = 'code' in error && typeof error.code === 'string' ? error.code : undefined
-  return code === 'PlanningRevisionConflict' || code === 'PlanningAuthorizationChanged'
+  return code === 'PlanningRevisionConflict' ||
+    code === 'PlanningAuthorizationChanged' ||
+    code === 'PlanningWorkItemChanged'
 }

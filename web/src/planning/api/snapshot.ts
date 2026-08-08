@@ -1,5 +1,5 @@
 import type { PlanningSnapshot } from '@mukuroji/contracts'
-import { isPlanningSnapshot } from './contractValidation'
+import { readPlanningSnapshot } from './contractValidation'
 import { PlanningApiError } from './errors'
 
 const planningApiBaseUrl = trimTrailingSlash(
@@ -43,14 +43,15 @@ async function requestPlanningSnapshot(
     )
   }
 
-  if (!isPlanningSnapshot(data)) {
+  const snapshot = readPlanningSnapshot(data)
+  if (!snapshot) {
     throw new PlanningApiError(
       response.status,
       defaultPlanningApiErrorMessage,
       'InvalidPlanningSnapshot',
     )
   }
-  return data
+  return snapshot
 }
 
 function isErrorResponse(value: unknown): value is { code?: string; message?: string } {

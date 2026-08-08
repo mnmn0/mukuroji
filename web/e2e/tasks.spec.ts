@@ -2463,19 +2463,26 @@ function createMockScheduleChangePreview(
     }
   }
 
-  const affectedProjectIds = impacts.flatMap((impact) => {
+  const affectedProjects = impacts.flatMap((impact) => {
     const workItem = findStoredWorkItem(
       taskResponsesByProject,
       teamIssuesByTeam,
       impact.teamId,
       impact.workItemId,
     )
-    return workItem?.assignedProjectId ? [workItem.assignedProjectId] : []
-  }).filter((projectId, index, projectIds) => projectIds.indexOf(projectId) === index)
+    return workItem?.assignedProjectId
+      ? [{ projectId: workItem.assignedProjectId, teamId: impact.teamId }]
+      : []
+  }).filter((project, index, projects) => projects.findIndex((candidate) =>
+    candidate.projectId === project.projectId && candidate.teamId === project.teamId
+  ) === index)
+  const affectedProjectIds = affectedProjects.map((project) => project.projectId)
+    .filter((projectId, index, projectIds) => projectIds.indexOf(projectId) === index)
 
   return {
     affectedMilestoneIds: [],
     affectedProjectIds,
+    affectedProjects,
     conflicts: structuredClone([...conflicts]),
     evaluatedRevisions: impacts.map((impact) => ({
       expectedRevision: impact.expectedRevision,
@@ -2599,8 +2606,8 @@ function calculateMockScheduleDelta(
   before: WorkItemSchedule,
   after: WorkItemSchedule,
 ): number {
-  const beforeDate = resolveMockScheduleAnchor(before, 'start')
-  const afterDate = resolveMockScheduleAnchor(after, 'start')
+  const beforeDate = resolveMockScheduleAnchor(before, 'finish')
+  const afterDate = resolveMockScheduleAnchor(after, 'finish')
   return beforeDate && afterDate ? differenceMockScheduleDays(beforeDate, afterDate) : 0
 }
 
@@ -2761,6 +2768,8 @@ async function dragScheduleCard(page: Page, source: Locator, target: Locator): P
   }
 }
 
+const ganttDropBottomOffset = 12
+
 /**
  * Uses Playwright's real pointer drag sequence to drop a Gantt control on one visible date.
  *
@@ -2790,7 +2799,7 @@ async function dragGanttControlToDate(
   const sourceX = sourceBounds.x + sourceBounds.width / 2
   const sourceY = sourceBounds.y + sourceBounds.height / 2
   const targetX = columnBounds.x + columnBounds.width / 2
-  const targetY = timelineBounds.y + timelineBounds.height - 12
+  const targetY = timelineBounds.y + timelineBounds.height - ganttDropBottomOffset
   const sourceReceivesPointer = await source.evaluate((element, point) => {
     const hitTarget = document.elementFromPoint(point.x, point.y)
     return element === hitTarget || (hitTarget !== null && element.contains(hitTarget))
@@ -3100,12 +3109,16 @@ test.describe('authenticated task page', () => {
     await expect(page.getByTestId('task-row-wireframe')).toContainText('1 件をブロック')
   })
 
-  test('Issue #190: Planning の Project 導線は owner Team が一意な場合だけ直接開く', async ({ page }) => {
+  test('Issue #190: Planning の Project 導線は Team-qualified scope を直接開く', async ({ page }) => {
     const snapshot: PlanningSnapshot = {
       ...structuredClone(planningSnapshotFixture),
       workItemDependencySummary: {
         ...structuredClone(planningSnapshotFixture.workItemDependencySummary),
         affectedProjectIds: ['refero', 'shared-launch'],
+        affectedProjects: [
+          { projectId: 'refero', teamId: 'core-team' },
+          { projectId: 'shared-launch', teamId: 'design-team' },
+        ],
       },
     }
     await page.unroute('**/api/planning')
@@ -3116,13 +3129,13 @@ test.describe('authenticated task page', () => {
 
     const dependencyPanel = page.getByTestId('planning-work-item-dependencies')
     await dependencyPanel.getByRole('button', {
-      name: '影響する Project 2 件: shared-launch',
+      name: '影響する Project 2 件: design-team / shared-launch',
     }).click()
-    await expect(page).toHaveURL('/search?q=shared-launch&type=project')
+    await expect(page).toHaveURL('/projects/shared-launch/tasks?teamId=design-team')
 
     await page.goto('/planning/timeline')
     await dependencyPanel.getByRole('button', {
-      name: '影響する Project 2 件: refero',
+      name: '影響する Project 2 件: core-team / refero',
     }).click()
     await expect(page).toHaveURL('/projects/refero/tasks?teamId=core-team')
   })

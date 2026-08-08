@@ -11,7 +11,7 @@ import type {
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import {
   isConfirmWorkItemScheduleChangeResponse,
-  isWorkItemScheduleChangePreview,
+  readWorkItemScheduleChangePreviewForEndpoint,
 } from '../../work-items/api/contractValidation'
 import type { TeamIssueActivity } from './activity'
 import type { TeamIssueComment } from './comments'
@@ -247,7 +247,7 @@ export async function previewTeamIssueSchedule(
   accessToken: string,
   input: PreviewWorkItemScheduleInput,
 ) {
-  return requestValidatedJson(
+  const data = await requestJson<unknown>(
     `${issuesApiBaseUrl}/teams/${encodeURIComponent(teamId)}/issues/${encodeURIComponent(issueId)}/schedule/preview`,
     accessToken,
     {
@@ -255,9 +255,16 @@ export async function previewTeamIssueSchedule(
       headers: { 'Content-Type': 'application/json' },
       method: 'POST',
     },
-    isWorkItemScheduleChangePreview,
-    'InvalidWorkItemSchedulePreview',
   )
+  const preview = readWorkItemScheduleChangePreviewForEndpoint(data, teamId, issueId)
+  if (!preview) {
+    throw new TeamIssuesApiError(
+      502,
+      defaultIssuesApiErrorMessage,
+      'InvalidWorkItemSchedulePreview',
+    )
+  }
+  return preview
 }
 
 /**

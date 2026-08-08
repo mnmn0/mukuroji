@@ -12,6 +12,8 @@ Issue #27 の Planning domain は、短期の Cycle と中長期の Portfolio / 
 - `WORK_ITEM_DEPENDENCY#<id>`: Team-qualified Work Item 間の canonical schedule dependency
 - `LINK#<teamId>#<workItemId>`: Work Item から Cycle / Milestone / Goal への link
 
+Planning API snapshot は `schemaVersion: 2` を返す。ローリングデプロイ中の新しい Web は v1 snapshot に不足する Work Item dependency 情報を空の既定値で補い、v2へ正規化する。DynamoDB の `META` row はAPI contractから独立したstorage schema version 1を維持し、既存Workspaceをmigrationなしで読み込む。
+
 すべての mutation は snapshot の `expectedRevision` を必須とし、認可に使った snapshot と mutation の revision を一致させたうえで、`META` の revision CAS と対象 row を同じ DynamoDB transaction で更新します。Stale write は `409 PlanningRevisionConflict` で拒否し、階層、dependency、link の部分更新を残しません。Canonical Work Item projection は強整合 read で取得します。Workspace member の role / status 更新と Planning scope が参照する Team / Project の archive は、事前検査した `META` revision を directory mutation と同じ transaction で一つ進めます。並行する Planning create / move とは一方だけが成功し、競合側は最新 snapshot で再検査します。
 
 1 Workspace は metadata を含め 2,000 row、1 row は安全余裕を含む 300 KB、1 transaction は 100 item / 3 MB、API snapshot は4 MBを上限とします。Entity description は UTF-8 で 20 KB、status update は1件 8 KB・entity ごとに新しい順で32件までです。上限超過は commit 前に `413` で拒否し、response だけ失敗して revision が進む状態を作りません。
@@ -37,19 +39,19 @@ Cycle を archive できるのは、残っている link の canonical Work Item
 
 ## Timeline と critical path
 
-Dependency は predecessor / successor の directed edge で、self edge、重複 edge、循環を拒否します。Scheduling type は `finish-to-start`、`start-to-start`、`finish-to-finish`、`start-to-finish` の4種です。`lagDays` は signed calendar day とし、正数を lag、負数を lead として扱います。必要な場合は successor の `start` または `finish` に `on`、`not-before`、`not-after` の明示 constraint を設定できます。
+Dependency は predecessor / successor の directed edge で、self edge、重複 edge、循環を拒否する。Scheduling type は `finish-to-start`、`start-to-start`、`finish-to-finish`、`start-to-finish` の4種である。`lagDays` は signed calendar day とし、正数を lag、負数を lead として扱う。必要な場合は successor の `start` または `finish` に `on`、`not-before`、`not-after` の明示 constraint を設定できる。
 
-Planning entity の critical path は dependency に参加する archive されていない entity の forecast（無い場合は baseline）の inclusive calendar day 数、dependency、lead / lag から DAG の最長経路を算出します。Dependency に参加しない長期 Portfolio 等が scheduling path を隠すことはありません。Timeline 上の日付や dependency の変更後は、mutation response に再計算した critical path を含めます。
+Planning entity の critical path は dependency に参加する archive されていない entity の forecast（無い場合は baseline）の inclusive calendar day 数、dependency、lead / lag から DAG の最長経路を算出する。Dependency に参加しない長期 Portfolio 等が scheduling path を隠すことはない。Timeline 上の日付や dependency の変更後は、mutation response に再計算した critical path を含める。
 
 ## Work Item schedule dependency
 
-Work Item の意味上の relation と日程を動かす dependency は別の正本を持ちます。`parent` / `child`、`duplicate`、`related`、`blocks` / `blockedBy` は WorkItemConfigurationTable の Team-scoped Relation Graph が所有し、意味 relation だけでは schedule を変更しません。日程 dependency は PlanningTable が Workspace scope で所有し、両端を `{teamId, workItemId}` で識別するため、権限のある Team / Project をまたいで作成できます。
+Work Item の意味上の relation と日程を動かす dependency は別の正本を持つ。`parent` / `child`、`duplicate`、`related`、`blocks` / `blockedBy` は WorkItemConfigurationTable の Team-scoped Relation Graph が所有し、意味 relation だけでは schedule を変更しない。日程 dependency は PlanningTable が Workspace scope で所有し、両端を `{teamId, workItemId}` で識別するため、権限のある Team / Project をまたいで作成できる。
 
-Planning snapshot は参照可能な両 endpoint が揃う edge だけを返し、同じ `workItemDependencies` と派生 summary を Table、Board、詳細 pane、Gantt、management surface が利用します。派生 summary には Work Item critical path、constraint conflict、未解決 blocker 件数、影響する Project / Milestone を含めます。片側だけを参照できる user へ相手 endpoint、edge、件数を漏らしません。
+Planning snapshot は参照可能な両 endpoint が揃う edge だけを返し、同じ `workItemDependencies` と派生 summary を Table、Board、詳細 pane、Gantt、management surface が利用する。派生 summary には Work Item critical path、constraint conflict、未解決 blocker 件数、影響する Project / Milestone を含める。影響Projectの正規表現は Team-qualified な `affectedProjects: {teamId, projectId}[]` とし、移行期間だけ unqualified な `affectedProjectIds` も返す。片側だけを参照できる user へ相手 endpoint、edge、件数を漏らさない。
 
-Dependency の作成・更新・削除は両 endpoint の manager 権限と Planning global revision を検証します。Qualified endpoint の self edge、同じ向きの重複 edge、transitive cycle、不正な lead / lag、実在しない Work Item、矛盾する constraint は commit 前に stable error code で拒否します。Work Item を削除する場合は先に incoming / outgoing dependency を解除し、dangling edge を残しません。
+Dependency の作成・更新・削除は両 endpoint の manager 権限と Planning global revision を検証する。Qualified endpoint の self edge、同じ向きの重複 edge、transitive cycle、不正な lead / lag、実在しない Work Item、矛盾する constraint は commit 前に stable error code で拒否する。Work Item を削除する場合は先に incoming / outgoing dependency を解除し、dangling edge を残さない。
 
-Schedule の move / resize / replace は、現在の Work Item revisions と Planning revision に対して downstream DAG を topological order で評価します。Preview は direct / propagated impact ごとの before / after、signed date delta、起点 dependency、conflict、影響 Project / Milestone を返します。`unscheduled` や必要な anchor を持たない `due-date` を暗黙の期間 task に補完せず、解決不能な edge は conflict として返します。評価対象は起点を含めて24件までに制限し、保存は preview 後の明示 confirm を必須とします。Confirm 時は graph と全対象 revision を再検証し、全日程を単一 transaction で更新します。Semantic `blocks` relation は preview の注意情報にはなっても propagated date update を生成しません。Automation や通常の単一 Work Item 更新は dependency を持つ日程を迂回せず、対話的な preview / confirm を要求します。
+Schedule の move / resize / replace は、現在の Work Item revisions と Planning revision に対して downstream DAG を topological order で評価する。Preview は direct / propagated impact ごとの before / after、signed date delta、起点 dependency、conflict、影響 Project / Milestone を返す。`unscheduled` や必要な anchor を持たない `due-date` を暗黙の期間 task に補完せず、解決不能な edge は conflict として返す。評価対象は起点を含めて24件までに制限し、保存は preview 後の明示 confirm を必須とする。Confirm 時は graph と全対象 revision を再検証し、全日程を単一 transaction で更新する。Semantic `blocks` relation は preview の注意情報にはなっても propagated date update を生成しない。Automation や通常の単一 Work Item 更新は dependency を持つ日程を迂回せず、対話的な preview / confirm を要求する。
 
 ## 権限
 

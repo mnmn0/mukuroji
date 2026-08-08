@@ -1,16 +1,11 @@
 import type {
   BulkOperationPreview,
   BulkOperationRequest,
-  PlanningSnapshot,
   ResolvedWorkItemConfiguration,
   WorkItemDependencyEndpoint,
   WorkItemRelation,
-  WorkItemScheduleChangePreview,
-  WorkItemScheduleOperation,
-  WorkItemScheduleDependency,
-  WorkItemScheduleDependencyPatch,
 } from '@mukuroji/contracts'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useLocation, useNavigate, useParams, useSearchParams } from 'react-router'
 import { canMutateWorkspaceContent } from '../../auth/api'
 import { useCurrentUser } from '../../auth/queries/useCurrentUser'
@@ -50,22 +45,13 @@ import {
 } from '../../projects/queries/useProjectMembers'
 import {
   createTeamIssue,
-  confirmTeamIssueSchedule,
-  previewTeamIssueSchedule,
   TeamIssuesApiError,
   type TeamIssue,
   type UpdateTeamIssueInput,
   updateTeamIssue,
 } from '../../issues/api'
-import {
-  createWorkItemScheduleDependency,
-  deleteWorkItemScheduleDependency,
-  isPlanningSnapshotConflict,
-  updateWorkItemScheduleDependency,
-} from '../../planning/api'
 import { usePlanningSnapshot } from '../../planning/queries/usePlanningSnapshot'
 import {
-  canManagePlanningWorkItemDependency,
   canManagePlanningWorkItemDependencyEndpoint,
   createPlanningAccessSnapshot,
 } from '../../planning/model/permissions'
@@ -90,13 +76,7 @@ import {
   resolveCurrentUserProjectKey,
   resolveProjectTaskRouteContext,
 } from '../../tasks/model/taskRoute'
-import {
-  applyConfirmedSchedulesToPlanningSnapshot,
-  applyConfirmedSchedulesToTasks,
-} from '../../tasks/model/scheduleConfirmation'
-import {
-  revalidateScheduleConfirmationCachesBestEffort,
-} from '../../tasks/mutations/scheduleConfirmationCache'
+import { createTaskScheduleMutationController } from '../../tasks/mutations/createTaskScheduleMutationController'
 import { applyTaskPatchOptimistically, type TaskCreateContext } from '../../tasks/model/taskView'
 import { TaskScreen } from '../../tasks/ui/TaskScreen'
 import type { WorkspaceMember } from '../../workspace/api'
@@ -112,9 +92,7 @@ import {
   readSelectedRelationGraphRevision,
   refreshRelationDetailAfterConflict,
 } from '../../work-items/model/workItemDisplay'
-import { createWorkItemDependencyMutationId } from '../../work-items/model/workItemDependencies'
 import type { WorkItemRelationEditorInput } from '../../work-items/ui/WorkItemRelationsEditor'
-import type { WorkItemDependencyCreateDraft } from '../../work-items/ui/WorkItemDependencyPanel'
 import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
 
 /** Aggregated resolved configuration result for every Team represented by a Project. */
@@ -185,7 +163,7 @@ export function TaskPage() {
     isQuickAccessSaving,
     onToggleProjectQuickAccess,
   } = useWorkspaceRouteContext()
-  const mutationRequestRunner = useRef(createMutationRequestRunner()).current
+  const [mutationRequestRunner] = useState(() => createMutationRequestRunner())
   const [searchParams, setSearchParams] = useSearchParams()
   const projectId = params.projectId ?? 'refero'
   const selectedTeamId = searchParams.get('teamId') ?? undefined
@@ -222,6 +200,8 @@ export function TaskPage() {
   const {
     data: teams = [],
     error: projectDirectoryError,
+    isLoading: isProjectDirectoryLoading,
+    key: projectDirectoryKey,
   } = useProjectDirectory({
     accessToken,
     enabled: Boolean(user && !currentUserError),
@@ -399,6 +379,7 @@ export function TaskPage() {
     'project-issue-detail',
   )
   const [issueUpdateError, setIssueUpdateError] = useState<readonly [string, string] | undefined>()
+  const [scheduleRefreshError, setScheduleRefreshError] = useState<unknown>()
   const selectedIssueUpdateErrorKey = resolvedSelectedIssue
     ? JSON.stringify([
         resolvedSelectedIssue.teamId,
@@ -482,6 +463,23 @@ export function TaskPage() {
       throw error
     }
   }
+  const scheduleMutations = createTaskScheduleMutationController({
+    accessToken,
+    guardEnterpriseSession,
+    mutatePlanning,
+    mutateProjectTasks,
+    mutateSelectedIssueDetail,
+    mutationRequestRunner,
+    onBackgroundRefreshError: (error) => {
+      redirectEnterpriseSessionError(error)
+      setScheduleRefreshError(error)
+    },
+    planningAccess,
+    planningSnapshot,
+    projectId,
+    t,
+    user,
+  })
   const taskErrorMessage = useMemo(() => {
     if (currentUserErrorAction?.kind === 'stay') {
       return t('tasks.error.loading')
@@ -499,12 +497,13 @@ export function TaskPage() {
     taskError,
     t,
   ])
-  const planningErrorMessage = planningError || planningProjectRolesError ||
+  const planningErrorMessage = planningError || planningProjectRolesError || scheduleRefreshError ||
     (planningProjectRolesResult?.errors.length ?? 0) > 0
     ? t('planning.error')
     : undefined
   const isPlanningDependencyLoading = Boolean(planningKey && isPlanningLoading) ||
-    Boolean(planningProjectRolesKey && isPlanningProjectRolesLoading)
+    Boolean(planningProjectRolesKey && isPlanningProjectRolesLoading) ||
+    Boolean(projectDirectoryKey && isProjectDirectoryLoading)
   const detailErrorMessage = issueUpdateErrorMessage ?? (
     detailError ? t('tasks.detail.error') : undefined
   )
@@ -823,234 +822,6 @@ export function TaskPage() {
     }
   }
 
-  /** Validates one interactive schedule operation against its observed revision. */
-  const handlePreviewScheduleChange = async (
-    task: ProjectTask,
-    operation: WorkItemScheduleOperation,
-  ): Promise<WorkItemScheduleChangePreview> => {
-    if (!accessToken) {
-      throw new Error(t('tasks.action.updateError'))
-    }
-
-    try {
-      return await guardEnterpriseSession(previewTeamIssueSchedule(
-        task.teamId,
-        task.id,
-        accessToken,
-        { expectedRevision: task.revision, operation },
-      ))
-    } catch (error) {
-      redirectEnterpriseSessionError(error)
-      if (error instanceof TeamIssuesApiError && error.code === 'WorkItemRevisionConflict') {
-        await Promise.all([mutateProjectTasks(), mutateSelectedIssueDetail()])
-      }
-      throw error
-    }
-  }
-
-  /** Confirms the original operation against both planning and relation graph revisions. */
-  const handleConfirmScheduleChange = async (
-    task: ProjectTask,
-    operation: WorkItemScheduleOperation,
-    preview: WorkItemScheduleChangePreview,
-  ): Promise<ProjectTask> => {
-    if (
-      !accessToken ||
-      preview.planningRevision === undefined ||
-      preview.relationGraphRevision === undefined
-    ) {
-      throw new Error(t('tasks.action.updateError'))
-    }
-    const expectedPlanningRevision = preview.planningRevision
-    const expectedRelationGraphRevision = preview.relationGraphRevision
-
-    let response: Awaited<ReturnType<typeof confirmTeamIssueSchedule>>
-    try {
-      response = await guardEnterpriseSession(mutationRequestRunner.run(
-        `issue:schedule:confirm:${task.teamId}:${task.id}`,
-        JSON.stringify([
-          preview.expectedRevision,
-          preview.evaluatedRevisions,
-          preview.impacts,
-          expectedPlanningRevision,
-          expectedRelationGraphRevision,
-          operation,
-        ]),
-        (context) => confirmTeamIssueSchedule(
-          task.teamId,
-          task.id,
-          accessToken,
-          {
-            confirmed: true,
-            expectedEvaluatedRevisions: preview.evaluatedRevisions,
-            expectedImpacts: preview.impacts,
-            expectedPlanningRevision,
-            expectedRelationGraphRevision,
-            expectedRevision: preview.expectedRevision,
-            operation,
-          },
-          context,
-        ),
-      ))
-    } catch (error) {
-      redirectEnterpriseSessionError(error)
-      if (isSchedulePreviewStaleError(error)) {
-        await Promise.all([
-          mutateProjectTasks(),
-          mutateSelectedIssueDetail(),
-          mutatePlanning(),
-        ])
-      }
-      throw error
-    }
-    const confirmedTask = response.workItems.find((item) =>
-      item.teamId === task.teamId && item.id === task.id
-    )
-    if (!confirmedTask) throw new Error(t('tasks.action.updateError'))
-
-    const updatedTask: ProjectTask = {
-      ...task,
-      assignedProjectId: confirmedTask.assignedProjectId,
-      dueDate: confirmedTask.dueDate,
-      revision: confirmedTask.revision,
-      schedule: confirmedTask.schedule,
-    }
-    /** Reapplies every committed cascade result to the current Project task cache. */
-    const preserveConfirmedProjectTasks = () => mutateProjectTasks(
-      (currentTasks = []) => applyConfirmedSchedulesToTasks(
-        currentTasks,
-        response.workItems,
-      ),
-      { revalidate: false },
-    )
-    /** Reapplies a matching committed result to the selected Work Item detail cache. */
-    const preserveConfirmedSelectedIssueDetail = () => mutateSelectedIssueDetail(
-      (currentDetail) => {
-        if (!currentDetail) return currentDetail
-        const [updatedIssue] = applyConfirmedSchedulesToTasks(
-          [currentDetail.issue],
-          response.workItems,
-        )
-        return updatedIssue ? { ...currentDetail, issue: updatedIssue } : currentDetail
-      },
-      { revalidate: false },
-    )
-    /** Reapplies every committed cascade result to the cached Planning projections. */
-    const preserveConfirmedPlanning = () => mutatePlanning(
-      (currentSnapshot) => applyConfirmedSchedulesToPlanningSnapshot(
-        currentSnapshot,
-        response.workItems,
-      ),
-      { revalidate: false },
-    )
-
-    void revalidateScheduleConfirmationCachesBestEffort([
-      {
-        preserveConfirmedState: preserveConfirmedProjectTasks,
-        refresh: () => mutateProjectTasks(),
-      },
-      {
-        preserveConfirmedState: preserveConfirmedSelectedIssueDetail,
-        refresh: () => mutateSelectedIssueDetail(),
-      },
-      {
-        preserveConfirmedState: preserveConfirmedPlanning,
-        refresh: () => mutatePlanning(),
-      },
-    ], redirectEnterpriseSessionError)
-
-    return updatedTask
-  }
-
-  /** Persists one dependency mutation and refreshes stale Planning authority on conflicts. */
-  const runScheduleDependencyMutation = async (
-    request: () => Promise<PlanningSnapshot>,
-  ): Promise<void> => {
-    try {
-      const result = await request()
-      await mutatePlanning(result, { revalidate: false })
-    } catch (error) {
-      if (isPlanningSnapshotConflict(error)) {
-        await mutatePlanning()
-      }
-      throw error
-    }
-  }
-
-  /** Creates one revision-bound canonical Work Item schedule dependency. */
-  const handleCreateScheduleDependency = async (
-    input: WorkItemDependencyCreateDraft,
-  ): Promise<void> => {
-    if (
-      !accessToken ||
-      !planningSnapshot ||
-      !canManagePlanningWorkItemDependency(user, input, planningSnapshot.workItems, planningAccess)
-    ) throw new Error(t('planning.error'))
-    await runScheduleDependencyMutation(() => guardEnterpriseSession(
-      mutationRequestRunner.run(
-        'planning:work-item-dependency:create',
-        JSON.stringify([planningSnapshot.revision, input]),
-        (context) => createWorkItemScheduleDependency(accessToken, {
-          ...input,
-          expectedRevision: planningSnapshot.revision,
-          id: createWorkItemDependencyMutationId(context.idempotencyKey),
-        }, context),
-      ),
-    ))
-  }
-
-  /** Updates one revision-bound canonical Work Item schedule dependency. */
-  const handleUpdateScheduleDependency = async (
-    dependency: WorkItemScheduleDependency,
-    patch: WorkItemScheduleDependencyPatch,
-  ): Promise<void> => {
-    if (
-      !accessToken ||
-      !planningSnapshot ||
-      !canManagePlanningWorkItemDependency(
-        user,
-        dependency,
-        planningSnapshot.workItems,
-        planningAccess,
-      )
-    ) throw new Error(t('planning.error'))
-    await runScheduleDependencyMutation(() => guardEnterpriseSession(
-      mutationRequestRunner.run(
-        `planning:work-item-dependency:${dependency.id}:update`,
-        JSON.stringify([planningSnapshot.revision, patch]),
-        (context) => updateWorkItemScheduleDependency(accessToken, dependency.id, {
-          expectedRevision: planningSnapshot.revision,
-          patch,
-        }, context),
-      ),
-    ))
-  }
-
-  /** Deletes one revision-bound canonical Work Item schedule dependency. */
-  const handleDeleteScheduleDependency = async (
-    dependency: WorkItemScheduleDependency,
-  ): Promise<void> => {
-    if (
-      !accessToken ||
-      !planningSnapshot ||
-      !canManagePlanningWorkItemDependency(
-        user,
-        dependency,
-        planningSnapshot.workItems,
-        planningAccess,
-      )
-    ) throw new Error(t('planning.error'))
-    await runScheduleDependencyMutation(() => guardEnterpriseSession(
-      mutationRequestRunner.run(
-        `planning:work-item-dependency:${dependency.id}:delete`,
-        String(planningSnapshot.revision),
-        (context) => deleteWorkItemScheduleDependency(accessToken, dependency.id, {
-          expectedRevision: planningSnapshot.revision,
-        }, context),
-      ),
-    ))
-  }
-
   const revalidateAfterBulkOperation = async () => {
     await Promise.all([
       mutateProjectTasks(),
@@ -1235,22 +1006,28 @@ export function TaskPage() {
       onSelectedIssueChange={handleSelectedIssueChange}
       onUpdateIssue={canMutateContent ? handleUpdateIssue : undefined}
       onUpdateTask={canMutateContent ? handleUpdateTask : undefined}
-      onPreviewScheduleChange={canMutateContent ? handlePreviewScheduleChange : undefined}
-      onConfirmScheduleChange={canMutateContent ? handleConfirmScheduleChange : undefined}
+      onPreviewScheduleChange={canMutateContent
+        ? scheduleMutations.previewScheduleChange
+        : undefined}
+      onConfirmScheduleChange={canMutateContent
+        ? scheduleMutations.confirmScheduleChange
+        : undefined}
       onCreateScheduleDependency={accessToken && planningSnapshot &&
           !planningErrorMessage && !isPlanningDependencyLoading
-        ? handleCreateScheduleDependency
+        ? scheduleMutations.createScheduleDependency
         : undefined}
       onDeleteScheduleDependency={accessToken && planningSnapshot &&
           !planningErrorMessage && !isPlanningDependencyLoading
-        ? handleDeleteScheduleDependency
+        ? scheduleMutations.deleteScheduleDependency
         : undefined}
       onRetryPlanning={planningErrorMessage
-        ? () => void Promise.all([mutatePlanning(), mutatePlanningProjectRoles()])
+        ? () => void Promise.all([mutatePlanning(), mutatePlanningProjectRoles()]).then(() => {
+            setScheduleRefreshError(undefined)
+          })
         : undefined}
       onUpdateScheduleDependency={accessToken && planningSnapshot &&
           !planningErrorMessage && !isPlanningDependencyLoading
-        ? handleUpdateScheduleDependency
+        ? scheduleMutations.updateScheduleDependency
         : undefined}
       planningErrorMessage={planningErrorMessage}
       planningSnapshot={planningSnapshot}
@@ -1283,16 +1060,4 @@ export function TaskPage() {
       workspaceMembers={workspaceAccess?.members ?? emptyWorkspaceMembers}
     />
   )
-}
-
-/** Returns whether a server conflict invalidates the currently displayed schedule preview. */
-function isSchedulePreviewStaleError(error: unknown): boolean {
-  if (!(error instanceof TeamIssuesApiError)) return false
-  return error.code === 'WorkItemRevisionConflict' ||
-    error.code === 'WorkItemSchedulePreviewStale' ||
-    error.code === 'PlanningRevisionConflict' ||
-    error.code === 'WorkItemRelationGraphConflict' ||
-    error.code === 'WorkItemAuthorizationChanged' ||
-    error.code === 'WorkItemScheduleDependencyConflict' ||
-    error.code === 'WorkItemScheduleCascadeConflict'
 }

@@ -43,6 +43,7 @@ import {
   type ScheduleDependencyConstraint,
   type UpdatePlanningEntityInput,
   type UpdateWorkItemScheduleDependencyInput,
+  type WorkItemAffectedProject,
   type WorkItemDependencyCriticalPath,
   type WorkItemDependencyEndpoint,
   type WorkItemSchedule,
@@ -65,6 +66,9 @@ const MAX_STATUS_MESSAGE_BYTES = 8_000
 const MAX_STATUS_UPDATES = 32
 const MAX_ROLLOVER_LINK_MUTATIONS = 49
 const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/
+
+/** Schema version of the persisted Planning META fencing row. */
+export const PLANNING_STORAGE_SCHEMA_VERSION = 1 as const
 
 /** Planning domain / persistence error です。 */
 export class PlanningError extends Error {
@@ -95,7 +99,7 @@ export type PlanningCallerAuthorizationConditionCheck = {
 }
 
 /** Minimal result exposed while preparing one durable Work Item dependency receipt. */
-type PlanningWorkItemDependencyTransactionResult = {
+export type PlanningWorkItemDependencyTransactionResult = {
   /** Whether the committed dependency is present after the mutation or was deleted. */
   kind: 'upsert' | 'delete'
   /** Planning revision produced by the mutation. */
@@ -116,11 +120,11 @@ export type PlanningMutationTransaction = {
    * Prepares a storage contribution from the minimal committed dependency result.
    *
    * @param result - Exact dependency and Planning revision produced by the mutation.
-   * @returns One conditional DynamoDB action, or undefined when receipt persistence is unavailable.
+   * @returns An opaque storage contribution validated inside the Planning adapter.
    */
   prepare(
     result: PlanningWorkItemDependencyTransactionResult,
-  ): Promise<PlanningMutationTransactionContribution | undefined>
+  ): Promise<unknown>
 }
 
 /** Directory 破壊操作の認可に使う Planning entity 参照です。 */
@@ -1128,17 +1132,59 @@ async function preparePlanningMutationTransactionContribution(
   }
   try {
     const contribution = await transaction.prepare(result)
-    if (!contribution || !isRecord(contribution.transactWriteItem)) {
+    if (!isPlanningMutationTransactionContribution(contribution)) {
       throw new Error('Planning receipt contribution is unavailable.')
     }
     return contribution
-  } catch {
+  } catch (error) {
+    if (error instanceof PlanningError) throw error
     throw new PlanningError(
       503,
       'PlanningIdempotencyUnavailable',
       'The durable Planning mutation receipt could not be prepared.',
     )
   }
+}
+
+/**
+ * Validates an opaque caller contribution before it crosses into the Planning DynamoDB adapter.
+ *
+ * @param value - Unknown contribution returned by the application transaction port.
+ * @returns Whether the value contains exactly one supported DynamoDB transaction action.
+ */
+function isPlanningMutationTransactionContribution(
+  value: unknown,
+): value is PlanningMutationTransactionContribution {
+  if (!isRecord(value)) return false
+  return isPlanningTransactWriteItem(value.transactWriteItem)
+}
+
+/**
+ * Validates the required storage fields of one DynamoDB transaction action.
+ *
+ * @param value - Unknown transaction action candidate.
+ * @returns Whether exactly one condition, delete, put, or update action is complete.
+ */
+function isPlanningTransactWriteItem(
+  value: unknown,
+): value is NonNullable<TransactWriteCommandInput['TransactItems']>[number] {
+  if (!isRecord(value)) return false
+  const conditionIsValid = isRecord(value.ConditionCheck) &&
+    typeof value.ConditionCheck.TableName === 'string' &&
+    isRecord(value.ConditionCheck.Key) &&
+    typeof value.ConditionCheck.ConditionExpression === 'string'
+  const deleteIsValid = isRecord(value.Delete) &&
+    typeof value.Delete.TableName === 'string' &&
+    isRecord(value.Delete.Key)
+  const putIsValid = isRecord(value.Put) &&
+    typeof value.Put.TableName === 'string' &&
+    isRecord(value.Put.Item)
+  const updateIsValid = isRecord(value.Update) &&
+    typeof value.Update.TableName === 'string' &&
+    isRecord(value.Update.Key) &&
+    typeof value.Update.UpdateExpression === 'string'
+  return [conditionIsValid, deleteIsValid, putIsValid, updateIsValid]
+    .filter(Boolean).length === 1
 }
 
 /** Test / local domain 利用向けの in-memory Planning client です。 */
@@ -1412,7 +1458,7 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
       if (!response.Item) return { revision: 0, updatedAt: undefined }
       if (
         response.Item.entryType !== 'planning-meta' ||
-        response.Item.schemaVersion !== PLANNING_SCHEMA_VERSION ||
+        response.Item.schemaVersion !== PLANNING_STORAGE_SCHEMA_VERSION ||
         !isPositiveInteger(response.Item.revision) ||
         (response.Item.updatedAt !== undefined && (
           typeof response.Item.updatedAt !== 'string' ||
@@ -1644,7 +1690,9 @@ function validateDependencies(state: PlanningWorkspaceState) {
     readIdentifier(dependency.id, 'Dependency ID')
     readDependencyType(dependency.type)
     readLagDays(dependency.lagDays)
-    if (dependency.constraint !== undefined) readDependencyConstraint(dependency.constraint)
+    const constraint = dependency.constraint === undefined
+      ? undefined
+      : readDependencyConstraint(dependency.constraint)
     if (dependency.predecessorId === dependency.successorId) {
       throw invalid('PlanningDependencySelf', 'An entity cannot depend on itself.')
     }
@@ -1656,8 +1704,13 @@ function validateDependencies(state: PlanningWorkspaceState) {
       )
     }
     edges.add(edge)
-    if (!findEntity(state, dependency.predecessorId) || !findEntity(state, dependency.successorId)) {
+    const predecessor = findEntity(state, dependency.predecessorId)
+    const successor = findEntity(state, dependency.successorId)
+    if (!predecessor || !successor) {
       throw invalid('PlanningDependencyEntityNotFound', 'Planning dependency references a missing entity.')
+    }
+    if (constraint !== undefined) {
+      requirePlanningDependencyConstraintIsSatisfied(successor, constraint)
     }
     const targets = adjacency.get(dependency.predecessorId) ?? []
     targets.push(dependency.successorId)
@@ -1674,6 +1727,31 @@ function validateDependencies(state: PlanningWorkspaceState) {
     visited.add(id)
   }
   for (const id of adjacency.keys()) visit(id)
+}
+
+/**
+ * Enforces one explicit dependency constraint against the successor forecast.
+ *
+ * Persisted Planning dependency constraints are invariants rather than advisory
+ * annotations, so both dependency creation and later forecast updates pass through
+ * this check via {@link validatePlanningState}.
+ *
+ * @param successor - Successor Planning entity whose forecast owns the constrained anchor.
+ * @param constraint - Validated explicit successor date constraint.
+ */
+function requirePlanningDependencyConstraintIsSatisfied(
+  successor: StoredPlanningEntity,
+  constraint: ScheduleDependencyConstraint,
+): void {
+  const actualDate = constraint.anchor === 'start'
+    ? successor.forecast.startDate
+    : successor.forecast.endDate
+  if (!satisfiesDependencyConstraint(actualDate, constraint)) {
+    throw conflict(
+      'PlanningDependencyConstraintViolation',
+      'Planning dependency constraint conflicts with the successor forecast.',
+    )
+  }
 }
 
 /**
@@ -2158,10 +2236,15 @@ export function createPlanningWorkItemDependencySummary(
       unresolvedBlockerCount += 1
     }
   }
-  const affectedProjectIds = new Set<string>()
+  const affectedProjects = new Map<string, WorkItemAffectedProject>()
   for (const key of endpointKeys) {
-    const projectId = workItemMap.get(key)?.projectId
-    if (projectId !== undefined) affectedProjectIds.add(projectId)
+    const workItem = workItemMap.get(key)
+    if (workItem?.projectId !== undefined) {
+      affectedProjects.set(`${workItem.teamId}\0${workItem.projectId}`, {
+        teamId: workItem.teamId,
+        projectId: workItem.projectId,
+      })
+    }
   }
   const affectedMilestoneIds = new Set<string>()
   for (const link of links) {
@@ -2176,7 +2259,11 @@ export function createPlanningWorkItemDependencySummary(
     criticalPath: calculateWorkItemDependencyCriticalPath(visibleDependencies, workItemMap),
     conflicts: calculateWorkItemDependencyConflicts(visibleDependencies, workItemMap),
     unresolvedBlockerCount,
-    affectedProjectIds: [...affectedProjectIds].sort(compareText),
+    affectedProjects: [...affectedProjects.values()].sort((first, second) =>
+      compareText(first.teamId, second.teamId) || compareText(first.projectId, second.projectId)
+    ),
+    affectedProjectIds: [...new Set([...affectedProjects.values()].map(({ projectId }) => projectId))]
+      .sort(compareText),
     affectedMilestoneIds: [...affectedMilestoneIds].sort(compareText),
   }
 }
@@ -2647,7 +2734,7 @@ function createPlanningRowMap(workspaceId: string, state: PlanningWorkspaceState
     workspaceId,
     recordKey: META_RECORD_KEY,
     entryType: 'planning-meta',
-    schemaVersion: PLANNING_SCHEMA_VERSION,
+    schemaVersion: PLANNING_STORAGE_SCHEMA_VERSION,
     revision: state.revision,
     updatedAt: state.updatedAt,
   })

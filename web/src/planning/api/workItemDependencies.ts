@@ -5,7 +5,7 @@ import type {
   UpdateWorkItemScheduleDependencyInput,
 } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
-import { isPlanningSnapshot } from './contractValidation'
+import { readPlanningSnapshot } from './contractValidation'
 import { PlanningApiError } from './errors'
 
 const planningApiBaseUrl = trimTrailingSlash(import.meta.env.VITE_API_BASE_URL ?? '/api')
@@ -109,7 +109,8 @@ async function requestMutation(
     )
   }
 
-  if (!isPlanningSnapshot(data)) {
+  const snapshot = readPlanningSnapshot(data)
+  if (!snapshot) {
     throw new PlanningApiError(
       response.status,
       defaultPlanningApiErrorMessage,
@@ -117,7 +118,7 @@ async function requestMutation(
     )
   }
 
-  return data
+  return snapshot
 }
 
 /** Returns whether an unknown response exposes safe optional error fields. */

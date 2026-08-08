@@ -186,6 +186,10 @@ describe('Work Item schedule dependency preview', () => {
         { teamId: 'team-b', workItemId: 'middle', expectedRevision: 3 },
       ],
       conflicts: [],
+      affectedProjects: [
+        { teamId: 'team-a', projectId: 'team-a-project' },
+        { teamId: 'team-b', projectId: 'team-b-project' },
+      ],
       affectedProjectIds: ['team-a-project', 'team-b-project'],
       affectedMilestoneIds: ['team-a-milestone', 'team-b-milestone'],
       requiresConfirmation: true,
@@ -686,5 +690,28 @@ describe('Work Item schedule dependency preview', () => {
       'WorkItemScheduleDependencyCycle',
       'Stored Work Item schedule dependencies contain a cycle.',
     ))
+  })
+
+  test('counts parallel endpoint pairs once when ordering a reachable graph', () => {
+    const root = state('root', '2026-06-01', '2026-06-02')
+    const successor = state('successor', '2026-06-03', '2026-06-04')
+
+    const preview = previewWorkItemDependencyScheduleChange({
+      root,
+      operation: { type: 'move', targetDate: '2026-06-03' },
+      workItems: [root, successor],
+      dependencies: [
+        dependency('dep-a', root.endpoint, successor.endpoint),
+        dependency('dep-b', root.endpoint, successor.endpoint),
+      ],
+      planningRevision: 1,
+    })
+
+    expect(preview.impacts).toHaveLength(2)
+    expect(preview.impacts[1]).toMatchObject({
+      workItemId: 'successor',
+      dependencyId: 'dep-a',
+    })
+    expect(preview.conflicts).toEqual([])
   })
 })

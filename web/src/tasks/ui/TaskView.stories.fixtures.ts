@@ -146,6 +146,7 @@ export const taskViewStoryPlanningSnapshot = {
   workItemDependencySummary: {
     affectedMilestoneIds: [],
     affectedProjectIds: ['refero'],
+    affectedProjects: [{ projectId: 'refero', teamId: 'core-team' }],
     conflicts: [],
     criticalPath: {
       slackByWorkItemKey: {

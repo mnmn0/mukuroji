@@ -1,5 +1,9 @@
 import { describe, expect, test } from 'bun:test'
-import type { PlanningSnapshot, WorkItemScheduleDependency } from '@mukuroji/contracts'
+import type {
+  PlanningSnapshot,
+  WorkItemScheduleChangePreview,
+  WorkItemScheduleDependency,
+} from '@mukuroji/contracts'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { createTranslator } from '../src/shared/i18n/i18n'
 import { collaborationWorkspaceMemberFixtures } from '../src/issues/fixtures'
@@ -13,6 +17,7 @@ import { TaskDetailPane } from '../src/tasks/ui/TaskDetailPane'
 import { TaskFileView } from '../src/tasks/ui/TaskFileView'
 import { TaskGanttView } from '../src/tasks/ui/TaskGanttView'
 import { TaskPermissionsView } from '../src/tasks/ui/TaskPermissionsView'
+import { TaskSchedulePreviewMetadata } from '../src/tasks/ui/TaskSchedulePreviewMetadata'
 import { TaskTableView } from '../src/tasks/ui/TaskTableView'
 import { TaskStatusBadge } from '../src/tasks/ui/TaskViewPrimitives'
 import {
@@ -33,6 +38,40 @@ const personLabels = {
 }
 
 describe('independent task views', () => {
+  test('shows legacy affected Project IDs without inventing Team-qualified links', () => {
+    const schedule = createDefaultDueDateTaskSchedule('2026-08-08')
+    const preview = {
+      affectedMilestoneIds: [],
+      affectedProjectIds: ['shared-project'],
+      affectedProjects: [],
+      conflicts: [],
+      evaluatedRevisions: [{
+        expectedRevision: 4,
+        teamId: 'core-team',
+        workItemId: 'wireframe',
+      }],
+      expectedRevision: 4,
+      impacts: [{
+        after: schedule,
+        before: schedule,
+        dateDeltaDays: 0,
+        expectedRevision: 4,
+        kind: 'direct',
+        teamId: 'core-team',
+        workItemId: 'wireframe',
+      }],
+      planningRevision: 12,
+      relationGraphRevision: 8,
+      requiresConfirmation: true,
+      warnings: [],
+    } satisfies WorkItemScheduleChangePreview
+
+    const html = renderToStaticMarkup(<TaskSchedulePreviewMetadata preview={preview} t={t} />)
+
+    expect(html).toContain('shared-project')
+    expect(html).not.toContain('core-team / shared-project')
+  })
+
   test('preserves table row, selection, count, empty, and error contracts', () => {
     const selectedTask = taskViewStoryTasks[0]
     const selectedTaskKey = createTaskKey(selectedTask)

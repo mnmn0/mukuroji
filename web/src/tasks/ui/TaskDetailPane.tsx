@@ -35,11 +35,9 @@ import {
   resolveWorkItemPersonOptions,
   resolveWorkItemWorkflowStatusId,
 } from '../../work-items/model/workItemDisplay'
+import type { WorkItemDependencyCreateDraft } from '../../work-items/model/workItemDependencies'
 import { WorkItemFieldsEditor } from '../../work-items/ui/WorkItemFieldsEditor'
-import {
-  WorkItemDependencyPanel,
-  type WorkItemDependencyCreateDraft,
-} from '../../work-items/ui/WorkItemDependencyPanel'
+import { WorkItemDependencyPanel } from '../../work-items/ui/WorkItemDependencyPanel'
 import {
   WorkItemRelationsEditor,
   type WorkItemRelationEditorInput,
@@ -466,7 +464,7 @@ export function TaskDetailPane({
               form={scheduleFormId}
               type="submit"
             >
-              {t('issues.detail.save')}
+              {t('tasks.schedule.reviewChange')}
             </button>
           </div>
           {hasCustomFields ? (

@@ -10,10 +10,15 @@ import type {
   WorkItemSchedule,
   WorkItemScheduleDependency,
 } from '@mukuroji/contracts'
-import { createDefaultDueDateWorkItemSchedule } from '@mukuroji/contracts'
+import {
+  PLANNING_SCHEMA_VERSION,
+  createDefaultDueDateWorkItemSchedule,
+} from '@mukuroji/contracts'
 import {
   DynamoDbPlanningClient,
   InMemoryPlanningClient,
+  PLANNING_STORAGE_SCHEMA_VERSION,
+  PlanningError,
   createPlanningWorkItemDependencySummary,
   requirePlanningWorkItemHasNoScheduleDependencies,
   type PlanningCallerAuthorizationConditionCheck,
@@ -576,25 +581,70 @@ describe('planning domain', () => {
     })
   })
 
+  test('enforces Planning dependency constraints across creation and forecast updates', async () => {
+    const client = new InMemoryPlanningClient(() => NOW)
+    await client.create('workspace-1', createCycleInput('constraint-predecessor', 0, {
+      baseline: { startDate: '2026-08-01', endDate: '2026-08-02' },
+      forecast: { startDate: '2026-08-01', endDate: '2026-08-02' },
+    }), EMPTY_WORK_ITEMS)
+    await client.create('workspace-1', createCycleInput('constraint-successor', 1, {
+      baseline: { startDate: '2026-08-03', endDate: '2026-08-05' },
+      forecast: { startDate: '2026-08-03', endDate: '2026-08-05' },
+    }), EMPTY_WORK_ITEMS)
+
+    await expect(client.createDependency('workspace-1', {
+      id: 'invalid-successor-constraint',
+      predecessorId: 'constraint-predecessor',
+      successorId: 'constraint-successor',
+      type: 'finish-to-start',
+      lagDays: 0,
+      constraint: { anchor: 'start', kind: 'not-before', date: '2026-08-04' },
+      expectedRevision: 2,
+    }, EMPTY_WORK_ITEMS)).rejects.toMatchObject({
+      status: 409,
+      code: 'PlanningDependencyConstraintViolation',
+    })
+
+    await client.createDependency('workspace-1', {
+      id: 'valid-successor-constraint',
+      predecessorId: 'constraint-predecessor',
+      successorId: 'constraint-successor',
+      type: 'finish-to-start',
+      lagDays: 0,
+      constraint: { anchor: 'start', kind: 'not-before', date: '2026-08-03' },
+      expectedRevision: 2,
+    }, EMPTY_WORK_ITEMS)
+
+    await expect(client.update('workspace-1', 'constraint-successor', {
+      expectedRevision: 3,
+      patch: {
+        forecast: { startDate: '2026-08-02', endDate: '2026-08-05' },
+      },
+    }, EMPTY_WORK_ITEMS)).rejects.toMatchObject({
+      status: 409,
+      code: 'PlanningDependencyConstraintViolation',
+    })
+  })
+
   test('manages canonical cross-Team Work Item dependencies and derived summary', async () => {
     const client = new InMemoryPlanningClient(() => NOW)
     const workItemState: PlanningWorkItemState = {
       workItems: [
         createWorkItem('work-a', 'started', {
           teamId: 'team-a',
-          projectId: 'project-a',
+          projectId: 'shared-project',
           dueDate: '2026-08-03',
           schedule: createDateRangeSchedule('2026-08-01', '2026-08-03'),
         }),
         createWorkItem('work-b', 'unstarted', {
           teamId: 'team-b',
-          projectId: 'project-b',
+          projectId: 'shared-project',
           dueDate: '2026-08-06',
           schedule: createDateRangeSchedule('2026-08-05', '2026-08-06'),
         }),
         createWorkItem('work-c', 'completed', {
           teamId: 'team-b',
-          projectId: 'project-b',
+          projectId: 'shared-project',
           dueDate: '2026-08-08',
           schedule: {
             mode: 'milestone',
@@ -640,6 +690,7 @@ describe('planning domain', () => {
       expectedRevision: 2,
     }, workItemState)
 
+    expect(response.planning.schemaVersion).toBe(PLANNING_SCHEMA_VERSION)
     expect(response.planning.workItemDependencies).toEqual([
       expect.objectContaining({
         id: 'dependency-a-b',
@@ -666,7 +717,11 @@ describe('planning domain', () => {
       },
       conflicts: [],
       unresolvedBlockerCount: 2,
-      affectedProjectIds: ['project-a', 'project-b'],
+      affectedProjects: [
+        { teamId: 'team-a', projectId: 'shared-project' },
+        { teamId: 'team-b', projectId: 'shared-project' },
+      ],
+      affectedProjectIds: ['shared-project'],
       affectedMilestoneIds: [],
     })
 
@@ -689,6 +744,7 @@ describe('planning domain', () => {
       criticalPath: { workItems: [], totalDurationDays: 0, slackByWorkItemKey: {} },
       conflicts: [],
       unresolvedBlockerCount: 0,
+      affectedProjects: [],
       affectedProjectIds: [],
       affectedMilestoneIds: [],
     })
@@ -801,6 +857,38 @@ describe('planning domain', () => {
     }, workItemState, [], transaction)).rejects.toMatchObject({
       status: 503,
       code: 'PlanningIdempotencyUnavailable',
+    })
+    expect(await client.getAuthorizationRevision('workspace-1')).toBe(0)
+  })
+
+  test('preserves a classified Planning receipt preparation error', async () => {
+    const client = new InMemoryPlanningClient(() => NOW)
+    const workItemState: PlanningWorkItemState = {
+      workItems: [
+        createWorkItem('work-a', 'unstarted', { teamId: 'team-a' }),
+        createWorkItem('work-b', 'unstarted', { teamId: 'team-b' }),
+      ],
+    }
+    const transaction = {
+      async prepare() {
+        throw new PlanningError(
+          409,
+          'PlanningIdempotencyConflict',
+          'The idempotency key belongs to a different dependency mutation.',
+        )
+      },
+    } satisfies PlanningMutationTransaction
+
+    await expect(client.createWorkItemDependency('workspace-1', {
+      id: 'dependency-a-b',
+      predecessor: { teamId: 'team-a', workItemId: 'work-a' },
+      successor: { teamId: 'team-b', workItemId: 'work-b' },
+      type: 'finish-to-finish',
+      lagDays: 0,
+      expectedRevision: 0,
+    }, workItemState, [], transaction)).rejects.toMatchObject({
+      status: 409,
+      code: 'PlanningIdempotencyConflict',
     })
     expect(await client.getAuthorizationRevision('workspace-1')).toBe(0)
   })
@@ -1845,6 +1933,7 @@ describe('planning persistence', () => {
       Item: {
         workspaceId: 'workspace-1',
         recordKey: 'META',
+        schemaVersion: PLANNING_STORAGE_SCHEMA_VERSION,
         revision: 1,
       },
       ConditionExpression: 'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',

@@ -23,12 +23,12 @@ import {
   createWorkItemDependencyRows,
   createWorkItemDependencySummaries,
   resolveWorkItemDependencySummary,
+  type WorkItemDependencyCreateDraft,
   type WorkItemDependencyRow,
 } from '../../work-items/model/workItemDependencies'
 import { WorkItemDependencyChips } from '../../work-items/ui/WorkItemDependencyChips'
 import {
   WorkItemDependencyPanel,
-  type WorkItemDependencyCreateDraft,
 } from '../../work-items/ui/WorkItemDependencyPanel'
 import {
   addTaskTimelineDays,
@@ -63,8 +63,8 @@ const MAX_GANTT_TIMELINE_COLUMNS = 180
 const MILLISECONDS_PER_CALENDAR_DAY = 86_400_000
 
 /** Formats a signed dependency offset without losing lead semantics. */
-function formatSignedLag(lagDays: number): string {
-  return `${lagDays > 0 ? '+' : ''}${lagDays}d`
+function formatSignedLag(lagDays: number, t: TaskGanttTranslator): string {
+  return `${lagDays > 0 ? '+' : ''}${lagDays}${t('workItems.dependencies.daySuffix')}`
 }
 
 /** Resolves a localized task Gantt-view message. */
@@ -457,7 +457,7 @@ export function TaskGanttView({
                   {t('workItems.dependencies.type')}: {t(`workItems.dependencies.type.${row.dependency.type}`)}
                 </span>
                 <span className="workbench-badge">
-                  {t('workItems.dependencies.lagDays')}: {formatSignedLag(row.dependency.lagDays)}
+                  {t('workItems.dependencies.lagDays')}: {formatSignedLag(row.dependency.lagDays, t)}
                 </span>
                 <span className="workbench-badge">
                   {t('workItems.dependencies.constraint')}:{' '}
@@ -580,7 +580,7 @@ export function TaskGanttView({
                   height: `${GANTT_ROW_HEIGHT}px`,
                 }}
               >
-                <div className="sticky left-0 z-10 grid min-h-0 gap-2 overflow-hidden border-r border-[#d8dde5] bg-white px-4 py-3" role="gridcell">
+                <div className="sticky left-0 z-10 grid min-h-0 gap-2 overflow-y-auto border-r border-[#d8dde5] bg-white px-4 py-3" role="gridcell">
                   <div className="flex min-w-0 items-start justify-between gap-3">
                     <div className="min-w-0">
                       {onSelectTask ? (
@@ -763,9 +763,10 @@ export function TaskGanttView({
           })}
             <svg
               aria-hidden="true"
-              className="pointer-events-none absolute left-[360px] top-0 z-[1] overflow-visible"
+              className="pointer-events-none absolute top-0 z-[1] overflow-visible"
               data-testid="task-gantt-connector-overlay"
               height={dependencyLayout.externalLaneHeight + rows.length * GANTT_ROW_HEIGHT}
+              style={{ left: `${GANTT_TABLE_WIDTH}px` }}
               width={timelineColumns.length * GANTT_DAY_WIDTH}
             >
               <defs>

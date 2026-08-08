@@ -8,8 +8,11 @@ import type {
   WorkItemScheduleDependency,
 } from './schedule-dependencies'
 
-/** Planning domain の現行 schema version です。 */
-export const PLANNING_SCHEMA_VERSION = 1 as const
+/** Planning API snapshot の現行 schema version です。 */
+export const PLANNING_SCHEMA_VERSION = 2 as const
+
+/** Rolling deployment 中に新しい client が受理する旧 Planning API schema version です。 */
+export const LEGACY_PLANNING_SCHEMA_VERSION = 1 as const
 
 /** Planning hierarchy に保存できる entity 種別です。 */
 export type PlanningEntityType =

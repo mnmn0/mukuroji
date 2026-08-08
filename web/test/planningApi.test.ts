@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test'
+import { LEGACY_PLANNING_SCHEMA_VERSION } from '@mukuroji/contracts'
 import {
   archivePlanningEntity,
   createPlanningDependency,
@@ -37,6 +38,100 @@ describe('Planning API', () => {
     expect(requests).toHaveLength(1)
     expect(requests[0]?.url).toBe('/api/planning')
     expect(requests[0]?.init.headers).toMatchObject({ Authorization: 'Bearer access-token' })
+  })
+
+  test('upgrades a dependency-free v1 snapshot during a rolling deployment', async () => {
+    const legacySnapshot = {
+      criticalPath: planningSnapshotFixture.criticalPath,
+      dependencies: planningSnapshotFixture.dependencies,
+      entities: planningSnapshotFixture.entities,
+      revision: planningSnapshotFixture.revision,
+      schemaVersion: LEGACY_PLANNING_SCHEMA_VERSION,
+      updatedAt: planningSnapshotFixture.updatedAt,
+      workItemLinks: planningSnapshotFixture.workItemLinks,
+      workItems: planningSnapshotFixture.workItems,
+    }
+    installFetchRecorder(legacySnapshot)
+
+    await expect(getPlanningSnapshot('access-token')).resolves.toMatchObject({
+      schemaVersion: 2,
+      workItemDependencies: [],
+      workItemDependencySummary: {
+        affectedMilestoneIds: [],
+        affectedProjectIds: [],
+        affectedProjects: [],
+        conflicts: [],
+        unresolvedBlockerCount: 0,
+      },
+    })
+  })
+
+  test('adds Team-qualified Projects to a v1 dependency summary', async () => {
+    const legacySnapshot = {
+      ...planningSnapshotFixture,
+      schemaVersion: LEGACY_PLANNING_SCHEMA_VERSION,
+      workItemDependencySummary: {
+        affectedMilestoneIds:
+          planningSnapshotFixture.workItemDependencySummary.affectedMilestoneIds,
+        affectedProjectIds:
+          planningSnapshotFixture.workItemDependencySummary.affectedProjectIds,
+        conflicts: planningSnapshotFixture.workItemDependencySummary.conflicts,
+        criticalPath: planningSnapshotFixture.workItemDependencySummary.criticalPath,
+        unresolvedBlockerCount:
+          planningSnapshotFixture.workItemDependencySummary.unresolvedBlockerCount,
+      },
+    }
+    installFetchRecorder(legacySnapshot)
+
+    await expect(getPlanningSnapshot('access-token')).resolves.toMatchObject({
+      schemaVersion: 2,
+      workItemDependencySummary: {
+        affectedProjects: [{ projectId: 'refero', teamId: 'core-team' }],
+      },
+    })
+  })
+
+  test('keeps ambiguous v1 Project IDs out of Team-qualified navigation', async () => {
+    const coreWorkItem = planningSnapshotFixture.workItems[0]
+    const ambiguousWorkItem = {
+      ...coreWorkItem,
+      id: 'design-refero-item',
+      teamId: 'design-team',
+    }
+    const uniqueWorkItem = {
+      ...coreWorkItem,
+      id: 'operations-release-item',
+      projectId: 'operations-release',
+      teamId: 'operations-team',
+    }
+    const affectedProjectIds = ['refero', 'operations-release', 'not-visible']
+    const legacySnapshot = {
+      ...planningSnapshotFixture,
+      schemaVersion: LEGACY_PLANNING_SCHEMA_VERSION,
+      workItemDependencySummary: {
+        affectedMilestoneIds:
+          planningSnapshotFixture.workItemDependencySummary.affectedMilestoneIds,
+        affectedProjectIds,
+        conflicts: planningSnapshotFixture.workItemDependencySummary.conflicts,
+        criticalPath: planningSnapshotFixture.workItemDependencySummary.criticalPath,
+        unresolvedBlockerCount:
+          planningSnapshotFixture.workItemDependencySummary.unresolvedBlockerCount,
+      },
+      workItems: [
+        ...planningSnapshotFixture.workItems,
+        ambiguousWorkItem,
+        uniqueWorkItem,
+      ],
+    }
+    installFetchRecorder(legacySnapshot)
+
+    await expect(getPlanningSnapshot('access-token')).resolves.toMatchObject({
+      schemaVersion: 2,
+      workItemDependencySummary: {
+        affectedProjectIds,
+        affectedProjects: [{ projectId: 'operations-release', teamId: 'operations-team' }],
+      },
+    })
   })
 
   test('uses stable mutation headers for entity lifecycle endpoints', async () => {
@@ -161,8 +256,13 @@ describe('Planning API', () => {
       ['PATCH', '/api/planning/work-item-dependencies/edge%2F1'],
       ['DELETE', '/api/planning/work-item-dependencies/edge%2F1'],
     ])
-    expect(JSON.parse(String(requests[0]?.init.body))).toMatchObject({
+    expect(JSON.parse(String(requests[0]?.init.body))).toEqual({
+      constraint: { anchor: 'finish', date: '2026-08-01', kind: 'not-after' },
+      expectedRevision: 12,
+      id: 'edge/1',
       lagDays: -2,
+      predecessor: { teamId: 'team/a', workItemId: 'item/a' },
+      successor: { teamId: 'team/b', workItemId: 'item/b' },
       type: 'start-to-finish',
     })
     expect(JSON.parse(String(requests[1]?.init.body))).toEqual({

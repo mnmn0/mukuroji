@@ -1297,16 +1297,16 @@ function configureFakeProjectClients(
     detailAssignedProjectId?: string
     /** Work Item ID ごとに detail fake が返す現在 assigned Project ID です。 */
     detailAssignedProjectIds?: Record<string, string>
-    /** Qualified Team/Work Item key ごとに detail fake が返す current revision です。 */
-    detailRevisions?: Record<string, number>
+    /** `${teamId}\0${workItemId}` key ごとに detail fake が返す current revision です。 */
+    detailRevisions?: Partial<Record<`${string}\0${string}`, number>>
     /** Notification 認可で再取得する Work Item の現在担当者です。 */
     detailAssigneeUserId?: string
     /** Detail fake が返す現在の設定済み custom field values です。 */
     detailCustomFieldValues?: Record<string, CustomFieldValue>
     /** Detail fake が返す現在の canonical schedule です。 */
     detailSchedule?: WorkItemSchedule
-    /** Work Item ID ごとに detail fake が返す現在の canonical schedule です。 */
-    detailSchedules?: Record<string, WorkItemSchedule>
+    /** `${teamId}\0${workItemId}` key ごとに detail fake が返す canonical schedule です。 */
+    detailSchedules?: Partial<Record<`${string}\0${string}`, WorkItemSchedule>>
     /** Detail fake が返す legacy search custom fields です。 */
     /** Detail fake が TeamIssueNotFound を返す Work Item ID です。 */
     detailMissingIssueIds?: string[]
@@ -2417,7 +2417,8 @@ function configureFakeProjectClients(
         const workflowStatusId = options.detailWorkflowStatusIds?.[detailReadIndex] ??
           options.detailWorkflowStatusId ??
           'in-progress'
-        const detailSchedule = options.detailSchedules?.[issueId] ?? options.detailSchedule ??
+        const detailSchedule = options.detailSchedules?.[`${teamId}\0${issueId}`] ??
+          options.detailSchedule ??
           createDefaultDueDateWorkItemSchedule('2026-06-18')
 
         return {

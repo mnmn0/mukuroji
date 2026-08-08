@@ -1323,6 +1323,9 @@ test('DynamoDB directory client archives teams and projects with conditional upd
           directoryTeamId: 'user#demo@example.com#team#core-team',
           issueId: 'work-item-1',
         },
+        ConditionExpression:
+          'attribute_exists(directoryTeamId) AND attribute_exists(issueId) AND ' +
+          '#revision = :expectedRevision',
         ExpressionAttributeValues: { ':expectedRevision': 9 },
       },
     }],
@@ -1558,6 +1561,7 @@ test('rejects a Project archive whose dependency guards exceed transaction capac
     },
   } as unknown as DynamoDBDocumentClient
   const client = new DynamoDbProjectDirectoryClient('DirectoryTable', documentClient)
+  // DynamoDB's 100-item transaction limit leaves 98 slots after the two directory writes.
   const guards = Array.from({ length: 98 }, (_, index) => ({
     teamId: 'core-team',
     workItemId: `work-item-${index}`,

@@ -48,7 +48,6 @@ import {
   createPlanningAccessSnapshot,
   filterManageablePlanningScopeTeams,
 } from '../../planning/model/permissions'
-import { resolvePlanningProjectNavigationPath } from '../../planning/model/navigation'
 import {
   PlanningScreen,
 } from '../../planning/ui/PlanningScreen'
@@ -63,6 +62,7 @@ import { createWorkItemDependencyMutationId } from '../../work-items/model/workI
 import {
   createPlanningPath,
   createProjectIssuesPath,
+  createProjectTasksPath,
   createTeamIssuesPath,
   type PlanningViewId,
 } from '../../shared/routing/paths'
@@ -263,8 +263,8 @@ export function PlanningPage() {
               : createTeamIssuesPath(workItem.teamId, workItem.id),
           )}
           onOpenMilestone={(milestoneId) => navigate(createPlanningPath('timeline', milestoneId))}
-          onOpenProject={(projectId) => navigate(
-            resolvePlanningProjectNavigationPath(teams, projectId),
+          onOpenProject={(project) => navigate(
+            createProjectTasksPath(project.projectId, project.teamId),
           )}
           onCreateEntity={canManagePlanning && snapshot && accessToken
             ? (input) => {

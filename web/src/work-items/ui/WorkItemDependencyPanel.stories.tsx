@@ -25,7 +25,7 @@ const meta = {
     onCreate: fn(),
     onDelete: fn(),
     onUpdate: fn(),
-    snapshot: planningSnapshotFixture,
+    snapshot: structuredClone(planningSnapshotFixture),
     t,
   },
 } satisfies Meta<typeof WorkItemDependencyPanel>
@@ -37,6 +37,20 @@ type Story = StoryObj<typeof meta>
 
 /** Workspace management view with critical path, constraint, and editable edge. */
 export const Management: Story = {}
+
+/** Dependency removal requires a second explicit confirmation action. */
+export const DeleteConfirmation: Story = {
+  play: async ({ args, canvasElement }) => {
+    const canvas = within(canvasElement)
+
+    await userEvent.click(canvas.getByRole('button', { name: /^削除:/u }))
+    await expect(canvas.getByRole('status')).toHaveTextContent(
+      'Finalize onboarding copy から Instrument activation events への依存関係を削除しますか？',
+    )
+    await userEvent.click(canvas.getByRole('button', { name: /^削除を確定:/u }))
+    await expect(args.onDelete).toHaveBeenCalledTimes(1)
+  },
+}
 
 /** Selected Work Item view with incoming/outgoing creation controls and chips. */
 export const CurrentWorkItem: Story = {
@@ -75,7 +89,9 @@ function createRefreshedPlanningSnapshot(): PlanningSnapshot {
 
 /** Renders a user-edited row followed by a newer server-owned version of the same dependency. */
 function AuthoritativeRefreshHarness() {
-  const [snapshot, setSnapshot] = useState<PlanningSnapshot>(planningSnapshotFixture)
+  const [snapshot, setSnapshot] = useState<PlanningSnapshot>(() =>
+    structuredClone(planningSnapshotFixture)
+  )
 
   return (
     <div className="grid gap-4">

@@ -15,14 +15,13 @@ import type {
   WorkItemScheduleDependencyPatch,
   PlanningWorkItemLink,
   PlanningWorkItemSummary,
+  WorkItemAffectedProject,
 } from '@mukuroji/contracts'
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import type { ProjectDirectoryTeam } from '../../projects/api'
 import type { MessageKey } from '../../shared/i18n/i18n'
-import {
-  WorkItemDependencyPanel,
-  type WorkItemDependencyCreateDraft,
-} from '../../work-items/ui/WorkItemDependencyPanel'
+import type { WorkItemDependencyCreateDraft } from '../../work-items/model/workItemDependencies'
+import { WorkItemDependencyPanel } from '../../work-items/ui/WorkItemDependencyPanel'
 import {
   resolvePlanningViewTabTarget,
   type PlanningViewId,
@@ -330,7 +329,7 @@ export type PlanningScreenProps = {
   /** Goal から Work Item を開く callback です。 */
   onOpenWorkItem?: (workItem: PlanningWorkItemSummary) => void
   /** Dependency summary から影響 Project を開く callback です。 */
-  onOpenProject?: (projectId: string) => void
+  onOpenProject?: (project: WorkItemAffectedProject) => void
   /** Dependency summary から影響 Milestone を開く callback です。 */
   onOpenMilestone?: (milestoneId: string) => void
 }
@@ -794,6 +793,7 @@ function DependencyEditor({
   labels: PlanningLabels
   onCreate?: PlanningScreenProps['onCreateDependency']
 }) {
+  const [constraintValidationMessage, setConstraintValidationMessage] = useState<string>()
   return (
     <form
       className="workbench-panel grid content-start gap-4 p-5"
@@ -806,7 +806,13 @@ function DependencyEditor({
         const type = readDependencyType(data.get('dependencyType'))
         const lagDays = Math.trunc(Number(data.get('lagDays')) || 0)
         const constraint = readPlanningDependencyConstraint(data)
-        if (data.get('constraintKind') && !constraint) return
+        if (data.get('constraintKind') && !constraint) {
+          setConstraintValidationMessage(
+            labels.workItemDependencyT('workItems.dependencies.invalid'),
+          )
+          return
+        }
+        setConstraintValidationMessage(undefined)
         if (predecessorId && successorId && predecessorId !== successorId) {
           void onCreate?.(predecessorId, successorId, type, lagDays, constraint)
         }
@@ -841,6 +847,11 @@ function DependencyEditor({
         </select>
       </label>
       <PlanningInput label={labels.workItemDependencyT('workItems.dependencies.constraint.date')} name="constraintDate" type="date" />
+      {constraintValidationMessage ? (
+        <p className="text-sm font-semibold text-red-700" role="alert">
+          {constraintValidationMessage}
+        </p>
+      ) : null}
       <button className="workbench-button-primary min-h-10 px-4 disabled:opacity-50" disabled={!onCreate || entities.length < 2} type="submit">
         {labels.addDependency}
       </button>

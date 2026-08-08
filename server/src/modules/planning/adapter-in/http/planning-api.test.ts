@@ -19,7 +19,10 @@ import type {
   PlanningMutationResponse,
   PlanningSnapshot,
 } from '@mukuroji/contracts'
-import { createDefaultDueDateWorkItemSchedule } from '@mukuroji/contracts'
+import {
+  PLANNING_SCHEMA_VERSION,
+  createDefaultDueDateWorkItemSchedule,
+} from '@mukuroji/contracts'
 import {
   afterEach,
   expect,
@@ -117,7 +120,7 @@ test('returns an authenticated empty Planning graph with accessible Work Item pr
   expect(response.status).toBe(200)
   const planning = await response.json() as PlanningSnapshot
   expect(planning).toMatchObject({
-    schemaVersion: 1,
+    schemaVersion: PLANNING_SCHEMA_VERSION,
     revision: 0,
     entities: [],
     dependencies: [],
@@ -322,6 +325,35 @@ test('binds dependency idempotency keys to the canonical method, path, and stabl
   expect(await differentMethodAndPath.json()).toMatchObject({
     code: 'PlanningWorkItemDependencyIdempotencyConflict',
   })
+})
+
+test('passes only canonical dependency fields across the Planning application boundary', async () => {
+  configureFakeProjectClients(true, {
+    role: 'manager',
+    workspaceRole: 'member',
+    teamIssueCount: 2,
+  })
+  const planning = new InMemoryPlanningClient()
+  const createDependency = planning.createWorkItemDependency.bind(planning)
+  let receivedInput: unknown
+  planning.createWorkItemDependency = (...input) => {
+    receivedInput = input[1]
+    return createDependency(...input)
+  }
+  configureWorkItemDependencyIdempotency(planning)
+
+  const response = await planningApiRequest(
+    '/api/planning/work-item-dependencies',
+    'POST',
+    {
+      ...createWorkItemDependencyInput(),
+      adapterOwnedField: 'must-not-cross-boundary',
+    },
+    'dependency-canonical-input',
+  )
+
+  expect(response.status).toBe(201)
+  expect(receivedInput).toEqual(createWorkItemDependencyInput())
 })
 
 test('returns stable validation and in-progress errors for dependency idempotency keys', async () => {

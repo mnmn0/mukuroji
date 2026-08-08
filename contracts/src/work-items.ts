@@ -3,7 +3,10 @@ import {
   type CustomFieldValue,
   type WorkflowStatusCategory,
 } from './work-item-configuration'
-import type { WorkItemScheduleDependencyConflict } from './schedule-dependencies'
+import type {
+  WorkItemAffectedProject,
+  WorkItemScheduleDependencyConflict,
+} from './schedule-dependencies'
 
 /**
  * 現在の canonical Work Item schema version です。
@@ -257,7 +260,13 @@ export type WorkItemScheduleChangePreview = {
   planningRevision?: number
   /** Conflicts that prevent automatic dependency propagation from being applied. */
   conflicts: WorkItemScheduleDependencyConflict[]
-  /** Projects reached by the direct or propagated impacts. */
+  /** Team-qualified Projects reached by the direct or propagated impacts. */
+  affectedProjects: WorkItemAffectedProject[]
+  /**
+   * Legacy unqualified Project identifiers retained during the Planning v2 rollout.
+   *
+   * Consumers that navigate to a Project must use {@link affectedProjects}.
+   */
   affectedProjectIds: string[]
   /** Milestones reached through Planning Work Item links. */
   affectedMilestoneIds: string[]

@@ -23,6 +23,14 @@ export type WorkItemDependencyEndpoint = {
   workItemId: string
 }
 
+/** Team-qualified Project reached by a Work Item schedule change or dependency graph. */
+export type WorkItemAffectedProject = {
+  /** Team that owns the Project. */
+  teamId: string
+  /** Team-local Project identifier. */
+  projectId: string
+}
+
 /** Canonical scheduling dependency between two Work Items. */
 export type WorkItemScheduleDependency = {
   /** Workspace-local dependency identifier. */
@@ -75,7 +83,13 @@ export type PlanningWorkItemDependencySummary = {
   conflicts: WorkItemScheduleDependencyConflict[]
   /** Dependencies whose predecessor is not completed or canceled. */
   unresolvedBlockerCount: number
-  /** Projects reached by at least one visible dependency endpoint. */
+  /** Team-qualified Projects reached by at least one visible dependency endpoint. */
+  affectedProjects: WorkItemAffectedProject[]
+  /**
+   * Legacy unqualified Project identifiers retained during the Planning v2 rollout.
+   *
+   * Consumers that navigate to a Project must use {@link affectedProjects}.
+   */
   affectedProjectIds: string[]
   /** Milestones linked to at least one visible dependency endpoint. */
   affectedMilestoneIds: string[]

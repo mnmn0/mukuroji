@@ -39,7 +39,7 @@ import { useWorkspaceSidebarController } from '../../shared/ui/sidebar'
 import type { WorkItemDefinitionFilter } from '../../work-items/model/workItemFilters'
 import { resolveWorkItemPersonOptions } from '../../work-items/model/workItemDisplay'
 import type { WorkItemRelationEditorInput } from '../../work-items/ui/WorkItemRelationsEditor'
-import type { WorkItemDependencyCreateDraft } from '../../work-items/ui/WorkItemDependencyPanel'
+import type { WorkItemDependencyCreateDraft } from '../../work-items/model/workItemDependencies'
 import type { CreateProjectTaskInput, ProjectTask } from '../api/tasks'
 import {
   createBulkOperationSelection,

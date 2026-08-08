@@ -100,5 +100,36 @@ describe('schedule confirmation cache projection', () => {
     const preservedTasks = applyConfirmedSchedulesToTasks([newerTask], olderConfirmation)
 
     expect(preservedTasks).toEqual([newerTask])
+
+    const newerPlanningSnapshot = {
+      ...planningSnapshotFixture,
+      workItems: [{
+        dueDate: newerTask.dueDate,
+        id: newerTask.id,
+        projectId: newerTask.assignedProjectId,
+        revision: newerTask.revision,
+        schedule: newerTask.schedule,
+        statusCategory: newerTask.statusCategory,
+        teamId: newerTask.teamId,
+        title: newerTask.title,
+      }],
+    } satisfies PlanningSnapshot
+    expect(applyConfirmedSchedulesToPlanningSnapshot(
+      newerPlanningSnapshot,
+      olderConfirmation,
+    )?.workItems).toEqual(newerPlanningSnapshot.workItems)
+  })
+
+  test('keeps an unloaded Planning cache undefined', () => {
+    const confirmation = [{
+      assignedProjectId: 'refero',
+      dueDate: '2026-06-04',
+      id: referoTaskFixtures[0].id,
+      revision: 2,
+      schedule: createDefaultDueDateTaskSchedule('2026-06-04'),
+      teamId: referoTaskFixtures[0].teamId,
+    }] satisfies ConfirmedWorkItemSchedule[]
+
+    expect(applyConfirmedSchedulesToPlanningSnapshot(undefined, confirmation)).toBeUndefined()
   })
 })

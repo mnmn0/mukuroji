@@ -1,6 +1,6 @@
 import {
-  WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS,
   type ScheduleDependencyConstraint,
+  type WorkItemAffectedProject,
   type WorkItemDependencyEndpoint,
   type WorkItemSchedule,
   type WorkItemScheduleChangePreview,
@@ -12,8 +12,8 @@ import {
   WorkItemScheduleError,
   addWorkItemScheduleCalendarDays,
   calculateWorkItemScheduleDateDeltaDays,
-  calculateWorkItemScheduleDurationDays,
   calculateWorkItemScheduleEndDate,
+  calculateWorkItemScheduleStartDate,
   normalizeWorkItemSchedule,
   previewWorkItemScheduleChange,
 } from './work-item-schedule'
@@ -238,10 +238,13 @@ export function previewWorkItemDependencyScheduleChange(
   const impactedKeys = new Set(impacts.map((impact) =>
     createWorkItemDependencyKey({ teamId: impact.teamId, workItemId: impact.workItemId })
   ))
-  const affectedProjectIds = uniqueSorted([...impactedKeys].flatMap((key) => {
-    const projectId = states.get(key)?.projectId
-    return projectId ? [projectId] : []
+  const affectedProjects = uniqueAffectedProjects([...impactedKeys].flatMap((key) => {
+    const state = states.get(key)
+    return state?.projectId === undefined
+      ? []
+      : [{ teamId: state.endpoint.teamId, projectId: state.projectId }]
   }))
+  const affectedProjectIds = uniqueSorted(affectedProjects.map(({ projectId }) => projectId))
   const affectedMilestoneIds = uniqueSorted([...impactedKeys].flatMap((key) =>
     states.get(key)?.milestoneIds ?? []
   ))
@@ -262,6 +265,7 @@ export function previewWorkItemDependencyScheduleChange(
       ? {}
       : { relationGraphRevision: input.relationGraphRevision }),
     conflicts: normalizedConflicts,
+    affectedProjects,
     affectedProjectIds,
     affectedMilestoneIds,
     requiresConfirmation: impacts.length > 1,
@@ -582,7 +586,7 @@ function shiftScheduleToAnchor(
       }
       return { schedule: next, changed: !schedulesEqual(schedule, next) }
     }
-    const startDate = calculateScheduleStartDate(
+    const startDate = calculateWorkItemScheduleStartDate(
       targetDate,
       schedule.durationDays,
       schedule.calendarPolicy,
@@ -619,34 +623,6 @@ function tryAddDependencyCalendarDays(date: string, days: number): string | unde
  */
 function isUnsupportedDependencyDateArithmetic(error: unknown): boolean {
   return error instanceof WorkItemScheduleError && error.code === 'InvalidWorkItemScheduleDate'
-}
-
-/**
- * Finds the first working date needed for an inclusive finish-anchored range.
- *
- * @param endDate - Inclusive target finish date.
- * @param durationDays - Positive working-day duration to preserve.
- * @param calendarPolicy - Canonical schedule calendar policy.
- * @returns Earliest counted working date for the requested finish.
- */
-function calculateScheduleStartDate(
-  endDate: string,
-  durationDays: number,
-  calendarPolicy: WorkItemSchedule['calendarPolicy'],
-): string {
-  let remaining = durationDays
-  for (let offset = 0; offset < WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS; offset += 1) {
-    const candidate = addWorkItemScheduleCalendarDays(endDate, -offset)
-    if (calculateWorkItemScheduleDurationDays(candidate, candidate, calendarPolicy) === 1) {
-      remaining -= 1
-      if (remaining === 0) return candidate
-    }
-  }
-  throw new WorkItemScheduleError(
-    400,
-    'InvalidWorkItemScheduleDuration',
-    'Finish-anchored schedule exceeds the supported planning horizon.',
-  )
 }
 
 /**
@@ -809,15 +785,16 @@ function topologicallySortReachableGraph(
   dependencies: readonly WorkItemScheduleDependency[],
 ): string[] {
   const incomingCount = new Map([...reachable].map((key) => [key, 0]))
-  const outgoing = new Map<string, string[]>()
+  const outgoing = new Map<string, Set<string>>()
   for (const dependency of dependencies) {
     const predecessorKey = createWorkItemDependencyKey(dependency.predecessor)
     const successorKey = createWorkItemDependencyKey(dependency.successor)
     if (!reachable.has(predecessorKey) || !reachable.has(successorKey)) continue
-    incomingCount.set(successorKey, (incomingCount.get(successorKey) ?? 0) + 1)
-    const entries = outgoing.get(predecessorKey) ?? []
-    entries.push(successorKey)
+    const entries = outgoing.get(predecessorKey) ?? new Set<string>()
+    if (entries.has(successorKey)) continue
+    entries.add(successorKey)
     outgoing.set(predecessorKey, entries)
+    incomingCount.set(successorKey, (incomingCount.get(successorKey) ?? 0) + 1)
   }
   const pending = [...incomingCount]
     .filter(([, count]) => count === 0)
@@ -828,7 +805,7 @@ function topologicallySortReachableGraph(
     const key = pending.shift()
     if (!key) continue
     result.push(key)
-    for (const successorKey of uniqueSorted(outgoing.get(key) ?? [])) {
+    for (const successorKey of [...(outgoing.get(key) ?? [])].sort()) {
       const count = (incomingCount.get(successorKey) ?? 0) - 1
       incomingCount.set(successorKey, count)
       if (count === 0) {
@@ -958,6 +935,24 @@ function schedulesEqual(left: WorkItemSchedule, right: WorkItemSchedule): boolea
  */
 function uniqueSorted(values: readonly string[]): string[] {
   return [...new Set(values)].sort()
+}
+
+/**
+ * Sorts and de-duplicates Team-qualified Project references.
+ *
+ * @param values - Candidate affected Project references.
+ * @returns Unique references ordered by Team and Project identifiers.
+ */
+function uniqueAffectedProjects(
+  values: readonly WorkItemAffectedProject[],
+): WorkItemAffectedProject[] {
+  const byKey = new Map<string, WorkItemAffectedProject>()
+  for (const value of values) {
+    byKey.set(`${value.teamId}\0${value.projectId}`, value)
+  }
+  return [...byKey.values()].sort((first, second) =>
+    first.teamId.localeCompare(second.teamId) || first.projectId.localeCompare(second.projectId)
+  )
 }
 
 /**

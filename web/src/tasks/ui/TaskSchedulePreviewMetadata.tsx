@@ -19,6 +19,10 @@ export function TaskSchedulePreviewMetadata({
   preview,
   t,
 }: TaskSchedulePreviewMetadataProps) {
+  const affectedProjectCount = preview.affectedProjects.length > 0
+    ? preview.affectedProjects.length
+    : preview.affectedProjectIds.length
+
   return (
     <div className="mt-4 grid gap-3" data-testid="task-schedule-preview-metadata">
       <ul className="grid gap-1 text-xs font-semibold text-[#475467]">
@@ -36,7 +40,7 @@ export function TaskSchedulePreviewMetadata({
         <span className="workbench-badge">
           {t('workItems.dependencies.affectedProjects').replace(
             '{count}',
-            String(preview.affectedProjectIds.length),
+            String(affectedProjectCount),
           )}
         </span>
         <span className="workbench-badge">
@@ -46,11 +50,25 @@ export function TaskSchedulePreviewMetadata({
           )}
         </span>
       </div>
-      {preview.affectedProjectIds.length > 0 ? (
+      {preview.affectedProjects.length > 0 ? (
         <ul
           aria-label={t('workItems.dependencies.affectedProjects').replace(
             '{count}',
-            String(preview.affectedProjectIds.length),
+            String(preview.affectedProjects.length),
+          )}
+          className="flex flex-wrap gap-1 font-mono text-[11px] text-[#475467]"
+        >
+          {preview.affectedProjects.map((project) => (
+            <li className="workbench-badge" key={`${project.teamId}:${project.projectId}`}>
+              {project.teamId} / {project.projectId}
+            </li>
+          ))}
+        </ul>
+      ) : preview.affectedProjectIds.length > 0 ? (
+        <ul
+          aria-label={t('workItems.dependencies.affectedProjects').replace(
+            '{count}',
+            String(affectedProjectCount),
           )}
           className="flex flex-wrap gap-1 font-mono text-[11px] text-[#475467]"
         >

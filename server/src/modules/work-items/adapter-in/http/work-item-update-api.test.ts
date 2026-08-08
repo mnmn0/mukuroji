@@ -21,6 +21,7 @@ import {
 } from '../../../planning/planning'
 import { InMemoryEnterpriseIdentityClient } from '../../../enterprise-identity/enterprise-identity'
 import { createInMemoryDeveloperPlatformAdapters } from '../../../developer-platform/adapter-out/in-memory/developer-platform-adapters'
+import { ProjectDataError } from '../../../directory'
 import type {
   DynamoDBClient,
 } from '@aws-sdk/client-dynamodb'
@@ -187,8 +188,8 @@ async function configureUpperBoundaryScheduleDependency() {
   const calls = configureFakeProjectClients(true, {
     teamIssueCount: 2,
     detailSchedules: {
-      'onboarding-friction': rootSchedule,
-      'work-item-1': successorSchedule,
+      'core-team\0onboarding-friction': rootSchedule,
+      'core-team\0work-item-1': successorSchedule,
     },
   })
   configureScheduleConfirmationIdempotency()
@@ -1106,6 +1107,16 @@ test('rejects internal adapter fields at the Work Item update boundary', async (
     )
 
     expect(response.status).toBe(400)
+    expect(await response.json()).toEqual(
+      field === 'archivedAt' || field === 'archivedBy'
+        ? {
+            code: 'InvalidWorkItemArchiveUpdate',
+            message: 'Work Item archive fields cannot be updated through this endpoint.',
+          }
+        : {
+            message: `Work Item body contains internal fields: ${field}.`,
+          },
+    )
   }
   expect(calls.issueUpdates).toEqual([])
 })
@@ -1187,6 +1198,7 @@ test('previews moving a due-date Work Item without mutating it', async () => {
     relationGraphRevision: 0,
     planningRevision: 0,
     conflicts: [],
+    affectedProjects: [{ teamId: 'core-team', projectId: 'refero' }],
     affectedProjectIds: ['refero'],
     affectedMilestoneIds: [],
     requiresConfirmation: false,
@@ -2171,6 +2183,37 @@ test('rejects stale, invalid, and unauthorized schedule previews', async () => {
   )
   expect(forbiddenResponse.status).toBe(403)
   expect(calls.issueDetails).toEqual([])
+})
+
+test('returns a stable conflict when a Work Item assignment leaves its Team scope', async () => {
+  configureFakeProjectClients(true, {
+    detailReadError: new ProjectDataError(
+      409,
+      'PlanningWorkItemScopeMismatch',
+      'Schedule dependency Work Item assignment does not match its owning Team.',
+    ),
+  })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction/schedule/preview',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        expectedRevision: 1,
+        operation: { type: 'move', targetDate: '2026-06-24' },
+      }),
+    },
+  )
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toEqual({
+    code: 'PlanningWorkItemScopeMismatch',
+    message: 'Schedule dependency Work Item assignment does not match its owning Team.',
+  })
 })
 
 test('rejects internal archive fields on the public Work Item update endpoint', async () => {

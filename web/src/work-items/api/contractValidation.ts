@@ -208,6 +208,15 @@ function isEvaluationRevision(value: unknown): boolean {
     isPositiveSafeInteger(value.expectedRevision)
 }
 
+/** Returns whether a value is one Team-qualified affected Project. */
+function isAffectedProject(value: unknown): boolean {
+  return isRecord(value) &&
+    typeof value.teamId === 'string' &&
+    value.teamId.length > 0 &&
+    typeof value.projectId === 'string' &&
+    value.projectId.length > 0
+}
+
 /**
  * Returns whether a value is a complete dependency-aware schedule preview.
  *
@@ -235,10 +244,57 @@ export function isWorkItemScheduleChangePreview(
     ) &&
     Array.isArray(value.conflicts) &&
     value.conflicts.every(isWorkItemScheduleDependencyConflict) &&
+    Array.isArray(value.affectedProjects) &&
+    value.affectedProjects.every(isAffectedProject) &&
     isStringArray(value.affectedProjectIds) &&
     isStringArray(value.affectedMilestoneIds) &&
     typeof value.requiresConfirmation === 'boolean' &&
     isStringArray(value.warnings)
+}
+
+/**
+ * Returns whether a schedule preview's direct impacts belong to the requested Work Item.
+ *
+ * @param value - Unknown preview response candidate.
+ * @param teamId - Team from the preview request path.
+ * @param workItemId - Work Item from the preview request path.
+ * @returns Whether the preview is complete and every direct impact matches the request target.
+ */
+export function isWorkItemScheduleChangePreviewForEndpoint(
+  value: unknown,
+  teamId: string,
+  workItemId: string,
+): value is WorkItemScheduleChangePreview {
+  if (!isWorkItemScheduleChangePreview(value)) return false
+  const directImpacts = value.impacts.filter((impact) => impact.kind === 'direct')
+  return directImpacts.length > 0 && directImpacts.every((impact) =>
+    impact.teamId === teamId && impact.workItemId === workItemId
+  )
+}
+
+/**
+ * Decodes an endpoint-bound schedule preview and upgrades its legacy affected Project shape.
+ *
+ * Legacy Project IDs cannot be safely qualified with a Team from this response alone. They stay
+ * in `affectedProjectIds` for fallback display or search while the current qualified collection
+ * is initialized empty.
+ *
+ * @param value - Unknown schedule preview response candidate.
+ * @param teamId - Team from the preview request path.
+ * @param workItemId - Work Item from the preview request path.
+ * @returns A current endpoint-bound preview, or undefined when the response is malformed.
+ */
+export function readWorkItemScheduleChangePreviewForEndpoint(
+  value: unknown,
+  teamId: string,
+  workItemId: string,
+): WorkItemScheduleChangePreview | undefined {
+  const normalized = isRecord(value) && value.affectedProjects === undefined
+    ? { ...value, affectedProjects: [] }
+    : value
+  return isWorkItemScheduleChangePreviewForEndpoint(normalized, teamId, workItemId)
+    ? normalized
+    : undefined
 }
 
 /** Returns whether an optional approval summary has valid numeric counters. */

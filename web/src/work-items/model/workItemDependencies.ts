@@ -1,4 +1,5 @@
 import type {
+  CreateWorkItemScheduleDependencyInput,
   PlanningSnapshot,
   PlanningWorkItemSummary,
   ScheduleDependencyConstraint,
@@ -10,6 +11,12 @@ import type {
 } from '@mukuroji/contracts'
 
 const MILLISECONDS_PER_DAY = 86_400_000
+
+/** Editable canonical dependency fields emitted by schedule-dependency create forms. */
+export type WorkItemDependencyCreateDraft = Omit<
+  CreateWorkItemScheduleDependencyInput,
+  'expectedRevision' | 'id'
+>
 
 /**
  * Derives a stable dependency resource ID from one retained mutation request.

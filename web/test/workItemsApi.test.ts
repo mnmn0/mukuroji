@@ -160,6 +160,7 @@ describe('canonical Work Item API', () => {
       expectedPlanningRevision: 12,
       expectedRelationGraphRevision: 8,
       expectedRevision: 3,
+      operation: { schedule, type: 'replace' },
     })
     expect(requests).toHaveLength(1)
   })
@@ -207,6 +208,83 @@ describe('canonical Work Item API', () => {
     }, mutationContext)).rejects.toMatchObject({
       code: 'InvalidWorkItemScheduleConfirmationResponse',
       status: 502,
+    })
+  })
+
+  test('rejects a schedule preview whose direct impact targets another Work Item', async () => {
+    const before = createDefaultTestSchedule('2026-08-02')
+    const after = createDefaultTestSchedule('2026-08-03')
+    installFetchRecorder({
+      affectedMilestoneIds: [],
+      affectedProjectIds: [],
+      affectedProjects: [],
+      conflicts: [],
+      evaluatedRevisions: [{
+        expectedRevision: 3,
+        teamId: 'other-team',
+        workItemId: 'other-issue',
+      }],
+      expectedRevision: 3,
+      impacts: [{
+        after,
+        before,
+        dateDeltaDays: 1,
+        expectedRevision: 3,
+        kind: 'direct',
+        teamId: 'other-team',
+        workItemId: 'other-issue',
+      }],
+      planningRevision: 1,
+      relationGraphRevision: 1,
+      requiresConfirmation: true,
+      warnings: [],
+    })
+
+    await expect(previewTeamIssueSchedule(
+      'core-team',
+      'issue-1',
+      'access-token',
+      { expectedRevision: 3, operation: { targetDate: '2026-08-03', type: 'move' } },
+    )).rejects.toMatchObject({ code: 'InvalidWorkItemSchedulePreview', status: 502 })
+  })
+
+  test('upgrades legacy schedule preview Project IDs without inventing a Team owner', async () => {
+    const before = createDefaultTestSchedule('2026-08-02')
+    const after = createDefaultTestSchedule('2026-08-03')
+    const legacyPreview = {
+      affectedMilestoneIds: ['milestone-beta'],
+      affectedProjectIds: ['shared-project'],
+      conflicts: [],
+      evaluatedRevisions: [{
+        expectedRevision: 3,
+        teamId: 'core-team',
+        workItemId: 'issue-1',
+      }],
+      expectedRevision: 3,
+      impacts: [{
+        after,
+        before,
+        dateDeltaDays: 1,
+        expectedRevision: 3,
+        kind: 'direct',
+        teamId: 'core-team',
+        workItemId: 'issue-1',
+      }],
+      planningRevision: 1,
+      relationGraphRevision: 1,
+      requiresConfirmation: true,
+      warnings: [],
+    }
+    installFetchRecorder(legacyPreview)
+
+    await expect(previewTeamIssueSchedule(
+      'core-team',
+      'issue-1',
+      'access-token',
+      { expectedRevision: 3, operation: { targetDate: '2026-08-03', type: 'move' } },
+    )).resolves.toEqual({
+      ...legacyPreview,
+      affectedProjects: [],
     })
   })
 

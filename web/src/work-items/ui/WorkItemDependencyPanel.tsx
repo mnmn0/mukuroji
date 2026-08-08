@@ -1,15 +1,14 @@
 import type {
-  CreateWorkItemScheduleDependencyInput,
   PlanningSnapshot,
   PlanningWorkItemSummary,
   ScheduleDependencyConstraint,
   ScheduleDependencyType,
+  WorkItemAffectedProject,
   WorkItemDependencyEndpoint,
   WorkItemScheduleDependency,
   WorkItemScheduleDependencyPatch,
 } from '@mukuroji/contracts'
 import { useMemo, useState } from 'react'
-import { resolvePlanningErrorMessageKey } from '../../planning/api/errors'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import {
   createWorkItemDependencyEndpointKey,
@@ -18,6 +17,7 @@ import {
   createWorkItemScheduleDependencyPatch,
   filterWorkItemDependencyRows,
   resolveWorkItemDependencySummary,
+  type WorkItemDependencyCreateDraft,
   type WorkItemDependencyRuleDraft,
 } from '../model/workItemDependencies'
 import { WorkItemDependencyChips } from './WorkItemDependencyChips'
@@ -28,12 +28,6 @@ const dependencyTypes: readonly ScheduleDependencyType[] = [
   'finish-to-finish',
   'start-to-finish',
 ]
-
-/** Editable canonical dependency fields emitted by the create form. */
-export type WorkItemDependencyCreateDraft = Omit<
-  CreateWorkItemScheduleDependencyInput,
-  'expectedRevision' | 'id'
->
 
 /** Props for the shared Work Item schedule-dependency editor. */
 export type WorkItemDependencyPanelProps = {
@@ -53,9 +47,11 @@ export type WorkItemDependencyPanelProps = {
   /** Opens one visible Work Item endpoint from a dependency row. */
   onOpenWorkItem?: (workItem: PlanningWorkItemSummary) => void
   /** Opens one affected Project from the management summary. */
-  onOpenProject?: (projectId: string) => void
+  onOpenProject?: (project: WorkItemAffectedProject) => void
   /** Opens one affected Milestone from the management summary. */
   onOpenMilestone?: (milestoneId: string) => void
+  /** Maps one mutation failure to safe user-facing text without coupling the view to transport errors. */
+  resolveErrorMessage?: (error: unknown) => string
   /** Optional endpoint set that limits rows and new edges to one contextual scope. */
   scopeEndpoints?: readonly WorkItemDependencyEndpoint[]
   /** Authoritative graph and visible Work Item projections. */
@@ -79,6 +75,7 @@ export function WorkItemDependencyPanel({
   onOpenProject,
   onOpenWorkItem,
   onUpdate,
+  resolveErrorMessage,
   scopeEndpoints,
   snapshot,
   t,
@@ -146,7 +143,7 @@ export function WorkItemDependencyPanel({
     try {
       await request()
     } catch (error) {
-      setErrorMessage(t(resolvePlanningErrorMessageKey(error, 'mutation')))
+      setErrorMessage(resolveErrorMessage?.(error) ?? t('workItems.dependencies.error'))
     } finally {
       setBusyKey(undefined)
     }
@@ -174,13 +171,13 @@ export function WorkItemDependencyPanel({
               String(snapshot.workItemDependencySummary.unresolvedBlockerCount),
             )}
           />
-          <DependencyMetric
+          <AffectedProjectMetric
             label={t('workItems.dependencies.affectedProjects').replace(
               '{count}',
-              String(snapshot.workItemDependencySummary.affectedProjectIds.length),
+              String(snapshot.workItemDependencySummary.affectedProjects.length),
             )}
-            onOpenValue={onOpenProject}
-            values={snapshot.workItemDependencySummary.affectedProjectIds}
+            onOpenProject={onOpenProject}
+            projects={snapshot.workItemDependencySummary.affectedProjects}
           />
           <DependencyMetric
             label={t('workItems.dependencies.affectedMilestones').replace(
@@ -199,7 +196,7 @@ export function WorkItemDependencyPanel({
         </div>
       ) : null}
 
-      <div className="grid gap-2" role="list">
+      <ul className="grid gap-2">
         {rows.map((row) => {
           const predecessorWorkItem = row.predecessor
           const successorWorkItem = row.successor
@@ -237,11 +234,13 @@ export function WorkItemDependencyPanel({
           )
         })}
         {rows.length === 0 ? (
-          <p className="rounded-lg border border-dashed border-[var(--workbench-border-strong)] p-4 text-sm font-medium text-[var(--workbench-muted)]">
-            {t('workItems.dependencies.empty')}
-          </p>
+          <li>
+            <p className="rounded-lg border border-dashed border-[var(--workbench-border-strong)] p-4 text-sm font-medium text-[var(--workbench-muted)]">
+              {t('workItems.dependencies.empty')}
+            </p>
+          </li>
         ) : null}
-      </div>
+      </ul>
 
       {canCreate && onCreate && snapshot && (
         currentEndpoint ? selectableItems.length > 0 : selectableItems.length > 1
@@ -262,6 +261,50 @@ export function WorkItemDependencyPanel({
       ) : null}
       {errorMessage ? <p className="text-sm font-semibold text-red-700" role="alert">{errorMessage}</p> : null}
     </section>
+  )
+}
+
+/** Props for Team-qualified affected Project navigation. */
+type AffectedProjectMetricProps = {
+  /** Fully formatted metric label. */
+  label: string
+  /** Opens one unambiguous Team-owned Project. */
+  onOpenProject?: (project: WorkItemAffectedProject) => void
+  /** Team-qualified Projects included in the metric. */
+  projects: readonly WorkItemAffectedProject[]
+}
+
+/** Renders affected Projects without collapsing identical IDs owned by different Teams. */
+function AffectedProjectMetric({
+  label,
+  onOpenProject,
+  projects,
+}: AffectedProjectMetricProps) {
+  return (
+    <div className="rounded-lg border border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] p-3 text-xs font-semibold text-[var(--workbench-text)]">
+      <p>{label}</p>
+      {projects.length > 0 ? (
+        <ul className="mt-2 grid gap-1 font-mono text-[11px] font-medium text-[var(--workbench-muted)]">
+          {projects.map((project) => {
+            const projectLabel = `${project.teamId} / ${project.projectId}`
+            return (
+              <li className="break-all" key={`${project.teamId}:${project.projectId}`}>
+                {onOpenProject ? (
+                  <button
+                    aria-label={`${label}: ${projectLabel}`}
+                    className="text-left underline decoration-dotted underline-offset-2 hover:text-[var(--workbench-primary)]"
+                    onClick={() => onOpenProject(project)}
+                    type="button"
+                  >
+                    {projectLabel}
+                  </button>
+                ) : projectLabel}
+              </li>
+            )
+          })}
+        </ul>
+      ) : null}
+    </div>
   )
 }
 
@@ -346,8 +389,12 @@ function DependencyRow({
   t,
 }: DependencyRowProps) {
   const hasConflicts = conflictCount > 0
+  const [isDeleteConfirmationOpen, setIsDeleteConfirmationOpen] = useState(false)
+  const deleteConfirmation = t('workItems.dependencies.removeConfirm')
+    .replace('{predecessor}', predecessorTitle)
+    .replace('{successor}', successorTitle)
   return (
-    <article
+    <li
       className={`rounded-lg border p-3 ${hasConflicts
         ? 'border-red-300 bg-red-50'
         : critical
@@ -356,7 +403,6 @@ function DependencyRow({
       data-critical={critical ? 'true' : 'false'}
       data-conflict={hasConflicts ? 'true' : 'false'}
       data-testid={`work-item-dependency-${dependency.id}`}
-      role="listitem"
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-wrap items-center gap-1 text-sm font-semibold text-[var(--workbench-text)]">
@@ -430,25 +476,52 @@ function DependencyRow({
               {busy ? t('workItems.dependencies.saving') : t('workItems.dependencies.update')}
             </button>
           ) : null}
-          {onDelete ? (
+          {onDelete && !isDeleteConfirmationOpen ? (
             <button
               aria-label={`${t('workItems.dependencies.remove')}: ${predecessorTitle} → ${successorTitle}`}
               className="workbench-button-secondary min-h-9 px-3"
               disabled={busy}
-              onClick={() => void onDelete()}
+              onClick={() => setIsDeleteConfirmationOpen(true)}
               type="button"
             >
               {t('workItems.dependencies.remove')}
             </button>
           ) : null}
+          {onDelete && isDeleteConfirmationOpen ? (
+            <>
+              <button
+                aria-label={`${t('workItems.dependencies.removeConfirmAction')}: ${predecessorTitle} → ${successorTitle}`}
+                className="workbench-button-secondary min-h-9 border-red-300 px-3 text-red-700"
+                disabled={busy}
+                onClick={() => void onDelete()}
+                type="button"
+              >
+                {t('workItems.dependencies.removeConfirmAction')}
+              </button>
+              <button
+                aria-label={`${t('workItems.dependencies.removeCancel')}: ${predecessorTitle} → ${successorTitle}`}
+                className="workbench-button-secondary min-h-9 px-3"
+                disabled={busy}
+                onClick={() => setIsDeleteConfirmationOpen(false)}
+                type="button"
+              >
+                {t('workItems.dependencies.removeCancel')}
+              </button>
+            </>
+          ) : null}
         </div>
       </form>
+      {onDelete && isDeleteConfirmationOpen ? (
+        <p className="mt-2 text-sm font-semibold text-red-700" role="status">
+          {deleteConfirmation}
+        </p>
+      ) : null}
       {readOnly ? (
         <p className="mt-2 text-xs font-semibold text-[var(--workbench-muted)]">
           {t('workItems.dependencies.readOnly')}
         </p>
       ) : null}
-    </article>
+    </li>
   )
 }
 
@@ -525,7 +598,7 @@ function DependencyCreateForm({
                 <option value="incoming">{t('workItems.dependencies.incoming')}</option>
               </select>
             </label>
-            <EndpointSelect items={selectableItems} label={t('workItems.relations.target')} name="target" />
+            <EndpointSelect items={selectableItems} label={t('workItems.dependencies.target')} name="target" />
           </>
         ) : (
           <>

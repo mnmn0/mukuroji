@@ -12,6 +12,7 @@ import {
 import {
   createMutationAuditContext,
 } from '../../../audit/audit'
+import { ProjectDataError } from '../../../directory'
 import {
   DynamoDBClient,
 } from '@aws-sdk/client-dynamodb'
@@ -1618,6 +1619,7 @@ test('DynamoDB Work Item updates compile and classify app-owned Planning revisio
 
     for (const shouldFail of [false, true]) {
       let planningConditionIndex = -1
+      let planningCondition: unknown
       const documentClient = {
         async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
           if (command.constructor.name === 'GetCommand') return { Item: currentIssue }
@@ -1628,16 +1630,7 @@ test('DynamoDB Work Item updates compile and classify app-owned Planning revisio
             planningConditionIndex = transactItems.findIndex((item) =>
               item.ConditionCheck?.TableName === 'PlanningTable'
             )
-            expect(transactItems.filter((item) => item.ConditionCheck)).toHaveLength(1)
-            expect(transactItems[planningConditionIndex]).toEqual({
-              ConditionCheck: expect.objectContaining({
-                TableName: 'PlanningTable',
-                Key: { workspaceId: 'workspace-1', recordKey: 'META' },
-                ExpressionAttributeValues: expect.objectContaining({
-                  ':authorization1': 4,
-                }),
-              }),
-            })
+            planningCondition = transactItems[planningConditionIndex]
             if (shouldFail) {
               const error = new Error('Transaction was canceled.')
               error.name = 'TransactionCanceledException'
@@ -1675,7 +1668,7 @@ test('DynamoDB Work Item updates compile and classify app-owned Planning revisio
 
       if (shouldFail) {
         await expect(mutation).rejects.toMatchObject({
-          code: 'WorkItemAuthorizationChanged',
+          code: 'PlanningRevisionConflict',
           status: 409,
         })
       } else {
@@ -1684,6 +1677,100 @@ test('DynamoDB Work Item updates compile and classify app-owned Planning revisio
         })
       }
       expect(planningConditionIndex).toBe(2)
+      expect(planningCondition).toEqual({
+        ConditionCheck: expect.objectContaining({
+          TableName: 'PlanningTable',
+          Key: { workspaceId: 'workspace-1', recordKey: 'META' },
+          ExpressionAttributeValues: expect.objectContaining({
+            ':authorization1': 4,
+          }),
+        }),
+      })
+    }
+  })
+})
+
+test('DynamoDB Work Item create and update classify snapshot Planning races', async () => {
+  await withTestEnvironment({
+    MUKUROJI_WORKSPACE_ACCESS_TABLE: 'WorkspaceAccessTable',
+    PLANNING_TABLE_NAME: 'PlanningTable',
+  }, async () => {
+    const currentIssue = createScheduleCascadeIssue('core-team', 'snapshot-race')
+    const authorizationSnapshot = {
+      workspaceId: 'workspace-1',
+      memberKey: 'demo@example.com',
+      workspaceMemberVersion: 3,
+      planningRevision: 8,
+    }
+
+    for (const operation of ['create', 'update'] as const) {
+      let planningConditionIndex = -1
+      const documentClient = {
+        async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+          if (command.constructor.name === 'QueryCommand') return { Items: [] }
+          if (command.constructor.name === 'GetCommand') return { Item: currentIssue }
+          if (command.constructor.name === 'TransactWriteCommand') {
+            const transactItems = command.input.TransactItems as Array<{
+              ConditionCheck?: { TableName?: string }
+            }>
+            planningConditionIndex = transactItems.findIndex((item) =>
+              item.ConditionCheck?.TableName === 'PlanningTable'
+            )
+            const error = new Error('Transaction was canceled.')
+            error.name = 'TransactionCanceledException'
+            Object.assign(error, {
+              CancellationReasons: transactItems.map((_, index) => ({
+                Code: index === planningConditionIndex
+                  ? 'ConditionalCheckFailed'
+                  : 'None',
+              })),
+            })
+            throw error
+          }
+          return {}
+        },
+      } as unknown as DynamoDBDocumentClient
+      const client = new DynamoDbTeamIssuesClient(
+        'IssuesTable',
+        'IssueEventsTable',
+        documentClient,
+        {} as DynamoDBClient,
+        false,
+      )
+      const mutation = operation === 'create'
+        ? client.createTeamIssue(
+            'workspace-1',
+            'core-team',
+            {
+              title: 'Snapshot race',
+              assigneeUserId: 'demo@example.com',
+              workflowSchemaVersion: 1,
+              workflowStatusId: 'todo',
+              statusCategory: 'unstarted',
+              customFieldValues: {},
+              schedule: createDueDateSchedule('2026-07-20'),
+              priority: 'medium',
+              authorizationSnapshot,
+            },
+            'demo@example.com',
+          )
+        : client.updateTeamIssue(
+            'workspace-1',
+            'core-team',
+            'snapshot-race',
+            {
+              expectedRevision: 1,
+              title: 'Updated snapshot race',
+              authorizationSnapshot,
+            },
+            'demo@example.com',
+          )
+
+      await expect(mutation).rejects.toMatchObject({
+        code: 'PlanningRevisionConflict',
+        status: 409,
+      })
+      expect(planningConditionIndex).toBeGreaterThan(0)
     }
   })
 })
@@ -2336,6 +2423,50 @@ test('DynamoDB Work Item schedule cascade keeps the maximum valid receipt compac
   expect(Buffer.byteLength(serializedReceipt, 'utf8')).toBeLessThanOrEqual(256 * 1024)
   expect(serializedReceipt).not.toContain('description')
   expect(serializedReceipt).not.toContain(largeText)
+})
+
+test('DynamoDB Work Item schedule cascade preserves classified receipt preparation errors', async () => {
+  const currentIssue = createScheduleCascadeIssue('core-team', 'root')
+  const documentClient = {
+    async send(command: { constructor: { name: string } }) {
+      if (command.constructor.name === 'GetCommand') return { Item: currentIssue }
+      throw new Error('The transaction must not start after receipt preparation fails.')
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'IssuesTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  await expect(client.updateTeamIssueSchedules(
+    'workspace-1',
+    [{
+      teamId: 'core-team',
+      workItemId: 'root',
+      expectedRevision: 1,
+      schedule: createDueDateSchedule('2026-07-21'),
+    }],
+    [],
+    'demo@example.com',
+    undefined,
+    [],
+    undefined,
+    {
+      async prepare() {
+        throw new ProjectDataError(
+          409,
+          'PlanningRevisionConflict',
+          'Planning changed. Reload and try again.',
+        )
+      },
+    },
+  )).rejects.toMatchObject({
+    code: 'PlanningRevisionConflict',
+    status: 409,
+  })
 })
 
 test('DynamoDB Work Item schedule cascade classifies cancellation indexes by safe priority', async () => {
