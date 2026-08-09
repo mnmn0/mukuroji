@@ -148,7 +148,7 @@ describe('issue collaboration tabs', () => {
 
   test('persists an exact source target without dropping the Work Item route', () => {
     const current = new URLSearchParams(
-      'teamId=core-team&issueId=issue-1&commentId=comment-1&rootCommentId=root-1',
+      'teamId=core-team&issueId=issue-1&commentId=comment-1&rootCommentId=root-1&activityEventId=event-1',
     )
     const next = applyIssueCollaborationSourceToSearchParams(current, {
       contextItemId: 'context-1',
@@ -164,5 +164,6 @@ describe('issue collaboration tabs', () => {
     expect(next.get('sourceKind')).toBe('comment')
     expect(next.get('commentId')).toBeNull()
     expect(next.get('rootCommentId')).toBeNull()
+    expect(next.get('activityEventId')).toBeNull()
   })
 })
