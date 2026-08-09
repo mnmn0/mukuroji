@@ -264,6 +264,8 @@ import {
 import { createRealtimeTicketRouter } from '../modules/realtime'
 import {
   CollaborationError,
+  COLLABORATION_CONTEXT_BODY_MAX_LENGTH,
+  COLLABORATION_CONTEXT_TITLE_MAX_LENGTH,
   createProjectCollaborationEntityKey,
   createWorkItemCollaborationEntityKey,
   type CollaborationAutomaticWatcherCandidate,
@@ -19505,8 +19507,16 @@ function readCreateCuratedContextItemRequest(
     : readCuratedContextIdentifier(value.supersedesItemId, 'Superseded context item ID')
   return {
     kind: readCuratedContextKind(value.kind),
-    title: readCuratedContextText(value.title, 'Curated context title', 200),
-    body: readCuratedContextText(value.body, 'Curated context body', 20_000),
+    title: readCuratedContextText(
+      value.title,
+      'Curated context title',
+      COLLABORATION_CONTEXT_TITLE_MAX_LENGTH,
+    ),
+    body: readCuratedContextText(
+      value.body,
+      'Curated context body',
+      COLLABORATION_CONTEXT_BODY_MAX_LENGTH,
+    ),
     ...(source ? { source } : {}),
     ...(mentionMemberKeys ? { mentionMemberKeys } : {}),
     ...(supersedesItemId ? { supersedesItemId } : {}),
@@ -19544,10 +19554,22 @@ function readUpdateCuratedContextItemRequest(
     ...(hasKind ? { kind: readCuratedContextKind(value.kind) } : {}),
     ...(hasState ? { state: readCuratedContextState(value.state) } : {}),
     ...(hasTitle
-      ? { title: readCuratedContextText(value.title, 'Curated context title', 200) }
+      ? {
+          title: readCuratedContextText(
+            value.title,
+            'Curated context title',
+            COLLABORATION_CONTEXT_TITLE_MAX_LENGTH,
+          ),
+        }
       : {}),
     ...(hasBody
-      ? { body: readCuratedContextText(value.body, 'Curated context body', 20_000) }
+      ? {
+          body: readCuratedContextText(
+            value.body,
+            'Curated context body',
+            COLLABORATION_CONTEXT_BODY_MAX_LENGTH,
+          ),
+        }
       : {}),
     ...(hasMentions
       ? { mentionMemberKeys: readCommentMentionMemberKeys(value.mentionMemberKeys) }
@@ -19573,7 +19595,11 @@ function readSetAcceptedResolutionRequest(
       'Expected thread version',
     ),
     commentId: readCuratedContextIdentifier(value.commentId, 'Accepted comment ID'),
-    summary: readCuratedContextText(value.summary, 'Accepted resolution summary', 20_000),
+    summary: readCuratedContextText(
+      value.summary,
+      'Accepted resolution summary',
+      COLLABORATION_CONTEXT_BODY_MAX_LENGTH,
+    ),
   }
 }
 
@@ -19590,7 +19616,11 @@ function readCuratedContextSource(value: unknown): CuratedContextSource {
   const kind = readCuratedContextSourceKind(value.kind)
   const originalBody = value.originalBody === undefined
     ? undefined
-    : readCuratedContextText(value.originalBody, 'Curated source original body', 20_000)
+    : readCuratedContextText(
+        value.originalBody,
+        'Curated source original body',
+        COLLABORATION_CONTEXT_BODY_MAX_LENGTH,
+      )
   const availabilityReason = value.availabilityReason === undefined
     ? undefined
     : readCuratedContextText(value.availabilityReason, 'Curated source availability reason', 1_000)
@@ -19951,7 +19981,7 @@ async function reconcileCuratedContextSourceForViewer(
       }
       const availability = error.status === 403
         ? 'permission-lost'
-        : error.code.toLowerCase().includes('retention')
+        : isCuratedContextDocumentRetentionError(error)
           ? 'retention-expired'
           : 'deleted'
       return {
@@ -20060,7 +20090,7 @@ function overlayCuratedContextSourceAvailability(
     ...source,
     availability,
     ...(currentRevision === undefined ? {} : { currentRevision }),
-    availabilityReason: reason,
+    ...(reason ? { availabilityReason: reason } : {}),
   }
   if (!redactSensitive) return overlaid
   return {
@@ -20119,7 +20149,23 @@ async function resolveCuratedContextMemberActor(
  * @returns Bounded captured source text.
  */
 function captureCuratedContextSourceBody(body: string) {
-  return body.slice(0, 20_000)
+  return body.slice(0, COLLABORATION_CONTEXT_BODY_MAX_LENGTH)
+}
+
+/** Stable Documents error codes that indicate a retention boundary. */
+const curatedContextDocumentRetentionErrorCodes = new Set([
+  'DocumentRetentionExpired',
+  'DocumentVersionRetentionExpired',
+])
+
+/**
+ * Distinguishes a retention-specific Documents failure from a deleted/missing source.
+ *
+ * @param error - Documents error returned while rehydrating a source.
+ * @returns Whether the error is an explicit retention failure.
+ */
+function isCuratedContextDocumentRetentionError(error: DocumentError): boolean {
+  return curatedContextDocumentRetentionErrorCodes.has(error.code)
 }
 
 /**
@@ -20135,8 +20181,8 @@ function resolveCuratedContextQuote(
   capturedBody: string,
   requested: CuratedContextQuote,
 ): CuratedContextQuote {
-  const hintedStart = requested.startOffset
-  const hintedEnd = requested.endOffset
+  const hintedStart = 'startOffset' in requested ? requested.startOffset : undefined
+  const hintedEnd = 'endOffset' in requested ? requested.endOffset : undefined
   const hintedRangeMatches = hintedStart !== undefined &&
     hintedEnd !== undefined &&
     Number.isSafeInteger(hintedStart) &&
@@ -20144,9 +20190,17 @@ function resolveCuratedContextQuote(
     hintedStart >= 0 &&
     hintedEnd === hintedStart + requested.text.length &&
     fullBody.slice(hintedStart, hintedEnd) === requested.text
-  const startOffset = hintedRangeMatches && hintedStart !== undefined
-    ? hintedStart
-    : fullBody.indexOf(requested.text)
+  let startOffset: number
+  if (hintedRangeMatches && hintedStart !== undefined) {
+    startOffset = hintedStart
+  } else {
+    startOffset = fullBody.indexOf(requested.text)
+    if (startOffset >= 0 && fullBody.indexOf(requested.text, startOffset + requested.text.length) >= 0) {
+      throw invalidCuratedContextInput(
+        'Curated source quote occurs multiple times; select an exact range.',
+      )
+    }
+  }
   if (startOffset < 0) {
     throw invalidCuratedContextInput('Curated source quote no longer matches the source.')
   }
@@ -20173,10 +20227,20 @@ function readCuratedContextQuote(value: unknown): CuratedContextQuote {
   }
   const startOffset = readOptionalCuratedContextOffset(value.startOffset, 'Quote start offset')
   const endOffset = readOptionalCuratedContextOffset(value.endOffset, 'Quote end offset')
+  if ((startOffset === undefined) !== (endOffset === undefined)) {
+    throw invalidCuratedContextInput(
+      'Quote start and end offsets must be provided together.',
+    )
+  }
   return {
-    text: readCuratedContextText(value.text, 'Curated source quote', 20_000),
-    ...(startOffset === undefined ? {} : { startOffset }),
-    ...(endOffset === undefined ? {} : { endOffset }),
+    text: readCuratedContextText(
+      value.text,
+      'Curated source quote',
+      COLLABORATION_CONTEXT_BODY_MAX_LENGTH,
+    ),
+    ...(startOffset === undefined || endOffset === undefined
+      ? {}
+      : { startOffset, endOffset }),
   }
 }
 

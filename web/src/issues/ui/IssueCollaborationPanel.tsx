@@ -1,4 +1,4 @@
-import { useMemo, useState, type KeyboardEvent } from 'react'
+import { useId, useMemo, useState, type KeyboardEvent } from 'react'
 import type { CuratedContextSource } from '@mukuroji/contracts'
 import type { FileArtifactsController } from '../../files/mutations/useFileArtifacts'
 import { createTranslator, type Locale, type MessageKey } from '../../shared/i18n/i18n'
@@ -9,6 +9,7 @@ import type { TeamIssueActivityEvent, TeamIssueComment } from '../api'
 import {
   issueCollaborationTabs,
   resolveIssueCollaborationTabTarget,
+  type IssueCollaborationRoute,
   type IssueCollaborationTab,
 } from '../model/collaborationTabs'
 import {
@@ -45,20 +46,10 @@ export type IssueCollaborationPanelProps = {
   focusedCommentId?: string
   /** Root comment required to page toward a focused reply. */
   focusedRootCommentId?: string
-  /** Optional controlled collaboration tab. */
-  activeTab?: IssueCollaborationTab
+  /** Route-owned collaboration state for this detail pane. */
+  route?: IssueCollaborationRoute
   /** Optional initial tab for uncontrolled rendering. */
   defaultTab?: IssueCollaborationTab
-  /** Called when the selected collaboration tab changes. */
-  onTabChange?: (tab: IssueCollaborationTab) => void
-  /** Curated context item targeted by a deep link. */
-  focusedContextItemId?: string
-  /** Source provenance entry targeted by a deep link. */
-  focusedSourceId?: string
-  /** Source category that disambiguates a deep-linked provenance entry. */
-  focusedSourceKind?: IssueSourceTarget['kind']
-  /** Activity event targeted by a deep link. */
-  focusedActivityEventId?: string
   /** External document or chat source draft opened by an adjacent integration. */
   contextDraft?: IssueContextDraft
   /** Called after an externally supplied source draft is opened. */
@@ -74,7 +65,6 @@ export type IssueCollaborationPanelProps = {
  * @returns The collaboration panel.
  */
 export function IssueCollaborationPanel({
-  activeTab,
   artifacts,
   className = '',
   contextDraft: externalContextDraft,
@@ -82,16 +72,12 @@ export function IssueCollaborationPanel({
   currentMemberKey,
   defaultTab = 'conversation',
   focusedCommentId,
-  focusedActivityEventId,
-  focusedContextItemId,
   focusedRootCommentId,
-  focusedSourceId,
-  focusedSourceKind,
   locale,
   members,
-  onTabChange,
   onContextDraftConsumed,
   readOnlyMessage,
+  route,
 }: IssueCollaborationPanelProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
   const [uncontrolledTab, setUncontrolledTab] = useState(defaultTab)
@@ -99,9 +85,10 @@ export function IssueCollaborationPanel({
     useState<IssueContextDraft>()
   const [selectedSource, setSelectedSource] = useState<IssueSourceTarget>()
   const contextDraft = externalContextDraft ?? promotedContextDraft
-  const selectedTab = externalContextDraft
+  const panelIdPrefix = useId()
+  const selectedTab = contextDraft
     ? 'decisions'
-    : activeTab ?? uncontrolledTab
+    : route?.collaborationTab ?? uncontrolledTab
   const uniquePresence = useMemo(
     () =>
       Array.from(
@@ -125,9 +112,9 @@ export function IssueCollaborationPanel({
   }
   const sourceFocus = resolveIssueSourceFocus(
     {
-      contextItemId: focusedContextItemId,
-      kind: focusedSourceKind,
-      sourceId: focusedSourceId,
+      contextItemId: route?.focusedContextItemId,
+      kind: route?.focusedSourceKind,
+      sourceId: route?.focusedSourceId,
     },
     selectedSource,
   )
@@ -217,8 +204,8 @@ export function IssueCollaborationPanel({
    * @param tab - Collaboration tab to display.
    */
   function selectTab(tab: IssueCollaborationTab) {
-    if (activeTab === undefined) setUncontrolledTab(tab)
-    onTabChange?.(tab)
+    if (route?.collaborationTab === undefined) setUncontrolledTab(tab)
+    route?.onCollaborationTabChange?.(tab)
   }
 
   /**
@@ -240,7 +227,7 @@ export function IssueCollaborationPanel({
 
     event.preventDefault()
     selectTab(target)
-    document.getElementById(createCollaborationTabId(target))?.focus()
+    document.getElementById(createCollaborationTabId(panelIdPrefix, target))?.focus()
   }
 
   return (
@@ -331,14 +318,14 @@ export function IssueCollaborationPanel({
         >
           {issueCollaborationTabs.map((tab) => (
             <button
-              aria-controls={createCollaborationPanelId()}
+              aria-controls={createCollaborationPanelId(panelIdPrefix)}
               aria-selected={selectedTab === tab}
               className={`relative inline-flex min-h-[44px] flex-none items-center gap-1.5 whitespace-nowrap px-3 text-xs font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--workbench-primary)] ${
                 selectedTab === tab
                   ? 'text-[var(--workbench-primary)]'
                   : 'text-[var(--workbench-muted)] hover:text-[var(--workbench-text)]'
               }`}
-              id={createCollaborationTabId(tab)}
+              id={createCollaborationTabId(panelIdPrefix, tab)}
               key={tab}
               onClick={() => selectTab(tab)}
               onKeyDown={(event) => handleTabKeyDown(event, tab)}
@@ -362,8 +349,8 @@ export function IssueCollaborationPanel({
       </div>
 
       <div
-        aria-labelledby={createCollaborationTabId(selectedTab)}
-        id={createCollaborationPanelId()}
+        aria-labelledby={createCollaborationTabId(panelIdPrefix, selectedTab)}
+        id={createCollaborationPanelId(panelIdPrefix)}
         role="tabpanel"
       >
         {selectedTab === 'conversation' ? (
@@ -408,7 +395,7 @@ export function IssueCollaborationPanel({
         {selectedTab === 'activity' ? (
           <IssueActivityTab
             controller={controller}
-            focusedActivityEventId={focusedActivityEventId}
+            focusedActivityEventId={route?.focusedActivityEventId}
             locale={locale}
             members={members}
             onPromoteActivity={
@@ -421,8 +408,9 @@ export function IssueCollaborationPanel({
         {selectedTab === 'decisions' ? (
           <IssueDecisionsTab
             controller={controller.context}
+            decisionsTabId={createCollaborationTabId(panelIdPrefix, 'decisions')}
             draft={contextDraft}
-            focusedContextItemId={focusedContextItemId}
+            focusedContextItemId={route?.focusedContextItemId}
             locale={locale}
             members={members}
             onDraftConsumed={() => {
@@ -442,9 +430,7 @@ export function IssueCollaborationPanel({
         {selectedTab === 'sources' ? (
           <IssueSourcesTab
             controller={controller.context}
-            focusedContextItemId={
-              sourceFocus.contextItemId
-            }
+              focusedContextItemId={sourceFocus.contextItemId}
             focusedSourceId={sourceFocus.sourceId}
             focusedSourceKind={sourceFocus.kind}
             locale={locale}
@@ -461,8 +447,11 @@ export function IssueCollaborationPanel({
  * @param tab - Collaboration tab.
  * @returns DOM ID for the tab.
  */
-function createCollaborationTabId(tab: IssueCollaborationTab): string {
-  return `issue-collaboration-tab-${tab}`
+function createCollaborationTabId(
+  prefix: string,
+  tab: IssueCollaborationTab,
+): string {
+  return `${prefix}-collaboration-tab-${tab}`
 }
 
 /**
@@ -470,8 +459,8 @@ function createCollaborationTabId(tab: IssueCollaborationTab): string {
  *
  * @returns DOM ID for the tabpanel.
  */
-function createCollaborationPanelId(): string {
-  return 'issue-collaboration-tabpanel'
+function createCollaborationPanelId(prefix: string): string {
+  return `${prefix}-collaboration-tabpanel`
 }
 
 /**

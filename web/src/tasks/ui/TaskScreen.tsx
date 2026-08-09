@@ -2,7 +2,6 @@ import type {
   BulkOperation,
   BulkOperationPreview,
   BulkOperationRequest,
-  CuratedContextSourceKind,
   PlanningSnapshot,
   ResolvedWorkItemConfiguration,
   WorkItemDependencyEndpoint,
@@ -22,7 +21,7 @@ import {
 import { RelatedDocuments } from '../../documents/ui/RelatedDocuments'
 import type { FileArtifactsController } from '../../files/mutations/useFileArtifacts'
 import type { IssueCollaborationController } from '../../issues/mutations/useIssueCollaboration'
-import type { IssueCollaborationTab } from '../../issues/model/collaborationTabs'
+import type { IssueCollaborationRoute } from '../../issues/model/collaborationTabs'
 import { TeamIssuesApiError, type TeamIssue, type TeamIssueDetail, type UpdateTeamIssueInput } from '../../issues/api'
 import type {
   ProjectDirectoryTeam,
@@ -244,18 +243,8 @@ export type TaskScreenProps = {
   focusedCommentId?: string
   /** Root comment containing the selected reply. */
   focusedRootCommentId?: string
-  /** Collaboration section selected by route state. */
-  collaborationTab?: IssueCollaborationTab
-  /** Curated context item selected by a deep link. */
-  focusedContextItemId?: string
-  /** Source provenance selected by a deep link. */
-  focusedSourceId?: string
-  /** Source category that disambiguates legacy source-ID deep links. */
-  focusedSourceKind?: CuratedContextSourceKind
-  /** Activity event selected by a deep link. */
-  focusedActivityEventId?: string
-  /** Persists collaboration tab selection in route state. */
-  onCollaborationTabChange?: (tab: IssueCollaborationTab) => void
+  /** Route-owned collaboration section and deep-link state. */
+  collaborationRoute?: IssueCollaborationRoute
   /** Whether the selected Work Item detail is being loaded. */
   isSelectedIssueDetailLoading?: boolean
   /** Error shown when selected Work Item detail could not be loaded or updated. */
@@ -349,18 +338,14 @@ export function TaskScreen({
   canManageProjectMembers = false,
   canManageScheduleDependencyEndpoint,
   collaboration,
-  collaborationTab,
+  collaborationRoute,
   artifacts,
   configurationErrorMessage,
   currentWorkspaceMemberKey,
   defaultCreateTaskOpen = false,
   detailErrorMessage,
   focusedCommentId,
-  focusedContextItemId,
-  focusedActivityEventId,
   focusedRootCommentId,
-  focusedSourceId,
-  focusedSourceKind,
   initialSelectedTaskId,
   initialTab = 'table',
   isAssigneeOptionsLoading = false,
@@ -389,7 +374,6 @@ export function TaskScreen({
   planningSnapshot,
   onLoadMoreProjectUsers,
   onAddRelation,
-  onCollaborationTabChange,
   onDeleteRelation,
   onProjectUserQueryChange,
   onRemoveProjectMember,
@@ -1197,7 +1181,7 @@ export function TaskScreen({
                   artifacts={artifacts}
                   canManageScheduleDependencyEndpoint={canManageScheduleDependencyEndpoint}
                   collaboration={collaboration}
-                  collaborationTab={collaborationTab}
+                  collaborationRoute={collaborationRoute}
                   configuration={detailTask
                     ? resolveProjectTaskConfiguration(
                         detailTask,
@@ -1209,11 +1193,7 @@ export function TaskScreen({
                   detail={selectedIssueDetail}
                   errorMessage={detailErrorMessage}
                   focusedCommentId={focusedCommentId}
-                  focusedContextItemId={focusedContextItemId}
-                  focusedActivityEventId={focusedActivityEventId}
                   focusedRootCommentId={focusedRootCommentId}
-                  focusedSourceId={focusedSourceId}
-                  focusedSourceKind={focusedSourceKind}
                   isLoading={isSelectedIssueDetailLoading}
                   isRelationCandidatesLoading={isRelationCandidatesLoading}
                   key={`${detailTask?.teamId ?? ''}:${detailTask?.id ?? ''}`}
@@ -1222,7 +1202,6 @@ export function TaskScreen({
                   onDeleteScheduleDependency={onDeleteScheduleDependency}
                   onAddRelation={onAddRelation}
                   onClose={handleCloseDetail}
-                  onCollaborationTabChange={onCollaborationTabChange}
                   onDeleteRelation={onDeleteRelation}
                   onUpdateIssue={detailTask &&
                       configurationFailedTeamIds.includes(detailTask.teamId)

@@ -101,15 +101,50 @@ export async function getTeamIssueCollaboration(
 
   const queryString = query.toString()
 
-  const page = await requestJson<TeamIssueCollaborationPage>(
+  const data = await requestJson<unknown>(
     `${createTeamIssuePath(teamId, issueId)}/collaboration${queryString ? `?${queryString}` : ''}`,
     accessToken,
   )
+
+  if (!isTeamIssueCollaborationPage(data)) {
+    throw new TeamIssuesApiError(
+      502,
+      'The issue collaboration response was invalid.',
+      'InvalidIssueCollaborationResponse',
+    )
+  }
+
+  const page = data
 
   return {
     ...page,
     comments: page.comments.map(normalizeAcceptedResolutionHistory),
   }
+}
+
+/** Validates the collection boundary returned by the collaboration endpoint. */
+function isTeamIssueCollaborationPage(
+  value: unknown,
+): value is TeamIssueCollaborationPage {
+  if (!isRecord(value) || !Array.isArray(value.comments)) {
+    return false
+  }
+
+  return value.comments.every(isTeamIssueComment)
+}
+
+/** Validates the stable fields required by one collaboration comment. */
+function isTeamIssueComment(value: unknown): value is TeamIssueComment {
+  return (
+    isRecord(value) &&
+    typeof value.id === 'string' &&
+    typeof value.createdAt === 'string'
+  )
+}
+
+/** Narrows an untrusted JSON object. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
 }
 
 /**

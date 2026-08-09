@@ -16,7 +16,7 @@ export type IssueActivityEntry = {
 export type IssueSystemActivityGroup = {
   /** Stable group discriminator. */
   kind: 'system-group'
-  /** Stable ID derived from the boundary events. */
+  /** Stable ID derived from the first event in the group. */
   id: string
   /** Consecutive system events represented by the group. */
   events: TeamIssueActivityEvent[]
@@ -51,7 +51,6 @@ export function groupIssueActivity(
 
     if (previous?.kind === 'system-group') {
       previous.events.push(event)
-      previous.id = createSystemGroupId(previous.events)
       continue
     }
 
@@ -85,13 +84,12 @@ export function isSystemActivityEvent(event: TeamIssueActivityEvent): boolean {
 }
 
 /**
- * Creates a stable disclosure ID from its first and last event IDs.
+ * Creates a stable disclosure ID from the first event ID.
  *
  * @param events - Non-empty consecutive system events.
  * @returns Stable DOM-safe group identifier.
  */
 function createSystemGroupId(events: readonly TeamIssueActivityEvent[]): string {
   const first = events[0]
-  const last = events.at(-1)
-  return `system-${first?.eventId ?? 'unknown'}-${last?.eventId ?? 'unknown'}`
+  return `system-${first?.eventId ?? 'unknown'}`
 }

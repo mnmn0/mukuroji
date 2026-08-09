@@ -190,12 +190,17 @@ export function RelatedDocuments({
               </a>
               {accessToken && onPromoteToContext ? (
                 <button
+                  aria-label={`${
+                    promotingDocumentId === backlink.documentId
+                      ? t('documents.related.promotingToContext')
+                      : t('documents.related.promoteToContext')
+                  }: ${backlink.documentTitle}`}
                   className="min-h-[44px] flex-none border-l border-[var(--workbench-border)] px-3 text-xs font-semibold text-[var(--workbench-primary)] hover:bg-[#f2fbf9]"
-                  data-testid={`related-document-promote-${backlink.documentId}`}
-                  disabled={Boolean(promotingDocumentId)}
-                  id={createRelatedDocumentPromotionTriggerId(
+                  data-testid={createRelatedDocumentPromotionTriggerId(
                     backlink.documentId,
                   )}
+                  disabled={promotingDocumentId === backlink.documentId}
+                  id={createRelatedDocumentPromotionTriggerId(backlink.documentId)}
                   onClick={() => void handlePromoteToContext(backlink)}
                   type="button"
                 >

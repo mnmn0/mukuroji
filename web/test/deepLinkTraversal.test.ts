@@ -40,12 +40,12 @@ describe('deep-link cursor traversal', () => {
   })
 
   test('bounds missing Sources targets independently for context and source links', () => {
+    let state: DeepLinkTraversalState = { requestedPages: 0 }
+
     for (const targetId of [
       'item:missing-context',
       'source:document:missing-source',
     ]) {
-      let state: DeepLinkTraversalState = { requestedPages: 0 }
-
       for (let index = 0; index < MAX_DEEP_LINK_AUTO_PAGES; index += 1) {
         const result = advanceDeepLinkTraversal(state, targetId, true)
         expect(result.shouldLoad).toBe(true)
@@ -63,12 +63,12 @@ describe('deep-link cursor traversal', () => {
   })
 
   test('bounds missing conversation roots and replies with separate target budgets', () => {
+    let state: DeepLinkTraversalState = { requestedPages: 0 }
+
     for (const targetId of [
       'root:missing-root:missing-comment',
       'reply:loaded-root:missing-reply',
     ]) {
-      let state: DeepLinkTraversalState = { requestedPages: 0 }
-
       for (let index = 0; index < MAX_DEEP_LINK_AUTO_PAGES; index += 1) {
         const result = advanceDeepLinkTraversal(state, targetId, true)
         expect(result.shouldLoad).toBe(true)

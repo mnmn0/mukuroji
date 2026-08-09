@@ -52,7 +52,6 @@ export function useIssueContextRevisionPages(
       ),
     {
       dedupingInterval: 1_000,
-      refreshInterval: 4_000,
       refreshWhenHidden: false,
       refreshWhenOffline: false,
       revalidateOnFocus: true,

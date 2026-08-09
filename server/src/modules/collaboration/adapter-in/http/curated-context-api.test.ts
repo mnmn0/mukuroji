@@ -30,12 +30,12 @@ afterEach(() => {
  * Creates a compact curated-context fixture with retained source provenance.
  *
  * @param id - Stable context-item identifier.
- * @param source - Captured source provenance.
+ * @param source - Captured source provenance, when the item has evidence.
  * @returns Curated-context fixture.
  */
 function createCuratedContextFixture(
   id: string,
-  source: CuratedContextSource,
+  source?: CuratedContextSource,
 ): CuratedContextItem {
   return {
     schemaVersion: COLLABORATION_CONTEXT_SCHEMA_VERSION,
@@ -46,7 +46,7 @@ function createCuratedContextFixture(
     state: 'active',
     title: `Context ${id}`,
     body: `Body ${id}`,
-    source,
+    ...(source ? { source } : {}),
     mentionMemberKeys: [],
     createdBy: { id: 'demo@example.com', displayName: 'Demo' },
     createdAt: '2026-08-09T01:00:00.000Z',
@@ -769,16 +769,9 @@ test('replays a committed create before rehydrating a source that later disappea
 
 test('replays a committed update before validating mutable mention dependencies', async () => {
   configureFakeProjectClients(true)
-  const committed = createCuratedContextFixture('context-replay', {
-    kind: 'activity',
-    sourceId: 'event-1',
-    originalBody: 'Retained activity evidence.',
-    occurredAt: '2026-08-09T01:00:00.000Z',
-    availability: 'available',
-  })
+  const committed = createCuratedContextFixture('context-replay')
   committed.title = 'Committed update'
   committed.revision = 2
-  delete committed.source
   let updateCalls = 0
   setTestAppDependencies({
     collaboration: createCollaborationStub({

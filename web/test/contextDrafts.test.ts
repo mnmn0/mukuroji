@@ -42,6 +42,27 @@ describe('related Document context drafts', () => {
       documentRecordFixture.revision,
     )
   })
+
+  test('bounds long document content at a complete UTF-16 code point', () => {
+    const longDocument = {
+      ...documentRecordFixture,
+      blocks: [
+        {
+          id: 'block-long',
+          text: `${'x'.repeat(19_999)}😀`,
+          type: 'paragraph' as const,
+        },
+      ],
+    }
+    const draft = createRelatedDocumentContextDraft(
+      backlinkFixture,
+      longDocument,
+    )
+
+    expect(draft.source?.originalBody).toHaveLength(19_999)
+    expect(draft.source?.quote?.endOffset).toBe(19_999)
+    expect(draft.source?.originalBody?.endsWith('\ud800')).toBeFalse()
+  })
 })
 
 describe('activity context drafts', () => {

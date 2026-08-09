@@ -57,20 +57,19 @@ export type CuratedContextActorSnapshot = {
 /**
  * Immutable text excerpt captured from a curated context source.
  */
-export type CuratedContextQuote = {
-  /**
-   * Exact source text retained for historical readability.
-   */
-  text: string
-  /**
-   * Inclusive UTF-16 offset into the captured original body when a range was selected.
-   */
-  startOffset?: number
-  /**
-   * Exclusive UTF-16 offset into the captured original body when a range was selected.
-   */
-  endOffset?: number
-}
+export type CuratedContextQuote =
+  | {
+      /** Exact source text retained for historical readability. */
+      text: string
+    }
+  | {
+      /** Exact source text retained for historical readability. */
+      text: string
+      /** Inclusive UTF-16 offset into the captured original body. */
+      startOffset: number
+      /** Exclusive UTF-16 offset into the captured original body. */
+      endOffset: number
+    }
 
 /**
  * Auditable provenance retained for evidence promoted into curated context.

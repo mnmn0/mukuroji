@@ -65,6 +65,8 @@ export type IssueDecisionsTabProps = {
   ) => void
   /** Context item targeted by a deep link. */
   focusedContextItemId?: string
+  /** Instance-specific tab ID used when restoring focus to the tablist. */
+  decisionsTabId: string
 }
 
 /**
@@ -115,6 +117,7 @@ type ContextEditorFormProps = {
  */
 export function IssueDecisionsTab({
   controller,
+  decisionsTabId,
   draft,
   focusedContextItemId,
   locale,
@@ -130,9 +133,9 @@ export function IssueDecisionsTab({
   const deepLinkTraversalRef = useRef<DeepLinkTraversalState>({
     requestedPages: 0,
   })
-  const initialEditor: ContextEditorState | undefined = draft
-    ? { ...draft, mode: 'create', state: 'active' }
-    : editorRequest
+  const initialEditor: ContextEditorState | undefined =
+    editorRequest ??
+    (draft ? { ...draft, mode: 'create', state: 'active' } : undefined)
 
   useEffect(() => {
     if (!focusedContextItemId) {
@@ -194,8 +197,9 @@ export function IssueDecisionsTab({
    */
   function closeEditor() {
     const returnTarget = editorReturnFocusRef.current
-    if (draft) onDraftConsumed?.()
-    else setEditorRequest(undefined)
+    const hasExplicitEditorRequest = editorRequest !== undefined
+    if (hasExplicitEditorRequest) setEditorRequest(undefined)
+    else if (draft) onDraftConsumed?.()
 
     window.requestAnimationFrame(() => {
       if (returnTarget?.isConnected) {
@@ -207,7 +211,7 @@ export function IssueDecisionsTab({
           ? document.getElementById(draft.returnFocusId)
           : null) ??
         createButtonRef.current ??
-        document.getElementById('issue-collaboration-tab-decisions')
+        document.getElementById(decisionsTabId)
       fallback?.focus()
     })
   }
@@ -614,7 +618,10 @@ function ContextRevisionSource({ source, t }: ContextRevisionSourceProps) {
         <span>{t(`collaboration.sources.availability.${source.availability}`)}</span>
         {source.capturedRevision !== undefined ? (
           <span>
-            {t('collaboration.sources.revision')}: {String(source.capturedRevision)}
+            {t('collaboration.sources.revisionValue').replace(
+              '{revision}',
+              String(source.capturedRevision),
+            )}
           </span>
         ) : null}
       </div>
@@ -907,6 +914,7 @@ function ContextEditorForm({
       ) : null}
       <button
         className="workbench-button-primary min-h-[44px] justify-self-start px-4"
+        data-testid="context-editor-submit"
         disabled={
           isSubmitting ||
           !editorIsAuthorized ||
@@ -937,17 +945,17 @@ function createContextEditorKey(
   draft: IssueContextDraft | undefined,
   editor: ContextEditorState,
 ): string {
-  if (!draft) return `${editor.mode}:${editor.item?.id ?? 'new'}`
-
   return [
-    'draft',
-    draft.source?.kind ?? 'manual',
-    draft.source?.sourceId ?? 'new',
-    draft.source?.capturedRevision ?? '',
-    draft.source?.quote?.text ?? '',
-    draft.kind,
-    draft.title,
-    draft.body,
+    draft ? 'draft' : 'editor',
+    editor.mode,
+    editor.item?.id ?? 'new',
+    editor.kind,
+    editor.title,
+    editor.body,
+    editor.source?.kind ?? draft?.source?.kind ?? 'manual',
+    editor.source?.sourceId ?? draft?.source?.sourceId ?? 'new',
+    editor.source?.capturedRevision ?? draft?.source?.capturedRevision ?? '',
+    editor.source?.quote?.text ?? draft?.source?.quote?.text ?? '',
   ].join(':')
 }
 
@@ -987,15 +995,16 @@ function updateContextSourceQuote(
   if (!quoteText) return { ...source, quote: undefined }
   const startOffset = source.originalBody?.indexOf(quoteText) ?? -1
 
-  return {
-    ...source,
-    quote: {
-      endOffset:
-        startOffset >= 0 ? startOffset + quoteText.length : undefined,
-      startOffset: startOffset >= 0 ? startOffset : undefined,
-      text: quoteText,
-    },
-  }
+  return startOffset < 0
+    ? { ...source, quote: { text: quoteText } }
+    : {
+        ...source,
+        quote: {
+          endOffset: startOffset + quoteText.length,
+          startOffset,
+          text: quoteText,
+        },
+      }
 }
 
 /**

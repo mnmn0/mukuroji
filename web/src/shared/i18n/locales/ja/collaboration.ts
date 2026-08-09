@@ -132,6 +132,7 @@ export const collaborationMessages = {
   'collaboration.sources.actor': '元の投稿者',
   'collaboration.sources.timestamp': '元の日時',
   'collaboration.sources.revision': '元情報の revision',
+  'collaboration.sources.revisionValue': 'revision {revision}',
   'collaboration.sources.sourceId': '情報源 ID',
   'collaboration.sources.unknown': '不明',
   'collaboration.sources.original': '保存した原文を表示',

@@ -39,7 +39,8 @@ export function useIssueContextPages(
       }),
     {
       dedupingInterval: 1_000,
-      refreshInterval: 4_000,
+      revalidateAll: false,
+      revalidateFirstPage: true,
       refreshWhenHidden: false,
       refreshWhenOffline: false,
       revalidateOnFocus: true,

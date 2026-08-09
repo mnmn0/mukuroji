@@ -1,9 +1,11 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  applyIssueCollaborationTabToSearchParams,
   getIssueCollaborationSearchParamsToClear,
   issueCollaborationTargetSearchParams,
   issueCollaborationTabs,
   readIssueCollaborationTab,
+  resolveIssueCollaborationTab,
   resolveIssueCollaborationTabTarget,
 } from '../src/issues/model/collaborationTabs'
 
@@ -24,6 +26,44 @@ describe('issue collaboration tabs', () => {
     expect(readIssueCollaborationTab('unknown')).toBe('conversation')
     expect(readIssueCollaborationTab(null)).toBe('conversation')
     expect(readIssueCollaborationTab(undefined)).toBe('conversation')
+  })
+
+  test('prioritizes explicit tab state over deep-link targets', () => {
+    expect(
+      resolveIssueCollaborationTab({
+        requestedTab: 'activity',
+        focusedContextItemId: 'context-1',
+        focusedSourceId: 'source-1',
+      }),
+    ).toBe('activity')
+    expect(
+      resolveIssueCollaborationTab({ focusedContextItemId: 'context-1' }),
+    ).toBe('decisions')
+    expect(resolveIssueCollaborationTab({ focusedSourceId: 'source-1' })).toBe(
+      'sources',
+    )
+    expect(
+      resolveIssueCollaborationTab({ focusedActivityEventId: 'event-1' }),
+    ).toBe('activity')
+  })
+
+  test('updates tab state and clears targets owned by other sections', () => {
+    const current = new URLSearchParams(
+      'collaborationTab=sources&contextItemId=context-1&sourceId=source-1&sourceKind=document&activityEventId=event-1',
+    )
+    const next = applyIssueCollaborationTabToSearchParams(current, 'activity')
+
+    expect(next.get('collaborationTab')).toBe('activity')
+    expect(next.get('activityEventId')).toBe('event-1')
+    expect(next.get('contextItemId')).toBeNull()
+    expect(next.get('sourceId')).toBeNull()
+    expect(next.get('sourceKind')).toBeNull()
+
+    expect(
+      applyIssueCollaborationTabToSearchParams(current, 'conversation').get(
+        'collaborationTab',
+      ),
+    ).toBeNull()
   })
 
   test('wraps arrow navigation and supports Home and End', () => {

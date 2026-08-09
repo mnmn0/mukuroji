@@ -77,7 +77,9 @@ function createCollaborationMemory(
 ) {
   const rows = new Map<string, Record<string, unknown>>()
   const transactions: Array<Record<string, unknown>> = []
-  let commentToMutateBeforeNextTransaction: string | undefined
+  let commentToMutateBeforeNextTransaction:
+    | { entityKey: string; commentId: string }
+    | undefined
   let reportCommittedTransactionAsConditionalFailure = false
   /** Creates the compound key used by the in-memory row map. */
   const storageKey = (entityKey: string, recordKey: string) => `${entityKey}\0${recordKey}`
@@ -133,8 +135,8 @@ function createCollaborationMemory(
     transactions.push(input)
     if (commentToMutateBeforeNextTransaction) {
       const key = storageKey(
-        'workspace#one#work-item#team/team-a/issue/issue-1',
-        `COMMENT#${commentToMutateBeforeNextTransaction}`,
+        commentToMutateBeforeNextTransaction.entityKey,
+        `COMMENT#${commentToMutateBeforeNextTransaction.commentId}`,
       )
       const current = rows.get(key)
       if (current && typeof current.version === 'number') {
@@ -205,8 +207,15 @@ function createCollaborationMemory(
     rows,
     transactions,
     /** Mutates one comment immediately before the next transaction evaluates its conditions. */
-    mutateCommentBeforeNextTransaction(commentId: string) {
-      commentToMutateBeforeNextTransaction = commentId
+    mutateCommentBeforeNextTransaction(
+      commentId: string,
+      entityKey = createWorkItemCollaborationEntityKey(
+        'workspace#one',
+        'team-a',
+        'issue-1',
+      ),
+    ) {
+      commentToMutateBeforeNextTransaction = { commentId, entityKey }
     },
     /** Simulates an identical concurrent winner committing before this caller observes a conflict. */
     reportNextCommittedTransactionAsConditionalFailure() {
@@ -1711,7 +1720,12 @@ test('fences captured comment creation and preserves immutable provenance during
   })
 })
 
-test('keeps accepted resolution history append-only and rejects invalid or concurrently edited replies', async () => {
+/**
+ * Creates the accepted-resolution state used by append-only, pagination, and rejection tests.
+ *
+ * @returns A memory client after selecting, editing, replacing, and replaying one resolution.
+ */
+async function createAcceptedResolutionHistoryState() {
   const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
   /** Creates a physical comment seed row for accepted-resolution tests. */
   const commentRow = (
@@ -1777,14 +1791,6 @@ test('keeps accepted resolution history append-only and rejects invalid or concu
     typeof row.recordKey === 'string' && row.recordKey.startsWith('RESOLUTION#root-1#')
   ).length
   expect(resolutionRowCount()).toBe(1)
-  const physicalRoot = memory.rows.get(`${entityKey}\0COMMENT#root-1`)
-  expect(physicalRoot).not.toHaveProperty('acceptedResolutions')
-  expect(physicalRoot?.acceptedResolutionId).toBe(first.acceptedResolutions[0]?.id)
-  expect(physicalRoot?.acceptedResolution).toMatchObject({
-    id: first.acceptedResolutions[0]?.id,
-    state: 'accepted',
-  })
-
   const replay = await memory.client.setAcceptedResolution(firstInput)
   expect(replay.version).toBe(2)
   expect(resolutionRowCount()).toBe(1)
@@ -1851,6 +1857,51 @@ test('keeps accepted resolution history append-only and rejects invalid or concu
   expect(replacementRows[1]).toMatchObject({ resolution: { state: 'superseded' } })
 
   const replayAfterReplacement = await memory.client.setAcceptedResolution(firstInput)
+  expect(resolutionRowCount()).toBe(5)
+
+  return {
+    actor,
+    entityKey,
+    first,
+    firstInput,
+    memory,
+    replay,
+    replayAfterReplacement,
+    replaced,
+    resolutionRowCount,
+    scope,
+  }
+}
+
+test('keeps accepted resolution history append-only through replacement and replay', async () => {
+  const {
+    entityKey,
+    first,
+    firstInput,
+    memory,
+    replay,
+    replayAfterReplacement,
+    replaced,
+    resolutionRowCount,
+  } = await createAcceptedResolutionHistoryState()
+
+  expect(first.acceptedResolutions).toHaveLength(1)
+  expect(first.acceptedResolutions[0]).toMatchObject({
+    sourceCommentId: 'reply-1',
+    capturedCommentRevision: 1,
+    capturedCommentBody: 'First answer',
+    state: 'accepted',
+  })
+  const physicalRoot = memory.rows.get(`${entityKey}\0COMMENT#root-1`)
+  expect(physicalRoot).not.toHaveProperty('acceptedResolutions')
+  expect(physicalRoot?.acceptedResolutionId).toBe(
+    replaced.acceptedResolutions[0]?.id,
+  )
+  expect(physicalRoot?.acceptedResolution).toMatchObject({
+    id: replaced.acceptedResolutions[0]?.id,
+    state: 'accepted',
+  })
+  expect(replay.version).toBe(2)
   expect(replayAfterReplacement).toMatchObject({
     version: 2,
     acceptedResolutions: [{
@@ -1860,6 +1911,11 @@ test('keeps accepted resolution history append-only and rejects invalid or concu
     }],
   })
   expect(resolutionRowCount()).toBe(5)
+  expect(firstInput.commentId).toBe('reply-1')
+})
+
+test('paginates accepted-resolution history with a scope-bound cursor', async () => {
+  const { entityKey, memory } = await createAcceptedResolutionHistoryState()
 
   const firstHistoryPage = await memory.client.getAcceptedResolutionHistory({
     entityKey,
@@ -1886,7 +1942,11 @@ test('keeps accepted resolution history append-only and rejects invalid or concu
     rootCommentId: 'root-1',
     cursor: firstHistoryPage.nextCursor,
   })).rejects.toMatchObject({ status: 400, code: 'InvalidCollaborationCursor' })
+})
 
+test('rejects invalid and concurrently edited accepted-resolution replies', async () => {
+  const { actor, entityKey, memory, scope } =
+    await createAcceptedResolutionHistoryState()
   await expect(memory.client.setAcceptedResolution({
     ...scope,
     rootCommentId: 'root-1',
@@ -1915,7 +1975,7 @@ test('keeps accepted resolution history append-only and rejects invalid or concu
     canModerate: false,
   })).rejects.toMatchObject({ status: 400, code: 'AcceptedResolutionNotReply' })
 
-  memory.mutateCommentBeforeNextTransaction('reply-3')
+  memory.mutateCommentBeforeNextTransaction('reply-3', entityKey)
   await expect(memory.client.setAcceptedResolution({
     ...scope,
     rootCommentId: 'root-1',
@@ -1925,7 +1985,11 @@ test('keeps accepted resolution history append-only and rejects invalid or concu
     actor,
     canModerate: false,
   })).rejects.toMatchObject({ status: 409, code: 'AcceptedResolutionSourceConflict' })
+})
 
+test('replays the accepted resolution safely after root deletion', async () => {
+  const { actor, firstInput, memory, scope } =
+    await createAcceptedResolutionHistoryState()
   await memory.client.deleteComment({
     ...scope,
     actorMemberKey: actor.id,

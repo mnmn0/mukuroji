@@ -843,7 +843,7 @@ export function createCommentWorkspaceSearchDocument(input: {
   issueId: string
   /** Canonical Comment ID です。 */
   commentId: string
-  /** Comment が属する root thread ID です。 */
+  /** Root thread identifier that contains the comment. */
   rootCommentId?: string
   /** Comment の現在 Markdown 本文です。 */
   body: string
@@ -876,13 +876,13 @@ export function createCommentWorkspaceSearchDocument(input: {
   })
 }
 
-/** Curated context source を runtime/backfill 共通の search document へ変換します。 */
+/** Converts a curated context item into a runtime/backfill Search document. */
 export function createCuratedContextItemWorkspaceSearchDocument(input: {
-  /** Canonical Workspace ID です。 */
+  /** Canonical Workspace identifier. */
   workspaceId: string
-  /** Curated context item の current canonical snapshot です。 */
+  /** Current canonical curated context item snapshot. */
   item: CuratedContextItem
-  /** Parent Work Item の current assigned Project ID です。 */
+  /** Current assigned Project identifier for the parent Work Item. */
   projectId?: string
 }) {
   const parentId = `team/${input.item.teamId}/issue/${input.item.workItemId}`

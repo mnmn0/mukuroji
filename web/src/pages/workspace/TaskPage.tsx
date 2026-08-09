@@ -63,9 +63,10 @@ import {
 } from '../../issues/queries/useWorkItems'
 import { useIssueCollaboration } from '../../issues/mutations/useIssueCollaboration'
 import {
-  getIssueCollaborationSearchParamsToClear,
+  applyIssueCollaborationTabToSearchParams,
   issueCollaborationTargetSearchParams,
-  readIssueCollaborationTab,
+  resolveIssueCollaborationTab,
+  type IssueCollaborationRoute,
   type IssueCollaborationTab,
 } from '../../issues/model/collaborationTabs'
 import { readIssueSourceKind } from '../../issues/model/contextSources'
@@ -184,15 +185,12 @@ export function TaskPage() {
     readIssueSourceKind(searchParams.get('sourceKind'))
   const focusedActivityEventId = searchParams.get('activityEventId')?.trim() || undefined
   const requestedCollaborationTab = searchParams.get('collaborationTab')
-  const collaborationTab = requestedCollaborationTab
-    ? readIssueCollaborationTab(requestedCollaborationTab)
-    : focusedContextItemId
-      ? 'decisions'
-      : focusedSourceId
-        ? 'sources'
-        : focusedActivityEventId
-          ? 'activity'
-          : 'conversation'
+  const collaborationTab = resolveIssueCollaborationTab({
+    requestedTab: requestedCollaborationTab,
+    focusedContextItemId,
+    focusedSourceId,
+    focusedActivityEventId,
+  })
   const isCreateTaskRequested = searchParams.get('create') === '1'
   const [session] = useState(() => getAuthSession())
   const [locale] = useState<Locale>(() => getInitialLocale())
@@ -720,18 +718,10 @@ export function TaskPage() {
 
   /** Persists collaboration section navigation without leaving the selected Work Item. */
   const handleCollaborationTabChange = (tab: IssueCollaborationTab) => {
-    const nextSearchParams = new URLSearchParams(searchParams)
-
-    if (tab === 'conversation') {
-      nextSearchParams.delete('collaborationTab')
-    } else {
-      nextSearchParams.set('collaborationTab', tab)
-    }
-    for (const key of getIssueCollaborationSearchParamsToClear(tab)) {
-      nextSearchParams.delete(key)
-    }
-
-    setSearchParams(nextSearchParams, { replace: true })
+    setSearchParams(
+      applyIssueCollaborationTabToSearchParams(searchParams, tab),
+      { replace: true },
+    )
   }
 
   /** Updates a visible Work Item with optimistic cache projection and conflict rollback. */
@@ -1027,16 +1017,21 @@ export function TaskPage() {
       canManageProjectMembers={canManageProjectMembers}
       canManageScheduleDependencyEndpoint={canManageScheduleDependencyEndpoint}
       collaboration={collaboration}
-      collaborationTab={collaborationTab}
+      collaborationRoute={
+        {
+          collaborationTab,
+          focusedContextItemId,
+          focusedSourceId,
+          focusedSourceKind,
+          focusedActivityEventId,
+          onCollaborationTabChange: handleCollaborationTabChange,
+        } satisfies IssueCollaborationRoute
+      }
       artifacts={issueArtifacts}
       currentWorkspaceMemberKey={workspaceAccess?.currentMember.memberKey}
       detailErrorMessage={detailErrorMessage}
       defaultCreateTaskOpen={isCreateTaskRequested}
       focusedCommentId={focusedCommentId}
-      focusedContextItemId={focusedContextItemId}
-      focusedSourceId={focusedSourceId}
-      focusedSourceKind={focusedSourceKind}
-      focusedActivityEventId={focusedActivityEventId}
       focusedRootCommentId={focusedRootCommentId}
       initialSelectedTaskId={resolvedSelectedIssue?.id}
       isAssigneeOptionsLoading={Boolean(projectMembersKey && isProjectMembersLoading)}
@@ -1044,7 +1039,6 @@ export function TaskPage() {
       isSelectedIssueDetailLoading={Boolean(issueDetailKey && isSelectedIssueDetailLoading)}
       isSystemAdmin={user?.isSystemAdmin}
       onLoadMoreProjectUsers={canManageProjectMembers ? handleLoadMoreProjectUsers : undefined}
-      onCollaborationTabChange={handleCollaborationTabChange}
       onProjectUserQueryChange={canManageProjectMembers ? setProjectUserQuery : undefined}
       onProjectQuickAccessToggle={handleProjectQuickAccessToggle}
       onRemoveProjectMember={canManageProjectMembers ? handleRemoveProjectMember : undefined}

@@ -439,10 +439,14 @@ export function IssueConversationTab({
                       resolutionEditor.rootComment,
                       resolutionEditor.sourceComment,
                       resolutionEditor.summary.trim(),
-                    ).then((succeeded) => {
-                      setIsResolutionSaving(false)
-                      if (succeeded) closeResolutionEditor()
-                    })
+                    )
+                      .then((succeeded) => {
+                        if (succeeded) closeResolutionEditor()
+                      })
+                      .catch((error: unknown) => {
+                        console.error('Accepted resolution save failed:', error)
+                      })
+                      .finally(() => setIsResolutionSaving(false))
                   }}
                 >
                   <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-text)]">
@@ -513,6 +517,7 @@ export function IssueConversationTab({
               ) : null}
               <details
                 className="group"
+                data-testid={`comment-thread-details-${thread.root.id}`}
                 open={
                   !thread.root.resolvedAt ||
                   focusedCommentTargetId === thread.root.id ||
@@ -735,6 +740,12 @@ type CommentCardProps = {
   t: (key: MessageKey) => string
 }
 
+/**
+ * Renders one root comment or reply with its available collaboration actions.
+ *
+ * @param props - Comment content, permissions, and interaction callbacks.
+ * @returns A comment card.
+ */
 function CommentCard({
   artifacts,
   comment,
@@ -1311,15 +1322,27 @@ function createResolutionHistoryPanelId(rootCommentId: string): string {
   return `resolution-history-panel-${encodeURIComponent(rootCommentId)}`
 }
 
+/** Props for comment attachment controls. */
+type CommentFileAttachmentsProps = {
+  /** File controller scoped to the current Work Item. */
+  artifacts: FileArtifactsController
+  /** Comment whose attachments are displayed. */
+  comment: TeamIssueComment
+  /** Translator for attachment labels. */
+  t: (key: MessageKey) => string
+}
+
+/**
+ * Renders downloadable attachments and the scoped upload control for a comment.
+ *
+ * @param props - Attachment controller, comment, and translator.
+ * @returns Attachment controls or nothing when no action is available.
+ */
 function CommentFileAttachments({
   artifacts,
   comment,
   t,
-}: {
-  artifacts: FileArtifactsController
-  comment: TeamIssueComment
-  t: (key: MessageKey) => string
-}) {
+}: CommentFileAttachmentsProps) {
   const inputRef = useRef<HTMLInputElement>(null)
   const [guestAccess, setGuestAccess] = useState(false)
   const files = artifacts.files.filter((file) =>
@@ -1455,6 +1478,12 @@ type CommentComposerProps = {
   t: (key: MessageKey) => string
 }
 
+/**
+ * Renders the Markdown comment composer and mention picker.
+ *
+ * @param props - Initial text, mention candidates, and composer actions.
+ * @returns Comment composer form.
+ */
 function CommentComposer({
   initialBodyMarkdown = '',
   initialMentionMemberKeys = [],
@@ -1679,19 +1708,28 @@ function CommentComposer({
   )
 }
 
+/** Props for a reaction toggle. */
+type ReactionButtonProps = {
+  /** Whether the current viewer may change reactions. */
+  canReact: boolean
+  /** Comment receiving the reaction. */
+  comment: TeamIssueComment
+  /** Collaboration controller that performs the mutation. */
+  controller: IssueCollaborationController
+  /** Emoji reaction rendered by the button. */
+  reaction: TeamIssueCommentReaction
+  /** Translator for reaction labels. */
+  t: (key: MessageKey) => string
+}
+
+/** Renders one accessible reaction toggle. */
 function ReactionButton({
   canReact,
   comment,
   controller,
   reaction,
   t,
-}: {
-  canReact: boolean
-  comment: TeamIssueComment
-  controller: IssueCollaborationController
-  reaction: TeamIssueCommentReaction
-  t: (key: MessageKey) => string
-}) {
+}: ReactionButtonProps) {
   return (
     <button
       aria-label={`${reaction.emoji} ${t(reaction.reactedByMe ? 'collaboration.reaction.remove' : 'collaboration.reaction.add')}`}
@@ -1711,15 +1749,22 @@ function ReactionButton({
   )
 }
 
+/** Props for a compact comment action button. */
+type CommentActionButtonProps = {
+  /** Visible action label. */
+  label: string
+  /** Callback receiving the activated button. */
+  onClick: (trigger: HTMLButtonElement) => void
+  /** Semantic emphasis for the action. */
+  tone?: 'default' | 'primary'
+}
+
+/** Renders a compact action button for a comment. */
 function CommentActionButton({
   label,
   onClick,
   tone = 'default',
-}: {
-  label: string
-  onClick: (trigger: HTMLButtonElement) => void
-  tone?: 'default' | 'primary'
-}) {
+}: CommentActionButtonProps) {
   return (
     <button
       className={`min-h-11 rounded px-1.5 py-1 text-[0.68rem] font-semibold transition hover:bg-[var(--workbench-surface-muted)] ${
@@ -1733,15 +1778,22 @@ function CommentActionButton({
   )
 }
 
+/** Props for a non-submitting composer toolbar control. */
+type ComposerToolButtonProps = {
+  /** Short content rendered inside the control. */
+  children: string
+  /** Accessible and tooltip label. */
+  label: string
+  /** Callback for the toolbar action. */
+  onClick: () => void
+}
+
+/** Renders one compact composer toolbar control. */
 function ComposerToolButton({
   children,
   label,
   onClick,
-}: {
-  children: string
-  label: string
-  onClick: () => void
-}) {
+}: ComposerToolButtonProps) {
   return (
     <button
       aria-label={label}
@@ -1755,15 +1807,22 @@ function ComposerToolButton({
   )
 }
 
+/** Props for a member avatar with a stable accessible name. */
+type MemberAvatarProps = {
+  /** Stable member identifier to resolve. */
+  memberKey: string
+  /** Workspace members available to the current viewer. */
+  members: WorkspaceMember[]
+  /** Whether to render the compact avatar size. */
+  small?: boolean
+}
+
+/** Renders a text-based member avatar. */
 function MemberAvatar({
   memberKey,
   members,
   small = false,
-}: {
-  memberKey: string
-  members: WorkspaceMember[]
-  small?: boolean
-}) {
+}: MemberAvatarProps) {
   const member = findWorkspaceMember(memberKey, members)
   const name = formatMemberName(member, memberKey)
 
@@ -1780,6 +1839,7 @@ function MemberAvatar({
   )
 }
 
+/** Renders the loading placeholders for the conversation feed. */
 function CollaborationSkeleton() {
   return (
     <div className="grid gap-3" aria-hidden="true">
@@ -1794,6 +1854,12 @@ function CollaborationSkeleton() {
   )
 }
 
+/**
+ * Groups a flat comment page into roots and chronologically ordered replies.
+ *
+ * @param comments - Comments returned by the collaboration API.
+ * @returns Thread rows suitable for the conversation feed.
+ */
 function createCommentThreads(comments: TeamIssueComment[]) {
   const rootComments = comments.filter((comment) => !comment.parentCommentId)
   const knownRootIds = new Set(rootComments.map((comment) => comment.id))
@@ -1812,14 +1878,17 @@ function createCommentThreads(comments: TeamIssueComment[]) {
   })) satisfies CommentThread[]
 }
 
+/** Creates the DOM anchor ID for one comment. */
 function createCommentAnchorId(commentId: string) {
   return `comment-${encodeURIComponent(commentId)}`
 }
 
+/** Resolves the stable author key across legacy and collaboration comments. */
 function resolveCommentAuthorKey(comment: TeamIssueComment) {
   return comment.authorMemberKey ?? comment.actorUserId ?? 'unknown-member'
 }
 
+/** Resolves the Markdown body across legacy and collaboration comments. */
 function resolveCommentBody(comment: TeamIssueComment) {
   return comment.bodyMarkdown ?? comment.body ?? ''
 }
@@ -1865,14 +1934,17 @@ function createCapturedResolutionSourceComment(
   }
 }
 
+/** Finds a workspace member by key, ID, or email. */
 function findWorkspaceMember(memberKey: string, members: WorkspaceMember[]) {
   return members.find((member) => member.memberKey === memberKey || member.id === memberKey || member.email === memberKey)
 }
 
+/** Formats a member display name with a stable fallback. */
 function formatMemberName(member: WorkspaceMember | undefined, fallback: string) {
   return member?.name?.trim() || member?.email || fallback
 }
 
+/** Formats one comment timestamp for the current locale. */
 function formatCommentDate(value: string, locale: Locale, includeYear: boolean) {
   const date = new Date(value)
 
@@ -1889,6 +1961,7 @@ function formatCommentDate(value: string, locale: Locale, includeYear: boolean) 
   }).format(date)
 }
 
+/** Formats the current typing-member status announcement. */
 function formatTypingLabel(
   memberKeys: string[],
   members: WorkspaceMember[],
@@ -1918,6 +1991,7 @@ type MentionAtCursor = {
   query: string
 }
 
+/** Reads the mention query immediately before a composer cursor. */
 function readMentionAtCursor(value: string, cursor: number): MentionAtCursor | undefined {
   const prefix = value.slice(0, cursor)
   const match = prefix.match(/(?:^|[^\p{L}\p{N}_@])@([^@\n]*)$/u)

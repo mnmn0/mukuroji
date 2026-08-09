@@ -2056,6 +2056,7 @@ function legacyAcceptedResolutionRecordKey(
   return `${acceptedResolutionRecordPrefix(rootCommentId)}${recordedAt}#${encodeURIComponent(resolutionId)}#${state}`
 }
 
+/** Physical comment row with the current accepted-resolution pointer. */
 type StoredComment = CollaborationComment & {
   /** DynamoDB partition key です。 */
   entityKey: string

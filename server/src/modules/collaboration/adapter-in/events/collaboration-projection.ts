@@ -90,7 +90,7 @@ export type AuditProjectionEvent = {
   projectId?: string
   /** current comment ID です。 */
   commentId?: string
-  /** Durable Workspace search projection の対象 context item ID です。 */
+  /** Curated context item ID targeted by the durable Workspace Search projection. */
   contextItemId?: string
   /** File proofing cleanup の対象 file ID です。 */
   fileId?: string
@@ -138,35 +138,35 @@ export interface DeletedFileCleanupDependencies {
   ): Promise<void>
 }
 
-/** Collaboration projection batch の外部依存です。 */
+/** External ports used by one collaboration projection batch. */
 export interface CollaborationProjectionDependencies {
-  /** Durable file delete cleanup を実行する port です。 */
+  /** Port that performs durable file-delete cleanup. */
   deletedFileCleanup: DeletedFileCleanupDependencies
-  /** Curated context の durable Workspace search projection を実行する port です。 */
+  /** Port that maintains durable Workspace Search context projections. */
   curatedContextSearch: CuratedContextSearchProjectionDependencies
-  /** Realtime invalidation を配送する port です。 */
+  /** Port that publishes realtime invalidations. */
   realtime: CollaborationRealtimePublisher
 }
 
-/** Curated context search projection へ渡す canonical scope です。 */
+/** Canonical scope passed to the curated context Search projection. */
 export type CuratedContextSearchProjectionInput = {
-  /** Canonical Workspace ID です。 */
+  /** Canonical Workspace identifier. */
   workspaceId: string
-  /** Parent Work Item の Team ID です。 */
+  /** Team identifier that owns the parent Work Item. */
   teamId: string
-  /** Parent Work Item ID です。 */
+  /** Parent Work Item identifier. */
   issueId: string
-  /** Current assigned Project ID です。 */
+  /** Current assigned Project identifier, when assigned. */
   projectId?: string
-  /** Mutated curated context item ID です。 */
+  /** Curated context item identifier that changed. */
   contextItemId: string
 }
 
-/** Curated context search document の idempotent projection port です。 */
+/** Idempotent port for the current curated context Search document. */
 export interface CuratedContextSearchProjectionDependencies {
-  /** Current canonical context item を search document へ upsert します。 */
+  /** Upserts the current canonical context item into Search. */
   upsertCurrent(input: CuratedContextSearchProjectionInput): Promise<void>
-  /** Superseded または orphaned context item の search document を削除します。 */
+  /** Deletes a superseded or orphaned context item Search document. */
   deleteCurrent(input: CuratedContextSearchProjectionInput): Promise<void>
 }
 

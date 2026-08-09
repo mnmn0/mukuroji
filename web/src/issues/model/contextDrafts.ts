@@ -100,8 +100,8 @@ export function createRelatedDocumentContextDraft(
   backlink: DocumentBacklink,
   document: DocumentRecord,
 ): IssueContextDraft {
-  const originalBody = createRelatedDocumentSourceBody(document).slice(
-    0,
+  const originalBody = truncateToUtf16Boundary(
+    createRelatedDocumentSourceBody(document),
     20_000,
   )
 
@@ -130,6 +130,21 @@ export function createRelatedDocumentContextDraft(
     },
     title: '',
   }
+}
+
+/**
+ * Truncates text by UTF-16 code units without leaving a dangling surrogate.
+ *
+ * @param value - Source text to bound.
+ * @param maximumLength - Maximum UTF-16 code-unit length.
+ * @returns Text no longer than the requested limit and safe to render.
+ */
+function truncateToUtf16Boundary(value: string, maximumLength: number): string {
+  const truncated = value.slice(0, maximumLength)
+  const lastCodeUnit = truncated.charCodeAt(truncated.length - 1)
+  return lastCodeUnit >= 0xd800 && lastCodeUnit <= 0xdbff
+    ? truncated.slice(0, -1)
+    : truncated
 }
 
 /**

@@ -65,11 +65,11 @@ export function createIssueSourceEntries(
 /**
  * Creates a DOM anchor keyed by the context item that owns the source snapshot.
  *
- * @param target - Context item owning the provenance snapshot.
+ * @param contextItemId - Context item owning the provenance snapshot.
  * @returns DOM-safe provenance anchor ID.
  */
-export function createIssueSourceAnchorId(target: IssueSourceTarget): string {
-  return `context-source-item-${encodeURIComponent(target.contextItemId)}`
+export function createIssueSourceAnchorId(contextItemId: string): string {
+  return `context-source-item-${encodeURIComponent(contextItemId)}`
 }
 
 /**

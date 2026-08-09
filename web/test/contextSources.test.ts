@@ -35,17 +35,9 @@ describe('curated context sources', () => {
 
   test('keeps DOM anchors unique for distinct item snapshots', () => {
     expect(
-      createIssueSourceAnchorId({
-        contextItemId: 'context-one',
-        kind: 'comment',
-        sourceId: 'shared-42',
-      }),
+      createIssueSourceAnchorId('context-one'),
     ).not.toBe(
-      createIssueSourceAnchorId({
-        contextItemId: 'context-two',
-        kind: 'comment',
-        sourceId: 'shared-42',
-      }),
+      createIssueSourceAnchorId('context-two'),
     )
   })
 

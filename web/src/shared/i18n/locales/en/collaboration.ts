@@ -132,6 +132,7 @@ export const collaborationMessages = {
   'collaboration.sources.actor': 'Original actor',
   'collaboration.sources.timestamp': 'Original time',
   'collaboration.sources.revision': 'Source revision',
+  'collaboration.sources.revisionValue': 'Revision {revision}',
   'collaboration.sources.sourceId': 'Source ID',
   'collaboration.sources.unknown': 'Unknown',
   'collaboration.sources.original': 'Show captured original',

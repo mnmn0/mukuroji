@@ -74,17 +74,16 @@ export function grantWorkspaceSearchWriterFenceAccess(
   resources: WorkspaceSearchWriterFenceResources,
   target: lambda.Function,
 ): void {
-  const tableArns = [
+  const sourceTableArns = [
     resources.projectDirectoryTable.tableArn,
     resources.workItemsTable.tableArn,
     resources.collaborationTable.tableArn,
     resources.documentsTable.tableArn,
-    resources.workspaceSearchTable.tableArn,
     resources.migrationStateTable.tableArn,
   ];
   target.addToRolePolicy(new iam.PolicyStatement({
     actions: ['dynamodb:DescribeTable'],
-    resources: tableArns,
+    resources: sourceTableArns,
   }));
   target.addToRolePolicy(new iam.PolicyStatement({
     actions: ['dynamodb:GetItem'],
@@ -98,6 +97,10 @@ export function grantWorkspaceSearchWriterFenceAccess(
       },
     },
     resources: [resources.migrationStateTable.tableArn],
+  }));
+  target.addToRolePolicy(new iam.PolicyStatement({
+    actions: ['dynamodb:PutItem', 'dynamodb:DeleteItem'],
+    resources: [resources.workspaceSearchTable.tableArn],
   }));
 }
 

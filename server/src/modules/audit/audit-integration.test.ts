@@ -542,6 +542,32 @@ test('issue activity authorizes the parent and forwards its pagination cursor', 
     metadata: { kind: 'rule-evaluation' },
     expiresAt: 2_000_000_000,
   })
+  const memberActorEvent = createAuditEvent({
+    context: createMutationAuditContext({
+      workspaceId,
+      actor: {
+        id: 'internal-subject',
+        kind: 'user',
+        displayName: 'Demo User',
+      },
+      idempotencyKey: 'issue-member-activity',
+      correlationId: 'issue-member-activity',
+      occurredAt,
+      request: {
+        method: 'POST',
+        path: '/api/work-items/issue-1',
+        body: { issueId: 'issue-1' },
+      },
+      source: { kind: 'api' },
+    }),
+    eventType: 'comment.created',
+    entity: { type: 'work-item', id: 'team/core-team/issue/issue-1' },
+    target: { type: 'work-item', id: 'team/core-team/issue/issue-1' },
+    action: 'created',
+    summary: 'A member added a comment.',
+    metadata: { actorMemberKey: actorUserId },
+    expiresAt: 2_000_000_000,
+  })
   const projectDirectory = {
     async getProjectDirectory() {
       return {
@@ -603,7 +629,10 @@ test('issue activity authorizes the parent and forwards its pagination cursor', 
       },
       async query(input) {
         queries.push({ ...input })
-        return { events: [activityEvent, systemActorEvent], nextCursor: 'next-activity-page' }
+        return {
+          events: [activityEvent, systemActorEvent, memberActorEvent],
+          nextCursor: 'next-activity-page',
+        }
       },
     },
   })
@@ -618,7 +647,15 @@ test('issue activity authorizes the parent and forwards its pagination cursor', 
   )
 
   expect(response.status).toBe(200)
-  expect(await response.json()).toMatchObject({
+  const activityResponse = await response.json() as {
+    events: Array<{
+      eventId: string
+      actorUserId?: string
+      metadata?: Record<string, unknown>
+    }>
+    nextCursor?: string
+  }
+  expect(activityResponse).toMatchObject({
     events: [{
       eventId: activityEvent.eventId,
       actor: {
@@ -645,9 +682,17 @@ test('issue activity authorizes the parent and forwards its pagination cursor', 
         systemChange: true,
         kind: 'rule-evaluation',
       },
+    }, {
+      eventId: memberActorEvent.eventId,
+      actorUserId: actorUserId,
+      metadata: {
+        actorKind: 'user',
+        systemChange: false,
+      },
     }],
     nextCursor: 'next-activity-page',
   })
+  expect(activityResponse.events[2]?.metadata).not.toHaveProperty('actorMemberKey')
   const otherTeamResponse = await app.request(
     '/api/teams/design-team/issues/issue-1/activity?limit=2',
     {

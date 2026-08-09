@@ -4,9 +4,13 @@ import {
   type CuratedContextActorSnapshot,
   type CuratedContextCapabilities,
   type CuratedContextItem,
+  type CuratedContextItemKind,
+  type CuratedContextItemState,
   type CuratedContextPage,
   type CuratedContextQuote,
   type CuratedContextRevisionPage,
+  type CuratedContextSourceAvailability,
+  type CuratedContextSourceKind,
   type CuratedContextSource,
   type CreateCuratedContextItemRequest,
   type SetAcceptedResolutionRequest,
@@ -450,11 +454,15 @@ function isCuratedContextSource(value: unknown): value is CuratedContextSource {
  * @returns Whether the quote is complete.
  */
 function isCuratedContextQuote(value: unknown): value is CuratedContextQuote {
+  if (!isRecord(value) || typeof value.text !== 'string') return false
+  const hasStart = value.startOffset !== undefined
+  const hasEnd = value.endOffset !== undefined
   return (
-    isRecord(value) &&
-    typeof value.text === 'string' &&
-    isOptionalNumber(value.startOffset) &&
-    isOptionalNumber(value.endOffset)
+    hasStart === hasEnd &&
+    (!hasStart || (
+      isOptionalNumber(value.startOffset) &&
+      isOptionalNumber(value.endOffset)
+    ))
   )
 }
 
@@ -494,7 +502,9 @@ function isCuratedContextCapabilities(
 }
 
 /** Validates a curated item kind. */
-function isCuratedContextKind(value: unknown): boolean {
+function isCuratedContextKind(
+  value: unknown,
+): value is CuratedContextItemKind {
   return (
     value === 'decision' ||
     value === 'action' ||
@@ -504,7 +514,9 @@ function isCuratedContextKind(value: unknown): boolean {
 }
 
 /** Validates a curated item state. */
-function isCuratedContextState(value: unknown): boolean {
+function isCuratedContextState(
+  value: unknown,
+): value is CuratedContextItemState {
   return (
     value === 'active' ||
     value === 'accepted' ||
@@ -514,7 +526,9 @@ function isCuratedContextState(value: unknown): boolean {
 }
 
 /** Validates a source kind. */
-function isCuratedContextSourceKind(value: unknown): boolean {
+function isCuratedContextSourceKind(
+  value: unknown,
+): value is CuratedContextSourceKind {
   return (
     value === 'comment' ||
     value === 'external-chat' ||
@@ -524,7 +538,9 @@ function isCuratedContextSourceKind(value: unknown): boolean {
 }
 
 /** Validates a source availability state. */
-function isCuratedContextAvailability(value: unknown): boolean {
+function isCuratedContextAvailability(
+  value: unknown,
+): value is CuratedContextSourceAvailability {
   return (
     value === 'available' ||
     value === 'edited' ||

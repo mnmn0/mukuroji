@@ -174,9 +174,6 @@ export function buildAuditProjectionWorker(
   realtimeSessionsTable.grants.readWriteData(collaborationProjectionFunction);
   workItemsTable.grants.readData(collaborationProjectionFunction);
   workspaceAccessTable.grants.readData(collaborationProjectionFunction);
-  input.workspaceSearchWriterFence.workspaceSearchTable.grantWriteData(
-    collaborationProjectionFunction,
-  );
   collaborationProjectionFunction.addToRolePolicy(
     new iam.PolicyStatement({
       actions: ['dynamodb:GetItem'],

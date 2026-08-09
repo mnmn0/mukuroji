@@ -230,7 +230,9 @@ describe('IssueCollaborationPanel', () => {
 
     expect(html).toContain('Accepted resolution')
     expect(html).toContain('空状態の表示条件を含めてモバイルとデスクトップで確認する。')
-    expect(html).toContain('<details class="group">')
+    expect(html).toContain(
+      'data-testid="comment-thread-details-comment-1"',
+    )
     expect(html).toContain('2 comments')
   })
 
@@ -427,7 +429,9 @@ describe('IssueCollaborationPanel', () => {
     expect(html).toContain(
       'You no longer have permission to save this context change.',
     )
-    expect(html).toMatch(/<button[^>]*disabled=""[^>]*type="submit"/)
+    expect(html).toMatch(
+      /data-testid="context-editor-submit"[^>]*disabled=""/,
+    )
   })
 
   test('never renders sensitive quote or permalink after source permission loss', () => {

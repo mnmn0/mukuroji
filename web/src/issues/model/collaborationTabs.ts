@@ -1,3 +1,5 @@
+import type { CuratedContextSourceKind } from '@mukuroji/contracts'
+
 /**
  * Tabs available in the issue collaboration panel, in keyboard-navigation order.
  */
@@ -12,6 +14,22 @@ export const issueCollaborationTabs = [
  * A tab available in the issue collaboration panel.
  */
 export type IssueCollaborationTab = (typeof issueCollaborationTabs)[number]
+
+/** Route-owned collaboration state shared by detail-pane boundaries. */
+export type IssueCollaborationRoute = {
+  /** Collaboration section selected by route state. */
+  collaborationTab?: IssueCollaborationTab
+  /** Curated context item selected by a deep link. */
+  focusedContextItemId?: string
+  /** Source provenance selected by a deep link. */
+  focusedSourceId?: string
+  /** Source category that disambiguates a source ID. */
+  focusedSourceKind?: CuratedContextSourceKind
+  /** Activity event selected by a deep link. */
+  focusedActivityEventId?: string
+  /** Persists collaboration tab selection in route state. */
+  onCollaborationTabChange?: (tab: IssueCollaborationTab) => void
+}
 
 /**
  * URL query keys that target content inside one collaboration panel.
@@ -46,6 +64,53 @@ export function readIssueCollaborationTab(
   value: string | null | undefined,
 ): IssueCollaborationTab {
   return issueCollaborationTabs.find((tab) => tab === value) ?? 'conversation'
+}
+
+/**
+ * Resolves the initial collaboration tab from route state and deep-link targets.
+ *
+ * @param input - Route values that may identify a collaboration destination.
+ * @returns The tab that should own the current route.
+ */
+export function resolveIssueCollaborationTab(input: {
+  requestedTab?: string | null
+  focusedContextItemId?: string
+  focusedSourceId?: string
+  focusedActivityEventId?: string
+}): IssueCollaborationTab {
+  if (input.requestedTab !== undefined && input.requestedTab !== null) {
+    return readIssueCollaborationTab(input.requestedTab)
+  }
+
+  if (input.focusedContextItemId) return 'decisions'
+  if (input.focusedSourceId) return 'sources'
+  if (input.focusedActivityEventId) return 'activity'
+  return 'conversation'
+}
+
+/**
+ * Applies a selected collaboration tab while clearing stale target parameters.
+ *
+ * @param searchParams - Current route query parameters.
+ * @param tab - Tab that should remain selected.
+ * @returns A new query parameter set with the tab state applied.
+ */
+export function applyIssueCollaborationTabToSearchParams(
+  searchParams: URLSearchParams,
+  tab: IssueCollaborationTab,
+): URLSearchParams {
+  const nextSearchParams = new URLSearchParams(searchParams)
+  if (tab === 'conversation') {
+    nextSearchParams.delete('collaborationTab')
+  } else {
+    nextSearchParams.set('collaborationTab', tab)
+  }
+
+  for (const key of getIssueCollaborationSearchParamsToClear(tab)) {
+    nextSearchParams.delete(key)
+  }
+
+  return nextSearchParams
 }
 
 /**

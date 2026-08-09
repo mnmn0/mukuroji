@@ -79,11 +79,7 @@ export function IssueSourcesTab({
     )
     const target = focusedSource
       ? document.getElementById(
-          createIssueSourceAnchorId({
-            contextItemId: focusedSource.item.id,
-            kind: focusedSource.source.kind,
-            sourceId: focusedSource.source.sourceId,
-          }),
+          createIssueSourceAnchorId(focusedSource.item.id),
         )
       : null
 
@@ -155,11 +151,7 @@ export function IssueSourcesTab({
             <li
               className="min-w-0 py-4 outline-none focus-visible:ring-2 focus-visible:ring-[var(--workbench-primary)] focus-visible:ring-offset-2"
               data-source-availability={source.availability}
-              id={createIssueSourceAnchorId({
-                contextItemId: item.id,
-                kind: source.kind,
-                sourceId: source.sourceId,
-              })}
+              id={createIssueSourceAnchorId(item.id)}
               key={item.id}
               tabIndex={-1}
             >
@@ -190,8 +182,9 @@ export function IssueSourcesTab({
                 </p>
               )}
               {!isSensitiveSourceRedacted(source) &&
-              source.quote?.startOffset !== undefined &&
-              source.quote.endOffset !== undefined ? (
+              source.quote &&
+              'startOffset' in source.quote &&
+              'endOffset' in source.quote ? (
                 <p className="mt-1 text-[0.68rem] font-medium text-[var(--workbench-muted-soft)]">
                   {t('collaboration.sources.range')
                     .replace('{start}', String(source.quote.startOffset))
@@ -239,7 +232,13 @@ export function IssueSourcesTab({
                   {t('collaboration.sources.revision')}
                 </dt>
                 <dd className="break-words text-[var(--workbench-text)]">
-                  {formatSourceRevision(source, t('collaboration.sources.unknown'))}
+                  {t('collaboration.sources.revisionValue').replace(
+                    '{revision}',
+                    formatSourceRevision(
+                      source,
+                      t('collaboration.sources.unknown'),
+                    ),
+                  )}
                 </dd>
                 <dt className="font-semibold text-[var(--workbench-muted)]">
                   {t('collaboration.sources.sourceId')}
@@ -261,6 +260,7 @@ export function IssueSourcesTab({
               ) : null}
 
               {!isSensitiveSourceRedacted(source) && source.permalink ? (
+                isNavigablePermalink(source.permalink) ? (
                 source.availability === 'available' ||
                 source.availability === 'edited' ? (
                   <a
@@ -280,6 +280,11 @@ export function IssueSourcesTab({
                       </span>
                     ) : null}
                   </a>
+                ) : (
+                  <p className="mt-3 break-all text-[0.68rem] font-medium text-[var(--workbench-muted)]">
+                    {t('collaboration.sources.retainedPermalink')}: {source.permalink}
+                  </p>
+                )
                 ) : (
                   <p className="mt-3 break-all text-[0.68rem] font-medium text-[var(--workbench-muted)]">
                     {t('collaboration.sources.retainedPermalink')}: {source.permalink}
@@ -330,6 +335,18 @@ export function IssueSourcesTab({
  */
 function isExternalPermalink(permalink: string): boolean {
   return /^https?:\/\//u.test(permalink)
+}
+
+/**
+ * Allows only provider links and routes that remain inside the current application origin.
+ *
+ * @param permalink - Retained provenance link supplied by the server.
+ * @returns Whether the value is safe to place in an anchor href.
+ */
+function isNavigablePermalink(permalink: string): boolean {
+  if (isExternalPermalink(permalink) || permalink.startsWith('?')) return true
+  if (permalink.startsWith('//')) return false
+  return permalink.startsWith('/') || permalink.startsWith('./') || permalink.startsWith('../')
 }
 
 /**
