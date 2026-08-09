@@ -449,6 +449,108 @@ test('denies a Team-qualified Planning Project notification for an inaccessible 
   })
 })
 
+test('denies a Team-scoped Initiative notification through a duplicate Project ID', async () => {
+  configureFakeProjectClients(true, {
+    workspaceRole: 'member',
+    projectAccesses: [{
+      teamId: 'core-team',
+      projectId: 'shared-launch',
+      role: 'viewer',
+    }],
+    teamProjects: [{ id: 'shared-launch', name: 'Shared launch', tone: 'green' }],
+    additionalTeams: [{
+      id: 'design-team',
+      name: 'Design Team',
+      projects: [{ id: 'shared-launch', name: 'Shared launch', tone: 'green' }],
+    }],
+  })
+  const planning = getTestAppDependencies().workItems.planning
+  const workspaceId = 'user#demo@example.com'
+  let revision = 0
+  for (const teamId of ['core-team', 'design-team']) {
+    await planning.create(workspaceId, {
+      ...createCyclePlanningInput(`${teamId}-portfolio`, revision),
+      type: 'portfolio',
+      teamId,
+      projectId: undefined,
+      cadence: undefined,
+      capacity: undefined,
+      carryOverPolicy: undefined,
+    }, { workItems: [] })
+    revision += 1
+    await planning.create(workspaceId, {
+      ...createCyclePlanningInput(`${teamId}-roadmap`, revision),
+      type: 'roadmap',
+      parentId: `${teamId}-portfolio`,
+      teamId,
+      projectId: undefined,
+      cadence: undefined,
+      capacity: undefined,
+      carryOverPolicy: undefined,
+    }, { workItems: [] })
+    revision += 1
+    await planning.create(workspaceId, {
+      ...createCyclePlanningInput(`${teamId}-initiative`, revision),
+      type: 'initiative',
+      parentId: `${teamId}-roadmap`,
+      teamId,
+      projectId: undefined,
+      cadence: undefined,
+      capacity: undefined,
+      carryOverPolicy: undefined,
+    }, { workItems: [] })
+    revision += 1
+  }
+  const nextDueAt = '2026-08-10T00:00:00.000Z'
+  for (const teamId of ['core-team', 'design-team']) {
+    await planning.configureUpdateCadence(workspaceId, {
+      target: { type: 'initiative', entityId: `${teamId}-initiative` },
+      cadence: {
+        updateOwnerMemberKey: 'demo@example.com',
+        cadence: { unit: 'week', count: 1 },
+        timeZone: 'UTC',
+        nextDueAt,
+        reminderHoursBefore: 24,
+      },
+      expectedRevision: revision,
+    }, { workItems: [] })
+    revision += 1
+  }
+  const coreNotification = createNotificationItem({
+    id: 'planning-team-initiative-core',
+    eventType: 'planning-update.overdue',
+    reasons: ['overdue'],
+    issueId: undefined,
+    projectId: undefined,
+    planningTargetType: 'initiative',
+    planningTargetId: 'core-team-initiative',
+    planningTargetRecordKey: 'UPDATE_TARGET#INITIATIVE#core-team-initiative',
+    planningNextDueAt: nextDueAt,
+    planningNotificationKind: 'overdue',
+  })
+  const designNotification = createNotificationItem({
+    ...coreNotification,
+    id: 'planning-team-initiative-design',
+    teamId: 'design-team',
+    planningTargetId: 'design-team-initiative',
+    planningTargetRecordKey: 'UPDATE_TARGET#INITIATIVE#design-team-initiative',
+  })
+  const probe = createNotificationVisibilityProbe([coreNotification, designNotification])
+  setTestAppDependencies({ notifications: probe.client })
+
+  const response = await app.request('/api/notifications', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(probe.visibility.get(coreNotification.id)).toBe(true)
+  expect(probe.visibility.get(designNotification.id)).toBe(false)
+  expect(await response.json()).toMatchObject({
+    notifications: [{ id: coreNotification.id }],
+    unreadCount: 1,
+  })
+})
+
 test('shows Planning notifications only for the current qualified target watcher', async () => {
   configureFakeProjectClients(true, {
     workspaceRole: 'member',

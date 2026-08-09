@@ -19505,8 +19505,10 @@ async function createNotificationVisibilityFilter(
       .map((access) => access.projectId),
   )
   const accessibleProjectScopeKeys = new Set<string>()
+  const accessiblePlanningTeamIds = new Set<string>()
   if (principal.isSystemAdmin) {
     for (const team of directory.teams) {
+      accessiblePlanningTeamIds.add(team.id)
       for (const project of team.projects) {
         accessibleProjectScopeKeys.add(`${team.id}\0${project.id}`)
       }
@@ -19519,6 +19521,7 @@ async function createNotificationVisibilityFilter(
       if (access.teamId) {
         if (ownerTeamIds.has(access.teamId)) {
           accessibleProjectScopeKeys.add(`${access.teamId}\0${access.projectId}`)
+          accessiblePlanningTeamIds.add(access.teamId)
         }
         continue
       }
@@ -19526,8 +19529,12 @@ async function createNotificationVisibilityFilter(
         const ownerTeamId = ownerTeamIds.values().next().value
         if (ownerTeamId) {
           accessibleProjectScopeKeys.add(`${ownerTeamId}\0${access.projectId}`)
+          accessiblePlanningTeamIds.add(ownerTeamId)
         }
       }
+    }
+    for (const teamId of principal.enterpriseAuthorizedTeamIds ?? []) {
+      if (activeTeamIds.has(teamId)) accessiblePlanningTeamIds.add(teamId)
     }
   }
   const accessibleTeamIds = principal.isSystemAdmin
@@ -19587,6 +19594,13 @@ async function createNotificationVisibilityFilter(
             `${currentPlanningScope.teamId}\0${currentPlanningScope.projectId}`,
           )
         )
+      ) {
+        return false
+      }
+      if (
+        currentPlanningScope.teamId &&
+        !currentPlanningScope.projectId &&
+        !accessiblePlanningTeamIds.has(currentPlanningScope.teamId)
       ) {
         return false
       }
