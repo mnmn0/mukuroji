@@ -3094,7 +3094,7 @@ test.describe('authenticated task page', () => {
 
     await expect(boardTab).toBeFocused()
     await expect(boardTab).toHaveAttribute('aria-selected', 'true')
-    await expect(page.getByRole('tabpanel')).toContainText('ボードビュー')
+    await expect(page.getByRole('tabpanel', { name: 'ボード' })).toContainText('ボードビュー')
   })
 
   test('Issue #190: Planning 障害でも Task を表示し dependency だけ再試行する', async ({ page }) => {
@@ -4522,7 +4522,11 @@ test.describe('authenticated task page', () => {
     await expect(
       page.getByTestId('comment-thread-comment-2').getByText('プロジェクト側で着手します。'),
     ).toBeVisible()
-    await expect(page.getByText('Demo User がコメントしました。')).toBeVisible()
+    const collaborationPanel = page.getByTestId('issue-collaboration-panel')
+    await collaborationPanel.getByRole('tab', { name: '活動' }).click()
+    await expect(collaborationPanel.getByRole('tabpanel', { name: '活動' })).toContainText(
+      'Demo User がコメントしました。',
+    )
     expect(requestCounts.issueComments).toBe(1)
 
     await page.goto('/projects/refero/issues?teamId=core-team')

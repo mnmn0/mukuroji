@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { IssueCollaborationPanel } from '../src/issues/ui/IssueCollaborationPanel'
+import { IssueActivityTab } from '../src/issues/ui/IssueActivityTab'
 import { mergeIssueComments } from '../src/issues/mutations/useIssueCollaboration'
 import {
   acceptedResolutionHistoryFixtures,
@@ -11,6 +12,35 @@ import {
 import { fileArtifactsControllerFixture, imageFileFixture } from '../src/files/fixtures'
 
 describe('IssueCollaborationPanel', () => {
+  test('localizes curated context activity event families', () => {
+    const html = renderToStaticMarkup(
+      <IssueActivityTab
+        controller={{
+          ...issueCollaborationControllerFixture,
+          activity: [
+            {
+              eventId: 'event-context-created',
+              eventType: 'context-item.created',
+              occurredAt: '2026-06-08T01:00:00.000Z',
+              actorUserId: 'demo@example.com',
+            },
+            {
+              eventId: 'event-resolution-selected',
+              eventType: 'accepted-resolution.selected',
+              occurredAt: '2026-06-08T01:05:00.000Z',
+              actorUserId: 'demo@example.com',
+            },
+          ],
+        }}
+        locale="ja"
+        members={collaborationWorkspaceMemberFixtures}
+      />,
+    )
+
+    expect(html).toContain('Demo User が整理済みの判断を作成しました。')
+    expect(html).toContain('Demo User が解決策を採用しました。')
+  })
+
   test('does not let a later legacy page replace a persisted comment with the same ID', () => {
     const persisted = issueCollaborationControllerFixture.comments[0]
     const merged = mergeIssueComments([

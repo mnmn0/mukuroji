@@ -5,6 +5,7 @@ import {
   type DynamoDBClient,
 } from '@aws-sdk/client-dynamodb'
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
+import { COLLABORATION_CONTEXT_SCHEMA_VERSION } from '@mukuroji/contracts'
 import {
   DynamoDbWorkspaceSearchClient,
   WorkspaceSearchError,
@@ -480,6 +481,67 @@ test('applies current resolved scope before RBAC and composite project filters',
   expect(response.results[0]?.highlights).toEqual(expect.arrayContaining([
     expect.objectContaining({ field: 'body' }),
   ]))
+})
+
+test('does not authorize a context item from its stale indexed project scope', async () => {
+  const contextItem = createCuratedContextItemWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    item: {
+      schemaVersion: COLLABORATION_CONTEXT_SCHEMA_VERSION,
+      id: 'context-1',
+      teamId: 'core',
+      workItemId: 'issue-1',
+      kind: 'decision',
+      title: 'Release decision',
+      body: 'Move the release to Friday.',
+      state: 'active',
+      createdAt: '2026-07-20T00:00:00.000Z',
+      updatedAt: '2026-07-20T00:00:00.000Z',
+      createdBy: { id: 'creator@example.com', displayName: 'Creator' },
+      updatedBy: { id: 'creator@example.com', displayName: 'Creator' },
+      mentionMemberKeys: [],
+      revision: 1,
+    },
+    projectId: 'project-a',
+  })
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([contextItem]),
+    {} as DynamoDBClient,
+    false,
+  )
+  const resolveCurrentScope = async () => ({
+    teamId: 'core',
+    projectId: 'project-b',
+    currentDocument: {
+      ...contextItem,
+      projectId: 'project-b',
+    },
+  })
+
+  const projectAResponse = await client.search({
+    workspaceId: 'workspace-1',
+    access: {
+      viewerUserId: 'project-a-viewer@example.com',
+      isSystemAdmin: false,
+      projectIds: new Set(['project-a']),
+      teamIds: new Set(['core']),
+    },
+    resolveCurrentScope,
+  })
+  const projectBResponse = await client.search({
+    workspaceId: 'workspace-1',
+    access: {
+      viewerUserId: 'project-b-viewer@example.com',
+      isSystemAdmin: false,
+      projectIds: new Set(['project-b']),
+      teamIds: new Set(['core']),
+    },
+    resolveCurrentScope,
+  })
+
+  expect(projectAResponse.results).toHaveLength(0)
+  expect(projectBResponse.results.map(({ id }) => id)).toEqual([contextItem.entityId])
 })
 
 test('requires a source-of-truth permission decision for Workspace-scoped documents', async () => {

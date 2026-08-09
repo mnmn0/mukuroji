@@ -356,9 +356,9 @@ export function IssueConversationTab({
             )
             const canManageAcceptedResolution =
               Boolean(onSetAcceptedResolution) &&
-              controller.capabilities.canComment &&
               (canAcceptResolution ||
-                (currentMemberKey !== undefined &&
+                (controller.capabilities.canComment &&
+                  currentMemberKey !== undefined &&
                   thread.root.authorMemberKey === currentMemberKey))
 
             return (

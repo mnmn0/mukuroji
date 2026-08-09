@@ -273,8 +273,6 @@ export function useIssueContext({
 
       try {
         await mutationRunner.run(operationKey, fingerprint, request)
-        await refresh()
-        return true
       } catch (mutationError) {
         console.error('Issue context mutation failed:', mutationError)
         const status =
@@ -285,6 +283,17 @@ export function useIssueContext({
         if (status === 409) await refresh().catch(() => undefined)
         return false
       }
+
+      // The mutation has committed at this point. A transient revalidation
+      // failure must not turn a successful request into a retryable failure:
+      // the runner has already consumed the idempotency context and retrying
+      // could create a duplicate or conflict with the committed revision.
+      try {
+        await refresh()
+      } catch (refreshError) {
+        console.error('Issue context revalidation failed:', refreshError)
+      }
+      return true
     },
     [mutationRunner, refresh, scope],
   )

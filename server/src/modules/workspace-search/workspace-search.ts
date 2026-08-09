@@ -1048,11 +1048,10 @@ export class DynamoDbWorkspaceSearchClient {
                   ...(storedDocument.projectId ? { projectId: storedDocument.projectId } : {}),
                 }
             if (!resolvedScope) return undefined
-            const document = {
-              ...(resolvedScope.currentDocument ?? storedDocument),
-              teamId: resolvedScope.teamId,
-              projectId: resolvedScope.projectId,
-            }
+            const document = applyResolvedWorkspaceSearchScope(
+              resolvedScope.currentDocument ?? storedDocument,
+              resolvedScope,
+            )
             return canAccessWorkspaceSearchDocument(
               document,
               input.access,
@@ -1808,6 +1807,31 @@ function canAccessWorkspaceSearchDocument(
   if (document.projectId) return access.projectIds.has(document.projectId)
   if (document.teamId) return access.teamIds.has(document.teamId)
   return false
+}
+
+/**
+ * Replaces indexed Team/Project ownership with the source-of-truth scope.
+ *
+ * @param document - Current or indexed search document to scope.
+ * @param resolvedScope - Scope resolved from the canonical Work Item.
+ * @returns A document whose ownership fields cannot retain stale index values.
+ */
+function applyResolvedWorkspaceSearchScope(
+  document: WorkspaceSearchDocument,
+  resolvedScope: WorkspaceSearchResolvedScope,
+): WorkspaceSearchDocument {
+  const scopedDocument = { ...document }
+  if (resolvedScope.teamId) {
+    scopedDocument.teamId = resolvedScope.teamId
+  } else {
+    delete scopedDocument.teamId
+  }
+  if (resolvedScope.projectId) {
+    scopedDocument.projectId = resolvedScope.projectId
+  } else {
+    delete scopedDocument.projectId
+  }
+  return scopedDocument
 }
 
 function toWorkspaceSearchResult(
