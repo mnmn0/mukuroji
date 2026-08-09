@@ -25,6 +25,10 @@ import {
   updateBulkItemSelection,
   type BulkOperationSelection,
 } from '../../bulk-operations/model/bulkOperation'
+import {
+  createBulkOperationTaskActionResult,
+  createBulkPreviewTaskActionResult,
+} from '../../bulk-operations/model/bulkOperationTaskAction'
 import { RelatedDocuments } from '../../documents/ui/RelatedDocuments'
 import type { FileArtifactsController } from '../../files/mutations/useFileArtifacts'
 import type { IssueCollaborationController } from '../../issues/mutations/useIssueCollaboration'
@@ -44,6 +48,7 @@ import type { WorkspaceMember } from '../../workspace/api'
 import { useModalFocus } from '../../shared/ui/useModalFocus'
 import { useWorkspaceSidebarController } from '../../shared/ui/sidebar'
 import type { WorkItemDefinitionFilter } from '../../work-items/model/workItemFilters'
+import { WorkItemConfigurationApiError } from '../../work-items/api'
 import { resolveWorkItemPersonOptions } from '../../work-items/model/workItemDisplay'
 import type { WorkItemRelationEditorInput } from '../../work-items/ui/WorkItemRelationsEditor'
 import type { WorkItemDependencyCreateDraft } from '../../work-items/model/workItemDependencies'
@@ -61,12 +66,22 @@ import type { TaskViewPresentationSettings } from '../../task-views/model/taskVi
 import {
   allowTaskAction,
   createFailedTaskActionResult,
+  createFailedTaskActionResults,
+  createSucceededTaskCreateActionResult,
   createSucceededTaskActionResult,
-  createSucceededTaskActionResults,
+  createSucceededTaskActionMutationResult,
   denyTaskAction,
   resolveTaskActionExecutionFailureMessage,
   type TaskActionExecutionResult,
 } from '../../task-views/model/taskActionRegistry'
+import {
+  cancelPendingTaskActionContext,
+  canDismissCompletedTaskActionOwner,
+  createTaskActionCompletionBridge,
+  isPendingTaskActionFocusCurrent,
+  isPendingTaskActionExplicitSelectionCurrent,
+  resolvePendingTaskActionContext,
+} from '../../task-views/model/taskActionCompletion'
 import type { TaskActionContextMenuAnchorPoint } from '../../task-views/model/taskActionContextMenu'
 import {
   resolveProjectTaskActionTarget,
@@ -83,7 +98,10 @@ import {
   createTaskSurfaceKeyboardInput,
   formatTaskSurfaceKeyboardShortcut,
 } from '../../task-views/ui/taskSurfaceKeyboard'
-import type { BulkOperationTaskActionRequest } from '../../bulk-operations/ui/BulkOperationToolbar'
+import type {
+  BulkOperationTaskActionInterruption,
+  BulkOperationTaskActionRequest,
+} from '../../bulk-operations/ui/BulkOperationToolbar'
 import type { CreateProjectTaskInput, ProjectTask } from '../api/tasks'
 import {
   createBulkOperationSelection,
@@ -145,6 +163,8 @@ type TaskUndoState = {
   inversePatch: UpdateTeamIssueInput
   /** Patch that reapplies the successful update after an undo. */
   forwardPatch: UpdateTeamIssueInput
+  /** Opaque token returned by the canonical action result and consumed by this undo state. */
+  undoToken: string
 }
 
 /** Most recently undone task update retained for redo. */
@@ -181,8 +201,18 @@ type TaskUpdateResult = {
   task: ProjectTask
 }
 
+/** Persisted Project Create outcome returned by the route-level mutation. */
+type CreatedProjectTaskMutation = {
+  /** Canonical Work Item created by persistence. */
+  task: ProjectTask
+  /** Application-relative route opened after creation, including retained view state. */
+  navigationPath: string
+}
+
 /** One revision-bound schedule update waiting for explicit user confirmation. */
 type PendingTaskScheduleUpdate = {
+  /** Exact canonical Schedule invocation that owns this preview, when registry-initiated. */
+  actionContext?: WorkItemActionContext
   /** Original schedule operation confirmed against the preview's graph revisions. */
   operation: WorkItemScheduleOperation
   /** Server-owned direct and dependency impacts shown before applying. */
@@ -324,7 +354,7 @@ export type TaskScreenProps = {
     teamId: string,
     issueId: string,
     input: UpdateTeamIssueInput,
-  ) => Promise<void>
+  ) => Promise<ProjectTask | void>
   /** Updates any visible Work Item through the shared optimistic action. */
   onUpdateTask?: (
     task: ProjectTask,
@@ -355,7 +385,10 @@ export type TaskScreenProps = {
   /** Deletes a relation from the selected Work Item. */
   onDeleteRelation?: (issueId: string, relation: WorkItemRelation) => Promise<void>
   /** Creates a Project task from a view-aware inline form. */
-  onCreateTask?: (input: CreateProjectTaskInput, context?: TaskCreateContext) => Promise<void>
+  onCreateTask?: (
+    input: CreateProjectTaskInput,
+    context?: TaskCreateContext,
+  ) => Promise<CreatedProjectTaskMutation | void>
   /** Loads the next page of Project user candidates. */
   onLoadMoreProjectUsers?: () => Promise<void>
   /** Changes the Project user search query. */
@@ -501,6 +534,7 @@ export function TaskScreen({
   const [taskActionContextMenuState, setTaskActionContextMenuState] = useState<
     TaskActionContextMenuState
   >()
+  const [taskActionCompletion] = useState(createTaskActionCompletionBridge)
   const [taskUndo, setTaskUndo] = useState<TaskUndoState>()
   const [taskRedo, setTaskRedo] = useState<TaskRedoState>()
   const [isRestoringTask, setIsRestoringTask] = useState(false)
@@ -508,14 +542,20 @@ export function TaskScreen({
   const [isApplyingScheduleUpdate, setIsApplyingScheduleUpdate] = useState(false)
   const nextSchedulePreviewSequenceRef = useRef(0)
   const nextBulkTaskActionRequestIdRef = useRef(0)
+  const nextBulkTaskActionEpochRef = useRef(0)
+  const bulkTaskActionContextsRef = useRef(new Map<number, WorkItemActionContext>())
   const scheduleUpdateChainRef = useRef<Promise<void>>(Promise.resolve())
   const detailScrollTopRef = useRef(0)
   const taskContentRef = useRef<HTMLDivElement>(null)
+  const pendingCreateTaskContextRef = useRef<TaskCreateContext | undefined>(undefined)
   const onSelectedIssueChangeRef = useRef(onSelectedIssueChange)
 
   useEffect(() => {
     onSelectedIssueChangeRef.current = onSelectedIssueChange
   }, [onSelectedIssueChange])
+  useEffect(() => () => {
+    taskActionCompletion.cancel()
+  }, [taskActionCompletion])
 
   const activeTab = localActiveTab === 'file' || localActiveTab === 'permissions'
     ? localActiveTab
@@ -703,6 +743,17 @@ export function TaskScreen({
   }), [selectedBulkItems, taskActionSelection.anchorTarget, taskActionSelection.focusedTarget])
 
   useEffect(() => {
+    const pendingContext = taskActionCompletion.current()
+    if (!pendingContext || pendingContext.actionId === 'create') return
+    const isCurrent = isBulkTaskActionId(pendingContext.actionId)
+      ? isPendingTaskActionExplicitSelectionCurrent(pendingContext, bulkTaskActionSelection)
+      : isPendingTaskActionFocusCurrent(pendingContext, taskActionSelection)
+    if (!isCurrent) {
+      taskActionCompletion.cancel(pendingContext.actionId)
+    }
+  }, [bulkTaskActionSelection, taskActionCompletion, taskActionSelection])
+
+  useEffect(() => {
     const visibleKeySet = new Set(visibleTaskViewKeys)
     queueMicrotask(() => {
       setBulkSelection((currentSelection) => {
@@ -804,8 +855,17 @@ export function TaskScreen({
     })
   }
 
-  /** Selects a task locally or delegates route-controlled selection to the caller. */
-  const handleSelectDetailTask = useCallback((task: ProjectTask) => {
+  /**
+   * Selects a task locally or delegates route-controlled selection to the caller.
+   *
+   * @param task - Task that becomes the focused detail owner.
+   * @param preservePendingAction - Whether an accepted action already owns this exact selection.
+   */
+  const handleSelectDetailTask = useCallback((
+    task: ProjectTask,
+    preservePendingAction = false,
+  ) => {
+    if (!preservePendingAction) taskActionCompletion.cancel()
     setTaskViewSelection((currentSelection) => reduceTaskViewSelection(currentSelection, {
       key: createTaskViewItemKey(task.teamId, task.id),
       type: 'focus',
@@ -820,16 +880,42 @@ export function TaskScreen({
     if (scrollTop !== 0) {
       requestAnimationFrame(() => taskContentRef.current?.scrollTo({ top: scrollTop }))
     }
+  }, [taskActionCompletion])
+
+  /** Dismisses a superseded create editor without completing another invocation. */
+  const dismissCreateTaskEditor = useCallback(() => {
+    setCreateTaskError(undefined)
+    setCreateTaskContext(undefined)
+    setIsCreateTaskOpen(false)
+  }, [])
+
+  /**
+   * Dismisses a superseded detail editor and any preview owned by its exact invocation.
+   *
+   * @param context - Exact awaiting action whose editor no longer owns user input.
+   */
+  const dismissTaskDetailEditor = useCallback((context: WorkItemActionContext) => {
+    setIsDetailOpen(false)
+    setScheduleUpdateQueue((current) => {
+      const cancelled = current.filter((candidate) => candidate.actionContext === context)
+      for (const candidate of cancelled) {
+        candidate.resolve({ applied: false, task: candidate.task })
+      }
+      return cancelled.length === 0
+        ? current
+        : current.filter((candidate) => candidate.actionContext !== context)
+    })
   }, [])
 
   /** Closes the detail pane without losing the current list position. */
   const handleCloseDetail = () => {
+    taskActionCompletion.cancel()
     detailScrollTopRef.current = taskContentRef.current?.scrollTop ?? 0
     setIsDetailOpen(false)
   }
 
-  /** Opens the shared create panel with context inherited from a task view. */
-  const handleCreateTaskOpen = useCallback((context?: TaskCreateContext) => {
+  /** Opens the shared create panel without cancelling its newly accepted invocation. */
+  const showCreateTaskEditor = useCallback((context?: TaskCreateContext) => {
     const defaultTeamId = activeProjectTeamId ?? teams.find((team) =>
       team.projects.some((project) => project.id === projectId),
     )?.id
@@ -868,6 +954,7 @@ export function TaskScreen({
         forwardPatch: input,
         inversePatch: createTaskInversePatch(task, input),
         task: updatedTask,
+        undoToken: createTaskUpdateUndoToken(updatedTask),
       })
       setTaskRedo(undefined)
       setTaskAction({
@@ -897,11 +984,13 @@ export function TaskScreen({
    *
    * @param task - Revision-bound Work Item snapshot being changed.
    * @param input - Complete update patch, including a replacement schedule when applicable.
+   * @param actionContext - Exact canonical Schedule invocation that owns this preview.
    * @returns Whether persistence ran and the resulting or unchanged task snapshot.
    */
   const performTaskUpdate = async (
     task: ProjectTask,
     input: UpdateTeamIssueInput,
+    actionContext?: WorkItemActionContext,
   ): Promise<TaskUpdateResult> => {
     if (!input.schedule) {
       return {
@@ -930,9 +1019,13 @@ export function TaskScreen({
         if (!schedule) {
           throw new Error('Schedule preview did not contain the target Work Item.')
         }
+        if (actionContext && taskActionCompletion.current() !== actionContext) {
+          return { applied: false, task }
+        }
 
         return await new Promise<TaskUpdateResult>((resolve, reject) => {
           setScheduleUpdateQueue((current) => [...current, {
+            ...(actionContext !== undefined ? { actionContext } : {}),
             operation,
             preview,
             reject,
@@ -976,6 +1069,8 @@ export function TaskScreen({
       return
     }
 
+    const pendingActionContext = pendingScheduleUpdate.actionContext
+    if (pendingActionContext && !taskActionCompletion.claim(pendingActionContext)) return
     setIsApplyingScheduleUpdate(true)
     try {
       const confirmedTask = await onConfirmScheduleChange?.(
@@ -984,7 +1079,21 @@ export function TaskScreen({
         pendingScheduleUpdate.preview,
       )
       if (!confirmedTask) throw new Error(t('tasks.action.updateError'))
-      setTaskUndo(undefined)
+      const directImpact = pendingScheduleUpdate.preview.impacts.find((impact) =>
+        impact.kind === 'direct' &&
+        impact.teamId === pendingScheduleUpdate.task.teamId &&
+        impact.workItemId === pendingScheduleUpdate.task.id
+      )
+      if (directImpact) {
+        setTaskUndo({
+          forwardPatch: { schedule: structuredClone(directImpact.after) },
+          inversePatch: { schedule: structuredClone(directImpact.before) },
+          task: confirmedTask,
+          undoToken: createTaskUpdateUndoToken(confirmedTask),
+        })
+      } else {
+        setTaskUndo(undefined)
+      }
       setTaskRedo(undefined)
       setTaskAction({ kind: 'success', message: t('tasks.action.saved') })
       pendingScheduleUpdate.resolve({ applied: true, task: confirmedTask })
@@ -1002,6 +1111,9 @@ export function TaskScreen({
   const handleCancelScheduleUpdate = () => {
     if (!pendingScheduleUpdate || isApplyingScheduleUpdate) {
       return
+    }
+    if (pendingScheduleUpdate.actionContext) {
+      taskActionCompletion.cancelContext(pendingScheduleUpdate.actionContext)
     }
     pendingScheduleUpdate.resolve({ applied: false, task: pendingScheduleUpdate.task })
     setScheduleUpdateQueue((current) => current.filter(
@@ -1039,6 +1151,7 @@ export function TaskScreen({
           forwardPatch: { schedule: structuredClone(directImpact.after) },
           inversePatch: { schedule: structuredClone(directImpact.before) },
           task: updatedTask,
+          undoToken: createTaskUpdateUndoToken(updatedTask),
         })
         setTaskRedo(undefined)
       }
@@ -1059,7 +1172,12 @@ export function TaskScreen({
 
   /** Reverses the most recent successful inline task update. */
   const handleUndoTask = async () => {
-    if (!taskUndo || !onUpdateTask || isRestoringTask) {
+    if (
+      !taskUndo ||
+      !onUpdateTask ||
+      isRestoringTask ||
+      !isTaskUpdateUndoTokenForTask(taskUndo.undoToken, taskUndo.task)
+    ) {
       return
     }
 
@@ -1113,6 +1231,7 @@ export function TaskScreen({
         forwardPatch: taskRedo.forwardPatch,
         inversePatch: createTaskInversePatch(taskRedo.task, taskRedo.forwardPatch),
         task: result.task,
+        undoToken: createTaskUpdateUndoToken(result.task),
       })
       setTaskRedo(undefined)
       setTaskAction({ kind: 'success', message: t('tasks.action.saved') })
@@ -1138,17 +1257,92 @@ export function TaskScreen({
         issueId: string,
         input: UpdateTeamIssueInput,
       ): Promise<void> => {
-        if (input.schedule && onUpdateTask) {
-          await handleUpdateTask(detailTask, input)
-          return
+        const pendingCandidate = resolvePendingTaskActionContext(
+          taskActionCompletion,
+          ['edit', 'relation', 'schedule'],
+          { teamId, workItemId: issueId },
+        )
+        const pendingContext = pendingCandidate && (
+          (pendingCandidate.actionId === 'schedule' && input.schedule !== undefined) ||
+          (pendingCandidate.actionId === 'edit' && input.schedule === undefined)
+        )
+          ? pendingCandidate
+          : undefined
+        if (pendingCandidate && !pendingContext) {
+          taskActionCompletion.cancelContext(pendingCandidate)
         }
-        if (onUpdateIssue) {
-          await onUpdateIssue(teamId, issueId, input)
-          return
+        const target = pendingContext
+          ? resolveProjectTaskActionTarget(pendingContext)
+          : undefined
+        const claimedContext = pendingContext && !input.schedule && target &&
+            taskActionCompletion.claim(pendingContext)
+          ? pendingContext
+          : input.schedule
+            ? pendingContext
+            : undefined
+
+        try {
+          let updatedTask: ProjectTask | undefined
+          if (input.schedule && onUpdateTask) {
+            const result = await performTaskUpdate(detailTask, input, pendingContext)
+            if (!result.applied) {
+              if (pendingContext) taskActionCompletion.cancelContext(pendingContext)
+              return
+            }
+            updatedTask = result.task
+          } else if (onUpdateIssue) {
+            const result = await onUpdateIssue(teamId, issueId, input)
+            if (result) {
+              updatedTask = result
+              setTaskUndo({
+                forwardPatch: input,
+                inversePatch: createTaskInversePatch(detailTask, input),
+                task: result,
+                undoToken: createTaskUpdateUndoToken(result),
+              })
+              setTaskRedo(undefined)
+              setTaskAction({ kind: 'success', message: t('tasks.action.saved') })
+            }
+          } else {
+            updatedTask = await handleUpdateTask(detailTask, input)
+          }
+          if (claimedContext && target) {
+            taskActionCompletion.settle(claimedContext, createSucceededTaskActionMutationResult(
+              claimedContext.actionId,
+              target,
+              updatedTask?.revision,
+              updatedTask ? createTaskUpdateUndoToken(updatedTask) : undefined,
+            ))
+          }
+        } catch (error) {
+          if (claimedContext) {
+            const isConflict = isTaskRevisionConflict(error)
+            const canDismissOwner = canDismissCompletedTaskActionOwner(
+              taskActionCompletion,
+              claimedContext,
+            )
+            taskActionCompletion.settle(claimedContext, createFailedTaskActionResult(
+              claimedContext.actionId,
+              target,
+              isConflict ? 'WorkItemRevisionConflict' : 'ProjectTaskActionMutationFailed',
+              isConflict ? 'conflict' : 'unknown',
+              resolveTaskMutationErrorMessage(error, t),
+              isConflict,
+            ))
+            if (canDismissOwner) dismissTaskDetailEditor(claimedContext)
+          }
+          throw error
         }
-        await handleUpdateTask(detailTask, input)
       }
-    : onUpdateIssue
+    : undefined
+  /** Cancels an accepted Schedule action when explicit save detects no mutation. */
+  const handleProjectScheduleNoChange = useCallback((teamId: string, issueId: string) => {
+    cancelPendingTaskActionContext(
+      taskActionCompletion,
+      ['schedule'],
+      { teamId, workItemId: issueId },
+    )
+  }, [taskActionCompletion])
   const bulkTaskActionsAvailable = Boolean(
     workspaceId && onBulkPreview && onBulkApply,
   )
@@ -1180,7 +1374,8 @@ export function TaskScreen({
   const executeTaskDetailAction = useCallback((
     context: WorkItemActionContext,
     controlSelector?: string,
-  ): WorkItemActionResult => {
+    waitForMutation = false,
+  ): Promise<WorkItemActionResult> | WorkItemActionResult => {
     const target = resolveProjectTaskActionTarget(context)
     const task = target
       ? tasks.find((candidate) =>
@@ -1197,10 +1392,17 @@ export function TaskScreen({
       )
     }
 
-    handleSelectDetailTask(task)
+    const completion = waitForMutation
+      ? taskActionCompletion.begin(
+          context,
+          dismissTaskDetailEditor,
+        )
+      : undefined
+    if (!completion) taskActionCompletion.cancel()
+    handleSelectDetailTask(task, true)
     if (controlSelector) focusTaskDetailControl(controlSelector)
-    return createSucceededTaskActionResult(context.actionId, target)
-  }, [handleSelectDetailTask, t, tasks])
+    return completion ?? createSucceededTaskActionResult(context.actionId, target)
+  }, [dismissTaskDetailEditor, handleSelectDetailTask, t, taskActionCompletion, tasks])
 
   const currentTaskActionTarget = taskActionSelection.targets.length === 1
     ? taskActionSelection.targets[0]
@@ -1236,10 +1438,20 @@ export function TaskScreen({
     visibleTasks,
   ])
 
+  /** Resets the bulk editor owned by one terminal or superseded canonical request. */
+  const dismissBulkTaskActionEditor = useCallback((requestId: number) => {
+    bulkTaskActionContextsRef.current.delete(requestId)
+    setBulkTaskActionRequest((current) =>
+      current?.requestId === requestId ? undefined : current
+    )
+    nextBulkTaskActionEpochRef.current += 1
+    setBulkTaskActionEpoch(nextBulkTaskActionEpochRef.current)
+  }, [])
+
   /** Reveals a parameterized bulk-operation entrance after registry checks succeed. */
   const executeBulkTaskActionEntrance = useCallback((
     context: WorkItemActionContext,
-  ): WorkItemActionResult => {
+  ): Promise<WorkItemActionResult> | WorkItemActionResult => {
     if (!isBulkTaskActionId(context.actionId)) {
       return createFailedTaskActionResult(
         context.actionId,
@@ -1262,17 +1474,32 @@ export function TaskScreen({
     })
     setBulkSelection({ items: requestedItems, projectId })
     nextBulkTaskActionRequestIdRef.current += 1
-    setBulkTaskActionEpoch(nextBulkTaskActionRequestIdRef.current)
-    setBulkTaskActionRequest({
+    const request: BulkOperationTaskActionRequest = {
       actionId: context.actionId,
       projectId,
       requestId: nextBulkTaskActionRequestIdRef.current,
+    }
+    const completion = taskActionCompletion.begin(context, () => {
+      dismissBulkTaskActionEditor(request.requestId)
     })
-    return createSucceededTaskActionResults(context.actionId, targets)
+    const invocationContext = taskActionCompletion.current()
+    if (invocationContext) {
+      bulkTaskActionContextsRef.current.set(request.requestId, invocationContext)
+    }
+    nextBulkTaskActionEpochRef.current += 1
+    setBulkTaskActionEpoch(nextBulkTaskActionEpochRef.current)
+    setBulkTaskActionRequest(request)
+    void completion.then(
+      () => bulkTaskActionContextsRef.current.delete(request.requestId),
+      () => bulkTaskActionContextsRef.current.delete(request.requestId),
+    )
+    return completion
   }, [
+    dismissBulkTaskActionEditor,
     projectId,
     projectTaskActionDisabledReasons.unavailable,
     t,
+    taskActionCompletion,
     visibleTasks,
   ])
 
@@ -1283,22 +1510,87 @@ export function TaskScreen({
     )
   }, [])
 
+  /** Claims one exact toolbar request immediately before its irreversible apply dispatch. */
+  const handleBulkTaskActionMutationStart = useCallback((
+    request: BulkOperationTaskActionRequest,
+  ): boolean => {
+    const context = bulkTaskActionContextsRef.current.get(request.requestId)
+    return Boolean(
+      context &&
+      context.actionId === request.actionId &&
+      taskActionCompletion.claim(context)
+    )
+  }, [taskActionCompletion])
+
+  /** Returns one applied durable operation to the exact invocation that started it. */
+  const handleBulkTaskActionOperationComplete = useCallback((
+    request: BulkOperationTaskActionRequest,
+    operation: BulkOperation,
+  ) => {
+    const context = bulkTaskActionContextsRef.current.get(request.requestId)
+    if (!context || context.actionId !== request.actionId) return
+    taskActionCompletion.settle(context, createBulkOperationTaskActionResult(
+      context.actionId,
+      operation,
+      t('taskViews.action.failed'),
+    ))
+  }, [t, taskActionCompletion])
+
+  /** Returns preview cancellation or failure to the pending bulk action executor. */
+  const handleBulkTaskActionInterrupted = useCallback((
+    interruption: BulkOperationTaskActionInterruption,
+  ) => {
+    if (interruption.requestId === undefined) return
+    const pendingContext = bulkTaskActionContextsRef.current.get(interruption.requestId)
+    if (!pendingContext || !isBulkTaskActionId(pendingContext.actionId)) return
+    if (interruption.kind === 'cancelled') {
+      taskActionCompletion.cancelContext(pendingContext)
+      return
+    }
+    if (interruption.kind === 'preview-rejected') {
+      taskActionCompletion.settle(pendingContext, createBulkPreviewTaskActionResult(
+        pendingContext.actionId,
+        interruption.preview,
+        t('taskViews.action.failed'),
+      ))
+      dismissBulkTaskActionEditor(interruption.requestId)
+      return
+    }
+    taskActionCompletion.settle(pendingContext, createFailedTaskActionResults(
+      pendingContext.actionId,
+      resolveProjectTaskActionTargets(pendingContext),
+      'ProjectBulkTaskActionFailed',
+      'unknown',
+      t('taskViews.action.failed'),
+      true,
+    ))
+    dismissBulkTaskActionEditor(interruption.requestId)
+  }, [dismissBulkTaskActionEditor, t, taskActionCompletion])
+
   const projectTaskActionHandlers = useMemo<ProjectTaskActionHandlers>(() => ({
     ...(canCreateTaskAction
       ? {
           create: (context) => {
-            handleCreateTaskOpen()
-            return createSucceededTaskActionResult(context.actionId)
+            const createContext = pendingCreateTaskContextRef.current
+            pendingCreateTaskContextRef.current = undefined
+            const completion = taskActionCompletion.begin(context, dismissCreateTaskEditor)
+            showCreateTaskEditor(createContext)
+            return completion
           },
         }
       : {}),
     open: (context) => executeTaskDetailAction(context),
     ...(canEditTaskAction
       ? {
-          edit: (context) => executeTaskDetailAction(context, 'input[name="title"]'),
+          edit: (context) => executeTaskDetailAction(
+            context,
+            'input[name="title"]',
+            true,
+          ),
           schedule: (context) => executeTaskDetailAction(
             context,
             'select[name="scheduleMode"]',
+            true,
           ),
         }
       : {}),
@@ -1314,6 +1606,7 @@ export function TaskScreen({
           relation: (context) => executeTaskDetailAction(
             context,
             '[data-testid="work-item-relations-editor"] select',
+            true,
           ),
         }
       : {}),
@@ -1321,10 +1614,15 @@ export function TaskScreen({
       ? {
           watch: async (context) => {
             const target = resolveProjectTaskActionTarget(context)
-            if (!target) {
+            if (
+              !target ||
+              !detailTask ||
+              detailTask.teamId !== target.teamId ||
+              detailTask.id !== target.workItemId
+            ) {
               return createFailedTaskActionResult(
                 context.actionId,
-                undefined,
+                target,
                 'ProjectTaskActionTargetNotFound',
                 'not-found',
                 t('taskViews.action.notFound'),
@@ -1348,10 +1646,13 @@ export function TaskScreen({
     canCreateTaskAction,
     canEditTaskAction,
     canManageTaskRelationAction,
+    detailTask,
     executeBulkTaskActionEntrance,
     executeTaskDetailAction,
-    handleCreateTaskOpen,
+    dismissCreateTaskEditor,
+    showCreateTaskEditor,
     t,
+    taskActionCompletion,
     toggleTaskWatch,
   ])
   const projectTaskActionPermissions = useMemo<ProjectTaskActionPermissions>(() => ({
@@ -1362,7 +1663,19 @@ export function TaskScreen({
     open: (context) => evaluateProjectTaskTargetPermission(context, false),
     relation: (context) => evaluateProjectTaskTargetPermission(context, true),
     schedule: (context) => evaluateProjectTaskTargetPermission(context, true),
-  }), [evaluateProjectTaskTargetPermission])
+    watch: (context) => {
+      const target = resolveProjectTaskActionTarget(context)
+      return target && detailTask && toggleTaskWatch &&
+          detailTask.teamId === target.teamId && detailTask.id === target.workItemId
+        ? allowTaskAction()
+        : denyTaskAction(projectTaskActionDisabledReasons.unavailable)
+    },
+  }), [
+    detailTask,
+    evaluateProjectTaskTargetPermission,
+    projectTaskActionDisabledReasons.unavailable,
+    toggleTaskWatch,
+  ])
 
   /** Projects normalized action failures into the existing reversible-action feedback surface. */
   const handleProjectTaskActionExecution = useCallback((result: TaskActionExecutionResult) => {
@@ -1390,6 +1703,82 @@ export function TaskScreen({
     selection: taskActionSelection,
     ...(activeProjectTeamId !== undefined ? { teamId: activeProjectTeamId } : {}),
   })
+
+  /**
+   * Routes header, Board, and other direct Create clicks through the canonical registry.
+   *
+   * @param context - Existing view-aware defaults consumed by the accepted Create handler.
+   */
+  const handleProjectCreateClick = useCallback((context?: TaskCreateContext) => {
+    pendingCreateTaskContextRef.current = context
+    void projectTaskActions.execute(
+      'create',
+      'click',
+      undefined,
+      { mode: 'none', targets: [] },
+    )
+  }, [projectTaskActions])
+
+  /**
+   * Returns an existing relation editor mutation to a pending canonical Relation action.
+   *
+   * @param issueId - Work Item whose relation graph is being changed.
+   * @param mutate - Existing add or delete relation mutation.
+   * @returns Nothing after the relation mutation and detail refresh complete.
+   */
+  const handleProjectTaskActionRelation = useCallback(async (
+    issueId: string,
+    mutate: () => Promise<void>,
+  ): Promise<void> => {
+    const teamId = detailTask?.teamId
+    const pendingCandidate = teamId
+      ? resolvePendingTaskActionContext(
+          taskActionCompletion,
+          ['edit', 'relation', 'schedule'],
+          { teamId, workItemId: issueId },
+        )
+      : undefined
+    const pendingContext = pendingCandidate?.actionId === 'relation'
+      ? pendingCandidate
+      : undefined
+    if (pendingCandidate && !pendingContext) {
+      taskActionCompletion.cancelContext(pendingCandidate)
+    }
+    const target = pendingContext
+      ? resolveProjectTaskActionTarget(pendingContext)
+      : undefined
+    const claimedContext = pendingContext && target && taskActionCompletion.claim(pendingContext)
+      ? pendingContext
+      : undefined
+
+    try {
+      await mutate()
+      if (claimedContext && target) {
+        taskActionCompletion.settle(claimedContext, createSucceededTaskActionMutationResult(
+          claimedContext.actionId,
+          target,
+        ))
+      }
+    } catch (error) {
+      if (claimedContext) {
+        const isConflict = isWorkItemRelationGraphConflict(error)
+        const canDismissOwner = canDismissCompletedTaskActionOwner(
+          taskActionCompletion,
+          claimedContext,
+        )
+        taskActionCompletion.settle(claimedContext, createFailedTaskActionResult(
+          claimedContext.actionId,
+          target,
+          isConflict ? 'WorkItemRelationGraphConflict' : 'ProjectTaskRelationMutationFailed',
+          isConflict ? 'conflict' : 'unknown',
+          t('taskViews.action.failed'),
+          isConflict,
+        ))
+        if (canDismissOwner) dismissTaskDetailEditor(claimedContext)
+      }
+      throw error
+    }
+  }, [detailTask?.teamId, dismissTaskDetailEditor, t, taskActionCompletion])
 
   const taskActionContextMenuContext = useMemo(() => {
     if (!taskActionContextMenuState) return undefined
@@ -1557,9 +1946,10 @@ export function TaskScreen({
           isCreateTaskOpen={isCreateTaskOpen}
           onCreateTaskOpenChange={onCreateTask ? (isOpen) => {
             if (isOpen) {
-              handleCreateTaskOpen()
+              handleProjectCreateClick()
             } else {
-              setIsCreateTaskOpen(false)
+              taskActionCompletion.cancel('create')
+              dismissCreateTaskEditor()
             }
           } : undefined}
           onMobileSidebarOpen={openMobileSidebar}
@@ -1664,28 +2054,71 @@ export function TaskScreen({
                 isSubmitting={isCreatingTask}
                 locale={locale}
                 onCancel={() => {
+                  taskActionCompletion.cancel('create')
                   setCreateTaskError(undefined)
                   setCreateTaskContext(undefined)
                   setIsCreateTaskOpen(false)
                 }}
                 onSubmit={async (input) => {
+                  const pendingContext = resolvePendingTaskActionContext(
+                    taskActionCompletion,
+                    ['create'],
+                  )
+                  const claimedContext = pendingContext &&
+                      taskActionCompletion.claim(pendingContext)
+                    ? pendingContext
+                    : undefined
                   setCreateTaskError(undefined)
                   setIsCreatingTask(true)
 
                   try {
-                    await onCreateTask(input, createTaskContext)
+                    const createdMutation = await onCreateTask(input, createTaskContext)
+                    const canDismissOwner = claimedContext
+                      ? canDismissCompletedTaskActionOwner(taskActionCompletion, claimedContext)
+                      : true
+                    if (claimedContext) {
+                      const createdTarget = createdMutation
+                        ? {
+                            expectedRevision: createdMutation.task.revision,
+                            teamId: createdMutation.task.teamId,
+                            workItemId: createdMutation.task.id,
+                          }
+                        : undefined
+                      taskActionCompletion.settle(claimedContext, createSucceededTaskCreateActionResult(
+                        createdTarget,
+                        createdMutation?.navigationPath,
+                      ))
+                    }
                     setTaskUndo(undefined)
                     setTaskRedo(undefined)
                     setTaskAction({
                       kind: 'success',
                       message: t('tasks.action.saved'),
                     })
-                    setCreateTaskContext(undefined)
-                    setIsCreateTaskOpen(false)
+                    if (canDismissOwner) {
+                      setCreateTaskContext(undefined)
+                      setIsCreateTaskOpen(false)
+                    }
                   } catch (error) {
-                    setCreateTaskError(
-                      error instanceof Error ? error.message : t('tasks.create.error'),
-                    )
+                    if (claimedContext) {
+                      const canDismissOwner = canDismissCompletedTaskActionOwner(
+                        taskActionCompletion,
+                        claimedContext,
+                      )
+                      taskActionCompletion.settle(claimedContext, createFailedTaskActionResult(
+                        claimedContext.actionId,
+                        undefined,
+                        'ProjectTaskCreateFailed',
+                        'unknown',
+                        t('tasks.create.error'),
+                      ))
+                      if (canDismissOwner) dismissCreateTaskEditor()
+                    }
+                    if (!claimedContext) {
+                      setCreateTaskError(
+                        error instanceof Error ? error.message : t('tasks.create.error'),
+                      )
+                    }
                   } finally {
                     setIsCreatingTask(false)
                   }
@@ -1738,8 +2171,11 @@ export function TaskScreen({
                 onBulkRetry={onBulkRetry}
                 onBulkTaskActionRequest={handleBulkTaskActionRequest}
                 onBulkTaskActionRequestConsumed={handleBulkTaskActionRequestConsumed}
+                onBulkTaskActionInterrupted={handleBulkTaskActionInterrupted}
+                onBulkTaskActionMutationStart={handleBulkTaskActionMutationStart}
+                onBulkTaskActionOperationComplete={handleBulkTaskActionOperationComplete}
                 onBulkUndo={onBulkUndo}
-                onCreateTaskOpen={onCreateTask ? handleCreateTaskOpen : undefined}
+                onCreateTaskOpen={onCreateTask ? handleProjectCreateClick : undefined}
                 onCreateScheduleDependency={onCreateScheduleDependency}
                 onDeleteScheduleDependency={onDeleteScheduleDependency}
                 onDefinitionFilterChange={(nextDefinitionFilter) => commitViewState({
@@ -1841,9 +2277,20 @@ export function TaskScreen({
                   locale={locale}
                   onCreateScheduleDependency={onCreateScheduleDependency}
                   onDeleteScheduleDependency={onDeleteScheduleDependency}
-                  onAddRelation={onAddRelation}
+                  onScheduleNoChange={handleProjectScheduleNoChange}
+                  onAddRelation={onAddRelation
+                    ? (issueId, input) => handleProjectTaskActionRelation(
+                        issueId,
+                        () => onAddRelation(issueId, input),
+                      )
+                    : undefined}
                   onClose={handleCloseDetail}
-                  onDeleteRelation={onDeleteRelation}
+                  onDeleteRelation={onDeleteRelation
+                    ? (issueId, relation) => handleProjectTaskActionRelation(
+                        issueId,
+                        () => onDeleteRelation(issueId, relation),
+                      )
+                    : undefined}
                   onUpdateIssue={detailTask &&
                       configurationFailedTeamIds.includes(detailTask.teamId)
                     ? undefined
@@ -1885,6 +2332,27 @@ export function TaskScreen({
         ) : null}
     </section>
   )
+}
+
+/**
+ * Creates the opaque token returned with a reversible inline task mutation.
+ *
+ * @param task - Persisted Work Item snapshot retained by the existing undo feedback state.
+ * @returns Team-qualified revision token consumed only by this screen's undo entrance.
+ */
+function createTaskUpdateUndoToken(task: ProjectTask): string {
+  return `task-update:${task.teamId}:${task.id}:${task.revision}`
+}
+
+/**
+ * Validates that an opaque inline-update undo token still owns the retained task snapshot.
+ *
+ * @param undoToken - Token exposed by the successful canonical action result.
+ * @param task - Persisted task snapshot about to be restored.
+ * @returns Whether the existing undo state may consume the token.
+ */
+function isTaskUpdateUndoTokenForTask(undoToken: string, task: ProjectTask): boolean {
+  return undoToken === createTaskUpdateUndoToken(task)
 }
 
 /** Narrows canonical actions to the parameterized operations backed by the bulk toolbar. */
@@ -2106,6 +2574,17 @@ function isTaskSchedulePreviewStaleCode(code: string | undefined): boolean {
  */
 function isTaskRevisionConflict(error: unknown): boolean {
   return error instanceof TeamIssuesApiError && error.code === 'WorkItemRevisionConflict'
+}
+
+/**
+ * Identifies a relation graph conflict that invalidates the retained graph revision.
+ *
+ * @param error - Unknown relation mutation failure.
+ * @returns Whether the canonical relation graph revision conflicted.
+ */
+function isWorkItemRelationGraphConflict(error: unknown): boolean {
+  return error instanceof WorkItemConfigurationApiError &&
+    error.code === 'WorkItemRelationGraphConflict'
 }
 
 /**

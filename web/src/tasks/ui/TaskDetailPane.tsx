@@ -98,6 +98,8 @@ export type TaskDetailPaneProps = {
   onDeleteScheduleDependency?: (dependency: WorkItemScheduleDependency) => void | Promise<void>
   /** Closes the detail pane while keeping the list selection and scroll position. */
   onClose?: () => void
+  /** Cancels an accepted Schedule action when explicit save detects no schedule change. */
+  onScheduleNoChange?: (teamId: string, issueId: string) => void
   /** Saves editable fields on the selected Work Item. */
   onUpdateIssue?: (
     teamId: string,
@@ -150,6 +152,7 @@ export function TaskDetailPane({
   onClose,
   onDeleteRelation,
   onDeleteScheduleDependency,
+  onScheduleNoChange,
   onUpdateIssue,
   onUpdateScheduleDependency,
   projects,
@@ -510,7 +513,10 @@ export function TaskDetailPane({
             return
           }
           setFieldErrors((current) => ({ ...current, schedule: undefined }))
-          if (areTaskSchedulesEqual(schedule, nextSchedule)) return
+          if (areTaskSchedulesEqual(schedule, nextSchedule)) {
+            onScheduleNoChange?.(task.teamId, task.id)
+            return
+          }
           void onUpdateIssue?.(
             task.teamId,
             task.id,

@@ -422,6 +422,74 @@ export function createSucceededTaskActionResults(
 }
 
 /**
+ * Creates a successful Create result retaining the persisted target and navigation destination.
+ *
+ * @param createdTarget - Revision-bound Work Item returned by persistence, when available.
+ * @param navigationPath - Application-relative destination opened for the created Work Item.
+ * @returns Shared successful Create result.
+ */
+export function createSucceededTaskCreateActionResult(
+  createdTarget?: WorkItemActionTarget,
+  navigationPath?: string,
+): WorkItemActionResult {
+  return {
+    actionId: 'create',
+    items: [],
+    schemaVersion: WORK_ITEM_ACTION_SCHEMA_VERSION,
+    status: 'succeeded',
+    ...(createdTarget !== undefined ? { createdTarget } : {}),
+    ...(navigationPath !== undefined ? { navigationPath } : {}),
+  }
+}
+
+/**
+ * Creates a canonical successful mutation result with its persisted revision and undo token.
+ *
+ * @param actionId - Canonical action that completed.
+ * @param target - Revision-bound target evaluated by the mutation.
+ * @param resultingRevision - Canonical revision returned by persistence, when available.
+ * @param undoToken - Opaque token consumed by the existing undo entrance, when available.
+ * @returns Shared successful mutation result.
+ */
+export function createSucceededTaskActionMutationResult(
+  actionId: WorkItemActionId,
+  target: WorkItemActionTarget,
+  resultingRevision?: number,
+  undoToken?: string,
+): WorkItemActionResult {
+  return {
+    actionId,
+    items: [{
+      status: 'succeeded',
+      target,
+      ...(resultingRevision !== undefined ? { resultingRevision } : {}),
+    }],
+    schemaVersion: WORK_ITEM_ACTION_SCHEMA_VERSION,
+    status: 'succeeded',
+    ...(undoToken !== undefined ? { undoToken } : {}),
+  }
+}
+
+/**
+ * Creates a canonical cancelled result for an editor or preview dismissed before persistence.
+ *
+ * @param actionId - Canonical action that was cancelled.
+ * @param targets - Ordered targets retained from the accepted action context.
+ * @returns Shared cancelled result.
+ */
+export function createCancelledTaskActionResult(
+  actionId: WorkItemActionId,
+  targets: readonly WorkItemActionTarget[],
+): WorkItemActionResult {
+  return {
+    actionId,
+    items: targets.map((target) => ({ status: 'cancelled', target })),
+    schemaVersion: WORK_ITEM_ACTION_SCHEMA_VERSION,
+    status: 'cancelled',
+  }
+}
+
+/**
  * Creates a canonical safe failure for a missing or unavailable action entrance.
  *
  * @param actionId - Canonical action that failed.
@@ -429,6 +497,7 @@ export function createSucceededTaskActionResults(
  * @param code - Stable failure code.
  * @param category - Stable failure category.
  * @param message - Safe localized failure message.
+ * @param retryable - Whether retrying after refresh may succeed.
  * @returns Shared failed result.
  */
 export function createFailedTaskActionResult(
@@ -437,12 +506,42 @@ export function createFailedTaskActionResult(
   code: string,
   category: WorkItemActionFailureCategory,
   message: string,
+  retryable = false,
 ): WorkItemActionResult {
-  const failure = { category, code, message, retryable: false }
+  return createFailedTaskActionResults(
+    actionId,
+    target ? [target] : [],
+    code,
+    category,
+    message,
+    retryable,
+  )
+}
+
+/**
+ * Creates a canonical safe failure for every target rejected by one mutation attempt.
+ *
+ * @param actionId - Canonical action that failed.
+ * @param targets - Ordered Team-qualified targets evaluated by the mutation.
+ * @param code - Stable failure code.
+ * @param category - Stable failure category.
+ * @param message - Safe localized failure message.
+ * @param retryable - Whether retrying the same normalized action may succeed.
+ * @returns Shared failed result containing one failure per target.
+ */
+export function createFailedTaskActionResults(
+  actionId: WorkItemActionId,
+  targets: readonly WorkItemActionTarget[],
+  code: string,
+  category: WorkItemActionFailureCategory,
+  message: string,
+  retryable = false,
+): WorkItemActionResult {
+  const failure = { category, code, message, retryable }
   return {
     actionId,
     failure,
-    items: target ? [{ failure, status: 'failed', target }] : [],
+    items: targets.map((target) => ({ failure, status: 'failed', target })),
     schemaVersion: WORK_ITEM_ACTION_SCHEMA_VERSION,
     status: 'failed',
   }

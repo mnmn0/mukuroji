@@ -40,8 +40,11 @@ export type UseWorkspaceTaskStatusMutationOptions = {
 export type WorkspaceTaskStatusMutationController = {
   /** Latest user-facing optimistic update error message. */
   errorMessage?: string
-  /** Moves a Work Item to a validated workflow status. */
-  moveTaskStatus?: (task: ProjectTask, workflowStatusId: string) => Promise<void>
+  /** Moves a Work Item to a validated workflow status and returns its persisted snapshot. */
+  moveTaskStatus?: (
+    task: ProjectTask,
+    workflowStatusId: string,
+  ) => Promise<ProjectTask | undefined>
 }
 
 /**
@@ -129,6 +132,7 @@ export function useWorkspaceTaskStatusMutation({
         (currentTasks = nextTasks) => replaceWorkspaceTask(currentTasks, updatedTask),
         { revalidate: false },
       )
+      return updatedTask
     } catch (error) {
       await mutateWorkItems(
         (currentTasks = nextTasks) => replaceWorkspaceTask(currentTasks, canonicalTask),

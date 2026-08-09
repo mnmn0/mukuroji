@@ -763,10 +763,12 @@ export function TaskPage() {
       ),
     ))
     await mutateProjectTasks()
-    navigate(preserveTaskViewUrlState(
+    const navigationPath = preserveTaskViewUrlState(
       createProjectIssuesPath(targetProjectId, targetTeamId, issue.id),
       searchParams,
-    ))
+    )
+    navigate(navigationPath)
+    return { navigationPath, task: issue }
   }
 
   const handleUpdateProjectMember = async (
@@ -949,7 +951,7 @@ export function TaskPage() {
     ])
 
     try {
-      await handleUpdateTask(currentIssue, input)
+      return await handleUpdateTask(currentIssue, input)
     } catch (error) {
       redirectEnterpriseSessionError(error)
       if (error instanceof TeamIssuesApiError && error.code === 'WorkItemRevisionConflict') {

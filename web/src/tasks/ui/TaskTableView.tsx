@@ -41,6 +41,7 @@ import {
   type BulkOperationProjectOption,
   type BulkOperationSelection,
   type BulkOperationTaskActionRequest,
+  type BulkOperationTaskActionInterruption,
 } from '../../bulk-operations/ui/BulkOperationToolbar'
 import {
   createTaskKey,
@@ -130,6 +131,17 @@ export type TaskTableViewProps = {
   ) => Promise<boolean>
   /** Acknowledges one canonical action request after the toolbar consumes it. */
   onBulkTaskActionRequestConsumed?: (requestId: number) => void
+  /** Claims the exact canonical request immediately before bulk apply dispatch. */
+  onBulkTaskActionMutationStart?: (request: BulkOperationTaskActionRequest) => boolean
+  /** Returns an applied operation to the exact canonical request that opened the editor. */
+  onBulkTaskActionOperationComplete?: (
+    request: BulkOperationTaskActionRequest,
+    operation: BulkOperation,
+  ) => void
+  /** Returns non-apply terminal outcomes to the canonical action completion bridge. */
+  onBulkTaskActionInterrupted?: (
+    interruption: BulkOperationTaskActionInterruption,
+  ) => void
   /** Validates a bulk operation before applying it. */
   onBulkPreview?: (request: BulkOperationRequest) => Promise<BulkOperationPreview>
   /** Retries retryable items from a bulk operation. */
@@ -225,6 +237,9 @@ export function TaskTableView({
   onBulkOperationComplete,
   onBulkTaskActionRequest,
   onBulkTaskActionRequestConsumed,
+  onBulkTaskActionMutationStart,
+  onBulkTaskActionOperationComplete,
+  onBulkTaskActionInterrupted,
   onBulkPreview,
   onBulkRetry,
   onBulkUndo,
@@ -452,6 +467,9 @@ export function TaskTableView({
         onOperationComplete={onBulkOperationComplete}
         onTaskActionRequest={onBulkTaskActionRequest}
         onTaskActionRequestConsumed={onBulkTaskActionRequestConsumed}
+        onTaskActionMutationStart={onBulkTaskActionMutationStart}
+        onTaskActionOperationComplete={onBulkTaskActionOperationComplete}
+        onTaskActionInterrupted={onBulkTaskActionInterrupted}
         onPreview={onBulkPreview}
         onRetry={onBulkRetry}
         onUndo={onBulkUndo}

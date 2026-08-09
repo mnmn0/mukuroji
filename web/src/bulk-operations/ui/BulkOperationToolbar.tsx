@@ -1,6 +1,5 @@
 import type {
   BulkOperation,
-  BulkOperationAction,
   BulkOperationPreview,
   BulkOperationRequest,
 } from '@mukuroji/contracts'
@@ -14,23 +13,52 @@ import {
   type BulkEditField,
   type BulkOperationSelection,
 } from '../model/bulkOperation'
+import {
+  resolveBulkOperationToolbarActionSelection,
+  type BulkOperationTaskActionId,
+  type BulkOperationToolbarAction,
+} from '../model/bulkOperationActionHandshake'
+import { resolveBulkOperationTaskActionUndoToken } from '../model/bulkOperationTaskAction'
 
 export type { BulkOperationSelection } from '../model/bulkOperation'
 
 const bulkPriorities = ['high', 'medium', 'low'] as const
 
-/** Toolbar mode including the canonical assign entrance backed by a bulk edit request. */
-type BulkOperationToolbarAction = BulkOperationAction['type'] | 'assign'
-
 /** Canonical bulk action requested by another Project action entrance. */
 export type BulkOperationTaskActionRequest = {
   /** Project action to reveal in the bulk-operation toolbar. */
-  actionId: 'move' | 'assign' | 'archive'
+  actionId: BulkOperationTaskActionId
   /** Project that owned the selection when the action was requested. */
   projectId: string
   /** Monotonic identifier that permits repeated requests for the same action. */
   requestId: number
 }
+
+/** Invocation identity retained by non-operation terminal bulk outcomes. */
+type BulkOperationTaskActionInterruptionIdentity = {
+  /** Monotonic request accepted by the toolbar instance that produced this outcome. */
+  requestId?: number
+}
+
+/** Non-operation terminal outcome returned by the bulk editor to a pending canonical action. */
+export type BulkOperationTaskActionInterruption = BulkOperationTaskActionInterruptionIdentity & (
+  | {
+      /** User dismissed the preview or switched to the non-canonical generic editor. */
+      kind: 'cancelled'
+    }
+  | {
+      /** Preview or apply raised an unexpected mutation error. */
+      kind: 'failed'
+      /** Original error retained for the surface's safe failure mapper. */
+      error: unknown
+    }
+  | {
+      /** Authoritative preview rejected persistence for one or more targets. */
+      kind: 'preview-rejected'
+      /** Revision-bound per-target validation outcomes. */
+      preview: BulkOperationPreview
+    }
+)
 
 /** Move action で選択できる Project です。 */
 export type BulkOperationProjectOption = {
@@ -71,12 +99,21 @@ export type BulkOperationToolbarProps = {
   onUndo?: (operationId: string) => Promise<BulkOperation>
   /** Operation 更新後に selection と親 cache を同期します。 */
   onOperationComplete?: (operation: BulkOperation) => void
+  /** Returns an applied operation to the exact canonical request that opened this toolbar. */
+  onTaskActionOperationComplete?: (
+    request: BulkOperationTaskActionRequest,
+    operation: BulkOperation,
+  ) => void
+  /** Claims the exact canonical request immediately before apply dispatch. */
+  onTaskActionMutationStart?: (request: BulkOperationTaskActionRequest) => boolean
   /** Runs a toolbar action entrance through the shared Project action registry. */
   onTaskActionRequest?: (
     actionId: BulkOperationTaskActionRequest['actionId'],
   ) => Promise<boolean>
   /** Acknowledges that the current canonical entrance initialized this toolbar instance. */
   onTaskActionRequestConsumed?: (requestId: number) => void
+  /** Returns cancellation, preview rejection, or mutation failure to the pending action bridge. */
+  onTaskActionInterrupted?: (interruption: BulkOperationTaskActionInterruption) => void
   /** Story/test で表示する初期 preview です。 */
   initialPreview?: BulkOperationPreview
   /** Story/test で表示する初期 operation です。 */
@@ -100,8 +137,11 @@ export function BulkOperationToolbar({
   onRetry,
   onUndo,
   onOperationComplete,
+  onTaskActionOperationComplete,
+  onTaskActionMutationStart,
   onTaskActionRequest,
   onTaskActionRequestConsumed,
+  onTaskActionInterrupted,
   initialPreview,
   initialOperation,
 }: BulkOperationToolbarProps) {
@@ -120,9 +160,10 @@ export function BulkOperationToolbar({
   const [previewedRequest, setPreviewedRequest] = useState<BulkOperationRequest>()
   const [preview, setPreview] = useState<BulkOperationPreview | undefined>(initialPreview)
   const [operation, setOperation] = useState<BulkOperation | undefined>(initialOperation)
+  const [activeTaskActionRequest, setActiveTaskActionRequest] = useState(taskActionRequest)
   const [errorMessage, setErrorMessage] = useState<string>()
   const [busyState, setBusyState] = useState<
-    'action' | 'preview' | 'apply' | 'resume' | 'retry' | 'undo'
+    'preview' | 'apply' | 'resume' | 'retry' | 'undo'
   >()
   const selectedKeySet = useMemo(
     () => new Set(selectedItems.map((item) => item.selectionKey)),
@@ -137,12 +178,6 @@ export function BulkOperationToolbar({
       selectAllRef.current.indeterminate = someVisibleSelected && !allVisibleSelected
     }
   }, [allVisibleSelected, someVisibleSelected])
-
-  useEffect(() => {
-    if (taskActionRequest) {
-      onTaskActionRequestConsumed?.(taskActionRequest.requestId)
-    }
-  }, [onTaskActionRequestConsumed, taskActionRequest])
 
   const request = createBulkOperationRequest(
     workspaceId,
@@ -165,6 +200,18 @@ export function BulkOperationToolbar({
     setErrorMessage(undefined)
   }, [])
 
+  /** Dismisses preview state and cancels an accepted action that has not applied. */
+  const closeReview = useCallback(() => {
+    onTaskActionInterrupted?.({
+      kind: 'cancelled',
+      ...(activeTaskActionRequest
+        ? { requestId: activeTaskActionRequest.requestId }
+        : {}),
+    })
+    setActiveTaskActionRequest(undefined)
+    resetReview()
+  }, [activeTaskActionRequest, onTaskActionInterrupted, resetReview])
+
   /** Activates one toolbar mode after its canonical entrance has been accepted. */
   const activateAction = useCallback((nextAction: BulkOperationToolbarAction) => {
     setAction(nextAction)
@@ -173,23 +220,38 @@ export function BulkOperationToolbar({
     resetReview()
   }, [resetReview])
 
+  useEffect(() => {
+    if (!taskActionRequest) return
+    queueMicrotask(() => {
+      activateAction(taskActionRequest.actionId)
+      setActiveTaskActionRequest(taskActionRequest)
+    })
+    onTaskActionRequestConsumed?.(taskActionRequest.requestId)
+  }, [activateAction, onTaskActionRequestConsumed, taskActionRequest])
+
   /** Routes parameterized Project actions through the shared registry before revealing inputs. */
-  const selectAction = async (nextAction: BulkOperationToolbarAction) => {
-    const taskActionId = resolveBulkOperationTaskActionId(nextAction)
-    if (!taskActionId || !onTaskActionRequest) {
-      activateAction(nextAction)
+  const selectAction = (nextAction: BulkOperationToolbarAction) => {
+    const selection = resolveBulkOperationToolbarActionSelection(
+      nextAction,
+      onTaskActionRequest !== undefined,
+    )
+    if (selection.immediateAction) {
+      onTaskActionInterrupted?.({
+        kind: 'cancelled',
+        ...(activeTaskActionRequest
+          ? { requestId: activeTaskActionRequest.requestId }
+          : {}),
+      })
+      setActiveTaskActionRequest(undefined)
+      activateAction(selection.immediateAction)
       return
     }
+    if (!selection.requestedActionId || !onTaskActionRequest) return
 
-    setBusyState('action')
     setErrorMessage(undefined)
-    try {
-      if (await onTaskActionRequest(taskActionId)) activateAction(nextAction)
-    } catch (error) {
+    void onTaskActionRequest(selection.requestedActionId).catch((error: unknown) => {
       setErrorMessage(toBulkErrorMessage(error, t))
-    } finally {
-      setBusyState(undefined)
-    }
+    })
   }
 
   const handlePreview = async () => {
@@ -204,8 +266,28 @@ export function BulkOperationToolbar({
       setPreviewedRequest(request)
       setPreview(nextPreview)
       setOperation(undefined)
+      if (!nextPreview.canApply) {
+        onTaskActionInterrupted?.({
+          kind: 'preview-rejected',
+          preview: nextPreview,
+          ...(activeTaskActionRequest
+            ? { requestId: activeTaskActionRequest.requestId }
+            : {}),
+        })
+        setActiveTaskActionRequest(undefined)
+        resetReview()
+      }
     } catch (error) {
       setErrorMessage(toBulkErrorMessage(error, t))
+      onTaskActionInterrupted?.({
+        error,
+        kind: 'failed',
+        ...(activeTaskActionRequest
+          ? { requestId: activeTaskActionRequest.requestId }
+          : {}),
+      })
+      setActiveTaskActionRequest(undefined)
+      resetReview()
     } finally {
       setBusyState(undefined)
     }
@@ -215,15 +297,37 @@ export function BulkOperationToolbar({
     if (!previewedRequest || !activePreview || !onApply) {
       return
     }
+    if (
+      activeTaskActionRequest &&
+      onTaskActionMutationStart &&
+      !onTaskActionMutationStart(activeTaskActionRequest)
+    ) {
+      setActiveTaskActionRequest(undefined)
+      resetReview()
+      return
+    }
 
     setBusyState('apply')
     setErrorMessage(undefined)
     try {
       const nextOperation = await onApply(previewedRequest, activePreview)
       setOperation(nextOperation)
+      if (activeTaskActionRequest) {
+        onTaskActionOperationComplete?.(activeTaskActionRequest, nextOperation)
+        setActiveTaskActionRequest(undefined)
+      }
       onOperationComplete?.(nextOperation)
     } catch (error) {
       setErrorMessage(toBulkErrorMessage(error, t))
+      onTaskActionInterrupted?.({
+        error,
+        kind: 'failed',
+        ...(activeTaskActionRequest
+          ? { requestId: activeTaskActionRequest.requestId }
+          : {}),
+      })
+      setActiveTaskActionRequest(undefined)
+      resetReview()
     } finally {
       setBusyState(undefined)
     }
@@ -269,11 +373,13 @@ export function BulkOperationToolbar({
     if (!operation || !onUndo) {
       return
     }
+    const undoToken = resolveBulkOperationTaskActionUndoToken(operation)
+    if (!undoToken) return
 
     setBusyState('undo')
     setErrorMessage(undefined)
     try {
-      const nextOperation = await onUndo(operation.id)
+      const nextOperation = await onUndo(undoToken)
       setOperation(nextOperation)
       onOperationComplete?.(nextOperation)
     } catch (error) {
@@ -291,7 +397,7 @@ export function BulkOperationToolbar({
             aria-label={t('bulk.selectVisible')}
             checked={allVisibleSelected}
             className="h-4 w-4 rounded border-[var(--workbench-border-strong)] text-[var(--workbench-primary)]"
-            disabled={readOnly || visibleItems.length === 0}
+            disabled={readOnly || visibleItems.length === 0 || busyState !== undefined}
             onChange={(event) => onVisibleSelectionChange(
               visibleItems.map((item) => item.selectionKey),
               event.target.checked,
@@ -313,7 +419,7 @@ export function BulkOperationToolbar({
                 : 'border-[var(--workbench-border)] bg-white text-[var(--workbench-text)] hover:border-[var(--workbench-primary)]'
             }`}
             disabled={
-              !mutationsAvailable || selectedItems.length === 0 || busyState === 'action'
+              !mutationsAvailable || selectedItems.length === 0 || busyState !== undefined
             }
             key={candidate}
             onClick={() => void selectAction(candidate)}
@@ -446,7 +552,7 @@ export function BulkOperationToolbar({
           preview={activePreview}
           t={t}
           onApply={activePreview && onApply ? () => void handleApply() : undefined}
-          onClose={resetReview}
+          onClose={closeReview}
           onResume={operation && previewedRequest && preview && onApply
             ? () => void handleResume()
             : undefined}
@@ -516,15 +622,6 @@ function createBulkOperationRequest(
     items,
     workspaceId,
   }
-}
-
-/** Resolves the canonical registry action associated with a toolbar mode. */
-function resolveBulkOperationTaskActionId(
-  action: BulkOperationToolbarAction,
-): BulkOperationTaskActionRequest['actionId'] | undefined {
-  return action === 'move' || action === 'assign' || action === 'archive'
-    ? action
-    : undefined
 }
 
 /** Resolves one localized toolbar action label without widening message keys. */

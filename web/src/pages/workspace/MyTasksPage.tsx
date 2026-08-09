@@ -7,6 +7,7 @@ import type {
 } from '@mukuroji/contracts'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router'
+import { TeamIssuesApiError } from '../../issues/api'
 import { createTranslator } from '../../shared/i18n/i18n'
 import {
   createBuiltInTaskViewDefinition,
@@ -28,10 +29,17 @@ import {
   allowTaskAction,
   createFailedTaskActionResult,
   createSucceededTaskActionResult,
+  createSucceededTaskActionMutationResult,
   denyTaskAction,
   resolveTaskActionExecutionFailureMessage,
   type TaskActionExecutionResult,
 } from '../../task-views/model/taskActionRegistry'
+import {
+  canDismissCompletedTaskActionOwner,
+  createTaskActionCompletionBridge,
+  isPendingTaskActionFocusCurrent,
+  resolvePendingTaskActionContext,
+} from '../../task-views/model/taskActionCompletion'
 import type { TaskActionContextMenuAnchorPoint } from '../../task-views/model/taskActionContextMenu'
 import {
   createTaskSurfaceActionBaseContext,
@@ -108,11 +116,15 @@ export function MyTasksPage() {
     MyTaskActionContextMenuState
   >()
   const [revealedStatusTaskKey, setRevealedStatusTaskKey] = useState<string>()
+  const [taskActionCompletion] = useState(createTaskActionCompletionBridge)
   const onOpenTaskRef = useRef(workspace.onOpenTask)
 
   useEffect(() => {
     onOpenTaskRef.current = workspace.onOpenTask
   }, [workspace.onOpenTask])
+  useEffect(() => () => {
+    taskActionCompletion.cancel()
+  }, [taskActionCompletion])
   const workItems = useWorkspaceWorkItemData(
     workspace.accessToken,
     workspace.canLoadWorkspaceData,
@@ -210,6 +222,13 @@ export function MyTasksPage() {
     () => createTaskViewActionSelection(taskViewSelection, visibleMyTaskActionTargets),
     [taskViewSelection, visibleMyTaskActionTargets],
   )
+  useEffect(() => {
+    const pendingContext = taskActionCompletion.current()
+    if (
+      pendingContext &&
+      !isPendingTaskActionFocusCurrent(pendingContext, myTaskActionSelection)
+    ) taskActionCompletion.cancel(pendingContext.actionId)
+  }, [myTaskActionSelection, taskActionCompletion])
   const myTaskActionLabels = useMemo<TaskSurfaceActionLabels>(() => ({
     archive: t('taskViews.action.archive'),
     assign: t('taskViews.action.assign'),
@@ -267,14 +286,15 @@ export function MyTasksPage() {
         t('taskViews.action.notFound'),
       )
     }
+    taskActionCompletion.cancel()
     onOpenTaskRef.current(task)
     return createSucceededTaskActionResult(context.actionId, target)
-  }, [resolveMyTaskActionTarget, t])
+  }, [resolveMyTaskActionTarget, t, taskActionCompletion])
 
   /** Reveals and focuses the existing status selector after canonical Move validation. */
   const executeMyTaskMoveAction = useCallback((
     context: WorkItemActionContext,
-  ): WorkItemActionResult => {
+  ): Promise<WorkItemActionResult> | WorkItemActionResult => {
     const { target, task } = resolveMyTaskActionTarget(context)
     if (
       !target ||
@@ -290,13 +310,21 @@ export function MyTasksPage() {
       )
     }
     const taskKey = createTaskViewItemKey(task.teamId, task.id)
+    const completion = taskActionCompletion.begin(context, () => {
+      setRevealedStatusTaskKey((currentKey) => currentKey === taskKey ? undefined : currentKey)
+    })
+    setTaskViewSelection((currentSelection) => reduceTaskViewSelection(currentSelection, {
+      key: taskKey,
+      type: 'focus',
+    }))
     setRevealedStatusTaskKey(taskKey)
     focusMyTaskStatusControl(taskKey)
-    return createSucceededTaskActionResult(context.actionId, target)
+    return completion
   }, [
     myTaskActionDisabledReasons.unavailable,
     canMoveMyTaskStatus,
     resolveMyTaskActionTarget,
+    taskActionCompletion,
   ])
 
   const myTaskActionHandlers = useMemo<TaskSurfaceActionHandlers>(() => ({
@@ -455,6 +483,7 @@ export function MyTasksPage() {
       )
       if (selectionAction) {
         event.preventDefault()
+        taskActionCompletion.cancel()
         setTaskActionErrorMessage(undefined)
         setTaskViewSelection(reduceTaskViewSelection(taskViewSelection, selectionAction))
         return
@@ -477,6 +506,7 @@ export function MyTasksPage() {
   }, [
     myTaskActions,
     taskActionContextMenuState,
+    taskActionCompletion,
     taskViewSelection,
     visibleMyTaskKeys,
   ])
@@ -489,6 +519,81 @@ export function MyTasksPage() {
     t,
     tasks: workItems.tasks,
   })
+  const moveTaskStatus = statusMutation.moveTaskStatus
+
+  /**
+   * Returns the status selector's persisted outcome to the accepted canonical Move action.
+   *
+   * @param task - Revision-bound personal Work Item being moved.
+   * @param workflowStatusId - Validated destination workflow status.
+   * @returns Nothing after the optimistic mutation and cache reconciliation complete.
+   */
+  const handleMoveMyTaskStatus = useCallback(async (
+    task: (typeof visibleMyTasks)[number],
+    workflowStatusId: string,
+  ): Promise<void> => {
+    if (!moveTaskStatus) return
+    const pendingContext = resolvePendingTaskActionContext(
+      taskActionCompletion,
+      ['move'],
+      { teamId: task.teamId, workItemId: task.id },
+    )
+    const target = pendingContext
+      ? resolveTaskSurfaceActionTarget(pendingContext)
+      : undefined
+    if (pendingContext && task.workflowStatusId === workflowStatusId) {
+      taskActionCompletion.cancelContext(pendingContext)
+      return
+    }
+    const claimedContext = pendingContext && target && taskActionCompletion.claim(pendingContext)
+      ? pendingContext
+      : undefined
+
+    try {
+      const updatedTask = await moveTaskStatus(task, workflowStatusId)
+      if (claimedContext && target) {
+        if (updatedTask) {
+          taskActionCompletion.settle(claimedContext, createSucceededTaskActionMutationResult(
+            claimedContext.actionId,
+            target,
+            updatedTask.revision,
+          ))
+        } else {
+          taskActionCompletion.settle(claimedContext, createFailedTaskActionResult(
+            claimedContext.actionId,
+            target,
+            'MyTasksMoveNotApplied',
+            'unavailable',
+            myTaskActionDisabledReasons.unavailable,
+          ))
+        }
+      }
+    } catch (error) {
+      if (claimedContext && target) {
+        const isConflict = error instanceof TeamIssuesApiError &&
+          error.code === 'WorkItemRevisionConflict'
+        const canDismissOwner = canDismissCompletedTaskActionOwner(
+          taskActionCompletion,
+          claimedContext,
+        )
+        taskActionCompletion.settle(claimedContext, createFailedTaskActionResult(
+          claimedContext.actionId,
+          target,
+          isConflict ? 'WorkItemRevisionConflict' : 'MyTasksMoveFailed',
+          isConflict ? 'conflict' : 'unknown',
+          isConflict ? t('workspace.myTasks.conflict') : t('workspace.myTasks.moveError'),
+          isConflict,
+        ))
+        if (canDismissOwner) {
+          const taskKey = createTaskViewItemKey(task.teamId, task.id)
+          setRevealedStatusTaskKey((currentKey) =>
+            currentKey === taskKey ? undefined : currentKey
+          )
+        }
+      }
+      throw error
+    }
+  }, [moveTaskStatus, myTaskActionDisabledReasons.unavailable, t, taskActionCompletion])
   const taskViewFieldOptions: TaskViewFieldOption[] = [
     { id: 'title', label: t('tasks.column.name') },
     { id: 'status', label: t('tasks.column.status') },
@@ -587,11 +692,25 @@ export function MyTasksPage() {
           configurationFailedTeamIds={workItems.configurationFailedTeamIds}
           configurationsByTeam={workItems.configurationsByTeam}
           locale={workspace.locale}
-          onMoveTaskStatus={statusMutation.moveTaskStatus}
+          onMoveTaskStatus={moveTaskStatus
+            ? handleMoveMyTaskStatus
+            : undefined}
           focusedTaskKey={taskViewSelection.focusedKey}
           onOpenTask={handleOpenMyTask}
           onStatusActionConsumed={(task) => {
             const taskKey = createTaskViewItemKey(task.teamId, task.id)
+            setRevealedStatusTaskKey((currentKey) =>
+              currentKey === taskKey ? undefined : currentKey
+            )
+          }}
+          onStatusActionCancelled={(task) => {
+            const taskKey = createTaskViewItemKey(task.teamId, task.id)
+            const pendingContext = resolvePendingTaskActionContext(
+              taskActionCompletion,
+              ['move'],
+              { teamId: task.teamId, workItemId: task.id },
+            )
+            if (pendingContext) taskActionCompletion.cancelContext(pendingContext)
             setRevealedStatusTaskKey((currentKey) =>
               currentKey === taskKey ? undefined : currentKey
             )

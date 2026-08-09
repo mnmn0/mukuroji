@@ -53,6 +53,8 @@ export type MyTasksWorkspaceViewProps = {
   ) => void
   /** Clears a status-action entrance after its selector commits a change. */
   onStatusActionConsumed?: (task: ProjectTask) => void
+  /** Cancels a revealed status action when its selector is dismissed unchanged. */
+  onStatusActionCancelled?: (task: ProjectTask) => void
   /** Visible card fields, density, wrapping, and grouping selected by the effective view. */
   presentation?: TaskViewPresentationSettings
   /** Team-qualified key whose status selector was revealed by the canonical Move action. */
@@ -87,6 +89,7 @@ export function MyTasksWorkspaceView({
   onOpenTask,
   onTaskActionMenuOpen,
   onStatusActionConsumed,
+  onStatusActionCancelled,
   personLabels = {},
   presentation,
   revealedStatusTaskKey,
@@ -402,6 +405,11 @@ export function MyTasksWorkspaceView({
                             moveTaskToStatus(task, nextStatus)
                             onStatusActionConsumed?.(task)
                           }}
+                      onStatusActionCancel={
+                        revealedStatusTaskKey === taskViewKey && onStatusActionCancelled
+                          ? () => onStatusActionCancelled(task)
+                          : undefined
+                      }
                       revealStatusControl={revealedStatusTaskKey === taskViewKey}
                       workflowStatuses={editableStatuses}
                       taskViewItemKey={taskViewKey}

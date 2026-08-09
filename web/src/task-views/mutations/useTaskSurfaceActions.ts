@@ -221,7 +221,10 @@ export function useTaskSurfaceActions(
   const executeContext = useCallback(async (
     context: WorkItemActionContext,
   ): Promise<TaskActionExecutionResult> => {
-    const result = await executeTaskAction(registry, context)
+    const result = await executeTaskAction(
+      registry,
+      createTaskActionInvocationContext(context),
+    )
     onExecutionResult?.(result)
     return result
   }, [onExecutionResult, registry])
@@ -274,6 +277,33 @@ export function useTaskSurfaceActions(
     registry,
     resolveShortcut,
   }), [execute, registry, resolveShortcut])
+}
+
+/**
+ * Creates a fresh invocation context for command definitions that retain a resolved snapshot.
+ *
+ * Command-menu entries may execute the same resolved context more than once. Fresh context and
+ * selection objects ensure each accepted execution has a distinct completion-bridge identity.
+ *
+ * @param context - Resolved canonical context retained by an action entrance.
+ * @returns Fresh invocation context preserving the same permission and revision snapshot values.
+ */
+export function createTaskActionInvocationContext(
+  context: WorkItemActionContext,
+): WorkItemActionContext {
+  return {
+    ...context,
+    selection: {
+      ...context.selection,
+      targets: context.selection.targets.map((target) => ({ ...target })),
+      ...(context.selection.anchorTarget
+        ? { anchorTarget: { ...context.selection.anchorTarget } }
+        : {}),
+      ...(context.selection.focusedTarget
+        ? { focusedTarget: { ...context.selection.focusedTarget } }
+        : {}),
+    },
+  }
 }
 
 /**

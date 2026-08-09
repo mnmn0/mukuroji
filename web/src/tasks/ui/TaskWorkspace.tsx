@@ -25,6 +25,7 @@ import type {
   BulkOperationProjectOption,
   BulkOperationSelection,
   BulkOperationTaskActionRequest,
+  BulkOperationTaskActionInterruption,
 } from '../../bulk-operations/ui/BulkOperationToolbar'
 import type { FileArtifactsController } from '../../files/mutations/useFileArtifacts'
 import type {
@@ -159,6 +160,17 @@ export type TaskWorkspaceProps = {
   ) => Promise<boolean>
   /** Acknowledges one canonical action request after the toolbar consumes it. */
   onBulkTaskActionRequestConsumed: (requestId: number) => void
+  /** Claims the exact canonical request immediately before bulk apply dispatch. */
+  onBulkTaskActionMutationStart?: (request: BulkOperationTaskActionRequest) => boolean
+  /** Returns an applied operation to the exact canonical request that opened the editor. */
+  onBulkTaskActionOperationComplete?: (
+    request: BulkOperationTaskActionRequest,
+    operation: BulkOperation,
+  ) => void
+  /** Returns non-apply terminal outcomes to the canonical action completion bridge. */
+  onBulkTaskActionInterrupted?: (
+    interruption: BulkOperationTaskActionInterruption,
+  ) => void
   /** Previews validation and effects for a bulk operation. */
   onBulkPreview?: (request: BulkOperationRequest) => Promise<BulkOperationPreview>
   /** Retries failed items in a bulk operation. */
@@ -297,6 +309,9 @@ export function TaskWorkspace({
   onBulkOperationComplete,
   onBulkTaskActionRequest,
   onBulkTaskActionRequestConsumed,
+  onBulkTaskActionMutationStart,
+  onBulkTaskActionOperationComplete,
+  onBulkTaskActionInterrupted,
   onBulkPreview,
   onBulkRetry,
   onBulkUndo,
@@ -613,6 +628,9 @@ export function TaskWorkspace({
           onBulkOperationComplete={onBulkOperationComplete}
           onBulkTaskActionRequest={onBulkTaskActionRequest}
           onBulkTaskActionRequestConsumed={onBulkTaskActionRequestConsumed}
+          onBulkTaskActionMutationStart={onBulkTaskActionMutationStart}
+          onBulkTaskActionOperationComplete={onBulkTaskActionOperationComplete}
+          onBulkTaskActionInterrupted={onBulkTaskActionInterrupted}
           onBulkPreview={onBulkPreview}
           onBulkRetry={onBulkRetry}
           onBulkUndo={onBulkUndo}

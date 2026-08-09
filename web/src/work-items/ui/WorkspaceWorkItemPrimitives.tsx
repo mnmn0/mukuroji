@@ -4,7 +4,7 @@ import type {
   WorkItemConfiguration,
   TaskViewDensity,
 } from '@mukuroji/contracts'
-import type { DragEvent } from 'react'
+import { useRef, type DragEvent } from 'react'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import { MoreHorizontalIcon } from '../../shared/ui/icons'
 import type { ViewportAnchorPoint } from '../../shared/lib/viewportAnchor'
@@ -106,6 +106,8 @@ export type CompactTaskCardProps = {
   onOpenTask?: (task: ProjectTask) => void
   /** Optional callback that requests a workflow status change. */
   onStatusChange?: (workflowStatusId: string) => void
+  /** Cancels a revealed canonical status action when its selector loses focus unchanged. */
+  onStatusActionCancel?: () => void
   /** Translator used for Workspace and priority labels. */
   t: (key: MessageKey) => string
   /** Work Item displayed by the card. */
@@ -152,6 +154,7 @@ export function CompactTaskCard({
   onDragStart,
   onOpenActionMenu,
   onOpenTask,
+  onStatusActionCancel,
   onStatusChange,
   t,
   task,
@@ -167,6 +170,7 @@ export function CompactTaskCard({
   wrapText = false,
   workflowStatuses = [],
 }: CompactTaskCardProps) {
+  const statusActionCommittedRef = useRef(false)
   const taskTitle = resolveWorkItemTitle(task)
   const statusSelectLabel = t('workspace.myTasks.moveStatusLabel').replace(
     '{title}',
@@ -336,6 +340,10 @@ export function CompactTaskCard({
           className="workbench-input mt-3 h-9 w-full px-3 text-xs disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400"
           data-testid={testId ? `${testId}-status-select` : undefined}
           disabled={isMoving}
+          onBlur={() => {
+            if (!statusActionCommittedRef.current) onStatusActionCancel?.()
+            statusActionCommittedRef.current = false
+          }}
           value={resolveWorkItemWorkflowStatusId(task)}
           onChange={(event) => {
             const nextStatus = workflowStatuses.find(
@@ -343,6 +351,7 @@ export function CompactTaskCard({
             )
 
             if (nextStatus) {
+              statusActionCommittedRef.current = true
               onStatusChange(nextStatus.id)
             }
           }}

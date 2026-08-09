@@ -102,6 +102,7 @@ import { useWorkspaceSidebarController } from '../../shared/ui/sidebar'
 import {
   createWorkItemRelation,
   deleteWorkItemRelation,
+  WorkItemConfigurationApiError,
 } from '../../work-items/api'
 import {
   useWorkItemConfiguration,
@@ -185,11 +186,19 @@ import {
 import {
   allowTaskAction,
   createFailedTaskActionResult,
+  createSucceededTaskCreateActionResult,
   createSucceededTaskActionResult,
+  createSucceededTaskActionMutationResult,
   denyTaskAction,
   resolveTaskActionExecutionFailureMessage,
   type TaskActionExecutionResult,
 } from '../../task-views/model/taskActionRegistry'
+import {
+  canDismissCompletedTaskActionOwner,
+  createTaskActionCompletionBridge,
+  isPendingTaskActionFocusCurrent,
+  resolvePendingTaskActionContext,
+} from '../../task-views/model/taskActionCompletion'
 import {
   createTaskSurfaceActionBaseContext,
   resolveTaskSurfaceActionTarget,
@@ -269,6 +278,14 @@ type TeamIssueActionMenuOpenHandler = (
  * @returns Whether the current user may manage the endpoint.
  */
 type CanManageWorkItemDependencyEndpoint = (endpoint: WorkItemDependencyEndpoint) => boolean
+
+/** Persisted Team Create outcome returned by the route-level mutation. */
+type CreatedTeamIssueMutation = {
+  /** Canonical Work Item created by persistence. */
+  issue: TeamIssue
+  /** Application-relative route opened after creation, including retained view state. */
+  navigationPath: string
+}
 
 /**
  * チーム所有 Issue 画面を描画する props です。
@@ -416,11 +433,14 @@ type TeamIssueScreenProps = {
   /**
    * Issue 作成時の callback です。
    */
-  onCreateIssue?: (input: CreateTeamIssueInput) => Promise<void>
+  onCreateIssue?: (input: CreateTeamIssueInput) => Promise<CreatedTeamIssueMutation | void>
   /**
    * Issue 更新時の callback です。
    */
-  onUpdateIssue?: (issueId: string, input: UpdateTeamIssueInput) => Promise<void>
+  onUpdateIssue?: (
+    issueId: string,
+    input: UpdateTeamIssueInput,
+  ) => Promise<TeamIssue | void>
   /**
    * 選択中 Work Item へ relation を追加する callback です。
    */
@@ -738,11 +758,13 @@ export function TeamIssuePage() {
       JSON.stringify(input),
       (context) => createTeamIssue(teamId, accessToken, input, context),
     ))
-    navigate(preserveTaskViewUrlState(
+    const navigationPath = preserveTaskViewUrlState(
       createTeamIssuesPath(teamId, issue.id),
       searchParams,
-    ))
+    )
+    navigate(navigationPath)
     await mutateIssues()
+    return { issue, navigationPath }
   }
 
   const handleUpdateIssue = async (issueId: string, input: UpdateTeamIssueInput) => {
@@ -759,7 +781,7 @@ export function TeamIssuePage() {
     }
 
     try {
-      await guardEnterpriseSession(mutationRequestRunner.run(
+      const updatedIssue = await guardEnterpriseSession(mutationRequestRunner.run(
         `issue:update:${teamId}:${issueId}`,
         JSON.stringify([currentIssue.revision, input]),
         (context) => updateTeamIssue(
@@ -775,6 +797,7 @@ export function TeamIssuePage() {
       ))
       await mutateIssues()
       await mutateIssueDetail()
+      return updatedIssue
     } catch (error) {
       if (error instanceof TeamIssuesApiError && error.code === 'WorkItemRevisionConflict') {
         await Promise.all([mutateIssues(), mutateIssueDetail()])
@@ -1052,11 +1075,16 @@ export function TeamIssueScreen({
   const [taskActionContextMenuState, setTaskActionContextMenuState] = useState<
     TeamIssueActionContextMenuState
   >()
+  const [taskActionCompletion] = useState(createTaskActionCompletionBridge)
+  const pendingCreateWorkflowStatusIdRef = useRef<string | undefined>(undefined)
   const onSelectIssueRef = useRef(onSelectIssue)
 
   useEffect(() => {
     onSelectIssueRef.current = onSelectIssue
   }, [onSelectIssue])
+  useEffect(() => () => {
+    taskActionCompletion.cancel()
+  }, [taskActionCompletion])
   const viewMode = viewState?.viewMode ?? localViewMode
   const searchQuery = viewState?.searchQuery ?? localSearchQuery
   const statusFilter = viewState?.statusFilter ?? localStatusFilter
@@ -1118,8 +1146,15 @@ export function TeamIssueScreen({
     ? detailUpdateError[1]
     : undefined
 
-  /** Opens the Team create form with an optional Board-column status context. */
-  const openCreateIssue = useCallback((workflowStatusId?: string) => {
+  /** Dismisses the Team create form without completing another invocation. */
+  const dismissCreateIssueEditor = useCallback(() => {
+    setCreateErrorMessage(undefined)
+    setCreateWorkflowStatusId(undefined)
+    setIsCreateOpen(false)
+  }, [])
+
+  /** Opens the Team create form for an already accepted canonical invocation. */
+  const showCreateIssueEditor = useCallback((workflowStatusId?: string) => {
     setCreateErrorMessage(undefined)
     setCreateWorkflowStatusId(workflowStatusId)
     setIsCreateOpen(true)
@@ -1127,10 +1162,9 @@ export function TeamIssueScreen({
 
   /** Closes the Team create form and clears its contextual defaults. */
   const closeCreateIssue = useCallback(() => {
-    setCreateErrorMessage(undefined)
-    setCreateWorkflowStatusId(undefined)
-    setIsCreateOpen(false)
-  }, [])
+    taskActionCompletion.cancel('create')
+    dismissCreateIssueEditor()
+  }, [dismissCreateIssueEditor, taskActionCompletion])
 
   const visibleIssues = useMemo(
     () => taskViewDefinition
@@ -1204,6 +1238,13 @@ export function TeamIssueScreen({
     () => createTaskViewActionSelection(taskViewSelection, visibleIssueActionTargets),
     [taskViewSelection, visibleIssueActionTargets],
   )
+  useEffect(() => {
+    const pendingContext = taskActionCompletion.current()
+    if (
+      pendingContext &&
+      !isPendingTaskActionFocusCurrent(pendingContext, teamActionSelection)
+    ) taskActionCompletion.cancel(pendingContext.actionId)
+  }, [taskActionCompletion, teamActionSelection])
   const teamActionScope = useMemo<TeamTaskViewScope>(
     () => ({ kind: 'team', teamId }),
     [teamId],
@@ -1239,7 +1280,8 @@ export function TeamIssueScreen({
   const executeTeamIssueDetailAction = useCallback((
     context: WorkItemActionContext,
     controlSelector?: string,
-  ): WorkItemActionResult => {
+    waitForMutation = false,
+  ): Promise<WorkItemActionResult> | WorkItemActionResult => {
     const target = resolveTaskSurfaceActionTarget(context)
     const issue = target
       ? visibleIssues.find((candidate) =>
@@ -1256,11 +1298,19 @@ export function TeamIssueScreen({
       )
     }
 
+    const completion = waitForMutation
+      ? taskActionCompletion.begin(context, () => onSelectIssueRef.current?.(''))
+      : undefined
     setDetailUpdateError(undefined)
+    if (!completion) taskActionCompletion.cancel()
+    setTaskViewSelection((currentSelection) => reduceTaskViewSelection(currentSelection, {
+      key: createTaskViewItemKey(issue.teamId, issue.id),
+      type: 'focus',
+    }))
     onSelectIssueRef.current?.(issue.id)
     if (controlSelector) focusTeamIssueDetailControl(controlSelector)
-    return createSucceededTaskActionResult(context.actionId, target)
-  }, [t, visibleIssues])
+    return completion ?? createSucceededTaskActionResult(context.actionId, target)
+  }, [t, taskActionCompletion, visibleIssues])
 
   const currentTeamActionTarget = teamActionSelection.targets.length === 1
     ? teamActionSelection.targets[0]
@@ -1279,8 +1329,11 @@ export function TeamIssueScreen({
     ...(canCreateIssueAction
       ? {
           create: (context) => {
-            openCreateIssue()
-            return createSucceededTaskActionResult(context.actionId)
+            const workflowStatusId = pendingCreateWorkflowStatusIdRef.current
+            pendingCreateWorkflowStatusIdRef.current = undefined
+            const completion = taskActionCompletion.begin(context, dismissCreateIssueEditor)
+            showCreateIssueEditor(workflowStatusId)
+            return completion
           },
         }
       : {}),
@@ -1291,10 +1344,15 @@ export function TeamIssueScreen({
       : {}),
     ...(canEditIssueAction
       ? {
-          edit: (context) => executeTeamIssueDetailAction(context, 'input[name="title"]'),
+          edit: (context) => executeTeamIssueDetailAction(
+            context,
+            'input[name="title"]',
+            true,
+          ),
           move: (context) => executeTeamIssueDetailAction(
             context,
             'select[name="workflowStatusId"]',
+            true,
           ),
         }
       : {}),
@@ -1303,6 +1361,7 @@ export function TeamIssueScreen({
           assign: (context) => executeTeamIssueDetailAction(
             context,
             'select[name="assigneeUserId"]',
+            true,
           ),
         }
       : {}),
@@ -1311,6 +1370,7 @@ export function TeamIssueScreen({
           relation: (context) => executeTeamIssueDetailAction(
             context,
             '[data-testid="work-item-relations-editor"] select',
+            true,
           ),
         }
       : {}),
@@ -1318,10 +1378,15 @@ export function TeamIssueScreen({
       ? {
           watch: async (context) => {
             const target = resolveTaskSurfaceActionTarget(context)
-            if (!target) {
+            if (
+              !target ||
+              !selectedIssue ||
+              selectedIssue.teamId !== target.teamId ||
+              selectedIssue.id !== target.workItemId
+            ) {
               return createFailedTaskActionResult(
                 context.actionId,
-                undefined,
+                target,
                 'TeamTaskActionTargetNotFound',
                 'not-found',
                 t('taskViews.action.notFound'),
@@ -1346,9 +1411,12 @@ export function TeamIssueScreen({
     canEditIssueAction,
     canManageIssueRelationAction,
     canOpenIssueAction,
+    dismissCreateIssueEditor,
     executeTeamIssueDetailAction,
-    openCreateIssue,
+    selectedIssue,
+    showCreateIssueEditor,
     t,
+    taskActionCompletion,
     toggleIssueWatch,
   ])
 
@@ -1388,11 +1456,19 @@ export function TeamIssueScreen({
     },
     open: evaluateTeamIssueTargetPermission,
     relation: evaluateTeamIssueTargetPermission,
-    watch: evaluateTeamIssueTargetPermission,
+    watch: (context) => {
+      const target = resolveTaskSurfaceActionTarget(context)
+      return target && selectedIssue && toggleIssueWatch &&
+          selectedIssue.teamId === target.teamId && selectedIssue.id === target.workItemId
+        ? allowTaskAction()
+        : denyTaskAction(teamActionDisabledReasons.unavailable)
+    },
   }), [
     canMoveTeamIssueAction,
     evaluateTeamIssueTargetPermission,
+    selectedIssue,
     teamActionDisabledReasons,
+    toggleIssueWatch,
     visibleIssues,
   ])
 
@@ -1421,6 +1497,168 @@ export function TeamIssueScreen({
     selection: teamActionSelection,
     surface: 'team',
   })
+
+  /**
+   * Routes header and Board-column Create clicks through the canonical Team registry.
+   *
+   * @param workflowStatusId - Optional Board-column status default for the create editor.
+   */
+  const handleTeamCreateClick = useCallback((workflowStatusId?: string) => {
+    pendingCreateWorkflowStatusIdRef.current = workflowStatusId
+    void teamActions.execute(
+      'create',
+      'click',
+      undefined,
+      { mode: 'none', targets: [] },
+    )
+  }, [teamActions])
+
+  /**
+   * Returns a detail-form mutation outcome to a pending Edit, Move, or Assign action.
+   *
+   * @param issueId - Team Issue persisted by the existing detail form.
+   * @param input - Validated detail patch submitted by the form.
+   * @returns Nothing after the existing mutation and completion bridge settle.
+   */
+  const handleTeamIssueActionUpdate = useCallback(async (
+    issueId: string,
+    input: UpdateTeamIssueInput,
+  ): Promise<void> => {
+    if (!onUpdateIssue) return
+    const pendingCandidate = resolvePendingTaskActionContext(
+      taskActionCompletion,
+      ['assign', 'edit', 'move', 'relation'],
+      { teamId, workItemId: issueId },
+    )
+    const currentIssue = selectedIssue?.id === issueId ? selectedIssue : undefined
+    const pendingContext = pendingCandidate && (
+      pendingCandidate.actionId === 'edit' ||
+      (pendingCandidate.actionId === 'move' &&
+        currentIssue !== undefined &&
+        input.workflowStatusId !== resolveWorkItemWorkflowStatusId(currentIssue)) ||
+      (pendingCandidate.actionId === 'assign' &&
+        input.assigneeUserId !== undefined &&
+        input.assigneeUserId !== currentIssue?.assigneeUserId)
+    )
+      ? pendingCandidate
+      : undefined
+    if (pendingCandidate && !pendingContext) {
+      taskActionCompletion.cancelContext(pendingCandidate)
+    }
+    const target = pendingContext
+      ? resolveTaskSurfaceActionTarget(pendingContext)
+      : undefined
+    const claimedContext = pendingContext && target && taskActionCompletion.claim(pendingContext)
+      ? pendingContext
+      : undefined
+    setDetailUpdateError(undefined)
+
+    try {
+      const updatedIssue = await onUpdateIssue(issueId, input)
+      if (claimedContext && target) {
+        taskActionCompletion.settle(claimedContext, createSucceededTaskActionMutationResult(
+          claimedContext.actionId,
+          target,
+          updatedIssue?.revision,
+        ))
+      }
+    } catch (error) {
+      if (claimedContext) {
+        const isConflict = isTeamIssueRevisionConflict(error)
+        const canDismissOwner = canDismissCompletedTaskActionOwner(
+          taskActionCompletion,
+          claimedContext,
+        )
+        taskActionCompletion.settle(claimedContext, createFailedTaskActionResult(
+          claimedContext.actionId,
+          target,
+          isConflict ? 'WorkItemRevisionConflict' : 'TeamTaskActionMutationFailed',
+          isConflict ? 'conflict' : 'unknown',
+          isConflict ? t('tasks.action.conflict') : t('taskViews.action.failed'),
+          isConflict,
+        ))
+        if (canDismissOwner) onSelectIssueRef.current?.('')
+      }
+      if (
+        selectedIssueUpdateErrorKey &&
+        (!claimedContext || canDismissCompletedTaskActionOwner(
+          taskActionCompletion,
+          claimedContext,
+        ))
+      ) {
+        setDetailUpdateError([
+          selectedIssueUpdateErrorKey,
+          error instanceof Error ? error.message : t('issues.error.update'),
+        ])
+      }
+    }
+  }, [
+    onUpdateIssue,
+    selectedIssueUpdateErrorKey,
+    selectedIssue,
+    t,
+    taskActionCompletion,
+    teamId,
+  ])
+
+  /**
+   * Returns a relation editor mutation to a pending canonical Relation action.
+   *
+   * @param issueId - Team Issue whose relation graph is being changed.
+   * @param mutate - Existing add or delete relation mutation.
+   * @returns Nothing after the relation graph refresh completes.
+   */
+  const handleTeamIssueActionRelation = useCallback(async (
+    issueId: string,
+    mutate: () => Promise<void>,
+  ): Promise<void> => {
+    const pendingCandidate = resolvePendingTaskActionContext(
+      taskActionCompletion,
+      ['assign', 'edit', 'move', 'relation'],
+      { teamId, workItemId: issueId },
+    )
+    const pendingContext = pendingCandidate?.actionId === 'relation'
+      ? pendingCandidate
+      : undefined
+    if (pendingCandidate && !pendingContext) {
+      taskActionCompletion.cancelContext(pendingCandidate)
+    }
+    const target = pendingContext
+      ? resolveTaskSurfaceActionTarget(pendingContext)
+      : undefined
+    const claimedContext = pendingContext && target && taskActionCompletion.claim(pendingContext)
+      ? pendingContext
+      : undefined
+
+    try {
+      await mutate()
+      if (claimedContext && target) {
+        taskActionCompletion.settle(claimedContext, createSucceededTaskActionMutationResult(
+          claimedContext.actionId,
+          target,
+        ))
+      }
+    } catch (error) {
+      if (claimedContext) {
+        const isConflict = isWorkItemRelationGraphConflict(error)
+        const canDismissOwner = canDismissCompletedTaskActionOwner(
+          taskActionCompletion,
+          claimedContext,
+        )
+        taskActionCompletion.settle(claimedContext, createFailedTaskActionResult(
+          claimedContext.actionId,
+          target,
+          isConflict ? 'WorkItemRelationGraphConflict' : 'TeamTaskRelationMutationFailed',
+          isConflict ? 'conflict' : 'unknown',
+          t('taskViews.action.failed'),
+          isConflict,
+        ))
+        if (canDismissOwner) onSelectIssueRef.current?.('')
+      }
+      throw error
+    }
+  }, [t, taskActionCompletion, teamId])
+
   const taskActionContextMenuContext = useMemo(() => {
     if (!taskActionContextMenuState) return undefined
     return createTaskSurfaceActionBaseContext(
@@ -1520,6 +1758,7 @@ export function TeamIssueScreen({
       )
       if (selectionAction) {
         event.preventDefault()
+        taskActionCompletion.cancel()
         setTaskActionErrorMessage(undefined)
         setTaskViewSelection(reduceTaskViewSelection(taskViewSelection, selectionAction))
         return
@@ -1542,6 +1781,7 @@ export function TeamIssueScreen({
   }, [
     isCreateOpen,
     taskActionContextMenuState,
+    taskActionCompletion,
     taskViewSelection,
     teamActions,
     visibleIssueKeys,
@@ -1576,7 +1816,7 @@ export function TeamIssueScreen({
                 <button
                   aria-expanded={isCreateOpen}
                   className="workbench-button-primary inline-flex h-10 items-center gap-2 px-4"
-                  onClick={() => isCreateOpen ? closeCreateIssue() : openCreateIssue()}
+                  onClick={() => isCreateOpen ? closeCreateIssue() : handleTeamCreateClick()}
                   type="button"
                 >
                   + {t('issues.action.new')}
@@ -1623,11 +1863,55 @@ export function TeamIssueScreen({
 
                       setCreateErrorMessage(undefined)
 
+                      const pendingContext = resolvePendingTaskActionContext(
+                        taskActionCompletion,
+                        ['create'],
+                      )
+                      const claimedContext = pendingContext &&
+                          taskActionCompletion.claim(pendingContext)
+                        ? pendingContext
+                        : undefined
                       try {
-                        await onCreateIssue(input)
-                        closeCreateIssue()
+                        const createdMutation = await onCreateIssue(input)
+                        const canDismissOwner = claimedContext
+                          ? canDismissCompletedTaskActionOwner(
+                              taskActionCompletion,
+                              claimedContext,
+                            )
+                          : true
+                        if (claimedContext) {
+                          taskActionCompletion.settle(claimedContext, createSucceededTaskCreateActionResult(
+                            createdMutation
+                              ? {
+                                  expectedRevision: createdMutation.issue.revision,
+                                  teamId: createdMutation.issue.teamId,
+                                  workItemId: createdMutation.issue.id,
+                                }
+                              : undefined,
+                            createdMutation?.navigationPath,
+                          ))
+                        }
+                        if (canDismissOwner) dismissCreateIssueEditor()
                       } catch (error) {
-                        setCreateErrorMessage(error instanceof Error ? error.message : t('issues.error.create'))
+                        if (claimedContext) {
+                          const canDismissOwner = canDismissCompletedTaskActionOwner(
+                            taskActionCompletion,
+                            claimedContext,
+                          )
+                          taskActionCompletion.settle(claimedContext, createFailedTaskActionResult(
+                            claimedContext.actionId,
+                            undefined,
+                            'TeamTaskCreateFailed',
+                            'unknown',
+                            t('issues.error.create'),
+                          ))
+                          if (canDismissOwner) dismissCreateIssueEditor()
+                        }
+                        if (!claimedContext) {
+                          setCreateErrorMessage(
+                            error instanceof Error ? error.message : t('issues.error.create'),
+                          )
+                        }
                       }
                     }}
                     projects={activeTeam?.projects ?? []}
@@ -1725,7 +2009,7 @@ export function TeamIssueScreen({
                       issues={visibleIssues}
                       presentation={taskViewPresentation}
                       locale={locale}
-                      onCreateIssueOpen={onCreateIssue ? openCreateIssue : undefined}
+                      onCreateIssueOpen={onCreateIssue ? handleTeamCreateClick : undefined}
                       onIssueActionMenuOpen={handleTeamIssueActionMenuOpen}
                       onOpenIssue={canOpenIssueAction ? handleOpenIssue : undefined}
                       selectedIssueKeys={taskViewSelection.selectedKeys}
@@ -1733,7 +2017,11 @@ export function TeamIssueScreen({
                       t={t}
                       workflowStatuses={workflowStatuses}
                       workspaceMembers={workspaceMembers}
-                      onUpdateIssue={onUpdateIssue}
+                      onUpdateIssue={onUpdateIssue
+                        ? async (issueId, input) => {
+                            await onUpdateIssue(issueId, input)
+                          }
+                        : undefined}
                     />
                   )}
                 </div>
@@ -1754,24 +2042,21 @@ export function TeamIssueScreen({
                 issue={selectedIssue}
                 isRelationsLoading={isRelationsLoading}
                 locale={locale}
-                onAddRelation={onAddRelation}
+                onAddRelation={onAddRelation
+                  ? (issueId, input) => handleTeamIssueActionRelation(
+                      issueId,
+                      () => onAddRelation(issueId, input),
+                    )
+                  : undefined}
                 onCreateScheduleDependency={onCreateScheduleDependency}
-                onDeleteRelation={onDeleteRelation}
+                onDeleteRelation={onDeleteRelation
+                  ? (issueId, relation) => handleTeamIssueActionRelation(
+                      issueId,
+                      () => onDeleteRelation(issueId, relation),
+                    )
+                  : undefined}
                 onDeleteScheduleDependency={onDeleteScheduleDependency}
-                onUpdateIssue={onUpdateIssue ? async (issueId, input) => {
-                  setDetailUpdateError(undefined)
-
-                  try {
-                    await onUpdateIssue(issueId, input)
-                  } catch (error) {
-                    if (selectedIssueUpdateErrorKey) {
-                      setDetailUpdateError([
-                        selectedIssueUpdateErrorKey,
-                        error instanceof Error ? error.message : t('issues.error.update'),
-                      ])
-                    }
-                  }
-                } : undefined}
+                onUpdateIssue={onUpdateIssue ? handleTeamIssueActionUpdate : undefined}
                 onUpdateScheduleDependency={onUpdateScheduleDependency}
                 planningSnapshot={planningSnapshot}
                 projects={activeTeam?.projects ?? []}
@@ -3593,6 +3878,31 @@ function resolveIssueCustomFieldSearchValues(
 ) {
   return resolveIssueCustomFieldEntries(issue, configuration, locale, personLabels)
     .flatMap(({ definition, value }) => [definition.name, value])
+}
+
+/**
+ * Identifies a revision conflict preserved either directly or as a route-level error cause.
+ *
+ * @param error - Unknown Team Issue mutation failure.
+ * @returns Whether the failure has the canonical Work Item revision conflict code.
+ */
+function isTeamIssueRevisionConflict(error: unknown): boolean {
+  if (error instanceof TeamIssuesApiError) {
+    return error.code === 'WorkItemRevisionConflict'
+  }
+  const cause = error instanceof Error ? error.cause : undefined
+  return cause instanceof TeamIssuesApiError && cause.code === 'WorkItemRevisionConflict'
+}
+
+/**
+ * Identifies the canonical relation graph conflict returned by relation persistence.
+ *
+ * @param error - Unknown relation mutation failure.
+ * @returns Whether the failure invalidated the retained relation graph revision.
+ */
+function isWorkItemRelationGraphConflict(error: unknown): boolean {
+  return error instanceof WorkItemConfigurationApiError &&
+    error.code === 'WorkItemRelationGraphConflict'
 }
 
 /**
