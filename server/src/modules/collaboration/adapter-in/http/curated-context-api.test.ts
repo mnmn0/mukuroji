@@ -94,6 +94,40 @@ test('returns cursor-paginated curated context with server-derived capabilities'
   })
 })
 
+test('rejects context content when the parent assignment changes during the read', async () => {
+  let detailReads = 0
+  const assignments: Record<string, string> = {
+    'onboarding-friction': 'refero',
+  }
+  configureFakeProjectClients(true, {
+    projectAccesses: [{ projectId: 'refero', role: 'viewer' }],
+    detailAssignedProjectIds: assignments,
+    detailReadHook: async () => {
+      detailReads += 1
+      if (detailReads === 2) assignments['onboarding-friction'] = 'private-project'
+    },
+  })
+  setTestAppDependencies({
+    collaboration: createCollaborationStub({
+      async getCuratedContext(input) {
+        return {
+          schemaVersion: COLLABORATION_CONTEXT_SCHEMA_VERSION,
+          items: [createCuratedContextFixture('assignment-race')],
+          capabilities: input.capabilities,
+        }
+      },
+    }),
+  })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction/context-items',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+
+  expect(response.status).toBe(403)
+  expect(await response.json()).toMatchObject({ message: 'Project access is denied.' })
+})
+
 test('keeps comment provenance available when only its lifecycle revision changes', async () => {
   configureFakeProjectClients(true)
   const originalBody = 'The accepted answer remains unchanged.'
@@ -649,7 +683,7 @@ test('rehydrates a comment source instead of trusting client provenance', async 
           kind: 'comment',
           sourceId: 'comment-1',
           originalBody: 'Untrusted client body',
-          quote: { text: 'source' },
+          quote: { text: ' source ', startOffset: 12, endOffset: 20 },
           occurredAt: '2020-01-01T00:00:00.000Z',
           availability: 'deleted',
         },
@@ -665,7 +699,7 @@ test('rehydrates a comment source instead of trusting client provenance', async 
     capturedRevision: 2,
     availability: 'available',
     permalink: '/teams/core-team/issues?issueId=onboarding-friction&commentId=comment-1&rootCommentId=root-1',
-    quote: { text: 'source', startOffset: 13, endOffset: 19 },
+    quote: { text: ' source ', startOffset: 12, endOffset: 20 },
   })
   expect(await response.json()).toEqual({ item })
 })

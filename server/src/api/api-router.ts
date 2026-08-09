@@ -7678,15 +7678,23 @@ routeApp.get('/api/teams/:teamId/issues/:issueId/context-items', async (c) => {
       cursor: c.req.query('cursor'),
       capabilities: createCuratedContextCapabilities(principal, context, detail.issue),
     })
+    const reconciledItems = await reconcileCuratedContextSourcesForViewer(
+      principal,
+      teamId,
+      issueId,
+      entityKey,
+      page.items,
+    )
+    await assertCuratedContextScopeUnchanged(
+      principal,
+      teamId,
+      issueId,
+      'viewer',
+      detail.issue.assignedProjectId,
+    )
     return c.json({
       ...page,
-      items: await reconcileCuratedContextSourcesForViewer(
-        principal,
-        teamId,
-        issueId,
-        entityKey,
-        page.items,
-      ),
+      items: reconciledItems,
     })
   } catch (error) {
     return toCollaborationErrorResponse(c, error)
@@ -7708,7 +7716,7 @@ routeApp.get(
 
     try {
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-      await loadAuthorizedTeamIssue(principal, teamId, issueId, 'viewer')
+      const { detail } = await loadAuthorizedTeamIssue(principal, teamId, issueId, 'viewer')
       const entityKey = createWorkItemCollaborationEntityKey(
         principal.directoryId,
         teamId,
@@ -7721,15 +7729,23 @@ routeApp.get(
         limit: limitValue === undefined ? undefined : Number(limitValue),
         cursor: c.req.query('cursor'),
       })
+      const reconciledItems = await reconcileCuratedContextSourcesForViewer(
+        principal,
+        teamId,
+        issueId,
+        entityKey,
+        page.items,
+      )
+      await assertCuratedContextScopeUnchanged(
+        principal,
+        teamId,
+        issueId,
+        'viewer',
+        detail.issue.assignedProjectId,
+      )
       return c.json({
         ...page,
-        items: await reconcileCuratedContextSourcesForViewer(
-          principal,
-          teamId,
-          issueId,
-          entityKey,
-          page.items,
-        ),
+        items: reconciledItems,
       })
     } catch (error) {
       return toCollaborationErrorResponse(c, error)
@@ -7957,9 +7973,9 @@ routeApp.get(
 
     try {
       const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-      await loadAuthorizedTeamIssue(principal, teamId, issueId, 'viewer')
+      const { detail } = await loadAuthorizedTeamIssue(principal, teamId, issueId, 'viewer')
       const limitValue = c.req.query('limit')
-      return c.json(await workItemDependencies.collaboration.getAcceptedResolutionHistory({
+      const page = await workItemDependencies.collaboration.getAcceptedResolutionHistory({
         entityKey: createWorkItemCollaborationEntityKey(
           principal.directoryId,
           teamId,
@@ -7968,7 +7984,15 @@ routeApp.get(
         rootCommentId,
         limit: limitValue === undefined ? undefined : Number(limitValue),
         cursor: c.req.query('cursor'),
-      }))
+      })
+      await assertCuratedContextScopeUnchanged(
+        principal,
+        teamId,
+        issueId,
+        'viewer',
+        detail.issue.assignedProjectId,
+      )
+      return c.json(page)
     } catch (error) {
       return toCollaborationErrorResponse(c, error)
     }
@@ -19180,6 +19204,38 @@ async function loadAuthorizedTeamIssue(
   return { context, detail }
 }
 
+/**
+ * Rechecks the parent Work Item scope after a curated-context read completes.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @param teamId - Owning Team identifier.
+ * @param issueId - Canonical Work Item identifier.
+ * @param minimumRole - Minimum current Project role required for the read.
+ * @param initialAssignedProjectId - Project assignment observed before the read.
+ * @returns A promise that resolves only when the parent scope is unchanged.
+ */
+async function assertCuratedContextScopeUnchanged(
+  principal: WorkspacePrincipal,
+  teamId: string,
+  issueId: string,
+  minimumRole: ProjectRole,
+  initialAssignedProjectId: string | undefined,
+): Promise<void> {
+  const current = await loadAuthorizedTeamIssue(
+    principal,
+    teamId,
+    issueId,
+    minimumRole,
+  )
+  if (current.detail.issue.assignedProjectId !== initialAssignedProjectId) {
+    throw new CollaborationError(
+      409,
+      'CollaborationConflict',
+      'Work Item assignment changed while curated context was loading.',
+    )
+  }
+}
+
 async function loadFileProofingRequestContext(
   c: Context,
   principal: WorkspacePrincipal,
@@ -20233,7 +20289,7 @@ function readCuratedContextQuote(value: unknown): CuratedContextQuote {
     )
   }
   return {
-    text: readCuratedContextText(
+    text: readCuratedContextQuoteText(
       value.text,
       'Curated source quote',
       COLLABORATION_CONTEXT_BODY_MAX_LENGTH,
@@ -20242,6 +20298,50 @@ function readCuratedContextQuote(value: unknown): CuratedContextQuote {
       ? {}
       : { startOffset, endOffset }),
   }
+}
+
+/**
+ * Validates quote text without normalizing its whitespace.
+ *
+ * @param value - Untrusted quote text.
+ * @param label - Safe validation label.
+ * @param maximumLength - Maximum UTF-16 length.
+ * @returns Exact quote text selected by the curator.
+ */
+function readCuratedContextQuoteText(
+  value: unknown,
+  label: string,
+  maximumLength: number,
+) {
+  if (typeof value !== 'string') {
+    throw invalidCuratedContextInput(`${label} must be text.`)
+  }
+  if (!value || value.length > maximumLength || hasCuratedContextUnsafeControlCharacters(value)) {
+    throw invalidCuratedContextInput(`${label} is empty or too long.`)
+  }
+  return value
+}
+
+/**
+ * Detects non-printing control characters that cannot be retained in a quote.
+ *
+ * @param value - Candidate quote text.
+ * @returns Whether the text contains a disallowed control character.
+ */
+function hasCuratedContextUnsafeControlCharacters(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index)
+    if (
+      (code >= 0 && code <= 8) ||
+      code === 11 ||
+      code === 12 ||
+      (code >= 14 && code <= 31) ||
+      code === 127
+    ) {
+      return true
+    }
+  }
+  return false
 }
 
 /**

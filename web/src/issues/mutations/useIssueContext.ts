@@ -318,7 +318,7 @@ export function useIssueContext({
         succeeded &&
         selectedContextItemId === input.supersedesItemId
       ) {
-        await mutateRevisions()
+        await refreshAuxiliaryContextQuery('revision history', mutateRevisions)
       }
       return succeeded
     },
@@ -353,7 +353,7 @@ export function useIssueContext({
           ),
       )
       if (succeeded && selectedContextItemId === item.id) {
-        await mutateRevisions()
+        await refreshAuxiliaryContextQuery('revision history', mutateRevisions)
       }
       return succeeded
     },
@@ -385,7 +385,10 @@ export function useIssueContext({
           ),
       )
       if (succeeded && selectedRootCommentId === rootCommentId) {
-        await mutateAcceptedResolutions()
+        await refreshAuxiliaryContextQuery(
+          'accepted-resolution history',
+          mutateAcceptedResolutions,
+        )
       }
       return succeeded
     },
@@ -498,6 +501,24 @@ export function useIssueContext({
     ),
     setAcceptedResolution,
     updateItem,
+  }
+}
+
+/**
+ * Revalidates an auxiliary context query without changing a committed mutation result.
+ *
+ * @param queryName - Safe label used for diagnostic logging.
+ * @param revalidate - SWR revalidation operation.
+ * @returns A promise that always resolves after logging transient refresh failures.
+ */
+export async function refreshAuxiliaryContextQuery(
+  queryName: string,
+  revalidate: () => Promise<unknown>,
+): Promise<void> {
+  try {
+    await revalidate()
+  } catch (error) {
+    console.error(`Issue context ${queryName} revalidation failed:`, error)
   }
 }
 
