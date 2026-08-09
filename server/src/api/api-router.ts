@@ -19584,7 +19584,11 @@ async function createNotificationVisibilityFilter(
       if (
         !notification.issueId &&
         requiresCurrentTriageOwner(notification) &&
-        currentScope.ownerUserId !== principal.userKey
+        (
+          !currentScope.ownerUserId ||
+          normalizeProjectMemberKey(currentScope.ownerUserId) !==
+            normalizeProjectMemberKey(principal.userKey)
+        )
       ) {
         return false
       }

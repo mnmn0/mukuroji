@@ -156,6 +156,53 @@ describe('triage schedule adapter', () => {
     }
   })
 
+  test('probes the required base table before disabling on an ambiguous missing resource', async () => {
+    const indexFailure = new Error('Requested resource not found.')
+    indexFailure.name = 'ResourceNotFoundException'
+    const indexHarness = createHarness((commandName) => {
+      if (commandName === 'QueryCommand') throw indexFailure
+      return {}
+    })
+
+    try {
+      await expect(runTriageSchedule({
+        documentClient: indexHarness.documentClient,
+        tableName: 'RequestIntakeTable',
+        auditTableName: 'AuditEventsTable',
+        auditRetentionDays: 365,
+        wakeIndexName: 'triage-wake-index',
+        wakeShardCount: 8,
+        batchSize: 100,
+        now: '2026-08-09T00:10:00.000Z',
+      })).resolves.toMatchObject({ disabled: true, evaluatedCandidates: 0 })
+      expect(indexHarness.calls).toEqual(['QueryCommand', 'GetCommand'])
+    } finally {
+      indexHarness.restore()
+    }
+
+    const tableFailure = new Error('Requested resource not found.')
+    tableFailure.name = 'ResourceNotFoundException'
+    const tableHarness = createHarness(() => {
+      throw tableFailure
+    })
+
+    try {
+      await expect(runTriageSchedule({
+        documentClient: tableHarness.documentClient,
+        tableName: 'RequestIntakeTable',
+        auditTableName: 'AuditEventsTable',
+        auditRetentionDays: 365,
+        wakeIndexName: 'triage-wake-index',
+        wakeShardCount: 8,
+        batchSize: 100,
+        now: '2026-08-09T00:10:00.000Z',
+      })).rejects.toBe(tableFailure)
+      expect(tableHarness.calls).toEqual(['QueryCommand', 'GetCommand'])
+    } finally {
+      tableHarness.restore()
+    }
+  })
+
   test('bubbles unrelated query validation failures instead of disabling the worker', async () => {
     const validationFailure = new Error('Invalid KeyConditionExpression.')
     validationFailure.name = 'ValidationException'
@@ -186,6 +233,39 @@ describe('triage schedule adapter', () => {
         return { Items: [{ scopeKey: 'WORKSPACE#workspace-1', recordKey: 'TRIAGE#triage-1' }] }
       }
       return { Item: { entryType: 'triage-entry', entry: {} } }
+    })
+
+    try {
+      await expect(runTriageSchedule({
+        documentClient: harness.documentClient,
+        tableName: 'RequestIntakeTable',
+        auditTableName: 'AuditEventsTable',
+        auditRetentionDays: 365,
+        wakeIndexName: 'triage-wake-index',
+        wakeShardCount: 8,
+        batchSize: 100,
+        now: '2026-08-09T00:10:00.000Z',
+      })).rejects.toMatchObject({ code: 'InvalidTriageEntry', status: 500 })
+      expect(harness.calls).toEqual(['QueryCommand', 'GetCommand'])
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('fails closed when an indexed row embeds an entry for another physical key', async () => {
+    const entry = createEntry()
+    entry.id = 'triage-other'
+    const storedItem = createTriageEntryTransactionItems({
+      tableName: 'RequestIntakeTable',
+      entry,
+      inputFingerprint: createTriageInputFingerprint({ sourceId: entry.source.sourceId }),
+    })[0]?.Put?.Item
+    if (!storedItem) throw new TypeError('Expected a stored triage entry fixture.')
+    const harness = createHarness((commandName) => {
+      if (commandName === 'QueryCommand') {
+        return { Items: [{ scopeKey: 'WORKSPACE#workspace-1', recordKey: 'TRIAGE#triage-1' }] }
+      }
+      return { Item: storedItem }
     })
 
     try {

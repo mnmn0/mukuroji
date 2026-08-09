@@ -379,15 +379,16 @@ export class DynamoDbTriageClient implements TriageClient {
 
   /** Strongly reads one canonical stored entry without applying a response projection. */
   private async readStoredEntry(workspaceId: string, entryId: string): Promise<TriageEntry> {
+    const key = createTriageEntryKey(workspaceId, entryId)
     const response = await this.documentClient.send(new GetCommand({
       TableName: this.tableName,
-      Key: createTriageEntryKey(workspaceId, entryId),
+      Key: key,
       ConsistentRead: true,
     }))
     if (response.Item === undefined) {
       throw new TriageError(404, 'TriageEntryNotFound', 'The triage entry was not found.')
     }
-    const entry = decodeTriageEntryRow(response.Item)
+    const entry = decodeTriageEntryRow(response.Item, key)
     if (!entry) {
       throw new TriageError(
         500,
@@ -995,12 +996,19 @@ export class DynamoDbTriageClient implements TriageClient {
           ConsistentRead: true,
         }))
         if (read.Item === undefined) continue
-        const entry = decodeTriageEntryRow(read.Item)
+        const entry = decodeTriageEntryRow(read.Item, key)
         if (!entry) {
           throw new TriageError(
             500,
             'InvalidTriageEntry',
             'The stored triage entry is invalid.',
+          )
+        }
+        if (entry.workspaceId !== workspaceId || entry.teamId !== teamId) {
+          throw new TriageError(
+            500,
+            'InvalidTriageEntry',
+            'The stored triage entry is outside the requested queue scope.',
           )
         }
         if (!matchesQueueFilter(entry, workspaceId, teamId, input, ownerUserId)) continue

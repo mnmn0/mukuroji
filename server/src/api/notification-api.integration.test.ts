@@ -328,6 +328,7 @@ test('rechecks Triage Project scope and redacts denied or retained source conten
     }),
   })
   const retained = createNotificationTriageEntry('triage-retained', {
+    ownerUserId: 'DEMO@EXAMPLE.COM',
     sourcePreview: {
       title: 'CURRENT_RETAINED_TRIAGE_TITLE',
       body: 'CURRENT_RETAINED_TRIAGE_BODY',

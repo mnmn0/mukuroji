@@ -2933,12 +2933,22 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
     workspaceId: string,
     submissionId: string,
   ): Promise<TriageEntry | undefined> {
+    const key = createTriageEntryKey(workspaceId, createFormTriageEntryId(submissionId))
     const response = await this.documentClient.send(new GetCommand({
       TableName: this.tableName,
-      Key: createTriageEntryKey(workspaceId, createFormTriageEntryId(submissionId)),
+      Key: key,
       ConsistentRead: true,
     }))
-    return decodeTriageEntryRow(response.Item)
+    if (response.Item === undefined) return undefined
+    const entry = decodeTriageEntryRow(response.Item, key)
+    if (!entry) {
+      throw new RequestIntakeError(
+        503,
+        'InvalidRequestTriageEntry',
+        'Stored request Triage entry is invalid.',
+      )
+    }
+    return entry
   }
 
   private createRateLimitUpdate(

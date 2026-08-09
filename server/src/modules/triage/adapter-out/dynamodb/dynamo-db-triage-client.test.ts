@@ -712,6 +712,31 @@ describe('DynamoDbTriageClient queue indexes', () => {
       harness.restore()
     }
   })
+
+  test('fails closed when a queue row embeds an entry for another physical key', async () => {
+    const entry = createEntry()
+    entry.id = 'triage-other'
+    const storedEntry = createTriageEntryTransactionItems({
+      tableName: 'RequestIntakeTable',
+      entry,
+      inputFingerprint: createTriageInputFingerprint({ sourceId: entry.source.sourceId }),
+    })[0]?.Put?.Item
+    if (!storedEntry) throw new TypeError('Expected a stored entry fixture.')
+    const harness = createHarness([
+      {},
+      { Items: [{ scopeKey: 'WORKSPACE#workspace-1', recordKey: 'TRIAGE#triage-1' }] },
+      { Item: storedEntry },
+    ])
+
+    try {
+      await expect(
+        harness.client.listEntries('workspace-1', 'support', { limit: 10 }),
+      ).rejects.toMatchObject({ code: 'InvalidTriageEntry', status: 500 })
+      expect(harness.calls()).toBe(3)
+    } finally {
+      harness.restore()
+    }
+  })
 })
 
 describe('DynamoDbTriageClient source admission', () => {

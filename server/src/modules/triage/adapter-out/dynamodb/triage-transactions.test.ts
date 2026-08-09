@@ -5,8 +5,10 @@ import { createTriageInputFingerprint } from '../../triage'
 import {
   createFormTriageEntryTransactionItems,
   createTriageAcceptanceTransactionItems,
+  createTriageEntryKey,
   createTriageSourceActivityTransactionItems,
   createTriageSourceClaimKey,
+  decodeTriageEntryRow,
 } from './triage-transactions'
 
 /** Stable transaction test instant. */
@@ -160,5 +162,26 @@ describe('triage DynamoDB transaction contributions', () => {
     expect(createTriageSourceClaimKey('workspace-1', 'email', 'message-1')).not.toEqual(
       createTriageSourceClaimKey('workspace-1', 'webhook', 'message-1'),
     )
+  })
+
+  test('decodes stored entries only when their projection matches the physical key', () => {
+    const entry = createEntry()
+    const storedItem = createFormTriageEntryTransactionItems({
+      tableName: 'RequestIntakeTable',
+      entry,
+      inputFingerprint: createTriageInputFingerprint({ submissionId: 'submission-1' }),
+    })[0]?.Put?.Item
+    if (!storedItem) throw new TypeError('Expected a stored triage entry fixture.')
+    const key = createTriageEntryKey(entry.workspaceId, entry.id)
+
+    expect(decodeTriageEntryRow(storedItem, key)).toMatchObject({ id: entry.id })
+    expect(decodeTriageEntryRow(storedItem, {
+      ...key,
+      recordKey: 'TRIAGE#triage-other',
+    })).toBeUndefined()
+    expect(decodeTriageEntryRow({
+      ...storedItem,
+      entry: { ...entry, revision: 0 },
+    }, key)).toBeUndefined()
   })
 })

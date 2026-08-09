@@ -426,14 +426,28 @@ export function createTriageWorkItemSourcePrefix(teamId: string, workItemId: str
   return `TRIAGE_WORK_ITEM#${requireIdentifier(teamId, 'Team ID')}#${requireIdentifier(workItemId, 'Work Item ID')}#`
 }
 
-/** Strictly decodes an entry embedded in a persistence row.
+/** Strictly decodes an entry embedded in its expected persistence row.
  *
  * @param value The untrusted DynamoDB item.
- * @returns The canonical entry, or undefined for another or malformed row.
+ * @param expectedKey The physical primary key used to read the item.
+ * @returns The canonical entry, or undefined for another, malformed, or misbound row.
  */
-export function decodeTriageEntryRow(value: unknown): TriageEntry | undefined {
+export function decodeTriageEntryRow(
+  value: unknown,
+  expectedKey: { scopeKey: string; recordKey: string },
+): TriageEntry | undefined {
   if (!isRecord(value) || value.entryType !== 'triage-entry') return undefined
-  return isTriageEntry(value.entry) ? value.entry : undefined
+  if (!isTriageEntry(value.entry)) return undefined
+  try {
+    validateTriageEntryProjection(value.entry)
+    const entryKey = createTriageEntryKey(value.entry.workspaceId, value.entry.id)
+    return entryKey.scopeKey === expectedKey.scopeKey &&
+        entryKey.recordKey === expectedKey.recordKey
+      ? value.entry
+      : undefined
+  } catch {
+    return undefined
+  }
 }
 
 /** Validates a triage entry before storing it.

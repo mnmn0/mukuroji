@@ -2533,6 +2533,12 @@ test('appends signed email activity to terminal Form and Triage records without 
     receivedAt: now.toISOString(),
   }
 
+  triageEntry.id = 'triage_other'
+  await expect(client.ingestEmail(envelope)).rejects.toMatchObject({
+    code: 'InvalidRequestTriageEntry',
+    status: 503,
+  })
+  triageEntry.id = 'triage_req-1'
   await expect(client.ingestEmail(envelope)).resolves.toMatchObject({
     receivedAt: now.toISOString(),
   })

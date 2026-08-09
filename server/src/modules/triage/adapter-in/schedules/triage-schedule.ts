@@ -213,7 +213,14 @@ export async function runTriageSchedule(
         ScanIndexForward: true,
       }))
     } catch (error) {
-      if (isUnavailableIndexError(error)) return { ...result, disabled: true }
+      if (isUnavailableIndexError(error)) {
+        await requireBaseTableForUnavailableIndex(
+          options.documentClient,
+          tableName,
+          error,
+        )
+        return { ...result, disabled: true }
+      }
       throw error
     }
 
@@ -233,7 +240,7 @@ export async function runTriageSchedule(
         ConsistentRead: true,
       }))
       if (read.Item === undefined) continue
-      const entry = decodeTriageEntryRow(read.Item)
+      const entry = decodeTriageEntryRow(read.Item, key)
       if (!entry) {
         throw new TriageError(
           500,
@@ -433,6 +440,29 @@ function isUnavailableIndexError(error: unknown): boolean {
   if (error.name === 'ResourceNotFoundException') return true
   return error.name === 'ValidationException' &&
     /(?:does not have the specified index|specified index.*(?:does not exist|not found)|index.*(?:not found|backfilling|not active)|backfilling global secondary index)/iu.test(error.message)
+}
+
+/** Distinguishes an unavailable index from a missing required base table.
+ *
+ * @param documentClient Request Intake DocumentClient used by the schedule.
+ * @param tableName Required Request Intake table name.
+ * @param error Ambiguous query error returned for either a missing table or index.
+ * @returns Completion after the base table is confirmed readable.
+ */
+async function requireBaseTableForUnavailableIndex(
+  documentClient: TriageScheduleDocumentClient,
+  tableName: string,
+  error: unknown,
+): Promise<void> {
+  if (!(error instanceof Error) || error.name !== 'ResourceNotFoundException') return
+  await documentClient.send(new GetCommand({
+    TableName: tableName,
+    Key: {
+      scopeKey: 'TRIAGE_INDEX_AVAILABILITY_PROBE',
+      recordKey: 'TRIAGE_INDEX_AVAILABILITY_PROBE',
+    },
+    ConsistentRead: true,
+  }))
 }
 
 /** Classifies a revision race in a DynamoDB transaction. */
