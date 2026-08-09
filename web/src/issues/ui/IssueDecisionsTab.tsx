@@ -132,6 +132,7 @@ export function IssueDecisionsTab({
   const createButtonRef = useRef<HTMLButtonElement>(null)
   const editorReturnFocusRef = useRef<HTMLElement | undefined>(undefined)
   const handledFocusTargetRef = useRef<string | undefined>(undefined)
+  const [deepLinkExhausted, setDeepLinkExhausted] = useState(false)
   const deepLinkTraversalRef = useRef<DeepLinkTraversalState>({
     requestedPages: 0,
   })
@@ -143,6 +144,7 @@ export function IssueDecisionsTab({
     if (!focusedContextItemId) {
       handledFocusTargetRef.current = undefined
       deepLinkTraversalRef.current = { requestedPages: 0 }
+      queueMicrotask(() => setDeepLinkExhausted(false))
       return
     }
     if (
@@ -167,7 +169,11 @@ export function IssueDecisionsTab({
       return
     }
 
-    if (!target) return
+    if (!target) {
+      queueMicrotask(() => setDeepLinkExhausted(traversal.exhausted))
+      return
+    }
+    queueMicrotask(() => setDeepLinkExhausted(false))
     handledFocusTargetRef.current = focusedContextItemId
     const frameId = window.requestAnimationFrame(() => {
       target.focus({ preventScroll: true })
@@ -249,6 +255,11 @@ export function IssueDecisionsTab({
           </button>
         ) : null}
       </div>
+      {deepLinkExhausted ? (
+        <p className="mt-3 border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800" role="status">
+          {t('collaboration.deepLink.exhausted')}
+        </p>
+      ) : null}
 
       {controller.hasLoadError ? (
         <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border border-red-200 bg-red-50 px-3 py-2.5" role="alert">

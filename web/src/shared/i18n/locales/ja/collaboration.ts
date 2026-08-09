@@ -68,6 +68,7 @@ export const collaborationMessages = {
   'collaboration.error.mutation': '操作を保存できませんでした。再度実行してください。',
   'collaboration.error.conflict': '別のメンバーが先に更新しました。最新の表示を確認し、もう一度操作してください。',
   'collaboration.retry': '再読み込み',
+  'collaboration.deepLink.exhausted': '最初の5ページではリンク先が見つかりませんでした。過去の項目を手動で読み込んで検索を続けてください。',
   'collaboration.decisions.description': '判断、アクション、リスク、補足情報を人が整理して残す台帳です。',
   'collaboration.decisions.create': '判断を追加',
   'collaboration.decisions.error': '整理済みの判断を取得できませんでした。',

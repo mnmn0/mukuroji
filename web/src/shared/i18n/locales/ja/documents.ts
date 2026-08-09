@@ -174,7 +174,7 @@ export const documentsMessages = {
   'documents.related.promoteToContext': '判断に追加',
   'documents.related.promotingToContext': '判断に追加中…',
   'documents.related.promoteToContextError':
-    '現在の権限ではこのドキュメントを開けませんでした。',
+    '現在の権限ではこのドキュメントを判断に追加できませんでした。',
   'documents.backlinks.openTarget': '開く',
   'documents.context.comments': 'コメント',
   'documents.context.backlinks': '関連',

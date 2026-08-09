@@ -68,6 +68,7 @@ export const collaborationMessages = {
   'collaboration.error.mutation': 'The change could not be saved. Try again.',
   'collaboration.error.conflict': 'Another member updated this first. Review the latest version and try again.',
   'collaboration.retry': 'Reload',
+  'collaboration.deepLink.exhausted': 'The linked item was not found in the first five pages. Load older items manually to continue searching.',
   'collaboration.decisions.description': 'A human-curated ledger of decisions, actions, risks, and supporting context.',
   'collaboration.decisions.create': 'Add context',
   'collaboration.decisions.error': 'Failed to load curated context.',

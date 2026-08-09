@@ -2398,6 +2398,14 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
     input: GetAcceptedResolutionHistoryInput,
   ): Promise<AcceptedResolutionPage> {
     await this.ensureLocalTable()
+    return this.readAcceptedResolutionHistoryPage(input, 0)
+  }
+
+  /** Reads one history page and retries once when the root pointer changes mid-read. */
+  private async readAcceptedResolutionHistoryPage(
+    input: GetAcceptedResolutionHistoryInput,
+    attempt: number,
+  ): Promise<AcceptedResolutionPage> {
     const entityKey = requireIdentifier(input.entityKey, 'Collaboration entity key')
     const rootCommentId = requireIdentifier(input.rootCommentId, 'Root comment ID')
     const limit = clampAcceptedResolutionHistoryLimit(input.limit)
@@ -2446,6 +2454,20 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       // One logical resolution produces at most an accepted and a superseded snapshot.
       Limit: limit * 2,
     }))
+    const latestRoot = await this.getRequiredStoredComment(entityKey, rootCommentId)
+    if (
+      latestRoot.version !== root.version ||
+      latestRoot.acceptedResolutionId !== root.acceptedResolutionId
+    ) {
+      if (attempt < 1) {
+        return this.readAcceptedResolutionHistoryPage(input, attempt + 1)
+      }
+      throw new CollaborationError(
+        409,
+        'AcceptedResolutionHistoryConflict',
+        'Accepted resolution history changed while it was being read.',
+      )
+    }
     const physicalRows = response.Items ?? []
     const items: AcceptedResolution[] = []
     let lastProcessedRecordKey: string | undefined

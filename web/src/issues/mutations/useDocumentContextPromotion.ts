@@ -22,38 +22,50 @@ export type DocumentContextPromotion = {
   onContextDraftConsumed: () => void
 }
 
+type ScopedDocumentContextDraft = {
+  /** Stable Team/Work Item identity that owns the draft. */
+  scopeKey: string
+  /** Draft values captured from the related document. */
+  draft: IssueContextDraft
+}
+
 /**
  * Owns the shared related-document promotion flow used by both detail panes.
  *
  * @param canCreate - Latest curated-context create capability.
+ * @param scopeKey - Stable Team/Work Item identity that owns the draft.
  * @param onTabChange - Optional route callback used to reveal the Decisions tab.
  * @returns Draft state and promotion callbacks.
  */
 export function useDocumentContextPromotion(
   canCreate: boolean,
+  scopeKey: string,
   onTabChange?: (tab: IssueCollaborationTab) => void,
 ): DocumentContextPromotion {
-  const [documentContextDraft, setDocumentContextDraft] =
-    useState<IssueContextDraft>()
+  const [scopedDraft, setScopedDraft] = useState<ScopedDocumentContextDraft>()
   const onPromoteToContext = useCallback(
     (
       backlink: DocumentBacklink,
       document: DocumentRecord,
       returnFocusId?: string,
     ) => {
-      setDocumentContextDraft({
-        ...createRelatedDocumentContextDraft(backlink, document),
-        returnFocusId,
+      setScopedDraft({
+        scopeKey,
+        draft: {
+          ...createRelatedDocumentContextDraft(backlink, document),
+          returnFocusId,
+        },
       })
       onTabChange?.('decisions')
     },
-    [onTabChange],
+    [onTabChange, scopeKey],
   )
 
   return {
-    documentContextDraft,
+    documentContextDraft:
+      scopedDraft?.scopeKey === scopeKey ? scopedDraft.draft : undefined,
     onContextDraftConsumed: useCallback(
-      () => setDocumentContextDraft(undefined),
+      () => setScopedDraft(undefined),
       [],
     ),
     onPromoteToContext: canCreate ? onPromoteToContext : undefined,

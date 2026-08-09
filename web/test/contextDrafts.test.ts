@@ -61,7 +61,8 @@ describe('related Document context drafts', () => {
 
     expect(draft.source?.originalBody).toHaveLength(19_999)
     expect(draft.source?.quote?.endOffset).toBe(19_999)
-    expect(draft.source?.originalBody?.endsWith('\ud800')).toBeFalse()
+    const lastCodeUnit = draft.source?.originalBody?.charCodeAt(19_998) ?? 0
+    expect(lastCodeUnit >= 0xd800 && lastCodeUnit <= 0xdbff).toBeFalse()
   })
 })
 

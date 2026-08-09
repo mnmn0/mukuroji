@@ -148,6 +148,7 @@ export function IssueConversationTab({
   const replyDeepLinkTraversalRef = useRef<DeepLinkTraversalState>({
     requestedPages: 0,
   })
+  const [deepLinkExhausted, setDeepLinkExhausted] = useState(false)
   const resolutionReturnFocusRef = useRef<HTMLElement | undefined>(undefined)
   const threads = useMemo(() => createCommentThreads(controller.comments), [controller.comments])
   const uniquePresence = useMemo(
@@ -209,6 +210,7 @@ export function IssueConversationTab({
       focusedCommentTargetRef.current = undefined
       rootDeepLinkTraversalRef.current = { requestedPages: 0 }
       replyDeepLinkTraversalRef.current = { requestedPages: 0 }
+      queueMicrotask(() => setDeepLinkExhausted(false))
       return
     }
 
@@ -247,6 +249,7 @@ export function IssueConversationTab({
             true,
           )
           replyDeepLinkTraversalRef.current = traversal.state
+          if (traversal.exhausted) queueMicrotask(() => setDeepLinkExhausted(true))
 
           if (traversal.shouldLoad) {
             focusLoadRequestRef.current = requestKey
@@ -263,6 +266,7 @@ export function IssueConversationTab({
             true,
           )
           rootDeepLinkTraversalRef.current = traversal.state
+          if (traversal.exhausted) queueMicrotask(() => setDeepLinkExhausted(true))
 
           if (traversal.shouldLoad) {
             focusLoadRequestRef.current = requestKey
@@ -275,6 +279,7 @@ export function IssueConversationTab({
     }
 
     focusLoadRequestRef.current = undefined
+    queueMicrotask(() => setDeepLinkExhausted(false))
     const frameId = window.requestAnimationFrame(() => {
       target.scrollIntoView({ behavior: 'auto', block: 'center' })
       target.focus({ preventScroll: true })
@@ -301,6 +306,11 @@ export function IssueConversationTab({
       className={`bg-white ${className}`}
       data-testid="issue-conversation-tab"
     >
+      {deepLinkExhausted ? (
+        <p className="m-5 border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800" role="status">
+          {t('collaboration.deepLink.exhausted')}
+        </p>
+      ) : null}
       <div className="border-b border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-5 py-4">
         {canCreateComment ? (
           <CommentComposer
@@ -360,6 +370,13 @@ export function IssueConversationTab({
                 (currentMemberKey !== undefined &&
                   thread.root.authorMemberKey === currentMemberKey &&
                   thread.root.capabilities?.canResolve === true))
+            const threadDetailsOpen =
+              !thread.root.resolvedAt ||
+              focusedCommentTargetId === thread.root.id ||
+              thread.replies.some(
+                (reply) => reply.id === focusedCommentTargetId,
+              ) ||
+              resolutionEditor?.rootComment.id === thread.root.id
 
             return (
               <article
@@ -518,14 +535,8 @@ export function IssueConversationTab({
               <details
                 className="group"
                 data-testid={`comment-thread-details-${thread.root.id}`}
-                open={
-                  !thread.root.resolvedAt ||
-                  focusedCommentTargetId === thread.root.id ||
-                  thread.replies.some(
-                    (reply) => reply.id === focusedCommentTargetId,
-                  ) ||
-                  resolutionEditor?.rootComment.id === thread.root.id
-                }
+                key={`thread-details-${thread.root.id}-${threadDetailsOpen ? 'open' : 'closed'}`}
+                open={threadDetailsOpen}
               >
                 {thread.root.resolvedAt ? (
                   <summary className="flex min-h-[44px] cursor-pointer list-none items-center gap-2 border-b border-[#c6e8e3] bg-[#e5f7f4] px-3 py-2 text-xs font-semibold text-[#116b63] marker:hidden">

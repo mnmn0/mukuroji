@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import { createTranslator } from '../../shared/i18n/i18n'
 import type { WorkspaceMember } from '../../workspace/api'
@@ -86,6 +86,7 @@ export function IssueActivityTab({
   const focusIsLoadingMoreActivity = controller.isLoadingMoreActivity
   const focusLoadMoreActivity = controller.loadMoreActivity
   const handledFocusTargetRef = useRef<string | undefined>(undefined)
+  const [deepLinkExhausted, setDeepLinkExhausted] = useState(false)
   const deepLinkTraversalRef = useRef<DeepLinkTraversalState>({
     requestedPages: 0,
   })
@@ -94,6 +95,7 @@ export function IssueActivityTab({
     if (!focusedActivityEventId) {
       handledFocusTargetRef.current = undefined
       deepLinkTraversalRef.current = { requestedPages: 0 }
+      queueMicrotask(() => setDeepLinkExhausted(false))
       return
     }
     if (
@@ -118,7 +120,11 @@ export function IssueActivityTab({
       return
     }
 
-    if (!target) return
+    if (!target) {
+      queueMicrotask(() => setDeepLinkExhausted(traversal.exhausted))
+      return
+    }
+    queueMicrotask(() => setDeepLinkExhausted(false))
     handledFocusTargetRef.current = focusedActivityEventId
     const enclosingDetails = target.closest('details')
     if (enclosingDetails) enclosingDetails.open = true
@@ -143,6 +149,11 @@ export function IssueActivityTab({
       className="px-5 py-4"
       data-testid="issue-activity-tab"
     >
+      {deepLinkExhausted ? (
+        <p className="mb-3 border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800" role="status">
+          {t('collaboration.deepLink.exhausted')}
+        </p>
+      ) : null}
       <div className="flex items-center justify-between gap-3">
         <p className="text-xs font-medium text-[var(--workbench-muted)]">
           {t('collaboration.activity.description')}

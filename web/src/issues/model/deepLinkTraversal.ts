@@ -23,10 +23,16 @@ export function advanceDeepLinkTraversal(
   current: DeepLinkTraversalState,
   targetId: string | undefined,
   canLoad: boolean,
-): { state: DeepLinkTraversalState; shouldLoad: boolean } {
+): {
+  state: DeepLinkTraversalState
+  shouldLoad: boolean
+  /** Whether the bounded automatic traversal stopped before finding the target. */
+  exhausted: boolean
+} {
   if (!targetId) {
     return {
       shouldLoad: false,
+      exhausted: false,
       state: { requestedPages: 0 },
     }
   }
@@ -38,6 +44,8 @@ export function advanceDeepLinkTraversal(
 
   return {
     shouldLoad,
+    exhausted:
+      !shouldLoad && canLoad && requestedPages >= MAX_DEEP_LINK_AUTO_PAGES,
     state: {
       requestedPages: shouldLoad ? requestedPages + 1 : requestedPages,
       targetId,

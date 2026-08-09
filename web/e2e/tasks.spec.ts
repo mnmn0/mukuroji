@@ -6401,13 +6401,17 @@ test.describe('authenticated task page', () => {
     const conversationTab = panel.getByRole('tab', { name: /会話/ })
     const decisionsTab = panel.getByRole('tab', { name: /判断/ })
     const sourcesTab = panel.getByRole('tab', { name: /情報源/ })
-    const collaborationAria = await panel
-      .getByRole('tablist', { name: '共同作業のセクション' })
-      .ariaSnapshot()
+    const collaborationTablist = panel.getByRole('tablist', {
+      name: '共同作業のセクション',
+    })
 
     await expect(conversationTab).toHaveAttribute('aria-selected', 'true')
-    expect(collaborationAria).toContain('- tab "会話 1" [selected]')
-    expect(collaborationAria).toContain('- tab "判断 1"')
+    await expect(
+      collaborationTablist.getByRole('tab', { name: '会話 1' }),
+    ).toHaveAttribute('aria-selected', 'true')
+    await expect(
+      collaborationTablist.getByRole('tab', { name: '判断 1' }),
+    ).toBeVisible()
     const collaborationPanelId = await conversationTab.getAttribute(
       'aria-controls',
     )
@@ -6494,8 +6498,9 @@ test.describe('authenticated task page', () => {
 
     await page.setViewportSize({ width: 390, height: 844 })
     for (const tab of [conversationTab, decisionsTab, sourcesTab]) {
-      const box = await tab.boundingBox()
-      expect(box?.height ?? 0).toBeGreaterThanOrEqual(44)
+      await expect
+        .poll(async () => (await tab.boundingBox())?.height ?? 0)
+        .toBeGreaterThanOrEqual(44)
     }
   })
 

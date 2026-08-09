@@ -174,7 +174,7 @@ export const documentsMessages = {
   'documents.related.promoteToContext': 'Add to context',
   'documents.related.promotingToContext': 'Adding to context…',
   'documents.related.promoteToContextError':
-    'This document could not be opened with your current permission.',
+    'This document could not be added to context with your current permission.',
   'documents.backlinks.openTarget': 'Open',
   'documents.context.comments': 'Comments',
   'documents.context.backlinks': 'Related',

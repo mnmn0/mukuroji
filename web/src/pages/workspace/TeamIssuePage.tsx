@@ -1951,6 +1951,7 @@ function IssueDetailContent({
   const [fieldErrors, setFieldErrors] = useState<Readonly<Record<string, string | undefined>>>({})
   const documentContextPromotion = useDocumentContextPromotion(
     Boolean(collaboration?.context.capabilities.canCreate),
+    `${issue.teamId}:${issue.id}`,
     collaborationRoute?.onCollaborationTabChange,
   )
   const selectedProjectId = selectedProject.revision === issue.revision

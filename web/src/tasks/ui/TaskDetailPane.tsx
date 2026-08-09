@@ -167,6 +167,7 @@ export function TaskDetailPane({
   const [fieldErrors, setFieldErrors] = useState<Readonly<Record<string, string | undefined>>>({})
   const documentContextPromotion = useDocumentContextPromotion(
     Boolean(collaboration?.context.capabilities.canCreate),
+    `${task?.teamId ?? ''}:${task?.id ?? ''}`,
     collaborationRoute?.onCollaborationTabChange,
   )
   const scheduleFormId = useId()

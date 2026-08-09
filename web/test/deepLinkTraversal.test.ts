@@ -22,6 +22,7 @@ describe('deep-link cursor traversal', () => {
       advanceDeepLinkTraversal(state, 'different-item', true),
     ).toEqual({
       shouldLoad: true,
+      exhausted: false,
       state: { requestedPages: 1, targetId: 'different-item' },
     })
   })
@@ -35,6 +36,7 @@ describe('deep-link cursor traversal', () => {
       ),
     ).toEqual({
       shouldLoad: false,
+      exhausted: false,
       state: { requestedPages: 2, targetId: 'item-1' },
     })
   })
@@ -54,6 +56,7 @@ describe('deep-link cursor traversal', () => {
 
       expect(advanceDeepLinkTraversal(state, targetId, true)).toEqual({
         shouldLoad: false,
+        exhausted: true,
         state: {
           requestedPages: MAX_DEEP_LINK_AUTO_PAGES,
           targetId,

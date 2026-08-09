@@ -1266,12 +1266,16 @@ async function readCurrentWorkItemScope(
   }))
   const item = result.Item
 
+  if (item === undefined) {
+    return { checked: true, exists: false, projectId: undefined }
+  }
+
   if (
     !isCanonicalWorkItemRecord(item) ||
     item.directoryTeamId !== directoryTeamId ||
     item.issueId !== event.issueId
   ) {
-    return { checked: true, exists: false, projectId: undefined }
+    throw new Error('Current Work Item row is invalid for collaboration projection.')
   }
 
   return {

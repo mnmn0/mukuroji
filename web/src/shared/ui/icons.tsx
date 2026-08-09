@@ -4,6 +4,8 @@ type IconProps = {
 
 const iconClass =
   'h-[23px] w-[23px] fill-none stroke-current stroke-2 [stroke-linecap:round] [stroke-linejoin:round]'
+const iconStrokeClass =
+  'h-[23px] w-[23px] stroke-current stroke-2 [stroke-linecap:round] [stroke-linejoin:round]'
 
 export function MailIcon({ className = iconClass }: IconProps) {
   return (
@@ -54,11 +56,11 @@ export function ChevronIcon({ className = iconClass }: IconProps) {
 /**
  * Renders the shared notification-watch icon.
  *
- * @param props - Optional class name and filled state.
+ * @param props - Optional class name and filled state. Custom class names should not add `fill-*` utilities.
  * @returns A decorative bell icon.
  */
 export function WatchIcon({
-  className = iconClass,
+  className = iconStrokeClass,
   filled = false,
 }: IconProps & { filled?: boolean }) {
   return (

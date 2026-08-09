@@ -3,7 +3,7 @@ import type {
   CuratedContextSourceAvailability,
   CuratedContextSourceKind,
 } from '@mukuroji/contracts'
-import { useEffect, useMemo, useRef } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { createTranslator, type Locale } from '../../shared/i18n/i18n'
 import { ExternalLinkIcon } from '../../shared/ui/icons'
 import type { IssueContextController } from '../mutations/useIssueContext'
@@ -51,6 +51,7 @@ export function IssueSourcesTab({
     [controller.items],
   )
   const handledFocusTargetRef = useRef<string | undefined>(undefined)
+  const [deepLinkExhausted, setDeepLinkExhausted] = useState(false)
   const deepLinkTraversalRef = useRef<DeepLinkTraversalState>({
     requestedPages: 0,
   })
@@ -59,6 +60,7 @@ export function IssueSourcesTab({
     if (!focusedContextItemId && !focusedSourceId) {
       handledFocusTargetRef.current = undefined
       deepLinkTraversalRef.current = { requestedPages: 0 }
+      queueMicrotask(() => setDeepLinkExhausted(false))
       return
     }
     const focusKey = focusedContextItemId
@@ -95,7 +97,11 @@ export function IssueSourcesTab({
       return
     }
 
-    if (!target) return
+    if (!target) {
+      queueMicrotask(() => setDeepLinkExhausted(traversal.exhausted))
+      return
+    }
+    queueMicrotask(() => setDeepLinkExhausted(false))
     handledFocusTargetRef.current = focusKey
     const frameId = window.requestAnimationFrame(() => {
       target.focus({ preventScroll: true })
@@ -124,6 +130,11 @@ export function IssueSourcesTab({
       <p className="text-xs font-medium leading-5 text-[var(--workbench-muted)]">
         {t('collaboration.sources.description')}
       </p>
+      {deepLinkExhausted ? (
+        <p className="mt-3 border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800" role="status">
+          {t('collaboration.deepLink.exhausted')}
+        </p>
+      ) : null}
 
       {controller.hasLoadError ? (
         <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border border-red-200 bg-red-50 px-3 py-2.5" role="alert">

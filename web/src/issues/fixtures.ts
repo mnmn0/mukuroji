@@ -240,7 +240,7 @@ export const curatedContextItemFixtures = [
       quote: {
         text: '`empty-state` の表示条件も一緒にテストします。',
         startOffset: 7,
-        endOffset: 38,
+        endOffset: 37,
       },
       permalink: '?commentId=comment-2&rootCommentId=comment-1',
       actor: { id: 'sato@example.com', displayName: '佐藤 花子' },
