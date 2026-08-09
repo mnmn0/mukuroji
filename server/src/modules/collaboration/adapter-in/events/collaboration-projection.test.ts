@@ -824,6 +824,46 @@ describe('collaboration projection pure helpers', () => {
     ])).toBe(false)
   })
 
+  test('fails closed for duplicate Project IDs unless membership is Team-qualified', () => {
+    const directory: ProjectDirectoryItem[] = [
+      { entryType: 'team', teamId: 'design' },
+      { entryType: 'team', teamId: 'core' },
+      { entryType: 'project', teamId: 'design', projectId: 'shared-launch' },
+      { entryType: 'project', teamId: 'core', projectId: 'shared-launch' },
+      {
+        entryType: 'project-member',
+        projectId: 'shared-launch',
+        memberKey: 'member@example.com',
+        role: 'viewer',
+      },
+    ]
+
+    expect(hasEligibleProjectAccess(
+      { teamId: 'core', projectId: 'shared-launch' },
+      'member@example.com',
+      directory,
+    )).toBe(false)
+    expect(hasEligibleProjectAccess(
+      { teamId: 'design', projectId: 'shared-launch' },
+      'member@example.com',
+      directory,
+    )).toBe(false)
+
+    const qualifiedDirectory = directory.map((item) =>
+      item.entryType === 'project-member' ? { ...item, teamId: 'core' } : item
+    )
+    expect(hasEligibleProjectAccess(
+      { teamId: 'core', projectId: 'shared-launch' },
+      'member@example.com',
+      qualifiedDirectory,
+    )).toBe(true)
+    expect(hasEligibleProjectAccess(
+      { teamId: 'design', projectId: 'shared-launch' },
+      'member@example.com',
+      qualifiedDirectory,
+    )).toBe(false)
+  })
+
   test('excludes deactivated Workspace members from notification recipients', () => {
     expect(isActiveWorkspaceNotificationMember('departed@example.com', {
       entryType: 'workspace-member',

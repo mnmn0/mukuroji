@@ -1086,28 +1086,39 @@ export function hasEligibleProjectAccess(
     activeTeamIds.has(item.teamId) &&
     !item.archivedAt
   )
-  const accessibleProjectIds = new Set(
-    directoryItems
-      .filter((item) =>
-        item.entryType === 'project-member' &&
-        normalizeMemberKey(item.memberKey) === memberKey &&
-        (item.role === 'viewer' || item.role === 'member' || item.role === 'manager') &&
-        item.projectId,
-      )
-      .map((item) => item.projectId as string),
-  )
+  const accessibleProjectScopeKeys = new Set<string>()
+  for (const item of directoryItems) {
+    if (
+      item.entryType !== 'project-member' ||
+      normalizeMemberKey(item.memberKey) !== memberKey ||
+      (item.role !== 'viewer' && item.role !== 'member' && item.role !== 'manager') ||
+      !item.projectId
+    ) {
+      continue
+    }
+    const ownerTeams = activeProjects.filter((project) =>
+      project.projectId === item.projectId &&
+      (item.teamId === undefined || project.teamId === item.teamId)
+    )
+    if (ownerTeams.length !== 1 || !ownerTeams[0]?.teamId) continue
+    accessibleProjectScopeKeys.add(`${ownerTeams[0].teamId}\0${item.projectId}`)
+  }
 
   if (event.projectId) {
-    const project = activeProjects.find((item) => item.projectId === event.projectId)
-    return project !== undefined &&
-      (!event.teamId || project.teamId === event.teamId) &&
-      accessibleProjectIds.has(event.projectId)
+    const matchingProjects = activeProjects.filter((item) =>
+      item.projectId === event.projectId &&
+      (event.teamId === undefined || item.teamId === event.teamId)
+    )
+    if (matchingProjects.length !== 1 || !matchingProjects[0]?.teamId) return false
+    return accessibleProjectScopeKeys.has(
+      `${matchingProjects[0].teamId}\0${event.projectId}`,
+    )
   }
 
   return activeProjects.some((item) =>
     item.teamId === event.teamId &&
     item.projectId !== undefined &&
-    accessibleProjectIds.has(item.projectId)
+    accessibleProjectScopeKeys.has(`${item.teamId}\0${item.projectId}`)
   )
 }
 
