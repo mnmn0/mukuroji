@@ -384,8 +384,17 @@ export function IssueCollaborationPanel({
                     expectedThreadVersion: rootComment.version ?? 1,
                     summary,
                   },
-                )
-              if (succeeded) await controller.refresh()
+              )
+              if (succeeded) {
+                try {
+                  await controller.refresh()
+                } catch (refreshError) {
+                  console.error(
+                    'Issue collaboration revalidation failed after accepted resolution:',
+                    refreshError,
+                  )
+                }
+              }
               return succeeded
             }}
             readOnlyMessage={readOnlyMessage}

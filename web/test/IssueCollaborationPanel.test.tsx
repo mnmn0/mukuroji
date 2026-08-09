@@ -342,11 +342,15 @@ describe('IssueCollaborationPanel', () => {
         comment.parentCommentId
           ? comment
           : {
-              ...comment,
-              acceptedResolutions: [],
-              resolvedAt: undefined,
-              resolvedByMemberKey: undefined,
-            },
+          ...comment,
+          acceptedResolutions: [],
+          resolvedAt: undefined,
+          resolvedByMemberKey: undefined,
+          capabilities: {
+            ...comment.capabilities,
+            canResolve: false,
+          },
+        },
       ),
       context: {
         ...issueCollaborationControllerFixture.context,

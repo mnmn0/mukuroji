@@ -80,6 +80,7 @@ export function grantWorkspaceSearchWriterFenceAccess(
     resources.collaborationTable.tableArn,
     resources.documentsTable.tableArn,
     resources.migrationStateTable.tableArn,
+    resources.workspaceSearchTable.tableArn,
   ];
   target.addToRolePolicy(new iam.PolicyStatement({
     actions: ['dynamodb:DescribeTable'],

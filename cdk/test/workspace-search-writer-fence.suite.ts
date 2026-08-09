@@ -217,12 +217,12 @@ test('strict writer-client compositions receive canonical tables and the explici
     'DocumentsTable',
     'AWS::DynamoDB::Table',
   );
-  const workspaceSearchTableId = requireResourceId(
-    'WorkspaceSearchTable',
-    'AWS::DynamoDB::Table',
-  );
   const migrationStateTableId = requireResourceId(
     'WorkspaceSearchMigrationStateTable',
+    'AWS::DynamoDB::Table',
+  );
+  const workspaceSearchTableId = requireResourceId(
+    'WorkspaceSearchTable',
     'AWS::DynamoDB::Table',
   );
 
@@ -336,6 +336,10 @@ test('writer-fence grants describe source and migration tables and read or condi
     'WorkspaceSearchMigrationStateTable',
     'AWS::DynamoDB::Table',
   );
+  const workspaceSearchTableId = requireResourceId(
+    'WorkspaceSearchTable',
+    'AWS::DynamoDB::Table',
+  );
   const migrationStateTableArn = {
     'Fn::GetAtt': [migrationStateTableId, 'Arn'],
   };
@@ -345,6 +349,7 @@ test('writer-fence grants describe source and migration tables and read or condi
     { 'Fn::GetAtt': [workItemsTableId, 'Arn'] },
     { 'Fn::GetAtt': [collaborationTableId, 'Arn'] },
     migrationStateTableArn,
+    { 'Fn::GetAtt': [workspaceSearchTableId, 'Arn'] },
   ];
 
   for (const [, roleLogicalIdPrefix] of writerFunctions) {
@@ -455,7 +460,6 @@ test('collaboration projection can converge current context search documents', (
   for (const action of [
     'dynamodb:UpdateItem',
     'dynamodb:BatchWriteItem',
-    'dynamodb:DescribeTable',
   ]) {
     const statement = statements.find((candidate) =>
       statementHasAction(candidate, action) &&
@@ -463,4 +467,9 @@ test('collaboration projection can converge current context search documents', (
     );
     expect(statement).toBeUndefined();
   }
+  const describeStatement = statements.find((candidate) =>
+    statementHasAction(candidate, 'dynamodb:DescribeTable') &&
+    statementHasResource(candidate, workspaceSearchTableArn)
+  );
+  expect(readProperty(describeStatement, 'Effect')).toBe('Allow');
 });
