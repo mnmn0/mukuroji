@@ -426,6 +426,77 @@ describe('notification store', () => {
       recipientStatusKey: 'workspace-1#member@example.com#unread',
     })
     expect(wokenRow?.snoozedUntil).toBeUndefined()
+    expect(recording.commands.find(({ input, name }) =>
+      name === 'QueryCommand' &&
+      (input.ExpressionAttributeValues as Record<string, unknown> | undefined)
+        ?.[':recipientStatusKey'] === 'workspace-1#member@example.com#snoozed'
+    )?.input).toMatchObject({
+      Limit: 250,
+      IndexName: 'RecipientStatusIndex',
+    })
+  })
+
+  test('fails closed after four expired-snooze wake pages', async () => {
+    let wakeQueries = 0
+    const recording = createClient(({ constructor, input }) => {
+      if (constructor.name !== 'QueryCommand') return {}
+      const statusKey = (input.ExpressionAttributeValues as Record<string, unknown> | undefined)
+        ?.[':recipientStatusKey']
+      if (statusKey !== 'workspace-1#member@example.com#snoozed') {
+        return { Items: [] }
+      }
+      wakeQueries += 1
+      return {
+        Items: [],
+        LastEvaluatedKey: {
+          recipientStatusKey: statusKey,
+          notificationKey: `wake-page-${wakeQueries}`,
+        },
+      }
+    })
+
+    await expect(recording.client.list({
+      workspaceId: 'workspace-1',
+      memberKey: 'member@example.com',
+      now: new Date('2026-07-12T13:00:00.000Z'),
+    })).rejects.toMatchObject({
+      status: 503,
+      code: 'NotificationSnoozeWakeLimitExceeded',
+    })
+    expect(wakeQueries).toBe(4)
+    expect(recording.commands.filter(({ input, name }) =>
+      name === 'QueryCommand' &&
+      (input.ExpressionAttributeValues as Record<string, unknown> | undefined)
+        ?.[':recipientStatusKey'] === 'workspace-1#member@example.com#snoozed'
+    ).every(({ input }) => input.Limit === 250)).toBeTrue()
+  })
+
+  test('fails closed when the expired-snooze wake cursor stalls', async () => {
+    let wakeQueries = 0
+    const stalledCursor = {
+      recipientStatusKey: 'workspace-1#member@example.com#snoozed',
+      notificationKey: 'stalled-wake-page',
+    }
+    const recording = createClient(({ constructor, input }) => {
+      if (constructor.name !== 'QueryCommand') return {}
+      const statusKey = (input.ExpressionAttributeValues as Record<string, unknown> | undefined)
+        ?.[':recipientStatusKey']
+      if (statusKey !== 'workspace-1#member@example.com#snoozed') {
+        return { Items: [] }
+      }
+      wakeQueries += 1
+      return { Items: [], LastEvaluatedKey: stalledCursor }
+    })
+
+    await expect(recording.client.list({
+      workspaceId: 'workspace-1',
+      memberKey: 'member@example.com',
+      now: new Date('2026-07-12T13:00:00.000Z'),
+    })).rejects.toMatchObject({
+      status: 503,
+      code: 'NotificationSnoozeWakeCursorStalled',
+    })
+    expect(wakeQueries).toBe(2)
   })
 
   test('counts only permission-visible unread notifications', async () => {

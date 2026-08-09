@@ -1,5 +1,6 @@
-import { useMemo } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import { createTranslator, type Locale, type MessageKey } from '../../shared/i18n/i18n'
+import { createFocusPath } from '../../shared/routing/paths'
 import type { InboxNotification, NotificationFilter } from '../api'
 import {
   createSnoozedUntil,
@@ -27,6 +28,8 @@ export type NotificationInboxProps = {
    * 通知対象をアプリ内で開く callback です。
    */
   onOpenNotification?: (notification: InboxNotification) => void
+  /** Immutable event selected by a cross-link from Focus. */
+  selectedEventId?: string
 }
 
 /**
@@ -36,6 +39,7 @@ export function NotificationInbox({
   controller,
   locale,
   onOpenNotification,
+  selectedEventId,
 }: NotificationInboxProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
   const groups = useMemo(
@@ -166,6 +170,7 @@ export function NotificationInbox({
                       locale={locale}
                       notification={notification}
                       onOpenNotification={onOpenNotification}
+                      selected={selectedEventId !== undefined && notification.eventId === selectedEventId}
                       t={t}
                     />
                   ))}
@@ -216,14 +221,17 @@ function NotificationRow({
   locale,
   notification,
   onOpenNotification,
+  selected,
   t,
 }: {
   controller: NotificationInboxController
   locale: Locale
   notification: InboxNotification
   onOpenNotification?: (notification: InboxNotification) => void
+  selected: boolean
   t: (key: MessageKey) => string
 }) {
+  const rowRef = useRef<HTMLElement>(null)
   const isUnread = notification.state === 'unread'
   const isRead = notification.state === 'read' || Boolean(notification.readAt)
   const isPending = controller.pendingNotificationId === notification.id
@@ -231,12 +239,23 @@ function NotificationRow({
   const title = notification.title?.trim() || eventLabel
   const summary = notification.summary?.trim() || createNotificationFallbackSummary(notification, eventLabel, t)
 
+  useEffect(() => {
+    if (!selected) return
+    rowRef.current?.scrollIntoView({ block: 'center' })
+    rowRef.current?.focus({ preventScroll: true })
+  }, [selected])
+
   return (
     <article
+      aria-current={selected ? 'true' : undefined}
       className={`relative grid grid-cols-[minmax(0,1fr)_auto] gap-4 px-5 py-4 transition max-[760px]:grid-cols-1 ${
         isUnread ? 'bg-[#f4fbfa]' : 'bg-white'
-      } ${isPending ? 'opacity-60' : 'hover:bg-[var(--workbench-surface-muted)]'}`}
+      } ${isPending ? 'opacity-60' : 'hover:bg-[var(--workbench-surface-muted)]'} ${
+        selected ? 'z-[1] outline outline-2 outline-offset-[-2px] outline-[var(--workbench-primary)]' : ''
+      }`}
       data-testid={`notification-row-${createNotificationTestToken(notification.id)}`}
+      ref={rowRef}
+      tabIndex={selected ? -1 : undefined}
     >
       {isUnread ? (
         <span
@@ -294,8 +313,17 @@ function NotificationRow({
       </button>
 
       <div className="flex flex-wrap items-center justify-end gap-2 self-center max-[760px]:justify-start max-[760px]:pl-[52px]">
+        {notification.teamId && notification.issueId ? (
+          <a
+            className="inline-flex min-h-9 items-center rounded-md border border-[var(--workbench-border)] bg-white px-2.5 text-xs font-semibold text-[var(--workbench-primary)] transition hover:border-[#99d7cf] max-[760px]:min-h-[44px]"
+            data-testid={`notification-focus-${createNotificationTestToken(notification.id)}`}
+            href={createFocusPath(notification.teamId, notification.issueId, notification.eventId)}
+          >
+            {t('workspace.inbox.action.openFocus')}
+          </a>
+        ) : null}
         <button
-          className="min-h-9 rounded-md border border-[var(--workbench-border)] bg-white px-2.5 text-xs font-semibold text-[var(--workbench-muted)] transition hover:border-[#99d7cf] hover:text-[var(--workbench-primary)] disabled:opacity-50"
+          className="min-h-9 rounded-md border border-[var(--workbench-border)] bg-white px-2.5 text-xs font-semibold text-[var(--workbench-muted)] transition hover:border-[#99d7cf] hover:text-[var(--workbench-primary)] disabled:opacity-50 max-[760px]:min-h-[44px]"
           disabled={isPending}
           onClick={() => void (isRead ? controller.markUnread(notification) : controller.markRead(notification))}
           type="button"
@@ -307,7 +335,7 @@ function NotificationRow({
             <span className="sr-only">{t('workspace.inbox.action.snooze')}</span>
             <select
               aria-label={t('workspace.inbox.action.snooze')}
-              className="workbench-input min-h-9 max-w-[130px] px-2.5 text-xs font-semibold text-[var(--workbench-muted)]"
+              className="workbench-input min-h-9 max-w-[130px] px-2.5 text-xs font-semibold text-[var(--workbench-muted)] max-[760px]:min-h-[44px]"
               data-testid={`notification-snooze-${createNotificationTestToken(notification.id)}`}
               disabled={isPending}
               value=""
@@ -329,7 +357,7 @@ function NotificationRow({
           </label>
         ) : null}
         <button
-          className="min-h-9 rounded-md border border-[var(--workbench-border)] bg-white px-2.5 text-xs font-semibold text-[var(--workbench-muted)] transition hover:border-[#99d7cf] hover:text-[var(--workbench-primary)] disabled:opacity-50"
+          className="min-h-9 rounded-md border border-[var(--workbench-border)] bg-white px-2.5 text-xs font-semibold text-[var(--workbench-muted)] transition hover:border-[#99d7cf] hover:text-[var(--workbench-primary)] disabled:opacity-50 max-[760px]:min-h-[44px]"
           disabled={isPending}
           onClick={() => void (controller.filter === 'archived'
             ? controller.restore(notification)

@@ -113,6 +113,14 @@ type UpdateResultCorruption = 'scope' | 'revision' | 'inactive'
 /** Deliberate invalid unlink result selected by fail-closed contract tests. */
 type UnlinkResultCorruption = 'scope' | 'revision' | 'active'
 
+/** Deliberate invalid canonical Work Item result selected by causal timestamp tests. */
+type CreateWorkItemResultCorruption =
+  | 'priority-noncanonical'
+  | 'priority-before-created'
+  | 'due-after-updated'
+  | 'approval-noncanonical'
+  | 'approval-before-created'
+
 /** Complete application fixture for external chat link boundary tests. */
 type LinkServiceFixture = {
   /** Service under test. */
@@ -359,6 +367,9 @@ class RecordingLinkTransactionPort implements ExternalChatLinkTransactionPort {
   /** Optional invalid unlink result returned without corrupting durable state. */
   unlinkResultCorruption?: UnlinkResultCorruption
 
+  /** Optional invalid Work Item result returned after a valid creation commit. */
+  createWorkItemResultCorruption?: CreateWorkItemResultCorruption
+
   /** Durable update receipts keyed by actor-scoped idempotency digest. */
   private readonly updateReceipts = new Map<string, RecordedUpdateReceipt>()
 
@@ -399,7 +410,9 @@ class RecordingLinkTransactionPort implements ExternalChatLinkTransactionPort {
       }
       return receipt.result
     }
-    const workItem = createCanonicalWorkItem('work-item-created', input.command)
+    const workItem = this.corruptCreateWorkItemResult(
+      createCanonicalWorkItem('work-item-created', input.command),
+    )
     const link: ExternalChatWorkItemLink = {
       ...input.linkDraft.link,
       workItemId: workItem.id,
@@ -621,6 +634,47 @@ class RecordingLinkTransactionPort implements ExternalChatLinkTransactionPort {
     return this.corruptMergeResult(result)
   }
 
+  /**
+   * Applies one deliberate causal timestamp corruption to a created Work Item result.
+   *
+   * @param workItem - Valid transaction-owned canonical Work Item.
+   * @returns Valid Work Item or one malformed boundary result.
+   */
+  private corruptCreateWorkItemResult(workItem: CanonicalWorkItem): CanonicalWorkItem {
+    switch (this.createWorkItemResultCorruption) {
+      case 'priority-noncanonical':
+        return { ...workItem, priorityUpdatedAt: '2026-08-06T06:00:00Z' }
+      case 'priority-before-created':
+        return { ...workItem, priorityUpdatedAt: '2026-08-06T05:59:00.000Z' }
+      case 'due-after-updated':
+        return { ...workItem, dueDateUpdatedAt: retryOccurredAt }
+      case 'approval-noncanonical':
+        if (workItem.approvalSummary === undefined) {
+          throw new Error('Expected an approval summary fixture.')
+        }
+        return {
+          ...workItem,
+          approvalSummary: {
+            ...workItem.approvalSummary,
+            updatedAt: '2026-08-06T06:01:00Z',
+          },
+        }
+      case 'approval-before-created':
+        if (workItem.approvalSummary === undefined) {
+          throw new Error('Expected an approval summary fixture.')
+        }
+        return {
+          ...workItem,
+          approvalSummary: {
+            ...workItem.approvalSummary,
+            updatedAt: '2026-08-06T05:59:00.000Z',
+          },
+        }
+      default:
+        return workItem
+    }
+  }
+
   /** Commits one final audit outbox record idempotently by logical operation. */
   private commitAudit(record: ExternalChatLinkAuditRecord): void {
     if (this.committedAuditOperations.has(record.operationId)) return
@@ -803,6 +857,14 @@ describe('ExternalChatLinkService', () => {
       reasonCode: 'ExternalChatWorkItemCreated',
     })
     expect(first.workItem.id).toBe('work-item-created')
+    expect(first.workItem).toMatchObject({
+      priorityUpdatedAt: occurredAt,
+      dueDateUpdatedAt: occurredAt,
+      approvalSummary: {
+        pendingCount: 1,
+        updatedAt: retryOccurredAt,
+      },
+    })
     expect(first.link.workItemId).toBe(first.workItem.id)
     expect(replay).toEqual(first)
     expect(replay.link.createdAt).toBe(occurredAt)
@@ -813,6 +875,26 @@ describe('ExternalChatLinkService', () => {
       linkId: first.link.id,
     }])
     expect((await fixture.store.getLink('workspace-1', first.link.id))?.active).toBeTrue()
+  })
+
+  test('rejects malformed causal timestamps returned by the creation transaction', async () => {
+    const corruptions: CreateWorkItemResultCorruption[] = [
+      'priority-noncanonical',
+      'priority-before-created',
+      'due-after-updated',
+      'approval-noncanonical',
+      'approval-before-created',
+    ]
+
+    for (const corruption of corruptions) {
+      const fixture = createLinkServiceFixture()
+      fixture.transactions.createWorkItemResultCorruption = corruption
+
+      await expect(fixture.service.createWorkItemFromThread(
+        createCommandContext(`create-corrupt-${corruption}`),
+        createWorkItemCommand(),
+      )).rejects.toMatchObject({ code: 'ExternalChatPersistenceFailed' })
+    }
   })
 
   test('authorizes an existing Work Item before resolving or linking its provider source', async () => {
@@ -1647,6 +1729,8 @@ function createCanonicalWorkItem(
     dueDate: '',
     schedule: command.workItem.schedule,
     priority: command.workItem.priority,
+    priorityUpdatedAt: occurredAt,
+    dueDateUpdatedAt: occurredAt,
     workflowStatusId: 'status-todo',
     statusCategory: 'unstarted',
     workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
@@ -1654,6 +1738,14 @@ function createCanonicalWorkItem(
     relationIds: [],
     createdAt: occurredAt,
     updatedAt: occurredAt,
+    approvalSummary: {
+      pendingCount: 1,
+      overdueCount: 0,
+      approvedCount: 0,
+      rejectedCount: 0,
+      changesRequestedCount: 0,
+      updatedAt: retryOccurredAt,
+    },
     source: 'dynamodb',
   }
 }

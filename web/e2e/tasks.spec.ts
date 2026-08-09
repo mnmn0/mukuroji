@@ -2,6 +2,7 @@ import { expect, test } from '@playwright/test'
 import type { Locator, Page } from '@playwright/test'
 import {
   DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY,
+  FOCUS_SCHEMA_VERSION,
   PLANNING_SCHEMA_VERSION,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
@@ -13,6 +14,10 @@ import {
   type FileAnnotation,
   type FileAttachment,
   type FileVersion,
+  type FocusItem,
+  type FocusPolicy,
+  type FocusQueueResponse,
+  type FocusQueueSection,
   type ProjectQuickAccessPreferences,
   type PlanningSnapshot,
   type PreviewWorkItemScheduleInput,
@@ -31,6 +36,7 @@ import {
   analyticsReportFixtures,
   analyticsSnapshotFixture,
 } from '../src/analytics/fixtures'
+import { focusQueueResponseFixture } from '../src/features/focus-queue/fixtures'
 import type { TeamIssue, TeamIssueActivity, TeamIssueComment } from '../src/issues/api'
 import type { InboxNotification, NotificationPreferences } from '../src/notifications/api'
 import { planningSnapshotFixture } from '../src/planning/fixtures'
@@ -113,6 +119,26 @@ type MockRequestCounts = {
    * Workspace 全体の Work Item 一覧 API request 数です。
    */
   workspaceWorkItems: number
+  /**
+   * Focus queue snapshot API request count.
+   */
+  focusReads: number
+  /**
+   * Focus snooze mutation API request count.
+   */
+  focusSnoozeUpdates: number
+  /**
+   * Focus watch mutation API request count.
+   */
+  focusWatchUpdates: number
+  /**
+   * Focus policy mutation API request count.
+   */
+  focusPolicyUpdates: number
+  /**
+   * Focus policy replacement inputs observed by the mock API.
+   */
+  focusPolicyInputs: unknown[]
   /**
    * 通知一覧 API の request 数です。
    */
@@ -319,6 +345,10 @@ type MockAuthenticatedTaskPageOptions = {
    * `teamId\0issueId` ごとの初期 Work Item relation です。
    */
   workItemRelationsByIssue?: Partial<Record<string, readonly WorkItemRelation[]>>
+  /**
+   * Focus API snapshot used by Workspace queue and attention previews.
+   */
+  focusQueue?: FocusQueueResponse
 }
 
 /**
@@ -338,6 +368,11 @@ async function mockAuthenticatedTaskPage(
     projectDirectory: 0,
     projectTasks: {},
     workspaceWorkItems: 0,
+    focusReads: 0,
+    focusSnoozeUpdates: 0,
+    focusWatchUpdates: 0,
+    focusPolicyUpdates: 0,
+    focusPolicyInputs: [],
     notificationReads: 0,
     notificationUpdates: 0,
     notificationPreferenceUpdates: 0,
@@ -430,6 +465,8 @@ async function mockAuthenticatedTaskPage(
     ...notification,
     reasons: [...notification.reasons],
   }))
+  let focusQueue = structuredClone(options.focusQueue ?? focusQueueResponseFixture)
+  const previousFocusSections = new Map<string, FocusQueueSection>()
   let notificationPreferences = cloneNotificationPreferences(
     options.notificationPreferences ?? createDefaultNotificationPreferences(),
   )
@@ -949,6 +986,126 @@ async function mockAuthenticatedTaskPage(
         workItemScheduleDependencyConflicts,
         planningRevision,
       ),
+    })
+  })
+
+  await page.route(/.*\/api\/focus(?:\?.*)?$/, async (route) => {
+    if (route.request().method() !== 'GET') {
+      await route.fallback()
+      return
+    }
+
+    requestCounts.focusReads += 1
+    expect(route.request().headers().authorization).toBe('Bearer test-access-token')
+    await route.fulfill({ json: focusQueue })
+  })
+
+  await page.route(
+    /.*\/api\/focus\/items\/[^/]+\/[^/]+\/snooze(?:\?.*)?$/,
+    async (route) => {
+      if (route.request().method() !== 'PUT') {
+        await route.fallback()
+        return
+      }
+
+      requestCounts.focusSnoozeUpdates += 1
+      expect(route.request().headers().authorization).toBe('Bearer test-access-token')
+      const { teamId, workItemId } = readMockFocusItemRoute(route.request().url())
+      const body: unknown = route.request().postDataJSON()
+      const item = findMockFocusItem(focusQueue, teamId, workItemId)
+
+      if (!isMockFocusSnoozeInput(body) || !item) {
+        await route.fulfill({ status: 404, json: { message: 'Focus item not found.' } })
+        return
+      }
+      if (body.expectedVersion !== item.version) {
+        await route.fulfill({ status: 409, json: { message: 'Focus item version conflict.' } })
+        return
+      }
+
+      const itemKey = createMockFocusItemKey(teamId, workItemId)
+      if (body.snoozedUntil) previousFocusSections.set(itemKey, item.section)
+      const nextSection = body.snoozedUntil
+        ? 'snoozed'
+        : previousFocusSections.get(itemKey) ?? 'now'
+      const updatedItem = structuredClone(item)
+      updatedItem.section = nextSection
+      updatedItem.updatedAt = new Date().toISOString()
+      updatedItem.version += 1
+      updatedItem.snoozeRevision += 1
+      if (body.snoozedUntil) updatedItem.snoozedUntil = body.snoozedUntil
+      else delete updatedItem.snoozedUntil
+      focusQueue = moveMockFocusItem(focusQueue, updatedItem)
+
+      await route.fulfill({ json: { item: updatedItem } })
+    },
+  )
+
+  await page.route(
+    /.*\/api\/focus\/items\/[^/]+\/[^/]+\/watch(?:\?.*)?$/,
+    async (route) => {
+      if (route.request().method() !== 'PUT') {
+        await route.fallback()
+        return
+      }
+
+      requestCounts.focusWatchUpdates += 1
+      expect(route.request().headers().authorization).toBe('Bearer test-access-token')
+      const { teamId, workItemId } = readMockFocusItemRoute(route.request().url())
+      const body: unknown = route.request().postDataJSON()
+      const item = findMockFocusItem(focusQueue, teamId, workItemId)
+
+      if (!isMockFocusWatchInput(body) || !item) {
+        await route.fulfill({ status: 404, json: { message: 'Focus item not found.' } })
+        return
+      }
+      if (body.expectedVersion !== item.version) {
+        await route.fulfill({ status: 409, json: { message: 'Focus item version conflict.' } })
+        return
+      }
+
+      const updatedItem: FocusItem = {
+        ...item,
+        updatedAt: new Date().toISOString(),
+        version: item.version + 1,
+        watching: body.watching,
+      }
+      focusQueue = replaceMockFocusItem(focusQueue, updatedItem)
+      await route.fulfill({ json: { item: updatedItem } })
+    },
+  )
+
+  await page.route(/.*\/api\/focus\/policies(?:\?.*)?$/, async (route) => {
+    if (route.request().method() !== 'PUT') {
+      await route.fallback()
+      return
+    }
+
+    requestCounts.focusPolicyUpdates += 1
+    expect(route.request().headers().authorization).toBe('Bearer test-access-token')
+    const body: unknown = route.request().postDataJSON()
+    requestCounts.focusPolicyInputs.push(structuredClone(body))
+    const target: FocusPolicy['target'] = isMockRecord(body) &&
+      isMockRecord(body.target) &&
+      body.target.type === 'team' &&
+      typeof body.target.teamId === 'string'
+      ? { teamId: body.target.teamId, type: 'team' }
+      : { type: 'user' }
+    const policy: FocusPolicy = {
+      id: target.type === 'team'
+        ? `mock-team-focus-policy-${target.teamId}`
+        : 'mock-user-focus-policy',
+      overrides: {},
+      schemaVersion: FOCUS_SCHEMA_VERSION,
+      target,
+      updatedAt: new Date().toISOString(),
+      version: requestCounts.focusPolicyUpdates + 3,
+    }
+    await route.fulfill({
+      json: {
+        effectivePolicies: focusQueue.effectivePolicies,
+        policy,
+      },
     })
   })
 
@@ -1876,6 +2033,151 @@ async function mockAuthenticatedTaskPage(
     })
   })
 
+}
+
+/**
+ * Reads the encoded Team and Work Item identifiers from a Focus item mutation URL.
+ *
+ * @param url - Absolute request URL intercepted by Playwright.
+ * @returns Decoded identifiers used to locate the mocked Focus item.
+ */
+function readMockFocusItemRoute(url: string): { teamId: string; workItemId: string } {
+  const pathSegments = new URL(url).pathname.split('/')
+  return {
+    teamId: decodeURIComponent(pathSegments[4] ?? ''),
+    workItemId: decodeURIComponent(pathSegments[5] ?? ''),
+  }
+}
+
+/**
+ * Creates the collision-free key used to retain a pre-snooze section.
+ *
+ * @param teamId - Canonical Team identifier.
+ * @param workItemId - Canonical Work Item identifier.
+ * @returns Stable compound Focus item key.
+ */
+function createMockFocusItemKey(teamId: string, workItemId: string): string {
+  return `${teamId}\0${workItemId}`
+}
+
+/**
+ * Narrows an unknown request body to a property-readable object.
+ *
+ * @param value - Untrusted JSON value supplied by the browser.
+ * @returns Whether the value is a non-null object.
+ */
+function isMockRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * Validates the revision-bound fields used by the mocked Focus snooze endpoint.
+ *
+ * @param value - Untrusted request JSON.
+ * @returns Whether the input contains a version and nullable ISO timestamp string.
+ */
+function isMockFocusSnoozeInput(value: unknown): value is {
+  expectedVersion: number
+  snoozedUntil: string | null
+} {
+  return isMockRecord(value) &&
+    typeof value.expectedVersion === 'number' &&
+    (typeof value.snoozedUntil === 'string' || value.snoozedUntil === null)
+}
+
+/**
+ * Validates the revision-bound fields used by the mocked Focus watch endpoint.
+ *
+ * @param value - Untrusted request JSON.
+ * @returns Whether the input contains a version and watch state.
+ */
+function isMockFocusWatchInput(value: unknown): value is {
+  expectedVersion: number
+  watching: boolean
+} {
+  return isMockRecord(value) &&
+    typeof value.expectedVersion === 'number' &&
+    typeof value.watching === 'boolean'
+}
+
+/**
+ * Finds one Focus item without changing the server-provided queue order.
+ *
+ * @param response - Current mocked Focus snapshot.
+ * @param teamId - Canonical Team identifier.
+ * @param workItemId - Canonical Work Item identifier.
+ * @returns Matching Focus item, if it remains visible.
+ */
+function findMockFocusItem(
+  response: FocusQueueResponse,
+  teamId: string,
+  workItemId: string,
+): FocusItem | undefined {
+  return response.sections
+    .flatMap((group) => group.items)
+    .find((item) =>
+      item.workItem.teamId === teamId && item.workItem.id === workItemId)
+}
+
+/**
+ * Replaces a mocked Focus item in place while preserving its section order.
+ *
+ * @param response - Current mocked Focus snapshot.
+ * @param updatedItem - New server item representation.
+ * @returns Updated snapshot with the same item order.
+ */
+function replaceMockFocusItem(
+  response: FocusQueueResponse,
+  updatedItem: FocusItem,
+): FocusQueueResponse {
+  return {
+    ...response,
+    generatedAt: new Date().toISOString(),
+    sections: response.sections.map((group) => ({
+      ...group,
+      items: group.items.map((item) =>
+        isSameMockFocusItem(item, updatedItem) ? updatedItem : item),
+    })),
+  }
+}
+
+/**
+ * Moves a mocked Focus item to the leading position of its new section.
+ *
+ * @param response - Current mocked Focus snapshot.
+ * @param updatedItem - Item carrying the server-selected destination section.
+ * @returns Updated snapshot with no duplicate item entries.
+ */
+function moveMockFocusItem(
+  response: FocusQueueResponse,
+  updatedItem: FocusItem,
+): FocusQueueResponse {
+  return {
+    ...response,
+    generatedAt: new Date().toISOString(),
+    sections: response.sections.map((group) => {
+      const remainingItems = group.items.filter((item) =>
+        !isSameMockFocusItem(item, updatedItem))
+      return {
+        ...group,
+        items: group.section === updatedItem.section
+          ? [updatedItem, ...remainingItems]
+          : remainingItems,
+      }
+    }),
+  }
+}
+
+/**
+ * Compares mocked Focus items by their canonical Team and Work Item identity.
+ *
+ * @param left - Existing queue item.
+ * @param right - Candidate replacement item.
+ * @returns Whether both values represent the same canonical item.
+ */
+function isSameMockFocusItem(left: FocusItem, right: FocusItem): boolean {
+  return left.workItem.teamId === right.workItem.teamId &&
+    left.workItem.id === right.workItem.id
 }
 
 function createDefaultNotifications(): InboxNotification[] {
@@ -3056,6 +3358,274 @@ async function expectWorkspaceRouteShell(page: Page, title: string): Promise<Loc
 test.describe('authenticated task page', () => {
   test.beforeEach(async ({ page }) => {
     await mockAuthenticatedTaskPage(page)
+  })
+
+  test('Issue #194: Focus は server 順・理由・keyboard・snooze・Inbox 相関を一続きで扱う', async ({ page }) => {
+    const focusQueue = structuredClone(focusQueueResponseFixture)
+    const mentionSignal = focusQueue.sections
+      .flatMap((group) => group.items)
+      .find((item) => item.workItem.id === 'WI-202')
+      ?.signals.find((signal) => signal.source.eventId === 'event-WI-202-mention')
+    if (!mentionSignal) throw new Error('The Focus fixture requires the WI-202 mention signal.')
+    mentionSignal.source.deepLink = '/inbox?eventId=event-WI-202-mention'
+
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      focusQueue,
+      notifications: [{
+        eventId: 'event-WI-202-mention',
+        eventType: 'comment.mentioned',
+        id: 'notification-focus-wi-202',
+        issueId: 'WI-202',
+        occurredAt: '2026-08-09T04:21:00.000Z',
+        projectId: 'refero',
+        reasons: ['mention'],
+        state: 'unread',
+        summary: 'Enterprise rollout question needs a response.',
+        teamId: 'core-team',
+        title: 'Answer the enterprise rollout question',
+      }],
+    })
+    const requestCounts = getMockRequestCounts(page)
+
+    await page.goto('/dashboard')
+    const sidebar = page.locator('aside[aria-label="メインサイドバー"]:visible')
+    await sidebar.getByRole('button', { name: 'フォーカス', exact: true }).click()
+    await expect(page).toHaveURL('/focus')
+
+    const queuePanel = page.getByRole('tabpanel', { name: /いま/ })
+    const orderedRows = queuePanel.locator('ol').first().locator(':scope > li')
+    const blockedItem = page.getByTestId('focus-item-core-team-WI-194')
+    const mentionItem = page.getByTestId('focus-item-core-team-WI-202')
+
+    await expect(orderedRows.nth(0)).toHaveAttribute(
+      'data-testid',
+      'focus-item-core-team-WI-194',
+    )
+    await expect(orderedRows.nth(1)).toHaveAttribute(
+      'data-testid',
+      'focus-item-core-team-WI-202',
+    )
+    await expect(blockedItem).toContainText('ブロッカー')
+    await expect(blockedItem).toContainText('期限超過')
+    await expect(blockedItem).toContainText('レビュー依頼')
+    await expect(blockedItem).toContainText('先行 Work Item を完了する')
+
+    await blockedItem.getByRole('button', { name: 'スヌーズ', exact: true }).click()
+    await blockedItem.getByLabel('再表示する時刻').selectOption('next-week')
+    await blockedItem.getByRole('button', { name: '確定', exact: true }).click()
+    await expect.poll(() => requestCounts.focusSnoozeUpdates).toBe(1)
+    await expect(blockedItem).toHaveCount(0)
+
+    const snoozeFeedback = page.getByRole('status').filter({ hasText: 'スヌーズしました' })
+    await expect(snoozeFeedback).toBeVisible()
+    await page.getByRole('tab', { name: /スヌーズ中/ }).click()
+    await expect(blockedItem).toBeVisible()
+    await snoozeFeedback.getByRole('button', { name: '元に戻す', exact: true }).click()
+    await expect.poll(() => requestCounts.focusSnoozeUpdates).toBe(2)
+    await expect(blockedItem).toHaveCount(0)
+
+    await page.getByRole('tab', { name: /いま/ }).click()
+    const blockedPrimary = blockedItem.locator('[data-focus-queue-primary]')
+    const mentionPrimary = mentionItem.locator('[data-focus-queue-primary]')
+    await blockedPrimary.focus()
+    await page.keyboard.press('j')
+    await expect(mentionPrimary).toBeFocused()
+    await page.keyboard.press('Enter')
+    await expect(page).toHaveURL(
+      '/projects/refero/issues?teamId=core-team&issueId=WI-202',
+    )
+
+    await page.goto('/inbox')
+    await expect(page.getByTestId('inbox-task-list')).toHaveCount(0)
+    await expect(page.locator('[data-testid^="focus-item-"]')).toHaveCount(0)
+    await page.getByTestId('notification-focus-notification-focus-wi-202').click()
+    await expect(page).toHaveURL(
+      '/focus?teamId=core-team&workItemId=WI-202&sourceEventId=event-WI-202-mention',
+    )
+    await expect(mentionPrimary).toHaveAttribute('aria-expanded', 'true')
+    await expect.poll(() => requestCounts.focusReads).toBeGreaterThanOrEqual(3)
+
+    await mentionItem.getByRole('button', { name: '根拠を開く', exact: true }).click()
+    await expect(page).toHaveURL('/inbox?eventId=event-WI-202-mention')
+    const selectedNotification = page.getByTestId(
+      'notification-row-notification-focus-wi-202',
+    )
+    await expect(selectedNotification).toHaveAttribute('aria-current', 'true')
+    await expect(selectedNotification).toBeFocused()
+  })
+
+  test('Issue #194: archived mention の根拠は該当 Inbox page まで取得して focus する', async ({ page }) => {
+    const focusQueue = structuredClone(focusQueueResponseFixture)
+    const nowGroup = focusQueue.sections.find((group) => group.section === 'now')
+    const mentionItem = nowGroup?.items.find((item) => item.workItem.id === 'WI-202')
+    const mentionSignal = mentionItem?.signals.find((signal) =>
+      signal.source.eventId === 'event-WI-202-mention'
+    )
+    if (!nowGroup || !mentionItem || !mentionSignal) {
+      throw new Error('The Focus fixture requires the WI-202 mention signal.')
+    }
+    nowGroup.items = [mentionItem]
+    mentionSignal.source.deepLink =
+      '/inbox?eventId=event-WI-202-mention&filter=archived'
+    const archivedNotifications: InboxNotification[] = [
+      ...Array.from({ length: 30 }, (_, index) => ({
+        eventId: `archived-filler-event-${index}`,
+        eventType: 'comment.mentioned',
+        id: `archived-filler-${index}`,
+        occurredAt: `2026-08-08T${String(index % 24).padStart(2, '0')}:00:00.000Z`,
+        reasons: ['mention'],
+        state: 'archived' as const,
+      })),
+      {
+        eventId: 'event-WI-202-mention',
+        eventType: 'comment.mentioned',
+        id: 'notification-focus-wi-202-archived',
+        issueId: 'WI-202',
+        occurredAt: '2026-08-07T04:21:00.000Z',
+        reasons: ['mention'],
+        state: 'archived',
+        teamId: 'core-team',
+        title: 'Answer the enterprise rollout question',
+      },
+    ]
+
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      focusQueue,
+      notifications: archivedNotifications,
+    })
+    const requestCounts = getMockRequestCounts(page)
+    await page.goto('/focus')
+
+    await page.getByTestId('focus-item-core-team-WI-202')
+      .getByRole('button', { name: '根拠を開く', exact: true })
+      .click()
+    await expect(page).toHaveURL(
+      '/inbox?eventId=event-WI-202-mention&filter=archived',
+    )
+    const selectedNotification = page.getByTestId(
+      'notification-row-notification-focus-wi-202-archived',
+    )
+    await expect(selectedNotification).toHaveAttribute('aria-current', 'true')
+    await expect(selectedNotification).toBeFocused()
+    await expect.poll(() => requestCounts.notificationReads).toBeGreaterThanOrEqual(2)
+  })
+
+  test('Issue #194: Focus の inline 操作を閉じると trigger に戻り、最後の行を移すと active tab に戻る', async ({ page }) => {
+    const focusQueue = structuredClone(focusQueueResponseFixture)
+    const nowGroup = focusQueue.sections.find((group) => group.section === 'now')
+    if (!nowGroup?.items[0]) throw new Error('The Focus fixture requires one Now item.')
+    nowGroup.items = [nowGroup.items[0]]
+
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, { focusQueue })
+    const requestCounts = getMockRequestCounts(page)
+    await page.goto('/focus')
+
+    const activeTab = page.getByRole('tab', { name: /いま/ })
+    const onlyItem = page.getByTestId('focus-item-core-team-WI-194')
+    const scheduleTrigger = onlyItem.getByRole('button', {
+      name: '期限を設定',
+      exact: true,
+    })
+    const snoozeTrigger = onlyItem.getByRole('button', {
+      name: 'スヌーズ',
+      exact: true,
+    })
+
+    await scheduleTrigger.click()
+    await onlyItem.getByLabel('新しい期限').press('Escape')
+    await expect(scheduleTrigger).toBeFocused()
+    await scheduleTrigger.click()
+    await onlyItem.getByRole('button', { name: 'キャンセル', exact: true }).click()
+    await expect(scheduleTrigger).toBeFocused()
+
+    await snoozeTrigger.click()
+    await onlyItem.getByLabel('再表示する時刻').press('Escape')
+    await expect(snoozeTrigger).toBeFocused()
+    await snoozeTrigger.click()
+    await onlyItem.getByRole('button', { name: 'キャンセル', exact: true }).click()
+    await expect(snoozeTrigger).toBeFocused()
+
+    await snoozeTrigger.click()
+    await onlyItem.getByRole('button', { name: '確定', exact: true }).click()
+    await expect.poll(() => requestCounts.focusSnoozeUpdates).toBe(1)
+    await expect(onlyItem).toHaveCount(0)
+    await expect(activeTab).toBeFocused()
+  })
+
+  test('Issue #194: Focus policy selector は個人と Team の sparse override を正しい target へ送る', async ({ page }) => {
+    const focusQueue = structuredClone(focusQueueResponseFixture)
+    delete focusQueue.userPolicy
+    focusQueue.teamPolicies = []
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, { focusQueue })
+    const requestCounts = getMockRequestCounts(page)
+    await page.goto('/focus')
+
+    const policyPanel = page.locator('details').filter({
+      hasText: 'フォーカスの優先ルール',
+    })
+    await policyPanel.locator('summary').click()
+    await policyPanel.locator('input[name="weight-urgent"]').fill('42')
+    await policyPanel.getByRole('button', { name: 'ルールを保存', exact: true }).click()
+    await expect.poll(() => requestCounts.focusPolicyUpdates).toBe(1)
+
+    await policyPanel.getByLabel('ルールの範囲').selectOption('team')
+    await policyPanel.locator('input[name="dueSoonDays"]').fill('5')
+    await policyPanel.getByRole('button', { name: 'ルールを保存', exact: true }).click()
+    await expect.poll(() => requestCounts.focusPolicyUpdates).toBe(2)
+    expect(requestCounts.focusPolicyInputs).toEqual([
+      {
+        expectedVersion: 0,
+        overrides: { weights: { urgent: 42 } },
+        target: { type: 'user' },
+      },
+      {
+        expectedVersion: 0,
+        overrides: { dueSoonDays: 5 },
+        target: { teamId: 'core-team', type: 'team' },
+      },
+    ])
+  })
+
+  test('Issue #194: Done の Focus 行は状態 selector から再オープンできる', async ({ page }) => {
+    const completedTask = referoTaskFixtures.find((task) => task.id === 'competitor-report')
+    const focusQueue = structuredClone(focusQueueResponseFixture)
+    const doneGroup = focusQueue.sections.find((group) => group.section === 'done')
+    const doneTemplate = doneGroup?.items[0]
+    if (!completedTask || !doneGroup || !doneTemplate) {
+      throw new Error('The task and Focus fixtures require one completed Work Item.')
+    }
+    doneGroup.items = [{
+      ...doneTemplate,
+      id: 'focus-competitor-report',
+      rank: {
+        ...doneTemplate.rank,
+        tieBreaker: 'core-team\0competitor-report',
+      },
+      workItem: structuredClone(completedTask),
+    }]
+    let reopenedWorkItemId = ''
+    let reopenedStatusId = ''
+
+    await mockAuthenticatedTaskPage(
+      page,
+      referoTaskFixtures,
+      (workItemId, workflowStatusId) => {
+        reopenedWorkItemId = workItemId
+        reopenedStatusId = workflowStatusId
+      },
+      { focusQueue },
+    )
+    const requestCounts = getMockRequestCounts(page)
+    await page.goto('/focus?section=done')
+
+    const doneItem = page.getByTestId('focus-item-core-team-competitor-report')
+    const statusSelector = doneItem.getByLabel('状態を変更')
+    await expect(statusSelector).toHaveValue('done')
+    await statusSelector.selectOption('in-progress')
+
+    await expect.poll(() => reopenedWorkItemId).toBe('competitor-report')
+    expect(reopenedStatusId).toBe('in-progress')
+    expect(requestCounts.issueUpdates).toBe(1)
   })
 
   test('主要タスクビューの読み上げ構造とキーボードタブ操作を維持する', async ({ page }) => {

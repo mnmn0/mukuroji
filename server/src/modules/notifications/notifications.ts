@@ -275,6 +275,9 @@ const maximumQueryPages = 100
 const notificationIdVersion = 1
 const notificationCursorVersion = 1
 const snoozeMaximumMilliseconds = 365 * 24 * 60 * 60 * 1_000
+const snoozeWakePageLimit = 250
+const snoozeWakeMaximumPages = 4
+const snoozeWakeMaximumRows = snoozeWakePageLimit * snoozeWakeMaximumPages
 
 /** Opaque notification ID の署名対象 payload です。 */
 type NotificationIdentifier = {
@@ -727,8 +730,15 @@ export class DynamoDbNotificationsClient implements NotificationClient {
 
   private async wakeExpiredSnoozes(recipientKey: string, now: Date) {
     let exclusiveStartKey: Record<string, unknown> | undefined
+    let pagesRead = 0
+    let rowsRead = 0
+    const visitedCursors = new Set<string>()
 
     do {
+      const remainingRows = snoozeWakeMaximumRows - rowsRead
+      if (remainingRows <= 0 || pagesRead >= snoozeWakeMaximumPages) {
+        throw createSnoozeWakeLimitError()
+      }
       const response = await this.documentClient.send(new QueryCommand({
         TableName: this.tableName,
         IndexName: this.statusIndexName,
@@ -736,9 +746,16 @@ export class DynamoDbNotificationsClient implements NotificationClient {
         ExpressionAttributeValues: {
           ':recipientStatusKey': createRecipientStatusKey(recipientKey, 'snoozed'),
         },
+        Limit: Math.min(snoozeWakePageLimit, remainingRows),
         ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
       }))
-      for (const row of response.Items ?? []) {
+      pagesRead += 1
+      const rows = response.Items ?? []
+      if (rows.length > remainingRows) {
+        throw createSnoozeWakeLimitError()
+      }
+      rowsRead += rows.length
+      for (const row of rows) {
         const snoozedUntil = readTimestamp(row.snoozedUntil)
         if (!snoozedUntil || Date.parse(snoozedUntil) > now.getTime()) {
           continue
@@ -765,6 +782,23 @@ export class DynamoDbNotificationsClient implements NotificationClient {
         }
       }
       exclusiveStartKey = response.LastEvaluatedKey
+      if (exclusiveStartKey !== undefined) {
+        const cursor = createQueryCursorFingerprint(exclusiveStartKey)
+        if (visitedCursors.has(cursor)) {
+          throw new NotificationError(
+            503,
+            'NotificationSnoozeWakeCursorStalled',
+            'Expired notification snoozes could not advance to the next page.',
+          )
+        }
+        visitedCursors.add(cursor)
+        if (
+          pagesRead >= snoozeWakeMaximumPages ||
+          rowsRead >= snoozeWakeMaximumRows
+        ) {
+          throw createSnoozeWakeLimitError()
+        }
+      }
     } while (exclusiveStartKey)
   }
 
@@ -1187,6 +1221,27 @@ function decodeNotificationCursor(
   } catch {
     throw new NotificationError(400, 'InvalidNotificationCursor', 'Notification cursor is invalid.')
   }
+}
+
+/** Creates a stable availability error when expired-snooze maintenance exceeds its read window. */
+function createSnoozeWakeLimitError(): NotificationError {
+  return new NotificationError(
+    503,
+    'NotificationSnoozeWakeLimitExceeded',
+    `Expired notification snooze maintenance cannot exceed ${snoozeWakeMaximumPages} pages or ${snoozeWakeMaximumRows} rows per read.`,
+  )
+}
+
+/**
+ * Creates a deterministic identity for one DynamoDB continuation key.
+ *
+ * @param key - Last evaluated key returned by DynamoDB.
+ * @returns Stable cursor identity independent of object property order.
+ */
+function createQueryCursorFingerprint(key: Record<string, unknown>): string {
+  return JSON.stringify(
+    Object.entries(key).sort(([left], [right]) => left.localeCompare(right)),
+  )
 }
 
 function encodeOpaque(value: unknown) {

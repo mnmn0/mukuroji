@@ -177,15 +177,18 @@ export function useUnreadNotificationCount(accessToken?: string, enabled = true)
  *
  * @param accessToken - Access token used by the Notifications API.
  * @param enabled - Whether the Inbox query may run.
+ * @param initialFilter - URL-selected state timeline used for the first page.
  * @returns The controller used to render and operate the Inbox.
  */
 export function useNotificationInbox(
   accessToken?: string,
   enabled = true,
+  initialFilter: NotificationFilter = 'all',
 ): NotificationInboxController {
   const mutationRunner = useRef(createMutationRequestRunner()).current
   const { mutate: mutateGlobal } = useSWRConfig()
-  const [filter, setFilterState] = useState<NotificationFilter>('all')
+  const [filter, setFilterState] = useState<NotificationFilter>(initialFilter)
+  const initialFilterRef = useRef(initialFilter)
   const [eventType, setEventTypeState] = useState<string | undefined>()
   const [pendingNotificationId, setPendingNotificationId] = useState<string | undefined>()
   const [mutationError, setMutationError] = useState<unknown>()
@@ -300,6 +303,12 @@ export function useNotificationInbox(
     setMutationError(undefined)
     void setSize(1)
   }, [setSize])
+
+  useEffect(() => {
+    if (initialFilterRef.current === initialFilter) return
+    initialFilterRef.current = initialFilter
+    setFilter(initialFilter)
+  }, [initialFilter, setFilter])
 
   const setEventType = useCallback((nextEventType?: string) => {
     setEventTypeState(nextEventType)

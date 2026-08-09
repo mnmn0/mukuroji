@@ -124,6 +124,20 @@ export type CollaborationWatcherState = {
   projectWatcherCount?: number
 }
 
+/** Bounded watcher state for one exact Workspace member. */
+export type CollaborationMemberWatcherState = {
+  /** Whether the member currently watches the requested entity. */
+  subscribed: boolean
+  /** Whether a manual subscribe or unsubscribe decision is stored. */
+  explicit: boolean
+  /** Whether at least one automatic watcher reason is stored. */
+  automatic: boolean
+  /** Current manual and automatic watcher reasons for the member. */
+  reasons: string[]
+  /** Whether the member currently watches the assigned Project, when requested. */
+  projectSubscribed?: boolean
+}
+
 /** Work Item を開いている browser session の集約です。 */
 export type CollaborationPresence = {
   /** Workspace member key です。 */
@@ -302,6 +316,8 @@ export type UpdateWatcherInput = {
   projectEntityKey?: string
   /** Subscribe/unsubscribe 対象 member key です。 */
   memberKey: string
+  /** Expected current manual watcher state used for optional compare-and-set. */
+  expectedSubscribed?: boolean
   /** 自動 watch mutation かどうかです。 */
   automatic?: boolean
   /** 自動 watch の理由です。 */
@@ -360,10 +376,32 @@ export interface CollaborationClient {
   removeReaction(input: CollaborationReactionInput): Promise<void>
   /** 現在 user と assigned project の watcher 状態を取得します。 */
   getWatcherState(input: GetWatcherStateInput): Promise<CollaborationWatcherState>
+  /** Reads one exact member watcher row without scanning the watcher scope. */
+  getMemberWatcherState(input: GetWatcherStateInput): Promise<CollaborationMemberWatcherState>
   /** 手動または自動 watcher を保存します。 */
-  subscribe(input: UpdateWatcherInput): Promise<CollaborationWatcherState>
+  subscribe(
+    input: UpdateWatcherInput & { expectedSubscribed: boolean },
+  ): Promise<CollaborationMemberWatcherState>
+  /** Saves a watcher while preserving scope-wide counts for compatibility callers. */
+  subscribe(
+    input: Omit<UpdateWatcherInput, 'expectedSubscribed'> & { expectedSubscribed?: undefined },
+  ): Promise<CollaborationWatcherState>
+  /** Saves a watcher when the optional compare-and-set shape is not statically narrowed. */
+  subscribe(
+    input: UpdateWatcherInput,
+  ): Promise<CollaborationMemberWatcherState | CollaborationWatcherState>
   /** 明示的な unsubscribe tombstone を保存します。 */
-  unsubscribe(input: UpdateWatcherInput): Promise<CollaborationWatcherState>
+  unsubscribe(
+    input: UpdateWatcherInput & { expectedSubscribed: boolean },
+  ): Promise<CollaborationMemberWatcherState>
+  /** Saves an unsubscribe tombstone while preserving counts for compatibility callers. */
+  unsubscribe(
+    input: Omit<UpdateWatcherInput, 'expectedSubscribed'> & { expectedSubscribed?: undefined },
+  ): Promise<CollaborationWatcherState>
+  /** Saves an unsubscribe tombstone when the optional compare-and-set shape is not narrowed. */
+  unsubscribe(
+    input: UpdateWatcherInput,
+  ): Promise<CollaborationMemberWatcherState | CollaborationWatcherState>
   /** Presence/typing lease を更新します。 */
   heartbeatPresence(input: PresenceHeartbeatInput): Promise<void>
   /** Browser tab の presence を削除します。 */
@@ -832,7 +870,46 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
     } satisfies CollaborationWatcherState
   }
 
+  /** Reads one exact member watcher row without calculating scope-wide counts. */
+  async getMemberWatcherState(input: GetWatcherStateInput) {
+    await this.ensureLocalTable()
+    const entityKey = requireText(input.entityKey, 'Collaboration entity key')
+    const memberKey = normalizeMemberKey(input.memberKey)
+    const projectEntityKey = input.projectEntityKey === undefined
+      ? undefined
+      : requireText(input.projectEntityKey, 'Project collaboration entity key')
+    const [current, projectCurrent] = await Promise.all([
+      this.readMemberWatcher(entityKey, memberKey),
+      projectEntityKey === undefined
+        ? undefined
+        : this.readMemberWatcher(projectEntityKey, memberKey),
+    ])
+    const reasons = current ? normalizeWatcherReasons(current.reasons) : []
+
+    return {
+      subscribed: current?.state === 'subscribed',
+      explicit: current?.explicit === true,
+      automatic: reasons.some((reason) => reason !== 'manual'),
+      reasons,
+      ...(projectEntityKey === undefined
+        ? {}
+        : { projectSubscribed: projectCurrent?.state === 'subscribed' }),
+    } satisfies CollaborationMemberWatcherState
+  }
+
   /** 手動または自動 watcher を保存します。 */
+  async subscribe(
+    input: UpdateWatcherInput & { expectedSubscribed: boolean },
+  ): Promise<CollaborationMemberWatcherState>
+  /** Saves a watcher while preserving scope-wide counts for compatibility callers. */
+  async subscribe(
+    input: Omit<UpdateWatcherInput, 'expectedSubscribed'> & { expectedSubscribed?: undefined },
+  ): Promise<CollaborationWatcherState>
+  /** Saves a watcher when the optional compare-and-set shape is not statically narrowed. */
+  async subscribe(
+    input: UpdateWatcherInput,
+  ): Promise<CollaborationMemberWatcherState | CollaborationWatcherState>
+  /** Saves a manual or automatic watcher and returns the requested projection shape. */
   async subscribe(input: UpdateWatcherInput) {
     await this.ensureLocalTable()
     const { entityKey, entityType, entityId } = validateWatcherScope(input)
@@ -842,7 +919,14 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
     const reason = input.automatic ? input.reason ?? 'comment' : 'manual'
     const update = input.automatic
       ? autoWatcherUpdate(this.tableName, entityKey, memberKey, reason, occurredAt)
-      : manualWatcherUpdate(this.tableName, entityKey, memberKey, 'subscribed', occurredAt)
+      : manualWatcherUpdate(
+          this.tableName,
+          entityKey,
+          memberKey,
+          'subscribed',
+          occurredAt,
+          input.expectedSubscribed,
+        )
     const auditPut = createMutationAuditEventPut(this.auditTableName, input.auditContext, {
       directoryId: input.workspaceId,
       eventType: 'watcher.subscribed',
@@ -867,6 +951,9 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       if (!isConditionalFailure(error)) {
         throw toCollaborationStoreError(error)
       }
+      if (input.expectedSubscribed !== undefined) {
+        throw new CollaborationError(409, 'CollaborationConflict', 'Watcher subscription conflicted.')
+      }
 
       const current = await this.getWatcherState({
         entityKey,
@@ -878,14 +965,29 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       }
       return current
     }
-    return this.getWatcherState({
+    const watcherInput = {
       entityKey,
       memberKey,
       projectEntityKey: input.projectEntityKey,
-    })
+    }
+    return input.expectedSubscribed === undefined
+      ? this.getWatcherState(watcherInput)
+      : this.getMemberWatcherState(watcherInput)
   }
 
   /** 明示的な unsubscribe tombstone を保存します。 */
+  async unsubscribe(
+    input: UpdateWatcherInput & { expectedSubscribed: boolean },
+  ): Promise<CollaborationMemberWatcherState>
+  /** Saves an unsubscribe tombstone while preserving counts for compatibility callers. */
+  async unsubscribe(
+    input: Omit<UpdateWatcherInput, 'expectedSubscribed'> & { expectedSubscribed?: undefined },
+  ): Promise<CollaborationWatcherState>
+  /** Saves an unsubscribe tombstone when the optional compare-and-set shape is not narrowed. */
+  async unsubscribe(
+    input: UpdateWatcherInput,
+  ): Promise<CollaborationMemberWatcherState | CollaborationWatcherState>
+  /** Saves an explicit unsubscribe tombstone and returns the requested projection shape. */
   async unsubscribe(input: UpdateWatcherInput) {
     await this.ensureLocalTable()
     const { entityKey, entityType, entityId } = validateWatcherScope(input)
@@ -910,13 +1012,23 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       await this.documentClient.send(new TransactWriteCommand({
         TransactItems: [
           ...parentConditions,
-          manualWatcherUpdate(this.tableName, entityKey, memberKey, 'unsubscribed', occurredAt),
+          manualWatcherUpdate(
+            this.tableName,
+            entityKey,
+            memberKey,
+            'unsubscribed',
+            occurredAt,
+            input.expectedSubscribed,
+          ),
           ...(auditPut ? [auditPut] : []),
         ],
       }))
     } catch (error) {
       if (!isConditionalFailure(error)) {
         throw toCollaborationStoreError(error)
+      }
+      if (input.expectedSubscribed !== undefined) {
+        throw new CollaborationError(409, 'CollaborationConflict', 'Watcher unsubscription conflicted.')
       }
 
       const current = await this.getWatcherState({
@@ -929,11 +1041,14 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       }
       return current
     }
-    return this.getWatcherState({
+    const watcherInput = {
       entityKey,
       memberKey,
       projectEntityKey: input.projectEntityKey,
-    })
+    }
+    return input.expectedSubscribed === undefined
+      ? this.getWatcherState(watcherInput)
+      : this.getMemberWatcherState(watcherInput)
   }
 
   /** Presence/typing lease を更新します。 */
@@ -1274,6 +1389,37 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
     }
   }
 
+  /**
+   * Reads and validates one exact watcher row with a consistent point read.
+   *
+   * @param entityKey - Collaboration entity partition key.
+   * @param memberKey - Normalized Workspace member key.
+   * @returns The stored watcher row, or undefined when no row exists.
+   */
+  private async readMemberWatcher(entityKey: string, memberKey: string) {
+    const recordKey = watcherRecordKey(memberKey)
+    const response = await this.documentClient.send(new GetCommand({
+      TableName: this.tableName,
+      Key: { entityKey, recordKey },
+      ConsistentRead: true,
+    }))
+    if (response.Item === undefined) return undefined
+
+    const watcher = toStoredWatcher(response.Item)
+    if (
+      watcher.entityKey !== entityKey ||
+      watcher.recordKey !== recordKey ||
+      watcher.memberKey !== memberKey
+    ) {
+      throw new CollaborationError(
+        503,
+        'InvalidCollaborationRecord',
+        'Watcher record identity is invalid.',
+      )
+    }
+    return watcher
+  }
+
   private async listPresence(entityKey: string) {
     const now = Math.floor(Date.now() / 1_000)
     const latestByMember = new Map<string, StoredPresence>()
@@ -1558,12 +1704,20 @@ function manualWatcherUpdate(
   memberKey: string,
   state: 'subscribed' | 'unsubscribed',
   occurredAt: string,
+  expectedSubscribed?: boolean,
 ) {
   return {
     Update: {
       TableName: tableName,
       Key: { entityKey, recordKey: watcherRecordKey(memberKey) },
       UpdateExpression: 'SET entryType = :entryType, memberKey = :memberKey, #state = :state, explicit = :true, createdAt = if_not_exists(createdAt, :createdAt), updatedAt = :updatedAt ADD reasons :reasons',
+      ...(expectedSubscribed === undefined
+        ? {}
+        : {
+            ConditionExpression: expectedSubscribed
+              ? '#state = :expectedState'
+              : 'attribute_not_exists(entityKey) OR #state = :expectedState',
+          }),
       ExpressionAttributeNames: { '#state': 'state' },
       ExpressionAttributeValues: {
         ':entryType': 'watcher',
@@ -1573,6 +1727,9 @@ function manualWatcherUpdate(
         ':createdAt': occurredAt,
         ':updatedAt': occurredAt,
         ':reasons': new Set(['manual']),
+        ...(expectedSubscribed === undefined
+          ? {}
+          : { ':expectedState': expectedSubscribed ? 'subscribed' : 'unsubscribed' }),
       },
     },
   }

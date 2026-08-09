@@ -278,6 +278,150 @@ test('reads every watcher page before calculating subscription state and count',
   })
 })
 
+test('reads one member watcher state with consistent point gets instead of queries', async () => {
+  const commands: Array<Record<string, unknown>> = []
+  const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
+  const projectEntityKey = createProjectCollaborationEntityKey('workspace#one', 'project-a')
+  const client = createClient(async (command) => {
+    const input = readCommandInput(command)
+    commands.push(input)
+    if (typeof input.Key !== 'object' || input.Key === null) {
+      throw new Error('Expected an exact watcher key read.')
+    }
+    const requestedEntityKey = Reflect.get(input.Key, 'entityKey')
+    return {
+      Item: {
+        entityKey: requestedEntityKey,
+        recordKey: 'WATCHER#member@example.com',
+        entryType: 'watcher',
+        memberKey: 'member@example.com',
+        state: requestedEntityKey === entityKey ? 'subscribed' : 'unsubscribed',
+        explicit: true,
+        reasons: new Set(requestedEntityKey === entityKey ? ['manual', 'comment'] : ['manual']),
+        createdAt: '2026-07-12T00:00:00.000Z',
+        updatedAt: '2026-07-12T00:00:00.000Z',
+      },
+    }
+  })
+
+  const watch = await client.getMemberWatcherState({
+    entityKey,
+    memberKey: 'Member@Example.com',
+    projectEntityKey,
+  })
+
+  expect(watch).toEqual({
+    subscribed: true,
+    explicit: true,
+    automatic: true,
+    reasons: ['comment', 'manual'],
+    projectSubscribed: false,
+  })
+  expect(commands).toEqual([
+    {
+      TableName: 'collaboration-table',
+      Key: { entityKey, recordKey: 'WATCHER#member@example.com' },
+      ConsistentRead: true,
+    },
+    {
+      TableName: 'collaboration-table',
+      Key: { entityKey: projectEntityKey, recordKey: 'WATCHER#member@example.com' },
+      ConsistentRead: true,
+    },
+  ])
+  expect(commands.every((command) => !('KeyConditionExpression' in command))).toBeTrue()
+})
+
+test('conditions manual watcher updates on the optional expected subscription state', async () => {
+  const transactions: Array<Record<string, unknown>> = []
+  const postWriteReads: Array<Record<string, unknown>> = []
+  const client = createClient(async (command) => {
+    const input = readCommandInput(command)
+    if ('TransactItems' in input) {
+      transactions.push(input)
+    } else {
+      postWriteReads.push(input)
+    }
+    return { Items: [] }
+  })
+  const entityKey = createProjectCollaborationEntityKey('workspace#one', 'project-a')
+  const scope = {
+    workspaceId: 'workspace#one',
+    entityKey,
+    projectId: 'project-a',
+    memberKey: 'member@example.com',
+  }
+
+  await client.subscribe({ ...scope, expectedSubscribed: false })
+  await client.unsubscribe({ ...scope, expectedSubscribed: true })
+
+  expect(transactions[0]?.TransactItems).toEqual([
+    expect.objectContaining({
+      Update: expect.objectContaining({
+        ConditionExpression: 'attribute_not_exists(entityKey) OR #state = :expectedState',
+        ExpressionAttributeValues: expect.objectContaining({
+          ':state': 'subscribed',
+          ':expectedState': 'unsubscribed',
+        }),
+      }),
+    }),
+  ])
+  expect(transactions[1]?.TransactItems).toEqual([
+    expect.objectContaining({
+      Update: expect.objectContaining({
+        ConditionExpression: '#state = :expectedState',
+        ExpressionAttributeValues: expect.objectContaining({
+          ':state': 'unsubscribed',
+          ':expectedState': 'subscribed',
+        }),
+      }),
+    }),
+  ])
+  expect(postWriteReads).toEqual([
+    {
+      TableName: 'collaboration-table',
+      Key: { entityKey, recordKey: 'WATCHER#member@example.com' },
+      ConsistentRead: true,
+    },
+    {
+      TableName: 'collaboration-table',
+      Key: { entityKey, recordKey: 'WATCHER#member@example.com' },
+      ConsistentRead: true,
+    },
+  ])
+})
+
+test('fails a watcher compare-and-set conflict without scanning the watcher scope', async () => {
+  let nonTransactionReads = 0
+  const client = createClient(async (command) => {
+    const input = readCommandInput(command)
+    if ('TransactItems' in input) {
+      throw Object.assign(new Error('conditional conflict'), {
+        name: 'TransactionCanceledException',
+        CancellationReasons: [{ Code: 'ConditionalCheckFailed' }],
+      })
+    }
+    nonTransactionReads += 1
+    return { Items: [] }
+  })
+  const scope = {
+    workspaceId: 'workspace#one',
+    entityKey: createProjectCollaborationEntityKey('workspace#one', 'project-a'),
+    projectId: 'project-a',
+    memberKey: 'member@example.com',
+  }
+
+  await expect(client.subscribe({ ...scope, expectedSubscribed: false })).rejects.toMatchObject({
+    status: 409,
+    code: 'CollaborationConflict',
+  })
+  await expect(client.unsubscribe({ ...scope, expectedSubscribed: true })).rejects.toMatchObject({
+    status: 409,
+    code: 'CollaborationConflict',
+  })
+  expect(nonTransactionReads).toBe(0)
+})
+
 test('seeds deduplicated automatic watchers when a comment is created', async () => {
   let transaction: Record<string, unknown> | undefined
   const client = createClient(async (command) => {

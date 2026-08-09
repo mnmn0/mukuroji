@@ -1663,6 +1663,12 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
           ...(status === 'changes-requested' ? { changesRequested: 1 } : {}),
         },
       ))
+    } else {
+      transactionItems.push(createApprovalSummaryTouch(
+        this.tableName,
+        scopeKey,
+        now,
+      ))
     }
     if (completionTransition && this.workItemsTableName) {
       transactionItems.push(...completionTransition.configurationConditionChecks)
@@ -2442,6 +2448,13 @@ export function createApprovalSummary(approvals: readonly ApprovalRequest[]): Ap
   const now = Date.now()
   const pending = approvals.filter((approval) => approval.status === 'pending')
   const nextDueAt = pending.map((approval) => approval.dueAt).sort()[0]
+  const updatedAt = approvals.reduce<string | undefined>(
+    (latest, approval) =>
+      latest === undefined || Date.parse(approval.updatedAt) > Date.parse(latest)
+        ? approval.updatedAt
+        : latest,
+    undefined,
+  )
 
   return {
     pendingCount: pending.length,
@@ -2452,6 +2465,7 @@ export function createApprovalSummary(approvals: readonly ApprovalRequest[]): Ap
       (approval) => approval.status === 'changes-requested',
     ).length,
     ...(nextDueAt ? { nextDueAt } : {}),
+    ...(updatedAt ? { updatedAt } : {}),
   }
 }
 
@@ -2477,6 +2491,7 @@ function toApprovalSummary(item: StoredApprovalSummaryItem): ApprovalSummary {
     rejectedCount: item.rejectedCount,
     changesRequestedCount: item.changesRequestedCount,
     ...(dueDates[0] ? { nextDueAt: dueDates[0] } : {}),
+    updatedAt: item.updatedAt,
   }
 }
 
@@ -3121,6 +3136,40 @@ function createApprovalSummaryUpdate(
   }
 }
 
+/**
+ * Advances aggregate causal evidence when a reviewer decision keeps the approval pending.
+ *
+ * @param tableName - File proofing table that owns the aggregate.
+ * @param scopeKey - Work Item approval partition key.
+ * @param updatedAt - Canonical reviewer decision timestamp.
+ * @returns Conditional aggregate touch committed with the reviewer decision.
+ */
+function createApprovalSummaryTouch(
+  tableName: string,
+  scopeKey: string,
+  updatedAt: string,
+): NonNullable<TransactWriteCommandInput['TransactItems']>[number] {
+  return {
+    Update: {
+      TableName: tableName,
+      Key: { scopeKey, recordKey: 'APPROVAL_SUMMARY' },
+      UpdateExpression: 'SET #updatedAt = :updatedAt',
+      ConditionExpression:
+        'attribute_exists(scopeKey) AND #entryType = :entryType AND #pending >= :one',
+      ExpressionAttributeNames: {
+        '#entryType': 'entryType',
+        '#pending': 'pendingCount',
+        '#updatedAt': 'updatedAt',
+      },
+      ExpressionAttributeValues: {
+        ':entryType': 'approval-summary',
+        ':one': 1,
+        ':updatedAt': updatedAt,
+      },
+    },
+  }
+}
+
 /** Optional audit event を state transaction へ追加します。 */
 function addAuditItem(
   transactionItems: NonNullable<TransactWriteCommandInput['TransactItems']>,
@@ -3433,9 +3482,27 @@ function isStoredFileApprovalIndexItem(value: unknown): value is StoredFileAppro
 /** Approval summary projection row を判定します。 */
 function isStoredApprovalSummaryItem(value: unknown): value is StoredApprovalSummaryItem {
   return typeof value === 'object' && value !== null &&
-    'entryType' in value && value.entryType === 'approval-summary' && (
-      !('pendingDueAt' in value) || value.pendingDueAt instanceof Set
-    )
+    'entryType' in value && value.entryType === 'approval-summary' &&
+    'pendingCount' in value && isNonnegativeSafeInteger(value.pendingCount) &&
+    'approvedCount' in value && isNonnegativeSafeInteger(value.approvedCount) &&
+    'rejectedCount' in value && isNonnegativeSafeInteger(value.rejectedCount) &&
+    'changesRequestedCount' in value &&
+      isNonnegativeSafeInteger(value.changesRequestedCount) &&
+    'updatedAt' in value && isValidTimestamp(value.updatedAt) &&
+    (!('pendingDueAt' in value) || (
+      value.pendingDueAt instanceof Set &&
+      [...value.pendingDueAt].every((entry) => typeof entry === 'string')
+    ))
+}
+
+/** Returns whether a stored counter is a nonnegative safe integer. */
+function isNonnegativeSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+}
+
+/** Returns whether a stored timestamp is a parseable string. */
+function isValidTimestamp(value: unknown): value is string {
+  return typeof value === 'string' && Number.isFinite(Date.parse(value))
 }
 
 /** Reviewer projection row を判定します。 */

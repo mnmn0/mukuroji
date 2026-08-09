@@ -2,6 +2,8 @@
 
 Mukuroji の Inbox は、Work Item の現在状態から都度組み立てる attention queue ではなく、ユーザー別に永続化した notification timeline を正本とします。
 
+現在も継続する blocker、review、期限、approval などは [Focus queue](./focus.md) が canonical source を再評価して表示します。通知の read/archive/snooze は Focus signal を解消せず、両画面は共通の `eventId` と Work Item scope で相互リンクします。Focus から archived / snoozed event を開く場合は該当 state filter も URL に束縛し、Web は Focus source の bounded windowを覆う範囲でcursor pageを自動取得してexact rowへscroll/focusします。
+
 ## Event から notification まで
 
 状態変更と同じ DynamoDB transaction に保存された `AuditEventsTable` の event を、`CollaborationProjectionFunction` が stream から処理します。recipient ごとの notification と processed receipt は同じ transaction に保存し、同じ event が再配送されても notification は一度だけ作成されます。
@@ -30,7 +32,7 @@ recipientStatusKey    = <recipientKey>#<unread|read|archived|snoozed>
 
 `RecipientStatusIndex` 導入前の notification row は、recipient の初回 read 時に base partition を bounded pagination で強整合走査し、state key と version を条件付きで補完します。完了 marker も同じ partition に保存するため、以後の request は一度きりの移行を繰り返しません。
 
-read、archive、snooze は notification row に version 付きで保存します。snooze 期限を過ぎた row は次の Inbox/count read で read/unread state に戻ります。`mark-all-read` は active unread row のみを更新し、archive や有効な snooze は解除しません。
+read、archive、snooze は notification row に version 付きで保存します。snooze 期限を過ぎた row は次の Inbox/count read で read/unread state に戻ります。この解除処理は250件 × 4 page（最大1,000行）に制限し、continuation が残る場合や cursor が進まない場合は `503` で fail closed します。`mark-all-read` は active unread row のみを更新し、archive や有効な snooze は解除しません。
 
 ## API
 

@@ -1593,7 +1593,17 @@ function normalizeCanonicalWorkItemResult(value: unknown): CanonicalWorkItem {
   if ((archivedAt === undefined) !== (archivedBy === undefined)) {
     invalidTransactionResult('canonical Work Item archive fields')
   }
-  const approvalSummary = normalizeApprovalSummary(value.approvalSummary)
+  const priorityUpdatedAt = readOptionalCausalResultTimestamp(
+    value.priorityUpdatedAt,
+    value.createdAt,
+    value.updatedAt,
+  )
+  const dueDateUpdatedAt = readOptionalCausalResultTimestamp(
+    value.dueDateUpdatedAt,
+    value.createdAt,
+    value.updatedAt,
+  )
+  const approvalSummary = normalizeApprovalSummary(value.approvalSummary, value.createdAt)
   return {
     schemaVersion: WORK_ITEM_SCHEMA_VERSION,
     revision: value.revision,
@@ -1610,6 +1620,8 @@ function normalizeCanonicalWorkItemResult(value: unknown): CanonicalWorkItem {
     dueDate: value.dueDate,
     schedule: value.schedule,
     priority: value.priority,
+    ...(priorityUpdatedAt === undefined ? {} : { priorityUpdatedAt }),
+    ...(dueDateUpdatedAt === undefined ? {} : { dueDateUpdatedAt }),
     workflowStatusId: value.workflowStatusId,
     statusCategory: value.statusCategory,
     workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
@@ -1658,9 +1670,13 @@ function isCustomFieldValue(value: unknown): value is CustomFieldValue {
  * Deeply validates and copies an optional Work Item approval summary.
  *
  * @param value - Candidate optional approval summary.
+ * @param workItemCreatedAt - Canonical creation boundary for approval activity.
  * @returns Exact summary or undefined.
  */
-function normalizeApprovalSummary(value: unknown): ApprovalSummary | undefined {
+function normalizeApprovalSummary(
+  value: unknown,
+  workItemCreatedAt: string,
+): ApprovalSummary | undefined {
   if (value === undefined) return undefined
   if (!isTransactionRecord(value)) invalidTransactionResult('canonical approval summary')
   if (
@@ -1671,6 +1687,13 @@ function normalizeApprovalSummary(value: unknown): ApprovalSummary | undefined {
     !isNonNegativeSafeInteger(value.changesRequestedCount)
   ) invalidTransactionResult('canonical approval summary')
   const nextDueAt = readOptionalResultTimestamp(value.nextDueAt)
+  const updatedAt = readOptionalResultTimestamp(value.updatedAt)
+  if (
+    updatedAt !== undefined &&
+    Date.parse(updatedAt) < Date.parse(workItemCreatedAt)
+  ) {
+    invalidTransactionResult('canonical approval summary timestamp')
+  }
   return {
     pendingCount: value.pendingCount,
     overdueCount: value.overdueCount,
@@ -1678,6 +1701,7 @@ function normalizeApprovalSummary(value: unknown): ApprovalSummary | undefined {
     rejectedCount: value.rejectedCount,
     changesRequestedCount: value.changesRequestedCount,
     ...(nextDueAt === undefined ? {} : { nextDueAt }),
+    ...(updatedAt === undefined ? {} : { updatedAt }),
   }
 }
 
@@ -1724,6 +1748,32 @@ function readOptionalResultTimestamp(value: unknown): string | undefined {
   if (value === undefined) return undefined
   if (!isCanonicalTimestamp(value)) invalidTransactionResult('canonical Work Item timestamp')
   return value
+}
+
+/**
+ * Reads one optional field-specific timestamp inside a canonical Work Item lifetime.
+ *
+ * @param value - Candidate causal timestamp.
+ * @param createdAt - Canonical Work Item creation timestamp.
+ * @param updatedAt - Canonical Work Item aggregate update timestamp.
+ * @returns Exact causal timestamp or undefined.
+ */
+function readOptionalCausalResultTimestamp(
+  value: unknown,
+  createdAt: string,
+  updatedAt: string,
+): string | undefined {
+  const timestamp = readOptionalResultTimestamp(value)
+  if (
+    timestamp !== undefined &&
+    (
+      Date.parse(timestamp) < Date.parse(createdAt) ||
+      Date.parse(timestamp) > Date.parse(updatedAt)
+    )
+  ) {
+    invalidTransactionResult('canonical Work Item causal timestamp')
+  }
+  return timestamp
 }
 
 /**

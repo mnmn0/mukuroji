@@ -7,6 +7,8 @@ const {
   createCollaborationStub,
   createDocumentFake,
   createFakeWorkItemConfigurationClient,
+  createTeamIssuesFake,
+  getTestAppDependencies,
   resetTestApp,
   runWithTestAppDependencies,
   setTestAppDependencies,
@@ -21,11 +23,13 @@ import {
   CollaborationError,
 } from '../../../collaboration/collaboration'
 import {
+  type CanonicalWorkItem,
   createDefaultDueDateWorkItemSchedule,
 } from '@mukuroji/contracts'
 import { InMemoryPlanningClient } from '../../../planning/planning'
 import { createWorkItemAuthorizationChangedError } from '../../adapter-out/dynamodb/work-item-client'
 import { createInMemoryDeveloperPlatformAdapters } from '../../../developer-platform/adapter-out/in-memory/developer-platform-adapters'
+import type { AuthenticatedDeveloperCredential } from '../../../developer-platform/application/ports'
 import {
   afterEach,
   expect,
@@ -35,6 +39,41 @@ import {
 afterEach(() => {
   resetTestApp()
 })
+
+/**
+ * Adds every current server-only Work Item field to an API test fixture.
+ *
+ * @param workItem - Canonical fixture returned by the fake persistence port.
+ * @returns Fixture carrying causal, intake, archive, and approval internals.
+ */
+function addInternalWorkItemFields(workItem: CanonicalWorkItem): CanonicalWorkItem {
+  return {
+    ...workItem,
+    priorityUpdatedAt: '2026-06-08T01:00:00.000Z',
+    dueDateUpdatedAt: '2026-06-08T01:00:00.000Z',
+    sourceRequestId: 'request-internal-1',
+    archivedAt: '2026-06-08T02:00:00.000Z',
+    archivedBy: 'internal-operator@example.com',
+    approvalSummary: {
+      pendingCount: 1,
+      overdueCount: 0,
+      approvedCount: 0,
+      rejectedCount: 0,
+      changesRequestedCount: 0,
+      updatedAt: '2026-06-08T02:00:00.000Z',
+    },
+  }
+}
+
+/** Current internal Work Item fields excluded by the closed public schema. */
+const internalWorkItemFields = [
+  'priorityUpdatedAt',
+  'dueDateUpdatedAt',
+  'sourceRequestId',
+  'archivedAt',
+  'archivedBy',
+  'approvalSummary',
+]
 
 test('does not expose legacy project task mutation routes', async () => {
   const calls = configureFakeProjectClients(true)
@@ -207,6 +246,190 @@ test('allows current system administrators to select an active Webhook Team', as
     locale: 'ja',
     consistentRead: true,
   })
+})
+
+test('projects every Public Work Item service result onto the closed response schema', async () => {
+  configureFakeProjectClients(true, {
+    directoryId: 'workspace-1',
+    workspaceRole: 'owner',
+  })
+  const baseTeamIssues = getTestAppDependencies().workItems.teamIssues
+  let preparedUpdateReceipt: unknown
+  const platform = createInMemoryDeveloperPlatformAdapters()
+  setTestAppDependencies({
+    ...platform,
+    documents: createDocumentFake({
+      async prepareWorkItemDeletionFenceTransactWrite() {
+        return {
+          transactWriteItem: {
+            Put: {
+              TableName: 'DocumentsTable',
+              Item: { activeBacklinkCount: 0 },
+            },
+          },
+        }
+      },
+    }),
+    transactions: {
+      async prepareIdempotencyCompletionTransactWrite(request) {
+        preparedUpdateReceipt = structuredClone(request.response)
+        return {
+          transactWriteItem: {
+            Put: {
+              TableName: 'DeveloperPlatformTable',
+              Item: { entryType: 'idempotency-completion' },
+            },
+          },
+        }
+      },
+    },
+    teamIssues: createTeamIssuesFake({
+      ...baseTeamIssues,
+      async getPublicWorkItemPage(directoryId, teamId, options) {
+        const page = await baseTeamIssues.getPublicWorkItemPage(directoryId, teamId, options)
+        return { ...page, issues: page.issues.map(addInternalWorkItemFields) }
+      },
+      async getTeamIssueDetail(directoryId, teamId, issueId, options) {
+        const detail = await baseTeamIssues.getTeamIssueDetail(
+          directoryId,
+          teamId,
+          issueId,
+          options,
+        )
+        return { ...detail, issue: addInternalWorkItemFields(detail.issue) }
+      },
+      async createTeamIssue(directoryId, teamId, input, actorUserId, auditContext) {
+        const response = await baseTeamIssues.createTeamIssue(
+          directoryId,
+          teamId,
+          input,
+          actorUserId,
+          auditContext,
+        )
+        return { issue: addInternalWorkItemFields(response.issue) }
+      },
+      async updateTeamIssue(
+        directoryId,
+        teamId,
+        issueId,
+        input,
+        actorUserId,
+        auditContext,
+        idempotency,
+      ) {
+        const response = await baseTeamIssues.updateTeamIssue(
+          directoryId,
+          teamId,
+          issueId,
+          input,
+          actorUserId,
+          auditContext,
+        )
+        const issue = addInternalWorkItemFields(response.issue)
+        await idempotency?.prepare({ status: 200, body: issue })
+        return { issue }
+      },
+      async deleteTeamIssue(
+        directoryId,
+        teamId,
+        issueId,
+        expectedRevision,
+        actorUserId,
+        auditContext,
+        idempotency,
+        deletionFences,
+        authorizationConditionChecks,
+        authorizationSnapshot,
+      ) {
+        if (baseTeamIssues.deleteTeamIssue === undefined) {
+          throw new Error('Expected the Public Work Item delete fake to be configured.')
+        }
+        const response = await baseTeamIssues.deleteTeamIssue(
+          directoryId,
+          teamId,
+          issueId,
+          expectedRevision,
+          actorUserId,
+          auditContext,
+          idempotency,
+          deletionFences,
+          authorizationConditionChecks,
+          authorizationSnapshot,
+        )
+        return { issue: addInternalWorkItemFields(response.issue) }
+      },
+    }),
+  })
+  const service = createCanonicalPublicWorkItemService()
+  const credential = {
+    kind: 'api-key',
+    workspaceId: 'workspace-1',
+    credentialId: 'closed-public-work-item-key',
+    subjectUserId: 'demo@example.com',
+    scopes: ['work-items:read', 'work-items:write', 'work-items:delete'],
+  } satisfies AuthenticatedDeveloperCredential
+  const mutationContext = {
+    requestId: 'closed-public-work-item-request',
+    idempotencyKey: 'closed-public-work-item-request',
+  }
+  const results = await runWithTestAppDependencies(async () => {
+    const page = await service.list(credential, { teamId: 'core-team' }, undefined, 10)
+    const item = await service.get(credential, 'core-team', 'onboarding-friction')
+    const created = await service.create(credential, {
+      teamId: 'core-team',
+      title: 'Public create projection',
+      assigneeUserId: 'sato@example.com',
+      assignedProjectId: 'refero',
+      schedule: createDefaultDueDateWorkItemSchedule('2026-06-18'),
+      priority: 'medium',
+    }, mutationContext)
+    const updated = await service.update(
+      credential,
+      'core-team',
+      'onboarding-friction',
+      { expectedRevision: 1, title: 'Public update projection' },
+      mutationContext,
+      {
+        credentialId: credential.credentialId,
+        idempotencyKey: mutationContext.idempotencyKey,
+        requestFingerprint: 'public-update-fingerprint',
+        reservationId: 'public-update-reservation',
+      },
+    )
+    const deleted = await service.delete(
+      credential,
+      'core-team',
+      'onboarding-friction',
+      1,
+      mutationContext,
+    )
+    return { page, item, created, updated, deleted }
+  })
+
+  const projectedItems = [
+    results.page.items[0],
+    results.item,
+    results.created,
+    results.updated,
+    results.deleted,
+  ]
+  for (const item of projectedItems) {
+    expect(item).toBeDefined()
+    for (const field of internalWorkItemFields) {
+      expect(item).not.toHaveProperty(field)
+    }
+  }
+  expect(preparedUpdateReceipt).toBeDefined()
+  if (
+    typeof preparedUpdateReceipt !== 'object' ||
+    preparedUpdateReceipt === null ||
+    !('body' in preparedUpdateReceipt)
+  ) {
+    throw new Error('Expected a prepared Public Work Item replay receipt.')
+  }
+  for (const field of internalWorkItemFields) {
+    expect(preparedUpdateReceipt.body).not.toHaveProperty(field)
+  }
 })
 
 test('rejects Public Work Item deletion while an incident schedule dependency exists', async () => {

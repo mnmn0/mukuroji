@@ -587,6 +587,7 @@ function createCollaborationStub(
     addReaction: unsupported,
     removeReaction: unsupported,
     getWatcherState: unsupported,
+    getMemberWatcherState: unsupported,
     subscribe: unsupported,
     unsubscribe: unsupported,
     heartbeatPresence: unsupported,

@@ -297,8 +297,49 @@ export function readWorkItemScheduleChangePreviewForEndpoint(
     : undefined
 }
 
-/** Returns whether an optional approval summary has valid numeric counters. */
-function isApprovalSummary(value: unknown): boolean {
+/**
+ * Returns whether a value is a canonical UTC timestamp.
+ *
+ * @param value - Unknown timestamp candidate.
+ * @returns Whether the value is the exact ISO UTC representation of a valid instant.
+ */
+function isCanonicalUtcTimestamp(value: unknown): value is string {
+  if (typeof value !== 'string') return false
+  const timestamp = new Date(value)
+  return Number.isFinite(timestamp.getTime()) && timestamp.toISOString() === value
+}
+
+/**
+ * Returns whether an optional causal timestamp falls inside the Work Item lifetime.
+ *
+ * @param value - Unknown optional causal timestamp.
+ * @param createdAt - Canonical Work Item creation timestamp.
+ * @param updatedAt - Canonical Work Item aggregate update timestamp.
+ * @returns Whether the timestamp is absent or lies inside the inclusive lifetime.
+ */
+function isOptionalWorkItemCausalTimestamp(
+  value: unknown,
+  createdAt: string,
+  updatedAt: string,
+): boolean {
+  return value === undefined || (
+    isCanonicalUtcTimestamp(value) &&
+    Date.parse(value) >= Date.parse(createdAt) &&
+    Date.parse(value) <= Date.parse(updatedAt)
+  )
+}
+
+/**
+ * Returns whether an optional approval summary has valid counters and causal evidence.
+ *
+ * Approval mutations may advance independently of the Work Item aggregate revision, so the
+ * summary timestamp has no Work Item `updatedAt` upper bound.
+ *
+ * @param value - Unknown optional approval summary.
+ * @param workItemCreatedAt - Earliest instant at which approval activity can exist.
+ * @returns Whether the optional summary satisfies the response contract.
+ */
+function isApprovalSummary(value: unknown, workItemCreatedAt: string): boolean {
   return value === undefined || (
     isRecord(value) &&
     isNonnegativeSafeInteger(value.pendingCount) &&
@@ -306,7 +347,14 @@ function isApprovalSummary(value: unknown): boolean {
     isNonnegativeSafeInteger(value.approvedCount) &&
     isNonnegativeSafeInteger(value.rejectedCount) &&
     isNonnegativeSafeInteger(value.changesRequestedCount) &&
-    isOptionalString(value.nextDueAt)
+    isOptionalString(value.nextDueAt) &&
+    (
+      value.updatedAt === undefined ||
+      (
+        isCanonicalUtcTimestamp(value.updatedAt) &&
+        Date.parse(value.updatedAt) >= Date.parse(workItemCreatedAt)
+      )
+    )
   )
 }
 
@@ -334,8 +382,19 @@ export function isCanonicalWorkItem(value: unknown): value is CanonicalWorkItem 
     typeof value.dueDate === 'string' &&
     isWorkItemSchedule(value.schedule) &&
     (value.priority === 'high' || value.priority === 'medium' || value.priority === 'low') &&
-    typeof value.createdAt === 'string' &&
-    typeof value.updatedAt === 'string' &&
+    isCanonicalUtcTimestamp(value.createdAt) &&
+    isCanonicalUtcTimestamp(value.updatedAt) &&
+    Date.parse(value.updatedAt) >= Date.parse(value.createdAt) &&
+    isOptionalWorkItemCausalTimestamp(
+      value.priorityUpdatedAt,
+      value.createdAt,
+      value.updatedAt,
+    ) &&
+    isOptionalWorkItemCausalTimestamp(
+      value.dueDateUpdatedAt,
+      value.createdAt,
+      value.updatedAt,
+    ) &&
     value.source === 'dynamodb' &&
     isOptionalString(value.assignedProjectId) &&
     isOptionalString(value.description) &&
@@ -344,7 +403,7 @@ export function isCanonicalWorkItem(value: unknown): value is CanonicalWorkItem 
     isOptionalString(value.sourceRequestId) &&
     isOptionalString(value.archivedAt) &&
     isOptionalString(value.archivedBy) &&
-    isApprovalSummary(value.approvalSummary)
+    isApprovalSummary(value.approvalSummary, value.createdAt)
 }
 
 /** Returns whether a value is one compact committed Work Item schedule. */

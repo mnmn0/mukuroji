@@ -1,8 +1,13 @@
 import { useMemo } from 'react'
+import { getFocusBlockedCount } from '../../features/focus-queue/model/focusMetrics'
+import { useFocusQueue } from '../../features/focus-queue/queries/useFocusQueue'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { createWorkspaceSummary } from '../../work-items/model/workspaceWorkItems'
 import { useWorkspaceWorkItemData } from '../../workspace/queries/useWorkspaceWorkItemData'
-import { WorkspaceTaskLoadNotice } from '../../workspace/ui/WorkspaceDataNotices'
+import {
+  WorkspaceFocusLoadNotice,
+  WorkspaceTaskLoadNotice,
+} from '../../workspace/ui/WorkspaceDataNotices'
 import { HomeWorkspaceView } from '../../workspace/ui/HomeWorkspaceView'
 import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
 import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
@@ -20,14 +25,23 @@ export function HomePage() {
     workspace.canLoadWorkspaceData,
     workspace.teams,
   )
+  const focusQueue = useFocusQueue(
+    workspace.accessToken,
+    workspace.canLoadWorkspaceData,
+  )
   const summary = useMemo(
-    () => createWorkspaceSummary(workspace.teams, workItems.tasks),
-    [workItems.tasks, workspace.teams],
+    () => createWorkspaceSummary(
+      workspace.teams,
+      workItems.tasks,
+      getFocusBlockedCount(focusQueue.data),
+    ),
+    [focusQueue.data, workItems.tasks, workspace.teams],
   )
   return (
     <WorkspaceRouteContent
-      isLoading={workItems.isLoading}
+      isLoading={workItems.isLoading || Boolean(focusQueue.key && focusQueue.isLoading)}
       sessionErrors={[
+        focusQueue.error,
         workItems.workItemsError,
         workItems.configurationsError,
         ...workItems.configurationErrors,
@@ -38,7 +52,15 @@ export function HomePage() {
           failedProjectCount={workItems.failedProjectCount}
           t={t}
         />
+        <WorkspaceFocusLoadNotice
+          hasCachedData={Boolean(focusQueue.data)}
+          hasError={Boolean(focusQueue.error)}
+          onRetry={() => void focusQueue.mutate()}
+          t={t}
+        />
         <HomeWorkspaceView
+          focusQueue={focusQueue.data}
+          isFocusUnavailable={Boolean(focusQueue.error && !focusQueue.data)}
           onOpenTask={workspace.onOpenTask}
           summary={summary}
           t={t}

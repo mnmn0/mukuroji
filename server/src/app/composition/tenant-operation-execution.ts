@@ -268,6 +268,7 @@ function readTenantOperationResourceOwnerConfig(): TenantOperationResourceOwnerC
     collaborationTableName: requireEnvironment('COLLABORATION_TABLE_NAME'),
     workspaceSearchTableName: requireEnvironment('WORKSPACE_SEARCH_TABLE_NAME'),
     notificationsTableName: requireEnvironment('NOTIFICATIONS_TABLE_NAME'),
+    focusTableName: requireEnvironment('FOCUS_TABLE_NAME'),
     realtimeSessionsTableName: requireEnvironment('REALTIME_SESSIONS_TABLE_NAME'),
     fileProofingTableName: requireEnvironment('FILE_PROOFING_TABLE_NAME'),
   }
