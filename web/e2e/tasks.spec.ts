@@ -6411,10 +6411,12 @@ test.describe('authenticated task page', () => {
     const collaborationPanelId = await conversationTab.getAttribute(
       'aria-controls',
     )
-    expect(collaborationPanelId).toBe('issue-collaboration-tabpanel')
-    await expect(page.locator('#issue-collaboration-tabpanel')).toHaveAttribute(
-      'role',
-      'tabpanel',
+    if (!collaborationPanelId) {
+      throw new Error('Conversation tab did not expose its collaboration panel ID.')
+    }
+    await expect(panel.getByRole('tabpanel')).toHaveAttribute(
+      'id',
+      collaborationPanelId,
     )
     await conversationTab.focus()
     await page.keyboard.press('ArrowRight')
