@@ -164,7 +164,7 @@ describe('triage DynamoDB transaction contributions', () => {
     )
   })
 
-  test('decodes stored entries only when their projection matches the physical key', () => {
+  test('decodes stored entries only when their complete projection matches the physical key', () => {
     const entry = createEntry()
     const storedItem = createFormTriageEntryTransactionItems({
       tableName: 'RequestIntakeTable',
@@ -175,6 +175,15 @@ describe('triage DynamoDB transaction contributions', () => {
     const key = createTriageEntryKey(entry.workspaceId, entry.id)
 
     expect(decodeTriageEntryRow(storedItem, key)).toMatchObject({ id: entry.id })
+    expect(decodeTriageEntryRow({
+      ...storedItem,
+      entry: {
+        ...entry,
+        events: [{ ...entry.events[0], id: '<message/2@example.com>' }],
+      },
+    }, key)).toMatchObject({
+      events: [{ id: '<message/2@example.com>' }],
+    })
     expect(decodeTriageEntryRow(storedItem, {
       ...key,
       recordKey: 'TRIAGE#triage-other',
@@ -182,6 +191,31 @@ describe('triage DynamoDB transaction contributions', () => {
     expect(decodeTriageEntryRow({
       ...storedItem,
       entry: { ...entry, revision: 0 },
+    }, key)).toBeUndefined()
+    expect(decodeTriageEntryRow({
+      ...storedItem,
+      entry: { ...entry, internalSecret: 'must-not-cross-the-boundary' },
+    }, key)).toBeUndefined()
+    expect(decodeTriageEntryRow({
+      ...storedItem,
+      entry: {
+        ...entry,
+        routing: { ...entry.routing, candidates: [{}] },
+      },
+    }, key)).toBeUndefined()
+    expect(decodeTriageEntryRow({
+      ...storedItem,
+      entry: {
+        ...entry,
+        sourcePreview: { ...entry.sourcePreview, attachmentCount: -1 },
+      },
+    }, key)).toBeUndefined()
+    expect(decodeTriageEntryRow({
+      ...storedItem,
+      entry: {
+        ...entry,
+        events: [{ ...entry.events[0], type: 'unrecognized-event' }],
+      },
     }, key)).toBeUndefined()
   })
 })

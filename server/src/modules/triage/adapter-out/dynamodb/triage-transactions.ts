@@ -11,6 +11,7 @@ import {
   applyTriageAction,
   evaluateTriageSchedule,
   recordTriageSourceActivity,
+  TRIAGE_ENTRY_EVENT_LIMIT,
   TriageError,
   type TriageSourceActivity,
 } from '../../domain/triage-entry'
@@ -455,6 +456,9 @@ export function decodeTriageEntryRow(
  * @param entry The entry projection to validate.
  */
 export function validateTriageEntryProjection(entry: TriageEntry): void {
+  if (!isTriageEntry(entry)) {
+    throw new TriageError(400, 'InvalidTriageEntry', 'The triage entry projection is invalid.')
+  }
   requireWorkspaceId(entry.workspaceId)
   requireIdentifier(entry.id, 'Triage entry ID')
   requireIdentifier(entry.teamId, 'Team ID')
@@ -842,31 +846,60 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-/** Narrowly validates a persisted entry projection. */
+/** Deeply validates a persisted entry projection and rejects unknown fields. */
 function isTriageEntry(value: unknown): value is TriageEntry {
-  if (!isRecord(value)) return false
-  if (
-    value.schemaVersion !== 1 ||
-    typeof value.id !== 'string' ||
-    typeof value.workspaceId !== 'string' ||
-    typeof value.teamId !== 'string' ||
-    typeof value.receivedAt !== 'string' ||
-    typeof value.lastActivityAt !== 'string' ||
-    typeof value.revision !== 'number' ||
-    typeof value.createdAt !== 'string' ||
-    typeof value.updatedAt !== 'string' ||
-    !isTriageState(value.state) ||
-    !isSource(value.source) ||
-    !isPreview(value.sourcePreview) ||
-    !isRequester(value.requester) ||
-    !isPermission(value.permission) ||
-    !isRouting(value.routing) ||
-    !isRetention(value.retention) ||
-    !isCapabilities(value.capabilities) ||
-    !Array.isArray(value.events) ||
-    !value.events.every(isEvent)
-  ) return false
-  return true
+  return isRecord(value) && hasOnlyKeys(value, [
+    'schemaVersion',
+    'id',
+    'workspaceId',
+    'source',
+    'sourcePreview',
+    'requester',
+    'receivedAt',
+    'lastActivityAt',
+    'state',
+    'routing',
+    'teamId',
+    'projectId',
+    'ownerUserId',
+    'permission',
+    'sla',
+    'snoozedUntil',
+    'retention',
+    'canonicalWorkItem',
+    'mergeReceipt',
+    'capabilities',
+    'events',
+    'revision',
+    'createdAt',
+    'updatedAt',
+  ]) &&
+    value.schemaVersion === 1 &&
+    isIdentifier(value.id) &&
+    isWorkspaceId(value.workspaceId) &&
+    isSource(value.source) &&
+    isPreview(value.sourcePreview) &&
+    isRequester(value.requester) &&
+    isIsoInstant(value.receivedAt) &&
+    isIsoInstant(value.lastActivityAt) &&
+    isTriageState(value.state) &&
+    isRouting(value.routing) &&
+    isIdentifier(value.teamId) &&
+    (value.projectId === undefined || isIdentifier(value.projectId)) &&
+    (value.ownerUserId === undefined || isMemberKey(value.ownerUserId)) &&
+    isPermission(value.permission) &&
+    (value.sla === undefined || isSla(value.sla)) &&
+    (value.snoozedUntil === undefined || isIsoInstant(value.snoozedUntil)) &&
+    isRetention(value.retention) &&
+    (value.canonicalWorkItem === undefined || isWorkItemReference(value.canonicalWorkItem)) &&
+    (value.mergeReceipt === undefined || isMergeReceipt(value.mergeReceipt)) &&
+    isCapabilities(value.capabilities) &&
+    Array.isArray(value.events) && value.events.length <= TRIAGE_ENTRY_EVENT_LIMIT &&
+    value.events.every(isEvent) &&
+    typeof value.revision === 'number' && Number.isSafeInteger(value.revision) &&
+    value.revision >= 1 &&
+    isIsoInstant(value.createdAt) &&
+    isIsoInstant(value.updatedAt)
 }
 
 /** Validates a lifecycle state. */
@@ -877,47 +910,172 @@ function isTriageState(value: unknown): value is TriageEntry['state'] {
 
 /** Validates the persisted source reference fields required by storage. */
 function isSource(value: unknown): value is TriageEntry['source'] {
-  return isRecord(value) &&
+  return isRecord(value) && hasOnlyKeys(value, [
+    'kind',
+    'sourceId',
+    'provider',
+    'containerId',
+    'messageId',
+    'formId',
+    'submissionId',
+    'connectorId',
+  ]) &&
     (value.kind === 'form' || value.kind === 'chat' || value.kind === 'email' ||
       value.kind === 'webhook' || value.kind === 'manual-handoff') &&
-    typeof value.sourceId === 'string'
+    isBoundedText(value.sourceId, 500) &&
+    isOptionalBoundedText(value.provider, 100) &&
+    isOptionalBoundedText(value.containerId, 500) &&
+    isOptionalBoundedText(value.messageId, 500) &&
+    isOptionalBoundedText(value.formId, 200) &&
+    isOptionalBoundedText(value.submissionId, 200) &&
+    isOptionalBoundedText(value.connectorId, 200)
 }
 
 /** Validates a source preview. */
 function isPreview(value: unknown): value is TriageEntry['sourcePreview'] {
-  return isRecord(value) && typeof value.title === 'string' && typeof value.body === 'string' &&
-    typeof value.attachmentCount === 'number' && typeof value.commentCount === 'number' &&
-    typeof value.watcherCount === 'number' && typeof value.sanitized === 'boolean' &&
-    typeof value.truncated === 'boolean' &&
-    (value.permalink === undefined || typeof value.permalink === 'string')
+  return isRecord(value) && hasOnlyKeys(value, [
+    'title',
+    'body',
+    'channelLabel',
+    'permalink',
+    'attachmentCount',
+    'commentCount',
+    'watcherCount',
+    'sanitized',
+    'truncated',
+  ]) &&
+    isBoundedText(value.title, 500) &&
+    isBoundedText(value.body, 8_000, true) &&
+    isOptionalBoundedText(value.channelLabel, 200) &&
+    (value.permalink === undefined || isHttpsUrl(value.permalink)) &&
+    isNonNegativeSafeInteger(value.attachmentCount) &&
+    isNonNegativeSafeInteger(value.commentCount) &&
+    isNonNegativeSafeInteger(value.watcherCount) &&
+    typeof value.sanitized === 'boolean' &&
+    typeof value.truncated === 'boolean'
 }
 
 /** Validates a requester projection. */
 function isRequester(value: unknown): value is TriageEntry['requester'] {
-  return isRecord(value) && typeof value.displayName === 'string' && typeof value.guest === 'boolean'
+  return isRecord(value) && hasOnlyKeys(value, [
+    'displayName',
+    'email',
+    'avatarUrl',
+    'externalId',
+    'guest',
+  ]) &&
+    isBoundedText(value.displayName, 500) &&
+    isOptionalBoundedText(value.email, 320) &&
+    (value.avatarUrl === undefined || isHttpsUrl(value.avatarUrl)) &&
+    isOptionalBoundedText(value.externalId, 500) &&
+    typeof value.guest === 'boolean'
 }
 
 /** Validates a permission projection. */
 function isPermission(value: unknown): value is TriageEntry['permission'] {
-  return isRecord(value) &&
+  return isRecord(value) && hasOnlyKeys(value, [
+    'visibility',
+    'canReply',
+    'guestVisible',
+    'reasonCode',
+    'checkedAt',
+  ]) &&
     (value.visibility === 'full' || value.visibility === 'metadata-only' || value.visibility === 'denied') &&
     typeof value.canReply === 'boolean' && typeof value.guestVisible === 'boolean' &&
-    typeof value.checkedAt === 'string'
+    isOptionalBoundedText(value.reasonCode, 200) &&
+    isIsoInstant(value.checkedAt)
 }
 
 /** Validates a routing projection. */
 function isRouting(value: unknown): value is TriageEntry['routing'] {
-  return isRecord(value) && typeof value.reason === 'string' && Array.isArray(value.candidates)
+  return isRecord(value) && hasOnlyKeys(value, ['reason', 'candidates']) &&
+    isBoundedText(value.reason, 2_000) && Array.isArray(value.candidates) &&
+    value.candidates.length <= 100 && value.candidates.every(isRoutingCandidate)
+}
+
+/** Validates one persisted routing candidate. */
+function isRoutingCandidate(value: unknown): value is TriageEntry['routing']['candidates'][number] {
+  return isRecord(value) && hasOnlyKeys(value, [
+    'teamId',
+    'projectId',
+    'reason',
+    'ruleId',
+    'score',
+    'permitted',
+  ]) &&
+    isIdentifier(value.teamId) &&
+    (value.projectId === undefined || isIdentifier(value.projectId)) &&
+    isBoundedText(value.reason, 2_000) &&
+    (value.ruleId === undefined || isIdentifier(value.ruleId)) &&
+    (value.score === undefined || (
+      typeof value.score === 'number' && Number.isFinite(value.score) &&
+      value.score >= 0 && value.score <= 1
+    )) &&
+    typeof value.permitted === 'boolean'
 }
 
 /** Validates retention metadata. */
 function isRetention(value: unknown): value is TriageEntry['retention'] {
-  return isRecord(value) && typeof value.expiresAt === 'string'
+  return isRecord(value) && hasOnlyKeys(value, ['policyId', 'expiresAt', 'redactedAt']) &&
+    isOptionalBoundedText(value.policyId, 200) && isIsoInstant(value.expiresAt) &&
+    (value.redactedAt === undefined || isIsoInstant(value.redactedAt))
+}
+
+/** Validates SLA and escalation timestamps. */
+function isSla(value: unknown): value is NonNullable<TriageEntry['sla']> {
+  return isRecord(value) && hasOnlyKeys(value, [
+    'policyId',
+    'dueAt',
+    'breachedAt',
+    'escalationDueAt',
+    'escalatedAt',
+  ]) &&
+    isIdentifier(value.policyId) && isIsoInstant(value.dueAt) &&
+    (value.breachedAt === undefined || isIsoInstant(value.breachedAt)) &&
+    (value.escalationDueAt === undefined || isIsoInstant(value.escalationDueAt)) &&
+    (value.escalatedAt === undefined || isIsoInstant(value.escalatedAt))
+}
+
+/** Validates a canonical Work Item reference. */
+function isWorkItemReference(
+  value: unknown,
+): value is NonNullable<TriageEntry['canonicalWorkItem']> {
+  return isRecord(value) && hasOnlyKeys(value, ['teamId', 'workItemId', 'projectId']) &&
+    isIdentifier(value.teamId) && isIdentifier(value.workItemId) &&
+    (value.projectId === undefined || isIdentifier(value.projectId))
+}
+
+/** Validates duplicate-context merge counts and completion time. */
+function isMergeReceipt(value: unknown): value is NonNullable<TriageEntry['mergeReceipt']> {
+  return isRecord(value) && hasOnlyKeys(value, [
+    'canonicalWorkItemId',
+    'mergedSourceCount',
+    'mergedCommentCount',
+    'mergedAttachmentCount',
+    'mergedWatcherCount',
+    'completedAt',
+  ]) &&
+    isIdentifier(value.canonicalWorkItemId) &&
+    isNonNegativeSafeInteger(value.mergedSourceCount) &&
+    isNonNegativeSafeInteger(value.mergedCommentCount) &&
+    isNonNegativeSafeInteger(value.mergedAttachmentCount) &&
+    isNonNegativeSafeInteger(value.mergedWatcherCount) &&
+    isIsoInstant(value.completedAt)
 }
 
 /** Validates a capability projection. */
 function isCapabilities(value: unknown): value is TriageEntry['capabilities'] {
-  return isRecord(value) &&
+  return isRecord(value) && hasOnlyKeys(value, [
+    'canAssign',
+    'canAcceptCreate',
+    'canAcceptLink',
+    'canMarkDuplicate',
+    'canDecline',
+    'canSnooze',
+    'canRequestInformation',
+    'canReply',
+    'canViewInternalContext',
+  ]) &&
     typeof value.canAssign === 'boolean' && typeof value.canAcceptCreate === 'boolean' &&
     typeof value.canAcceptLink === 'boolean' && typeof value.canMarkDuplicate === 'boolean' &&
     typeof value.canDecline === 'boolean' && typeof value.canSnooze === 'boolean' &&
@@ -927,7 +1085,84 @@ function isCapabilities(value: unknown): value is TriageEntry['capabilities'] {
 
 /** Validates an immutable event projection. */
 function isEvent(value: unknown): value is TriageEntryEvent {
-  return isRecord(value) && typeof value.id === 'string' && typeof value.type === 'string' &&
-    typeof value.actorId === 'string' && typeof value.summary === 'string' &&
-    typeof value.createdAt === 'string'
+  return isRecord(value) && hasOnlyKeys(value, [
+    'id',
+    'type',
+    'actorId',
+    'summary',
+    'createdAt',
+  ]) &&
+    isBoundedText(value.id, 200) && isEventType(value.type) &&
+    isBoundedText(value.actorId, 500) && isBoundedText(value.summary, 2_000) &&
+    isIsoInstant(value.createdAt)
+}
+
+/** Validates a persisted event discriminator. */
+function isEventType(value: unknown): value is TriageEntryEvent['type'] {
+  return value === 'created' || value === 'assigned' || value === 'accepted' ||
+    value === 'linked' || value === 'duplicate' || value === 'declined' ||
+    value === 'snoozed' || value === 'information-requested' ||
+    value === 'activity-received' || value === 'resurfaced' ||
+    value === 'sla-breached' || value === 'escalated' ||
+    value === 'retention-redacted'
+}
+
+/** Returns whether an object contains only explicitly allowed keys. */
+function hasOnlyKeys(value: Record<string, unknown>, allowedKeys: readonly string[]): boolean {
+  return Object.keys(value).every((key) => allowedKeys.includes(key))
+}
+
+/** Validates a canonical persisted identifier. */
+function isIdentifier(value: unknown): value is string {
+  return typeof value === 'string' && value.length <= 200 && value.trim() === value &&
+    /^[A-Za-z0-9][A-Za-z0-9._:-]*$/u.test(value)
+}
+
+/** Validates a Workspace identifier that may contain Cognito delimiters. */
+function isWorkspaceId(value: unknown): value is string {
+  return isBoundedText(value, 500) && value.trim() === value &&
+    ![...value].some((character) => {
+      const codePoint = character.codePointAt(0) ?? 0
+      return codePoint <= 31 || codePoint === 127
+    })
+}
+
+/** Validates a canonical Workspace member key. */
+function isMemberKey(value: unknown): value is string {
+  return typeof value === 'string' && value.length <= 320 && value.trim() === value &&
+    /^[A-Za-z0-9][A-Za-z0-9._:@+-]*$/u.test(value)
+}
+
+/** Validates bounded persisted text. */
+function isBoundedText(value: unknown, maximumLength: number, allowEmpty = false): value is string {
+  return typeof value === 'string' && value.length <= maximumLength &&
+    (allowEmpty || value.trim().length > 0)
+}
+
+/** Validates an optional bounded text field. */
+function isOptionalBoundedText(value: unknown, maximumLength: number): boolean {
+  return value === undefined || isBoundedText(value, maximumLength)
+}
+
+/** Validates an ISO 8601 instant in the canonical stored representation. */
+function isIsoInstant(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length > 100) return false
+  const instant = new Date(value)
+  return Number.isFinite(instant.getTime()) && instant.toISOString() === value
+}
+
+/** Validates a bounded credential-free HTTPS URL. */
+function isHttpsUrl(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length > 2_048) return false
+  try {
+    const url = new URL(value)
+    return url.protocol === 'https:' && !url.username && !url.password
+  } catch {
+    return false
+  }
+}
+
+/** Validates a non-negative safe integer count. */
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
 }
