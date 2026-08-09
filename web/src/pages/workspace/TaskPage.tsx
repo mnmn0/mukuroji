@@ -1105,7 +1105,8 @@ export function TaskPage() {
     }
   }
 
-  const canCreateProjectTask = canMutateContent && Boolean(creationTeam) && Object.keys(
+  const canMutateProjectTasks = taskViewController.canWrite
+  const canCreateProjectTask = canMutateProjectTasks && Boolean(creationTeam) && Object.keys(
     workItemConfigurationLoadResult.configurationsByTeam,
   ).length > 0
   const projectTaskViewState = taskViewDefinitionToProjectState(
@@ -1179,7 +1180,7 @@ export function TaskPage() {
       locale={locale}
       activeProjectTeamId={interactionTeamId}
       onCreateTask={canCreateProjectTask ? handleCreateTask : undefined}
-      onAddRelation={canMutateContent ? handleAddRelation : undefined}
+      onAddRelation={canMutateProjectTasks ? handleAddRelation : undefined}
       assigneeErrorMessage={projectMembersErrorMessage}
       assigneeOptions={activeProjectMembers}
       canManageProjectMembers={canManageProjectMembers}
@@ -1200,21 +1201,21 @@ export function TaskPage() {
       onProjectUserQueryChange={canManageProjectMembers ? setProjectUserQuery : undefined}
       onProjectQuickAccessToggle={handleProjectQuickAccessToggle}
       onRemoveProjectMember={canManageProjectMembers ? handleRemoveProjectMember : undefined}
-      onDeleteRelation={canMutateContent ? handleDeleteRelation : undefined}
+      onDeleteRelation={canMutateProjectTasks ? handleDeleteRelation : undefined}
       onSelectedIssueChange={handleSelectedIssueChange}
-      onUpdateIssue={canMutateContent ? handleUpdateIssue : undefined}
-      onUpdateTask={canMutateContent ? handleUpdateTask : undefined}
-      onPreviewScheduleChange={canMutateContent
+      onUpdateIssue={canMutateProjectTasks ? handleUpdateIssue : undefined}
+      onUpdateTask={canMutateProjectTasks ? handleUpdateTask : undefined}
+      onPreviewScheduleChange={canMutateProjectTasks
         ? scheduleMutations.previewScheduleChange
         : undefined}
-      onConfirmScheduleChange={canMutateContent
+      onConfirmScheduleChange={canMutateProjectTasks
         ? scheduleMutations.confirmScheduleChange
         : undefined}
-      onCreateScheduleDependency={accessToken && planningSnapshot &&
+      onCreateScheduleDependency={canMutateProjectTasks && accessToken && planningSnapshot &&
           !planningErrorMessage && !isPlanningDependencyLoading
         ? scheduleMutations.createScheduleDependency
         : undefined}
-      onDeleteScheduleDependency={accessToken && planningSnapshot &&
+      onDeleteScheduleDependency={canMutateProjectTasks && accessToken && planningSnapshot &&
           !planningErrorMessage && !isPlanningDependencyLoading
         ? scheduleMutations.deleteScheduleDependency
         : undefined}
@@ -1225,17 +1226,17 @@ export function TaskPage() {
             })
             .catch(() => undefined)
         : undefined}
-      onUpdateScheduleDependency={accessToken && planningSnapshot &&
+      onUpdateScheduleDependency={canMutateProjectTasks && accessToken && planningSnapshot &&
           !planningErrorMessage && !isPlanningDependencyLoading
         ? scheduleMutations.updateScheduleDependency
         : undefined}
       planningErrorMessage={planningErrorMessage}
       planningSnapshot={planningSnapshot}
       onUpdateProjectMember={canManageProjectMembers ? handleUpdateProjectMember : undefined}
-      onBulkApply={canMutateContent && workspaceId ? handleBulkApply : undefined}
-      onBulkPreview={canMutateContent && workspaceId ? handleBulkPreview : undefined}
-      onBulkRetry={canMutateContent && workspaceId ? handleBulkRetry : undefined}
-      onBulkUndo={canMutateContent && workspaceId ? handleBulkUndo : undefined}
+      onBulkApply={canMutateProjectTasks && workspaceId ? handleBulkApply : undefined}
+      onBulkPreview={canMutateProjectTasks && workspaceId ? handleBulkPreview : undefined}
+      onBulkRetry={canMutateProjectTasks && workspaceId ? handleBulkRetry : undefined}
+      onBulkUndo={canMutateProjectTasks && workspaceId ? handleBulkUndo : undefined}
       projectId={projectId}
       projectFiles={projectFiles}
       projectMembers={projectMembers}

@@ -71,6 +71,7 @@ const noTaskViewCapabilities: SavedTaskViewCapabilities = {
   canManageSharedViews: false,
   canSetTeamDefault: false,
   writableTeamIds: [],
+  writableProjectScopes: [],
 }
 
 /**

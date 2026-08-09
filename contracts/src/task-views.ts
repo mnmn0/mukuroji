@@ -292,7 +292,17 @@ export type SavedTaskView = {
   migrationWarnings?: TaskViewMigrationWarning[]
 }
 
-/** Mutation capabilities evaluated for the exact surface and scope of a task-view list request. */
+/** One Team-qualified Project scope where the current viewer may mutate Work Items. */
+export type TaskViewWritableProjectScope = {
+  /** Team that owns the writable Project. */
+  teamId: string
+  /** Project where the current viewer has authoritative Work Item write access. */
+  projectId: string
+}
+
+/**
+ * Saved View lifecycle permissions and Work Item write scopes evaluated for an exact list context.
+ */
 export type SavedTaskViewCapabilities = {
   /** Whether the current viewer may mutate personal task views and preferences in this scope. */
   canWrite: boolean
@@ -300,8 +310,14 @@ export type SavedTaskViewCapabilities = {
   canManageSharedViews: boolean
   /** Whether the current viewer may assign a Team default for this scope. */
   canSetTeamDefault: boolean
-  /** Readable Team identifiers where the current viewer may create Team-visible task views. */
+  /**
+   * Readable Team scopes with authoritative write access for unassigned Work Items.
+   *
+   * Team-visible Saved View creation additionally requires the `canWrite` lifecycle permission.
+   */
   writableTeamIds: string[]
+  /** Readable Team-qualified Project scopes with authoritative assigned Work Item write access. */
+  writableProjectScopes: TaskViewWritableProjectScope[]
 }
 
 /** Cursor-paginated page of task views visible to the current viewer. */

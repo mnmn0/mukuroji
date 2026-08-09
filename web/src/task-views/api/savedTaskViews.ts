@@ -18,6 +18,7 @@ import {
   type TaskViewMigrationWarning,
   type TaskViewScope,
   type TaskViewSurface,
+  type TaskViewWritableProjectScope,
   type UpdateSavedTaskViewInput,
   type WorkspaceSearchDateFilter,
 } from '@mukuroji/contracts'
@@ -299,6 +300,9 @@ function readSavedTaskViewsResponse(value: unknown): SavedTaskViewsResponse {
       canManageSharedViews: value.capabilities.canManageSharedViews,
       canSetTeamDefault: value.capabilities.canSetTeamDefault,
       canWrite: value.capabilities.canWrite,
+      writableProjectScopes: dedupeTaskViewWritableProjectScopes(
+        value.capabilities.writableProjectScopes,
+      ),
       writableTeamIds: [...new Set(value.capabilities.writableTeamIds)],
     },
     views,
@@ -313,12 +317,43 @@ function isSavedTaskViewCapabilities(value: unknown): value is SavedTaskViewCapa
       'canWrite',
       'canManageSharedViews',
       'canSetTeamDefault',
+      'writableProjectScopes',
       'writableTeamIds',
     ]) &&
     typeof value.canWrite === 'boolean' &&
     typeof value.canManageSharedViews === 'boolean' &&
     typeof value.canSetTeamDefault === 'boolean' &&
+    Array.isArray(value.writableProjectScopes) &&
+    value.writableProjectScopes.every(isTaskViewWritableProjectScope) &&
     isStringArray(value.writableTeamIds)
+}
+
+/** Returns whether one unknown value is a complete Team-qualified writable Project scope. */
+function isTaskViewWritableProjectScope(
+  value: unknown,
+): value is TaskViewWritableProjectScope {
+  return isRecord(value) &&
+    hasOnlyFields(value, ['teamId', 'projectId']) &&
+    typeof value.teamId === 'string' &&
+    value.teamId.length > 0 &&
+    typeof value.projectId === 'string' &&
+    value.projectId.length > 0
+}
+
+/** Deduplicates structured writable Project scopes without exposing an encoded key contract. */
+function dedupeTaskViewWritableProjectScopes(
+  scopes: readonly TaskViewWritableProjectScope[],
+): TaskViewWritableProjectScope[] {
+  const deduped: TaskViewWritableProjectScope[] = []
+  for (const scope of scopes) {
+    if (deduped.some((candidate) =>
+      candidate.teamId === scope.teamId && candidate.projectId === scope.projectId
+    )) {
+      continue
+    }
+    deduped.push({ projectId: scope.projectId, teamId: scope.teamId })
+  }
+  return deduped
 }
 
 /**
@@ -337,6 +372,11 @@ function intersectSavedTaskViewCapabilities(
     canManageSharedViews: current.canManageSharedViews && next.canManageSharedViews,
     canSetTeamDefault: current.canSetTeamDefault && next.canSetTeamDefault,
     canWrite: current.canWrite && next.canWrite,
+    writableProjectScopes: current.writableProjectScopes.filter((scope) =>
+      next.writableProjectScopes.some((candidate) =>
+        candidate.teamId === scope.teamId && candidate.projectId === scope.projectId
+      )
+    ),
     writableTeamIds: current.writableTeamIds.filter((teamId) =>
       nextWritableTeamIds.has(teamId)
     ),

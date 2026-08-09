@@ -461,6 +461,30 @@ describe('independent task views', () => {
     expect(html).toContain('data-testid="my-tasks-card-refero-wireframe-status-select"')
   })
 
+  test('keeps My Tasks status controls hidden when the exact Work Item scope is read-only', () => {
+    const task = taskViewStoryTasks[0]
+    const taskKey = createTaskViewItemKey(task.teamId, task.id)
+    const html = renderToStaticMarkup(
+      <MyTasksWorkspaceView
+        canMoveTaskStatus={() => false}
+        configurationFailedTeamIds={[]}
+        configurationsByTeam={taskViewStoryConfigurationsByTeam}
+        onMoveTaskStatus={async () => undefined}
+        revealedStatusTaskKey={taskKey}
+        t={t}
+        tasks={[task]}
+        teams={[{
+          id: 'core-team',
+          name: 'コアチーム',
+          projects: [{ id: 'refero', name: 'Refero' }],
+        }]}
+      />,
+    )
+
+    expect(html).not.toContain('data-testid="my-tasks-card-refero-wireframe-status-select"')
+    expect(html).toContain('draggable="false"')
+  })
+
   test('orders the Gantt view by due date and leaves unscheduled tasks last', () => {
     const html = renderToStaticMarkup(
       <TaskGanttView

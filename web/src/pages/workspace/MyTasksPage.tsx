@@ -42,6 +42,7 @@ import {
 } from '../../task-views/model/taskActionCompletion'
 import type { TaskActionContextMenuAnchorPoint } from '../../task-views/model/taskActionContextMenu'
 import { executeMyTaskDirectStatusMove } from '../../task-views/model/myTaskDirectMove'
+import { canWriteTaskViewWorkItem } from '../../task-views/model/taskViewWorkItemPermission'
 import {
   clearTaskStatusMoveRequest,
   createTaskStatusMoveRequest,
@@ -267,21 +268,27 @@ export function MyTasksPage() {
   /** Checks whether the current permission and configuration expose a safe status entrance. */
   const canMoveMyTaskStatus = useCallback((task: (typeof visibleMyTasks)[number]) => {
     const configuration = workItems.configurationsByTeam[task.teamId]?.configuration
-    return workspace.canMutateTeamConfiguration &&
+    return canWriteTaskViewWorkItem({
+      writableProjectScopes: taskViewController.writableProjectScopes,
+      writableTeamIds: taskViewController.writableTeamIds,
+    }, task) &&
       configuration !== undefined &&
       !workItems.configurationFailedTeamIds.includes(task.teamId) &&
       resolveEditableWorkflowStatuses(task, configuration).some(
         (status) => status.id !== task.workflowStatusId,
       )
   }, [
-    workspace.canMutateTeamConfiguration,
+    taskViewController.writableProjectScopes,
+    taskViewController.writableTeamIds,
     workItems.configurationFailedTeamIds,
     workItems.configurationsByTeam,
   ])
+  const hasWritableWorkItemScope = taskViewController.writableTeamIds.length > 0 ||
+    taskViewController.writableProjectScopes.length > 0
   const statusMutation = useWorkspaceTaskStatusMutation({
     accessToken: workspace.accessToken,
     configurationsByTeam: workItems.configurationsByTeam,
-    enabled: workspace.canMutateTeamConfiguration,
+    enabled: hasWritableWorkItemScope,
     guardAuthenticatedRequest: workspace.guardEnterpriseSession,
     mutateWorkItems: workItems.mutateWorkItems,
     t,
@@ -570,7 +577,6 @@ export function MyTasksPage() {
     task: (typeof visibleMyTasks)[number],
     workflowStatusId: string,
   ): Promise<void> => {
-    if (!moveTaskStatus) return
     const taskKey = createTaskViewItemKey(task.teamId, task.id)
     const pendingContext = resolvePendingTaskActionContext(
       taskActionCompletion,
@@ -580,6 +586,18 @@ export function MyTasksPage() {
     const target = pendingContext
       ? resolveTaskSurfaceActionTarget(pendingContext)
       : undefined
+    if (!moveTaskStatus || !canMoveMyTaskStatus(task)) {
+      if (pendingContext && target && taskActionCompletion.claim(pendingContext)) {
+        taskActionCompletion.settle(pendingContext, createFailedTaskActionResult(
+          pendingContext.actionId,
+          target,
+          'MyTasksMoveUnavailable',
+          'unavailable',
+          myTaskActionDisabledReasons.unavailable,
+        ))
+      }
+      return
+    }
     if (
       revealedStatusTaskKey !== taskKey ||
       !pendingContext ||
@@ -659,6 +677,7 @@ export function MyTasksPage() {
       throw error
     }
   }, [
+    canMoveMyTaskStatus,
     moveTaskStatus,
     myTaskActionDisabledReasons.unavailable,
     myTaskActions,
@@ -761,6 +780,7 @@ export function MyTasksPage() {
           </p>
         ) : null}
         <MyTasksWorkspaceView
+          canMoveTaskStatus={canMoveMyTaskStatus}
           configurationFailedTeamIds={workItems.configurationFailedTeamIds}
           configurationsByTeam={workItems.configurationsByTeam}
           locale={workspace.locale}

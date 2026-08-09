@@ -134,6 +134,7 @@ describe('task view contracts', () => {
         canSetTeamDefault: true,
         canWrite: true,
         writableTeamIds: ['core-team'],
+        writableProjectScopes: [{ teamId: 'core-team', projectId: 'refero' }],
       },
       views: [view],
     } satisfies SavedTaskViewsResponse
@@ -147,6 +148,9 @@ describe('task view contracts', () => {
     expect(duplicateInput.visibility).toBe('personal')
     expect(listQuery.scope).toEqual(view.definition.scope)
     expect(listResponse.capabilities.writableTeamIds).toEqual(['core-team'])
+    expect(listResponse.capabilities.writableProjectScopes).toEqual([
+      { teamId: 'core-team', projectId: 'refero' },
+    ])
     expect(defaultSelection).toEqual({ source: 'team', viewId: view.id })
   })
 

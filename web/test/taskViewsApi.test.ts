@@ -32,6 +32,11 @@ describe('saved task-view API', () => {
     const requests = installJsonResponses([
       {
         capabilities: createSavedTaskViewCapabilities({
+          writableProjectScopes: [
+            { teamId: 'core-team', projectId: 'shared-project' },
+            { teamId: 'design-team', projectId: 'shared-project' },
+            { teamId: 'core-team', projectId: 'shared-project' },
+          ],
           writableTeamIds: ['core-team', 'design-team'],
         }),
         views: [first],
@@ -42,6 +47,11 @@ describe('saved task-view API', () => {
           canManageSharedViews: false,
           canSetTeamDefault: false,
           canWrite: false,
+          writableProjectScopes: [
+            { teamId: 'operations-team', projectId: 'shared-project' },
+            { teamId: 'core-team', projectId: 'shared-project' },
+            { teamId: 'core-team', projectId: 'shared-project' },
+          ],
           writableTeamIds: ['core-team', 'operations-team'],
         }),
         views: [first, second],
@@ -60,6 +70,7 @@ describe('saved task-view API', () => {
       canManageSharedViews: false,
       canSetTeamDefault: false,
       canWrite: false,
+      writableProjectScopes: [{ teamId: 'core-team', projectId: 'shared-project' }],
       writableTeamIds: ['core-team'],
     })
     expect(requests).toHaveLength(2)
@@ -281,8 +292,34 @@ describe('saved task-view API', () => {
 
     installJsonResponses([{
       capabilities: {
+        canManageSharedViews: false,
+        canSetTeamDefault: false,
+        canWrite: false,
+        writableTeamIds: [],
+      },
+      views: [],
+    }])
+    await expect(getSavedTaskViews('access-token')).rejects.toMatchObject({
+      code: 'InvalidTaskViewResponse',
+      status: 502,
+    })
+
+    installJsonResponses([{
+      capabilities: {
         ...createSavedTaskViewCapabilities(),
         writableTeamIds: ['core-team', 42],
+      },
+      views: [],
+    }])
+    await expect(getSavedTaskViews('access-token')).rejects.toMatchObject({
+      code: 'InvalidTaskViewResponse',
+      status: 502,
+    })
+
+    installJsonResponses([{
+      capabilities: {
+        ...createSavedTaskViewCapabilities(),
+        writableProjectScopes: [{ teamId: 'core-team', projectId: 42 }],
       },
       views: [],
     }])
@@ -351,6 +388,7 @@ function createSavedTaskViewCapabilities(
     canManageSharedViews: true,
     canSetTeamDefault: true,
     canWrite: true,
+    writableProjectScopes: [{ teamId: 'core-team', projectId: 'refero' }],
     writableTeamIds: ['core-team'],
     ...overrides,
   }

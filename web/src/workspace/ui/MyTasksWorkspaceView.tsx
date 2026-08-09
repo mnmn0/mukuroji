@@ -33,6 +33,8 @@ import {
  * Props for the Workspace personal task board.
  */
 export type MyTasksWorkspaceViewProps = {
+  /** Checks whether one permission-pruned Work Item exposes status mutation controls. */
+  canMoveTaskStatus?: (task: ProjectTask) => boolean
   /** Team IDs whose Work Item configurations could not be loaded. */
   configurationFailedTeamIds: readonly string[]
   /** Resolved Work Item configurations indexed by Team ID. */
@@ -82,6 +84,7 @@ export type MyTasksWorkspaceViewProps = {
  * @returns The personal Workspace task board.
  */
 export function MyTasksWorkspaceView({
+  canMoveTaskStatus,
   configurationFailedTeamIds,
   configurationsByTeam,
   focusedTaskKey,
@@ -104,7 +107,10 @@ export function MyTasksWorkspaceView({
   const [draggedTaskKey, setDraggedTaskKey] = useState<string | undefined>()
   const [dropTargetColumnKey, setDropTargetColumnKey] = useState<string | undefined>()
   const [movingTaskKeys, setMovingTaskKeys] = useState<ReadonlySet<string>>(() => new Set())
-  const canMoveTasks = Boolean(onMoveTaskStatus)
+  /** Checks both the route handler and the exact server-authoritative Work Item scope. */
+  const canMoveTask = (task: ProjectTask) => Boolean(
+    onMoveTaskStatus && (canMoveTaskStatus?.(task) ?? true),
+  )
   const statusColumns = useMemo(
     () => createWorkspaceTaskStatusColumns(tasks, configurationsByTeam, teams),
     [configurationsByTeam, tasks, teams],
@@ -132,7 +138,7 @@ export function MyTasksWorkspaceView({
    * @returns Nothing.
    */
   const moveTaskToStatus = (task: ProjectTask, workflowStatusId: string) => {
-    if (!onMoveTaskStatus || task.workflowStatusId === workflowStatusId) {
+    if (!onMoveTaskStatus || !canMoveTask(task) || task.workflowStatusId === workflowStatusId) {
       return
     }
 
@@ -168,7 +174,7 @@ export function MyTasksWorkspaceView({
    * @returns Nothing.
    */
   const handleDragStart = (event: DragEvent<HTMLElement>, task: ProjectTask) => {
-    if (!canMoveTasks) {
+    if (!canMoveTask(task)) {
       return
     }
 
@@ -210,8 +216,9 @@ export function MyTasksWorkspaceView({
       : undefined
 
     if (
-      !canMoveTasks ||
+      !onMoveTaskStatus ||
       !carriesTaskKey ||
+      (draggedTask && !canMoveTask(draggedTask)) ||
       (draggedTask && column.teamId !== draggedTask.teamId)
     ) {
       return
@@ -356,6 +363,7 @@ export function MyTasksWorkspaceView({
                   const isMoving = movingTaskKeys.has(taskKey)
                   const configuration = configurationsByTeam[task.teamId]?.configuration
                   const editableStatuses = resolveEditableWorkflowStatuses(task, configuration)
+                  const canMoveCurrentTask = canMoveTask(task)
                   const primaryHeading = primaryHeadingByTaskKey.get(taskKey)
                   const secondaryHeading = secondaryHeadingByTaskKey.get(taskKey)
 
@@ -374,7 +382,7 @@ export function MyTasksWorkspaceView({
                     <CompactTaskCard
                       configuration={configuration}
                       density={presentation?.density}
-                      draggable={canMoveTasks && !isMoving}
+                      draggable={canMoveCurrentTask && !isMoving}
                       isDragging={draggedTaskKey === taskKey}
                       isMoving={isMoving}
                       focused={focusedTaskKey === taskViewKey}
@@ -399,7 +407,7 @@ export function MyTasksWorkspaceView({
                           )
                         : undefined}
                       onOpenTask={onOpenTask}
-                      onStatusChange={!onMoveTaskStatus
+                      onStatusChange={!canMoveCurrentTask
                         ? undefined
                         : (nextStatus) => {
                             moveTaskToStatus(task, nextStatus)

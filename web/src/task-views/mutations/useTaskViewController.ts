@@ -41,6 +41,7 @@ const deniedSavedTaskViewCapabilities = {
   canManageSharedViews: false,
   canSetTeamDefault: false,
   canWrite: false,
+  writableProjectScopes: [],
   writableTeamIds: [],
 } satisfies SavedTaskViewCapabilities
 
@@ -127,7 +128,9 @@ export type TaskViewController = {
   updateActiveView: () => Promise<void>
   /** Saved views visible for the current surface and scope. */
   views: readonly SavedTaskView[]
-  /** Readable Team identifiers where Team-visible task views may be created. */
+  /** Server-authoritative Team-qualified Project scopes where Work Items may be mutated. */
+  writableProjectScopes: SavedTaskViewCapabilities['writableProjectScopes']
+  /** Server-authoritative Team scopes for unassigned Work Item mutation and Team-view audiences. */
   writableTeamIds: readonly string[]
 }
 
@@ -662,6 +665,7 @@ export function useTaskViewController(
       )
     },
     views: savedViews,
+    writableProjectScopes: savedTaskViewCapabilities.writableProjectScopes,
     writableTeamIds: savedTaskViewCapabilities.writableTeamIds,
   }
 }

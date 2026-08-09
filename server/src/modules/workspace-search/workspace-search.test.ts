@@ -1222,6 +1222,7 @@ test('filters task views by surface and scope and binds cursors to that context'
     canManageSharedViews: false,
     canSetTeamDefault: true,
     writableTeamIds: ['core'],
+    writableProjectScopes: [{ teamId: 'core', projectId: 'project-1' }],
   })
 
   const firstPage = await client.listTaskViews({
@@ -1258,10 +1259,20 @@ test('reports mutation capabilities only for the exact task view list scope', as
     teamIds: new Set(['read-only', 'writable', 'secondary']),
     writableTeamIds: new Set(['writable', 'secondary', 'not-readable']),
     manageableTeamIds: new Set(['writable']),
-    projectIds: new Set<string>(),
-    writableProjectIds: new Set<string>(),
-    projectScopeKeys: new Set<string>(),
-    writableProjectScopeKeys: new Set<string>(),
+    projectIds: new Set(['project-a', 'project-b', 'project-read-only']),
+    writableProjectIds: new Set(['project-a', 'project-b', 'project-read-only']),
+    projectScopeKeys: new Set([
+      'writable\0project-a',
+      'secondary\0project-b',
+      'read-only\0project-read-only',
+    ]),
+    writableProjectScopeKeys: new Set([
+      'writable\0project-a',
+      'secondary\0project-b',
+      'read-only\0project-read-only',
+      'not-readable\0private-project',
+      'malformed-key',
+    ]),
   }
 
   const unscoped = await client.listTaskViews({
@@ -1286,6 +1297,22 @@ test('reports mutation capabilities only for the exact task view list scope', as
     scope: { kind: 'viewer' },
     access,
   })
+  const workspace = await client.listTaskViews({
+    workspaceId: 'workspace-1',
+    surface: 'workspace-search',
+    scope: { kind: 'workspace' },
+    access,
+  })
+  const writableProject = await client.listTaskViews({
+    workspaceId: 'workspace-1',
+    surface: 'project',
+    scope: {
+      kind: 'project',
+      teamId: 'read-only',
+      projectId: 'project-read-only',
+    },
+    access,
+  })
   const globallyReadOnlyTeam = await client.listTaskViews({
     workspaceId: 'workspace-1',
     surface: 'team',
@@ -1298,30 +1325,63 @@ test('reports mutation capabilities only for the exact task view list scope', as
     canManageSharedViews: false,
     canSetTeamDefault: false,
     writableTeamIds: [],
+    writableProjectScopes: [],
   })
   expect(writableTeam.capabilities).toEqual({
     canWrite: true,
     canManageSharedViews: true,
     canSetTeamDefault: true,
     writableTeamIds: ['writable'],
+    writableProjectScopes: [{ teamId: 'writable', projectId: 'project-a' }],
   })
   expect(readOnlyTeam.capabilities).toEqual({
     canWrite: false,
     canManageSharedViews: false,
     canSetTeamDefault: false,
     writableTeamIds: [],
+    writableProjectScopes: [{
+      teamId: 'read-only',
+      projectId: 'project-read-only',
+    }],
   })
   expect(viewer.capabilities).toEqual({
     canWrite: true,
     canManageSharedViews: true,
     canSetTeamDefault: false,
     writableTeamIds: ['secondary', 'writable'],
+    writableProjectScopes: [
+      { teamId: 'read-only', projectId: 'project-read-only' },
+      { teamId: 'secondary', projectId: 'project-b' },
+      { teamId: 'writable', projectId: 'project-a' },
+    ],
+  })
+  expect(workspace.capabilities).toEqual({
+    canWrite: false,
+    canManageSharedViews: false,
+    canSetTeamDefault: false,
+    writableTeamIds: ['secondary', 'writable'],
+    writableProjectScopes: [
+      { teamId: 'read-only', projectId: 'project-read-only' },
+      { teamId: 'secondary', projectId: 'project-b' },
+      { teamId: 'writable', projectId: 'project-a' },
+    ],
+  })
+  expect(writableProject.capabilities).toEqual({
+    canWrite: true,
+    canManageSharedViews: true,
+    canSetTeamDefault: false,
+    writableTeamIds: [],
+    writableProjectScopes: [{
+      teamId: 'read-only',
+      projectId: 'project-read-only',
+    }],
   })
   expect(globallyReadOnlyTeam.capabilities).toEqual({
     canWrite: false,
     canManageSharedViews: false,
     canSetTeamDefault: false,
-    writableTeamIds: [],
+    writableTeamIds: ['writable'],
+    writableProjectScopes: [{ teamId: 'writable', projectId: 'project-a' }],
   })
 })
 
@@ -3038,6 +3098,7 @@ test('prevents idempotent recreation from reviving another viewer preference lif
       canManageSharedViews: false,
       canSetTeamDefault: false,
       writableTeamIds: [],
+      writableProjectScopes: [],
     },
     views: [],
   })

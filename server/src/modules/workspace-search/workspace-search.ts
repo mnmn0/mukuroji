@@ -43,6 +43,7 @@ import {
   type TaskViewMigrationWarning,
   type TaskViewScope,
   type TaskViewSurface,
+  type TaskViewWritableProjectScope,
   type UpdateSavedTaskViewInput,
   type WorkflowStatusCategory,
   type WorkItemPriority,
@@ -3998,12 +3999,12 @@ function canWriteTaskViewScope(scope: TaskViewScope, access: TaskViewAccessScope
 }
 
 /**
- * Creates mutation capabilities only for an exact surface-and-scope list query.
+ * Creates Saved View lifecycle and Work Item mutation capabilities for an exact list query.
  *
  * @param surface - Validated product surface filter, when supplied.
  * @param scope - Validated resource scope filter, when supplied.
  * @param access - Current viewer read and write authorization.
- * @returns Server-authoritative capabilities that never infer mutation access from list rows.
+ * @returns Server-authoritative capabilities that never infer write access from list rows.
  */
 function createTaskViewListCapabilities(
   surface: TaskViewSurface | undefined,
@@ -4016,18 +4017,17 @@ function createTaskViewListCapabilities(
       canManageSharedViews: false,
       canSetTeamDefault: false,
       writableTeamIds: [],
+      writableProjectScopes: [],
     }
   }
   const canWrite = access.canWrite && canWriteTaskViewScope(scope, access)
   const scopeTeamId = getTaskViewScopeTeamId(scope)
   const candidateTeamIds = scopeTeamId ? [scopeTeamId] : [...access.writableTeamIds]
-  const writableTeamIds = canWrite
-    ? candidateTeamIds
-        .filter((teamId) =>
-          access.teamIds.has(teamId) && access.writableTeamIds.has(teamId)
-        )
-        .sort()
-    : []
+  const writableTeamIds = candidateTeamIds
+    .filter((teamId) =>
+      access.teamIds.has(teamId) && access.writableTeamIds.has(teamId)
+    )
+    .sort()
   return {
     canWrite,
     canManageSharedViews: canWrite && access.canManageSharedViews,
@@ -4035,7 +4035,94 @@ function createTaskViewListCapabilities(
       canWrite && scopeTeamId && access.manageableTeamIds.has(scopeTeamId),
     ),
     writableTeamIds,
+    writableProjectScopes: createTaskViewListWritableProjectScopes(scope, access),
   }
+}
+
+/**
+ * Returns authoritative Team-qualified Project write scopes inside one exact task-view scope.
+ *
+ * @param scope - Exact resource scope requested by the current list operation.
+ * @param access - Current viewer read and write authorization.
+ * @returns Deterministically ordered readable Project scopes with Work Item write access.
+ */
+function createTaskViewListWritableProjectScopes(
+  scope: TaskViewScope,
+  access: TaskViewAccessScope,
+): TaskViewWritableProjectScope[] {
+  if (
+    scope.kind === 'project' &&
+    scope.teamId === undefined &&
+    !access.writableProjectIds.has(scope.projectId)
+  ) {
+    return []
+  }
+  return [...access.writableProjectScopeKeys]
+    .filter((scopeKey) => access.projectScopeKeys.has(scopeKey))
+    .flatMap((scopeKey) => {
+      const writableScope = parseTaskViewProjectScopeKey(scopeKey)
+      if (!writableScope || !taskViewWritableProjectScopeMatches(scope, writableScope)) {
+        return []
+      }
+      return [writableScope]
+    })
+    .sort(compareTaskViewWritableProjectScopes)
+}
+
+/**
+ * Parses one internal Team-qualified Project authorization key without trusting malformed data.
+ *
+ * @param scopeKey - Candidate `${teamId}\0${projectId}` authorization key.
+ * @returns Structured Project scope, or undefined when the key is malformed.
+ */
+function parseTaskViewProjectScopeKey(
+  scopeKey: string,
+): TaskViewWritableProjectScope | undefined {
+  const separatorIndex = scopeKey.indexOf('\0')
+  if (
+    separatorIndex <= 0 ||
+    separatorIndex === scopeKey.length - 1 ||
+    scopeKey.indexOf('\0', separatorIndex + 1) !== -1
+  ) {
+    return undefined
+  }
+  return {
+    teamId: scopeKey.slice(0, separatorIndex),
+    projectId: scopeKey.slice(separatorIndex + 1),
+  }
+}
+
+/**
+ * Checks whether one writable Project belongs to the exact task-view resource scope.
+ *
+ * @param scope - Exact resource scope requested by the current list operation.
+ * @param writableScope - Team-qualified Project scope from current authorization.
+ * @returns Whether the Project capability may be disclosed for the requested scope.
+ */
+function taskViewWritableProjectScopeMatches(
+  scope: TaskViewScope,
+  writableScope: TaskViewWritableProjectScope,
+): boolean {
+  if (scope.kind === 'workspace' || scope.kind === 'viewer') return true
+  if (scope.kind === 'team') return scope.teamId === writableScope.teamId
+  return scope.projectId === writableScope.projectId && (
+    scope.teamId === undefined || scope.teamId === writableScope.teamId
+  )
+}
+
+/**
+ * Orders Team-qualified Project capabilities for deterministic API responses.
+ *
+ * @param left - First writable Project scope.
+ * @param right - Second writable Project scope.
+ * @returns Negative, zero, or positive ordering value.
+ */
+function compareTaskViewWritableProjectScopes(
+  left: TaskViewWritableProjectScope,
+  right: TaskViewWritableProjectScope,
+): number {
+  const teamOrder = left.teamId.localeCompare(right.teamId)
+  return teamOrder || left.projectId.localeCompare(right.projectId)
 }
 
 /** Requires mutation authority for one concrete task view resource scope. */

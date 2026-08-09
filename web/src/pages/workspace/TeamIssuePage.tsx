@@ -208,6 +208,7 @@ import {
   executeTeamIssueDirectStatusMove,
   isTeamIssueRevisionConflict,
 } from '../../task-views/model/teamIssueDirectMove'
+import { canWriteTaskViewWorkItem } from '../../task-views/model/taskViewWorkItemPermission'
 import {
   createTaskSurfaceActionBaseContext,
   resolveTaskSurfaceActionTarget,
@@ -312,6 +313,12 @@ type TeamIssueScreenProps = {
   viewState?: TeamIssueViewState
   /** Persists one complete next route-controlled Team Issue view state. */
   onViewStateChange?: (state: TeamIssueViewState) => void
+  /** Checks whether one visible Team Issue belongs to a server-authorized write scope. */
+  canMutateIssue?: (issue: TeamIssue) => boolean
+  /** Whether the current viewer may create an unassigned Work Item in the Team scope. */
+  canCreateUnassignedIssue?: boolean
+  /** Project destinations where the current viewer may create a Team Issue. */
+  createIssueProjects?: ProjectDirectoryTeam['projects']
   /**
    * Related Documents を取得する access token です。
    */
@@ -594,7 +601,6 @@ export function TeamIssuePage() {
       .charAt(0)
       .toUpperCase() || 'J'
   const canManageStructure = canManageWorkspaceStructure(user)
-  const canMutateContent = canMutateWorkspaceContent(user)
   const currentUserErrorAction = resolveEnterpriseSessionErrorsAction(
     currentUserError,
     [
@@ -702,6 +708,27 @@ export function TeamIssuePage() {
     searchParams,
     surface: 'team',
   })
+  /** Checks the current Team-qualified ownership scope before exposing a Work Item mutation. */
+  const canMutateTeamIssue = useCallback((issue: TeamIssue) => canWriteTaskViewWorkItem({
+    writableProjectScopes: taskViewController.writableProjectScopes,
+    writableTeamIds: taskViewController.writableTeamIds,
+  }, issue), [
+    taskViewController.writableProjectScopes,
+    taskViewController.writableTeamIds,
+  ])
+  const hasWritableWorkItemScope = taskViewController.writableTeamIds.length > 0 ||
+    taskViewController.writableProjectScopes.length > 0
+  const canCreateUnassignedIssue = taskViewController.writableTeamIds.includes(teamId)
+  const createIssueProjects = useMemo(() => activeTeam?.projects.filter((project) =>
+    taskViewController.writableProjectScopes.some((scope) =>
+      scope.teamId === teamId && scope.projectId === project.id
+    )
+  ) ?? [], [
+    activeTeam?.projects,
+    taskViewController.writableProjectScopes,
+    teamId,
+  ])
+  const canCreateTeamIssue = canCreateUnassignedIssue || createIssueProjects.length > 0
   const taskViewState = taskViewDefinitionToTeamState(taskViewController.effectiveDefinition)
   const taskViewTeams = useMemo(
     () => {
@@ -761,6 +788,16 @@ export function TeamIssuePage() {
     if (!accessToken) {
       return
     }
+    if (!canWriteTaskViewWorkItem({
+      writableProjectScopes: taskViewController.writableProjectScopes,
+      writableTeamIds: taskViewController.writableTeamIds,
+    }, { assignedProjectId: input.assignedProjectId, teamId })) {
+      throw new TeamIssuesApiError(
+        403,
+        t('taskViews.action.unavailable'),
+        'TeamTaskActionAccessDenied',
+      )
+    }
 
     const issue = await guardEnterpriseSession(mutationRequestRunner.run(
       `issue:create:${teamId}`,
@@ -785,8 +822,21 @@ export function TeamIssuePage() {
       ? issueDetail.issue
       : issues.find((issue) => issue.id === issueId)
 
-    if (!currentIssue) {
-      return
+    const nextOwnership = {
+      assignedProjectId: input.assignedProjectId === undefined
+        ? currentIssue?.assignedProjectId
+        : input.assignedProjectId ?? undefined,
+      teamId: currentIssue?.teamId ?? teamId,
+    }
+    if (!currentIssue || !canMutateTeamIssue(currentIssue) || !canWriteTaskViewWorkItem({
+      writableProjectScopes: taskViewController.writableProjectScopes,
+      writableTeamIds: taskViewController.writableTeamIds,
+    }, nextOwnership)) {
+      throw new TeamIssuesApiError(
+        403,
+        t('taskViews.action.unavailable'),
+        'TeamTaskActionAccessDenied',
+      )
     }
 
     try {
@@ -825,6 +875,17 @@ export function TeamIssuePage() {
       return
     }
 
+    const currentIssue = issueDetail?.issue.id === issueId
+      ? issueDetail.issue
+      : issues.find((issue) => issue.id === issueId)
+    if (!currentIssue || !canMutateTeamIssue(currentIssue)) {
+      throw new TeamIssuesApiError(
+        403,
+        t('taskViews.action.unavailable'),
+        'TeamTaskActionAccessDenied',
+      )
+    }
+
     const graphRevision = readSelectedRelationGraphRevision(issueDetail, issueId, t)
 
     try {
@@ -849,6 +910,17 @@ export function TeamIssuePage() {
   const handleDeleteRelation = async (issueId: string, relation: WorkItemRelation) => {
     if (!accessToken) {
       return
+    }
+
+    const currentIssue = issueDetail?.issue.id === issueId
+      ? issueDetail.issue
+      : issues.find((issue) => issue.id === issueId)
+    if (!currentIssue || !canMutateTeamIssue(currentIssue)) {
+      throw new TeamIssuesApiError(
+        403,
+        t('taskViews.action.unavailable'),
+        'TeamTaskActionAccessDenied',
+      )
     }
 
     const graphRevision = readSelectedRelationGraphRevision(issueDetail, issueId, t)
@@ -946,6 +1018,8 @@ export function TeamIssuePage() {
       accessToken={accessToken}
       assigneeOptions={assigneeOptions}
       artifacts={artifacts}
+      canCreateUnassignedIssue={canCreateUnassignedIssue}
+      canMutateIssue={canMutateTeamIssue}
       canManageDependencyEndpoint={canManageDependencyEndpoint}
       collaboration={collaboration}
       canManageExternalLinks={canManageStructure}
@@ -963,12 +1037,15 @@ export function TeamIssuePage() {
       isRelationsLoading={Boolean(detailKey && isIssueDetailLoading)}
       key={teamId}
       locale={locale}
-      onAddRelation={canMutateContent ? handleAddRelation : undefined}
-      onCreateIssue={canMutateContent && !workItemConfigurationError ? handleCreateIssue : undefined}
+      onAddRelation={hasWritableWorkItemScope ? handleAddRelation : undefined}
+      createIssueProjects={createIssueProjects}
+      onCreateIssue={canCreateTeamIssue && !workItemConfigurationError
+        ? handleCreateIssue
+        : undefined}
       onCreateScheduleDependency={accessToken && planningSnapshot
         ? dependencyMutations.create
         : undefined}
-      onDeleteRelation={canMutateContent ? handleDeleteRelation : undefined}
+      onDeleteRelation={hasWritableWorkItemScope ? handleDeleteRelation : undefined}
       onDeleteScheduleDependency={accessToken && planningSnapshot
         ? dependencyMutations.delete
         : undefined}
@@ -980,7 +1057,9 @@ export function TeamIssuePage() {
         createTeamIssuesPath(teamId, issueId),
         searchParams,
       ))}
-      onUpdateIssue={canMutateContent && !workItemConfigurationError ? handleUpdateIssue : undefined}
+      onUpdateIssue={hasWritableWorkItemScope && !workItemConfigurationError
+        ? handleUpdateIssue
+        : undefined}
       onUpdateScheduleDependency={accessToken && planningSnapshot
         ? dependencyMutations.update
         : undefined}
@@ -1022,6 +1101,8 @@ export function TeamIssueScreen({
   accessToken,
   assigneeOptions = [],
   artifacts,
+  canCreateUnassignedIssue = true,
+  canMutateIssue,
   canManageDependencyEndpoint,
   canManageExternalLinks = false,
   collaboration,
@@ -1050,6 +1131,7 @@ export function TeamIssueScreen({
   onUpdateScheduleDependency,
   planningErrorMessage,
   planningSnapshot,
+  createIssueProjects,
   relations = [],
   resolvedConfiguration,
   selectedIssueId,
@@ -1266,11 +1348,16 @@ export function TeamIssueScreen({
   const canEditIssueAction = onUpdateIssue !== undefined && canOpenIssueAction
   const canAssignIssueAction = canEditIssueAction && assigneeOptions.length > 0
   const canManageIssueRelationAction = onAddRelation !== undefined && canOpenIssueAction
+  /** Checks the exact persisted Work Item ownership scope. */
+  const canMutateTeamIssueAction = useCallback((issue: TeamIssue) =>
+    canMutateIssue?.(issue) ?? true,
+  [canMutateIssue])
   /** Checks whether one visible Team Issue has a different reachable workflow status. */
   const canMoveTeamIssueAction = useCallback((issue: TeamIssue) =>
-    canEditIssueAction && resolveEditableWorkflowStatuses(issue, configuration).some(
+    canEditIssueAction && canMutateTeamIssueAction(issue) &&
+      resolveEditableWorkflowStatuses(issue, configuration).some(
       (status) => status.id !== issue.workflowStatusId,
-    ), [canEditIssueAction, configuration])
+    ), [canEditIssueAction, canMutateTeamIssueAction, configuration])
   const teamActionLabels = useMemo<TaskSurfaceActionLabels>(() => ({
     archive: t('taskViews.action.archive'),
     assign: t('taskViews.action.assign'),
@@ -1336,6 +1423,8 @@ export function TeamIssueScreen({
       collaboration.capabilities.canWatch
     ? collaboration.toggleWatch
     : undefined
+  const canMutateSelectedIssue = selectedIssue !== undefined &&
+    canMutateTeamIssueAction(selectedIssue)
 
   /** Executes a destination-bearing Board Move or reveals the detail selector for other entrances. */
   const executeTeamIssueMoveAction = useCallback((
@@ -1486,9 +1575,31 @@ export function TeamIssueScreen({
       : denyTaskAction(teamActionDisabledReasons.unavailable)
   }, [teamActionDisabledReasons, visibleIssues])
 
+  /** Evaluates one canonical mutation against the current Team-qualified Work Item scope. */
+  const evaluateTeamIssueMutationPermission = useCallback((context: WorkItemActionContext) => {
+    const targets = resolveTaskSurfaceActionTargets(context)
+    if (targets.length === 0) return allowTaskAction()
+    if (targets.length !== 1) {
+      return denyTaskAction(teamActionDisabledReasons.singleSelectionRequired)
+    }
+    const target = targets[0]
+    const issue = target
+      ? visibleIssues.find((candidate) =>
+          candidate.teamId === target.teamId && candidate.id === target.workItemId
+        )
+      : undefined
+    return issue && canMutateTeamIssueAction(issue)
+      ? allowTaskAction()
+      : denyTaskAction(teamActionDisabledReasons.unavailable)
+  }, [
+    canMutateTeamIssueAction,
+    teamActionDisabledReasons,
+    visibleIssues,
+  ])
+
   const teamActionPermissions = useMemo<TaskSurfaceActionPermissions>(() => ({
-    assign: evaluateTeamIssueTargetPermission,
-    edit: evaluateTeamIssueTargetPermission,
+    assign: evaluateTeamIssueMutationPermission,
+    edit: evaluateTeamIssueMutationPermission,
     move: (context) => {
       const targets = resolveTaskSurfaceActionTargets(context)
       if (targets.length === 0) return allowTaskAction()
@@ -1506,7 +1617,7 @@ export function TeamIssueScreen({
         : denyTaskAction(teamActionDisabledReasons.unavailable)
     },
     open: evaluateTeamIssueTargetPermission,
-    relation: evaluateTeamIssueTargetPermission,
+    relation: evaluateTeamIssueMutationPermission,
     watch: (context) => {
       const target = resolveTaskSurfaceActionTarget(context)
       return target && selectedIssue && toggleIssueWatch &&
@@ -1516,6 +1627,7 @@ export function TeamIssueScreen({
     },
   }), [
     canMoveTeamIssueAction,
+    evaluateTeamIssueMutationPermission,
     evaluateTeamIssueTargetPermission,
     selectedIssue,
     teamActionDisabledReasons,
@@ -1931,6 +2043,7 @@ export function TeamIssueScreen({
                   <CreateIssuePanel
                     key={`create-issue-${createWorkflowStatusId ?? ''}`}
                     assigneeOptions={assigneeOptions}
+                    canCreateUnassignedIssue={canCreateUnassignedIssue}
                     configuration={configuration}
                     errorMessage={createErrorMessage}
                     workflowStatusId={createWorkflowStatusId}
@@ -1996,7 +2109,7 @@ export function TeamIssueScreen({
                         }
                       }
                     }}
-                    projects={activeTeam?.projects ?? []}
+                    projects={createIssueProjects ?? activeTeam?.projects ?? []}
                     t={t}
                     workspaceMembers={workspaceMembers}
                   />
@@ -2091,6 +2204,7 @@ export function TeamIssueScreen({
                       issues={visibleIssues}
                       presentation={taskViewPresentation}
                       locale={locale}
+                      canMoveIssueStatus={canMoveTeamIssueAction}
                       onCreateIssueOpen={onCreateIssue ? handleTeamCreateClick : undefined}
                       onIssueActionMenuOpen={handleTeamIssueActionMenuOpen}
                       onMoveIssueStatus={canEditIssueAction
@@ -2122,24 +2236,33 @@ export function TeamIssueScreen({
                 issue={selectedIssue}
                 isRelationsLoading={isRelationsLoading}
                 locale={locale}
-                onAddRelation={onAddRelation
+                onAddRelation={canMutateSelectedIssue && onAddRelation
                   ? (issueId, input) => handleTeamIssueActionRelation(
                       issueId,
                       () => onAddRelation(issueId, input),
                     )
                   : undefined}
-                onCreateScheduleDependency={onCreateScheduleDependency}
-                onDeleteRelation={onDeleteRelation
+                onCreateScheduleDependency={canMutateSelectedIssue
+                  ? onCreateScheduleDependency
+                  : undefined}
+                onDeleteRelation={canMutateSelectedIssue && onDeleteRelation
                   ? (issueId, relation) => handleTeamIssueActionRelation(
                       issueId,
                       () => onDeleteRelation(issueId, relation),
                     )
                   : undefined}
-                onDeleteScheduleDependency={onDeleteScheduleDependency}
-                onUpdateIssue={onUpdateIssue ? handleTeamIssueActionUpdate : undefined}
-                onUpdateScheduleDependency={onUpdateScheduleDependency}
+                onDeleteScheduleDependency={canMutateSelectedIssue
+                  ? onDeleteScheduleDependency
+                  : undefined}
+                onUpdateIssue={canMutateSelectedIssue && onUpdateIssue
+                  ? handleTeamIssueActionUpdate
+                  : undefined}
+                onUpdateScheduleDependency={canMutateSelectedIssue
+                  ? onUpdateScheduleDependency
+                  : undefined}
                 planningSnapshot={planningSnapshot}
-                projects={activeTeam?.projects ?? []}
+                canAssignUnassigned={canCreateUnassignedIssue}
+                projects={createIssueProjects ?? activeTeam?.projects ?? []}
                 relationCandidates={issues}
                 relations={relations}
                 t={t}
@@ -2261,6 +2384,7 @@ function IssueToolbar({
 
 function CreateIssuePanel({
   assigneeOptions,
+  canCreateUnassignedIssue,
   configuration,
   errorMessage,
   locale,
@@ -2272,6 +2396,8 @@ function CreateIssuePanel({
   workspaceMembers,
 }: {
   assigneeOptions: ProjectMember[]
+  /** Whether an unassigned Team-owned Work Item is an authorized create destination. */
+  canCreateUnassignedIssue: boolean
   configuration?: WorkItemConfiguration
   errorMessage?: string
   locale: Locale
@@ -2283,7 +2409,9 @@ function CreateIssuePanel({
   workspaceMembers: WorkspaceMember[]
 }) {
   const today = formatLocalDateInputValue()
-  const [selectedProjectId, setSelectedProjectId] = useState('')
+  const [selectedProjectId, setSelectedProjectId] = useState(
+    canCreateUnassignedIssue ? '' : projects[0]?.id ?? '',
+  )
   const [fieldErrors, setFieldErrors] = useState<Readonly<Record<string, string | undefined>>>({})
   const workflowStatuses = resolveCreateWorkflowStatuses(configuration)
   const contextualWorkflowStatusId = workflowStatusId && workflowStatuses.some((status) => status.id === workflowStatusId)
@@ -2366,7 +2494,9 @@ function CreateIssuePanel({
               onChange={(event) => setSelectedProjectId(event.target.value)}
               value={selectedProjectId}
             >
-              <option value="">{t('issues.project.unassigned')}</option>
+              {canCreateUnassignedIssue ? (
+                <option value="">{t('issues.project.unassigned')}</option>
+              ) : null}
               {projects.map((project) => (
                 <option key={project.id} value={project.id}>
                   {project.name}
@@ -2901,6 +3031,7 @@ function resolveTeamIssueGroupValue(
 
 function IssueBoard({
   activeTeam,
+  canMoveIssueStatus,
   configuration,
   dependencySummaries,
   focusedIssueKey,
@@ -2918,6 +3049,8 @@ function IssueBoard({
   workspaceMembers,
 }: {
   activeTeam?: ProjectDirectoryTeam
+  /** Checks whether one Team Issue belongs to a server-authorized status mutation scope. */
+  canMoveIssueStatus?: (issue: TeamIssue) => boolean
   configuration?: WorkItemConfiguration
   dependencySummaries: Readonly<Record<string, WorkItemDependencySummary>>
   focusedIssueKey?: string
@@ -2942,6 +3075,10 @@ function IssueBoard({
   const [draggedIssueId, setDraggedIssueId] = useState<string>()
   const [dropTargetStatusId, setDropTargetStatusId] = useState<string>()
   const [movingIssueIds, setMovingIssueIds] = useState<ReadonlySet<string>>(() => new Set())
+  /** Checks the Board callback and the current issue-specific write scope together. */
+  const canMoveIssue = (issue: TeamIssue) => Boolean(
+    onMoveIssueStatus && (canMoveIssueStatus?.(issue) ?? true),
+  )
   const visibleFields = new Set((presentation?.columns ?? [
     { field: 'title' },
     { field: 'project' },
@@ -2971,7 +3108,7 @@ function IssueBoard({
 
   /** Validates and requests a Team workflow status change. */
   const moveIssueToStatus = (issue: TeamIssue, workflowStatusId: string) => {
-    if (!onMoveIssueStatus || issue.workflowStatusId === workflowStatusId) {
+    if (!onMoveIssueStatus || !canMoveIssue(issue) || issue.workflowStatusId === workflowStatusId) {
       return
     }
 
@@ -2996,7 +3133,7 @@ function IssueBoard({
 
   /** Starts a native drag for a Team Work Item. */
   const handleDragStart = (event: DragEvent<HTMLElement>, issue: TeamIssue) => {
-    if (!onMoveIssueStatus) {
+    if (!canMoveIssue(issue)) {
       return
     }
 
@@ -3101,7 +3238,13 @@ function IssueBoard({
 
                 const issue = issues.find((candidate) => candidate.id === draggedIssueId)
 
-                if (!issue || !resolveEditableWorkflowStatuses(issue, configuration).some((candidate) => candidate.id === status.id)) {
+                if (
+                  !issue ||
+                  !canMoveIssue(issue) ||
+                  !resolveEditableWorkflowStatuses(issue, configuration).some(
+                    (candidate) => candidate.id === status.id,
+                  )
+                ) {
                   return
                 }
 
@@ -3136,6 +3279,7 @@ function IssueBoard({
                     const selectedForAction = selectedIssueKeys.includes(issueKey)
                     const isMoving = movingIssueIds.has(issue.id)
                     const editableStatuses = resolveEditableWorkflowStatuses(issue, configuration)
+                    const canMoveCurrentIssue = canMoveIssue(issue)
                     const primaryHeading = primaryHeadingByIssueId.get(issue.id)
                     const secondaryHeading = secondaryHeadingByIssueId.get(issue.id)
                     const customFieldEntries = new Map(
@@ -3182,7 +3326,7 @@ function IssueBoard({
                         data-task-view-focused={focusedForAction ? 'true' : 'false'}
                         data-task-view-selected={selectedForAction ? 'true' : 'false'}
                         data-testid={`team-issue-card-${issue.id}`}
-                        draggable={Boolean(onMoveIssueStatus) && !isMoving}
+                        draggable={canMoveCurrentIssue && !isMoving}
                         onDragEnd={() => {
                           setDraggedIssueId(undefined)
                           setDropTargetStatusId(undefined)
@@ -3279,7 +3423,7 @@ function IssueBoard({
                         {visibleFields.has('team') ? (
                           <p className="mt-2 text-xs font-medium text-[var(--workbench-muted)]">{issue.teamId}</p>
                         ) : null}
-                        {visibleFields.has('status') && onMoveIssueStatus && editableStatuses.length > 0 ? (
+                        {visibleFields.has('status') && canMoveCurrentIssue && editableStatuses.length > 0 ? (
                           <select
                             aria-label={`${resolveIssueTitle(issue, t)}: ${t('tasks.column.status')}`}
                             className="workbench-input mt-3 h-8 w-full px-2 text-xs"
@@ -3294,7 +3438,7 @@ function IssueBoard({
                             ))}
                           </select>
                         ) : null}
-                        {onMoveIssueStatus ? (
+                        {canMoveCurrentIssue ? (
                           <p className="mt-2 text-[11px] font-medium text-[var(--workbench-muted)]">
                             {t('tasks.board.dragHint')}
                           </p>
@@ -3326,6 +3470,7 @@ function IssueDetailPane({
   accessToken,
   assigneeOptions,
   artifacts,
+  canAssignUnassigned,
   canManageDependencyEndpoint,
   canManageExternalLinks,
   collaboration,
@@ -3354,6 +3499,8 @@ function IssueDetailPane({
   accessToken?: string
   assigneeOptions: ProjectMember[]
   artifacts?: FileArtifactsController
+  /** Whether the current viewer may move this Work Item out of a Project. */
+  canAssignUnassigned: boolean
   /** Determines whether the current user may manage one canonical dependency endpoint. */
   canManageDependencyEndpoint?: CanManageWorkItemDependencyEndpoint
   canManageExternalLinks: boolean
@@ -3397,6 +3544,7 @@ function IssueDetailPane({
       accessToken={accessToken}
       assigneeOptions={assigneeOptions}
       artifacts={artifacts}
+      canAssignUnassigned={canAssignUnassigned}
       canManageDependencyEndpoint={canManageDependencyEndpoint}
       canManageExternalLinks={canManageExternalLinks}
       collaboration={collaboration}
@@ -3430,6 +3578,7 @@ function IssueDetailContent({
   accessToken,
   assigneeOptions,
   artifacts,
+  canAssignUnassigned,
   canManageDependencyEndpoint,
   canManageExternalLinks,
   collaboration,
@@ -3461,6 +3610,8 @@ function IssueDetailContent({
   assigneeOptions: ProjectMember[]
   /** 選択中 Issue の file/version/annotation/approval controller です。 */
   artifacts?: FileArtifactsController
+  /** Whether the current viewer may move this Work Item out of a Project. */
+  canAssignUnassigned: boolean
   /** Determines whether the current user may manage one canonical dependency endpoint. */
   canManageDependencyEndpoint?: CanManageWorkItemDependencyEndpoint
   /** External link の作成、更新、解除が許可されているかどうかです。 */
@@ -3619,7 +3770,9 @@ function IssueDetailContent({
                 })}
                 value={selectedProjectId}
               >
-                <option value="">{t('issues.project.unassigned')}</option>
+                {canAssignUnassigned ? (
+                  <option value="">{t('issues.project.unassigned')}</option>
+                ) : null}
                 {projects.map((project) => (
                   <option key={project.id} value={project.id}>{project.name}</option>
                 ))}

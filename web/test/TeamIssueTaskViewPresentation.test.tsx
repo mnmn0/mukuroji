@@ -168,4 +168,60 @@ describe('Team Issue task-view presentation', () => {
     expect(html).toContain(teamIssueFixtures[0].title)
     expect(html).not.toContain(teamIssueFixtures[1].title)
   })
+
+  test('gates Board movement and selected detail controls per qualified Work Item scope', () => {
+    const writableIssue = teamIssueFixtures[0]
+    const readOnlyIssue = teamIssueFixtures[1]
+    if (!writableIssue || !readOnlyIssue) {
+      throw new Error('Expected two Team Issue fixtures.')
+    }
+    const html = renderToStaticMarkup(
+      <TeamIssueScreen
+        canMutateIssue={(issue) => issue.id === writableIssue.id}
+        issues={[writableIssue, readOnlyIssue]}
+        locale="ja"
+        onSelectIssue={() => undefined}
+        onUpdateIssue={async () => undefined}
+        resolvedConfiguration={{ configuration: teamWorkItemConfigurationFixture }}
+        selectedIssueId={readOnlyIssue.id}
+        teamId="core-team"
+        teams={projectDirectoryFixtures}
+        userInitial="J"
+        viewState={{
+          definitionFilter: { category: 'all', customFieldId: '' },
+          searchQuery: '',
+          statusFilter: 'all',
+          viewMode: 'board',
+        }}
+      />,
+    )
+
+    expect(html.match(/draggable="true"/g)?.length).toBe(1)
+    expect(html.match(/draggable="false"/g)?.length).toBe(1)
+    expect(html).toContain('<fieldset class="contents" disabled="">')
+    expect(html).toContain('data-testid="team-issue-detail-pane"')
+  })
+
+  test('keeps Team create destinations inside server-authorized Project scopes', () => {
+    const team = projectDirectoryFixtures.find((candidate) => candidate.id === 'core-team')
+    const writableProject = team?.projects.find((project) => project.id === 'refero')
+    if (!writableProject) throw new Error('Expected the Refero Project fixture.')
+    const html = renderToStaticMarkup(
+      <TeamIssueScreen
+        canCreateUnassignedIssue={false}
+        createIssueProjects={[writableProject]}
+        defaultCreateIssueOpen
+        locale="ja"
+        onCreateIssue={async () => undefined}
+        resolvedConfiguration={{ configuration: teamWorkItemConfigurationFixture }}
+        teamId="core-team"
+        teams={projectDirectoryFixtures}
+        userInitial="J"
+      />,
+    )
+
+    expect(html).toContain('<option value="refero" selected="">Refero</option>')
+    expect(html).not.toContain('<option value="">未アサイン</option>')
+    expect(html).not.toContain('<option value="product-roadmap">')
+  })
 })

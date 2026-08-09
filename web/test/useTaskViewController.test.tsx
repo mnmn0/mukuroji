@@ -48,6 +48,7 @@ const writableTaskViewCapabilities = {
   canManageSharedViews: true,
   canSetTeamDefault: true,
   canWrite: true,
+  writableProjectScopes: [{ teamId: 'core-team', projectId: 'refero' }],
   writableTeamIds: ['core-team'],
 } satisfies SavedTaskViewCapabilities
 
@@ -144,6 +145,9 @@ describe('useTaskViewController resolution', () => {
     const controller = renderController(createInput(searchParams))
 
     expect(controller.isLoading).toBe(true)
+    expect(controller.canWrite).toBeFalse()
+    expect(controller.writableProjectScopes).toEqual([])
+    expect(controller.writableTeamIds).toEqual([])
     expect(controller.migrationWarnings).not.toContainEqual({
       code: 'permission-redacted',
       fallback: 'unavailable',
@@ -167,14 +171,18 @@ describe('useTaskViewController resolution', () => {
         canManageSharedViews: false,
         canSetTeamDefault: false,
         canWrite: false,
-        writableTeamIds: [],
+        writableProjectScopes: [{ teamId: 'core-team', projectId: 'refero' }],
+        writableTeamIds: ['core-team'],
       },
     )
 
     expect(controller.canWrite).toBeFalse()
     expect(controller.canManageShared).toBeFalse()
     expect(controller.canSetTeamDefault).toBeFalse()
-    expect(controller.writableTeamIds).toEqual([])
+    expect(controller.writableProjectScopes).toEqual([
+      { teamId: 'core-team', projectId: 'refero' },
+    ])
+    expect(controller.writableTeamIds).toEqual(['core-team'])
     await controller.saveAs({ name: 'Denied view', visibility: 'personal' })
     await controller.duplicateView(selectedView.id)
     await controller.patchPreference(selectedView.id, { favorite: true })
@@ -200,6 +208,7 @@ describe('useTaskViewController resolution', () => {
         canManageSharedViews: false,
         canSetTeamDefault: false,
         canWrite: true,
+        writableProjectScopes: [{ teamId: 'core-team', projectId: 'refero' }],
         writableTeamIds: ['core-team'],
       },
     )
