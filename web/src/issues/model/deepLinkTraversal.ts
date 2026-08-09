@@ -13,11 +13,14 @@ export type DeepLinkTraversalState = {
 
 /**
  * Advances a bounded automatic deep-link traversal.
+ * The page counter advances only while the target is unresolved and another
+ * page is available; once the budget is spent, callers should surface an
+ * explicit manual retry instead of continuing automatic loading.
  *
  * @param current - Current target and automatic request count.
  * @param targetId - Deep-linked entity identifier.
  * @param canLoad - Whether another cursor page is currently available and idle.
- * @returns Updated state and whether the caller should request one page.
+ * @returns Updated state, the next-load decision, and bounded-exhaustion status.
  */
 export function advanceDeepLinkTraversal(
   current: DeepLinkTraversalState,

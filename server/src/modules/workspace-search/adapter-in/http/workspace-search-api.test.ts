@@ -871,6 +871,7 @@ test('search endpoint drops a context item when its Work Item assignment changes
     },
   })
   let resolvedScope: WorkspaceSearchResolvedScope | undefined
+  let searchCalled = false
   setTestAppDependencies({
     collaboration: createCollaborationStub({
       async getCuratedContextItemSnapshot(input) {
@@ -894,6 +895,7 @@ test('search endpoint drops a context item when its Work Item assignment changes
     }),
     workspaceSearch: createWorkspaceSearchFake({
       async search(input) {
+        searchCalled = true
         resolvedScope = await input.resolveCurrentScope?.(createWorkspaceSearchDocument({
           workspaceId: input.workspaceId,
           entityType: 'context-item',
@@ -915,6 +917,8 @@ test('search endpoint drops a context item when its Work Item assignment changes
   })
 
   expect(response.status).toBe(200)
+  expect(searchCalled).toBe(true)
+  expect(detailReadCount).toBeGreaterThanOrEqual(2)
   expect(resolvedScope).toBeUndefined()
 })
 

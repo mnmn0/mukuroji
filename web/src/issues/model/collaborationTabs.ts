@@ -15,6 +15,16 @@ export const issueCollaborationTabs = [
  */
 export type IssueCollaborationTab = (typeof issueCollaborationTabs)[number]
 
+/** A source target persisted in the collaboration route. */
+export type IssueCollaborationSourceTarget = {
+  /** Curated context item owning the source. */
+  contextItemId: string
+  /** Source identifier within its provider. */
+  sourceId: string
+  /** Source kind used to disambiguate provider IDs. */
+  kind: CuratedContextSourceKind
+}
+
 /** Route-owned collaboration state shared by detail-pane boundaries. */
 export type IssueCollaborationRoute = {
   /** Collaboration section selected by route state. */
@@ -29,6 +39,8 @@ export type IssueCollaborationRoute = {
   focusedActivityEventId?: string
   /** Persists collaboration tab selection in route state. */
   onCollaborationTabChange?: (tab: IssueCollaborationTab) => void
+  /** Persists an exact source target in route state. */
+  onCollaborationSourceChange?: (target: IssueCollaborationSourceTarget) => void
 }
 
 /**
@@ -110,6 +122,28 @@ export function applyIssueCollaborationTabToSearchParams(
     nextSearchParams.delete(key)
   }
 
+  return nextSearchParams
+}
+
+/**
+ * Applies an exact source target while preserving the surrounding Work Item route.
+ *
+ * @param searchParams - Current route query parameters.
+ * @param target - Source target that should be focused.
+ * @returns A new query parameter set with the source target persisted.
+ */
+export function applyIssueCollaborationSourceToSearchParams(
+  searchParams: URLSearchParams,
+  target: IssueCollaborationSourceTarget,
+): URLSearchParams {
+  const nextSearchParams = new URLSearchParams(searchParams)
+  nextSearchParams.set('collaborationTab', 'sources')
+  nextSearchParams.set('contextItemId', target.contextItemId)
+  nextSearchParams.set('sourceId', target.sourceId)
+  nextSearchParams.set('sourceKind', target.kind)
+  nextSearchParams.delete('commentId')
+  nextSearchParams.delete('rootCommentId')
+  nextSearchParams.delete('activityEventId')
   return nextSearchParams
 }
 

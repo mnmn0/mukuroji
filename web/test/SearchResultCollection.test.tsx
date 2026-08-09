@@ -97,6 +97,27 @@ describe('SearchResultCollection', () => {
     expect(html).toContain('>Ready for QA<')
     expect(html).not.toContain('>ready-for-qa<')
   })
+
+  test('localizes context-item kind subtitles when no body is available', () => {
+    const html = renderToStaticMarkup(
+      <SearchResultCollection
+        layout={tableLayout}
+        locale="ja"
+        onNavigate={() => undefined}
+        results={[{
+          entityType: 'context-item',
+          highlights: [],
+          id: 'decision-1',
+          subtitle: 'decision',
+          title: 'リリース判断',
+          url: '/teams/core-team/issues?issueId=issue-1&contextItemId=decision-1',
+        }]}
+      />,
+    )
+
+    expect(html).toContain('判断')
+    expect(html).not.toContain('>decision<')
+  })
 })
 
 function createResult(

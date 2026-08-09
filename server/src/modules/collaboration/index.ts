@@ -18,6 +18,7 @@ export {
   type CollaborationWatcherState,
   type CreateCuratedContextItemInput,
   type CreateCollaborationCommentInput,
+  type CuratedContextAuthorizationSnapshot,
   type CuratedContextMutationInput,
   type DeleteCollaborationCommentInput,
   type GetCollaborationCommentSnapshotInput,

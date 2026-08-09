@@ -453,22 +453,25 @@ function formatActivityTimeRange(
   events: readonly TeamIssueActivityEvent[],
   locale: Locale,
 ): string {
-  const first = events[0]
-  const last = events.at(-1)
-  if (!first || !last) return ''
+  const ordered = [...events].sort((left, right) =>
+    left.occurredAt.localeCompare(right.occurredAt),
+  )
+  const oldest = ordered[0]
+  const newest = ordered.at(-1)
+  if (!oldest || !newest) return ''
 
   const formatter = new Intl.DateTimeFormat(locale === 'ja' ? 'ja-JP' : 'en-US', {
     hour: '2-digit',
     minute: '2-digit',
   })
-  const firstDate = new Date(first.occurredAt)
-  const lastDate = new Date(last.occurredAt)
+  const oldestDate = new Date(oldest.occurredAt)
+  const newestDate = new Date(newest.occurredAt)
 
-  if (Number.isNaN(firstDate.getTime()) || Number.isNaN(lastDate.getTime())) {
-    return `${first.occurredAt}–${last.occurredAt}`
+  if (Number.isNaN(oldestDate.getTime()) || Number.isNaN(newestDate.getTime())) {
+    return `${oldest.occurredAt}–${newest.occurredAt}`
   }
 
-  return `${formatter.format(firstDate)}–${formatter.format(lastDate)}`
+  return `${formatter.format(oldestDate)}–${formatter.format(newestDate)}`
 }
 
 /**

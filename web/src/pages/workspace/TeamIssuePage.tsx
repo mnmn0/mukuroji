@@ -55,6 +55,7 @@ import {
 import { useDocumentContextPromotion } from '../../issues/mutations/useDocumentContextPromotion'
 import {
   applyIssueCollaborationTabToSearchParams,
+  applyIssueCollaborationSourceToSearchParams,
   resolveIssueCollaborationTab,
   type IssueCollaborationRoute,
   type IssueCollaborationTab,
@@ -680,6 +681,14 @@ export function TeamIssuePage() {
     )
   }
 
+  /** Persists a source provenance target in the selected Work Item route. */
+  const handleCollaborationSourceChange = (target: Parameters<NonNullable<IssueCollaborationRoute['onCollaborationSourceChange']>>[0]) => {
+    setSearchParams(
+      applyIssueCollaborationSourceToSearchParams(searchParams, target),
+      { replace: true },
+    )
+  }
+
   return (
     <TeamIssueScreen
       accessToken={accessToken}
@@ -694,6 +703,7 @@ export function TeamIssuePage() {
         focusedSourceKind,
         focusedActivityEventId,
         onCollaborationTabChange: handleCollaborationTabChange,
+        onCollaborationSourceChange: handleCollaborationSourceChange,
       }}
       canManageExternalLinks={canManageStructure}
       configurationErrorMessage={configurationErrorMessage}

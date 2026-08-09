@@ -22,6 +22,7 @@ export type DocumentContextPromotion = {
   onContextDraftConsumed: () => void
 }
 
+/** Stores a related-document draft together with its owning Team/Work Item scope. */
 type ScopedDocumentContextDraft = {
   /** Stable Team/Work Item identity that owns the draft. */
   scopeKey: string

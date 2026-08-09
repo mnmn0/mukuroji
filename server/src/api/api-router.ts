@@ -7783,6 +7783,7 @@ routeApp.post('/api/teams/:teamId/issues/:issueId/context-items', async (c) => {
           issueId,
           entityKey,
           replayed,
+          detail.issue.assignedProjectId,
         ),
       }, 201)
     }
@@ -7808,6 +7809,10 @@ routeApp.post('/api/teams/:teamId/issues/:issueId/context-items', async (c) => {
       projectId: detail.issue.assignedProjectId,
       projectEntityKey,
       actor: createCuratedContextActorSnapshot(principal),
+      authorizationSnapshot: {
+        memberKey: principal.userKey,
+        workspaceMemberVersion: principal.workspaceMember.version,
+      },
       kind: request.kind,
       title: request.title,
       body: request.body,
@@ -7845,6 +7850,7 @@ routeApp.post('/api/teams/:teamId/issues/:issueId/context-items', async (c) => {
         issueId,
         entityKey,
         item,
+        detail.issue.assignedProjectId,
       ),
     }, 201)
   } catch (error) {
@@ -7889,6 +7895,7 @@ routeApp.patch('/api/teams/:teamId/issues/:issueId/context-items/:contextItemId'
           issueId,
           entityKey,
           replayed,
+          detail.issue.assignedProjectId,
         ),
       })
     }
@@ -7913,6 +7920,10 @@ routeApp.patch('/api/teams/:teamId/issues/:issueId/context-items/:contextItemId'
       projectEntityKey,
       itemId: contextItemId,
       actor: createCuratedContextActorSnapshot(principal),
+      authorizationSnapshot: {
+        memberKey: principal.userKey,
+        workspaceMemberVersion: principal.workspaceMember.version,
+      },
       expectedRevision: request.expectedRevision,
       ...(request.kind ? { kind: request.kind } : {}),
       ...(request.state ? { state: request.state } : {}),
@@ -7951,6 +7962,7 @@ routeApp.patch('/api/teams/:teamId/issues/:issueId/context-items/:contextItemId'
         issueId,
         entityKey,
         item,
+        detail.issue.assignedProjectId,
       ),
     })
   } catch (error) {
@@ -19872,6 +19884,7 @@ async function requirePermissionSafeCuratedContextItem(
   issueId: string,
   entityKey: string,
   item: CuratedContextItem,
+  initialAssignedProjectId: string | undefined,
 ): Promise<CuratedContextItem> {
   const [reconciled] = await reconcileCuratedContextSourcesForViewer(
     principal,
@@ -19887,6 +19900,13 @@ async function requirePermissionSafeCuratedContextItem(
       'Curated context response could not be reconciled.',
     )
   }
+  await assertCuratedContextScopeUnchanged(
+    principal,
+    teamId,
+    issueId,
+    'member',
+    initialAssignedProjectId,
+  )
   return reconciled
 }
 
@@ -20224,7 +20244,11 @@ async function resolveCuratedContextMemberActor(
  * @returns Bounded captured source text.
  */
 function captureCuratedContextSourceBody(body: string) {
-  return body.slice(0, COLLABORATION_CONTEXT_BODY_MAX_LENGTH)
+  const bounded = body.slice(0, COLLABORATION_CONTEXT_BODY_MAX_LENGTH)
+  const lastCodeUnit = bounded.charCodeAt(bounded.length - 1)
+  return lastCodeUnit >= 0xd800 && lastCodeUnit <= 0xdbff
+    ? bounded.slice(0, -1)
+    : bounded
 }
 
 /** Stable Documents error codes that indicate a retention boundary. */
@@ -20270,7 +20294,7 @@ function resolveCuratedContextQuote(
     startOffset = hintedStart
   } else {
     startOffset = fullBody.indexOf(requested.text)
-    if (startOffset >= 0 && fullBody.indexOf(requested.text, startOffset + requested.text.length) >= 0) {
+    if (startOffset >= 0 && fullBody.indexOf(requested.text, startOffset + 1) >= 0) {
       throw invalidCuratedContextInput(
         'Curated source quote occurs multiple times; select an exact range.',
       )

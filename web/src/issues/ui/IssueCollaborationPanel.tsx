@@ -434,11 +434,13 @@ export function IssueCollaborationPanel({
               onContextDraftConsumed?.()
             }}
             onOpenSource={(item, source) => {
-              setSelectedSource({
+              const target = {
                 contextItemId: item.id,
                 kind: source.kind,
                 sourceId: source.sourceId,
-              })
+              }
+              setSelectedSource(target)
+              route?.onCollaborationSourceChange?.(target)
               selectTab('sources')
             }}
           />

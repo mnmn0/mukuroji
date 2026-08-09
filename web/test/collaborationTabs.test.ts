@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import {
   applyIssueCollaborationTabToSearchParams,
+  applyIssueCollaborationSourceToSearchParams,
   getIssueCollaborationSearchParamsToClear,
   issueCollaborationTargetSearchParams,
   issueCollaborationTabs,
@@ -143,5 +144,25 @@ describe('issue collaboration tabs', () => {
     expect(issueCollaborationTargetSearchParams).toEqual(
       expect.arrayContaining(['sourceId', 'sourceKind']),
     )
+  })
+
+  test('persists an exact source target without dropping the Work Item route', () => {
+    const current = new URLSearchParams(
+      'teamId=core-team&issueId=issue-1&commentId=comment-1&rootCommentId=root-1',
+    )
+    const next = applyIssueCollaborationSourceToSearchParams(current, {
+      contextItemId: 'context-1',
+      kind: 'comment',
+      sourceId: 'comment-2',
+    })
+
+    expect(next.get('teamId')).toBe('core-team')
+    expect(next.get('issueId')).toBe('issue-1')
+    expect(next.get('collaborationTab')).toBe('sources')
+    expect(next.get('contextItemId')).toBe('context-1')
+    expect(next.get('sourceId')).toBe('comment-2')
+    expect(next.get('sourceKind')).toBe('comment')
+    expect(next.get('commentId')).toBeNull()
+    expect(next.get('rootCommentId')).toBeNull()
   })
 })

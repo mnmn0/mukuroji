@@ -64,6 +64,7 @@ import {
 import { useIssueCollaboration } from '../../issues/mutations/useIssueCollaboration'
 import {
   applyIssueCollaborationTabToSearchParams,
+  applyIssueCollaborationSourceToSearchParams,
   issueCollaborationTargetSearchParams,
   resolveIssueCollaborationTab,
   type IssueCollaborationRoute,
@@ -724,6 +725,14 @@ export function TaskPage() {
     )
   }
 
+  /** Persists a source provenance target in the selected Work Item route. */
+  const handleCollaborationSourceChange = (target: Parameters<NonNullable<IssueCollaborationRoute['onCollaborationSourceChange']>>[0]) => {
+    setSearchParams(
+      applyIssueCollaborationSourceToSearchParams(searchParams, target),
+      { replace: true },
+    )
+  }
+
   /** Updates a visible Work Item with optimistic cache projection and conflict rollback. */
   const handleUpdateTask = async (
     task: ProjectTask,
@@ -1025,6 +1034,7 @@ export function TaskPage() {
           focusedSourceKind,
           focusedActivityEventId,
           onCollaborationTabChange: handleCollaborationTabChange,
+          onCollaborationSourceChange: handleCollaborationSourceChange,
         } satisfies IssueCollaborationRoute
       }
       artifacts={issueArtifacts}

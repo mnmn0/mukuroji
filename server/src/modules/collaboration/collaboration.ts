@@ -175,6 +175,14 @@ export type CollaborationThreadPage = {
   threadResolved?: boolean
 }
 
+/** Authorization generation observed before a curated context mutation. */
+export type CuratedContextAuthorizationSnapshot = {
+  /** Workspace member whose authorization was checked. */
+  memberKey: string
+  /** Membership generation observed during authorization. */
+  workspaceMemberVersion: number
+}
+
 /** Team-owned Work Item scope の共通入力です。 */
 export type WorkItemCollaborationScope = {
   /** Canonical Workspace ID です。 */
@@ -193,6 +201,8 @@ export type WorkItemCollaborationScope = {
   projectEntityKey?: string
   /** Resolve/reopen 認可時に読み込んだ Work Item assignee key です。 */
   assigneeMemberKey?: string
+  /** Authorization generation observed before the context mutation. */
+  authorizationSnapshot?: CuratedContextAuthorizationSnapshot
 }
 
 /** Thread page 取得入力です。 */
@@ -2687,6 +2697,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
   async createCuratedContextItem(input: CreateCuratedContextItemInput) {
     await this.ensureLocalTable()
     assertWorkItemScope(input)
+    assertCuratedContextAuthorizationSnapshot(input)
     if (input.auditContext) {
       const replayed = await this.getCuratedContextMutationReplay({
         entityKey: input.entityKey,
@@ -2818,6 +2829,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       : undefined
     const transactionItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [
       parentIssueCondition(this.parentIssueTableName, input),
+      ...curatedContextAuthorizationConditions(input),
       ...(capturedSource?.comment
         ? [commentVersionCondition(this.tableName, input.entityKey, capturedSource.comment)]
         : []),
@@ -2881,6 +2893,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
     await this.ensureLocalTable()
     assertWorkItemScope(input)
     assertExpectedContextRevision(input.expectedRevision)
+    assertCuratedContextAuthorizationSnapshot(input)
     if (input.auditContext) {
       const replayed = await this.getCuratedContextMutationReplay({
         entityKey: input.entityKey,
@@ -2977,6 +2990,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       await this.documentClient.send(new TransactWriteCommand({
         TransactItems: [
           parentIssueCondition(this.parentIssueTableName, input),
+          ...curatedContextAuthorizationConditions(input),
           contextSnapshotPut(this.tableName, after, input.expectedRevision),
           contextRevisionPut(this.tableName, after),
           ...(input.auditContext
@@ -4567,6 +4581,70 @@ function parentIssueCondition(tableName: string, input: WorkItemCollaborationSco
         : {}),
     },
   }
+}
+
+/**
+ * Validates the caller authorization generation carried into a context mutation.
+ *
+ * @param input - Context mutation scope and actor.
+ * @returns Nothing when the snapshot is valid or omitted for trusted internal callers.
+ * @throws CollaborationError when the snapshot does not identify the actor.
+ */
+function assertCuratedContextAuthorizationSnapshot(
+  input: CuratedContextMutationInput,
+): void {
+  const snapshot = input.authorizationSnapshot
+  if (!snapshot) return
+  if (
+    typeof snapshot.memberKey !== 'string' ||
+    snapshot.memberKey.trim().length === 0 ||
+    snapshot.memberKey !== input.actor.id ||
+    !Number.isSafeInteger(snapshot.workspaceMemberVersion) ||
+    snapshot.workspaceMemberVersion < 0
+  ) {
+    throw new CollaborationError(
+      400,
+      'InvalidAuthorizationSnapshot',
+      'Curated context authorization snapshot is invalid.',
+    )
+  }
+}
+
+/**
+ * Creates the membership generation condition used by curated-context writes.
+ *
+ * @param input - Context mutation scope containing the authorization snapshot.
+ * @returns DynamoDB transaction conditions for the current membership row.
+ */
+function curatedContextAuthorizationConditions(
+  input: CuratedContextMutationInput,
+): NonNullable<TransactWriteCommandInput['TransactItems']> {
+  const snapshot = input.authorizationSnapshot
+  if (!snapshot) return []
+  const tableName =
+    readEnvironment('MUKUROJI_WORKSPACE_ACCESS_TABLE') ??
+    readEnvironment('WORKSPACE_ACCESS_TABLE_NAME') ??
+    'mukuroji-workspace-access-local'
+  return [{
+    ConditionCheck: {
+      TableName: tableName,
+      Key: {
+        workspaceId: input.workspaceId,
+        recordKey: `MEMBER#${normalizeMemberKey(snapshot.memberKey)}`,
+      },
+      ConditionExpression:
+        'entryType = :workspaceMemberEntryType AND #status = :activeStatus AND #version = :workspaceMemberVersion',
+      ExpressionAttributeNames: {
+        '#status': 'status',
+        '#version': 'version',
+      },
+      ExpressionAttributeValues: {
+        ':workspaceMemberEntryType': 'workspace-member',
+        ':activeStatus': 'active',
+        ':workspaceMemberVersion': snapshot.workspaceMemberVersion,
+      },
+    },
+  }]
 }
 
 function watcherParentIssueConditions(tableName: string, input: UpdateWatcherInput) {
