@@ -264,6 +264,8 @@ const documentClient = DynamoDBDocumentClient.from(dynamoDbClient, {
 })
 const s3Client = new S3Client({ region: getAwsRegion() })
 const projectionConsumerName = 'collaboration-projection-v1'
+/** Independent receipt namespace for context search during rolling deployments. */
+const curatedContextSearchProjectionConsumerName = 'collaboration-context-search-v2'
 const watcherNotificationEventTypes = new Set([
   'comment.created',
   'comment.replied',
@@ -402,19 +404,51 @@ async function processRecord(
 
   await cleanupDeletedFileProjection(event, dependencies.deletedFileCleanup)
 
-  if (event.outboxStatus !== 'pending' || await isProjectionProcessed(event.eventId)) {
+  if (event.outboxStatus !== 'pending') {
     return
   }
 
-  const currentScope = await readCurrentWorkItemScope(event)
+  const isCuratedContextEvent = curatedContextSearchProjectionEventTypes.has(event.eventType)
+  const searchProjectionProcessed = isCuratedContextEvent
+    ? await isProjectionProcessed(event.eventId, curatedContextSearchProjectionConsumerName)
+    : true
+  let currentScope: CurrentWorkItemNotificationScope | undefined
+  if (isCuratedContextEvent && !searchProjectionProcessed) {
+    currentScope = await readCurrentWorkItemScope(event)
+  }
+  if (await isProjectionProcessed(event.eventId)) {
+    if (isCuratedContextEvent && !searchProjectionProcessed && currentScope) {
+      const scopedEvent = currentScope.checked
+        ? { ...event, projectId: currentScope.projectId }
+        : event
+      await projectCuratedContextSearchEvent(
+        scopedEvent,
+        dependencies.curatedContextSearch,
+        currentScope.exists,
+      )
+      await markProjectionProcessed(
+        event.eventId,
+        curatedContextSearchProjectionConsumerName,
+      )
+    }
+    return
+  }
+
+  currentScope ??= await readCurrentWorkItemScope(event)
   const scopedEvent = currentScope.checked
     ? { ...event, projectId: currentScope.projectId }
     : event
-  await projectCuratedContextSearchEvent(
-    scopedEvent,
-    dependencies.curatedContextSearch,
-    currentScope.exists,
-  )
+  if (isCuratedContextEvent && !searchProjectionProcessed) {
+    await projectCuratedContextSearchEvent(
+      scopedEvent,
+      dependencies.curatedContextSearch,
+      currentScope.exists,
+    )
+    await markProjectionProcessed(
+      event.eventId,
+      curatedContextSearchProjectionConsumerName,
+    )
+  }
   if (!currentScope.exists) {
     await markProjectionProcessed(event.eventId)
     return
@@ -735,12 +769,15 @@ export function toSubscribedWatcherCandidates(
   })
 }
 
-async function isProjectionProcessed(eventId: string) {
+async function isProjectionProcessed(
+  eventId: string,
+  consumerName = projectionConsumerName,
+) {
   const result = await documentClient.send(
     new GetCommand({
       TableName: requireEnv('PROCESSED_AUDIT_EVENTS_TABLE_NAME'),
       Key: {
-        consumerName: projectionConsumerName,
+        consumerName,
         eventId,
       },
       ConsistentRead: true,
@@ -750,13 +787,16 @@ async function isProjectionProcessed(eventId: string) {
   return result.Item !== undefined
 }
 
-async function markProjectionProcessed(eventId: string) {
+async function markProjectionProcessed(
+  eventId: string,
+  consumerName = projectionConsumerName,
+) {
   try {
     await documentClient.send(
       new PutCommand({
         TableName: requireEnv('PROCESSED_AUDIT_EVENTS_TABLE_NAME'),
         Item: {
-          consumerName: projectionConsumerName,
+          consumerName,
           eventId,
           processedAt: new Date().toISOString(),
           expiresAt: currentEpochSeconds() + readPositiveIntegerEnv(

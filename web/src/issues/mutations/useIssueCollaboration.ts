@@ -254,6 +254,7 @@ export function useIssueCollaboration({
     issueId,
     teamId,
   })
+  const refreshContext = context.refresh
 
   useEffect(() => {
     replyPageStateRef.current = replyPageState
@@ -718,7 +719,7 @@ export function useIssueCollaboration({
             return
           }
 
-          void refresh()
+          void Promise.all([refresh(), refreshContext()])
         })
         socket.addEventListener('close', () => {
           if (realtimeSocketRef.current === socket) {
@@ -733,7 +734,7 @@ export function useIssueCollaboration({
       realtimeSocketRef.current?.close()
       realtimeSocketRef.current = null
     }
-  }, [accessToken, clientId, isConfigured, issueId, mutate, refresh, teamId])
+  }, [accessToken, clientId, isConfigured, issueId, mutate, refresh, refreshContext, teamId])
 
   useEffect(() => {
     if (!isConfigured || !accessToken || !teamId || !issueId) {

@@ -8040,6 +8040,10 @@ routeApp.put('/api/teams/:teamId/issues/:issueId/comments/:rootCommentId/accepte
       assigneeMemberKey: detail.issue.assigneeUserId,
       rootCommentId,
       actor: createCuratedContextActorSnapshot(principal),
+      authorizationSnapshot: {
+        memberKey: principal.userKey,
+        workspaceMemberVersion: principal.workspaceMember.version,
+      },
       expectedThreadVersion: request.expectedThreadVersion,
       commentId: request.commentId,
       summary: request.summary,

@@ -289,6 +289,12 @@ export type CuratedContextMutationInput = WorkItemCollaborationScope & {
   auditContext?: MutationAuditContext
 }
 
+/** Common actor-bearing input accepted by authorization-fenced context mutations. */
+type CuratedContextAuthorizationInput = WorkItemCollaborationScope & {
+  /** Mutation actor whose membership generation is fenced. */
+  actor: CuratedContextActorSnapshot
+}
+
 /** Curated context item 作成入力です。 */
 export type CreateCuratedContextItemInput = CuratedContextMutationInput &
   CreateCuratedContextItemRequest
@@ -3036,6 +3042,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
     await this.ensureLocalTable()
     assertWorkItemScope(input)
     assertExpectedVersion(input.expectedThreadVersion)
+    assertCuratedContextAuthorizationSnapshot(input)
     const rootCommentId = requireIdentifier(input.rootCommentId, 'Root comment ID')
     const sourceCommentId = requireIdentifier(input.commentId, 'Comment ID')
     const actor = normalizeContextActor(input.actor, 'Accepted resolution actor')
@@ -3219,6 +3226,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       await this.documentClient.send(new TransactWriteCommand({
         TransactItems: [
           parentIssueCondition(this.parentIssueTableName, input),
+          ...curatedContextAuthorizationConditions(input),
           ...(!editingCurrent && selected
             ? [commentVersionCondition(this.tableName, input.entityKey, selected)]
             : []),
@@ -4591,7 +4599,7 @@ function parentIssueCondition(tableName: string, input: WorkItemCollaborationSco
  * @throws CollaborationError when the snapshot does not identify the actor.
  */
 function assertCuratedContextAuthorizationSnapshot(
-  input: CuratedContextMutationInput,
+  input: CuratedContextAuthorizationInput,
 ): void {
   const snapshot = input.authorizationSnapshot
   if (!snapshot) return
@@ -4617,7 +4625,7 @@ function assertCuratedContextAuthorizationSnapshot(
  * @returns DynamoDB transaction conditions for the current membership row.
  */
 function curatedContextAuthorizationConditions(
-  input: CuratedContextMutationInput,
+  input: CuratedContextAuthorizationInput,
 ): NonNullable<TransactWriteCommandInput['TransactItems']> {
   const snapshot = input.authorizationSnapshot
   if (!snapshot) return []
