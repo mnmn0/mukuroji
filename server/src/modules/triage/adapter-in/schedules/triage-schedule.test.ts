@@ -156,6 +156,129 @@ describe('triage schedule adapter', () => {
     }
   })
 
+  test('bubbles unrelated query validation failures instead of disabling the worker', async () => {
+    const validationFailure = new Error('Invalid KeyConditionExpression.')
+    validationFailure.name = 'ValidationException'
+    const harness = createHarness(() => {
+      throw validationFailure
+    })
+
+    try {
+      await expect(runTriageSchedule({
+        documentClient: harness.documentClient,
+        tableName: 'RequestIntakeTable',
+        auditTableName: 'AuditEventsTable',
+        auditRetentionDays: 365,
+        wakeIndexName: 'triage-wake-index',
+        wakeShardCount: 8,
+        batchSize: 100,
+        now: '2026-08-09T00:10:00.000Z',
+      })).rejects.toBe(validationFailure)
+      expect(harness.calls).toEqual(['QueryCommand'])
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('fails closed when an indexed base row exists with an invalid entry payload', async () => {
+    const harness = createHarness((commandName) => {
+      if (commandName === 'QueryCommand') {
+        return { Items: [{ scopeKey: 'WORKSPACE#workspace-1', recordKey: 'TRIAGE#triage-1' }] }
+      }
+      return { Item: { entryType: 'triage-entry', entry: {} } }
+    })
+
+    try {
+      await expect(runTriageSchedule({
+        documentClient: harness.documentClient,
+        tableName: 'RequestIntakeTable',
+        auditTableName: 'AuditEventsTable',
+        auditRetentionDays: 365,
+        wakeIndexName: 'triage-wake-index',
+        wakeShardCount: 8,
+        batchSize: 100,
+        now: '2026-08-09T00:10:00.000Z',
+      })).rejects.toMatchObject({ code: 'InvalidTriageEntry', status: 500 })
+      expect(harness.calls).toEqual(['QueryCommand', 'GetCommand'])
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('bubbles non-conditional transaction cancellations for retry and DLQ handling', async () => {
+    const entry = createEntry()
+    const storedItem = createTriageEntryTransactionItems({
+      tableName: 'RequestIntakeTable',
+      entry,
+      inputFingerprint: createTriageInputFingerprint({ sourceId: entry.source.sourceId }),
+    })[0]?.Put?.Item
+    if (!storedItem) throw new TypeError('Expected a stored triage entry fixture.')
+    const throughputFailure = Object.assign(new Error('Transaction capacity exceeded.'), {
+      name: 'TransactionCanceledException',
+      CancellationReasons: [{ Code: 'ProvisionedThroughputExceeded' }],
+    })
+    const harness = createHarness((commandName) => {
+      if (commandName === 'QueryCommand') {
+        return { Items: [{ scopeKey: 'WORKSPACE#workspace-1', recordKey: 'TRIAGE#triage-1' }] }
+      }
+      if (commandName === 'GetCommand') return { Item: storedItem }
+      throw throughputFailure
+    })
+
+    try {
+      await expect(runTriageSchedule({
+        documentClient: harness.documentClient,
+        tableName: 'RequestIntakeTable',
+        auditTableName: 'AuditEventsTable',
+        auditRetentionDays: 365,
+        wakeIndexName: 'triage-wake-index',
+        wakeShardCount: 8,
+        batchSize: 1,
+        now: '2026-08-09T00:10:00.000Z',
+      })).rejects.toBe(throughputFailure)
+      expect(harness.calls).toEqual(['QueryCommand', 'GetCommand', 'TransactWriteCommand'])
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('counts a transaction cancellation caused only by a conditional race', async () => {
+    const entry = createEntry()
+    const storedItem = createTriageEntryTransactionItems({
+      tableName: 'RequestIntakeTable',
+      entry,
+      inputFingerprint: createTriageInputFingerprint({ sourceId: entry.source.sourceId }),
+    })[0]?.Put?.Item
+    if (!storedItem) throw new TypeError('Expected a stored triage entry fixture.')
+    const conflict = Object.assign(new Error('Entry revision changed.'), {
+      name: 'TransactionCanceledException',
+      CancellationReasons: [{ Code: 'ConditionalCheckFailed' }, { Code: 'None' }],
+    })
+    const harness = createHarness((commandName) => {
+      if (commandName === 'QueryCommand') {
+        return { Items: [{ scopeKey: 'WORKSPACE#workspace-1', recordKey: 'TRIAGE#triage-1' }] }
+      }
+      if (commandName === 'GetCommand') return { Item: storedItem }
+      throw conflict
+    })
+
+    try {
+      await expect(runTriageSchedule({
+        documentClient: harness.documentClient,
+        tableName: 'RequestIntakeTable',
+        auditTableName: 'AuditEventsTable',
+        auditRetentionDays: 365,
+        wakeIndexName: 'triage-wake-index',
+        wakeShardCount: 8,
+        batchSize: 1,
+        now: '2026-08-09T00:10:00.000Z',
+      })).resolves.toMatchObject({ evaluatedCandidates: 1, conflicts: 1 })
+      expect(harness.calls).toEqual(['QueryCommand', 'GetCommand', 'TransactWriteCommand'])
+    } finally {
+      harness.restore()
+    }
+  })
+
   test('atomically appends SLA and escalation audit outbox events with deep-link recipients', async () => {
     const entry = createEntry()
     entry.state = 'pending'

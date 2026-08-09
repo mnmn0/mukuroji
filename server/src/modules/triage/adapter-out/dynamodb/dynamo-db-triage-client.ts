@@ -384,9 +384,16 @@ export class DynamoDbTriageClient implements TriageClient {
       Key: createTriageEntryKey(workspaceId, entryId),
       ConsistentRead: true,
     }))
+    if (response.Item === undefined) {
+      throw new TriageError(404, 'TriageEntryNotFound', 'The triage entry was not found.')
+    }
     const entry = decodeTriageEntryRow(response.Item)
     if (!entry) {
-      throw new TriageError(404, 'TriageEntryNotFound', 'The triage entry was not found.')
+      throw new TriageError(
+        500,
+        'InvalidTriageEntry',
+        'The stored triage entry is invalid.',
+      )
     }
     return entry
   }
@@ -975,14 +982,28 @@ export class DynamoDbTriageClient implements TriageClient {
       exclusiveStartKey = response.LastEvaluatedKey
       for (const item of response.Items ?? []) {
         const key = readPrimaryKey(item)
-        if (!key) continue
+        if (!key) {
+          throw new TriageError(
+            500,
+            'InvalidTriageIndexRow',
+            'The triage queue index contains an invalid row.',
+          )
+        }
         const read = await this.documentClient.send(new GetCommand({
           TableName: this.tableName,
           Key: key,
           ConsistentRead: true,
         }))
+        if (read.Item === undefined) continue
         const entry = decodeTriageEntryRow(read.Item)
-        if (!entry || !matchesQueueFilter(entry, workspaceId, teamId, input, ownerUserId)) continue
+        if (!entry) {
+          throw new TriageError(
+            500,
+            'InvalidTriageEntry',
+            'The stored triage entry is invalid.',
+          )
+        }
+        if (!matchesQueueFilter(entry, workspaceId, teamId, input, ownerUserId)) continue
         entries.push(projectTriageEntryForResponse(entry))
       }
     } while (
@@ -1792,10 +1813,21 @@ function readAssociationEntryId(value: unknown): string | undefined {
 
 /** Classifies a conditional DynamoDB conflict. */
 function isConditionalConflict(error: unknown): boolean {
-  return error instanceof Error && (
-    error.name === 'TransactionCanceledException' ||
-    error.name === 'ConditionalCheckFailedException'
-  )
+  if (!(error instanceof Error)) return false
+  if (error.name === 'ConditionalCheckFailedException') return true
+  if (error.name !== 'TransactionCanceledException') return false
+  const cancellationReasons = Reflect.get(error, 'CancellationReasons')
+  if (!Array.isArray(cancellationReasons) || cancellationReasons.length === 0) return false
+  let hasConditionalFailure = false
+  for (const reason of cancellationReasons) {
+    const code = isRecord(reason) ? reason.Code : undefined
+    if (code === 'ConditionalCheckFailed') {
+      hasConditionalFailure = true
+      continue
+    }
+    if (code !== 'None') return false
+  }
+  return hasConditionalFailure
 }
 
 /** Classifies a transaction cancellation caused only by one expected CAS item. */
@@ -1814,11 +1846,10 @@ function isOnlyConditionalConflictAt(error: unknown, itemIndex: number): boolean
 
 /** Classifies an optional index that is absent or still backfilling. */
 function isUnavailableIndexError(error: unknown): boolean {
-  return error instanceof Error && (
-    error.name === 'ResourceNotFoundException' ||
-    error.name === 'ValidationException' ||
-    /index.*(not found|backfilling|not active)/iu.test(error.message)
-  )
+  if (!(error instanceof Error)) return false
+  if (error.name === 'ResourceNotFoundException') return true
+  return error.name === 'ValidationException' &&
+    /(?:does not have the specified index|specified index.*(?:does not exist|not found)|index.*(?:not found|backfilling|not active)|backfilling global secondary index)/iu.test(error.message)
 }
 
 /** Creates a stable invalid-cursor error. */

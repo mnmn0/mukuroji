@@ -220,14 +220,27 @@ export async function runTriageSchedule(
     for (const item of response.Items ?? []) {
       if (result.evaluatedCandidates >= batchSize) break
       const key = readPrimaryKey(item)
-      if (!key) continue
+      if (!key) {
+        throw new TriageError(
+          500,
+          'InvalidTriageIndexRow',
+          'The triage wake index contains an invalid row.',
+        )
+      }
       const read = await options.documentClient.send(new GetCommand({
         TableName: tableName,
         Key: key,
         ConsistentRead: true,
       }))
+      if (read.Item === undefined) continue
       const entry = decodeTriageEntryRow(read.Item)
-      if (!entry) continue
+      if (!entry) {
+        throw new TriageError(
+          500,
+          'InvalidTriageEntry',
+          'The stored triage entry is invalid.',
+        )
+      }
       result.evaluatedCandidates += 1
       const contribution = createTriageScheduleTransactionItems({
         tableName,
@@ -417,17 +430,28 @@ function readPrimaryKey(value: unknown): { scopeKey: string; recordKey: string }
 /** Classifies a missing or not-yet-active optional index. */
 function isUnavailableIndexError(error: unknown): boolean {
   if (!(error instanceof Error)) return false
-  return error.name === 'ResourceNotFoundException' ||
-    error.name === 'ValidationException' ||
-    /index.*(not found|backfilling|not active)/iu.test(error.message)
+  if (error.name === 'ResourceNotFoundException') return true
+  return error.name === 'ValidationException' &&
+    /(?:does not have the specified index|specified index.*(?:does not exist|not found)|index.*(?:not found|backfilling|not active)|backfilling global secondary index)/iu.test(error.message)
 }
 
 /** Classifies a revision race in a DynamoDB transaction. */
 function isConditionalConflict(error: unknown): boolean {
-  return error instanceof Error && (
-    error.name === 'TransactionCanceledException' ||
-    error.name === 'ConditionalCheckFailedException'
-  )
+  if (!(error instanceof Error)) return false
+  if (error.name === 'ConditionalCheckFailedException') return true
+  if (error.name !== 'TransactionCanceledException') return false
+  const cancellationReasons = Reflect.get(error, 'CancellationReasons')
+  if (!Array.isArray(cancellationReasons) || cancellationReasons.length === 0) return false
+  let hasConditionalFailure = false
+  for (const reason of cancellationReasons) {
+    const code = isRecord(reason) ? reason.Code : undefined
+    if (code === 'ConditionalCheckFailed') {
+      hasConditionalFailure = true
+      continue
+    }
+    if (code !== 'None') return false
+  }
+  return hasConditionalFailure
 }
 
 /** Reads one non-empty environment variable. */

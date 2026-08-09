@@ -285,6 +285,76 @@ describe('DynamoDbTriageClient action receipt lookup', () => {
   })
 })
 
+describe('DynamoDbTriageClient transaction failure classification', () => {
+  test('bubbles non-conditional transaction cancellations instead of returning a revision conflict', async () => {
+    const entry = createEntry()
+    const storedEntry = createTriageEntryTransactionItems({
+      tableName: 'RequestIntakeTable',
+      entry,
+      inputFingerprint: createTriageInputFingerprint({ sourceId: entry.source.sourceId }),
+    })[0]?.Put?.Item
+    if (!storedEntry) throw new TypeError('Expected a stored entry fixture.')
+    const throughputFailure = Object.assign(new Error('Transaction capacity exceeded.'), {
+      name: 'TransactionCanceledException',
+      CancellationReasons: [{ Code: 'ProvisionedThroughputExceeded' }],
+    })
+    const harness = createHarness([{}, { Item: storedEntry }, throughputFailure])
+
+    try {
+      const fingerprint = createTriageInputFingerprint({ activityId: 'activity-1' })
+      await expect(harness.client.recordSourceActivity(
+        'workspace-1',
+        'support',
+        'triage-1',
+        {
+          activityId: 'activity-1',
+          occurredAt: '2026-08-09T00:10:00.000Z',
+          summary: 'Requester replied.',
+          actorId: 'source:email',
+        },
+        { key: 'activity-1', fingerprint },
+      )).rejects.toBe(throughputFailure)
+      expect(harness.calls()).toBe(3)
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('maps a cancellation caused only by a conditional check to a revision conflict', async () => {
+    const entry = createEntry()
+    const storedEntry = createTriageEntryTransactionItems({
+      tableName: 'RequestIntakeTable',
+      entry,
+      inputFingerprint: createTriageInputFingerprint({ sourceId: entry.source.sourceId }),
+    })[0]?.Put?.Item
+    if (!storedEntry) throw new TypeError('Expected a stored entry fixture.')
+    const conflict = Object.assign(new Error('Entry revision changed.'), {
+      name: 'TransactionCanceledException',
+      CancellationReasons: [{ Code: 'ConditionalCheckFailed' }, { Code: 'None' }],
+    })
+    const harness = createHarness([{}, { Item: storedEntry }, conflict, {}])
+
+    try {
+      const fingerprint = createTriageInputFingerprint({ activityId: 'activity-1' })
+      await expect(harness.client.recordSourceActivity(
+        'workspace-1',
+        'support',
+        'triage-1',
+        {
+          activityId: 'activity-1',
+          occurredAt: '2026-08-09T00:10:00.000Z',
+          summary: 'Requester replied.',
+          actorId: 'source:email',
+        },
+        { key: 'activity-1', fingerprint },
+      )).rejects.toMatchObject({ code: 'TriageRevisionConflict', status: 409 })
+      expect(harness.calls()).toBe(4)
+    } finally {
+      harness.restore()
+    }
+  })
+})
+
 describe('DynamoDbTriageClient configuration receipts', () => {
   test('commits and replays an initial revision-zero replacement', async () => {
     const input = createConfigurationInput(0)
@@ -587,6 +657,57 @@ describe('DynamoDbTriageClient queue indexes', () => {
           }),
         }),
       ])
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('falls back from an unavailable owner index but not from unrelated validation failures', async () => {
+    const missingIndex = new Error('The table does not have the specified index.')
+    missingIndex.name = 'ValidationException'
+    const fallbackHarness = createHarness([{}, missingIndex, { Items: [] }])
+
+    try {
+      await expect(fallbackHarness.client.listEntries('workspace-1', 'support', {
+        ownerUserId: 'owner@example.com',
+        limit: 10,
+      })).resolves.toMatchObject({ entries: [] })
+      expect(fallbackHarness.commands.map(({ name }) => name)).toEqual([
+        'GetCommand',
+        'QueryCommand',
+        'QueryCommand',
+      ])
+    } finally {
+      fallbackHarness.restore()
+    }
+
+    const validationFailure = new Error('Invalid KeyConditionExpression.')
+    validationFailure.name = 'ValidationException'
+    const failingHarness = createHarness([{}, validationFailure])
+
+    try {
+      await expect(failingHarness.client.listEntries('workspace-1', 'support', {
+        ownerUserId: 'owner@example.com',
+        limit: 10,
+      })).rejects.toBe(validationFailure)
+      expect(failingHarness.calls()).toBe(2)
+    } finally {
+      failingHarness.restore()
+    }
+  })
+
+  test('fails closed when a queue row exists with an invalid entry payload', async () => {
+    const harness = createHarness([
+      {},
+      { Items: [{ scopeKey: 'WORKSPACE#workspace-1', recordKey: 'TRIAGE#triage-1' }] },
+      { Item: { entryType: 'triage-entry', entry: {} } },
+    ])
+
+    try {
+      await expect(
+        harness.client.listEntries('workspace-1', 'support', { limit: 10 }),
+      ).rejects.toMatchObject({ code: 'InvalidTriageEntry', status: 500 })
+      expect(harness.calls()).toBe(3)
     } finally {
       harness.restore()
     }

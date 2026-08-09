@@ -342,12 +342,15 @@ test('rechecks Triage Project scope and redacts denied or retained source conten
       redactedAt: TRIAGE_NOW,
     },
   })
+  const staleOwner = createNotificationTriageEntry('triage-stale-owner', {
+    ownerUserId: 'new-owner@example.com',
+  })
   const movedNotification = createNotificationItem({
     id: 'triage-moved-notification',
     issueId: undefined,
     triageEntryId: moved.id,
     projectId: 'project-a',
-    reasons: ['sla'],
+    reasons: ['triage-sla'],
     title: 'HISTORICAL_MOVED_TRIAGE_TITLE',
     summary: 'HISTORICAL_MOVED_TRIAGE_SUMMARY',
   })
@@ -356,7 +359,7 @@ test('rechecks Triage Project scope and redacts denied or retained source conten
     issueId: undefined,
     triageEntryId: denied.id,
     projectId: 'project-a',
-    reasons: ['sla'],
+    reasons: ['triage-sla'],
     title: 'HISTORICAL_DENIED_TRIAGE_TITLE',
     summary: 'HISTORICAL_DENIED_TRIAGE_SUMMARY',
   })
@@ -365,14 +368,22 @@ test('rechecks Triage Project scope and redacts denied or retained source conten
     issueId: undefined,
     triageEntryId: retained.id,
     projectId: 'project-a',
-    reasons: ['sla'],
+    reasons: ['triage-sla'],
     title: 'HISTORICAL_RETAINED_TRIAGE_TITLE',
     summary: 'HISTORICAL_RETAINED_TRIAGE_SUMMARY',
+  })
+  const staleOwnerNotification = createNotificationItem({
+    id: 'triage-stale-owner-notification',
+    issueId: undefined,
+    triageEntryId: staleOwner.id,
+    projectId: 'project-a',
+    reasons: ['triage-sla'],
   })
   const probe = createNotificationVisibilityProbe([
     movedNotification,
     deniedNotification,
     retainedNotification,
+    staleOwnerNotification,
   ])
   setTestAppDependencies({
     notifications: probe.client,
@@ -380,6 +391,7 @@ test('rechecks Triage Project scope and redacts denied or retained source conten
       [moved.id, moved],
       [denied.id, denied],
       [retained.id, retained],
+      [staleOwner.id, staleOwner],
     ])),
   })
 
@@ -393,6 +405,7 @@ test('rechecks Triage Project scope and redacts denied or retained source conten
   expect(probe.visibility.get(movedNotification.id)).toBe(false)
   expect(probe.visibility.get(deniedNotification.id)).toBe(true)
   expect(probe.visibility.get(retainedNotification.id)).toBe(true)
+  expect(probe.visibility.get(staleOwnerNotification.id)).toBe(false)
   expect(body).toMatchObject({
     notifications: [
       { id: deniedNotification.id, title: 'Restricted source' },

@@ -19436,7 +19436,8 @@ function requiresCurrentWorkItemAssignee(notification: NotificationItem) {
 function requiresCurrentTriageOwner(notification: NotificationItem) {
   return notification.reasons.length > 0 && notification.reasons.every((reason) =>
     reason === 'assignee' || reason === 'assignment' || reason === 'due' ||
-    reason === 'overdue' || reason === 'sla' || reason === 'escalation'
+    reason === 'overdue' || reason === 'sla' || reason === 'triage-sla' ||
+    reason === 'escalation'
   )
 }
 
