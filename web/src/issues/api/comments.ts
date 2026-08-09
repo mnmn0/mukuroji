@@ -64,7 +64,7 @@ export type TeamIssueComment = {
    */
   resolvedByMemberKey?: string
   /**
-   * Current and superseded accepted resolutions in append-only history order.
+   * Current accepted resolution snapshot; append-only history is loaded independently.
    */
   acceptedResolutions?: AcceptedResolution[]
   /**

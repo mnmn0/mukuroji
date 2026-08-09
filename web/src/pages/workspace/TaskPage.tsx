@@ -63,6 +63,8 @@ import {
 } from '../../issues/queries/useWorkItems'
 import { useIssueCollaboration } from '../../issues/mutations/useIssueCollaboration'
 import {
+  getIssueCollaborationSearchParamsToClear,
+  issueCollaborationTargetSearchParams,
   readIssueCollaborationTab,
   type IssueCollaborationTab,
 } from '../../issues/model/collaborationTabs'
@@ -592,12 +594,9 @@ export function TaskPage() {
     const nextSearchParams = new URLSearchParams(searchParams)
 
     nextSearchParams.delete('issueId')
-    nextSearchParams.delete('commentId')
-    nextSearchParams.delete('rootCommentId')
-    nextSearchParams.delete('contextItemId')
-    nextSearchParams.delete('sourceId')
-    nextSearchParams.delete('activityEventId')
-    nextSearchParams.delete('collaborationTab')
+    for (const key of issueCollaborationTargetSearchParams) {
+      nextSearchParams.delete(key)
+    }
     setSearchParams(nextSearchParams, {
       replace: true,
       state: ambiguousIssueSelectionLocationState,
@@ -728,13 +727,9 @@ export function TaskPage() {
     } else {
       nextSearchParams.set('collaborationTab', tab)
     }
-    if (tab !== 'conversation') {
-      nextSearchParams.delete('commentId')
-      nextSearchParams.delete('rootCommentId')
+    for (const key of getIssueCollaborationSearchParamsToClear(tab)) {
+      nextSearchParams.delete(key)
     }
-    if (tab !== 'decisions') nextSearchParams.delete('contextItemId')
-    if (tab !== 'sources') nextSearchParams.delete('sourceId')
-    if (tab !== 'activity') nextSearchParams.delete('activityEventId')
 
     setSearchParams(nextSearchParams, { replace: true })
   }

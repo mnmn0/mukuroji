@@ -5,14 +5,19 @@ import { createTranslator, type Locale, type MessageKey } from '../../shared/i18
 import { WatchIcon } from '../../shared/ui/icons'
 import type { WorkspaceMember } from '../../workspace/api'
 import type { IssueCollaborationController } from '../mutations/useIssueCollaboration'
+import type { TeamIssueActivityEvent, TeamIssueComment } from '../api'
 import {
   issueCollaborationTabs,
   resolveIssueCollaborationTabTarget,
   type IssueCollaborationTab,
 } from '../model/collaborationTabs'
-import type { IssueContextDraft } from '../model/contextDrafts'
+import {
+  createActivityContextSource,
+  type IssueContextDraft,
+} from '../model/contextDrafts'
 import {
   createIssueSourceEntries,
+  resolveIssueSourceFocus,
   type IssueSourceTarget,
 } from '../model/contextSources'
 import { IssueActivityTab } from './IssueActivityTab'
@@ -118,6 +123,14 @@ export function IssueCollaborationPanel({
     decisions: controller.context.items.length,
     sources: createIssueSourceEntries(controller.context.items).length,
   }
+  const sourceFocus = resolveIssueSourceFocus(
+    {
+      contextItemId: focusedContextItemId,
+      kind: focusedSourceKind,
+      sourceId: focusedSourceId,
+    },
+    selectedSource,
+  )
 
   /**
    * Opens a human-curated editor backed by immutable source provenance.
@@ -127,6 +140,75 @@ export function IssueCollaborationPanel({
   function promoteSource(source: CuratedContextSource) {
     setPromotedContextDraft({ body: '', kind: 'context', source, title: '' })
     selectTab('decisions')
+  }
+
+  /**
+   * Opens a context draft backed by one captured comment snapshot.
+   *
+   * @param comment - Permission-filtered comment selected by the viewer.
+   */
+  function promoteCommentSource(comment: TeamIssueComment) {
+    const actorKey =
+      comment.authorMemberKey ??
+      comment.actorUserId ??
+      'unknown-member'
+    const actor = members.find(
+      (member) =>
+        member.memberKey === actorKey ||
+        member.id === actorKey ||
+        member.email === actorKey,
+    )
+    const originalBody = comment.bodyMarkdown ?? comment.body ?? ''
+    promoteSource({
+      actor: {
+        displayName: actor?.name?.trim() || actor?.email || actorKey,
+        id: actorKey,
+      },
+      availability: comment.deletedAt ? 'deleted' : 'available',
+      availabilityReason: comment.deletedAt
+        ? t('collaboration.sources.commentDeletedReason')
+        : undefined,
+      capturedRevision: comment.version ?? 1,
+      containerId:
+        comment.rootCommentId ?? comment.parentCommentId ?? comment.id,
+      kind: 'comment',
+      occurredAt: comment.createdAt,
+      originalBody,
+      permalink: `?commentId=${encodeURIComponent(
+        comment.id,
+      )}&rootCommentId=${encodeURIComponent(
+        comment.rootCommentId ?? comment.id,
+      )}`,
+      quote: originalBody
+        ? {
+            endOffset: originalBody.length,
+            startOffset: 0,
+            text: originalBody,
+          }
+        : undefined,
+      sourceId: comment.id,
+    })
+  }
+
+  /**
+   * Opens a context draft backed by one canonical activity snapshot.
+   *
+   * @param event - Permission-filtered audit event selected by the viewer.
+   */
+  function promoteActivitySource(event: TeamIssueActivityEvent) {
+    const actor = members.find(
+      (member) =>
+        member.memberKey === event.actorUserId ||
+        member.id === event.actorUserId ||
+        member.email === event.actorUserId,
+    )
+    promoteSource(
+      createActivityContextSource(event, {
+        displayName:
+          actor?.name?.trim() || actor?.email || event.actorUserId,
+        id: event.actorUserId,
+      }),
+    )
   }
 
   /**
@@ -297,50 +379,11 @@ export function IssueCollaborationPanel({
             hasResolutionError={controller.context.hasMutationError}
             locale={locale}
             members={members}
-            onPromoteComment={(comment) => {
-              const actorKey =
-                comment.authorMemberKey ??
-                comment.actorUserId ??
-                'unknown-member'
-              const actor = members.find(
-                (member) =>
-                  member.memberKey === actorKey ||
-                  member.id === actorKey ||
-                  member.email === actorKey,
-              )
-              const originalBody =
-                comment.bodyMarkdown ?? comment.body ?? ''
-              promoteSource({
-                actor: {
-                  displayName:
-                    actor?.name?.trim() || actor?.email || actorKey,
-                  id: actorKey,
-                },
-                availability: comment.deletedAt ? 'deleted' : 'available',
-                availabilityReason: comment.deletedAt
-                  ? t('collaboration.sources.commentDeletedReason')
-                  : undefined,
-                capturedRevision: comment.version ?? 1,
-                containerId:
-                  comment.rootCommentId ?? comment.parentCommentId ?? comment.id,
-                kind: 'comment',
-                occurredAt: comment.createdAt,
-                originalBody,
-                permalink: `?commentId=${encodeURIComponent(
-                  comment.id,
-                )}&rootCommentId=${encodeURIComponent(
-                  comment.rootCommentId ?? comment.id,
-                )}`,
-                quote: originalBody
-                  ? {
-                      endOffset: originalBody.length,
-                      startOffset: 0,
-                      text: originalBody,
-                    }
-                  : undefined,
-                sourceId: comment.id,
-              })
-            }}
+            onPromoteComment={
+              controller.context.capabilities.canCreate
+                ? promoteCommentSource
+                : undefined
+            }
             onSetAcceptedResolution={async (
               rootComment,
               sourceComment,
@@ -368,38 +411,11 @@ export function IssueCollaborationPanel({
             focusedActivityEventId={focusedActivityEventId}
             locale={locale}
             members={members}
-            onPromoteActivity={(event) => {
-              const actor = members.find(
-                (member) =>
-                  member.memberKey === event.actorUserId ||
-                  member.id === event.actorUserId ||
-                  member.email === event.actorUserId,
-              )
-              promoteSource({
-                actor: {
-                  displayName:
-                    actor?.name?.trim() ||
-                    actor?.email ||
-                    event.actorUserId,
-                  id: event.actorUserId,
-                },
-                availability: 'available',
-                kind: 'activity',
-                occurredAt: event.occurredAt,
-                originalBody: event.summary,
-                permalink: `?activityEventId=${encodeURIComponent(
-                  event.eventId,
-                )}`,
-                quote: event.summary
-                  ? {
-                      endOffset: event.summary.length,
-                      startOffset: 0,
-                      text: event.summary,
-                    }
-                  : undefined,
-                sourceId: event.eventId,
-              })
-            }}
+            onPromoteActivity={
+              controller.context.capabilities.canCreate
+                ? promoteActivitySource
+                : undefined
+            }
           />
         ) : null}
         {selectedTab === 'decisions' ? (
@@ -427,15 +443,10 @@ export function IssueCollaborationPanel({
           <IssueSourcesTab
             controller={controller.context}
             focusedContextItemId={
-              selectedTab === 'sources'
-                ? focusedContextItemId ?? selectedSource?.contextItemId
-                : selectedSource?.contextItemId
+              sourceFocus.contextItemId
             }
-            focusedSourceId={focusedSourceId ?? selectedSource?.sourceId}
-            focusedSourceKind={
-              focusedSourceKind ??
-              (focusedSourceId ? undefined : selectedSource?.kind)
-            }
+            focusedSourceId={sourceFocus.sourceId}
+            focusedSourceKind={sourceFocus.kind}
             locale={locale}
           />
         ) : null}

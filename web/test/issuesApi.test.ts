@@ -124,6 +124,26 @@ describe('team issue collaboration API', () => {
     ])
   })
 
+  test('rejects malformed activity pages at the API boundary', async () => {
+    installFetchRecorder({
+      events: [
+        {
+          actorUserId: null,
+          eventId: 'event-1',
+          eventType: 'work-item.updated',
+          occurredAt: '2026-08-09T00:00:00.000Z',
+        },
+      ],
+    })
+
+    await expect(
+      getTeamIssueActivity('core', 'issue-1', 'token'),
+    ).rejects.toMatchObject({
+      code: 'InvalidIssueActivityResponse',
+      status: 502,
+    })
+  })
+
   test('uses an independent context cursor and revision-fenced curated mutations', async () => {
     const requests = installFetchRecorder({
       schemaVersion: COLLABORATION_CONTEXT_SCHEMA_VERSION,

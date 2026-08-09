@@ -336,6 +336,70 @@ describe('IssueCollaborationPanel', () => {
     expect(html).not.toContain('Accept as resolution')
   })
 
+  test('hides comment and activity promotion when curated context creation is read-only', () => {
+    const controller = {
+      ...issueCollaborationControllerFixture,
+      context: {
+        ...issueCollaborationControllerFixture.context,
+        capabilities: {
+          ...issueCollaborationControllerFixture.context.capabilities,
+          canCreate: false,
+        },
+      },
+    }
+    const conversationHtml = renderToStaticMarkup(
+      <IssueCollaborationPanel
+        controller={controller}
+        currentMemberKey="demo@example.com"
+        locale="en"
+        members={collaborationWorkspaceMemberFixtures}
+      />,
+    )
+    const activityHtml = renderToStaticMarkup(
+      <IssueCollaborationPanel
+        controller={controller}
+        currentMemberKey="demo@example.com"
+        defaultTab="activity"
+        locale="en"
+        members={collaborationWorkspaceMemberFixtures}
+      />,
+    )
+
+    expect(conversationHtml).not.toContain('>Promote</button>')
+    expect(activityHtml).not.toContain('>Promote</button>')
+    expect(activityHtml).not.toContain('aria-label="Promote activity:')
+  })
+
+  test('disables an open context editor after its create capability expires', () => {
+    const html = renderToStaticMarkup(
+      <IssueCollaborationPanel
+        contextDraft={{
+          body: 'Keep the captured rationale.',
+          kind: 'decision',
+          title: 'Retain the decision',
+        }}
+        controller={{
+          ...issueCollaborationControllerFixture,
+          context: {
+            ...issueCollaborationControllerFixture.context,
+            capabilities: {
+              ...issueCollaborationControllerFixture.context.capabilities,
+              canCreate: false,
+            },
+          },
+        }}
+        currentMemberKey="demo@example.com"
+        locale="en"
+        members={collaborationWorkspaceMemberFixtures}
+      />,
+    )
+
+    expect(html).toContain(
+      'You no longer have permission to save this context change.',
+    )
+    expect(html).toMatch(/<button[^>]*disabled=""[^>]*type="submit"/)
+  })
+
   test('never renders sensitive quote or permalink after source permission loss', () => {
     const html = renderToStaticMarkup(
       <IssueCollaborationPanel

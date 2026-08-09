@@ -2,6 +2,8 @@ import { describe, expect, test } from 'bun:test'
 import type { DocumentBacklink } from '../src/documents/api'
 import { documentRecordFixture } from '../src/documents/fixtures'
 import {
+  canSubmitContextEditor,
+  createActivityContextSource,
   createRelatedDocumentContextDraft,
   createRelatedDocumentSourceBody,
 } from '../src/issues/model/contextDrafts'
@@ -39,5 +41,46 @@ describe('related Document context drafts', () => {
     expect(draft.source?.capturedRevision).toBe(
       documentRecordFixture.revision,
     )
+  })
+})
+
+describe('activity context drafts', () => {
+  test('uses the canonical event type when an audit event has no summary', () => {
+    const source = createActivityContextSource(
+      {
+        actorUserId: 'system:workflow',
+        eventId: 'event-summaryless',
+        eventType: 'work-item.updated',
+        occurredAt: '2026-08-09T01:00:00.000Z',
+      },
+      { id: 'system:workflow', displayName: 'Workflow' },
+    )
+
+    expect(source.originalBody).toBe('work-item.updated')
+    expect(source.quote).toEqual({
+      endOffset: 'work-item.updated'.length,
+      startOffset: 0,
+      text: 'work-item.updated',
+    })
+  })
+})
+
+describe('context editor authorization', () => {
+  test('requires current replacement permission for a create that supersedes an item', () => {
+    const capabilities = {
+      canCreate: true,
+      canEdit: true,
+      canReplace: false,
+    }
+
+    expect(
+      canSubmitContextEditor('create', undefined, capabilities),
+    ).toBeTrue()
+    expect(
+      canSubmitContextEditor('create', 'context-1', capabilities),
+    ).toBeFalse()
+    expect(
+      canSubmitContextEditor('replace', undefined, capabilities),
+    ).toBeFalse()
   })
 })

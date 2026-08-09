@@ -1,9 +1,11 @@
 import type {
+  CuratedContextActorSnapshot,
   CuratedContextItemKind,
   CuratedContextSource,
 } from '@mukuroji/contracts'
 import type { DocumentBacklink, DocumentRecord } from '../../documents/api'
 import { createDocumentPath } from '../../shared/routing/paths'
+import type { TeamIssueActivityEvent } from '../api/activity'
 
 /**
  * Human-curated item draft created from a comment, activity event, or related document.
@@ -19,6 +21,69 @@ export type IssueContextDraft = {
   source?: CuratedContextSource
   /** Optional adjacent control that should regain focus when the draft editor closes. */
   returnFocusId?: string
+}
+
+/**
+ * Checks the latest capability snapshot before a context editor submits.
+ *
+ * Evidence-backed creates require replacement permission only after the curator selects
+ * an existing item to supersede. Edit and replace sessions use their dedicated capability.
+ *
+ * @param mode - Mutation mode owned by the open editor.
+ * @param supersedesItemId - Optional existing item selected by a create session.
+ * @param capabilities - Latest context mutation capabilities from the server.
+ * @returns Whether the current editor operation may be submitted.
+ */
+export function canSubmitContextEditor(
+  mode: 'create' | 'edit' | 'replace',
+  supersedesItemId: string | undefined,
+  capabilities: {
+    canCreate: boolean
+    canEdit: boolean
+    canReplace: boolean
+  },
+): boolean {
+  if (mode === 'create') {
+    return (
+      capabilities.canCreate &&
+      (!supersedesItemId || capabilities.canReplace)
+    )
+  }
+  return mode === 'edit'
+    ? capabilities.canEdit
+    : capabilities.canReplace
+}
+
+/**
+ * Creates canonical activity provenance for a human-curated draft.
+ *
+ * Summary-less audit events use their stable event type, matching the server-side capture
+ * fallback and ensuring the quote always describes the source that will be persisted.
+ *
+ * @param event - Permission-filtered audit event promoted by the viewer.
+ * @param actor - Resolved actor snapshot shown with the provenance.
+ * @returns Activity source with a continuous full-body quote.
+ */
+export function createActivityContextSource(
+  event: TeamIssueActivityEvent,
+  actor: CuratedContextActorSnapshot,
+): CuratedContextSource {
+  const originalBody = event.summary?.trim() || event.eventType
+
+  return {
+    actor,
+    availability: 'available',
+    kind: 'activity',
+    occurredAt: event.occurredAt,
+    originalBody,
+    permalink: `?activityEventId=${encodeURIComponent(event.eventId)}`,
+    quote: {
+      endOffset: originalBody.length,
+      startOffset: 0,
+      text: originalBody,
+    },
+    sourceId: event.eventId,
+  }
 }
 
 /**

@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  getIssueCollaborationSearchParamsToClear,
+  issueCollaborationTargetSearchParams,
   issueCollaborationTabs,
   readIssueCollaborationTab,
   resolveIssueCollaborationTabTarget,
@@ -86,5 +88,20 @@ describe('issue collaboration tabs', () => {
     expect(
       resolveIssueCollaborationTabTarget('conversation', 'ArrowRight', []),
     ).toBeUndefined()
+  })
+
+  test('clears source identity and kind together outside the Sources tab', () => {
+    expect(getIssueCollaborationSearchParamsToClear('activity')).toEqual(
+      expect.arrayContaining(['sourceId', 'sourceKind']),
+    )
+    expect(getIssueCollaborationSearchParamsToClear('sources')).not.toContain(
+      'sourceId',
+    )
+    expect(getIssueCollaborationSearchParamsToClear('sources')).not.toContain(
+      'sourceKind',
+    )
+    expect(issueCollaborationTargetSearchParams).toEqual(
+      expect.arrayContaining(['sourceId', 'sourceKind']),
+    )
   })
 })

@@ -14,6 +14,29 @@ export const issueCollaborationTabs = [
 export type IssueCollaborationTab = (typeof issueCollaborationTabs)[number]
 
 /**
+ * URL query keys that target content inside one collaboration panel.
+ */
+export type IssueCollaborationTargetSearchParam =
+  | 'activityEventId'
+  | 'collaborationTab'
+  | 'commentId'
+  | 'contextItemId'
+  | 'rootCommentId'
+  | 'sourceId'
+  | 'sourceKind'
+
+/** All collaboration target keys cleared when an ambiguous Work Item route is normalized. */
+export const issueCollaborationTargetSearchParams: readonly IssueCollaborationTargetSearchParam[] = [
+  'commentId',
+  'rootCommentId',
+  'contextItemId',
+  'sourceId',
+  'sourceKind',
+  'activityEventId',
+  'collaborationTab',
+]
+
+/**
  * Safely reads an issue collaboration tab from URL query state.
  *
  * @param value - The value of the collaboration tab query parameter.
@@ -23,6 +46,23 @@ export function readIssueCollaborationTab(
   value: string | null | undefined,
 ): IssueCollaborationTab {
   return issueCollaborationTabs.find((tab) => tab === value) ?? 'conversation'
+}
+
+/**
+ * Lists stale deep-link keys that must be removed when selecting a collaboration tab.
+ *
+ * @param tab - Collaboration tab that will remain active.
+ * @returns Query keys owned by every other collaboration section.
+ */
+export function getIssueCollaborationSearchParamsToClear(
+  tab: IssueCollaborationTab,
+): IssueCollaborationTargetSearchParam[] {
+  const keys: IssueCollaborationTargetSearchParam[] = []
+  if (tab !== 'conversation') keys.push('commentId', 'rootCommentId')
+  if (tab !== 'decisions') keys.push('contextItemId')
+  if (tab !== 'sources') keys.push('sourceId', 'sourceKind')
+  if (tab !== 'activity') keys.push('activityEventId')
+  return keys
 }
 
 /**

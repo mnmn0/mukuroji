@@ -4,6 +4,7 @@ import {
   createIssueSourceAnchorId,
   createIssueSourceEntries,
   readIssueSourceKind,
+  resolveIssueSourceFocus,
 } from '../src/issues/model/contextSources'
 
 describe('curated context sources', () => {
@@ -52,5 +53,45 @@ describe('curated context sources', () => {
     expect(readIssueSourceKind('document')).toBe('document')
     expect(readIssueSourceKind('unknown')).toBeUndefined()
     expect(readIssueSourceKind(null)).toBeUndefined()
+  })
+
+  test('prioritizes a coherent in-panel source target over a stale route kind', () => {
+    expect(
+      resolveIssueSourceFocus(
+        {
+          kind: 'comment',
+        },
+        {
+          contextItemId: 'selected-item',
+          kind: 'document',
+          sourceId: 'selected-source',
+        },
+      ),
+    ).toEqual({
+      contextItemId: 'selected-item',
+      kind: 'document',
+      sourceId: 'selected-source',
+    })
+  })
+
+  test('prioritizes a newly routed source target over an older in-panel selection', () => {
+    expect(
+      resolveIssueSourceFocus(
+        {
+          contextItemId: 'route-item',
+          kind: 'comment',
+          sourceId: 'route-source',
+        },
+        {
+          contextItemId: 'selected-item',
+          kind: 'document',
+          sourceId: 'selected-source',
+        },
+      ),
+    ).toEqual({
+      contextItemId: 'route-item',
+      kind: 'comment',
+      sourceId: 'route-source',
+    })
   })
 })

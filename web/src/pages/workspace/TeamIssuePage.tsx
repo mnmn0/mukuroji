@@ -54,6 +54,7 @@ import {
   useIssueCollaboration,
 } from '../../issues/mutations/useIssueCollaboration'
 import {
+  getIssueCollaborationSearchParamsToClear,
   readIssueCollaborationTab,
   type IssueCollaborationTab,
 } from '../../issues/model/collaborationTabs'
@@ -696,13 +697,9 @@ export function TeamIssuePage() {
     } else {
       nextSearchParams.set('collaborationTab', tab)
     }
-    if (tab !== 'conversation') {
-      nextSearchParams.delete('commentId')
-      nextSearchParams.delete('rootCommentId')
+    for (const key of getIssueCollaborationSearchParamsToClear(tab)) {
+      nextSearchParams.delete(key)
     }
-    if (tab !== 'decisions') nextSearchParams.delete('contextItemId')
-    if (tab !== 'sources') nextSearchParams.delete('sourceId')
-    if (tab !== 'activity') nextSearchParams.delete('activityEventId')
 
     setSearchParams(nextSearchParams, { replace: true })
   }

@@ -34,6 +34,18 @@ export type IssueSourceTarget = {
 }
 
 /**
+ * Optional source focus decoded from the current route.
+ */
+export type IssueSourceFocus = {
+  /** Curated context item that owns the requested provenance snapshot. */
+  contextItemId?: string
+  /** Source system category used to disambiguate duplicate identifiers. */
+  kind?: CuratedContextSourceKind
+  /** Stable identifier inside the source category. */
+  sourceId?: string
+}
+
+/**
  * Projects every source-bearing context item into its own immutable audit entry.
  *
  * Two context items may deliberately capture a different revision or quote from the same source,
@@ -58,6 +70,32 @@ export function createIssueSourceEntries(
  */
 export function createIssueSourceAnchorId(target: IssueSourceTarget): string {
   return `context-source-item-${encodeURIComponent(target.contextItemId)}`
+}
+
+/**
+ * Resolves source focus while retaining valid route targets and discarding a stale route kind.
+ *
+ * @param routeFocus - Optional target decoded from the current URL.
+ * @param selectedTarget - Exact target selected from the Decisions tab in this panel instance.
+ * @returns One internally consistent source focus target, with explicit route IDs taking priority.
+ */
+export function resolveIssueSourceFocus(
+  routeFocus: IssueSourceFocus,
+  selectedTarget: IssueSourceTarget | undefined,
+): IssueSourceFocus {
+  if (
+    !selectedTarget ||
+    routeFocus.contextItemId !== undefined ||
+    routeFocus.sourceId !== undefined
+  ) {
+    return routeFocus
+  }
+
+  return {
+    contextItemId: selectedTarget.contextItemId,
+    kind: selectedTarget.kind,
+    sourceId: selectedTarget.sourceId,
+  }
 }
 
 /**

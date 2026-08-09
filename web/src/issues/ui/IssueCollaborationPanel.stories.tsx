@@ -1,5 +1,9 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import type { CreateCuratedContextItemRequest } from '@mukuroji/contracts'
+import type {
+  CreateCuratedContextItemRequest,
+  CuratedContextItem,
+  UpdateCuratedContextItemRequest,
+} from '@mukuroji/contracts'
 import { expect, fn, userEvent, within } from 'storybook/test'
 import {
   acceptedResolutionHistoryFixtures,
@@ -51,6 +55,16 @@ const createEvidenceReplacement = fn(
 )
 const createInheritedSourceReplacement = fn(
   async (input: CreateCuratedContextItemRequest) => {
+    void input
+    return true
+  },
+)
+const updateDecisionState = fn(
+  async (
+    item: CuratedContextItem,
+    input: UpdateCuratedContextItemRequest,
+  ) => {
+    void item
     void input
     return true
   },
@@ -326,6 +340,40 @@ export const DecisionRevisionHistory: Story = {
     await expect(
       canvas.getByRole('button', { name: 'さらに前の変更を読み込む' }),
     ).toBeVisible()
+  },
+}
+
+/**
+ * An in-place edit can move a non-superseded decision through its lifecycle.
+ */
+export const EditDecisionState: Story = {
+  args: {
+    controller: {
+      ...issueCollaborationControllerFixture,
+      context: {
+        ...issueCollaborationControllerFixture.context,
+        updateItem: updateDecisionState,
+      },
+    },
+    defaultTab: 'decisions',
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    updateDecisionState.mockClear()
+    const editButton = canvas.getAllByRole('button', { name: '編集' }).at(0)
+    if (!editButton) throw new Error('Missing Edit action.')
+    await userEvent.click(editButton)
+    await userEvent.selectOptions(
+      canvas.getByRole('combobox', { name: '状態' }),
+      'completed',
+    )
+    await userEvent.click(
+      canvas.getByRole('button', { name: '判断を保存' }),
+    )
+    await expect(updateDecisionState).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'context-decision-1' }),
+      expect.objectContaining({ state: 'completed' }),
+    )
   },
 }
 

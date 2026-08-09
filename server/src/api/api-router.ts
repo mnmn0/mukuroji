@@ -12440,11 +12440,17 @@ function toWorkItemActivityPageView(page: AuditEventPage) {
     events: page.events.map((event) => {
       const view = toAuditEventView(event)
       const actorMemberKey = event.metadata?.actorMemberKey
+      const metadata = {
+        ...view.metadata,
+        actorKind: view.actor.kind,
+        systemChange: view.actor.kind === 'system' || view.source === 'system',
+      }
       return {
         ...view,
         actorUserId: typeof actorMemberKey === 'string' && actorMemberKey.trim()
           ? actorMemberKey
           : view.actor.id,
+        metadata,
       }
     }),
     ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),

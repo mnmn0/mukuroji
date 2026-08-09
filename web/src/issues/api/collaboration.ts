@@ -113,10 +113,10 @@ export async function getTeamIssueCollaboration(
 }
 
 /**
- * Normalizes absent accepted-resolution history and rejects malformed audit data.
+ * Normalizes an absent current accepted-resolution snapshot and rejects malformed audit data.
  *
  * @param comment - Comment returned by the collaboration API.
- * @returns Comment with runtime-validated accepted resolution history.
+ * @returns Comment with a runtime-validated current accepted resolution snapshot.
  */
 function normalizeAcceptedResolutionHistory(
   comment: TeamIssueComment,

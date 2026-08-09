@@ -1,6 +1,7 @@
 import type {
   CuratedContextItem,
   CuratedContextItemKind,
+  CuratedContextItemState,
   CuratedContextSource,
 } from '@mukuroji/contracts'
 import {
@@ -21,7 +22,10 @@ import type {
   IssueContextController,
 } from '../mutations/useIssueContext'
 import { resolveIssueMentionMemberKeys } from '../model/commentMentions'
-import type { IssueContextDraft } from '../model/contextDrafts'
+import {
+  canSubmitContextEditor,
+  type IssueContextDraft,
+} from '../model/contextDrafts'
 import {
   advanceDeepLinkTraversal,
   type DeepLinkTraversalState,
@@ -34,6 +38,11 @@ const contextKinds: readonly CuratedContextItemKind[] = [
   'risk',
   'context',
 ]
+
+const mutableContextStates: readonly Exclude<
+  CuratedContextItemState,
+  'superseded'
+>[] = ['active', 'accepted', 'completed']
 
 /**
  * Props for the Decisions ledger.
@@ -68,6 +77,8 @@ type ContextEditorState = {
   item?: CuratedContextItem
   /** Semantic category selected by the curator. */
   kind: CuratedContextItemKind
+  /** Non-superseded lifecycle state selected for an in-place edit. */
+  state: Exclude<CuratedContextItemState, 'superseded'>
   /** Human-authored label. */
   title: string
   /** Human-authored Markdown explanation. */
@@ -120,7 +131,7 @@ export function IssueDecisionsTab({
     requestedPages: 0,
   })
   const initialEditor: ContextEditorState | undefined = draft
-    ? { ...draft, mode: 'create' }
+    ? { ...draft, mode: 'create', state: 'active' }
     : editorRequest
 
   useEffect(() => {
@@ -220,6 +231,7 @@ export function IssueDecisionsTab({
                 body: '',
                 kind: 'decision',
                 mode: 'create',
+                state: 'active',
                 title: '',
               })
             }
@@ -340,6 +352,7 @@ export function IssueDecisionsTab({
                         kind: item.kind,
                         mode: 'edit',
                         source: item.source,
+                        state: readMutableContextState(item.state) ?? 'active',
                         title: item.title,
                       })
                     }
@@ -358,6 +371,7 @@ export function IssueDecisionsTab({
                         kind: item.kind,
                         mode: 'replace',
                         source: item.source,
+                        state: 'active',
                         title: item.title,
                       })
                     }
@@ -647,6 +661,12 @@ function ContextEditorForm({
   )
   const [isSubmitting, setIsSubmitting] = useState(false)
   const sourceQuoteIsValid = isSourceQuoteValid(editor.source)
+  const editorIsAuthorized = canSubmitContextEditor(
+    editor.mode,
+    editor.supersedesItemId,
+    controller.capabilities,
+  )
+  const editorControlsAreDisabled = isSubmitting || !editorIsAuthorized
 
   /**
    * Submits the current create, edit, or replace operation.
@@ -656,6 +676,7 @@ function ContextEditorForm({
   async function submitEditor(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     if (
+      !editorIsAuthorized ||
       !editor.title.trim() ||
       !editor.body.trim() ||
       !sourceQuoteIsValid
@@ -676,6 +697,7 @@ function ContextEditorForm({
             expectedRevision: editor.item.revision,
             kind: editor.kind,
             mentionMemberKeys,
+            state: editor.state,
             title: editor.title.trim(),
           })
         : await controller.createItem({
@@ -714,11 +736,19 @@ function ContextEditorForm({
           {t('collaboration.cancel')}
         </button>
       </div>
+      {!editorIsAuthorized ? (
+        <p
+          className="border border-[var(--workbench-border-strong)] bg-white px-3 py-2.5 text-xs font-semibold leading-5 text-[var(--workbench-muted)]"
+          role="status"
+        >
+          {t('collaboration.decisions.editor.permissionLost')}
+        </p>
+      ) : null}
       <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-text)]">
         {t('collaboration.decisions.kind')}
         <select
           className="workbench-input min-h-[44px]"
-          disabled={isSubmitting}
+          disabled={editorControlsAreDisabled}
           onChange={(event) => {
             const kind = readContextKind(event.target.value)
             if (kind) setEditor((current) => ({ ...current, kind }))
@@ -732,12 +762,32 @@ function ContextEditorForm({
           ))}
         </select>
       </label>
+      {editor.mode === 'edit' ? (
+        <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-text)]">
+          {t('collaboration.decisions.state')}
+          <select
+            className="workbench-input min-h-[44px]"
+            disabled={editorControlsAreDisabled}
+            onChange={(event) => {
+              const state = readMutableContextState(event.target.value)
+              if (state) setEditor((current) => ({ ...current, state }))
+            }}
+            value={editor.state}
+          >
+            {mutableContextStates.map((state) => (
+              <option key={state} value={state}>
+                {t(`collaboration.decisions.state.${state}`)}
+              </option>
+            ))}
+          </select>
+        </label>
+      ) : null}
       <label className="grid gap-1.5 text-xs font-semibold text-[var(--workbench-text)]">
         {t('collaboration.decisions.title')}
         <input
           autoFocus
           className="workbench-input min-h-[44px]"
-          disabled={isSubmitting}
+          disabled={editorControlsAreDisabled}
           maxLength={200}
           onChange={(event) =>
             setEditor((current) => ({
@@ -757,7 +807,7 @@ function ContextEditorForm({
           {t('collaboration.decisions.supersedesOptional')}
           <select
             className="workbench-input min-h-[44px]"
-            disabled={isSubmitting}
+            disabled={editorControlsAreDisabled}
             onChange={(event) =>
               setEditor((current) => ({
                 ...current,
@@ -784,7 +834,7 @@ function ContextEditorForm({
         {t('collaboration.decisions.body')}
         <textarea
           className="workbench-input min-h-28 resize-y py-2"
-          disabled={isSubmitting}
+          disabled={editorControlsAreDisabled}
           maxLength={20_000}
           onChange={(event) =>
             setEditor((current) => ({
@@ -812,7 +862,7 @@ function ContextEditorForm({
               }
               className="workbench-input min-h-20 resize-y py-2"
               disabled={
-                isSubmitting ||
+                editorControlsAreDisabled ||
                 editor.mode !== 'create' ||
                 !editor.source.originalBody
               }
@@ -859,6 +909,7 @@ function ContextEditorForm({
         className="workbench-button-primary min-h-[44px] justify-self-start px-4"
         disabled={
           isSubmitting ||
+          !editorIsAuthorized ||
           !editor.title.trim() ||
           !editor.body.trim() ||
           !sourceQuoteIsValid
@@ -908,6 +959,18 @@ function createContextEditorKey(
  */
 function readContextKind(value: string): CuratedContextItemKind | undefined {
   return contextKinds.find((kind) => kind === value)
+}
+
+/**
+ * Reads an editor select value as a lifecycle state that can be updated in place.
+ *
+ * @param value - Select value from the edit form.
+ * @returns A supported non-superseded state or undefined.
+ */
+function readMutableContextState(
+  value: string,
+): Exclude<CuratedContextItemState, 'superseded'> | undefined {
+  return mutableContextStates.find((state) => state === value)
 }
 
 /**
