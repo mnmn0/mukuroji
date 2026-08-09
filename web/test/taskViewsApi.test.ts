@@ -216,7 +216,7 @@ describe('saved task-view API', () => {
   })
 
   test('rejects internally inconsistent default preference metadata', async () => {
-    const malformed = {
+    const malformedPersonalDefault = {
       ...createSavedTaskViewFixture('invalid-default-view'),
       preference: {
         defaultSource: 'team',
@@ -227,9 +227,26 @@ describe('saved task-view API', () => {
         pinned: false,
       },
     }
-    installJsonResponses([malformed])
+    const malformedTeamDefault = {
+      ...createSavedTaskViewFixture('invalid-team-default-view'),
+      preference: {
+        favorite: false,
+        isDefault: false,
+        isPersonalDefault: false,
+        isTeamDefault: true,
+        pinned: false,
+      },
+    }
+    installJsonResponses([malformedPersonalDefault, malformedTeamDefault])
 
     await expect(getSavedTaskView('access-token', 'invalid-default-view')).rejects.toMatchObject({
+      code: 'InvalidTaskViewResponse',
+      status: 502,
+    })
+    await expect(getSavedTaskView(
+      'access-token',
+      'invalid-team-default-view',
+    )).rejects.toMatchObject({
       code: 'InvalidTaskViewResponse',
       status: 502,
     })
