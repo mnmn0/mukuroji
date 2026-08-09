@@ -200,6 +200,15 @@ import {
   resolvePendingTaskActionContext,
 } from '../../task-views/model/taskActionCompletion'
 import {
+  clearTaskStatusMoveRequest,
+  createTaskStatusMoveRequest,
+  type TaskStatusMoveRequestSlot,
+} from '../../task-views/model/taskStatusMoveRequest'
+import {
+  executeTeamIssueDirectStatusMove,
+  isTeamIssueRevisionConflict,
+} from '../../task-views/model/teamIssueDirectMove'
+import {
   createTaskSurfaceActionBaseContext,
   resolveTaskSurfaceActionTarget,
   resolveTaskSurfaceActionTargets,
@@ -1076,6 +1085,9 @@ export function TeamIssueScreen({
     TeamIssueActionContextMenuState
   >()
   const [taskActionCompletion] = useState(createTaskActionCompletionBridge)
+  const directStatusMoveRequestSlotRef = useRef<TaskStatusMoveRequestSlot>({
+    current: undefined,
+  })
   const pendingCreateWorkflowStatusIdRef = useRef<string | undefined>(undefined)
   const onSelectIssueRef = useRef(onSelectIssue)
 
@@ -1325,6 +1337,48 @@ export function TeamIssueScreen({
     ? collaboration.toggleWatch
     : undefined
 
+  /** Executes a destination-bearing Board Move or reveals the detail selector for other entrances. */
+  const executeTeamIssueMoveAction = useCallback((
+    context: WorkItemActionContext,
+  ): WorkItemActionResult | Promise<WorkItemActionResult> => {
+    const requestSlot = directStatusMoveRequestSlotRef.current
+    if (!requestSlot.current) {
+      return executeTeamIssueDetailAction(
+        context,
+        'select[name="workflowStatusId"]',
+        true,
+      )
+    }
+
+    taskActionCompletion.cancel()
+    return executeTeamIssueDirectStatusMove(
+      context,
+      requestSlot,
+      visibleIssues,
+      configuration,
+      onUpdateIssue,
+      {
+        conflict: t('tasks.action.conflict'),
+        failed: t('taskViews.action.failed'),
+        unavailable: teamActionDisabledReasons.unavailable,
+      },
+    ) ?? createFailedTaskActionResult(
+      context.actionId,
+      resolveTaskSurfaceActionTarget(context),
+      'TeamTaskMoveRequestMismatch',
+      'validation',
+      teamActionDisabledReasons.unavailable,
+    )
+  }, [
+    configuration,
+    executeTeamIssueDetailAction,
+    onUpdateIssue,
+    t,
+    taskActionCompletion,
+    teamActionDisabledReasons.unavailable,
+    visibleIssues,
+  ])
+
   const teamActionHandlers = useMemo<TaskSurfaceActionHandlers>(() => ({
     ...(canCreateIssueAction
       ? {
@@ -1349,11 +1403,7 @@ export function TeamIssueScreen({
             'input[name="title"]',
             true,
           ),
-          move: (context) => executeTeamIssueDetailAction(
-            context,
-            'select[name="workflowStatusId"]',
-            true,
-          ),
+          move: executeTeamIssueMoveAction,
         }
       : {}),
     ...(canAssignIssueAction
@@ -1413,6 +1463,7 @@ export function TeamIssueScreen({
     canOpenIssueAction,
     dismissCreateIssueEditor,
     executeTeamIssueDetailAction,
+    executeTeamIssueMoveAction,
     selectedIssue,
     showCreateIssueEditor,
     t,
@@ -1497,6 +1548,37 @@ export function TeamIssueScreen({
     selection: teamActionSelection,
     surface: 'team',
   })
+
+  /** Routes a Team Board status selection or drop through the canonical Move registry. */
+  const handleTeamIssueStatusMove = useCallback(async (
+    issue: TeamIssue,
+    destinationWorkflowStatusId: string,
+  ): Promise<void> => {
+    const target = {
+      expectedRevision: issue.revision,
+      teamId: issue.teamId,
+      workItemId: issue.id,
+    }
+    const request = createTaskStatusMoveRequest(target, destinationWorkflowStatusId)
+    const requestSlot = directStatusMoveRequestSlotRef.current
+    requestSlot.current = request
+    setTaskActionErrorMessage(undefined)
+    setTaskViewSelection((currentSelection) => reduceTaskViewSelection(currentSelection, {
+      key: createTaskViewItemKey(issue.teamId, issue.id),
+      type: 'focus',
+    }))
+
+    try {
+      await teamActions.execute(
+        'move',
+        'click',
+        undefined,
+        createFocusedTaskViewActionSelection(target),
+      )
+    } finally {
+      clearTaskStatusMoveRequest(requestSlot, request)
+    }
+  }, [teamActions])
 
   /**
    * Routes header and Board-column Create clicks through the canonical Team registry.
@@ -2011,17 +2093,15 @@ export function TeamIssueScreen({
                       locale={locale}
                       onCreateIssueOpen={onCreateIssue ? handleTeamCreateClick : undefined}
                       onIssueActionMenuOpen={handleTeamIssueActionMenuOpen}
+                      onMoveIssueStatus={canEditIssueAction
+                        ? handleTeamIssueStatusMove
+                        : undefined}
                       onOpenIssue={canOpenIssueAction ? handleOpenIssue : undefined}
                       selectedIssueKeys={taskViewSelection.selectedKeys}
                       selectedIssueId={selectedIssueId}
                       t={t}
                       workflowStatuses={workflowStatuses}
                       workspaceMembers={workspaceMembers}
-                      onUpdateIssue={onUpdateIssue
-                        ? async (issueId, input) => {
-                            await onUpdateIssue(issueId, input)
-                          }
-                        : undefined}
                     />
                   )}
                 </div>
@@ -2828,8 +2908,8 @@ function IssueBoard({
   locale,
   onCreateIssueOpen,
   onIssueActionMenuOpen,
+  onMoveIssueStatus,
   onOpenIssue,
-  onUpdateIssue,
   presentation,
   selectedIssueKeys,
   selectedIssueId,
@@ -2846,8 +2926,9 @@ function IssueBoard({
   onCreateIssueOpen?: (workflowStatusId: string) => void
   /** Opens the canonical action menu for one Team Issue card. */
   onIssueActionMenuOpen?: TeamIssueActionMenuOpenHandler
+  /** Routes one Board status selection or drop through the canonical Move action. */
+  onMoveIssueStatus?: (issue: TeamIssue, workflowStatusId: string) => Promise<void>
   onOpenIssue?: (issue: TeamIssue) => void
-  onUpdateIssue?: (issueId: string, input: UpdateTeamIssueInput) => Promise<void>
   presentation?: TaskViewPresentationSettings
   selectedIssueKeys: readonly string[]
   selectedIssueId?: string
@@ -2861,7 +2942,6 @@ function IssueBoard({
   const [draggedIssueId, setDraggedIssueId] = useState<string>()
   const [dropTargetStatusId, setDropTargetStatusId] = useState<string>()
   const [movingIssueIds, setMovingIssueIds] = useState<ReadonlySet<string>>(() => new Set())
-  const [moveErrorMessage, setMoveErrorMessage] = useState<string>()
   const visibleFields = new Set((presentation?.columns ?? [
     { field: 'title' },
     { field: 'project' },
@@ -2891,7 +2971,7 @@ function IssueBoard({
 
   /** Validates and requests a Team workflow status change. */
   const moveIssueToStatus = (issue: TeamIssue, workflowStatusId: string) => {
-    if (!onUpdateIssue || issue.workflowStatusId === workflowStatusId) {
+    if (!onMoveIssueStatus || issue.workflowStatusId === workflowStatusId) {
       return
     }
 
@@ -2902,18 +2982,9 @@ function IssueBoard({
     }
 
     const issueId = issue.id
-    setMoveErrorMessage(undefined)
     setMovingIssueIds((currentIds) => new Set(currentIds).add(issueId))
-    void onUpdateIssue(issueId, { workflowStatusId })
-      .catch((error) => {
-        const cause = error instanceof Error ? error.cause : undefined
-        const isConflict = (error instanceof TeamIssuesApiError && error.code === 'WorkItemRevisionConflict') ||
-          (cause instanceof TeamIssuesApiError && cause.code === 'WorkItemRevisionConflict')
-
-        setMoveErrorMessage(isConflict
-          ? t('tasks.action.conflict')
-          : t('tasks.action.updateError'))
-      })
+    void onMoveIssueStatus(issue, workflowStatusId)
+      .catch(() => undefined)
       .finally(() => {
         setMovingIssueIds((currentIds) => {
           const nextIds = new Set(currentIds)
@@ -2925,7 +2996,7 @@ function IssueBoard({
 
   /** Starts a native drag for a Team Work Item. */
   const handleDragStart = (event: DragEvent<HTMLElement>, issue: TeamIssue) => {
-    if (!onUpdateIssue) {
+    if (!onMoveIssueStatus) {
       return
     }
 
@@ -2953,11 +3024,6 @@ function IssueBoard({
 
   return (
     <section className="mt-5 grid min-w-0 gap-3">
-      {moveErrorMessage ? (
-        <p className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-bold text-red-700" role="alert">
-          {moveErrorMessage}
-        </p>
-      ) : null}
       <div className="flex min-w-0 gap-4 overflow-x-auto pb-2">
         {visibleWorkflowStatuses.map((status) => {
           const columnIssues = issues.filter(
@@ -3029,7 +3095,7 @@ function IssueBoard({
               key={status.id}
               onDragLeave={() => setDropTargetStatusId(undefined)}
               onDragOver={(event) => {
-                if (!onUpdateIssue || !draggedIssueId) {
+                if (!onMoveIssueStatus || !draggedIssueId) {
                   return
                 }
 
@@ -3116,7 +3182,7 @@ function IssueBoard({
                         data-task-view-focused={focusedForAction ? 'true' : 'false'}
                         data-task-view-selected={selectedForAction ? 'true' : 'false'}
                         data-testid={`team-issue-card-${issue.id}`}
-                        draggable={Boolean(onUpdateIssue) && !isMoving}
+                        draggable={Boolean(onMoveIssueStatus) && !isMoving}
                         onDragEnd={() => {
                           setDraggedIssueId(undefined)
                           setDropTargetStatusId(undefined)
@@ -3213,7 +3279,7 @@ function IssueBoard({
                         {visibleFields.has('team') ? (
                           <p className="mt-2 text-xs font-medium text-[var(--workbench-muted)]">{issue.teamId}</p>
                         ) : null}
-                        {visibleFields.has('status') && onUpdateIssue && editableStatuses.length > 0 ? (
+                        {visibleFields.has('status') && onMoveIssueStatus && editableStatuses.length > 0 ? (
                           <select
                             aria-label={`${resolveIssueTitle(issue, t)}: ${t('tasks.column.status')}`}
                             className="workbench-input mt-3 h-8 w-full px-2 text-xs"
@@ -3228,7 +3294,7 @@ function IssueBoard({
                             ))}
                           </select>
                         ) : null}
-                        {onUpdateIssue ? (
+                        {onMoveIssueStatus ? (
                           <p className="mt-2 text-[11px] font-medium text-[var(--workbench-muted)]">
                             {t('tasks.board.dragHint')}
                           </p>
@@ -3878,20 +3944,6 @@ function resolveIssueCustomFieldSearchValues(
 ) {
   return resolveIssueCustomFieldEntries(issue, configuration, locale, personLabels)
     .flatMap(({ definition, value }) => [definition.name, value])
-}
-
-/**
- * Identifies a revision conflict preserved either directly or as a route-level error cause.
- *
- * @param error - Unknown Team Issue mutation failure.
- * @returns Whether the failure has the canonical Work Item revision conflict code.
- */
-function isTeamIssueRevisionConflict(error: unknown): boolean {
-  if (error instanceof TeamIssuesApiError) {
-    return error.code === 'WorkItemRevisionConflict'
-  }
-  const cause = error instanceof Error ? error.cause : undefined
-  return cause instanceof TeamIssuesApiError && cause.code === 'WorkItemRevisionConflict'
 }
 
 /**

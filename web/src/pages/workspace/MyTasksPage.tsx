@@ -41,6 +41,12 @@ import {
   resolvePendingTaskActionContext,
 } from '../../task-views/model/taskActionCompletion'
 import type { TaskActionContextMenuAnchorPoint } from '../../task-views/model/taskActionContextMenu'
+import { executeMyTaskDirectStatusMove } from '../../task-views/model/myTaskDirectMove'
+import {
+  clearTaskStatusMoveRequest,
+  createTaskStatusMoveRequest,
+  type TaskStatusMoveRequestSlot,
+} from '../../task-views/model/taskStatusMoveRequest'
 import {
   createTaskSurfaceActionBaseContext,
   resolveTaskSurfaceActionTarget,
@@ -117,6 +123,7 @@ export function MyTasksPage() {
   >()
   const [revealedStatusTaskKey, setRevealedStatusTaskKey] = useState<string>()
   const [taskActionCompletion] = useState(createTaskActionCompletionBridge)
+  const taskStatusMoveRequestSlot = useRef<TaskStatusMoveRequestSlot>({ current: undefined })
   const onOpenTaskRef = useRef(workspace.onOpenTask)
 
   useEffect(() => {
@@ -271,6 +278,16 @@ export function MyTasksPage() {
     workItems.configurationFailedTeamIds,
     workItems.configurationsByTeam,
   ])
+  const statusMutation = useWorkspaceTaskStatusMutation({
+    accessToken: workspace.accessToken,
+    configurationsByTeam: workItems.configurationsByTeam,
+    enabled: workspace.canMutateTeamConfiguration,
+    guardAuthenticatedRequest: workspace.guardEnterpriseSession,
+    mutateWorkItems: workItems.mutateWorkItems,
+    t,
+    tasks: workItems.tasks,
+  })
+  const moveTaskStatus = statusMutation.moveTaskStatus
 
   /** Opens one personal Work Item through the existing route action. */
   const executeMyTaskOpenAction = useCallback((
@@ -291,10 +308,34 @@ export function MyTasksPage() {
     return createSucceededTaskActionResult(context.actionId, target)
   }, [resolveMyTaskActionTarget, t, taskActionCompletion])
 
-  /** Reveals and focuses the existing status selector after canonical Move validation. */
+  /** Executes a direct destination or reveals the existing selector after Move validation. */
   const executeMyTaskMoveAction = useCallback((
     context: WorkItemActionContext,
-  ): Promise<WorkItemActionResult> | WorkItemActionResult => {
+  ): WorkItemActionResult | Promise<WorkItemActionResult> => {
+    const requestSlot = taskStatusMoveRequestSlot.current
+    if (requestSlot.current) {
+      taskActionCompletion.cancel()
+      return executeMyTaskDirectStatusMove(
+        context,
+        requestSlot,
+        visibleMyTasks,
+        workItems.configurationsByTeam,
+        moveTaskStatus,
+        {
+          conflict: t('workspace.myTasks.conflict'),
+          failed: t('workspace.myTasks.moveError'),
+          notFound: t('taskViews.action.notFound'),
+          unavailable: myTaskActionDisabledReasons.unavailable,
+        },
+      ) ?? createFailedTaskActionResult(
+        context.actionId,
+        resolveTaskSurfaceActionTarget(context),
+        'MyTasksMoveTargetMismatch',
+        'validation',
+        myTaskActionDisabledReasons.unavailable,
+      )
+    }
+
     const { target, task } = resolveMyTaskActionTarget(context)
     if (
       !target ||
@@ -323,8 +364,12 @@ export function MyTasksPage() {
   }, [
     myTaskActionDisabledReasons.unavailable,
     canMoveMyTaskStatus,
+    moveTaskStatus,
     resolveMyTaskActionTarget,
+    t,
     taskActionCompletion,
+    visibleMyTasks,
+    workItems.configurationsByTeam,
   ])
 
   const myTaskActionHandlers = useMemo<TaskSurfaceActionHandlers>(() => ({
@@ -510,29 +555,23 @@ export function MyTasksPage() {
     taskViewSelection,
     visibleMyTaskKeys,
   ])
-  const statusMutation = useWorkspaceTaskStatusMutation({
-    accessToken: workspace.accessToken,
-    configurationsByTeam: workItems.configurationsByTeam,
-    enabled: workspace.canMutateTeamConfiguration,
-    guardAuthenticatedRequest: workspace.guardEnterpriseSession,
-    mutateWorkItems: workItems.mutateWorkItems,
-    t,
-    tasks: workItems.tasks,
-  })
-  const moveTaskStatus = statusMutation.moveTaskStatus
-
   /**
-   * Returns the status selector's persisted outcome to the accepted canonical Move action.
+   * Routes status controls and drops through the canonical Move action pipeline.
+   *
+   * A selector revealed by an accepted command completes its existing bridge invocation. Normal
+   * status controls and drag gestures instead install an exact one-shot destination request before
+   * entering the same registry permission, validation, and result pipeline.
    *
    * @param task - Revision-bound personal Work Item being moved.
-   * @param workflowStatusId - Validated destination workflow status.
-   * @returns Nothing after the optimistic mutation and cache reconciliation complete.
+   * @param workflowStatusId - Destination workflow status selected by the interaction.
+   * @returns Nothing after the canonical action and any optimistic mutation complete.
    */
   const handleMoveMyTaskStatus = useCallback(async (
     task: (typeof visibleMyTasks)[number],
     workflowStatusId: string,
   ): Promise<void> => {
     if (!moveTaskStatus) return
+    const taskKey = createTaskViewItemKey(task.teamId, task.id)
     const pendingContext = resolvePendingTaskActionContext(
       taskActionCompletion,
       ['move'],
@@ -541,11 +580,38 @@ export function MyTasksPage() {
     const target = pendingContext
       ? resolveTaskSurfaceActionTarget(pendingContext)
       : undefined
-    if (pendingContext && task.workflowStatusId === workflowStatusId) {
+    if (
+      revealedStatusTaskKey !== taskKey ||
+      !pendingContext ||
+      !target ||
+      target.teamId !== task.teamId ||
+      target.workItemId !== task.id ||
+      target.expectedRevision !== task.revision
+    ) {
+      const directTarget = {
+        expectedRevision: task.revision,
+        teamId: task.teamId,
+        workItemId: task.id,
+      }
+      const request = createTaskStatusMoveRequest(directTarget, workflowStatusId)
+      taskStatusMoveRequestSlot.current.current = request
+      try {
+        await myTaskActions.execute(
+          'move',
+          'click',
+          undefined,
+          createFocusedTaskViewActionSelection(directTarget),
+        )
+      } finally {
+        clearTaskStatusMoveRequest(taskStatusMoveRequestSlot.current, request)
+      }
+      return
+    }
+    if (task.workflowStatusId === workflowStatusId) {
       taskActionCompletion.cancelContext(pendingContext)
       return
     }
-    const claimedContext = pendingContext && target && taskActionCompletion.claim(pendingContext)
+    const claimedContext = taskActionCompletion.claim(pendingContext)
       ? pendingContext
       : undefined
 
@@ -585,7 +651,6 @@ export function MyTasksPage() {
           isConflict,
         ))
         if (canDismissOwner) {
-          const taskKey = createTaskViewItemKey(task.teamId, task.id)
           setRevealedStatusTaskKey((currentKey) =>
             currentKey === taskKey ? undefined : currentKey
           )
@@ -593,7 +658,14 @@ export function MyTasksPage() {
       }
       throw error
     }
-  }, [moveTaskStatus, myTaskActionDisabledReasons.unavailable, t, taskActionCompletion])
+  }, [
+    moveTaskStatus,
+    myTaskActionDisabledReasons.unavailable,
+    myTaskActions,
+    revealedStatusTaskKey,
+    t,
+    taskActionCompletion,
+  ])
   const taskViewFieldOptions: TaskViewFieldOption[] = [
     { id: 'title', label: t('tasks.column.name') },
     { id: 'status', label: t('tasks.column.status') },
