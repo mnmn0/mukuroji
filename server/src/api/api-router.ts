@@ -18111,6 +18111,25 @@ async function resolveCurrentWorkspaceSearchScope(
         itemId: parsedContextItem.contextItemId,
       })
       if (!item || item.state === 'superseded') return undefined
+      const latestDetail = await workItemDependencies.teamIssues.getTeamIssueDetail(
+        workspaceId,
+        parsed.teamId,
+        parsed.issueId,
+        { consistentIssueRead: true, eventLimit: 0 },
+      ).catch((error) => {
+        if (isTeamIssueNotFoundError(error)) return undefined
+        throw error
+      })
+      if (
+        !latestDetail ||
+        latestDetail.issue.assignedProjectId !== detail.issue.assignedProjectId ||
+        (latestDetail.issue.assignedProjectId &&
+          !activeTeam.projects.some((project) =>
+            project.id === latestDetail.issue.assignedProjectId,
+          ))
+      ) {
+        return undefined
+      }
       return {
         ...scope,
         currentDocument: createCuratedContextItemWorkspaceSearchDocument({

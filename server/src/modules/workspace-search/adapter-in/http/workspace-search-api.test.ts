@@ -858,6 +858,66 @@ test('search endpoint rehydrates curated context and drops superseded projection
   expect(resolvedScopes[1]).toBeUndefined()
 })
 
+test('search endpoint drops a context item when its Work Item assignment changes during rehydration', async () => {
+  const assignedProjectIds: Record<string, string> = { 'issue-1': 'refero' }
+  let detailReadCount = 0
+  configureFakeProjectClients(true, {
+    detailAssignedProjectIds: assignedProjectIds,
+    detailReadHook: async (issueId) => {
+      detailReadCount += 1
+      if (issueId === 'issue-1' && detailReadCount === 2) {
+        assignedProjectIds[issueId] = 'other-project'
+      }
+    },
+  })
+  let resolvedScope: WorkspaceSearchResolvedScope | undefined
+  setTestAppDependencies({
+    collaboration: createCollaborationStub({
+      async getCuratedContextItemSnapshot(input) {
+        return {
+          schemaVersion: 1,
+          id: input.itemId,
+          teamId: 'core-team',
+          workItemId: 'issue-1',
+          kind: 'decision',
+          state: 'accepted',
+          title: 'Current release decision',
+          body: 'Current source-of-truth decision body',
+          mentionMemberKeys: [],
+          createdBy: { id: 'sato@example.com', displayName: 'Sato' },
+          createdAt: '2026-06-08T01:00:00.000Z',
+          updatedBy: { id: 'demo@example.com', displayName: 'Demo' },
+          updatedAt: '2026-07-12T02:00:00.000Z',
+          revision: 4,
+        }
+      },
+    }),
+    workspaceSearch: createWorkspaceSearchFake({
+      async search(input) {
+        resolvedScope = await input.resolveCurrentScope?.(createWorkspaceSearchDocument({
+          workspaceId: input.workspaceId,
+          entityType: 'context-item',
+          entityId: 'team/core-team/issue/issue-1/context-item/current',
+          parentId: 'team/core-team/issue/issue-1',
+          title: 'Stale context',
+          body: 'Stale context body',
+          url: '/teams/core-team/issues?issueId=issue-1&contextItemId=current',
+          teamId: 'core-team',
+          sourceRevision: 1,
+        }))
+        return { schemaVersion: 1, results: [] }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/search', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(resolvedScope).toBeUndefined()
+})
+
 test('search endpoint fails closed for missing, deleted, or malformed comment sources', async () => {
   configureFakeProjectClients(true)
   const resolvedScopes: Array<WorkspaceSearchResolvedScope | undefined> = []
