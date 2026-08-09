@@ -103,6 +103,8 @@ export type NotificationItem = {
   projectId?: string
   /** 対象 Work Item ID です。 */
   issueId?: string
+  /** Team Triage queue の対象 Entry ID です。 */
+  triageEntryId?: string
   /** 対象 comment ID です。 */
   commentId?: string
   /** Reply が属する root comment ID です。 */
@@ -507,6 +509,9 @@ export class DynamoDbNotificationsClient implements NotificationClient {
     const updated = toNotificationItem(nextRow, recipientKey, now)
     if (!updated) {
       throw new NotificationError(500, 'InvalidNotification', 'Notification state is invalid.')
+    }
+    if (input.isVisible && !await input.isVisible(updated)) {
+      throw new NotificationError(404, 'NotificationNotFound', 'Notification was not found.')
     }
     return updated
   }
@@ -979,6 +984,9 @@ function toNotificationItem(
     ...(readText(value.teamId) ? { teamId: readText(value.teamId) } : {}),
     ...(readText(value.projectId) ? { projectId: readText(value.projectId) } : {}),
     ...(readText(value.issueId) ? { issueId: readText(value.issueId) } : {}),
+    ...(readText(value.triageEntryId)
+      ? { triageEntryId: readText(value.triageEntryId) }
+      : {}),
     ...(readText(value.commentId) ? { commentId: readText(value.commentId) } : {}),
     ...(readText(value.rootCommentId) ? { rootCommentId: readText(value.rootCommentId) } : {}),
     occurredAt,

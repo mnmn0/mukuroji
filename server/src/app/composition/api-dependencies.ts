@@ -76,6 +76,12 @@ import {
 import { DynamoDbRealtimeTicketsClient } from '../../modules/realtime/realtime-ticket'
 import { createDefaultRequestIntakeClient } from '../../modules/request-intake/request-intake'
 import {
+  DynamoDbTriageClient,
+  TriageError,
+  type TriageAdmissionValidator,
+} from '../../modules/triage'
+import { DynamoDbWorkspaceAccessClient } from '../../modules/workspace-access'
+import {
   createDefaultWorkItemImportExecutionStore,
   createDefaultWorkItemImportQueue,
   createDefaultWorkItemImportSourceStore,
@@ -89,6 +95,8 @@ import {
 import {
   DynamoDbProjectTasksClient,
   DynamoDbTeamIssuesClient,
+  type TeamIssuesClient,
+  type TriageDuplicateContextTransactionContribution,
   type WorkItemImportQueue,
   type WorkItemImportSourceStore,
 } from '../../modules/work-items'
@@ -467,9 +475,15 @@ export function createProductionWorkspaceDependencies(): WorkspaceDependencies {
  * @returns Work Item dependencies backed by configured production adapters.
  */
 export function createProductionWorkItemDependencies(): WorkItemDependencies {
+  const teamIssues = new DynamoDbTeamIssuesClient()
+  const triageAdmissionValidator = createTriageAdmissionValidator(
+    new DynamoDbProjectDirectoryClient(),
+    new DynamoDbWorkspaceAccessClient(),
+  )
+  const triage = createTriageClient(teamIssues, triageAdmissionValidator)
   return {
     projectTasks: new DynamoDbProjectTasksClient(),
-    teamIssues: new DynamoDbTeamIssuesClient(),
+    teamIssues,
     realtimeTickets: new DynamoDbRealtimeTicketsClient(),
     collaboration: new DynamoDbCollaborationClient(),
     fileProofing: createDefaultFileProofingClient(),
@@ -481,8 +495,140 @@ export function createProductionWorkItemDependencies(): WorkItemDependencies {
     planning: createPlanningClient(),
     requestIntake: createDefaultRequestIntakeClient(
       createProductionTenantAvailability(),
+      async (entry) => await triage.prepareEntryAdmission(entry),
     ),
+    triage,
     analytics: createAnalyticsRepository(),
+  }
+}
+
+/**
+ * Creates the Team Triage adapter with canonical Work Item lookup composition.
+ *
+ * New Work Item creation remains at the HTTP application boundary so its Work Item,
+ * audit, source conversion, Triage revision, association, and receipt commit together.
+ * Existing Work Item links are resolved after the route's live authorization checks. Duplicate
+ * resolution additionally contributes a revision-guarded, de-identified Work Item context event
+ * to the same transaction that terminalizes the Triage Entry.
+ *
+ * @param teamIssues - Canonical Work Item persistence used for strong reference reads.
+ * @param validateAdmission - Live Project/member validation for source admission.
+ * @returns A production DynamoDB-backed Triage client.
+ */
+function createTriageClient(
+  teamIssues: TeamIssuesClient,
+  validateAdmission: TriageAdmissionValidator,
+): DynamoDbTriageClient {
+  return new DynamoDbTriageClient({
+    validateAdmission,
+    resolveWorkItemAction: async (workspaceId, entry, actor, action, now) => {
+      if (action.action === 'accept' && action.mode === 'create') {
+        throw new TriageError(
+          409,
+          'TriageWorkItemOrchestrationRequired',
+          'New Work Item acceptance requires atomic API orchestration.',
+        )
+      }
+      const workItemId = action.action === 'duplicate'
+        ? action.canonicalWorkItemId
+        : action.workItemId
+      const detail = await teamIssues.getTeamIssueDetail(
+        workspaceId,
+        entry.teamId,
+        workItemId,
+        { consistentIssueRead: true, eventLimit: 0 },
+      )
+      let duplicateContext: TriageDuplicateContextTransactionContribution | undefined
+      if (action.action === 'duplicate') {
+        if (!teamIssues.createTriageDuplicateContextTransactionItems) {
+          throw new TriageError(
+            409,
+            'TriageDuplicateContextOrchestrationRequired',
+            'Duplicate resolution requires canonical Work Item context orchestration.',
+          )
+        }
+        duplicateContext = teamIssues.createTriageDuplicateContextTransactionItems({
+          directoryId: workspaceId,
+          teamId: detail.issue.teamId,
+          workItemId: detail.issue.id,
+          expectedWorkItemRevision: detail.issue.revision,
+          actorUserId: actor.id,
+          entry,
+          mergedAt: now,
+        })
+      }
+      return {
+        canonicalWorkItem: {
+          teamId: detail.issue.teamId,
+          workItemId: detail.issue.id,
+          ...(detail.issue.assignedProjectId
+            ? { projectId: detail.issue.assignedProjectId }
+            : {}),
+        },
+        ...(action.action === 'duplicate'
+          ? {
+              mergeReceipt: {
+                canonicalWorkItemId: detail.issue.id,
+                mergedSourceCount: 1,
+                mergedCommentCount: duplicateContext?.snapshot.commentMetadataCount ?? 0,
+                mergedAttachmentCount:
+                  duplicateContext?.snapshot.attachmentMetadataCount ?? 0,
+                mergedWatcherCount: duplicateContext?.snapshot.watcherMetadataCount ?? 0,
+                completedAt: now,
+              },
+              transactItems: duplicateContext?.transactItems,
+            }
+          : {}),
+      }
+    },
+  })
+}
+
+/** Creates live Project/member validation for every Triage admission attempt.
+ *
+ * @param projectDirectory Authoritative active Team and Project directory reader.
+ * @param workspaceAccess Authoritative active Workspace member reader.
+ * @returns A validator invoked after each current configuration evaluation.
+ */
+export function createTriageAdmissionValidator(
+  projectDirectory: Pick<DynamoDbProjectDirectoryClient, 'getProjectDirectory'>,
+  workspaceAccess: Pick<DynamoDbWorkspaceAccessClient, 'getActiveMember'>,
+): TriageAdmissionValidator {
+  return async (entry, configuration) => {
+    const directory = await projectDirectory.getProjectDirectory(entry.workspaceId, 'en', true)
+    const team = directory.teams.find((candidate) => candidate.id === entry.teamId)
+    if (!team) {
+      throw new TriageError(
+        409,
+        'TriageAdmissionTeamUnavailable',
+        'The target Triage Team is not active.',
+      )
+    }
+    if (entry.projectId && !team.projects.some((project) => project.id === entry.projectId)) {
+      throw new TriageError(
+        409,
+        'TriageAdmissionProjectUnavailable',
+        'The configured Triage Project is not active in the target Team.',
+      )
+    }
+    const memberUserIds = new Set<string>()
+    if (entry.ownerUserId) memberUserIds.add(entry.ownerUserId)
+    const slaPolicy = entry.sla
+      ? configuration.slaPolicies.find((candidate) => candidate.id === entry.sla?.policyId)
+      : undefined
+    if (slaPolicy?.escalationOwnerUserId) {
+      memberUserIds.add(slaPolicy.escalationOwnerUserId)
+    }
+    const activeMembers = await Promise.all([...memberUserIds].map(async (memberUserId) =>
+      await workspaceAccess.getActiveMember(entry.workspaceId, memberUserId)
+    ))
+    if (activeMembers.some((member) => member === undefined)) {
+      throw new TriageError(
+        409,
+        'TriageAdmissionOwnerUnavailable',
+        'A configured Triage owner is not an active Workspace member.',
+      )
+    }
   }
 }
 
@@ -811,6 +957,7 @@ export function overrideAppDependencies(
         : {}),
       ...(overrides.planning ? { planning: overrides.planning } : {}),
       ...(overrides.requestIntake ? { requestIntake: overrides.requestIntake } : {}),
+      ...(overrides.triage ? { triage: overrides.triage } : {}),
       ...(overrides.analytics ? { analytics: overrides.analytics } : {}),
     },
     automation: {

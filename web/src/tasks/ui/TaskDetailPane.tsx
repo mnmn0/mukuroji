@@ -23,6 +23,7 @@ import {
 import { IssueCollaborationPanel } from '../../issues/ui/IssueCollaborationPanel'
 import type { ProjectDirectoryTeam, ProjectMember } from '../../projects/api'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
+import { createTeamTriagePath } from '../../shared/routing/paths'
 import type { WorkspaceMember } from '../../workspace/api'
 import {
   isCustomFieldApplicable,
@@ -228,6 +229,10 @@ export function TaskDetailPane({
   const canonicalRelationCandidates = relationCandidates.filter((candidate) =>
     candidate.teamId === task.teamId,
   )
+  const sourceTriageEntryId = issue?.sourceTriageEntryId ?? task.sourceTriageEntryId
+  const triageContextSnapshots = hasMatchingIssueDetail
+    ? detail?.triageContextSnapshots ?? []
+    : []
 
   return (
     <aside
@@ -294,6 +299,47 @@ export function TaskDetailPane({
             <h2 className="mt-1.5 text-lg font-semibold leading-6 text-[var(--workbench-text)]">{title}</h2>
             {isLoading ? (
               <p className="mt-2 text-sm font-medium text-[var(--workbench-muted)]">{t('tasks.detail.loading')}</p>
+            ) : null}
+            {sourceTriageEntryId ? (
+              <a
+                className="mt-2 inline-flex text-sm font-semibold text-[var(--workbench-primary)] underline-offset-4 hover:underline"
+                data-testid="task-detail-triage-source"
+                href={createTeamTriagePath(task.teamId, sourceTriageEntryId)}
+              >
+                {t('tasks.detail.openTriageSource')}
+              </a>
+            ) : null}
+            {triageContextSnapshots.length > 0 ? (
+              <section
+                className="mt-3 rounded-md border border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-3 py-2.5"
+                data-testid="task-detail-triage-context"
+              >
+                <p className="text-xs font-semibold uppercase tracking-wide text-[var(--workbench-muted)]">
+                  {t('tasks.detail.triageContext.title')}
+                </p>
+                <ul className="mt-2 grid gap-2">
+                  {triageContextSnapshots.map((snapshot) => (
+                    <li className="text-xs leading-5 text-[var(--workbench-muted)]" key={snapshot.triageEntryId}>
+                      <a
+                        className="font-semibold text-[var(--workbench-primary)] underline-offset-4 hover:underline"
+                        href={createTeamTriagePath(task.teamId, snapshot.triageEntryId)}
+                      >
+                        {t(resolveTriageSourceMessageKey(snapshot.sourceKind))}
+                      </a>
+                      <span>
+                        {' · '}
+                        {t('tasks.detail.triageContext.counts')
+                          .replace('{comments}', String(snapshot.commentMetadataCount))
+                          .replace('{attachments}', String(snapshot.attachmentMetadataCount))
+                          .replace('{watchers}', String(snapshot.watcherMetadataCount))}
+                      </span>
+                      <span className="block">
+                        {t(resolveTriageContextAvailabilityMessageKey(snapshot.availability))}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </section>
             ) : null}
           </div>
           <div className="flex items-center gap-2">
@@ -732,6 +778,40 @@ function cloneScheduleCalendarPolicy(
 /** Formats a project member for an assignee select option. */
 function formatProjectMemberOption(member: ProjectMember) {
   return `${member.name ?? member.email} / ${member.email}`
+}
+
+/**
+ * Resolves one provider-neutral Triage source kind to an existing localized label.
+ *
+ * @param sourceKind - Source channel retained by the duplicate-context snapshot.
+ * @returns The message key for the source label.
+ */
+function resolveTriageSourceMessageKey(
+  sourceKind: 'form' | 'chat' | 'email' | 'webhook' | 'manual-handoff',
+): MessageKey {
+  if (sourceKind === 'manual-handoff') return 'triage.source.manualHandoff'
+  return `triage.source.${sourceKind}`
+}
+
+/**
+ * Resolves retained-context disclosure level to a concise localized explanation.
+ *
+ * @param availability - Permission-safe context level committed during the merge.
+ * @returns The matching Work Item detail message key.
+ */
+function resolveTriageContextAvailabilityMessageKey(
+  availability: 'summary-metadata' | 'counts-only' | 'restricted' | 'redacted',
+): MessageKey {
+  if (availability === 'summary-metadata') {
+    return 'tasks.detail.triageContext.availability.summaryMetadata'
+  }
+  if (availability === 'counts-only') {
+    return 'tasks.detail.triageContext.availability.countsOnly'
+  }
+  if (availability === 'restricted') {
+    return 'tasks.detail.triageContext.availability.restricted'
+  }
+  return 'tasks.detail.triageContext.availability.redacted'
 }
 
 /** Resolves a Team Issue title for relation candidate display. */

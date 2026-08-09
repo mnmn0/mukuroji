@@ -17,6 +17,7 @@ import {
 import {
   REQUEST_FORM_SCHEMA_VERSION,
   REQUEST_SUBMISSION_SCHEMA_VERSION,
+  TRIAGE_ENTRY_SCHEMA_VERSION,
   type CreateRequestFormInput,
   type MarkDuplicateRequestSubmissionAction,
   type PublicRequestForm,
@@ -51,6 +52,7 @@ import {
   type RequestSubmissionStatus,
   type RequestWorkItemReference,
   type SubmitRequestInput,
+  type TriageEntry,
   type UpdateRequestFormInput,
   type WorkItemPriority,
 } from '@mukuroji/contracts'
@@ -60,6 +62,17 @@ import {
   type FileObjectClient,
   type FileVersionAccess,
 } from '../files'
+import {
+  createFormTriageEntryTransactionItems,
+  createTriageCapabilities,
+  createTriageEntryKey,
+  createTriageSourceActivityTransactionItems,
+  decodeTriageEntryRow,
+  TRIAGE_OWNER_ACTIVITY_INDEX_NAME,
+  TRIAGE_TEAM_ACTIVITY_INDEX_NAME,
+  TRIAGE_WAKE_INDEX_NAME,
+  type TriageAdmissionTransactionContribution,
+} from '../triage'
 
 /** Request intake queue GSI の既定名です。 */
 export const REQUEST_QUEUE_INDEX_NAME = 'RequestQueueIndex'
@@ -201,19 +214,37 @@ export interface RequestIntakeClient {
   ): Promise<RequestSubmissionPage>
   /** Submission detail を strong read します。 */
   getSubmission(workspaceId: string, submissionId: string): Promise<RequestSubmission>
-  /** Convert 以外の explicit triage action を適用します。 */
+  /** Applies one non-conversion Request action and optional caller-owned atomic contributions.
+   *
+   * @param workspaceId - Owning Workspace identifier.
+   * @param submissionId - Target Request submission identifier.
+   * @param actor - Authenticated Request actor.
+   * @param input - Revision-fenced non-conversion action.
+   * @param additionalTransactionItems - Narrow cross-domain items committed with the Request.
+   * @returns The resulting Request submission view.
+   */
   applyAction(
     workspaceId: string,
     submissionId: string,
     actor: RequestIntakeActor,
     input: Exclude<RequestSubmissionActionInput, { action: 'convert' }>,
+    additionalTransactionItems?: NonNullable<TransactWriteCommandInput['TransactItems']>,
   ): Promise<RequestSubmission>
-  /** Work Item 作成後の trace projection を revision 条件付きで保存します。 */
+  /** Stores a revision-fenced Work Item trace projection and optional atomic contributions.
+   *
+   * @param workspaceId - Owning Workspace identifier.
+   * @param submissionId - Source Request submission identifier.
+   * @param actor - Authenticated Request actor.
+   * @param input - Canonical Work Item projection and expected revision.
+   * @param additionalTransactionItems - Narrow cross-domain items committed with the projection.
+   * @returns The resulting terminal Request submission.
+   */
   completeConversion(
     workspaceId: string,
     submissionId: string,
     actor: RequestIntakeActor,
     input: RequestConversionProjection,
+    additionalTransactionItems?: NonNullable<TransactWriteCommandInput['TransactItems']>,
   ): Promise<RequestSubmission>
   /** External capability thread の allowlist 済み message view を返します。 */
   getRequesterThread(
@@ -246,6 +277,15 @@ export interface RequestIntakeTenantAvailability {
   ): NonNullable<TransactWriteCommandInput['TransactItems']>[number]
 }
 
+/** Applies current Team Triage configuration before a Form entry is committed.
+ *
+ * @param entry - Normalized Form entry before Team configuration is applied.
+ * @returns The configured entry and optional Triage-owned transaction items.
+ */
+export type FormTriageAdmissionPreparer = (
+  entry: TriageEntry,
+) => Promise<TriageAdmissionTransactionContribution>
+
 /** DynamoDB/S3 client の差し替え option です。 */
 export type DynamoDbRequestIntakeClientOptions = {
   /** Request intake table 名です。 */
@@ -270,6 +310,8 @@ export type DynamoDbRequestIntakeClientOptions = {
   bootstrapLocalTable?: boolean
   /** Public traffic を tenant closure と直列化する lifecycle boundary です。 */
   tenantAvailability?: RequestIntakeTenantAvailability
+  /** Production callback that applies current Team Triage configuration. */
+  prepareFormTriageAdmission?: FormTriageAdmissionPreparer
 }
 
 /** Raw capability token を除いた form root row です。 */
@@ -1258,6 +1300,8 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
   private readonly bootstrapLocalTable: boolean
   /** Public Request Intake traffic の tenant lifecycle boundary です。 */
   private readonly tenantAvailability: RequestIntakeTenantAvailability
+  /** Current Team configuration callback for Form Triage admission. */
+  private readonly prepareFormTriageAdmission?: FormTriageAdmissionPreparer
   /** In-flight local table bootstrap promise です。 */
   private tableReady?: Promise<void>
 
@@ -1282,6 +1326,7 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
     this.token = options.token ?? (() => randomBytes(32).toString('base64url'))
     this.bootstrapLocalTable = options.bootstrapLocalTable ?? Boolean(endpoint)
     this.tenantAvailability = options.tenantAvailability ?? ALLOW_ACTIVE_TENANT
+    this.prepareFormTriageAdmission = options.prepareFormTriageAdmission
   }
 
   /** Workspace の form 一覧を返します。 */
@@ -1909,6 +1954,11 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
       attachmentObjectKeys: Object.fromEntries(uploads.map(({ stored }) => [stored.attachmentId, stored.objectKey])),
       attachmentObjectVersionIds: Object.fromEntries(uploads.map(({ stored, verified }) => [stored.attachmentId, verified.objectVersionId])),
     }
+    const baseTriageEntry = createFormTriageEntry(
+      session.workspaceId,
+      submission,
+      resolution.accessMode,
+    )
     const confirmationMessage = resolveLocalizedText(
       version.snapshot.definition.confirmation.message,
       locale,
@@ -1937,7 +1987,7 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
     }
     assertStoredRequestItemSize(submission)
     assertStoredRequestItemSize(threadLookup)
-    const transactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [
+    const baseTransactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [
       ...this.createTenantWriteGuard(session.workspaceId),
       {
         Put: {
@@ -2003,31 +2053,73 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
         event,
       ),
     ]
-    try {
-      await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactItems }))
-      await this.finalizeSubmissionAttachments(submission)
-      return receipt
-    } catch (error) {
-      if (isConditionalFailure(error)) {
-        if (!await this.tenantAvailability.isActive(resolution.workspaceId)) {
-          throw unavailableForm()
-        }
-        const replay = await this.getSessionByDigest(this.hashToken('session', input.sessionToken))
-        if (replay.inputFingerprint === inputFingerprint && replay.receipt) {
-          await this.consumeReplayRateLimit(
-            { ...resolution, tokenDigest: replay.scopeKey },
-          )
-          const replayedSubmission = await this.getStoredSubmission(
-            replay.workspaceId,
-            replay.receipt.submissionId,
-          )
-          await this.finalizeSubmissionAttachments(replayedSubmission)
-          return this.toSubmissionReceipt(replay.workspaceId, replay.receipt)
-        }
-        throw new RequestIntakeError(409, 'RequestSessionConsumed', 'Submission session was already used.')
+    let commitError: unknown
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      let admission: TriageAdmissionTransactionContribution
+      try {
+        admission = this.prepareFormTriageAdmission
+          ? await this.prepareFormTriageAdmission(baseTriageEntry)
+          : { entry: baseTriageEntry, transactItems: [] }
+      } catch (error) {
+        commitError = error
+        break
       }
-      throw toRequestStoreError(error)
+      requireSameFormTriageAdmission(baseTriageEntry, admission.entry)
+      const triageTransactItems = createFormTriageEntryTransactionItems({
+        tableName: this.tableName,
+        entry: admission.entry,
+        inputFingerprint,
+      })
+      const retryableConflictItemIndex = admission.retryableConflictItemIndex === undefined
+        ? undefined
+        : baseTransactItems.length + triageTransactItems.length +
+          admission.retryableConflictItemIndex
+      const transactItems = [
+        ...baseTransactItems,
+        ...triageTransactItems,
+        ...admission.transactItems,
+      ]
+      try {
+        await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactItems }))
+        await this.finalizeSubmissionAttachments(submission)
+        return receipt
+      } catch (error) {
+        if (
+          retryableConflictItemIndex !== undefined &&
+          isOnlyConditionalFailureAt(error, retryableConflictItemIndex)
+        ) {
+          if (attempt < 2) continue
+          commitError = new RequestIntakeError(
+            409,
+            'TriageAdmissionConflict',
+            'Triage routing changed while the request was submitted. Retry the submission.',
+            { cause: error },
+          )
+          break
+        }
+        commitError = error
+        break
+      }
     }
+    if (isConditionalFailure(commitError)) {
+      if (!await this.tenantAvailability.isActive(resolution.workspaceId)) {
+        throw unavailableForm()
+      }
+      const replay = await this.getSessionByDigest(this.hashToken('session', input.sessionToken))
+      if (replay.inputFingerprint === inputFingerprint && replay.receipt) {
+        await this.consumeReplayRateLimit(
+          { ...resolution, tokenDigest: replay.scopeKey },
+        )
+        const replayedSubmission = await this.getStoredSubmission(
+          replay.workspaceId,
+          replay.receipt.submissionId,
+        )
+        await this.finalizeSubmissionAttachments(replayedSubmission)
+        return this.toSubmissionReceipt(replay.workspaceId, replay.receipt)
+      }
+      throw new RequestIntakeError(409, 'RequestSessionConsumed', 'Submission session was already used.')
+    }
+    throw toRequestStoreError(commitError)
   }
 
   /** Workspace intake queue を cursor pagination します。 */
@@ -2122,6 +2214,7 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
     submissionId: string,
     actor: RequestIntakeActor,
     input: Exclude<RequestSubmissionActionInput, { action: 'convert' }>,
+    additionalTransactionItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [],
   ) {
     const current = await this.getStoredSubmission(workspaceId, submissionId)
     requireExpectedRevision(input.expectedRevision, current.revision)
@@ -2135,10 +2228,14 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
     let eventType: RequestSubmissionEvent['type']
     let summary: string
     if (input.action === 'assign') {
-      triageAssigneeUserId = requireText(input.assigneeUserId, 'Request assignee', 320).toLowerCase()
+      triageAssigneeUserId = input.assigneeUserId === null
+        ? undefined
+        : requireText(input.assigneeUserId, 'Request assignee', 320).toLowerCase()
       nextStatus = 'triaging'
       eventType = 'assigned'
-      summary = 'Request was assigned for triage.'
+      summary = triageAssigneeUserId
+        ? 'Request was assigned for triage.'
+        : 'Request was left unowned in triage.'
     } else if (input.action === 'request-more-info') {
       const body = requireText(input.message, 'More information message', 10_000)
       nextStatus = 'needs-more-info'
@@ -2181,11 +2278,13 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
       createdAt: now,
     }
     const persistedEvents = await this.getSubmissionEvents(workspaceId, submissionId)
+    const assignmentBase = triageAssigneeUserId
+      ? { ...current, triageAssigneeUserId }
+      : removeRequestTriageAssignee(current)
     const next = {
-      ...current,
+      ...assignmentBase,
       status: nextStatus,
       revision: current.revision + 1,
-      ...(triageAssigneeUserId ? { triageAssigneeUserId } : {}),
       ...(duplicateOfSubmissionId ? { duplicateOfSubmissionId } : {}),
       messages: messages.reduce<RequestSubmissionMessage[]>((history, message) =>
         appendRequestMessage(history, message), []),
@@ -2195,19 +2294,33 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
         ? terminalSubmissionCapabilities
         : activeSubmissionCapabilities,
     } satisfies StoredRequestSubmission
-    await this.putSubmissionWithRevision(next, current.revision, event)
+    await this.putSubmissionWithRevision(
+      next,
+      current.revision,
+      event,
+      additionalTransactionItems,
+    )
     return toRequestSubmissionView(
       next,
       appendCompleteRequestSubmissionEventHistory(current, persistedEvents, event),
     )
   }
 
-  /** Work Item 作成後の trace projection を保存します。 */
+  /** Stores the Work Item trace projection with optional cross-domain transaction items.
+   *
+   * @param workspaceId - Owning Workspace identifier.
+   * @param submissionId - Source Request submission identifier.
+   * @param actor - Authenticated Request actor.
+   * @param input - Canonical Work Item projection and expected revision.
+   * @param additionalTransactionItems - Narrow atomic contributions owned by another domain.
+   * @returns The resulting terminal Request submission.
+   */
   async completeConversion(
     workspaceId: string,
     submissionId: string,
     actor: RequestIntakeActor,
     input: RequestConversionProjection,
+    additionalTransactionItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [],
   ) {
     const current = await this.getStoredSubmission(workspaceId, submissionId)
     if (current.status === 'converted' && current.workItem && sameWorkItem(current.workItem, input.workItem)) {
@@ -2235,7 +2348,12 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
       updatedAt: now,
       capabilities: terminalSubmissionCapabilities,
     }
-    await this.putSubmissionWithRevision(next, current.revision, event)
+    await this.putSubmissionWithRevision(
+      next,
+      current.revision,
+      event,
+      additionalTransactionItems,
+    )
     return toRequestSubmissionView(
       next,
       appendCompleteRequestSubmissionEventHistory(current, persistedEvents, event),
@@ -2625,6 +2743,7 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
     next: StoredRequestSubmission,
     expectedRevision: number,
     event: RequestSubmissionEvent,
+    additionalTransactionItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [],
   ) {
     assertStoredRequestItemSize(next)
     try {
@@ -2647,6 +2766,7 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
             next.id,
             event,
           ),
+          ...additionalTransactionItems,
         ],
       }))
     } catch (error) {
@@ -2680,9 +2800,14 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
     },
   ) {
     const current = await this.getStoredSubmission(lookup.workspaceId, lookup.submissionId)
-    if (terminalSubmissionStatuses.has(current.status)) {
+    const terminal = terminalSubmissionStatuses.has(current.status)
+    if (terminal && source === 'web') {
       throw new RequestIntakeError(409, 'RequestThreadClosed', 'Request thread is closed.')
     }
+    const triageEntry = await this.getFormTriageEntry(
+      lookup.workspaceId,
+      lookup.submissionId,
+    )
     const nowDate = this.now()
     const now = nowDate.toISOString()
     const replyId = createSortableId('reply', nowDate, randomUUID())
@@ -2696,7 +2821,7 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
     }
     const next: StoredRequestSubmission = {
       ...current,
-      status: 'triaging',
+      status: terminal ? current.status : 'triaging',
       revision: current.revision + 1,
       messages: appendRequestMessage(current.messages, {
         id: replyId,
@@ -2707,7 +2832,7 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
       }),
       events: createRequestSubmissionEventProjection(current.events, event),
       updatedAt: now,
-      capabilities: activeSubmissionCapabilities,
+      capabilities: terminal ? current.capabilities : activeSubmissionCapabilities,
     }
     assertStoredRequestItemSize(next)
     const transactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [
@@ -2730,6 +2855,28 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
         event,
       ),
     ]
+    if (triageEntry) {
+      const triageContribution = createTriageSourceActivityTransactionItems({
+        tableName: this.tableName,
+        entry: triageEntry,
+        activity: {
+          activityId: event.id,
+          occurredAt: now,
+          summary: event.summary,
+          actorId: 'requester',
+        },
+        idempotency: {
+          key: dedupe?.digest ?? replyId,
+          fingerprint: dedupe?.inputFingerprint ?? stableHash({
+            workspaceId: lookup.workspaceId,
+            submissionId: lookup.submissionId,
+            source,
+            body,
+          }),
+        },
+      })
+      transactItems.push(...triageContribution.transactItems)
+    }
     if (dedupe) {
       const replyReceipt: StoredReplyReceipt = {
         entryType: dedupe.entryType,
@@ -2773,6 +2920,25 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
       if (isConditionalFailure(error)) throw revisionConflict('Request submission')
       throw toRequestStoreError(error)
     }
+  }
+
+  /**
+   * Reads the deterministic Triage projection for a Form submission when it exists.
+   *
+   * @param workspaceId - Workspace that owns the Form submission.
+   * @param submissionId - Canonical Request submission identifier.
+   * @returns The canonical Triage Entry, or undefined for a pre-Triage legacy submission.
+   */
+  private async getFormTriageEntry(
+    workspaceId: string,
+    submissionId: string,
+  ): Promise<TriageEntry | undefined> {
+    const response = await this.documentClient.send(new GetCommand({
+      TableName: this.tableName,
+      Key: createTriageEntryKey(workspaceId, createFormTriageEntryId(submissionId)),
+      ConsistentRead: true,
+    }))
+    return decodeTriageEntryRow(response.Item)
   }
 
   private createRateLimitUpdate(
@@ -2966,6 +3132,9 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
       this.dynamoDbClient,
       this.tableName,
       this.queueIndexName,
+      readEnvironment('TRIAGE_TEAM_ACTIVITY_INDEX_NAME') ?? TRIAGE_TEAM_ACTIVITY_INDEX_NAME,
+      readEnvironment('TRIAGE_OWNER_ACTIVITY_INDEX_NAME') ?? TRIAGE_OWNER_ACTIVITY_INDEX_NAME,
+      readEnvironment('TRIAGE_WAKE_INDEX_NAME') ?? TRIAGE_WAKE_INDEX_NAME,
     )
     await this.tableReady
   }
@@ -2975,12 +3144,17 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
  * Creates the production Request Intake client with a mandatory tenant lifecycle guard.
  *
  * @param tenantAvailability - Active-tenant read and atomic write boundary.
+ * @param prepareFormTriageAdmission - Optional current Team configuration callback.
  * @returns A configured Request Intake client.
  */
 export function createDefaultRequestIntakeClient(
   tenantAvailability: RequestIntakeTenantAvailability,
+  prepareFormTriageAdmission?: FormTriageAdmissionPreparer,
 ): RequestIntakeClient {
-  return new DynamoDbRequestIntakeClient({ tenantAvailability })
+  return new DynamoDbRequestIntakeClient({
+    tenantAvailability,
+    ...(prepareFormTriageAdmission ? { prepareFormTriageAdmission } : {}),
+  })
 }
 
 /** Explicit compatibility boundary used only by directly constructed test/local clients. */
@@ -3429,6 +3603,181 @@ function resolveLocalizedText(
   return value[locale] ?? value[fallback] ?? value.ja ?? value.en ?? ''
 }
 
+/**
+ * Creates the deterministic Team Triage projection committed with a Form submission.
+ *
+ * @param workspaceId - Workspace that owns the submission and target Team.
+ * @param submission - Canonical Request submission and immutable Form snapshot.
+ * @param accessMode - Capability mode used to classify the external requester.
+ * @returns A normalized pending Triage Entry owned by the saved routing Team.
+ */
+function createFormTriageEntry(
+  workspaceId: string,
+  submission: StoredRequestSubmission,
+  accessMode: RequestFormAccessMode,
+): TriageEntry {
+  const preview = createFormTriagePreview(submission)
+  const permission: TriageEntry['permission'] = {
+    visibility: 'full',
+    canReply: true,
+    guestVisible: false,
+    checkedAt: submission.createdAt,
+  }
+  const routingCandidate = {
+    teamId: submission.routingTarget.teamId,
+    ...(submission.routingTarget.projectId
+      ? { projectId: submission.routingTarget.projectId }
+      : {}),
+    reason: 'Published Request Form routing selected this destination.',
+    score: 1,
+    permitted: true,
+  }
+  const retentionDate = new Date(submission.createdAt)
+  retentionDate.setUTCDate(retentionDate.getUTCDate() + 365)
+  const entry: TriageEntry = {
+    schemaVersion: TRIAGE_ENTRY_SCHEMA_VERSION,
+    id: createFormTriageEntryId(submission.id),
+    workspaceId,
+    source: {
+      kind: 'form',
+      sourceId: submission.id,
+      formId: submission.formId,
+      submissionId: submission.id,
+    },
+    sourcePreview: {
+      title: resolveLocalizedText(
+        submission.formSnapshot.snapshot.definition.title,
+        submission.locale,
+        submission.formSnapshot.snapshot.definition.defaultLocale,
+      ),
+      body: preview.body,
+      channelLabel: 'Request Form',
+      attachmentCount: submission.attachments.length,
+      commentCount: submission.messages.length,
+      watcherCount: 0,
+      sanitized: true,
+      truncated: preview.truncated,
+    },
+    requester: {
+      displayName: submission.requesterEmail ?? 'Request Form requester',
+      ...(submission.requesterEmail ? { email: submission.requesterEmail } : {}),
+      guest: accessMode === 'public',
+    },
+    receivedAt: submission.createdAt,
+    lastActivityAt: submission.createdAt,
+    state: 'pending',
+    routing: {
+      reason: 'The published Request Form routing snapshot selected this Team.',
+      candidates: [routingCandidate],
+    },
+    teamId: submission.routingTarget.teamId,
+    ...(submission.routingTarget.projectId
+      ? { projectId: submission.routingTarget.projectId }
+      : {}),
+    ...(submission.triageAssigneeUserId
+      ? { ownerUserId: submission.triageAssigneeUserId }
+      : {}),
+    permission,
+    retention: { expiresAt: retentionDate.toISOString() },
+    capabilities: createTriageCapabilities({ state: 'pending', permission }),
+    events: [{
+      id: `triage-created-${submission.id}`,
+      type: 'created',
+      actorId: 'requester',
+      summary: 'A Request Form submission entered Team triage.',
+      createdAt: submission.createdAt,
+    }],
+    revision: 1,
+    createdAt: submission.createdAt,
+    updatedAt: submission.createdAt,
+  }
+  return entry
+}
+
+/**
+ * Removes a legacy queue assignee without retaining an undefined DynamoDB attribute.
+ *
+ * @param submission - Stored Request submission to copy.
+ * @returns A copy with no Triage assignee projection.
+ */
+function removeRequestTriageAssignee(
+  submission: StoredRequestSubmission,
+): StoredRequestSubmission {
+  const next = { ...submission }
+  delete next.triageAssigneeUserId
+  return next
+}
+
+/**
+ * Creates a bounded plain-text Form answer preview without attachment identifiers.
+ *
+ * @param submission - Canonical Request submission and immutable field definitions.
+ * @returns The bounded preview and whether content was truncated.
+ */
+function createFormTriagePreview(
+  submission: StoredRequestSubmission,
+): { body: string; truncated: boolean } {
+  const lines = submission.formSnapshot.snapshot.definition.sections.flatMap((section) =>
+    section.fields.flatMap((field) => {
+      if (field.type === 'attachment') return []
+      const value = submission.answers[field.id]
+      if (value === undefined) return []
+      const rendered = Array.isArray(value)
+        ? value.join(', ')
+        : String(value)
+      if (!rendered.trim()) return []
+      const label = resolveLocalizedText(
+        field.label,
+        submission.locale,
+        submission.formSnapshot.snapshot.definition.defaultLocale,
+      )
+      return [`${label}: ${rendered.replaceAll(/\s+/gu, ' ').trim()}`]
+    }),
+  )
+  const complete = lines.join('\n')
+  return {
+    body: complete.slice(0, 8_000),
+    truncated: complete.length > 8_000,
+  }
+}
+
+/**
+ * Derives the stable Triage Entry identifier for one Form submission.
+ *
+ * @param submissionId - Canonical Request submission identifier.
+ * @returns A conservative identifier reused by replies and conversion.
+ */
+export function createFormTriageEntryId(submissionId: string): string {
+  return `triage_${requireIdentifier(submissionId, 'Request submission ID')}`
+}
+
+/** Ensures a trusted admission callback changed only configurable Triage fields. */
+function requireSameFormTriageAdmission(
+  original: TriageEntry,
+  configured: TriageEntry,
+): void {
+  if (
+    original.id !== configured.id ||
+    original.workspaceId !== configured.workspaceId ||
+    original.teamId !== configured.teamId ||
+    original.source.kind !== 'form' ||
+    configured.source.kind !== 'form' ||
+    original.source.sourceId !== configured.source.sourceId ||
+    original.source.formId !== configured.source.formId ||
+    original.source.submissionId !== configured.source.submissionId ||
+    original.createdAt !== configured.createdAt ||
+    original.receivedAt !== configured.receivedAt ||
+    original.revision !== configured.revision ||
+    configured.state !== 'pending'
+  ) {
+    throw new RequestIntakeError(
+      500,
+      'InvalidTriageAdmission',
+      'The configured Triage admission changed immutable source identity.',
+    )
+  }
+}
+
 function readOptionalFutureTimestamp(value: unknown, now: Date, label: string) {
   if (value === undefined) return undefined
   const timestamp = requireIsoTimestamp(value, label)
@@ -3586,6 +3935,23 @@ function isConditionalFailure(error: unknown) {
     )
 }
 
+/** Detects a transaction cancellation caused only by one retryable item. */
+function isOnlyConditionalFailureAt(error: unknown, itemIndex: number): boolean {
+  if (!Number.isSafeInteger(itemIndex) || itemIndex < 0 ||
+    typeof error !== 'object' || error === null ||
+    Reflect.get(error, 'name') !== 'TransactionCanceledException') {
+    return false
+  }
+  const cancellationReasons = Reflect.get(error, 'CancellationReasons')
+  if (!Array.isArray(cancellationReasons) || itemIndex >= cancellationReasons.length) return false
+  return cancellationReasons.every((reason, index) => {
+    const code = typeof reason === 'object' && reason !== null
+      ? Reflect.get(reason, 'Code')
+      : undefined
+    return index === itemIndex ? code === 'ConditionalCheckFailed' : code === 'None'
+  })
+}
+
 function toRequestStoreError(error: unknown) {
   if (error instanceof RequestIntakeError) return error
   return requestStoreUnavailable(error)
@@ -3614,19 +3980,44 @@ async function ensureLocalRequestIntakeTable(
   client: DynamoDBClient,
   tableName: string,
   queueIndexName: string,
+  triageTeamIndexName: string,
+  triageOwnerIndexName: string,
+  triageWakeIndexName: string,
 ) {
   try {
     const response = await client.send(new DescribeTableCommand({ TableName: tableName }))
     const table = response.Table
-    const index = table?.GlobalSecondaryIndexes?.find((candidate) => candidate.IndexName === queueIndexName)
+    const indexes = table?.GlobalSecondaryIndexes ?? []
+    const queueIndex = indexes.find((candidate) => candidate.IndexName === queueIndexName)
+    const triageTeamIndex = indexes.find((candidate) =>
+      candidate.IndexName === triageTeamIndexName
+    )
+    const triageOwnerIndex = indexes.find((candidate) =>
+      candidate.IndexName === triageOwnerIndexName
+    )
+    const triageWakeIndex = indexes.find((candidate) =>
+      candidate.IndexName === triageWakeIndexName
+    )
     if (
       !sameKeyDefinition(table?.KeySchema, [
         { AttributeName: 'scopeKey', KeyType: 'HASH' },
         { AttributeName: 'recordKey', KeyType: 'RANGE' },
       ]) ||
-      !sameKeyDefinition(index?.KeySchema, [
+      !sameKeyDefinition(queueIndex?.KeySchema, [
         { AttributeName: 'queueKey', KeyType: 'HASH' },
         { AttributeName: 'queueRecordKey', KeyType: 'RANGE' },
+      ]) ||
+      !sameKeyDefinition(triageTeamIndex?.KeySchema, [
+        { AttributeName: 'triageTeamKey', KeyType: 'HASH' },
+        { AttributeName: 'triageActivityKey', KeyType: 'RANGE' },
+      ]) ||
+      !sameKeyDefinition(triageOwnerIndex?.KeySchema, [
+        { AttributeName: 'triageOwnerKey', KeyType: 'HASH' },
+        { AttributeName: 'triageActivityKey', KeyType: 'RANGE' },
+      ]) ||
+      !sameKeyDefinition(triageWakeIndex?.KeySchema, [
+        { AttributeName: 'triageWakeShard', KeyType: 'HASH' },
+        { AttributeName: 'triageNextWakeAt', KeyType: 'RANGE' },
       ])
     ) {
       throw new RequestIntakeError(
@@ -3647,19 +4038,50 @@ async function ensureLocalRequestIntakeTable(
       { AttributeName: 'recordKey', AttributeType: 'S' },
       { AttributeName: 'queueKey', AttributeType: 'S' },
       { AttributeName: 'queueRecordKey', AttributeType: 'S' },
+      { AttributeName: 'triageTeamKey', AttributeType: 'S' },
+      { AttributeName: 'triageOwnerKey', AttributeType: 'S' },
+      { AttributeName: 'triageActivityKey', AttributeType: 'S' },
+      { AttributeName: 'triageWakeShard', AttributeType: 'S' },
+      { AttributeName: 'triageNextWakeAt', AttributeType: 'S' },
     ],
     KeySchema: [
       { AttributeName: 'scopeKey', KeyType: 'HASH' },
       { AttributeName: 'recordKey', KeyType: 'RANGE' },
     ],
-    GlobalSecondaryIndexes: [{
-      IndexName: queueIndexName,
-      KeySchema: [
-        { AttributeName: 'queueKey', KeyType: 'HASH' },
-        { AttributeName: 'queueRecordKey', KeyType: 'RANGE' },
-      ],
-      Projection: { ProjectionType: 'ALL' },
-    }],
+    GlobalSecondaryIndexes: [
+      {
+        IndexName: queueIndexName,
+        KeySchema: [
+          { AttributeName: 'queueKey', KeyType: 'HASH' },
+          { AttributeName: 'queueRecordKey', KeyType: 'RANGE' },
+        ],
+        Projection: { ProjectionType: 'ALL' },
+      },
+      {
+        IndexName: triageTeamIndexName,
+        KeySchema: [
+          { AttributeName: 'triageTeamKey', KeyType: 'HASH' },
+          { AttributeName: 'triageActivityKey', KeyType: 'RANGE' },
+        ],
+        Projection: { ProjectionType: 'ALL' },
+      },
+      {
+        IndexName: triageOwnerIndexName,
+        KeySchema: [
+          { AttributeName: 'triageOwnerKey', KeyType: 'HASH' },
+          { AttributeName: 'triageActivityKey', KeyType: 'RANGE' },
+        ],
+        Projection: { ProjectionType: 'ALL' },
+      },
+      {
+        IndexName: triageWakeIndexName,
+        KeySchema: [
+          { AttributeName: 'triageWakeShard', KeyType: 'HASH' },
+          { AttributeName: 'triageNextWakeAt', KeyType: 'RANGE' },
+        ],
+        Projection: { ProjectionType: 'KEYS_ONLY' },
+      },
+    ],
   }))
   try {
     await client.send(new UpdateTimeToLiveCommand({

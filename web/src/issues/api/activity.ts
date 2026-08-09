@@ -3,7 +3,11 @@ import { TeamIssuesApiError } from './errors'
 /**
  * チーム所有 Issue の活動種別です。
  */
-export type TeamIssueActivityType = 'created' | 'updated' | 'commented'
+export type TeamIssueActivityType =
+  | 'created'
+  | 'updated'
+  | 'commented'
+  | 'triage-context-merged'
 
 /**
  * チーム所有 Issue の活動履歴です。

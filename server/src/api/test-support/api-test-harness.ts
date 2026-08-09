@@ -694,6 +694,9 @@ function createTeamIssuesFake(
     throw new Error('Unexpected Team Issues client call.')
   }
   return {
+    createTriageDuplicateContextTransactionItems: () => {
+      throw new Error('Unexpected Team Issues client call.')
+    },
     getTeamIssues: unsupported,
     getPublicWorkItemPage: unsupported,
     getProjectIssues: unsupported,

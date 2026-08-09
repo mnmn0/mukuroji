@@ -20,6 +20,7 @@ import { TaskPage } from '../pages/workspace/TaskPage'
 import { TeamIssuePage } from '../pages/workspace/TeamIssuePage'
 import { TeamMembersPage } from '../pages/workspace/TeamMembersPage'
 import { TeamOverviewPage } from '../pages/workspace/TeamOverviewPage'
+import { TeamTriagePage } from '../pages/workspace/TeamTriagePage'
 import { ProjectTasksRedirect } from './ProjectTasksRedirect'
 import { WorkspaceCommandMenuLayout } from '../commands/ui/WorkspaceCommandMenu'
 import { SearchPage } from '../search/SearchPage'
@@ -96,6 +97,10 @@ export const appRoutes: RouteObject[] = [
               {
                 path: '/teams/:teamId/members',
                 element: <TeamMembersPage />,
+              },
+              {
+                path: '/teams/:teamId/triage',
+                element: <TeamTriagePage />,
               },
               {
                 path: '/teams/:teamId/projects',

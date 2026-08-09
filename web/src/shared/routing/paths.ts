@@ -278,6 +278,20 @@ export function createTeamIssuesPath(
 }
 
 /**
+ * Creates a canonical Team triage queue or selected-entry deep link.
+ *
+ * @param teamId - Team whose intake queue should open.
+ * @param entryId - Optional triage entry selected in the detail pane.
+ * @returns A same-origin Team triage path.
+ */
+export function createTeamTriagePath(teamId: string, entryId?: string) {
+  const path = `/teams/${encodeURIComponent(teamId)}/triage`
+  if (!entryId) return path
+  const searchParams = new URLSearchParams({ entryId })
+  return `${path}?${searchParams.toString()}`
+}
+
+/**
  * チーム配下の固定ビュー URL を生成します。
  */
 export function createTeamViewPath(teamId: string, viewId: SidebarTeamViewId) {

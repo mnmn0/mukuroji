@@ -30,6 +30,8 @@ Canonical row は次の field を持つ。
 | `description` | no | 詳細説明。 |
 | `assigneeUserId` | yes | Workspace member の安定 ID。 |
 | `creatorMemberKey` | yes | Work Item を作成した Workspace member key。 |
+| `sourceTriageEntryId` | no | Team Triage から作成された場合の source Entry ID。 |
+| `sourceRequestId` | no | Form source から作成された場合の Request submission ID。 |
 | `workflowSchemaVersion` | yes | 値を検証した Work Item configuration schema version。現在は `1`。 |
 | `workflowStatusId` | yes | 解決済み workflow の status ID。 |
 | `statusCategory` | yes | status 定義から確定した `backlog`、`unstarted`、`started`、`completed`、`canceled` のいずれか。 |

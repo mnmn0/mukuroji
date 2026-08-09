@@ -161,6 +161,18 @@ export const workItemsMessages = {
   'tasks.detail.error': 'タスク詳細を取得できませんでした',
   'tasks.detail.conflict': '別のメンバーが先に更新しました。最新の内容を確認してから、もう一度保存してください。',
   'tasks.detail.description': '説明',
+  'tasks.detail.openTriageSource': 'Team Triage で受付元を開く',
+  'tasks.detail.triageContext.title': '保存された受付コンテキスト',
+  'tasks.detail.triageContext.counts':
+    'コメント {comments}件 · 添付 {attachments}件 · ウォッチャー {watchers}人',
+  'tasks.detail.triageContext.availability.summaryMetadata':
+    '安全な活動概要とメタデータをこの Work Item に保存しました。',
+  'tasks.detail.triageContext.availability.countsOnly':
+    '権限上参照できるメタデータ件数だけを保存しました。',
+  'tasks.detail.triageContext.availability.restricted':
+    '重複統合時に受付元のコンテキストは制限されていました。',
+  'tasks.detail.triageContext.availability.redacted':
+    '重複統合前に受付元のコンテキストは削除済みでした。',
   'tasks.detail.readOnly': '詳細情報を取得できないため、このタスクは参照専用です。',
   'tasks.detail.readOnlyPermission': 'このタスクを編集する権限がありません。Workspace の owner または admin に依頼してください。',
   'tasks.comment.readOnly': '詳細情報を取得できないため、このタスクにはコメントを追加できません。',

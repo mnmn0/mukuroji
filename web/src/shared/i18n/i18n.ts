@@ -142,6 +142,7 @@ export function createSidebarLabels(locale: Locale): SidebarLabels {
       confirm: t('sidebar.archive.confirm'),
     },
     teamOverview: t('sidebar.teamOverview'),
+    triage: t('sidebar.triage'),
     issues: t('sidebar.issues'),
     members: t('sidebar.members'),
     projectCount: (count) =>

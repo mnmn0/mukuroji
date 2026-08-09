@@ -44,7 +44,7 @@ test('routes every CloudWatch alarm to distinct primary and secondary SNS topics
     ],
   };
 
-  expect(Object.keys(alarms)).toHaveLength(45);
+  expect(Object.keys(alarms)).toHaveLength(47);
   expect(Object.keys(compositeAlarms)).toHaveLength(1);
   synthesizedTemplate.resourceCountIs('AWS::SNS::Topic', 0);
   synthesizedTemplate.resourceCountIs('AWS::SNS::Subscription', 2);

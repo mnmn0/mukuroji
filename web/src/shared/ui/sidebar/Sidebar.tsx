@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import type { ComponentType, FormEvent, ReactNode, RefObject } from 'react'
 import { BrandMark } from '../BrandMark'
+import { HandoffIcon } from '../icons'
 
 /**
  * サイドバー内の SVG アイコンに渡す共通 props です。
@@ -89,7 +90,7 @@ export type SidebarNavId =
 /**
  * チーム配下で選択できる固定ビューです。
  */
-export type SidebarTeamViewId = 'overview' | 'issues' | 'projects' | 'members'
+export type SidebarTeamViewId = 'overview' | 'triage' | 'issues' | 'projects' | 'members'
 
 /**
  * 新規作成モーダルで選択できる作成対象です。
@@ -304,6 +305,10 @@ export type SidebarLabels = {
    * チーム概要ビューの文言です。
    */
   teamOverview: string
+  /**
+   * Team triage queue view label.
+   */
+  triage: string
   /**
    * Issue ビューの文言です。
    */
@@ -608,6 +613,7 @@ const defaultLabels: SidebarLabels = {
     confirm: 'アーカイブ',
   },
   teamOverview: 'チーム概要',
+  triage: 'Triage',
   issues: 'Issues',
   members: 'メンバー',
   projectCount: (count) => `プロジェクト ${count}`,
@@ -2161,7 +2167,7 @@ function NavButton({
   )
 }
 
-/** Renders the four stable views owned by the single current Team. */
+/** Renders the five stable views owned by the single current Team. */
 function CurrentTeamNavigation({
   activeTeamId,
   activeTeamViewId,
@@ -2193,6 +2199,13 @@ function CurrentTeamNavigation({
         icon={PanelIcon}
         label={labels.teamOverview}
         onClick={() => onSelectTeamView(team.id, 'overview')}
+      />
+      <SubNavButton
+        active={isTeamActive && activeTeamViewId === 'triage'}
+        collapsed={collapsed}
+        icon={HandoffIcon}
+        label={labels.triage}
+        onClick={() => onSelectTeamView(team.id, 'triage')}
       />
       <SubNavButton
         active={isTeamActive && activeTeamViewId === 'issues'}

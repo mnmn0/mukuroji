@@ -58,6 +58,7 @@ describe('Sidebar information architecture', () => {
     expect(html).toContain('Team 01')
     expect(html).not.toContain('Team 20')
     expect(html).toContain(labels.projectCount(20))
+    expect(html).toContain(labels.triage)
     expect(html).not.toContain('Project 2.20')
   })
 

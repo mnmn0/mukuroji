@@ -5,6 +5,19 @@ import {
 } from '../src/notifications/model/paths'
 
 describe('notification deep links', () => {
+  test('prefers a structured Team Triage target over a generic deep link', () => {
+    expect(resolveNotificationPath({
+      deepLink: '/inbox',
+      eventType: 'triage.assigned',
+      id: 'notification-triage-1',
+      occurredAt: '2026-07-12T00:00:00.000Z',
+      reasons: ['assigned'],
+      state: 'unread',
+      teamId: 'design/team',
+      triageEntryId: 'entry/42',
+    })).toBe('/teams/design%2Fteam/triage?entryId=entry%2F42')
+  })
+
   test('uses structured team, project, Work Item, and comment scope', () => {
     expect(resolveNotificationPath({
       commentId: 'comment/1',

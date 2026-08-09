@@ -161,7 +161,10 @@ describe('notification store', () => {
       if (queryCount === 2) {
         return {
           Items: [
-            createNotificationRow(),
+            createNotificationRow({
+              deepLink: '/teams/core/triage?entryId=triage_20260809_sla',
+              triageEntryId: 'triage_20260809_sla',
+            }),
             createNotificationRow({
               notificationKey: '2026-07-12T11:30:00.000Z#evt-in-app-disabled',
               eventId: 'evt-in-app-disabled',
@@ -200,6 +203,7 @@ describe('notification store', () => {
       title: 'Notification foundations',
       actorLabel: 'Author Example',
       rootCommentId: 'root-1',
+      triageEntryId: 'triage_20260809_sla',
     })
     expect(page.nextCursor).toBeUndefined()
     expect(recording.commands.find((command) =>
@@ -285,6 +289,45 @@ describe('notification store', () => {
     })
     const put = recording.commands.find((command) => command.name === 'PutCommand')
     expect(put?.input.ConditionExpression).toContain('#version = :version')
+  })
+
+  test('reapplies the current visibility projection to an updated notification response', async () => {
+    const row = createNotificationRow({
+      issueId: undefined,
+      summary: 'HISTORICAL_TRIAGE_SUMMARY',
+      title: 'HISTORICAL_TRIAGE_TITLE',
+      triageEntryId: 'triage-1',
+    })
+    let queryCount = 0
+    const recording = createClient(({ constructor }) => {
+      if (constructor.name === 'QueryCommand') {
+        queryCount += 1
+        return queryCount === 1 ? { Items: [] } : { Items: [row] }
+      }
+      if (constructor.name === 'GetCommand') return { Item: row }
+      return {}
+    })
+    const listed = await recording.client.list({
+      workspaceId: 'workspace-1',
+      memberKey: 'member@example.com',
+      limit: 1,
+    })
+
+    const updated = await recording.client.update({
+      workspaceId: 'workspace-1',
+      memberKey: 'member@example.com',
+      notificationId: listed.notifications[0]?.id ?? '',
+      action: 'mark-read',
+      isVisible: (notification) => {
+        notification.title = 'Restricted source'
+        delete notification.summary
+        return true
+      },
+    })
+
+    expect(updated).toMatchObject({ state: 'read', title: 'Restricted source' })
+    expect(updated.summary).toBeUndefined()
+    expect(JSON.stringify(updated)).not.toContain('HISTORICAL_TRIAGE')
   })
 
   test('persists read, unread, archive, and restore transitions', async () => {

@@ -7,6 +7,7 @@ import type {
 import { renderToStaticMarkup } from 'react-dom/server'
 import { createTranslator } from '../src/shared/i18n/i18n'
 import { collaborationWorkspaceMemberFixtures } from '../src/issues/fixtures'
+import type { TeamIssueDetail } from '../src/issues/api'
 import { teamWorkItemConfigurationFixture } from '../src/work-items/fixtures'
 import { createTaskKey } from '../src/tasks/model/taskView'
 import { createDefaultDueDateTaskSchedule } from '../src/tasks/model/taskSchedule'
@@ -560,5 +561,73 @@ describe('independent task views', () => {
     expect(html).not.toContain('詳細の古いタイトル')
     expect(html).toContain('value="2026-06-10"')
     expect(html).toContain('<option value="due-date" selected="">期限のみ</option>')
+  })
+
+  test('links a canonical Work Item back to its Team Triage source', () => {
+    const detail = {
+      ...taskViewStorySelectedIssueDetail,
+      issue: {
+        ...taskViewStorySelectedIssueDetail.issue,
+        sourceTriageEntryId: 'triage/source-1',
+      },
+    }
+    const html = renderToStaticMarkup(
+      <TaskDetailPane
+        assigneeOptions={taskViewStoryProjectMembers}
+        configuration={teamWorkItemConfigurationFixture}
+        detail={detail}
+        isLoading={false}
+        isRelationCandidatesLoading={false}
+        locale="ja"
+        projects={[{ id: 'refero', name: 'Refero' }]}
+        relationCandidates={[]}
+        t={t}
+        task={taskViewStoryTasks[0]}
+        workspaceMembers={collaborationWorkspaceMemberFixtures}
+      />,
+    )
+
+    expect(html).toContain('data-testid="task-detail-triage-source"')
+    expect(html).toContain('href="/teams/core-team/triage?entryId=triage%2Fsource-1"')
+  })
+
+  test('shows permission-safe duplicate context retained with the canonical Work Item', () => {
+    const detail = {
+      ...taskViewStorySelectedIssueDetail,
+      triageContextSnapshots: [{
+        triageEntryId: 'triage-duplicate-1',
+        sourceKind: 'form',
+        visibilityAtMerge: 'full',
+        availability: 'summary-metadata',
+        receivedAt: '2026-08-08T00:00:00.000Z',
+        lastActivityAt: '2026-08-08T01:00:00.000Z',
+        sourceRetentionExpiresAt: '2027-08-08T00:00:00.000Z',
+        commentMetadataCount: 3,
+        attachmentMetadataCount: 2,
+        watcherMetadataCount: 1,
+        events: [],
+        mergedAt: '2026-08-09T00:00:00.000Z',
+      }],
+    } satisfies TeamIssueDetail
+    const html = renderToStaticMarkup(
+      <TaskDetailPane
+        assigneeOptions={taskViewStoryProjectMembers}
+        configuration={teamWorkItemConfigurationFixture}
+        detail={detail}
+        isLoading={false}
+        isRelationCandidatesLoading={false}
+        locale="ja"
+        projects={[{ id: 'refero', name: 'Refero' }]}
+        relationCandidates={[]}
+        t={t}
+        task={taskViewStoryTasks[0]}
+        workspaceMembers={collaborationWorkspaceMemberFixtures}
+      />,
+    )
+
+    expect(html).toContain('data-testid="task-detail-triage-context"')
+    expect(html).toContain('保存された受付コンテキスト')
+    expect(html).toContain('コメント 3件 · 添付 2件 · ウォッチャー 1人')
+    expect(html).toContain('href="/teams/core-team/triage?entryId=triage-duplicate-1"')
   })
 })

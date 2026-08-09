@@ -77,11 +77,14 @@ import type {
   CustomFieldValue,
   RequestSubmissionEvent,
   ResolvedWorkItemConfiguration,
+  TriageEntry,
   WorkflowStatusCategory,
   WorkItemPriority,
   WorkItemRelation,
   WorkItemSchedule,
   WorkItemStatus,
+  WorkItemTriageContextEventSnapshot,
+  WorkItemTriageContextSnapshot,
 } from '@mukuroji/contracts'
 
 /**
@@ -485,7 +488,11 @@ export type ProjectTasksResponse = {
 /**
  * チーム所有 Issue の活動種別です。
  */
-type TeamIssueActivityType = 'created' | 'updated' | 'commented'
+type TeamIssueActivityType =
+  | 'created'
+  | 'updated'
+  | 'commented'
+  | 'triage-context-merged'
 
 /**
  * DynamoDB に保存する team issue item です。
@@ -553,6 +560,8 @@ type TeamIssueItem = {
   creatorMemberKey: string
   /** Request intake から作成された場合の source submission ID です。 */
   sourceRequestId?: string
+  /** Team Triage から作成された場合の source Entry ID です。 */
+  sourceTriageEntryId?: string
   /** Relation Graph から同期する search/backfill 用の派生 relation ID 一覧です。 */
   relationIds: string[]
   /**
@@ -627,6 +636,8 @@ type TeamIssueEventItem = {
    * コメント本文です。comment event のみ設定します。
    */
   body?: string
+  /** Permission-safe source provenance retained by a duplicate Triage merge event. */
+  triageContextSnapshot?: WorkItemTriageContextSnapshot
   /**
    * 活動履歴に表示する概要です。
    */
@@ -791,6 +802,8 @@ export type TeamIssueDetailResponse = {
    * Issue 活動履歴一覧です。
    */
   activity: TeamIssueActivityResponseItem[]
+  /** De-identified duplicate-source context committed with this canonical Work Item. */
+  triageContextSnapshots?: WorkItemTriageContextSnapshot[]
   /** Bounded event 読み込みの次 page を指す opaque cursor です。 */
   nextEventCursor?: string
   /** Work Item に適用される解決済み workflow/custom field 定義です。 */
@@ -871,6 +884,42 @@ export type RequestConversionTransactionInput = {
   submissionId: string
   /** Mutation 前に読み込んだ append-only event 履歴です。 */
   events: readonly RequestSubmissionEvent[]
+}
+
+/** Triage compositionが Work Item 作成 transaction へ追加する受入更新です。 */
+export type TriageAcceptanceTransactionInput = {
+  /** Work Item から追跡する source Triage Entry ID です。 */
+  entryId: string
+  /** Triage Entry、Work Item、audit で共有する canonical mutation instant です。 */
+  occurredAt: string
+  /** Revision guard、association、event、receipt を含む transaction item です。 */
+  transactItems: NonNullable<TransactWriteCommandInput['TransactItems']>
+}
+
+/** Input used to prepare canonical Work Item provenance for a duplicate Triage merge. */
+export type CreateTriageDuplicateContextTransactionItemsInput = {
+  /** Owning Workspace directory identifier. */
+  directoryId: string
+  /** Team that owns the canonical Work Item. */
+  teamId: string
+  /** Canonical Work Item receiving the duplicate context. */
+  workItemId: string
+  /** Strongly read Work Item revision guarded by the combined transaction. */
+  expectedWorkItemRevision: number
+  /** Workspace member performing the duplicate merge. */
+  actorUserId: string
+  /** Strongly read Triage Entry supplying permission and retained metadata. */
+  entry: TriageEntry
+  /** Canonical ISO 8601 instant shared with the Triage mutation. */
+  mergedAt: string
+}
+
+/** Prepared Work Item provenance and unexecuted transaction actions. */
+export type TriageDuplicateContextTransactionContribution = {
+  /** De-identified context snapshot written to the Work Item event partition. */
+  snapshot: WorkItemTriageContextSnapshot
+  /** Work Item revision guard and immutable context event Put. */
+  transactItems: NonNullable<TransactWriteCommandInput['TransactItems']>
 }
 
 /**
@@ -1063,6 +1112,14 @@ export type NamedWorkItemDeletionFence = {
  * API handler から利用する team issue client の最小 interface です。
  */
 export type TeamIssuesClient = {
+  /** Prepares de-identified duplicate-source context for an atomic Triage merge.
+   *
+   * @param input - Strongly read Work Item and permission-safe Triage context.
+   * @returns The snapshot and unexecuted Work Item transaction actions.
+   */
+  createTriageDuplicateContextTransactionItems?(
+    input: CreateTriageDuplicateContextTransactionItemsInput,
+  ): TriageDuplicateContextTransactionContribution
   /**
    * DynamoDB から指定 team ID の Issue 一覧を取得します。
    */
@@ -1109,6 +1166,7 @@ export type TeamIssuesClient = {
     actorUserId: string,
     auditContext?: MutationAuditContext,
     requestConversion?: RequestConversionTransactionInput,
+    triageAcceptance?: TriageAcceptanceTransactionInput,
   ): Promise<CreateTeamIssueResponse>
   /**
    * DynamoDB の team issue を更新します。
@@ -1268,7 +1326,7 @@ function createRequestConversionEventTransactionPut(
         entryType: 'submission-event',
         scopeKey: input.scopeKey,
         recordKey:
-          `EVENT#${input.submissionId}#${event.createdAt}#${event.id}`,
+          `SUBMISSION_EVENT#${input.submissionId}#${event.createdAt}#${event.id}`,
         submissionId: input.submissionId,
         ...event,
       },
@@ -1488,6 +1546,94 @@ export class DynamoDbTeamIssuesClient {
   }
 
   /**
+   * Prepares permission-safe duplicate-source provenance for a combined Triage transaction.
+   *
+   * The immutable event lives in the canonical Work Item event partition and deliberately omits
+   * source bodies, requester identity, provider IDs, attachment names, and watcher identities.
+   * A revision guard prevents the provenance from being attached to a stale or replaced target.
+   *
+   * @param input - Strongly read Work Item and Triage source context.
+   * @returns The retained snapshot and unexecuted Work Item transaction actions.
+   */
+  createTriageDuplicateContextTransactionItems(
+    input: CreateTriageDuplicateContextTransactionItemsInput,
+  ): TriageDuplicateContextTransactionContribution {
+    const directoryId = readRequiredString(
+      input.directoryId,
+      'Triage context Workspace ID is required.',
+    )
+    const teamId = readRequiredString(
+      input.teamId,
+      'Triage context Team ID is required.',
+    )
+    const workItemId = readRequiredString(
+      input.workItemId,
+      'Triage context Work Item ID is required.',
+    )
+    const actorUserId = readRequiredString(
+      input.actorUserId,
+      'Triage context actor ID is required.',
+    )
+    const mergedAt = readTriageAcceptanceInstant(input.mergedAt)
+    if (
+      !Number.isSafeInteger(input.expectedWorkItemRevision) ||
+      input.expectedWorkItemRevision < 1
+    ) {
+      throw new ProjectDataError(
+        400,
+        'InvalidProjectWrite',
+        'Triage context Work Item revision is invalid.',
+      )
+    }
+    if (input.entry.workspaceId !== directoryId || input.entry.teamId !== teamId) {
+      throw new ProjectDataError(
+        409,
+        'TriageContextScopeMismatch',
+        'Triage context does not belong to the canonical Work Item scope.',
+      )
+    }
+    const snapshot = createPermissionSafeTriageContextSnapshot(input.entry, mergedAt)
+    const eventItem = this.createIssueEventItem({
+      directoryId,
+      teamId,
+      issueId: workItemId,
+      eventId: `${mergedAt}#triage-context-merged#${snapshot.triageEntryId}`,
+      eventType: 'triage-context-merged',
+      actorUserId,
+      summary: 'Duplicate Team Triage context was retained.',
+      triageContextSnapshot: snapshot,
+      createdAt: mergedAt,
+    })
+
+    return {
+      snapshot,
+      transactItems: [
+        {
+          ConditionCheck: {
+            TableName: this.issueTableName,
+            Key: {
+              directoryTeamId: createDirectoryTeamId(directoryId, teamId),
+              issueId: workItemId,
+            },
+            ConditionExpression: 'revision = :expectedRevision',
+            ExpressionAttributeValues: {
+              ':expectedRevision': input.expectedWorkItemRevision,
+            },
+          },
+        },
+        {
+          Put: {
+            TableName: this.eventTableName,
+            Item: eventItem,
+            ConditionExpression:
+              'attribute_not_exists(directoryTeamIssueId) AND attribute_not_exists(eventId)',
+          },
+        },
+      ],
+    }
+  }
+
+  /**
    * DynamoDB から指定 team ID の Issue 一覧を取得します。
    */
   async getTeamIssues(
@@ -1669,6 +1815,9 @@ export class DynamoDbTeamIssuesClient {
         ? { items: [] as TeamIssueEventItem[] }
         : await this.queryTeamIssueEventItems(directoryId, teamId, issueId, options)
       const events = eventPage.items
+      const triageContextSnapshots = events
+        .map((event) => event.triageContextSnapshot)
+        .filter(isDefined)
 
       return {
         issue: toTeamIssueResponseItem(issue),
@@ -1676,6 +1825,7 @@ export class DynamoDbTeamIssuesClient {
           .filter((event) => event.eventType === 'commented' && event.body)
           .map(toTeamIssueCommentResponseItem),
         activity: events.map(toTeamIssueActivityResponseItem),
+        ...(triageContextSnapshots.length > 0 ? { triageContextSnapshots } : {}),
         ...(eventPage.nextCursor ? { nextEventCursor: eventPage.nextCursor } : {}),
       } satisfies TeamIssueDetailResponse
     } catch (error) {
@@ -1697,6 +1847,7 @@ export class DynamoDbTeamIssuesClient {
     actorUserId: string,
     auditContext?: MutationAuditContext,
     requestConversion?: RequestConversionTransactionInput,
+    triageAcceptance?: TriageAcceptanceTransactionInput,
   ) {
     await this.ensureLocalTables()
     let auditPut: ReturnType<typeof createMutationAuditEventPut> = undefined
@@ -1728,7 +1879,7 @@ export class DynamoDbTeamIssuesClient {
       (idempotentIssueId === undefined) !==
         (idempotentRequestDigest === undefined) ||
       (idempotentIssueId !== undefined &&
-        !/^(?:api|import)-[a-f0-9]{48}$/u.test(idempotentIssueId)) ||
+      !/^(?:api|import|triage)-[a-f0-9]{48}$/u.test(idempotentIssueId)) ||
       (idempotentRequestDigest !== undefined &&
         !/^[a-f0-9]{64}$/u.test(idempotentRequestDigest))
     ) {
@@ -1741,6 +1892,19 @@ export class DynamoDbTeamIssuesClient {
     const sourceRequestId = requestConversion
       ? readSourceRequestId(requestConversion.submissionId)
       : undefined
+    const sourceTriageEntryId = triageAcceptance
+      ? readSourceTriageEntryId(triageAcceptance.entryId)
+      : undefined
+    if (
+      triageAcceptance &&
+      (idempotentIssueId === undefined || idempotentRequestDigest === undefined)
+    ) {
+      throw new ProjectDataError(
+        400,
+        'InvalidIdempotentWorkItemCreate',
+        'Triage acceptance requires deterministic Work Item create metadata.',
+      )
+    }
     const idempotencyResourceId = readIdempotencyResourceId(input.idempotencyResourceId)
     if (idempotentIssueId !== undefined && idempotencyResourceId !== undefined) {
       throw new ProjectDataError(
@@ -1750,7 +1914,9 @@ export class DynamoDbTeamIssuesClient {
       )
     }
     const directoryTeamId = createDirectoryTeamId(directoryId, teamId)
-    const now = new Date().toISOString()
+    const now = triageAcceptance
+      ? readTriageAcceptanceInstant(triageAcceptance.occurredAt)
+      : new Date().toISOString()
     const configurationConditionChecks = input.configurationConditionChecks ?? []
     const authorizationConditionEntries = [
       ...createCallerAuthorizationConditionEntries(input.authorizationConditionChecks),
@@ -1798,6 +1964,7 @@ export class DynamoDbTeamIssuesClient {
         assigneeUserId,
         creatorMemberKey: actorUserId,
         ...(sourceRequestId ? { sourceRequestId } : {}),
+        ...(sourceTriageEntryId ? { sourceTriageEntryId } : {}),
         workflowSchemaVersion,
         workflowStatusId,
         statusCategory,
@@ -1848,6 +2015,7 @@ export class DynamoDbTeamIssuesClient {
           'schedule',
           'priority',
           'sourceRequestId',
+          'sourceTriageEntryId',
         ]),
         metadata: {
           adapter: 'canonical-work-item',
@@ -1856,6 +2024,7 @@ export class DynamoDbTeamIssuesClient {
           issueId,
           projectId: assignedProjectId,
           sourceRequestId,
+          sourceTriageEntryId,
           deepLink: createTeamIssueDeepLink(teamId, issueId),
           notificationTitle: title,
           notificationCandidates: [
@@ -1894,6 +2063,7 @@ export class DynamoDbTeamIssuesClient {
             ...configurationConditionChecks,
             ...authorizationConditionChecks,
             ...requestConversionItems,
+            ...(triageAcceptance?.transactItems ?? []),
           ],
         }),
       )
@@ -3519,6 +3689,87 @@ export function isTeamIssueNotFoundError(error: unknown) {
 }
 
 /**
+ * Creates a de-identified Work Item-owned snapshot from a strongly read Triage Entry.
+ *
+ * Full source visibility permits only provider-secret-free lifecycle summaries. Metadata-only
+ * visibility retains counts but no history summaries, while restricted or already-redacted
+ * sources retain provenance timestamps with zero context counts.
+ *
+ * @param entry - Canonical Triage Entry observed immediately before duplicate resolution.
+ * @param mergedAt - Canonical instant shared with the atomic duplicate transaction.
+ * @returns A bounded snapshot safe to expose under canonical Work Item authorization.
+ */
+function createPermissionSafeTriageContextSnapshot(
+  entry: TriageEntry,
+  mergedAt: string,
+): WorkItemTriageContextSnapshot {
+  const redacted = entry.retention.redactedAt !== undefined
+  const retainCounts = !redacted && entry.permission.visibility !== 'denied'
+  const retainSummaries = !redacted && entry.permission.visibility === 'full'
+  const events: WorkItemTriageContextEventSnapshot[] = retainSummaries
+    ? entry.events.map((event) => ({
+        eventId: event.id,
+        type: event.type,
+        summary: event.summary,
+        createdAt: event.createdAt,
+      }))
+    : []
+  const availability = redacted
+    ? 'redacted'
+    : entry.permission.visibility === 'denied'
+      ? 'restricted'
+      : retainSummaries
+        ? 'summary-metadata'
+        : 'counts-only'
+
+  const snapshot: WorkItemTriageContextSnapshot = {
+    triageEntryId: readTriageContextEntryId(entry.id),
+    sourceKind: entry.source.kind,
+    visibilityAtMerge: entry.permission.visibility,
+    availability,
+    receivedAt: readTriageAcceptanceInstant(entry.receivedAt),
+    lastActivityAt: readTriageAcceptanceInstant(entry.lastActivityAt),
+    sourceRetentionExpiresAt: readTriageAcceptanceInstant(entry.retention.expiresAt),
+    ...(entry.retention.redactedAt
+      ? { sourceRedactedAt: readTriageAcceptanceInstant(entry.retention.redactedAt) }
+      : {}),
+    commentMetadataCount: retainCounts ? entry.sourcePreview.commentCount : 0,
+    attachmentMetadataCount: retainCounts ? entry.sourcePreview.attachmentCount : 0,
+    watcherMetadataCount: retainCounts ? entry.sourcePreview.watcherCount : 0,
+    events,
+    mergedAt,
+  }
+  if (!isWorkItemTriageContextSnapshot(snapshot)) {
+    throw new ProjectDataError(
+      409,
+      'InvalidTriageDuplicateContext',
+      'The permission-safe Triage context snapshot is invalid.',
+    )
+  }
+  return snapshot
+}
+
+/**
+ * Validates the broader provider-neutral Triage Entry identifier used by duplicate provenance.
+ *
+ * @param value - Strongly read Triage Entry identifier.
+ * @returns The normalized identifier.
+ */
+function readTriageContextEntryId(value: unknown): string {
+  if (
+    typeof value !== 'string' ||
+    !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/u.test(value)
+  ) {
+    throw new ProjectDataError(
+      400,
+      'InvalidProjectWrite',
+      'Triage context Entry ID is invalid.',
+    )
+  }
+  return value
+}
+
+/**
  * Parses a stored canonical Work Item into its public response representation.
  *
  * @param value - Untrusted DynamoDB item or replay payload.
@@ -3549,6 +3800,10 @@ export function toTeamIssueResponseItem(value: unknown): TeamIssueResponseItem {
 
   if (item.sourceRequestId) {
     issue.sourceRequestId = item.sourceRequestId
+  }
+
+  if (item.sourceTriageEntryId) {
+    issue.sourceTriageEntryId = item.sourceTriageEntryId
   }
 
   if (item.assignedProjectId) {
@@ -3677,9 +3932,167 @@ function isTeamIssueEventItem(value: unknown): value is TeamIssueEventItem {
     isTeamIssueActivityType(value.eventType) &&
     typeof value.actorUserId === 'string' &&
     (value.body === undefined || typeof value.body === 'string') &&
+    hasCanonicalTriageContextSnapshot(value.eventType, value.triageContextSnapshot) &&
     typeof value.summary === 'string' &&
     typeof value.createdAt === 'string'
   )
+}
+
+/**
+ * Validates the optional duplicate-context payload and binds it to its dedicated event type.
+ *
+ * @param eventType - Stored Work Item event discriminator.
+ * @param snapshot - Optional source-context payload.
+ * @returns Whether the payload is absent for normal events or canonical for merge events.
+ */
+function hasCanonicalTriageContextSnapshot(
+  eventType: TeamIssueActivityType,
+  snapshot: unknown,
+): snapshot is WorkItemTriageContextSnapshot | undefined {
+  return eventType === 'triage-context-merged'
+    ? isWorkItemTriageContextSnapshot(snapshot)
+    : snapshot === undefined
+}
+
+/**
+ * Validates a de-identified duplicate-context snapshot before returning it from a Work Item read.
+ *
+ * Exact key allowlists prevent unknown persisted fields from becoming an accidental data leak.
+ *
+ * @param value - Untrusted event payload read from DynamoDB.
+ * @returns Whether the payload is a canonical permission-safe snapshot.
+ */
+function isWorkItemTriageContextSnapshot(value: unknown): value is WorkItemTriageContextSnapshot {
+  if (!isRecord(value) || !Object.keys(value).every((key) =>
+    key === 'triageEntryId' ||
+    key === 'sourceKind' ||
+    key === 'visibilityAtMerge' ||
+    key === 'availability' ||
+    key === 'receivedAt' ||
+    key === 'lastActivityAt' ||
+    key === 'sourceRetentionExpiresAt' ||
+    key === 'sourceRedactedAt' ||
+    key === 'commentMetadataCount' ||
+    key === 'attachmentMetadataCount' ||
+    key === 'watcherMetadataCount' ||
+    key === 'events' ||
+    key === 'mergedAt'
+  )) {
+    return false
+  }
+  const receivedAt = readCanonicalContextInstant(value.receivedAt)
+  const lastActivityAt = readCanonicalContextInstant(value.lastActivityAt)
+  const mergedAt = readCanonicalContextInstant(value.mergedAt)
+  const sourceRedactedAt = value.sourceRedactedAt === undefined
+    ? undefined
+    : readCanonicalContextInstant(value.sourceRedactedAt)
+  if (!receivedAt || !lastActivityAt || !mergedAt) return false
+  if (Date.parse(receivedAt) > Date.parse(lastActivityAt) ||
+      Date.parse(lastActivityAt) > Date.parse(mergedAt)) return false
+  if (
+    (value.sourceRedactedAt !== undefined && !sourceRedactedAt) ||
+    (sourceRedactedAt !== undefined && Date.parse(sourceRedactedAt) > Date.parse(mergedAt))
+  ) {
+    return false
+  }
+  if (
+    typeof value.triageEntryId !== 'string' ||
+    !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/u.test(value.triageEntryId) ||
+    !isTriageContextSourceKind(value.sourceKind) ||
+    !isTriageContextVisibility(value.visibilityAtMerge) ||
+    !isTriageContextAvailability(value.availability) ||
+    !readCanonicalContextInstant(value.sourceRetentionExpiresAt) ||
+    !isNonnegativeSafeInteger(value.commentMetadataCount) ||
+    !isNonnegativeSafeInteger(value.attachmentMetadataCount) ||
+    !isNonnegativeSafeInteger(value.watcherMetadataCount) ||
+    !Array.isArray(value.events) ||
+    value.events.length > 100 ||
+    !value.events.every(isWorkItemTriageContextEventSnapshot) ||
+    value.events.some((event) => Date.parse(event.createdAt) > Date.parse(mergedAt))
+  ) {
+    return false
+  }
+  if (value.availability === 'summary-metadata') {
+    return value.visibilityAtMerge === 'full' && sourceRedactedAt === undefined
+  }
+  if (value.events.length > 0) return false
+  if (value.availability === 'counts-only') {
+    return value.visibilityAtMerge === 'metadata-only' && sourceRedactedAt === undefined
+  }
+  if (value.availability === 'restricted') {
+    return value.visibilityAtMerge === 'denied' && sourceRedactedAt === undefined &&
+      hasNoTriageContextCounts(value)
+  }
+  return sourceRedactedAt !== undefined && hasNoTriageContextCounts(value)
+}
+
+/**
+ * Validates one allowlisted lifecycle summary embedded in a duplicate-context snapshot.
+ *
+ * @param value - Untrusted nested event payload.
+ * @returns Whether the event contains only the provider-secret-free summary contract.
+ */
+function isWorkItemTriageContextEventSnapshot(
+  value: unknown,
+): value is WorkItemTriageContextEventSnapshot {
+  return isRecord(value) &&
+    Object.keys(value).every((key) =>
+      key === 'eventId' || key === 'type' || key === 'summary' || key === 'createdAt'
+    ) &&
+    typeof value.eventId === 'string' && value.eventId.length > 0 && value.eventId.length <= 200 &&
+    isTriageContextEventType(value.type) &&
+    typeof value.summary === 'string' && value.summary.length > 0 && value.summary.length <= 2_000 &&
+    readCanonicalContextInstant(value.createdAt) !== undefined
+}
+
+/** Returns whether all de-identified context counts are zero. */
+function hasNoTriageContextCounts(
+  value: Record<string, unknown>,
+): boolean {
+  return value.commentMetadataCount === 0 &&
+    value.attachmentMetadataCount === 0 &&
+    value.watcherMetadataCount === 0
+}
+
+/** Returns a canonical ISO instant or undefined for malformed input. */
+function readCanonicalContextInstant(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const instant = new Date(value)
+  return Number.isFinite(instant.getTime()) && instant.toISOString() === value
+    ? value
+    : undefined
+}
+
+/** Returns whether an unknown value is a supported Triage source kind. */
+function isTriageContextSourceKind(value: unknown): boolean {
+  return value === 'form' || value === 'chat' || value === 'email' ||
+    value === 'webhook' || value === 'manual-handoff'
+}
+
+/** Returns whether an unknown value is a source visibility state. */
+function isTriageContextVisibility(value: unknown): boolean {
+  return value === 'full' || value === 'metadata-only' || value === 'denied'
+}
+
+/** Returns whether an unknown value is a retained-context availability state. */
+function isTriageContextAvailability(value: unknown): boolean {
+  return value === 'summary-metadata' || value === 'counts-only' ||
+    value === 'restricted' || value === 'redacted'
+}
+
+/** Returns whether an unknown value is a provider-neutral Triage lifecycle event type. */
+function isTriageContextEventType(value: unknown): boolean {
+  return value === 'created' || value === 'assigned' || value === 'accepted' ||
+    value === 'linked' || value === 'duplicate' || value === 'declined' ||
+    value === 'snoozed' || value === 'information-requested' ||
+    value === 'activity-received' || value === 'resurfaced' ||
+    value === 'sla-breached' || value === 'escalated' ||
+    value === 'retention-redacted'
+}
+
+/** Returns whether an unknown value is a nonnegative integer safe for JSON and DynamoDB. */
+function isNonnegativeSafeInteger(value: unknown): boolean {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
 }
 
 function isProjectTaskItem(value: unknown): value is ProjectTaskItem {
@@ -3734,7 +4147,8 @@ function isProjectTaskPriority(value: unknown): value is ProjectTaskPriority {
 }
 
 function isTeamIssueActivityType(value: unknown): value is TeamIssueActivityType {
-  return value === 'created' || value === 'updated' || value === 'commented'
+  return value === 'created' || value === 'updated' || value === 'commented' ||
+    value === 'triage-context-merged'
 }
 
 /**
@@ -3924,6 +4338,52 @@ function readSourceRequestId(value: unknown) {
   }
 
   return value.trim()
+}
+
+/**
+ * Validates the source Triage Entry identifier persisted on a canonical Work Item.
+ *
+ * @param value - Candidate Entry identifier supplied by trusted Triage composition.
+ * @returns The normalized identifier.
+ */
+function readSourceTriageEntryId(value: unknown) {
+  if (
+    typeof value !== 'string' ||
+    !/^[A-Za-z0-9_-]{12,200}$/u.test(value.trim())
+  ) {
+    throw new ProjectDataError(
+      400,
+      'InvalidProjectWrite',
+      'Source Triage Entry ID is invalid.',
+    )
+  }
+
+  return value.trim()
+}
+
+/**
+ * Validates the mutation instant shared by Triage and canonical Work Item writes.
+ *
+ * @param value - Candidate ISO 8601 instant supplied by trusted composition.
+ * @returns The exact canonical UTC instant.
+ */
+function readTriageAcceptanceInstant(value: unknown) {
+  if (typeof value !== 'string') {
+    throw new ProjectDataError(
+      400,
+      'InvalidProjectWrite',
+      'Triage acceptance time is invalid.',
+    )
+  }
+  const instant = new Date(value)
+  if (!Number.isFinite(instant.getTime()) || instant.toISOString() !== value) {
+    throw new ProjectDataError(
+      400,
+      'InvalidProjectWrite',
+      'Triage acceptance time is invalid.',
+    )
+  }
+  return value
 }
 
 /**

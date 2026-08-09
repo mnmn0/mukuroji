@@ -288,6 +288,9 @@ const expectedWorkflowConfiguration = {
   REQUEST_TOKEN_HASH_SECRET: nestedSecret(
     ref(API_REQUEST_TOKEN_HASH_VALUE_SECRET_LOGICAL_ID),
   ),
+  TRIAGE_OWNER_ACTIVITY_INDEX_NAME: base64('triage-owner-activity-index'),
+  TRIAGE_TEAM_ACTIVITY_INDEX_NAME: base64('triage-team-activity-index'),
+  TRIAGE_WAKE_INDEX_NAME: base64('triage-wake-index'),
   WEBHOOK_DELIVERY_QUEUE_URL: base64(
     ref('WebhookDeliveryQueue2A244492'),
   ),

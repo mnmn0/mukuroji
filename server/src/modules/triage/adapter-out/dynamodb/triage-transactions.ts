@@ -1,0 +1,919 @@
+import { createHash } from 'node:crypto'
+import type { TransactWriteCommandInput } from '@aws-sdk/lib-dynamodb'
+import type {
+  TriageActionInput,
+  TriageEntry,
+  TriageEntryEvent,
+  TriageMergeReceipt,
+  TriageWorkItemReference,
+} from '@mukuroji/contracts'
+import {
+  applyTriageAction,
+  evaluateTriageSchedule,
+  recordTriageSourceActivity,
+  TriageError,
+  type TriageSourceActivity,
+} from '../../domain/triage-entry'
+import type { TriageIdempotency } from '../../triage'
+
+/** Default number of deterministic wake partitions used by the schedule index. */
+export const DEFAULT_TRIAGE_WAKE_SHARD_COUNT = 8
+
+/** One DynamoDB action that may be composed into a larger atomic write. */
+export type TriageTransactionItem = NonNullable<
+  TransactWriteCommandInput['TransactItems']
+>[number]
+
+/** A complete list of triage-owned DynamoDB transaction actions. */
+export type TriageTransactionItems = NonNullable<TransactWriteCommandInput['TransactItems']>
+
+/** The next entry together with transaction actions that have not been executed. */
+export type TriageTransactionContribution = {
+  /** The canonical entry returned after the combined transaction succeeds. */
+  entry: TriageEntry
+  /** Triage-owned actions to append to the caller's transaction. */
+  transactItems: TriageTransactionItems
+}
+
+/** Input for an operation receipt composed by an external owner transaction. */
+export type CreateTriageOperationReceiptTransactionPutInput = {
+  /** Request Intake table name. */
+  tableName: string
+  /** Resulting canonical entry returned on replay. */
+  entry: TriageEntry
+  /** Stable operation namespace. */
+  operation: string
+  /** Replay protection bound to the semantic input. */
+  idempotency: TriageIdempotency
+  /** Receipt TTL instant. */
+  expiresAt: string
+}
+
+/** Input for creating any source-owned triage entry atomically. */
+export type CreateTriageEntryTransactionItemsInput = {
+  /** Request Intake table name. */
+  tableName: string
+  /** Fully normalized initial entry. */
+  entry: TriageEntry
+  /** Fingerprint binding the source identity to its immutable initial payload. */
+  inputFingerprint: string
+  /** Number of deterministic wake shards configured on the table. */
+  wakeShardCount?: number
+}
+
+/** Input for composing a form submission triage row. */
+export type CreateFormTriageEntryTransactionPutInput = {
+  /** Request Intake table name. */
+  tableName: string
+  /** Fully normalized form-source entry. */
+  entry: TriageEntry
+  /** Number of deterministic wake shards configured on the table. */
+  wakeShardCount?: number
+}
+
+/** Input for atomically appending source activity and resurfacing when required. */
+export type CreateTriageSourceActivityTransactionItemsInput = {
+  /** Request Intake table name. */
+  tableName: string
+  /** Strongly read current entry. */
+  entry: TriageEntry
+  /** Provider-normalized stable activity. */
+  activity: TriageSourceActivity
+  /** Replay protection bound to the stable source event. */
+  idempotency: TriageIdempotency
+  /** Optional receipt TTL instant, defaulting to ninety days after activity. */
+  receiptExpiresAt?: string
+  /** Number of deterministic wake shards configured on the table. */
+  wakeShardCount?: number
+}
+
+/** Input for an atomic accept-create, accept-link, or duplicate contribution. */
+export type CreateTriageAcceptanceTransactionItemsInput = {
+  /** Request Intake table name. */
+  tableName: string
+  /** Strongly read current entry. */
+  entry: TriageEntry
+  /** Validated acceptance or duplicate action with expected revision. */
+  action: Extract<TriageActionInput, { action: 'accept' | 'duplicate' }>
+  /** Final canonical Work Item identity chosen by application composition. */
+  canonicalWorkItem: TriageWorkItemReference
+  /** Stable member or service actor identifier. */
+  actorId: string
+  /** ISO 8601 mutation instant shared with the Work Item transaction. */
+  now: string
+  /** Replay protection bound to the semantic acceptance input. */
+  idempotency: TriageIdempotency
+  /** Duplicate-context preservation proof required for duplicate actions. */
+  mergeReceipt?: TriageMergeReceipt
+  /** Optional receipt TTL instant, defaulting to ninety days after mutation. */
+  receiptExpiresAt?: string
+  /** Number of deterministic wake shards configured on the table. */
+  wakeShardCount?: number
+}
+
+/** Input for a non-Work-Item triage action transaction. */
+export type CreateTriageActionTransactionItemsInput = {
+  /** Request Intake table name. */
+  tableName: string
+  /** Strongly read current entry. */
+  entry: TriageEntry
+  /** Validated action that does not require Work Item orchestration. */
+  action: Exclude<TriageActionInput, { action: 'accept' | 'duplicate' }>
+  /** Stable member or service actor identifier. */
+  actorId: string
+  /** ISO 8601 mutation instant. */
+  now: string
+  /** Replay protection bound to the semantic action input. */
+  idempotency: TriageIdempotency
+  /** Optional receipt TTL instant, defaulting to ninety days after mutation. */
+  receiptExpiresAt?: string
+  /** Number of deterministic wake shards configured on the table. */
+  wakeShardCount?: number
+}
+
+/** Input for one strongly read schedule candidate. */
+export type CreateTriageScheduleTransactionItemsInput = {
+  /** Request Intake table name. */
+  tableName: string
+  /** Strongly read current entry. */
+  entry: TriageEntry
+  /** ISO 8601 schedule evaluation instant. */
+  now: string
+  /** Number of deterministic wake shards configured on the table. */
+  wakeShardCount?: number
+}
+
+/** Schedule contribution with explicit fired-deadline flags. */
+export type TriageScheduleTransactionContribution = TriageTransactionContribution & {
+  /** Whether a snoozed entry returned to pending. */
+  resurfaced: boolean
+  /** Whether response SLA breach was newly recorded. */
+  breached: boolean
+  /** Whether escalation was newly recorded. */
+  escalated: boolean
+  /** Whether retention redaction was newly applied. */
+  redacted: boolean
+}
+
+/** Builds the conditional root Put for a form submission transaction.
+ *
+ * @param input The form entry and Request Intake table identity.
+ * @returns A transaction Put that has not been executed.
+ */
+export function createFormTriageEntryTransactionPut(
+  input: CreateFormTriageEntryTransactionPutInput,
+): TriageTransactionItem {
+  if (input.entry.source.kind !== 'form') {
+    throw new TriageError(400, 'InvalidTriageSource', 'A form triage entry must use a form source.')
+  }
+  validateTriageEntryProjection(input.entry)
+  return createEntryPut(
+    requireText(input.tableName, 'Request Intake table name', 1_000),
+    input.entry,
+    normalizeWakeShardCount(input.wakeShardCount),
+  )
+}
+
+/** Builds all triage-owned writes for a form submission transaction.
+ *
+ * @param input The initial form entry and source fingerprint.
+ * @returns Root, source-claim, and immutable-event writes.
+ */
+export function createFormTriageEntryTransactionItems(
+  input: CreateTriageEntryTransactionItemsInput,
+): TriageTransactionItems {
+  if (input.entry.source.kind !== 'form') {
+    throw new TriageError(400, 'InvalidTriageSource', 'A form triage entry must use a form source.')
+  }
+  return createTriageEntryTransactionItems(input)
+}
+
+/** Builds all writes required to create a unique source entry.
+ *
+ * @param input The normalized entry, table, and initial payload fingerprint.
+ * @returns Root, source-claim, and immutable-event writes.
+ */
+export function createTriageEntryTransactionItems(
+  input: CreateTriageEntryTransactionItemsInput,
+): TriageTransactionItems {
+  const tableName = requireText(input.tableName, 'Request Intake table name', 1_000)
+  validateTriageEntryProjection(input.entry)
+  requireFingerprint(input.inputFingerprint)
+  const events = input.entry.events.map((event) => createEventPut(tableName, input.entry, event))
+  return [
+    createEntryPut(tableName, input.entry, normalizeWakeShardCount(input.wakeShardCount)),
+    createSourceClaimPut(tableName, input.entry, input.inputFingerprint),
+    ...events,
+  ]
+}
+
+/** Builds an activity receipt and revision-conditional resurface transaction.
+ *
+ * @param input The current entry, normalized activity, and replay protection.
+ * @returns The next entry and unexecuted transaction items.
+ */
+export function createTriageSourceActivityTransactionItems(
+  input: CreateTriageSourceActivityTransactionItemsInput,
+): TriageTransactionContribution {
+  const tableName = requireText(input.tableName, 'Request Intake table name', 1_000)
+  validateTriageEntryProjection(input.entry)
+  validateIdempotency(input.idempotency)
+  const entry = recordTriageSourceActivity(input.entry, input.activity)
+  const newEvents = findNewEvents(input.entry, entry)
+  return {
+    entry,
+    transactItems: [
+      createEntryUpdate(
+        tableName,
+        entry,
+        input.entry.revision,
+        normalizeWakeShardCount(input.wakeShardCount),
+      ),
+      ...newEvents.map((event) => createEventPut(tableName, entry, event)),
+      createReceiptPut(
+        tableName,
+        entry,
+        'activity',
+        input.idempotency,
+        input.receiptExpiresAt ?? addDays(input.activity.occurredAt, 90),
+      ),
+    ],
+  }
+}
+
+/** Builds triage acceptance writes for composition with Work Item writes.
+ *
+ * @param input The current entry, final Work Item reference, actor, and replay protection.
+ * @returns The accepted entry and unexecuted triage transaction actions.
+ */
+export function createTriageAcceptanceTransactionItems(
+  input: CreateTriageAcceptanceTransactionItemsInput,
+): TriageTransactionContribution {
+  const tableName = requireText(input.tableName, 'Request Intake table name', 1_000)
+  validateTriageEntryProjection(input.entry)
+  validateIdempotency(input.idempotency)
+  const entry = applyTriageAction(input.entry, input.action, {
+    actorId: input.actorId,
+    now: input.now,
+    canonicalWorkItem: input.canonicalWorkItem,
+    ...(input.mergeReceipt ? { mergeReceipt: input.mergeReceipt } : {}),
+  })
+  return createActionContribution(
+    tableName,
+    input.entry,
+    entry,
+    input.idempotency,
+    input.receiptExpiresAt ?? addDays(input.now, 90),
+    normalizeWakeShardCount(input.wakeShardCount),
+    true,
+  )
+}
+
+/** Builds a replay-safe transaction for an action without Work Item dependencies.
+ *
+ * @param input The current entry, action, actor, and replay protection.
+ * @returns The next entry and unexecuted transaction actions.
+ */
+export function createTriageActionTransactionItems(
+  input: CreateTriageActionTransactionItemsInput,
+): TriageTransactionContribution {
+  const tableName = requireText(input.tableName, 'Request Intake table name', 1_000)
+  validateTriageEntryProjection(input.entry)
+  validateIdempotency(input.idempotency)
+  const entry = applyTriageAction(input.entry, input.action, {
+    actorId: input.actorId,
+    now: input.now,
+  })
+  return createActionContribution(
+    tableName,
+    input.entry,
+    entry,
+    input.idempotency,
+    input.receiptExpiresAt ?? addDays(input.now, 90),
+    normalizeWakeShardCount(input.wakeShardCount),
+    false,
+  )
+}
+
+/** Builds a revision-conditional schedule update when a deadline fired.
+ *
+ * @param input The current entry and schedule instant.
+ * @returns The updated entry, fired flags, and unexecuted transaction items.
+ */
+export function createTriageScheduleTransactionItems(
+  input: CreateTriageScheduleTransactionItemsInput,
+): TriageScheduleTransactionContribution {
+  const tableName = requireText(input.tableName, 'Request Intake table name', 1_000)
+  validateTriageEntryProjection(input.entry)
+  const evaluation = evaluateTriageSchedule(input.entry, input.now)
+  const changed = evaluation.entry.revision !== input.entry.revision
+  return {
+    entry: evaluation.entry,
+    resurfaced: evaluation.resurfaced,
+    breached: evaluation.breached,
+    escalated: evaluation.escalated,
+    redacted: evaluation.redacted,
+    transactItems: changed
+      ? [
+          createEntryUpdate(
+            tableName,
+            evaluation.entry,
+            input.entry.revision,
+            normalizeWakeShardCount(input.wakeShardCount),
+          ),
+          ...findNewEvents(input.entry, evaluation.entry).map((event) =>
+            createEventPut(tableName, evaluation.entry, event)),
+        ]
+      : [],
+  }
+}
+
+/** Returns the physical primary key for an entry.
+ *
+ * @param workspaceId The owning Workspace ID.
+ * @param entryId The entry ID.
+ * @returns The Request Intake table primary key.
+ */
+export function createTriageEntryKey(
+  workspaceId: string,
+  entryId: string,
+): { scopeKey: string; recordKey: string } {
+  return {
+    scopeKey: createWorkspaceScopeKey(workspaceId),
+    recordKey: `TRIAGE#${requireIdentifier(entryId, 'Triage entry ID')}`,
+  }
+}
+
+/** Returns the source uniqueness lookup key.
+ *
+ * @param workspaceId The owning Workspace ID.
+ * @param sourceKind The source kind.
+ * @param sourceId The provider-stable source ID.
+ * @returns The digest-based lookup key.
+ */
+export function createTriageSourceClaimKey(
+  workspaceId: string,
+  sourceKind: TriageEntry['source']['kind'],
+  sourceId: string,
+): { scopeKey: string; recordKey: 'LOOKUP' } {
+  const digest = digestText([
+    requireWorkspaceId(workspaceId),
+    sourceKind,
+    requireText(sourceId, 'Triage source ID', 500),
+  ].join('\u0000'))
+  return { scopeKey: `TRIAGE_SOURCE#${digest}`, recordKey: 'LOOKUP' }
+}
+
+/** Returns an operation idempotency receipt key.
+ *
+ * @param workspaceId The owning Workspace ID.
+ * @param entryId The target entry ID.
+ * @param operation The operation namespace.
+ * @param idempotencyKey The caller-selected retry key.
+ * @returns The digest-based receipt key.
+ */
+export function createTriageReceiptKey(
+  workspaceId: string,
+  entryId: string,
+  operation: string,
+  idempotencyKey: string,
+): { scopeKey: string; recordKey: 'RECEIPT' } {
+  const digest = digestText([
+    requireWorkspaceId(workspaceId),
+    requireIdentifier(entryId, 'Triage entry ID'),
+    requireText(operation, 'Triage operation', 100),
+    requireText(idempotencyKey, 'Triage idempotency key', 200),
+  ].join('\u0000'))
+  return { scopeKey: `TRIAGE_RECEIPT#${digest}`, recordKey: 'RECEIPT' }
+}
+
+/** Builds a fingerprint-bound receipt Put for an externally composed transaction.
+ *
+ * @param input The table, operation, result, and replay protection.
+ * @returns An immutable receipt Put that has not been executed.
+ */
+export function createTriageOperationReceiptTransactionPut(
+  input: CreateTriageOperationReceiptTransactionPutInput,
+): TriageTransactionItem {
+  validateTriageEntryProjection(input.entry)
+  validateIdempotency(input.idempotency)
+  return createReceiptPut(
+    requireText(input.tableName, 'Request Intake table name', 1_000),
+    input.entry,
+    requireText(input.operation, 'Triage operation', 100),
+    input.idempotency,
+    input.expiresAt,
+  )
+}
+
+
+/** Returns a Workspace scope key shared with Request Intake rows.
+ *
+ * @param workspaceId The Workspace directory ID.
+ * @returns The table partition key.
+ */
+export function createWorkspaceScopeKey(workspaceId: string): string {
+  return `WORKSPACE#${requireWorkspaceId(workspaceId)}`
+}
+
+/** Returns the reverse source association prefix for a Work Item.
+ *
+ * @param teamId The owning Team ID.
+ * @param workItemId The canonical Work Item ID.
+ * @returns The physical record-key prefix.
+ */
+export function createTriageWorkItemSourcePrefix(teamId: string, workItemId: string): string {
+  return `TRIAGE_WORK_ITEM#${requireIdentifier(teamId, 'Team ID')}#${requireIdentifier(workItemId, 'Work Item ID')}#`
+}
+
+/** Strictly decodes an entry embedded in a persistence row.
+ *
+ * @param value The untrusted DynamoDB item.
+ * @returns The canonical entry, or undefined for another or malformed row.
+ */
+export function decodeTriageEntryRow(value: unknown): TriageEntry | undefined {
+  if (!isRecord(value) || value.entryType !== 'triage-entry') return undefined
+  return isTriageEntry(value.entry) ? value.entry : undefined
+}
+
+/** Validates a triage entry before storing it.
+ *
+ * @param entry The entry projection to validate.
+ */
+export function validateTriageEntryProjection(entry: TriageEntry): void {
+  requireWorkspaceId(entry.workspaceId)
+  requireIdentifier(entry.id, 'Triage entry ID')
+  requireIdentifier(entry.teamId, 'Team ID')
+  requireText(entry.source.sourceId, 'Triage source ID', 500)
+  requireText(entry.sourcePreview.title, 'Triage source title', 500)
+  requireText(entry.sourcePreview.body, 'Triage source preview', 8_000, true)
+  if (entry.sourcePreview.permalink !== undefined) {
+    requireHttpsUrl(entry.sourcePreview.permalink, 'Triage source permalink')
+  }
+  requireIsoInstant(entry.receivedAt, 'Triage received time')
+  requireIsoInstant(entry.lastActivityAt, 'Triage last activity time')
+  requireIsoInstant(entry.retention.expiresAt, 'Triage retention deadline')
+  if (!Number.isSafeInteger(entry.revision) || entry.revision < 1) {
+    throw new TriageError(400, 'InvalidTriageEntry', 'Triage entry revision is invalid.')
+  }
+}
+
+/** Creates an action contribution shared by resolved and ordinary actions. */
+function createActionContribution(
+  tableName: string,
+  current: TriageEntry,
+  entry: TriageEntry,
+  idempotency: TriageIdempotency,
+  receiptExpiresAt: string,
+  wakeShardCount: number,
+  associateWorkItem: boolean,
+): TriageTransactionContribution {
+  const events = findNewEvents(current, entry)
+  const association = associateWorkItem
+    ? [createWorkItemAssociationPut(tableName, entry)]
+    : []
+  return {
+    entry,
+    transactItems: [
+      createEntryUpdate(tableName, entry, current.revision, wakeShardCount),
+      ...events.map((event) => createEventPut(tableName, entry, event)),
+      ...association,
+      createReceiptPut(tableName, entry, 'action', idempotency, receiptExpiresAt),
+    ],
+  }
+}
+
+/** Builds an immutable root entry Put. */
+function createEntryPut(
+  tableName: string,
+  entry: TriageEntry,
+  wakeShardCount: number,
+): TriageTransactionItem {
+  return {
+    Put: {
+      TableName: tableName,
+      Item: createStoredEntry(entry, wakeShardCount),
+      ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
+    },
+  }
+}
+
+/** Builds a revision-conditional root entry Update. */
+function createEntryUpdate(
+  tableName: string,
+  entry: TriageEntry,
+  expectedRevision: number,
+  wakeShardCount: number,
+): TriageTransactionItem {
+  const stored = createStoredEntry(entry, wakeShardCount)
+  const values: Record<string, unknown> = {
+    ':entry': entry,
+    ':revision': entry.revision,
+    ':expectedRevision': expectedRevision,
+    ':state': entry.state,
+    ':teamId': entry.teamId,
+    ':sourceKind': entry.source.kind,
+    ':teamKey': stored.triageTeamKey,
+    ':activityKey': stored.triageActivityKey,
+  }
+  const sets = [
+    '#entry = :entry',
+    '#revision = :revision',
+    '#state = :state',
+    'teamId = :teamId',
+    'sourceKind = :sourceKind',
+    'triageTeamKey = :teamKey',
+    'triageActivityKey = :activityKey',
+  ]
+  const removes: string[] = []
+  if (stored.triageOwnerKey) {
+    values[':ownerKey'] = stored.triageOwnerKey
+    sets.push('triageOwnerKey = :ownerKey')
+  } else {
+    removes.push('triageOwnerKey')
+  }
+  if (stored.triageWakeShard && stored.triageNextWakeAt) {
+    values[':wakeShard'] = stored.triageWakeShard
+    values[':nextWakeAt'] = stored.triageNextWakeAt
+    sets.push('triageWakeShard = :wakeShard', 'triageNextWakeAt = :nextWakeAt')
+  } else {
+    removes.push('triageWakeShard', 'triageNextWakeAt')
+  }
+  if (entry.canonicalWorkItem) {
+    values[':workItemId'] = entry.canonicalWorkItem.workItemId
+    sets.push('canonicalWorkItemId = :workItemId')
+  } else {
+    removes.push('canonicalWorkItemId')
+  }
+  return {
+    Update: {
+      TableName: tableName,
+      Key: createTriageEntryKey(entry.workspaceId, entry.id),
+      UpdateExpression: `SET ${sets.join(', ')}${removes.length ? ` REMOVE ${removes.join(', ')}` : ''}`,
+      ConditionExpression: '#revision = :expectedRevision AND teamId = :teamId',
+      ExpressionAttributeNames: {
+        '#entry': 'entry',
+        '#revision': 'revision',
+        '#state': 'state',
+      },
+      ExpressionAttributeValues: values,
+    },
+  }
+}
+
+/** Creates one persisted root item with sparse index attributes. */
+function createStoredEntry(entry: TriageEntry, wakeShardCount: number) {
+  const nextWakeAt = calculateNextWakeAt(entry)
+  const triageOwnerKey = createOwnerIndexKey(entry)
+  return {
+    entryType: 'triage-entry',
+    ...createTriageEntryKey(entry.workspaceId, entry.id),
+    entry,
+    revision: entry.revision,
+    state: entry.state,
+    teamId: entry.teamId,
+    sourceKind: entry.source.kind,
+    triageTeamKey: `WORKSPACE#${entry.workspaceId}#TEAM#${entry.teamId}`,
+    triageActivityKey: `${entry.lastActivityAt}#${entry.id}`,
+    ...(triageOwnerKey ? { triageOwnerKey } : {}),
+    ...(nextWakeAt
+      ? {
+          triageWakeShard: `WAKE#${calculateWakeShard(entry.id, wakeShardCount)}`,
+          triageNextWakeAt: `${nextWakeAt}#${entry.id}`,
+        }
+      : {}),
+    ...(entry.canonicalWorkItem
+      ? { canonicalWorkItemId: entry.canonicalWorkItem.workItemId }
+      : {}),
+  }
+}
+
+/** Builds a source uniqueness claim. */
+function createSourceClaimPut(
+  tableName: string,
+  entry: TriageEntry,
+  inputFingerprint: string,
+): TriageTransactionItem {
+  return {
+    Put: {
+      TableName: tableName,
+      Item: {
+        entryType: 'triage-source-claim',
+        ...createTriageSourceClaimKey(entry.workspaceId, entry.source.kind, entry.source.sourceId),
+        workspaceId: entry.workspaceId,
+        entryId: entry.id,
+        sourceKind: entry.source.kind,
+        sourceId: entry.source.sourceId,
+        inputFingerprint,
+        createdAt: entry.createdAt,
+      },
+      ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
+    },
+  }
+}
+
+/** Builds an immutable event Put. */
+function createEventPut(
+  tableName: string,
+  entry: TriageEntry,
+  event: TriageEntryEvent,
+): TriageTransactionItem {
+  return {
+    Put: {
+      TableName: tableName,
+      Item: {
+        entryType: 'triage-entry-event',
+        scopeKey: createWorkspaceScopeKey(entry.workspaceId),
+        recordKey: `TRIAGE_EVENT#${entry.id}#${event.createdAt}#${event.id}`,
+        entryId: entry.id,
+        event,
+      },
+      ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
+    },
+  }
+}
+
+/** Builds an immutable reverse Work Item source association. */
+function createWorkItemAssociationPut(tableName: string, entry: TriageEntry): TriageTransactionItem {
+  if (!entry.canonicalWorkItem) {
+    throw new TriageError(409, 'TriageWorkItemUnresolved', 'The canonical Work Item is missing.')
+  }
+  return {
+    Put: {
+      TableName: tableName,
+      Item: {
+        entryType: 'triage-work-item-source',
+        scopeKey: createWorkspaceScopeKey(entry.workspaceId),
+        recordKey: `${createTriageWorkItemSourcePrefix(
+          entry.canonicalWorkItem.teamId,
+          entry.canonicalWorkItem.workItemId,
+        )}${entry.id}`,
+        workspaceId: entry.workspaceId,
+        teamId: entry.canonicalWorkItem.teamId,
+        workItemId: entry.canonicalWorkItem.workItemId,
+        entryId: entry.id,
+        source: { kind: entry.source.kind, sourceId: entry.source.sourceId },
+        updatedAt: entry.updatedAt,
+      },
+      ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
+    },
+  }
+}
+
+/** Builds a fingerprint-bound operation receipt Put. */
+function createReceiptPut(
+  tableName: string,
+  entry: TriageEntry,
+  operation: string,
+  idempotency: TriageIdempotency,
+  expiresAtValue: string,
+): TriageTransactionItem {
+  const expiresAt = requireIsoInstant(expiresAtValue, 'Triage receipt expiry')
+  return {
+    Put: {
+      TableName: tableName,
+      Item: {
+        entryType: 'triage-operation-receipt',
+        ...createTriageReceiptKey(entry.workspaceId, entry.id, operation, idempotency.key),
+        workspaceId: entry.workspaceId,
+        entryId: entry.id,
+        operation,
+        inputFingerprint: idempotency.fingerprint,
+        resultRevision: entry.revision,
+        createdAt: entry.updatedAt,
+        expiresAt: Math.floor(Date.parse(expiresAt) / 1_000),
+      },
+      ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
+    },
+  }
+}
+
+/** Finds events appended after a strongly read projection. */
+function findNewEvents(current: TriageEntry, next: TriageEntry): TriageEntryEvent[] {
+  const currentIds = new Set(current.events.map((event) => event.id))
+  return next.events.filter((event) => !currentIds.has(event.id))
+}
+
+/** Calculates the earliest deadline represented by the sparse wake index. */
+function calculateNextWakeAt(entry: TriageEntry): string | undefined {
+  const candidates: string[] = []
+  if (!entry.retention.redactedAt) candidates.push(entry.retention.expiresAt)
+  if (entry.state !== 'accepted' && entry.state !== 'duplicate' && entry.state !== 'declined') {
+    if (entry.state === 'snoozed' && entry.snoozedUntil) candidates.push(entry.snoozedUntil)
+    if (entry.sla && !entry.sla.breachedAt) candidates.push(entry.sla.dueAt)
+    if (entry.sla?.escalationDueAt && !entry.sla.escalatedAt) {
+      candidates.push(entry.sla.escalationDueAt)
+    }
+  }
+  return candidates.sort()[0]
+}
+
+/** Creates a sparse owner index partition key. */
+function createOwnerIndexKey(entry: TriageEntry): string {
+  return `WORKSPACE#${entry.workspaceId}#TEAM#${entry.teamId}#OWNER#${entry.ownerUserId ?? 'UNOWNED'}`
+}
+
+/** Deterministically maps an entry ID to one wake shard. */
+function calculateWakeShard(entryId: string, shardCount: number): number {
+  const prefix = digestText(entryId).slice(0, 8)
+  return Number.parseInt(prefix, 16) % shardCount
+}
+
+/** Adds whole UTC days to an instant. */
+function addDays(value: string, days: number): string {
+  const instant = new Date(requireIsoInstant(value, 'Triage receipt base time'))
+  instant.setUTCDate(instant.getUTCDate() + days)
+  return instant.toISOString()
+}
+
+/** Validates replay protection. */
+function validateIdempotency(value: TriageIdempotency): void {
+  requireText(value.key, 'Triage idempotency key', 200)
+  requireFingerprint(value.fingerprint)
+}
+
+/** Validates a SHA-256 semantic input fingerprint. */
+function requireFingerprint(value: string): void {
+  if (!/^[a-f0-9]{64}$/u.test(value)) {
+    throw new TriageError(400, 'InvalidTriageIdempotency', 'The input fingerprint is invalid.')
+  }
+}
+
+/** Normalizes the configured wake shard count. */
+function normalizeWakeShardCount(value: number | undefined): number {
+  const count = value ?? DEFAULT_TRIAGE_WAKE_SHARD_COUNT
+  if (!Number.isSafeInteger(count) || count < 1 || count > 128) {
+    throw new TriageError(500, 'InvalidTriageConfiguration', 'The wake shard count is invalid.')
+  }
+  return count
+}
+
+/** Creates a SHA-256 hex digest. */
+function digestText(value: string): string {
+  return createHash('sha256').update(value).digest('hex')
+}
+
+/** Requires a conservative identifier. */
+function requireIdentifier(value: string, label: string): string {
+  const identifier = requireText(value, label, 200)
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u.test(identifier)) {
+    throw new TriageError(400, 'InvalidTriageInput', `${label} is invalid.`)
+  }
+  return identifier
+}
+
+/**
+ * Validates a canonical Workspace partition identifier without rejecting Cognito-style IDs.
+ *
+ * Workspace directory IDs legitimately contain delimiters such as `#` and `@`; they are
+ * stored as DynamoDB scalar values, so only blank, oversized, and control-character values
+ * need to be rejected here.
+ *
+ * @param value - Workspace identifier supplied by an authenticated boundary.
+ * @returns The normalized Workspace identifier.
+ */
+function requireWorkspaceId(value: string): string {
+  const workspaceId = requireText(value, 'Workspace ID', 500)
+  if ([...workspaceId].some((character) => {
+    const codePoint = character.codePointAt(0) ?? 0
+    return codePoint <= 31 || codePoint === 127
+  })) {
+    throw new TriageError(400, 'InvalidTriageInput', 'Workspace ID is invalid.')
+  }
+  return workspaceId
+}
+
+/** Requires bounded text, optionally allowing an empty value. */
+function requireText(
+  value: string,
+  label: string,
+  maximumLength: number,
+  allowEmpty = false,
+): string {
+  const normalized = value.trim()
+  if ((!allowEmpty && !normalized) || normalized.length > maximumLength) {
+    throw new TriageError(400, 'InvalidTriageInput', `${label} is invalid.`)
+  }
+  return normalized
+}
+
+/** Requires a parseable ISO 8601 instant. */
+function requireIsoInstant(value: string, label: string): string {
+  const instant = new Date(value)
+  if (!Number.isFinite(instant.getTime())) {
+    throw new TriageError(400, 'InvalidTriageInput', `${label} is invalid.`)
+  }
+  return instant.toISOString()
+}
+
+/** Requires a bounded HTTPS URL. */
+function requireHttpsUrl(value: string, label: string): string {
+  if (value.length > 2_048) {
+    throw new TriageError(400, 'InvalidTriageInput', `${label} is invalid.`)
+  }
+  let url: URL
+  try {
+    url = new URL(value)
+  } catch (error) {
+    throw new TriageError(400, 'InvalidTriageInput', `${label} is invalid.`, { cause: error })
+  }
+  if (url.protocol !== 'https:' || url.username || url.password) {
+    throw new TriageError(400, 'InvalidTriageInput', `${label} is invalid.`)
+  }
+  return url.toString()
+}
+
+/** Checks whether an untrusted value is a non-array object. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** Narrowly validates a persisted entry projection. */
+function isTriageEntry(value: unknown): value is TriageEntry {
+  if (!isRecord(value)) return false
+  if (
+    value.schemaVersion !== 1 ||
+    typeof value.id !== 'string' ||
+    typeof value.workspaceId !== 'string' ||
+    typeof value.teamId !== 'string' ||
+    typeof value.receivedAt !== 'string' ||
+    typeof value.lastActivityAt !== 'string' ||
+    typeof value.revision !== 'number' ||
+    typeof value.createdAt !== 'string' ||
+    typeof value.updatedAt !== 'string' ||
+    !isTriageState(value.state) ||
+    !isSource(value.source) ||
+    !isPreview(value.sourcePreview) ||
+    !isRequester(value.requester) ||
+    !isPermission(value.permission) ||
+    !isRouting(value.routing) ||
+    !isRetention(value.retention) ||
+    !isCapabilities(value.capabilities) ||
+    !Array.isArray(value.events) ||
+    !value.events.every(isEvent)
+  ) return false
+  return true
+}
+
+/** Validates a lifecycle state. */
+function isTriageState(value: unknown): value is TriageEntry['state'] {
+  return value === 'pending' || value === 'accepted' || value === 'duplicate' ||
+    value === 'declined' || value === 'snoozed' || value === 'needs-information'
+}
+
+/** Validates the persisted source reference fields required by storage. */
+function isSource(value: unknown): value is TriageEntry['source'] {
+  return isRecord(value) &&
+    (value.kind === 'form' || value.kind === 'chat' || value.kind === 'email' ||
+      value.kind === 'webhook' || value.kind === 'manual-handoff') &&
+    typeof value.sourceId === 'string'
+}
+
+/** Validates a source preview. */
+function isPreview(value: unknown): value is TriageEntry['sourcePreview'] {
+  return isRecord(value) && typeof value.title === 'string' && typeof value.body === 'string' &&
+    typeof value.attachmentCount === 'number' && typeof value.commentCount === 'number' &&
+    typeof value.watcherCount === 'number' && typeof value.sanitized === 'boolean' &&
+    typeof value.truncated === 'boolean' &&
+    (value.permalink === undefined || typeof value.permalink === 'string')
+}
+
+/** Validates a requester projection. */
+function isRequester(value: unknown): value is TriageEntry['requester'] {
+  return isRecord(value) && typeof value.displayName === 'string' && typeof value.guest === 'boolean'
+}
+
+/** Validates a permission projection. */
+function isPermission(value: unknown): value is TriageEntry['permission'] {
+  return isRecord(value) &&
+    (value.visibility === 'full' || value.visibility === 'metadata-only' || value.visibility === 'denied') &&
+    typeof value.canReply === 'boolean' && typeof value.guestVisible === 'boolean' &&
+    typeof value.checkedAt === 'string'
+}
+
+/** Validates a routing projection. */
+function isRouting(value: unknown): value is TriageEntry['routing'] {
+  return isRecord(value) && typeof value.reason === 'string' && Array.isArray(value.candidates)
+}
+
+/** Validates retention metadata. */
+function isRetention(value: unknown): value is TriageEntry['retention'] {
+  return isRecord(value) && typeof value.expiresAt === 'string'
+}
+
+/** Validates a capability projection. */
+function isCapabilities(value: unknown): value is TriageEntry['capabilities'] {
+  return isRecord(value) &&
+    typeof value.canAssign === 'boolean' && typeof value.canAcceptCreate === 'boolean' &&
+    typeof value.canAcceptLink === 'boolean' && typeof value.canMarkDuplicate === 'boolean' &&
+    typeof value.canDecline === 'boolean' && typeof value.canSnooze === 'boolean' &&
+    typeof value.canRequestInformation === 'boolean' && typeof value.canReply === 'boolean' &&
+    typeof value.canViewInternalContext === 'boolean'
+}
+
+/** Validates an immutable event projection. */
+function isEvent(value: unknown): value is TriageEntryEvent {
+  return isRecord(value) && typeof value.id === 'string' && typeof value.type === 'string' &&
+    typeof value.actorId === 'string' && typeof value.summary === 'string' &&
+    typeof value.createdAt === 'string'
+}

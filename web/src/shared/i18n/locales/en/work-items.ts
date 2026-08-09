@@ -161,6 +161,18 @@ export const workItemsMessages = {
   'tasks.detail.error': 'Failed to load task details',
   'tasks.detail.conflict': 'Another member updated this first. Review the latest details and save again.',
   'tasks.detail.description': 'Description',
+  'tasks.detail.openTriageSource': 'Open source in Team Triage',
+  'tasks.detail.triageContext.title': 'Retained intake context',
+  'tasks.detail.triageContext.counts':
+    '{comments} comments · {attachments} attachments · {watchers} watchers',
+  'tasks.detail.triageContext.availability.summaryMetadata':
+    'Safe activity summaries and metadata were retained with this Work Item.',
+  'tasks.detail.triageContext.availability.countsOnly':
+    'Only permission-safe metadata counts were retained.',
+  'tasks.detail.triageContext.availability.restricted':
+    'Source context was restricted when this duplicate was merged.',
+  'tasks.detail.triageContext.availability.redacted':
+    'Source context had already been redacted when this duplicate was merged.',
   'tasks.detail.readOnly': 'This task is read-only because its details could not be loaded.',
   'tasks.detail.readOnlyPermission': 'You do not have permission to edit this task. Ask a Workspace owner or admin for access.',
   'tasks.comment.readOnly': 'Comments cannot be added because this task\'s details could not be loaded.',
