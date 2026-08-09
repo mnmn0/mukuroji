@@ -84,9 +84,10 @@ export function IssueCollaborationPanel({
   const [promotedContextDraft, setPromotedContextDraft] =
     useState<IssueContextDraft>()
   const [selectedSource, setSelectedSource] = useState<IssueSourceTarget>()
+  const [hasOverriddenDraftTab, setHasOverriddenDraftTab] = useState(false)
   const contextDraft = externalContextDraft ?? promotedContextDraft
   const panelIdPrefix = useId()
-  const selectedTab = contextDraft
+  const selectedTab = contextDraft && !hasOverriddenDraftTab
     ? 'decisions'
     : route?.collaborationTab ?? uncontrolledTab
   const uniquePresence = useMemo(
@@ -126,7 +127,12 @@ export function IssueCollaborationPanel({
    */
   function promoteSource(source: CuratedContextSource) {
     setPromotedContextDraft({ body: '', kind: 'context', source, title: '' })
-    selectTab('decisions')
+    setHasOverriddenDraftTab(false)
+    if (route?.collaborationTab === undefined) {
+      setUncontrolledTab('decisions')
+    } else {
+      route.onCollaborationTabChange?.('decisions')
+    }
   }
 
   /**
@@ -204,6 +210,7 @@ export function IssueCollaborationPanel({
    * @param tab - Collaboration tab to display.
    */
   function selectTab(tab: IssueCollaborationTab) {
+    if (contextDraft) setHasOverriddenDraftTab(true)
     if (route?.collaborationTab === undefined) setUncontrolledTab(tab)
     route?.onCollaborationTabChange?.(tab)
   }

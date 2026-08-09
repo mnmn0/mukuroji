@@ -40,7 +40,7 @@ export type RelatedDocumentsProps = {
 }
 
 /**
- * Work Item / Project / Goal から参照元 Documents へ戻る panel です。
+ * Renders a panel that links a Work Item, Project, or Goal to related Documents.
  */
 export function RelatedDocuments({
   accessToken,

@@ -1563,15 +1563,21 @@ function CommentComposer({
     }
 
     setIsSubmitting(true)
-    const succeeded = await onSubmit({
-      bodyMarkdown: trimmedBody,
-      mentionMemberKeys: resolveIssueMentionMemberKeys(
-        trimmedBody,
-        mentionMemberKeys,
-        members,
-      ),
-    })
-    setIsSubmitting(false)
+    let succeeded = false
+    try {
+      succeeded = await onSubmit({
+        bodyMarkdown: trimmedBody,
+        mentionMemberKeys: resolveIssueMentionMemberKeys(
+          trimmedBody,
+          mentionMemberKeys,
+          members,
+        ),
+      })
+    } catch (error) {
+      console.error('Failed to submit collaboration comment.', error)
+    } finally {
+      setIsSubmitting(false)
+    }
 
     if (succeeded && !initialBodyMarkdown) {
       setBodyMarkdown('')

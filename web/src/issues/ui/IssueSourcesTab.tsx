@@ -345,7 +345,7 @@ function isExternalPermalink(permalink: string): boolean {
  */
 function isNavigablePermalink(permalink: string): boolean {
   if (isExternalPermalink(permalink) || permalink.startsWith('?')) return true
-  if (permalink.startsWith('//')) return false
+  if (/^[/\\]{2}/u.test(permalink)) return false
   return permalink.startsWith('/') || permalink.startsWith('./') || permalink.startsWith('../')
 }
 

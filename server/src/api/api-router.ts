@@ -19979,7 +19979,7 @@ async function reconcileCuratedContextSourceForViewer(
     }
     const bodyWasEdited = source.originalBody === undefined
       ? !sourceRevisionMatches(source.capturedRevision, comment.version)
-      : source.originalBody !== comment.bodyMarkdown
+      : source.originalBody !== captureCuratedContextSourceBody(comment.bodyMarkdown)
     const availability = bodyWasEdited ? 'edited' : 'available'
     return {
       ...item,

@@ -6,6 +6,7 @@ import type {
 } from '@mukuroji/contracts'
 import {
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -126,6 +127,7 @@ export function IssueDecisionsTab({
   onOpenSource,
 }: IssueDecisionsTabProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
+  const panelInstanceId = useId()
   const [editorRequest, setEditorRequest] = useState<ContextEditorState>()
   const createButtonRef = useRef<HTMLButtonElement>(null)
   const editorReturnFocusRef = useRef<HTMLElement | undefined>(undefined)
@@ -150,7 +152,7 @@ export function IssueDecisionsTab({
       return
     }
     const target = document.getElementById(
-      createContextItemAnchorId(focusedContextItemId),
+      createContextItemAnchorId(panelInstanceId, focusedContextItemId),
     )
 
     const traversal = advanceDeepLinkTraversal(
@@ -179,6 +181,7 @@ export function IssueDecisionsTab({
     controller.isLoadingMore,
     controller.items,
     focusedContextItemId,
+    panelInstanceId,
   ])
 
   /**
@@ -298,7 +301,7 @@ export function IssueDecisionsTab({
           {controller.items.map((item) => (
             <li
               className="min-w-0 py-4 outline-none focus-visible:ring-2 focus-visible:ring-[var(--workbench-primary)] focus-visible:ring-offset-2"
-              id={createContextItemAnchorId(item.id)}
+              id={createContextItemAnchorId(panelInstanceId, item.id)}
               key={item.id}
               tabIndex={-1}
             >
@@ -328,7 +331,7 @@ export function IssueDecisionsTab({
               {item.supersededByItemId ? (
                 <a
                   className="mt-2 inline-flex min-h-[44px] items-center text-xs font-semibold text-[var(--workbench-primary)] underline underline-offset-2"
-                  href={`#${createContextItemAnchorId(item.supersededByItemId)}`}
+                  href={`#${createContextItemAnchorId(panelInstanceId, item.supersededByItemId)}`}
                 >
                   {t('collaboration.decisions.openReplacement')}
                 </a>
@@ -386,12 +389,12 @@ export function IssueDecisionsTab({
                 ) : null}
                 {item.revision > 1 ? (
                   <button
-                    aria-controls={createContextHistoryPanelId(item.id)}
+                    aria-controls={createContextHistoryPanelId(panelInstanceId, item.id)}
                     aria-expanded={
                       controller.revisionHistory.contextItemId === item.id
                     }
                     className="min-h-[44px] text-xs font-semibold text-[var(--workbench-muted)] underline underline-offset-2"
-                    id={createContextHistoryButtonId(item.id)}
+                    id={createContextHistoryButtonId(panelInstanceId, item.id)}
                     onClick={() => {
                       if (controller.revisionHistory.contextItemId === item.id) {
                         controller.closeRevisionHistory()
@@ -413,6 +416,7 @@ export function IssueDecisionsTab({
                 <ContextRevisionHistory
                   currentItem={item}
                   history={controller.revisionHistory}
+                  instanceId={panelInstanceId}
                   locale={locale}
                   onLoadMore={controller.loadMoreRevisions}
                   onRetry={controller.retryRevisionHistory}
@@ -463,6 +467,8 @@ type ContextRevisionHistoryProps = {
   currentItem: CuratedContextItem
   /** Lazy cursor state for the selected item. */
   history: CuratedContextRevisionHistoryState
+  /** React instance identifier used to isolate DOM IDs between panels. */
+  instanceId: string
   /** Locale used for audit timestamps. */
   locale: Locale
   /** Loads the next page of older snapshots. */
@@ -482,6 +488,7 @@ type ContextRevisionHistoryProps = {
 function ContextRevisionHistory({
   currentItem,
   history,
+  instanceId,
   locale,
   onLoadMore,
   onRetry,
@@ -494,9 +501,9 @@ function ContextRevisionHistory({
   return (
     <section
       aria-busy={history.isLoading || history.isLoadingMore}
-      aria-labelledby={createContextHistoryButtonId(currentItem.id)}
+      aria-labelledby={createContextHistoryButtonId(instanceId, currentItem.id)}
       className="mt-3 border-l-2 border-[var(--workbench-border-strong)] pl-3"
-      id={createContextHistoryPanelId(currentItem.id)}
+      id={createContextHistoryPanelId(instanceId, currentItem.id)}
     >
       <h4 className="py-2 text-xs font-semibold text-[var(--workbench-text)]">
         {t('collaboration.decisions.history.title')}
@@ -663,6 +670,8 @@ function ContextEditorForm({
   replaceableItems,
 }: ContextEditorFormProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
+  const editorInstanceId = useId()
+  const quoteErrorId = `context-source-quote-error-${encodeURIComponent(editorInstanceId)}`
   const [editor, setEditor] = useState<ContextEditorState>(
     () => initialEditor,
   )
@@ -865,7 +874,7 @@ function ContextEditorForm({
               aria-describedby={
                 sourceQuoteIsValid
                   ? undefined
-                  : 'context-source-quote-error'
+                  : quoteErrorId
               }
               className="workbench-input min-h-20 resize-y py-2"
               disabled={
@@ -894,7 +903,7 @@ function ContextEditorForm({
           {!sourceQuoteIsValid ? (
             <p
               className="text-xs font-semibold text-red-700"
-              id="context-source-quote-error"
+              id={quoteErrorId}
               role="alert"
             >
               {t('collaboration.decisions.quoteInvalid')}
@@ -1021,31 +1030,34 @@ function isSourceQuoteValid(source: CuratedContextSource | undefined): boolean {
 /**
  * Creates a stable focus anchor for one curated item.
  *
+ * @param instanceId - React instance identifier for this Decisions panel.
  * @param itemId - Curated item identifier.
  * @returns DOM-safe anchor ID.
  */
-function createContextItemAnchorId(itemId: string): string {
-  return `context-item-${encodeURIComponent(itemId)}`
+function createContextItemAnchorId(instanceId: string, itemId: string): string {
+  return `context-item-${encodeURIComponent(instanceId)}-${encodeURIComponent(itemId)}`
 }
 
 /**
  * Creates the toggle ID that labels one revision history region.
  *
+ * @param instanceId - React instance identifier for this Decisions panel.
  * @param itemId - Curated context item identifier.
  * @returns DOM-safe history toggle ID.
  */
-function createContextHistoryButtonId(itemId: string): string {
-  return `context-history-toggle-${encodeURIComponent(itemId)}`
+function createContextHistoryButtonId(instanceId: string, itemId: string): string {
+  return `context-history-toggle-${encodeURIComponent(instanceId)}-${encodeURIComponent(itemId)}`
 }
 
 /**
  * Creates the controlled region ID for one revision history.
  *
+ * @param instanceId - React instance identifier for this Decisions panel.
  * @param itemId - Curated context item identifier.
  * @returns DOM-safe history panel ID.
  */
-function createContextHistoryPanelId(itemId: string): string {
-  return `context-history-panel-${encodeURIComponent(itemId)}`
+function createContextHistoryPanelId(instanceId: string, itemId: string): string {
+  return `context-history-panel-${encodeURIComponent(instanceId)}-${encodeURIComponent(itemId)}`
 }
 
 /**

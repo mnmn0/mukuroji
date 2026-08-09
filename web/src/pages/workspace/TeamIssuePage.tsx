@@ -1911,7 +1911,6 @@ function IssueDetailContent({
   externalLinksAccessToken?: string
   /** notification deep link から focus する comment ID です。 */
   focusedCommentId?: string
-  /** Curated context item selected by a deep link. */
   /** notification deep link の reply が属する root comment ID です。 */
   focusedRootCommentId?: string
   /** 編集対象 Issue です。 */

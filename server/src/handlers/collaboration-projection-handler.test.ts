@@ -33,7 +33,8 @@ test('imports the production collaboration projection without unrelated API secr
     new Response(subprocess.stdout).text(),
   ])
 
-  expect(exitCode, standardError).toBe(0)
+  expect(exitCode).toBe(0)
+  expect(standardError).toBe('')
   expect(standardOutput).toContain('projection-imported')
   expect(standardError).not.toContain('REQUEST_TOKEN_HASH_SECRET')
   expect(standardError).not.toContain('ANALYTICS_TABLE_NAME')

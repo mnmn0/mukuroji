@@ -3,6 +3,12 @@ import type { AcceptedResolution } from '@mukuroji/contracts'
 import { TeamIssuesApiError } from './errors'
 import type { TeamIssuePresence } from './presence'
 import type { TeamIssueWatchState } from './watch'
+import {
+  createTeamIssuePath,
+  readApiError,
+  readJson,
+  trimTrailingSlash,
+} from './http'
 
 /**
  * Work Item 全体で行える共同作業操作です。
@@ -74,8 +80,6 @@ const issuesApiBaseUrl = trimTrailingSlash(
   import.meta.env.VITE_TASKS_API_BASE_URL ?? import.meta.env.VITE_API_BASE_URL ?? '/api',
 )
 
-const defaultIssuesApiErrorMessage = 'Unable to complete the Work Item request.'
-
 /**
  * Work Item の comment thread、watcher、presence を cursor 付きで取得します。
  */
@@ -102,7 +106,7 @@ export async function getTeamIssueCollaboration(
   const queryString = query.toString()
 
   const data = await requestJson<unknown>(
-    `${createTeamIssuePath(teamId, issueId)}/collaboration${queryString ? `?${queryString}` : ''}`,
+    `${createTeamIssuePath(issuesApiBaseUrl, teamId, issueId)}/collaboration${queryString ? `?${queryString}` : ''}`,
     accessToken,
   )
 
@@ -233,10 +237,6 @@ export function isAcceptedResolution(
   )
 }
 
-function createTeamIssuePath(teamId: string, issueId: string) {
-  return `${issuesApiBaseUrl}/teams/${encodeURIComponent(teamId)}/issues/${encodeURIComponent(issueId)}`
-}
-
 async function requestJson<TResponse>(
   url: string,
   accessToken?: string,
@@ -262,40 +262,4 @@ async function requestJson<TResponse>(
   }
 
   return data as TResponse
-}
-
-function readApiError(data: unknown) {
-  const message = typeof data === 'object' &&
-    data !== null &&
-    'message' in data &&
-    typeof data.message === 'string' &&
-    data.message.trim().length > 0
-    ? data.message
-    : defaultIssuesApiErrorMessage
-  const code = typeof data === 'object' &&
-    data !== null &&
-    'code' in data &&
-    typeof data.code === 'string'
-    ? data.code
-    : undefined
-
-  return { code, message }
-}
-
-async function readJson<T>(response: Response): Promise<T> {
-  const text = await response.text()
-
-  if (!text) {
-    return {} as T
-  }
-
-  try {
-    return JSON.parse(text) as T
-  } catch {
-    return {} as T
-  }
-}
-
-function trimTrailingSlash(value: string) {
-  return value.replace(/\/+$/, '')
 }

@@ -22,6 +22,12 @@ import {
 } from '../../shared/api/mutationHeaders'
 import { TeamIssuesApiError } from './errors'
 import { isAcceptedResolution } from './collaboration'
+import {
+  createTeamIssuePath,
+  readApiError,
+  readJson,
+  trimTrailingSlash,
+} from './http'
 
 /**
  * Cursor options for the curated context ledger.
@@ -49,9 +55,6 @@ const issuesApiBaseUrl = trimTrailingSlash(
     '/api',
 )
 
-const defaultIssuesApiErrorMessage =
-  'Unable to complete the Work Item request.'
-
 /**
  * Loads one cursor page of human-curated Work Item context.
  *
@@ -72,7 +75,7 @@ export async function getTeamIssueContextItems(
   if (options.cursor) query.set('cursor', options.cursor)
   const queryString = query.toString()
   const data = await requestIssueJson(
-    `${createTeamIssuePath(teamId, issueId)}/context-items${
+    `${createTeamIssuePath(issuesApiBaseUrl, teamId, issueId)}/context-items${
       queryString ? `?${queryString}` : ''
     }`,
     accessToken,
@@ -108,7 +111,7 @@ export async function getTeamIssueContextRevisions(
 ): Promise<CuratedContextRevisionPage> {
   const query = createHistoryQuery(options)
   const data = await requestIssueJson(
-    `${createTeamIssuePath(teamId, issueId)}/context-items/${encodeURIComponent(
+    `${createTeamIssuePath(issuesApiBaseUrl, teamId, issueId)}/context-items/${encodeURIComponent(
       contextItemId,
     )}/revisions${query}`,
     accessToken,
@@ -144,7 +147,7 @@ export async function getTeamIssueAcceptedResolutions(
 ): Promise<AcceptedResolutionPage> {
   const query = createHistoryQuery(options)
   const data = await requestIssueJson(
-    `${createTeamIssuePath(teamId, issueId)}/comments/${encodeURIComponent(
+    `${createTeamIssuePath(issuesApiBaseUrl, teamId, issueId)}/comments/${encodeURIComponent(
       rootCommentId,
     )}/accepted-resolutions${query}`,
     accessToken,
@@ -179,7 +182,7 @@ export function createTeamIssueContextItem(
   mutationContext: MutationRequestContext,
 ): Promise<void> {
   return requestIssueMutation(
-    `${createTeamIssuePath(teamId, issueId)}/context-items`,
+    `${createTeamIssuePath(issuesApiBaseUrl, teamId, issueId)}/context-items`,
     accessToken,
     {
       body: JSON.stringify(input),
@@ -212,7 +215,7 @@ export function updateTeamIssueContextItem(
   mutationContext: MutationRequestContext,
 ): Promise<void> {
   return requestIssueMutation(
-    `${createTeamIssuePath(teamId, issueId)}/context-items/${encodeURIComponent(
+    `${createTeamIssuePath(issuesApiBaseUrl, teamId, issueId)}/context-items/${encodeURIComponent(
       contextItemId,
     )}`,
     accessToken,
@@ -247,7 +250,7 @@ export function setTeamIssueAcceptedResolution(
   mutationContext: MutationRequestContext,
 ): Promise<void> {
   return requestIssueMutation(
-    `${createTeamIssuePath(teamId, issueId)}/comments/${encodeURIComponent(
+    `${createTeamIssuePath(issuesApiBaseUrl, teamId, issueId)}/comments/${encodeURIComponent(
       rootCommentId,
     )}/accepted-resolution`,
     accessToken,
@@ -314,35 +317,6 @@ async function requestIssueMutation(
  * @param response - Fetch response to decode.
  * @returns Parsed JSON or an empty object for empty and malformed responses.
  */
-async function readJson(response: Response): Promise<unknown> {
-  const text = await response.text()
-  if (!text) return {}
-
-  try {
-    return JSON.parse(text)
-  } catch {
-    return {}
-  }
-}
-
-/**
- * Reads a stable API error from untrusted JSON.
- *
- * @param data - Untrusted response payload.
- * @returns Error code and human-readable message.
- */
-function readApiError(data: unknown): { code?: string; message: string } {
-  if (!isRecord(data)) return { message: defaultIssuesApiErrorMessage }
-
-  return {
-    code: typeof data.code === 'string' ? data.code : undefined,
-    message:
-      typeof data.message === 'string' && data.message.trim()
-        ? data.message
-        : defaultIssuesApiErrorMessage,
-  }
-}
-
 /**
  * Validates a complete curated context page at the API boundary.
  *
@@ -602,18 +576,3 @@ function createHistoryQuery(options: GetTeamIssueHistoryOptions): string {
  * @param issueId - Work Item identifier.
  * @returns Configured Issues API path.
  */
-function createTeamIssuePath(teamId: string, issueId: string): string {
-  return `${issuesApiBaseUrl}/teams/${encodeURIComponent(
-    teamId,
-  )}/issues/${encodeURIComponent(issueId)}`
-}
-
-/**
- * Trims trailing slashes from one configured API base URL.
- *
- * @param value - Configured base URL.
- * @returns Base URL without trailing slashes.
- */
-function trimTrailingSlash(value: string): string {
-  return value.replace(/\/+$/, '')
-}

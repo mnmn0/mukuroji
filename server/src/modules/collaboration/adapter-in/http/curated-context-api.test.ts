@@ -130,7 +130,8 @@ test('rejects context content when the parent assignment changes during the read
 
 test('keeps comment provenance available when only its lifecycle revision changes', async () => {
   configureFakeProjectClients(true)
-  const originalBody = 'The accepted answer remains unchanged.'
+  const fullBody = 'The accepted answer remains unchanged.' + 'x'.repeat(20_000)
+  const originalBody = fullBody.slice(0, 20_000)
   setTestAppDependencies({
     collaboration: createCollaborationStub({
       async getCuratedContext(input) {
@@ -156,7 +157,7 @@ test('keeps comment provenance available when only its lifecycle revision change
           rootCommentId: 'root-1',
           parentCommentId: 'root-1',
           authorMemberKey: 'demo@example.com',
-          bodyMarkdown: originalBody,
+          bodyMarkdown: fullBody,
           version: 2,
           mentionMemberKeys: [],
           createdAt: '2026-08-09T01:00:00.000Z',
