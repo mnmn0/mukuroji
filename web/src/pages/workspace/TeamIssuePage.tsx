@@ -4,6 +4,10 @@ import type {
   TaskViewDefinition,
   TaskViewScope,
   TeamTaskViewScope,
+  WorkItemActionContext,
+  WorkItemActionId,
+  WorkItemActionResult,
+  WorkItemActionSelection,
   WorkflowStatusDefinition,
   WorkItemConfiguration,
   WorkItemRelation,
@@ -42,6 +46,7 @@ import {
 import {
   MobileSidebarButton,
 } from '../../shared/ui/sidebar'
+import { MoreHorizontalIcon } from '../../shared/ui/icons'
 import {
   createTranslator,
   getInitialLocale,
@@ -186,7 +191,9 @@ import {
   type TaskActionExecutionResult,
 } from '../../task-views/model/taskActionRegistry'
 import {
+  createTaskSurfaceActionBaseContext,
   resolveTaskSurfaceActionTarget,
+  resolveTaskSurfaceActionTargets,
   useTaskSurfaceActions,
   type TaskSurfaceActionDisabledReasons,
   type TaskSurfaceActionHandlers,
@@ -197,6 +204,8 @@ import {
   createTaskSurfaceKeyboardInput,
   formatTaskSurfaceKeyboardShortcut,
 } from '../../task-views/ui/taskSurfaceKeyboard'
+import type { TaskActionContextMenuAnchorPoint } from '../../task-views/model/taskActionContextMenu'
+import { TaskActionContextMenu } from '../../task-views/ui/TaskActionContextMenu'
 import {
   TaskViewToolbar,
   type TaskViewFieldOption,
@@ -228,6 +237,30 @@ const taskViewBuiltInFields = [
 type IssueViewMode = 'table' | 'board'
 
 const issueViewPanelId = 'team-issue-view-panel'
+
+/** Transient Team Issue context-menu target retained independently from keyboard selection. */
+type TeamIssueActionContextMenuState = {
+  /** Pointer or overflow-control position used by the responsive menu layout. */
+  anchorPoint: TaskActionContextMenuAnchorPoint
+  /** Element that regains focus after the menu closes. */
+  returnFocusElement: HTMLElement
+  /** Revision-bound target selected by this row or card entrance. */
+  selection: WorkItemActionSelection
+}
+
+/**
+ * Opens the canonical action menu for one Team Issue row or card.
+ *
+ * @param issue - Team Issue represented by the triggering row or card.
+ * @param anchorPoint - Viewport coordinates used to anchor the menu.
+ * @param returnFocusElement - Trigger element that regains focus after dismissal.
+ * @returns Nothing.
+ */
+type TeamIssueActionMenuOpenHandler = (
+  issue: TeamIssue,
+  anchorPoint: TaskActionContextMenuAnchorPoint,
+  returnFocusElement: HTMLElement,
+) => void
 
 /**
  * Evaluates whether the current user may manage one dependency endpoint.
@@ -1016,6 +1049,9 @@ export function TeamIssueScreen({
     createTaskViewSelectionState,
   )
   const [taskActionErrorMessage, setTaskActionErrorMessage] = useState<string>()
+  const [taskActionContextMenuState, setTaskActionContextMenuState] = useState<
+    TeamIssueActionContextMenuState
+  >()
   const onSelectIssueRef = useRef(onSelectIssue)
 
   useEffect(() => {
@@ -1174,6 +1210,14 @@ export function TeamIssueScreen({
   )
   const canCreateIssueAction = onCreateIssue !== undefined
   const canOpenIssueAction = onSelectIssue !== undefined
+  const canEditIssueAction = onUpdateIssue !== undefined && canOpenIssueAction
+  const canAssignIssueAction = canEditIssueAction && assigneeOptions.length > 0
+  const canManageIssueRelationAction = onAddRelation !== undefined && canOpenIssueAction
+  /** Checks whether one visible Team Issue has a different reachable workflow status. */
+  const canMoveTeamIssueAction = useCallback((issue: TeamIssue) =>
+    canEditIssueAction && resolveEditableWorkflowStatuses(issue, configuration).some(
+      (status) => status.id !== issue.workflowStatusId,
+    ), [canEditIssueAction, configuration])
   const teamActionLabels = useMemo<TaskSurfaceActionLabels>(() => ({
     archive: t('taskViews.action.archive'),
     assign: t('taskViews.action.assign'),
@@ -1190,6 +1234,47 @@ export function TeamIssueScreen({
     singleSelectionRequired: t('taskViews.action.singleSelectionRequired'),
     unavailable: t('taskViews.action.unavailable'),
   }), [t])
+
+  /** Opens one Team Issue detail and focuses an existing mutation control when requested. */
+  const executeTeamIssueDetailAction = useCallback((
+    context: WorkItemActionContext,
+    controlSelector?: string,
+  ): WorkItemActionResult => {
+    const target = resolveTaskSurfaceActionTarget(context)
+    const issue = target
+      ? visibleIssues.find((candidate) =>
+          candidate.teamId === target.teamId && candidate.id === target.workItemId
+        )
+      : undefined
+    if (!target || !issue) {
+      return createFailedTaskActionResult(
+        context.actionId,
+        target,
+        'TeamTaskActionTargetNotFound',
+        'not-found',
+        t('taskViews.action.notFound'),
+      )
+    }
+
+    setDetailUpdateError(undefined)
+    onSelectIssueRef.current?.(issue.id)
+    if (controlSelector) focusTeamIssueDetailControl(controlSelector)
+    return createSucceededTaskActionResult(context.actionId, target)
+  }, [t, visibleIssues])
+
+  const currentTeamActionTarget = teamActionSelection.targets.length === 1
+    ? teamActionSelection.targets[0]
+    : teamActionSelection.targets.length === 0
+      ? teamActionSelection.focusedTarget
+      : undefined
+  const toggleIssueWatch = currentTeamActionTarget &&
+      selectedIssue?.teamId === currentTeamActionTarget.teamId &&
+      selectedIssue.id === currentTeamActionTarget.workItemId &&
+      collaboration?.watch &&
+      collaboration.capabilities.canWatch
+    ? collaboration.toggleWatch
+    : undefined
+
   const teamActionHandlers = useMemo<TaskSurfaceActionHandlers>(() => ({
     ...(canCreateIssueAction
       ? {
@@ -1201,40 +1286,115 @@ export function TeamIssueScreen({
       : {}),
     ...(canOpenIssueAction
       ? {
-          open: (context) => {
+          open: (context) => executeTeamIssueDetailAction(context),
+        }
+      : {}),
+    ...(canEditIssueAction
+      ? {
+          edit: (context) => executeTeamIssueDetailAction(context, 'input[name="title"]'),
+          move: (context) => executeTeamIssueDetailAction(
+            context,
+            'select[name="workflowStatusId"]',
+          ),
+        }
+      : {}),
+    ...(canAssignIssueAction
+      ? {
+          assign: (context) => executeTeamIssueDetailAction(
+            context,
+            'select[name="assigneeUserId"]',
+          ),
+        }
+      : {}),
+    ...(canManageIssueRelationAction
+      ? {
+          relation: (context) => executeTeamIssueDetailAction(
+            context,
+            '[data-testid="work-item-relations-editor"] select',
+          ),
+        }
+      : {}),
+    ...(toggleIssueWatch
+      ? {
+          watch: async (context) => {
             const target = resolveTaskSurfaceActionTarget(context)
-            const issue = target
-              ? visibleIssues.find((candidate) =>
-                  candidate.teamId === target.teamId && candidate.id === target.workItemId
-                )
-              : undefined
-            if (!target || !issue) {
+            if (!target) {
               return createFailedTaskActionResult(
                 context.actionId,
-                target,
+                undefined,
                 'TeamTaskActionTargetNotFound',
                 'not-found',
                 t('taskViews.action.notFound'),
               )
             }
-            setDetailUpdateError(undefined)
-            onSelectIssueRef.current?.(issue.id)
-            return createSucceededTaskActionResult(context.actionId, target)
+            const succeeded = await toggleIssueWatch()
+            return succeeded
+              ? createSucceededTaskActionResult(context.actionId, target)
+              : createFailedTaskActionResult(
+                  context.actionId,
+                  target,
+                  'TeamTaskWatchFailed',
+                  'unknown',
+                  t('taskViews.action.failed'),
+                )
           },
         }
       : {}),
-  }), [canCreateIssueAction, canOpenIssueAction, openCreateIssue, t, visibleIssues])
+  }), [
+    canAssignIssueAction,
+    canCreateIssueAction,
+    canEditIssueAction,
+    canManageIssueRelationAction,
+    canOpenIssueAction,
+    executeTeamIssueDetailAction,
+    openCreateIssue,
+    t,
+    toggleIssueWatch,
+  ])
+
+  /** Evaluates one Team detail entrance against its revision-bound visible target. */
+  const evaluateTeamIssueTargetPermission = useCallback((context: WorkItemActionContext) => {
+    const targets = resolveTaskSurfaceActionTargets(context)
+    if (targets.length === 0) return allowTaskAction()
+    if (targets.length !== 1) {
+      return denyTaskAction(teamActionDisabledReasons.singleSelectionRequired)
+    }
+    const target = targets[0]
+    return target && visibleIssues.some((issue) =>
+      issue.teamId === target.teamId && issue.id === target.workItemId
+    )
+      ? allowTaskAction()
+      : denyTaskAction(teamActionDisabledReasons.unavailable)
+  }, [teamActionDisabledReasons, visibleIssues])
+
   const teamActionPermissions = useMemo<TaskSurfaceActionPermissions>(() => ({
-    open: (context) => {
-      const target = resolveTaskSurfaceActionTarget(context)
-      if (!target) return allowTaskAction()
-      return visibleIssues.some((issue) =>
-        issue.teamId === target.teamId && issue.id === target.workItemId
-      )
+    assign: evaluateTeamIssueTargetPermission,
+    edit: evaluateTeamIssueTargetPermission,
+    move: (context) => {
+      const targets = resolveTaskSurfaceActionTargets(context)
+      if (targets.length === 0) return allowTaskAction()
+      if (targets.length !== 1) {
+        return denyTaskAction(teamActionDisabledReasons.singleSelectionRequired)
+      }
+      const target = targets[0]
+      const issue = target
+        ? visibleIssues.find((candidate) =>
+            candidate.teamId === target.teamId && candidate.id === target.workItemId
+          )
+        : undefined
+      return issue && canMoveTeamIssueAction(issue)
         ? allowTaskAction()
         : denyTaskAction(teamActionDisabledReasons.unavailable)
     },
-  }), [teamActionDisabledReasons.unavailable, visibleIssues])
+    open: evaluateTeamIssueTargetPermission,
+    relation: evaluateTeamIssueTargetPermission,
+    watch: evaluateTeamIssueTargetPermission,
+  }), [
+    canMoveTeamIssueAction,
+    evaluateTeamIssueTargetPermission,
+    teamActionDisabledReasons,
+    visibleIssues,
+  ])
 
   /**
    * Projects normalized Team action failures into an accessible local notice.
@@ -1261,6 +1421,19 @@ export function TeamIssueScreen({
     selection: teamActionSelection,
     surface: 'team',
   })
+  const taskActionContextMenuContext = useMemo(() => {
+    if (!taskActionContextMenuState) return undefined
+    return createTaskSurfaceActionBaseContext(
+      'team',
+      teamActionScope,
+      taskActionContextMenuState.selection,
+      activeTaskViewId,
+    )
+  }, [
+    activeTaskViewId,
+    taskActionContextMenuState,
+    teamActionScope,
+  ])
 
   useEffect(() => {
     queueMicrotask(() => {
@@ -1295,6 +1468,39 @@ export function TeamIssueScreen({
     )
   }, [teamActions])
 
+  /** Opens a revision-bound Team Issue menu without inheriting unrelated selection. */
+  const handleTeamIssueActionMenuOpen = useCallback<TeamIssueActionMenuOpenHandler>((
+    issue,
+    anchorPoint,
+    returnFocusElement,
+  ) => {
+    const issueKey = createTaskViewItemKey(issue.teamId, issue.id)
+    setTaskViewSelection((currentSelection) => reduceTaskViewSelection(currentSelection, {
+      key: issueKey,
+      type: 'focus',
+    }))
+    setTaskActionContextMenuState({
+      anchorPoint,
+      returnFocusElement,
+      selection: createFocusedTaskViewActionSelection({
+        expectedRevision: issue.revision,
+        teamId: issue.teamId,
+        workItemId: issue.id,
+      }),
+    })
+  }, [])
+
+  /** Routes one Team Issue menu activation through the canonical action registry. */
+  const handleTeamIssueActionMenuExecute = useCallback((actionId: WorkItemActionId) => {
+    if (!taskActionContextMenuState) return
+    void teamActions.execute(
+      actionId,
+      'context-menu',
+      undefined,
+      taskActionContextMenuState.selection,
+    )
+  }, [taskActionContextMenuState, teamActions])
+
   useEffect(() => {
     /**
      * Routes Team navigation and action shortcuts through shared reducers and registry policy.
@@ -1303,7 +1509,10 @@ export function TeamIssueScreen({
      * @returns Nothing.
      */
     const handleTeamKeyboard = (event: KeyboardEvent) => {
-      const input = createTaskSurfaceKeyboardInput(event, isCreateOpen)
+      const input = createTaskSurfaceKeyboardInput(
+        event,
+        isCreateOpen || Boolean(taskActionContextMenuState),
+      )
       const selectionAction = createTaskViewSelectionKeyboardAction(
         input,
         taskViewSelection,
@@ -1330,7 +1539,13 @@ export function TeamIssueScreen({
 
     document.addEventListener('keydown', handleTeamKeyboard)
     return () => document.removeEventListener('keydown', handleTeamKeyboard)
-  }, [isCreateOpen, taskViewSelection, teamActions, visibleIssueKeys])
+  }, [
+    isCreateOpen,
+    taskActionContextMenuState,
+    taskViewSelection,
+    teamActions,
+    visibleIssueKeys,
+  ])
 
   return (
     <>
@@ -1494,6 +1709,7 @@ export function TeamIssueScreen({
                       issues={visibleIssues}
                       presentation={taskViewPresentation}
                       locale={locale}
+                      onIssueActionMenuOpen={handleTeamIssueActionMenuOpen}
                       onOpenIssue={canOpenIssueAction ? handleOpenIssue : undefined}
                       selectedIssueKeys={taskViewSelection.selectedKeys}
                       selectedIssueId={selectedIssueId}
@@ -1510,6 +1726,7 @@ export function TeamIssueScreen({
                       presentation={taskViewPresentation}
                       locale={locale}
                       onCreateIssueOpen={onCreateIssue ? openCreateIssue : undefined}
+                      onIssueActionMenuOpen={handleTeamIssueActionMenuOpen}
                       onOpenIssue={canOpenIssueAction ? handleOpenIssue : undefined}
                       selectedIssueKeys={taskViewSelection.selectedKeys}
                       selectedIssueId={selectedIssueId}
@@ -1566,6 +1783,19 @@ export function TeamIssueScreen({
             </div>
           </div>
         )}
+        {taskActionContextMenuState && taskActionContextMenuContext ? (
+          <TaskActionContextMenu
+            anchorPoint={taskActionContextMenuState.anchorPoint}
+            context={taskActionContextMenuContext}
+            labels={teamActionLabels}
+            menuLabel={t('tasks.action.more')}
+            onClose={() => setTaskActionContextMenuState(undefined)}
+            onExecute={handleTeamIssueActionMenuExecute}
+            registry={teamActions.registry}
+            returnFocusElement={taskActionContextMenuState.returnFocusElement}
+            testId="team-issue-action-context-menu"
+          />
+        ) : null}
     </>
   )
 }
@@ -1862,6 +2092,7 @@ function IssueTable({
   focusedIssueKey,
   issues,
   locale,
+  onIssueActionMenuOpen,
   onOpenIssue,
   presentation,
   selectedIssueKeys,
@@ -1875,6 +2106,8 @@ function IssueTable({
   focusedIssueKey?: string
   issues: TeamIssue[]
   locale: Locale
+  /** Opens the canonical action menu for one Team Issue row. */
+  onIssueActionMenuOpen?: TeamIssueActionMenuOpenHandler
   onOpenIssue?: (issue: TeamIssue) => void
   presentation?: TaskViewPresentationSettings
   selectedIssueKeys: readonly string[]
@@ -1935,6 +2168,16 @@ function IssueTable({
         data-task-view-focused={focusedForAction ? 'true' : 'false'}
         data-task-view-selected={selectedForAction ? 'true' : 'false'}
         key={issue.id}
+        onContextMenu={(event) => {
+          if (!onIssueActionMenuOpen) return
+          event.preventDefault()
+          onIssueActionMenuOpen(
+            issue,
+            { x: event.clientX, y: event.clientY },
+            event.currentTarget,
+          )
+        }}
+        tabIndex={-1}
       >
         {tableColumnPlacements.map((placement) => {
           const field = placement.column.field
@@ -1946,18 +2189,39 @@ function IssueTable({
           switch (field) {
             case 'title': return (
               <td {...columnCellProps} className={`${titleCellPadding} text-sm font-semibold text-[var(--workbench-text)]`} key={field}>
-                <button
-                  aria-pressed={selectedForAction || selectedIssueId === issue.id}
-                  className={`w-full rounded-sm text-left font-semibold transition hover:text-[var(--workbench-primary)] focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-[#2563eb]/10 disabled:cursor-default disabled:text-[var(--workbench-text)] ${
-                    wrapText ? 'whitespace-normal break-words' : 'truncate'
-                  }`}
-                  data-testid={`issue-row-${issue.id}`}
-                  disabled={!onOpenIssue}
-                  onClick={() => onOpenIssue?.(issue)}
-                  type="button"
-                >
-                  {resolveIssueTitle(issue, t)}
-                </button>
+                <div className="flex min-w-0 items-start gap-2">
+                  <button
+                    aria-pressed={selectedForAction || selectedIssueId === issue.id}
+                    className={`min-w-0 flex-1 rounded-sm text-left font-semibold transition hover:text-[var(--workbench-primary)] focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-[#2563eb]/10 disabled:cursor-default disabled:text-[var(--workbench-text)] ${
+                      wrapText ? 'whitespace-normal break-words' : 'truncate'
+                    }`}
+                    data-testid={`issue-row-${issue.id}`}
+                    disabled={!onOpenIssue}
+                    onClick={() => onOpenIssue?.(issue)}
+                    type="button"
+                  >
+                    {resolveIssueTitle(issue, t)}
+                  </button>
+                  {onIssueActionMenuOpen ? (
+                    <button
+                      aria-label={`${t('tasks.action.more')}: ${resolveIssueTitle(issue, t)}`}
+                      className="grid h-9 w-9 flex-none place-items-center rounded text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary)] max-[640px]:h-11 max-[640px]:w-11"
+                      data-testid={`team-issue-row-actions-${issue.id}`}
+                      onClick={(event) => {
+                        const returnFocusElement = event.currentTarget
+                        const bounds = returnFocusElement.getBoundingClientRect()
+                        onIssueActionMenuOpen(
+                          issue,
+                          { x: bounds.right, y: bounds.bottom },
+                          returnFocusElement,
+                        )
+                      }}
+                      type="button"
+                    >
+                      <MoreHorizontalIcon className="h-5 w-5" />
+                    </button>
+                  ) : null}
+                </div>
                 <WorkItemDependencyChips
                   className="pt-2"
                   summary={resolveWorkItemDependencySummary(
@@ -2189,6 +2453,23 @@ function resolveIssueTableCellPadding(
 }
 
 /**
+ * Focuses and reveals a control after React commits a selected Team Issue detail update.
+ *
+ * @param selector - Selector scoped to the active Team Issue detail pane.
+ * @returns Nothing.
+ */
+function focusTeamIssueDetailControl(selector: string): void {
+  requestAnimationFrame(() => {
+    const detailPane = document.querySelector<HTMLElement>(
+      '[data-testid="team-issue-detail-pane"]',
+    )
+    const control = detailPane?.querySelector<HTMLElement>(selector)
+    control?.focus()
+    control?.scrollIntoView({ block: 'nearest' })
+  })
+}
+
+/**
  * Resolves width and sticky-edge styles for a persisted Team Issue table column.
  *
  * @param placement - Column width and cumulative pin offsets.
@@ -2261,6 +2542,7 @@ function IssueBoard({
   issues,
   locale,
   onCreateIssueOpen,
+  onIssueActionMenuOpen,
   onOpenIssue,
   onUpdateIssue,
   presentation,
@@ -2277,6 +2559,8 @@ function IssueBoard({
   issues: TeamIssue[]
   locale: Locale
   onCreateIssueOpen?: (workflowStatusId: string) => void
+  /** Opens the canonical action menu for one Team Issue card. */
+  onIssueActionMenuOpen?: TeamIssueActionMenuOpenHandler
   onOpenIssue?: (issue: TeamIssue) => void
   onUpdateIssue?: (issueId: string, input: UpdateTeamIssueInput) => Promise<void>
   presentation?: TaskViewPresentationSettings
@@ -2553,18 +2837,49 @@ function IssueBoard({
                           setDropTargetStatusId(undefined)
                         }}
                         onDragStart={(event) => handleDragStart(event, issue)}
+                        onContextMenu={(event) => {
+                          if (!onIssueActionMenuOpen) return
+                          event.preventDefault()
+                          onIssueActionMenuOpen(
+                            issue,
+                            { x: event.clientX, y: event.clientY },
+                            event.currentTarget,
+                          )
+                        }}
+                        tabIndex={-1}
                       >
-                        <button
-                          aria-pressed={selectedForAction || selectedIssueId === issue.id}
-                          className={`w-full text-left text-sm font-semibold leading-6 text-[var(--workbench-text)] hover:text-[var(--workbench-primary)] disabled:cursor-default disabled:text-[var(--workbench-text)] ${
-                            wrapText ? 'whitespace-normal break-words' : 'truncate'
-                          }`}
-                          disabled={!onOpenIssue}
-                          onClick={() => onOpenIssue?.(issue)}
-                          type="button"
-                        >
-                          {resolveIssueTitle(issue, t)}
-                        </button>
+                        <div className="flex min-w-0 items-start gap-2">
+                          <button
+                            aria-pressed={selectedForAction || selectedIssueId === issue.id}
+                            className={`min-w-0 flex-1 text-left text-sm font-semibold leading-6 text-[var(--workbench-text)] hover:text-[var(--workbench-primary)] disabled:cursor-default disabled:text-[var(--workbench-text)] ${
+                              wrapText ? 'whitespace-normal break-words' : 'truncate'
+                            }`}
+                            disabled={!onOpenIssue}
+                            onClick={() => onOpenIssue?.(issue)}
+                            type="button"
+                          >
+                            {resolveIssueTitle(issue, t)}
+                          </button>
+                          {onIssueActionMenuOpen ? (
+                            <button
+                              aria-label={`${t('tasks.action.more')}: ${resolveIssueTitle(issue, t)}`}
+                              className="grid h-9 w-9 flex-none place-items-center rounded text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary)] max-[640px]:h-11 max-[640px]:w-11"
+                              data-testid={`team-issue-card-actions-${issue.id}`}
+                              onClick={(event) => {
+                                const returnFocusElement = event.currentTarget
+                                const bounds = returnFocusElement.getBoundingClientRect()
+                                onIssueActionMenuOpen(
+                                  issue,
+                                  { x: bounds.right, y: bounds.bottom },
+                                  returnFocusElement,
+                                )
+                              }}
+                              type="button"
+                            >
+                              <MoreHorizontalIcon className="h-5 w-5" />
+                            </button>
+                          ) : null}
+                        </div>
                         <WorkItemDependencyChips
                           className="mt-2"
                           summary={resolveWorkItemDependencySummary(
@@ -2866,7 +3181,10 @@ function IssueDetailContent({
   ) ?? false
 
   return (
-    <aside className="workbench-detail-pane min-h-0 min-w-0 max-[1080px]:border-l-0 max-[1080px]:border-t">
+    <aside
+      className="workbench-detail-pane min-h-0 min-w-0 max-[1080px]:border-l-0 max-[1080px]:border-t"
+      data-testid="team-issue-detail-pane"
+    >
       <form
         className="grid min-w-0 gap-4 px-6 py-7"
         key={`${issue.id}:${issue.revision}`}

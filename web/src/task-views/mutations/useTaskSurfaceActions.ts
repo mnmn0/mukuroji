@@ -107,6 +107,8 @@ export type TaskSurfaceActionDisabledReasons = {
 export type UseTaskSurfaceActionsOptions = {
   /** Saved task view active when an action is invoked. */
   activeViewId?: string
+  /** Canonical action IDs that this surface can safely execute for multiple targets. */
+  bulkActionIds?: readonly WorkItemActionId[]
   /** Localized reasons used for unavailable or invalid actions. */
   disabledReasons: TaskSurfaceActionDisabledReasons
   /** Existing safe UI or mutation entrances for canonical actions. */
@@ -146,6 +148,8 @@ export type TaskSurfaceActionController = {
 
 /** Options used by the pure task-surface action registry factory. */
 export type CreateTaskSurfaceActionRegistryOptions = {
+  /** Canonical action IDs that this surface can safely execute for multiple targets. */
+  bulkActionIds?: readonly WorkItemActionId[]
   /** Existing safe UI or mutation entrances for canonical actions. */
   handlers: TaskSurfaceActionHandlers
   /** Localized reasons used for unavailable or invalid actions. */
@@ -180,6 +184,7 @@ export function useTaskSurfaceActions(
   const { registerWorkItemActions } = useWorkspaceCommandMenu()
   const {
     activeViewId,
+    bulkActionIds,
     disabledReasons,
     handlers,
     labels,
@@ -193,11 +198,12 @@ export function useTaskSurfaceActions(
   } = options
   const registry = useMemo(
     () => createTaskSurfaceActionRegistry({
+      ...(bulkActionIds !== undefined ? { bulkActionIds } : {}),
       disabledReasons,
       handlers,
       permissions,
     }),
-    [disabledReasons, handlers, permissions],
+    [bulkActionIds, disabledReasons, handlers, permissions],
   )
   const baseContext = useMemo<
     Omit<WorkItemActionContext, 'actionId' | 'keyboardShortcut' | 'trigger'>
@@ -338,6 +344,7 @@ export function createTaskSurfaceActionRegistry(
       resolveTaskSurfaceActionHandler(options.handlers, actionId),
       options.permissions?.[actionId],
       options.disabledReasons,
+      options.bulkActionIds ?? [],
     )),
     reservedShortcuts: reservedTaskSurfaceShortcuts,
   })
@@ -383,6 +390,7 @@ export function resolveTaskSurfaceActionTargets(
  * @param handler - Safe task-surface entrance, when available.
  * @param permission - Optional target-aware permission evaluator.
  * @param disabledReasons - Localized disabled and validation messages.
+ * @param bulkActionIds - Action IDs that this surface can execute for multiple targets.
  * @returns Registry definition for one canonical action.
  */
 function createTaskSurfaceActionDefinition(
@@ -390,6 +398,7 @@ function createTaskSurfaceActionDefinition(
   handler: TaskSurfaceActionHandler | undefined,
   permission: TaskSurfaceActionPermission | undefined,
   disabledReasons: TaskSurfaceActionDisabledReasons,
+  bulkActionIds: readonly WorkItemActionId[],
 ): TaskActionDefinition {
   const shortcut = resolveTaskSurfaceActionShortcut(actionId)
   return {
@@ -407,6 +416,7 @@ function createTaskSurfaceActionDefinition(
       actionId,
       context,
       disabledReasons,
+      bulkActionIds,
     ),
   }
 }
@@ -417,32 +427,24 @@ function createTaskSurfaceActionDefinition(
  * @param actionId - Canonical action identifier.
  * @param context - Current permission-pruned selection context.
  * @param reasons - Localized validation reasons.
+ * @param bulkActionIds - Action IDs that this surface can execute for multiple targets.
  * @returns Valid for create, one target, or a supported bulk action; otherwise invalid.
  */
 function validateTaskSurfaceAction(
   actionId: WorkItemActionId,
   context: WorkItemActionContext,
   reasons: TaskSurfaceActionDisabledReasons,
+  bulkActionIds: readonly WorkItemActionId[],
 ): TaskActionValidationResult {
   if (actionId === 'create') return validateTaskAction()
   const targets = resolveTaskSurfaceActionTargets(context)
   if (targets.length === 0) {
     return invalidateTaskAction([reasons.selectionRequired])
   }
-  if (targets.length > 1 && !isTaskSurfaceBulkAction(actionId)) {
+  if (targets.length > 1 && !bulkActionIds.includes(actionId)) {
     return invalidateTaskAction([reasons.singleSelectionRequired])
   }
   return validateTaskAction()
-}
-
-/**
- * Reports whether a canonical task action may consume multiple selected targets.
- *
- * @param actionId - Canonical action identifier.
- * @returns Whether the action accepts a multi-selection.
- */
-function isTaskSurfaceBulkAction(actionId: WorkItemActionId): boolean {
-  return actionId === 'move' || actionId === 'assign' || actionId === 'archive'
 }
 
 /**

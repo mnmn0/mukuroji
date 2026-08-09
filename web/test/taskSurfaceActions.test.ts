@@ -12,6 +12,7 @@ import {
   createTaskSurfaceActionContext,
   createTaskSurfaceActionRegistry,
   resolveTaskSurfaceActionTarget,
+  type TaskSurfaceActionHandler,
 } from '../src/task-views/mutations/useTaskSurfaceActions'
 
 const disabledReasons = {
@@ -29,6 +30,11 @@ describe('task-surface action adapter', () => {
       viewId: string
     }[] = [
       {
+        scope: { kind: 'workspace' },
+        surface: 'workspace-search',
+        viewId: 'workspace-results',
+      },
+      {
         scope: { kind: 'project', projectId: 'roadmap', teamId: 'platform' },
         surface: 'project',
         viewId: 'project-delivery',
@@ -42,6 +48,11 @@ describe('task-surface action adapter', () => {
         scope: { kind: 'viewer' },
         surface: 'my-tasks',
         viewId: 'my-current-work',
+      },
+      {
+        scope: { kind: 'viewer' },
+        surface: 'focus',
+        viewId: 'my-focus',
       },
     ]
 
@@ -137,5 +148,45 @@ describe('task-surface action adapter', () => {
       expect((await executeTaskAction(registry, context)).status).toBe('executed')
     }
     expect(receivedContexts).toEqual(contexts)
+  })
+
+  test('rejects multi-target actions unless the mounted surface opts into bulk execution', async () => {
+    const handler: TaskSurfaceActionHandler = (context) => ({
+      actionId: context.actionId,
+      items: [],
+      schemaVersion: WORK_ITEM_ACTION_SCHEMA_VERSION,
+      status: 'succeeded',
+    })
+    const context: WorkItemActionContext = {
+      actionId: 'move',
+      schemaVersion: WORK_ITEM_ACTION_SCHEMA_VERSION,
+      scope: { kind: 'viewer' },
+      selection: {
+        mode: 'multiple',
+        targets: [
+          { teamId: 'platform', workItemId: 'first' },
+          { teamId: 'platform', workItemId: 'second' },
+        ],
+      },
+      surface: 'my-tasks',
+      trigger: 'command-menu',
+    }
+
+    const singleTargetRegistry = createTaskSurfaceActionRegistry({
+      disabledReasons,
+      handlers: { move: handler },
+    })
+    const bulkRegistry = createTaskSurfaceActionRegistry({
+      bulkActionIds: ['move'],
+      disabledReasons,
+      handlers: { move: handler },
+    })
+
+    expect(await executeTaskAction(singleTargetRegistry, context)).toEqual({
+      actionId: 'move',
+      issues: [disabledReasons.singleSelectionRequired],
+      status: 'invalid',
+    })
+    expect((await executeTaskAction(bulkRegistry, context)).status).toBe('executed')
   })
 })

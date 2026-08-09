@@ -44,6 +44,7 @@ const storyTasks: ProjectTask[] = referoTaskFixtures.map((task) => ({
       : task.workflowStatusId,
 }))
 const onOpenMyTaskAction = fn()
+const onOpenMyTaskActionMenu = fn()
 
 const storySummary: WorkspaceSummary = {
   blocked: 2,
@@ -306,6 +307,7 @@ export const MyTasksFocusedSelection: Story = {
         configurationsByTeam={storyWorkItemConfigurations}
         focusedTaskKey={firstTaskKey}
         onOpenTask={onOpenMyTaskAction}
+        onTaskActionMenuOpen={onOpenMyTaskActionMenu}
         selectedTaskKeys={[firstTaskKey]}
         t={t}
         tasks={storyTasks}
@@ -317,13 +319,17 @@ export const MyTasksFocusedSelection: Story = {
     const canvas = within(canvasElement)
     const card = canvas.getByTestId('my-tasks-card-refero-wireframe')
     const openButton = canvas.getByTestId('my-tasks-card-refero-wireframe-open')
+    const actionButton = canvas.getByTestId('my-tasks-card-refero-wireframe-actions')
     onOpenMyTaskAction.mockClear()
+    onOpenMyTaskActionMenu.mockClear()
 
     await expect(card).toHaveAttribute('data-task-view-focused', 'true')
     await expect(card).toHaveAttribute('data-task-view-selected', 'true')
     await expect(card).toHaveAttribute('aria-current', 'true')
     await userEvent.click(openButton)
     await expect(onOpenMyTaskAction).toHaveBeenCalledTimes(1)
+    await userEvent.click(actionButton)
+    await expect(onOpenMyTaskActionMenu).toHaveBeenCalledTimes(1)
   },
 }
 

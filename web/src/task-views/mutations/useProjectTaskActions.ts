@@ -1,6 +1,7 @@
 import type {
   ProjectTaskViewScope,
   WorkItemActionContext,
+  WorkItemActionId,
   WorkItemActionSelection,
   WorkItemActionTarget,
 } from '@mukuroji/contracts'
@@ -21,6 +22,9 @@ import {
 } from './useTaskSurfaceActions'
 import type { TaskActionExecutionResult } from '../model/taskActionRegistry'
 import type { TaskActionRegistry } from '../model/taskActionRegistry'
+
+/** Canonical Project actions backed by the existing bulk mutation toolbar. */
+const projectTaskBulkActionIds: readonly WorkItemActionId[] = ['move', 'assign', 'archive']
 
 /** Executes one Project-surface action after the shared permission and validation pipeline. */
 export type ProjectTaskActionHandler = TaskSurfaceActionHandler
@@ -85,6 +89,7 @@ export function useProjectTaskActions(
 
   return useTaskSurfaceActions({
     ...(options.activeViewId !== undefined ? { activeViewId: options.activeViewId } : {}),
+    bulkActionIds: projectTaskBulkActionIds,
     disabledReasons: options.disabledReasons,
     handlers: options.handlers,
     labels: options.labels,
@@ -108,7 +113,10 @@ export function useProjectTaskActions(
 export function createProjectTaskActionRegistry(
   options: CreateProjectTaskActionRegistryOptions,
 ): TaskActionRegistry {
-  return createTaskSurfaceActionRegistry(options)
+  return createTaskSurfaceActionRegistry({
+    ...options,
+    bulkActionIds: projectTaskBulkActionIds,
+  })
 }
 
 /**

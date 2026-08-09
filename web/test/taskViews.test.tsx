@@ -424,6 +424,43 @@ describe('independent task views', () => {
     expect(html).toContain('Moderate')
   })
 
+  test('renders a canonical My Tasks card menu and reveals Move status controls', () => {
+    const task = taskViewStoryTasks[0]
+    const taskKey = createTaskViewItemKey(task.teamId, task.id)
+    const html = renderToStaticMarkup(
+      <MyTasksWorkspaceView
+        configurationFailedTeamIds={[]}
+        configurationsByTeam={taskViewStoryConfigurationsByTeam}
+        onMoveTaskStatus={async () => undefined}
+        onTaskActionMenuOpen={() => undefined}
+        presentation={{
+          columns: [{ field: 'title' }],
+          density: 'comfortable',
+          display: {
+            showArchived: false,
+            showAssigneeAvatars: false,
+            showCompleted: true,
+            showEmptyGroups: true,
+            showSubtasks: true,
+            wrapTitles: false,
+          },
+        }}
+        revealedStatusTaskKey={taskKey}
+        t={t}
+        tasks={[task]}
+        teams={[{
+          id: 'core-team',
+          name: 'コアチーム',
+          projects: [{ id: 'refero', name: 'Refero' }],
+        }]}
+      />,
+    )
+
+    expect(html).toContain(`data-task-view-item-key="${taskKey}"`)
+    expect(html).toContain('data-testid="my-tasks-card-refero-wireframe-actions"')
+    expect(html).toContain('data-testid="my-tasks-card-refero-wireframe-status-select"')
+  })
+
   test('orders the Gantt view by due date and leaves unscheduled tasks last', () => {
     const html = renderToStaticMarkup(
       <TaskGanttView

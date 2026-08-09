@@ -166,6 +166,31 @@ export const SharedActionSelection: Story = {
   },
 }
 
+/** Row overflow actions reuse the canonical registry and restore focus into Team detail controls. */
+export const SharedActionContextMenu: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const body = within(document.body)
+    onSelectIssueAction.mockClear()
+
+    await userEvent.click(canvas.getByTestId(
+      'team-issue-row-actions-onboarding-friction',
+    ))
+    const menu = await body.findByTestId('team-issue-action-context-menu')
+    const editAction = menu.querySelector<HTMLButtonElement>('[data-action-id="edit"]')
+    if (!editAction) throw new Error('Expected the Team Issue Edit action.')
+    await expect(editAction).toHaveAttribute('aria-disabled', 'false')
+    await userEvent.click(editAction)
+
+    await waitFor(() => expect(onSelectIssueAction).toHaveBeenCalledWith(
+      'onboarding-friction',
+    ))
+    await waitFor(() => expect(document.activeElement).toBe(
+      canvasElement.querySelector('[data-testid="team-issue-detail-pane"] input[name="title"]'),
+    ))
+  },
+}
+
 /**
  * Command menu provider 外では desktop/mobile とも検索導線を表示しない状態です。
  */

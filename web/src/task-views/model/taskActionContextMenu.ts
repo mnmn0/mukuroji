@@ -2,6 +2,7 @@ import type {
   WorkItemActionContext,
   WorkItemActionId,
 } from '@mukuroji/contracts'
+import type { ViewportAnchorPoint } from '../../shared/lib/viewportAnchor'
 import {
   formatTaskActionShortcut,
   resolveTaskActionDisabledReason,
@@ -21,12 +22,7 @@ export const taskActionContextMenuActionIds: readonly WorkItemActionId[] = [
 ]
 
 /** Pointer or overflow-button anchor used to position a desktop context menu. */
-export type TaskActionContextMenuAnchorPoint = {
-  /** Horizontal viewport coordinate in CSS pixels. */
-  x: number
-  /** Vertical viewport coordinate in CSS pixels. */
-  y: number
-}
+export type TaskActionContextMenuAnchorPoint = ViewportAnchorPoint
 
 /** Responsive placement resolved for the context menu. */
 export type TaskActionContextMenuLayout = {

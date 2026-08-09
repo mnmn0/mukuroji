@@ -1,4 +1,10 @@
-import type { TaskViewScope } from '@mukuroji/contracts'
+import type {
+  TaskViewScope,
+  WorkItemActionContext,
+  WorkItemActionId,
+  WorkItemActionResult,
+  WorkItemActionSelection,
+} from '@mukuroji/contracts'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router'
 import { createTranslator } from '../../shared/i18n/i18n'
@@ -26,14 +32,18 @@ import {
   resolveTaskActionExecutionFailureMessage,
   type TaskActionExecutionResult,
 } from '../../task-views/model/taskActionRegistry'
+import type { TaskActionContextMenuAnchorPoint } from '../../task-views/model/taskActionContextMenu'
 import {
+  createTaskSurfaceActionBaseContext,
   resolveTaskSurfaceActionTarget,
+  resolveTaskSurfaceActionTargets,
   useTaskSurfaceActions,
   type TaskSurfaceActionDisabledReasons,
   type TaskSurfaceActionHandlers,
   type TaskSurfaceActionLabels,
   type TaskSurfaceActionPermissions,
 } from '../../task-views/mutations/useTaskSurfaceActions'
+import { TaskActionContextMenu } from '../../task-views/ui/TaskActionContextMenu'
 import {
   createTaskSurfaceKeyboardInput,
   formatTaskSurfaceKeyboardShortcut,
@@ -50,6 +60,7 @@ import {
   isOpenableWorkspaceTask,
   isWorkspaceTaskAssignedToUser,
 } from '../../work-items/model/workspaceWorkItems'
+import { resolveEditableWorkflowStatuses } from '../../work-items/model/workItemDisplay'
 import { useWorkspaceTaskStatusMutation } from '../../workspace/mutations/useWorkspaceTaskStatusMutation'
 import { useWorkspaceWorkItemData } from '../../workspace/queries/useWorkspaceWorkItemData'
 import {
@@ -70,6 +81,16 @@ const taskViewBuiltInFields = [
   'team',
 ]
 
+/** Transient My Tasks context-menu target retained independently from keyboard selection. */
+type MyTaskActionContextMenuState = {
+  /** Pointer or overflow-control position used by the responsive menu layout. */
+  anchorPoint: TaskActionContextMenuAnchorPoint
+  /** Element that regains focus after the menu closes. */
+  returnFocusElement: HTMLElement
+  /** Revision-bound Work Item selected by this card entrance. */
+  selection: WorkItemActionSelection
+}
+
 /**
  * Renders the URL-specific My Tasks route and owns its status mutation controller.
  *
@@ -83,6 +104,10 @@ export function MyTasksPage() {
     createTaskViewSelectionState,
   )
   const [taskActionErrorMessage, setTaskActionErrorMessage] = useState<string>()
+  const [taskActionContextMenuState, setTaskActionContextMenuState] = useState<
+    MyTaskActionContextMenuState
+  >()
+  const [revealedStatusTaskKey, setRevealedStatusTaskKey] = useState<string>()
   const onOpenTaskRef = useRef(workspace.onOpenTask)
 
   useEffect(() => {
@@ -201,40 +226,108 @@ export function MyTasksPage() {
     singleSelectionRequired: t('taskViews.action.singleSelectionRequired'),
     unavailable: t('taskViews.action.unavailable'),
   }), [t])
-  const myTaskActionHandlers = useMemo<TaskSurfaceActionHandlers>(() => ({
-    open: (context) => {
-      const target = resolveTaskSurfaceActionTarget(context)
-      const task = target
-        ? visibleMyTasks.find((candidate) =>
-            candidate.teamId === target.teamId && candidate.id === target.workItemId
-          )
-        : undefined
-      if (!target || !task || !isOpenableWorkspaceTask(task)) {
-        return createFailedTaskActionResult(
-          context.actionId,
-          target,
-          'MyTasksActionTargetNotFound',
-          'not-found',
-          t('taskViews.action.notFound'),
+
+  /** Resolves one permission-pruned personal Work Item from a canonical action context. */
+  const resolveMyTaskActionTarget = useCallback((context: WorkItemActionContext) => {
+    const target = resolveTaskSurfaceActionTarget(context)
+    const task = target
+      ? visibleMyTasks.find((candidate) =>
+          candidate.teamId === target.teamId && candidate.id === target.workItemId
         )
-      }
-      onOpenTaskRef.current(task)
-      return createSucceededTaskActionResult(context.actionId, target)
-    },
-  }), [t, visibleMyTasks])
-  const myTaskActionPermissions = useMemo<TaskSurfaceActionPermissions>(() => ({
-    open: (context) => {
-      const target = resolveTaskSurfaceActionTarget(context)
-      if (!target) return allowTaskAction()
-      return visibleMyTasks.some((task) =>
-        task.teamId === target.teamId &&
-        task.id === target.workItemId &&
-        isOpenableWorkspaceTask(task)
+      : undefined
+    return { target, task }
+  }, [visibleMyTasks])
+
+  /** Checks whether the current permission and configuration expose a safe status entrance. */
+  const canMoveMyTaskStatus = useCallback((task: (typeof visibleMyTasks)[number]) => {
+    const configuration = workItems.configurationsByTeam[task.teamId]?.configuration
+    return workspace.canMutateTeamConfiguration &&
+      configuration !== undefined &&
+      !workItems.configurationFailedTeamIds.includes(task.teamId) &&
+      resolveEditableWorkflowStatuses(task, configuration).some(
+        (status) => status.id !== task.workflowStatusId,
       )
+  }, [
+    workspace.canMutateTeamConfiguration,
+    workItems.configurationFailedTeamIds,
+    workItems.configurationsByTeam,
+  ])
+
+  /** Opens one personal Work Item through the existing route action. */
+  const executeMyTaskOpenAction = useCallback((
+    context: WorkItemActionContext,
+  ): WorkItemActionResult => {
+    const { target, task } = resolveMyTaskActionTarget(context)
+    if (!target || !task || !isOpenableWorkspaceTask(task)) {
+      return createFailedTaskActionResult(
+        context.actionId,
+        target,
+        'MyTasksActionTargetNotFound',
+        'not-found',
+        t('taskViews.action.notFound'),
+      )
+    }
+    onOpenTaskRef.current(task)
+    return createSucceededTaskActionResult(context.actionId, target)
+  }, [resolveMyTaskActionTarget, t])
+
+  /** Reveals and focuses the existing status selector after canonical Move validation. */
+  const executeMyTaskMoveAction = useCallback((
+    context: WorkItemActionContext,
+  ): WorkItemActionResult => {
+    const { target, task } = resolveMyTaskActionTarget(context)
+    if (
+      !target ||
+      !task ||
+      !canMoveMyTaskStatus(task)
+    ) {
+      return createFailedTaskActionResult(
+        context.actionId,
+        target,
+        'MyTasksMoveUnavailable',
+        'unavailable',
+        myTaskActionDisabledReasons.unavailable,
+      )
+    }
+    const taskKey = createTaskViewItemKey(task.teamId, task.id)
+    setRevealedStatusTaskKey(taskKey)
+    focusMyTaskStatusControl(taskKey)
+    return createSucceededTaskActionResult(context.actionId, target)
+  }, [
+    myTaskActionDisabledReasons.unavailable,
+    canMoveMyTaskStatus,
+    resolveMyTaskActionTarget,
+  ])
+
+  const myTaskActionHandlers = useMemo<TaskSurfaceActionHandlers>(() => ({
+    move: executeMyTaskMoveAction,
+    open: executeMyTaskOpenAction,
+  }), [executeMyTaskMoveAction, executeMyTaskOpenAction])
+  const myTaskActionPermissions = useMemo<TaskSurfaceActionPermissions>(() => ({
+    move: (context) => {
+      const targets = resolveTaskSurfaceActionTargets(context)
+      if (targets.length === 0) return allowTaskAction()
+      if (targets.length !== 1) {
+        return denyTaskAction(myTaskActionDisabledReasons.singleSelectionRequired)
+      }
+      const { task } = resolveMyTaskActionTarget(context)
+      return task && canMoveMyTaskStatus(task)
         ? allowTaskAction()
         : denyTaskAction(myTaskActionDisabledReasons.unavailable)
     },
-  }), [myTaskActionDisabledReasons.unavailable, visibleMyTasks])
+    open: (context) => {
+      const { target, task } = resolveMyTaskActionTarget(context)
+      if (!target) return allowTaskAction()
+      return task && isOpenableWorkspaceTask(task)
+        ? allowTaskAction()
+        : denyTaskAction(myTaskActionDisabledReasons.unavailable)
+    },
+  }), [
+    myTaskActionDisabledReasons.singleSelectionRequired,
+    myTaskActionDisabledReasons.unavailable,
+    canMoveMyTaskStatus,
+    resolveMyTaskActionTarget,
+  ])
 
   /**
    * Projects normalized My Tasks action failures into an accessible local notice.
@@ -263,6 +356,19 @@ export function MyTasksPage() {
     selection: myTaskActionSelection,
     surface: 'my-tasks',
   })
+  const taskActionContextMenuContext = useMemo(() => {
+    if (!taskActionContextMenuState) return undefined
+    return createTaskSurfaceActionBaseContext(
+      'my-tasks',
+      taskViewScope,
+      taskActionContextMenuState.selection,
+      taskViewController.activeSavedView?.id,
+    )
+  }, [
+    taskActionContextMenuState,
+    taskViewController.activeSavedView?.id,
+    taskViewScope,
+  ])
 
   useEffect(() => {
     queueMicrotask(() => {
@@ -297,6 +403,39 @@ export function MyTasksPage() {
     )
   }, [myTaskActions])
 
+  /** Opens a revision-bound card menu without inheriting an unrelated multi-selection. */
+  const handleMyTaskActionMenuOpen = useCallback((
+    task: (typeof visibleMyTasks)[number],
+    anchorPoint: TaskActionContextMenuAnchorPoint,
+    returnFocusElement: HTMLElement,
+  ) => {
+    const taskKey = createTaskViewItemKey(task.teamId, task.id)
+    setTaskViewSelection((currentSelection) => reduceTaskViewSelection(currentSelection, {
+      key: taskKey,
+      type: 'focus',
+    }))
+    setTaskActionContextMenuState({
+      anchorPoint,
+      returnFocusElement,
+      selection: createFocusedTaskViewActionSelection({
+        expectedRevision: task.revision,
+        teamId: task.teamId,
+        workItemId: task.id,
+      }),
+    })
+  }, [])
+
+  /** Routes one personal-task menu activation through the canonical action registry. */
+  const handleMyTaskActionMenuExecute = useCallback((actionId: WorkItemActionId) => {
+    if (!taskActionContextMenuState) return
+    void myTaskActions.execute(
+      actionId,
+      'context-menu',
+      undefined,
+      taskActionContextMenuState.selection,
+    )
+  }, [myTaskActions, taskActionContextMenuState])
+
   useEffect(() => {
     /**
      * Routes personal-task navigation and shortcuts through shared reducers and registry policy.
@@ -305,7 +444,10 @@ export function MyTasksPage() {
      * @returns Nothing.
      */
     const handleMyTaskKeyboard = (event: KeyboardEvent) => {
-      const input = createTaskSurfaceKeyboardInput(event)
+      const input = createTaskSurfaceKeyboardInput(
+        event,
+        Boolean(taskActionContextMenuState),
+      )
       const selectionAction = createTaskViewSelectionKeyboardAction(
         input,
         taskViewSelection,
@@ -332,7 +474,12 @@ export function MyTasksPage() {
 
     document.addEventListener('keydown', handleMyTaskKeyboard)
     return () => document.removeEventListener('keydown', handleMyTaskKeyboard)
-  }, [myTaskActions, taskViewSelection, visibleMyTaskKeys])
+  }, [
+    myTaskActions,
+    taskActionContextMenuState,
+    taskViewSelection,
+    visibleMyTaskKeys,
+  ])
   const statusMutation = useWorkspaceTaskStatusMutation({
     accessToken: workspace.accessToken,
     configurationsByTeam: workItems.configurationsByTeam,
@@ -443,6 +590,14 @@ export function MyTasksPage() {
           onMoveTaskStatus={statusMutation.moveTaskStatus}
           focusedTaskKey={taskViewSelection.focusedKey}
           onOpenTask={handleOpenMyTask}
+          onStatusActionConsumed={(task) => {
+            const taskKey = createTaskViewItemKey(task.teamId, task.id)
+            setRevealedStatusTaskKey((currentKey) =>
+              currentKey === taskKey ? undefined : currentKey
+            )
+          }}
+          onTaskActionMenuOpen={handleMyTaskActionMenuOpen}
+          revealedStatusTaskKey={revealedStatusTaskKey}
           selectedTaskKeys={taskViewSelection.selectedKeys}
           t={t}
           taskMoveErrorMessage={statusMutation.errorMessage}
@@ -451,7 +606,36 @@ export function MyTasksPage() {
           tasks={visibleMyTasks}
           teams={workspace.teams}
         />
+        {taskActionContextMenuState && taskActionContextMenuContext ? (
+          <TaskActionContextMenu
+            anchorPoint={taskActionContextMenuState.anchorPoint}
+            context={taskActionContextMenuContext}
+            labels={myTaskActionLabels}
+            menuLabel={t('tasks.action.more')}
+            onClose={() => setTaskActionContextMenuState(undefined)}
+            onExecute={handleMyTaskActionMenuExecute}
+            registry={myTaskActions.registry}
+            returnFocusElement={taskActionContextMenuState.returnFocusElement}
+            testId="my-tasks-action-context-menu"
+          />
+        ) : null}
       </div>
     </WorkspaceRouteContent>
   )
+}
+
+/**
+ * Focuses the status selector revealed by a canonical My Tasks Move entrance.
+ *
+ * @param taskKey - Team-qualified task-view item key rendered on the target card.
+ * @returns Nothing.
+ */
+function focusMyTaskStatusControl(taskKey: string): void {
+  requestAnimationFrame(() => {
+    const card = [...document.querySelectorAll<HTMLElement>('[data-task-view-item-key]')]
+      .find((candidate) => candidate.dataset.taskViewItemKey === taskKey)
+    const statusControl = card?.querySelector<HTMLSelectElement>('select')
+    statusControl?.focus()
+    statusControl?.scrollIntoView({ block: 'nearest' })
+  })
 }

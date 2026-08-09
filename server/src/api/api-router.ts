@@ -18736,7 +18736,9 @@ function readTaskViewDefinition(value: unknown): TaskViewDefinition {
       ? scope.kind === 'project'
       : surface === 'team'
         ? scope.kind === 'team'
-        : scope.kind === 'viewer'
+        : surface === 'my-tasks' || surface === 'focus'
+          ? scope.kind === 'viewer'
+          : false
   if (!validScope) {
     return invalidTaskViewApiInput('Task view surface and scope do not match.')
   }

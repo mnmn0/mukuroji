@@ -6,6 +6,8 @@ import type {
 } from '@mukuroji/contracts'
 import type { DragEvent } from 'react'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
+import { MoreHorizontalIcon } from '../../shared/ui/icons'
+import type { ViewportAnchorPoint } from '../../shared/lib/viewportAnchor'
 import type { ProjectTask, TaskPriority } from '../../tasks/api'
 import {
   formatCustomFieldValue,
@@ -95,6 +97,11 @@ export type CompactTaskCardProps = {
   onDragStart?: (event: DragEvent<HTMLElement>) => void
   /** Row spacing selected by the effective task view. */
   density?: TaskViewDensity
+  /** Opens the responsive canonical action menu for this Work Item. */
+  onOpenActionMenu?: (
+    anchorPoint: ViewportAnchorPoint,
+    returnFocusElement: HTMLElement,
+  ) => void
   /** Optional callback that opens the selected Work Item. */
   onOpenTask?: (task: ProjectTask) => void
   /** Optional callback that requests a workflow status change. */
@@ -103,6 +110,8 @@ export type CompactTaskCardProps = {
   t: (key: MessageKey) => string
   /** Work Item displayed by the card. */
   task: ProjectTask
+  /** Team-qualified key used to resolve this card from a canonical action target. */
+  taskViewItemKey?: string
   /** Optional test identifier for the card and its interactive controls. */
   testId?: string
   /** Visible Project label shown when the Project field is enabled. */
@@ -111,6 +120,8 @@ export type CompactTaskCardProps = {
   teamLabel?: string
   /** Person identities mapped to labels for person custom fields. */
   personLabels?: Readonly<Record<string, string>>
+  /** Whether the canonical Move entrance reveals the status selector outside visible columns. */
+  revealStatusControl?: boolean
   /** Whether an assignee initial is rendered beside the assignee label. */
   showAssigneeAvatar?: boolean
   /** Whether the Work Item is selected through the shared task-view reducer. */
@@ -139,14 +150,17 @@ export function CompactTaskCard({
   locale = 'ja',
   onDragEnd,
   onDragStart,
+  onOpenActionMenu,
   onOpenTask,
   onStatusChange,
   t,
   task,
+  taskViewItemKey,
   testId,
   projectLabel,
   teamLabel,
   personLabels = {},
+  revealStatusControl = false,
   showAssigneeAvatar = false,
   selected = false,
   visibleFields = ['title', 'status', 'dueDate', 'priority'],
@@ -201,7 +215,7 @@ export function CompactTaskCard({
     <article
       aria-current={focused || undefined}
       aria-grabbed={isDragging || undefined}
-      className={`rounded-lg border border-slate-200 ${
+      className={`min-w-0 w-full rounded-lg border border-slate-200 ${
         selected ? 'bg-blue-50/70' : 'bg-white'
       } ${cardPadding} transition ${
         draggable ? 'cursor-grab hover:border-[#99d7cf] hover:shadow-[0_1px_2px_rgba(23,32,29,0.06)] active:cursor-grabbing' : ''
@@ -209,30 +223,60 @@ export function CompactTaskCard({
         isDragging ? 'opacity-50 ring-2 ring-[#99d7cf]' : ''
       } ${isMoving ? 'opacity-70' : ''}`}
       data-task-view-focused={focused ? 'true' : 'false'}
+      data-task-view-item-key={taskViewItemKey}
       data-task-view-selected={selected ? 'true' : 'false'}
       data-testid={testId}
       draggable={draggable}
       onDragEnd={onDragEnd}
       onDragStart={onDragStart}
+      onContextMenu={(event) => {
+        if (!onOpenActionMenu) return
+        event.preventDefault()
+        onOpenActionMenu(
+          { x: event.clientX, y: event.clientY },
+          event.currentTarget,
+        )
+      }}
+      tabIndex={onOpenActionMenu ? -1 : undefined}
     >
       {selected ? <span className="sr-only">{t('tasks.row.selected')}</span> : null}
-      {onOpenTask ? (
-        <button
-          className={`w-full text-left text-sm font-semibold leading-6 text-[var(--workbench-text)] hover:text-[var(--workbench-primary)] disabled:hover:text-[var(--workbench-text)] ${
+      <div className="flex min-w-0 items-start gap-2">
+        {onOpenTask ? (
+          <button
+            className={`min-w-0 flex-1 text-left text-sm font-semibold leading-6 text-[var(--workbench-text)] hover:text-[var(--workbench-primary)] disabled:hover:text-[var(--workbench-text)] ${
+              wrapText ? 'whitespace-normal break-words' : 'truncate'
+            }`}
+            data-testid={testId ? `${testId}-open` : undefined}
+            disabled={!isOpenableWorkspaceTask(task)}
+            onClick={() => onOpenTask(task)}
+            type="button"
+          >
+            {taskTitle}
+          </button>
+        ) : (
+          <p className={`min-w-0 flex-1 text-sm font-semibold leading-6 text-[var(--workbench-text)] ${
             wrapText ? 'whitespace-normal break-words' : 'truncate'
-          }`}
-          data-testid={testId ? `${testId}-open` : undefined}
-          disabled={!isOpenableWorkspaceTask(task)}
-          onClick={() => onOpenTask(task)}
-          type="button"
-        >
-          {taskTitle}
-        </button>
-      ) : (
-        <p className={`text-sm font-semibold leading-6 text-[var(--workbench-text)] ${
-          wrapText ? 'whitespace-normal break-words' : 'truncate'
-        }`}>{taskTitle}</p>
-      )}
+          }`}>{taskTitle}</p>
+        )}
+        {onOpenActionMenu ? (
+          <button
+            aria-label={`${t('tasks.action.more')}: ${taskTitle}`}
+            className="grid h-9 w-9 flex-none place-items-center rounded text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary)] max-[640px]:h-11 max-[640px]:w-11"
+            data-testid={testId ? `${testId}-actions` : undefined}
+            onClick={(event) => {
+              const returnFocusElement = event.currentTarget
+              const bounds = returnFocusElement.getBoundingClientRect()
+              onOpenActionMenu(
+                { x: bounds.right, y: bounds.bottom },
+                returnFocusElement,
+              )
+            }}
+            type="button"
+          >
+            <MoreHorizontalIcon className="h-5 w-5" />
+          </button>
+        ) : null}
+      </div>
       {visibleFields.includes('assignee') ? (
         <div className="mt-2 flex min-w-0 items-center gap-2 text-xs font-medium text-[var(--workbench-muted)]">
           {showAssigneeAvatar ? (
@@ -286,7 +330,7 @@ export function CompactTaskCard({
           ))}
         </dl>
       ) : null}
-      {visibleFields.includes('status') && onStatusChange ? (
+      {(visibleFields.includes('status') || revealStatusControl) && onStatusChange ? (
         <select
           aria-label={statusSelectLabel}
           className="workbench-input mt-3 h-9 w-full px-3 text-xs disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400"

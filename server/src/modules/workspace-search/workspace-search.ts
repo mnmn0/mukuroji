@@ -4376,7 +4376,9 @@ function validateTaskViewSurfaceScope(surface: TaskViewSurface, scope: TaskViewS
       ? scope.kind === 'project'
       : surface === 'team'
         ? scope.kind === 'team'
-        : scope.kind === 'viewer'
+        : surface === 'my-tasks' || surface === 'focus'
+          ? scope.kind === 'viewer'
+          : false
   if (!valid) invalidTaskView('Task view surface and scope do not match.')
 }
 

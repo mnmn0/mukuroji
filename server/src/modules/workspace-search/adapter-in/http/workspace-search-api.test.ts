@@ -2044,6 +2044,26 @@ test('task view endpoints reject malformed query and JSON contracts before invok
       },
     }),
   })
+  const triageResponse = await app.request('/api/task-views', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      name: 'Unowned triage queue',
+      visibility: 'personal',
+      definition: {
+        surface: 'triage',
+        scope: { kind: 'viewer' },
+        filters: {},
+        layout: {
+          mode: 'list',
+          sort: [],
+          columns: [{ field: 'title' }],
+          density: 'compact',
+          displayOptions: {},
+        },
+      },
+    }),
+  })
   const invalidIdempotencyHeaders = {
     ...headers,
     'Idempotency-Key': 'x'.repeat(257),
@@ -2061,11 +2081,13 @@ test('task view endpoints reject malformed query and JSON contracts before invok
   expect([
     listResponse.status,
     createResponse.status,
+    triageResponse.status,
     updateResponse.status,
     deleteResponse.status,
-  ]).toEqual([400, 400, 400, 400])
+  ]).toEqual([400, 400, 400, 400, 400])
   expect(await listResponse.json()).toMatchObject({ code: 'InvalidTaskView' })
   expect(await createResponse.json()).toMatchObject({ code: 'InvalidTaskView' })
+  expect(await triageResponse.json()).toMatchObject({ code: 'InvalidTaskView' })
   expect(await updateResponse.json()).toMatchObject({ code: 'InvalidTaskView' })
   expect(await deleteResponse.json()).toMatchObject({ code: 'InvalidTaskView' })
   expect(operationCount).toBe(0)

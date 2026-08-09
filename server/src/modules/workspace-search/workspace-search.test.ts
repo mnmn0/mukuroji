@@ -1533,7 +1533,7 @@ test('binds every task view mutation to its authoritative writable resource scop
   })).resolves.toMatchObject({ name: 'My Tasks queue' })
 })
 
-test('reads task views by ID without disclosing inaccessible personal definitions', async () => {
+test('reads personal Focus views and rejects Triage until its queue ownership is defined', async () => {
   const client = new DynamoDbWorkspaceSearchClient(
     'search-table',
     createMemoryDocumentClient([]),
@@ -1555,6 +1555,26 @@ test('reads task views by ID without disclosing inaccessible personal definition
     projectScopeKeys: new Set<string>(),
     writableProjectScopeKeys: new Set<string>(),
   }
+  expect(client.createTaskView({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    input: {
+      name: 'Unowned triage queue',
+      visibility: 'personal',
+      definition: {
+        surface: 'triage',
+        scope: { kind: 'viewer' },
+        filters: {},
+        layout: {
+          mode: 'list',
+          sort: [],
+          columns: [{ field: 'title' }],
+          density: 'compact',
+          displayOptions: {},
+        },
+      },
+    },
+  })).rejects.toMatchObject({ code: 'InvalidTaskView', status: 400 })
   const created = await client.createTaskView({
     workspaceId: 'workspace-1',
     access: ownerAccess,

@@ -9,6 +9,7 @@ import {
   type TaskViewGroupValue,
   type TaskViewPresentationSettings,
 } from '../../task-views/model/taskViewPresentation'
+import type { TaskActionContextMenuAnchorPoint } from '../../task-views/model/taskActionContextMenu'
 import { createTaskViewItemKey } from '../../task-views/model/taskViewSelection'
 import {
   resolveEditableWorkflowStatuses,
@@ -44,8 +45,18 @@ export type MyTasksWorkspaceViewProps = {
   onMoveTaskStatus?: (task: ProjectTask, workflowStatusId: string) => Promise<void>
   /** Optional callback that opens a selected Work Item. */
   onOpenTask?: (task: ProjectTask) => void
+  /** Opens the canonical action menu for one personal Work Item card. */
+  onTaskActionMenuOpen?: (
+    task: ProjectTask,
+    anchorPoint: TaskActionContextMenuAnchorPoint,
+    returnFocusElement: HTMLElement,
+  ) => void
+  /** Clears a status-action entrance after its selector commits a change. */
+  onStatusActionConsumed?: (task: ProjectTask) => void
   /** Visible card fields, density, wrapping, and grouping selected by the effective view. */
   presentation?: TaskViewPresentationSettings
+  /** Team-qualified key whose status selector was revealed by the canonical Move action. */
+  revealedStatusTaskKey?: string
   /** Person identities mapped to labels for person custom fields. */
   personLabels?: Readonly<Record<string, string>>
   /** Translator used for Workspace labels. */
@@ -74,8 +85,11 @@ export function MyTasksWorkspaceView({
   focusedTaskKey,
   locale = 'ja',
   onOpenTask,
+  onTaskActionMenuOpen,
+  onStatusActionConsumed,
   personLabels = {},
   presentation,
+  revealedStatusTaskKey,
   t,
   taskMoveErrorMessage,
   taskViewToolbar,
@@ -374,11 +388,23 @@ export function MyTasksWorkspaceView({
                       wrapText={presentation?.display.wrapTitles}
                       onDragEnd={handleDragEnd}
                       onDragStart={(event) => handleDragStart(event, task)}
+                      onOpenActionMenu={onTaskActionMenuOpen
+                        ? (anchorPoint, returnFocusElement) => onTaskActionMenuOpen(
+                            task,
+                            anchorPoint,
+                            returnFocusElement,
+                          )
+                        : undefined}
                       onOpenTask={onOpenTask}
                       onStatusChange={!onMoveTaskStatus
                         ? undefined
-                        : (nextStatus) => moveTaskToStatus(task, nextStatus)}
+                        : (nextStatus) => {
+                            moveTaskToStatus(task, nextStatus)
+                            onStatusActionConsumed?.(task)
+                          }}
+                      revealStatusControl={revealedStatusTaskKey === taskViewKey}
                       workflowStatuses={editableStatuses}
+                      taskViewItemKey={taskViewKey}
                     />
                     </Fragment>
                   )
@@ -431,6 +457,14 @@ export function MyTasksWorkspaceView({
                   visibleFields={presentation?.columns.map((column) => column.field)}
                   wrapText={presentation?.display.wrapTitles}
                   onOpenTask={onOpenTask}
+                  onOpenActionMenu={onTaskActionMenuOpen
+                    ? (anchorPoint, returnFocusElement) => onTaskActionMenuOpen(
+                        task,
+                        anchorPoint,
+                        returnFocusElement,
+                      )
+                    : undefined}
+                  taskViewItemKey={createTaskViewItemKey(task.teamId, task.id)}
                   workflowStatuses={[]}
                 />
               ))}
