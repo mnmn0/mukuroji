@@ -24,6 +24,7 @@ import {
 import type {
   BulkOperationProjectOption,
   BulkOperationSelection,
+  BulkOperationTaskActionRequest,
 } from '../../bulk-operations/ui/BulkOperationToolbar'
 import type { FileArtifactsController } from '../../files/mutations/useFileArtifacts'
 import type {
@@ -41,6 +42,11 @@ import {
 import { WorkItemDefinitionFilters } from '../../work-items/ui/WorkItemDefinitionFilters'
 import type { WorkItemDependencyCreateDraft } from '../../work-items/model/workItemDependencies'
 import type { WorkItemPersonOption } from '../../work-items/ui/WorkItemFieldsEditor'
+import {
+  groupTaskViewItems,
+  type TaskViewGroupValue,
+  type TaskViewPresentationSettings,
+} from '../../task-views/model/taskViewPresentation'
 import type { ProjectTask } from '../api/tasks'
 import {
   createAssigneeFilterOptions,
@@ -64,6 +70,7 @@ import { TaskFileView } from './TaskFileView'
 import { TaskGanttView } from './TaskGanttView'
 import { TaskPermissionsView } from './TaskPermissionsView'
 import { TaskTableView } from './TaskTableView'
+import type { ProjectTaskActionMenuOpenHandler } from './projectTaskActionMenu'
 
 const priorityFilterOptions: readonly PriorityFilter[] = ['all', ...taskPriorities]
 
@@ -77,6 +84,10 @@ export type TaskWorkspaceProps = {
   bulkProjectOptions: BulkOperationProjectOption[]
   /** Workspace id required by bulk operations. */
   bulkWorkspaceId: string
+  /** Canonical Project action requested by another action entrance. */
+  bulkTaskActionRequest?: BulkOperationTaskActionRequest
+  /** Stable key epoch retained after the current canonical action request is consumed. */
+  bulkTaskActionEpoch: number
   /** Selected assignee filter. */
   assigneeFilter: AssigneeFilter
   /** Active Project members available to inline assignee editors. */
@@ -142,6 +153,12 @@ export type TaskWorkspaceProps = {
   ) => Promise<BulkOperation>
   /** Synchronizes selection after a bulk operation changes state. */
   onBulkOperationComplete: (operation: BulkOperation) => void
+  /** Routes parameterized bulk entrances through the canonical Project action registry. */
+  onBulkTaskActionRequest?: (
+    actionId: BulkOperationTaskActionRequest['actionId'],
+  ) => Promise<boolean>
+  /** Acknowledges one canonical action request after the toolbar consumes it. */
+  onBulkTaskActionRequestConsumed: (requestId: number) => void
   /** Previews validation and effects for a bulk operation. */
   onBulkPreview?: (request: BulkOperationRequest) => Promise<BulkOperationPreview>
   /** Retries failed items in a bulk operation. */
@@ -162,6 +179,8 @@ export type TaskWorkspaceProps = {
   onDeleteScheduleDependency?: (dependency: WorkItemScheduleDependency) => void | Promise<void>
   /** Changes the selected priority filter. */
   onPriorityFilterChange: (priorityFilter: PriorityFilter) => void
+  /** Resets every task filter in one state transition. */
+  onResetFilters?: () => void
   /** Changes the project user search query. */
   onProjectUserQueryChange?: (query: string) => void
   /** Removes a member from the project. */
@@ -170,6 +189,8 @@ export type TaskWorkspaceProps = {
   onSearchQueryChange: (query: string) => void
   /** Selects a task for the detail pane. */
   onSelectTask: (task: ProjectTask) => void
+  /** Opens the canonical action menu for one rendered task row or card. */
+  onTaskActionMenuOpen?: ProjectTaskActionMenuOpenHandler
   /** Changes the selected task sort order. */
   onSortOrderChange: (sortOrder: TaskSortOrder) => void
   /** Changes the selected workflow status filter. */
@@ -214,6 +235,10 @@ export type TaskWorkspaceProps = {
   t: (key: MessageKey) => string
   /** Task list error shown in place of task views. */
   taskErrorMessage?: string
+  /** Shared saved-view lifecycle and display controls. */
+  taskViewToolbar?: ReactNode
+  /** Columns, grouping, density, and text wrapping applied by task layouts. */
+  taskViewPresentation?: TaskViewPresentationSettings
   /** Filtered and sorted tasks rendered by the active view. */
   tasks: ProjectTask[]
   /** Bulk operation snapshots for currently visible tasks. */
@@ -236,6 +261,8 @@ export function TaskWorkspace({
   activeTab,
   allTasks,
   bulkProjectOptions,
+  bulkTaskActionEpoch,
+  bulkTaskActionRequest,
   bulkWorkspaceId,
   assigneeFilter,
   assigneeOptions,
@@ -268,6 +295,8 @@ export function TaskWorkspace({
   onAssigneeFilterChange,
   onBulkApply,
   onBulkOperationComplete,
+  onBulkTaskActionRequest,
+  onBulkTaskActionRequestConsumed,
   onBulkPreview,
   onBulkRetry,
   onBulkUndo,
@@ -278,10 +307,12 @@ export function TaskWorkspace({
   onCreateScheduleDependency,
   onDeleteScheduleDependency,
   onPriorityFilterChange,
+  onResetFilters,
   onProjectUserQueryChange,
   onRemoveProjectMember,
   onSearchQueryChange,
   onSelectTask,
+  onTaskActionMenuOpen,
   onSortOrderChange,
   onStatusFilterChange,
   onTaskSelectionChange,
@@ -297,6 +328,8 @@ export function TaskWorkspace({
   statusFilter,
   t,
   taskErrorMessage,
+  taskViewToolbar,
+  taskViewPresentation,
   tasks,
   visibleBulkItems,
   currentWorkspaceMemberKey,
@@ -312,6 +345,43 @@ export function TaskWorkspace({
   const dependencySummaries = useMemo(
     () => createWorkItemDependencySummaries(planningSnapshot),
     [planningSnapshot],
+  )
+  const boardGroups = taskViewPresentation?.groupBy && taskViewPresentation.groupBy !== 'status'
+    ? groupTaskViewItems(
+        tasks,
+        taskViewPresentation.groupBy,
+        (task, field) => resolveProjectWorkspaceGroupValue(
+          task,
+          field,
+          configurationsByTeam,
+          t,
+        ),
+        taskViewPresentation.groupDirection,
+      )
+    : undefined
+
+  /** Renders one complete workflow board for an optional primary group. */
+  const renderBoard = (boardTasks: ProjectTask[]) => (
+    <TaskBoardView
+      assigneeOptions={assigneeOptions}
+      configuration={configuration}
+      configurationsByTeam={configurationsByTeam}
+      configurationFailedTeamIds={configurationFailedTeamIds}
+      dependencySummaries={dependencySummaries}
+      locale={locale}
+      onSelectTask={onSelectTask}
+      onTaskActionMenuOpen={onTaskActionMenuOpen}
+      onCreateTaskOpen={onCreateTaskOpen}
+      onUpdateTask={onUpdateTask}
+      personLabels={personLabels}
+      personOptions={personOptions}
+      presentation={taskViewPresentation}
+      projectId={projectId}
+      selectedDetailTaskKey={selectedDetailTaskKey}
+      statusColumns={statusColumns}
+      t={t}
+      tasks={boardTasks}
+    />
   )
 
   if (activeTab === 'permissions') {
@@ -355,6 +425,7 @@ export function TaskWorkspace({
 
   return (
     <div className="px-[clamp(18px,2.5vw,30px)] py-4">
+      {taskViewToolbar}
       <div className="workbench-toolbar flex flex-wrap items-center justify-between gap-3 px-3 py-2">
         <div className="flex flex-wrap items-center gap-2">
           <label className="relative block">
@@ -378,11 +449,15 @@ export function TaskWorkspace({
               setIsDueDateMenuOpen(false)
               setIsPriorityMenuOpen(false)
               setIsSortMenuOpen(false)
-              onStatusFilterChange('all')
-              onAssigneeFilterChange('all')
-              onPriorityFilterChange('all')
-              onDueDateFilterChange('all')
-              onDefinitionFilterChange({ category: 'all', customFieldId: '' })
+              if (onResetFilters) {
+                onResetFilters()
+              } else {
+                onStatusFilterChange('all')
+                onAssigneeFilterChange('all')
+                onPriorityFilterChange('all')
+                onDueDateFilterChange('all')
+                onDefinitionFilterChange({ category: 'all', customFieldId: '' })
+              }
             }}
           />
           <FilterMenu
@@ -527,6 +602,8 @@ export function TaskWorkspace({
         <TaskTableView
           assigneeOptions={assigneeOptions}
           bulkProjectOptions={bulkProjectOptions}
+          bulkTaskActionEpoch={bulkTaskActionEpoch}
+          bulkTaskActionRequest={bulkTaskActionRequest}
           bulkWorkspaceId={bulkWorkspaceId}
           configuration={configuration}
           configurationsByTeam={configurationsByTeam}
@@ -534,12 +611,15 @@ export function TaskWorkspace({
           locale={locale}
           onBulkApply={onBulkApply}
           onBulkOperationComplete={onBulkOperationComplete}
+          onBulkTaskActionRequest={onBulkTaskActionRequest}
+          onBulkTaskActionRequestConsumed={onBulkTaskActionRequestConsumed}
           onBulkPreview={onBulkPreview}
           onBulkRetry={onBulkRetry}
           onBulkUndo={onBulkUndo}
           onCreateTaskOpen={onCreateTaskOpen}
           onUpdateTask={onUpdateTask}
           onSelectTask={onSelectTask}
+          onTaskActionMenuOpen={onTaskActionMenuOpen}
           onTaskSelectionChange={onTaskSelectionChange}
           onVisibleTaskSelectionChange={onVisibleTaskSelectionChange}
           personOptions={personOptions}
@@ -551,28 +631,24 @@ export function TaskWorkspace({
           t={t}
           taskErrorMessage={taskErrorMessage}
           tasks={tasks}
+          presentation={taskViewPresentation}
           visibleBulkItems={visibleBulkItems}
         />
       ) : null}
       {activeTab === 'board' && !taskErrorMessage ? (
-        <TaskBoardView
-          assigneeOptions={assigneeOptions}
-          configuration={configuration}
-          configurationsByTeam={configurationsByTeam}
-          configurationFailedTeamIds={configurationFailedTeamIds}
-          dependencySummaries={dependencySummaries}
-          locale={locale}
-          onSelectTask={onSelectTask}
-          onCreateTaskOpen={onCreateTaskOpen}
-          onUpdateTask={onUpdateTask}
-          personLabels={personLabels}
-          personOptions={personOptions}
-          projectId={projectId}
-          selectedDetailTaskKey={selectedDetailTaskKey}
-          statusColumns={statusColumns}
-          t={t}
-          tasks={tasks}
-        />
+        boardGroups ? (
+          <div className="grid gap-5" data-testid="project-task-board-groups">
+            {boardGroups.map((group) => (
+              <section className="min-w-0" key={group.key}>
+                <h2 className="border-b border-[var(--workbench-border)] pb-2 text-sm font-bold text-[var(--workbench-text)]">
+                  {group.label}{' '}
+                  <span className="font-medium text-[var(--workbench-muted)]">({group.items.length})</span>
+                </h2>
+                {renderBoard([...group.items])}
+              </section>
+            ))}
+          </div>
+        ) : renderBoard(tasks)
       ) : null}
       {activeTab === 'gantt' && !taskErrorMessage ? (
         <TaskGanttView
@@ -606,6 +682,39 @@ export function TaskWorkspace({
       ) : null}
     </div>
   )
+}
+
+/** Resolves a stable key and visible label for a project board primary group. */
+function resolveProjectWorkspaceGroupValue(
+  task: ProjectTask,
+  field: string,
+  configurationsByTeam: Readonly<Record<string, ResolvedWorkItemConfiguration>>,
+  t: (key: MessageKey) => string,
+): TaskViewGroupValue {
+  const configuration = configurationsByTeam[task.teamId]?.configuration
+  let value: string
+  switch (field) {
+    case 'title': value = task.title; break
+    case 'status': value = configuration?.workflow.statuses.find(
+      (status) => status.id === task.workflowStatusId,
+    )?.name ?? task.workflowStatusId; break
+    case 'assignee': value = task.assigneeName ?? task.assigneeEmail ?? task.assigneeUserId; break
+    case 'dueDate': value = task.dueDate || '—'; break
+    case 'priority': value = t(`tasks.priority.${task.priority}`); break
+    case 'project': value = task.assignedProjectId ?? '—'; break
+    case 'team': value = task.teamId; break
+    default: {
+      const customValue = field.startsWith('custom:')
+        ? task.customFieldValues[field.slice('custom:'.length)]
+        : undefined
+      value = Array.isArray(customValue)
+        ? customValue.join(', ')
+        : customValue === undefined || customValue === null || customValue === ''
+          ? '—'
+          : String(customValue)
+    }
+  }
+  return { key: value, label: value }
 }
 
 /** Props accepted by a filter menu wrapper. */

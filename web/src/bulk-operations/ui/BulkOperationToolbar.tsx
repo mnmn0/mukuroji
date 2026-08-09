@@ -4,7 +4,7 @@ import type {
   BulkOperationPreview,
   BulkOperationRequest,
 } from '@mukuroji/contracts'
-import { useEffect, useId, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import { BulkOperationResultPanel } from './BulkOperationResultPanel'
 import {
@@ -18,6 +18,19 @@ import {
 export type { BulkOperationSelection } from '../model/bulkOperation'
 
 const bulkPriorities = ['high', 'medium', 'low'] as const
+
+/** Toolbar mode including the canonical assign entrance backed by a bulk edit request. */
+type BulkOperationToolbarAction = BulkOperationAction['type'] | 'assign'
+
+/** Canonical bulk action requested by another Project action entrance. */
+export type BulkOperationTaskActionRequest = {
+  /** Project action to reveal in the bulk-operation toolbar. */
+  actionId: 'move' | 'assign' | 'archive'
+  /** Project that owned the selection when the action was requested. */
+  projectId: string
+  /** Monotonic identifier that permits repeated requests for the same action. */
+  requestId: number
+}
 
 /** Move action で選択できる Project です。 */
 export type BulkOperationProjectOption = {
@@ -39,6 +52,8 @@ export type BulkOperationToolbarProps = {
   projectOptions?: BulkOperationProjectOption[]
   /** 権限不足で mutation を禁止するかどうかです。 */
   readOnly?: boolean
+  /** Canonical action requested by command-menu or another shared entrance. */
+  taskActionRequest?: BulkOperationTaskActionRequest
   /** 現在 locale の翻訳関数です。 */
   t: (key: MessageKey) => string
   /** 表示中 item の checkbox state をまとめて変更します。 */
@@ -56,6 +71,12 @@ export type BulkOperationToolbarProps = {
   onUndo?: (operationId: string) => Promise<BulkOperation>
   /** Operation 更新後に selection と親 cache を同期します。 */
   onOperationComplete?: (operation: BulkOperation) => void
+  /** Runs a toolbar action entrance through the shared Project action registry. */
+  onTaskActionRequest?: (
+    actionId: BulkOperationTaskActionRequest['actionId'],
+  ) => Promise<boolean>
+  /** Acknowledges that the current canonical entrance initialized this toolbar instance. */
+  onTaskActionRequestConsumed?: (requestId: number) => void
   /** Story/test で表示する初期 preview です。 */
   initialPreview?: BulkOperationPreview
   /** Story/test で表示する初期 operation です。 */
@@ -71,6 +92,7 @@ export function BulkOperationToolbar({
   visibleItems,
   projectOptions = [],
   readOnly = false,
+  taskActionRequest,
   t,
   onVisibleSelectionChange,
   onPreview,
@@ -78,6 +100,8 @@ export function BulkOperationToolbar({
   onRetry,
   onUndo,
   onOperationComplete,
+  onTaskActionRequest,
+  onTaskActionRequestConsumed,
   initialPreview,
   initialOperation,
 }: BulkOperationToolbarProps) {
@@ -85,15 +109,21 @@ export function BulkOperationToolbar({
   const valueId = useId()
   const targetProjectId = useId()
   const selectAllRef = useRef<HTMLInputElement>(null)
-  const [action, setAction] = useState<BulkOperationAction['type']>('edit')
-  const [editField, setEditField] = useState<BulkEditField>('workflowStatusId')
+  const [action, setAction] = useState<BulkOperationToolbarAction>(
+    taskActionRequest?.actionId ?? 'edit',
+  )
+  const [editField, setEditField] = useState<BulkEditField>(
+    taskActionRequest?.actionId === 'assign' ? 'assigneeUserId' : 'workflowStatusId',
+  )
   const [editValue, setEditValue] = useState('')
   const [moveProjectId, setMoveProjectId] = useState('')
   const [previewedRequest, setPreviewedRequest] = useState<BulkOperationRequest>()
   const [preview, setPreview] = useState<BulkOperationPreview | undefined>(initialPreview)
   const [operation, setOperation] = useState<BulkOperation | undefined>(initialOperation)
   const [errorMessage, setErrorMessage] = useState<string>()
-  const [busyState, setBusyState] = useState<'preview' | 'apply' | 'resume' | 'retry' | 'undo'>()
+  const [busyState, setBusyState] = useState<
+    'action' | 'preview' | 'apply' | 'resume' | 'retry' | 'undo'
+  >()
   const selectedKeySet = useMemo(
     () => new Set(selectedItems.map((item) => item.selectionKey)),
     [selectedItems],
@@ -107,6 +137,12 @@ export function BulkOperationToolbar({
       selectAllRef.current.indeterminate = someVisibleSelected && !allVisibleSelected
     }
   }, [allVisibleSelected, someVisibleSelected])
+
+  useEffect(() => {
+    if (taskActionRequest) {
+      onTaskActionRequestConsumed?.(taskActionRequest.requestId)
+    }
+  }, [onTaskActionRequestConsumed, taskActionRequest])
 
   const request = createBulkOperationRequest(
     workspaceId,
@@ -122,16 +158,38 @@ export function BulkOperationToolbar({
   const requestReady = request !== undefined
   const mutationsAvailable = !readOnly && Boolean(onPreview && onApply)
 
-  const resetReview = () => {
+  const resetReview = useCallback(() => {
     setPreview(undefined)
     setPreviewedRequest(undefined)
     setOperation(undefined)
     setErrorMessage(undefined)
-  }
+  }, [])
 
-  const selectAction = (nextAction: BulkOperationAction['type']) => {
+  /** Activates one toolbar mode after its canonical entrance has been accepted. */
+  const activateAction = useCallback((nextAction: BulkOperationToolbarAction) => {
     setAction(nextAction)
+    if (nextAction === 'assign') setEditField('assigneeUserId')
+    if (nextAction === 'edit') setEditField('workflowStatusId')
     resetReview()
+  }, [resetReview])
+
+  /** Routes parameterized Project actions through the shared registry before revealing inputs. */
+  const selectAction = async (nextAction: BulkOperationToolbarAction) => {
+    const taskActionId = resolveBulkOperationTaskActionId(nextAction)
+    if (!taskActionId || !onTaskActionRequest) {
+      activateAction(nextAction)
+      return
+    }
+
+    setBusyState('action')
+    setErrorMessage(undefined)
+    try {
+      if (await onTaskActionRequest(taskActionId)) activateAction(nextAction)
+    } catch (error) {
+      setErrorMessage(toBulkErrorMessage(error, t))
+    } finally {
+      setBusyState(undefined)
+    }
   }
 
   const handlePreview = async () => {
@@ -246,7 +304,7 @@ export function BulkOperationToolbar({
         <span className="workbench-badge-primary" data-testid="bulk-selected-count">
           {t('bulk.selectedCount').replace('{count}', String(selectedItems.length))}
         </span>
-        {(['edit', 'move', 'archive'] as const).map((candidate) => (
+        {(['edit', 'move', 'assign', 'archive'] as const).map((candidate) => (
           <button
             aria-pressed={action === candidate}
             className={`h-9 rounded-md border px-3 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${
@@ -254,12 +312,14 @@ export function BulkOperationToolbar({
                 ? 'border-[var(--workbench-primary)] bg-[#e5f7f4] text-[var(--workbench-primary)]'
                 : 'border-[var(--workbench-border)] bg-white text-[var(--workbench-text)] hover:border-[var(--workbench-primary)]'
             }`}
-            disabled={!mutationsAvailable || selectedItems.length === 0}
+            disabled={
+              !mutationsAvailable || selectedItems.length === 0 || busyState === 'action'
+            }
             key={candidate}
-            onClick={() => selectAction(candidate)}
+            onClick={() => void selectAction(candidate)}
             type="button"
           >
-            {t(`bulk.action.${candidate}`)}
+            {resolveBulkOperationActionLabel(candidate, t)}
           </button>
         ))}
       </div>
@@ -286,7 +346,7 @@ export function BulkOperationToolbar({
                   }}
                   value={editField}
                 >
-                  {bulkEditFields.map((field) => (
+                  {bulkEditFields.filter((field) => field !== 'assigneeUserId').map((field) => (
                     <option key={field} value={field}>{t(`bulk.edit.field.${field}`)}</option>
                   ))}
                 </select>
@@ -323,6 +383,22 @@ export function BulkOperationToolbar({
                 )}
               </label>
             </>
+          ) : null}
+          {action === 'assign' ? (
+            <label className="grid min-w-56 flex-1 gap-1 text-xs font-semibold text-[var(--workbench-muted)]" htmlFor={valueId}>
+              {t('bulk.edit.field.assigneeUserId')}
+              <input
+                className="workbench-input h-9 px-3 text-sm"
+                id={valueId}
+                onChange={(event) => {
+                  setEditValue(event.target.value)
+                  resetReview()
+                }}
+                placeholder={t('bulk.edit.placeholder.assigneeUserId')}
+                type="text"
+                value={editValue}
+              />
+            </label>
           ) : null}
           {action === 'move' ? (
             <label className="grid min-w-64 flex-1 gap-1 text-xs font-semibold text-[var(--workbench-muted)]" htmlFor={targetProjectId}>
@@ -384,7 +460,7 @@ export function BulkOperationToolbar({
 
 function createBulkOperationRequest(
   workspaceId: string,
-  action: BulkOperationAction['type'],
+  action: BulkOperationToolbarAction,
   selectedItems: BulkOperationSelection[],
   editField: BulkEditField,
   editValue: string,
@@ -416,6 +492,18 @@ function createBulkOperationRequest(
     }
   }
 
+  if (action === 'assign') {
+    if (!editValue.trim()) return undefined
+    return {
+      action: {
+        patch: createBulkEditPatch('assigneeUserId', editValue),
+        type: 'edit',
+      },
+      items,
+      workspaceId,
+    }
+  }
+
   if (!editValue.trim()) {
     return undefined
   }
@@ -428,6 +516,26 @@ function createBulkOperationRequest(
     items,
     workspaceId,
   }
+}
+
+/** Resolves the canonical registry action associated with a toolbar mode. */
+function resolveBulkOperationTaskActionId(
+  action: BulkOperationToolbarAction,
+): BulkOperationTaskActionRequest['actionId'] | undefined {
+  return action === 'move' || action === 'assign' || action === 'archive'
+    ? action
+    : undefined
+}
+
+/** Resolves one localized toolbar action label without widening message keys. */
+function resolveBulkOperationActionLabel(
+  action: BulkOperationToolbarAction,
+  t: (key: MessageKey) => string,
+): string {
+  if (action === 'assign') return t('taskViews.action.assign')
+  if (action === 'edit') return t('bulk.action.edit')
+  if (action === 'move') return t('bulk.action.move')
+  return t('bulk.action.archive')
 }
 
 function toBulkErrorMessage(error: unknown, t: (key: MessageKey) => string) {

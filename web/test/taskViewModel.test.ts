@@ -31,6 +31,7 @@ import {
   formatTaskDateInputValue,
   applyTaskPatchOptimistically,
   isTaskInProjectStatusColumn,
+  matchesProjectTaskKeyword,
   isTaskOverdue,
   matchesTaskDueDateFilter,
   parseTaskDueDate,
@@ -55,7 +56,7 @@ describe('task view constants and input normalization', () => {
   test('exposes the existing tabs, priorities, due-date filters, and sort orders', () => {
     expect(taskTabs).toEqual(['table', 'board', 'gantt', 'calendar', 'file', 'permissions'])
     expect(taskPriorities).toEqual(['high', 'medium', 'low'])
-    expect(taskDueDateFilters).toEqual(['all', 'overdue', 'upcoming', 'no-date'])
+    expect(taskDueDateFilters).toEqual(['all', 'overdue', 'today', 'upcoming', 'no-date'])
     expect(taskSortOrders).toEqual(['due-date-asc', 'due-date-desc'])
   })
 
@@ -79,6 +80,7 @@ describe('task view constants and input normalization', () => {
     expect(taskDueDateFilters.map(resolveDueDateFilterLabelKey)).toEqual([
       'tasks.filter.dueDateAll',
       'tasks.filter.dueDateOverdue',
+      'tasks.filter.dueDateToday',
       'tasks.filter.dueDateUpcoming',
       'tasks.filter.dueDateNoDate',
     ])
@@ -237,6 +239,7 @@ describe('task due-date model', () => {
     expect(isTaskOverdue(today, referenceDay)).toBe(false)
     expect(isTaskOverdue(completed, referenceDay)).toBe(false)
     expect(matchesTaskDueDateFilter(overdue, 'overdue', referenceDay)).toBe(true)
+    expect(matchesTaskDueDateFilter(today, 'today', referenceDay)).toBe(true)
     expect(matchesTaskDueDateFilter(today, 'upcoming', referenceDay)).toBe(true)
     expect(matchesTaskDueDateFilter(completed, 'overdue', referenceDay)).toBe(false)
     expect(matchesTaskDueDateFilter(completed, 'upcoming', referenceDay)).toBe(false)
@@ -550,6 +553,26 @@ describe('task custom-field display, filters, and sorting', () => {
     )
 
     expect(result.map((task) => task.id)).toEqual(['matching'])
+  })
+
+  test('matches Project task display labels, schedule dates, and formatted custom fields', () => {
+    const task = createTask({
+      customFieldValues: { risk: 'urgent' },
+      priority: 'high',
+      schedule: createDefaultDueDateTaskSchedule('2026-07-24'),
+      workflowStatusId: 'todo',
+    })
+    const queries = ['ready', 'high', '2026-07-24', 'urgent']
+
+    expect(queries.map((query) => matchesProjectTaskKeyword(
+      task,
+      query,
+      configuration,
+      resolvedConfigurations,
+      'en',
+      {},
+      translateTaskLabel,
+    ))).toEqual([true, true, true, true])
   })
 
   test('falls back from stale status and custom-field filters without losing category', () => {

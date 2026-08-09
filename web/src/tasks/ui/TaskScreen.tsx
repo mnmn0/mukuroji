@@ -1,18 +1,25 @@
-import type {
-  BulkOperation,
-  BulkOperationPreview,
-  BulkOperationRequest,
-  PlanningSnapshot,
-  ResolvedWorkItemConfiguration,
-  WorkItemDependencyEndpoint,
-  WorkItemRelation,
-  WorkItemSchedule,
-  WorkItemScheduleChangePreview,
-  WorkItemScheduleOperation,
-  WorkItemScheduleDependency,
-  WorkItemScheduleDependencyPatch,
+import {
+  type ProjectTaskViewScope,
+  type WorkItemActionContext,
+  type WorkItemActionId,
+  type WorkItemActionResult,
+  type WorkItemActionSelection,
+  type WorkItemActionTarget,
+  type BulkOperation,
+  type BulkOperationPreview,
+  type BulkOperationRequest,
+  type PlanningSnapshot,
+  type ResolvedWorkItemConfiguration,
+  type TaskViewDefinition,
+  type WorkItemDependencyEndpoint,
+  type WorkItemRelation,
+  type WorkItemSchedule,
+  type WorkItemScheduleChangePreview,
+  type WorkItemScheduleOperation,
+  type WorkItemScheduleDependency,
+  type WorkItemScheduleDependencyPatch,
 } from '@mukuroji/contracts'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
   clearSucceededBulkSelection,
   updateBulkItemSelection,
@@ -40,6 +47,43 @@ import type { WorkItemDefinitionFilter } from '../../work-items/model/workItemFi
 import { resolveWorkItemPersonOptions } from '../../work-items/model/workItemDisplay'
 import type { WorkItemRelationEditorInput } from '../../work-items/ui/WorkItemRelationsEditor'
 import type { WorkItemDependencyCreateDraft } from '../../work-items/model/workItemDependencies'
+import {
+  createTaskViewActionSelection,
+  createFocusedTaskViewActionSelection,
+  createTaskViewItemKey,
+  createTaskViewSelectionKeyboardAction,
+  createTaskViewSelectionState,
+  reduceTaskViewSelection,
+  type TaskViewSelectionState,
+} from '../../task-views/model/taskViewSelection'
+import { applyTaskViewDefinitionToTasks } from '../../task-views/model/taskViewSurfaceState'
+import type { TaskViewPresentationSettings } from '../../task-views/model/taskViewPresentation'
+import {
+  allowTaskAction,
+  createFailedTaskActionResult,
+  createSucceededTaskActionResult,
+  createSucceededTaskActionResults,
+  denyTaskAction,
+  resolveTaskActionExecutionFailureMessage,
+  type TaskActionExecutionResult,
+} from '../../task-views/model/taskActionRegistry'
+import type { TaskActionContextMenuAnchorPoint } from '../../task-views/model/taskActionContextMenu'
+import {
+  resolveProjectTaskActionTarget,
+  resolveProjectTaskActionTargets,
+  useProjectTaskActions,
+  type ProjectTaskActionDisabledReasons,
+  type ProjectTaskActionHandlers,
+  type ProjectTaskActionLabels,
+  type ProjectTaskActionPermissions,
+} from '../../task-views/mutations/useProjectTaskActions'
+import { createTaskSurfaceActionBaseContext } from '../../task-views/mutations/useTaskSurfaceActions'
+import { TaskActionContextMenu } from '../../task-views/ui/TaskActionContextMenu'
+import {
+  createTaskSurfaceKeyboardInput,
+  formatTaskSurfaceKeyboardShortcut,
+} from '../../task-views/ui/taskSurfaceKeyboard'
+import type { BulkOperationTaskActionRequest } from '../../bulk-operations/ui/BulkOperationToolbar'
 import type { CreateProjectTaskInput, ProjectTask } from '../api/tasks'
 import {
   createBulkOperationSelection,
@@ -50,6 +94,7 @@ import {
   createTaskPersonLabels,
   filterAndSortProjectTasks,
   findTaskBySelection,
+  matchesProjectTaskKeyword,
   resolveEffectiveDefinitionFilter,
   resolveEffectiveStatusFilter,
   resolveLatestTaskSnapshot,
@@ -58,6 +103,7 @@ import {
   type DueDateFilter,
   type PriorityFilter,
   type TaskCreateContext,
+  type TaskScreenViewState,
   type StatusFilter,
   type TaskSortOrder,
   type TaskTab,
@@ -71,6 +117,7 @@ import { TaskActionFeedback } from './TaskActionFeedback'
 import { TaskDetailPane } from './TaskDetailPane'
 import { TaskHeader } from './TaskHeader'
 import { TaskWorkspace } from './TaskWorkspace'
+import type { ProjectTaskActionMenuOpenHandler } from './projectTaskActionMenu'
 import { TaskSchedulePreviewMetadata } from './TaskSchedulePreviewMetadata'
 import { createTaskTabId, taskTabPanelId } from './taskTabAccessibility'
 
@@ -116,6 +163,16 @@ type TaskActionState = {
   message: string
 }
 
+/** Transient context-menu target retained independently from bulk selection. */
+type TaskActionContextMenuState = {
+  /** Pointer or overflow-control position used by the responsive menu layout. */
+  anchorPoint: TaskActionContextMenuAnchorPoint
+  /** Element that regains focus after dismissal. */
+  returnFocusElement: HTMLElement
+  /** Revision-bound target selected by this specific row or card entrance. */
+  selection: WorkItemActionSelection
+}
+
 /** Result of a task update that may require an explicit schedule confirmation. */
 type TaskUpdateResult = {
   /** Whether persistence ran after the user confirmed the preview. */
@@ -142,6 +199,18 @@ type PendingTaskScheduleUpdate = {
 
 /** Props accepted by the task management screen. */
 export type TaskScreenProps = {
+  /** Saved task view active when canonical actions are invoked. */
+  activeTaskViewId?: string
+  /** Shared saved-view lifecycle and display controls rendered above task filters. */
+  taskViewToolbar?: ReactNode
+  /** Complete effective definition used for multi-value filtering and sorting. */
+  taskViewDefinition?: TaskViewDefinition
+  /** Presentation settings rendered by table and board layouts. */
+  taskViewPresentation?: TaskViewPresentationSettings
+  /** Optional route-controlled task view state. */
+  viewState?: TaskScreenViewState
+  /** Persists one complete next route-controlled task view state. */
+  onViewStateChange?: (state: TaskScreenViewState) => void
   /** Workspace ID included in bulk operation requests. */
   workspaceId?: string
   /** Access token used to load related documents. */
@@ -319,6 +388,7 @@ export type TaskScreenProps = {
  * @returns The complete task screen with sidebar, views, and selected-task detail.
  */
 export function TaskScreen({
+  activeTaskViewId,
   workspaceId = '',
   accessToken,
   locale,
@@ -366,6 +436,9 @@ export function TaskScreen({
   selectedIssueDetail,
   tasks = [],
   taskErrorMessage,
+  taskViewToolbar,
+  taskViewDefinition,
+  taskViewPresentation,
   planningErrorMessage,
   planningSnapshot,
   onLoadMoreProjectUsers,
@@ -390,25 +463,34 @@ export function TaskScreen({
   onBulkApply,
   onBulkRetry,
   onBulkUndo,
+  onViewStateChange,
+  viewState,
   workspaceMembers = emptyWorkspaceMembers,
 }: TaskScreenProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
   const { openMobileSidebar } = useWorkspaceSidebarController()
-  const [activeTab, setActiveTab] = useState<TaskTab>(initialTab)
-  const [searchQuery, setSearchQuery] = useState('')
-  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
-  const [definitionFilter, setDefinitionFilter] = useState<WorkItemDefinitionFilter>({
+  const [localActiveTab, setLocalActiveTab] = useState<TaskTab>(initialTab)
+  const [localSearchQuery, setLocalSearchQuery] = useState('')
+  const [localStatusFilter, setLocalStatusFilter] = useState<StatusFilter>('all')
+  const [localDefinitionFilter, setLocalDefinitionFilter] = useState<WorkItemDefinitionFilter>({
     category: 'all',
     customFieldId: '',
   })
-  const [assigneeFilter, setAssigneeFilter] = useState<AssigneeFilter>('all')
-  const [priorityFilter, setPriorityFilter] = useState<PriorityFilter>('all')
-  const [dueDateFilter, setDueDateFilter] = useState<DueDateFilter>('all')
-  const [sortOrder, setSortOrder] = useState<TaskSortOrder>('due-date-asc')
+  const [localAssigneeFilter, setLocalAssigneeFilter] = useState<AssigneeFilter>('all')
+  const [localPriorityFilter, setLocalPriorityFilter] = useState<PriorityFilter>('all')
+  const [localDueDateFilter, setLocalDueDateFilter] = useState<DueDateFilter>('all')
+  const [localSortOrder, setLocalSortOrder] = useState<TaskSortOrder>('due-date-asc')
   const [bulkSelection, setBulkSelection] = useState<TaskBulkSelectionState>({
     items: [],
     projectId,
   })
+  const [bulkTaskActionRequest, setBulkTaskActionRequest] = useState<
+    BulkOperationTaskActionRequest
+  >()
+  const [bulkTaskActionEpoch, setBulkTaskActionEpoch] = useState(0)
+  const [taskViewSelection, setTaskViewSelection] = useState<TaskViewSelectionState>(
+    createTaskViewSelectionState,
+  )
   const [localSelectedDetailTaskKey, setLocalSelectedDetailTaskKey] = useState<string>()
   const [isDetailOpen, setIsDetailOpen] = useState(true)
   const [isCreateTaskOpen, setIsCreateTaskOpen] = useState(defaultCreateTaskOpen)
@@ -416,15 +498,58 @@ export function TaskScreen({
   const [createTaskError, setCreateTaskError] = useState<string>()
   const [isCreatingTask, setIsCreatingTask] = useState(false)
   const [taskAction, setTaskAction] = useState<TaskActionState>()
+  const [taskActionContextMenuState, setTaskActionContextMenuState] = useState<
+    TaskActionContextMenuState
+  >()
   const [taskUndo, setTaskUndo] = useState<TaskUndoState>()
   const [taskRedo, setTaskRedo] = useState<TaskRedoState>()
   const [isRestoringTask, setIsRestoringTask] = useState(false)
   const [scheduleUpdateQueue, setScheduleUpdateQueue] = useState<PendingTaskScheduleUpdate[]>([])
   const [isApplyingScheduleUpdate, setIsApplyingScheduleUpdate] = useState(false)
   const nextSchedulePreviewSequenceRef = useRef(0)
+  const nextBulkTaskActionRequestIdRef = useRef(0)
   const scheduleUpdateChainRef = useRef<Promise<void>>(Promise.resolve())
   const detailScrollTopRef = useRef(0)
   const taskContentRef = useRef<HTMLDivElement>(null)
+  const onSelectedIssueChangeRef = useRef(onSelectedIssueChange)
+
+  useEffect(() => {
+    onSelectedIssueChangeRef.current = onSelectedIssueChange
+  }, [onSelectedIssueChange])
+
+  const activeTab = localActiveTab === 'file' || localActiveTab === 'permissions'
+    ? localActiveTab
+    : viewState?.activeTab ?? localActiveTab
+  const assigneeFilter = viewState?.assigneeFilter ?? localAssigneeFilter
+  const definitionFilter = viewState?.definitionFilter ?? localDefinitionFilter
+  const dueDateFilter = viewState?.dueDateFilter ?? localDueDateFilter
+  const priorityFilter = viewState?.priorityFilter ?? localPriorityFilter
+  const searchQuery = viewState?.searchQuery ?? localSearchQuery
+  const sortOrder = viewState?.sortOrder ?? localSortOrder
+  const statusFilter = viewState?.statusFilter ?? localStatusFilter
+  const currentViewState: TaskScreenViewState = {
+    activeTab,
+    assigneeFilter,
+    definitionFilter,
+    dueDateFilter,
+    priorityFilter,
+    searchQuery,
+    sortOrder,
+    statusFilter,
+  }
+
+  /** Applies one complete view state locally and forwards it to the route controller. */
+  const commitViewState = (nextViewState: TaskScreenViewState) => {
+    setLocalActiveTab(nextViewState.activeTab)
+    setLocalAssigneeFilter(nextViewState.assigneeFilter)
+    setLocalDefinitionFilter(nextViewState.definitionFilter)
+    setLocalDueDateFilter(nextViewState.dueDateFilter)
+    setLocalPriorityFilter(nextViewState.priorityFilter)
+    setLocalSearchQuery(nextViewState.searchQuery)
+    setLocalSortOrder(nextViewState.sortOrder)
+    setLocalStatusFilter(nextViewState.statusFilter)
+    onViewStateChange?.(nextViewState)
+  }
   const resolvedProjectName = projectName ?? projectId
   const resolvedActiveTeam = activeProjectTeamId
     ? teams.find((team) =>
@@ -477,21 +602,33 @@ export function TaskScreen({
     [configuration, definitionFilter],
   )
   const visibleTasks = useMemo(
-    () => filterAndSortProjectTasks(tasks, {
-      assigneeFilter,
-      configuration,
-      configurationsByTeam: resolvedConfigurationsByTeam,
-      definitionFilter: effectiveDefinitionFilter,
-      dueDateFilter,
-      locale,
-      personLabels,
-      priorityFilter,
-      searchQuery,
-      sortOrder,
-      statusColumns,
-      statusFilter: effectiveStatusFilter,
-      t,
-    }),
+    () => taskViewDefinition
+      ? applyTaskViewDefinitionToTasks(tasks, taskViewDefinition, {
+          keywordMatcher: (task, normalizedKeyword) => matchesProjectTaskKeyword(
+            task,
+            normalizedKeyword,
+            configuration,
+            resolvedConfigurationsByTeam,
+            locale,
+            personLabels,
+            t,
+          ),
+        })
+      : filterAndSortProjectTasks(tasks, {
+          assigneeFilter,
+          configuration,
+          configurationsByTeam: resolvedConfigurationsByTeam,
+          definitionFilter: effectiveDefinitionFilter,
+          dueDateFilter,
+          locale,
+          personLabels,
+          priorityFilter,
+          searchQuery,
+          sortOrder,
+          statusColumns,
+          statusFilter: effectiveStatusFilter,
+          t,
+        }),
     [
       assigneeFilter,
       configuration,
@@ -507,6 +644,7 @@ export function TaskScreen({
       statusColumns,
       t,
       tasks,
+      taskViewDefinition,
     ],
   )
   const bulkProjectOptions = useMemo(() => createBulkProjectOptions(teams), [teams])
@@ -521,6 +659,81 @@ export function TaskScreen({
     () => visibleTasks.map((task) => createBulkOperationSelection(task, t)),
     [t, visibleTasks],
   )
+  const visibleActionTargets = useMemo<WorkItemActionTarget[]>(
+    () => visibleTasks.map((task) => ({
+      expectedRevision: task.revision,
+      teamId: task.teamId,
+      workItemId: task.id,
+    })),
+    [visibleTasks],
+  )
+  const visibleTaskViewKeys = useMemo(
+    () => visibleActionTargets.map((target) =>
+      createTaskViewItemKey(target.teamId, target.workItemId)
+    ),
+    [visibleActionTargets],
+  )
+  const selectedBulkTaskViewKeys = useMemo(
+    () => selectedBulkItems.map((item) =>
+      createTaskViewItemKey(item.teamId, item.workItemId)
+    ),
+    [selectedBulkItems],
+  )
+  const taskActionSelection = useMemo(
+    () => createTaskViewActionSelection(taskViewSelection, visibleActionTargets),
+    [taskViewSelection, visibleActionTargets],
+  )
+  const bulkTaskActionSelection = useMemo<WorkItemActionSelection>(() => ({
+    mode: selectedBulkItems.length === 0
+      ? 'none'
+      : selectedBulkItems.length === 1
+        ? 'single'
+        : 'multiple',
+    targets: selectedBulkItems.map((item) => ({
+      expectedRevision: item.expectedRevision,
+      teamId: item.teamId,
+      workItemId: item.workItemId,
+    })),
+    ...(taskActionSelection.focusedTarget
+      ? { focusedTarget: taskActionSelection.focusedTarget }
+      : {}),
+    ...(taskActionSelection.anchorTarget
+      ? { anchorTarget: taskActionSelection.anchorTarget }
+      : {}),
+  }), [selectedBulkItems, taskActionSelection.anchorTarget, taskActionSelection.focusedTarget])
+
+  useEffect(() => {
+    const visibleKeySet = new Set(visibleTaskViewKeys)
+    queueMicrotask(() => {
+      setBulkSelection((currentSelection) => {
+        if (currentSelection.projectId !== projectId) return currentSelection
+        const items = currentSelection.items.filter((item) => visibleKeySet.has(
+          createTaskViewItemKey(item.teamId, item.workItemId),
+        ))
+        return items.length === currentSelection.items.length
+          ? currentSelection
+          : { items, projectId }
+      })
+    })
+  }, [projectId, visibleTaskViewKeys])
+
+  useEffect(() => {
+    const selectedKeySet = new Set(selectedBulkTaskViewKeys)
+    queueMicrotask(() => {
+      setTaskViewSelection((currentSelection) => {
+        const prunedSelection = reduceTaskViewSelection(currentSelection, {
+          availableKeys: visibleTaskViewKeys,
+          type: 'prune',
+        })
+        const selectedKeys = visibleTaskViewKeys.filter((key) => selectedKeySet.has(key))
+        const nextSelection = { ...prunedSelection, selectedKeys }
+        return areTaskViewSelectionsEqual(currentSelection, nextSelection)
+          ? currentSelection
+          : nextSelection
+      })
+    })
+  }, [selectedBulkTaskViewKeys, visibleTaskViewKeys])
+
   const selectedDetailTask =
     (localSelectedDetailTaskKey
       ? tasks.find((task) => createTaskKey(task) === localSelectedDetailTaskKey)
@@ -592,15 +805,22 @@ export function TaskScreen({
   }
 
   /** Selects a task locally or delegates route-controlled selection to the caller. */
-  const handleSelectDetailTask = (task: ProjectTask) => {
+  const handleSelectDetailTask = useCallback((task: ProjectTask) => {
+    setTaskViewSelection((currentSelection) => reduceTaskViewSelection(currentSelection, {
+      key: createTaskViewItemKey(task.teamId, task.id),
+      type: 'focus',
+    }))
     setIsDetailOpen(true)
-    if (!onSelectedIssueChange) {
+    if (!onSelectedIssueChangeRef.current) {
       setLocalSelectedDetailTaskKey(createTaskKey(task))
     }
 
-    onSelectedIssueChange?.(task)
-    restoreDetailScrollTop()
-  }
+    onSelectedIssueChangeRef.current?.(task)
+    const scrollTop = detailScrollTopRef.current
+    if (scrollTop !== 0) {
+      requestAnimationFrame(() => taskContentRef.current?.scrollTo({ top: scrollTop }))
+    }
+  }, [])
 
   /** Closes the detail pane without losing the current list position. */
   const handleCloseDetail = () => {
@@ -609,7 +829,7 @@ export function TaskScreen({
   }
 
   /** Opens the shared create panel with context inherited from a task view. */
-  const handleCreateTaskOpen = (context?: TaskCreateContext) => {
+  const handleCreateTaskOpen = useCallback((context?: TaskCreateContext) => {
     const defaultTeamId = activeProjectTeamId ?? teams.find((team) =>
       team.projects.some((project) => project.id === projectId),
     )?.id
@@ -629,18 +849,7 @@ export function TaskScreen({
     setCreateTaskContext(resolvedContext)
     setIsCreateTaskOpen(true)
     taskContentRef.current?.scrollTo({ top: 0 })
-  }
-
-  /** Restores the list scroll position captured when the detail pane closed. */
-  const restoreDetailScrollTop = () => {
-    const scrollTop = detailScrollTopRef.current
-
-    if (scrollTop === 0) {
-      return
-    }
-
-    requestAnimationFrame(() => taskContentRef.current?.scrollTo({ top: scrollTop }))
-  }
+  }, [activeProjectTeamId, projectId, teams])
 
   /** Persists an already-confirmed task patch and retains an inverse for undo. */
   const persistTaskUpdate = async (
@@ -940,6 +1149,404 @@ export function TaskScreen({
         await handleUpdateTask(detailTask, input)
       }
     : onUpdateIssue
+  const bulkTaskActionsAvailable = Boolean(
+    workspaceId && onBulkPreview && onBulkApply,
+  )
+  const canCreateTaskAction = onCreateTask !== undefined
+  const canEditTaskAction = onUpdateTask !== undefined || onUpdateIssue !== undefined
+  const canManageTaskRelationAction = onAddRelation !== undefined
+
+  const projectTaskActionLabels = useMemo<ProjectTaskActionLabels>(() => ({
+    archive: t('taskViews.action.archive'),
+    assign: t('taskViews.action.assign'),
+    create: t('taskViews.action.create'),
+    edit: t('taskViews.action.edit'),
+    move: t('taskViews.action.move'),
+    open: t('taskViews.action.open'),
+    relation: t('taskViews.action.relation'),
+    schedule: t('taskViews.action.schedule'),
+    watch: t('taskViews.action.watch'),
+  }), [t])
+  const projectTaskActionDisabledReasons = useMemo<ProjectTaskActionDisabledReasons>(
+    () => ({
+      selectionRequired: t('taskViews.action.selectionRequired'),
+      singleSelectionRequired: t('taskViews.action.singleSelectionRequired'),
+      unavailable: t('taskViews.action.unavailable'),
+    }),
+    [t],
+  )
+
+  /** Opens one permission-safe task and optionally focuses a detail control. */
+  const executeTaskDetailAction = useCallback((
+    context: WorkItemActionContext,
+    controlSelector?: string,
+  ): WorkItemActionResult => {
+    const target = resolveProjectTaskActionTarget(context)
+    const task = target
+      ? tasks.find((candidate) =>
+          candidate.teamId === target.teamId && candidate.id === target.workItemId
+        )
+      : undefined
+    if (!target || !task) {
+      return createFailedTaskActionResult(
+        context.actionId,
+        target,
+        'ProjectTaskActionTargetNotFound',
+        'not-found',
+        t('taskViews.action.notFound'),
+      )
+    }
+
+    handleSelectDetailTask(task)
+    if (controlSelector) focusTaskDetailControl(controlSelector)
+    return createSucceededTaskActionResult(context.actionId, target)
+  }, [handleSelectDetailTask, t, tasks])
+
+  const currentTaskActionTarget = taskActionSelection.targets.length === 1
+    ? taskActionSelection.targets[0]
+    : taskActionSelection.targets.length === 0
+      ? taskActionSelection.focusedTarget
+      : undefined
+  const toggleTaskWatch = currentTaskActionTarget &&
+      detailTask?.teamId === currentTaskActionTarget.teamId &&
+      detailTask.id === currentTaskActionTarget.workItemId &&
+      collaboration?.watch &&
+      collaboration.capabilities.canWatch
+    ? collaboration.toggleWatch
+    : undefined
+
+  /** Evaluates access against every concrete target instead of the currently open detail pane. */
+  const evaluateProjectTaskTargetPermission = useCallback((
+    context: WorkItemActionContext,
+    requiresConfiguration: boolean,
+  ) => {
+    const targets = resolveProjectTaskActionTargets(context)
+    if (targets.length === 0) return allowTaskAction()
+    const allowed = targets.every((target) => visibleTasks.some((task) =>
+      task.teamId === target.teamId &&
+      task.id === target.workItemId &&
+      (!requiresConfiguration || !configurationFailedTeamIds.includes(task.teamId))
+    ))
+    return allowed
+      ? allowTaskAction()
+      : denyTaskAction(projectTaskActionDisabledReasons.unavailable)
+  }, [
+    configurationFailedTeamIds,
+    projectTaskActionDisabledReasons.unavailable,
+    visibleTasks,
+  ])
+
+  /** Reveals a parameterized bulk-operation entrance after registry checks succeed. */
+  const executeBulkTaskActionEntrance = useCallback((
+    context: WorkItemActionContext,
+  ): WorkItemActionResult => {
+    if (!isBulkTaskActionId(context.actionId)) {
+      return createFailedTaskActionResult(
+        context.actionId,
+        undefined,
+        'ProjectBulkTaskActionUnavailable',
+        'unavailable',
+        projectTaskActionDisabledReasons.unavailable,
+      )
+    }
+    const targets = resolveProjectTaskActionTargets(context)
+    const requestedItems = targets.flatMap((target) => {
+      const task = visibleTasks.find((candidate) =>
+        candidate.teamId === target.teamId && candidate.id === target.workItemId
+      )
+      if (!task) return []
+      return [{
+        ...createBulkOperationSelection(task, t),
+        expectedRevision: target.expectedRevision ?? task.revision,
+      }]
+    })
+    setBulkSelection({ items: requestedItems, projectId })
+    nextBulkTaskActionRequestIdRef.current += 1
+    setBulkTaskActionEpoch(nextBulkTaskActionRequestIdRef.current)
+    setBulkTaskActionRequest({
+      actionId: context.actionId,
+      projectId,
+      requestId: nextBulkTaskActionRequestIdRef.current,
+    })
+    return createSucceededTaskActionResults(context.actionId, targets)
+  }, [
+    projectId,
+    projectTaskActionDisabledReasons.unavailable,
+    t,
+    visibleTasks,
+  ])
+
+  /** Acknowledges one toolbar entrance without changing the remount epoch. */
+  const handleBulkTaskActionRequestConsumed = useCallback((requestId: number) => {
+    setBulkTaskActionRequest((currentRequest) =>
+      currentRequest?.requestId === requestId ? undefined : currentRequest
+    )
+  }, [])
+
+  const projectTaskActionHandlers = useMemo<ProjectTaskActionHandlers>(() => ({
+    ...(canCreateTaskAction
+      ? {
+          create: (context) => {
+            handleCreateTaskOpen()
+            return createSucceededTaskActionResult(context.actionId)
+          },
+        }
+      : {}),
+    open: (context) => executeTaskDetailAction(context),
+    ...(canEditTaskAction
+      ? {
+          edit: (context) => executeTaskDetailAction(context, 'input[name="title"]'),
+          schedule: (context) => executeTaskDetailAction(
+            context,
+            'select[name="scheduleMode"]',
+          ),
+        }
+      : {}),
+    ...(bulkTaskActionsAvailable
+      ? {
+          archive: executeBulkTaskActionEntrance,
+          assign: executeBulkTaskActionEntrance,
+          move: executeBulkTaskActionEntrance,
+        }
+      : {}),
+    ...(canManageTaskRelationAction
+      ? {
+          relation: (context) => executeTaskDetailAction(
+            context,
+            '[data-testid="work-item-relations-editor"] select',
+          ),
+        }
+      : {}),
+    ...(toggleTaskWatch
+      ? {
+          watch: async (context) => {
+            const target = resolveProjectTaskActionTarget(context)
+            if (!target) {
+              return createFailedTaskActionResult(
+                context.actionId,
+                undefined,
+                'ProjectTaskActionTargetNotFound',
+                'not-found',
+                t('taskViews.action.notFound'),
+              )
+            }
+            const succeeded = await toggleTaskWatch()
+            return succeeded
+              ? createSucceededTaskActionResult(context.actionId, target)
+              : createFailedTaskActionResult(
+                  context.actionId,
+                  target,
+                  'ProjectTaskWatchFailed',
+                  'unknown',
+                  t('taskViews.action.failed'),
+                )
+          },
+        }
+      : {}),
+  }), [
+    bulkTaskActionsAvailable,
+    canCreateTaskAction,
+    canEditTaskAction,
+    canManageTaskRelationAction,
+    executeBulkTaskActionEntrance,
+    executeTaskDetailAction,
+    handleCreateTaskOpen,
+    t,
+    toggleTaskWatch,
+  ])
+  const projectTaskActionPermissions = useMemo<ProjectTaskActionPermissions>(() => ({
+    archive: (context) => evaluateProjectTaskTargetPermission(context, false),
+    assign: (context) => evaluateProjectTaskTargetPermission(context, false),
+    edit: (context) => evaluateProjectTaskTargetPermission(context, true),
+    move: (context) => evaluateProjectTaskTargetPermission(context, false),
+    open: (context) => evaluateProjectTaskTargetPermission(context, false),
+    relation: (context) => evaluateProjectTaskTargetPermission(context, true),
+    schedule: (context) => evaluateProjectTaskTargetPermission(context, true),
+  }), [evaluateProjectTaskTargetPermission])
+
+  /** Projects normalized action failures into the existing reversible-action feedback surface. */
+  const handleProjectTaskActionExecution = useCallback((result: TaskActionExecutionResult) => {
+    const errorMessage = resolveTaskActionExecutionFailureMessage(
+      result,
+      t('taskViews.action.failed'),
+    )
+    if (errorMessage) {
+      setTaskAction({ kind: 'error', message: errorMessage })
+      return
+    }
+    if (result.status === 'executed' && result.actionId === 'watch') {
+      setTaskAction({ kind: 'success', message: t('tasks.action.saved') })
+    }
+  }, [t])
+
+  const projectTaskActions = useProjectTaskActions({
+    ...(activeTaskViewId !== undefined ? { activeViewId: activeTaskViewId } : {}),
+    disabledReasons: projectTaskActionDisabledReasons,
+    handlers: projectTaskActionHandlers,
+    labels: projectTaskActionLabels,
+    onExecutionResult: handleProjectTaskActionExecution,
+    permissions: projectTaskActionPermissions,
+    projectId,
+    selection: taskActionSelection,
+    ...(activeProjectTeamId !== undefined ? { teamId: activeProjectTeamId } : {}),
+  })
+
+  const taskActionContextMenuContext = useMemo(() => {
+    if (!taskActionContextMenuState) return undefined
+    const scope: ProjectTaskViewScope = {
+      kind: 'project',
+      projectId,
+      ...(activeProjectTeamId !== undefined ? { teamId: activeProjectTeamId } : {}),
+    }
+    return createTaskSurfaceActionBaseContext(
+      'project',
+      scope,
+      taskActionContextMenuState.selection,
+      activeTaskViewId,
+    )
+  }, [
+    activeProjectTeamId,
+    activeTaskViewId,
+    projectId,
+    taskActionContextMenuState,
+  ])
+
+  /** Executes a normal row or card open through the same canonical action pipeline. */
+  const handleOpenTask = useCallback((task: ProjectTask) => {
+    void projectTaskActions.execute(
+      'open',
+      'click',
+      undefined,
+      createFocusedTaskViewActionSelection({
+        expectedRevision: task.revision,
+        teamId: task.teamId,
+        workItemId: task.id,
+      }),
+    )
+  }, [projectTaskActions])
+
+  /**
+   * Opens a revision-bound row or card menu without inheriting unrelated bulk selection.
+   *
+   * @param task - Project task represented by the triggering row or card.
+   * @param anchorPoint - Viewport coordinates used to anchor the menu.
+   * @param returnFocusElement - Trigger element that regains focus after dismissal.
+   * @returns Nothing.
+   */
+  const handleTaskActionMenuOpen = useCallback<ProjectTaskActionMenuOpenHandler>(
+    (task, anchorPoint, returnFocusElement) => {
+      const taskKey = createTaskViewItemKey(task.teamId, task.id)
+      setTaskViewSelection((currentSelection) => reduceTaskViewSelection(currentSelection, {
+        key: taskKey,
+        type: 'focus',
+      }))
+      setTaskActionContextMenuState({
+        anchorPoint,
+        returnFocusElement,
+        selection: createFocusedTaskViewActionSelection({
+          expectedRevision: task.revision,
+          teamId: task.teamId,
+          workItemId: task.id,
+        }),
+      })
+    },
+    [],
+  )
+
+  /**
+   * Routes a context-menu activation through the same canonical registry executor.
+   *
+   * @param actionId - Canonical Work Item action selected from the menu.
+   * @returns Nothing.
+   */
+  const handleTaskActionMenuExecute = useCallback((actionId: WorkItemActionId) => {
+    if (!taskActionContextMenuState) return
+    void projectTaskActions.execute(
+      actionId,
+      'context-menu',
+      undefined,
+      taskActionContextMenuState.selection,
+    )
+  }, [projectTaskActions, taskActionContextMenuState])
+
+  /** Lets the bulk toolbar request Move, Assign, or Archive through the shared registry. */
+  const handleBulkTaskActionRequest = useCallback(async (
+    actionId: BulkOperationTaskActionRequest['actionId'],
+  ): Promise<boolean> => {
+    const result = await projectTaskActions.execute(
+      actionId,
+      'bulk-action',
+      undefined,
+      bulkTaskActionSelection,
+    )
+    return result.status === 'executed' && result.result.status === 'succeeded'
+  }, [bulkTaskActionSelection, projectTaskActions])
+
+  useEffect(() => {
+    /** Routes global task shortcuts through guarded selection or the canonical action pipeline. */
+    const handleTaskKeyboard = (event: KeyboardEvent) => {
+      const input = createTaskSurfaceKeyboardInput(
+        event,
+        isCreateTaskOpen ||
+          Boolean(pendingScheduleUpdate) ||
+          Boolean(taskActionContextMenuState),
+      )
+      const selectionAction = activeTab === 'file' || activeTab === 'permissions'
+        ? undefined
+        : createTaskViewSelectionKeyboardAction(
+            input,
+            taskViewSelection,
+            visibleTaskViewKeys,
+          )
+
+      if (selectionAction) {
+        event.preventDefault()
+        const nextSelection = reduceTaskViewSelection(taskViewSelection, selectionAction)
+        const selectedKeys = new Set(nextSelection.selectedKeys)
+        setTaskViewSelection(nextSelection)
+        setBulkSelection({
+          items: visibleBulkItems.filter((item) => selectedKeys.has(
+            createTaskViewItemKey(item.teamId, item.workItemId),
+          )),
+          projectId,
+        })
+        const focusedTask = nextSelection.focusedKey
+          ? visibleTasks.find((task) =>
+              createTaskViewItemKey(task.teamId, task.id) === nextSelection.focusedKey
+            )
+          : undefined
+        if (focusedTask) handleSelectDetailTask(focusedTask)
+        return
+      }
+
+      const definition = projectTaskActions.resolveShortcut(input)
+      if (!definition) return
+      event.preventDefault()
+      const keyboardShortcut = definition.shortcut
+        ? formatTaskSurfaceKeyboardShortcut(definition.shortcut)
+        : undefined
+      void projectTaskActions.execute(
+        definition.id,
+        'keyboard',
+        keyboardShortcut,
+      )
+    }
+
+    document.addEventListener('keydown', handleTaskKeyboard)
+    return () => document.removeEventListener('keydown', handleTaskKeyboard)
+  }, [
+    activeTab,
+    handleSelectDetailTask,
+    isCreateTaskOpen,
+    pendingScheduleUpdate,
+    projectId,
+    projectTaskActions,
+    taskActionContextMenuState,
+    taskViewSelection,
+    visibleBulkItems,
+    visibleTasks,
+    visibleTaskViewKeys,
+  ])
 
   return (
     <section aria-busy={isLoading} className="flex min-w-0 flex-1 flex-col overflow-hidden">
@@ -957,7 +1564,10 @@ export function TaskScreen({
           } : undefined}
           onMobileSidebarOpen={openMobileSidebar}
           onProjectQuickAccessToggle={onProjectQuickAccessToggle}
-          onTabChange={setActiveTab}
+          onTabChange={(nextActiveTab) => commitViewState({
+            ...currentViewState,
+            activeTab: nextActiveTab,
+          })}
           projectName={resolvedProjectName}
           t={t}
           tasks={tasks}
@@ -1103,6 +1713,8 @@ export function TaskScreen({
                 assigneeOptions={assigneeOptions}
                 assigneeFilter={assigneeFilter}
                 bulkProjectOptions={bulkProjectOptions}
+                bulkTaskActionEpoch={bulkTaskActionEpoch}
+                bulkTaskActionRequest={bulkTaskActionRequest}
                 bulkWorkspaceId={workspaceId}
                 canManageProjectMembers={canManageProjectMembers}
                 canManageScheduleDependencyEndpoint={canManageScheduleDependencyEndpoint}
@@ -1116,25 +1728,57 @@ export function TaskScreen({
                 isProjectUsersLoading={isProjectUsersLoading}
                 isSystemAdmin={isSystemAdmin}
                 locale={locale}
-                onAssigneeFilterChange={setAssigneeFilter}
+                onAssigneeFilterChange={(nextAssigneeFilter) => commitViewState({
+                  ...currentViewState,
+                  assigneeFilter: nextAssigneeFilter,
+                })}
                 onBulkApply={onBulkApply}
                 onBulkOperationComplete={handleBulkOperationComplete}
                 onBulkPreview={onBulkPreview}
                 onBulkRetry={onBulkRetry}
+                onBulkTaskActionRequest={handleBulkTaskActionRequest}
+                onBulkTaskActionRequestConsumed={handleBulkTaskActionRequestConsumed}
                 onBulkUndo={onBulkUndo}
                 onCreateTaskOpen={onCreateTask ? handleCreateTaskOpen : undefined}
                 onCreateScheduleDependency={onCreateScheduleDependency}
                 onDeleteScheduleDependency={onDeleteScheduleDependency}
-                onDefinitionFilterChange={setDefinitionFilter}
-                onDueDateFilterChange={setDueDateFilter}
+                onDefinitionFilterChange={(nextDefinitionFilter) => commitViewState({
+                  ...currentViewState,
+                  definitionFilter: nextDefinitionFilter,
+                })}
+                onDueDateFilterChange={(nextDueDateFilter) => commitViewState({
+                  ...currentViewState,
+                  dueDateFilter: nextDueDateFilter,
+                })}
                 onLoadMoreProjectUsers={onLoadMoreProjectUsers}
-                onPriorityFilterChange={setPriorityFilter}
+                onPriorityFilterChange={(nextPriorityFilter) => commitViewState({
+                  ...currentViewState,
+                  priorityFilter: nextPriorityFilter,
+                })}
+                onResetFilters={() => commitViewState({
+                  ...currentViewState,
+                  assigneeFilter: 'all',
+                  definitionFilter: { category: 'all', customFieldId: '' },
+                  dueDateFilter: 'all',
+                  priorityFilter: 'all',
+                  statusFilter: 'all',
+                })}
                 onProjectUserQueryChange={onProjectUserQueryChange}
                 onRemoveProjectMember={onRemoveProjectMember}
-                onSearchQueryChange={setSearchQuery}
-                onSelectTask={handleSelectDetailTask}
-                onSortOrderChange={setSortOrder}
-                onStatusFilterChange={setStatusFilter}
+                onSearchQueryChange={(nextSearchQuery) => commitViewState({
+                  ...currentViewState,
+                  searchQuery: nextSearchQuery,
+                })}
+                onSelectTask={handleOpenTask}
+                onTaskActionMenuOpen={handleTaskActionMenuOpen}
+                onSortOrderChange={(nextSortOrder) => commitViewState({
+                  ...currentViewState,
+                  sortOrder: nextSortOrder,
+                })}
+                onStatusFilterChange={(nextStatusFilter) => commitViewState({
+                  ...currentViewState,
+                  statusFilter: nextStatusFilter,
+                })}
                 onTaskSelectionChange={updateTaskSelection}
                 onUpdateProjectMember={onUpdateProjectMember}
                 onUpdateScheduleDependency={onUpdateScheduleDependency}
@@ -1166,6 +1810,8 @@ export function TaskScreen({
                 statusFilter={effectiveStatusFilter}
                 t={t}
                 taskErrorMessage={taskErrorMessage}
+                taskViewToolbar={taskViewToolbar}
+                taskViewPresentation={taskViewPresentation}
                 tasks={visibleTasks}
                 visibleBulkItems={visibleBulkItems}
                 workspaceMembers={workspaceMembers}
@@ -1224,8 +1870,59 @@ export function TaskScreen({
             t={t}
           />
         ) : null}
+        {taskActionContextMenuState && taskActionContextMenuContext ? (
+          <TaskActionContextMenu
+            anchorPoint={taskActionContextMenuState.anchorPoint}
+            context={taskActionContextMenuContext}
+            labels={projectTaskActionLabels}
+            menuLabel={t('tasks.action.more')}
+            onClose={() => setTaskActionContextMenuState(undefined)}
+            onExecute={handleTaskActionMenuExecute}
+            registry={projectTaskActions.registry}
+            returnFocusElement={taskActionContextMenuState.returnFocusElement}
+            testId="project-task-action-context-menu"
+          />
+        ) : null}
     </section>
   )
+}
+
+/** Narrows canonical actions to the parameterized operations backed by the bulk toolbar. */
+function isBulkTaskActionId(
+  actionId: WorkItemActionId,
+): actionId is BulkOperationTaskActionRequest['actionId'] {
+  return actionId === 'move' || actionId === 'assign' || actionId === 'archive'
+}
+
+/**
+ * Compares focus, anchor, and ordered selected keys without relying on object identity.
+ *
+ * @param first - First shared task-view selection.
+ * @param second - Second shared task-view selection.
+ * @returns Whether both selections describe the same interaction state.
+ */
+function areTaskViewSelectionsEqual(
+  first: TaskViewSelectionState,
+  second: TaskViewSelectionState,
+): boolean {
+  return first.focusedKey === second.focusedKey &&
+    first.anchorKey === second.anchorKey &&
+    first.selectedKeys.length === second.selectedKeys.length &&
+    first.selectedKeys.every((key, index) => key === second.selectedKeys[index])
+}
+
+/**
+ * Focuses and reveals a control after React commits a selected-task detail update.
+ *
+ * @param selector - Selector scoped to the active task detail pane.
+ */
+function focusTaskDetailControl(selector: string): void {
+  requestAnimationFrame(() => {
+    const detailPane = document.querySelector<HTMLElement>('[data-testid="task-detail-pane"]')
+    const control = detailPane?.querySelector<HTMLElement>(selector)
+    control?.focus()
+    control?.scrollIntoView({ block: 'nearest' })
+  })
 }
 
 /** Props for the schedule preview shared by Table, Board, and detail updates. */

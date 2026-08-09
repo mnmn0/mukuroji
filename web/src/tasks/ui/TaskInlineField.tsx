@@ -31,6 +31,8 @@ export type TaskInlineFieldProps = {
   testId?: string
   /** Commits the changed value through the shared Work Item action. */
   onCommit: (value: string) => Promise<void>
+  /** Whether the read trigger may wrap instead of truncating its text. */
+  wrapText?: boolean
 }
 
 /**
@@ -49,6 +51,7 @@ export function TaskInlineField({
   options = [],
   testId,
   value,
+  wrapText = false,
 }: TaskInlineFieldProps) {
   const [isEditing, setIsEditing] = useState(false)
   const [draft, setDraft] = useState(value)
@@ -97,7 +100,9 @@ export function TaskInlineField({
     return (
       <button
         aria-label={ariaLabel}
-        className="inline-flex min-w-0 max-w-full truncate rounded px-1.5 py-0.5 text-left transition hover:bg-[#e5f7f4] hover:text-[var(--workbench-primary)] focus:outline-none focus:ring-2 focus:ring-[#2563eb]/20"
+        className={`inline-flex min-w-0 max-w-full rounded px-1.5 py-0.5 text-left transition hover:bg-[#e5f7f4] hover:text-[var(--workbench-primary)] focus:outline-none focus:ring-2 focus:ring-[#2563eb]/20 ${
+          wrapText ? 'whitespace-normal break-words' : 'truncate'
+        }`}
         data-task-field={fieldKey}
         data-testid={testId}
         onClick={startEditing}

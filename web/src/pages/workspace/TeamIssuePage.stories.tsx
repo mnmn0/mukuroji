@@ -1,6 +1,6 @@
 import type { WorkItemRelation } from '@mukuroji/contracts'
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import { expect, userEvent, within } from 'storybook/test'
+import { expect, fn, userEvent, waitFor, within } from 'storybook/test'
 import { TeamIssueScreen } from './TeamIssuePage'
 import {
   collaborationWorkspaceMemberFixtures,
@@ -91,6 +91,8 @@ const crowdedIssues = Array.from({ length: 20 }, (_, index) => {
   }
 })
 
+const onSelectIssueAction = fn()
+
 const meta = {
   title: 'Application/Teams/Issue Page',
   component: TeamIssueScreen,
@@ -109,6 +111,7 @@ const meta = {
     onAddRelation: async () => undefined,
     onCreateIssue: async () => undefined,
     onDeleteRelation: async () => undefined,
+    onSelectIssue: onSelectIssueAction,
     onUpdateIssue: async () => undefined,
     selectedIssueId: 'onboarding-friction',
     teamId: 'core-team',
@@ -133,6 +136,35 @@ type Story = StoryObj<typeof meta>
  * チーム所有 Issue を一覧と詳細ペインで表示する標準状態です。
  */
 export const Default: Story = {}
+
+/** Shared J/K, Space, keyboard Open, and click Open behavior for the Team surface. */
+export const SharedActionSelection: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const firstButton = canvas.getByTestId('issue-row-onboarding-friction')
+    const secondButton = canvas.getByTestId('issue-row-billing-copy')
+    const firstRow = firstButton.closest('tr')
+    const secondRow = secondButton.closest('tr')
+    if (!firstRow || !secondRow) throw new Error('Expected Team Issue table rows.')
+    onSelectIssueAction.mockClear()
+
+    await userEvent.keyboard('j')
+    await waitFor(() => expect(firstRow).toHaveAttribute('data-task-view-focused', 'true'))
+    await expect(onSelectIssueAction).not.toHaveBeenCalled()
+
+    await userEvent.keyboard(' ')
+    await waitFor(() => expect(firstRow).toHaveAttribute('data-task-view-selected', 'true'))
+    await userEvent.keyboard('{Enter}')
+    await waitFor(() => expect(onSelectIssueAction).toHaveBeenCalledWith(
+      'onboarding-friction',
+    ))
+
+    onSelectIssueAction.mockClear()
+    await userEvent.click(secondButton)
+    await waitFor(() => expect(onSelectIssueAction).toHaveBeenCalledWith('billing-copy'))
+    await expect(secondRow).toHaveAttribute('data-task-view-focused', 'true')
+  },
+}
 
 /**
  * Command menu provider 外では desktop/mobile とも検索導線を表示しない状態です。
@@ -167,6 +199,30 @@ export const DetailPaneAlignment: Story = {
 export const Board: Story = {
   args: {
     initialViewMode: 'board',
+  },
+}
+
+/** Compact grouped Team table using an explicit saved-view presentation. */
+export const SavedViewPresentation: Story = {
+  args: {
+    taskViewPresentation: {
+      columns: [
+        { field: 'title', pin: 'start', width: 320 },
+        { field: 'status', width: 170 },
+        { field: 'priority', pin: 'end', width: 150 },
+      ],
+      density: 'compact',
+      display: {
+        showArchived: false,
+        showAssigneeAvatars: true,
+        showCompleted: true,
+        showEmptyGroups: true,
+        showSubtasks: true,
+        wrapTitles: true,
+      },
+      groupBy: 'priority',
+      subgroupBy: 'assignee',
+    },
   },
 }
 

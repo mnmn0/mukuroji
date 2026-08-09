@@ -314,6 +314,58 @@ describe('BulkOperationToolbar', () => {
     expect(html).not.toContain('Undo succeeded items')
   })
 
+  test('exposes assign beside move and archive as a canonical bulk entrance', () => {
+    const html = renderToStaticMarkup(
+      <BulkOperationToolbar
+        selectedItems={selections.slice(0, 2)}
+        t={createTranslator('en')}
+        visibleItems={selections}
+        workspaceId="workspace-1"
+        onApply={async () => partialOperation}
+        onPreview={async () => ({
+          action: { archived: true, type: 'archive' },
+          canApply: true,
+          items: [],
+          operationToken: 'preview-token',
+        })}
+        onVisibleSelectionChange={() => undefined}
+      />,
+    )
+
+    expect(html).toContain('Bulk move')
+    expect(html).toContain('Assign Work Item')
+    expect(html).toContain('Bulk archive')
+    expect(html).not.toContain('<option value="assigneeUserId">')
+  })
+
+  test('uses a keyed canonical request as the initial toolbar action', () => {
+    const html = renderToStaticMarkup(
+      <BulkOperationToolbar
+        selectedItems={selections.slice(0, 2)}
+        taskActionRequest={{
+          actionId: 'assign',
+          projectId: 'project-1',
+          requestId: 7,
+        }}
+        t={createTranslator('en')}
+        visibleItems={selections}
+        workspaceId="workspace-1"
+        onApply={async () => partialOperation}
+        onPreview={async () => ({
+          action: { archived: true, type: 'archive' },
+          canApply: true,
+          items: [],
+          operationToken: 'preview-token',
+        })}
+        onVisibleSelectionChange={() => undefined}
+      />,
+    )
+
+    expect(html).toMatch(/<button aria-pressed="true"[^>]*>Assign Work Item<\/button>/)
+    expect(html).toContain('Assignee ID')
+    expect(html).not.toContain('Status</option>')
+  })
+
   test('disables selection and actions in read-only mode', () => {
     const html = renderToStaticMarkup(
       <BulkOperationToolbar

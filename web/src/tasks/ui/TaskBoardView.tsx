@@ -3,11 +3,17 @@ import type {
   WorkItemConfiguration,
   WorkItemPatch,
 } from '@mukuroji/contracts'
-import { useState, type DragEvent } from 'react'
+import { Fragment, useState, type DragEvent } from 'react'
 import type { ProjectTask } from '../api/tasks'
 import type { ProjectMember } from '../../projects/api'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
+import { MoreHorizontalIcon } from '../../shared/ui/icons'
 import type { WorkItemPersonOption } from '../../work-items/ui/WorkItemFieldsEditor'
+import {
+  groupTaskViewItems,
+  type TaskViewGroupValue,
+  type TaskViewPresentationSettings,
+} from '../../task-views/model/taskViewPresentation'
 import {
   resolveWorkItemDependencySummary,
   type WorkItemDependencySummary,
@@ -22,6 +28,7 @@ import {
   createTaskKey,
   isTaskInProjectStatusColumn,
   resolveProjectTaskConfiguration,
+  resolveTaskCustomFieldEntries,
   resolveTaskPriority,
   taskPriorities,
   type TaskCreateContext,
@@ -39,12 +46,14 @@ import {
 } from '../../work-items/model/workItemDisplay'
 import { TaskInlineField } from './TaskInlineField'
 import { TaskInlineCustomFields } from './TaskInlineCustomFields'
+import { WorkItemAssigneeAvatar } from '../../work-items/ui/WorkItemAssigneeAvatar'
 import {
   TaskCustomFieldSummary,
   TaskPriorityBadge,
   TaskStatusBadge,
   TaskViewHeading,
 } from './TaskViewPrimitives'
+import type { ProjectTaskActionMenuOpenHandler } from './projectTaskActionMenu'
 
 /** Resolves a localized task-board message. */
 type TaskBoardTranslator = (key: MessageKey) => string
@@ -65,6 +74,8 @@ export type TaskBoardViewProps = {
   dependencySummaries?: Readonly<Record<string, WorkItemDependencySummary>>
   /** Mapping from person identifiers to display names. */
   personLabels: Readonly<Record<string, string>>
+  /** Visible card fields, density, wrapping, and grouping selected by the effective view. */
+  presentation?: TaskViewPresentationSettings
   /** Person options available to custom-field editors. */
   personOptions?: WorkItemPersonOption[]
   /** Project receiving contextual Board creates. */
@@ -79,6 +90,8 @@ export type TaskBoardViewProps = {
   t: TaskBoardTranslator
   /** Selects a task for the detail pane. */
   onSelectTask: (task: ProjectTask) => void
+  /** Opens the canonical action menu for one rendered card. */
+  onTaskActionMenuOpen?: ProjectTaskActionMenuOpenHandler
   /** Opens the create panel with Board-column context. */
   onCreateTaskOpen?: (context?: TaskCreateContext) => void
   /** Updates or moves a task through the shared Work Item action. */
@@ -99,11 +112,13 @@ export function TaskBoardView({
   dependencySummaries = {},
   locale,
   personLabels,
+  presentation,
   personOptions = [],
   projectId,
   selectedDetailTaskKey,
   onCreateTaskOpen,
   onSelectTask,
+  onTaskActionMenuOpen,
   onUpdateTask,
   t,
   tasks,
@@ -115,6 +130,31 @@ export function TaskBoardView({
   const unavailableTasks = tasks.filter((task) =>
     configurationFailedTeamIds.includes(task.teamId),
   )
+  const visibleFields = new Set((presentation?.columns ?? [
+    { field: 'title' },
+    { field: 'status' },
+    { field: 'assignee' },
+    { field: 'dueDate' },
+    { field: 'priority' },
+  ]).map((column) => column.field))
+  const cardPadding = presentation?.density === 'compact'
+    ? 'p-2.5'
+    : presentation?.density === 'spacious'
+      ? 'p-4'
+      : 'p-3'
+  const cardGap = presentation?.density === 'compact'
+    ? 'gap-1.5 p-2'
+    : presentation?.density === 'spacious'
+      ? 'gap-3 p-3.5'
+      : 'gap-2 p-2.5'
+  const wrapText = presentation?.display.wrapTitles ?? false
+  const showAssigneeAvatars = presentation?.display.showAssigneeAvatars ?? false
+  const showEmptyGroups = presentation?.display.showEmptyGroups ?? true
+  const visibleStatusColumns = showEmptyGroups
+    ? statusColumns
+    : statusColumns.filter((column) =>
+        tasks.some((task) => isTaskInProjectStatusColumn(task, column))
+      )
   /** Validates and sends a status transition for one project task. */
   const moveTaskToStatus = async (task: ProjectTask, workflowStatusId: string) => {
     if (!onUpdateTask || task.workflowStatusId === workflowStatusId) {
@@ -184,9 +224,30 @@ export function TaskBoardView({
         t={t}
         titleKey="tasks.view.board"
       />
-      {statusColumns.map((column) => {
+      {visibleStatusColumns.map((column) => {
         const statusTasks = tasks.filter((task) => isTaskInProjectStatusColumn(task, column))
         const columnConfiguration = configurationsByTeam[column.teamId]?.configuration ?? configuration
+        const subgroups = presentation?.subgroupBy
+          ? groupTaskViewItems(
+              statusTasks,
+              presentation.subgroupBy,
+              (task, field) => resolveProjectBoardGroupValue(
+                task,
+                field,
+                resolveProjectTaskConfiguration(task, configurationsByTeam, configuration),
+                t,
+              ),
+              presentation.subgroupDirection,
+            )
+          : []
+        const orderedStatusTasks = subgroups.length > 0
+          ? subgroups.flatMap((group) => group.items)
+          : statusTasks
+        const subgroupByFirstTaskKey = new Map<string, (typeof subgroups)[number]>()
+        for (const group of subgroups) {
+          const firstTask = group.items[0]
+          if (firstTask) subgroupByFirstTaskKey.set(createTaskKey(firstTask), group)
+        }
 
         return (
           <div
@@ -242,9 +303,9 @@ export function TaskBoardView({
                 </span>
               </div>
             </div>
-            <div className="grid gap-2 p-2.5">
+            <div className={`grid ${cardGap}`}>
               {statusTasks.length > 0 ? (
-                statusTasks.map((task) => {
+                orderedStatusTasks.map((task) => {
                   const taskKey = createTaskKey(task)
                   const schedule = resolveTaskSchedule(task)
                   const scheduleRange = formatTaskScheduleRange(schedule)
@@ -276,23 +337,59 @@ export function TaskBoardView({
                           { label: t('tasks.detail.unassigned'), value: '' },
                           ...memberOptions,
                         ]
+                  const customFieldEntries = new Map(
+                    resolveTaskCustomFieldEntries(
+                      task,
+                      taskConfiguration,
+                      locale,
+                      personLabels,
+                      t,
+                    ).map((entry) => [entry.definition.id, entry.value]),
+                  )
+                  const customColumns = [...visibleFields].flatMap((field) => {
+                    if (!field.startsWith('custom:')) return []
+                    const fieldId = field.slice('custom:'.length)
+                    return [{
+                      id: fieldId,
+                      label: taskConfiguration?.customFields.find(
+                        (definition) => definition.id === fieldId,
+                      )?.name ?? fieldId,
+                      value: customFieldEntries.get(fieldId) ?? '—',
+                    }]
+                  })
 
+                  const subgroup = subgroupByFirstTaskKey.get(taskKey)
                   return (
+                    <Fragment key={taskKey}>
+                    {subgroup ? (
+                      <h3 className="rounded bg-slate-100 px-2.5 py-1.5 text-xs font-bold text-[var(--workbench-muted)]">
+                        {subgroup.label} ({subgroup.items.length})
+                      </h3>
+                    ) : null}
                     <article
                       aria-grabbed={draggedTaskKey === taskKey || undefined}
-                      className={`rounded-md border p-3 text-left transition ${
+                      className={`rounded-md border ${cardPadding} text-left transition ${
                         selectedDetailTaskKey === taskKey
                           ? 'border-[#99d7cf] bg-[#e5f7f4] shadow-[inset_3px_0_0_var(--workbench-primary)]'
                           : 'border-[var(--workbench-border)] bg-white hover:border-[#99d7cf] hover:bg-[var(--workbench-surface-muted)]'
                       } ${draggedTaskKey === taskKey ? 'opacity-50 ring-2 ring-[#99d7cf]' : ''} ${isMoving ? 'opacity-70' : ''}`}
                       data-testid={`project-task-card-${task.id}`}
                       draggable={Boolean(onUpdateTask) && !isMoving}
-                      key={taskKey}
                       onDragEnd={() => {
                         setDraggedTaskKey(undefined)
                         setDropTargetColumnKey(undefined)
                       }}
                       onDragStart={(event) => handleDragStart(event, task)}
+                      onContextMenu={(event) => {
+                        if (!onTaskActionMenuOpen) return
+                        event.preventDefault()
+                        onTaskActionMenuOpen(
+                          task,
+                          { x: event.clientX, y: event.clientY },
+                          event.currentTarget,
+                        )
+                      }}
+                      tabIndex={-1}
                     >
                       <div className="flex items-start gap-2">
                         {onUpdateTask ? (
@@ -301,11 +398,14 @@ export function TaskBoardView({
                             displayValue={resolveWorkItemTitle(task)}
                             testId={`task-inline-title-${task.id}`}
                             value={resolveWorkItemTitle(task)}
+                            wrapText={wrapText}
                             onCommit={(value) => onUpdateTask(task, { title: value }).then(() => undefined)}
                           />
                         ) : (
                           <button
-                            className="min-w-0 flex-1 text-left text-sm font-semibold leading-5 text-[#1c1d1f] hover:text-[var(--workbench-primary)]"
+                            className={`min-w-0 flex-1 text-left text-sm font-semibold leading-5 text-[#1c1d1f] hover:text-[var(--workbench-primary)] ${
+                              wrapText ? 'whitespace-normal break-words' : 'truncate'
+                            }`}
                             onClick={() => onSelectTask(task)}
                             type="button"
                           >
@@ -322,13 +422,33 @@ export function TaskBoardView({
                             ↗
                           </button>
                         ) : null}
+                        {onTaskActionMenuOpen ? (
+                          <button
+                            aria-label={`${t('tasks.action.more')}: ${resolveWorkItemTitle(task)}`}
+                            className="grid h-8 w-8 flex-none place-items-center rounded text-[var(--workbench-muted)] hover:bg-white hover:text-[var(--workbench-primary)] max-[640px]:h-11 max-[640px]:w-11"
+                            data-testid={`task-card-actions-${task.id}`}
+                            onClick={(event) => {
+                              event.stopPropagation()
+                              const returnFocusElement = event.currentTarget
+                              const bounds = returnFocusElement.getBoundingClientRect()
+                              onTaskActionMenuOpen(
+                                task,
+                                { x: bounds.right, y: bounds.bottom },
+                                returnFocusElement,
+                              )
+                            }}
+                            type="button"
+                          >
+                            <MoreHorizontalIcon className="h-5 w-5" />
+                          </button>
+                        ) : null}
                       </div>
                       <WorkItemDependencyChips
                         className="mt-2"
                         summary={dependencySummary}
                         t={t}
                       />
-                      {onUpdateTask && editableStatuses.length > 0 ? (
+                      {visibleFields.has('status') && onUpdateTask && editableStatuses.length > 0 ? (
                         <TaskInlineField
                           ariaLabel={`${t('tasks.inline.edit')}: ${t('tasks.column.status')}`}
                           displayValue={resolveWorkItemWorkflowStatusLabel(task, taskConfiguration)}
@@ -342,22 +462,27 @@ export function TaskBoardView({
                           onCommit={(value) => moveTaskToStatus(task, value)}
                         />
                       ) : null}
-                      {onUpdateTask && inlineAssigneeOptions.length > 0 ? (
-                        <TaskInlineField
-                          ariaLabel={`${t('tasks.inline.edit')}: ${t('tasks.column.assignee')}`}
-                          displayValue={resolveWorkItemAssignee(task)}
-                          kind="select"
-                          options={inlineAssigneeOptions}
-                          testId={`task-inline-assignee-${task.id}`}
-                          value={task.assigneeUserId}
-                          onCommit={(value) => onUpdateTask(task, { assigneeUserId: value }).then(() => undefined)}
-                        />
-                      ) : (
-                        <p className="mt-2 truncate text-xs font-medium text-[#5f6874]">
-                          {resolveWorkItemAssignee(task)}
-                        </p>
-                      )}
-                      {onUpdateTask ? (
+                      {visibleFields.has('assignee') ? (
+                        <div className="mt-2 flex min-w-0 items-center gap-2 text-xs font-medium text-[#5f6874]">
+                          {showAssigneeAvatars ? (
+                            <WorkItemAssigneeAvatar label={resolveWorkItemAssignee(task)} />
+                          ) : null}
+                          {onUpdateTask && inlineAssigneeOptions.length > 0 ? (
+                            <TaskInlineField
+                              ariaLabel={`${t('tasks.inline.edit')}: ${t('tasks.column.assignee')}`}
+                              displayValue={resolveWorkItemAssignee(task)}
+                              kind="select"
+                              options={inlineAssigneeOptions}
+                              testId={`task-inline-assignee-${task.id}`}
+                              value={task.assigneeUserId}
+                              onCommit={(value) => onUpdateTask(task, { assigneeUserId: value }).then(() => undefined)}
+                            />
+                          ) : (
+                            <span className="truncate">{resolveWorkItemAssignee(task)}</span>
+                          )}
+                        </div>
+                      ) : null}
+                      {(!presentation || visibleFields.has('customFields')) && onUpdateTask ? (
                         <TaskInlineCustomFields
                           configuration={taskConfiguration}
                           locale={locale}
@@ -367,7 +492,7 @@ export function TaskBoardView({
                           t={t}
                           task={task}
                         />
-                      ) : (
+                      ) : !presentation || visibleFields.has('customFields') ? (
                         <TaskCustomFieldSummary
                           configuration={taskConfiguration}
                           locale={locale}
@@ -375,9 +500,22 @@ export function TaskBoardView({
                           t={t}
                           task={task}
                         />
-                      )}
-                      <div className="mt-3 flex flex-wrap items-center gap-2">
-                        {onUpdateTask ? (
+                      ) : null}
+                      {customColumns.length > 0 ? (
+                        <dl className="mt-2 grid gap-1.5 text-xs text-[var(--workbench-muted)]">
+                          {customColumns.map((item) => (
+                            <div className="flex min-w-0 items-baseline justify-between gap-2" key={item.id}>
+                              <dt className="truncate font-semibold">{item.label}</dt>
+                              <dd className={wrapText ? 'break-words text-right' : 'truncate text-right'}>
+                                {item.value}
+                              </dd>
+                            </div>
+                          ))}
+                        </dl>
+                      ) : null}
+                      {visibleFields.has('priority') || visibleFields.has('dueDate') ? (
+                        <div className="mt-3 flex flex-wrap items-center gap-2">
+                        {visibleFields.has('priority') && onUpdateTask ? (
                           <TaskInlineField
                             ariaLabel={`${t('tasks.inline.edit')}: ${t('tasks.column.priority')}`}
                             displayValue={t(`tasks.priority.${task.priority}`)}
@@ -390,8 +528,8 @@ export function TaskBoardView({
                             value={task.priority}
                             onCommit={(value) => onUpdateTask(task, { priority: resolveTaskPriority(value) }).then(() => undefined)}
                           />
-                        ) : <TaskPriorityBadge priority={task.priority} t={t} />}
-                        {onUpdateTask && (schedule.mode === 'due-date' || schedule.mode === 'unscheduled') ? (
+                        ) : visibleFields.has('priority') ? <TaskPriorityBadge priority={task.priority} t={t} /> : null}
+                        {visibleFields.has('dueDate') && onUpdateTask && (schedule.mode === 'due-date' || schedule.mode === 'unscheduled') ? (
                           <TaskInlineField
                             ariaLabel={`${t('tasks.inline.edit')}: ${t('tasks.column.dueDate')}`}
                             displayValue={scheduleDisplay}
@@ -402,14 +540,26 @@ export function TaskBoardView({
                               schedule: replaceTaskDeadlineSchedule(schedule, value),
                             }).then(() => undefined)}
                           />
-                        ) : (
+                        ) : visibleFields.has('dueDate') ? (
                           <span className="text-xs font-semibold text-[#5f6874]">{scheduleDisplay}</span>
-                        )}
-                      </div>
+                        ) : null}
+                        </div>
+                      ) : null}
+                      {visibleFields.has('project') ? (
+                        <p className="mt-2 text-[11px] font-medium text-[var(--workbench-muted)]">
+                          {t('workspace.column.project')}: {task.assignedProjectId ?? '—'}
+                        </p>
+                      ) : null}
+                      {visibleFields.has('team') ? (
+                        <p className="mt-1 text-[11px] font-medium text-[var(--workbench-muted)]">
+                          {t('workspace.column.team')}: {task.teamId}
+                        </p>
+                      ) : null}
                       <p className="mt-2 text-[11px] font-medium text-[var(--workbench-muted)]">
                         {t('tasks.board.dragHint')}
                       </p>
                     </article>
+                    </Fragment>
                   )
                 })
               ) : (
@@ -421,6 +571,11 @@ export function TaskBoardView({
           </div>
         )
       })}
+      {visibleStatusColumns.length === 0 && unavailableTasks.length === 0 ? (
+        <p className="col-span-full rounded-md border border-dashed border-[var(--workbench-border-strong)] px-4 py-8 text-center text-sm font-medium text-[var(--workbench-muted)]">
+          {t('tasks.board.empty')}
+        </p>
+      ) : null}
       {unavailableTasks.length > 0 ? (
         <div
           className="workbench-panel min-h-[420px] border-red-200"
@@ -431,23 +586,86 @@ export function TaskBoardView({
           </div>
           <div className="grid gap-2 p-2.5">
             {unavailableTasks.map((task) => (
-              <button
+              <article
                 className="rounded-md border border-red-100 bg-white p-3 text-left transition hover:border-red-200"
                 key={createTaskKey(task)}
-                onClick={() => onSelectTask(task)}
-                type="button"
+                onContextMenu={(event) => {
+                  if (!onTaskActionMenuOpen) return
+                  event.preventDefault()
+                  onTaskActionMenuOpen(
+                    task,
+                    { x: event.clientX, y: event.clientY },
+                    event.currentTarget,
+                  )
+                }}
+                tabIndex={-1}
               >
-                <p className="text-sm font-semibold leading-5 text-[var(--workbench-text)]">
-                  {resolveWorkItemTitle(task)}
-                </p>
+                <div className="flex items-start gap-2">
+                  <button
+                    className="min-w-0 flex-1 text-left text-sm font-semibold leading-5 text-[var(--workbench-text)] hover:text-[var(--workbench-primary)]"
+                    onClick={() => onSelectTask(task)}
+                    type="button"
+                  >
+                    {resolveWorkItemTitle(task)}
+                  </button>
+                  {onTaskActionMenuOpen ? (
+                    <button
+                      aria-label={`${t('tasks.action.more')}: ${resolveWorkItemTitle(task)}`}
+                      className="grid h-8 w-8 flex-none place-items-center rounded text-[var(--workbench-muted)] hover:bg-red-50 hover:text-[var(--workbench-primary)] max-[640px]:h-11 max-[640px]:w-11"
+                      data-testid={`task-card-actions-${task.id}`}
+                      onClick={(event) => {
+                        const returnFocusElement = event.currentTarget
+                        const bounds = returnFocusElement.getBoundingClientRect()
+                        onTaskActionMenuOpen(
+                          task,
+                          { x: bounds.right, y: bounds.bottom },
+                          returnFocusElement,
+                        )
+                      }}
+                      type="button"
+                    >
+                      <MoreHorizontalIcon className="h-5 w-5" />
+                    </button>
+                  ) : null}
+                </div>
                 <p className="mt-2 text-xs font-medium text-[var(--workbench-muted)]">
                   {resolveWorkItemAssignee(task)} · {task.workflowStatusId}
                 </p>
-              </button>
+              </article>
             ))}
           </div>
         </div>
       ) : null}
     </section>
   )
+}
+
+/** Resolves a stable key and visible label for one project board subgroup field. */
+function resolveProjectBoardGroupValue(
+  task: ProjectTask,
+  field: string,
+  configuration: WorkItemConfiguration | undefined,
+  t: TaskBoardTranslator,
+): TaskViewGroupValue {
+  let value: string
+  switch (field) {
+    case 'title': value = resolveWorkItemTitle(task); break
+    case 'status': value = resolveWorkItemWorkflowStatusLabel(task, configuration); break
+    case 'assignee': value = resolveWorkItemAssignee(task); break
+    case 'dueDate': value = task.dueDate || '—'; break
+    case 'priority': value = t(`tasks.priority.${task.priority}`); break
+    case 'project': value = task.assignedProjectId ?? '—'; break
+    case 'team': value = task.teamId; break
+    default: {
+      const customValue = field.startsWith('custom:')
+        ? task.customFieldValues[field.slice('custom:'.length)]
+        : undefined
+      value = Array.isArray(customValue)
+        ? customValue.join(', ')
+        : customValue === undefined || customValue === null || customValue === ''
+          ? '—'
+          : String(customValue)
+    }
+  }
+  return { key: value, label: value }
 }

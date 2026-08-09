@@ -2,6 +2,7 @@ import type {
   BulkOperationPreview,
   BulkOperationRequest,
   ResolvedWorkItemConfiguration,
+  TaskViewScope,
   WorkItemDependencyEndpoint,
   WorkItemRelation,
 } from '@mukuroji/contracts'
@@ -79,6 +80,21 @@ import {
 import { createTaskScheduleMutationController } from '../../tasks/mutations/createTaskScheduleMutationController'
 import { applyTaskPatchOptimistically, type TaskCreateContext } from '../../tasks/model/taskView'
 import { TaskScreen } from '../../tasks/ui/TaskScreen'
+import {
+  createBuiltInTaskViewDefinition,
+  filterTaskViewAudienceTeams,
+  presentationSettingsToTaskViewDefinition,
+  projectStateToTaskViewDefinition,
+  taskViewDefinitionToPresentationSettings,
+  taskViewDefinitionToProjectState,
+} from '../../task-views/model/taskViewSurfaceState'
+import { preserveTaskViewUrlState } from '../../task-views/model/taskViewUrlState'
+import { useTaskViewController } from '../../task-views/mutations/useTaskViewController'
+import { TaskViewToolbar } from '../../task-views/ui/TaskViewToolbar'
+import {
+  createTaskViewOption,
+  formatTaskViewMigrationWarning,
+} from '../../task-views/ui/taskViewToolbarAdapter'
 import type { WorkspaceMember } from '../../workspace/api'
 import { useWorkspaceAccess } from '../../workspace/queries/useWorkspaceAccess'
 import {
@@ -118,6 +134,15 @@ const emptyProjectWorkItemConfigurationLoadResult: ProjectWorkItemConfigurationL
   failedTeamIds: emptyConfigurationTeamIds,
 }
 const ambiguousIssueSelectionLocationState = 'ambiguous-issue-selection'
+const standardTaskViewFields = [
+  'title',
+  'status',
+  'assignee',
+  'dueDate',
+  'priority',
+  'project',
+  'team',
+]
 
 /**
  * Preserves the identity of a Work Item file scope until its route identifiers change.
@@ -217,6 +242,7 @@ export function TaskPage() {
     projectId,
     Boolean(user && !currentUserError),
     normalizeProjectIssueError,
+    true,
   )
   const {
     data: projectMembersData,
@@ -338,6 +364,114 @@ export function TaskPage() {
     ? workItemConfigurationLoadResult.configurationsByTeam[selectedWorkItemTeamId]
     : undefined
   const failedConfigurationTeamIds = workItemConfigurationLoadResult.failedTeamIds
+  const taskViewScope = useMemo<TaskViewScope>(
+    () => selectedTeamId
+      ? { kind: 'project', projectId, teamId: selectedTeamId }
+      : { kind: 'project', projectId },
+    [projectId, selectedTeamId],
+  )
+  const taskViewCustomFields = useMemo(() => {
+    const fieldsById = new Map<string, string>()
+    for (const resolved of Object.values(
+      workItemConfigurationLoadResult.configurationsByTeam,
+    )) {
+      for (const field of resolved.configuration.customFields) {
+        if (field.projectIds?.length && !field.projectIds.includes(projectId)) continue
+        if (!fieldsById.has(field.id)) fieldsById.set(field.id, field.name)
+      }
+    }
+    return [...fieldsById].map(([id, name]) => ({ id, name }))
+  }, [projectId, workItemConfigurationLoadResult.configurationsByTeam])
+  const taskViewWorkflowStatuses = useMemo(
+    () => Object.entries(workItemConfigurationLoadResult.configurationsByTeam)
+      .flatMap(([teamId, resolved]) => resolved.configuration.workflow.statuses.map((status) => ({
+        statusId: status.id,
+        teamId,
+      }))),
+    [workItemConfigurationLoadResult.configurationsByTeam],
+  )
+  const taskViewLegacyStatusIds = useMemo(
+    () => [...new Set(taskViewWorkflowStatuses.map((status) => status.statusId))],
+    [taskViewWorkflowStatuses],
+  )
+  const taskViewFields = useMemo(
+    () => [
+      ...standardTaskViewFields,
+      ...taskViewCustomFields.map((field) => `custom:${field.id}`),
+    ],
+    [taskViewCustomFields],
+  )
+  const taskViewColumns = useMemo(
+    () => [
+      ...standardTaskViewFields,
+      ...(taskViewCustomFields.length > 0 ? ['customFields'] : []),
+      ...taskViewCustomFields.map((field) => `custom:${field.id}`),
+    ],
+    [taskViewCustomFields],
+  )
+  const builtInTaskViewDefinition = useMemo(
+    () => createBuiltInTaskViewDefinition(
+      'project',
+      taskViewScope,
+      'table',
+      taskViewCustomFields.length > 0 ? ['customFields'] : [],
+    ),
+    [taskViewCustomFields.length, taskViewScope],
+  )
+  const taskViewController = useTaskViewController({
+    accessToken,
+    builtInDefinition: builtInTaskViewDefinition,
+    capabilities: {
+      columns: taskViewColumns,
+      fields: taskViewFields,
+      layoutModes: ['table', 'board', 'gantt', 'calendar'],
+      legacyStatusIds: taskViewLegacyStatusIds,
+      requiredColumns: ['title'],
+      workflowStatuses: taskViewWorkflowStatuses,
+    },
+    enabled: Boolean(accessToken && user && !currentUserError),
+    onSearchParamsChange: (nextSearchParams) => {
+      setSearchParams(nextSearchParams, { replace: true })
+    },
+    scope: taskViewScope,
+    searchParams,
+    surface: 'project',
+  })
+  const taskViewFieldOptions = useMemo(
+    () => [
+      { id: 'title', label: t('tasks.create.title') },
+      { id: 'status', label: t('tasks.filter.status') },
+      { id: 'assignee', label: t('tasks.filter.assignee') },
+      { id: 'dueDate', label: t('tasks.filter.dueDate') },
+      { id: 'priority', label: t('tasks.filter.priority') },
+      { id: 'project', label: t('workspace.column.project') },
+      { id: 'team', label: t('workspace.column.team') },
+      ...(taskViewCustomFields.length > 0
+        ? [{ id: 'customFields', label: t('workItems.fields.title') }]
+        : []),
+      ...taskViewCustomFields.map((field) => ({
+        id: `custom:${field.id}`,
+        label: field.name,
+      })),
+    ],
+    [t, taskViewCustomFields],
+  )
+  const taskViewGroupOptions = useMemo(
+    () => taskViewFieldOptions.filter((option) => option.id !== 'customFields'),
+    [taskViewFieldOptions],
+  )
+  const taskViewTeams = useMemo(
+    () => {
+      const writableTeamIds = new Set(taskViewController.writableTeamIds)
+      return filterTaskViewAudienceTeams(
+        teams
+          .filter((team) => team.projects.some((project) => project.id === projectId))
+          .map((team) => ({ id: team.id, name: team.name })),
+        taskViewScope,
+      ).filter((team) => writableTeamIds.has(team.id))
+    },
+    [projectId, taskViewController.writableTeamIds, taskViewScope, teams],
+  )
   const {
     data: relationCandidates = emptyTeamIssues,
     error: relationCandidatesError,
@@ -347,6 +481,7 @@ export function TaskPage() {
     accessToken,
     selectedWorkItemTeamId,
     Boolean(user && !currentUserError),
+    false,
     'project-relation-candidates',
   )
   const resolvedSelectedIssueTeamId = selectedWorkItemTeamId
@@ -628,7 +763,10 @@ export function TaskPage() {
       ),
     ))
     await mutateProjectTasks()
-    navigate(createProjectIssuesPath(targetProjectId, targetTeamId, issue.id))
+    navigate(preserveTaskViewUrlState(
+      createProjectIssuesPath(targetProjectId, targetTeamId, issue.id),
+      searchParams,
+    ))
   }
 
   const handleUpdateProjectMember = async (
@@ -691,7 +829,10 @@ export function TaskPage() {
     }
 
     setIssueUpdateError(undefined)
-    navigate(createProjectIssuesPath(task.assignedProjectId ?? projectId, nextTeamId, task.id))
+    navigate(preserveTaskViewUrlState(
+      createProjectIssuesPath(task.assignedProjectId ?? projectId, nextTeamId, task.id),
+      searchParams,
+    ))
   }
 
   /** Updates a visible Work Item with optimistic cache projection and conflict rollback. */
@@ -965,12 +1106,67 @@ export function TaskPage() {
   const canCreateProjectTask = canMutateContent && Boolean(creationTeam) && Object.keys(
     workItemConfigurationLoadResult.configurationsByTeam,
   ).length > 0
+  const projectTaskViewState = taskViewDefinitionToProjectState(
+    taskViewController.effectiveDefinition,
+  )
+  const taskViewOptions = taskViewController.views.map(createTaskViewOption)
+  const activeTaskViewOption = taskViewController.activeSavedView
+    ? createTaskViewOption(taskViewController.activeSavedView)
+    : undefined
+  const taskViewToolbar = (
+    <TaskViewToolbar
+      builtInName={t('tasks.tab.table')}
+      canManageShared={taskViewController.canManageShared}
+      canSetTeamDefault={taskViewController.canSetTeamDefault}
+      canWrite={taskViewController.canWrite}
+      columnOptions={taskViewFieldOptions}
+      errorMessage={taskViewController.errorMessage}
+      groupOptions={taskViewGroupOptions}
+      isDirty={taskViewController.isDirty}
+      isSaving={taskViewController.isSaving}
+      migrationWarnings={taskViewController.migrationWarnings.map(
+        formatTaskViewMigrationWarning,
+      )}
+      onCopyLink={taskViewController.copyPermalink}
+      onDelete={taskViewController.deleteView}
+      onDuplicate={taskViewController.duplicateView}
+      onPatchPreference={taskViewController.patchPreference}
+      onReset={taskViewController.resetOverrides}
+      onSaveAs={taskViewController.saveAs}
+      onSelectView={taskViewController.selectView}
+      onSettingsChange={(settings) => {
+        taskViewController.setEffectiveDefinition(
+          presentationSettingsToTaskViewDefinition(
+            taskViewController.effectiveDefinition,
+            settings,
+          ),
+        )
+      }}
+      onUpdate={taskViewController.activeSavedView?.canEdit
+        ? taskViewController.updateActiveView
+        : undefined}
+      selectedView={activeTaskViewOption}
+      settings={taskViewDefinitionToPresentationSettings(
+        taskViewController.effectiveDefinition,
+      )}
+      supportsColumnLayoutMetadata={projectTaskViewState.activeTab === 'table'}
+      supportsEmptyGroups={projectTaskViewState.activeTab === 'board'}
+      supportsLayoutPresentation={projectTaskViewState.activeTab === 'table' ||
+        projectTaskViewState.activeTab === 'board'}
+      supportsKeyboardSelection
+      teams={taskViewTeams}
+      t={t}
+      views={taskViewOptions}
+    />
+  )
 
   return (
     <TaskScreen
+      key={projectId}
       workspaceId={workspaceId}
       configurationErrorMessage={configurationErrorMessage}
       accessToken={accessToken}
+      activeTaskViewId={taskViewController.activeSavedView?.id}
       isLoading={isLoading}
       isProjectQuickAccess={interactionTeamId
         ? isProjectQuickAccess({ projectId, teamId: interactionTeamId })
@@ -1055,10 +1251,24 @@ export function TaskPage() {
       configurationFailedTeamIds={failedConfigurationTeamIds}
       onRetryConfigurations={() => void mutateWorkItemConfigurations()}
       taskErrorMessage={taskErrorMessage}
+      taskViewToolbar={taskViewToolbar}
+      taskViewDefinition={taskViewController.effectiveDefinition}
+      taskViewPresentation={taskViewDefinitionToPresentationSettings(
+        taskViewController.effectiveDefinition,
+      )}
       tasks={tasks}
       teamName={interactionTeam?.name}
       teams={teams}
       userInitial={userInitial}
+      viewState={projectTaskViewState}
+      onViewStateChange={(nextViewState) => {
+        taskViewController.setEffectiveDefinition(
+          projectStateToTaskViewDefinition(
+            taskViewController.effectiveDefinition,
+            nextViewState,
+          ),
+        )
+      }}
       workspaceMembers={workspaceAccess?.members ?? emptyWorkspaceMembers}
     />
   )

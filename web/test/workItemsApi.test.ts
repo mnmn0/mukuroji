@@ -7,6 +7,8 @@ import {
 } from '@mukuroji/contracts'
 import {
   confirmTeamIssueSchedule,
+  getProjectIssues,
+  getTeamIssues,
   getWorkspaceWorkItems,
   previewTeamIssueSchedule,
   TeamIssuesApiError,
@@ -37,6 +39,24 @@ describe('canonical Work Item API', () => {
     expect(requests[0]?.init.headers).toMatchObject({
       Authorization: 'Bearer access-token',
     })
+  })
+
+  test('opts task-view list endpoints into archived Work Items through URL queries', async () => {
+    const workItem = createWorkItem({ archivedAt: '2026-08-09T00:00:00.000Z' })
+
+    let requests = installFetchRecorder({ issues: [workItem], teamId: 'core team' })
+    await expect(getTeamIssues('core team', 'access-token', true)).resolves.toEqual([workItem])
+    expect(requests[0]?.url).toBe('/api/teams/core%20team/issues?includeArchived=true')
+
+    requests = installFetchRecorder({ issues: [workItem], projectId: 'launch / plan' })
+    await expect(getProjectIssues('launch / plan', 'access-token', true)).resolves.toEqual([workItem])
+    expect(requests[0]?.url).toBe(
+      '/api/projects/launch%20%2F%20plan/issues?includeArchived=true',
+    )
+
+    requests = installFetchRecorder({ workItems: [workItem] })
+    await expect(getWorkspaceWorkItems('access-token', true)).resolves.toEqual([workItem])
+    expect(requests[0]?.url).toBe('/api/work-items?includeArchived=true')
   })
 
   test('sends expectedRevision with stable mutation headers', async () => {

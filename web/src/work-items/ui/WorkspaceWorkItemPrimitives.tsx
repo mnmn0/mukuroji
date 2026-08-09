@@ -2,10 +2,16 @@
 import type {
   WorkflowStatusDefinition,
   WorkItemConfiguration,
+  TaskViewDensity,
 } from '@mukuroji/contracts'
 import type { DragEvent } from 'react'
-import type { MessageKey } from '../../shared/i18n/i18n'
+import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import type { ProjectTask, TaskPriority } from '../../tasks/api'
+import {
+  formatCustomFieldValue,
+  isCustomFieldApplicable,
+  sortCustomFieldDefinitions,
+} from '../model/customFields'
 import {
   resolveWorkItemAssignee,
   resolveWorkItemTitle,
@@ -15,6 +21,7 @@ import {
   resolveWorkflowStatusCategory,
 } from '../model/workItemDisplay'
 import { isOpenableWorkspaceTask } from '../model/workspaceWorkItems'
+import { WorkItemAssigneeAvatar } from './WorkItemAssigneeAvatar'
 
 /**
  * Props for a Work Item row in a Workspace action list.
@@ -74,14 +81,20 @@ export type CompactTaskCardProps = {
   configuration?: WorkItemConfiguration
   /** Whether native drag interactions are enabled for the card. */
   draggable?: boolean
+  /** Whether the card currently owns task-view keyboard focus. */
+  focused?: boolean
   /** Whether the card is currently being dragged. */
   isDragging?: boolean
   /** Whether a status mutation is currently pending for the Work Item. */
   isMoving?: boolean
+  /** Locale used to format typed custom-field values. */
+  locale?: Locale
   /** Optional callback invoked when a native drag interaction ends. */
   onDragEnd?: () => void
   /** Optional callback invoked when a native drag interaction starts. */
   onDragStart?: (event: DragEvent<HTMLElement>) => void
+  /** Row spacing selected by the effective task view. */
+  density?: TaskViewDensity
   /** Optional callback that opens the selected Work Item. */
   onOpenTask?: (task: ProjectTask) => void
   /** Optional callback that requests a workflow status change. */
@@ -92,6 +105,20 @@ export type CompactTaskCardProps = {
   task: ProjectTask
   /** Optional test identifier for the card and its interactive controls. */
   testId?: string
+  /** Visible Project label shown when the Project field is enabled. */
+  projectLabel?: string
+  /** Visible Team label shown when the Team field is enabled. */
+  teamLabel?: string
+  /** Person identities mapped to labels for person custom fields. */
+  personLabels?: Readonly<Record<string, string>>
+  /** Whether an assignee initial is rendered beside the assignee label. */
+  showAssigneeAvatar?: boolean
+  /** Whether the Work Item is selected through the shared task-view reducer. */
+  selected?: boolean
+  /** Fields whose metadata remains visible on the card. */
+  visibleFields?: readonly string[]
+  /** Whether long Work Item titles may wrap instead of truncating. */
+  wrapText?: boolean
   /** Workflow statuses available in the card's status selector. */
   workflowStatuses?: readonly WorkflowStatusDefinition[]
 }
@@ -104,9 +131,12 @@ export type CompactTaskCardProps = {
  */
 export function CompactTaskCard({
   configuration,
+  density = 'comfortable',
   draggable = false,
+  focused = false,
   isDragging = false,
   isMoving = false,
+  locale = 'ja',
   onDragEnd,
   onDragStart,
   onOpenTask,
@@ -114,6 +144,13 @@ export function CompactTaskCard({
   t,
   task,
   testId,
+  projectLabel,
+  teamLabel,
+  personLabels = {},
+  showAssigneeAvatar = false,
+  selected = false,
+  visibleFields = ['title', 'status', 'dueDate', 'priority'],
+  wrapText = false,
   workflowStatuses = [],
 }: CompactTaskCardProps) {
   const taskTitle = resolveWorkItemTitle(task)
@@ -121,21 +158,69 @@ export function CompactTaskCard({
     '{title}',
     taskTitle,
   )
+  const cardPadding = density === 'compact'
+    ? 'p-2.5'
+    : density === 'spacious'
+      ? 'p-5'
+      : 'p-4'
+  const customFieldEntries = configuration
+    ? sortCustomFieldDefinitions(configuration.customFields).flatMap((definition) => {
+        const value = task.customFieldValues[definition.id]
+        if (value === undefined || !isCustomFieldApplicable(definition, task.assignedProjectId)) {
+          return []
+        }
+        return [{
+          id: definition.id,
+          label: definition.name,
+          value: formatCustomFieldValue(definition, value, {
+            durationUnitLabels: {
+              days: t('workItems.durationUnit.days'),
+              hours: t('workItems.durationUnit.hours'),
+              minutes: t('workItems.durationUnit.minutes'),
+            },
+            falseLabel: t('workItems.fields.booleanFalse'),
+            locale,
+            personLabels,
+            trueLabel: t('workItems.fields.booleanTrue'),
+          }),
+        }]
+      })
+    : []
+  const customFieldEntriesById = new Map(customFieldEntries.map((entry) => [entry.id, entry]))
+  const selectedCustomFieldEntries = visibleFields.flatMap((field) => {
+    if (!field.startsWith('custom:')) return []
+    const fieldId = field.slice('custom:'.length)
+    return [customFieldEntriesById.get(fieldId) ?? {
+      id: fieldId,
+      label: configuration?.customFields.find((definition) => definition.id === fieldId)?.name ?? fieldId,
+      value: '—',
+    }]
+  })
 
   return (
     <article
+      aria-current={focused || undefined}
       aria-grabbed={isDragging || undefined}
-      className={`rounded-lg border border-slate-200 bg-white p-4 transition ${
+      className={`rounded-lg border border-slate-200 ${
+        selected ? 'bg-blue-50/70' : 'bg-white'
+      } ${cardPadding} transition ${
         draggable ? 'cursor-grab hover:border-[#99d7cf] hover:shadow-[0_1px_2px_rgba(23,32,29,0.06)] active:cursor-grabbing' : ''
-      } ${isDragging ? 'opacity-50 ring-2 ring-[#99d7cf]' : ''} ${isMoving ? 'opacity-70' : ''}`}
+      } ${focused ? 'ring-2 ring-blue-500/40' : ''} ${
+        isDragging ? 'opacity-50 ring-2 ring-[#99d7cf]' : ''
+      } ${isMoving ? 'opacity-70' : ''}`}
+      data-task-view-focused={focused ? 'true' : 'false'}
+      data-task-view-selected={selected ? 'true' : 'false'}
       data-testid={testId}
       draggable={draggable}
       onDragEnd={onDragEnd}
       onDragStart={onDragStart}
     >
+      {selected ? <span className="sr-only">{t('tasks.row.selected')}</span> : null}
       {onOpenTask ? (
         <button
-          className="w-full text-left text-sm font-semibold leading-6 text-[var(--workbench-text)] hover:text-[var(--workbench-primary)] disabled:hover:text-[var(--workbench-text)]"
+          className={`w-full text-left text-sm font-semibold leading-6 text-[var(--workbench-text)] hover:text-[var(--workbench-primary)] disabled:hover:text-[var(--workbench-text)] ${
+            wrapText ? 'whitespace-normal break-words' : 'truncate'
+          }`}
           data-testid={testId ? `${testId}-open` : undefined}
           disabled={!isOpenableWorkspaceTask(task)}
           onClick={() => onOpenTask(task)}
@@ -144,16 +229,64 @@ export function CompactTaskCard({
           {taskTitle}
         </button>
       ) : (
-        <p className="text-sm font-semibold leading-6 text-[var(--workbench-text)]">{taskTitle}</p>
+        <p className={`text-sm font-semibold leading-6 text-[var(--workbench-text)] ${
+          wrapText ? 'whitespace-normal break-words' : 'truncate'
+        }`}>{taskTitle}</p>
       )}
-      <p className="mt-2 text-xs font-semibold uppercase tracking-[0.08em] text-[var(--workbench-muted)]">
-        {task.dueDate}
-      </p>
-      <div className="mt-3 flex flex-wrap items-center gap-2">
-        <StatusPill configuration={configuration} task={task} />
-        <PriorityPill priority={task.priority} t={t} />
-      </div>
-      {onStatusChange ? (
+      {visibleFields.includes('assignee') ? (
+        <div className="mt-2 flex min-w-0 items-center gap-2 text-xs font-medium text-[var(--workbench-muted)]">
+          {showAssigneeAvatar ? (
+            <WorkItemAssigneeAvatar label={resolveWorkItemAssignee(task)} />
+          ) : null}
+          <span className="truncate">{resolveWorkItemAssignee(task)}</span>
+        </div>
+      ) : null}
+      {visibleFields.includes('dueDate') ? (
+        <p className="mt-2 text-xs font-semibold uppercase tracking-[0.08em] text-[var(--workbench-muted)]">
+          {task.dueDate}
+        </p>
+      ) : null}
+      {visibleFields.includes('status') || visibleFields.includes('priority') ? (
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          {visibleFields.includes('status') ? <StatusPill configuration={configuration} task={task} /> : null}
+          {visibleFields.includes('priority') ? <PriorityPill priority={task.priority} t={t} /> : null}
+        </div>
+      ) : null}
+      {visibleFields.includes('project') && projectLabel ? (
+        <p className="mt-2 text-xs font-medium text-[var(--workbench-muted)]">{projectLabel}</p>
+      ) : null}
+      {visibleFields.includes('team') && teamLabel ? (
+        <p className="mt-1 text-xs font-medium text-[var(--workbench-muted)]">{teamLabel}</p>
+      ) : null}
+      {visibleFields.includes('customFields') && customFieldEntries.length > 0 ? (
+        <div className="mt-3 flex min-w-0 flex-wrap gap-1.5">
+          {customFieldEntries.slice(0, 2).map((entry) => (
+            <span
+              className="workbench-badge max-w-full truncate"
+              key={entry.id}
+              title={`${entry.label}: ${entry.value}`}
+            >
+              {entry.label}: {entry.value}
+            </span>
+          ))}
+          {customFieldEntries.length > 2 ? (
+            <span className="workbench-badge">+{customFieldEntries.length - 2}</span>
+          ) : null}
+        </div>
+      ) : null}
+      {selectedCustomFieldEntries.length > 0 ? (
+        <dl className="mt-3 grid gap-1.5 text-xs text-[var(--workbench-muted)]">
+          {selectedCustomFieldEntries.map((entry) => (
+            <div className="flex min-w-0 items-baseline justify-between gap-2" key={entry.id}>
+              <dt className="truncate font-semibold">{entry.label}</dt>
+              <dd className={wrapText ? 'break-words text-right' : 'truncate text-right'}>
+                {entry.value}
+              </dd>
+            </div>
+          ))}
+        </dl>
+      ) : null}
+      {visibleFields.includes('status') && onStatusChange ? (
         <select
           aria-label={statusSelectLabel}
           className="workbench-input mt-3 h-9 w-full px-3 text-xs disabled:cursor-not-allowed disabled:bg-slate-100 disabled:text-slate-400"

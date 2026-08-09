@@ -5,12 +5,14 @@ import {
   type DynamoDBClient,
 } from '@aws-sdk/client-dynamodb'
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
+import type { TaskViewDefinition } from '@mukuroji/contracts'
 import {
   DynamoDbWorkspaceSearchClient,
   WorkspaceSearchError,
   createCommentWorkspaceSearchDocument,
   createDocumentWorkspaceSearchSourceDocument,
   createDocumentWorkspaceSearchDocument,
+  createTaskViewRecordKey,
   createWorkItemWorkspaceSearchDocument,
   createWorkspaceSearchDocument,
   ensureLocalWorkspaceSearchTable,
@@ -1134,6 +1136,1796 @@ test('removes deleted custom field references with stable migration warnings', (
   expect(migrated.migrationWarnings).toHaveLength(4)
 })
 
+test('filters task views by surface and scope and binds cursors to that context', async () => {
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([]),
+    {} as DynamoDBClient,
+    false,
+  )
+  const access = {
+    viewerUserId: 'owner@example.com',
+    isSystemAdmin: false,
+    canAccessWorkspaceScope: true,
+    canWriteWorkspaceScope: true,
+    canManageSharedViews: false,
+    canWrite: true,
+    teamIds: new Set(['core']),
+    writableTeamIds: new Set(['core']),
+    manageableTeamIds: new Set(['core']),
+    projectIds: new Set(['project-1', 'project-2']),
+    writableProjectIds: new Set(['project-1', 'project-2']),
+    projectScopeKeys: new Set(['core\0project-1', 'core\0project-2']),
+    writableProjectScopeKeys: new Set(['core\0project-1', 'core\0project-2']),
+  }
+  const createProjectView = (projectId: string, name: string, idempotencyKey: string) =>
+    client.createTaskView({
+      workspaceId: 'workspace-1',
+      access,
+      idempotencyKey,
+      input: {
+        name,
+        visibility: 'personal',
+        definition: {
+          surface: 'project',
+          scope: { kind: 'project', projectId, teamId: 'core' },
+          filters: {},
+          layout: {
+            mode: 'table',
+            sort: [],
+            columns: [{ field: 'title' }],
+            density: 'compact',
+            displayOptions: {},
+          },
+        },
+      },
+    })
+
+  const firstProjectView = await createProjectView('project-1', 'Project one A', 'project-one-a')
+  const secondProjectView = await createProjectView('project-1', 'Project one B', 'project-one-b')
+  await createProjectView('project-2', 'Project two', 'project-two')
+  await client.createTaskView({
+    workspaceId: 'workspace-1',
+    access,
+    input: {
+      name: 'Team queue',
+      visibility: 'team',
+      teamId: 'core',
+      definition: {
+        surface: 'team',
+        scope: { kind: 'team', teamId: 'core' },
+        filters: {},
+        layout: {
+          mode: 'board',
+          sort: [],
+          columns: [{ field: 'title' }],
+          density: 'comfortable',
+          displayOptions: {},
+        },
+      },
+    },
+  })
+
+  const projectPage = await client.listTaskViews({
+    workspaceId: 'workspace-1',
+    surface: 'project',
+    scope: { kind: 'project', projectId: 'project-1', teamId: 'core' },
+    access,
+  })
+  expect(new Set(projectPage.views.map((view) => view.id))).toEqual(new Set([
+    firstProjectView.id,
+    secondProjectView.id,
+  ]))
+  expect(projectPage.capabilities).toEqual({
+    canWrite: true,
+    canManageSharedViews: false,
+    canSetTeamDefault: true,
+    writableTeamIds: ['core'],
+  })
+
+  const firstPage = await client.listTaskViews({
+    workspaceId: 'workspace-1',
+    surface: 'project',
+    scope: { kind: 'project', projectId: 'project-1', teamId: 'core' },
+    access,
+    limit: 1,
+  })
+  expect(firstPage.nextCursor).toBeString()
+  expect(client.listTaskViews({
+    workspaceId: 'workspace-1',
+    surface: 'project',
+    scope: { kind: 'project', projectId: 'project-2', teamId: 'core' },
+    access,
+    cursor: firstPage.nextCursor,
+  })).rejects.toMatchObject({ code: 'InvalidTaskViewCursor', status: 400 })
+})
+
+test('reports mutation capabilities only for the exact task view list scope', async () => {
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([]),
+    {} as DynamoDBClient,
+    false,
+  )
+  const access = {
+    viewerUserId: 'owner@example.com',
+    isSystemAdmin: false,
+    canAccessWorkspaceScope: true,
+    canWriteWorkspaceScope: false,
+    canManageSharedViews: true,
+    canWrite: true,
+    teamIds: new Set(['read-only', 'writable', 'secondary']),
+    writableTeamIds: new Set(['writable', 'secondary', 'not-readable']),
+    manageableTeamIds: new Set(['writable']),
+    projectIds: new Set<string>(),
+    writableProjectIds: new Set<string>(),
+    projectScopeKeys: new Set<string>(),
+    writableProjectScopeKeys: new Set<string>(),
+  }
+
+  const unscoped = await client.listTaskViews({
+    workspaceId: 'workspace-1',
+    access,
+  })
+  const writableTeam = await client.listTaskViews({
+    workspaceId: 'workspace-1',
+    surface: 'team',
+    scope: { kind: 'team', teamId: 'writable' },
+    access,
+  })
+  const readOnlyTeam = await client.listTaskViews({
+    workspaceId: 'workspace-1',
+    surface: 'team',
+    scope: { kind: 'team', teamId: 'read-only' },
+    access,
+  })
+  const viewer = await client.listTaskViews({
+    workspaceId: 'workspace-1',
+    surface: 'my-tasks',
+    scope: { kind: 'viewer' },
+    access,
+  })
+  const globallyReadOnlyTeam = await client.listTaskViews({
+    workspaceId: 'workspace-1',
+    surface: 'team',
+    scope: { kind: 'team', teamId: 'writable' },
+    access: { ...access, canWrite: false },
+  })
+
+  expect(unscoped.capabilities).toEqual({
+    canWrite: false,
+    canManageSharedViews: false,
+    canSetTeamDefault: false,
+    writableTeamIds: [],
+  })
+  expect(writableTeam.capabilities).toEqual({
+    canWrite: true,
+    canManageSharedViews: true,
+    canSetTeamDefault: true,
+    writableTeamIds: ['writable'],
+  })
+  expect(readOnlyTeam.capabilities).toEqual({
+    canWrite: false,
+    canManageSharedViews: false,
+    canSetTeamDefault: false,
+    writableTeamIds: [],
+  })
+  expect(viewer.capabilities).toEqual({
+    canWrite: true,
+    canManageSharedViews: true,
+    canSetTeamDefault: false,
+    writableTeamIds: ['secondary', 'writable'],
+  })
+  expect(globallyReadOnlyTeam.capabilities).toEqual({
+    canWrite: false,
+    canManageSharedViews: false,
+    canSetTeamDefault: false,
+    writableTeamIds: [],
+  })
+})
+
+test('keeps Project scope authorization Team-qualified and rejects mismatched Team audiences', async () => {
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([]),
+    {} as DynamoDBClient,
+    false,
+  )
+  const access = {
+    viewerUserId: 'owner@example.com',
+    isSystemAdmin: false,
+    canAccessWorkspaceScope: true,
+    canWriteWorkspaceScope: true,
+    canManageSharedViews: false,
+    canWrite: true,
+    teamIds: new Set(['team-a', 'team-b']),
+    writableTeamIds: new Set(['team-a', 'team-b']),
+    manageableTeamIds: new Set(['team-a', 'team-b']),
+    projectIds: new Set(['duplicate-project']),
+    writableProjectIds: new Set(['duplicate-project']),
+    projectScopeKeys: new Set(['team-a\0duplicate-project']),
+    writableProjectScopeKeys: new Set(['team-a\0duplicate-project']),
+  }
+  const layout = {
+    mode: 'table' as const,
+    sort: [],
+    columns: [{ field: 'title' }],
+    density: 'compact' as const,
+    displayOptions: {},
+  }
+
+  expect(client.createTaskView({
+    workspaceId: 'workspace-1',
+    access,
+    input: {
+      name: 'Wrong Project owner',
+      visibility: 'personal',
+      definition: {
+        surface: 'project',
+        scope: { kind: 'project', teamId: 'team-b', projectId: 'duplicate-project' },
+        filters: {},
+        layout,
+      },
+    },
+  })).rejects.toMatchObject({ code: 'TaskViewAccessDenied', status: 403 })
+
+  expect(client.createTaskView({
+    workspaceId: 'workspace-1',
+    access,
+    input: {
+      name: 'Wrong Team audience',
+      visibility: 'team',
+      teamId: 'team-b',
+      definition: {
+        surface: 'team',
+        scope: { kind: 'team', teamId: 'team-a' },
+        filters: {},
+        layout,
+      },
+    },
+  })).rejects.toMatchObject({ code: 'TaskViewAccessDenied', status: 403 })
+
+  expect(client.createTaskView({
+    workspaceId: 'workspace-1',
+    access: {
+      ...access,
+      isSystemAdmin: true,
+      teamIds: new Set<string>(),
+      writableTeamIds: new Set<string>(),
+      manageableTeamIds: new Set<string>(),
+      projectIds: new Set<string>(),
+      writableProjectIds: new Set<string>(),
+      projectScopeKeys: new Set<string>(),
+      writableProjectScopeKeys: new Set<string>(),
+    },
+    input: {
+      name: 'Missing Team',
+      visibility: 'team',
+      teamId: 'missing-team',
+      definition: {
+        surface: 'team',
+        scope: { kind: 'team', teamId: 'missing-team' },
+        filters: {},
+        layout,
+      },
+    },
+  })).rejects.toMatchObject({ code: 'TaskViewAccessDenied', status: 403 })
+})
+
+test('binds every task view mutation to its authoritative writable resource scope', async () => {
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([]),
+    {} as DynamoDBClient,
+    false,
+  )
+  const projectDefinition = (teamId: string, projectId: string): TaskViewDefinition => ({
+    surface: 'project',
+    scope: { kind: 'project', teamId, projectId },
+    filters: {},
+    layout: {
+      mode: 'table',
+      sort: [],
+      columns: [{ field: 'title' }],
+      density: 'comfortable',
+      displayOptions: {},
+    },
+  })
+  const broadAccess = {
+    viewerUserId: 'writer@example.com',
+    isSystemAdmin: false,
+    canAccessWorkspaceScope: false,
+    canWriteWorkspaceScope: false,
+    canManageSharedViews: false,
+    canWrite: true,
+    teamIds: new Set(['team-a', 'team-b']),
+    writableTeamIds: new Set(['team-a', 'team-b']),
+    manageableTeamIds: new Set<string>(),
+    projectIds: new Set(['project-a', 'project-b']),
+    writableProjectIds: new Set(['project-a', 'project-b']),
+    projectScopeKeys: new Set(['team-a\0project-a', 'team-b\0project-b']),
+    writableProjectScopeKeys: new Set(['team-a\0project-a', 'team-b\0project-b']),
+  }
+  const projectBView = await client.createTaskView({
+    workspaceId: 'workspace-1',
+    access: broadAccess,
+    input: {
+      name: 'Project B queue',
+      visibility: 'personal',
+      definition: projectDefinition('team-b', 'project-b'),
+    },
+  })
+  const projectAWriter = {
+    ...broadAccess,
+    writableTeamIds: new Set<string>(),
+    writableProjectIds: new Set(['project-a']),
+    writableProjectScopeKeys: new Set(['team-a\0project-a']),
+  }
+
+  expect(await client.getTaskView({
+    workspaceId: 'workspace-1',
+    viewId: projectBView.id,
+    access: projectAWriter,
+  })).toMatchObject({ id: projectBView.id, canEdit: false })
+  expect(client.createTaskView({
+    workspaceId: 'workspace-1',
+    access: projectAWriter,
+    input: {
+      name: 'Denied Project B copy',
+      visibility: 'personal',
+      definition: projectDefinition('team-b', 'project-b'),
+    },
+  })).rejects.toMatchObject({ code: 'TaskViewAccessDenied', status: 403 })
+  expect(client.createTaskView({
+    workspaceId: 'workspace-1',
+    access: projectAWriter,
+    input: {
+      name: 'Denied Team B audience',
+      visibility: 'team',
+      teamId: 'team-b',
+      definition: {
+        ...projectDefinition('team-a', 'project-a'),
+        surface: 'my-tasks',
+        scope: { kind: 'viewer' },
+      },
+    },
+  })).rejects.toMatchObject({ code: 'TaskViewAccessDenied', status: 403 })
+  expect(client.updateTaskView({
+    workspaceId: 'workspace-1',
+    viewId: projectBView.id,
+    access: projectAWriter,
+    input: { expectedRevision: 1, favorite: true },
+  })).rejects.toMatchObject({ code: 'TaskViewAccessDenied', status: 403 })
+  expect(client.duplicateTaskView({
+    workspaceId: 'workspace-1',
+    sourceViewId: projectBView.id,
+    access: projectAWriter,
+    input: { visibility: 'personal' },
+  })).rejects.toMatchObject({ code: 'TaskViewAccessDenied', status: 403 })
+  expect(client.deleteTaskView({
+    workspaceId: 'workspace-1',
+    viewId: projectBView.id,
+    expectedRevision: 1,
+    access: projectAWriter,
+  })).rejects.toMatchObject({ code: 'TaskViewAccessDenied', status: 403 })
+
+  expect(client.createTaskView({
+    workspaceId: 'workspace-1',
+    access: projectAWriter,
+    input: {
+      name: 'Project A queue',
+      visibility: 'personal',
+      definition: projectDefinition('team-a', 'project-a'),
+    },
+  })).resolves.toMatchObject({ name: 'Project A queue' })
+  expect(client.createTaskView({
+    workspaceId: 'workspace-1',
+    access: projectAWriter,
+    input: {
+      name: 'My Tasks queue',
+      visibility: 'personal',
+      definition: {
+        ...projectDefinition('team-a', 'project-a'),
+        surface: 'my-tasks',
+        scope: { kind: 'viewer' },
+      },
+    },
+  })).resolves.toMatchObject({ name: 'My Tasks queue' })
+})
+
+test('reads task views by ID without disclosing inaccessible personal definitions', async () => {
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([]),
+    {} as DynamoDBClient,
+    false,
+  )
+  const ownerAccess = {
+    viewerUserId: 'owner@example.com',
+    isSystemAdmin: false,
+    canAccessWorkspaceScope: true,
+    canWriteWorkspaceScope: true,
+    canManageSharedViews: false,
+    canWrite: true,
+    teamIds: new Set<string>(),
+    writableTeamIds: new Set<string>(),
+    manageableTeamIds: new Set<string>(),
+    projectIds: new Set<string>(),
+    writableProjectIds: new Set<string>(),
+    projectScopeKeys: new Set<string>(),
+    writableProjectScopeKeys: new Set<string>(),
+  }
+  const created = await client.createTaskView({
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    input: {
+      name: 'My focus',
+      visibility: 'personal',
+      definition: {
+        surface: 'focus',
+        scope: { kind: 'viewer' },
+        filters: { priorities: ['high'] },
+        layout: {
+          mode: 'list',
+          sort: [{ field: 'priority', direction: 'desc' }],
+          columns: [{ field: 'title' }],
+          density: 'compact',
+          displayOptions: {},
+        },
+      },
+    },
+  })
+
+  expect(await client.getTaskView({
+    workspaceId: 'workspace-1',
+    viewId: created.id,
+    access: ownerAccess,
+  })).toMatchObject({ id: created.id, definition: { surface: 'focus' } })
+  expect(client.getTaskView({
+    workspaceId: 'workspace-1',
+    viewId: created.id,
+    access: { ...ownerAccess, viewerUserId: 'other@example.com' },
+  })).rejects.toMatchObject({ code: 'TaskViewNotFound', status: 404 })
+})
+
+test('resolves personal defaults before Team defaults and falls back after clearing personal state', async () => {
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([]),
+    {} as DynamoDBClient,
+    false,
+  )
+  const managerAccess = {
+    viewerUserId: 'manager@example.com',
+    isSystemAdmin: false,
+    canAccessWorkspaceScope: true,
+    canWriteWorkspaceScope: true,
+    canManageSharedViews: false,
+    canWrite: true,
+    teamIds: new Set(['core']),
+    writableTeamIds: new Set(['core']),
+    manageableTeamIds: new Set(['core']),
+    projectIds: new Set<string>(),
+    writableProjectIds: new Set<string>(),
+    projectScopeKeys: new Set<string>(),
+    writableProjectScopeKeys: new Set<string>(),
+  }
+  const definition = {
+    surface: 'team' as const,
+    scope: { kind: 'team' as const, teamId: 'core' },
+    filters: {},
+    layout: {
+      mode: 'board' as const,
+      sort: [],
+      columns: [{ field: 'title' }],
+      density: 'comfortable' as const,
+      displayOptions: {},
+    },
+  }
+  const teamDefault = await client.createTaskView({
+    workspaceId: 'workspace-1',
+    access: managerAccess,
+    input: {
+      name: 'Team default',
+      visibility: 'team',
+      teamId: 'core',
+      definition,
+      defaultSource: 'team',
+    },
+  })
+  const memberAccess = {
+    ...managerAccess,
+    viewerUserId: 'member@example.com',
+    manageableTeamIds: new Set<string>(),
+  }
+
+  expect(await client.getTaskView({
+    workspaceId: 'workspace-1',
+    viewId: teamDefault.id,
+    access: memberAccess,
+  })).toMatchObject({
+    preference: { isDefault: true, defaultSource: 'team' },
+  })
+
+  const personalDefault = await client.createTaskView({
+    workspaceId: 'workspace-1',
+    access: memberAccess,
+    input: {
+      name: 'My default',
+      visibility: 'personal',
+      definition,
+      defaultSource: 'personal',
+    },
+  })
+  const withPersonal = await client.listTaskViews({
+    workspaceId: 'workspace-1',
+    surface: 'team',
+    scope: { kind: 'team', teamId: 'core' },
+    access: memberAccess,
+  })
+  expect(withPersonal.views.find((view) => view.id === personalDefault.id)?.preference)
+    .toMatchObject({
+      isDefault: true,
+      isPersonalDefault: true,
+      isTeamDefault: false,
+      defaultSource: 'personal',
+    })
+  expect(withPersonal.views.find((view) => view.id === teamDefault.id)?.preference)
+    .toMatchObject({ isDefault: false, isPersonalDefault: false, isTeamDefault: true })
+
+  await client.updateTaskView({
+    workspaceId: 'workspace-1',
+    viewId: personalDefault.id,
+    access: memberAccess,
+    input: { expectedRevision: 1, defaultSource: null },
+  })
+  expect(await client.getTaskView({
+    workspaceId: 'workspace-1',
+    viewId: teamDefault.id,
+    access: memberAccess,
+  })).toMatchObject({ preference: { isDefault: true, defaultSource: 'team' } })
+
+  await client.updateTaskView({
+    workspaceId: 'workspace-1',
+    viewId: teamDefault.id,
+    access: managerAccess,
+    input: { expectedRevision: 1, defaultSource: 'personal' },
+  })
+  expect(await client.getTaskView({
+    workspaceId: 'workspace-1',
+    viewId: teamDefault.id,
+    access: managerAccess,
+  })).toMatchObject({
+    preference: {
+      isDefault: true,
+      isPersonalDefault: true,
+      isTeamDefault: true,
+      defaultSource: 'personal',
+    },
+  })
+  await client.updateTaskView({
+    workspaceId: 'workspace-1',
+    viewId: teamDefault.id,
+    access: managerAccess,
+    input: { expectedRevision: 1, clearDefaultSource: 'personal' },
+  })
+  expect(await client.getTaskView({
+    workspaceId: 'workspace-1',
+    viewId: teamDefault.id,
+    access: managerAccess,
+  })).toMatchObject({ preference: { isDefault: true, defaultSource: 'team' } })
+  expect(client.updateTaskView({
+    workspaceId: 'workspace-1',
+    viewId: teamDefault.id,
+    access: memberAccess,
+    input: { expectedRevision: 1, defaultSource: null },
+  })).rejects.toMatchObject({ code: 'TaskViewAccessDenied', status: 403 })
+  expect(client.updateTaskView({
+    workspaceId: 'workspace-1',
+    viewId: teamDefault.id,
+    access: memberAccess,
+    input: { expectedRevision: 1, clearDefaultSource: 'team' },
+  })).rejects.toMatchObject({ code: 'TaskViewAccessDenied', status: 403 })
+  await client.updateTaskView({
+    workspaceId: 'workspace-1',
+    viewId: teamDefault.id,
+    access: managerAccess,
+    input: { expectedRevision: 1, clearDefaultSource: 'team' },
+  })
+  expect(await client.getTaskView({
+    workspaceId: 'workspace-1',
+    viewId: teamDefault.id,
+    access: managerAccess,
+  })).toMatchObject({
+    preference: {
+      isDefault: false,
+      isPersonalDefault: false,
+      isTeamDefault: false,
+    },
+  })
+})
+
+test('invalidates a Team default when its target stops being a Team-visible view', async () => {
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([]),
+    {} as DynamoDBClient,
+    false,
+  )
+  const managerAccess = {
+    viewerUserId: 'manager@example.com',
+    isSystemAdmin: false,
+    canAccessWorkspaceScope: true,
+    canWriteWorkspaceScope: true,
+    canManageSharedViews: true,
+    canWrite: true,
+    teamIds: new Set(['core']),
+    writableTeamIds: new Set(['core']),
+    manageableTeamIds: new Set(['core']),
+    projectIds: new Set<string>(),
+    writableProjectIds: new Set<string>(),
+    projectScopeKeys: new Set<string>(),
+    writableProjectScopeKeys: new Set<string>(),
+  }
+  const created = await client.createTaskView({
+    workspaceId: 'workspace-1',
+    access: managerAccess,
+    input: {
+      name: 'Former Team default',
+      visibility: 'team',
+      teamId: 'core',
+      defaultSource: 'team',
+      definition: {
+        surface: 'team',
+        scope: { kind: 'team', teamId: 'core' },
+        filters: {},
+        layout: {
+          mode: 'board',
+          sort: [],
+          columns: [{ field: 'title' }],
+          density: 'comfortable',
+          displayOptions: {},
+        },
+      },
+    },
+  })
+  await client.updateTaskView({
+    workspaceId: 'workspace-1',
+    viewId: created.id,
+    access: managerAccess,
+    input: { expectedRevision: 1, visibility: 'shared', teamId: null },
+  })
+  expect(await client.getTaskView({
+    workspaceId: 'workspace-1',
+    viewId: created.id,
+    access: { ...managerAccess, viewerUserId: 'member@example.com' },
+  })).toMatchObject({ preference: { isDefault: false } })
+  await client.updateTaskView({
+    workspaceId: 'workspace-1',
+    viewId: created.id,
+    access: managerAccess,
+    input: { expectedRevision: 2, visibility: 'team', teamId: 'core' },
+  })
+  expect(await client.getTaskView({
+    workspaceId: 'workspace-1',
+    viewId: created.id,
+    access: managerAccess,
+  })).toMatchObject({ preference: { isDefault: false, isTeamDefault: false } })
+})
+
+test('does not resurrect a personal default after its view leaves and returns to a context', async () => {
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([]),
+    {} as DynamoDBClient,
+    false,
+  )
+  const access = {
+    viewerUserId: 'owner@example.com',
+    isSystemAdmin: false,
+    canAccessWorkspaceScope: true,
+    canWriteWorkspaceScope: true,
+    canManageSharedViews: false,
+    canWrite: true,
+    teamIds: new Set(['team-a', 'team-b']),
+    writableTeamIds: new Set(['team-a', 'team-b']),
+    manageableTeamIds: new Set(['team-a', 'team-b']),
+    projectIds: new Set<string>(),
+    writableProjectIds: new Set<string>(),
+    projectScopeKeys: new Set<string>(),
+    writableProjectScopeKeys: new Set<string>(),
+  }
+  const layout = {
+    mode: 'board' as const,
+    sort: [],
+    columns: [{ field: 'title' }],
+    density: 'comfortable' as const,
+    displayOptions: {},
+  }
+  const created = await client.createTaskView({
+    workspaceId: 'workspace-1',
+    access,
+    input: {
+      name: 'Context-bound personal default',
+      visibility: 'personal',
+      defaultSource: 'personal',
+      definition: {
+        surface: 'team',
+        scope: { kind: 'team', teamId: 'team-a' },
+        filters: {},
+        layout,
+      },
+    },
+  })
+
+  await client.updateTaskView({
+    workspaceId: 'workspace-1',
+    viewId: created.id,
+    access,
+    input: {
+      expectedRevision: 1,
+      definition: {
+        ...created.definition,
+        scope: { kind: 'team', teamId: 'team-b' },
+      },
+    },
+  })
+  await client.updateTaskView({
+    workspaceId: 'workspace-1',
+    viewId: created.id,
+    access,
+    input: {
+      expectedRevision: 2,
+      definition: created.definition,
+    },
+  })
+
+  expect(await client.getTaskView({
+    workspaceId: 'workspace-1',
+    viewId: created.id,
+    access,
+  })).toMatchObject({
+    preference: { isDefault: false, isPersonalDefault: false },
+  })
+})
+
+test('keeps a recreated default marker when stale cleanup observes an older generation', async () => {
+  const control: NonNullable<Parameters<typeof createMemoryDocumentClient>[1]> = {}
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([], control),
+    {} as DynamoDBClient,
+    false,
+  )
+  const access = {
+    viewerUserId: 'manager@example.com',
+    isSystemAdmin: false,
+    canAccessWorkspaceScope: true,
+    canWriteWorkspaceScope: true,
+    canManageSharedViews: false,
+    canWrite: true,
+    teamIds: new Set(['team-a', 'team-b']),
+    writableTeamIds: new Set(['team-a', 'team-b']),
+    manageableTeamIds: new Set(['team-a', 'team-b']),
+    projectIds: new Set<string>(),
+    writableProjectIds: new Set<string>(),
+    projectScopeKeys: new Set<string>(),
+    writableProjectScopeKeys: new Set<string>(),
+  }
+  const layout = {
+    mode: 'board' as const,
+    sort: [],
+    columns: [{ field: 'title' }],
+    density: 'comfortable' as const,
+    displayOptions: {},
+  }
+  const teamADefinition = {
+    surface: 'team' as const,
+    scope: { kind: 'team' as const, teamId: 'team-a' },
+    filters: {},
+    layout,
+  }
+  const target = await client.createTaskView({
+    workspaceId: 'workspace-1',
+    access,
+    input: {
+      name: 'Default target',
+      visibility: 'team',
+      teamId: 'team-a',
+      defaultSource: 'team',
+      definition: teamADefinition,
+    },
+  })
+  await client.createTaskView({
+    workspaceId: 'workspace-1',
+    access,
+    input: {
+      name: 'Team A anchor',
+      visibility: 'team',
+      teamId: 'team-a',
+      definition: teamADefinition,
+    },
+  })
+  let staleMarker: Record<string, unknown> | undefined
+  control.beforeNextTransaction = (items) => {
+    const marker = [...items.values()].find((item) =>
+      item.entryType === 'task-view-default' &&
+      item.ownerType === 'team' &&
+      item.viewId === target.id
+    )
+    if (!marker) throw new Error('Expected the original Team default marker.')
+    staleMarker = structuredClone(marker)
+  }
+  await client.updateTaskView({
+    workspaceId: 'workspace-1',
+    viewId: target.id,
+    access,
+    input: {
+      expectedRevision: 1,
+      teamId: 'team-b',
+      definition: {
+        ...teamADefinition,
+        scope: { kind: 'team', teamId: 'team-b' },
+      },
+    },
+  })
+  const capturedMarker = staleMarker
+  if (!capturedMarker || typeof capturedMarker.recordKey !== 'string') {
+    throw new Error('Expected a captured Team default marker.')
+  }
+  control.beforeNextTransaction = (items) => {
+    items.set(`workspace-1\0${capturedMarker.recordKey}`, structuredClone(capturedMarker))
+  }
+  await client.updateTaskView({
+    workspaceId: 'workspace-1',
+    viewId: target.id,
+    access,
+    input: { expectedRevision: 2, favorite: true },
+  })
+
+  control.beforeNextTransaction = (items) => {
+    const targetKey = `workspace-1\0${createTaskViewRecordKey(target.id)}`
+    const targetRow = items.get(targetKey)
+    if (!targetRow) throw new Error('Expected the task view target row.')
+    items.set(targetKey, {
+      ...targetRow,
+      teamId: 'team-a',
+      definition: teamADefinition,
+      revision: 3,
+      updatedAt: '2099-08-09T00:00:00.000Z',
+    })
+    items.set(`workspace-1\0${capturedMarker.recordKey}`, {
+      ...capturedMarker,
+      generation: '00000000-0000-4000-8000-000000000001',
+    })
+  }
+  await client.listTaskViews({
+    workspaceId: 'workspace-1',
+    surface: 'team',
+    scope: { kind: 'team', teamId: 'team-a' },
+    access,
+  })
+
+  expect(await client.getTaskView({
+    workspaceId: 'workspace-1',
+    viewId: target.id,
+    access,
+  })).toMatchObject({
+    preference: { isDefault: true, isTeamDefault: true },
+  })
+})
+
+test('duplicates a sanitized task view into an independent idempotent lifecycle', async () => {
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([]),
+    {} as DynamoDBClient,
+    false,
+  )
+  const access = {
+    viewerUserId: 'owner@example.com',
+    isSystemAdmin: false,
+    canAccessWorkspaceScope: true,
+    canWriteWorkspaceScope: true,
+    canManageSharedViews: false,
+    canWrite: true,
+    teamIds: new Set<string>(),
+    writableTeamIds: new Set<string>(),
+    manageableTeamIds: new Set<string>(),
+    projectIds: new Set<string>(),
+    writableProjectIds: new Set<string>(),
+    projectScopeKeys: new Set<string>(),
+    writableProjectScopeKeys: new Set<string>(),
+    activeCustomFieldIds: new Set(['kept']),
+    readableCustomFieldIds: new Set(['kept']),
+  }
+  const source = await client.createTaskView({
+    workspaceId: 'workspace-1',
+    access,
+    input: {
+      name: 'Source',
+      description: 'Original',
+      visibility: 'personal',
+      definition: {
+        surface: 'my-tasks',
+        scope: { kind: 'viewer' },
+        filters: {
+          customFields: [
+            { fieldId: 'kept', operator: 'equals', value: 'yes' },
+            { fieldId: 'deleted', operator: 'equals', value: 'no' },
+          ],
+        },
+        layout: {
+          mode: 'table',
+          sort: [],
+          columns: [{ field: 'title' }, { field: 'custom:deleted' }],
+          density: 'compact',
+          displayOptions: {},
+        },
+      },
+    },
+  })
+  const duplicateRequest = {
+    workspaceId: 'workspace-1',
+    sourceViewId: source.id,
+    access,
+    idempotencyKey: 'duplicate-source',
+    input: { name: 'Copy', description: null, favorite: true },
+  }
+  const duplicate = await client.duplicateTaskView(duplicateRequest)
+  await client.updateTaskView({
+    workspaceId: 'workspace-1',
+    viewId: source.id,
+    access,
+    input: { expectedRevision: 1, name: 'Changed source' },
+  })
+  const replay = await client.duplicateTaskView(duplicateRequest)
+
+  expect(replay).toEqual(duplicate)
+  expect(duplicate).toMatchObject({
+    name: 'Copy',
+    revision: 1,
+    preference: { favorite: true },
+  })
+  expect(duplicate.description).toBeUndefined()
+  expect(duplicate.definition.filters.customFields?.map((filter) => filter.fieldId)).toEqual(['kept'])
+  await client.updateTaskView({
+    workspaceId: 'workspace-1',
+    viewId: duplicate.id,
+    access,
+    input: { expectedRevision: 1, name: 'Independent copy' },
+  })
+  expect(await client.getTaskView({
+    workspaceId: 'workspace-1',
+    viewId: source.id,
+    access,
+  })).toMatchObject({ name: 'Changed source', revision: 2 })
+})
+
+test('sanitizes deleted and permission-restricted task view references with stable warnings', async () => {
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([]),
+    {} as DynamoDBClient,
+    false,
+  )
+  const access = {
+    viewerUserId: 'owner@example.com',
+    isSystemAdmin: false,
+    canAccessWorkspaceScope: true,
+    canWriteWorkspaceScope: true,
+    canManageSharedViews: false,
+    canWrite: true,
+    teamIds: new Set(['core']),
+    writableTeamIds: new Set(['core']),
+    manageableTeamIds: new Set(['core']),
+    projectIds: new Set(['project-1']),
+    writableProjectIds: new Set(['project-1']),
+    projectScopeKeys: new Set(['core\0project-1']),
+    writableProjectScopeKeys: new Set(['core\0project-1']),
+    activeCustomFieldIds: new Set(['kept', 'private']),
+    readableCustomFieldIds: new Set(['kept']),
+    activeStatusIds: new Set(['core\0todo']),
+    readableColumnIds: new Set(['title', 'customFields']),
+    readableActorIds: new Set(['owner@example.com']),
+    readableRelationIds: new Set(['visible-relation']),
+  }
+  const created = await client.createTaskView({
+    workspaceId: 'workspace-1',
+    access,
+    input: {
+      name: 'Migration source',
+      visibility: 'personal',
+      definition: {
+        surface: 'team',
+        scope: { kind: 'team', teamId: 'core' },
+        filters: {
+          assigneeUserIds: ['owner@example.com', 'hidden@example.com'],
+          creatorUserIds: ['hidden@example.com'],
+          relationIds: ['visible-relation', 'hidden-relation'],
+          teamIds: ['core', 'secret'],
+          projectIds: ['project-1', 'project-2'],
+          statuses: ['todo', 'gone'],
+          workflowStatuses: [
+            { teamId: 'core', statusId: 'todo' },
+            { teamId: 'core', statusId: 'gone' },
+            { teamId: 'secret', statusId: 'hidden' },
+          ],
+          customFields: [
+            { fieldId: 'kept', operator: 'equals', value: 'yes' },
+            { fieldId: 'deleted', operator: 'equals', value: 'no' },
+            { fieldId: 'private', operator: 'equals', value: 'hidden' },
+          ],
+        },
+        layout: {
+          mode: 'table',
+          group: { field: 'custom:deleted', direction: 'asc' },
+          subgroup: { field: 'custom:private', direction: 'asc' },
+          sort: [
+            { field: 'custom:kept', direction: 'asc' },
+            { field: 'customFields', direction: 'asc' },
+            { field: 'unknown-built-in', direction: 'desc' },
+          ],
+          columns: [
+            { field: 'title' },
+            { field: 'customFields' },
+            { field: 'status' },
+            { field: 'custom:kept' },
+            { field: 'custom:deleted' },
+            { field: 'custom:private' },
+          ],
+          density: 'comfortable',
+          displayOptions: {},
+        },
+      },
+    },
+  })
+
+  expect(created.definition.filters).toMatchObject({
+    assigneeUserIds: ['owner@example.com'],
+    creatorUserIds: [],
+    relationIds: ['visible-relation'],
+    teamIds: ['core'],
+    projectIds: ['project-1'],
+    statuses: ['todo'],
+    workflowStatuses: [{ teamId: 'core', statusId: 'todo' }],
+    customFields: [{ fieldId: 'kept', operator: 'equals', value: 'yes' }],
+  })
+  expect(created.definition.layout).toMatchObject({
+    sort: [{ field: 'custom:kept', direction: 'asc' }],
+    columns: [
+      { field: 'title' },
+      { field: 'customFields' },
+      { field: 'custom:kept' },
+    ],
+  })
+  expect(created.definition.layout.group).toBeUndefined()
+  expect(created.definition.layout.subgroup).toBeUndefined()
+  expect(new Set(created.migrationWarnings?.map((warning) => warning.code))).toEqual(new Set([
+    'deleted-custom-field',
+    'deleted-workflow-status',
+    'permission-redacted',
+    'invalid-layout',
+  ]))
+  expect(created.migrationWarnings?.every((warning) => warning.referenceId === undefined)).toBe(true)
+})
+
+test('retains a currently authorized relation target with no source edge and redacts it after access loss', async () => {
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([]),
+    {} as DynamoDBClient,
+    false,
+  )
+  let targetReadable = true
+  const resolvedInputs: Array<{
+    relationIds: readonly string[]
+    surface: string
+    scopeKind: string
+  }> = []
+  const access = {
+    viewerUserId: 'owner@example.com',
+    isSystemAdmin: false,
+    canAccessWorkspaceScope: true,
+    canWriteWorkspaceScope: true,
+    canManageSharedViews: false,
+    canWrite: true,
+    teamIds: new Set(['core']),
+    writableTeamIds: new Set(['core']),
+    manageableTeamIds: new Set(['core']),
+    projectIds: new Set(['project-1']),
+    writableProjectIds: new Set(['project-1']),
+    projectScopeKeys: new Set(['core\0project-1']),
+    writableProjectScopeKeys: new Set(['core\0project-1']),
+    async resolveReadableRelationIds(input: {
+      relationIds: readonly string[]
+      surface: string
+      scope: { kind: string }
+    }) {
+      await Promise.resolve()
+      resolvedInputs.push({
+        relationIds: [...input.relationIds],
+        surface: input.surface,
+        scopeKind: input.scope.kind,
+      })
+      return targetReadable
+        ? new Set(['blocks:target-without-edge'])
+        : new Set<string>()
+    },
+  }
+  const created = await client.createTaskView({
+    workspaceId: 'workspace-1',
+    access,
+    input: {
+      name: 'Blocked by target',
+      visibility: 'personal',
+      definition: {
+        surface: 'team',
+        scope: { kind: 'team', teamId: 'core' },
+        filters: { relationIds: ['blocks:target-without-edge'] },
+        layout: {
+          mode: 'table',
+          sort: [],
+          columns: [{ field: 'title' }],
+          density: 'comfortable',
+          displayOptions: {},
+        },
+      },
+    },
+  })
+
+  expect(created.definition.filters.relationIds).toEqual(['blocks:target-without-edge'])
+  expect(created.migrationWarnings).toBeUndefined()
+
+  targetReadable = false
+  const afterPermissionLoss = await client.getTaskView({
+    workspaceId: 'workspace-1',
+    viewId: created.id,
+    access,
+  })
+
+  expect(afterPermissionLoss.definition.filters.relationIds).toEqual([])
+  expect(afterPermissionLoss.migrationWarnings).toContainEqual({
+    code: 'permission-redacted',
+    section: 'filter',
+    fallback: 'removed',
+  })
+  expect(resolvedInputs).toEqual([
+    {
+      relationIds: ['blocks:target-without-edge'],
+      surface: 'team',
+      scopeKind: 'team',
+    },
+    {
+      relationIds: ['blocks:target-without-edge'],
+      surface: 'team',
+      scopeKind: 'team',
+    },
+  ])
+})
+
+test('retains a duplicate Project ID when the task view scope safely qualifies its Team', async () => {
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([]),
+    {} as DynamoDBClient,
+    false,
+  )
+  const access = {
+    viewerUserId: 'owner@example.com',
+    isSystemAdmin: false,
+    canAccessWorkspaceScope: true,
+    canWriteWorkspaceScope: true,
+    canManageSharedViews: false,
+    canWrite: true,
+    teamIds: new Set(['team-a']),
+    writableTeamIds: new Set(['team-a']),
+    manageableTeamIds: new Set(['team-a']),
+    projectIds: new Set<string>(),
+    writableProjectIds: new Set<string>(),
+    projectScopeKeys: new Set(['team-a\0roadmap']),
+    writableProjectScopeKeys: new Set(['team-a\0roadmap']),
+  }
+
+  const created = await client.createTaskView({
+    workspaceId: 'workspace-1',
+    access,
+    input: {
+      name: 'Qualified roadmap',
+      visibility: 'personal',
+      definition: {
+        surface: 'project',
+        scope: { kind: 'project', projectId: 'roadmap', teamId: 'team-a' },
+        filters: { projectIds: ['roadmap'] },
+        layout: {
+          mode: 'table',
+          sort: [],
+          columns: [{ field: 'title' }],
+          density: 'comfortable',
+          displayOptions: {},
+        },
+      },
+    },
+  })
+
+  expect(created.definition.filters.projectIds).toEqual(['roadmap'])
+  expect(created.migrationWarnings).toBeUndefined()
+})
+
+test('rejects a normalized task view definition that exceeds the DynamoDB item budget', async () => {
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([]),
+    {} as DynamoDBClient,
+    false,
+  )
+  const fieldIds = Array.from({ length: 20 }, (_, index) => `field-${index}`)
+  const access = {
+    viewerUserId: 'owner@example.com',
+    isSystemAdmin: false,
+    canAccessWorkspaceScope: true,
+    canWriteWorkspaceScope: true,
+    canManageSharedViews: false,
+    canWrite: true,
+    teamIds: new Set<string>(),
+    writableTeamIds: new Set<string>(),
+    manageableTeamIds: new Set<string>(),
+    projectIds: new Set<string>(),
+    writableProjectIds: new Set<string>(),
+    projectScopeKeys: new Set<string>(),
+    writableProjectScopeKeys: new Set<string>(),
+    activeCustomFieldIds: new Set(fieldIds),
+    readableCustomFieldIds: new Set(fieldIds),
+  }
+
+  expect(client.createTaskView({
+    workspaceId: 'workspace-1',
+    access,
+    input: {
+      name: 'Oversized definition',
+      visibility: 'personal',
+      definition: {
+        surface: 'my-tasks',
+        scope: { kind: 'viewer' },
+        filters: {
+          customFields: fieldIds.map((fieldId) => ({
+            fieldId,
+            operator: 'equals',
+            value: 'x'.repeat(20_000),
+          })),
+        },
+        layout: {
+          mode: 'table',
+          sort: [],
+          columns: [{ field: 'title' }],
+          density: 'compact',
+          displayOptions: {},
+        },
+      },
+    },
+  })).rejects.toMatchObject({ code: 'InvalidTaskView', status: 400 })
+})
+
+test('replays task view updates without reverting newer preference, default, or definition state', async () => {
+  const control: NonNullable<Parameters<typeof createMemoryDocumentClient>[1]> = {}
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([], control),
+    {} as DynamoDBClient,
+    false,
+  )
+  const access = {
+    viewerUserId: 'owner@example.com',
+    isSystemAdmin: false,
+    canAccessWorkspaceScope: true,
+    canWriteWorkspaceScope: true,
+    canManageSharedViews: false,
+    canWrite: true,
+    teamIds: new Set<string>(),
+    writableTeamIds: new Set<string>(),
+    manageableTeamIds: new Set<string>(),
+    projectIds: new Set<string>(),
+    writableProjectIds: new Set<string>(),
+    projectScopeKeys: new Set<string>(),
+    writableProjectScopeKeys: new Set<string>(),
+  }
+  const definition = {
+    surface: 'my-tasks' as const,
+    scope: { kind: 'viewer' as const },
+    filters: {},
+    layout: {
+      mode: 'list' as const,
+      sort: [],
+      columns: [{ field: 'title' }],
+      density: 'compact' as const,
+      displayOptions: {},
+    },
+  }
+  const primary = await client.createTaskView({
+    workspaceId: 'workspace-1',
+    access,
+    input: { name: 'Primary', visibility: 'personal', definition },
+  })
+  const replacement = await client.createTaskView({
+    workspaceId: 'workspace-1',
+    access,
+    input: { name: 'Replacement', visibility: 'personal', definition },
+  })
+  const firstRequest = {
+    workspaceId: 'workspace-1',
+    viewId: primary.id,
+    access,
+    idempotencyKey: 'preference-a',
+    input: {
+      expectedRevision: 1,
+      favorite: true,
+      defaultSource: 'personal' as const,
+    },
+  }
+
+  await client.updateTaskView(firstRequest)
+  await client.updateTaskView({
+    workspaceId: 'workspace-1',
+    viewId: primary.id,
+    access,
+    idempotencyKey: 'preference-b',
+    input: { expectedRevision: 1, favorite: false },
+  })
+  await client.updateTaskView({
+    workspaceId: 'workspace-1',
+    viewId: replacement.id,
+    access,
+    idempotencyKey: 'default-b',
+    input: { expectedRevision: 1, defaultSource: 'personal' },
+  })
+
+  expect(await client.updateTaskView(firstRequest)).toMatchObject({
+    revision: 1,
+    preference: { favorite: false, isDefault: false },
+  })
+  expect(await client.getTaskView({
+    workspaceId: 'workspace-1',
+    viewId: replacement.id,
+    access,
+  })).toMatchObject({ preference: { isDefault: true, isPersonalDefault: true } })
+  expect(client.updateTaskView({
+    ...firstRequest,
+    input: { expectedRevision: 1, favorite: false, defaultSource: 'personal' },
+  })).rejects.toMatchObject({ code: 'TaskViewIdempotencyConflict', status: 409 })
+
+  const definitionRequest = {
+    workspaceId: 'workspace-1',
+    viewId: primary.id,
+    access,
+    idempotencyKey: 'definition-a',
+    input: { expectedRevision: 1, name: 'First committed name' },
+  }
+  expect(await client.updateTaskView(definitionRequest)).toMatchObject({
+    name: 'First committed name',
+    revision: 2,
+  })
+  expect(await client.updateTaskView(definitionRequest)).toMatchObject({
+    name: 'First committed name',
+    revision: 2,
+  })
+  await client.updateTaskView({
+    workspaceId: 'workspace-1',
+    viewId: primary.id,
+    access,
+    idempotencyKey: 'definition-b',
+    input: { expectedRevision: 2, name: 'Latest committed name' },
+  })
+  expect(await client.updateTaskView(definitionRequest)).toMatchObject({
+    name: 'Latest committed name',
+    revision: 3,
+  })
+
+  control.failNextTransaction = true
+  const atomicRequest = {
+    workspaceId: 'workspace-1',
+    viewId: primary.id,
+    access,
+    idempotencyKey: 'atomic-update',
+    input: { expectedRevision: 3, pinned: true },
+  }
+  expect(client.updateTaskView(atomicRequest)).rejects.toThrow('transaction failed')
+  let atomicReceiptRecordKey: string | undefined
+  control.beforeNextTransaction = (_items, transactItems) => {
+    const receipt = transactItems
+      .flatMap((item) => isMemoryRecord(item.Put?.Item) ? [item.Put.Item] : [])
+      .find((item) => item.entryType === 'task-view-mutation-receipt')
+    if (!receipt || typeof receipt.recordKey !== 'string') {
+      throw new Error('Expected the atomic update receipt.')
+    }
+    atomicReceiptRecordKey = receipt.recordKey
+  }
+  expect(await client.updateTaskView(atomicRequest)).toMatchObject({
+    revision: 3,
+    preference: { pinned: true },
+  })
+
+  const capturedReceiptRecordKey = atomicReceiptRecordKey
+  if (!capturedReceiptRecordKey) throw new Error('Expected a captured atomic update receipt.')
+  control.beforeNextTransaction = (items) => {
+    const receiptKey = `workspace-1\0${capturedReceiptRecordKey}`
+    const receipt = items.get(receiptKey)
+    if (!receipt) throw new Error('Expected the committed atomic update receipt.')
+    items.set(receiptKey, {
+      ...receipt,
+      committedAt: '2000-01-01T00:00:00.000Z',
+      expiresAt: 946_771_200,
+    })
+  }
+  await client.updateTaskView({
+    workspaceId: 'workspace-1',
+    viewId: replacement.id,
+    access,
+    input: { expectedRevision: 1, pinned: true },
+  })
+  expect(await client.updateTaskView({
+    ...atomicRequest,
+    input: { expectedRevision: 3, pinned: false },
+  })).toMatchObject({
+    revision: 3,
+    preference: { pinned: false },
+  })
+})
+
+test('replays a same-key concurrent task view update after the receipt wins its transaction', async () => {
+  const control: NonNullable<Parameters<typeof createMemoryDocumentClient>[1]> = {}
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([], control),
+    {} as DynamoDBClient,
+    false,
+  )
+  const access = {
+    viewerUserId: 'owner@example.com',
+    isSystemAdmin: false,
+    canAccessWorkspaceScope: true,
+    canWriteWorkspaceScope: true,
+    canManageSharedViews: false,
+    canWrite: true,
+    teamIds: new Set<string>(),
+    writableTeamIds: new Set<string>(),
+    manageableTeamIds: new Set<string>(),
+    projectIds: new Set<string>(),
+    writableProjectIds: new Set<string>(),
+    projectScopeKeys: new Set<string>(),
+    writableProjectScopeKeys: new Set<string>(),
+  }
+  const created = await client.createTaskView({
+    workspaceId: 'workspace-1',
+    access,
+    input: {
+      name: 'Concurrent replay',
+      visibility: 'personal',
+      definition: {
+        surface: 'my-tasks',
+        scope: { kind: 'viewer' },
+        filters: {},
+        layout: {
+          mode: 'list',
+          sort: [],
+          columns: [{ field: 'title' }],
+          density: 'compact',
+          displayOptions: {},
+        },
+      },
+    },
+  })
+  let installedReceipt = false
+  control.beforeNextTransaction = (items, transactItems) => {
+    const preferenceMutation = transactItems.find((item) => {
+      const key = item.Update?.Key
+      return isMemoryRecord(key) &&
+        typeof key.recordKey === 'string' &&
+        key.recordKey.startsWith('TASK_VIEW_PREFERENCE#')
+    })
+    if (!preferenceMutation) {
+      throw new Error('Expected a task view preference transaction item.')
+    }
+    applyMemoryTransactionItem(items, preferenceMutation, 0, 1)
+    const receipt = transactItems
+      .flatMap((item) => isMemoryRecord(item.Put?.Item) ? [item.Put.Item] : [])
+      .find((item) => item?.entryType === 'task-view-mutation-receipt')
+    if (!receipt) throw new Error('Expected a task view mutation receipt transaction item.')
+    if (typeof receipt.committedAt !== 'string' || typeof receipt.expiresAt !== 'number') {
+      throw new Error('Expected a timestamped task view mutation receipt.')
+    }
+    expect(receipt.expiresAt).toBe(
+      Math.floor(Date.parse(receipt.committedAt) / 1_000) + 24 * 60 * 60,
+    )
+    items.set(
+      `${String(receipt.workspaceId)}\0${String(receipt.recordKey)}`,
+      structuredClone(receipt),
+    )
+    installedReceipt = true
+  }
+
+  const replay = await client.updateTaskView({
+    workspaceId: 'workspace-1',
+    viewId: created.id,
+    access,
+    idempotencyKey: 'concurrent-update',
+    input: { expectedRevision: 1, favorite: true },
+  })
+
+  expect(installedReceipt).toBeTrue()
+  expect(replay).toMatchObject({
+    id: created.id,
+    revision: 1,
+    preference: { favorite: true },
+  })
+})
+
+test('replays task view deletion from a durable actor-bound receipt', async () => {
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([]),
+    {} as DynamoDBClient,
+    false,
+  )
+  const access = {
+    viewerUserId: 'owner@example.com',
+    isSystemAdmin: false,
+    canAccessWorkspaceScope: true,
+    canWriteWorkspaceScope: true,
+    canManageSharedViews: false,
+    canWrite: true,
+    teamIds: new Set<string>(),
+    writableTeamIds: new Set<string>(),
+    manageableTeamIds: new Set<string>(),
+    projectIds: new Set<string>(),
+    writableProjectIds: new Set<string>(),
+    projectScopeKeys: new Set<string>(),
+    writableProjectScopeKeys: new Set<string>(),
+  }
+  const definition = {
+    surface: 'my-tasks' as const,
+    scope: { kind: 'viewer' as const },
+    filters: {},
+    layout: {
+      mode: 'list' as const,
+      sort: [],
+      columns: [{ field: 'title' }],
+      density: 'compact' as const,
+      displayOptions: {},
+    },
+  }
+  const created = await client.createTaskView({
+    workspaceId: 'workspace-1',
+    access,
+    input: { name: 'Delete once', visibility: 'personal', definition },
+  })
+  const request = {
+    workspaceId: 'workspace-1',
+    viewId: created.id,
+    expectedRevision: 1,
+    access,
+    idempotencyKey: 'delete-once',
+  }
+
+  const deleted = await client.deleteTaskView(request)
+  expect(await client.deleteTaskView(request)).toEqual(deleted)
+  expect(client.deleteTaskView({
+    ...request,
+    expectedRevision: 2,
+  })).rejects.toMatchObject({ code: 'TaskViewIdempotencyConflict', status: 409 })
+  expect(client.deleteTaskView({
+    ...request,
+    access: { ...access, viewerUserId: 'other@example.com' },
+  })).rejects.toMatchObject({ code: 'TaskViewNotFound', status: 404 })
+
+  const withoutKey = await client.createTaskView({
+    workspaceId: 'workspace-1',
+    access,
+    input: { name: 'Legacy delete', visibility: 'personal', definition },
+  })
+  await client.deleteTaskView({
+    workspaceId: 'workspace-1',
+    viewId: withoutKey.id,
+    expectedRevision: 1,
+    access,
+  })
+  expect(client.deleteTaskView({
+    workspaceId: 'workspace-1',
+    viewId: withoutKey.id,
+    expectedRevision: 1,
+    access,
+  })).rejects.toMatchObject({ code: 'TaskViewNotFound', status: 404 })
+})
+
+test('rejects task view updates when a concurrent delete installs a same-revision tombstone', async () => {
+  const control: NonNullable<Parameters<typeof createMemoryDocumentClient>[1]> = {}
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([], control),
+    {} as DynamoDBClient,
+    false,
+  )
+  const access = {
+    viewerUserId: 'owner@example.com',
+    isSystemAdmin: false,
+    canAccessWorkspaceScope: true,
+    canWriteWorkspaceScope: true,
+    canManageSharedViews: false,
+    canWrite: true,
+    teamIds: new Set<string>(),
+    writableTeamIds: new Set<string>(),
+    manageableTeamIds: new Set<string>(),
+    projectIds: new Set<string>(),
+    writableProjectIds: new Set<string>(),
+    projectScopeKeys: new Set<string>(),
+    writableProjectScopeKeys: new Set<string>(),
+  }
+  /** Creates one personal task view used as a target for the concurrent-delete race. */
+  const createView = (name: string) => client.createTaskView({
+    workspaceId: 'workspace-1',
+    access,
+    input: {
+      name,
+      visibility: 'personal',
+      definition: {
+        surface: 'my-tasks',
+        scope: { kind: 'viewer' },
+        filters: {},
+        layout: {
+          mode: 'list',
+          sort: [],
+          columns: [{ field: 'title' }],
+          density: 'compact',
+          displayOptions: {},
+        },
+      },
+    },
+  })
+  const definitionTarget = await createView('Definition target')
+  const preferenceTarget = await createView('Preference target')
+
+  control.beforeNextTransaction = (items) => {
+    const recordKey = createTaskViewRecordKey(definitionTarget.id)
+    items.set(`workspace-1\0${recordKey}`, {
+      schemaVersion: 1,
+      workspaceId: 'workspace-1',
+      recordKey,
+      entryType: 'task-view-tombstone',
+      id: definitionTarget.id,
+      revision: definitionTarget.revision,
+      deletedAt: '2026-08-09T00:00:00.000Z',
+    })
+  }
+  expect(client.updateTaskView({
+    workspaceId: 'workspace-1',
+    viewId: definitionTarget.id,
+    access,
+    input: { expectedRevision: 1, name: 'Must not update the tombstone' },
+  })).rejects.toMatchObject({ code: 'TaskViewRevisionConflict', status: 409 })
+
+  control.beforeNextTransaction = (items) => {
+    const recordKey = createTaskViewRecordKey(preferenceTarget.id)
+    items.set(`workspace-1\0${recordKey}`, {
+      schemaVersion: 1,
+      workspaceId: 'workspace-1',
+      recordKey,
+      entryType: 'task-view-tombstone',
+      id: preferenceTarget.id,
+      revision: preferenceTarget.revision,
+      deletedAt: '2026-08-09T00:00:00.000Z',
+    })
+  }
+  expect(client.updateTaskView({
+    workspaceId: 'workspace-1',
+    viewId: preferenceTarget.id,
+    access,
+    input: { expectedRevision: 1, favorite: true },
+  })).rejects.toMatchObject({ code: 'TaskViewRevisionConflict', status: 409 })
+})
+
+test('prevents idempotent recreation from reviving another viewer preference lifecycle', async () => {
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([]),
+    {} as DynamoDBClient,
+    false,
+  )
+  const ownerAccess = {
+    viewerUserId: 'owner@example.com',
+    isSystemAdmin: false,
+    canAccessWorkspaceScope: true,
+    canWriteWorkspaceScope: true,
+    canManageSharedViews: true,
+    canWrite: true,
+    teamIds: new Set<string>(),
+    writableTeamIds: new Set<string>(),
+    manageableTeamIds: new Set<string>(),
+    projectIds: new Set<string>(),
+    writableProjectIds: new Set<string>(),
+    projectScopeKeys: new Set<string>(),
+    writableProjectScopeKeys: new Set<string>(),
+  }
+  const createRequest = {
+    workspaceId: 'workspace-1',
+    access: ownerAccess,
+    idempotencyKey: 'reusable-shared-view',
+    input: {
+      name: 'Shared queue',
+      visibility: 'shared' as const,
+      definition: {
+        surface: 'workspace-search' as const,
+        scope: { kind: 'workspace' as const },
+        filters: {},
+        layout: {
+          mode: 'table' as const,
+          sort: [],
+          columns: [{ field: 'title' }],
+          density: 'compact' as const,
+          displayOptions: {},
+        },
+      },
+    },
+  }
+  const created = await client.createTaskView(createRequest)
+  const memberAccess = {
+    ...ownerAccess,
+    viewerUserId: 'member@example.com',
+    canAccessWorkspaceScope: true,
+    canWriteWorkspaceScope: true,
+    canManageSharedViews: false,
+  }
+  await client.updateTaskView({
+    workspaceId: 'workspace-1',
+    viewId: created.id,
+    access: memberAccess,
+    input: {
+      expectedRevision: 1,
+      favorite: true,
+      pinned: true,
+      defaultSource: 'personal',
+    },
+  })
+  await client.deleteTaskView({
+    workspaceId: 'workspace-1',
+    viewId: created.id,
+    expectedRevision: 1,
+    access: ownerAccess,
+  })
+
+  expect(client.createTaskView(createRequest)).rejects.toMatchObject({
+    code: 'TaskViewIdempotencyConflict',
+    status: 409,
+  })
+  expect(await client.listTaskViews({
+    workspaceId: 'workspace-1',
+    access: memberAccess,
+  })).toEqual({
+    capabilities: {
+      canWrite: false,
+      canManageSharedViews: false,
+      canSetTeamDefault: false,
+      writableTeamIds: [],
+    },
+    views: [],
+  })
+  const recreated = await client.createTaskView({
+    workspaceId: createRequest.workspaceId,
+    access: createRequest.access,
+    input: createRequest.input,
+  })
+  expect(recreated.id).not.toBe(created.id)
+  expect(await client.getTaskView({
+    workspaceId: 'workspace-1',
+    viewId: recreated.id,
+    access: memberAccess,
+  })).toMatchObject({
+    preference: {
+      favorite: false,
+      pinned: false,
+      isDefault: false,
+    },
+  })
+})
+
 test('waits for a newly created local search table to become active', async () => {
   const commands: string[] = []
   let describeCount = 0
@@ -1173,7 +2965,10 @@ function createMemoryDocumentClient(
   initialItems: Array<Record<string, unknown>>,
   control: {
     failNextTransaction?: boolean
-    beforeNextTransaction?: (items: Map<string, Record<string, unknown>>) => void
+    beforeNextTransaction?: (
+      items: Map<string, Record<string, unknown>>,
+      transactItems: Array<Record<string, Record<string, unknown>>>,
+    ) => void
   } = {},
 ) {
   const items = new Map(
@@ -1190,7 +2985,7 @@ function createMemoryDocumentClient(
         }
         const beforeNextTransaction = control.beforeNextTransaction
         control.beforeNextTransaction = undefined
-        beforeNextTransaction?.(items)
+        beforeNextTransaction?.(items, transactItems)
         const pendingItems = new Map(
           [...items].map(([key, item]) => [key, structuredClone(item)]),
         )
@@ -1290,12 +3085,43 @@ function matchesMemoryCondition(
 ) {
   const condition = operation.ConditionExpression
   if (typeof condition !== 'string') return true
-  if (condition.startsWith('attribute_not_exists')) return current === undefined
   const names = operation.ExpressionAttributeNames as Record<string, string> | undefined
   const values = operation.ExpressionAttributeValues as Record<string, unknown> | undefined
-  const match = condition.match(/^(#[A-Za-z0-9]+) = (:[A-Za-z0-9]+)$/u)
-  if (!match) throw new Error(`Unsupported memory condition: ${condition}`)
+  return condition.split(' OR ').some((alternative) =>
+    alternative.split(' AND ').every((clause) =>
+      matchesMemoryConditionClause(current, clause, names, values)
+    )
+  )
+}
+
+/** Evaluates one atomic DynamoDB condition used by the in-memory persistence fake. */
+function matchesMemoryConditionClause(
+  current: Record<string, unknown> | undefined,
+  clause: string,
+  names: Record<string, string> | undefined,
+  values: Record<string, unknown> | undefined,
+) {
+  const attributeNotExists = clause.match(/^attribute_not_exists\((#?[A-Za-z0-9]+)\)$/u)
+  if (attributeNotExists?.[1]) {
+    const attributeName = names?.[attributeNotExists[1]] ?? attributeNotExists[1]
+    return current?.[attributeName] === undefined
+  }
+  const lessThanOrEqual = clause.match(/^(#[A-Za-z0-9]+) <= (:[A-Za-z0-9]+)$/u)
+  if (lessThanOrEqual?.[1] && lessThanOrEqual[2]) {
+    const currentValue = current?.[names?.[lessThanOrEqual[1]] ?? '']
+    const expectedValue = values?.[lessThanOrEqual[2]]
+    return typeof currentValue === 'number' &&
+      typeof expectedValue === 'number' &&
+      currentValue <= expectedValue
+  }
+  const match = clause.match(/^(#[A-Za-z0-9]+) = (:[A-Za-z0-9]+)$/u)
+  if (!match) throw new Error(`Unsupported memory condition: ${clause}`)
   return current?.[names?.[match[1] ?? ''] ?? ''] === values?.[match[2] ?? '']
+}
+
+/** Returns whether an in-memory DynamoDB attribute is a record value. */
+function isMemoryRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 function applyMemoryUpdate(
