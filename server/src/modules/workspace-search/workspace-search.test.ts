@@ -9,6 +9,7 @@ import {
   DynamoDbWorkspaceSearchClient,
   WorkspaceSearchError,
   createCommentWorkspaceSearchDocument,
+  createCuratedContextItemWorkspaceSearchDocument,
   createDocumentWorkspaceSearchSourceDocument,
   createDocumentWorkspaceSearchDocument,
   createWorkItemWorkspaceSearchDocument,
@@ -240,6 +241,7 @@ test('normalizes realtime and backfill Work Item and comment projection fields c
     commentId: 'comment-1',
     body: 'Approved for release.\nProceed with rollout.',
     creatorUserId: 'owner@example.com',
+    rootCommentId: 'root-comment',
   })
 
   expect(workItem).toMatchObject({
@@ -251,6 +253,43 @@ test('normalizes realtime and backfill Work Item and comment projection fields c
     title: 'Approved for release.',
     subtitle: 'owner@example.com',
     parentId: 'team/core/issue/issue-1',
+    url: '/teams/core/issues?issueId=issue-1&commentId=comment-1&rootCommentId=root-comment',
+  })
+})
+
+test('projects curated context with a stable Work Item deep link and source revision', () => {
+  const document = createCuratedContextItemWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    projectId: 'project-1',
+    item: {
+      schemaVersion: 1,
+      id: 'context-1',
+      teamId: 'core',
+      workItemId: 'issue-1',
+      kind: 'decision',
+      state: 'accepted',
+      title: 'Ship the release',
+      body: 'The release is approved after the final regression pass.',
+      mentionMemberKeys: ['owner@example.com'],
+      createdBy: { id: 'owner@example.com', displayName: 'Owner' },
+      createdAt: '2026-08-09T01:00:00.000Z',
+      updatedBy: { id: 'manager@example.com', displayName: 'Manager' },
+      updatedAt: '2026-08-09T02:00:00.000Z',
+      revision: 3,
+    },
+  })
+
+  expect(document).toMatchObject({
+    entityType: 'context-item',
+    entityId: 'team/core/issue/issue-1/context-item/context-1',
+    parentId: 'team/core/issue/issue-1',
+    title: 'Ship the release',
+    subtitle: 'decision',
+    status: 'accepted',
+    projectId: 'project-1',
+    creatorUserId: 'owner@example.com',
+    sourceRevision: 3,
+    url: '/projects/project-1/issues?teamId=core&issueId=issue-1&contextItemId=context-1',
   })
 })
 

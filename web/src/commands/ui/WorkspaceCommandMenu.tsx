@@ -103,6 +103,7 @@ const searchEntityLabelKeys: Record<SearchEntityType, MessageKey> = {
   project: 'search.entity.project',
   team: 'search.entity.team',
   comment: 'search.entity.comment',
+  'context-item': 'search.entity.context-item',
   file: 'search.entity.file',
   document: 'search.entity.document',
 }
@@ -607,6 +608,7 @@ function EntityGlyph({ entityType }: { entityType: SearchEntityType }) {
     project: '▦',
     team: '◉',
     comment: '“',
+    'context-item': '◆',
     file: '▤',
     document: '≡',
   }

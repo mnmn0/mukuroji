@@ -10,6 +10,10 @@ import {
 /** Exact application writer Lambda and execution-role construct prefixes. */
 const writerFunctions: ReadonlyArray<readonly [string, string]> = [
   [
+    'CollaborationProjectionFunction1AAC5764',
+    'CollaborationProjectionFunctionServiceRole',
+  ],
+  [
     'ListProjectTasksFunction2134AF4A',
     'ListProjectTasksFunctionServiceRole',
   ],
@@ -51,10 +55,6 @@ const writerFunctions: ReadonlyArray<readonly [string, string]> = [
 const configurationOnlyFunctions: ReadonlyArray<
   readonly [string, string]
 > = [
-  [
-    'CollaborationProjectionFunction1AAC5764',
-    'CollaborationProjectionFunctionServiceRole',
-  ],
   [
     'ConnectorPollFunctionB3EBB19B',
     'ConnectorPollFunctionServiceRole',
@@ -433,5 +433,28 @@ test('configuration-only strict compositions have no migration-state IAM access'
     expect(JSON.stringify(rolePolicies)).not.toContain(
       migrationStateTableId,
     );
+  }
+});
+
+test('collaboration projection can converge current context search documents', () => {
+  const roleLogicalId = requireResourceId(
+    'CollaborationProjectionFunctionServiceRole',
+    'AWS::IAM::Role',
+  );
+  const workspaceSearchTableId = requireResourceId(
+    'WorkspaceSearchTable',
+    'AWS::DynamoDB::Table',
+  );
+  const workspaceSearchTableArn = {
+    'Fn::GetAtt': [workspaceSearchTableId, 'Arn'],
+  };
+  const statements = requirePolicyStatementsForRole(roleLogicalId);
+
+  for (const action of ['dynamodb:PutItem', 'dynamodb:DeleteItem']) {
+    const statement = statements.find((candidate) =>
+      statementHasAction(candidate, action) &&
+      statementHasResource(candidate, workspaceSearchTableArn)
+    );
+    expect(readProperty(statement, 'Effect')).toBe('Allow');
   }
 });

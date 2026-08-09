@@ -17,6 +17,7 @@ import {
   SEARCH_SCHEMA_VERSION,
   WORK_ITEM_SCHEDULE_MIN_YEAR,
   type CreateSavedWorkspaceViewInput,
+  type CuratedContextItem,
   type DocumentBlock,
   type DocumentDetail,
   type DocumentRelationTarget,
@@ -425,6 +426,7 @@ const searchEntityTypes = new Set<SearchEntityType>([
   'project',
   'team',
   'comment',
+  'context-item',
   'file',
   'document',
 ])
@@ -841,6 +843,8 @@ export function createCommentWorkspaceSearchDocument(input: {
   issueId: string
   /** Canonical Comment ID です。 */
   commentId: string
+  /** Comment が属する root thread ID です。 */
+  rootCommentId?: string
   /** Comment の現在 Markdown 本文です。 */
   body: string
   /** Comment author の Workspace member key です。 */
@@ -851,7 +855,11 @@ export function createCommentWorkspaceSearchDocument(input: {
   updatedAt?: string
 }) {
   const parentId = `team/${input.teamId}/issue/${input.issueId}`
-  const query = new URLSearchParams({ issueId: input.issueId, commentId: input.commentId })
+  const query = new URLSearchParams({
+    issueId: input.issueId,
+    commentId: input.commentId,
+    rootCommentId: input.rootCommentId ?? input.commentId,
+  })
   return createWorkspaceSearchDocument({
     workspaceId: input.workspaceId,
     entityType: 'comment',
@@ -865,6 +873,42 @@ export function createCommentWorkspaceSearchDocument(input: {
     ...(input.creatorUserId ? { creatorUserId: input.creatorUserId } : {}),
     ...(input.createdAt ? { createdAt: input.createdAt } : {}),
     ...(input.updatedAt ? { updatedAt: input.updatedAt } : {}),
+  })
+}
+
+/** Curated context source を runtime/backfill 共通の search document へ変換します。 */
+export function createCuratedContextItemWorkspaceSearchDocument(input: {
+  /** Canonical Workspace ID です。 */
+  workspaceId: string
+  /** Curated context item の current canonical snapshot です。 */
+  item: CuratedContextItem
+  /** Parent Work Item の current assigned Project ID です。 */
+  projectId?: string
+}) {
+  const parentId = `team/${input.item.teamId}/issue/${input.item.workItemId}`
+  const query = new URLSearchParams({
+    teamId: input.item.teamId,
+    issueId: input.item.workItemId,
+    contextItemId: input.item.id,
+  })
+  return createWorkspaceSearchDocument({
+    workspaceId: input.workspaceId,
+    entityType: 'context-item',
+    entityId: `${parentId}/context-item/${input.item.id}`,
+    title: input.item.title,
+    subtitle: input.item.kind,
+    body: input.item.body,
+    url: input.projectId
+      ? `/projects/${encodeURIComponent(input.projectId)}/issues?${query.toString()}`
+      : `/teams/${encodeURIComponent(input.item.teamId)}/issues?${query.toString()}`,
+    teamId: input.item.teamId,
+    ...(input.projectId ? { projectId: input.projectId } : {}),
+    parentId,
+    creatorUserId: input.item.createdBy.id,
+    status: input.item.state,
+    createdAt: input.item.createdAt,
+    updatedAt: input.item.updatedAt,
+    sourceRevision: input.item.revision,
   })
 }
 

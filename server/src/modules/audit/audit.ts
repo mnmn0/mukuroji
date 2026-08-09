@@ -1502,7 +1502,9 @@ export function toAuditEventView(value: unknown) {
 const publicAuditMetadataFields = new Set([
   'adapter',
   'backfilled',
+  'acceptedCommentId',
   'commentId',
+  'contextItemId',
   'diffUnavailable',
   'kind',
   'legacyEventId',
@@ -1510,6 +1512,7 @@ const publicAuditMetadataFields = new Set([
   'legacySource',
   'memberKey',
   'projectId',
+  'rootCommentId',
   'teamId',
 ])
 

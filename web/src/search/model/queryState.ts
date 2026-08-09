@@ -37,6 +37,7 @@ const searchEntityTypes = [
   'project',
   'team',
   'comment',
+  'context-item',
   'file',
   'document',
 ] as const satisfies readonly SearchEntityType[]

@@ -16,6 +16,7 @@ export type SearchEntityType =
   | 'project'
   | 'team'
   | 'comment'
+  | 'context-item'
   | 'file'
   | 'document'
 

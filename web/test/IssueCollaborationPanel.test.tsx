@@ -3,7 +3,9 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { IssueCollaborationPanel } from '../src/issues/ui/IssueCollaborationPanel'
 import { mergeIssueComments } from '../src/issues/mutations/useIssueCollaboration'
 import {
+  acceptedResolutionHistoryFixtures,
   collaborationWorkspaceMemberFixtures,
+  curatedContextRevisionFixtures,
   issueCollaborationControllerFixture,
 } from '../src/issues/fixtures'
 import { fileArtifactsControllerFixture, imageFileFixture } from '../src/files/fixtures'
@@ -161,6 +163,7 @@ describe('IssueCollaborationPanel', () => {
           })),
         }}
         currentMemberKey="demo@example.com"
+        defaultTab="activity"
         locale="en"
         members={collaborationWorkspaceMemberFixtures}
       />,
@@ -183,5 +186,171 @@ describe('IssueCollaborationPanel', () => {
     ]) {
       expect(html).toContain(message)
     }
+  })
+
+  test('keeps accepted resolution summary visible above a collapsed resolved thread', () => {
+    const html = renderToStaticMarkup(
+      <IssueCollaborationPanel
+        controller={issueCollaborationControllerFixture}
+        currentMemberKey="demo@example.com"
+        locale="en"
+        members={collaborationWorkspaceMemberFixtures}
+      />,
+    )
+
+    expect(html).toContain('Accepted resolution')
+    expect(html).toContain('空状態の表示条件を含めてモバイルとデスクトップで確認する。')
+    expect(html).toContain('<details class="group">')
+    expect(html).toContain('2 comments')
+  })
+
+  test('renders accepted resolution history only from its independent cursor state', () => {
+    const html = renderToStaticMarkup(
+      <IssueCollaborationPanel
+        controller={{
+          ...issueCollaborationControllerFixture,
+          context: {
+            ...issueCollaborationControllerFixture.context,
+            acceptedResolutionHistory: {
+              hasLoadError: false,
+              hasMore: true,
+              isLoading: false,
+              isLoadingMore: false,
+              items: acceptedResolutionHistoryFixtures,
+              rootCommentId: 'comment-1',
+            },
+          },
+        }}
+        currentMemberKey="demo@example.com"
+        locale="en"
+        members={collaborationWorkspaceMemberFixtures}
+      />,
+    )
+
+    expect(html).toContain('Resolution history')
+    expect(html).toContain('旧案では説明文だけを更新する。')
+    expect(html).toContain('Superseded')
+    expect(html).toContain('Captured source reply · revision 1')
+    expect(html).toContain('Load earlier resolutions')
+  })
+
+  test('keeps revision loading, error, and empty states mutually exclusive', () => {
+    const controller = {
+      ...issueCollaborationControllerFixture,
+      context: {
+        ...issueCollaborationControllerFixture.context,
+        revisionHistory: {
+          contextItemId: 'context-action-1',
+          hasLoadError: false,
+          hasMore: false,
+          isLoading: true,
+          isLoadingMore: false,
+          items: [],
+        },
+      },
+    }
+    const html = renderToStaticMarkup(
+      <IssueCollaborationPanel
+        controller={controller}
+        currentMemberKey="demo@example.com"
+        defaultTab="decisions"
+        locale="en"
+        members={collaborationWorkspaceMemberFixtures}
+      />,
+    )
+
+    expect(html).toContain('Loading change history…')
+    expect(html).not.toContain('No earlier revisions are available.')
+    expect(html).not.toContain('Failed to load change history.')
+  })
+
+  test('renders permission-filtered evidence in immutable context revisions', () => {
+    const html = renderToStaticMarkup(
+      <IssueCollaborationPanel
+        controller={{
+          ...issueCollaborationControllerFixture,
+          context: {
+            ...issueCollaborationControllerFixture.context,
+            revisionHistory: {
+              contextItemId: 'context-action-1',
+              hasLoadError: false,
+              hasMore: true,
+              isLoading: false,
+              isLoadingMore: false,
+              items: curatedContextRevisionFixtures,
+            },
+          },
+        }}
+        currentMemberKey="demo@example.com"
+        defaultTab="decisions"
+        locale="en"
+        members={collaborationWorkspaceMemberFixtures}
+      />,
+    )
+
+    expect(html).toContain('顧客ヒアリングを確認する')
+    expect(html).toContain('Access revoked')
+    expect(html).toContain(
+      'The viewer no longer has permission to this source.',
+    )
+    expect(html).toContain(
+      'Quoted text, captured original, and permalink are hidden',
+    )
+    expect(html).toContain('Load earlier changes')
+  })
+
+  test('hides accepted-resolution mutations from a read-only root author', () => {
+    const controller = {
+      ...issueCollaborationControllerFixture,
+      capabilities: {
+        ...issueCollaborationControllerFixture.capabilities,
+        canComment: false,
+      },
+      comments: issueCollaborationControllerFixture.comments.map((comment) =>
+        comment.parentCommentId
+          ? comment
+          : {
+              ...comment,
+              acceptedResolutions: [],
+              resolvedAt: undefined,
+              resolvedByMemberKey: undefined,
+            },
+      ),
+      context: {
+        ...issueCollaborationControllerFixture.context,
+        capabilities: {
+          ...issueCollaborationControllerFixture.context.capabilities,
+          canAcceptResolution: false,
+        },
+      },
+    }
+    const html = renderToStaticMarkup(
+      <IssueCollaborationPanel
+        controller={controller}
+        currentMemberKey="demo@example.com"
+        locale="en"
+        members={collaborationWorkspaceMemberFixtures}
+      />,
+    )
+
+    expect(html).not.toContain('Accept as resolution')
+  })
+
+  test('never renders sensitive quote or permalink after source permission loss', () => {
+    const html = renderToStaticMarkup(
+      <IssueCollaborationPanel
+        controller={issueCollaborationControllerFixture}
+        currentMemberKey="demo@example.com"
+        defaultTab="sources"
+        locale="en"
+        members={collaborationWorkspaceMemberFixtures}
+      />,
+    )
+
+    expect(html).toContain('Access revoked')
+    expect(html).toContain('Research participant')
+    expect(html).toContain('you no longer have source permission')
+    expect(html).not.toContain('最初に何をすればよいか分かりませんでした。')
+    expect(html).not.toContain('https://example.com/messages/42')
   })
 })

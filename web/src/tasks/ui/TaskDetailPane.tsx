@@ -1,4 +1,5 @@
 import type {
+  CuratedContextSourceKind,
   PlanningSnapshot,
   WorkItemDependencyEndpoint,
   WorkItemConfiguration,
@@ -21,6 +22,11 @@ import {
   resolveWorkItemTitle,
 } from '../../work-items/model/workItemDisplay'
 import { IssueCollaborationPanel } from '../../issues/ui/IssueCollaborationPanel'
+import type { IssueCollaborationTab } from '../../issues/model/collaborationTabs'
+import {
+  createRelatedDocumentContextDraft,
+  type IssueContextDraft,
+} from '../../issues/model/contextDrafts'
 import type { ProjectDirectoryTeam, ProjectMember } from '../../projects/api'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import type { WorkspaceMember } from '../../workspace/api'
@@ -80,6 +86,18 @@ export type TaskDetailPaneProps = {
   focusedCommentId?: string
   /** Root comment containing the selected reply. */
   focusedRootCommentId?: string
+  /** Collaboration section selected by route state. */
+  collaborationTab?: IssueCollaborationTab
+  /** Curated context item selected by a deep link. */
+  focusedContextItemId?: string
+  /** Source provenance selected by a deep link. */
+  focusedSourceId?: string
+  /** Source category that disambiguates legacy source-ID deep links. */
+  focusedSourceKind?: CuratedContextSourceKind
+  /** Activity event selected by a deep link. */
+  focusedActivityEventId?: string
+  /** Persists collaboration tab selection in route state. */
+  onCollaborationTabChange?: (tab: IssueCollaborationTab) => void
   /** Whether the selected Work Item detail is loading. */
   isLoading: boolean
   /** Whether relation candidates are loading. */
@@ -135,12 +153,17 @@ export function TaskDetailPane({
   artifacts,
   canManageScheduleDependencyEndpoint,
   collaboration,
+  collaborationTab,
   configuration,
   currentWorkspaceMemberKey,
   detail,
   errorMessage,
   focusedCommentId,
+  focusedContextItemId,
+  focusedActivityEventId,
   focusedRootCommentId,
+  focusedSourceId,
+  focusedSourceKind,
   isLoading,
   isRelationCandidatesLoading,
   locale,
@@ -148,6 +171,7 @@ export function TaskDetailPane({
   onAddRelation,
   onCreateScheduleDependency,
   onClose,
+  onCollaborationTabChange,
   onDeleteRelation,
   onDeleteScheduleDependency,
   onUpdateIssue,
@@ -160,6 +184,8 @@ export function TaskDetailPane({
   workspaceMembers,
 }: TaskDetailPaneProps) {
   const [fieldErrors, setFieldErrors] = useState<Readonly<Record<string, string | undefined>>>({})
+  const [documentContextDraft, setDocumentContextDraft] =
+    useState<IssueContextDraft>()
   const scheduleFormId = useId()
   const hasMatchingIssueDetail = Boolean(
     task && detail?.issue.id === task.id && detail.issue.teamId === task.teamId,
@@ -562,20 +588,41 @@ export function TaskDetailPane({
       </div>
       <RelatedDocuments
         accessToken={accessToken}
+        onPromoteToContext={
+          collaboration?.context.capabilities.canCreate
+              ? (backlink, document, returnFocusId) => {
+                  setDocumentContextDraft(
+                    {
+                      ...createRelatedDocumentContextDraft(backlink, document),
+                      returnFocusId,
+                    },
+                  )
+                  onCollaborationTabChange?.('decisions')
+                }
+            : undefined
+        }
         t={t}
         targetId={task.teamId ? `team/${task.teamId}/issue/${task.id}` : undefined}
         targetKind="work-item"
       />
       {collaboration ? (
         <IssueCollaborationPanel
+          activeTab={collaborationTab}
           artifacts={artifacts}
+          contextDraft={documentContextDraft}
           key={`${task.teamId ?? ''}:${task.id}`}
           controller={collaboration}
           currentMemberKey={currentWorkspaceMemberKey}
           focusedCommentId={focusedCommentId}
+          focusedContextItemId={focusedContextItemId}
+          focusedActivityEventId={focusedActivityEventId}
           focusedRootCommentId={focusedRootCommentId}
+          focusedSourceId={focusedSourceId}
+          focusedSourceKind={focusedSourceKind}
           locale={locale}
           members={workspaceMembers}
+          onTabChange={onCollaborationTabChange}
+          onContextDraftConsumed={() => setDocumentContextDraft(undefined)}
         />
       ) : null}
     </aside>

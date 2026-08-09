@@ -32,12 +32,18 @@ import {
   type CanonicalWorkItem,
   type ConfirmedWorkItemSchedule,
   type ConfirmWorkItemScheduleChangeResponse,
+  type CreateCuratedContextItemRequest,
   type CreateWorkItemInput,
   type CreatePlanningDependencyInput,
   type CreateWorkItemScheduleDependencyInput,
   type CreatePlanningEntityInput,
   type CreateSavedWorkspaceViewInput,
   type CustomFieldDefinition,
+  type CuratedContextActorSnapshot,
+  type CuratedContextCapabilities,
+  type CuratedContextItem,
+  type CuratedContextQuote,
+  type CuratedContextSource,
   type DocumentRelationTarget,
   type RequestFormDraft,
   type RequestFormField,
@@ -69,6 +75,8 @@ import {
   type UpdateWorkItemScheduleDependencyInput,
   type UpdateProjectQuickAccessPreferencesInput,
   type UpdateSavedWorkspaceViewInput,
+  type UpdateCuratedContextItemRequest,
+  type SetAcceptedResolutionRequest,
   type WorkItemConfiguration,
   type WorkItemRelation,
   type WorkItemRelationType,
@@ -283,6 +291,8 @@ import {
 } from '../modules/notifications/adapter-in/http/notification-router'
 import {
   createCommentWorkspaceSearchDocument,
+  createCuratedContextItemWorkspaceSearchDocument,
+  createDocumentWorkspaceSearchBody,
   createDocumentWorkspaceSearchDocument,
   WorkspaceSearchError,
   createProjectWorkspaceSearchDocument,
@@ -7090,7 +7100,7 @@ routeApp.get('/api/teams/:teamId/issues/:issueId/activity', async (c) => {
       }),
     )
 
-    return c.json(toAuditEventPageView(page))
+    return c.json(toWorkItemActivityPageView(page))
   } catch (error) {
     if (error instanceof CognitoServiceError) {
       return toCognitoDirectoryErrorResponse(c, error)
@@ -7582,6 +7592,7 @@ routeApp.get('/api/teams/:teamId/issues/:issueId/collaboration', async (c) => {
           mentionMemberKeys: [],
           createdAt: comment.createdAt,
           updatedAt: comment.createdAt,
+          acceptedResolutions: [],
           reactions: [],
           source: 'legacy' as const,
           capabilities: {
@@ -7629,6 +7640,386 @@ routeApp.get('/api/teams/:teamId/issues/:issueId/collaboration', async (c) => {
         canReact: canWrite,
         canWatch: principal.workspaceRole !== 'guest',
       },
+    })
+  } catch (error) {
+    return toCollaborationErrorResponse(c, error)
+  }
+})
+
+/** Team-owned Work Item の curated context items を cursor page で返します。 */
+routeApp.get('/api/teams/:teamId/issues/:issueId/context-items', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  const teamId = c.req.param('teamId')
+  const issueId = c.req.param('issueId')
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  if (!teamId || !issueId) {
+    return c.json({ message: 'Team ID and issue ID are required.' }, 400)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+    const { context, detail } = await loadAuthorizedTeamIssue(principal, teamId, issueId, 'viewer')
+    const limitValue = c.req.query('limit')
+    const limit = limitValue === undefined ? undefined : Number(limitValue)
+    const entityKey = createWorkItemCollaborationEntityKey(
+      principal.directoryId,
+      teamId,
+      issueId,
+    )
+    const page = await workItemDependencies.collaboration.getCuratedContext({
+      entityKey,
+      limit,
+      cursor: c.req.query('cursor'),
+      capabilities: createCuratedContextCapabilities(principal, context, detail.issue),
+    })
+    return c.json({
+      ...page,
+      items: await reconcileCuratedContextSourcesForViewer(
+        principal,
+        teamId,
+        issueId,
+        entityKey,
+        page.items,
+      ),
+    })
+  } catch (error) {
+    return toCollaborationErrorResponse(c, error)
+  }
+})
+
+/** Curated context item の immutable revision history を cursor page で返します。 */
+routeApp.get(
+  '/api/teams/:teamId/issues/:issueId/context-items/:contextItemId/revisions',
+  async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    const teamId = c.req.param('teamId')
+    const issueId = c.req.param('issueId')
+    const contextItemId = c.req.param('contextItemId')
+
+    if (!accessToken) {
+      return c.json({ message: 'Bearer token is required.' }, 401)
+    }
+
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      await loadAuthorizedTeamIssue(principal, teamId, issueId, 'viewer')
+      const entityKey = createWorkItemCollaborationEntityKey(
+        principal.directoryId,
+        teamId,
+        issueId,
+      )
+      const limitValue = c.req.query('limit')
+      const page = await workItemDependencies.collaboration.getCuratedContextRevisions({
+        entityKey,
+        itemId: contextItemId,
+        limit: limitValue === undefined ? undefined : Number(limitValue),
+        cursor: c.req.query('cursor'),
+      })
+      return c.json({
+        ...page,
+        items: await reconcileCuratedContextSourcesForViewer(
+          principal,
+          teamId,
+          issueId,
+          entityKey,
+          page.items,
+        ),
+      })
+    } catch (error) {
+      return toCollaborationErrorResponse(c, error)
+    }
+  },
+)
+
+/** Team-owned Work Item に human-curated context item を追加します。 */
+routeApp.post('/api/teams/:teamId/issues/:issueId/context-items', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  const teamId = c.req.param('teamId')
+  const issueId = c.req.param('issueId')
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+    requireWorkspaceBusinessWrite(principal)
+    const request = readCreateCuratedContextItemRequest(await readJson<unknown>(c.req))
+    const { context, detail } = await loadAuthorizedTeamIssue(principal, teamId, issueId, 'member')
+    const entityKey = createWorkItemCollaborationEntityKey(principal.directoryId, teamId, issueId)
+    const auditContext = createApiMutationContext(c, principal, { teamId, issueId, ...request })
+    const replayed = await workItemDependencies.collaboration.getCuratedContextMutationReplay({
+      entityKey,
+      operation: 'create',
+      auditContext,
+    })
+    if (replayed) {
+      return c.json({
+        item: await requirePermissionSafeCuratedContextItem(
+          principal,
+          teamId,
+          issueId,
+          entityKey,
+          replayed,
+        ),
+      }, 201)
+    }
+    const mentionMemberKeys = request.mentionMemberKeys ?? []
+    await requireValidCommentMentions(
+      principal.directoryId,
+      mentionMemberKeys,
+      context,
+      detail.issue.assignedProjectId,
+    )
+    const projectEntityKey = detail.issue.assignedProjectId
+      ? createProjectCollaborationEntityKey(principal.directoryId, detail.issue.assignedProjectId)
+      : undefined
+    const source = request.source
+      ? await resolveCuratedContextSource(principal, teamId, issueId, entityKey, request.source)
+      : undefined
+    const item = await workItemDependencies.collaboration.createCuratedContextItem({
+      workspaceId: principal.directoryId,
+      teamId,
+      issueId,
+      workItemTitle: detail.issue.title,
+      entityKey,
+      projectId: detail.issue.assignedProjectId,
+      projectEntityKey,
+      actor: createCuratedContextActorSnapshot(principal),
+      kind: request.kind,
+      title: request.title,
+      body: request.body,
+      ...(source ? { source } : {}),
+      mentionMemberKeys,
+      ...(request.supersedesItemId ? { supersedesItemId: request.supersedesItemId } : {}),
+      notificationCandidates: mentionMemberKeys.map((memberKey) => ({
+        memberKey,
+        reason: 'mention',
+      })),
+      automaticWatcherCandidates: createTeamIssueAutomaticWatcherCandidates(detail.issue),
+      deepLink: createTeamIssueDeepLink(teamId, issueId),
+      auditContext,
+    })
+    await projectWorkspaceSearchDocumentBestEffort(
+      () => createCuratedContextItemWorkspaceSearchDocument({
+        workspaceId: principal.directoryId,
+        item,
+        projectId: detail.issue.assignedProjectId,
+      }),
+      'curated context creation',
+    )
+    if (request.supersedesItemId) {
+      await deleteWorkspaceSearchDocumentBestEffort(
+        principal.directoryId,
+        'context-item',
+        `${createTeamIssueAuditEntityId(teamId, issueId)}/context-item/${request.supersedesItemId}`,
+        'curated context supersession',
+      )
+    }
+    return c.json({
+      item: await requirePermissionSafeCuratedContextItem(
+        principal,
+        teamId,
+        issueId,
+        entityKey,
+        item,
+      ),
+    }, 201)
+  } catch (error) {
+    return toCollaborationErrorResponse(c, error)
+  }
+})
+
+/** Curated context item を optimistic revision 条件付きで更新します。 */
+routeApp.patch('/api/teams/:teamId/issues/:issueId/context-items/:contextItemId', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  const teamId = c.req.param('teamId')
+  const issueId = c.req.param('issueId')
+  const contextItemId = c.req.param('contextItemId')
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+    requireWorkspaceBusinessWrite(principal)
+    const request = readUpdateCuratedContextItemRequest(await readJson<unknown>(c.req))
+    const { context, detail } = await loadAuthorizedTeamIssue(principal, teamId, issueId, 'member')
+    const entityKey = createWorkItemCollaborationEntityKey(principal.directoryId, teamId, issueId)
+    const auditContext = createApiMutationContext(c, principal, {
+      teamId,
+      issueId,
+      contextItemId,
+      ...request,
+    })
+    const replayed = await workItemDependencies.collaboration.getCuratedContextMutationReplay({
+      entityKey,
+      operation: 'update',
+      itemId: contextItemId,
+      auditContext,
+    })
+    if (replayed) {
+      return c.json({
+        item: await requirePermissionSafeCuratedContextItem(
+          principal,
+          teamId,
+          issueId,
+          entityKey,
+          replayed,
+        ),
+      })
+    }
+    if (request.mentionMemberKeys) {
+      await requireValidCommentMentions(
+        principal.directoryId,
+        request.mentionMemberKeys,
+        context,
+        detail.issue.assignedProjectId,
+      )
+    }
+    const projectEntityKey = detail.issue.assignedProjectId
+      ? createProjectCollaborationEntityKey(principal.directoryId, detail.issue.assignedProjectId)
+      : undefined
+    const item = await workItemDependencies.collaboration.updateCuratedContextItem({
+      workspaceId: principal.directoryId,
+      teamId,
+      issueId,
+      workItemTitle: detail.issue.title,
+      entityKey,
+      projectId: detail.issue.assignedProjectId,
+      projectEntityKey,
+      itemId: contextItemId,
+      actor: createCuratedContextActorSnapshot(principal),
+      expectedRevision: request.expectedRevision,
+      ...(request.kind ? { kind: request.kind } : {}),
+      ...(request.state ? { state: request.state } : {}),
+      ...(request.title !== undefined ? { title: request.title } : {}),
+      ...(request.body !== undefined ? { body: request.body } : {}),
+      ...(request.mentionMemberKeys ? { mentionMemberKeys: request.mentionMemberKeys } : {}),
+      notificationCandidates: (request.mentionMemberKeys ?? []).map((memberKey) => ({
+        memberKey,
+        reason: 'mention',
+      })),
+      automaticWatcherCandidates: createTeamIssueAutomaticWatcherCandidates(detail.issue),
+      deepLink: createTeamIssueDeepLink(teamId, issueId),
+      auditContext,
+    })
+    if (item.state === 'superseded') {
+      await deleteWorkspaceSearchDocumentBestEffort(
+        principal.directoryId,
+        'context-item',
+        `${createTeamIssueAuditEntityId(teamId, issueId)}/context-item/${item.id}`,
+        'curated context update',
+      )
+    } else {
+      await projectWorkspaceSearchDocumentBestEffort(
+        () => createCuratedContextItemWorkspaceSearchDocument({
+          workspaceId: principal.directoryId,
+          item,
+          projectId: detail.issue.assignedProjectId,
+        }),
+        'curated context update',
+      )
+    }
+    return c.json({
+      item: await requirePermissionSafeCuratedContextItem(
+        principal,
+        teamId,
+        issueId,
+        entityKey,
+        item,
+      ),
+    })
+  } catch (error) {
+    return toCollaborationErrorResponse(c, error)
+  }
+})
+
+/** Root thread の accepted resolution history を cursor page で返します。 */
+routeApp.get(
+  '/api/teams/:teamId/issues/:issueId/comments/:rootCommentId/accepted-resolutions',
+  async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    const teamId = c.req.param('teamId')
+    const issueId = c.req.param('issueId')
+    const rootCommentId = c.req.param('rootCommentId')
+
+    if (!accessToken) {
+      return c.json({ message: 'Bearer token is required.' }, 401)
+    }
+
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      await loadAuthorizedTeamIssue(principal, teamId, issueId, 'viewer')
+      const limitValue = c.req.query('limit')
+      return c.json(await workItemDependencies.collaboration.getAcceptedResolutionHistory({
+        entityKey: createWorkItemCollaborationEntityKey(
+          principal.directoryId,
+          teamId,
+          issueId,
+        ),
+        rootCommentId,
+        limit: limitValue === undefined ? undefined : Number(limitValue),
+        cursor: c.req.query('cursor'),
+      }))
+    } catch (error) {
+      return toCollaborationErrorResponse(c, error)
+    }
+  },
+)
+
+/** Root thread の accepted resolution を選択・差し替え・再要約します。 */
+routeApp.put('/api/teams/:teamId/issues/:issueId/comments/:rootCommentId/accepted-resolution', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  const teamId = c.req.param('teamId')
+  const issueId = c.req.param('issueId')
+  const rootCommentId = c.req.param('rootCommentId')
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+    requireWorkspaceBusinessWrite(principal)
+    const request = readSetAcceptedResolutionRequest(await readJson<unknown>(c.req))
+    const { context, detail } = await loadAuthorizedTeamIssue(principal, teamId, issueId, 'viewer')
+    const comment = await workItemDependencies.collaboration.setAcceptedResolution({
+      workspaceId: principal.directoryId,
+      teamId,
+      issueId,
+      workItemTitle: detail.issue.title,
+      entityKey: createWorkItemCollaborationEntityKey(principal.directoryId, teamId, issueId),
+      projectId: detail.issue.assignedProjectId,
+      projectEntityKey: detail.issue.assignedProjectId
+        ? createProjectCollaborationEntityKey(principal.directoryId, detail.issue.assignedProjectId)
+        : undefined,
+      assigneeMemberKey: detail.issue.assigneeUserId,
+      rootCommentId,
+      actor: createCuratedContextActorSnapshot(principal),
+      expectedThreadVersion: request.expectedThreadVersion,
+      commentId: request.commentId,
+      summary: request.summary,
+      canModerate: canManageTeamIssueCollaboration(
+        principal,
+        context,
+        detail.issue.assignedProjectId,
+      ) || detail.issue.assigneeUserId === principal.userKey,
+      deepLink: createTeamIssueDeepLink(teamId, issueId),
+      auditContext: createApiMutationContext(c, principal, {
+        teamId,
+        issueId,
+        rootCommentId,
+        ...request,
+      }),
+    })
+    return c.json({
+      comment: toCollaborationCommentResponse(comment, principal, context, detail.issue),
     })
   } catch (error) {
     return toCollaborationErrorResponse(c, error)
@@ -12034,6 +12425,28 @@ function readAuditEventQuery(
 function toAuditEventPageView(page: AuditEventPage) {
   return {
     events: page.events.map(toAuditEventView),
+    ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
+  }
+}
+
+/**
+ * Creates the Work Item activity response with its Web-compatible actor identifier.
+ *
+ * @param page - Permission-filtered audit event page.
+ * @returns Activity page retaining the shared actor snapshot and stable actorUserId.
+ */
+function toWorkItemActivityPageView(page: AuditEventPage) {
+  return {
+    events: page.events.map((event) => {
+      const view = toAuditEventView(event)
+      const actorMemberKey = event.metadata?.actorMemberKey
+      return {
+        ...view,
+        actorUserId: typeof actorMemberKey === 'string' && actorMemberKey.trim()
+          ? actorMemberKey
+          : view.actor.id,
+      }
+    }),
     ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
   }
 }
@@ -17645,6 +18058,36 @@ async function resolveCurrentWorkspaceSearchScope(
         ),
       }
     }
+    if (document.entityType === 'context-item') {
+      const parsedContextItem = parseSearchCuratedContextItemEntityId(
+        document.entityId,
+        document.parentId,
+      )
+      if (
+        !parsedContextItem ||
+        parsedContextItem.teamId !== parsed.teamId ||
+        parsedContextItem.issueId !== parsed.issueId
+      ) {
+        return undefined
+      }
+      const item = await workItemDependencies.collaboration.getCuratedContextItemSnapshot({
+        entityKey: createWorkItemCollaborationEntityKey(
+          workspaceId,
+          parsed.teamId,
+          parsed.issueId,
+        ),
+        itemId: parsedContextItem.contextItemId,
+      })
+      if (!item || item.state === 'superseded') return undefined
+      return {
+        ...scope,
+        currentDocument: createCuratedContextItemWorkspaceSearchDocument({
+          workspaceId,
+          item,
+          projectId: detail.issue.assignedProjectId,
+        }),
+      }
+    }
     if (document.entityType !== 'comment') return scope
     const parsedComment = parseSearchCommentEntityId(document.entityId, document.parentId)
     if (
@@ -17703,6 +18146,31 @@ function parseSearchCommentEntityId(
   const expectedParentId = createTeamIssueAuditEntityId(match[1], match[2])
   return parentId === expectedParentId
     ? { teamId: match[1], issueId: match[2], commentId: match[3] }
+    : undefined
+}
+
+/**
+ * Parses a canonical curated-context search identity and verifies its parent.
+ *
+ * @param value - Indexed context-item entity identity.
+ * @param parentId - Indexed parent Work Item identity.
+ * @returns Parsed identifiers when the identity and parent agree.
+ */
+function parseSearchCuratedContextItemEntityId(
+  value: string,
+  parentId: string | undefined,
+) {
+  const match = value.match(
+    /^team\/([^/]+)\/issue\/([^/]+)\/context-item\/([^/]+)$/u,
+  )
+  if (!match?.[1] || !match[2] || !match[3]) return undefined
+  const expectedParentId = createTeamIssueAuditEntityId(match[1], match[2])
+  return parentId === expectedParentId
+    ? {
+        teamId: match[1],
+        issueId: match[2],
+        contextItemId: match[3],
+      }
     : undefined
 }
 
@@ -18963,6 +19431,907 @@ function canManageTeamIssueCollaboration(
   return access !== undefined && projectAccessAllows(access, 'manager')
 }
 
+/**
+ * Builds the permission flags returned with one curated-context page.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @param context - Current Team and Project authorization snapshot.
+ * @param issue - Current canonical Work Item snapshot.
+ * @returns Server-derived curated-context capabilities.
+ */
+function createCuratedContextCapabilities(
+  principal: WorkspacePrincipal,
+  context: TeamPermissionContext,
+  issue: TeamIssueResponseItem,
+): CuratedContextCapabilities {
+  const canWrite = canWriteTeamIssue(principal, context, issue.assignedProjectId)
+  const canAcceptResolution = principal.workspaceRole !== 'guest' && (
+    canManageTeamIssueCollaboration(
+      principal,
+      context,
+      issue.assignedProjectId,
+    ) || issue.assigneeUserId === principal.userKey
+  )
+  return {
+    canCreate: canWrite,
+    canEdit: canWrite,
+    canReplace: canWrite,
+    // Root authors are added per thread by the Web UI and rechecked by the mutation.
+    canAcceptResolution,
+  }
+}
+
+/**
+ * Captures a display-safe actor identity for collaboration history.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @returns Actor snapshot safe to retain in curated-context history.
+ */
+function createCuratedContextActorSnapshot(
+  principal: WorkspacePrincipal,
+): CuratedContextActorSnapshot {
+  return {
+    id: principal.userKey,
+    displayName: principal.workspaceMember.name?.trim() || principal.userKey,
+  }
+}
+
+/**
+ * Reads and validates the create payload for one curated-context item.
+ *
+ * @param value - Untrusted JSON request body.
+ * @returns Validated shared create request.
+ */
+function readCreateCuratedContextItemRequest(
+  value: unknown,
+): CreateCuratedContextItemRequest {
+  if (!isRecord(value)) {
+    throw invalidCuratedContextInput('Curated context request body must be an object.')
+  }
+  const mentionMemberKeys = Object.hasOwn(value, 'mentionMemberKeys')
+    ? readCommentMentionMemberKeys(value.mentionMemberKeys)
+    : undefined
+  const source = value.source === undefined
+    ? undefined
+    : readCuratedContextSource(value.source)
+  const supersedesItemId = value.supersedesItemId === undefined
+    ? undefined
+    : readCuratedContextIdentifier(value.supersedesItemId, 'Superseded context item ID')
+  return {
+    kind: readCuratedContextKind(value.kind),
+    title: readCuratedContextText(value.title, 'Curated context title', 200),
+    body: readCuratedContextText(value.body, 'Curated context body', 20_000),
+    ...(source ? { source } : {}),
+    ...(mentionMemberKeys ? { mentionMemberKeys } : {}),
+    ...(supersedesItemId ? { supersedesItemId } : {}),
+  }
+}
+
+/**
+ * Reads and validates a revision-fenced curated-context update payload.
+ *
+ * @param value - Untrusted JSON request body.
+ * @returns Validated shared update request.
+ */
+function readUpdateCuratedContextItemRequest(
+  value: unknown,
+): UpdateCuratedContextItemRequest {
+  if (!isRecord(value)) {
+    throw invalidCuratedContextInput('Curated context request body must be an object.')
+  }
+  const hasKind = Object.hasOwn(value, 'kind')
+  const hasState = Object.hasOwn(value, 'state')
+  const hasTitle = Object.hasOwn(value, 'title')
+  const hasBody = Object.hasOwn(value, 'body')
+  const hasSource = Object.hasOwn(value, 'source')
+  const hasMentions = Object.hasOwn(value, 'mentionMemberKeys')
+  if (hasSource) {
+    throw invalidCuratedContextInput(
+      'Use atomic replacement to change curated context source evidence.',
+    )
+  }
+  if (!hasKind && !hasState && !hasTitle && !hasBody && !hasMentions) {
+    throw invalidCuratedContextInput('At least one curated context field must be updated.')
+  }
+  return {
+    expectedRevision: readCuratedContextRevision(value.expectedRevision, 'Expected context revision'),
+    ...(hasKind ? { kind: readCuratedContextKind(value.kind) } : {}),
+    ...(hasState ? { state: readCuratedContextState(value.state) } : {}),
+    ...(hasTitle
+      ? { title: readCuratedContextText(value.title, 'Curated context title', 200) }
+      : {}),
+    ...(hasBody
+      ? { body: readCuratedContextText(value.body, 'Curated context body', 20_000) }
+      : {}),
+    ...(hasMentions
+      ? { mentionMemberKeys: readCommentMentionMemberKeys(value.mentionMemberKeys) }
+      : {}),
+  }
+}
+
+/**
+ * Reads and validates a thread accepted-resolution payload.
+ *
+ * @param value - Untrusted JSON request body.
+ * @returns Validated shared accepted-resolution request.
+ */
+function readSetAcceptedResolutionRequest(
+  value: unknown,
+): SetAcceptedResolutionRequest {
+  if (!isRecord(value)) {
+    throw invalidCuratedContextInput('Accepted resolution request body must be an object.')
+  }
+  return {
+    expectedThreadVersion: readCuratedContextRevision(
+      value.expectedThreadVersion,
+      'Expected thread version',
+    ),
+    commentId: readCuratedContextIdentifier(value.commentId, 'Accepted comment ID'),
+    summary: readCuratedContextText(value.summary, 'Accepted resolution summary', 20_000),
+  }
+}
+
+/**
+ * Parses provenance fields without trusting the client-provided source snapshot.
+ *
+ * @param value - Untrusted source payload.
+ * @returns Structurally validated source locator and requested quote.
+ */
+function readCuratedContextSource(value: unknown): CuratedContextSource {
+  if (!isRecord(value)) {
+    throw invalidCuratedContextInput('Curated context source must be an object.')
+  }
+  const kind = readCuratedContextSourceKind(value.kind)
+  const originalBody = value.originalBody === undefined
+    ? undefined
+    : readCuratedContextText(value.originalBody, 'Curated source original body', 20_000)
+  const availabilityReason = value.availabilityReason === undefined
+    ? undefined
+    : readCuratedContextText(value.availabilityReason, 'Curated source availability reason', 1_000)
+  return {
+    kind,
+    sourceId: readCuratedContextIdentifier(value.sourceId, 'Curated source ID'),
+    ...(value.containerId === undefined
+      ? {}
+      : { containerId: readCuratedContextIdentifier(value.containerId, 'Curated source container ID') }),
+    ...(originalBody ? { originalBody } : {}),
+    ...(value.quote === undefined ? {} : { quote: readCuratedContextQuote(value.quote) }),
+    ...(value.permalink === undefined
+      ? {}
+      : { permalink: readCuratedContextText(value.permalink, 'Curated source permalink', 2_000) }),
+    ...(value.actor === undefined ? {} : { actor: readCuratedContextActorSnapshot(value.actor) }),
+    occurredAt: readCuratedContextText(value.occurredAt, 'Curated source timestamp', 128),
+    ...(value.capturedRevision === undefined
+      ? {}
+      : { capturedRevision: readCuratedContextSourceRevision(value.capturedRevision) }),
+    ...(value.currentRevision === undefined
+      ? {}
+      : { currentRevision: readCuratedContextSourceRevision(value.currentRevision) }),
+    availability: readCuratedContextAvailability(value.availability),
+    ...(availabilityReason ? { availabilityReason } : {}),
+  }
+}
+
+/**
+ * Resolves a client source locator to a server-owned provenance snapshot.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @param teamId - Owning Team identifier.
+ * @param issueId - Owning Work Item identifier.
+ * @param entityKey - Canonical collaboration entity key.
+ * @param requested - Validated but untrusted source locator.
+ * @returns Permission-checked provenance captured from the current source of truth.
+ */
+async function resolveCuratedContextSource(
+  principal: WorkspacePrincipal,
+  teamId: string,
+  issueId: string,
+  entityKey: string,
+  requested: CuratedContextSource,
+): Promise<CuratedContextSource> {
+  if (requested.kind === 'external-chat') {
+    throw new CollaborationError(
+      503,
+      'ExternalChatSourceUnavailable',
+      'External chat source capture is unavailable until a permission-gated provider is configured.',
+    )
+  }
+
+  if (requested.kind === 'comment') {
+    const comment = await workItemDependencies.collaboration.getCommentSnapshot({
+      entityKey,
+      commentId: requested.sourceId,
+    })
+    if (!comment || comment.deletedAt) {
+      throw new CollaborationError(
+        409,
+        'CuratedContextSourceUnavailable',
+        'The selected comment is no longer available.',
+      )
+    }
+    const originalBody = captureCuratedContextSourceBody(comment.bodyMarkdown)
+    return {
+      kind: 'comment',
+      sourceId: comment.id,
+      containerId: comment.rootCommentId,
+      originalBody,
+      ...(requested.quote
+        ? { quote: resolveCuratedContextQuote(comment.bodyMarkdown, originalBody, requested.quote) }
+        : {}),
+      permalink: `${createTeamIssueDeepLink(teamId, issueId)}` +
+        `&commentId=${encodeURIComponent(comment.id)}` +
+        `&rootCommentId=${encodeURIComponent(comment.rootCommentId)}`,
+      actor: await resolveCuratedContextMemberActor(principal.directoryId, comment.authorMemberKey),
+      occurredAt: comment.createdAt,
+      capturedRevision: comment.version,
+      currentRevision: comment.version,
+      availability: 'available',
+    }
+  }
+
+  if (requested.kind === 'document') {
+    const searchContext = await createWorkspaceSearchContext(principal)
+    const document = await workItemDependencies.documents.get({
+        workspaceId: principal.directoryId,
+        documentId: requested.sourceId,
+        access: searchContext.documentAccess,
+      }).catch((error: unknown) => {
+      if (error instanceof DocumentError && (error.status === 403 || error.status === 404)) {
+        throw new CollaborationError(
+          404,
+          'CuratedContextSourceUnavailable',
+          'The selected document is not available to the current viewer.',
+          { cause: error },
+        )
+      }
+      throw error
+    })
+    const fullBody = createDocumentWorkspaceSearchBody(document)
+    const originalBody = captureCuratedContextSourceBody(fullBody)
+    return {
+      kind: 'document',
+      sourceId: document.id,
+      containerId: document.id,
+      ...(originalBody ? { originalBody } : {}),
+      ...(requested.quote
+        ? { quote: resolveCuratedContextQuote(fullBody, originalBody, requested.quote) }
+        : {}),
+      permalink: `/documents/${encodeURIComponent(document.id)}`,
+      actor: await resolveCuratedContextMemberActor(
+        principal.directoryId,
+        document.updatedByUserId,
+      ),
+      occurredAt: document.updatedAt,
+      capturedRevision: document.revision,
+      currentRevision: document.revision,
+      availability: 'available',
+    }
+  }
+
+  const event = await workspaceDependencies.auditEvents.getEvent(
+    principal.directoryId,
+    requested.sourceId,
+  )
+  if (
+    !event ||
+    isExpiredCuratedContextAuditEvent(event) ||
+    event.entity.type !== 'work-item' ||
+    event.entity.id !== createTeamIssueAuditEntityId(teamId, issueId)
+  ) {
+    throw new CollaborationError(
+      404,
+      'CuratedContextSourceNotFound',
+      'The selected activity event was not found in this Work Item.',
+    )
+  }
+  const eventBody = event.summary?.trim() || event.eventType
+  const originalBody = captureCuratedContextSourceBody(eventBody)
+  return {
+    kind: 'activity',
+    sourceId: event.eventId,
+    containerId: event.entity.id,
+    originalBody,
+    ...(requested.quote
+      ? { quote: resolveCuratedContextQuote(eventBody, originalBody, requested.quote) }
+      : {}),
+    permalink: `${createTeamIssueDeepLink(teamId, issueId)}` +
+      `&collaborationTab=activity&activityEventId=${encodeURIComponent(event.eventId)}`,
+    actor: {
+      id: event.actor.id,
+      displayName: event.actor.displayName?.trim() || event.actor.id,
+    },
+    occurredAt: event.occurredAt,
+    availability: 'available',
+  }
+}
+
+/**
+ * Reconciles one mutation response through the same permission-safe source overlay as reads.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @param teamId - Owning Team identifier.
+ * @param issueId - Owning Work Item identifier.
+ * @param entityKey - Canonical collaboration entity key.
+ * @param item - Canonical item returned by the collaboration store.
+ * @returns A permission-safe item for the current viewer.
+ */
+async function requirePermissionSafeCuratedContextItem(
+  principal: WorkspacePrincipal,
+  teamId: string,
+  issueId: string,
+  entityKey: string,
+  item: CuratedContextItem,
+): Promise<CuratedContextItem> {
+  const [reconciled] = await reconcileCuratedContextSourcesForViewer(
+    principal,
+    teamId,
+    issueId,
+    entityKey,
+    [item],
+  )
+  if (!reconciled) {
+    throw new CollaborationError(
+      503,
+      'InvalidCollaborationRecord',
+      'Curated context response could not be reconciled.',
+    )
+  }
+  return reconciled
+}
+
+/**
+ * Reconciles page sources against current permission-aware source state in bounded batches.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @param teamId - Owning Team identifier.
+ * @param issueId - Owning Work Item identifier.
+ * @param entityKey - Canonical collaboration entity key.
+ * @param items - Captured curated-context snapshots.
+ * @returns Items with current availability overlaid while retained provenance is preserved.
+ */
+async function reconcileCuratedContextSourcesForViewer(
+  principal: WorkspacePrincipal,
+  teamId: string,
+  issueId: string,
+  entityKey: string,
+  items: CuratedContextItem[],
+) {
+  const documentAccess = items.some((item) => item.source?.kind === 'document')
+    ? (await createWorkspaceSearchContext(principal)).documentAccess
+    : undefined
+  const reconciled: CuratedContextItem[] = []
+  const concurrency = 8
+  for (let offset = 0; offset < items.length; offset += concurrency) {
+    const page = items.slice(offset, offset + concurrency)
+    reconciled.push(...await Promise.all(page.map((item) =>
+      reconcileCuratedContextSourceForViewer(
+        principal,
+        teamId,
+        issueId,
+        entityKey,
+        item,
+        documentAccess,
+      )
+    )))
+  }
+  return reconciled
+}
+
+/**
+ * Overlays one context item's current source availability without replacing captured evidence.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @param teamId - Owning Team identifier.
+ * @param issueId - Owning Work Item identifier.
+ * @param entityKey - Canonical collaboration entity key.
+ * @param item - Captured curated-context item.
+ * @param documentAccess - Current viewer document authorization context when needed.
+ * @returns Context item with a permission-safe current availability overlay.
+ */
+async function reconcileCuratedContextSourceForViewer(
+  principal: WorkspacePrincipal,
+  teamId: string,
+  issueId: string,
+  entityKey: string,
+  item: CuratedContextItem,
+  documentAccess: DocumentAccessContext | undefined,
+): Promise<CuratedContextItem> {
+  const source = item.source
+  if (!source) return item
+
+  if (source.kind === 'external-chat') {
+    const retainedAvailability = source.availability === 'retention-expired' ||
+      source.availability === 'deleted'
+      ? source.availability
+      : 'permission-lost'
+    return {
+      ...item,
+      source: overlayCuratedContextSourceAvailability(
+        source,
+        retainedAvailability,
+        source.currentRevision,
+        retainedAvailability === 'permission-lost'
+          ? 'Current external chat access cannot be verified because no permission-gated provider is configured.'
+          : source.availabilityReason,
+        true,
+      ),
+    }
+  }
+
+  if (source.kind === 'comment') {
+    const comment = await workItemDependencies.collaboration.getCommentSnapshot({
+      entityKey,
+      commentId: source.sourceId,
+    })
+    if (!comment) {
+      return {
+        ...item,
+        source: overlayCuratedContextSourceAvailability(
+          source,
+          'deleted',
+          source.currentRevision,
+          'The source comment is no longer present; captured provenance remains available.',
+        ),
+      }
+    }
+    if (comment.deletedAt) {
+      return {
+        ...item,
+        source: overlayCuratedContextSourceAvailability(
+          source,
+          'deleted',
+          comment.version,
+          'The source comment was deleted after this provenance was captured.',
+        ),
+      }
+    }
+    const bodyWasEdited = source.originalBody === undefined
+      ? !sourceRevisionMatches(source.capturedRevision, comment.version)
+      : source.originalBody !== comment.bodyMarkdown
+    const availability = bodyWasEdited ? 'edited' : 'available'
+    return {
+      ...item,
+      source: overlayCuratedContextSourceAvailability(
+        source,
+        availability,
+        comment.version,
+        availability === 'edited'
+          ? 'The source comment was edited after this provenance was captured.'
+          : undefined,
+      ),
+    }
+  }
+
+  if (source.kind === 'document') {
+    if (!documentAccess) {
+      return {
+        ...item,
+        source: overlayCuratedContextSourceAvailability(
+          source,
+          'permission-lost',
+          source.currentRevision,
+          'Current document access could not be verified.',
+        ),
+      }
+    }
+    try {
+      const document = await workItemDependencies.documents.get({
+        workspaceId: principal.directoryId,
+        documentId: source.sourceId,
+        access: documentAccess,
+        includeArchived: true,
+      })
+      const availability = document.archivedAt
+        ? 'deleted'
+        : sourceRevisionMatches(source.capturedRevision, document.revision)
+          ? 'available'
+          : 'edited'
+      return {
+        ...item,
+        source: overlayCuratedContextSourceAvailability(
+          source,
+          availability,
+          document.revision,
+          availability === 'deleted'
+            ? 'The source document was archived after this provenance was captured.'
+            : availability === 'edited'
+              ? 'The source document changed after this provenance was captured.'
+              : undefined,
+        ),
+      }
+    } catch (error) {
+      if (!(error instanceof DocumentError) || (error.status !== 403 && error.status !== 404)) {
+        throw error
+      }
+      const availability = error.status === 403
+        ? 'permission-lost'
+        : error.code.toLowerCase().includes('retention')
+          ? 'retention-expired'
+          : 'deleted'
+      return {
+        ...item,
+        source: overlayCuratedContextSourceAvailability(
+          source,
+          availability,
+          source.currentRevision,
+          availability === 'permission-lost'
+            ? 'The current viewer no longer has permission to open the source document.'
+            : availability === 'retention-expired'
+              ? 'The source document is no longer available under its retention policy.'
+              : 'The source document was deleted or archived after this provenance was captured.',
+          true,
+        ),
+      }
+    }
+  }
+
+  const event = await workspaceDependencies.auditEvents.getEvent(
+    principal.directoryId,
+    source.sourceId,
+  )
+  const expectedEntityId = createTeamIssueAuditEntityId(teamId, issueId)
+  if (!event) {
+    return {
+      ...item,
+      source: overlayCuratedContextSourceAvailability(
+        source,
+        'retention-expired',
+        source.currentRevision,
+        'The source activity event is no longer available under audit retention.',
+        true,
+      ),
+    }
+  }
+  if (isExpiredCuratedContextAuditEvent(event)) {
+    return {
+      ...item,
+      source: overlayCuratedContextSourceAvailability(
+        source,
+        'retention-expired',
+        source.currentRevision,
+        'The source activity event is no longer available under audit retention.',
+        true,
+      ),
+    }
+  }
+  if (event.entity.type !== 'work-item' || event.entity.id !== expectedEntityId) {
+    return {
+      ...item,
+      source: overlayCuratedContextSourceAvailability(
+        source,
+        'deleted',
+        source.currentRevision,
+        'The source activity event no longer belongs to this Work Item.',
+      ),
+    }
+  }
+  return {
+    ...item,
+    source: overlayCuratedContextSourceAvailability(
+      source,
+      'available',
+      source.currentRevision,
+      undefined,
+    ),
+  }
+}
+
+/**
+ * Treats an audit row as unavailable as soon as its retention TTL is reached.
+ *
+ * DynamoDB may retain expired rows briefly after their TTL, so callers must not
+ * rely on physical deletion to enforce the audit retention boundary.
+ *
+ * @param event - Audit event returned by the strongly scoped store read.
+ * @param nowEpochSeconds - Current epoch seconds used for deterministic tests.
+ * @returns Whether the audit event is outside its retention window.
+ */
+function isExpiredCuratedContextAuditEvent(
+  event: { /** DynamoDB TTL epoch seconds. */ expiresAt?: number },
+  nowEpochSeconds = Math.floor(Date.now() / 1_000),
+) {
+  return event.expiresAt !== undefined && event.expiresAt <= nowEpochSeconds
+}
+
+/**
+ * Applies current availability fields while preserving every captured provenance field.
+ *
+ * @param source - Captured provenance snapshot.
+ * @param availability - Current permission-aware availability.
+ * @param currentRevision - Latest observed source-native revision.
+ * @param reason - Safe explanation for an edited or unavailable source.
+ * @param redactSensitive - Whether source text and navigation must be omitted even when the availability label is retained.
+ * @returns Provenance with current availability overlaid.
+ */
+function overlayCuratedContextSourceAvailability(
+  source: CuratedContextSource,
+  availability: CuratedContextSource['availability'],
+  currentRevision: CuratedContextSource['currentRevision'],
+  reason: string | undefined,
+  redactSensitive = availability === 'permission-lost',
+): CuratedContextSource {
+  const overlaid: CuratedContextSource = {
+    ...source,
+    availability,
+    ...(currentRevision === undefined ? {} : { currentRevision }),
+    availabilityReason: reason,
+  }
+  if (!redactSensitive) return overlaid
+  return {
+    kind: overlaid.kind,
+    sourceId: overlaid.sourceId,
+    ...(overlaid.containerId ? { containerId: overlaid.containerId } : {}),
+    ...(overlaid.actor ? { actor: overlaid.actor } : {}),
+    occurredAt: overlaid.occurredAt,
+    ...(overlaid.capturedRevision === undefined
+      ? {}
+      : { capturedRevision: overlaid.capturedRevision }),
+    ...(overlaid.currentRevision === undefined
+      ? {}
+      : { currentRevision: overlaid.currentRevision }),
+    availability: overlaid.availability,
+    ...(reason ? { availabilityReason: reason } : {}),
+  }
+}
+
+/**
+ * Compares source-native revisions without conflating absent and zero revisions.
+ *
+ * @param captured - Revision retained at capture time.
+ * @param current - Latest observed revision.
+ * @returns Whether both revisions represent the same source snapshot.
+ */
+function sourceRevisionMatches(
+  captured: CuratedContextSource['capturedRevision'],
+  current: string | number,
+) {
+  return captured !== undefined && String(captured) === String(current)
+}
+
+/**
+ * Resolves one retained member identity without requiring the member to remain active.
+ *
+ * @param workspaceId - Canonical Workspace identifier.
+ * @param memberKey - Stable Workspace member key.
+ * @returns Display-safe actor snapshot.
+ */
+async function resolveCuratedContextMemberActor(
+  workspaceId: string,
+  memberKey: string,
+): Promise<CuratedContextActorSnapshot> {
+  const member = await workspaceDependencies.workspaceAccess.getActiveMember(workspaceId, memberKey)
+  return {
+    id: memberKey,
+    displayName: member?.name?.trim() || member?.email || memberKey,
+  }
+}
+
+/**
+ * Retains a bounded original source body inside one DynamoDB context snapshot.
+ *
+ * @param body - Current permission-checked source text.
+ * @returns Bounded captured source text.
+ */
+function captureCuratedContextSourceBody(body: string) {
+  return body.slice(0, 20_000)
+}
+
+/**
+ * Verifies a requested quote against current source text and derives retained offsets.
+ *
+ * @param fullBody - Full current source body used for validation.
+ * @param capturedBody - Bounded body retained in the provenance snapshot.
+ * @param requested - Client-selected quote and optional range.
+ * @returns Server-verified quote snapshot.
+ */
+function resolveCuratedContextQuote(
+  fullBody: string,
+  capturedBody: string,
+  requested: CuratedContextQuote,
+): CuratedContextQuote {
+  const hintedStart = requested.startOffset
+  const hintedEnd = requested.endOffset
+  const hintedRangeMatches = hintedStart !== undefined &&
+    hintedEnd !== undefined &&
+    Number.isSafeInteger(hintedStart) &&
+    Number.isSafeInteger(hintedEnd) &&
+    hintedStart >= 0 &&
+    hintedEnd === hintedStart + requested.text.length &&
+    fullBody.slice(hintedStart, hintedEnd) === requested.text
+  const startOffset = hintedRangeMatches && hintedStart !== undefined
+    ? hintedStart
+    : fullBody.indexOf(requested.text)
+  if (startOffset < 0) {
+    throw invalidCuratedContextInput('Curated source quote no longer matches the source.')
+  }
+  const endOffset = startOffset + requested.text.length
+  if (endOffset > capturedBody.length) {
+    throw invalidCuratedContextInput('Curated source quote is outside the retained source range.')
+  }
+  return {
+    text: requested.text,
+    startOffset,
+    endOffset,
+  }
+}
+
+/**
+ * Reads a provenance quote from an untrusted JSON object.
+ *
+ * @param value - Untrusted quote payload.
+ * @returns Validated quote payload.
+ */
+function readCuratedContextQuote(value: unknown): CuratedContextQuote {
+  if (!isRecord(value)) {
+    throw invalidCuratedContextInput('Curated source quote must be an object.')
+  }
+  const startOffset = readOptionalCuratedContextOffset(value.startOffset, 'Quote start offset')
+  const endOffset = readOptionalCuratedContextOffset(value.endOffset, 'Quote end offset')
+  return {
+    text: readCuratedContextText(value.text, 'Curated source quote', 20_000),
+    ...(startOffset === undefined ? {} : { startOffset }),
+    ...(endOffset === undefined ? {} : { endOffset }),
+  }
+}
+
+/**
+ * Reads a display-safe actor snapshot from an untrusted source payload.
+ *
+ * @param value - Untrusted actor payload.
+ * @returns Validated actor snapshot.
+ */
+function readCuratedContextActorSnapshot(value: unknown): CuratedContextActorSnapshot {
+  if (!isRecord(value)) {
+    throw invalidCuratedContextInput('Curated source actor must be an object.')
+  }
+  return {
+    id: readCuratedContextIdentifier(value.id, 'Curated source actor ID'),
+    displayName: readCuratedContextText(value.displayName, 'Curated source actor name', 500),
+    ...(value.avatarUrl === undefined
+      ? {}
+      : { avatarUrl: readCuratedContextText(value.avatarUrl, 'Curated source actor avatar', 2_000) }),
+  }
+}
+
+/**
+ * Reads one optional non-negative quote offset.
+ *
+ * @param value - Untrusted offset.
+ * @param label - Safe validation label.
+ * @returns Validated offset or undefined.
+ */
+function readOptionalCuratedContextOffset(value: unknown, label: string) {
+  if (value === undefined) return undefined
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+    throw invalidCuratedContextInput(`${label} is invalid.`)
+  }
+  return value
+}
+
+/**
+ * Reads one positive optimistic revision.
+ *
+ * @param value - Untrusted revision.
+ * @param label - Safe validation label.
+ * @returns Positive integer revision.
+ */
+function readCuratedContextRevision(value: unknown, label: string) {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) {
+    throw invalidCuratedContextInput(`${label} must be a positive integer.`)
+  }
+  return value
+}
+
+/**
+ * Reads one curated-context identifier.
+ *
+ * @param value - Untrusted identifier.
+ * @param label - Safe validation label.
+ * @returns Trimmed bounded identifier.
+ */
+function readCuratedContextIdentifier(value: unknown, label: string) {
+  return readCuratedContextText(value, label, 512)
+}
+
+/**
+ * Normalizes one required curated-context text field.
+ *
+ * @param value - Untrusted text.
+ * @param label - Safe validation label.
+ * @param maximumLength - Maximum retained UTF-16 length.
+ * @returns Trimmed normalized text.
+ */
+function readCuratedContextText(value: unknown, label: string, maximumLength: number) {
+  if (typeof value !== 'string') {
+    throw invalidCuratedContextInput(`${label} must be text.`)
+  }
+  const normalized = value.replace(/\r\n?/gu, '\n').trim()
+  if (!normalized || normalized.length > maximumLength) {
+    throw invalidCuratedContextInput(`${label} is empty or too long.`)
+  }
+  return normalized
+}
+
+/**
+ * Reads a curated-context semantic kind.
+ *
+ * @param value - Untrusted kind.
+ * @returns Validated kind.
+ */
+function readCuratedContextKind(value: unknown) {
+  if (value === 'decision' || value === 'action' || value === 'risk' || value === 'context') {
+    return value
+  }
+  throw invalidCuratedContextInput('Curated context kind is invalid.')
+}
+
+/**
+ * Reads a curated-context lifecycle state.
+ *
+ * @param value - Untrusted state.
+ * @returns Validated state.
+ */
+function readCuratedContextState(value: unknown) {
+  if (value === 'active' || value === 'accepted' || value === 'completed') {
+    return value
+  }
+  throw invalidCuratedContextInput('Curated context state is invalid.')
+}
+
+/**
+ * Reads a curated-context source kind.
+ *
+ * @param value - Untrusted kind.
+ * @returns Validated source kind.
+ */
+function readCuratedContextSourceKind(value: unknown) {
+  if (value === 'comment' || value === 'external-chat' || value === 'document' || value === 'activity') {
+    return value
+  }
+  throw invalidCuratedContextInput('Curated context source kind is invalid.')
+}
+
+/**
+ * Reads a source availability state.
+ *
+ * @param value - Untrusted availability.
+ * @returns Validated source availability.
+ */
+function readCuratedContextAvailability(value: unknown) {
+  if (
+    value === 'available' ||
+    value === 'edited' ||
+    value === 'deleted' ||
+    value === 'permission-lost' ||
+    value === 'retention-expired'
+  ) {
+    return value
+  }
+  throw invalidCuratedContextInput('Curated source availability is invalid.')
+}
+
+/**
+ * Reads a string or positive integer source-native revision.
+ *
+ * @param value - Untrusted source revision.
+ * @returns Validated source-native revision.
+ */
+function readCuratedContextSourceRevision(value: unknown) {
+  if (typeof value === 'string' && value.trim()) return value.trim()
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) return value
+  throw invalidCuratedContextInput('Curated source revision is invalid.')
+}
+
+/**
+ * Creates a stable collaboration validation error.
+ *
+ * @param message - Safe client-facing validation message.
+ * @returns Stable validation error.
+ */
+function invalidCuratedContextInput(message: string) {
+  return new CollaborationError(400, 'InvalidCuratedContextInput', message)
+}
+
 function createTeamIssueAutomaticWatcherCandidates(
   issue: TeamIssueResponseItem,
 ): CollaborationAutomaticWatcherCandidate[] {
@@ -19011,6 +20380,7 @@ function toCollaborationCommentResponse(
     ...(comment.resolvedByMemberKey
       ? { resolvedByMemberKey: comment.resolvedByMemberKey }
       : {}),
+    acceptedResolutions: comment.acceptedResolutions,
     reactions: comment.reactions,
     capabilities: {
       canEdit: authorCanMutate && !comment.deletedAt,
@@ -19298,6 +20668,7 @@ function createCommentSearchDocument(
     teamId,
     issueId: issue.id,
     commentId: comment.id,
+    rootCommentId: comment.rootCommentId,
     body: comment.bodyMarkdown,
     creatorUserId: comment.authorMemberKey,
     createdAt: comment.createdAt,

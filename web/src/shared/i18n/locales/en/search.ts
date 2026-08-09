@@ -68,6 +68,7 @@ export const searchMessages = {
   'search.entity.project': 'Project',
   'search.entity.team': 'Team',
   'search.entity.comment': 'Comment',
+  'search.entity.context-item': 'Curated context',
   'search.entity.file': 'File',
   'search.entity.document': 'Document',
   'search.operator.equals': 'Equals',

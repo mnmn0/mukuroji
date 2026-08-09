@@ -1,4 +1,5 @@
 import type { TeamIssueComment } from './comments'
+import type { AcceptedResolution } from '@mukuroji/contracts'
 import { TeamIssuesApiError } from './errors'
 import type { TeamIssuePresence } from './presence'
 import type { TeamIssueWatchState } from './watch'
@@ -100,9 +101,100 @@ export async function getTeamIssueCollaboration(
 
   const queryString = query.toString()
 
-  return requestJson<TeamIssueCollaborationPage>(
+  const page = await requestJson<TeamIssueCollaborationPage>(
     `${createTeamIssuePath(teamId, issueId)}/collaboration${queryString ? `?${queryString}` : ''}`,
     accessToken,
+  )
+
+  return {
+    ...page,
+    comments: page.comments.map(normalizeAcceptedResolutionHistory),
+  }
+}
+
+/**
+ * Normalizes absent accepted-resolution history and rejects malformed audit data.
+ *
+ * @param comment - Comment returned by the collaboration API.
+ * @returns Comment with runtime-validated accepted resolution history.
+ */
+function normalizeAcceptedResolutionHistory(
+  comment: TeamIssueComment,
+): TeamIssueComment {
+  if (comment.acceptedResolutions === undefined) {
+    return { ...comment, acceptedResolutions: [] }
+  }
+
+  if (
+    !Array.isArray(comment.acceptedResolutions) ||
+    !comment.acceptedResolutions.every(isAcceptedResolution)
+  ) {
+    throw new TeamIssuesApiError(
+      502,
+      'The accepted resolution history response was invalid.',
+      'InvalidAcceptedResolutionResponse',
+    )
+  }
+
+  return comment
+}
+
+/**
+ * Validates one accepted-resolution history entry at the Web API boundary.
+ *
+ * @param value - Untrusted resolution candidate.
+ * @returns Whether the candidate contains the complete shared contract.
+ */
+export function isAcceptedResolution(
+  value: unknown,
+): value is AcceptedResolution {
+  if (typeof value !== 'object' || value === null) return false
+  if (!('acceptedBy' in value)) return false
+  const actor = value.acceptedBy
+
+  const commonFieldsAreValid = (
+    typeof actor === 'object' &&
+    actor !== null &&
+    'id' in actor &&
+    typeof actor.id === 'string' &&
+    'displayName' in actor &&
+    typeof actor.displayName === 'string' &&
+    (!('avatarUrl' in actor) || typeof actor.avatarUrl === 'string') &&
+    'id' in value &&
+    typeof value.id === 'string' &&
+    'sourceCommentId' in value &&
+    typeof value.sourceCommentId === 'string' &&
+    'sourceRootCommentId' in value &&
+    typeof value.sourceRootCommentId === 'string' &&
+    'capturedCommentRevision' in value &&
+    typeof value.capturedCommentRevision === 'number' &&
+    'capturedCommentBody' in value &&
+    typeof value.capturedCommentBody === 'string' &&
+    'summary' in value &&
+    typeof value.summary === 'string' &&
+    'acceptedAt' in value &&
+    typeof value.acceptedAt === 'string' &&
+    'state' in value &&
+    (value.state === 'accepted' || value.state === 'superseded')
+  )
+
+  if (!commonFieldsAreValid) return false
+  if (value.state === 'accepted') return true
+
+  return (
+    'supersededByResolutionId' in value &&
+    typeof value.supersededByResolutionId === 'string' &&
+    'supersededAt' in value &&
+    typeof value.supersededAt === 'string' &&
+    'supersededBy' in value &&
+    typeof value.supersededBy === 'object' &&
+    value.supersededBy !== null &&
+    'id' in value.supersededBy &&
+    typeof value.supersededBy.id === 'string' &&
+    'displayName' in value.supersededBy &&
+    typeof value.supersededBy.displayName === 'string' &&
+    (!('avatarUrl' in value.supersededBy) ||
+      typeof value.supersededBy.avatarUrl === 'string')
   )
 }
 

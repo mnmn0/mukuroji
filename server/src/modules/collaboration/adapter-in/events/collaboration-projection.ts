@@ -90,6 +90,8 @@ export type AuditProjectionEvent = {
   projectId?: string
   /** current comment ID です。 */
   commentId?: string
+  /** Durable Workspace search projection の対象 context item ID です。 */
+  contextItemId?: string
   /** File proofing cleanup の対象 file ID です。 */
   fileId?: string
   /** Reply が属する root comment ID です。 */
@@ -140,8 +142,32 @@ export interface DeletedFileCleanupDependencies {
 export interface CollaborationProjectionDependencies {
   /** Durable file delete cleanup を実行する port です。 */
   deletedFileCleanup: DeletedFileCleanupDependencies
+  /** Curated context の durable Workspace search projection を実行する port です。 */
+  curatedContextSearch: CuratedContextSearchProjectionDependencies
   /** Realtime invalidation を配送する port です。 */
   realtime: CollaborationRealtimePublisher
+}
+
+/** Curated context search projection へ渡す canonical scope です。 */
+export type CuratedContextSearchProjectionInput = {
+  /** Canonical Workspace ID です。 */
+  workspaceId: string
+  /** Parent Work Item の Team ID です。 */
+  teamId: string
+  /** Parent Work Item ID です。 */
+  issueId: string
+  /** Current assigned Project ID です。 */
+  projectId?: string
+  /** Mutated curated context item ID です。 */
+  contextItemId: string
+}
+
+/** Curated context search document の idempotent projection port です。 */
+export interface CuratedContextSearchProjectionDependencies {
+  /** Current canonical context item を search document へ upsert します。 */
+  upsertCurrent(input: CuratedContextSearchProjectionInput): Promise<void>
+  /** Superseded または orphaned context item の search document を削除します。 */
+  deleteCurrent(input: CuratedContextSearchProjectionInput): Promise<void>
 }
 
 /**
@@ -238,6 +264,100 @@ const documentClient = DynamoDBDocumentClient.from(dynamoDbClient, {
 })
 const s3Client = new S3Client({ region: getAwsRegion() })
 const projectionConsumerName = 'collaboration-projection-v1'
+const watcherNotificationEventTypes = new Set([
+  'comment.created',
+  'comment.replied',
+  'comment.edited',
+  'context-item.created',
+  'context-item.updated',
+  'accepted-resolution.selected',
+  'accepted-resolution.replaced',
+  'accepted-resolution.edited',
+])
+const curatedContextSearchUpsertEventTypes = new Set([
+  'context-item.created',
+  'context-item.updated',
+])
+const curatedContextSearchProjectionEventTypes = new Set([
+  ...curatedContextSearchUpsertEventTypes,
+  'context-item.superseded',
+])
+
+/**
+ * Reports whether one collaboration audit event should notify current scope watchers.
+ *
+ * @param eventType - Canonical append-only audit event type.
+ * @returns Whether watcher candidates must be resolved for the event.
+ */
+export function supportsCollaborationWatcherNotifications(eventType: string) {
+  return watcherNotificationEventTypes.has(eventType)
+}
+
+/**
+ * Projects one curated-context audit event into Workspace search.
+ *
+ * @param event - Parsed canonical audit event.
+ * @param dependencies - Idempotent search projection operations.
+ * @param workItemExists - Whether the parent Work Item still exists at projection time.
+ * @returns A promise that resolves after a relevant event is projected.
+ */
+export async function projectCuratedContextSearchEvent(
+  event: AuditProjectionEvent,
+  dependencies: CuratedContextSearchProjectionDependencies,
+  workItemExists = true,
+): Promise<void> {
+  if (!curatedContextSearchProjectionEventTypes.has(event.eventType)) {
+    return
+  }
+
+  const teamId = requireContextSearchProjectionIdentifier(event.teamId, 'team ID')
+  const issueId = requireContextSearchProjectionIdentifier(event.issueId, 'Work Item ID')
+  const contextItemId = requireContextSearchProjectionIdentifier(
+    event.contextItemId,
+    'context item ID',
+  )
+  const entityId = `team/${teamId}/issue/${issueId}`
+  const scopeKey = `${event.workspaceId}#work-item#${entityId}`
+  const targetId = `${entityId}/context-item/${contextItemId}`
+  if (
+    event.entityId !== entityId ||
+    event.scopeKey !== scopeKey ||
+    event.targetId !== targetId
+  ) {
+    throw new Error('Curated context search projection scope is invalid.')
+  }
+
+  const input: CuratedContextSearchProjectionInput = {
+    workspaceId: event.workspaceId,
+    teamId,
+    issueId,
+    contextItemId,
+    ...(event.projectId ? { projectId: event.projectId } : {}),
+  }
+  if (workItemExists && curatedContextSearchUpsertEventTypes.has(event.eventType)) {
+    await dependencies.upsertCurrent(input)
+    return
+  }
+  await dependencies.deleteCurrent(input)
+}
+
+/**
+ * Requires one non-empty identifier from curated-context audit metadata.
+ *
+ * @param value - Candidate identifier.
+ * @param label - Safe diagnostic label.
+ * @returns The validated identifier.
+ */
+function requireContextSearchProjectionIdentifier(
+  value: string | undefined,
+  label: string,
+) {
+  const normalized = value?.trim()
+  if (!normalized) {
+    throw new Error(`Curated context search projection ${label} is missing.`)
+  }
+  return normalized
+}
 
 /**
  * Audit stream batch を処理し、cleanup 失敗を record 単位の retry response に変換します。
@@ -287,13 +407,18 @@ async function processRecord(
   }
 
   const currentScope = await readCurrentWorkItemScope(event)
+  const scopedEvent = currentScope.checked
+    ? { ...event, projectId: currentScope.projectId }
+    : event
+  await projectCuratedContextSearchEvent(
+    scopedEvent,
+    dependencies.curatedContextSearch,
+    currentScope.exists,
+  )
   if (!currentScope.exists) {
     await markProjectionProcessed(event.eventId)
     return
   }
-  const scopedEvent = currentScope.checked
-    ? { ...event, projectId: currentScope.projectId }
-    : event
   const authorizationEvent = refreshScheduledNotificationEvent(scopedEvent, currentScope)
   if (!authorizationEvent) {
     await markProjectionProcessed(event.eventId)
@@ -557,7 +682,7 @@ function deduplicateMetadataKeys(keys: DeletedFileMetadataKey[]) {
 }
 
 async function readSubscribedWatcherCandidates(event: AuditProjectionEvent) {
-  if (!['comment.created', 'comment.replied', 'comment.edited'].includes(event.eventType)) {
+  if (!supportsCollaborationWatcherNotifications(event.eventType)) {
     return []
   }
 
@@ -1201,6 +1326,7 @@ export function parseAuditProjectionEvent(
     issueId: readString(metadata.issueId),
     projectId: readString(metadata.projectId),
     commentId: readString(metadata.commentId),
+    contextItemId: readString(metadata.contextItemId),
     fileId: readString(metadata.fileId),
     rootCommentId: readString(metadata.rootCommentId),
     notificationTitle: readString(metadata.notificationTitle) ?? readString(metadata.title),

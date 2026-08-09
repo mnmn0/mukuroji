@@ -489,6 +489,15 @@ test('workspace audit projects invitation lifecycle events without storage field
 
 test('issue activity authorizes the parent and forwards its pagination cursor', async () => {
   const queries: Array<Record<string, unknown>> = []
+  const activityEvent = createAuditEvent({
+    context: createAuditContext('issue-activity-read'),
+    eventType: 'work-item.updated',
+    entity: { type: 'work-item', id: 'team/core-team/issue/issue-1' },
+    target: { type: 'work-item', id: 'team/core-team/issue/issue-1' },
+    action: 'updated',
+    summary: 'Work Item was updated.',
+    expiresAt: 2_000_000_000,
+  })
   const projectDirectory = {
     async getProjectDirectory() {
       return {
@@ -550,7 +559,7 @@ test('issue activity authorizes the parent and forwards its pagination cursor', 
       },
       async query(input) {
         queries.push({ ...input })
-        return { events: [], nextCursor: 'next-activity-page' }
+        return { events: [activityEvent], nextCursor: 'next-activity-page' }
       },
     },
   })
@@ -565,7 +574,14 @@ test('issue activity authorizes the parent and forwards its pagination cursor', 
   )
 
   expect(response.status).toBe(200)
-  expect(await response.json()).toEqual({ events: [], nextCursor: 'next-activity-page' })
+  expect(await response.json()).toMatchObject({
+    events: [{
+      eventId: activityEvent.eventId,
+      actor: { id: actorUserId, displayName: 'Demo User' },
+      actorUserId,
+    }],
+    nextCursor: 'next-activity-page',
+  })
   const otherTeamResponse = await app.request(
     '/api/teams/design-team/issues/issue-1/activity?limit=2',
     {

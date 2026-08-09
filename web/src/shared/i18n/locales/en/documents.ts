@@ -171,6 +171,10 @@ export const documentsMessages = {
   'documents.related.empty': 'No documents reference this item yet.',
   'documents.related.error': 'Related documents could not be loaded.',
   'documents.related.openDocuments': 'All documents',
+  'documents.related.promoteToContext': 'Add to context',
+  'documents.related.promotingToContext': 'Opening…',
+  'documents.related.promoteToContextError':
+    'This document could not be opened with your current permission.',
   'documents.backlinks.openTarget': 'Open',
   'documents.context.comments': 'Comments',
   'documents.context.backlinks': 'Related',

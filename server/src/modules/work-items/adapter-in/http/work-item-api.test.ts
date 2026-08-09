@@ -735,6 +735,7 @@ test('loads team issue detail and creates comments after team access is confirme
           mentionMemberKeys: [],
           createdAt: '2026-06-08T02:00:00.000Z',
           updatedAt: '2026-06-08T02:00:00.000Z',
+          acceptedResolutions: [],
           reactions: [],
         }
         collaborationComments.push(comment)
@@ -1008,6 +1009,7 @@ test('returns persisted collaboration comments together with inert legacy commen
               mentionMemberKeys: [],
               createdAt: '2026-07-12T00:01:00.000Z',
               updatedAt: '2026-07-12T00:01:00.000Z',
+              acceptedResolutions: [],
               reactions: [],
             }],
             nextCursor: 'older-replies',
@@ -1025,6 +1027,7 @@ test('returns persisted collaboration comments together with inert legacy commen
             createdAt: '2026-07-12T00:00:00.000Z',
             updatedAt: '2026-07-12T00:00:30.000Z',
             editedAt: '2026-07-12T00:00:30.000Z',
+            acceptedResolutions: [],
             reactions: [],
           }],
         }
@@ -1089,6 +1092,7 @@ test('keeps a departed author in history while blocking deactivated member mutat
                 mentionMemberKeys: [],
                 createdAt: '2026-07-12T00:00:00.000Z',
                 updatedAt: '2026-07-12T00:00:00.000Z',
+                acceptedResolutions: [],
                 reactions: [],
               }],
           watch: {
@@ -1111,6 +1115,7 @@ test('keeps a departed author in history while blocking deactivated member mutat
           mentionMemberKeys: [],
           createdAt: '2026-06-08T01:00:00.000Z',
           updatedAt: '2026-06-08T01:00:00.000Z',
+          acceptedResolutions: [],
           reactions: [],
         }
       },
@@ -1167,6 +1172,7 @@ test('marks roots and replies in a resolved thread as non-replyable', async () =
     createdAt: '2026-07-12T00:00:00.000Z',
     updatedAt: '2026-07-12T00:01:00.000Z',
     resolvedAt: '2026-07-12T00:01:00.000Z',
+    acceptedResolutions: [],
     reactions: [],
   }
   setTestAppDependencies({
@@ -1306,6 +1312,7 @@ test('allows active system administrators to be mentioned without project member
             mentionMemberKeys: input.mentionMemberKeys ?? [],
             createdAt: '2026-07-12T00:00:00.000Z',
             updatedAt: '2026-07-12T00:00:00.000Z',
+            acceptedResolutions: [],
             reactions: [],
           }
         },
@@ -1347,6 +1354,7 @@ test('allows a Workspace owner with viewer access to moderate a comment', async 
           createdAt: '2026-07-12T00:00:00.000Z',
           updatedAt: '2026-07-12T00:01:00.000Z',
           deletedAt: '2026-07-12T00:01:00.000Z',
+          acceptedResolutions: [],
           reactions: [],
         }
       },
@@ -1387,6 +1395,7 @@ test('allows an assigned project manager to moderate another member comment', as
           createdAt: '2026-07-12T00:00:00.000Z',
           updatedAt: '2026-07-12T00:01:00.000Z',
           deletedAt: '2026-07-12T00:01:00.000Z',
+          acceptedResolutions: [],
           reactions: [],
         }
       },

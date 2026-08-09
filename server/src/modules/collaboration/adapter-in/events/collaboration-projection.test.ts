@@ -19,12 +19,15 @@ import {
   hasEligibleProjectAccess,
   mergeDeletedObjectTags,
   parseAuditProjectionEvent,
+  projectCuratedContextSearchEvent,
   processCollaborationProjectionBatch,
   publishRealtimeInvalidation,
   refreshScheduledNotificationEvent,
+  supportsCollaborationWatcherNotifications,
   tagDeletedFileObjectVersion,
   toSubscribedWatcherCandidates,
   type AuditProjectionEvent,
+  type CuratedContextSearchProjectionInput,
   type DeletedFileCleanupDependencies,
   type DeletedFileMetadataKey,
   type DeletedFileObjectVersion,
@@ -161,6 +164,183 @@ describe('collaboration projection pure helpers', () => {
     ], 'watcher')).toEqual([
       { memberKey: 'watcher@example.com', reason: 'watcher' },
     ])
+  })
+
+  test('resolves watchers for curated context and accepted-resolution audit events', () => {
+    for (const eventType of [
+      'context-item.created',
+      'context-item.updated',
+      'accepted-resolution.selected',
+      'accepted-resolution.replaced',
+      'accepted-resolution.edited',
+    ]) {
+      expect(supportsCollaborationWatcherNotifications(eventType)).toBeTrue()
+    }
+    expect(supportsCollaborationWatcherNotifications('context-item.superseded')).toBeFalse()
+    expect(supportsCollaborationWatcherNotifications('context-item.read')).toBeFalse()
+  })
+
+  test('dispatches created and updated context items to upsert and superseded items to delete', async () => {
+    const upserts: CuratedContextSearchProjectionInput[] = []
+    const deletions: CuratedContextSearchProjectionInput[] = []
+    const dependencies = {
+      async upsertCurrent(input: CuratedContextSearchProjectionInput) {
+        upserts.push(input)
+      },
+      async deleteCurrent(input: CuratedContextSearchProjectionInput) {
+        deletions.push(input)
+      },
+    }
+    const contextEventScope = {
+      teamId: 'core',
+      issueId: 'example',
+      projectId: 'platform',
+      contextItemId: 'context-1',
+      targetId: 'team/core/issue/example/context-item/context-1',
+    }
+
+    await projectCuratedContextSearchEvent(
+      createProjectionEvent({ ...contextEventScope, eventType: 'context-item.created' }),
+      dependencies,
+    )
+    await projectCuratedContextSearchEvent(
+      createProjectionEvent({ ...contextEventScope, eventType: 'context-item.updated' }),
+      dependencies,
+    )
+    await projectCuratedContextSearchEvent(
+      createProjectionEvent({ ...contextEventScope, eventType: 'context-item.superseded' }),
+      dependencies,
+    )
+
+    expect(upserts).toEqual([
+      {
+        workspaceId: 'workspace-1',
+        teamId: 'core',
+        issueId: 'example',
+        projectId: 'platform',
+        contextItemId: 'context-1',
+      },
+      {
+        workspaceId: 'workspace-1',
+        teamId: 'core',
+        issueId: 'example',
+        projectId: 'platform',
+        contextItemId: 'context-1',
+      },
+    ])
+    expect(deletions).toEqual([{
+      workspaceId: 'workspace-1',
+      teamId: 'core',
+      issueId: 'example',
+      projectId: 'platform',
+      contextItemId: 'context-1',
+    }])
+  })
+
+  test('converges orphaned created and updated context projections by deleting them', async () => {
+    const upserts: CuratedContextSearchProjectionInput[] = []
+    const deletions: CuratedContextSearchProjectionInput[] = []
+    const dependencies = {
+      async upsertCurrent(input: CuratedContextSearchProjectionInput) {
+        upserts.push(input)
+      },
+      async deleteCurrent(input: CuratedContextSearchProjectionInput) {
+        deletions.push(input)
+      },
+    }
+    const contextEventScope = {
+      teamId: 'core',
+      issueId: 'example',
+      contextItemId: 'context-1',
+      targetId: 'team/core/issue/example/context-item/context-1',
+    }
+
+    await projectCuratedContextSearchEvent(
+      createProjectionEvent({ ...contextEventScope, eventType: 'context-item.created' }),
+      dependencies,
+      false,
+    )
+    await projectCuratedContextSearchEvent(
+      createProjectionEvent({ ...contextEventScope, eventType: 'context-item.updated' }),
+      dependencies,
+      false,
+    )
+
+    expect(upserts).toEqual([])
+    expect(deletions).toEqual([
+      {
+        workspaceId: 'workspace-1',
+        teamId: 'core',
+        issueId: 'example',
+        contextItemId: 'context-1',
+      },
+      {
+        workspaceId: 'workspace-1',
+        teamId: 'core',
+        issueId: 'example',
+        contextItemId: 'context-1',
+      },
+    ])
+  })
+
+  test('propagates context search failures so the stream record remains retryable', async () => {
+    const projectionFailure = new Error('Workspace search is unavailable.')
+    const event = createProjectionEvent({
+      eventType: 'context-item.created',
+      teamId: 'core',
+      issueId: 'example',
+      contextItemId: 'context-1',
+      targetId: 'team/core/issue/example/context-item/context-1',
+    })
+
+    await expect(projectCuratedContextSearchEvent(event, {
+      async upsertCurrent() {
+        throw projectionFailure
+      },
+      async deleteCurrent() {},
+    })).rejects.toBe(projectionFailure)
+
+    await expect(projectCuratedContextSearchEvent(
+      { ...event, eventType: 'context-item.superseded' },
+      {
+        async upsertCurrent() {},
+        async deleteCurrent() {
+          throw projectionFailure
+        },
+      },
+    )).rejects.toBe(projectionFailure)
+  })
+
+  test('fails closed when curated context audit scope metadata is incomplete', async () => {
+    await expect(projectCuratedContextSearchEvent(createProjectionEvent({
+      eventType: 'context-item.updated',
+      teamId: 'core',
+      issueId: 'example',
+      targetId: 'team/core/issue/example/context-item/context-1',
+    }), {
+      async upsertCurrent() {},
+      async deleteCurrent() {},
+    })).rejects.toThrow('context item ID is missing')
+  })
+
+  test('parses curated context item identity from audit metadata', () => {
+    expect(parseAuditProjectionEvent({
+      eventId: 'evt-context-1',
+      eventType: 'context-item.created',
+      workspaceId: 'workspace-1',
+      occurredAt: '2026-07-12T12:00:00.000Z',
+      entityType: 'work-item',
+      entityId: 'team/core/issue/example',
+      target: {
+        type: 'context-item',
+        id: 'team/core/issue/example/context-item/context-1',
+      },
+      metadata: {
+        teamId: 'core',
+        issueId: 'example',
+        contextItemId: 'context-1',
+      },
+    })).toMatchObject({ contextItemId: 'context-1' })
   })
 
   test('parses actor member metadata and preserves suppressed outbox events', () => {
@@ -381,6 +561,10 @@ describe('collaboration projection pure helpers', () => {
       }],
     }, {
       deletedFileCleanup: dependencies,
+      curatedContextSearch: {
+        async upsertCurrent() {},
+        async deleteCurrent() {},
+      },
       realtime: { async publish() {} },
     })
 

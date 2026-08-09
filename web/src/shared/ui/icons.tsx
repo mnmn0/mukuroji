@@ -50,3 +50,55 @@ export function ChevronIcon({ className = iconClass }: IconProps) {
     </svg>
   )
 }
+
+/**
+ * Renders the shared notification-watch icon.
+ *
+ * @param props - Optional class name and filled state.
+ * @returns A decorative bell icon.
+ */
+export function WatchIcon({
+  className = iconClass,
+  filled = false,
+}: IconProps & { filled?: boolean }) {
+  return (
+    <svg
+      aria-hidden="true"
+      className={`${className} ${filled ? 'fill-current' : 'fill-none'}`}
+      viewBox="0 0 24 24"
+    >
+      <path d="M18 8a6 6 0 1 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4" />
+    </svg>
+  )
+}
+
+/**
+ * Renders the shared completed or accepted-state icon.
+ *
+ * @param props - Optional class name.
+ * @returns A decorative check enclosed by a circle.
+ */
+export function CheckCircleIcon({ className = iconClass }: IconProps) {
+  return (
+    <svg aria-hidden="true" className={className} viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="9" />
+      <path d="m8 12 2.5 2.5L16.5 9" />
+    </svg>
+  )
+}
+
+/**
+ * Renders the shared external-link icon.
+ *
+ * @param props - Optional class name.
+ * @returns A decorative arrow leaving a square.
+ */
+export function ExternalLinkIcon({ className = iconClass }: IconProps) {
+  return (
+    <svg aria-hidden="true" className={className} viewBox="0 0 24 24">
+      <path d="M14 5h5v5" />
+      <path d="m12 12 7-7" />
+      <path d="M19 13v6H5V5h6" />
+    </svg>
+  )
+}

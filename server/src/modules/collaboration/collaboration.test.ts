@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test'
 import type { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
+import type { CuratedContextSource } from '@mukuroji/contracts'
 import { createMutationAuditContext } from '../audit/audit'
 import {
   CollaborationError,
@@ -39,6 +40,202 @@ function createClient(
     lowLevelClient,
     false,
   )
+}
+
+/**
+ * Tests whether a value supports safe property access in the in-memory DynamoDB test transport.
+ *
+ * @param value - Unknown command fragment.
+ * @returns Whether the value is a record.
+ */
+function isTestRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * Creates a DynamoDB transaction cancellation used by optimistic-lock tests.
+ *
+ * @returns An AWS-shaped conditional transaction error.
+ */
+function createConditionalTransactionError() {
+  return Object.assign(new Error('conditional transaction failed'), {
+    name: 'TransactionCanceledException',
+    CancellationReasons: [{ Code: 'ConditionalCheckFailed' }],
+  })
+}
+
+/**
+ * Creates a small in-memory DocumentClient transport for collaboration store tests.
+ *
+ * @param seed - Physical collaboration rows available before the first command.
+ * @param auditTableName - Optional append-only audit table used by mutations.
+ * @returns Stateful client, rows, transaction log, and a comment-race hook.
+ */
+function createCollaborationMemory(
+  seed: Array<Record<string, unknown>> = [],
+  auditTableName?: string,
+) {
+  const rows = new Map<string, Record<string, unknown>>()
+  const transactions: Array<Record<string, unknown>> = []
+  let commentToMutateBeforeNextTransaction: string | undefined
+  let reportCommittedTransactionAsConditionalFailure = false
+  /** Creates the compound key used by the in-memory row map. */
+  const storageKey = (entityKey: string, recordKey: string) => `${entityKey}\0${recordKey}`
+  for (const row of seed) {
+    if (typeof row.entityKey === 'string' && typeof row.recordKey === 'string') {
+      rows.set(storageKey(row.entityKey, row.recordKey), row)
+    }
+  }
+
+  const client = createClient(async (command) => {
+    const input = readCommandInput(command)
+    if (isTestRecord(input.Key) &&
+        typeof input.Key.entityKey === 'string' &&
+        typeof input.Key.recordKey === 'string') {
+      return { Item: rows.get(storageKey(input.Key.entityKey, input.Key.recordKey)) }
+    }
+
+    if (typeof input.KeyConditionExpression === 'string' &&
+        isTestRecord(input.ExpressionAttributeValues) &&
+        typeof input.ExpressionAttributeValues[':entityKey'] === 'string' &&
+        typeof input.ExpressionAttributeValues[':prefix'] === 'string') {
+      const entityKey = input.ExpressionAttributeValues[':entityKey']
+      const prefix = input.ExpressionAttributeValues[':prefix']
+      const ordered = [...rows.values()]
+        .filter((row) => row.entityKey === entityKey &&
+          typeof row.recordKey === 'string' && row.recordKey.startsWith(prefix))
+        .sort((left, right) => String(left.recordKey).localeCompare(String(right.recordKey)))
+      if (input.ScanIndexForward === false) {
+        ordered.reverse()
+      }
+      const startRecordKey = isTestRecord(input.ExclusiveStartKey) &&
+          typeof input.ExclusiveStartKey.recordKey === 'string'
+        ? input.ExclusiveStartKey.recordKey
+        : undefined
+      const startIndex = startRecordKey
+        ? Math.max(0, ordered.findIndex((row) => row.recordKey === startRecordKey) + 1)
+        : 0
+      const limit = typeof input.Limit === 'number' ? input.Limit : ordered.length
+      const items = ordered.slice(startIndex, startIndex + limit)
+      const hasMore = startIndex + items.length < ordered.length
+      const last = items.at(-1)
+      return {
+        Items: items,
+        ...(hasMore && last && typeof last.recordKey === 'string'
+          ? { LastEvaluatedKey: { entityKey, recordKey: last.recordKey } }
+          : {}),
+      }
+    }
+
+    if (!Array.isArray(input.TransactItems)) {
+      return {}
+    }
+    transactions.push(input)
+    if (commentToMutateBeforeNextTransaction) {
+      const key = storageKey(
+        'workspace#one#work-item#team/team-a/issue/issue-1',
+        `COMMENT#${commentToMutateBeforeNextTransaction}`,
+      )
+      const current = rows.get(key)
+      if (current && typeof current.version === 'number') {
+        rows.set(key, { ...current, version: current.version + 1, bodyMarkdown: 'Changed concurrently' })
+      }
+      commentToMutateBeforeNextTransaction = undefined
+    }
+
+    for (const transactionItem of input.TransactItems) {
+      if (!isTestRecord(transactionItem)) continue
+      const condition = isTestRecord(transactionItem.ConditionCheck)
+        ? transactionItem.ConditionCheck
+        : undefined
+      if (condition?.TableName === 'collaboration-table' && isTestRecord(condition.Key) &&
+          typeof condition.Key.entityKey === 'string' &&
+          typeof condition.Key.recordKey === 'string') {
+        const current = rows.get(storageKey(condition.Key.entityKey, condition.Key.recordKey))
+        const expression = typeof condition.ConditionExpression === 'string'
+          ? condition.ConditionExpression
+          : ''
+        const values = isTestRecord(condition.ExpressionAttributeValues)
+          ? condition.ExpressionAttributeValues
+          : {}
+        if ((expression.includes('attribute_exists') && !current) ||
+            (expression.includes('attribute_not_exists(deletedAt)') && current?.deletedAt) ||
+            (typeof values[':capturedVersion'] === 'number' &&
+              current?.version !== values[':capturedVersion'])) {
+          throw createConditionalTransactionError()
+        }
+      }
+
+      const put = isTestRecord(transactionItem.Put) ? transactionItem.Put : undefined
+      if (put?.TableName !== 'collaboration-table' || !isTestRecord(put.Item) ||
+          typeof put.Item.entityKey !== 'string' || typeof put.Item.recordKey !== 'string') {
+        continue
+      }
+      const current = rows.get(storageKey(put.Item.entityKey, put.Item.recordKey))
+      const expression = typeof put.ConditionExpression === 'string' ? put.ConditionExpression : ''
+      const values = isTestRecord(put.ExpressionAttributeValues)
+        ? put.ExpressionAttributeValues
+        : {}
+      if ((expression.includes('attribute_not_exists(entityKey)') && current) ||
+          (typeof values[':expectedRevision'] === 'number' &&
+            current?.revision !== values[':expectedRevision']) ||
+          (typeof values[':expectedVersion'] === 'number' &&
+            current?.version !== values[':expectedVersion'])) {
+        throw createConditionalTransactionError()
+      }
+    }
+
+    for (const transactionItem of input.TransactItems) {
+      if (!isTestRecord(transactionItem) || !isTestRecord(transactionItem.Put)) continue
+      const put = transactionItem.Put
+      if (put.TableName === 'collaboration-table' && isTestRecord(put.Item) &&
+          typeof put.Item.entityKey === 'string' && typeof put.Item.recordKey === 'string') {
+        rows.set(storageKey(put.Item.entityKey, put.Item.recordKey), put.Item)
+      }
+    }
+    if (reportCommittedTransactionAsConditionalFailure) {
+      reportCommittedTransactionAsConditionalFailure = false
+      throw createConditionalTransactionError()
+    }
+    return {}
+  }, auditTableName)
+
+  return {
+    client,
+    rows,
+    transactions,
+    /** Mutates one comment immediately before the next transaction evaluates its conditions. */
+    mutateCommentBeforeNextTransaction(commentId: string) {
+      commentToMutateBeforeNextTransaction = commentId
+    },
+    /** Simulates an identical concurrent winner committing before this caller observes a conflict. */
+    reportNextCommittedTransactionAsConditionalFailure() {
+      reportCommittedTransactionAsConditionalFailure = true
+    },
+  }
+}
+
+/**
+ * Creates a deterministic audit context for an in-memory collaboration mutation.
+ *
+ * @param idempotencyKey - Logical mutation identifier.
+ * @param occurredAt - Mutation timestamp.
+ * @param body - Optional request body included in the fingerprint.
+ * @returns Mutation audit context.
+ */
+function createTestAuditContext(
+  idempotencyKey: string,
+  occurredAt: string,
+  body?: unknown,
+) {
+  return createMutationAuditContext({
+    workspaceId: 'workspace#one',
+    actor: { id: 'author@example.com', kind: 'user', displayName: 'Author' },
+    idempotencyKey,
+    occurredAt,
+    request: { method: 'POST', path: '/collaboration-test', body },
+    source: { kind: 'api' },
+  })
 }
 
 test('creates stable collaboration keys for Work Item and project scopes', () => {
@@ -831,4 +1028,1203 @@ test('upserts and removes a presence lease with a normalized member key', async 
       },
     }],
   })
+})
+
+test('pages curated context newest-first with scope-bound cursors and capabilities', async () => {
+  const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
+  const actor = { id: 'author@example.com', displayName: 'Author' }
+  const contextRows = [
+    { id: 'ctx-1', createdAt: '2026-07-12T00:00:00.000Z', title: 'First' },
+    { id: 'ctx-2', createdAt: '2026-07-12T00:01:00.000Z', title: 'Second' },
+  ].flatMap(({ id, createdAt, title }) => [{
+    entityKey,
+    recordKey: `CONTEXT#${id}`,
+    entryType: 'context',
+    schemaVersion: 1,
+    id,
+    teamId: 'team-a',
+    workItemId: 'issue-1',
+    kind: 'decision',
+    state: 'active',
+    title,
+    body: `${title} body`,
+    mentionMemberKeys: [],
+    createdBy: actor,
+    createdAt,
+    updatedBy: actor,
+    updatedAt: createdAt,
+    revision: 1,
+  }, {
+    entityKey,
+    recordKey: `CONTEXT_ORDER#${createdAt}#${id}`,
+    entryType: 'context-order',
+    itemId: id,
+    createdAt,
+  }])
+  const memory = createCollaborationMemory(contextRows)
+  const capabilities = {
+    canCreate: true,
+    canEdit: true,
+    canReplace: false,
+    canAcceptResolution: true,
+  }
+
+  const first = await memory.client.getCuratedContext({ entityKey, limit: 1, capabilities })
+  expect(first).toMatchObject({
+    schemaVersion: 1,
+    items: [{ id: 'ctx-2', title: 'Second' }],
+    capabilities,
+  })
+  expect(first.nextCursor).toBeString()
+  const second = await memory.client.getCuratedContext({
+    entityKey,
+    limit: 1,
+    cursor: first.nextCursor,
+    capabilities,
+  })
+  expect(second.items.map((item) => item.id)).toEqual(['ctx-1'])
+  expect(second.nextCursor).toBeUndefined()
+
+  await expect(memory.client.getCuratedContext({
+    entityKey: createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-2'),
+    cursor: first.nextCursor,
+    capabilities,
+  })).rejects.toMatchObject({ status: 400, code: 'InvalidCollaborationCursor' })
+})
+
+test('hard-bounds curated context pages to ten payload-heavy items', async () => {
+  const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
+  const actor = { id: 'author@example.com', displayName: 'Author' }
+  const worstCaseText = '\uD800'.repeat(20_000)
+  const rows = Array.from({ length: 12 }, (_, index) => {
+    const id = `ctx-${String(index).padStart(2, '0')}`
+    const createdAt = new Date(Date.UTC(2026, 6, 12, 0, index)).toISOString()
+    return [{
+      entityKey,
+      recordKey: `CONTEXT#${id}`,
+      entryType: 'context',
+      schemaVersion: 1,
+      id,
+      teamId: 'team-a',
+      workItemId: 'issue-1',
+      kind: 'context',
+      state: 'active',
+      title: `Context ${index}`,
+      body: worstCaseText,
+      source: {
+        kind: 'activity',
+        sourceId: `event-${index}`,
+        originalBody: worstCaseText,
+        quote: { text: worstCaseText },
+        occurredAt: createdAt,
+        availability: 'available',
+      },
+      mentionMemberKeys: [],
+      createdBy: actor,
+      createdAt,
+      updatedBy: actor,
+      updatedAt: createdAt,
+      revision: 1,
+    }, {
+      entityKey,
+      recordKey: `CONTEXT_ORDER#${createdAt}#${id}`,
+      entryType: 'context-order',
+      itemId: id,
+      createdAt,
+    }]
+  }).flat()
+  const memory = createCollaborationMemory(rows)
+
+  const page = await memory.client.getCuratedContext({
+    entityKey,
+    limit: 100,
+    capabilities: {
+      canCreate: true,
+      canEdit: true,
+      canReplace: true,
+      canAcceptResolution: true,
+    },
+  })
+
+  expect(page.items).toHaveLength(10)
+  expect(page.items[0]?.id).toBe('ctx-11')
+  expect(page.nextCursor).toBeString()
+  expect(Buffer.byteLength(JSON.stringify(page), 'utf8')).toBeLessThan(6 * 1024 * 1024)
+})
+
+test('hard-bounds and strictly validates curated context revision pages', async () => {
+  const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
+  const actor = { id: 'author@example.com', displayName: 'Author' }
+  const snapshots = Array.from({ length: 12 }, (_, index) => {
+    const revision = index + 1
+    const updatedAt = new Date(Date.UTC(2026, 6, 12, 0, revision)).toISOString()
+    return {
+      schemaVersion: 1,
+      id: 'ctx-history',
+      teamId: 'team-a',
+      workItemId: 'issue-1',
+      kind: 'decision',
+      state: 'active',
+      title: `Decision revision ${revision}`,
+      body: `Body revision ${revision}`,
+      mentionMemberKeys: [],
+      createdBy: actor,
+      createdAt: '2026-07-12T00:00:00.000Z',
+      updatedBy: actor,
+      updatedAt,
+      revision,
+    }
+  })
+  const current = snapshots.at(-1)
+  if (!current) throw new Error('Expected a current context fixture.')
+  const memory = createCollaborationMemory([{
+    ...current,
+    entityKey,
+    recordKey: 'CONTEXT#ctx-history',
+    entryType: 'context',
+  }, ...snapshots.map((snapshot) => ({
+    entityKey,
+    recordKey: `CONTEXT_REVISION#ctx-history#${String(snapshot.revision).padStart(12, '0')}`,
+    entryType: 'context-revision',
+    itemId: 'ctx-history',
+    revision: snapshot.revision,
+    snapshot,
+    createdAt: snapshot.updatedAt,
+  }))])
+
+  const page = await memory.client.getCuratedContextRevisions({
+    entityKey,
+    itemId: 'ctx-history',
+    limit: 100,
+  })
+  expect(page.items.map((item) => item.revision)).toEqual([12, 11, 10, 9, 8, 7, 6, 5, 4, 3])
+  expect(page.nextCursor).toBeString()
+
+  const latestKey = `${entityKey}\0CONTEXT_REVISION#ctx-history#000000000012`
+  const latest = memory.rows.get(latestKey)
+  if (!latest || !isTestRecord(latest.snapshot)) {
+    throw new Error('Expected the latest context revision fixture.')
+  }
+  memory.rows.set(latestKey, {
+    ...latest,
+    snapshot: { ...latest.snapshot, id: 'ctx-other' },
+  })
+  await expect(memory.client.getCuratedContextRevisions({
+    entityKey,
+    itemId: 'ctx-history',
+    limit: 1,
+  })).rejects.toMatchObject({ status: 503, code: 'InvalidCollaborationRecord' })
+})
+
+test('creates, revision-fences, and atomically supersedes curated context with history and watchers', async () => {
+  const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
+  const memory = createCollaborationMemory([], 'audit-table')
+  const scope = {
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'issue-1',
+    entityKey,
+    workItemTitle: 'Decision target',
+  }
+  const actor = { id: 'Author@Example.com', displayName: 'Author' }
+  const source: CuratedContextSource = {
+    kind: 'activity',
+    sourceId: 'event-1',
+    originalBody: 'Regression suite passed.',
+    quote: { text: 'Regression suite passed.' },
+    occurredAt: '2026-07-11T23:59:00.000Z',
+    availability: 'available',
+  }
+  const created = await memory.client.createCuratedContextItem({
+    ...scope,
+    actor,
+    kind: 'decision',
+    title: 'Choose option A',
+    body: 'Option A is the accepted direction.',
+    source,
+    mentionMemberKeys: ['Reviewer@Example.com'],
+    auditContext: createTestAuditContext(
+      'context-create',
+      '2026-07-12T00:00:00.000Z',
+      { title: 'Choose option A' },
+    ),
+  })
+  expect(created).toMatchObject({ revision: 1, state: 'active' })
+
+  const createReplay = await memory.client.createCuratedContextItem({
+    ...scope,
+    actor,
+    kind: 'decision',
+    title: 'Choose option A',
+    body: 'Option A is the accepted direction.',
+    source,
+    mentionMemberKeys: ['Reviewer@Example.com'],
+    auditContext: createTestAuditContext(
+      'context-create',
+      '2026-07-12T00:00:30.000Z',
+      { title: 'Choose option A' },
+    ),
+  })
+  expect(createReplay).toEqual(created)
+  expect(memory.transactions).toHaveLength(1)
+
+  memory.reportNextCommittedTransactionAsConditionalFailure()
+  const updated = await memory.client.updateCuratedContextItem({
+    ...scope,
+    actor,
+    itemId: created.id,
+    expectedRevision: 1,
+    state: 'accepted',
+    body: 'Option A is approved.',
+    auditContext: createTestAuditContext(
+      'context-update',
+      '2026-07-12T00:01:00.000Z',
+      { expectedRevision: 1 },
+    ),
+  })
+  expect(updated).toMatchObject({ revision: 2, state: 'accepted', body: 'Option A is approved.' })
+
+  const updateReplay = await memory.client.updateCuratedContextItem({
+    ...scope,
+    actor,
+    itemId: created.id,
+    expectedRevision: 1,
+    state: 'accepted',
+    body: 'Option A is approved.',
+    auditContext: createTestAuditContext(
+      'context-update',
+      '2026-07-12T00:01:30.000Z',
+      { expectedRevision: 1 },
+    ),
+  })
+  expect(updateReplay).toEqual(updated)
+  expect(memory.transactions).toHaveLength(2)
+
+  await expect(memory.client.updateCuratedContextItem({
+    ...scope,
+    actor,
+    itemId: created.id,
+    expectedRevision: 1,
+    title: 'Stale update',
+  })).rejects.toMatchObject({ status: 409, code: 'ContextRevisionConflict' })
+
+  const replacement = await memory.client.createCuratedContextItem({
+    ...scope,
+    actor,
+    kind: 'decision',
+    title: 'Choose option B',
+    body: 'New evidence makes option B preferable.',
+    supersedesItemId: created.id,
+    auditContext: createTestAuditContext(
+      'context-replace',
+      '2026-07-12T00:02:00.000Z',
+      { supersedesItemId: created.id },
+    ),
+  })
+  const superseded = await memory.client.getCuratedContextItemSnapshot({
+    entityKey,
+    itemId: created.id,
+  })
+  expect(replacement).toMatchObject({ revision: 1, state: 'active' })
+  expect(replacement.source).toEqual(created.source)
+  expect(superseded).toMatchObject({
+    revision: 3,
+    state: 'superseded',
+    supersededByItemId: replacement.id,
+  })
+  expect([...memory.rows.values()].filter((row) =>
+    typeof row.recordKey === 'string' && row.recordKey.startsWith('CONTEXT_REVISION#')
+  )).toHaveLength(4)
+  const firstRevisionPage = await memory.client.getCuratedContextRevisions({
+    entityKey,
+    itemId: created.id,
+    limit: 2,
+  })
+  expect(firstRevisionPage.items.map((item) => item.revision)).toEqual([3, 2])
+  expect(firstRevisionPage.nextCursor).toBeString()
+  const secondRevisionPage = await memory.client.getCuratedContextRevisions({
+    entityKey,
+    itemId: created.id,
+    limit: 2,
+    cursor: firstRevisionPage.nextCursor,
+  })
+  expect(secondRevisionPage.items.map((item) => item.revision)).toEqual([1])
+  expect(secondRevisionPage.nextCursor).toBeUndefined()
+  await expect(memory.client.getCuratedContextRevisions({
+    entityKey,
+    itemId: replacement.id,
+    cursor: firstRevisionPage.nextCursor,
+  })).rejects.toMatchObject({ status: 400, code: 'InvalidCollaborationCursor' })
+
+  const auditEventTypes = memory.transactions.flatMap((transaction) => {
+    if (!Array.isArray(transaction.TransactItems)) return []
+    return transaction.TransactItems.flatMap((item) => {
+      if (!isTestRecord(item) || !isTestRecord(item.Put) || !isTestRecord(item.Put.Item)) return []
+      return typeof item.Put.Item.eventType === 'string' ? [item.Put.Item.eventType] : []
+    })
+  })
+  expect(auditEventTypes).toEqual(expect.arrayContaining([
+    'context-item.created',
+    'context-item.updated',
+    'context-item.superseded',
+  ]))
+  const auditSummaries = memory.transactions.flatMap((transaction) => {
+    if (!Array.isArray(transaction.TransactItems)) return []
+    return transaction.TransactItems.flatMap((item) => {
+      if (!isTestRecord(item) || !isTestRecord(item.Put) || !isTestRecord(item.Put.Item)) return []
+      return typeof item.Put.Item.summary === 'string' ? [item.Put.Item.summary] : []
+    })
+  })
+  expect(auditSummaries).toEqual(expect.arrayContaining([
+    'Curated decision “Choose option A” was created.',
+    'Curated decision “Choose option A” was updated.',
+    'Curated decision “Choose option A” was superseded.',
+  ]))
+  const watcherRecordKeys = memory.transactions.flatMap((transaction) => {
+    if (!Array.isArray(transaction.TransactItems)) return []
+    return transaction.TransactItems.flatMap((item) => {
+      if (!isTestRecord(item) || !isTestRecord(item.Update) || !isTestRecord(item.Update.Key)) return []
+      return typeof item.Update.Key.recordKey === 'string' ? [item.Update.Key.recordKey] : []
+    })
+  })
+  expect(watcherRecordKeys).toEqual(expect.arrayContaining([
+    'WATCHER#author@example.com',
+    'WATCHER#reviewer@example.com',
+  ]))
+})
+
+test('replays immutable curated-context mutation responses after later revisions', async () => {
+  const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
+  const memory = createCollaborationMemory([], 'audit-table')
+  const scope = {
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'issue-1',
+    entityKey,
+  }
+  const actor = { id: 'author@example.com', displayName: 'Author' }
+  const createRequestBody = { title: 'Durable decision', body: 'Original response body.' }
+  const createContext = createTestAuditContext(
+    'durable-create',
+    '2026-07-12T03:00:00.000Z',
+    createRequestBody,
+  )
+  const created = await memory.client.createCuratedContextItem({
+    ...scope,
+    actor,
+    kind: 'decision',
+    title: createRequestBody.title,
+    body: createRequestBody.body,
+    auditContext: createContext,
+  })
+  const laterUpdate = await memory.client.updateCuratedContextItem({
+    ...scope,
+    actor,
+    itemId: created.id,
+    expectedRevision: 1,
+    body: 'A later response body.',
+    auditContext: createTestAuditContext(
+      'later-update',
+      '2026-07-12T03:01:00.000Z',
+      { expectedRevision: 1, body: 'A later response body.' },
+    ),
+  })
+  expect(laterUpdate.revision).toBe(2)
+
+  const replayedCreate = await memory.client.createCuratedContextItem({
+    ...scope,
+    actor,
+    kind: 'decision',
+    title: createRequestBody.title,
+    body: createRequestBody.body,
+    auditContext: createTestAuditContext(
+      'durable-create',
+      '2026-07-12T03:02:00.000Z',
+      createRequestBody,
+    ),
+  })
+  expect(replayedCreate).toEqual(created)
+
+  const durableUpdateBody = { expectedRevision: 2, title: 'Durable updated title' }
+  const durableUpdate = await memory.client.updateCuratedContextItem({
+    ...scope,
+    actor,
+    itemId: created.id,
+    expectedRevision: 2,
+    title: durableUpdateBody.title,
+    auditContext: createTestAuditContext(
+      'durable-update',
+      '2026-07-12T03:03:00.000Z',
+      durableUpdateBody,
+    ),
+  })
+  const finalUpdate = await memory.client.updateCuratedContextItem({
+    ...scope,
+    actor,
+    itemId: created.id,
+    expectedRevision: 3,
+    state: 'accepted',
+    auditContext: createTestAuditContext(
+      'final-update',
+      '2026-07-12T03:04:00.000Z',
+      { expectedRevision: 3, state: 'accepted' },
+    ),
+  })
+  expect(finalUpdate).toMatchObject({ revision: 4, state: 'accepted' })
+
+  const replayedUpdate = await memory.client.updateCuratedContextItem({
+    ...scope,
+    actor,
+    itemId: created.id,
+    expectedRevision: 2,
+    title: durableUpdateBody.title,
+    auditContext: createTestAuditContext(
+      'durable-update',
+      '2026-07-12T03:05:00.000Z',
+      durableUpdateBody,
+    ),
+  })
+  expect(replayedUpdate).toEqual(durableUpdate)
+  expect(memory.transactions).toHaveLength(4)
+
+  await expect(memory.client.createCuratedContextItem({
+    ...scope,
+    actor,
+    kind: 'risk',
+    title: 'Reused key with different input',
+    body: 'This must not create another item.',
+    auditContext: createTestAuditContext(
+      'durable-create',
+      '2026-07-12T03:06:00.000Z',
+      { title: 'Different fingerprint' },
+    ),
+  })).rejects.toMatchObject({
+    status: 409,
+    code: 'CollaborationIdempotencyConflict',
+  })
+  expect(memory.transactions).toHaveLength(4)
+})
+
+test('reconciles lifecycle-only revisions, edits, deletion, and missing comment sources', async () => {
+  const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
+  const sourceBody = 'The selected evidence remains immutable.'
+  const comment = {
+    entityKey,
+    recordKey: 'COMMENT#reply-1',
+    entryType: 'comment',
+    id: 'reply-1',
+    rootCommentId: 'root-1',
+    parentCommentId: 'root-1',
+    authorMemberKey: 'reply@example.com',
+    bodyMarkdown: sourceBody,
+    version: 2,
+    mentionMemberKeys: [],
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:01:00.000Z',
+  }
+  const context = {
+    entityKey,
+    recordKey: 'CONTEXT#ctx-source',
+    entryType: 'context',
+    schemaVersion: 1,
+    id: 'ctx-source',
+    teamId: 'team-a',
+    workItemId: 'issue-1',
+    kind: 'context',
+    state: 'active',
+    title: 'Source evidence',
+    body: 'Retained source evidence.',
+    source: {
+      kind: 'comment',
+      sourceId: 'reply-1',
+      containerId: 'root-1',
+      originalBody: sourceBody,
+      quote: { text: 'selected evidence', startOffset: 4, endOffset: 21 },
+      actor: { id: 'reply@example.com', displayName: 'Reply Author' },
+      occurredAt: '2026-07-12T00:00:00.000Z',
+      capturedRevision: 1,
+      currentRevision: 1,
+      availability: 'available',
+    },
+    mentionMemberKeys: [],
+    createdBy: { id: 'author@example.com', displayName: 'Author' },
+    createdAt: '2026-07-12T00:00:30.000Z',
+    updatedBy: { id: 'author@example.com', displayName: 'Author' },
+    updatedAt: '2026-07-12T00:00:30.000Z',
+    revision: 1,
+  }
+  const memory = createCollaborationMemory([comment, context])
+
+  const lifecycleUpdated = await memory.client.getCuratedContextItemSnapshot({
+    entityKey,
+    itemId: 'ctx-source',
+  })
+  expect(lifecycleUpdated?.source).toMatchObject({
+    originalBody: sourceBody,
+    availability: 'available',
+    currentRevision: 2,
+  })
+
+  memory.rows.set(`${entityKey}\0COMMENT#reply-1`, {
+    ...comment,
+    bodyMarkdown: 'Edited current body',
+    version: 3,
+  })
+  const edited = await memory.client.getCuratedContextItemSnapshot({
+    entityKey,
+    itemId: 'ctx-source',
+  })
+  expect(edited?.source).toMatchObject({
+    originalBody: sourceBody,
+    quote: { text: 'selected evidence', startOffset: 4, endOffset: 21 },
+    availability: 'edited',
+    currentRevision: 3,
+  })
+  expect(edited?.source).not.toHaveProperty('currentBody')
+
+  memory.rows.set(`${entityKey}\0COMMENT#reply-1`, {
+    ...comment,
+    bodyMarkdown: '',
+    version: 4,
+    deletedAt: '2026-07-12T00:02:00.000Z',
+  })
+  const deleted = await memory.client.getCuratedContextItemSnapshot({
+    entityKey,
+    itemId: 'ctx-source',
+  })
+  expect(deleted?.source).toMatchObject({
+    originalBody: sourceBody,
+    availability: 'deleted',
+    currentRevision: 4,
+  })
+
+  memory.rows.delete(`${entityKey}\0COMMENT#reply-1`)
+  const missing = await memory.client.getCuratedContextItemSnapshot({
+    entityKey,
+    itemId: 'ctx-source',
+  })
+  expect(missing?.source).toMatchObject({ originalBody: sourceBody, availability: 'deleted' })
+  expect(missing?.source?.currentRevision).toBeUndefined()
+})
+
+test('fences captured comment creation and preserves immutable provenance during edits', async () => {
+  const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
+  const actor = { id: 'author@example.com', displayName: 'Author' }
+  const createSourceComment = {
+    entityKey,
+    recordKey: 'COMMENT#reply-create',
+    entryType: 'comment',
+    id: 'reply-create',
+    rootCommentId: 'root-1',
+    parentCommentId: 'root-1',
+    authorMemberKey: 'reply@example.com',
+    bodyMarkdown: 'Create evidence',
+    version: 1,
+    mentionMemberKeys: [],
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+  }
+  const updateSourceComment = {
+    ...createSourceComment,
+    recordKey: 'COMMENT#reply-update',
+    id: 'reply-update',
+    bodyMarkdown: 'Update evidence',
+  }
+  const existingContext = {
+    entityKey,
+    recordKey: 'CONTEXT#ctx-existing',
+    entryType: 'context',
+    schemaVersion: 1,
+    id: 'ctx-existing',
+    teamId: 'team-a',
+    workItemId: 'issue-1',
+    kind: 'context',
+    state: 'active',
+    title: 'Existing context',
+    body: 'Existing body',
+    source: {
+      kind: 'comment',
+      sourceId: 'reply-update',
+      containerId: 'root-1',
+      originalBody: 'Update evidence',
+      quote: { text: 'Update evidence' },
+      occurredAt: updateSourceComment.createdAt,
+      capturedRevision: 1,
+      availability: 'available',
+    },
+    mentionMemberKeys: [],
+    createdBy: actor,
+    createdAt: '2026-07-12T00:00:30.000Z',
+    updatedBy: actor,
+    updatedAt: '2026-07-12T00:00:30.000Z',
+    revision: 1,
+  }
+  const memory = createCollaborationMemory([
+    createSourceComment,
+    updateSourceComment,
+    existingContext,
+  ])
+  const scope = {
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'issue-1',
+    entityKey,
+  }
+
+  memory.mutateCommentBeforeNextTransaction('reply-create')
+  await expect(memory.client.createCuratedContextItem({
+    ...scope,
+    actor,
+    kind: 'context',
+    title: 'Racing create',
+    body: 'Do not commit stale evidence.',
+    source: {
+      kind: 'comment',
+      sourceId: 'reply-create',
+      containerId: 'root-1',
+      originalBody: 'Create evidence',
+      quote: { text: 'Create evidence' },
+      occurredAt: createSourceComment.createdAt,
+      capturedRevision: 1,
+      availability: 'available',
+    },
+  })).rejects.toMatchObject({
+    status: 409,
+    code: 'ContextSourceRevisionConflict',
+  })
+
+  memory.mutateCommentBeforeNextTransaction('reply-update')
+  const updated = await memory.client.updateCuratedContextItem({
+    ...scope,
+    actor,
+    itemId: 'ctx-existing',
+    expectedRevision: 1,
+    title: 'Edited context',
+  })
+  expect(updated).toMatchObject({
+    title: 'Edited context',
+    source: {
+      sourceId: 'reply-update',
+      originalBody: 'Update evidence',
+      capturedRevision: 1,
+    },
+  })
+})
+
+test('keeps accepted resolution history append-only and rejects invalid or concurrently edited replies', async () => {
+  const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
+  /** Creates a physical comment seed row for accepted-resolution tests. */
+  const commentRow = (
+    id: string,
+    rootCommentId: string,
+    bodyMarkdown: string,
+    deletedAt?: string,
+  ) => ({
+    entityKey,
+    recordKey: `COMMENT#${id}`,
+    entryType: 'comment',
+    id,
+    rootCommentId,
+    ...(id === rootCommentId ? {} : { parentCommentId: rootCommentId }),
+    authorMemberKey: id === rootCommentId ? 'author@example.com' : `${id}@example.com`,
+    bodyMarkdown,
+    version: 1,
+    mentionMemberKeys: [],
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+    ...(deletedAt ? { deletedAt } : {}),
+  })
+  const memory = createCollaborationMemory([
+    commentRow('root-1', 'root-1', 'Question'),
+    commentRow('reply-1', 'root-1', 'First answer'),
+    commentRow('reply-2', 'root-1', 'Second answer'),
+    commentRow('reply-3', 'root-1', 'Third answer'),
+    commentRow('other-reply', 'other-root', 'Other thread answer'),
+    commentRow('deleted-reply', 'root-1', '', '2026-07-12T00:01:00.000Z'),
+  ], 'audit-table')
+  const scope = {
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'issue-1',
+    entityKey,
+  }
+  const actor = { id: 'author@example.com', displayName: 'Author' }
+  const firstInput = {
+    ...scope,
+    rootCommentId: 'root-1',
+    commentId: 'reply-1',
+    summary: 'Use the first answer.',
+    expectedThreadVersion: 1,
+    actor,
+    canModerate: false,
+    auditContext: createTestAuditContext(
+      'resolution-select',
+      '2026-07-12T00:01:00.000Z',
+      { commentId: 'reply-1', summary: 'Use the first answer.' },
+    ),
+  }
+  memory.reportNextCommittedTransactionAsConditionalFailure()
+  const first = await memory.client.setAcceptedResolution(firstInput)
+  expect(first.acceptedResolutions).toHaveLength(1)
+  expect(first.acceptedResolutions[0]).toMatchObject({
+    sourceCommentId: 'reply-1',
+    capturedCommentRevision: 1,
+    capturedCommentBody: 'First answer',
+    state: 'accepted',
+  })
+  /** Counts append-only resolution rows without inspecting root history fields. */
+  const resolutionRowCount = () => [...memory.rows.values()].filter((row) =>
+    typeof row.recordKey === 'string' && row.recordKey.startsWith('RESOLUTION#root-1#')
+  ).length
+  expect(resolutionRowCount()).toBe(1)
+  const physicalRoot = memory.rows.get(`${entityKey}\0COMMENT#root-1`)
+  expect(physicalRoot).not.toHaveProperty('acceptedResolutions')
+  expect(physicalRoot?.acceptedResolutionId).toBe(first.acceptedResolutions[0]?.id)
+  expect(physicalRoot?.acceptedResolution).toMatchObject({
+    id: first.acceptedResolutions[0]?.id,
+    state: 'accepted',
+  })
+
+  const replay = await memory.client.setAcceptedResolution(firstInput)
+  expect(replay.version).toBe(2)
+  expect(resolutionRowCount()).toBe(1)
+
+  const selectedReplyKey = `${entityKey}\0COMMENT#reply-1`
+  const selectedReply = memory.rows.get(selectedReplyKey)
+  if (!selectedReply) throw new Error('Expected the selected reply fixture.')
+  memory.rows.set(selectedReplyKey, {
+    ...selectedReply,
+    bodyMarkdown: '',
+    deletedAt: '2026-07-12T00:01:30.000Z',
+    updatedAt: '2026-07-12T00:01:30.000Z',
+    version: 2,
+  })
+
+  const edited = await memory.client.setAcceptedResolution({
+    ...scope,
+    rootCommentId: 'root-1',
+    commentId: 'reply-1',
+    summary: 'Use the first answer with the manual clarification.',
+    expectedThreadVersion: 2,
+    actor,
+    canModerate: false,
+    auditContext: createTestAuditContext(
+      'resolution-edit',
+      '2026-07-12T00:02:00.000Z',
+      { commentId: 'reply-1', summary: 'Use the first answer with the manual clarification.' },
+    ),
+  })
+  expect(edited.acceptedResolutions).toHaveLength(1)
+  expect(edited.acceptedResolutions[0]).toMatchObject({
+    capturedCommentBody: 'First answer',
+    capturedCommentRevision: 1,
+    sourceCommentId: 'reply-1',
+    state: 'accepted',
+  })
+  expect(resolutionRowCount()).toBe(3)
+
+  const replaced = await memory.client.setAcceptedResolution({
+    ...scope,
+    rootCommentId: 'root-1',
+    commentId: 'reply-2',
+    summary: 'Use the newer second answer.',
+    expectedThreadVersion: 3,
+    actor,
+    canModerate: false,
+    auditContext: createTestAuditContext(
+      'resolution-replace',
+      '2026-07-12T00:03:00.000Z',
+      { commentId: 'reply-2', summary: 'Use the newer second answer.' },
+    ),
+  })
+  expect(replaced.acceptedResolutions).toHaveLength(1)
+  expect(replaced.acceptedResolutions[0]).toMatchObject({
+    sourceCommentId: 'reply-2',
+    state: 'accepted',
+  })
+  expect(resolutionRowCount()).toBe(5)
+  const replacementRows = [...memory.rows.values()]
+    .filter((row) => row.entryType === 'accepted-resolution' &&
+      row.recordedAt === '2026-07-12T00:03:00.000Z')
+    .sort((left, right) => String(right.recordKey).localeCompare(String(left.recordKey)))
+  expect(replacementRows[0]).toMatchObject({ resolution: { state: 'accepted' } })
+  expect(replacementRows[1]).toMatchObject({ resolution: { state: 'superseded' } })
+
+  const replayAfterReplacement = await memory.client.setAcceptedResolution(firstInput)
+  expect(replayAfterReplacement).toMatchObject({
+    version: 2,
+    acceptedResolutions: [{
+      sourceCommentId: 'reply-1',
+      summary: 'Use the first answer.',
+      state: 'accepted',
+    }],
+  })
+  expect(resolutionRowCount()).toBe(5)
+
+  const firstHistoryPage = await memory.client.getAcceptedResolutionHistory({
+    entityKey,
+    rootCommentId: 'root-1',
+    limit: 2,
+  })
+  expect(firstHistoryPage.items).toHaveLength(2)
+  expect(firstHistoryPage.items.map((resolution) => resolution.state)).toEqual([
+    'accepted',
+    'superseded',
+  ])
+  expect(firstHistoryPage.nextCursor).toBeString()
+  const secondHistoryPage = await memory.client.getAcceptedResolutionHistory({
+    entityKey,
+    rootCommentId: 'root-1',
+    limit: 2,
+    cursor: firstHistoryPage.nextCursor,
+  })
+  expect(secondHistoryPage.items).toHaveLength(1)
+  expect(secondHistoryPage.items[0]).toMatchObject({ state: 'superseded' })
+  expect(secondHistoryPage.nextCursor).toBeUndefined()
+  await expect(memory.client.getAcceptedResolutionHistory({
+    entityKey: createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-2'),
+    rootCommentId: 'root-1',
+    cursor: firstHistoryPage.nextCursor,
+  })).rejects.toMatchObject({ status: 400, code: 'InvalidCollaborationCursor' })
+
+  await expect(memory.client.setAcceptedResolution({
+    ...scope,
+    rootCommentId: 'root-1',
+    commentId: 'other-reply',
+    summary: 'Invalid cross-thread source.',
+    expectedThreadVersion: 4,
+    actor,
+    canModerate: false,
+  })).rejects.toMatchObject({ status: 400, code: 'AcceptedResolutionCrossThread' })
+  await expect(memory.client.setAcceptedResolution({
+    ...scope,
+    rootCommentId: 'root-1',
+    commentId: 'deleted-reply',
+    summary: 'Invalid deleted source.',
+    expectedThreadVersion: 4,
+    actor,
+    canModerate: false,
+  })).rejects.toMatchObject({ status: 409, code: 'AcceptedResolutionSourceDeleted' })
+  await expect(memory.client.setAcceptedResolution({
+    ...scope,
+    rootCommentId: 'root-1',
+    commentId: 'root-1',
+    summary: 'Root is not a reply.',
+    expectedThreadVersion: 4,
+    actor,
+    canModerate: false,
+  })).rejects.toMatchObject({ status: 400, code: 'AcceptedResolutionNotReply' })
+
+  memory.mutateCommentBeforeNextTransaction('reply-3')
+  await expect(memory.client.setAcceptedResolution({
+    ...scope,
+    rootCommentId: 'root-1',
+    commentId: 'reply-3',
+    summary: 'This capture races with an edit.',
+    expectedThreadVersion: 4,
+    actor,
+    canModerate: false,
+  })).rejects.toMatchObject({ status: 409, code: 'AcceptedResolutionSourceConflict' })
+
+  await memory.client.deleteComment({
+    ...scope,
+    actorMemberKey: actor.id,
+    commentId: 'root-1',
+    expectedVersion: 4,
+    auditContext: createTestAuditContext(
+      'delete-root-after-resolution',
+      '2026-07-12T00:05:00.000Z',
+      { commentId: 'root-1' },
+    ),
+  })
+  const replayAfterRootDeletion = await memory.client.setAcceptedResolution(firstInput)
+  expect(replayAfterRootDeletion).toMatchObject({
+    bodyMarkdown: '',
+    mentionMemberKeys: [],
+    deletedAt: '2026-07-12T00:05:00.000Z',
+    acceptedResolutions: [{ capturedCommentBody: 'First answer' }],
+  })
+  expect(replayAfterRootDeletion.bodyMarkdown).not.toContain('Question')
+})
+
+test('rejects accepted-resolution idempotency key reuse without an audit table', async () => {
+  const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
+  /** Creates a physical comment row for the receipt collision test. */
+  const commentRow = (id: string, rootCommentId: string, bodyMarkdown: string) => ({
+    entityKey,
+    recordKey: `COMMENT#${id}`,
+    entryType: 'comment',
+    id,
+    rootCommentId,
+    ...(id === rootCommentId ? {} : { parentCommentId: rootCommentId }),
+    authorMemberKey: id === rootCommentId ? 'author@example.com' : `${id}@example.com`,
+    bodyMarkdown,
+    version: 1,
+    mentionMemberKeys: [],
+    createdAt: '2026-07-12T05:00:00.000Z',
+    updatedAt: '2026-07-12T05:00:00.000Z',
+  })
+  const memory = createCollaborationMemory([
+    commentRow('root-receipt', 'root-receipt', 'Question'),
+    commentRow('reply-a', 'root-receipt', 'Answer A'),
+    commentRow('reply-b', 'root-receipt', 'Answer B'),
+  ])
+  const scope = {
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'issue-1',
+    entityKey,
+    rootCommentId: 'root-receipt',
+    actor: { id: 'author@example.com', displayName: 'Author' },
+    canModerate: false,
+  }
+  const requestBody = {
+    expectedThreadVersion: 1,
+    commentId: 'reply-a',
+    summary: 'Accept answer A.',
+  }
+  await memory.client.setAcceptedResolution({
+    ...scope,
+    ...requestBody,
+    auditContext: createTestAuditContext(
+      'accepted-receipt-collision',
+      '2026-07-12T05:01:00.000Z',
+      requestBody,
+    ),
+  })
+
+  const conflictingInputs = [
+    { ...requestBody, summary: 'A different summary.' },
+    { ...requestBody, commentId: 'reply-b' },
+    { ...requestBody, expectedThreadVersion: 2 },
+  ]
+  for (const [index, conflicting] of conflictingInputs.entries()) {
+    await expect(memory.client.setAcceptedResolution({
+      ...scope,
+      ...conflicting,
+      auditContext: createTestAuditContext(
+        'accepted-receipt-collision',
+        `2026-07-12T05:0${index + 2}:00.000Z`,
+        conflicting,
+      ),
+    })).rejects.toMatchObject({
+      status: 409,
+      code: 'CollaborationIdempotencyConflict',
+    })
+  }
+  expect(memory.transactions).toHaveLength(1)
+})
+
+test('hard-bounds large accepted resolution history pages and keeps cursors thread-scoped', async () => {
+  const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
+  const actor = { id: 'author@example.com', displayName: 'Author' }
+  const worstCaseText = '\uD800'.repeat(20_000)
+  const current = {
+    id: 'resolution-current',
+    sourceCommentId: 'reply-current',
+    sourceRootCommentId: 'root-many',
+    capturedCommentRevision: 1,
+    capturedCommentBody: worstCaseText,
+    summary: worstCaseText,
+    acceptedBy: actor,
+    acceptedAt: '2026-07-13T00:00:00.000Z',
+    state: 'accepted',
+  }
+  const historicalRows = Array.from({ length: 120 }, (_, index) => {
+    const recordedAt = new Date(Date.UTC(2026, 6, 12, 0, 0, index)).toISOString()
+    const id = `resolution-${String(index).padStart(3, '0')}`
+    return {
+      entityKey,
+      recordKey: `RESOLUTION#root-many#${recordedAt}#${id}#superseded`,
+      entryType: 'accepted-resolution',
+      rootCommentId: 'root-many',
+      resolution: {
+        id,
+        sourceCommentId: `reply-${index}`,
+        sourceRootCommentId: 'root-many',
+        capturedCommentRevision: 1,
+        capturedCommentBody: index >= 110 ? worstCaseText : `Answer ${index}`,
+        summary: index >= 110 ? worstCaseText : `Accepted answer ${index}.`,
+        acceptedBy: actor,
+        acceptedAt: recordedAt,
+        state: 'superseded',
+        supersededByResolutionId: 'resolution-current',
+        supersededBy: actor,
+        supersededAt: recordedAt,
+      },
+      recordedAt,
+    }
+  })
+  const memory = createCollaborationMemory([
+    {
+      entityKey,
+      recordKey: 'COMMENT#root-many',
+      entryType: 'comment',
+      id: 'root-many',
+      rootCommentId: 'root-many',
+      authorMemberKey: 'author@example.com',
+      bodyMarkdown: 'Question',
+      version: 121,
+      mentionMemberKeys: [],
+      createdAt: '2026-07-12T00:00:00.000Z',
+      updatedAt: '2026-07-13T00:00:00.000Z',
+      acceptedResolutionId: current.id,
+      acceptedResolution: current,
+    },
+    ...historicalRows,
+    {
+      entityKey,
+      recordKey: `RESOLUTION#root-many#${current.acceptedAt}#${current.id}#accepted`,
+      entryType: 'accepted-resolution',
+      rootCommentId: 'root-many',
+      resolution: current,
+      recordedAt: current.acceptedAt,
+    },
+  ])
+
+  const first = await memory.client.getAcceptedResolutionHistory({
+    entityKey,
+    rootCommentId: 'root-many',
+    limit: 100,
+  })
+  expect(first.items).toHaveLength(10)
+  expect(first.items[0]).toMatchObject({ id: 'resolution-current', state: 'accepted' })
+  expect(first.nextCursor).toBeString()
+  expect(Buffer.byteLength(JSON.stringify(first), 'utf8')).toBeLessThan(6 * 1024 * 1024)
+  const second = await memory.client.getAcceptedResolutionHistory({
+    entityKey,
+    rootCommentId: 'root-many',
+    limit: 100,
+    cursor: first.nextCursor,
+  })
+  expect(second.items).toHaveLength(10)
+  expect(second.nextCursor).toBeString()
+  expect(new Set([...first.items, ...second.items].map((resolution) => resolution.id)).size)
+    .toBe(20)
+
+  await expect(memory.client.getAcceptedResolutionHistory({
+    entityKey,
+    rootCommentId: 'other-root',
+    cursor: first.nextCursor,
+  })).rejects.toMatchObject({ status: 400, code: 'InvalidCollaborationCursor' })
+})
+
+test('reads and incrementally migrates legacy inline accepted resolution history', async () => {
+  const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
+  const actor = { id: 'author@example.com', displayName: 'Author' }
+  const legacySuperseded = {
+    id: 'legacy-old',
+    sourceCommentId: 'reply-old',
+    sourceRootCommentId: 'root-legacy',
+    capturedCommentRevision: 1,
+    capturedCommentBody: 'Old answer',
+    summary: 'Old accepted answer.',
+    acceptedBy: actor,
+    acceptedAt: '2026-07-12T00:01:00.000Z',
+    state: 'superseded',
+    supersededByResolutionId: 'legacy-current',
+    supersededBy: actor,
+    supersededAt: '2026-07-12T00:02:00.000Z',
+  }
+  const legacyCurrent = {
+    id: 'legacy-current',
+    sourceCommentId: 'reply-current',
+    sourceRootCommentId: 'root-legacy',
+    capturedCommentRevision: 1,
+    capturedCommentBody: 'Legacy current answer',
+    summary: 'Legacy current accepted answer.',
+    acceptedBy: actor,
+    acceptedAt: '2026-07-12T00:02:00.000Z',
+    state: 'accepted',
+  }
+  const memory = createCollaborationMemory([{
+    entityKey,
+    recordKey: 'COMMENT#root-legacy',
+    entryType: 'comment',
+    id: 'root-legacy',
+    rootCommentId: 'root-legacy',
+    authorMemberKey: actor.id,
+    bodyMarkdown: 'Legacy question',
+    version: 5,
+    mentionMemberKeys: [],
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:02:00.000Z',
+    acceptedResolutions: [legacySuperseded, legacyCurrent],
+  }, {
+    entityKey,
+    recordKey: 'COMMENT#reply-new',
+    entryType: 'comment',
+    id: 'reply-new',
+    rootCommentId: 'root-legacy',
+    parentCommentId: 'root-legacy',
+    authorMemberKey: 'reply@example.com',
+    bodyMarkdown: 'New answer',
+    version: 1,
+    mentionMemberKeys: [],
+    createdAt: '2026-07-12T00:03:00.000Z',
+    updatedAt: '2026-07-12T00:03:00.000Z',
+  }])
+
+  const snapshot = await memory.client.getCommentSnapshot({
+    entityKey,
+    commentId: 'root-legacy',
+  })
+  expect(snapshot?.acceptedResolutions).toMatchObject([legacyCurrent])
+  const firstLegacyPage = await memory.client.getAcceptedResolutionHistory({
+    entityKey,
+    rootCommentId: 'root-legacy',
+    limit: 1,
+  })
+  expect(firstLegacyPage.nextCursor).toBeString()
+  const secondLegacyPage = await memory.client.getAcceptedResolutionHistory({
+    entityKey,
+    rootCommentId: 'root-legacy',
+    limit: 1,
+    cursor: firstLegacyPage.nextCursor,
+  })
+  expect(new Set([
+    ...firstLegacyPage.items,
+    ...secondLegacyPage.items,
+  ].map((resolution) => resolution.id))).toEqual(new Set(['legacy-current', 'legacy-old']))
+
+  const migrated = await memory.client.setAcceptedResolution({
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'issue-1',
+    entityKey,
+    rootCommentId: 'root-legacy',
+    commentId: 'reply-new',
+    summary: 'Use the new answer.',
+    expectedThreadVersion: 5,
+    actor,
+    canModerate: false,
+    auditContext: createTestAuditContext(
+      'legacy-resolution-migration',
+      '2026-07-12T00:04:00.000Z',
+      { commentId: 'reply-new', summary: 'Use the new answer.' },
+    ),
+  })
+  expect(migrated.acceptedResolutions).toMatchObject([{
+    sourceCommentId: 'reply-new',
+    state: 'accepted',
+  }])
+  const physicalRoot = memory.rows.get(`${entityKey}\0COMMENT#root-legacy`)
+  expect(physicalRoot?.acceptedResolution).toMatchObject({
+    sourceCommentId: 'reply-new',
+    state: 'accepted',
+  })
+  expect(physicalRoot?.acceptedResolutions).toMatchObject([
+    { id: 'legacy-old', state: 'superseded' },
+    { id: 'legacy-current', state: 'superseded' },
+  ])
+  const migratedHistory = await memory.client.getAcceptedResolutionHistory({
+    entityKey,
+    rootCommentId: 'root-legacy',
+    limit: 10,
+  })
+  expect(migratedHistory.items.map((resolution) => resolution.id)).toEqual([
+    migrated.acceptedResolutions[0]?.id,
+    'legacy-current',
+    'legacy-old',
+  ])
 })

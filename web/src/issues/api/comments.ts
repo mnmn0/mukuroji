@@ -1,4 +1,5 @@
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
+import type { AcceptedResolution } from '@mukuroji/contracts'
 import type { TeamIssueActivity } from './activity'
 import { TeamIssuesApiError } from './errors'
 
@@ -62,6 +63,10 @@ export type TeamIssueComment = {
    * thread を解決した Workspace member key です。
    */
   resolvedByMemberKey?: string
+  /**
+   * Current and superseded accepted resolutions in append-only history order.
+   */
+  acceptedResolutions?: AcceptedResolution[]
   /**
    * 本文中で mention された Workspace member key の重複除外済み一覧です。
    */

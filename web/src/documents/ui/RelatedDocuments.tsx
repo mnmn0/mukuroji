@@ -2,8 +2,10 @@ import { useState } from 'react'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import { createDocumentPath } from '../../shared/routing/paths'
 import {
+  getDocument,
   getDocumentBacklinks,
   type DocumentBacklink,
+  type DocumentRecord,
 } from '../api'
 import { useDocumentBacklinks } from '../queries/useDocumentQueries'
 
@@ -27,6 +29,14 @@ export type RelatedDocumentsProps = {
    * 表示文言を解決する翻訳関数です。
    */
   t: (key: MessageKey) => string
+  /**
+   * Opens a human-authored curated-context draft sourced from a related document.
+   */
+  onPromoteToContext?: (
+    backlink: DocumentBacklink,
+    document: DocumentRecord,
+    returnFocusId: string,
+  ) => void
 }
 
 /**
@@ -34,6 +44,7 @@ export type RelatedDocumentsProps = {
  */
 export function RelatedDocuments({
   accessToken,
+  onPromoteToContext,
   targetId,
   targetKind,
   t,
@@ -47,6 +58,10 @@ export function RelatedDocuments({
   } = useDocumentBacklinks(accessToken, targetKind, targetId)
   const [isLoadingMore, setIsLoadingMore] =
     useState(false)
+  const [promotingDocumentId, setPromotingDocumentId] =
+    useState<string>()
+  const [promotionErrorDocumentId, setPromotionErrorDocumentId] =
+    useState<string>()
 
   if (!key) return null
 
@@ -83,6 +98,39 @@ export function RelatedDocuments({
     }
   }
 
+  /**
+   * Reads the currently authorized Document body before opening quote selection.
+   *
+   * @param backlink - Permission-filtered relation selected by the curator.
+   */
+  const handlePromoteToContext = async (backlink: DocumentBacklink) => {
+    if (
+      !accessToken ||
+      !onPromoteToContext ||
+      promotingDocumentId
+    ) {
+      return
+    }
+
+    setPromotingDocumentId(backlink.documentId)
+    setPromotionErrorDocumentId(undefined)
+    try {
+      const document = await getDocument(
+        accessToken,
+        backlink.documentId,
+      )
+      onPromoteToContext(
+        backlink,
+        document,
+        createRelatedDocumentPromotionTriggerId(backlink.documentId),
+      )
+    } catch {
+      setPromotionErrorDocumentId(backlink.documentId)
+    } finally {
+      setPromotingDocumentId(undefined)
+    }
+  }
+
   return (
     <section className="grid gap-3 border-t border-[var(--workbench-border)] px-6 py-5">
       <div>
@@ -114,31 +162,56 @@ export function RelatedDocuments({
       {backlinks.length > 0 ? (
         <div className="grid gap-2">
           {backlinks.map((backlink) => (
-            <a
-              className="flex min-w-0 items-center gap-3 rounded-lg border border-[var(--workbench-border)] bg-white px-3 py-2.5 hover:border-[var(--workbench-primary)] hover:bg-[#f2fbf9]"
-              href={createDocumentPath(
-                backlink.documentId,
-              )}
+            <div
+              className="flex min-w-0 items-stretch rounded-lg border border-[var(--workbench-border)] bg-white"
               key={`${backlink.documentId}:${backlink.relation.id}`}
             >
-              <span
-                aria-hidden="true"
-                className="grid h-8 w-8 flex-none place-items-center rounded-md bg-[#e5f7f4] text-sm font-bold text-[var(--workbench-primary)]"
+              <a
+                className="flex min-h-[44px] min-w-0 flex-1 items-center gap-3 px-3 py-2.5 hover:bg-[#f2fbf9]"
+                href={createDocumentPath(
+                  backlink.documentId,
+                )}
               >
-                D
-              </span>
-              <span className="min-w-0 flex-1 truncate text-sm font-semibold text-[var(--workbench-text)]">
-                {backlink.documentTitle}
-              </span>
-              <span
-                aria-hidden="true"
-                className="text-[var(--workbench-muted)]"
-              >
-                →
-              </span>
-            </a>
+                <span
+                  aria-hidden="true"
+                  className="grid h-8 w-8 flex-none place-items-center rounded-md bg-[#e5f7f4] text-sm font-bold text-[var(--workbench-primary)]"
+                >
+                  D
+                </span>
+                <span className="min-w-0 flex-1 truncate text-sm font-semibold text-[var(--workbench-text)]">
+                  {backlink.documentTitle}
+                </span>
+                <span
+                  aria-hidden="true"
+                  className="text-[var(--workbench-muted)]"
+                >
+                  →
+                </span>
+              </a>
+              {accessToken && onPromoteToContext ? (
+                <button
+                  className="min-h-[44px] flex-none border-l border-[var(--workbench-border)] px-3 text-xs font-semibold text-[var(--workbench-primary)] hover:bg-[#f2fbf9]"
+                  data-testid={`related-document-promote-${backlink.documentId}`}
+                  disabled={Boolean(promotingDocumentId)}
+                  id={createRelatedDocumentPromotionTriggerId(
+                    backlink.documentId,
+                  )}
+                  onClick={() => void handlePromoteToContext(backlink)}
+                  type="button"
+                >
+                  {promotingDocumentId === backlink.documentId
+                    ? t('documents.related.promotingToContext')
+                    : t('documents.related.promoteToContext')}
+                </button>
+              ) : null}
+            </div>
           ))}
         </div>
+      ) : null}
+      {promotionErrorDocumentId ? (
+        <p className="text-sm font-semibold text-red-700" role="alert">
+          {t('documents.related.promoteToContextError')}
+        </p>
       ) : null}
       {data?.nextCursor ? (
         <button
@@ -154,6 +227,16 @@ export function RelatedDocuments({
       ) : null}
     </section>
   )
+}
+
+/**
+ * Creates a stable focus-return target for one related Document promotion action.
+ *
+ * @param documentId - Permission-filtered Document identifier.
+ * @returns DOM-safe button ID.
+ */
+function createRelatedDocumentPromotionTriggerId(documentId: string): string {
+  return `related-document-promote-${encodeURIComponent(documentId)}`
 }
 
 function mergeBacklinks(

@@ -171,6 +171,10 @@ export const documentsMessages = {
   'documents.related.empty': '参照しているドキュメントはまだありません。',
   'documents.related.error': '関連ドキュメントを読み込めませんでした。',
   'documents.related.openDocuments': 'ドキュメント一覧',
+  'documents.related.promoteToContext': '判断に追加',
+  'documents.related.promotingToContext': '開いています…',
+  'documents.related.promoteToContextError':
+    '現在の権限ではこのドキュメントを開けませんでした。',
   'documents.backlinks.openTarget': '開く',
   'documents.context.comments': 'コメント',
   'documents.context.backlinks': '関連',

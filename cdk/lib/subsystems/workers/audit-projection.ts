@@ -10,7 +10,7 @@ import * as sqs from 'aws-cdk-lib/aws-sqs';
 import type { LambdaBuildPaths } from '../../config/lambda-build-paths';
 import type { StackParameters } from '../../config/stack-parameters';
 import {
-  configureWorkspaceSearchWriterFence,
+  bindWorkspaceSearchWriterFence,
   type WorkspaceSearchWriterFenceResources,
 } from '../../policies/workspace-search-writer-fence';
 import type { DataStoreResources } from '../data-stores';
@@ -133,7 +133,7 @@ export function buildAuditProjectionWorker(
       },
     },
   );
-  configureWorkspaceSearchWriterFence(
+  bindWorkspaceSearchWriterFence(
     input.workspaceSearchWriterFence,
     collaborationProjectionFunction,
   );
@@ -174,6 +174,9 @@ export function buildAuditProjectionWorker(
   realtimeSessionsTable.grants.readWriteData(collaborationProjectionFunction);
   workItemsTable.grants.readData(collaborationProjectionFunction);
   workspaceAccessTable.grants.readData(collaborationProjectionFunction);
+  input.workspaceSearchWriterFence.workspaceSearchTable.grantWriteData(
+    collaborationProjectionFunction,
+  );
   collaborationProjectionFunction.addToRolePolicy(
     new iam.PolicyStatement({
       actions: ['dynamodb:GetItem'],

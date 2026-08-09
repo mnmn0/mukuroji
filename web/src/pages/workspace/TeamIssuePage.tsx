@@ -1,4 +1,5 @@
 import type {
+  CuratedContextSourceKind,
   PlanningSnapshot,
   ResolvedWorkItemConfiguration,
   WorkflowStatusDefinition,
@@ -52,6 +53,15 @@ import {
   type IssueCollaborationController,
   useIssueCollaboration,
 } from '../../issues/mutations/useIssueCollaboration'
+import {
+  readIssueCollaborationTab,
+  type IssueCollaborationTab,
+} from '../../issues/model/collaborationTabs'
+import { readIssueSourceKind } from '../../issues/model/contextSources'
+import {
+  createRelatedDocumentContextDraft,
+  type IssueContextDraft,
+} from '../../issues/model/contextDrafts'
 import {
   canManagePlanningWorkItemDependencyEndpoint,
   createPlanningAccessSnapshot,
@@ -238,6 +248,18 @@ type TeamIssueScreenProps = {
    * notification deep link の reply が属する root comment ID です。
    */
   focusedRootCommentId?: string
+  /** Collaboration section selected by route state. */
+  collaborationTab?: IssueCollaborationTab
+  /** Curated context item selected by a deep link. */
+  focusedContextItemId?: string
+  /** Source provenance selected by a deep link. */
+  focusedSourceId?: string
+  /** Source category that disambiguates legacy source-ID deep links. */
+  focusedSourceKind?: CuratedContextSourceKind
+  /** Activity event selected by a deep link. */
+  focusedActivityEventId?: string
+  /** Persists collaboration tab selection in route state. */
+  onCollaborationTabChange?: (tab: IssueCollaborationTab) => void
   /**
    * タスク担当者として選択できる project member 一覧です。
    */
@@ -316,6 +338,20 @@ export function TeamIssuePage() {
   const requestedIssueId = searchParams.get('issueId')?.trim() || undefined
   const focusedCommentId = searchParams.get('commentId')?.trim() || undefined
   const focusedRootCommentId = searchParams.get('rootCommentId')?.trim() || undefined
+  const focusedContextItemId = searchParams.get('contextItemId')?.trim() || undefined
+  const focusedSourceId = searchParams.get('sourceId')?.trim() || undefined
+  const focusedSourceKind = readIssueSourceKind(searchParams.get('sourceKind'))
+  const focusedActivityEventId = searchParams.get('activityEventId')?.trim() || undefined
+  const requestedCollaborationTab = searchParams.get('collaborationTab')
+  const collaborationTab = requestedCollaborationTab
+    ? readIssueCollaborationTab(requestedCollaborationTab)
+    : focusedContextItemId
+      ? 'decisions'
+      : focusedSourceId
+        ? 'sources'
+        : focusedActivityEventId
+          ? 'activity'
+          : 'conversation'
   const isCreateIssueRequested = searchParams.get('create') === '1'
   const t = useMemo(() => createTranslator(locale), [locale])
   const accessToken = session?.accessToken
@@ -651,6 +687,26 @@ export function TeamIssuePage() {
     }
   }
 
+  /** Persists collaboration section navigation for the selected Team Work Item. */
+  const handleCollaborationTabChange = (tab: IssueCollaborationTab) => {
+    const nextSearchParams = new URLSearchParams(searchParams)
+
+    if (tab === 'conversation') {
+      nextSearchParams.delete('collaborationTab')
+    } else {
+      nextSearchParams.set('collaborationTab', tab)
+    }
+    if (tab !== 'conversation') {
+      nextSearchParams.delete('commentId')
+      nextSearchParams.delete('rootCommentId')
+    }
+    if (tab !== 'decisions') nextSearchParams.delete('contextItemId')
+    if (tab !== 'sources') nextSearchParams.delete('sourceId')
+    if (tab !== 'activity') nextSearchParams.delete('activityEventId')
+
+    setSearchParams(nextSearchParams, { replace: true })
+  }
+
   return (
     <TeamIssueScreen
       accessToken={accessToken}
@@ -658,6 +714,7 @@ export function TeamIssuePage() {
       artifacts={artifacts}
       canManageDependencyEndpoint={canManageDependencyEndpoint}
       collaboration={collaboration}
+      collaborationTab={collaborationTab}
       canManageExternalLinks={canManageStructure}
       configurationErrorMessage={configurationErrorMessage}
       currentWorkspaceMemberKey={workspaceAccess?.currentMember.memberKey}
@@ -665,7 +722,11 @@ export function TeamIssuePage() {
       externalLinksAccessToken={accessToken}
       defaultCreateIssueOpen={isCreateIssueRequested}
       focusedCommentId={focusedCommentId}
+      focusedContextItemId={focusedContextItemId}
+      focusedActivityEventId={focusedActivityEventId}
       focusedRootCommentId={focusedRootCommentId}
+      focusedSourceId={focusedSourceId}
+      focusedSourceKind={focusedSourceKind}
       issueErrorMessage={issueErrorMessage}
       issues={screenIssues}
       isLoading={isLoading}
@@ -674,6 +735,7 @@ export function TeamIssuePage() {
       key={teamId}
       locale={locale}
       onAddRelation={canMutateContent ? handleAddRelation : undefined}
+      onCollaborationTabChange={handleCollaborationTabChange}
       onCreateIssue={canMutateContent && !workItemConfigurationError ? handleCreateIssue : undefined}
       onCreateScheduleDependency={accessToken && planningSnapshot
         ? dependencyMutations.create
@@ -717,13 +779,18 @@ export function TeamIssueScreen({
   canManageDependencyEndpoint,
   canManageExternalLinks = false,
   collaboration,
+  collaborationTab,
   configurationErrorMessage,
   currentWorkspaceMemberKey,
   defaultCreateIssueOpen = false,
   detailErrorMessage,
   externalLinksAccessToken,
   focusedCommentId,
+  focusedContextItemId,
+  focusedActivityEventId,
   focusedRootCommentId,
+  focusedSourceId,
+  focusedSourceKind,
   initialViewMode = 'table',
   issueErrorMessage,
   issues = [],
@@ -732,6 +799,7 @@ export function TeamIssueScreen({
   isRelationsLoading = false,
   locale,
   onAddRelation,
+  onCollaborationTabChange,
   onCreateIssue,
   onCreateScheduleDependency,
   onDeleteRelation,
@@ -1042,16 +1110,22 @@ export function TeamIssueScreen({
                 canManageDependencyEndpoint={canManageDependencyEndpoint}
                 canManageExternalLinks={canManageExternalLinks}
                 collaboration={collaboration}
+                collaborationTab={collaborationTab}
                 configuration={configuration}
                 currentWorkspaceMemberKey={currentWorkspaceMemberKey}
                 detailErrorMessage={detailErrorMessage ?? detailErrorMessageLocal}
                 externalLinksAccessToken={externalLinksAccessToken}
                 focusedCommentId={focusedCommentId}
+                focusedContextItemId={focusedContextItemId}
+                focusedActivityEventId={focusedActivityEventId}
                 focusedRootCommentId={focusedRootCommentId}
+                focusedSourceId={focusedSourceId}
+                focusedSourceKind={focusedSourceKind}
                 issue={selectedIssue}
                 isRelationsLoading={isRelationsLoading}
                 locale={locale}
                 onAddRelation={onAddRelation}
+                onCollaborationTabChange={onCollaborationTabChange}
                 onCreateScheduleDependency={onCreateScheduleDependency}
                 onDeleteRelation={onDeleteRelation}
                 onDeleteScheduleDependency={onDeleteScheduleDependency}
@@ -1718,16 +1792,22 @@ function IssueDetailPane({
   canManageDependencyEndpoint,
   canManageExternalLinks,
   collaboration,
+  collaborationTab,
   configuration,
   currentWorkspaceMemberKey,
   detailErrorMessage,
   externalLinksAccessToken,
   focusedCommentId,
+  focusedContextItemId,
+  focusedActivityEventId,
   focusedRootCommentId,
+  focusedSourceId,
+  focusedSourceKind,
   issue,
   isRelationsLoading,
   locale,
   onAddRelation,
+  onCollaborationTabChange,
   onCreateScheduleDependency,
   onDeleteRelation,
   onDeleteScheduleDependency,
@@ -1747,16 +1827,22 @@ function IssueDetailPane({
   canManageDependencyEndpoint?: WorkItemDependencyPanelProps['canManageEndpoint']
   canManageExternalLinks: boolean
   collaboration?: IssueCollaborationController
+  collaborationTab?: IssueCollaborationTab
   configuration?: WorkItemConfiguration
   currentWorkspaceMemberKey?: string
   detailErrorMessage?: string
   externalLinksAccessToken?: string
   focusedCommentId?: string
+  focusedContextItemId?: string
+  focusedActivityEventId?: string
   focusedRootCommentId?: string
+  focusedSourceId?: string
+  focusedSourceKind?: CuratedContextSourceKind
   issue?: TeamIssue
   isRelationsLoading: boolean
   locale: Locale
   onAddRelation?: (issueId: string, input: WorkItemRelationEditorInput) => Promise<void>
+  onCollaborationTabChange?: (tab: IssueCollaborationTab) => void
   /** Creates a canonical schedule dependency. */
   onCreateScheduleDependency?: TeamIssueScreenProps['onCreateScheduleDependency']
   onDeleteRelation?: (issueId: string, relation: WorkItemRelation) => Promise<void>
@@ -1789,17 +1875,23 @@ function IssueDetailPane({
       canManageDependencyEndpoint={canManageDependencyEndpoint}
       canManageExternalLinks={canManageExternalLinks}
       collaboration={collaboration}
+      collaborationTab={collaborationTab}
       configuration={configuration}
       currentWorkspaceMemberKey={currentWorkspaceMemberKey}
       detailErrorMessage={detailErrorMessage}
       externalLinksAccessToken={externalLinksAccessToken}
       focusedCommentId={focusedCommentId}
+      focusedContextItemId={focusedContextItemId}
+      focusedActivityEventId={focusedActivityEventId}
       focusedRootCommentId={focusedRootCommentId}
+      focusedSourceId={focusedSourceId}
+      focusedSourceKind={focusedSourceKind}
       issue={issue}
       isRelationsLoading={isRelationsLoading}
       key={issue.id}
       locale={locale}
       onAddRelation={onAddRelation}
+      onCollaborationTabChange={onCollaborationTabChange}
       onCreateScheduleDependency={onCreateScheduleDependency}
       onDeleteRelation={onDeleteRelation}
       onDeleteScheduleDependency={onDeleteScheduleDependency}
@@ -1822,16 +1914,22 @@ function IssueDetailContent({
   canManageDependencyEndpoint,
   canManageExternalLinks,
   collaboration,
+  collaborationTab,
   configuration,
   currentWorkspaceMemberKey,
   detailErrorMessage,
   externalLinksAccessToken,
   focusedCommentId,
+  focusedContextItemId,
+  focusedActivityEventId,
   focusedRootCommentId,
+  focusedSourceId,
+  focusedSourceKind,
   issue,
   isRelationsLoading,
   locale,
   onAddRelation,
+  onCollaborationTabChange,
   onCreateScheduleDependency,
   onDeleteRelation,
   onDeleteScheduleDependency,
@@ -1856,6 +1954,8 @@ function IssueDetailContent({
   canManageExternalLinks: boolean
   /** 選択中 Issue の discussion controller です。 */
   collaboration?: IssueCollaborationController
+  /** Collaboration section selected by route state. */
+  collaborationTab?: IssueCollaborationTab
   /** 選択中 Issue に適用する configuration です。 */
   configuration?: WorkItemConfiguration
   /** 現在の Workspace member key です。 */
@@ -1866,8 +1966,16 @@ function IssueDetailContent({
   externalLinksAccessToken?: string
   /** notification deep link から focus する comment ID です。 */
   focusedCommentId?: string
+  /** Curated context item selected by a deep link. */
+  focusedContextItemId?: string
+  /** Activity event selected by a deep link. */
+  focusedActivityEventId?: string
   /** notification deep link の reply が属する root comment ID です。 */
   focusedRootCommentId?: string
+  /** Source provenance selected by a deep link. */
+  focusedSourceId?: string
+  /** Source category that disambiguates legacy source-ID deep links. */
+  focusedSourceKind?: CuratedContextSourceKind
   /** 編集対象 Issue です。 */
   issue: TeamIssue
   /** Relation 候補の取得中かどうかです。 */
@@ -1876,6 +1984,8 @@ function IssueDetailContent({
   locale: Locale
   /** Relation 追加 callback です。 */
   onAddRelation?: (issueId: string, input: WorkItemRelationEditorInput) => Promise<void>
+  /** Persists collaboration section navigation in route state. */
+  onCollaborationTabChange?: (tab: IssueCollaborationTab) => void
   /** Creates a canonical schedule dependency. */
   onCreateScheduleDependency?: TeamIssueScreenProps['onCreateScheduleDependency']
   /** Relation 解除 callback です。 */
@@ -1904,6 +2014,8 @@ function IssueDetailContent({
     value: issue.assignedProjectId ?? '',
   })
   const [fieldErrors, setFieldErrors] = useState<Readonly<Record<string, string | undefined>>>({})
+  const [documentContextDraft, setDocumentContextDraft] =
+    useState<IssueContextDraft>()
   const selectedProjectId = selectedProject.revision === issue.revision
     ? selectedProject.value
     : issue.assignedProjectId ?? ''
@@ -2126,20 +2238,41 @@ function IssueDetailContent({
       </div>
       <RelatedDocuments
         accessToken={accessToken}
+        onPromoteToContext={
+          collaboration?.context.capabilities.canCreate
+              ? (backlink, document, returnFocusId) => {
+                  setDocumentContextDraft(
+                    {
+                      ...createRelatedDocumentContextDraft(backlink, document),
+                      returnFocusId,
+                    },
+                  )
+                  onCollaborationTabChange?.('decisions')
+                }
+            : undefined
+        }
         t={t}
         targetId={`team/${issue.teamId}/issue/${issue.id}`}
         targetKind="work-item"
       />
       {collaboration ? (
         <IssueCollaborationPanel
+          activeTab={collaborationTab}
           artifacts={artifacts}
+          contextDraft={documentContextDraft}
           key={`${issue.teamId}:${issue.id}`}
           controller={collaboration}
           currentMemberKey={currentWorkspaceMemberKey}
           focusedCommentId={focusedCommentId}
+          focusedContextItemId={focusedContextItemId}
+          focusedActivityEventId={focusedActivityEventId}
           focusedRootCommentId={focusedRootCommentId}
+          focusedSourceId={focusedSourceId}
+          focusedSourceKind={focusedSourceKind}
           locale={locale}
           members={workspaceMembers}
+          onTabChange={onCollaborationTabChange}
+          onContextDraftConsumed={() => setDocumentContextDraft(undefined)}
         />
       ) : null}
     </aside>

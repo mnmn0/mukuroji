@@ -85,7 +85,7 @@ type SavedViewDraft = {
   teamId: string
 }
 
-const searchEntityTypes = ['work-item', 'project', 'team', 'comment', 'file', 'document'] as const satisfies readonly SearchEntityType[]
+const searchEntityTypes = ['work-item', 'project', 'team', 'comment', 'context-item', 'file', 'document'] as const satisfies readonly SearchEntityType[]
 const searchLayoutModes = ['table', 'board', 'calendar', 'timeline'] as const satisfies readonly SearchViewLayoutMode[]
 const searchCustomFieldOperators = [
   'equals',

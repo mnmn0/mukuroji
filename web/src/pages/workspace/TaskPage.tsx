@@ -1,6 +1,7 @@
 import type {
   BulkOperationPreview,
   BulkOperationRequest,
+  CuratedContextSourceKind,
   ResolvedWorkItemConfiguration,
   WorkItemDependencyEndpoint,
   WorkItemRelation,
@@ -61,6 +62,11 @@ import {
   useTeamIssues,
 } from '../../issues/queries/useWorkItems'
 import { useIssueCollaboration } from '../../issues/mutations/useIssueCollaboration'
+import {
+  readIssueCollaborationTab,
+  type IssueCollaborationTab,
+} from '../../issues/model/collaborationTabs'
+import { readIssueSourceKind } from '../../issues/model/contextSources'
 import {
   createProjectIssuesPath,
 } from '../../shared/routing/paths'
@@ -170,6 +176,21 @@ export function TaskPage() {
   const selectedIssueId = searchParams.get('issueId') ?? undefined
   const focusedCommentId = searchParams.get('commentId')?.trim() || undefined
   const focusedRootCommentId = searchParams.get('rootCommentId')?.trim() || undefined
+  const focusedContextItemId = searchParams.get('contextItemId')?.trim() || undefined
+  const focusedSourceId = searchParams.get('sourceId')?.trim() || undefined
+  const focusedSourceKind: CuratedContextSourceKind | undefined =
+    readIssueSourceKind(searchParams.get('sourceKind'))
+  const focusedActivityEventId = searchParams.get('activityEventId')?.trim() || undefined
+  const requestedCollaborationTab = searchParams.get('collaborationTab')
+  const collaborationTab = requestedCollaborationTab
+    ? readIssueCollaborationTab(requestedCollaborationTab)
+    : focusedContextItemId
+      ? 'decisions'
+      : focusedSourceId
+        ? 'sources'
+        : focusedActivityEventId
+          ? 'activity'
+          : 'conversation'
   const isCreateTaskRequested = searchParams.get('create') === '1'
   const [session] = useState(() => getAuthSession())
   const [locale] = useState<Locale>(() => getInitialLocale())
@@ -573,6 +594,10 @@ export function TaskPage() {
     nextSearchParams.delete('issueId')
     nextSearchParams.delete('commentId')
     nextSearchParams.delete('rootCommentId')
+    nextSearchParams.delete('contextItemId')
+    nextSearchParams.delete('sourceId')
+    nextSearchParams.delete('activityEventId')
+    nextSearchParams.delete('collaborationTab')
     setSearchParams(nextSearchParams, {
       replace: true,
       state: ambiguousIssueSelectionLocationState,
@@ -692,6 +717,26 @@ export function TaskPage() {
 
     setIssueUpdateError(undefined)
     navigate(createProjectIssuesPath(task.assignedProjectId ?? projectId, nextTeamId, task.id))
+  }
+
+  /** Persists collaboration section navigation without leaving the selected Work Item. */
+  const handleCollaborationTabChange = (tab: IssueCollaborationTab) => {
+    const nextSearchParams = new URLSearchParams(searchParams)
+
+    if (tab === 'conversation') {
+      nextSearchParams.delete('collaborationTab')
+    } else {
+      nextSearchParams.set('collaborationTab', tab)
+    }
+    if (tab !== 'conversation') {
+      nextSearchParams.delete('commentId')
+      nextSearchParams.delete('rootCommentId')
+    }
+    if (tab !== 'decisions') nextSearchParams.delete('contextItemId')
+    if (tab !== 'sources') nextSearchParams.delete('sourceId')
+    if (tab !== 'activity') nextSearchParams.delete('activityEventId')
+
+    setSearchParams(nextSearchParams, { replace: true })
   }
 
   /** Updates a visible Work Item with optimistic cache projection and conflict rollback. */
@@ -987,11 +1032,16 @@ export function TaskPage() {
       canManageProjectMembers={canManageProjectMembers}
       canManageScheduleDependencyEndpoint={canManageScheduleDependencyEndpoint}
       collaboration={collaboration}
+      collaborationTab={collaborationTab}
       artifacts={issueArtifacts}
       currentWorkspaceMemberKey={workspaceAccess?.currentMember.memberKey}
       detailErrorMessage={detailErrorMessage}
       defaultCreateTaskOpen={isCreateTaskRequested}
       focusedCommentId={focusedCommentId}
+      focusedContextItemId={focusedContextItemId}
+      focusedSourceId={focusedSourceId}
+      focusedSourceKind={focusedSourceKind}
+      focusedActivityEventId={focusedActivityEventId}
       focusedRootCommentId={focusedRootCommentId}
       initialSelectedTaskId={resolvedSelectedIssue?.id}
       isAssigneeOptionsLoading={Boolean(projectMembersKey && isProjectMembersLoading)}
@@ -999,6 +1049,7 @@ export function TaskPage() {
       isSelectedIssueDetailLoading={Boolean(issueDetailKey && isSelectedIssueDetailLoading)}
       isSystemAdmin={user?.isSystemAdmin}
       onLoadMoreProjectUsers={canManageProjectMembers ? handleLoadMoreProjectUsers : undefined}
+      onCollaborationTabChange={handleCollaborationTabChange}
       onProjectUserQueryChange={canManageProjectMembers ? setProjectUserQuery : undefined}
       onProjectQuickAccessToggle={handleProjectQuickAccessToggle}
       onRemoveProjectMember={canManageProjectMembers ? handleRemoveProjectMember : undefined}
