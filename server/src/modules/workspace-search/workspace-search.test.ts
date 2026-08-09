@@ -2,11 +2,12 @@ import { expect, spyOn, test } from 'bun:test'
 import {
   CreateTableCommand,
   DescribeTableCommand,
-  type DynamoDBClient,
+  DynamoDBClient,
 } from '@aws-sdk/client-dynamodb'
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import type { TaskViewDefinition } from '@mukuroji/contracts'
 import {
+  type CreateTaskViewRequest,
   DynamoDbWorkspaceSearchClient,
   WorkspaceSearchError,
   createCommentWorkspaceSearchDocument,
@@ -2756,7 +2757,7 @@ test('replays task view deletion from a durable actor-bound receipt', async () =
   })).rejects.toMatchObject({ code: 'TaskViewNotFound', status: 404 })
 })
 
-test('rejects task view updates when a concurrent delete installs a same-revision tombstone', async () => {
+test('rejects task view updates when a concurrent delete removes the live row', async () => {
   const control: NonNullable<Parameters<typeof createMemoryDocumentClient>[1]> = {}
   const client = new DynamoDbWorkspaceSearchClient(
     'search-table',
@@ -2804,11 +2805,13 @@ test('rejects task view updates when a concurrent delete installs a same-revisio
   const preferenceTarget = await createView('Preference target')
 
   control.beforeNextTransaction = (items) => {
-    const recordKey = createTaskViewRecordKey(definitionTarget.id)
-    items.set(`workspace-1\0${recordKey}`, {
+    const liveRecordKey = createTaskViewRecordKey(definitionTarget.id)
+    const tombstoneRecordKey = `TASK_VIEW_TOMBSTONE#${definitionTarget.id}`
+    items.delete(`workspace-1\0${liveRecordKey}`)
+    items.set(`workspace-1\0${tombstoneRecordKey}`, {
       schemaVersion: 1,
       workspaceId: 'workspace-1',
-      recordKey,
+      recordKey: tombstoneRecordKey,
       entryType: 'task-view-tombstone',
       id: definitionTarget.id,
       revision: definitionTarget.revision,
@@ -2823,11 +2826,13 @@ test('rejects task view updates when a concurrent delete installs a same-revisio
   })).rejects.toMatchObject({ code: 'TaskViewRevisionConflict', status: 409 })
 
   control.beforeNextTransaction = (items) => {
-    const recordKey = createTaskViewRecordKey(preferenceTarget.id)
-    items.set(`workspace-1\0${recordKey}`, {
+    const liveRecordKey = createTaskViewRecordKey(preferenceTarget.id)
+    const tombstoneRecordKey = `TASK_VIEW_TOMBSTONE#${preferenceTarget.id}`
+    items.delete(`workspace-1\0${liveRecordKey}`)
+    items.set(`workspace-1\0${tombstoneRecordKey}`, {
       schemaVersion: 1,
       workspaceId: 'workspace-1',
-      recordKey,
+      recordKey: tombstoneRecordKey,
       entryType: 'task-view-tombstone',
       id: preferenceTarget.id,
       revision: preferenceTarget.revision,
@@ -2842,10 +2847,99 @@ test('rejects task view updates when a concurrent delete installs a same-revisio
   })).rejects.toMatchObject({ code: 'TaskViewRevisionConflict', status: 409 })
 })
 
-test('prevents idempotent recreation from reviving another viewer preference lifecycle', async () => {
+test('returns a stable conflict when deletion commits between create replay reads', async () => {
+  const control: NonNullable<Parameters<typeof createMemoryDocumentClient>[1]> = {}
   const client = new DynamoDbWorkspaceSearchClient(
     'search-table',
-    createMemoryDocumentClient([]),
+    createMemoryDocumentClient([], control),
+    new DynamoDBClient({}),
+    false,
+  )
+  const access = {
+    viewerUserId: 'owner@example.com',
+    isSystemAdmin: false,
+    canAccessWorkspaceScope: true,
+    canWriteWorkspaceScope: true,
+    canManageSharedViews: false,
+    canWrite: true,
+    teamIds: new Set<string>(),
+    writableTeamIds: new Set<string>(),
+    manageableTeamIds: new Set<string>(),
+    projectIds: new Set<string>(),
+    writableProjectIds: new Set<string>(),
+    projectScopeKeys: new Set<string>(),
+    writableProjectScopeKeys: new Set<string>(),
+  }
+  const createRequest: CreateTaskViewRequest = {
+    workspaceId: 'workspace-1',
+    access,
+    idempotencyKey: 'delete-between-replay-reads',
+    input: {
+      name: 'Delete during replay',
+      visibility: 'personal',
+      definition: {
+        surface: 'my-tasks',
+        scope: { kind: 'viewer' },
+        filters: {},
+        layout: {
+          mode: 'list',
+          sort: [],
+          columns: [{ field: 'title' }],
+          density: 'compact',
+          displayOptions: {},
+        },
+      },
+    },
+  }
+  const created = await client.createTaskView(createRequest)
+  let liveReadCount = 0
+  control.beforeGet = (items, workspaceId, recordKey) => {
+    const liveRecordKey = createTaskViewRecordKey(created.id)
+    if (workspaceId !== 'workspace-1' || recordKey !== liveRecordKey) return
+    liveReadCount += 1
+    if (liveReadCount !== 2) return
+    const mapKey = `${workspaceId}\0${recordKey}`
+    const liveView = items.get(mapKey)
+    if (
+      !liveView ||
+      typeof liveView.createIdempotencyKeyHash !== 'string' ||
+      typeof liveView.createRequestFingerprint !== 'string' ||
+      typeof liveView.revision !== 'number'
+    ) {
+      throw new Error('Expected an idempotent live task view.')
+    }
+    const tombstoneRecordKey = `TASK_VIEW_TOMBSTONE#${created.id}`
+    items.delete(mapKey)
+    items.set(`${workspaceId}\0${tombstoneRecordKey}`, {
+      schemaVersion: 1,
+      workspaceId,
+      recordKey: tombstoneRecordKey,
+      entryType: 'task-view-tombstone',
+      id: created.id,
+      revision: liveView.revision,
+      createIdempotencyKeyHash: liveView.createIdempotencyKeyHash,
+      createRequestFingerprint: liveView.createRequestFingerprint,
+      deletedAt: '2026-08-09T00:00:00.000Z',
+    })
+  }
+
+  expect(client.createTaskView(createRequest)).rejects.toMatchObject({
+    code: 'TaskViewIdempotencyConflict',
+    status: 409,
+  })
+  expect(liveReadCount).toBe(2)
+})
+
+test('prevents idempotent recreation from reviving another viewer preference lifecycle', async () => {
+  const liveListPages: string[][] = []
+  const control: NonNullable<Parameters<typeof createMemoryDocumentClient>[1]> = {
+    observeQuery(prefix, recordKeys) {
+      if (prefix === 'TASK_VIEW#') liveListPages.push([...recordKeys])
+    },
+  }
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([], control),
     {} as DynamoDBClient,
     false,
   )
@@ -2904,6 +2998,16 @@ test('prevents idempotent recreation from reviving another viewer preference lif
       defaultSource: 'personal',
     },
   })
+  let deletionTombstoneRecordKey: string | undefined
+  control.beforeNextTransaction = (_items, transactItems) => {
+    const tombstone = transactItems
+      .flatMap((item) => isMemoryRecord(item.Put?.Item) ? [item.Put.Item] : [])
+      .find((item) => item.entryType === 'task-view-tombstone')
+    if (!tombstone || typeof tombstone.recordKey !== 'string') {
+      throw new Error('Expected a task view deletion tombstone.')
+    }
+    deletionTombstoneRecordKey = tombstone.recordKey
+  }
   await client.deleteTaskView({
     workspaceId: 'workspace-1',
     viewId: created.id,
@@ -2911,10 +3015,20 @@ test('prevents idempotent recreation from reviving another viewer preference lif
     access: ownerAccess,
   })
 
+  const expectedTombstoneRecordKey = `TASK_VIEW_TOMBSTONE#${created.id}`
+  expect(deletionTombstoneRecordKey).toBe(expectedTombstoneRecordKey)
+  let createTombstoneBlockerObserved = false
+  control.beforeNextTransaction = (_items, transactItems) => {
+    createTombstoneBlockerObserved = transactItems.some((item) => {
+      const key = item.ConditionCheck?.Key
+      return isMemoryRecord(key) && key.recordKey === expectedTombstoneRecordKey
+    })
+  }
   expect(client.createTaskView(createRequest)).rejects.toMatchObject({
     code: 'TaskViewIdempotencyConflict',
     status: 409,
   })
+  expect(createTombstoneBlockerObserved).toBeTrue()
   expect(await client.listTaskViews({
     workspaceId: 'workspace-1',
     access: memberAccess,
@@ -2927,6 +3041,7 @@ test('prevents idempotent recreation from reviving another viewer preference lif
     },
     views: [],
   })
+  expect(liveListPages).toEqual([[]])
   const recreated = await client.createTaskView({
     workspaceId: createRequest.workspaceId,
     access: createRequest.access,
@@ -2989,6 +3104,14 @@ function createMemoryDocumentClient(
       items: Map<string, Record<string, unknown>>,
       transactItems: Array<Record<string, Record<string, unknown>>>,
     ) => void
+    /** Observes the record keys returned by each in-memory query page. */
+    observeQuery?: (prefix: string, recordKeys: readonly string[]) => void
+    /** Mutates or observes in-memory state immediately before one point read. */
+    beforeGet?: (
+      items: Map<string, Record<string, unknown>>,
+      workspaceId: string,
+      recordKey: string,
+    ) => void
   } = {},
 ) {
   const items = new Map(
@@ -3030,6 +3153,10 @@ function createMemoryDocumentClient(
         )
         const limit = typeof input.Limit === 'number' ? input.Limit : matching.length
         const page = matching.slice(0, limit)
+        control.observeQuery?.(
+          prefix,
+          page.map((item) => String(item.recordKey)),
+        )
         return {
           Items: page.map((item) => structuredClone(item)),
           ScannedCount: page.length,
@@ -3045,6 +3172,13 @@ function createMemoryDocumentClient(
       }
       const key = input.Key as { workspaceId?: string; recordKey?: string } | undefined
       if (key) {
+        if (command.constructor.name !== 'DeleteCommand') {
+          control.beforeGet?.(
+            items,
+            String(key.workspaceId),
+            String(key.recordKey),
+          )
+        }
         const mapKey = `${String(key.workspaceId)}\0${String(key.recordKey)}`
         if (command.constructor.name === 'DeleteCommand') {
           items.delete(mapKey)

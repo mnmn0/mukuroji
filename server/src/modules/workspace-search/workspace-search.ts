@@ -82,6 +82,9 @@ export const WORKSPACE_TASK_VIEW_DEFAULT_PREFIX = 'TASK_VIEW_DEFAULT#'
 /** Workspace search table prefix for durable task view mutation receipts. */
 const WORKSPACE_TASK_VIEW_MUTATION_RECEIPT_PREFIX = 'TASK_VIEW_MUTATION_RECEIPT#'
 
+/** Workspace search table prefix for durable task view deletion tombstones. */
+const WORKSPACE_TASK_VIEW_TOMBSTONE_PREFIX = 'TASK_VIEW_TOMBSTONE#'
+
 /** Task view update/delete retries are replayable for 24 hours after commit. */
 const TASK_VIEW_MUTATION_RECEIPT_TTL_SECONDS = 24 * 60 * 60
 
@@ -682,7 +685,7 @@ type StoredTaskViewTombstone = {
   schemaVersion: typeof TASK_VIEW_SCHEMA_VERSION
   /** DynamoDB partition key. */
   workspaceId: string
-  /** DynamoDB sort key retained from the deleted view. */
+  /** DynamoDB sort key in the dedicated tombstone namespace. */
   recordKey: string
   /** Single-table row discriminator. */
   entryType: typeof TASK_VIEW_TOMBSTONE_ENTRY_TYPE
@@ -697,9 +700,6 @@ type StoredTaskViewTombstone = {
   /** Timestamp at which the view was deleted. */
   deletedAt: string
 }
-
-/** Persisted task view record, including durable deletion markers. */
-type StoredTaskViewRecord = StoredTaskView | StoredTaskViewTombstone
 
 /** DynamoDB に保存する viewer 別 task view preference row です。 */
 type StoredTaskViewPreference = {
@@ -930,6 +930,19 @@ export function createSavedWorkspaceViewRecordKey(viewId: string) {
  */
 export function createTaskViewRecordKey(viewId: string) {
   return `${WORKSPACE_TASK_VIEW_PREFIX}${requireIdentifier(viewId, 'Task view ID')}`
+}
+
+/**
+ * Creates the canonical deletion tombstone record key from a task view ID.
+ *
+ * @param viewId - Workspace-unique task view identifier.
+ * @returns Server-owned DynamoDB record key outside the live task view namespace.
+ */
+function createTaskViewTombstoneRecordKey(viewId: string) {
+  return `${WORKSPACE_TASK_VIEW_TOMBSTONE_PREFIX}${requireIdentifier(
+    viewId,
+    'Task view ID',
+  )}`
 }
 
 /**
@@ -1981,10 +1994,8 @@ export class DynamoDbWorkspaceSearchClient {
       const items = response.Items ?? []
       let lastProcessedRecordKey: string | undefined
       for (const [itemIndex, item] of items.entries()) {
-        const record = readStoredTaskViewRecord(item)
-        lastProcessedRecordKey = record.recordKey
-        if (record.entryType === TASK_VIEW_TOMBSTONE_ENTRY_TYPE) continue
-        const view = record
+        const view = readStoredTaskView(item)
+        lastProcessedRecordKey = view.recordKey
         if (
           matchesTaskViewListFilter(view, surface, scope) &&
           canReadTaskView(view, input.access)
@@ -2167,6 +2178,16 @@ export class DynamoDbWorkspaceSearchClient {
         Put: {
           TableName: this.tableName,
           Item: stored,
+          ConditionExpression: 'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
+        },
+      },
+      {
+        ConditionCheck: {
+          TableName: this.tableName,
+          Key: {
+            workspaceId,
+            recordKey: createTaskViewTombstoneRecordKey(id),
+          },
           ConditionExpression: 'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
         },
       },
@@ -2662,7 +2683,7 @@ export class DynamoDbWorkspaceSearchClient {
     const tombstone: StoredTaskViewTombstone = {
       schemaVersion: TASK_VIEW_SCHEMA_VERSION,
       workspaceId,
-      recordKey: current.recordKey,
+      recordKey: createTaskViewTombstoneRecordKey(current.id),
       entryType: TASK_VIEW_TOMBSTONE_ENTRY_TYPE,
       id: current.id,
       revision: current.revision,
@@ -2696,15 +2717,22 @@ export class DynamoDbWorkspaceSearchClient {
     ])
     const transactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [
       {
-        Put: {
+        Delete: {
           TableName: this.tableName,
-          Item: tombstone,
+          Key: { workspaceId, recordKey: current.recordKey },
           ConditionExpression: '#revision = :expectedRevision AND #entryType = :entryType',
           ExpressionAttributeNames: { '#revision': 'revision', '#entryType': 'entryType' },
           ExpressionAttributeValues: {
             ':expectedRevision': expectedRevision,
             ':entryType': 'task-view',
           },
+        },
+      },
+      {
+        Put: {
+          TableName: this.tableName,
+          Item: tombstone,
+          ConditionExpression: 'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
         },
       },
       {
@@ -2846,20 +2874,24 @@ export class DynamoDbWorkspaceSearchClient {
     return response.Item ? readStoredDefaultView(response.Item) : undefined
   }
 
-  /** Strongly reads a task view definition or deletion tombstone. */
-  private async getTaskViewRecord(workspaceId: string, viewId: string) {
+  /** Strongly reads a live task view definition when one exists. */
+  private async getTaskViewIfPresent(workspaceId: string, viewId: string) {
     const response = await this.documentClient.send(new GetCommand({
       TableName: this.tableName,
       Key: { workspaceId, recordKey: createTaskViewRecordKey(viewId) },
       ConsistentRead: true,
     }))
-    return response.Item ? readStoredTaskViewRecord(response.Item) : undefined
+    return response.Item ? readStoredTaskView(response.Item) : undefined
   }
 
-  /** Strongly reads a live task view definition and hides durable deletion tombstones. */
-  private async getTaskViewIfPresent(workspaceId: string, viewId: string) {
-    const record = await this.getTaskViewRecord(workspaceId, viewId)
-    return record?.entryType === 'task-view' ? record : undefined
+  /** Strongly reads a task view deletion tombstone when one exists. */
+  private async getTaskViewTombstoneIfPresent(workspaceId: string, viewId: string) {
+    const response = await this.documentClient.send(new GetCommand({
+      TableName: this.tableName,
+      Key: { workspaceId, recordKey: createTaskViewTombstoneRecordKey(viewId) },
+      ConsistentRead: true,
+    }))
+    return response.Item ? readStoredTaskViewTombstone(response.Item) : undefined
   }
 
   /**
@@ -2942,23 +2974,62 @@ export class DynamoDbWorkspaceSearchClient {
       ownerUserId,
       idempotencyKey,
     )
-    const record = await this.getTaskViewRecord(workspaceId, idempotencyHash)
-    if (!record) return undefined
+    const liveView = await this.getTaskViewIfPresent(workspaceId, idempotencyHash)
+    if (liveView) {
+      if (
+        liveView.createIdempotencyKeyHash !== idempotencyHash ||
+        liveView.createRequestFingerprint !== requestFingerprint ||
+        liveView.ownerUserId !== ownerUserId
+      ) {
+        throw createTaskViewIdempotencyConflict()
+      }
+      try {
+        return await this.getTaskView({ workspaceId, viewId: liveView.id, access })
+      } catch (error) {
+        if (
+          !(error instanceof WorkspaceSearchError) ||
+          error.code !== 'TaskViewNotFound'
+        ) {
+          throw error
+        }
+        await this.rejectDeletedTaskViewIdempotencyReplay(
+          workspaceId,
+          idempotencyHash,
+          requestFingerprint,
+        )
+        throw error
+      }
+    }
+    await this.rejectDeletedTaskViewIdempotencyReplay(
+      workspaceId,
+      idempotencyHash,
+      requestFingerprint,
+    )
+    return undefined
+  }
+
+  /** Rejects a create replay when its deterministic lifecycle has been deleted. */
+  private async rejectDeletedTaskViewIdempotencyReplay(
+    workspaceId: string,
+    idempotencyHash: string,
+    requestFingerprint: string,
+  ) {
+    const tombstone = await this.getTaskViewTombstoneIfPresent(
+      workspaceId,
+      idempotencyHash,
+    )
+    if (!tombstone) return
     if (
-      record.createIdempotencyKeyHash !== idempotencyHash ||
-      record.createRequestFingerprint !== requestFingerprint ||
-      (record.entryType === 'task-view' && record.ownerUserId !== ownerUserId)
+      tombstone.createIdempotencyKeyHash !== idempotencyHash ||
+      tombstone.createRequestFingerprint !== requestFingerprint
     ) {
       throw createTaskViewIdempotencyConflict()
     }
-    if (record.entryType === TASK_VIEW_TOMBSTONE_ENTRY_TYPE) {
-      throw new WorkspaceSearchError(
-        409,
-        'TaskViewIdempotencyConflict',
-        'Idempotent task view result was deleted and cannot be recreated.',
-      )
-    }
-    return this.getTaskView({ workspaceId, viewId: record.id, access })
+    throw new WorkspaceSearchError(
+      409,
+      'TaskViewIdempotencyConflict',
+      'Idempotent task view result was deleted and cannot be recreated.',
+    )
   }
 
   /** Strongly reads a required task view definition or throws the stable not-found error. */
@@ -3108,16 +3179,9 @@ export class DynamoDbWorkspaceSearchClient {
         ConditionCheck: {
           TableName: this.tableName,
           Key: { workspaceId, recordKey: createTaskViewRecordKey(viewId) },
-          ConditionExpression: [
-            'attribute_not_exists(#recordKey)',
-            '#entryType = :tombstoneEntryType',
-          ].join(' OR '),
+          ConditionExpression: 'attribute_not_exists(#recordKey)',
           ExpressionAttributeNames: {
             '#recordKey': 'recordKey',
-            '#entryType': 'entryType',
-          },
-          ExpressionAttributeValues: {
-            ':tombstoneEntryType': TASK_VIEW_TOMBSTONE_ENTRY_TYPE,
           },
         },
       },
@@ -4718,13 +4782,6 @@ function readStoredDefaultView(value: Record<string, unknown>) {
   return value as StoredDefaultView
 }
 
-/** Reads and validates one persisted live task view or durable deletion tombstone. */
-function readStoredTaskViewRecord(value: Record<string, unknown>): StoredTaskViewRecord {
-  return value.entryType === TASK_VIEW_TOMBSTONE_ENTRY_TYPE
-    ? readStoredTaskViewTombstone(value)
-    : readStoredTaskView(value)
-}
-
 /** Reads and validates one durable task view deletion tombstone. */
 function readStoredTaskViewTombstone(value: Record<string, unknown>): StoredTaskViewTombstone {
   if (
@@ -4750,7 +4807,9 @@ function readStoredTaskViewTombstone(value: Record<string, unknown>): StoredTask
       'Task view request fingerprint',
       256,
     )
-    if (value.recordKey !== createTaskViewRecordKey(id)) throw invalidStoredTaskView()
+    if (value.recordKey !== createTaskViewTombstoneRecordKey(id)) {
+      throw invalidStoredTaskView()
+    }
     return {
       schemaVersion: TASK_VIEW_SCHEMA_VERSION,
       workspaceId: requireText(value.workspaceId, 'Task view Workspace ID'),
