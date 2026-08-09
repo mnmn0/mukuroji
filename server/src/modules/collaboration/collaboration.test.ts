@@ -4,6 +4,7 @@ import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import { createMutationAuditContext } from '../audit/audit'
 import {
   CollaborationError,
+  createPlanningUpdateCollaborationEntityKey,
   createProjectCollaborationEntityKey,
   createWorkItemCollaborationEntityKey,
   DynamoDbCollaborationClient,
@@ -41,13 +42,17 @@ function createClient(
   )
 }
 
-test('creates stable collaboration keys for Work Item and project scopes', () => {
+test('creates stable collaboration keys for Work Item, project, and Planning update scopes', () => {
   expect(createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')).toBe(
     'workspace#one#work-item#team/team-a/issue/issue-1',
   )
   expect(createProjectCollaborationEntityKey('workspace#one', 'project-a')).toBe(
     'workspace#one#project#project-a',
   )
+  expect(createPlanningUpdateCollaborationEntityKey(
+    'workspace#one',
+    'project/team-a/project-a',
+  )).toBe('workspace#one#planning-update#project/team-a/project-a')
 })
 
 test('prefers the canonical Work Items environment for parent mutation guards', async () => {
@@ -232,6 +237,39 @@ test('stores a project watcher in the project scope', async () => {
     reasons: [],
     watcherCount: 0,
   })
+})
+
+test('stores a Planning update watcher in its qualified target scope', async () => {
+  const transactions: Array<Record<string, unknown>> = []
+  const client = createClient(async (command) => {
+    const input = readCommandInput(command)
+    if ('TransactItems' in input) {
+      transactions.push(input)
+      return {}
+    }
+    return { Items: [] }
+  })
+  const planningUpdateTargetKey = 'project/team-a/project-a'
+  const entityKey = createPlanningUpdateCollaborationEntityKey(
+    'workspace#one',
+    planningUpdateTargetKey,
+  )
+
+  await client.subscribe({
+    workspaceId: 'workspace#one',
+    entityKey,
+    planningUpdateTargetKey,
+    memberKey: 'Member@Example.com',
+  })
+
+  expect(transactions).toHaveLength(1)
+  expect(transactions[0]?.TransactItems).toEqual([
+    expect.objectContaining({
+      Update: expect.objectContaining({
+        Key: { entityKey, recordKey: 'WATCHER#member@example.com' },
+      }),
+    }),
+  ])
 })
 
 test('reads every watcher page before calculating subscription state and count', async () => {
@@ -585,6 +623,16 @@ test('rejects watcher writes whose key does not match the requested scope', asyn
     workspaceId: 'workspace#one',
     entityKey: createProjectCollaborationEntityKey('workspace#one', 'project-b'),
     projectId: 'project-a',
+    memberKey: 'member@example.com',
+  })).rejects.toBeInstanceOf(CollaborationError)
+
+  await expect(client.unsubscribe({
+    workspaceId: 'workspace#one',
+    entityKey: createPlanningUpdateCollaborationEntityKey(
+      'workspace#one',
+      'project/team-b/project-b',
+    ),
+    planningUpdateTargetKey: 'project/team-a/project-a',
     memberKey: 'member@example.com',
   })).rejects.toBeInstanceOf(CollaborationError)
 })

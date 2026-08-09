@@ -4,8 +4,11 @@ import {
 const {
   app,
   configureFakeProjectClients,
+  createCollaborationStub,
+  createCyclePlanningInput,
   createNotificationItem,
   createNotificationVisibilityProbe,
+  getTestAppDependencies,
   resetTestApp,
   setTestAppDependencies,
 } = createApiTestHarness()
@@ -257,4 +260,339 @@ test('hides stale assignee-only notifications after Work Item reassignment', asy
     notifications: [{ id: retainedMention.id }],
     unreadCount: 1,
   })
+})
+
+test('revalidates current Planning cadence, recipient, occurrence, kind, and Project ACL', async () => {
+  configureFakeProjectClients(true, {
+    workspaceRole: 'member',
+    projectAccesses: [
+      { projectId: 'refero', role: 'viewer' },
+      { projectId: 'handoff', role: 'viewer' },
+    ],
+    teamProjects: [
+      { id: 'refero', name: 'Refero', tone: 'blue' },
+      { id: 'handoff', name: 'Handoff', tone: 'green' },
+      { id: 'private-project', name: 'Private', tone: 'purple' },
+    ],
+  })
+  const planning = getTestAppDependencies().workItems.planning
+  const nextDueAt = '2026-08-10T00:00:00.000Z'
+  await planning.configureUpdateCadence('user#demo@example.com', {
+    target: { type: 'project', teamId: 'core-team', projectId: 'refero' },
+    cadence: {
+      updateOwnerMemberKey: 'demo@example.com',
+      cadence: { unit: 'week', count: 1 },
+      timeZone: 'Asia/Tokyo',
+      nextDueAt,
+      reminderHoursBefore: 24,
+      escalationHoursAfter: 12,
+      escalationMemberKey: 'sato@example.com',
+    },
+    expectedRevision: 0,
+  }, { workItems: [] })
+  await planning.configureUpdateCadence('user#demo@example.com', {
+    target: { type: 'project', teamId: 'core-team', projectId: 'private-project' },
+    cadence: {
+      updateOwnerMemberKey: 'demo@example.com',
+      cadence: { unit: 'week', count: 1 },
+      timeZone: 'UTC',
+      nextDueAt,
+      reminderHoursBefore: 24,
+    },
+    expectedRevision: 1,
+  }, { workItems: [] })
+  await planning.configureUpdateCadence('user#demo@example.com', {
+    target: { type: 'project', teamId: 'core-team', projectId: 'handoff' },
+    cadence: {
+      updateOwnerMemberKey: 'sato@example.com',
+      cadence: { unit: 'week', count: 1 },
+      timeZone: 'UTC',
+      nextDueAt,
+      reminderHoursBefore: 24,
+    },
+    expectedRevision: 2,
+  }, { workItems: [] })
+
+  const current = createNotificationItem({
+    id: 'planning-current',
+    eventType: 'planning-update.overdue',
+    reasons: ['overdue'],
+    issueId: undefined,
+    planningTargetType: 'project',
+    planningTargetId: 'refero',
+    planningTargetRecordKey: 'UPDATE_TARGET#PROJECT#core-team#refero',
+    planningNextDueAt: nextDueAt,
+    planningNotificationKind: 'overdue',
+  })
+  const staleOccurrence = createNotificationItem({
+    ...current,
+    id: 'planning-stale-occurrence',
+    planningNextDueAt: '2026-08-17T00:00:00.000Z',
+  })
+  const mismatchedKind = createNotificationItem({
+    ...current,
+    id: 'planning-mismatched-kind',
+    eventType: 'planning-update.reminder',
+  })
+  const wrongEscalationRecipient = createNotificationItem({
+    ...current,
+    id: 'planning-wrong-escalation-recipient',
+    eventType: 'planning-update.escalation',
+    reasons: ['escalation'],
+    planningNotificationKind: 'escalation',
+  })
+  const staleOwner = createNotificationItem({
+    ...current,
+    id: 'planning-stale-owner',
+    projectId: 'handoff',
+    planningTargetId: 'handoff',
+    planningTargetRecordKey: 'UPDATE_TARGET#PROJECT#core-team#handoff',
+  })
+  const inaccessibleProject = createNotificationItem({
+    ...current,
+    id: 'planning-inaccessible-project',
+    projectId: 'private-project',
+    planningTargetId: 'private-project',
+    planningTargetRecordKey: 'UPDATE_TARGET#PROJECT#core-team#private-project',
+  })
+  const probe = createNotificationVisibilityProbe([
+    current,
+    staleOccurrence,
+    mismatchedKind,
+    wrongEscalationRecipient,
+    staleOwner,
+    inaccessibleProject,
+  ])
+  setTestAppDependencies({ notifications: probe.client })
+
+  const response = await app.request('/api/notifications', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(probe.visibility).toEqual(new Map([
+    [current.id, true],
+    [staleOccurrence.id, false],
+    [mismatchedKind.id, false],
+    [wrongEscalationRecipient.id, false],
+    [staleOwner.id, false],
+    [inaccessibleProject.id, false],
+  ]))
+  expect(await response.json()).toMatchObject({
+    notifications: [{ id: current.id }],
+    unreadCount: 1,
+  })
+})
+
+test('denies a Team-qualified Planning Project notification for an inaccessible duplicate ID', async () => {
+  configureFakeProjectClients(true, {
+    workspaceRole: 'member',
+    projectAccesses: [{
+      teamId: 'core-team',
+      projectId: 'shared-launch',
+      role: 'viewer',
+    }],
+    teamProjects: [{ id: 'shared-launch', name: 'Shared launch', tone: 'green' }],
+    additionalTeams: [{
+      id: 'design-team',
+      name: 'Design Team',
+      projects: [{ id: 'shared-launch', name: 'Shared launch', tone: 'green' }],
+    }],
+  })
+  const planning = getTestAppDependencies().workItems.planning
+  const workspaceId = 'user#demo@example.com'
+  const nextDueAt = '2026-08-10T00:00:00.000Z'
+  for (const [revision, teamId] of ['core-team', 'design-team'].entries()) {
+    await planning.configureUpdateCadence(workspaceId, {
+      target: { type: 'project', teamId, projectId: 'shared-launch' },
+      cadence: {
+        updateOwnerMemberKey: 'demo@example.com',
+        cadence: { unit: 'week', count: 1 },
+        timeZone: 'UTC',
+        nextDueAt,
+        reminderHoursBefore: 24,
+      },
+      expectedRevision: revision,
+    }, { workItems: [] })
+  }
+  const coreNotification = createNotificationItem({
+    id: 'planning-shared-core',
+    eventType: 'planning-update.overdue',
+    reasons: ['overdue'],
+    issueId: undefined,
+    projectId: 'shared-launch',
+    planningTargetType: 'project',
+    planningTargetId: 'shared-launch',
+    planningTargetRecordKey: 'UPDATE_TARGET#PROJECT#core-team#shared-launch',
+    planningNextDueAt: nextDueAt,
+    planningNotificationKind: 'overdue',
+  })
+  const designNotification = createNotificationItem({
+    ...coreNotification,
+    id: 'planning-shared-design',
+    teamId: 'design-team',
+    planningTargetRecordKey: 'UPDATE_TARGET#PROJECT#design-team#shared-launch',
+  })
+  const probe = createNotificationVisibilityProbe([coreNotification, designNotification])
+  setTestAppDependencies({ notifications: probe.client })
+
+  const response = await app.request('/api/notifications', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(probe.visibility.get(coreNotification.id)).toBe(true)
+  expect(probe.visibility.get(designNotification.id)).toBe(false)
+  expect(await response.json()).toMatchObject({
+    notifications: [{ id: coreNotification.id }],
+    unreadCount: 1,
+  })
+})
+
+test('shows Planning notifications only for the current qualified target watcher', async () => {
+  configureFakeProjectClients(true, {
+    workspaceRole: 'member',
+    projectAccesses: [{ teamId: 'core-team', projectId: 'refero', role: 'viewer' }],
+  })
+  const planning = getTestAppDependencies().workItems.planning
+  const nextDueAt = '2026-08-10T00:00:00.000Z'
+  await planning.configureUpdateCadence('user#demo@example.com', {
+    target: { type: 'project', teamId: 'core-team', projectId: 'refero' },
+    cadence: {
+      updateOwnerMemberKey: 'sato@example.com',
+      cadence: { unit: 'week', count: 1 },
+      timeZone: 'UTC',
+      nextDueAt,
+      reminderHoursBefore: 24,
+    },
+    expectedRevision: 0,
+  }, { workItems: [] })
+  const targetWatcher = createNotificationItem({
+    id: 'planning-target-watcher',
+    eventType: 'planning-update.overdue',
+    reasons: ['watcher'],
+    issueId: undefined,
+    planningTargetType: 'project',
+    planningTargetId: 'refero',
+    planningTargetRecordKey: 'UPDATE_TARGET#PROJECT#core-team#refero',
+    planningNextDueAt: nextDueAt,
+    planningNotificationKind: 'overdue',
+  })
+  const projectWatcher = createNotificationItem({
+    ...targetWatcher,
+    id: 'planning-project-watcher',
+    reasons: ['project-watcher'],
+  })
+  const probe = createNotificationVisibilityProbe([targetWatcher, projectWatcher])
+  const watcherReads: string[] = []
+  let subscribed = true
+  setTestAppDependencies({
+    collaboration: createCollaborationStub({
+      async getWatcherState(input) {
+        watcherReads.push(input.entityKey)
+        return {
+          subscribed,
+          explicit: subscribed,
+          automatic: false,
+          reasons: subscribed ? ['manual'] : [],
+          watcherCount: subscribed ? 1 : 0,
+        }
+      },
+    }),
+    notifications: probe.client,
+  })
+
+  const subscribedResponse = await app.request('/api/notifications', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  expect(subscribedResponse.status).toBe(200)
+  expect(await subscribedResponse.json()).toMatchObject({
+    notifications: [{ id: targetWatcher.id }],
+    unreadCount: 1,
+  })
+  expect(probe.visibility.get(projectWatcher.id)).toBe(false)
+
+  subscribed = false
+  const unsubscribedResponse = await app.request('/api/notifications', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+  expect(unsubscribedResponse.status).toBe(200)
+  expect(await unsubscribedResponse.json()).toMatchObject({ notifications: [], unreadCount: 0 })
+  expect(watcherReads).toEqual([
+    'user#demo@example.com#planning-update#project/core-team/refero',
+    'user#demo@example.com#planning-update#project/core-team/refero',
+  ])
+})
+
+test('hides an existing Planning notification after its Initiative is archived', async () => {
+  configureFakeProjectClients(true, {
+    workspaceRole: 'member',
+    projectAccesses: [{ projectId: 'refero', role: 'viewer' }],
+  })
+  const planning = getTestAppDependencies().workItems.planning
+  const workspaceId = 'user#demo@example.com'
+  await planning.create(workspaceId, {
+    ...createCyclePlanningInput('initiative-parent-portfolio', 0),
+    type: 'portfolio',
+    teamId: undefined,
+    projectId: undefined,
+    cadence: undefined,
+    capacity: undefined,
+    carryOverPolicy: undefined,
+  }, { workItems: [] })
+  await planning.create(workspaceId, {
+    ...createCyclePlanningInput('initiative-parent-roadmap', 1),
+    type: 'roadmap',
+    parentId: 'initiative-parent-portfolio',
+    cadence: undefined,
+    capacity: undefined,
+    carryOverPolicy: undefined,
+  }, { workItems: [] })
+  await planning.create(workspaceId, {
+    ...createCyclePlanningInput('archived-initiative', 2),
+    type: 'initiative',
+    parentId: 'initiative-parent-roadmap',
+    cadence: undefined,
+    capacity: undefined,
+    carryOverPolicy: undefined,
+  }, { workItems: [] })
+  const nextDueAt = '2026-08-10T00:00:00.000Z'
+  await planning.configureUpdateCadence(workspaceId, {
+    target: { type: 'initiative', entityId: 'archived-initiative' },
+    cadence: {
+      updateOwnerMemberKey: 'demo@example.com',
+      cadence: { unit: 'week', count: 1 },
+      timeZone: 'UTC',
+      nextDueAt,
+      reminderHoursBefore: 24,
+    },
+    expectedRevision: 3,
+  }, { workItems: [] })
+  await planning.archive(
+    workspaceId,
+    'archived-initiative',
+    { expectedRevision: 4 },
+    { workItems: [] },
+  )
+  const archived = createNotificationItem({
+    id: 'planning-archived-initiative',
+    eventType: 'planning-update.overdue',
+    reasons: ['overdue'],
+    issueId: undefined,
+    planningTargetType: 'initiative',
+    planningTargetId: 'archived-initiative',
+    planningTargetRecordKey: 'UPDATE_TARGET#INITIATIVE#archived-initiative',
+    planningNextDueAt: nextDueAt,
+    planningNotificationKind: 'overdue',
+  })
+  const probe = createNotificationVisibilityProbe([archived])
+  setTestAppDependencies({ notifications: probe.client })
+
+  const response = await app.request('/api/notifications', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(probe.visibility.get(archived.id)).toBe(false)
+  expect(await response.json()).toMatchObject({ notifications: [], unreadCount: 0 })
 })

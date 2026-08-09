@@ -118,6 +118,7 @@ export const taskViewStoryPlanningSnapshot = {
   schemaVersion: PLANNING_SCHEMA_VERSION,
   revision: 4,
   entities: [],
+  updateTargets: [],
   dependencies: [],
   workItemDependencies: [
     {

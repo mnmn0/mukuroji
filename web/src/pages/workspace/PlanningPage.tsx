@@ -1,3 +1,11 @@
+import type {
+  PlanningSnapshot,
+  PlanningUpdate,
+  PlanningUpdateComment,
+  PlanningUpdateReaction,
+  PlanningUpdateTarget,
+  PlanningUpdateTargetSummary,
+} from '@mukuroji/contracts'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate, useSearchParams } from 'react-router'
 import {
@@ -21,7 +29,9 @@ import {
 } from '../../shared/i18n/i18n'
 import {
   archivePlanningEntity,
-  addPlanningStatusUpdate,
+  addPlanningUpdateReaction,
+  configurePlanningUpdateCadence,
+  createPlanningUpdateComment,
   createPlanningDependency,
   createPlanningEntity,
   createWorkItemScheduleDependency,
@@ -29,21 +39,44 @@ import {
   deletePlanningWorkItemLink,
   deleteWorkItemScheduleDependency,
   duplicatePlanningEntity,
+  exportPlanningUpdates,
   movePlanningEntity,
+  publishPlanningUpdate,
   putPlanningWorkItemLink,
   resolvePlanningErrorMessageKey,
   rolloverPlanningCycle,
+  removePlanningUpdateReaction,
   updatePlanningEntity,
   updateWorkItemScheduleDependency,
+  subscribePlanningUpdateWatch,
+  unsubscribePlanningUpdateWatch,
 } from '../../planning/api'
+import {
+  createMissingPlanningTargetUpdateView,
+  createPlanningTargetUpdateView,
+  planningUpdateTargetsAreEqual,
+  type PlanningUpdateTargetDetailView,
+  type PlanningUpdateTargetSummaryView,
+  type PlanningUpdateCollaborationController,
+  type PlanningUpdateCommentView,
+  type PlanningUpdateReactionView,
+} from '../../planning/model/statusUpdateView'
 import { usePlanningSnapshot } from '../../planning/queries/usePlanningSnapshot'
 import {
+  revalidatePlanningUpdateHistoryAfterPublish,
+  usePlanningUpdateAnnotations,
+  usePlanningUpdates,
+  usePlanningUpdateWatch,
+} from '../../planning/queries/usePlanningUpdates'
+import {
+  canAnnotatePlanningUpdateTarget,
   canLinkPlanningEntity,
   canManageAnyPlanningScope,
   canManagePlanningScope,
+  canManagePlanningUpdateTarget,
   canManagePlanningWorkItemDependency,
   canManagePlanningWorkItemDependencyEndpoint,
-  canUpdatePlanningEntityStatus,
+  canPublishPlanningUpdateTarget,
   canUpdatePlanningWorkItemLink,
   createPlanningAccessSnapshot,
   filterManageablePlanningScopeTeams,
@@ -82,6 +115,7 @@ export function PlanningPage() {
   const [session] = useState<AuthSession | null>(() => getAuthSession())
   const [locale] = useState<Locale>(() => getInitialLocale())
   const [mutationErrorMessage, setMutationErrorMessage] = useState<string>()
+  const [isUpdateCollaborationPending, setIsUpdateCollaborationPending] = useState(false)
   const t = useMemo(() => createTranslator(locale), [locale])
   const labels = useMemo(() => createPlanningLabels(locale), [locale])
   const { openMobileSidebar } = useWorkspaceSidebarController()
@@ -95,6 +129,7 @@ export function PlanningPage() {
     data: teams = emptyTeams,
     error: projectDirectoryError,
     isLoading: isProjectDirectoryLoading,
+    mutate: mutateProjectDirectory,
   } = useProjectDirectory({
     accessToken,
     enabled: Boolean(user && !currentUserError),
@@ -117,6 +152,7 @@ export function PlanningPage() {
     error: projectRolesError,
     isLoading: isProjectRolesLoading,
     key: planningProjectRolesKey,
+    mutate: mutateProjectRoles,
   } = usePlanningProjectRoles(
     accessToken,
     currentUserProjectKey,
@@ -140,6 +176,50 @@ export function PlanningPage() {
   )
   const activeView = resolvePlanningView(location.pathname)
   const selectedEntityId = searchParams.get('entityId') ?? undefined
+  const selectedUpdateTarget = resolveSelectedPlanningUpdateTarget(
+    searchParams,
+    selectedEntityId,
+    snapshot,
+  )
+  const updateHistory = usePlanningUpdates(
+    accessToken,
+    selectedUpdateTarget,
+    Boolean(user && !currentUserError),
+  )
+  const updateWatch = usePlanningUpdateWatch(
+    accessToken,
+    selectedUpdateTarget,
+    Boolean(user && !currentUserError),
+  )
+  const updateAnnotations = usePlanningUpdateAnnotations(
+    accessToken,
+    selectedUpdateTarget,
+    updateHistory.data?.updates,
+    Boolean(user && !currentUserError),
+  )
+  const updateAnnotationViews = useMemo(
+    () => createPlanningUpdateAnnotationViews(
+      updateHistory.data?.updates,
+      updateAnnotations.data?.comments,
+      updateAnnotations.data?.reactions,
+      currentUserProjectKey,
+    ),
+    [
+      updateAnnotations.data?.comments,
+      updateAnnotations.data?.reactions,
+      updateHistory.data?.updates,
+      currentUserProjectKey,
+    ],
+  )
+  const updateTargetDetails = useMemo(
+    () => createPlanningUpdateTargetDetails(
+      snapshot,
+      teams,
+      selectedUpdateTarget,
+      updateHistory.data?.updates,
+    ),
+    [selectedUpdateTarget, snapshot, teams, updateHistory.data?.updates],
+  )
   const canManagePlanning = canManageAnyPlanningScope(user, planningAccess)
   const canMutatePlanningContent = canMutateWorkspaceContent(user)
   const currentPath = `${location.pathname}${location.search}${location.hash}`
@@ -149,6 +229,9 @@ export function PlanningPage() {
       planningError,
       projectDirectoryError,
       projectRolesError,
+      updateHistory.error,
+      updateWatch.error,
+      updateAnnotations.error,
       ...(projectRolesResult?.errors ?? []),
     ],
     currentPath,
@@ -161,6 +244,15 @@ export function PlanningPage() {
   const loadErrorMessage = loadError
     ? t(resolvePlanningErrorMessageKey(loadError))
     : undefined
+  const updateHistoryErrorMessage = updateHistory.error
+    ? labels.historyError
+    : undefined
+  const accessErrorMessage = [
+    projectDirectoryError ? t('planning.access.directoryError') : undefined,
+    projectRolesError || (projectRolesResult?.errors.length ?? 0) > 0
+      ? t('planning.access.rolesError')
+      : undefined,
+  ].filter(Boolean).join(' ')
 
   useEffect(() => {
     document.documentElement.lang = locale
@@ -186,10 +278,12 @@ export function PlanningPage() {
     navigate,
   ])
 
+  /** Runs one Planning mutation and updates the authoritative bounded snapshot on success. */
   const runMutation = async (
     key: string,
     payload: unknown,
     request: (context: MutationRequestContext) => ReturnType<typeof archivePlanningEntity>,
+    afterSuccess?: () => Promise<unknown>,
   ) => {
     if (!accessToken) {
       return
@@ -203,6 +297,9 @@ export function PlanningPage() {
         request,
       )
       await mutatePlanning(result, { revalidate: false })
+      if (afterSuccess) {
+        await revalidatePlanningUpdateHistoryAfterPublish(afterSuccess)
+      }
     } catch (error) {
       const sessionErrorAction = resolveEnterpriseSessionErrorsAction(
         undefined,
@@ -225,19 +322,217 @@ export function PlanningPage() {
     }
   }
 
+  /** Toggles the current viewer's watch state for the route-selected update target. */
+  const togglePlanningUpdateWatch = async () => {
+    const currentWatch = updateWatch.data
+    if (!accessToken || !selectedUpdateTarget || !currentWatch) return
+    setMutationErrorMessage(undefined)
+    setIsUpdateCollaborationPending(true)
+    try {
+      const nextWatch = await mutationRequestRunner.run(
+        `planning:update:${createPlanningUpdateTargetKey(selectedUpdateTarget)}:watch`,
+        String(!currentWatch.subscribed),
+        (context) => currentWatch.subscribed
+          ? unsubscribePlanningUpdateWatch(accessToken, selectedUpdateTarget, context)
+          : subscribePlanningUpdateWatch(accessToken, selectedUpdateTarget, context),
+      )
+      await updateWatch.mutate(nextWatch, { revalidate: false })
+    } catch (error) {
+      const sessionErrorAction = resolveEnterpriseSessionErrorsAction(
+        undefined,
+        [error],
+        currentPath,
+      )
+      if (sessionErrorAction?.redirectTo) {
+        if (sessionErrorAction.clearSession) clearAuthSession()
+        navigate(sessionErrorAction.redirectTo, { replace: true })
+        return
+      }
+      setMutationErrorMessage(t(resolvePlanningErrorMessageKey(error, 'mutation')))
+    } finally {
+      setIsUpdateCollaborationPending(false)
+    }
+  }
+
+  /** Downloads the complete immutable history for the route-selected update target. */
+  const exportPlanningUpdateHistory = async () => {
+    if (!accessToken || !selectedUpdateTarget) return
+    setMutationErrorMessage(undefined)
+    setIsUpdateCollaborationPending(true)
+    try {
+      const artifact = await exportPlanningUpdates(accessToken, selectedUpdateTarget)
+      downloadPlanningUpdateArtifact(artifact.blob, artifact.filename)
+    } catch (error) {
+      setMutationErrorMessage(t(resolvePlanningErrorMessageKey(error, 'mutation')))
+    } finally {
+      setIsUpdateCollaborationPending(false)
+    }
+  }
+
+  /** Appends a comment to the selected target's referenced immutable update. */
+  const submitPlanningUpdateComment = async (
+    updateId: string,
+    bodyMarkdown: string,
+  ) => {
+    const update = updateHistory.data?.updates.find((candidate) => candidate.id === updateId)
+    if (!accessToken || !selectedUpdateTarget || !update) return
+    const input = {
+      body: bodyMarkdown,
+      id: createPlanningClientId('planning-update-comment'),
+      target: selectedUpdateTarget,
+      updateVersion: update.version,
+    }
+    setMutationErrorMessage(undefined)
+    setIsUpdateCollaborationPending(true)
+    try {
+      await mutationRequestRunner.run(
+        `planning:update:${createPlanningUpdateTargetKey(selectedUpdateTarget)}:${update.version}:comment:${input.id}`,
+        JSON.stringify(input),
+        (context) => createPlanningUpdateComment(accessToken, input, context),
+      )
+      try {
+        await updateAnnotations.mutate()
+      } catch {
+        // SWR preserves the annotation query error for the recoverable collaboration alert.
+      }
+    } catch (error) {
+      const sessionErrorAction = resolveEnterpriseSessionErrorsAction(
+        undefined,
+        [error],
+        currentPath,
+      )
+      if (sessionErrorAction?.redirectTo) {
+        if (sessionErrorAction.clearSession) clearAuthSession()
+        navigate(sessionErrorAction.redirectTo, { replace: true })
+        return
+      }
+      setMutationErrorMessage(t(resolvePlanningErrorMessageKey(error, 'mutation')))
+      throw error
+    } finally {
+      setIsUpdateCollaborationPending(false)
+    }
+  }
+
+  /** Toggles the current member's reaction on one selected immutable update. */
+  const togglePlanningUpdateReaction = async (
+    updateId: string,
+    emoji: string,
+  ) => {
+    const update = updateHistory.data?.updates.find((candidate) => candidate.id === updateId)
+    if (!accessToken || !selectedUpdateTarget || !update) return
+    const input = {
+      emoji,
+      target: selectedUpdateTarget,
+      updateVersion: update.version,
+    }
+    const hasCurrentMemberReaction = updateAnnotations.data?.reactions.some((reaction) =>
+      reaction.updateVersion === update.version &&
+      reaction.emoji === emoji &&
+      reaction.memberKey.trim().toLowerCase() === currentUserProjectKey
+    ) ?? false
+    setMutationErrorMessage(undefined)
+    setIsUpdateCollaborationPending(true)
+    try {
+      await mutationRequestRunner.run(
+        `planning:update:${createPlanningUpdateTargetKey(selectedUpdateTarget)}:${update.version}:reaction:${emoji}`,
+        JSON.stringify([input, hasCurrentMemberReaction]),
+        async (context) => {
+          if (hasCurrentMemberReaction) {
+            await removePlanningUpdateReaction(accessToken, input, context)
+          } else {
+            await addPlanningUpdateReaction(accessToken, input, context)
+          }
+        },
+      )
+      await updateAnnotations.mutate()
+    } catch (error) {
+      const sessionErrorAction = resolveEnterpriseSessionErrorsAction(
+        undefined,
+        [error],
+        currentPath,
+      )
+      if (sessionErrorAction?.redirectTo) {
+        if (sessionErrorAction.clearSession) clearAuthSession()
+        navigate(sessionErrorAction.redirectTo, { replace: true })
+        return
+      }
+      setMutationErrorMessage(t(resolvePlanningErrorMessageKey(error, 'mutation')))
+    } finally {
+      setIsUpdateCollaborationPending(false)
+    }
+  }
+
+  const canAnnotateSelectedUpdate = Boolean(
+    canMutatePlanningContent &&
+    selectedUpdateTarget &&
+    !planningUpdateTargetIsArchived(snapshot, selectedUpdateTarget) &&
+    canAnnotatePlanningUpdateTarget(
+      user,
+      selectedUpdateTarget,
+      snapshot?.entities ?? [],
+      planningAccess,
+    ),
+  )
+
+  const updateCollaboration: PlanningUpdateCollaborationController | undefined =
+    selectedUpdateTarget && accessToken
+      ? {
+          commentsByUpdateId: updateAnnotationViews.commentsByUpdateId,
+          errorMessage: updateWatch.error || updateAnnotations.error
+            ? labels.collaborationError
+            : undefined,
+          isLoading: Boolean(
+            updateWatch.key && updateWatch.isLoading ||
+            updateAnnotations.key && updateAnnotations.isLoading,
+          ),
+          isPending: isUpdateCollaborationPending,
+          onAddComment: canAnnotateSelectedUpdate
+            ? submitPlanningUpdateComment
+            : undefined,
+          onExport: exportPlanningUpdateHistory,
+          onRetry: updateWatch.error || updateAnnotations.error
+            ? () => void Promise.all([
+                updateWatch.mutate(),
+                updateAnnotations.mutate(),
+              ])
+            : undefined,
+          onToggleReaction: canAnnotateSelectedUpdate
+            ? togglePlanningUpdateReaction
+            : undefined,
+          onToggleWatch: updateWatch.data && canMutatePlanningContent
+            ? togglePlanningUpdateWatch
+            : undefined,
+          reactionsByUpdateId: updateAnnotationViews.reactionsByUpdateId,
+          watch: updateWatch.data
+            ? {
+                subscribed: updateWatch.data.subscribed,
+                watcherCount: updateWatch.data.watcherCount,
+              }
+            : undefined,
+        }
+      : undefined
+
   return (
     <div className="relative min-h-0 min-w-0 flex-1">
         <div className="absolute left-4 top-4 z-20 min-[981px]:hidden">
           <MobileSidebarButton label={t('sidebar.mobileOpen')} onClick={openMobileSidebar} />
         </div>
         <PlanningScreen
+          accessErrorMessage={accessErrorMessage || undefined}
           activeView={activeView}
           errorMessage={mutationErrorMessage ?? loadErrorMessage}
           initialSelectedEntityId={selectedEntityId}
+          initialSelectedUpdateTarget={selectedUpdateTarget}
+          hasMoreUpdateHistory={updateHistory.hasMore}
           isLoading={isLoading}
-          key={selectedEntityId ?? ''}
+          isLoadingMoreUpdateHistory={updateHistory.isLoadingMore}
+          isUpdateHistoryLoading={Boolean(updateHistory.key && updateHistory.isLoading)}
+          key={`${selectedEntityId ?? ''}:${selectedUpdateTarget ? createPlanningUpdateTargetKey(selectedUpdateTarget) : ''}`}
           labels={labels}
           snapshot={snapshot}
+          updateHistoryErrorMessage={updateHistoryErrorMessage}
+          updateCollaboration={updateCollaboration}
+          updateTargetDetails={updateTargetDetails}
           canLinkEntity={(entity) => canLinkPlanningEntity(user, entity, planningAccess)}
           canCreateInScope={(scope) => canManagePlanningScope(user, scope, planningAccess)}
           canManageEntity={(entity) => canManagePlanningScope(user, entity, planningAccess)}
@@ -248,15 +543,51 @@ export function PlanningPage() {
               snapshot?.workItems ?? [],
               planningAccess,
             )}
-          canUpdateEntityStatus={(entity) =>
-            canUpdatePlanningEntityStatus(user, entity, planningAccess)}
+          canManageUpdateCadence={(target) =>
+            !planningUpdateTargetIsArchived(snapshot, target) &&
+            canManagePlanningUpdateTarget(
+              user,
+              target,
+              snapshot?.entities ?? [],
+              planningAccess,
+            )}
+          canPublishUpdate={(target) =>
+            !planningUpdateTargetIsArchived(snapshot, target) &&
+            canPublishPlanningUpdateTarget(
+              user,
+              target,
+              snapshot?.entities ?? [],
+              snapshot?.updateTargets ?? [],
+              planningAccess,
+            )}
           canUpdateWorkItemLink={(workItem) =>
             canUpdatePlanningWorkItemLink(user, workItem, planningAccess)}
           createScopeTeams={manageableCreateScopeTeams}
           onRetry={loadErrorMessage && !mutationErrorMessage
             ? () => void mutatePlanning()
             : undefined}
-          onViewChange={(view) => navigate(createPlanningPath(view, selectedEntityId))}
+          onRetryAccess={accessErrorMessage
+            ? () => {
+                void Promise.all([
+                  mutateProjectDirectory(),
+                  mutateProjectRoles(),
+                ])
+              }
+            : undefined}
+          onRetryUpdateHistory={updateHistory.error
+            ? () => void updateHistory.mutate()
+            : undefined}
+          onLoadMoreUpdateHistory={updateHistory.hasMore
+            ? () => updateHistory.loadMore().then(() => undefined)
+            : undefined}
+          onViewChange={(view) => navigate(
+            selectedUpdateTarget
+              ? createPlanningUpdateTargetPath(view, selectedUpdateTarget)
+              : createPlanningPath(view, selectedEntityId),
+          )}
+          onSelectUpdateTarget={(target) => navigate(
+            createPlanningUpdateTargetPath(activeView, target),
+          )}
           onOpenWorkItem={(workItem) => navigate(
             workItem.projectId
               ? createProjectIssuesPath(workItem.projectId, workItem.teamId, workItem.id)
@@ -413,19 +744,41 @@ export function PlanningPage() {
                 )
               }
             : undefined}
-          onAddStatusUpdate={canMutatePlanningContent && snapshot && accessToken
-            ? (entity, message, health, risk) => {
+          onSaveUpdateCadence={canMutatePlanningContent && snapshot && accessToken
+            ? (target, cadence) => {
                 const input = {
-                  id: createPlanningClientId('status-update'),
-                  message,
-                  health,
-                  risk,
+                  cadence,
                   expectedRevision: snapshot.revision,
+                  target,
                 }
                 return runMutation(
-                  `planning:entity:${entity.id}:status-update:${input.id}`,
+                  `planning:update:${createPlanningUpdateTargetKey(target)}:cadence`,
                   input,
-                  (context) => addPlanningStatusUpdate(accessToken, entity.id, input, context),
+                  (context) => configurePlanningUpdateCadence(
+                    accessToken,
+                    input,
+                    context,
+                  ).then((result) => result.planning),
+                )
+              }
+            : undefined}
+          onPublishUpdate={canMutatePlanningContent && snapshot && accessToken
+            ? (target, draft) => {
+                const input = {
+                  ...draft,
+                  expectedRevision: snapshot.revision,
+                  id: createPlanningClientId('planning-update'),
+                  target,
+                }
+                return runMutation(
+                  `planning:update:${createPlanningUpdateTargetKey(target)}:publish:${input.id}`,
+                  input,
+                  (context) => publishPlanningUpdate(
+                    accessToken,
+                    input,
+                    context,
+                  ).then((result) => result.planning),
+                  () => updateHistory.mutate(),
                 )
               }
             : undefined}
@@ -479,6 +832,250 @@ function resolvePlanningView(pathname: string): PlanningViewId {
 function createPlanningClientId(prefix: string) {
   const suffix = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`
   return `${prefix}-${suffix}`
+}
+
+/**
+ * Resolves the Project or Initiative update target encoded by the Planning route.
+ *
+ * @param searchParams - Current Planning query parameters.
+ * @param selectedEntityId - Optional entity selected by the legacy entity route.
+ * @param snapshot - Current Planning snapshot used to recognize an Initiative.
+ * @returns An unambiguous update target, or undefined.
+ */
+function resolveSelectedPlanningUpdateTarget(
+  searchParams: URLSearchParams,
+  selectedEntityId: string | undefined,
+  snapshot: PlanningSnapshot | undefined,
+): PlanningUpdateTarget | undefined {
+  const targetType = searchParams.get('targetType')
+  if (targetType === 'project') {
+    const teamId = searchParams.get('teamId')?.trim()
+    const projectId = searchParams.get('projectId')?.trim()
+    return teamId && projectId
+      ? { type: 'project', projectId, teamId }
+      : undefined
+  }
+  const entityId = searchParams.get('entityId')?.trim() || selectedEntityId
+  if (targetType === 'initiative' && entityId) {
+    return { type: 'initiative', entityId }
+  }
+  const selectedEntity = snapshot?.entities.find((entity) =>
+    entity.id === entityId && entity.type === 'initiative'
+  )
+  return selectedEntity
+    ? { type: 'initiative', entityId: selectedEntity.id }
+    : undefined
+}
+
+/**
+ * Builds visible target metadata and joins full history only to the selected stream.
+ *
+ * @param snapshot - Current authoritative Planning snapshot.
+ * @param teams - Permission-filtered Workspace directory.
+ * @param selectedTarget - Route-selected Project or Initiative target.
+ * @param selectedUpdates - Full immutable history for the selected target.
+ * @returns Detail projections for list summaries and the selected pane.
+ */
+function createPlanningUpdateTargetDetails(
+  snapshot: PlanningSnapshot | undefined,
+  teams: readonly ProjectDirectoryTeam[],
+  selectedTarget: PlanningUpdateTarget | undefined,
+  selectedUpdates: readonly PlanningUpdate[] = [],
+): PlanningUpdateTargetDetailView[] {
+  if (!snapshot) return []
+  const details = snapshot.updateTargets.flatMap((summary) => {
+    const summaryView = createPlanningUpdateTargetSummaryView(
+      summary.target,
+      summary,
+      snapshot,
+      teams,
+    )
+    if (!summaryView) return []
+    const updates = selectedTarget && planningUpdateTargetsAreEqual(
+      selectedTarget,
+      summary.target,
+    )
+      ? selectedUpdates
+      : []
+    return [{
+      summary: summaryView,
+      updateView: createPlanningTargetUpdateView(summary, updates),
+    }]
+  })
+  if (!selectedTarget || details.some((detail) =>
+    planningUpdateTargetsAreEqual(detail.summary.target, selectedTarget)
+  )) {
+    return details
+  }
+  const selectedSummary = createPlanningUpdateTargetSummaryView(
+    selectedTarget,
+    undefined,
+    snapshot,
+    teams,
+  )
+  return selectedSummary
+    ? [...details, {
+        summary: selectedSummary,
+        updateView: createMissingPlanningTargetUpdateView(selectedTarget),
+      }]
+    : details
+}
+
+/**
+ * Adapts contract annotations to immutable ledger rows and aggregates reactions by emoji.
+ *
+ * @param updates - Visible immutable updates that own annotation rows.
+ * @param comments - Loaded append-only comments across the visible versions.
+ * @param reactions - Loaded member reactions across the visible versions.
+ * @param currentMemberKey - Normalized Workspace member key for viewer-state projection.
+ * @returns Comment and reaction maps keyed by immutable update ID.
+ */
+function createPlanningUpdateAnnotationViews(
+  updates: readonly PlanningUpdate[] = [],
+  comments: readonly PlanningUpdateComment[] = [],
+  reactions: readonly PlanningUpdateReaction[] = [],
+  currentMemberKey = '',
+) {
+  const commentsByUpdateId: Record<string, PlanningUpdateCommentView[]> = {}
+  const reactionsByUpdateId: Record<string, PlanningUpdateReactionView[]> = {}
+
+  for (const update of updates) {
+    commentsByUpdateId[update.id] = comments
+      .filter((comment) => comment.updateVersion === update.version)
+      .map((comment) => ({
+        authorMemberKey: comment.authorMemberKey,
+        bodyMarkdown: comment.body,
+        createdAt: comment.createdAt,
+        id: comment.id,
+        updateId: update.id,
+      }))
+    const reactionCounts = new Map<string, { count: number; reactedByViewer: boolean }>()
+    for (const reaction of reactions) {
+      if (reaction.updateVersion !== update.version) continue
+      const current = reactionCounts.get(reaction.emoji)
+      reactionCounts.set(reaction.emoji, {
+        count: (current?.count ?? 0) + 1,
+        reactedByViewer: Boolean(
+          current?.reactedByViewer ||
+          currentMemberKey && reaction.memberKey.trim().toLowerCase() === currentMemberKey,
+        ),
+      })
+    }
+    reactionsByUpdateId[update.id] = [...reactionCounts].map(([reaction, aggregate]) => ({
+      count: aggregate.count,
+      reaction,
+      reactedByViewer: aggregate.reactedByViewer,
+    }))
+  }
+
+  return { commentsByUpdateId, reactionsByUpdateId }
+}
+
+/**
+ * Resolves user-facing metadata for one visible Project or Initiative target.
+ *
+ * @param target - Canonical target identity.
+ * @param updateSummary - Optional cadence and latest-update projection.
+ * @param snapshot - Current Planning snapshot.
+ * @param teams - Permission-filtered Workspace directory.
+ * @returns Display metadata, or undefined when the target is not visible.
+ */
+function createPlanningUpdateTargetSummaryView(
+  target: PlanningUpdateTarget,
+  updateSummary: PlanningUpdateTargetSummary | undefined,
+  snapshot: PlanningSnapshot,
+  teams: readonly ProjectDirectoryTeam[],
+): PlanningUpdateTargetSummaryView | undefined {
+  if (target.type === 'project') {
+    const team = teams.find((candidate) => candidate.id === target.teamId)
+    const project = team?.projects.find((candidate) => candidate.id === target.projectId)
+    if (!team || !project) return undefined
+    return {
+      context: team.name,
+      health: updateSummary?.latestUpdate?.health ?? 'unknown',
+      ownerMemberKey: updateSummary?.cadence?.updateOwnerMemberKey ?? '',
+      progress: updateSummary?.latestUpdate?.progressSnapshot.percent ?? 0,
+      target,
+      title: project.name,
+    }
+  }
+  const entity = snapshot.entities.find((candidate) =>
+    candidate.type === 'initiative' && candidate.id === target.entityId
+  )
+  if (!entity) return undefined
+  const context = [entity.teamId, entity.projectId].filter(Boolean).join(' / ')
+  return {
+    context: context || undefined,
+    health: entity.health,
+    ownerMemberKey: updateSummary?.cadence?.updateOwnerMemberKey ?? entity.ownerMemberKey,
+    progress: entity.progress,
+    target,
+    title: entity.title,
+  }
+}
+
+/**
+ * Creates a Planning route that preserves a Team-qualified update target.
+ *
+ * @param view - Planning view to open.
+ * @param target - Project or Initiative update target.
+ * @returns Same-origin Planning path.
+ */
+function createPlanningUpdateTargetPath(
+  view: PlanningViewId,
+  target: PlanningUpdateTarget,
+) {
+  const parameters = new URLSearchParams({ targetType: target.type })
+  if (target.type === 'project') {
+    parameters.set('teamId', target.teamId)
+    parameters.set('projectId', target.projectId)
+  } else {
+    parameters.set('entityId', target.entityId)
+  }
+  return `/planning/${view}?${parameters.toString()}`
+}
+
+/**
+ * Returns whether a target summary has stopped accepting updates after archive.
+ *
+ * @param snapshot - Current Planning snapshot.
+ * @param target - Project or Initiative target.
+ * @returns True when the target summary is archived.
+ */
+function planningUpdateTargetIsArchived(
+  snapshot: PlanningSnapshot | undefined,
+  target: PlanningUpdateTarget,
+) {
+  return snapshot?.updateTargets.some((summary) =>
+    planningUpdateTargetsAreEqual(summary.target, target) && Boolean(summary.archivedAt)
+  ) ?? false
+}
+
+/**
+ * Creates a Team-qualified mutation and component key for one update target.
+ *
+ * @param target - Canonical update target.
+ * @returns Stable string key.
+ */
+function createPlanningUpdateTargetKey(target: PlanningUpdateTarget) {
+  return target.type === 'project'
+    ? `project:${target.teamId}\0${target.projectId}`
+    : `initiative:${target.entityId}`
+}
+
+/**
+ * Starts a browser download for one exported Planning update artifact.
+ *
+ * @param blob - Exported file body.
+ * @param filename - Server-supplied safe filename.
+ */
+function downloadPlanningUpdateArtifact(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob)
+  const anchor = document.createElement('a')
+  anchor.href = url
+  anchor.download = filename
+  anchor.click()
+  URL.revokeObjectURL(url)
 }
 
 function resolveCurrentUserProjectKey(user: CurrentUser | undefined) {

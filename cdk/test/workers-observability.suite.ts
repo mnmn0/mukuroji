@@ -893,6 +893,9 @@ test('audit stream isolates downstream delivery and retention consumers', () => 
         NOTIFICATIONS_TABLE_NAME: {
           Ref: 'NotificationsTable76DCFC6C',
         },
+        PLANNING_TABLE_NAME: {
+          Ref: 'PlanningTable2A0D4CC5',
+        },
         PROCESSED_AUDIT_EVENTS_TABLE_NAME: {
           Ref: 'ProcessedAuditEventsTableFF485133',
         },
@@ -1007,6 +1010,7 @@ test('audit stream isolates downstream delivery and retention consumers', () => 
   expect(serializedProjectionPolicy).toContain('cognito-idp:AdminListGroupsForUser');
   expect(serializedProjectionPolicy).toContain('CognitoUserPoolId');
   expect(serializedProjectionPolicy).toContain('TeamIssuesTable189D851D');
+  expect(serializedProjectionPolicy).toContain('PlanningTable2A0D4CC5');
   expect(serializedProjectionPolicy).toContain('TenantAdministrationTable621D59EB');
   expect(serializedProjectionPolicy).not.toContain('DeveloperPlatformTable772E085C');
   expect(serializedProjectionPolicy).not.toContain('LookupKeyIndex');
@@ -1017,6 +1021,8 @@ test('audit stream isolates downstream delivery and retention consumers', () => 
     .toContain('dynamodb:PutItem');
   expect(actionsForProjectionTable('ProcessedAuditEventsTableFF485133'))
     .toContain('dynamodb:PutItem');
+  expect(actionsForProjectionTable('PlanningTable2A0D4CC5'))
+    .toContain('dynamodb:GetItem');
   expect(serializedProjectionPolicy).toContain('sqs:SendMessage');
   expect(serializedProjectionPolicy).toContain('FileProofingTable');
   expect(serializedProjectionPolicy).toContain('dynamodb:GetItem');
@@ -1954,7 +1960,8 @@ test('hourly schedule emits deterministic events and surfaces bounded scan failu
   const template = synthesizedTemplate;
 
   template.hasResourceProperties('AWS::Lambda::Function', {
-    Description: 'Emits deterministic due and overdue Work Item notification events.',
+    Description:
+      'Emits deterministic Work Item and Planning health update notification events.',
     Handler: 'index.handler',
     Runtime: 'nodejs22.x',
     Timeout: 300,
@@ -1964,6 +1971,9 @@ test('hourly schedule emits deterministic events and surfaces bounded scan failu
         AUDIT_RETENTION_DAYS: { Ref: 'AuditRetentionDays' },
         NOTIFICATION_SCHEDULE_MAX_PAGES: '1000',
         NOTIFICATION_SCHEDULE_SCAN_PAGE_SIZE: '100',
+        PLANNING_TABLE_NAME: { Ref: 'PlanningTable2A0D4CC5' },
+        PLANNING_UPDATE_SCHEDULE_INDEX_NAME: 'UpdateScheduleDueIndex',
+        PROJECT_DIRECTORY_TABLE_NAME: { Ref: 'ProjectDirectoryTable9ED01C01' },
         WORK_ITEMS_TABLE_NAME: { Ref: 'TeamIssuesTable189D851D' },
       }),
     },
@@ -2003,7 +2013,8 @@ test('hourly schedule emits deterministic events and surfaces bounded scan failu
     TreatMissingData: 'notBreaching',
   });
   template.hasResourceProperties('AWS::Events::Rule', {
-    Description: 'Checks canonical Work Items for due and overdue notifications.',
+    Description:
+      'Checks canonical Work Items and Planning update targets for scheduled notifications.',
     ScheduleExpression: 'rate(1 hour)',
     State: 'ENABLED',
     Targets: Match.arrayWith([
@@ -2020,8 +2031,13 @@ test('hourly schedule emits deterministic events and surfaces bounded scan failu
   const serializedSchedulePolicy = JSON.stringify(schedulePolicy);
 
   expect(serializedSchedulePolicy).toContain('TeamIssuesTable189D851D');
+  expect(serializedSchedulePolicy).toContain('PlanningTable2A0D4CC5');
+  expect(serializedSchedulePolicy).toContain('UpdateScheduleDueIndex');
+  expect(serializedSchedulePolicy).toContain('ProjectDirectoryTable9ED01C01');
   expect(serializedSchedulePolicy).toContain('AuditEventsTable0723963E');
   expect(serializedSchedulePolicy).toContain('dynamodb:Scan');
+  expect(serializedSchedulePolicy).toContain('dynamodb:GetItem');
+  expect(serializedSchedulePolicy).toContain('dynamodb:Query');
   expect(serializedSchedulePolicy).toContain('dynamodb:PutItem');
   expect(serializedSchedulePolicy).toContain('sqs:SendMessage');
   template.hasOutput('NotificationScheduleDlqUrl', {});

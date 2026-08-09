@@ -5,11 +5,141 @@ import {
   WORK_ITEM_SCHEMA_VERSION,
 } from '@mukuroji/contracts'
 import {
+  createPlanningScheduledNotificationCandidates,
   parseUtcDateOnly,
+  parsePlanningUpdateTargetScheduleRow,
   runNotificationSchedule,
   type NotificationScheduleDocumentClient,
   type NotificationScheduleRunOptions,
 } from './notification-schedule'
+import {
+  createPlanningUpdateNextNotificationAtRecordKey,
+  createPlanningUpdateScheduleShard,
+} from '../../../planning'
+
+/** Creates a canonical Project update target row for schedule tests. */
+function createPlanningProjectUpdateTarget(overrides: Record<string, unknown> = {}) {
+  const cadence = {
+    updateOwnerMemberKey: 'Owner@Example.com',
+    cadence: { unit: 'week', count: 1 },
+    timeZone: 'Asia/Tokyo',
+    nextDueAt: '2026-07-12T09:00:00.000Z',
+    reminderHoursBefore: 24,
+    escalationHoursAfter: 12,
+    escalationMemberKey: 'manager@example.com',
+  }
+  return {
+    workspaceId: 'workspace-1',
+    recordKey: 'UPDATE_TARGET#PROJECT#core-team#platform',
+    entryType: 'planning-update-target',
+    target: { type: 'project', teamId: 'core-team', projectId: 'platform' },
+    cadence,
+    latestVersion: 0,
+    updatedAt: '2026-07-01T09:00:00.000Z',
+    ...overrides,
+  }
+}
+
+/** Creates a canonical Initiative update target row for schedule tests. */
+function createPlanningInitiativeUpdateTarget(overrides: Record<string, unknown> = {}) {
+  return {
+    workspaceId: 'workspace-1',
+    recordKey: 'UPDATE_TARGET#INITIATIVE#launch',
+    entryType: 'planning-update-target',
+    target: { type: 'initiative', entityId: 'launch' },
+    cadence: {
+      updateOwnerMemberKey: 'owner@example.com',
+      cadence: { unit: 'month', count: 1 },
+      timeZone: 'UTC',
+      nextDueAt: '2026-07-12T09:00:00.000Z',
+      reminderHoursBefore: 24,
+    },
+    latestVersion: 2,
+    updatedAt: '2026-07-01T09:00:00.000Z',
+    ...overrides,
+  }
+}
+
+/** Creates one KEYS_ONLY projection returned by the Planning schedule due index. */
+function createPlanningDueIndexItem(row: Record<string, unknown>) {
+  const workspaceId = row.workspaceId
+  const recordKey = row.recordKey
+  const cadence = row.cadence
+  if (
+    typeof workspaceId !== 'string' ||
+    typeof recordKey !== 'string' ||
+    typeof cadence !== 'object' ||
+    cadence === null ||
+    !('nextDueAt' in cadence) ||
+    typeof cadence.nextDueAt !== 'string' ||
+    !('reminderHoursBefore' in cadence) ||
+    typeof cadence.reminderHoursBefore !== 'number'
+  ) {
+    throw new TypeError('Planning schedule test row is invalid.')
+  }
+  return {
+    workspaceId,
+    recordKey,
+    updateScheduleShard: createPlanningUpdateScheduleShard(workspaceId, recordKey),
+    nextNotificationAtRecordKey: createPlanningUpdateNextNotificationAtRecordKey(
+      workspaceId,
+      recordKey,
+      cadence.nextDueAt,
+      cadence.reminderHoursBefore,
+    ),
+  }
+}
+
+/** Resolves one Planning due-index query from canonical target test rows. */
+function resolvePlanningDueIndexQuery(
+  input: Record<string, unknown>,
+  rows: readonly Record<string, unknown>[],
+) {
+  if (input.IndexName !== 'UpdateScheduleDueIndex') return undefined
+  const values = input.ExpressionAttributeValues
+  if (
+    typeof values !== 'object' ||
+    values === null ||
+    !(':scheduleShard' in values) ||
+    typeof values[':scheduleShard'] !== 'string' ||
+    !(':upperBound' in values) ||
+    typeof values[':upperBound'] !== 'string'
+  ) {
+    throw new TypeError('Planning schedule test query is invalid.')
+  }
+  const scheduleShard = values[':scheduleShard']
+  const upperBound = values[':upperBound']
+  const items = rows
+    .map(createPlanningDueIndexItem)
+    .filter((item) =>
+      item.updateScheduleShard === scheduleShard &&
+      item.nextNotificationAtRecordKey <= upperBound
+    )
+  return { Items: items, ScannedCount: items.length }
+}
+
+/** Resolves one strong UPDATE_TARGET base-table read from canonical target test rows. */
+function resolvePlanningTargetGet(
+  input: Record<string, unknown>,
+  rows: readonly Record<string, unknown>[],
+) {
+  if (input.TableName !== 'PlanningTable') return undefined
+  const key = input.Key
+  if (
+    typeof key !== 'object' ||
+    key === null ||
+    !('workspaceId' in key) ||
+    typeof key.workspaceId !== 'string' ||
+    !('recordKey' in key) ||
+    typeof key.recordKey !== 'string' ||
+    !key.recordKey.startsWith('UPDATE_TARGET#')
+  ) return undefined
+  return {
+    Item: rows.find((row) =>
+      row.workspaceId === key.workspaceId && row.recordKey === key.recordKey
+    ),
+  }
+}
 
 function createRecordingDocumentClient(
   resolve: (name: string, input: Record<string, unknown>) => unknown | Promise<unknown>,
@@ -85,7 +215,7 @@ function createRunOptions(
     auditEventsTableName: 'AuditEventsTable',
     now: new Date('2026-07-12T09:00:00.000Z'),
     scanPageSize: 25,
-    maxScanPages: 10,
+    maxScanPages: 100,
     auditRetentionDays: 30,
     requestId: 'schedule-event-1',
     ...overrides,
@@ -405,5 +535,290 @@ describe('notification schedule handler', () => {
     await expect(
       runNotificationSchedule(createRunOptions(recording.client, { maxScanPages: 1 })),
     ).rejects.toThrow('exceeded the configured 1 scan page limit')
+  })
+
+  test('decodes Planning update targets and derives reminder, overdue, and escalation stages', () => {
+    const record = parsePlanningUpdateTargetScheduleRow(createPlanningProjectUpdateTarget())
+    expect(record).toBeDefined()
+    if (!record) throw new Error('Expected a Planning update target record.')
+
+    expect(createPlanningScheduledNotificationCandidates(
+      record,
+      new Date('2026-07-11T10:00:00.000Z'),
+    )).toEqual([expect.objectContaining({
+      kind: 'reminder',
+      recipientMemberKey: 'owner@example.com',
+      nextDueAt: '2026-07-12T09:00:00.000Z',
+    })])
+    expect(createPlanningScheduledNotificationCandidates(
+      record,
+      new Date('2026-07-12T21:00:00.000Z'),
+    )).toEqual([
+      expect.objectContaining({
+        kind: 'overdue',
+        recipientMemberKey: 'owner@example.com',
+      }),
+      expect.objectContaining({
+        kind: 'escalation',
+        recipientMemberKey: 'manager@example.com',
+      }),
+    ])
+    expect(createPlanningScheduledNotificationCandidates(
+      { ...record, archivedAt: '2026-07-12T08:00:00.000Z' },
+      new Date('2026-07-12T21:00:00.000Z'),
+    )).toEqual([])
+    expect(() => parsePlanningUpdateTargetScheduleRow(createPlanningProjectUpdateTarget({
+      cadence: {
+        updateOwnerMemberKey: 'owner@example.com',
+        cadence: { unit: 'week', count: 1 },
+        timeZone: 'UTC',
+        nextDueAt: '2026-07-12T09:00:00.000Z',
+        reminderHoursBefore: 24,
+        escalationHoursAfter: 12,
+      },
+    }))).toThrow('escalation hours and member must be configured together')
+  })
+
+  test('emits one deterministic overdue event for an active current Project target', async () => {
+    const eventIds: string[] = []
+    let putCount = 0
+    let reassigned = false
+    const recording = createRecordingDocumentClient((name, input) => {
+      const targetRow = createPlanningProjectUpdateTarget(reassigned
+        ? {
+            cadence: {
+              updateOwnerMemberKey: 'new-owner@example.com',
+              cadence: { unit: 'week', count: 1 },
+              timeZone: 'Asia/Tokyo',
+              nextDueAt: '2026-07-12T09:00:00.000Z',
+              reminderHoursBefore: 24,
+              escalationHoursAfter: 12,
+              escalationMemberKey: 'manager@example.com',
+            },
+          }
+        : {})
+      if (name === 'ScanCommand') {
+        return { ScannedCount: 0, Items: [] }
+      }
+      if (name === 'QueryCommand') {
+        const duePage = resolvePlanningDueIndexQuery(input, [targetRow])
+        if (duePage) return duePage
+        return {
+          Items: [{
+            directoryId: 'workspace-1',
+            entryType: 'project',
+            teamId: 'core-team',
+            projectId: 'platform',
+          }],
+        }
+      }
+      if (name === 'GetCommand') {
+        const target = resolvePlanningTargetGet(input, [targetRow])
+        if (target) return target
+      }
+      if (name === 'PutCommand') {
+        putCount += 1
+        const item = input.Item
+        if (typeof item === 'object' && item !== null && 'eventId' in item) {
+          eventIds.push(String(item.eventId))
+        }
+        if (putCount === 2) {
+          const duplicate = new Error('The conditional request failed')
+          duplicate.name = 'ConditionalCheckFailedException'
+          throw duplicate
+        }
+      }
+      return {}
+    })
+    const options = createRunOptions(recording.client, {
+      now: new Date('2026-07-12T10:00:00.000Z'),
+      planningTableName: 'PlanningTable',
+      projectDirectoryTableName: 'ProjectDirectoryTable',
+    })
+
+    await expect(runNotificationSchedule(options)).resolves.toMatchObject({
+      duplicateEvents: 0,
+      emittedEvents: 1,
+      scannedItems: 1,
+      scannedPages: 17,
+    })
+    await expect(runNotificationSchedule(options)).resolves.toMatchObject({
+      duplicateEvents: 1,
+      emittedEvents: 0,
+    })
+    reassigned = true
+    await expect(runNotificationSchedule(options)).resolves.toMatchObject({
+      duplicateEvents: 0,
+      emittedEvents: 1,
+    })
+    expect(eventIds).toHaveLength(3)
+    expect(eventIds[0]).toBe(eventIds[1])
+    expect(eventIds[2]).not.toBe(eventIds[0])
+    expect(recording.commands.find((command) => command.name === 'PutCommand')?.input.Item)
+      .toMatchObject({
+        eventType: 'planning-update.overdue',
+        entityType: 'planning-update-target',
+        entityId: 'project/core-team/platform',
+        outboxStatus: 'pending',
+        metadata: {
+          teamId: 'core-team',
+          projectId: 'platform',
+          deepLink: '/planning/portfolio?targetType=project&teamId=core-team&projectId=platform',
+          planningTargetType: 'project',
+          planningTargetId: 'platform',
+          planningTargetRecordKey: 'UPDATE_TARGET#PROJECT#core-team#platform',
+          planningNextDueAt: '2026-07-12T09:00:00.000Z',
+          notificationCandidates: [{
+            memberKey: 'owner@example.com',
+            reason: 'overdue',
+          }],
+        },
+      })
+  })
+
+  test('uses percent-encoded public target keys for special-character watcher scopes', async () => {
+    const project = createPlanningProjectUpdateTarget({
+      recordKey: 'UPDATE_TARGET#PROJECT#team%2Falpha%20space#project%2Fbeta%3F',
+      target: {
+        type: 'project',
+        teamId: 'team/alpha space',
+        projectId: 'project/beta?',
+      },
+    })
+    const initiative = createPlanningInitiativeUpdateTarget({
+      recordKey: 'UPDATE_TARGET#INITIATIVE#launch%2Fphase%201',
+      target: { type: 'initiative', entityId: 'launch/phase 1' },
+    })
+    const recording = createRecordingDocumentClient((name, input) => {
+      if (name === 'ScanCommand') {
+        return { Items: [] }
+      }
+      if (name === 'QueryCommand') {
+        const duePage = resolvePlanningDueIndexQuery(input, [project, initiative])
+        if (duePage) return duePage
+        return {
+          Items: [{
+            directoryId: 'workspace-1',
+            entryType: 'project',
+            teamId: 'team/alpha space',
+            projectId: 'project/beta?',
+          }],
+        }
+      }
+      if (name === 'GetCommand') {
+        const target = resolvePlanningTargetGet(input, [project, initiative])
+        if (target) return target
+        return {
+          Item: {
+            workspaceId: 'workspace-1',
+            recordKey: 'ENTITY#launch%2Fphase%201',
+            entryType: 'planning-entity',
+            type: 'initiative',
+            id: 'launch/phase 1',
+          },
+        }
+      }
+      return {}
+    })
+
+    await expect(runNotificationSchedule(createRunOptions(recording.client, {
+      now: new Date('2026-07-12T10:00:00.000Z'),
+      planningTableName: 'PlanningTable',
+      projectDirectoryTableName: 'ProjectDirectoryTable',
+    }))).resolves.toMatchObject({ emittedEvents: 2 })
+    const events = recording.commands
+      .filter((command) => command.name === 'PutCommand')
+      .map((command) => command.input.Item)
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        entityId: 'project/team%2Falpha%20space/project%2Fbeta%3F',
+        metadata: expect.objectContaining({
+          deepLink:
+            '/planning/portfolio?targetType=project&teamId=team%2Falpha+space&projectId=project%2Fbeta%3F',
+        }),
+      }),
+      expect.objectContaining({
+        entityId: 'initiative/launch%2Fphase%201',
+        metadata: expect.objectContaining({
+          deepLink: '/planning/portfolio?targetType=initiative&entityId=launch%2Fphase+1',
+        }),
+      }),
+    ]))
+  })
+
+  test('suppresses archived Projects and resolves current Initiative scope before emission', async () => {
+    const projectRow = createPlanningProjectUpdateTarget()
+    const projectRecording = createRecordingDocumentClient((name, input) => {
+      if (name === 'ScanCommand') {
+        return { Items: [] }
+      }
+      if (name === 'QueryCommand') {
+        const duePage = resolvePlanningDueIndexQuery(input, [projectRow])
+        if (duePage) return duePage
+        return {
+          Items: [{
+            directoryId: 'workspace-1',
+            entryType: 'project',
+            teamId: 'core-team',
+            projectId: 'platform',
+            archivedAt: '2026-07-12T09:30:00.000Z',
+          }],
+        }
+      }
+      if (name === 'GetCommand') {
+        const target = resolvePlanningTargetGet(input, [projectRow])
+        if (target) return target
+      }
+      return {}
+    })
+    await expect(runNotificationSchedule(createRunOptions(projectRecording.client, {
+      now: new Date('2026-07-12T10:00:00.000Z'),
+      planningTableName: 'PlanningTable',
+      projectDirectoryTableName: 'ProjectDirectoryTable',
+    }))).resolves.toMatchObject({ emittedEvents: 0 })
+
+    const initiativeRow = createPlanningInitiativeUpdateTarget()
+    const initiativeRecording = createRecordingDocumentClient((name, input) => {
+      if (name === 'ScanCommand') {
+        return { Items: [] }
+      }
+      if (name === 'QueryCommand') {
+        const duePage = resolvePlanningDueIndexQuery(input, [initiativeRow])
+        if (duePage) return duePage
+      }
+      if (name === 'GetCommand') {
+        const target = resolvePlanningTargetGet(input, [initiativeRow])
+        if (target) return target
+        return {
+          Item: {
+            workspaceId: 'workspace-1',
+            recordKey: 'ENTITY#launch',
+            entryType: 'planning-entity',
+            type: 'initiative',
+            id: 'launch',
+            teamId: 'core-team',
+            projectId: 'platform',
+          },
+        }
+      }
+      return {}
+    })
+    await expect(runNotificationSchedule(createRunOptions(initiativeRecording.client, {
+      now: new Date('2026-07-11T10:00:00.000Z'),
+      planningTableName: 'PlanningTable',
+      projectDirectoryTableName: 'ProjectDirectoryTable',
+    }))).resolves.toMatchObject({ emittedEvents: 1 })
+    expect(initiativeRecording.commands.find((command) => command.name === 'PutCommand')?.input.Item)
+      .toMatchObject({
+        eventType: 'planning-update.reminder',
+        entityId: 'initiative/launch',
+        metadata: {
+          teamId: 'core-team',
+          projectId: 'platform',
+          deepLink: '/planning/portfolio?targetType=initiative&entityId=launch',
+          planningTargetType: 'initiative',
+          planningTargetId: 'launch',
+        },
+      })
   })
 })

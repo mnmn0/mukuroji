@@ -22,9 +22,15 @@ import type {
   CollaborationRealtimePublisher,
 } from '../../application/ports/realtime-publisher'
 import {
+  createPlanningUpdateCollaborationEntityKey,
+  createProjectCollaborationEntityKey,
+} from '../../collaboration'
+import {
   NOTIFICATION_PREFERENCES_KEY,
   createNotificationDeliveryPlan,
+  parsePlanningUpdateTargetScheduleRow,
   parseStoredNotificationPreferences,
+  type PlanningScheduledNotificationKind,
   type NotificationPreferences,
 } from '../../../notifications'
 import { isMissingFileObjectVersionError } from '../../../files'
@@ -100,6 +106,16 @@ export type AuditProjectionEvent = {
   summary?: string
   /** Scheduled due/overdue event が対象にした date-only 期限です。 */
   dueDate?: string
+  /** Scheduled Planning event の Project / Initiative target type です。 */
+  planningTargetType?: 'project' | 'initiative'
+  /** Scheduled Planning event の canonical target ID です。 */
+  planningTargetId?: string
+  /** Scheduled Planning event が再検証する UPDATE_TARGET record key です。 */
+  planningTargetRecordKey?: string
+  /** Scheduled Planning event が対象にした cadence occurrence deadline です。 */
+  planningNextDueAt?: string
+  /** Scheduled Planning event の reminder / overdue / escalation kind です。 */
+  planningNotificationKind?: PlanningScheduledNotificationKind
   /** notification/realtime consumer へ配送する event かどうかです。 */
   outboxStatus: 'pending' | 'suppressed'
 }
@@ -231,6 +247,32 @@ export type CurrentWorkItemNotificationScope = {
   statusCategory?: string
 }
 
+/** Projection 時に強整合 read した Planning update target scope です。 */
+export type CurrentPlanningUpdateNotificationScope = {
+  /** Planning update target read を実施できる event だったかどうかです。 */
+  checked: boolean
+  /** Canonical target row と Initiative source が現在も存在するかどうかです。 */
+  exists: boolean
+  /** Current target が archived / disabled かどうかです。 */
+  archived: boolean
+  /** Current Project / Initiative target type です。 */
+  targetType?: 'project' | 'initiative'
+  /** Current canonical target ID です。 */
+  targetId?: string
+  /** Current target record key です。 */
+  targetRecordKey?: string
+  /** Current update owner member key です。 */
+  ownerMemberKey?: string
+  /** Current escalation recipient member key です。 */
+  escalationMemberKey?: string
+  /** Current cadence occurrence deadline です。 */
+  nextDueAt?: string
+  /** Current Team authorization scope です。 */
+  teamId?: string
+  /** Current Project authorization scope です。 */
+  projectId?: string
+}
+
 const dynamoDbClient = new DynamoDBClient({ region: getAwsRegion() })
 const cognitoClient = new CognitoIdentityProviderClient({ region: getAwsRegion() })
 const documentClient = DynamoDBDocumentClient.from(dynamoDbClient, {
@@ -291,10 +333,34 @@ async function processRecord(
     await markProjectionProcessed(event.eventId)
     return
   }
-  const scopedEvent = currentScope.checked
+  const workItemScopedEvent = currentScope.checked
     ? { ...event, projectId: currentScope.projectId }
     : event
-  const authorizationEvent = refreshScheduledNotificationEvent(scopedEvent, currentScope)
+  const workItemAuthorizationEvent = refreshScheduledNotificationEvent(
+    workItemScopedEvent,
+    currentScope,
+  )
+  if (!workItemAuthorizationEvent) {
+    await markProjectionProcessed(event.eventId)
+    return
+  }
+
+  const planningScope = await readCurrentPlanningUpdateScope(workItemAuthorizationEvent)
+  if (!planningScope.exists) {
+    await markProjectionProcessed(event.eventId)
+    return
+  }
+  const planningScopedEvent = planningScope.checked
+    ? {
+      ...workItemAuthorizationEvent,
+      teamId: planningScope.teamId,
+      projectId: planningScope.projectId,
+    }
+    : workItemAuthorizationEvent
+  const authorizationEvent = refreshPlanningScheduledNotificationEvent(
+    planningScopedEvent,
+    planningScope,
+  )
   if (!authorizationEvent) {
     await markProjectionProcessed(event.eventId)
     return
@@ -557,21 +623,11 @@ function deduplicateMetadataKeys(keys: DeletedFileMetadataKey[]) {
 }
 
 async function readSubscribedWatcherCandidates(event: AuditProjectionEvent) {
-  if (!['comment.created', 'comment.replied', 'comment.edited'].includes(event.eventType)) {
+  if (!projectsSubscribedWatchers(event.eventType)) {
     return []
   }
 
-  const scopes = [
-    ...(event.scopeKey
-      ? [{ entityKey: event.scopeKey, reason: 'watcher' }]
-      : []),
-    ...(event.projectId
-      ? [{
-          entityKey: `${event.workspaceId}#project#${event.projectId}`,
-          reason: 'project-watcher',
-        }]
-      : []),
-  ]
+  const scopes = createSubscribedWatcherScopes(event)
   const pages = await Promise.all(scopes.map(async ({ entityKey, reason }) => {
     const candidates: NotificationCandidate[] = []
     let exclusiveStartKey: Record<string, unknown> | undefined
@@ -595,6 +651,53 @@ async function readSubscribedWatcherCandidates(event: AuditProjectionEvent) {
   }))
 
   return pages.flat()
+}
+
+/**
+ * Returns whether an audit event fans out to current collaboration watchers.
+ *
+ * @param eventType - Canonical audit event type.
+ * @returns Whether the event's supported watcher scopes must be queried.
+ */
+export function projectsSubscribedWatchers(eventType: string) {
+  return ['comment.created', 'comment.replied', 'comment.edited'].includes(eventType) ||
+    planningNotificationKindFromEventType(eventType) !== undefined
+}
+
+/**
+ * Creates the canonical collaboration scopes queried for one watcher-producing event.
+ *
+ * @param event - Audit event identity and current Project scope.
+ * @returns Comment target/Project scopes or a Team-qualified Planning target scope.
+ */
+export function createSubscribedWatcherScopes(
+  event: Pick<
+    AuditProjectionEvent,
+    'entityId' | 'eventType' | 'projectId' | 'scopeKey' | 'workspaceId'
+  >,
+) {
+  const planningNotification = planningNotificationKindFromEventType(event.eventType) !== undefined
+  return [
+    ...(planningNotification
+      ? event.entityId
+        ? [{
+            entityKey: createPlanningUpdateCollaborationEntityKey(
+              event.workspaceId,
+              event.entityId,
+            ),
+            reason: 'watcher',
+          }]
+        : []
+      : event.scopeKey
+      ? [{ entityKey: event.scopeKey, reason: 'watcher' }]
+      : []),
+    ...(event.projectId && !planningNotification
+      ? [{
+          entityKey: createProjectCollaborationEntityKey(event.workspaceId, event.projectId),
+          reason: 'project-watcher',
+        }]
+      : []),
+  ]
 }
 
 /** Collaboration watcher rows から有効な notification candidates だけを抽出します。 */
@@ -831,6 +934,11 @@ export function createNotificationProjectionItem(
     rootCommentId: event.rootCommentId,
     projectId: event.projectId,
     teamId: event.teamId,
+    planningTargetType: event.planningTargetType,
+    planningTargetId: event.planningTargetId,
+    planningTargetRecordKey: event.planningTargetRecordKey,
+    planningNextDueAt: event.planningNextDueAt,
+    planningNotificationKind: event.planningNotificationKind,
     deepLink: event.deepLink,
     title: event.notificationTitle,
     summary: event.summary,
@@ -877,6 +985,54 @@ export function refreshScheduledNotificationEvent(
       memberKey: scope.assigneeMemberKey,
       reason,
     }],
+  }
+}
+
+/**
+ * Revalidates a scheduled Planning notification against its current owner, occurrence, and archive state.
+ *
+ * @param event - Parsed audit projection event.
+ * @param scope - Strongly read current Planning update target scope.
+ * @returns A current recipient event, or undefined when the scheduled event is stale.
+ */
+export function refreshPlanningScheduledNotificationEvent(
+  event: AuditProjectionEvent,
+  scope: CurrentPlanningUpdateNotificationScope,
+): AuditProjectionEvent | undefined {
+  const kind = planningNotificationKindFromEventType(event.eventType)
+  if (!kind) {
+    return event
+  }
+  const currentRecipient = kind === 'escalation'
+    ? scope.escalationMemberKey
+    : scope.ownerMemberKey
+  const scheduledRecipient = normalizeMemberKey(
+    event.notificationCandidates.find((candidate) => candidate.reason === kind)?.memberKey,
+  )
+  if (
+    !scope.checked ||
+    !scope.exists ||
+    scope.archived ||
+    !currentRecipient ||
+    !event.planningTargetType ||
+    event.planningTargetType !== scope.targetType ||
+    !event.planningTargetId ||
+    event.planningTargetId !== scope.targetId ||
+    !event.planningTargetRecordKey ||
+    event.planningTargetRecordKey !== scope.targetRecordKey ||
+    !event.planningNextDueAt ||
+    event.planningNextDueAt !== scope.nextDueAt ||
+    event.planningNotificationKind !== kind ||
+    scheduledRecipient !== currentRecipient
+  ) {
+    return undefined
+  }
+
+  return {
+    ...event,
+    teamId: scope.teamId,
+    projectId: scope.projectId,
+    notificationCandidates: [{ memberKey: currentRecipient, reason: kind }],
   }
 }
 
@@ -1160,6 +1316,103 @@ async function readCurrentWorkItemScope(
 }
 
 /**
+ * Strongly reads the canonical Planning update target and Initiative scope for scheduled events.
+ *
+ * @param event - Parsed audit event that may represent a Planning scheduled notification.
+ * @returns Current Planning target scope, or an unchecked pass-through for other events.
+ */
+async function readCurrentPlanningUpdateScope(
+  event: AuditProjectionEvent,
+): Promise<CurrentPlanningUpdateNotificationScope> {
+  const kind = planningNotificationKindFromEventType(event.eventType)
+  if (!kind) {
+    return { checked: false, exists: true, archived: false }
+  }
+  if (!event.planningTargetRecordKey) {
+    return { checked: true, exists: false, archived: true }
+  }
+
+  const result = await documentClient.send(new GetCommand({
+    TableName: requireEnv('PLANNING_TABLE_NAME'),
+    Key: {
+      workspaceId: event.workspaceId,
+      recordKey: event.planningTargetRecordKey,
+    },
+    ConsistentRead: true,
+  }))
+  if (!result.Item) {
+    return { checked: true, exists: false, archived: true }
+  }
+  const record = parsePlanningUpdateTargetScheduleRow(result.Item)
+  if (
+    !record ||
+    record.workspaceId !== event.workspaceId ||
+    record.recordKey !== event.planningTargetRecordKey
+  ) {
+    throw new Error('Planning notification target row is invalid.')
+  }
+  const targetType = record.target.type
+  const targetId = targetType === 'project'
+    ? record.target.projectId
+    : record.target.entityId
+  const base = {
+    checked: true,
+    exists: true,
+    archived: record.archivedAt !== undefined,
+    targetType,
+    targetId,
+    targetRecordKey: record.recordKey,
+    ...(record.cadence
+      ? {
+        ownerMemberKey: record.cadence.updateOwnerMemberKey,
+        ...(record.cadence.escalationMemberKey
+          ? { escalationMemberKey: record.cadence.escalationMemberKey }
+          : {}),
+        nextDueAt: record.cadence.nextDueAt,
+      }
+      : {}),
+  }
+  if (record.target.type === 'project') {
+    return {
+      ...base,
+      teamId: record.target.teamId,
+      projectId: record.target.projectId,
+    }
+  }
+
+  const initiativeRecordKey = `ENTITY#${encodeURIComponent(record.target.entityId)}`
+  const initiativeResult = await documentClient.send(new GetCommand({
+    TableName: requireEnv('PLANNING_TABLE_NAME'),
+    Key: { workspaceId: event.workspaceId, recordKey: initiativeRecordKey },
+    ConsistentRead: true,
+  }))
+  const initiative = initiativeResult.Item
+  if (!initiative) {
+    return { ...base, exists: false, archived: true }
+  }
+  if (
+    initiative.workspaceId !== event.workspaceId ||
+    initiative.recordKey !== initiativeRecordKey ||
+    initiative.entryType !== 'planning-entity' ||
+    initiative.type !== 'initiative' ||
+    initiative.id !== record.target.entityId
+  ) {
+    throw new Error('Planning notification Initiative source row is invalid.')
+  }
+  const teamId = readString(initiative.teamId)
+  const projectId = readString(initiative.projectId)
+  if (projectId && !teamId) {
+    throw new Error('Planning notification Initiative Project scope requires a Team scope.')
+  }
+  return {
+    ...base,
+    archived: base.archived || initiative.archivedAt !== undefined,
+    ...(teamId ? { teamId } : {}),
+    ...(projectId ? { projectId } : {}),
+  }
+}
+
+/**
  * schema v1 と legacy-compatible audit record を projection 用 event へ正規化します。
  */
 export function parseAuditProjectionEvent(
@@ -1206,8 +1459,39 @@ export function parseAuditProjectionEvent(
     notificationTitle: readString(metadata.notificationTitle) ?? readString(metadata.title),
     summary: readString(value.summary),
     dueDate: normalizeStoredDateOnly(readString(metadata.dueDate)),
+    planningTargetType: readPlanningTargetType(metadata.planningTargetType),
+    planningTargetId: readString(metadata.planningTargetId),
+    planningTargetRecordKey: readString(metadata.planningTargetRecordKey),
+    planningNextDueAt: readTimestamp(metadata.planningNextDueAt),
+    planningNotificationKind: readPlanningNotificationKind(
+      metadata.planningNotificationKind,
+    ),
     outboxStatus: value.outboxStatus === 'suppressed' ? 'suppressed' : 'pending',
   }
+}
+
+/** Returns the canonical Planning notification kind represented by an event type. */
+function planningNotificationKindFromEventType(
+  eventType: string,
+): PlanningScheduledNotificationKind | undefined {
+  if (eventType === 'planning-update.reminder') return 'reminder'
+  if (eventType === 'planning-update.overdue') return 'overdue'
+  if (eventType === 'planning-update.escalation') return 'escalation'
+  return undefined
+}
+
+/** Reads a validated Planning target type from audit metadata. */
+function readPlanningTargetType(value: unknown): 'project' | 'initiative' | undefined {
+  return value === 'project' || value === 'initiative' ? value : undefined
+}
+
+/** Reads a validated Planning notification kind from audit metadata. */
+function readPlanningNotificationKind(
+  value: unknown,
+): PlanningScheduledNotificationKind | undefined {
+  return value === 'reminder' || value === 'overdue' || value === 'escalation'
+    ? value
+    : undefined
 }
 
 function readNotificationCandidates(value: unknown) {
@@ -1280,6 +1564,14 @@ function normalizeStoredDateOnly(value: string | undefined) {
 
 function readString(value: unknown) {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+/** Reads and canonicalizes a valid timestamp from untrusted event metadata. */
+function readTimestamp(value: unknown): string | undefined {
+  const text = readString(value)
+  if (!text) return undefined
+  const timestamp = Date.parse(text)
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : undefined
 }
 
 function readPositiveInteger(value: unknown) {

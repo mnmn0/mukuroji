@@ -238,6 +238,7 @@ test('guards inactive users before deprovisioning and signs out only after succe
             type: 'roadmap',
             ownerMemberKey: 'managed@example.com',
           }],
+          updateTargets: [],
           workItemLinks: [],
           workItemDependencies: [],
         }

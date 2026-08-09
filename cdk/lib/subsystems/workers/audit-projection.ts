@@ -68,6 +68,7 @@ export function buildAuditProjectionWorker(
     auditEventsTable,
     collaborationTable,
     notificationsTable,
+    planningTable,
     processedAuditEventsTable,
     projectDirectoryTable,
     realtimeSessionsTable,
@@ -115,6 +116,7 @@ export function buildAuditProjectionWorker(
         FILE_PROOFING_TABLE_NAME: fileProofingTable.tableName,
         NOTIFICATIONS_TABLE_NAME: notificationsTable.tableName,
         NOTIFICATION_RETENTION_SECONDS: String(365 * 24 * 60 * 60),
+        PLANNING_TABLE_NAME: planningTable.tableName,
         PROCESSED_AUDIT_EVENTS_TABLE_NAME: processedAuditEventsTable.tableName,
         PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
         PROJECT_DIRECTORY_WEBHOOK_AUTHORIZATION_INDEX_NAME:
@@ -169,6 +171,12 @@ export function buildAuditProjectionWorker(
   auditEventsTable.grantStreamRead(collaborationProjectionFunction);
   collaborationTable.grants.readData(collaborationProjectionFunction);
   notificationsTable.grants.readWriteData(collaborationProjectionFunction);
+  collaborationProjectionFunction.addToRolePolicy(
+    new iam.PolicyStatement({
+      actions: ['dynamodb:GetItem'],
+      resources: [planningTable.tableArn],
+    }),
+  );
   processedAuditEventsTable.grants.readWriteData(collaborationProjectionFunction);
   projectDirectoryTable.grants.readData(collaborationProjectionFunction);
   realtimeSessionsTable.grants.readWriteData(collaborationProjectionFunction);

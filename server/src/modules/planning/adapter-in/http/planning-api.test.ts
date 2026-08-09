@@ -3,6 +3,7 @@ import {
 } from '../../../../api/test-support/api-test-harness'
 const {
   configureFakeProjectClients,
+  createCollaborationStub,
   createCyclePlanningInput,
   getTestAppDependencies,
   planningApiRequest,
@@ -43,6 +44,58 @@ function createWorkItemDependencyInput(expectedRevision = 0) {
     lagDays: 0,
     expectedRevision,
   }
+}
+
+/**
+ * Seeds the hierarchy required by an Initiative update target.
+ *
+ * @param planning - Isolated Planning client to populate.
+ * @param entityId - Initiative identifier used by update requests.
+ * @param teamId - Optional Team-only scope; omitted for Workspace scope.
+ */
+async function seedPlanningUpdateInitiative(
+  planning: InMemoryPlanningClient,
+  entityId: string,
+  teamId?: string,
+): Promise<void> {
+  const workspaceId = 'user#demo@example.com'
+  const portfolioId = `${entityId}-portfolio`
+  const roadmapId = `${entityId}-roadmap`
+  await planning.create(workspaceId, {
+    ...createCyclePlanningInput('unused-cycle', 0),
+    id: portfolioId,
+    type: 'portfolio',
+    title: `${entityId} portfolio`,
+    teamId: undefined,
+    projectId: undefined,
+    cadence: undefined,
+    capacity: undefined,
+    carryOverPolicy: undefined,
+  }, { workItems: [] })
+  await planning.create(workspaceId, {
+    ...createCyclePlanningInput('unused-cycle', 1),
+    id: roadmapId,
+    type: 'roadmap',
+    title: `${entityId} roadmap`,
+    parentId: portfolioId,
+    teamId,
+    projectId: undefined,
+    cadence: undefined,
+    capacity: undefined,
+    carryOverPolicy: undefined,
+  }, { workItems: [] })
+  await planning.create(workspaceId, {
+    ...createCyclePlanningInput('unused-cycle', 2),
+    id: entityId,
+    type: 'initiative',
+    title: `${entityId} initiative`,
+    parentId: roadmapId,
+    teamId,
+    projectId: undefined,
+    cadence: undefined,
+    capacity: undefined,
+    carryOverPolicy: undefined,
+  }, { workItems: [] })
 }
 
 /**
@@ -111,6 +164,72 @@ function configureWorkItemDependencyIdempotency(
   return { planning, preparedResponses }
 }
 
+/**
+ * Configures atomic in-memory completion for Planning update annotation receipts.
+ *
+ * @param planning - Planning client retained across first attempts and response-loss retries.
+ * @returns Configured Planning client and captured durable response payloads.
+ */
+function configurePlanningAnnotationIdempotency(
+  planning = new InMemoryPlanningClient(() => new Date('2026-08-07T00:00:00.000Z')),
+) {
+  const platform = createInMemoryDeveloperPlatformAdapters()
+  const preparedResponses: unknown[] = []
+  const preparedCompletions: CompleteIdempotencyRequest[] = []
+
+  /** Completes one staged receipt only after its simulated annotation write succeeds. */
+  async function completePreparedMutation<Result>(
+    operation: () => Promise<Result>,
+  ): Promise<Result> {
+    const firstPendingIndex = preparedCompletions.length
+    try {
+      const result = await operation()
+      const completions = preparedCompletions.splice(firstPendingIndex)
+      const completion = completions[0]
+      if (!completion || completions.length !== 1) {
+        throw new Error('Expected exactly one staged annotation receipt completion.')
+      }
+      await platform.idempotency.completeIdempotency(completion)
+      return result
+    } catch (error) {
+      preparedCompletions.splice(firstPendingIndex)
+      throw error
+    }
+  }
+
+  const createComment = planning.createUpdateComment.bind(planning)
+  planning.createUpdateComment = (...input) => completePreparedMutation(
+    () => createComment(...input),
+  )
+  const addReaction = planning.addUpdateReaction.bind(planning)
+  planning.addUpdateReaction = (...input) => completePreparedMutation(
+    () => addReaction(...input),
+  )
+  const removeReaction = planning.removeUpdateReaction.bind(planning)
+  planning.removeUpdateReaction = (...input) => completePreparedMutation(
+    () => removeReaction(...input),
+  )
+  setTestAppDependencies({
+    planning,
+    idempotency: platform.idempotency,
+    transactions: {
+      async prepareIdempotencyCompletionTransactWrite(request) {
+        preparedResponses.push(request.response)
+        preparedCompletions.push(request)
+        return {
+          transactWriteItem: {
+            Put: {
+              TableName: 'DeveloperPlatformTable',
+              Item: { entryType: 'idempotency', state: 'completed' },
+            },
+          },
+        }
+      },
+    },
+  })
+  return { planning, preparedResponses }
+}
+
 test('returns an authenticated empty Planning graph with accessible Work Item projections', async () => {
   configureFakeProjectClients(true, { role: 'member', workspaceRole: 'member' })
   setTestAppDependencies({ planning: new InMemoryPlanningClient() })
@@ -134,6 +253,365 @@ test('returns an authenticated empty Planning graph with accessible Work Item pr
       statusCategory: 'started',
     }),
   ])
+})
+
+test('configures, publishes, pages, exports, and watches a qualified Project update', async () => {
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+  let current = new Date('2026-08-07T00:00:00.000Z')
+  configurePlanningAnnotationIdempotency(new InMemoryPlanningClient(() => current))
+  const target = { type: 'project', teamId: 'core-team', projectId: 'refero' }
+  const configured = await planningApiRequest('/api/planning/updates/cadence', 'PUT', {
+    target,
+    cadence: {
+      updateOwnerMemberKey: 'demo@example.com',
+      cadence: { unit: 'week', count: 1 },
+      timeZone: 'Asia/Tokyo',
+      nextDueAt: '2026-08-10T00:00:00.000Z',
+      reminderHoursBefore: 24,
+    },
+    expectedRevision: 0,
+  })
+
+  expect(configured.status).toBe(200)
+  expect(await configured.json()).toMatchObject({
+    planning: { revision: 1 },
+    updateTarget: {
+      target,
+      latestVersion: 0,
+      updateState: 'missing',
+    },
+  })
+
+  configureFakeProjectClients(true, { role: 'member', workspaceRole: 'member' })
+  setTestAppDependencies({
+    collaboration: createCollaborationStub({
+      async subscribe() {
+        return {
+          subscribed: true,
+          explicit: true,
+          automatic: false,
+          reasons: ['manual'],
+          watcherCount: 1,
+        }
+      },
+    }),
+  })
+  const published = await planningApiRequest('/api/planning/updates', 'POST', {
+    target,
+    id: 'project-update-1',
+    health: 'at-risk',
+    risk: 'medium',
+    summary: 'Migration is progressing with one dependency at risk.',
+    riskSummary: 'The vendor handoff may move by one day.',
+    decisionSummary: 'Keep the staged rollout.',
+    helpNeeded: 'Confirm the vendor owner.',
+    nextAction: 'Complete the handoff review.',
+    evidence: [{ type: 'link', url: 'https://example.com/evidence', label: 'Handoff log' }],
+    expectedRevision: 1,
+  })
+
+  expect(published.status).toBe(201)
+  expect(await published.json()).toMatchObject({
+    planning: { revision: 2 },
+    update: {
+      id: 'project-update-1',
+      version: 1,
+      origin: 'manual',
+      health: 'at-risk',
+      authorMemberKey: 'demo@example.com',
+      target,
+    },
+  })
+
+  const query = '?targetType=project&teamId=core-team&projectId=refero&limit=20'
+  const history = await planningApiRequest(`/api/planning/updates${query}`)
+  expect(history.status).toBe(200)
+  expect(await history.json()).toMatchObject({
+    updates: [{ id: 'project-update-1', version: 1 }],
+  })
+
+  const exported = await planningApiRequest(`/api/planning/updates/export${query}`)
+  expect(exported.status).toBe(200)
+  expect(exported.headers.get('Content-Disposition')).toContain(
+    'planning-updates-project-core-team-refero.json',
+  )
+  expect(await exported.json()).toMatchObject({
+    schemaVersion: 1,
+    target,
+    updates: [{ id: 'project-update-1' }],
+  })
+
+  const createdComment = await planningApiRequest(
+    `/api/planning/updates/1/comments${query}`,
+    'POST',
+    { id: 'project-update-comment-1', body: 'The handoff evidence is now confirmed.' },
+    'planning-comment-request-1',
+  )
+  expect(createdComment.status).toBe(201)
+  const createdCommentBody = await createdComment.json()
+  expect(createdCommentBody).toMatchObject({
+    comment: {
+      id: 'project-update-comment-1',
+      updateVersion: 1,
+      authorMemberKey: 'demo@example.com',
+    },
+  })
+  current = new Date('2026-08-07T01:00:00.000Z')
+  const replayedComment = await planningApiRequest(
+    `/api/planning/updates/1/comments${query}`,
+    'POST',
+    { id: 'project-update-comment-1', body: 'The handoff evidence is now confirmed.' },
+    'planning-comment-request-1',
+  )
+  expect(replayedComment.status).toBe(201)
+  expect(replayedComment.headers.get('Idempotency-Replayed')).toBe('true')
+  expect(await replayedComment.json()).toEqual(createdCommentBody)
+  const conflictingCommentReplay = await planningApiRequest(
+    `/api/planning/updates/1/comments${query}`,
+    'POST',
+    { id: 'project-update-comment-1', body: 'A different retry payload.' },
+    'planning-comment-request-1',
+  )
+  expect(conflictingCommentReplay.status).toBe(409)
+  expect(await conflictingCommentReplay.json()).toMatchObject({
+    code: 'PlanningUpdateAnnotationIdempotencyConflict',
+  })
+  const commentWithoutIdempotencyKey = await planningApiRequest(
+    `/api/planning/updates/1/comments${query}`,
+    'POST',
+    { id: 'project-update-comment-2', body: 'Must reserve a durable response receipt.' },
+  )
+  expect(commentWithoutIdempotencyKey.status).toBe(400)
+  expect(await commentWithoutIdempotencyKey.json()).toMatchObject({
+    code: 'InvalidPlanningUpdateAnnotationIdempotencyKey',
+  })
+
+  const comments = await planningApiRequest(`/api/planning/updates/1/comments${query}`)
+  expect(comments.status).toBe(200)
+  expect(await comments.json()).toMatchObject({
+    comments: [{ id: 'project-update-comment-1' }],
+  })
+
+  const addedReaction = await planningApiRequest(
+    `/api/planning/updates/1/reactions${query}`,
+    'PUT',
+    { emoji: '👍' },
+    'planning-reaction-add-request-1',
+  )
+  expect(addedReaction.status).toBe(201)
+  const addedReactionBody = await addedReaction.json()
+  expect(addedReactionBody).toMatchObject({
+    reaction: { emoji: '👍', memberKey: 'demo@example.com', updateVersion: 1 },
+  })
+  current = new Date('2026-08-07T02:00:00.000Z')
+  const replayedReaction = await planningApiRequest(
+    `/api/planning/updates/1/reactions${query}`,
+    'PUT',
+    { emoji: '👍' },
+    'planning-reaction-add-request-1',
+  )
+  expect(replayedReaction.status).toBe(201)
+  expect(replayedReaction.headers.get('Idempotency-Replayed')).toBe('true')
+  expect(await replayedReaction.json()).toEqual(addedReactionBody)
+  const reactions = await planningApiRequest(`/api/planning/updates/1/reactions${query}`)
+  expect(await reactions.json()).toMatchObject({
+    reactions: [{ emoji: '👍', memberKey: 'demo@example.com' }],
+  })
+  const removedReaction = await planningApiRequest(
+    `/api/planning/updates/1/reactions${query}`,
+    'DELETE',
+    { emoji: '👍' },
+    'planning-reaction-remove-request-1',
+  )
+  expect(removedReaction.status).toBe(204)
+  const replayedRemoval = await planningApiRequest(
+    `/api/planning/updates/1/reactions${query}`,
+    'DELETE',
+    { emoji: '👍' },
+    'planning-reaction-remove-request-1',
+  )
+  expect(replayedRemoval.status).toBe(204)
+  expect(replayedRemoval.headers.get('Idempotency-Replayed')).toBe('true')
+  const reactionsAfterRemoval = await planningApiRequest(
+    `/api/planning/updates/1/reactions${query}`,
+  )
+  expect(await reactionsAfterRemoval.json()).toMatchObject({ reactions: [] })
+
+  const watched = await planningApiRequest(
+    '/api/planning/update-watch?targetType=project&teamId=core-team&projectId=refero',
+    'PUT',
+  )
+  expect(watched.status).toBe(200)
+  expect(await watched.json()).toHaveProperty('watch')
+})
+
+test('keeps Project viewers read-only for update comments and reactions', async () => {
+  const planning = new InMemoryPlanningClient(() => new Date('2026-08-07T00:00:00.000Z'))
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+  configurePlanningAnnotationIdempotency(planning)
+  const target = { type: 'project' as const, teamId: 'core-team', projectId: 'refero' }
+  await planningApiRequest('/api/planning/updates/cadence', 'PUT', {
+    target,
+    cadence: {
+      updateOwnerMemberKey: 'demo@example.com',
+      cadence: { unit: 'week', count: 1 },
+      timeZone: 'UTC',
+      nextDueAt: '2026-08-10T00:00:00.000Z',
+      reminderHoursBefore: 24,
+    },
+    expectedRevision: 0,
+  })
+  await planningApiRequest('/api/planning/updates', 'POST', {
+    target,
+    id: 'viewer-guard-update',
+    health: 'on-track',
+    risk: 'none',
+    summary: 'Viewer guard update.',
+    riskSummary: '',
+    decisionSummary: '',
+    helpNeeded: '',
+    nextAction: '',
+    evidence: [],
+    expectedRevision: 1,
+  })
+  configureFakeProjectClients(true, { role: 'viewer', workspaceRole: 'member' })
+  const query = '?targetType=project&teamId=core-team&projectId=refero'
+
+  const comment = await planningApiRequest(
+    `/api/planning/updates/1/comments${query}`,
+    'POST',
+    { id: 'viewer-comment', body: 'Must not persist.' },
+    'viewer-comment-request',
+  )
+  expect(comment.status).toBe(403)
+  const reaction = await planningApiRequest(
+    `/api/planning/updates/1/reactions${query}`,
+    'PUT',
+    { emoji: '👍' },
+    'viewer-reaction-request',
+  )
+  expect(reaction.status).toBe(403)
+})
+
+test('requires the exact Team-qualified Project access when Project IDs are duplicated', async () => {
+  const planning = new InMemoryPlanningClient()
+  await seedPlanningUpdateInitiative(planning, 'core-team-initiative', 'core-team')
+
+  configureFakeProjectClients(true, {
+    workspaceRole: 'member',
+    projectAccesses: [{ teamId: 'other-team', projectId: 'refero', role: 'viewer' }],
+    additionalTeams: [{
+      id: 'other-team',
+      name: 'Other Team',
+      projects: [{ id: 'refero', name: 'Other Refero', tone: 'purple' }],
+    }],
+  })
+  setTestAppDependencies({ planning })
+
+  const denied = await planningApiRequest(
+    '/api/planning/updates?targetType=project&teamId=core-team&projectId=refero',
+  )
+  expect(denied.status).toBe(403)
+  const teamScopedInitiativeDenied = await planningApiRequest(
+    '/api/planning/updates?targetType=initiative&entityId=core-team-initiative',
+  )
+  expect(teamScopedInitiativeDenied.status).toBe(403)
+  const allowed = await planningApiRequest(
+    '/api/planning/updates?targetType=project&teamId=other-team&projectId=refero',
+  )
+  expect(allowed.status).toBe(200)
+  expect(await allowed.json()).toEqual({ updates: [] })
+})
+
+test('rejects cadence recipients that cannot act in the current target scope', async () => {
+  configureFakeProjectClients(false, {
+    workspaceRole: 'owner',
+    systemAdminMemberKeys: ['demo@example.com'],
+  })
+  setTestAppDependencies({ planning: new InMemoryPlanningClient() })
+  const target = { type: 'project', teamId: 'core-team', projectId: 'refero' }
+  const cadence = {
+    cadence: { unit: 'week', count: 1 },
+    timeZone: 'UTC',
+    nextDueAt: '2026-08-10T00:00:00.000Z',
+    reminderHoursBefore: 24,
+  }
+
+  const ownerDenied = await planningApiRequest('/api/planning/updates/cadence', 'PUT', {
+    target,
+    cadence: { ...cadence, updateOwnerMemberKey: 'owner@example.com' },
+    expectedRevision: 0,
+  })
+  expect(ownerDenied.status).toBe(409)
+  expect(await ownerDenied.json()).toMatchObject({
+    code: 'PlanningUpdateRecipientAccessDenied',
+  })
+  const escalationDenied = await planningApiRequest('/api/planning/updates/cadence', 'PUT', {
+    target,
+    cadence: {
+      ...cadence,
+      updateOwnerMemberKey: 'demo@example.com',
+      escalationHoursAfter: 4,
+      escalationMemberKey: 'escalation@example.com',
+    },
+    expectedRevision: 0,
+  })
+  expect(escalationDenied.status).toBe(409)
+  expect(await escalationDenied.json()).toMatchObject({
+    code: 'PlanningUpdateRecipientAccessDenied',
+  })
+})
+
+test('rejects guest recipients for Workspace-scoped Initiative cadence', async () => {
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'owner' })
+  const planning = new InMemoryPlanningClient()
+  await seedPlanningUpdateInitiative(planning, 'workspace-initiative')
+  setTestAppDependencies({ planning })
+
+  const dependencies = getTestAppDependencies()
+  const workspaceAccess = dependencies.workspace.workspaceAccess
+  setTestAppDependencies({
+    workspaceAccess: {
+      ...workspaceAccess,
+      async getActiveMember(workspaceId, memberKey) {
+        const member = await workspaceAccess.getActiveMember(workspaceId, memberKey)
+        return member && memberKey === 'guest@example.com'
+          ? { ...member, role: 'guest' }
+          : member
+      },
+    },
+  })
+  const target = { type: 'initiative', entityId: 'workspace-initiative' }
+  const cadence = {
+    cadence: { unit: 'week', count: 1 },
+    timeZone: 'UTC',
+    nextDueAt: '2026-08-10T00:00:00.000Z',
+    reminderHoursBefore: 24,
+  }
+
+  const ownerDenied = await planningApiRequest('/api/planning/updates/cadence', 'PUT', {
+    target,
+    cadence: { ...cadence, updateOwnerMemberKey: 'guest@example.com' },
+    expectedRevision: 3,
+  })
+  expect(ownerDenied.status).toBe(409)
+  expect(await ownerDenied.json()).toMatchObject({
+    code: 'PlanningUpdateRecipientAccessDenied',
+  })
+  const escalationDenied = await planningApiRequest('/api/planning/updates/cadence', 'PUT', {
+    target,
+    cadence: {
+      ...cadence,
+      updateOwnerMemberKey: 'demo@example.com',
+      escalationHoursAfter: 4,
+      escalationMemberKey: 'guest@example.com',
+    },
+    expectedRevision: 3,
+  })
+  expect(escalationDenied.status).toBe(409)
+  expect(await escalationDenied.json()).toMatchObject({
+    code: 'PlanningUpdateRecipientAccessDenied',
+  })
 })
 
 test('lets managers build a scoped hierarchy and dependency graph', async () => {

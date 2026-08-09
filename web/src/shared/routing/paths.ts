@@ -58,6 +58,46 @@ export function createPlanningPath(viewId: PlanningViewId, entityId?: string) {
 }
 
 /**
+ * Creates a URL that opens one Team-qualified Project update in the Planning portfolio.
+ *
+ * @param teamId - Team that owns the Project.
+ * @param projectId - Team-local Project identifier.
+ * @returns Same-origin Planning path with an unambiguous Project update target.
+ */
+export function createPlanningProjectUpdatePath(teamId: string, projectId: string) {
+  const parameters = new URLSearchParams({
+    targetType: 'project',
+    teamId,
+    projectId,
+  })
+  return `/planning/portfolio?${parameters.toString()}`
+}
+
+/**
+ * Creates the stable DOM anchor used by one Planning dependency ledger row.
+ *
+ * @param dependencyId - Workspace-local Planning dependency identifier.
+ * @returns URL-safe fragment identifier for the Timeline dependency row.
+ */
+export function createPlanningDependencyAnchorId(dependencyId: string) {
+  let encodedDependencyId = ''
+  for (let index = 0; index < dependencyId.length; index += 1) {
+    encodedDependencyId += dependencyId.charCodeAt(index).toString(16).padStart(4, '0')
+  }
+  return `planning-dependency-${encodedDependencyId}`
+}
+
+/**
+ * Creates a Timeline deep link to one Planning dependency ledger row.
+ *
+ * @param dependencyId - Workspace-local Planning dependency identifier.
+ * @returns Same-origin Timeline path with a stable dependency fragment.
+ */
+export function createPlanningDependencyPath(dependencyId: string) {
+  return `/planning/timeline#${createPlanningDependencyAnchorId(dependencyId)}`
+}
+
+/**
  * Requests workbench で表示できる tab です。
  */
 export type RequestsView = 'queue' | 'forms'

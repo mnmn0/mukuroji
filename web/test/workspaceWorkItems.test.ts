@@ -162,8 +162,12 @@ describe('Workspace Work Item model', () => {
 
     expect(coreRow?.progress).toBe(100)
     expect(coreRow?.risk).toBe('low')
+    expect(coreRow?.teamId).toBe('core-team')
+    expect(coreRow?.projectId).toBe('shared-launch')
     expect(designRow?.progress).toBe(0)
     expect(designRow?.risk).toBe('watch')
+    expect(designRow?.teamId).toBe('design-team')
+    expect(designRow?.projectId).toBe('shared-launch')
   })
 
   test('parses only exact ISO calendar dates', () => {

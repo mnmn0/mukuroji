@@ -107,6 +107,16 @@ export type NotificationItem = {
   commentId?: string
   /** Reply が属する root comment ID です。 */
   rootCommentId?: string
+  /** Scheduled health update の Project / Initiative target type です。 */
+  planningTargetType?: 'project' | 'initiative'
+  /** Scheduled health update の canonical target ID です。 */
+  planningTargetId?: string
+  /** Current Planning target を再検証する record key です。 */
+  planningTargetRecordKey?: string
+  /** Scheduled health update が対象にした cadence deadline です。 */
+  planningNextDueAt?: string
+  /** Scheduled health update の notification stage です。 */
+  planningNotificationKind?: 'reminder' | 'overdue' | 'escalation'
   /** Event 発生日時です。 */
   occurredAt: string
   /** 現在の Inbox state です。 */
@@ -981,6 +991,21 @@ function toNotificationItem(
     ...(readText(value.issueId) ? { issueId: readText(value.issueId) } : {}),
     ...(readText(value.commentId) ? { commentId: readText(value.commentId) } : {}),
     ...(readText(value.rootCommentId) ? { rootCommentId: readText(value.rootCommentId) } : {}),
+    ...(readPlanningTargetType(value.planningTargetType)
+      ? { planningTargetType: readPlanningTargetType(value.planningTargetType) }
+      : {}),
+    ...(readText(value.planningTargetId)
+      ? { planningTargetId: readText(value.planningTargetId) }
+      : {}),
+    ...(readText(value.planningTargetRecordKey)
+      ? { planningTargetRecordKey: readText(value.planningTargetRecordKey) }
+      : {}),
+    ...(readTimestamp(value.planningNextDueAt)
+      ? { planningNextDueAt: readTimestamp(value.planningNextDueAt) }
+      : {}),
+    ...(readPlanningNotificationKind(value.planningNotificationKind)
+      ? { planningNotificationKind: readPlanningNotificationKind(value.planningNotificationKind) }
+      : {}),
     occurredAt,
     state: resolveNotificationState(value, now),
     ...(readTimestamp(value.readAt) ? { readAt: readTimestamp(value.readAt) } : {}),
@@ -1225,6 +1250,20 @@ function readStringArray(value: unknown) {
   return Array.isArray(value)
     ? [...new Set(value.map(readText).filter((item): item is string => Boolean(item)))].sort()
     : []
+}
+
+/** Reads a validated Planning health update target type. */
+function readPlanningTargetType(value: unknown): 'project' | 'initiative' | undefined {
+  return value === 'project' || value === 'initiative' ? value : undefined
+}
+
+/** Reads a validated Planning health update notification kind. */
+function readPlanningNotificationKind(
+  value: unknown,
+): 'reminder' | 'overdue' | 'escalation' | undefined {
+  return value === 'reminder' || value === 'overdue' || value === 'escalation'
+    ? value
+    : undefined
 }
 
 function readLegacyWorkItemScope(value: Record<string, unknown>) {

@@ -2,6 +2,7 @@
 export {
   CollaborationError,
   createProjectCollaborationEntityKey,
+  createPlanningUpdateCollaborationEntityKey,
   createWorkItemCollaborationEntityKey,
   type CollaborationAutomaticWatcherCandidate,
   type CollaborationClient,

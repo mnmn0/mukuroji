@@ -1,6 +1,16 @@
 import {
   LEGACY_PLANNING_SCHEMA_VERSION,
   PLANNING_SCHEMA_VERSION,
+  PLANNING_UPDATE_CONTENT_VERSION,
+  type PlanningUpdate,
+  type PlanningUpdateCadenceMutationResponse,
+  type PlanningUpdateComment,
+  type PlanningUpdateCommentPage,
+  type PlanningUpdateHistoryPage,
+  type PlanningUpdatePublishResponse,
+  type PlanningUpdateReaction,
+  type PlanningUpdateReactionPage,
+  type PlanningUpdateTargetSummary,
   type PlanningSnapshot,
 } from '@mukuroji/contracts'
 import {
@@ -52,6 +62,13 @@ const planningRiskValues = new Set<string>([
   'medium',
   'high',
   'critical',
+])
+const planningUpdateStates = new Set<string>([
+  'not-configured',
+  'missing',
+  'current',
+  'overdue',
+  'stale',
 ])
 
 /** Returns whether a value is one Planning status update. */
@@ -119,6 +136,233 @@ function isPlanningCadence(value: unknown): boolean {
     (value.unit === 'week' || value.unit === 'month') &&
     isPositiveSafeInteger(value.count)
   )
+}
+
+/** Returns whether a value is a Project or Initiative update target. */
+function isPlanningUpdateTarget(value: unknown): boolean {
+  if (!isRecord(value)) return false
+  if (value.type === 'project') {
+    return typeof value.teamId === 'string' &&
+      value.teamId.length > 0 &&
+      typeof value.projectId === 'string' &&
+      value.projectId.length > 0
+  }
+  return value.type === 'initiative' &&
+    typeof value.entityId === 'string' &&
+    value.entityId.length > 0
+}
+
+/** Returns whether a value is a configured recurring update cadence. */
+function isPlanningUpdateCadence(value: unknown): boolean {
+  return isRecord(value) &&
+    typeof value.updateOwnerMemberKey === 'string' &&
+    isRecord(value.cadence) &&
+    isPlanningCadence(value.cadence) &&
+    isIanaTimeZone(value.timeZone) &&
+    isIsoTimestamp(value.nextDueAt) &&
+    isNonnegativeSafeInteger(value.reminderHoursBefore) &&
+    (
+      value.escalationHoursAfter === undefined ||
+      isNonnegativeSafeInteger(value.escalationHoursAfter)
+    ) &&
+    isOptionalString(value.escalationMemberKey)
+}
+
+/** Returns whether a value is a server-captured progress snapshot. */
+function isPlanningUpdateProgressSnapshot(value: unknown): boolean {
+  return isRecord(value) &&
+    isFiniteNumber(value.percent) &&
+    value.percent >= 0 &&
+    value.percent <= 100 &&
+    isNonnegativeSafeInteger(value.linkedWorkItemCount)
+}
+
+/** Returns whether a value is the bounded latest-update summary. */
+function isPlanningLatestUpdateSummary(value: unknown): boolean {
+  return isRecord(value) &&
+    typeof value.id === 'string' &&
+    isPositiveSafeInteger(value.version) &&
+    typeof value.health === 'string' && planningHealthValues.has(value.health) &&
+    typeof value.risk === 'string' && planningRiskValues.has(value.risk) &&
+    typeof value.summary === 'string' &&
+    isPlanningUpdateProgressSnapshot(value.progressSnapshot) &&
+    typeof value.authorMemberKey === 'string' &&
+    isIsoTimestamp(value.coveredDueAt) &&
+    isIsoTimestamp(value.createdAt)
+}
+
+/** Returns whether a value is one snapshot update-target summary. */
+function isPlanningUpdateTargetSummary(
+  value: unknown,
+): value is PlanningUpdateTargetSummary {
+  return isRecord(value) &&
+    isPlanningUpdateTarget(value.target) &&
+    (value.cadence === undefined || isPlanningUpdateCadence(value.cadence)) &&
+    typeof value.updateState === 'string' && planningUpdateStates.has(value.updateState) &&
+    isNonnegativeSafeInteger(value.latestVersion) &&
+    (value.latestUpdate === undefined || isPlanningLatestUpdateSummary(value.latestUpdate)) &&
+    isOptionalString(value.archivedAt) &&
+    typeof value.updatedAt === 'string'
+}
+
+/** Returns whether a value is one immutable update evidence reference. */
+function isPlanningUpdateEvidence(value: unknown): boolean {
+  if (!isRecord(value) || typeof value.type !== 'string') return false
+  switch (value.type) {
+    case 'work-item':
+      return typeof value.teamId === 'string' && typeof value.workItemId === 'string'
+    case 'planning-entity':
+      return typeof value.entityId === 'string'
+    case 'decision':
+      return typeof value.decisionId === 'string' && isHttpsUrl(value.url)
+    case 'file':
+      return typeof value.fileId === 'string' && isHttpsUrl(value.url)
+    case 'link':
+      return isHttpsUrl(value.url) && isOptionalString(value.label)
+    default:
+      return false
+  }
+}
+
+/** Returns whether a value is an absolute HTTPS URL accepted by evidence contracts. */
+function isHttpsUrl(value: unknown): boolean {
+  if (typeof value !== 'string') return false
+  try {
+    const url = new URL(value)
+    return url.protocol === 'https:' && !url.username && !url.password
+  } catch {
+    return false
+  }
+}
+
+/** Returns whether a value is a parseable ISO-like timestamp. */
+function isIsoTimestamp(value: unknown): value is string {
+  return typeof value === 'string' && Number.isFinite(Date.parse(value))
+}
+
+/** Returns whether a value names an IANA time zone supported by this runtime. */
+function isIanaTimeZone(value: unknown): value is string {
+  if (typeof value !== 'string' || !value) return false
+  try {
+    new Intl.DateTimeFormat('en', { timeZone: value }).format()
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** Returns whether a value is a captured Team and Project scope. */
+function isPlanningUpdateScopeSnapshot(value: unknown): boolean {
+  return isRecord(value) &&
+    isOptionalString(value.teamId) &&
+    isOptionalString(value.projectId)
+}
+
+/** Returns whether a value is one captured Milestone. */
+function isPlanningUpdateMilestoneSnapshot(value: unknown): boolean {
+  return isRecord(value) &&
+    typeof value.entityId === 'string' &&
+    typeof value.title === 'string' &&
+    typeof value.status === 'string' && planningStatuses.has(value.status) &&
+    isPlanningDateRange(value.forecast)
+}
+
+/** Returns whether a value is one captured Planning dependency. */
+function isPlanningUpdateDependencySnapshot(value: unknown): boolean {
+  return isRecord(value) &&
+    typeof value.dependencyId === 'string' &&
+    typeof value.predecessorId === 'string' &&
+    typeof value.successorId === 'string' &&
+    isScheduleDependencyType(value.type) &&
+    Number.isSafeInteger(value.lagDays)
+}
+
+/** Returns whether a value is the immutable comparison context of an update. */
+function isPlanningUpdateContextSnapshot(value: unknown): boolean {
+  return isRecord(value) &&
+    typeof value.health === 'string' && planningHealthValues.has(value.health) &&
+    typeof value.risk === 'string' && planningRiskValues.has(value.risk) &&
+    isPlanningUpdateProgressSnapshot(value.progress) &&
+    isPlanningUpdateScopeSnapshot(value.scope) &&
+    isOptionalString(value.targetDate) &&
+    Array.isArray(value.milestones) &&
+    value.milestones.every(isPlanningUpdateMilestoneSnapshot) &&
+    Array.isArray(value.dependencies) &&
+    value.dependencies.every(isPlanningUpdateDependencySnapshot)
+}
+
+/** Returns whether a value is one immutable comparison delta. */
+function isPlanningUpdateChange(value: unknown): boolean {
+  if (!isRecord(value) || typeof value.type !== 'string') return false
+  switch (value.type) {
+    case 'health':
+      return typeof value.before === 'string' && planningHealthValues.has(value.before) &&
+        typeof value.after === 'string' && planningHealthValues.has(value.after)
+    case 'risk':
+      return typeof value.before === 'string' && planningRiskValues.has(value.before) &&
+        typeof value.after === 'string' && planningRiskValues.has(value.after)
+    case 'progress':
+      return isFiniteNumber(value.before) && isFiniteNumber(value.after)
+    case 'target-date':
+      return isOptionalString(value.before) && isOptionalString(value.after)
+    case 'scope':
+      return isPlanningUpdateScopeSnapshot(value.before) &&
+        isPlanningUpdateScopeSnapshot(value.after)
+    case 'milestones':
+    case 'dependencies':
+      return isStringArray(value.addedIds) &&
+        isStringArray(value.removedIds) &&
+        isStringArray(value.changedIds)
+    default:
+      return false
+  }
+}
+
+/** Returns whether a value is one full immutable structured update. */
+function isPlanningUpdate(value: unknown): value is PlanningUpdate {
+  return isRecord(value) &&
+    typeof value.id === 'string' &&
+    isPlanningUpdateTarget(value.target) &&
+    isPositiveSafeInteger(value.version) &&
+    value.contentVersion === PLANNING_UPDATE_CONTENT_VERSION &&
+    value.origin === 'manual' &&
+    typeof value.health === 'string' && planningHealthValues.has(value.health) &&
+    typeof value.risk === 'string' && planningRiskValues.has(value.risk) &&
+    typeof value.summary === 'string' &&
+    typeof value.riskSummary === 'string' &&
+    typeof value.decisionSummary === 'string' &&
+    typeof value.helpNeeded === 'string' &&
+    typeof value.nextAction === 'string' &&
+    isPlanningUpdateProgressSnapshot(value.progressSnapshot) &&
+    isPlanningUpdateContextSnapshot(value.contextSnapshot) &&
+    Array.isArray(value.changes) &&
+    value.changes.every(isPlanningUpdateChange) &&
+    Array.isArray(value.evidence) &&
+    value.evidence.every(isPlanningUpdateEvidence) &&
+    typeof value.authorMemberKey === 'string' &&
+    isIsoTimestamp(value.coveredDueAt) &&
+    isIsoTimestamp(value.createdAt)
+}
+
+/** Returns whether a value is one append-only immutable-update comment. */
+function isPlanningUpdateComment(value: unknown): value is PlanningUpdateComment {
+  return isRecord(value) &&
+    typeof value.id === 'string' &&
+    isPlanningUpdateTarget(value.target) &&
+    isPositiveSafeInteger(value.updateVersion) &&
+    typeof value.body === 'string' &&
+    typeof value.authorMemberKey === 'string' &&
+    isIsoTimestamp(value.createdAt)
+}
+
+/** Returns whether a value is one member reaction on an immutable update. */
+function isPlanningUpdateReaction(value: unknown): value is PlanningUpdateReaction {
+  return isRecord(value) &&
+    isPlanningUpdateTarget(value.target) &&
+    isPositiveSafeInteger(value.updateVersion) &&
+    typeof value.emoji === 'string' &&
+    typeof value.memberKey === 'string' &&
+    isIsoTimestamp(value.createdAt)
 }
 
 /** Returns whether a value is one local-date Planning range. */
@@ -221,6 +465,8 @@ export function isPlanningSnapshot(value: unknown): value is PlanningSnapshot {
     value.workItemLinks.every(isPlanningWorkItemLink) &&
     Array.isArray(value.workItems) &&
     value.workItems.every(isPlanningWorkItem) &&
+    Array.isArray(value.updateTargets) &&
+    value.updateTargets.every(isPlanningUpdateTargetSummary) &&
     isPlanningCriticalPath(value.criticalPath) &&
     isWorkItemDependencySummary(value.workItemDependencySummary) &&
     isOptionalString(value.updatedAt)
@@ -238,11 +484,19 @@ export function isPlanningSnapshot(value: unknown): value is PlanningSnapshot {
  */
 export function readPlanningSnapshot(value: unknown): PlanningSnapshot | undefined {
   if (isPlanningSnapshot(value)) return value
+  if (isRecord(value) && value.schemaVersion === PLANNING_SCHEMA_VERSION) {
+    const normalizedCurrent = {
+      ...value,
+      updateTargets: value.updateTargets ?? [],
+    }
+    if (isPlanningSnapshot(normalizedCurrent)) return normalizedCurrent
+  }
   if (!isLegacyPlanningSnapshot(value)) return undefined
 
   const normalized = {
     ...value,
     schemaVersion: PLANNING_SCHEMA_VERSION,
+    updateTargets: [],
     workItemDependencies: value.workItemDependencies ?? [],
     workItemDependencySummary: normalizeLegacyWorkItemDependencySummary(
       value.workItemDependencySummary,
@@ -250,6 +504,131 @@ export function readPlanningSnapshot(value: unknown): PlanningSnapshot | undefin
     ),
   }
   return isPlanningSnapshot(normalized) ? normalized : undefined
+}
+
+/**
+ * Decodes one immutable Planning update history page.
+ *
+ * @param value - Unknown history API response candidate.
+ * @returns A validated history page, or undefined when malformed.
+ */
+export function readPlanningUpdateHistoryPage(
+  value: unknown,
+): PlanningUpdateHistoryPage | undefined {
+  if (!isRecord(value) ||
+    !Array.isArray(value.updates) ||
+    !value.updates.every(isPlanningUpdate) ||
+    !isOptionalString(value.nextCursor)) {
+    return undefined
+  }
+  return {
+    nextCursor: value.nextCursor,
+    updates: value.updates,
+  }
+}
+
+/**
+ * Decodes one cursor-paginated immutable-update comment page.
+ *
+ * @param value - Unknown comment history response candidate.
+ * @returns A validated comment page, or undefined when malformed.
+ */
+export function readPlanningUpdateCommentPage(
+  value: unknown,
+): PlanningUpdateCommentPage | undefined {
+  if (!isRecord(value) ||
+    !Array.isArray(value.comments) ||
+    !value.comments.every(isPlanningUpdateComment) ||
+    !isOptionalString(value.nextCursor)) {
+    return undefined
+  }
+  return {
+    nextCursor: value.nextCursor,
+    comments: value.comments,
+  }
+}
+
+/**
+ * Decodes one newly created immutable-update comment envelope.
+ *
+ * @param value - Unknown comment mutation response candidate.
+ * @returns The validated comment envelope, or undefined when malformed.
+ */
+export function readPlanningUpdateCommentMutationResponse(
+  value: unknown,
+): { comment: PlanningUpdateComment } | undefined {
+  return isRecord(value) && isPlanningUpdateComment(value.comment)
+    ? { comment: value.comment }
+    : undefined
+}
+
+/**
+ * Decodes one immutable-update reaction page.
+ *
+ * @param value - Unknown reaction history response candidate.
+ * @returns A validated reaction page, or undefined when malformed.
+ */
+export function readPlanningUpdateReactionPage(
+  value: unknown,
+): PlanningUpdateReactionPage | undefined {
+  if (!isRecord(value) ||
+    !Array.isArray(value.reactions) ||
+    !value.reactions.every(isPlanningUpdateReaction) ||
+    !isOptionalString(value.nextCursor)) {
+    return undefined
+  }
+  return {
+    nextCursor: value.nextCursor,
+    reactions: value.reactions,
+  }
+}
+
+/**
+ * Decodes one newly added immutable-update reaction envelope.
+ *
+ * @param value - Unknown reaction mutation response candidate.
+ * @returns The validated reaction envelope, or undefined when malformed.
+ */
+export function readPlanningUpdateReactionMutationResponse(
+  value: unknown,
+): { reaction: PlanningUpdateReaction } | undefined {
+  return isRecord(value) && isPlanningUpdateReaction(value.reaction)
+    ? { reaction: value.reaction }
+    : undefined
+}
+
+/**
+ * Decodes one cadence mutation response and its authoritative snapshot.
+ *
+ * @param value - Unknown cadence mutation response candidate.
+ * @returns A validated response, or undefined when malformed.
+ */
+export function readPlanningUpdateCadenceMutationResponse(
+  value: unknown,
+): PlanningUpdateCadenceMutationResponse | undefined {
+  if (!isRecord(value) || !isPlanningUpdateTargetSummary(value.updateTarget)) {
+    return undefined
+  }
+  const planning = readPlanningSnapshot(value.planning)
+  return planning
+    ? { planning, updateTarget: value.updateTarget }
+    : undefined
+}
+
+/**
+ * Decodes one structured manual publish response and its immutable update.
+ *
+ * @param value - Unknown publish response candidate.
+ * @returns A validated response, or undefined when malformed.
+ */
+export function readPlanningUpdatePublishResponse(
+  value: unknown,
+): PlanningUpdatePublishResponse | undefined {
+  if (!isRecord(value) || !isPlanningUpdate(value.update)) return undefined
+  const planning = readPlanningSnapshot(value.planning)
+  return planning
+    ? { planning, update: value.update }
+    : undefined
 }
 
 /** Returns whether a response matches the dependency-free Planning v1 snapshot shape. */

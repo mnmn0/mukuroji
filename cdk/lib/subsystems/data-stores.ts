@@ -175,6 +175,13 @@ export function buildDataStores(
     removalPolicy: cdk.RemovalPolicy.RETAIN,
   });
 
+  planningTable.addGlobalSecondaryIndex({
+    indexName: 'UpdateScheduleDueIndex',
+    partitionKey: { name: 'updateScheduleShard', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'nextNotificationAtRecordKey', type: dynamodb.AttributeType.STRING },
+    projectionType: dynamodb.ProjectionType.KEYS_ONLY,
+  });
+
   const capacityPlanningTable = new dynamodb.Table(stack, 'CapacityPlanningTable', {
     partitionKey: { name: 'workspaceId', type: dynamodb.AttributeType.STRING },
     sortKey: { name: 'recordKey', type: dynamodb.AttributeType.STRING },

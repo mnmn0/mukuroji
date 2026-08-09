@@ -278,7 +278,7 @@ export type CollaborationReactionInput = WorkItemCollaborationScope & {
 
 /** Watcher state 取得入力です。 */
 export type GetWatcherStateInput = {
-  /** Work Item または project entity key です。 */
+  /** Work Item、Project、または Planning update target の entity key です。 */
   entityKey: string
   /** 現在 user の member key です。 */
   memberKey: string
@@ -298,6 +298,8 @@ export type UpdateWatcherInput = {
   issueId?: string
   /** Assigned project または watch 対象 project ID です。 */
   projectId?: string
+  /** Project/Initiative を一意に表す Planning update target key です。 */
+  planningUpdateTargetKey?: string
   /** Work Item 取得時に併記する assigned project entity key です。 */
   projectEntityKey?: string
   /** Subscribe/unsubscribe 対象 member key です。 */
@@ -460,6 +462,14 @@ export function createWorkItemCollaborationEntityKey(
 /** Project scope の canonical collaboration entity key を作成します。 */
 export function createProjectCollaborationEntityKey(workspaceId: string, projectId: string) {
   return `${requireText(workspaceId, 'Workspace ID')}#project#${requireText(projectId, 'Project ID')}`
+}
+
+/** Planning update target scope の canonical collaboration entity key を作成します。 */
+export function createPlanningUpdateCollaborationEntityKey(
+  workspaceId: string,
+  targetKey: string,
+) {
+  return `${requireText(workspaceId, 'Workspace ID')}#planning-update#${requireText(targetKey, 'Planning update target key')}`
 }
 
 /** DynamoDB collaboration table を操作する client です。 */
@@ -855,6 +865,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
         teamId: input.teamId,
         issueId: input.issueId,
         projectId: input.projectId,
+        planningUpdateTargetKey: input.planningUpdateTargetKey,
         kind: reason,
       },
     })
@@ -904,6 +915,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
         teamId: input.teamId,
         issueId: input.issueId,
         projectId: input.projectId,
+        planningUpdateTargetKey: input.planningUpdateTargetKey,
       },
     })
     try {
@@ -1398,6 +1410,27 @@ function validateWatcherScope(input: UpdateWatcherInput) {
       entityKey,
       entityType: 'work-item' as const,
       entityId: workItemEntityId(teamId, issueId),
+    }
+  }
+
+  if (input.planningUpdateTargetKey) {
+    const targetKey = requireText(
+      input.planningUpdateTargetKey,
+      'Planning update target key',
+    )
+    if (
+      entityKey !== createPlanningUpdateCollaborationEntityKey(workspaceId, targetKey)
+    ) {
+      throw new CollaborationError(
+        400,
+        'InvalidCollaborationScope',
+        'Planning update watcher scope is invalid.',
+      )
+    }
+    return {
+      entityKey,
+      entityType: 'planning-update-target' as const,
+      entityId: targetKey,
     }
   }
 

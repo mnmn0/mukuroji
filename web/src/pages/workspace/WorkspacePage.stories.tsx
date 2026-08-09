@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
+import type { PlanningUpdateTargetSummary } from '@mukuroji/contracts'
 import { useState, type ReactElement } from 'react'
 import { MemoryRouter, Outlet, Route, Routes } from 'react-router'
 import {
@@ -47,6 +48,31 @@ const storySummary: WorkspaceSummary = {
   projects: 5,
   tasks: storyTasks.length,
 }
+
+const storyPlanningUpdateTargets: PlanningUpdateTargetSummary[] = [{
+  target: { type: 'project', teamId: 'core-team', projectId: 'refero' },
+  cadence: {
+    updateOwnerMemberKey: 'demo@example.com',
+    cadence: { unit: 'week', count: 1 },
+    timeZone: 'Asia/Tokyo',
+    nextDueAt: '2026-08-14T08:00:00.000Z',
+    reminderHoursBefore: 24,
+  },
+  updateState: 'overdue',
+  latestVersion: 3,
+  latestUpdate: {
+    id: 'story-project-update-3',
+    version: 3,
+    health: 'on-track',
+    risk: 'low',
+    summary: 'Release scope is stable; final evidence review remains.',
+    progressSnapshot: { percent: 78, linkedWorkItemCount: 6 },
+    authorMemberKey: 'demo@example.com',
+    coveredDueAt: '2026-08-07T08:00:00.000Z',
+    createdAt: '2026-08-07T07:30:00.000Z',
+  },
+  updatedAt: '2026-08-07T07:30:00.000Z',
+}]
 
 const storyWorkItemConfigurations = {
   'core-team': inheritedWorkItemConfigurationFixture,
@@ -343,6 +369,24 @@ export const InboxWithoutNotifications: Story = {
 export const DashboardRoute: Story = {
   render: () => (
     <DashboardWorkspaceView
+      planningUpdateTargets={storyPlanningUpdateTargets}
+      summary={storySummary}
+      t={t}
+      tasks={storyTasks}
+      teams={projectDirectoryFixtures}
+      workItemConfigurationsByTeam={storyWorkItemConfigurations}
+    />
+  ),
+}
+
+/** The dashboard preserves separate health and reporting freshness on a narrow viewport. */
+export const DashboardRouteMobile: Story = {
+  parameters: {
+    viewport: { defaultViewport: 'mobile1' },
+  },
+  render: () => (
+    <DashboardWorkspaceView
+      planningUpdateTargets={storyPlanningUpdateTargets}
       summary={storySummary}
       t={t}
       tasks={storyTasks}

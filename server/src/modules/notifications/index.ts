@@ -26,5 +26,11 @@ export {
   type UpdateNotificationPreferencesInput,
 } from './notifications'
 export {
+  createPlanningScheduledNotificationCandidates,
   createNotificationScheduleHandler,
+  parsePlanningUpdateTargetScheduleRow,
+  type PlanningScheduledNotificationKind,
+  type PlanningUpdateNotificationCadence,
+  type PlanningUpdateTargetReference,
+  type PlanningUpdateTargetScheduleRecord,
 } from './adapter-in/schedules/notification-schedule'

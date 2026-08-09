@@ -5,7 +5,10 @@ import type {
   CreatePlanningEntityInput,
   PlanningEntity,
   PlanningEntityType,
+  PlanningUpdateCadence,
+  PlanningUpdateTarget,
   PlanningWorkItemSummary,
+  PublishPlanningUpdateInput,
   UpdatePlanningEntityInput,
   WorkItemSchedule,
   WorkItemScheduleDependency,
@@ -25,6 +28,10 @@ import {
   type PlanningMutationTransaction,
   type PlanningWorkItemState,
 } from './planning'
+import {
+  createPlanningUpdateNextNotificationAtRecordKey,
+  createPlanningUpdateScheduleShard,
+} from './planning-update-schedule-index'
 
 const NOW = new Date('2026-07-16T09:00:00.000Z')
 const EMPTY_WORK_ITEMS: PlanningWorkItemState = { workItems: [] }
@@ -92,6 +99,33 @@ function createStoredCycle(id: string) {
   }
 }
 
+/**
+ * Creates one complete human-authored structured update input.
+ *
+ * @param expectedRevision - Planning revision observed by the caller.
+ * @param overrides - Structured fields replaced for the scenario.
+ * @returns Publish input for the default Project target.
+ */
+function createPlanningUpdateInput(
+  expectedRevision: number,
+  overrides: Partial<PublishPlanningUpdateInput> = {},
+): PublishPlanningUpdateInput {
+  return {
+    target: { type: 'project', teamId: 'team-1', projectId: 'project-1' },
+    id: `update-${expectedRevision}`,
+    health: 'on-track',
+    risk: 'none',
+    summary: 'Delivery remains on plan.',
+    riskSummary: '',
+    decisionSummary: '',
+    helpNeeded: '',
+    nextAction: 'Ship the next increment.',
+    evidence: [],
+    expectedRevision,
+    ...overrides,
+  }
+}
+
 function getEntity(entities: readonly PlanningEntity[], id: string) {
   const entity = entities.find((candidate) => candidate.id === id)
   if (!entity) throw new Error(`Planning entity "${id}" was not returned.`)
@@ -122,6 +156,28 @@ function createWorkItem(
     schedule: createDefaultDueDateWorkItemSchedule('2026-08-31'),
     ...overrides,
   }
+}
+
+/**
+ * Applies the record-key prefix used by a mocked DynamoDB Query command.
+ *
+ * @param input - AWS SDK Query input captured by the test double.
+ * @param rows - Complete physical rows available to the fake table.
+ * @returns Rows whose sort keys match the requested prefix.
+ */
+function rowsForPlanningRecordPrefixQuery(
+  input: Record<string, unknown>,
+  rows: readonly Record<string, unknown>[],
+) {
+  const values = input.ExpressionAttributeValues
+  if (
+    typeof values !== 'object' || values === null ||
+    !(':recordPrefix' in values) || typeof values[':recordPrefix'] !== 'string'
+  ) return []
+  const recordPrefix = values[':recordPrefix']
+  return rows.filter((row) =>
+    typeof row.recordKey === 'string' && row.recordKey.startsWith(recordPrefix)
+  )
 }
 
 /**
@@ -1829,6 +1885,580 @@ describe('planning domain', () => {
   })
 })
 
+describe('planning structured updates', () => {
+  test('keeps freshness separate from health and advances weekly cadence through DST', async () => {
+    let current = new Date('2026-02-28T12:00:00.000Z')
+    const client = new InMemoryPlanningClient(() => current)
+    const target: PlanningUpdateTarget = {
+      type: 'project', teamId: 'team-1', projectId: 'project-1',
+    }
+    const cadence: PlanningUpdateCadence = {
+      updateOwnerMemberKey: 'owner@example.com',
+      cadence: { unit: 'week', count: 1 },
+      timeZone: 'America/New_York',
+      nextDueAt: '2026-03-01T15:00:00.000Z',
+      reminderHoursBefore: 24,
+    }
+
+    const configured = await client.configureUpdateCadence('workspace-1', {
+      target,
+      cadence,
+      expectedRevision: 0,
+    }, EMPTY_WORK_ITEMS)
+    expect(configured.updateTarget.updateState).toBe('missing')
+
+    const first = await client.publishUpdate(
+      'workspace-1',
+      createPlanningUpdateInput(1, { target, id: 'update-1', health: 'off-track' }),
+      'AUTHOR@EXAMPLE.COM',
+      EMPTY_WORK_ITEMS,
+    )
+    expect(first.update).toMatchObject({
+      version: 1,
+      origin: 'manual',
+      health: 'off-track',
+      authorMemberKey: 'author@example.com',
+      coveredDueAt: '2026-03-01T15:00:00.000Z',
+    })
+    expect(first.planning.updateTargets[0]).toMatchObject({
+      updateState: 'current',
+      cadence: { nextDueAt: '2026-03-08T14:00:00.000Z' },
+      latestUpdate: { health: 'off-track' },
+    })
+
+    current = new Date('2026-03-07T14:00:00.000Z')
+    expect((await client.get('workspace-1', EMPTY_WORK_ITEMS)).updateTargets[0]?.updateState)
+      .toBe('stale')
+    current = new Date('2026-03-08T14:00:00.000Z')
+    expect((await client.get('workspace-1', EMPTY_WORK_ITEMS)).updateTargets[0]?.updateState)
+      .toBe('overdue')
+
+    await client.publishUpdate(
+      'workspace-1',
+      createPlanningUpdateInput(2, { target, id: 'update-2', health: 'on-track' }),
+      'author@example.com',
+      EMPTY_WORK_ITEMS,
+    )
+    const firstPage = await client.listUpdates('workspace-1', { target, limit: 1 })
+    expect(firstPage.updates.map((update) => update.version)).toEqual([2])
+    expect(firstPage.nextCursor).toBeString()
+    const secondPage = await client.listUpdates('workspace-1', {
+      target,
+      limit: 1,
+      cursor: firstPage.nextCursor,
+    })
+    expect(secondPage.updates.map((update) => update.version)).toEqual([1])
+    expect(secondPage.nextCursor).toBeUndefined()
+  })
+
+  test('retains the original monthly day across shorter calendar months', async () => {
+    for (const scenario of [
+      {
+        initialDueAt: '2027-01-31T09:00:00.000Z',
+        februaryDueAt: '2027-02-28T09:00:00.000Z',
+        marchDueAt: '2027-03-31T09:00:00.000Z',
+      },
+      {
+        initialDueAt: '2027-01-30T09:00:00.000Z',
+        februaryDueAt: '2027-02-28T09:00:00.000Z',
+        marchDueAt: '2027-03-30T09:00:00.000Z',
+      },
+    ]) {
+      let current = new Date('2027-01-01T09:00:00.000Z')
+      const client = new InMemoryPlanningClient(() => current)
+      const target: PlanningUpdateTarget = {
+        type: 'project', teamId: 'team-1', projectId: 'project-1',
+      }
+      await client.configureUpdateCadence('workspace-1', {
+        target,
+        cadence: {
+          updateOwnerMemberKey: 'owner@example.com',
+          cadence: { unit: 'month', count: 1 },
+          timeZone: 'UTC',
+          nextDueAt: scenario.initialDueAt,
+          reminderHoursBefore: 0,
+        },
+        expectedRevision: 0,
+      }, EMPTY_WORK_ITEMS)
+      const first = await client.publishUpdate(
+        'workspace-1',
+        createPlanningUpdateInput(1, { target, id: 'update-1' }),
+        'owner@example.com',
+        EMPTY_WORK_ITEMS,
+      )
+      expect(first.planning.updateTargets[0]?.cadence?.nextDueAt)
+        .toBe(scenario.februaryDueAt)
+      current = new Date('2027-02-01T09:00:00.000Z')
+      const second = await client.publishUpdate(
+        'workspace-1',
+        createPlanningUpdateInput(2, { target, id: 'update-2' }),
+        'owner@example.com',
+        EMPTY_WORK_ITEMS,
+      )
+      expect(second.planning.updateTargets[0]?.cadence?.nextDueAt)
+        .toBe(scenario.marchDueAt)
+    }
+  })
+
+  test('captures immutable Initiative context and diffs canonical changes', async () => {
+    const client = new InMemoryPlanningClient(() => NOW)
+    await client.create(
+      'workspace-1',
+      createEntityInput('portfolio-1', 'portfolio', 0),
+      EMPTY_WORK_ITEMS,
+    )
+    await client.create(
+      'workspace-1',
+      createEntityInput('roadmap-1', 'roadmap', 1, { parentId: 'portfolio-1' }),
+      EMPTY_WORK_ITEMS,
+    )
+    await client.create(
+      'workspace-1',
+      createEntityInput('initiative-1', 'initiative', 2, {
+        parentId: 'roadmap-1',
+        teamId: 'team-1',
+        projectId: 'project-1',
+        progressMode: 'manual',
+        manualProgress: 20,
+        forecast: { startDate: '2026-08-01', endDate: '2026-09-01' },
+      }),
+      EMPTY_WORK_ITEMS,
+    )
+    const target: PlanningUpdateTarget = { type: 'initiative', entityId: 'initiative-1' }
+    await client.configureUpdateCadence('workspace-1', {
+      target,
+      cadence: {
+        updateOwnerMemberKey: 'owner@example.com',
+        cadence: { unit: 'month', count: 1 },
+        timeZone: 'UTC',
+        nextDueAt: '2026-08-31T09:00:00.000Z',
+        reminderHoursBefore: 48,
+      },
+      expectedRevision: 3,
+    }, EMPTY_WORK_ITEMS)
+    await expect(client.publishUpdate('workspace-1', createPlanningUpdateInput(4, {
+      target,
+      id: 'initiative-update-invalid-evidence',
+      evidence: [{
+        type: 'decision',
+        decisionId: 'decision-1',
+        url: 'http://example.com/decisions/decision-1',
+      }],
+    }), 'owner@example.com', EMPTY_WORK_ITEMS)).rejects.toMatchObject({
+      code: 'PlanningUpdateEvidenceInvalid',
+    })
+    const first = await client.publishUpdate('workspace-1', createPlanningUpdateInput(4, {
+      target,
+      id: 'initiative-update-1',
+      evidence: [
+        { type: 'planning-entity', entityId: 'initiative-1' },
+        {
+          type: 'decision',
+          decisionId: 'decision-1',
+          url: 'https://example.com/decisions/decision-1',
+        },
+        {
+          type: 'file',
+          fileId: 'file-1',
+          url: 'https://example.com/files/file-1',
+        },
+        { type: 'link', url: 'https://example.com/evidence' },
+      ],
+    }), 'owner@example.com', EMPTY_WORK_ITEMS)
+    expect(first.update.evidence).toContainEqual({
+      type: 'decision',
+      decisionId: 'decision-1',
+      url: 'https://example.com/decisions/decision-1',
+    })
+    expect(first.update.evidence).toContainEqual({
+      type: 'file',
+      fileId: 'file-1',
+      url: 'https://example.com/files/file-1',
+    })
+    expect(first.update.contextSnapshot).toMatchObject({
+      health: 'on-track',
+      risk: 'none',
+      progress: { percent: 20, linkedWorkItemCount: 0 },
+      scope: { teamId: 'team-1', projectId: 'project-1' },
+      targetDate: '2026-09-01',
+    })
+
+    await client.update('workspace-1', 'initiative-1', {
+      expectedRevision: 5,
+      patch: {
+        manualProgress: 60,
+        forecast: { startDate: '2026-08-01', endDate: '2026-10-15' },
+      },
+    }, EMPTY_WORK_ITEMS)
+    const second = await client.publishUpdate('workspace-1', createPlanningUpdateInput(6, {
+      target,
+      id: 'initiative-update-2',
+      health: 'at-risk',
+      risk: 'medium',
+    }), 'owner@example.com', EMPTY_WORK_ITEMS)
+    expect(second.update.changes).toEqual([
+      { type: 'health', before: 'on-track', after: 'at-risk' },
+      { type: 'risk', before: 'none', after: 'medium' },
+      { type: 'progress', before: 20, after: 60 },
+      { type: 'target-date', before: '2026-09-01', after: '2026-10-15' },
+    ])
+    await expect(client.publishUpdate('workspace-1', createPlanningUpdateInput(7, {
+      target,
+      id: 'initiative-update-1',
+    }), 'owner@example.com', EMPTY_WORK_ITEMS)).rejects.toMatchObject({
+      status: 409,
+      code: 'PlanningUpdateExists',
+    })
+    const history = await client.listUpdates('workspace-1', { target })
+    expect(history.updates).toHaveLength(2)
+    expect(history.updates[1]?.contextSnapshot.progress.percent).toBe(20)
+  })
+
+  test('bounds a Team Initiative context and evidence to its common visibility envelope', async () => {
+    const client = new InMemoryPlanningClient(() => NOW)
+    const workItemState: PlanningWorkItemState = {
+      workItems: [
+        createWorkItem('work-visible', 'completed', { projectId: undefined }),
+        createWorkItem('work-hidden', 'completed', { projectId: 'project-hidden' }),
+      ],
+    }
+    await client.create(
+      'workspace-1',
+      createEntityInput('portfolio-1', 'portfolio', 0),
+      workItemState,
+    )
+    await client.create(
+      'workspace-1',
+      createEntityInput('roadmap-1', 'roadmap', 1, { parentId: 'portfolio-1' }),
+      workItemState,
+    )
+    await client.create(
+      'workspace-1',
+      createEntityInput('initiative-team', 'initiative', 2, {
+        parentId: 'roadmap-1',
+        teamId: 'team-1',
+      }),
+      workItemState,
+    )
+    await client.create(
+      'workspace-1',
+      createEntityInput('phase-visible', 'phase', 3, {
+        parentId: 'initiative-team',
+        teamId: 'team-1',
+      }),
+      workItemState,
+    )
+    await client.create(
+      'workspace-1',
+      createEntityInput('milestone-visible', 'milestone', 4, {
+        parentId: 'phase-visible',
+        teamId: 'team-1',
+        status: 'completed',
+      }),
+      workItemState,
+    )
+    await client.create(
+      'workspace-1',
+      createEntityInput('phase-hidden', 'phase', 5, {
+        parentId: 'initiative-team',
+        teamId: 'team-1',
+        projectId: 'project-hidden',
+      }),
+      workItemState,
+    )
+    await client.create(
+      'workspace-1',
+      createEntityInput('milestone-hidden', 'milestone', 6, {
+        parentId: 'phase-hidden',
+        teamId: 'team-1',
+        projectId: 'project-hidden',
+      }),
+      workItemState,
+    )
+    await client.createDependency('workspace-1', {
+      id: 'dependency-visible',
+      predecessorId: 'phase-visible',
+      successorId: 'milestone-visible',
+      type: 'finish-to-start',
+      lagDays: 0,
+      expectedRevision: 7,
+    }, workItemState)
+    await client.createDependency('workspace-1', {
+      id: 'dependency-hidden',
+      predecessorId: 'milestone-visible',
+      successorId: 'milestone-hidden',
+      type: 'finish-to-start',
+      lagDays: 0,
+      expectedRevision: 8,
+    }, workItemState)
+    const target: PlanningUpdateTarget = {
+      type: 'initiative',
+      entityId: 'initiative-team',
+    }
+    await client.configureUpdateCadence('workspace-1', {
+      target,
+      cadence: {
+        updateOwnerMemberKey: 'owner@example.com',
+        cadence: { unit: 'week', count: 1 },
+        timeZone: 'UTC',
+        nextDueAt: '2026-07-20T09:00:00.000Z',
+        reminderHoursBefore: 24,
+      },
+      expectedRevision: 9,
+    }, workItemState)
+
+    await expect(client.publishUpdate('workspace-1', createPlanningUpdateInput(10, {
+      target,
+      id: 'hidden-entity-evidence',
+      evidence: [{ type: 'planning-entity', entityId: 'phase-hidden' }],
+    }), 'owner@example.com', workItemState)).rejects.toMatchObject({
+      status: 400,
+      code: 'PlanningUpdateEvidenceInvalid',
+    })
+    await expect(client.publishUpdate('workspace-1', createPlanningUpdateInput(10, {
+      target,
+      id: 'hidden-work-item-evidence',
+      evidence: [{ type: 'work-item', teamId: 'team-1', workItemId: 'work-hidden' }],
+    }), 'owner@example.com', workItemState)).rejects.toMatchObject({
+      status: 400,
+      code: 'PlanningUpdateEvidenceInvalid',
+    })
+
+    const published = await client.publishUpdate(
+      'workspace-1',
+      createPlanningUpdateInput(10, {
+        target,
+        id: 'team-update-1',
+        evidence: [
+          { type: 'planning-entity', entityId: 'milestone-visible' },
+          { type: 'work-item', teamId: 'team-1', workItemId: 'work-visible' },
+        ],
+      }),
+      'owner@example.com',
+      workItemState,
+    )
+    expect(published.update.contextSnapshot).toMatchObject({
+      scope: { teamId: 'team-1' },
+      progress: { percent: 100, linkedWorkItemCount: 0 },
+    })
+    expect(published.update.contextSnapshot.milestones.map((milestone) => milestone.entityId))
+      .toEqual(['milestone-visible'])
+    expect(published.update.contextSnapshot.dependencies.map((dependency) => dependency.dependencyId))
+      .toEqual(['dependency-visible'])
+    expect(JSON.stringify(published.update.contextSnapshot)).not.toContain('hidden')
+    expect(published.update.evidence).toEqual([
+      { type: 'planning-entity', entityId: 'milestone-visible' },
+      { type: 'work-item', teamId: 'team-1', workItemId: 'work-visible' },
+    ])
+  })
+
+  test('calculates Project progress from every assigned canonical Work Item without Planning links', async () => {
+    const client = new InMemoryPlanningClient(() => NOW)
+    const target: PlanningUpdateTarget = {
+      type: 'project',
+      teamId: 'team-1',
+      projectId: 'project-1',
+    }
+    const workItemState: PlanningWorkItemState = {
+      workItems: [
+        createWorkItem('work-unstarted', 'unstarted'),
+        createWorkItem('work-completed', 'completed'),
+        createWorkItem('work-other-project', 'completed', { projectId: 'project-2' }),
+        createWorkItem('work-other-team', 'completed', { teamId: 'team-2' }),
+      ],
+    }
+    await client.configureUpdateCadence('workspace-1', {
+      target,
+      cadence: {
+        updateOwnerMemberKey: 'owner@example.com',
+        cadence: { unit: 'week', count: 1 },
+        timeZone: 'UTC',
+        nextDueAt: '2026-07-20T09:00:00.000Z',
+        reminderHoursBefore: 24,
+      },
+      expectedRevision: 0,
+    }, workItemState)
+
+    const published = await client.publishUpdate(
+      'workspace-1',
+      createPlanningUpdateInput(1, { target, id: 'project-update-1' }),
+      'owner@example.com',
+      workItemState,
+    )
+    expect(published.planning.workItemLinks).toEqual([])
+    expect(published.update.contextSnapshot.progress).toEqual({
+      percent: 50,
+      linkedWorkItemCount: 2,
+    })
+    expect(published.update.progressSnapshot).toEqual({
+      percent: 50,
+      linkedWorkItemCount: 2,
+    })
+  })
+
+  test('archives an Initiative update target atomically and rejects further publishing', async () => {
+    const client = new InMemoryPlanningClient(() => NOW)
+    await client.create(
+      'workspace-1',
+      createEntityInput('portfolio-1', 'portfolio', 0),
+      EMPTY_WORK_ITEMS,
+    )
+    await client.create(
+      'workspace-1',
+      createEntityInput('roadmap-1', 'roadmap', 1, { parentId: 'portfolio-1' }),
+      EMPTY_WORK_ITEMS,
+    )
+    await client.create(
+      'workspace-1',
+      createEntityInput('initiative-1', 'initiative', 2, { parentId: 'roadmap-1' }),
+      EMPTY_WORK_ITEMS,
+    )
+    const target: PlanningUpdateTarget = { type: 'initiative', entityId: 'initiative-1' }
+    await client.configureUpdateCadence('workspace-1', {
+      target,
+      cadence: {
+        updateOwnerMemberKey: 'owner@example.com',
+        cadence: { unit: 'week', count: 1 },
+        timeZone: 'UTC',
+        nextDueAt: '2026-07-20T09:00:00.000Z',
+        reminderHoursBefore: 24,
+      },
+      expectedRevision: 3,
+    }, EMPTY_WORK_ITEMS)
+
+    const archived = await client.archive(
+      'workspace-1',
+      'initiative-1',
+      { expectedRevision: 4 },
+      EMPTY_WORK_ITEMS,
+    )
+    expect(archived.planning.updateTargets[0]?.archivedAt).toBe(NOW.toISOString())
+    await expect(client.publishUpdate('workspace-1', createPlanningUpdateInput(5, {
+      target,
+    }), 'owner@example.com', EMPTY_WORK_ITEMS)).rejects.toMatchObject({
+      status: 409,
+      code: 'PlanningEntityArchived',
+    })
+  })
+
+  test('requires escalation hours and member to be configured together', async () => {
+    const client = new InMemoryPlanningClient(() => NOW)
+    await expect(client.configureUpdateCadence('workspace-1', {
+      target: { type: 'project', teamId: 'team-1', projectId: 'project-1' },
+      cadence: {
+        updateOwnerMemberKey: 'owner@example.com',
+        cadence: { unit: 'week', count: 1 },
+        timeZone: 'UTC',
+        nextDueAt: '2026-07-20T09:00:00.000Z',
+        reminderHoursBefore: 24,
+        escalationHoursAfter: 12,
+      },
+      expectedRevision: 0,
+    }, EMPTY_WORK_ITEMS)).rejects.toMatchObject({
+      status: 400,
+      code: 'PlanningUpdateEscalationInvalid',
+    })
+  })
+
+  test('stores comments and reactions outside the immutable update body', async () => {
+    let current = new Date('2026-07-16T09:00:00.000Z')
+    const client = new InMemoryPlanningClient(() => current)
+    const target: PlanningUpdateTarget = {
+      type: 'project', teamId: 'team-1', projectId: 'project-1',
+    }
+    await client.configureUpdateCadence('workspace-1', {
+      target,
+      cadence: {
+        updateOwnerMemberKey: 'owner@example.com',
+        cadence: { unit: 'week', count: 1 },
+        timeZone: 'UTC',
+        nextDueAt: '2026-07-20T09:00:00.000Z',
+        reminderHoursBefore: 24,
+      },
+      expectedRevision: 0,
+    }, EMPTY_WORK_ITEMS)
+    const published = await client.publishUpdate(
+      'workspace-1',
+      createPlanningUpdateInput(1, { target, id: 'update-1' }),
+      'owner@example.com',
+      EMPTY_WORK_ITEMS,
+    )
+
+    await client.createUpdateComment('workspace-1', {
+      target,
+      updateVersion: 1,
+      id: 'comment-1',
+      body: 'First observation',
+    }, 'member-a@example.com')
+    current = new Date('2026-07-16T10:00:00.000Z')
+    await client.createUpdateComment('workspace-1', {
+      target,
+      updateVersion: 1,
+      id: 'comment-2',
+      body: 'Second observation',
+    }, 'member-b@example.com')
+    const firstComments = await client.listUpdateComments('workspace-1', {
+      target,
+      updateVersion: 1,
+      limit: 1,
+    })
+    expect(firstComments.comments.map((comment) => comment.id)).toEqual(['comment-2'])
+    if (!firstComments.nextCursor) throw new Error('Expected a second comment page.')
+    const secondComments = await client.listUpdateComments('workspace-1', {
+      target,
+      updateVersion: 1,
+      limit: 1,
+      cursor: firstComments.nextCursor,
+    })
+    expect(secondComments.comments.map((comment) => comment.id)).toEqual(['comment-1'])
+    current = new Date('2026-07-16T11:00:00.000Z')
+    await expect(client.createUpdateComment('workspace-1', {
+      target,
+      updateVersion: 1,
+      id: 'comment-1',
+      body: 'Retried later',
+    }, 'member-a@example.com')).rejects.toMatchObject({
+      status: 409,
+      code: 'PlanningUpdateCommentExists',
+    })
+
+    await client.addUpdateReaction('workspace-1', {
+      target, updateVersion: 1, emoji: '👍',
+    }, 'member-a@example.com')
+    await client.addUpdateReaction('workspace-1', {
+      target, updateVersion: 1, emoji: '👍',
+    }, 'member-b@example.com')
+    await expect(client.addUpdateReaction('workspace-1', {
+      target, updateVersion: 1, emoji: '👍',
+    }, 'member-a@example.com')).rejects.toMatchObject({
+      status: 409,
+      code: 'PlanningUpdateReactionExists',
+    })
+    await client.removeUpdateReaction('workspace-1', {
+      target, updateVersion: 1, emoji: '👍',
+    }, 'member-a@example.com')
+    const reactions = await client.listUpdateReactions('workspace-1', {
+      target,
+      updateVersion: 1,
+    })
+    expect(reactions.reactions).toEqual([
+      expect.objectContaining({ emoji: '👍', memberKey: 'member-b@example.com' }),
+    ])
+    expect(await client.listUpdates('workspace-1', { target })).toMatchObject({
+      updates: [published.update],
+    })
+    await expect(client.createUpdateComment('workspace-1', {
+      target,
+      updateVersion: 999,
+      id: 'missing-comment',
+      body: 'No parent',
+    }, 'member@example.com')).rejects.toMatchObject({
+      status: 404,
+      code: 'PlanningUpdateNotFound',
+    })
+  })
+})
+
 describe('planning persistence', () => {
   test('reads the authorization revision from only the strong META row', async () => {
     const commands: Array<{
@@ -1879,6 +2509,134 @@ describe('planning persistence', () => {
     }])
   })
 
+  test('reads only bounded graph prefixes between strong META barriers', async () => {
+    const commands: Array<{
+      /** AWS SDK command class name. */
+      name: string
+      /** AWS SDK command input. */
+      input: Record<string, unknown>
+    }> = []
+    const physicalRows: Record<string, unknown>[] = [
+      createStoredCycle('cycle-1'),
+      {
+        workspaceId: 'workspace-1',
+        recordKey: 'UPDATE#PROJECT#team-1#project-1#0000000000000001',
+        entryType: 'planning-update',
+      },
+      {
+        workspaceId: 'workspace-1',
+        recordKey: 'UPDATE_ID#PROJECT#team-1#project-1#update-1',
+        entryType: 'planning-update-id',
+      },
+      {
+        workspaceId: 'workspace-1',
+        recordKey: 'UPDATE_COMMENT#PROJECT#team-1#project-1#0000000000000001#comment-1',
+        entryType: 'planning-update-comment',
+      },
+      {
+        workspaceId: 'workspace-1',
+        recordKey: 'UPDATE_COMMENT_ID#PROJECT#team-1#project-1#0000000000000001#comment-1',
+        entryType: 'planning-update-comment-id',
+      },
+      {
+        workspaceId: 'workspace-1',
+        recordKey: 'UPDATE_REACTION#PROJECT#team-1#project-1#0000000000000001#reaction-1',
+        entryType: 'planning-update-reaction',
+      },
+    ]
+    const documentClient = {
+      async send(command: {
+        /** AWS SDK command constructor. */
+        constructor: { name: string }
+        /** AWS SDK command input. */
+        input: Record<string, unknown>
+      }) {
+        commands.push({ name: command.constructor.name, input: command.input })
+        if (command.constructor.name === 'GetCommand') {
+          return {
+            Item: {
+              workspaceId: 'workspace-1',
+              recordKey: 'META',
+              entryType: 'planning-meta',
+              schemaVersion: 1,
+              revision: 1,
+              updatedAt: NOW.toISOString(),
+            },
+          }
+        }
+        if (command.constructor.name === 'QueryCommand') {
+          return { Items: rowsForPlanningRecordPrefixQuery(command.input, physicalRows) }
+        }
+        return {}
+      },
+    } as unknown as DynamoDBDocumentClient
+    const client = new DynamoDbPlanningClient(
+      'PlanningTable',
+      documentClient,
+      {} as DynamoDBClient,
+      false,
+      () => NOW,
+    )
+
+    const snapshot = await client.get('workspace-1', EMPTY_WORK_ITEMS)
+    expect(snapshot.entities.map((entity) => entity.id)).toEqual(['cycle-1'])
+    expect(commands.map((command) => command.name)).toEqual([
+      'GetCommand',
+      'QueryCommand',
+      'QueryCommand',
+      'QueryCommand',
+      'QueryCommand',
+      'QueryCommand',
+      'GetCommand',
+    ])
+    for (const barrier of [commands[0], commands.at(-1)]) {
+      expect(barrier).toMatchObject({
+        name: 'GetCommand',
+        input: {
+          Key: { workspaceId: 'workspace-1', recordKey: 'META' },
+          ConsistentRead: true,
+        },
+      })
+    }
+    const graphQueries = commands.filter((command) => command.name === 'QueryCommand')
+    const graphPrefixes = graphQueries.map((command) => {
+      const values = command.input.ExpressionAttributeValues
+      if (
+        typeof values !== 'object' || values === null ||
+        !(':recordPrefix' in values) || typeof values[':recordPrefix'] !== 'string'
+      ) throw new Error('Expected a graph record prefix.')
+      return values[':recordPrefix']
+    })
+    expect(graphPrefixes).toEqual([
+      'ENTITY#',
+      'DEPENDENCY#',
+      'WORK_ITEM_DEPENDENCY#',
+      'LINK#',
+      'UPDATE_TARGET#',
+    ])
+    expect(graphPrefixes.every((prefix) =>
+      !prefix.startsWith('UPDATE#') &&
+      !prefix.startsWith('UPDATE_ID#') &&
+      !prefix.startsWith('UPDATE_COMMENT#') &&
+      !prefix.startsWith('UPDATE_REACTION#')
+    )).toBeTrue()
+    expect(graphQueries.map((command) => command.input.Limit)).toEqual([
+      2_000,
+      1_999,
+      1_999,
+      1_999,
+      1_999,
+    ])
+    for (const command of graphQueries) {
+      expect(command.input).toMatchObject({
+        KeyConditionExpression:
+          'workspaceId = :workspaceId AND begins_with(recordKey, :recordPrefix)',
+        ConsistentRead: true,
+      })
+      expect(command.input).not.toHaveProperty('FilterExpression')
+    }
+  })
+
   test('writes META revision CAS and changed rows in one DynamoDB transaction', async () => {
     const commands: Array<{
       /** AWS SDK command class name. */
@@ -1916,6 +2674,10 @@ describe('planning persistence', () => {
     expect(commands.map((command) => command.name)).toEqual([
       'GetCommand',
       'QueryCommand',
+      'QueryCommand',
+      'QueryCommand',
+      'QueryCommand',
+      'QueryCommand',
       'GetCommand',
       'TransactWriteCommand',
     ])
@@ -1945,6 +2707,223 @@ describe('planning persistence', () => {
     })
   })
 
+  test('publishes an immutable UPDATE row while keeping only latest context on UPDATE_TARGET', async () => {
+    const target: PlanningUpdateTarget = {
+      type: 'project', teamId: 'team-1', projectId: 'project-1',
+    }
+    const storedTarget = {
+      workspaceId: 'workspace-1',
+      recordKey: 'UPDATE_TARGET#PROJECT#team-1#project-1',
+      entryType: 'planning-update-target',
+      target,
+      cadence: {
+        updateOwnerMemberKey: 'owner@example.com',
+        cadence: { unit: 'week', count: 1 },
+        timeZone: 'UTC',
+        nextDueAt: '2026-07-20T09:00:00.000Z',
+        reminderHoursBefore: 24,
+      },
+      latestVersion: 0,
+      updatedAt: NOW.toISOString(),
+    }
+    let transaction: Record<string, unknown> | undefined
+    let immutableRow: Record<string, unknown> | undefined
+    const documentClient = {
+      async send(command: {
+        /** AWS SDK command constructor. */
+        constructor: { name: string }
+        /** AWS SDK command input. */
+        input: Record<string, unknown>
+      }) {
+        if (command.constructor.name === 'GetCommand') {
+          return {
+            Item: {
+              workspaceId: 'workspace-1',
+              recordKey: 'META',
+              entryType: 'planning-meta',
+              schemaVersion: 1,
+              revision: 1,
+              updatedAt: NOW.toISOString(),
+            },
+          }
+        }
+        if (command.constructor.name === 'QueryCommand') {
+          return {
+            Items: rowsForPlanningRecordPrefixQuery(command.input, [
+              storedTarget,
+              ...(immutableRow === undefined ? [] : [immutableRow]),
+            ]),
+          }
+        }
+        transaction = command.input
+        const items = command.input.TransactItems
+        if (Array.isArray(items)) {
+          for (const item of items) {
+            if (
+              typeof item === 'object' && item !== null &&
+              'Put' in item && typeof item.Put === 'object' && item.Put !== null &&
+              'Item' in item.Put && typeof item.Put.Item === 'object' && item.Put.Item !== null &&
+              'entryType' in item.Put.Item && item.Put.Item.entryType === 'planning-update'
+            ) {
+              immutableRow = item.Put.Item
+            }
+          }
+        }
+        return {}
+      },
+    } as unknown as DynamoDBDocumentClient
+    const client = new DynamoDbPlanningClient(
+      'PlanningTable',
+      documentClient,
+      {} as DynamoDBClient,
+      false,
+      () => NOW,
+    )
+
+    const response = await client.publishUpdate(
+      'workspace-1',
+      createPlanningUpdateInput(1, { target, id: 'update-1' }),
+      'owner@example.com',
+      EMPTY_WORK_ITEMS,
+    )
+    expect(response.planning.updateTargets[0]).not.toHaveProperty('latestContextSnapshot')
+    const transactionItems = transaction?.TransactItems as Array<{
+      /** DynamoDB Put operation. */
+      Put?: {
+        /** Row written by the operation. */
+        Item: Record<string, unknown>
+        /** Optional immutability condition. */
+        ConditionExpression?: string
+      }
+    }>
+    expect(transactionItems.map((item) => item.Put?.Item.recordKey)).toEqual([
+      'META',
+      'UPDATE_TARGET#PROJECT#team-1#project-1',
+      'UPDATE_ID#PROJECT#team-1#project-1#update-1',
+      'UPDATE#PROJECT#team-1#project-1#0000000000000001',
+    ])
+    const targetRow = transactionItems[1]?.Put?.Item
+    const persistedCadence = targetRow?.cadence
+    if (
+      !targetRow ||
+      typeof persistedCadence !== 'object' ||
+      persistedCadence === null ||
+      !('nextDueAt' in persistedCadence) ||
+      typeof persistedCadence.nextDueAt !== 'string' ||
+      !('reminderHoursBefore' in persistedCadence) ||
+      typeof persistedCadence.reminderHoursBefore !== 'number'
+    ) {
+      throw new Error('Expected a persisted Planning update cadence.')
+    }
+    expect(targetRow).toMatchObject({
+      updateScheduleShard: createPlanningUpdateScheduleShard(
+        'workspace-1',
+        'UPDATE_TARGET#PROJECT#team-1#project-1',
+      ),
+      nextNotificationAtRecordKey: createPlanningUpdateNextNotificationAtRecordKey(
+        'workspace-1',
+        'UPDATE_TARGET#PROJECT#team-1#project-1',
+        persistedCadence.nextDueAt,
+        persistedCadence.reminderHoursBefore,
+      ),
+    })
+    expect(transactionItems[2]?.Put?.ConditionExpression).toBe(
+      'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
+    )
+    expect(transactionItems[3]?.Put?.ConditionExpression).toBe(
+      'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
+    )
+    const history = await client.listUpdates('workspace-1', { target })
+    expect(history.updates).toEqual([response.update])
+  })
+
+  test('reserves comment IDs atomically across retries with different creation times', async () => {
+    let current = new Date('2026-07-16T09:00:00.000Z')
+    let preparedKind: string | undefined
+    const attemptedKeys: string[][] = []
+    const reservedCommentIds = new Set<string>()
+    const documentClient = {
+      async send(command: {
+        /** AWS SDK command constructor. */
+        constructor: { name: string }
+        /** AWS SDK command input. */
+        input: Record<string, unknown>
+      }) {
+        if (command.constructor.name !== 'TransactWriteCommand') return {}
+        const items = command.input.TransactItems as Array<{
+          /** Optional annotation put. */
+          Put?: { Item: { recordKey: string } }
+        }>
+        const keys = items
+          .map((item) => item.Put?.Item.recordKey)
+          .filter((recordKey) => recordKey !== undefined)
+        attemptedKeys.push(keys)
+        const markerKey = keys.find((recordKey) => recordKey.startsWith('UPDATE_COMMENT_ID#'))
+        if (!markerKey) throw new Error('Expected a comment identity marker.')
+        if (reservedCommentIds.has(markerKey)) {
+          throw {
+            name: 'TransactionCanceledException',
+            CancellationReasons: [
+              { Code: 'None' },
+              { Code: 'ConditionalCheckFailed' },
+              { Code: 'None' },
+            ],
+          }
+        }
+        reservedCommentIds.add(markerKey)
+        return {}
+      },
+    } as unknown as DynamoDBDocumentClient
+    const client = new DynamoDbPlanningClient(
+      'PlanningTable',
+      documentClient,
+      {} as DynamoDBClient,
+      false,
+      () => current,
+    )
+    const target: PlanningUpdateTarget = {
+      type: 'project', teamId: 'team-1', projectId: 'project-1',
+    }
+
+    await client.createUpdateComment('workspace-1', {
+      target,
+      updateVersion: 1,
+      id: 'comment-1',
+      body: 'First attempt',
+    }, 'member@example.com', {
+      async prepare(result) {
+        preparedKind = result.kind
+        return {
+          transactWriteItem: {
+            Put: {
+              TableName: 'IdempotencyTable',
+              Item: { recordKey: 'RECEIPT#comment-1' },
+            },
+          },
+        }
+      },
+    })
+    current = new Date('2026-07-16T10:00:00.000Z')
+    await expect(client.createUpdateComment('workspace-1', {
+      target,
+      updateVersion: 1,
+      id: 'comment-1',
+      body: 'Retried later',
+    }, 'member@example.com')).rejects.toMatchObject({
+      status: 409,
+      code: 'PlanningUpdateCommentExists',
+    })
+
+    expect(attemptedKeys).toHaveLength(2)
+    expect(preparedKind).toBe('comment-create')
+    expect(attemptedKeys[0]).toContain('RECEIPT#comment-1')
+    expect(attemptedKeys[0]?.[0]).toBe(
+      'UPDATE_COMMENT_ID#PROJECT#team-1#project-1#0000000000000001#comment-1',
+    )
+    expect(attemptedKeys[1]?.[0]).toBe(attemptedKeys[0]?.[0])
+    expect(attemptedKeys[1]?.[1]).not.toBe(attemptedKeys[0]?.[1])
+  })
+
   test('condition-checks canonical Work Item revision in link transactions', async () => {
     let transaction: Record<string, unknown> | undefined
     const storedCycle = createStoredCycle('cycle-1')
@@ -1967,7 +2946,11 @@ describe('planning persistence', () => {
             },
           }
         }
-        if (command.constructor.name === 'QueryCommand') return { Items: [storedCycle] }
+        if (command.constructor.name === 'QueryCommand') {
+          return {
+            Items: rowsForPlanningRecordPrefixQuery(command.input, [storedCycle]),
+          }
+        }
         transaction = command.input
         throw {
           name: 'TransactionCanceledException',
@@ -2255,7 +3238,11 @@ describe('planning persistence', () => {
             },
           }
         }
-        if (command.constructor.name === 'QueryCommand') return { Items: [storedCycle, storedLink] }
+        if (command.constructor.name === 'QueryCommand') {
+          return {
+            Items: rowsForPlanningRecordPrefixQuery(command.input, [storedCycle, storedLink]),
+          }
+        }
         transaction = command.input
         throw {
           name: 'TransactionCanceledException',
@@ -2455,6 +3442,8 @@ describe('planning persistence', () => {
       async send(command: {
         /** AWS SDK command constructor. */
         constructor: { name: string }
+        /** AWS SDK command input. */
+        input: Record<string, unknown>
       }) {
         if (command.constructor.name === 'GetCommand') {
           return {
@@ -2468,7 +3457,11 @@ describe('planning persistence', () => {
             },
           }
         }
-        if (command.constructor.name === 'QueryCommand') return { Items: storedEntities }
+        if (command.constructor.name === 'QueryCommand') {
+          return {
+            Items: rowsForPlanningRecordPrefixQuery(command.input, storedEntities),
+          }
+        }
         transactionCalls += 1
         return {}
       },
@@ -2498,6 +3491,8 @@ describe('planning persistence', () => {
       async send(command: {
         /** AWS SDK command constructor. */
         constructor: { name: string }
+        /** AWS SDK command input. */
+        input: Record<string, unknown>
       }) {
         if (command.constructor.name === 'GetCommand') {
           return {
@@ -2511,7 +3506,11 @@ describe('planning persistence', () => {
             },
           }
         }
-        if (command.constructor.name === 'QueryCommand') return { Items: [storedEntity] }
+        if (command.constructor.name === 'QueryCommand') {
+          return {
+            Items: rowsForPlanningRecordPrefixQuery(command.input, [storedEntity]),
+          }
+        }
         transactionCalls += 1
         return {}
       },
@@ -2562,7 +3561,12 @@ describe('planning persistence', () => {
           }
         }
         if (command.constructor.name === 'QueryCommand') {
-          return { Items: [storedLargeEntity, storedSmallEntity] }
+          return {
+            Items: rowsForPlanningRecordPrefixQuery(
+              command.input,
+              [storedLargeEntity, storedSmallEntity],
+            ),
+          }
         }
         transaction = command.input
         return {}
@@ -2626,12 +3630,14 @@ describe('planning persistence', () => {
       async send(command: {
         /** AWS SDK command constructor. */
         constructor: { name: string }
+        /** AWS SDK command input. */
+        input: Record<string, unknown>
       }) {
         if (command.constructor.name === 'GetCommand') {
           return { Item: storedAtLimit[0] }
         }
         if (command.constructor.name === 'QueryCommand') {
-          return { Items: storedAtLimit }
+          return { Items: rowsForPlanningRecordPrefixQuery(command.input, storedAtLimit) }
         }
         transactionCalls += 1
         return {}
@@ -2659,6 +3665,8 @@ describe('planning persistence', () => {
       async send(command: {
         /** AWS SDK command constructor. */
         constructor: { name: string }
+        /** AWS SDK command input. */
+        input: Record<string, unknown>
       }) {
         if (command.constructor.name === 'QueryCommand') return { Items: [] }
         if (command.constructor.name === 'TransactWriteCommand') transactionCalls += 1
@@ -2704,6 +3712,8 @@ describe('planning persistence', () => {
       async send(command: {
         /** AWS SDK command constructor. */
         constructor: { name: string }
+        /** AWS SDK command input. */
+        input: Record<string, unknown>
       }) {
         if (command.constructor.name === 'GetCommand') {
           return {
@@ -2717,7 +3727,9 @@ describe('planning persistence', () => {
             },
           }
         }
-        return { Items: [storedEntity] }
+        return {
+          Items: rowsForPlanningRecordPrefixQuery(command.input, [storedEntity]),
+        }
       },
     } as unknown as DynamoDBDocumentClient
     const client = new DynamoDbPlanningClient(
