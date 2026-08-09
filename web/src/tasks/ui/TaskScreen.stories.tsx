@@ -1,11 +1,14 @@
 import {
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
+  type WorkItemScheduleChangePreview,
+  type WorkItemScheduleOperation,
 } from '@mukuroji/contracts'
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import {
   useCallback,
   useMemo,
+  useRef,
   useState,
   useSyncExternalStore,
   type ComponentProps,
@@ -18,7 +21,7 @@ import {
   type WorkspaceCommandMenuContextValue,
 } from '../../commands/ui/WorkspaceCommandMenuContext'
 import { createDefaultDateRangeTaskSchedule } from '../model/taskSchedule'
-import type { TeamIssueDetail } from '../../issues/api'
+import type { TeamIssueDetail, UpdateTeamIssueInput } from '../../issues/api'
 import {
   collaborationWorkspaceMemberFixtures,
   issueCollaborationControllerFixture,
@@ -27,6 +30,7 @@ import {
 } from '../../issues/fixtures'
 import { projectDirectoryFixtures } from '../../projects/fixtures'
 import type { ProjectMember, ProjectUser } from '../../projects/api'
+import type { ProjectTask } from '../api/tasks'
 import { referoTaskFixtures } from '../fixtures'
 import { fileArtifactsControllerFixture } from '../../files/fixtures'
 import type { FileArtifactsController } from '../../files/mutations/useFileArtifacts'
@@ -163,6 +167,134 @@ const selectedIssueDetail: TeamIssueDetail = {
 const onProjectQuickAccessToggle = fn()
 const onRetryPlanning = fn()
 const onContextMenuSelectedIssueChange = fn()
+const onDirectPatchMutation = fn(async (task: ProjectTask, input: UpdateTeamIssueInput) => {
+  void input
+  return createStoryUpdatedTask(task)
+})
+const onDeniedDirectPatchMutation = fn(async (task: ProjectTask, input: UpdateTeamIssueInput) => {
+  void input
+  return createStoryUpdatedTask(task)
+})
+const onTimelinePreview = fn(async (task: ProjectTask) => createTimelinePreview(task))
+const onTimelineConfirm = fn(async (task: ProjectTask) => createStoryUpdatedTask(task))
+const onCancelledTimelinePreview = fn(async (task: ProjectTask) => createTimelinePreview(task))
+const onCancelledTimelineConfirm = fn(async (task: ProjectTask) => createStoryUpdatedTask(task))
+const onDeniedTimelinePreview = fn(async (task: ProjectTask) => createTimelinePreview(task))
+const onDeniedTimelineConfirm = fn(async (task: ProjectTask) => createStoryUpdatedTask(task))
+
+/** Returns the direct-impact preview used by Project timeline interaction stories. */
+function createTimelinePreview(task: ProjectTask): WorkItemScheduleChangePreview {
+  return {
+    affectedMilestoneIds: [],
+    affectedProjectIds: ['refero'],
+    affectedProjects: [{ projectId: 'refero', teamId: task.teamId }],
+    conflicts: [],
+    evaluatedRevisions: [{
+      expectedRevision: task.revision,
+      teamId: task.teamId,
+      workItemId: task.id,
+    }],
+    expectedRevision: task.revision,
+    impacts: [{
+      after: structuredClone(task.schedule),
+      before: structuredClone(task.schedule),
+      dateDeltaDays: 0,
+      expectedRevision: task.revision,
+      kind: 'direct',
+      teamId: task.teamId,
+      workItemId: task.id,
+    }],
+    planningRevision: 1,
+    relationGraphRevision: 1,
+    requiresConfirmation: true,
+    warnings: [],
+  }
+}
+
+/** Returns an updated immutable task snapshot for direct mutation stories. */
+function createStoryUpdatedTask(task: ProjectTask): ProjectTask {
+  return {
+    ...task,
+    revision: task.revision + 1,
+    updatedAt: '2026-06-09T00:00:00.000Z',
+  }
+}
+
+/** Props for a harness that proves cancelled timeline previews cannot revive a modal. */
+type LateTimelinePreviewHarnessProps = {
+  /** Whether switching the active tab remounts the Project screen before preview completion. */
+  remountOnTabSwitch: boolean
+}
+
+/**
+ * Keeps the delayed preview resolver outside TaskScreen so a Story play function can settle it
+ * after the active Gantt surface has unmounted.
+ *
+ * @param props - Determines whether the test removes the whole screen or remounts another tab.
+ * @returns The delayed timeline-preview regression harness.
+ */
+function LateTimelinePreviewHarness({ remountOnTabSwitch }: LateTimelinePreviewHarnessProps) {
+  const [isMounted, setIsMounted] = useState(true)
+  const [activeTab, setActiveTab] = useState<'gantt' | 'table'>('gantt')
+  const [previewCallCount, setPreviewCallCount] = useState(0)
+  const resolvePreviewRef = useRef<((preview: WorkItemScheduleChangePreview) => void) | undefined>(undefined)
+
+  /** Starts a deliberately unresolved preview until the story asks it to settle. */
+  const onPreviewScheduleChange = (task: ProjectTask, operation: WorkItemScheduleOperation) => {
+    void task
+    void operation
+    setPreviewCallCount((count) => count + 1)
+    return new Promise<WorkItemScheduleChangePreview>((resolve) => {
+      resolvePreviewRef.current = resolve
+    })
+  }
+
+  /** Resolves the current delayed preview only after the active timeline has gone away. */
+  const resolvePendingPreview = () => {
+    const task = storyTasks[0]
+    if (task) resolvePreviewRef.current?.(createTimelinePreview(task))
+  }
+
+  return (
+    <div>
+      <div className="flex gap-2 p-2">
+        <button
+          data-testid="late-timeline-unmount"
+          onClick={() => setIsMounted(false)}
+          type="button"
+        >
+          Unmount timeline
+        </button>
+        <button
+          data-testid="late-timeline-switch-tab"
+          onClick={() => setActiveTab('table')}
+          type="button"
+        >
+          Switch tab
+        </button>
+        <button
+          data-testid="late-timeline-resolve-preview"
+          onClick={resolvePendingPreview}
+          type="button"
+        >
+          Resolve preview
+        </button>
+        <output data-testid="late-timeline-preview-count">
+          {previewCallCount}
+        </output>
+      </div>
+      {isMounted ? (
+        <TaskScreen
+          {...meta.args}
+          initialTab={activeTab}
+          key={remountOnTabSwitch ? activeTab : 'gantt'}
+          onConfirmScheduleChange={async (task) => createStoryUpdatedTask(task)}
+          onPreviewScheduleChange={onPreviewScheduleChange}
+        />
+      ) : null}
+    </div>
+  )
+}
 
 /** Props for the command-provider render-loop regression harness. */
 type CommandProviderTaskScreenProps = {
@@ -671,6 +803,161 @@ export const LoadingError: Story = {
   args: {
     taskErrorMessage: 'Lambda returned 500.',
     tasks: [],
+  },
+}
+
+/** Inline status changes pass through one canonical mutation before the editor closes. */
+export const DirectInlinePatch: Story = {
+  args: {
+    onUpdateTask: onDirectPatchMutation,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    onDirectPatchMutation.mockClear()
+
+    await userEvent.click(canvas.getByTestId('task-inline-status-wireframe'))
+    await userEvent.selectOptions(
+      canvas.getByTestId('task-inline-status-wireframe-input'),
+      'review',
+    )
+
+    await waitFor(() => expect(onDirectPatchMutation).toHaveBeenCalledTimes(1))
+    const [task, patch] = onDirectPatchMutation.mock.calls[0] ?? []
+    expect(task).toMatchObject({ id: 'wireframe', revision: 1, teamId: 'core-team' })
+    expect(patch).toEqual({ workflowStatusId: 'review' })
+  },
+}
+
+/** Configuration access rejection prevents a direct inline edit from reaching persistence. */
+export const DirectInlinePatchPermissionDenied: Story = {
+  args: {
+    configurationFailedTeamIds: ['core-team'],
+    onUpdateTask: onDeniedDirectPatchMutation,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    onDeniedDirectPatchMutation.mockClear()
+
+    await userEvent.click(canvas.getByTestId('task-inline-title-wireframe'))
+    const titleInput = canvas.getByTestId('task-inline-title-wireframe-input')
+    await userEvent.clear(titleInput)
+    await userEvent.type(titleInput, '更新できないタイトル')
+    await userEvent.tab()
+
+    await canvas.findByTestId('task-action-feedback')
+    await expect(onDeniedDirectPatchMutation).toHaveBeenCalledTimes(0)
+  },
+}
+
+/** A Gantt edit previews exactly once, then persists only after explicit confirmation. */
+export const TimelinePreviewAndConfirm: Story = {
+  args: {
+    initialTab: 'gantt',
+    onConfirmScheduleChange: onTimelineConfirm,
+    onPreviewScheduleChange: onTimelinePreview,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    onTimelinePreview.mockClear()
+    onTimelineConfirm.mockClear()
+    const modeSelect = canvas.getAllByLabelText('スケジュール種別')[0]
+
+    if (!modeSelect) throw new Error('Expected the first Gantt schedule mode selector.')
+    await userEvent.selectOptions(modeSelect, 'milestone')
+
+    const dialog = await canvas.findByRole('dialog')
+    await expect(onTimelinePreview).toHaveBeenCalledTimes(1)
+    await expect(onTimelineConfirm).toHaveBeenCalledTimes(0)
+    await userEvent.click(within(dialog).getByRole('button', { name: '適用' }))
+    await waitFor(() => expect(onTimelineConfirm).toHaveBeenCalledTimes(1))
+    await waitFor(() => expect(canvas.queryByRole('dialog')).not.toBeInTheDocument())
+  },
+}
+
+/** Cancelling a Gantt preview leaves the canonical mutation callback untouched. */
+export const TimelinePreviewCancel: Story = {
+  args: {
+    initialTab: 'gantt',
+    onConfirmScheduleChange: onCancelledTimelineConfirm,
+    onPreviewScheduleChange: onCancelledTimelinePreview,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    onCancelledTimelinePreview.mockClear()
+    onCancelledTimelineConfirm.mockClear()
+    const modeSelect = canvas.getAllByLabelText('スケジュール種別')[0]
+
+    if (!modeSelect) throw new Error('Expected the first Gantt schedule mode selector.')
+    await userEvent.selectOptions(modeSelect, 'milestone')
+
+    const dialog = await canvas.findByRole('dialog')
+    await expect(onCancelledTimelinePreview).toHaveBeenCalledTimes(1)
+    await userEvent.click(within(dialog).getByRole('button', { name: 'キャンセル' }))
+    await expect(onCancelledTimelineConfirm).toHaveBeenCalledTimes(0)
+    await expect(canvas.queryByRole('dialog')).not.toBeInTheDocument()
+  },
+}
+
+/** Timeline permission rejection occurs before the server preview request or dialog. */
+export const TimelinePreviewPermissionDenied: Story = {
+  args: {
+    configurationFailedTeamIds: ['core-team'],
+    initialTab: 'gantt',
+    onConfirmScheduleChange: onDeniedTimelineConfirm,
+    onPreviewScheduleChange: onDeniedTimelinePreview,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    onDeniedTimelinePreview.mockClear()
+    onDeniedTimelineConfirm.mockClear()
+    const modeSelect = canvas.getAllByLabelText('スケジュール種別')[0]
+
+    if (!modeSelect) throw new Error('Expected the first Gantt schedule mode selector.')
+    await userEvent.selectOptions(modeSelect, 'milestone')
+
+    await canvas.findByTestId('task-action-feedback')
+    await expect(onDeniedTimelinePreview).toHaveBeenCalledTimes(0)
+    await expect(onDeniedTimelineConfirm).toHaveBeenCalledTimes(0)
+    await expect(canvas.queryByRole('dialog')).not.toBeInTheDocument()
+  },
+}
+
+/** An unmounted timeline cannot show a late schedule-preview dialog. */
+export const TimelinePreviewUnmounted: Story = {
+  render: () => <LateTimelinePreviewHarness remountOnTabSwitch={false} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const documentBody = within(canvasElement.ownerDocument.body)
+    const modeSelect = canvas.getAllByLabelText('スケジュール種別')[0]
+
+    if (!modeSelect) throw new Error('Expected the first Gantt schedule mode selector.')
+    await userEvent.selectOptions(modeSelect, 'milestone')
+    await waitFor(() => expect(
+      canvas.getByTestId('late-timeline-preview-count'),
+    ).toHaveTextContent('1'))
+    await userEvent.click(canvas.getByTestId('late-timeline-unmount'))
+    await userEvent.click(canvas.getByTestId('late-timeline-resolve-preview'))
+    await waitFor(() => expect(documentBody.queryByRole('dialog')).not.toBeInTheDocument())
+  },
+}
+
+/** Switching from Gantt while a preview is pending cannot let the old tab create a modal. */
+export const TimelinePreviewAfterTabSwitch: Story = {
+  render: () => <LateTimelinePreviewHarness remountOnTabSwitch />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const documentBody = within(canvasElement.ownerDocument.body)
+    const modeSelect = canvas.getAllByLabelText('スケジュール種別')[0]
+
+    if (!modeSelect) throw new Error('Expected the first Gantt schedule mode selector.')
+    await userEvent.selectOptions(modeSelect, 'milestone')
+    await waitFor(() => expect(
+      canvas.getByTestId('late-timeline-preview-count'),
+    ).toHaveTextContent('1'))
+    await userEvent.click(canvas.getByTestId('late-timeline-switch-tab'))
+    await userEvent.click(canvas.getByTestId('late-timeline-resolve-preview'))
+    await waitFor(() => expect(documentBody.queryByRole('dialog')).not.toBeInTheDocument())
+    await expect(canvas.queryByTestId('task-gantt-timeline-wireframe')).not.toBeInTheDocument()
   },
 }
 

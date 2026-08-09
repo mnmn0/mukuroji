@@ -7,7 +7,6 @@ import type {
   WorkItemDependencyEndpoint,
   WorkItemConfiguration,
   WorkItemPatch,
-  WorkItemScheduleChangePreview,
   WorkItemScheduleDependency,
   WorkItemScheduleDependencyPatch,
   WorkItemScheduleOperation,
@@ -27,6 +26,7 @@ import type {
   BulkOperationTaskActionRequest,
   BulkOperationTaskActionInterruption,
 } from '../../bulk-operations/ui/BulkOperationToolbar'
+import type { ProjectTaskDirectScheduleHandle } from '../../task-views/model/projectTaskDirectActionRequest'
 import type { FileArtifactsController } from '../../files/mutations/useFileArtifacts'
 import type {
   ProjectMember,
@@ -213,17 +213,11 @@ export type TaskWorkspaceProps = {
   onVisibleTaskSelectionChange: (selectionKeys: string[], selected: boolean) => void
   /** Updates a task through the shared Work Item mutation. */
   onUpdateTask?: (task: ProjectTask, input: WorkItemPatch) => Promise<ProjectTask>
-  /** Atomically confirms a previewed schedule operation and its dependency ripple. */
-  onConfirmScheduleChange?: (
+  /** Starts a canonical schedule action and returns its exact preview controller. */
+  onRequestScheduleChange?: (
     task: ProjectTask,
     operation: WorkItemScheduleOperation,
-    preview: WorkItemScheduleChangePreview,
-  ) => Promise<ProjectTask>
-  /** Previews a schedule move, resize, or replacement before it is applied. */
-  onPreviewScheduleChange?: (
-    task: ProjectTask,
-    operation: WorkItemScheduleOperation,
-  ) => Promise<WorkItemScheduleChangePreview>
+  ) => ProjectTaskDirectScheduleHandle
   /** Adds or updates a project member role. */
   onUpdateProjectMember?: (
     projectId: string,
@@ -334,9 +328,8 @@ export function TaskWorkspace({
   onVisibleTaskSelectionChange,
   onUpdateProjectMember,
   onUpdateScheduleDependency,
-  onConfirmScheduleChange,
+  onRequestScheduleChange,
   onUpdateTask,
-  onPreviewScheduleChange,
   searchQuery,
   selectedTaskKeys,
   selectedBulkItems,
@@ -675,11 +668,10 @@ export function TaskWorkspace({
           configuration={configuration}
           configurationsByTeam={configurationsByTeam}
           planningSnapshot={planningSnapshot}
-          onConfirmScheduleChange={onConfirmScheduleChange}
           onCreateTaskOpen={onCreateTaskOpen}
           onCreateScheduleDependency={onCreateScheduleDependency}
           onDeleteScheduleDependency={onDeleteScheduleDependency}
-          onPreviewScheduleChange={onPreviewScheduleChange}
+          onRequestScheduleChange={onRequestScheduleChange}
           onSelectTask={onSelectTask}
           onUpdateScheduleDependency={onUpdateScheduleDependency}
           projectId={projectId}
@@ -689,9 +681,8 @@ export function TaskWorkspace({
       ) : null}
       {activeTab === 'calendar' && !taskErrorMessage ? (
         <TaskCalendarView
-          onConfirmScheduleChange={onConfirmScheduleChange}
           onCreateTaskOpen={onCreateTaskOpen}
-          onPreviewScheduleChange={onPreviewScheduleChange}
+          onRequestScheduleChange={onRequestScheduleChange}
           onSelectTask={onSelectTask}
           projectId={projectId}
           t={t}

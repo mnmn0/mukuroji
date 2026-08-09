@@ -65,6 +65,7 @@ import { applyTaskViewDefinitionToTasks } from '../../task-views/model/taskViewS
 import type { TaskViewPresentationSettings } from '../../task-views/model/taskViewPresentation'
 import {
   allowTaskAction,
+  createCancelledTaskActionResult,
   createFailedTaskActionResult,
   createFailedTaskActionResults,
   createSucceededTaskCreateActionResult,
@@ -74,6 +75,28 @@ import {
   resolveTaskActionExecutionFailureMessage,
   type TaskActionExecutionResult,
 } from '../../task-views/model/taskActionRegistry'
+import {
+  beginProjectTaskDirectSchedulePreview,
+  cancelAwaitingProjectTaskDirectSchedule,
+  claimProjectTaskDirectActionTarget,
+  clearProjectTaskDirectActionRequest,
+  completeProjectTaskDirectScheduleMutation,
+  consumeProjectTaskDirectActionRequest,
+  createProjectTaskDirectPatchRequest,
+  createProjectTaskDirectScheduleHandle,
+  createProjectTaskDirectScheduleRequest,
+  failProjectTaskDirectSchedule,
+  isSupportedProjectTaskDirectPatch,
+  publishProjectTaskDirectSchedulePreview,
+  readProjectTaskDirectSchedulePhase,
+  releaseProjectTaskDirectActionTarget,
+  resolveProjectTaskDirectActionTarget,
+  waitForProjectTaskDirectScheduleDecision,
+  type ProjectTaskDirectActionInFlight,
+  type ProjectTaskDirectActionRequest,
+  type ProjectTaskDirectActionRequestSlot,
+  type ProjectTaskDirectScheduleHandle,
+} from '../../task-views/model/projectTaskDirectActionRequest'
 import {
   cancelPendingTaskActionContext,
   canDismissCompletedTaskActionOwner,
@@ -213,6 +236,8 @@ type CreatedProjectTaskMutation = {
 type PendingTaskScheduleUpdate = {
   /** Exact canonical Schedule invocation that owns this preview, when registry-initiated. */
   actionContext?: WorkItemActionContext
+  /** Exact direct patch request that owns this preview, when installed by a surface control. */
+  directRequest?: ProjectTaskDirectActionRequest
   /** Original schedule operation confirmed against the preview's graph revisions. */
   operation: WorkItemScheduleOperation
   /** Server-owned direct and dependency impacts shown before applying. */
@@ -540,21 +565,69 @@ export function TaskScreen({
   const [isRestoringTask, setIsRestoringTask] = useState(false)
   const [scheduleUpdateQueue, setScheduleUpdateQueue] = useState<PendingTaskScheduleUpdate[]>([])
   const [isApplyingScheduleUpdate, setIsApplyingScheduleUpdate] = useState(false)
+  const scheduleUpdateQueueRef = useRef<PendingTaskScheduleUpdate[]>([])
+  const isApplyingScheduleUpdateRef = useRef(false)
   const nextSchedulePreviewSequenceRef = useRef(0)
   const nextBulkTaskActionRequestIdRef = useRef(0)
   const nextBulkTaskActionEpochRef = useRef(0)
   const bulkTaskActionContextsRef = useRef(new Map<number, WorkItemActionContext>())
+  const directTaskActionRequestSlotRef = useRef<ProjectTaskDirectActionRequestSlot>({
+    current: undefined,
+  })
+  const directTaskActionsInFlightRef = useRef<ProjectTaskDirectActionInFlight>(new Map())
+  const directTaskActionResultsRef = useRef(
+    new WeakMap<ProjectTaskDirectActionRequest, ProjectTask>(),
+  )
+  const directTaskActionErrorsRef = useRef(
+    new WeakMap<ProjectTaskDirectActionRequest, unknown>(),
+  )
   const scheduleUpdateChainRef = useRef<Promise<void>>(Promise.resolve())
   const detailScrollTopRef = useRef(0)
   const taskContentRef = useRef<HTMLDivElement>(null)
   const pendingCreateTaskContextRef = useRef<TaskCreateContext | undefined>(undefined)
   const onSelectedIssueChangeRef = useRef(onSelectedIssueChange)
+  const onConfirmScheduleChangeRef = useRef(onConfirmScheduleChange)
+  const onPreviewScheduleChangeRef = useRef(onPreviewScheduleChange)
+  const onUpdateTaskRef = useRef(onUpdateTask)
+  const tasksRef = useRef(tasks)
+  const performTaskUpdateRef = useRef<(
+    task: ProjectTask,
+    input: UpdateTeamIssueInput,
+    actionContext?: WorkItemActionContext,
+    directRequest?: ProjectTaskDirectActionRequest,
+  ) => Promise<TaskUpdateResult>>(undefined)
 
   useEffect(() => {
     onSelectedIssueChangeRef.current = onSelectedIssueChange
   }, [onSelectedIssueChange])
+  useEffect(() => {
+    onConfirmScheduleChangeRef.current = onConfirmScheduleChange
+    onPreviewScheduleChangeRef.current = onPreviewScheduleChange
+    onUpdateTaskRef.current = onUpdateTask
+    tasksRef.current = tasks
+  }, [onConfirmScheduleChange, onPreviewScheduleChange, onUpdateTask, tasks])
+  useEffect(() => {
+    scheduleUpdateQueueRef.current = scheduleUpdateQueue
+  }, [scheduleUpdateQueue])
+  useEffect(() => {
+    isApplyingScheduleUpdateRef.current = isApplyingScheduleUpdate
+  }, [isApplyingScheduleUpdate])
   useEffect(() => () => {
     taskActionCompletion.cancel()
+    const applyingSequence = isApplyingScheduleUpdateRef.current
+      ? scheduleUpdateQueueRef.current[0]?.sequence
+      : undefined
+    for (const request of directTaskActionsInFlightRef.current.values()) {
+      const ownsApplyingPreview = scheduleUpdateQueueRef.current.some((pending) =>
+        pending.sequence === applyingSequence && pending.directRequest === request
+      )
+      if (ownsApplyingPreview) continue
+      cancelAwaitingProjectTaskDirectSchedule(request)
+    }
+    for (const pending of scheduleUpdateQueueRef.current) {
+      if (pending.sequence === applyingSequence) continue
+      pending.resolve({ applied: false, task: pending.task })
+    }
   }, [taskActionCompletion])
 
   const activeTab = localActiveTab === 'file' || localActiveTab === 'permissions'
@@ -744,12 +817,23 @@ export function TaskScreen({
 
   useEffect(() => {
     const pendingContext = taskActionCompletion.current()
-    if (!pendingContext || pendingContext.actionId === 'create') return
-    const isCurrent = isBulkTaskActionId(pendingContext.actionId)
-      ? isPendingTaskActionExplicitSelectionCurrent(pendingContext, bulkTaskActionSelection)
-      : isPendingTaskActionFocusCurrent(pendingContext, taskActionSelection)
-    if (!isCurrent) {
-      taskActionCompletion.cancel(pendingContext.actionId)
+    if (pendingContext && pendingContext.actionId !== 'create') {
+      const isCurrent = isBulkTaskActionId(pendingContext.actionId)
+        ? isPendingTaskActionExplicitSelectionCurrent(pendingContext, bulkTaskActionSelection)
+        : isPendingTaskActionFocusCurrent(pendingContext, taskActionSelection)
+      if (!isCurrent) {
+        taskActionCompletion.cancel(pendingContext.actionId)
+      }
+    }
+    const focusedTarget = taskActionSelection.focusedTarget
+    for (const request of directTaskActionsInFlightRef.current.values()) {
+      if (request.input.kind !== 'schedule-operation') continue
+      const focusCurrent = focusedTarget?.teamId === request.target.teamId &&
+        focusedTarget.workItemId === request.target.workItemId &&
+        focusedTarget.expectedRevision === request.target.expectedRevision
+      if (!focusCurrent && cancelAwaitingProjectTaskDirectSchedule(request)) {
+        releaseProjectTaskDirectActionTarget(directTaskActionsInFlightRef.current, request)
+      }
     }
   }, [bulkTaskActionSelection, taskActionCompletion, taskActionSelection])
 
@@ -938,7 +1022,7 @@ export function TaskScreen({
   }, [activeProjectTeamId, projectId, teams])
 
   /** Persists an already-confirmed task patch and retains an inverse for undo. */
-  const persistTaskUpdate = async (
+  const persistTaskUpdate = useCallback(async (
     task: ProjectTask,
     input: UpdateTeamIssueInput,
   ) => {
@@ -974,7 +1058,7 @@ export function TaskScreen({
       })
       throw error
     }
-  }
+  }, [onUpdateTask, t])
 
   /**
    * Previews every schedule patch before allowing the shared persistence path to run.
@@ -985,12 +1069,14 @@ export function TaskScreen({
    * @param task - Revision-bound Work Item snapshot being changed.
    * @param input - Complete update patch, including a replacement schedule when applicable.
    * @param actionContext - Exact canonical Schedule invocation that owns this preview.
+   * @param directRequest - Exact surface request cancelled if preview ownership is lost.
    * @returns Whether persistence ran and the resulting or unchanged task snapshot.
    */
-  const performTaskUpdate = async (
+  const performTaskUpdate = useCallback(async (
     task: ProjectTask,
     input: UpdateTeamIssueInput,
     actionContext?: WorkItemActionContext,
+    directRequest?: ProjectTaskDirectActionRequest,
   ): Promise<TaskUpdateResult> => {
     if (!input.schedule) {
       return {
@@ -1014,25 +1100,37 @@ export function TaskScreen({
     nextSchedulePreviewSequenceRef.current += 1
     const queuedUpdate = scheduleUpdateChainRef.current.then(async (): Promise<TaskUpdateResult> => {
       try {
+        if (directRequest && readProjectTaskDirectSchedulePhase(directRequest) === 'cancelled') {
+          return { applied: false, task }
+        }
         const preview = await onPreviewScheduleChange(task, operation)
         const schedule = findDirectScheduleImpact(preview, task)
         if (!schedule) {
           throw new Error('Schedule preview did not contain the target Work Item.')
         }
-        if (actionContext && taskActionCompletion.current() !== actionContext) {
+        if (
+          (actionContext && taskActionCompletion.current() !== actionContext) ||
+          (directRequest && readProjectTaskDirectSchedulePhase(directRequest) === 'cancelled')
+        ) {
           return { applied: false, task }
         }
 
         return await new Promise<TaskUpdateResult>((resolve, reject) => {
-          setScheduleUpdateQueue((current) => [...current, {
+          const pendingUpdate: PendingTaskScheduleUpdate = {
             ...(actionContext !== undefined ? { actionContext } : {}),
+            ...(directRequest !== undefined ? { directRequest } : {}),
             operation,
             preview,
             reject,
             resolve,
             sequence,
             task,
-          }])
+          }
+          scheduleUpdateQueueRef.current = [
+            ...scheduleUpdateQueueRef.current,
+            pendingUpdate,
+          ]
+          setScheduleUpdateQueue((current) => [...current, pendingUpdate])
         })
       } catch (error) {
         setTaskAction({
@@ -1047,19 +1145,16 @@ export function TaskScreen({
       () => undefined,
     )
     return await queuedUpdate
-  }
-
-  /**
-   * Routes a task patch through schedule preview when needed.
-   *
-   * @param task - Revision-bound Work Item snapshot being changed.
-   * @param input - Complete update patch.
-   * @returns The resulting task, or the original snapshot after preview cancellation.
-   */
-  const handleUpdateTask = async (
-    task: ProjectTask,
-    input: UpdateTeamIssueInput,
-  ): Promise<ProjectTask> => (await performTaskUpdate(task, input)).task
+  }, [
+    onConfirmScheduleChange,
+    onPreviewScheduleChange,
+    persistTaskUpdate,
+    t,
+    taskActionCompletion,
+  ])
+  useEffect(() => {
+    performTaskUpdateRef.current = performTaskUpdate
+  }, [performTaskUpdate])
 
   const pendingScheduleUpdate = scheduleUpdateQueue[0]
 
@@ -1071,6 +1166,7 @@ export function TaskScreen({
 
     const pendingActionContext = pendingScheduleUpdate.actionContext
     if (pendingActionContext && !taskActionCompletion.claim(pendingActionContext)) return
+    isApplyingScheduleUpdateRef.current = true
     setIsApplyingScheduleUpdate(true)
     try {
       const confirmedTask = await onConfirmScheduleChange?.(
@@ -1100,9 +1196,13 @@ export function TaskScreen({
     } catch (error) {
       pendingScheduleUpdate.reject(error)
     } finally {
+      scheduleUpdateQueueRef.current = scheduleUpdateQueueRef.current.filter(
+        (candidate) => candidate.sequence !== pendingScheduleUpdate.sequence,
+      )
       setScheduleUpdateQueue((current) => current.filter(
         (candidate) => candidate.sequence !== pendingScheduleUpdate.sequence,
       ))
+      isApplyingScheduleUpdateRef.current = false
       setIsApplyingScheduleUpdate(false)
     }
   }
@@ -1116,58 +1216,12 @@ export function TaskScreen({
       taskActionCompletion.cancelContext(pendingScheduleUpdate.actionContext)
     }
     pendingScheduleUpdate.resolve({ applied: false, task: pendingScheduleUpdate.task })
+    scheduleUpdateQueueRef.current = scheduleUpdateQueueRef.current.filter(
+      (candidate) => candidate.sequence !== pendingScheduleUpdate.sequence,
+    )
     setScheduleUpdateQueue((current) => current.filter(
       (candidate) => candidate.sequence !== pendingScheduleUpdate.sequence,
     ))
-  }
-
-  /**
-   * Confirms a Gantt or Calendar operation and retains its direct schedule for undo/redo.
-   *
-   * @param task - Revision-bound Work Item that initiated the timeline operation.
-   * @param operation - Original move, resize, or replacement operation.
-   * @param preview - Authoritative direct and dependency-cascade preview.
-   * @returns Updated direct Work Item returned by the atomic confirmation.
-   */
-  const handleConfirmTimelineScheduleChange = async (
-    task: ProjectTask,
-    operation: WorkItemScheduleOperation,
-    preview: WorkItemScheduleChangePreview,
-  ): Promise<ProjectTask> => {
-    if (!onConfirmScheduleChange) {
-      throw new Error(t('tasks.action.updateError'))
-    }
-
-    setTaskAction(undefined)
-    try {
-      const updatedTask = await onConfirmScheduleChange(task, operation, preview)
-      const directImpact = preview.impacts.find((impact) =>
-        impact.kind === 'direct' &&
-        impact.teamId === task.teamId &&
-        impact.workItemId === task.id
-      )
-      if (directImpact) {
-        setTaskUndo({
-          forwardPatch: { schedule: structuredClone(directImpact.after) },
-          inversePatch: { schedule: structuredClone(directImpact.before) },
-          task: updatedTask,
-          undoToken: createTaskUpdateUndoToken(updatedTask),
-        })
-        setTaskRedo(undefined)
-      }
-      setTaskAction({ kind: 'success', message: t('tasks.action.saved') })
-      return updatedTask
-    } catch (error) {
-      if (isTaskRevisionConflict(error)) {
-        setTaskUndo(undefined)
-        setTaskRedo(undefined)
-      }
-      setTaskAction({
-        kind: 'error',
-        message: resolveTaskMutationErrorMessage(error, t),
-      })
-      throw error
-    }
   }
 
   /** Reverses the most recent successful inline task update. */
@@ -1304,7 +1358,7 @@ export function TaskScreen({
               setTaskAction({ kind: 'success', message: t('tasks.action.saved') })
             }
           } else {
-            updatedTask = await handleUpdateTask(detailTask, input)
+            updatedTask = (await performTaskUpdate(detailTask, input)).task
           }
           if (claimedContext && target) {
             taskActionCompletion.settle(claimedContext, createSucceededTaskActionMutationResult(
@@ -1347,6 +1401,7 @@ export function TaskScreen({
     workspaceId && onBulkPreview && onBulkApply,
   )
   const canCreateTaskAction = onCreateTask !== undefined
+  const canDirectTaskAction = onUpdateTask !== undefined
   const canEditTaskAction = onUpdateTask !== undefined || onUpdateIssue !== undefined
   const canManageTaskRelationAction = onAddRelation !== undefined
 
@@ -1370,12 +1425,22 @@ export function TaskScreen({
     [t],
   )
 
+  /** Cancels every direct Schedule request that still awaits preview or user confirmation. */
+  const cancelAwaitingDirectTaskScheduleActions = useCallback(() => {
+    for (const request of directTaskActionsInFlightRef.current.values()) {
+      if (cancelAwaitingProjectTaskDirectSchedule(request)) {
+        releaseProjectTaskDirectActionTarget(directTaskActionsInFlightRef.current, request)
+      }
+    }
+  }, [])
+
   /** Opens one permission-safe task and optionally focuses a detail control. */
   const executeTaskDetailAction = useCallback((
     context: WorkItemActionContext,
     controlSelector?: string,
     waitForMutation = false,
   ): Promise<WorkItemActionResult> | WorkItemActionResult => {
+    cancelAwaitingDirectTaskScheduleActions()
     const target = resolveProjectTaskActionTarget(context)
     const task = target
       ? tasks.find((candidate) =>
@@ -1402,7 +1467,225 @@ export function TaskScreen({
     handleSelectDetailTask(task, true)
     if (controlSelector) focusTaskDetailControl(controlSelector)
     return completion ?? createSucceededTaskActionResult(context.actionId, target)
-  }, [dismissTaskDetailEditor, handleSelectDetailTask, t, taskActionCompletion, tasks])
+  }, [
+    cancelAwaitingDirectTaskScheduleActions,
+    dismissTaskDetailEditor,
+    handleSelectDetailTask,
+    t,
+    taskActionCompletion,
+    tasks,
+  ])
+
+  /**
+   * Consumes and executes a direct patch before falling back to detail or bulk action controls.
+   *
+   * Consumption, current-revision validation, and per-target ownership all finish before the
+   * first asynchronous preview or persistence call. An installed mismatch is terminal and never
+   * opens a selector or bulk editor intended for a different invocation.
+   *
+   * @param context - Canonical context accepted by shared permission and validation.
+   * @returns Canonical direct mutation result, or undefined when no direct request was installed.
+   */
+  const executeProjectTaskDirectAction = useCallback((
+    context: WorkItemActionContext,
+  ): WorkItemActionResult | Promise<WorkItemActionResult> | undefined => {
+    const requestSlot = directTaskActionRequestSlotRef.current
+    const installedRequest = requestSlot.current
+    if (!installedRequest) return undefined
+
+    const contextTarget = resolveProjectTaskDirectActionTarget(context)
+    const sameWorkItem = contextTarget !== undefined &&
+      installedRequest.target.teamId === contextTarget.teamId &&
+      installedRequest.target.workItemId === contextTarget.workItemId
+    const request = consumeProjectTaskDirectActionRequest(requestSlot, context)
+    if (!request || !contextTarget) {
+      const conflict = sameWorkItem &&
+        installedRequest.target.expectedRevision !== contextTarget?.expectedRevision
+      const message = conflict
+        ? t('tasks.action.conflict')
+        : projectTaskActionDisabledReasons.unavailable
+      failProjectTaskDirectSchedule(installedRequest, new Error(message))
+      return createFailedTaskActionResult(
+        context.actionId,
+        contextTarget,
+        conflict ? 'WorkItemRevisionConflict' : 'ProjectTaskDirectRequestMismatch',
+        conflict ? 'conflict' : 'validation',
+        message,
+        conflict,
+      )
+    }
+
+    const task = tasksRef.current.find((candidate) =>
+      candidate.teamId === contextTarget.teamId &&
+      candidate.id === contextTarget.workItemId
+    )
+    if (!task) {
+      const error = new Error(t('taskViews.action.notFound'))
+      failProjectTaskDirectSchedule(request, error)
+      return createFailedTaskActionResult(
+        context.actionId,
+        contextTarget,
+        'ProjectTaskActionTargetNotFound',
+        'not-found',
+        error.message,
+      )
+    }
+    if (task.revision !== contextTarget.expectedRevision) {
+      const error = new TeamIssuesApiError(
+        409,
+        t('tasks.action.conflict'),
+        'WorkItemRevisionConflict',
+      )
+      failProjectTaskDirectSchedule(request, error)
+      return createFailedTaskActionResult(
+        context.actionId,
+        contextTarget,
+        'WorkItemRevisionConflict',
+        'conflict',
+        error.message,
+        true,
+      )
+    }
+    if (!claimProjectTaskDirectActionTarget(directTaskActionsInFlightRef.current, request)) {
+      const error = new Error(t('tasks.action.conflict'))
+      failProjectTaskDirectSchedule(request, error)
+      return createFailedTaskActionResult(
+        context.actionId,
+        contextTarget,
+        'ProjectTaskDirectActionInFlight',
+        'conflict',
+        error.message,
+        true,
+      )
+    }
+
+    taskActionCompletion.cancel()
+    const confirmScheduleChange = onConfirmScheduleChangeRef.current
+    const previewScheduleChange = onPreviewScheduleChangeRef.current
+    const updateTask = onUpdateTaskRef.current
+    const runTaskUpdate = performTaskUpdateRef.current
+
+    /** Executes persistence after the synchronous request and target claims above. */
+    const executeMutation = async (): Promise<WorkItemActionResult> => {
+      try {
+        if (request.input.kind === 'schedule-operation') {
+          if (!previewScheduleChange || !confirmScheduleChange) {
+            const error = new Error(projectTaskActionDisabledReasons.unavailable)
+            failProjectTaskDirectSchedule(request, error)
+            return createFailedTaskActionResult(
+              context.actionId,
+              contextTarget,
+              'ProjectTaskDirectScheduleUnavailable',
+              'unavailable',
+              error.message,
+            )
+          }
+          if (!beginProjectTaskDirectSchedulePreview(request)) {
+            return createCancelledTaskActionResult(context.actionId, [contextTarget])
+          }
+          const preview = await previewScheduleChange(task, request.input.operation)
+          const directImpact = preview.impacts.find((impact) =>
+            impact.kind === 'direct' &&
+            impact.teamId === task.teamId &&
+            impact.workItemId === task.id
+          )
+          if (!directImpact) {
+            throw new Error('Schedule preview did not contain the target Work Item.')
+          }
+          if (!publishProjectTaskDirectSchedulePreview(request, preview)) {
+            return createCancelledTaskActionResult(context.actionId, [contextTarget])
+          }
+          const decision = await waitForProjectTaskDirectScheduleDecision(request)
+          if (decision === 'cancelled') {
+            return createCancelledTaskActionResult(context.actionId, [contextTarget])
+          }
+          const updatedTask = await confirmScheduleChange(
+            task,
+            request.input.operation,
+            preview,
+          )
+          completeProjectTaskDirectScheduleMutation(request, updatedTask)
+          directTaskActionResultsRef.current.set(request, updatedTask)
+          setTaskUndo({
+            forwardPatch: { schedule: structuredClone(directImpact.after) },
+            inversePatch: { schedule: structuredClone(directImpact.before) },
+            task: updatedTask,
+            undoToken: createTaskUpdateUndoToken(updatedTask),
+          })
+          setTaskRedo(undefined)
+          setTaskAction({ kind: 'success', message: t('tasks.action.saved') })
+          return createSucceededTaskActionMutationResult(
+            context.actionId,
+            contextTarget,
+            updatedTask.revision,
+            createTaskUpdateUndoToken(updatedTask),
+          )
+        }
+        if (!isSupportedProjectTaskDirectPatch(request)) {
+          const error = new Error(t('tasks.action.updateError'))
+          failProjectTaskDirectSchedule(request, error)
+          return createFailedTaskActionResult(
+            context.actionId,
+            contextTarget,
+            'ProjectTaskDirectPatchUnsupported',
+            'validation',
+            error.message,
+          )
+        }
+        if (!updateTask || !runTaskUpdate) {
+          const error = new Error(projectTaskActionDisabledReasons.unavailable)
+          failProjectTaskDirectSchedule(request, error)
+          return createFailedTaskActionResult(
+            context.actionId,
+            contextTarget,
+            'ProjectTaskDirectMutationUnavailable',
+            'unavailable',
+            error.message,
+          )
+        }
+
+        const result = await runTaskUpdate(task, request.input.patch, undefined, request)
+        if (!result.applied) {
+          cancelAwaitingProjectTaskDirectSchedule(request)
+          return createCancelledTaskActionResult(context.actionId, [contextTarget])
+        }
+        directTaskActionResultsRef.current.set(request, result.task)
+        return createSucceededTaskActionMutationResult(
+          context.actionId,
+          contextTarget,
+          result.task.revision,
+          createTaskUpdateUndoToken(result.task),
+        )
+      } catch (error) {
+        if (readProjectTaskDirectSchedulePhase(request) === 'cancelled') {
+          return createCancelledTaskActionResult(context.actionId, [contextTarget])
+        }
+        directTaskActionErrorsRef.current.set(request, error)
+        failProjectTaskDirectSchedule(request, error)
+        const conflict = isTaskRevisionConflict(error)
+        if (conflict) {
+          setTaskUndo(undefined)
+          setTaskRedo(undefined)
+        }
+        return createFailedTaskActionResult(
+          context.actionId,
+          contextTarget,
+          conflict ? 'WorkItemRevisionConflict' : 'ProjectTaskActionMutationFailed',
+          conflict ? 'conflict' : 'unknown',
+          resolveTaskMutationErrorMessage(error, t),
+          conflict,
+        )
+      } finally {
+        releaseProjectTaskDirectActionTarget(directTaskActionsInFlightRef.current, request)
+      }
+    }
+
+    return executeMutation()
+  }, [
+    projectTaskActionDisabledReasons.unavailable,
+    t,
+    taskActionCompletion,
+  ])
 
   const currentTaskActionTarget = taskActionSelection.targets.length === 1
     ? taskActionSelection.targets[0]
@@ -1452,6 +1735,7 @@ export function TaskScreen({
   const executeBulkTaskActionEntrance = useCallback((
     context: WorkItemActionContext,
   ): Promise<WorkItemActionResult> | WorkItemActionResult => {
+    cancelAwaitingDirectTaskScheduleActions()
     if (!isBulkTaskActionId(context.actionId)) {
       return createFailedTaskActionResult(
         context.actionId,
@@ -1495,6 +1779,7 @@ export function TaskScreen({
     )
     return completion
   }, [
+    cancelAwaitingDirectTaskScheduleActions,
     dismissBulkTaskActionEditor,
     projectId,
     projectTaskActionDisabledReasons.unavailable,
@@ -1567,10 +1852,32 @@ export function TaskScreen({
     dismissBulkTaskActionEditor(interruption.requestId)
   }, [dismissBulkTaskActionEditor, t, taskActionCompletion])
 
+  /** Executes a direct Assign or Move request before retaining the existing bulk fallback. */
+  const executeProjectTaskParameterizedAction = useCallback((
+    context: WorkItemActionContext,
+  ): WorkItemActionResult | Promise<WorkItemActionResult> => {
+    const directResult = executeProjectTaskDirectAction(context)
+    if (directResult) return directResult
+    if (bulkTaskActionsAvailable) return executeBulkTaskActionEntrance(context)
+    return createFailedTaskActionResult(
+      context.actionId,
+      resolveProjectTaskActionTarget(context),
+      'ProjectTaskActionUnavailable',
+      'unavailable',
+      projectTaskActionDisabledReasons.unavailable,
+    )
+  }, [
+    bulkTaskActionsAvailable,
+    executeBulkTaskActionEntrance,
+    executeProjectTaskDirectAction,
+    projectTaskActionDisabledReasons.unavailable,
+  ])
+
   const projectTaskActionHandlers = useMemo<ProjectTaskActionHandlers>(() => ({
     ...(canCreateTaskAction
       ? {
           create: (context) => {
+            cancelAwaitingDirectTaskScheduleActions()
             const createContext = pendingCreateTaskContextRef.current
             pendingCreateTaskContextRef.current = undefined
             const completion = taskActionCompletion.begin(context, dismissCreateTaskEditor)
@@ -1582,23 +1889,25 @@ export function TaskScreen({
     open: (context) => executeTaskDetailAction(context),
     ...(canEditTaskAction
       ? {
-          edit: (context) => executeTaskDetailAction(
-            context,
-            'input[name="title"]',
-            true,
-          ),
-          schedule: (context) => executeTaskDetailAction(
-            context,
-            'select[name="scheduleMode"]',
-            true,
-          ),
+          edit: (context) => executeProjectTaskDirectAction(context) ??
+            executeTaskDetailAction(
+              context,
+              'input[name="title"]',
+              true,
+            ),
+          schedule: (context) => executeProjectTaskDirectAction(context) ??
+            executeTaskDetailAction(
+              context,
+              'select[name="scheduleMode"]',
+              true,
+            ),
         }
       : {}),
-    ...(bulkTaskActionsAvailable
+    ...(bulkTaskActionsAvailable || canDirectTaskAction
       ? {
-          archive: executeBulkTaskActionEntrance,
-          assign: executeBulkTaskActionEntrance,
-          move: executeBulkTaskActionEntrance,
+          ...(bulkTaskActionsAvailable ? { archive: executeBulkTaskActionEntrance } : {}),
+          assign: executeProjectTaskParameterizedAction,
+          move: executeProjectTaskParameterizedAction,
         }
       : {}),
     ...(canManageTaskRelationAction
@@ -1613,6 +1922,7 @@ export function TaskScreen({
     ...(toggleTaskWatch
       ? {
           watch: async (context) => {
+            cancelAwaitingDirectTaskScheduleActions()
             const target = resolveProjectTaskActionTarget(context)
             if (
               !target ||
@@ -1643,11 +1953,15 @@ export function TaskScreen({
       : {}),
   }), [
     bulkTaskActionsAvailable,
+    cancelAwaitingDirectTaskScheduleActions,
     canCreateTaskAction,
+    canDirectTaskAction,
     canEditTaskAction,
     canManageTaskRelationAction,
     detailTask,
     executeBulkTaskActionEntrance,
+    executeProjectTaskDirectAction,
+    executeProjectTaskParameterizedAction,
     executeTaskDetailAction,
     dismissCreateTaskEditor,
     showCreateTaskEditor,
@@ -1655,11 +1969,28 @@ export function TaskScreen({
     taskActionCompletion,
     toggleTaskWatch,
   ])
+
+  /** Keeps command and context Assign/Move disabled unless their bulk editor is available. */
+  const evaluateProjectTaskParameterizedPermission = useCallback((
+    context: WorkItemActionContext,
+  ) => {
+    const directRequest = directTaskActionRequestSlotRef.current.current
+    if (
+      !bulkTaskActionsAvailable &&
+      (!directRequest || directRequest.actionId !== context.actionId)
+    ) return denyTaskAction(projectTaskActionDisabledReasons.unavailable)
+    return evaluateProjectTaskTargetPermission(context, false)
+  }, [
+    bulkTaskActionsAvailable,
+    evaluateProjectTaskTargetPermission,
+    projectTaskActionDisabledReasons.unavailable,
+  ])
+
   const projectTaskActionPermissions = useMemo<ProjectTaskActionPermissions>(() => ({
     archive: (context) => evaluateProjectTaskTargetPermission(context, false),
-    assign: (context) => evaluateProjectTaskTargetPermission(context, false),
+    assign: evaluateProjectTaskParameterizedPermission,
     edit: (context) => evaluateProjectTaskTargetPermission(context, true),
-    move: (context) => evaluateProjectTaskTargetPermission(context, false),
+    move: evaluateProjectTaskParameterizedPermission,
     open: (context) => evaluateProjectTaskTargetPermission(context, false),
     relation: (context) => evaluateProjectTaskTargetPermission(context, true),
     schedule: (context) => evaluateProjectTaskTargetPermission(context, true),
@@ -1673,6 +2004,7 @@ export function TaskScreen({
   }), [
     detailTask,
     evaluateProjectTaskTargetPermission,
+    evaluateProjectTaskParameterizedPermission,
     projectTaskActionDisabledReasons.unavailable,
     toggleTaskWatch,
   ])
@@ -1703,6 +2035,112 @@ export function TaskScreen({
     selection: taskActionSelection,
     ...(activeProjectTeamId !== undefined ? { teamId: activeProjectTeamId } : {}),
   })
+
+  /**
+   * Routes Table, Board, inline, paste, and fill patches through one canonical action registry.
+   *
+   * The existing persistence and schedule-preview primitive remains private so canonical handlers,
+   * detail saves, undo, and redo cannot recursively dispatch a second action.
+   *
+   * @param task - Revision-bound Work Item selected by the direct mutation control.
+   * @param input - Complete atomic patch emitted by that control.
+   * @returns Persisted task, or the original snapshot after an explicit preview cancellation.
+   */
+  const handleUpdateTask = useCallback(async (
+    task: ProjectTask,
+    input: UpdateTeamIssueInput,
+  ): Promise<ProjectTask> => {
+    const target = {
+      expectedRevision: task.revision,
+      teamId: task.teamId,
+      workItemId: task.id,
+    }
+    const request = createProjectTaskDirectPatchRequest(projectId, target, input)
+    const requestSlot = directTaskActionRequestSlotRef.current
+    requestSlot.current = request
+
+    try {
+      const execution = await projectTaskActions.execute(
+        request.actionId,
+        'click',
+        undefined,
+        createFocusedTaskViewActionSelection(target),
+      )
+      const updatedTask = directTaskActionResultsRef.current.get(request)
+      if (updatedTask) return updatedTask
+      const mutationError = directTaskActionErrorsRef.current.get(request)
+      if (mutationError !== undefined) throw mutationError
+      if (execution.status === 'executed' && execution.result.status === 'cancelled') {
+        return task
+      }
+      const message = resolveTaskActionExecutionFailureMessage(
+        execution,
+        t('tasks.action.updateError'),
+      ) ?? t('tasks.action.updateError')
+      const error = new Error(message)
+      failProjectTaskDirectSchedule(request, error)
+      throw error
+    } finally {
+      clearProjectTaskDirectActionRequest(requestSlot, request)
+    }
+  }, [projectId, projectTaskActions, t])
+
+  /**
+   * Starts a Gantt or Calendar Schedule action before requesting its server preview.
+   *
+   * @param task - Revision-bound Work Item selected by the timeline gesture.
+   * @param operation - Move, resize, or replacement operation selected by that gesture.
+   * @returns Synchronous invocation handle owned before the preview network request settles.
+   */
+  const handleRequestTimelineScheduleChange = useCallback((
+    task: ProjectTask,
+    operation: WorkItemScheduleOperation,
+  ): ProjectTaskDirectScheduleHandle => {
+    const target = {
+      expectedRevision: task.revision,
+      teamId: task.teamId,
+      workItemId: task.id,
+    }
+    const request = createProjectTaskDirectScheduleRequest(projectId, target, operation)
+    const requestSlot = directTaskActionRequestSlotRef.current
+    requestSlot.current = request
+    setTaskViewSelection((currentSelection) => reduceTaskViewSelection(currentSelection, {
+      key: createTaskViewItemKey(task.teamId, task.id),
+      type: 'focus',
+    }))
+
+    const execution = projectTaskActions.execute(
+      'schedule',
+      'click',
+      undefined,
+      createFocusedTaskViewActionSelection(target),
+    )
+    void execution.then(
+      (result) => {
+        clearProjectTaskDirectActionRequest(requestSlot, request)
+        const message = resolveTaskActionExecutionFailureMessage(
+          result,
+          t('tasks.action.updateError'),
+        )
+        if (message) failProjectTaskDirectSchedule(request, new Error(message))
+      },
+      (error: unknown) => {
+        clearProjectTaskDirectActionRequest(requestSlot, request)
+        failProjectTaskDirectSchedule(request, error)
+      },
+    )
+    const handle = createProjectTaskDirectScheduleHandle(request)
+    return {
+      ...handle,
+      cancel: () => {
+        const cancelled = handle.cancel()
+        if (cancelled) {
+          releaseProjectTaskDirectActionTarget(directTaskActionsInFlightRef.current, request)
+        }
+        return cancelled
+      },
+    }
+  }, [projectId, projectTaskActions, t])
 
   /**
    * Routes header, Board, and other direct Create clicks through the canonical registry.
@@ -2218,11 +2656,10 @@ export function TaskScreen({
                 onTaskSelectionChange={updateTaskSelection}
                 onUpdateProjectMember={onUpdateProjectMember}
                 onUpdateScheduleDependency={onUpdateScheduleDependency}
-                onConfirmScheduleChange={onConfirmScheduleChange
-                  ? handleConfirmTimelineScheduleChange
+                onRequestScheduleChange={onPreviewScheduleChange && onConfirmScheduleChange
+                  ? handleRequestTimelineScheduleChange
                   : undefined}
                 onUpdateTask={onUpdateTask ? handleUpdateTask : undefined}
-                onPreviewScheduleChange={onPreviewScheduleChange}
                 onVisibleTaskSelectionChange={updateVisibleTaskSelection}
                 personLabels={personLabels}
                 personOptions={personOptions}
