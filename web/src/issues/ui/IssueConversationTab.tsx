@@ -365,6 +365,7 @@ export function IssueConversationTab({
               thread.root,
             )
             const canManageAcceptedResolution =
+              !thread.root.deletedAt &&
               Boolean(onSetAcceptedResolution) &&
               (canAcceptResolution ||
                 (currentMemberKey !== undefined &&

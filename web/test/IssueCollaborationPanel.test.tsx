@@ -236,6 +236,28 @@ describe('IssueCollaborationPanel', () => {
     expect(html).toContain('2 comments')
   })
 
+  test('hides accepted-resolution controls when the root thread is deleted', () => {
+    const rootComment = issueCollaborationControllerFixture.comments[0]
+    const html = renderToStaticMarkup(
+      <IssueCollaborationPanel
+        controller={{
+          ...issueCollaborationControllerFixture,
+          comments: [
+            { ...rootComment, deletedAt: '2026-06-08T01:45:00.000Z' },
+            issueCollaborationControllerFixture.comments[1],
+          ],
+        }}
+        currentMemberKey="demo@example.com"
+        locale="en"
+        members={collaborationWorkspaceMemberFixtures}
+      />,
+    )
+
+    expect(html).not.toContain('>Accept as resolution<')
+    expect(html).not.toContain('>Replace resolution<')
+    expect(html).not.toContain('Edit summary')
+  })
+
   test('renders accepted resolution history only from its independent cursor state', () => {
     const html = renderToStaticMarkup(
       <IssueCollaborationPanel
