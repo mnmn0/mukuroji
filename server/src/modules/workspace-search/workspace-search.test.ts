@@ -3047,6 +3047,20 @@ test('prevents idempotent recreation from reviving another viewer preference lif
     canWriteWorkspaceScope: true,
     canManageSharedViews: false,
   }
+  let sharedViewerPreferenceRecordKey: string | undefined
+  control.beforeNextTransaction = (_items, transactItems) => {
+    const preferenceMutation = transactItems.find((item) => {
+      const key = item.Update?.Key
+      return isMemoryRecord(key) &&
+        typeof key.recordKey === 'string' &&
+        key.recordKey.startsWith('TASK_VIEW_PREFERENCE#')
+    })
+    const key = preferenceMutation?.Update?.Key
+    if (!isMemoryRecord(key) || typeof key.recordKey !== 'string') {
+      throw new Error('Expected a shared viewer preference transaction item.')
+    }
+    sharedViewerPreferenceRecordKey = key.recordKey
+  }
   await client.updateTaskView({
     workspaceId: 'workspace-1',
     viewId: created.id,
@@ -3058,9 +3072,16 @@ test('prevents idempotent recreation from reviving another viewer preference lif
       defaultSource: 'personal',
     },
   })
+  if (!sharedViewerPreferenceRecordKey) {
+    throw new Error('Expected a captured shared viewer preference record key.')
+  }
   let deletionTombstoneRecordKey: string | undefined
   let sharedViewerPreferenceDeleted = false
-  control.beforeNextTransaction = (_items, transactItems) => {
+  /** Captures the main deletion and the subsequent paginated preference cleanup transaction. */
+  const observeDeletionTransaction = (
+    _items: Map<string, Record<string, unknown>>,
+    transactItems: Array<Record<string, Record<string, unknown>>>,
+  ) => {
     const tombstone = transactItems
       .flatMap((item) => isMemoryRecord(item.Put?.Item) ? [item.Put.Item] : [])
       .find((item) => item.entryType === 'task-view-tombstone')
@@ -3070,15 +3091,15 @@ test('prevents idempotent recreation from reviving another viewer preference lif
     sharedViewerPreferenceDeleted ||= transactItems.some((item) => {
       const key = item.Delete?.Key
       return isMemoryRecord(key) &&
-        typeof key.recordKey === 'string' &&
-        key.recordKey.startsWith('TASK_VIEW_PREFERENCE#') &&
-        key.recordKey.endsWith(`#${created.id}`) &&
-        !key.recordKey.includes('owner')
+        key.recordKey === sharedViewerPreferenceRecordKey
     })
-    if (!tombstone && !sharedViewerPreferenceDeleted) {
+    if (tombstone) {
+      control.beforeNextTransaction = observeDeletionTransaction
+    } else if (!sharedViewerPreferenceDeleted) {
       throw new Error('Expected a task view deletion cleanup transaction.')
     }
   }
+  control.beforeNextTransaction = observeDeletionTransaction
   await client.deleteTaskView({
     workspaceId: 'workspace-1',
     viewId: created.id,
