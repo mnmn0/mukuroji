@@ -1206,6 +1206,59 @@ test('returns accepted resolution history on the updated root comment', async ()
   })
 })
 
+test('does not serialize an accepted-resolution response after Work Item reassignment', async () => {
+  let detailReads = 0
+  const assignments: Record<string, string> = {
+    'onboarding-friction': 'refero',
+  }
+  configureFakeProjectClients(true, {
+    projectAccesses: [{ projectId: 'refero', role: 'viewer' }],
+    detailAssignedProjectIds: assignments,
+    detailReadHook: async () => {
+      detailReads += 1
+      if (detailReads === 2) assignments['onboarding-friction'] = 'private-project'
+    },
+  })
+  setTestAppDependencies({
+    collaboration: createCollaborationStub({
+      async setAcceptedResolution() {
+        return {
+          id: 'root-1',
+          rootCommentId: 'root-1',
+          authorMemberKey: 'demo@example.com',
+          bodyMarkdown: 'What should we ship?',
+          version: 4,
+          mentionMemberKeys: [],
+          createdAt: '2026-08-09T00:00:00.000Z',
+          updatedAt: '2026-08-09T02:00:00.000Z',
+          acceptedResolutions: [],
+          reactions: [],
+        }
+      },
+    }),
+  })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction/comments/root-1/accepted-resolution',
+    {
+      method: 'PUT',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        expectedThreadVersion: 3,
+        commentId: 'reply-1',
+        summary: 'Use the reviewed answer.',
+      }),
+    },
+  )
+
+  expect(detailReads).toBe(2)
+  expect(response.status).toBe(403)
+  expect(await response.json()).toMatchObject({ message: 'Project access is denied.' })
+})
+
 test('allows the Work Item assignee to accept a resolution with viewer project access', async () => {
   configureFakeProjectClients(true, {
     detailAssigneeUserId: 'demo@example.com',

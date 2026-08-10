@@ -1,8 +1,10 @@
 import type {
   CuratedContextItem,
   CuratedContextSource,
+  CuratedContextSourceAvailability,
   CuratedContextSourceKind,
 } from '@mukuroji/contracts'
+import type { MessageKey } from '../../shared/i18n/i18n'
 
 const issueSourceKinds: readonly CuratedContextSourceKind[] = [
   'comment',
@@ -10,6 +12,42 @@ const issueSourceKinds: readonly CuratedContextSourceKind[] = [
   'document',
   'activity',
 ]
+
+/** Availability states that require explanatory copy in the source ledger. */
+type UnavailableSourceAvailability = Exclude<
+  CuratedContextSourceAvailability,
+  'available'
+>
+
+const sourceAvailabilityReasonKeys: Record<
+  CuratedContextSourceKind,
+  Record<UnavailableSourceAvailability, MessageKey>
+> = {
+  activity: {
+    deleted: 'collaboration.sources.reason.activity.deleted',
+    edited: 'collaboration.sources.reason.activity.edited',
+    'permission-lost': 'collaboration.sources.reason.activity.permissionLost',
+    'retention-expired': 'collaboration.sources.reason.activity.retentionExpired',
+  },
+  comment: {
+    deleted: 'collaboration.sources.reason.comment.deleted',
+    edited: 'collaboration.sources.reason.comment.edited',
+    'permission-lost': 'collaboration.sources.reason.comment.permissionLost',
+    'retention-expired': 'collaboration.sources.reason.comment.retentionExpired',
+  },
+  document: {
+    deleted: 'collaboration.sources.reason.document.deleted',
+    edited: 'collaboration.sources.reason.document.edited',
+    'permission-lost': 'collaboration.sources.reason.document.permissionLost',
+    'retention-expired': 'collaboration.sources.reason.document.retentionExpired',
+  },
+  'external-chat': {
+    deleted: 'collaboration.sources.reason.externalChat.deleted',
+    edited: 'collaboration.sources.reason.externalChat.edited',
+    'permission-lost': 'collaboration.sources.reason.externalChat.permissionLost',
+    'retention-expired': 'collaboration.sources.reason.externalChat.retentionExpired',
+  },
+}
 
 /**
  * One immutable provenance snapshot and the curated item that owns it.
@@ -43,6 +81,24 @@ export type IssueSourceFocus = {
   kind?: CuratedContextSourceKind
   /** Stable identifier inside the source category. */
   sourceId?: string
+}
+
+/**
+ * Resolves localized explanation copy for one source availability state.
+ *
+ * Server availability reasons are audit metadata and may be English or contain implementation
+ * wording, so the UI always renders a locale-owned message keyed by source kind and state.
+ *
+ * @param source - Source kind and current availability.
+ * @returns Translation key for the localized explanation.
+ */
+export function getIssueSourceAvailabilityReasonKey(
+  source: Pick<CuratedContextSource, 'kind' | 'availability'>,
+): MessageKey {
+  if (source.availability === 'available') {
+    return 'collaboration.sources.unavailableReason'
+  }
+  return sourceAvailabilityReasonKeys[source.kind][source.availability]
 }
 
 /**

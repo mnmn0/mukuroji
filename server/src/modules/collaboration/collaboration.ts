@@ -628,6 +628,10 @@ function toStoredCuratedContextItem(value: Record<string, unknown>): StoredCurat
     if (value.recordKey !== contextItemRecordKey(id)) {
       throw new Error('invalid context record key')
     }
+    const entityOwner = parseWorkItemEntityOwner(value.entityKey)
+    if (entityOwner.teamId !== value.teamId || entityOwner.issueId !== value.workItemId) {
+      throw new Error('curated context owner does not match entity key')
+    }
     const mentionMemberKeys = normalizeMentionMemberKeys(
       value.mentionMemberKeys.filter((entry): entry is string => typeof entry === 'string'),
     )
@@ -682,6 +686,30 @@ function toStoredCuratedContextItem(value: Record<string, unknown>): StoredCurat
       { cause: error },
     )
   }
+}
+
+/**
+ * Parses the canonical Team and Work Item owner embedded in a collaboration entity key.
+ *
+ * @param entityKey - Persisted collaboration entity key.
+ * @returns Canonical owner identifiers encoded by the key.
+ */
+function parseWorkItemEntityOwner(entityKey: string): { teamId: string; issueId: string } {
+  const marker = '#work-item#team/'
+  const markerIndex = entityKey.indexOf(marker)
+  const issueMarker = '/issue/'
+  const issueMarkerIndex = markerIndex < 0
+    ? -1
+    : entityKey.indexOf(issueMarker, markerIndex + marker.length)
+  if (markerIndex < 0 || issueMarkerIndex < 0) {
+    throw new Error('invalid work item entity key')
+  }
+  const teamId = entityKey.slice(markerIndex + marker.length, issueMarkerIndex)
+  const issueId = entityKey.slice(issueMarkerIndex + issueMarker.length)
+  if (!teamId || !issueId) {
+    throw new Error('invalid work item entity owner')
+  }
+  return { teamId, issueId }
 }
 
 /**

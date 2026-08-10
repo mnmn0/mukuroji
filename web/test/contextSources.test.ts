@@ -3,6 +3,7 @@ import { curatedContextItemFixtures } from '../src/issues/fixtures'
 import {
   createIssueSourceAnchorId,
   createIssueSourceEntries,
+  getIssueSourceAvailabilityReasonKey,
   readIssueSourceKind,
   resolveIssueSourceFocus,
 } from '../src/issues/model/contextSources'
@@ -45,6 +46,17 @@ describe('curated context sources', () => {
     expect(readIssueSourceKind('document')).toBe('document')
     expect(readIssueSourceKind('unknown')).toBeUndefined()
     expect(readIssueSourceKind(null)).toBeUndefined()
+  })
+
+  test('maps source kind and availability to localized reason keys', () => {
+    expect(getIssueSourceAvailabilityReasonKey({
+      kind: 'document',
+      availability: 'permission-lost',
+    })).toBe('collaboration.sources.reason.document.permissionLost')
+    expect(getIssueSourceAvailabilityReasonKey({
+      kind: 'comment',
+      availability: 'edited',
+    })).toBe('collaboration.sources.reason.comment.edited')
   })
 
   test('prioritizes a coherent in-panel source target over a stale route kind', () => {

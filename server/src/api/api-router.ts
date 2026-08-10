@@ -8060,8 +8060,14 @@ routeApp.put('/api/teams/:teamId/issues/:issueId/comments/:rootCommentId/accepte
         ...request,
       }),
     })
+    const current = await loadAuthorizedTeamIssue(principal, teamId, issueId, 'viewer')
     return c.json({
-      comment: toCollaborationCommentResponse(comment, principal, context, detail.issue),
+      comment: toCollaborationCommentResponse(
+        comment,
+        principal,
+        current.context,
+        current.detail.issue,
+      ),
     })
   } catch (error) {
     return toCollaborationErrorResponse(c, error)

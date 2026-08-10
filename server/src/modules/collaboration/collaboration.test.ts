@@ -256,6 +256,45 @@ test('creates stable collaboration keys for Work Item and project scopes', () =>
   )
 })
 
+test('rejects curated context rows whose owner disagrees with the entity key', async () => {
+  const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
+  const client = createClient(async (command) => {
+    const input = readCommandInput(command)
+    if (isTestRecord(input.Key) && input.Key.recordKey === 'CONTEXT#context-owner-mismatch') {
+      return {
+        Item: {
+          entityKey,
+          recordKey: 'CONTEXT#context-owner-mismatch',
+          entryType: 'context',
+          schemaVersion: 1,
+          id: 'context-owner-mismatch',
+          teamId: 'team-other',
+          workItemId: 'issue-1',
+          kind: 'decision',
+          state: 'active',
+          title: 'Decision',
+          body: 'Body',
+          mentionMemberKeys: [],
+          createdBy: { id: 'author@example.com', displayName: 'Author' },
+          createdAt: '2026-07-12T00:00:00.000Z',
+          updatedBy: { id: 'author@example.com', displayName: 'Author' },
+          updatedAt: '2026-07-12T00:00:00.000Z',
+          revision: 1,
+        },
+      }
+    }
+    return {}
+  })
+
+  await expect(client.getCuratedContextItemSnapshot({
+    entityKey,
+    itemId: 'context-owner-mismatch',
+  })).rejects.toMatchObject({
+    status: 503,
+    code: 'InvalidCollaborationRecord',
+  })
+})
+
 test('prefers the canonical Work Items environment for parent mutation guards', async () => {
   const originalWorkItemsTableName = Bun.env.WORK_ITEMS_TABLE_NAME
   const originalLegacyTeamIssuesTableName = Bun.env.MUKUROJI_TEAM_ISSUES_TABLE

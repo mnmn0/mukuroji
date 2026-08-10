@@ -345,7 +345,7 @@ describe('IssueCollaborationPanel', () => {
     expect(html).toContain('顧客ヒアリングを確認する')
     expect(html).toContain('Access revoked')
     expect(html).toContain(
-      'The viewer no longer has permission to this source.',
+      'You no longer have permission to view this external message.',
     )
     expect(html).toContain(
       'Quoted text, captured original, and permalink are hidden',

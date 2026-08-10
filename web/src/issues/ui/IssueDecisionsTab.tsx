@@ -27,6 +27,7 @@ import {
   canSubmitContextEditor,
   type IssueContextDraft,
 } from '../model/contextDrafts'
+import { getIssueSourceAvailabilityReasonKey } from '../model/contextSources'
 import {
   advanceDeepLinkTraversal,
   type DeepLinkTraversalState,
@@ -643,9 +644,9 @@ function ContextRevisionSource({ source, t }: ContextRevisionSourceProps) {
           </span>
         ) : null}
       </div>
-      {source.availabilityReason ? (
+      {source.availability !== 'available' ? (
         <p className="mt-1 text-[0.68rem] leading-5 text-[var(--workbench-muted)]">
-          {source.availabilityReason}
+          {t(getIssueSourceAvailabilityReasonKey(source))}
         </p>
       ) : null}
       {sensitiveContentIsRedacted ? (

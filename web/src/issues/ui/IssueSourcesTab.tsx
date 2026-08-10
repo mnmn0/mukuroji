@@ -10,6 +10,7 @@ import type { IssueContextController } from '../mutations/useIssueContext'
 import {
   createIssueSourceAnchorId,
   createIssueSourceEntries,
+  getIssueSourceAvailabilityReasonKey,
 } from '../model/contextSources'
 import {
   advanceDeepLinkTraversal,
@@ -218,8 +219,7 @@ export function IssueSourcesTab({
                     )}
                   </p>
                   <p className="mt-1 text-xs leading-5">
-                    {source.availabilityReason ??
-                      t('collaboration.sources.unavailableReason')}
+                    {t(getIssueSourceAvailabilityReasonKey(source))}
                   </p>
                 </div>
               ) : null}

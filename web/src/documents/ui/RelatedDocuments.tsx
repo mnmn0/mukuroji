@@ -122,7 +122,10 @@ export function RelatedDocuments({
       onPromoteToContext(
         backlink,
         document,
-        createRelatedDocumentPromotionTriggerId(backlink.documentId),
+        createRelatedDocumentPromotionTriggerId(
+          backlink.documentId,
+          backlink.relation.id,
+        ),
       )
     } catch {
       setPromotionErrorDocumentId(backlink.documentId)
@@ -198,9 +201,13 @@ export function RelatedDocuments({
                   className="min-h-[44px] flex-none border-l border-[var(--workbench-border)] px-3 text-xs font-semibold text-[var(--workbench-primary)] hover:bg-[#f2fbf9]"
                   data-testid={createRelatedDocumentPromotionTriggerId(
                     backlink.documentId,
+                    backlink.relation.id,
                   )}
                   disabled={promotingDocumentId === backlink.documentId}
-                  id={createRelatedDocumentPromotionTriggerId(backlink.documentId)}
+                  id={createRelatedDocumentPromotionTriggerId(
+                    backlink.documentId,
+                    backlink.relation.id,
+                  )}
                   onClick={() => void handlePromoteToContext(backlink)}
                   type="button"
                 >
@@ -238,10 +245,14 @@ export function RelatedDocuments({
  * Creates a stable focus-return target for one related Document promotion action.
  *
  * @param documentId - Permission-filtered Document identifier.
+ * @param relationId - Canonical relation identifier for this backlink.
  * @returns DOM-safe button ID.
  */
-function createRelatedDocumentPromotionTriggerId(documentId: string): string {
-  return `related-document-promote-${encodeURIComponent(documentId)}`
+function createRelatedDocumentPromotionTriggerId(
+  documentId: string,
+  relationId: string,
+): string {
+  return `related-document-promote-${encodeURIComponent(documentId)}-${encodeURIComponent(relationId)}`
 }
 
 function mergeBacklinks(

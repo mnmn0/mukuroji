@@ -168,9 +168,9 @@ export function IssueConversationTab({
   const focusLoadMoreReplies = controller.loadMoreReplies
   const focusReplyPagination = controller.replyPagination
   const focusedCommentTargetId =
-    focusedCommentId ?? resolutionSourceTarget?.commentId
+    resolutionSourceTarget?.commentId ?? focusedCommentId
   const focusedRootTargetId =
-    focusedRootCommentId ?? resolutionSourceTarget?.rootCommentId
+    resolutionSourceTarget?.rootCommentId ?? focusedRootCommentId
 
   /**
    * Opens the accepted-resolution editor and remembers its keyboard trigger.
