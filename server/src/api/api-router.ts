@@ -17712,6 +17712,21 @@ async function createWorkspaceSearchContext(
         : []
     }),
   )
+  const roleWritableTeamIds = new Set<string>()
+  const roleWritableProjectIds = new Set<string>()
+  const roleWritableProjectScopeKeys = new Set<string>()
+  for (const access of projectScopeAccesses) {
+    if (!projectAccessAllows(access, 'member')) continue
+    const teamId = resolveProjectAccessTeamId(access, directory)
+    if (!teamId) continue
+    roleWritableTeamIds.add(teamId)
+    roleWritableProjectScopeKeys.add(
+      createTaskViewProjectScopeKey(teamId, access.projectId),
+    )
+    if (globallyUniqueProjectIds.has(access.projectId)) {
+      roleWritableProjectIds.add(access.projectId)
+    }
+  }
   const readableTeamIds = new Set(
     projectScopeAccesses.flatMap((access) => {
       if (!projectAccessAllows(access, 'viewer')) return []
@@ -17743,7 +17758,6 @@ async function createWorkspaceSearchContext(
         ? principal.workspaceRole !== 'guest'
         : hasEnterpriseWorkspacePermission(principal, 'workspace.write')
     )
-  const canWriteAllReadableTaskViewScopes = canWriteWorkspaceTaskViewScope
   const enterpriseManageableTeamIds = new Set<string>()
   const enterpriseWritableTeamIds = new Set<string>()
   const enterpriseWritableProjectIds = new Set<string>()
@@ -17834,17 +17848,31 @@ async function createWorkspaceSearchContext(
             })
           : []),
       ].filter((teamId) => readableTeamIds.has(teamId)))
-  const writableTeamIds = new Set(canWriteAllReadableTaskViewScopes
-    ? readableTeamIds
-    : [...enterpriseWritableTeamIds].filter((teamId) => readableTeamIds.has(teamId)))
-  const writableProjectIds = new Set(canWriteAllReadableTaskViewScopes
-    ? readableProjectIds
-    : [...enterpriseWritableProjectIds].filter((projectId) => readableProjectIds.has(projectId)))
-  const writableProjectScopeKeys = new Set(canWriteAllReadableTaskViewScopes
-    ? readableProjectScopeKeys
-    : [...enterpriseWritableProjectScopeKeys].filter((scopeKey) =>
-        readableProjectScopeKeys.has(scopeKey)
-      ))
+  const writableTeamIds = new Set(
+    principal.isSystemAdmin
+      ? readableTeamIds
+      : principal.enterprisePermissions !== undefined
+        ? [...enterpriseWritableTeamIds].filter((teamId) => readableTeamIds.has(teamId))
+        : [...roleWritableTeamIds].filter((teamId) => readableTeamIds.has(teamId)),
+  )
+  const writableProjectIds = new Set(
+    principal.isSystemAdmin
+      ? readableProjectIds
+      : principal.enterprisePermissions !== undefined
+        ? [...enterpriseWritableProjectIds].filter((projectId) => readableProjectIds.has(projectId))
+        : [...roleWritableProjectIds].filter((projectId) => readableProjectIds.has(projectId)),
+  )
+  const writableProjectScopeKeys = new Set(
+    principal.isSystemAdmin
+      ? readableProjectScopeKeys
+      : principal.enterprisePermissions !== undefined
+        ? [...enterpriseWritableProjectScopeKeys].filter((scopeKey) =>
+            readableProjectScopeKeys.has(scopeKey)
+          )
+        : [...roleWritableProjectScopeKeys].filter((scopeKey) =>
+            readableProjectScopeKeys.has(scopeKey)
+          ),
+  )
   const projectRoles = Object.fromEntries(
     projectAccesses.flatMap(({ projectId, role }) =>
       role === undefined ? [] : [[projectId, role]]

@@ -2813,7 +2813,17 @@ export class DynamoDbWorkspaceSearchClient {
       }
       throw error
     }
-    await this.cleanupTaskViewPreferences(workspaceId, viewId)
+    try {
+      await this.cleanupTaskViewPreferences(workspaceId, viewId)
+    } catch (error) {
+      // The live row, tombstone, and optional receipt are already committed. Keep the
+      // acknowledged delete result stable when this best-effort cleanup is unavailable.
+      console.error('Task view preference cleanup failed after deletion commit.', {
+        error,
+        viewId,
+        workspaceId,
+      })
+    }
     return { id: viewId, revision: expectedRevision }
   }
 

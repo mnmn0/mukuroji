@@ -2817,6 +2817,66 @@ test('replays task view deletion from a durable actor-bound receipt', async () =
   })).rejects.toMatchObject({ code: 'TaskViewNotFound', status: 404 })
 })
 
+test('keeps a committed task view deletion successful when preference cleanup is unavailable', async () => {
+  const control: NonNullable<Parameters<typeof createMemoryDocumentClient>[1]> = {
+    failNextQuery: false,
+  }
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([], control),
+    {} as DynamoDBClient,
+    false,
+  )
+  const access = {
+    viewerUserId: 'owner@example.com',
+    isSystemAdmin: false,
+    canAccessWorkspaceScope: true,
+    canWriteWorkspaceScope: true,
+    canManageSharedViews: false,
+    canWrite: true,
+    teamIds: new Set<string>(),
+    writableTeamIds: new Set<string>(),
+    manageableTeamIds: new Set<string>(),
+    projectIds: new Set<string>(),
+    writableProjectIds: new Set<string>(),
+    projectScopeKeys: new Set<string>(),
+    writableProjectScopeKeys: new Set<string>(),
+  }
+  const created = await client.createTaskView({
+    workspaceId: 'workspace-1',
+    access,
+    input: {
+      name: 'Cleanup outage',
+      visibility: 'personal',
+      definition: {
+        surface: 'my-tasks',
+        scope: { kind: 'viewer' },
+        filters: {},
+        layout: {
+          mode: 'list',
+          sort: [],
+          columns: [{ field: 'title' }],
+          density: 'compact',
+          displayOptions: {},
+        },
+      },
+    },
+  })
+  control.failNextQuery = true
+
+  await expect(client.deleteTaskView({
+    workspaceId: 'workspace-1',
+    viewId: created.id,
+    expectedRevision: 1,
+    access,
+  })).resolves.toEqual({ id: created.id, revision: 1 })
+  await expect(client.getTaskView({
+    workspaceId: 'workspace-1',
+    viewId: created.id,
+    access,
+  })).rejects.toMatchObject({ code: 'TaskViewNotFound', status: 404 })
+})
+
 test('rejects task view updates when a concurrent delete removes the live row', async () => {
   const control: NonNullable<Parameters<typeof createMemoryDocumentClient>[1]> = {}
   const client = new DynamoDbWorkspaceSearchClient(
@@ -3194,6 +3254,8 @@ function createMemoryDocumentClient(
   initialItems: Array<Record<string, unknown>>,
   control: {
     failNextTransaction?: boolean
+    /** Fails the next paginated Query to simulate a post-commit cleanup outage. */
+    failNextQuery?: boolean
     beforeNextTransaction?: (
       items: Map<string, Record<string, unknown>>,
       transactItems: Array<Record<string, Record<string, unknown>>>,
@@ -3240,6 +3302,10 @@ function createMemoryDocumentClient(
           ? -1
           : String(left.recordKey) > String(right.recordKey) ? 1 : 0)
       if ('KeyConditionExpression' in input) {
+        if (control.failNextQuery) {
+          control.failNextQuery = false
+          throw new Error('query failed')
+        }
         const prefix = String(expressionValues?.[':prefix'] ?? '')
         const startKey = (input.ExclusiveStartKey as { recordKey?: string } | undefined)?.recordKey
         const matching = tableItems.filter((item) =>

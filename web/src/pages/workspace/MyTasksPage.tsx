@@ -13,6 +13,7 @@ import {
   createBuiltInTaskViewDefinition,
   applyTaskViewDefinitionToTasks,
   presentationSettingsToTaskViewDefinition,
+  taskViewDefinitionRequiresArchivedItems,
   taskViewDefinitionToPresentationSettings,
 } from '../../task-views/model/taskViewSurfaceState'
 import { useTaskViewController } from '../../task-views/mutations/useTaskViewController'
@@ -126,6 +127,7 @@ export function MyTasksPage() {
   const [taskActionCompletion] = useState(createTaskActionCompletionBridge)
   const taskStatusMoveRequestSlot = useRef<TaskStatusMoveRequestSlot>({ current: undefined })
   const onOpenTaskRef = useRef(workspace.onOpenTask)
+  const [includeArchivedWorkItems, setIncludeArchivedWorkItems] = useState(false)
 
   useEffect(() => {
     onOpenTaskRef.current = workspace.onOpenTask
@@ -137,7 +139,7 @@ export function MyTasksPage() {
     workspace.accessToken,
     workspace.canLoadWorkspaceData,
     workspace.teams,
-    true,
+    includeArchivedWorkItems,
   )
   const myTasks = useMemo(
     () => workItems.tasks.filter((task) => isWorkspaceTaskAssignedToUser(
@@ -205,6 +207,21 @@ export function MyTasksPage() {
     searchParams,
     surface: 'my-tasks',
   })
+  const shouldIncludeArchivedWorkItems = taskViewDefinitionRequiresArchivedItems(
+    taskViewController.effectiveDefinition,
+  )
+  useEffect(() => {
+    let active = true
+    queueMicrotask(() => {
+      if (!active) return
+      setIncludeArchivedWorkItems((current) =>
+        current === shouldIncludeArchivedWorkItems ? current : shouldIncludeArchivedWorkItems,
+      )
+    })
+    return () => {
+      active = false
+    }
+  }, [shouldIncludeArchivedWorkItems])
   const visibleMyTasks = useMemo(
     () => applyTaskViewDefinitionToTasks(
       myTasks,

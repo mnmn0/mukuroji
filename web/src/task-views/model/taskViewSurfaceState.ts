@@ -83,6 +83,19 @@ export function filterTaskViewAudienceTeams<TTeam extends { id: string }>(
 }
 
 /**
+ * Checks whether a definition needs the archived Work Item history to be loaded.
+ *
+ * @param definition - Effective definition whose filters and display options are evaluated.
+ * @returns Whether archived Work Items can appear in the rendered result.
+ */
+export function taskViewDefinitionRequiresArchivedItems(
+  definition: TaskViewDefinition,
+): boolean {
+  return definition.filters.includeArchived === true &&
+    definition.layout.displayOptions.showArchived === true
+}
+
+/**
  * Resolves whether the viewer may assign a Team default for one Team surface.
  *
  * @param canManageWorkspace - Whether Workspace-level administration is available.

@@ -9,6 +9,7 @@ import {
   filterMyTasksByTaskViewDefinition,
   presentationSettingsToTaskViewDefinition,
   projectStateToTaskViewDefinition,
+  taskViewDefinitionRequiresArchivedItems,
   taskViewDefinitionToPresentationSettings,
   taskViewDefinitionToProjectState,
   taskViewDefinitionToTeamState,
@@ -69,6 +70,28 @@ describe('task-view surface adapters', () => {
       'priority',
       'customFields',
     ])
+  })
+
+  test('requests archived history only when filters and display options both allow it', () => {
+    const definition = createBuiltInTaskViewDefinition(
+      'my-tasks',
+      { kind: 'viewer' },
+      'board',
+    )
+
+    expect(taskViewDefinitionRequiresArchivedItems(definition)).toBe(false)
+    expect(taskViewDefinitionRequiresArchivedItems({
+      ...definition,
+      filters: { includeArchived: true },
+    })).toBe(false)
+    expect(taskViewDefinitionRequiresArchivedItems({
+      ...definition,
+      filters: { includeArchived: true },
+      layout: {
+        ...definition.layout,
+        displayOptions: { ...definition.layout.displayOptions, showArchived: true },
+      },
+    })).toBe(true)
   })
 
   test('maps Project state through Team-qualified status identity and retains unrelated fields', () => {

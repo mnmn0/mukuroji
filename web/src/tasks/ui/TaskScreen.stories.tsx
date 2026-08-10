@@ -167,6 +167,7 @@ const selectedIssueDetail: TeamIssueDetail = {
 const onProjectQuickAccessToggle = fn()
 const onRetryPlanning = fn()
 const onContextMenuSelectedIssueChange = fn()
+const onReadOnlySelectedIssueChange = fn()
 const onDirectPatchMutation = fn(async (task: ProjectTask, input: UpdateTeamIssueInput) => {
   void input
   return createStoryUpdatedTask(task)
@@ -725,6 +726,25 @@ export const DetailSelected: Story = {
   args: {
     initialSelectedTaskId: 'wireframe',
     selectedIssueDetail,
+  },
+}
+
+/** Read-only Project members can still open a task detail pane. */
+export const ReadOnlyOpen: Story = {
+  args: {
+    canMutateTask: () => false,
+    onSelectedIssueChange: onReadOnlySelectedIssueChange,
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    onReadOnlySelectedIssueChange.mockClear()
+
+    await userEvent.click(canvas.getByTestId('task-row-wireframe'))
+
+    await waitFor(() => expect(onReadOnlySelectedIssueChange).toHaveBeenCalledTimes(1))
+    expect(onReadOnlySelectedIssueChange).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'wireframe', teamId: 'core-team' }),
+    )
   },
 }
 

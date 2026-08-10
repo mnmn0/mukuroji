@@ -1709,13 +1709,14 @@ export function TaskScreen({
   const evaluateProjectTaskTargetPermission = useCallback((
     context: WorkItemActionContext,
     requiresConfiguration: boolean,
+    requiresMutation = true,
   ) => {
     const targets = resolveProjectTaskActionTargets(context)
     if (targets.length === 0) return allowTaskAction()
     const allowed = targets.every((target) => visibleTasks.some((task) =>
       task.teamId === target.teamId &&
       task.id === target.workItemId &&
-      (!canMutateTask || canMutateTask(task)) &&
+      (!requiresMutation || !canMutateTask || canMutateTask(task)) &&
       (!requiresConfiguration || !configurationFailedTeamIds.includes(task.teamId))
     ))
     return allowed
@@ -1998,7 +1999,7 @@ export function TaskScreen({
     assign: evaluateProjectTaskParameterizedPermission,
     edit: (context) => evaluateProjectTaskTargetPermission(context, true),
     move: evaluateProjectTaskParameterizedPermission,
-    open: (context) => evaluateProjectTaskTargetPermission(context, false),
+    open: (context) => evaluateProjectTaskTargetPermission(context, false, false),
     relation: (context) => evaluateProjectTaskTargetPermission(context, true),
     schedule: (context) => evaluateProjectTaskTargetPermission(context, true),
     watch: (context) => {

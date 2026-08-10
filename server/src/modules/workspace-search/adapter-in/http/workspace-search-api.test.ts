@@ -1438,6 +1438,39 @@ test('task view endpoints forward the complete lifecycle with current permission
   })
 })
 
+test('does not promote viewer-only Project roles into Work Item write scopes', async () => {
+  configureFakeProjectClients(true, {
+    workspaceRole: 'member',
+    projectAccesses: [{ projectId: 'refero', teamId: 'core-team', role: 'viewer' }],
+  })
+  let listInput: ListTaskViewsInput | undefined
+  setTestAppDependencies({
+    workspaceSearch: createTaskViewWorkspaceSearchFake({
+      async listTaskViews(input) {
+        listInput = input
+        return { capabilities: noTaskViewCapabilities, views: [] }
+      },
+    }),
+  })
+
+  const scope = encodeURIComponent(JSON.stringify({
+    kind: 'project',
+    projectId: 'refero',
+    teamId: 'core-team',
+  }))
+  const response = await app.request(
+    `/api/task-views?surface=project&scope=${scope}`,
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+
+  expect(response.status).toBe(200)
+  expect(listInput?.access.teamIds.has('core-team')).toBeTrue()
+  expect(listInput?.access.projectScopeKeys.has('core-team\0refero')).toBeTrue()
+  expect(listInput?.access.writableTeamIds.has('core-team')).toBeFalse()
+  expect(listInput?.access.writableProjectIds.has('refero')).toBeFalse()
+  expect(listInput?.access.writableProjectScopeKeys.has('core-team\0refero')).toBeFalse()
+})
+
 test('task view relation resolution strongly authorizes targets with bounded request-wide caching', async () => {
   const observedCalls = configureFakeProjectClients(true, {
     projectAccesses: [
