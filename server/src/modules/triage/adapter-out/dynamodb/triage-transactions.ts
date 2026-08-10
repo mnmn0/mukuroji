@@ -33,6 +33,49 @@ export type TriageTransactionItem = NonNullable<
 /** A complete list of triage-owned DynamoDB transaction actions. */
 export type TriageTransactionItems = NonNullable<TransactWriteCommandInput['TransactItems']>
 
+/** Creates a condition that fences one observed Team configuration revision.
+ *
+ * @param tableName Request Intake table containing Team configuration.
+ * @param workspaceId Owning Workspace identifier.
+ * @param teamId Configured Team identifier.
+ * @param expectedRevision Configuration revision observed before the mutation.
+ * @returns A DynamoDB condition check that has not been executed.
+ */
+export function createTriageConfigurationRevisionConditionCheck(
+  tableName: string,
+  workspaceId: string,
+  teamId: string,
+  expectedRevision: number,
+): TriageTransactionItem {
+  const validatedTeamId = requireIdentifier(teamId, 'Team ID')
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
+    throw new TriageError(
+      400,
+      'InvalidTriageInput',
+      'The observed Triage configuration revision is invalid.',
+    )
+  }
+  return {
+    ConditionCheck: {
+      TableName: tableName,
+      Key: {
+        scopeKey: createWorkspaceScopeKey(workspaceId),
+        recordKey: `TRIAGE_CONFIG#TEAM#${validatedTeamId}`,
+      },
+      ConditionExpression:
+        '(attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)) OR ' +
+        '#configuration.#revision = :expectedRevision',
+      ExpressionAttributeNames: {
+        '#configuration': 'configuration',
+        '#revision': 'revision',
+      },
+      ExpressionAttributeValues: {
+        ':expectedRevision': expectedRevision,
+      },
+    },
+  }
+}
+
 /** The next entry together with transaction actions that have not been executed. */
 export type TriageTransactionContribution = {
   /** The canonical entry returned after the combined transaction succeeds. */

@@ -637,6 +637,34 @@ describe('Team Triage API composition', () => {
     expect(await managerQueue.json()).toMatchObject({ canManageConfiguration: true })
   })
 
+  test('denies a Project-scoped manager from replacing full Team settings', async () => {
+    const entry = createEntry({ projectId: 'project-a' })
+    configureFakeProjectClients(false, {
+      projectAccesses: [{ projectId: 'project-a', role: 'manager' }],
+      teamProjects: [
+        { id: 'project-a', name: 'Project A', tone: 'blue' },
+        { id: 'project-b', name: 'Project B', tone: 'purple' },
+      ],
+      workspaceRole: 'member',
+    })
+    setTestAppDependencies({ triage: createTriageClient(entry) })
+
+    const response = await app.request('/api/teams/core-team/triage-settings', {
+      method: 'PUT',
+      headers: createHeaders('project-manager-settings'),
+      body: JSON.stringify({
+        allowedBulkActions: ['assign', 'decline', 'snooze'],
+        expectedRevision: 0,
+        rules: [],
+        rotations: [],
+        slaPolicies: [],
+        retentionDays: 365,
+      }),
+    })
+
+    expect(response.status).toBe(403)
+  })
+
   test('keeps Workspace administrators read-only while preserving system administrator writes', async () => {
     const entry = createEntry()
     configureFakeProjectClients(true, {

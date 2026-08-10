@@ -323,6 +323,7 @@ import {
   createTriageActionAuditIdempotencyKey,
   createTriageActionTransactionItems,
   createTriageBulkTargetIdempotencyKey,
+  createTriageConfigurationRevisionConditionCheck,
   createTriageInputFingerprint,
   createTriageRouter,
   TriageError,
@@ -17221,6 +17222,7 @@ async function requireTriageTeamAccess(
       )
     }
     await requireTeamConfigurationAdministration(principal, teamId)
+    teamContext = await requireFullTriageConfigurationScope(principal, teamId)
   } else {
     if (access === 'write') requireWorkspaceBusinessWrite(principal)
     teamContext = await requireTeamPermission(
@@ -17491,7 +17493,7 @@ async function validateTriageBulkAction(
   context: Context,
   teamId: string,
   input: TriageBulkActionInput,
-): Promise<void> {
+): Promise<number> {
   const principal = await authenticateTriagePrincipal(context)
   const configuration = await workItemDependencies.triage.getConfiguration(
     principal.directoryId,
@@ -17504,7 +17506,7 @@ async function validateTriageBulkAction(
       'This bulk action is disabled by the current Team Triage configuration.',
     )
   }
-  if (input.operation.action !== 'assign') return
+  if (input.operation.action !== 'assign') return configuration.revision
   const teamContext = await requireTeamPermission(principal, teamId, 'member')
   if (input.operation.ownerUserId) {
     await requireActiveWorkspaceAssignee(
@@ -17520,6 +17522,7 @@ async function validateTriageBulkAction(
       'member',
     )
   }
+  return configuration.revision
 }
 
 /**
@@ -17801,6 +17804,14 @@ async function applyTriageRouteAction(request: TriageRouterActionRequest) {
           action,
         )
       : []
+    const configurationCheck = request.configurationRevision === undefined
+      ? []
+      : [createTriageConfigurationRevisionConditionCheck(
+          getEnv('REQUEST_INTAKE_TABLE_NAME') ?? 'mukuroji-request-intake-local',
+          request.workspaceId,
+          request.teamId,
+          request.configurationRevision,
+        )]
     await workItemDependencies.requestIntake.applyAction(
       request.workspaceId,
       submission.id,
@@ -17816,7 +17827,7 @@ async function applyTriageRouteAction(request: TriageRouterActionRequest) {
             expectedRevision: submission.revision,
             reason: action.reason,
           },
-      [...referenceChecks, ...contribution.transactItems],
+      [...configurationCheck, ...referenceChecks, ...contribution.transactItems],
     )
     return { entry: contribution.entry, replayed: false }
   }
@@ -17928,6 +17939,7 @@ async function applyTriageRouteAction(request: TriageRouterActionRequest) {
     request.action,
     request.idempotency,
     request.auditContext,
+    request.configurationRevision,
   )
 }
 
@@ -18023,6 +18035,7 @@ async function applyTriageBulkRouteAction(
         action,
         idempotency,
         auditContext,
+        configurationRevision: request.configurationRevision,
       })
       results.push({ entryId: target.entryId, status: 'succeeded', entry: receipt.entry })
     } catch (error) {
@@ -19400,6 +19413,42 @@ async function requireTeamConfigurationAdministration(
     return
   }
   await requireTeamPermission(principal, teamId, 'manager')
+}
+
+/** Requires a settings replacement caller to manage every active Project in the Team.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param teamId - Team whose complete configuration would be replaced.
+ * @returns A Project-scoped Team context when legacy access was used, otherwise undefined.
+ */
+async function requireFullTriageConfigurationScope(
+  principal: WorkspacePrincipal,
+  teamId: string,
+): Promise<TeamPermissionContext | undefined> {
+  if (
+    principal.isSystemAdmin ||
+    principal.workspaceRole === 'owner' ||
+    principal.workspaceRole === 'admin' ||
+    isEnterpriseTriageTeamScope(principal, teamId) &&
+      principal.enterpriseGrantedRoutePermissions?.includes('teams.manage') === true
+  ) {
+    return undefined
+  }
+
+  const context = await requireTeamPermission(principal, teamId, 'manager')
+  const managedProjectIds = new Set(
+    context.projectAccesses
+      ?.filter((access) => projectAccessAllows(access, 'manager'))
+      .map((access) => access.projectId) ?? [],
+  )
+  if (context.team.projects.every((project) => managedProjectIds.has(project.id))) {
+    return context
+  }
+  throw new WorkspaceAccessError(
+    403,
+    'WorkspacePermissionDenied',
+    'Full Team management permission is required to replace Triage settings.',
+  )
 }
 
 async function authorizeRelationMutation(

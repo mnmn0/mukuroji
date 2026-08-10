@@ -39,6 +39,8 @@ export function getTriageEntries(
   const query = new URLSearchParams()
   if (options.cursor) query.set('cursor', options.cursor)
   if (options.limit !== undefined) query.set('limit', String(options.limit))
+  if (options.query) query.set('query', options.query)
+  if (options.sla) query.set('sla', options.sla)
   if (options.state) query.set('state', options.state)
   if (options.sourceKind) query.set('sourceKind', options.sourceKind)
   if (options.ownerUserId) query.set('owner', options.ownerUserId)

@@ -122,6 +122,7 @@ async function mockTriageApis(page: Page): Promise<TriageApiState> {
       await route.fulfill({
         json: {
           allowedBulkActions: ['assign', 'decline', 'snooze'],
+          canManageConfiguration: true,
           entries: structuredClone(state.entries),
         },
       })

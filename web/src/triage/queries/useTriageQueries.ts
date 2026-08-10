@@ -53,6 +53,8 @@ export function useTriageQueue(
       getTriageEntries(currentTeamId, token, {
         cursor: cursor || undefined,
         limit: 50,
+        query: filters.query,
+        sla: filters.sla,
         ownerUserId: owner === 'mine'
           ? ownerKey || undefined
           : owner === 'unowned' ? 'unowned' : undefined,

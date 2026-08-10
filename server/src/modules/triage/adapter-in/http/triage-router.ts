@@ -75,6 +75,8 @@ export type TriageRouterActionRequest = {
   idempotency: TriageIdempotency
   /** Immutable request context captured before application orchestration. */
   auditContext: MutationAuditContext
+  /** Configuration revision observed during a bulk preflight, when applicable. */
+  configurationRevision?: number
 }
 
 /** Input supplied to the composable bulk-action orchestration boundary. */
@@ -91,6 +93,8 @@ export type TriageRouterBulkActionRequest = {
   input: TriageBulkActionInput
   /** Caller-supplied bulk idempotency key. */
   idempotencyKey: string
+  /** Configuration revision observed before target transactions begin. */
+  configurationRevision?: number
   /** Factory retaining the bulk request while binding each target receipt key. */
   createAuditContext: TriageAuditContextFactory
 }
@@ -150,7 +154,7 @@ export type TriageRouterDependencies = {
     context: Context,
     teamId: string,
     input: TriageBulkActionInput,
-  ): Promise<void>
+  ): Promise<number | void>
   /** Replaces caller-asserted manual routing fields with server-owned values.
    *
    * @param context The authenticated Hono request context.
@@ -305,7 +309,11 @@ export function createTriageRouter(dependencies: TriageRouterDependencies) {
         requireVisibleTriageEntry(principal, entry)
       }
       requireVisibleBulkProject(principal, input.operation)
-      await dependencies.validateBulkAction?.(context, teamId, input)
+      const configurationRevision = await dependencies.validateBulkAction?.(
+        context,
+        teamId,
+        input,
+      )
       const preparedAuditContexts = new Map(input.targets.map((target) => {
         const targetIdempotency = {
           key: createTriageBulkTargetIdempotencyKey(idempotencyKey, target.entryId),
@@ -355,6 +363,7 @@ export function createTriageRouter(dependencies: TriageRouterDependencies) {
             actor: { id: principal.userId },
             input,
             idempotencyKey,
+            ...(configurationRevision === undefined ? {} : { configurationRevision }),
             createAuditContext,
           })
         : await dependencies.getTriage().applyBulkAction(
@@ -637,8 +646,10 @@ function requireVisibleBulkProject(
 
 /** Reads Team queue filters from the Hono query surface. */
 function readListInput(context: Context): TriageEntryListInput {
+  const query = context.req.query('query')?.trim()
   const state = context.req.query('state')
   const sourceKind = context.req.query('sourceKind')
+  const sla = context.req.query('sla')
   const ownerUserId = context.req.query('ownerUserId')
   const ownerAlias = context.req.query('owner')
   if (ownerUserId && ownerAlias && ownerUserId !== ownerAlias) {
@@ -646,14 +657,30 @@ function readListInput(context: Context): TriageEntryListInput {
   }
   const owner = ownerUserId ?? ownerAlias
   return {
+    ...(query ? { query: readQueueQuery(query) } : {}),
     ...(state ? { state: readState(state) } : {}),
     ...(sourceKind ? { sourceKind: readSourceKind(sourceKind) } : {}),
+    ...(sla ? { sla: readQueueSlaFilter(sla) } : {}),
     ...(owner
       ? { ownerUserId: readOwnerFilter(owner) }
       : {}),
     ...(context.req.query('limit') ? { limit: readLimit(context.req.query('limit')) } : {}),
     ...(context.req.query('cursor') ? { cursor: context.req.query('cursor') } : {}),
   }
+}
+
+/** Validates one bounded free-text queue query. */
+function readQueueQuery(value: string): string {
+  if (value.length > 200) throw invalidInput('Triage queue query is too long.')
+  return value
+}
+
+/** Validates one derived SLA queue filter. */
+function readQueueSlaFilter(value: string): TriageEntryListInput['sla'] {
+  if (value === 'on-track' || value === 'due-soon' || value === 'breached' || value === 'paused') {
+    return value
+  }
+  throw invalidInput('Triage SLA filter is invalid.')
 }
 
 /** Strictly parses one operator action. */

@@ -1,3 +1,5 @@
+import type { TriageQueueSlaFilter } from '@mukuroji/contracts'
+
 export type {
   AcceptCreateTriageAction,
   AcceptLinkTriageAction,
@@ -30,6 +32,7 @@ export type {
   TriageRoutingCandidate,
   TriageRoutingRule,
   TriageSla,
+  TriageQueueSlaFilter,
   TriageSlaPolicy,
   TriageSourceKind,
   TriageSourcePreview,
@@ -39,7 +42,7 @@ export type {
 } from '@mukuroji/contracts'
 
 /** SLA conditions derived by the Web presentation model. */
-export type TriageSlaFilter = 'on-track' | 'due-soon' | 'breached' | 'paused'
+export type TriageSlaFilter = TriageQueueSlaFilter
 
 /** URL-backed filters supported by the Team triage workbench. */
 export type TriageQueueFilters = {

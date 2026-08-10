@@ -16,6 +16,7 @@ import {
   createTriageRouter,
   type TriagePrincipal,
   type TriageRouterActionRequest,
+  type TriageRouterBulkActionRequest,
   type TriageRouterDependencies,
 } from './triage-router'
 
@@ -777,6 +778,32 @@ describe('triage HTTP router', () => {
         body: bulkInputs[0],
       }),
     })
+  })
+
+  test('carries the bulk configuration revision into target orchestration', async () => {
+    const requests: TriageRouterBulkActionRequest[] = []
+    const { router } = createDependencies(createEntry(), undefined, undefined, {
+      validateBulkAction: async () => 7,
+      applyBulkAction: async (request) => {
+        requests.push(request)
+        return { results: [] }
+      },
+    })
+
+    const response = await router.request('/api/teams/support/triage-entries/bulk-actions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Idempotency-Key': 'bulk-config-fence',
+      },
+      body: JSON.stringify({
+        targets: [{ entryId: 'triage-1', expectedRevision: 1 }],
+        operation: { action: 'decline', reason: 'Handled elsewhere.' },
+      }),
+    })
+
+    expect(response.status).toBe(200)
+    expect(requests[0]?.configurationRevision).toBe(7)
   })
 
   test('rejects a prepared manual handoff outside the principal Project scope', async () => {

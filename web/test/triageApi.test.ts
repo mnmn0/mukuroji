@@ -30,7 +30,9 @@ describe('Team triage API boundary', () => {
     const page = await getTriageEntries('core/team', 'access-token', {
       cursor: 'opaque/cursor',
       limit: 25,
+      query: 'billing owner',
       ownerUserId: 'unowned',
+      sla: 'breached',
       sourceKind: 'chat',
       state: 'pending',
     })
@@ -38,7 +40,7 @@ describe('Team triage API boundary', () => {
     expect(page.entries).toHaveLength(4)
     expect(page.allowedBulkActions).toEqual(['assign', 'decline', 'snooze'])
     expect(requests[0]?.url).toBe(
-      '/api/teams/core%2Fteam/triage-entries?cursor=opaque%2Fcursor&limit=25&state=pending&sourceKind=chat&owner=unowned',
+      '/api/teams/core%2Fteam/triage-entries?cursor=opaque%2Fcursor&limit=25&query=billing+owner&sla=breached&state=pending&sourceKind=chat&owner=unowned',
     )
     expect(new Headers(requests[0]?.init.headers).get('Authorization')).toBe(
       'Bearer access-token',

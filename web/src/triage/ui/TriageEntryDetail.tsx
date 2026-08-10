@@ -139,6 +139,13 @@ export function TriageEntryDetail({
               ) : null}
             </div>
           ) : null}
+          <button
+            className="workbench-button-secondary mt-4 min-h-10 px-4"
+            onClick={onBack}
+            type="button"
+          >
+            {t('triage.detail.back')}
+          </button>
         </div>
       </aside>
     )

@@ -35,6 +35,7 @@ export {
   createFormTriageEntryTransactionPut,
   createTriageAcceptanceTransactionItems,
   createTriageActionTransactionItems,
+  createTriageConfigurationRevisionConditionCheck,
   createTriageEntryKey,
   createTriageEntryTransactionItems,
   createTriageOperationReceiptTransactionPut,

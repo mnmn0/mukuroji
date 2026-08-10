@@ -52,7 +52,7 @@ export function createTriageEntryView(
 }
 
 /**
- * Applies URL-backed client filters that are not supported by the queue transport.
+ * Applies URL-backed filters again to the permission-safe entries returned by the queue transport.
  *
  * @param entries - Validated entries from loaded cursor pages.
  * @param filters - Active URL-backed filters.

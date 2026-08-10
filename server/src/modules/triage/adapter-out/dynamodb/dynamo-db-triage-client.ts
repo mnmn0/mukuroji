@@ -21,6 +21,7 @@ import {
   type TriageEntryListInput,
   type TriageEntryPage,
   type TriageMutationReceipt,
+  type TriageQueueSlaFilter,
   type TriageOwnerRotation,
   type TriageOwnerStrategy,
   type TriagePermission,
@@ -57,6 +58,7 @@ import type {
 import {
   createTriageAcceptanceTransactionItems,
   createTriageActionTransactionItems,
+  createTriageConfigurationRevisionConditionCheck,
   createTriageEntryKey,
   createTriageEntryTransactionItems,
   createTriageOperationReceiptTransactionPut,
@@ -487,6 +489,7 @@ export class DynamoDbTriageClient implements TriageClient {
    * @param action The validated revision-fenced transition.
    * @param idempotency Replay protection bound to the normalized action.
    * @param auditContext Immutable caller context for an assignment audit event.
+   * @param configurationRevision Optional Team configuration revision to fence with the action.
    * @returns The committed or replayed permission-safe receipt.
    */
   async applyAction(
@@ -497,6 +500,7 @@ export class DynamoDbTriageClient implements TriageClient {
     action: TriageActionInput,
     idempotency: TriageIdempotency,
     auditContext: MutationAuditContext,
+    configurationRevision?: number,
   ): Promise<TriageMutationReceipt> {
     const replay = await this.readReceipt(workspaceId, entryId, 'action', idempotency)
     if (replay) return replay
@@ -509,12 +513,23 @@ export class DynamoDbTriageClient implements TriageClient {
       idempotency,
       auditContext,
     )
-    if (contribution.transactItems.length > 100) {
+    const transactItems = configurationRevision === undefined
+      ? contribution.transactItems
+      : [
+          createTriageConfigurationRevisionConditionCheck(
+            this.tableName,
+            workspaceId,
+            teamId,
+            configurationRevision,
+          ),
+          ...contribution.transactItems,
+        ]
+    if (transactItems.length > 100) {
       throw new TriageError(409, 'TriageTransactionTooLarge', 'The triage action is too large.')
     }
     try {
       await this.documentClient.send(new TransactWriteCommand({
-        TransactItems: contribution.transactItems,
+        TransactItems: transactItems,
       }))
       return { entry: projectTriageEntryForResponse(contribution.entry), replayed: false }
     } catch (error) {
@@ -577,6 +592,7 @@ export class DynamoDbTriageClient implements TriageClient {
           action,
           idempotency,
           auditContext,
+          configuration.revision,
         )
         results.push({ entryId: target.entryId, status: 'succeeded', entry: receipt.entry })
       } catch (error) {
@@ -1106,6 +1122,7 @@ export class DynamoDbTriageClient implements TriageClient {
       : undefined
     let pages = 0
     const entries: TriageEntry[] = []
+    const now = this.now()
 
     do {
       const response = await this.documentClient.send(new QueryCommand({
@@ -1149,7 +1166,7 @@ export class DynamoDbTriageClient implements TriageClient {
             'The stored triage entry is outside the requested queue scope.',
           )
         }
-        if (!matchesQueueFilter(entry, workspaceId, teamId, input, ownerUserId)) continue
+        if (!matchesQueueFilter(entry, workspaceId, teamId, input, ownerUserId, now)) continue
         entries.push(projectTriageEntryForResponse(entry))
       }
     } while (
@@ -1435,13 +1452,54 @@ function matchesQueueFilter(
   teamId: string,
   input: TriageEntryListInput,
   ownerUserId: string | undefined,
+  now: Date,
 ): boolean {
   if (entry.workspaceId !== workspaceId || entry.teamId !== teamId) return false
   if (input.state && entry.state !== input.state) return false
   if (input.sourceKind && entry.source.kind !== input.sourceKind) return false
   if (ownerUserId === 'UNOWNED' && entry.ownerUserId !== undefined) return false
   if (ownerUserId && ownerUserId !== 'UNOWNED' && entry.ownerUserId !== ownerUserId) return false
+  if (input.query && !matchesQueueQuery(entry, input.query)) return false
+  if (input.sla && resolveQueueSlaFilter(entry, now) !== input.sla) return false
   return true
+}
+
+/** Matches bounded queue search text against safe source and routing metadata. */
+function matchesQueueQuery(entry: TriageEntry, query: string): boolean {
+  const normalizedQuery = query.trim().toLocaleLowerCase('en-US')
+  if (!normalizedQuery) return true
+  const canViewContent = entry.permission.visibility === 'full'
+  const canViewMetadata = entry.permission.visibility !== 'denied'
+  const canViewInternalContext = entry.capabilities.canViewInternalContext
+  return [
+    canViewMetadata ? entry.sourcePreview.title : undefined,
+    canViewContent ? entry.sourcePreview.body : undefined,
+    canViewMetadata ? entry.sourcePreview.channelLabel : undefined,
+    canViewMetadata ? entry.source.provider : undefined,
+    canViewMetadata ? entry.requester.displayName : undefined,
+    canViewMetadata ? entry.ownerUserId : undefined,
+    ...(canViewInternalContext
+      ? entry.routing.candidates.flatMap((candidate) => [
+          candidate.teamId,
+          candidate.projectId,
+          candidate.reason,
+        ])
+      : []),
+  ].some((value) => value?.toLocaleLowerCase('en-US').includes(normalizedQuery))
+}
+
+/** Derives the same persisted/deadline SLA state used by the Web queue. */
+function resolveQueueSlaFilter(
+  entry: TriageEntry,
+  now: Date,
+): TriageQueueSlaFilter {
+  if (entry.sla?.breachedAt) return 'breached'
+  if (entry.state === 'snoozed' || !entry.sla) return 'paused'
+  const dueAt = Date.parse(entry.sla.dueAt)
+  if (!Number.isFinite(dueAt)) return 'on-track'
+  const remainingMilliseconds = dueAt - now.getTime()
+  if (remainingMilliseconds <= 0) return 'breached'
+  return remainingMilliseconds <= 4 * 60 * 60 * 1_000 ? 'due-soon' : 'on-track'
 }
 
 /** Creates a filter- and index-bound queue cursor scope. */
@@ -1458,6 +1516,8 @@ function createQueueCursorScope(
     state: input.state,
     sourceKind: input.sourceKind,
     ownerUserId: input.ownerUserId,
+    query: input.query,
+    sla: input.sla,
   })
 }
 

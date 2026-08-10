@@ -136,6 +136,7 @@ export interface TriageClient {
    * @param action The validated action.
    * @param idempotency Replay protection bound to the action.
    * @param auditContext Immutable request and source context for the action audit event.
+   * @param configurationRevision Optional Team configuration revision to fence with the action.
    * @returns The mutation receipt.
    */
   applyAction(
@@ -146,6 +147,7 @@ export interface TriageClient {
     action: TriageActionInput,
     idempotency: TriageIdempotency,
     auditContext: MutationAuditContext,
+    configurationRevision?: number,
   ): Promise<TriageMutationReceipt>
   /** Looks up an existing action receipt before externally composed Work Item creation.
    *

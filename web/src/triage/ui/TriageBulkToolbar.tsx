@@ -5,6 +5,7 @@ import type {
   TriageBulkItemResult,
   TriageBulkOperation,
 } from '../api'
+import { createTriageBulkInput, type TriageBulkActionMode } from '../model/triageBulk'
 import type { TriageEntryView } from '../model/triageView'
 
 /** Props accepted by the explicit Team triage bulk operation toolbar. */
@@ -29,9 +30,6 @@ export type TriageBulkToolbarProps = {
   ) => Promise<readonly TriageBulkItemResult[]>
 }
 
-/** Bulk operation whose confirmation form is currently open. */
-type BulkActionMode = 'assign' | 'decline' | 'snooze'
-
 /**
  * Renders selection feedback and confirmation forms for bounded bulk actions.
  *
@@ -48,7 +46,7 @@ export function TriageBulkToolbar({
   results = [],
   t,
 }: TriageBulkToolbarProps) {
-  const [mode, setMode] = useState<BulkActionMode>()
+  const [mode, setMode] = useState<TriageBulkActionMode>()
   const [localError, setLocalError] = useState(false)
 
   if (entries.length === 0) return null
@@ -56,7 +54,7 @@ export function TriageBulkToolbar({
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (!mode || isPending) return
-    const input = createBulkInput(entries, mode, new FormData(event.currentTarget))
+    const input = createTriageBulkInput(entries, mode, new FormData(event.currentTarget))
     if (!input) {
       setLocalError(true)
       return
@@ -168,8 +166,8 @@ export function TriageBulkToolbar({
 /** Opens one bulk-operation confirmation form. */
 function BulkModeButton({ label, mode, onSelect }: {
   label: string
-  mode: BulkActionMode
-  onSelect: (mode: BulkActionMode) => void
+  mode: TriageBulkActionMode
+  onSelect: (mode: TriageBulkActionMode) => void
 }) {
   return (
     <button className="workbench-button-secondary min-h-10 px-4" onClick={() => onSelect(mode)} type="button">
@@ -178,47 +176,8 @@ function BulkModeButton({ label, mode, onSelect }: {
   )
 }
 
-/** Builds a bounded bulk input from selected entry revisions and form values. */
-function createBulkInput(
-  entries: readonly TriageEntryView[],
-  mode: BulkActionMode,
-  formData: FormData,
-): TriageBulkActionInput | undefined {
-  const targets = entries.map(({ entry }) => ({
-    entryId: entry.id,
-    expectedRevision: entry.revision,
-  }))
-  if (mode === 'assign') {
-    const ownerUserId = readFormValue(formData, 'ownerUserId')
-    const projectId = readFormValue(formData, 'projectId')
-    return {
-      operation: {
-        action: 'assign',
-        ownerUserId: ownerUserId || null,
-        projectId: projectId || null,
-      },
-      targets,
-    }
-  }
-  if (mode === 'decline') {
-    const reason = readFormValue(formData, 'reason')
-    return reason ? { operation: { action: 'decline', reason }, targets } : undefined
-  }
-  const localUntil = readFormValue(formData, 'until')
-  const until = localUntil ? new Date(localUntil) : undefined
-  return until && !Number.isNaN(until.getTime())
-    ? { operation: { action: 'snooze', until: until.toISOString() }, targets }
-    : undefined
-}
-
-/** Reads and trims one string field from a bulk form. */
-function readFormValue(formData: FormData, key: string) {
-  const value = formData.get(key)
-  return typeof value === 'string' ? value.trim() : ''
-}
-
 /** Formats a Date for a local `datetime-local` input. */
-function toLocalDateTime(date: Date) {
+function toLocalDateTime(date: Date): string {
   const offsetDate = new Date(date.getTime() - date.getTimezoneOffset() * 60_000)
   return offsetDate.toISOString().slice(0, 16)
 }

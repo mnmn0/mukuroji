@@ -360,6 +360,52 @@ describe('DynamoDbTriageClient action receipt lookup', () => {
 })
 
 describe('DynamoDbTriageClient transaction failure classification', () => {
+  test('fences bulk target actions against the preflighted configuration revision', async () => {
+    const entry = createEntry()
+    entry.state = 'pending'
+    entry.revision = 1
+    entry.capabilities = createTriageCapabilities(entry)
+    const storedEntry = createTriageEntryTransactionItems({
+      tableName: 'RequestIntakeTable',
+      entry,
+      inputFingerprint: createTriageInputFingerprint({ sourceId: entry.source.sourceId }),
+    })[0]?.Put?.Item
+    if (!storedEntry) throw new TypeError('Expected a stored entry fixture.')
+    const harness = createHarness([{}, { Item: storedEntry }, {}])
+
+    try {
+      const idempotency = {
+        key: 'bulk-target-1',
+        fingerprint: createTriageInputFingerprint({ action: 'decline', entryId: entry.id }),
+      }
+      await harness.client.applyAction(
+        'workspace-1',
+        'support',
+        entry.id,
+        { id: 'member@example.com' },
+        { action: 'decline', expectedRevision: 1, reason: 'Handled elsewhere.' },
+        idempotency,
+        createTestAuditContext(entry.id, idempotency),
+        4,
+      )
+
+      const transactionInput = harness.commands[2]?.input
+      if (!transactionInput || !Array.isArray(transactionInput.TransactItems)) {
+        throw new TypeError('Expected a captured triage transaction.')
+      }
+      expect(transactionInput.TransactItems[0]).toMatchObject({
+        ConditionCheck: {
+          ConditionExpression:
+            '(attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)) OR ' +
+            '#configuration.#revision = :expectedRevision',
+          ExpressionAttributeValues: { ':expectedRevision': 4 },
+        },
+      })
+    } finally {
+      harness.restore()
+    }
+  })
+
   test('bubbles non-conditional transaction cancellations instead of returning a revision conflict', async () => {
     const entry = createEntry()
     const storedEntry = createTriageEntryTransactionItems({
@@ -900,6 +946,61 @@ describe('DynamoDbTriageClient queue indexes', () => {
           }),
         }),
       ])
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('applies search and SLA filters before returning each paginated queue page', async () => {
+    const matchingEntry = createEntry()
+    matchingEntry.id = 'triage-search-match'
+    matchingEntry.source.sourceId = 'message-search-match'
+    matchingEntry.sourcePreview.title = 'Billing escalation'
+    matchingEntry.state = 'pending'
+    matchingEntry.sla = {
+      policyId: 'support-sla',
+      dueAt: '2026-08-09T01:00:00.000Z',
+    }
+    const nonMatchingEntry = createEntry()
+    nonMatchingEntry.id = 'triage-search-other'
+    nonMatchingEntry.source.sourceId = 'message-search-other'
+    nonMatchingEntry.sourcePreview.title = 'General question'
+    nonMatchingEntry.state = 'pending'
+    nonMatchingEntry.sla = {
+      policyId: 'support-sla',
+      dueAt: '2026-08-09T12:00:00.000Z',
+    }
+    const matchingRow = createTriageEntryTransactionItems({
+      tableName: 'RequestIntakeTable',
+      entry: matchingEntry,
+      inputFingerprint: createTriageInputFingerprint({ sourceId: matchingEntry.source.sourceId }),
+    })[0]?.Put?.Item
+    const nonMatchingRow = createTriageEntryTransactionItems({
+      tableName: 'RequestIntakeTable',
+      entry: nonMatchingEntry,
+      inputFingerprint: createTriageInputFingerprint({ sourceId: nonMatchingEntry.source.sourceId }),
+    })[0]?.Put?.Item
+    if (!matchingRow || !nonMatchingRow) throw new TypeError('Expected stored entry fixtures.')
+    const harness = createHarness([
+      {},
+      {
+        Items: [
+          { scopeKey: 'WORKSPACE#workspace-1', recordKey: 'TRIAGE#triage-search-other' },
+          { scopeKey: 'WORKSPACE#workspace-1', recordKey: 'TRIAGE#triage-search-match' },
+        ],
+      },
+      { Item: nonMatchingRow },
+      { Item: matchingRow },
+    ])
+
+    try {
+      const page = await harness.client.listEntries('workspace-1', 'support', {
+        limit: 10,
+        query: 'billing',
+        sla: 'due-soon',
+      })
+
+      expect(page.entries.map(({ id }) => id)).toEqual(['triage-search-match'])
     } finally {
       harness.restore()
     }

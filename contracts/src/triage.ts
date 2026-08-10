@@ -285,11 +285,18 @@ export type TriageEntryPage = {
 }
 
 /** Filters accepted by a Team triage queue query. */
+export type TriageQueueSlaFilter = 'on-track' | 'due-soon' | 'breached' | 'paused'
+
+/** Filters accepted by a Team triage queue query. */
 export type TriageEntryListInput = {
+  /** Case-insensitive text matched against the permission-safe queue projection. */
+  query?: string
   /** A single lifecycle state to include. */
   state?: TriageEntryState
   /** A single source kind to include. */
   sourceKind?: TriageSourceKind
+  /** The derived SLA condition to include. */
+  sla?: TriageQueueSlaFilter
   /** A specific owner, or the literal `unowned`. */
   ownerUserId?: string | 'unowned'
   /** Maximum entries to return. */

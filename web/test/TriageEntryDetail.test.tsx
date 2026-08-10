@@ -61,4 +61,19 @@ describe('TriageEntryDetail', () => {
     expect(html).toContain('Source unavailable')
     expect(html).toContain('No actions are available')
   })
+
+  test('keeps a queue back action when a deep-linked entry is unavailable', () => {
+    const html = renderToStaticMarkup(
+      <TriageEntryDetail
+        errorMessage="Entry unavailable"
+        locale="en"
+        onBack={() => undefined}
+        t={createTranslator('en')}
+        view={undefined}
+      />,
+    )
+
+    expect(html).toContain('Entry unavailable')
+    expect(html).toContain('Back to queue')
+  })
 })
