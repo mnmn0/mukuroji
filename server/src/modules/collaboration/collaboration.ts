@@ -183,6 +183,31 @@ export type CuratedContextAuthorizationSnapshot = {
   workspaceMemberVersion: number
 }
 
+/**
+ * Authorization and source revisions captured while reading a Document source.
+ *
+ * This is intentionally a server-side mutation input rather than part of the
+ * public provenance contract.  The Documents adapter owns the rows and the
+ * collaboration adapter turns this semantic snapshot into transaction
+ * conditions.
+ */
+export type CuratedContextDocumentSourceAuthorizationSnapshot = {
+  /** Canonical Document identifier that was read. */
+  sourceId: string
+  /** Document content/metadata revision observed during the read. */
+  documentRevision: number
+  /** Workspace-wide Documents authorization generation observed during the read. */
+  documentAuthorizationRevision: number
+  /** Workspace member whose access was checked, when applicable. */
+  workspaceMemberKey?: string
+  /** Workspace membership generation observed during the read, when applicable. */
+  workspaceMemberVersion?: number
+  /** Planning authorization generation observed during the read, when applicable. */
+  planningRevision?: number
+  /** Enterprise Identity authorization generation observed during the read, when applicable. */
+  enterpriseControlRevision?: number
+}
+
 /** Team-owned Work Item scope の共通入力です。 */
 export type WorkItemCollaborationScope = {
   /** Canonical Workspace ID です。 */
@@ -287,6 +312,8 @@ export type CuratedContextMutationInput = WorkItemCollaborationScope & {
   deepLink?: string
   /** State と同じ transaction に保存する audit context です。 */
   auditContext?: MutationAuditContext
+  /** Document source authorization snapshot fenced by the create transaction. */
+  sourceAuthorizationSnapshot?: CuratedContextDocumentSourceAuthorizationSnapshot
 }
 
 /** Common actor-bearing input accepted by authorization-fenced context mutations. */
@@ -2777,6 +2804,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
     await this.ensureLocalTable()
     assertWorkItemScope(input)
     assertCuratedContextAuthorizationSnapshot(input)
+    assertCuratedContextDocumentSourceAuthorizationSnapshot(input)
     if (input.auditContext) {
       const replayed = await this.getCuratedContextMutationReplay({
         entityKey: input.entityKey,
@@ -2909,6 +2937,9 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
     const transactionItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [
       parentIssueCondition(this.parentIssueTableName, input),
       ...curatedContextAuthorizationConditions(input),
+      ...(input.sourceAuthorizationSnapshot
+        ? curatedContextDocumentSourceConditions(input, input.sourceAuthorizationSnapshot)
+        : []),
       ...(capturedSource?.comment
         ? [commentVersionCondition(this.tableName, input.entityKey, capturedSource.comment)]
         : []),
@@ -4692,6 +4723,93 @@ function assertCuratedContextAuthorizationSnapshot(
 }
 
 /**
+ * Validates a Document source snapshot before it is converted into DynamoDB
+ * conditions.  The source snapshot is required whenever a mutation captures
+ * a fresh Document; replacements that inherit an existing source do not need
+ * to re-fence the source.
+ *
+ * @param input - Curated-context mutation carrying an optional Document source.
+ * @returns Nothing when the snapshot is valid.
+ * @throws CollaborationError when the source and authorization snapshots do not match.
+ */
+function assertCuratedContextDocumentSourceAuthorizationSnapshot(
+  input: CreateCuratedContextItemInput,
+): void {
+  const source = input.source
+  const snapshot = input.sourceAuthorizationSnapshot
+  if (source?.kind !== 'document') {
+    if (snapshot !== undefined) {
+      throw new CollaborationError(
+        400,
+        'InvalidDocumentSourceAuthorizationSnapshot',
+        'A Document authorization snapshot requires a Document source.',
+      )
+    }
+    return
+  }
+  if (snapshot === undefined || snapshot.sourceId !== source.sourceId) {
+    throw new CollaborationError(
+      400,
+      'InvalidDocumentSourceAuthorizationSnapshot',
+      'A Document source must carry the authorization snapshot used to read it.',
+    )
+  }
+  if (
+    !Number.isSafeInteger(snapshot.documentRevision) ||
+    snapshot.documentRevision < 1 ||
+    source.capturedRevision !== snapshot.documentRevision ||
+    !Number.isSafeInteger(snapshot.documentAuthorizationRevision) ||
+    snapshot.documentAuthorizationRevision < 0
+  ) {
+    throw new CollaborationError(
+      400,
+      'InvalidDocumentSourceAuthorizationSnapshot',
+      'The Document source revision snapshot is invalid.',
+    )
+  }
+  if (
+    snapshot.workspaceMemberKey !== undefined &&
+    (
+      snapshot.workspaceMemberVersion === undefined ||
+      snapshot.workspaceMemberKey !== input.authorizationSnapshot?.memberKey ||
+      snapshot.workspaceMemberVersion !== input.authorizationSnapshot.workspaceMemberVersion
+    )
+  ) {
+    throw new CollaborationError(
+      400,
+      'InvalidDocumentSourceAuthorizationSnapshot',
+      'The Document source membership snapshot does not match the mutation actor.',
+    )
+  }
+  if (
+    snapshot.workspaceMemberKey === undefined &&
+    snapshot.workspaceMemberVersion !== undefined
+  ) {
+    throw new CollaborationError(
+      400,
+      'InvalidDocumentSourceAuthorizationSnapshot',
+      'The Document source membership snapshot must include a member key.',
+    )
+  }
+  for (const generation of [
+    snapshot.workspaceMemberVersion,
+    snapshot.planningRevision,
+    snapshot.enterpriseControlRevision,
+  ]) {
+    if (
+      generation !== undefined &&
+      (!Number.isSafeInteger(generation) || generation < 0)
+    ) {
+      throw new CollaborationError(
+        400,
+        'InvalidDocumentSourceAuthorizationSnapshot',
+        'The Document source authorization generation is invalid.',
+      )
+    }
+  }
+}
+
+/**
  * Creates the membership generation condition used by curated-context writes.
  *
  * @param input - Context mutation scope containing the authorization snapshot.
@@ -4726,6 +4844,147 @@ function curatedContextAuthorizationConditions(
       },
     },
   }]
+}
+
+/**
+ * Creates transaction conditions for the Document source and its authorization
+ * generations.  These conditions are intentionally built in the collaboration
+ * adapter so source access cannot change between permission-checked read and
+ * context-item commit.
+ *
+ * @param input - Curated-context mutation scope.
+ * @param snapshot - Document source snapshot captured by the API adapter.
+ * @returns DynamoDB transaction conditions for the source rows.
+ */
+function curatedContextDocumentSourceConditions(
+  input: CuratedContextMutationInput,
+  snapshot: CuratedContextDocumentSourceAuthorizationSnapshot,
+): NonNullable<TransactWriteCommandInput['TransactItems']> {
+  const documentsTableName =
+    readEnvironment('DOCUMENTS_TABLE_NAME') ??
+    readEnvironment('MUKUROJI_DOCUMENTS_TABLE') ??
+    'mukuroji-documents-local'
+  const conditions: NonNullable<TransactWriteCommandInput['TransactItems']> = [
+    {
+      ConditionCheck: {
+        TableName: documentsTableName,
+        Key: {
+          workspaceId: input.workspaceId,
+          recordKey: `DOCUMENT#${snapshot.sourceId}`,
+        },
+        ConditionExpression:
+          'entryType = :documentEntryType AND documentId = :documentId AND #revision = :documentRevision',
+        ExpressionAttributeNames: { '#revision': 'revision' },
+        ExpressionAttributeValues: {
+          ':documentEntryType': 'document',
+          ':documentId': snapshot.sourceId,
+          ':documentRevision': snapshot.documentRevision,
+        },
+      },
+    },
+    {
+      ConditionCheck: {
+        TableName: documentsTableName,
+        Key: {
+          workspaceId: input.workspaceId,
+          recordKey: 'DOCUMENT_AUTHORIZATION_REVISION',
+        },
+        ConditionExpression:
+          snapshot.documentAuthorizationRevision === 0
+            ? 'attribute_not_exists(workspaceId)'
+            : 'entryType = :authorizationEntryType AND #revision = :documentAuthorizationRevision',
+        ...(snapshot.documentAuthorizationRevision === 0
+          ? {}
+          : {
+              ExpressionAttributeNames: { '#revision': 'revision' },
+              ExpressionAttributeValues: {
+                ':authorizationEntryType': 'document-authorization-revision',
+                ':documentAuthorizationRevision': snapshot.documentAuthorizationRevision,
+              },
+            }),
+      },
+    },
+  ]
+
+  const mutationAuthorizationSnapshot = input.authorizationSnapshot
+  if (
+    snapshot.workspaceMemberKey !== undefined &&
+    mutationAuthorizationSnapshot === undefined
+  ) {
+    conditions.push({
+      ConditionCheck: {
+        TableName:
+          readEnvironment('MUKUROJI_WORKSPACE_ACCESS_TABLE') ??
+          readEnvironment('WORKSPACE_ACCESS_TABLE_NAME') ??
+          'mukuroji-workspace-access-local',
+        Key: {
+          workspaceId: input.workspaceId,
+          recordKey: `MEMBER#${normalizeMemberKey(snapshot.workspaceMemberKey)}`,
+        },
+        ConditionExpression:
+          'entryType = :workspaceMemberEntryType AND #status = :activeStatus AND #version = :workspaceMemberVersion',
+        ExpressionAttributeNames: {
+          '#status': 'status',
+          '#version': 'version',
+        },
+        ExpressionAttributeValues: {
+          ':workspaceMemberEntryType': 'workspace-member',
+          ':activeStatus': 'active',
+          ':workspaceMemberVersion': snapshot.workspaceMemberVersion,
+        },
+      },
+    })
+  }
+
+  if (snapshot.planningRevision !== undefined) {
+    conditions.push({
+      ConditionCheck: {
+        TableName: readEnvironment('PLANNING_TABLE_NAME') ?? 'mukuroji-planning-local',
+        Key: {
+          workspaceId: input.workspaceId,
+          recordKey: 'META',
+        },
+        ConditionExpression: snapshot.planningRevision === 0
+          ? 'attribute_not_exists(workspaceId)'
+          : 'entryType = :planningEntryType AND #revision = :planningRevision',
+        ...(snapshot.planningRevision === 0
+          ? {}
+          : {
+              ExpressionAttributeNames: { '#revision': 'revision' },
+              ExpressionAttributeValues: {
+                ':planningEntryType': 'planning-meta',
+                ':planningRevision': snapshot.planningRevision,
+              },
+            }),
+      },
+    })
+  }
+
+  const enterpriseTableName = readEnvironment('ENTERPRISE_IDENTITY_TABLE_NAME')
+  if (enterpriseTableName && snapshot.enterpriseControlRevision !== undefined) {
+    conditions.push({
+      ConditionCheck: {
+        TableName: enterpriseTableName,
+        Key: {
+          scopeKey: `WORKSPACE#${input.workspaceId}`,
+          recordKey: 'CONTROL',
+        },
+        ConditionExpression: snapshot.enterpriseControlRevision === 0
+          ? 'attribute_not_exists(scopeKey)'
+          : 'entryType = :enterpriseEntryType AND #controlRevision = :enterpriseControlRevision',
+        ...(snapshot.enterpriseControlRevision === 0
+          ? {}
+          : {
+              ExpressionAttributeNames: { '#controlRevision': 'controlRevision' },
+              ExpressionAttributeValues: {
+                ':enterpriseEntryType': 'enterprise-identity-control',
+                ':enterpriseControlRevision': snapshot.enterpriseControlRevision,
+              },
+            }),
+      },
+    })
+  }
+  return conditions
 }
 
 function watcherParentIssueConditions(tableName: string, input: UpdateWatcherInput) {

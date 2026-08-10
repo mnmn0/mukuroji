@@ -270,6 +270,7 @@ import {
   createWorkItemCollaborationEntityKey,
   type CollaborationAutomaticWatcherCandidate,
   type CollaborationComment,
+  type CuratedContextDocumentSourceAuthorizationSnapshot,
 } from '../modules/collaboration/collaboration'
 import {
   FILE_APPROVAL_MAX_REVIEWERS,
@@ -7797,7 +7798,7 @@ routeApp.post('/api/teams/:teamId/issues/:issueId/context-items', async (c) => {
     const projectEntityKey = detail.issue.assignedProjectId
       ? createProjectCollaborationEntityKey(principal.directoryId, detail.issue.assignedProjectId)
       : undefined
-    const source = request.source
+    const resolvedSource = request.source
       ? await resolveCuratedContextSource(principal, teamId, issueId, entityKey, request.source)
       : undefined
     const item = await workItemDependencies.collaboration.createCuratedContextItem({
@@ -7816,7 +7817,10 @@ routeApp.post('/api/teams/:teamId/issues/:issueId/context-items', async (c) => {
       kind: request.kind,
       title: request.title,
       body: request.body,
-      ...(source ? { source } : {}),
+      ...(resolvedSource ? { source: resolvedSource.source } : {}),
+      ...(resolvedSource?.documentAuthorizationSnapshot
+        ? { sourceAuthorizationSnapshot: resolvedSource.documentAuthorizationSnapshot }
+        : {}),
       mentionMemberKeys,
       ...(request.supersedesItemId ? { supersedesItemId: request.supersedesItemId } : {}),
       notificationCandidates: mentionMemberKeys.map((memberKey) => ({
@@ -17963,6 +17967,9 @@ async function createWorkspaceSearchContext(
       principal,
       directory,
     )
+  const planningRevision = await workItemDependencies.planning.getAuthorizationRevision(
+    principal.directoryId,
+  )
 
   return {
     directory,
@@ -17970,6 +17977,22 @@ async function createWorkspaceSearchContext(
       memberKey: principal.userKey,
       workspaceRole: principal.workspaceRole,
       isSystemAdmin: principal.isSystemAdmin,
+      authorizationSnapshots: [{
+        workspaceId: principal.directoryId,
+        ...(principal.principalKind === 'service-account'
+          ? {}
+          : {
+              workspaceMemberKey: principal.userKey,
+              workspaceMemberVersion: principal.workspaceMember.version,
+            }),
+        planningRevision,
+        ...(principal.enterpriseIdentityControlRevision === undefined
+          ? {}
+          : {
+              enterpriseControlRevision:
+                principal.enterpriseIdentityControlRevision,
+            }),
+      } satisfies DocumentAuthorizationFenceSnapshot],
       ...(enterpriseDocumentScopeAccess ?? {
         projectRoles,
         ...createDocumentEnterpriseScopeBoundary(
@@ -19745,6 +19768,14 @@ function readCuratedContextSource(value: unknown): CuratedContextSource {
   }
 }
 
+/** Permission-checked source snapshot plus any server-only transaction fence. */
+type ResolvedCuratedContextSource = {
+  /** Canonical provenance captured from the current source of truth. */
+  source: CuratedContextSource
+  /** Document authorization generations that must remain current at commit time. */
+  documentAuthorizationSnapshot?: CuratedContextDocumentSourceAuthorizationSnapshot
+}
+
 /**
  * Resolves a client source locator to a server-owned provenance snapshot.
  *
@@ -19761,7 +19792,7 @@ async function resolveCuratedContextSource(
   issueId: string,
   entityKey: string,
   requested: CuratedContextSource,
-): Promise<CuratedContextSource> {
+): Promise<ResolvedCuratedContextSource> {
   if (requested.kind === 'external-chat') {
     throw new CollaborationError(
       503,
@@ -19784,26 +19815,32 @@ async function resolveCuratedContextSource(
     }
     const originalBody = captureCuratedContextSourceBody(comment.bodyMarkdown)
     return {
-      kind: 'comment',
-      sourceId: comment.id,
-      containerId: comment.rootCommentId,
-      originalBody,
-      ...(requested.quote
-        ? { quote: resolveCuratedContextQuote(comment.bodyMarkdown, originalBody, requested.quote) }
-        : {}),
-      permalink: `${createTeamIssueDeepLink(teamId, issueId)}` +
-        `&commentId=${encodeURIComponent(comment.id)}` +
-        `&rootCommentId=${encodeURIComponent(comment.rootCommentId)}`,
-      actor: await resolveCuratedContextMemberActor(principal.directoryId, comment.authorMemberKey),
-      occurredAt: comment.createdAt,
-      capturedRevision: comment.version,
-      currentRevision: comment.version,
-      availability: 'available',
+      source: {
+        kind: 'comment',
+        sourceId: comment.id,
+        containerId: comment.rootCommentId,
+        originalBody,
+        ...(requested.quote
+          ? { quote: resolveCuratedContextQuote(comment.bodyMarkdown, originalBody, requested.quote) }
+          : {}),
+        permalink: `${createTeamIssueDeepLink(teamId, issueId)}` +
+          `&commentId=${encodeURIComponent(comment.id)}` +
+          `&rootCommentId=${encodeURIComponent(comment.rootCommentId)}`,
+        actor: await resolveCuratedContextMemberActor(principal.directoryId, comment.authorMemberKey),
+        occurredAt: comment.createdAt,
+        capturedRevision: comment.version,
+        currentRevision: comment.version,
+        availability: 'available',
+      },
     }
   }
 
   if (requested.kind === 'document') {
     const searchContext = await createWorkspaceSearchContext(principal)
+    const authorizationRevisionBefore =
+      await workItemDependencies.documents.getAuthorizationRevision(
+        principal.directoryId,
+      )
     const document = await workItemDependencies.documents.get({
         workspaceId: principal.directoryId,
         documentId: requested.sourceId,
@@ -19819,25 +19856,63 @@ async function resolveCuratedContextSource(
       }
       throw error
     })
+    const authorizationRevisionAfter =
+      await workItemDependencies.documents.getAuthorizationRevision(
+        principal.directoryId,
+      )
+    if (authorizationRevisionBefore !== authorizationRevisionAfter) {
+      throw new CollaborationError(
+        409,
+        'CuratedContextSourceAuthorizationChanged',
+        'Document authorization changed while reading the source. Reload and try again.',
+      )
+    }
     const fullBody = createDocumentWorkspaceSearchBody(document)
     const originalBody = captureCuratedContextSourceBody(fullBody)
     return {
-      kind: 'document',
-      sourceId: document.id,
-      containerId: document.id,
-      ...(originalBody ? { originalBody } : {}),
-      ...(requested.quote
-        ? { quote: resolveCuratedContextQuote(fullBody, originalBody, requested.quote) }
-        : {}),
-      permalink: `/documents/${encodeURIComponent(document.id)}`,
-      actor: await resolveCuratedContextMemberActor(
-        principal.directoryId,
-        document.updatedByUserId,
-      ),
-      occurredAt: document.updatedAt,
-      capturedRevision: document.revision,
-      currentRevision: document.revision,
-      availability: 'available',
+      source: {
+        kind: 'document',
+        sourceId: document.id,
+        containerId: document.id,
+        ...(originalBody ? { originalBody } : {}),
+        ...(requested.quote
+          ? { quote: resolveCuratedContextQuote(fullBody, originalBody, requested.quote) }
+          : {}),
+        permalink: `/documents/${encodeURIComponent(document.id)}`,
+        actor: await resolveCuratedContextMemberActor(
+          principal.directoryId,
+          document.updatedByUserId,
+        ),
+        occurredAt: document.updatedAt,
+        capturedRevision: document.revision,
+        currentRevision: document.revision,
+        availability: 'available',
+      },
+      documentAuthorizationSnapshot: {
+        sourceId: document.id,
+        documentRevision: document.revision,
+        documentAuthorizationRevision: authorizationRevisionAfter,
+        ...(searchContext.documentAccess.authorizationSnapshots?.[0]?.workspaceMemberKey === undefined
+          ? {}
+          : {
+              workspaceMemberKey:
+                searchContext.documentAccess.authorizationSnapshots[0].workspaceMemberKey,
+              workspaceMemberVersion:
+                searchContext.documentAccess.authorizationSnapshots[0].workspaceMemberVersion,
+            }),
+        ...(searchContext.documentAccess.authorizationSnapshots?.[0]?.planningRevision === undefined
+          ? {}
+          : {
+              planningRevision:
+                searchContext.documentAccess.authorizationSnapshots[0].planningRevision,
+            }),
+        ...(searchContext.documentAccess.authorizationSnapshots?.[0]?.enterpriseControlRevision === undefined
+          ? {}
+          : {
+              enterpriseControlRevision:
+                searchContext.documentAccess.authorizationSnapshots[0].enterpriseControlRevision,
+            }),
+      },
     }
   }
 
@@ -19860,21 +19935,23 @@ async function resolveCuratedContextSource(
   const eventBody = event.summary?.trim() || event.eventType
   const originalBody = captureCuratedContextSourceBody(eventBody)
   return {
-    kind: 'activity',
-    sourceId: event.eventId,
-    containerId: event.entity.id,
-    originalBody,
-    ...(requested.quote
-      ? { quote: resolveCuratedContextQuote(eventBody, originalBody, requested.quote) }
-      : {}),
-    permalink: `${createTeamIssueDeepLink(teamId, issueId)}` +
-      `&collaborationTab=activity&activityEventId=${encodeURIComponent(event.eventId)}`,
-    actor: {
-      id: event.actor.id,
-      displayName: event.actor.displayName?.trim() || event.actor.id,
+    source: {
+      kind: 'activity',
+      sourceId: event.eventId,
+      containerId: event.entity.id,
+      originalBody,
+      ...(requested.quote
+        ? { quote: resolveCuratedContextQuote(eventBody, originalBody, requested.quote) }
+        : {}),
+      permalink: `${createTeamIssueDeepLink(teamId, issueId)}` +
+        `&collaborationTab=activity&activityEventId=${encodeURIComponent(event.eventId)}`,
+      actor: {
+        id: event.actor.id,
+        displayName: event.actor.displayName?.trim() || event.actor.id,
+      },
+      occurredAt: event.occurredAt,
+      availability: 'available',
     },
-    occurredAt: event.occurredAt,
-    availability: 'available',
   }
 }
 

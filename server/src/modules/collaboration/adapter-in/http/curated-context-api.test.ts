@@ -192,6 +192,9 @@ test('returns cursor-paginated curated context revisions with permission-safe pr
   let capturedInput: Parameters<CollaborationClient['getCuratedContextRevisions']>[0] | undefined
   setTestAppDependencies({
     documents: createDocumentFake({
+      async getAuthorizationRevision() {
+        return 0
+      },
       async get() {
         throw new DocumentError(403, 'DocumentViewDenied', 'Document access was lost.')
       },
@@ -853,6 +856,9 @@ test('bounds a long document body before the context snapshot reaches persistenc
   let capturedInput: Parameters<CollaborationClient['createCuratedContextItem']>[0] | undefined
   setTestAppDependencies({
     documents: createDocumentFake({
+      async getAuthorizationRevision() {
+        return 0
+      },
       async get() {
         return {
           schemaVersion: 1,
@@ -928,6 +934,13 @@ test('bounds a long document body before the context snapshot reaches persistenc
     currentRevision: 7,
     availability: 'available',
   })
+  expect(capturedInput?.sourceAuthorizationSnapshot).toMatchObject({
+    sourceId: 'document-1',
+    documentRevision: 7,
+    documentAuthorizationRevision: 0,
+    workspaceMemberKey: 'demo@example.com',
+    workspaceMemberVersion: 1,
+  })
 })
 
 test('does not reveal whether an unavailable document exists', async () => {
@@ -937,6 +950,9 @@ test('does not reveal whether an unavailable document exists', async () => {
     let createCalled = false
     setTestAppDependencies({
       documents: createDocumentFake({
+        async getAuthorizationRevision() {
+          return 0
+        },
         async get() {
           throw new DocumentError(
             status,

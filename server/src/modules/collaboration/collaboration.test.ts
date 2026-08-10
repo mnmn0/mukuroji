@@ -1441,6 +1441,90 @@ test('creates, revision-fences, and atomically supersedes curated context with h
   ]))
 })
 
+test('fences a captured Document source and its authorization generation in the create transaction', async () => {
+  const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
+  const memory = createCollaborationMemory([], 'audit-table')
+  const actor = { id: 'author@example.com', displayName: 'Author' }
+  await memory.client.createCuratedContextItem({
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'issue-1',
+    entityKey,
+    actor,
+    authorizationSnapshot: {
+      memberKey: actor.id,
+      workspaceMemberVersion: 4,
+    },
+    kind: 'decision',
+    title: 'Use the current document policy',
+    body: 'The decision was captured while the source was readable.',
+    source: {
+      kind: 'document',
+      sourceId: 'document-1',
+      capturedRevision: 7,
+      currentRevision: 7,
+      occurredAt: '2026-07-12T00:00:00.000Z',
+      availability: 'available',
+    },
+    sourceAuthorizationSnapshot: {
+      sourceId: 'document-1',
+      documentRevision: 7,
+      documentAuthorizationRevision: 3,
+      workspaceMemberKey: actor.id,
+      workspaceMemberVersion: 4,
+      planningRevision: 9,
+    },
+    auditContext: createTestAuditContext(
+      'document-context-create',
+      '2026-07-12T00:00:00.000Z',
+    ),
+  })
+
+  const transactionItems = memory.transactions[0]?.TransactItems
+  if (!Array.isArray(transactionItems)) {
+    throw new Error('Expected a context create transaction.')
+  }
+  const conditions = transactionItems.filter((item): item is Record<string, unknown> =>
+    isTestRecord(item) && isTestRecord(item.ConditionCheck),
+  )
+  expect(conditions).toContainEqual(expect.objectContaining({
+    ConditionCheck: expect.objectContaining({
+      TableName: 'mukuroji-documents-local',
+      Key: {
+        workspaceId: 'workspace#one',
+        recordKey: 'DOCUMENT#document-1',
+      },
+      ExpressionAttributeValues: expect.objectContaining({
+        ':documentRevision': 7,
+      }),
+    }),
+  }))
+  expect(conditions).toContainEqual(expect.objectContaining({
+    ConditionCheck: expect.objectContaining({
+      TableName: 'mukuroji-documents-local',
+      Key: {
+        workspaceId: 'workspace#one',
+        recordKey: 'DOCUMENT_AUTHORIZATION_REVISION',
+      },
+      ExpressionAttributeValues: expect.objectContaining({
+        ':documentAuthorizationRevision': 3,
+      }),
+    }),
+  }))
+  expect(conditions).toContainEqual(expect.objectContaining({
+    ConditionCheck: expect.objectContaining({
+      TableName: 'mukuroji-planning-local',
+      Key: {
+        workspaceId: 'workspace#one',
+        recordKey: 'META',
+      },
+      ExpressionAttributeValues: expect.objectContaining({
+        ':planningRevision': 9,
+      }),
+    }),
+  }))
+})
+
 test('replays immutable curated-context mutation responses after later revisions', async () => {
   const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
   const memory = createCollaborationMemory([], 'audit-table')
