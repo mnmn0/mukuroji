@@ -915,6 +915,31 @@ test('duplicate context retains only redaction provenance after source retention
   })
 })
 
+test('duplicate context treats an elapsed retention deadline as redacted', () => {
+  const client = new DynamoDbTeamIssuesClient('WorkItemsTable', 'IssueEventsTable')
+  const contribution = client.createTriageDuplicateContextTransactionItems({
+    directoryId: 'workspace-1',
+    teamId: 'core',
+    workItemId: 'canonical-work-item',
+    expectedWorkItemRevision: 7,
+    actorUserId: 'triager@example.com',
+    entry: createDuplicateContextEntry({
+      retention: {
+        expiresAt: '2026-08-09T00:00:00.000Z',
+      },
+    }),
+    mergedAt: '2026-08-09T00:00:01.000Z',
+  })
+
+  expect(contribution.snapshot).toMatchObject({
+    availability: 'redacted',
+    commentMetadataCount: 0,
+    attachmentMetadataCount: 0,
+    watcherMetadataCount: 0,
+    events: [],
+  })
+})
+
 test('metadata-only duplicate context excludes internal lifecycle summaries', () => {
   const client = new DynamoDbTeamIssuesClient('WorkItemsTable', 'IssueEventsTable')
   const contribution = client.createTriageDuplicateContextTransactionItems({

@@ -20,6 +20,7 @@ const triageQueryConfig = {
  * @param teamId - Team whose queue should be loaded.
  * @param filters - URL-backed queue filters.
  * @param enabled - Whether the authenticated query may run.
+ * @param currentUserKey - Canonical owner key used by the Mine filter.
  * @returns SWR Infinite state for the filtered queue.
  */
 export function useTriageQueue(
@@ -27,10 +28,12 @@ export function useTriageQueue(
   teamId: string | undefined,
   filters: TriageQueueFilters,
   enabled = true,
+  currentUserKey?: string,
 ) {
   return useSWRInfinite(
     (pageIndex, previousPage: TriageEntryPage | null) => {
       if (!accessToken || !teamId || !enabled) return null
+      if (filters.owner === 'mine' && !currentUserKey) return null
       if (pageIndex > 0 && !previousPage?.nextCursor) return null
 
       return [
@@ -41,15 +44,18 @@ export function useTriageQueue(
         filters.state ?? '',
         filters.source ?? '',
         filters.owner ?? 'all',
+        currentUserKey ?? '',
         filters.sla ?? '',
         pageIndex === 0 ? '' : previousPage?.nextCursor ?? '',
       ] as const
     },
-    ([, token, currentTeamId, , state, source, owner, , cursor]) =>
+    ([, token, currentTeamId, , state, source, owner, ownerKey, , cursor]) =>
       getTriageEntries(currentTeamId, token, {
         cursor: cursor || undefined,
         limit: 50,
-        ownerUserId: owner === 'unowned' ? 'unowned' : undefined,
+        ownerUserId: owner === 'mine'
+          ? ownerKey || undefined
+          : owner === 'unowned' ? 'unowned' : undefined,
         sourceKind: source === 'form' || source === 'chat' || source === 'email' || source === 'webhook' || source === 'manual-handoff'
           ? source
           : undefined,

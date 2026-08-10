@@ -1,5 +1,8 @@
 import type {
   ResolvedWorkItemConfiguration,
+  TriageActionInput,
+  TriageEntry,
+  UpdateTriageConfigurationInput,
   WorkItemRelationMutationResponse,
   WorkItemRelationType,
 } from '@mukuroji/contracts'
@@ -78,7 +81,9 @@ import { createDefaultRequestIntakeClient } from '../../modules/request-intake/r
 import {
   DynamoDbTriageClient,
   TriageError,
+  type TriageActionReferenceValidator,
   type TriageAdmissionValidator,
+  type TriageConfigurationReferenceValidator,
 } from '../../modules/triage'
 import { DynamoDbWorkspaceAccessClient } from '../../modules/workspace-access'
 import {
@@ -481,11 +486,18 @@ export function createProductionWorkspaceDependencies(): WorkspaceDependencies {
  */
 export function createProductionWorkItemDependencies(): WorkItemDependencies {
   const teamIssues = new DynamoDbTeamIssuesClient()
+  const projectDirectory = new DynamoDbProjectDirectoryClient()
+  const workspaceAccess = new DynamoDbWorkspaceAccessClient()
   const triageAdmissionValidator = createTriageAdmissionValidator(
-    new DynamoDbProjectDirectoryClient(),
-    new DynamoDbWorkspaceAccessClient(),
+    projectDirectory,
+    workspaceAccess,
   )
-  const triage = createTriageClient(teamIssues, triageAdmissionValidator)
+  const triage = createTriageClient(
+    teamIssues,
+    triageAdmissionValidator,
+    createTriageConfigurationReferenceValidator(projectDirectory, workspaceAccess),
+    createTriageActionReferenceValidator(projectDirectory, workspaceAccess),
+  )
   return {
     projectTasks: new DynamoDbProjectTasksClient(),
     teamIssues,
@@ -523,9 +535,13 @@ export function createProductionWorkItemDependencies(): WorkItemDependencies {
 function createTriageClient(
   teamIssues: TeamIssuesClient,
   validateAdmission: TriageAdmissionValidator,
+  validateConfigurationReferences: TriageConfigurationReferenceValidator,
+  validateActionReferences: TriageActionReferenceValidator,
 ): DynamoDbTriageClient {
   return new DynamoDbTriageClient({
     validateAdmission,
+    validateConfigurationReferences,
+    validateActionReferences,
     resolveWorkItemAction: async (workspaceId, entry, actor, action, now) => {
       if (action.action === 'accept' && action.mode === 'create') {
         throw new TriageError(
@@ -659,6 +675,148 @@ export function createTriageAdmissionValidator(
         409,
         'TriageAdmissionOwnerUnavailable',
         'A configured Triage owner is not an active Workspace member.',
+      )
+    }
+    return {
+      transactItems: [
+        ...directoryConditionChecks,
+        ...memberConditionChecks.flatMap((conditionCheck) =>
+          conditionCheck === undefined ? [] : [conditionCheck]
+        ),
+      ],
+    }
+  }
+}
+
+/** Creates commit-time guards for every directory and member referenced by settings. */
+export function createTriageConfigurationReferenceValidator(
+  projectDirectory: Pick<DynamoDbProjectDirectoryClient, 'createActiveReferenceConditionChecks'>,
+  workspaceAccess: Pick<DynamoDbWorkspaceAccessClient, 'createActiveMemberConditionCheck'>,
+): TriageConfigurationReferenceValidator {
+  return async (workspaceId: string, teamId: string, input: UpdateTriageConfigurationInput) => {
+    let directoryConditionChecks
+    try {
+      directoryConditionChecks = await projectDirectory.createActiveReferenceConditionChecks(
+        workspaceId,
+        teamId,
+      )
+      const projectIds = new Set(
+        input.rules
+          .map((rule) => rule.projectId)
+          .filter((projectId): projectId is string => projectId !== undefined),
+      )
+      for (const projectId of projectIds) {
+        const projectChecks = await projectDirectory.createActiveReferenceConditionChecks(
+          workspaceId,
+          teamId,
+          projectId,
+        )
+        directoryConditionChecks.push(...projectChecks.slice(1))
+      }
+    } catch (error) {
+      if (error instanceof ProjectDataError && error.code === 'TeamNotFound') {
+        throw new TriageError(
+          409,
+          'TriageConfigurationTeamUnavailable',
+          'The configured Triage Team is not active.',
+          { cause: error },
+        )
+      }
+      if (error instanceof ProjectDataError && error.code === 'ProjectNotFound') {
+        throw new TriageError(
+          409,
+          'TriageConfigurationProjectUnavailable',
+          'A configured Triage Project is not active in the target Team.',
+          { cause: error },
+        )
+      }
+      throw error
+    }
+
+    const memberUserIds = new Set<string>()
+    for (const rule of input.rules) {
+      if (rule.owner.type === 'fixed') {
+        memberUserIds.add(normalizeProjectMemberKey(rule.owner.ownerUserId))
+      }
+    }
+    for (const rotation of input.rotations) {
+      for (const memberUserId of rotation.memberUserIds) {
+        memberUserIds.add(normalizeProjectMemberKey(memberUserId))
+      }
+    }
+    for (const policy of input.slaPolicies) {
+      if (policy.escalationOwnerUserId) {
+        memberUserIds.add(normalizeProjectMemberKey(policy.escalationOwnerUserId))
+      }
+    }
+    const memberConditionChecks = await Promise.all([...memberUserIds].map(async (memberUserId) =>
+      await workspaceAccess.createActiveMemberConditionCheck(workspaceId, memberUserId)
+    ))
+    if (memberConditionChecks.some((conditionCheck) => conditionCheck === undefined)) {
+      throw new TriageError(
+        409,
+        'TriageConfigurationOwnerUnavailable',
+        'A configured Triage owner is not an active Workspace member.',
+      )
+    }
+    const transactItems = [
+      ...directoryConditionChecks,
+      ...memberConditionChecks.flatMap((conditionCheck) =>
+        conditionCheck === undefined ? [] : [conditionCheck]
+      ),
+    ]
+    if (transactItems.length > 98) {
+      throw new TriageError(
+        400,
+        'InvalidTriageConfiguration',
+        'The Triage configuration references too many live directory records.',
+      )
+    }
+    return { transactItems }
+  }
+}
+
+/** Creates commit-time guards for one assignment's Team, Project, and owner references. */
+export function createTriageActionReferenceValidator(
+  projectDirectory: Pick<DynamoDbProjectDirectoryClient, 'createActiveReferenceConditionChecks'>,
+  workspaceAccess: Pick<DynamoDbWorkspaceAccessClient, 'createActiveMemberConditionCheck'>,
+): TriageActionReferenceValidator {
+  return async (
+    workspaceId: string,
+    teamId: string,
+    entry: TriageEntry,
+    action: Extract<TriageActionInput, { action: 'assign' }>,
+  ) => {
+    const projectId = action.projectId === null
+      ? undefined
+      : action.projectId ?? entry.projectId
+    let directoryConditionChecks
+    try {
+      directoryConditionChecks = await projectDirectory.createActiveReferenceConditionChecks(
+        workspaceId,
+        teamId,
+        projectId,
+      )
+    } catch (error) {
+      if (error instanceof ProjectDataError && error.code === 'TeamNotFound') {
+        throw new TriageError(409, 'TriageAssignmentTeamUnavailable', 'The target Team is not active.', { cause: error })
+      }
+      if (error instanceof ProjectDataError && error.code === 'ProjectNotFound') {
+        throw new TriageError(409, 'TriageAssignmentProjectUnavailable', 'The target Project is not active.', { cause: error })
+      }
+      throw error
+    }
+    const memberConditionChecks = action.ownerUserId === null || action.ownerUserId === undefined
+      ? []
+      : [await workspaceAccess.createActiveMemberConditionCheck(
+          workspaceId,
+          normalizeProjectMemberKey(action.ownerUserId),
+        )]
+    if (memberConditionChecks.some((conditionCheck) => conditionCheck === undefined)) {
+      throw new TriageError(
+        409,
+        'TriageAssignmentOwnerUnavailable',
+        'The assigned owner is not an active Workspace member.',
       )
     }
     return {

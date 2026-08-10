@@ -95,6 +95,8 @@ export type WorkspaceRouteContextValue = {
   userLabel: string
   /** Stable identifiers that route models may use to recognize the current user. */
   userIdentityAliases: string[]
+  /** Canonical lower-case owner key used by server-side queue filters. */
+  userKey?: string
   /** The uppercase initial displayed by the shared workspace header. */
   userInitial: string
   /** The team and project directory displayed by the shared sidebar. */
@@ -260,6 +262,7 @@ export function WorkspaceRouteProvider() {
       .filter(isNonEmptyString),
     [user],
   )
+  const userKey = (user?.attributes.email ?? user?.username)?.trim().toLowerCase() || undefined
   const userInitial = userLabel.trim().charAt(0).toUpperCase() || 'M'
   const canLoadWorkspaceData = Boolean(user && !currentUserError)
   const canManageWorkspaceConfiguration = canManageWorkspaceStructure(user)
@@ -730,6 +733,7 @@ export function WorkspaceRouteProvider() {
     userIdentityAliases,
     userInitial,
     userLabel,
+    userKey,
   }), [
     accessToken,
     canLoadWorkspaceData,
@@ -774,6 +778,7 @@ export function WorkspaceRouteProvider() {
     userIdentityAliases,
     userInitial,
     userLabel,
+    userKey,
   ])
 
   if (!session) {

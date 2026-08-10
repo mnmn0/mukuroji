@@ -3743,7 +3743,12 @@ function createPermissionSafeTriageContextSnapshot(
   entry: TriageEntry,
   mergedAt: string,
 ): WorkItemTriageContextSnapshot {
-  const redacted = entry.retention.redactedAt !== undefined
+  const retentionDeadline = Date.parse(entry.retention.expiresAt)
+  const mergedAtTimestamp = Date.parse(mergedAt)
+  const retentionElapsed = Number.isFinite(retentionDeadline) &&
+    Number.isFinite(mergedAtTimestamp) &&
+    retentionDeadline <= mergedAtTimestamp
+  const redacted = entry.retention.redactedAt !== undefined || retentionElapsed
   const retainCounts = !redacted && entry.permission.visibility !== 'denied'
   const retainSummaries = !redacted && entry.permission.visibility === 'full'
   const events: WorkItemTriageContextEventSnapshot[] = retainSummaries
@@ -3762,6 +3767,8 @@ function createPermissionSafeTriageContextSnapshot(
         ? 'summary-metadata'
         : 'counts-only'
 
+  const effectiveRedactedAt = entry.retention.redactedAt ??
+    (retentionElapsed ? entry.retention.expiresAt : undefined)
   const snapshot: WorkItemTriageContextSnapshot = {
     triageEntryId: readTriageContextEntryId(entry.id),
     sourceKind: entry.source.kind,
@@ -3770,8 +3777,8 @@ function createPermissionSafeTriageContextSnapshot(
     receivedAt: readTriageAcceptanceInstant(entry.receivedAt),
     lastActivityAt: readTriageAcceptanceInstant(entry.lastActivityAt),
     sourceRetentionExpiresAt: readTriageAcceptanceInstant(entry.retention.expiresAt),
-    ...(entry.retention.redactedAt
-      ? { sourceRedactedAt: readTriageAcceptanceInstant(entry.retention.redactedAt) }
+    ...(effectiveRedactedAt
+      ? { sourceRedactedAt: readTriageAcceptanceInstant(effectiveRedactedAt) }
       : {}),
     commentMetadataCount: retainCounts ? entry.sourcePreview.commentCount : 0,
     attachmentMetadataCount: retainCounts ? entry.sourcePreview.attachmentCount : 0,

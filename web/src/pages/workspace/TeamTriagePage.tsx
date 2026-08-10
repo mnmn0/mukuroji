@@ -40,7 +40,8 @@ export function TeamTriagePage() {
     workspace.accessToken,
     teamId,
     routeState.filters,
-    workspace.canLoadWorkspaceData && Boolean(activeTeam) && routeState.view === 'queue',
+    workspace.canLoadWorkspaceData && Boolean(activeTeam),
+    workspace.userKey,
   )
   const loadedEntries = useMemo(() => Array.from(new Map(
     (queue.data ?? [])
@@ -76,6 +77,7 @@ export function TeamTriagePage() {
   })
   const lastQueuePage = queue.data?.at(-1)
   const allowedBulkActions = queue.data?.[0]?.allowedBulkActions ?? []
+  const canManageConfiguration = queue.data?.[0]?.canManageConfiguration === true
   const isLoadingMore = Boolean(
     queue.data && queue.data.length < queue.size && queue.isValidating,
   )
@@ -117,7 +119,7 @@ export function TeamTriagePage() {
       <TriageWorkbench
         allowedBulkActions={allowedBulkActions}
         bulkResults={mutation.bulkResults}
-        canManageConfiguration={workspace.canMutateTeamConfiguration}
+        canManageConfiguration={canManageConfiguration}
         configuration={settings.data}
         configurationErrorMessage={configurationErrorMessage}
         counts={countTriageEntryViews(entryViews)}

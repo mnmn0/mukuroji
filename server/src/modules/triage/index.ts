@@ -73,6 +73,8 @@ export {
   type TriageAdmissionTransactionContribution,
   type TriageAdmissionValidationContribution,
   type TriageAdmissionValidator,
+  type TriageActionReferenceValidator,
+  type TriageConfigurationReferenceValidator,
 } from './adapter-out/dynamodb/dynamo-db-triage-client'
 
 /** Team triage HTTP adapter and composable action boundary. */

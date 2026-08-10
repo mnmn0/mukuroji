@@ -53,6 +53,8 @@ export type TriagePrincipal = {
   visibleProjectIds?: readonly string[]
   /** Project IDs writable by the principal, or undefined for full Team write access. */
   writableProjectIds?: readonly string[]
+  /** Whether the principal may read and replace Team Triage configuration. */
+  canManageConfiguration?: boolean
 }
 
 /** Input supplied to the composable action orchestration boundary. */
@@ -204,6 +206,9 @@ export function createTriageRouter(dependencies: TriageRouterDependencies) {
       )
       return context.json({
         ...page,
+        ...(principal.canManageConfiguration === undefined
+          ? {}
+          : { canManageConfiguration: principal.canManageConfiguration }),
         allowedBulkActions: principal.teamAccess === 'read'
           ? []
           : page.allowedBulkActions,

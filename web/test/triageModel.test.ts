@@ -51,5 +51,14 @@ describe('triage presentation model', () => {
       dueSoonEntry,
       new Date('2026-08-09T01:30:00.000Z'),
     )).toBe('due-soon')
+    if (!dueSoonEntry.sla) throw new Error('Expected an SLA fixture.')
+    expect(resolveTriageSlaState({
+      ...dueSoonEntry,
+      state: 'snoozed',
+      sla: {
+        ...dueSoonEntry.sla,
+        breachedAt: '2026-08-09T01:00:00.000Z',
+      },
+    })).toBe('breached')
   })
 })

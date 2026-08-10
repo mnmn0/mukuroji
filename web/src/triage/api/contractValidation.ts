@@ -41,9 +41,13 @@ const invalidContractMessage = 'The Team triage response did not match the expec
 export function readTriageEntryPage(value: unknown): TriageEntryPage {
   const record = requireRecord(value)
   const nextCursor = readOptionalString(record.nextCursor)
+  const canManageConfiguration = record.canManageConfiguration === undefined
+    ? undefined
+    : requireBoolean(record.canManageConfiguration)
   return {
     allowedBulkActions: readAllowedBulkActions(record.allowedBulkActions),
     entries: requireArray(record.entries).map(readTriageEntry),
+    ...(canManageConfiguration === undefined ? {} : { canManageConfiguration }),
     ...(nextCursor ? { nextCursor } : {}),
   }
 }

@@ -656,8 +656,11 @@ test.each([
   expect(response.status).toBe(200)
   expect(responseCorrelationId).toBeString()
   expect(receivedAction).toEqual(body)
-  expect(receivedTransactionItems).toHaveLength(body.action === 'assign' ? 4 : 3)
-  expect(receivedTransactionItems?.[0]?.Update).toMatchObject({
+  expect(receivedTransactionItems).toHaveLength(body.action === 'assign' ? 7 : 3)
+  const triageUpdate = receivedTransactionItems?.find((item) =>
+    item.Update?.ConditionExpression === '#revision = :expectedRevision AND teamId = :teamId'
+  )
+  expect(triageUpdate?.Update).toMatchObject({
     ConditionExpression: '#revision = :expectedRevision AND teamId = :teamId',
     ExpressionAttributeValues: {
       ':expectedRevision': 1,
@@ -669,13 +672,19 @@ test.each([
       },
     },
   })
-  expect(receivedTransactionItems?.[2]?.Put?.Item).toMatchObject({
+  const triageReceipt = receivedTransactionItems?.find((item) =>
+    item.Put?.Item?.entryType === 'triage-operation-receipt'
+  )
+  expect(triageReceipt?.Put?.Item).toMatchObject({
     entryType: 'triage-operation-receipt',
     entryId: entry.id,
     resultRevision: 2,
   })
   if (body.action === 'assign') {
-    expect(receivedTransactionItems?.[3]?.Put?.Item).toMatchObject({
+    const assignmentAudit = receivedTransactionItems?.find((item) =>
+      item.Put?.Item?.eventType === 'triage.assigned'
+    )
+    expect(assignmentAudit?.Put?.Item).toMatchObject({
       correlationId: responseCorrelationId,
       eventType: 'triage.assigned',
       entity: { type: 'triage-entry', id: entry.id },

@@ -17246,6 +17246,11 @@ async function requireTriageTeamAccess(
     teamId,
     teamAccess,
   )
+  const canManageConfiguration = resolveTriageConfigurationManagement(
+    principal,
+    teamContext,
+    visibleProjectIds,
+  )
   return {
     workspaceId: principal.directoryId,
     userId: principal.userKey,
@@ -17260,7 +17265,25 @@ async function requireTriageTeamAccess(
     teamAccess,
     ...(visibleProjectIds !== undefined ? { visibleProjectIds } : {}),
     ...(writableProjectIds !== undefined ? { writableProjectIds } : {}),
+    canManageConfiguration,
   }
+}
+
+/** Resolves the exact Team management capability used by the settings mutation route. */
+function resolveTriageConfigurationManagement(
+  principal: WorkspacePrincipal,
+  context: TeamPermissionContext | undefined,
+  visibleProjectIds: readonly string[] | undefined,
+): boolean {
+  if (visibleProjectIds !== undefined && !principal.isSystemAdmin) return false
+  if (principal.isSystemAdmin || principal.workspaceRole === 'owner' || principal.workspaceRole === 'admin') {
+    return true
+  }
+  if (principal.enterpriseRouteAuthorizedAtResource) {
+    return principal.enterpriseGrantedRoutePermissions?.includes('teams.manage') === true
+  }
+  if (principal.enterprisePermissions !== undefined) return false
+  return context?.projectAccesses?.some((access) => access.role === 'manager') === true
 }
 
 /** Merges stronger Project-scoped Enterprise access into a Team-scoped read snapshot.
@@ -17770,6 +17793,14 @@ async function applyTriageRouteAction(request: TriageRouterActionRequest) {
       idempotency: request.idempotency,
       auditContext: request.auditContext,
     })
+    const referenceChecks = action.action === 'assign'
+      ? await createTriageAssignmentReferenceConditionChecks(
+          request.workspaceId,
+          request.teamId,
+          currentEntry,
+          action,
+        )
+      : []
     await workItemDependencies.requestIntake.applyAction(
       request.workspaceId,
       submission.id,
@@ -17785,7 +17816,7 @@ async function applyTriageRouteAction(request: TriageRouterActionRequest) {
             expectedRevision: submission.revision,
             reason: action.reason,
           },
-      contribution.transactItems,
+      [...referenceChecks, ...contribution.transactItems],
     )
     return { entry: contribution.entry, replayed: false }
   }
@@ -17898,6 +17929,62 @@ async function applyTriageRouteAction(request: TriageRouterActionRequest) {
     request.idempotency,
     request.auditContext,
   )
+}
+
+/** Builds commit-time Team, Project, and owner fences for Form-backed assignments. */
+async function createTriageAssignmentReferenceConditionChecks(
+  workspaceId: string,
+  teamId: string,
+  entry: TriageEntry,
+  action: Extract<TriageActionInput, { action: 'assign' }>,
+): Promise<NonNullable<TransactWriteCommandInput['TransactItems']>> {
+  const createDirectoryChecks = workspaceDependencies.projectDirectory
+    .createActiveReferenceConditionChecks
+  const createMemberCheck = workspaceDependencies.workspaceAccess
+    .createActiveMemberConditionCheck
+  if (!createDirectoryChecks || !createMemberCheck) {
+    throw new TriageError(
+      503,
+      'TriageAssignmentReferenceValidationUnavailable',
+      'Assignment reference validation is unavailable. Retry the request.',
+    )
+  }
+  const projectId = action.projectId === null
+    ? undefined
+    : action.projectId ?? entry.projectId
+  let directoryChecks
+  try {
+    directoryChecks = await createDirectoryChecks.call(
+      workspaceDependencies.projectDirectory,
+      workspaceId,
+      teamId,
+      projectId,
+    )
+  } catch (error) {
+    if (error instanceof ProjectDataError && error.code === 'TeamNotFound') {
+      throw new TriageError(409, 'TriageAssignmentTeamUnavailable', 'The target Team is not active.', { cause: error })
+    }
+    if (error instanceof ProjectDataError && error.code === 'ProjectNotFound') {
+      throw new TriageError(409, 'TriageAssignmentProjectUnavailable', 'The target Project is not active.', { cause: error })
+    }
+    throw error
+  }
+  if (action.ownerUserId === null || action.ownerUserId === undefined) {
+    return directoryChecks
+  }
+  const memberCheck = await createMemberCheck.call(
+    workspaceDependencies.workspaceAccess,
+    workspaceId,
+    normalizeProjectMemberKey(action.ownerUserId),
+  )
+  if (!memberCheck) {
+    throw new TriageError(
+      409,
+      'TriageAssignmentOwnerUnavailable',
+      'The assigned owner is not an active Workspace member.',
+    )
+  }
+  return [...directoryChecks, memberCheck]
 }
 
 /**
@@ -18311,26 +18398,38 @@ async function createLegacyRequestTriageContribution(
         },
       }
     : entry
+  const contribution = createTriageActionTransactionItems({
+    tableName,
+    audit: {
+      tableName: getConfiguredAuditTableName() ?? 'mukuroji-audit-events',
+      retentionDays: getConfiguredAuditRetentionDays(),
+    },
+    entry: entryForAction,
+    action,
+    actorId: principal.userKey,
+    now: new Date().toISOString(),
+    idempotency,
+    auditContext: createApiMutationContext(
+      context,
+      principal,
+      input,
+      createTriageActionAuditIdempotencyKey(entry.id, idempotency),
+    ),
+  })
+  const referenceChecks = action.action === 'assign'
+    ? await createTriageAssignmentReferenceConditionChecks(
+        principal.directoryId,
+        entry.teamId,
+        entry,
+        action,
+      )
+    : []
   return {
     replayed: false,
-    contribution: createTriageActionTransactionItems({
-      tableName,
-      audit: {
-        tableName: getConfiguredAuditTableName() ?? 'mukuroji-audit-events',
-        retentionDays: getConfiguredAuditRetentionDays(),
-      },
-      entry: entryForAction,
-      action,
-      actorId: principal.userKey,
-      now: new Date().toISOString(),
-      idempotency,
-      auditContext: createApiMutationContext(
-        context,
-        principal,
-        input,
-        createTriageActionAuditIdempotencyKey(entry.id, idempotency),
-      ),
-    }),
+    contribution: {
+      entry: contribution.entry,
+      transactItems: [...referenceChecks, ...contribution.transactItems],
+    },
   }
 }
 

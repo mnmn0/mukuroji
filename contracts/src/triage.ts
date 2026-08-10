@@ -278,6 +278,8 @@ export type TriageEntryPage = {
   entries: TriageEntry[]
   /** Permission-safe bulk operation kinds currently enabled for the Team. */
   allowedBulkActions: TriageBulkOperation['action'][]
+  /** Whether the current principal may edit Team Triage configuration. */
+  canManageConfiguration?: boolean
   /** Opaque scope-bound cursor for the next page. */
   nextCursor?: string
 }

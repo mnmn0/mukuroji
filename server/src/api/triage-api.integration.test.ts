@@ -620,6 +620,9 @@ describe('Team Triage API composition', () => {
     const managerEntry = await app.request('/api/teams/core-team/triage-entries/triage-api-1', {
       headers: createHeaders(),
     })
+    const managerQueue = await app.request('/api/teams/core-team/triage-entries', {
+      headers: createHeaders(),
+    })
 
     const managerSettingsBody: unknown = await managerSettings.json()
     expect({ body: managerSettingsBody, status: managerSettings.status }).toMatchObject({
@@ -630,6 +633,8 @@ describe('Team Triage API composition', () => {
     expect(await managerEntry.json()).toMatchObject({
       capabilities: { canAssign: true, canDecline: true, canReply: true },
     })
+    expect(managerQueue.status).toBe(200)
+    expect(await managerQueue.json()).toMatchObject({ canManageConfiguration: true })
   })
 
   test('keeps Workspace administrators read-only while preserving system administrator writes', async () => {
@@ -883,6 +888,7 @@ describe('Team Triage API composition', () => {
     expect(list.status).toBe(200)
     expect(await list.json()).toEqual({
       allowedBulkActions: ['assign', 'decline', 'snooze'],
+      canManageConfiguration: false,
       entries: [],
     })
     expect(detail.status).toBe(404)

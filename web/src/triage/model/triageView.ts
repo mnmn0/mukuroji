@@ -132,8 +132,8 @@ export function resolveTriageSlaState(
   entry: TriageEntry,
   now: Date = new Date(),
 ): TriageSlaFilter {
+  if (entry.sla?.breachedAt) return 'breached'
   if (entry.state === 'snoozed' || !entry.sla) return 'paused'
-  if (entry.sla.breachedAt) return 'breached'
 
   const dueAt = Date.parse(entry.sla.dueAt)
   if (!Number.isFinite(dueAt)) return 'on-track'

@@ -21,6 +21,7 @@ import {
 } from './triage-transactions'
 import {
   DynamoDbTriageClient,
+  type TriageConfigurationReferenceValidator,
   type TriageAdmissionValidator,
 } from './dynamo-db-triage-client'
 
@@ -102,6 +103,8 @@ function createEntry(): TriageEntry {
 type HarnessOptions = {
   /** Live validator invoked by source admission. */
   validateAdmission?: TriageAdmissionValidator
+  /** Commit-time settings reference guards. */
+  validateConfigurationReferences?: TriageConfigurationReferenceValidator
 }
 
 /** Creates a real DocumentClient whose send method follows a deterministic response list.
@@ -144,6 +147,9 @@ function createHarness(responses: unknown[], options: HarnessOptions = {}) {
       id: () => 'triage-manual-1',
       ...(options.validateAdmission
         ? { validateAdmission: options.validateAdmission }
+        : {}),
+      ...(options.validateConfigurationReferences
+        ? { validateConfigurationReferences: options.validateConfigurationReferences }
         : {}),
     }),
     calls: () => callIndex,
@@ -496,6 +502,43 @@ describe('DynamoDbTriageClient configuration receipts', () => {
           }),
         }),
       ])
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('joins live settings reference guards to the configuration transaction', async () => {
+    const input = createConfigurationInput(0)
+    const fingerprint = createTriageInputFingerprint({
+      workspaceId: 'workspace-1',
+      teamId: 'support',
+      input,
+    })
+    const referenceGuard = {
+      ConditionCheck: {
+        TableName: 'DirectoryTable',
+        Key: { directoryId: 'workspace-1', entryKey: 'team#support' },
+        ConditionExpression: '#status = :active',
+        ExpressionAttributeNames: { '#status': 'status' },
+        ExpressionAttributeValues: { ':active': 'active' },
+      },
+    }
+    const harness = createHarness([{}, {}, {}], {
+      validateConfigurationReferences: (async () => ({
+        transactItems: [referenceGuard],
+      })) satisfies TriageConfigurationReferenceValidator,
+    })
+
+    try {
+      await harness.client.updateConfiguration(
+        'workspace-1',
+        'support',
+        { id: 'manager@example.com' },
+        input,
+        { key: 'settings-guarded', fingerprint },
+      )
+      const transactItems = harness.commands[2]?.input.TransactItems
+      expect(Array.isArray(transactItems) ? transactItems[0] : undefined).toEqual(referenceGuard)
     } finally {
       harness.restore()
     }

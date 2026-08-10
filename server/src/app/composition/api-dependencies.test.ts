@@ -4,9 +4,14 @@ import {
   TRIAGE_ENTRY_SCHEMA_VERSION,
   type TriageConfiguration,
   type TriageEntry,
+  type UpdateTriageConfigurationInput,
 } from '@mukuroji/contracts'
 import { ProjectDataError } from '../../modules/directory'
-import { createTriageAdmissionValidator } from './api-dependencies'
+import {
+  createTriageActionReferenceValidator,
+  createTriageAdmissionValidator,
+  createTriageConfigurationReferenceValidator,
+} from './api-dependencies'
 
 const NOW = '2026-08-09T00:00:00.000Z'
 
@@ -181,4 +186,109 @@ test('returns distinct Team/Project guards and one version guard for a shared ow
     'ProjectDirectoryTable',
     'WorkspaceAccessTable',
   ])
+})
+
+test('binds every configured Project and member reference to settings persistence', async () => {
+  const projectReads: (string | undefined)[] = []
+  const memberReads: string[] = []
+  const validate = createTriageConfigurationReferenceValidator({
+    async createActiveReferenceConditionChecks(directoryId, teamId, projectId) {
+      projectReads.push(projectId)
+      return [{
+        ConditionCheck: {
+          TableName: 'ProjectDirectoryTable',
+          Key: { directoryId, entryKey: projectId ? `PROJECT#${projectId}` : `TEAM#${teamId}` },
+          ConditionExpression: 'attribute_not_exists(archivedAt)',
+        },
+      }, ...(projectId ? [{
+        ConditionCheck: {
+          TableName: 'ProjectDirectoryTable',
+          Key: { directoryId, entryKey: `PROJECT#${projectId}` },
+          ConditionExpression: 'attribute_not_exists(archivedAt)',
+        },
+      }] : [])]
+    },
+  }, {
+    async createActiveMemberConditionCheck(workspaceId, memberKey) {
+      memberReads.push(memberKey)
+      return {
+        ConditionCheck: {
+          TableName: 'WorkspaceAccessTable',
+          Key: { workspaceId, recordKey: `MEMBER#${memberKey}` },
+          ConditionExpression: '#status = :active AND #version = :version',
+        },
+      }
+    },
+  })
+  const input = {
+    ...CONFIGURATION,
+    expectedRevision: 0,
+    rules: [{
+      id: 'rule-1',
+      name: 'Support',
+      enabled: true,
+      order: 1,
+      sourceKinds: ['form'],
+      keywords: [],
+      teamId: 'support',
+      projectId: 'project-1',
+      owner: { type: 'fixed', ownerUserId: 'Fixed@Example.com' },
+    }],
+    rotations: [{
+      id: 'rotation-1',
+      name: 'Support rotation',
+      memberUserIds: ['Rotate@Example.com'],
+      nextIndex: 0,
+    }],
+    slaPolicies: [{
+      id: 'sla-1',
+      name: 'Support SLA',
+      sourceKinds: ['form'],
+      responseMinutes: 60,
+      escalationOwnerUserId: 'Escalation@Example.com',
+    }],
+  } satisfies UpdateTriageConfigurationInput
+
+  const contribution = await validate('workspace-1', 'support', input)
+
+  expect(projectReads).toEqual([undefined, 'project-1'])
+  expect(memberReads.sort()).toEqual([
+    'escalation@example.com',
+    'fixed@example.com',
+    'rotate@example.com',
+  ])
+  expect(contribution.transactItems).toHaveLength(5)
+})
+
+test('binds assignment destination and owner references to the action transaction', async () => {
+  const validate = createTriageActionReferenceValidator({
+    async createActiveReferenceConditionChecks() {
+      return [{
+        ConditionCheck: {
+          TableName: 'ProjectDirectoryTable',
+          Key: { entryKey: 'TEAM#support' },
+          ConditionExpression: 'attribute_not_exists(archivedAt)',
+        },
+      }]
+    },
+  }, {
+    async createActiveMemberConditionCheck() {
+      return {
+        ConditionCheck: {
+          TableName: 'WorkspaceAccessTable',
+          Key: { recordKey: 'MEMBER#owner@example.com' },
+          ConditionExpression: '#status = :active',
+        },
+      }
+    },
+  })
+
+  const contribution = await validate('workspace-1', 'support', ENTRY, {
+    action: 'assign',
+    expectedRevision: 1,
+    ownerUserId: 'Owner@Example.com',
+    projectId: null,
+  })
+
+  expect(contribution.transactItems).toHaveLength(2)
 })

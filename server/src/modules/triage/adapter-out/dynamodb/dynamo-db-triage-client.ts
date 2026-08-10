@@ -105,6 +105,10 @@ export type DynamoDbTriageClientOptions = {
   resolveWorkItemAction?: ResolveTriageWorkItemAction
   /** Live Project/member validation applied to every admission evaluation attempt. */
   validateAdmission?: TriageAdmissionValidator
+  /** Commit-time guards for every persisted Team configuration reference. */
+  validateConfigurationReferences?: TriageConfigurationReferenceValidator
+  /** Commit-time guards for every assigned Project and Workspace owner reference. */
+  validateActionReferences?: TriageActionReferenceValidator
   /** Test-replaceable clock. */
   now?: () => Date
   /** Test-replaceable entry ID generator. */
@@ -136,6 +140,34 @@ export type TriageAdmissionValidationContribution = {
 export type TriageAdmissionValidator = (
   entry: TriageEntry,
   configuration: TriageConfiguration,
+) => Promise<TriageAdmissionValidationContribution>
+
+/** Builds commit-time guards for references selected by a Team configuration update.
+ *
+ * @param workspaceId Owning Workspace identifier.
+ * @param teamId Configured Team identifier.
+ * @param input Strictly validated replacement configuration.
+ * @returns Directory and membership conditions joined to the configuration transaction.
+ */
+export type TriageConfigurationReferenceValidator = (
+  workspaceId: string,
+  teamId: string,
+  input: UpdateTriageConfigurationInput,
+) => Promise<TriageAdmissionValidationContribution>
+
+/** Builds commit-time guards for references selected by an assignment action.
+ *
+ * @param workspaceId Owning Workspace identifier.
+ * @param teamId Target Team identifier.
+ * @param entry Strongly read current entry.
+ * @param action Validated assignment transition.
+ * @returns Directory and membership conditions joined to the action transaction.
+ */
+export type TriageActionReferenceValidator = (
+  workspaceId: string,
+  teamId: string,
+  entry: TriageEntry,
+  action: Extract<TriageActionInput, { action: 'assign' }>,
 ) => Promise<TriageAdmissionValidationContribution>
 
 /** A source claim returned after a uniqueness conflict. */
@@ -219,6 +251,12 @@ export class DynamoDbTriageClient implements TriageClient {
   /** Optional live reference validator invoked for every admission attempt. */
   private readonly validateAdmission?: TriageAdmissionValidator
 
+  /** Optional commit-time validator for persisted configuration references. */
+  private readonly validateConfigurationReferences?: TriageConfigurationReferenceValidator
+
+  /** Optional commit-time validator for assignment references. */
+  private readonly validateActionReferences?: TriageActionReferenceValidator
+
   /** Test-replaceable clock. */
   private readonly now: () => Date
 
@@ -292,6 +330,8 @@ export class DynamoDbTriageClient implements TriageClient {
     )
     this.resolveWorkItemAction = options.resolveWorkItemAction
     this.validateAdmission = options.validateAdmission
+    this.validateConfigurationReferences = options.validateConfigurationReferences
+    this.validateActionReferences = options.validateActionReferences
     this.now = options.now ?? (() => new Date())
     this.id = options.id ?? (() => `triage_${randomUUID().replaceAll('-', '')}`)
   }
@@ -706,6 +746,9 @@ export class DynamoDbTriageClient implements TriageClient {
       revision: currentRevision + 1,
       updatedAt: now,
     }
+    const referenceValidation = this.validateConfigurationReferences
+      ? await this.validateConfigurationReferences(workspaceId, teamId, input)
+      : undefined
     const condition = current
       ? { expression: 'revision = :expectedRevision', values: { ':expectedRevision': currentRevision } }
       : {
@@ -715,6 +758,7 @@ export class DynamoDbTriageClient implements TriageClient {
     try {
       await this.documentClient.send(new TransactWriteCommand({
         TransactItems: [
+          ...(referenceValidation?.transactItems ?? []),
           {
             Put: {
               TableName: this.tableName,
@@ -1015,7 +1059,7 @@ export class DynamoDbTriageClient implements TriageClient {
         transactItems: [...(resolution.transactItems ?? []), ...triage.transactItems],
       }
     }
-    return createTriageActionTransactionItems({
+    const contribution = createTriageActionTransactionItems({
       tableName: this.tableName,
       entry,
       action,
@@ -1026,6 +1070,20 @@ export class DynamoDbTriageClient implements TriageClient {
       auditContext,
       wakeShardCount: this.wakeShardCount,
     })
+    if (action.action !== 'assign' || !this.validateActionReferences) return contribution
+    const referenceValidation = await this.validateActionReferences(
+      workspaceId,
+      entry.teamId,
+      entry,
+      action,
+    )
+    return {
+      entry: contribution.entry,
+      transactItems: [
+        ...referenceValidation.transactItems,
+        ...contribution.transactItems,
+      ],
+    }
   }
 
   /** Queries an index and strongly reads matching base rows. */
