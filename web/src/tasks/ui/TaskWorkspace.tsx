@@ -45,13 +45,13 @@ import type { WorkItemDependencyCreateDraft } from '../../work-items/model/workI
 import type { WorkItemPersonOption } from '../../work-items/ui/WorkItemFieldsEditor'
 import {
   groupTaskViewItems,
-  type TaskViewGroupValue,
   type TaskViewPresentationSettings,
 } from '../../task-views/model/taskViewPresentation'
 import type { ProjectTask } from '../api/tasks'
 import {
   createAssigneeFilterOptions,
   resolveDueDateFilterLabelKey,
+  resolveProjectTaskGroupValue,
   resolveTaskSortOrderLabelKey,
   taskDueDateFilters,
   taskPriorities,
@@ -358,10 +358,11 @@ export function TaskWorkspace({
     ? groupTaskViewItems(
         tasks,
         taskViewPresentation.groupBy,
-        (task, field) => resolveProjectWorkspaceGroupValue(
+        (task, field) => resolveProjectTaskGroupValue(
           task,
           field,
           configurationsByTeam,
+          configuration,
           t,
         ),
         taskViewPresentation.groupDirection,
@@ -691,39 +692,6 @@ export function TaskWorkspace({
       ) : null}
     </div>
   )
-}
-
-/** Resolves a stable key and visible label for a project board primary group. */
-function resolveProjectWorkspaceGroupValue(
-  task: ProjectTask,
-  field: string,
-  configurationsByTeam: Readonly<Record<string, ResolvedWorkItemConfiguration>>,
-  t: (key: MessageKey) => string,
-): TaskViewGroupValue {
-  const configuration = configurationsByTeam[task.teamId]?.configuration
-  let value: string
-  switch (field) {
-    case 'title': value = task.title; break
-    case 'status': value = configuration?.workflow.statuses.find(
-      (status) => status.id === task.workflowStatusId,
-    )?.name ?? task.workflowStatusId; break
-    case 'assignee': value = task.assigneeName ?? task.assigneeEmail ?? task.assigneeUserId; break
-    case 'dueDate': value = task.dueDate || '—'; break
-    case 'priority': value = t(`tasks.priority.${task.priority}`); break
-    case 'project': value = task.assignedProjectId ?? '—'; break
-    case 'team': value = task.teamId; break
-    default: {
-      const customValue = field.startsWith('custom:')
-        ? task.customFieldValues[field.slice('custom:'.length)]
-        : undefined
-      value = Array.isArray(customValue)
-        ? customValue.join(', ')
-        : customValue === undefined || customValue === null || customValue === ''
-          ? '—'
-          : String(customValue)
-    }
-  }
-  return { key: value, label: value }
 }
 
 /** Props accepted by a filter menu wrapper. */

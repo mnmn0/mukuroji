@@ -10,6 +10,7 @@ import type { BulkOperationSelection } from '../../bulk-operations/model/bulkOpe
 import type { ProjectDirectoryTeam } from '../../projects/api/directory'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import type { WorkspaceMember } from '../../workspace/api/access'
+import type { TaskViewGroupValue } from '../../task-views/model/taskViewPresentation'
 import {
   isCustomFieldApplicable,
   sortCustomFieldDefinitions,
@@ -20,6 +21,8 @@ import {
 } from '../../work-items/model/workItemFilters'
 import {
   formatWorkItemCustomFieldValue,
+  resolveWorkItemAssignee,
+  resolveWorkItemTitle,
   resolveWorkItemWorkflowStatusLabel,
   resolveWorkflowStatusCategory,
   sortWorkflowStatuses,
@@ -637,6 +640,51 @@ export function resolveProjectTaskConfiguration(
 }
 
 /**
+ * Resolves one consistent grouping key and label for a Project task.
+ *
+ * @param task - Project Work Item whose value is being grouped.
+ * @param field - Built-in or custom field used for grouping.
+ * @param configurationsByTeam - Team-specific configurations for aggregate Project views.
+ * @param fallbackConfiguration - Single-Team configuration used when no Team map is available.
+ * @param t - Translator used for localized priority labels.
+ * @returns Stable grouping key and human-readable label.
+ */
+export function resolveProjectTaskGroupValue(
+  task: ProjectTask,
+  field: string,
+  configurationsByTeam: Readonly<Record<string, ResolvedWorkItemConfiguration>>,
+  fallbackConfiguration: WorkItemConfiguration | undefined,
+  t: TaskTranslator,
+): TaskViewGroupValue {
+  const configuration = resolveProjectTaskConfiguration(
+    task,
+    configurationsByTeam,
+    fallbackConfiguration,
+  )
+  let value: string
+  switch (field) {
+    case 'title': value = resolveWorkItemTitle(task); break
+    case 'status': value = resolveWorkItemWorkflowStatusLabel(task, configuration); break
+    case 'assignee': value = resolveWorkItemAssignee(task); break
+    case 'dueDate': value = task.dueDate || '—'; break
+    case 'priority': value = t(`tasks.priority.${task.priority}`); break
+    case 'project': value = task.assignedProjectId ?? '—'; break
+    case 'team': value = task.teamId; break
+    default: {
+      const customValue = field.startsWith('custom:')
+        ? task.customFieldValues[field.slice('custom:'.length)]
+        : undefined
+      value = Array.isArray(customValue)
+        ? customValue.join(', ')
+        : customValue === undefined || customValue === null || customValue === ''
+          ? '—'
+          : String(customValue)
+    }
+  }
+  return { key: value, label: value }
+}
+
+/**
  * Creates Team-scoped workflow columns for a Project task board and status filter.
  *
  * @param tasks - Project tasks that contribute owning Team IDs.
@@ -861,7 +909,7 @@ export function filterAndSortProjectTasks(
     options.definitionFilter,
     options.configuration,
   )
-  const normalizedQuery = options.searchQuery.trim().toLowerCase()
+  const normalizedQuery = options.searchQuery.trim().toLocaleLowerCase()
   const today = options.today ?? new Date()
   const filteredTasks = tasks.filter((task) => {
     const resolvedTaskConfiguration = resolveProjectTaskConfiguration(

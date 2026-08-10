@@ -78,7 +78,11 @@ describe('task-view surface adapters', () => {
     expect(state).toEqual({
       activeTab: 'board',
       assigneeFilter: 'sato@example.com',
-      definitionFilter: { category: 'started', customFieldId: 'risk' },
+      definitionFilter: {
+        category: 'started',
+        customFieldId: 'risk',
+        customFieldValue: 'high',
+      },
       dueDateFilter: 'upcoming',
       priorityFilter: 'high',
       searchQuery: 'launch',
@@ -117,6 +121,28 @@ describe('task-view surface adapters', () => {
     })
 
     expect(next.filters.customFields).toEqual(definition.filters.customFields)
+  })
+
+  test('maps a changed Project custom-field value to a canonical predicate', () => {
+    const definition = createBuiltInTaskViewDefinition(
+      'project',
+      { kind: 'project', projectId: 'refero' },
+      'table',
+    )
+    const next = projectStateToTaskViewDefinition(definition, {
+      ...taskViewDefinitionToProjectState(definition),
+      definitionFilter: {
+        category: 'all',
+        customFieldId: 'impact',
+        customFieldValue: 'launch',
+      },
+    })
+
+    expect(next.filters.customFields).toEqual([{
+      fieldId: 'impact',
+      operator: 'contains',
+      value: 'launch',
+    }])
   })
 
   test('removes cleared Project filters instead of creating no-op empty arrays', () => {
@@ -220,7 +246,11 @@ describe('task-view surface adapters', () => {
     const state = taskViewDefinitionToTeamState(definition)
 
     expect(state).toEqual({
-      definitionFilter: { category: 'started', customFieldId: 'risk' },
+      definitionFilter: {
+        category: 'started',
+        customFieldId: 'risk',
+        customFieldValue: 'high',
+      },
       searchQuery: 'launch',
       statusFilter: 'active',
       viewMode: 'table',

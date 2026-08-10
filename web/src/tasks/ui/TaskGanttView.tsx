@@ -303,6 +303,9 @@ export function TaskGanttView({
     const sequence = nextScheduleRequestSequenceRef.current + 1
     nextScheduleRequestSequenceRef.current = sequence
     activeScheduleHandleRef.current?.cancel()
+    pendingChangeRef.current?.controller.cancel()
+    pendingChangeRef.current = undefined
+    setPendingChange(undefined)
     const handle = onRequestScheduleChange(task, operation)
     activeScheduleHandleRef.current = handle
     const taskKey = createTaskKey(task)

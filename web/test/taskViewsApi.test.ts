@@ -230,10 +230,11 @@ describe('saved task-view API', () => {
     const malformedTeamDefault = {
       ...createSavedTaskViewFixture('invalid-team-default-view'),
       preference: {
+        defaultSource: 'team',
         favorite: false,
-        isDefault: false,
+        isDefault: true,
         isPersonalDefault: false,
-        isTeamDefault: true,
+        isTeamDefault: false,
         pinned: false,
       },
     }
@@ -250,6 +251,25 @@ describe('saved task-view API', () => {
       code: 'InvalidTaskViewResponse',
       status: 502,
     })
+  })
+
+  test('accepts a shadowed Team default preference without an effective source', async () => {
+    const shadowedTeamDefault = {
+      ...createSavedTaskViewFixture('shadowed-team-default-view'),
+      preference: {
+        favorite: false,
+        isDefault: false,
+        isPersonalDefault: false,
+        isTeamDefault: true,
+        pinned: false,
+      },
+    }
+    installJsonResponses([shadowedTeamDefault])
+
+    await expect(getSavedTaskView(
+      'access-token',
+      'shadowed-team-default-view',
+    )).resolves.toEqual(shadowedTeamDefault)
   })
 
   test('rejects invalid layout metadata and preserves classified API errors', async () => {

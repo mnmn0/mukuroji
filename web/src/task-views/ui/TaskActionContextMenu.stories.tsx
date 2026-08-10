@@ -157,9 +157,10 @@ export const Desktop: Story = {
 
 /** Touch-sized bottom sheet at the supported mobile viewport. */
 export const Mobile: Story = {
-  parameters: {
+  globals: {
     viewport: {
-      defaultViewport: 'mobile1',
+      value: 'mobile1',
+      isRotated: false,
     },
   },
   play: async ({ canvasElement }) => {

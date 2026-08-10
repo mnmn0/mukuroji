@@ -1105,7 +1105,10 @@ export function TaskPage() {
     }
   }
 
-  const canMutateProjectTasks = taskViewController.canWrite
+  const canMutateProjectTasks = taskViewController.writableProjectScopes.some((scope) =>
+    scope.projectId === projectId &&
+    (selectedTeamId === undefined || scope.teamId === selectedTeamId)
+  )
   const canCreateProjectTask = canMutateProjectTasks && Boolean(creationTeam) && Object.keys(
     workItemConfigurationLoadResult.configurationsByTeam,
   ).length > 0

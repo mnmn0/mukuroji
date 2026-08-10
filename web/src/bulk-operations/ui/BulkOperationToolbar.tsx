@@ -266,28 +266,26 @@ export function BulkOperationToolbar({
       setPreviewedRequest(request)
       setPreview(nextPreview)
       setOperation(undefined)
-      if (!nextPreview.canApply) {
+      if (!nextPreview.canApply && activeTaskActionRequest) {
         onTaskActionInterrupted?.({
           kind: 'preview-rejected',
           preview: nextPreview,
-          ...(activeTaskActionRequest
-            ? { requestId: activeTaskActionRequest.requestId }
-            : {}),
+          requestId: activeTaskActionRequest.requestId,
         })
         setActiveTaskActionRequest(undefined)
         resetReview()
       }
     } catch (error) {
       setErrorMessage(toBulkErrorMessage(error, t))
-      onTaskActionInterrupted?.({
-        error,
-        kind: 'failed',
-        ...(activeTaskActionRequest
-          ? { requestId: activeTaskActionRequest.requestId }
-          : {}),
-      })
-      setActiveTaskActionRequest(undefined)
-      resetReview()
+      if (activeTaskActionRequest) {
+        onTaskActionInterrupted?.({
+          error,
+          kind: 'failed',
+          requestId: activeTaskActionRequest.requestId,
+        })
+        setActiveTaskActionRequest(undefined)
+        resetReview()
+      }
     } finally {
       setBusyState(undefined)
     }
@@ -319,15 +317,15 @@ export function BulkOperationToolbar({
       onOperationComplete?.(nextOperation)
     } catch (error) {
       setErrorMessage(toBulkErrorMessage(error, t))
-      onTaskActionInterrupted?.({
-        error,
-        kind: 'failed',
-        ...(activeTaskActionRequest
-          ? { requestId: activeTaskActionRequest.requestId }
-          : {}),
-      })
-      setActiveTaskActionRequest(undefined)
-      resetReview()
+      if (activeTaskActionRequest) {
+        onTaskActionInterrupted?.({
+          error,
+          kind: 'failed',
+          requestId: activeTaskActionRequest.requestId,
+        })
+        setActiveTaskActionRequest(undefined)
+        resetReview()
+      }
     } finally {
       setBusyState(undefined)
     }

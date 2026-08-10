@@ -11,7 +11,7 @@ import {
   type TaskViewWorkflowStatusFilter,
   type UpdateSavedTaskViewInput,
 } from '@mukuroji/contracts'
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
 import {
   createSavedTaskView,
@@ -277,19 +277,12 @@ export function useTaskViewController(
   const [mutationRunner] = useState(() => createMutationRequestRunner())
   const [isSaving, setIsSaving] = useState(false)
   const [mutationErrorMessage, setMutationErrorMessage] = useState<string>()
-  const isMountedRef = useRef(true)
   const latestUrlInputRef = useRef({
     onSearchParamsChange: input.onSearchParamsChange,
     scope: input.scope,
     searchParams: input.searchParams,
     surface: input.surface,
   })
-  useEffect(() => {
-    isMountedRef.current = true
-    return () => {
-      isMountedRef.current = false
-    }
-  }, [])
   useLayoutEffect(() => {
     latestUrlInputRef.current = {
       onSearchParamsChange: input.onSearchParamsChange,
@@ -297,12 +290,7 @@ export function useTaskViewController(
       searchParams: input.searchParams,
       surface: input.surface,
     }
-  }, [
-    input.onSearchParamsChange,
-    input.scope,
-    input.searchParams,
-    input.surface,
-  ])
+  }, [input.onSearchParamsChange, input.scope, input.searchParams, input.surface])
   const {
     data: savedTaskViewCollection,
     error: savedViewsError,
@@ -424,7 +412,6 @@ export function useTaskViewController(
     viewId: string | undefined,
     override: TaskViewUrlOverride | undefined,
   ) => {
-    if (!isMountedRef.current) return
     if (createCurrentUrlFingerprint() !== startedUrlFingerprint) return
     commitUrl(viewId, override)
   }

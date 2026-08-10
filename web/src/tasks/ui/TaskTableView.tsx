@@ -22,7 +22,6 @@ import type { TaskViewPresentationSettings } from '../../task-views/model/taskVi
 import {
   groupTaskViewItems,
   resolveTaskViewTableColumnPlacements,
-  type TaskViewGroupValue,
   type TaskViewTableColumnPlacement,
 } from '../../task-views/model/taskViewPresentation'
 import {
@@ -47,6 +46,7 @@ import {
   createTaskKey,
   isTaskOverdue,
   resolveProjectTaskConfiguration,
+  resolveProjectTaskGroupValue,
   resolveTaskCustomFieldEntries,
   resolveTaskPriority,
   taskPriorities,
@@ -278,7 +278,8 @@ export function TaskTableView({
         (task, field) => resolveProjectTaskGroupValue(
           task,
           field,
-          resolveProjectTaskConfiguration(task, configurationsByTeam, configuration),
+          configurationsByTeam,
+          configuration,
           t,
         ),
         presentation.groupDirection,
@@ -562,11 +563,8 @@ export function TaskTableView({
                         (task, field) => resolveProjectTaskGroupValue(
                           task,
                           field,
-                          resolveProjectTaskConfiguration(
-                            task,
-                            configurationsByTeam,
-                            configuration,
-                          ),
+                          configurationsByTeam,
+                          configuration,
                           t,
                         ),
                         presentation.subgroupDirection,
@@ -659,36 +657,6 @@ function TaskTableGroupRow({
       </th>
     </tr>
   )
-}
-
-/** Resolves a stable key and visible label for one project task grouping field. */
-function resolveProjectTaskGroupValue(
-  task: ProjectTask,
-  field: string,
-  configuration: WorkItemConfiguration | undefined,
-  t: TaskTableTranslator,
-): TaskViewGroupValue {
-  let value: string
-  switch (field) {
-    case 'title': value = resolveWorkItemTitle(task); break
-    case 'status': value = resolveWorkItemWorkflowStatusLabel(task, configuration); break
-    case 'assignee': value = resolveWorkItemAssignee(task); break
-    case 'dueDate': value = task.dueDate || '—'; break
-    case 'priority': value = t(`tasks.priority.${task.priority}`); break
-    case 'project': value = task.assignedProjectId ?? '—'; break
-    case 'team': value = task.teamId; break
-    default: {
-      const customValue = field.startsWith('custom:')
-        ? task.customFieldValues[field.slice('custom:'.length)]
-        : undefined
-      value = Array.isArray(customValue)
-        ? customValue.join(', ')
-        : customValue === undefined || customValue === null || customValue === ''
-          ? '—'
-          : String(customValue)
-    }
-  }
-  return { key: value, label: value }
 }
 
 /**

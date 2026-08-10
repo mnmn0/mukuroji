@@ -74,13 +74,15 @@ export function TaskActionContextMenu({
   const menuRef = useRef<HTMLDivElement>(null)
   const itemRefs = useRef<Array<HTMLButtonElement | null>>([])
   const returnFocusRef = useRef(returnFocusElement)
+  const anchorX = anchorPoint.x
+  const anchorY = anchorPoint.y
   const items = useMemo(
     () => createTaskActionContextMenuItems(registry, labels, context, actionIds),
     [actionIds, context, labels, registry],
   )
   const [layout, setLayout] = useState(() =>
     resolveTaskActionContextMenuLayout(
-      anchorPoint,
+      { x: anchorX, y: anchorY },
       readViewportWidth(),
       readViewportHeight(),
       taskActionContextMenuWidth,
@@ -121,7 +123,7 @@ export function TaskActionContextMenu({
     const updateLayout = () => {
       const menu = menuRef.current
       setLayout(resolveTaskActionContextMenuLayout(
-        anchorPoint,
+        { x: anchorX, y: anchorY },
         readViewportWidth(),
         readViewportHeight(),
         menu?.offsetWidth ?? taskActionContextMenuWidth,
@@ -133,7 +135,7 @@ export function TaskActionContextMenu({
     if (typeof window === 'undefined') return
     window.addEventListener('resize', updateLayout)
     return () => window.removeEventListener('resize', updateLayout)
-  }, [anchorPoint, items.length])
+  }, [anchorX, anchorY, items.length])
 
   /** Moves focus through every visible item, including disabled reasons. */
   const moveActiveItem = (offset: number) => {

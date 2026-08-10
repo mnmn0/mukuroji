@@ -54,7 +54,7 @@ const readOnlySharedView: TaskViewOption = {
 }
 
 describe('TaskViewToolbar', () => {
-  test('exposes pressed state only for preference toggles', () => {
+  test('exposes checked state only for preference toggles', () => {
     const inactiveToggle = renderToStaticMarkup(
       <TaskViewPreferenceButton
         active={false}
@@ -66,8 +66,8 @@ describe('TaskViewToolbar', () => {
       <TaskViewPreferenceButton label="複製" onClick={() => undefined} />,
     )
 
-    expect(inactiveToggle).toContain('aria-pressed="false"')
-    expect(lifecycleAction).not.toContain('aria-pressed')
+    expect(inactiveToggle).toContain('aria-checked="false"')
+    expect(lifecycleAction).not.toContain('aria-checked')
   })
 
   test('renders selected-view update, save-as, reset, permalink, and settings entry points', () => {

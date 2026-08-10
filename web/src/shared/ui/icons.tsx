@@ -145,8 +145,7 @@ export function StarIcon({ className = iconClass, filled = false }: IconProps & 
   return (
     <svg
       aria-hidden="true"
-      className={className}
-      fill={filled ? 'currentColor' : 'none'}
+      className={`${className} ${filled ? 'fill-current' : 'fill-none'}`}
       stroke="currentColor"
       strokeLinecap="round"
       strokeLinejoin="round"
@@ -171,8 +170,7 @@ export function PinIcon({ className = iconClass, filled = false }: IconProps & {
   return (
     <svg
       aria-hidden="true"
-      className={className}
-      fill={filled ? 'currentColor' : 'none'}
+      className={`${className} ${filled ? 'fill-current' : 'fill-none'}`}
       stroke="currentColor"
       strokeLinecap="round"
       strokeLinejoin="round"

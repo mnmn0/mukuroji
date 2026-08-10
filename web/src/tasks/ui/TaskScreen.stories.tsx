@@ -936,8 +936,12 @@ export const TimelinePreviewUnmounted: Story = {
       canvas.getByTestId('late-timeline-preview-count'),
     ).toHaveTextContent('1'))
     await userEvent.click(canvas.getByTestId('late-timeline-unmount'))
+    await waitFor(() => expect(
+      canvas.queryByTestId('task-gantt-timeline-wireframe'),
+    ).not.toBeInTheDocument())
     await userEvent.click(canvas.getByTestId('late-timeline-resolve-preview'))
-    await waitFor(() => expect(documentBody.queryByRole('dialog')).not.toBeInTheDocument())
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(documentBody.queryByRole('dialog')).not.toBeInTheDocument()
   },
 }
 
@@ -955,9 +959,11 @@ export const TimelinePreviewAfterTabSwitch: Story = {
       canvas.getByTestId('late-timeline-preview-count'),
     ).toHaveTextContent('1'))
     await userEvent.click(canvas.getByTestId('late-timeline-switch-tab'))
+    await waitFor(() => expect(canvas.getByTestId('tasks-count')).toBeInTheDocument())
     await userEvent.click(canvas.getByTestId('late-timeline-resolve-preview'))
-    await waitFor(() => expect(documentBody.queryByRole('dialog')).not.toBeInTheDocument())
-    await expect(canvas.queryByTestId('task-gantt-timeline-wireframe')).not.toBeInTheDocument()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(documentBody.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(canvas.queryByTestId('task-gantt-timeline-wireframe')).not.toBeInTheDocument()
   },
 }
 

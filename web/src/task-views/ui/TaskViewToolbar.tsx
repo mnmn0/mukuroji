@@ -615,7 +615,7 @@ type PreferenceButtonProps = {
  * Renders one compact preference toggle or lifecycle action.
  *
  * @param props - Visible label, optional toggle state, and action callback.
- * @returns An accessible menu item that exposes pressed state only for toggles.
+ * @returns An accessible menu item that exposes checked state for toggles.
  */
 export function TaskViewPreferenceButton({
   active,
@@ -628,7 +628,7 @@ export function TaskViewPreferenceButton({
   const isActive = active === true
   return (
     <button
-      aria-pressed={active}
+      aria-checked={active}
       className={`flex min-h-9 w-full items-center gap-2 rounded-md px-2.5 text-left text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${
         danger
           ? 'text-red-700 hover:bg-red-50'
@@ -638,7 +638,7 @@ export function TaskViewPreferenceButton({
       }`}
       disabled={disabled}
       onClick={onClick}
-      role="menuitem"
+      role={active === undefined ? 'menuitem' : 'menuitemcheckbox'}
       type="button"
     >
       {icon}

@@ -307,8 +307,6 @@ export function MyTasksWorkspaceView({
           const primaryHeadingByTaskKey = new Map<string, (typeof primaryCardGroups)[number]>()
           const secondaryHeadingByTaskKey = new Map<string, string>()
           for (const primaryGroup of primaryCardGroups) {
-            const firstTask = primaryGroup.items[0]
-            if (firstTask) primaryHeadingByTaskKey.set(createWorkspaceTaskKey(firstTask), primaryGroup)
             const secondaryGroups = secondaryCardGroupField
               ? groupTaskViewItems(
                   primaryGroup.items,
@@ -323,6 +321,11 @@ export function MyTasksWorkspaceView({
                   presentation?.subgroupDirection,
                 )
               : []
+            const orderedPrimaryItems = secondaryGroups.length > 0
+              ? secondaryGroups.flatMap((secondaryGroup) => secondaryGroup.items)
+              : primaryGroup.items
+            const firstTask = orderedPrimaryItems[0]
+            if (firstTask) primaryHeadingByTaskKey.set(createWorkspaceTaskKey(firstTask), primaryGroup)
             if (secondaryGroups.length > 0) {
               for (const secondaryGroup of secondaryGroups) {
                 const firstSecondaryTask = secondaryGroup.items[0]

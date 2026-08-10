@@ -204,11 +204,11 @@ export const TeamEffectiveDefault: Story = {
   play: async ({ args, canvasElement }) => {
     const canvas = within(canvasElement)
     await userEvent.click(canvas.getByRole('button', { name: t('tasks.action.more') }))
-    const personalDefaultButton = canvas.getByRole('menuitem', {
+    const personalDefaultButton = canvas.getByRole('menuitemcheckbox', {
       name: t('search.saved.makeDefault'),
     })
 
-    await expect(personalDefaultButton).toHaveAttribute('aria-pressed', 'false')
+    await expect(personalDefaultButton).toHaveAttribute('aria-checked', 'false')
     await userEvent.click(personalDefaultButton)
     await expect(args.onPatchPreference).toHaveBeenCalledWith('team-delivery', {
       isDefault: true,

@@ -54,7 +54,7 @@ test('keeps the unprocessed DynamoDB page behind the opaque search cursor', asyn
   expect(first.results.map((result) => result.id)).toEqual([documents[0]?.entityId])
   expect(second.results.map((result) => result.id)).toEqual([documents[1]?.entityId])
   expect(first.nextCursor).toBeString()
-  expect(client.search({
+  await expect(client.search({
     ...input,
     cursor: first.nextCursor,
     filters: { keyword: 'different query' },
@@ -217,7 +217,7 @@ test('binds live projections to a deterministic server-owned content digest', as
   })).results.map((result) => result.id)).toEqual([
     'team/core/issue/issue-1',
   ])
-  expect(corruptClient.search({
+  await expect(corruptClient.search({
     workspaceId: 'workspace-1',
     access,
   })).rejects.toMatchObject({
@@ -801,7 +801,7 @@ test('keeps personal saved views private and detects stale revisions', async () 
   })])
   expect(otherViews.views).toEqual([])
   control.failNextTransaction = true
-  expect(client.updateSavedView({
+  await expect(client.updateSavedView({
     workspaceId: 'workspace-1',
     viewId: created.id,
     access: ownerAccess,
@@ -838,7 +838,7 @@ test('keeps personal saved views private and detects stale revisions', async () 
     favorite: false,
     isDefault: false,
   })
-  expect(client.updateSavedView({
+  await expect(client.updateSavedView({
     workspaceId: 'workspace-1',
     viewId: created.id,
     access: ownerAccess,
@@ -900,7 +900,7 @@ test('does not persist a partial saved view when its transaction fails', async (
     },
   }
 
-  expect(client.createSavedView(request)).rejects.toThrow('transaction failed')
+  await expect(client.createSavedView(request)).rejects.toThrow('transaction failed')
   expect((await client.listSavedViews({ workspaceId: 'workspace-1', access })).views).toEqual([])
 
   const created = await client.createSavedView(request)
@@ -908,7 +908,7 @@ test('does not persist a partial saved view when its transaction fails', async (
     views: [expect.objectContaining({ id: created.id, favorite: true, isDefault: true })],
   })
   control.failNextTransaction = true
-  expect(client.deleteSavedView({
+  await expect(client.deleteSavedView({
     workspaceId: 'workspace-1',
     viewId: created.id,
     expectedRevision: 1,
@@ -962,7 +962,7 @@ test('replays idempotent saved view creation and rejects a changed payload', asy
   expect(replayed).toEqual(created)
   expect(await client.listSavedViews({ workspaceId: 'workspace-1', access }))
     .toMatchObject({ views: [expect.objectContaining({ id: created.id })] })
-  expect(client.createSavedView({
+  await expect(client.createSavedView({
     ...request,
     input: { ...request.input, name: 'Changed payload' },
   })).rejects.toMatchObject({
@@ -1024,13 +1024,13 @@ test('returns definition edit authority without blocking viewer preferences', as
     access: memberAccess,
     input: { expectedRevision: 1, favorite: true, isDefault: false },
   }
-  expect(client.updateSavedView(preferenceUpdate)).rejects.toMatchObject({
+  await expect(client.updateSavedView(preferenceUpdate)).rejects.toMatchObject({
     code: 'SavedViewRevisionConflict',
     status: 409,
   })
   expect(await client.updateSavedView(preferenceUpdate))
     .toMatchObject({ revision: 1, canEdit: false, favorite: true, isDefault: false })
-  expect(client.updateSavedView({
+  await expect(client.updateSavedView({
     workspaceId: 'workspace-1',
     viewId: created.id,
     access: memberAccess,
@@ -1233,7 +1233,7 @@ test('filters task views by surface and scope and binds cursors to that context'
     limit: 1,
   })
   expect(firstPage.nextCursor).toBeString()
-  expect(client.listTaskViews({
+  await expect(client.listTaskViews({
     workspaceId: 'workspace-1',
     surface: 'project',
     scope: { kind: 'project', projectId: 'project-2', teamId: 'core' },
@@ -1415,7 +1415,7 @@ test('keeps Project scope authorization Team-qualified and rejects mismatched Te
     displayOptions: {},
   }
 
-  expect(client.createTaskView({
+  await expect(client.createTaskView({
     workspaceId: 'workspace-1',
     access,
     input: {
@@ -1430,7 +1430,7 @@ test('keeps Project scope authorization Team-qualified and rejects mismatched Te
     },
   })).rejects.toMatchObject({ code: 'TaskViewAccessDenied', status: 403 })
 
-  expect(client.createTaskView({
+  await expect(client.createTaskView({
     workspaceId: 'workspace-1',
     access,
     input: {
@@ -1446,7 +1446,7 @@ test('keeps Project scope authorization Team-qualified and rejects mismatched Te
     },
   })).rejects.toMatchObject({ code: 'TaskViewAccessDenied', status: 403 })
 
-  expect(client.createTaskView({
+  await expect(client.createTaskView({
     workspaceId: 'workspace-1',
     access: {
       ...access,
@@ -1528,7 +1528,7 @@ test('binds every task view mutation to its authoritative writable resource scop
     viewId: projectBView.id,
     access: projectAWriter,
   })).toMatchObject({ id: projectBView.id, canEdit: false })
-  expect(client.createTaskView({
+  await expect(client.createTaskView({
     workspaceId: 'workspace-1',
     access: projectAWriter,
     input: {
@@ -1537,7 +1537,7 @@ test('binds every task view mutation to its authoritative writable resource scop
       definition: projectDefinition('team-b', 'project-b'),
     },
   })).rejects.toMatchObject({ code: 'TaskViewAccessDenied', status: 403 })
-  expect(client.createTaskView({
+  await expect(client.createTaskView({
     workspaceId: 'workspace-1',
     access: projectAWriter,
     input: {
@@ -1551,26 +1551,26 @@ test('binds every task view mutation to its authoritative writable resource scop
       },
     },
   })).rejects.toMatchObject({ code: 'TaskViewAccessDenied', status: 403 })
-  expect(client.updateTaskView({
+  await expect(client.updateTaskView({
     workspaceId: 'workspace-1',
     viewId: projectBView.id,
     access: projectAWriter,
     input: { expectedRevision: 1, favorite: true },
   })).rejects.toMatchObject({ code: 'TaskViewAccessDenied', status: 403 })
-  expect(client.duplicateTaskView({
+  await expect(client.duplicateTaskView({
     workspaceId: 'workspace-1',
     sourceViewId: projectBView.id,
     access: projectAWriter,
     input: { visibility: 'personal' },
   })).rejects.toMatchObject({ code: 'TaskViewAccessDenied', status: 403 })
-  expect(client.deleteTaskView({
+  await expect(client.deleteTaskView({
     workspaceId: 'workspace-1',
     viewId: projectBView.id,
     expectedRevision: 1,
     access: projectAWriter,
   })).rejects.toMatchObject({ code: 'TaskViewAccessDenied', status: 403 })
 
-  expect(client.createTaskView({
+  await expect(client.createTaskView({
     workspaceId: 'workspace-1',
     access: projectAWriter,
     input: {
@@ -1579,7 +1579,7 @@ test('binds every task view mutation to its authoritative writable resource scop
       definition: projectDefinition('team-a', 'project-a'),
     },
   })).resolves.toMatchObject({ name: 'Project A queue' })
-  expect(client.createTaskView({
+  await expect(client.createTaskView({
     workspaceId: 'workspace-1',
     access: projectAWriter,
     input: {
@@ -1616,7 +1616,7 @@ test('reads personal Focus views and rejects Triage until its queue ownership is
     projectScopeKeys: new Set<string>(),
     writableProjectScopeKeys: new Set<string>(),
   }
-  expect(client.createTaskView({
+  await expect(client.createTaskView({
     workspaceId: 'workspace-1',
     access: ownerAccess,
     input: {
@@ -1662,7 +1662,7 @@ test('reads personal Focus views and rejects Triage until its queue ownership is
     viewId: created.id,
     access: ownerAccess,
   })).toMatchObject({ id: created.id, definition: { surface: 'focus' } })
-  expect(client.getTaskView({
+  await expect(client.getTaskView({
     workspaceId: 'workspace-1',
     viewId: created.id,
     access: { ...ownerAccess, viewerUserId: 'other@example.com' },
@@ -1795,13 +1795,13 @@ test('resolves personal defaults before Team defaults and falls back after clear
     viewId: teamDefault.id,
     access: managerAccess,
   })).toMatchObject({ preference: { isDefault: true, defaultSource: 'team' } })
-  expect(client.updateTaskView({
+  await expect(client.updateTaskView({
     workspaceId: 'workspace-1',
     viewId: teamDefault.id,
     access: memberAccess,
     input: { expectedRevision: 1, defaultSource: null },
   })).rejects.toMatchObject({ code: 'TaskViewAccessDenied', status: 403 })
-  expect(client.updateTaskView({
+  await expect(client.updateTaskView({
     workspaceId: 'workspace-1',
     viewId: teamDefault.id,
     access: memberAccess,
@@ -2459,7 +2459,7 @@ test('rejects a normalized task view definition that exceeds the DynamoDB item b
     readableCustomFieldIds: new Set(fieldIds),
   }
 
-  expect(client.createTaskView({
+  await expect(client.createTaskView({
     workspaceId: 'workspace-1',
     access,
     input: {
@@ -2569,7 +2569,7 @@ test('replays task view updates without reverting newer preference, default, or 
     viewId: replacement.id,
     access,
   })).toMatchObject({ preference: { isDefault: true, isPersonalDefault: true } })
-  expect(client.updateTaskView({
+  await expect(client.updateTaskView({
     ...firstRequest,
     input: { expectedRevision: 1, favorite: false, defaultSource: 'personal' },
   })).rejects.toMatchObject({ code: 'TaskViewIdempotencyConflict', status: 409 })
@@ -2609,7 +2609,7 @@ test('replays task view updates without reverting newer preference, default, or 
     idempotencyKey: 'atomic-update',
     input: { expectedRevision: 3, pinned: true },
   }
-  expect(client.updateTaskView(atomicRequest)).rejects.toThrow('transaction failed')
+  await expect(client.updateTaskView(atomicRequest)).rejects.toThrow('transaction failed')
   let atomicReceiptRecordKey: string | undefined
   control.beforeNextTransaction = (_items, transactItems) => {
     const receipt = transactItems
@@ -2789,11 +2789,11 @@ test('replays task view deletion from a durable actor-bound receipt', async () =
 
   const deleted = await client.deleteTaskView(request)
   expect(await client.deleteTaskView(request)).toEqual(deleted)
-  expect(client.deleteTaskView({
+  await expect(client.deleteTaskView({
     ...request,
     expectedRevision: 2,
   })).rejects.toMatchObject({ code: 'TaskViewIdempotencyConflict', status: 409 })
-  expect(client.deleteTaskView({
+  await expect(client.deleteTaskView({
     ...request,
     access: { ...access, viewerUserId: 'other@example.com' },
   })).rejects.toMatchObject({ code: 'TaskViewNotFound', status: 404 })
@@ -2809,7 +2809,7 @@ test('replays task view deletion from a durable actor-bound receipt', async () =
     expectedRevision: 1,
     access,
   })
-  expect(client.deleteTaskView({
+  await expect(client.deleteTaskView({
     workspaceId: 'workspace-1',
     viewId: withoutKey.id,
     expectedRevision: 1,
@@ -2878,7 +2878,7 @@ test('rejects task view updates when a concurrent delete removes the live row', 
       deletedAt: '2026-08-09T00:00:00.000Z',
     })
   }
-  expect(client.updateTaskView({
+  await expect(client.updateTaskView({
     workspaceId: 'workspace-1',
     viewId: definitionTarget.id,
     access,
@@ -2899,7 +2899,7 @@ test('rejects task view updates when a concurrent delete removes the live row', 
       deletedAt: '2026-08-09T00:00:00.000Z',
     })
   }
-  expect(client.updateTaskView({
+  await expect(client.updateTaskView({
     workspaceId: 'workspace-1',
     viewId: preferenceTarget.id,
     access,
@@ -2983,7 +2983,7 @@ test('returns a stable conflict when deletion commits between create replay read
     })
   }
 
-  expect(client.createTaskView(createRequest)).rejects.toMatchObject({
+  await expect(client.createTaskView(createRequest)).rejects.toMatchObject({
     code: 'TaskViewIdempotencyConflict',
     status: 409,
   })
@@ -3084,7 +3084,7 @@ test('prevents idempotent recreation from reviving another viewer preference lif
       return isMemoryRecord(key) && key.recordKey === expectedTombstoneRecordKey
     })
   }
-  expect(client.createTaskView(createRequest)).rejects.toMatchObject({
+  await expect(client.createTaskView(createRequest)).rejects.toMatchObject({
     code: 'TaskViewIdempotencyConflict',
     status: 409,
   })

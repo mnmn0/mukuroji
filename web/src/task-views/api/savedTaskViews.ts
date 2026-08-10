@@ -567,8 +567,7 @@ function isSavedTaskViewPreference(value: unknown): value is SavedTaskViewPrefer
 
   if (!value.isDefault) {
     return value.defaultSource === undefined &&
-      !value.isPersonalDefault &&
-      !value.isTeamDefault
+      !value.isPersonalDefault
   }
   if (value.defaultSource === 'personal') {
     return value.isPersonalDefault

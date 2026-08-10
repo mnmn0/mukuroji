@@ -12,7 +12,10 @@ import {
   matchesTaskDueDateFilter,
   type TaskScreenViewState,
 } from '../../tasks/model/taskView'
-import type { WorkItemDefinitionFilter } from '../../work-items/model/workItemFilters'
+import {
+  hasWorkItemDefinitionFilterValue,
+  type WorkItemDefinitionFilter,
+} from '../../work-items/model/workItemFilters'
 import type { TaskViewPresentationSettings } from './taskViewPresentation'
 
 const defaultTaskViewColumns = [
@@ -144,6 +147,7 @@ export function taskViewDefinitionToProjectState(
 ): TaskScreenViewState {
   const workflowStatus = definition.filters.workflowStatuses?.[0]
   const customField = definition.filters.customFields?.[0]
+  const customFieldValue = readTaskViewCustomFieldValue(customField)
   return {
     activeTab: isProjectTaskLayout(definition.layout.mode)
       ? definition.layout.mode
@@ -152,6 +156,7 @@ export function taskViewDefinitionToProjectState(
     definitionFilter: {
       category: definition.filters.workflowCategories?.[0] ?? 'all',
       customFieldId: customField?.fieldId ?? '',
+      ...(customFieldValue !== undefined ? { customFieldValue } : {}),
     },
     dueDateFilter: readProjectDueDateFilter(definition.filters.dueDatePreset),
     priorityFilter: definition.filters.priorities?.[0] ?? 'all',
@@ -212,12 +217,19 @@ export function projectStateToTaskViewDefinition(
       )
     }
   }
-  if (state.definitionFilter.customFieldId !== currentState.definitionFilter.customFieldId) {
+  if (
+    state.definitionFilter.customFieldId !== currentState.definitionFilter.customFieldId ||
+    !valuesEqual(
+      state.definitionFilter.customFieldValue,
+      currentState.definitionFilter.customFieldValue,
+    )
+  ) {
     if (!state.definitionFilter.customFieldId) delete filters.customFields
     else {
       filters.customFields = updatePrimaryCustomFieldFilter(
         definition.filters.customFields,
         state.definitionFilter.customFieldId,
+        state.definitionFilter.customFieldValue,
       )
     }
   }
@@ -261,10 +273,13 @@ export function taskViewDefinitionToTeamState(
   definition: TaskViewDefinition,
 ): TeamIssueViewState {
   const workflowStatus = definition.filters.workflowStatuses?.[0]
+  const customField = definition.filters.customFields?.[0]
+  const customFieldValue = readTaskViewCustomFieldValue(customField)
   return {
     definitionFilter: {
       category: definition.filters.workflowCategories?.[0] ?? 'all',
-      customFieldId: definition.filters.customFields?.[0]?.fieldId ?? '',
+      customFieldId: customField?.fieldId ?? '',
+      ...(customFieldValue !== undefined ? { customFieldValue } : {}),
     },
     searchQuery: definition.filters.keyword ?? '',
     statusFilter: workflowStatus?.statusId ?? 'all',
@@ -314,12 +329,19 @@ export function teamStateToTaskViewDefinition(
       )
     }
   }
-  if (state.definitionFilter.customFieldId !== currentState.definitionFilter.customFieldId) {
+  if (
+    state.definitionFilter.customFieldId !== currentState.definitionFilter.customFieldId ||
+    !valuesEqual(
+      state.definitionFilter.customFieldValue,
+      currentState.definitionFilter.customFieldValue,
+    )
+  ) {
     if (!state.definitionFilter.customFieldId) delete filters.customFields
     else {
       filters.customFields = updatePrimaryCustomFieldFilter(
         definition.filters.customFields,
         state.definitionFilter.customFieldId,
+        state.definitionFilter.customFieldValue,
       )
     }
   }
@@ -551,7 +573,7 @@ export function filterTasksByTaskViewDefinition(
     )) return false
     if (
       definition.filters.relationIds?.length &&
-      !definition.filters.relationIds.some((relationId) => task.relationIds.includes(relationId))
+      !definition.filters.relationIds.every((relationId) => task.relationIds.includes(relationId))
     ) return false
     if (definition.filters.date && !matchesTaskDateRange(task, definition.filters.date)) {
       return false
@@ -687,16 +709,53 @@ function compareTaskViewValues(
 function updatePrimaryCustomFieldFilter(
   filters: readonly SearchCustomFieldFilter[] | undefined,
   fieldId: string,
+  value: WorkItemDefinitionFilter['customFieldValue'],
 ): SearchCustomFieldFilter[] {
   if (!fieldId) return []
-  if (filters?.[0]?.fieldId === fieldId) return filters.map((filter) => ({ ...filter }))
+  const existingFilter = filters?.[0]?.fieldId === fieldId ? filters[0] : undefined
+  const primaryFilter = createPrimaryCustomFieldFilter(fieldId, value, existingFilter)
   return [
-    { fieldId, operator: 'is-not-empty' },
+    primaryFilter,
     ...(filters ?? [])
       .slice(1)
       .filter((filter) => filter.fieldId !== fieldId)
       .map((filter) => ({ ...filter })),
   ]
+}
+
+/** Reads a supported custom-field value from a canonical predicate for surface controls. */
+function readTaskViewCustomFieldValue(
+  filter: SearchCustomFieldFilter | undefined,
+): WorkItemDefinitionFilter['customFieldValue'] {
+  if (
+    !filter ||
+    filter.operator === 'is-empty' ||
+    filter.operator === 'is-not-empty' ||
+    filter.value === null
+  ) {
+    return undefined
+  }
+  return filter.value
+}
+
+/** Creates the canonical primary predicate represented by a surface custom-field control. */
+function createPrimaryCustomFieldFilter(
+  fieldId: string,
+  value: WorkItemDefinitionFilter['customFieldValue'],
+  existingFilter: SearchCustomFieldFilter | undefined,
+): SearchCustomFieldFilter {
+  if (!hasWorkItemDefinitionFilterValue(value)) {
+    return { fieldId, operator: 'is-not-empty' }
+  }
+
+  const operator = existingFilter &&
+      existingFilter.operator !== 'is-empty' &&
+      existingFilter.operator !== 'is-not-empty'
+    ? existingFilter.operator
+    : typeof value === 'string' || Array.isArray(value)
+      ? 'contains'
+      : 'equals'
+  return { fieldId, operator, value }
 }
 
 /**
