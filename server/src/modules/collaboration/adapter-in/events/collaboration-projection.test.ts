@@ -20,6 +20,7 @@ import {
   mergeDeletedObjectTags,
   parseAuditProjectionEvent,
   projectCuratedContextSearchEvent,
+  projectCuratedContextSearchEventWithParentFence,
   processCollaborationProjectionBatch,
   publishRealtimeInvalidation,
   refreshScheduledNotificationEvent,
@@ -309,6 +310,50 @@ describe('collaboration projection pure helpers', () => {
         },
       },
     )).rejects.toBe(projectionFailure)
+  })
+
+  test('does not acknowledge a context search projection when the parent assignment changes', async () => {
+    const upserts: CuratedContextSearchProjectionInput[] = []
+    const deletions: CuratedContextSearchProjectionInput[] = []
+    const scopes = [
+      { checked: true, exists: true, projectId: 'platform' },
+      { checked: true, exists: true, projectId: 'product' },
+    ]
+    let readCount = 0
+    const event = createProjectionEvent({
+      eventType: 'context-item.created',
+      teamId: 'core',
+      issueId: 'example',
+      projectId: 'platform',
+      contextItemId: 'context-1',
+      targetId: 'team/core/issue/example/context-item/context-1',
+    })
+
+    await expect(projectCuratedContextSearchEventWithParentFence(event, {
+      async upsertCurrent(input) {
+        upserts.push(input)
+      },
+      async deleteCurrent(input) {
+        deletions.push(input)
+      },
+    }, async () => scopes[readCount++] ?? scopes.at(-1)!)).rejects.toThrow(
+      'parent scope changed during projection',
+    )
+
+    expect(upserts).toEqual([{
+      workspaceId: 'workspace-1',
+      teamId: 'core',
+      issueId: 'example',
+      projectId: 'platform',
+      contextItemId: 'context-1',
+    }])
+    expect(deletions).toEqual([{
+      workspaceId: 'workspace-1',
+      teamId: 'core',
+      issueId: 'example',
+      projectId: 'platform',
+      contextItemId: 'context-1',
+    }])
   })
 
   test('fails closed when curated context audit scope metadata is incomplete', async () => {

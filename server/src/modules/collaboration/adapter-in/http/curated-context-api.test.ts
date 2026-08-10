@@ -1025,6 +1025,102 @@ test('does not capture a Document when its Project authorization changes during 
   expect(createCalled).toBeFalse()
 })
 
+test('does not expose a document snapshot when Project authorization changes during reconciliation', async () => {
+  configureFakeProjectClients(true)
+  let planningRevision = 0
+  let documentReads = 0
+  const baseDependencies = getTestAppDependencies()
+  setTestAppDependencies({
+    planning: {
+      async getAuthorizationRevision() {
+        return planningRevision
+      },
+    } as unknown as PlanningClient,
+    projectDirectory: {
+      ...baseDependencies.workspace.projectDirectory,
+      async getProjectAccessList() {
+        return [{ projectId: 'refero', role: 'manager' as const }]
+      },
+    },
+    documents: createDocumentFake({
+      async get() {
+        documentReads += 1
+        if (documentReads === 1) {
+          planningRevision = 1
+          return {
+            schemaVersion: 1,
+            id: 'document-1',
+            kind: 'page',
+            scope: { type: 'project', projectId: 'refero' },
+            title: 'Private source',
+            position: 'a0',
+            revision: 3,
+            permission: { mode: 'inherit', memberGrants: [] },
+            relations: [],
+            favorite: false,
+            capabilities: {
+              canView: true,
+              canEdit: false,
+              canComment: false,
+              canShare: false,
+              canManagePermissions: false,
+              canArchive: false,
+              canRestore: false,
+              canExport: false,
+            },
+            createdByUserId: 'demo@example.com',
+            updatedByUserId: 'demo@example.com',
+            createdAt: '2026-08-09T00:00:00.000Z',
+            updatedAt: '2026-08-09T01:00:00.000Z',
+            blocks: [{
+              id: 'block-1',
+              type: 'paragraph',
+              text: 'Private retained evidence.',
+            }],
+          }
+        }
+        throw new DocumentError(403, 'DocumentViewDenied', 'Document access was revoked.')
+      },
+    }),
+    collaboration: createCollaborationStub({
+      async getCuratedContext(input) {
+        return {
+          schemaVersion: COLLABORATION_CONTEXT_SCHEMA_VERSION,
+          items: [createCuratedContextFixture('document-race', {
+            kind: 'document',
+            sourceId: 'document-1',
+            originalBody: 'Private retained evidence.',
+            quote: { text: 'Private retained evidence.' },
+            permalink: '/documents/document-1',
+            occurredAt: '2026-08-09T01:00:00.000Z',
+            capturedRevision: 3,
+            currentRevision: 3,
+            availability: 'available',
+          })],
+          capabilities: input.capabilities,
+        }
+      },
+    }),
+  })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction/context-items',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+
+  expect(response.status).toBe(200)
+  expect(documentReads).toBeGreaterThanOrEqual(2)
+  const body = await response.json()
+  expect(body.items[0].source).toMatchObject({
+    kind: 'document',
+    sourceId: 'document-1',
+    availability: 'permission-lost',
+  })
+  expect(body.items[0].source).not.toHaveProperty('originalBody')
+  expect(body.items[0].source).not.toHaveProperty('quote')
+  expect(body.items[0].source).not.toHaveProperty('permalink')
+})
+
 test('does not reveal whether an unavailable document exists', async () => {
   configureFakeProjectClients(true)
 
@@ -1120,6 +1216,64 @@ test('fails closed when external chat provider composition is unavailable', asyn
   expect(response.status).toBe(503)
   expect(await response.json()).toMatchObject({ code: 'ExternalChatSourceUnavailable' })
   expect(createCalled).toBeFalse()
+})
+
+test('passes the Activity retention snapshot into the context transaction', async () => {
+  configureFakeProjectClients(true)
+  const retainedEvent = {
+    ...createFakeAuditEvent(),
+    eventId: 'retained-event',
+    entity: {
+      type: 'work-item',
+      id: 'team/core-team/issue/onboarding-friction',
+    },
+    expiresAt: 2_000_000_000,
+  }
+  let capturedInput: Parameters<CollaborationClient['createCuratedContextItem']>[0] | undefined
+  setTestAppDependencies({
+    auditEvents: {
+      async getEvent() {
+        return retainedEvent
+      },
+      async query() {
+        throw new Error('Unexpected audit query.')
+      },
+    },
+    collaboration: createCollaborationStub({
+      async createCuratedContextItem(input) {
+        capturedInput = input
+        return createCuratedContextFixture('activity-capture', input.source)
+      },
+    }),
+  })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction/context-items',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        kind: 'context',
+        title: 'Retain activity evidence',
+        body: 'Promote the still-retained activity event.',
+        source: {
+          kind: 'activity',
+          sourceId: 'retained-event',
+          occurredAt: '2020-01-01T00:00:00.000Z',
+          availability: 'available',
+        },
+      }),
+    },
+  )
+
+  expect(response.status).toBe(201)
+  expect(capturedInput?.activitySourceAuthorizationSnapshot).toEqual({
+    sourceId: 'retained-event',
+    expiresAt: 2_000_000_000,
+  })
 })
 
 test('rejects an activity source whose retained audit row has already expired', async () => {

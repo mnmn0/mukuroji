@@ -344,6 +344,60 @@ export async function projectCuratedContextSearchEvent(
 }
 
 /**
+ * Projects a context-search event while fencing the parent Work Item scope.
+ *
+ * The parent assignment can change independently of the audit stream event.
+ * A fresh read immediately before and after the Search write keeps stale
+ * project documents from being acknowledged as processed; a changed scope
+ * deletes the old projection and leaves the stream record retryable.
+ *
+ * @param event - Parsed canonical audit event.
+ * @param dependencies - Idempotent search projection operations.
+ * @param readParentScope - Strongly consistent parent Work Item reader.
+ * @returns The latest parent scope for the notification projection.
+ * @throws Error when the parent scope changes around the Search write.
+ */
+export async function projectCuratedContextSearchEventWithParentFence(
+  event: AuditProjectionEvent,
+  dependencies: CuratedContextSearchProjectionDependencies,
+  readParentScope: (
+    event: AuditProjectionEvent,
+  ) => Promise<CurrentWorkItemNotificationScope> = readCurrentWorkItemScope,
+): Promise<CurrentWorkItemNotificationScope> {
+  const before = await readParentScope(event)
+  const scopedEvent = before.checked
+    ? { ...event, projectId: before.projectId }
+    : event
+  await projectCuratedContextSearchEvent(scopedEvent, dependencies, before.exists)
+
+  const after = await readParentScope(event)
+  if (sameCuratedContextParentScope(before, after)) {
+    return after
+  }
+
+  // Remove a document written under the stale scope before the event is
+  // retried. The retry will resolve the new project or delete the orphan.
+  await projectCuratedContextSearchEvent(scopedEvent, dependencies, false)
+  throw new Error('Curated context search parent scope changed during projection.')
+}
+
+/**
+ * Compares the parent fields that determine a context Search document scope.
+ *
+ * @param left - Scope observed before the Search write.
+ * @param right - Scope observed after the Search write.
+ * @returns Whether both reads describe the same parent assignment/existence.
+ */
+function sameCuratedContextParentScope(
+  left: CurrentWorkItemNotificationScope,
+  right: CurrentWorkItemNotificationScope,
+) {
+  return left.checked === right.checked &&
+    left.exists === right.exists &&
+    left.projectId === right.projectId
+}
+
+/**
  * Requires one non-empty identifier from curated-context audit metadata.
  *
  * @param value - Candidate identifier.
@@ -418,13 +472,9 @@ async function processRecord(
   }
   if (await isProjectionProcessed(event.eventId)) {
     if (isCuratedContextEvent && !searchProjectionProcessed && currentScope) {
-      const scopedEvent = currentScope.checked
-        ? { ...event, projectId: currentScope.projectId }
-        : event
-      await projectCuratedContextSearchEvent(
-        scopedEvent,
+      currentScope = await projectCuratedContextSearchEventWithParentFence(
+        event,
         dependencies.curatedContextSearch,
-        currentScope.exists,
       )
       await markProjectionProcessed(
         event.eventId,
@@ -435,14 +485,10 @@ async function processRecord(
   }
 
   currentScope ??= await readCurrentWorkItemScope(event)
-  const scopedEvent = currentScope.checked
-    ? { ...event, projectId: currentScope.projectId }
-    : event
   if (isCuratedContextEvent && !searchProjectionProcessed) {
-    await projectCuratedContextSearchEvent(
-      scopedEvent,
+    currentScope = await projectCuratedContextSearchEventWithParentFence(
+      event,
       dependencies.curatedContextSearch,
-      currentScope.exists,
     )
     await markProjectionProcessed(
       event.eventId,
@@ -453,7 +499,7 @@ async function processRecord(
     await markProjectionProcessed(event.eventId)
     return
   }
-  const authorizationEvent = refreshScheduledNotificationEvent(scopedEvent, currentScope)
+  const authorizationEvent = refreshScheduledNotificationEvent(event, currentScope)
   if (!authorizationEvent) {
     await markProjectionProcessed(event.eventId)
     return

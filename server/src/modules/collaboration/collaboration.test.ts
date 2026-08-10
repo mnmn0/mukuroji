@@ -1290,6 +1290,10 @@ test('creates, revision-fences, and atomically supersedes curated context with h
     title: 'Choose option A',
     body: 'Option A is the accepted direction.',
     source,
+    activitySourceAuthorizationSnapshot: {
+      sourceId: source.sourceId,
+      expiresAt: Math.floor(Date.now() / 1_000) + 300,
+    },
     mentionMemberKeys: ['Reviewer@Example.com'],
     auditContext: createTestAuditContext(
       'context-create',
@@ -1306,6 +1310,10 @@ test('creates, revision-fences, and atomically supersedes curated context with h
     title: 'Choose option A',
     body: 'Option A is the accepted direction.',
     source,
+    activitySourceAuthorizationSnapshot: {
+      sourceId: source.sourceId,
+      expiresAt: Math.floor(Date.now() / 1_000) + 300,
+    },
     mentionMemberKeys: ['Reviewer@Example.com'],
     auditContext: createTestAuditContext(
       'context-create',
@@ -1520,6 +1528,54 @@ test('fences a captured Document source and its authorization generation in the 
       },
       ExpressionAttributeValues: expect.objectContaining({
         ':planningRevision': 9,
+      }),
+    }),
+  }))
+})
+
+test('fences Activity source capture against the audit retention deadline', async () => {
+  const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
+  const memory = createCollaborationMemory([], 'audit-table')
+  const expiresAt = Math.floor(Date.now() / 1_000) + 300
+  await memory.client.createCuratedContextItem({
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'issue-1',
+    entityKey,
+    actor: { id: 'author@example.com', displayName: 'Author' },
+    kind: 'decision',
+    title: 'Use the audit result',
+    body: 'The activity event remains within retention.',
+    source: {
+      kind: 'activity',
+      sourceId: 'event-1',
+      occurredAt: '2026-07-12T00:00:00.000Z',
+      availability: 'available',
+    },
+    activitySourceAuthorizationSnapshot: {
+      sourceId: 'event-1',
+      expiresAt,
+    },
+    auditContext: createTestAuditContext(
+      'activity-context-create',
+      '2026-07-12T00:00:00.000Z',
+    ),
+  })
+
+  const transactionItems = memory.transactions[0]?.TransactItems
+  if (!Array.isArray(transactionItems)) {
+    throw new Error('Expected an Activity context create transaction.')
+  }
+  expect(transactionItems).toContainEqual(expect.objectContaining({
+    ConditionCheck: expect.objectContaining({
+      TableName: 'mukuroji-audit-events',
+      Key: {
+        directoryId: 'workspace#one',
+        eventId: 'event-1',
+      },
+      ExpressionAttributeValues: expect.objectContaining({
+        ':capturedExpiresAt': expiresAt,
+        ':nowEpoch': expect.any(Number),
       }),
     }),
   }))

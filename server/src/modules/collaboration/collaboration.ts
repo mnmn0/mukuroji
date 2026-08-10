@@ -208,6 +208,20 @@ export type CuratedContextDocumentSourceAuthorizationSnapshot = {
   enterpriseControlRevision?: number
 }
 
+/**
+ * Retention snapshot captured while reading an Activity source.
+ *
+ * This server-only snapshot is converted into an audit-row condition so a
+ * source cannot cross its retention boundary between the API read and the
+ * context-item transaction.
+ */
+export type CuratedContextActivitySourceAuthorizationSnapshot = {
+  /** Immutable audit event identifier that was read. */
+  sourceId: string
+  /** Audit retention deadline in epoch seconds, when the event has one. */
+  expiresAt?: number
+}
+
 /** Team-owned Work Item scope の共通入力です。 */
 export type WorkItemCollaborationScope = {
   /** Canonical Workspace ID です。 */
@@ -314,6 +328,8 @@ export type CuratedContextMutationInput = WorkItemCollaborationScope & {
   auditContext?: MutationAuditContext
   /** Document source authorization snapshot fenced by the create transaction. */
   sourceAuthorizationSnapshot?: CuratedContextDocumentSourceAuthorizationSnapshot
+  /** Activity retention snapshot fenced by the create transaction. */
+  activitySourceAuthorizationSnapshot?: CuratedContextActivitySourceAuthorizationSnapshot
 }
 
 /** Common actor-bearing input accepted by authorization-fenced context mutations. */
@@ -2805,6 +2821,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
     assertWorkItemScope(input)
     assertCuratedContextAuthorizationSnapshot(input)
     assertCuratedContextDocumentSourceAuthorizationSnapshot(input)
+    assertCuratedContextActivitySourceAuthorizationSnapshot(input)
     if (input.auditContext) {
       const replayed = await this.getCuratedContextMutationReplay({
         entityKey: input.entityKey,
@@ -2939,6 +2956,9 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       ...curatedContextAuthorizationConditions(input),
       ...(input.sourceAuthorizationSnapshot
         ? curatedContextDocumentSourceConditions(input, input.sourceAuthorizationSnapshot)
+        : []),
+      ...(input.activitySourceAuthorizationSnapshot
+        ? curatedContextActivitySourceConditions(input, input.activitySourceAuthorizationSnapshot)
         : []),
       ...(capturedSource?.comment
         ? [commentVersionCondition(this.tableName, input.entityKey, capturedSource.comment)]
@@ -4810,6 +4830,50 @@ function assertCuratedContextDocumentSourceAuthorizationSnapshot(
 }
 
 /**
+ * Validates an Activity retention snapshot before it is converted into a
+ * DynamoDB condition.
+ *
+ * @param input - Curated-context create input carrying an optional activity source.
+ * @returns Nothing when the snapshot is valid.
+ * @throws CollaborationError when the snapshot does not identify the source.
+ */
+function assertCuratedContextActivitySourceAuthorizationSnapshot(
+  input: CreateCuratedContextItemInput,
+): void {
+  const source = input.source
+  const snapshot = input.activitySourceAuthorizationSnapshot
+  if (source?.kind !== 'activity') {
+    if (snapshot !== undefined) {
+      throw new CollaborationError(
+        400,
+        'InvalidActivitySourceAuthorizationSnapshot',
+        'An Activity authorization snapshot requires an Activity source.',
+      )
+    }
+    return
+  }
+  if (snapshot === undefined) {
+    throw new CollaborationError(
+      400,
+      'InvalidActivitySourceAuthorizationSnapshot',
+      'An Activity source must carry the retention snapshot used to read it.',
+    )
+  }
+  if (
+    snapshot.sourceId !== source.sourceId ||
+    snapshot.sourceId.trim().length === 0 ||
+    (snapshot.expiresAt !== undefined &&
+      (!Number.isSafeInteger(snapshot.expiresAt) || snapshot.expiresAt <= 0))
+  ) {
+    throw new CollaborationError(
+      400,
+      'InvalidActivitySourceAuthorizationSnapshot',
+      'The Activity source retention snapshot is invalid.',
+    )
+  }
+}
+
+/**
  * Creates the membership generation condition used by curated-context writes.
  *
  * @param input - Context mutation scope containing the authorization snapshot.
@@ -4985,6 +5049,45 @@ function curatedContextDocumentSourceConditions(
     })
   }
   return conditions
+}
+
+/**
+ * Creates the audit-row retention condition for an Activity source capture.
+ *
+ * @param input - Curated-context mutation scope.
+ * @param snapshot - Retention deadline captured from the audit source read.
+ * @returns DynamoDB transaction conditions for the source row.
+ */
+function curatedContextActivitySourceConditions(
+  input: CuratedContextMutationInput,
+  snapshot: CuratedContextActivitySourceAuthorizationSnapshot,
+): NonNullable<TransactWriteCommandInput['TransactItems']> {
+  const auditTableName =
+    readEnvironment('MUKUROJI_AUDIT_EVENTS_TABLE') ??
+    readEnvironment('AUDIT_EVENTS_TABLE_NAME') ??
+    'mukuroji-audit-events'
+  const hasRetentionDeadline = snapshot.expiresAt !== undefined
+  return [{
+    ConditionCheck: {
+      TableName: auditTableName,
+      Key: {
+        directoryId: input.workspaceId,
+        eventId: snapshot.sourceId,
+      },
+      ConditionExpression: hasRetentionDeadline
+        ? 'attribute_exists(directoryId) AND attribute_exists(eventId) AND #expiresAt = :capturedExpiresAt AND #expiresAt > :nowEpoch'
+        : 'attribute_exists(directoryId) AND attribute_exists(eventId)',
+      ...(hasRetentionDeadline
+        ? {
+            ExpressionAttributeNames: { '#expiresAt': 'expiresAt' },
+            ExpressionAttributeValues: {
+              ':capturedExpiresAt': snapshot.expiresAt,
+              ':nowEpoch': Math.floor(Date.now() / 1_000),
+            },
+          }
+        : {}),
+    },
+  }]
 }
 
 function watcherParentIssueConditions(tableName: string, input: UpdateWatcherInput) {

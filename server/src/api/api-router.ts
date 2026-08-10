@@ -270,6 +270,7 @@ import {
   createWorkItemCollaborationEntityKey,
   type CollaborationAutomaticWatcherCandidate,
   type CollaborationComment,
+  type CuratedContextActivitySourceAuthorizationSnapshot,
   type CuratedContextDocumentSourceAuthorizationSnapshot,
 } from '../modules/collaboration/collaboration'
 import {
@@ -7820,6 +7821,9 @@ routeApp.post('/api/teams/:teamId/issues/:issueId/context-items', async (c) => {
       ...(resolvedSource ? { source: resolvedSource.source } : {}),
       ...(resolvedSource?.documentAuthorizationSnapshot
         ? { sourceAuthorizationSnapshot: resolvedSource.documentAuthorizationSnapshot }
+        : {}),
+      ...(resolvedSource?.activityAuthorizationSnapshot
+        ? { activitySourceAuthorizationSnapshot: resolvedSource.activityAuthorizationSnapshot }
         : {}),
       mentionMemberKeys,
       ...(request.supersedesItemId ? { supersedesItemId: request.supersedesItemId } : {}),
@@ -19824,6 +19828,8 @@ type ResolvedCuratedContextSource = {
   source: CuratedContextSource
   /** Document authorization generations that must remain current at commit time. */
   documentAuthorizationSnapshot?: CuratedContextDocumentSourceAuthorizationSnapshot
+  /** Activity retention deadline that must remain valid at commit time. */
+  activityAuthorizationSnapshot?: CuratedContextActivitySourceAuthorizationSnapshot
 }
 
 /**
@@ -20002,6 +20008,10 @@ async function resolveCuratedContextSource(
       occurredAt: event.occurredAt,
       availability: 'available',
     },
+    activityAuthorizationSnapshot: {
+      sourceId: event.eventId,
+      ...(event.expiresAt === undefined ? {} : { expiresAt: event.expiresAt }),
+    },
   }
 }
 
@@ -20064,25 +20074,45 @@ async function reconcileCuratedContextSourcesForViewer(
   entityKey: string,
   items: CuratedContextItem[],
 ) {
-  const documentAccess = items.some((item) => item.source?.kind === 'document')
-    ? (await createWorkspaceSearchContext(principal)).documentAccess
-    : undefined
-  const reconciled: CuratedContextItem[] = []
-  const concurrency = 8
-  for (let offset = 0; offset < items.length; offset += concurrency) {
-    const page = items.slice(offset, offset + concurrency)
-    reconciled.push(...await Promise.all(page.map((item) =>
-      reconcileCuratedContextSourceForViewer(
-        principal,
-        teamId,
-        issueId,
-        entityKey,
-        item,
-        documentAccess,
+  const containsDocumentSource = items.some((item) => item.source?.kind === 'document')
+  const authorizationAttempts = containsDocumentSource ? 2 : 1
+  for (let attempt = 0; attempt < authorizationAttempts; attempt += 1) {
+    const searchContext = containsDocumentSource
+      ? await createWorkspaceSearchContext(principal)
+      : undefined
+    const documentAccess = searchContext?.documentAccess
+    const reconciled: CuratedContextItem[] = []
+    const concurrency = 8
+    for (let offset = 0; offset < items.length; offset += concurrency) {
+      const page = items.slice(offset, offset + concurrency)
+      reconciled.push(...await Promise.all(page.map((item) =>
+        reconcileCuratedContextSourceForViewer(
+          principal,
+          teamId,
+          issueId,
+          entityKey,
+          item,
+          documentAccess,
+        )
+      )))
+    }
+
+    if (
+      !searchContext ||
+      await isWorkspaceSearchAuthorizationCurrent(
+        principal.directoryId,
+        searchContext.planningRevision,
       )
-    )))
+    ) {
+      return reconciled
+    }
   }
-  return reconciled
+
+  throw new CollaborationError(
+    409,
+    'CuratedContextSourceAuthorizationChanged',
+    'Document authorization changed while reading curated context sources. Reload and try again.',
+  )
 }
 
 /**
