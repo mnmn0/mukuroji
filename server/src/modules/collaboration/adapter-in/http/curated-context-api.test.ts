@@ -11,6 +11,7 @@ import type {
   CollaborationClient,
 } from '../../collaboration'
 import { DocumentError } from '../../../documents'
+import type { PlanningClient } from '../../../planning/planning'
 
 const {
   app,
@@ -18,6 +19,7 @@ const {
   createCollaborationStub,
   createDocumentFake,
   createFakeAuditEvent,
+  getTestAppDependencies,
   resetTestApp,
   setTestAppDependencies,
 } = createApiTestHarness()
@@ -941,6 +943,86 @@ test('bounds a long document body before the context snapshot reaches persistenc
     workspaceMemberKey: 'demo@example.com',
     workspaceMemberVersion: 1,
   })
+})
+
+test('does not capture a Document when its Project authorization changes during source resolution', async () => {
+  configureFakeProjectClients(true)
+  let planningRevision = 0
+  let projectRole: 'manager' | undefined = 'manager'
+  let projectAccessReads = 0
+  let createCalled = false
+  const baseDependencies = getTestAppDependencies()
+  setTestAppDependencies({
+    planning: {
+      async getAuthorizationRevision() {
+        return planningRevision
+      },
+    } as unknown as PlanningClient,
+    projectDirectory: {
+      ...baseDependencies.workspace.projectDirectory,
+      async getProjectAccessList() {
+        projectAccessReads += 1
+        const roleAtRead = projectRole
+        if (projectAccessReads === 2) {
+          planningRevision = 1
+          projectRole = undefined
+        }
+        return roleAtRead === undefined
+          ? []
+          : [{ projectId: 'refero', role: roleAtRead }]
+      },
+    },
+    documents: createDocumentFake({
+      async getAuthorizationRevision() {
+        return 0
+      },
+      async get(input) {
+        if (input.access.projectRoles?.refero === undefined) {
+          throw new DocumentError(
+            403,
+            'DocumentViewDenied',
+            'Document is unavailable to the current viewer.',
+          )
+        }
+        throw new Error('Document access was not refreshed after Project revocation.')
+      },
+    }),
+    collaboration: createCollaborationStub({
+      async createCuratedContextItem() {
+        createCalled = true
+        throw new Error('Unexpected curated context create.')
+      },
+    }),
+  })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction/context-items',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        kind: 'context',
+        title: 'Private document source',
+        body: 'Do not capture after access revocation.',
+        source: {
+          kind: 'document',
+          sourceId: 'document-1',
+          occurredAt: '2026-08-09T00:00:00.000Z',
+          availability: 'available',
+        },
+      }),
+    },
+  )
+
+  expect(response.status).toBe(404)
+  expect(await response.json()).toMatchObject({
+    code: 'CuratedContextSourceUnavailable',
+  })
+  expect(projectAccessReads).toBeGreaterThanOrEqual(3)
+  expect(createCalled).toBeFalse()
 })
 
 test('does not reveal whether an unavailable document exists', async () => {

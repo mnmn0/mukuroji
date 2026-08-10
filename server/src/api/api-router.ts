@@ -17915,6 +17915,8 @@ function collectActivePlanningDescendants(
 type WorkspaceSearchContext = {
   /** Active Team/Project hierarchy です。 */
   directory: ProjectDirectoryResponse
+  /** Search scope と Document ACL を解決した Planning authorization revision です。 */
+  planningRevision: number
   /** Document source of truth の ACL 評価に使う current viewer です。 */
   documentAccess: DocumentAccessContext
   /** Search result の current viewer scope です。 */
@@ -17923,16 +17925,45 @@ type WorkspaceSearchContext = {
   savedViewAccess: SavedViewAccessScope
 }
 
+/**
+ * Reads the Project access set together with the Planning generation that authorized it.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @param directory - Consistent active Team/Project directory snapshot.
+ * @returns Project access entries and the generation that serialized the read.
+ */
+async function readWorkspaceSearchAuthorizationSnapshot(
+  principal: WorkspacePrincipal,
+  directory: ProjectDirectoryResponse,
+) {
+  if (principal.isSystemAdmin) {
+    return {
+      planningRevision: await workItemDependencies.planning.getAuthorizationRevision(
+        principal.directoryId,
+      ),
+      projectAccesses: directory.teams.flatMap((team) => team.projects.map((project) => ({
+        projectId: project.id,
+        role: 'manager' as const,
+      }))),
+    }
+  }
+
+  const authorization = await readDocumentAuthorizationSnapshot(principal)
+  return {
+    planningRevision: authorization.planningRevision,
+    projectAccesses: Object.entries(authorization.projectRoles).map(([projectId, role]) => ({
+      projectId,
+      role,
+    })),
+  }
+}
+
 async function createWorkspaceSearchContext(
   principal: WorkspacePrincipal,
 ): Promise<WorkspaceSearchContext> {
   const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja', true)
-  const projectAccesses = principal.isSystemAdmin
-    ? directory.teams.flatMap((team) => team.projects.map((project) => ({
-        projectId: project.id,
-        role: 'manager' as const,
-      })))
-    : await getEffectiveProjectAccessList(principal)
+  const authorization = await readWorkspaceSearchAuthorizationSnapshot(principal, directory)
+  const projectAccesses = authorization.projectAccesses
   const readableProjectIds = new Set(
     projectAccesses
       .filter((access) => projectAccessAllows(access, 'viewer'))
@@ -17967,12 +17998,10 @@ async function createWorkspaceSearchContext(
       principal,
       directory,
     )
-  const planningRevision = await workItemDependencies.planning.getAuthorizationRevision(
-    principal.directoryId,
-  )
 
   return {
     directory,
+    planningRevision: authorization.planningRevision,
     documentAccess: {
       memberKey: principal.userKey,
       workspaceRole: principal.workspaceRole,
@@ -17985,7 +18014,7 @@ async function createWorkspaceSearchContext(
               workspaceMemberKey: principal.userKey,
               workspaceMemberVersion: principal.workspaceMember.version,
             }),
-        planningRevision,
+        planningRevision: authorization.planningRevision,
         ...(principal.enterpriseIdentityControlRevision === undefined
           ? {}
           : {
@@ -18018,6 +18047,21 @@ async function createWorkspaceSearchContext(
       manageableTeamIds,
     },
   }
+}
+
+/**
+ * Rechecks the Planning generation before exposing a rehydrated search result.
+ *
+ * @param workspaceId - Workspace whose Project authorization is being checked.
+ * @param expectedPlanningRevision - Generation captured when the search context was built.
+ * @returns Whether the original Project access snapshot is still current.
+ */
+async function isWorkspaceSearchAuthorizationCurrent(
+  workspaceId: string,
+  expectedPlanningRevision: number,
+): Promise<boolean> {
+  return await workItemDependencies.planning.getAuthorizationRevision(workspaceId) ===
+    expectedPlanningRevision
 }
 
 async function resolveCurrentWorkspaceSearchScope(
@@ -18173,6 +18217,12 @@ async function resolveCurrentWorkspaceSearchScope(
             project.id === latestDetail.issue.assignedProjectId,
           ))
       ) {
+        return undefined
+      }
+      if (!await isWorkspaceSearchAuthorizationCurrent(
+        workspaceId,
+        context.planningRevision,
+      )) {
         return undefined
       }
       return {
