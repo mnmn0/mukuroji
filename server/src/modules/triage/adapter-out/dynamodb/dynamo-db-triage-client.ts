@@ -913,7 +913,13 @@ export class DynamoDbTriageClient implements TriageClient {
     const entries: TriageEntry[] = []
     for (const item of response.Items ?? []) {
       const entryId = readAssociationEntryId(item)
-      if (!entryId) continue
+      if (!entryId) {
+        throw new TriageError(
+          503,
+          'TriagePersistenceCorrupt',
+          'A reverse source association is malformed.',
+        )
+      }
       entries.push(await this.getEntry(workspaceId, teamId, entryId))
     }
     return {
@@ -1945,7 +1951,7 @@ function readPrimaryKey(value: unknown): { scopeKey: string; recordKey: string }
 /** Reads an entry ID from a reverse source association. */
 function readAssociationEntryId(value: unknown): string | undefined {
   return isRecord(value) && value.entryType === 'triage-work-item-source' &&
-    typeof value.entryId === 'string' ? value.entryId : undefined
+    isIdentifier(value.entryId) ? value.entryId : undefined
 }
 
 /** Classifies a conditional DynamoDB conflict. */

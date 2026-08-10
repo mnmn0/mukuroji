@@ -2855,9 +2855,16 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
       ),
     ]
     if (triageEntry) {
+      const triageEntryWithMessageCount = {
+        ...triageEntry,
+        sourcePreview: {
+          ...triageEntry.sourcePreview,
+          commentCount: triageEntry.sourcePreview.commentCount + 1,
+        },
+      }
       const triageContribution = createTriageSourceActivityTransactionItems({
         tableName: this.tableName,
-        entry: triageEntry,
+        entry: triageEntryWithMessageCount,
         activity: {
           activityId: event.id,
           occurredAt: now,

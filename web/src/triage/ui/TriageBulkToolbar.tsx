@@ -105,10 +105,16 @@ export function TriageBulkToolbar({
             {t('triage.bulk.review').replace('{count}', String(entries.length))}
           </p>
           {mode === 'assign' ? (
-            <label className="grid gap-1 text-sm font-semibold text-[var(--workbench-text)]">
-              {t('triage.bulk.ownerUserId')}
-              <input autoFocus className="workbench-input min-h-10 px-3" name="ownerUserId" placeholder={t('triage.bulk.unownedHint')} />
-            </label>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="grid gap-1 text-sm font-semibold text-[var(--workbench-text)]">
+                {t('triage.bulk.ownerUserId')}
+                <input autoFocus className="workbench-input min-h-10 px-3" name="ownerUserId" placeholder={t('triage.bulk.unownedHint')} />
+              </label>
+              <label className="grid gap-1 text-sm font-semibold text-[var(--workbench-text)]">
+                {t('triage.bulk.projectId')}
+                <input className="workbench-input min-h-10 px-3" name="projectId" placeholder={t('triage.action.projectOptional')} />
+              </label>
+            </div>
           ) : mode === 'decline' ? (
             <label className="grid gap-1 text-sm font-semibold text-[var(--workbench-text)]">
               {t('triage.bulk.reason')}
@@ -184,7 +190,15 @@ function createBulkInput(
   }))
   if (mode === 'assign') {
     const ownerUserId = readFormValue(formData, 'ownerUserId')
-    return { operation: { action: 'assign', ownerUserId: ownerUserId || null }, targets }
+    const projectId = readFormValue(formData, 'projectId')
+    return {
+      operation: {
+        action: 'assign',
+        ownerUserId: ownerUserId || null,
+        projectId: projectId || null,
+      },
+      targets,
+    }
   }
   if (mode === 'decline') {
     const reason = readFormValue(formData, 'reason')

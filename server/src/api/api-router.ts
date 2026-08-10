@@ -7,6 +7,7 @@ import {
 import { resolve4, resolve6, resolveTxt } from 'node:dns/promises'
 import { request as requestHttps } from 'node:https'
 import { isIP } from 'node:net'
+import type { TransactWriteCommandInput } from '@aws-sdk/lib-dynamodb'
 import {
   PUBLIC_API_OPENAPI_DOCUMENT,
   ENTERPRISE_PERMISSION_IDS,
@@ -216,6 +217,7 @@ import {
   createWorkItemDependencyKey,
   createWorkItemAuthorizationChangedError,
   createWorkItemRelationGraphRevisionConditionCheck,
+  createWorkItemRevisionConditionCheck,
   customFieldValueRecordsEqual,
   deriveWorkItemScheduleDueDate,
   isTeamIssueNotFoundError,
@@ -17869,7 +17871,19 @@ async function applyTriageRouteAction(request: TriageRouterActionRequest) {
               : {}),
           },
         },
-        [...(duplicateContext?.transactItems ?? []), ...contribution.transactItems],
+        [
+          ...(action.action === 'accept'
+            ? [createWorkItemRevisionConditionCheck(
+                getTeamIssuesTableName(),
+                request.workspaceId,
+                detail.issue.teamId,
+                detail.issue.id,
+                detail.issue.revision,
+              )]
+            : []),
+          ...(duplicateContext?.transactItems ?? []),
+          ...contribution.transactItems,
+        ],
       )
       return { entry: contribution.entry, replayed: false }
     }
@@ -18020,13 +18034,20 @@ async function requestTriageInformationFromSource(
     request.workspaceId,
     entry.source.submissionId,
   )
+  const entryWithMessageCount = {
+    ...entry,
+    sourcePreview: {
+      ...entry.sourcePreview,
+      commentCount: entry.sourcePreview.commentCount + 1,
+    },
+  }
   const contribution = createTriageActionTransactionItems({
     tableName: getEnv('REQUEST_INTAKE_TABLE_NAME') ?? 'mukuroji-request-intake-local',
     audit: {
       tableName: getConfiguredAuditTableName() ?? 'mukuroji-audit-events',
       retentionDays: getConfiguredAuditRetentionDays(),
     },
-    entry,
+    entry: entryWithMessageCount,
     action: request.action,
     actorId: principal.userKey,
     now: new Date().toISOString(),
@@ -18281,6 +18302,15 @@ async function createLegacyRequestTriageContribution(
       },
     }
   }
+  const entryForAction = action.action === 'request-information'
+    ? {
+        ...entry,
+        sourcePreview: {
+          ...entry.sourcePreview,
+          commentCount: entry.sourcePreview.commentCount + 1,
+        },
+      }
+    : entry
   return {
     replayed: false,
     contribution: createTriageActionTransactionItems({
@@ -18289,7 +18319,7 @@ async function createLegacyRequestTriageContribution(
         tableName: getConfiguredAuditTableName() ?? 'mukuroji-audit-events',
         retentionDays: getConfiguredAuditRetentionDays(),
       },
-      entry,
+      entry: entryForAction,
       action,
       actorId: principal.userKey,
       now: new Date().toISOString(),
@@ -18404,6 +18434,20 @@ async function acceptTriageEntryAsNewWorkItem(
     normalized,
     resolvedConfiguration,
   )
+  const acceptanceReferenceConditionChecks =
+    await createTriageAcceptanceReferenceConditionChecks(
+      request.workspaceId,
+      request.teamId,
+      assignedProjectId,
+      assigneeUserId,
+    )
+  const guardedConfigured = {
+    ...configured,
+    authorizationConditionChecks: [
+      ...(configured.authorizationConditionChecks ?? []),
+      ...acceptanceReferenceConditionChecks,
+    ],
+  }
   const now = new Date().toISOString()
   const canonicalWorkItem = {
     teamId: request.teamId,
@@ -18422,7 +18466,7 @@ async function acceptTriageEntryAsNewWorkItem(
   const created = await workItemDependencies.teamIssues.createTeamIssue(
     request.workspaceId,
     request.teamId,
-    configured,
+    guardedConfigured,
     principal.userKey,
     createApiMutationContext(request.context, principal, {
       action: 'triage.accept',
@@ -20774,6 +20818,63 @@ async function requireActiveWorkspaceAssignee(
   }
 
   return dependencies.cognito.getUserProfile(userId)
+}
+
+/** Returns the configured canonical Work Item table used by transaction fences. */
+function getTeamIssuesTableName(): string {
+  return getEnv('MUKUROJI_TEAM_ISSUES_TABLE') ??
+    getEnv('TEAM_ISSUES_TABLE_NAME') ??
+    'mukuroji-team-issues-local'
+}
+
+/** Builds commit-time Team, Project, and assignee fences for Triage acceptance.
+ *
+ * @param workspaceId - Owning Workspace directory identifier.
+ * @param teamId - Team that must remain active through Work Item creation.
+ * @param projectId - Optional Project that must remain active through commit.
+ * @param assigneeUserId - Member that must remain active through commit.
+ * @returns Directory and Workspace condition checks for the acceptance transaction.
+ */
+async function createTriageAcceptanceReferenceConditionChecks(
+  workspaceId: string,
+  teamId: string,
+  projectId: string | undefined,
+  assigneeUserId: string,
+): Promise<NonNullable<TransactWriteCommandInput['TransactItems']>> {
+  const createReferenceChecks = workspaceDependencies.projectDirectory.createActiveReferenceConditionChecks
+  const createMemberCheck = workspaceDependencies.workspaceAccess.createActiveMemberConditionCheck
+  if (!createReferenceChecks || !createMemberCheck) {
+    throw new TriageError(
+      503,
+      'TriageAcceptanceReferenceUnavailable',
+      'Acceptance reference fencing is unavailable.',
+    )
+  }
+  let referenceChecks
+  try {
+    referenceChecks = await createReferenceChecks(workspaceId, teamId, projectId)
+  } catch (error) {
+    if (error instanceof ProjectDataError) {
+      throw new TriageError(
+        409,
+        error.code === 'ProjectNotFound'
+          ? 'TriageAcceptanceProjectUnavailable'
+          : 'TriageAcceptanceTeamUnavailable',
+        'The selected acceptance destination is no longer active.',
+        { cause: error },
+      )
+    }
+    throw error
+  }
+  const memberCheck = await createMemberCheck(workspaceId, assigneeUserId)
+  if (!memberCheck) {
+    throw new TriageError(
+      409,
+      'TriageAcceptanceOwnerUnavailable',
+      'The selected acceptance owner is no longer active.',
+    )
+  }
+  return [...referenceChecks, memberCheck]
 }
 
 async function hydrateProjectTasksResponse(response: ProjectTasksResponse) {

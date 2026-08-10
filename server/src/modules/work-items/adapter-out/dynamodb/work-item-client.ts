@@ -868,6 +868,46 @@ export type CreateTeamIssueRequestBody = {
   idempotentRequestDigest?: string
 }
 
+/** Creates a revision fence for an existing canonical Work Item reference.
+ *
+ * @param tableName - Canonical Work Item table name.
+ * @param directoryId - Owning Workspace directory identifier.
+ * @param teamId - Work Item Team identifier.
+ * @param workItemId - Canonical Work Item identifier.
+ * @param expectedRevision - Revision observed by the caller's strong read.
+ * @returns A DynamoDB condition check composable with a larger transaction.
+ */
+export function createWorkItemRevisionConditionCheck(
+  tableName: string,
+  directoryId: string,
+  teamId: string,
+  workItemId: string,
+  expectedRevision: number,
+): NonNullable<TransactWriteCommandInput['TransactItems']>[number] {
+  const normalizedTableName = readRequiredString(tableName, 'Work Item table name is required.')
+  const normalizedDirectoryId = readRequiredString(directoryId, 'Workspace ID is required.')
+  const normalizedTeamId = readRequiredString(teamId, 'Team ID is required.')
+  const normalizedWorkItemId = readRequiredString(workItemId, 'Work Item ID is required.')
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) {
+    throw new ProjectDataError(
+      400,
+      'InvalidProjectWrite',
+      'Work Item revision is invalid.',
+    )
+  }
+  return {
+    ConditionCheck: {
+      TableName: normalizedTableName,
+      Key: {
+        directoryTeamId: createDirectoryTeamId(normalizedDirectoryId, normalizedTeamId),
+        issueId: normalizedWorkItemId,
+      },
+      ConditionExpression: 'revision = :expectedRevision',
+      ExpressionAttributeValues: { ':expectedRevision': expectedRevision },
+    },
+  }
+}
+
 /** Trusted request conversion handler が Work Item transactionへ追加する narrow projection です。 */
 export type RequestConversionTransactionInput = {
   /** Request intake table 名です。 */

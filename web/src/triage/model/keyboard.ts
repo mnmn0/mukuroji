@@ -2,6 +2,7 @@ import type { TriageEntryCapabilities } from '../api'
 
 /** Action form that may be opened by a keyboard shortcut. */
 export type TriageActionMode =
+  | 'assign'
   | 'accept'
   | 'duplicate'
   | 'decline'

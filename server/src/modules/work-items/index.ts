@@ -98,6 +98,7 @@ export {
 export {
   createTeamIssueAuditEntityId,
   createTeamIssueDeepLink,
+  createWorkItemRevisionConditionCheck,
   createWorkItemAuthorizationChangedError,
   customFieldValueRecordsEqual,
   DynamoDbProjectTasksClient,

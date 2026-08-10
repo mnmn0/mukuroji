@@ -43,6 +43,7 @@ import {
 } from '../api-router'
 import {
   DynamoDbProjectDirectoryClient,
+  ProjectDataError,
   type ProjectArchiveWorkItemRevisionGuard,
   type ProjectRole,
 } from '../../modules/directory'
@@ -608,6 +609,7 @@ function createWorkspaceAccessFake(
     throw new Error('Unexpected Workspace Access client call.')
   }
   return {
+    createActiveMemberConditionCheck: unsupported,
     getMember: unsupported,
     getActiveMember: unsupported,
     getAccessSnapshot: unsupported,
@@ -1823,6 +1825,29 @@ function configureFakeProjectClients(
       },
     }),
     projectDirectory: {
+      async createActiveReferenceConditionChecks(directoryId, teamId, projectId) {
+        if (projectId && !hasProjectAccess) {
+          throw new ProjectDataError(404, 'ProjectNotFound', 'Project is unavailable.')
+        }
+        return [
+          {
+            ConditionCheck: {
+              TableName: 'DirectoryTable',
+              Key: { directoryId, entryKey: `TEAM#${teamId}` },
+              ConditionExpression: 'attribute_exists(directoryId)',
+            },
+          },
+          ...(projectId
+            ? [{
+                ConditionCheck: {
+                  TableName: 'DirectoryTable',
+                  Key: { directoryId, entryKey: `PROJECT#${projectId}` },
+                  ConditionExpression: 'attribute_exists(directoryId)',
+                },
+              }]
+            : []),
+        ]
+      },
       async getProjectDirectory(directoryId, locale, consistentRead) {
         calls.directoryReads.push({
           directoryId,
@@ -2054,6 +2079,17 @@ function configureFakeProjectClients(
       },
     },
     workspaceAccess: {
+      async createActiveMemberConditionCheck(workspaceId, memberKey) {
+        const member = createWorkspaceMember(memberKey)
+        if (member.status !== 'active') return undefined
+        return {
+          ConditionCheck: {
+            TableName: 'WorkspaceAccessTable',
+            Key: { workspaceId, recordKey: `MEMBER#${memberKey}` },
+            ConditionExpression: 'attribute_exists(workspaceId)',
+          },
+        }
+      },
       async getMember(_workspaceId, memberKey) {
         return createWorkspaceMember(memberKey)
       },

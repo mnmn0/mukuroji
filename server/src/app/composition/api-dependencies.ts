@@ -95,6 +95,7 @@ import {
 import {
   DynamoDbProjectTasksClient,
   DynamoDbTeamIssuesClient,
+  createWorkItemRevisionConditionCheck,
   type TeamIssuesClient,
   type TriageDuplicateContextTransactionContribution,
   type WorkItemImportQueue,
@@ -561,6 +562,10 @@ function createTriageClient(
           mergedAt: now,
         })
       }
+      const environment = loadServerConfig().environment
+      const workItemTableName = environment.MUKUROJI_TEAM_ISSUES_TABLE ??
+        environment.TEAM_ISSUES_TABLE_NAME ??
+        'mukuroji-team-issues-local'
       return {
         canonicalWorkItem: {
           teamId: detail.issue.teamId,
@@ -581,6 +586,19 @@ function createTriageClient(
                 completedAt: now,
               },
               transactItems: duplicateContext?.transactItems,
+            }
+          : {}),
+        ...(action.action === 'accept'
+          ? {
+              transactItems: [
+                createWorkItemRevisionConditionCheck(
+                  workItemTableName,
+                  workspaceId,
+                  detail.issue.teamId,
+                  detail.issue.id,
+                  detail.issue.revision,
+                ),
+              ],
             }
           : {}),
       }

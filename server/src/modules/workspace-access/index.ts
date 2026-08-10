@@ -27,4 +27,5 @@ export {
   type WorkspaceMemberProvisioningSource,
   type WorkspaceMemberResponse,
   type WorkspaceMemberStatus,
+  type WorkspaceAccessTransactWriteItem,
 } from './workspace-access'

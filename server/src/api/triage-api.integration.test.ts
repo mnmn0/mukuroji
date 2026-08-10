@@ -933,6 +933,12 @@ describe('Team Triage API composition', () => {
         ) {
           expect(triageAcceptance?.entryId).toBe(pendingEntry.id)
           expect(triageAcceptance?.transactItems.length).toBeGreaterThanOrEqual(3)
+          expect(input.authorizationConditionChecks?.some((item) =>
+            item.ConditionCheck?.TableName === 'DirectoryTable'
+          )).toBe(true)
+          expect(input.authorizationConditionChecks?.some((item) =>
+            item.ConditionCheck?.TableName === 'WorkspaceAccessTable'
+          )).toBe(true)
           if (typeof input.idempotentIssueId !== 'string' || !triageAcceptance) {
             throw new Error('Triage acceptance did not supply a deterministic Work Item write.')
           }

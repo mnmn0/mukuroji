@@ -22,6 +22,7 @@ describe('TriageEntryDetail', () => {
     expect(html).toContain('Open original source')
     expect(html).toContain('rel="noreferrer noopener"')
     expect(html).toContain('Accept')
+    expect(html).toContain('Change routing')
     expect(html).toContain('Request information')
   })
 

@@ -2588,6 +2588,7 @@ test('appends signed email activity to terminal Form and Triage records without 
     id: 'triage_req-1',
     revision: 3,
     state: 'accepted',
+    sourcePreview: { commentCount: 1 },
     events: expect.arrayContaining([expect.objectContaining({
       actorId: 'requester',
       summary: 'Requester replied by email.',

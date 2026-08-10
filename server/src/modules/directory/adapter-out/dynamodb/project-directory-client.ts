@@ -587,6 +587,18 @@ export type RemoveProjectMemberResponse = {
  * API handler から利用する team/project directory client の最小 interface です。
  */
 export type ProjectDirectoryClient = {
+  /** Builds commit-time conditions proving a Team and optional Project remain active.
+   *
+   * @param directoryId - Owning Workspace directory identifier.
+   * @param teamId - Team that must remain active through commit.
+   * @param projectId - Optional Project that must remain active through commit.
+   * @returns DynamoDB condition checks for the dependent transaction.
+   */
+  createActiveReferenceConditionChecks?(
+    directoryId: string,
+    teamId: string,
+    projectId?: string,
+  ): Promise<NonNullable<TransactWriteCommandInput['TransactItems']>>
   /**
    * DynamoDB から sidebar 用の team/project 階層を取得します。
    */

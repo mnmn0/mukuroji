@@ -319,6 +319,16 @@ export class WorkspaceAccessError extends Error {
 
 /** Workspace access data store の公開契約です。 */
 export interface WorkspaceAccessClient {
+  /** Builds a commit-time condition proving a Workspace member remains active.
+   *
+   * @param workspaceId - Owning Workspace identifier.
+   * @param memberKey - Stable member key that must remain active through commit.
+   * @returns A DynamoDB condition check, or undefined when the member is inactive.
+   */
+  createActiveMemberConditionCheck?(
+    workspaceId: string,
+    memberKey: string,
+  ): Promise<WorkspaceAccessTransactWriteItem | undefined>
   /** 指定 member を取得します。 */
   getMember(workspaceId: string, memberKey: string): Promise<WorkspaceMember | undefined>
   /** 指定 member が active な場合だけ返します。 */
@@ -457,7 +467,7 @@ export interface WorkspaceAccessClient {
 }
 
 /** DynamoDB transaction item used by the Workspace Access adapter. */
-type WorkspaceAccessTransactWriteItem = NonNullable<
+export type WorkspaceAccessTransactWriteItem = NonNullable<
   TransactWriteCommandInput['TransactItems']
 >[number]
 

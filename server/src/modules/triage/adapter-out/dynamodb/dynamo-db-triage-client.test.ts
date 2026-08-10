@@ -1672,4 +1672,29 @@ describe('DynamoDbTriageClient source admission', () => {
       harness.restore()
     }
   })
+
+  test('fails closed when a reverse source association row is malformed', async () => {
+    const harness = createHarness([{
+      Items: [{
+        entryType: 'triage-work-item-source',
+        scopeKey: 'WORKSPACE#workspace-1',
+        recordKey: 'TRIAGE_SOURCE#support#work-item-1#triage-1',
+        teamId: 'support',
+        workItemId: 'work-item-1',
+      }],
+    }])
+
+    try {
+      await expect(harness.client.listWorkItemSources(
+        'workspace-1',
+        'support',
+        'work-item-1',
+      )).rejects.toMatchObject({
+        code: 'TriagePersistenceCorrupt',
+        status: 503,
+      })
+    } finally {
+      harness.restore()
+    }
+  })
 })

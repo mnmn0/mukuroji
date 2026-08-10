@@ -352,6 +352,9 @@ export function TriageEntryDetail({
 
         <div className="border-t border-[var(--workbench-border)] pt-5">
           <div className="flex flex-wrap gap-2" aria-label={t('triage.action.aria')}>
+            {entry.capabilities.canAssign ? (
+              <ActionButton label={t('triage.action.assign')} onActivate={activateAction} mode="assign" />
+            ) : null}
             {(entry.capabilities.canAcceptCreate || entry.capabilities.canAcceptLink) ? (
               <ActionButton shortcut="A" label={t('triage.action.accept')} primary onActivate={activateAction} mode="accept" />
             ) : null}
@@ -382,7 +385,29 @@ export function TriageEntryDetail({
             <h3 className="text-base font-semibold text-[var(--workbench-text)]">
               {t(actionTitleKey(actionMode))}
             </h3>
-            {actionMode === 'accept' ? (
+            {actionMode === 'assign' ? (
+              <>
+                <label className="grid gap-1 text-sm font-semibold text-[var(--workbench-text)]">
+                  {t('triage.action.ownerUserId')}
+                  <input
+                    autoFocus
+                    className="workbench-input min-h-10 px-3"
+                    defaultValue={entry.ownerUserId ?? ''}
+                    name="ownerUserId"
+                    placeholder={t('triage.action.ownerOptional')}
+                  />
+                </label>
+                <label className="grid gap-1 text-sm font-semibold text-[var(--workbench-text)]">
+                  {t('triage.action.projectId')}
+                  <input
+                    className="workbench-input min-h-10 px-3"
+                    defaultValue={entry.projectId ?? view.routingCandidate?.projectId ?? ''}
+                    name="projectId"
+                    placeholder={t('triage.action.projectOptional')}
+                  />
+                </label>
+              </>
+            ) : actionMode === 'accept' ? (
               <>
                 <div className="flex gap-2" role="group" aria-label={t('triage.action.acceptMode')}>
                   {entry.capabilities.canAcceptCreate ? (
@@ -526,7 +551,7 @@ function ActionButton({ label, mode, onActivate, primary = false, shortcut }: {
   mode: TriageActionMode
   onActivate: (mode: TriageActionMode, trigger?: HTMLButtonElement) => void
   primary?: boolean
-  shortcut: string
+  shortcut?: string
 }) {
   return (
     <button
@@ -534,7 +559,7 @@ function ActionButton({ label, mode, onActivate, primary = false, shortcut }: {
       onClick={(event) => onActivate(mode, event.currentTarget)}
       type="button"
     >
-      {label} <kbd className="ml-1 text-[10px] opacity-70">{shortcut}</kbd>
+      {label} {shortcut ? <kbd className="ml-1 text-[10px] opacity-70">{shortcut}</kbd> : null}
     </button>
   )
 }
@@ -559,6 +584,16 @@ function createActionInput(
   formData: FormData,
 ): TriageActionInput | undefined {
   const expectedRevision = entry.revision
+  if (actionMode === 'assign') {
+    const ownerUserId = readFormValue(formData, 'ownerUserId')
+    const projectId = readFormValue(formData, 'projectId')
+    return {
+      action: 'assign',
+      expectedRevision,
+      ownerUserId: ownerUserId || null,
+      projectId: projectId || null,
+    }
+  }
   if (actionMode === 'accept') {
     if (acceptMode === 'create' && entry.capabilities.canAcceptCreate) {
       const projectId = readFormValue(formData, 'projectId')
@@ -599,6 +634,7 @@ function createActionInput(
 
 /** Resolves the localized heading used by an action form. */
 function actionTitleKey(mode: TriageActionMode): MessageKey {
+  if (mode === 'assign') return 'triage.action.assign'
   if (mode === 'accept') return 'triage.action.accept'
   if (mode === 'duplicate') return 'triage.action.duplicate'
   if (mode === 'decline') return 'triage.action.decline'
@@ -609,7 +645,7 @@ function actionTitleKey(mode: TriageActionMode): MessageKey {
 /** Checks whether an entry exposes any operator decision. */
 function hasAnyAction(entry: TriageEntry) {
   const capabilities = entry.capabilities
-  return capabilities.canAcceptCreate || capabilities.canAcceptLink ||
+  return capabilities.canAssign || capabilities.canAcceptCreate || capabilities.canAcceptLink ||
     capabilities.canMarkDuplicate || capabilities.canDecline ||
     capabilities.canSnooze ||
     (capabilities.canRequestInformation && capabilities.canReply)
