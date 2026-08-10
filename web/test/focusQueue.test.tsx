@@ -11,10 +11,13 @@ import {
   getFocusQueueItems,
   getFocusSourcePath,
   resolveFocusQueueNavigationIndex,
+  resolveSelectedFocusItem,
   resolveFocusSnoozeUntil,
 } from '../src/features/focus-queue/model/focusQueue'
 import { FocusQueue } from '../src/features/focus-queue/ui/FocusQueue'
 import { readFocusPolicyOverrides } from '../src/features/focus-queue/model/focusPolicyForm'
+import { FocusQueueApiError } from '../src/features/focus-queue/api/focusQueue'
+import { resolveWorkspaceFocusOverviewState } from '../src/features/focus-queue/queries/useWorkspaceFocusOverview'
 import { createTranslator } from '../src/shared/i18n/i18n'
 
 describe('Focus queue', () => {
@@ -48,12 +51,38 @@ describe('Focus queue', () => {
     expect(resolveFocusQueueNavigationIndex(0, 0, 'next')).toBe(-1)
   })
 
+  test('keeps a visible URL deep link ahead of an earlier local selection', () => {
+    const nowItems = getFocusQueueItems(focusQueueResponseFixture, 'now')
+    expect(resolveSelectedFocusItem(
+      nowItems,
+      'focus-WI-202',
+      'focus-WI-194',
+    )?.id).toBe('focus-WI-202')
+  })
+
+  test('hides cached Focus after authorization failures but retains it for transient errors', () => {
+    expect(resolveWorkspaceFocusOverviewState(
+      focusQueueResponseFixture,
+      new FocusQueueApiError(403, 'Forbidden'),
+    )).toEqual({ isUnavailable: true, response: undefined })
+    expect(resolveWorkspaceFocusOverviewState(
+      focusQueueResponseFixture,
+      new FocusQueueApiError(503, 'Unavailable'),
+    )).toEqual({ isUnavailable: false, response: focusQueueResponseFixture })
+  })
+
   test('creates deterministic snooze times and schedule operations', () => {
     const now = new Date('2026-08-09T01:00:00.000Z')
     const item = getFocusQueueItems(focusQueueResponseFixture, 'now')[0]
     if (!item) throw new Error('The Focus fixture requires one Now item.')
 
-    expect(resolveFocusSnoozeUntil('next-week', now)).toBe('2026-08-16T01:00:00.000Z')
+    const nextWeek = new Date(resolveFocusSnoozeUntil('next-week', now))
+    expect(nextWeek.getDate()).toBe(new Date(2026, 7, 16, 9).getDate())
+    expect(nextWeek.getHours()).toBe(9)
+    const lateToday = new Date(2026, 7, 9, 22, 30)
+    const laterToday = new Date(resolveFocusSnoozeUntil('later-today', lateToday))
+    expect(laterToday.getDate()).toBe(lateToday.getDate())
+    expect(laterToday.getTime()).toBeGreaterThan(lateToday.getTime())
     expect(createFocusScheduleOperation(item, '2026-08-20')).toEqual({
       targetDate: '2026-08-20',
       type: 'move',
@@ -65,13 +94,17 @@ describe('Focus queue', () => {
     formData.set('weight-urgent', '42')
 
     expect(readFocusPolicyOverrides(formData)).toEqual({
-      weights: { urgent: 42 },
+      invalidFieldNames: [],
+      overrides: { weights: { urgent: 42 } },
     })
     formData.set('dueSoonDays', '366')
-    expect(readFocusPolicyOverrides(formData)).toBeUndefined()
+    expect(readFocusPolicyOverrides(formData)).toEqual({
+      invalidFieldNames: ['dueSoonDays'],
+      overrides: { weights: { urgent: 42 } },
+    })
   })
 
-  test('opens only a signal source authorized by the server snapshot', () => {
+  test('falls back from an inaccessible requested signal to another authorized source', () => {
     const item = getFocusQueueItems(focusQueueResponseFixture, 'now')[0]
     const firstSignal = item?.signals[0]
     if (!item || !firstSignal) throw new Error('The Focus fixture requires one signal.')
@@ -120,11 +153,12 @@ describe('Focus queue', () => {
     expect(html).toContain('Why this is in Focus')
     expect(html).toContain('Complete the predecessor Work Item')
     expect(html).toContain('Score 25')
-    expect(html).toContain('min-h-[44px]')
-    expect(html).toContain('tabindex="0"')
-    expect(html).toContain('tabindex="-1"')
-    expect(html).toContain('placeholder="10"')
-    expect(html).toContain('value="8"')
+    expect(html).toMatch(/<button[^>]*class="workbench-button-primary min-h-\[44px\][^>]*>Open</u)
+    expect(html).toMatch(/<button[^>]*data-focus-queue-primary="true"[^>]*tabindex="0"/u)
+    expect(html).toMatch(/<button[^>]*data-focus-queue-primary="true"[^>]*tabindex="-1"/u)
+    expect(html).toMatch(/<input(?=[^>]*name="weight-blocker")(?=[^>]*placeholder="10")[^>]*>/u)
+    expect(html).toMatch(/<input(?=[^>]*name="weight-urgent")(?=[^>]*value="8")[^>]*>/u)
+    expect(html.match(/aria-controls="focus-item-details-/gu)).toHaveLength(1)
   })
 
   test('keeps policy controls available when the selected section is empty', () => {
@@ -137,6 +171,7 @@ describe('Focus queue', () => {
     const html = renderToStaticMarkup(
       <FocusQueue
         locale="en"
+        onOpenItem={() => undefined}
         onSectionChange={() => undefined}
         response={emptyNowResponse}
         section="now"
@@ -163,7 +198,7 @@ describe('Focus queue', () => {
     )
 
     expect(html).toContain('Could not update the rules')
-    expect(html).not.toContain('Your current permissions do not allow this action.')
+    expect(html).not.toContain('The action could not be completed')
   })
 
   test('distinguishes a refreshed conflict from a generic action failure', () => {

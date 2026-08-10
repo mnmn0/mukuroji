@@ -415,6 +415,13 @@ test('projects every Public Work Item service result onto the closed response sc
   ]
   for (const item of projectedItems) {
     expect(item).toBeDefined()
+    expect(item).toMatchObject({
+      dueDate: '2026-06-18',
+      schedule: {
+        mode: 'due-date',
+        dueDate: '2026-06-18',
+      },
+    })
     for (const field of internalWorkItemFields) {
       expect(item).not.toHaveProperty(field)
     }
@@ -430,6 +437,10 @@ test('projects every Public Work Item service result onto the closed response sc
   for (const field of internalWorkItemFields) {
     expect(preparedUpdateReceipt.body).not.toHaveProperty(field)
   }
+  expect(preparedUpdateReceipt.body).toHaveProperty('schedule', expect.objectContaining({
+    mode: 'due-date',
+    dueDate: '2026-06-18',
+  }))
 })
 
 test('rejects Public Work Item deletion while an incident schedule dependency exists', async () => {

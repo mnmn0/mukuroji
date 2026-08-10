@@ -30,6 +30,7 @@ import {
   getFocusSectionMessageKey,
   getFocusSignalMessageKey,
   resolveFocusQueueNavigationIndex,
+  resolveSelectedFocusItem,
   resolveFocusSnoozeUntil,
   type FocusQueueNavigationKey,
 } from '../model/focusQueue'
@@ -147,13 +148,21 @@ export function FocusQueue({
   const items = getFocusQueueItems(response, section)
   const counts = getFocusQueueSectionCounts(response)
   const [selectedItemId, setSelectedItemId] = useState<string>()
+  const [overriddenRequestedItemId, setOverriddenRequestedItemId] = useState<string>()
+  const [previousRequestedItemId, setPreviousRequestedItemId] = useState(requestedItemId)
+  if (previousRequestedItemId !== requestedItemId) {
+    setPreviousRequestedItemId(requestedItemId)
+    setOverriddenRequestedItemId(undefined)
+  }
   const rowRefs = useRef(new Map<string, HTMLButtonElement>())
-  const requestedItem = requestedItemId
-    ? items.find((item) => item.id === requestedItemId)
-    : undefined
-  const selectedItem = items.find((item) => item.id === selectedItemId) ??
-    requestedItem ??
-    items[0]
+  const effectiveRequestedItemId = overriddenRequestedItemId === requestedItemId
+    ? undefined
+    : requestedItemId
+  const selectedItem = resolveSelectedFocusItem(
+    items,
+    effectiveRequestedItemId,
+    selectedItemId,
+  )
   const editorPolicy = getFocusPolicyForEditor(response, selectedItem)
   const editorTeamId = editorPolicy?.teamId
   const editorTeamPolicy = editorTeamId === undefined
@@ -163,6 +172,12 @@ export function FocusQueue({
       )
   const canEditEditorTeam = editorTeamId !== undefined &&
     response?.policyCapabilities.editableTeamIds.includes(editorTeamId) === true
+
+  /** Selects a row locally while allowing a later URL change to take precedence again. */
+  const selectItem = (itemId: string) => {
+    setSelectedItemId(itemId)
+    setOverriddenRequestedItemId(requestedItemId)
+  }
 
   /** Restores focus to the mutated row or the nearest remaining server-ordered row. */
   const restoreFocusAfterMutation = (itemId: string, previousIndex: number) => {
@@ -185,7 +200,7 @@ export function FocusQueue({
     const nextIndex = resolveFocusQueueNavigationIndex(currentIndex, items.length, key)
     const nextItem = items[nextIndex]
     if (!nextItem) return
-    setSelectedItemId(nextItem.id)
+    selectItem(nextItem.id)
     rowRefs.current.get(nextItem.id)?.focus({ preventScroll: true })
     rowRefs.current.get(nextItem.id)?.scrollIntoView({ block: 'nearest' })
   }
@@ -214,7 +229,7 @@ export function FocusQueue({
     <section aria-label={t('workspace.focus.title')} className="grid gap-4">
       <div className="workbench-toolbar overflow-hidden">
         <div
-          aria-label={t('workspace.focus.title')}
+          aria-label={t('workspace.focus.sectionTablist')}
           className="flex min-w-0 overflow-x-auto border-b border-[var(--workbench-border)]"
           role="tablist"
         >
@@ -342,7 +357,7 @@ export function FocusQueue({
                   if (element) rowRefs.current.set(item.id, element)
                   else rowRefs.current.delete(item.id)
                 }}
-                onSelect={() => setSelectedItemId(item.id)}
+                onSelect={() => selectItem(item.id)}
                 onSnooze={onSnooze}
                 onStatusChange={onStatusChange}
                 onWatchingChange={onWatchingChange}
@@ -448,7 +463,7 @@ function FocusQueueRow({
     <li data-testid={`focus-item-${item.workItem.teamId}-${item.workItem.id}`}>
       <button
         aria-expanded={isSelected}
-        aria-controls={`focus-item-details-${item.id}`}
+        aria-controls={isSelected ? `focus-item-details-${item.id}` : undefined}
         className={`grid min-h-[76px] w-full grid-cols-[52px_minmax(0,1fr)_auto] items-center gap-3 px-4 py-3 text-left transition-colors max-[720px]:grid-cols-[40px_minmax(0,1fr)] ${
           isSelected
             ? 'bg-[var(--workbench-surface-muted)]'
@@ -648,7 +663,6 @@ function FocusQueueRow({
             {!hasVisibleFocusAction(item, statuses, {
               onAssignToViewer,
               onComplete,
-              onOpenItem,
               onOpenSource,
               onPreviewSchedule,
               onSnooze,
@@ -755,9 +769,11 @@ function FocusScheduleControl({
     operation: WorkItemScheduleOperation
     preview: WorkItemScheduleChangePreview
   }>()
+  const [hasPreviewError, setHasPreviewError] = useState(false)
 
   /** Closes the inline editor and restores keyboard focus to its trigger. */
   const closeEditor = () => {
+    setHasPreviewError(false)
     setPreviewState(undefined)
     setIsOpen(false)
     globalThis.requestAnimationFrame(() => triggerRef.current?.focus({ preventScroll: true }))
@@ -783,7 +799,15 @@ function FocusScheduleControl({
     ).length
     const hasConflicts = previewState.preview.conflicts.length > 0
     return (
-      <div className="flex w-full flex-wrap items-center gap-2 border-l-2 border-[var(--workbench-warning)] pl-3 text-app-caption sm:w-auto">
+      <div
+        className="flex w-full flex-wrap items-center gap-2 border-l-2 border-[var(--workbench-warning)] pl-3 text-app-caption sm:w-auto"
+        onKeyDown={(event) => {
+          if (event.key === 'Escape') {
+            event.preventDefault()
+            closeEditor()
+          }
+        }}
+      >
         <span className="text-[var(--workbench-muted)]">
           {t('workspace.focus.schedule.impactCount').replace(
             '{count}',
@@ -834,9 +858,14 @@ function FocusScheduleControl({
         const date = formData.get('focusScheduleDate')
         if (typeof date !== 'string' || date.length === 0) return
         const operation = createFocusScheduleOperation(item, date)
+        setHasPreviewError(false)
+        setPreviewState(undefined)
         void onPreviewSchedule(item, operation).then((preview) => {
           setPreviewState({ operation, preview })
-        }, () => undefined)
+        }, () => {
+          setPreviewState(undefined)
+          setHasPreviewError(true)
+        })
       }}
     >
       <label className="grid gap-1 text-app-caption font-semibold text-[var(--workbench-muted)]">
@@ -862,6 +891,11 @@ function FocusScheduleControl({
       >
         {t('workspace.focus.action.cancel')}
       </button>
+      {hasPreviewError ? (
+        <span className="basis-full text-[var(--workbench-danger)]" role="alert">
+          {t('workspace.focus.actionError')}
+        </span>
+      ) : null}
     </form>
   )
 }
@@ -927,7 +961,7 @@ function FocusSnoozeControl({
           onActionSettled,
           onActionSettled,
         )
-        setIsOpen(false)
+        closeEditor()
       }}
     >
       <select
@@ -1061,24 +1095,15 @@ function getSignalChipClassName(type: FocusItem['signals'][number]['type']): str
 function isAnyFocusActionPending(
   isPending: (action: FocusQueueActionId) => boolean,
 ): boolean {
-  return [
+  const itemActionIds: readonly FocusQueueActionId[] = [
     'assign',
     'complete',
     'schedule',
     'snooze',
     'status',
     'watch',
-  ].some((action) => isPendingActionId(action) && isPending(action))
-}
-
-/** Narrows one local pending action identifier. */
-function isPendingActionId(value: string): value is FocusQueueActionId {
-  return value === 'assign' ||
-    value === 'complete' ||
-    value === 'schedule' ||
-    value === 'snooze' ||
-    value === 'status' ||
-    value === 'watch'
+  ]
+  return itemActionIds.some((action) => isPending(action))
 }
 
 /** Callback subset used to determine whether permission leaves any visible action. */
@@ -1087,8 +1112,6 @@ type FocusVisibleActionCallbacks = {
   onAssignToViewer?: FocusQueueRowProps['onAssignToViewer']
   /** Optional complete callback. */
   onComplete?: FocusQueueRowProps['onComplete']
-  /** Optional open callback. */
-  onOpenItem?: FocusQueueRowProps['onOpenItem']
   /** Optional source callback. */
   onOpenSource?: FocusQueueRowProps['onOpenSource']
   /** Optional schedule-preview callback. */
@@ -1107,8 +1130,7 @@ function hasVisibleFocusAction(
   statuses: readonly WorkflowStatusDefinition[],
   callbacks: FocusVisibleActionCallbacks,
 ): boolean {
-  return Boolean(callbacks.onOpenItem) ||
-    Boolean(item.capabilities.assign && callbacks.onAssignToViewer) ||
+  return Boolean(item.capabilities.assign && callbacks.onAssignToViewer) ||
     Boolean(item.capabilities.complete && callbacks.onComplete &&
       statuses.some((status) => status.category === 'completed')) ||
     Boolean(item.capabilities.changeStatus && callbacks.onStatusChange && statuses.length > 0) ||

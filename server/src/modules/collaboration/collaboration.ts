@@ -33,6 +33,9 @@ export const COLLABORATION_COMMENT_MAX_LENGTH = 20_000
 /** 一つの comment で解決できる mention 数です。 */
 export const COLLABORATION_MENTION_MAX_COUNT = 20
 
+/** Maximum length of one opaque watcher mutation identity. */
+const watcherMutationIdentityMaximumLength = 256
+
 /** UI と API が受け付ける reaction emoji です。 */
 export const COLLABORATION_REACTIONS = ['👍', '❤️', '🎉', '👀', '✅'] as const
 
@@ -134,6 +137,10 @@ export type CollaborationMemberWatcherState = {
   automatic: boolean
   /** Current manual and automatic watcher reasons for the member. */
   reasons: string[]
+  /** Opaque identity of the mutation that produced the current row. */
+  mutationIdentity?: string
+  /** Canonical timestamp of the persisted watcher row. */
+  updatedAt?: string
   /** Whether the member currently watches the assigned Project, when requested. */
   projectSubscribed?: boolean
 }
@@ -318,6 +325,8 @@ export type UpdateWatcherInput = {
   memberKey: string
   /** Expected current manual watcher state used for optional compare-and-set. */
   expectedSubscribed?: boolean
+  /** Opaque identity used to recover a committed mutation after response loss. */
+  mutationIdentity?: string
   /** 自動 watch mutation かどうかです。 */
   automatic?: boolean
   /** 自動 watch の理由です。 */
@@ -451,6 +460,8 @@ type StoredWatcher = {
   createdAt: string
   /** 更新日時です。 */
   updatedAt: string
+  /** Opaque identity of the mutation that produced the row, when one was supplied. */
+  mutationIdentity?: string
 }
 
 type StoredPresence = {
@@ -891,6 +902,10 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       explicit: current?.explicit === true,
       automatic: reasons.some((reason) => reason !== 'manual'),
       reasons,
+      ...(current?.mutationIdentity === undefined
+        ? {}
+        : { mutationIdentity: current.mutationIdentity }),
+      ...(current === undefined ? {} : { updatedAt: current.updatedAt }),
       ...(projectEntityKey === undefined
         ? {}
         : { projectSubscribed: projectCurrent?.state === 'subscribed' }),
@@ -911,6 +926,8 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
   ): Promise<CollaborationMemberWatcherState | CollaborationWatcherState>
   /** Saves a manual or automatic watcher and returns the requested projection shape. */
   async subscribe(input: UpdateWatcherInput) {
+    validateWatcherUpdateMode(input, 'subscribe')
+    const mutationIdentity = normalizeWatcherMutationIdentity(input.mutationIdentity)
     await this.ensureLocalTable()
     const { entityKey, entityType, entityId } = validateWatcherScope(input)
     const parentConditions = watcherParentIssueConditions(this.parentIssueTableName, input)
@@ -918,7 +935,14 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
     const occurredAt = input.auditContext?.occurredAt ?? new Date().toISOString()
     const reason = input.automatic ? input.reason ?? 'comment' : 'manual'
     const update = input.automatic
-      ? autoWatcherUpdate(this.tableName, entityKey, memberKey, reason, occurredAt)
+      ? autoWatcherUpdate(
+          this.tableName,
+          entityKey,
+          memberKey,
+          reason,
+          occurredAt,
+          mutationIdentity,
+        )
       : manualWatcherUpdate(
           this.tableName,
           entityKey,
@@ -926,6 +950,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
           'subscribed',
           occurredAt,
           input.expectedSubscribed,
+          mutationIdentity,
         )
     const auditPut = createMutationAuditEventPut(this.auditTableName, input.auditContext, {
       directoryId: input.workspaceId,
@@ -989,6 +1014,8 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
   ): Promise<CollaborationMemberWatcherState | CollaborationWatcherState>
   /** Saves an explicit unsubscribe tombstone and returns the requested projection shape. */
   async unsubscribe(input: UpdateWatcherInput) {
+    validateWatcherUpdateMode(input, 'unsubscribe')
+    const mutationIdentity = normalizeWatcherMutationIdentity(input.mutationIdentity)
     await this.ensureLocalTable()
     const { entityKey, entityType, entityId } = validateWatcherScope(input)
     const parentConditions = watcherParentIssueConditions(this.parentIssueTableName, input)
@@ -1019,6 +1046,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
             'unsubscribed',
             occurredAt,
             input.expectedSubscribed,
+            mutationIdentity,
           ),
           ...(auditPut ? [auditPut] : []),
         ],
@@ -1554,6 +1582,28 @@ function validateWatcherScope(input: UpdateWatcherInput) {
   return { entityKey, entityType: 'project' as const, entityId: projectId }
 }
 
+/**
+ * Rejects watcher update modes whose optional controls would otherwise be ignored.
+ *
+ * @param input - Untrusted watcher update request.
+ * @param operation - Requested watcher transition.
+ */
+function validateWatcherUpdateMode(
+  input: UpdateWatcherInput,
+  operation: 'subscribe' | 'unsubscribe',
+): void {
+  if (
+    input.automatic === true &&
+    (input.expectedSubscribed !== undefined || operation === 'unsubscribe')
+  ) {
+    throw new CollaborationError(
+      400,
+      'InvalidWatcherUpdate',
+      'Automatic watcher updates cannot use manual watcher transition controls.',
+    )
+  }
+}
+
 function parentIssueCondition(tableName: string, input: WorkItemCollaborationScope) {
   const assignmentCondition = input.projectId
     ? 'assignedProjectId = :assignedProjectId'
@@ -1635,12 +1685,13 @@ function autoWatcherUpdate(
   memberKey: string,
   reasons: string | string[],
   occurredAt: string,
+  mutationIdentity?: string,
 ) {
   return {
     Update: {
       TableName: tableName,
       Key: { entityKey, recordKey: watcherRecordKey(memberKey) },
-      UpdateExpression: 'SET entryType = :entryType, memberKey = :memberKey, #state = if_not_exists(#state, :subscribed), explicit = if_not_exists(explicit, :false), createdAt = if_not_exists(createdAt, :createdAt), updatedAt = :updatedAt ADD reasons :reasons',
+      UpdateExpression: `SET entryType = :entryType, memberKey = :memberKey, #state = if_not_exists(#state, :subscribed), explicit = if_not_exists(explicit, :false), createdAt = if_not_exists(createdAt, :createdAt), updatedAt = :updatedAt${mutationIdentity === undefined ? ' REMOVE mutationIdentity' : ', mutationIdentity = :mutationIdentity'} ADD reasons :reasons`,
       ExpressionAttributeNames: { '#state': 'state' },
       ExpressionAttributeValues: {
         ':entryType': 'watcher',
@@ -1650,6 +1701,7 @@ function autoWatcherUpdate(
         ':createdAt': occurredAt,
         ':updatedAt': occurredAt,
         ':reasons': new Set(Array.isArray(reasons) ? reasons : [reasons]),
+        ...(mutationIdentity === undefined ? {} : { ':mutationIdentity': mutationIdentity }),
       },
     },
   }
@@ -1705,12 +1757,13 @@ function manualWatcherUpdate(
   state: 'subscribed' | 'unsubscribed',
   occurredAt: string,
   expectedSubscribed?: boolean,
+  mutationIdentity?: string,
 ) {
   return {
     Update: {
       TableName: tableName,
       Key: { entityKey, recordKey: watcherRecordKey(memberKey) },
-      UpdateExpression: 'SET entryType = :entryType, memberKey = :memberKey, #state = :state, explicit = :true, createdAt = if_not_exists(createdAt, :createdAt), updatedAt = :updatedAt ADD reasons :reasons',
+      UpdateExpression: `SET entryType = :entryType, memberKey = :memberKey, #state = :state, explicit = :true, createdAt = if_not_exists(createdAt, :createdAt), updatedAt = :updatedAt${mutationIdentity === undefined ? ' REMOVE mutationIdentity' : ', mutationIdentity = :mutationIdentity'} ADD reasons :reasons`,
       ...(expectedSubscribed === undefined
         ? {}
         : {
@@ -1727,6 +1780,7 @@ function manualWatcherUpdate(
         ':createdAt': occurredAt,
         ':updatedAt': occurredAt,
         ':reasons': new Set(['manual']),
+        ...(mutationIdentity === undefined ? {} : { ':mutationIdentity': mutationIdentity }),
         ...(expectedSubscribed === undefined
           ? {}
           : { ':expectedState': expectedSubscribed ? 'subscribed' : 'unsubscribed' }),
@@ -1887,10 +1941,13 @@ function toStoredWatcher(value: Record<string, unknown>): StoredWatcher {
     typeof value.entityKey !== 'string' ||
     typeof value.recordKey !== 'string' ||
     typeof value.memberKey !== 'string' ||
-    (value.state !== 'subscribed' && value.state !== 'unsubscribed')
+    (value.state !== 'subscribed' && value.state !== 'unsubscribed') ||
+    typeof value.updatedAt !== 'string' ||
+    !Number.isFinite(Date.parse(value.updatedAt))
   ) {
     throw new CollaborationError(503, 'InvalidCollaborationRecord', 'Watcher record is invalid.')
   }
+  const mutationIdentity = requireStoredWatcherMutationIdentity(value.mutationIdentity)
 
   return {
     entityKey: value.entityKey,
@@ -1901,7 +1958,8 @@ function toStoredWatcher(value: Record<string, unknown>): StoredWatcher {
     explicit: value.explicit === true,
     reasons: value.reasons instanceof Set || Array.isArray(value.reasons) ? value.reasons : [],
     createdAt: typeof value.createdAt === 'string' ? value.createdAt : '',
-    updatedAt: typeof value.updatedAt === 'string' ? value.updatedAt : '',
+    updatedAt: value.updatedAt,
+    ...(mutationIdentity === undefined ? {} : { mutationIdentity }),
   }
 }
 
@@ -2023,6 +2081,48 @@ function requireText(value: string, label: string) {
     throw new CollaborationError(400, 'InvalidCollaborationInput', `${label} is required.`)
   }
   return value.trim()
+}
+
+/** Normalizes one optional bounded mutation identity supplied by the application layer. */
+function normalizeWatcherMutationIdentity(value: unknown): string | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'string') {
+    throw new CollaborationError(
+      400,
+      'InvalidWatcherMutationIdentity',
+      'Watcher mutation identity must be a non-empty string.',
+    )
+  }
+  const normalized = value.trim()
+  if (
+    normalized.length === 0 ||
+    normalized.length > watcherMutationIdentityMaximumLength
+  ) {
+    throw new CollaborationError(
+      400,
+      'InvalidWatcherMutationIdentity',
+      `Watcher mutation identity must be ${watcherMutationIdentityMaximumLength} characters or fewer.`,
+    )
+  }
+  return normalized
+}
+
+/** Reads one optional canonical mutation identity from an untrusted watcher row. */
+function requireStoredWatcherMutationIdentity(value: unknown): string | undefined {
+  if (value === undefined) return undefined
+  if (
+    typeof value !== 'string' ||
+    value.trim() !== value ||
+    value.length === 0 ||
+    value.length > watcherMutationIdentityMaximumLength
+  ) {
+    throw new CollaborationError(
+      503,
+      'InvalidCollaborationRecord',
+      'Watcher record mutation identity is invalid.',
+    )
+  }
+  return value
 }
 
 function clampLimit(value: number | undefined) {

@@ -16,6 +16,8 @@ import {
   type FileVersion,
   type FocusItem,
   type FocusPolicy,
+  type FocusPolicyOverrides,
+  type FocusPolicySettings,
   type FocusQueueResponse,
   type FocusQueueSection,
   type ProjectQuickAccessPreferences,
@@ -309,6 +311,8 @@ type MockAuthenticatedTaskPageOptions = {
    * Schedule preview を permission error にする `teamId\0issueId` key の一覧です。
    */
   forbiddenSchedulePreviewIssueKeys?: readonly string[]
+  /** One-based Focus snooze request numbers that should fail without mutating state. */
+  failedFocusSnoozeRequestNumbers?: readonly number[]
   /**
    * Planning snapshot と schedule preview に使う canonical dependency 一覧です。
    */
@@ -437,6 +441,9 @@ async function mockAuthenticatedTaskPage(
   const pendingRevisionConflictIssueKeys = new Set(options.revisionConflictIssueKeys ?? [])
   const forbiddenSchedulePreviewIssueKeys = new Set(
     options.forbiddenSchedulePreviewIssueKeys ?? [],
+  )
+  const failedFocusSnoozeRequestNumbers = new Set(
+    options.failedFocusSnoozeRequestNumbers ?? [],
   )
   const workItemScheduleDependencies = structuredClone([
     ...(options.workItemScheduleDependencies ?? []),
@@ -1010,6 +1017,13 @@ async function mockAuthenticatedTaskPage(
 
       requestCounts.focusSnoozeUpdates += 1
       expect(route.request().headers().authorization).toBe('Bearer test-access-token')
+      if (failedFocusSnoozeRequestNumbers.has(requestCounts.focusSnoozeUpdates)) {
+        await route.fulfill({
+          status: 503,
+          json: { code: 'FocusSnoozeUnavailable', message: 'Focus snooze failed.' },
+        })
+        return
+      }
       const { teamId, workItemId } = readMockFocusItemRoute(route.request().url())
       const body: unknown = route.request().postDataJSON()
       const item = findMockFocusItem(focusQueue, teamId, workItemId)
@@ -1091,19 +1105,56 @@ async function mockAuthenticatedTaskPage(
       typeof body.target.teamId === 'string'
       ? { teamId: body.target.teamId, type: 'team' }
       : { type: 'user' }
+    const overrides = isMockRecord(body)
+      ? readMockFocusPolicyOverrides(body.overrides)
+      : undefined
+    if (!overrides) {
+      await route.fulfill({ status: 400, json: { message: 'Invalid Focus policy overrides.' } })
+      return
+    }
     const policy: FocusPolicy = {
       id: target.type === 'team'
         ? `mock-team-focus-policy-${target.teamId}`
         : 'mock-user-focus-policy',
-      overrides: {},
+      overrides,
       schemaVersion: FOCUS_SCHEMA_VERSION,
       target,
       updatedAt: new Date().toISOString(),
       version: requestCounts.focusPolicyUpdates + 3,
     }
+    const effectivePolicies = focusQueue.effectivePolicies.map((effectivePolicy) => {
+      const applies = target.type === 'user' || effectivePolicy.teamId === target.teamId
+      if (!applies) return effectivePolicy
+      return {
+        ...effectivePolicy,
+        settings: applyMockFocusPolicyOverrides(effectivePolicy.settings, overrides),
+        ...(target.type === 'team'
+          ? {
+              teamSettings: applyMockFocusPolicyOverrides(
+                effectivePolicy.teamSettings,
+                overrides,
+              ),
+            }
+          : {}),
+      }
+    })
+    focusQueue = {
+      ...focusQueue,
+      effectivePolicies,
+      ...(target.type === 'user'
+        ? { userPolicy: policy }
+        : {
+            teamPolicies: [
+              ...focusQueue.teamPolicies.filter((candidate) =>
+                candidate.target.type !== 'team' || candidate.target.teamId !== target.teamId
+              ),
+              policy,
+            ],
+          }),
+    }
     await route.fulfill({
       json: {
-        effectivePolicies: focusQueue.effectivePolicies,
+        effectivePolicies,
         policy,
       },
     })
@@ -2071,6 +2122,94 @@ function isMockRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
+ * Reads the numeric fields supported by the Focus policy E2E mock.
+ *
+ * @param value - Untrusted policy override request value.
+ * @returns A validated sparse override or undefined for an invalid field.
+ */
+function readMockFocusPolicyOverrides(value: unknown): FocusPolicyOverrides | undefined {
+  if (!isMockRecord(value)) return undefined
+  const scalarFields: readonly (keyof FocusPolicyOverrides)[] = [
+    'cycleDueSoonDays',
+    'dueSoonDays',
+    'nowScoreThreshold',
+    'slaHours',
+  ]
+  if (scalarFields.some((field) =>
+    value[field] !== undefined && typeof value[field] !== 'number'
+  )) {
+    return undefined
+  }
+  if (value.weights !== undefined && !isMockRecord(value.weights)) return undefined
+  const weights = isMockRecord(value.weights) ? value.weights : undefined
+  const weightFields: readonly string[] = [
+    'approval',
+    'blocker',
+    'cycle',
+    'dueSoon',
+    'mention',
+    'overdue',
+    'reviewRequest',
+    'sla',
+    'urgent',
+  ]
+  if (weights && weightFields.some((field) =>
+    weights[field] !== undefined && typeof weights[field] !== 'number'
+  )) {
+    return undefined
+  }
+
+  return {
+    ...(typeof value.cycleDueSoonDays === 'number'
+      ? { cycleDueSoonDays: value.cycleDueSoonDays }
+      : {}),
+    ...(typeof value.dueSoonDays === 'number' ? { dueSoonDays: value.dueSoonDays } : {}),
+    ...(typeof value.nowScoreThreshold === 'number'
+      ? { nowScoreThreshold: value.nowScoreThreshold }
+      : {}),
+    ...(typeof value.slaHours === 'number' ? { slaHours: value.slaHours } : {}),
+    ...(weights
+      ? {
+          weights: {
+            ...(typeof weights.approval === 'number' ? { approval: weights.approval } : {}),
+            ...(typeof weights.blocker === 'number' ? { blocker: weights.blocker } : {}),
+            ...(typeof weights.cycle === 'number' ? { cycle: weights.cycle } : {}),
+            ...(typeof weights.dueSoon === 'number' ? { dueSoon: weights.dueSoon } : {}),
+            ...(typeof weights.mention === 'number' ? { mention: weights.mention } : {}),
+            ...(typeof weights.overdue === 'number' ? { overdue: weights.overdue } : {}),
+            ...(typeof weights.reviewRequest === 'number'
+              ? { reviewRequest: weights.reviewRequest }
+              : {}),
+            ...(typeof weights.sla === 'number' ? { sla: weights.sla } : {}),
+            ...(typeof weights.urgent === 'number' ? { urgent: weights.urgent } : {}),
+          },
+        }
+      : {}),
+  }
+}
+
+/**
+ * Applies one sparse policy layer to complete mocked effective settings.
+ *
+ * @param settings - Current complete settings.
+ * @param overrides - Sparse replacement observed by the mock endpoint.
+ * @returns Complete settings reflecting the submitted values.
+ */
+function applyMockFocusPolicyOverrides(
+  settings: FocusPolicySettings,
+  overrides: FocusPolicyOverrides,
+): FocusPolicySettings {
+  return {
+    ...settings,
+    ...overrides,
+    weights: {
+      ...settings.weights,
+      ...overrides.weights,
+    },
+  }
+}
+
+/**
  * Validates the revision-bound fields used by the mocked Focus snooze endpoint.
  *
  * @param value - Untrusted request JSON.
@@ -2152,6 +2291,9 @@ function moveMockFocusItem(
   response: FocusQueueResponse,
   updatedItem: FocusItem,
 ): FocusQueueResponse {
+  if (!response.sections.some((group) => group.section === updatedItem.section)) {
+    throw new Error(`Mock Focus response is missing section ${updatedItem.section}.`)
+  }
   return {
     ...response,
     generatedAt: new Date().toISOString(),
@@ -3444,6 +3586,11 @@ test.describe('authenticated task page', () => {
     )
     await expect(mentionPrimary).toHaveAttribute('aria-expanded', 'true')
     await expect.poll(() => requestCounts.focusReads).toBeGreaterThanOrEqual(3)
+    await blockedPrimary.click()
+    await expect(blockedPrimary).toHaveAttribute('aria-expanded', 'true')
+    await expect(mentionPrimary).toHaveAttribute('aria-expanded', 'false')
+    await mentionPrimary.click()
+    await expect(mentionPrimary).toHaveAttribute('aria-expanded', 'true')
 
     await mentionItem.getByRole('button', { name: '根拠を開く', exact: true }).click()
     await expect(page).toHaveURL('/inbox?eventId=event-WI-202-mention')
@@ -3510,6 +3657,17 @@ test.describe('authenticated task page', () => {
     await expect.poll(() => requestCounts.notificationReads).toBeGreaterThanOrEqual(2)
   })
 
+  test('Issue #194: 解決済みまたは閲覧不可の deep link は不在理由を表示する', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page)
+    await page.goto(
+      '/focus?teamId=core-team&workItemId=missing-item&sourceEventId=missing-event',
+    )
+
+    await expect(page.getByTestId('focus-deep-link-unavailable')).toContainText(
+      'リンク先の Work Item はフォーカスにないか、現在の権限では表示できません。',
+    )
+  })
+
   test('Issue #194: Focus の inline 操作を閉じると trigger に戻り、最後の行を移すと active tab に戻る', async ({ page }) => {
     const focusQueue = structuredClone(focusQueueResponseFixture)
     const nowGroup = focusQueue.sections.find((group) => group.section === 'now')
@@ -3552,6 +3710,56 @@ test.describe('authenticated task page', () => {
     await expect(activeTab).toBeFocused()
   })
 
+  test('Issue #194: Focus の schedule preview 失敗は editor 内に理由を表示する', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page)
+    await page.route(
+      /.*\/api\/teams\/[^/]+\/issues\/[^/]+\/schedule\/preview$/,
+      async (route) => {
+        await route.fulfill({
+          status: 503,
+          json: { code: 'SchedulePreviewUnavailable', message: 'Preview failed.' },
+        })
+      },
+    )
+    await page.goto('/focus')
+
+    const item = page.getByTestId('focus-item-core-team-WI-194')
+    await item.getByRole('button', { name: '期限を設定', exact: true }).click()
+    await item.getByLabel('新しい期限').fill('2026-08-20')
+    await item.getByRole('button', { name: '影響を確認', exact: true }).click()
+
+    await expect(item.getByRole('alert')).toContainText(
+      '操作を完了できませんでした。もう一度お試しください。',
+    )
+    await expect(item.getByLabel('新しい期限')).toBeVisible()
+  })
+
+  test('Issue #194: snooze の Undo 失敗後も feedback を復元して再試行できる', async ({ page }) => {
+    const focusQueue = structuredClone(focusQueueResponseFixture)
+    const nowGroup = focusQueue.sections.find((group) => group.section === 'now')
+    if (!nowGroup?.items[0]) throw new Error('The Focus fixture requires one Now item.')
+    nowGroup.items = [nowGroup.items[0]]
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      failedFocusSnoozeRequestNumbers: [2],
+      focusQueue,
+    })
+    const requestCounts = getMockRequestCounts(page)
+    await page.goto('/focus')
+
+    const item = page.getByTestId('focus-item-core-team-WI-194')
+    await item.getByRole('button', { name: 'スヌーズ', exact: true }).click()
+    await item.getByRole('button', { name: '確定', exact: true }).click()
+    await expect.poll(() => requestCounts.focusSnoozeUpdates).toBe(1)
+    const undo = page.getByRole('button', { name: '元に戻す', exact: true })
+    await undo.click()
+    await expect.poll(() => requestCounts.focusSnoozeUpdates).toBe(2)
+
+    await expect(undo).toBeVisible()
+    await expect(page.getByRole('alert').filter({
+      hasText: '操作を完了できませんでした。',
+    })).toBeVisible()
+  })
+
   test('Issue #194: Focus policy selector は個人と Team の sparse override を正しい target へ送る', async ({ page }) => {
     const focusQueue = structuredClone(focusQueueResponseFixture)
     delete focusQueue.userPolicy
@@ -3565,6 +3773,12 @@ test.describe('authenticated task page', () => {
     })
     await policyPanel.locator('summary').click()
     await policyPanel.locator('input[name="weight-urgent"]').fill('42')
+    await policyPanel.locator('input[name="dueSoonDays"]').fill('366')
+    await policyPanel.getByRole('button', { name: 'ルールを保存', exact: true }).click()
+    await expect(policyPanel.getByText('許可された範囲の値を入力してください。')).toBeVisible()
+    expect(requestCounts.focusPolicyUpdates).toBe(0)
+    await expect(policyPanel.locator('input[name="weight-urgent"]')).toHaveValue('42')
+    await policyPanel.locator('input[name="dueSoonDays"]').fill('')
     await policyPanel.getByRole('button', { name: 'ルールを保存', exact: true }).click()
     await expect.poll(() => requestCounts.focusPolicyUpdates).toBe(1)
 

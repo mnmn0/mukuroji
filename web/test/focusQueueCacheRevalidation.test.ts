@@ -45,6 +45,8 @@ describe('Focus cache revalidation', () => {
     ], scope)).toBe(false)
     expect(isFocusAffectedCacheKey(['project-tasks', 'token', 'project-b'], scope)).toBe(false)
     expect(isFocusAffectedCacheKey(['planning-snapshot', 'token'], scope)).toBe(false)
+    expect(isFocusAffectedCacheKey('workspace-work-items', scope)).toBe(false)
+    expect(isFocusAffectedCacheKey(() => ['workspace-work-items'], scope)).toBe(false)
   })
 
   test('includes every propagated schedule impact and the Planning snapshot', () => {
@@ -84,6 +86,10 @@ describe('Focus cache revalidation', () => {
     )
     await revalidateFocusCachesOnConflict(
       new TeamIssuesApiError(500, 'Work Item failure'),
+      revalidate,
+    )
+    await revalidateFocusCachesOnConflict(
+      new FocusQueueApiError(500, 'Focus failure'),
       revalidate,
     )
 

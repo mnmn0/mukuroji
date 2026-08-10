@@ -77,27 +77,28 @@ export function FocusPolicyPanel({
   t,
 }: FocusPolicyPanelProps) {
   const [scope, setScope] = useState<'user' | 'team'>('user')
+  const [invalidFieldNames, setInvalidFieldNames] = useState<readonly string[]>([])
   if (!policy) return null
   const editingTeam = scope === 'team' && policy.teamId !== undefined
   const storedPolicy = editingTeam ? teamPolicy : personalPolicy
   const inheritedSettings = editingTeam ? policy.baseSettings : policy.teamSettings
   const canEdit = editingTeam ? canEditTeam : canEditPersonal
 
-  /** Validates and submits one sparse personal policy replacement. */
+  /** Validates and submits one sparse policy replacement. */
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (!onSave) return
     const formData = new FormData(event.currentTarget)
-    const overrides = readFocusPolicyOverrides(formData)
-    if (overrides) {
-      const target: FocusPolicyTarget = editingTeam && policy.teamId !== undefined
-        ? { type: 'team', teamId: policy.teamId }
-        : { type: 'user' }
-      void onSave(target, storedPolicy?.version ?? 0, overrides).then(
-        () => undefined,
-        () => undefined,
-      )
-    }
+    const result = readFocusPolicyOverrides(formData)
+    setInvalidFieldNames(result.invalidFieldNames)
+    if (result.invalidFieldNames.length > 0) return
+    const target: FocusPolicyTarget = editingTeam && policy.teamId !== undefined
+      ? { type: 'team', teamId: policy.teamId }
+      : { type: 'user' }
+    void onSave(target, storedPolicy?.version ?? 0, result.overrides).then(
+      () => undefined,
+      () => undefined,
+    )
   }
 
   return (
@@ -118,6 +119,12 @@ export function FocusPolicyPanel({
       <form
         className="border-t border-[var(--workbench-border)] px-4 py-4"
         key={`${policy.fingerprint}:${scope}:${storedPolicy?.version ?? 0}`}
+        noValidate
+        onChange={(event) => {
+          const target = event.target
+          if (!(target instanceof HTMLInputElement)) return
+          setInvalidFieldNames((current) => current.filter((name) => name !== target.name))
+        }}
         onSubmit={handleSubmit}
       >
         <p className="mb-4 text-app-caption text-[var(--workbench-muted)]">
@@ -131,7 +138,10 @@ export function FocusPolicyPanel({
             <span>{t('workspace.focus.policy.scope')}</span>
             <select
               className="workbench-input min-h-[44px] px-3"
-              onChange={(event) => setScope(event.target.value === 'team' ? 'team' : 'user')}
+              onChange={(event) => {
+                setInvalidFieldNames([])
+                setScope(event.target.value === 'team' ? 'team' : 'user')
+              }}
               value={scope}
             >
               <option value="user">{t('workspace.focus.policy.scopeUser')}</option>
@@ -143,7 +153,11 @@ export function FocusPolicyPanel({
         ) : null}
         <fieldset disabled={!onSave || !canEdit || isSaving}>
           <div className="grid gap-x-4 gap-y-3 sm:grid-cols-2 lg:grid-cols-3">
-            {focusPolicyWeightFields.map(({ field, signalType }) => (
+            {focusPolicyWeightFields.map(({ field, signalType }) => {
+              const name = `weight-${field}`
+              const invalid = invalidFieldNames.includes(name)
+              const errorId = `focus-policy-${name}-error`
+              return (
               <label className="grid gap-1 text-app-caption font-semibold text-[var(--workbench-muted)]" key={field}>
                 <span>
                   {t('workspace.focus.policy.weight').replace(
@@ -152,19 +166,29 @@ export function FocusPolicyPanel({
                   )}
                 </span>
                 <input
+                  aria-describedby={invalid ? errorId : undefined}
+                  aria-invalid={invalid || undefined}
                   className="workbench-input min-h-[44px] w-full px-3 tabular-nums"
                   defaultValue={storedPolicy?.overrides.weights?.[field] ?? ''}
                   max="10000"
                   min="0"
-                  name={`weight-${field}`}
+                  name={name}
                   placeholder={String(inheritedSettings.weights[field])}
                   step="0.1"
                   type="number"
                 />
+                {invalid ? (
+                  <span className="text-[var(--workbench-danger)]" id={errorId} role="alert">
+                    {t('workspace.focus.policy.fieldError')}
+                  </span>
+                ) : null}
               </label>
-            ))}
+              )
+            })}
             <PolicyNumberField
               effectiveValue={inheritedSettings.dueSoonDays}
+              errorMessage={t('workspace.focus.policy.fieldError')}
+              invalid={invalidFieldNames.includes('dueSoonDays')}
               label={t('workspace.focus.policy.dueSoonDays')}
               max="365"
               name="dueSoonDays"
@@ -172,6 +196,8 @@ export function FocusPolicyPanel({
             />
             <PolicyNumberField
               effectiveValue={inheritedSettings.cycleDueSoonDays}
+              errorMessage={t('workspace.focus.policy.fieldError')}
+              invalid={invalidFieldNames.includes('cycleDueSoonDays')}
               label={t('workspace.focus.policy.cycleDueSoonDays')}
               max="365"
               name="cycleDueSoonDays"
@@ -179,6 +205,8 @@ export function FocusPolicyPanel({
             />
             <PolicyNumberField
               effectiveValue={inheritedSettings.slaHours}
+              errorMessage={t('workspace.focus.policy.fieldError')}
+              invalid={invalidFieldNames.includes('slaHours')}
               label={t('workspace.focus.policy.slaHours')}
               max="8760"
               min="1"
@@ -187,6 +215,8 @@ export function FocusPolicyPanel({
             />
             <PolicyNumberField
               effectiveValue={inheritedSettings.nowScoreThreshold}
+              errorMessage={t('workspace.focus.policy.fieldError')}
+              invalid={invalidFieldNames.includes('nowScoreThreshold')}
               label={t('workspace.focus.policy.nowThreshold')}
               max="100000"
               name="nowScoreThreshold"
@@ -219,6 +249,10 @@ export function FocusPolicyPanel({
 type PolicyNumberFieldProps = {
   /** Effective inherited value shown as a placeholder. */
   effectiveValue: number
+  /** Localized validation message displayed below this field. */
+  errorMessage: string
+  /** Whether the current supplied value failed policy validation. */
+  invalid: boolean
   /** Visible localized field label. */
   label: string
   /** Highest value accepted by the server-side policy validator. */
@@ -236,6 +270,8 @@ type PolicyNumberFieldProps = {
 /** Renders one 44px policy number field. */
 function PolicyNumberField({
   effectiveValue,
+  errorMessage,
+  invalid,
   label,
   max,
   min = '0',
@@ -243,10 +279,13 @@ function PolicyNumberField({
   step = '1',
   value,
 }: PolicyNumberFieldProps) {
+  const errorId = `focus-policy-${name}-error`
   return (
     <label className="grid gap-1 text-app-caption font-semibold text-[var(--workbench-muted)]">
       <span>{label}</span>
       <input
+        aria-describedby={invalid ? errorId : undefined}
+        aria-invalid={invalid || undefined}
         className="workbench-input min-h-[44px] w-full px-3 tabular-nums"
         defaultValue={value ?? ''}
         max={max}
@@ -256,6 +295,11 @@ function PolicyNumberField({
         step={step}
         type="number"
       />
+      {invalid ? (
+        <span className="text-[var(--workbench-danger)]" id={errorId} role="alert">
+          {errorMessage}
+        </span>
+      ) : null}
     </label>
   )
 }

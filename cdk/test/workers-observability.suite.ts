@@ -2311,8 +2311,14 @@ test('tenant lifecycle execution is split into queued environment-bound resource
           'dynamodb:UpdateItem',
         ]));
       } else {
-        expect(focusActions).not.toContain('dynamodb:DeleteItem');
-        expect(focusActions).not.toContain('dynamodb:PutItem');
+        for (const writeAction of [
+          'dynamodb:BatchWriteItem',
+          'dynamodb:DeleteItem',
+          'dynamodb:PutItem',
+          'dynamodb:UpdateItem',
+        ]) {
+          expect(focusActions).not.toContain(writeAction);
+        }
       }
     } else {
       expect(focusStatements).toEqual([]);

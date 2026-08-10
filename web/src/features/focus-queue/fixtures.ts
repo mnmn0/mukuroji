@@ -69,24 +69,20 @@ const snoozedItem = {
   ),
   snoozedUntil: '2026-08-11T00:00:00.000Z',
 } satisfies FocusItem
+const doneItemBase = createFocusFixtureItem(
+  'WI-190',
+  'done',
+  'Resolve the dependency incident',
+  ['blocker'],
+)
 const doneItem = {
-  ...createFocusFixtureItem(
-    'WI-190',
-    'done',
-    'Resolve the dependency incident',
-    ['blocker'],
-  ),
+  ...doneItemBase,
   actionability: {
     actionable: false,
     reasons: ['work-item-completed'],
   },
   workItem: {
-    ...createFocusFixtureItem(
-      'WI-190',
-      'done',
-      'Resolve the dependency incident',
-      ['blocker'],
-    ).workItem,
+    ...doneItemBase.workItem,
     statusCategory: 'completed',
     workflowStatusId: 'done',
   },

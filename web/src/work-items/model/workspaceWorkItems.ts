@@ -34,7 +34,7 @@ export type WorkspaceSummary = {
   projects: number
   /** Number of incomplete Work Items. */
   tasks: number
-  /** Number of high-priority incomplete Work Items. */
+  /** Number of active Work Items blocked by canonical relation/dependency signals. */
   blocked: number
 }
 

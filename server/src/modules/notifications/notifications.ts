@@ -737,7 +737,7 @@ export class DynamoDbNotificationsClient implements NotificationClient {
     do {
       const remainingRows = snoozeWakeMaximumRows - rowsRead
       if (remainingRows <= 0 || pagesRead >= snoozeWakeMaximumPages) {
-        throw createSnoozeWakeLimitError()
+        break
       }
       const response = await this.documentClient.send(new QueryCommand({
         TableName: this.tableName,
@@ -750,10 +750,7 @@ export class DynamoDbNotificationsClient implements NotificationClient {
         ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
       }))
       pagesRead += 1
-      const rows = response.Items ?? []
-      if (rows.length > remainingRows) {
-        throw createSnoozeWakeLimitError()
-      }
+      const rows = (response.Items ?? []).slice(0, remainingRows)
       rowsRead += rows.length
       for (const row of rows) {
         const snoozedUntil = readTimestamp(row.snoozedUntil)
@@ -792,12 +789,6 @@ export class DynamoDbNotificationsClient implements NotificationClient {
           )
         }
         visitedCursors.add(cursor)
-        if (
-          pagesRead >= snoozeWakeMaximumPages ||
-          rowsRead >= snoozeWakeMaximumRows
-        ) {
-          throw createSnoozeWakeLimitError()
-        }
       }
     } while (exclusiveStartKey)
   }
@@ -1221,15 +1212,6 @@ function decodeNotificationCursor(
   } catch {
     throw new NotificationError(400, 'InvalidNotificationCursor', 'Notification cursor is invalid.')
   }
-}
-
-/** Creates a stable availability error when expired-snooze maintenance exceeds its read window. */
-function createSnoozeWakeLimitError(): NotificationError {
-  return new NotificationError(
-    503,
-    'NotificationSnoozeWakeLimitExceeded',
-    `Expired notification snooze maintenance cannot exceed ${snoozeWakeMaximumPages} pages or ${snoozeWakeMaximumRows} rows per read.`,
-  )
 }
 
 /**

@@ -1905,10 +1905,11 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
       createFileProofingScopeKey(scope),
       'APPROVAL_SUMMARY',
     )
-
-    return isStoredApprovalSummaryItem(summary)
-      ? toApprovalSummary(summary)
-      : createEmptyApprovalSummary()
+    if (summary === undefined) return createEmptyApprovalSummary()
+    if (!isStoredApprovalSummaryItem(summary)) {
+      throw createApprovalSummaryUnavailableError()
+    }
+    return toApprovalSummary(summary)
   }
 
   /** 複数 Work Item の approval summary projection を bounded batch read します。 */
@@ -1920,6 +1921,7 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
       requireWorkItemScope(scope)
       return createFileProofingScopeKey(scope)
     }))]
+    const requestedScopeKeys = new Set(scopeKeys)
     const summaries = new Map<string, ApprovalSummary>(scopeKeys.map((scopeKey) => [
       scopeKey,
       createEmptyApprovalSummary(),
@@ -1940,18 +1942,18 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
           },
         }))
         for (const item of response.Responses?.[this.tableName] ?? []) {
-          if (isStoredApprovalSummaryItem(item)) {
-            summaries.set(item.scopeKey, toApprovalSummary(item))
+          if (
+            !isStoredApprovalSummaryItem(item) ||
+            !requestedScopeKeys.has(item.scopeKey)
+          ) {
+            throw createApprovalSummaryUnavailableError()
           }
+          summaries.set(item.scopeKey, toApprovalSummary(item))
         }
         keys = response.UnprocessedKeys?.[this.tableName]?.Keys ?? []
       }
       if (keys.length > 0) {
-        throw new FileProofingError(
-          503,
-          'ApprovalSummaryUnavailable',
-          'Approval summaries could not be read completely.',
-        )
+        throw createApprovalSummaryUnavailableError()
       }
     }
 
@@ -2478,6 +2480,15 @@ function createEmptyApprovalSummary(): ApprovalSummary {
     rejectedCount: 0,
     changesRequestedCount: 0,
   }
+}
+
+/** Creates the safe availability error used for incomplete or malformed summary reads. */
+function createApprovalSummaryUnavailableError(): FileProofingError {
+  return new FileProofingError(
+    503,
+    'ApprovalSummaryUnavailable',
+    'Approval summaries could not be read completely.',
+  )
 }
 
 /** Stored aggregate projection を時点依存の overdue count 付き response へ変換します。 */
@@ -3482,6 +3493,8 @@ function isStoredFileApprovalIndexItem(value: unknown): value is StoredFileAppro
 /** Approval summary projection row を判定します。 */
 function isStoredApprovalSummaryItem(value: unknown): value is StoredApprovalSummaryItem {
   return typeof value === 'object' && value !== null &&
+    'scopeKey' in value && typeof value.scopeKey === 'string' &&
+    'recordKey' in value && value.recordKey === 'APPROVAL_SUMMARY' &&
     'entryType' in value && value.entryType === 'approval-summary' &&
     'pendingCount' in value && isNonnegativeSafeInteger(value.pendingCount) &&
     'approvedCount' in value && isNonnegativeSafeInteger(value.approvedCount) &&

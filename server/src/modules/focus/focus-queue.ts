@@ -201,6 +201,11 @@ type FocusProjectionContext = {
     string,
     readonly PlanningSnapshot['workItemLinks'][number][]
   >
+  /** Planning dependencies grouped by Team-qualified successor identity. */
+  planningDependenciesBySuccessorKey: ReadonlyMap<
+    string,
+    readonly PlanningSnapshot['workItemDependencies'][number][]
+  >
   /** Planning entities keyed by their Workspace-local identifier. */
   planningEntitiesById: ReadonlyMap<string, PlanningSnapshot['entities'][number]>
   /** Reviewer approvals grouped by Team-qualified Work Item identity. */
@@ -420,9 +425,15 @@ function hasActiveBlocker(
  * @param workItemId - Team-local Work Item identifier.
  * @returns Collision-safe in-memory identity.
  */
-function createWorkItemKey(teamId: string, workItemId: string): string {
+export function createFocusWorkItemStateKey(
+  teamId: string,
+  workItemId: string,
+): string {
   return `${teamId}${WORK_ITEM_KEY_SEPARATOR}${workItemId}`
 }
+
+/** Internal concise alias for the shared Focus Work Item state-map key contract. */
+const createWorkItemKey = createFocusWorkItemStateKey
 
 /**
  * Normalizes an evaluation instant and rejects invalid timestamps.
@@ -804,6 +815,21 @@ function createProjectionContext(
     )
   }
 
+  const planningDependenciesBySuccessorKey = new Map<
+    string,
+    PlanningSnapshot['workItemDependencies'][number][]
+  >()
+  for (const dependency of input.planning.workItemDependencies) {
+    appendMapValue(
+      planningDependenciesBySuccessorKey,
+      createWorkItemKey(
+        dependency.successor.teamId,
+        dependency.successor.workItemId,
+      ),
+      dependency,
+    )
+  }
+
   return {
     now,
     evaluatedAt,
@@ -822,6 +848,7 @@ function createProjectionContext(
       ]),
     ),
     planningLinksByWorkItemKey,
+    planningDependenciesBySuccessorKey,
     planningEntitiesById: new Map(
       input.planning.entities.map((entity) => [entity.id, entity]),
     ),
@@ -1149,11 +1176,8 @@ function createBlockerSignals(
   workItem: CanonicalWorkItem,
 ): ProjectedSignal[] {
   const successorKey = createWorkItemKey(workItem.teamId, workItem.id)
-  return context.planning.workItemDependencies.flatMap((dependency) => {
-    if (createWorkItemKey(
-      dependency.successor.teamId,
-      dependency.successor.workItemId,
-    ) !== successorKey) return []
+  const dependencies = context.planningDependenciesBySuccessorKey.get(successorKey) ?? []
+  return dependencies.flatMap((dependency) => {
     const predecessorKey = createWorkItemKey(
       dependency.predecessor.teamId,
       dependency.predecessor.workItemId,

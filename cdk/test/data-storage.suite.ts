@@ -145,6 +145,9 @@ test('Focus state uses a retained expiring scope and record key table', () => {
       PointInTimeRecoverySpecification: {
         PointInTimeRecoveryEnabled: true,
       },
+      SSESpecification: {
+        SSEEnabled: true,
+      },
       TimeToLiveSpecification: {
         AttributeName: 'expiresAt',
         Enabled: true,

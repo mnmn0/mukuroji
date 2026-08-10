@@ -436,7 +436,7 @@ describe('notification store', () => {
     })
   })
 
-  test('fails closed after four expired-snooze wake pages', async () => {
+  test('stops expired-snooze maintenance after four pages and continues the Inbox read', async () => {
     let wakeQueries = 0
     const recording = createClient(({ constructor, input }) => {
       if (constructor.name !== 'QueryCommand') return {}
@@ -447,7 +447,10 @@ describe('notification store', () => {
       }
       wakeQueries += 1
       return {
-        Items: [],
+        Items: Array.from({ length: 250 }, (_, index) => ({
+          notificationKey: `future-snooze-${wakeQueries}-${index}`,
+          snoozedUntil: '2099-07-12T13:00:00.000Z',
+        })),
         LastEvaluatedKey: {
           recipientStatusKey: statusKey,
           notificationKey: `wake-page-${wakeQueries}`,
@@ -459,10 +462,7 @@ describe('notification store', () => {
       workspaceId: 'workspace-1',
       memberKey: 'member@example.com',
       now: new Date('2026-07-12T13:00:00.000Z'),
-    })).rejects.toMatchObject({
-      status: 503,
-      code: 'NotificationSnoozeWakeLimitExceeded',
-    })
+    })).resolves.toEqual({ notifications: [] })
     expect(wakeQueries).toBe(4)
     expect(recording.commands.filter(({ input, name }) =>
       name === 'QueryCommand' &&

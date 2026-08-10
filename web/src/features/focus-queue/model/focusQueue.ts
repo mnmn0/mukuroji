@@ -10,6 +10,7 @@ import {
   type WorkItemScheduleOperation,
 } from '@mukuroji/contracts'
 import type { Locale, MessageKey } from '../../../shared/i18n/i18n'
+import { isSafeApplicationPath } from '../../../shared/routing/applicationPath'
 
 /** Focus queue sections in their stable product order. */
 export const focusQueueSectionOrder: readonly FocusQueueSection[] = Object.freeze([
@@ -73,6 +74,24 @@ export function getFocusQueueSectionCounts(
 }
 
 /**
+ * Resolves queue selection with an authorized URL request taking precedence over local state.
+ *
+ * @param items - Server-ordered items in the active section.
+ * @param requestedItemId - Item selected by the current URL when still visible.
+ * @param selectedItemId - Item selected locally before the URL changed.
+ * @returns The requested item, local selection, or first server-ranked item.
+ */
+export function resolveSelectedFocusItem(
+  items: readonly FocusItem[],
+  requestedItemId?: string,
+  selectedItemId?: string,
+): FocusItem | undefined {
+  return items.find((item) => item.id === requestedItemId) ??
+    items.find((item) => item.id === selectedItemId) ??
+    items[0]
+}
+
+/**
  * Resolves an Inbox correlation only when both the Work Item and optional source event remain visible.
  *
  * @param response - Permission-filtered Focus queue snapshot.
@@ -116,9 +135,7 @@ export function getFocusSourcePath(
   const path = preferredSignal?.source.deepLink ??
     item.signals.find((signal) =>
       signal.permission.canOpenSource && signal.source.deepLink)?.source.deepLink
-  return path?.startsWith('/') && !path.startsWith('//') && !path.includes('\\')
-    ? path
-    : undefined
+  return isSafeApplicationPath(path) ? path : undefined
 }
 
 /**
@@ -259,15 +276,22 @@ export function resolveFocusSnoozeUntil(
 ): string {
   const wakeTime = new Date(now)
   switch (preset) {
-    case 'later-today':
-      wakeTime.setHours(wakeTime.getHours() + 4)
+    case 'later-today': {
+      const endOfToday = new Date(now)
+      endOfToday.setHours(23, 59, 59, 999)
+      wakeTime.setTime(Math.min(
+        wakeTime.getTime() + (4 * 60 * 60 * 1_000),
+        endOfToday.getTime(),
+      ))
       break
+    }
     case 'tomorrow':
       wakeTime.setDate(wakeTime.getDate() + 1)
       wakeTime.setHours(9, 0, 0, 0)
       break
     case 'next-week':
       wakeTime.setDate(wakeTime.getDate() + 7)
+      wakeTime.setHours(9, 0, 0, 0)
       break
   }
   return wakeTime.toISOString()

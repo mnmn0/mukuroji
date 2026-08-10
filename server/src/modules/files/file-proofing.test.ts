@@ -1656,6 +1656,33 @@ describe('file proofing domain', () => {
     expect(summaries.get(createFileProofingScopeKey(scope))?.nextDueAt).toBeUndefined()
   })
 
+  test('fails closed when a stored approval summary projection is malformed', async () => {
+    const state = createClient()
+    const scopeKey = createFileProofingScopeKey(scope)
+    state.documentClient.items.set(createMemoryKey({
+      scopeKey,
+      recordKey: 'APPROVAL_SUMMARY',
+    }), {
+      scopeKey,
+      recordKey: 'APPROVAL_SUMMARY',
+      entryType: 'approval-summary',
+      pendingCount: 1,
+      approvedCount: -1,
+      rejectedCount: 0,
+      changesRequestedCount: 0,
+      updatedAt: '2026-07-13T00:00:00.000Z',
+    })
+
+    await expect(state.client.getApprovalSummary(scope)).rejects.toMatchObject({
+      code: 'ApprovalSummaryUnavailable',
+      status: 503,
+    })
+    await expect(state.client.getApprovalSummaries([scope])).rejects.toMatchObject({
+      code: 'ApprovalSummaryUnavailable',
+      status: 503,
+    })
+  })
+
   test('creates one durable Work Item approval across retries and transitions after unanimous approval', async () => {
     const state = createClient('work-items', 'audit-events')
     const workItemKey = {

@@ -302,10 +302,14 @@ import {
 import {
   FocusStateError,
   createFocusCauseFingerprint,
+  createFocusPolicyMutationPreview,
   createFocusQueue,
+  createFocusWorkItemStateKey as createFocusWorkItemKey,
   resolveFocusEffectivePolicies,
   type CreateFocusQueueInput,
   type FocusRelationGraphSource,
+  type FocusSnoozeRecord,
+  type FocusStateSnapshot,
 } from '../modules/focus'
 import {
   createCommentWorkspaceSearchDocument,
@@ -5987,33 +5991,37 @@ routeApp.put('/api/focus/policies', async (c) => {
       reservationRequest,
       reservation.reservationId,
     )
-    let mutationCommitted = false
     try {
       const now = new Date()
+      const prepared = await prepareFocusPolicyMutation(
+        principal,
+        input,
+        now,
+        reservationRequest,
+        targetIdentity,
+      )
+      if (prepared.committedPolicy !== undefined) {
+        await completeFocusPolicyMutationReceipt(
+          reservationRequest,
+          token,
+          targetIdentity,
+          prepared.committedPolicy,
+          prepared.effectivePolicies,
+        )
+        c.header('Idempotency-Replayed', 'true')
+        return c.json({
+          policy: prepared.committedPolicy,
+          effectivePolicies: prepared.effectivePolicies,
+        } satisfies UpdateFocusPolicyResponse)
+      }
       const policy = await workItemDependencies.focusState.savePolicy({
         workspaceId: principal.directoryId,
         memberKey: principal.userKey,
         update: input,
         now,
+        mutationIdentity: prepared.mutationIdentity,
       })
-      mutationCommitted = true
-      const accessibleTeamIds = await readFocusAccessibleTeamIds(principal)
-      const policyStateTeamIds = input.target.type === 'team'
-        ? [...new Set([...accessibleTeamIds, input.target.teamId])].sort()
-        : accessibleTeamIds
-      const state = await workItemDependencies.focusState.getState({
-        workspaceId: principal.directoryId,
-        memberKey: principal.userKey,
-        teamIds: policyStateTeamIds,
-      })
-      const effectivePolicyTeamIds = input.target.type === 'team'
-        ? [input.target.teamId]
-        : accessibleTeamIds
-      const effectivePolicies = resolveFocusEffectivePolicies({
-        teamIds: effectivePolicyTeamIds,
-        teamPolicies: state.teamPolicies,
-        ...(state.userPolicy === undefined ? {} : { userPolicy: state.userPolicy }),
-      })
+      const effectivePolicies = prepared.effectivePolicies
       const response = { policy, effectivePolicies } satisfies UpdateFocusPolicyResponse
       await completeFocusPolicyMutationReceipt(
         reservationRequest,
@@ -6024,9 +6032,7 @@ routeApp.put('/api/focus/policies', async (c) => {
       )
       return c.json(response)
     } catch (error) {
-      if (!mutationCommitted) {
-        await releaseFocusMutationReservation(reservationRequest, token)
-      }
+      await releaseFocusMutationReservation(reservationRequest, token)
       throw error
     }
   } catch (error) {
@@ -6047,8 +6053,9 @@ routeApp.put('/api/focus/items/:teamId/:workItemId/snooze', async (c) => {
     const workItemId = readFocusRouteId(c.req.param('workItemId'), 'Focus Work Item ID')
     const now = new Date()
     const input = readFocusSnoozeInput(await readJson<unknown>(c.req), now)
+    const queue = await readFocusQueue(principal, now)
     const current = requireFocusItem(
-      await readFocusQueue(principal, now),
+      queue,
       teamId,
       workItemId,
     )
@@ -6083,8 +6090,39 @@ routeApp.put('/api/focus/items/:teamId/:workItemId/snooze', async (c) => {
       reservationRequest,
       reservation.reservationId,
     )
-    let mutationCommitted = false
     try {
+      const mutationIdentity = createFocusItemMutationRecoveryIdentity(
+        reservationRequest,
+        operation,
+        targetIdentity,
+        current,
+        requireFocusEffectivePolicyFingerprint(queue, current),
+      )
+      const state = await workItemDependencies.focusState.getState({
+        workspaceId: principal.directoryId,
+        memberKey: principal.userKey,
+        teamIds: [teamId],
+      })
+      const committedSnooze = findCommittedFocusSnooze(
+        state,
+        teamId,
+        workItemId,
+        mutationIdentity,
+        input.snoozedUntil,
+        createFocusCauseFingerprint(current.signals),
+      )
+      if (committedSnooze !== undefined) {
+        const item = restoreFocusItemEvaluationTime(current, committedSnooze.updatedAt)
+        await completeFocusItemMutationReceipt(
+          reservationRequest,
+          token,
+          operation,
+          targetIdentity,
+          item,
+        )
+        c.header('Idempotency-Replayed', 'true')
+        return c.json({ item } satisfies UpdateFocusSnoozeResponse)
+      }
       requireFocusItemVersion(current, input.expectedVersion)
       await workItemDependencies.focusState.saveSnooze({
         workspaceId: principal.directoryId,
@@ -6095,8 +6133,8 @@ routeApp.put('/api/focus/items/:teamId/:workItemId/snooze', async (c) => {
         causeFingerprint: createFocusCauseFingerprint(current.signals),
         snoozedUntil: input.snoozedUntil,
         now,
+        mutationIdentity,
       })
-      mutationCommitted = true
       const item = requireUpdatedFocusItem(
         await readFocusQueue(principal, now),
         teamId,
@@ -6112,9 +6150,7 @@ routeApp.put('/api/focus/items/:teamId/:workItemId/snooze', async (c) => {
       )
       return c.json(response)
     } catch (error) {
-      if (!mutationCommitted) {
-        await releaseFocusMutationReservation(reservationRequest, token)
-      }
+      await releaseFocusMutationReservation(reservationRequest, token)
       throw error
     }
   } catch (error) {
@@ -6136,8 +6172,9 @@ routeApp.put('/api/focus/items/:teamId/:workItemId/watch', async (c) => {
     const workItemId = readFocusRouteId(c.req.param('workItemId'), 'Focus Work Item ID')
     const input = readFocusWatchInput(await readJson<unknown>(c.req))
     const now = new Date()
+    const queue = await readFocusQueue(principal, now)
     const current = requireFocusItem(
-      await readFocusQueue(principal, now),
+      queue,
       teamId,
       workItemId,
     )
@@ -6173,9 +6210,7 @@ routeApp.put('/api/focus/items/:teamId/:workItemId/watch', async (c) => {
       reservationRequest,
       reservation.reservationId,
     )
-    let mutationCommitted = false
     try {
-      requireFocusItemVersion(current, input.expectedVersion)
       const entityKey = createWorkItemCollaborationEntityKey(
         principal.directoryId,
         teamId,
@@ -6187,37 +6222,63 @@ routeApp.put('/api/focus/items/:teamId/:workItemId/watch', async (c) => {
             detail.issue.assignedProjectId,
           )
         : undefined
-      let observedWatching: boolean
-      if (current.watching !== input.watching) {
-        const mutation = {
-          workspaceId: principal.directoryId,
-          teamId,
-          issueId: workItemId,
-          entityKey,
-          projectId: detail.issue.assignedProjectId,
-          projectEntityKey,
-          memberKey: principal.userKey,
-          expectedSubscribed: current.watching,
-          auditContext: createApiMutationContext(c, principal, {
-            expectedVersion: input.expectedVersion,
-            teamId,
-            workItemId,
-            watching: input.watching,
-          }),
-        }
-        const watch = input.watching
-          ? await workItemDependencies.collaboration.subscribe(mutation)
-          : await workItemDependencies.collaboration.unsubscribe(mutation)
-        mutationCommitted = true
-        observedWatching = watch.subscribed
-      } else {
-        const watch = await workItemDependencies.collaboration.getMemberWatcherState({
+      const mutationIdentity = createFocusItemMutationRecoveryIdentity(
+        reservationRequest,
+        operation,
+        targetIdentity,
+        current,
+        requireFocusEffectivePolicyFingerprint(queue, current),
+      )
+      const storedWatcher = await workItemDependencies.collaboration
+        .getMemberWatcherState({
           entityKey,
           memberKey: principal.userKey,
           projectEntityKey,
         })
-        observedWatching = watch.subscribed
+      if (
+        storedWatcher.mutationIdentity === mutationIdentity &&
+        storedWatcher.subscribed === input.watching &&
+        storedWatcher.updatedAt !== undefined
+      ) {
+        requireFocusWatchPostcondition(current.watching, input.watching)
+        const item = restoreFocusItemEvaluationTime(current, storedWatcher.updatedAt)
+        await completeFocusItemMutationReceipt(
+          reservationRequest,
+          token,
+          operation,
+          targetIdentity,
+          item,
+        )
+        c.header('Idempotency-Replayed', 'true')
+        return c.json({ item } satisfies UpdateFocusWatchResponse)
       }
+      requireFocusWatchPostcondition(storedWatcher.subscribed, current.watching)
+      requireFocusItemVersion(current, input.expectedVersion)
+      const auditContext = {
+        ...createApiMutationContext(c, principal, {
+          expectedVersion: input.expectedVersion,
+          teamId,
+          workItemId,
+          watching: input.watching,
+        }),
+        occurredAt: now.toISOString(),
+      }
+      const mutation = {
+        workspaceId: principal.directoryId,
+        teamId,
+        issueId: workItemId,
+        entityKey,
+        projectId: detail.issue.assignedProjectId,
+        projectEntityKey,
+        memberKey: principal.userKey,
+        expectedSubscribed: current.watching,
+        mutationIdentity,
+        auditContext,
+      }
+      const watch = input.watching
+        ? await workItemDependencies.collaboration.subscribe(mutation)
+        : await workItemDependencies.collaboration.unsubscribe(mutation)
+      const observedWatching = watch.subscribed
       requireFocusWatchPostcondition(observedWatching, input.watching)
       const item = requireUpdatedFocusItem(
         await readFocusQueue(principal, now),
@@ -6235,9 +6296,7 @@ routeApp.put('/api/focus/items/:teamId/:workItemId/watch', async (c) => {
       )
       return c.json(response)
     } catch (error) {
-      if (!mutationCommitted) {
-        await releaseFocusMutationReservation(reservationRequest, token)
-      }
+      await releaseFocusMutationReservation(reservationRequest, token)
       throw error
     }
   } catch (error) {
@@ -19958,8 +20017,8 @@ const FOCUS_SNOOZE_MAXIMUM_MILLISECONDS = 365 * 24 * 60 * 60 * 1_000
 /** Maximum concurrent watcher reads performed while assembling one Focus queue. */
 const FOCUS_WATCHER_READ_BATCH_SIZE = 16
 
-/** Stable separator for recipient-local Team-qualified Work Item map keys. */
-const FOCUS_WORK_ITEM_KEY_SEPARATOR = '\0'
+/** Maximum Focus items whose watcher state is resolved for one queue. */
+const FOCUS_WATCHER_READ_LIMIT = 400
 
 /** Stable Focus HTTP boundary error. */
 class FocusApiError extends Error {
@@ -20391,6 +20450,259 @@ function createFocusItemMutationPath(
 }
 
 /**
+ * Prepares the exact policy snapshot and recovery marker used by one durable update.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @param input - Validated policy replacement.
+ * @param now - Stable mutation clock.
+ * @param request - Actor-scoped idempotency reservation identity.
+ * @param targetIdentity - Opaque policy target identity.
+ * @returns Predicted response, mutation marker, and an already committed policy when recoverable.
+ */
+async function prepareFocusPolicyMutation(
+  principal: WorkspacePrincipal,
+  input: UpdateFocusPolicyInput,
+  now: Date,
+  request: ReserveIdempotencyRequest,
+  targetIdentity: string,
+) {
+  const target = input.target
+  const accessibleTeamIds = await readFocusAccessibleTeamIds(principal)
+  const policyStateTeamIds = target.type === 'team'
+    ? [...new Set([...accessibleTeamIds, target.teamId])].sort()
+    : accessibleTeamIds
+  const state = await workItemDependencies.focusState.getState({
+    workspaceId: principal.directoryId,
+    memberKey: principal.userKey,
+    teamIds: policyStateTeamIds,
+  })
+  const preview = createFocusPolicyMutationPreview({
+    workspaceId: principal.directoryId,
+    memberKey: principal.userKey,
+    update: input,
+    now,
+  })
+  const teamPolicies = target.type === 'team'
+    ? [
+        ...state.teamPolicies.filter((policy) =>
+          policy.target.type !== 'team' || policy.target.teamId !== target.teamId
+        ),
+        preview,
+      ]
+    : state.teamPolicies
+  const userPolicy = target.type === 'user' ? preview : state.userPolicy
+  const effectivePolicyTeamIds = target.type === 'team'
+    ? [target.teamId]
+    : accessibleTeamIds
+  const effectivePolicies = resolveFocusEffectivePolicies({
+    teamIds: effectivePolicyTeamIds,
+    teamPolicies,
+    ...(userPolicy === undefined ? {} : { userPolicy }),
+  })
+  const mutationIdentity = createFocusMutationRecoveryIdentity(
+    request,
+    'policy',
+    targetIdentity,
+    {
+      policy: createFocusPolicyRecoveryEvidence(preview),
+      effectivePolicies: effectivePolicies.map((policy) => ({
+        teamId: policy.teamId,
+        fingerprint: policy.fingerprint,
+      })),
+    },
+  )
+  const storedPolicy = target.type === 'user'
+    ? state.userPolicy
+    : state.teamPolicies.find((policy) =>
+        policy.target.type === 'team' && policy.target.teamId === target.teamId
+      )
+  const storedMutationIdentity = target.type === 'user'
+    ? state.userPolicyMutationIdentity
+    : state.teamPolicyMutationIdentities[target.teamId]
+  const committedPolicy =
+    storedMutationIdentity === mutationIdentity &&
+    storedPolicy !== undefined &&
+    stableDigestStringify(createFocusPolicyRecoveryEvidence(storedPolicy)) ===
+      stableDigestStringify(createFocusPolicyRecoveryEvidence(preview))
+      ? storedPolicy
+      : undefined
+
+  return {
+    committedPolicy,
+    effectivePolicies,
+    mutationIdentity,
+  }
+}
+
+/**
+ * Selects policy fields whose values are independent from the retry clock.
+ *
+ * @param policy - Stored or predicted policy.
+ * @returns Canonical recovery evidence excluding the mutation timestamp.
+ */
+function createFocusPolicyRecoveryEvidence(policy: FocusPolicy) {
+  return {
+    schemaVersion: policy.schemaVersion,
+    id: policy.id,
+    target: policy.target,
+    version: policy.version,
+    overrides: policy.overrides,
+  }
+}
+
+/**
+ * Creates a durable marker that binds a domain write to one exact logical request.
+ *
+ * @param request - Actor-scoped reservation identity.
+ * @param operation - Focus mutation kind.
+ * @param targetIdentity - Opaque identity of the mutation target.
+ * @param evidence - Operation-specific observable state that must remain unchanged.
+ * @returns Lowercase SHA-256 mutation identity.
+ */
+function createFocusMutationRecoveryIdentity(
+  request: ReserveIdempotencyRequest,
+  operation: FocusMutationReceiptOperation,
+  targetIdentity: string,
+  evidence: unknown,
+): string {
+  return createHash('sha256').update(stableDigestStringify({
+    credentialId: request.credentialId,
+    idempotencyKey: request.idempotencyKey,
+    operation,
+    requestFingerprint: request.requestFingerprint,
+    targetIdentity,
+    workspaceId: request.workspaceId,
+    evidence,
+  })).digest('hex')
+}
+
+/**
+ * Creates retry-stable evidence for one item mutation while omitting its own effects.
+ *
+ * @param request - Actor-scoped reservation identity.
+ * @param operation - Snooze or watcher operation.
+ * @param targetIdentity - Opaque Work Item target identity.
+ * @param item - Current permission-filtered Focus item.
+ * @param effectivePolicyFingerprint - Current effective policy fingerprint.
+ * @returns Lowercase SHA-256 mutation identity.
+ */
+function createFocusItemMutationRecoveryIdentity(
+  request: ReserveIdempotencyRequest,
+  operation: 'snooze' | 'watch',
+  targetIdentity: string,
+  item: FocusItem,
+  effectivePolicyFingerprint: string,
+): string {
+  const signals = item.signals.map((signal) => ({
+    ...signal,
+    freshness: {
+      ...(signal.freshness.validUntil === undefined
+        ? {}
+        : { validUntil: signal.freshness.validUntil }),
+      ...(signal.freshness.sourceVersion === undefined
+        ? {}
+        : { sourceVersion: signal.freshness.sourceVersion }),
+    },
+  }))
+  const operationStableEvidence = operation === 'snooze'
+    ? { watching: item.watching }
+    : {
+        section: item.section,
+        snoozeRevision: item.snoozeRevision,
+        snoozedUntil: item.snoozedUntil ?? null,
+      }
+  return createFocusMutationRecoveryIdentity(
+    request,
+    operation,
+    targetIdentity,
+    {
+      actionability: item.actionability,
+      capabilities: item.capabilities,
+      effectivePolicyFingerprint,
+      effectivePolicyId: item.effectivePolicyId,
+      id: item.id,
+      operationStableEvidence,
+      rank: item.rank,
+      schemaVersion: item.schemaVersion,
+      signals,
+      workItem: item.workItem,
+    },
+  )
+}
+
+/**
+ * Finds the exact snooze row produced by one previously committed logical request.
+ *
+ * @param state - Current recipient Focus state.
+ * @param teamId - Owning Team identifier.
+ * @param workItemId - Team-local Work Item identifier.
+ * @param mutationIdentity - Expected durable mutation marker.
+ * @param snoozedUntil - Desired wake time, or null for an unsnooze tombstone.
+ * @param causeFingerprint - Current exact signal-cause fingerprint.
+ * @returns Matching committed snooze row, or undefined.
+ */
+function findCommittedFocusSnooze(
+  state: FocusStateSnapshot,
+  teamId: string,
+  workItemId: string,
+  mutationIdentity: string,
+  snoozedUntil: string | null,
+  causeFingerprint: string,
+): FocusSnoozeRecord | undefined {
+  return state.snoozes.find((record) =>
+    record.teamId === teamId &&
+    record.workItemId === workItemId &&
+    record.mutationIdentity === mutationIdentity &&
+    record.causeFingerprint === causeFingerprint &&
+    (record.snoozedUntil ?? null) === snoozedUntil
+  )
+}
+
+/**
+ * Resolves the effective policy evidence referenced by one Focus item.
+ *
+ * @param queue - Queue snapshot containing the policy collection.
+ * @param item - Item whose policy reference must resolve exactly.
+ * @returns Current effective policy fingerprint.
+ */
+function requireFocusEffectivePolicyFingerprint(
+  queue: FocusQueueResponse,
+  item: FocusItem,
+): string {
+  const policy = queue.effectivePolicies.find((candidate) =>
+    candidate.id === item.effectivePolicyId &&
+    candidate.teamId === item.workItem.teamId
+  )
+  if (policy === undefined) throw focusIdempotencyUnavailable()
+  return policy.fingerprint
+}
+
+/**
+ * Rebuilds a Focus item with the original evaluation clock of a recovered mutation.
+ *
+ * @param item - Current item whose observable state matched the committed marker.
+ * @param evaluatedAt - Persisted canonical mutation timestamp.
+ * @returns Detached item matching the original response clock.
+ */
+function restoreFocusItemEvaluationTime(
+  item: FocusItem,
+  evaluatedAt: string,
+): FocusItem {
+  if (!isStoredFocusTimestamp(evaluatedAt)) throw focusIdempotencyUnavailable()
+  return {
+    ...item,
+    signals: item.signals.map((signal) => ({
+      ...signal,
+      freshness: {
+        ...signal.freshness,
+        evaluatedAt,
+      },
+    })),
+    updatedAt: evaluatedAt,
+  }
+}
+
+/**
  * Reserves one Focus mutation and maps persistence failures to the Focus API contract.
  *
  * @param request - Actor-scoped reservation identity.
@@ -20747,8 +21059,11 @@ async function replayFocusPolicyMutation(
       throw invalidStoredFocusMutationReceipt()
     }
   } else {
-    const accessibleTeamIdSet = new Set(await readFocusAccessibleTeamIds(principal))
-    if (effectivePolicyTeamIds.some((teamId) => !accessibleTeamIdSet.has(teamId))) {
+    const accessibleTeamIds = await readFocusAccessibleTeamIds(principal)
+    if (
+      stableDigestStringify([...effectivePolicyTeamIds].sort()) !==
+        stableDigestStringify(accessibleTeamIds)
+    ) {
       throw new FocusApiError(
         403,
         'FocusPolicyReplayAccessChanged',
@@ -21091,7 +21406,9 @@ function canReadFocusScopedSource(
 ): boolean {
   if (principal.isSystemAdmin) return true
   const evaluation = principal.enterpriseAuthorizationEvaluation
-  if (evaluation === undefined) return true
+  if (evaluation === undefined) {
+    return principal.enterpriseLegacyProjectAccessSuppressed !== true
+  }
   if (projectId !== undefined && teamId === undefined) return false
   const resource: EnterpriseAuthorizationResource = projectId !== undefined
     ? {
@@ -21187,17 +21504,30 @@ function filterFocusPlanningSnapshotForPrincipal(
   snapshot: PlanningSnapshot,
   workItems: readonly CanonicalWorkItem[],
 ): PlanningSnapshot {
-  if (principal.isSystemAdmin || principal.enterpriseAuthorizationEvaluation === undefined) {
-    return snapshot
-  }
+  if (principal.isSystemAdmin) return snapshot
   const canonicalWorkItemsByKey = new Map(workItems.map((workItem) => [
     createFocusWorkItemKey(workItem.teamId, workItem.id),
     workItem,
   ]))
+  const legacyReadableTeamIds = new Set(workItems.map((workItem) => workItem.teamId))
+  const legacyReadableProjectIds = new Set(workItems.flatMap((workItem) =>
+    workItem.assignedProjectId === undefined ? [] : [workItem.assignedProjectId]
+  ))
+  /** Restricts legacy sources to resources evidenced by the authorized Work Item window. */
+  const canReadPlanningResource = (teamId?: string, projectId?: string) =>
+    principal.enterpriseAuthorizationEvaluation === undefined
+      ? principal.enterpriseLegacyProjectAccessSuppressed !== true &&
+        teamId !== undefined &&
+        legacyReadableTeamIds.has(teamId) &&
+        (projectId === undefined || legacyReadableProjectIds.has(projectId))
+      : canReadFocusScopedSource(
+          principal,
+          'planning.read',
+          teamId,
+          projectId,
+        )
   const readableWorkItemKeys = new Set(workItems
-    .filter((workItem) => canReadFocusScopedSource(
-      principal,
-      'planning.read',
+    .filter((workItem) => canReadPlanningResource(
       workItem.teamId,
       workItem.assignedProjectId,
     ))
@@ -21217,9 +21547,7 @@ function filterFocusPlanningSnapshotForPrincipal(
     ))
   )
   const entities = snapshot.entities.filter((entity) =>
-    canReadFocusScopedSource(
-      principal,
-      'planning.read',
+    canReadPlanningResource(
       entity.teamId,
       entity.projectId,
     )
@@ -21489,13 +21817,19 @@ async function readFocusWatchingByWorkItemKey(
     ]),
   )
   const watching: Record<string, boolean> = {}
-  const entries = [...uniqueItems.entries()]
+  const entries = [...uniqueItems.entries()].sort(([left], [right]) =>
+    left.localeCompare(right)
+  )
+  for (const [key] of entries.slice(FOCUS_WATCHER_READ_LIMIT)) {
+    watching[key] = false
+  }
+  const readableEntries = entries.slice(0, FOCUS_WATCHER_READ_LIMIT)
   for (
     let start = 0;
-    start < entries.length;
+    start < readableEntries.length;
     start += FOCUS_WATCHER_READ_BATCH_SIZE
   ) {
-    const batch = entries.slice(start, start + FOCUS_WATCHER_READ_BATCH_SIZE)
+    const batch = readableEntries.slice(start, start + FOCUS_WATCHER_READ_BATCH_SIZE)
     const states = await Promise.all(batch.map(async ([key, item]) => {
       const state = await workItemDependencies.collaboration.getMemberWatcherState({
         entityKey: createWorkItemCollaborationEntityKey(
@@ -21673,6 +22007,13 @@ async function readFocusNotifications(
       )
     }
   }
+  if (notifications.size > FOCUS_NOTIFICATION_GLOBAL_LIMIT) {
+    throw new FocusApiError(
+      503,
+      'FocusNotificationReadLimitExceeded',
+      'Focus notifications exceed the supported read window.',
+    )
+  }
   const mentionCountsByWorkItemKey = new Map<string, number>()
   const boundedNotifications: NotificationItem[] = []
   const newestFirst = [...notifications.values()].sort((left, right) => {
@@ -21691,17 +22032,6 @@ async function readFocusNotifications(
     boundedNotifications.push(notification)
   }
   return boundedNotifications
-}
-
-/**
- * Creates one collision-safe Work Item key for recipient-local maps.
- *
- * @param teamId - Owning Team identifier.
- * @param workItemId - Team-local Work Item identifier.
- * @returns Team-qualified in-memory key.
- */
-function createFocusWorkItemKey(teamId: string, workItemId: string): string {
-  return `${teamId}${FOCUS_WORK_ITEM_KEY_SEPARATOR}${workItemId}`
 }
 
 /**
@@ -24987,7 +25317,22 @@ function projectPublicWorkItemReceiptBody(value: unknown): Record<string, unknow
   }
   const projected: Record<string, unknown> = {}
   for (const field of PUBLIC_WORK_ITEM_RESPONSE_FIELDS) {
+    if (field === 'schedule') continue
     if (value[field] !== undefined) projected[field] = structuredClone(value[field])
+  }
+  if (value.schedule !== undefined) {
+    try {
+      projected.schedule = projectPublicWorkItemSchedule(
+        normalizeWorkItemSchedule(value.schedule),
+      )
+    } catch {
+      throw new PublicApiServiceError(
+        503,
+        'temporarily_unavailable',
+        'The Work Item mutation produced an invalid replay receipt.',
+        true,
+      )
+    }
   }
   return projected
 }

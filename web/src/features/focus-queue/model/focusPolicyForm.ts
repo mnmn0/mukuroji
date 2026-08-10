@@ -8,15 +8,23 @@ type ParsedPolicyNumber = {
   value?: number
 }
 
+/** Parsed overrides and field-level validation failures from one policy form. */
+export type FocusPolicyFormReadResult = {
+  /** Names of controls whose supplied values failed bounds or integer validation. */
+  invalidFieldNames: readonly string[]
+  /** Valid sparse overrides retained even when another field is invalid. */
+  overrides: FocusPolicyOverrides
+}
+
 /**
  * Parses a sparse Focus policy replacement from trusted form controls.
  *
  * @param formData - Form fields whose blanks intentionally retain inheritance.
- * @returns Sparse override values, or undefined when a supplied value is invalid.
+ * @returns Valid sparse overrides plus the names of invalid supplied fields.
  */
 export function readFocusPolicyOverrides(
   formData: FormData,
-): FocusPolicyOverrides | undefined {
+): FocusPolicyFormReadResult {
   const blocker = readOptionalPolicyNumber(formData, 'weight-blocker', 0, 10_000)
   const urgent = readOptionalPolicyNumber(formData, 'weight-urgent', 0, 10_000)
   const overdue = readOptionalPolicyNumber(formData, 'weight-overdue', 0, 10_000)
@@ -46,11 +54,21 @@ export function readFocusPolicyOverrides(
     0,
     100_000,
   )
-  const values = [
-    blocker, urgent, overdue, dueSoon, approval, reviewRequest, mention, sla, cycle,
-    dueSoonDays, cycleDueSoonDays, slaHours, nowScoreThreshold,
+  const values: readonly [string, ParsedPolicyNumber][] = [
+    ['weight-blocker', blocker],
+    ['weight-urgent', urgent],
+    ['weight-overdue', overdue],
+    ['weight-dueSoon', dueSoon],
+    ['weight-approval', approval],
+    ['weight-reviewRequest', reviewRequest],
+    ['weight-mention', mention],
+    ['weight-sla', sla],
+    ['weight-cycle', cycle],
+    ['dueSoonDays', dueSoonDays],
+    ['cycleDueSoonDays', cycleDueSoonDays],
+    ['slaHours', slaHours],
+    ['nowScoreThreshold', nowScoreThreshold],
   ]
-  if (values.some((value) => !value.valid)) return undefined
 
   const weights = {
     ...(approval.value === undefined ? {} : { approval: approval.value }),
@@ -64,15 +82,18 @@ export function readFocusPolicyOverrides(
     ...(urgent.value === undefined ? {} : { urgent: urgent.value }),
   }
   return {
-    ...(Object.keys(weights).length === 0 ? {} : { weights }),
-    ...(cycleDueSoonDays.value === undefined
-      ? {}
-      : { cycleDueSoonDays: cycleDueSoonDays.value }),
-    ...(dueSoonDays.value === undefined ? {} : { dueSoonDays: dueSoonDays.value }),
-    ...(nowScoreThreshold.value === undefined
-      ? {}
-      : { nowScoreThreshold: nowScoreThreshold.value }),
-    ...(slaHours.value === undefined ? {} : { slaHours: slaHours.value }),
+    invalidFieldNames: values.flatMap(([name, value]) => value.valid ? [] : [name]),
+    overrides: {
+      ...(Object.keys(weights).length === 0 ? {} : { weights }),
+      ...(cycleDueSoonDays.value === undefined
+        ? {}
+        : { cycleDueSoonDays: cycleDueSoonDays.value }),
+      ...(dueSoonDays.value === undefined ? {} : { dueSoonDays: dueSoonDays.value }),
+      ...(nowScoreThreshold.value === undefined
+        ? {}
+        : { nowScoreThreshold: nowScoreThreshold.value }),
+      ...(slaHours.value === undefined ? {} : { slaHours: slaHours.value }),
+    },
   }
 }
 

@@ -89,6 +89,7 @@ export function DashboardWorkspaceView({
         <MetricCard label={t('workspace.metric.openTasks')} value={summary.tasks} tone="emerald" />
         <MetricCard
           label={t('workspace.metric.blocked')}
+          srValue={isFocusUnavailable ? t('workspace.focus.previewUnavailable') : undefined}
           testId="workspace-focus-blocked-metric"
           value={isFocusUnavailable ? '—' : summary.blocked}
           tone="red"
@@ -131,7 +132,7 @@ export function DashboardWorkspaceView({
         <SectionHeader
           title={t('workspace.dashboard.decisionTitle')}
           meta={isFocusUnavailable
-            ? t('workspace.focus.previewUnavailable')
+            ? undefined
             : t('workspace.dashboard.decisionMeta').replace(
                 '{count}',
                 String(decisionTasks.length),

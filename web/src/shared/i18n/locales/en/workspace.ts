@@ -20,6 +20,7 @@ export const workspaceMessages = {
   'workspace.action.openTask': 'Open',
   'workspace.focus.eyebrow': 'Needs a decision now',
   'workspace.focus.title': 'Focus',
+  'workspace.focus.sectionTablist': 'Focus queue sections',
   'workspace.focus.description':
     'Review the next work to move, ranked by blockers, reviews, deadlines, and their source evidence.',
   'workspace.focus.section.now': 'Now',
@@ -35,6 +36,8 @@ export const workspaceMessages = {
   'workspace.focus.overviewUnavailable':
     'Focus data is unavailable. Affected metrics and previews are shown as —.',
   'workspace.focus.previewUnavailable': 'Focus data is unavailable.',
+  'workspace.focus.deepLinkUnavailable':
+    'The linked Work Item is no longer in Focus, or you do not have access to it.',
   'workspace.focus.retry': 'Reload',
   'workspace.focus.empty.now': 'Nothing needs action right now.',
   'workspace.focus.empty.next': 'There is no next work to move.',
@@ -107,7 +110,7 @@ export const workspaceMessages = {
   'workspace.focus.metadata.rank': 'Rank {rank}',
   'workspace.focus.keyboardHint': 'Use J / K or arrow keys to move, Enter to open',
   'workspace.focus.policy.title': 'Focus priority rules',
-  'workspace.focus.policy.description': 'Adjust one policy layer. Leave a field blank to inherit the shown lower-layer value.',
+  'workspace.focus.policy.description': 'Adjust one policy layer. Leave a field blank to inherit the Team or system-default value shown.',
   'workspace.focus.policy.scope': 'Policy scope',
   'workspace.focus.policy.scopeUser': 'Personal',
   'workspace.focus.policy.scopeTeam': 'Team',
@@ -121,6 +124,7 @@ export const workspaceMessages = {
   'workspace.focus.policy.saving': 'Saving',
   'workspace.focus.policy.saved': 'Rules saved.',
   'workspace.focus.policy.updateError': 'Could not update the rules. Review the latest settings.',
+  'workspace.focus.policy.fieldError': 'Enter a value within the allowed range.',
   'workspace.myTasks.eyebrow': 'Owned work',
   'workspace.myTasks.title': 'My tasks',
   'workspace.myTasks.description':

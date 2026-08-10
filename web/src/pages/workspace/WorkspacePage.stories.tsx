@@ -231,7 +231,6 @@ function WorkspaceCommonErrorShellStory() {
             focusQueue={focusQueueResponseFixture}
             summary={storySummary}
             t={t}
-            tasks={storyTasks}
             teams={projectDirectoryFixtures}
             workItemConfigurationsByTeam={storyWorkItemConfigurations}
           />
@@ -273,7 +272,19 @@ export const HomeRoute: Story = {
       focusQueue={focusQueueResponseFixture}
       summary={storySummary}
       t={t}
-      tasks={storyTasks}
+      teams={projectDirectoryFixtures}
+      workItemConfigurationsByTeam={storyWorkItemConfigurations}
+    />
+  ),
+}
+
+/** The `/home` route when Focus metrics and previews cannot be loaded. */
+export const HomeRouteFocusUnavailable: Story = {
+  render: () => (
+    <HomeWorkspaceView
+      isFocusUnavailable
+      summary={{ ...storySummary, blocked: 0 }}
+      t={t}
       teams={projectDirectoryFixtures}
       workItemConfigurationsByTeam={storyWorkItemConfigurations}
     />
@@ -342,6 +353,20 @@ export const DashboardRoute: Story = {
     <DashboardWorkspaceView
       focusQueue={focusQueueResponseFixture}
       summary={storySummary}
+      t={t}
+      tasks={storyTasks}
+      teams={projectDirectoryFixtures}
+      workItemConfigurationsByTeam={storyWorkItemConfigurations}
+    />
+  ),
+}
+
+/** The `/dashboard` route when Focus metrics and previews cannot be loaded. */
+export const DashboardRouteFocusUnavailable: Story = {
+  render: () => (
+    <DashboardWorkspaceView
+      isFocusUnavailable
+      summary={{ ...storySummary, blocked: 0 }}
       t={t}
       tasks={storyTasks}
       teams={projectDirectoryFixtures}

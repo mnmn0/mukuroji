@@ -88,6 +88,11 @@ describe('Work Item detail paths', () => {
       '/focus?teamId=core%2Fteam&workItemId=issue%2F42&sourceEventId=event%2F9',
     )
     expect(createFocusPath()).toBe('/focus')
+    expect(createFocusPath('core-team')).toBe('/focus')
+    expect(createFocusPath(undefined, 'issue-42')).toBe('/focus')
+    expect(createFocusPath(undefined, undefined, 'event-9')).toBe(
+      '/focus?sourceEventId=event-9',
+    )
   })
 
   test('keeps assigned Work Items scoped by project, team, and issue', () => {

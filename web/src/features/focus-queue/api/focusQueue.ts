@@ -27,6 +27,7 @@ import {
   type UpdateFocusWatchInput,
   type UpdateFocusWatchResponse,
 } from '@mukuroji/contracts'
+import { isSafeApplicationPath } from '../../../shared/routing/applicationPath'
 import { createMutationHeaders, type MutationRequestContext } from '../../../shared/api/mutationHeaders'
 import {
   isFiniteNumber,
@@ -704,14 +705,6 @@ function createFocusItemActionPath(
   action: 'snooze' | 'watch',
 ): string {
   return `${focusApiBaseUrl}/focus/items/${encodeURIComponent(teamId)}/${encodeURIComponent(workItemId)}/${action}`
-}
-
-/** Returns whether a deep link stays inside the current application origin. */
-function isSafeApplicationPath(value: unknown): value is string {
-  return typeof value === 'string' &&
-    value.startsWith('/') &&
-    !value.startsWith('//') &&
-    !value.includes('\\')
 }
 
 /** Fetches and validates one Focus endpoint response. */

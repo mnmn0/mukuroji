@@ -5,6 +5,7 @@ import {
   type ResolvedWorkItemConfiguration,
 } from '@mukuroji/contracts'
 import { renderToStaticMarkup } from 'react-dom/server'
+import { MemoryRouter } from 'react-router'
 import { focusQueueResponseFixture } from '../src/features/focus-queue/fixtures'
 import { notificationInboxControllerFixture } from '../src/notifications/fixtures'
 import { WorkspaceInboxView } from '../src/notifications/ui/WorkspaceInboxView'
@@ -86,7 +87,6 @@ describe('Workspace approval Inbox', () => {
         focusQueue={focusQueueResponseFixture}
         summary={summary}
         t={t}
-        tasks={[task]}
         teams={projectDirectoryFixtures}
         workItemConfigurationsByTeam={workItemConfigurationsByTeam}
         onOpenTask={() => undefined}
@@ -117,36 +117,38 @@ describe('Workspace approval Inbox', () => {
     }
   })
 
-  test('marks unavailable Focus metrics and previews instead of reporting real zeroes', () => {
-    const t = createTranslator('en')
-    const summary = { blocked: 0, projects: 1, tasks: 0 }
-    const views = [
-      <HomeWorkspaceView
-        isFocusUnavailable
-        summary={summary}
-        t={t}
-        tasks={[]}
-        teams={projectDirectoryFixtures}
-        workItemConfigurationsByTeam={{}}
-      />,
-      <DashboardWorkspaceView
-        isFocusUnavailable
-        summary={summary}
-        t={t}
-        tasks={[]}
-        teams={projectDirectoryFixtures}
-        workItemConfigurationsByTeam={{}}
-      />,
-    ]
-
-    for (const view of views) {
+  for (const viewName of ['Home', 'Dashboard']) {
+    test(`marks unavailable Focus metrics and previews instead of reporting real zeroes on ${viewName}`, () => {
+      const t = createTranslator('en')
+      const summary = { blocked: 0, projects: 1, tasks: 0 }
+      const view = viewName === 'Home'
+        ? (
+            <HomeWorkspaceView
+              isFocusUnavailable
+              summary={summary}
+              t={t}
+              teams={projectDirectoryFixtures}
+              workItemConfigurationsByTeam={{}}
+            />
+          )
+        : (
+            <DashboardWorkspaceView
+              isFocusUnavailable
+              summary={summary}
+              t={t}
+              tasks={[]}
+              teams={projectDirectoryFixtures}
+              workItemConfigurationsByTeam={{}}
+            />
+          )
       const html = renderToStaticMarkup(view)
       expect(html).toContain('data-testid="workspace-focus-blocked-metric"')
-      expect(html).toContain('>—</p>')
+      expect(html).toContain('aria-hidden="true">—</span>')
+      expect(html).toContain('<span class="sr-only">Focus data is unavailable.</span>')
       expect(html).toContain('data-testid="workspace-focus-preview-unavailable"')
       expect(html).toContain('Focus data is unavailable.')
-    }
-  })
+    })
+  }
 
   test('renders route-specific retry notices for Focus and Team configuration failures', () => {
     const t = createTranslator('en')
@@ -170,17 +172,19 @@ describe('Workspace approval Inbox', () => {
     expect(html).toContain('data-testid="workspace-focus-load-error"')
     expect(html).toContain('Affected metrics and previews are shown as —.')
     expect(html).toContain('data-testid="focus-configuration-error"')
-    expect(html).toContain('min-h-[44px]')
+    expect(html).toContain('>Reload</button>')
   })
 
   test('keeps Inbox event-only while cross-linking continuing attention to Focus', () => {
     const html = renderToStaticMarkup(
-      <WorkspaceInboxView
-        locale="ja"
-        notificationInbox={notificationInboxControllerFixture}
-        selectedEventId="event-comment-mentioned-1"
-        t={createTranslator('ja')}
-      />,
+      <MemoryRouter>
+        <WorkspaceInboxView
+          locale="ja"
+          notificationInbox={notificationInboxControllerFixture}
+          selectedEventId="event-comment-mentioned-1"
+          t={createTranslator('ja')}
+        />
+      </MemoryRouter>,
     )
 
     expect(html).toContain('data-testid="inbox-open-focus"')
@@ -190,6 +194,28 @@ describe('Workspace approval Inbox', () => {
     expect(html).toContain('teamId=core-team&amp;workItemId=wireframe')
     expect(html).toContain('aria-current="true"')
     expect(html).toContain('data-testid="notification-load-more"')
+  })
+
+  test('renders an explicit empty state when the available Home Focus preview has no items', () => {
+    const emptyFocusQueue = {
+      ...focusQueueResponseFixture,
+      sections: focusQueueResponseFixture.sections.map((group) => ({
+        ...group,
+        items: [],
+      })),
+    }
+    const html = renderToStaticMarkup(
+      <HomeWorkspaceView
+        focusQueue={emptyFocusQueue}
+        summary={{ blocked: 0, projects: 1, tasks: 0 }}
+        t={createTranslator('en')}
+        teams={projectDirectoryFixtures}
+        workItemConfigurationsByTeam={{}}
+      />,
+    )
+
+    expect(html).toContain('No tasks have been registered yet.')
+    expect(html).not.toContain('data-testid="workspace-focus-preview-unavailable"')
   })
 
   test('keeps canonical My Tasks visible when its Team configuration is unavailable', () => {

@@ -47,11 +47,18 @@ export function FocusPage() {
     mutateFocusQueue: focusQuery.mutate,
   })
   const requestedSourceEventId = searchParams.get('sourceEventId')?.trim() || undefined
+  const requestedTeamId = searchParams.get('teamId')?.trim() || undefined
+  const requestedWorkItemId = searchParams.get('workItemId')?.trim() || undefined
   const deepLinkedItem = findDeepLinkedFocusItem(focusQuery.data, {
     sourceEventId: requestedSourceEventId,
-    teamId: searchParams.get('teamId')?.trim() || undefined,
-    workItemId: searchParams.get('workItemId')?.trim() || undefined,
+    teamId: requestedTeamId,
+    workItemId: requestedWorkItemId,
   })
+  const hasUnavailableDeepLink = Boolean(
+    focusQuery.data &&
+    (requestedWorkItemId || requestedSourceEventId) &&
+    !deepLinkedItem,
+  )
   const selectedSection = deepLinkedItem?.section ?? readFocusQueueSection(
     searchParams.get('section'),
   )
@@ -91,6 +98,15 @@ export function FocusPage() {
           t={t}
           testId="focus-configuration-error"
         />
+        {hasUnavailableDeepLink ? (
+          <p
+            className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-app-meta font-semibold text-amber-800"
+            data-testid="focus-deep-link-unavailable"
+            role="status"
+          >
+            {t('workspace.focus.deepLinkUnavailable')}
+          </p>
+        ) : null}
         <FocusQueue
           configurationsByTeam={configurationResult?.configurationsByTeam}
           hasError={Boolean(focusQuery.error)}

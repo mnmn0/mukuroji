@@ -37,14 +37,20 @@ export type FocusSnoozeRecord = {
   snoozedUntil?: string
   /** ISO 8601 timestamp of the latest state change. */
   updatedAt: string
+  /** Opaque identity of the mutation that produced this exact state. */
+  mutationIdentity?: string
 }
 
 /** Policy and snooze rows required to project one recipient's Focus queue. */
 export type FocusStateSnapshot = {
   /** Current user's personal policy override when one has been stored. */
   userPolicy?: FocusPolicy
+  /** Opaque identity of the mutation that produced the personal policy. */
+  userPolicyMutationIdentity?: string
   /** Accessible Team policy overrides in stable Team order. */
   teamPolicies: FocusPolicy[]
+  /** Opaque mutation identities keyed by accessible Team identifier. */
+  teamPolicyMutationIdentities: Readonly<Record<string, string>>
   /** Recipient-specific snooze records, including version-preserving tombstones. */
   snoozes: FocusSnoozeRecord[]
 }
@@ -69,6 +75,8 @@ export type SaveFocusPolicyInput = {
   update: UpdateFocusPolicyInput
   /** Stable mutation clock. */
   now: Date
+  /** Opaque identity used to recover a committed mutation after response loss. */
+  mutationIdentity?: string
 }
 
 /** Input for a version-checked Focus snooze replacement. */
@@ -89,6 +97,8 @@ export type SaveFocusSnoozeInput = {
   snoozedUntil: string | null
   /** Stable mutation clock. */
   now: Date
+  /** Opaque identity used to recover a committed mutation after response loss. */
+  mutationIdentity?: string
 }
 
 /** Durable port owned by the Focus module. */
@@ -145,11 +155,22 @@ const snoozeMaximumMilliseconds = 365 * 24 * 60 * 60 * 1_000
 const snoozeReadPageLimit = 250
 const snoozeReadMaximumPages = 4
 const snoozeReadMaximumRows = snoozeReadPageLimit * snoozeReadMaximumPages
+const mutationIdentityMaximumLength = 256
+
+/** Validated policy payload and mutation identity read from one persistence envelope. */
+type StoredFocusPolicy = {
+  /** Public policy payload. */
+  policy: FocusPolicy
+  /** Opaque identity of the mutation that produced the payload. */
+  mutationIdentity?: string
+}
 
 /** In-memory Focus state adapter used by tests and isolated app composition. */
 export class InMemoryFocusStateClient implements FocusStateClient {
   /** Stored policy rows keyed by their physical identity. */
   private readonly policies = new Map<string, FocusPolicy>()
+  /** Latest policy mutation identities keyed by their physical identity. */
+  private readonly policyMutationIdentities = new Map<string, string>()
   /** Stored snooze rows keyed by their physical identity. */
   private readonly snoozes = new Map<string, FocusSnoozeRecord>()
 
@@ -157,13 +178,20 @@ export class InMemoryFocusStateClient implements FocusStateClient {
   async getState(input: GetFocusStateInput): Promise<FocusStateSnapshot> {
     const workspaceId = requireText(input.workspaceId, 'Focus Workspace ID')
     const memberKey = normalizeMemberKey(input.memberKey)
-    const userPolicy = this.policies.get(createPolicyStorageKey(
+    const userPolicyKey = createPolicyStorageKey(
       createUserScopeKey(workspaceId, memberKey),
-    ))
+    )
+    const userPolicy = this.policies.get(userPolicyKey)
+    const teamPolicyMutationIdentities: Record<string, string> = {}
     const teamPolicies = uniqueSorted(input.teamIds).flatMap((teamId) => {
-      const policy = this.policies.get(createPolicyStorageKey(
+      const policyKey = createPolicyStorageKey(
         createTeamScopeKey(workspaceId, teamId),
-      ))
+      )
+      const policy = this.policies.get(policyKey)
+      const mutationIdentity = this.policyMutationIdentities.get(policyKey)
+      if (policy && mutationIdentity) {
+        teamPolicyMutationIdentities[teamId] = mutationIdentity
+      }
       return policy ? [cloneFocusPolicy(policy)] : []
     })
     const userScope = createUserScopeKey(workspaceId, memberKey)
@@ -175,16 +203,22 @@ export class InMemoryFocusStateClient implements FocusStateClient {
       throw createSnoozeReadLimitError()
     }
 
+    const userPolicyMutationIdentity = this.policyMutationIdentities.get(userPolicyKey)
     return {
       ...(userPolicy ? { userPolicy: cloneFocusPolicy(userPolicy) } : {}),
+      ...(userPolicyMutationIdentity === undefined
+        ? {}
+        : { userPolicyMutationIdentity }),
       teamPolicies,
+      teamPolicyMutationIdentities,
       snoozes,
     }
   }
 
   /** Stores one policy replacement with optimistic concurrency. */
   async savePolicy(input: SaveFocusPolicyInput): Promise<FocusPolicy> {
-    const policy = createStoredPolicy(input)
+    const policy = createFocusPolicyMutationPreview(input)
+    const mutationIdentity = normalizeMutationIdentity(input.mutationIdentity)
     const key = createPolicyStorageKey(createPolicyScopeKey(
       input.workspaceId,
       input.memberKey,
@@ -195,6 +229,11 @@ export class InMemoryFocusStateClient implements FocusStateClient {
       throw createConflictError('Focus policy changed after it was read.')
     }
     this.policies.set(key, cloneFocusPolicy(policy))
+    if (mutationIdentity === undefined) {
+      this.policyMutationIdentities.delete(key)
+    } else {
+      this.policyMutationIdentities.set(key, mutationIdentity)
+    }
     return cloneFocusPolicy(policy)
   }
 
@@ -258,10 +297,18 @@ export class DynamoDbFocusStateClient implements FocusStateClient {
     const workspaceId = requireText(input.workspaceId, 'Focus Workspace ID')
     const memberKey = normalizeMemberKey(input.memberKey)
     const userScope = createUserScopeKey(workspaceId, memberKey)
-    const userPolicyPromise = this.readPolicy(userScope)
+    const userPolicyPromise = this.readPolicy(
+      workspaceId,
+      memberKey,
+      { type: 'user' },
+    )
     const teamPoliciesPromise = Promise.all(
       uniqueSorted(input.teamIds).map((teamId) =>
-        this.readPolicy(createTeamScopeKey(workspaceId, teamId)),
+        this.readPolicy(
+          workspaceId,
+          memberKey,
+          { type: 'team', teamId },
+        ),
       ),
     )
     const snoozesPromise = this.readSnoozes(userScope)
@@ -270,12 +317,26 @@ export class DynamoDbFocusStateClient implements FocusStateClient {
       teamPoliciesPromise,
       snoozesPromise,
     ])
+    const teamPolicies: FocusPolicy[] = []
+    const teamPolicyMutationIdentities: Record<string, string> = {}
+    for (const stored of candidateTeamPolicies) {
+      if (stored === undefined) continue
+      teamPolicies.push(stored.policy)
+      if (
+        stored.mutationIdentity !== undefined &&
+        stored.policy.target.type === 'team'
+      ) {
+        teamPolicyMutationIdentities[stored.policy.target.teamId] = stored.mutationIdentity
+      }
+    }
 
     return {
-      ...(userPolicy ? { userPolicy } : {}),
-      teamPolicies: candidateTeamPolicies.filter(
-        (policy): policy is FocusPolicy => policy !== undefined,
-      ),
+      ...(userPolicy ? { userPolicy: userPolicy.policy } : {}),
+      ...(userPolicy?.mutationIdentity === undefined
+        ? {}
+        : { userPolicyMutationIdentity: userPolicy.mutationIdentity }),
+      teamPolicies,
+      teamPolicyMutationIdentities,
       snoozes,
     }
   }
@@ -288,7 +349,8 @@ export class DynamoDbFocusStateClient implements FocusStateClient {
       input.memberKey,
       input.update.target,
     )
-    const policy = createStoredPolicy(input)
+    const policy = createFocusPolicyMutationPreview(input)
+    const mutationIdentity = normalizeMutationIdentity(input.mutationIdentity)
     try {
       await this.documentClient.send(new PutCommand({
         TableName: this.tableName,
@@ -299,6 +361,7 @@ export class DynamoDbFocusStateClient implements FocusStateClient {
           version: policy.version,
           policy,
           updatedAt: policy.updatedAt,
+          ...(mutationIdentity === undefined ? {} : { mutationIdentity }),
         },
         ...createVersionCondition(input.update.expectedVersion),
       }))
@@ -328,8 +391,13 @@ export class DynamoDbFocusStateClient implements FocusStateClient {
           teamId,
           workItemId,
           causeFingerprint: record.causeFingerprint,
-          snoozedUntil: record.snoozedUntil,
+          ...(record.snoozedUntil === undefined
+            ? {}
+            : { snoozedUntil: record.snoozedUntil }),
           updatedAt: record.updatedAt,
+          ...(record.mutationIdentity === undefined
+            ? {}
+            : { mutationIdentity: record.mutationIdentity }),
           expiresAt,
         },
         ...createVersionCondition(input.expectedVersion),
@@ -340,15 +408,33 @@ export class DynamoDbFocusStateClient implements FocusStateClient {
     }
   }
 
-  /** Reads and validates one policy row. */
-  private async readPolicy(scopeKey: string): Promise<FocusPolicy | undefined> {
+  /**
+   * Reads and validates one policy row against its requested physical scope.
+   *
+   * @param workspaceId - Canonical Workspace identifier.
+   * @param memberKey - Authenticated member implied by a personal policy target.
+   * @param expectedTarget - Policy target implied by the requested partition.
+   * @returns Stored policy when the exact requested row exists.
+   */
+  private async readPolicy(
+    workspaceId: string,
+    memberKey: string,
+    expectedTarget: FocusPolicyTarget,
+  ): Promise<StoredFocusPolicy | undefined> {
+    const target = normalizePolicyTarget(expectedTarget)
+    const scopeKey = createPolicyScopeKey(workspaceId, memberKey, target)
     const response = await this.documentClient.send(new GetCommand({
       TableName: this.tableName,
       Key: { scopeKey, recordKey: userPolicyRecordKey },
       ConsistentRead: true,
     }))
     if (!response.Item) return undefined
-    return parseStoredPolicy(response.Item)
+    return parseStoredPolicy(
+      response.Item,
+      scopeKey,
+      createFocusPolicyId(workspaceId, memberKey, target),
+      target,
+    )
   }
 
   /** Reads all snooze/tombstone rows in one recipient partition. */
@@ -453,8 +539,15 @@ export function createFocusStateClient(): FocusStateClient {
   return new DynamoDbFocusStateClient()
 }
 
-/** Creates one stored policy from a validated application input. */
-function createStoredPolicy(input: SaveFocusPolicyInput): FocusPolicy {
+/**
+ * Creates the exact normalized policy that a mutation would persist.
+ *
+ * @param input - Authorized policy replacement and stable mutation clock.
+ * @returns Deterministic next policy without performing persistence.
+ */
+export function createFocusPolicyMutationPreview(
+  input: SaveFocusPolicyInput,
+): FocusPolicy {
   const workspaceId = requireText(input.workspaceId, 'Focus Workspace ID')
   const memberKey = normalizeMemberKey(input.memberKey)
   const nextVersion = incrementVersion(input.update.expectedVersion)
@@ -463,9 +556,7 @@ function createStoredPolicy(input: SaveFocusPolicyInput): FocusPolicy {
   const overrides = normalizePolicyOverrides(input.update.overrides)
   return {
     schemaVersion: FOCUS_SCHEMA_VERSION,
-    id: target.type === 'user'
-      ? `focus-policy:${workspaceId}:user:${memberKey}`
-      : `focus-policy:${workspaceId}:team:${target.teamId}`,
+    id: createFocusPolicyId(workspaceId, memberKey, target),
     target,
     version: nextVersion,
     overrides,
@@ -478,6 +569,7 @@ function createStoredSnooze(input: SaveFocusSnoozeInput): FocusSnoozeRecord {
   const snoozedUntil = input.snoozedUntil === null
     ? undefined
     : requireFutureTimestamp(input.snoozedUntil, input.now)
+  const mutationIdentity = normalizeMutationIdentity(input.mutationIdentity)
   return {
     teamId: requireText(input.teamId, 'Focus Team ID'),
     workItemId: requireText(input.workItemId, 'Focus Work Item ID'),
@@ -485,6 +577,7 @@ function createStoredSnooze(input: SaveFocusSnoozeInput): FocusSnoozeRecord {
     causeFingerprint: requireText(input.causeFingerprint, 'Focus cause fingerprint'),
     ...(snoozedUntil ? { snoozedUntil } : {}),
     updatedAt: requireDate(input.now, 'Focus snooze mutation time').toISOString(),
+    ...(mutationIdentity === undefined ? {} : { mutationIdentity }),
   }
 }
 
@@ -497,6 +590,17 @@ function createPolicyScopeKey(
   return target.type === 'user'
     ? createUserScopeKey(workspaceId, memberKey)
     : createTeamScopeKey(workspaceId, target.teamId)
+}
+
+/** Creates the canonical public identifier for one physically scoped policy row. */
+function createFocusPolicyId(
+  workspaceId: string,
+  memberKey: string,
+  target: FocusPolicyTarget,
+): string {
+  return target.type === 'user'
+    ? `focus-policy:${requireText(workspaceId, 'Focus Workspace ID')}:user:${normalizeMemberKey(memberKey)}`
+    : `focus-policy:${requireText(workspaceId, 'Focus Workspace ID')}:team:${requireText(target.teamId, 'Focus Team ID')}`
 }
 
 /** Builds one Workspace/member Focus partition key. */
@@ -549,9 +653,27 @@ function createVersionCondition(expectedVersion: number): {
       }
 }
 
-/** Parses and validates one stored Focus policy row. */
-function parseStoredPolicy(value: Record<string, unknown>): FocusPolicy {
-  if (value.entryType !== 'policy' || !isRecord(value.policy)) {
+/**
+ * Parses and validates one stored Focus policy row and its physical identity.
+ *
+ * @param value - Untrusted DynamoDB row.
+ * @param expectedScopeKey - Exact partition key used for the consistent read.
+ * @param expectedPolicyId - Canonical policy identifier implied by that partition.
+ * @param expectedTarget - Canonical target implied by that partition.
+ * @returns Validated policy detached from the persistence envelope.
+ */
+function parseStoredPolicy(
+  value: Record<string, unknown>,
+  expectedScopeKey: string,
+  expectedPolicyId: string,
+  expectedTarget: FocusPolicyTarget,
+): StoredFocusPolicy {
+  if (
+    value.scopeKey !== expectedScopeKey ||
+    value.recordKey !== userPolicyRecordKey ||
+    value.entryType !== 'policy' ||
+    !isRecord(value.policy)
+  ) {
     throw createCorruptStateError('A Focus policy row is malformed.')
   }
   const policy = value.policy
@@ -566,7 +688,7 @@ function parseStoredPolicy(value: Record<string, unknown>): FocusPolicy {
     throw createCorruptStateError('A Focus policy row is malformed.')
   }
   try {
-    return {
+    const parsed: FocusPolicy = {
       schemaVersion: FOCUS_SCHEMA_VERSION,
       id: requireText(policy.id, 'Focus policy ID'),
       target: normalizePolicyTarget(policy.target),
@@ -574,9 +696,32 @@ function parseStoredPolicy(value: Record<string, unknown>): FocusPolicy {
       overrides: normalizePolicyOverrides(policy.overrides),
       updatedAt: requireTimestamp(policy.updatedAt, 'Focus policy updated time'),
     }
+    if (
+      parsed.id !== expectedPolicyId ||
+      parsed.version !== value.version ||
+      parsed.updatedAt !== value.updatedAt ||
+      !arePolicyTargetsEqual(parsed.target, expectedTarget)
+    ) {
+      throw new TypeError('Focus policy identity does not match its physical scope.')
+    }
+    const mutationIdentity = requireStoredMutationIdentity(value.mutationIdentity)
+    return {
+      policy: parsed,
+      ...(mutationIdentity === undefined ? {} : { mutationIdentity }),
+    }
   } catch (error) {
     throw createCorruptStateError('A Focus policy row is malformed.', error)
   }
+}
+
+/** Returns whether two normalized Focus policy targets identify the same scope. */
+function arePolicyTargetsEqual(
+  left: FocusPolicyTarget,
+  right: FocusPolicyTarget,
+): boolean {
+  return left.type === 'user'
+    ? right.type === 'user'
+    : right.type === 'team' && left.teamId === right.teamId
 }
 
 /** Parses and validates one stored Focus snooze row. */
@@ -585,6 +730,7 @@ function parseStoredSnooze(value: Record<string, unknown>): FocusSnoozeRecord {
     throw createCorruptStateError('A Focus snooze row is malformed.')
   }
   try {
+    const mutationIdentity = requireStoredMutationIdentity(value.mutationIdentity)
     return {
       teamId: requireText(value.teamId, 'Focus Team ID'),
       workItemId: requireText(value.workItemId, 'Focus Work Item ID'),
@@ -594,6 +740,7 @@ function parseStoredSnooze(value: Record<string, unknown>): FocusSnoozeRecord {
         ? {}
         : { snoozedUntil: requireTimestamp(value.snoozedUntil, 'Focus snooze wake time') }),
       updatedAt: requireTimestamp(value.updatedAt, 'Focus snooze updated time'),
+      ...(mutationIdentity === undefined ? {} : { mutationIdentity }),
     }
   } catch (error) {
     throw createCorruptStateError('A Focus snooze row is malformed.', error)
@@ -716,6 +863,41 @@ function requireText(value: unknown, label: string): string {
     throw new TypeError(`${label} is required.`)
   }
   return value.trim()
+}
+
+/** Normalizes an optional bounded mutation identity supplied by the application layer. */
+function normalizeMutationIdentity(value: unknown): string | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'string') {
+    throw new FocusStateError(
+      400,
+      'InvalidFocusMutationIdentity',
+      'Focus mutation identity must be a non-empty string.',
+    )
+  }
+  const normalized = value.trim()
+  if (normalized.length === 0 || normalized.length > mutationIdentityMaximumLength) {
+    throw new FocusStateError(
+      400,
+      'InvalidFocusMutationIdentity',
+      `Focus mutation identity must be ${mutationIdentityMaximumLength} characters or fewer.`,
+    )
+  }
+  return normalized
+}
+
+/** Reads an optional canonical mutation identity from an untrusted persistence row. */
+function requireStoredMutationIdentity(value: unknown): string | undefined {
+  if (value === undefined) return undefined
+  if (
+    typeof value !== 'string' ||
+    value.trim() !== value ||
+    value.length === 0 ||
+    value.length > mutationIdentityMaximumLength
+  ) {
+    throw new TypeError('Stored Focus mutation identity is invalid.')
+  }
+  return value
 }
 
 /** Normalizes a Workspace member key for durable recipient identity. */

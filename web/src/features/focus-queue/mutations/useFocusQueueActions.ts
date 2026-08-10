@@ -123,7 +123,11 @@ export function useFocusQueueActions({
   mutateFocusQueue,
 }: UseFocusQueueActionsOptions): FocusQueueMutationController {
   const { mutate: mutateSWR } = useSWRConfig()
-  const mutationRunner = useRef(createMutationRequestRunner()).current
+  const mutationRunnerRef = useRef<ReturnType<typeof createMutationRequestRunner> | null>(null)
+  if (mutationRunnerRef.current === null) {
+    mutationRunnerRef.current = createMutationRequestRunner()
+  }
+  const mutationRunner = mutationRunnerRef.current
   const pendingKeysRef = useRef(new Set<string>())
   const [pendingKeys, setPendingKeys] = useState<ReadonlySet<string>>(new Set())
   const [failedAction, setFailedAction] = useState<{
@@ -417,7 +421,12 @@ export function useFocusQueueActions({
     if (!snoozeFeedback) return
     const feedback = snoozeFeedback
     setSnoozeFeedback(undefined)
-    await updateSnooze(feedback.item, feedback.previousSnoozedUntil)
+    try {
+      await updateSnooze(feedback.item, feedback.previousSnoozedUntil)
+    } catch (error) {
+      setSnoozeFeedback(feedback)
+      throw error
+    }
     setSnoozeFeedback(undefined)
   }, [snoozeFeedback, updateSnooze])
 

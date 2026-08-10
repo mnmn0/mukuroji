@@ -300,6 +300,9 @@ test('reads one member watcher state with consistent point gets instead of queri
         reasons: new Set(requestedEntityKey === entityKey ? ['manual', 'comment'] : ['manual']),
         createdAt: '2026-07-12T00:00:00.000Z',
         updatedAt: '2026-07-12T00:00:00.000Z',
+        mutationIdentity: requestedEntityKey === entityKey
+          ? 'watch-mutation-1'
+          : 'project-watch-mutation-1',
       },
     }
   })
@@ -315,6 +318,8 @@ test('reads one member watcher state with consistent point gets instead of queri
     explicit: true,
     automatic: true,
     reasons: ['comment', 'manual'],
+    mutationIdentity: 'watch-mutation-1',
+    updatedAt: '2026-07-12T00:00:00.000Z',
     projectSubscribed: false,
   })
   expect(commands).toEqual([
@@ -352,8 +357,16 @@ test('conditions manual watcher updates on the optional expected subscription st
     memberKey: 'member@example.com',
   }
 
-  await client.subscribe({ ...scope, expectedSubscribed: false })
-  await client.unsubscribe({ ...scope, expectedSubscribed: true })
+  await client.subscribe({
+    ...scope,
+    expectedSubscribed: false,
+    mutationIdentity: 'watch-mutation-1',
+  })
+  await client.unsubscribe({
+    ...scope,
+    expectedSubscribed: true,
+    mutationIdentity: 'watch-mutation-2',
+  })
 
   expect(transactions[0]?.TransactItems).toEqual([
     expect.objectContaining({
@@ -362,7 +375,9 @@ test('conditions manual watcher updates on the optional expected subscription st
         ExpressionAttributeValues: expect.objectContaining({
           ':state': 'subscribed',
           ':expectedState': 'unsubscribed',
+          ':mutationIdentity': 'watch-mutation-1',
         }),
+        UpdateExpression: expect.stringContaining('mutationIdentity = :mutationIdentity'),
       }),
     }),
   ])
@@ -373,7 +388,9 @@ test('conditions manual watcher updates on the optional expected subscription st
         ExpressionAttributeValues: expect.objectContaining({
           ':state': 'unsubscribed',
           ':expectedState': 'subscribed',
+          ':mutationIdentity': 'watch-mutation-2',
         }),
+        UpdateExpression: expect.stringContaining('mutationIdentity = :mutationIdentity'),
       }),
     }),
   ])
@@ -389,6 +406,157 @@ test('conditions manual watcher updates on the optional expected subscription st
       ConsistentRead: true,
     },
   ])
+})
+
+test('returns the persisted marker after a same-state manual watcher compare-and-set', async () => {
+  let transaction: Record<string, unknown> | undefined
+  const entityKey = createProjectCollaborationEntityKey('workspace#one', 'project-a')
+  const client = createClient(async (command) => {
+    const input = readCommandInput(command)
+    if ('TransactItems' in input) {
+      transaction = input
+      return {}
+    }
+    return {
+      Item: {
+        entityKey,
+        recordKey: 'WATCHER#member@example.com',
+        entryType: 'watcher',
+        memberKey: 'member@example.com',
+        state: 'subscribed',
+        explicit: true,
+        reasons: new Set(['manual']),
+        createdAt: '2026-07-12T00:00:00.000Z',
+        updatedAt: '2026-07-12T01:00:00.000Z',
+        mutationIdentity: 'watch-mutation-same-state',
+      },
+    }
+  })
+
+  const state = await client.subscribe({
+    workspaceId: 'workspace#one',
+    entityKey,
+    projectId: 'project-a',
+    memberKey: 'member@example.com',
+    expectedSubscribed: true,
+    mutationIdentity: 'watch-mutation-same-state',
+  })
+
+  expect(transaction?.TransactItems).toEqual([
+    expect.objectContaining({
+      Update: expect.objectContaining({
+        ConditionExpression: '#state = :expectedState',
+        ExpressionAttributeValues: expect.objectContaining({
+          ':expectedState': 'subscribed',
+          ':mutationIdentity': 'watch-mutation-same-state',
+        }),
+      }),
+    }),
+  ])
+  expect(state).toEqual({
+    subscribed: true,
+    explicit: true,
+    automatic: false,
+    reasons: ['manual'],
+    mutationIdentity: 'watch-mutation-same-state',
+    updatedAt: '2026-07-12T01:00:00.000Z',
+  })
+})
+
+test('rejects automatic watcher requests that would ignore manual transition controls', async () => {
+  let commands = 0
+  const client = createClient(async () => {
+    commands += 1
+    return {}
+  })
+  const scope = {
+    workspaceId: 'workspace#one',
+    entityKey: createProjectCollaborationEntityKey('workspace#one', 'project-a'),
+    projectId: 'project-a',
+    memberKey: 'member@example.com',
+    automatic: true,
+  }
+
+  await expect(client.subscribe({
+    ...scope,
+    expectedSubscribed: false,
+  })).rejects.toMatchObject({
+    status: 400,
+    code: 'InvalidWatcherUpdate',
+  })
+  await expect(client.unsubscribe(scope)).rejects.toMatchObject({
+    status: 400,
+    code: 'InvalidWatcherUpdate',
+  })
+  await expect(client.subscribe({
+    ...scope,
+    automatic: false,
+    mutationIdentity: ' ',
+  })).rejects.toMatchObject({
+    status: 400,
+    code: 'InvalidWatcherMutationIdentity',
+  })
+  expect(commands).toBe(0)
+})
+
+test('persists an automatic watcher mutation identity when explicitly supplied', async () => {
+  let transaction: Record<string, unknown> | undefined
+  const entityKey = createProjectCollaborationEntityKey('workspace#one', 'project-a')
+  const client = createClient(async (command) => {
+    const input = readCommandInput(command)
+    if ('TransactItems' in input) {
+      transaction = input
+      return {}
+    }
+    return { Items: [] }
+  })
+
+  await client.subscribe({
+    workspaceId: 'workspace#one',
+    entityKey,
+    projectId: 'project-a',
+    memberKey: 'member@example.com',
+    automatic: true,
+    reason: 'comment',
+    mutationIdentity: 'automatic-watch-mutation-1',
+  })
+
+  expect(transaction?.TransactItems).toEqual([
+    expect.objectContaining({
+      Update: expect.objectContaining({
+        ExpressionAttributeValues: expect.objectContaining({
+          ':mutationIdentity': 'automatic-watch-mutation-1',
+        }),
+        UpdateExpression: expect.stringContaining('mutationIdentity = :mutationIdentity'),
+      }),
+    }),
+  ])
+})
+
+test('fails closed on a malformed stored watcher mutation identity', async () => {
+  const entityKey = createProjectCollaborationEntityKey('workspace#one', 'project-a')
+  const client = createClient(async () => ({
+    Item: {
+      entityKey,
+      recordKey: 'WATCHER#member@example.com',
+      entryType: 'watcher',
+      memberKey: 'member@example.com',
+      state: 'subscribed',
+      explicit: true,
+      reasons: new Set(['manual']),
+      createdAt: '2026-07-12T00:00:00.000Z',
+      updatedAt: '2026-07-12T00:00:00.000Z',
+      mutationIdentity: 'x'.repeat(257),
+    },
+  }))
+
+  await expect(client.getMemberWatcherState({
+    entityKey,
+    memberKey: 'member@example.com',
+  })).rejects.toMatchObject({
+    status: 503,
+    code: 'InvalidCollaborationRecord',
+  })
 })
 
 test('fails a watcher compare-and-set conflict without scanning the watcher scope', async () => {

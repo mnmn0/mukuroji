@@ -1,13 +1,12 @@
-import { useEffect, useMemo, useRef } from 'react'
-import { useSearchParams } from 'react-router'
+import { useMemo } from 'react'
+import { useNavigate, useSearchParams } from 'react-router'
 import type { NotificationFilter } from '../../notifications/api'
 import { useNotificationInbox } from '../../notifications/mutations/useNotifications'
 import { WorkspaceInboxView } from '../../notifications/ui/WorkspaceInboxView'
 import { createTranslator } from '../../shared/i18n/i18n'
+import { createFocusPath } from '../../shared/routing/paths'
 import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
 import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
-
-const focusInboxMaximumAutomaticPageLoads = 7
 
 /**
  * Renders the URL-specific Inbox route with the durable notification timeline.
@@ -16,6 +15,7 @@ const focusInboxMaximumAutomaticPageLoads = 7
  */
 export function InboxPage() {
   const workspace = useWorkspaceRouteContext()
+  const navigate = useNavigate()
   const [searchParams] = useSearchParams()
   const t = useMemo(() => createTranslator(workspace.locale), [workspace.locale])
   const selectedEventId = searchParams.get('eventId')?.trim() || undefined
@@ -23,30 +23,8 @@ export function InboxPage() {
   const notificationInbox = useNotificationInbox(
     workspace.accessToken,
     workspace.canLoadWorkspaceData,
-    selectedFilter,
+    { initialFilter: selectedFilter, selectedEventId },
   )
-  const automaticLoadState = useRef({ selection: '', loads: 0 })
-
-  useEffect(() => {
-    const selection = `${selectedFilter}\u0000${selectedEventId ?? ''}`
-    if (automaticLoadState.current.selection !== selection) {
-      automaticLoadState.current = { selection, loads: 0 }
-    }
-    if (
-      selectedEventId === undefined ||
-      notificationInbox.notifications.some((notification) =>
-        notification.eventId === selectedEventId
-      ) ||
-      !notificationInbox.hasMore ||
-      notificationInbox.isLoadingMore ||
-      notificationInbox.hasLoadError ||
-      automaticLoadState.current.loads >= focusInboxMaximumAutomaticPageLoads
-    ) {
-      return
-    }
-    automaticLoadState.current.loads += 1
-    void notificationInbox.loadMore()
-  }, [notificationInbox, selectedEventId, selectedFilter])
 
   return (
     <WorkspaceRouteContent
@@ -56,6 +34,11 @@ export function InboxPage() {
         <WorkspaceInboxView
           locale={workspace.locale}
           notificationInbox={notificationInbox}
+          onOpenFocus={(notification) => navigate(createFocusPath(
+            notification.teamId,
+            notification.issueId,
+            notification.eventId,
+          ))}
           onOpenNotification={workspace.onOpenNotification}
           selectedEventId={selectedEventId}
           t={t}

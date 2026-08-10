@@ -1,6 +1,5 @@
 import { useMemo } from 'react'
-import { getFocusBlockedCount } from '../../features/focus-queue/model/focusMetrics'
-import { useFocusQueue } from '../../features/focus-queue/queries/useFocusQueue'
+import { useWorkspaceFocusOverview } from '../../features/focus-queue/queries/useWorkspaceFocusOverview'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { createWorkspaceSummary } from '../../work-items/model/workspaceWorkItems'
 import { useWorkspaceWorkItemData } from '../../workspace/queries/useWorkspaceWorkItemData'
@@ -25,7 +24,7 @@ export function HomePage() {
     workspace.canLoadWorkspaceData,
     workspace.teams,
   )
-  const focusQueue = useFocusQueue(
+  const focus = useWorkspaceFocusOverview(
     workspace.accessToken,
     workspace.canLoadWorkspaceData,
   )
@@ -33,15 +32,14 @@ export function HomePage() {
     () => createWorkspaceSummary(
       workspace.teams,
       workItems.tasks,
-      getFocusBlockedCount(focusQueue.data),
+      focus.blockedCount,
     ),
-    [focusQueue.data, workItems.tasks, workspace.teams],
+    [focus.blockedCount, workItems.tasks, workspace.teams],
   )
   return (
     <WorkspaceRouteContent
-      isLoading={workItems.isLoading || Boolean(focusQueue.key && focusQueue.isLoading)}
+      isLoading={workItems.isLoading || focus.isLoading}
       sessionErrors={[
-        focusQueue.error,
         workItems.workItemsError,
         workItems.configurationsError,
         ...workItems.configurationErrors,
@@ -52,19 +50,13 @@ export function HomePage() {
           failedProjectCount={workItems.failedProjectCount}
           t={t}
         />
-        <WorkspaceFocusLoadNotice
-          hasCachedData={Boolean(focusQueue.data)}
-          hasError={Boolean(focusQueue.error)}
-          onRetry={() => void focusQueue.mutate()}
-          t={t}
-        />
+        <WorkspaceFocusLoadNotice {...focus.noticeProps} t={t} />
         <HomeWorkspaceView
-          focusQueue={focusQueue.data}
-          isFocusUnavailable={Boolean(focusQueue.error && !focusQueue.data)}
+          focusQueue={focus.response}
+          isFocusUnavailable={focus.isUnavailable}
           onOpenTask={workspace.onOpenTask}
           summary={summary}
           t={t}
-          tasks={workItems.tasks}
           teams={workspace.teams}
           workItemConfigurationsByTeam={workItems.configurationsByTeam}
         />

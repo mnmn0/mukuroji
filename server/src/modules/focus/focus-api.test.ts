@@ -155,6 +155,42 @@ function createFocusNotificationClient(calls: string[]): NotificationClient {
 }
 
 /**
+ * Creates mention pages whose deduplicated cross-partition window exceeds the Focus limit.
+ *
+ * @returns Notification client exposing 201 unique recent mention events within page budgets.
+ */
+function createOversizedFocusNotificationClient(): NotificationClient {
+  const base = createFocusNotificationClient([])
+  const all = Array.from({ length: 200 }, (_, index) =>
+    createFocusMention(`event-window-${index}`, 'unread')
+  )
+  const archived = [createFocusMention('event-window-200', 'archived')]
+  return {
+    ...base,
+    async list(input) {
+      const source = input.filter === 'all'
+        ? all
+        : input.filter === 'archived'
+          ? archived
+          : []
+      const offset = input.cursor === undefined ? 0 : Number(input.cursor)
+      const page = source.slice(offset, offset + 50)
+      const notifications: NotificationItem[] = []
+      for (const notification of page) {
+        if (!input.isVisible || await input.isVisible(notification)) {
+          notifications.push(notification)
+        }
+      }
+      const nextOffset = offset + page.length
+      return {
+        notifications,
+        ...(nextOffset < source.length ? { nextCursor: String(nextOffset) } : {}),
+      }
+    },
+  }
+}
+
+/**
  * Configures canonical Work Item, notification, approval, and watcher Focus sources.
  *
  * @param role - Legacy Project role granted to the current viewer.
@@ -179,6 +215,8 @@ function configureFocusSources(
   const watcherMutations: string[] = []
   const watcherExpectedStates: Array<boolean | undefined> = []
   let watching = false
+  let watcherMutationIdentity: string | undefined
+  let watcherUpdatedAt: string | undefined
   const developerPlatform = createInMemoryDeveloperPlatformAdapters()
   setTestAppDependencies({
     idempotency: developerPlatform.idempotency,
@@ -193,19 +231,41 @@ function configureFocusSources(
         return createWatcherState(watching)
       },
       async getMemberWatcherState() {
-        return createWatcherState(watching)
+        return {
+          ...createWatcherState(watching),
+          ...(watcherMutationIdentity === undefined
+            ? {}
+            : { mutationIdentity: watcherMutationIdentity }),
+          ...(watcherUpdatedAt === undefined ? {} : { updatedAt: watcherUpdatedAt }),
+        }
       },
       async subscribe(input) {
         watcherMutations.push('subscribe')
         watcherExpectedStates.push(input.expectedSubscribed)
         watching = true
-        return createWatcherState(watching)
+        watcherMutationIdentity = input.mutationIdentity
+        watcherUpdatedAt = input.auditContext?.occurredAt
+        return {
+          ...createWatcherState(watching),
+          ...(watcherMutationIdentity === undefined
+            ? {}
+            : { mutationIdentity: watcherMutationIdentity }),
+          ...(watcherUpdatedAt === undefined ? {} : { updatedAt: watcherUpdatedAt }),
+        }
       },
       async unsubscribe(input) {
         watcherMutations.push('unsubscribe')
         watcherExpectedStates.push(input.expectedSubscribed)
         watching = false
-        return createWatcherState(watching)
+        watcherMutationIdentity = input.mutationIdentity
+        watcherUpdatedAt = input.auditContext?.occurredAt
+        return {
+          ...createWatcherState(watching),
+          ...(watcherMutationIdentity === undefined
+            ? {}
+            : { mutationIdentity: watcherMutationIdentity }),
+          ...(watcherUpdatedAt === undefined ? {} : { updatedAt: watcherUpdatedAt }),
+        }
       },
     }),
   })
@@ -214,6 +274,33 @@ function configureFocusSources(
     notificationCalls,
     watcherMutations,
     watcherExpectedStates,
+  }
+}
+
+/**
+ * Wraps one idempotency adapter with a transient first completion failure.
+ *
+ * @param delegate - Durable in-memory adapter that retains reservations and receipts.
+ * @returns Adapter whose first receipt completion fails before delegating later calls.
+ */
+function createSingleCompletionFailure(
+  delegate: ReturnType<typeof createInMemoryDeveloperPlatformAdapters>['idempotency'],
+) {
+  let shouldFailCompletion = true
+  return {
+    reserveIdempotency(request: Parameters<typeof delegate.reserveIdempotency>[0]) {
+      return delegate.reserveIdempotency(request)
+    },
+    completeIdempotency(request: Parameters<typeof delegate.completeIdempotency>[0]) {
+      if (shouldFailCompletion) {
+        shouldFailCompletion = false
+        return Promise.reject(new Error('Simulated Focus receipt completion failure.'))
+      }
+      return delegate.completeIdempotency(request)
+    },
+    releaseIdempotency(request: Parameters<typeof delegate.releaseIdempotency>[0]) {
+      return delegate.releaseIdempotency(request)
+    },
   }
 }
 
@@ -301,6 +388,34 @@ async function createFocusEnterpriseIdentity(
     updatedAt: now,
   })
   return identity
+}
+
+/**
+ * Grants the existing Focus test role to one additional Team.
+ *
+ * @param identity - Enterprise identity fixture created for a Team-scoped grant.
+ * @param teamId - Additional Team made visible to the mapped principal.
+ */
+async function addFocusEnterpriseTeamMapping(
+  identity: InMemoryEnterpriseIdentityClient,
+  teamId: string,
+): Promise<void> {
+  const workspaceId = 'user#demo@example.com'
+  const snapshot = await identity.getSnapshot(workspaceId)
+  const group = snapshot.scimGroups.find((candidate) => candidate.active)
+  if (group === undefined) throw new Error('Expected one active Focus SCIM group.')
+  await identity.putGroupMapping({
+    workspaceId,
+    mappingId: `focus-team-mapping-${teamId}`,
+    identityProviderId: 'focus-team-idp',
+    directoryGroupId: group.groupId,
+    roleId: 'custom:focus-work-item-access',
+    scope: { workspaceId, kind: 'team', targetId: teamId },
+    enabled: true,
+    priority: 1,
+    revision: 1,
+    updatedAt: new Date().toISOString(),
+  })
 }
 
 /**
@@ -491,7 +606,19 @@ test('fails closed when mention history exceeds the four-page source window', as
   expect(notificationCalls.filter((call) => call.startsWith('snoozed:'))).toHaveLength(0)
 })
 
-test('surfaces bounded notification snooze maintenance failures through Focus', async () => {
+test('fails closed when deduplicated mentions exceed the cross-partition limit', async () => {
+  configureFocusSources()
+  setTestAppDependencies({ notifications: createOversizedFocusNotificationClient() })
+
+  const response = await focusRequest('/api/focus')
+
+  expect(response.status).toBe(503)
+  expect(await response.json()).toMatchObject({
+    code: 'FocusNotificationReadLimitExceeded',
+  })
+})
+
+test('surfaces stalled notification snooze maintenance through Focus', async () => {
   configureFocusSources()
   const notificationClient = createFocusNotificationClient([])
   setTestAppDependencies({
@@ -500,8 +627,8 @@ test('surfaces bounded notification snooze maintenance failures through Focus', 
       async list() {
         throw new NotificationError(
           503,
-          'NotificationSnoozeWakeLimitExceeded',
-          'Expired notification snooze maintenance exceeded its read window.',
+          'NotificationSnoozeWakeCursorStalled',
+          'Expired notification snooze maintenance cursor stopped advancing.',
         )
       },
     },
@@ -511,7 +638,7 @@ test('surfaces bounded notification snooze maintenance failures through Focus', 
 
   expect(response.status).toBe(503)
   expect(await response.json()).toMatchObject({
-    code: 'NotificationSnoozeWakeLimitExceeded',
+    code: 'NotificationSnoozeWakeCursorStalled',
   })
 })
 
@@ -557,6 +684,37 @@ test('bounds a complete mention window by age and Work Item count', async () => 
   expect(mentionEventIds).toEqual(
     Array.from({ length: 10 }, (_, index) => `bounded-event-${index}`).sort(),
   )
+})
+
+test('bounds watcher point reads to the accessible Focus item window', async () => {
+  configureFocusSources('member', undefined, 200)
+  configureFakeAuthenticatedUser({
+    email: 'sato@example.com',
+    'custom:directory_id': 'user#demo@example.com',
+  })
+  let watcherReads = 0
+  setTestAppDependencies({
+    collaboration: createCollaborationStub({
+      async getMemberWatcherState() {
+        watcherReads += 1
+        return createWatcherState(false)
+      },
+    }),
+  })
+
+  const response = await focusRequest('/api/focus')
+
+  expect(response.status).toBe(200)
+  const body: unknown = await response.json()
+  if (!isRecord(body) || !Array.isArray(body.sections)) {
+    throw new Error('Expected Focus sections.')
+  }
+  const itemCount = body.sections.reduce((count, section) => {
+    if (!isRecord(section) || !Array.isArray(section.items)) return count
+    return count + section.items.length
+  }, 0)
+  expect(itemCount).toBe(200)
+  expect(watcherReads).toBe(200)
 })
 
 test('bounds reviewer approval pagination to the Focus source window', async () => {
@@ -1038,6 +1196,47 @@ test('replays a lost-response policy retry and rejects key reuse with another pa
   expect(await conflict.json()).toMatchObject({ code: 'FocusIdempotencyConflict' })
 })
 
+test('recovers a committed policy when receipt completion failed', async () => {
+  const { developerPlatform } = configureFocusSources('manager')
+  const focusState = new InMemoryFocusStateClient()
+  setTestAppDependencies({
+    focusState,
+    idempotency: createSingleCompletionFailure(developerPlatform.idempotency),
+  })
+  const input = {
+    target: { type: 'user' as const },
+    expectedVersion: 0,
+    overrides: { dueSoonDays: 9 },
+  }
+  const idempotencyKey = 'focus-policy-completion-failure'
+
+  const first = await focusRequest(
+    '/api/focus/policies',
+    'PUT',
+    input,
+    idempotencyKey,
+  )
+  expect(first.status).toBe(503)
+  expect(await first.json()).toMatchObject({ code: 'FocusIdempotencyUnavailable' })
+
+  const retry = await focusRequest(
+    '/api/focus/policies',
+    'PUT',
+    input,
+    idempotencyKey,
+  )
+  expect(retry.status).toBe(200)
+  expect(retry.headers.get('Idempotency-Replayed')).toBe('true')
+  expect(await retry.json()).toMatchObject({
+    policy: { version: 1, overrides: input.overrides },
+  })
+  expect((await focusState.getState({
+    workspaceId: 'user#demo@example.com',
+    memberKey: 'demo@example.com',
+    teamIds: ['core-team'],
+  })).userPolicy).toMatchObject({ version: 1 })
+})
+
 test('fails closed when personal policy replay loses a stored Team scope', async () => {
   configureFocusSources('manager')
   const input = {
@@ -1067,6 +1266,58 @@ test('fails closed when personal policy replay loses a stored Team scope', async
 
   expect(retry.status).toBe(403)
   expect(await retry.json()).toMatchObject({ code: 'FocusPolicyReplayAccessChanged' })
+})
+
+test('fails closed when personal policy replay gains a new Team scope', async () => {
+  await withTestEnvironment({
+    COGNITO_CLIENT_ID: 'mukuroji-main-client',
+    COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+    COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
+    COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+  }, async () => {
+    configureFocusSources('manager')
+    configureFakeProjectClients(false, {
+      workspaceRole: 'member',
+      teamProjects: [{ id: 'refero', name: 'Refero', tone: 'blue' }],
+      additionalTeams: [{ id: 'later-team', name: 'Later Team', projects: [] }],
+    })
+    configureFakeAuthenticatedUser({
+      email: 'sato@example.com',
+      'custom:directory_id': 'user#demo@example.com',
+    })
+    const identity = await createFocusEnterpriseIdentity('team')
+    setTestAppDependencies({ enterpriseIdentity: identity })
+    const authorization = `Bearer ${createAccessToken([], {
+      client_id: 'mukuroji-main-client',
+      token_use: 'access',
+    })}`
+    const input = {
+      target: { type: 'user' as const },
+      expectedVersion: 0,
+      overrides: { dueSoonDays: 8 },
+    }
+    const request = () => app.request('/api/focus/policies', {
+      method: 'PUT',
+      headers: {
+        Authorization: authorization,
+        'Content-Type': 'application/json',
+        'Idempotency-Key': 'focus-policy-access-gain',
+      },
+      body: JSON.stringify(input),
+    })
+
+    const first = await request()
+    expect(first.status).toBe(200)
+    expect(await first.json()).toMatchObject({
+      effectivePolicies: [{ teamId: 'core-team' }],
+    })
+
+    await addFocusEnterpriseTeamMapping(identity, 'later-team')
+    const retry = await request()
+
+    expect(retry.status).toBe(403)
+    expect(await retry.json()).toMatchObject({ code: 'FocusPolicyReplayAccessChanged' })
+  })
 })
 
 test('rejects unknown fields in a compact Focus replay outcome', async () => {
@@ -1259,6 +1510,51 @@ test('replays a lost-response snooze retry and rejects key reuse with another pa
   expect(await conflict.json()).toMatchObject({ code: 'FocusIdempotencyConflict' })
 })
 
+test('recovers a committed snooze when receipt completion failed', async () => {
+  const { developerPlatform } = configureFocusSources()
+  const focusState = new InMemoryFocusStateClient()
+  setTestAppDependencies({
+    focusState,
+    idempotency: createSingleCompletionFailure(developerPlatform.idempotency),
+  })
+  const currentResponse = await focusRequest('/api/focus')
+  const currentVersion = readNumberProperty(
+    readFocusItem(await currentResponse.json(), 'onboarding-friction'),
+    'version',
+  )
+  const input = {
+    expectedVersion: currentVersion,
+    snoozedUntil: createFocusSnoozeTime(5),
+  }
+  const idempotencyKey = 'focus-snooze-completion-failure'
+
+  const first = await focusRequest(
+    '/api/focus/items/core-team/onboarding-friction/snooze',
+    'PUT',
+    input,
+    idempotencyKey,
+  )
+  expect(first.status).toBe(503)
+  expect(await first.json()).toMatchObject({ code: 'FocusIdempotencyUnavailable' })
+
+  const retry = await focusRequest(
+    '/api/focus/items/core-team/onboarding-friction/snooze',
+    'PUT',
+    input,
+    idempotencyKey,
+  )
+  expect(retry.status).toBe(200)
+  expect(retry.headers.get('Idempotency-Replayed')).toBe('true')
+  expect(await retry.json()).toMatchObject({
+    item: { snoozedUntil: input.snoozedUntil, snoozeRevision: 1 },
+  })
+  expect((await focusState.getState({
+    workspaceId: 'user#demo@example.com',
+    memberKey: 'demo@example.com',
+    teamIds: ['core-team'],
+  })).snoozes).toHaveLength(1)
+})
+
 test('rejects a snooze wake time beyond the bounded retention window', async () => {
   configureFocusSources()
   const currentResponse = await focusRequest('/api/focus')
@@ -1352,6 +1648,40 @@ test('replays a lost-response watch retry and rejects key reuse with another pay
   )
   expect(conflict.status).toBe(409)
   expect(await conflict.json()).toMatchObject({ code: 'FocusIdempotencyConflict' })
+  expect(watcherMutations).toEqual(['subscribe'])
+})
+
+test('recovers a committed watch when receipt completion failed', async () => {
+  const { developerPlatform, watcherMutations } = configureFocusSources('member')
+  setTestAppDependencies({
+    idempotency: createSingleCompletionFailure(developerPlatform.idempotency),
+  })
+  const currentResponse = await focusRequest('/api/focus')
+  const currentVersion = readNumberProperty(
+    readFocusItem(await currentResponse.json(), 'onboarding-friction'),
+    'version',
+  )
+  const input = { expectedVersion: currentVersion, watching: true }
+  const idempotencyKey = 'focus-watch-completion-failure'
+
+  const first = await focusRequest(
+    '/api/focus/items/core-team/onboarding-friction/watch',
+    'PUT',
+    input,
+    idempotencyKey,
+  )
+  expect(first.status).toBe(503)
+  expect(await first.json()).toMatchObject({ code: 'FocusIdempotencyUnavailable' })
+
+  const retry = await focusRequest(
+    '/api/focus/items/core-team/onboarding-friction/watch',
+    'PUT',
+    input,
+    idempotencyKey,
+  )
+  expect(retry.status).toBe(200)
+  expect(retry.headers.get('Idempotency-Replayed')).toBe('true')
+  expect(await retry.json()).toMatchObject({ item: { watching: true } })
   expect(watcherMutations).toEqual(['subscribe'])
 })
 

@@ -28,6 +28,8 @@ export type NotificationInboxProps = {
    * 通知対象をアプリ内で開く callback です。
    */
   onOpenNotification?: (notification: InboxNotification) => void
+  /** Opens a notification's continuing Focus item through application navigation. */
+  onOpenFocus?: (notification: InboxNotification) => void
   /** Immutable event selected by a cross-link from Focus. */
   selectedEventId?: string
 }
@@ -38,6 +40,7 @@ export type NotificationInboxProps = {
 export function NotificationInbox({
   controller,
   locale,
+  onOpenFocus,
   onOpenNotification,
   selectedEventId,
 }: NotificationInboxProps) {
@@ -169,6 +172,7 @@ export function NotificationInbox({
                       key={notification.id}
                       locale={locale}
                       notification={notification}
+                      onOpenFocus={onOpenFocus}
                       onOpenNotification={onOpenNotification}
                       selected={selectedEventId !== undefined && notification.eventId === selectedEventId}
                       t={t}
@@ -220,6 +224,7 @@ function NotificationRow({
   controller,
   locale,
   notification,
+  onOpenFocus,
   onOpenNotification,
   selected,
   t,
@@ -227,6 +232,7 @@ function NotificationRow({
   controller: NotificationInboxController
   locale: Locale
   notification: InboxNotification
+  onOpenFocus?: (notification: InboxNotification) => void
   onOpenNotification?: (notification: InboxNotification) => void
   selected: boolean
   t: (key: MessageKey) => string
@@ -315,9 +321,24 @@ function NotificationRow({
       <div className="flex flex-wrap items-center justify-end gap-2 self-center max-[760px]:justify-start max-[760px]:pl-[52px]">
         {notification.teamId && notification.issueId ? (
           <a
-            className="inline-flex min-h-9 items-center rounded-md border border-[var(--workbench-border)] bg-white px-2.5 text-xs font-semibold text-[var(--workbench-primary)] transition hover:border-[#99d7cf] max-[760px]:min-h-[44px]"
+            className="inline-flex min-h-9 items-center rounded-md border border-[var(--workbench-border)] bg-white px-2.5 text-xs font-semibold text-[var(--workbench-primary)] transition hover:border-[#99d7cf] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--workbench-primary)] max-[760px]:min-h-[44px]"
             data-testid={`notification-focus-${createNotificationTestToken(notification.id)}`}
             href={createFocusPath(notification.teamId, notification.issueId, notification.eventId)}
+            onClick={onOpenFocus
+              ? (event) => {
+                  if (
+                    event.altKey ||
+                    event.ctrlKey ||
+                    event.metaKey ||
+                    event.shiftKey ||
+                    event.button !== 0
+                  ) {
+                    return
+                  }
+                  event.preventDefault()
+                  onOpenFocus(notification)
+                }
+              : undefined}
           >
             {t('workspace.inbox.action.openFocus')}
           </a>

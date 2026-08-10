@@ -36,8 +36,6 @@ export type HomeWorkspaceViewProps = {
   summary: WorkspaceSummary
   /** Translator used for Workspace labels. */
   t: (key: MessageKey) => string
-  /** Workspace Work Items used to build focus and attention queues. */
-  tasks: readonly ProjectTask[]
   /** Workspace directory used to display the Team count. */
   teams: readonly ProjectDirectoryTeam[]
   /** Resolved Work Item configurations indexed by Team ID. */
@@ -72,6 +70,7 @@ export function HomeWorkspaceView({
         <MetricCard label={t('workspace.metric.openTasks')} value={summary.tasks} tone="emerald" />
         <MetricCard
           label={t('workspace.metric.blocked')}
+          srValue={isFocusUnavailable ? t('workspace.focus.previewUnavailable') : undefined}
           testId="workspace-focus-blocked-metric"
           value={isFocusUnavailable ? '—' : summary.blocked}
           tone="red"
@@ -98,6 +97,10 @@ export function HomeWorkspaceView({
                 data-testid="workspace-focus-preview-unavailable"
               >
                 {t('workspace.focus.previewUnavailable')}
+              </p>
+            ) : nextTasks.length === 0 ? (
+              <p className="px-5 py-8 text-sm font-medium text-[var(--workbench-muted)]">
+                {t('workspace.empty.tasks')}
               </p>
             ) : null}
           </div>

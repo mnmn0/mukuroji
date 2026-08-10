@@ -1,4 +1,6 @@
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
+import { Link } from 'react-router'
+import { createFocusPath } from '../../shared/routing/paths'
 import type { InboxNotification } from '../api/inbox'
 import type { NotificationInboxController } from '../mutations/useNotifications'
 import { NotificationInbox } from './NotificationInbox'
@@ -9,6 +11,8 @@ export type WorkspaceInboxViewProps = {
   locale: Locale
   /** Durable notification data and actions. */
   notificationInbox: NotificationInboxController
+  /** Opens one notification's continuing Focus item through the route owner. */
+  onOpenFocus?: (notification: InboxNotification) => void
   /** Opens the destination associated with a notification. */
   onOpenNotification?: (notification: InboxNotification) => void
   /** Immutable event selected by a Focus source link when present. */
@@ -26,6 +30,7 @@ export type WorkspaceInboxViewProps = {
 export function WorkspaceInboxView({
   locale,
   notificationInbox,
+  onOpenFocus,
   onOpenNotification,
   selectedEventId,
   t,
@@ -41,18 +46,19 @@ export function WorkspaceInboxView({
             {t('workspace.inbox.focusDescription')}
           </p>
         </div>
-        <a
-          className="workbench-button-secondary inline-flex min-h-[44px] shrink-0 items-center px-4"
+        <Link
+          className="workbench-button-secondary inline-flex min-h-[44px] shrink-0 items-center px-4 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--workbench-primary)]"
           data-testid="inbox-open-focus"
-          href="/focus"
+          to={createFocusPath()}
         >
           {t('workspace.inbox.openFocus')}
-        </a>
+        </Link>
       </section>
 
       <NotificationInbox
         controller={notificationInbox}
         locale={locale}
+        onOpenFocus={onOpenFocus}
         onOpenNotification={onOpenNotification}
         selectedEventId={selectedEventId}
       />
