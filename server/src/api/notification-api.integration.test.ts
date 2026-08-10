@@ -346,6 +346,10 @@ test('rechecks Triage Project scope and redacts denied or retained source conten
   const staleOwner = createNotificationTriageEntry('triage-stale-owner', {
     ownerUserId: 'new-owner@example.com',
   })
+  const escalatedToAnotherMember = createNotificationTriageEntry(
+    'triage-escalation-recipient',
+    { ownerUserId: 'queue-owner@example.com' },
+  )
   const movedNotification = createNotificationItem({
     id: 'triage-moved-notification',
     issueId: undefined,
@@ -378,13 +382,21 @@ test('rechecks Triage Project scope and redacts denied or retained source conten
     issueId: undefined,
     triageEntryId: staleOwner.id,
     projectId: 'project-a',
-    reasons: ['triage-sla'],
+    reasons: ['triage-assignment'],
+  })
+  const escalationRecipientNotification = createNotificationItem({
+    id: 'triage-escalation-recipient-notification',
+    issueId: undefined,
+    triageEntryId: escalatedToAnotherMember.id,
+    projectId: 'project-a',
+    reasons: ['triage-escalation'],
   })
   const probe = createNotificationVisibilityProbe([
     movedNotification,
     deniedNotification,
     retainedNotification,
     staleOwnerNotification,
+    escalationRecipientNotification,
   ])
   setTestAppDependencies({
     notifications: probe.client,
@@ -393,6 +405,7 @@ test('rechecks Triage Project scope and redacts denied or retained source conten
       [denied.id, denied],
       [retained.id, retained],
       [staleOwner.id, staleOwner],
+      [escalatedToAnotherMember.id, escalatedToAnotherMember],
     ])),
   })
 
@@ -407,12 +420,14 @@ test('rechecks Triage Project scope and redacts denied or retained source conten
   expect(probe.visibility.get(deniedNotification.id)).toBe(true)
   expect(probe.visibility.get(retainedNotification.id)).toBe(true)
   expect(probe.visibility.get(staleOwnerNotification.id)).toBe(false)
+  expect(probe.visibility.get(escalationRecipientNotification.id)).toBe(true)
   expect(body).toMatchObject({
     notifications: [
       { id: deniedNotification.id, title: 'Restricted source' },
       { id: retainedNotification.id, title: 'Restricted source' },
+      { id: escalationRecipientNotification.id },
     ],
-    unreadCount: 2,
+    unreadCount: 3,
   })
   for (const secretMarker of [
     'CURRENT_PRIVATE_TRIAGE',

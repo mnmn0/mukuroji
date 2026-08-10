@@ -5,8 +5,13 @@ import {
   type TriageConfiguration,
   type TriageEntry,
 } from '@mukuroji/contracts'
+import { createAuditEventId, createRequestFingerprint } from '../../../audit'
 import { createTriageCapabilities, TriageError } from '../../domain/triage-entry'
-import { createTriageInputFingerprint, type TriageClient } from '../../triage'
+import {
+  createTriageBulkTargetIdempotencyKey,
+  createTriageInputFingerprint,
+  type TriageClient,
+} from '../../triage'
 import {
   createTriageRouter,
   type TriagePrincipal,
@@ -97,6 +102,20 @@ function createConfiguration(): TriageConfiguration {
   }
 }
 
+/** Creates a Project-scoped principal used by authorization boundary tests.
+ *
+ * @returns A write-capable principal restricted to the visible Project.
+ */
+function createProjectScopedTriagePrincipal(): TriagePrincipal {
+  return {
+    workspaceId: 'workspace-1',
+    userId: 'member-1',
+    auditActor: { id: 'actor-1', kind: 'user' },
+    teamAccess: 'write',
+    visibleProjectIds: ['project-visible'],
+  }
+}
+
 /** Creates a complete TriageClient test double.
  *
  * @param entry Entry returned by read and mutation methods.
@@ -140,12 +159,18 @@ function createClient(entry: TriageEntry, entries: TriageEntry[] = [entry]): Tri
  */
 function createDependencies(
   entry: TriageEntry,
-  principal: TriagePrincipal = { workspaceId: 'workspace-1', userId: 'member-1' },
+  principal: TriagePrincipal = {
+    workspaceId: 'workspace-1',
+    userId: 'member-1',
+    auditActor: { id: 'actor-1', kind: 'user' },
+    teamAccess: 'write',
+  },
   entries: TriageEntry[] = [entry],
   overrides: Partial<TriageRouterDependencies> = {},
 ) {
   const actions: TriageRouterActionRequest[] = []
   const bulkInputs: Parameters<TriageClient['applyBulkAction']>[3][] = []
+  const bulkAuditContextFactories: Parameters<TriageClient['applyBulkAction']>[5][] = []
   const manualInputs: Parameters<TriageClient['createManualHandoff']>[3][] = []
   const manualIdempotencies: Parameters<TriageClient['createManualHandoff']>[4][] = []
   const configurationReceiptIdempotencies:
@@ -156,6 +181,7 @@ function createDependencies(
     ...baseClient,
     applyBulkAction: async (...parameters) => {
       bulkInputs.push(parameters[3])
+      bulkAuditContextFactories.push(parameters[5])
       return await baseClient.applyBulkAction(...parameters)
     },
     createManualHandoff: async (...parameters) => {
@@ -197,6 +223,7 @@ function createDependencies(
   }
   return {
     actions,
+    bulkAuditContextFactories,
     bulkInputs,
     configurationIdempotencies,
     configurationReceiptIdempotencies,
@@ -214,6 +241,8 @@ describe('triage HTTP router', () => {
       headers: {
         'Content-Type': 'application/json',
         'Idempotency-Key': 'accept-triage-1',
+        'X-Correlation-Id': 'correlation-triage-1',
+        'X-Request-Id': 'request-triage-1',
       },
       body: JSON.stringify({ action: 'accept', mode: 'create', expectedRevision: 1 }),
     })
@@ -230,6 +259,128 @@ describe('triage HTTP router', () => {
     expect(actions[0]?.context.req.path).toBe(
       '/api/teams/support/triage-entries/triage-1/actions',
     )
+    expect(actions[0]?.auditContext).toMatchObject({
+      actor: { id: 'actor-1', kind: 'user' },
+      correlationId: 'correlation-triage-1',
+      source: {
+        kind: 'api',
+        requestId: 'request-triage-1',
+        method: 'POST',
+        route: '/api/teams/support/triage-entries/triage-1/actions',
+      },
+    })
+  })
+
+  test('preserves service and break-glass audit identity from authorization', async () => {
+    const servicePrincipal: TriagePrincipal = {
+      workspaceId: 'workspace-1',
+      userId: 'member-1',
+      auditActor: { id: 'service-account-1', kind: 'service' },
+      teamAccess: 'write',
+    }
+    const serviceDependencies = createDependencies(createEntry(), servicePrincipal)
+    const serviceResponse = await serviceDependencies.router.request(
+      '/api/teams/support/triage-entries/triage-1/actions',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Idempotency-Key': 'service-assign',
+          'X-Correlation-Id': 'service-correlation-1',
+        },
+        body: JSON.stringify({
+          action: 'assign',
+          expectedRevision: 1,
+          ownerUserId: null,
+        }),
+      },
+    )
+    expect(serviceResponse.status).toBe(200)
+    expect(serviceDependencies.actions[0]?.auditContext).toMatchObject({
+      actor: { id: 'service-account-1', kind: 'service' },
+      correlationId: 'service-correlation-1',
+    })
+
+    const principal: TriagePrincipal = {
+      workspaceId: 'workspace-1',
+      userId: 'member-1',
+      auditActor: { id: 'break-glass-actor-1', kind: 'break-glass' },
+      auditCorrelationId: 'break-glass-activation-1',
+      teamAccess: 'write',
+    }
+    const { actions, router } = createDependencies(createEntry(), principal)
+    const response = await router.request(
+      '/api/teams/support/triage-entries/triage-1/actions',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Idempotency-Key': 'break-glass-assign',
+          'X-Correlation-Id': 'client-correlation-must-not-win',
+        },
+        body: JSON.stringify({
+          action: 'assign',
+          expectedRevision: 1,
+          ownerUserId: null,
+        }),
+      },
+    )
+
+    expect(response.status).toBe(200)
+    expect(actions[0]?.auditContext).toMatchObject({
+      actor: { id: 'break-glass-actor-1', kind: 'break-glass' },
+      correlationId: 'break-glass-activation-1',
+    })
+  })
+
+  test('namespaces single-action audit identity across Entries sharing one raw key', async () => {
+    const firstEntry = createEntry('full', 'triage-1')
+    const secondEntry = createEntry('full', 'triage-2')
+    const { actions, router } = createDependencies(
+      firstEntry,
+      undefined,
+      [firstEntry, secondEntry],
+    )
+    const request = {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Idempotency-Key': 'same-raw-key',
+      },
+      body: JSON.stringify({
+        action: 'assign',
+        expectedRevision: 1,
+        ownerUserId: null,
+      }),
+    }
+
+    const firstResponse = await router.request(
+      '/api/teams/support/triage-entries/triage-1/actions',
+      request,
+    )
+    const secondResponse = await router.request(
+      '/api/teams/support/triage-entries/triage-2/actions',
+      request,
+    )
+    const firstContext = actions[0]?.auditContext
+    const secondContext = actions[1]?.auditContext
+    if (!firstContext || !secondContext) {
+      throw new TypeError('Expected both single-action audit contexts.')
+    }
+
+    expect(firstResponse.status).toBe(200)
+    expect(secondResponse.status).toBe(200)
+    expect(secondContext.idempotencyKeyHash).not.toBe(firstContext.idempotencyKeyHash)
+    expect(secondContext.correlationId).not.toBe(firstContext.correlationId)
+    expect(createAuditEventId(
+      secondContext,
+      'triage.assigned',
+      { type: 'triage-entry', id: secondEntry.id },
+    )).not.toBe(createAuditEventId(
+      firstContext,
+      'triage.assigned',
+      { type: 'triage-entry', id: firstEntry.id },
+    ))
   })
 
   test('projects denied source content before returning queue and action responses', async () => {
@@ -257,6 +408,80 @@ describe('triage HTTP router', () => {
     expect(JSON.stringify(queueBody)).not.toContain('secret body')
     expect(JSON.stringify(queueBody)).not.toContain('requester@example.com')
     expect(JSON.stringify(actionBody)).not.toContain('chat.example.com')
+  })
+
+  test('projects read-only Team access to non-mutating response capabilities', async () => {
+    const entry = createEntry()
+    const { router: viewerRouter } = createDependencies(entry, {
+      workspaceId: 'workspace-1',
+      userId: 'viewer-1',
+      auditActor: { id: 'viewer-actor-1', kind: 'user' },
+      teamAccess: 'read',
+    })
+    const { router: managerRouter } = createDependencies(entry, {
+      workspaceId: 'workspace-1',
+      userId: 'manager-1',
+      auditActor: { id: 'manager-actor-1', kind: 'user' },
+      teamAccess: 'manage',
+    })
+
+    const viewerResponse = await viewerRouter.request(
+      '/api/teams/support/triage-entries/triage-1',
+    )
+    const managerResponse = await managerRouter.request(
+      '/api/teams/support/triage-entries/triage-1',
+    )
+    const viewerQueueResponse = await viewerRouter.request('/api/teams/support/triage-entries')
+    const managerQueueResponse = await managerRouter.request('/api/teams/support/triage-entries')
+    const viewerBody: TriageEntry = await viewerResponse.json()
+    const managerBody: TriageEntry = await managerResponse.json()
+    const viewerQueueBody: { allowedBulkActions: string[] } = await viewerQueueResponse.json()
+    const managerQueueBody: { allowedBulkActions: string[] } = await managerQueueResponse.json()
+
+    expect(viewerBody.capabilities).toEqual({
+      canAssign: false,
+      canAcceptCreate: false,
+      canAcceptLink: false,
+      canMarkDuplicate: false,
+      canDecline: false,
+      canSnooze: false,
+      canRequestInformation: false,
+      canReply: false,
+      canViewInternalContext: true,
+    })
+    expect(managerBody.capabilities).toEqual(entry.capabilities)
+    expect(viewerQueueBody.allowedBulkActions).toEqual([])
+    expect(managerQueueBody.allowedBulkActions).toEqual(['assign', 'decline', 'snooze'])
+  })
+
+  test('projects Enterprise Team read plus legacy Project write without widening scope', async () => {
+    const writable = createEntry('full', 'triage-writable', 'project-writable')
+    const readOnly = createEntry('full', 'triage-read-only', 'project-read-only')
+    const unassigned = createEntry('full', 'triage-unassigned')
+    const { router } = createDependencies(writable, {
+      workspaceId: 'workspace-1',
+      userId: 'mixed-member-1',
+      auditActor: { id: 'mixed-actor-1', kind: 'user' },
+      teamAccess: 'write',
+      writableProjectIds: ['project-writable'],
+    }, [writable, readOnly, unassigned])
+
+    const response = await router.request('/api/teams/support/triage-entries')
+    const body: { entries: TriageEntry[] } = await response.json()
+
+    expect(body.entries.find(({ id }) => id === writable.id)?.capabilities.canDecline).toBe(true)
+    expect(body.entries.find(({ id }) => id === readOnly.id)?.capabilities).toEqual({
+      canAssign: false,
+      canAcceptCreate: false,
+      canAcceptLink: false,
+      canMarkDuplicate: false,
+      canDecline: false,
+      canSnooze: false,
+      canRequestInformation: false,
+      canReply: false,
+      canViewInternalContext: true,
+    })
+    expect(body.entries.find(({ id }) => id === unassigned.id)?.capabilities.canDecline).toBe(false)
   })
 
   test('requires an idempotency key and rejects unsupported action fields', async () => {
@@ -321,11 +546,7 @@ describe('triage HTTP router', () => {
     }
     const hidden = createEntry('full', 'triage-hidden', 'project-hidden')
     const unassigned = createEntry('full', 'triage-unassigned')
-    const principal: TriagePrincipal = {
-      workspaceId: 'workspace-1',
-      userId: 'member-1',
-      visibleProjectIds: ['project-visible'],
-    }
+    const principal: TriagePrincipal = createProjectScopedTriagePrincipal()
     const { router } = createDependencies(visible, principal, [visible, hidden, unassigned])
 
     const queueResponse = await router.request('/api/teams/support/triage-entries')
@@ -348,11 +569,7 @@ describe('triage HTTP router', () => {
   })
 
   test('denies Team-wide settings to a Project-scoped principal', async () => {
-    const principal: TriagePrincipal = {
-      workspaceId: 'workspace-1',
-      userId: 'member-1',
-      visibleProjectIds: ['project-visible'],
-    }
+    const principal: TriagePrincipal = createProjectScopedTriagePrincipal()
     const { router } = createDependencies(
       createEntry('full', 'triage-visible', 'project-visible'),
       principal,
@@ -437,11 +654,7 @@ describe('triage HTTP router', () => {
   test('fails closed before single actions outside the current or destination Project scope', async () => {
     const visible = createEntry('full', 'triage-visible', 'project-visible')
     const hidden = createEntry('full', 'triage-hidden', 'project-hidden')
-    const principal: TriagePrincipal = {
-      workspaceId: 'workspace-1',
-      userId: 'member-1',
-      visibleProjectIds: ['project-visible'],
-    }
+    const principal: TriagePrincipal = createProjectScopedTriagePrincipal()
     const { actions, router } = createDependencies(visible, principal, [visible, hidden])
     const headers = {
       'Content-Type': 'application/json',
@@ -482,13 +695,9 @@ describe('triage HTTP router', () => {
   test('validates visible bulk actions and rejects hidden targets or destinations first', async () => {
     const visible = createEntry('full', 'triage-visible', 'project-visible')
     const hidden = createEntry('full', 'triage-hidden', 'project-hidden')
-    const principal: TriagePrincipal = {
-      workspaceId: 'workspace-1',
-      userId: 'member-1',
-      visibleProjectIds: ['project-visible'],
-    }
+    const principal: TriagePrincipal = createProjectScopedTriagePrincipal()
     const validated: Parameters<NonNullable<TriageRouterDependencies['validateBulkAction']>>[2][] = []
-    const { bulkInputs, router } = createDependencies(
+    const { bulkAuditContextFactories, bulkInputs, router } = createDependencies(
       visible,
       principal,
       [visible, hidden],
@@ -501,6 +710,7 @@ describe('triage HTTP router', () => {
     const headers = {
       'Content-Type': 'application/json',
       'Idempotency-Key': 'project-scoped-bulk',
+      'X-Correlation-Id': 'correlation-bulk-1',
     }
 
     const hiddenTargetResponse = await router.request(
@@ -542,15 +752,36 @@ describe('triage HTTP router', () => {
     expect(visibleResponse.status).toBe(200)
     expect(validated).toHaveLength(1)
     expect(bulkInputs).toHaveLength(1)
+    const createAuditContext = bulkAuditContextFactories[0]
+    if (!createAuditContext || !bulkInputs[0]) {
+      throw new TypeError('Expected the bulk audit context factory and parsed input.')
+    }
+    const target = bulkInputs[0].targets[0]
+    if (!target) throw new TypeError('Expected one parsed bulk target.')
+    const auditContext = createAuditContext('triage-visible', {
+      key: createTriageBulkTargetIdempotencyKey('project-scoped-bulk', target.entryId),
+      fingerprint: createTriageInputFingerprint({
+        target,
+        operation: bulkInputs[0].operation,
+      }),
+    })
+    expect(auditContext).toMatchObject({
+      correlationId: 'correlation-bulk-1',
+      source: {
+        method: 'POST',
+        route: '/api/teams/support/triage-entries/bulk-actions',
+      },
+      requestFingerprint: createRequestFingerprint({
+        method: 'POST',
+        path: '/api/teams/support/triage-entries/bulk-actions',
+        body: bulkInputs[0],
+      }),
+    })
   })
 
   test('rejects a prepared manual handoff outside the principal Project scope', async () => {
     const visible = createEntry('full', 'triage-visible', 'project-visible')
-    const principal: TriagePrincipal = {
-      workspaceId: 'workspace-1',
-      userId: 'member-1',
-      visibleProjectIds: ['project-visible'],
-    }
+    const principal: TriagePrincipal = createProjectScopedTriagePrincipal()
     const { manualInputs, router } = createDependencies(
       visible,
       principal,
@@ -648,11 +879,7 @@ describe('triage HTTP router', () => {
 
   test('fails closed when the committed manual handoff moves outside Project scope', async () => {
     const hidden = createEntry('full', 'triage-hidden', 'project-hidden')
-    const principal: TriagePrincipal = {
-      workspaceId: 'workspace-1',
-      userId: 'member-1',
-      visibleProjectIds: ['project-visible'],
-    }
+    const principal: TriagePrincipal = createProjectScopedTriagePrincipal()
     const { manualInputs, router } = createDependencies(
       hidden,
       principal,

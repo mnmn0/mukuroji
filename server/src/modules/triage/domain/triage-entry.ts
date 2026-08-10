@@ -394,7 +394,7 @@ export function applyTriageAction(
       now,
     )
   } else if (action.action === 'decline') {
-    requireText(action.reason, 'Decline reason', 2_000)
+    const reason = requireText(action.reason, 'Decline reason', 2_000)
     next = transitionEntry(
       entry,
       'declined',
@@ -402,7 +402,7 @@ export function applyTriageAction(
         `declined:${entry.revision + 1}:${now}`,
         'declined',
         actorId,
-        'Triage entry was declined.',
+        reason,
         now,
       ),
       now,
@@ -463,6 +463,8 @@ export function recordTriageSourceActivity(
   activity: TriageSourceActivity,
 ): TriageEntry {
   const occurredAt = requireIsoInstant(activity.occurredAt, 'Triage activity time')
+  const lastActivityAt = latestInstant(entry.lastActivityAt, occurredAt)
+  const updatedAt = latestInstant(entry.updatedAt, occurredAt)
   const event = createEvent(
     requireText(activity.activityId, 'Triage activity ID', 200),
     'activity-received',
@@ -472,12 +474,16 @@ export function recordTriageSourceActivity(
   )
   const received = {
     ...entry,
-    lastActivityAt: occurredAt,
+    lastActivityAt,
     events: appendEvent(entry.events, event),
     revision: entry.revision + 1,
-    updatedAt: occurredAt,
+    updatedAt,
   }
   if (entry.state !== 'snoozed' && entry.state !== 'needs-information') {
+    return { ...received, capabilities: createTriageCapabilities(received) }
+  }
+  const transitionAt = findCurrentWaitingTransitionAt(entry)
+  if (Date.parse(occurredAt) <= Date.parse(transitionAt)) {
     return { ...received, capabilities: createTriageCapabilities(received) }
   }
   const withoutWake = removeSnooze(received)
@@ -496,6 +502,38 @@ export function recordTriageSourceActivity(
     ),
   }
   return { ...resurfaced, capabilities: createTriageCapabilities(resurfaced) }
+}
+
+/** Finds the transition instant for the current source-waiting state.
+ *
+ * The transition event normally remains in the bounded history. Persisted entries whose
+ * older transition event has already aged out use `updatedAt` as a conservative fallback
+ * so delayed provider deliveries cannot reopen the entry without proof that they are new.
+ *
+ * @param entry The current snoozed or information-waiting entry.
+ * @returns The latest matching transition instant, or the current update instant.
+ */
+function findCurrentWaitingTransitionAt(
+  entry: Pick<TriageEntry, 'events' | 'state' | 'updatedAt'>,
+): string {
+  const transitionType = entry.state === 'snoozed'
+    ? 'snoozed'
+    : 'information-requested'
+  for (let index = entry.events.length - 1; index >= 0; index -= 1) {
+    const event = entry.events[index]
+    if (event?.type === transitionType) return event.createdAt
+  }
+  return entry.updatedAt
+}
+
+/** Returns the later of two canonical ISO instants.
+ *
+ * @param first The first validated instant.
+ * @param second The second validated instant.
+ * @returns The chronologically later instant without changing its canonical representation.
+ */
+function latestInstant(first: string, second: string): string {
+  return Date.parse(first) >= Date.parse(second) ? first : second
 }
 
 /** Evaluates snooze, SLA, and escalation deadlines at a schedule instant.

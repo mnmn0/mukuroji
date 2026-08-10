@@ -327,7 +327,10 @@ test('Duplicate preserves context and Snooze resurfaces after new source activit
   }
   await page.reload()
   await page.getByRole('button', { name: /Snooze S/ }).click()
-  await page.getByLabel('Resurface at').fill('2026-08-10T09:00')
+  const snoozeUntil = new Date(Date.now() + 48 * 60 * 60 * 1_000)
+    .toISOString()
+    .slice(0, 16)
+  await page.getByLabel('Resurface at').fill(snoozeUntil)
   await page.getByRole('button', { name: 'Review and apply' }).click()
   await expect(page.getByTestId('triage-entry-detail')).toContainText('Snoozed')
 

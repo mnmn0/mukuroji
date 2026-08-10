@@ -837,6 +837,68 @@ export class DynamoDbProjectDirectoryClient {
     }
   }
 
+  /** Builds commit-time guards for active Team and optional Project references.
+   *
+   * The rows are strongly read before their exact primary keys are bound to active-state
+   * conditions, so an archive transaction cannot commit between validation and the caller's
+   * dependent write.
+   *
+   * @param directoryId Owning Workspace directory identifier.
+   * @param teamId Team that must remain active through commit.
+   * @param projectId Optional Project that must remain active in the Team through commit.
+   * @returns DynamoDB condition checks composable with a dependent transaction.
+   */
+  async createActiveReferenceConditionChecks(
+    directoryId: string,
+    teamId: string,
+    projectId?: string,
+  ): Promise<NonNullable<TransactWriteCommandInput['TransactItems']>> {
+    const items = await this.readValidDirectoryItems(directoryId, true)
+    const team = items.find((item): item is ProjectDirectoryTeamItem =>
+      item.entryType === 'team' && item.teamId === teamId && isActiveDirectoryItem(item)
+    )
+    if (!team) {
+      throw new ProjectDataError(404, 'TeamNotFound', `Team "${teamId}" was not found.`)
+    }
+    const checks: NonNullable<TransactWriteCommandInput['TransactItems']> = [{
+      ConditionCheck: this.createActiveTeamConditionCheck(directoryId, team.entryKey, teamId),
+    }]
+    if (projectId === undefined) return checks
+    const project = items.find((item): item is ProjectDirectoryProjectItem =>
+      item.entryType === 'project' &&
+      item.teamId === teamId &&
+      item.projectId === projectId &&
+      isActiveDirectoryItem(item)
+    )
+    if (!project) {
+      throw new ProjectDataError(
+        404,
+        'ProjectNotFound',
+        `Project "${projectId}" was not found in team "${teamId}".`,
+      )
+    }
+    checks.push({
+      ConditionCheck: {
+        TableName: this.tableName,
+        Key: { directoryId, entryKey: project.entryKey },
+        ConditionExpression:
+          '#entryType = :entryType AND #teamId = :teamId AND #projectId = :projectId AND attribute_not_exists(#archivedAt)',
+        ExpressionAttributeNames: {
+          '#archivedAt': 'archivedAt',
+          '#entryType': 'entryType',
+          '#projectId': 'projectId',
+          '#teamId': 'teamId',
+        },
+        ExpressionAttributeValues: {
+          ':entryType': 'project',
+          ':projectId': projectId,
+          ':teamId': teamId,
+        },
+      },
+    })
+    return checks
+  }
+
   /**
    * Reads one viewer's ordered quick-access preference.
    *
@@ -2265,17 +2327,40 @@ export class DynamoDbProjectDirectoryClient {
     throw toProjectDataError(originalError)
   }
 
-  /**
-   * project 作成時点でも team が active であることを検証する condition check を作ります。
+  /** Builds a commit-time guard for an active Team row.
+   *
+   * @param directoryId Owning Workspace directory identifier.
+   * @param entryKey Physical sort key obtained from the validated directory snapshot.
+   * @param expectedTeamId Optional semantic Team identifier bound to the row.
+   * @returns A DynamoDB condition check for the source transaction.
    */
-  private createActiveTeamConditionCheck(directoryId: string, entryKey: string) {
+  private createActiveTeamConditionCheck(
+    directoryId: string,
+    entryKey: string,
+    expectedTeamId?: string,
+  ) {
     return {
       TableName: this.tableName,
       Key: {
         directoryId,
         entryKey,
       },
-      ConditionExpression: 'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)',
+      ConditionExpression: expectedTeamId === undefined
+        ? 'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)'
+        : '#entryType = :entryType AND #teamId = :teamId AND attribute_not_exists(#archivedAt)',
+      ...(expectedTeamId === undefined
+        ? {}
+        : {
+            ExpressionAttributeNames: {
+              '#archivedAt': 'archivedAt',
+              '#entryType': 'entryType',
+              '#teamId': 'teamId',
+            },
+            ExpressionAttributeValues: {
+              ':entryType': 'team',
+              ':teamId': expectedTeamId,
+            },
+          }),
     }
   }
 

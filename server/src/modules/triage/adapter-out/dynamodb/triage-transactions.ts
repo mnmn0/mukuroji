@@ -7,6 +7,7 @@ import type {
   TriageMergeReceipt,
   TriageWorkItemReference,
 } from '@mukuroji/contracts'
+import type { MutationAuditContext } from '../../../audit'
 import {
   applyTriageAction,
   evaluateTriageSchedule,
@@ -16,6 +17,10 @@ import {
   type TriageSourceActivity,
 } from '../../domain/triage-entry'
 import type { TriageIdempotency } from '../../triage'
+import {
+  createTriageAssignmentAuditTransactionItems,
+  type TriageAuditOutboxConfiguration,
+} from './triage-audit-events'
 
 /** Default number of deterministic wake partitions used by the schedule index. */
 export const DEFAULT_TRIAGE_WAKE_SHARD_COUNT = 8
@@ -126,6 +131,10 @@ export type CreateTriageActionTransactionItemsInput = {
   now: string
   /** Replay protection bound to the semantic action input. */
   idempotency: TriageIdempotency
+  /** Immutable audit outbox joined to assignment actions. */
+  audit: TriageAuditOutboxConfiguration
+  /** Immutable caller context used when the action produces an assignment audit event. */
+  auditContext: MutationAuditContext
   /** Optional receipt TTL instant, defaulting to ninety days after mutation. */
   receiptExpiresAt?: string
   /** Number of deterministic wake shards configured on the table. */
@@ -285,7 +294,7 @@ export function createTriageActionTransactionItems(
     actorId: input.actorId,
     now: input.now,
   })
-  return createActionContribution(
+  const contribution = createActionContribution(
     tableName,
     input.entry,
     entry,
@@ -294,6 +303,21 @@ export function createTriageActionTransactionItems(
     normalizeWakeShardCount(input.wakeShardCount),
     false,
   )
+  return {
+    entry: contribution.entry,
+    transactItems: [
+      ...contribution.transactItems,
+      ...(input.action.action === 'assign'
+        ? createTriageAssignmentAuditTransactionItems({
+            audit: input.audit,
+            previousEntry: input.entry,
+            assignedEntry: contribution.entry,
+            actorId: input.actorId,
+            auditContext: input.auditContext,
+          })
+        : []),
+    ],
+  }
 }
 
 /** Builds a revision-conditional schedule update when a deadline fired.

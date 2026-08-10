@@ -318,6 +318,7 @@ import {
 } from '../modules/request-intake/adapter-in/http/public-request-intake-router'
 import {
   createTriageAcceptanceTransactionItems,
+  createTriageActionAuditIdempotencyKey,
   createTriageActionTransactionItems,
   createTriageBulkTargetIdempotencyKey,
   createTriageInputFingerprint,
@@ -17225,6 +17226,9 @@ async function requireTriageTeamAccess(
       teamId,
       access === 'write' ? 'member' : 'viewer',
     )
+    if (isEnterpriseTriageTeamScope(principal, teamId)) {
+      teamContext = await mergeTriageProjectAccesses(principal, teamContext)
+    }
   }
   const visibleProjectIds = teamContext
     ? resolveRestrictedTriageProjectIds(
@@ -17233,11 +17237,191 @@ async function requireTriageTeamAccess(
         access === 'write' ? 'member' : 'viewer',
       )
     : undefined
+  const teamAccess = resolveEffectiveTriageTeamAccess(principal, teamContext, teamId, access)
+  const writableProjectIds = resolveWritableTriageProjectIds(
+    principal,
+    teamContext,
+    teamId,
+    teamAccess,
+  )
   return {
     workspaceId: principal.directoryId,
     userId: principal.userKey,
-    ...(visibleProjectIds ? { visibleProjectIds } : {}),
+    auditActor: {
+      id: principal.actorId,
+      kind: resolveEnterpriseAuditActorKind(principal),
+      displayName: principal.userKey,
+    },
+    ...(principal.enterpriseBreakGlassActivationId
+      ? { auditCorrelationId: principal.enterpriseBreakGlassActivationId }
+      : {}),
+    teamAccess,
+    ...(visibleProjectIds !== undefined ? { visibleProjectIds } : {}),
+    ...(writableProjectIds !== undefined ? { writableProjectIds } : {}),
   }
+}
+
+/** Merges stronger Project-scoped Enterprise access into a Team-scoped read snapshot.
+ *
+ * Team-level Enterprise read grants synthesize viewer access for every active Project. A
+ * principal may simultaneously hold a stronger Project role, so Triage must preserve that
+ * narrower write authority without widening it to the whole Team.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param context - Live Team context initially resolved for the route.
+ * @returns The context with the strongest role retained for each Project in the Team.
+ */
+async function mergeTriageProjectAccesses(
+  principal: WorkspacePrincipal,
+  context: TeamPermissionContext,
+): Promise<TeamPermissionContext> {
+  if (principal.isSystemAdmin || context.projectAccesses === undefined) return context
+  const teamProjectIds = new Set(context.team.projects.map((project) => project.id))
+  const roleByProjectId = new Map(
+    context.projectAccesses.map((access) => [access.projectId, access.role] as const),
+  )
+  for (const access of await getEffectiveProjectAccessList(principal)) {
+    if (!teamProjectIds.has(access.projectId) || access.role === undefined) continue
+    const currentRole = roleByProjectId.get(access.projectId)
+    if (
+      currentRole === undefined ||
+      projectRoleWeights[access.role] > projectRoleWeights[currentRole]
+    ) {
+      roleByProjectId.set(access.projectId, access.role)
+    }
+  }
+  for (const project of context.team.projects) {
+    const enterpriseRole = resolveTriageEnterpriseProjectRole(
+      principal,
+      context.team.id,
+      project.id,
+    )
+    if (enterpriseRole === undefined) continue
+    const currentRole = roleByProjectId.get(project.id)
+    if (
+      currentRole === undefined ||
+      projectRoleWeights[enterpriseRole] > projectRoleWeights[currentRole]
+    ) {
+      roleByProjectId.set(project.id, enterpriseRole)
+    }
+  }
+  return {
+    ...context,
+    projectAccesses: [...roleByProjectId].map(([projectId, role]) => ({ projectId, role })),
+  }
+}
+
+/** Re-evaluates one Project's full Triage role from the authenticated Enterprise snapshot.
+ *
+ * The request-level Project list is intentionally derived from the GET route permission and can
+ * therefore collapse a stronger write grant to viewer. Re-evaluating the write/manage permissions
+ * against the same immutable authorization snapshot preserves the effective role without trusting
+ * client state or performing a second directory read.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param teamId - Parent Team for the Project resource.
+ * @param projectId - Project whose Triage role is being projected.
+ * @returns The strongest Enterprise Project role, or undefined when no Triage grant applies.
+ */
+function resolveTriageEnterpriseProjectRole(
+  principal: WorkspacePrincipal,
+  teamId: string,
+  projectId: string,
+): ProjectRole | undefined {
+  const evaluation = principal.enterpriseAuthorizationEvaluation
+  if (!evaluation) return undefined
+  const resource: EnterpriseAuthorizationResource = {
+    workspaceId: principal.directoryId,
+    kind: 'project',
+    targetId: projectId,
+    parentTeamId: teamId,
+  }
+  const allows = (permission: EnterprisePermissionId) =>
+    evaluateEnterpriseAccess({
+      permission,
+      principal: evaluation.principal,
+      assignments: evaluation.assignments,
+      customRoles: evaluation.snapshot.customRoles,
+      groupMappings: evaluation.groupMappings,
+      resource,
+    }).allowed
+  if (allows('teams.write')) {
+    return allows('teams.manage') ? 'manager' : 'member'
+  }
+  return allows('teams.read') ? 'viewer' : undefined
+}
+
+/**
+ * Resolves the strongest live Team access without widening a read-only Project role.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param context - Live Team and Project access context when the route reads entries.
+ * @param teamId - Team whose access is being projected.
+ * @param minimumAccess - Access already enforced for the current route.
+ * @returns Strongest access that may be advertised in Triage response capabilities.
+ */
+function resolveEffectiveTriageTeamAccess(
+  principal: WorkspacePrincipal,
+  context: TeamPermissionContext | undefined,
+  teamId: string,
+  minimumAccess: TriageTeamAccess,
+): TriageTeamAccess {
+  if (minimumAccess === 'manage' || principal.isSystemAdmin) return 'manage'
+  let effectiveAccess = minimumAccess
+  if (isEnterpriseTriageTeamScope(principal, teamId)) {
+    const canWrite = principal.enterprisePermissions?.includes('teams.write') === true
+    if (canWrite && principal.enterprisePermissions?.includes('teams.manage')) return 'manage'
+    if (canWrite) effectiveAccess = 'write'
+  }
+  if (context?.projectAccesses?.some((entry) => entry.role === 'manager')) return 'manage'
+  if (context?.projectAccesses?.some((entry) => entry.role === 'member')) return 'write'
+  return effectiveAccess
+}
+
+/**
+ * Resolves the Project subset for which entry mutations may truthfully be advertised.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param context - Live Team and Project access context.
+ * @param teamId - Team whose access is being projected.
+ * @param teamAccess - Strongest resolved Team access.
+ * @returns Writable Project IDs, an empty read-only set, or undefined for Team-wide write.
+ */
+function resolveWritableTriageProjectIds(
+  principal: WorkspacePrincipal,
+  context: TeamPermissionContext | undefined,
+  teamId: string,
+  teamAccess: TriageTeamAccess,
+): readonly string[] | undefined {
+  if (teamAccess === 'read') return []
+  if (
+    principal.isSystemAdmin ||
+    isEnterpriseTriageTeamScope(principal, teamId) &&
+      principal.enterprisePermissions?.includes('teams.write') === true
+  ) {
+    return undefined
+  }
+  if (!context) return undefined
+  return resolveRestrictedTriageProjectIds(principal, context, 'member')
+}
+
+/**
+ * Returns whether current Enterprise authorization covers the routed Team itself.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param teamId - Team route identifier.
+ * @returns Whether Team-wide Enterprise permissions are authoritative for this request.
+ */
+function isEnterpriseTriageTeamScope(
+  principal: WorkspacePrincipal,
+  teamId: string,
+): boolean {
+  return principal.enterpriseRouteAuthorizedAtResource === true &&
+    (
+      principal.enterpriseAuthorizationResource?.kind === 'workspace' ||
+      principal.enterpriseAuthorizationResource?.kind === 'team' &&
+        principal.enterpriseAuthorizationResource.targetId === teamId
+    )
 }
 
 /**
@@ -17573,11 +17757,16 @@ async function applyTriageRouteAction(request: TriageRouterActionRequest) {
     )
     const contribution = createTriageActionTransactionItems({
       tableName: getEnv('REQUEST_INTAKE_TABLE_NAME') ?? 'mukuroji-request-intake-local',
+      audit: {
+        tableName: getConfiguredAuditTableName() ?? 'mukuroji-audit-events',
+        retentionDays: getConfiguredAuditRetentionDays(),
+      },
       entry: currentEntry,
       action,
       actorId: principal.userKey,
       now: new Date().toISOString(),
       idempotency: request.idempotency,
+      auditContext: request.auditContext,
     })
     await workItemDependencies.requestIntake.applyAction(
       request.workspaceId,
@@ -17693,6 +17882,7 @@ async function applyTriageRouteAction(request: TriageRouterActionRequest) {
     request.actor,
     request.action,
     request.idempotency,
+    request.auditContext,
   )
 }
 
@@ -17706,8 +17896,22 @@ async function applyTriageBulkRouteAction(
   request: TriageRouterBulkActionRequest,
 ): Promise<TriageBulkActionResult> {
   const results: TriageBulkActionResult['results'] = []
-  for (const target of request.input.targets) {
+  const preparedTargets = request.input.targets.map((target) => {
     const action = createTriageBulkTargetAction(target, request.input.operation)
+    const idempotency = {
+      key: createTriageBulkTargetIdempotencyKey(
+        request.idempotencyKey,
+        target.entryId,
+      ),
+      fingerprint: createTriageInputFingerprint({
+        target,
+        operation: request.input.operation,
+      }),
+    }
+    const auditContext = request.createAuditContext(target.entryId, idempotency)
+    return { action, auditContext, idempotency, target }
+  })
+  for (const { action, auditContext, idempotency, target } of preparedTargets) {
     try {
       const receipt = await applyTriageRouteAction({
         context: request.context,
@@ -17716,16 +17920,8 @@ async function applyTriageBulkRouteAction(
         entryId: target.entryId,
         actor: request.actor,
         action,
-        idempotency: {
-          key: createTriageBulkTargetIdempotencyKey(
-            request.idempotencyKey,
-            target.entryId,
-          ),
-          fingerprint: createTriageInputFingerprint({
-            target,
-            operation: request.input.operation,
-          }),
-        },
+        idempotency,
+        auditContext,
       })
       results.push({ entryId: target.entryId, status: 'succeeded', entry: receipt.entry })
     } catch (error) {
@@ -17826,11 +18022,16 @@ async function requestTriageInformationFromSource(
   )
   const contribution = createTriageActionTransactionItems({
     tableName: getEnv('REQUEST_INTAKE_TABLE_NAME') ?? 'mukuroji-request-intake-local',
+    audit: {
+      tableName: getConfiguredAuditTableName() ?? 'mukuroji-audit-events',
+      retentionDays: getConfiguredAuditRetentionDays(),
+    },
     entry,
     action: request.action,
     actorId: principal.userKey,
     now: new Date().toISOString(),
     idempotency: request.idempotency,
+    auditContext: request.auditContext,
   })
   await workItemDependencies.requestIntake.applyAction(
     request.workspaceId,
@@ -17929,6 +18130,12 @@ async function repairConvertedRequestTriageProjection(
     { id: principal.userKey },
     action,
     idempotency,
+    createApiMutationContext(
+      context,
+      principal,
+      action,
+      createTriageActionAuditIdempotencyKey(entry.id, idempotency),
+    ),
   )
 }
 
@@ -18078,11 +18285,21 @@ async function createLegacyRequestTriageContribution(
     replayed: false,
     contribution: createTriageActionTransactionItems({
       tableName,
+      audit: {
+        tableName: getConfiguredAuditTableName() ?? 'mukuroji-audit-events',
+        retentionDays: getConfiguredAuditRetentionDays(),
+      },
       entry,
       action,
       actorId: principal.userKey,
       now: new Date().toISOString(),
       idempotency,
+      auditContext: createApiMutationContext(
+        context,
+        principal,
+        input,
+        createTriageActionAuditIdempotencyKey(entry.id, idempotency),
+      ),
     }),
   }
 }
@@ -19437,7 +19654,7 @@ function requiresCurrentTriageOwner(notification: NotificationItem) {
   return notification.reasons.length > 0 && notification.reasons.every((reason) =>
     reason === 'assignee' || reason === 'assignment' || reason === 'due' ||
     reason === 'overdue' || reason === 'sla' || reason === 'triage-sla' ||
-    reason === 'escalation'
+    reason === 'escalation' || reason === 'triage-assignment'
   )
 }
 

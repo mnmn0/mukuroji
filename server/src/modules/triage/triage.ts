@@ -15,6 +15,7 @@ import type {
   UpdateTriageConfigurationInput,
 } from '@mukuroji/contracts'
 import type { TransactWriteCommandInput } from '@aws-sdk/lib-dynamodb'
+import type { MutationAuditContext } from '../audit'
 
 /** Creates a canonical SHA-256 fingerprint for validated JSON-like input.
  *
@@ -38,6 +39,28 @@ export function createTriageBulkTargetIdempotencyKey(
   return `bulk:${createTriageInputFingerprint({ bulkIdempotencyKey, entryId })}`
 }
 
+/** Namespaces an action audit identity by operation and target entry.
+ *
+ * Triage action receipts are stored below an Entry, while audit event IDs are Workspace-scoped.
+ * Hashing the receipt fingerprint with the caller key prevents two Entries using the same HTTP
+ * key from producing one immutable audit event ID while retaining semantic replay binding.
+ *
+ * @param entryId Stable target Triage Entry identifier.
+ * @param idempotency Receipt identity bound to semantic input.
+ * @returns A bounded audit-only idempotency namespace.
+ */
+export function createTriageActionAuditIdempotencyKey(
+  entryId: string,
+  idempotency: TriageIdempotency,
+): string {
+  return `triage-action:${createTriageInputFingerprint({
+    operation: 'triage-action',
+    entryId,
+    key: idempotency.key,
+    fingerprint: idempotency.fingerprint,
+  })}`
+}
+
 /** Authenticated actor used by triage mutations. */
 export type TriageActor = {
   /** Stable Workspace user or service identifier. */
@@ -51,6 +74,17 @@ export type TriageIdempotency = {
   /** Stable fingerprint of the validated semantic input. */
   fingerprint: string
 }
+
+/** Creates one immutable audit context bound to a target-specific mutation receipt.
+ *
+ * @param entryId Stable target Triage Entry used to namespace the audit event identity.
+ * @param idempotency Replay protection selected for the individual Triage target.
+ * @returns The API or semantic-source audit context for that exact target mutation.
+ */
+export type TriageAuditContextFactory = (
+  entryId: string,
+  idempotency: TriageIdempotency,
+) => MutationAuditContext
 
 /** Work Item resolution contributed by application composition. */
 export type TriageWorkItemActionResolution = {
@@ -101,6 +135,7 @@ export interface TriageClient {
    * @param actor The authenticated actor.
    * @param action The validated action.
    * @param idempotency Replay protection bound to the action.
+   * @param auditContext Immutable request and source context for the action audit event.
    * @returns The mutation receipt.
    */
   applyAction(
@@ -110,6 +145,7 @@ export interface TriageClient {
     actor: TriageActor,
     action: TriageActionInput,
     idempotency: TriageIdempotency,
+    auditContext: MutationAuditContext,
   ): Promise<TriageMutationReceipt>
   /** Looks up an existing action receipt before externally composed Work Item creation.
    *
@@ -130,6 +166,7 @@ export interface TriageClient {
    * @param actor The authenticated actor.
    * @param input The validated bulk input.
    * @param idempotencyKey The bulk request idempotency namespace.
+   * @param createAuditContext Factory preserving the bulk request while binding each target key.
    * @returns One result per target.
    */
   applyBulkAction(
@@ -138,6 +175,7 @@ export interface TriageClient {
     actor: TriageActor,
     input: TriageBulkActionInput,
     idempotencyKey: string,
+    createAuditContext: TriageAuditContextFactory,
   ): Promise<TriageBulkActionResult>
   /** Reads Team triage settings.
    *

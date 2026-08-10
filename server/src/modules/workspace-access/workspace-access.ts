@@ -630,6 +630,43 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     return member?.status === 'active' ? member : undefined
   }
 
+  /** Builds a commit-time guard for one currently active Workspace member.
+   *
+   * @param workspaceId Owning Workspace identifier.
+   * @param memberKey Stable member key that must remain active.
+   * @returns A version-and-status condition, or undefined when the member is not active.
+   */
+  async createActiveMemberConditionCheck(
+    workspaceId: string,
+    memberKey: string,
+  ): Promise<WorkspaceAccessTransactWriteItem | undefined> {
+    const member = await this.getActiveMember(workspaceId, memberKey)
+    if (!member) return undefined
+    return {
+      ConditionCheck: {
+        TableName: this.tableName,
+        Key: {
+          workspaceId,
+          recordKey: createMemberRecordKey(member.memberKey),
+        },
+        ConditionExpression:
+          '#entryType = :entryType AND #memberKey = :memberKey AND #status = :active AND #version = :version',
+        ExpressionAttributeNames: {
+          '#entryType': 'entryType',
+          '#memberKey': 'memberKey',
+          '#status': 'status',
+          '#version': 'version',
+        },
+        ExpressionAttributeValues: {
+          ':active': 'active',
+          ':entryType': 'workspace-member',
+          ':memberKey': member.memberKey,
+          ':version': member.version,
+        },
+      },
+    }
+  }
+
   /** 管理画面用の Workspace access snapshot を取得します。 */
   async getAccessSnapshot(workspaceId: string, actorMemberKey: string) {
     const items = await this.queryItems(workspaceId)

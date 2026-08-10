@@ -1,10 +1,15 @@
 import { describe, expect, test } from 'bun:test'
 import { TRIAGE_ENTRY_SCHEMA_VERSION, type TriageEntry } from '@mukuroji/contracts'
+import { createMutationAuditContext } from '../../../audit'
 import { createTriageCapabilities } from '../../domain/triage-entry'
-import { createTriageInputFingerprint } from '../../triage'
+import {
+  createTriageActionAuditIdempotencyKey,
+  createTriageInputFingerprint,
+} from '../../triage'
 import {
   createFormTriageEntryTransactionItems,
   createTriageAcceptanceTransactionItems,
+  createTriageActionTransactionItems,
   createTriageEntryKey,
   createTriageSourceActivityTransactionItems,
   createTriageSourceClaimKey,
@@ -64,6 +69,46 @@ function createEntry(): TriageEntry {
     createdAt: NOW,
     updatedAt: NOW,
   }
+}
+
+/** Creates a stable request-derived audit context for one transaction test.
+ *
+ * @param body Semantic HTTP request body captured by the adapter.
+ * @param path Actual HTTP request path.
+ * @param idempotencyKey Target-specific replay key.
+ * @param correlationId Correlation ID shared by the logical API request.
+ * @param receiptFingerprint Fingerprint binding the receipt to target and semantic input.
+ * @param entryId Stable target Entry used by the audit idempotency namespace.
+ * @returns Immutable mutation context supplied to the Triage transaction builder.
+ */
+function createAssignmentAuditContext(
+  body: unknown,
+  path = '/api/teams/support/triage-entries/triage-form-1/actions',
+  idempotencyKey = 'assign-1',
+  correlationId = 'correlation-assign-1',
+  receiptFingerprint = createTriageInputFingerprint(body),
+  entryId = 'triage-form-1',
+) {
+  return createMutationAuditContext({
+    workspaceId: 'workspace-1',
+    actor: { id: 'actor-1', kind: 'user' },
+    idempotencyKey: createTriageActionAuditIdempotencyKey(
+      entryId,
+      {
+        key: idempotencyKey,
+        fingerprint: receiptFingerprint,
+      },
+    ),
+    correlationId,
+    occurredAt: '2026-08-09T00:04:59.000Z',
+    request: { method: 'POST', path, body },
+    source: {
+      kind: 'api',
+      requestId: 'request-1',
+      method: 'POST',
+      route: path,
+    },
+  })
 }
 
 describe('triage DynamoDB transaction contributions', () => {
@@ -131,6 +176,306 @@ describe('triage DynamoDB transaction contributions', () => {
       resultRevision: 2,
     })
     expect(contribution.transactItems[3]?.Put?.Item).not.toHaveProperty('receipt')
+  })
+
+  test('atomically appends a deterministic assignment outbox event for the new owner', () => {
+    const entry = createEntry()
+    entry.ownerUserId = 'previous@example.com'
+    entry.projectId = 'intake'
+    const idempotency = {
+      key: 'assign-1',
+      fingerprint: createTriageInputFingerprint({
+        action: 'assign',
+        entryId: entry.id,
+        ownerUserId: 'next@example.com',
+      }),
+    }
+    const createContribution = () => createTriageActionTransactionItems({
+      tableName: 'RequestIntakeTable',
+      audit: { tableName: 'AuditEventsTable', retentionDays: 365 },
+      entry,
+      action: {
+        action: 'assign',
+        expectedRevision: 1,
+        ownerUserId: 'next@example.com',
+      },
+      actorId: 'operator@example.com',
+      now: '2026-08-09T00:05:00.000Z',
+      idempotency,
+      auditContext: createAssignmentAuditContext({
+        action: 'assign',
+        expectedRevision: 1,
+        ownerUserId: 'next@example.com',
+      }),
+    })
+
+    const contribution = createContribution()
+    const replayContribution = createContribution()
+    const auditPut = contribution.transactItems.find((item) =>
+      item.Put?.TableName === 'AuditEventsTable'
+    )?.Put
+    const replayAuditPut = replayContribution.transactItems.find((item) =>
+      item.Put?.TableName === 'AuditEventsTable'
+    )?.Put
+
+    expect(contribution.entry).toMatchObject({
+      ownerUserId: 'next@example.com',
+      revision: 2,
+    })
+    expect(contribution.transactItems).toHaveLength(4)
+    expect(contribution.transactItems.some((item) =>
+      item.Put?.Item?.entryType === 'triage-operation-receipt'
+    )).toBe(true)
+    expect(auditPut?.Item).toMatchObject({
+      eventType: 'triage.assigned',
+      entity: { type: 'triage-entry', id: 'triage-form-1' },
+      outboxStatus: 'pending',
+      metadata: {
+        actorMemberKey: 'operator@example.com',
+        teamId: 'support',
+        projectId: 'intake',
+        triageEntryId: 'triage-form-1',
+        deepLink: '/teams/support/triage?entryId=triage-form-1',
+        notificationTitle: 'Triage assignment',
+        notificationCandidates: [{
+          memberKey: 'next@example.com',
+          reason: 'triage-assignment',
+        }],
+      },
+    })
+    expect(replayAuditPut?.Item?.eventId).toBe(auditPut?.Item?.eventId)
+    expect(auditPut?.Item).toMatchObject({
+      correlationId: 'correlation-assign-1',
+      source: 'api',
+      sourceDetails: {
+        kind: 'api',
+        requestId: 'request-1',
+        method: 'POST',
+        route: '/api/teams/support/triage-entries/triage-form-1/actions',
+      },
+    })
+    expect(JSON.stringify(auditPut?.Item)).not.toContain('Please grant access.')
+  })
+
+  test('audits assignment clearing without producing a notification candidate', () => {
+    const entry = createEntry()
+    entry.ownerUserId = 'previous@example.com'
+    const contribution = createTriageActionTransactionItems({
+      tableName: 'RequestIntakeTable',
+      audit: { tableName: 'AuditEventsTable', retentionDays: 365 },
+      entry,
+      action: { action: 'assign', expectedRevision: 1, ownerUserId: null },
+      actorId: 'operator@example.com',
+      now: '2026-08-09T00:05:00.000Z',
+      idempotency: {
+        key: 'unassign-1',
+        fingerprint: createTriageInputFingerprint({
+          action: 'assign',
+          entryId: entry.id,
+          ownerUserId: null,
+        }),
+      },
+      auditContext: createAssignmentAuditContext(
+        { action: 'assign', expectedRevision: 1, ownerUserId: null },
+        undefined,
+        'unassign-1',
+      ),
+    })
+    const auditItem = contribution.transactItems.find((item) =>
+      item.Put?.TableName === 'AuditEventsTable'
+    )?.Put?.Item
+
+    expect(contribution.entry.ownerUserId).toBeUndefined()
+    expect(auditItem).toMatchObject({
+      eventType: 'triage.assigned',
+      summary: 'Triage assignment changed.',
+      metadata: { notificationCandidates: [] },
+    })
+  })
+
+  test('preserves single, bulk, and legacy request context without inventing Project input', () => {
+    const cases = [
+      {
+        name: 'single',
+        path: '/api/teams/support/triage-entries/triage-form-1/actions',
+        body: { action: 'assign', expectedRevision: 1, ownerUserId: 'next@example.com' },
+      },
+      {
+        name: 'bulk',
+        path: '/api/teams/support/triage-entries/bulk-actions',
+        body: {
+          targets: [{ entryId: 'triage-form-1', expectedRevision: 1 }],
+          operation: { action: 'assign', ownerUserId: 'next@example.com' },
+        },
+      },
+      {
+        name: 'legacy',
+        path: '/api/requests/submission-1/actions',
+        body: {
+          action: 'assign',
+          expectedRevision: 1,
+          assigneeUserId: 'next@example.com',
+        },
+      },
+    ]
+
+    for (const requestCase of cases) {
+      const entry = createEntry()
+      entry.projectId = 'intake'
+      const idempotencyKey = `assign-${requestCase.name}`
+      const auditContext = createAssignmentAuditContext(
+        requestCase.body,
+        requestCase.path,
+        idempotencyKey,
+        'correlation-shared-request',
+      )
+      const contribution = createTriageActionTransactionItems({
+        tableName: 'RequestIntakeTable',
+        audit: { tableName: 'AuditEventsTable', retentionDays: 365 },
+        entry,
+        action: {
+          action: 'assign',
+          expectedRevision: 1,
+          ownerUserId: 'next@example.com',
+        },
+        actorId: 'operator@example.com',
+        now: '2026-08-09T00:05:00.000Z',
+        idempotency: {
+          key: idempotencyKey,
+          fingerprint: createTriageInputFingerprint(requestCase.body),
+        },
+        auditContext,
+      })
+      const auditItem = contribution.transactItems.find((item) =>
+        item.Put?.TableName === 'AuditEventsTable'
+      )?.Put?.Item
+
+      expect(auditItem).toMatchObject({
+        correlationId: 'correlation-shared-request',
+        requestFingerprint: auditContext.requestFingerprint,
+        source: 'api',
+        sourceDetails: { method: 'POST', route: requestCase.path },
+      })
+    }
+
+    const omittedProjectContext = createAssignmentAuditContext(
+      { action: 'assign', expectedRevision: 1, ownerUserId: 'next@example.com' },
+    )
+    const inventedProjectContext = createAssignmentAuditContext({
+      action: 'assign',
+      expectedRevision: 1,
+      ownerUserId: 'next@example.com',
+      projectId: 'intake',
+    })
+    expect(omittedProjectContext.requestFingerprint).not.toBe(
+      inventedProjectContext.requestFingerprint,
+    )
+  })
+
+  test('describes a Project-only assignment without claiming an ownership change', () => {
+    const entry = createEntry()
+    entry.ownerUserId = 'owner@example.com'
+    entry.projectId = 'intake'
+    const contribution = createTriageActionTransactionItems({
+      tableName: 'RequestIntakeTable',
+      audit: { tableName: 'AuditEventsTable', retentionDays: 365 },
+      entry,
+      action: {
+        action: 'assign',
+        expectedRevision: 1,
+        ownerUserId: 'owner@example.com',
+        projectId: 'other-project',
+      },
+      actorId: 'operator@example.com',
+      now: '2026-08-09T00:05:00.000Z',
+      idempotency: {
+        key: 'assign-project-only',
+        fingerprint: createTriageInputFingerprint({ projectId: 'other-project' }),
+      },
+      auditContext: createAssignmentAuditContext(
+        {
+          action: 'assign',
+          expectedRevision: 1,
+          ownerUserId: 'owner@example.com',
+          projectId: 'other-project',
+        },
+        undefined,
+        'assign-project-only',
+      ),
+    })
+    const auditItem = contribution.transactItems.find((item) =>
+      item.Put?.TableName === 'AuditEventsTable'
+    )?.Put?.Item
+
+    expect(auditItem).toMatchObject({
+      summary: 'Triage assignment changed.',
+      changes: [{ field: 'projectId', before: 'intake', after: 'other-project' }],
+    })
+  })
+
+  test('keeps single and legacy assignment event IDs distinct across Entries sharing a raw key', () => {
+    const requestCases = [
+      {
+        name: 'single',
+        path: '/api/teams/support/triage-entries/triage-form-1/actions',
+        body: { action: 'assign', expectedRevision: 1, ownerUserId: 'next@example.com' },
+      },
+      {
+        name: 'legacy',
+        path: '/api/requests/submission-1/actions',
+        body: {
+          action: 'assign',
+          expectedRevision: 1,
+          assigneeUserId: 'next@example.com',
+        },
+      },
+    ]
+
+    for (const requestCase of requestCases) {
+      const entries = [
+        createEntry(),
+        { ...createEntry(), id: 'triage-form-2' },
+      ]
+      const eventIds = entries.map((entry) => {
+        const receiptFingerprint = createTriageInputFingerprint({
+          workspaceId: entry.workspaceId,
+          teamId: entry.teamId,
+          entryId: entry.id,
+          action: requestCase.body,
+        })
+        const contribution = createTriageActionTransactionItems({
+          tableName: 'RequestIntakeTable',
+          audit: { tableName: 'AuditEventsTable', retentionDays: 365 },
+          entry,
+          action: {
+            action: 'assign',
+            expectedRevision: 1,
+            ownerUserId: 'next@example.com',
+          },
+          actorId: 'operator@example.com',
+          now: '2026-08-09T00:05:00.000Z',
+          idempotency: {
+            key: 'same-raw-key',
+            fingerprint: receiptFingerprint,
+          },
+          auditContext: createAssignmentAuditContext(
+            requestCase.body,
+            requestCase.path.replace('triage-form-1', entry.id),
+            'same-raw-key',
+            `correlation-${requestCase.name}`,
+            receiptFingerprint,
+            entry.id,
+          ),
+        })
+        return contribution.transactItems.find((item) =>
+          item.Put?.TableName === 'AuditEventsTable'
+        )?.Put?.Item?.eventId
+      })
+
+      expect(eventIds[0]).toBeString()
+      expect(eventIds[1]).toBeString()
+      expect(eventIds[1]).not.toBe(eventIds[0])
+    }
   })
 
   test('builds activity dedupe and resurface writes without reopening terminal entries', () => {

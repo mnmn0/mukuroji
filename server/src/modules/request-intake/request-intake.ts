@@ -2070,10 +2070,9 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
         entry: admission.entry,
         inputFingerprint,
       })
-      const retryableConflictItemIndex = admission.retryableConflictItemIndex === undefined
-        ? undefined
-        : baseTransactItems.length + triageTransactItems.length +
-          admission.retryableConflictItemIndex
+      const retryableConflictItemIndexes = admission.retryableConflictItemIndexes?.map(
+        (itemIndex) => baseTransactItems.length + triageTransactItems.length + itemIndex,
+      ) ?? []
       const transactItems = [
         ...baseTransactItems,
         ...triageTransactItems,
@@ -2085,8 +2084,8 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
         return receipt
       } catch (error) {
         if (
-          retryableConflictItemIndex !== undefined &&
-          isOnlyConditionalFailureAt(error, retryableConflictItemIndex)
+          retryableConflictItemIndexes.length > 0 &&
+          isOnlyConditionalFailureAtAny(error, retryableConflictItemIndexes)
         ) {
           if (attempt < 2) continue
           commitError = new RequestIntakeError(
@@ -3945,21 +3944,40 @@ function isConditionalFailure(error: unknown) {
     )
 }
 
-/** Detects a transaction cancellation caused only by one retryable item. */
-function isOnlyConditionalFailureAt(error: unknown, itemIndex: number): boolean {
-  if (!Number.isSafeInteger(itemIndex) || itemIndex < 0 ||
+/** Detects a transaction cancellation caused only by retryable admission guards.
+ *
+ * @param error Untrusted DynamoDB transaction failure.
+ * @param itemIndexes Transaction positions owned by the admission snapshot.
+ * @returns Whether at least one expected guard failed and every other item was unaffected.
+ */
+function isOnlyConditionalFailureAtAny(
+  error: unknown,
+  itemIndexes: readonly number[],
+): boolean {
+  const expectedIndexes = new Set(itemIndexes)
+  if (expectedIndexes.size < 1 || [...expectedIndexes].some((itemIndex) =>
+    !Number.isSafeInteger(itemIndex) || itemIndex < 0
+  ) ||
     typeof error !== 'object' || error === null ||
     Reflect.get(error, 'name') !== 'TransactionCanceledException') {
     return false
   }
   const cancellationReasons = Reflect.get(error, 'CancellationReasons')
-  if (!Array.isArray(cancellationReasons) || itemIndex >= cancellationReasons.length) return false
+  if (!Array.isArray(cancellationReasons) ||
+    [...expectedIndexes].some((itemIndex) => itemIndex >= cancellationReasons.length)) {
+    return false
+  }
+  let hasExpectedConditionalFailure = false
   return cancellationReasons.every((reason, index) => {
     const code = typeof reason === 'object' && reason !== null
       ? Reflect.get(reason, 'Code')
       : undefined
-    return index === itemIndex ? code === 'ConditionalCheckFailed' : code === 'None'
-  })
+    if (code === 'ConditionalCheckFailed' && expectedIndexes.has(index)) {
+      hasExpectedConditionalFailure = true
+      return true
+    }
+    return code === 'None'
+  }) && hasExpectedConditionalFailure
 }
 
 function toRequestStoreError(error: unknown) {

@@ -6,6 +6,7 @@ import {
   TRIAGE_ENTRY_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
   createDefaultUnscheduledWorkItemSchedule,
+  type EnterpriseCustomRoleId,
   type RequestSubmission,
   type TriageConfiguration,
   type TriageEntry,
@@ -21,15 +22,18 @@ import type {
   TeamIssueResponseItem,
 } from '../modules/work-items'
 import { createTriageCapabilities, TriageError } from '../modules/triage/domain/triage-entry'
+import { InMemoryEnterpriseIdentityClient } from '../modules/enterprise-identity/enterprise-identity'
 
 const {
   app,
   configureFakeProjectClients,
+  createAccessToken,
   createFakeWorkItemConfigurationClient,
   createTeamIssuesFake,
   createTestWorkItemConfiguration,
   resetTestApp,
   setTestAppDependencies,
+  withTestEnvironment,
 } = createApiTestHarness()
 
 /** Stable instant used by API integration fixtures. */
@@ -134,19 +138,23 @@ function createConfiguration(
  *
  * @param entry - Entry returned by read and mutation operations.
  * @param configuration - Team settings returned by strong configuration reads.
+ * @param entries - Entries returned by the queue read.
  * @returns A complete composition client suitable for the API dependency graph.
  */
 function createTriageClient(
   entry: TriageEntry,
   configuration = createConfiguration(),
+  entries: readonly TriageEntry[] = [entry],
 ): TriageCompositionClient {
   return {
     listEntries: async () => ({
       allowedBulkActions: configuration.allowedBulkActions,
-      entries: [entry],
+      entries: [...entries],
     }),
-    getEntry: async () => entry,
-    getEntryForMutation: async () => entry,
+    getEntry: async (_workspaceId, _teamId, entryId) =>
+      entries.find((candidate) => candidate.id === entryId) ?? entry,
+    getEntryForMutation: async (_workspaceId, _teamId, entryId) =>
+      entries.find((candidate) => candidate.id === entryId) ?? entry,
     applyAction: async () => ({ entry, replayed: false }),
     getActionReceipt: async () => undefined,
     applyBulkAction: async () => ({ results: [] }),
@@ -347,6 +355,119 @@ function createHeaders(idempotencyKey?: string): Record<string, string> {
   }
 }
 
+/** Creates an applied Team-scoped Enterprise role for the authenticated test member.
+ *
+ * @param permission - Team permission granted by the custom role.
+ * @param projectMemberProjectId - Optional Project receiving an additional member role.
+ * @returns An Enterprise Identity client containing the applied directory mapping.
+ */
+async function createEnterpriseTriageIdentity(
+  permission: 'teams.read' | 'teams.write',
+  projectMemberProjectId?: string,
+): Promise<InMemoryEnterpriseIdentityClient> {
+  const workspaceId = 'user#demo@example.com'
+  const identity = new InMemoryEnterpriseIdentityClient()
+  const suffix = permission === 'teams.read' ? 'reader' : 'writer'
+  await identity.putIdentityProvider({
+    workspaceId,
+    providerId: `idp-triage-${suffix}`,
+    kind: 'oidc',
+    displayName: 'Triage directory',
+    cognitoProviderName: 'EnterpriseOidc',
+    status: 'active',
+    revision: 1,
+    issuer: 'https://idp.example.com',
+    clientId: 'enterprise-client',
+    authorizationEndpoint: 'https://idp.example.com/authorize',
+    tokenEndpoint: 'https://idp.example.com/token',
+    jwksUri: 'https://idp.example.com/jwks',
+    scopes: ['openid', 'email'],
+    createdAt: NOW,
+    updatedAt: NOW,
+    lastTestedAt: NOW,
+  })
+  await identity.putCustomRole({
+    workspaceId,
+    roleId: `custom:triage-${suffix}`,
+    name: `Triage ${suffix}`,
+    permissions: permission === 'teams.read'
+      ? ['teams.read']
+      : ['teams.read', 'teams.write'],
+    guestAssignable: false,
+    revision: 1,
+    createdAt: NOW,
+    updatedAt: NOW,
+  })
+  const user = await identity.upsertScimUser({
+    workspaceId,
+    identityProviderId: `idp-triage-${suffix}`,
+    externalId: `triage-${suffix}-user`,
+    userName: 'demo@example.com',
+    emails: ['demo@example.com'],
+    active: true,
+    linkedMemberKey: 'demo@example.com',
+    idempotencyKey: `triage-${suffix}-user`,
+  })
+  const group = await identity.upsertScimGroup({
+    workspaceId,
+    identityProviderId: `idp-triage-${suffix}`,
+    externalId: `triage-${suffix}s`,
+    displayName: `Triage ${suffix}s`,
+    active: true,
+    memberUserIds: [user.userId],
+    idempotencyKey: `triage-${suffix}-group`,
+  })
+  const desiredUser = (await identity.getSnapshot(workspaceId)).scimUsers.find((candidate) =>
+    candidate.userId === user.userId
+  )
+  if (!desiredUser) throw new Error('Expected the Enterprise Triage user to exist.')
+  await identity.markScimUserApplied(workspaceId, desiredUser.userId, desiredUser.version)
+  await identity.markScimGroupApplied(workspaceId, group.groupId, group.version)
+  await identity.putGroupMapping({
+    workspaceId,
+    mappingId: `triage-${suffix}-mapping`,
+    identityProviderId: `idp-triage-${suffix}`,
+    directoryGroupId: group.groupId,
+    roleId: `custom:triage-${suffix}`,
+    scope: { workspaceId, kind: 'team', targetId: 'core-team' },
+    enabled: true,
+    priority: 0,
+    revision: 1,
+    updatedAt: NOW,
+  })
+  if (projectMemberProjectId) {
+    const projectWriterRoleId: EnterpriseCustomRoleId =
+      `custom:triage-${suffix}-project-writer`
+    await identity.putCustomRole({
+      workspaceId,
+      roleId: projectWriterRoleId,
+      name: `Triage ${suffix} Project writer`,
+      permissions: ['teams.read', 'teams.write'],
+      guestAssignable: false,
+      revision: 1,
+      createdAt: NOW,
+      updatedAt: NOW,
+    })
+    await identity.putGroupMapping({
+      workspaceId,
+      mappingId: `triage-${suffix}-project-member-mapping`,
+      identityProviderId: `idp-triage-${suffix}`,
+      directoryGroupId: group.groupId,
+      roleId: projectWriterRoleId,
+      scope: {
+        workspaceId,
+        kind: 'project',
+        targetId: projectMemberProjectId,
+      },
+      enabled: true,
+      priority: 1,
+      revision: 1,
+      updatedAt: NOW,
+    })
+  }
+  return identity
+}
+
 afterEach(() => {
   resetTestApp()
 })
@@ -417,9 +538,29 @@ describe('Team Triage API composition', () => {
     ])
 
     expect(list.status).toBe(200)
-    expect(await list.json()).toMatchObject({ entries: [{ id: 'triage-api-1' }] })
+    expect(await list.json()).toMatchObject({
+      allowedBulkActions: [],
+      entries: [{
+        id: 'triage-api-1',
+        capabilities: {
+          canAssign: false,
+          canAcceptCreate: false,
+          canAcceptLink: false,
+          canMarkDuplicate: false,
+          canDecline: false,
+          canSnooze: false,
+          canRequestInformation: false,
+          canReply: false,
+          canViewInternalContext: true,
+        },
+      }],
+    })
     expect(detail.status).toBe(200)
-    expect(await detail.json()).toMatchObject({ id: 'triage-api-1', teamId: 'core-team' })
+    expect(await detail.json()).toMatchObject({
+      id: 'triage-api-1',
+      teamId: 'core-team',
+      capabilities: { canAssign: false, canDecline: false, canReply: false },
+    })
     expect(action.status).toBe(403)
     expect(settings.status).toBe(200)
     expect(settingsUpdate.status).toBe(403)
@@ -457,6 +598,9 @@ describe('Team Triage API composition', () => {
     })
 
     expect(memberAction.status).toBe(200)
+    expect(await memberAction.json()).toMatchObject({
+      entry: { capabilities: { canAssign: true, canDecline: true, canReply: true } },
+    })
     expect(memberSettingsUpdate.status).toBe(403)
 
     configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
@@ -473,12 +617,177 @@ describe('Team Triage API composition', () => {
         retentionDays: 365,
       }),
     })
+    const managerEntry = await app.request('/api/teams/core-team/triage-entries/triage-api-1', {
+      headers: createHeaders(),
+    })
 
     const managerSettingsBody: unknown = await managerSettings.json()
     expect({ body: managerSettingsBody, status: managerSettings.status }).toMatchObject({
       status: 200,
     })
     expect(managerSettingsBody).toEqual(createConfiguration())
+    expect(managerEntry.status).toBe(200)
+    expect(await managerEntry.json()).toMatchObject({
+      capabilities: { canAssign: true, canDecline: true, canReply: true },
+    })
+  })
+
+  test('keeps Workspace administrators read-only while preserving system administrator writes', async () => {
+    const entry = createEntry()
+    configureFakeProjectClients(true, {
+      role: 'viewer',
+      workspaceRole: 'admin',
+    })
+    setTestAppDependencies({ triage: createTriageClient(entry) })
+
+    const workspaceAdmin = await app.request(
+      '/api/teams/core-team/triage-entries/triage-api-1',
+      { headers: createHeaders() },
+    )
+    expect(workspaceAdmin.status).toBe(200)
+    expect(await workspaceAdmin.json()).toMatchObject({
+      capabilities: { canAssign: false, canDecline: false, canReply: false },
+    })
+
+    configureFakeProjectClients(false, {
+      role: 'viewer',
+      systemAdminMemberKeys: ['demo@example.com'],
+      workspaceRole: 'member',
+    })
+    setTestAppDependencies({ triage: createTriageClient(entry) })
+    const systemAdmin = await app.request(
+      '/api/teams/core-team/triage-entries/triage-api-1',
+      { headers: createHeaders() },
+    )
+
+    expect(systemAdmin.status).toBe(200)
+    expect(await systemAdmin.json()).toMatchObject({
+      capabilities: { canAssign: true, canDecline: true, canReply: true },
+    })
+  })
+
+  test('projects Team-scoped Enterprise read and write permissions without widening them', async () => {
+    await withTestEnvironment({
+      COGNITO_CLIENT_ID: 'mukuroji-main-client',
+      COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+      COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
+      COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+    }, async () => {
+      const entry = createEntry()
+      const enterpriseHeaders = {
+        Authorization: `Bearer ${createAccessToken([], {
+          client_id: 'mukuroji-main-client',
+          token_use: 'access',
+        })}`,
+      }
+      configureFakeProjectClients(false, {
+        workspaceRole: 'member',
+        teamProjects: [{ id: 'refero', name: 'Refero', tone: 'blue' }],
+      })
+      setTestAppDependencies({
+        enterpriseIdentity: await createEnterpriseTriageIdentity('teams.read'),
+        triage: createTriageClient(entry),
+      })
+      const reader = await app.request(
+        '/api/teams/core-team/triage-entries/triage-api-1',
+        { headers: enterpriseHeaders },
+      )
+      expect(reader.status).toBe(200)
+      expect(await reader.json()).toMatchObject({
+        capabilities: { canAssign: false, canDecline: false, canReply: false },
+      })
+
+      const projectAEntry = createEntry({
+        id: 'triage-project-a',
+        projectId: 'project-a',
+      })
+      const projectBEntry = createEntry({
+        id: 'triage-project-b',
+        projectId: 'project-b',
+      })
+      const unassignedEntry = createEntry({
+        id: 'triage-unassigned',
+        projectId: undefined,
+      })
+      configureFakeProjectClients(false, {
+        workspaceRole: 'member',
+        teamProjects: [
+          { id: 'project-a', name: 'Project A', tone: 'blue' },
+          { id: 'project-b', name: 'Project B', tone: 'purple' },
+        ],
+      })
+      setTestAppDependencies({
+        enterpriseIdentity: await createEnterpriseTriageIdentity('teams.read', 'project-a'),
+        triage: createTriageClient(
+          projectAEntry,
+          createConfiguration(),
+          [projectAEntry, projectBEntry, unassignedEntry],
+        ),
+      })
+      const mixedAccess = await app.request(
+        '/api/teams/core-team/triage-entries',
+        { headers: enterpriseHeaders },
+      )
+      expect(mixedAccess.status).toBe(200)
+      expect(await mixedAccess.json()).toMatchObject({
+        entries: [
+          { id: 'triage-project-a', capabilities: { canAssign: true } },
+          { id: 'triage-project-b', capabilities: { canAssign: false } },
+          { id: 'triage-unassigned', capabilities: { canAssign: false } },
+        ],
+      })
+      const writableAction = await app.request(
+        '/api/teams/core-team/triage-entries/triage-project-a/actions',
+        {
+          method: 'POST',
+          headers: {
+            ...enterpriseHeaders,
+            'Content-Type': 'application/json',
+            'Idempotency-Key': 'mixed-project-a-assign',
+          },
+          body: JSON.stringify({
+            action: 'assign',
+            expectedRevision: 1,
+            ownerUserId: null,
+          }),
+        },
+      )
+      const readOnlyAction = await app.request(
+        '/api/teams/core-team/triage-entries/triage-project-b/actions',
+        {
+          method: 'POST',
+          headers: {
+            ...enterpriseHeaders,
+            'Content-Type': 'application/json',
+            'Idempotency-Key': 'mixed-project-b-assign',
+          },
+          body: JSON.stringify({
+            action: 'assign',
+            expectedRevision: 1,
+            ownerUserId: null,
+          }),
+        },
+      )
+      expect(writableAction.status).toBe(200)
+      expect(readOnlyAction.status).toBe(404)
+
+      configureFakeProjectClients(false, {
+        workspaceRole: 'member',
+        teamProjects: [{ id: 'refero', name: 'Refero', tone: 'blue' }],
+      })
+      setTestAppDependencies({
+        enterpriseIdentity: await createEnterpriseTriageIdentity('teams.write'),
+        triage: createTriageClient(entry),
+      })
+      const writer = await app.request(
+        '/api/teams/core-team/triage-entries/triage-api-1',
+        { headers: enterpriseHeaders },
+      )
+      expect(writer.status).toBe(200)
+      expect(await writer.json()).toMatchObject({
+        capabilities: { canAssign: true, canDecline: true, canReply: true },
+      })
+    })
   })
 
   test('rejects a bulk operation disabled by the current Team configuration', async () => {
@@ -521,7 +830,6 @@ describe('Team Triage API composition', () => {
         operation: { action: 'assign', ownerUserId: null },
       }),
     })
-
     expect(disabled.status).toBe(409)
     expect(await disabled.json()).toEqual({
       code: 'TriageBulkActionDisabled',

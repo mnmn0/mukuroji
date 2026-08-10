@@ -229,6 +229,112 @@ describe('triage entry state machine', () => {
       'activity-received',
       'resurfaced',
     ])
+
+    const waiting = applyTriageAction(createEntry(), {
+      action: 'request-information',
+      expectedRevision: 1,
+      message: 'Please provide the affected account ID.',
+    }, { actorId: 'member-1', now: '2026-08-09T00:05:00.000Z' })
+    const waitingWithSla = evaluateTriageSchedule(
+      waiting,
+      '2026-08-09T00:30:00.000Z',
+    ).entry
+    const delayedReply = recordTriageSourceActivity(waitingWithSla, {
+      activityId: 'provider-event-delayed-reply',
+      actorId: 'source:email',
+      occurredAt: '2026-08-09T00:10:00.000Z',
+      summary: 'Requester replied before the SLA worker ran.',
+    })
+
+    expect(delayedReply.state).toBe('pending')
+    expect(delayedReply.lastActivityAt).toBe('2026-08-09T00:10:00.000Z')
+    expect(delayedReply.updatedAt).toBe('2026-08-09T00:30:00.000Z')
+  })
+
+  test('retains a bounded decline reason in decision history', () => {
+    const reason = '  This request belongs to the billing support workflow.  '
+
+    const declined = applyTriageAction(createEntry(), {
+      action: 'decline',
+      expectedRevision: 1,
+      reason,
+    }, { actorId: 'member-1', now: '2026-08-09T00:05:00.000Z' })
+
+    expect(declined.events.at(-1)).toEqual({
+      id: 'declined:2:2026-08-09T00:05:00.000Z',
+      type: 'declined',
+      actorId: 'member-1',
+      summary: reason.trim(),
+      createdAt: '2026-08-09T00:05:00.000Z',
+    })
+    const deniedProjection = projectTriageEntryForResponse({
+      ...declined,
+      permission: {
+        visibility: 'denied',
+        canReply: false,
+        guestVisible: false,
+        reasonCode: 'permission-lost',
+        checkedAt: '2026-08-09T00:06:00.000Z',
+      },
+    })
+    expect(deniedProjection.events).toEqual([])
+    expect(JSON.stringify(deniedProjection)).not.toContain(reason.trim())
+    expect(() => applyTriageAction(createEntry(), {
+      action: 'decline',
+      expectedRevision: 1,
+      reason: 'x'.repeat(2_001),
+    }, { actorId: 'member-1', now: '2026-08-09T00:05:00.000Z' })).toThrow(TriageError)
+  })
+
+  test('records distinct out-of-order activity without regressing timestamps or stale resurfacing', () => {
+    const snoozed = applyTriageAction(createEntry({
+      lastActivityAt: '2026-08-09T00:20:00.000Z',
+      updatedAt: '2026-08-09T00:20:00.000Z',
+    }), {
+      action: 'snooze',
+      expectedRevision: 1,
+      until: '2026-08-10T00:00:00.000Z',
+    }, { actorId: 'member-1', now: '2026-08-09T00:30:00.000Z' })
+
+    const staleActivity = recordTriageSourceActivity(snoozed, {
+      activityId: 'provider-event-distinct-but-old',
+      actorId: 'source:email',
+      occurredAt: '2026-08-09T00:25:00.000Z',
+      summary: 'A delayed provider delivery.',
+    })
+
+    expect(staleActivity).toMatchObject({
+      state: 'snoozed',
+      snoozedUntil: '2026-08-10T00:00:00.000Z',
+      lastActivityAt: '2026-08-09T00:25:00.000Z',
+      updatedAt: '2026-08-09T00:30:00.000Z',
+      revision: 3,
+    })
+    expect(staleActivity.events.at(-1)?.type).toBe('activity-received')
+
+    const simultaneousActivity = recordTriageSourceActivity(snoozed, {
+      activityId: 'provider-event-at-transition',
+      actorId: 'source:email',
+      occurredAt: '2026-08-09T00:30:00.000Z',
+      summary: 'A provider delivery timestamped with the snooze transition.',
+    })
+    expect(simultaneousActivity.state).toBe('snoozed')
+
+    const pending = createEntry({
+      lastActivityAt: '2026-08-09T00:20:00.000Z',
+      updatedAt: '2026-08-09T00:30:00.000Z',
+    })
+    const olderPendingActivity = recordTriageSourceActivity(pending, {
+      activityId: 'provider-event-pending-old',
+      actorId: 'source:email',
+      occurredAt: '2026-08-09T00:10:00.000Z',
+      summary: 'Another delayed provider delivery.',
+    })
+    expect(olderPendingActivity).toMatchObject({
+      state: 'pending',
+      lastActivityAt: '2026-08-09T00:20:00.000Z',
+      updatedAt: '2026-08-09T00:30:00.000Z',
+    })
   })
 
   test('keeps terminal entries closed while retaining later source activity', () => {

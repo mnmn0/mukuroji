@@ -16,9 +16,23 @@ import {
   type TriageSourceKind,
   type UpdateTriageConfigurationInput,
 } from '@mukuroji/contracts'
+import {
+  createMutationAuditContext,
+  type AuditActor,
+  type MutationAuditContext,
+} from '../../../audit'
 import { projectTriageEntryForResponse, TriageError } from '../../domain/triage-entry'
-import { createTriageInputFingerprint } from '../../triage'
-import type { TriageActor, TriageClient, TriageIdempotency } from '../../triage'
+import {
+  createTriageActionAuditIdempotencyKey,
+  createTriageBulkTargetIdempotencyKey,
+  createTriageInputFingerprint,
+} from '../../triage'
+import type {
+  TriageActor,
+  TriageAuditContextFactory,
+  TriageClient,
+  TriageIdempotency,
+} from '../../triage'
 
 /** Team authorization level requested by one triage route. */
 export type TriageTeamAccess = 'read' | 'write' | 'manage'
@@ -27,10 +41,18 @@ export type TriageTeamAccess = 'read' | 'write' | 'manage'
 export type TriagePrincipal = {
   /** Authenticated Workspace directory ID. */
   workspaceId: string
-  /** Stable authenticated user ID. */
+  /** Stable authenticated user or service principal identifier. */
   userId: string
+  /** Stable authenticated audit actor, including service and break-glass identity. */
+  auditActor: AuditActor
+  /** Correlation override binding break-glass mutations to their activation. */
+  auditCorrelationId?: string
+  /** Strongest live Team access resolved for the authenticated principal. */
+  teamAccess: TriageTeamAccess
   /** Project IDs visible to a Project-scoped principal, or undefined for full Team visibility. */
   visibleProjectIds?: readonly string[]
+  /** Project IDs writable by the principal, or undefined for full Team write access. */
+  writableProjectIds?: readonly string[]
 }
 
 /** Input supplied to the composable action orchestration boundary. */
@@ -49,6 +71,8 @@ export type TriageRouterActionRequest = {
   action: TriageActionInput
   /** Header-bound semantic replay protection. */
   idempotency: TriageIdempotency
+  /** Immutable request context captured before application orchestration. */
+  auditContext: MutationAuditContext
 }
 
 /** Input supplied to the composable bulk-action orchestration boundary. */
@@ -65,6 +89,8 @@ export type TriageRouterBulkActionRequest = {
   input: TriageBulkActionInput
   /** Caller-supplied bulk idempotency key. */
   idempotencyKey: string
+  /** Factory retaining the bulk request while binding each target receipt key. */
+  createAuditContext: TriageAuditContextFactory
 }
 
 /** Dependencies injected into the Team triage HTTP adapter. */
@@ -178,6 +204,9 @@ export function createTriageRouter(dependencies: TriageRouterDependencies) {
       )
       return context.json({
         ...page,
+        allowedBulkActions: principal.teamAccess === 'read'
+          ? []
+          : page.allowedBulkActions,
         entries: page.entries
           .filter((entry) => isTriageEntryVisible(principal, entry))
           .map((entry) => projectTriageEntryForPrincipal(principal, entry)),
@@ -228,6 +257,13 @@ export function createTriageRouter(dependencies: TriageRouterDependencies) {
         actor: { id: principal.userId },
         action,
         idempotency,
+        auditContext: createTriageApiAuditContext(
+          context,
+          principal,
+          entryId,
+          action,
+          idempotency,
+        ),
       }
       const receipt = dependencies.applyAction
         ? await dependencies.applyAction(request)
@@ -238,6 +274,7 @@ export function createTriageRouter(dependencies: TriageRouterDependencies) {
             request.actor,
             request.action,
             request.idempotency,
+            request.auditContext,
           )
       return context.json({
         ...receipt,
@@ -264,6 +301,47 @@ export function createTriageRouter(dependencies: TriageRouterDependencies) {
       }
       requireVisibleBulkProject(principal, input.operation)
       await dependencies.validateBulkAction?.(context, teamId, input)
+      const preparedAuditContexts = new Map(input.targets.map((target) => {
+        const targetIdempotency = {
+          key: createTriageBulkTargetIdempotencyKey(idempotencyKey, target.entryId),
+          fingerprint: createTriageInputFingerprint({
+            target,
+            operation: input.operation,
+          }),
+        }
+        return [
+          target.entryId,
+          {
+            context: createTriageApiAuditContext(
+              context,
+              principal,
+              target.entryId,
+              input,
+              targetIdempotency,
+            ),
+            idempotency: targetIdempotency,
+          },
+        ] satisfies readonly [string, {
+          context: MutationAuditContext
+          idempotency: TriageIdempotency
+        }]
+      }))
+      /** Returns the preflighted context only for its exact target receipt identity. */
+      const createAuditContext: TriageAuditContextFactory = (entryId, idempotency) => {
+        const prepared = preparedAuditContexts.get(entryId)
+        if (
+          !prepared ||
+          prepared.idempotency.key !== idempotency.key ||
+          prepared.idempotency.fingerprint !== idempotency.fingerprint
+        ) {
+          throw new TriageError(
+            500,
+            'TriageAuditContextMismatch',
+            'The preflighted Triage audit context does not match the target receipt.',
+          )
+        }
+        return prepared.context
+      }
       const result = dependencies.applyBulkAction
         ? await dependencies.applyBulkAction({
             context,
@@ -272,6 +350,7 @@ export function createTriageRouter(dependencies: TriageRouterDependencies) {
             actor: { id: principal.userId },
             input,
             idempotencyKey,
+            createAuditContext,
           })
         : await dependencies.getTriage().applyBulkAction(
             principal.workspaceId,
@@ -279,6 +358,7 @@ export function createTriageRouter(dependencies: TriageRouterDependencies) {
             { id: principal.userId },
             input,
             idempotencyKey,
+            createAuditContext,
           )
       return context.json({
         results: result.results.map((item) => item.entry
@@ -418,7 +498,9 @@ function projectTriageEntryForPrincipal(
   entry: TriageEntry,
 ): TriageEntry {
   const projected = projectTriageEntryForResponse(entry)
-  if (principal.visibleProjectIds === undefined) return projected
+  if (principal.visibleProjectIds === undefined) {
+    return projectTriageCapabilitiesForPrincipal(principal, projected)
+  }
   const visibleProjectIds = new Set(principal.visibleProjectIds)
   const candidates = projected.routing.candidates.filter((candidate) =>
     candidate.projectId !== undefined && visibleProjectIds.has(candidate.projectId)
@@ -438,7 +520,39 @@ function projectTriageEntryForPrincipal(
   ) {
     delete scoped.canonicalWorkItem
   }
-  return scoped
+  return projectTriageCapabilitiesForPrincipal(principal, scoped)
+}
+
+/** Applies the principal's live Team and Project write access to response capabilities.
+ *
+ * @param principal The authenticated Team or Project-scoped principal.
+ * @param entry The permission- and Project-safe response entry.
+ * @returns The entry with truthful mutation capabilities for the current principal.
+ */
+function projectTriageCapabilitiesForPrincipal(
+  principal: TriagePrincipal,
+  entry: TriageEntry,
+): TriageEntry {
+  const writable = principal.teamAccess !== 'read' &&
+    (
+      principal.writableProjectIds === undefined ||
+      entry.projectId !== undefined && principal.writableProjectIds.includes(entry.projectId)
+    )
+  if (writable) return entry
+  return {
+    ...entry,
+    capabilities: {
+      canAssign: false,
+      canAcceptCreate: false,
+      canAcceptLink: false,
+      canMarkDuplicate: false,
+      canDecline: false,
+      canSnooze: false,
+      canRequestInformation: false,
+      canReply: false,
+      canViewInternalContext: entry.capabilities.canViewInternalContext,
+    },
+  }
 }
 
 /** Fails closed when an entry is outside the authenticated Project scope.
@@ -825,6 +939,53 @@ function readSlaPolicy(value: unknown): TriageSlaPolicy {
             'Escalation owner user ID',
           ),
         }),
+  }
+}
+
+/** Captures the real HTTP request as immutable assignment-audit context.
+ *
+ * @param context Matched Hono request, including request and correlation headers.
+ * @param principal Authenticated Workspace principal resolved for the Team route.
+ * @param entryId Stable target Entry used to namespace the Workspace-scoped audit event ID.
+ * @param body Strictly parsed semantic body for the original single or bulk request.
+ * @param idempotency Target-specific replay protection used by the transaction receipt.
+ * @returns A normalized audit context safe to persist with the assignment transaction.
+ */
+function createTriageApiAuditContext(
+  context: Context,
+  principal: TriagePrincipal,
+  entryId: string,
+  body: unknown,
+  idempotency: TriageIdempotency,
+): MutationAuditContext {
+  try {
+    const path = new URL(context.req.url).pathname
+    const correlationId = principal.auditCorrelationId ??
+      context.req.header('X-Correlation-Id')?.trim()
+    return createMutationAuditContext({
+      workspaceId: principal.workspaceId,
+      actor: principal.auditActor,
+      idempotencyKey: createTriageActionAuditIdempotencyKey(entryId, idempotency),
+      ...(correlationId ? { correlationId } : {}),
+      request: {
+        method: context.req.method,
+        path,
+        body,
+      },
+      source: {
+        kind: 'api',
+        requestId: context.req.header('X-Request-Id'),
+        method: context.req.method,
+        route: path,
+        ipAddress: context.req.header('X-Forwarded-For')?.split(',')[0]?.trim(),
+        userAgent: context.req.header('User-Agent'),
+      },
+    })
+  } catch (error) {
+    if (error instanceof TypeError || error instanceof RangeError) {
+      throw invalidInput(error.message)
+    }
+    throw error
   }
 }
 

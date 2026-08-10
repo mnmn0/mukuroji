@@ -30,7 +30,12 @@ import {
   type TriageWorkItemSourcePage,
   type UpdateTriageConfigurationInput,
 } from '@mukuroji/contracts'
-import { getConfiguredDynamoDbEndpoint } from '../../../audit'
+import {
+  getConfiguredAuditRetentionDays,
+  getConfiguredAuditTableName,
+  getConfiguredDynamoDbEndpoint,
+  type MutationAuditContext,
+} from '../../../audit'
 import {
   createTriageCapabilities,
   evaluateTriageAdmission,
@@ -45,6 +50,7 @@ import {
 import type {
   ResolveTriageWorkItemAction,
   TriageActor,
+  TriageAuditContextFactory,
   TriageClient,
   TriageIdempotency,
 } from '../../triage'
@@ -64,6 +70,7 @@ import {
   type TriageTransactionContribution,
   type TriageTransactionItems,
 } from './triage-transactions'
+import type { TriageAuditOutboxConfiguration } from './triage-audit-events'
 
 /** Default Team activity GSI name. */
 export const TRIAGE_TEAM_ACTIVITY_INDEX_NAME = 'triage-team-activity-index'
@@ -82,6 +89,10 @@ export type DynamoDbTriageClientOptions = {
   teamIndexName?: string
   /** Optional owner activity GSI name. */
   ownerIndexName?: string
+  /** Immutable audit event outbox table name. */
+  auditTableName?: string
+  /** Number of days Triage audit events remain queryable. */
+  auditRetentionDays?: number
   /** Caller-owned DocumentClient. */
   documentClient?: DynamoDBDocumentClient
   /** Low-level client used when no DocumentClient is supplied. */
@@ -104,22 +115,28 @@ export type DynamoDbTriageClientOptions = {
 export type TriageAdmissionTransactionContribution = {
   /** Entry after current Team routing and service configuration is applied. */
   entry: TriageEntry
-  /** Optional conditional configuration writes owned by Triage. */
+  /** Configuration guard or reservation followed by validated live-reference conditions. */
   transactItems: TriageTransactionItems
-  /** Relative item index whose conditional race may be retried with a fresh configuration. */
-  retryableConflictItemIndex?: number
+  /** Relative item indexes whose conditional races require fresh live validation. */
+  retryableConflictItemIndexes?: number[]
+}
+
+/** Live-reference guards contributed by one admission validation snapshot. */
+export type TriageAdmissionValidationContribution = {
+  /** Directory and membership conditions joined to the source-owned transaction. */
+  transactItems: TriageTransactionItems
 }
 
 /** Validates the final entry references derived from one current configuration snapshot.
  *
  * @param entry Entry after routing, ownership, SLA, and retention evaluation.
  * @param configuration Configuration snapshot used for that evaluation.
- * @returns Completion after every live reference has been validated.
+ * @returns Transaction guards binding every validated live reference to commit time.
  */
 export type TriageAdmissionValidator = (
   entry: TriageEntry,
   configuration: TriageConfiguration,
-) => Promise<void>
+) => Promise<TriageAdmissionValidationContribution>
 
 /** A source claim returned after a uniqueness conflict. */
 type StoredTriageSourceClaim = {
@@ -184,6 +201,9 @@ export class DynamoDbTriageClient implements TriageClient {
   /** Optional owner activity GSI name. */
   private readonly ownerIndexName: string
 
+  /** Immutable assignment audit outbox configuration. */
+  private readonly audit: TriageAuditOutboxConfiguration
+
   /** Request Intake DocumentClient. */
   private readonly documentClient: DynamoDBDocumentClient
 
@@ -246,6 +266,18 @@ export class DynamoDbTriageClient implements TriageClient {
       'Triage owner index name',
       255,
     )
+    this.audit = {
+      tableName: requireText(
+        options.auditTableName ?? getConfiguredAuditTableName() ?? 'mukuroji-audit-events',
+        'Audit event table name',
+        1_000,
+      ),
+      retentionDays: requirePositiveInteger(
+        options.auditRetentionDays ?? getConfiguredAuditRetentionDays(),
+        'Audit retention days',
+        36_500,
+      ),
+    }
     this.wakeShardCount = requirePositiveInteger(
       options.wakeShardCount ?? Number(readEnvironment('TRIAGE_WAKE_SHARD_COUNT') ??
         DEFAULT_TRIAGE_WAKE_SHARD_COUNT),
@@ -280,7 +312,11 @@ export class DynamoDbTriageClient implements TriageClient {
     requireIdentifier(teamId, 'Team ID')
     const limit = requirePositiveInteger(input.limit ?? 50, 'Triage queue limit', 100)
     const owner = input.ownerUserId === 'unowned' ? 'UNOWNED' : input.ownerUserId
-    const preferOwnerIndex = owner !== undefined && this.ownerIndexAvailable !== false
+    const cursorIndexKind = input.cursor !== undefined
+      ? this.decodeQueueCursorIndexKind(input.cursor, workspaceId, teamId, input)
+      : undefined
+    const indexKind = cursorIndexKind ??
+      (owner !== undefined && this.ownerIndexAvailable !== false ? 'owner' : 'team')
     const configuration = await this.getConfiguration(workspaceId, teamId)
 
     try {
@@ -289,26 +325,29 @@ export class DynamoDbTriageClient implements TriageClient {
         teamId,
         input,
         limit,
-        preferOwnerIndex ? 'owner' : 'team',
+        indexKind,
         owner,
       )
-      if (preferOwnerIndex) this.ownerIndexAvailable = true
+      if (indexKind === 'owner') this.ownerIndexAvailable = true
       return {
         allowedBulkActions: [...configuration.allowedBulkActions],
         entries: result.entries,
         ...(result.lastEvaluatedKey
           ? {
-              nextCursor: this.encodeCursor(createQueueCursorScope(
-                workspaceId,
-                teamId,
-                input,
-                preferOwnerIndex ? 'owner' : 'team',
-              ), preferOwnerIndex ? this.ownerIndexName : this.teamIndexName, result.lastEvaluatedKey),
+              nextCursor: this.encodeCursor(
+                createQueueCursorScope(workspaceId, teamId, input, indexKind),
+                indexKind === 'owner' ? this.ownerIndexName : this.teamIndexName,
+                result.lastEvaluatedKey,
+              ),
             }
           : {}),
       }
     } catch (error) {
-      if (!preferOwnerIndex || input.cursor || !isUnavailableIndexError(error)) throw error
+      if (
+        indexKind !== 'owner' ||
+        cursorIndexKind !== undefined ||
+        !isUnavailableIndexError(error)
+      ) throw error
       this.ownerIndexAvailable = false
       const result = await this.queryQueue(workspaceId, teamId, input, limit, 'team', owner)
       return {
@@ -407,6 +446,7 @@ export class DynamoDbTriageClient implements TriageClient {
    * @param actor The authenticated actor.
    * @param action The validated revision-fenced transition.
    * @param idempotency Replay protection bound to the normalized action.
+   * @param auditContext Immutable caller context for an assignment audit event.
    * @returns The committed or replayed permission-safe receipt.
    */
   async applyAction(
@@ -416,11 +456,19 @@ export class DynamoDbTriageClient implements TriageClient {
     actor: TriageActor,
     action: TriageActionInput,
     idempotency: TriageIdempotency,
+    auditContext: MutationAuditContext,
   ): Promise<TriageMutationReceipt> {
     const replay = await this.readReceipt(workspaceId, entryId, 'action', idempotency)
     if (replay) return replay
     const entry = await this.getEntryForMutation(workspaceId, teamId, entryId)
-    const contribution = await this.createActionContribution(workspaceId, entry, actor, action, idempotency)
+    const contribution = await this.createActionContribution(
+      workspaceId,
+      entry,
+      actor,
+      action,
+      idempotency,
+      auditContext,
+    )
     if (contribution.transactItems.length > 100) {
       throw new TriageError(409, 'TriageTransactionTooLarge', 'The triage action is too large.')
     }
@@ -446,6 +494,7 @@ export class DynamoDbTriageClient implements TriageClient {
    * @param actor The authenticated actor.
    * @param input The targets, revisions, and allowed operation.
    * @param idempotencyKey The caller-selected key for the whole request.
+   * @param createAuditContext Factory binding the immutable bulk request to each target key.
    * @returns One independently classified result for each target.
    */
   async applyBulkAction(
@@ -454,6 +503,7 @@ export class DynamoDbTriageClient implements TriageClient {
     actor: TriageActor,
     input: TriageBulkActionInput,
     idempotencyKey: string,
+    createAuditContext: TriageAuditContextFactory,
   ): Promise<TriageBulkActionResult> {
     if (input.targets.length < 1 || input.targets.length > TRIAGE_BULK_ACTION_LIMIT) {
       throw new TriageError(400, 'InvalidTriageBulkAction', 'The bulk target count is invalid.')
@@ -468,12 +518,16 @@ export class DynamoDbTriageClient implements TriageClient {
     }
     const bulkIdempotencyKey = requireText(idempotencyKey, 'Bulk idempotency key', 160)
     const results: TriageBulkActionResult['results'] = []
-    for (const target of input.targets) {
+    const preparedTargets = input.targets.map((target) => {
       const action = createBulkAction(target, input.operation)
       const idempotency = {
         key: createTriageBulkTargetIdempotencyKey(bulkIdempotencyKey, target.entryId),
         fingerprint: createTriageInputFingerprint({ target, operation: input.operation }),
       }
+      const auditContext = createAuditContext(target.entryId, idempotency)
+      return { action, auditContext, idempotency, target }
+    })
+    for (const { action, auditContext, idempotency, target } of preparedTargets) {
       try {
         const receipt = await this.applyAction(
           workspaceId,
@@ -482,6 +536,7 @@ export class DynamoDbTriageClient implements TriageClient {
           actor,
           action,
           idempotency,
+          auditContext,
         )
         results.push({ entryId: target.entryId, status: 'succeeded', entry: receipt.entry })
       } catch (error) {
@@ -518,7 +573,7 @@ export class DynamoDbTriageClient implements TriageClient {
   /** Applies current Team configuration before a source transaction creates an entry.
    *
    * @param entry The normalized source entry owned by the caller's transaction.
-   * @returns The configured entry and optional conditional rotation cursor write.
+   * @returns The configured entry, configuration fence, and validated live-reference guards.
    */
   async prepareEntryAdmission(
     entry: TriageEntry,
@@ -536,48 +591,55 @@ export class DynamoDbTriageClient implements TriageClient {
     const configuration = storedConfiguration ??
       createDefaultConfiguration(entry.workspaceId, entry.teamId, entry.createdAt)
     const evaluation = evaluateTriageAdmission(configuration, entry, entry.createdAt)
-    await this.validateAdmission?.(evaluation.entry, configuration)
+    const validation = await this.validateAdmission?.(evaluation.entry, configuration) ?? {
+      transactItems: [],
+    }
     if (!evaluation.rotationReservation) {
-      return {
-        entry: evaluation.entry,
-        transactItems: [createConfigurationSnapshotCondition(
+      const transactItems = [
+        createConfigurationSnapshotCondition(
           this.tableName,
           entry.workspaceId,
           entry.teamId,
           storedConfiguration,
-        )],
-        retryableConflictItemIndex: 0,
+        ),
+        ...validation.transactItems,
+      ]
+      return {
+        entry: evaluation.entry,
+        transactItems,
+        retryableConflictItemIndexes: transactItems.map((_, index) => index),
       }
     }
     const reservation = evaluation.rotationReservation
+    const transactItems: TriageTransactionItems = [{
+      Put: {
+        TableName: this.tableName,
+        Item: {
+          entryType: 'triage-configuration',
+          ...createConfigurationKey(entry.workspaceId, entry.teamId),
+          configuration: reservation.configuration,
+          revision: reservation.configuration.revision,
+          updatedBy: 'system:triage-admission',
+        },
+        ConditionExpression:
+          '#revision = :expectedRevision AND ' +
+          `#configuration.#rotations[${reservation.rotationIndex}].#nextIndex = :expectedNextIndex`,
+        ExpressionAttributeNames: {
+          '#configuration': 'configuration',
+          '#nextIndex': 'nextIndex',
+          '#revision': 'revision',
+          '#rotations': 'rotations',
+        },
+        ExpressionAttributeValues: {
+          ':expectedRevision': reservation.expectedRevision,
+          ':expectedNextIndex': reservation.expectedNextIndex,
+        },
+      },
+    }, ...validation.transactItems]
     return {
       entry: evaluation.entry,
-      transactItems: [{
-        Put: {
-          TableName: this.tableName,
-          Item: {
-            entryType: 'triage-configuration',
-            ...createConfigurationKey(entry.workspaceId, entry.teamId),
-            configuration: reservation.configuration,
-            revision: reservation.configuration.revision,
-            updatedBy: 'system:triage-admission',
-          },
-          ConditionExpression:
-            '#revision = :expectedRevision AND ' +
-            `#configuration.#rotations[${reservation.rotationIndex}].#nextIndex = :expectedNextIndex`,
-          ExpressionAttributeNames: {
-            '#configuration': 'configuration',
-            '#nextIndex': 'nextIndex',
-            '#revision': 'revision',
-            '#rotations': 'rotations',
-          },
-          ExpressionAttributeValues: {
-            ':expectedRevision': reservation.expectedRevision,
-            ':expectedNextIndex': reservation.expectedNextIndex,
-          },
-        },
-      }],
-      retryableConflictItemIndex: 0,
+      transactItems,
+      retryableConflictItemIndexes: transactItems.map((_, index) => index),
     }
   }
 
@@ -784,17 +846,17 @@ export class DynamoDbTriageClient implements TriageClient {
         idempotency,
         expiresAt: addDays(now, 90),
       }))
-      const retryableConflictItemIndex = admission.retryableConflictItemIndex === undefined
-        ? undefined
-        : transactItems.length + admission.retryableConflictItemIndex
+      const retryableConflictItemIndexes = admission.retryableConflictItemIndexes?.map(
+        (itemIndex) => transactItems.length + itemIndex,
+      ) ?? []
       transactItems.push(...admission.transactItems)
       try {
         await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactItems }))
         return { entry: projectTriageEntryForResponse(entry), replayed: false }
       } catch (error) {
         if (
-          retryableConflictItemIndex !== undefined &&
-          isOnlyConditionalConflictAt(error, retryableConflictItemIndex)
+          retryableConflictItemIndexes.length > 0 &&
+          isOnlyConditionalConflictAtAny(error, retryableConflictItemIndexes)
         ) {
           if (attempt < 2) continue
           throw new TriageError(
@@ -903,13 +965,23 @@ export class DynamoDbTriageClient implements TriageClient {
     }
   }
 
-  /** Builds an action contribution after optional Work Item resolution. */
+  /** Builds an action contribution after optional Work Item resolution.
+   *
+   * @param workspaceId Workspace owning the action target.
+   * @param entry Strongly read canonical Triage Entry.
+   * @param actor Authenticated user or service principal.
+   * @param action Validated state transition input.
+   * @param idempotency Entry-scoped replay identity and fingerprint.
+   * @param auditContext Immutable request provenance for assignment outbox events.
+   * @returns An unexecuted revision-fenced transaction contribution.
+   */
   private async createActionContribution(
     workspaceId: string,
     entry: TriageEntry,
     actor: TriageActor,
     action: TriageActionInput,
     idempotency: TriageIdempotency,
+    auditContext: MutationAuditContext,
   ): Promise<TriageTransactionContribution> {
     const now = this.now().toISOString()
     if (action.action === 'accept' || action.action === 'duplicate') {
@@ -944,6 +1016,8 @@ export class DynamoDbTriageClient implements TriageClient {
       actorId: actor.id,
       now,
       idempotency,
+      audit: this.audit,
+      auditContext,
       wakeShardCount: this.wakeShardCount,
     })
   }
@@ -1105,8 +1179,51 @@ export class DynamoDbTriageClient implements TriageClient {
     return `${payload}.${signature}`
   }
 
-  /** Decodes and authenticates a scope-bound cursor. */
+  /** Resolves the queue index selected by a previously issued cursor.
+   *
+   * @param cursor Opaque signed queue cursor.
+   * @param workspaceId Workspace expected to own the queue.
+   * @param teamId Team expected to own the queue.
+   * @param input Current queue filters that must match the original page.
+   * @returns The authenticated index kind that must continue the pagination chain.
+   */
+  private decodeQueueCursorIndexKind(
+    cursor: string,
+    workspaceId: string,
+    teamId: string,
+    input: TriageEntryListInput,
+  ): 'team' | 'owner' {
+    const value = this.decodeCursorPayload(cursor)
+    if (
+      value.index === this.teamIndexName &&
+      value.scope === createQueueCursorScope(workspaceId, teamId, input, 'team')
+    ) return 'team'
+    if (
+      value.index === this.ownerIndexName &&
+      value.scope === createQueueCursorScope(workspaceId, teamId, input, 'owner')
+    ) return 'owner'
+    throw invalidCursor()
+  }
+
+  /** Decodes and authenticates a cursor against one expected scope and index.
+   *
+   * @param cursor Opaque signed cursor.
+   * @param scope Expected semantic pagination scope.
+   * @param index Expected DynamoDB index identity.
+   * @returns The authenticated cursor payload.
+   */
   private decodeCursor(cursor: string, scope: string, index: string): TriageCursorPayload {
+    const value = this.decodeCursorPayload(cursor)
+    if (value.scope !== scope || value.index !== index) throw invalidCursor()
+    return value
+  }
+
+  /** Decodes and authenticates the shape of one signed cursor payload.
+   *
+   * @param cursor Opaque signed cursor.
+   * @returns The authenticated payload before its semantic scope is selected.
+   */
+  private decodeCursorPayload(cursor: string): TriageCursorPayload {
     const [payload, signature, extra] = cursor.split('.')
     if (!payload || !signature || extra !== undefined) throw invalidCursor()
     const expected = createHmac('sha256', this.cursorSecret).update(payload).digest()
@@ -1129,7 +1246,12 @@ export class DynamoDbTriageClient implements TriageClient {
         cause: error,
       })
     }
-    if (!isRecord(value) || value.scope !== scope || value.index !== index || !isRecord(value.key)) {
+    if (
+      !isRecord(value) ||
+      typeof value.scope !== 'string' ||
+      typeof value.index !== 'string' ||
+      !isRecord(value.key)
+    ) {
       throw invalidCursor()
     }
     return { scope: value.scope, index: value.index, key: value.key }
@@ -1401,6 +1523,13 @@ function validateConfigurationInput(
   requirePositiveInteger(input.retentionDays, 'Retention days', 3_650)
   const ruleIds = new Set<string>()
   const rotationIds = new Set(input.rotations.map((rotation) => rotation.id))
+  if (rotationIds.size !== input.rotations.length) {
+    throw new TriageError(400, 'InvalidTriageConfiguration', 'Rotation IDs must be unique.')
+  }
+  const slaPolicyIds = new Set(input.slaPolicies.map((policy) => policy.id))
+  if (slaPolicyIds.size !== input.slaPolicies.length) {
+    throw new TriageError(400, 'InvalidTriageConfiguration', 'SLA policy IDs must be unique.')
+  }
   for (const rule of input.rules) {
     if (ruleIds.has(rule.id)) {
       throw new TriageError(400, 'InvalidTriageConfiguration', 'Routing rule IDs must be unique.')
@@ -1838,18 +1967,37 @@ function isConditionalConflict(error: unknown): boolean {
   return hasConditionalFailure
 }
 
-/** Classifies a transaction cancellation caused only by one expected CAS item. */
-function isOnlyConditionalConflictAt(error: unknown, itemIndex: number): boolean {
-  if (!Number.isSafeInteger(itemIndex) || itemIndex < 0 ||
+/** Classifies a transaction cancellation caused only by expected admission guards.
+ *
+ * @param error Untrusted DynamoDB transaction failure.
+ * @param itemIndexes Transaction positions owned by the admission snapshot.
+ * @returns Whether at least one expected guard failed and every other item was unaffected.
+ */
+function isOnlyConditionalConflictAtAny(
+  error: unknown,
+  itemIndexes: readonly number[],
+): boolean {
+  const expectedIndexes = new Set(itemIndexes)
+  if (expectedIndexes.size < 1 || [...expectedIndexes].some((itemIndex) =>
+    !Number.isSafeInteger(itemIndex) || itemIndex < 0
+  ) ||
     !(error instanceof Error) || error.name !== 'TransactionCanceledException') {
     return false
   }
   const cancellationReasons = Reflect.get(error, 'CancellationReasons')
-  if (!Array.isArray(cancellationReasons) || itemIndex >= cancellationReasons.length) return false
+  if (!Array.isArray(cancellationReasons) ||
+    [...expectedIndexes].some((itemIndex) => itemIndex >= cancellationReasons.length)) {
+    return false
+  }
+  let hasExpectedConditionalFailure = false
   return cancellationReasons.every((reason, index) => {
     const code = isRecord(reason) ? reason.Code : undefined
-    return index === itemIndex ? code === 'ConditionalCheckFailed' : code === 'None'
-  })
+    if (code === 'ConditionalCheckFailed' && expectedIndexes.has(index)) {
+      hasExpectedConditionalFailure = true
+      return true
+    }
+    return code === 'None'
+  }) && hasExpectedConditionalFailure
 }
 
 /** Classifies an optional index that is absent or still backfilling. */

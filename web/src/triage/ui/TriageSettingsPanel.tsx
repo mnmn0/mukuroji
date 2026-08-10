@@ -10,6 +10,10 @@ import type {
   TriageSourceKind,
   UpdateTriageConfigurationInput,
 } from '../api'
+import {
+  createUniqueTriageConfigurationId,
+  replaceTriageRotationMembers,
+} from '../model/configurationDraft'
 
 const bulkActionOptions = [
   { action: 'assign', labelKey: 'triage.bulk.assign' },
@@ -174,7 +178,14 @@ function TriageSettingsEditor({
         action={canManage ? (
           <button className="workbench-button-secondary min-h-10 px-4" onClick={() => setRules((current) => [
             ...current,
-            createEmptyRule(configuration.teamId, current.length),
+            createEmptyRule(
+              configuration.teamId,
+              current.length,
+              createUniqueTriageConfigurationId(
+                'rule',
+                current.map((rule) => rule.id),
+              ),
+            ),
           ])} type="button">{t('triage.settings.addRule')}</button>
         ) : undefined}
         description={t('triage.settings.rulesDescription')}
@@ -278,7 +289,15 @@ function TriageSettingsEditor({
         action={canManage ? (
           <button className="workbench-button-secondary min-h-10 px-4" onClick={() => setRotations((current) => [
             ...current,
-            { id: `rotation-${current.length + 1}`, memberUserIds: [], name: '', nextIndex: 0 },
+            {
+              id: createUniqueTriageConfigurationId(
+                'rotation',
+                current.map((rotation) => rotation.id),
+              ),
+              memberUserIds: [],
+              name: '',
+              nextIndex: 0,
+            },
           ])} type="button">{t('triage.settings.addRotation')}</button>
         ) : undefined}
         description={t('triage.settings.rotationsDescription')}
@@ -297,7 +316,11 @@ function TriageSettingsEditor({
                 disabled={!canManage}
                 label={t('triage.settings.rotationMembers')}
                 value={rotation.memberUserIds.join(', ')}
-                onChange={(value) => setRotations(updateAt(rotations, index, { ...rotation, memberUserIds: parseList(value) }))}
+                onChange={(value) => setRotations(updateAt(
+                  rotations,
+                  index,
+                  replaceTriageRotationMembers(rotation, parseList(value)),
+                ))}
               />
               {canManage ? (
                 <button className="min-h-10 self-end px-3 text-sm font-semibold text-red-700" onClick={() => setRotations(removeAt(rotations, index))} type="button">
@@ -313,7 +336,15 @@ function TriageSettingsEditor({
         action={canManage ? (
           <button className="workbench-button-secondary min-h-10 px-4" onClick={() => setSlaPolicies((current) => [
             ...current,
-            { id: `sla-${current.length + 1}`, name: '', responseMinutes: 240, sourceKinds: [] },
+            {
+              id: createUniqueTriageConfigurationId(
+                'sla',
+                current.map((policy) => policy.id),
+              ),
+              name: '',
+              responseMinutes: 240,
+              sourceKinds: [],
+            },
           ])} type="button">{t('triage.settings.addSla')}</button>
         ) : undefined}
         description={t('triage.settings.slaDescription')}
@@ -474,10 +505,14 @@ function SettingsLoading({ label }: { label: string }) {
 }
 
 /** Creates an editable blank routing rule scoped to the current Team. */
-function createEmptyRule(teamId: string, order: number): TriageRoutingRule {
+function createEmptyRule(
+  teamId: string,
+  order: number,
+  id: string,
+): TriageRoutingRule {
   return {
     enabled: true,
-    id: `rule-${order + 1}`,
+    id,
     keywords: [],
     name: '',
     order,

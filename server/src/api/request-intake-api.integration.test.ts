@@ -646,14 +646,17 @@ test.each([
         Authorization: 'Bearer test-token',
         'Content-Type': 'application/json',
         'Idempotency-Key': `legacy-${body.action}`,
+        'X-Correlation-Id': `legacy-${body.action}-correlation`,
       },
       body: JSON.stringify(body),
     },
   )
 
+  const responseCorrelationId = response.headers.get('X-Correlation-Id')
   expect(response.status).toBe(200)
+  expect(responseCorrelationId).toBeString()
   expect(receivedAction).toEqual(body)
-  expect(receivedTransactionItems).toHaveLength(3)
+  expect(receivedTransactionItems).toHaveLength(body.action === 'assign' ? 4 : 3)
   expect(receivedTransactionItems?.[0]?.Update).toMatchObject({
     ConditionExpression: '#revision = :expectedRevision AND teamId = :teamId',
     ExpressionAttributeValues: {
@@ -671,6 +674,26 @@ test.each([
     entryId: entry.id,
     resultRevision: 2,
   })
+  if (body.action === 'assign') {
+    expect(receivedTransactionItems?.[3]?.Put?.Item).toMatchObject({
+      correlationId: responseCorrelationId,
+      eventType: 'triage.assigned',
+      entity: { type: 'triage-entry', id: entry.id },
+      metadata: {
+        teamId: entry.teamId,
+        triageEntryId: entry.id,
+        notificationCandidates: [{
+          memberKey: body.assigneeUserId,
+          reason: 'triage-assignment',
+        }],
+      },
+      outboxStatus: 'pending',
+      sourceDetails: {
+        method: 'POST',
+        route: `/api/request-submissions/${submission.id}/actions`,
+      },
+    })
+  }
 })
 
 test('commits a legacy Request duplicate and canonical Triage source association together', async () => {

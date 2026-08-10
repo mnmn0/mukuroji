@@ -735,6 +735,7 @@ export function buildApiRuntime(
         actions: ['dynamodb:ConditionCheckItem'],
         resources: [
           workItemsTable.tableArn,
+          requestIntakeTable.tableArn,
           projectDirectoryTable.tableArn,
           workspaceAccessTable.tableArn,
           planningTable.tableArn,

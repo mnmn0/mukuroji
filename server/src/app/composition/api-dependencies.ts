@@ -100,7 +100,11 @@ import {
   type WorkItemImportQueue,
   type WorkItemImportSourceStore,
 } from '../../modules/work-items'
-import { DynamoDbProjectDirectoryClient } from '../../modules/directory'
+import {
+  DynamoDbProjectDirectoryClient,
+  ProjectDataError,
+  normalizeProjectMemberKey,
+} from '../../modules/directory'
 import {
   createProductionTenantExportDownloadClient,
   type TenantEntitlementEnforcement,
@@ -591,43 +595,61 @@ function createTriageClient(
  * @returns A validator invoked after each current configuration evaluation.
  */
 export function createTriageAdmissionValidator(
-  projectDirectory: Pick<DynamoDbProjectDirectoryClient, 'getProjectDirectory'>,
-  workspaceAccess: Pick<DynamoDbWorkspaceAccessClient, 'getActiveMember'>,
+  projectDirectory: Pick<DynamoDbProjectDirectoryClient, 'createActiveReferenceConditionChecks'>,
+  workspaceAccess: Pick<DynamoDbWorkspaceAccessClient, 'createActiveMemberConditionCheck'>,
 ): TriageAdmissionValidator {
   return async (entry, configuration) => {
-    const directory = await projectDirectory.getProjectDirectory(entry.workspaceId, 'en', true)
-    const team = directory.teams.find((candidate) => candidate.id === entry.teamId)
-    if (!team) {
-      throw new TriageError(
-        409,
-        'TriageAdmissionTeamUnavailable',
-        'The target Triage Team is not active.',
+    let directoryConditionChecks
+    try {
+      directoryConditionChecks = await projectDirectory.createActiveReferenceConditionChecks(
+        entry.workspaceId,
+        entry.teamId,
+        entry.projectId,
       )
-    }
-    if (entry.projectId && !team.projects.some((project) => project.id === entry.projectId)) {
-      throw new TriageError(
-        409,
-        'TriageAdmissionProjectUnavailable',
-        'The configured Triage Project is not active in the target Team.',
-      )
+    } catch (error) {
+      if (error instanceof ProjectDataError && error.code === 'TeamNotFound') {
+        throw new TriageError(
+          409,
+          'TriageAdmissionTeamUnavailable',
+          'The target Triage Team is not active.',
+          { cause: error },
+        )
+      }
+      if (error instanceof ProjectDataError && error.code === 'ProjectNotFound') {
+        throw new TriageError(
+          409,
+          'TriageAdmissionProjectUnavailable',
+          'The configured Triage Project is not active in the target Team.',
+          { cause: error },
+        )
+      }
+      throw error
     }
     const memberUserIds = new Set<string>()
-    if (entry.ownerUserId) memberUserIds.add(entry.ownerUserId)
+    if (entry.ownerUserId) memberUserIds.add(normalizeProjectMemberKey(entry.ownerUserId))
     const slaPolicy = entry.sla
       ? configuration.slaPolicies.find((candidate) => candidate.id === entry.sla?.policyId)
       : undefined
     if (slaPolicy?.escalationOwnerUserId) {
-      memberUserIds.add(slaPolicy.escalationOwnerUserId)
+      memberUserIds.add(normalizeProjectMemberKey(slaPolicy.escalationOwnerUserId))
     }
-    const activeMembers = await Promise.all([...memberUserIds].map(async (memberUserId) =>
-      await workspaceAccess.getActiveMember(entry.workspaceId, memberUserId)
+    const memberConditionChecks = await Promise.all([...memberUserIds].map(async (memberUserId) =>
+      await workspaceAccess.createActiveMemberConditionCheck(entry.workspaceId, memberUserId)
     ))
-    if (activeMembers.some((member) => member === undefined)) {
+    if (memberConditionChecks.some((conditionCheck) => conditionCheck === undefined)) {
       throw new TriageError(
         409,
         'TriageAdmissionOwnerUnavailable',
         'A configured Triage owner is not an active Workspace member.',
       )
+    }
+    return {
+      transactItems: [
+        ...directoryConditionChecks,
+        ...memberConditionChecks.flatMap((conditionCheck) =>
+          conditionCheck === undefined ? [] : [conditionCheck]
+        ),
+      ],
     }
   }
 }

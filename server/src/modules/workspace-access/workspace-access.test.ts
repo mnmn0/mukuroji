@@ -192,6 +192,52 @@ function createInvitationLifecycleClient(
   )
 }
 
+test('builds an active member admission guard bound to the persisted version', async () => {
+  const inputs: Array<Record<string, unknown>> = []
+  const member = createWorkspaceMember('owner@example.com', 'member', 'active', 7)
+  const client = new DynamoDbWorkspaceAccessClient(
+    'WorkspaceAccessTable',
+    createDocumentClient((command) => {
+      inputs.push(command.input)
+      return { Item: toMemberItem(member) }
+    }),
+  )
+
+  await expect(client.createActiveMemberConditionCheck(
+    workspaceId,
+    'Owner@Example.com',
+  )).resolves.toEqual({
+    ConditionCheck: {
+      TableName: 'WorkspaceAccessTable',
+      Key: {
+        workspaceId,
+        recordKey: 'MEMBER#owner@example.com',
+      },
+      ConditionExpression:
+        '#entryType = :entryType AND #memberKey = :memberKey AND #status = :active AND #version = :version',
+      ExpressionAttributeNames: {
+        '#entryType': 'entryType',
+        '#memberKey': 'memberKey',
+        '#status': 'status',
+        '#version': 'version',
+      },
+      ExpressionAttributeValues: {
+        ':active': 'active',
+        ':entryType': 'workspace-member',
+        ':memberKey': 'owner@example.com',
+        ':version': 7,
+      },
+    },
+  })
+  expect(inputs).toEqual([expect.objectContaining({
+    ConsistentRead: true,
+    Key: {
+      workspaceId,
+      recordKey: 'MEMBER#owner@example.com',
+    },
+  })])
+})
+
 test('creates a seven-day invitation reservation before Cognito provisioning', async () => {
   const inputs: Array<Record<string, unknown>> = []
   const client = new DynamoDbWorkspaceAccessClient(

@@ -1,3 +1,4 @@
+import { createHmac } from 'node:crypto'
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import { describe, expect, spyOn, test } from 'bun:test'
@@ -8,8 +9,13 @@ import {
   type TriageEntry,
   type UpdateTriageConfigurationInput,
 } from '@mukuroji/contracts'
-import { createTriageCapabilities } from '../../domain/triage-entry'
-import { createTriageInputFingerprint } from '../../triage'
+import { createMutationAuditContext } from '../../../audit'
+import { createTriageCapabilities, TriageError } from '../../domain/triage-entry'
+import {
+  createTriageActionAuditIdempotencyKey,
+  createTriageInputFingerprint,
+  type TriageIdempotency,
+} from '../../triage'
 import {
   createTriageEntryTransactionItems,
 } from './triage-transactions'
@@ -20,6 +26,29 @@ import {
 
 /** Stable client adapter test instant. */
 const NOW = '2026-08-09T00:00:00.000Z'
+
+/** Creates a semantic test context for one target-specific Triage action.
+ *
+ * @param entryId Target Entry selected by the client.
+ * @param idempotency Target receipt identity selected by the client.
+ * @returns Immutable non-fabricated test source context.
+ */
+function createTestAuditContext(entryId: string, idempotency: TriageIdempotency) {
+  return createMutationAuditContext({
+    workspaceId: 'workspace-1',
+    actor: { id: 'member@example.com', kind: 'user' },
+    idempotencyKey: createTriageActionAuditIdempotencyKey(entryId, idempotency),
+    occurredAt: NOW,
+    request: {
+      method: 'TEST',
+      path: 'triage-client-test/apply-action',
+    },
+    source: {
+      kind: 'system',
+      route: 'triage-client-test',
+    },
+  })
+}
 
 /** Creates a metadata-only entry containing fields that must not reach a receipt response. */
 function createEntry(): TriageEntry {
@@ -214,6 +243,45 @@ function findTransactionPutItem(
     }
   }
   return undefined
+}
+
+/** Input used to reproduce the signed queue cursor format issued before this change. */
+type PreviouslyIssuedQueueCursorInput = {
+  /** Workspace bound into the cursor scope. */
+  workspaceId: string
+  /** Team bound into the cursor scope. */
+  teamId: string
+  /** Owner filter bound into the cursor scope. */
+  ownerUserId: string
+  /** Queue index selected for the original pagination chain. */
+  indexKind: 'team' | 'owner'
+  /** DynamoDB continuation key stored by the original cursor. */
+  key: Record<string, unknown>
+}
+
+/** Reproduces the existing signed queue cursor format for compatibility tests.
+ *
+ * @param input Scope, index, and DynamoDB key issued by an earlier client version.
+ * @returns An opaque cursor signed with the test harness secret.
+ */
+function createPreviouslyIssuedQueueCursor(input: PreviouslyIssuedQueueCursorInput): string {
+  const scope = createTriageInputFingerprint({
+    workspaceId: input.workspaceId,
+    teamId: input.teamId,
+    indexKind: input.indexKind,
+    state: undefined,
+    sourceKind: undefined,
+    ownerUserId: input.ownerUserId,
+  })
+  const index = input.indexKind === 'owner'
+    ? 'triage-owner-activity-index'
+    : 'triage-team-activity-index'
+  const payload = Buffer.from(JSON.stringify({ scope, index, key: input.key }))
+    .toString('base64url')
+  const signature = createHmac('sha256', 'test-cursor-secret')
+    .update(payload)
+    .digest('base64url')
+  return `${payload}.${signature}`
 }
 
 describe('DynamoDbTriageClient action receipt lookup', () => {
@@ -544,6 +612,59 @@ describe('DynamoDbTriageClient configuration receipts', () => {
       harness.restore()
     }
   })
+
+  test('rejects duplicate rotation and SLA policy IDs before settings persistence', async () => {
+    const duplicateRotationInput: UpdateTriageConfigurationInput = {
+      ...createConfigurationInput(0),
+      rotations: [{
+        id: 'rotation-1',
+        name: 'Primary',
+        memberUserIds: ['one@example.com'],
+        nextIndex: 0,
+      }, {
+        id: 'rotation-1',
+        name: 'Secondary',
+        memberUserIds: ['two@example.com'],
+        nextIndex: 0,
+      }],
+    }
+    const duplicateSlaInput: UpdateTriageConfigurationInput = {
+      ...createConfigurationInput(0),
+      slaPolicies: [{
+        id: 'sla-1',
+        name: 'Form response',
+        sourceKinds: ['form'],
+        responseMinutes: 60,
+      }, {
+        id: 'sla-1',
+        name: 'Email response',
+        sourceKinds: ['email'],
+        responseMinutes: 30,
+      }],
+    }
+    const harness = createHarness([])
+
+    try {
+      for (const [key, input] of [
+        ['duplicate-rotation', duplicateRotationInput],
+        ['duplicate-sla', duplicateSlaInput],
+      ] as const) {
+        await expect(harness.client.updateConfiguration(
+          'workspace-1',
+          'support',
+          { id: 'manager@example.com' },
+          input,
+          {
+            key,
+            fingerprint: createTriageInputFingerprint({ input }),
+          },
+        )).rejects.toMatchObject({ code: 'InvalidTriageConfiguration', status: 400 })
+      }
+      expect(harness.calls()).toBe(0)
+    } finally {
+      harness.restore()
+    }
+  })
 })
 
 describe('DynamoDbTriageClient queue indexes', () => {
@@ -561,8 +682,37 @@ describe('DynamoDbTriageClient queue indexes', () => {
     }]
     const crossScope = createConfigurationSnapshot(4)
     crossScope.workspaceId = 'workspace-other'
+    const duplicateRotations = createConfigurationSnapshot(4)
+    duplicateRotations.rotations = [{
+      id: 'rotation-1',
+      name: 'Primary',
+      memberUserIds: ['one@example.com'],
+      nextIndex: 0,
+    }, {
+      id: 'rotation-1',
+      name: 'Secondary',
+      memberUserIds: ['two@example.com'],
+      nextIndex: 0,
+    }]
+    const duplicateSlaPolicies = createConfigurationSnapshot(4)
+    duplicateSlaPolicies.slaPolicies = [{
+      id: 'sla-1',
+      name: 'Form response',
+      sourceKinds: ['form'],
+      responseMinutes: 60,
+    }, {
+      id: 'sla-1',
+      name: 'Email response',
+      sourceKinds: ['email'],
+      responseMinutes: 30,
+    }]
 
-    for (const configuration of [malformed, crossScope]) {
+    for (const configuration of [
+      malformed,
+      crossScope,
+      duplicateRotations,
+      duplicateSlaPolicies,
+    ]) {
       const harness = createHarness([{
         Item: {
           entryType: 'triage-configuration',
@@ -601,7 +751,57 @@ describe('DynamoDbTriageClient queue indexes', () => {
           operation: { action: 'decline', reason: 'Out of scope.' },
         },
         'bulk-disabled',
+        createTestAuditContext,
       )).rejects.toMatchObject({ code: 'TriageBulkActionDisabled', status: 409 })
+      expect(harness.calls()).toBe(1)
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('preflights every bulk audit context before reading or mutating a target', async () => {
+    const configuration = createConfigurationSnapshot(4)
+    const harness = createHarness([{
+      Item: {
+        entryType: 'triage-configuration',
+        configuration,
+        revision: configuration.revision,
+      },
+    }])
+    let auditContextCount = 0
+
+    /** Creates one valid context before rejecting the second target context. */
+    function createPartiallyInvalidAuditContext(
+      entryId: string,
+      idempotency: TriageIdempotency,
+    ) {
+      auditContextCount += 1
+      if (auditContextCount === 2) {
+        throw new TriageError(
+          400,
+          'InvalidTriageInput',
+          'The bulk audit context is invalid.',
+        )
+      }
+      return createTestAuditContext(entryId, idempotency)
+    }
+
+    try {
+      await expect(harness.client.applyBulkAction(
+        'workspace-1',
+        'support',
+        { id: 'member@example.com' },
+        {
+          targets: [
+            { entryId: 'triage-1', expectedRevision: 1 },
+            { entryId: 'triage-2', expectedRevision: 1 },
+          ],
+          operation: { action: 'assign', ownerUserId: null },
+        },
+        'bulk-audit-preflight',
+        createPartiallyInvalidAuditContext,
+      )).rejects.toMatchObject({ code: 'InvalidTriageInput', status: 400 })
+      expect(auditContextCount).toBe(2)
       expect(harness.calls()).toBe(1)
     } finally {
       harness.restore()
@@ -693,6 +893,212 @@ describe('DynamoDbTriageClient queue indexes', () => {
       expect(failingHarness.calls()).toBe(2)
     } finally {
       failingHarness.restore()
+    }
+  })
+
+  test('accepts existing queue cursors and rejects cursor scope changes before reading DynamoDB', async () => {
+    const continuationKey = {
+      scopeKey: 'WORKSPACE#workspace-1',
+      recordKey: 'TRIAGE#triage-1',
+      triageTeamKey: 'WORKSPACE#workspace-1#TEAM#support',
+      triageActivitySort: `${NOW}#triage-1`,
+    }
+    const cursor = createPreviouslyIssuedQueueCursor({
+      workspaceId: 'workspace-1',
+      teamId: 'support',
+      ownerUserId: 'owner@example.com',
+      indexKind: 'team',
+      key: continuationKey,
+    })
+    const harness = createHarness([{}, { Items: [] }])
+
+    try {
+      await expect(harness.client.listEntries('workspace-1', 'support', {
+        ownerUserId: 'owner@example.com',
+        cursor,
+        limit: 10,
+      })).resolves.toMatchObject({ entries: [] })
+      expect(harness.commands[1]).toEqual(expect.objectContaining({
+        name: 'QueryCommand',
+        input: expect.objectContaining({
+          IndexName: 'triage-team-activity-index',
+          ExclusiveStartKey: continuationKey,
+        }),
+      }))
+
+      await expect(harness.client.listEntries('workspace-1', 'billing', {
+        ownerUserId: 'owner@example.com',
+        cursor,
+      })).rejects.toMatchObject({ code: 'InvalidTriageCursor', status: 400 })
+      await expect(harness.client.listEntries('workspace-1', 'support', {
+        ownerUserId: 'another-owner@example.com',
+        cursor,
+      })).rejects.toMatchObject({ code: 'InvalidTriageCursor', status: 400 })
+
+      const signature = cursor.split('.')[1]
+      if (!signature) throw new TypeError('Expected a signed cursor fixture.')
+      const tamperedPayload = Buffer.from(JSON.stringify({
+        scope: 'tampered-scope',
+        index: 'triage-team-activity-index',
+        key: continuationKey,
+      })).toString('base64url')
+      await expect(harness.client.listEntries('workspace-1', 'support', {
+        ownerUserId: 'owner@example.com',
+        cursor: `${tamperedPayload}.${signature}`,
+      })).rejects.toMatchObject({ code: 'InvalidTriageCursor', status: 400 })
+      expect(harness.calls()).toBe(2)
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('continues a filtered Team fallback cursor across instances when the owner GSI becomes active', async () => {
+    const otherOwnerEntry = createEntry()
+    otherOwnerEntry.id = 'triage-other-owner'
+    otherOwnerEntry.source.sourceId = 'message-other-owner'
+    otherOwnerEntry.ownerUserId = 'another-owner@example.com'
+    const matchingEntry = createEntry()
+    matchingEntry.id = 'triage-matching-owner'
+    matchingEntry.source.sourceId = 'message-matching-owner'
+    matchingEntry.ownerUserId = 'owner@example.com'
+    const otherOwnerRow = createTriageEntryTransactionItems({
+      tableName: 'RequestIntakeTable',
+      entry: otherOwnerEntry,
+      inputFingerprint: createTriageInputFingerprint({
+        sourceId: otherOwnerEntry.source.sourceId,
+      }),
+    })[0]?.Put?.Item
+    const matchingRow = createTriageEntryTransactionItems({
+      tableName: 'RequestIntakeTable',
+      entry: matchingEntry,
+      inputFingerprint: createTriageInputFingerprint({
+        sourceId: matchingEntry.source.sourceId,
+      }),
+    })[0]?.Put?.Item
+    if (!otherOwnerRow || !matchingRow) throw new TypeError('Expected stored entry fixtures.')
+    const firstPageKey = {
+      scopeKey: 'WORKSPACE#workspace-1',
+      recordKey: 'TRIAGE#triage-other-owner',
+      triageTeamKey: 'WORKSPACE#workspace-1#TEAM#support',
+      triageActivitySort: `${NOW}#triage-other-owner`,
+    }
+    const secondPageKey = {
+      scopeKey: 'WORKSPACE#workspace-1',
+      recordKey: 'TRIAGE#triage-matching-owner',
+      triageTeamKey: 'WORKSPACE#workspace-1#TEAM#support',
+      triageActivitySort: `${NOW}#triage-matching-owner`,
+    }
+    const missingIndex = new Error('The table does not have the specified index.')
+    missingIndex.name = 'ValidationException'
+    const rolloutHarness = createHarness([
+      {},
+      missingIndex,
+      {
+        Items: [{
+          scopeKey: 'WORKSPACE#workspace-1',
+          recordKey: 'TRIAGE#triage-other-owner',
+        }],
+        LastEvaluatedKey: firstPageKey,
+      },
+      { Item: otherOwnerRow },
+      {
+        Items: [{
+          scopeKey: 'WORKSPACE#workspace-1',
+          recordKey: 'TRIAGE#triage-matching-owner',
+        }],
+        LastEvaluatedKey: secondPageKey,
+      },
+      { Item: matchingRow },
+    ])
+
+    let cursor: string
+    try {
+      const page = await rolloutHarness.client.listEntries('workspace-1', 'support', {
+        ownerUserId: 'owner@example.com',
+        limit: 1,
+      })
+      expect(page.entries.map(({ id }) => id)).toEqual(['triage-matching-owner'])
+      if (!page.nextCursor) throw new TypeError('Expected a Team fallback cursor.')
+      cursor = page.nextCursor
+      expect(rolloutHarness.commands.filter(({ name }) => name === 'QueryCommand').map(
+        ({ input }) => input.IndexName,
+      )).toEqual([
+        'triage-owner-activity-index',
+        'triage-team-activity-index',
+        'triage-team-activity-index',
+      ])
+      expect(rolloutHarness.commands[4]?.input).toEqual(expect.objectContaining({
+        ExclusiveStartKey: firstPageKey,
+      }))
+    } finally {
+      rolloutHarness.restore()
+    }
+
+    const nextInstanceHarness = createHarness([{}, { Items: [] }, {}, { Items: [] }])
+    try {
+      await expect(nextInstanceHarness.client.listEntries('workspace-1', 'support', {
+        ownerUserId: 'owner@example.com',
+        cursor,
+        limit: 1,
+      })).resolves.toMatchObject({ entries: [] })
+      await expect(nextInstanceHarness.client.listEntries('workspace-1', 'support', {
+        ownerUserId: 'owner@example.com',
+        limit: 1,
+      })).resolves.toMatchObject({ entries: [] })
+      const queries = nextInstanceHarness.commands.filter(({ name }) => name === 'QueryCommand')
+      expect(queries).toEqual([
+        expect.objectContaining({
+          input: expect.objectContaining({
+            IndexName: 'triage-team-activity-index',
+            ExclusiveStartKey: secondPageKey,
+          }),
+        }),
+        expect.objectContaining({
+          input: expect.objectContaining({ IndexName: 'triage-owner-activity-index' }),
+        }),
+      ])
+    } finally {
+      nextInstanceHarness.restore()
+    }
+  })
+
+  test('lets an owner cursor override a stale unavailable-index observation', async () => {
+    const ownerContinuationKey = {
+      scopeKey: 'WORKSPACE#workspace-1',
+      recordKey: 'TRIAGE#triage-owner-page',
+      triageOwnerKey: 'WORKSPACE#workspace-1#TEAM#support#OWNER#owner@example.com',
+      triageActivitySort: `${NOW}#triage-owner-page`,
+    }
+    const cursor = createPreviouslyIssuedQueueCursor({
+      workspaceId: 'workspace-1',
+      teamId: 'support',
+      ownerUserId: 'owner@example.com',
+      indexKind: 'owner',
+      key: ownerContinuationKey,
+    })
+    const missingIndex = new Error('The table does not have the specified index.')
+    missingIndex.name = 'ValidationException'
+    const harness = createHarness([{}, missingIndex, { Items: [] }, {}, { Items: [] }])
+
+    try {
+      await harness.client.listEntries('workspace-1', 'support', {
+        ownerUserId: 'owner@example.com',
+      })
+      await expect(harness.client.listEntries('workspace-1', 'support', {
+        ownerUserId: 'owner@example.com',
+        cursor,
+      })).resolves.toMatchObject({ entries: [] })
+      const queries = harness.commands.filter(({ name }) => name === 'QueryCommand')
+      expect(queries.map(({ input }) => input.IndexName)).toEqual([
+        'triage-owner-activity-index',
+        'triage-team-activity-index',
+        'triage-owner-activity-index',
+      ])
+      expect(queries[2]?.input).toEqual(expect.objectContaining({
+        ExclusiveStartKey: ownerContinuationKey,
+      }))
+    } finally {
+      harness.restore()
     }
   })
 
@@ -788,7 +1194,7 @@ describe('DynamoDbTriageClient source admission', () => {
       const contribution = await harness.client.prepareEntryAdmission(entry)
 
       expect(contribution.entry.ownerUserId).toBe('one@example.com')
-      expect(contribution.retryableConflictItemIndex).toBe(0)
+      expect(contribution.retryableConflictItemIndexes).toEqual([0])
       expect(contribution.transactItems).toEqual([expect.objectContaining({
         Put: expect.objectContaining({
           TableName: 'RequestIntakeTable',
@@ -851,6 +1257,18 @@ describe('DynamoDbTriageClient source admission', () => {
     }], {
       validateAdmission: async (entry, currentConfiguration) => {
         validated.push({ entry, configuration: currentConfiguration })
+        return {
+          transactItems: [{
+            ConditionCheck: {
+              TableName: 'WorkspaceAccessTable',
+              Key: {
+                workspaceId: entry.workspaceId,
+                recordKey: `MEMBER#${entry.ownerUserId}`,
+              },
+              ConditionExpression: '#status = :active AND #version = :version',
+            },
+          }],
+        }
       },
     })
     const entry = createEntry()
@@ -870,7 +1288,7 @@ describe('DynamoDbTriageClient source admission', () => {
         projectId: 'configured-project',
         ownerUserId: 'fixed@example.com',
       })
-      expect(contribution.retryableConflictItemIndex).toBe(0)
+      expect(contribution.retryableConflictItemIndexes).toEqual([0, 1])
       expect(contribution.transactItems).toEqual([{
         ConditionCheck: {
           TableName: 'RequestIntakeTable',
@@ -884,6 +1302,15 @@ describe('DynamoDbTriageClient source admission', () => {
             '#revision': 'revision',
           },
           ExpressionAttributeValues: { ':expectedRevision': 4 },
+        },
+      }, {
+        ConditionCheck: {
+          TableName: 'WorkspaceAccessTable',
+          Key: {
+            workspaceId: 'workspace-1',
+            recordKey: 'MEMBER#fixed@example.com',
+          },
+          ConditionExpression: '#status = :active AND #version = :version',
         },
       }])
       expect(validated).toHaveLength(1)
@@ -911,7 +1338,7 @@ describe('DynamoDbTriageClient source admission', () => {
     try {
       const contribution = await harness.client.prepareEntryAdmission(entry)
 
-      expect(contribution.retryableConflictItemIndex).toBe(0)
+      expect(contribution.retryableConflictItemIndexes).toEqual([0])
       expect(contribution.transactItems).toEqual([{
         ConditionCheck: {
           TableName: 'RequestIntakeTable',
@@ -1023,6 +1450,160 @@ describe('DynamoDbTriageClient source admission', () => {
         revision: 6,
         configuration: { rotations: [{ nextIndex: 0 }] },
       })
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('rejects a manual handoff when its Project is archived before commit', async () => {
+    let validationAttempts = 0
+    const projectArchiveRace = Object.assign(new Error('Project archived'), {
+      name: 'TransactionCanceledException',
+      CancellationReasons: Array.from({ length: 7 }, (_value, index) => ({
+        Code: index === 6 ? 'ConditionalCheckFailed' : 'None',
+      })),
+    })
+    const configuration = createManualRotationConfiguration(4, 0)
+    const harness = createHarness([
+      {},
+      { Item: { entryType: 'triage-configuration', configuration, revision: 4 } },
+      projectArchiveRace,
+      { Item: { entryType: 'triage-configuration', configuration, revision: 4 } },
+    ], {
+      validateAdmission: async () => {
+        validationAttempts += 1
+        if (validationAttempts > 1) {
+          throw new TriageError(
+            409,
+            'TriageAdmissionProjectUnavailable',
+            'The configured Triage Project is not active in the target Team.',
+          )
+        }
+        return {
+          transactItems: [{
+            ConditionCheck: {
+              TableName: 'ProjectDirectoryTable',
+              Key: { directoryId: 'workspace-1', entryKey: 'TEAM#support' },
+              ConditionExpression: '#entryType = :team AND attribute_not_exists(#archivedAt)',
+            },
+          }, {
+            ConditionCheck: {
+              TableName: 'ProjectDirectoryTable',
+              Key: { directoryId: 'workspace-1', entryKey: 'PROJECT#configured-project' },
+              ConditionExpression: '#entryType = :project AND attribute_not_exists(#archivedAt)',
+            },
+          }],
+        }
+      },
+    })
+
+    try {
+      await expect(harness.client.createManualHandoff(
+        'workspace-1',
+        'support',
+        { id: 'operator@example.com' },
+        {
+          sourceId: 'handoff-project-race',
+          title: 'Manual support request',
+          body: 'Please investigate this request.',
+          requesterDisplayName: 'Internal operator',
+          projectId: 'configured-project',
+          routingReason: 'Manual handoff.',
+          retentionExpiresAt: '2027-08-09T00:00:00.000Z',
+        },
+        {
+          key: 'manual-project-race',
+          fingerprint: createTriageInputFingerprint({ sourceId: 'handoff-project-race' }),
+        },
+      )).rejects.toMatchObject({
+        code: 'TriageAdmissionProjectUnavailable',
+        status: 409,
+      })
+      expect(validationAttempts).toBe(2)
+      expect(harness.commands.map(({ name }) => name)).toEqual([
+        'GetCommand',
+        'GetCommand',
+        'TransactWriteCommand',
+        'GetCommand',
+      ])
+      expect(harness.commands[2]?.input.TransactItems).toHaveLength(7)
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('rejects a manual handoff when its owner is deactivated before commit', async () => {
+    let validationAttempts = 0
+    const memberDeactivationRace = Object.assign(new Error('Member deactivated'), {
+      name: 'TransactionCanceledException',
+      CancellationReasons: Array.from({ length: 7 }, (_value, index) => ({
+        Code: index === 6 ? 'ConditionalCheckFailed' : 'None',
+      })),
+    })
+    const configuration = createManualRotationConfiguration(4, 0)
+    const harness = createHarness([
+      {},
+      { Item: { entryType: 'triage-configuration', configuration, revision: 4 } },
+      memberDeactivationRace,
+      { Item: { entryType: 'triage-configuration', configuration, revision: 4 } },
+    ], {
+      validateAdmission: async () => {
+        validationAttempts += 1
+        if (validationAttempts > 1) {
+          throw new TriageError(
+            409,
+            'TriageAdmissionOwnerUnavailable',
+            'A configured Triage owner is not an active Workspace member.',
+          )
+        }
+        return {
+          transactItems: [{
+            ConditionCheck: {
+              TableName: 'ProjectDirectoryTable',
+              Key: { directoryId: 'workspace-1', entryKey: 'TEAM#support' },
+              ConditionExpression: '#entryType = :team AND attribute_not_exists(#archivedAt)',
+            },
+          }, {
+            ConditionCheck: {
+              TableName: 'WorkspaceAccessTable',
+              Key: { workspaceId: 'workspace-1', recordKey: 'MEMBER#one@example.com' },
+              ConditionExpression: '#status = :active AND #version = :version',
+            },
+          }],
+        }
+      },
+    })
+
+    try {
+      await expect(harness.client.createManualHandoff(
+        'workspace-1',
+        'support',
+        { id: 'operator@example.com' },
+        {
+          sourceId: 'handoff-member-race',
+          title: 'Manual support request',
+          body: 'Please investigate this request.',
+          requesterDisplayName: 'Internal operator',
+          projectId: 'configured-project',
+          routingReason: 'Manual handoff.',
+          retentionExpiresAt: '2027-08-09T00:00:00.000Z',
+        },
+        {
+          key: 'manual-member-race',
+          fingerprint: createTriageInputFingerprint({ sourceId: 'handoff-member-race' }),
+        },
+      )).rejects.toMatchObject({
+        code: 'TriageAdmissionOwnerUnavailable',
+        status: 409,
+      })
+      expect(validationAttempts).toBe(2)
+      expect(harness.commands.map(({ name }) => name)).toEqual([
+        'GetCommand',
+        'GetCommand',
+        'TransactWriteCommand',
+        'GetCommand',
+      ])
+      expect(harness.commands[2]?.input.TransactItems).toHaveLength(7)
     } finally {
       harness.restore()
     }

@@ -5,6 +5,7 @@ import {
   type TriageConfiguration,
   type TriageEntry,
 } from '@mukuroji/contracts'
+import { ProjectDataError } from '../../modules/directory'
 import { createTriageAdmissionValidator } from './api-dependencies'
 
 const NOW = '2026-08-09T00:00:00.000Z'
@@ -82,19 +83,19 @@ test('rejects Team-level admission when the strongly read Team is missing', asyn
   let directoryReads = 0
   let memberReads = 0
   const validateAdmission = createTriageAdmissionValidator({
-    /** Returns a current directory without the target Team. */
-    async getProjectDirectory(directoryId, locale, consistentRead) {
+    /** Reports that the current active Team row is unavailable. */
+    async createActiveReferenceConditionChecks(directoryId, teamId, projectId) {
       directoryReads += 1
-      expect({ directoryId, locale, consistentRead }).toEqual({
+      expect({ directoryId, teamId, projectId }).toEqual({
         directoryId: 'workspace-1',
-        locale: 'en',
-        consistentRead: true,
+        teamId: 'support',
+        projectId: undefined,
       })
-      return { teams: [] }
+      throw new ProjectDataError(404, 'TeamNotFound', 'Team not found.')
     },
   }, {
     /** Records unexpected member reads after Team validation fails. */
-    async getActiveMember() {
+    async createActiveMemberConditionCheck() {
       memberReads += 1
       return undefined
     },
@@ -106,4 +107,78 @@ test('rejects Team-level admission when the strongly read Team is missing', asyn
   })
   expect(directoryReads).toBe(1)
   expect(memberReads).toBe(0)
+})
+
+test('returns distinct Team/Project guards and one version guard for a shared owner', async () => {
+  const entry = {
+    ...ENTRY,
+    projectId: 'project-1',
+    ownerUserId: 'Owner@Example.com',
+    sla: {
+      policyId: 'support-sla',
+      dueAt: '2026-08-09T01:00:00.000Z',
+      escalationDueAt: '2026-08-09T01:30:00.000Z',
+    },
+  } satisfies TriageEntry
+  const configuration = {
+    ...CONFIGURATION,
+    slaPolicies: [{
+      id: 'support-sla',
+      name: 'Support SLA',
+      sourceKinds: ['form'],
+      responseMinutes: 60,
+      escalationMinutes: 30,
+      escalationOwnerUserId: 'owner@example.com',
+    }],
+  } satisfies TriageConfiguration
+  let memberReads = 0
+  const validateAdmission = createTriageAdmissionValidator({
+    /** Returns exact active Team and Project row guards. */
+    async createActiveReferenceConditionChecks(directoryId, teamId, projectId) {
+      expect({ directoryId, teamId, projectId }).toEqual({
+        directoryId: 'workspace-1',
+        teamId: 'support',
+        projectId: 'project-1',
+      })
+      return [{
+        ConditionCheck: {
+          TableName: 'ProjectDirectoryTable',
+          Key: { directoryId, entryKey: 'TEAM#support' },
+          ConditionExpression: '#entryType = :team',
+        },
+      }, {
+        ConditionCheck: {
+          TableName: 'ProjectDirectoryTable',
+          Key: { directoryId, entryKey: 'PROJECT#project-1' },
+          ConditionExpression: '#entryType = :project',
+        },
+      }]
+    },
+  }, {
+    /** Returns the exact active membership version guard. */
+    async createActiveMemberConditionCheck(workspaceId, memberUserId) {
+      memberReads += 1
+      expect({ workspaceId, memberUserId }).toEqual({
+        workspaceId: 'workspace-1',
+        memberUserId: 'owner@example.com',
+      })
+      return {
+        ConditionCheck: {
+          TableName: 'WorkspaceAccessTable',
+          Key: { workspaceId, recordKey: 'MEMBER#owner@example.com' },
+          ConditionExpression: '#status = :active AND #version = :version',
+        },
+      }
+    },
+  })
+
+  const contribution = await validateAdmission(entry, configuration)
+
+  expect(memberReads).toBe(1)
+  expect(contribution.transactItems).toHaveLength(3)
+  expect(contribution.transactItems.map((item) => item.ConditionCheck?.TableName)).toEqual([
+    'ProjectDirectoryTable',
+    'ProjectDirectoryTable',
+    'WorkspaceAccessTable',
+  ])
 })

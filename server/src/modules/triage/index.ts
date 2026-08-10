@@ -18,9 +18,11 @@ export {
 /** Triage application ports used by composition and adapters. */
 export {
   createTriageBulkTargetIdempotencyKey,
+  createTriageActionAuditIdempotencyKey,
   createTriageInputFingerprint,
   type ResolveTriageWorkItemAction,
   type TriageActor,
+  type TriageAuditContextFactory,
   type TriageClient,
   type TriageIdempotency,
   type TriageWorkItemActionResolution,
@@ -57,6 +59,11 @@ export {
   type TriageTransactionItems,
 } from './adapter-out/dynamodb/triage-transactions'
 
+/** Triage audit outbox configuration shared by API and schedule transactions. */
+export type {
+  TriageAuditOutboxConfiguration,
+} from './adapter-out/dynamodb/triage-audit-events'
+
 /** DynamoDB-backed triage application client. */
 export {
   TRIAGE_OWNER_ACTIVITY_INDEX_NAME,
@@ -64,6 +71,7 @@ export {
   DynamoDbTriageClient,
   type DynamoDbTriageClientOptions,
   type TriageAdmissionTransactionContribution,
+  type TriageAdmissionValidationContribution,
   type TriageAdmissionValidator,
 } from './adapter-out/dynamodb/dynamo-db-triage-client'
 

@@ -1566,8 +1566,26 @@ test('re-evaluates Form Triage admission after a rotation cursor race and commit
             ExpressionAttributeNames: { '#revision': 'revision' },
             ExpressionAttributeValues: { ':expectedRevision': admissionAttempt },
           },
+        }, {
+          ConditionCheck: {
+            TableName: 'project-directory-table',
+            Key: {
+              directoryId: 'workspace-1',
+              entryKey: 'PROJECT#triage-project',
+            },
+            ConditionExpression: '#entryType = :project AND attribute_not_exists(#archivedAt)',
+          },
+        }, {
+          ConditionCheck: {
+            TableName: 'workspace-access-table',
+            Key: {
+              workspaceId: 'workspace-1',
+              recordKey: `MEMBER#${ownerUserId}`,
+            },
+            ConditionExpression: '#status = :active AND #version = :version',
+          },
         }],
-        retryableConflictItemIndex: 0,
+        retryableConflictItemIndexes: [0, 1, 2],
       }
     },
   })
@@ -1609,13 +1627,27 @@ test('re-evaluates Form Triage admission after a rotation cursor race and commit
       retention: { expiresAt: '2026-08-15T09:00:00.000Z' },
     },
   })
-  expect(committedItems.at(-1)).toMatchObject({
+  const configurationItem = committedItems.find((item) =>
+    item && typeof item === 'object' &&
+    Reflect.get(Reflect.get(item, 'Put') ?? {}, 'Item') &&
+    Reflect.get(Reflect.get(Reflect.get(item, 'Put'), 'Item'), 'entryType') ===
+      'triage-configuration'
+  )
+  expect(configurationItem).toMatchObject({
     Put: {
       Item: { entryType: 'triage-configuration', revision: 3 },
       ConditionExpression: '#revision = :expectedRevision',
       ExpressionAttributeValues: { ':expectedRevision': 2 },
     },
   })
+  expect(committedItems.slice(-2)).toEqual([
+    expect.objectContaining({
+      ConditionCheck: expect.objectContaining({ TableName: 'project-directory-table' }),
+    }),
+    expect.objectContaining({
+      ConditionCheck: expect.objectContaining({ TableName: 'workspace-access-table' }),
+    }),
+  ])
 })
 
 test('rate limits an unused submission session and hashes the external client key', async () => {
