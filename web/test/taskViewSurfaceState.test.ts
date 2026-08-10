@@ -564,6 +564,65 @@ describe('My Tasks task-view filtering', () => {
     })).toEqual([task])
   })
 
+  test('requires every shared keyword term and normalizes full-width input', () => {
+    const task = {
+      ...taskViewStoryTasks[0],
+      title: 'Release wireframe plan',
+    }
+    const definition = {
+      ...createBuiltInTaskViewDefinition('my-tasks', { kind: 'viewer' }, 'board'),
+      filters: { keyword: 'ＲＥＬＥＡＳＥ   wireframe' },
+    } satisfies TaskViewDefinition
+
+    expect(filterMyTasksByTaskViewDefinition([task], definition)).toEqual([task])
+    expect(filterMyTasksByTaskViewDefinition([task], {
+      ...definition,
+      filters: { keyword: 'release missing' },
+    })).toEqual([])
+  })
+
+  test('hides child Work Items when sub-items are disabled', () => {
+    const childTask = {
+      ...taskViewStoryTasks[0],
+      id: 'child-task',
+      relationIds: ['parent:parent-task'],
+    }
+    const definition = {
+      ...createBuiltInTaskViewDefinition('project', { kind: 'project', projectId: 'refero' }, 'table'),
+      layout: {
+        ...createBuiltInTaskViewDefinition('project', { kind: 'project', projectId: 'refero' }, 'table').layout,
+        displayOptions: { showSubItems: false },
+      },
+    } satisfies TaskViewDefinition
+
+    expect(filterMyTasksByTaskViewDefinition([childTask], definition)).toEqual([])
+  })
+
+  test('matches legacy status filters only against workflow status IDs', () => {
+    const task = taskViewStoryTasks[0]
+    const definition = {
+      ...createBuiltInTaskViewDefinition('my-tasks', { kind: 'viewer' }, 'board'),
+      filters: { statuses: [task.statusCategory] },
+    } satisfies TaskViewDefinition
+
+    expect(filterMyTasksByTaskViewDefinition([task], definition)).toEqual([])
+  })
+
+  test('compares date-only upper bounds at day granularity', () => {
+    const task = {
+      ...taskViewStoryTasks[0],
+      updatedAt: '2026-06-10T12:00:00.000Z',
+    }
+    const definition = {
+      ...createBuiltInTaskViewDefinition('my-tasks', { kind: 'viewer' }, 'board'),
+      filters: {
+        date: { field: 'updatedAt', to: '2026-06-10' },
+      },
+    } satisfies TaskViewDefinition
+
+    expect(filterMyTasksByTaskViewDefinition([task], definition)).toEqual([task])
+  })
+
   test('evaluates canonical custom-field operators instead of treating them as no-ops', () => {
     const tasks = taskViewStoryTasks.slice(0, 2).map((task, index) => ({
       ...task,

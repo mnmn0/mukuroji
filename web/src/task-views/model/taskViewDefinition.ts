@@ -903,7 +903,8 @@ function readTaskViewColumn(value: unknown): TaskViewColumn | undefined {
   if (value.width !== undefined && (
     typeof value.width !== 'number' ||
     !Number.isFinite(value.width) ||
-    value.width <= 0
+    value.width < 40 ||
+    value.width > 2_000
   )) return undefined
   if (value.pin !== undefined && value.pin !== 'start' && value.pin !== 'end') {
     return undefined

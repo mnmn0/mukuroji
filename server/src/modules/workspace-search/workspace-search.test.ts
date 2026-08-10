@@ -3059,14 +3059,25 @@ test('prevents idempotent recreation from reviving another viewer preference lif
     },
   })
   let deletionTombstoneRecordKey: string | undefined
+  let sharedViewerPreferenceDeleted = false
   control.beforeNextTransaction = (_items, transactItems) => {
     const tombstone = transactItems
       .flatMap((item) => isMemoryRecord(item.Put?.Item) ? [item.Put.Item] : [])
       .find((item) => item.entryType === 'task-view-tombstone')
-    if (!tombstone || typeof tombstone.recordKey !== 'string') {
-      throw new Error('Expected a task view deletion tombstone.')
+    if (tombstone && typeof tombstone.recordKey === 'string') {
+      deletionTombstoneRecordKey = tombstone.recordKey
     }
-    deletionTombstoneRecordKey = tombstone.recordKey
+    sharedViewerPreferenceDeleted ||= transactItems.some((item) => {
+      const key = item.Delete?.Key
+      return isMemoryRecord(key) &&
+        typeof key.recordKey === 'string' &&
+        key.recordKey.startsWith('TASK_VIEW_PREFERENCE#') &&
+        key.recordKey.endsWith(`#${created.id}`) &&
+        !key.recordKey.includes('owner')
+    })
+    if (!tombstone && !sharedViewerPreferenceDeleted) {
+      throw new Error('Expected a task view deletion cleanup transaction.')
+    }
   }
   await client.deleteTaskView({
     workspaceId: 'workspace-1',
@@ -3077,6 +3088,7 @@ test('prevents idempotent recreation from reviving another viewer preference lif
 
   const expectedTombstoneRecordKey = `TASK_VIEW_TOMBSTONE#${created.id}`
   expect(deletionTombstoneRecordKey).toBe(expectedTombstoneRecordKey)
+  expect(sharedViewerPreferenceDeleted).toBeTrue()
   let createTombstoneBlockerObserved = false
   control.beforeNextTransaction = (_items, transactItems) => {
     createTombstoneBlockerObserved = transactItems.some((item) => {

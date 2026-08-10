@@ -95,6 +95,8 @@ export type TaskWorkspaceProps = {
   assigneeOptions: ProjectMember[]
   /** Whether the current user may manage project members. */
   canManageProjectMembers: boolean
+  /** Checks exact Team-qualified Project write scope for one concrete Work Item. */
+  canMutateTask?: (task: ProjectTask) => boolean
   /** Determines whether the current user may manage one canonical dependency endpoint. */
   canManageScheduleDependencyEndpoint?: (endpoint: WorkItemDependencyEndpoint) => boolean
   /** Single-Team fallback Work Item configuration. */
@@ -174,9 +176,9 @@ export type TaskWorkspaceProps = {
   /** Previews validation and effects for a bulk operation. */
   onBulkPreview?: (request: BulkOperationRequest) => Promise<BulkOperationPreview>
   /** Retries failed items in a bulk operation. */
-  onBulkRetry?: (operationId: string) => Promise<BulkOperation>
+  onBulkRetry?: (operationId: string, operation?: BulkOperation) => Promise<BulkOperation>
   /** Undoes successful items in a bulk operation. */
-  onBulkUndo?: (operationId: string) => Promise<BulkOperation>
+  onBulkUndo?: (operationId: string, operation?: BulkOperation) => Promise<BulkOperation>
   /** Changes the selected due-date filter. */
   onDueDateFilterChange: (dueDateFilter: DueDateFilter) => void
   /** Changes the workflow/custom-field definition filter. */
@@ -274,6 +276,7 @@ export function TaskWorkspace({
   assigneeOptions,
   canManageProjectMembers,
   canManageScheduleDependencyEndpoint,
+  canMutateTask,
   configuration,
   configurationsByTeam,
   configurationFailedTeamIds,
@@ -382,6 +385,7 @@ export function TaskWorkspace({
       onTaskActionMenuOpen={onTaskActionMenuOpen}
       onCreateTaskOpen={onCreateTaskOpen}
       onUpdateTask={onUpdateTask}
+      canMutateTask={canMutateTask}
       personLabels={personLabels}
       personOptions={personOptions}
       presentation={taskViewPresentation}
@@ -630,6 +634,7 @@ export function TaskWorkspace({
           onBulkUndo={onBulkUndo}
           onCreateTaskOpen={onCreateTaskOpen}
           onUpdateTask={onUpdateTask}
+          canMutateTask={canMutateTask}
           onSelectTask={onSelectTask}
           onTaskActionMenuOpen={onTaskActionMenuOpen}
           onTaskSelectionChange={onTaskSelectionChange}

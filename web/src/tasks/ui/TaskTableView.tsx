@@ -90,6 +90,8 @@ export type TaskTableViewProps = {
   bulkTaskActionEpoch?: number
   /** Fallback configuration used for a single-team project view. */
   configuration?: WorkItemConfiguration
+  /** Checks exact Team-qualified Project write scope for one concrete Work Item. */
+  canMutateTask?: (task: ProjectTask) => boolean
   /** Team-scoped resolved configurations used by individual rows. */
   configurationsByTeam: Record<string, ResolvedWorkItemConfiguration>
   /** Locale used to format custom-field values. */
@@ -145,9 +147,9 @@ export type TaskTableViewProps = {
   /** Validates a bulk operation before applying it. */
   onBulkPreview?: (request: BulkOperationRequest) => Promise<BulkOperationPreview>
   /** Retries retryable items from a bulk operation. */
-  onBulkRetry?: (operationId: string) => Promise<BulkOperation>
+  onBulkRetry?: (operationId: string, operation?: BulkOperation) => Promise<BulkOperation>
   /** Undoes succeeded items from a bulk operation. */
-  onBulkUndo?: (operationId: string) => Promise<BulkOperation>
+  onBulkUndo?: (operationId: string, operation?: BulkOperation) => Promise<BulkOperation>
   /** Opens the create-task form when task creation is available. */
   onCreateTaskOpen?: (context?: TaskCreateContext) => void
   /** Updates a row through the common Work Item action. */
@@ -168,6 +170,8 @@ type TaskTableRowProps = {
   assigneeOptions: ProjectMember[]
   /** Configuration used to render workflow and custom-field values. */
   configuration?: WorkItemConfiguration
+  /** Checks exact Team-qualified Project write scope for one concrete Work Item. */
+  canMutateTask?: (task: ProjectTask) => boolean
   /** Locale used to format custom-field values. */
   locale: Locale
   /** Canonical dependency state for this row. */
@@ -219,6 +223,7 @@ export function TaskTableView({
   bulkTaskActionRequest,
   bulkWorkspaceId,
   configuration,
+  canMutateTask,
   configurationsByTeam,
   dependencySummaries = {},
   locale,
@@ -301,10 +306,12 @@ export function TaskTableView({
     }
 
     setTableAction(undefined)
+    const writableUpdates = updates.filter(({ task }) => canMutateTask?.(task) ?? true)
     const results = await Promise.allSettled(
-      updates.map(({ patch, task }) => onUpdateTask(task, patch)),
+      writableUpdates.map(({ patch, task }) => onUpdateTask(task, patch)),
     )
-    const failedCount = invalidCount + results.filter((result) => result.status === 'rejected').length
+    const failedCount = invalidCount + (updates.length - writableUpdates.length) +
+      results.filter((result) => result.status === 'rejected').length
 
     if (failedCount > 0) {
       setTableAction({
@@ -441,6 +448,7 @@ export function TaskTableView({
       onTaskActionMenuOpen={onTaskActionMenuOpen}
       onCreateTaskOpen={onCreateTaskOpen}
       onUpdateTask={onUpdateTask}
+      canMutateTask={canMutateTask}
       selectedForDetail={selectedDetailTaskKey === createTaskKey(task)}
       selected={selectedTaskKeys.includes(createTaskKey(task))}
       selectionReadOnly={selectionReadOnly}
@@ -668,6 +676,7 @@ function TaskTableGroupRow({
 function TaskTableRow({
   assigneeOptions,
   configuration,
+  canMutateTask,
   dependencySummary,
   locale,
   personOptions,
@@ -727,10 +736,16 @@ function TaskTableRow({
       : [
           { label: t('tasks.detail.unassigned'), value: '' },
           ...memberOptions,
-        ]
+      ]
+  const canEditTask = Boolean(onUpdateTask && (canMutateTask?.(task) ?? true))
+  /** Sends one row edit only when its exact Work Item scope is writable. */
+  const updateTask = async (candidate: ProjectTask, input: WorkItemPatch): Promise<ProjectTask> => {
+    if (!canEditTask || !onUpdateTask) return candidate
+    return onUpdateTask(candidate, input)
+  }
   /** Sends one row edit through the shared Work Item mutation. */
   const commitPatch = async (patch: WorkItemPatch) => {
-    await onUpdateTask?.(task, patch)
+    if (canEditTask) await updateTask(task, patch)
   }
 
   return (
@@ -775,7 +790,7 @@ function TaskTableRow({
                   disabled={selectionReadOnly}
                   type="checkbox"
                 />
-                {onUpdateTask ? (
+                {canEditTask ? (
                   <TaskInlineField
                     ariaLabel={`${t('tasks.inline.edit')}: ${t('tasks.column.name')}`}
                     displayValue={taskTitle}
@@ -796,7 +811,7 @@ function TaskTableRow({
                     {taskTitle}
                   </button>
                 )}
-                {onUpdateTask ? (
+                {canEditTask ? (
                   <button
                     aria-label={`${t('tasks.detail.title')}: ${taskTitle}`}
                     className="rounded px-1 text-xs text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary)]"
@@ -807,11 +822,11 @@ function TaskTableRow({
                     ↗
                   </button>
                 ) : null}
-                {!presentation && onUpdateTask ? (
+                {!presentation && canEditTask ? (
                   <TaskInlineCustomFields
                     configuration={configuration}
                     locale={locale}
-                    onUpdateTask={onUpdateTask}
+                    onUpdateTask={updateTask}
                     personLabels={personLabels}
                     personOptions={personOptions}
                     t={t}
@@ -839,7 +854,7 @@ function TaskTableRow({
             <td {...columnCellProps} className={`${wrapText ? 'break-words' : 'truncate'} ${cellPadding} text-[#505967]`} key={field}>
               <div className="flex min-w-0 items-center gap-2">
                 {showAssigneeAvatar ? <WorkItemAssigneeAvatar label={assigneeLabel} /> : null}
-                {onUpdateTask && inlineAssigneeOptions.length > 0 ? (
+                {canEditTask && inlineAssigneeOptions.length > 0 ? (
                   <TaskInlineField
                     ariaLabel={`${t('tasks.inline.edit')}: ${t('tasks.column.assignee')}`}
                     displayValue={assigneeLabel}
@@ -856,7 +871,7 @@ function TaskTableRow({
           )
           case 'status': return (
             <td {...columnCellProps} className={cellPadding} key={field}>
-              {onUpdateTask && editableStatuses.length > 0 ? (
+              {canEditTask && editableStatuses.length > 0 ? (
                 <TaskInlineField
                   ariaLabel={`${t('tasks.inline.edit')}: ${t('tasks.column.status')}`}
                   displayValue={resolveWorkItemWorkflowStatusLabel(task, configuration)}
@@ -883,7 +898,7 @@ function TaskTableRow({
               }`}
               key={field}
             >
-              {onUpdateTask && (schedule.mode === 'due-date' || schedule.mode === 'unscheduled') ? (
+              {canEditTask && (schedule.mode === 'due-date' || schedule.mode === 'unscheduled') ? (
                 <TaskInlineField
                   ariaLabel={`${t('tasks.inline.edit')}: ${t('tasks.column.dueDate')}`}
                   displayValue={scheduleDisplay}
@@ -900,7 +915,7 @@ function TaskTableRow({
           )
           case 'priority': return (
             <td {...columnCellProps} className={cellPadding} key={field}>
-              {onUpdateTask ? (
+              {canEditTask ? (
                 <TaskInlineField
                   ariaLabel={`${t('tasks.inline.edit')}: ${t('tasks.column.priority')}`}
                   displayValue={t(`tasks.priority.${task.priority}`)}
@@ -934,11 +949,11 @@ function TaskTableRow({
           )
           case 'customFields': return (
             <td {...columnCellProps} className={cellPadding} key={field}>
-              {onUpdateTask ? (
+              {canEditTask ? (
                 <TaskInlineCustomFields
                   configuration={configuration}
                   locale={locale}
-                  onUpdateTask={onUpdateTask}
+                  onUpdateTask={updateTask}
                   personLabels={personLabels}
                   personOptions={personOptions}
                   t={t}

@@ -202,14 +202,60 @@ export function reconcileSavedTaskViews(
   views: readonly SavedTaskView[],
   change: SavedTaskViewCacheChange,
 ): SavedTaskView[] {
-  if (change.type === 'remove') {
-    return views.filter((view) => view.id !== change.viewId)
-  }
+  const reconciledViews = change.type === 'remove'
+    ? views.filter((view) => view.id !== change.viewId)
+    : (() => {
+        const existingIndex = views.findIndex((view) => view.id === change.view.id)
+        if (existingIndex < 0) return [...views, change.view]
+        return views.map((view, index) => index === existingIndex ? change.view : view)
+      })()
+  return reconcileSavedTaskViewDefaults(reconciledViews, change)
+}
 
-  const existingIndex = views.findIndex((view) => view.id === change.view.id)
-  if (existingIndex < 0) return [...views, change.view]
+/**
+ * Recomputes effective personal and Team defaults after one local cache transition.
+ *
+ * The mutation response is authoritative for its target. All other cached rows are normalized so
+ * an old default cannot remain effective after the server has moved or removed that default.
+ *
+ * @param views - Saved views after applying the identifier-level cache transition.
+ * @param change - Mutation that produced the transition.
+ * @returns Views with mutually consistent default metadata.
+ */
+function reconcileSavedTaskViewDefaults(
+  views: readonly SavedTaskView[],
+  change: SavedTaskViewCacheChange,
+): SavedTaskView[] {
+  const changedView = change.type === 'remove' ? undefined : change.view
+  const personalDefaultId = changedView?.preference.isPersonalDefault
+    ? changedView.id
+    : views.find((view) => view.preference.isPersonalDefault)?.id
+  const teamDefaultId = changedView?.preference.isTeamDefault
+    ? changedView.id
+    : views.find((view) => view.preference.isTeamDefault)?.id
 
-  return views.map((view, index) => index === existingIndex ? change.view : view)
+  return views.map((view) => {
+    const isPersonalDefault = view.id === personalDefaultId
+    const isTeamDefault = view.id === teamDefaultId
+    const isDefault = isPersonalDefault || (!personalDefaultId && isTeamDefault)
+    const defaultSource: SavedTaskView['preference']['defaultSource'] = isPersonalDefault
+      ? 'personal'
+      : isDefault && isTeamDefault
+        ? 'team'
+        : undefined
+    const preference = { ...view.preference }
+    delete preference.defaultSource
+    return {
+      ...view,
+      preference: {
+        ...preference,
+        isDefault,
+        isPersonalDefault,
+        isTeamDefault,
+        ...(defaultSource ? { defaultSource } : {}),
+      },
+    }
+  })
 }
 
 /**

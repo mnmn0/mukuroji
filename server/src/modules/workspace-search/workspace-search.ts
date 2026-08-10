@@ -119,6 +119,9 @@ export const TASK_VIEW_MAX_LIMIT = 100
 /** 一回の read で lazy cleanup する orphan preference の最大数です。 */
 const TASK_VIEW_ORPHAN_CLEANUP_LIMIT = 20
 
+/** Shared task-view preference cleanup reads and deletes at most one bounded page at a time. */
+const TASK_VIEW_PREFERENCE_CLEANUP_PAGE_SIZE = 100
+
 /** Maximum UTF-8 size reserved for one normalized task view definition. */
 const TASK_VIEW_DEFINITION_MAX_BYTES = 300_000
 
@@ -2810,6 +2813,7 @@ export class DynamoDbWorkspaceSearchClient {
       }
       throw error
     }
+    await this.cleanupTaskViewPreferences(workspaceId, viewId)
     return { id: viewId, revision: expectedRevision }
   }
 
@@ -3048,6 +3052,51 @@ export class DynamoDbWorkspaceSearchClient {
       ConsistentRead: true,
     }))
     return response.Item ? readStoredTaskViewPreference(response.Item) : undefined
+  }
+
+  /** Removes every viewer preference for a deleted task view in bounded DynamoDB pages. */
+  private async cleanupTaskViewPreferences(workspaceId: string, viewId: string) {
+    const preferencePrefix = `${WORKSPACE_TASK_VIEW_PREFERENCE_PREFIX}`
+    let exclusiveStartKey: Record<string, unknown> | undefined
+    do {
+      const response = await this.documentClient.send(new QueryCommand({
+        TableName: this.tableName,
+        KeyConditionExpression: 'workspaceId = :workspaceId AND begins_with(recordKey, :prefix)',
+        FilterExpression: '#entryType = :entryType AND #viewId = :viewId',
+        ExpressionAttributeNames: {
+          '#entryType': 'entryType',
+          '#viewId': 'viewId',
+        },
+        ExpressionAttributeValues: {
+          ':entryType': 'task-view-preference',
+          ':viewId': viewId,
+          ':workspaceId': workspaceId,
+          ':prefix': preferencePrefix,
+        },
+        ExclusiveStartKey: exclusiveStartKey,
+        Limit: TASK_VIEW_PREFERENCE_CLEANUP_PAGE_SIZE,
+      }))
+      const preferenceKeys = (response.Items ?? [])
+        .filter((item) => isRecordValue(item) &&
+          item.entryType === 'task-view-preference' &&
+          item.viewId === viewId &&
+          typeof item.recordKey === 'string')
+        .map((item) => ({
+          workspaceId,
+          recordKey: String(item.recordKey),
+        }))
+      if (preferenceKeys.length > 0) {
+        await this.documentClient.send(new TransactWriteCommand({
+          TransactItems: preferenceKeys.map((key) => ({
+            Delete: {
+              TableName: this.tableName,
+              Key: key,
+            },
+          })),
+        }))
+      }
+      exclusiveStartKey = response.LastEvaluatedKey
+    } while (exclusiveStartKey)
   }
 
   /** Strongly reads one personal or Team default marker. */

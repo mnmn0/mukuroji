@@ -66,6 +66,8 @@ export type TaskBoardViewProps = {
   configuration?: WorkItemConfiguration
   /** Team identifiers whose configurations could not be loaded. */
   configurationFailedTeamIds: string[]
+  /** Checks exact Team-qualified Project write scope for one concrete Work Item. */
+  canMutateTask?: (task: ProjectTask) => boolean
   /** Team-scoped resolved configurations used by columns and cards. */
   configurationsByTeam: Record<string, ResolvedWorkItemConfiguration>
   /** Locale used to format custom-field values. */
@@ -109,6 +111,7 @@ export function TaskBoardView({
   configuration,
   configurationsByTeam,
   configurationFailedTeamIds,
+  canMutateTask,
   dependencySummaries = {},
   locale,
   personLabels,
@@ -150,6 +153,15 @@ export function TaskBoardView({
   const wrapText = presentation?.display.wrapTitles ?? false
   const showAssigneeAvatars = presentation?.display.showAssigneeAvatars ?? false
   const showEmptyGroups = presentation?.display.showEmptyGroups ?? true
+  /** Returns whether one card may expose inline Work Item mutation controls. */
+  const canEditTask = (task: ProjectTask) => Boolean(
+    onUpdateTask && (canMutateTask?.(task) ?? true),
+  )
+  /** Sends one card edit only when its exact Work Item scope is writable. */
+  const updateTask = async (task: ProjectTask, input: WorkItemPatch): Promise<ProjectTask> => {
+    if (!canEditTask(task) || !onUpdateTask) return task
+    return onUpdateTask(task, input)
+  }
   const visibleStatusColumns = showEmptyGroups
     ? statusColumns
     : statusColumns.filter((column) =>
@@ -157,7 +169,7 @@ export function TaskBoardView({
       )
   /** Validates and sends a status transition for one project task. */
   const moveTaskToStatus = async (task: ProjectTask, workflowStatusId: string) => {
-    if (!onUpdateTask || task.workflowStatusId === workflowStatusId) {
+    if (!canEditTask(task) || task.workflowStatusId === workflowStatusId) {
       return
     }
 
@@ -173,7 +185,7 @@ export function TaskBoardView({
     setDraggedTaskKey(undefined)
     setDropTargetColumnKey(undefined)
     try {
-      await onUpdateTask(task, { workflowStatusId })
+      await updateTask(task, { workflowStatusId })
     } finally {
       setMovingTaskKeys((currentKeys) => {
         const nextKeys = new Set(currentKeys)
@@ -185,7 +197,7 @@ export function TaskBoardView({
 
   /** Starts a native drag interaction carrying the task's composite key. */
   const handleDragStart = (event: DragEvent<HTMLElement>, task: ProjectTask) => {
-    if (!onUpdateTask) {
+    if (!canEditTask(task)) {
       return
     }
 
@@ -264,7 +276,7 @@ export function TaskBoardView({
                 ? tasks.find((candidate) => createTaskKey(candidate) === draggedTaskKey)
                 : undefined
 
-              if (!onUpdateTask || !draggedTask || draggedTask.teamId !== column.teamId) {
+              if (!draggedTask || !canEditTask(draggedTask) || draggedTask.teamId !== column.teamId) {
                 return
               }
 
@@ -374,7 +386,7 @@ export function TaskBoardView({
                           : 'border-[var(--workbench-border)] bg-white hover:border-[#99d7cf] hover:bg-[var(--workbench-surface-muted)]'
                       } ${draggedTaskKey === taskKey ? 'opacity-50 ring-2 ring-[#99d7cf]' : ''} ${isMoving ? 'opacity-70' : ''}`}
                       data-testid={`project-task-card-${task.id}`}
-                      draggable={Boolean(onUpdateTask) && !isMoving}
+                      draggable={canEditTask(task) && !isMoving}
                       onDragEnd={() => {
                         setDraggedTaskKey(undefined)
                         setDropTargetColumnKey(undefined)
@@ -392,14 +404,14 @@ export function TaskBoardView({
                       tabIndex={-1}
                     >
                       <div className="flex items-start gap-2">
-                        {onUpdateTask ? (
+                        {canEditTask(task) ? (
                           <TaskInlineField
                             ariaLabel={`${t('tasks.inline.edit')}: ${t('tasks.column.name')}`}
                             displayValue={resolveWorkItemTitle(task)}
                             testId={`task-inline-title-${task.id}`}
                             value={resolveWorkItemTitle(task)}
                             wrapText={wrapText}
-                            onCommit={(value) => onUpdateTask(task, { title: value }).then(() => undefined)}
+                            onCommit={(value) => updateTask(task, { title: value }).then(() => undefined)}
                           />
                         ) : (
                           <button
@@ -412,7 +424,7 @@ export function TaskBoardView({
                             {resolveWorkItemTitle(task)}
                           </button>
                         )}
-                        {onUpdateTask ? (
+                        {canEditTask(task) ? (
                           <button
                             aria-label={`${t('tasks.detail.title')}: ${resolveWorkItemTitle(task)}`}
                             className="rounded px-1 text-xs text-[var(--workbench-muted)] hover:bg-white hover:text-[var(--workbench-primary)]"
@@ -448,7 +460,7 @@ export function TaskBoardView({
                         summary={dependencySummary}
                         t={t}
                       />
-                      {visibleFields.has('status') && onUpdateTask && editableStatuses.length > 0 ? (
+                      {visibleFields.has('status') && canEditTask(task) && editableStatuses.length > 0 ? (
                         <TaskInlineField
                           ariaLabel={`${t('tasks.inline.edit')}: ${t('tasks.column.status')}`}
                           displayValue={resolveWorkItemWorkflowStatusLabel(task, taskConfiguration)}
@@ -467,7 +479,7 @@ export function TaskBoardView({
                           {showAssigneeAvatars ? (
                             <WorkItemAssigneeAvatar label={resolveWorkItemAssignee(task)} />
                           ) : null}
-                          {onUpdateTask && inlineAssigneeOptions.length > 0 ? (
+                          {canEditTask(task) && inlineAssigneeOptions.length > 0 ? (
                             <TaskInlineField
                               ariaLabel={`${t('tasks.inline.edit')}: ${t('tasks.column.assignee')}`}
                               displayValue={resolveWorkItemAssignee(task)}
@@ -475,18 +487,18 @@ export function TaskBoardView({
                               options={inlineAssigneeOptions}
                               testId={`task-inline-assignee-${task.id}`}
                               value={task.assigneeUserId}
-                              onCommit={(value) => onUpdateTask(task, { assigneeUserId: value }).then(() => undefined)}
+                              onCommit={(value) => updateTask(task, { assigneeUserId: value }).then(() => undefined)}
                             />
                           ) : (
                             <span className="truncate">{resolveWorkItemAssignee(task)}</span>
                           )}
                         </div>
                       ) : null}
-                      {(!presentation || visibleFields.has('customFields')) && onUpdateTask ? (
+                      {(!presentation || visibleFields.has('customFields')) && canEditTask(task) ? (
                         <TaskInlineCustomFields
                           configuration={taskConfiguration}
                           locale={locale}
-                          onUpdateTask={onUpdateTask}
+                          onUpdateTask={updateTask}
                           personLabels={personLabels}
                           personOptions={personOptions}
                           t={t}
@@ -515,7 +527,7 @@ export function TaskBoardView({
                       ) : null}
                       {visibleFields.has('priority') || visibleFields.has('dueDate') ? (
                         <div className="mt-3 flex flex-wrap items-center gap-2">
-                        {visibleFields.has('priority') && onUpdateTask ? (
+                        {visibleFields.has('priority') && canEditTask(task) ? (
                           <TaskInlineField
                             ariaLabel={`${t('tasks.inline.edit')}: ${t('tasks.column.priority')}`}
                             displayValue={t(`tasks.priority.${task.priority}`)}
@@ -526,17 +538,17 @@ export function TaskBoardView({
                             }))}
                             testId={`task-inline-priority-${task.id}`}
                             value={task.priority}
-                            onCommit={(value) => onUpdateTask(task, { priority: resolveTaskPriority(value) }).then(() => undefined)}
+                            onCommit={(value) => updateTask(task, { priority: resolveTaskPriority(value) }).then(() => undefined)}
                           />
                         ) : visibleFields.has('priority') ? <TaskPriorityBadge priority={task.priority} t={t} /> : null}
-                        {visibleFields.has('dueDate') && onUpdateTask && (schedule.mode === 'due-date' || schedule.mode === 'unscheduled') ? (
+                        {visibleFields.has('dueDate') && canEditTask(task) && (schedule.mode === 'due-date' || schedule.mode === 'unscheduled') ? (
                           <TaskInlineField
                             ariaLabel={`${t('tasks.inline.edit')}: ${t('tasks.column.dueDate')}`}
                             displayValue={scheduleDisplay}
                             kind="date"
                             testId={`task-inline-due-date-${task.id}`}
                             value={schedule.mode === 'due-date' ? schedule.dueDate : ''}
-                            onCommit={(value) => onUpdateTask(task, {
+                            onCommit={(value) => updateTask(task, {
                               schedule: replaceTaskDeadlineSchedule(schedule, value),
                             }).then(() => undefined)}
                           />

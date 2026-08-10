@@ -518,12 +518,14 @@ export function filterTasksByTaskViewDefinition(
   definition: TaskViewDefinition,
   context: TaskViewEvaluationContext = {},
 ): ProjectTask[] {
-  const keyword = definition.filters.keyword?.trim().toLocaleLowerCase() ?? ''
+  const keywordTerms = splitTaskViewKeyword(definition.filters.keyword)
   const now = context.now ?? new Date()
   const showCompleted = definition.layout.displayOptions.showCompleted ?? true
+  const showSubItems = definition.layout.displayOptions.showSubItems ?? true
   const showArchived = definition.layout.displayOptions.showArchived ?? false
   return tasks.filter((task) => {
     if (!showCompleted && task.statusCategory === 'completed') return false
+    if (!showSubItems && hasTaskViewParentRelation(task)) return false
     if (
       definition.filters.entityTypes?.length &&
       !definition.filters.entityTypes.includes('work-item')
@@ -546,9 +548,7 @@ export function filterTasksByTaskViewDefinition(
     ) return false
     if (
       definition.filters.statuses?.length &&
-      !definition.filters.statuses.some((status) =>
-        status === task.workflowStatusId || status === task.statusCategory
-      )
+      !definition.filters.statuses.includes(task.workflowStatusId)
     ) return false
     if (
       definition.filters.priorities?.length &&
@@ -578,9 +578,10 @@ export function filterTasksByTaskViewDefinition(
     if (definition.filters.date && !matchesTaskDateRange(task, definition.filters.date)) {
       return false
     }
-    if (!keyword) return true
-    return matchesCanonicalTaskViewKeyword(task, keyword) ||
-      context.keywordMatcher?.(task, keyword) === true
+    return keywordTerms.every((term) =>
+      matchesCanonicalTaskViewKeyword(task, term) ||
+      context.keywordMatcher?.(task, term) === true
+    )
   })
 }
 
@@ -632,7 +633,7 @@ export function applyTaskViewDefinitionToTasks(
  * Matches stable raw Work Item fields that every task-view surface can search safely.
  *
  * @param task - Work Item evaluated by the canonical filter.
- * @param normalizedKeyword - Trimmed lower-case keyword from the persisted definition.
+ * @param normalizedKeyword - One normalized keyword term from the persisted definition.
  * @returns Whether a canonical raw field contains the keyword.
  */
 function matchesCanonicalTaskViewKeyword(
@@ -646,7 +647,23 @@ function matchesCanonicalTaskViewKeyword(
     task.assigneeUserId,
     task.assignedProjectId,
     task.workflowStatusId,
-  ].some((value) => value?.toLocaleLowerCase().includes(normalizedKeyword))
+  ].some((value) => value?.normalize('NFKC').toLocaleLowerCase().includes(normalizedKeyword))
+}
+
+/** Splits one user keyword into normalized terms shared with Workspace Search. */
+function splitTaskViewKeyword(value: string | undefined): string[] {
+  return value
+    ?.normalize('NFKC')
+    .toLocaleLowerCase()
+    .replace(/\s+/gu, ' ')
+    .trim()
+    .split(' ')
+    .filter(Boolean) ?? []
+}
+
+/** Returns whether a Work Item is a child of another Work Item. */
+function hasTaskViewParentRelation(task: ProjectTask): boolean {
+  return task.relationIds.some((relationId) => relationId.startsWith('parent:'))
 }
 
 /** Returns whether a Work Item falls inside one persisted inclusive date range. */
@@ -660,8 +677,10 @@ function matchesTaskDateRange(
       ? task.updatedAt
       : task.dueDate
   if (!value) return false
-  if (filter.from && value < filter.from) return false
-  return !filter.to || value <= filter.to
+  const fromComparable = filter.from?.length === 10 ? value.slice(0, 10) : value
+  const toComparable = filter.to?.length === 10 ? value.slice(0, 10) : value
+  return (!filter.from || fromComparable >= filter.from) &&
+    (!filter.to || toComparable <= filter.to)
 }
 
 /** Resolves one built-in or custom task-view field to a sortable primitive. */

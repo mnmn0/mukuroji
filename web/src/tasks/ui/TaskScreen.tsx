@@ -314,6 +314,8 @@ export type TaskScreenProps = {
   isSystemAdmin?: boolean
   /** Whether the current user may manage Project member roles. */
   canManageProjectMembers?: boolean
+  /** Checks exact Team-qualified Project write scope for one concrete Work Item. */
+  canMutateTask?: (task: ProjectTask) => boolean
   /** Error shown when Project permissions could not be loaded or changed. */
   projectMembersErrorMessage?: string
   /** Error shown when Project tasks could not be loaded. */
@@ -434,9 +436,9 @@ export type TaskScreenProps = {
     preview: BulkOperationPreview,
   ) => Promise<BulkOperation>
   /** Retries retryable failed items in a bulk operation. */
-  onBulkRetry?: (operationId: string) => Promise<BulkOperation>
+  onBulkRetry?: (operationId: string, operation?: BulkOperation) => Promise<BulkOperation>
   /** Undoes successful items in a bulk operation. */
-  onBulkUndo?: (operationId: string) => Promise<BulkOperation>
+  onBulkUndo?: (operationId: string, operation?: BulkOperation) => Promise<BulkOperation>
 }
 
 /**
@@ -461,6 +463,7 @@ export function TaskScreen({
   assigneeErrorMessage,
   assigneeOptions = emptyProjectMembers,
   canManageProjectMembers = false,
+  canMutateTask,
   canManageScheduleDependencyEndpoint,
   collaboration,
   artifacts,
@@ -879,6 +882,8 @@ export function TaskScreen({
   const detailTask = isDetailOpen
     ? resolveLatestTaskSnapshot(selectedDetailTask, selectedIssueDetail?.issue)
     : undefined
+  const canMutateDetailTask = detailTask !== undefined &&
+    (canMutateTask?.(detailTask) ?? true)
   const selectedDetailTaskKey = selectedDetailTask
     ? createTaskKey(selectedDetailTask)
     : undefined
@@ -1710,6 +1715,7 @@ export function TaskScreen({
     const allowed = targets.every((target) => visibleTasks.some((task) =>
       task.teamId === target.teamId &&
       task.id === target.workItemId &&
+      (!canMutateTask || canMutateTask(task)) &&
       (!requiresConfiguration || !configurationFailedTeamIds.includes(task.teamId))
     ))
     return allowed
@@ -1717,6 +1723,7 @@ export function TaskScreen({
       : denyTaskAction(projectTaskActionDisabledReasons.unavailable)
   }, [
     configurationFailedTeamIds,
+    canMutateTask,
     projectTaskActionDisabledReasons.unavailable,
     visibleTasks,
   ])
@@ -2589,6 +2596,7 @@ export function TaskScreen({
                 bulkWorkspaceId={workspaceId}
                 canManageProjectMembers={canManageProjectMembers}
                 canManageScheduleDependencyEndpoint={canManageScheduleDependencyEndpoint}
+                canMutateTask={canMutateTask}
                 configuration={configuration}
                 configurationFailedTeamIds={configurationFailedTeamIds}
                 configurationsByTeam={resolvedConfigurationsByTeam}
@@ -2712,23 +2720,27 @@ export function TaskScreen({
                   isRelationCandidatesLoading={isRelationCandidatesLoading}
                   key={`${detailTask?.teamId ?? ''}:${detailTask?.id ?? ''}`}
                   locale={locale}
-                  onCreateScheduleDependency={onCreateScheduleDependency}
-                  onDeleteScheduleDependency={onDeleteScheduleDependency}
+                  onCreateScheduleDependency={canMutateDetailTask
+                    ? onCreateScheduleDependency
+                    : undefined}
+                  onDeleteScheduleDependency={canMutateDetailTask
+                    ? onDeleteScheduleDependency
+                    : undefined}
                   onScheduleNoChange={handleProjectScheduleNoChange}
-                  onAddRelation={onAddRelation
+                  onAddRelation={canMutateDetailTask && onAddRelation
                     ? (issueId, input) => handleProjectTaskActionRelation(
                         issueId,
                         () => onAddRelation(issueId, input),
                       )
                     : undefined}
                   onClose={handleCloseDetail}
-                  onDeleteRelation={onDeleteRelation
+                  onDeleteRelation={canMutateDetailTask && onDeleteRelation
                     ? (issueId, relation) => handleProjectTaskActionRelation(
                         issueId,
                         () => onDeleteRelation(issueId, relation),
                       )
                     : undefined}
-                  onUpdateIssue={detailTask &&
+                  onUpdateIssue={!canMutateDetailTask || !detailTask ||
                       configurationFailedTeamIds.includes(detailTask.teamId)
                     ? undefined
                     : handleUpdateDetailIssue}

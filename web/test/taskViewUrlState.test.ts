@@ -147,6 +147,24 @@ describe('task view URL state', () => {
     })
   })
 
+  test('rejects URL column widths outside persisted server bounds', () => {
+    const searchParams = new URLSearchParams({
+      'view.v': String(TASK_VIEW_URL_STATE_SCHEMA_VERSION),
+      'view.override': JSON.stringify({
+        layout: {
+          columns: [{ field: 'title', width: 39 }, { field: 'status', width: 2_001 }],
+        },
+      }),
+    })
+
+    const parsed = parseTaskViewUrlState(searchParams, context)
+
+    expect(parsed.state.override?.layout?.columns).toBeUndefined()
+    expect(parsed.warnings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ section: 'url-override' }),
+    ]))
+  })
+
   test('updates only owned parameters and clears stale view state', () => {
     const current = new URLSearchParams()
     current.append('teamId', 'team-1')

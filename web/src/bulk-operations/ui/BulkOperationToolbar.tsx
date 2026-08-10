@@ -94,9 +94,9 @@ export type BulkOperationToolbarProps = {
     preview: BulkOperationPreview,
   ) => Promise<BulkOperation>
   /** Failed item だけを再試行します。 */
-  onRetry?: (operationId: string) => Promise<BulkOperation>
+  onRetry?: (operationId: string, operation?: BulkOperation) => Promise<BulkOperation>
   /** 成功 item を undo します。 */
-  onUndo?: (operationId: string) => Promise<BulkOperation>
+  onUndo?: (operationId: string, operation?: BulkOperation) => Promise<BulkOperation>
   /** Operation 更新後に selection と親 cache を同期します。 */
   onOperationComplete?: (operation: BulkOperation) => void
   /** Returns an applied operation to the exact canonical request that opened this toolbar. */
@@ -339,7 +339,7 @@ export function BulkOperationToolbar({
     setBusyState('retry')
     setErrorMessage(undefined)
     try {
-      const nextOperation = await onRetry(operation.id)
+      const nextOperation = await onRetry(operation.id, operation)
       setOperation(nextOperation)
       onOperationComplete?.(nextOperation)
     } catch (error) {
@@ -377,7 +377,7 @@ export function BulkOperationToolbar({
     setBusyState('undo')
     setErrorMessage(undefined)
     try {
-      const nextOperation = await onUndo(undoToken)
+      const nextOperation = await onUndo(undoToken, operation)
       setOperation(nextOperation)
       onOperationComplete?.(nextOperation)
     } catch (error) {

@@ -506,6 +506,57 @@ describe('useTaskViewController resolution', () => {
     )).toEqual([createdView])
   })
 
+  test('reconciles stale personal and Team default flags after a default mutation', () => {
+    const promotedTeamView = {
+      ...teamDefault,
+      revision: teamDefault.revision + 1,
+      preference: {
+        ...teamDefault.preference,
+        defaultSource: 'personal',
+        isDefault: true,
+        isPersonalDefault: true,
+        isTeamDefault: true,
+      },
+    } satisfies SavedTaskView
+
+    const reconciled = reconcileSavedTaskViews(
+      [personalDefault, teamDefault],
+      { type: 'replace', view: promotedTeamView },
+    )
+
+    expect(reconciled.find((view) => view.id === promotedTeamView.id)?.preference).toMatchObject({
+      defaultSource: 'personal',
+      isDefault: true,
+      isPersonalDefault: true,
+      isTeamDefault: true,
+    })
+    expect(reconciled.find((view) => view.id === personalDefault.id)?.preference).toMatchObject({
+      isDefault: false,
+      isPersonalDefault: false,
+      isTeamDefault: false,
+    })
+    expect(reconciled.find((view) => view.id === personalDefault.id)?.preference.defaultSource)
+      .toBeUndefined()
+  })
+
+  test('promotes a remaining Team default after removing the personal default', () => {
+    const reconciled = reconcileSavedTaskViews(
+      [personalDefault, teamDefault],
+      { type: 'remove', viewId: personalDefault.id },
+    )
+
+    expect(reconciled).toEqual([{
+      ...teamDefault,
+      preference: {
+        ...teamDefault.preference,
+        defaultSource: 'team',
+        isDefault: true,
+        isPersonalDefault: false,
+        isTeamDefault: true,
+      },
+    }])
+  })
+
   test('keeps canonical cache data when revalidation fails after publication', async () => {
     const createdView = createSavedView('created-view', 'created', 'table', {
       isDefault: false,
