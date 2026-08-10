@@ -1983,6 +1983,36 @@ test('paginates accepted-resolution history with a scope-bound cursor', async ()
   })).rejects.toMatchObject({ status: 400, code: 'InvalidCollaborationCursor' })
 })
 
+test('rejects an accepted-resolution cursor when the root pointer changes', async () => {
+  const { actor, entityKey, memory, scope } = await createAcceptedResolutionHistoryState()
+  const firstHistoryPage = await memory.client.getAcceptedResolutionHistory({
+    entityKey,
+    rootCommentId: 'root-1',
+    limit: 1,
+  })
+  expect(firstHistoryPage.nextCursor).toBeString()
+
+  await memory.client.setAcceptedResolution({
+    ...scope,
+    rootCommentId: 'root-1',
+    commentId: 'reply-3',
+    summary: 'Use the third answer after the first history page.',
+    expectedThreadVersion: 4,
+    actor,
+    canModerate: false,
+  })
+
+  await expect(memory.client.getAcceptedResolutionHistory({
+    entityKey,
+    rootCommentId: 'root-1',
+    limit: 1,
+    cursor: firstHistoryPage.nextCursor,
+  })).rejects.toMatchObject({
+    status: 409,
+    code: 'AcceptedResolutionHistoryConflict',
+  })
+})
+
 test('rejects invalid and concurrently edited accepted-resolution replies', async () => {
   const { actor, entityKey, memory, scope } =
     await createAcceptedResolutionHistoryState()

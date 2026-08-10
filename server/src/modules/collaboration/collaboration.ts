@@ -1127,6 +1127,21 @@ function encodeAcceptedResolutionCursor(cursor: AcceptedResolutionCursor) {
 }
 
 /**
+ * Captures the root snapshot that an accepted-resolution cursor must continue from.
+ *
+ * @param root - Current root comment snapshot.
+ * @returns Version and accepted-resolution pointer bound to the cursor.
+ */
+function acceptedResolutionCursorSnapshot(
+  root: Pick<StoredComment, 'version' | 'acceptedResolutionId'>,
+): Pick<AcceptedResolutionCursor, 'rootVersion' | 'acceptedResolutionId'> {
+  return {
+    rootVersion: root.version,
+    acceptedResolutionId: root.acceptedResolutionId ?? null,
+  }
+}
+
+/**
  * Decodes and validates an accepted resolution history cursor.
  *
  * @param value - Opaque cursor string.
@@ -1145,21 +1160,31 @@ function decodeAcceptedResolutionCursor(
   try {
     const parsed: unknown = JSON.parse(Buffer.from(value, 'base64url').toString('utf8'))
     if (!isRecord(parsed) ||
-        parsed.version !== 1 ||
+        parsed.version !== 2 ||
         parsed.entityKey !== entityKey ||
         parsed.rootCommentId !== rootCommentId ||
         (parsed.phase !== 'append' && parsed.phase !== 'legacy')) {
       throw new Error('cursor mismatch')
     }
+    const rawAcceptedResolutionId = parsed.acceptedResolutionId
+    if (!isPositiveSafeInteger(parsed.rootVersion) ||
+        !(rawAcceptedResolutionId === null || typeof rawAcceptedResolutionId === 'string')) {
+      throw new Error('root snapshot mismatch')
+    }
+    const acceptedResolutionId = rawAcceptedResolutionId === null
+      ? null
+      : requireIdentifier(rawAcceptedResolutionId, 'Accepted resolution pointer')
     if (parsed.phase === 'append') {
       if (typeof parsed.recordKey !== 'string' ||
           !parsed.recordKey.startsWith(acceptedResolutionRecordPrefix(rootCommentId))) {
         throw new Error('append cursor mismatch')
       }
       return {
-        version: 1,
+        version: 2,
         entityKey,
         rootCommentId,
+        rootVersion: parsed.rootVersion,
+        acceptedResolutionId,
         phase: 'append',
         recordKey: parsed.recordKey,
       }
@@ -1168,9 +1193,11 @@ function decodeAcceptedResolutionCursor(
       throw new Error('legacy cursor mismatch')
     }
     return {
-      version: 1,
+      version: 2,
       entityKey,
       rootCommentId,
+      rootVersion: parsed.rootVersion,
+      acceptedResolutionId,
       phase: 'legacy',
       legacyOffset: parsed.legacyOffset,
     }
@@ -2284,11 +2311,15 @@ type DiscussionCursor = {
 /** Accepted resolution history cursor payload です。 */
 type AcceptedResolutionCursor = {
   /** Cursor schema version です。 */
-  version: 1
+  version: 2
   /** Cursor を発行した entity key です。 */
   entityKey: string
   /** Cursor を発行した root comment ID です。 */
   rootCommentId: string
+  /** Root comment revision observed when the cursor was issued. */
+  rootVersion: number
+  /** Accepted-resolution pointer observed when the cursor was issued. */
+  acceptedResolutionId: string | null
   /** Append-only rows または legacy inline history の pagination phase です。 */
   phase: 'append' | 'legacy'
   /** Append phase の直前 page で最後に処理した physical row key です。 */
@@ -2458,6 +2489,17 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
     if (root.parentCommentId || root.rootCommentId !== root.id) {
       throw new CollaborationError(400, 'CommentNotRoot', 'Only root comments own accepted resolutions.')
     }
+    if (
+      cursor &&
+      (cursor.rootVersion !== root.version ||
+        cursor.acceptedResolutionId !== (root.acceptedResolutionId ?? null))
+    ) {
+      throw new CollaborationError(
+        409,
+        'AcceptedResolutionHistoryConflict',
+        'Accepted resolution history changed before the next page was read.',
+      )
+    }
 
     const legacyHistory = [...root.legacyAcceptedResolutions].sort((left, right) => {
       const leftAt = left.supersededAt ?? left.acceptedAt
@@ -2473,9 +2515,10 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
         ...(nextOffset < legacyHistory.length
           ? {
               nextCursor: encodeAcceptedResolutionCursor({
-                version: 1,
+                version: 2,
                 entityKey,
                 rootCommentId,
+                ...acceptedResolutionCursorSnapshot(root),
                 phase: 'legacy',
                 legacyOffset: nextOffset,
               }),
@@ -2534,9 +2577,10 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       return {
         items,
         nextCursor: encodeAcceptedResolutionCursor({
-          version: 1,
+          version: 2,
           entityKey,
           rootCommentId,
+          ...acceptedResolutionCursorSnapshot(root),
           phase: 'append',
           recordKey: lastProcessedRecordKey,
         }),
@@ -2551,9 +2595,10 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       ...(legacyItems.length < legacyHistory.length
         ? {
             nextCursor: encodeAcceptedResolutionCursor({
-              version: 1,
+              version: 2,
               entityKey,
               rootCommentId,
+              ...acceptedResolutionCursorSnapshot(root),
               phase: 'legacy',
               legacyOffset: legacyItems.length,
             }),

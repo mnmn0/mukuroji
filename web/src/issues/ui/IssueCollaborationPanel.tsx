@@ -440,8 +440,14 @@ export function IssueCollaborationPanel({
                 sourceId: source.sourceId,
               }
               setSelectedSource(target)
-              route?.onCollaborationSourceChange?.(target)
-              selectTab('sources')
+              if (route?.onCollaborationSourceChange) {
+                // The controlled route callback persists the source and tab in one
+                // search-parameter update. Calling selectTab afterward would clear
+                // the exact contextItemId that was just written.
+                route.onCollaborationSourceChange(target)
+              } else {
+                selectTab('sources')
+              }
             }}
           />
         ) : null}
