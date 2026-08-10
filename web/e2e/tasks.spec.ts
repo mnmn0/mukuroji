@@ -6439,7 +6439,7 @@ test.describe('authenticated task page', () => {
     await expect(
       panel.getByRole('status').getByText('アクセス権を喪失'),
     ).toBeVisible()
-    await expect(panel.getByText('接続済みアカウントの権限が失われました。')).toBeVisible()
+    await expect(panel.getByText('この外部メッセージを表示する権限がありません。')).toBeVisible()
     await expect(panel.getByText('E2E_SECRET_QUOTE')).toHaveCount(0)
     await expect(panel.getByText('E2E_SECRET_ORIGINAL')).toHaveCount(0)
     await expect(
@@ -6480,7 +6480,7 @@ test.describe('authenticated task page', () => {
     ).not.toHaveAttribute('open', '')
 
     await page.getByTestId(
-      'related-document-promote-document-onboarding-research',
+      'related-document-promote-document-onboarding-research-relation-wireframe-research',
     ).click()
     await expect(decisionsTab).toHaveAttribute('aria-selected', 'true')
     await expect(panel.getByText(/根拠を添付: ドキュメント/)).toBeVisible()
