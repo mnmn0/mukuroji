@@ -17993,6 +17993,33 @@ function requireWorkspaceBusinessRead(principal: WorkspacePrincipal) {
   }
 }
 
+/**
+ * Requires a current Workspace-scoped route for Workspace-scoped Planning data.
+ *
+ * Enterprise permissions are resource-bound.  A caller authorized only at a
+ * Team or Project resource may still carry a read-capable permission, but that
+ * permission must not unlock immutable Planning context captured while an
+ * Initiative was Workspace-scoped.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ */
+function requirePlanningWorkspaceScopeRead(principal: WorkspacePrincipal): void {
+  requireWorkspaceBusinessRead(principal)
+  if (
+    principal.enterprisePermissions !== undefined &&
+    !(
+      principal.enterpriseRouteAuthorizedAtResource === true &&
+      principal.enterpriseAuthorizationResource?.kind === 'workspace'
+    )
+  ) {
+    throw new PlanningError(
+      403,
+      'PlanningUpdateScopeAccessDenied',
+      'Workspace-scoped Planning access requires Workspace permission.',
+    )
+  }
+}
+
 function requireWorkspaceAdministration(principal: WorkspacePrincipal) {
   if (principal.enterpriseRouteAuthorizedAtResource) {
     return
@@ -18476,7 +18503,7 @@ async function requirePlanningUpdateTargetPermission(
   } else if (entity.teamId) {
     await requirePlanningUpdateTeamPermission(principal, entity.teamId, minimumRole)
   } else {
-    requireWorkspaceBusinessRead(principal)
+    requirePlanningWorkspaceScopeRead(principal)
     if (minimumRole === 'manager') requireWorkspaceAdministration(principal)
   }
   return entity
@@ -18516,7 +18543,7 @@ async function requirePlanningUpdateCapturedScopePermission(
     await requirePlanningUpdateTeamPermission(principal, scope.teamId, 'viewer')
     return
   }
-  requireWorkspaceBusinessRead(principal)
+  requirePlanningWorkspaceScopeRead(principal)
 }
 
 /**

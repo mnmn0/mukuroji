@@ -957,6 +957,166 @@ test('applies a directory-mapped custom role to only its assigned Project APIs',
   })
 })
 
+test('hides Workspace-scoped immutable Planning context after an Initiative moves to a Project', async () => {
+  await withTestEnvironment({
+    COGNITO_CLIENT_ID: 'mukuroji-main-client',
+    COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+    COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
+    COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+  }, async () => {
+    configureFakeProjectClients(false, {
+      workspaceRole: 'member',
+      teamProjects: [{ id: 'refero', name: 'Refero', tone: 'blue' }],
+    })
+    const workspaceId = 'user#demo@example.com'
+    const workItemState = { workItems: [] }
+    const planning = new InMemoryPlanningClient(() => new Date('2026-08-07T00:00:00.000Z'))
+    await planning.create(workspaceId, {
+      ...createCyclePlanningInput('moving-workspace-portfolio', 0),
+      type: 'portfolio',
+      title: 'Moving workspace portfolio',
+      teamId: undefined,
+      projectId: undefined,
+      cadence: undefined,
+      capacity: undefined,
+      carryOverPolicy: undefined,
+    }, workItemState)
+    await planning.create(workspaceId, {
+      ...createCyclePlanningInput('moving-workspace-roadmap', 1),
+      type: 'roadmap',
+      title: 'Moving workspace roadmap',
+      parentId: 'moving-workspace-portfolio',
+      teamId: undefined,
+      projectId: undefined,
+      cadence: undefined,
+      capacity: undefined,
+      carryOverPolicy: undefined,
+    }, workItemState)
+    await planning.create(workspaceId, {
+      ...createCyclePlanningInput('moving-workspace-initiative', 2),
+      type: 'initiative',
+      title: 'Moving workspace initiative',
+      parentId: 'moving-workspace-roadmap',
+      teamId: undefined,
+      projectId: undefined,
+      cadence: undefined,
+      capacity: undefined,
+      carryOverPolicy: undefined,
+    }, workItemState)
+    await planning.configureUpdateCadence(workspaceId, {
+      target: { type: 'initiative', entityId: 'moving-workspace-initiative' },
+      cadence: {
+        updateOwnerMemberKey: 'demo@example.com',
+        cadence: { unit: 'week', count: 1 },
+        timeZone: 'UTC',
+        nextDueAt: '2026-08-10T00:00:00.000Z',
+        reminderHoursBefore: 24,
+      },
+      expectedRevision: 3,
+    }, workItemState)
+    await planning.publishUpdate(workspaceId, {
+      target: { type: 'initiative', entityId: 'moving-workspace-initiative' },
+      id: 'workspace-context-update',
+      health: 'on-track',
+      risk: 'none',
+      summary: 'Workspace context must remain scope protected.',
+      riskSummary: '',
+      decisionSummary: '',
+      helpNeeded: '',
+      nextAction: '',
+      evidence: [],
+      expectedRevision: 4,
+    }, 'demo@example.com', workItemState)
+    await planning.move(workspaceId, 'moving-workspace-initiative', {
+      parentId: 'moving-workspace-roadmap',
+      teamId: 'core-team',
+      projectId: 'refero',
+      expectedRevision: 5,
+    }, workItemState)
+
+    const identity = new InMemoryEnterpriseIdentityClient()
+    const now = new Date().toISOString()
+    await identity.putIdentityProvider({
+      workspaceId,
+      providerId: 'planning-history-scope-idp',
+      kind: 'oidc',
+      displayName: 'Planning history scope directory',
+      cognitoProviderName: 'EnterpriseOidc',
+      status: 'active',
+      revision: 1,
+      issuer: 'https://idp.example.com',
+      clientId: 'enterprise-client',
+      authorizationEndpoint: 'https://idp.example.com/authorize',
+      tokenEndpoint: 'https://idp.example.com/token',
+      jwksUri: 'https://idp.example.com/jwks',
+      scopes: ['openid', 'email'],
+      createdAt: now,
+      updatedAt: now,
+      lastTestedAt: now,
+    })
+    await identity.putCustomRole({
+      workspaceId,
+      roleId: 'custom:planning-project-reader',
+      name: 'Planning Project reader',
+      permissions: ['planning.read'],
+      guestAssignable: false,
+      revision: 1,
+      createdAt: now,
+      updatedAt: now,
+    })
+    const user = await identity.upsertScimUser({
+      workspaceId,
+      identityProviderId: 'planning-history-scope-idp',
+      externalId: 'planning-history-scope-user',
+      userName: 'demo@example.com',
+      emails: ['demo@example.com'],
+      active: true,
+      linkedMemberKey: 'demo@example.com',
+      idempotencyKey: 'planning-history-scope-user',
+    })
+    const group = await identity.upsertScimGroup({
+      workspaceId,
+      identityProviderId: 'planning-history-scope-idp',
+      externalId: 'planning-history-scope-group',
+      displayName: 'Planning history scope readers',
+      active: true,
+      memberUserIds: [user.userId],
+      idempotencyKey: 'planning-history-scope-group',
+    })
+    const desiredUser = (await identity.getSnapshot(workspaceId)).scimUsers.find((candidate) =>
+      candidate.userId === user.userId
+    )
+    if (!desiredUser) throw new Error('Expected the Planning history scope user to exist.')
+    await identity.markScimUserApplied(workspaceId, desiredUser.userId, desiredUser.version)
+    await identity.markScimGroupApplied(workspaceId, group.groupId, group.version)
+    await identity.putGroupMapping({
+      workspaceId,
+      mappingId: 'planning-history-scope-project-mapping',
+      identityProviderId: 'planning-history-scope-idp',
+      directoryGroupId: group.groupId,
+      roleId: 'custom:planning-project-reader',
+      scope: { workspaceId, kind: 'project', targetId: 'refero' },
+      enabled: true,
+      priority: 0,
+      revision: 1,
+      updatedAt: now,
+    })
+    setTestAppDependencies({ enterpriseIdentity: identity, planning })
+
+    const authorization = `Bearer ${createAccessToken([], {
+      client_id: 'mukuroji-main-client',
+      token_use: 'access',
+    })}`
+    const response = await app.request(
+      '/api/planning/updates?targetType=initiative&entityId=moving-workspace-initiative',
+      { headers: { Authorization: authorization } },
+    )
+
+    expect(response.status).toBe(200)
+    expect(await response.json()).toEqual({ updates: [] })
+  })
+})
+
 test('binds Enterprise Analytics report writes to Team and Workspace visibility scopes', async () => {
   await withTestEnvironment({
     COGNITO_CLIENT_ID: 'mukuroji-main-client',
