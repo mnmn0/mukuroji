@@ -344,8 +344,11 @@ export function TeamIssuePage() {
     enabled: Boolean(user && !currentUserError),
     locale,
   })
-  const projectIds = useMemo(
-    () => [...new Set(teams.flatMap((team) => team.projects.map((project) => project.id)))],
+  const projectScopes = useMemo(
+    () => teams.flatMap((team) => team.projects.map((project) => ({
+      teamId: team.id,
+      projectId: project.id,
+    }))),
     [teams],
   )
   const currentUserProjectKey = resolveCurrentUserProjectKey(user)
@@ -358,7 +361,7 @@ export function TeamIssuePage() {
   } = usePlanningProjectRoles(
     accessToken,
     currentUserProjectKey,
-    projectIds,
+    projectScopes,
     Boolean(
       user &&
       !currentUserError &&

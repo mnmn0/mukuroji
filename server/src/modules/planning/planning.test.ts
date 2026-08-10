@@ -2707,7 +2707,7 @@ describe('planning persistence', () => {
     })
   })
 
-  test('publishes an immutable UPDATE row while keeping only latest context on UPDATE_TARGET', async () => {
+  test('condition-checks source Work Items while publishing an immutable UPDATE row', async () => {
     const target: PlanningUpdateTarget = {
       type: 'project', teamId: 'team-1', projectId: 'project-1',
     }
@@ -2728,6 +2728,7 @@ describe('planning persistence', () => {
     }
     let transaction: Record<string, unknown> | undefined
     let immutableRow: Record<string, unknown> | undefined
+    let rejectSourceRevision = true
     const documentClient = {
       async send(command: {
         /** AWS SDK command constructor. */
@@ -2756,6 +2757,19 @@ describe('planning persistence', () => {
           }
         }
         transaction = command.input
+        if (rejectSourceRevision) {
+          rejectSourceRevision = false
+          throw {
+            name: 'TransactionCanceledException',
+            CancellationReasons: [
+              { Code: 'None' },
+              { Code: 'ConditionalCheckFailed' },
+              { Code: 'None' },
+              { Code: 'None' },
+              { Code: 'None' },
+            ],
+          }
+        }
         const items = command.input.TransactItems
         if (Array.isArray(items)) {
           for (const item of items) {
@@ -2778,14 +2792,41 @@ describe('planning persistence', () => {
       {} as DynamoDBClient,
       false,
       () => NOW,
+      'WorkItemsTable',
     )
+    const workItemState: PlanningWorkItemState = {
+      workItems: [
+        createWorkItem('work-source', 'started', { revision: 7 }),
+        createWorkItem('work-other-project', 'completed', {
+          projectId: 'project-2',
+          revision: 8,
+        }),
+        createWorkItem('work-other-team', 'completed', {
+          teamId: 'team-2',
+          revision: 9,
+        }),
+      ],
+    }
 
+    await expect(client.publishUpdate(
+      'workspace-1',
+      createPlanningUpdateInput(1, { target, id: 'update-1' }),
+      'owner@example.com',
+      workItemState,
+    )).rejects.toMatchObject({
+      status: 409,
+      code: 'PlanningWorkItemChanged',
+    })
     const response = await client.publishUpdate(
       'workspace-1',
       createPlanningUpdateInput(1, { target, id: 'update-1' }),
       'owner@example.com',
-      EMPTY_WORK_ITEMS,
+      workItemState,
     )
+    expect(response.update.progressSnapshot).toEqual({
+      percent: 50,
+      linkedWorkItemCount: 1,
+    })
     expect(response.planning.updateTargets[0]).not.toHaveProperty('latestContextSnapshot')
     const transactionItems = transaction?.TransactItems as Array<{
       /** DynamoDB Put operation. */
@@ -2795,14 +2836,39 @@ describe('planning persistence', () => {
         /** Optional immutability condition. */
         ConditionExpression?: string
       }
+      /** Optional canonical Work Item revision condition. */
+      ConditionCheck?: {
+        /** Canonical Work Item table. */
+        TableName: string
+        /** Qualified canonical Work Item key. */
+        Key: Record<string, unknown>
+        /** Canonical existence and revision condition. */
+        ConditionExpression: string
+        /** Revision attribute alias. */
+        ExpressionAttributeNames: Record<string, unknown>
+        /** Expected revision value. */
+        ExpressionAttributeValues: Record<string, unknown>
+      }
     }>
     expect(transactionItems.map((item) => item.Put?.Item.recordKey)).toEqual([
       'META',
+      undefined,
       'UPDATE_TARGET#PROJECT#team-1#project-1',
       'UPDATE_ID#PROJECT#team-1#project-1#update-1',
       'UPDATE#PROJECT#team-1#project-1#0000000000000001',
     ])
-    const targetRow = transactionItems[1]?.Put?.Item
+    expect(transactionItems[1]?.ConditionCheck).toMatchObject({
+      TableName: 'WorkItemsTable',
+      Key: {
+        directoryTeamId: 'workspace-1#team#team-1',
+        issueId: 'work-source',
+      },
+      ConditionExpression:
+        'attribute_exists(directoryTeamId) AND attribute_exists(issueId) AND #revision = :expectedRevision',
+      ExpressionAttributeNames: { '#revision': 'revision' },
+      ExpressionAttributeValues: { ':expectedRevision': 7 },
+    })
+    const targetRow = transactionItems[2]?.Put?.Item
     const persistedCadence = targetRow?.cadence
     if (
       !targetRow ||
@@ -2827,10 +2893,10 @@ describe('planning persistence', () => {
         persistedCadence.reminderHoursBefore,
       ),
     })
-    expect(transactionItems[2]?.Put?.ConditionExpression).toBe(
+    expect(transactionItems[3]?.Put?.ConditionExpression).toBe(
       'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
     )
-    expect(transactionItems[3]?.Put?.ConditionExpression).toBe(
+    expect(transactionItems[4]?.Put?.ConditionExpression).toBe(
       'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
     )
     const history = await client.listUpdates('workspace-1', { target })

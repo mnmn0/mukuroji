@@ -23,6 +23,7 @@ import type {
 } from '../../application/ports/realtime-publisher'
 import {
   createPlanningUpdateCollaborationEntityKey,
+  createPlanningUpdatePublicTargetKey,
   createProjectCollaborationEntityKey,
 } from '../../collaboration'
 import {
@@ -673,17 +674,49 @@ export function projectsSubscribedWatchers(eventType: string) {
 export function createSubscribedWatcherScopes(
   event: Pick<
     AuditProjectionEvent,
-    'entityId' | 'eventType' | 'projectId' | 'scopeKey' | 'workspaceId'
+    | 'entityId'
+    | 'eventType'
+    | 'planningTargetId'
+    | 'planningTargetType'
+    | 'projectId'
+    | 'scopeKey'
+    | 'teamId'
+    | 'workspaceId'
   >,
 ) {
   const planningNotification = planningNotificationKindFromEventType(event.eventType) !== undefined
+  const planningTargetKey = planningNotification
+    ? event.planningTargetType === 'project' && event.teamId && event.projectId
+      ? createPlanningUpdatePublicTargetKey({
+          type: 'project',
+          teamId: event.teamId,
+          projectId: event.projectId,
+        })
+      : event.planningTargetType === 'initiative' && event.planningTargetId
+        ? createPlanningUpdatePublicTargetKey({
+            type: 'initiative',
+            entityId: event.planningTargetId,
+          })
+          : event.teamId && event.projectId
+            ? createPlanningUpdatePublicTargetKey({
+                type: 'project',
+                teamId: event.teamId,
+                projectId: event.projectId,
+              })
+          : event.entityId && (
+              event.entityId.startsWith('project/') ||
+              event.entityId.startsWith('initiative/')
+            )
+            ? event.entityId
+            : undefined
+    : undefined
   return [
     ...(planningNotification
-      ? event.entityId
+      ? planningTargetKey
         ? [{
             entityKey: createPlanningUpdateCollaborationEntityKey(
               event.workspaceId,
-              event.entityId,
+              planningTargetKey,
             ),
             reason: 'watcher',
           }]
@@ -1375,11 +1408,11 @@ async function readCurrentPlanningUpdateScope(
     targetRecordKey: record.recordKey,
     ...(record.cadence
       ? {
-        ownerMemberKey: record.cadence.updateOwnerMemberKey,
+        ownerMemberKey: normalizeMemberKey(record.cadence.updateOwnerMemberKey),
         ...(record.cadence.escalationMemberKey
-          ? { escalationMemberKey: record.cadence.escalationMemberKey }
+          ? { escalationMemberKey: normalizeMemberKey(record.cadence.escalationMemberKey) }
           : {}),
-        nextDueAt: record.cadence.nextDueAt,
+        nextDueAt: readTimestamp(record.cadence.nextDueAt),
       }
       : {}),
   }

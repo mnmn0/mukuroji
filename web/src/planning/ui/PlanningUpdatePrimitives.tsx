@@ -299,6 +299,9 @@ export function PlanningUpdateDetailPane({
   summary,
   updateView,
 }: PlanningUpdateDetailPaneProps) {
+  const collaborationIsPending = collaboration?.isPending ?? false
+  const collaborationIsLoading = collaboration?.isLoading ?? false
+  const collaborationErrorMessage = collaboration?.errorMessage
   return (
     <aside
       aria-label={`${labels.latestUpdate}: ${summary.title}`}
@@ -327,7 +330,7 @@ export function PlanningUpdateDetailPane({
         {collaboration?.errorMessage ? (
           <div className="mt-4 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2" role="alert">
             <p className="text-xs font-semibold text-red-800">
-              {collaboration.errorMessage || labels.collaborationError}
+              {collaborationErrorMessage || labels.collaborationError}
             </p>
             {collaboration.onRetry ? (
               <button className="workbench-button-secondary min-h-9 px-3" onClick={collaboration.onRetry} type="button">
@@ -350,8 +353,8 @@ export function PlanningUpdateDetailPane({
                   : 'workbench-button-secondary min-h-10 px-3'}
                 disabled={
                   !collaboration.onToggleWatch ||
-                  collaboration.isPending ||
-                  collaboration.isLoading
+                  collaborationIsPending ||
+                  collaborationIsLoading
                 }
                 onClick={() => void collaboration.onToggleWatch?.()}
                 type="button"
@@ -365,7 +368,7 @@ export function PlanningUpdateDetailPane({
             {collaboration.onExport ? (
               <button
                 className="workbench-button-secondary min-h-10 px-3"
-                disabled={collaboration.isPending}
+                disabled={collaborationIsPending}
                 onClick={() => void collaboration.onExport?.()}
                 type="button"
               >
@@ -887,6 +890,9 @@ export function PlanningStatusUpdateLedger({
   updateView,
 }: PlanningStatusUpdateLedgerProps) {
   const onAddComment = collaboration?.onAddComment
+  const collaborationIsPending = collaboration?.isPending ?? false
+  const collaborationIsLoading = collaboration?.isLoading ?? false
+  const collaborationErrorMessage = collaboration?.errorMessage
   return (
     <section className="workbench-panel overflow-hidden" data-testid="planning-status-update-history">
       <div className="px-5 py-4">
@@ -1037,9 +1043,9 @@ export function PlanningStatusUpdateLedger({
                           ? 'workbench-button-primary min-h-9 px-3'
                           : 'workbench-button-secondary min-h-9 px-3'}
                         disabled={
-                          collaboration.isPending ||
-                          collaboration.isLoading ||
-                          Boolean(collaboration.errorMessage)
+                          collaborationIsPending ||
+                          collaborationIsLoading ||
+                          Boolean(collaborationErrorMessage)
                         }
                         key={reaction}
                         onClick={() => void collaboration.onToggleReaction?.(update.id, reaction)}
@@ -1088,9 +1094,9 @@ export function PlanningStatusUpdateLedger({
                     aria-label={labels.commentPlaceholder}
                     className="workbench-input min-h-20 p-3"
                     disabled={
-                      collaboration.isPending ||
-                      collaboration.isLoading ||
-                      Boolean(collaboration.errorMessage)
+                      collaborationIsPending ||
+                      collaborationIsLoading ||
+                      Boolean(collaborationErrorMessage)
                     }
                     name="comment"
                     placeholder={labels.commentPlaceholder}
@@ -1099,9 +1105,9 @@ export function PlanningStatusUpdateLedger({
                   <button
                     className="workbench-button-secondary min-h-9 px-3"
                     disabled={
-                      collaboration.isPending ||
-                      collaboration.isLoading ||
-                      Boolean(collaboration.errorMessage)
+                      collaborationIsPending ||
+                      collaborationIsLoading ||
+                      Boolean(collaborationErrorMessage)
                     }
                     type="submit"
                   >

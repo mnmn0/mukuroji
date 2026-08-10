@@ -387,6 +387,7 @@ export class CollaborationError extends Error {
   }
 }
 
+/** Persisted collaboration comment row with its DynamoDB key metadata. */
 type StoredComment = CollaborationComment & {
   /** DynamoDB partition key です。 */
   entityKey: string
@@ -396,6 +397,7 @@ type StoredComment = CollaborationComment & {
   entryType: 'comment'
 }
 
+/** Persisted watcher row with its current subscription state. */
 type StoredWatcher = {
   /** DynamoDB partition key です。 */
   entityKey: string
@@ -417,6 +419,7 @@ type StoredWatcher = {
   updatedAt: string
 }
 
+/** Persisted browser presence lease row. */
 type StoredPresence = {
   /** DynamoDB partition key です。 */
   entityKey: string
@@ -436,6 +439,7 @@ type StoredPresence = {
   expiresAt: number
 }
 
+/** Cursor used to continue reading one collaboration discussion prefix. */
 type DiscussionCursor = {
   /** Cursor schema version です。 */
   version: 1
@@ -470,6 +474,32 @@ export function createPlanningUpdateCollaborationEntityKey(
   targetKey: string,
 ) {
   return `${requireText(workspaceId, 'Workspace ID')}#planning-update#${requireText(targetKey, 'Planning update target key')}`
+}
+
+/** Canonical target identity used by Planning update APIs, watchers, and notifications. */
+export type PlanningUpdateTargetKeyInput =
+  | {
+      /** Target discriminator for a Team-qualified Project. */
+      type: 'project'
+      /** Team that owns the Project. */
+      teamId: string
+      /** Team-local Project identifier. */
+      projectId: string
+    }
+  | {
+      /** Target discriminator for an Initiative. */
+      type: 'initiative'
+      /** Workspace-local Initiative identifier. */
+      entityId: string
+    }
+
+/** Creates the shared public key used to store and query Planning update watchers. */
+export function createPlanningUpdatePublicTargetKey(
+  target: PlanningUpdateTargetKeyInput,
+): string {
+  return target.type === 'project'
+    ? `project/${encodeURIComponent(requireText(target.teamId, 'Team ID'))}/${encodeURIComponent(requireText(target.projectId, 'Project ID'))}`
+    : `initiative/${encodeURIComponent(requireText(target.entityId, 'Initiative ID'))}`
 }
 
 /** DynamoDB collaboration table を操作する client です。 */

@@ -51,6 +51,7 @@ import {
   isPlanningWorkItemLinkCandidate,
   resolvePlanningCycleRolloverTargets,
 } from '../model/selectors'
+import { createPlanningUpdateTargetKey } from '../model/targetKey'
 import {
   PlanningLatestUpdateSummary,
   PlanningUpdateDetailPane,
@@ -1813,12 +1814,6 @@ function resolvePlanningEntityUpdateView(
  * @param target - Canonical update target.
  * @returns A key that preserves Team identity for duplicate Project IDs.
  */
-function createPlanningUpdateTargetKey(target: PlanningUpdateTargetView) {
-  return target.type === 'project'
-    ? `project:${target.teamId}\0${target.projectId}`
-    : `initiative:${target.entityId}`
-}
-
 function groupChildren(entities: PlanningEntity[]) {
   const result = new Map<string, PlanningEntity[]>()
   for (const entity of entities) {

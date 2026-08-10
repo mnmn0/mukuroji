@@ -22,6 +22,7 @@ import {
   type WorkspaceSummary,
 } from '../../work-items/model/workspaceWorkItems'
 import { TaskListRow } from '../../work-items/ui/WorkspaceWorkItemPrimitives'
+import { formatPlanningUpdateDate } from '../../planning/model/date'
 
 /**
  * Props for the Workspace dashboard view.
@@ -95,10 +96,6 @@ function findProjectUpdateTarget(
 }
 
 /** Returns the compact ISO calendar date used by the dense portfolio ledger. */
-function formatUpdateDate(value: string | undefined) {
-  return value?.slice(0, 10) ?? '—'
-}
-
 /**
  * Maps a portfolio risk value to its translated Workspace message key.
  *
@@ -232,7 +229,10 @@ export function DashboardWorkspaceView({
                             <p className="truncate text-xs text-[var(--workbench-muted)]">
                               {updateTarget.latestUpdate.authorMemberKey} ·{' '}
                               <time dateTime={updateTarget.latestUpdate.createdAt}>
-                                {formatUpdateDate(updateTarget.latestUpdate.createdAt)}
+                                {formatPlanningUpdateDate(
+                                  updateTarget.latestUpdate.createdAt,
+                                  updateTarget.cadence?.timeZone,
+                                )}
                               </time>
                             </p>
                           </div>
@@ -240,7 +240,10 @@ export function DashboardWorkspaceView({
                         <p className="text-xs font-medium tabular-nums text-[var(--workbench-muted)]">
                           {t('workspace.planningUpdate.column.nextDue')}: {' '}
                           <time dateTime={updateTarget?.cadence?.nextDueAt}>
-                            {formatUpdateDate(updateTarget?.cadence?.nextDueAt)}
+                            {formatPlanningUpdateDate(
+                              updateTarget?.cadence?.nextDueAt,
+                              updateTarget?.cadence?.timeZone,
+                            )}
                           </time>
                         </p>
                       </div>
@@ -270,7 +273,10 @@ export function DashboardWorkspaceView({
                           <p className="text-xs text-[var(--workbench-muted)]">
                             {updateTarget.latestUpdate.authorMemberKey} ·{' '}
                             <time dateTime={updateTarget.latestUpdate.createdAt}>
-                              {formatUpdateDate(updateTarget.latestUpdate.createdAt)}
+                              {formatPlanningUpdateDate(
+                                updateTarget.latestUpdate.createdAt,
+                                updateTarget.cadence?.timeZone,
+                              )}
                             </time>
                           </p>
                         </div>
@@ -278,7 +284,10 @@ export function DashboardWorkspaceView({
                     </td>
                     <td className="px-5 py-4 tabular-nums text-[var(--workbench-muted)] max-[760px]:hidden">
                       <time dateTime={updateTarget?.cadence?.nextDueAt}>
-                        {formatUpdateDate(updateTarget?.cadence?.nextDueAt)}
+                        {formatPlanningUpdateDate(
+                          updateTarget?.cadence?.nextDueAt,
+                          updateTarget?.cadence?.timeZone,
+                        )}
                       </time>
                     </td>
                   </tr>

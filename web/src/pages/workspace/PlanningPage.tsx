@@ -61,6 +61,7 @@ import {
   type PlanningUpdateCommentView,
   type PlanningUpdateReactionView,
 } from '../../planning/model/statusUpdateView'
+import { createPlanningUpdateTargetKey } from '../../planning/model/targetKey'
 import { usePlanningSnapshot } from '../../planning/queries/usePlanningSnapshot'
 import {
   revalidatePlanningUpdateHistoryAfterPublish,
@@ -142,8 +143,11 @@ export function PlanningPage() {
     mutate: mutatePlanning,
     key: planningKey,
   } = usePlanningSnapshot(accessToken, Boolean(user && !currentUserError))
-  const projectIds = useMemo(
-    () => [...new Set(teams.flatMap((team) => team.projects.map((project) => project.id)))],
+  const projectScopes = useMemo(
+    () => teams.flatMap((team) => team.projects.map((project) => ({
+      teamId: team.id,
+      projectId: project.id,
+    }))),
     [teams],
   )
   const currentUserProjectKey = resolveCurrentUserProjectKey(user)
@@ -156,7 +160,7 @@ export function PlanningPage() {
   } = usePlanningProjectRoles(
     accessToken,
     currentUserProjectKey,
-    projectIds,
+    projectScopes,
     Boolean(
       user &&
       !currentUserError &&
@@ -1057,12 +1061,6 @@ function planningUpdateTargetIsArchived(
  * @param target - Canonical update target.
  * @returns Stable string key.
  */
-function createPlanningUpdateTargetKey(target: PlanningUpdateTarget) {
-  return target.type === 'project'
-    ? `project:${target.teamId}\0${target.projectId}`
-    : `initiative:${target.entityId}`
-}
-
 /**
  * Starts a browser download for one exported Planning update artifact.
  *
@@ -1075,7 +1073,7 @@ function downloadPlanningUpdateArtifact(blob: Blob, filename: string) {
   anchor.href = url
   anchor.download = filename
   anchor.click()
-  URL.revokeObjectURL(url)
+  window.setTimeout(() => URL.revokeObjectURL(url), 0)
 }
 
 function resolveCurrentUserProjectKey(user: CurrentUser | undefined) {

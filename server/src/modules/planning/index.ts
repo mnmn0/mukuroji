@@ -2,6 +2,7 @@
 export {
   PLANNING_STORAGE_SCHEMA_VERSION,
   createPlanningWorkItemDependencySummary,
+  createPlanningUpdateProjectTargetRecordKey,
   PlanningError,
   requirePlanningWorkItemHasNoScheduleDependencies,
   type PlanningAuthorizationState,
@@ -11,6 +12,7 @@ export {
   type PlanningMutationTransaction,
   type PlanningMutationTransactionResult,
   type PlanningUpdateAnnotationTransactionResult,
+  type PlanningUpdatePublishTransactionResult,
   type PlanningUpdateTargetAuthorizationReference,
   type PlanningWorkItemDependencyTransactionResult,
   type PlanningWorkItemState,

@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, spyOn, test } from 'bun:test'
 import {
   createDefaultDueDateWorkItemSchedule,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
@@ -577,6 +577,67 @@ describe('notification schedule handler', () => {
         escalationHoursAfter: 12,
       },
     }))).toThrow('escalation hours and member must be configured together')
+  })
+
+  test('logs and skips one malformed due-index row without stopping valid peers', async () => {
+    const validTarget = createPlanningProjectUpdateTarget()
+    const validIndexItem = createPlanningDueIndexItem(validTarget)
+    const malformedIndexItem = {
+      workspaceId: 'workspace-1',
+      recordKey: '',
+      updateScheduleShard: validIndexItem.updateScheduleShard,
+      nextNotificationAtRecordKey: validIndexItem.nextNotificationAtRecordKey,
+    }
+    const recording = createRecordingDocumentClient((name, input) => {
+      if (name === 'ScanCommand') return { Items: [] }
+      if (name === 'QueryCommand' && input.IndexName === 'UpdateScheduleDueIndex') {
+        const values = input.ExpressionAttributeValues
+        const queriedShard = typeof values === 'object' && values !== null &&
+            ':scheduleShard' in values
+          ? values[':scheduleShard']
+          : undefined
+        return queriedShard === validIndexItem.updateScheduleShard
+          ? { Items: [malformedIndexItem, validIndexItem], ScannedCount: 2 }
+          : { Items: [], ScannedCount: 0 }
+      }
+      if (name === 'QueryCommand') {
+        return {
+          Items: [{
+            directoryId: 'workspace-1',
+            entryType: 'project',
+            teamId: 'core-team',
+            projectId: 'platform',
+          }],
+        }
+      }
+      if (name === 'GetCommand') {
+        const target = resolvePlanningTargetGet(input, [validTarget])
+        if (target) return target
+      }
+      return {}
+    })
+    const errorLog = spyOn(console, 'error').mockImplementation(() => undefined)
+    try {
+      await expect(runNotificationSchedule(createRunOptions(recording.client, {
+        now: new Date('2026-07-12T10:00:00.000Z'),
+        planningTableName: 'PlanningTable',
+        projectDirectoryTableName: 'ProjectDirectoryTable',
+      }))).resolves.toMatchObject({
+        emittedEvents: 1,
+        scannedItems: 2,
+        skippedItems: 1,
+      })
+      expect(errorLog).toHaveBeenCalledTimes(1)
+      expect(errorLog).toHaveBeenCalledWith(
+        'Planning update schedule row is invalid.',
+        {
+          requestId: 'schedule-event-1',
+          scheduleShard: validIndexItem.updateScheduleShard,
+        },
+      )
+    } finally {
+      errorLog.mockRestore()
+    }
   })
 
   test('emits one deterministic overdue event for an active current Project target', async () => {

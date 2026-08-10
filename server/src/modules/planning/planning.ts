@@ -189,10 +189,21 @@ export type PlanningUpdateAnnotationTransactionResult =
       memberKey: string
     }
 
+/** Minimal result exposed while preparing a durable Planning publish receipt. */
+export type PlanningUpdatePublishTransactionResult = {
+  /** Identifies an immutable structured update publish. */
+  kind: 'publish'
+  /** Planning revision produced by the publish. */
+  revision: number
+  /** Complete immutable update value committed by the publish. */
+  update: PlanningUpdate
+}
+
 /** Minimal Planning mutation result accepted by a durable receipt contribution. */
 export type PlanningMutationTransactionResult =
   | PlanningWorkItemDependencyTransactionResult
   | PlanningUpdateAnnotationTransactionResult
+  | PlanningUpdatePublishTransactionResult
 
 /** One external DynamoDB action prepared for the Planning mutation transaction. */
 type PlanningMutationTransactionContribution = {
@@ -323,6 +334,8 @@ export type PlanningClient = {
     input: PublishPlanningUpdateInput,
     authorMemberKey: string,
     workItemState: PlanningWorkItemState,
+    authorizationConditionChecks?: readonly PlanningCallerAuthorizationConditionCheck[],
+    transaction?: PlanningMutationTransaction<PlanningUpdatePublishTransactionResult>,
   ): Promise<PlanningUpdatePublishResponse>
   /** Target-local immutable update history を新しい順に返します。 */
   listUpdates(
@@ -412,7 +425,7 @@ export type PlanningClient = {
     input: CreateWorkItemScheduleDependencyInput,
     workItemState: PlanningWorkItemState,
     authorizationConditionChecks?: readonly PlanningCallerAuthorizationConditionCheck[],
-    transaction?: PlanningMutationTransaction,
+    transaction?: PlanningMutationTransaction<PlanningMutationTransactionResult>,
   ): Promise<PlanningMutationResponse>
   /**
    * Updates editable fields of a canonical Work Item schedule dependency.
@@ -431,7 +444,7 @@ export type PlanningClient = {
     input: UpdateWorkItemScheduleDependencyInput,
     workItemState: PlanningWorkItemState,
     authorizationConditionChecks?: readonly PlanningCallerAuthorizationConditionCheck[],
-    transaction?: PlanningMutationTransaction,
+    transaction?: PlanningMutationTransaction<PlanningMutationTransactionResult>,
   ): Promise<PlanningMutationResponse>
   /**
    * Deletes one canonical Work Item schedule dependency.
@@ -450,7 +463,7 @@ export type PlanningClient = {
     input: PlanningRevisionInput,
     workItemState: PlanningWorkItemState,
     authorizationConditionChecks?: readonly PlanningCallerAuthorizationConditionCheck[],
-    transaction?: PlanningMutationTransaction,
+    transaction?: PlanningMutationTransaction<PlanningMutationTransactionResult>,
   ): Promise<PlanningMutationResponse>
   /** Work Item planning link を作成または置換します。 */
   putWorkItemLink(
@@ -970,6 +983,8 @@ abstract class BasePlanningClient implements PlanningClient {
     input: PublishPlanningUpdateInput,
     authorMemberKey: string,
     workItemState: PlanningWorkItemState,
+    authorizationConditionChecks: readonly PlanningCallerAuthorizationConditionCheck[] = [],
+    transaction?: PlanningMutationTransaction<PlanningUpdatePublishTransactionResult>,
   ): Promise<PlanningUpdatePublishResponse> {
     const result = await this.mutate(
       workspaceId,
@@ -1006,6 +1021,12 @@ abstract class BasePlanningClient implements PlanningClient {
           target,
           health,
           risk,
+          workItemState,
+        )
+        const workItemConditions = createPlanningUpdateSourceWorkItemConditions(
+          state,
+          target,
+          evidence,
           workItemState,
         )
         const version = current.latestVersion + 1
@@ -1053,8 +1074,10 @@ abstract class BasePlanningClient implements PlanningClient {
           const entity = requireActiveEntity(next, target.entityId)
           next = replaceEntity(next, { ...entity, health, risk, updatedAt: now })
         }
-        return { state: next, publishedUpdate: update }
+        return { state: next, publishedUpdate: update, workItemConditions }
       },
+      authorizationConditionChecks,
+      transaction,
     )
     if (!result.publishedUpdate) {
       throw new PlanningError(503, 'PlanningUpdateUnavailable', 'Published update is unavailable.')
@@ -1649,7 +1672,7 @@ abstract class BasePlanningClient implements PlanningClient {
     workItemState: PlanningWorkItemState,
     mutation: (state: PlanningWorkspaceState, now: string) => PlanningMutationResult,
     authorizationConditionChecks: readonly PlanningCallerAuthorizationConditionCheck[] = [],
-    transaction?: PlanningMutationTransaction,
+    transaction?: PlanningMutationTransaction<PlanningMutationTransactionResult>,
   ) {
     const workspaceId = readIdentifier(workspaceIdValue, 'Workspace ID')
     const expectedRevision = readRevision(expectedRevisionValue)
@@ -1665,18 +1688,24 @@ abstract class BasePlanningClient implements PlanningClient {
       updatedAt: this.now().toISOString(),
     }
     const planning = createPlanningSnapshot(after, workItemState, this.now().toISOString())
+    const transactionResult: PlanningMutationTransactionResult | undefined =
+      result.publishedUpdate === undefined
+        ? result.workItemDependencyTransactionSource === undefined
+          ? undefined
+          : {
+              ...result.workItemDependencyTransactionSource,
+              revision: after.revision,
+              dependency: structuredClone(result.workItemDependencyTransactionSource.dependency),
+            }
+        : {
+            kind: 'publish',
+            revision: after.revision,
+            update: structuredClone(result.publishedUpdate),
+          }
     const transactionContribution = transaction
       ? await preparePlanningMutationTransactionContribution(
           transaction,
-          result.workItemDependencyTransactionSource === undefined
-            ? undefined
-            : {
-                ...result.workItemDependencyTransactionSource,
-                revision: after.revision,
-                dependency: structuredClone(
-                  result.workItemDependencyTransactionSource.dependency,
-                ),
-              },
+          transactionResult,
         )
       : undefined
     await this.commitState(
@@ -2850,7 +2879,8 @@ function readPlanningUpdateCadence(value: unknown): PlanningUpdateCadence {
     )
   }
   const timeZone = readPlanningTimeZone(value.timeZone)
-  const nextDueAt = readTimestamp(value.nextDueAt, 'Planning update next due timestamp')
+  const rawNextDueAt = readTimestamp(value.nextDueAt, 'Planning update next due timestamp')
+  const nextDueAt = new Date(Date.parse(rawNextDueAt)).toISOString()
   const reminderHoursBefore = readPlanningUpdateHourOffset(
     value.reminderHoursBefore,
     'Reminder hours before',
@@ -3645,11 +3675,8 @@ function createPlanningUpdateContextSnapshot(
   risk: PlanningRisk,
   workItemState: PlanningWorkItemState,
 ): PlanningUpdateContextSnapshot {
-  const workItems = createWorkItemMap(workItemState)
   const scope = createPlanningUpdateVisibilityEnvelope(state, target)
-  const visibleWorkItems = new Map([...workItems].filter(([, workItem]) =>
-    isInsidePlanningUpdateVisibilityEnvelope(scope, workItem.teamId, workItem.projectId)
-  ))
+  const visibleWorkItems = createPlanningUpdateVisibleWorkItemMap(state, target, workItemState)
   const canonicalState = {
     ...state,
     entities: state.entities.filter((entity) =>
@@ -3783,6 +3810,25 @@ function isInsidePlanningUpdateVisibilityEnvelope(
 }
 
 /**
+ * Selects canonical Work Items inside one update target visibility envelope.
+ *
+ * @param state - Current canonical Planning graph.
+ * @param target - Project or Initiative update target.
+ * @param workItemState - Canonical Work Item projection visible to the publisher.
+ * @returns Qualified Work Item map bounded to the immutable update scope.
+ */
+function createPlanningUpdateVisibleWorkItemMap(
+  state: PlanningWorkspaceState,
+  target: PlanningUpdateTarget,
+  workItemState: PlanningWorkItemState,
+) {
+  const scope = createPlanningUpdateVisibilityEnvelope(state, target)
+  return new Map([...createWorkItemMap(workItemState)].filter(([, workItem]) =>
+    isInsidePlanningUpdateVisibilityEnvelope(scope, workItem.teamId, workItem.projectId)
+  ))
+}
+
+/**
  * Computes typed changes between the previous and current immutable contexts.
  *
  * @param previous - Previous published context, absent for version one.
@@ -3887,15 +3933,12 @@ function requirePlanningUpdateEvidenceExists(
   evidence: readonly PlanningUpdateEvidence[],
   workItemState: PlanningWorkItemState,
 ) {
-  const workItems = createWorkItemMap(workItemState)
+  const workItems = createPlanningUpdateVisibleWorkItemMap(state, target, workItemState)
   const scope = createPlanningUpdateVisibilityEnvelope(state, target)
   for (const item of evidence) {
     if (item.type === 'work-item') {
       const workItem = workItems.get(createWorkItemKey(item.teamId, item.workItemId))
-      if (
-        !workItem ||
-        !isInsidePlanningUpdateVisibilityEnvelope(scope, workItem.teamId, workItem.projectId)
-      ) {
+      if (!workItem) {
         throw invalid(
           'PlanningUpdateEvidenceInvalid',
           'Evidence Work Item is unavailable for this update target.',
@@ -3915,6 +3958,106 @@ function requirePlanningUpdateEvidenceExists(
       }
     }
   }
+}
+
+/**
+ * Captures revisions for every canonical Work Item used by one immutable update.
+ *
+ * Project progress consumes every Work Item assigned to the exact qualified
+ * Project. Initiative roll-ups consume Work Items linked into the active target
+ * subtree. Typed Work Item evidence is always included in the source set.
+ *
+ * @param state - Current canonical Planning graph.
+ * @param target - Project or Initiative update target.
+ * @param evidence - Validated typed evidence stored with the update.
+ * @param workItemState - Canonical Work Item projection used for context and evidence.
+ * @returns Deterministically ordered DynamoDB revision conditions.
+ */
+function createPlanningUpdateSourceWorkItemConditions(
+  state: PlanningWorkspaceState,
+  target: PlanningUpdateTarget,
+  evidence: readonly PlanningUpdateEvidence[],
+  workItemState: PlanningWorkItemState,
+): PlanningWorkItemCondition[] {
+  const visibleWorkItems = createPlanningUpdateVisibleWorkItemMap(state, target, workItemState)
+  const sourceKeys = new Set<string>()
+  if (target.type === 'project') {
+    for (const key of visibleWorkItems.keys()) sourceKeys.add(key)
+  } else {
+    const scope = createPlanningUpdateVisibilityEnvelope(state, target)
+    const visibleEntities = state.entities.filter((entity) =>
+      isInsidePlanningUpdateVisibilityEnvelope(scope, entity.teamId, entity.projectId)
+    )
+    const rollupEntityIds = collectPlanningUpdateRollupEntityIds(
+      visibleEntities,
+      target.entityId,
+    )
+    for (const link of state.workItemLinks) {
+      const key = createWorkItemKey(link.teamId, link.workItemId)
+      const workItem = visibleWorkItems.get(key)
+      if (!workItem || link.projectId !== workItem.projectId) continue
+      if ([link.cycleId, link.milestoneId, ...link.goalIds].some((entityId) =>
+        entityId !== undefined && rollupEntityIds.has(entityId)
+      )) sourceKeys.add(key)
+    }
+  }
+  for (const item of evidence) {
+    if (item.type === 'work-item') {
+      sourceKeys.add(createWorkItemKey(item.teamId, item.workItemId))
+    }
+  }
+  return [...sourceKeys]
+    .sort(compareText)
+    .map((key) => {
+      const workItem = visibleWorkItems.get(key)
+      if (!workItem) {
+        throw invalid(
+          'PlanningUpdateEvidenceInvalid',
+          'Evidence Work Item is unavailable for this update target.',
+        )
+      }
+      return {
+        teamId: workItem.teamId,
+        workItemId: workItem.id,
+        revision: readRevision(workItem.revision),
+      }
+    })
+}
+
+/**
+ * Collects entities whose linked Work Items contribute to an Initiative roll-up.
+ *
+ * Canceled or archived branches are excluded consistently with roll-up
+ * calculation, while completed and manual branches retain linked-item counts.
+ *
+ * @param entities - Planning entities already bounded to the target envelope.
+ * @param rootEntityId - Initiative entity that owns the update target.
+ * @returns Active roll-up entity identities in the target subtree.
+ */
+function collectPlanningUpdateRollupEntityIds(
+  entities: readonly StoredPlanningEntity[],
+  rootEntityId: string,
+) {
+  const entitiesById = new Map(entities.map((entity) => [entity.id, entity]))
+  const childrenByParent = new Map<string, StoredPlanningEntity[]>()
+  for (const entity of entities) {
+    if (!entity.parentId) continue
+    const children = childrenByParent.get(entity.parentId) ?? []
+    children.push(entity)
+    childrenByParent.set(entity.parentId, children)
+  }
+  const entityIds = new Set<string>()
+  const pending = [rootEntityId]
+  while (pending.length > 0) {
+    const entityId = pending.pop()!
+    const entity = entitiesById.get(entityId)
+    if (!entity || entity.archivedAt || entity.status === 'canceled' || entityIds.has(entityId)) {
+      continue
+    }
+    entityIds.add(entityId)
+    for (const child of childrenByParent.get(entityId) ?? []) pending.push(child.id)
+  }
+  return entityIds
 }
 
 function calculateRollups(
@@ -5674,6 +5817,20 @@ function createPlanningUpdateTargetRecordKey(target: PlanningUpdateTarget) {
     `${UPDATE_TARGET_RECORD_PREFIX}${createPlanningUpdateTargetRecordSuffix(target)}`,
     'Planning update target record key',
   )
+}
+
+/**
+ * Creates the canonical Planning UPDATE_TARGET key for a Team-qualified Project.
+ *
+ * @param teamId - Owning Team identifier.
+ * @param projectId - Team-local Project identifier.
+ * @returns DynamoDB sort key for the Project target row.
+ */
+export function createPlanningUpdateProjectTargetRecordKey(
+  teamId: string,
+  projectId: string,
+): string {
+  return createPlanningUpdateTargetRecordKey({ type: 'project', teamId, projectId })
 }
 
 /**

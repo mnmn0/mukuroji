@@ -18,6 +18,7 @@ import {
   PLANNING_UPDATE_SCHEDULE_DUE_INDEX_NAME,
   PLANNING_UPDATE_SCHEDULE_SHARD_COUNT,
 } from '../../../planning'
+import { createPlanningUpdatePublicTargetKey } from '../../../collaboration'
 import {
   isCanonicalWorkItemRecord,
   workItemScheduleInstantToLocalDate,
@@ -412,15 +413,27 @@ async function queryDuePlanningUpdateTargets(
       input.result.scannedItems += response.ScannedCount ?? response.Items?.length ?? 0
 
       for (const indexedItem of response.Items ?? []) {
-        const record = await readCurrentPlanningUpdateTargetFromDueIndex(
-          input,
-          indexedItem,
-          scheduleShard,
-          upperBound,
-        )
-        const candidates = record
-          ? createPlanningScheduledNotificationCandidates(record, input.now)
-          : []
+        let record: PlanningUpdateTargetScheduleRecord | undefined
+        let candidates: PlanningScheduledNotificationCandidate[] = []
+        try {
+          record = await readCurrentPlanningUpdateTargetFromDueIndex(
+            input,
+            indexedItem,
+            scheduleShard,
+            upperBound,
+          )
+          candidates = record
+            ? createPlanningScheduledNotificationCandidates(record, input.now)
+            : []
+        } catch (error) {
+          if (!(error instanceof TypeError)) throw error
+          console.error('Planning update schedule row is invalid.', {
+            requestId: input.options.requestId,
+            scheduleShard,
+          })
+          input.result.skippedItems += 1
+          continue
+        }
         if (!record || candidates.length === 0) {
           input.result.skippedItems += 1
           continue
@@ -970,9 +983,7 @@ function createPlanningScheduledNotificationAuditEvent(
   const targetId = candidate.target.type === 'project'
     ? candidate.target.projectId
     : candidate.target.entityId
-  const entityId = candidate.target.type === 'project'
-    ? `project/${encodePlanningRecordKeySegment(candidate.target.teamId)}/${encodePlanningRecordKeySegment(candidate.target.projectId)}`
-    : `initiative/${encodePlanningRecordKeySegment(candidate.target.entityId)}`
+  const entityId = createPlanningUpdatePublicTargetKey(candidate.target)
   const occurredAt = now.toISOString()
   const idempotencyDigest = createHash('sha256').update([
     candidate.workspaceId,

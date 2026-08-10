@@ -133,14 +133,22 @@ const projectsApiBaseUrl = trimTrailingSlash(
 /**
  * DynamoDB に保存されたプロジェクトメンバー一覧を取得します。
  */
-export async function getProjectMembers(accessToken: string, projectId: string, signal?: AbortSignal) {
+export async function getProjectMembers(
+  accessToken: string,
+  projectId: string,
+  teamIdOrSignal?: string | AbortSignal,
+  signal?: AbortSignal,
+) {
+  const teamId = typeof teamIdOrSignal === 'string' ? teamIdOrSignal : undefined
+  const requestSignal = typeof teamIdOrSignal === 'string' ? signal : teamIdOrSignal
+  const query = teamId ? `?teamId=${encodeURIComponent(teamId)}` : ''
   const response = await fetch(
-    `${projectsApiBaseUrl}/projects/${encodeURIComponent(projectId)}/members`,
+    `${projectsApiBaseUrl}/projects/${encodeURIComponent(projectId)}/members${query}`,
     {
       headers: {
         Authorization: `Bearer ${accessToken}`,
       },
-      signal,
+      signal: requestSignal,
     },
   )
   const data = await readJson<unknown>(response)

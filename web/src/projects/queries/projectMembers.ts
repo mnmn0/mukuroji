@@ -6,6 +6,7 @@ import {
 } from '../api/members'
 import type { ProjectDirectoryProject } from '../api/directory'
 import type { TeamProjectMemberAccess } from '../model/teamInsights'
+import type { PlanningProjectRoleScope } from '../../planning/model/permissions'
 
 /**
  * 複数 Project の member を Workspace の Team 表示用にまとめて取得します。
@@ -99,12 +100,19 @@ export async function loadActiveProjectMembers(
 export async function loadPlanningProjectRoles(
   accessToken: string,
   memberKey: string,
-  projectIds: readonly string[],
+  projectScopes: readonly (string | PlanningProjectRoleScope)[],
 ) {
+  const scopes: Array<{ projectId: string; teamId?: string }> = projectScopes.map((scope) => typeof scope === 'string'
+    ? { projectId: scope }
+    : scope)
+  const projectIdCounts = new Map<string, number>()
+  for (const scope of scopes) {
+    projectIdCounts.set(scope.projectId, (projectIdCounts.get(scope.projectId) ?? 0) + 1)
+  }
   const responses = await Promise.allSettled(
-    projectIds.map(async (projectId) => ({
-      projectId,
-      members: await getProjectMembers(accessToken, projectId),
+    scopes.map(async (scope) => ({
+      scope,
+      members: await getProjectMembers(accessToken, scope.projectId, scope.teamId),
     })),
   )
   const roles: Record<string, ProjectMemberRole> = {}
@@ -119,7 +127,9 @@ export async function loadPlanningProjectRoles(
     )
 
     if (member) {
-      roles[response.value.projectId] = member.role
+      const { projectId, teamId } = response.value.scope
+      if (teamId !== undefined) roles[`${teamId}\0${projectId}`] = member.role
+      if (projectIdCounts.get(projectId) === 1) roles[projectId] = member.role
     }
   }
 

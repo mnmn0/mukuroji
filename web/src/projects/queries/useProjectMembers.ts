@@ -7,6 +7,7 @@ import {
   loadWorkspaceProjectMembers,
 } from './projectMembers'
 import type { ProjectDirectoryProject } from '../api/directory'
+import type { PlanningProjectRoleScope } from '../../planning/model/permissions'
 
 const projectMemberQueryConfig = {
   dedupingInterval: 10_000,
@@ -142,16 +143,16 @@ export function useWorkspaceProjectMembers(
 export function usePlanningProjectRoles(
   accessToken: string | undefined,
   memberKey: string,
-  projectIds: readonly string[],
+  projectScopes: readonly (string | PlanningProjectRoleScope)[],
   enabled = true,
 ) {
   const key = accessToken && enabled
-    ? ['planning-project-roles', accessToken, memberKey, projectIds.join('\0')] as const
+    ? ['planning-project-roles', accessToken, memberKey, JSON.stringify(projectScopes)] as const
     : null
 
   const query = useSWR(
     key,
-    ([, token]) => loadPlanningProjectRoles(token, memberKey, projectIds),
+    ([, token]) => loadPlanningProjectRoles(token, memberKey, projectScopes),
     projectMemberQueryConfig,
   )
 

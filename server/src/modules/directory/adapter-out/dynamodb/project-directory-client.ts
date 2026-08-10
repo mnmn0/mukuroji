@@ -63,7 +63,10 @@ import {
   type ProjectQuickAccessPreferences,
   type UpdateProjectQuickAccessPreferencesInput,
 } from '@mukuroji/contracts'
-import { PLANNING_STORAGE_SCHEMA_VERSION } from '../../../planning'
+import {
+  createPlanningUpdateProjectTargetRecordKey,
+  PLANNING_STORAGE_SCHEMA_VERSION,
+} from '../../../planning'
 
 /**
  * プロジェクトごとの権限ロールです。
@@ -648,7 +651,11 @@ export type ProjectDirectoryClient = {
   /**
    * DynamoDB から project member 一覧を取得します。
    */
-  getProjectMembers(directoryId: string, projectId: string): Promise<ProjectMembersResponse>
+  getProjectMembers(
+    directoryId: string,
+    projectId: string,
+    teamId?: string,
+  ): Promise<ProjectMembersResponse>
   /**
    * DynamoDB の project member role を作成または更新します。
    */
@@ -1055,10 +1062,10 @@ export class DynamoDbProjectDirectoryClient {
   /**
    * DynamoDB から project member 一覧を取得します。
    */
-  async getProjectMembers(directoryId: string, projectId: string) {
+  async getProjectMembers(directoryId: string, projectId: string, teamId?: string) {
     try {
       const items = await this.readValidDirectoryItems(directoryId)
-      this.requireActiveProject(items, projectId)
+      this.requireActiveProject(items, projectId, teamId)
       const members = items
         .filter((item): item is ProjectMemberItem =>
           item.entryType === 'project-member' &&
@@ -1820,11 +1827,41 @@ export class DynamoDbProjectDirectoryClient {
         expectedPlanningRevision,
         archivedAt,
       )
+      const planningTargetUpdates = await Promise.all(
+        items
+          .filter((item): item is ProjectDirectoryProjectItem =>
+            item.entryType === 'project' && item.teamId === teamId && isActiveDirectoryItem(item)
+          )
+          .map((project) => this.readPlanningProjectArchiveUpdate(
+            directoryId,
+            teamId,
+            project.projectId,
+            archivedAt,
+          )),
+      )
+      const planningTargetMutations = planningTargetUpdates.flatMap((update) =>
+        update === undefined ? [] : [update]
+      )
       planningRevisionItemIndex = 1 + auditItems.length
+      if (
+        1 + auditItems.length + 1 + planningTargetMutations.length >
+        DYNAMODB_TRANSACTION_MAX_ACTIONS
+      ) {
+        throw new ProjectDataError(
+          413,
+          'PlanningProjectTargetArchiveLimitExceeded',
+          'The Team has too many Project update targets to archive atomically.',
+        )
+      }
 
       await this.documentClient.send(
         new TransactWriteCommand({
-          TransactItems: [stateUpdate, ...auditItems, planningRevisionMutation],
+          TransactItems: [
+            stateUpdate,
+            ...auditItems,
+            planningRevisionMutation,
+            ...planningTargetMutations,
+          ],
         }),
       )
 
@@ -1927,6 +1964,12 @@ export class DynamoDbProjectDirectoryClient {
         expectedPlanningRevision,
         archivedAt,
       )
+      const planningTargetUpdate = await this.readPlanningProjectArchiveUpdate(
+        directoryId,
+        teamId,
+        projectId,
+        archivedAt,
+      )
       planningRevisionItemIndex = 1 + auditItems.length
       const workItemRevisionConditions = workItemRevisionGuards.map((guard) => ({
         ConditionCheck: {
@@ -1942,11 +1985,13 @@ export class DynamoDbProjectDirectoryClient {
           ExpressionAttributeValues: { ':expectedRevision': guard.expectedRevision },
         },
       }))
-      workItemRevisionGuardStartIndex = planningRevisionItemIndex + 1
+      workItemRevisionGuardStartIndex = planningRevisionItemIndex + 1 +
+        (planningTargetUpdate === undefined ? 0 : 1)
       const transactItems = [
         stateUpdate,
         ...auditItems,
         planningRevisionMutation,
+        ...(planningTargetUpdate === undefined ? [] : [planningTargetUpdate]),
         ...workItemRevisionConditions,
       ]
       if (transactItems.length > DYNAMODB_TRANSACTION_MAX_ACTIONS) {
@@ -2044,9 +2089,59 @@ export class DynamoDbProjectDirectoryClient {
   }
 
   /**
+   * Reads one current Project update target before an archive transaction.
+   *
+   * @param directoryId - Planning Workspace partition.
+   * @param teamId - Owning Team identifier.
+   * @param projectId - Team-qualified Project identifier.
+   * @param archivedAt - Archive timestamp to write when a target exists.
+   * @returns Conditional Planning target update, or undefined when cadence is not configured.
+   */
+  private async readPlanningProjectArchiveUpdate(
+    directoryId: string,
+    teamId: string,
+    projectId: string,
+    archivedAt: string,
+  ) {
+    const response = await this.documentClient.send(new GetCommand({
+      TableName: this.planningTableName,
+      Key: {
+        workspaceId: directoryId,
+        recordKey: createPlanningUpdateProjectTargetRecordKey(teamId, projectId),
+      },
+      ConsistentRead: true,
+    }))
+    const item = response.Item
+    if (
+      !item ||
+      item.entryType !== 'planning-update-target' ||
+      !isRecord(item.target) ||
+      item.target.type !== 'project' ||
+      item.target.teamId !== teamId ||
+      item.target.projectId !== projectId ||
+      item.archivedAt !== undefined
+    ) {
+      return undefined
+    }
+    return {
+      Update: {
+        TableName: this.planningTableName,
+        Key: {
+          workspaceId: directoryId,
+          recordKey: createPlanningUpdateProjectTargetRecordKey(teamId, projectId),
+        },
+        UpdateExpression: 'SET archivedAt = :archivedAt REMOVE updateScheduleShard, nextNotificationAtRecordKey',
+        ConditionExpression:
+          'attribute_exists(workspaceId) AND attribute_exists(recordKey) AND attribute_not_exists(archivedAt)',
+        ExpressionAttributeValues: { ':archivedAt': archivedAt },
+      },
+    }
+  }
+
+  /**
    * 指定 project ID が active な project として存在することを検証します。
    */
-  private requireActiveProject(items: ProjectDirectoryItem[], projectId: string) {
+  private requireActiveProject(items: ProjectDirectoryItem[], projectId: string, teamId?: string) {
     const activeTeamIds = new Set(
       items
         .filter((item): item is ProjectDirectoryTeamItem =>
@@ -2057,6 +2152,7 @@ export class DynamoDbProjectDirectoryClient {
     const project = items.find((item) =>
       item.entryType === 'project' &&
       item.projectId === projectId &&
+      (teamId === undefined || item.teamId === teamId) &&
       activeTeamIds.has(item.teamId) &&
       isActiveDirectoryItem(item),
     )

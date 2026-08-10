@@ -265,6 +265,7 @@ import { createRealtimeTicketRouter } from '../modules/realtime'
 import {
   CollaborationError,
   createPlanningUpdateCollaborationEntityKey,
+  createPlanningUpdatePublicTargetKey,
   createProjectCollaborationEntityKey,
   createWorkItemCollaborationEntityKey,
   type CollaborationAutomaticWatcherCandidate,
@@ -411,6 +412,7 @@ import {
   type PlanningCallerAuthorizationConditionCheck,
   type PlanningMutationTransaction,
   type PlanningUpdateAnnotationTransactionResult,
+  type PlanningUpdatePublishTransactionResult,
   type PlanningWorkItemState,
 } from '../modules/planning'
 import type {
@@ -751,6 +753,12 @@ type WorkspacePrincipal = ProjectPrincipal & {
    */
   workspaceMemberStatus: WorkspaceMemberStatus
 }
+
+/** Maximum number of immutable updates included in one Planning export. */
+const MAX_PLANNING_UPDATE_EXPORT_COUNT = 10_000
+
+/** Maximum UTF-8 payload size accepted for one Planning export. */
+const MAX_PLANNING_UPDATE_EXPORT_BYTES = 16_000_000
 
 /**
  * Enterprise security route の current permission set を検証済みの principal です。
@@ -5971,6 +5979,8 @@ routeApp.put('/api/planning/updates/cadence', async (c) => {
 /** Human-authored structured Project / Initiative update を immutable publish します。 */
 routeApp.post('/api/planning/updates', async (c) => {
   const accessToken = readBearerAccessToken(c)
+  let reservationToRelease: ReleaseIdempotencyRequest | undefined
+  let mutationCommitted = false
   if (!accessToken) {
     return c.json({ message: 'Bearer token is required.' }, 401)
   }
@@ -5988,14 +5998,81 @@ routeApp.post('/api/planning/updates', async (c) => {
       principal.directoryId,
       workItemState,
     )
-    requirePlanningAuthorizationRevision(snapshot.revision, input.expectedRevision)
     const visibleSnapshot = filterPlanningSnapshotForPrincipal(principal, snapshot)
+    const idempotencyKey = c.req.header('Idempotency-Key')?.trim()
+    let publishTransaction: PlanningMutationTransaction<PlanningUpdatePublishTransactionResult> | undefined
+    if (idempotencyKey) {
+      const validatedKey = readRequiredPlanningUpdatePublishIdempotencyKey(idempotencyKey)
+      const expectation: PlanningUpdatePublishReceiptExpectation = {
+        target: input.target,
+        id: input.id,
+        authorMemberKey: principal.userKey.toLowerCase(),
+        request: input,
+      }
+      const reservationRequest = createPlanningUpdatePublishReservationRequest(
+        principal,
+        validatedKey,
+        c.req.method,
+        '/api/planning/updates',
+        expectation,
+      )
+      const reservation = await reservePlanningUpdatePublishMutation(reservationRequest)
+      if (reservation.status === 'in-progress') {
+        throw new PlanningError(
+          409,
+          'PlanningUpdatePublishIdempotencyInProgress',
+          'The same Planning update publish is still in progress.',
+        )
+      }
+      if (reservation.status === 'replay') {
+        await requirePlanningUpdateTargetPermission(principal, visibleSnapshot, input.target, 'member')
+        const replay = readStoredPlanningUpdatePublishMutationReceipt(
+          reservation.response,
+          reservationRequest.workspaceId,
+          expectation,
+        )
+        const update = await readPlanningUpdateByVersion(
+          principal.directoryId,
+          replay.target,
+          replay.version,
+        )
+        if (update.id !== replay.id) {
+          throw planningUpdatePublishIdempotencyUnavailable()
+        }
+        await requirePlanningUpdateCapturedScopePermission(
+          principal,
+          update.contextSnapshot.scope,
+        )
+        c.header('Idempotency-Replayed', 'true')
+        return c.json({
+          planning: filterPlanningSnapshotForPrincipal(principal, snapshot),
+          update,
+        }, 201)
+      }
+      reservationToRelease = { ...reservationRequest, reservationId: reservation.reservationId }
+      publishTransaction = createPlanningUpdatePublishIdempotencyTransaction(
+        reservationRequest.workspaceId,
+        {
+          credentialId: reservationRequest.credentialId,
+          idempotencyKey: validatedKey,
+          requestFingerprint: reservationRequest.requestFingerprint,
+          reservationId: reservation.reservationId,
+        },
+        expectation,
+      )
+      if (!publishTransaction) throw planningUpdatePublishIdempotencyUnavailable()
+    }
+    requirePlanningAuthorizationRevision(snapshot.revision, input.expectedRevision)
     await requirePlanningUpdateTargetPermission(principal, visibleSnapshot, input.target, 'member')
     const configuredTarget = findPlanningUpdateTargetSummary(snapshot, input.target)
-    if (
-      configuredTarget?.cadence &&
-      configuredTarget.cadence.updateOwnerMemberKey !== principal.userKey.toLowerCase()
-    ) {
+    if (!configuredTarget?.cadence) {
+      throw new PlanningError(
+        409,
+        'PlanningUpdateCadenceNotConfigured',
+        'Configure an update cadence before publishing.',
+      )
+    }
+    if (configuredTarget.cadence.updateOwnerMemberKey !== principal.userKey.toLowerCase()) {
       await requirePlanningUpdateTargetPermission(principal, visibleSnapshot, input.target, 'manager')
     }
     const response = await workItemDependencies.planning.publishUpdate(
@@ -6003,12 +6080,18 @@ routeApp.post('/api/planning/updates', async (c) => {
       input,
       principal.userKey,
       workItemState,
+      createPlanningCallerAuthorizationConditionChecks(principal),
+      publishTransaction,
     )
+    mutationCommitted = true
     return c.json({
       ...response,
       planning: filterPlanningSnapshotForPrincipal(principal, response.planning),
     }, 201)
   } catch (error) {
+    if (reservationToRelease && !mutationCommitted) {
+      await releasePlanningUpdatePublishReservation(reservationToRelease)
+    }
     return toPlanningErrorResponse(c, error)
   }
 })
@@ -6039,11 +6122,15 @@ routeApp.get('/api/planning/updates', async (c) => {
       'viewer',
     )
     const limit = readPlanningUpdateHistoryLimit(c.req.query('limit'))
-    return c.json(await workItemDependencies.planning.listUpdates(principal.directoryId, {
+    const page = await workItemDependencies.planning.listUpdates(principal.directoryId, {
       target,
       ...(limit === undefined ? {} : { limit }),
       ...(c.req.query('cursor') ? { cursor: c.req.query('cursor') } : {}),
-    }))
+    })
+    return c.json({
+      ...page,
+      updates: await filterPlanningUpdatesByCapturedScope(principal, page.updates),
+    })
   } catch (error) {
     return toPlanningErrorResponse(c, error)
   }
@@ -6052,25 +6139,12 @@ routeApp.get('/api/planning/updates', async (c) => {
 /** Immutable Planning update に append-only comment を作成します。 */
 routeApp.post('/api/planning/updates/:updateVersion/comments', async (c) => {
   const accessToken = readBearerAccessToken(c)
-  let reservationToRelease: ReleaseIdempotencyRequest | undefined
-  let mutationCommitted = false
   if (!accessToken) {
     return c.json({ message: 'Bearer token is required.' }, 401)
   }
 
   try {
     const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-    requireWorkspaceBusinessWrite(principal)
-    const idempotencyKey = readRequiredPlanningUpdateAnnotationIdempotencyKey(
-      c.req.header('Idempotency-Key'),
-    )
-    const target = readPlanningUpdateTargetQuery(
-      c.req.query('targetType'),
-      c.req.query('teamId'),
-      c.req.query('projectId'),
-      c.req.query('entityId'),
-    )
-    const updateVersion = readPlanningUpdateVersion(c.req.param('updateVersion'))
     const candidate = await readPlanningJson<Pick<
       CreatePlanningUpdateCommentInput,
       'body' | 'id'
@@ -6081,71 +6155,39 @@ routeApp.post('/api/planning/updates/:updateVersion/comments', async (c) => {
       principal.directoryId,
       await readPlanningWorkItemState(principal),
     )
-    await requirePlanningUpdateTargetPermission(
-      principal,
-      filterPlanningSnapshotForPrincipal(principal, snapshot),
-      target,
-      'member',
-    )
-    const receiptExpectation: PlanningUpdateAnnotationReceiptExpectation = {
-      operation: 'comment-create',
-      target,
-      updateVersion,
-      memberKey: principal.userKey.toLowerCase(),
-      id,
-      body,
-    }
-    const reservationRequest = createPlanningUpdateAnnotationReservationRequest(
-      principal,
-      idempotencyKey,
-      c.req.method,
-      `/api/planning/updates/${updateVersion}/comments`,
-      receiptExpectation,
-    )
-    const reservation = await reservePlanningUpdateAnnotationMutation(reservationRequest)
-    if (reservation.status === 'in-progress') {
-      throw new PlanningError(
-        409,
-        'PlanningUpdateAnnotationIdempotencyInProgress',
-        'The same Planning update annotation mutation is still in progress.',
-      )
-    }
-    if (reservation.status === 'replay') {
-      const replay = readStoredPlanningUpdateAnnotationMutationReceipt(
-        reservation.response,
-        reservationRequest.workspaceId,
-        receiptExpectation,
-      )
-      if (replay.operation !== 'comment-create') {
-        throw invalidStoredPlanningUpdateAnnotationMutationReceipt()
-      }
-      c.header('Idempotency-Replayed', 'true')
-      return c.json(replay.body, replay.status)
-    }
-    reservationToRelease = { ...reservationRequest, reservationId: reservation.reservationId }
-    const transaction = createPlanningUpdateAnnotationIdempotencyTransaction(
-      reservationRequest.workspaceId,
-      {
-        credentialId: reservationRequest.credentialId,
-        idempotencyKey,
-        requestFingerprint: reservationRequest.requestFingerprint,
-        reservationId: reservation.reservationId,
+    return await executePlanningUpdateAnnotationMutation(c, principal, snapshot, {
+      targetType: c.req.query('targetType'),
+      teamId: c.req.query('teamId'),
+      projectId: c.req.query('projectId'),
+      entityId: c.req.query('entityId'),
+      updateVersion: c.req.param('updateVersion'),
+      path: `/api/planning/updates/${c.req.param('updateVersion')}/comments`,
+    }, {
+      createExpectation: (target, updateVersion) => ({
+        operation: 'comment-create',
+        target,
+        updateVersion,
+        memberKey: principal.userKey.toLowerCase(),
+        id,
+        body,
+      }),
+      mutate: ({ target, updateVersion, transaction }) =>
+        workItemDependencies.planning.createUpdateComment(
+          principal.directoryId,
+          { target, updateVersion, id, body },
+          principal.userKey,
+          transaction,
+        ),
+      replay: (context, replay) => {
+        if (replay.operation !== 'comment-create') {
+          throw invalidStoredPlanningUpdateAnnotationMutationReceipt()
+        }
+        context.header('Idempotency-Replayed', 'true')
+        return context.json(replay.body, replay.status)
       },
-      receiptExpectation,
-    )
-    if (!transaction) throw planningUpdateAnnotationIdempotencyUnavailable()
-    const comment = await workItemDependencies.planning.createUpdateComment(
-      principal.directoryId,
-      { target, updateVersion, id, body },
-      principal.userKey,
-      transaction,
-    )
-    mutationCommitted = true
-    return c.json({ comment }, 201)
+      success: (context, comment) => context.json({ comment }, 201),
+    })
   } catch (error) {
-    if (reservationToRelease && !mutationCommitted) {
-      await releasePlanningUpdateAnnotationReservation(reservationToRelease)
-    }
     return toPlanningErrorResponse(c, error)
   }
 })
@@ -6176,6 +6218,12 @@ routeApp.get('/api/planning/updates/:updateVersion/comments', async (c) => {
       target,
       'viewer',
     )
+    await requirePlanningUpdateVersionCapturedScopePermission(
+      principal.directoryId,
+      principal,
+      target,
+      updateVersion,
+    )
     const limit = readPlanningUpdateHistoryLimit(c.req.query('limit'))
     return c.json(await workItemDependencies.planning.listUpdateComments(
       principal.directoryId,
@@ -6194,95 +6242,50 @@ routeApp.get('/api/planning/updates/:updateVersion/comments', async (c) => {
 /** Current member の reaction を immutable Planning update に追加します。 */
 routeApp.put('/api/planning/updates/:updateVersion/reactions', async (c) => {
   const accessToken = readBearerAccessToken(c)
-  let reservationToRelease: ReleaseIdempotencyRequest | undefined
-  let mutationCommitted = false
   if (!accessToken) {
     return c.json({ message: 'Bearer token is required.' }, 401)
   }
 
   try {
     const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-    requireWorkspaceBusinessWrite(principal)
-    const idempotencyKey = readRequiredPlanningUpdateAnnotationIdempotencyKey(
-      c.req.header('Idempotency-Key'),
-    )
-    const target = readPlanningUpdateTargetQuery(
-      c.req.query('targetType'),
-      c.req.query('teamId'),
-      c.req.query('projectId'),
-      c.req.query('entityId'),
-    )
-    const updateVersion = readPlanningUpdateVersion(c.req.param('updateVersion'))
     const candidate = await readPlanningJson<Pick<PlanningUpdateReactionInput, 'emoji'>>(c.req)
     const emoji = readPlanningUpdateReactionToken(candidate.emoji)
     const snapshot = await workItemDependencies.planning.get(
       principal.directoryId,
       await readPlanningWorkItemState(principal),
     )
-    await requirePlanningUpdateTargetPermission(
-      principal,
-      filterPlanningSnapshotForPrincipal(principal, snapshot),
-      target,
-      'member',
-    )
-    const receiptExpectation: PlanningUpdateAnnotationReceiptExpectation = {
-      operation: 'reaction-add',
-      target,
-      updateVersion,
-      memberKey: principal.userKey.toLowerCase(),
-      emoji,
-    }
-    const reservationRequest = createPlanningUpdateAnnotationReservationRequest(
-      principal,
-      idempotencyKey,
-      c.req.method,
-      `/api/planning/updates/${updateVersion}/reactions`,
-      receiptExpectation,
-    )
-    const reservation = await reservePlanningUpdateAnnotationMutation(reservationRequest)
-    if (reservation.status === 'in-progress') {
-      throw new PlanningError(
-        409,
-        'PlanningUpdateAnnotationIdempotencyInProgress',
-        'The same Planning update annotation mutation is still in progress.',
-      )
-    }
-    if (reservation.status === 'replay') {
-      const replay = readStoredPlanningUpdateAnnotationMutationReceipt(
-        reservation.response,
-        reservationRequest.workspaceId,
-        receiptExpectation,
-      )
-      if (replay.operation !== 'reaction-add') {
-        throw invalidStoredPlanningUpdateAnnotationMutationReceipt()
-      }
-      c.header('Idempotency-Replayed', 'true')
-      return c.json(replay.body, replay.status)
-    }
-    reservationToRelease = { ...reservationRequest, reservationId: reservation.reservationId }
-    const transaction = createPlanningUpdateAnnotationIdempotencyTransaction(
-      reservationRequest.workspaceId,
-      {
-        credentialId: reservationRequest.credentialId,
-        idempotencyKey,
-        requestFingerprint: reservationRequest.requestFingerprint,
-        reservationId: reservation.reservationId,
+    return await executePlanningUpdateAnnotationMutation(c, principal, snapshot, {
+      targetType: c.req.query('targetType'),
+      teamId: c.req.query('teamId'),
+      projectId: c.req.query('projectId'),
+      entityId: c.req.query('entityId'),
+      updateVersion: c.req.param('updateVersion'),
+      path: `/api/planning/updates/${c.req.param('updateVersion')}/reactions`,
+    }, {
+      createExpectation: (target, updateVersion) => ({
+        operation: 'reaction-add',
+        target,
+        updateVersion,
+        memberKey: principal.userKey.toLowerCase(),
+        emoji,
+      }),
+      mutate: ({ target, updateVersion, transaction }) =>
+        workItemDependencies.planning.addUpdateReaction(
+          principal.directoryId,
+          { target, updateVersion, emoji },
+          principal.userKey,
+          transaction,
+        ),
+      replay: (context, replay) => {
+        if (replay.operation !== 'reaction-add') {
+          throw invalidStoredPlanningUpdateAnnotationMutationReceipt()
+        }
+        context.header('Idempotency-Replayed', 'true')
+        return context.json(replay.body, replay.status)
       },
-      receiptExpectation,
-    )
-    if (!transaction) throw planningUpdateAnnotationIdempotencyUnavailable()
-    const reaction = await workItemDependencies.planning.addUpdateReaction(
-      principal.directoryId,
-      { target, updateVersion, emoji },
-      principal.userKey,
-      transaction,
-    )
-    mutationCommitted = true
-    return c.json({ reaction }, 201)
+      success: (context, reaction) => context.json({ reaction }, 201),
+    })
   } catch (error) {
-    if (reservationToRelease && !mutationCommitted) {
-      await releasePlanningUpdateAnnotationReservation(reservationToRelease)
-    }
     return toPlanningErrorResponse(c, error)
   }
 })
@@ -6290,95 +6293,50 @@ routeApp.put('/api/planning/updates/:updateVersion/reactions', async (c) => {
 /** Current member の reaction を immutable Planning update から削除します。 */
 routeApp.delete('/api/planning/updates/:updateVersion/reactions', async (c) => {
   const accessToken = readBearerAccessToken(c)
-  let reservationToRelease: ReleaseIdempotencyRequest | undefined
-  let mutationCommitted = false
   if (!accessToken) {
     return c.json({ message: 'Bearer token is required.' }, 401)
   }
 
   try {
     const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-    requireWorkspaceBusinessWrite(principal)
-    const idempotencyKey = readRequiredPlanningUpdateAnnotationIdempotencyKey(
-      c.req.header('Idempotency-Key'),
-    )
-    const target = readPlanningUpdateTargetQuery(
-      c.req.query('targetType'),
-      c.req.query('teamId'),
-      c.req.query('projectId'),
-      c.req.query('entityId'),
-    )
-    const updateVersion = readPlanningUpdateVersion(c.req.param('updateVersion'))
     const candidate = await readPlanningJson<Pick<PlanningUpdateReactionInput, 'emoji'>>(c.req)
     const emoji = readPlanningUpdateReactionToken(candidate.emoji)
     const snapshot = await workItemDependencies.planning.get(
       principal.directoryId,
       await readPlanningWorkItemState(principal),
     )
-    await requirePlanningUpdateTargetPermission(
-      principal,
-      filterPlanningSnapshotForPrincipal(principal, snapshot),
-      target,
-      'member',
-    )
-    const receiptExpectation: PlanningUpdateAnnotationReceiptExpectation = {
-      operation: 'reaction-remove',
-      target,
-      updateVersion,
-      memberKey: principal.userKey.toLowerCase(),
-      emoji,
-    }
-    const reservationRequest = createPlanningUpdateAnnotationReservationRequest(
-      principal,
-      idempotencyKey,
-      c.req.method,
-      `/api/planning/updates/${updateVersion}/reactions`,
-      receiptExpectation,
-    )
-    const reservation = await reservePlanningUpdateAnnotationMutation(reservationRequest)
-    if (reservation.status === 'in-progress') {
-      throw new PlanningError(
-        409,
-        'PlanningUpdateAnnotationIdempotencyInProgress',
-        'The same Planning update annotation mutation is still in progress.',
-      )
-    }
-    if (reservation.status === 'replay') {
-      const replay = readStoredPlanningUpdateAnnotationMutationReceipt(
-        reservation.response,
-        reservationRequest.workspaceId,
-        receiptExpectation,
-      )
-      if (replay.operation !== 'reaction-remove') {
-        throw invalidStoredPlanningUpdateAnnotationMutationReceipt()
-      }
-      c.header('Idempotency-Replayed', 'true')
-      return c.body(null, replay.status)
-    }
-    reservationToRelease = { ...reservationRequest, reservationId: reservation.reservationId }
-    const transaction = createPlanningUpdateAnnotationIdempotencyTransaction(
-      reservationRequest.workspaceId,
-      {
-        credentialId: reservationRequest.credentialId,
-        idempotencyKey,
-        requestFingerprint: reservationRequest.requestFingerprint,
-        reservationId: reservation.reservationId,
+    return await executePlanningUpdateAnnotationMutation(c, principal, snapshot, {
+      targetType: c.req.query('targetType'),
+      teamId: c.req.query('teamId'),
+      projectId: c.req.query('projectId'),
+      entityId: c.req.query('entityId'),
+      updateVersion: c.req.param('updateVersion'),
+      path: `/api/planning/updates/${c.req.param('updateVersion')}/reactions`,
+    }, {
+      createExpectation: (target, updateVersion) => ({
+        operation: 'reaction-remove',
+        target,
+        updateVersion,
+        memberKey: principal.userKey.toLowerCase(),
+        emoji,
+      }),
+      mutate: ({ target, updateVersion, transaction }) =>
+        workItemDependencies.planning.removeUpdateReaction(
+          principal.directoryId,
+          { target, updateVersion, emoji },
+          principal.userKey,
+          transaction,
+        ).then(() => undefined),
+      replay: (context, replay) => {
+        if (replay.operation !== 'reaction-remove') {
+          throw invalidStoredPlanningUpdateAnnotationMutationReceipt()
+        }
+        context.header('Idempotency-Replayed', 'true')
+        return context.body(null, replay.status)
       },
-      receiptExpectation,
-    )
-    if (!transaction) throw planningUpdateAnnotationIdempotencyUnavailable()
-    await workItemDependencies.planning.removeUpdateReaction(
-      principal.directoryId,
-      { target, updateVersion, emoji },
-      principal.userKey,
-      transaction,
-    )
-    mutationCommitted = true
-    return c.body(null, 204)
+      success: (context) => context.body(null, 204),
+    })
   } catch (error) {
-    if (reservationToRelease && !mutationCommitted) {
-      await releasePlanningUpdateAnnotationReservation(reservationToRelease)
-    }
     return toPlanningErrorResponse(c, error)
   }
 })
@@ -6408,6 +6366,12 @@ routeApp.get('/api/planning/updates/:updateVersion/reactions', async (c) => {
       filterPlanningSnapshotForPrincipal(principal, snapshot),
       target,
       'viewer',
+    )
+    await requirePlanningUpdateVersionCapturedScopePermission(
+      principal.directoryId,
+      principal,
+      target,
+      updateVersion,
     )
     const limit = readPlanningUpdateHistoryLimit(c.req.query('limit'))
     return c.json(await workItemDependencies.planning.listUpdateReactions(
@@ -6457,13 +6421,16 @@ routeApp.get('/api/planning/updates/export', async (c) => {
         limit: 100,
         ...(cursor ? { cursor } : {}),
       })
-      updates.push(...page.updates)
+      updates.push(...await filterPlanningUpdatesByCapturedScope(principal, page.updates))
       cursor = page.nextCursor
-      if (updates.length > 10_000) {
+      if (
+        updates.length > MAX_PLANNING_UPDATE_EXPORT_COUNT ||
+        Buffer.byteLength(JSON.stringify(updates), 'utf8') > MAX_PLANNING_UPDATE_EXPORT_BYTES
+      ) {
         throw new PlanningError(
           413,
           'PlanningUpdateExportLimitExceeded',
-          'Planning update export cannot exceed 10,000 updates.',
+          'Planning update export exceeds the safe size limit.',
         )
       }
     } while (cursor)
@@ -7491,6 +7458,7 @@ routeApp.get('/api/projects/:projectId/users', async (c) => {
 routeApp.get('/api/projects/:projectId/members', async (c) => {
   const accessToken = readBearerAccessToken(c)
   const projectId = c.req.param('projectId')
+  const teamIdCandidate = c.req.query('teamId')
 
   if (!accessToken) {
     return c.json({ message: 'Bearer token is required.' }, 401)
@@ -7502,11 +7470,22 @@ routeApp.get('/api/projects/:projectId/members', async (c) => {
 
   try {
     const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-    await requireProjectPermission(principal, projectId, 'member')
+    const teamId = teamIdCandidate === undefined
+      ? undefined
+      : readPlanningIdentifier(teamIdCandidate, 'Team ID')
+    if (teamId === undefined) {
+      await requireProjectPermission(principal, projectId, 'member')
+    } else {
+      await requirePlanningUpdateProjectPermission(principal, teamId, projectId, 'member')
+    }
 
     return c.json(
       await hydrateProjectMembersResponse(
-        await workspaceDependencies.projectDirectory.getProjectMembers(principal.directoryId, projectId),
+        await workspaceDependencies.projectDirectory.getProjectMembers(
+          principal.directoryId,
+          projectId,
+          teamId,
+        ),
         principal.directoryId,
       ),
     )
@@ -12481,18 +12460,6 @@ function readPlanningUpdateTargetQuery(
     'PlanningUpdateTargetInvalid',
     'targetType must be project or initiative.',
   )
-}
-
-/**
- * Returns a stable, reversible logical key for collaboration and audit metadata.
- *
- * @param target - Validated update target.
- * @returns Percent-encoded Project/Initiative key.
- */
-function createPlanningUpdatePublicTargetKey(target: PlanningUpdateTarget) {
-  return target.type === 'project'
-    ? `project/${encodeURIComponent(target.teamId)}/${encodeURIComponent(target.projectId)}`
-    : `initiative/${encodeURIComponent(target.entityId)}`
 }
 
 /**
@@ -17991,6 +17958,41 @@ function requireWorkspaceBusinessWrite(principal: WorkspacePrincipal) {
   )
 }
 
+/**
+ * Requires a non-guest Workspace member for business data reads.
+ *
+ * Enterprise-scoped requests must carry a read-capable permission as well as an
+ * active membership.  This guard is intentionally narrower than a generic
+ * workspace authentication check so workspace-scoped Planning history cannot
+ * be read by guests.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ */
+function requireWorkspaceBusinessRead(principal: WorkspacePrincipal) {
+  if (principal.workspaceRole === 'guest') {
+    throw new WorkspaceAccessError(
+      403,
+      'WorkspaceRoleDenied',
+      'Guest members have read-only access to business data.',
+    )
+  }
+  if (
+    principal.enterprisePermissions !== undefined &&
+    !principal.enterprisePermissions.some((permission) =>
+      permission.endsWith('.read') ||
+      permission.endsWith('.write') ||
+      permission.endsWith('.manage') ||
+      permission === 'files.approve'
+    )
+  ) {
+    throw new WorkspaceAccessError(
+      403,
+      'WorkspaceRoleDenied',
+      'A read-capable Workspace permission is required.',
+    )
+  }
+}
+
 function requireWorkspaceAdministration(principal: WorkspacePrincipal) {
   if (principal.enterpriseRouteAuthorizedAtResource) {
     return
@@ -18473,10 +18475,82 @@ async function requirePlanningUpdateTargetPermission(
     await requireProjectPermission(principal, entity.projectId, minimumRole)
   } else if (entity.teamId) {
     await requirePlanningUpdateTeamPermission(principal, entity.teamId, minimumRole)
-  } else if (minimumRole === 'manager') {
-    requireWorkspaceAdministration(principal)
+  } else {
+    requireWorkspaceBusinessRead(principal)
+    if (minimumRole === 'manager') requireWorkspaceAdministration(principal)
   }
   return entity
+}
+
+/**
+ * Rechecks the scope captured in an immutable update before returning it.
+ *
+ * Immutable context can outlive a current Initiative move or an ACL change.
+ * Authorizing only the current target would therefore expose historical
+ * milestones, dependencies, or evidence from the former scope.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @param scope - Scope captured by the immutable update.
+ */
+async function requirePlanningUpdateCapturedScopePermission(
+  principal: WorkspacePrincipal,
+  scope: { teamId?: string; projectId?: string },
+): Promise<void> {
+  if (scope.projectId !== undefined) {
+    if (scope.teamId === undefined) {
+      throw new PlanningError(
+        403,
+        'PlanningUpdateScopeAccessDenied',
+        'The immutable update scope is incomplete.',
+      )
+    }
+    await requirePlanningUpdateProjectPermission(
+      principal,
+      scope.teamId,
+      scope.projectId,
+      'viewer',
+    )
+    return
+  }
+  if (scope.teamId !== undefined) {
+    await requirePlanningUpdateTeamPermission(principal, scope.teamId, 'viewer')
+    return
+  }
+  requireWorkspaceBusinessRead(principal)
+}
+
+/**
+ * Removes immutable updates whose captured scope is no longer readable.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @param updates - Immutable updates returned by the canonical history store.
+ * @returns Only updates whose captured scope remains visible.
+ */
+async function filterPlanningUpdatesByCapturedScope(
+  principal: WorkspacePrincipal,
+  updates: readonly PlanningUpdate[],
+): Promise<PlanningUpdate[]> {
+  const visible: PlanningUpdate[] = []
+  for (const update of updates) {
+    try {
+      await requirePlanningUpdateCapturedScopePermission(
+        principal,
+        update.contextSnapshot.scope,
+      )
+      visible.push(update)
+    } catch (error) {
+      if (isPlanningVisibilityAuthorizationError(error)) continue
+      throw error
+    }
+  }
+  return visible
+}
+
+/** Returns whether an authorization failure should hide one historical row. */
+function isPlanningVisibilityAuthorizationError(error: unknown): boolean {
+  return isRecord(error) &&
+    typeof error.status === 'number' &&
+    (error.status === 403 || error.status === 404)
 }
 
 /**
@@ -21904,6 +21978,24 @@ type PlanningUpdateAnnotationReceiptOperation =
   | 'reaction-add'
   | 'reaction-remove'
 
+/** Canonical request identity retained by a durable Planning publish receipt. */
+type PlanningUpdatePublishReceiptExpectation = {
+  /** Project or Initiative that owns the immutable update. */
+  target: PlanningUpdateTarget
+  /** Client-generated target-local update ID. */
+  id: string
+  /** Authenticated member key that published the update. */
+  authorMemberKey: string
+  /** Exact request body bound to the idempotency fingerprint. */
+  request: PublishPlanningUpdateInput
+}
+
+/** Stable schema discriminator for Planning publish receipts. */
+const PLANNING_UPDATE_PUBLISH_RECEIPT_SCHEMA = 'planning-update-publish'
+
+/** Current Planning publish receipt version. */
+const PLANNING_UPDATE_PUBLISH_RECEIPT_VERSION = 1
+
 /** Target and actor fields shared by every Planning update annotation receipt. */
 type PlanningUpdateAnnotationReceiptBase = {
   /** Receipt operation discriminator. */
@@ -22062,6 +22154,343 @@ async function releasePlanningUpdateAnnotationReservation(
   await developerPlatformDependencies.idempotency
     .releaseIdempotency(request)
     .catch(() => undefined)
+}
+
+/** Query and path values shared by Planning update annotation mutations. */
+type PlanningUpdateAnnotationMutationInput = {
+  /** Requested target discriminator. */
+  targetType: string | undefined
+  /** Qualified Project Team identifier, when applicable. */
+  teamId: string | undefined
+  /** Qualified Project identifier, when applicable. */
+  projectId: string | undefined
+  /** Initiative identifier, when applicable. */
+  entityId: string | undefined
+  /** Raw immutable update version path parameter. */
+  updateVersion: string
+  /** Canonical route path used for the idempotency fingerprint. */
+  path: string
+}
+
+/** Callbacks that retain the operation-specific part of an annotation mutation. */
+type PlanningUpdateAnnotationMutationCallbacks<Result> = {
+  /** Builds the receipt identity after target and version validation. */
+  createExpectation: (
+    target: PlanningUpdateTarget,
+    updateVersion: number,
+  ) => PlanningUpdateAnnotationReceiptExpectation
+  /** Executes the domain mutation with its durable receipt transaction. */
+  mutate: (input: {
+    target: PlanningUpdateTarget
+    updateVersion: number
+    transaction: PlanningMutationTransaction<PlanningUpdateAnnotationTransactionResult>
+  }) => Promise<Result>
+  /** Creates the response for a completed durable mutation. */
+  success: (context: Context, result: Result) => Response
+  /** Creates the response for a durable replay. */
+  replay: (context: Context, replay: PlanningUpdateAnnotationReplay) => Response
+}
+
+/**
+ * Executes the shared authorization and idempotency flow for one annotation mutation.
+ *
+ * Target/version parsing, captured-scope authorization, durable reservation, replay, and
+ * failed-mutation cleanup intentionally live here so comment and reaction routes cannot drift.
+ *
+ * @param context - Hono request context used to create the response and replay header.
+ * @param principal - Authenticated Workspace principal.
+ * @param snapshot - Current Planning snapshot used for target authorization.
+ * @param input - Raw target/version/path values from the route.
+ * @param callbacks - Operation-specific receipt, domain, and response callbacks.
+ * @returns The operation-specific HTTP response.
+ */
+async function executePlanningUpdateAnnotationMutation<Result>(
+  context: Context,
+  principal: WorkspacePrincipal,
+  snapshot: PlanningSnapshot,
+  input: PlanningUpdateAnnotationMutationInput,
+  callbacks: PlanningUpdateAnnotationMutationCallbacks<Result>,
+): Promise<Response> {
+  let reservationToRelease: ReleaseIdempotencyRequest | undefined
+  let mutationCommitted = false
+  try {
+    requireWorkspaceBusinessWrite(principal)
+    const idempotencyKey = readRequiredPlanningUpdateAnnotationIdempotencyKey(
+      context.req.header('Idempotency-Key'),
+    )
+    const target = readPlanningUpdateTargetQuery(
+      input.targetType,
+      input.teamId,
+      input.projectId,
+      input.entityId,
+    )
+    const updateVersion = readPlanningUpdateVersion(input.updateVersion)
+    await requirePlanningUpdateTargetPermission(
+      principal,
+      filterPlanningSnapshotForPrincipal(principal, snapshot),
+      target,
+      'member',
+    )
+    await requirePlanningUpdateVersionCapturedScopePermission(
+      principal.directoryId,
+      principal,
+      target,
+      updateVersion,
+    )
+    const receiptExpectation = callbacks.createExpectation(target, updateVersion)
+    const reservationRequest = createPlanningUpdateAnnotationReservationRequest(
+      principal,
+      idempotencyKey,
+      context.req.method,
+      input.path,
+      receiptExpectation,
+    )
+    const reservation = await reservePlanningUpdateAnnotationMutation(reservationRequest)
+    if (reservation.status === 'in-progress') {
+      throw new PlanningError(
+        409,
+        'PlanningUpdateAnnotationIdempotencyInProgress',
+        'The same Planning update annotation mutation is still in progress.',
+      )
+    }
+    if (reservation.status === 'replay') {
+      const replay = readStoredPlanningUpdateAnnotationMutationReceipt(
+        reservation.response,
+        reservationRequest.workspaceId,
+        receiptExpectation,
+      )
+      return callbacks.replay(context, replay)
+    }
+    reservationToRelease = { ...reservationRequest, reservationId: reservation.reservationId }
+    const transaction = createPlanningUpdateAnnotationIdempotencyTransaction(
+      reservationRequest.workspaceId,
+      {
+        credentialId: reservationRequest.credentialId,
+        idempotencyKey,
+        requestFingerprint: reservationRequest.requestFingerprint,
+        reservationId: reservation.reservationId,
+      },
+      receiptExpectation,
+    )
+    if (!transaction) throw planningUpdateAnnotationIdempotencyUnavailable()
+    const result = await callbacks.mutate({ target, updateVersion, transaction })
+    mutationCommitted = true
+    return callbacks.success(context, result)
+  } catch (error) {
+    if (reservationToRelease && !mutationCommitted) {
+      await releasePlanningUpdateAnnotationReservation(reservationToRelease)
+    }
+    throw error
+  }
+}
+
+/** Validates the optional publish idempotency key when one is supplied. */
+function readRequiredPlanningUpdatePublishIdempotencyKey(value: string): string {
+  const key = value.trim()
+  const hasControlCharacter = [...key].some((character) => {
+    const codePoint = character.codePointAt(0)
+    return codePoint !== undefined && (codePoint <= 31 || codePoint === 127)
+  })
+  if (!key || key.length > 256 || hasControlCharacter) {
+    throw new PlanningError(
+      400,
+      'InvalidPlanningUpdatePublishIdempotencyKey',
+      'Idempotency-Key must contain 1 to 256 characters without control characters.',
+    )
+  }
+  return key
+}
+
+/** Creates the user-scoped reservation identity for one publish request. */
+function createPlanningUpdatePublishReservationRequest(
+  principal: WorkspacePrincipal,
+  idempotencyKey: string,
+  method: string,
+  path: string,
+  expectation: PlanningUpdatePublishReceiptExpectation,
+): ReserveIdempotencyRequest {
+  return {
+    workspaceId: createWorkItemScheduleIdempotencyWorkspaceId(principal.directoryId),
+    credentialId: createWorkItemScheduleIdempotencyUserId(
+      principal.directoryId,
+      principal.actorId,
+    ),
+    idempotencyKey,
+    requestFingerprint: createHash('sha256')
+      .update(`${method.toUpperCase()}\n${path}\n${stableDigestStringify(expectation.request)}`)
+      .digest('hex'),
+  }
+}
+
+/** Reserves one Planning publish and maps storage failures to its stable error. */
+async function reservePlanningUpdatePublishMutation(request: ReserveIdempotencyRequest) {
+  try {
+    return await developerPlatformDependencies.idempotency.reserveIdempotency(request)
+  } catch (error) {
+    if (error instanceof DeveloperPlatformError && error.code === 'IdempotencyKeyConflict') {
+      throw new PlanningError(
+        409,
+        'PlanningUpdatePublishIdempotencyConflict',
+        'Idempotency-Key was already used for a different Planning update publish.',
+      )
+    }
+    throw planningUpdatePublishIdempotencyUnavailable()
+  }
+}
+
+/** Creates the stable failure returned when publish receipt persistence is unavailable. */
+function planningUpdatePublishIdempotencyUnavailable(): PlanningError {
+  return new PlanningError(
+    503,
+    'PlanningUpdatePublishIdempotencyUnavailable',
+    'Planning update publish idempotency is unavailable.',
+  )
+}
+
+/** Releases an uncommitted Planning publish reservation without masking the original error. */
+async function releasePlanningUpdatePublishReservation(
+  request: ReleaseIdempotencyRequest,
+): Promise<void> {
+  await developerPlatformDependencies.idempotency.releaseIdempotency(request).catch(() => undefined)
+}
+
+/** Creates a durable publish receipt contribution for the Planning transaction. */
+function createPlanningUpdatePublishIdempotencyTransaction(
+  workspaceId: string,
+  token: IdempotencyMutationToken,
+  expectation: PlanningUpdatePublishReceiptExpectation,
+): PlanningMutationTransaction<PlanningUpdatePublishTransactionResult> | undefined {
+  const prepare = developerPlatformDependencies.transactions
+    .prepareIdempotencyCompletionTransactWrite
+  if (!prepare) return undefined
+  return {
+    async prepare(result) {
+      return prepare.call(developerPlatformDependencies.transactions, {
+        workspaceId,
+        credentialId: token.credentialId,
+        idempotencyKey: token.idempotencyKey,
+        requestFingerprint: token.requestFingerprint,
+        reservationId: token.reservationId,
+        response: createPlanningUpdatePublishReceiptResponse(workspaceId, expectation, result),
+      })
+    },
+  }
+}
+
+/** Creates the compact durable payload used to replay the immutable update. */
+function createPlanningUpdatePublishReceiptResponse(
+  workspaceId: string,
+  expectation: PlanningUpdatePublishReceiptExpectation,
+  result: PlanningUpdatePublishTransactionResult,
+) {
+  if (
+    result.kind !== 'publish' ||
+    result.update.id !== expectation.id ||
+    result.update.authorMemberKey !== expectation.authorMemberKey ||
+    !planningUpdateTargetsEqual(result.update.target, expectation.target)
+  ) {
+    throw planningUpdatePublishIdempotencyUnavailable()
+  }
+  return {
+    status: 201 as const,
+    body: {
+      schema: PLANNING_UPDATE_PUBLISH_RECEIPT_SCHEMA,
+      version: PLANNING_UPDATE_PUBLISH_RECEIPT_VERSION,
+      workspaceId,
+      status: 201,
+      payload: {
+        target: structuredClone(result.update.target),
+        id: result.update.id,
+        version: result.update.version,
+      },
+    },
+  }
+}
+
+/** Decoded identity stored in a successful Planning publish receipt. */
+type PlanningUpdatePublishReplay = {
+  /** Project or Initiative target. */
+  target: PlanningUpdateTarget
+  /** Immutable update ID. */
+  id: string
+  /** Target-local immutable version. */
+  version: number
+}
+
+/** Strictly decodes one completed Planning publish receipt. */
+function readStoredPlanningUpdatePublishMutationReceipt(
+  value: unknown,
+  workspaceId: string,
+  expectation: PlanningUpdatePublishReceiptExpectation,
+): PlanningUpdatePublishReplay {
+  if (!isRecord(value) || value.status !== 201 || !isRecord(value.body)) {
+    throw planningUpdatePublishIdempotencyUnavailable()
+  }
+  const receipt = value.body
+  const payload = isRecord(receipt.payload) ? receipt.payload : undefined
+  if (
+    receipt.schema !== PLANNING_UPDATE_PUBLISH_RECEIPT_SCHEMA ||
+    receipt.version !== PLANNING_UPDATE_PUBLISH_RECEIPT_VERSION ||
+    receipt.workspaceId !== workspaceId ||
+    receipt.status !== 201 ||
+    !payload ||
+    typeof payload.id !== 'string' ||
+    typeof payload.version !== 'number' ||
+    !Number.isSafeInteger(payload.version) ||
+    payload.version < 1 ||
+    !isRecord(payload.target) ||
+    stableDigestStringify(payload.target) !== stableDigestStringify(expectation.target) ||
+    payload.id !== expectation.id ||
+    stableDigestStringify({ status: 201, body: receipt }) !== stableDigestStringify(value)
+  ) {
+    throw planningUpdatePublishIdempotencyUnavailable()
+  }
+  return {
+    target: structuredClone(expectation.target),
+    id: expectation.id,
+    version: payload.version,
+  }
+}
+
+/** Reads one immutable update version, paging only when the receipt is not latest. */
+async function readPlanningUpdateByVersion(
+  workspaceId: string,
+  target: PlanningUpdateTarget,
+  version: number,
+): Promise<PlanningUpdate> {
+  let cursor: string | undefined
+  do {
+    const page = await workItemDependencies.planning.listUpdates(workspaceId, {
+      target,
+      limit: 100,
+      ...(cursor ? { cursor } : {}),
+    })
+    const update = page.updates.find((candidate) => candidate.version === version)
+    if (update) return update
+    cursor = page.nextCursor
+  } while (cursor)
+  throw planningUpdatePublishIdempotencyUnavailable()
+}
+
+/** Rechecks the captured scope before exposing annotations for one immutable version. */
+async function requirePlanningUpdateVersionCapturedScopePermission(
+  workspaceId: string,
+  principal: WorkspacePrincipal,
+  target: PlanningUpdateTarget,
+  version: number,
+): Promise<void> {
+  const update = await readPlanningUpdateByVersion(workspaceId, target, version)
+  if (!planningUpdateTargetsEqual(update.target, target)) {
+    throw new PlanningError(
+      404,
+      'PlanningUpdateNotFound',
+      'Planning update was not found.',
+    )
+  }
+  await requirePlanningUpdateCapturedScopePermission(
+    principal,
+    update.contextSnapshot.scope,
+  )
 }
 
 /** Creates the stable failure used when a stored annotation receipt is malformed. */

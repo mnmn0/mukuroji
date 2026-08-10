@@ -24,6 +24,14 @@ export type PlanningAccessSnapshot = {
   projectIdsByTeamId: Readonly<Record<string, readonly string[]>>
 }
 
+/** Team-qualified Project scope used when loading UI role assignments. */
+export type PlanningProjectRoleScope = {
+  /** Owning Team identifier. */
+  teamId: string
+  /** Team-local Project identifier. */
+  projectId: string
+}
+
 /**
  * Planning scope の権限判定に必要な Team / Project 参照です。
  */
@@ -259,9 +267,12 @@ export function canManageAnyPlanningScope(
 ) {
   if (!canWritePlanning(user)) return false
   if (user?.isSystemAdmin || isWorkspaceAdministrator(user)) return true
-  return Object.entries(access.projectRoles).some(([projectId, role]) =>
-    !access.ambiguousProjectIds.has(projectId) && role === 'manager'
-  )
+  return Object.entries(access.projectRoles).some(([key, role]) => {
+    if (role !== 'manager') return false
+    const separator = key.indexOf('\0')
+    const projectId = separator < 0 ? key : key.slice(separator + 1)
+    return separator >= 0 || !access.ambiguousProjectIds.has(projectId)
+  })
 }
 
 /**
@@ -304,18 +315,20 @@ function canUsePlanningScope(
   const scopedProjectIds = scope.teamId
     ? access.projectIdsByTeamId[scope.teamId] ?? []
     : []
+  const roleForProject = (teamId: string, projectId: string) =>
+    access.projectRoles[`${teamId}\0${projectId}`] ??
+    (access.ambiguousProjectIds.has(projectId) ? undefined : access.projectRoles[projectId])
   if (
     scope.teamId &&
     !scopedProjectIds.some((projectId) =>
-      !access.ambiguousProjectIds.has(projectId) &&
-      roleAllows(access.projectRoles[projectId], minimumRole)
+      roleAllows(roleForProject(scope.teamId!, projectId), minimumRole)
     )
   ) {
     return false
   }
   if (scope.projectId) {
-    if (access.ambiguousProjectIds.has(scope.projectId)) return false
-    if (!roleAllows(access.projectRoles[scope.projectId], minimumRole)) return false
+    const role = roleForProject(scope.teamId ?? '', scope.projectId)
+    if (!roleAllows(role, minimumRole)) return false
     if (scope.teamId && !scopedProjectIds.includes(scope.projectId)) return false
   }
   if (!scope.teamId && !scope.projectId) {

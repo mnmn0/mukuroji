@@ -17,6 +17,7 @@ import {
 import type { MessageKey } from '../../shared/i18n/i18n'
 import { ProgressBar } from '../../shared/ui/WorkbenchPrimitives'
 import { useModalFocus } from '../../shared/ui/useModalFocus'
+import { formatPlanningUpdateDate } from '../../planning/model/date'
 
 /** Props for the searchable, filterable Project directory view. */
 export type ProjectDirectoryViewProps = {
@@ -536,7 +537,10 @@ function ProjectDirectoryListRow({
                 {planningUpdate?.latestUpdate?.summary ?? t('planning.updateState.neverUpdated')}
                 {planningUpdate?.cadence?.nextDueAt
                   ? ` · ${formatProjectDirectoryMessage(t('planning.updateState.dueMeta'), {
-                      date: planningUpdate.cadence.nextDueAt.slice(0, 10),
+                      date: formatPlanningUpdateDate(
+                        planningUpdate.cadence.nextDueAt,
+                        planningUpdate.cadence.timeZone,
+                      ),
                     })}`
                   : ''}
               </button>
@@ -545,7 +549,10 @@ function ProjectDirectoryListRow({
                 {planningUpdate?.latestUpdate?.summary ?? t('planning.updateState.neverUpdated')}
                 {planningUpdate?.cadence?.nextDueAt
                   ? ` · ${formatProjectDirectoryMessage(t('planning.updateState.dueMeta'), {
-                      date: planningUpdate.cadence.nextDueAt.slice(0, 10),
+                      date: formatPlanningUpdateDate(
+                        planningUpdate.cadence.nextDueAt,
+                        planningUpdate.cadence.timeZone,
+                      ),
                     })}`
                   : ''}
               </span>
@@ -554,7 +561,10 @@ function ProjectDirectoryListRow({
               <span className="min-w-0 truncate px-1 text-[11px] font-medium text-[var(--workbench-muted)]">
                 {formatProjectDirectoryMessage(t('planning.updateState.updatedMeta'), {
                   author: planningUpdate.latestUpdate.authorMemberKey,
-                  date: planningUpdate.latestUpdate.createdAt.slice(0, 10),
+                  date: formatPlanningUpdateDate(
+                    planningUpdate.latestUpdate.createdAt,
+                    planningUpdate.cadence?.timeZone,
+                  ),
                 })}
               </span>
             ) : null}

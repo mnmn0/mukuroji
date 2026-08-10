@@ -3,6 +3,7 @@ import {
   type Locale,
 } from '../../shared/i18n/i18n'
 import type { PlanningLabels } from './PlanningScreen'
+import { formatPlanningUpdateDate } from '../model/date'
 
 /**
  * PlanningScreen へ渡す locale 済み label を生成します。
@@ -12,10 +13,6 @@ import type { PlanningLabels } from './PlanningScreen'
  */
 export function createPlanningLabels(locale: Locale): PlanningLabels {
   const t = createTranslator(locale)
-  const statusDateFormatter = new Intl.DateTimeFormat(locale, {
-    dateStyle: 'medium',
-    timeStyle: 'short',
-  })
   return {
     eyebrow: t('planning.eyebrow'),
     title: t('planning.title'),
@@ -106,16 +103,7 @@ export function createPlanningLabels(locale: Locale): PlanningLabels {
       stale: t('planning.updateState.stale'),
     },
     dueAtMeta: (nextDueAt, timeZone) => {
-      let formattedDate: string
-      try {
-        formattedDate = new Intl.DateTimeFormat(locale, {
-          dateStyle: 'medium',
-          timeStyle: 'short',
-          timeZone,
-        }).format(new Date(nextDueAt))
-      } catch {
-        formattedDate = statusDateFormatter.format(new Date(nextDueAt))
-      }
+      const formattedDate = formatPlanningUpdateDate(nextDueAt, timeZone, locale)
       const dueLabel = t('planning.updateState.dueMeta').replace('{date}', formattedDate)
       return timeZone ? `${dueLabel} · ${timeZone}` : dueLabel
     },
@@ -201,7 +189,7 @@ export function createPlanningLabels(locale: Locale): PlanningLabels {
     rollupHealth: t('planning.field.rollupHealth'),
     noStatusUpdates: t('planning.statusUpdates.empty'),
     statusUpdateMeta: (authorMemberKey, createdAt) =>
-      `${authorMemberKey} · ${statusDateFormatter.format(new Date(createdAt))}`,
+      `${authorMemberKey} · ${formatPlanningUpdateDate(createdAt, undefined, locale)}`,
     entityTypes: {
       cycle: t('planning.type.cycle'),
       milestone: t('planning.type.milestone'),

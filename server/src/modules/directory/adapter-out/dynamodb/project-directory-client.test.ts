@@ -1267,7 +1267,7 @@ test('DynamoDB directory client archives teams and projects with conditional upd
     projectId: 'refero',
     archivedAt: expect.any(String),
   })
-  expect(sentInputs[1]).toMatchObject({
+  expect(sentInputs[2]).toMatchObject({
     TransactItems: [{
       Update: {
         TableName: 'DirectoryTable',
@@ -1292,7 +1292,7 @@ test('DynamoDB directory client archives teams and projects with conditional upd
       },
     }],
   })
-  expect(sentInputs[3]).toMatchObject({
+  expect(sentInputs[5]).toMatchObject({
     TransactItems: [{
       Update: {
         TableName: 'DirectoryTable',
