@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
+import { expect, fn, within } from 'storybook/test'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { teamWorkItemConfigurationFixture } from '../../work-items/fixtures'
 import { createWorkItemDependencySummaries } from '../../work-items/model/workItemDependencies'
@@ -10,6 +11,13 @@ import {
 } from './TaskView.stories.fixtures'
 
 const t = createTranslator('ja')
+const selectedBulkItem = {
+  expectedRevision: 1,
+  label: taskViewStoryTasks[0].title,
+  selectionKey: 'refero:core-team:wireframe',
+  teamId: 'core-team',
+  workItemId: 'wireframe',
+}
 
 /** Storybook metadata for the independent project task table view. */
 const meta = {
@@ -58,6 +66,59 @@ type Story = StoryObj<typeof meta>
 
 /** Standard populated project task table. */
 export const Default: Story = {}
+
+/** Compact grouped table with a minimal visible-column set and wrapped titles. */
+export const SavedViewPresentation: Story = {
+  args: {
+    presentation: {
+      columns: [
+        { field: 'title', pin: 'start', width: 320 },
+        { field: 'priority', pin: 'end', width: 150 },
+      ],
+      density: 'compact',
+      display: {
+        showArchived: false,
+        showAssigneeAvatars: true,
+        showCompleted: true,
+        showEmptyGroups: true,
+        showSubtasks: true,
+        wrapTitles: true,
+      },
+      groupBy: 'priority',
+      subgroupBy: 'assignee',
+    },
+  },
+}
+
+/** Canonical Assign request consumed once while retaining the initialized toolbar mode. */
+export const CanonicalAssignEntrance: Story = {
+  args: {
+    bulkWorkspaceId: 'workspace-1',
+    bulkTaskActionEpoch: 7,
+    bulkTaskActionRequest: {
+      actionId: 'assign',
+      projectId: 'refero',
+      requestId: 7,
+    },
+    onBulkApply: fn(),
+    onBulkPreview: fn(),
+    onBulkTaskActionRequestConsumed: fn(),
+    selectedBulkItems: [selectedBulkItem],
+    selectedTaskKeys: [selectedBulkItem.selectionKey],
+    visibleBulkItems: [selectedBulkItem],
+  },
+  play: async ({ args, canvasElement }) => {
+    const canvas = within(canvasElement)
+    await expect(canvas.getByRole('button', {
+      name: t('taskViews.action.assign'),
+    })).toHaveAttribute('aria-pressed', 'true')
+    await expect(canvas.getByRole('textbox', {
+      name: t('bulk.edit.field.assigneeUserId'),
+    })).toBeInTheDocument()
+    await expect(args.onBulkTaskActionRequestConsumed).toHaveBeenCalledTimes(1)
+    await expect(args.onBulkTaskActionRequestConsumed).toHaveBeenCalledWith(7)
+  },
+}
 
 /** Empty project task table. */
 export const Empty: Story = {

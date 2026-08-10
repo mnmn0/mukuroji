@@ -7,7 +7,10 @@ import type {
 import { renderToStaticMarkup } from 'react-dom/server'
 import { createTranslator } from '../src/shared/i18n/i18n'
 import { collaborationWorkspaceMemberFixtures } from '../src/issues/fixtures'
-import { teamWorkItemConfigurationFixture } from '../src/work-items/fixtures'
+import {
+  teamWorkItemConfigurationFixture,
+  workItemCustomFieldValueFixture,
+} from '../src/work-items/fixtures'
 import { createTaskKey } from '../src/tasks/model/taskView'
 import { createDefaultDueDateTaskSchedule } from '../src/tasks/model/taskSchedule'
 import { CreateTaskPanel } from '../src/tasks/ui/CreateTaskPanel'
@@ -20,6 +23,13 @@ import { TaskPermissionsView } from '../src/tasks/ui/TaskPermissionsView'
 import { TaskSchedulePreviewMetadata } from '../src/tasks/ui/TaskSchedulePreviewMetadata'
 import { TaskTableView } from '../src/tasks/ui/TaskTableView'
 import { TaskStatusBadge } from '../src/tasks/ui/TaskViewPrimitives'
+import type { TaskViewPresentationSettings } from '../src/task-views/model/taskViewPresentation'
+import { createTaskViewItemKey } from '../src/task-views/model/taskViewSelection'
+import {
+  createBuiltInTaskViewDefinition,
+  taskViewDefinitionToPresentationSettings,
+} from '../src/task-views/model/taskViewSurfaceState'
+import { MyTasksWorkspaceView } from '../src/workspace/ui/MyTasksWorkspaceView'
 import {
   taskViewStoryConfigurationsByTeam,
   taskViewStoryProjectFiles,
@@ -93,16 +103,20 @@ describe('independent task views', () => {
         onBulkOperationComplete={() => undefined}
         onCreateTaskOpen={() => undefined}
         onSelectTask={() => undefined}
+        onTaskActionMenuOpen={() => undefined}
         onTaskSelectionChange={() => undefined}
         onVisibleTaskSelectionChange={() => undefined}
       />,
     )
 
     expect(html).toContain('data-testid="task-row-wireframe"')
+    expect(html).toContain('data-task-action="open"')
     expect(html).toContain('data-selected="true"')
     expect(html).toContain('data-testid="tasks-count"')
     expect(html).toContain('4件のタスク')
     expect(html).toContain('data-testid="task-row-add-wireframe"')
+    expect(html).toContain('data-testid="task-row-actions-wireframe"')
+    expect(html).toContain('aria-label="その他の操作: ワイヤーフレームを確認する"')
 
     const emptyHtml = renderToStaticMarkup(
       <TaskTableView
@@ -162,6 +176,7 @@ describe('independent task views', () => {
         t={t}
         tasks={taskViewStoryTasks}
         onSelectTask={() => undefined}
+        onTaskActionMenuOpen={() => undefined}
       />,
     )
     const unavailableHtml = renderToStaticMarkup(
@@ -174,15 +189,300 @@ describe('independent task views', () => {
         t={t}
         tasks={[taskViewStoryTasks[0]]}
         onSelectTask={() => undefined}
+        onTaskActionMenuOpen={() => undefined}
       />,
     )
 
     expect(html).toContain('aria-label="ボードビュー"')
     expect(html).toContain('data-testid="project-task-column-core-team-active"')
     expect(html).toContain('ワイヤーフレームを確認する')
+    expect(html).toContain('data-testid="task-card-actions-wireframe"')
     expect(unavailableHtml).toContain(
       'data-testid="project-task-configuration-unavailable-column"',
     )
+    expect(unavailableHtml).toContain('data-testid="task-card-actions-wireframe"')
+  })
+
+  test('renders task-view columns, density, wrapping, grouping, and subgrouping', () => {
+    const presentation = {
+      columns: [
+        { field: 'title', pin: 'start', width: 340 },
+        { field: 'assignee', width: 180 },
+        { field: 'priority', pin: 'end', width: 140 },
+      ],
+      density: 'compact',
+      display: {
+        showArchived: false,
+        showAssigneeAvatars: true,
+        showCompleted: true,
+        showEmptyGroups: true,
+        showSubtasks: true,
+        wrapTitles: true,
+      },
+      groupBy: 'priority',
+      groupDirection: 'desc',
+      subgroupBy: 'assignee',
+      subgroupDirection: 'asc',
+    } satisfies TaskViewPresentationSettings
+    const tableHtml = renderToStaticMarkup(
+      <TaskTableView
+        bulkProjectOptions={[]}
+        bulkWorkspaceId=""
+        configuration={teamWorkItemConfigurationFixture}
+        configurationsByTeam={taskViewStoryConfigurationsByTeam}
+        locale="ja"
+        personLabels={personLabels}
+        presentation={presentation}
+        projectId="refero"
+        selectedBulkItems={[]}
+        selectedTaskKeys={[]}
+        t={t}
+        tasks={taskViewStoryTasks.slice(0, 2)}
+        visibleBulkItems={[]}
+        onBulkOperationComplete={() => undefined}
+        onSelectTask={() => undefined}
+        onTaskSelectionChange={() => undefined}
+        onVisibleTaskSelectionChange={() => undefined}
+      />,
+    )
+    const boardHtml = renderToStaticMarkup(
+      <TaskBoardView
+        configuration={teamWorkItemConfigurationFixture}
+        configurationFailedTeamIds={[]}
+        configurationsByTeam={taskViewStoryConfigurationsByTeam}
+        locale="ja"
+        personLabels={personLabels}
+        presentation={{
+          ...presentation,
+          columns: [{ field: 'title' }, { field: 'assignee' }],
+          density: 'spacious',
+          display: { ...presentation.display, showEmptyGroups: false },
+          groupBy: 'status',
+          subgroupBy: 'priority',
+        }}
+        statusColumns={taskViewStoryStatusColumns}
+        t={t}
+        tasks={taskViewStoryTasks.slice(0, 2)}
+        onSelectTask={() => undefined}
+      />,
+    )
+
+    expect(tableHtml).toContain('data-testid="task-table-group"')
+    expect(tableHtml).toContain('data-testid="task-table-subgroup"')
+    expect(tableHtml).toContain('py-1.5')
+    expect(tableHtml).toContain('whitespace-normal break-words')
+    expect(tableHtml).toContain('data-column-pin="start"')
+    expect(tableHtml).toContain('data-column-pin="end"')
+    expect(tableHtml).toContain('width:340px')
+    expect(tableHtml).toContain('data-testid="work-item-assignee-avatar"')
+    expect(tableHtml).not.toContain('2026-06-03')
+    expect(boardHtml).toContain('p-4')
+    expect(boardHtml).toContain('高 (1)')
+    expect(boardHtml).toContain('data-testid="work-item-assignee-avatar"')
+    expect(boardHtml).not.toContain('project-task-column-core-team-ready')
+    expect(boardHtml).not.toContain('project-task-column-core-team-done')
+    expect(boardHtml).not.toContain('2026-06-03')
+  })
+
+  test('preserves built-in custom-field summaries and renders selected custom columns', () => {
+    const task = {
+      ...taskViewStoryTasks[0],
+      customFieldValues: workItemCustomFieldValueFixture,
+    }
+    const builtInPresentation = taskViewDefinitionToPresentationSettings(
+      createBuiltInTaskViewDefinition(
+        'project',
+        { kind: 'project', projectId: 'refero' },
+        'table',
+        ['customFields'],
+      ),
+    )
+    /** Renders the same configured task under one presentation variant. */
+    const renderTable = (presentation: TaskViewPresentationSettings) => renderToStaticMarkup(
+      <TaskTableView
+        bulkProjectOptions={[]}
+        bulkWorkspaceId=""
+        configuration={teamWorkItemConfigurationFixture}
+        configurationsByTeam={taskViewStoryConfigurationsByTeam}
+        locale="ja"
+        personLabels={personLabels}
+        presentation={presentation}
+        projectId="refero"
+        selectedBulkItems={[]}
+        selectedTaskKeys={[]}
+        t={t}
+        tasks={[task]}
+        visibleBulkItems={[]}
+        onBulkOperationComplete={() => undefined}
+        onSelectTask={() => undefined}
+        onTaskSelectionChange={() => undefined}
+        onVisibleTaskSelectionChange={() => undefined}
+      />,
+    )
+
+    const builtInHtml = renderTable(builtInPresentation)
+    const customColumnHtml = renderTable({
+      ...builtInPresentation,
+      columns: [{ field: 'title' }, { field: 'custom:risk-level' }],
+    })
+
+    expect(builtInHtml).toContain(t('workItems.fields.title'))
+    expect(builtInHtml).toContain('Customer impact')
+    expect(customColumnHtml).toContain('Risk level')
+    expect(customColumnHtml).toContain('Moderate')
+  })
+
+  test('applies My Tasks card fields, density, wrapping, and board section grouping', () => {
+    const focusedTask = taskViewStoryTasks[0]
+    const focusedTaskKey = createTaskViewItemKey(focusedTask.teamId, focusedTask.id)
+    const html = renderToStaticMarkup(
+      <MyTasksWorkspaceView
+        configurationFailedTeamIds={[]}
+        configurationsByTeam={taskViewStoryConfigurationsByTeam}
+        focusedTaskKey={focusedTaskKey}
+        presentation={{
+          columns: [
+            { field: 'title' },
+            { field: 'assignee' },
+            { field: 'project' },
+            { field: 'team' },
+          ],
+          density: 'compact',
+          display: {
+            showArchived: false,
+            showAssigneeAvatars: true,
+            showCompleted: true,
+            showEmptyGroups: false,
+            showSubtasks: true,
+            wrapTitles: true,
+          },
+          groupBy: 'status',
+          subgroupBy: 'priority',
+        }}
+        t={t}
+        selectedTaskKeys={[focusedTaskKey]}
+        tasks={taskViewStoryTasks.slice(0, 2)}
+        teams={[{
+          id: 'core-team',
+          name: 'コアチーム',
+          projects: [{ id: 'refero', name: 'Refero' }],
+        }]}
+      />,
+    )
+
+    expect(html).toContain('高 (1)')
+    expect(html).toContain('p-2.5')
+    expect(html).toContain('whitespace-normal break-words')
+    expect(html).toContain('data-testid="work-item-assignee-avatar"')
+    expect(html).toContain('data-task-view-focused="true"')
+    expect(html).toContain('data-task-view-selected="true"')
+    expect(html).toContain(t('tasks.row.selected'))
+    expect(html).toContain('Refero')
+    expect(html).toContain('コアチーム')
+    expect(html).not.toContain('2026-06-03')
+    expect(html).not.toContain('my-tasks-column-core-team-ready')
+    expect(html).not.toContain('my-tasks-column-core-team-done')
+  })
+
+  test('renders My Tasks custom-field summaries and individual saved-view fields', () => {
+    const html = renderToStaticMarkup(
+      <MyTasksWorkspaceView
+        configurationFailedTeamIds={[]}
+        configurationsByTeam={taskViewStoryConfigurationsByTeam}
+        locale="ja"
+        presentation={{
+          columns: [
+            { field: 'title' },
+            { field: 'customFields' },
+            { field: 'custom:risk-level' },
+          ],
+          density: 'comfortable',
+          display: {
+            showArchived: false,
+            showAssigneeAvatars: true,
+            showCompleted: true,
+            showEmptyGroups: true,
+            showSubtasks: true,
+            wrapTitles: false,
+          },
+        }}
+        t={t}
+        tasks={[{
+          ...taskViewStoryTasks[0],
+          customFieldValues: workItemCustomFieldValueFixture,
+        }]}
+        teams={[{
+          id: 'core-team',
+          name: 'コアチーム',
+          projects: [{ id: 'refero', name: 'Refero' }],
+        }]}
+      />,
+    )
+
+    expect(html).toContain('Customer impact')
+    expect(html).toContain('Risk level')
+    expect(html).toContain('Moderate')
+  })
+
+  test('renders a canonical My Tasks card menu and reveals Move status controls', () => {
+    const task = taskViewStoryTasks[0]
+    const taskKey = createTaskViewItemKey(task.teamId, task.id)
+    const html = renderToStaticMarkup(
+      <MyTasksWorkspaceView
+        configurationFailedTeamIds={[]}
+        configurationsByTeam={taskViewStoryConfigurationsByTeam}
+        onMoveTaskStatus={async () => undefined}
+        onTaskActionMenuOpen={() => undefined}
+        presentation={{
+          columns: [{ field: 'title' }],
+          density: 'comfortable',
+          display: {
+            showArchived: false,
+            showAssigneeAvatars: false,
+            showCompleted: true,
+            showEmptyGroups: true,
+            showSubtasks: true,
+            wrapTitles: false,
+          },
+        }}
+        revealedStatusTaskKey={taskKey}
+        t={t}
+        tasks={[task]}
+        teams={[{
+          id: 'core-team',
+          name: 'コアチーム',
+          projects: [{ id: 'refero', name: 'Refero' }],
+        }]}
+      />,
+    )
+
+    expect(html).toContain(`data-task-view-item-key="${taskKey}"`)
+    expect(html).toContain('data-testid="my-tasks-card-refero-wireframe-actions"')
+    expect(html).toContain('data-testid="my-tasks-card-refero-wireframe-status-select"')
+  })
+
+  test('keeps My Tasks status controls hidden when the exact Work Item scope is read-only', () => {
+    const task = taskViewStoryTasks[0]
+    const taskKey = createTaskViewItemKey(task.teamId, task.id)
+    const html = renderToStaticMarkup(
+      <MyTasksWorkspaceView
+        canMoveTaskStatus={() => false}
+        configurationFailedTeamIds={[]}
+        configurationsByTeam={taskViewStoryConfigurationsByTeam}
+        onMoveTaskStatus={async () => undefined}
+        revealedStatusTaskKey={taskKey}
+        t={t}
+        tasks={[task]}
+        teams={[{
+          id: 'core-team',
+          name: 'コアチーム',
+          projects: [{ id: 'refero', name: 'Refero' }],
+        }]}
+      />,
+    )
+
+    expect(html).not.toContain('data-testid="my-tasks-card-refero-wireframe-status-select"')
+    expect(html).toContain('draggable="false"')
   })
 
   test('orders the Gantt view by due date and leaves unscheduled tasks last', () => {

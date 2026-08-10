@@ -333,4 +333,10 @@ textarea {
     border-left: 1px solid var(--workbench-border);
     background: var(--workbench-surface);
   }
+
+  @media (max-width: 720px) {
+    .workbench-table [data-column-pin] {
+      position: static !important;
+    }
+  }
 }

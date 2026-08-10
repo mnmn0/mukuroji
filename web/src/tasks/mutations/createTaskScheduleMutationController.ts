@@ -227,7 +227,7 @@ export function createTaskScheduleMutationController({
     )
     /** Fetches and publishes the Project list only after it observes committed revisions. */
     const refreshProjectTasks = () => refreshScheduleConfirmationCache(
-      () => guardEnterpriseSession(getProjectIssues(projectId, token)),
+      () => guardEnterpriseSession(getProjectIssues(projectId, token, true)),
       (refreshedTasks) => assertConfirmedScheduleRevisionsObserved(
         refreshedTasks,
         response.workItems.filter((item) => item.assignedProjectId === projectId),

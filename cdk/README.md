@@ -142,7 +142,7 @@ real metricによる`OK → ALARM → OK`と両receiptの手順は
 - `EnterpriseScimGroupJobFunctionName`, `EnterpriseScimGroupJobDlqUrl`
 - `EnterpriseIdentityTableName`（Workspace generation/`CONTROL` checkpoint、global domain claim、SSO/policy/role、SCIM projection、provisioning run の store。Enterprise Identity 専用 GSI は持ちません）
 - `WorkItemCollaborationTableName`, `RealtimeSessionsTableName`, `RealtimeWebSocketUrl`
-- `WorkspaceSearchTableName`（検索文書、saved view、ユーザー別 view preference）
+- `WorkspaceSearchTableName`（検索文書、saved/task view、ユーザー別 view preference、24 時間保持の task view mutation receipt。receipt のみ `expiresAt` TTL で失効）
 - `WorkspaceSearchMigrationStateTableName`（lease、checkpoint、operation receipt 用の retained/PITR store）
 - `WorkspaceSearchMigrationDeploymentTargetId`, `WorkspaceSearchMigrationDeploymentTrustVersion`, `WorkspaceSearchMigrationDeploymentEnvironment`, `WorkspaceSearchMigrationDeploymentAccount`, `WorkspaceSearchMigrationDeploymentRegion`, `WorkspaceSearchMigrationProductionAccountDigest`, `WorkspaceSearchMigrationDeploymentTrustRootDigest`（review済みsource mapから決まるcanonical deployment trust root。raw production account IDは含めない）
 - `WorkspaceSearchMigrationJournalBucketName`, `WorkspaceSearchMigrationJournalKeyArn`（通常artifactは30–31日、`workspace-search/v1/rehearsal/evidence-*`だけ365–366日の Object Lock COMPLIANCE 付きlossless migration artifact store。Preimage journal segment は2 MiB以下、planning raw source/target artifact segment は16 MiB以下の単一 `PutObject` に限定し、multipart upload は許可しません。専用 access log bucket は current/noncurrent version を90日保持）
