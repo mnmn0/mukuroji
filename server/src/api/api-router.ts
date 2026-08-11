@@ -5772,7 +5772,15 @@ routeApp.post('/api/request-submissions/:submissionId/actions', async (c) => {
       await repairConvertedRequestTriageProjection(c, principal, submission)
       return c.json(submission)
     }
-    const conversion = createRequestWorkItemInput(submission, body)
+    const triageEntryId = createFormTriageEntryId(submissionId)
+    const triageEntry = await readLegacyConversionTriageEntry(
+      principal.directoryId,
+      submission.routingTarget.teamId,
+      triageEntryId,
+    )
+    const conversion = triageEntry?.retention.redactedAt !== undefined
+      ? createRetentionSafeRequestWorkItemInput(submission, body)
+      : createRequestWorkItemInput(submission, body)
     const teamContext = await requireTeamPermission(principal, conversion.target.teamId, 'member')
     requireAssignedProjectPermission(
       principal,
@@ -5781,12 +5789,6 @@ routeApp.post('/api/request-submissions/:submissionId/actions', async (c) => {
       'member',
     )
     await validateRequestRoutingTarget(principal.directoryId, conversion.target)
-    const triageEntryId = createFormTriageEntryId(submissionId)
-    const triageEntry = await readLegacyConversionTriageEntry(
-      principal.directoryId,
-      submission.routingTarget.teamId,
-      triageEntryId,
-    )
     if (triageEntry && conversion.target.teamId !== triageEntry.teamId) {
       throw new RequestIntakeError(
         409,
@@ -5847,9 +5849,27 @@ routeApp.post('/api/request-submissions/:submissionId/actions', async (c) => {
       normalized,
       resolvedConfiguration,
     )
+    const authorizationConditionChecks = triageEntry
+      ? await createTriageProjectAuthorizationConditionChecks(
+          principal,
+          teamContext,
+          principal.directoryId,
+          conversion.target.teamId,
+          conversion.target.projectId,
+        )
+      : []
+    const guardedConfigured = authorizationConditionChecks.length === 0
+      ? configured
+      : {
+          ...configured,
+          authorizationConditionChecks: mergeTriageConditionChecks(
+            configured.authorizationConditionChecks ?? [],
+            authorizationConditionChecks,
+          ),
+        };
     await requireActiveWorkspaceAssignee(
       principal.directoryId,
-      readTeamIssueAssigneeUserId(configured),
+      readTeamIssueAssigneeUserId(guardedConfigured),
     )
     const triageOccurredAt = triageEntry && triageAction && triageIdempotency && deterministicIssueId
       ? new Date().toISOString()
@@ -5875,7 +5895,7 @@ routeApp.post('/api/request-submissions/:submissionId/actions', async (c) => {
     const created = await hydrateCreateTeamIssueResponse(await workItemDependencies.teamIssues.createTeamIssue(
       principal.directoryId,
       conversion.target.teamId,
-      configured,
+      guardedConfigured,
       principal.userKey,
       createApiMutationContext(c, principal, {
         submissionId,
@@ -17966,12 +17986,15 @@ async function applyTriageRouteAction(request: TriageRouterActionRequest) {
     currentEntry.projectId,
     'member',
   )
-  const authorizationConditionChecks = await createTriageProjectAuthorizationConditionChecks(
-    principal,
-    currentTeamContext,
-    request.workspaceId,
-    request.teamId,
-    currentEntry.projectId,
+  let authorizationConditionChecks = mergeTriageConditionChecks(
+    request.authorizationConditionChecks ?? [],
+    await createTriageProjectAuthorizationConditionChecks(
+      principal,
+      currentTeamContext,
+      request.workspaceId,
+      request.teamId,
+      currentEntry.projectId,
+    ),
   )
 
   if (request.action.action === 'assign') {
@@ -17997,7 +18020,20 @@ async function applyTriageRouteAction(request: TriageRouterActionRequest) {
 
   const action = request.action
   if (action.action === 'accept' && action.mode === 'create') {
-    return await acceptTriageEntryAsNewWorkItem(principal, { ...request, action })
+    authorizationConditionChecks = mergeTriageConditionChecks(
+      authorizationConditionChecks,
+      await createTriageProjectAuthorizationConditionChecks(
+        principal,
+        currentTeamContext,
+        request.workspaceId,
+        request.teamId,
+        action.projectId ?? currentEntry.projectId,
+      ),
+    )
+    return await acceptTriageEntryAsNewWorkItem(
+      principal,
+      { ...request, action, authorizationConditionChecks },
+    )
   }
 
   if (action.action === 'request-information') {
@@ -18079,11 +18115,21 @@ async function applyTriageRouteAction(request: TriageRouterActionRequest) {
     const workItemId = action.action === 'duplicate'
       ? action.canonicalWorkItemId
       : action.workItemId
-    const { detail } = await loadAuthorizedTeamIssue(
+    const { context: targetTeamContext, detail } = await loadAuthorizedTeamIssue(
       principal,
       request.teamId,
       workItemId,
       'member',
+    )
+    authorizationConditionChecks = mergeTriageConditionChecks(
+      authorizationConditionChecks,
+      await createTriageProjectAuthorizationConditionChecks(
+        principal,
+        targetTeamContext,
+        request.workspaceId,
+        request.teamId,
+        detail.issue.assignedProjectId,
+      ),
     )
     if (currentEntry.source.kind === 'form' && currentEntry.source.submissionId) {
       const replay = await workItemDependencies.triage.getActionReceipt(
@@ -18157,6 +18203,7 @@ async function applyTriageRouteAction(request: TriageRouterActionRequest) {
           },
         },
         [
+          ...authorizationConditionChecks,
           ...(action.action === 'accept'
             ? [createWorkItemRevisionConditionCheck(
                 getTeamIssuesTableName(),
@@ -18786,6 +18833,29 @@ function createDeterministicTriageWorkItemId(
 }
 
 /**
+ * Creates a retention-safe legacy conversion input without reading source answers.
+ *
+ * Routing metadata and explicit operator overrides remain available, but mapped title,
+ * description, and custom fields cannot be copied after the source retention boundary.
+ *
+ * @param submission - Stored Request submission whose answers must be isolated.
+ * @param overrides - Validated conversion options supplied by the operator.
+ * @returns A Work Item input derived without retained source answers.
+ */
+function createRetentionSafeRequestWorkItemInput(
+  submission: RequestSubmission,
+  overrides: Extract<RequestSubmissionActionInput, { action: 'convert' }>,
+) {
+  return createRequestWorkItemInput(
+    { ...submission, answers: {} },
+    {
+      ...overrides,
+      title: overrides.title?.trim() || 'Retained source',
+    },
+  )
+}
+
+/**
  * Creates a canonical Work Item and accepts its Triage Entry in one transaction.
  *
  * A Form source also converts its Request submission in the same transaction. The
@@ -18820,7 +18890,7 @@ async function acceptTriageEntryAsNewWorkItem(
         entry.source.submissionId,
       )
     : undefined
-  const formConversion = submission
+  const formConversion = submission && entry.retention.redactedAt === undefined
     ? createRequestWorkItemInput(submission, {
         action: 'convert',
         expectedRevision: submission.revision,
@@ -18849,12 +18919,18 @@ async function acceptTriageEntryAsNewWorkItem(
   const resolvedConfiguration = await workItemDependencies.workItemConfigurations
     .getTeamConfiguration(request.workspaceId, request.teamId)
   const normalized = normalizeTeamIssueInput({
-    ...(formConversion?.input ?? {
-      title: entry.sourcePreview.title,
-      ...(entry.sourcePreview.body ? { description: entry.sourcePreview.body } : {}),
-      schedule: createDefaultUnscheduledWorkItemSchedule(),
-      priority: 'medium',
-    }),
+    ...(formConversion?.input ?? (entry.retention.redactedAt !== undefined
+      ? {
+          title: 'Retained source',
+          schedule: createDefaultUnscheduledWorkItemSchedule(),
+          priority: 'medium',
+        }
+      : {
+          title: entry.sourcePreview.title,
+          ...(entry.sourcePreview.body ? { description: entry.sourcePreview.body } : {}),
+          schedule: createDefaultUnscheduledWorkItemSchedule(),
+          priority: 'medium',
+        })),
     assignedProjectId: assignedProjectId ?? null,
     assigneeUserId,
     idempotentIssueId: issueId,
@@ -18878,6 +18954,7 @@ async function acceptTriageEntryAsNewWorkItem(
     authorizationConditionChecks: [
       ...(configured.authorizationConditionChecks ?? []),
       ...acceptanceReferenceConditionChecks,
+      ...(request.authorizationConditionChecks ?? []),
     ],
   }
   const now = new Date().toISOString()

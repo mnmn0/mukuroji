@@ -21,7 +21,11 @@ import type {
   CreateTeamIssueRequestBody,
   TeamIssueResponseItem,
 } from '../modules/work-items'
-import { createTriageCapabilities, TriageError } from '../modules/triage/domain/triage-entry'
+import {
+  createTriageCapabilities,
+  redactExpiredTriageEntry,
+  TriageError,
+} from '../modules/triage/domain/triage-entry'
 import { InMemoryEnterpriseIdentityClient } from '../modules/enterprise-identity/enterprise-identity'
 
 const {
@@ -973,6 +977,9 @@ describe('Team Triage API composition', () => {
           expect(input.authorizationConditionChecks?.some((item) =>
             item.ConditionCheck?.TableName === 'WorkspaceAccessTable'
           )).toBe(true)
+          expect(input.authorizationConditionChecks?.some((item) =>
+            item.ConditionCheck?.Key?.entryKey === 'PROJECT_MEMBER#refero#demo@example.com'
+          )).toBe(true)
           if (typeof input.idempotentIssueId !== 'string' || !triageAcceptance) {
             throw new Error('Triage acceptance did not supply a deterministic Work Item write.')
           }
@@ -1156,6 +1163,81 @@ describe('Team Triage API composition', () => {
       },
       schedule: { mode: 'due-date', dueDate: '2026-08-12' },
       priority: 'high',
+    })
+  })
+
+  test('accept-create does not copy an expired Form submission body', async () => {
+    const submission = createMappedFormSubmission()
+    const expiredEntry = redactExpiredTriageEntry(
+      createEntry({
+        id: 'triage-form-expired-1',
+        source: {
+          kind: 'form',
+          sourceId: submission.id,
+          formId: submission.formId,
+          submissionId: submission.id,
+        },
+        retention: { expiresAt: '2026-08-08T00:00:00.000Z' },
+      }),
+      NOW,
+    )
+    let createdInput: CreateTeamIssueRequestBody | undefined
+    configureFakeProjectClients(true, {
+      role: 'member',
+      workspaceRole: 'member',
+      projectAccesses: [{ projectId: 'refero', role: 'member' }],
+    })
+    setTestAppDependencies({
+      requestIntake: createRequestIntakeClient({
+        getSubmission: async () => submission,
+      }),
+      triage: createTriageClient(expiredEntry),
+      teamIssues: createTeamIssuesFake({
+        async createTeamIssue(
+          _workspaceId,
+          _teamId,
+          input,
+          _actorUserId,
+          _auditContext,
+          _requestConversion,
+          triageAcceptance,
+        ) {
+          createdInput = input
+          if (!triageAcceptance || typeof input.idempotentIssueId !== 'string') {
+            throw new Error('Expired Form acceptance omitted its atomic Triage contribution.')
+          }
+          return {
+            issue: createAcceptedWorkItem(input.idempotentIssueId, triageAcceptance.entryId),
+          }
+        },
+      }),
+    })
+
+    const response = await app.request(
+      '/api/teams/core-team/triage-entries/triage-form-expired-1/actions',
+      {
+        method: 'POST',
+        headers: createHeaders('accept-expired-form'),
+        body: JSON.stringify({
+          action: 'accept',
+          mode: 'create',
+          expectedRevision: 1,
+        }),
+      },
+    )
+
+    expect(response.status).toBe(200)
+    expect(createdInput).toMatchObject({
+      title: 'Retained source',
+      assignedProjectId: 'refero',
+      customFieldValues: {},
+      priority: 'medium',
+    })
+    expect(createdInput?.description).toBeUndefined()
+    expect(createdInput?.title).not.toBe('Mapped outage title')
+    expect(createdInput?.customFieldValues).not.toMatchObject({
+      'request-channel': 'customer-success',
+      estimate: 8,
     })
   })
 

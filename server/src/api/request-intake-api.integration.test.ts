@@ -25,6 +25,8 @@ import {
 import {
   createTriageCapabilities,
 } from '../modules/triage'
+import { redactExpiredTriageEntry } from '../modules/triage/domain/triage-entry'
+import type { CreateTeamIssueRequestBody } from '../modules/work-items'
 import type {
   DynamoDBClient,
 } from '@aws-sdk/client-dynamodb'
@@ -577,6 +579,110 @@ test('commits a Request conversion pointer in the same transaction as its canoni
       ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
     },
   })
+})
+
+test('does not copy expired Form answers during legacy conversion', async () => {
+  const submission = createLegacySubmission({
+    answers: { title: 'Expired source answer' },
+  })
+  const entry = redactExpiredTriageEntry(
+    createLegacyTriageEntry(submission, {
+      retention: { expiresAt: '2026-08-08T00:00:00.000Z' },
+    }),
+    TRIAGE_NOW,
+  )
+  let createdInput: CreateTeamIssueRequestBody | undefined
+  configureFakeProjectClients(true, {
+    workspaceRole: 'owner',
+    projectAccesses: [{ projectId: 'refero', role: 'manager' }],
+  })
+  setTestAppDependencies({
+    triage: createLegacyTriageClient(entry),
+    requestIntake: createRequestIntakeClient({
+      getSubmission: async () => submission,
+      completeConversion: async () => ({
+        ...submission,
+        status: 'converted',
+        revision: submission.revision + 1,
+        workItem: {
+          teamId: 'core-team',
+          workItemId: 'retained-work-item',
+          projectId: 'refero',
+        },
+      }),
+    }),
+    teamIssues: createTeamIssuesFake({
+      async createTeamIssue(
+        _directoryId,
+        teamId,
+        input,
+        actorUserId,
+        _auditContext,
+        _requestConversion,
+        _triageAcceptance,
+      ) {
+        createdInput = input
+        const statusCategory = input.statusCategory === 'backlog' ||
+          input.statusCategory === 'unstarted' ||
+          input.statusCategory === 'started' ||
+          input.statusCategory === 'completed' ||
+          input.statusCategory === 'canceled'
+          ? input.statusCategory
+          : 'unstarted'
+        const priority = input.priority === 'low' || input.priority === 'medium' || input.priority === 'high'
+          ? input.priority
+          : 'medium'
+        return {
+          issue: {
+            schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+            revision: 1,
+            id: 'retained-work-item',
+            teamId,
+            ...(typeof input.assignedProjectId === 'string'
+              ? { assignedProjectId: input.assignedProjectId }
+              : {}),
+            title: String(input.title),
+            assigneeUserId: String(input.assigneeUserId),
+            creatorMemberKey: actorUserId,
+            workflowSchemaVersion: 1,
+            workflowStatusId: typeof input.workflowStatusId === 'string'
+              ? input.workflowStatusId
+              : 'todo',
+            statusCategory,
+            customFieldValues: {},
+            relationIds: [],
+            dueDate: '',
+            schedule: createDefaultUnscheduledWorkItemSchedule(),
+            priority,
+            createdAt: TRIAGE_NOW,
+            updatedAt: TRIAGE_NOW,
+            source: 'dynamodb',
+          },
+        }
+      },
+    }),
+  })
+
+  const response = await app.request(
+    `/api/request-submissions/${submission.id}/actions`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+        'Idempotency-Key': 'legacy-expired-conversion',
+      },
+      body: JSON.stringify({ action: 'convert', expectedRevision: 1 }),
+    },
+  )
+
+  expect(response.status).toBe(200)
+  expect(createdInput).toMatchObject({
+    title: 'Retained source',
+    customFieldValues: {},
+  })
+  expect(createdInput?.description).toBeUndefined()
+  expect(createdInput?.title).not.toBe('Expired source answer')
 })
 
 test.each([
