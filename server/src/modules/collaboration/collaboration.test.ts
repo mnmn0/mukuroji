@@ -1264,6 +1264,43 @@ test('hard-bounds and strictly validates curated context revision pages', async 
   })).rejects.toMatchObject({ status: 503, code: 'InvalidCollaborationRecord' })
 })
 
+test('preserves source line endings while validating curated context quote ranges', async () => {
+  const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
+  const source: CuratedContextSource = {
+    kind: 'activity',
+    sourceId: 'event-line-endings',
+    originalBody: 'line one\r\nline two',
+    quote: { text: 'line one\r\nline two', startOffset: 0, endOffset: 18 },
+    occurredAt: '2026-07-11T23:59:00.000Z',
+    availability: 'available',
+  }
+  const memory = createCollaborationMemory([], 'audit-table')
+
+  const created = await memory.client.createCuratedContextItem({
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'issue-1',
+    entityKey,
+    workItemTitle: 'Line ending evidence',
+    actor: { id: 'author@example.com', displayName: 'Author' },
+    kind: 'decision',
+    title: 'Preserve source line endings',
+    body: 'The captured source retains its original line endings.',
+    source,
+    activitySourceAuthorizationSnapshot: {
+      sourceId: source.sourceId,
+      expiresAt: Math.floor(Date.now() / 1_000) + 300,
+    },
+    auditContext: createTestAuditContext(
+      'line-ending-context',
+      '2026-07-12T00:00:00.000Z',
+      { title: 'Preserve source line endings' },
+    ),
+  })
+
+  expect(created.source).toEqual(source)
+})
+
 test('creates, revision-fences, and atomically supersedes curated context with history and watchers', async () => {
   const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
   const memory = createCollaborationMemory([], 'audit-table')
@@ -2120,6 +2157,51 @@ test('keeps accepted resolution history append-only through replacement and repl
   })
   expect(resolutionRowCount()).toBe(5)
   expect(firstInput.commentId).toBe('reply-1')
+})
+
+test('rejects accepted-resolution pointers and snapshots that are not paired', async () => {
+  const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
+  const resolution = {
+    id: 'resolution-current',
+    sourceCommentId: 'reply-1',
+    sourceRootCommentId: 'root-malformed',
+    capturedCommentRevision: 1,
+    capturedCommentBody: 'Answer',
+    summary: 'Use the answer.',
+    acceptedBy: { id: 'author@example.com', displayName: 'Author' },
+    acceptedAt: '2026-07-12T00:01:00.000Z',
+    state: 'accepted' as const,
+  }
+  const root = {
+    entityKey,
+    recordKey: 'COMMENT#root-malformed',
+    entryType: 'comment',
+    id: 'root-malformed',
+    rootCommentId: 'root-malformed',
+    authorMemberKey: 'author@example.com',
+    bodyMarkdown: 'Question',
+    version: 1,
+    mentionMemberKeys: [],
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+  }
+  const malformedRoots = [
+    { ...root, acceptedResolutionId: resolution.id },
+    { ...root, acceptedResolution: resolution },
+    {
+      ...root,
+      acceptedResolutionId: resolution.id,
+      acceptedResolution: { ...resolution, id: 'resolution-other' },
+    },
+  ]
+
+  for (const malformedRoot of malformedRoots) {
+    const memory = createCollaborationMemory([malformedRoot])
+    await expect(memory.client.getCommentSnapshot({
+      entityKey,
+      commentId: root.id,
+    })).rejects.toMatchObject({ status: 503, code: 'InvalidCollaborationRecord' })
+  }
 })
 
 test('paginates accepted-resolution history with a scope-bound cursor', async () => {

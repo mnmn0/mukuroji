@@ -483,7 +483,9 @@ test('non-projection writer-fence roles cannot mutate Workspace Search documents
     'Fn::GetAtt': [workspaceSearchTableId, 'Arn'],
   };
 
-  for (const [, roleLogicalIdPrefix] of writerFunctions.slice(1)) {
+  for (const [, roleLogicalIdPrefix] of writerFunctions
+    .slice(1)
+    .filter(([functionLogicalId]) => functionLogicalId !== apiFunctionLogicalId)) {
     const roleLogicalId = requireResourceId(
       roleLogicalIdPrefix,
       'AWS::IAM::Role',

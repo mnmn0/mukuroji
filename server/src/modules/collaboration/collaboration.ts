@@ -1469,6 +1469,8 @@ function normalizeCuratedContextQuote(
     'Curated context quote text',
     COLLABORATION_CONTEXT_BODY_MAX_LENGTH,
     false,
+    true,
+    true,
   )
   const hasStart = value.startOffset !== undefined
   const hasEnd = value.endOffset !== undefined
@@ -1669,6 +1671,8 @@ function normalizeIsoTimestamp(value: unknown, label: string) {
  * @param label - Validation label.
  * @param maxLength - Maximum UTF-16 length.
  * @param trim - Whether to trim surrounding whitespace.
+ * @param allowCarriageReturn - Whether carriage returns are valid in exact text.
+ * @param preserveLineEndings - Whether line endings must remain byte-for-byte unchanged.
  * @returns Validated text.
  */
 function requireTextValue(
@@ -1676,18 +1680,24 @@ function requireTextValue(
   label: string,
   maxLength: number,
   trim = true,
+  allowCarriageReturn = false,
+  preserveLineEndings = false,
 ) {
   if (typeof value !== 'string') {
     throw new CollaborationError(400, 'InvalidCollaborationInput', `${label} must be text.`)
   }
-  const normalized = trim ? value.replace(/\r\n?/g, '\n').trim() : value.replace(/\r\n?/g, '\n')
+  const normalized = preserveLineEndings
+    ? value
+    : trim
+      ? value.replace(/\r\n?/g, '\n').trim()
+      : value.replace(/\r\n?/g, '\n')
   if (!normalized.trim()) {
     throw new CollaborationError(400, 'InvalidCollaborationInput', `${label} is required.`)
   }
   if (normalized.length > maxLength) {
     throw new CollaborationError(400, 'InvalidCollaborationInput', `${label} is too long.`)
   }
-  if (hasUnsafeControlCharacter(normalized)) {
+  if (hasUnsafeControlCharacter(normalized, allowCarriageReturn)) {
     throw new CollaborationError(
       400,
       'InvalidCollaborationInput',
@@ -1706,10 +1716,14 @@ function requireTextValue(
  * @returns Validated exact text.
  */
 function requireBoundedExactText(value: unknown, label: string, maxLength: number) {
-  if (typeof value !== 'string' || value.length > maxLength || hasUnsafeControlCharacter(value)) {
+  if (
+    typeof value !== 'string' ||
+    value.length > maxLength ||
+    hasUnsafeControlCharacter(value, true)
+  ) {
     throw new CollaborationError(400, 'InvalidContextSource', `${label} is invalid.`)
   }
-  return value.replace(/\r\n?/g, '\n')
+  return value
 }
 
 /**
@@ -4056,16 +4070,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
     if (!response.Item) {
       return undefined
     }
-    const comment = toStoredComment(response.Item)
-    if (comment.rootCommentId !== comment.id ||
-        !comment.acceptedResolutionId ||
-        comment.acceptedResolutions.length > 0) {
-      return comment
-    }
-    return {
-      ...comment,
-      acceptedResolutions: [await this.readCurrentAcceptedResolution(comment)],
-    }
+    return toStoredComment(response.Item)
   }
 
   private async getRequiredStoredComment(entityKey: string, commentId: string) {
@@ -4135,42 +4140,6 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       editedAt: current.editedAt,
       deletedAt: current.deletedAt,
     } satisfies StoredComment
-  }
-
-  /**
-   * Reads the current resolution from a transitional pointer-only root row.
-   *
-   * New writes retain this snapshot directly on the root. The bounded two-row
-   * lookup exists only for rows written before that snapshot was introduced.
-   *
-   * @param root - Stored root comment containing only a current pointer.
-   * @returns Current accepted resolution snapshot.
-   */
-  private async readCurrentAcceptedResolution(root: StoredComment) {
-    const response = await this.documentClient.send(new QueryCommand({
-      TableName: this.tableName,
-      KeyConditionExpression: 'entityKey = :entityKey AND begins_with(recordKey, :prefix)',
-      ExpressionAttributeValues: {
-        ':entityKey': root.entityKey,
-        ':prefix': acceptedResolutionRecordPrefix(root.id),
-      },
-      ConsistentRead: true,
-      ScanIndexForward: false,
-      Limit: 2,
-    }))
-    const current = (response.Items ?? [])
-      .map((item) => toStoredAcceptedResolution(item, root.id).resolution)
-      .find((resolution) =>
-        resolution.state === 'accepted' && resolution.id === root.acceptedResolutionId
-      )
-    if (!current) {
-      throw new CollaborationError(
-        503,
-        'InvalidCollaborationRecord',
-        'Accepted resolution current snapshot does not match the root pointer.',
-      )
-    }
-    return current
   }
 
   /**
@@ -5356,10 +5325,22 @@ function normalizeCommentBody(value: string) {
   return normalized
 }
 
-function hasUnsafeControlCharacter(value: string) {
+/**
+ * Detects control characters that are unsafe for persisted collaboration text.
+ *
+ * @param value - Text to inspect.
+ * @param allowCarriageReturn - Whether carriage returns are preserved as source evidence.
+ * @returns Whether the text contains an unsafe control character.
+ */
+function hasUnsafeControlCharacter(value: string, allowCarriageReturn = false) {
   return [...value].some((character) => {
     const codePoint = character.codePointAt(0) ?? 0
-    return codePoint === 127 || (codePoint < 32 && codePoint !== 9 && codePoint !== 10)
+    return codePoint === 127 || (
+      codePoint < 32 &&
+      codePoint !== 9 &&
+      codePoint !== 10 &&
+      !(allowCarriageReturn && codePoint === 13)
+    )
   })
 }
 
@@ -5405,14 +5386,29 @@ function toStoredComment(value: Record<string, unknown>) {
       'Accepted resolution current snapshot is invalid.',
     )
   }
+  const acceptedResolutionId = value.acceptedResolutionId === undefined
+    ? undefined
+    : requireIdentifierValue(value.acceptedResolutionId, 'Accepted resolution ID')
+  if (acceptedResolutionId !== undefined && !storedCurrentResolution) {
+    throw new CollaborationError(
+      503,
+      'InvalidCollaborationRecord',
+      'Accepted resolution pointer requires a current snapshot.',
+    )
+  }
+  if (storedCurrentResolution && acceptedResolutionId === undefined) {
+    throw new CollaborationError(
+      503,
+      'InvalidCollaborationRecord',
+      'Accepted resolution current snapshot requires a root pointer.',
+    )
+  }
   const legacyCurrentResolution = legacyAcceptedResolutions.find(
     (resolution) => resolution.state === 'accepted',
   )
   const currentResolution = storedCurrentResolution ?? legacyCurrentResolution
-  const acceptedResolutionId = typeof value.acceptedResolutionId === 'string'
-    ? requireIdentifier(value.acceptedResolutionId, 'Accepted resolution ID')
-    : currentResolution?.id
-  if (currentResolution && acceptedResolutionId !== currentResolution.id) {
+  const normalizedAcceptedResolutionId = acceptedResolutionId ?? currentResolution?.id
+  if (storedCurrentResolution && acceptedResolutionId !== storedCurrentResolution.id) {
     throw new CollaborationError(
       503,
       'InvalidCollaborationRecord',
@@ -5441,7 +5437,9 @@ function toStoredComment(value: Record<string, unknown>) {
     ...(typeof value.resolvedByMemberKey === 'string'
       ? { resolvedByMemberKey: normalizeMemberKey(value.resolvedByMemberKey) }
       : {}),
-    ...(acceptedResolutionId ? { acceptedResolutionId } : {}),
+    ...(normalizedAcceptedResolutionId
+      ? { acceptedResolutionId: normalizedAcceptedResolutionId }
+      : {}),
     reactions: [],
     acceptedResolutions: currentResolution ? [currentResolution] : [],
     legacyAcceptedResolutions,
