@@ -208,7 +208,7 @@ export function TriageWorkbench({
             didSave={didSaveConfiguration}
             isLoading={isConfigurationLoading}
             isSaving={isSavingConfiguration}
-            key={configuration?.revision ?? 'triage-settings'}
+            key={configuration ? `${configuration.teamId}:${configuration.revision}` : 'triage-settings'}
             onRetry={onRetryConfiguration}
             onSave={onSaveConfiguration}
             t={t}
