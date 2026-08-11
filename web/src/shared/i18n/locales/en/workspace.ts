@@ -114,6 +114,7 @@ export const workspaceMessages = {
   'workspace.focus.policy.scope': 'Policy scope',
   'workspace.focus.policy.scopeUser': 'Personal',
   'workspace.focus.policy.scopeTeam': 'Team',
+  'workspace.focus.policy.team': 'Team policy',
   'workspace.focus.policy.weight': '{signal} weight',
   'workspace.focus.policy.dueSoonDays': 'Due-soon window in days',
   'workspace.focus.policy.cycleDueSoonDays': 'Cycle due-soon window in days',

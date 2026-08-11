@@ -6130,6 +6130,7 @@ routeApp.put('/api/focus/items/:teamId/:workItemId/snooze', async (c) => {
         current,
         requireFocusEffectivePolicyFingerprint(queue, current),
       )
+      const causeFingerprint = createFocusCauseFingerprint(current.signals)
       const state = await workItemDependencies.focusState.getState({
         workspaceId: principal.directoryId,
         memberKey: principal.userKey,
@@ -6141,7 +6142,7 @@ routeApp.put('/api/focus/items/:teamId/:workItemId/snooze', async (c) => {
         workItemId,
         mutationIdentity,
         input.snoozedUntil,
-        createFocusCauseFingerprint(current.signals),
+        causeFingerprint,
       )
       if (committedSnooze !== undefined) {
         const item = restoreFocusItemEvaluationTime(current, committedSnooze.updatedAt)
@@ -6162,7 +6163,7 @@ routeApp.put('/api/focus/items/:teamId/:workItemId/snooze', async (c) => {
         teamId,
         workItemId,
         expectedVersion: current.snoozeRevision,
-        causeFingerprint: createFocusCauseFingerprint(current.signals),
+        causeFingerprint,
         snoozedUntil: input.snoozedUntil,
         now,
         mutationIdentity,
@@ -6172,6 +6173,7 @@ routeApp.put('/api/focus/items/:teamId/:workItemId/snooze', async (c) => {
         teamId,
         workItemId,
       )
+      requireFocusSnoozePostcondition(item, causeFingerprint, input.snoozedUntil)
       const response = { item } satisfies UpdateFocusSnoozeResponse
       await completeFocusItemMutationReceipt(
         reservationRequest,
@@ -6300,6 +6302,7 @@ routeApp.put('/api/focus/items/:teamId/:workItemId/watch', async (c) => {
         teamId,
         issueId: workItemId,
         entityKey,
+        authorizationConditionChecks: createPlanningCallerAuthorizationConditionChecks(principal),
         projectId: detail.issue.assignedProjectId,
         projectEntityKey,
         memberKey: principal.userKey,
@@ -24001,7 +24004,13 @@ async function readFocusNotifications(
     if (notification.teamId === undefined || notification.issueId === undefined) continue
     const key = createFocusWorkItemKey(notification.teamId, notification.issueId)
     const currentCount = mentionCountsByWorkItemKey.get(key) ?? 0
-    if (currentCount >= FOCUS_NOTIFICATION_PER_WORK_ITEM_LIMIT) continue
+    if (currentCount >= FOCUS_NOTIFICATION_PER_WORK_ITEM_LIMIT) {
+      throw new FocusApiError(
+        503,
+        'FocusNotificationReadLimitExceeded',
+        'Focus mentions exceed the supported per-Work-Item read window.',
+      )
+    }
     mentionCountsByWorkItemKey.set(key, currentCount + 1)
     boundedNotifications.push(notification)
   }
@@ -24075,6 +24084,31 @@ function requireFocusItemVersion(item: FocusItem, expectedVersion: number): void
       409,
       'FocusItemVersionConflict',
       'Focus item changed after it was read. Reload and try again.',
+    )
+  }
+}
+
+/**
+ * Requires a snooze write to match the exact source evidence used to persist it.
+ *
+ * @param item - Focus item recomputed after the durable snooze write.
+ * @param expectedCauseFingerprint - Signal fingerprint captured before the write.
+ * @param expectedSnoozedUntil - Requested wake time, or null for an unsnooze.
+ */
+function requireFocusSnoozePostcondition(
+  item: FocusItem,
+  expectedCauseFingerprint: string,
+  expectedSnoozedUntil: string | null,
+): void {
+  const actualCauseFingerprint = createFocusCauseFingerprint(item.signals)
+  if (
+    actualCauseFingerprint !== expectedCauseFingerprint ||
+    (item.snoozedUntil ?? null) !== expectedSnoozedUntil
+  ) {
+    throw new FocusApiError(
+      409,
+      'FocusSnoozeConflict',
+      'Focus source evidence changed during the snooze mutation. Reload and try again.',
     )
   }
 }

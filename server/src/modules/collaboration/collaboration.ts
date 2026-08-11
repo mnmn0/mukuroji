@@ -189,6 +189,14 @@ export type WorkItemCollaborationScope = {
   assigneeMemberKey?: string
 }
 
+/** Read-only authorization row guard appended to a watcher mutation transaction. */
+export type CollaborationAuthorizationConditionCheck = {
+  /** Condition check against one current authorization source-of-truth row. */
+  ConditionCheck: NonNullable<
+    NonNullable<TransactWriteCommandInput['TransactItems']>[number]['ConditionCheck']
+  >
+}
+
 /** Thread page 取得入力です。 */
 export type GetCollaborationThreadInput = {
   /** Collaboration entity key です。 */
@@ -327,6 +335,8 @@ export type UpdateWatcherInput = {
   expectedSubscribed?: boolean
   /** Opaque identity used to recover a committed mutation after response loss. */
   mutationIdentity?: string
+  /** Caller authorization rows guarded in the same transaction as the watcher write. */
+  authorizationConditionChecks?: readonly CollaborationAuthorizationConditionCheck[]
   /** 自動 watch mutation かどうかです。 */
   automatic?: boolean
   /** 自動 watch の理由です。 */
@@ -1636,18 +1646,17 @@ function parentIssueCondition(tableName: string, input: WorkItemCollaborationSco
 }
 
 function watcherParentIssueConditions(tableName: string, input: UpdateWatcherInput) {
-  if (!input.issueId) {
-    return []
-  }
-
-  return [parentIssueCondition(tableName, {
-    workspaceId: requireText(input.workspaceId, 'Workspace ID'),
-    teamId: requireText(input.teamId ?? '', 'Team ID'),
-    issueId: requireText(input.issueId, 'Issue ID'),
-    entityKey: requireText(input.entityKey, 'Collaboration entity key'),
-    projectId: input.projectId,
-    projectEntityKey: input.projectEntityKey,
-  })]
+  const parentConditions = input.issueId === undefined
+    ? []
+    : [parentIssueCondition(tableName, {
+        workspaceId: requireText(input.workspaceId, 'Workspace ID'),
+        teamId: requireText(input.teamId ?? '', 'Team ID'),
+        issueId: requireText(input.issueId, 'Issue ID'),
+        entityKey: requireText(input.entityKey, 'Collaboration entity key'),
+        projectId: input.projectId,
+        projectEntityKey: input.projectEntityKey,
+      })]
+  return [...(input.authorizationConditionChecks ?? []), ...parentConditions]
 }
 
 function commentCondition(tableName: string, entityKey: string, commentId: string) {

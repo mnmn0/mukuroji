@@ -148,6 +148,7 @@ export function FocusQueue({
   const items = getFocusQueueItems(response, section)
   const counts = getFocusQueueSectionCounts(response)
   const [selectedItemId, setSelectedItemId] = useState<string>()
+  const [selectedPolicyTeamId, setSelectedPolicyTeamId] = useState<string>()
   const [overriddenRequestedItemId, setOverriddenRequestedItemId] = useState<string>()
   const [previousRequestedItemId, setPreviousRequestedItemId] = useState(requestedItemId)
   if (previousRequestedItemId !== requestedItemId) {
@@ -158,12 +159,23 @@ export function FocusQueue({
   const effectiveRequestedItemId = overriddenRequestedItemId === requestedItemId
     ? undefined
     : requestedItemId
+  const editablePolicyTeamIds = response?.policyCapabilities.editableTeamIds.filter((teamId) =>
+    response.effectivePolicies.some((policy) => policy.teamId === teamId)
+  ) ?? []
+  const preferredPolicyTeamId = selectedPolicyTeamId !== undefined &&
+    editablePolicyTeamIds.includes(selectedPolicyTeamId)
+    ? selectedPolicyTeamId
+    : undefined
   const selectedItem = resolveSelectedFocusItem(
     items,
     effectiveRequestedItemId,
     selectedItemId,
   )
-  const editorPolicy = getFocusPolicyForEditor(response, selectedItem)
+  const editorPolicy = getFocusPolicyForEditor(
+    response,
+    selectedItem,
+    preferredPolicyTeamId,
+  )
   const editorTeamId = editorPolicy?.teamId
   const editorTeamPolicy = editorTeamId === undefined
     ? undefined
@@ -371,9 +383,11 @@ export function FocusQueue({
       <FocusPolicyPanel
         canEditPersonal={response?.policyCapabilities.canEditPersonal === true}
         canEditTeam={canEditEditorTeam}
+        editableTeamIds={editablePolicyTeamIds}
         hasError={policyError}
         isSaving={isActionPending('policy-editor', 'policy')}
         onSave={onUpdatePolicy}
+        onTeamChange={setSelectedPolicyTeamId}
         personalPolicy={response?.userPolicy}
         policy={editorPolicy}
         teamPolicy={editorTeamPolicy}

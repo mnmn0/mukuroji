@@ -158,13 +158,18 @@ export function getFocusItemPolicy(
  *
  * @param response - Current queue snapshot.
  * @param item - Selected item whose Team context is preferred.
+ * @param preferredTeamId - Explicit Team selected in the policy editor.
  * @returns Selected Team policy, or the first visible Team policy for an empty section.
  */
 export function getFocusPolicyForEditor(
   response: FocusQueueResponse | undefined,
   item: FocusItem | undefined,
+  preferredTeamId?: string,
 ): FocusEffectivePolicy | undefined {
-  return getFocusItemPolicy(response, item) ?? response?.effectivePolicies[0]
+  const preferredPolicy = preferredTeamId === undefined
+    ? undefined
+    : response?.effectivePolicies.find((policy) => policy.teamId === preferredTeamId)
+  return preferredPolicy ?? getFocusItemPolicy(response, item) ?? response?.effectivePolicies[0]
 }
 
 /**

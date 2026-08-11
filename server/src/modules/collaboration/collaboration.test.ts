@@ -3,6 +3,7 @@ import type { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import { createMutationAuditContext } from '../audit/audit'
 import {
+  type CollaborationAuthorizationConditionCheck,
   CollaborationError,
   createProjectCollaborationEntityKey,
   createWorkItemCollaborationEntityKey,
@@ -95,6 +96,44 @@ test('prefers the canonical Work Items environment for parent mutation guards', 
         originalLegacyTeamIssuesTableName
     }
   }
+})
+
+test('includes caller authorization guards in watcher transactions', async () => {
+  let transaction: Record<string, unknown> | undefined
+  const client = createClient(async (command) => {
+    const input = readCommandInput(command)
+    if ('TransactItems' in input) transaction = input
+    return {}
+  })
+  const authorizationCheck: CollaborationAuthorizationConditionCheck = {
+    ConditionCheck: {
+      TableName: 'workspace-access-table',
+      Key: {
+        workspaceId: 'workspace#one',
+        recordKey: 'MEMBER#member@example.com',
+      },
+      ConditionExpression: '#version = :expectedVersion',
+      ExpressionAttributeNames: { '#version': 'version' },
+      ExpressionAttributeValues: { ':expectedVersion': 4 },
+    },
+  }
+
+  await client.subscribe({
+    authorizationConditionChecks: [authorizationCheck],
+    entityKey: createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1'),
+    expectedSubscribed: false,
+    issueId: 'issue-1',
+    memberKey: 'member@example.com',
+    teamId: 'team-a',
+    workspaceId: 'workspace#one',
+  })
+
+  expect(transaction?.TransactItems).toEqual(expect.arrayContaining([
+    authorizationCheck,
+    expect.objectContaining({
+      ConditionCheck: expect.objectContaining({ TableName: 'issue-table' }),
+    }),
+  ]))
 })
 
 test('reads soft-deleted comment snapshots consistently for search revalidation', async () => {

@@ -43,6 +43,8 @@ export type FocusPolicyPanelProps = {
   canEditTeam?: boolean
   /** Whether the personal policy layer may be managed. */
   canEditPersonal?: boolean
+  /** Team IDs whose effective policies may be selected in the editor. */
+  editableTeamIds?: readonly string[]
   /** Saves a sparse policy layer using optimistic concurrency. */
   onSave?: (
     target: FocusPolicyTarget,
@@ -55,6 +57,8 @@ export type FocusPolicyPanelProps = {
   policy?: FocusEffectivePolicy
   /** Stored Team layer whose sparse values replace product defaults. */
   teamPolicy?: FocusPolicy
+  /** Selects one effective Team policy for the editor. */
+  onTeamChange?: (teamId: string) => void
   /** Localized message resolver. */
   t: (key: MessageKey) => string
 }
@@ -68,9 +72,11 @@ export type FocusPolicyPanelProps = {
 export function FocusPolicyPanel({
   canEditPersonal = false,
   canEditTeam = false,
+  editableTeamIds = [],
   hasError = false,
   isSaving = false,
   onSave,
+  onTeamChange,
   personalPolicy,
   policy,
   teamPolicy,
@@ -83,6 +89,10 @@ export function FocusPolicyPanel({
   const storedPolicy = editingTeam ? teamPolicy : personalPolicy
   const inheritedSettings = editingTeam ? policy.baseSettings : policy.teamSettings
   const canEdit = editingTeam ? canEditTeam : canEditPersonal
+  const selectableTeamIds = [...new Set([
+    ...editableTeamIds,
+    ...(policy.teamId === undefined ? [] : [policy.teamId]),
+  ])]
 
   /** Validates and submits one sparse policy replacement. */
   const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
@@ -133,6 +143,25 @@ export function FocusPolicyPanel({
             policy.provenance.map((layer) => layer.source).join(' → '),
           )}
         </p>
+        {selectableTeamIds.length > 1 && policy.teamId !== undefined ? (
+          <label className="mb-4 grid max-w-xs gap-1 text-app-caption font-semibold text-[var(--workbench-muted)]">
+            <span>{t('workspace.focus.policy.team')}</span>
+            <select
+              aria-label={t('workspace.focus.policy.team')}
+              className="workbench-input min-h-[44px] px-3"
+              disabled={onTeamChange === undefined}
+              onChange={(event) => {
+                setInvalidFieldNames([])
+                onTeamChange?.(event.target.value)
+              }}
+              value={policy.teamId}
+            >
+              {selectableTeamIds.map((teamId) => (
+                <option key={teamId} value={teamId}>{teamId}</option>
+              ))}
+            </select>
+          </label>
+        ) : null}
         {policy.teamId ? (
           <label className="mb-4 grid max-w-xs gap-1 text-app-caption font-semibold text-[var(--workbench-muted)]">
             <span>{t('workspace.focus.policy.scope')}</span>

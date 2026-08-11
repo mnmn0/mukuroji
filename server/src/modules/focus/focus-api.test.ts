@@ -214,6 +214,7 @@ function configureFocusSources(
   const notificationCalls: string[] = []
   const watcherMutations: string[] = []
   const watcherExpectedStates: Array<boolean | undefined> = []
+  const watcherAuthorizationConditionChecks: Array<readonly unknown[]> = []
   let watching = false
   let watcherMutationIdentity: string | undefined
   let watcherUpdatedAt: string | undefined
@@ -242,6 +243,7 @@ function configureFocusSources(
       async subscribe(input) {
         watcherMutations.push('subscribe')
         watcherExpectedStates.push(input.expectedSubscribed)
+        watcherAuthorizationConditionChecks.push(input.authorizationConditionChecks ?? [])
         watching = true
         watcherMutationIdentity = input.mutationIdentity
         watcherUpdatedAt = input.auditContext?.occurredAt
@@ -256,6 +258,7 @@ function configureFocusSources(
       async unsubscribe(input) {
         watcherMutations.push('unsubscribe')
         watcherExpectedStates.push(input.expectedSubscribed)
+        watcherAuthorizationConditionChecks.push(input.authorizationConditionChecks ?? [])
         watching = false
         watcherMutationIdentity = input.mutationIdentity
         watcherUpdatedAt = input.auditContext?.occurredAt
@@ -272,6 +275,7 @@ function configureFocusSources(
   return {
     developerPlatform,
     notificationCalls,
+    watcherAuthorizationConditionChecks,
     watcherMutations,
     watcherExpectedStates,
   }
@@ -618,6 +622,30 @@ test('fails closed when deduplicated mentions exceed the cross-partition limit',
   })
 })
 
+test('fails closed when one Work Item exceeds the mention window', async () => {
+  configureFocusSources()
+  const notificationClient = createFocusNotificationClient([])
+  const mentions = Array.from({ length: 11 }, (_, index) => ({
+    ...createFocusMention(`per-item-event-${index}`, 'unread'),
+    occurredAt: new Date(Date.now() - index * 1_000).toISOString(),
+  }))
+  setTestAppDependencies({
+    notifications: {
+      ...notificationClient,
+      async list(input) {
+        return input.filter === 'all' ? { notifications: mentions } : { notifications: [] }
+      },
+    },
+  })
+
+  const response = await focusRequest('/api/focus')
+
+  expect(response.status).toBe(503)
+  expect(await response.json()).toMatchObject({
+    code: 'FocusNotificationReadLimitExceeded',
+  })
+})
+
 test('surfaces stalled notification snooze maintenance through Focus', async () => {
   configureFocusSources()
   const notificationClient = createFocusNotificationClient([])
@@ -645,7 +673,7 @@ test('surfaces stalled notification snooze maintenance through Focus', async () 
 test('bounds a complete mention window by age and Work Item count', async () => {
   configureFocusSources()
   const currentTime = Date.now()
-  const recentMentions = Array.from({ length: 15 }, (_, index) => ({
+  const recentMentions = Array.from({ length: 10 }, (_, index) => ({
     ...createFocusMention(`bounded-event-${index}`, 'unread'),
     occurredAt: new Date(currentTime - index * 1_000).toISOString(),
   }))
@@ -1504,6 +1532,41 @@ test('snoozes with the current projected version and rejects a stale retry', asy
   expect(await stale.json()).toMatchObject({ code: 'FocusItemVersionConflict' })
 })
 
+test('rejects a snooze when source evidence changes before the postcondition read', async () => {
+  configureFocusSources()
+  const notificationClient = createFocusNotificationClient([])
+  const initialMention = createFocusMention('snooze-before-event', 'unread')
+  const changedMention = createFocusMention('snooze-after-event', 'unread')
+  let allReads = 0
+  setTestAppDependencies({
+    notifications: {
+      ...notificationClient,
+      async list(input) {
+        if (input.filter !== 'all') return { notifications: [] }
+        allReads += 1
+        return { notifications: [allReads <= 2 ? initialMention : changedMention] }
+      },
+    },
+  })
+
+  const currentResponse = await focusRequest('/api/focus')
+  const currentVersion = readNumberProperty(
+    readFocusItem(await currentResponse.json(), 'onboarding-friction'),
+    'version',
+  )
+  const response = await focusRequest(
+    '/api/focus/items/core-team/onboarding-friction/snooze',
+    'PUT',
+    {
+      expectedVersion: currentVersion,
+      snoozedUntil: createFocusSnoozeTime(7),
+    },
+  )
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toMatchObject({ code: 'FocusSnoozeConflict' })
+})
+
 test('replays a lost-response snooze retry and rejects key reuse with another payload', async () => {
   configureFocusSources()
   const focusState = new InMemoryFocusStateClient()
@@ -1620,7 +1683,11 @@ test('rejects a snooze wake time beyond the bounded retention window', async () 
 })
 
 test('changes watch state with current legacy Work Item write permission', async () => {
-  const { watcherMutations, watcherExpectedStates } = configureFocusSources('member')
+  const {
+    watcherAuthorizationConditionChecks,
+    watcherMutations,
+    watcherExpectedStates,
+  } = configureFocusSources('member')
   const currentResponse = await focusRequest('/api/focus')
   const currentVersion = readNumberProperty(
     readFocusItem(await currentResponse.json(), 'onboarding-friction'),
@@ -1643,6 +1710,16 @@ test('changes watch state with current legacy Work Item write permission', async
   })
   expect(watcherMutations).toEqual(['subscribe'])
   expect(watcherExpectedStates).toEqual([false])
+  expect(watcherAuthorizationConditionChecks[0]).toEqual(expect.arrayContaining([
+    expect.objectContaining({
+      ConditionCheck: expect.objectContaining({
+        Key: {
+          recordKey: 'MEMBER#demo@example.com',
+          workspaceId: 'user#demo@example.com',
+        },
+      }),
+    }),
+  ]))
 
   const stale = await focusRequest(
     '/api/focus/items/core-team/onboarding-friction/watch',

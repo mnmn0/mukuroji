@@ -114,6 +114,7 @@ export const workspaceMessages = {
   'workspace.focus.policy.scope': 'ルールの範囲',
   'workspace.focus.policy.scopeUser': '個人',
   'workspace.focus.policy.scopeTeam': 'チーム',
+  'workspace.focus.policy.team': 'チームのルール',
   'workspace.focus.policy.weight': '{signal} の重み',
   'workspace.focus.policy.dueSoonDays': '期限間近とみなす日数',
   'workspace.focus.policy.cycleDueSoonDays': 'サイクル期限間近とみなす日数',

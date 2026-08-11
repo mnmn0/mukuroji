@@ -9,6 +9,7 @@ import {
   createFocusScheduleOperation,
   findDeepLinkedFocusItem,
   getFocusQueueItems,
+  getFocusPolicyForEditor,
   getFocusSourcePath,
   resolveFocusQueueNavigationIndex,
   resolveSelectedFocusItem,
@@ -58,6 +59,24 @@ describe('Focus queue', () => {
       'focus-WI-202',
       'focus-WI-194',
     )?.id).toBe('focus-WI-202')
+  })
+
+  test('preserves an explicit Team policy selection when no item is selected', () => {
+    const firstPolicy = focusQueueResponseFixture.effectivePolicies[0]
+    if (!firstPolicy) throw new Error('The Focus fixture requires one effective policy.')
+    const response: FocusQueueResponse = {
+      ...focusQueueResponseFixture,
+      effectivePolicies: [
+        firstPolicy,
+        { ...firstPolicy, id: 'effective-empty-team', teamId: 'empty-team' },
+      ],
+      policyCapabilities: {
+        ...focusQueueResponseFixture.policyCapabilities,
+        editableTeamIds: ['core-team', 'empty-team'],
+      },
+    }
+
+    expect(getFocusPolicyForEditor(response, undefined, 'empty-team')?.teamId).toBe('empty-team')
   })
 
   test('hides cached Focus after authorization failures but retains it for transient errors', () => {
@@ -182,6 +201,38 @@ describe('Focus queue', () => {
     expect(html).toContain('Focus priority rules')
     expect(html).toContain('Policy scope')
     expect(html).toContain('>Team</option>')
+  })
+
+  test('exposes every editable Team policy when the selected section is empty', () => {
+    const firstPolicy = focusQueueResponseFixture.effectivePolicies[0]
+    if (!firstPolicy) throw new Error('The Focus fixture requires one effective policy.')
+    const emptyTeamResponse: FocusQueueResponse = {
+      ...focusQueueResponseFixture,
+      effectivePolicies: [
+        firstPolicy,
+        { ...firstPolicy, id: 'effective-empty-team', teamId: 'empty-team' },
+      ],
+      policyCapabilities: {
+        ...focusQueueResponseFixture.policyCapabilities,
+        editableTeamIds: ['core-team', 'empty-team'],
+      },
+      sections: focusQueueResponseFixture.sections.map((group) =>
+        group.section === 'now' ? { ...group, items: [] } : group,
+      ),
+    }
+    const html = renderToStaticMarkup(
+      <FocusQueue
+        locale="en"
+        onOpenItem={() => undefined}
+        onSectionChange={() => undefined}
+        response={emptyTeamResponse}
+        section="now"
+        t={createTranslator('en')}
+      />,
+    )
+
+    expect(html).toContain('aria-label="Team policy"')
+    expect(html).toContain('value="empty-team"')
   })
 
   test('keeps policy failures separate from item mutation failures', () => {
