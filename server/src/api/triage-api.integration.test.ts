@@ -682,6 +682,50 @@ describe('Team Triage API composition', () => {
     ]))
   })
 
+  test('fences Project-scoped mutations with the active actor membership version', async () => {
+    const entry = createEntry({ projectId: 'refero' })
+    let authorizationConditionChecks: Parameters<TriageCompositionClient['applyAction']>[8]
+    const triage = {
+      ...createTriageClient(entry),
+      applyAction: async (...parameters: Parameters<TriageCompositionClient['applyAction']>) => {
+        authorizationConditionChecks = parameters[8]
+        return { entry, replayed: false }
+      },
+    } satisfies TriageCompositionClient
+    configureFakeProjectClients(true, {
+      projectAccesses: [{ projectId: 'refero', role: 'member' }],
+      workspaceRole: 'member',
+    })
+    setTestAppDependencies({ triage })
+
+    const response = await app.request(
+      '/api/teams/core-team/triage-entries/triage-api-1/actions',
+      {
+        method: 'POST',
+        headers: createHeaders('project-scoped-decline'),
+        body: JSON.stringify({
+          action: 'decline',
+          expectedRevision: 1,
+          reason: 'No longer relevant.',
+        }),
+      },
+    )
+
+    expect(response.status).toBe(200)
+    expect(authorizationConditionChecks).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        ConditionCheck: expect.objectContaining({
+          TableName: 'WorkspaceAccessTable',
+          Key: {
+            workspaceId: 'user#demo@example.com',
+            recordKey: 'MEMBER#demo@example.com',
+          },
+          ConditionExpression: 'attribute_exists(workspaceId)',
+        }),
+      }),
+    ]))
+  })
+
   test('rejects guest members as Triage owners and settings references', async () => {
     const entry = createEntry()
     configureFakeProjectClients(true, {

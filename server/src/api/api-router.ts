@@ -18278,7 +18278,7 @@ async function applyTriageRouteAction(request: TriageRouterActionRequest) {
   )
 }
 
-/** Builds a commit-time condition for the Project membership that authorized a Triage action. */
+/** Builds commit-time conditions for the Workspace actor and Project access authorizing a Triage action. */
 async function createTriageProjectAuthorizationConditionChecks(
   principal: WorkspacePrincipal,
   context: TeamPermissionContext,
@@ -18290,9 +18290,7 @@ async function createTriageProjectAuthorizationConditionChecks(
   if (principal.isSystemAdmin) {
     return []
   }
-  const actorMembershipChecks = projectId === undefined
-    ? await createTriageActiveActorConditionChecks(principal)
-    : []
+  const actorMembershipChecks = await createTriageActiveActorConditionChecks(principal)
   const enterpriseProjectAccess = projectId !== undefined &&
     principal.enterpriseProjectAccesses?.some((access) =>
       access.projectId === projectId && projectAccessAllows(access, minimumRole)
@@ -18334,7 +18332,7 @@ async function createTriageProjectAuthorizationConditionChecks(
       'Project authorization changed while the action was being prepared.',
     )
   }
-  return [conditionCheck]
+  return mergeTriageConditionChecks(actorMembershipChecks, [conditionCheck])
 }
 
 /** Builds commit-time authorization fences for replacing a full Team configuration. */
@@ -18377,7 +18375,7 @@ async function createTriageConfigurationAuthorizationConditionChecks(
   return mergeTriageConditionChecks(authorizationConditionChecks)
 }
 
-/** Builds the commit-time active-membership fence for a Projectless Triage mutation. */
+/** Builds the commit-time active-membership fence for a Triage mutation. */
 async function createTriageActiveActorConditionChecks(
   principal: WorkspacePrincipal,
   options?: WorkspaceActiveMemberConditionOptions,
@@ -18513,6 +18511,7 @@ async function createTriageActionReferenceConditionChecks(
     workspaceDependencies.workspaceAccess,
     workspaceId,
     normalizeProjectMemberKey(action.ownerUserId),
+    TRIAGE_NON_GUEST_MEMBER_CONDITION_OPTIONS,
   )
   if (!memberCheck) {
     throw new TriageError(
@@ -23307,7 +23306,11 @@ async function createTriageAcceptanceReferenceConditionChecks(
     }
     throw error
   }
-  const memberCheck = await createMemberCheck(workspaceId, assigneeUserId)
+  const memberCheck = await createMemberCheck(
+    workspaceId,
+    assigneeUserId,
+    TRIAGE_NON_GUEST_MEMBER_CONDITION_OPTIONS,
+  )
   if (!memberCheck) {
     throw new TriageError(
       409,

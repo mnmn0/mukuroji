@@ -166,7 +166,13 @@ export function TaskDetailPane({
 }: TaskDetailPaneProps) {
   const [fieldErrors, setFieldErrors] = useState<Readonly<Record<string, string | undefined>>>({})
   const scheduleFormId = useId()
-  const triageSourcesQuery = useTriageWorkItemSources(
+  const {
+    data: triageSourcesPages,
+    error: triageSourcesError,
+    isValidating: isTriageSourcesValidating,
+    setSize: setTriageSourcesSize,
+    size: triageSourcesSize,
+  } = useTriageWorkItemSources(
     accessToken,
     task?.teamId,
     task?.id,
@@ -243,7 +249,12 @@ export function TaskDetailPane({
   const triageContextSnapshots = hasMatchingIssueDetail
     ? detail?.triageContextSnapshots ?? []
     : []
-  const reverseTriageSources = triageSourcesQuery.data
+  const lastTriageSourcesPage = triageSourcesPages?.at(-1)
+  const hasMoreTriageSources = Boolean(lastTriageSourcesPage?.nextCursor)
+  const isLoadingMoreTriageSources = Boolean(
+    triageSourcesPages && triageSourcesSize > triageSourcesPages.length && isTriageSourcesValidating,
+  )
+  const reverseTriageSources = triageSourcesPages
     ?.flatMap((page) => page.entries)
     .filter((entry) => entry.id !== sourceTriageEntryId) ?? []
 
@@ -322,7 +333,7 @@ export function TaskDetailPane({
                 {t('tasks.detail.openTriageSource')}
               </a>
             ) : null}
-            {reverseTriageSources.length > 0 ? (
+            {reverseTriageSources.length > 0 || triageSourcesError ? (
               <section
                 className="mt-3 rounded-md border border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-3 py-2.5"
                 data-testid="task-detail-triage-sources"
@@ -342,6 +353,23 @@ export function TaskDetailPane({
                     </li>
                   ))}
                 </ul>
+                {triageSourcesError ? (
+                  <p className="mt-2 text-xs text-red-700" role="alert">
+                    {t('tasks.detail.triageSources.error')}
+                  </p>
+                ) : null}
+                {hasMoreTriageSources ? (
+                  <button
+                    className="workbench-button-secondary mt-3 min-h-9 px-3 text-xs"
+                    disabled={isLoadingMoreTriageSources}
+                    onClick={() => void setTriageSourcesSize(triageSourcesSize + 1)}
+                    type="button"
+                  >
+                    {isLoadingMoreTriageSources
+                      ? t('tasks.detail.triageSources.loadingMore')
+                      : t('tasks.detail.triageSources.loadMore')}
+                  </button>
+                ) : null}
               </section>
             ) : null}
             {triageContextSnapshots.length > 0 ? (

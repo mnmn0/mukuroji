@@ -164,6 +164,9 @@ export const workItemsMessages = {
   'tasks.detail.description': 'Description',
   'tasks.detail.openTriageSource': 'Open source in Team Triage',
   'tasks.detail.triageSources.title': 'Related Team Triage sources',
+  'tasks.detail.triageSources.loadMore': 'Load more sources',
+  'tasks.detail.triageSources.loadingMore': 'Loading more sources...',
+  'tasks.detail.triageSources.error': 'Related Team Triage sources could not be loaded.',
   'tasks.detail.triageContext.title': 'Retained intake context',
   'tasks.detail.triageContext.counts':
     '{comments} comments · {attachments} attachments · {watchers} watchers',

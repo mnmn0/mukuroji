@@ -164,6 +164,9 @@ export const workItemsMessages = {
   'tasks.detail.description': '説明',
   'tasks.detail.openTriageSource': 'Team Triage で受付元を開く',
   'tasks.detail.triageSources.title': '関連する Team Triage の受付元',
+  'tasks.detail.triageSources.loadMore': '受付元を追加で読み込む',
+  'tasks.detail.triageSources.loadingMore': '受付元を追加で読み込んでいます…',
+  'tasks.detail.triageSources.error': '関連する Team Triage の受付元を読み込めませんでした。',
   'tasks.detail.triageContext.title': '保存された受付コンテキスト',
   'tasks.detail.triageContext.counts':
     'コメント {comments}件 · 添付 {attachments}件 · ウォッチャー {watchers}人',
