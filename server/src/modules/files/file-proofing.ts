@@ -2449,7 +2449,8 @@ export function mapGuardDutyScanStatus(tags: Tag[] | undefined): FileScanStatus 
 export function createApprovalSummary(approvals: readonly ApprovalRequest[]): ApprovalSummary {
   const now = Date.now()
   const pending = approvals.filter((approval) => approval.status === 'pending')
-  const nextDueAt = pending.map((approval) => approval.dueAt).sort()[0]
+  const pendingDueAt = pending.map((approval) => approval.dueAt).sort()
+  const nextDueAt = pendingDueAt[0]
   const updatedAt = approvals.reduce<string | undefined>(
     (latest, approval) =>
       latest === undefined || Date.parse(approval.updatedAt) > Date.parse(latest)
@@ -2467,6 +2468,7 @@ export function createApprovalSummary(approvals: readonly ApprovalRequest[]): Ap
       (approval) => approval.status === 'changes-requested',
     ).length,
     ...(nextDueAt ? { nextDueAt } : {}),
+    ...(pendingDueAt.length > 0 ? { pendingDueAt } : {}),
     ...(updatedAt ? { updatedAt } : {}),
   }
 }
@@ -2502,6 +2504,7 @@ function toApprovalSummary(item: StoredApprovalSummaryItem): ApprovalSummary {
     rejectedCount: item.rejectedCount,
     changesRequestedCount: item.changesRequestedCount,
     ...(dueDates[0] ? { nextDueAt: dueDates[0] } : {}),
+    ...(dueDates.length > 0 ? { pendingDueAt: dueDates } : {}),
     updatedAt: item.updatedAt,
   }
 }

@@ -348,6 +348,10 @@ function isApprovalSummary(value: unknown, workItemCreatedAt: string): boolean {
     isNonnegativeSafeInteger(value.rejectedCount) &&
     isNonnegativeSafeInteger(value.changesRequestedCount) &&
     isOptionalString(value.nextDueAt) &&
+    (value.pendingDueAt === undefined || (
+      isStringArray(value.pendingDueAt) &&
+      value.pendingDueAt.every(isCanonicalUtcTimestamp)
+    )) &&
     (
       value.updatedAt === undefined ||
       (

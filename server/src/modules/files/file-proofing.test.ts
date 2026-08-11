@@ -1612,6 +1612,7 @@ describe('file proofing domain', () => {
 
     expect(await client.getApprovalSummary(scope)).toMatchObject({
       nextDueAt: dueAt,
+      pendingDueAt: [dueAt, dueAt],
       pendingCount: 2,
       updatedAt: expect.any(String),
     })
@@ -1639,6 +1640,7 @@ describe('file proofing domain', () => {
     )
     expect(await client.getApprovalSummary(scope)).toMatchObject({
       nextDueAt: dueAt,
+      pendingDueAt: [dueAt],
       pendingCount: 1,
     })
     await client.cancelApproval(
@@ -2106,6 +2108,7 @@ describe('file proofing domain', () => {
     ])).toMatchObject({
       changesRequestedCount: 1,
       pendingCount: 1,
+      pendingDueAt: ['2026-02-01T00:00:00.000Z'],
       updatedAt: '2026-01-03T00:00:00.000Z',
     })
   })

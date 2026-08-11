@@ -275,7 +275,7 @@ export function useNotificationInbox(
           context,
         ),
       )
-      await Promise.all([
+      await Promise.allSettled([
         refresh(),
         mutateGlobal(['focus-queue', accessToken]),
       ])
@@ -308,7 +308,7 @@ export function useNotificationInbox(
         String(unreadCount),
         (context) => markAllNotificationsRead(accessToken, context),
       )
-      await Promise.all([
+      await Promise.allSettled([
         refresh(),
         mutateGlobal(['focus-queue', accessToken]),
       ])

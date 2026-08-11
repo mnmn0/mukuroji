@@ -1687,6 +1687,7 @@ function normalizeApprovalSummary(
     !isNonNegativeSafeInteger(value.changesRequestedCount)
   ) invalidTransactionResult('canonical approval summary')
   const nextDueAt = readOptionalResultTimestamp(value.nextDueAt)
+  const pendingDueAt = readOptionalResultTimestampArray(value.pendingDueAt)
   const updatedAt = readOptionalResultTimestamp(value.updatedAt)
   if (
     updatedAt !== undefined &&
@@ -1701,6 +1702,7 @@ function normalizeApprovalSummary(
     rejectedCount: value.rejectedCount,
     changesRequestedCount: value.changesRequestedCount,
     ...(nextDueAt === undefined ? {} : { nextDueAt }),
+    ...(pendingDueAt === undefined ? {} : { pendingDueAt }),
     ...(updatedAt === undefined ? {} : { updatedAt }),
   }
 }
@@ -1748,6 +1750,20 @@ function readOptionalResultTimestamp(value: unknown): string | undefined {
   if (value === undefined) return undefined
   if (!isCanonicalTimestamp(value)) invalidTransactionResult('canonical Work Item timestamp')
   return value
+}
+
+/** Reads one optional array of canonical transaction result timestamps. */
+function readOptionalResultTimestampArray(value: unknown): string[] | undefined {
+  if (value === undefined) return undefined
+  if (!Array.isArray(value)) invalidTransactionResult('canonical Work Item timestamp list')
+  const timestamps: string[] = []
+  for (const entry of value) {
+    if (!isCanonicalTimestamp(entry)) {
+      invalidTransactionResult('canonical Work Item timestamp list')
+    }
+    timestamps.push(entry)
+  }
+  return timestamps
 }
 
 /**

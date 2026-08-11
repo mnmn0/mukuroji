@@ -337,6 +337,10 @@ describe('Focus queue projection', () => {
         rejectedCount: 0,
         changesRequestedCount: 0,
         nextDueAt: '2026-08-11T12:00:00.000Z',
+        pendingDueAt: [
+          '2026-08-10T12:00:00.000Z',
+          '2026-08-11T12:00:00.000Z',
+        ],
         updatedAt: '2026-08-09T10:30:00.000Z',
       },
     }
@@ -367,6 +371,87 @@ describe('Focus queue projection', () => {
     ])
     expect(item.signals[0]?.freshness.validUntil).toBe('2026-08-11T12:00:00.000Z')
     expect(item.rank.score).toBe(145)
+  })
+
+  test('preserves the remaining approval deadline after excluding a review request', () => {
+    const baseWorkItem = createWorkItem('remaining-approval-deadline')
+    const viewerDueAt = '2026-08-10T12:00:00.000Z'
+    const remainingDueAt = '2026-08-11T12:00:00.000Z'
+    const workItem: CanonicalWorkItem = {
+      ...baseWorkItem,
+      approvalSummary: {
+        pendingCount: 2,
+        overdueCount: 0,
+        approvedCount: 0,
+        rejectedCount: 0,
+        changesRequestedCount: 0,
+        nextDueAt: viewerDueAt,
+        pendingDueAt: [viewerDueAt, remainingDueAt],
+        updatedAt: '2026-08-09T10:30:00.000Z',
+      },
+    }
+    const approval: ApprovalRequest = {
+      id: 'viewer-approval-remaining-deadline',
+      teamId: workItem.teamId,
+      issueId: workItem.id,
+      revision: 1,
+      status: 'pending',
+      reviewers: [{ memberKey: 'viewer', status: 'pending' }],
+      dueAt: viewerDueAt,
+      requestedByMemberKey: 'requester',
+      requestedByKind: 'member',
+      createdAt: '2026-08-09T08:00:00.000Z',
+      updatedAt: '2026-08-09T08:00:00.000Z',
+      capabilities: { canDecide: true, canCancel: false },
+      subjectType: 'work-item',
+    }
+
+    const item = findFocusItem(projectQueue({
+      workItems: [workItem],
+      approvals: [approval],
+    }), workItem.id)
+
+    expect(item.signals[0]?.freshness.validUntil).toBe(remainingDueAt)
+  })
+
+  test('preserves a shared deadline for an unrelated approval', () => {
+    const baseWorkItem = createWorkItem('shared-approval-deadline')
+    const sharedDueAt = '2026-08-10T12:00:00.000Z'
+    const workItem: CanonicalWorkItem = {
+      ...baseWorkItem,
+      approvalSummary: {
+        pendingCount: 2,
+        overdueCount: 0,
+        approvedCount: 0,
+        rejectedCount: 0,
+        changesRequestedCount: 0,
+        nextDueAt: sharedDueAt,
+        pendingDueAt: [sharedDueAt, sharedDueAt],
+        updatedAt: '2026-08-09T10:30:00.000Z',
+      },
+    }
+    const approval: ApprovalRequest = {
+      id: 'viewer-approval-shared-deadline',
+      teamId: workItem.teamId,
+      issueId: workItem.id,
+      revision: 1,
+      status: 'pending',
+      reviewers: [{ memberKey: 'viewer', status: 'pending' }],
+      dueAt: sharedDueAt,
+      requestedByMemberKey: 'requester',
+      requestedByKind: 'member',
+      createdAt: '2026-08-09T08:00:00.000Z',
+      updatedAt: '2026-08-09T08:00:00.000Z',
+      capabilities: { canDecide: true, canCancel: false },
+      subjectType: 'work-item',
+    }
+
+    const item = findFocusItem(projectQueue({
+      workItems: [workItem],
+      approvals: [approval],
+    }), workItem.id)
+
+    expect(item.signals[0]?.freshness.validUntil).toBe(sharedDueAt)
   })
 
   test('projects SLA breaches and near active cycle boundaries from effective policy', () => {

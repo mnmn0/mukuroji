@@ -23977,6 +23977,7 @@ async function readFocusNotifications(
     const visitedCursors = new Set<string>()
     let cursor: string | undefined
     let pagesRead = 0
+    let cutoffReached = false
     do {
       const page = await workItemDependencies.notifications.list({
         workspaceId: principal.directoryId,
@@ -23990,6 +23991,11 @@ async function readFocusNotifications(
       pagesRead += 1
       for (const notification of page.notifications) {
         const occurredAt = Date.parse(notification.occurredAt)
+        // Notification pages are newest-first by their timestamp-prefixed key, so an old
+        // item proves that later pages cannot contain an in-window mention.
+        if (Number.isFinite(occurredAt) && occurredAt < cutoffTime) {
+          cutoffReached = true
+        }
         if (
           notification.reasons.includes('mention') &&
           notification.teamId !== undefined &&
@@ -24022,22 +24028,27 @@ async function readFocusNotifications(
           notifications.set(notification.eventId, notification)
         }
       }
-      if (page.nextCursor !== undefined) {
-        if (visitedCursors.has(page.nextCursor)) {
-          throw new FocusApiError(
-            503,
-            'FocusNotificationCursorStalled',
-            'Focus notifications could not advance to the next page.',
-          )
+      if (cutoffReached) {
+        cursor = undefined
+      } else {
+        if (page.nextCursor !== undefined) {
+          if (visitedCursors.has(page.nextCursor)) {
+            throw new FocusApiError(
+              503,
+              'FocusNotificationCursorStalled',
+              'Focus notifications could not advance to the next page.',
+            )
+          }
+          visitedCursors.add(page.nextCursor)
         }
-        visitedCursors.add(page.nextCursor)
+        cursor = page.nextCursor
       }
-      cursor = page.nextCursor
     } while (
+      !cutoffReached &&
       cursor !== undefined &&
       pagesRead < FOCUS_NOTIFICATION_MAX_PAGES_PER_FILTER
     )
-    if (cursor !== undefined) {
+    if (!cutoffReached && cursor !== undefined) {
       throw new FocusApiError(
         503,
         'FocusNotificationReadLimitExceeded',

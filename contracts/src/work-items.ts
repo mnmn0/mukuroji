@@ -351,6 +351,10 @@ export type ApprovalSummary = {
    */
   nextDueAt?: string
   /**
+   * 判断待ち approval の期限一覧です。重複値は同一期限の別 approval を表します。
+   */
+  pendingDueAt?: string[]
+  /**
    * Timestamp of the latest approval mutation represented by this aggregate.
    */
   updatedAt?: string

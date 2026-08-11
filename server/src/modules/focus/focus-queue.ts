@@ -1380,12 +1380,15 @@ function createApprovalSummarySignals(
     new Date(approval.dueAt).getTime() < context.now.getTime()
   ).length
   const overdueCount = Math.max(0, summary.overdueCount - excludedOverdueCount)
-  const excludedDueAt = new Set(excludedApprovals
-    .filter((approval) => approval.status === 'pending')
-    .map((approval) => approval.dueAt))
-  const nextDueAt = summary.nextDueAt !== undefined && !excludedDueAt.has(summary.nextDueAt)
-    ? summary.nextDueAt
-    : undefined
+  const remainingDueDates = summary.pendingDueAt === undefined
+    ? summary.nextDueAt === undefined ? [] : [summary.nextDueAt]
+    : [...summary.pendingDueAt]
+  for (const excludedApproval of excludedApprovals) {
+    if (excludedApproval.status !== 'pending') continue
+    const excludedDueAtIndex = remainingDueDates.indexOf(excludedApproval.dueAt)
+    if (excludedDueAtIndex >= 0) remainingDueDates.splice(excludedDueAtIndex, 1)
+  }
+  const nextDueAt = remainingDueDates.sort()[0]
   const occurredAt = selectCausalTimestamp(summary.updatedAt, workItem.createdAt)
   const sourceId = createCausalSourceId([
     createWorkItemSourceId(workItem),

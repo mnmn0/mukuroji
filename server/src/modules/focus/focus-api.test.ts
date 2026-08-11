@@ -575,10 +575,6 @@ test('fails closed when mention history exceeds the four-page source window', as
     ...createFocusMention(`bounded-event-${index}`, 'unread'),
     occurredAt: new Date(currentTime - index * 1_000).toISOString(),
   }))
-  const expiredMention = {
-    ...createFocusMention('expired-event', 'unread'),
-    occurredAt: new Date(currentTime - 100 * 24 * 60 * 60 * 1_000).toISOString(),
-  }
   const notificationClient = createFocusNotificationClient([])
   setTestAppDependencies({
     notifications: {
@@ -586,7 +582,7 @@ test('fails closed when mention history exceeds the four-page source window', as
       async list(input) {
         notificationCalls.push(`${input.filter ?? 'all'}:${input.cursor ?? ''}`)
         const candidates = input.filter === 'all' && input.cursor === undefined
-          ? [...recentMentions, expiredMention]
+          ? recentMentions
           : []
         const notifications: NotificationItem[] = []
         for (const notification of candidates) {
@@ -611,6 +607,45 @@ test('fails closed when mention history exceeds the four-page source window', as
   expect(notificationCalls.filter((call) => call.startsWith('all:'))).toHaveLength(4)
   expect(notificationCalls.filter((call) => call.startsWith('archived:'))).toHaveLength(0)
   expect(notificationCalls.filter((call) => call.startsWith('snoozed:'))).toHaveLength(0)
+})
+
+test('stops mention pagination after crossing the lookback cutoff', async () => {
+  configureFocusSources()
+  const notificationCalls: string[] = []
+  const currentTime = Date.now()
+  const recentMentions = Array.from({ length: 2 }, (_, index) => ({
+    ...createFocusMention(`cutoff-event-${index}`, 'unread'),
+    occurredAt: new Date(currentTime - index * 1_000).toISOString(),
+  }))
+  const expiredMention = {
+    ...createFocusMention('expired-cutoff-event', 'unread'),
+    occurredAt: new Date(currentTime - 100 * 24 * 60 * 60 * 1_000).toISOString(),
+  }
+  const notificationClient = createFocusNotificationClient([])
+  setTestAppDependencies({
+    notifications: {
+      ...notificationClient,
+      async list(input) {
+        notificationCalls.push(`${input.filter ?? 'all'}:${input.cursor ?? ''}`)
+        const candidates = input.filter === 'all' && input.cursor === undefined
+          ? [...recentMentions, expiredMention]
+          : []
+        return {
+          notifications: candidates,
+          ...(input.filter === 'all' && input.cursor === undefined
+            ? { nextCursor: 'all:after-cutoff' }
+            : {}),
+        }
+      },
+    },
+  })
+
+  const response = await focusRequest('/api/focus')
+
+  expect(response.status).toBe(200)
+  expect(notificationCalls.filter((call) => call.startsWith('all:'))).toEqual(['all:'])
+  expect(notificationCalls.filter((call) => call.startsWith('archived:'))).toHaveLength(1)
+  expect(notificationCalls.filter((call) => call.startsWith('snoozed:'))).toHaveLength(1)
 })
 
 test('fails closed when deduplicated mentions exceed the cross-partition limit', async () => {
