@@ -701,6 +701,65 @@ describe('DynamoDbTriageClient configuration receipts', () => {
     }
   })
 
+  test('fences rotation cursor changes while replacing rotation settings', async () => {
+    const current = createManualRotationConfiguration(4, 1)
+    const input = createConfigurationInput(4)
+    input.rotations = [{
+      ...current.rotations[0]!,
+      name: 'Renamed support rotation',
+      nextIndex: 0,
+    }]
+    const fingerprint = createTriageInputFingerprint({
+      workspaceId: 'workspace-1',
+      teamId: 'support',
+      input,
+    })
+    const harness = createHarness([
+      {},
+      {
+        Item: {
+          entryType: 'triage-configuration',
+          configuration: current,
+          revision: current.revision,
+          rotationCursors: { 'support-rotation': 1 },
+        },
+      },
+      {},
+    ])
+
+    try {
+      await harness.client.updateConfiguration(
+        'workspace-1',
+        'support',
+        { id: 'manager@example.com' },
+        input,
+        { key: 'settings-rotation-change', fingerprint },
+      )
+
+      expect(harness.commands[2]?.input.TransactItems).toEqual([
+        expect.objectContaining({
+          Update: expect.objectContaining({
+            ConditionExpression:
+              'revision = :expectedRevision AND ' +
+              '(attribute_not_exists(#rotationCursors) OR ' +
+              '#rotationCursors = :expectedRotationCursors)',
+            ExpressionAttributeNames: expect.objectContaining({
+              '#rotationCursors': 'rotationCursors',
+            }),
+            ExpressionAttributeValues: expect.objectContaining({
+              ':expectedRevision': 4,
+              ':expectedRotationCursors': { 'support-rotation': 1 },
+              ':rotationCursors': { 'support-rotation': 0 },
+            }),
+          }),
+        }),
+        expect.anything(),
+      ])
+    } finally {
+      harness.restore()
+    }
+  })
+
   test('rejects one settings key reused with different input', async () => {
     const originalInput = createConfigurationInput(0, 30)
     const originalFingerprint = createTriageInputFingerprint({
@@ -2006,6 +2065,80 @@ describe('DynamoDbTriageClient source admission', () => {
         code: 'TriagePersistenceCorrupt',
         status: 503,
       })
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('fills reverse source pages before applying Project visibility', async () => {
+    const hiddenEntry = createEntry()
+    hiddenEntry.id = 'triage-hidden-source'
+    hiddenEntry.projectId = 'hidden-project'
+    const visibleEntry = createEntry()
+    visibleEntry.id = 'triage-visible-source'
+    visibleEntry.projectId = 'visible-project'
+    const hiddenRow = createTriageEntryTransactionItems({
+      tableName: 'RequestIntakeTable',
+      entry: hiddenEntry,
+      inputFingerprint: createTriageInputFingerprint({ sourceId: hiddenEntry.source.sourceId }),
+    })[0]?.Put?.Item
+    const visibleRow = createTriageEntryTransactionItems({
+      tableName: 'RequestIntakeTable',
+      entry: visibleEntry,
+      inputFingerprint: createTriageInputFingerprint({ sourceId: visibleEntry.source.sourceId }),
+    })[0]?.Put?.Item
+    if (!hiddenRow || !visibleRow) throw new TypeError('Expected stored source entries.')
+    const hiddenAssociationKey = {
+      scopeKey: 'WORKSPACE#workspace-1',
+      recordKey: 'TRIAGE_SOURCE#support#work-item-1#triage-hidden-source',
+    }
+    const visibleAssociationKey = {
+      scopeKey: 'WORKSPACE#workspace-1',
+      recordKey: 'TRIAGE_SOURCE#support#work-item-1#triage-visible-source',
+    }
+    const harness = createHarness([
+      {
+        Items: [{
+          entryType: 'triage-work-item-source',
+          ...hiddenAssociationKey,
+          entryId: hiddenEntry.id,
+          teamId: 'support',
+          workItemId: 'work-item-1',
+        }],
+        LastEvaluatedKey: hiddenAssociationKey,
+      },
+      { Item: hiddenRow },
+      {
+        Items: [{
+          entryType: 'triage-work-item-source',
+          ...visibleAssociationKey,
+          entryId: visibleEntry.id,
+          teamId: 'support',
+          workItemId: 'work-item-1',
+        }],
+      },
+      { Item: visibleRow },
+    ])
+
+    try {
+      const page = await harness.client.listWorkItemSources(
+        'workspace-1',
+        'support',
+        'work-item-1',
+        1,
+        undefined,
+        ['visible-project'],
+      )
+
+      expect(page.entries.map(({ id }) => id)).toEqual(['triage-visible-source'])
+      const queries = harness.commands.filter(({ name }) => name === 'QueryCommand')
+      expect(queries).toHaveLength(2)
+      expect(queries[0]?.input.Limit).toBe(1)
+      expect(queries[1]?.input).toEqual(expect.objectContaining({
+        ExclusiveStartKey: hiddenAssociationKey,
+        Limit: 1,
+      }))
+      expect(page.nextCursor).toBeUndefined()
     } finally {
       harness.restore()
     }

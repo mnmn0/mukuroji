@@ -31,6 +31,37 @@ describe('triage presentation model', () => {
     )).toHaveLength(0)
   })
 
+  test('matches every permission-safe routing candidate field', () => {
+    const entry = triageEntryFixtures[0]
+    if (!entry) throw new Error('Expected a routing fixture.')
+    const routingEntry = {
+      ...entry,
+      id: 'triage-routing-search',
+      routing: {
+        ...entry.routing,
+        candidates: [
+          {
+            teamId: 'core-team',
+            projectId: 'launch-support',
+            reason: 'Matches the customer launch escalation rule.',
+            permitted: true,
+          },
+          {
+            teamId: 'billing-team',
+            reason: 'Matches a billing handoff rule.',
+            permitted: false,
+          },
+        ],
+      },
+    }
+
+    expect(filterTriageEntryViews(
+      [routingEntry],
+      { query: 'billing handoff rule' },
+      [],
+    ).map((view) => view.entry.id)).toEqual(['triage-routing-search'])
+  })
+
   test('derives owner and SLA filters plus queue metrics from visible entries', () => {
     const dueSoonEntry = triageEntryFixtures[1]
     if (!dueSoonEntry) throw new Error('Expected an SLA fixture.')

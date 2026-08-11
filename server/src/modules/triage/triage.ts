@@ -244,6 +244,7 @@ export interface TriageClient {
    * @param workItemId The canonical Work Item ID.
    * @param limit The bounded page size.
    * @param cursor The opaque next-page cursor.
+   * @param visibleProjectIds Optional Project visibility scope used to fill pages safely.
    * @returns The reverse source trace page.
    */
   listWorkItemSources(
@@ -252,6 +253,7 @@ export interface TriageClient {
     workItemId: string,
     limit?: number,
     cursor?: string,
+    visibleProjectIds?: readonly string[],
   ): Promise<TriageWorkItemSourcePage>
 }
 

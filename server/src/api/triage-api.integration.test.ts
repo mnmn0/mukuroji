@@ -641,6 +641,97 @@ describe('Team Triage API composition', () => {
     expect(await managerQueue.json()).toMatchObject({ canManageConfiguration: true })
   })
 
+  test('fences Projectless mutations with the active actor membership version', async () => {
+    const entry = createEntry({ projectId: undefined })
+    let authorizationConditionChecks: Parameters<TriageCompositionClient['applyAction']>[8]
+    const triage = {
+      ...createTriageClient(entry),
+      applyAction: async (...parameters: Parameters<TriageCompositionClient['applyAction']>) => {
+        authorizationConditionChecks = parameters[8]
+        return { entry, replayed: false }
+      },
+    } satisfies TriageCompositionClient
+    configureFakeProjectClients(true, { role: 'member', workspaceRole: 'member' })
+    setTestAppDependencies({ triage })
+
+    const response = await app.request(
+      '/api/teams/core-team/triage-entries/triage-api-1/actions',
+      {
+        method: 'POST',
+        headers: createHeaders('projectless-decline'),
+        body: JSON.stringify({
+          action: 'decline',
+          expectedRevision: 1,
+          reason: 'No longer relevant.',
+        }),
+      },
+    )
+
+    expect(response.status).toBe(200)
+    expect(authorizationConditionChecks).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        ConditionCheck: expect.objectContaining({
+          TableName: 'WorkspaceAccessTable',
+          Key: {
+            workspaceId: 'user#demo@example.com',
+            recordKey: 'MEMBER#demo@example.com',
+          },
+          ConditionExpression: 'attribute_exists(workspaceId)',
+        }),
+      }),
+    ]))
+  })
+
+  test('rejects guest members as Triage owners and settings references', async () => {
+    const entry = createEntry()
+    configureFakeProjectClients(true, {
+      role: 'manager',
+      workspaceRole: 'member',
+      guestWorkspaceMemberKeys: ['sato@example.com'],
+    })
+    setTestAppDependencies({ triage: createTriageClient(entry) })
+
+    const action = await app.request(
+      '/api/teams/core-team/triage-entries/triage-api-1/actions',
+      {
+        method: 'POST',
+        headers: createHeaders('guest-owner-action'),
+        body: JSON.stringify({
+          action: 'assign',
+          expectedRevision: 1,
+          ownerUserId: 'sato@example.com',
+        }),
+      },
+    )
+    const settings = await app.request('/api/teams/core-team/triage-settings', {
+      method: 'PUT',
+      headers: createHeaders('guest-owner-settings'),
+      body: JSON.stringify({
+        allowedBulkActions: ['assign', 'decline', 'snooze'],
+        expectedRevision: 0,
+        rules: [{
+          id: 'guest-owner-rule',
+          name: 'Guest owner rule',
+          enabled: true,
+          order: 1,
+          sourceKinds: ['chat'],
+          keywords: [],
+          teamId: 'core-team',
+          projectId: 'refero',
+          owner: { type: 'fixed', ownerUserId: 'sato@example.com' },
+        }],
+        rotations: [],
+        slaPolicies: [],
+        retentionDays: 365,
+      }),
+    })
+
+    expect(action.status).toBe(409)
+    expect(await action.json()).toMatchObject({ code: 'WorkspaceAssigneeInactive' })
+    expect(settings.status).toBe(409)
+    expect(await settings.json()).toMatchObject({ code: 'WorkspaceAssigneeInactive' })
+  })
+
   test('denies a Project-scoped manager from replacing full Team settings', async () => {
     const entry = createEntry({ projectId: 'project-a' })
     configureFakeProjectClients(false, {

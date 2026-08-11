@@ -811,7 +811,24 @@ export class DynamoDbTriageClient implements TriageClient {
       ? await this.validateConfigurationReferences(workspaceId, teamId, normalizedInput)
       : undefined
     const condition = current
-      ? { expression: 'revision = :expectedRevision', values: { ':expectedRevision': currentRevision } }
+      ? {
+          expression: 'revision = :expectedRevision' +
+            (rotationPolicyChanged
+              ? ' AND (attribute_not_exists(#rotationCursors) OR ' +
+                '#rotationCursors = :expectedRotationCursors)'
+              : ''),
+          values: {
+            ':expectedRevision': currentRevision,
+            ...(rotationPolicyChanged
+              ? {
+                  ':expectedRotationCursors': Object.fromEntries(current.rotations.map((rotation) => [
+                    rotation.id,
+                    rotation.nextIndex,
+                  ])),
+                }
+              : {}),
+          },
+        }
       : {
           expression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
           values: undefined,
@@ -1040,40 +1057,59 @@ export class DynamoDbTriageClient implements TriageClient {
     workItemId: string,
     limitValue = 50,
     cursor?: string,
+    visibleProjectIds?: readonly string[],
   ): Promise<TriageWorkItemSourcePage> {
     const limit = requirePositiveInteger(limitValue, 'Triage source page limit', 100)
     const prefix = createTriageWorkItemSourcePrefix(teamId, workItemId)
-    const scope = createTriageInputFingerprint({ workspaceId, teamId, workItemId, type: 'sources' })
+    const normalizedVisibleProjectIds = visibleProjectIds === undefined
+      ? undefined
+      : [...new Set(visibleProjectIds)].sort()
+    const scope = createTriageInputFingerprint({
+      workspaceId,
+      teamId,
+      workItemId,
+      type: 'sources',
+      visibleProjectIds: normalizedVisibleProjectIds,
+    })
     const exclusiveStartKey = cursor
       ? this.decodeCursor(cursor, scope, 'primary').key
       : undefined
-    const response = await this.documentClient.send(new QueryCommand({
-      TableName: this.tableName,
-      KeyConditionExpression: 'scopeKey = :scopeKey AND begins_with(recordKey, :prefix)',
-      ExpressionAttributeValues: {
-        ':scopeKey': createWorkspaceScopeKey(workspaceId),
-        ':prefix': prefix,
-      },
-      Limit: limit,
-      ConsistentRead: true,
-      ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
-    }))
+    let nextKey = exclusiveStartKey
     const entries: TriageEntry[] = []
-    for (const item of response.Items ?? []) {
-      const entryId = readAssociationEntryId(item)
-      if (!entryId) {
-        throw new TriageError(
-          503,
-          'TriagePersistenceCorrupt',
-          'A reverse source association is malformed.',
-        )
+    do {
+      const response = await this.documentClient.send(new QueryCommand({
+        TableName: this.tableName,
+        KeyConditionExpression: 'scopeKey = :scopeKey AND begins_with(recordKey, :prefix)',
+        ExpressionAttributeValues: {
+          ':scopeKey': createWorkspaceScopeKey(workspaceId),
+          ':prefix': prefix,
+        },
+        Limit: Math.max(1, limit - entries.length),
+        ConsistentRead: true,
+        ...(nextKey ? { ExclusiveStartKey: nextKey } : {}),
+      }))
+      nextKey = response.LastEvaluatedKey
+      for (const item of response.Items ?? []) {
+        const entryId = readAssociationEntryId(item)
+        if (!entryId) {
+          throw new TriageError(
+            503,
+            'TriagePersistenceCorrupt',
+            'A reverse source association is malformed.',
+          )
+        }
+        const entry = await this.getEntry(workspaceId, teamId, entryId)
+        if (
+          normalizedVisibleProjectIds !== undefined &&
+          (entry.projectId === undefined || !normalizedVisibleProjectIds.includes(entry.projectId))
+        ) continue
+        entries.push(entry)
       }
-      entries.push(await this.getEntry(workspaceId, teamId, entryId))
-    }
+    } while (entries.length < limit && nextKey !== undefined)
     return {
       entries,
-      ...(response.LastEvaluatedKey
-        ? { nextCursor: this.encodeCursor(scope, 'primary', response.LastEvaluatedKey) }
+      ...(nextKey
+        ? { nextCursor: this.encodeCursor(scope, 'primary', nextKey) }
         : {}),
     }
   }

@@ -1258,6 +1258,8 @@ function configureFakeProjectClients(
     /** Cognito user 一覧 fake が返す次 page token です。 */
     cognitoUsersNextToken?: string
     profileError?: Error
+    /** 指定した active member を Workspace guest として返します。 */
+    guestWorkspaceMemberKeys?: string[]
     inactiveWorkspaceMemberKeys?: string[]
     mentionAccessDeniedMemberKeys?: string[]
     /** NEW_PASSWORD_REQUIRED challenge で Cognito が返す error です。 */
@@ -1547,7 +1549,11 @@ function configureFakeProjectClients(
     memberKey,
     email: memberKey,
     name: memberKey === 'demo@example.com' ? 'Demo User' : undefined,
-    role: memberKey === 'demo@example.com' ? workspaceRole : 'member' as WorkspaceRole,
+    role: memberKey === 'demo@example.com'
+      ? workspaceRole
+      : options.guestWorkspaceMemberKeys?.includes(memberKey)
+        ? 'guest' as WorkspaceRole
+        : 'member' as WorkspaceRole,
     status: memberKey === 'demo@example.com'
       ? workspaceStatus
       : options.inactiveWorkspaceMemberKeys?.includes(memberKey)

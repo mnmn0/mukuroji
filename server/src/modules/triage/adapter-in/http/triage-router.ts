@@ -474,17 +474,29 @@ export function createTriageRouter(dependencies: TriageRouterDependencies) {
       )
       const principal = await dependencies.requireTeamAccess(context, teamId, 'read')
       await dependencies.requireWorkItemAccess(context, teamId, workItemId)
-      const page = await dependencies.getTriage().listWorkItemSources(
-        principal.workspaceId,
-        teamId,
-        workItemId,
-        readLimit(context.req.query('limit')),
-        context.req.query('cursor'),
-      )
+      const limit = readLimit(context.req.query('limit'))
+      const entries: TriageEntry[] = []
+      let cursor = context.req.query('cursor')
+      let nextCursor: string | undefined
+      do {
+        const page = await dependencies.getTriage().listWorkItemSources(
+          principal.workspaceId,
+          teamId,
+          workItemId,
+          Math.max(1, limit - entries.length),
+          cursor,
+          principal.visibleProjectIds,
+        )
+        entries.push(
+          ...page.entries.filter((entry) => isTriageEntryVisible(principal, entry)),
+        )
+        nextCursor = page.nextCursor
+        cursor = page.nextCursor
+      } while (entries.length < limit && nextCursor !== undefined)
       return context.json({
-        ...page,
-        entries: page.entries
-          .filter((entry) => isTriageEntryVisible(principal, entry))
+        ...(nextCursor ? { nextCursor } : {}),
+        entries: entries
+          .slice(0, limit)
           .map((entry) => projectTriageEntryForPrincipal(principal, entry)),
       })
     } catch (error) {

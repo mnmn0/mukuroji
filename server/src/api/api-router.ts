@@ -18251,15 +18251,20 @@ async function createTriageProjectAuthorizationConditionChecks(
   if (principal.isSystemAdmin) {
     return []
   }
+  const actorMembershipChecks = projectId === undefined
+    ? await createTriageActiveActorConditionChecks(principal)
+    : []
   const enterpriseProjectAccess = projectId !== undefined &&
     principal.enterpriseProjectAccesses?.some((access) =>
       access.projectId === projectId && projectAccessAllows(access, 'member')
     ) === true
   if (isEnterpriseTriageTeamScope(principal, teamId) || enterpriseProjectAccess) {
     const enterpriseControlCheck = createEnterpriseControlAuthorizationConditionCheck(principal)
-    return enterpriseControlCheck ? [enterpriseControlCheck] : []
+    return enterpriseControlCheck
+      ? [...actorMembershipChecks, enterpriseControlCheck]
+      : actorMembershipChecks
   }
-  if (!projectId) return []
+  if (!projectId) return actorMembershipChecks
   const access = context.projectAccesses?.find((candidate) => candidate.projectId === projectId)
   if (!access || !projectAccessAllows(access, 'member')) {
     throw new ProjectDataError(
@@ -18288,6 +18293,34 @@ async function createTriageProjectAuthorizationConditionChecks(
       409,
       'TriageProjectAccessChanged',
       'Project authorization changed while the action was being prepared.',
+    )
+  }
+  return [conditionCheck]
+}
+
+/** Builds the commit-time active-membership fence for a Projectless Triage mutation. */
+async function createTriageActiveActorConditionChecks(
+  principal: WorkspacePrincipal,
+): Promise<TriageAuthorizationConditionChecks> {
+  const createMemberCheck = workspaceDependencies.workspaceAccess
+    .createActiveMemberConditionCheck
+  if (!createMemberCheck) {
+    throw new TriageError(
+      503,
+      'TriageActorAuthorizationFenceUnavailable',
+      'Workspace membership fencing is unavailable. Retry the Triage action.',
+    )
+  }
+  const conditionCheck = await createMemberCheck.call(
+    workspaceDependencies.workspaceAccess,
+    principal.directoryId,
+    normalizeProjectMemberKey(principal.userKey),
+  )
+  if (!conditionCheck) {
+    throw new TriageError(
+      409,
+      'TriageActorMembershipChanged',
+      'Workspace membership changed while the Triage action was being prepared.',
     )
   }
   return [conditionCheck]
@@ -23136,11 +23169,11 @@ async function requireActiveWorkspaceAssignee(
 ) {
   const member = await dependencies.workspaceAccess.getActiveMember(directoryId, userId)
 
-  if (!member) {
+  if (!member || member.role === 'guest') {
     throw new WorkspaceAccessError(
       409,
       'WorkspaceAssigneeInactive',
-      'Only active Workspace members can be assigned.',
+      'Only active non-guest Workspace members can be assigned.',
     )
   }
 

@@ -89,8 +89,13 @@ export function filterTriageEntryViews(
         view.sourceLabel,
         entry.requester.displayName,
         entry.ownerUserId,
-        view.routingCandidate?.teamId,
-        view.routingCandidate?.projectId,
+        ...(entry.capabilities.canViewInternalContext
+          ? entry.routing.candidates.flatMap((candidate) => [
+              candidate.teamId,
+              candidate.projectId,
+              candidate.reason,
+            ])
+          : []),
       ].some((value) => value?.toLocaleLowerCase().includes(normalizedQuery))
     })
 }
