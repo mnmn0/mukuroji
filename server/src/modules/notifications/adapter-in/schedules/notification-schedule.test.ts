@@ -546,6 +546,21 @@ describe('notification schedule handler', () => {
     ).rejects.toThrow('exceeded the configured 1 scan page limit')
   })
 
+  test('shares the page bound between Work Item scans and Planning queries', async () => {
+    const recording = createRecordingDocumentClient((name) => {
+      if (name === 'ScanCommand') return { Items: [] }
+      return { Items: [] }
+    })
+
+    await expect(
+      runNotificationSchedule(createRunOptions(recording.client, {
+        maxScanPages: 1,
+        planningTableName: 'PlanningTable',
+      })),
+    ).rejects.toThrow('exceeded the configured 1 Planning query page limit')
+    expect(recording.commands.filter((command) => command.name === 'QueryCommand')).toHaveLength(0)
+  })
+
   test('decodes Planning update targets and derives reminder, overdue, and escalation stages', () => {
     const record = parsePlanningUpdateTargetScheduleRow(createPlanningProjectUpdateTarget())
     expect(record).toBeDefined()

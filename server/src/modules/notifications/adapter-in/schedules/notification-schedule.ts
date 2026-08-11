@@ -394,13 +394,11 @@ async function queryDuePlanningUpdateTargets(
   const scopeCache = new Map<string, Promise<PlanningScheduledTargetScope>>()
   const activeProjectsByWorkspace = new Map<string, Promise<ReadonlySet<string>>>()
   const upperBound = createPlanningUpdateScheduleUpperBound(input.now.toISOString())
-  let queriedPages = 0
-
   for (let shardIndex = 0; shardIndex < PLANNING_UPDATE_SCHEDULE_SHARD_COUNT; shardIndex += 1) {
     const scheduleShard = createPlanningUpdateScheduleShardName(shardIndex)
     let exclusiveStartKey: Record<string, unknown> | undefined
     do {
-      if (queriedPages >= input.maxScanPages) {
+      if (input.result.scannedPages >= input.maxScanPages) {
         throw new Error(
           `Notification schedule exceeded the configured ${input.maxScanPages} Planning query page limit.`,
         )
@@ -418,7 +416,6 @@ async function queryDuePlanningUpdateTargets(
         ScanIndexForward: true,
         ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
       }))
-      queriedPages += 1
       input.result.scannedPages += 1
       input.result.scannedItems += response.ScannedCount ?? response.Items?.length ?? 0
 
