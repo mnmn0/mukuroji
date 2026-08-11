@@ -199,7 +199,6 @@ class MemoryDocumentClient {
         if (values[':increment'] !== undefined && values[':entryType'] === 'planning-meta') {
           this.items.set(key, {
             ...existing,
-            ...update.Key as Record<string, unknown>,
             entryType: values[':entryType'],
             schemaVersion: values[':schemaVersion'],
             updatedAt: values[':updatedAt'],
