@@ -735,6 +735,18 @@ function toStoredCuratedContextItem(value: Record<string, unknown>): StoredCurat
 }
 
 /**
+ * Parses a persisted curated-context current snapshot for maintenance tooling.
+ *
+ * @param value - Untrusted DynamoDB document row.
+ * @returns Validated public curated-context snapshot without physical keys.
+ */
+export function parseCuratedContextItemRow(
+  value: Record<string, unknown>,
+): CuratedContextItem {
+  return toCuratedContextItem(toStoredCuratedContextItem(value))
+}
+
+/**
  * Parses the canonical Team and Work Item owner embedded in a collaboration entity key.
  *
  * @param entityKey - Persisted collaboration entity key.

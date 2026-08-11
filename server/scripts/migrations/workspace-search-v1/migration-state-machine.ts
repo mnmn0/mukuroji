@@ -2678,6 +2678,7 @@ function validateTargetOperation(
 ): void {
   if (
     operation.entityType !== 'comment' &&
+    operation.entityType !== 'context-item' &&
     operation.entityType !== 'document' &&
     operation.entityType !== 'project' &&
     operation.entityType !== 'team' &&
@@ -2915,7 +2916,7 @@ function isWorkspaceSearchMigrationSourceName(
 function sourceForEntityType(
   entityType: WorkspaceSearchMigrationOperation['entityType'],
 ): WorkspaceSearchMigrationSourceName {
-  if (entityType === 'comment') return 'collaboration'
+  if (entityType === 'comment' || entityType === 'context-item') return 'collaboration'
   if (entityType === 'document') return 'documents'
   if (entityType === 'work-item') return 'work-items'
   return 'project-directory'

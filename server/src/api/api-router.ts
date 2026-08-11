@@ -18150,6 +18150,8 @@ type WorkspaceSearchContext = {
   directory: ProjectDirectoryResponse
   /** Search scope と Document ACL を解決した Planning authorization revision です。 */
   planningRevision: number
+  /** Document ACL の current authorization generation です。 */
+  documentAuthorizationRevision?: number
   /** Document source of truth の ACL 評価に使う current viewer です。 */
   documentAccess: DocumentAccessContext
   /** Search result の current viewer scope です。 */
@@ -18195,9 +18197,13 @@ async function readWorkspaceSearchAuthorizationSnapshot(
 
 async function createWorkspaceSearchContext(
   principal: WorkspacePrincipal,
+  options: { includeDocumentAuthorizationRevision?: boolean } = {},
 ): Promise<WorkspaceSearchContext> {
   const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja', true)
   const authorization = await readWorkspaceSearchAuthorizationSnapshot(principal, directory)
+  const documentAuthorizationRevision = options.includeDocumentAuthorizationRevision
+    ? await workItemDependencies.documents.getAuthorizationRevision(principal.directoryId)
+    : undefined
   const projectScopeAccesses = principal.isSystemAdmin
     ? directory.teams.flatMap((team) => team.projects.map((project) => ({
         teamId: team.id,
@@ -18398,6 +18404,7 @@ async function createWorkspaceSearchContext(
   return {
     directory,
     planningRevision: authorization.planningRevision,
+    documentAuthorizationRevision,
     documentAccess: {
       memberKey: principal.userKey,
       workspaceRole: principal.workspaceRole,
@@ -18471,9 +18478,17 @@ async function createWorkspaceSearchContext(
 async function isWorkspaceSearchAuthorizationCurrent(
   workspaceId: string,
   expectedPlanningRevision: number,
+  expectedDocumentAuthorizationRevision?: number,
 ): Promise<boolean> {
-  return await workItemDependencies.planning.getAuthorizationRevision(workspaceId) ===
-    expectedPlanningRevision
+  const [planningRevision, documentAuthorizationRevision] = await Promise.all([
+    workItemDependencies.planning.getAuthorizationRevision(workspaceId),
+    expectedDocumentAuthorizationRevision === undefined
+      ? Promise.resolve(undefined)
+      : workItemDependencies.documents.getAuthorizationRevision(workspaceId),
+  ])
+  return planningRevision === expectedPlanningRevision &&
+    (expectedDocumentAuthorizationRevision === undefined ||
+      documentAuthorizationRevision === expectedDocumentAuthorizationRevision)
 }
 
 /**
@@ -22029,7 +22044,9 @@ async function reconcileCuratedContextSourcesForViewer(
   const authorizationAttempts = containsDocumentSource ? 2 : 1
   for (let attempt = 0; attempt < authorizationAttempts; attempt += 1) {
     const searchContext = containsDocumentSource
-      ? await createWorkspaceSearchContext(principal)
+      ? await createWorkspaceSearchContext(principal, {
+          includeDocumentAuthorizationRevision: true,
+        })
       : undefined
     const documentAccess = searchContext?.documentAccess
     const reconciled: CuratedContextItem[] = []
@@ -22053,6 +22070,7 @@ async function reconcileCuratedContextSourcesForViewer(
       await isWorkspaceSearchAuthorizationCurrent(
         principal.directoryId,
         searchContext.planningRevision,
+        searchContext.documentAuthorizationRevision,
       )
     ) {
       return reconciled

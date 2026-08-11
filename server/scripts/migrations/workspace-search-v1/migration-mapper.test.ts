@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  COLLABORATION_CONTEXT_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
   createDefaultDueDateWorkItemSchedule,
 } from '@mukuroji/contracts'
@@ -116,6 +117,37 @@ function createCommentRow(
     mentionMemberKeys: [],
     createdAt: '2026-07-24T01:00:00.000Z',
     updatedAt: '2026-07-24T02:00:00.000Z',
+    ...overrides,
+  }
+}
+
+/**
+ * Creates a canonical current curated-context Collaboration row.
+ *
+ * @param overrides - Fields to replace in the fixture.
+ * @returns Decoded native curated-context row.
+ */
+function createContextRow(
+  overrides: Readonly<Record<string, unknown>> = {},
+): Record<string, unknown> {
+  return {
+    entityKey: 'workspace-1#work-item#team/team-1/issue/issue-1',
+    recordKey: 'CONTEXT#context-1',
+    entryType: 'context',
+    schemaVersion: COLLABORATION_CONTEXT_SCHEMA_VERSION,
+    id: 'context-1',
+    teamId: 'team-1',
+    workItemId: 'issue-1',
+    kind: 'context',
+    state: 'active',
+    title: 'Release context',
+    body: 'The release is ready after verification.',
+    mentionMemberKeys: [],
+    createdBy: { id: 'creator@example.com', displayName: 'Creator' },
+    createdAt: '2026-07-24T01:00:00.000Z',
+    updatedBy: { id: 'editor@example.com', displayName: 'Editor' },
+    updatedAt: '2026-07-24T02:00:00.000Z',
+    revision: 2,
     ...overrides,
   }
 }
@@ -555,6 +587,62 @@ describe('Workspace Search production migration mapper', () => {
     expect(deleted.operation).toEqual({ action: 'delete' })
     expect(deleted.entityType).toBe('comment')
     expect(deleted.targetKey).toEqual(active.targetKey)
+  })
+
+  test('maps current curated context and ignores its auxiliary rows', () => {
+    const active = requireMapped(
+      mapWorkspaceSearchMigrationRow('collaboration', createContextRow()),
+    )
+    expect(active.entityType).toBe('context-item')
+    expect(active.operation.action).toBe('put')
+    if (active.operation.action !== 'put') {
+      throw new Error('Expected curated context put.')
+    }
+    expect(active.operation.document).toMatchObject({
+      entityType: 'context-item',
+      entityId: 'team/team-1/issue/issue-1/context-item/context-1',
+      title: 'Release context',
+      body: 'The release is ready after verification.',
+      teamId: 'team-1',
+      parentId: 'team/team-1/issue/issue-1',
+      sourceRevision: 2,
+    })
+
+    const superseded = requireMapped(mapWorkspaceSearchMigrationRow(
+      'collaboration',
+      createContextRow({ state: 'superseded', supersededByItemId: 'context-2' }),
+    ))
+    expect(superseded.operation).toEqual({ action: 'delete' })
+    expect(superseded.targetKey).toEqual(active.targetKey)
+
+    for (const entryType of [
+      'context-order',
+      'context-revision',
+      'context-mutation-receipt',
+    ]) {
+      expect(mapWorkspaceSearchMigrationRow(
+        'collaboration',
+        { entryType, tenantSecret: 'not-returned' },
+      )).toEqual({
+        classification: 'ignored',
+        reasonCode: 'RECOGNIZED_NON_TARGET_ROW',
+      })
+    }
+  })
+
+  test('fails closed for malformed current curated context rows', () => {
+    for (const item of [
+      createContextRow({ recordKey: 'CONTEXT#other' }),
+      createContextRow({ schemaVersion: 2 }),
+      createContextRow({ teamId: 'other-team' }),
+      createContextRow({ title: '' }),
+      createContextRow({ createdBy: { id: 'creator@example.com' } }),
+    ]) {
+      expect(mapWorkspaceSearchMigrationRow('collaboration', item)).toEqual({
+        classification: 'invalid',
+        reasonCode: 'MALFORMED_COLLABORATION_TARGET',
+      })
+    }
   })
 
   test('rejects TTL-managed attributes on Collaboration target candidates', () => {

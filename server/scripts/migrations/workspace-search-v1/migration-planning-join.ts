@@ -3714,7 +3714,7 @@ function sourceForOwnedEntity(
   entityType: string,
 ): WorkspaceSearchMigrationSourceName {
   if (entityType === 'work-item') return 'work-items'
-  if (entityType === 'comment') return 'collaboration'
+  if (entityType === 'comment' || entityType === 'context-item') return 'collaboration'
   if (entityType === 'document') return 'documents'
   if (entityType === 'team' || entityType === 'project') {
     return 'project-directory'

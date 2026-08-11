@@ -5,6 +5,7 @@ export {
   CollaborationError,
   createProjectCollaborationEntityKey,
   createWorkItemCollaborationEntityKey,
+  parseCuratedContextItemRow,
   type CollaborationAutomaticWatcherCandidate,
   type CollaborationClient,
   type CollaborationComment,

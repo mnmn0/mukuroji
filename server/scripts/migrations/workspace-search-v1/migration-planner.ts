@@ -1682,6 +1682,30 @@ function createAbsentSourceKey(
       recordKey: { S: `COMMENT#${commentId}` },
     }
   }
+  if (document.entityType === 'context-item') {
+    const teamId = parts[1]
+    const issueId = parts[3]
+    const contextItemId = parts[5]
+    if (
+      parts.length !== 6 ||
+      parts[0] !== 'team' ||
+      parts[2] !== 'issue' ||
+      parts[4] !== 'context-item' ||
+      !teamId ||
+      !issueId ||
+      !contextItemId
+    ) {
+      return failInvalidTargetRow()
+    }
+    return {
+      entityKey: {
+        S:
+          `${document.workspaceId}#work-item#team/` +
+          `${teamId}/issue/${issueId}`,
+      },
+      recordKey: { S: `CONTEXT#${encodeURIComponent(contextItemId)}` },
+    }
+  }
   if (document.entityType === 'document') {
     return {
       workspaceId: { S: document.workspaceId },
@@ -1704,7 +1728,7 @@ function sourceForEntityType(
   entityType: WorkspaceSearchMigrationOperation['entityType'],
 ): WorkspaceSearchMigrationSourceName {
   if (entityType === 'work-item') return 'work-items'
-  if (entityType === 'comment') return 'collaboration'
+  if (entityType === 'comment' || entityType === 'context-item') return 'collaboration'
   if (entityType === 'document') return 'documents'
   return 'project-directory'
 }
@@ -1719,6 +1743,7 @@ function isMigrationEntityType(
   entityType: SearchEntityType,
 ): entityType is WorkspaceSearchMigrationOperation['entityType'] {
   return entityType === 'comment' ||
+    entityType === 'context-item' ||
     entityType === 'document' ||
     entityType === 'project' ||
     entityType === 'team' ||

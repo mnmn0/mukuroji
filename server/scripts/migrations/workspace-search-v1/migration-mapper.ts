@@ -3,10 +3,14 @@ import {
   type DocumentDetail,
   type SearchEntityType,
 } from '@mukuroji/contracts'
+import {
+  parseCuratedContextItemRow,
+} from '../../../src/modules/collaboration'
 import { validateDocumentPayload } from '../../../src/modules/documents'
 import { isCanonicalWorkItemRecord } from '../../../src/modules/work-items'
 import {
   createCommentWorkspaceSearchDocument,
+  createCuratedContextItemWorkspaceSearchDocument,
   createDocumentWorkspaceSearchDocument,
   createProjectWorkspaceSearchDocument,
   createTeamWorkspaceSearchDocument,
@@ -28,6 +32,9 @@ const projectDirectoryIgnoredEntryTypes = new Set<string>([
   'workspace-metadata',
 ])
 const collaborationIgnoredEntryTypes = new Set<string>([
+  'context-mutation-receipt',
+  'context-order',
+  'context-revision',
   'discussion',
   'presence',
   'reaction',
@@ -384,6 +391,9 @@ function mapCollaborationRow(
     }
     return ignoredRow()
   }
+  if (entryType === 'context') {
+    return mapCuratedContextRow(item)
+  }
   if (entryType !== 'comment') {
     return invalidRow('UNRECOGNIZED_COLLABORATION_ROW')
   }
@@ -462,6 +472,46 @@ function mapCollaborationRow(
     creatorUserId: authorMemberKey,
     createdAt,
     updatedAt,
+  }))
+}
+
+/**
+ * Maps a current curated-context snapshot to its Workspace Search projection.
+ *
+ * @param item - Decoded Collaboration current-snapshot row.
+ * @returns Strict row classification.
+ */
+function mapCuratedContextRow(
+  item: Readonly<Record<string, unknown>>,
+): WorkspaceSearchMigrationRowClassification {
+  let contextItem: ReturnType<typeof parseCuratedContextItemRow>
+  try {
+    contextItem = parseCuratedContextItemRow(item)
+  } catch {
+    return invalidRow('MALFORMED_COLLABORATION_TARGET')
+  }
+
+  const entityKey = readNonBlankString(item.entityKey)
+  const scope = entityKey
+    ? parseWorkItemCollaborationEntityKey(entityKey)
+    : undefined
+  if (
+    !scope ||
+    contextItem.teamId !== scope.teamId ||
+    contextItem.workItemId !== scope.issueId ||
+    contextItem.id.includes('/')
+  ) {
+    return invalidRow('MALFORMED_COLLABORATION_TARGET')
+  }
+
+  const entityId =
+    `team/${scope.teamId}/issue/${scope.issueId}/context-item/${contextItem.id}`
+  if (contextItem.state === 'superseded') {
+    return mappedDelete(scope.workspaceId, 'context-item', entityId)
+  }
+  return mappedPut(createCuratedContextItemWorkspaceSearchDocument({
+    workspaceId: scope.workspaceId,
+    item: contextItem,
   }))
 }
 
