@@ -8,6 +8,7 @@ import {
 } from '@mukuroji/contracts'
 import {
   cleanupDeletedFileProjection,
+  createCuratedContextSearchParentCondition,
   createDynamoBatchItemFailure,
   createNotificationProjectionDeliveryState,
   createNotificationProjectionItem,
@@ -354,6 +355,45 @@ describe('collaboration projection pure helpers', () => {
       projectId: 'platform',
       contextItemId: 'context-1',
     }])
+  })
+
+  test('fences the Search receipt to the parent Work Item scope', () => {
+    const event = createProjectionEvent({
+      teamId: 'core',
+      issueId: 'example',
+    })
+
+    expect(createCuratedContextSearchParentCondition('team-issues', event, {
+      checked: true,
+      exists: true,
+      projectId: 'platform',
+    })).toEqual({
+      ConditionCheck: {
+        TableName: 'team-issues',
+        Key: {
+          directoryTeamId: 'workspace-1#team#core',
+          issueId: 'example',
+        },
+        ConditionExpression:
+          'attribute_exists(directoryTeamId) AND attribute_exists(issueId) AND #assignedProjectId = :assignedProjectId',
+        ExpressionAttributeNames: { '#assignedProjectId': 'assignedProjectId' },
+        ExpressionAttributeValues: { ':assignedProjectId': 'platform' },
+      },
+    })
+
+    expect(createCuratedContextSearchParentCondition('team-issues', event, {
+      checked: true,
+      exists: false,
+    })).toEqual({
+      ConditionCheck: {
+        TableName: 'team-issues',
+        Key: {
+          directoryTeamId: 'workspace-1#team#core',
+          issueId: 'example',
+        },
+        ConditionExpression: 'attribute_not_exists(directoryTeamId) AND attribute_not_exists(issueId)',
+      },
+    })
   })
 
   test('fails closed when curated context audit scope metadata is incomplete', async () => {

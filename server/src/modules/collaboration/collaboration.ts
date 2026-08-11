@@ -61,6 +61,9 @@ export const COLLABORATION_CONTEXT_BODY_MAX_LENGTH = 20_000
 /** UI と API が受け付ける reaction emoji です。 */
 export const COLLABORATION_REACTIONS = ['👍', '❤️', '🎉', '👀', '✅'] as const
 
+/** Minimum retention headroom required before an Activity source can be committed. */
+const curatedContextActivityMinimumRemainingSeconds = 5
+
 /** 保存できる reaction emoji です。 */
 export type CollaborationReactionEmoji = typeof COLLABORATION_REACTIONS[number]
 
@@ -4863,7 +4866,9 @@ function assertCuratedContextActivitySourceAuthorizationSnapshot(
     snapshot.sourceId !== source.sourceId ||
     snapshot.sourceId.trim().length === 0 ||
     (snapshot.expiresAt !== undefined &&
-      (!Number.isSafeInteger(snapshot.expiresAt) || snapshot.expiresAt <= 0))
+      (!Number.isSafeInteger(snapshot.expiresAt) ||
+        snapshot.expiresAt <= Math.floor(Date.now() / 1_000) +
+          curatedContextActivityMinimumRemainingSeconds))
   ) {
     throw new CollaborationError(
       400,

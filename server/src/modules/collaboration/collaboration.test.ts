@@ -1581,6 +1581,35 @@ test('fences Activity source capture against the audit retention deadline', asyn
   }))
 })
 
+test('rejects Activity source capture with insufficient retention headroom', async () => {
+  const memory = createCollaborationMemory([], 'audit-table')
+  const expiresAt = Math.floor(Date.now() / 1_000) + 1
+
+  await expect(memory.client.createCuratedContextItem({
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'issue-1',
+    entityKey: createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1'),
+    actor: { id: 'author@example.com', displayName: 'Author' },
+    kind: 'decision',
+    title: 'Reject a nearly expired source',
+    body: 'The source should not cross its retention boundary during commit.',
+    source: {
+      kind: 'activity',
+      sourceId: 'event-nearly-expired',
+      occurredAt: '2026-07-12T00:00:00.000Z',
+      availability: 'available',
+    },
+    activitySourceAuthorizationSnapshot: {
+      sourceId: 'event-nearly-expired',
+      expiresAt,
+    },
+  })).rejects.toMatchObject({
+    status: 400,
+    code: 'InvalidActivitySourceAuthorizationSnapshot',
+  })
+})
+
 test('replays immutable curated-context mutation responses after later revisions', async () => {
   const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
   const memory = createCollaborationMemory([], 'audit-table')

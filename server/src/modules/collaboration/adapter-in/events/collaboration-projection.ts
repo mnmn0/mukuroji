@@ -257,6 +257,22 @@ export type CurrentWorkItemNotificationScope = {
   statusCategory?: string
 }
 
+/** Indicates that a Search projection receipt lost its parent Work Item fence. */
+class CuratedContextSearchParentScopeChangedError extends Error {
+  constructor() {
+    super('Curated context search parent scope changed before receipt acknowledgement.')
+    this.name = 'CuratedContextSearchParentScopeChangedError'
+  }
+}
+
+/** Parent snapshot used to fence a curated-context Search receipt write. */
+type CuratedContextSearchReceiptFence = {
+  /** Audit event whose parent row is being fenced. */
+  event: AuditProjectionEvent
+  /** Parent scope observed immediately before the receipt write. */
+  scope: CurrentWorkItemNotificationScope
+}
+
 const dynamoDbClient = new DynamoDBClient({ region: getAwsRegion() })
 const cognitoClient = new CognitoIdentityProviderClient({ region: getAwsRegion() })
 const documentClient = DynamoDBDocumentClient.from(dynamoDbClient, {
@@ -476,9 +492,11 @@ async function processRecord(
         event,
         dependencies.curatedContextSearch,
       )
-      await markProjectionProcessed(
+      await acknowledgeCuratedContextSearchProjection(
         event.eventId,
-        curatedContextSearchProjectionConsumerName,
+        event,
+        currentScope,
+        dependencies.curatedContextSearch,
       )
     }
     return
@@ -490,9 +508,11 @@ async function processRecord(
       event,
       dependencies.curatedContextSearch,
     )
-    await markProjectionProcessed(
+    await acknowledgeCuratedContextSearchProjection(
       event.eventId,
-      curatedContextSearchProjectionConsumerName,
+      event,
+      currentScope,
+      dependencies.curatedContextSearch,
     )
   }
   if (!currentScope.exists) {
@@ -836,27 +856,126 @@ async function isProjectionProcessed(
 async function markProjectionProcessed(
   eventId: string,
   consumerName = projectionConsumerName,
+  parentFence?: CuratedContextSearchReceiptFence,
 ) {
+  const item = {
+    consumerName,
+    eventId,
+    processedAt: new Date().toISOString(),
+    expiresAt: currentEpochSeconds() + readPositiveIntegerEnv(
+      'PROCESSED_AUDIT_EVENT_RETENTION_SECONDS',
+      30 * 24 * 60 * 60,
+    ),
+  }
+  const parentCondition = parentFence === undefined
+    ? undefined
+    : createCuratedContextSearchParentCondition(
+        requireEnv('TEAM_ISSUES_TABLE_NAME'),
+        parentFence.event,
+        parentFence.scope,
+      )
   try {
-    await documentClient.send(
-      new PutCommand({
+    const receiptPut = {
+      Put: {
         TableName: requireEnv('PROCESSED_AUDIT_EVENTS_TABLE_NAME'),
-        Item: {
-          consumerName,
-          eventId,
-          processedAt: new Date().toISOString(),
-          expiresAt: currentEpochSeconds() + readPositiveIntegerEnv(
-            'PROCESSED_AUDIT_EVENT_RETENTION_SECONDS',
-            30 * 24 * 60 * 60,
-          ),
-        },
+        Item: item,
         ConditionExpression: 'attribute_not_exists(consumerName) AND attribute_not_exists(eventId)',
-      }),
+      },
+    }
+    if (parentCondition) {
+      await documentClient.send(new TransactWriteCommand({
+        TransactItems: [parentCondition, receiptPut],
+      }))
+    } else {
+      await documentClient.send(new PutCommand({
+        TableName: requireEnv('PROCESSED_AUDIT_EVENTS_TABLE_NAME'),
+        Item: item,
+        ConditionExpression: receiptPut.Put.ConditionExpression,
+      }))
+    }
+  } catch (error) {
+    if (isAwsNamedError(error, 'ConditionalCheckFailedException')) {
+      return
+    }
+    if (isConditionalTransactionCancellation(error)) {
+      if (await isProjectionProcessed(eventId, consumerName)) {
+        return
+      }
+      throw new CuratedContextSearchParentScopeChangedError()
+    }
+    throw error
+  }
+}
+
+/** Acknowledges Search only while the parent Work Item still has the captured scope. */
+async function acknowledgeCuratedContextSearchProjection(
+  eventId: string,
+  event: AuditProjectionEvent,
+  scope: CurrentWorkItemNotificationScope,
+  dependencies: CuratedContextSearchProjectionDependencies,
+): Promise<void> {
+  try {
+    await markProjectionProcessed(
+      eventId,
+      curatedContextSearchProjectionConsumerName,
+      { event, scope },
     )
   } catch (error) {
-    if (!isAwsNamedError(error, 'ConditionalCheckFailedException')) {
+    if (!(error instanceof CuratedContextSearchParentScopeChangedError)) {
       throw error
     }
+
+    const latestScope = await readCurrentWorkItemScope(event)
+    if (!sameCuratedContextParentScope(scope, latestScope)) {
+      await projectCuratedContextSearchEvent(
+        { ...event, projectId: scope.projectId },
+        dependencies,
+        false,
+      )
+    }
+    throw error
+  }
+}
+
+/**
+ * Builds the parent condition used by a Search receipt transaction.
+ *
+ * @param tableName - Team Issues table containing the current parent Work Item.
+ * @param event - Audit event identifying the parent Work Item.
+ * @param scope - Parent scope captured before the receipt write.
+ * @returns A DynamoDB condition check, or undefined when the event has no readable parent scope.
+ */
+export function createCuratedContextSearchParentCondition(
+  tableName: string,
+  event: AuditProjectionEvent,
+  scope: CurrentWorkItemNotificationScope,
+) {
+  if (!scope.checked || !event.teamId || !event.issueId) {
+    return undefined
+  }
+
+  const conditionExpression = !scope.exists
+    ? 'attribute_not_exists(directoryTeamId) AND attribute_not_exists(issueId)'
+    : scope.projectId === undefined
+      ? 'attribute_exists(directoryTeamId) AND attribute_exists(issueId) AND attribute_not_exists(#assignedProjectId)'
+      : 'attribute_exists(directoryTeamId) AND attribute_exists(issueId) AND #assignedProjectId = :assignedProjectId'
+  return {
+    ConditionCheck: {
+      TableName: tableName,
+      Key: {
+        directoryTeamId: `${event.workspaceId}#team#${event.teamId}`,
+        issueId: event.issueId,
+      },
+      ConditionExpression: conditionExpression,
+      ...(scope.exists && scope.projectId !== undefined
+        ? {
+            ExpressionAttributeNames: { '#assignedProjectId': 'assignedProjectId' },
+            ExpressionAttributeValues: { ':assignedProjectId': scope.projectId },
+          }
+        : scope.exists
+          ? { ExpressionAttributeNames: { '#assignedProjectId': 'assignedProjectId' } }
+          : {}),
+    },
   }
 }
 
