@@ -78,10 +78,10 @@ class MemoryDocumentClient {
       const scopeKey = values[':scopeKey']
       const prefix = values[':recordPrefix']
       this.queryPrefixes.push(prefix)
-      const matchingItems = [...this.items.values()].filter((item) =>
-        item.scopeKey === scopeKey &&
-        (!prefix || String(item.recordKey).startsWith(prefix))
-      )
+      const matchingItems = [...this.items.values()].filter((item) => input.IndexName === 'FileIdIndex'
+        ? item.fileId === values[':fileId']
+        : item.scopeKey === scopeKey &&
+          (!prefix || String(item.recordKey).startsWith(prefix)))
       const exclusiveKey = input.ExclusiveStartKey as Record<string, unknown> | undefined
       const startIndex = exclusiveKey
         ? matchingItems.findIndex((item) => createMemoryKey(item) === createMemoryKey(exclusiveKey)) + 1
@@ -490,6 +490,15 @@ async function createAvailableFile() {
 }
 
 describe('file proofing domain', () => {
+  test('resolves a visible file through the File ID reverse index', async () => {
+    const { client, session } = await createAvailableFile()
+
+    await expect(client.findFileById(scope.workspaceId, manager, session.file.id)).resolves.toEqual({
+      file: expect.objectContaining({ id: session.file.id }),
+      scope,
+    })
+  })
+
   test('signs upload length and media type so object metadata cannot bypass validation', async () => {
     const client = new S3FileObjectClient(
       new S3Client({

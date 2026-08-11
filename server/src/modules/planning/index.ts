@@ -12,6 +12,7 @@ export {
   type PlanningMutationTransaction,
   type PlanningMutationTransactionResult,
   type PlanningUpdateAnnotationTransactionResult,
+  type PlanningUpdateCadenceTransactionResult,
   type PlanningUpdatePublishTransactionResult,
   type PlanningUpdateTargetAuthorizationReference,
   type PlanningWorkItemDependencyTransactionResult,

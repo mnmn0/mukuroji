@@ -51,11 +51,6 @@ export const PlanningEntityEvidence: Story = {
   args: { initialEvidenceType: 'planning-entity' },
 }
 
-/** Decision evidence with a required immutable HTTPS permalink. */
-export const DecisionEvidence: Story = {
-  args: { initialEvidenceType: 'decision' },
-}
-
 /** File evidence with a required immutable HTTPS permalink. */
 export const FileEvidence: Story = {
   args: { initialEvidenceType: 'file' },

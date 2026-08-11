@@ -183,16 +183,6 @@ export type PlanningUpdateEntityEvidence = {
   entityId: string
 }
 
-/** Decision record を根拠として参照します。 */
-export type PlanningUpdateDecisionEvidence = {
-  /** Decision evidence の discriminator です。 */
-  type: 'decision'
-  /** Workspace 内の Decision ID です。 */
-  decisionId: string
-  /** Decision を開くための credential-free HTTPS permalink です。 */
-  url: string
-}
-
 /** Workspace file を根拠として参照します。 */
 export type PlanningUpdateFileEvidence = {
   /** File evidence の discriminator です。 */
@@ -217,7 +207,6 @@ export type PlanningUpdateLinkEvidence = {
 export type PlanningUpdateEvidence =
   | PlanningUpdateWorkItemEvidence
   | PlanningUpdateEntityEvidence
-  | PlanningUpdateDecisionEvidence
   | PlanningUpdateFileEvidence
   | PlanningUpdateLinkEvidence
 

@@ -213,8 +213,6 @@ function isPlanningUpdateEvidence(value: unknown): boolean {
       return typeof value.teamId === 'string' && typeof value.workItemId === 'string'
     case 'planning-entity':
       return typeof value.entityId === 'string'
-    case 'decision':
-      return typeof value.decisionId === 'string' && isHttpsUrl(value.url)
     case 'file':
       return typeof value.fileId === 'string' && isHttpsUrl(value.url)
     case 'link':

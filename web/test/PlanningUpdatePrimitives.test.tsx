@@ -70,18 +70,6 @@ describe('Planning update evidence composer', () => {
       },
       {
         fields: {
-          evidenceType: 'decision',
-          evidenceDecisionId: 'decision-42',
-          evidenceDecisionUrl: 'https://example.com/decisions/42',
-        },
-        expected: [{
-          type: 'decision',
-          decisionId: 'decision-42',
-          url: 'https://example.com/decisions/42',
-        }],
-      },
-      {
-        fields: {
           evidenceType: 'file',
           evidenceFileId: 'brief.pdf',
           evidenceFileUrl: 'https://example.com/files/brief.pdf',

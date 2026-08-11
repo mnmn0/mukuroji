@@ -58,6 +58,8 @@ import {
   type PlanningRevisionInput,
   type PlanningSnapshot,
   type PlanningStatusUpdateInput,
+  type PlanningUpdateCadence,
+  type PlanningUpdateTargetSummary,
   type PlanningUpdate,
   type PlanningUpdateComment,
   type PlanningUpdateReaction,
@@ -429,6 +431,7 @@ import {
   requirePlanningWorkItemHasNoScheduleDependencies,
   type PlanningAuthorizationState,
   type PlanningCallerAuthorizationConditionCheck,
+  type PlanningUpdateCadenceTransactionResult,
   type PlanningMutationTransaction,
   type PlanningUpdateAnnotationTransactionResult,
   type PlanningUpdatePublishTransactionResult,
@@ -5951,6 +5954,8 @@ routeApp.get('/api/planning', async (c) => {
 /** Project / Initiative の recurring health-update cadence を設定または解除します。 */
 routeApp.put('/api/planning/updates/cadence', async (c) => {
   const accessToken = readBearerAccessToken(c)
+  let reservationToRelease: ReleaseIdempotencyRequest | undefined
+  let mutationCommitted = false
   if (!accessToken) {
     return c.json({ message: 'Bearer token is required.' }, 401)
   }
@@ -5968,8 +5973,65 @@ routeApp.put('/api/planning/updates/cadence', async (c) => {
       principal.directoryId,
       workItemState,
     )
-    requirePlanningAuthorizationRevision(snapshot.revision, input.expectedRevision)
     const visibleSnapshot = filterPlanningSnapshotForPrincipal(principal, snapshot)
+    const idempotencyKey = c.req.header('Idempotency-Key')?.trim()
+    let cadenceTransaction: PlanningMutationTransaction<PlanningUpdateCadenceTransactionResult> | undefined
+    if (idempotencyKey) {
+      const validatedKey = readRequiredPlanningUpdateCadenceIdempotencyKey(idempotencyKey)
+      const expectation: PlanningUpdateCadenceReceiptExpectation = {
+        target: input.target,
+        request: input,
+      }
+      const reservationRequest = createPlanningUpdateCadenceReservationRequest(
+        principal,
+        validatedKey,
+        c.req.method,
+        '/api/planning/updates/cadence',
+        expectation,
+      )
+      const reservation = await reservePlanningUpdateCadenceMutation(reservationRequest)
+      if (reservation.status === 'in-progress') {
+        throw new PlanningError(
+          409,
+          'PlanningUpdateCadenceIdempotencyInProgress',
+          'The same Planning update cadence mutation is still in progress.',
+        )
+      }
+      if (reservation.status === 'replay') {
+        await requirePlanningUpdateTargetPermission(
+          principal,
+          visibleSnapshot,
+          input.target,
+          'manager',
+        )
+        const replay = readStoredPlanningUpdateCadenceMutationReceipt(
+          reservation.response,
+          reservationRequest.workspaceId,
+          expectation,
+        )
+        c.header('Idempotency-Replayed', 'true')
+        return c.json({
+          planning: filterPlanningSnapshotForPrincipal(principal, snapshot),
+          updateTarget: replay.updateTarget,
+        })
+      }
+      reservationToRelease = {
+        ...reservationRequest,
+        reservationId: reservation.reservationId,
+      }
+      cadenceTransaction = createPlanningUpdateCadenceIdempotencyTransaction(
+        reservationRequest.workspaceId,
+        {
+          credentialId: reservationRequest.credentialId,
+          idempotencyKey: validatedKey,
+          requestFingerprint: reservationRequest.requestFingerprint,
+          reservationId: reservation.reservationId,
+        },
+        expectation,
+      )
+      if (!cadenceTransaction) throw planningUpdateCadenceIdempotencyUnavailable()
+    }
+    requirePlanningAuthorizationRevision(snapshot.revision, input.expectedRevision)
     await requirePlanningUpdateTargetPermission(
       principal,
       visibleSnapshot,
@@ -6001,12 +6063,17 @@ routeApp.put('/api/planning/updates/cadence', async (c) => {
       input,
       workItemState,
       createPlanningCallerAuthorizationConditionChecks(principal, cadenceRecipientMembers),
+      cadenceTransaction,
     )
+    mutationCommitted = true
     return c.json({
       ...response,
       planning: filterPlanningSnapshotForPrincipal(principal, response.planning),
     })
   } catch (error) {
+    if (reservationToRelease && !mutationCommitted) {
+      await releasePlanningUpdateCadenceReservation(reservationToRelease)
+    }
     return toPlanningErrorResponse(c, error)
   }
 })
@@ -6167,14 +6234,23 @@ routeApp.get('/api/planning/updates', async (c) => {
       'viewer',
     )
     const limit = readPlanningUpdateHistoryLimit(c.req.query('limit'))
-    const page = await workItemDependencies.planning.listUpdates(principal.directoryId, {
+    let page = await workItemDependencies.planning.listUpdates(principal.directoryId, {
       target,
       ...(limit === undefined ? {} : { limit }),
       ...(c.req.query('cursor') ? { cursor: c.req.query('cursor') } : {}),
     })
+    const visibleUpdates = await filterPlanningUpdatesByCapturedScope(principal, page.updates)
+    while (limit !== undefined && visibleUpdates.length < limit && page.nextCursor) {
+      page = await workItemDependencies.planning.listUpdates(principal.directoryId, {
+        target,
+        limit,
+        cursor: page.nextCursor,
+      })
+      visibleUpdates.push(...await filterPlanningUpdatesByCapturedScope(principal, page.updates))
+    }
     return c.json({
       ...page,
-      updates: await filterPlanningUpdatesByCapturedScope(principal, page.updates),
+      updates: visibleUpdates,
     })
   } catch (error) {
     return toPlanningErrorResponse(c, error)
@@ -19004,9 +19080,8 @@ function findPlanningUpdateTargetSummary(
  * Validates external evidence references before an immutable update is committed.
  *
  * File references are resolved through the File Proofing read adapter and guarded by a
- * transaction condition against deletion. Decision references are rejected until a canonical
- * Decision visibility adapter exists; accepting an opaque ID and HTTPS URL would make an
- * evidence record look authoritative without proving that it exists in this Workspace.
+ * transaction condition against deletion. Unsupported external references are rejected rather
+ * than accepting an opaque ID and HTTPS URL that cannot be proven to exist in this Workspace.
  *
  * @param principal - Authenticated publisher whose file visibility is being evaluated.
  * @param snapshot - Unfiltered Planning snapshot used to resolve the target envelope.
@@ -19021,16 +19096,6 @@ async function createPlanningUpdateEvidenceConditionChecks(
   input: PublishPlanningUpdateInput,
 ): Promise<PlanningCallerAuthorizationConditionCheck[]> {
   const candidateEvidence = Array.isArray(input.evidence) ? input.evidence : []
-  if (candidateEvidence.some((candidate) =>
-    isRecord(candidate) && candidate.type === 'decision'
-  )) {
-    throw new PlanningError(
-      400,
-      'PlanningUpdateEvidenceInvalid',
-      'Decision evidence cannot be published until its canonical visibility adapter is available.',
-    )
-  }
-
   const fileIds = new Set<string>()
   for (const candidate of candidateEvidence) {
     if (!isRecord(candidate) || candidate.type !== 'file' || typeof candidate.fileId !== 'string') {
@@ -19053,17 +19118,21 @@ async function createPlanningUpdateEvidenceConditionChecks(
     visibleSnapshot,
     input.target,
   )
-  const filesById = new Map<string, FileProofingScope>()
+  const scopesByKey = new Map(scopes.map((scope) => [createFileProofingScopeKey(scope), scope]))
   try {
-    const collections = await Promise.all(scopes.map(async (scope) => ({
-      scope,
-      collection: await workItemDependencies.fileProofing.list(scope, actor),
+    const lookups = await Promise.all([...fileIds].map(async (fileId) => ({
+      fileId,
+      lookup: await workItemDependencies.fileProofing.findFileById(
+        principal.directoryId,
+        actor,
+        fileId,
+      ),
     })))
-    for (const { scope, collection } of collections) {
-      for (const file of collection.files) {
-        if (file.capabilities.canDownload && !filesById.has(file.id)) {
-          filesById.set(file.id, scope)
-        }
+    for (const { fileId, lookup } of lookups) {
+      if (!lookup?.file.capabilities.canDownload) continue
+      const scope = scopesByKey.get(createFileProofingScopeKey(lookup.scope))
+      if (scope) {
+        scopesByKey.set(fileId, scope)
       }
     }
   } catch (error) {
@@ -19077,7 +19146,7 @@ async function createPlanningUpdateEvidenceConditionChecks(
 
   const tableName = getEnv('FILE_PROOFING_TABLE_NAME')?.trim() ?? 'mukuroji-file-proofing'
   return [...fileIds].map((fileId) => {
-    const scope = filesById.get(fileId)
+    const scope = scopesByKey.get(fileId)
     if (!scope) {
       throw new PlanningError(
         400,
@@ -24370,11 +24439,25 @@ type PlanningUpdatePublishReceiptExpectation = {
   request: PublishPlanningUpdateInput
 }
 
+/** Canonical request identity retained by a durable Planning cadence receipt. */
+type PlanningUpdateCadenceReceiptExpectation = {
+  /** Project or Initiative whose recurring cadence changes. */
+  target: PlanningUpdateTarget
+  /** Exact request body bound to the idempotency fingerprint. */
+  request: ConfigurePlanningUpdateCadenceInput
+}
+
 /** Stable schema discriminator for Planning publish receipts. */
 const PLANNING_UPDATE_PUBLISH_RECEIPT_SCHEMA = 'planning-update-publish'
 
 /** Current Planning publish receipt version. */
 const PLANNING_UPDATE_PUBLISH_RECEIPT_VERSION = 1
+
+/** Stable schema discriminator for Planning cadence receipts. */
+const PLANNING_UPDATE_CADENCE_RECEIPT_SCHEMA = 'planning-update-cadence'
+
+/** Current Planning cadence receipt version. */
+const PLANNING_UPDATE_CADENCE_RECEIPT_VERSION = 1
 
 /** Target and actor fields shared by every Planning update annotation receipt. */
 type PlanningUpdateAnnotationReceiptBase = {
@@ -24670,6 +24753,215 @@ async function executePlanningUpdateAnnotationMutation<Result>(
   }
 }
 
+/** Validates the required idempotency key for one Planning cadence mutation. */
+function readRequiredPlanningUpdateCadenceIdempotencyKey(value: string): string {
+  const key = value.trim()
+  const hasControlCharacter = [...key].some((character) => {
+    const codePoint = character.codePointAt(0)
+    return codePoint !== undefined && (codePoint <= 31 || codePoint === 127)
+  })
+  if (!key || key.length > 256 || hasControlCharacter) {
+    throw new PlanningError(
+      400,
+      'InvalidPlanningUpdateCadenceIdempotencyKey',
+      'Idempotency-Key must contain 1 to 256 characters without control characters.',
+    )
+  }
+  return key
+}
+
+/** Creates the user-scoped reservation identity for one cadence mutation. */
+function createPlanningUpdateCadenceReservationRequest(
+  principal: WorkspacePrincipal,
+  idempotencyKey: string,
+  method: string,
+  path: string,
+  expectation: PlanningUpdateCadenceReceiptExpectation,
+): ReserveIdempotencyRequest {
+  return {
+    workspaceId: createWorkItemScheduleIdempotencyWorkspaceId(principal.directoryId),
+    credentialId: createWorkItemScheduleIdempotencyUserId(
+      principal.directoryId,
+      principal.actorId,
+    ),
+    idempotencyKey,
+    requestFingerprint: createHash('sha256')
+      .update(`${method.toUpperCase()}\n${path}\n${stableDigestStringify(expectation.request)}`)
+      .digest('hex'),
+  }
+}
+
+/** Reserves one Planning cadence mutation and maps storage failures to a stable API error. */
+async function reservePlanningUpdateCadenceMutation(request: ReserveIdempotencyRequest) {
+  try {
+    return await developerPlatformDependencies.idempotency.reserveIdempotency(request)
+  } catch (error) {
+    if (error instanceof DeveloperPlatformError && error.code === 'IdempotencyKeyConflict') {
+      throw new PlanningError(
+        409,
+        'PlanningUpdateCadenceIdempotencyConflict',
+        'Idempotency-Key was already used for a different Planning update cadence mutation.',
+      )
+    }
+    throw planningUpdateCadenceIdempotencyUnavailable()
+  }
+}
+
+/** Creates the stable failure returned when cadence receipt persistence is unavailable. */
+function planningUpdateCadenceIdempotencyUnavailable(): PlanningError {
+  return new PlanningError(
+    503,
+    'PlanningUpdateCadenceIdempotencyUnavailable',
+    'Planning update cadence idempotency is unavailable.',
+  )
+}
+
+/** Releases an uncommitted Planning cadence reservation without masking the route error. */
+async function releasePlanningUpdateCadenceReservation(
+  request: ReleaseIdempotencyRequest,
+): Promise<void> {
+  await developerPlatformDependencies.idempotency.releaseIdempotency(request).catch(() => undefined)
+}
+
+/** Creates a durable cadence receipt contribution for the Planning transaction. */
+function createPlanningUpdateCadenceIdempotencyTransaction(
+  workspaceId: string,
+  token: IdempotencyMutationToken,
+  expectation: PlanningUpdateCadenceReceiptExpectation,
+): PlanningMutationTransaction<PlanningUpdateCadenceTransactionResult> | undefined {
+  const prepare = developerPlatformDependencies.transactions
+    .prepareIdempotencyCompletionTransactWrite
+  if (!prepare) return undefined
+  return {
+    async prepare(result) {
+      return prepare.call(developerPlatformDependencies.transactions, {
+        workspaceId,
+        credentialId: token.credentialId,
+        idempotencyKey: token.idempotencyKey,
+        requestFingerprint: token.requestFingerprint,
+        reservationId: token.reservationId,
+        response: createPlanningUpdateCadenceReceiptResponse(workspaceId, expectation, result),
+      })
+    },
+  }
+}
+
+/** Creates the compact durable payload used to replay a cadence mutation. */
+function createPlanningUpdateCadenceReceiptResponse(
+  workspaceId: string,
+  expectation: PlanningUpdateCadenceReceiptExpectation,
+  result: PlanningUpdateCadenceTransactionResult,
+) {
+  if (
+    result.kind !== 'cadence' ||
+    !planningUpdateTargetsEqual(result.updateTarget.target, expectation.target)
+  ) {
+    throw planningUpdateCadenceIdempotencyUnavailable()
+  }
+  return {
+    status: 200 as const,
+    body: {
+      schema: PLANNING_UPDATE_CADENCE_RECEIPT_SCHEMA,
+      version: PLANNING_UPDATE_CADENCE_RECEIPT_VERSION,
+      workspaceId,
+      status: 200,
+      payload: {
+        target: structuredClone(result.updateTarget.target),
+        revision: result.revision,
+        updateTarget: structuredClone(result.updateTarget),
+      },
+    },
+  }
+}
+
+/** Decoded identity stored in a successful Planning cadence receipt. */
+type PlanningUpdateCadenceReplay = {
+  /** Project or Initiative target. */
+  target: PlanningUpdateTarget
+  /** Planning revision committed by the cadence mutation. */
+  revision: number
+  /** Target summary committed by the cadence mutation. */
+  updateTarget: PlanningUpdateTargetSummary
+}
+
+/** Strictly decodes one completed Planning cadence receipt. */
+function readStoredPlanningUpdateCadenceMutationReceipt(
+  value: unknown,
+  workspaceId: string,
+  expectation: PlanningUpdateCadenceReceiptExpectation,
+): PlanningUpdateCadenceReplay {
+  if (!isRecord(value) || value.status !== 200 || !isRecord(value.body)) {
+    throw planningUpdateCadenceIdempotencyUnavailable()
+  }
+  const receipt = value.body
+  const payload = isRecord(receipt.payload) ? receipt.payload : undefined
+  if (
+    receipt.schema !== PLANNING_UPDATE_CADENCE_RECEIPT_SCHEMA ||
+    receipt.version !== PLANNING_UPDATE_CADENCE_RECEIPT_VERSION ||
+    receipt.workspaceId !== workspaceId ||
+    receipt.status !== 200 ||
+    !payload ||
+    typeof payload.revision !== 'number' ||
+    !Number.isSafeInteger(payload.revision) ||
+    payload.revision < 1 ||
+    !isPlanningUpdateTargetSummary(payload.updateTarget) ||
+    !isPlanningUpdateTarget(payload.target) ||
+    stableDigestStringify(payload.target) !== stableDigestStringify(expectation.target) ||
+    stableDigestStringify(payload.updateTarget.target) !== stableDigestStringify(expectation.target) ||
+    stableDigestStringify({ status: 200, body: receipt }) !== stableDigestStringify(value)
+  ) {
+    throw planningUpdateCadenceIdempotencyUnavailable()
+  }
+  return {
+    target: structuredClone(expectation.target),
+    revision: payload.revision,
+    updateTarget: structuredClone(payload.updateTarget),
+  }
+}
+
+/** Checks the persisted shape of one Planning update target. */
+function isPlanningUpdateTarget(value: unknown): value is PlanningUpdateTarget {
+  if (!isRecord(value) || typeof value.type !== 'string') return false
+  if (value.type === 'initiative') return typeof value.entityId === 'string'
+  return value.type === 'project' &&
+    typeof value.teamId === 'string' &&
+    typeof value.projectId === 'string'
+}
+
+/** Checks the persisted shape of one Planning cadence. */
+function isPlanningUpdateCadence(value: unknown): value is PlanningUpdateCadence {
+  if (!isRecord(value) || typeof value.updateOwnerMemberKey !== 'string' ||
+    typeof value.timeZone !== 'string' || typeof value.nextDueAt !== 'string' ||
+    typeof value.reminderHoursBefore !== 'number' ||
+    !Number.isSafeInteger(value.reminderHoursBefore) || value.reminderHoursBefore < 0 ||
+    !isRecord(value.cadence) ||
+    (value.cadence.unit !== 'week' && value.cadence.unit !== 'month') ||
+    typeof value.cadence.count !== 'number' ||
+    !Number.isSafeInteger(value.cadence.count) || value.cadence.count < 1) {
+    return false
+  }
+  return (value.escalationHoursAfter === undefined ||
+      (typeof value.escalationHoursAfter === 'number' &&
+        Number.isSafeInteger(value.escalationHoursAfter) &&
+        value.escalationHoursAfter >= 0)) &&
+    (value.escalationMemberKey === undefined || typeof value.escalationMemberKey === 'string')
+}
+
+/** Checks the persisted shape of one Planning update target summary. */
+function isPlanningUpdateTargetSummary(value: unknown): value is PlanningUpdateTargetSummary {
+  if (!isRecord(value) || !isPlanningUpdateTarget(value.target) ||
+    (value.cadence !== undefined && !isPlanningUpdateCadence(value.cadence)) ||
+    typeof value.latestVersion !== 'number' ||
+    !Number.isSafeInteger(value.latestVersion) || value.latestVersion < 0 ||
+    (value.updateState !== 'not-configured' && value.updateState !== 'missing' &&
+      value.updateState !== 'current' && value.updateState !== 'overdue' &&
+      value.updateState !== 'stale') ||
+    typeof value.updatedAt !== 'string') {
+    return false
+  }
+  return true
+}
+
 /** Validates the optional publish idempotency key when one is supplied. */
 function readRequiredPlanningUpdatePublishIdempotencyKey(value: string): string {
   const key = value.trim()
@@ -24865,6 +25157,18 @@ async function requirePlanningUpdateVersionCapturedScopePermission(
   target: PlanningUpdateTarget,
   version: number,
 ): Promise<void> {
+  const snapshot = await workItemDependencies.planning.get(
+    workspaceId,
+    await readPlanningWorkItemState(principal),
+  )
+  const targetSummary = findPlanningUpdateTargetSummary(snapshot, target)
+  if (!targetSummary || version > targetSummary.latestVersion) {
+    throw new PlanningError(
+      404,
+      'PlanningUpdateNotFound',
+      'Planning update was not found.',
+    )
+  }
   const update = await readPlanningUpdateByVersion(workspaceId, target, version)
   if (!planningUpdateTargetsEqual(update.target, target)) {
     throw new PlanningError(

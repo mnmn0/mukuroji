@@ -74,6 +74,9 @@ export const GUARDDUTY_SCAN_STATUS_TAG = 'GuardDutyMalwareScanStatus'
 /** Physical Planning META key that serializes canonical Work Item projections. */
 const PLANNING_META_RECORD_KEY = 'META'
 
+/** DynamoDB reverse index used for direct File ID evidence resolution. */
+const FILE_ID_INDEX_NAME = 'FileIdIndex'
+
 /**
  * Creates the Planning META update for a canonical Work Item transition.
  *
@@ -223,6 +226,14 @@ export type FileProofingCollection = {
     /** 新規 file を Workspace guest と共有できるかどうかです。 */
     canGrantGuestAccess: boolean
   }
+}
+
+/** One file resolved through the canonical File ID reverse index. */
+export type FileProofingFileLookup = {
+  /** File metadata projected for the current actor. */
+  file: FileAttachment
+  /** Scope that owns the file metadata row. */
+  scope: FileProofingScope
 }
 
 /** Annotation 作成入力です。 */
@@ -562,6 +573,12 @@ export interface FileObjectClient {
 export interface FileProofingClient {
   /** Scope の file と approval を取得します。 */
   list(scope: FileProofingScope, actor: FileProofingActor): Promise<FileProofingCollection>
+  /** Resolves one visible file by its canonical File ID reverse index. */
+  findFileById(
+    workspaceId: string,
+    actor: FileProofingActor,
+    fileId: string,
+  ): Promise<FileProofingFileLookup | undefined>
   /** 新規 file upload session を作成します。 */
   createUpload(
     scope: FileProofingScope,
@@ -952,6 +969,46 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
         canRequestApproval: scope.kind === 'work-item' && actor.canWrite,
         canGrantGuestAccess: actor.canManage,
       },
+    }
+  }
+
+  /** Resolves one visible file without scanning every file scope in the workspace. */
+  async findFileById(
+    workspaceId: string,
+    actor: FileProofingActor,
+    fileId: string,
+  ): Promise<FileProofingFileLookup | undefined> {
+    await this.ensureReady()
+    const normalizedWorkspaceId = requireText(workspaceId, 'Workspace ID')
+    const normalizedFileId = requireText(fileId, 'File ID')
+    const response = await this.documentClient.send(new QueryCommand({
+      TableName: this.tableName,
+      IndexName: FILE_ID_INDEX_NAME,
+      KeyConditionExpression: '#fileId = :fileId',
+      ExpressionAttributeNames: { '#fileId': 'fileId' },
+      ExpressionAttributeValues: { ':fileId': normalizedFileId },
+    }))
+    const matches = (response.Items ?? [])
+      .filter(isStoredFileItem)
+      .filter((item) => item.workspaceId === normalizedWorkspaceId)
+    if (matches.length > 1) {
+      throw new FileProofingError(
+        503,
+        'FileLookupUnavailable',
+        'The canonical File ID lookup returned duplicate file records.',
+      )
+    }
+    const stored = matches[0]
+    if (!stored || stored.deletedAt || (actor.guest && !stored.guestAccess)) {
+      return undefined
+    }
+    const refreshed = await this.refreshScanStatuses(stored)
+    if (refreshed.deletedAt || (actor.guest && !refreshed.guestAccess)) {
+      return undefined
+    }
+    return {
+      file: toFileAttachment(refreshed, actor),
+      scope: createFileScopeFromStoredItem(refreshed),
     }
   }
 
@@ -2558,6 +2615,19 @@ function createFileRecordKey(fileId: string) {
   return `FILE#${requireText(fileId, 'File ID')}`
 }
 
+/** Creates the public file scope represented by one stored file row. */
+function createFileScopeFromStoredItem(item: StoredFileItem): FileProofingScope {
+  return {
+    workspaceId: item.workspaceId,
+    teamId: item.teamId,
+    kind: item.issueId === undefined ? 'project' : 'work-item',
+    ...(item.issueId === undefined
+      ? { projectId: requireText(item.projectId, 'Project ID') }
+      : { issueId: item.issueId }),
+    ...(item.projectId === undefined ? {} : { projectId: item.projectId }),
+  }
+}
+
 /** Approval record key を作成します。 */
 function createApprovalRecordKey(approvalId: string) {
   return `APPROVAL#${requireText(approvalId, 'Approval ID')}`
@@ -3521,6 +3591,7 @@ async function ensureLocalFileProofingTable(client: DynamoDBClient, tableName: s
       TableName: tableName,
       BillingMode: 'PAY_PER_REQUEST',
       AttributeDefinitions: [
+        { AttributeName: 'fileId', AttributeType: 'S' },
         { AttributeName: 'scopeKey', AttributeType: 'S' },
         { AttributeName: 'recordKey', AttributeType: 'S' },
       ],
@@ -3528,6 +3599,14 @@ async function ensureLocalFileProofingTable(client: DynamoDBClient, tableName: s
         { AttributeName: 'scopeKey', KeyType: 'HASH' },
         { AttributeName: 'recordKey', KeyType: 'RANGE' },
       ],
+      GlobalSecondaryIndexes: [{
+        IndexName: FILE_ID_INDEX_NAME,
+        KeySchema: [
+          { AttributeName: 'fileId', KeyType: 'HASH' },
+          { AttributeName: 'scopeKey', KeyType: 'RANGE' },
+        ],
+        Projection: { ProjectionType: 'ALL' },
+      }],
     }))
   } catch (error) {
     if (!isResourceInUseError(error)) {

@@ -460,6 +460,12 @@ export function buildDataStores(
     removalPolicy: cdk.RemovalPolicy.RETAIN,
     timeToLiveAttribute: 'expiresAt',
   });
+  fileProofingTable.addGlobalSecondaryIndex({
+    indexName: 'FileIdIndex',
+    partitionKey: { name: 'fileId', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'scopeKey', type: dynamodb.AttributeType.STRING },
+    projectionType: dynamodb.ProjectionType.ALL,
+  });
 
   return {
     legacyTasksTable,

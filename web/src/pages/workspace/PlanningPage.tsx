@@ -64,6 +64,7 @@ import {
 import { createPlanningUpdateTargetKey } from '../../planning/model/targetKey'
 import { usePlanningSnapshot } from '../../planning/queries/usePlanningSnapshot'
 import {
+  hasPlanningUpdateViewerReaction,
   revalidatePlanningUpdateHistoryAfterPublish,
   usePlanningUpdateAnnotations,
   usePlanningUpdates,
@@ -433,13 +434,13 @@ export function PlanningPage() {
     setMutationErrorMessage(undefined)
     setIsUpdateCollaborationPending(true)
     try {
-      const loadedAnnotations = await updateAnnotations.loadVersion(update.version)
-      const hasCurrentMemberReaction = (loadedAnnotations?.reactions ?? updateAnnotations.data?.reactions ?? [])
-        .some((reaction) =>
-          reaction.updateVersion === update.version &&
-          reaction.emoji === emoji &&
-          reaction.memberKey.trim().toLowerCase() === currentUserProjectKey
-        )
+      const hasCurrentMemberReaction = await hasPlanningUpdateViewerReaction(
+        accessToken,
+        selectedUpdateTarget,
+        update.version,
+        currentUserProjectKey,
+        emoji,
+      )
       await mutationRequestRunner.run(
         `planning:update:${createPlanningUpdateTargetKey(selectedUpdateTarget)}:${update.version}:reaction:${emoji}`,
         JSON.stringify([input, hasCurrentMemberReaction]),

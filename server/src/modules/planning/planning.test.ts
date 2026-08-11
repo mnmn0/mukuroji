@@ -2086,17 +2086,6 @@ describe('planning structured updates', () => {
     }, EMPTY_WORK_ITEMS)
     await expect(client.publishUpdate('workspace-1', createPlanningUpdateInput(4, {
       target,
-      id: 'initiative-update-invalid-evidence',
-      evidence: [{
-        type: 'decision',
-        decisionId: 'decision-1',
-        url: 'http://example.com/decisions/decision-1',
-      }],
-    }), 'owner@example.com', EMPTY_WORK_ITEMS)).rejects.toMatchObject({
-      code: 'PlanningUpdateEvidenceInvalid',
-    })
-    await expect(client.publishUpdate('workspace-1', createPlanningUpdateInput(4, {
-      target,
       id: 'initiative-update-credentialed-evidence',
       evidence: [{
         type: 'file',
@@ -2112,11 +2101,6 @@ describe('planning structured updates', () => {
       evidence: [
         { type: 'planning-entity', entityId: 'initiative-1' },
         {
-          type: 'decision',
-          decisionId: 'decision-1',
-          url: 'https://example.com/decisions/decision-1',
-        },
-        {
           type: 'file',
           fileId: 'file-1',
           url: 'https://example.com/files/file-1',
@@ -2124,11 +2108,6 @@ describe('planning structured updates', () => {
         { type: 'link', url: 'https://example.com/evidence' },
       ],
     }), 'owner@example.com', EMPTY_WORK_ITEMS)
-    expect(first.update.evidence).toContainEqual({
-      type: 'decision',
-      decisionId: 'decision-1',
-      url: 'https://example.com/decisions/decision-1',
-    })
     expect(first.update.evidence).toContainEqual({
       type: 'file',
       fileId: 'file-1',

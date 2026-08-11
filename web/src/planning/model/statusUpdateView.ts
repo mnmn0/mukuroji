@@ -149,7 +149,7 @@ export function readPlanningUpdateEvidenceType(
 ): PlanningUpdateEvidence['type'] | 'none' {
   if (
     value === 'work-item' || value === 'planning-entity' ||
-    value === 'decision' || value === 'file' || value === 'link'
+    value === 'file' || value === 'link'
   ) {
     return value
   }
@@ -182,11 +182,6 @@ export function readPlanningUpdateEvidence(
     const selectedValue = String(data.get('evidencePlanningEntity') ?? '')
     const candidate = candidates.planningEntities.find((item) => item.value === selectedValue)
     return candidate ? [{ type: 'planning-entity', entityId: candidate.entityId }] : undefined
-  }
-  if (evidenceType === 'decision') {
-    const decisionId = String(data.get('evidenceDecisionId') ?? '').trim()
-    const url = readPlanningEvidenceHttpsUrl(data.get('evidenceDecisionUrl'))
-    return decisionId && url ? [{ type: 'decision', decisionId, url }] : undefined
   }
   if (evidenceType === 'file') {
     const fileId = String(data.get('evidenceFileId') ?? '').trim()
@@ -551,8 +546,6 @@ function createPlanningUpdateEvidenceView(
         label: evidence.entityId,
         url: `/planning/roadmap?entityId=${encodeURIComponent(evidence.entityId)}`,
       }
-    case 'decision':
-      return { id, label: `Decision · ${evidence.decisionId}`, url: evidence.url }
     case 'file':
       return { id, label: `File · ${evidence.fileId}`, url: evidence.url }
     case 'link':

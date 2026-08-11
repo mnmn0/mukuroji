@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
-import type { PlanningUpdateTarget } from '@mukuroji/contracts'
+import type { PlanningUpdateReactionPage, PlanningUpdateTarget } from '@mukuroji/contracts'
 import {
+  hasPlanningUpdateViewerReaction,
   loadBoundedPlanningUpdateAnnotations,
   revalidatePlanningUpdateHistoryAfterPublish,
   selectPlanningUpdateAnnotationVersions,
@@ -83,5 +84,38 @@ describe('Planning update query coordination', () => {
     expect(reactionRequests.every(({ cursor, limit }) => cursor === undefined && limit === 100)).toBe(true)
     expect(annotations.comments).toHaveLength(20)
     expect(annotations.reactions).toHaveLength(20)
+  })
+
+  test('follows reaction pages until the viewer reaction is found', async () => {
+    const target = { type: 'project' as const, teamId: 'team-1', projectId: 'project-1' }
+    const calls: Array<{ cursor?: string }> = []
+    const pages: PlanningUpdateReactionPage[] = [
+      { reactions: [], nextCursor: 'page-2' },
+      {
+        reactions: [{
+          target,
+          updateVersion: 4,
+          emoji: '👍',
+          memberKey: ' Viewer@Example.com ',
+          createdAt: '2026-08-11T00:00:00.000Z',
+        }],
+      },
+    ]
+
+    await expect(hasPlanningUpdateViewerReaction(
+      'access-token',
+      target,
+      4,
+      'viewer@example.com',
+      '👍',
+      async (_accessToken, input) => {
+        calls.push({ cursor: input.cursor })
+        const page = pages.shift()
+        if (!page) throw new Error('unexpected reaction page')
+        return page
+      },
+    )).resolves.toBe(true)
+
+    expect(calls).toEqual([{ cursor: undefined }, { cursor: 'page-2' }])
   })
 })

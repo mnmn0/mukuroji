@@ -213,6 +213,7 @@ test('enterprise SCIM group jobs run in a dedicated bounded worker', () => {
     'dynamodb:GetItem',
     'dynamodb:PutItem',
     'dynamodb:Query',
+    'dynamodb:UpdateItem',
   ]);
   expect(actionsForTable('DocumentsTable7E808EE5')).toEqual([
     'dynamodb:DescribeTable',

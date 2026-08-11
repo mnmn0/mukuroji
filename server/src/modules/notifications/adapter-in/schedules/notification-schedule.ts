@@ -1104,14 +1104,14 @@ async function readActiveScheduledProjectKeys(
     }))
     pages += 1
     for (const item of response.Items ?? []) {
-      if (
-        item.entryType === 'project' &&
-        typeof item.teamId === 'string' &&
-        typeof item.projectId === 'string' &&
-        item.archivedAt === undefined
-      ) {
-        activeProjects.add(`${item.teamId}\0${item.projectId}`)
+      if (item.entryType !== 'project') continue
+      const teamId = requireText(item.teamId, 'Project directory team ID')
+      const projectId = requireText(item.projectId, 'Project directory project ID')
+      if (item.archivedAt !== undefined) {
+        requireTimestamp(item.archivedAt, 'Project directory archived timestamp')
+        continue
       }
+      activeProjects.add(teamId + '\0' + projectId)
     }
     exclusiveStartKey = response.LastEvaluatedKey
   } while (exclusiveStartKey)

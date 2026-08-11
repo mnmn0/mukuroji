@@ -592,16 +592,6 @@ describe('Planning API', () => {
     })).rejects.toMatchObject({ code: 'InvalidPlanningUpdateResponse' })
 
     installFetchRecorder({
-      updates: [{
-        ...planningUpdateHistoryFixture[0],
-        evidence: [{ type: 'decision', decisionId: 'decision-without-permalink' }],
-      }],
-    })
-    await expect(listPlanningUpdates('access-token', {
-      target: initiativeUpdateTarget,
-    })).rejects.toMatchObject({ code: 'InvalidPlanningUpdateResponse' })
-
-    installFetchRecorder({
       watch: {
         automatic: false,
         explicit: true,

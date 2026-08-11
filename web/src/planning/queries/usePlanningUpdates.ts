@@ -325,6 +325,46 @@ export async function loadBoundedPlanningUpdateAnnotations(
 }
 
 /**
+ * Finds the current member's reaction while following every reaction page.
+ *
+ * @param accessToken - Planning API access token.
+ * @param target - Selected Planning update target.
+ * @param updateVersion - Immutable update version to inspect.
+ * @param memberKey - Current member key used for the viewer reaction lookup.
+ * @param emoji - Reaction token to match.
+ * @param loadReactions - Reaction page loader overridden by focused tests.
+ * @returns Whether the current member already has the requested reaction.
+ */
+export async function hasPlanningUpdateViewerReaction(
+  accessToken: string,
+  target: PlanningUpdateTarget,
+  updateVersion: number,
+  memberKey: string,
+  emoji: string,
+  loadReactions: typeof listPlanningUpdateReactions = listPlanningUpdateReactions,
+): Promise<boolean> {
+  const normalizedMemberKey = memberKey.trim().toLowerCase()
+  let cursor: string | undefined
+  do {
+    const page = await loadReactions(accessToken, {
+      limit: planningUpdateAnnotationPageSize,
+      target,
+      updateVersion,
+      ...(cursor ? { cursor } : {}),
+    })
+    if (page.reactions.some((reaction) =>
+      reaction.updateVersion === updateVersion &&
+      reaction.emoji === emoji &&
+      reaction.memberKey.trim().toLowerCase() === normalizedMemberKey
+    )) {
+      return true
+    }
+    cursor = page.nextCursor
+  } while (cursor)
+  return false
+}
+
+/**
  * Loads the bounded annotation preview while reusing one cache entry per target/version.
  *
  * @param accessToken - Planning API access token.

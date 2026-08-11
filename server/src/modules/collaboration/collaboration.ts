@@ -926,7 +926,11 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       if (!isConditionalFailure(error)) {
         throw toCollaborationStoreError(error)
       }
-      if (input.authorizationConditionChecks?.length) {
+      if (isAuthorizationConditionFailure(
+        error,
+        parentConditions.length,
+        input.authorizationConditionChecks?.length ?? 0,
+      )) {
         throw new CollaborationError(
           409,
           'CollaborationAuthorizationChanged',
@@ -986,7 +990,11 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       if (!isConditionalFailure(error)) {
         throw toCollaborationStoreError(error)
       }
-      if (input.authorizationConditionChecks?.length) {
+      if (isAuthorizationConditionFailure(
+        error,
+        parentConditions.length,
+        input.authorizationConditionChecks?.length ?? 0,
+      )) {
         throw new CollaborationError(
           409,
           'CollaborationAuthorizationChanged',
@@ -2020,6 +2028,42 @@ function isConditionalFailure(error: unknown) {
 
   const reasons = (error as { CancellationReasons?: Array<{ Code?: string }> }).CancellationReasons
   return Array.isArray(reasons) && reasons.some((reason) => reason.Code === 'ConditionalCheckFailed')
+}
+
+/**
+ * Checks whether one DynamoDB transaction failed in the caller-authorization slice.
+ *
+ * Direct conditional failures have no per-item reason and therefore remain on the
+ * idempotent replay path; only an indexed authorization condition is authoritative here.
+ *
+ * @param error - DynamoDB transaction error.
+ * @param startIndex - First authorization condition index in the transaction.
+ * @param count - Number of authorization conditions.
+ * @returns Whether an authorization condition failed.
+ */
+function isAuthorizationConditionFailure(
+  error: unknown,
+  startIndex: number,
+  count: number,
+): boolean {
+  if (
+    count === 0 ||
+    typeof error !== 'object' ||
+    error === null ||
+    !('name' in error) ||
+    error.name !== 'TransactionCanceledException' ||
+    !('CancellationReasons' in error) ||
+    !Array.isArray(error.CancellationReasons)
+  ) {
+    return false
+  }
+  const reasons = error.CancellationReasons
+  if (reasons.length < startIndex + count) return false
+  const authorizationReasons = reasons.slice(startIndex, startIndex + count)
+  return authorizationReasons.some((reason) =>
+    typeof reason === 'object' && reason !== null &&
+    'Code' in reason && reason.Code === 'ConditionalCheckFailed'
+  )
 }
 
 function toCollaborationStoreError(error: unknown) {

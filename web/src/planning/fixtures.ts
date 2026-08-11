@@ -418,11 +418,6 @@ export const planningUpdateHistoryFixture = [
       { type: 'work-item', teamId: 'core-team', workItemId: 'journey-events' },
       { type: 'planning-entity', entityId: 'milestone-beta' },
       {
-        type: 'decision',
-        decisionId: 'decision-beta-cohort',
-        url: 'https://example.com/decisions/decision-beta-cohort',
-      },
-      {
         type: 'file',
         fileId: 'research-findings.pdf',
         url: 'https://example.com/files/research-findings.pdf',

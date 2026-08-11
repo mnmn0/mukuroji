@@ -208,10 +208,21 @@ export type PlanningUpdatePublishTransactionResult = {
   update: PlanningUpdate
 }
 
+/** Minimal result exposed while preparing a durable Planning cadence receipt. */
+export type PlanningUpdateCadenceTransactionResult = {
+  /** Identifies a recurring update cadence mutation. */
+  kind: 'cadence'
+  /** Planning revision produced by the cadence mutation. */
+  revision: number
+  /** Complete target summary committed by the cadence mutation. */
+  updateTarget: PlanningUpdateTargetSummary
+}
+
 /** Minimal Planning mutation result accepted by a durable receipt contribution. */
 export type PlanningMutationTransactionResult =
   | PlanningWorkItemDependencyTransactionResult
   | PlanningUpdateAnnotationTransactionResult
+  | PlanningUpdateCadenceTransactionResult
   | PlanningUpdatePublishTransactionResult
 
 /** One external DynamoDB action prepared for the Planning mutation transaction. */
@@ -337,6 +348,7 @@ export type PlanningClient = {
     input: ConfigurePlanningUpdateCadenceInput,
     workItemState: PlanningWorkItemState,
     authorizationConditionChecks?: readonly PlanningCallerAuthorizationConditionCheck[],
+    transaction?: PlanningMutationTransaction<PlanningUpdateCadenceTransactionResult>,
   ): Promise<PlanningUpdateCadenceMutationResponse>
   /** Human-authored structured update を append-only publish します。 */
   publishUpdate(
@@ -567,6 +579,8 @@ type PlanningMutationResult = {
   workItemDependencyTransactionSource?: PlanningWorkItemDependencyTransactionSource
   /** 同じ transaction で append-only 保存する structured update です。 */
   publishedUpdate?: PlanningUpdate
+  /** Target whose summary is retained for a durable cadence receipt. */
+  planningUpdateCadenceTransactionTarget?: PlanningUpdateTarget
 }
 
 /** Storage 非依存の Planning mutation 実装です。 */
@@ -954,6 +968,7 @@ abstract class BasePlanningClient implements PlanningClient {
     input: ConfigurePlanningUpdateCadenceInput,
     workItemState: PlanningWorkItemState,
     authorizationConditionChecks: readonly PlanningCallerAuthorizationConditionCheck[] = [],
+    transaction?: PlanningMutationTransaction<PlanningUpdateCadenceTransactionResult>,
   ): Promise<PlanningUpdateCadenceMutationResponse> {
     const result = await this.mutate(
       workspaceId,
@@ -992,9 +1007,13 @@ abstract class BasePlanningClient implements PlanningClient {
             : { latestContextSnapshot: structuredClone(current.latestContextSnapshot) }),
           updatedAt: now,
         }
-        return { state: replacePlanningUpdateTarget(state, updated) }
+        return {
+          state: replacePlanningUpdateTarget(state, updated),
+          planningUpdateCadenceTransactionTarget: target,
+        }
       },
       authorizationConditionChecks,
+      transaction,
     )
     const updateTarget = result.planning.updateTargets.find((candidate) =>
       planningUpdateTargetsEqual(candidate.target, readPlanningUpdateTarget(input.target))
@@ -1724,14 +1743,36 @@ abstract class BasePlanningClient implements PlanningClient {
       updatedAt: this.now().toISOString(),
     }
     const planning = createPlanningSnapshot(after, workItemState, this.now().toISOString())
+    const cadenceTransactionTarget = result.planningUpdateCadenceTransactionTarget
+    const cadenceTarget = cadenceTransactionTarget === undefined
+      ? undefined
+      : planning.updateTargets.find((candidate) =>
+          planningUpdateTargetsEqual(
+            candidate.target,
+            cadenceTransactionTarget,
+          )
+        )
+    if (cadenceTransactionTarget !== undefined && !cadenceTarget) {
+      throw new PlanningError(
+        503,
+        'PlanningUpdateUnavailable',
+        'Updated cadence target is unavailable.',
+      )
+    }
     const transactionResult: PlanningMutationTransactionResult | undefined =
       result.publishedUpdate === undefined
-        ? result.workItemDependencyTransactionSource === undefined
-          ? undefined
+        ? cadenceTarget === undefined
+          ? result.workItemDependencyTransactionSource === undefined
+            ? undefined
+            : {
+                ...result.workItemDependencyTransactionSource,
+                revision: after.revision,
+                dependency: structuredClone(result.workItemDependencyTransactionSource.dependency),
+              }
           : {
-              ...result.workItemDependencyTransactionSource,
+              kind: 'cadence',
               revision: after.revision,
-              dependency: structuredClone(result.workItemDependencyTransactionSource.dependency),
+              updateTarget: structuredClone(cadenceTarget),
             }
         : {
             kind: 'publish',
@@ -5514,13 +5555,6 @@ function readPlanningUpdateEvidence(value: unknown): PlanningUpdateEvidence[] {
       return {
         type: 'planning-entity',
         entityId: readIdentifier(candidate.entityId, 'Evidence Planning entity ID'),
-      }
-    }
-    if (candidate.type === 'decision') {
-      return {
-        type: 'decision',
-        decisionId: readIdentifier(candidate.decisionId, 'Evidence Decision ID'),
-        url: readPlanningUpdateEvidenceUrl(candidate.url),
       }
     }
     if (candidate.type === 'file') {

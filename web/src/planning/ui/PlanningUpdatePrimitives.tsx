@@ -105,8 +105,6 @@ export type PlanningUpdateLabels = {
   evidenceWorkItem: string
   /** Canonical Planning entity evidence option label. */
   evidencePlanningEntity: string
-  /** Decision evidence option label. */
-  evidenceDecision: string
   /** File evidence option label. */
   evidenceFile: string
   /** Generic HTTPS evidence option label. */
@@ -115,8 +113,6 @@ export type PlanningUpdateLabels = {
   evidenceWorkItemPlaceholder: string
   /** Planning entity selector placeholder. */
   evidencePlanningEntityPlaceholder: string
-  /** Decision ID field placeholder. */
-  evidenceDecisionIdPlaceholder: string
   /** File ID field placeholder. */
   evidenceFileIdPlaceholder: string
   /** Evidence label placeholder. */
@@ -653,6 +649,7 @@ export function PlanningStatusUpdateComposer({
     initialEvidenceType,
   )
   const [formError, setFormError] = useState<string | undefined>()
+  const [isPublishing, setIsPublishing] = useState(false)
 
   return (
     <section className="workbench-panel p-5" data-testid="planning-update-composer">
@@ -671,7 +668,7 @@ export function PlanningStatusUpdateComposer({
         onSubmit={(event) => {
           event.preventDefault()
           setFormError(undefined)
-          if (!onPublish) return
+          if (!onPublish || isPublishing) return
           const data = new FormData(event.currentTarget)
           const selectedHealth = readHealth(data.get('health'))
           const selectedRisk = readRisk(data.get('risk'))
@@ -688,7 +685,7 @@ export function PlanningStatusUpdateComposer({
             setFormError(labels.formInvalid)
             return
           }
-          void onPublish({
+          const draft = {
             decisionSummary: readOptionalText(data.get('decisionSummary')) ?? '',
             evidence,
             health: selectedHealth,
@@ -697,7 +694,17 @@ export function PlanningStatusUpdateComposer({
             risk: selectedRisk,
             riskSummary: readOptionalText(data.get('riskSummary')) ?? '',
             summary,
-          })
+          }
+          setIsPublishing(true)
+          void (async () => {
+            try {
+              await onPublish(draft)
+            } catch {
+              // The page-level mutation handler owns the user-visible error state.
+            } finally {
+              setIsPublishing(false)
+            }
+          })()
         }}
       >
         <div className="grid grid-cols-[minmax(140px,0.35fr)_minmax(140px,0.35fr)_minmax(0,1fr)] gap-3 max-[720px]:grid-cols-1">
@@ -798,7 +805,6 @@ export function PlanningStatusUpdateComposer({
               <option disabled={evidenceCandidates.planningEntities.length === 0} value="planning-entity">
                 {labels.evidencePlanningEntity}
               </option>
-              <option value="decision">{labels.evidenceDecision}</option>
               <option value="file">{labels.evidenceFile}</option>
               <option value="link">{labels.evidenceLink}</option>
             </select>
@@ -834,24 +840,6 @@ export function PlanningStatusUpdateComposer({
                 <option key={candidate.value} value={candidate.value}>{candidate.label}</option>
               ))}
             </select>
-          ) : null}
-          {evidenceType === 'decision' ? (
-            <div className="grid grid-cols-[minmax(140px,0.45fr)_minmax(0,1fr)] gap-3 max-[620px]:grid-cols-1">
-              <input
-                aria-label={labels.evidenceDecisionIdPlaceholder}
-                className="workbench-input h-10 px-3"
-                disabled={!onPublish}
-                name="evidenceDecisionId"
-                placeholder={labels.evidenceDecisionIdPlaceholder}
-                required
-              />
-              <PlanningEvidenceUrlInput
-                hasError={Boolean(formError)}
-                labels={labels}
-                name="evidenceDecisionUrl"
-                onPublish={onPublish}
-              />
-            </div>
           ) : null}
           {evidenceType === 'file' ? (
             <div className="grid grid-cols-[minmax(140px,0.45fr)_minmax(0,1fr)] gap-3 max-[620px]:grid-cols-1">
@@ -900,7 +888,8 @@ export function PlanningStatusUpdateComposer({
         ) : null}
         <button
           className="workbench-button-primary min-h-10 px-4 disabled:opacity-50"
-          disabled={!onPublish}
+          disabled={!onPublish || isPublishing}
+          aria-busy={isPublishing}
           type="submit"
         >
           {labels.publishUpdate}

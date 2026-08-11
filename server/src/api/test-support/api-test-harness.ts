@@ -541,6 +541,7 @@ function createFileProofingStub(
   }
   return {
     list: unsupported,
+    findFileById: unsupported,
     createUpload: unsupported,
     createVersionUpload: unsupported,
     completeUpload: unsupported,

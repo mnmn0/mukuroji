@@ -211,6 +211,10 @@ function configurePlanningAnnotationIdempotency(
   planning.removeUpdateReaction = (...input) => completePreparedMutation(
     () => removeReaction(...input),
   )
+  const configureCadence = planning.configureUpdateCadence.bind(planning)
+  planning.configureUpdateCadence = (...input) => input[4]
+    ? completePreparedMutation(() => configureCadence(...input))
+    : configureCadence(...input)
   setTestAppDependencies({
     planning,
     idempotency: platform.idempotency,
@@ -272,10 +276,11 @@ test('configures, publishes, pages, exports, and watches a qualified Project upd
       reminderHoursBefore: 24,
     },
     expectedRevision: 0,
-  })
+  }, 'planning-cadence-request-1')
 
   expect(configured.status).toBe(200)
-  expect(await configured.json()).toMatchObject({
+  const configuredBody = await configured.json()
+  expect(configuredBody).toMatchObject({
     planning: { revision: 1 },
     updateTarget: {
       target,
@@ -283,6 +288,26 @@ test('configures, publishes, pages, exports, and watches a qualified Project upd
       updateState: 'missing',
     },
   })
+
+  const replayedCadence = await planningApiRequest(
+    '/api/planning/updates/cadence',
+    'PUT',
+    {
+      target,
+      cadence: {
+        updateOwnerMemberKey: 'demo@example.com',
+        cadence: { unit: 'week', count: 1 },
+        timeZone: 'Asia/Tokyo',
+        nextDueAt: '2026-08-10T00:00:00.000Z',
+        reminderHoursBefore: 24,
+      },
+      expectedRevision: 0,
+    },
+    'planning-cadence-request-1',
+  )
+  expect(replayedCadence.status).toBe(200)
+  expect(replayedCadence.headers.get('Idempotency-Replayed')).toBe('true')
+  expect(await replayedCadence.json()).toEqual(configuredBody)
 
   configureFakeProjectClients(true, { role: 'member', workspaceRole: 'member' })
   setTestAppDependencies({
@@ -464,17 +489,19 @@ test('requires visible File evidence and fails closed for unsupported Decision e
   setTestAppDependencies({
     planning,
     fileProofing: createFileProofingStub({
-      async list(scope) {
-        seenScopes.push(`${scope.kind}:${scope.projectId ?? scope.issueId ?? ''}`)
-        return {
-          files: scope.kind === 'project' ? [file] : [],
-          approvals: [],
-          capabilities: {
-            canUpload: false,
-            canRequestApproval: false,
-            canGrantGuestAccess: false,
-          },
-        }
+      async findFileById(_workspaceId, _actor, fileId) {
+        seenScopes.push('project:refero')
+        return fileId === file.id
+          ? {
+              file,
+              scope: {
+                workspaceId: 'user#demo@example.com',
+                teamId: 'core-team',
+                kind: 'project',
+                projectId: 'refero',
+              },
+            }
+          : undefined
       },
     }),
   })
