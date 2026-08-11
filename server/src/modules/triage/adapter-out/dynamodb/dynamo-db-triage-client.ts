@@ -751,6 +751,7 @@ export class DynamoDbTriageClient implements TriageClient {
    * @param actor The authenticated settings manager.
    * @param input The validated replacement configuration.
    * @param idempotency Replay protection bound to the settings replacement.
+   * @param authorizationConditionChecks Caller authorization conditions joined to the settings transaction.
    * @returns The newly committed or exactly replayed configuration.
    */
   async updateConfiguration(
@@ -759,6 +760,7 @@ export class DynamoDbTriageClient implements TriageClient {
     actor: TriageActor,
     input: UpdateTriageConfigurationInput,
     idempotency: TriageIdempotency,
+    authorizationConditionChecks?: TriageAuthorizationConditionChecks,
   ): Promise<TriageConfiguration> {
     const normalizedInput = normalizeTriageConfigurationInput(input)
     validateConfigurationInput(teamId, normalizedInput)
@@ -833,60 +835,69 @@ export class DynamoDbTriageClient implements TriageClient {
           expression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
           values: undefined,
         }
+    const transactItems = dedupeTriageConditionChecks([
+      ...(authorizationConditionChecks ?? []),
+      ...(referenceValidation?.transactItems ?? []),
+      {
+        Update: {
+          TableName: this.tableName,
+          Key: createConfigurationKey(workspaceId, teamId),
+          UpdateExpression: 'SET #entryType = :entryType, ' +
+            '#configuration = :configuration, #revision = :revision, ' +
+            '#updatedBy = :updatedBy' +
+            (rotationPolicyChanged ? ', #rotationCursors = :rotationCursors' : ''),
+          ConditionExpression: condition.expression,
+          ExpressionAttributeNames: {
+            '#configuration': 'configuration',
+            '#entryType': 'entryType',
+            '#revision': 'revision',
+            '#updatedBy': 'updatedBy',
+            ...(rotationPolicyChanged ? { '#rotationCursors': 'rotationCursors' } : {}),
+          },
+          ExpressionAttributeValues: {
+            ':configuration': next,
+            ':entryType': 'triage-configuration',
+            ':revision': next.revision,
+            ':updatedBy': requireUserId(actor.id, 'Triage actor ID'),
+            ...(condition.values ?? undefined),
+            ...(rotationPolicyChanged
+              ? {
+                  ':rotationCursors': Object.fromEntries(nextRotations.map((rotation) => [
+                    rotation.id,
+                    rotation.nextIndex,
+                  ])),
+                }
+              : {}),
+          },
+        },
+      },
+      {
+        Put: {
+          TableName: this.tableName,
+          Item: {
+            entryType: 'triage-configuration-receipt',
+            ...createConfigurationReceiptKey(workspaceId, teamId, idempotency.key),
+            workspaceId,
+            teamId,
+            inputFingerprint: idempotency.fingerprint,
+            configuration: next,
+            createdAt: now,
+            expiresAt: Math.floor(Date.parse(addDays(now, 90)) / 1_000),
+          },
+          ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
+        },
+      },
+    ])
+    if (transactItems.length > 100) {
+      throw new TriageError(
+        409,
+        'TriageTransactionTooLarge',
+        'The triage settings transaction is too large.',
+      )
+    }
     try {
       await this.documentClient.send(new TransactWriteCommand({
-        TransactItems: [
-          ...(referenceValidation?.transactItems ?? []),
-          {
-            Update: {
-              TableName: this.tableName,
-              Key: createConfigurationKey(workspaceId, teamId),
-              UpdateExpression: 'SET #entryType = :entryType, ' +
-                '#configuration = :configuration, #revision = :revision, ' +
-                '#updatedBy = :updatedBy' +
-                (rotationPolicyChanged ? ', #rotationCursors = :rotationCursors' : ''),
-              ConditionExpression: condition.expression,
-              ExpressionAttributeNames: {
-                '#configuration': 'configuration',
-                '#entryType': 'entryType',
-                '#revision': 'revision',
-                '#updatedBy': 'updatedBy',
-                ...(rotationPolicyChanged ? { '#rotationCursors': 'rotationCursors' } : {}),
-              },
-              ExpressionAttributeValues: {
-                ':configuration': next,
-                ':entryType': 'triage-configuration',
-                ':revision': next.revision,
-                ':updatedBy': requireUserId(actor.id, 'Triage actor ID'),
-                ...(condition.values ?? undefined),
-                ...(rotationPolicyChanged
-                  ? {
-                      ':rotationCursors': Object.fromEntries(nextRotations.map((rotation) => [
-                        rotation.id,
-                        rotation.nextIndex,
-                      ])),
-                    }
-                  : {}),
-              },
-            },
-          },
-          {
-            Put: {
-              TableName: this.tableName,
-              Item: {
-                entryType: 'triage-configuration-receipt',
-                ...createConfigurationReceiptKey(workspaceId, teamId, idempotency.key),
-                workspaceId,
-                teamId,
-                inputFingerprint: idempotency.fingerprint,
-                configuration: next,
-                createdAt: now,
-                expiresAt: Math.floor(Date.parse(addDays(now, 90)) / 1_000),
-              },
-              ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
-            },
-          },
-        ],
+        TransactItems: transactItems,
       }))
       return next
     } catch (error) {
@@ -957,6 +968,7 @@ export class DynamoDbTriageClient implements TriageClient {
    * @param actor The authenticated internal actor.
    * @param input The normalized handoff source and server-derived routing snapshot.
    * @param idempotency Replay protection bound to the original semantic handoff.
+   * @param authorizationConditionChecks Caller authorization conditions joined to the handoff transaction.
    * @returns The newly committed or replayed permission-safe entry receipt.
    */
   async createManualHandoff(
@@ -965,6 +977,7 @@ export class DynamoDbTriageClient implements TriageClient {
     actor: TriageActor,
     input: CreateManualTriageEntryInput,
     idempotency: TriageIdempotency,
+    authorizationConditionChecks?: TriageAuthorizationConditionChecks,
   ): Promise<TriageMutationReceipt> {
     const existing = await this.readSourceClaim(workspaceId, 'manual-handoff', input.sourceId)
     if (existing) return this.replaySourceClaim(existing, idempotency.fingerprint, teamId)
@@ -995,12 +1008,15 @@ export class DynamoDbTriageClient implements TriageClient {
       }
       const entry = admission.entry
       requireSamePreparedManualProject(input, entry)
-      const transactItems = createTriageEntryTransactionItems({
-        tableName: this.tableName,
-        entry,
-        inputFingerprint: idempotency.fingerprint,
-        wakeShardCount: this.wakeShardCount,
-      })
+      const transactItems = dedupeTriageConditionChecks([
+        ...(authorizationConditionChecks ?? []),
+        ...createTriageEntryTransactionItems({
+          tableName: this.tableName,
+          entry,
+          inputFingerprint: idempotency.fingerprint,
+          wakeShardCount: this.wakeShardCount,
+        }),
+      ])
       transactItems.push(createTriageOperationReceiptTransactionPut({
         tableName: this.tableName,
         entry,
@@ -1012,6 +1028,13 @@ export class DynamoDbTriageClient implements TriageClient {
         (itemIndex) => transactItems.length + itemIndex,
       ) ?? []
       transactItems.push(...admission.transactItems)
+      if (transactItems.length > 100) {
+        throw new TriageError(
+          409,
+          'TriageTransactionTooLarge',
+          'The manual Triage handoff transaction is too large.',
+        )
+      }
       try {
         await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactItems }))
         return {

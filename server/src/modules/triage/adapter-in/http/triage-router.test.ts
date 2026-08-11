@@ -174,9 +174,13 @@ function createDependencies(
   const bulkAuditContextFactories: Parameters<TriageClient['applyBulkAction']>[5][] = []
   const manualInputs: Parameters<TriageClient['createManualHandoff']>[3][] = []
   const manualIdempotencies: Parameters<TriageClient['createManualHandoff']>[4][] = []
+  const manualAuthorizationConditionChecks:
+    (Parameters<TriageClient['createManualHandoff']>[5] | undefined)[] = []
   const configurationReceiptIdempotencies:
     Parameters<TriageClient['getConfigurationUpdateReceipt']>[2][] = []
   const configurationIdempotencies: Parameters<TriageClient['updateConfiguration']>[4][] = []
+  const configurationAuthorizationConditionChecks:
+    (Parameters<TriageClient['updateConfiguration']>[5] | undefined)[] = []
   const baseClient = createClient(entry, entries)
   const client: TriageClient = {
     ...baseClient,
@@ -188,6 +192,7 @@ function createDependencies(
     createManualHandoff: async (...parameters) => {
       manualInputs.push(parameters[3])
       manualIdempotencies.push(parameters[4])
+      manualAuthorizationConditionChecks.push(parameters[5])
       return await baseClient.createManualHandoff(...parameters)
     },
     getConfigurationUpdateReceipt: async (...parameters) => {
@@ -196,6 +201,7 @@ function createDependencies(
     },
     updateConfiguration: async (...parameters) => {
       configurationIdempotencies.push(parameters[4])
+      configurationAuthorizationConditionChecks.push(parameters[5])
       return await baseClient.updateConfiguration(...parameters)
     },
   }
@@ -227,8 +233,10 @@ function createDependencies(
     bulkAuditContextFactories,
     bulkInputs,
     configurationIdempotencies,
+    configurationAuthorizationConditionChecks,
     configurationReceiptIdempotencies,
     manualIdempotencies,
+    manualAuthorizationConditionChecks,
     manualInputs,
     router: createTriageRouter(dependencies),
   }
@@ -652,6 +660,41 @@ describe('triage HTTP router', () => {
     ])
   })
 
+  test('passes settings authorization conditions to the triage client', async () => {
+    const authorizationConditionChecks = [{
+      ConditionCheck: {
+        TableName: 'WorkspaceAccessTable',
+        Key: { workspaceId: 'workspace-1', recordKey: 'MEMBER#member-1' },
+        ConditionExpression: '#status = :active',
+      },
+    }]
+    const { configurationAuthorizationConditionChecks, router } = createDependencies(
+      createEntry(),
+      undefined,
+      undefined,
+      { validateConfiguration: async () => authorizationConditionChecks },
+    )
+
+    const response = await router.request('/api/teams/support/triage-settings', {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        'Idempotency-Key': 'settings-auth-fence',
+      },
+      body: JSON.stringify({
+        expectedRevision: 1,
+        rules: [],
+        rotations: [],
+        slaPolicies: [],
+        allowedBulkActions: ['assign', 'decline', 'snooze'],
+        retentionDays: 365,
+      }),
+    })
+
+    expect(response.status).toBe(200)
+    expect(configurationAuthorizationConditionChecks).toEqual([authorizationConditionChecks])
+  })
+
   test('fails closed before single actions outside the current or destination Project scope', async () => {
     const visible = createEntry('full', 'triage-visible', 'project-visible')
     const hidden = createEntry('full', 'triage-hidden', 'project-hidden')
@@ -843,6 +886,46 @@ describe('triage HTTP router', () => {
 
     expect(response.status).toBe(404)
     expect(manualInputs).toHaveLength(0)
+  })
+
+  test('passes manual handoff authorization conditions to the triage client', async () => {
+    const authorizationConditionChecks = [{
+      ConditionCheck: {
+        TableName: 'ProjectDirectoryTable',
+        Key: { directoryId: 'workspace-1', entryKey: 'PROJECT#project-visible' },
+        ConditionExpression: '#role = :member',
+      },
+    }]
+    const { manualAuthorizationConditionChecks, router } = createDependencies(
+      createEntry(),
+      undefined,
+      undefined,
+      {
+        createManualHandoffAuthorizationConditionChecks: async () => authorizationConditionChecks,
+      },
+    )
+
+    const response = await router.request(
+      '/api/teams/support/triage-entries/manual-handoffs',
+      {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Idempotency-Key': 'manual-auth-fence',
+        },
+        body: JSON.stringify({
+          sourceId: 'manual-auth-fence-1',
+          title: 'Internal escalation',
+          body: '',
+          requesterDisplayName: 'Operator',
+          routingReason: 'Operator handoff.',
+          retentionExpiresAt: '2027-08-09T00:00:00.000Z',
+        }),
+      },
+    )
+
+    expect(response.status).toBe(201)
+    expect(manualAuthorizationConditionChecks).toEqual([authorizationConditionChecks])
   })
 
   test('keeps manual response-loss replay fingerprints stable across derived deadline changes', async () => {

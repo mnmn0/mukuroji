@@ -317,17 +317,25 @@ export class WorkspaceAccessError extends Error {
   }
 }
 
+/** Options for binding an active Workspace member to an allowed role set. */
+export type WorkspaceActiveMemberConditionOptions = {
+  /** Workspace roles that must remain assigned when the transaction commits. */
+  readonly allowedRoles?: readonly WorkspaceRole[]
+}
+
 /** Workspace access data store の公開契約です。 */
 export interface WorkspaceAccessClient {
   /** Builds a commit-time condition proving a Workspace member remains active.
    *
    * @param workspaceId - Owning Workspace identifier.
    * @param memberKey - Stable member key that must remain active through commit.
+   * @param options - Optional role set that must remain assigned through commit.
    * @returns A DynamoDB condition check, or undefined when the member is inactive.
    */
   createActiveMemberConditionCheck?(
     workspaceId: string,
     memberKey: string,
+    options?: WorkspaceActiveMemberConditionOptions,
   ): Promise<WorkspaceAccessTransactWriteItem | undefined>
   /** 指定 member を取得します。 */
   getMember(workspaceId: string, memberKey: string): Promise<WorkspaceMember | undefined>
@@ -644,14 +652,26 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
    *
    * @param workspaceId Owning Workspace identifier.
    * @param memberKey Stable member key that must remain active.
+   * @param options Optional role set that must remain assigned through commit.
    * @returns A version-and-status condition, or undefined when the member is not active.
    */
   async createActiveMemberConditionCheck(
     workspaceId: string,
     memberKey: string,
+    options?: WorkspaceActiveMemberConditionOptions,
   ): Promise<WorkspaceAccessTransactWriteItem | undefined> {
     const member = await this.getActiveMember(workspaceId, memberKey)
     if (!member) return undefined
+    const allowedRoles = options?.allowedRoles?.length === 0
+      ? undefined
+      : options?.allowedRoles
+    if (options?.allowedRoles !== undefined &&
+      (allowedRoles === undefined || !allowedRoles.includes(member.role))) {
+      return undefined
+    }
+    const roleCondition = allowedRoles === undefined
+      ? ''
+      : ' AND #role IN (' + allowedRoles.map((_, index) => `:allowedRole${index}`).join(', ') + ')'
     return {
       ConditionCheck: {
         TableName: this.tableName,
@@ -660,18 +680,23 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
           recordKey: createMemberRecordKey(member.memberKey),
         },
         ConditionExpression:
-          '#entryType = :entryType AND #memberKey = :memberKey AND #status = :active AND #version = :version',
+          '#entryType = :entryType AND #memberKey = :memberKey AND #status = :active AND #version = :version' +
+          roleCondition,
         ExpressionAttributeNames: {
           '#entryType': 'entryType',
           '#memberKey': 'memberKey',
           '#status': 'status',
           '#version': 'version',
+          ...(allowedRoles === undefined ? {} : { '#role': 'role' }),
         },
         ExpressionAttributeValues: {
           ':active': 'active',
           ':entryType': 'workspace-member',
           ':memberKey': member.memberKey,
           ':version': member.version,
+          ...(allowedRoles === undefined
+            ? {}
+            : Object.fromEntries(allowedRoles.map((role, index) => [`:allowedRole${index}`, role]))),
         },
       },
     }

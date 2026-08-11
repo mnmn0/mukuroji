@@ -275,6 +275,7 @@ import {
   WorkspaceAccessError,
   isWorkspaceIdentitySafeToDelete,
   type WorkspaceInvitation,
+  type WorkspaceActiveMemberConditionOptions,
   type WorkspaceMember,
   type WorkspaceMemberStatus,
   type WorkspaceRole,
@@ -561,6 +562,11 @@ export type {
   WorkspaceMemberStatus,
   WorkspaceRole,
 } from '../modules/workspace-access/workspace-access'
+
+/** Workspace roles that may perform a Team Triage mutation. */
+const TRIAGE_NON_GUEST_MEMBER_CONDITION_OPTIONS: WorkspaceActiveMemberConditionOptions = {
+  allowedRoles: ['owner', 'admin', 'member'],
+}
 
 
 
@@ -5708,6 +5714,8 @@ routeApp.route('/', createTriageRouter({
   readJson,
   validateBulkAction: validateTriageBulkAction,
   prepareManualHandoff: prepareTriageManualHandoff,
+  createManualHandoffAuthorizationConditionChecks:
+    createTriageManualHandoffAuthorizationConditionChecks,
   validateConfiguration: validateTriageConfigurationReferences,
   applyAction: applyTriageRouteAction,
   applyBulkAction: applyTriageBulkRouteAction,
@@ -17856,6 +17864,30 @@ async function prepareTriageManualHandoff(
   }
 }
 
+/** Builds caller authorization fences for one manual Triage handoff. */
+async function createTriageManualHandoffAuthorizationConditionChecks(
+  context: Context,
+  teamId: string,
+  input: CreateManualTriageEntryInput,
+): Promise<TriageAuthorizationConditionChecks> {
+  const principal = await authenticateTriagePrincipal(context)
+  const teamContext = await requireTeamPermission(principal, teamId, 'member')
+  if (principal.isSystemAdmin) return []
+  return mergeTriageConditionChecks(
+    await createTriageActiveActorConditionChecks(
+      principal,
+      TRIAGE_NON_GUEST_MEMBER_CONDITION_OPTIONS,
+    ),
+    await createTriageProjectAuthorizationConditionChecks(
+      principal,
+      teamContext,
+      principal.directoryId,
+      teamId,
+      input.projectId,
+    ),
+  )
+}
+
 /**
  * Resolves a fixed or rotation-backed owner from one current Team configuration.
  *
@@ -17886,7 +17918,7 @@ async function validateTriageConfigurationReferences(
   context: Context,
   teamId: string,
   input: UpdateTriageConfigurationInput,
-): Promise<void> {
+): Promise<TriageAuthorizationConditionChecks> {
   const principal = await authenticateTriagePrincipal(context)
   const teamContext = await requireTeamPermission(principal, teamId, 'manager')
   const memberUserIds = new Set<string>()
@@ -17910,6 +17942,12 @@ async function validateTriageConfigurationReferences(
   await Promise.all([...memberUserIds].map(async (memberUserId) => {
     await requireActiveWorkspaceAssignee(principal.directoryId, memberUserId)
   }))
+  return await createTriageConfigurationAuthorizationConditionChecks(
+    principal,
+    teamContext,
+    principal.directoryId,
+    teamId,
+  )
 }
 
 /**
@@ -18247,6 +18285,7 @@ async function createTriageProjectAuthorizationConditionChecks(
   workspaceId: string,
   teamId: string,
   projectId: string | undefined,
+  minimumRole: ProjectRole = 'member',
 ): Promise<TriageAuthorizationConditionChecks> {
   if (principal.isSystemAdmin) {
     return []
@@ -18256,7 +18295,7 @@ async function createTriageProjectAuthorizationConditionChecks(
     : []
   const enterpriseProjectAccess = projectId !== undefined &&
     principal.enterpriseProjectAccesses?.some((access) =>
-      access.projectId === projectId && projectAccessAllows(access, 'member')
+      access.projectId === projectId && projectAccessAllows(access, minimumRole)
     ) === true
   if (isEnterpriseTriageTeamScope(principal, teamId) || enterpriseProjectAccess) {
     const enterpriseControlCheck = createEnterpriseControlAuthorizationConditionCheck(principal)
@@ -18266,7 +18305,7 @@ async function createTriageProjectAuthorizationConditionChecks(
   }
   if (!projectId) return actorMembershipChecks
   const access = context.projectAccesses?.find((candidate) => candidate.projectId === projectId)
-  if (!access || !projectAccessAllows(access, 'member')) {
+  if (!access || !projectAccessAllows(access, minimumRole)) {
     throw new ProjectDataError(
       403,
       'ProjectAccessDenied',
@@ -18286,7 +18325,7 @@ async function createTriageProjectAuthorizationConditionChecks(
     workspaceId,
     projectId,
     principal.userKey,
-    'member',
+    minimumRole,
   )
   if (!conditionCheck) {
     throw new TriageError(
@@ -18298,9 +18337,50 @@ async function createTriageProjectAuthorizationConditionChecks(
   return [conditionCheck]
 }
 
+/** Builds commit-time authorization fences for replacing a full Team configuration. */
+async function createTriageConfigurationAuthorizationConditionChecks(
+  principal: WorkspacePrincipal,
+  context: TeamPermissionContext,
+  workspaceId: string,
+  teamId: string,
+): Promise<TriageAuthorizationConditionChecks> {
+  if (principal.isSystemAdmin) return []
+  if (isEnterpriseTriageTeamScope(principal, teamId)) {
+    const enterpriseControlCheck = createEnterpriseControlAuthorizationConditionCheck(principal)
+    return mergeTriageConditionChecks(
+      await createTriageActiveActorConditionChecks(
+        principal,
+        TRIAGE_NON_GUEST_MEMBER_CONDITION_OPTIONS,
+      ),
+      enterpriseControlCheck ? [enterpriseControlCheck] : [],
+    )
+  }
+  if (principal.workspaceRole === 'owner' || principal.workspaceRole === 'admin') {
+    return await createTriageActiveActorConditionChecks(principal, {
+      allowedRoles: ['owner', 'admin'],
+    })
+  }
+  const authorizationConditionChecks = await createTriageActiveActorConditionChecks(
+    principal,
+    TRIAGE_NON_GUEST_MEMBER_CONDITION_OPTIONS,
+  )
+  for (const project of context.team.projects) {
+    authorizationConditionChecks.push(...await createTriageProjectAuthorizationConditionChecks(
+      principal,
+      context,
+      workspaceId,
+      teamId,
+      project.id,
+      'manager',
+    ))
+  }
+  return mergeTriageConditionChecks(authorizationConditionChecks)
+}
+
 /** Builds the commit-time active-membership fence for a Projectless Triage mutation. */
 async function createTriageActiveActorConditionChecks(
   principal: WorkspacePrincipal,
+  options?: WorkspaceActiveMemberConditionOptions,
 ): Promise<TriageAuthorizationConditionChecks> {
   const createMemberCheck = workspaceDependencies.workspaceAccess
     .createActiveMemberConditionCheck
@@ -18315,6 +18395,7 @@ async function createTriageActiveActorConditionChecks(
     workspaceDependencies.workspaceAccess,
     principal.directoryId,
     normalizeProjectMemberKey(principal.userKey),
+    options ?? TRIAGE_NON_GUEST_MEMBER_CONDITION_OPTIONS,
   )
   if (!conditionCheck) {
     throw new TriageError(

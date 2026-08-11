@@ -27,6 +27,7 @@ import {
   type TriageSourcePreview,
   type TriageSourceReference,
   type TriageWorkItemReference,
+  type TriageWorkItemSourcePage,
 } from '@mukuroji/contracts'
 import { TriageApiError } from './errors'
 
@@ -48,6 +49,21 @@ export function readTriageEntryPage(value: unknown): TriageEntryPage {
     allowedBulkActions: readAllowedBulkActions(record.allowedBulkActions),
     entries: requireArray(record.entries).map(readTriageEntry),
     ...(canManageConfiguration === undefined ? {} : { canManageConfiguration }),
+    ...(nextCursor ? { nextCursor } : {}),
+  }
+}
+
+/**
+ * Validates one reverse Triage source page attached to a canonical Work Item.
+ *
+ * @param value - Unknown JSON response body.
+ * @returns A validated reverse source page.
+ */
+export function readTriageWorkItemSourcePage(value: unknown): TriageWorkItemSourcePage {
+  const record = requireRecord(value)
+  const nextCursor = readOptionalString(record.nextCursor)
+  return {
+    entries: requireArray(record.entries).map(readTriageEntry),
     ...(nextCursor ? { nextCursor } : {}),
   }
 }

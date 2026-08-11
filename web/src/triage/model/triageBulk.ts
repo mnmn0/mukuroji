@@ -27,7 +27,7 @@ export function createTriageBulkInput(
       operation: {
         action: 'assign',
         ownerUserId: ownerUserId || null,
-        ...(projectId ? { projectId } : {}),
+        ...(formData.has('projectId') ? { projectId: projectId || null } : {}),
       },
       targets,
     }

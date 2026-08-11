@@ -85,7 +85,10 @@ import {
   type TriageAdmissionValidator,
   type TriageConfigurationReferenceValidator,
 } from '../../modules/triage'
-import { DynamoDbWorkspaceAccessClient } from '../../modules/workspace-access'
+import {
+  DynamoDbWorkspaceAccessClient,
+  type WorkspaceActiveMemberConditionOptions,
+} from '../../modules/workspace-access'
 import {
   createDefaultWorkItemImportExecutionStore,
   createDefaultWorkItemImportQueue,
@@ -622,6 +625,11 @@ function createTriageClient(
   })
 }
 
+/** Workspace roles that may own a Triage entry or escalation. */
+const TRIAGE_NON_GUEST_MEMBER_CONDITION_OPTIONS: WorkspaceActiveMemberConditionOptions = {
+  allowedRoles: ['owner', 'admin', 'member'],
+}
+
 /** Creates live Project/member validation for every Triage admission attempt.
  *
  * @param projectDirectory Authoritative active Team and Project directory reader.
@@ -668,7 +676,11 @@ export function createTriageAdmissionValidator(
       memberUserIds.add(normalizeProjectMemberKey(slaPolicy.escalationOwnerUserId))
     }
     const memberConditionChecks = await Promise.all([...memberUserIds].map(async (memberUserId) =>
-      await workspaceAccess.createActiveMemberConditionCheck(entry.workspaceId, memberUserId)
+      await workspaceAccess.createActiveMemberConditionCheck(
+        entry.workspaceId,
+        memberUserId,
+        TRIAGE_NON_GUEST_MEMBER_CONDITION_OPTIONS,
+      )
     ))
     if (memberConditionChecks.some((conditionCheck) => conditionCheck === undefined)) {
       throw new TriageError(
@@ -750,7 +762,11 @@ export function createTriageConfigurationReferenceValidator(
       }
     }
     const memberConditionChecks = await Promise.all([...memberUserIds].map(async (memberUserId) =>
-      await workspaceAccess.createActiveMemberConditionCheck(workspaceId, memberUserId)
+      await workspaceAccess.createActiveMemberConditionCheck(
+        workspaceId,
+        memberUserId,
+        TRIAGE_NON_GUEST_MEMBER_CONDITION_OPTIONS,
+      )
     ))
     if (memberConditionChecks.some((conditionCheck) => conditionCheck === undefined)) {
       throw new TriageError(
@@ -824,6 +840,7 @@ export function createTriageActionReferenceValidator(
       : [await workspaceAccess.createActiveMemberConditionCheck(
           workspaceId,
           normalizeProjectMemberKey(action.ownerUserId),
+          TRIAGE_NON_GUEST_MEMBER_CONDITION_OPTIONS,
         )]
     if (memberConditionChecks.some((conditionCheck) => conditionCheck === undefined)) {
       throw new TriageError(

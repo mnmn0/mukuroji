@@ -25,11 +25,12 @@ describe('Triage bulk policy projection', () => {
     expect(html).not.toContain('>Snooze<')
   })
 
-  test('omits the optional Project when bulk owner assignment leaves it blank', () => {
+  test('serializes a blank Project as an explicit clear for bulk owner assignment', () => {
     const entry = triageEntryFixtures[0]
     if (!entry) throw new Error('Expected a triage fixture.')
     const formData = new FormData()
     formData.set('ownerUserId', 'owner@example.com')
+    formData.set('projectId', '')
 
     const input = createTriageBulkInput(
       [createTriageEntryView(entry)],
@@ -40,6 +41,7 @@ describe('Triage bulk policy projection', () => {
     expect(input?.operation).toEqual({
       action: 'assign',
       ownerUserId: 'owner@example.com',
+      projectId: null,
     })
   })
 })

@@ -4,7 +4,9 @@ import {
   getTriageEntries,
   getTriageEntry,
   getTriageSettings,
+  getTriageWorkItemSources,
   type TriageEntryPage,
+  type TriageWorkItemSourcePage,
   type TriageQueueFilters,
 } from '../api'
 
@@ -100,6 +102,42 @@ export function useTriageEntry(
   )
 
   return { ...query, key }
+}
+
+/**
+ * Loads all visible reverse Triage sources attached to one Work Item.
+ *
+ * @param accessToken - Access token used by the triage API.
+ * @param teamId - Team owning the canonical Work Item.
+ * @param workItemId - Stable canonical Work Item ID.
+ * @param enabled - Whether the authenticated query may run.
+ * @returns SWR Infinite state for the reverse source pages.
+ */
+export function useTriageWorkItemSources(
+  accessToken: string | undefined,
+  teamId: string | undefined,
+  workItemId: string | undefined,
+  enabled = true,
+) {
+  return useSWRInfinite(
+    (pageIndex, previousPage: TriageWorkItemSourcePage | null) => {
+      if (!accessToken || !teamId || !workItemId || !enabled) return null
+      if (pageIndex > 0 && !previousPage?.nextCursor) return null
+      return [
+        'triage-work-item-sources',
+        accessToken,
+        teamId,
+        workItemId,
+        pageIndex === 0 ? '' : previousPage?.nextCursor ?? '',
+      ] as const
+    },
+    ([, token, currentTeamId, currentWorkItemId, cursor]) =>
+      getTriageWorkItemSources(currentTeamId, currentWorkItemId, token, {
+        cursor: cursor || undefined,
+        limit: 50,
+      }),
+    triageQueryConfig,
+  )
 }
 
 /**

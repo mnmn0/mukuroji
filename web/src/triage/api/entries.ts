@@ -8,6 +8,7 @@ import {
   readTriageEntry,
   readTriageEntryPage,
   readTriageMutationReceipt,
+  readTriageWorkItemSourcePage,
 } from './contractValidation'
 import { TriageApiError } from './errors'
 import type {
@@ -22,6 +23,14 @@ const defaultTriageApiErrorMessage = 'Unable to complete the Team triage operati
 
 /** Options accepted by the cursor-paginated Team triage queue API. */
 export type GetTriageEntriesOptions = TriageEntryListInput
+
+/** Options accepted by the cursor-paginated reverse Triage source API. */
+export type GetTriageWorkItemSourcesOptions = {
+  /** Opaque cursor returned by the previous source page. */
+  readonly cursor?: string
+  /** Maximum number of visible source entries to return. */
+  readonly limit?: number
+}
 
 /**
  * Loads one permission-filtered page from a Team triage queue.
@@ -65,6 +74,31 @@ export function getTriageEntry(teamId: string, entryId: string, accessToken: str
     `${triageTeamPath(teamId)}/triage-entries/${encodeURIComponent(entryId)}`,
     { accessToken },
     readTriageEntry,
+  )
+}
+
+/**
+ * Loads one permission-filtered page of Triage sources attached to a Work Item.
+ *
+ * @param teamId - Team owning the canonical Work Item.
+ * @param workItemId - Stable canonical Work Item ID.
+ * @param accessToken - Access token used by the triage API.
+ * @param options - Cursor and page-size options.
+ * @returns A validated reverse source page.
+ */
+export function getTriageWorkItemSources(
+  teamId: string,
+  workItemId: string,
+  accessToken: string,
+  options: GetTriageWorkItemSourcesOptions = {},
+) {
+  const query = new URLSearchParams()
+  if (options.cursor) query.set('cursor', options.cursor)
+  if (options.limit !== undefined) query.set('limit', String(options.limit))
+  return requestJson(
+    `${triageTeamPath(teamId)}/work-items/${encodeURIComponent(workItemId)}/triage-sources${query.size ? `?${query.toString()}` : ''}`,
+    { accessToken },
+    readTriageWorkItemSourcePage,
   )
 }
 

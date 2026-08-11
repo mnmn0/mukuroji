@@ -336,7 +336,7 @@ export function TriageQueue({
                             : `${entry.requester.displayName} · ${view.sourceLabel}`}
                         </span>
                         <span className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs font-semibold text-[var(--workbench-muted)]">
-                          <span>{formatDateTime(entry.receivedAt, locale)}</span>
+                          <span>{formatDateTime(entry.lastActivityAt, locale)}</span>
                           <span>{entry.ownerUserId ?? t('triage.queue.unowned')}</span>
                           <SlaLabel state={view.slaState} t={t} />
                           {entry.permission.visibility !== 'full' ? (

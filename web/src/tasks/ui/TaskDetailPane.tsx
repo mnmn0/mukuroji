@@ -24,6 +24,7 @@ import { IssueCollaborationPanel } from '../../issues/ui/IssueCollaborationPanel
 import type { ProjectDirectoryTeam, ProjectMember } from '../../projects/api'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import { createTeamTriagePath } from '../../shared/routing/paths'
+import { useTriageWorkItemSources } from '../../triage/queries/useTriageQueries'
 import type { WorkspaceMember } from '../../workspace/api'
 import {
   isCustomFieldApplicable,
@@ -165,6 +166,12 @@ export function TaskDetailPane({
 }: TaskDetailPaneProps) {
   const [fieldErrors, setFieldErrors] = useState<Readonly<Record<string, string | undefined>>>({})
   const scheduleFormId = useId()
+  const triageSourcesQuery = useTriageWorkItemSources(
+    accessToken,
+    task?.teamId,
+    task?.id,
+    Boolean(task),
+  )
   const hasMatchingIssueDetail = Boolean(
     task && detail?.issue.id === task.id && detail.issue.teamId === task.teamId,
   )
@@ -236,6 +243,9 @@ export function TaskDetailPane({
   const triageContextSnapshots = hasMatchingIssueDetail
     ? detail?.triageContextSnapshots ?? []
     : []
+  const reverseTriageSources = triageSourcesQuery.data
+    ?.flatMap((page) => page.entries)
+    .filter((entry) => entry.id !== sourceTriageEntryId) ?? []
 
   return (
     <aside
@@ -311,6 +321,28 @@ export function TaskDetailPane({
               >
                 {t('tasks.detail.openTriageSource')}
               </a>
+            ) : null}
+            {reverseTriageSources.length > 0 ? (
+              <section
+                className="mt-3 rounded-md border border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-3 py-2.5"
+                data-testid="task-detail-triage-sources"
+              >
+                <p className="text-xs font-semibold uppercase tracking-wide text-[var(--workbench-muted)]">
+                  {t('tasks.detail.triageSources.title')}
+                </p>
+                <ul className="mt-2 grid gap-2">
+                  {reverseTriageSources.map((entry) => (
+                    <li key={entry.id}>
+                      <a
+                        className="text-xs font-semibold text-[var(--workbench-primary)] underline-offset-4 hover:underline"
+                        href={createTeamTriagePath(task.teamId, entry.id)}
+                      >
+                        {entry.sourcePreview.title || t(resolveTriageSourceMessageKey(entry.source.kind))}
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              </section>
             ) : null}
             {triageContextSnapshots.length > 0 ? (
               <section

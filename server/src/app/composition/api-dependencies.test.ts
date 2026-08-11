@@ -137,6 +137,7 @@ test('returns distinct Team/Project guards and one version guard for a shared ow
     }],
   } satisfies TriageConfiguration
   let memberReads = 0
+  const memberOptions: unknown[] = []
   const validateAdmission = createTriageAdmissionValidator({
     /** Returns exact active Team and Project row guards. */
     async createActiveReferenceConditionChecks(directoryId, teamId, projectId) {
@@ -161,8 +162,9 @@ test('returns distinct Team/Project guards and one version guard for a shared ow
     },
   }, {
     /** Returns the exact active membership version guard. */
-    async createActiveMemberConditionCheck(workspaceId, memberUserId) {
+    async createActiveMemberConditionCheck(workspaceId, memberUserId, options) {
       memberReads += 1
+      memberOptions.push(options)
       expect({ workspaceId, memberUserId }).toEqual({
         workspaceId: 'workspace-1',
         memberUserId: 'owner@example.com',
@@ -180,6 +182,9 @@ test('returns distinct Team/Project guards and one version guard for a shared ow
   const contribution = await validateAdmission(entry, configuration)
 
   expect(memberReads).toBe(1)
+  expect(memberOptions).toEqual([{
+    allowedRoles: ['owner', 'admin', 'member'],
+  }])
   expect(contribution.transactItems).toHaveLength(3)
   expect(contribution.transactItems.map((item) => item.ConditionCheck?.TableName)).toEqual([
     'ProjectDirectoryTable',
@@ -191,6 +196,7 @@ test('returns distinct Team/Project guards and one version guard for a shared ow
 test('binds every configured Project and member reference to settings persistence', async () => {
   const projectReads: (string | undefined)[] = []
   const memberReads: string[] = []
+  const memberOptions: unknown[] = []
   const validate = createTriageConfigurationReferenceValidator({
     async createActiveReferenceConditionChecks(directoryId, teamId, projectId) {
       projectReads.push(projectId)
@@ -209,8 +215,9 @@ test('binds every configured Project and member reference to settings persistenc
       }] : [])]
     },
   }, {
-    async createActiveMemberConditionCheck(workspaceId, memberKey) {
+    async createActiveMemberConditionCheck(workspaceId, memberKey, options) {
       memberReads.push(memberKey)
+      memberOptions.push(options)
       return {
         ConditionCheck: {
           TableName: 'WorkspaceAccessTable',
@@ -256,6 +263,11 @@ test('binds every configured Project and member reference to settings persistenc
     'escalation@example.com',
     'fixed@example.com',
     'rotate@example.com',
+  ])
+  expect(memberOptions).toEqual([
+    { allowedRoles: ['owner', 'admin', 'member'] },
+    { allowedRoles: ['owner', 'admin', 'member'] },
+    { allowedRoles: ['owner', 'admin', 'member'] },
   ])
   expect(contribution.transactItems).toHaveLength(5)
 })

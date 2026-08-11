@@ -163,6 +163,7 @@ export const workItemsMessages = {
   'tasks.detail.conflict': 'Another member updated this first. Review the latest details and save again.',
   'tasks.detail.description': 'Description',
   'tasks.detail.openTriageSource': 'Open source in Team Triage',
+  'tasks.detail.triageSources.title': 'Related Team Triage sources',
   'tasks.detail.triageContext.title': 'Retained intake context',
   'tasks.detail.triageContext.counts':
     '{comments} comments · {attachments} attachments · {watchers} watchers',

@@ -238,6 +238,45 @@ test('builds an active member admission guard bound to the persisted version', a
   })])
 })
 
+test('binds allowed Workspace roles to the active member guard', async () => {
+  const member = createWorkspaceMember('owner@example.com', 'member', 'active', 7)
+  const client = new DynamoDbWorkspaceAccessClient(
+    'WorkspaceAccessTable',
+    createDocumentClient(() => ({ Item: toMemberItem(member) })),
+  )
+
+  await expect(client.createActiveMemberConditionCheck(
+    workspaceId,
+    'owner@example.com',
+    { allowedRoles: ['owner', 'admin', 'member'] },
+  )).resolves.toMatchObject({
+    ConditionCheck: {
+      ConditionExpression:
+        '#entryType = :entryType AND #memberKey = :memberKey AND #status = :active AND #version = :version AND #role IN (:allowedRole0, :allowedRole1, :allowedRole2)',
+      ExpressionAttributeNames: { '#role': 'role' },
+      ExpressionAttributeValues: {
+        ':allowedRole0': 'owner',
+        ':allowedRole1': 'admin',
+        ':allowedRole2': 'member',
+      },
+    },
+  })
+})
+
+test('rejects a guest member when a non-guest role guard is requested', async () => {
+  const member = createWorkspaceMember('guest@example.com', 'guest', 'active', 3)
+  const client = new DynamoDbWorkspaceAccessClient(
+    'WorkspaceAccessTable',
+    createDocumentClient(() => ({ Item: toMemberItem(member) })),
+  )
+
+  await expect(client.createActiveMemberConditionCheck(
+    workspaceId,
+    'guest@example.com',
+    { allowedRoles: ['owner', 'admin', 'member'] },
+  )).resolves.toBeUndefined()
+})
+
 test('creates a seven-day invitation reservation before Cognito provisioning', async () => {
   const inputs: Array<Record<string, unknown>> = []
   const client = new DynamoDbWorkspaceAccessClient(

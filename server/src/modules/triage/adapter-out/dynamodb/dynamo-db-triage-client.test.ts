@@ -588,7 +588,7 @@ describe('DynamoDbTriageClient configuration receipts', () => {
     }
   })
 
-  test('joins live settings reference guards to the configuration transaction', async () => {
+  test('joins caller and live settings reference guards to the configuration transaction', async () => {
     const input = createConfigurationInput(0)
     const fingerprint = createTriageInputFingerprint({
       workspaceId: 'workspace-1',
@@ -604,6 +604,13 @@ describe('DynamoDbTriageClient configuration receipts', () => {
         ExpressionAttributeValues: { ':active': 'active' },
       },
     }
+    const authorizationGuard = {
+      ConditionCheck: {
+        TableName: 'WorkspaceAccessTable',
+        Key: { workspaceId: 'workspace-1', recordKey: 'MEMBER#manager@example.com' },
+        ConditionExpression: '#role = :manager',
+      },
+    }
     const harness = createHarness([{}, {}, {}], {
       validateConfigurationReferences: (async () => ({
         transactItems: [referenceGuard],
@@ -617,9 +624,13 @@ describe('DynamoDbTriageClient configuration receipts', () => {
         { id: 'manager@example.com' },
         input,
         { key: 'settings-guarded', fingerprint },
+        [authorizationGuard],
       )
       const transactItems = harness.commands[2]?.input.TransactItems
-      expect(Array.isArray(transactItems) ? transactItems[0] : undefined).toEqual(referenceGuard)
+      expect(Array.isArray(transactItems) ? transactItems.slice(0, 2) : undefined).toEqual([
+        authorizationGuard,
+        referenceGuard,
+      ])
     } finally {
       harness.restore()
     }
@@ -1976,6 +1987,41 @@ describe('DynamoDbTriageClient source admission', () => {
         'GetCommand',
       ])
       expect(harness.commands[2]?.input.TransactItems).toHaveLength(7)
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('joins caller authorization guards to the manual handoff transaction', async () => {
+    const fingerprint = createTriageInputFingerprint({ sourceId: 'manual-auth-1' })
+    const authorizationGuard = {
+      ConditionCheck: {
+        TableName: 'WorkspaceAccessTable',
+        Key: { workspaceId: 'workspace-1', recordKey: 'MEMBER#operator@example.com' },
+        ConditionExpression: '#status = :active',
+      },
+    }
+    const harness = createHarness([{}, {}, {}])
+
+    try {
+      await harness.client.createManualHandoff(
+        'workspace-1',
+        'support',
+        { id: 'operator@example.com' },
+        {
+          sourceId: 'manual-auth-1',
+          title: 'Manual support request',
+          body: 'Please investigate this request.',
+          requesterDisplayName: 'Internal operator',
+          routingReason: 'Operator handoff.',
+          retentionExpiresAt: '2027-08-09T00:00:00.000Z',
+        },
+        { key: 'manual-auth', fingerprint },
+        [authorizationGuard],
+      )
+
+      const transactItems = harness.commands[2]?.input.TransactItems
+      expect(Array.isArray(transactItems) ? transactItems[0] : undefined).toEqual(authorizationGuard)
     } finally {
       harness.restore()
     }

@@ -212,6 +212,7 @@ export interface TriageClient {
    * @param actor The authenticated actor.
    * @param input The validated replacement.
    * @param idempotency Replay protection bound to the settings replacement.
+   * @param authorizationConditionChecks Caller authorization conditions joined to the settings transaction.
    * @returns The updated configuration.
    */
   updateConfiguration(
@@ -220,6 +221,7 @@ export interface TriageClient {
     actor: TriageActor,
     input: UpdateTriageConfigurationInput,
     idempotency: TriageIdempotency,
+    authorizationConditionChecks?: TriageAuthorizationConditionChecks,
   ): Promise<TriageConfiguration>
   /** Creates a replay-safe internal manual handoff.
    *
@@ -228,6 +230,7 @@ export interface TriageClient {
    * @param actor The authenticated actor.
    * @param input The validated handoff.
    * @param idempotency Replay protection bound to the handoff.
+   * @param authorizationConditionChecks Caller authorization conditions joined to the handoff transaction.
    * @returns The created or replayed entry receipt.
    */
   createManualHandoff(
@@ -236,6 +239,7 @@ export interface TriageClient {
     actor: TriageActor,
     input: CreateManualTriageEntryInput,
     idempotency: TriageIdempotency,
+    authorizationConditionChecks?: TriageAuthorizationConditionChecks,
   ): Promise<TriageMutationReceipt>
   /** Lists source entries attached to a Work Item.
    *

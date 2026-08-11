@@ -163,6 +163,7 @@ export const workItemsMessages = {
   'tasks.detail.conflict': '別のメンバーが先に更新しました。最新の内容を確認してから、もう一度保存してください。',
   'tasks.detail.description': '説明',
   'tasks.detail.openTriageSource': 'Team Triage で受付元を開く',
+  'tasks.detail.triageSources.title': '関連する Team Triage の受付元',
   'tasks.detail.triageContext.title': '保存された受付コンテキスト',
   'tasks.detail.triageContext.counts':
     'コメント {comments}件 · 添付 {attachments}件 · ウォッチャー {watchers}人',

@@ -38,6 +38,7 @@ export type {
   TriageSourcePreview,
   TriageSourceReference,
   TriageWorkItemReference,
+  TriageWorkItemSourcePage,
   UpdateTriageConfigurationInput,
 } from '@mukuroji/contracts'
 

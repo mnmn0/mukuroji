@@ -146,7 +146,7 @@ export type TriageRouterDependencies = {
     context: Context,
     teamId: string,
     input: UpdateTriageConfigurationInput,
-  ): Promise<void>
+  ): Promise<TriageAuthorizationConditionChecks | void>
   /** Validates live owner and Project references before a bulk mutation is applied.
    *
    * @param context The authenticated Hono request context.
@@ -170,6 +170,18 @@ export type TriageRouterDependencies = {
     teamId: string,
     input: CreateManualTriageEntryInput,
   ): Promise<CreateManualTriageEntryInput>
+  /** Builds caller authorization conditions for a manual handoff transaction.
+   *
+   * @param context The authenticated Hono request context.
+   * @param teamId The Team receiving the handoff.
+   * @param input The server-prepared handoff.
+   * @returns Conditions proving the caller still has the required Team/Project access.
+   */
+  createManualHandoffAuthorizationConditionChecks?(
+    context: Context,
+    teamId: string,
+    input: CreateManualTriageEntryInput,
+  ): Promise<TriageAuthorizationConditionChecks>
   /** Optionally orchestrates Work Item-dependent actions in one transaction.
    *
    * Accept-create composition should strong-read the entry, build the triage transaction
@@ -402,6 +414,9 @@ export function createTriageRouter(dependencies: TriageRouterDependencies) {
         ? await dependencies.prepareManualHandoff(context, teamId, parsedInput)
         : parsedInput
       requireVisibleProject(principal, input.projectId)
+      const authorizationConditionChecks = dependencies.createManualHandoffAuthorizationConditionChecks
+        ? await dependencies.createManualHandoffAuthorizationConditionChecks(context, teamId, input)
+        : undefined
       const idempotency = createIdempotency(
         context.req.header('Idempotency-Key'),
         { workspaceId: principal.workspaceId, teamId, input: parsedInput },
@@ -412,6 +427,7 @@ export function createTriageRouter(dependencies: TriageRouterDependencies) {
         { id: principal.userId },
         input,
         idempotency,
+        authorizationConditionChecks,
       )
       requireVisibleTriageEntry(principal, receipt.entry)
       return context.json({
@@ -452,13 +468,19 @@ export function createTriageRouter(dependencies: TriageRouterDependencies) {
         idempotency,
       )
       if (replay) return context.json(replay)
-      await dependencies.validateConfiguration?.(context, teamId, input)
+      const configurationValidationResult = await dependencies.validateConfiguration?.(
+        context,
+        teamId,
+        input,
+      )
+      const authorizationConditionChecks = configurationValidationResult ?? undefined
       return context.json(await dependencies.getTriage().updateConfiguration(
         principal.workspaceId,
         teamId,
         { id: principal.userId },
         input,
         idempotency,
+        authorizationConditionChecks,
       ))
     } catch (error) {
       return dependencies.mapError(context, error)
