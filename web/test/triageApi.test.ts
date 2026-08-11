@@ -39,6 +39,7 @@ describe('Team triage API boundary', () => {
 
     expect(page.entries).toHaveLength(4)
     expect(page.allowedBulkActions).toEqual(['assign', 'decline', 'snooze'])
+    expect(page.entries[0]?.sla?.escalationOwnerUserId).toBe('manager@example.com')
     expect(requests[0]?.url).toBe(
       '/api/teams/core%2Fteam/triage-entries?cursor=opaque%2Fcursor&limit=25&query=billing+owner&sla=breached&state=pending&sourceKind=chat&owner=unowned',
     )

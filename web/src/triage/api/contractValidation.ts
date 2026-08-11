@@ -273,12 +273,14 @@ function readSla(value: unknown): TriageSla {
   const breachedAt = readOptionalString(record.breachedAt)
   const escalationDueAt = readOptionalString(record.escalationDueAt)
   const escalatedAt = readOptionalString(record.escalatedAt)
+  const escalationOwnerUserId = readOptionalString(record.escalationOwnerUserId)
   return {
     dueAt: requireString(record.dueAt),
     policyId: requireString(record.policyId),
     ...(breachedAt ? { breachedAt } : {}),
     ...(escalatedAt ? { escalatedAt } : {}),
     ...(escalationDueAt ? { escalationDueAt } : {}),
+    ...(escalationOwnerUserId ? { escalationOwnerUserId } : {}),
   }
 }
 

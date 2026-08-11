@@ -75,6 +75,7 @@ export const triageEntryFixtures: readonly TriageEntry[] = [
       breachedAt: '2026-08-09T01:15:00.000Z',
       dueAt: '2026-08-09T01:10:00.000Z',
       escalationDueAt: '2026-08-09T01:40:00.000Z',
+      escalationOwnerUserId: 'manager@example.com',
       policyId: 'priority-chat',
     },
     source: {
