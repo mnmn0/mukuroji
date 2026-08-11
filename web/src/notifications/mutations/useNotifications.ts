@@ -275,7 +275,10 @@ export function useNotificationInbox(
           context,
         ),
       )
-      await refresh()
+      await Promise.all([
+        refresh(),
+        mutateGlobal(['focus-queue', accessToken]),
+      ])
       return true
     } catch (actionError) {
       console.error('Notification action failed:', actionError)
@@ -289,7 +292,7 @@ export function useNotificationInbox(
     } finally {
       setPendingNotificationId(undefined)
     }
-  }, [accessToken, mutationRunner, refresh])
+  }, [accessToken, mutateGlobal, mutationRunner, refresh])
 
   const markAllRead = useCallback(async () => {
     if (!accessToken) {
@@ -305,7 +308,10 @@ export function useNotificationInbox(
         String(unreadCount),
         (context) => markAllNotificationsRead(accessToken, context),
       )
-      await refresh()
+      await Promise.all([
+        refresh(),
+        mutateGlobal(['focus-queue', accessToken]),
+      ])
       return true
     } catch (markAllError) {
       console.error('Mark all notifications read failed:', markAllError)
@@ -314,7 +320,7 @@ export function useNotificationInbox(
     } finally {
       setPendingNotificationId(undefined)
     }
-  }, [accessToken, mutationRunner, refresh, unreadCount])
+  }, [accessToken, mutateGlobal, mutationRunner, refresh, unreadCount])
 
   const setFilter = useCallback((nextFilter: NotificationFilter) => {
     setFilterState(nextFilter)
@@ -338,7 +344,7 @@ export function useNotificationInbox(
 
   const automaticLoadState = useRef({ selection: '', loads: 0 })
   useEffect(() => {
-    const selection = `${filter}\0${selectedEventId ?? ''}`
+    const selection = `${filter}\0${eventType ?? ''}\0${selectedEventId ?? ''}`
     if (automaticLoadState.current.selection !== selection) {
       automaticLoadState.current = { selection, loads: 0 }
     }
@@ -354,7 +360,7 @@ export function useNotificationInbox(
     }
     automaticLoadState.current.loads += 1
     void loadMore()
-  }, [error, filter, isLoadingMore, lastPage?.nextCursor, loadMore, notifications, selectedEventId])
+  }, [error, eventType, filter, isLoadingMore, lastPage?.nextCursor, loadMore, notifications, selectedEventId])
 
   return {
     archive: (notification) => runNotificationAction(notification, 'archive'),

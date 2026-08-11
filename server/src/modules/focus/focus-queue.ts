@@ -1298,14 +1298,14 @@ function createApprovalSignals(
 ): ProjectedSignal[] {
   const key = createWorkItemKey(workItem.teamId, workItem.id)
   const approvals = context.approvalsByWorkItemKey.get(key) ?? []
-  const hasViewerReviewRequest = approvals.some((approval) =>
+  const viewerReviewApprovals = approvals.filter((approval) =>
     approval.status === 'pending' && approval.reviewers.some((reviewer) =>
       normalizeFocusMemberKey(reviewer.memberKey) === context.viewerMemberKey &&
       reviewer.status === 'pending'
     )
   )
-  const aggregateSignals = ownedByViewer && !hasViewerReviewRequest
-    ? createApprovalSummarySignals(context, workItem)
+  const aggregateSignals = ownedByViewer
+    ? createApprovalSummarySignals(context, workItem, viewerReviewApprovals)
     : []
   const reviewerSignals = approvals.flatMap((approval) => {
     if (approval.status !== 'pending') return []
@@ -1356,25 +1356,43 @@ function createApprovalSignals(
 }
 
 /**
- * Projects an owned Work Item's approval aggregate when the viewer is not its active reviewer.
+ * Projects an owned Work Item's approval aggregate for pending approvals not represented by a viewer review request.
  *
  * @param context - Projection context.
  * @param workItem - Owned Work Item with an optional approval summary.
+ * @param excludedApprovals - Viewer-specific pending approvals already projected separately.
  * @returns Pending approval and optional overdue signals.
  */
 function createApprovalSummarySignals(
   context: FocusProjectionContext,
   workItem: CanonicalWorkItem,
+  excludedApprovals: readonly ApprovalRequest[] = [],
 ): ProjectedSignal[] {
   const summary = workItem.approvalSummary
-  if (summary === undefined || summary.pendingCount < 1) return []
+  if (summary === undefined) return []
+  const excludedPendingCount = excludedApprovals.filter((approval) =>
+    approval.status === 'pending'
+  ).length
+  const pendingCount = Math.max(0, summary.pendingCount - excludedPendingCount)
+  if (pendingCount < 1) return []
+  const excludedOverdueCount = excludedApprovals.filter((approval) =>
+    approval.status === 'pending' &&
+    new Date(approval.dueAt).getTime() < context.now.getTime()
+  ).length
+  const overdueCount = Math.max(0, summary.overdueCount - excludedOverdueCount)
+  const excludedDueAt = new Set(excludedApprovals
+    .filter((approval) => approval.status === 'pending')
+    .map((approval) => approval.dueAt))
+  const nextDueAt = summary.nextDueAt !== undefined && !excludedDueAt.has(summary.nextDueAt)
+    ? summary.nextDueAt
+    : undefined
   const occurredAt = selectCausalTimestamp(summary.updatedAt, workItem.createdAt)
   const sourceId = createCausalSourceId([
     createWorkItemSourceId(workItem),
     'approval-summary',
-    summary.pendingCount,
-    summary.overdueCount,
-    summary.nextDueAt ?? '',
+    pendingCount,
+    overdueCount,
+    nextDueAt ?? '',
   ].join(':'), occurredAt)
   const signals = [createProjectedSignal({
     type: 'approval',
@@ -1382,21 +1400,21 @@ function createApprovalSummarySignals(
     sourceId,
     occurredAt,
     evaluatedAt: context.evaluatedAt,
-    ...(summary.nextDueAt === undefined ? {} : { validUntil: summary.nextDueAt }),
+    ...(nextDueAt === undefined ? {} : { validUntil: nextDueAt }),
     deepLink: createWorkItemDeepLink(workItem),
     resolutionCondition: 'approval-decided',
-    ...(summary.nextDueAt === undefined ? {} : { deadline: summary.nextDueAt }),
+    ...(nextDueAt === undefined ? {} : { deadline: nextDueAt }),
   })]
-  if (summary.overdueCount > 0) {
+  if (overdueCount > 0) {
     signals.push(createProjectedSignal({
       type: 'overdue',
       sourceKind: 'approval',
       sourceId: `${sourceId}:deadline`,
-      occurredAt: summary.nextDueAt ?? occurredAt,
+      occurredAt: nextDueAt ?? occurredAt,
       evaluatedAt: context.evaluatedAt,
       deepLink: createWorkItemDeepLink(workItem),
       resolutionCondition: 'approval-decided',
-      ...(summary.nextDueAt === undefined ? {} : { deadline: summary.nextDueAt }),
+      ...(nextDueAt === undefined ? {} : { deadline: nextDueAt }),
     }))
   }
   return signals

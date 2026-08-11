@@ -6053,7 +6053,11 @@ routeApp.put('/api/focus/policies', async (c) => {
         mutationIdentity: prepared.mutationIdentity,
         authorizationConditionChecks: createPlanningCallerAuthorizationConditionChecks(principal),
       })
-      const effectivePolicies = prepared.effectivePolicies
+      const effectivePolicies = await readAndVerifyFocusPolicyEffectivePolicies(
+        principal,
+        input,
+        prepared.effectivePolicies,
+      )
       const response = { policy, effectivePolicies } satisfies UpdateFocusPolicyResponse
       await completeFocusPolicyMutationReceipt(
         reservationRequest,
@@ -22487,6 +22491,63 @@ async function prepareFocusPolicyMutation(
     effectivePolicies,
     mutationIdentity,
   }
+}
+
+/**
+ * Re-reads every policy layer contributing to a successful policy response.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @param input - Validated policy replacement.
+ * @param expectedEffectivePolicies - Effective policies computed before the write.
+ * @returns Effective policies verified against the post-write snapshot.
+ */
+async function readAndVerifyFocusPolicyEffectivePolicies(
+  principal: WorkspacePrincipal,
+  input: UpdateFocusPolicyInput,
+  expectedEffectivePolicies: readonly FocusEffectivePolicy[],
+): Promise<FocusEffectivePolicy[]> {
+  const accessibleTeamIds = await readFocusAccessibleTeamIds(principal)
+  const teamIds = input.target.type === 'team'
+    ? [input.target.teamId]
+    : accessibleTeamIds
+  const expectedTeamIds = expectedEffectivePolicies.flatMap((policy) =>
+    policy.teamId === undefined ? [] : [policy.teamId]
+  )
+  if (stableDigestStringify(teamIds) !== stableDigestStringify(expectedTeamIds)) {
+    throw focusPolicyContributingStateChanged()
+  }
+
+  const state = await workItemDependencies.focusState.getState({
+    workspaceId: principal.directoryId,
+    memberKey: principal.userKey,
+    teamIds,
+  })
+  const effectivePolicies = resolveFocusEffectivePolicies({
+    teamIds,
+    teamPolicies: state.teamPolicies,
+    ...(state.userPolicy === undefined ? {} : { userPolicy: state.userPolicy }),
+  })
+  const expectedOutcome = expectedEffectivePolicies.map((policy) => ({
+    teamId: policy.teamId,
+    fingerprint: policy.fingerprint,
+  }))
+  const currentOutcome = effectivePolicies.map((policy) => ({
+    teamId: policy.teamId,
+    fingerprint: policy.fingerprint,
+  }))
+  if (stableDigestStringify(currentOutcome) !== stableDigestStringify(expectedOutcome)) {
+    throw focusPolicyContributingStateChanged()
+  }
+  return effectivePolicies
+}
+
+/** Creates the conflict returned when a contributing Focus policy layer changes mid-write. */
+function focusPolicyContributingStateChanged(): FocusApiError {
+  return new FocusApiError(
+    409,
+    'FocusPolicyContributingStateChanged',
+    'A contributing Focus policy changed during the mutation. Reload and try again.',
+  )
 }
 
 /**

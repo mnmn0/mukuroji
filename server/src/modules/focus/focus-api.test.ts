@@ -13,7 +13,10 @@ import {
 } from '../planning/planning'
 import { InMemoryEnterpriseIdentityClient } from '../enterprise-identity/enterprise-identity'
 import { createInMemoryDeveloperPlatformAdapters } from '../developer-platform/adapter-out/in-memory/developer-platform-adapters'
-import { InMemoryFocusStateClient } from './focus-state'
+import {
+  InMemoryFocusStateClient,
+  type FocusStateClient,
+} from './focus-state'
 import { createApiTestHarness } from '../../api/test-support/api-test-harness'
 import {
   createDefaultDueDateWorkItemSchedule,
@@ -1220,6 +1223,55 @@ test('validates and version-checks user policy replacements', async () => {
   })
   expect(invalid.status).toBe(400)
   expect(await invalid.json()).toMatchObject({ code: 'InvalidFocusInput' })
+})
+
+test('rejects a policy response when a contributing layer changes after the write', async () => {
+  configureFocusSources('manager')
+  const baseFocusState = new InMemoryFocusStateClient()
+  let stateReads = 0
+  const focusState: FocusStateClient = {
+    async getState(input) {
+      stateReads += 1
+      if (stateReads === 2) {
+        await baseFocusState.savePolicy({
+          workspaceId: 'user#demo@example.com',
+          memberKey: 'demo@example.com',
+          update: {
+            target: { type: 'team', teamId: 'core-team' },
+            expectedVersion: 0,
+            overrides: { nowScoreThreshold: 99 },
+          },
+          now: new Date('2026-08-09T00:00:00.000Z'),
+          mutationIdentity: 'concurrent-team-policy',
+        })
+      }
+      return baseFocusState.getState(input)
+    },
+    savePolicy: (input) => baseFocusState.savePolicy(input),
+    saveSnooze: (input) => baseFocusState.saveSnooze(input),
+  }
+  setTestAppDependencies({ focusState })
+
+  const response = await focusRequest(
+    '/api/focus/policies',
+    'PUT',
+    {
+      target: { type: 'user' },
+      expectedVersion: 0,
+      overrides: { dueSoonDays: 4 },
+    },
+    'focus-policy-contributing-race',
+  )
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toMatchObject({
+    code: 'FocusPolicyContributingStateChanged',
+  })
+  expect((await baseFocusState.getState({
+    workspaceId: 'user#demo@example.com',
+    memberKey: 'demo@example.com',
+    teamIds: ['core-team'],
+  })).userPolicy).toMatchObject({ version: 1 })
 })
 
 test('replays a lost-response policy retry and rejects key reuse with another payload', async () => {

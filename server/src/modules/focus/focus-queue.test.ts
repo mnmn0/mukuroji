@@ -326,6 +326,49 @@ describe('Focus queue projection', () => {
     expect(item.signals[0]?.freshness.sourceVersion).toBeUndefined()
   })
 
+  test('preserves unrelated approval aggregate beside the viewer review request', () => {
+    const baseWorkItem = createWorkItem('mixed-approval-ownership')
+    const workItem: CanonicalWorkItem = {
+      ...baseWorkItem,
+      approvalSummary: {
+        pendingCount: 2,
+        overdueCount: 0,
+        approvedCount: 0,
+        rejectedCount: 0,
+        changesRequestedCount: 0,
+        nextDueAt: '2026-08-11T12:00:00.000Z',
+        updatedAt: '2026-08-09T10:30:00.000Z',
+      },
+    }
+    const approval: ApprovalRequest = {
+      id: 'viewer-approval-1',
+      teamId: workItem.teamId,
+      issueId: workItem.id,
+      revision: 1,
+      status: 'pending',
+      reviewers: [{ memberKey: 'viewer', status: 'pending' }],
+      dueAt: '2026-08-10T12:00:00.000Z',
+      requestedByMemberKey: 'requester',
+      requestedByKind: 'member',
+      createdAt: '2026-08-09T08:00:00.000Z',
+      updatedAt: '2026-08-09T08:00:00.000Z',
+      capabilities: { canDecide: true, canCancel: false },
+      subjectType: 'work-item',
+    }
+
+    const item = findFocusItem(projectQueue({
+      workItems: [workItem],
+      approvals: [approval],
+    }), workItem.id)
+
+    expect(item.signals.map((signal) => signal.type)).toEqual([
+      'approval',
+      'review-request',
+    ])
+    expect(item.signals[0]?.freshness.validUntil).toBe('2026-08-11T12:00:00.000Z')
+    expect(item.rank.score).toBe(145)
+  })
+
   test('projects SLA breaches and near active cycle boundaries from effective policy', () => {
     const workItem = createWorkItem(
       'cycle-item',

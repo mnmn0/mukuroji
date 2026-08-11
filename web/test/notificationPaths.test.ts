@@ -39,6 +39,8 @@ describe('notification deep links', () => {
     expect(isSafeApplicationPath('https://example.com/steal-session')).toBe(false)
     expect(isSafeApplicationPath('//example.com/steal-session')).toBe(false)
     expect(isSafeApplicationPath('/focus\\attacker.example')).toBe(false)
+    expect(isSafeApplicationPath('/\n/attacker.example')).toBe(false)
+    expect(isSafeApplicationPath('/\t/attacker.example')).toBe(false)
     expect(resolveNotificationPath({
       deepLink: '//example.com/steal-session',
       eventType: 'automation.failed',

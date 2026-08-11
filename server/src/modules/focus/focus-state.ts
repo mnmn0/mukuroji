@@ -778,15 +778,20 @@ function parseStoredSnooze(
       throw new TypeError('Focus snooze identity does not match its physical scope.')
     }
     const mutationIdentity = requireStoredMutationIdentity(value.mutationIdentity)
+    const updatedAt = requireTimestamp(value.updatedAt, 'Focus snooze updated time')
+    const snoozedUntil = value.snoozedUntil === undefined
+      ? undefined
+      : requireTimestamp(value.snoozedUntil, 'Focus snooze wake time')
+    requireStateExpiry(value.expiresAt, updatedAt, snoozedUntil)
     return {
       teamId,
       workItemId,
       version: requireVersion(value.version),
       causeFingerprint: requireText(value.causeFingerprint, 'Focus cause fingerprint'),
-      ...(value.snoozedUntil === undefined
+      ...(snoozedUntil === undefined
         ? {}
-        : { snoozedUntil: requireTimestamp(value.snoozedUntil, 'Focus snooze wake time') }),
-      updatedAt: requireTimestamp(value.updatedAt, 'Focus snooze updated time'),
+        : { snoozedUntil }),
+      updatedAt,
       ...(mutationIdentity === undefined ? {} : { mutationIdentity }),
     }
   } catch (error) {
@@ -852,9 +857,35 @@ function readOptionalPolicyNumber(
 
 /** Creates the TTL retained after the wake time to preserve concurrency history. */
 function createStateExpiry(record: FocusSnoozeRecord, now: Date): number {
-  const nowTime = requireDate(now, 'Focus snooze mutation time').getTime()
-  const wakeTime = record.snoozedUntil ? Date.parse(record.snoozedUntil) : nowTime
-  return Math.floor(Math.max(nowTime, wakeTime) / 1000) + stateRetentionSeconds
+  requireDate(now, 'Focus snooze mutation time')
+  return createStateExpiryFromTimestamps(record.updatedAt, record.snoozedUntil)
+}
+
+/** Validates one persisted snooze TTL against the timestamps that produced it. */
+function requireStateExpiry(
+  value: unknown,
+  updatedAt: string,
+  snoozedUntil?: string,
+): number {
+  const expected = createStateExpiryFromTimestamps(updatedAt, snoozedUntil)
+  if (
+    typeof value !== 'number' ||
+    !Number.isSafeInteger(value) ||
+    value !== expected
+  ) {
+    throw new TypeError('Focus snooze retention metadata is malformed.')
+  }
+  return value
+}
+
+/** Computes the exact epoch-second TTL retained for one validated snooze row. */
+function createStateExpiryFromTimestamps(
+  updatedAt: string,
+  snoozedUntil?: string,
+): number {
+  const updatedTime = Date.parse(updatedAt)
+  const wakeTime = snoozedUntil === undefined ? updatedTime : Date.parse(snoozedUntil)
+  return Math.floor(Math.max(updatedTime, wakeTime) / 1000) + stateRetentionSeconds
 }
 
 /** Creates a stable failure when recipient state exceeds the supported read window. */

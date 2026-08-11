@@ -618,6 +618,7 @@ test('fails closed on a malformed stored snooze mutation identity', async () => 
       workItemId: { S: 'issue-1' },
       causeFingerprint: { S: 'cause-1' },
       updatedAt: { S: mutationTime(1).toISOString() },
+      expiresAt: { N: createRetentionExpiry(mutationTime(1).toISOString()) },
       mutationIdentity: { S: 'snooze-mutation-1' },
     }
     const lowLevelClient = new DynamoDBClient({
@@ -657,6 +658,36 @@ test('fails closed on a malformed stored snooze mutation identity', async () => 
       expect((await client.getState(input)).snoozes[0]?.mutationIdentity).toBe(
         'snooze-mutation-1',
       )
+      const validSnoozeRow = snoozeRow
+      const updatedAt = mutationTime(1).toISOString()
+      const snoozedUntil = '2026-08-10T00:00:00.000Z'
+      const malformedRetentionRows: Record<string, unknown>[] = [
+        {
+          ...validSnoozeRow,
+          expiresAt: undefined,
+        },
+        {
+          ...validSnoozeRow,
+          expiresAt: { S: createRetentionExpiry(updatedAt) },
+        },
+        {
+          ...validSnoozeRow,
+          expiresAt: { N: '1' },
+        },
+        {
+          ...validSnoozeRow,
+          snoozedUntil: { S: snoozedUntil },
+          expiresAt: { N: createRetentionExpiry(updatedAt) },
+        },
+      ]
+      for (const malformedRow of malformedRetentionRows) {
+        snoozeRow = malformedRow
+        await expect(client.getState(input)).rejects.toMatchObject({
+          code: 'FocusStateCorrupt',
+          status: 503,
+        })
+      }
+      snoozeRow = validSnoozeRow
       snoozeRow = { ...snoozeRow, mutationIdentity: { S: ' ' } }
       await expect(client.getState(input)).rejects.toMatchObject({
         code: 'FocusStateCorrupt',
@@ -831,6 +862,7 @@ function createPaginatedSnoozeResponse(page: number): Record<string, unknown> {
       workItemId: { S: `issue-${page}` },
       causeFingerprint: { S: `cause-${page}` },
       updatedAt: { S: mutationTime(page).toISOString() },
+      expiresAt: { N: createRetentionExpiry(mutationTime(page).toISOString()) },
     }],
     LastEvaluatedKey: {
       scopeKey: { S: scopeKey },
