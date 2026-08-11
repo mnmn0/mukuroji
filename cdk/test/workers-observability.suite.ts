@@ -209,6 +209,7 @@ test('enterprise SCIM group jobs run in a dedicated bounded worker', () => {
     'dynamodb:UpdateItem',
   ]);
   expect(actionsForTable('PlanningTable2A0D4CC5')).toEqual([
+    'dynamodb:ConditionCheckItem',
     'dynamodb:GetItem',
     'dynamodb:PutItem',
     'dynamodb:Query',
@@ -2537,12 +2538,13 @@ test('automation workers consume the audit outbox and run recurring schedules wi
       Properties?: { PolicyDocument?: { Statement?: Array<Record<string, unknown>> } };
     } | undefined)?.Properties?.PolicyDocument?.Statement ?? [];
     const planningRevisionFenceStatement = statements.find((statement) =>
-      statement.Action === 'dynamodb:UpdateItem' &&
+      (statement.Action === 'dynamodb:UpdateItem' ||
+        Array.isArray(statement.Action) && statement.Action.includes('dynamodb:UpdateItem')) &&
       JSON.stringify(statement.Resource).includes('PlanningTable2A0D4CC5') &&
       JSON.stringify(statement.Condition).includes('TransactWriteItems')
     );
     expect(planningRevisionFenceStatement).toEqual({
-      Action: 'dynamodb:UpdateItem',
+      Action: ['dynamodb:PutItem', 'dynamodb:UpdateItem'],
       Condition: {
         'ForAllValues:StringEquals': {
           'dynamodb:Attributes': [

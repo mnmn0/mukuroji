@@ -2537,9 +2537,16 @@ describe('planning persistence', () => {
           name: command.constructor.name,
           input: command.input,
         })
+        const key = command.input.Key
+        if (
+          typeof key === 'object' && key !== null &&
+          'workspaceId' in key && key.workspaceId !== 'FENCE#workspace-1'
+        ) {
+          return {}
+        }
         return {
           Item: {
-            workspaceId: 'workspace-1',
+            workspaceId: 'FENCE#workspace-1',
             recordKey: 'META',
             entryType: 'planning-meta',
             schemaVersion: 1,
@@ -2558,14 +2565,195 @@ describe('planning persistence', () => {
     )
 
     expect(await client.getAuthorizationRevision('workspace-1')).toBe(7)
-    expect(commands).toEqual([{
-      name: 'GetCommand',
-      input: expect.objectContaining({
-        TableName: 'PlanningTable',
-        Key: { workspaceId: 'FENCE#workspace-1', recordKey: 'META' },
-        ConsistentRead: true,
+    expect(commands).toEqual([
+      {
+        name: 'GetCommand',
+        input: expect.objectContaining({
+          TableName: 'PlanningTable',
+          Key: { workspaceId: 'FENCE#workspace-1', recordKey: 'META' },
+          ConsistentRead: true,
+        }),
+      },
+      {
+        name: 'GetCommand',
+        input: expect.objectContaining({
+          TableName: 'PlanningTable',
+          Key: { workspaceId: 'workspace-1', recordKey: 'META' },
+          ConsistentRead: true,
+        }),
+      },
+    ])
+  })
+
+  test('migrates a legacy META row before exposing the isolated revision fence', async () => {
+    const commands: Array<{
+      /** AWS SDK command class name. */
+      name: string
+      /** AWS SDK command input. */
+      input: Record<string, unknown>
+    }> = []
+    let fencedMeta: Record<string, unknown> | undefined
+    const legacyMeta = {
+      workspaceId: 'workspace-1',
+      recordKey: 'META',
+      entryType: 'planning-meta',
+      schemaVersion: 1,
+      revision: 7,
+      updatedAt: NOW.toISOString(),
+    }
+    const documentClient = {
+      async send(command: {
+        /** AWS SDK command constructor. */
+        constructor: { name: string }
+        /** AWS SDK command input. */
+        input: Record<string, unknown>
+      }) {
+        commands.push({ name: command.constructor.name, input: command.input })
+        if (command.constructor.name === 'GetCommand') {
+          const key = command.input.Key
+          if (
+            typeof key === 'object' && key !== null &&
+            'workspaceId' in key && key.workspaceId === 'FENCE#workspace-1'
+          ) {
+            return { Item: fencedMeta }
+          }
+          return { Item: legacyMeta }
+        }
+        if (command.constructor.name === 'TransactWriteCommand') {
+          const items = command.input.TransactItems
+          if (!Array.isArray(items)) throw new Error('Expected migration transaction items.')
+          const put = items.find((item) =>
+            typeof item === 'object' && item !== null && 'Put' in item
+          )
+          if (
+            typeof put !== 'object' || put === null ||
+            !('Put' in put) || typeof put.Put !== 'object' || put.Put === null ||
+            !('Item' in put.Put) || typeof put.Put.Item !== 'object' || put.Put.Item === null
+          ) {
+            throw new Error('Expected fenced META Put.')
+          }
+          const item = put.Put.Item
+          if (Array.isArray(item)) throw new Error('Expected a fenced META object.')
+          fencedMeta = Object.fromEntries(Object.entries(item))
+        }
+        return {}
+      },
+    } as unknown as DynamoDBDocumentClient
+    const client = new DynamoDbPlanningClient(
+      'PlanningTable',
+      documentClient,
+      {} as DynamoDBClient,
+      false,
+      () => NOW,
+    )
+
+    expect(await client.getAuthorizationRevision('workspace-1')).toBe(7)
+    expect(fencedMeta).toMatchObject({
+      workspaceId: 'FENCE#workspace-1',
+      recordKey: 'META',
+      entryType: 'planning-meta',
+      schemaVersion: 1,
+      revision: 7,
+      updatedAt: NOW.toISOString(),
+    })
+    expect(commands.map((command) => command.name)).toEqual([
+      'GetCommand',
+      'GetCommand',
+      'TransactWriteCommand',
+    ])
+    expect(commands[2]?.input.TransactItems).toEqual([
+      expect.objectContaining({
+        ConditionCheck: expect.objectContaining({
+          Key: { workspaceId: 'workspace-1', recordKey: 'META' },
+          ConditionExpression:
+            '#entryType = :entryType AND #schemaVersion = :schemaVersion AND #revision = :revision',
+        }),
       }),
-    }])
+      expect.objectContaining({
+        Put: expect.objectContaining({
+          ConditionExpression:
+            'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
+        }),
+      }),
+    ])
+  })
+
+  test('raises a source-initialized fence to the legacy revision before returning it', async () => {
+    const commands: Array<{
+      /** AWS SDK command class name. */
+      name: string
+      /** AWS SDK command input. */
+      input: Record<string, unknown>
+    }> = []
+    const fencedMeta = {
+      workspaceId: 'FENCE#workspace-1',
+      recordKey: 'META',
+      entryType: 'planning-meta',
+      schemaVersion: 1,
+      revision: 2,
+      updatedAt: '2026-08-11T00:00:00.000Z',
+    }
+    const legacyMeta = {
+      workspaceId: 'workspace-1',
+      recordKey: 'META',
+      entryType: 'planning-meta',
+      schemaVersion: 1,
+      revision: 7,
+      updatedAt: NOW.toISOString(),
+    }
+    const documentClient = {
+      async send(command: {
+        /** AWS SDK command constructor. */
+        constructor: { name: string }
+        /** AWS SDK command input. */
+        input: Record<string, unknown>
+      }) {
+        commands.push({ name: command.constructor.name, input: command.input })
+        if (command.constructor.name === 'GetCommand') {
+          const key = command.input.Key
+          if (
+            typeof key === 'object' && key !== null &&
+            'workspaceId' in key && key.workspaceId === 'FENCE#workspace-1'
+          ) {
+            return { Item: fencedMeta }
+          }
+          return { Item: legacyMeta }
+        }
+        return {}
+      },
+    } as unknown as DynamoDBDocumentClient
+    const client = new DynamoDbPlanningClient(
+      'PlanningTable',
+      documentClient,
+      {} as DynamoDBClient,
+      false,
+      () => NOW,
+    )
+
+    expect(await client.getAuthorizationRevision('workspace-1')).toBe(7)
+    expect(commands.map((command) => command.name)).toEqual([
+      'GetCommand',
+      'GetCommand',
+      'TransactWriteCommand',
+    ])
+    expect(commands[2]?.input.TransactItems).toEqual([
+      expect.objectContaining({
+        ConditionCheck: expect.objectContaining({
+          Key: { workspaceId: 'workspace-1', recordKey: 'META' },
+          ExpressionAttributeValues: expect.objectContaining({ ':revision': 7 }),
+        }),
+      }),
+      expect.objectContaining({
+        Update: expect.objectContaining({
+          Key: { workspaceId: 'FENCE#workspace-1', recordKey: 'META' },
+          UpdateExpression: 'SET #revision = :revision, #updatedAt = :updatedAt',
+          ExpressionAttributeValues: expect.objectContaining({
+            ':fencedRevision': 2,
+            ':revision': 7,
+          }),
+        }),
+      }),
+    ])
   })
 
   test('reads only bounded graph prefixes between strong META barriers', async () => {
@@ -2641,14 +2829,22 @@ describe('planning persistence', () => {
     expect(snapshot.entities.map((entity) => entity.id)).toEqual(['cycle-1'])
     expect(commands.map((command) => command.name)).toEqual([
       'GetCommand',
+      'GetCommand',
       'QueryCommand',
       'QueryCommand',
       'QueryCommand',
       'QueryCommand',
       'QueryCommand',
       'GetCommand',
+      'GetCommand',
     ])
-    for (const barrier of [commands[0], commands.at(-1)]) {
+    const fenceBarriers = commands.filter((command) => {
+      if (command.name !== 'GetCommand') return false
+      const key = command.input.Key
+      return typeof key === 'object' && key !== null &&
+        'workspaceId' in key && key.workspaceId === 'FENCE#workspace-1'
+    })
+    for (const barrier of fenceBarriers) {
       expect(barrier).toMatchObject({
         name: 'GetCommand',
         input: {
@@ -2732,11 +2928,13 @@ describe('planning persistence', () => {
     expect(response.planning.revision).toBe(1)
     expect(commands.map((command) => command.name)).toEqual([
       'GetCommand',
+      'GetCommand',
       'QueryCommand',
       'QueryCommand',
       'QueryCommand',
       'QueryCommand',
       'QueryCommand',
+      'GetCommand',
       'GetCommand',
       'TransactWriteCommand',
     ])

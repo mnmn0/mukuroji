@@ -122,6 +122,14 @@ const MAX_ROLLOVER_LINK_MUTATIONS = 49
 const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/
 const planningTimeZoneFormatters = new Map<string, Intl.DateTimeFormat>()
 
+/** Strongly read Planning revision metadata returned by either storage key. */
+type PlanningMeta = {
+  /** Monotonic revision shared by Planning and source projections. */
+  revision: number
+  /** Last mutation timestamp, when persisted. */
+  updatedAt?: string
+}
+
 /** Schema version of the persisted Planning META fencing row. */
 export const PLANNING_STORAGE_SCHEMA_VERSION = 1 as const
 
@@ -2709,37 +2717,167 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
     }
   }
 
-  /** Workspace の META row を強整合 read します。 */
-  private async readMeta(workspaceId: string) {
+  /**
+   * Strongly reads the fenced META row and reconciles one valid legacy META row when needed.
+   *
+   * Existing Planning graph rows remain under the workspace partition.  A conditional
+   * transaction copies the legacy revision into the isolated fence before any caller can
+   * observe a new revision, so source projections cannot restart an existing workspace at 1.
+   * If a source projection initialized the fence first, the same barrier raises it to the
+   * legacy revision before returning it.
+   *
+   * @param workspaceId - Workspace identifier whose revision is requested.
+   * @returns The current Planning revision metadata.
+   */
+  private async readMeta(workspaceId: string): Promise<PlanningMeta> {
     try {
-      const response = await this.documentClient.send(new GetCommand({
-        TableName: this.tableName,
-        Key: {
-          workspaceId: `${META_WORKSPACE_KEY_PREFIX}${workspaceId}`,
-          recordKey: META_RECORD_KEY,
-        },
-        ConsistentRead: true,
-      }))
-      if (!response.Item) return { revision: 0, updatedAt: undefined }
-      if (
-        response.Item.entryType !== 'planning-meta' ||
-        response.Item.schemaVersion !== PLANNING_STORAGE_SCHEMA_VERSION ||
-        !isPositiveInteger(response.Item.revision) ||
-        (response.Item.updatedAt !== undefined && (
-          typeof response.Item.updatedAt !== 'string' ||
-          !Number.isFinite(Date.parse(response.Item.updatedAt))
-        ))
-      ) {
-        throw persistenceInvalid('Planning metadata is invalid.')
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const fenced = await this.readMetaRow(
+          `${META_WORKSPACE_KEY_PREFIX}${workspaceId}`,
+        )
+        const legacy = await this.readMetaRow(workspaceId)
+
+        if (fenced) {
+          if (!legacy || legacy.revision <= fenced.revision) return fenced
+
+          try {
+            await this.documentClient.send(new TransactWriteCommand({
+              TransactItems: [
+                {
+                  ConditionCheck: {
+                    TableName: this.tableName,
+                    Key: { workspaceId, recordKey: META_RECORD_KEY },
+                    ConditionExpression:
+                      '#entryType = :entryType AND #schemaVersion = :schemaVersion AND ' +
+                      '#revision = :revision',
+                    ExpressionAttributeNames: {
+                      '#entryType': 'entryType',
+                      '#revision': 'revision',
+                      '#schemaVersion': 'schemaVersion',
+                    },
+                    ExpressionAttributeValues: {
+                      ':entryType': 'planning-meta',
+                      ':revision': legacy.revision,
+                      ':schemaVersion': PLANNING_STORAGE_SCHEMA_VERSION,
+                    },
+                  },
+                },
+                {
+                  Update: {
+                    TableName: this.tableName,
+                    Key: {
+                      workspaceId: `${META_WORKSPACE_KEY_PREFIX}${workspaceId}`,
+                      recordKey: META_RECORD_KEY,
+                    },
+                    UpdateExpression: legacy.updatedAt === undefined
+                      ? 'SET #revision = :revision REMOVE #updatedAt'
+                      : 'SET #revision = :revision, #updatedAt = :updatedAt',
+                    ConditionExpression:
+                      '#entryType = :entryType AND #schemaVersion = :schemaVersion AND ' +
+                      '#revision = :fencedRevision',
+                    ExpressionAttributeNames: {
+                      '#entryType': 'entryType',
+                      '#revision': 'revision',
+                      '#schemaVersion': 'schemaVersion',
+                      '#updatedAt': 'updatedAt',
+                    },
+                    ExpressionAttributeValues: {
+                      ':entryType': 'planning-meta',
+                      ':fencedRevision': fenced.revision,
+                      ':revision': legacy.revision,
+                      ':schemaVersion': PLANNING_STORAGE_SCHEMA_VERSION,
+                      ...(legacy.updatedAt === undefined
+                        ? {}
+                        : { ':updatedAt': legacy.updatedAt }),
+                    },
+                  },
+                },
+              ],
+            }))
+            return legacy
+          } catch (error) {
+            if (!isPlanningTransactionConditionalFailureAt(error, 0) &&
+              !isPlanningTransactionConditionalFailureAt(error, 1)) {
+              throw error
+            }
+            continue
+          }
+        }
+
+        if (!legacy) return { revision: 0 }
+
+        try {
+          await this.documentClient.send(new TransactWriteCommand({
+            TransactItems: [
+              {
+                ConditionCheck: {
+                  TableName: this.tableName,
+                  Key: { workspaceId, recordKey: META_RECORD_KEY },
+                  ConditionExpression:
+                    '#entryType = :entryType AND #schemaVersion = :schemaVersion AND ' +
+                    '#revision = :revision',
+                  ExpressionAttributeNames: {
+                    '#entryType': 'entryType',
+                    '#revision': 'revision',
+                    '#schemaVersion': 'schemaVersion',
+                  },
+                  ExpressionAttributeValues: {
+                    ':entryType': 'planning-meta',
+                    ':revision': legacy.revision,
+                    ':schemaVersion': PLANNING_STORAGE_SCHEMA_VERSION,
+                  },
+                },
+              },
+              {
+                Put: {
+                  TableName: this.tableName,
+                  Item: {
+                    workspaceId: `${META_WORKSPACE_KEY_PREFIX}${workspaceId}`,
+                    recordKey: META_RECORD_KEY,
+                    entryType: 'planning-meta',
+                    schemaVersion: PLANNING_STORAGE_SCHEMA_VERSION,
+                    revision: legacy.revision,
+                    ...(legacy.updatedAt === undefined
+                      ? {}
+                      : { updatedAt: legacy.updatedAt }),
+                  },
+                  ConditionExpression:
+                    'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
+                },
+              },
+            ],
+          }))
+          return legacy
+        } catch (error) {
+          if (!isPlanningTransactionConditionalFailureAt(error, 0) &&
+            !isPlanningTransactionConditionalFailureAt(error, 1)) {
+            throw error
+          }
+        }
       }
-      return {
-        revision: response.Item.revision,
-        updatedAt: response.Item.updatedAt as string | undefined,
-      }
+      throw conflict(
+        'PlanningRevisionConflict',
+        'Planning metadata changed while the revision fence was being initialized.',
+      )
     } catch (error) {
       if (error instanceof PlanningError) throw error
       throw toPersistenceError(error)
     }
+  }
+
+  /**
+   * Strongly reads and validates one physical Planning META row.
+   *
+   * @param workspaceId - Physical partition key of the META row.
+   * @returns Validated metadata, or undefined when the row does not exist.
+   */
+  private async readMetaRow(workspaceId: string): Promise<PlanningMeta | undefined> {
+    const response = await this.documentClient.send(new GetCommand({
+      TableName: this.tableName,
+      Key: { workspaceId, recordKey: META_RECORD_KEY },
+      ConsistentRead: true,
+    }))
+    return readPlanningMetaItem(response.Item)
   }
 }
 
@@ -6806,6 +6944,33 @@ function getDynamoDbEndpoint() {
 
 function isPositiveInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0
+}
+
+/**
+ * Validates one stored Planning META item without trusting its physical key.
+ *
+ * @param item - Raw DynamoDB item returned for a META key.
+ * @returns Validated revision metadata, or undefined when the item is absent.
+ */
+function readPlanningMetaItem(
+  item: Record<string, unknown> | undefined,
+): PlanningMeta | undefined {
+  if (!item) return undefined
+  if (
+    item.entryType !== 'planning-meta' ||
+    item.schemaVersion !== PLANNING_STORAGE_SCHEMA_VERSION ||
+    !isPositiveInteger(item.revision) ||
+    (item.updatedAt !== undefined && (
+      typeof item.updatedAt !== 'string' ||
+      !Number.isFinite(Date.parse(item.updatedAt))
+    ))
+  ) {
+    throw persistenceInvalid('Planning metadata is invalid.')
+  }
+  return {
+    revision: item.revision,
+    ...(item.updatedAt === undefined ? {} : { updatedAt: item.updatedAt }),
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

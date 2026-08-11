@@ -12,6 +12,7 @@ import {
   bindWorkspaceSearchWriterFence,
   type WorkspaceSearchWriterFenceResources,
 } from '../../policies/workspace-search-writer-fence';
+import { grantPlanningRevisionFenceMigrationAccess } from '../../policies/planning-revision-fence';
 import type { DataStoreResources } from '../data-stores';
 import {
   bindRuntimeControls,
@@ -150,6 +151,7 @@ export function buildEnterpriseIdentityWorkers(
     actions: ['dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:Query'],
     resources: [planningTable.tableArn],
   }));
+  grantPlanningRevisionFenceMigrationAccess(planningTable, enterpriseScimGroupJobFunction);
   enterpriseScimGroupJobFunction.addToRolePolicy(new iam.PolicyStatement({
     actions: [
       'dynamodb:GetItem',

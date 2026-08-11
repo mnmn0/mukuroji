@@ -38,3 +38,50 @@ export function grantPlanningRevisionFenceAccess(
     },
   }))
 }
+
+/**
+ * Grants the bounded transaction permissions required to copy a legacy META row into its fence.
+ *
+ * The condition check is read-only and may inspect the legacy partition only inside the
+ * migration transaction.  The accompanying PutItem is limited to fence partitions and the
+ * exact metadata attributes, so migration cannot create or overwrite ordinary Planning rows.
+ *
+ * @param planningTable - Planning table containing legacy and isolated META rows.
+ * @param target - Lambda that may lazily initialize the revision fence.
+ */
+export function grantPlanningRevisionFenceMigrationAccess(
+  planningTable: dynamodb.ITable,
+  target: lambda.Function,
+): void {
+  target.addToRolePolicy(new iam.PolicyStatement({
+    actions: ['dynamodb:ConditionCheckItem'],
+    resources: [planningTable.tableArn],
+    conditions: {
+      StringEquals: {
+        'dynamodb:EnclosingOperation': 'TransactWriteItems',
+      },
+    },
+  }))
+  target.addToRolePolicy(new iam.PolicyStatement({
+    actions: ['dynamodb:PutItem'],
+    resources: [planningTable.tableArn],
+    conditions: {
+      'ForAllValues:StringEquals': {
+        'dynamodb:Attributes': [
+          'workspaceId',
+          'recordKey',
+          'entryType',
+          'schemaVersion',
+          'revision',
+          'updatedAt',
+        ],
+      },
+      'ForAllValues:StringLike': {
+        'dynamodb:LeadingKeys': ['FENCE#*'],
+      },
+      StringEquals: {
+        'dynamodb:EnclosingOperation': 'TransactWriteItems',
+      },
+    },
+  }))
+}
