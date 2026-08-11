@@ -473,3 +473,27 @@ test('collaboration projection can converge current context search documents', (
   );
   expect(readProperty(describeStatement, 'Effect')).toBe('Allow');
 });
+
+test('non-projection writer-fence roles cannot mutate Workspace Search documents', () => {
+  const workspaceSearchTableId = requireResourceId(
+    'WorkspaceSearchTable',
+    'AWS::DynamoDB::Table',
+  );
+  const workspaceSearchTableArn = {
+    'Fn::GetAtt': [workspaceSearchTableId, 'Arn'],
+  };
+
+  for (const [, roleLogicalIdPrefix] of writerFunctions.slice(1)) {
+    const roleLogicalId = requireResourceId(
+      roleLogicalIdPrefix,
+      'AWS::IAM::Role',
+    );
+    const statements = requirePolicyStatementsForRole(roleLogicalId);
+    const projectionWriteStatements = statements.filter((statement) =>
+      (statementHasAction(statement, 'dynamodb:PutItem') ||
+        statementHasAction(statement, 'dynamodb:DeleteItem')) &&
+      statementHasResource(statement, workspaceSearchTableArn)
+    );
+    expect(projectionWriteStatements).toHaveLength(0);
+  }
+});

@@ -616,6 +616,8 @@ describe('Workspace Search production migration mapper', () => {
     expect(superseded.targetKey).toEqual(active.targetKey)
 
     for (const entryType of [
+      'accepted-resolution',
+      'accepted-resolution-receipt',
       'context-order',
       'context-revision',
       'context-mutation-receipt',

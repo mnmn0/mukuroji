@@ -32,6 +32,8 @@ const projectDirectoryIgnoredEntryTypes = new Set<string>([
   'workspace-metadata',
 ])
 const collaborationIgnoredEntryTypes = new Set<string>([
+  'accepted-resolution',
+  'accepted-resolution-receipt',
   'context-mutation-receipt',
   'context-order',
   'context-revision',

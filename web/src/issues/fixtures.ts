@@ -383,6 +383,7 @@ export const issueContextControllerFixture = {
   hasMore: true,
   hasLoadError: false,
   hasMutationError: false,
+  hasResolutionMutationError: false,
   revisionHistory: {
     items: [],
     isLoading: false,

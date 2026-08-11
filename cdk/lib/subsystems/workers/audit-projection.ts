@@ -11,6 +11,7 @@ import type { LambdaBuildPaths } from '../../config/lambda-build-paths';
 import type { StackParameters } from '../../config/stack-parameters';
 import {
   bindWorkspaceSearchWriterFence,
+  grantWorkspaceSearchProjectionAccess,
   type WorkspaceSearchWriterFenceResources,
 } from '../../policies/workspace-search-writer-fence';
 import type { DataStoreResources } from '../data-stores';
@@ -134,6 +135,10 @@ export function buildAuditProjectionWorker(
     },
   );
   bindWorkspaceSearchWriterFence(
+    input.workspaceSearchWriterFence,
+    collaborationProjectionFunction,
+  );
+  grantWorkspaceSearchProjectionAccess(
     input.workspaceSearchWriterFence,
     collaborationProjectionFunction,
   );

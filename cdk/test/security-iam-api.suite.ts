@@ -894,11 +894,16 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
     Array.isArray(statement.Action) ? statement.Action : [statement.Action]
   );
   expect(workspaceSearchActions).toEqual(expect.arrayContaining([
-    'dynamodb:DeleteItem',
+    'dynamodb:BatchGetItem',
+    'dynamodb:DescribeTable',
     'dynamodb:GetItem',
-    'dynamodb:PutItem',
     'dynamodb:Query',
+    'dynamodb:Scan',
     'dynamodb:ConditionCheckItem',
+  ]));
+  expect(workspaceSearchActions).not.toEqual(expect.arrayContaining([
+    'dynamodb:DeleteItem',
+    'dynamodb:PutItem',
     'dynamodb:UpdateItem',
   ]));
   expect(configurationDataStatement).toEqual({

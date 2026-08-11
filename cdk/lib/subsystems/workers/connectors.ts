@@ -212,7 +212,6 @@ export function buildConnectorWorkers(
     resources: [tenantAdministrationTable.tableArn],
   }));
   workItemConfigurationTable.grants.readData(connectorSyncFunction);
-  workspaceSearchTable.grants.readWriteData(connectorSyncFunction);
   restrictKmsGrantToDeveloperPlatformPurpose(
     developerPlatformConnectorKey.grants.actions(
       connectorSyncFunction,

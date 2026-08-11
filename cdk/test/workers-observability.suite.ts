@@ -2560,23 +2560,18 @@ test('automation workers consume the audit outbox and run recurring schedules wi
       'cognito-idp:AdminListGroupsForUser',
     ]));
     expect(JSON.stringify(cognitoStatement?.Resource)).toContain('CognitoUserPoolId');
-    const workspaceSearchStatement = statements.find((statement) => {
+    const workspaceSearchWriteStatement = statements.find((statement) => {
       const actions = Array.isArray(statement.Action)
         ? statement.Action
         : [statement.Action];
-      return actions.includes('dynamodb:GetItem') &&
+      return actions.some((action) =>
+        action === 'dynamodb:PutItem' || action === 'dynamodb:UpdateItem' ||
+        action === 'dynamodb:DeleteItem'
+      ) &&
         JSON.stringify(statement.Resource)
           .includes('WorkspaceSearchTable2575AD6B');
     });
-    expect(workspaceSearchStatement).toEqual(expect.objectContaining({
-      Effect: 'Allow',
-      Action: expect.arrayContaining([
-        'dynamodb:GetItem',
-        'dynamodb:PutItem',
-        'dynamodb:UpdateItem',
-        'dynamodb:DeleteItem',
-      ]),
-    }));
+    expect(workspaceSearchWriteStatement).toBeUndefined();
     const projectDirectoryStatement = statements.find((statement) => {
       const actions = Array.isArray(statement.Action)
         ? statement.Action

@@ -635,7 +635,7 @@ export function buildApiRuntime(
   collaborationTable.grants.readWriteData(apiFunction);
   fileProofingTable.grants.readWriteData(apiFunction);
   notificationsTable.grants.readWriteData(apiFunction);
-  workspaceSearchTable.grants.readWriteData(apiFunction);
+  workspaceSearchTable.grants.readData(apiFunction);
   realtimeSessionsTable.grants.readWriteData(apiFunction);
   const apiCapacityPlanningDataPolicy = new iam.Policy(
     scope,

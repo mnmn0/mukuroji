@@ -99,6 +99,20 @@ export function grantWorkspaceSearchWriterFenceAccess(
     },
     resources: [resources.migrationStateTable.tableArn],
   }));
+}
+
+/**
+ * Grants the collaboration projection Lambda access to mutate Workspace
+ * Search projection documents.
+ *
+ * @param resources - Exact Workspace Search target table.
+ * @param target - Collaboration projection Lambda that owns the projection.
+ * @returns Nothing.
+ */
+export function grantWorkspaceSearchProjectionAccess(
+  resources: WorkspaceSearchWriterFenceResources,
+  target: lambda.Function,
+): void {
   target.addToRolePolicy(new iam.PolicyStatement({
     actions: ['dynamodb:PutItem', 'dynamodb:DeleteItem'],
     resources: [resources.workspaceSearchTable.tableArn],

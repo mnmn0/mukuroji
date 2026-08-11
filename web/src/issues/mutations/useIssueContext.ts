@@ -77,6 +77,9 @@ export type AcceptedResolutionHistoryState = {
   hasLoadError: boolean
 }
 
+/** Mutation family used to keep context and accepted-resolution failures separate. */
+type IssueContextMutationOperation = 'context' | 'resolution'
+
 /**
  * Data and actions for the Decisions and Sources tabs.
  */
@@ -101,6 +104,10 @@ export type IssueContextController = {
   hasMutationError: boolean
   /** HTTP status from the latest failed context mutation. */
   mutationErrorStatus?: number
+  /** Whether the latest accepted-resolution mutation failed. */
+  hasResolutionMutationError: boolean
+  /** HTTP status from the latest failed accepted-resolution mutation. */
+  resolutionMutationErrorStatus?: number
   /** Raw errors consumed by the shared session policy handler. */
   sessionErrors?: readonly unknown[]
   /** Creates a curated item, optionally superseding an existing item. */
@@ -167,6 +174,8 @@ export function useIssueContext({
   const [mutationFailure, setMutationFailure] = useState<{
     /** Raw error retained for session policy handling. */
     error: unknown
+    /** Mutation family that produced the failure. */
+    operation: IssueContextMutationOperation
     /** Context scope that owns the failure. */
     scope: string
     /** Optional HTTP status returned by the API. */
@@ -222,6 +231,14 @@ export function useIssueContext({
   const lastPage = data?.at(-1)
   const activeMutationFailure =
     mutationFailure?.scope === scope ? mutationFailure : undefined
+  const activeContextMutationFailure =
+    activeMutationFailure?.operation === 'context'
+      ? activeMutationFailure
+      : undefined
+  const activeResolutionMutationFailure =
+    activeMutationFailure?.operation === 'resolution'
+      ? activeMutationFailure
+      : undefined
   const items = useMemo(
     () =>
       mergeCuratedContextItems(
@@ -263,6 +280,7 @@ export function useIssueContext({
 
   const runMutation = useCallback(
     async (
+      operation: IssueContextMutationOperation,
       operationKey: string,
       fingerprint: string,
       request: Parameters<typeof mutationRunner.run>[2],
@@ -279,7 +297,7 @@ export function useIssueContext({
           mutationError instanceof TeamIssuesApiError
             ? mutationError.status
             : undefined
-        setMutationFailure({ error: mutationError, scope, status })
+        setMutationFailure({ error: mutationError, operation, scope, status })
         if (status === 409) await refresh().catch(() => undefined)
         return false
       }
@@ -303,6 +321,7 @@ export function useIssueContext({
       if (!accessToken || !teamId || !issueId) return false
 
       const succeeded = await runMutation(
+        'context',
         `issue:context:create:${teamId}:${issueId}:${input.supersedesItemId ?? 'new'}`,
         JSON.stringify(input),
         (context) =>
@@ -340,6 +359,7 @@ export function useIssueContext({
       if (!accessToken || !teamId || !issueId) return false
 
       const succeeded = await runMutation(
+        'context',
         `issue:context:update:${teamId}:${issueId}:${item.id}`,
         JSON.stringify(input),
         (context) =>
@@ -372,6 +392,7 @@ export function useIssueContext({
       if (!accessToken || !teamId || !issueId) return false
 
       const succeeded = await runMutation(
+        'resolution',
         `issue:resolution:set:${teamId}:${issueId}:${rootCommentId}`,
         JSON.stringify(input),
         (context) =>
@@ -470,14 +491,16 @@ export function useIssueContext({
     createItem,
     hasLoadError: Boolean(error),
     hasMore: Boolean(lastPage?.nextCursor),
-    hasMutationError: Boolean(activeMutationFailure),
+    hasMutationError: Boolean(activeContextMutationFailure),
     isLoading: isConfigured && isLoading,
     isLoadingMore,
     items,
     loadMoreAcceptedResolutions,
     loadMore,
     loadMoreRevisions,
-    mutationErrorStatus: activeMutationFailure?.status,
+    mutationErrorStatus: activeContextMutationFailure?.status,
+    hasResolutionMutationError: Boolean(activeResolutionMutationFailure),
+    resolutionMutationErrorStatus: activeResolutionMutationFailure?.status,
     openAcceptedResolutionHistory,
     openRevisionHistory,
     refresh,

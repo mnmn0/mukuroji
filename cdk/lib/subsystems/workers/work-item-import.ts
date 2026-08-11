@@ -164,7 +164,6 @@ export function buildWorkItemImportWorker(
     ],
   }));
   workItemConfigurationTable.grants.readData(workItemImportFunction);
-  workspaceSearchTable.grants.readWriteData(workItemImportFunction);
   workItemImportFunction.addToRolePolicy(new iam.PolicyStatement({
     actions: ['dynamodb:ConditionCheckItem'],
     resources: [

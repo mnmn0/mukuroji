@@ -370,7 +370,7 @@ export function IssueCollaborationPanel({
             currentMemberKey={currentMemberKey}
             focusedCommentId={focusedCommentId}
             focusedRootCommentId={focusedRootCommentId}
-            hasResolutionError={controller.context.hasMutationError}
+            hasResolutionError={controller.context.hasResolutionMutationError}
             locale={locale}
             members={members}
             onPromoteComment={
@@ -405,7 +405,9 @@ export function IssueCollaborationPanel({
               return succeeded
             }}
             readOnlyMessage={readOnlyMessage}
-            resolutionErrorStatus={controller.context.mutationErrorStatus}
+            resolutionErrorStatus={
+              controller.context.resolutionMutationErrorStatus
+            }
           />
         ) : null}
         {selectedTab === 'activity' ? (
