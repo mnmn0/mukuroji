@@ -1017,6 +1017,8 @@ test('audit stream isolates downstream delivery and retention consumers', () => 
     .toContain('dynamodb:PutItem');
   expect(actionsForProjectionTable('ProcessedAuditEventsTableFF485133'))
     .toContain('dynamodb:PutItem');
+  expect(actionsForProjectionTable('TeamIssuesTable189D851D'))
+    .toContain('dynamodb:ConditionCheckItem');
   expect(serializedProjectionPolicy).toContain('sqs:SendMessage');
   expect(serializedProjectionPolicy).toContain('FileProofingTable');
   expect(serializedProjectionPolicy).toContain('dynamodb:GetItem');

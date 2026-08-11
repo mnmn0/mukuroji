@@ -176,6 +176,17 @@ export function buildAuditProjectionWorker(
   workspaceAccessTable.grants.readData(collaborationProjectionFunction);
   collaborationProjectionFunction.addToRolePolicy(
     new iam.PolicyStatement({
+      actions: ['dynamodb:ConditionCheckItem'],
+      resources: [workItemsTable.tableArn],
+      conditions: {
+        'ForAnyValue:StringEquals': {
+          'dynamodb:EnclosingOperation': ['TransactWriteItems'],
+        },
+      },
+    }),
+  );
+  collaborationProjectionFunction.addToRolePolicy(
+    new iam.PolicyStatement({
       actions: ['dynamodb:GetItem'],
       resources: [tenantAdministrationTable.tableArn],
     }),
