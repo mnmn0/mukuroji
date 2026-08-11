@@ -58,6 +58,9 @@ export const COLLABORATION_CONTEXT_TITLE_MAX_LENGTH = 200
 /** Curated context body と accepted resolution summary に保存できる文字数です。 */
 export const COLLABORATION_CONTEXT_BODY_MAX_LENGTH = 20_000
 
+/** Record key for the per-entity curated-context pagination generation. */
+const CURATED_CONTEXT_LEDGER_RECORD_KEY = 'CONTEXT_LEDGER'
+
 /** UI と API が受け付ける reaction emoji です。 */
 export const COLLABORATION_REACTIONS = ['👍', '❤️', '🎉', '👀', '✅'] as const
 
@@ -184,6 +187,8 @@ export type CuratedContextAuthorizationSnapshot = {
   memberKey: string
   /** Membership generation observed during authorization. */
   workspaceMemberVersion: number
+  /** Enterprise Identity authorization generation observed during authorization. */
+  enterpriseControlRevision?: number
 }
 
 /**
@@ -365,6 +370,8 @@ export type SetAcceptedResolutionInput = WorkItemCollaborationScope &
     deepLink?: string
     /** State と同じ transaction に保存する audit context です。 */
     auditContext?: MutationAuditContext
+    /** Authorization generations observed before the mutation. */
+    authorizationSnapshot?: CuratedContextAuthorizationSnapshot
   }
 
 /** Accepted resolution history page 取得入力です。 */
@@ -960,6 +967,36 @@ function contextRevisionPut(tableName: string, item: StoredCuratedContextItem) {
 }
 
 /**
+ * Builds the atomic generation increment for one curated-context ledger.
+ *
+ * @param tableName - Collaboration table name.
+ * @param entityKey - Work Item collaboration entity key.
+ * @returns DynamoDB transaction item that increments the ledger generation.
+ */
+function contextLedgerIncrement(tableName: string, entityKey: string) {
+  return {
+    Update: {
+      TableName: tableName,
+      Key: { entityKey, recordKey: CURATED_CONTEXT_LEDGER_RECORD_KEY },
+      UpdateExpression:
+        'SET #entryType = :entryType, #generation = if_not_exists(#generation, :zero) + :one',
+      ConditionExpression:
+        'attribute_not_exists(#entryType) OR ' +
+        '(#entryType = :entryType AND #generation >= :zero)',
+      ExpressionAttributeNames: {
+        '#entryType': 'entryType',
+        '#generation': 'generation',
+      },
+      ExpressionAttributeValues: {
+        ':entryType': 'context-ledger',
+        ':zero': 0,
+        ':one': 1,
+      },
+    },
+  }
+}
+
+/**
  * Builds an append-only receipt that points to an immutable mutation response revision.
  *
  * @param tableName - Collaboration table name.
@@ -1156,14 +1193,18 @@ function decodeCuratedContextCursor(value: string | undefined, entityKey: string
   try {
     const parsed: unknown = JSON.parse(Buffer.from(value, 'base64url').toString('utf8'))
     if (!isRecord(parsed) ||
-        parsed.version !== 1 ||
+        parsed.version !== 2 ||
         parsed.entityKey !== entityKey ||
         parsed.prefix !== 'CONTEXT_ORDER#' ||
         typeof parsed.recordKey !== 'string' ||
-        !parsed.recordKey.startsWith('CONTEXT_ORDER#')) {
+        !parsed.recordKey.startsWith('CONTEXT_ORDER#') ||
+        !isNonNegativeSafeInteger(parsed.generation)) {
       throw new Error('cursor mismatch')
     }
-    return { entityKey, recordKey: parsed.recordKey }
+    return {
+      key: { entityKey, recordKey: parsed.recordKey },
+      generation: parsed.generation,
+    }
   } catch (error) {
     throw new CollaborationError(
       400,
@@ -2320,13 +2361,15 @@ type StoredCuratedContextMutationReceipt = {
 /** Curated context cursor payload です。 */
 type CuratedContextCursor = {
   /** Cursor schema version です。 */
-  version: 1
+  version: 2
   /** Cursor を発行した entity key です。 */
   entityKey: string
   /** Cursor を発行した row prefix です。 */
   prefix: 'CONTEXT_ORDER#'
   /** DynamoDB last evaluated sort key です。 */
   recordKey: string
+  /** Context-ledger generation observed when the cursor was issued. */
+  generation: number
 }
 
 type StoredWatcher = {
@@ -2686,14 +2729,22 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
     const prefix: CuratedContextCursor['prefix'] = 'CONTEXT_ORDER#'
     const limit = clampCuratedContextLimit(input.limit)
     const capabilities = normalizeContextCapabilities(input.capabilities)
-    const exclusiveStartKey = decodeCuratedContextCursor(input.cursor, entityKey)
+    const generation = await this.getCuratedContextLedgerGeneration(entityKey)
+    const decodedCursor = decodeCuratedContextCursor(input.cursor, entityKey)
+    if (decodedCursor && decodedCursor.generation !== generation) {
+      throw new CollaborationError(
+        409,
+        'CollaborationCursorExpired',
+        'Curated context changed while paging. Restart from the first page.',
+      )
+    }
 
     try {
       const response = await this.documentClient.send(new QueryCommand({
         TableName: this.tableName,
         KeyConditionExpression: 'entityKey = :entityKey AND begins_with(recordKey, :prefix)',
         ExpressionAttributeValues: { ':entityKey': entityKey, ':prefix': prefix },
-        ExclusiveStartKey: exclusiveStartKey,
+        ExclusiveStartKey: decodedCursor?.key,
         ConsistentRead: true,
         ScanIndexForward: false,
         Limit: limit,
@@ -2710,6 +2761,14 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
         }
         return this.reconcileCuratedContextItemSource(item)
       }))
+      const currentGeneration = await this.getCuratedContextLedgerGeneration(entityKey)
+      if (currentGeneration !== generation) {
+        throw new CollaborationError(
+          409,
+          'CollaborationCursorExpired',
+          'Curated context changed while paging. Restart from the first page.',
+        )
+      }
 
       return {
         schemaVersion: COLLABORATION_CONTEXT_SCHEMA_VERSION,
@@ -2718,10 +2777,11 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
             typeof response.LastEvaluatedKey.recordKey === 'string'
           ? {
               nextCursor: encodeCuratedContextCursor({
-                version: 1,
+                version: 2,
                 entityKey,
                 prefix,
                 recordKey: response.LastEvaluatedKey.recordKey,
+                generation,
               }),
             }
           : {}),
@@ -2983,6 +3043,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
     const transactionItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [
       parentIssueCondition(this.parentIssueTableName, input),
       ...curatedContextAuthorizationConditions(input),
+      contextLedgerIncrement(this.tableName, input.entityKey),
       ...(input.sourceAuthorizationSnapshot
         ? curatedContextDocumentSourceConditions(input, input.sourceAuthorizationSnapshot)
         : []),
@@ -3150,6 +3211,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
         TransactItems: [
           parentIssueCondition(this.parentIssueTableName, input),
           ...curatedContextAuthorizationConditions(input),
+          contextLedgerIncrement(this.tableName, input.entityKey),
           contextSnapshotPut(this.tableName, after, input.expectedRevision),
           contextRevisionPut(this.tableName, after),
           ...(input.auditContext
@@ -4304,6 +4366,39 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
   }
 
   /**
+   * Reads the current curated-context ledger generation consistently.
+   *
+   * @param entityKey - Work Item collaboration entity key.
+   * @returns The current generation, or zero for a legacy scope without a ledger row.
+   */
+  private async getCuratedContextLedgerGeneration(entityKey: string): Promise<number> {
+    try {
+      const response = await this.documentClient.send(new GetCommand({
+        TableName: this.tableName,
+        Key: { entityKey, recordKey: CURATED_CONTEXT_LEDGER_RECORD_KEY },
+        ConsistentRead: true,
+      }))
+      const item = response.Item
+      if (item === undefined) return 0
+      if (
+        item.entryType !== 'context-ledger' ||
+        item.entityKey !== entityKey ||
+        item.recordKey !== CURATED_CONTEXT_LEDGER_RECORD_KEY ||
+        !isNonNegativeSafeInteger(item.generation)
+      ) {
+        throw new CollaborationError(
+          503,
+          'InvalidCollaborationRecord',
+          'Curated context ledger record is invalid.',
+        )
+      }
+      return item.generation
+    } catch (error) {
+      throw toCollaborationStoreError(error)
+    }
+  }
+
+  /**
    * Reads a curated-context mutation receipt consistently.
    *
    * @param entityKey - Collaboration entity key.
@@ -4716,7 +4811,10 @@ function assertCuratedContextAuthorizationSnapshot(
     snapshot.memberKey.trim().length === 0 ||
     snapshot.memberKey !== input.actor.id ||
     !Number.isSafeInteger(snapshot.workspaceMemberVersion) ||
-    snapshot.workspaceMemberVersion < 0
+    snapshot.workspaceMemberVersion < 0 ||
+    (snapshot.enterpriseControlRevision !== undefined &&
+      (!Number.isSafeInteger(snapshot.enterpriseControlRevision) ||
+        snapshot.enterpriseControlRevision < 0))
   ) {
     throw new CollaborationError(
       400,
@@ -4874,7 +4972,7 @@ function curatedContextAuthorizationConditions(
     readEnvironment('MUKUROJI_WORKSPACE_ACCESS_TABLE') ??
     readEnvironment('WORKSPACE_ACCESS_TABLE_NAME') ??
     'mukuroji-workspace-access-local'
-  return [{
+  const conditions: NonNullable<TransactWriteCommandInput['TransactItems']> = [{
     ConditionCheck: {
       TableName: tableName,
       Key: {
@@ -4894,6 +4992,33 @@ function curatedContextAuthorizationConditions(
       },
     },
   }]
+  const enterpriseTableName = readEnvironment('ENTERPRISE_IDENTITY_TABLE_NAME')
+  if (enterpriseTableName && snapshot.enterpriseControlRevision !== undefined) {
+    const controlRevision = snapshot.enterpriseControlRevision
+    conditions.push({
+      ConditionCheck: {
+        TableName: enterpriseTableName,
+        Key: {
+          scopeKey: `WORKSPACE#${input.workspaceId}`,
+          recordKey: 'CONTROL',
+        },
+        ConditionExpression: controlRevision === 0
+          ? '(attribute_not_exists(#scopeKey) OR ' +
+            '(#entryType = :controlEntryType AND #controlRevision = :expectedControlRevision))'
+          : '#entryType = :controlEntryType AND #controlRevision = :expectedControlRevision',
+        ExpressionAttributeNames: {
+          '#scopeKey': 'scopeKey',
+          '#entryType': 'entryType',
+          '#controlRevision': 'controlRevision',
+        },
+        ExpressionAttributeValues: {
+          ':controlEntryType': 'enterprise-identity-control',
+          ':expectedControlRevision': controlRevision,
+        },
+      },
+    })
+  }
+  return conditions
 }
 
 /**

@@ -519,7 +519,10 @@ async function processRecord(
     await markProjectionProcessed(event.eventId)
     return
   }
-  const authorizationEvent = refreshScheduledNotificationEvent(event, currentScope)
+  const scopedEvent = isCuratedContextEvent
+    ? overlayCurrentWorkItemNotificationScope(event, currentScope)
+    : event
+  const authorizationEvent = refreshScheduledNotificationEvent(scopedEvent, currentScope)
   if (!authorizationEvent) {
     await markProjectionProcessed(event.eventId)
     return
@@ -1208,6 +1211,24 @@ export function refreshScheduledNotificationEvent(
       reason,
     }],
   }
+}
+
+/**
+ * Overlays the current Work Item project onto a curated-context audit event.
+ *
+ * @param event - Audit event whose captured project may be stale.
+ * @param scope - Current parent Work Item scope read by the projection.
+ * @returns Event carrying the current project assignment, when one exists.
+ */
+export function overlayCurrentWorkItemNotificationScope(
+  event: AuditProjectionEvent,
+  scope: CurrentWorkItemNotificationScope,
+): AuditProjectionEvent {
+  if (scope.projectId !== undefined) {
+    return { ...event, projectId: scope.projectId }
+  }
+  const { projectId: _staleProjectId, ...eventWithoutProject } = event
+  return eventWithoutProject
 }
 
 async function readProjectionNotificationPreferences(recipientKey: string) {

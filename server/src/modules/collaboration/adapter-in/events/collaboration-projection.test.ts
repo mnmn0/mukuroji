@@ -19,6 +19,7 @@ import {
   hasCurrentSystemAdminMembership,
   hasEligibleProjectAccess,
   mergeDeletedObjectTags,
+  overlayCurrentWorkItemNotificationScope,
   parseAuditProjectionEvent,
   projectCuratedContextSearchEvent,
   projectCuratedContextSearchEventWithParentFence,
@@ -818,6 +819,25 @@ describe('collaboration projection pure helpers', () => {
       exists: true,
       statusCategory: 'completed',
     })).toBeUndefined()
+  })
+
+  test('overlays the current assigned Project on curated context notifications', () => {
+    const event = createProjectionEvent({
+      eventType: 'context-item.created',
+      issueId: 'context-issue',
+      projectId: 'project-a',
+      teamId: 'core-team',
+    })
+
+    expect(overlayCurrentWorkItemNotificationScope(event, {
+      checked: true,
+      exists: true,
+      projectId: 'project-b',
+    })).toMatchObject({ projectId: 'project-b' })
+    expect(overlayCurrentWorkItemNotificationScope(event, {
+      checked: true,
+      exists: true,
+    })).not.toHaveProperty('projectId')
   })
 
   test('accepts only canonical ISO Work Item due dates from audit metadata', () => {

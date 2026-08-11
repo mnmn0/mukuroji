@@ -195,6 +195,25 @@ function createCollaborationMemory(
         rows.set(storageKey(put.Item.entityKey, put.Item.recordKey), put.Item)
       }
     }
+    for (const transactionItem of input.TransactItems) {
+      if (!isTestRecord(transactionItem) || !isTestRecord(transactionItem.Update)) continue
+      const update = transactionItem.Update
+      if (update.TableName !== 'collaboration-table' || !isTestRecord(update.Key) ||
+          typeof update.Key.entityKey !== 'string' ||
+          update.Key.recordKey !== 'CONTEXT_LEDGER') {
+        continue
+      }
+      const current = rows.get(storageKey(update.Key.entityKey, update.Key.recordKey))
+      const generation = current && typeof current.generation === 'number'
+        ? current.generation
+        : 0
+      rows.set(storageKey(update.Key.entityKey, update.Key.recordKey), {
+        entityKey: update.Key.entityKey,
+        recordKey: update.Key.recordKey,
+        entryType: 'context-ledger',
+        generation: generation + 1,
+      })
+    }
     if (reportCommittedTransactionAsConditionalFailure) {
       reportCommittedTransactionAsConditionalFailure = false
       throw createConditionalTransactionError()
@@ -1138,6 +1157,84 @@ test('pages curated context newest-first with scope-bound cursors and capabiliti
     cursor: first.nextCursor,
     capabilities,
   })).rejects.toMatchObject({ status: 400, code: 'InvalidCollaborationCursor' })
+})
+
+test('expires a curated context cursor when the ledger generation changes', async () => {
+  const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
+  const actor = { id: 'author@example.com', displayName: 'Author' }
+  const memory = createCollaborationMemory([
+    {
+      entityKey,
+      recordKey: 'CONTEXT#ctx-1',
+      entryType: 'context',
+      schemaVersion: 1,
+      id: 'ctx-1',
+      teamId: 'team-a',
+      workItemId: 'issue-1',
+      kind: 'context',
+      state: 'active',
+      title: 'First',
+      body: 'First body',
+      mentionMemberKeys: [],
+      createdBy: actor,
+      createdAt: '2026-07-12T00:00:00.000Z',
+      updatedBy: actor,
+      updatedAt: '2026-07-12T00:00:00.000Z',
+      revision: 1,
+    },
+    {
+      entityKey,
+      recordKey: 'CONTEXT_ORDER#2026-07-12T00:00:00.000Z#ctx-1',
+      entryType: 'context-order',
+      itemId: 'ctx-1',
+      createdAt: '2026-07-12T00:00:00.000Z',
+    },
+    {
+      entityKey,
+      recordKey: 'CONTEXT#ctx-2',
+      entryType: 'context',
+      schemaVersion: 1,
+      id: 'ctx-2',
+      teamId: 'team-a',
+      workItemId: 'issue-1',
+      kind: 'context',
+      state: 'active',
+      title: 'Second',
+      body: 'Second body',
+      mentionMemberKeys: [],
+      createdBy: actor,
+      createdAt: '2026-07-12T00:01:00.000Z',
+      updatedBy: actor,
+      updatedAt: '2026-07-12T00:01:00.000Z',
+      revision: 1,
+    },
+    {
+      entityKey,
+      recordKey: 'CONTEXT_ORDER#2026-07-12T00:01:00.000Z#ctx-2',
+      entryType: 'context-order',
+      itemId: 'ctx-2',
+      createdAt: '2026-07-12T00:01:00.000Z',
+    },
+  ])
+  const capabilities = {
+    canCreate: true,
+    canEdit: true,
+    canReplace: true,
+    canAcceptResolution: true,
+  }
+  const first = await memory.client.getCuratedContext({ entityKey, limit: 1, capabilities })
+  memory.rows.set(`${entityKey}\0CONTEXT_LEDGER`, {
+    entityKey,
+    recordKey: 'CONTEXT_LEDGER',
+    entryType: 'context-ledger',
+    generation: 1,
+  })
+
+  await expect(memory.client.getCuratedContext({
+    entityKey,
+    cursor: first.nextCursor,
+    capabilities,
+  })).rejects.toMatchObject({ status: 409, code: 'CollaborationCursorExpired' })
 })
 
 test('hard-bounds curated context pages to ten payload-heavy items', async () => {

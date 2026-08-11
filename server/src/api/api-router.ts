@@ -7910,6 +7910,8 @@ routeApp.get('/api/teams/:teamId/issues/:issueId/context-items', async (c) => {
       issueId,
       'viewer',
       detail.issue.assignedProjectId,
+      accessToken,
+      c,
     )
     return c.json({
       ...page,
@@ -7961,6 +7963,8 @@ routeApp.get(
         issueId,
         'viewer',
         detail.issue.assignedProjectId,
+        accessToken,
+        c,
       )
       return c.json({
         ...page,
@@ -8003,6 +8007,8 @@ routeApp.post('/api/teams/:teamId/issues/:issueId/context-items', async (c) => {
           entityKey,
           replayed,
           detail.issue.assignedProjectId,
+          accessToken,
+          c,
         ),
       }, 201)
     }
@@ -8031,6 +8037,9 @@ routeApp.post('/api/teams/:teamId/issues/:issueId/context-items', async (c) => {
       authorizationSnapshot: {
         memberKey: principal.userKey,
         workspaceMemberVersion: principal.workspaceMember.version,
+        ...(principal.enterpriseIdentityControlRevision === undefined
+          ? {}
+          : { enterpriseControlRevision: principal.enterpriseIdentityControlRevision }),
       },
       kind: request.kind,
       title: request.title,
@@ -8076,6 +8085,8 @@ routeApp.post('/api/teams/:teamId/issues/:issueId/context-items', async (c) => {
         entityKey,
         item,
         detail.issue.assignedProjectId,
+        accessToken,
+        c,
       ),
     }, 201)
   } catch (error) {
@@ -8121,6 +8132,8 @@ routeApp.patch('/api/teams/:teamId/issues/:issueId/context-items/:contextItemId'
           entityKey,
           replayed,
           detail.issue.assignedProjectId,
+          accessToken,
+          c,
         ),
       })
     }
@@ -8148,6 +8161,9 @@ routeApp.patch('/api/teams/:teamId/issues/:issueId/context-items/:contextItemId'
       authorizationSnapshot: {
         memberKey: principal.userKey,
         workspaceMemberVersion: principal.workspaceMember.version,
+        ...(principal.enterpriseIdentityControlRevision === undefined
+          ? {}
+          : { enterpriseControlRevision: principal.enterpriseIdentityControlRevision }),
       },
       expectedRevision: request.expectedRevision,
       ...(request.kind ? { kind: request.kind } : {}),
@@ -8188,6 +8204,8 @@ routeApp.patch('/api/teams/:teamId/issues/:issueId/context-items/:contextItemId'
         entityKey,
         item,
         detail.issue.assignedProjectId,
+        accessToken,
+        c,
       ),
     })
   } catch (error) {
@@ -8228,6 +8246,8 @@ routeApp.get(
         issueId,
         'viewer',
         detail.issue.assignedProjectId,
+        accessToken,
+        c,
       )
       return c.json(page)
     } catch (error) {
@@ -8268,6 +8288,9 @@ routeApp.put('/api/teams/:teamId/issues/:issueId/comments/:rootCommentId/accepte
       authorizationSnapshot: {
         memberKey: principal.userKey,
         workspaceMemberVersion: principal.workspaceMember.version,
+        ...(principal.enterpriseIdentityControlRevision === undefined
+          ? {}
+          : { enterpriseControlRevision: principal.enterpriseIdentityControlRevision }),
       },
       expectedThreadVersion: request.expectedThreadVersion,
       commentId: request.commentId,
@@ -21296,6 +21319,8 @@ async function loadAuthorizedTeamIssue(
  * @param issueId - Canonical Work Item identifier.
  * @param minimumRole - Minimum current Project role required for the read.
  * @param initialAssignedProjectId - Project assignment observed before the read.
+ * @param accessToken - Access token used to re-resolve Enterprise authorization before return.
+ * @param context - Current route context used by the authentication refresh.
  * @returns A promise that resolves only when the parent scope is unchanged.
  */
 async function assertCuratedContextScopeUnchanged(
@@ -21304,9 +21329,14 @@ async function assertCuratedContextScopeUnchanged(
   issueId: string,
   minimumRole: ProjectRole,
   initialAssignedProjectId: string | undefined,
+  accessToken?: string,
+  context?: Context,
 ): Promise<void> {
+  const currentPrincipal = accessToken === undefined
+    ? principal
+    : await authenticateWorkspacePrincipal(accessToken, undefined, context)
   const current = await loadAuthorizedTeamIssue(
-    principal,
+    currentPrincipal,
     teamId,
     issueId,
     minimumRole,
@@ -21989,6 +22019,9 @@ async function resolveCuratedContextSource(
  * @param issueId - Owning Work Item identifier.
  * @param entityKey - Canonical collaboration entity key.
  * @param item - Canonical item returned by the collaboration store.
+ * @param initialAssignedProjectId - Project assignment observed before the mutation.
+ * @param accessToken - Access token used to re-resolve Enterprise authorization before return.
+ * @param context - Current route context used by the authentication refresh.
  * @returns A permission-safe item for the current viewer.
  */
 async function requirePermissionSafeCuratedContextItem(
@@ -21998,6 +22031,8 @@ async function requirePermissionSafeCuratedContextItem(
   entityKey: string,
   item: CuratedContextItem,
   initialAssignedProjectId: string | undefined,
+  accessToken?: string,
+  context?: Context,
 ): Promise<CuratedContextItem> {
   const [reconciled] = await reconcileCuratedContextSourcesForViewer(
     principal,
@@ -22019,6 +22054,8 @@ async function requirePermissionSafeCuratedContextItem(
     issueId,
     'member',
     initialAssignedProjectId,
+    accessToken,
+    context,
   )
   return reconciled
 }
