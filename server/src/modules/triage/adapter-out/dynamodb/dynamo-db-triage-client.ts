@@ -683,28 +683,40 @@ export class DynamoDbTriageClient implements TriageClient {
       }
     }
     const reservation = evaluation.rotationReservation
+    const rotation = reservation.configuration.rotations[reservation.rotationIndex]
+    if (!rotation) {
+      throw new TriageError(
+        500,
+        'InvalidTriageConfiguration',
+        'The evaluated Triage owner rotation is unavailable.',
+      )
+    }
+    const expectedRotationCursors = Object.fromEntries(
+      reservation.configuration.rotations.map((candidate, index) => [
+        candidate.id,
+        index === reservation.rotationIndex ? reservation.expectedNextIndex : candidate.nextIndex,
+      ]),
+    )
+    const nextRotationCursors = {
+      ...expectedRotationCursors,
+      [rotation.id]: rotation.nextIndex,
+    }
     const transactItems: TriageTransactionItems = [{
-      Put: {
+      Update: {
         TableName: this.tableName,
-        Item: {
-          entryType: 'triage-configuration',
-          ...createConfigurationKey(entry.workspaceId, entry.teamId),
-          configuration: reservation.configuration,
-          revision: reservation.configuration.revision,
-          updatedBy: 'system:triage-admission',
-        },
+        Key: createConfigurationKey(entry.workspaceId, entry.teamId),
+        UpdateExpression: 'SET #rotationCursors = :nextRotationCursors',
         ConditionExpression:
           '#revision = :expectedRevision AND ' +
-          `#configuration.#rotations[${reservation.rotationIndex}].#nextIndex = :expectedNextIndex`,
+          '(attribute_not_exists(#rotationCursors) OR #rotationCursors = :expectedRotationCursors)',
         ExpressionAttributeNames: {
-          '#configuration': 'configuration',
-          '#nextIndex': 'nextIndex',
           '#revision': 'revision',
-          '#rotations': 'rotations',
+          '#rotationCursors': 'rotationCursors',
         },
         ExpressionAttributeValues: {
           ':expectedRevision': reservation.expectedRevision,
-          ':expectedNextIndex': reservation.expectedNextIndex,
+          ':expectedRotationCursors': expectedRotationCursors,
+          ':nextRotationCursors': nextRotationCursors,
         },
       },
     }, ...validation.transactItems]
@@ -748,7 +760,8 @@ export class DynamoDbTriageClient implements TriageClient {
     input: UpdateTriageConfigurationInput,
     idempotency: TriageIdempotency,
   ): Promise<TriageConfiguration> {
-    validateConfigurationInput(teamId, input)
+    const normalizedInput = normalizeTriageConfigurationInput(input)
+    validateConfigurationInput(teamId, normalizedInput)
     validateConfigurationIdempotency(idempotency)
     const replay = await this.readConfigurationReceipt(
       workspaceId,
@@ -763,24 +776,39 @@ export class DynamoDbTriageClient implements TriageClient {
     }))
     const current = decodeTriageConfigurationRow(currentResponse.Item, workspaceId, teamId)
     const currentRevision = current?.revision ?? 0
-    if (currentRevision !== input.expectedRevision) {
+    if (currentRevision !== normalizedInput.expectedRevision) {
       throw new TriageError(409, 'TriageConfigurationConflict', 'Triage settings changed.')
     }
     const now = this.now().toISOString()
+    const rotationPolicyChanged = current === undefined ||
+      current.rotations.length !== normalizedInput.rotations.length ||
+      normalizedInput.rotations.some((rotation) => {
+        const previous = current.rotations.find((candidate) => candidate.id === rotation.id)
+        return previous === undefined ||
+          previous.name !== rotation.name ||
+          !sameTextArray(previous.memberUserIds, rotation.memberUserIds)
+      })
+    const nextRotations = normalizedInput.rotations.map((rotation) => {
+      const previous = current?.rotations.find((candidate) => candidate.id === rotation.id)
+      const preservesCursor = previous !== undefined &&
+        previous.name === rotation.name &&
+        sameTextArray(previous.memberUserIds, rotation.memberUserIds)
+      return preservesCursor ? { ...rotation, nextIndex: previous.nextIndex } : rotation
+    })
     const next: TriageConfiguration = {
       schemaVersion: TRIAGE_CONFIGURATION_SCHEMA_VERSION,
       workspaceId,
       teamId,
-      rules: input.rules,
-      rotations: input.rotations,
-      slaPolicies: input.slaPolicies,
-      allowedBulkActions: input.allowedBulkActions,
-      retentionDays: input.retentionDays,
+      rules: normalizedInput.rules,
+      rotations: nextRotations,
+      slaPolicies: normalizedInput.slaPolicies,
+      allowedBulkActions: normalizedInput.allowedBulkActions,
+      retentionDays: normalizedInput.retentionDays,
       revision: currentRevision + 1,
       updatedAt: now,
     }
     const referenceValidation = this.validateConfigurationReferences
-      ? await this.validateConfigurationReferences(workspaceId, teamId, input)
+      ? await this.validateConfigurationReferences(workspaceId, teamId, normalizedInput)
       : undefined
     const condition = current
       ? { expression: 'revision = :expectedRevision', values: { ':expectedRevision': currentRevision } }
@@ -793,17 +821,36 @@ export class DynamoDbTriageClient implements TriageClient {
         TransactItems: [
           ...(referenceValidation?.transactItems ?? []),
           {
-            Put: {
+            Update: {
               TableName: this.tableName,
-              Item: {
-                entryType: 'triage-configuration',
-                ...createConfigurationKey(workspaceId, teamId),
-                configuration: next,
-                revision: next.revision,
-                updatedBy: requireUserId(actor.id, 'Triage actor ID'),
-              },
+              Key: createConfigurationKey(workspaceId, teamId),
+              UpdateExpression: 'SET #entryType = :entryType, ' +
+                '#configuration = :configuration, #revision = :revision, ' +
+                '#updatedBy = :updatedBy' +
+                (rotationPolicyChanged ? ', #rotationCursors = :rotationCursors' : ''),
               ConditionExpression: condition.expression,
-              ...(condition.values ? { ExpressionAttributeValues: condition.values } : {}),
+              ExpressionAttributeNames: {
+                '#configuration': 'configuration',
+                '#entryType': 'entryType',
+                '#revision': 'revision',
+                '#updatedBy': 'updatedBy',
+                ...(rotationPolicyChanged ? { '#rotationCursors': 'rotationCursors' } : {}),
+              },
+              ExpressionAttributeValues: {
+                ':configuration': next,
+                ':entryType': 'triage-configuration',
+                ':revision': next.revision,
+                ':updatedBy': requireUserId(actor.id, 'Triage actor ID'),
+                ...(condition.values ?? undefined),
+                ...(rotationPolicyChanged
+                  ? {
+                      ':rotationCursors': Object.fromEntries(nextRotations.map((rotation) => [
+                        rotation.id,
+                        rotation.nextIndex,
+                      ])),
+                    }
+                  : {}),
+              },
             },
           },
           {
@@ -1758,6 +1805,35 @@ function validateConfigurationInput(
   }
 }
 
+/** Normalizes configuration-owned member identifiers before validation and persistence.
+ *
+ * @param input The validated settings replacement.
+ * @returns A detached settings replacement with canonical rotation member keys.
+ */
+function normalizeTriageConfigurationInput(
+  input: UpdateTriageConfigurationInput,
+): UpdateTriageConfigurationInput {
+  return {
+    ...input,
+    rotations: input.rotations.map((rotation) => ({
+      ...rotation,
+      memberUserIds: rotation.memberUserIds.map((memberUserId) =>
+        memberUserId.trim().toLowerCase()
+      ),
+    })),
+  }
+}
+
+/** Compares ordered text values without allowing a settings write to reset a live cursor.
+ *
+ * @param first First ordered collection.
+ * @param second Second ordered collection.
+ * @returns Whether both collections contain the same values in the same order.
+ */
+function sameTextArray(first: readonly string[], second: readonly string[]): boolean {
+  return first.length === second.length && first.every((value, index) => value === second[index])
+}
+
 /** Decodes one Team configuration row and rejects corrupt or cross-scope state.
  *
  * @param value The untrusted DynamoDB item read from the expected primary key.
@@ -1783,7 +1859,40 @@ export function decodeTriageConfigurationRow(
   ) {
     throw invalidStoredConfiguration()
   }
-  return configuration
+  const withRotationCursors = applyPersistedRotationCursors(
+    configuration,
+    value.rotationCursors,
+  )
+  if (!withRotationCursors) throw invalidStoredConfiguration()
+  return withRotationCursors
+}
+
+/** Applies the operational owner-rotation cursors without changing policy revision.
+ *
+ * @param configuration The validated policy snapshot.
+ * @param value The optional persisted cursor map.
+ * @returns The effective configuration, or undefined for an invalid cursor map.
+ */
+function applyPersistedRotationCursors(
+  configuration: TriageConfiguration,
+  value: unknown,
+): TriageConfiguration | undefined {
+  if (value === undefined) return configuration
+  if (!isRecord(value)) return undefined
+  if (Object.keys(value).length !== configuration.rotations.length) return undefined
+  const rotations: TriageOwnerRotation[] = []
+  for (const rotation of configuration.rotations) {
+    const cursor = value[rotation.id]
+    if (!isNonNegativeInteger(cursor) || cursor >= rotation.memberUserIds.length) {
+      return undefined
+    }
+    rotations.push({ ...rotation, nextIndex: cursor })
+  }
+  const knownRotationIds = new Set(configuration.rotations.map((rotation) => rotation.id))
+  if (Object.keys(value).some((rotationId) => !knownRotationIds.has(rotationId))) {
+    return undefined
+  }
+  return { ...configuration, rotations }
 }
 
 /** Decodes one immutable Team configuration replacement receipt.

@@ -145,7 +145,7 @@ describe('triage entry state machine', () => {
       expectedRevision: 7,
       expectedNextIndex: 1,
       configuration: {
-        revision: 8,
+        revision: 7,
         rotations: [{ nextIndex: 0 }],
       },
     })

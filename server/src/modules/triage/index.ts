@@ -7,6 +7,7 @@ export {
   evaluateTriageSchedule,
   isTerminalTriageState,
   projectTriageEntryForResponse,
+  redactExpiredTriageEntry,
   recordTriageSourceActivity,
   type ApplyTriageActionContext,
   type TriageAdmissionEvaluation,

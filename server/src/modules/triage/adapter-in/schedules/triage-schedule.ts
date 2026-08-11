@@ -180,6 +180,11 @@ export async function runTriageSchedule(
   }
 
   for (let shard = 0; shard < wakeShardCount && result.evaluatedCandidates < batchSize; shard += 1) {
+    const remainingShards = wakeShardCount - shard
+    const shardLimit = Math.max(
+      1,
+      Math.ceil((batchSize - result.evaluatedCandidates) / remainingShards),
+    )
     let response
     try {
       response = await options.documentClient.send(new QueryCommand({
@@ -191,7 +196,7 @@ export async function runTriageSchedule(
           ':wakeShard': `WAKE#${shard}`,
           ':nextWakeAt': `${now}#\uffff`,
         },
-        Limit: batchSize - result.evaluatedCandidates,
+        Limit: shardLimit,
         ScanIndexForward: true,
       }))
     } catch (error) {

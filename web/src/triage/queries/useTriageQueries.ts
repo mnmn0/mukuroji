@@ -13,6 +13,11 @@ const triageQueryConfig = {
   shouldRetryOnError: false,
 } as const
 
+const triageQueueQueryConfig = {
+  ...triageQueryConfig,
+  refreshInterval: 60_000,
+} as const
+
 /**
  * Loads a filtered Team triage queue with opaque cursor pagination.
  *
@@ -65,7 +70,7 @@ export function useTriageQueue(
           ? state
           : undefined,
       }),
-    triageQueryConfig,
+    triageQueueQueryConfig,
   )
 }
 

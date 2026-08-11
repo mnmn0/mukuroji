@@ -92,6 +92,31 @@ function createHarness(
 }
 
 describe('triage schedule adapter', () => {
+  test('allocates a bounded query quota to every wake shard', async () => {
+    const harness = createHarness((commandName) =>
+      commandName === 'QueryCommand' ? { Items: [] } : {}
+    )
+
+    try {
+      await expect(runTriageSchedule({
+        documentClient: harness.documentClient,
+        tableName: 'RequestIntakeTable',
+        auditTableName: 'AuditEventsTable',
+        auditRetentionDays: 365,
+        wakeIndexName: 'triage-wake-index',
+        wakeShardCount: 4,
+        batchSize: 4,
+        now: NOW,
+      })).resolves.toMatchObject({ evaluatedCandidates: 0 })
+      expect(harness.inputs
+        .filter((input) => 'IndexName' in input)
+        .map((input) => input.Limit)
+      ).toEqual([1, 2, 2, 4])
+    } finally {
+      harness.restore()
+    }
+  })
+
   test('strongly reads KEYS_ONLY candidates and conditionally resurfaces due entries', async () => {
     const entry = createEntry()
     const storedItem = createTriageEntryTransactionItems({

@@ -68,6 +68,7 @@ import {
   createTriageEntryKey,
   createTriageSourceActivityTransactionItems,
   decodeTriageEntryRow,
+  redactExpiredTriageEntry,
   TRIAGE_OWNER_ACTIVITY_INDEX_NAME,
   TRIAGE_TEAM_ACTIVITY_INDEX_NAME,
   TRIAGE_WAKE_INDEX_NAME,
@@ -2855,11 +2856,12 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
       ),
     ]
     if (triageEntry) {
+      const retentionSafeEntry = redactExpiredTriageEntry(triageEntry, now)
       const triageEntryWithMessageCount = {
-        ...triageEntry,
+        ...retentionSafeEntry,
         sourcePreview: {
-          ...triageEntry.sourcePreview,
-          commentCount: triageEntry.sourcePreview.commentCount + 1,
+          ...retentionSafeEntry.sourcePreview,
+          commentCount: retentionSafeEntry.sourcePreview.commentCount + 1,
         },
       }
       const triageContribution = createTriageSourceActivityTransactionItems({

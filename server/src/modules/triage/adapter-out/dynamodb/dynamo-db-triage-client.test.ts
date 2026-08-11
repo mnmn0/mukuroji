@@ -251,6 +251,40 @@ function findTransactionPutItem(
   return undefined
 }
 
+/** Returns the configuration snapshot carried by a settings or admission transaction. */
+function findTransactionConfiguration(
+  transactionItems: unknown,
+): Record<string, unknown> | undefined {
+  if (!Array.isArray(transactionItems)) return undefined
+  for (const transactionItem of transactionItems) {
+    if (!transactionItem || typeof transactionItem !== 'object') continue
+    const put = Reflect.get(transactionItem, 'Put')
+    if (put && typeof put === 'object') {
+      const item = Reflect.get(put, 'Item')
+      if (item && typeof item === 'object' && Reflect.get(item, 'entryType') === 'triage-configuration') {
+        return Object.fromEntries(Object.entries(item))
+      }
+    }
+    const update = Reflect.get(transactionItem, 'Update')
+    if (update && typeof update === 'object') {
+      const values = Reflect.get(update, 'ExpressionAttributeValues')
+      if (values && typeof values === 'object') {
+        const configuration = Reflect.get(values, ':configuration')
+        if (configuration && typeof configuration === 'object') {
+          return {
+            configuration,
+            revision: Reflect.get(values, ':revision'),
+          }
+        }
+        if (Reflect.get(values, ':nextRotationCursors') !== undefined) {
+          return { revision: Reflect.get(values, ':expectedRevision') }
+        }
+      }
+    }
+  }
+  return undefined
+}
+
 /** Input used to reproduce the signed queue cursor format issued before this change. */
 type PreviouslyIssuedQueueCursorInput = {
   /** Workspace bound into the cursor scope. */
@@ -526,13 +560,14 @@ describe('DynamoDbTriageClient configuration receipts', () => {
       ])
       expect(harness.commands[2]?.input.TransactItems).toEqual([
         expect.objectContaining({
-          Put: expect.objectContaining({
-            Item: expect.objectContaining({
-              entryType: 'triage-configuration',
-              configuration: next,
-            }),
+          Update: expect.objectContaining({
+            UpdateExpression: expect.stringContaining('#configuration = :configuration'),
             ConditionExpression:
               'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
+            ExpressionAttributeValues: expect.objectContaining({
+              ':configuration': next,
+              ':rotationCursors': {},
+            }),
           }),
         }),
         expect.objectContaining({
@@ -642,10 +677,14 @@ describe('DynamoDbTriageClient configuration receipts', () => {
       expect(replayed).toEqual(next)
       expect(harness.commands[2]?.input.TransactItems).toEqual([
         expect.objectContaining({
-          Put: expect.objectContaining({
-            Item: expect.objectContaining({ configuration: next, revision: 8 }),
+          Update: expect.objectContaining({
+            UpdateExpression: expect.not.stringContaining('#rotationCursors = :rotationCursors'),
             ConditionExpression: 'revision = :expectedRevision',
-            ExpressionAttributeValues: { ':expectedRevision': 7 },
+            ExpressionAttributeValues: expect.objectContaining({
+              ':configuration': next,
+              ':revision': 8,
+              ':expectedRevision': 7,
+            }),
           }),
         }),
         expect.objectContaining({
@@ -731,12 +770,22 @@ describe('DynamoDbTriageClient configuration receipts', () => {
         responseMinutes: 30,
       }],
     }
+    const duplicateMemberInput: UpdateTriageConfigurationInput = {
+      ...createConfigurationInput(0),
+      rotations: [{
+        id: 'rotation-members',
+        name: 'Members',
+        memberUserIds: ['One@example.com', 'one@example.com'],
+        nextIndex: 0,
+      }],
+    }
     const harness = createHarness([])
 
     try {
       for (const [key, input] of [
         ['duplicate-rotation', duplicateRotationInput],
         ['duplicate-sla', duplicateSlaInput],
+        ['duplicate-member', duplicateMemberInput],
       ] as const) {
         await expect(harness.client.updateConfiguration(
           'workspace-1',
@@ -1425,23 +1474,18 @@ describe('DynamoDbTriageClient source admission', () => {
       expect(contribution.entry.ownerUserId).toBe('one@example.com')
       expect(contribution.retryableConflictItemIndexes).toEqual([0])
       expect(contribution.transactItems).toEqual([expect.objectContaining({
-        Put: expect.objectContaining({
+        Update: expect.objectContaining({
           TableName: 'RequestIntakeTable',
           ConditionExpression:
             '#revision = :expectedRevision AND ' +
-            '#configuration.#rotations[0].#nextIndex = :expectedNextIndex',
+            '(attribute_not_exists(#rotationCursors) OR ' +
+            '#rotationCursors = :expectedRotationCursors)',
           ExpressionAttributeValues: {
             ':expectedRevision': 4,
-            ':expectedNextIndex': 0,
+            ':expectedRotationCursors': { 'support-rotation': 0 },
+            ':nextRotationCursors': { 'support-rotation': 1 },
           },
-          Item: expect.objectContaining({
-            entryType: 'triage-configuration',
-            revision: 5,
-            configuration: expect.objectContaining({
-              revision: 5,
-              rotations: [expect.objectContaining({ nextIndex: 1 })],
-            }),
-          }),
+          UpdateExpression: 'SET #rotationCursors = :nextRotationCursors',
         }),
       })])
       expect(harness.commands[0]).toEqual(expect.objectContaining({
@@ -1668,16 +1712,14 @@ describe('DynamoDbTriageClient source admission', () => {
       expect(findTransactionPutItem(firstItems, 'triage-entry')).toMatchObject({
         entry: { ownerUserId: 'one@example.com' },
       })
-      expect(findTransactionPutItem(firstItems, 'triage-configuration')).toMatchObject({
-        revision: 5,
-        configuration: { rotations: [{ nextIndex: 1 }] },
+      expect(findTransactionConfiguration(firstItems)).toMatchObject({
+        revision: 4,
       })
       expect(findTransactionPutItem(committedItems, 'triage-entry')).toMatchObject({
         entry: { ownerUserId: 'two@example.com' },
       })
-      expect(findTransactionPutItem(committedItems, 'triage-configuration')).toMatchObject({
-        revision: 6,
-        configuration: { rotations: [{ nextIndex: 0 }] },
+      expect(findTransactionConfiguration(committedItems)).toMatchObject({
+        revision: 5,
       })
     } finally {
       harness.restore()

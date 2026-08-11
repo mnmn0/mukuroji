@@ -4,8 +4,8 @@ export const TRIAGE_ENTRY_SCHEMA_VERSION = 1
 /** Current persisted and public schema version for team triage configuration. */
 export const TRIAGE_CONFIGURATION_SCHEMA_VERSION = 1
 
-/** Maximum number of entries accepted by one bulk triage operation. */
-export const TRIAGE_BULK_ACTION_LIMIT = 100
+/** Maximum number of entries accepted by one sequential bulk triage operation. */
+export const TRIAGE_BULK_ACTION_LIMIT = 20
 
 /** A channel that can contribute an item to the shared triage queue. */
 export type TriageSourceKind =

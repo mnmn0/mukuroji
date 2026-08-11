@@ -18248,14 +18248,18 @@ async function createTriageProjectAuthorizationConditionChecks(
   teamId: string,
   projectId: string | undefined,
 ): Promise<TriageAuthorizationConditionChecks> {
-  if (!projectId || principal.isSystemAdmin || isEnterpriseTriageTeamScope(principal, teamId)) {
+  if (principal.isSystemAdmin) {
     return []
   }
-  if (principal.enterpriseProjectAccesses?.some((access) =>
-    access.projectId === projectId && projectAccessAllows(access, 'member')
-  )) {
-    return []
+  const enterpriseProjectAccess = projectId !== undefined &&
+    principal.enterpriseProjectAccesses?.some((access) =>
+      access.projectId === projectId && projectAccessAllows(access, 'member')
+    ) === true
+  if (isEnterpriseTriageTeamScope(principal, teamId) || enterpriseProjectAccess) {
+    const enterpriseControlCheck = createEnterpriseControlAuthorizationConditionCheck(principal)
+    return enterpriseControlCheck ? [enterpriseControlCheck] : []
   }
+  if (!projectId) return []
   const access = context.projectAccesses?.find((candidate) => candidate.projectId === projectId)
   if (!access || !projectAccessAllows(access, 'member')) {
     throw new ProjectDataError(
@@ -18287,6 +18291,50 @@ async function createTriageProjectAuthorizationConditionChecks(
     )
   }
   return [conditionCheck]
+}
+
+/** Creates the commit-time Enterprise authorization generation fence for a Triage action.
+ *
+ * @param principal The Enterprise-authorized Workspace principal.
+ * @returns A CONTROL condition check when the Enterprise table is configured, or undefined for
+ * local in-memory Enterprise authorization.
+ */
+function createEnterpriseControlAuthorizationConditionCheck(
+  principal: WorkspacePrincipal,
+): TriageAuthorizationConditionChecks[number] | undefined {
+  const enterpriseTableName = getEnv('ENTERPRISE_IDENTITY_TABLE_NAME')?.trim()
+  const controlRevision = principal.enterpriseIdentityControlRevision
+  if (!enterpriseTableName) return undefined
+  if (controlRevision === undefined) {
+    throw new ProjectDataError(
+      503,
+      'EnterpriseAuthorizationUnavailable',
+      'Enterprise authorization state is unavailable for this Triage mutation.',
+    )
+  }
+  const expressionAttributeNames: Record<string, string> = {
+    '#controlRevision': 'controlRevision',
+    '#entryType': 'entryType',
+  }
+  if (controlRevision === 0) expressionAttributeNames['#scopeKey'] = 'scopeKey'
+  return {
+    ConditionCheck: {
+      TableName: enterpriseTableName,
+      Key: {
+        scopeKey: `WORKSPACE#${principal.directoryId}`,
+        recordKey: 'CONTROL',
+      },
+      ConditionExpression: controlRevision === 0
+        ? '(attribute_not_exists(#scopeKey) OR ' +
+          '(#entryType = :controlEntryType AND #controlRevision = :expectedControlRevision))'
+        : '#entryType = :controlEntryType AND #controlRevision = :expectedControlRevision',
+      ExpressionAttributeNames: expressionAttributeNames,
+      ExpressionAttributeValues: {
+        ':controlEntryType': 'enterprise-identity-control',
+        ':expectedControlRevision': controlRevision,
+      },
+    },
+  }
 }
 
 /** Removes duplicate DynamoDB condition checks when current and destination Projects coincide. */

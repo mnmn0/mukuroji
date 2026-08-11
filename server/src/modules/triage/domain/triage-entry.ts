@@ -197,8 +197,8 @@ export function evaluateTriageAdmission(
         rotations: configuration.rotations.map((candidate, index) =>
           index === rotationIndex ? { ...candidate, nextIndex } : candidate
         ),
-        revision: configuration.revision + 1,
-        updatedAt: now,
+        revision: configuration.revision,
+        updatedAt: configuration.updatedAt,
       },
       rotationIndex,
       expectedRevision: configuration.revision,
