@@ -35,6 +35,7 @@ const collaborationIgnoredEntryTypes = new Set<string>([
   'accepted-resolution',
   'accepted-resolution-receipt',
   'context-mutation-receipt',
+  'context-ledger',
   'context-order',
   'context-revision',
   'discussion',

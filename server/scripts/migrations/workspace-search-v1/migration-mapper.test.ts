@@ -621,6 +621,7 @@ describe('Workspace Search production migration mapper', () => {
       'context-order',
       'context-revision',
       'context-mutation-receipt',
+      'context-ledger',
     ]) {
       expect(mapWorkspaceSearchMigrationRow(
         'collaboration',

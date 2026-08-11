@@ -7913,7 +7913,7 @@ routeApp.get('/api/teams/:teamId/issues/:issueId/context-items', async (c) => {
       entityKey,
       page.items,
     )
-    await assertCuratedContextScopeUnchanged(
+    const finalPrincipal = await assertCuratedContextScopeUnchanged(
       currentPrincipal,
       teamId,
       issueId,
@@ -7922,9 +7922,20 @@ routeApp.get('/api/teams/:teamId/issues/:issueId/context-items', async (c) => {
       accessToken,
       c,
     )
+    const finalScope = await loadAuthorizedTeamIssue(
+      finalPrincipal,
+      teamId,
+      issueId,
+      'viewer',
+    )
     return c.json({
       ...page,
       items: reconciledItems,
+      capabilities: createCuratedContextCapabilities(
+        finalPrincipal,
+        finalScope.context,
+        finalScope.detail.issue,
+      ),
     })
   } catch (error) {
     return toCollaborationErrorResponse(c, error)

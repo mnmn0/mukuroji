@@ -96,6 +96,51 @@ test('returns cursor-paginated curated context with server-derived capabilities'
   })
 })
 
+test('recomputes curated context capabilities after final authorization recheck', async () => {
+  const projectAccesses: Array<{ projectId: string; role: 'manager' | 'viewer' }> = [{
+    projectId: 'refero',
+    role: 'manager',
+  }]
+  let detailReads = 0
+  configureFakeProjectClients(true, {
+    projectAccesses,
+    workspaceRole: 'member',
+    detailReadHook: async () => {
+      detailReads += 1
+      if (detailReads === 2) {
+        projectAccesses[0].role = 'viewer'
+      }
+    },
+  })
+  setTestAppDependencies({
+    collaboration: createCollaborationStub({
+      async getCuratedContext(input) {
+        return {
+          schemaVersion: COLLABORATION_CONTEXT_SCHEMA_VERSION,
+          items: [],
+          capabilities: input.capabilities,
+        }
+      },
+    }),
+  })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction/context-items',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+
+  expect(response.status).toBe(200)
+  expect(detailReads).toBeGreaterThanOrEqual(4)
+  expect(await response.json()).toMatchObject({
+    capabilities: {
+      canCreate: false,
+      canEdit: false,
+      canReplace: false,
+      canAcceptResolution: false,
+    },
+  })
+})
+
 test('rejects context content when the parent assignment changes during the read', async () => {
   let detailReads = 0
   const assignments: Record<string, string> = {
