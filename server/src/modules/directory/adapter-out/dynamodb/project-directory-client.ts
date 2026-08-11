@@ -599,6 +599,20 @@ export type ProjectDirectoryClient = {
     teamId: string,
     projectId?: string,
   ): Promise<NonNullable<TransactWriteCommandInput['TransactItems']>>
+  /** Builds a condition proving a Project member retains the requested role at commit time.
+   *
+   * @param directoryId - Owning Workspace directory identifier.
+   * @param projectId - Project whose membership authorizes the action.
+   * @param memberKey - Workspace member key whose role must remain active.
+   * @param minimumRole - Minimum role required by the dependent transaction.
+   * @returns A membership condition, or undefined when no matching direct grant exists.
+   */
+  createProjectAccessConditionCheck?(
+    directoryId: string,
+    projectId: string,
+    memberKey: string,
+    minimumRole: ProjectRole,
+  ): Promise<NonNullable<TransactWriteCommandInput['TransactItems']>[number] | undefined>
   /**
    * DynamoDB から sidebar 用の team/project 階層を取得します。
    */
@@ -909,6 +923,46 @@ export class DynamoDbProjectDirectoryClient {
       },
     })
     return checks
+  }
+
+  /** Builds a commit-time condition for one active direct Project membership. */
+  async createProjectAccessConditionCheck(
+    directoryId: string,
+    projectId: string,
+    memberKey: string,
+    minimumRole: ProjectRole,
+  ): Promise<NonNullable<TransactWriteCommandInput['TransactItems']>[number] | undefined> {
+    const items = await this.readValidDirectoryItems(directoryId, true)
+    const member = items.find((item): item is ProjectMemberItem =>
+      item.entryType === 'project-member' &&
+      item.projectId === projectId &&
+      item.memberKey === normalizeProjectMemberKey(memberKey) &&
+      item.archivedAt === undefined &&
+      projectRoleWeights[item.role] >= projectRoleWeights[minimumRole]
+    )
+    if (!member) return undefined
+    return {
+      ConditionCheck: {
+        TableName: this.tableName,
+        Key: { directoryId, entryKey: member.entryKey },
+        ConditionExpression:
+          '#entryType = :entryType AND #projectId = :projectId AND #memberKey = :memberKey AND ' +
+          '#role = :role AND attribute_not_exists(#archivedAt)',
+        ExpressionAttributeNames: {
+          '#archivedAt': 'archivedAt',
+          '#entryType': 'entryType',
+          '#memberKey': 'memberKey',
+          '#projectId': 'projectId',
+          '#role': 'role',
+        },
+        ExpressionAttributeValues: {
+          ':entryType': 'project-member',
+          ':memberKey': member.memberKey,
+          ':projectId': projectId,
+          ':role': member.role,
+        },
+      },
+    }
   }
 
   /**

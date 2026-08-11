@@ -173,7 +173,7 @@ export function evaluateTriageAdmission(
   let ownerUserId = entry.ownerUserId
   let rotationReservation: TriageAdmissionRotationReservation | undefined
   if (rule?.owner.type === 'fixed') {
-    ownerUserId = rule.owner.ownerUserId
+    ownerUserId = normalizeTriageMemberKey(rule.owner.ownerUserId)
   } else if (rule?.owner.type === 'rotation') {
     const rotationId = rule.owner.rotationId
     const rotationIndex = configuration.rotations.findIndex((candidate) =>
@@ -189,7 +189,7 @@ export function evaluateTriageAdmission(
         'The persisted Triage owner rotation is invalid.',
       )
     }
-    ownerUserId = rotation.memberUserIds[rotation.nextIndex]
+    ownerUserId = normalizeTriageMemberKey(rotation.memberUserIds[rotation.nextIndex])
     const nextIndex = (rotation.nextIndex + 1) % rotation.memberUserIds.length
     rotationReservation = {
       configuration: {
@@ -264,19 +264,23 @@ export function evaluateTriageAdmission(
  * @param entry The canonical stored entry.
  * @returns A permission-safe response that never exposes unavailable source content.
  */
-export function projectTriageEntryForResponse(entry: TriageEntry): TriageEntry {
-  if (entry.permission.visibility === 'full') {
-    const projected = entry.sourcePreview.permalink !== undefined &&
-      !isSafeHttpsUrl(entry.sourcePreview.permalink)
-      ? { ...entry, sourcePreview: removePermalink(entry.sourcePreview) }
-      : entry
+export function projectTriageEntryForResponse(
+  entry: TriageEntry,
+  nowValue = new Date().toISOString(),
+): TriageEntry {
+  const retentionSafeEntry = redactExpiredTriageEntry(entry, nowValue)
+  if (retentionSafeEntry.permission.visibility === 'full') {
+    const projected = retentionSafeEntry.sourcePreview.permalink !== undefined &&
+      !isSafeHttpsUrl(retentionSafeEntry.sourcePreview.permalink)
+      ? { ...retentionSafeEntry, sourcePreview: removePermalink(retentionSafeEntry.sourcePreview) }
+      : retentionSafeEntry
     return { ...projected, capabilities: createTriageCapabilities(projected) }
   }
-  const sourcePreview = removePermalink(entry.sourcePreview)
-  const requester = removeRequesterContact(entry.requester)
-  if (entry.permission.visibility === 'metadata-only') {
+  const sourcePreview = removePermalink(retentionSafeEntry.sourcePreview)
+  const requester = removeRequesterContact(retentionSafeEntry.requester)
+  if (retentionSafeEntry.permission.visibility === 'metadata-only') {
     const projected: TriageEntry = {
-      ...entry,
+      ...retentionSafeEntry,
       sourcePreview: { ...sourcePreview, body: '' },
       requester,
     }
@@ -284,7 +288,7 @@ export function projectTriageEntryForResponse(entry: TriageEntry): TriageEntry {
   }
   const restrictedPreview = removeChannelLabel(sourcePreview)
   const projected: TriageEntry = {
-    ...entry,
+    ...retentionSafeEntry,
     sourcePreview: {
       ...restrictedPreview,
       title: 'Restricted source',
@@ -302,6 +306,58 @@ export function projectTriageEntryForResponse(entry: TriageEntry): TriageEntry {
   return {
     ...projected,
     capabilities: createTriageCapabilities(projected, false),
+  }
+}
+
+/** Redacts expired source content before a read or mutation consumes an entry.
+ *
+ * The scheduled retention worker persists an audit event and revision, but queue reads and
+ * actions must remain safe while that worker is delayed or disabled. This boundary projection
+ * intentionally preserves the current revision so a subsequent action can persist its own
+ * revision-fenced update without exposing or copying expired content.
+ *
+ * @param entry The canonical entry to protect.
+ * @param nowValue The ISO 8601 boundary evaluation instant.
+ * @returns The original entry or a content-redacted detached projection.
+ */
+export function redactExpiredTriageEntry(
+  entry: TriageEntry,
+  nowValue: string,
+): TriageEntry {
+  const now = requireIsoInstant(nowValue, 'Triage retention evaluation time')
+  if (entry.retention.redactedAt || Date.parse(entry.retention.expiresAt) > Date.parse(now)) {
+    return entry
+  }
+  const sourcePreview = removePermalink(entry.sourcePreview)
+  const permission: TriageEntry['permission'] = {
+    visibility: 'metadata-only',
+    canReply: false,
+    guestVisible: false,
+    reasonCode: 'retention-expired',
+    checkedAt: now,
+  }
+  return {
+    ...entry,
+    sourcePreview: {
+      ...sourcePreview,
+      title: 'Retained source',
+      body: '',
+      attachmentCount: 0,
+      commentCount: 0,
+      watcherCount: 0,
+      sanitized: true,
+      truncated: false,
+    },
+    requester: {
+      displayName: 'Redacted requester',
+      guest: entry.requester.guest,
+    },
+    permission,
+    retention: { ...entry.retention, redactedAt: now },
+    capabilities: createTriageCapabilities({
+      ...entry,
+      permission,
+    }),
   }
 }
 
@@ -335,7 +391,7 @@ export function applyTriageAction(
   if (action.action === 'assign') {
     const ownerBase = action.ownerUserId === null
       ? withoutOwner(entry)
-      : { ...entry, ownerUserId: action.ownerUserId }
+      : { ...entry, ownerUserId: normalizeTriageMemberKey(action.ownerUserId) }
     const assignmentBase = action.projectId === null
       ? withoutProject(ownerBase)
       : action.projectId === undefined
@@ -534,6 +590,15 @@ function findCurrentWaitingTransitionAt(
  */
 function latestInstant(first: string, second: string): string {
   return Date.parse(first) >= Date.parse(second) ? first : second
+}
+
+/** Normalizes a Workspace member key before it enters a Triage owner field.
+ *
+ * @param value The validated member identifier.
+ * @returns The canonical lowercase member key.
+ */
+function normalizeTriageMemberKey(value: string): string {
+  return value.trim().toLowerCase()
 }
 
 /** Evaluates snooze, SLA, and escalation deadlines at a schedule instant.

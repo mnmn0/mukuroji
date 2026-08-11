@@ -1848,6 +1848,16 @@ function configureFakeProjectClients(
             : []),
         ]
       },
+      async createProjectAccessConditionCheck(directoryId, projectId, memberKey) {
+        if (!hasProjectAccess) return undefined
+        return {
+          ConditionCheck: {
+            TableName: 'DirectoryTable',
+            Key: { directoryId, entryKey: `PROJECT_MEMBER#${projectId}#${memberKey}` },
+            ConditionExpression: 'attribute_exists(directoryId)',
+          },
+        }
+      },
       async getProjectDirectory(directoryId, locale, consistentRead) {
         calls.directoryReads.push({
           directoryId,

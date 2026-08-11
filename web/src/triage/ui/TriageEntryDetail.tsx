@@ -7,7 +7,6 @@ import {
 } from 'react'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import {
-  createProjectIssuesPath,
   createTeamIssuesPath,
 } from '../../shared/routing/paths'
 import { ShieldIcon } from '../../shared/ui/icons'
@@ -153,16 +152,10 @@ export function TriageEntryDetail({
 
   const entry = view.entry
   const canonicalPath = entry.canonicalWorkItem
-    ? entry.canonicalWorkItem.projectId
-      ? createProjectIssuesPath(
-          entry.canonicalWorkItem.projectId,
-          entry.canonicalWorkItem.teamId,
-          entry.canonicalWorkItem.workItemId,
-        )
-      : createTeamIssuesPath(
-          entry.canonicalWorkItem.teamId,
-          entry.canonicalWorkItem.workItemId,
-        )
+    ? createTeamIssuesPath(
+        entry.canonicalWorkItem.teamId,
+        entry.canonicalWorkItem.workItemId,
+      )
     : undefined
 
   const submitAction = async (event: FormEvent<HTMLFormElement>) => {

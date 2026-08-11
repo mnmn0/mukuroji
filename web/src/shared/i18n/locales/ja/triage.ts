@@ -161,6 +161,8 @@ export const triageMessages = {
   'triage.settings.targetProject': '対象プロジェクト ID',
   'triage.settings.ownerStrategy': '担当（unowned / fixed:user / rotation:id）',
   'triage.settings.remove': '削除',
+  'triage.settings.moveUp': '上へ移動',
+  'triage.settings.moveDown': '下へ移動',
   'triage.settings.rotations': '担当ローテーション',
   'triage.settings.rotationsDescription': '候補メンバーを順番に割り当てます。',
   'triage.settings.rotationsEmpty': '担当ローテーションはありません。',

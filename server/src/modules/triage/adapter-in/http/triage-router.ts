@@ -29,6 +29,7 @@ import {
 } from '../../triage'
 import type {
   TriageActor,
+  TriageAuthorizationConditionChecks,
   TriageAuditContextFactory,
   TriageClient,
   TriageIdempotency,
@@ -77,6 +78,8 @@ export type TriageRouterActionRequest = {
   auditContext: MutationAuditContext
   /** Configuration revision observed during a bulk preflight, when applicable. */
   configurationRevision?: number
+  /** Caller authorization conditions joined to the action transaction. */
+  authorizationConditionChecks?: TriageAuthorizationConditionChecks
 }
 
 /** Input supplied to the composable bulk-action orchestration boundary. */
@@ -203,10 +206,16 @@ export function createTriageRouter(dependencies: TriageRouterDependencies) {
     try {
       const teamId = readIdentifier(context.req.param('teamId') ?? '', 'Team ID')
       const principal = await dependencies.requireTeamAccess(context, teamId, 'read')
+      const input = readListInput(context)
       const page = await dependencies.getTriage().listEntries(
         principal.workspaceId,
         teamId,
-        readListInput(context),
+        {
+          ...input,
+          ...(principal.visibleProjectIds === undefined
+            ? {}
+            : { visibleProjectIds: principal.visibleProjectIds }),
+        },
       )
       return context.json({
         ...page,
@@ -1096,7 +1105,7 @@ function readUserId(value: unknown, label: string): string {
   if (!/^[A-Za-z0-9][A-Za-z0-9._:@+-]*$/u.test(identifier)) {
     throw invalidInput(`${label} is invalid.`)
   }
-  return identifier
+  return identifier.toLowerCase()
 }
 
 /** Reads bounded text, optionally allowing empty content. */

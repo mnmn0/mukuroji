@@ -17,6 +17,11 @@ import type {
 import type { TransactWriteCommandInput } from '@aws-sdk/lib-dynamodb'
 import type { MutationAuditContext } from '../audit'
 
+/** DynamoDB condition checks supplied by an authorization boundary. */
+export type TriageAuthorizationConditionChecks = NonNullable<
+  TransactWriteCommandInput['TransactItems']
+>
+
 /** Creates a canonical SHA-256 fingerprint for validated JSON-like input.
  *
  * @param value The semantic input after transport validation.
@@ -137,6 +142,7 @@ export interface TriageClient {
    * @param idempotency Replay protection bound to the action.
    * @param auditContext Immutable request and source context for the action audit event.
    * @param configurationRevision Optional Team configuration revision to fence with the action.
+   * @param authorizationConditionChecks Caller authorization conditions joined to the action transaction.
    * @returns The mutation receipt.
    */
   applyAction(
@@ -148,6 +154,7 @@ export interface TriageClient {
     idempotency: TriageIdempotency,
     auditContext: MutationAuditContext,
     configurationRevision?: number,
+    authorizationConditionChecks?: TriageAuthorizationConditionChecks,
   ): Promise<TriageMutationReceipt>
   /** Looks up an existing action receipt before externally composed Work Item creation.
    *

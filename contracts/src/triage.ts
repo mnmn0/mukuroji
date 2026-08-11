@@ -291,6 +291,8 @@ export type TriageQueueSlaFilter = 'on-track' | 'due-soon' | 'breached' | 'pause
 export type TriageEntryListInput = {
   /** Case-insensitive text matched against the permission-safe queue projection. */
   query?: string
+  /** Server-provided Project scope used to prevent hidden routing metadata from affecting search. */
+  visibleProjectIds?: readonly string[]
   /** A single lifecycle state to include. */
   state?: TriageEntryState
   /** A single source kind to include. */

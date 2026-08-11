@@ -1006,6 +1006,47 @@ describe('DynamoDbTriageClient queue indexes', () => {
     }
   })
 
+  test('scopes routing metadata search to the caller-visible Project set', async () => {
+    const entry = createEntry()
+    entry.permission = {
+      visibility: 'full',
+      canReply: true,
+      guestVisible: false,
+      checkedAt: NOW,
+    }
+    entry.routing = {
+      reason: 'Visible route.',
+      candidates: [
+        { teamId: 'support', projectId: 'hidden-project', reason: 'Confidential route.', permitted: true },
+        { teamId: 'support', projectId: 'visible-project', reason: 'Visible route.', permitted: true },
+      ],
+    }
+    entry.capabilities = createTriageCapabilities(entry)
+    const storedEntry = createTriageEntryTransactionItems({
+      tableName: 'RequestIntakeTable',
+      entry,
+      inputFingerprint: createTriageInputFingerprint({ sourceId: entry.source.sourceId }),
+    })[0]?.Put?.Item
+    if (!storedEntry) throw new TypeError('Expected a stored entry fixture.')
+    const harness = createHarness([
+      {},
+      { Items: [{ scopeKey: 'WORKSPACE#workspace-1', recordKey: 'TRIAGE#triage-1' }] },
+      { Item: storedEntry },
+    ])
+
+    try {
+      const page = await harness.client.listEntries('workspace-1', 'support', {
+        limit: 10,
+        query: 'confidential',
+        visibleProjectIds: ['visible-project'],
+      })
+
+      expect(page.entries).toEqual([])
+    } finally {
+      harness.restore()
+    }
+  })
+
   test('falls back from an unavailable owner index but not from unrelated validation failures', async () => {
     const missingIndex = new Error('The table does not have the specified index.')
     missingIndex.name = 'ValidationException'
@@ -1104,7 +1145,7 @@ describe('DynamoDbTriageClient queue indexes', () => {
     const matchingEntry = createEntry()
     matchingEntry.id = 'triage-matching-owner'
     matchingEntry.source.sourceId = 'message-matching-owner'
-    matchingEntry.ownerUserId = 'owner@example.com'
+    matchingEntry.ownerUserId = 'Owner@Example.com'
     const otherOwnerRow = createTriageEntryTransactionItems({
       tableName: 'RequestIntakeTable',
       entry: otherOwnerEntry,

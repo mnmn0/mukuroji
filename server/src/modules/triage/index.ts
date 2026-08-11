@@ -22,6 +22,7 @@ export {
   createTriageInputFingerprint,
   type ResolveTriageWorkItemAction,
   type TriageActor,
+  type TriageAuthorizationConditionChecks,
   type TriageAuditContextFactory,
   type TriageClient,
   type TriageIdempotency,

@@ -509,10 +509,13 @@ export function decodeTriageEntryRow(
   try {
     validateTriageEntryProjection(value.entry)
     const entryKey = createTriageEntryKey(value.entry.workspaceId, value.entry.id)
-    return entryKey.scopeKey === expectedKey.scopeKey &&
-        entryKey.recordKey === expectedKey.recordKey
+    if (entryKey.scopeKey !== expectedKey.scopeKey || entryKey.recordKey !== expectedKey.recordKey) {
+      return undefined
+    }
+    const normalizedOwnerUserId = value.entry.ownerUserId?.trim().toLowerCase()
+    return normalizedOwnerUserId === undefined || normalizedOwnerUserId === value.entry.ownerUserId
       ? value.entry
-      : undefined
+      : { ...value.entry, ownerUserId: normalizedOwnerUserId }
   } catch {
     return undefined
   }
@@ -795,7 +798,9 @@ function calculateNextWakeAt(entry: TriageEntry): string | undefined {
 
 /** Creates a sparse owner index partition key. */
 function createOwnerIndexKey(entry: TriageEntry): string {
-  return `WORKSPACE#${entry.workspaceId}#TEAM#${entry.teamId}#OWNER#${entry.ownerUserId ?? 'UNOWNED'}`
+  return `WORKSPACE#${entry.workspaceId}#TEAM#${entry.teamId}#OWNER#${
+    entry.ownerUserId?.trim().toLowerCase() ?? 'UNOWNED'
+  }`
 }
 
 /** Deterministically maps an entry ID to one wake shard. */

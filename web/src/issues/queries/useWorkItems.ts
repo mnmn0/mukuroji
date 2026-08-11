@@ -17,6 +17,7 @@ const workItemQueryConfig = {
  * @param accessToken - Work Item API の access token です。
  * @param teamId - 取得対象の Team ID です。
  * @param enabled - Query を実行するかどうかです。
+ * @param includeArchived - Whether the Team query includes archived Work Items.
  * @param scope - 同じTeam一覧を異なる用途で分離するSWR key scopeです。
  * @returns Team Work Item 一覧の SWR state です。
  */
@@ -24,15 +25,17 @@ export function useTeamIssues(
   accessToken: string | undefined,
   teamId: string | undefined,
   enabled = true,
+  includeArchived = false,
   scope = 'team-issues',
 ) {
   const key = accessToken && teamId && enabled
-    ? [scope, accessToken, teamId] as const
+    ? [scope, accessToken, teamId, includeArchived] as const
     : null
 
   const query = useSWR(
     key,
-    ([, token, currentTeamId]) => getTeamIssues(currentTeamId, token),
+    ([, token, currentTeamId, shouldIncludeArchived]) =>
+      getTeamIssues(currentTeamId, token, shouldIncludeArchived),
     workItemQueryConfig,
   )
 
@@ -46,6 +49,7 @@ export function useTeamIssues(
  * @param projectId - 取得対象の Project ID です。
  * @param enabled - Query を実行するかどうかです。
  * @param normalizeError - Legacy Project task error へ変換する関数です。
+ * @param includeArchived - Whether the Project query includes archived Work Items.
  * @returns Project Work Item 一覧の SWR state です。
  */
 export function useProjectIssues(
@@ -53,16 +57,17 @@ export function useProjectIssues(
   projectId: string | undefined,
   enabled = true,
   normalizeError: (error: unknown) => unknown = (error) => error,
+  includeArchived = false,
 ) {
   const key = accessToken && projectId && enabled
-    ? ['project-tasks', accessToken, projectId] as const
+    ? ['project-tasks', accessToken, projectId, includeArchived] as const
     : null
 
   const query = useSWR(
     key,
-    async ([, token, currentProjectId]) => {
+    async ([, token, currentProjectId, shouldIncludeArchived]) => {
       try {
-        return await getProjectIssues(currentProjectId, token)
+        return await getProjectIssues(currentProjectId, token, shouldIncludeArchived)
       } catch (error) {
         throw normalizeError(error)
       }
@@ -78,16 +83,22 @@ export function useProjectIssues(
  *
  * @param accessToken - Work Item API の access token です。
  * @param enabled - Query を実行するかどうかです。
+ * @param includeArchived - Whether the Workspace query includes archived Work Items.
  * @returns Workspace Work Item 一覧の SWR state です。
  */
-export function useWorkspaceWorkItems(accessToken?: string, enabled = true) {
+export function useWorkspaceWorkItems(
+  accessToken?: string,
+  enabled = true,
+  includeArchived = false,
+) {
   const key = accessToken && enabled
-    ? ['workspace-work-items', accessToken] as const
+    ? ['workspace-work-items', accessToken, includeArchived] as const
     : null
 
   const query = useSWR(
     key,
-    ([, token]) => getWorkspaceWorkItems(token),
+    ([, token, shouldIncludeArchived]) =>
+      getWorkspaceWorkItems(token, shouldIncludeArchived),
     workItemQueryConfig,
   )
 

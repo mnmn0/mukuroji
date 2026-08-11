@@ -455,6 +455,7 @@ export function buildDataStores(
     billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
     pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
     removalPolicy: cdk.RemovalPolicy.RETAIN,
+    timeToLiveAttribute: 'expiresAt',
   });
 
   const notificationsTable = new dynamodb.Table(stack, 'NotificationsTable', {

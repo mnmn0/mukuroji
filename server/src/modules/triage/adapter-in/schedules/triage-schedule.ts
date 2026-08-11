@@ -17,6 +17,7 @@ import {
   decodeTriageEntryRow,
   DEFAULT_TRIAGE_WAKE_SHARD_COUNT,
 } from '../../adapter-out/dynamodb/triage-transactions'
+import { decodeTriageConfigurationRow } from '../../adapter-out/dynamodb/dynamo-db-triage-client'
 import {
   createTriageScheduleAuditTransactionItems,
   readTriageNotificationMemberKey,
@@ -272,7 +273,7 @@ export async function runTriageSchedule(
   return result
 }
 
-/** Reads the current escalation recipient from the Team configuration row. */
+/** Reads the current escalation recipient from the canonical Team configuration row. */
 async function readEscalationOwnerUserId(
   documentClient: TriageScheduleDocumentClient,
   tableName: string,
@@ -288,19 +289,21 @@ async function readEscalationOwnerUserId(
     },
     ConsistentRead: true,
   }))
-  if (!isRecord(response.Item) || response.Item.entryType !== 'triage-configuration') {
-    return undefined
+  const configuration = decodeTriageConfigurationRow(
+    response.Item,
+    entry.workspaceId,
+    entry.teamId,
+  )
+  if (!configuration) return undefined
+  const policy = configuration.slaPolicies.find((candidate) => candidate.id === policyId)
+  if (!policy) {
+    throw new TriageError(
+      500,
+      'InvalidTriageConfiguration',
+      'The Triage SLA policy referenced by the entry is unavailable.',
+    )
   }
-  const configuration = response.Item.configuration
-  if (!isRecord(configuration) || configuration.workspaceId !== entry.workspaceId ||
-    configuration.teamId !== entry.teamId || !Array.isArray(configuration.slaPolicies)) {
-    return undefined
-  }
-  for (const policy of configuration.slaPolicies) {
-    if (!isRecord(policy) || policy.id !== policyId) continue
-    return readTriageNotificationMemberKey(policy.escalationOwnerUserId)
-  }
-  return undefined
+  return readTriageNotificationMemberKey(policy.escalationOwnerUserId)
 }
 
 /** Reads a KEYS_ONLY GSI result into a base-table key. */

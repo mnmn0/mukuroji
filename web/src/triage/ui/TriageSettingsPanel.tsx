@@ -211,6 +211,14 @@ function TriageSettingsEditor({
                   onChange={(event) => setRules(updateAt(rules, index, { ...rule, name: event.target.value }))}
                   value={rule.name}
                 />
+                <ReorderControls
+                  canManage={canManage}
+                  isFirst={index === 0}
+                  isLast={index === rules.length - 1}
+                  onMoveDown={() => setRules(moveAt(rules, index, 1))}
+                  onMoveUp={() => setRules(moveAt(rules, index, -1))}
+                  t={t}
+                />
                 {canManage ? (
                   <button className="min-h-10 px-3 text-sm font-semibold text-red-700" onClick={() => setRules(removeAt(rules, index))} type="button">
                     {t('triage.settings.remove')}
@@ -360,6 +368,14 @@ function TriageSettingsEditor({
                   value={policy.name}
                   onChange={(value) => setSlaPolicies(updateAt(slaPolicies, index, { ...policy, name: value }))}
                 />
+                <ReorderControls
+                  canManage={canManage}
+                  isFirst={index === 0}
+                  isLast={index === slaPolicies.length - 1}
+                  onMoveDown={() => setSlaPolicies(moveAt(slaPolicies, index, 1))}
+                  onMoveUp={() => setSlaPolicies(moveAt(slaPolicies, index, -1))}
+                  t={t}
+                />
                 {canManage ? (
                   <button className="min-h-10 px-3 text-sm font-semibold text-red-700" onClick={() => setSlaPolicies(removeAt(slaPolicies, index))} type="button">
                     {t('triage.settings.remove')}
@@ -455,6 +471,53 @@ function SettingsSection({ action, children, description, title }: {
       </div>
       {children}
     </section>
+  )
+}
+
+/** Renders accessible controls for changing first-match configuration order. */
+function ReorderControls({
+  canManage,
+  isFirst,
+  isLast,
+  onMoveDown,
+  onMoveUp,
+  t,
+}: {
+  /** Whether the current principal may change the order. */
+  canManage: boolean
+  /** Whether the item is already first. */
+  isFirst: boolean
+  /** Whether the item is already last. */
+  isLast: boolean
+  /** Moves the item one position down. */
+  onMoveDown: () => void
+  /** Moves the item one position up. */
+  onMoveUp: () => void
+  /** Localized message resolver. */
+  t: (key: MessageKey) => string
+}) {
+  if (!canManage) return null
+  return (
+    <div className="flex items-center gap-1" role="group">
+      <button
+        aria-label={t('triage.settings.moveUp')}
+        className="min-h-10 min-w-10 px-2 text-lg font-semibold text-[var(--workbench-muted)] disabled:opacity-40"
+        disabled={isFirst}
+        onClick={onMoveUp}
+        type="button"
+      >
+        ↑
+      </button>
+      <button
+        aria-label={t('triage.settings.moveDown')}
+        className="min-h-10 min-w-10 px-2 text-lg font-semibold text-[var(--workbench-muted)] disabled:opacity-40"
+        disabled={isLast}
+        onClick={onMoveDown}
+        type="button"
+      >
+        ↓
+      </button>
+    </div>
   )
 }
 
@@ -562,4 +625,17 @@ function updateAt<Value>(values: readonly Value[], index: number, value: Value) 
 /** Removes one immutable array entry by index. */
 function removeAt<Value>(values: readonly Value[], index: number) {
   return values.filter((_, currentIndex) => currentIndex !== index)
+}
+
+/** Moves one editable configuration item while preserving all other array entries. */
+function moveAt<Value>(values: readonly Value[], index: number, offset: -1 | 1): Value[] {
+  const targetIndex = index + offset
+  if (targetIndex < 0 || targetIndex >= values.length) return [...values]
+  const next = [...values]
+  const moved = next[index]
+  const target = next[targetIndex]
+  if (moved === undefined || target === undefined) return next
+  next[index] = target
+  next[targetIndex] = moved
+  return next
 }

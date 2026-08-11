@@ -463,5 +463,20 @@ describe('triage entry state machine', () => {
       },
     }))
     expect(malformedPermalink.sourcePreview.permalink).toBeUndefined()
+
+    const expired = projectTriageEntryForResponse(createEntry({
+      retention: { expiresAt: '2026-08-09T00:00:00.000Z' },
+    }), '2026-08-10T00:00:00.000Z')
+    expect(expired).toMatchObject({
+      permission: { visibility: 'metadata-only', reasonCode: 'retention-expired' },
+      requester: { displayName: 'Redacted requester' },
+      sourcePreview: {
+        title: 'Retained source',
+        body: '',
+        attachmentCount: 0,
+        commentCount: 0,
+        watcherCount: 0,
+      },
+    })
   })
 })

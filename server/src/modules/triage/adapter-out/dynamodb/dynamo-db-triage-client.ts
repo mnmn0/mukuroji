@@ -41,6 +41,7 @@ import {
   createTriageCapabilities,
   evaluateTriageAdmission,
   projectTriageEntryForResponse,
+  redactExpiredTriageEntry,
   TriageError,
   type TriageSourceActivity,
 } from '../../domain/triage-entry'
@@ -52,6 +53,7 @@ import type {
   ResolveTriageWorkItemAction,
   TriageActor,
   TriageAuditContextFactory,
+  TriageAuthorizationConditionChecks,
   TriageClient,
   TriageIdempotency,
 } from '../../triage'
@@ -157,19 +159,21 @@ export type TriageConfigurationReferenceValidator = (
   input: UpdateTriageConfigurationInput,
 ) => Promise<TriageAdmissionValidationContribution>
 
-/** Builds commit-time guards for references selected by an assignment action.
+/** Builds commit-time guards for references selected by a non-Work-Item action.
  *
  * @param workspaceId Owning Workspace identifier.
  * @param teamId Target Team identifier.
  * @param entry Strongly read current entry.
- * @param action Validated assignment transition.
+ * @param action Validated non-Work-Item transition.
+ * @param actorId Authenticated actor whose direct Project access may authorize the action.
  * @returns Directory and membership conditions joined to the action transaction.
  */
 export type TriageActionReferenceValidator = (
   workspaceId: string,
   teamId: string,
   entry: TriageEntry,
-  action: Extract<TriageActionInput, { action: 'assign' }>,
+  action: Exclude<TriageActionInput, { action: 'accept' | 'duplicate' }>,
+  actorId?: string,
 ) => Promise<TriageAdmissionValidationContribution>
 
 /** A source claim returned after a uniqueness conflict. */
@@ -353,7 +357,9 @@ export class DynamoDbTriageClient implements TriageClient {
     requireWorkspaceId(workspaceId)
     requireIdentifier(teamId, 'Team ID')
     const limit = requirePositiveInteger(input.limit ?? 50, 'Triage queue limit', 100)
-    const owner = input.ownerUserId === 'unowned' ? 'UNOWNED' : input.ownerUserId
+    const owner = input.ownerUserId === 'unowned'
+      ? 'UNOWNED'
+      : input.ownerUserId?.trim().toLowerCase()
     const cursorIndexKind = input.cursor !== undefined
       ? this.decodeQueueCursorIndexKind(input.cursor, workspaceId, teamId, input)
       : undefined
@@ -418,6 +424,7 @@ export class DynamoDbTriageClient implements TriageClient {
   async getEntry(workspaceId: string, teamId: string, entryId: string): Promise<TriageEntry> {
     return projectTriageEntryForResponse(
       await this.getEntryForMutation(workspaceId, teamId, entryId),
+      this.now().toISOString(),
     )
   }
 
@@ -440,7 +447,7 @@ export class DynamoDbTriageClient implements TriageClient {
     if (entry.teamId !== teamId) {
       throw new TriageError(404, 'TriageEntryNotFound', 'The triage entry was not found.')
     }
-    return entry
+    return redactExpiredTriageEntry(entry, this.now().toISOString())
   }
 
   /** Looks up an existing fingerprint-bound action receipt.
@@ -490,6 +497,7 @@ export class DynamoDbTriageClient implements TriageClient {
    * @param idempotency Replay protection bound to the normalized action.
    * @param auditContext Immutable caller context for an assignment audit event.
    * @param configurationRevision Optional Team configuration revision to fence with the action.
+   * @param authorizationConditionChecks Caller authorization conditions joined to the action transaction.
    * @returns The committed or replayed permission-safe receipt.
    */
   async applyAction(
@@ -501,6 +509,7 @@ export class DynamoDbTriageClient implements TriageClient {
     idempotency: TriageIdempotency,
     auditContext: MutationAuditContext,
     configurationRevision?: number,
+    authorizationConditionChecks?: TriageAuthorizationConditionChecks,
   ): Promise<TriageMutationReceipt> {
     const replay = await this.readReceipt(workspaceId, entryId, 'action', idempotency)
     if (replay) return replay
@@ -513,17 +522,18 @@ export class DynamoDbTriageClient implements TriageClient {
       idempotency,
       auditContext,
     )
-    const transactItems = configurationRevision === undefined
-      ? contribution.transactItems
-      : [
-          createTriageConfigurationRevisionConditionCheck(
+    const transactItems = dedupeTriageConditionChecks([
+      ...(authorizationConditionChecks ?? []),
+      ...(configurationRevision === undefined
+        ? []
+        : [createTriageConfigurationRevisionConditionCheck(
             this.tableName,
             workspaceId,
             teamId,
             configurationRevision,
-          ),
-          ...contribution.transactItems,
-        ]
+          )]),
+      ...contribution.transactItems,
+    ])
     if (transactItems.length > 100) {
       throw new TriageError(409, 'TriageTransactionTooLarge', 'The triage action is too large.')
     }
@@ -531,7 +541,10 @@ export class DynamoDbTriageClient implements TriageClient {
       await this.documentClient.send(new TransactWriteCommand({
         TransactItems: transactItems,
       }))
-      return { entry: projectTriageEntryForResponse(contribution.entry), replayed: false }
+      return {
+        entry: projectTriageEntryForResponse(contribution.entry, this.now().toISOString()),
+        replayed: false,
+      }
     } catch (error) {
       if (!isConditionalConflict(error)) throw error
       const concurrentReplay = await this.readReceipt(workspaceId, entryId, 'action', idempotency)
@@ -622,7 +635,7 @@ export class DynamoDbTriageClient implements TriageClient {
       Key: createConfigurationKey(workspaceId, teamId),
       ConsistentRead: true,
     }))
-    const stored = decodeConfigurationRow(response.Item, workspaceId, teamId)
+    const stored = decodeTriageConfigurationRow(response.Item, workspaceId, teamId)
     return stored ?? createDefaultConfiguration(workspaceId, teamId, this.now().toISOString())
   }
 
@@ -639,7 +652,7 @@ export class DynamoDbTriageClient implements TriageClient {
       Key: createConfigurationKey(entry.workspaceId, entry.teamId),
       ConsistentRead: true,
     }))
-    const storedConfiguration = decodeConfigurationRow(
+    const storedConfiguration = decodeTriageConfigurationRow(
       response.Item,
       entry.workspaceId,
       entry.teamId,
@@ -744,7 +757,7 @@ export class DynamoDbTriageClient implements TriageClient {
       Key: createConfigurationKey(workspaceId, teamId),
       ConsistentRead: true,
     }))
-    const current = decodeConfigurationRow(currentResponse.Item, workspaceId, teamId)
+    const current = decodeTriageConfigurationRow(currentResponse.Item, workspaceId, teamId)
     const currentRevision = current?.revision ?? 0
     if (currentRevision !== input.expectedRevision) {
       throw new TriageError(409, 'TriageConfigurationConflict', 'Triage settings changed.')
@@ -912,7 +925,10 @@ export class DynamoDbTriageClient implements TriageClient {
       transactItems.push(...admission.transactItems)
       try {
         await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactItems }))
-        return { entry: projectTriageEntryForResponse(entry), replayed: false }
+        return {
+          entry: projectTriageEntryForResponse(entry, this.now().toISOString()),
+          replayed: false,
+        }
       } catch (error) {
         if (
           retryableConflictItemIndexes.length > 0 &&
@@ -1020,7 +1036,10 @@ export class DynamoDbTriageClient implements TriageClient {
       await this.documentClient.send(new TransactWriteCommand({
         TransactItems: contribution.transactItems,
       }))
-      return { entry: projectTriageEntryForResponse(contribution.entry), replayed: false }
+      return {
+        entry: projectTriageEntryForResponse(contribution.entry, this.now().toISOString()),
+        replayed: false,
+      }
     } catch (error) {
       if (!isConditionalConflict(error)) throw error
       const concurrent = await this.readReceipt(workspaceId, entryId, 'activity', idempotency)
@@ -1086,12 +1105,13 @@ export class DynamoDbTriageClient implements TriageClient {
       auditContext,
       wakeShardCount: this.wakeShardCount,
     })
-    if (action.action !== 'assign' || !this.validateActionReferences) return contribution
+    if (!this.validateActionReferences) return contribution
     const referenceValidation = await this.validateActionReferences(
       workspaceId,
       entry.teamId,
       entry,
       action,
+      actor.id,
     )
     return {
       entry: contribution.entry,
@@ -1166,8 +1186,9 @@ export class DynamoDbTriageClient implements TriageClient {
             'The stored triage entry is outside the requested queue scope.',
           )
         }
-        if (!matchesQueueFilter(entry, workspaceId, teamId, input, ownerUserId, now)) continue
-        entries.push(projectTriageEntryForResponse(entry))
+        const boundaryEntry = redactExpiredTriageEntry(entry, now.toISOString())
+        if (!matchesQueueFilter(boundaryEntry, workspaceId, teamId, input, ownerUserId, now)) continue
+        entries.push(projectTriageEntryForResponse(boundaryEntry, now.toISOString()))
       }
     } while (
       entries.length < limit &&
@@ -1213,7 +1234,7 @@ export class DynamoDbTriageClient implements TriageClient {
         'The triage receipt references an unavailable entry revision.',
       )
     }
-    return { entry: projectTriageEntryForResponse(entry), replayed: true }
+    return { entry: projectTriageEntryForResponse(entry, this.now().toISOString()), replayed: true }
   }
 
   /** Reads a unique source claim. */
@@ -1457,20 +1478,30 @@ function matchesQueueFilter(
   if (entry.workspaceId !== workspaceId || entry.teamId !== teamId) return false
   if (input.state && entry.state !== input.state) return false
   if (input.sourceKind && entry.source.kind !== input.sourceKind) return false
-  if (ownerUserId === 'UNOWNED' && entry.ownerUserId !== undefined) return false
-  if (ownerUserId && ownerUserId !== 'UNOWNED' && entry.ownerUserId !== ownerUserId) return false
-  if (input.query && !matchesQueueQuery(entry, input.query)) return false
+  const normalizedEntryOwner = entry.ownerUserId?.trim().toLowerCase()
+  if (ownerUserId === 'UNOWNED' && normalizedEntryOwner !== undefined) return false
+  if (ownerUserId && ownerUserId !== 'UNOWNED' && normalizedEntryOwner !== ownerUserId) return false
+  if (input.query && !matchesQueueQuery(entry, input.query, input.visibleProjectIds)) return false
   if (input.sla && resolveQueueSlaFilter(entry, now) !== input.sla) return false
   return true
 }
 
 /** Matches bounded queue search text against safe source and routing metadata. */
-function matchesQueueQuery(entry: TriageEntry, query: string): boolean {
+function matchesQueueQuery(
+  entry: TriageEntry,
+  query: string,
+  visibleProjectIds: readonly string[] | undefined,
+): boolean {
   const normalizedQuery = query.trim().toLocaleLowerCase('en-US')
   if (!normalizedQuery) return true
   const canViewContent = entry.permission.visibility === 'full'
   const canViewMetadata = entry.permission.visibility !== 'denied'
   const canViewInternalContext = entry.capabilities.canViewInternalContext
+  const visibleRoutingCandidates = visibleProjectIds === undefined
+    ? entry.routing.candidates
+    : entry.routing.candidates.filter((candidate) =>
+        candidate.projectId !== undefined && visibleProjectIds.includes(candidate.projectId)
+      )
   return [
     canViewMetadata ? entry.sourcePreview.title : undefined,
     canViewContent ? entry.sourcePreview.body : undefined,
@@ -1479,7 +1510,7 @@ function matchesQueueQuery(entry: TriageEntry, query: string): boolean {
     canViewMetadata ? entry.requester.displayName : undefined,
     canViewMetadata ? entry.ownerUserId : undefined,
     ...(canViewInternalContext
-      ? entry.routing.candidates.flatMap((candidate) => [
+      ? visibleRoutingCandidates.flatMap((candidate) => [
           candidate.teamId,
           candidate.projectId,
           candidate.reason,
@@ -1502,6 +1533,19 @@ function resolveQueueSlaFilter(
   return remainingMilliseconds <= 4 * 60 * 60 * 1_000 ? 'due-soon' : 'on-track'
 }
 
+/** Removes duplicate condition checks when an action's current and destination scopes coincide. */
+function dedupeTriageConditionChecks(items: TriageTransactionItems): TriageTransactionItems {
+  const seen = new Set<string>()
+  return items.filter((item) => {
+    const condition = item.ConditionCheck
+    if (!condition?.TableName || !condition.Key) return true
+    const key = JSON.stringify([condition.TableName, condition.Key])
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+}
+
 /** Creates a filter- and index-bound queue cursor scope. */
 function createQueueCursorScope(
   workspaceId: string,
@@ -1516,6 +1560,9 @@ function createQueueCursorScope(
     state: input.state,
     sourceKind: input.sourceKind,
     ownerUserId: input.ownerUserId,
+    visibleProjectIds: input.visibleProjectIds === undefined
+      ? undefined
+      : [...input.visibleProjectIds].sort(),
     query: input.query,
     sla: input.sla,
   })
@@ -1687,7 +1734,7 @@ function validateConfigurationInput(
  * @param teamId The Team requested by the caller.
  * @returns The validated configuration, or undefined when no row exists.
  */
-function decodeConfigurationRow(
+export function decodeTriageConfigurationRow(
   value: unknown,
   workspaceId: string,
   teamId: string,
@@ -1850,7 +1897,7 @@ function decodeOwnerStrategy(value: unknown): TriageOwnerStrategy | undefined {
   if (!isRecord(value)) return undefined
   if (value.type === 'unowned') return { type: 'unowned' }
   if (value.type === 'fixed' && isUserId(value.ownerUserId)) {
-    return { type: 'fixed', ownerUserId: value.ownerUserId }
+    return { type: 'fixed', ownerUserId: value.ownerUserId.toLowerCase() }
   }
   if (value.type === 'rotation' && isIdentifier(value.rotationId)) {
     return { type: 'rotation', rotationId: value.rotationId }
@@ -1877,7 +1924,7 @@ function decodeOwnerRotation(value: unknown): TriageOwnerRotation | undefined {
   return {
     id: value.id,
     name: value.name,
-    memberUserIds: [...value.memberUserIds],
+    memberUserIds: value.memberUserIds.map((memberUserId) => memberUserId.toLowerCase()),
     nextIndex: value.nextIndex,
   }
 }
@@ -1909,7 +1956,7 @@ function decodeSlaPolicy(value: unknown): TriageSlaPolicy | undefined {
       : { escalationMinutes: value.escalationMinutes }),
     ...(value.escalationOwnerUserId === undefined
       ? {}
-      : { escalationOwnerUserId: value.escalationOwnerUserId }),
+      : { escalationOwnerUserId: value.escalationOwnerUserId.toLowerCase() }),
   }
 }
 

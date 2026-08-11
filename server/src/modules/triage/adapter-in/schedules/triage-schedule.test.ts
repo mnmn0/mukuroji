@@ -386,13 +386,25 @@ describe('triage schedule adapter', () => {
           return {
             Item: {
               entryType: 'triage-configuration',
+              revision: 1,
               configuration: {
+                schemaVersion: 1,
                 workspaceId: 'workspace-1',
                 teamId: 'platform',
+                rules: [],
+                rotations: [],
                 slaPolicies: [{
                   id: 'support-sla',
+                  name: 'Support SLA',
+                  sourceKinds: ['email'],
+                  responseMinutes: 60,
+                  escalationMinutes: 30,
                   escalationOwnerUserId: 'incident-manager@example.com',
                 }],
+                allowedBulkActions: ['assign', 'decline', 'snooze'],
+                retentionDays: 365,
+                revision: 1,
+                updatedAt: '2026-08-09T00:00:00.000Z',
               },
             },
           }
@@ -457,6 +469,60 @@ describe('triage schedule adapter', () => {
           }),
         }),
       ]))
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('fails closed when the escalation configuration row is malformed', async () => {
+    const entry = createEntry()
+    entry.state = 'pending'
+    delete entry.snoozedUntil
+    entry.ownerUserId = 'triager@example.com'
+    entry.sla = {
+      policyId: 'support-sla',
+      dueAt: '2026-08-09T00:05:00.000Z',
+      escalationDueAt: '2026-08-09T00:09:00.000Z',
+    }
+    entry.capabilities = createTriageCapabilities(entry)
+    const storedItem = createTriageEntryTransactionItems({
+      tableName: 'RequestIntakeTable',
+      entry,
+      inputFingerprint: createTriageInputFingerprint({ sourceId: entry.source.sourceId }),
+    })[0]?.Put?.Item
+    if (!storedItem) throw new TypeError('Expected a stored triage entry fixture.')
+    const harness = createHarness((commandName, input) => {
+      if (commandName === 'QueryCommand') {
+        return { Items: [{ scopeKey: 'WORKSPACE#workspace-1', recordKey: 'TRIAGE#triage-1' }] }
+      }
+      if (commandName === 'GetCommand') {
+        const key = isRecord(input.Key) ? input.Key : {}
+        if (key.recordKey === 'TRIAGE_CONFIG#TEAM#platform') {
+          return {
+            Item: {
+              entryType: 'triage-configuration',
+              revision: 1,
+              configuration: { workspaceId: 'workspace-1', teamId: 'platform' },
+            },
+          }
+        }
+        return { Item: storedItem }
+      }
+      return {}
+    })
+
+    try {
+      await expect(runTriageSchedule({
+        documentClient: harness.documentClient,
+        tableName: 'RequestIntakeTable',
+        auditTableName: 'AuditEventsTable',
+        auditRetentionDays: 365,
+        wakeIndexName: 'triage-wake-index',
+        wakeShardCount: 8,
+        batchSize: 1,
+        now: '2026-08-09T00:10:00.000Z',
+      })).rejects.toMatchObject({ code: 'InvalidTriageConfiguration', status: 500 })
+      expect(harness.calls).toEqual(['QueryCommand', 'GetCommand', 'GetCommand'])
     } finally {
       harness.restore()
     }

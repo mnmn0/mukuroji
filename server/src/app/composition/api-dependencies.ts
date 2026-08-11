@@ -776,20 +776,24 @@ export function createTriageConfigurationReferenceValidator(
   }
 }
 
-/** Creates commit-time guards for one assignment's Team, Project, and owner references. */
+/** Creates commit-time guards for one Triage action's Team, Project, and owner references. */
 export function createTriageActionReferenceValidator(
-  projectDirectory: Pick<DynamoDbProjectDirectoryClient, 'createActiveReferenceConditionChecks'>,
+  projectDirectory: Pick<DynamoDbProjectDirectoryClient, 'createActiveReferenceConditionChecks'> &
+    Partial<Pick<DynamoDbProjectDirectoryClient, 'createProjectAccessConditionCheck'>>,
   workspaceAccess: Pick<DynamoDbWorkspaceAccessClient, 'createActiveMemberConditionCheck'>,
 ): TriageActionReferenceValidator {
   return async (
     workspaceId: string,
     teamId: string,
     entry: TriageEntry,
-    action: Extract<TriageActionInput, { action: 'assign' }>,
+    action: Exclude<TriageActionInput, { action: 'accept' | 'duplicate' }>,
+    actorId?: string,
   ) => {
-    const projectId = action.projectId === null
-      ? undefined
-      : action.projectId ?? entry.projectId
+    const projectId = action.action === 'assign'
+      ? action.projectId === null
+        ? undefined
+        : action.projectId ?? entry.projectId
+      : entry.projectId
     let directoryConditionChecks
     try {
       directoryConditionChecks = await projectDirectory.createActiveReferenceConditionChecks(
@@ -806,7 +810,16 @@ export function createTriageActionReferenceValidator(
       }
       throw error
     }
-    const memberConditionChecks = action.ownerUserId === null || action.ownerUserId === undefined
+    const accessConditionCheck = projectId && actorId && projectDirectory.createProjectAccessConditionCheck
+      ? await projectDirectory.createProjectAccessConditionCheck(
+          workspaceId,
+          projectId,
+          actorId,
+          'member',
+        )
+      : undefined
+    const memberConditionChecks = action.action !== 'assign' ||
+      action.ownerUserId === null || action.ownerUserId === undefined
       ? []
       : [await workspaceAccess.createActiveMemberConditionCheck(
           workspaceId,
@@ -822,6 +835,7 @@ export function createTriageActionReferenceValidator(
     return {
       transactItems: [
         ...directoryConditionChecks,
+        ...(accessConditionCheck ? [accessConditionCheck] : []),
         ...memberConditionChecks.flatMap((conditionCheck) =>
           conditionCheck === undefined ? [] : [conditionCheck]
         ),

@@ -161,6 +161,8 @@ export const triageMessages = {
   'triage.settings.targetProject': 'Target Project ID',
   'triage.settings.ownerStrategy': 'Owner (unowned / fixed:user / rotation:id)',
   'triage.settings.remove': 'Remove',
+  'triage.settings.moveUp': 'Move up',
+  'triage.settings.moveDown': 'Move down',
   'triage.settings.rotations': 'Owner rotations',
   'triage.settings.rotationsDescription': 'Assign eligible members in a deterministic order.',
   'triage.settings.rotationsEmpty': 'There are no owner rotations.',
