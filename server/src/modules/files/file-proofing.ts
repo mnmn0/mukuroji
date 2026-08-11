@@ -55,6 +55,7 @@ import {
   shouldBootstrapLocalDynamoDb,
 } from '../../infrastructure/aws/dynamodb-client'
 import { FILE_UPLOAD_MAX_SIZE_BYTES } from '../file-upload-policy'
+import { PLANNING_STORAGE_SCHEMA_VERSION } from '../planning'
 import { isMissingFileObjectVersionError } from './file-object-errors'
 import { isAllowedFileContentType, normalizeFileContentType } from './file-content-type'
 
@@ -69,6 +70,51 @@ export const FILE_APPROVAL_COMMENT_MAX_LENGTH = 2_000
 
 /** GuardDuty が object tag に保存する malware scan status key です。 */
 export const GUARDDUTY_SCAN_STATUS_TAG = 'GuardDutyMalwareScanStatus'
+
+/** Physical Planning META key that serializes canonical Work Item projections. */
+const PLANNING_META_RECORD_KEY = 'META'
+
+/**
+ * Creates the Planning META update for a canonical Work Item transition.
+ *
+ * @param planningTableName - Optional Planning table configured for the runtime.
+ * @param workspaceId - Workspace whose canonical Work Item projection changes.
+ * @param updatedAt - Mutation timestamp written to Planning META.
+ * @returns A transaction update, or undefined when Planning storage is not configured.
+ */
+function createPlanningRevisionIncrementTransactionItem(
+  planningTableName: string | undefined,
+  workspaceId: string,
+  updatedAt: string,
+): NonNullable<TransactWriteCommandInput['TransactItems']>[number] | undefined {
+  if (!planningTableName) return undefined
+  return {
+    Update: {
+      TableName: planningTableName,
+      Key: { workspaceId, recordKey: PLANNING_META_RECORD_KEY },
+      UpdateExpression:
+        'SET #entryType = if_not_exists(#entryType, :entryType), ' +
+        '#schemaVersion = if_not_exists(#schemaVersion, :schemaVersion), ' +
+        '#updatedAt = :updatedAt ADD #revision :increment',
+      ConditionExpression:
+        'attribute_not_exists(#entryType) OR (' +
+        '#entryType = :entryType AND #schemaVersion = :schemaVersion AND ' +
+        'attribute_exists(#revision))',
+      ExpressionAttributeNames: {
+        '#entryType': 'entryType',
+        '#schemaVersion': 'schemaVersion',
+        '#updatedAt': 'updatedAt',
+        '#revision': 'revision',
+      },
+      ExpressionAttributeValues: {
+        ':entryType': 'planning-meta',
+        ':schemaVersion': PLANNING_STORAGE_SCHEMA_VERSION,
+        ':updatedAt': updatedAt,
+        ':increment': 1,
+      },
+    },
+  }
+}
 
 /** File proofing API が扱う安定 error です。 */
 export class FileProofingError extends Error {
@@ -825,6 +871,9 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
   /** Approval 完了時に transition する canonical Work Item table 名です。 */
   private readonly workItemsTableName?: string
 
+  /** Approval 完了時に canonical Work Item と同時更新する Planning table 名です。 */
+  private readonly planningTableName?: string
+
   /** Soft delete 後の保持日数です。 */
   private readonly retentionDays: number
 
@@ -849,6 +898,8 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
       retentionDays?: number
       /** Canonical Work Item table 名です。 */
       workItemsTableName?: string
+      /** Canonical Work Item transition と同時更新する Planning table 名です。 */
+      planningTableName?: string
       /** Local bootstrap 用の DynamoDB client です。 */
       dynamoDbClient?: DynamoDBClient
       /** Local table を自動作成するかどうかです。 */
@@ -860,6 +911,7 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
     this.objectClient = objectClient
     this.auditTableName = options.auditTableName?.trim() || undefined
     this.workItemsTableName = options.workItemsTableName?.trim() || undefined
+    this.planningTableName = options.planningTableName?.trim() || undefined
     this.retentionDays = requirePositiveInteger(options.retentionDays ?? 30, 'File retention days')
     this.dynamoDbClient = options.dynamoDbClient
     this.bootstrapLocalTable = options.bootstrapLocalTable === true
@@ -1697,6 +1749,14 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
           },
         },
       })
+      const planningRevisionMutation = createPlanningRevisionIncrementTransactionItem(
+        this.planningTableName,
+        scope.workspaceId,
+        now,
+      )
+      if (planningRevisionMutation) {
+        transactionItems.push(planningRevisionMutation)
+      }
     }
     addAuditItem(transactionItems, this.auditTableName, auditContext, {
       directoryId: scope.workspaceId,
@@ -2398,6 +2458,7 @@ export function createDefaultFileProofingClient(): FileProofingClient {
       retentionDays: readPositiveIntegerEnvironment('FILE_RETENTION_DAYS', 30),
       workItemsTableName: readEnvironment('WORK_ITEMS_TABLE_NAME') ??
         readEnvironment('TEAM_ISSUES_TABLE_NAME'),
+      planningTableName: readEnvironment('PLANNING_TABLE_NAME'),
       dynamoDbClient,
       bootstrapLocalTable: shouldBootstrapLocalDynamoDb(),
     },
