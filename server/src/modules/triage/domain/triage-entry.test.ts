@@ -478,5 +478,40 @@ describe('triage entry state machine', () => {
         watcherCount: 0,
       },
     })
+
+    const staleRedactionMarker = projectTriageEntryForResponse(createEntry({
+      sourcePreview: {
+        ...createEntry().sourcePreview,
+        body: 'must not escape a stale redaction marker',
+        attachmentCount: 2,
+        commentCount: 3,
+        watcherCount: 4,
+        permalink: 'https://example.com/private-source',
+      },
+      requester: {
+        displayName: 'Original requester',
+        email: 'requester@example.com',
+        externalId: 'external-requester-id',
+        guest: false,
+      },
+      retention: {
+        expiresAt: '2026-08-09T00:00:00.000Z',
+        redactedAt: '2026-08-09T00:01:00.000Z',
+      },
+    }), '2026-08-10T00:00:00.000Z')
+    expect(staleRedactionMarker).toMatchObject({
+      sourcePreview: {
+        title: 'Retained source',
+        body: '',
+        attachmentCount: 0,
+        commentCount: 0,
+        watcherCount: 0,
+      },
+      requester: { displayName: 'Redacted requester' },
+      permission: { visibility: 'metadata-only', reasonCode: 'retention-expired' },
+    })
+    expect(staleRedactionMarker.sourcePreview.permalink).toBeUndefined()
+    expect(staleRedactionMarker.requester.email).toBeUndefined()
+    expect(staleRedactionMarker.requester.externalId).toBeUndefined()
   })
 })

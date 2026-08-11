@@ -325,7 +325,8 @@ export function redactExpiredTriageEntry(
   nowValue: string,
 ): TriageEntry {
   const now = requireIsoInstant(nowValue, 'Triage retention evaluation time')
-  if (entry.retention.redactedAt || Date.parse(entry.retention.expiresAt) > Date.parse(now)) {
+  const redactedAt = entry.retention.redactedAt
+  if (!redactedAt && Date.parse(entry.retention.expiresAt) > Date.parse(now)) {
     return entry
   }
   const sourcePreview = removePermalink(entry.sourcePreview)
@@ -334,7 +335,7 @@ export function redactExpiredTriageEntry(
     canReply: false,
     guestVisible: false,
     reasonCode: 'retention-expired',
-    checkedAt: now,
+    checkedAt: redactedAt ?? now,
   }
   return {
     ...entry,
@@ -353,7 +354,7 @@ export function redactExpiredTriageEntry(
       guest: entry.requester.guest,
     },
     permission,
-    retention: { ...entry.retention, redactedAt: now },
+    retention: { ...entry.retention, redactedAt: redactedAt ?? now },
     capabilities: createTriageCapabilities({
       ...entry,
       permission,
