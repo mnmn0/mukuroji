@@ -14,11 +14,14 @@ import {
 } from './notification-schedule'
 import {
   createPlanningUpdateNextNotificationAtRecordKey,
+  createPlanningUpdateNotificationAtRecordKey,
   createPlanningUpdateScheduleShard,
 } from '../../../planning'
 
 /** Creates a canonical Project update target row for schedule tests. */
-function createPlanningProjectUpdateTarget(overrides: Record<string, unknown> = {}) {
+function createPlanningProjectUpdateTarget(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
   const cadence = {
     updateOwnerMemberKey: 'Owner@Example.com',
     cadence: { unit: 'week', count: 1 },
@@ -77,16 +80,20 @@ function createPlanningDueIndexItem(row: Record<string, unknown>) {
   ) {
     throw new TypeError('Planning schedule test row is invalid.')
   }
+  const nextNotificationAtRecordKey = Object.hasOwn(row, 'nextNotificationAtRecordKey')
+    ? row.nextNotificationAtRecordKey
+    : createPlanningUpdateNextNotificationAtRecordKey(
+        workspaceId,
+        recordKey,
+        cadence.nextDueAt,
+        cadence.reminderHoursBefore,
+      )
+  if (typeof nextNotificationAtRecordKey !== 'string') return undefined
   return {
     workspaceId,
     recordKey,
     updateScheduleShard: createPlanningUpdateScheduleShard(workspaceId, recordKey),
-    nextNotificationAtRecordKey: createPlanningUpdateNextNotificationAtRecordKey(
-      workspaceId,
-      recordKey,
-      cadence.nextDueAt,
-      cadence.reminderHoursBefore,
-    ),
+    nextNotificationAtRecordKey,
   }
 }
 
@@ -109,12 +116,14 @@ function resolvePlanningDueIndexQuery(
   }
   const scheduleShard = values[':scheduleShard']
   const upperBound = values[':upperBound']
-  const items = rows
-    .map(createPlanningDueIndexItem)
-    .filter((item) =>
+  const items = rows.flatMap((row) => {
+    const item = createPlanningDueIndexItem(row)
+    return item &&
       item.updateScheduleShard === scheduleShard &&
       item.nextNotificationAtRecordKey <= upperBound
-    )
+      ? [item]
+      : []
+  })
   return { Items: items, ScannedCount: items.length }
 }
 
@@ -582,6 +591,7 @@ describe('notification schedule handler', () => {
   test('logs and fails the invocation for one malformed due-index row', async () => {
     const validTarget = createPlanningProjectUpdateTarget()
     const validIndexItem = createPlanningDueIndexItem(validTarget)
+    if (!validIndexItem) throw new Error('Expected a valid Planning due-index item.')
     const malformedIndexItem = {
       workspaceId: 'workspace-1',
       recordKey: '',
@@ -731,6 +741,108 @@ describe('notification schedule handler', () => {
           }],
         },
       })
+  })
+
+  test('advances the sparse Planning due index after each notification stage', async () => {
+    const targetRow = createPlanningProjectUpdateTarget({
+      nextNotificationAtRecordKey: createPlanningUpdateNextNotificationAtRecordKey(
+        'workspace-1',
+        'UPDATE_TARGET#PROJECT#core-team#platform',
+        '2026-07-12T09:00:00.000Z',
+        24,
+      ),
+    })
+    const eventIds = new Set<string>()
+    const recording = createRecordingDocumentClient((name, input) => {
+      if (name === 'ScanCommand') return { Items: [] }
+      if (name === 'QueryCommand') {
+        const duePage = resolvePlanningDueIndexQuery(input, [targetRow])
+        if (duePage) return duePage
+        return {
+          Items: [{
+            directoryId: 'workspace-1',
+            entryType: 'project',
+            teamId: 'core-team',
+            projectId: 'platform',
+          }],
+        }
+      }
+      if (name === 'GetCommand') {
+        const target = resolvePlanningTargetGet(input, [targetRow])
+        if (target) return target
+      }
+      if (name === 'PutCommand') {
+        const item = input.Item
+        if (typeof item === 'object' && item !== null && 'eventId' in item) {
+          const eventId = String(item.eventId)
+          if (eventIds.has(eventId)) {
+            const duplicate = new Error('The conditional request failed')
+            duplicate.name = 'ConditionalCheckFailedException'
+            throw duplicate
+          }
+          eventIds.add(eventId)
+        }
+      }
+      if (name === 'UpdateCommand') {
+        const values = input.ExpressionAttributeValues
+        if (
+          typeof values === 'object' && values !== null &&
+          ':nextNotificationAtRecordKey' in values &&
+          typeof values[':nextNotificationAtRecordKey'] === 'string'
+        ) {
+          targetRow.nextNotificationAtRecordKey = values[':nextNotificationAtRecordKey']
+        } else {
+          targetRow.nextNotificationAtRecordKey = undefined
+        }
+      }
+      return {}
+    })
+    const options = createRunOptions(recording.client, {
+      now: new Date('2026-07-12T10:00:00.000Z'),
+      planningTableName: 'PlanningTable',
+      projectDirectoryTableName: 'ProjectDirectoryTable',
+    })
+
+    await expect(runNotificationSchedule(options)).resolves.toMatchObject({
+      emittedEvents: 1,
+      duplicateEvents: 0,
+    })
+    expect(targetRow.nextNotificationAtRecordKey).toBe(
+      createPlanningUpdateNotificationAtRecordKey(
+        'workspace-1',
+        'UPDATE_TARGET#PROJECT#core-team#platform',
+        '2026-07-12T21:00:00.000Z',
+      ),
+    )
+
+    await expect(runNotificationSchedule(createRunOptions(recording.client, {
+      now: new Date('2026-07-12T10:30:00.000Z'),
+      planningTableName: 'PlanningTable',
+      projectDirectoryTableName: 'ProjectDirectoryTable',
+    }))).resolves.toMatchObject({
+      emittedEvents: 0,
+      duplicateEvents: 0,
+    })
+    expect(targetRow.nextNotificationAtRecordKey).toContain('2026-07-12T21:00:00.000Z')
+
+    await expect(runNotificationSchedule(createRunOptions(recording.client, {
+      now: new Date('2026-07-12T22:00:00.000Z'),
+      planningTableName: 'PlanningTable',
+      projectDirectoryTableName: 'ProjectDirectoryTable',
+    }))).resolves.toMatchObject({
+      emittedEvents: 1,
+      duplicateEvents: 1,
+    })
+    expect(targetRow.nextNotificationAtRecordKey).toBeUndefined()
+
+    await expect(runNotificationSchedule(createRunOptions(recording.client, {
+      now: new Date('2026-07-12T23:00:00.000Z'),
+      planningTableName: 'PlanningTable',
+      projectDirectoryTableName: 'ProjectDirectoryTable',
+    }))).resolves.toMatchObject({
+      emittedEvents: 0,
+      duplicateEvents: 0,
+    })
   })
 
   test('uses percent-encoded public target keys for special-character watcher scopes', async () => {

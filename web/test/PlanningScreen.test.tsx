@@ -83,9 +83,13 @@ function sliceElement(html: string, marker: string, closingElement: string) {
   if (startIndex < 0) {
     throw new Error(`Test marker not found in markup: ${marker}`)
   }
+  const endIndex = html.indexOf(closingElement, startIndex)
+  if (endIndex < 0) {
+    throw new Error(`Test closing element not found in markup: ${closingElement}`)
+  }
   return html.slice(
     html.lastIndexOf('<', startIndex),
-    html.indexOf(closingElement, startIndex) + closingElement.length,
+    endIndex + closingElement.length,
   )
 }
 

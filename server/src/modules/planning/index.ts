@@ -20,6 +20,7 @@ export {
 
 export {
   createPlanningUpdateNextNotificationAtRecordKey,
+  createPlanningUpdateNotificationAtRecordKey,
   createPlanningUpdateScheduleShard,
   createPlanningUpdateScheduleShardName,
   createPlanningUpdateScheduleUpperBound,

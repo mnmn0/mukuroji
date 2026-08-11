@@ -18381,6 +18381,58 @@ async function requirePlanningCadenceRecipientTargetPermission(
   }
   if (await authenticationDependencies.cognito.isSystemAdmin(memberKey)) return member
 
+  const enterpriseEvaluation = principal.enterpriseAuthorizationEvaluation
+  if (
+    principal.enterpriseLegacyProjectAccessSuppressed &&
+    principal.enterprisePermissions !== undefined &&
+    enterpriseEvaluation
+  ) {
+    const directoryPrincipal = resolveEnterpriseDirectoryPrincipal(
+      enterpriseEvaluation.snapshot,
+      memberKey,
+      [],
+    )
+    const suppressLegacyWorkspaceRole = directoryPrincipal.directoryManaged ||
+      directoryPrincipal.compatibleRoleAssignments.some((assignment) =>
+        assignment.principalKind === 'member' && assignment.principalId === memberKey ||
+        assignment.principalKind === 'directory-group' && (
+          assignment.source === 'directory-mapping' ||
+          directoryPrincipal.directoryGroupIds.includes(assignment.principalId)
+        )
+      ) || directoryPrincipal.compatibleGroupMappings.some((mapping) => mapping.enabled)
+    const candidateAccess = evaluateEnterpriseAccess({
+      permission: minimumRole === 'member' ? 'work-items.write' : 'work-items.read',
+      principal: {
+        kind: 'member',
+        principalId: memberKey,
+        directoryGroupIds: directoryPrincipal.directoryGroupIds,
+        directoryGroupMemberships: directoryPrincipal.directoryGroupMemberships,
+        workspaceRole: member.role,
+        includeWorkspaceRolePermissions: !suppressLegacyWorkspaceRole,
+        ...(suppressLegacyWorkspaceRole
+          ? { directPermissions: ['workspace.read' as const] }
+          : {}),
+        systemAdministrator: false,
+      },
+      assignments: directoryPrincipal.compatibleRoleAssignments,
+      customRoles: enterpriseEvaluation.snapshot.customRoles,
+      groupMappings: directoryPrincipal.compatibleGroupMappings,
+      resource: projectId
+        ? {
+            workspaceId: principal.directoryId,
+            kind: 'project',
+            targetId: projectId,
+            parentTeamId: teamId,
+          }
+        : {
+            workspaceId: principal.directoryId,
+            kind: 'team',
+            targetId: teamId,
+          },
+    })
+    if (candidateAccess.allowed) return member
+  }
+
   const [directory, accesses] = await Promise.all([
     workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja', true),
     workspaceDependencies.projectDirectory.getProjectAccessList(principal.directoryId, memberKey),

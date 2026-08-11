@@ -12,6 +12,7 @@ import {
   bindWorkspaceSearchWriterFence,
   type WorkspaceSearchWriterFenceResources,
 } from '../../policies/workspace-search-writer-fence';
+import { grantPlanningRevisionFenceAccess } from '../../policies/planning-revision-fence';
 import type { DataStoreResources } from '../data-stores';
 import type { FileStorageResources } from '../file-storage';
 import {
@@ -163,6 +164,7 @@ export function buildWorkItemImportWorker(
       enterpriseIdentityTable.tableArn,
     ],
   }));
+  grantPlanningRevisionFenceAccess(planningTable, workItemImportFunction);
   workItemConfigurationTable.grants.readData(workItemImportFunction);
   workspaceSearchTable.grants.readWriteData(workItemImportFunction);
   workItemImportFunction.addToRolePolicy(new iam.PolicyStatement({

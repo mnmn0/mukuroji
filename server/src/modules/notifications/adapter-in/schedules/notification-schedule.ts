@@ -4,6 +4,7 @@ import {
   PutCommand,
   QueryCommand,
   ScanCommand,
+  UpdateCommand,
   type DynamoDBDocumentClient,
 } from '@aws-sdk/lib-dynamodb'
 import { WORK_ITEM_SCHEDULE_MIN_YEAR } from '@mukuroji/contracts'
@@ -13,6 +14,9 @@ import {
   createMutationAuditContext,
 } from '../../../audit'
 import {
+  createPlanningUpdateNextNotificationAtRecordKey,
+  createPlanningUpdateNotificationAtRecordKey,
+  createPlanningUpdateScheduleShard,
   createPlanningUpdateScheduleShardName,
   createPlanningUpdateScheduleUpperBound,
   PLANNING_UPDATE_SCHEDULE_DUE_INDEX_NAME,
@@ -158,6 +162,8 @@ export type PlanningUpdateTargetScheduleProjection = {
 type PlanningUpdateTargetScheduleRecord = PlanningUpdateTargetScheduleProjection & {
   /** Physical DynamoDB row key. */
   recordKey: string
+  /** Opaque key for the next notification stage, when persisted. */
+  nextNotificationAtRecordKey?: string
 }
 
 /** Planning update schedule から生成する一つの notification candidate です。 */
@@ -438,6 +444,16 @@ async function queryDuePlanningUpdateTargets(
           throw new Error('Planning update schedule row is invalid.', { cause: error })
         }
         if (!record || candidates.length === 0) {
+          if (record) {
+            await advancePlanningUpdateNotificationIndex(
+              input,
+              record,
+              requireText(
+                indexedItem.nextNotificationAtRecordKey,
+                'Indexed Planning next notification key',
+              ),
+            )
+          }
           input.result.skippedItems += 1
           continue
         }
@@ -457,6 +473,14 @@ async function queryDuePlanningUpdateTargets(
         }
         const currentScope = await scope
         if (!currentScope.active) {
+          await advancePlanningUpdateNotificationIndex(
+            input,
+            record,
+            requireText(
+              indexedItem.nextNotificationAtRecordKey,
+              'Indexed Planning next notification key',
+            ),
+          )
           input.result.skippedItems += 1
           continue
         }
@@ -468,6 +492,14 @@ async function queryDuePlanningUpdateTargets(
             currentScope,
           )
         }
+        await advancePlanningUpdateNotificationIndex(
+          input,
+          record,
+          requireText(
+            indexedItem.nextNotificationAtRecordKey,
+            'Indexed Planning next notification key',
+          ),
+        )
       }
 
       exclusiveStartKey = response.LastEvaluatedKey
@@ -509,7 +541,100 @@ async function readCurrentPlanningUpdateTargetFromDueIndex(
   ) {
     throw new TypeError('Planning update schedule target source row is invalid.')
   }
+  if (record.nextNotificationAtRecordKey !== undefined) {
+    if (record.nextNotificationAtRecordKey !== indexedDueKey) return undefined
+  } else if (
+    record.cadence &&
+    createPlanningUpdateNextNotificationAtRecordKey(
+      record.workspaceId,
+      record.recordKey,
+      record.cadence.nextDueAt,
+      record.cadence.reminderHoursBefore,
+    ) !== indexedDueKey
+  ) {
+    return undefined
+  }
   return record
+}
+
+/**
+ * Advances or removes one processed Planning update notification index entry.
+ *
+ * The target row is conditionally updated with both the indexed key and its
+ * source timestamp so a stale due-index result cannot move a newer cadence
+ * backward or resurrect an already archived target.
+ *
+ * @param input - Normalized schedule execution input.
+ * @param record - Strongly read target projection.
+ * @param expectedIndexKey - Due-index key returned by the query.
+ */
+async function advancePlanningUpdateNotificationIndex(
+  input: PlanningUpdateTargetQueryInput,
+  record: PlanningUpdateTargetScheduleRecord,
+  expectedIndexKey: string,
+) {
+  const nextNotificationAt = createNextPlanningNotificationStage(record, input.now)
+  const expressionAttributeNames = {
+    '#nextNotificationAtRecordKey': 'nextNotificationAtRecordKey',
+    '#updateScheduleShard': 'updateScheduleShard',
+    '#updatedAt': 'updatedAt',
+  }
+  const expressionAttributeValues = {
+    ':expectedIndexKey': expectedIndexKey,
+    ':updatedAt': record.updatedAt,
+    ...(nextNotificationAt === undefined
+      ? {}
+      : {
+          ':nextNotificationAtRecordKey': createPlanningUpdateNotificationAtRecordKey(
+            record.workspaceId,
+            record.recordKey,
+            nextNotificationAt,
+          ),
+          ':scheduleShard': createPlanningUpdateScheduleShard(
+            record.workspaceId,
+            record.recordKey,
+          ),
+        }),
+  }
+  const updateExpression = nextNotificationAt === undefined
+    ? 'REMOVE #nextNotificationAtRecordKey, #updateScheduleShard'
+    : 'SET #nextNotificationAtRecordKey = :nextNotificationAtRecordKey, ' +
+      '#updateScheduleShard = :scheduleShard'
+  const indexCondition = record.nextNotificationAtRecordKey === undefined
+    ? 'attribute_not_exists(#nextNotificationAtRecordKey)'
+    : '#nextNotificationAtRecordKey = :expectedIndexKey'
+  try {
+    await input.options.documentClient.send(new UpdateCommand({
+      TableName: input.planningTableName,
+      Key: { workspaceId: record.workspaceId, recordKey: record.recordKey },
+      UpdateExpression: updateExpression,
+      ConditionExpression:
+        `${indexCondition} AND #updatedAt = :updatedAt`,
+      ExpressionAttributeNames: expressionAttributeNames,
+      ExpressionAttributeValues: expressionAttributeValues,
+    }))
+  } catch (error) {
+    if (isAwsNamedError(error, 'ConditionalCheckFailedException')) return
+    throw error
+  }
+}
+
+/** Calculates the next strictly future notification stage for a target. */
+function createNextPlanningNotificationStage(
+  record: PlanningUpdateTargetScheduleRecord,
+  now: Date,
+) {
+  if (record.archivedAt || !record.cadence) return undefined
+  const nowTime = normalizeDate(now, 'Planning update notification schedule time').getTime()
+  const dueTime = Date.parse(record.cadence.nextDueAt)
+  const reminderTime = dueTime - record.cadence.reminderHoursBefore * 3_600_000
+  if (nowTime < reminderTime) return new Date(reminderTime).toISOString()
+  if (nowTime < dueTime) return new Date(dueTime).toISOString()
+  if (record.cadence.escalationHoursAfter !== undefined) {
+    const escalationTime = dueTime + record.cadence.escalationHoursAfter * 3_600_000
+    if (nowTime < escalationTime) return new Date(escalationTime).toISOString()
+  }
+  return undefined
 }
 
 /** Writes one deterministic Planning scheduled event and classifies duplicate retries. */
@@ -746,6 +871,12 @@ export function parsePlanningUpdateTargetScheduleRow(
     : parsePlanningUpdateNotificationCadence(
       requireRecord(value.cadence, 'Planning update target cadence'),
     )
+  const nextNotificationAtRecordKey = value.nextNotificationAtRecordKey === undefined
+    ? undefined
+    : requireText(
+        value.nextNotificationAtRecordKey,
+        'Planning update next notification key',
+      )
 
   return {
     workspaceId,
@@ -753,6 +884,7 @@ export function parsePlanningUpdateTargetScheduleRow(
     target,
     ...(cadence ? { cadence } : {}),
     latestVersion,
+    ...(nextNotificationAtRecordKey ? { nextNotificationAtRecordKey } : {}),
     ...(archivedAt ? { archivedAt } : {}),
     updatedAt,
   }
@@ -769,7 +901,11 @@ export function parsePlanningUpdateTargetScheduleProjection(
 ): PlanningUpdateTargetScheduleProjection | undefined {
   const record = parsePlanningUpdateTargetScheduleRow(value)
   if (!record) return undefined
-  const { recordKey: _recordKey, ...projection } = record
+  const {
+    recordKey: _recordKey,
+    nextNotificationAtRecordKey: _nextNotificationAtRecordKey,
+    ...projection
+  } = record
   return projection
 }
 

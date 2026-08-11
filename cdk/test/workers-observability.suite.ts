@@ -2440,6 +2440,7 @@ test('automation workers consume the audit outbox and run recurring schedules wi
         TENANT_ADMINISTRATION_TABLE_NAME: { Ref: 'TenantAdministrationTable621D59EB' },
         WORK_ITEM_CONFIGURATION_TABLE_NAME: { Ref: 'WorkItemConfigurationTable35E94558' },
         WORK_ITEMS_TABLE_NAME: { Ref: 'TeamIssuesTable189D851D' },
+        PLANNING_TABLE_NAME: { Ref: 'PlanningTable2A0D4CC5' },
         WORKSPACE_SEARCH_TABLE_NAME: { Ref: 'WorkspaceSearchTable2575AD6B' },
       }),
     },
@@ -2465,6 +2466,7 @@ test('automation workers consume the audit outbox and run recurring schedules wi
         TENANT_ADMINISTRATION_TABLE_NAME: { Ref: 'TenantAdministrationTable621D59EB' },
         WORK_ITEM_CONFIGURATION_TABLE_NAME: { Ref: 'WorkItemConfigurationTable35E94558' },
         WORK_ITEMS_TABLE_NAME: { Ref: 'TeamIssuesTable189D851D' },
+        PLANNING_TABLE_NAME: { Ref: 'PlanningTable2A0D4CC5' },
         WORKSPACE_SEARCH_TABLE_NAME: { Ref: 'WorkspaceSearchTable2575AD6B' },
       }),
     },
@@ -2533,6 +2535,33 @@ test('automation workers consume the audit outbox and run recurring schedules wi
     const statements = (policy as {
       Properties?: { PolicyDocument?: { Statement?: Array<Record<string, unknown>> } };
     } | undefined)?.Properties?.PolicyDocument?.Statement ?? [];
+    const planningRevisionFenceStatement = statements.find((statement) =>
+      statement.Action === 'dynamodb:UpdateItem' &&
+      JSON.stringify(statement.Resource).includes('PlanningTable2A0D4CC5') &&
+      JSON.stringify(statement.Condition).includes('TransactWriteItems')
+    );
+    expect(planningRevisionFenceStatement).toEqual({
+      Action: 'dynamodb:UpdateItem',
+      Condition: {
+        'ForAllValues:StringEquals': {
+          'dynamodb:Attributes': [
+            'workspaceId',
+            'recordKey',
+            'entryType',
+            'schemaVersion',
+            'revision',
+            'updatedAt',
+          ],
+        },
+        StringEquals: {
+          'dynamodb:EnclosingOperation': 'TransactWriteItems',
+        },
+      },
+      Effect: 'Allow',
+      Resource: {
+        'Fn::GetAtt': ['PlanningTable2A0D4CC5', 'Arn'],
+      },
+    });
     const conditionCheckStatements = (conditionCheckPolicy as {
       Properties?: { PolicyDocument?: { Statement?: Array<Record<string, unknown>> } };
     } | undefined)?.Properties?.PolicyDocument?.Statement ?? [];

@@ -1609,6 +1609,16 @@ test('DynamoDB Work Item client compiles authorization snapshots inside the adap
           }),
         }),
       },
+      {
+        Update: expect.objectContaining({
+          TableName: 'PlanningTable',
+          Key: {
+            workspaceId: 'workspace-1',
+            recordKey: 'META',
+          },
+          UpdateExpression: expect.stringContaining('ADD #revision :increment'),
+        }),
+      },
     ])
   })
 })
@@ -2306,7 +2316,7 @@ test('DynamoDB Work Item schedule cascade writes one bounded transaction with un
 
       expect(transactions).toHaveLength(1)
       const transactItems = transactions[0] ?? []
-      expect(transactItems).toHaveLength(auditEnabled ? 12 : 10)
+      expect(transactItems).toHaveLength(auditEnabled ? 13 : 11)
       expect(transactItems.filter((item) => item.Update?.TableName === 'IssuesTable'))
         .toHaveLength(2)
       expect(transactItems).toContainEqual(expect.objectContaining({
@@ -2339,8 +2349,11 @@ test('DynamoDB Work Item schedule cascade writes one bounded transaction with un
       )
       expect(auditItems).toHaveLength(auditEnabled ? 2 : 0)
       expect(new Set(auditItems.map((item) => item.eventId)).size).toBe(auditItems.length)
-      expect(transactItems.at(-1)).toMatchObject({
+      expect(transactItems.at(-2)).toMatchObject({
         Put: { TableName: 'DeveloperPlatformTable' },
+      })
+      expect(transactItems.at(-1)).toMatchObject({
+        Update: { TableName: 'PlanningTable' },
       })
       expect(preparedResponse).toMatchObject({
         status: 200,

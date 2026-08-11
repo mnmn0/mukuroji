@@ -504,6 +504,8 @@ type StoredPlanningUpdateTarget = Omit<PlanningUpdateTargetSummary, 'updateState
   latestContextSnapshot?: PlanningUpdateContextSnapshot
   /** Monthly recurrence が month-end clamp 後も保持する original local day です。 */
   cadenceAnchorDay?: number
+  /** Schedule worker が次の未配信 notification stage を指す opaque due-index key です。 */
+  nextNotificationAtRecordKey?: string
 }
 
 /** Workspace planning graph の永続化 state です。 */
@@ -958,15 +960,20 @@ abstract class BasePlanningClient implements PlanningClient {
         const cadence = input.cadence === null
           ? undefined
           : readPlanningUpdateCadence(input.cadence)
+        const cadenceAnchorDay = cadence?.cadence.unit === 'month'
+          ? current?.cadence?.cadence.unit === 'month' &&
+            current.cadence.timeZone === cadence.timeZone &&
+            current.cadence.nextDueAt === cadence.nextDueAt
+            ? current.cadenceAnchorDay
+            : planningLocalDateTimeAt(
+                Date.parse(cadence.nextDueAt),
+                cadence.timeZone,
+              ).day
+          : undefined
         const updated: StoredPlanningUpdateTarget = {
           target,
           ...(cadence === undefined ? {} : { cadence }),
-          ...(cadence?.cadence.unit === 'month'
-            ? { cadenceAnchorDay: planningLocalDateTimeAt(
-                Date.parse(cadence.nextDueAt),
-                cadence.timeZone,
-              ).day }
-            : {}),
+          ...(cadenceAnchorDay === undefined ? {} : { cadenceAnchorDay }),
           latestVersion: current?.latestVersion ?? 0,
           ...(current?.latestUpdate === undefined
             ? {}
@@ -1035,12 +1042,6 @@ abstract class BasePlanningClient implements PlanningClient {
           risk,
           workItemState,
         )
-        const workItemConditions = createPlanningUpdateSourceWorkItemConditions(
-          state,
-          target,
-          evidence,
-          workItemState,
-        )
         const version = current.latestVersion + 1
         if (!Number.isSafeInteger(version)) {
           throw conflict('PlanningUpdateVersionExhausted', 'Planning update version is exhausted.')
@@ -1066,8 +1067,12 @@ abstract class BasePlanningClient implements PlanningClient {
           coveredDueAt: current.cadence.nextDueAt,
           createdAt: now,
         }
+        const {
+          nextNotificationAtRecordKey: _previousNotificationAtRecordKey,
+          ...currentWithoutNotificationIndex
+        } = current
         const updatedTarget: StoredPlanningUpdateTarget = {
-          ...current,
+          ...currentWithoutNotificationIndex,
           cadence: {
             ...current.cadence,
             nextDueAt: nextPlanningUpdateDueAt(
@@ -1086,7 +1091,7 @@ abstract class BasePlanningClient implements PlanningClient {
           const entity = requireActiveEntity(next, target.entityId)
           next = replaceEntity(next, { ...entity, health, risk, updatedAt: now })
         }
-        return { state: next, publishedUpdate: update, workItemConditions }
+        return { state: next, publishedUpdate: update }
       },
       authorizationConditionChecks,
       transaction,
@@ -4008,106 +4013,6 @@ function requirePlanningUpdateEvidenceExists(
   }
 }
 
-/**
- * Captures revisions for every canonical Work Item used by one immutable update.
- *
- * Project progress consumes every Work Item assigned to the exact qualified
- * Project. Initiative roll-ups consume Work Items linked into the active target
- * subtree. Typed Work Item evidence is always included in the source set.
- *
- * @param state - Current canonical Planning graph.
- * @param target - Project or Initiative update target.
- * @param evidence - Validated typed evidence stored with the update.
- * @param workItemState - Canonical Work Item projection used for context and evidence.
- * @returns Deterministically ordered DynamoDB revision conditions.
- */
-function createPlanningUpdateSourceWorkItemConditions(
-  state: PlanningWorkspaceState,
-  target: PlanningUpdateTarget,
-  evidence: readonly PlanningUpdateEvidence[],
-  workItemState: PlanningWorkItemState,
-): PlanningWorkItemCondition[] {
-  const visibleWorkItems = createPlanningUpdateVisibleWorkItemMap(state, target, workItemState)
-  const sourceKeys = new Set<string>()
-  if (target.type === 'project') {
-    for (const key of visibleWorkItems.keys()) sourceKeys.add(key)
-  } else {
-    const scope = createPlanningUpdateVisibilityEnvelope(state, target)
-    const visibleEntities = state.entities.filter((entity) =>
-      isInsidePlanningUpdateVisibilityEnvelope(scope, entity.teamId, entity.projectId)
-    )
-    const rollupEntityIds = collectPlanningUpdateRollupEntityIds(
-      visibleEntities,
-      target.entityId,
-    )
-    for (const link of state.workItemLinks) {
-      const key = createWorkItemKey(link.teamId, link.workItemId)
-      const workItem = visibleWorkItems.get(key)
-      if (!workItem || link.projectId !== workItem.projectId) continue
-      if ([link.cycleId, link.milestoneId, ...link.goalIds].some((entityId) =>
-        entityId !== undefined && rollupEntityIds.has(entityId)
-      )) sourceKeys.add(key)
-    }
-  }
-  for (const item of evidence) {
-    if (item.type === 'work-item') {
-      sourceKeys.add(createWorkItemKey(item.teamId, item.workItemId))
-    }
-  }
-  return [...sourceKeys]
-    .sort(compareText)
-    .map((key) => {
-      const workItem = visibleWorkItems.get(key)
-      if (!workItem) {
-        throw invalid(
-          'PlanningUpdateEvidenceInvalid',
-          'Evidence Work Item is unavailable for this update target.',
-        )
-      }
-      return {
-        teamId: workItem.teamId,
-        workItemId: workItem.id,
-        revision: readRevision(workItem.revision),
-      }
-    })
-}
-
-/**
- * Collects entities whose linked Work Items contribute to an Initiative roll-up.
- *
- * Canceled or archived branches are excluded consistently with roll-up
- * calculation, while completed and manual branches retain linked-item counts.
- *
- * @param entities - Planning entities already bounded to the target envelope.
- * @param rootEntityId - Initiative entity that owns the update target.
- * @returns Active roll-up entity identities in the target subtree.
- */
-function collectPlanningUpdateRollupEntityIds(
-  entities: readonly StoredPlanningEntity[],
-  rootEntityId: string,
-) {
-  const entitiesById = new Map(entities.map((entity) => [entity.id, entity]))
-  const childrenByParent = new Map<string, StoredPlanningEntity[]>()
-  for (const entity of entities) {
-    if (!entity.parentId) continue
-    const children = childrenByParent.get(entity.parentId) ?? []
-    children.push(entity)
-    childrenByParent.set(entity.parentId, children)
-  }
-  const entityIds = new Set<string>()
-  const pending = [rootEntityId]
-  while (pending.length > 0) {
-    const entityId = pending.pop()!
-    const entity = entitiesById.get(entityId)
-    if (!entity || entity.archivedAt || entity.status === 'canceled' || entityIds.has(entityId)) {
-      continue
-    }
-    entityIds.add(entityId)
-    for (const child of childrenByParent.get(entityId) ?? []) pending.push(child.id)
-  }
-  return entityIds
-}
-
 function calculateRollups(
   state: PlanningWorkspaceState,
   workItems: ReadonlyMap<string, PlanningWorkItemSummary>,
@@ -4940,12 +4845,13 @@ function createPlanningRowMap(workspaceId: string, state: PlanningWorkspaceState
         ? {}
         : {
             updateScheduleShard: createPlanningUpdateScheduleShard(workspaceId, recordKey),
-            nextNotificationAtRecordKey: createPlanningUpdateNextNotificationAtRecordKey(
-              workspaceId,
-              recordKey,
-              target.cadence.nextDueAt,
-              target.cadence.reminderHoursBefore,
-            ),
+            nextNotificationAtRecordKey: target.nextNotificationAtRecordKey ??
+              createPlanningUpdateNextNotificationAtRecordKey(
+                workspaceId,
+                recordKey,
+                target.cadence.nextDueAt,
+                target.cadence.reminderHoursBefore,
+              ),
           }),
     })
   }
@@ -5107,6 +5013,12 @@ function readStoredPlanningUpdateTarget(
     ...(row.latestContextSnapshot === undefined
       ? {}
       : { latestContextSnapshot: readPlanningUpdateContextSnapshot(row.latestContextSnapshot) }),
+    ...(row.nextNotificationAtRecordKey === undefined
+      ? {}
+      : { nextNotificationAtRecordKey: readIdentifier(
+          row.nextNotificationAtRecordKey,
+          'Planning update notification index key',
+        ) }),
     ...(row.archivedAt === undefined
       ? {}
       : { archivedAt: readTimestamp(row.archivedAt, 'Update target archived timestamp') }),
@@ -5505,7 +5417,12 @@ function readPlanningUpdateEvidenceUrl(value: unknown) {
   }
   try {
     const url = new URL(value)
-    if (url.protocol !== 'https:' || url.username || url.password) throw new Error('invalid')
+    if (
+      url.protocol !== 'https:' ||
+      url.username ||
+      url.password ||
+      url.search
+    ) throw new Error('invalid')
     return url.toString()
   } catch {
     throw invalid('PlanningUpdateEvidenceInvalid', 'Evidence URL must use HTTPS.')

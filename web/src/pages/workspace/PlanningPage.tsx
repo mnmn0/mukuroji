@@ -389,12 +389,14 @@ export function PlanningPage() {
     setMutationErrorMessage(undefined)
     setIsUpdateCollaborationPending(true)
     try {
+      await updateAnnotations.loadVersion(update.version)
       await mutationRequestRunner.run(
         `planning:update:${createPlanningUpdateTargetKey(selectedUpdateTarget)}:${update.version}:comment:${input.id}`,
         JSON.stringify(input),
         (context) => createPlanningUpdateComment(accessToken, input, context),
       )
       try {
+        await updateAnnotations.loadVersion(update.version)
         await updateAnnotations.mutate()
       } catch {
         // SWR preserves the annotation query error for the recoverable collaboration alert.
@@ -429,14 +431,16 @@ export function PlanningPage() {
       target: selectedUpdateTarget,
       updateVersion: update.version,
     }
-    const hasCurrentMemberReaction = updateAnnotations.data?.reactions.some((reaction) =>
-      reaction.updateVersion === update.version &&
-      reaction.emoji === emoji &&
-      reaction.memberKey.trim().toLowerCase() === currentUserProjectKey
-    ) ?? false
     setMutationErrorMessage(undefined)
     setIsUpdateCollaborationPending(true)
     try {
+      const loadedAnnotations = await updateAnnotations.loadVersion(update.version)
+      const hasCurrentMemberReaction = (loadedAnnotations?.reactions ?? updateAnnotations.data?.reactions ?? [])
+        .some((reaction) =>
+          reaction.updateVersion === update.version &&
+          reaction.emoji === emoji &&
+          reaction.memberKey.trim().toLowerCase() === currentUserProjectKey
+        )
       await mutationRequestRunner.run(
         `planning:update:${createPlanningUpdateTargetKey(selectedUpdateTarget)}:${update.version}:reaction:${emoji}`,
         JSON.stringify([input, hasCurrentMemberReaction]),
@@ -449,6 +453,7 @@ export function PlanningPage() {
         },
       )
       try {
+        await updateAnnotations.loadVersion(update.version)
         await updateAnnotations.mutate()
       } catch {
         // SWR preserves the annotation query error for the recoverable collaboration alert.

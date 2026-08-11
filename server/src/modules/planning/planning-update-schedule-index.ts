@@ -76,12 +76,36 @@ export function createPlanningUpdateNextNotificationAtRecordKey(
   ) {
     throw new TypeError('Planning update first notification timestamp is invalid.')
   }
+  return createPlanningUpdateNotificationAtRecordKey(
+    workspaceId,
+    targetRecordKey,
+    new Date(firstNotificationTime).toISOString(),
+  )
+}
+
+/**
+ * Creates the opaque due-index sort key for an arbitrary future notification stage.
+ *
+ * @param workspaceId - Workspace that owns the target row.
+ * @param targetRecordKey - Canonical UPDATE_TARGET record key.
+ * @param notificationAt - Absolute stage timestamp.
+ * @returns Lexicographically sortable due-index record key.
+ */
+export function createPlanningUpdateNotificationAtRecordKey(
+  workspaceId: string,
+  targetRecordKey: string,
+  notificationAt: string,
+) {
+  const timestamp = requireScheduleTimestamp(
+    notificationAt,
+    'Planning update notification time',
+  )
   const digest = createHash('sha256')
     .update(`${requireScheduleKeyPart(workspaceId, 'Workspace ID')}\0${
       requireScheduleKeyPart(targetRecordKey, 'Planning update target record key')
     }`)
     .digest('hex')
-  return `${new Date(firstNotificationTime).toISOString()}#${digest}`
+  return `${timestamp.toISOString()}#${digest}`
 }
 
 /**

@@ -2000,6 +2000,54 @@ describe('planning structured updates', () => {
     }
   })
 
+  test('retains the monthly anchor when editing an already-clamped occurrence', async () => {
+    const client = new InMemoryPlanningClient(() => new Date('2027-02-01T09:00:00.000Z'))
+    const target: PlanningUpdateTarget = {
+      type: 'project', teamId: 'team-1', projectId: 'project-1',
+    }
+    await client.configureUpdateCadence('workspace-1', {
+      target,
+      cadence: {
+        updateOwnerMemberKey: 'owner@example.com',
+        cadence: { unit: 'month', count: 1 },
+        timeZone: 'UTC',
+        nextDueAt: '2027-01-31T09:00:00.000Z',
+        reminderHoursBefore: 0,
+      },
+      expectedRevision: 0,
+    }, EMPTY_WORK_ITEMS)
+    const first = await client.publishUpdate(
+      'workspace-1',
+      createPlanningUpdateInput(1, { target, id: 'update-1' }),
+      'owner@example.com',
+      EMPTY_WORK_ITEMS,
+    )
+    expect(first.planning.updateTargets[0]?.cadence?.nextDueAt)
+      .toBe('2027-02-28T09:00:00.000Z')
+
+    const edited = await client.configureUpdateCadence('workspace-1', {
+      target,
+      cadence: {
+        updateOwnerMemberKey: 'new-owner@example.com',
+        cadence: { unit: 'month', count: 1 },
+        timeZone: 'UTC',
+        nextDueAt: '2027-02-28T09:00:00.000Z',
+        reminderHoursBefore: 24,
+      },
+      expectedRevision: 2,
+    }, EMPTY_WORK_ITEMS)
+    expect(edited.updateTarget.cadence?.nextDueAt).toBe('2027-02-28T09:00:00.000Z')
+
+    const second = await client.publishUpdate(
+      'workspace-1',
+      createPlanningUpdateInput(3, { target, id: 'update-2' }),
+      'new-owner@example.com',
+      EMPTY_WORK_ITEMS,
+    )
+    expect(second.planning.updateTargets[0]?.cadence?.nextDueAt)
+      .toBe('2027-03-31T09:00:00.000Z')
+  })
+
   test('captures immutable Initiative context and diffs canonical changes', async () => {
     const client = new InMemoryPlanningClient(() => NOW)
     await client.create(
@@ -2043,6 +2091,17 @@ describe('planning structured updates', () => {
         type: 'decision',
         decisionId: 'decision-1',
         url: 'http://example.com/decisions/decision-1',
+      }],
+    }), 'owner@example.com', EMPTY_WORK_ITEMS)).rejects.toMatchObject({
+      code: 'PlanningUpdateEvidenceInvalid',
+    })
+    await expect(client.publishUpdate('workspace-1', createPlanningUpdateInput(4, {
+      target,
+      id: 'initiative-update-credentialed-evidence',
+      evidence: [{
+        type: 'file',
+        fileId: 'file-1',
+        url: 'https://example.com/files/file-1?X-Amz-Signature=secret',
       }],
     }), 'owner@example.com', EMPTY_WORK_ITEMS)).rejects.toMatchObject({
       code: 'PlanningUpdateEvidenceInvalid',
@@ -2707,7 +2766,7 @@ describe('planning persistence', () => {
     })
   })
 
-  test('condition-checks source Work Items while publishing an immutable UPDATE row', async () => {
+  test('uses one global Planning revision fence while publishing an immutable UPDATE row', async () => {
     const target: PlanningUpdateTarget = {
       type: 'project', teamId: 'team-1', projectId: 'project-1',
     }
@@ -2762,8 +2821,8 @@ describe('planning persistence', () => {
           throw {
             name: 'TransactionCanceledException',
             CancellationReasons: [
-              { Code: 'None' },
               { Code: 'ConditionalCheckFailed' },
+              { Code: 'None' },
               { Code: 'None' },
               { Code: 'None' },
               { Code: 'None' },
@@ -2815,7 +2874,7 @@ describe('planning persistence', () => {
       workItemState,
     )).rejects.toMatchObject({
       status: 409,
-      code: 'PlanningWorkItemChanged',
+      code: 'PlanningRevisionConflict',
     })
     const response = await client.publishUpdate(
       'workspace-1',
@@ -2852,23 +2911,13 @@ describe('planning persistence', () => {
     }>
     expect(transactionItems.map((item) => item.Put?.Item.recordKey)).toEqual([
       'META',
-      undefined,
       'UPDATE_TARGET#PROJECT#team-1#project-1',
       'UPDATE_ID#PROJECT#team-1#project-1#update-1',
       'UPDATE#PROJECT#team-1#project-1#0000000000000001',
     ])
-    expect(transactionItems[1]?.ConditionCheck).toMatchObject({
-      TableName: 'WorkItemsTable',
-      Key: {
-        directoryTeamId: 'workspace-1#team#team-1',
-        issueId: 'work-source',
-      },
-      ConditionExpression:
-        'attribute_exists(directoryTeamId) AND attribute_exists(issueId) AND #revision = :expectedRevision',
-      ExpressionAttributeNames: { '#revision': 'revision' },
-      ExpressionAttributeValues: { ':expectedRevision': 7 },
-    })
-    const targetRow = transactionItems[2]?.Put?.Item
+    expect(transactionItems.filter((item) => item.ConditionCheck?.TableName === 'WorkItemsTable'))
+      .toHaveLength(0)
+    const targetRow = transactionItems[1]?.Put?.Item
     const persistedCadence = targetRow?.cadence
     if (
       !targetRow ||
@@ -2893,10 +2942,10 @@ describe('planning persistence', () => {
         persistedCadence.reminderHoursBefore,
       ),
     })
-    expect(transactionItems[3]?.Put?.ConditionExpression).toBe(
+    expect(transactionItems[2]?.Put?.ConditionExpression).toBe(
       'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
     )
-    expect(transactionItems[4]?.Put?.ConditionExpression).toBe(
+    expect(transactionItems[3]?.Put?.ConditionExpression).toBe(
       'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
     )
     const history = await client.listUpdates('workspace-1', { target })

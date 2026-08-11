@@ -7,6 +7,7 @@ import type {
 } from '@mukuroji/contracts'
 import useSWR from 'swr'
 import useSWRInfinite from 'swr/infinite'
+import { useMemo, useState } from 'react'
 import {
   getPlanningUpdateWatch,
   listPlanningUpdateComments,
@@ -153,6 +154,15 @@ export function usePlanningUpdateAnnotations(
   enabled = true,
 ) {
   const targetKey = target ? createPlanningUpdateTargetKey(target) : undefined
+  const annotationScopeKey = `${accessToken ?? ''}\0${targetKey ?? ''}`
+  const [onDemandState, setOnDemandState] = useState<{
+    scopeKey: string
+    pages: Record<string, PlanningUpdateAnnotationPage>
+  }>({ scopeKey: annotationScopeKey, pages: {} })
+  const onDemandPages = useMemo(
+    () => onDemandState.scopeKey === annotationScopeKey ? onDemandState.pages : {},
+    [annotationScopeKey, onDemandState],
+  )
   const updateVersions = selectPlanningUpdateAnnotationVersions(updates)
   const versionsKey = updateVersions.join(',')
   const key = accessToken && target && targetKey && updateVersions.length > 0 && enabled
@@ -170,17 +180,67 @@ export function usePlanningUpdateAnnotations(
     },
     planningUpdateQueryConfig,
   )
+  const data = useMemo(() => {
+    const pages = [
+      ...(query.data ? [query.data] : []),
+      ...Object.values(onDemandPages),
+    ]
+    return {
+      comments: deduplicatePlanningUpdateComments(pages.flatMap((page) => page.comments)),
+      reactions: deduplicatePlanningUpdateReactions(pages.flatMap((page) => page.reactions)),
+    }
+  }, [onDemandPages, query.data])
+  const loadVersion = async (updateVersion: number) => {
+    if (!accessToken || !target) return undefined
+    invalidatePlanningUpdateAnnotationPageCache(accessToken, target, [updateVersion])
+    const page = await loadCachedPlanningUpdateAnnotationPage(
+      accessToken,
+      target,
+      updateVersion,
+    )
+    setOnDemandState((current) => ({
+      scopeKey: annotationScopeKey,
+      pages: {
+        ...(current.scopeKey === annotationScopeKey ? current.pages : {}),
+        [updateVersion]: page,
+      },
+    }))
+    return page
+  }
 
   return {
     ...query,
+    data: (query.data || Object.keys(onDemandPages).length > 0) ? data : query.data,
+    loadVersion,
     mutate: () => {
       if (accessToken && target) {
-        invalidatePlanningUpdateAnnotationPageCache(accessToken, target, updateVersions)
+        invalidatePlanningUpdateAnnotationPageCache(
+          accessToken,
+          target,
+          [...updateVersions, ...Object.keys(onDemandPages).map(Number)],
+        )
       }
       return query.mutate()
     },
     key,
   }
+}
+
+/** Removes duplicate comment rows when eager and on-demand pages overlap. */
+function deduplicatePlanningUpdateComments(
+  comments: readonly PlanningUpdateComment[],
+): PlanningUpdateComment[] {
+  return [...new Map(comments.map((comment) => [comment.id, comment])).values()]
+}
+
+/** Removes duplicate reaction rows when eager and on-demand pages overlap. */
+function deduplicatePlanningUpdateReactions(
+  reactions: readonly PlanningUpdateReaction[],
+): PlanningUpdateReaction[] {
+  return [...new Map(reactions.map((reaction) => [
+    `${reaction.updateVersion}\0${reaction.memberKey}\0${reaction.emoji}`,
+    reaction,
+  ])).values()]
 }
 
 /**
