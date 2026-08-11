@@ -7897,15 +7897,24 @@ routeApp.get('/api/teams/:teamId/issues/:issueId/context-items', async (c) => {
       cursor: c.req.query('cursor'),
       capabilities: createCuratedContextCapabilities(principal, context, detail.issue),
     })
-    const reconciledItems = await reconcileCuratedContextSourcesForViewer(
+    const currentPrincipal = await assertCuratedContextScopeUnchanged(
       principal,
+      teamId,
+      issueId,
+      'viewer',
+      detail.issue.assignedProjectId,
+      accessToken,
+      c,
+    )
+    const reconciledItems = await reconcileCuratedContextSourcesForViewer(
+      currentPrincipal,
       teamId,
       issueId,
       entityKey,
       page.items,
     )
     await assertCuratedContextScopeUnchanged(
-      principal,
+      currentPrincipal,
       teamId,
       issueId,
       'viewer',
@@ -7950,15 +7959,24 @@ routeApp.get(
         limit: limitValue === undefined ? undefined : Number(limitValue),
         cursor: c.req.query('cursor'),
       })
-      const reconciledItems = await reconcileCuratedContextSourcesForViewer(
+      const currentPrincipal = await assertCuratedContextScopeUnchanged(
         principal,
+        teamId,
+        issueId,
+        'viewer',
+        detail.issue.assignedProjectId,
+        accessToken,
+        c,
+      )
+      const reconciledItems = await reconcileCuratedContextSourcesForViewer(
+        currentPrincipal,
         teamId,
         issueId,
         entityKey,
         page.items,
       )
       await assertCuratedContextScopeUnchanged(
-        principal,
+        currentPrincipal,
         teamId,
         issueId,
         'viewer',
@@ -8308,11 +8326,20 @@ routeApp.put('/api/teams/:teamId/issues/:issueId/comments/:rootCommentId/accepte
         ...request,
       }),
     })
-    const current = await loadAuthorizedTeamIssue(principal, teamId, issueId, 'viewer')
+    const currentPrincipal = await assertCuratedContextScopeUnchanged(
+      principal,
+      teamId,
+      issueId,
+      'viewer',
+      detail.issue.assignedProjectId,
+      accessToken,
+      c,
+    )
+    const current = await loadAuthorizedTeamIssue(currentPrincipal, teamId, issueId, 'viewer')
     return c.json({
       comment: toCollaborationCommentResponse(
         comment,
-        principal,
+        currentPrincipal,
         current.context,
         current.detail.issue,
       ),
@@ -21321,7 +21348,7 @@ async function loadAuthorizedTeamIssue(
  * @param initialAssignedProjectId - Project assignment observed before the read.
  * @param accessToken - Access token used to re-resolve Enterprise authorization before return.
  * @param context - Current route context used by the authentication refresh.
- * @returns A promise that resolves only when the parent scope is unchanged.
+ * @returns The freshly authenticated principal after the parent scope is verified unchanged.
  */
 async function assertCuratedContextScopeUnchanged(
   principal: WorkspacePrincipal,
@@ -21329,12 +21356,10 @@ async function assertCuratedContextScopeUnchanged(
   issueId: string,
   minimumRole: ProjectRole,
   initialAssignedProjectId: string | undefined,
-  accessToken?: string,
-  context?: Context,
-): Promise<void> {
-  const currentPrincipal = accessToken === undefined
-    ? principal
-    : await authenticateWorkspacePrincipal(accessToken, undefined, context)
+  accessToken: string,
+  context: Context,
+): Promise<WorkspacePrincipal> {
+  const currentPrincipal = await authenticateWorkspacePrincipal(accessToken, undefined, context)
   const current = await loadAuthorizedTeamIssue(
     currentPrincipal,
     teamId,
@@ -21348,6 +21373,7 @@ async function assertCuratedContextScopeUnchanged(
       'Work Item assignment changed while curated context was loading.',
     )
   }
+  return currentPrincipal
 }
 
 async function loadFileProofingRequestContext(
@@ -22031,11 +22057,20 @@ async function requirePermissionSafeCuratedContextItem(
   entityKey: string,
   item: CuratedContextItem,
   initialAssignedProjectId: string | undefined,
-  accessToken?: string,
-  context?: Context,
+  accessToken: string,
+  context: Context,
 ): Promise<CuratedContextItem> {
-  const [reconciled] = await reconcileCuratedContextSourcesForViewer(
+  const currentPrincipal = await assertCuratedContextScopeUnchanged(
     principal,
+    teamId,
+    issueId,
+    'member',
+    initialAssignedProjectId,
+    accessToken,
+    context,
+  )
+  const [reconciled] = await reconcileCuratedContextSourcesForViewer(
+    currentPrincipal,
     teamId,
     issueId,
     entityKey,
@@ -22049,7 +22084,7 @@ async function requirePermissionSafeCuratedContextItem(
     )
   }
   await assertCuratedContextScopeUnchanged(
-    principal,
+    currentPrincipal,
     teamId,
     issueId,
     'member',

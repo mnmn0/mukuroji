@@ -981,9 +981,10 @@ function contextLedgerIncrement(tableName: string, entityKey: string) {
       UpdateExpression:
         'SET #entryType = :entryType, #generation = if_not_exists(#generation, :zero) + :one',
       ConditionExpression:
-        'attribute_not_exists(#entryType) OR ' +
+        'attribute_not_exists(#entityKey) OR ' +
         '(#entryType = :entryType AND #generation >= :zero)',
       ExpressionAttributeNames: {
+        '#entityKey': 'entityKey',
         '#entryType': 'entryType',
         '#generation': 'generation',
       },
