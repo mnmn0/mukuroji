@@ -18,6 +18,7 @@ import {
 import { FocusQueue } from '../src/features/focus-queue/ui/FocusQueue'
 import { readFocusPolicyOverrides } from '../src/features/focus-queue/model/focusPolicyForm'
 import { FocusQueueApiError } from '../src/features/focus-queue/api/focusQueue'
+import { resolveFocusQueueResponse } from '../src/features/focus-queue/queries/useFocusQueue'
 import { resolveWorkspaceFocusOverviewState } from '../src/features/focus-queue/queries/useWorkspaceFocusOverview'
 import { createTranslator } from '../src/shared/i18n/i18n'
 
@@ -80,6 +81,14 @@ describe('Focus queue', () => {
   })
 
   test('hides cached Focus after authorization failures but retains it for transient errors', () => {
+    expect(resolveFocusQueueResponse(
+      focusQueueResponseFixture,
+      new FocusQueueApiError(403, 'Forbidden'),
+    )).toBeUndefined()
+    expect(resolveFocusQueueResponse(
+      focusQueueResponseFixture,
+      new FocusQueueApiError(503, 'Unavailable'),
+    )).toBe(focusQueueResponseFixture)
     expect(resolveWorkspaceFocusOverviewState(
       focusQueueResponseFixture,
       new FocusQueueApiError(403, 'Forbidden'),

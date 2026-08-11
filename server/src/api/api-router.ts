@@ -23332,6 +23332,7 @@ async function readFocusQueue(
     editableTeamPolicyIds,
     ...(state.userPolicy === undefined ? {} : { userPolicy: state.userPolicy }),
     snoozeRecords: state.snoozes,
+    canApproveByWorkItemKey: workItemPermissions.canApproveByWorkItemKey,
     canWriteByWorkItemKey: workItemPermissions.canWriteByWorkItemKey,
     canWatchByWorkItemKey: workItemPermissions.canWatchByWorkItemKey,
     watchingByWorkItemKey: {},
@@ -23709,6 +23710,7 @@ async function readFocusWorkItemPermissionsByKey(
     : await getEffectiveProjectAccessList(principal)
   const teamById = new Map(directory.teams.map((team) => [team.id, team]))
   const canWriteByWorkItemKey: Record<string, boolean> = {}
+  const canApproveByWorkItemKey: Record<string, boolean> = {}
   const canWatchByWorkItemKey: Record<string, boolean> = {}
 
   for (const workItem of workItems) {
@@ -23728,9 +23730,10 @@ async function readFocusWorkItemPermissionsByKey(
     }
     const key = createFocusWorkItemKey(workItem.teamId, workItem.id)
     canWriteByWorkItemKey[key] = canWriteFocusWorkItem(principal, context, workItem)
+    canApproveByWorkItemKey[key] = canApproveFocusWorkItem(principal, context, workItem)
     canWatchByWorkItemKey[key] = canWatchFocusWorkItem(principal, context, workItem)
   }
-  return { canWatchByWorkItemKey, canWriteByWorkItemKey }
+  return { canApproveByWorkItemKey, canWatchByWorkItemKey, canWriteByWorkItemKey }
 }
 
 /**
@@ -23760,6 +23763,52 @@ function canWriteFocusWorkItem(
   }
   return evaluateEnterpriseAccess({
     permission: 'work-items.write',
+    principal: evaluation.principal,
+    assignments: evaluation.assignments,
+    customRoles: evaluation.snapshot.customRoles,
+    groupMappings: evaluation.groupMappings,
+    resource: workItem.assignedProjectId === undefined
+      ? {
+          workspaceId: principal.directoryId,
+          kind: 'team',
+          targetId: workItem.teamId,
+        }
+      : {
+          workspaceId: principal.directoryId,
+          kind: 'project',
+          targetId: workItem.assignedProjectId,
+          parentTeamId: workItem.teamId,
+        },
+  }).allowed
+}
+
+/**
+ * Evaluates the approval-decision permission for one Focus Work Item.
+ *
+ * @param principal - Authenticated Workspace principal whose approval access is evaluated.
+ * @param context - Current Team and Project authorization context.
+ * @param workItem - Canonical Work Item whose approval may be decided.
+ * @returns Whether the current source state authorizes an approval decision.
+ */
+function canApproveFocusWorkItem(
+  principal: WorkspacePrincipal,
+  context: TeamPermissionContext,
+  workItem: CanonicalWorkItem,
+): boolean {
+  if (principal.workspaceRole === 'guest') return false
+  if (principal.isSystemAdmin) return true
+  const evaluation = principal.enterpriseAuthorizationEvaluation
+  if (evaluation === undefined) {
+    return principal.enterpriseLegacyProjectAccessSuppressed !== true
+  }
+  if (
+    workItem.assignedProjectId !== undefined &&
+    !context.team.projects.some((project) => project.id === workItem.assignedProjectId)
+  ) {
+    return false
+  }
+  return evaluateEnterpriseAccess({
+    permission: 'files.approve',
     principal: evaluation.principal,
     assignments: evaluation.assignments,
     customRoles: evaluation.snapshot.customRoles,

@@ -1,7 +1,6 @@
 import type { FocusQueueResponse } from '@mukuroji/contracts'
-import { FocusQueueApiError } from '../api/focusQueue'
 import { getFocusBlockedCount } from '../model/focusMetrics'
-import { useFocusQueue } from './useFocusQueue'
+import { resolveFocusQueueResponse, useFocusQueue } from './useFocusQueue'
 
 /**
  * Resolves whether cached Focus data remains safe to show after a refresh failure.
@@ -14,9 +13,7 @@ export function resolveWorkspaceFocusOverviewState(
   response: FocusQueueResponse | undefined,
   error: unknown,
 ) {
-  const authorizationFailed = error instanceof FocusQueueApiError &&
-    (error.status === 401 || error.status === 403)
-  const visibleResponse = authorizationFailed ? undefined : response
+  const visibleResponse = resolveFocusQueueResponse(response, error)
 
   return {
     isUnavailable: Boolean(error && !visibleResponse),

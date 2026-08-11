@@ -20,6 +20,7 @@ import {
 import { createApiTestHarness } from '../../api/test-support/api-test-harness'
 import {
   createDefaultDueDateWorkItemSchedule,
+  type ApprovalRequest,
   type EnterprisePermissionId,
 } from '@mukuroji/contracts'
 
@@ -1028,6 +1029,71 @@ test('supports scoped Enterprise Focus reads while omitting unauthorized source 
     }
     expect(approvalPageReads).toBe(0)
     expect(approvalSummaryReads).toBe(0)
+  })
+})
+
+test('does not mark Enterprise reviewer requests actionable without files approval', async () => {
+  await withTestEnvironment({
+    COGNITO_CLIENT_ID: 'mukuroji-main-client',
+    COGNITO_ENTERPRISE_IDP_NAME: 'EnterpriseOidc',
+    COGNITO_SSO_CLIENT_ID: 'mukuroji-sso-client',
+    COGNITO_SSO_REDIRECT_URI: 'https://app.example.com/api/auth/sso/callback',
+  }, async () => {
+    configureFocusSources()
+    configureFakeAuthenticatedUser({
+      email: 'sato@example.com',
+      'custom:directory_id': 'user#demo@example.com',
+    })
+    const approval: ApprovalRequest = {
+      id: 'focus-reviewer-approval',
+      teamId: 'core-team',
+      issueId: 'onboarding-friction',
+      subjectType: 'work-item',
+      revision: 1,
+      status: 'pending',
+      reviewers: [{ memberKey: 'sato@example.com', status: 'pending' }],
+      dueAt: '2099-07-20T00:00:00.000Z',
+      requestedByMemberKey: 'demo@example.com',
+      requestedByKind: 'member',
+      createdAt: '2026-07-12T00:00:00.000Z',
+      updatedAt: '2026-07-12T00:00:00.000Z',
+      capabilities: { canCancel: false, canDecide: true },
+    }
+    setTestAppDependencies({
+      enterpriseIdentity: await createFocusEnterpriseIdentity(
+        'project',
+        ['work-items.read', 'files.read'],
+      ),
+      fileProofing: createFileProofingStub({
+        async listReviewerApprovals() {
+          return { approvals: [approval] }
+        },
+      }),
+      notifications: {
+        ...createFocusNotificationClient([]),
+        async list() {
+          return { notifications: [] }
+        },
+      },
+    })
+    const authorization = `Bearer ${createAccessToken([], {
+      client_id: 'mukuroji-main-client',
+      token_use: 'access',
+    })}`
+
+    const response = await app.request('/api/focus', {
+      headers: { Authorization: authorization },
+    })
+
+    expect(response.status).toBe(200)
+    const item = readFocusItem(await response.json(), 'onboarding-friction')
+    expect(item).toMatchObject({
+      actionability: {
+        actionable: false,
+        reasons: ['no-permitted-primary-action'],
+      },
+      section: 'waiting',
+    })
   })
 })
 

@@ -1,5 +1,5 @@
 import useSWR from 'swr'
-import { getFocusQueue } from '../api/focusQueue'
+import { FocusQueueApiError, getFocusQueue } from '../api/focusQueue'
 
 const focusQueueRefreshInterval = 15_000
 
@@ -15,6 +15,22 @@ export function createFocusQueueKey(
   enabled: boolean,
 ): readonly ['focus-queue', string] | null {
   return accessToken && enabled ? ['focus-queue', accessToken] : null
+}
+
+/**
+ * Removes cached Focus data after an authorization failure.
+ *
+ * @param response - Last successfully loaded Focus snapshot.
+ * @param error - Latest Focus query failure.
+ * @returns Focus snapshot that is safe to expose to the current principal.
+ */
+export function resolveFocusQueueResponse(
+  response: Awaited<ReturnType<typeof getFocusQueue>> | undefined,
+  error: unknown,
+) {
+  const authorizationFailed = error instanceof FocusQueueApiError &&
+    (error.status === 401 || error.status === 403)
+  return authorizationFailed ? undefined : response
 }
 
 /**
@@ -42,5 +58,9 @@ export function useFocusQueue(
     },
   )
 
-  return { ...query, key }
+  return {
+    ...query,
+    data: resolveFocusQueueResponse(query.data, query.error),
+    key,
+  }
 }

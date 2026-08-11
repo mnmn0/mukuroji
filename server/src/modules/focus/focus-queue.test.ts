@@ -41,6 +41,8 @@ type QueueFixture = {
   snoozes?: readonly FocusSnoozeRecord[]
   /** Optional write-state replacements keyed by Team-qualified Work Item identity. */
   canWrite?: Readonly<Record<string, boolean>>
+  /** Optional approval-decision permission replacements keyed by Work Item identity. */
+  canApprove?: Readonly<Record<string, boolean>>
   /** Optional complete watch-permission map; omission grants fixtures permission by default. */
   canWatch?: Readonly<Record<string, boolean>>
   /** Optional watcher-state replacements keyed by Team-qualified Work Item identity. */
@@ -296,6 +298,38 @@ describe('Focus queue projection', () => {
       '/inbox?eventId=mention-event-1&filter=archived',
     )
     expect(item.signals[0]?.resolution.condition).toBe('source-removed')
+  })
+
+  test('does not make a reviewer request actionable without approval permission', () => {
+    const workItem = createWorkItem('approval-permission-required', 'other-member')
+    const approval: ApprovalRequest = {
+      id: 'approval-permission-required-1',
+      teamId: workItem.teamId,
+      issueId: workItem.id,
+      revision: 1,
+      status: 'pending',
+      reviewers: [{ memberKey: 'viewer', status: 'pending' }],
+      dueAt: '2026-08-12T12:00:00.000Z',
+      requestedByMemberKey: 'requester',
+      requestedByKind: 'member',
+      createdAt: '2026-08-09T08:00:00.000Z',
+      updatedAt: '2026-08-09T08:00:00.000Z',
+      capabilities: { canDecide: true, canCancel: false },
+      subjectType: 'work-item',
+    }
+    const item = findFocusItem(projectQueue({
+      workItems: [workItem],
+      approvals: [approval],
+      canApprove: { [createTestWorkItemKey(workItem)]: false },
+      canWrite: { [createTestWorkItemKey(workItem)]: false },
+    }), workItem.id)
+
+    expect(item.signals.map((signal) => signal.type)).toEqual(['review-request'])
+    expect(item.actionability).toEqual({
+      actionable: false,
+      reasons: ['no-permitted-primary-action'],
+    })
+    expect(item.section).toBe('waiting')
   })
 
   test('projects an owned pending approval aggregate as external waiting work', () => {
@@ -785,6 +819,9 @@ function projectQueue(fixture: QueueFixture): FocusQueueResponse {
   const canWatchByWorkItemKey = Object.fromEntries(
     fixture.workItems.map((workItem) => [createTestWorkItemKey(workItem), true]),
   )
+  const canApproveByWorkItemKey = Object.fromEntries(
+    fixture.workItems.map((workItem) => [createTestWorkItemKey(workItem), true]),
+  )
   return createFocusQueue({
     now: fixture.now ?? '2026-08-09T12:00:00.000Z',
     viewerMemberKey: fixture.viewerMemberKey ?? 'viewer',
@@ -798,6 +835,10 @@ function projectQueue(fixture: QueueFixture): FocusQueueResponse {
     teamPolicies: fixture.teamPolicies ?? [],
     ...(fixture.userPolicy === undefined ? {} : { userPolicy: fixture.userPolicy }),
     snoozeRecords: fixture.snoozes ?? [],
+    canApproveByWorkItemKey: {
+      ...canApproveByWorkItemKey,
+      ...fixture.canApprove,
+    },
     canWriteByWorkItemKey: {
       ...canWriteByWorkItemKey,
       ...fixture.canWrite,

@@ -124,6 +124,11 @@ export type CreateFocusQueueInput = {
    */
   canWriteByWorkItemKey: Readonly<Record<string, boolean>>
   /**
+   * Approval-decision permission keyed by `teamId`, a NUL separator, and Work Item ID.
+   * Missing entries fail closed and suppress review-request actionability.
+   */
+  canApproveByWorkItemKey: Readonly<Record<string, boolean>>
+  /**
    * Watch permission keyed by `teamId`, a NUL separator, and Work Item ID.
    * Missing entries fail closed and suppress the watch mutation capability.
    */
@@ -912,6 +917,7 @@ function projectFocusItem(
   if (!directlyRelevant || (!terminal && signals.length === 0)) return undefined
 
   const canWrite = input.canWriteByWorkItemKey[key] === true
+  const canApprove = input.canApproveByWorkItemKey[key] === true
   const canWatch = input.canWatchByWorkItemKey[key] === true
   const capabilities = createCapabilities(
     terminal,
@@ -920,7 +926,13 @@ function projectFocusItem(
     ownedByViewer,
     signals,
   )
-  const actionability = createActionability(terminal, canWrite, capabilities, signals)
+  const actionability = createActionability(
+    terminal,
+    canWrite,
+    canApprove,
+    capabilities,
+    signals,
+  )
   const rank = createFocusRank(projectedSignals, policy.settings.weights, key)
   const causeFingerprint = createFocusCauseFingerprint(signals)
   const activeSnooze = isActiveMatchingSnooze(snooze, causeFingerprint, context.now)
@@ -1661,6 +1673,7 @@ function createCapabilities(
 function createActionability(
   terminal: boolean,
   canWrite: boolean,
+  canApprove: boolean,
   capabilities: FocusItemCapabilities,
   signals: readonly FocusSignal[],
 ): FocusActionability {
@@ -1668,7 +1681,8 @@ function createActionability(
     return { actionable: false, reasons: ['work-item-completed'] }
   }
   const hasReviewAction = capabilities.openSource && signals.some((signal) =>
-    signal.type === 'review-request' || signal.type === 'mention'
+    signal.type === 'mention' ||
+    (signal.type === 'review-request' && canApprove)
   )
   if (signals.some((signal) => signal.type === 'blocker') && !hasReviewAction) {
     return { actionable: false, reasons: ['blocked'] }
