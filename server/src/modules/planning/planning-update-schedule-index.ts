@@ -70,7 +70,10 @@ export function createPlanningUpdateNextNotificationAtRecordKey(
   const firstNotificationTime = reminderHoursBefore === 0
     ? dueTime
     : dueTime - reminderHoursBefore * 3_600_000
-  if (!Number.isFinite(firstNotificationTime)) {
+  if (
+    !Number.isSafeInteger(firstNotificationTime) ||
+    Math.abs(firstNotificationTime) > 8_640_000_000_000_000
+  ) {
     throw new TypeError('Planning update first notification timestamp is invalid.')
   }
   const digest = createHash('sha256')

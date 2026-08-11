@@ -856,6 +856,10 @@ test('workspace search persists documents views and preferences in one retained 
     PointInTimeRecoverySpecification: {
       PointInTimeRecoveryEnabled: true,
     },
+    TimeToLiveSpecification: {
+      AttributeName: 'expiresAt',
+      Enabled: true,
+    },
   });
 
   const resource = template.toJSON().Resources.WorkspaceSearchTable2575AD6B;

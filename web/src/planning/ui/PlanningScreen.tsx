@@ -471,7 +471,11 @@ export function PlanningScreen({
   const selectedUpdateSummary = selectedUpdateDetail?.summary ?? (
     selectedEntity && selectedEntityUpdateTarget && resolvedSelectedUpdateTarget &&
       planningUpdateTargetsAreEqual(selectedEntityUpdateTarget, resolvedSelectedUpdateTarget)
-      ? createPlanningUpdateTargetSummary(selectedEntity, resolvedSelectedUpdateTarget)
+      ? createPlanningUpdateTargetSummary(
+          selectedEntity,
+          resolvedSelectedUpdateTarget,
+          createScopeTeams,
+        )
       : undefined
   )
   const selectedUpdateView = selectedUpdateDetail?.updateView ?? (
@@ -1669,7 +1673,7 @@ function PortfolioView({
                       >
                         <div className="flex min-w-0 flex-wrap items-center gap-1.5">
                           <HealthBadge
-                            health={updateView.updates[0]?.health ?? entity.health}
+                            health={entity.health}
                             labels={labels}
                           />
                           <PlanningUpdateFreshnessBadge freshness={updateView.freshness} labels={labels} />
@@ -1766,14 +1770,21 @@ function resolvePlanningEntityUpdateTarget(
 function createPlanningUpdateTargetSummary(
   entity: PlanningEntity,
   target: PlanningUpdateTargetView,
+  scopeTeams: readonly ProjectDirectoryTeam[],
 ): PlanningUpdateTargetSummaryView {
+  const team = target.type === 'project'
+    ? scopeTeams.find((candidate) => candidate.id === target.teamId)
+    : undefined
+  const project = target.type === 'project'
+    ? team?.projects.find((candidate) => candidate.id === target.projectId)
+    : undefined
   return {
-    context: target.type === 'project' ? entity.teamId : undefined,
+    context: target.type === 'project' ? team?.name ?? entity.teamId : undefined,
     health: entity.health,
     ownerMemberKey: entity.ownerMemberKey,
     progress: entity.progress,
     target,
-    title: target.type === 'project' ? target.projectId : entity.title,
+    title: target.type === 'project' ? project?.name ?? target.projectId : entity.title,
   }
 }
 

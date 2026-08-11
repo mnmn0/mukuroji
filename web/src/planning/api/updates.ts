@@ -335,16 +335,23 @@ function requestPlanningUpdateReactionMutation(
   mutationContext: MutationRequestContext,
   method: 'DELETE' | 'PUT',
 ) {
-  const query = createPlanningUpdateSearchParams(input.target)
+  const query = createPlanningUpdateSearchParams(input.target, method === 'DELETE'
+    ? { emoji: input.emoji }
+    : {})
   const path = `${planningApiBaseUrl}/planning/updates/${input.updateVersion}/reactions?${query.toString()}`
-  const init = {
-    body: JSON.stringify({ emoji: input.emoji }),
-    headers: {
-      'Content-Type': 'application/json',
-      ...createMutationHeaders(mutationContext),
-    },
-    method,
-  }
+  const init: RequestInit = method === 'DELETE'
+    ? {
+        headers: createMutationHeaders(mutationContext),
+        method,
+      }
+    : {
+        body: JSON.stringify({ emoji: input.emoji }),
+        headers: {
+          'Content-Type': 'application/json',
+          ...createMutationHeaders(mutationContext),
+        },
+        method,
+      }
   return method === 'DELETE'
     ? requestPlanningUpdateNoContent(path, accessToken, init)
     : requestPlanningUpdateJson(
@@ -391,7 +398,7 @@ function requestPlanningUpdateWatch(
  */
 export function createPlanningUpdateSearchParams(
   target: PlanningUpdateTarget,
-  pagination: { cursor?: string; limit?: number } = {},
+  pagination: { cursor?: string; emoji?: string; limit?: number } = {},
 ) {
   const parameters = new URLSearchParams({ targetType: target.type })
   if (target.type === 'project') {
@@ -402,6 +409,7 @@ export function createPlanningUpdateSearchParams(
   }
   if (pagination.limit !== undefined) parameters.set('limit', String(pagination.limit))
   if (pagination.cursor) parameters.set('cursor', pagination.cursor)
+  if (pagination.emoji) parameters.set('emoji', pagination.emoji)
   return parameters
 }
 

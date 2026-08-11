@@ -5,6 +5,7 @@ import {
   BulkOperationToolbar,
   type BulkOperationSelection,
 } from '../src/bulk-operations/ui/BulkOperationToolbar'
+import { resolveBulkOperationToolbarActionSelection } from '../src/bulk-operations/model/bulkOperationActionHandshake'
 import { BulkOperationResultPanel } from '../src/bulk-operations/ui/BulkOperationResultPanel'
 import {
   clearSucceededBulkSelection,
@@ -312,6 +313,88 @@ describe('BulkOperationToolbar', () => {
     expect(mismatchedUndoOperation.items.some((item) => item.status === 'succeeded')).toBe(true)
     expect(mismatchedUndoOperation.items.some((item) => item.undoable)).toBe(true)
     expect(html).not.toContain('Undo succeeded items')
+  })
+
+  test('exposes assign beside move and archive as a canonical bulk entrance', () => {
+    const html = renderToStaticMarkup(
+      <BulkOperationToolbar
+        selectedItems={selections.slice(0, 2)}
+        t={createTranslator('en')}
+        visibleItems={selections}
+        workspaceId="workspace-1"
+        onApply={async () => partialOperation}
+        onPreview={async () => ({
+          action: { archived: true, type: 'archive' },
+          canApply: true,
+          items: [],
+          operationToken: 'preview-token',
+        })}
+        onVisibleSelectionChange={() => undefined}
+      />,
+    )
+
+    expect(html).toContain('Bulk move')
+    expect(html).toContain('Assign Work Item')
+    expect(html).toContain('Bulk archive')
+    expect(html).not.toContain('<option value="assigneeUserId">')
+  })
+
+  test('uses a keyed canonical request as the initial toolbar action', () => {
+    const html = renderToStaticMarkup(
+      <BulkOperationToolbar
+        selectedItems={selections.slice(0, 2)}
+        taskActionRequest={{
+          actionId: 'assign',
+          projectId: 'project-1',
+          requestId: 7,
+        }}
+        t={createTranslator('en')}
+        visibleItems={selections}
+        workspaceId="workspace-1"
+        onApply={async () => partialOperation}
+        onPreview={async () => ({
+          action: { archived: true, type: 'archive' },
+          canApply: true,
+          items: [],
+          operationToken: 'preview-token',
+        })}
+        onVisibleSelectionChange={() => undefined}
+      />,
+    )
+
+    expect(html).toMatch(/<button aria-pressed="true"[^>]*>Assign Work Item<\/button>/)
+    expect(html).toContain('Assignee ID')
+    expect(html).not.toContain('Status</option>')
+  })
+
+  test('waits for an emitted accepted request before activating a canonical mode', () => {
+    expect(resolveBulkOperationToolbarActionSelection('move', true)).toEqual({
+      requestedActionId: 'move',
+    })
+    expect(resolveBulkOperationToolbarActionSelection('edit', true)).toEqual({
+      immediateAction: 'edit',
+    })
+
+    const deniedHtml = renderToStaticMarkup(
+      <BulkOperationToolbar
+        selectedItems={selections.slice(0, 2)}
+        t={createTranslator('en')}
+        visibleItems={selections}
+        workspaceId="workspace-1"
+        onApply={async () => partialOperation}
+        onPreview={async () => ({
+          action: { targetProjectId: 'project-2', type: 'move' },
+          canApply: true,
+          items: [],
+          operationToken: 'preview-token',
+        })}
+        onTaskActionRequest={async () => false}
+        onVisibleSelectionChange={() => undefined}
+      />,
+    )
+
+    expect(deniedHtml).toMatch(/<button aria-pressed="true"[^>]*>Bulk edit<\/button>/)
+    expect(deniedHtml).toMatch(/<button aria-pressed="false"[^>]*>Bulk move<\/button>/)
   })
 
   test('disables selection and actions in read-only mode', () => {

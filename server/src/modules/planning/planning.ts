@@ -327,6 +327,7 @@ export type PlanningClient = {
     workspaceId: string,
     input: ConfigurePlanningUpdateCadenceInput,
     workItemState: PlanningWorkItemState,
+    authorizationConditionChecks?: readonly PlanningCallerAuthorizationConditionCheck[],
   ): Promise<PlanningUpdateCadenceMutationResponse>
   /** Human-authored structured update を append-only publish します。 */
   publishUpdate(
@@ -349,6 +350,7 @@ export type PlanningClient = {
    * @param input - Target, immutable update version, client ID, and body.
    * @param authorMemberKey - Authenticated comment author.
    * @param transaction - Optional durable response receipt committed with the comment.
+   * @param authorizationConditionChecks - Caller authorization rows guarded during persistence.
    * @returns The committed append-only comment.
    */
   createUpdateComment(
@@ -356,6 +358,7 @@ export type PlanningClient = {
     input: CreatePlanningUpdateCommentInput,
     authorMemberKey: string,
     transaction?: PlanningMutationTransaction<PlanningUpdateAnnotationTransactionResult>,
+    authorizationConditionChecks?: readonly PlanningCallerAuthorizationConditionCheck[],
   ): Promise<PlanningUpdateComment>
   /** Immutable update comments を新しい順に page 取得します。 */
   listUpdateComments(
@@ -369,6 +372,7 @@ export type PlanningClient = {
    * @param input - Target, immutable update version, and reaction token.
    * @param memberKey - Authenticated reacting member.
    * @param transaction - Optional durable response receipt committed with the reaction.
+   * @param authorizationConditionChecks - Caller authorization rows guarded during persistence.
    * @returns The committed reaction.
    */
   addUpdateReaction(
@@ -376,6 +380,7 @@ export type PlanningClient = {
     input: PlanningUpdateReactionInput,
     memberKey: string,
     transaction?: PlanningMutationTransaction<PlanningUpdateAnnotationTransactionResult>,
+    authorizationConditionChecks?: readonly PlanningCallerAuthorizationConditionCheck[],
   ): Promise<PlanningUpdateReaction>
   /**
    * Removes the current member's reaction from an immutable Planning update.
@@ -384,6 +389,7 @@ export type PlanningClient = {
    * @param input - Target, immutable update version, and reaction token.
    * @param memberKey - Authenticated reacting member.
    * @param transaction - Optional durable response receipt committed with the removal.
+   * @param authorizationConditionChecks - Caller authorization rows guarded during persistence.
    * @returns A promise that resolves after the idempotent removal commits.
    */
   removeUpdateReaction(
@@ -391,6 +397,7 @@ export type PlanningClient = {
     input: PlanningUpdateReactionInput,
     memberKey: string,
     transaction?: PlanningMutationTransaction<PlanningUpdateAnnotationTransactionResult>,
+    authorizationConditionChecks?: readonly PlanningCallerAuthorizationConditionCheck[],
   ): Promise<void>
   /** Immutable update reactions を stable key 順に page 取得します。 */
   listUpdateReactions(
@@ -583,6 +590,7 @@ abstract class BasePlanningClient implements PlanningClient {
     workspaceId: string,
     comment: PlanningUpdateComment,
     transactionContribution?: PlanningMutationTransactionContribution,
+    authorizationConditionChecks?: readonly PlanningCallerAuthorizationConditionCheck[],
   ): Promise<void>
 
   /** Storage から update comment の1 pageを返します。 */
@@ -599,6 +607,7 @@ abstract class BasePlanningClient implements PlanningClient {
     workspaceId: string,
     reaction: PlanningUpdateReaction,
     transactionContribution?: PlanningMutationTransactionContribution,
+    authorizationConditionChecks?: readonly PlanningCallerAuthorizationConditionCheck[],
   ): Promise<void>
 
   /** Storage から current member reaction を削除します。 */
@@ -609,6 +618,7 @@ abstract class BasePlanningClient implements PlanningClient {
     emoji: string,
     memberKey: string,
     transactionContribution?: PlanningMutationTransactionContribution,
+    authorizationConditionChecks?: readonly PlanningCallerAuthorizationConditionCheck[],
   ): Promise<void>
 
   /** Storage から update reaction の1 pageを返します。 */
@@ -932,6 +942,7 @@ abstract class BasePlanningClient implements PlanningClient {
     workspaceId: string,
     input: ConfigurePlanningUpdateCadenceInput,
     workItemState: PlanningWorkItemState,
+    authorizationConditionChecks: readonly PlanningCallerAuthorizationConditionCheck[] = [],
   ): Promise<PlanningUpdateCadenceMutationResponse> {
     const result = await this.mutate(
       workspaceId,
@@ -967,6 +978,7 @@ abstract class BasePlanningClient implements PlanningClient {
         }
         return { state: replacePlanningUpdateTarget(state, updated) }
       },
+      authorizationConditionChecks,
     )
     const updateTarget = result.planning.updateTargets.find((candidate) =>
       planningUpdateTargetsEqual(candidate.target, readPlanningUpdateTarget(input.target))
@@ -1105,6 +1117,7 @@ abstract class BasePlanningClient implements PlanningClient {
     input: CreatePlanningUpdateCommentInput,
     authorMemberKey: string,
     transaction?: PlanningMutationTransaction<PlanningUpdateAnnotationTransactionResult>,
+    authorizationConditionChecks: readonly PlanningCallerAuthorizationConditionCheck[] = [],
   ): Promise<PlanningUpdateComment> {
     const normalizedWorkspaceId = readIdentifier(workspaceId, 'Workspace ID')
     const target = readPlanningUpdateTarget(input.target)
@@ -1123,7 +1136,12 @@ abstract class BasePlanningClient implements PlanningClient {
           comment: structuredClone(comment),
         })
       : undefined
-    await this.appendUpdateComment(normalizedWorkspaceId, comment, transactionContribution)
+    await this.appendUpdateComment(
+      normalizedWorkspaceId,
+      comment,
+      transactionContribution,
+      authorizationConditionChecks,
+    )
     return structuredClone(comment)
   }
 
@@ -1159,6 +1177,7 @@ abstract class BasePlanningClient implements PlanningClient {
     input: PlanningUpdateReactionInput,
     memberKey: string,
     transaction?: PlanningMutationTransaction<PlanningUpdateAnnotationTransactionResult>,
+    authorizationConditionChecks: readonly PlanningCallerAuthorizationConditionCheck[] = [],
   ): Promise<PlanningUpdateReaction> {
     const reaction: PlanningUpdateReaction = {
       target: readPlanningUpdateTarget(input.target),
@@ -1177,6 +1196,7 @@ abstract class BasePlanningClient implements PlanningClient {
       readIdentifier(workspaceId, 'Workspace ID'),
       reaction,
       transactionContribution,
+      authorizationConditionChecks,
     )
     return structuredClone(reaction)
   }
@@ -1187,6 +1207,7 @@ abstract class BasePlanningClient implements PlanningClient {
     input: PlanningUpdateReactionInput,
     memberKey: string,
     transaction?: PlanningMutationTransaction<PlanningUpdateAnnotationTransactionResult>,
+    authorizationConditionChecks: readonly PlanningCallerAuthorizationConditionCheck[] = [],
   ): Promise<void> {
     const normalizedWorkspaceId = readIdentifier(workspaceId, 'Workspace ID')
     const target = readPlanningUpdateTarget(input.target)
@@ -1209,6 +1230,7 @@ abstract class BasePlanningClient implements PlanningClient {
       emoji,
       normalizedMemberKey,
       transactionContribution,
+      authorizationConditionChecks,
     )
   }
 
@@ -1865,6 +1887,7 @@ export class InMemoryPlanningClient extends BasePlanningClient {
     workspaceId: string,
     comment: PlanningUpdateComment,
     _transactionContribution?: PlanningMutationTransactionContribution,
+    _authorizationConditionChecks?: readonly PlanningCallerAuthorizationConditionCheck[],
   ) {
     if (!await this.planningUpdateExists(workspaceId, comment.target, comment.updateVersion)) {
       throw notFound('PlanningUpdateNotFound', 'Planning update was not found.')
@@ -1907,7 +1930,7 @@ export class InMemoryPlanningClient extends BasePlanningClient {
       ...(candidates.length > page.length && last
         ? {
             nextCursor: createPlanningUpdateAnnotationCursor(
-              'comment', target, updateVersion, last.recordKey,
+              'comment', target, updateVersion, last.comment,
             ),
           }
         : {}),
@@ -1919,6 +1942,7 @@ export class InMemoryPlanningClient extends BasePlanningClient {
     workspaceId: string,
     reaction: PlanningUpdateReaction,
     _transactionContribution?: PlanningMutationTransactionContribution,
+    _authorizationConditionChecks?: readonly PlanningCallerAuthorizationConditionCheck[],
   ) {
     if (!await this.planningUpdateExists(workspaceId, reaction.target, reaction.updateVersion)) {
       throw notFound('PlanningUpdateNotFound', 'Planning update was not found.')
@@ -1945,6 +1969,7 @@ export class InMemoryPlanningClient extends BasePlanningClient {
     emoji: string,
     memberKey: string,
     _transactionContribution?: PlanningMutationTransactionContribution,
+    _authorizationConditionChecks?: readonly PlanningCallerAuthorizationConditionCheck[],
   ) {
     if (!await this.planningUpdateExists(workspaceId, target, updateVersion)) {
       throw notFound('PlanningUpdateNotFound', 'Planning update was not found.')
@@ -1982,7 +2007,7 @@ export class InMemoryPlanningClient extends BasePlanningClient {
       ...(candidates.length > page.length && last
         ? {
             nextCursor: createPlanningUpdateAnnotationCursor(
-              'reaction', target, updateVersion, last.recordKey,
+              'reaction', target, updateVersion, last.reaction,
             ),
           }
         : {}),
@@ -2181,6 +2206,7 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
     workspaceId: string,
     comment: PlanningUpdateComment,
     transactionContribution?: PlanningMutationTransactionContribution,
+    authorizationConditionChecks: readonly PlanningCallerAuthorizationConditionCheck[] = [],
   ) {
     await this.writePlanningUpdateAnnotation(
       workspaceId,
@@ -2191,6 +2217,7 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
       'Planning update comment already exists.',
       createPlanningUpdateCommentIdRow(workspaceId, comment),
       transactionContribution,
+      authorizationConditionChecks,
     )
   }
 
@@ -2236,7 +2263,7 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
                 'comment',
                 target,
                 updateVersion,
-                createPlanningUpdateCommentRecordKey(last),
+                last,
               ),
             }
           : {}),
@@ -2254,6 +2281,7 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
     workspaceId: string,
     reaction: PlanningUpdateReaction,
     transactionContribution?: PlanningMutationTransactionContribution,
+    authorizationConditionChecks: readonly PlanningCallerAuthorizationConditionCheck[] = [],
   ) {
     await this.writePlanningUpdateAnnotation(
       workspaceId,
@@ -2264,6 +2292,7 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
       'Planning update reaction already exists.',
       undefined,
       transactionContribution,
+      authorizationConditionChecks,
     )
   }
 
@@ -2275,6 +2304,7 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
     emoji: string,
     memberKey: string,
     transactionContribution?: PlanningMutationTransactionContribution,
+    authorizationConditionChecks: readonly PlanningCallerAuthorizationConditionCheck[] = [],
   ) {
     await this.ensureTable()
     try {
@@ -2286,6 +2316,7 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
             target,
             updateVersion,
           ),
+          ...authorizationConditionChecks,
           {
             Delete: {
               TableName: this.tableName,
@@ -2309,7 +2340,14 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
       if (isPlanningTransactionConditionalFailureAt(error, 0)) {
         throw notFound('PlanningUpdateNotFound', 'Planning update was not found.')
       }
-      if (transactionContribution && isPlanningTransactionConditionalFailureAt(error, 2)) {
+      if (isPlanningCallerAuthorizationTransactionCancellation(error, 1, authorizationConditionChecks.length)) {
+        throw conflict(
+          'PlanningAuthorizationChanged',
+          'Planning authorization changed. Reload and try again.',
+        )
+      }
+      const transactionContributionIndex = 1 + authorizationConditionChecks.length + 1
+      if (transactionContribution && isPlanningTransactionConditionalFailureAt(error, transactionContributionIndex)) {
         throw conflict(
           'PlanningIdempotencyConflict',
           'The durable Planning mutation receipt changed. Retry the request.',
@@ -2361,7 +2399,7 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
                 'reaction',
                 target,
                 updateVersion,
-                createPlanningUpdateReactionRecordKey(last),
+                last,
               ),
             }
           : {}),
@@ -2395,6 +2433,7 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
     duplicateMessage: string,
     uniquenessRow?: Record<string, unknown>,
     transactionContribution?: PlanningMutationTransactionContribution,
+    authorizationConditionChecks: readonly PlanningCallerAuthorizationConditionCheck[] = [],
   ) {
     await this.ensureTable()
     try {
@@ -2406,6 +2445,7 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
             target,
             updateVersion,
           ),
+          ...authorizationConditionChecks,
           ...(uniquenessRow === undefined
             ? []
             : [{
@@ -2433,13 +2473,21 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
       if (isPlanningTransactionConditionalFailureAt(error, 0)) {
         throw notFound('PlanningUpdateNotFound', 'Planning update was not found.')
       }
+      if (isPlanningCallerAuthorizationTransactionCancellation(error, 1, authorizationConditionChecks.length)) {
+        throw conflict(
+          'PlanningAuthorizationChanged',
+          'Planning authorization changed. Reload and try again.',
+        )
+      }
+      const uniquenessIndex = 1 + authorizationConditionChecks.length
+      const rowIndex = uniquenessIndex + (uniquenessRow === undefined ? 0 : 1)
       if (
-        isPlanningTransactionConditionalFailureAt(error, 1) ||
-        uniquenessRow !== undefined && isPlanningTransactionConditionalFailureAt(error, 2)
+        uniquenessRow !== undefined && isPlanningTransactionConditionalFailureAt(error, uniquenessIndex) ||
+        isPlanningTransactionConditionalFailureAt(error, rowIndex)
       ) {
         throw conflict(duplicateCode, duplicateMessage)
       }
-      const transactionContributionIndex = uniquenessRow === undefined ? 2 : 3
+      const transactionContributionIndex = rowIndex + 1
       if (
         transactionContribution &&
         isPlanningTransactionConditionalFailureAt(error, transactionContributionIndex)
@@ -5945,7 +5993,9 @@ function createPlanningUpdateCommentRecordPrefix(
  * @param comment - Validated comment.
  * @returns DynamoDB comment sort key.
  */
-function createPlanningUpdateCommentRecordKey(comment: PlanningUpdateComment) {
+function createPlanningUpdateCommentRecordKey(
+  comment: Pick<PlanningUpdateComment, 'target' | 'updateVersion' | 'id' | 'createdAt'>,
+) {
   const timestamp = Date.parse(comment.createdAt)
   if (!Number.isSafeInteger(timestamp) || timestamp < 0) {
     throw invalid('PlanningUpdateCommentInvalid', 'Planning update comment timestamp is invalid.')
@@ -6219,6 +6269,25 @@ type PlanningUpdateHistoryCursorPayload = {
   beforeVersion: number
 }
 
+/** Logical annotation boundary carried by a public cursor. */
+type PlanningUpdateAnnotationCursorBoundary =
+  | {
+      /** Boundary discriminator. */
+      kind: 'comment'
+      /** Comment identity. */
+      id: string
+      /** Comment creation timestamp used for chronological ordering. */
+      createdAt: string
+    }
+  | {
+      /** Boundary discriminator. */
+      kind: 'reaction'
+      /** Reaction token. */
+      emoji: string
+      /** Reacting member identity. */
+      memberKey: string
+    }
+
 /** Versioned and scope-bound annotation cursor payload. */
 type PlanningUpdateAnnotationCursorPayload = {
   /** Cursor schema version. */
@@ -6229,8 +6298,8 @@ type PlanningUpdateAnnotationCursorPayload = {
   targetKey: string
   /** Immutable update version binding. */
   updateVersion: number
-  /** Last DynamoDB row key returned by the previous page. */
-  recordKey: string
+  /** Last logical annotation returned by the previous page. */
+  boundary: PlanningUpdateAnnotationCursorBoundary
 }
 
 /**
@@ -6321,21 +6390,40 @@ function readPlanningUpdateHistoryLimit(value: unknown) {
  * @param kind - Comment or reaction collection.
  * @param target - Canonical update target.
  * @param updateVersion - Immutable target-local version.
- * @param recordKey - Last returned annotation record key.
+ * @param annotation - Last returned logical annotation.
  * @returns Base64url cursor.
  */
 function createPlanningUpdateAnnotationCursor(
   kind: 'comment' | 'reaction',
   target: PlanningUpdateTarget,
   updateVersion: number,
-  recordKey: string,
+  annotation: PlanningUpdateComment | PlanningUpdateReaction,
 ) {
+  const boundary: PlanningUpdateAnnotationCursorBoundary = kind === 'comment'
+    ? 'id' in annotation
+      ? {
+          kind: 'comment',
+          id: readIdentifier(annotation.id, 'Planning update comment ID'),
+          createdAt: readTimestamp(annotation.createdAt, 'Planning update comment timestamp'),
+        }
+      : (() => {
+          throw invalid('PlanningUpdateCursorInvalid', 'Planning update comment cursor is invalid.')
+        })()
+    : 'emoji' in annotation
+      ? {
+          kind: 'reaction',
+          emoji: readPlanningUpdateReaction(annotation.emoji),
+          memberKey: readOwnerMemberKey(annotation.memberKey),
+        }
+      : (() => {
+          throw invalid('PlanningUpdateCursorInvalid', 'Planning update reaction cursor is invalid.')
+        })()
   const payload: PlanningUpdateAnnotationCursorPayload = {
     version: 1,
     kind,
     targetKey: createPlanningUpdateTargetIdentity(target),
     updateVersion: readPlanningUpdateVersion(updateVersion),
-    recordKey: readPlanningUpdateAnnotationRecordKey(recordKey, kind, target, updateVersion),
+    boundary,
   }
   return Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url')
 }
@@ -6369,7 +6457,7 @@ function readPlanningUpdateAnnotationCursor(
  * @param kind - Expected annotation collection.
  * @param target - Expected target scope.
  * @param updateVersion - Expected immutable update version.
- * @returns Exclusive DynamoDB record-key boundary.
+ * @returns Exclusive DynamoDB record-key boundary derived from the logical cursor.
  */
 function decodePlanningUpdateAnnotationCursor(
   cursor: string,
@@ -6385,43 +6473,44 @@ function decodePlanningUpdateAnnotationCursor(
       value.kind !== kind ||
       value.targetKey !== createPlanningUpdateTargetIdentity(target) ||
       value.updateVersion !== updateVersion ||
-      typeof value.recordKey !== 'string'
+      !isRecord(value.boundary)
     ) {
       throw new Error('invalid')
     }
-    return readPlanningUpdateAnnotationRecordKey(
-      value.recordKey,
-      kind,
+    if (kind === 'comment') {
+      if (
+        value.boundary.kind !== 'comment' ||
+        typeof value.boundary.id !== 'string' ||
+        typeof value.boundary.createdAt !== 'string'
+      ) {
+        throw new Error('invalid')
+      }
+      return createPlanningUpdateCommentRecordKey({
+        target,
+        updateVersion,
+        id: readIdentifier(value.boundary.id, 'Planning update comment ID'),
+        createdAt: readTimestamp(
+          value.boundary.createdAt,
+          'Planning update comment timestamp',
+        ),
+      })
+    }
+    if (
+      value.boundary.kind !== 'reaction' ||
+      typeof value.boundary.emoji !== 'string' ||
+      typeof value.boundary.memberKey !== 'string'
+    ) {
+      throw new Error('invalid')
+    }
+    return createPlanningUpdateReactionRecordKey({
       target,
       updateVersion,
-    )
+      emoji: readPlanningUpdateReaction(value.boundary.emoji),
+      memberKey: readOwnerMemberKey(value.boundary.memberKey),
+    })
   } catch {
     throw invalid('PlanningUpdateCursorInvalid', 'Planning update annotation cursor is invalid.')
   }
-}
-
-/**
- * Binds one annotation record key to its expected canonical prefix.
- *
- * @param recordKey - Candidate DynamoDB sort key.
- * @param kind - Expected annotation collection.
- * @param target - Expected target scope.
- * @param updateVersion - Expected immutable update version.
- * @returns Size-checked record key.
- */
-function readPlanningUpdateAnnotationRecordKey(
-  recordKey: string,
-  kind: 'comment' | 'reaction',
-  target: PlanningUpdateTarget,
-  updateVersion: number,
-) {
-  const prefix = kind === 'comment'
-    ? createPlanningUpdateCommentRecordPrefix(target, updateVersion)
-    : createPlanningUpdateReactionRecordPrefix(target, updateVersion)
-  if (!recordKey.startsWith(prefix) || recordKey.length <= prefix.length) {
-    throw invalid('PlanningUpdateCursorInvalid', 'Planning update annotation cursor is invalid.')
-  }
-  return readRecordKey(recordKey, 'Planning update annotation cursor record key')
 }
 
 function encodeRecordKeyIdentifier(value: string) {

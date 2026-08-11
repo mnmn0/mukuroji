@@ -557,10 +557,9 @@ describe('Planning API', () => {
     }, mutationContext)).resolves.toBeUndefined()
     expect(deleteRequests[0]).toMatchObject({
       init: {
-        body: JSON.stringify({ emoji: reaction.emoji }),
         method: 'DELETE',
       },
-      url: '/api/planning/updates/2/reactions?targetType=project&teamId=core-team&projectId=refero',
+      url: '/api/planning/updates/2/reactions?targetType=project&teamId=core-team&projectId=refero&emoji=%F0%9F%91%8D',
     })
   })
 

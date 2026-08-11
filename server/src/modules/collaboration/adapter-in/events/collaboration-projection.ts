@@ -29,7 +29,7 @@ import {
 import {
   NOTIFICATION_PREFERENCES_KEY,
   createNotificationDeliveryPlan,
-  parsePlanningUpdateTargetScheduleRow,
+  parsePlanningUpdateTargetScheduleProjection,
   parseStoredNotificationPreferences,
   type PlanningScheduledNotificationKind,
   type NotificationPreferences,
@@ -1387,11 +1387,10 @@ async function readCurrentPlanningUpdateScope(
   if (!result.Item) {
     return { checked: true, exists: false, archived: true }
   }
-  const record = parsePlanningUpdateTargetScheduleRow(result.Item)
+  const record = parsePlanningUpdateTargetScheduleProjection(result.Item)
   if (
     !record ||
-    record.workspaceId !== event.workspaceId ||
-    record.recordKey !== event.planningTargetRecordKey
+    record.workspaceId !== event.workspaceId
   ) {
     throw new Error('Planning notification target row is invalid.')
   }
@@ -1405,7 +1404,7 @@ async function readCurrentPlanningUpdateScope(
     archived: record.archivedAt !== undefined,
     targetType,
     targetId,
-    targetRecordKey: record.recordKey,
+    targetRecordKey: event.planningTargetRecordKey,
     ...(record.cadence
       ? {
         ownerMemberKey: normalizeMemberKey(record.cadence.updateOwnerMemberKey),

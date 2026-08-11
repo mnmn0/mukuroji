@@ -139,11 +139,9 @@ export type PlanningUpdateNotificationCadence = {
 }
 
 /** PlanningTable の canonical update target schedule projection です。 */
-export type PlanningUpdateTargetScheduleRecord = {
+export type PlanningUpdateTargetScheduleProjection = {
   /** Canonical Workspace ID です。 */
   workspaceId: string
-  /** Physical row key。Projection 時の strong re-read にも使用します。 */
-  recordKey: string
   /** Project または Initiative target です。 */
   target: PlanningUpdateTargetReference
   /** Active cadence。Cadence 未設定 target では省略します。 */
@@ -154,6 +152,12 @@ export type PlanningUpdateTargetScheduleRecord = {
   archivedAt?: string
   /** Target projection の最終更新日時です。 */
   updatedAt: string
+}
+
+/** Physical PlanningTable row used by the schedule adapter after validation. */
+type PlanningUpdateTargetScheduleRecord = PlanningUpdateTargetScheduleProjection & {
+  /** Physical DynamoDB row key. */
+  recordKey: string
 }
 
 /** Planning update schedule から生成する一つの notification candidate です。 */
@@ -431,8 +435,7 @@ async function queryDuePlanningUpdateTargets(
             requestId: input.options.requestId,
             scheduleShard,
           })
-          input.result.skippedItems += 1
-          continue
+          throw new Error('Planning update schedule row is invalid.', { cause: error })
         }
         if (!record || candidates.length === 0) {
           input.result.skippedItems += 1
@@ -753,6 +756,21 @@ export function parsePlanningUpdateTargetScheduleRow(
     ...(archivedAt ? { archivedAt } : {}),
     updatedAt,
   }
+}
+
+/**
+ * Decodes a canonical schedule projection without exposing its physical row key.
+ *
+ * @param value - Untrusted DynamoDB row from the Planning table.
+ * @returns A validated schedule projection, or undefined for a non-target row.
+ */
+export function parsePlanningUpdateTargetScheduleProjection(
+  value: Record<string, unknown>,
+): PlanningUpdateTargetScheduleProjection | undefined {
+  const record = parsePlanningUpdateTargetScheduleRow(value)
+  if (!record) return undefined
+  const { recordKey: _recordKey, ...projection } = record
+  return projection
 }
 
 /**

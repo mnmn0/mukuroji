@@ -34,6 +34,7 @@ import {
   type ConfirmWorkItemScheduleChangeResponse,
   type ConfigurePlanningUpdateCadenceInput,
   type CreatePlanningUpdateCommentInput,
+  type CreateSavedTaskViewInput,
   type CreateWorkItemInput,
   type CreatePlanningDependencyInput,
   type CreateWorkItemScheduleDependencyInput,
@@ -46,8 +47,11 @@ import {
   type RequestFormRoutingTarget,
   type RequestSubmissionActionInput,
   type ScheduleDependencyConstraint,
+  type SearchCustomFieldFilter,
+  type SearchCustomFieldValue,
   type CustomFieldValue,
   type CycleRolloverInput,
+  type DuplicateSavedTaskViewInput,
   type DuplicatePlanningEntityInput,
   type MovePlanningEntityInput,
   type PlanningEntity,
@@ -76,7 +80,16 @@ import {
   type UpdatePlanningEntityInput,
   type UpdateWorkItemScheduleDependencyInput,
   type UpdateProjectQuickAccessPreferencesInput,
+  type UpdateSavedTaskViewInput,
   type UpdateSavedWorkspaceViewInput,
+  type TaskViewColumn,
+  type TaskViewDefinition,
+  type TaskViewDisplayOptions,
+  type TaskViewFilters,
+  type TaskViewGrouping,
+  type TaskViewLayout,
+  type TaskViewScope,
+  type TaskViewSurface,
   type WorkItemConfiguration,
   type WorkItemRelation,
   type WorkItemRelationType,
@@ -296,10 +309,16 @@ import {
   createDocumentWorkspaceSearchDocument,
   WorkspaceSearchError,
   createProjectWorkspaceSearchDocument,
+  createTaskViewProjectScopeKey,
+  createTaskViewStatusKey,
   createTeamWorkspaceSearchDocument,
   createWorkItemWorkspaceSearchDocument,
   type SavedViewAccessScope,
+  type ResolveTaskViewRelationIdsInput,
+  type TaskViewAccessScope,
+  type TaskViewClient,
   type WorkspaceSearchAccessScope,
+  type WorkspaceSearchClient,
   type WorkspaceSearchDocument,
 } from '../modules/workspace-search/workspace-search'
 import {
@@ -871,6 +890,9 @@ const WORK_ITEMS_RESPONSE_LIMIT = 200
 const WORK_ITEMS_TEAM_READ_LIMIT = 20
 /** `/api/work-items` が 1 partition で filter/dedupe 前に評価する最大 item 数です。 */
 const WORK_ITEMS_PARTITION_SCAN_LIMIT = 1_000
+/** Planning publish が一度に評価する canonical Work Item の最大数です。 */
+const PLANNING_CANONICAL_WORK_ITEM_LIMIT =
+  WORK_ITEMS_TEAM_READ_LIMIT * WORK_ITEMS_PARTITION_SCAN_LIMIT
 /** Analytics が一つの entity query で読む audit event page size です。 */
 const ANALYTICS_AUDIT_PAGE_SIZE = 100
 /** Analytics が一つの Work Item identity で読む最大 audit page 数です。 */
@@ -900,6 +922,10 @@ const ANALYTICS_SNAPSHOT_ACL_INSPECTION_LIMIT = 1_000
 const ANALYTICS_SNAPSHOT_REPOSITORY_PAGE_LIMIT = 10
 /** Relation target の強整合 detail read を同時実行する最大数です。 */
 const WORK_ITEM_RELATION_TARGET_READ_CONCURRENCY = 8
+/** One task-view request may strongly inspect at most one full 20-Team relation filter. */
+const TASK_VIEW_RELATION_TARGET_READ_LIMIT = WORK_ITEMS_TEAM_READ_LIMIT * 100
+/** One task-view request may resolve at most one full legacy relation filter through Search. */
+const TASK_VIEW_LEGACY_RELATION_SEARCH_LIMIT = 100
 
 
 
@@ -1526,6 +1552,13 @@ const enterpriseRoutePermissionRules = [
     method: '*',
     pathPattern: '/api/teams/:teamId/work-item-configuration*',
     permission: 'work-items.write',
+  },
+  { method: 'GET', pathPattern: '/api/task-views*', permission: 'work-items.read' },
+  {
+    method: '*',
+    pathPattern: '/api/task-views*',
+    permission: 'work-items.write',
+    alternativePermissions: ['workspace.write'],
   },
   {
     method: 'GET',
@@ -5886,8 +5919,9 @@ routeApp.get('/api/work-items', async (c) => {
 
   try {
     const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+    const includeArchived = readOptionalIncludeArchivedQuery(c.req.query('includeArchived'))
     return c.json(await hydrateWorkItemsResponse(
-      await readAccessibleWorkItems(principal),
+      await readAccessibleWorkItems(principal, includeArchived),
       principal.directoryId,
     ))
   } catch (error) {
@@ -5942,8 +5976,8 @@ routeApp.put('/api/planning/updates/cadence', async (c) => {
       input.target,
       'manager',
     )
-    if (input.cadence) {
-      await Promise.all([
+    const cadenceRecipientMembers = input.cadence
+      ? await Promise.all([
         requirePlanningCadenceRecipientTargetPermission(
           principal,
           visibleSnapshot,
@@ -5961,11 +5995,12 @@ routeApp.put('/api/planning/updates/cadence', async (c) => {
             )]
           : []),
       ])
-    }
+      : []
     const response = await workItemDependencies.planning.configureUpdateCadence(
       principal.directoryId,
       input,
       workItemState,
+      createPlanningCallerAuthorizationConditionChecks(principal, cadenceRecipientMembers),
     )
     return c.json({
       ...response,
@@ -6075,11 +6110,12 @@ routeApp.post('/api/planning/updates', async (c) => {
     if (configuredTarget.cadence.updateOwnerMemberKey !== principal.userKey.toLowerCase()) {
       await requirePlanningUpdateTargetPermission(principal, visibleSnapshot, input.target, 'manager')
     }
+    const canonicalWorkItemState = await readCanonicalPlanningWorkItemState(principal)
     const response = await workItemDependencies.planning.publishUpdate(
       principal.directoryId,
       input,
       principal.userKey,
-      workItemState,
+      canonicalWorkItemState,
       createPlanningCallerAuthorizationConditionChecks(principal),
       publishTransaction,
     )
@@ -6171,12 +6207,13 @@ routeApp.post('/api/planning/updates/:updateVersion/comments', async (c) => {
         id,
         body,
       }),
-      mutate: ({ target, updateVersion, transaction }) =>
+      mutate: ({ target, updateVersion, transaction, authorizationConditionChecks }) =>
         workItemDependencies.planning.createUpdateComment(
           principal.directoryId,
           { target, updateVersion, id, body },
           principal.userKey,
           transaction,
+          authorizationConditionChecks,
         ),
       replay: (context, replay) => {
         if (replay.operation !== 'comment-create') {
@@ -6269,12 +6306,13 @@ routeApp.put('/api/planning/updates/:updateVersion/reactions', async (c) => {
         memberKey: principal.userKey.toLowerCase(),
         emoji,
       }),
-      mutate: ({ target, updateVersion, transaction }) =>
+      mutate: ({ target, updateVersion, transaction, authorizationConditionChecks }) =>
         workItemDependencies.planning.addUpdateReaction(
           principal.directoryId,
           { target, updateVersion, emoji },
           principal.userKey,
           transaction,
+          authorizationConditionChecks,
         ),
       replay: (context, replay) => {
         if (replay.operation !== 'reaction-add') {
@@ -6299,8 +6337,7 @@ routeApp.delete('/api/planning/updates/:updateVersion/reactions', async (c) => {
 
   try {
     const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-    const candidate = await readPlanningJson<Pick<PlanningUpdateReactionInput, 'emoji'>>(c.req)
-    const emoji = readPlanningUpdateReactionToken(candidate.emoji)
+    const emoji = readPlanningUpdateReactionToken(c.req.query('emoji'))
     const snapshot = await workItemDependencies.planning.get(
       principal.directoryId,
       await readPlanningWorkItemState(principal),
@@ -6320,12 +6357,13 @@ routeApp.delete('/api/planning/updates/:updateVersion/reactions', async (c) => {
         memberKey: principal.userKey.toLowerCase(),
         emoji,
       }),
-      mutate: ({ target, updateVersion, transaction }) =>
+      mutate: ({ target, updateVersion, transaction, authorizationConditionChecks }) =>
         workItemDependencies.planning.removeUpdateReaction(
           principal.directoryId,
           { target, updateVersion, emoji },
           principal.userKey,
           transaction,
+          authorizationConditionChecks,
         ).then(() => undefined),
       replay: (context, replay) => {
         if (replay.operation !== 'reaction-remove') {
@@ -6485,7 +6523,7 @@ routeApp.get('/api/planning/update-watch', async (c) => {
     })
     return c.json({ watch })
   } catch (error) {
-    return toCollaborationErrorResponse(c, error)
+    return toPlanningErrorResponse(c, error)
   }
 })
 
@@ -6538,7 +6576,7 @@ for (const planningUpdateWatchMethod of ['PUT', 'DELETE'] as const) {
         : await workItemDependencies.collaboration.unsubscribe(mutationInput)
       return c.json({ watch })
     } catch (error) {
-      return toCollaborationErrorResponse(c, error)
+      return toPlanningErrorResponse(c, error)
     }
   })
 }
@@ -7394,6 +7432,186 @@ routeApp.delete('/api/saved-views/:viewId', async (c) => {
   }
 })
 
+/** Returns task views visible to the current viewer within an optional surface and scope. */
+routeApp.get('/api/task-views', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+    const context = await createWorkspaceSearchContext(principal)
+    const taskViews = requireTaskViewClient(workItemDependencies.workspaceSearch)
+    const surface = c.req.query('surface') === undefined
+      ? undefined
+      : readTaskViewSurface(c.req.query('surface'))
+    const scope = c.req.query('scope') === undefined
+      ? undefined
+      : readTaskViewScopeQuery(c.req.query('scope'))
+    const limit = c.req.query('limit') === undefined
+      ? undefined
+      : readTaskViewListLimit(c.req.query('limit'))
+    const cursor = c.req.query('cursor') === undefined
+      ? undefined
+      : readTaskViewCursor(c.req.query('cursor'))
+    const access = await createTaskViewAccessScope(principal, context)
+    return c.json(await taskViews.listTaskViews({
+      workspaceId: principal.directoryId,
+      access,
+      ...(surface ? { surface } : {}),
+      ...(scope ? { scope } : {}),
+      ...(limit === undefined ? {} : { limit }),
+      ...(cursor ? { cursor } : {}),
+    }))
+  } catch (error) {
+    return toWorkspaceSearchErrorResponse(c, error)
+  }
+})
+
+/** Creates one personal, Team, or Workspace-shared task view. */
+routeApp.post('/api/task-views', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+    const context = await createWorkspaceSearchContext(principal)
+    const taskViews = requireTaskViewClient(workItemDependencies.workspaceSearch)
+    const input = readCreateSavedTaskViewInput(await readTaskViewJson(c.req))
+    const idempotencyKey = readOptionalTaskViewIdempotencyKey(
+      c.req.header('Idempotency-Key'),
+    )
+    const access = await createTaskViewAccessScope(principal, context)
+    return c.json(await taskViews.createTaskView({
+      workspaceId: principal.directoryId,
+      access,
+      input,
+      ...(idempotencyKey ? { idempotencyKey } : {}),
+    }), 201)
+  } catch (error) {
+    return toWorkspaceSearchErrorResponse(c, error)
+  }
+})
+
+/** Reads one task view without disclosing inaccessible definitions. */
+routeApp.get('/api/task-views/:viewId', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+    const context = await createWorkspaceSearchContext(principal)
+    const taskViews = requireTaskViewClient(workItemDependencies.workspaceSearch)
+    const viewId = readTaskViewPathId(c.req.param('viewId'))
+    const access = await createTaskViewAccessScope(principal, context)
+    return c.json(await taskViews.getTaskView({
+      workspaceId: principal.directoryId,
+      viewId,
+      access,
+    }))
+  } catch (error) {
+    return toWorkspaceSearchErrorResponse(c, error)
+  }
+})
+
+/** Updates one task view definition or the current viewer's preferences. */
+routeApp.patch('/api/task-views/:viewId', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+    const context = await createWorkspaceSearchContext(principal)
+    const taskViews = requireTaskViewClient(workItemDependencies.workspaceSearch)
+    const viewId = readTaskViewPathId(c.req.param('viewId'))
+    const input = readUpdateSavedTaskViewInput(await readTaskViewJson(c.req))
+    const idempotencyKey = readOptionalTaskViewIdempotencyKey(
+      c.req.header('Idempotency-Key'),
+    )
+    const access = await createTaskViewAccessScope(principal, context)
+    return c.json(await taskViews.updateTaskView({
+      workspaceId: principal.directoryId,
+      viewId,
+      access,
+      input,
+      ...(idempotencyKey ? { idempotencyKey } : {}),
+    }))
+  } catch (error) {
+    return toWorkspaceSearchErrorResponse(c, error)
+  }
+})
+
+/** Duplicates one accessible task view into an independent lifecycle. */
+routeApp.post('/api/task-views/:viewId/duplicate', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+    const context = await createWorkspaceSearchContext(principal)
+    const taskViews = requireTaskViewClient(workItemDependencies.workspaceSearch)
+    const sourceViewId = readTaskViewPathId(c.req.param('viewId'))
+    const input = readDuplicateSavedTaskViewInput(await readTaskViewJson(c.req))
+    const idempotencyKey = readOptionalTaskViewIdempotencyKey(
+      c.req.header('Idempotency-Key'),
+    )
+    const access = await createTaskViewAccessScope(principal, context)
+    return c.json(await taskViews.duplicateTaskView({
+      workspaceId: principal.directoryId,
+      sourceViewId,
+      access,
+      input,
+      ...(idempotencyKey ? { idempotencyKey } : {}),
+    }), 201)
+  } catch (error) {
+    return toWorkspaceSearchErrorResponse(c, error)
+  }
+})
+
+/** Deletes one task view definition under an optimistic revision guard. */
+routeApp.delete('/api/task-views/:viewId', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+    const context = await createWorkspaceSearchContext(principal)
+    const taskViews = requireTaskViewClient(workItemDependencies.workspaceSearch)
+    const viewId = readTaskViewPathId(c.req.param('viewId'))
+    const expectedRevision = readTaskViewRevisionQuery(c.req.query('expectedRevision'))
+    const idempotencyKey = readOptionalTaskViewIdempotencyKey(
+      c.req.header('Idempotency-Key'),
+    )
+    const access = await createTaskViewAccessScope(principal, context)
+    return c.json(await taskViews.deleteTaskView({
+      workspaceId: principal.directoryId,
+      viewId,
+      expectedRevision,
+      access,
+      ...(idempotencyKey ? { idempotencyKey } : {}),
+    }))
+  } catch (error) {
+    return toWorkspaceSearchErrorResponse(c, error)
+  }
+})
+
 /** Issue #20 の legacy project task を read-only で返します。 */
 routeApp.get('/api/projects/:projectId/tasks', async (c) => {
   const accessToken = readBearerAccessToken(c)
@@ -7635,8 +7853,14 @@ routeApp.get('/api/teams/:teamId/issues', async (c) => {
   try {
     const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
     const context = await requireTeamPermission(principal, teamId, 'viewer')
+    const includeArchived = readOptionalIncludeArchivedQuery(c.req.query('includeArchived'))
 
-    return c.json(await hydrateTeamIssuesResponse(await readTeamIssues(principal.directoryId, context, principal)))
+    return c.json(await hydrateTeamIssuesResponse(await readTeamIssues(
+      principal.directoryId,
+      context,
+      principal,
+      includeArchived,
+    )))
   } catch (error) {
     if (error instanceof CognitoServiceError) {
       return toCognitoDirectoryErrorResponse(c, error)
@@ -9383,10 +9607,11 @@ routeApp.get('/api/projects/:projectId/issues', async (c) => {
   try {
     const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
     await requireProjectPermission(principal, projectId, 'viewer')
+    const includeArchived = readOptionalIncludeArchivedQuery(c.req.query('includeArchived'))
 
     return c.json(
       await hydrateProjectIssuesResponse(
-        await readProjectIssues(principal.directoryId, projectId),
+        await readProjectIssues(principal.directoryId, projectId, includeArchived),
       ),
     )
   } catch (error) {
@@ -14613,7 +14838,7 @@ function shouldEvaluateEnterpriseProjectScopes(
   resource: EnterpriseAuthorizationResource,
 ) {
   if (resource.kind === 'project') return true
-  return /^\/api\/(?:analytics|approvals|bulk-operations|document-backlinks|documents|planning|projects|realtime\/tickets|teams|work-item-configuration|work-items)(?:\/|$)/u
+  return /^\/api\/(?:analytics|approvals|bulk-operations|document-backlinks|documents|planning|projects|realtime\/tickets|task-views|teams|work-item-configuration|work-items)(?:\/|$)/u
     .test(path)
 }
 
@@ -17936,8 +18161,9 @@ function requireSystemAdmin(principal: ProjectPrincipal) {
   )
 }
 
-function requireWorkspaceBusinessWrite(principal: WorkspacePrincipal) {
-  if (
+/** Returns whether the current principal may perform mutable Workspace business operations. */
+function canWorkspaceBusinessWrite(principal: WorkspacePrincipal) {
+  return (
     principal.workspaceRole !== 'guest' &&
     (
       !principal.enterprisePermissions ||
@@ -17947,9 +18173,19 @@ function requireWorkspaceBusinessWrite(principal: WorkspacePrincipal) {
         permission === 'files.approve'
       )
     )
-  ) {
-    return
-  }
+  )
+}
+
+/** Returns whether the current route grants Task View mutation capability. */
+function canWriteTaskViews(principal: WorkspacePrincipal) {
+  if (principal.workspaceRole === 'guest') return false
+  if (principal.enterprisePermissions === undefined) return true
+  return principal.enterprisePermissions.includes('work-items.write') ||
+    hasEnterpriseWorkspacePermission(principal, 'workspace.write')
+}
+
+function requireWorkspaceBusinessWrite(principal: WorkspacePrincipal) {
+  if (canWorkspaceBusinessWrite(principal)) return
 
   throw new WorkspaceAccessError(
     403,
@@ -18110,7 +18346,7 @@ async function requirePlanningCadenceRecipientTargetPermission(
   target: PlanningUpdateTarget,
   memberKeyValue: unknown,
   minimumRole: Extract<ProjectRole, 'viewer' | 'member'>,
-): Promise<void> {
+): Promise<WorkspaceMember> {
   const member = await requirePlanningActiveOwner(principal, memberKeyValue)
   const memberKey = member.memberKey.toLowerCase()
   let teamId: string | undefined
@@ -18141,9 +18377,9 @@ async function requirePlanningCadenceRecipientTargetPermission(
         'The update recipient must have business access to the Workspace target.',
       )
     }
-    return
+    return member
   }
-  if (await authenticationDependencies.cognito.isSystemAdmin(memberKey)) return
+  if (await authenticationDependencies.cognito.isSystemAdmin(memberKey)) return member
 
   const [directory, accesses] = await Promise.all([
     workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja', true),
@@ -18166,7 +18402,7 @@ async function requirePlanningCadenceRecipientTargetPermission(
         ) && projectAccessAllows(access, minimumRole)
       )
     ) {
-      return
+      return member
     }
   } else if (teamId) {
     const team = directory.teams.find((candidate) => candidate.id === teamId)
@@ -18176,7 +18412,7 @@ async function requirePlanningCadenceRecipientTargetPermission(
         projectAccessAllows(access, minimumRole)
       )
     )) {
-      return
+      return member
     }
   }
   throw new PlanningError(
@@ -18760,41 +18996,199 @@ type WorkspaceSearchContext = {
   searchAccess: WorkspaceSearchAccessScope
   /** Saved view の current viewer scope です。 */
   savedViewAccess: SavedViewAccessScope
+  /** Task view の current viewer scope without configuration-derived capabilities. */
+  taskViewAccess: TaskViewAccessScope
 }
 
 async function createWorkspaceSearchContext(
   principal: WorkspacePrincipal,
 ): Promise<WorkspaceSearchContext> {
   const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja', true)
-  const projectAccesses = principal.isSystemAdmin
+  const projectScopeAccesses = principal.isSystemAdmin
     ? directory.teams.flatMap((team) => team.projects.map((project) => ({
+        teamId: team.id,
         projectId: project.id,
         role: 'manager' as const,
       })))
-    : await getEffectiveProjectAccessList(principal)
+    : await getEffectiveProjectScopeAccessList(principal)
+  const projectAccesses = collapseProjectAccessesById(projectScopeAccesses)
+  const globallyUniqueProjectIds = getGloballyUniqueProjectIds(directory)
   const readableProjectIds = new Set(
     projectAccesses
-      .filter((access) => projectAccessAllows(access, 'viewer'))
+      .filter((access) =>
+        globallyUniqueProjectIds.has(access.projectId) && projectAccessAllows(access, 'viewer')
+      )
       .map((access) => access.projectId),
   )
-  const manageableProjectIds = new Set(
-    projectAccesses
-      .filter((access) => projectAccessAllows(access, 'manager'))
-      .map((access) => access.projectId),
+  const readableProjectScopeKeys = new Set(
+    projectScopeAccesses.flatMap((access) => {
+      if (!projectAccessAllows(access, 'viewer')) return []
+      const teamId = resolveProjectAccessTeamId(access, directory)
+      return teamId
+        ? [createTaskViewProjectScopeKey(teamId, access.projectId)]
+        : []
+    }),
   )
+  const roleWritableTeamIds = new Set<string>()
+  const roleWritableProjectIds = new Set<string>()
+  const roleWritableProjectScopeKeys = new Set<string>()
+  for (const access of projectScopeAccesses) {
+    if (!projectAccessAllows(access, 'member')) continue
+    const teamId = resolveProjectAccessTeamId(access, directory)
+    if (!teamId) continue
+    roleWritableTeamIds.add(teamId)
+    roleWritableProjectScopeKeys.add(
+      createTaskViewProjectScopeKey(teamId, access.projectId),
+    )
+    if (globallyUniqueProjectIds.has(access.projectId)) {
+      roleWritableProjectIds.add(access.projectId)
+    }
+  }
   const readableTeamIds = new Set(
-    directory.teams
-      .filter((team) => team.projects.some((project) => readableProjectIds.has(project.id)))
-      .map((team) => team.id),
+    projectScopeAccesses.flatMap((access) => {
+      if (!projectAccessAllows(access, 'viewer')) return []
+      const teamId = resolveProjectAccessTeamId(access, directory)
+      return teamId ? [teamId] : []
+    }),
   )
   const activeTeamIds = new Set(directory.teams.map((team) => team.id))
+  if (principal.isSystemAdmin) {
+    for (const teamId of activeTeamIds) readableTeamIds.add(teamId)
+  }
   for (const teamId of principal.enterpriseAuthorizedTeamIds ?? []) {
     if (activeTeamIds.has(teamId)) readableTeamIds.add(teamId)
   }
-  const manageableTeamIds = new Set(
-    directory.teams
-      .filter((team) => team.projects.some((project) => manageableProjectIds.has(project.id)))
-      .map((team) => team.id),
+  const canManageReadableTaskViewTeams =
+    principal.isSystemAdmin ||
+    (
+      principal.enterprisePermissions === undefined &&
+      (principal.workspaceRole === 'owner' || principal.workspaceRole === 'admin')
+    ) ||
+    (
+      principal.enterprisePermissions !== undefined &&
+      hasEnterpriseWorkspacePermission(principal, 'workspace.manage')
+    )
+  const canWriteWorkspaceTaskViewScope =
+    principal.isSystemAdmin ||
+    (
+      principal.enterprisePermissions === undefined
+        ? principal.workspaceRole !== 'guest'
+        : hasEnterpriseWorkspacePermission(principal, 'workspace.write')
+    )
+  const enterpriseManageableTeamIds = new Set<string>()
+  const enterpriseWritableTeamIds = new Set<string>()
+  const enterpriseWritableProjectIds = new Set<string>()
+  const enterpriseWritableProjectScopeKeys = new Set<string>()
+  const enterpriseEvaluation = principal.enterpriseAuthorizationEvaluation
+  if (principal.enterprisePermissions !== undefined && enterpriseEvaluation) {
+    for (const team of directory.teams) {
+      const canManageTeam = evaluateEnterpriseAccess({
+        permission: 'teams.manage',
+        principal: enterpriseEvaluation.principal,
+        assignments: enterpriseEvaluation.assignments,
+        customRoles: enterpriseEvaluation.snapshot.customRoles,
+        groupMappings: enterpriseEvaluation.groupMappings,
+        resource: {
+          workspaceId: principal.directoryId,
+          kind: 'team',
+          targetId: team.id,
+        },
+      }).allowed
+      const canManageProject = team.projects.some((project) =>
+        evaluateEnterpriseAccess({
+          permission: 'projects.manage',
+          principal: enterpriseEvaluation.principal,
+          assignments: enterpriseEvaluation.assignments,
+          customRoles: enterpriseEvaluation.snapshot.customRoles,
+          groupMappings: enterpriseEvaluation.groupMappings,
+          resource: {
+            workspaceId: principal.directoryId,
+            kind: 'project',
+            targetId: project.id,
+            parentTeamId: team.id,
+          },
+        }).allowed
+      )
+      if (canManageTeam || canManageProject) enterpriseManageableTeamIds.add(team.id)
+      if (evaluateEnterpriseAccess({
+        permission: 'work-items.write',
+        principal: enterpriseEvaluation.principal,
+        assignments: enterpriseEvaluation.assignments,
+        customRoles: enterpriseEvaluation.snapshot.customRoles,
+        groupMappings: enterpriseEvaluation.groupMappings,
+        resource: {
+          workspaceId: principal.directoryId,
+          kind: 'team',
+          targetId: team.id,
+        },
+      }).allowed) {
+        enterpriseWritableTeamIds.add(team.id)
+      }
+      for (const project of team.projects) {
+        if (!evaluateEnterpriseAccess({
+          permission: 'work-items.write',
+          principal: enterpriseEvaluation.principal,
+          assignments: enterpriseEvaluation.assignments,
+          customRoles: enterpriseEvaluation.snapshot.customRoles,
+          groupMappings: enterpriseEvaluation.groupMappings,
+          resource: {
+            workspaceId: principal.directoryId,
+            kind: 'project',
+            targetId: project.id,
+            parentTeamId: team.id,
+          },
+        }).allowed) {
+          continue
+        }
+        enterpriseWritableProjectScopeKeys.add(
+          createTaskViewProjectScopeKey(team.id, project.id),
+        )
+        if (globallyUniqueProjectIds.has(project.id)) {
+          enterpriseWritableProjectIds.add(project.id)
+        }
+      }
+    }
+  }
+  const canAccessWorkspaceTaskViewScope =
+    principal.isSystemAdmin ||
+    principal.enterprisePermissions === undefined ||
+    principal.enterpriseRouteAuthorizedAtResource === true
+  const manageableTeamIds = new Set(canManageReadableTaskViewTeams
+    ? readableTeamIds
+    : [
+        ...enterpriseManageableTeamIds,
+        ...(principal.enterprisePermissions === undefined
+          ? projectScopeAccesses.flatMap((access) => {
+              if (!projectAccessAllows(access, 'manager')) return []
+              const teamId = resolveProjectAccessTeamId(access, directory)
+              return teamId ? [teamId] : []
+            })
+          : []),
+      ].filter((teamId) => readableTeamIds.has(teamId)))
+  const writableTeamIds = new Set(
+    principal.isSystemAdmin
+      ? readableTeamIds
+      : principal.enterprisePermissions !== undefined
+        ? [...enterpriseWritableTeamIds].filter((teamId) => readableTeamIds.has(teamId))
+        : [...roleWritableTeamIds].filter((teamId) => readableTeamIds.has(teamId)),
+  )
+  const writableProjectIds = new Set(
+    principal.isSystemAdmin
+      ? readableProjectIds
+      : principal.enterprisePermissions !== undefined
+        ? [...enterpriseWritableProjectIds].filter((projectId) => readableProjectIds.has(projectId))
+        : [...roleWritableProjectIds].filter((projectId) => readableProjectIds.has(projectId)),
+  )
+  const writableProjectScopeKeys = new Set(
+    principal.isSystemAdmin
+      ? readableProjectScopeKeys
+      : principal.enterprisePermissions !== undefined
+        ? [...enterpriseWritableProjectScopeKeys].filter((scopeKey) =>
+            readableProjectScopeKeys.has(scopeKey)
+          )
+        : [...roleWritableProjectScopeKeys].filter((scopeKey) =>
+            readableProjectScopeKeys.has(scopeKey)
+          ),
   )
   const projectRoles = Object.fromEntries(
     projectAccesses.flatMap(({ projectId, role }) =>
@@ -18837,7 +19231,476 @@ async function createWorkspaceSearchContext(
       teamIds: readableTeamIds,
       manageableTeamIds,
     },
+    taskViewAccess: {
+      viewerUserId: principal.userKey,
+      isSystemAdmin: principal.isSystemAdmin,
+      canAccessWorkspaceScope: canAccessWorkspaceTaskViewScope,
+      canWriteWorkspaceScope: canWriteWorkspaceTaskViewScope,
+      canManageSharedViews:
+        canAccessWorkspaceTaskViewScope && canManageReadableTaskViewTeams,
+      canWrite: canWriteTaskViews(principal),
+      teamIds: readableTeamIds,
+      writableTeamIds,
+      manageableTeamIds,
+      projectIds: readableProjectIds,
+      writableProjectIds,
+      projectScopeKeys: readableProjectScopeKeys,
+      writableProjectScopeKeys,
+    },
   }
+}
+
+/**
+ * Enriches current task-view authorization with active configuration references.
+ *
+ * @param principal - Authenticated Workspace principal for the current request.
+ * @param context - Directory-derived authorization snapshot for the request.
+ * @returns Permission-safe task-view access and migration capability sets.
+ */
+async function createTaskViewAccessScope(
+  principal: WorkspacePrincipal,
+  context: WorkspaceSearchContext,
+): Promise<TaskViewAccessScope> {
+  const [workspaceConfiguration, activeMembers] = await Promise.all([
+    workItemDependencies.workItemConfigurations.getWorkspaceConfiguration(
+      principal.directoryId,
+    ),
+    workspaceDependencies.workspaceAccess.listActiveMembers(principal.directoryId),
+  ])
+  const teamConfigurations: Array<{
+    teamId: string
+    resolved: ResolvedWorkItemConfiguration
+  }> = []
+  for (let offset = 0; offset < context.directory.teams.length; offset += 8) {
+    const batch = context.directory.teams.slice(offset, offset + 8)
+    teamConfigurations.push(...await Promise.all(batch.map(async (team) => ({
+      teamId: team.id,
+      resolved: await workItemDependencies.workItemConfigurations.getTeamConfiguration(
+        principal.directoryId,
+        team.id,
+      ),
+    }))))
+  }
+  const activeCustomFieldIds = new Set(
+    workspaceConfiguration.configuration.customFields.map((field) => field.id),
+  )
+  const readableCustomFieldIds = new Set(activeCustomFieldIds)
+  const activeStatusIds = new Set<string>()
+  const readableActorIds = new Set(activeMembers.flatMap((member) => [
+    member.memberKey,
+    member.email,
+  ]))
+  const relationTargetReadCache = new Map<
+    string,
+    Promise<TeamIssueDetailResponse | undefined>
+  >()
+  const relationSearchCache = new Map<string, Promise<boolean>>()
+  const relationSearchScopeCache = new Map<
+    string,
+    Promise<TeamIssueDetailResponse | undefined>
+  >()
+  const relationDocumentSearchReadContext = createDocumentSearchAccessReadContext()
+  let planningAuthorizationStatePromise:
+    ReturnType<typeof workItemDependencies.planning.getAuthorizationState> | undefined
+
+  for (const teamConfiguration of teamConfigurations) {
+    const canReadTeam =
+      principal.isSystemAdmin ||
+      context.taskViewAccess.teamIds.has(teamConfiguration.teamId)
+    for (const field of teamConfiguration.resolved.configuration.customFields) {
+      activeCustomFieldIds.add(field.id)
+      if (canReadTeam) readableCustomFieldIds.add(field.id)
+    }
+    for (const status of teamConfiguration.resolved.configuration.workflow.statuses) {
+      activeStatusIds.add(createTaskViewStatusKey(teamConfiguration.teamId, status.id))
+    }
+  }
+
+  return {
+    ...context.taskViewAccess,
+    activeCustomFieldIds,
+    readableCustomFieldIds,
+    activeStatusIds,
+    readableActorIds,
+    resolveReadableRelationIds: (input) => resolveReadableTaskViewRelationIds(
+      principal,
+      context,
+      input,
+      relationTargetReadCache,
+      relationSearchCache,
+      relationSearchScopeCache,
+      relationDocumentSearchReadContext,
+      () => {
+        planningAuthorizationStatePromise ??=
+          workItemDependencies.planning.getAuthorizationState(principal.directoryId)
+        return planningAuthorizationStatePromise
+      },
+    ),
+  }
+}
+
+/** Work Item relation prefixes whose target identifier is Team-local. */
+const taskViewWorkItemRelationPrefixes: ReadonlySet<string> = new Set([
+  'parent',
+  'child',
+  'blocks',
+  'blockedBy',
+  'related',
+  'duplicate',
+])
+
+/**
+ * Resolves persisted relation references against current targets and current viewer access.
+ *
+ * @param principal - Authenticated principal whose access bounds every reference.
+ * @param context - Current directory and search authorization snapshot.
+ * @param input - Candidate references and the task-view context that qualifies local IDs.
+ * @param targetReadCache - Request-local strongly consistent Work Item target cache.
+ * @param searchCache - Request-local legacy reference search cache.
+ * @param searchScopeCache - Request-local Work Item scope cache used by current-source search.
+ * @param documentSearchReadContext - Compact Document ACL read context shared by fallback searches.
+ * @param readPlanningAuthorizationState - Lazy current Planning authorization-state reader.
+ * @returns Relation IDs that may be disclosed without changing valid empty-result filters.
+ */
+async function resolveReadableTaskViewRelationIds(
+  principal: WorkspacePrincipal,
+  context: WorkspaceSearchContext,
+  input: ResolveTaskViewRelationIdsInput,
+  targetReadCache: Map<string, Promise<TeamIssueDetailResponse | undefined>>,
+  searchCache: Map<string, Promise<boolean>>,
+  searchScopeCache: Map<string, Promise<TeamIssueDetailResponse | undefined>>,
+  documentSearchReadContext: ReturnType<typeof createDocumentSearchAccessReadContext>,
+  readPlanningAuthorizationState: () => ReturnType<
+    typeof workItemDependencies.planning.getAuthorizationState
+  >,
+): Promise<ReadonlySet<string>> {
+  const readableIds = new Set<string>()
+  const checks: Array<() => Promise<void>> = []
+  let scopedTeamIds: readonly string[] | undefined
+
+  for (const relationId of input.relationIds) {
+    const separatorIndex = relationId.indexOf(':')
+    const prefix = separatorIndex < 0 ? undefined : relationId.slice(0, separatorIndex)
+    const targetId = separatorIndex < 0 ? undefined : relationId.slice(separatorIndex + 1)
+
+    if (prefix && taskViewWorkItemRelationPrefixes.has(prefix)) {
+      if (!targetId) continue
+      scopedTeamIds ??= resolveTaskViewRelationScopeTeamIds(input.scope, context)
+      if (scopedTeamIds.length > WORK_ITEMS_TEAM_READ_LIMIT) {
+        throw new WorkspaceSearchError(
+          413,
+          'TaskViewRelationResolutionLimitExceeded',
+          `Task view relation resolution spans more than ${WORK_ITEMS_TEAM_READ_LIMIT} Teams.`,
+        )
+      }
+      const candidateTeamIds = scopedTeamIds
+      checks.push(async () => {
+        for (const teamId of candidateTeamIds) {
+          if (await readAuthorizedTaskViewRelationTarget(
+            principal,
+            context,
+            teamId,
+            targetId,
+            targetReadCache,
+          )) {
+            readableIds.add(relationId)
+            return
+          }
+        }
+      })
+      continue
+    }
+
+    if (prefix === 'work-item') {
+      if (!targetId) continue
+      const target = parseSearchWorkItemEntityId(targetId)
+      if (!target) continue
+      checks.push(async () => {
+        if (await readAuthorizedTaskViewRelationTarget(
+          principal,
+          context,
+          target.teamId,
+          target.issueId,
+          targetReadCache,
+        )) {
+          readableIds.add(relationId)
+        }
+      })
+      continue
+    }
+
+    if (prefix === 'project') {
+      if (!targetId) continue
+      checks.push(async () => {
+        if (canReadTaskViewProjectRelationTarget(principal, context, input.scope, targetId)) {
+          readableIds.add(relationId)
+        }
+      })
+      continue
+    }
+
+    if (prefix === 'goal') {
+      if (!targetId) continue
+      checks.push(async () => {
+        const state = await readPlanningAuthorizationState()
+        const target = state.entities.find((entity) =>
+          entity.id === targetId &&
+          entity.type === 'goal' &&
+          entity.archivedAt === undefined
+        )
+        if (target && canReadTaskViewGoalRelationTarget(principal, context, target)) {
+          readableIds.add(relationId)
+        }
+      })
+      continue
+    }
+
+    checks.push(async () => {
+      if (await searchCurrentReadableTaskViewRelationId(
+        principal.directoryId,
+        relationId,
+        context,
+        searchCache,
+        searchScopeCache,
+        documentSearchReadContext,
+      )) {
+        readableIds.add(relationId)
+      }
+    })
+  }
+
+  for (
+    let offset = 0;
+    offset < checks.length;
+    offset += WORK_ITEM_RELATION_TARGET_READ_CONCURRENCY
+  ) {
+    await Promise.all(
+      checks.slice(offset, offset + WORK_ITEM_RELATION_TARGET_READ_CONCURRENCY)
+        .map((check) => check()),
+    )
+  }
+  return readableIds
+}
+
+/**
+ * Resolves Teams in which an unqualified Work Item relation target may be interpreted.
+ *
+ * @param scope - Task-view scope that qualifies Team-local Work Item IDs when possible.
+ * @param context - Current readable Team and Project hierarchy.
+ * @returns Active readable Team IDs bounded later by the aggregate-read policy.
+ */
+function resolveTaskViewRelationScopeTeamIds(
+  scope: ResolveTaskViewRelationIdsInput['scope'],
+  context: WorkspaceSearchContext,
+): readonly string[] {
+  if (scope.kind === 'team') return [scope.teamId]
+  if (scope.kind === 'project' && scope.teamId) return [scope.teamId]
+  if (scope.kind === 'project') {
+    return context.directory.teams.flatMap((team) =>
+      team.projects.some((project) => project.id === scope.projectId) &&
+        context.taskViewAccess.projectScopeKeys.has(
+          createTaskViewProjectScopeKey(team.id, scope.projectId),
+        )
+        ? [team.id]
+        : []
+    )
+  }
+  return context.directory.teams.flatMap((team) =>
+    context.taskViewAccess.teamIds.has(team.id) ? [team.id] : []
+  )
+}
+
+/**
+ * Strongly reads one Work Item relation target and reapplies its current assigned-Project ACL.
+ *
+ * @param principal - Authenticated current viewer.
+ * @param context - Current directory and task-view access snapshot.
+ * @param teamId - Canonical owner Team of the target.
+ * @param issueId - Team-local target Work Item ID.
+ * @param cache - Request-local canonical target read cache.
+ * @returns The current readable target, or undefined after deletion or permission loss.
+ */
+async function readAuthorizedTaskViewRelationTarget(
+  principal: WorkspacePrincipal,
+  context: WorkspaceSearchContext,
+  teamId: string,
+  issueId: string,
+  cache: Map<string, Promise<TeamIssueDetailResponse | undefined>>,
+): Promise<TeamIssueDetailResponse | undefined> {
+  const team = context.directory.teams.find((candidate) => candidate.id === teamId)
+  if (
+    !team ||
+    (!principal.isSystemAdmin && !context.taskViewAccess.teamIds.has(teamId))
+  ) {
+    return undefined
+  }
+  const cacheKey = JSON.stringify([teamId, issueId])
+  let pending = cache.get(cacheKey)
+  if (!pending) {
+    if (cache.size >= TASK_VIEW_RELATION_TARGET_READ_LIMIT) {
+      throw new WorkspaceSearchError(
+        413,
+        'TaskViewRelationResolutionLimitExceeded',
+        'Task view relation resolution exceeds the current-source target read limit.',
+      )
+    }
+    pending = workItemDependencies.teamIssues.getTeamIssueDetail(
+      principal.directoryId,
+      teamId,
+      issueId,
+      { consistentIssueRead: true, eventLimit: 0 },
+    ).catch((error) => {
+      if (isTeamIssueNotFoundError(error)) return undefined
+      throw error
+    })
+    cache.set(cacheKey, pending)
+  }
+  const detail = await pending
+  if (!detail || detail.issue.id !== issueId || detail.issue.teamId !== teamId) return undefined
+  const assignedProjectId = detail.issue.assignedProjectId
+  if (!assignedProjectId) return detail
+  if (!team.projects.some((project) => project.id === assignedProjectId)) return undefined
+  if (
+    principal.isSystemAdmin ||
+    context.taskViewAccess.projectScopeKeys.has(
+      createTaskViewProjectScopeKey(teamId, assignedProjectId),
+    ) ||
+    principal.enterpriseAuthorizedTeamIds?.includes(teamId)
+  ) {
+    return detail
+  }
+  return undefined
+}
+
+/**
+ * Checks a Document-style Project relation against a non-ambiguous current Project scope.
+ *
+ * @param principal - Authenticated current viewer.
+ * @param context - Current active Project hierarchy and access sets.
+ * @param scope - Task-view scope that may qualify a duplicate Project ID.
+ * @param projectId - Bare Project target identifier from the relation filter.
+ * @returns Whether the Project exists and is readable without cross-Team confusion.
+ */
+function canReadTaskViewProjectRelationTarget(
+  principal: WorkspacePrincipal,
+  context: WorkspaceSearchContext,
+  scope: ResolveTaskViewRelationIdsInput['scope'],
+  projectId: string,
+): boolean {
+  const scopeTeamId = scope.kind === 'team'
+    ? scope.teamId
+    : scope.kind === 'project'
+      ? scope.teamId
+      : undefined
+  if (scopeTeamId) {
+    const team = context.directory.teams.find((candidate) => candidate.id === scopeTeamId)
+    if (!team?.projects.some((project) => project.id === projectId)) return false
+    return principal.isSystemAdmin ||
+      context.taskViewAccess.projectScopeKeys.has(
+        createTaskViewProjectScopeKey(scopeTeamId, projectId),
+      ) ||
+      Boolean(principal.enterpriseAuthorizedTeamIds?.includes(scopeTeamId))
+  }
+  if (context.taskViewAccess.projectIds.has(projectId)) return true
+  const ownerTeams = context.directory.teams.filter((team) =>
+    team.projects.some((project) => project.id === projectId)
+  )
+  return ownerTeams.length === 1 && Boolean(
+    ownerTeams[0] && principal.enterpriseAuthorizedTeamIds?.includes(ownerTeams[0].id),
+  )
+}
+
+/**
+ * Checks one active Planning Goal against the current Planning response boundary.
+ *
+ * @param principal - Authenticated current viewer.
+ * @param context - Current active Team/Project hierarchy and task-view access.
+ * @param target - Current unarchived Planning authorization reference.
+ * @returns Whether the current Planning API would disclose the Goal.
+ */
+function canReadTaskViewGoalRelationTarget(
+  principal: WorkspacePrincipal,
+  context: WorkspaceSearchContext,
+  target: Awaited<ReturnType<
+    typeof workItemDependencies.planning.getAuthorizationState
+  >>['entities'][number],
+): boolean {
+  const team = target.teamId === undefined
+    ? undefined
+    : context.directory.teams.find((candidate) => candidate.id === target.teamId)
+  const projectTeams = target.projectId === undefined
+    ? []
+    : context.directory.teams.filter((candidate) =>
+        (target.teamId === undefined || candidate.id === target.teamId) &&
+        candidate.projects.some((project) => project.id === target.projectId)
+      )
+  const projectTeam = projectTeams.length === 1 ? projectTeams[0] : undefined
+  if (
+    (target.teamId !== undefined && !team) ||
+    (target.projectId !== undefined && projectTeams.length !== 1)
+  ) {
+    return false
+  }
+  if (
+    principal.isSystemAdmin ||
+    principal.enterprisePermissions === undefined ||
+    principal.enterpriseRouteAuthorizedAtResource === true &&
+      principal.enterpriseAuthorizationResource?.kind === 'workspace'
+  ) {
+    return true
+  }
+  if (target.projectId !== undefined && projectTeam) {
+    return context.taskViewAccess.projectScopeKeys.has(
+      createTaskViewProjectScopeKey(projectTeam.id, target.projectId),
+    ) || Boolean(principal.enterpriseAuthorizedTeamIds?.includes(projectTeam.id))
+  }
+  return Boolean(target.teamId && context.taskViewAccess.teamIds.has(target.teamId))
+}
+
+/**
+ * Uses current-source Workspace Search only for legacy relation IDs without an authoritative prefix.
+ *
+ * @param workspaceId - Current Workspace partition.
+ * @param relationId - Unknown legacy relation identifier.
+ * @param context - Current search and source authorization context.
+ * @param cache - Request-local candidate search result cache.
+ * @param scopeCache - Request-local Work Item source cache.
+ * @param documentSearchReadContext - Compact Document ACL read context.
+ * @returns Whether one current accessible source still contains the legacy relation ID.
+ */
+async function searchCurrentReadableTaskViewRelationId(
+  workspaceId: string,
+  relationId: string,
+  context: WorkspaceSearchContext,
+  cache: Map<string, Promise<boolean>>,
+  scopeCache: Map<string, Promise<TeamIssueDetailResponse | undefined>>,
+  documentSearchReadContext: ReturnType<typeof createDocumentSearchAccessReadContext>,
+): Promise<boolean> {
+  let pending = cache.get(relationId)
+  if (!pending) {
+    if (cache.size >= TASK_VIEW_LEGACY_RELATION_SEARCH_LIMIT) {
+      throw new WorkspaceSearchError(
+        413,
+        'TaskViewRelationResolutionLimitExceeded',
+        'Task view relation resolution exceeds the legacy search limit.',
+      )
+    }
+    pending = workItemDependencies.workspaceSearch.search({
+      workspaceId,
+      filters: { relationIds: [relationId] },
+      limit: 1,
+      access: context.searchAccess,
+      resolveCurrentScope: (document) => resolveCurrentWorkspaceSearchScope(
+        workspaceId,
+        document,
+        context,
+        scopeCache,
+        documentSearchReadContext,
+      ),
+    }).then((response) => response.results.length > 0)
+    cache.set(relationId, pending)
+  }
+  return pending
 }
 
 async function resolveCurrentWorkspaceSearchScope(
@@ -19016,6 +19879,985 @@ function parseSearchCommentEntityId(
     : undefined
 }
 
+/**
+ * Resolves the optional task-view methods as one fail-closed required port.
+ *
+ * @param client - Workspace Search client configured by the composition root.
+ * @returns Required task-view lifecycle methods bound to the configured client.
+ */
+function requireTaskViewClient(client: WorkspaceSearchClient): TaskViewClient {
+  const {
+    listTaskViews,
+    getTaskView,
+    createTaskView,
+    updateTaskView,
+    duplicateTaskView,
+    deleteTaskView,
+  } = client
+  if (
+    typeof listTaskViews !== 'function' ||
+    typeof getTaskView !== 'function' ||
+    typeof createTaskView !== 'function' ||
+    typeof updateTaskView !== 'function' ||
+    typeof duplicateTaskView !== 'function' ||
+    typeof deleteTaskView !== 'function'
+  ) {
+    throw new WorkspaceSearchError(
+      503,
+      'TaskViewUnavailable',
+      'Task view storage is unavailable.',
+    )
+  }
+  return {
+    listTaskViews: listTaskViews.bind(client),
+    getTaskView: getTaskView.bind(client),
+    createTaskView: createTaskView.bind(client),
+    updateTaskView: updateTaskView.bind(client),
+    duplicateTaskView: duplicateTaskView.bind(client),
+    deleteTaskView: deleteTaskView.bind(client),
+  }
+}
+
+/**
+ * Reads one JSON body without assigning a trusted application type prematurely.
+ *
+ * @param request - Hono request JSON reader.
+ * @returns Parsed untrusted JSON value.
+ */
+async function readTaskViewJson(request: { json: () => Promise<unknown> }): Promise<unknown> {
+  try {
+    return await request.json()
+  } catch (error) {
+    return invalidTaskViewApiInput('Task view request body must be valid JSON.', error)
+  }
+}
+
+/**
+ * Reads one stable task-view path identifier.
+ *
+ * @param value - Untrusted path segment.
+ * @returns Trimmed application identifier.
+ */
+function readTaskViewPathId(value: unknown): string {
+  const identifier = readRequiredTaskViewText(value, 'Task view ID', 256)
+  if (!/^[A-Za-z0-9._:@+-]+$/u.test(identifier)) {
+    return invalidTaskViewApiInput('Task view ID is invalid.')
+  }
+  return identifier
+}
+
+/**
+ * Reads an optional opaque task-view cursor without decoding its contents at the transport layer.
+ *
+ * @param value - Untrusted cursor query value.
+ * @returns Bounded opaque cursor.
+ */
+function readTaskViewCursor(value: unknown): string {
+  return readRequiredTaskViewText(value, 'Task view cursor', 8_192)
+}
+
+/**
+ * Reads the bounded page size accepted by the task-view list contract.
+ *
+ * @param value - Untrusted limit query value.
+ * @returns Integer page size between one and one hundred.
+ */
+function readTaskViewListLimit(value: unknown): number {
+  const parsed = typeof value === 'string' && value ? Number(value) : Number.NaN
+  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 100) {
+    return invalidTaskViewApiInput('Task view limit must be between 1 and 100.')
+  }
+  return parsed
+}
+
+/**
+ * Reads the optimistic revision supplied to task-view deletion.
+ *
+ * @param value - Untrusted revision query value.
+ * @returns Positive safe integer revision.
+ */
+function readTaskViewRevisionQuery(value: unknown): number {
+  const parsed = typeof value === 'string' && value ? Number(value) : Number.NaN
+  return readPositiveTaskViewInteger(parsed, 'Task view revision')
+}
+
+/**
+ * Reads an optional task-view mutation idempotency key.
+ *
+ * @param value - Untrusted request header value.
+ * @returns Trimmed bounded idempotency key, when supplied.
+ */
+function readOptionalTaskViewIdempotencyKey(value: unknown): string | undefined {
+  if (value === undefined || value === '') return undefined
+  return readRequiredTaskViewText(value, 'Task view idempotency key', 256)
+}
+
+/**
+ * Reads a task-view surface discriminator.
+ *
+ * @param value - Untrusted surface value.
+ * @returns Supported task-view surface.
+ */
+function readTaskViewSurface(value: unknown): TaskViewSurface {
+  if (
+    value === 'workspace-search' ||
+    value === 'project' ||
+    value === 'team' ||
+    value === 'my-tasks' ||
+    value === 'focus' ||
+    value === 'triage'
+  ) {
+    return value
+  }
+  return invalidTaskViewApiInput('Task view surface is invalid.')
+}
+
+/**
+ * Parses one JSON-encoded task-view scope query.
+ *
+ * @param value - Untrusted scope query value.
+ * @returns Validated task-view resource scope.
+ */
+function readTaskViewScopeQuery(value: unknown): TaskViewScope {
+  if (typeof value !== 'string' || !value) {
+    return invalidTaskViewApiInput('Task view scope is invalid.')
+  }
+  try {
+    return readTaskViewScope(JSON.parse(value))
+  } catch (error) {
+    if (error instanceof WorkspaceSearchError) throw error
+    return invalidTaskViewApiInput('Task view scope is invalid.', error)
+  }
+}
+
+/**
+ * Reads one structured task-view resource scope.
+ *
+ * @param value - Untrusted scope value.
+ * @returns Canonical task-view resource scope.
+ */
+function readTaskViewScope(value: unknown): TaskViewScope {
+  if (!isRecord(value)) {
+    return invalidTaskViewApiInput('Task view scope is invalid.')
+  }
+  if (value.kind === 'workspace') return { kind: 'workspace' }
+  if (value.kind === 'viewer') return { kind: 'viewer' }
+  if (value.kind === 'team') {
+    return {
+      kind: 'team',
+      teamId: readRequiredTaskViewText(value.teamId, 'Task view scope Team ID', 256),
+    }
+  }
+  if (value.kind === 'project') {
+    const teamId = readOptionalTaskViewText(value.teamId, 'Task view scope Team ID', 256)
+    return {
+      kind: 'project',
+      projectId: readRequiredTaskViewText(
+        value.projectId,
+        'Task view scope Project ID',
+        256,
+      ),
+      ...(teamId ? { teamId } : {}),
+    }
+  }
+  return invalidTaskViewApiInput('Task view scope is invalid.')
+}
+
+/**
+ * Reads one complete task-view definition.
+ *
+ * @param value - Untrusted definition value.
+ * @returns Canonical task-view definition.
+ */
+function readTaskViewDefinition(value: unknown): TaskViewDefinition {
+  if (!isRecord(value)) {
+    return invalidTaskViewApiInput('Task view definition is required.')
+  }
+  const surface = readTaskViewSurface(value.surface)
+  const scope = readTaskViewScope(value.scope)
+  const validScope = surface === 'workspace-search'
+    ? scope.kind === 'workspace'
+    : surface === 'project'
+      ? scope.kind === 'project'
+      : surface === 'team'
+        ? scope.kind === 'team'
+        : surface === 'my-tasks' || surface === 'focus'
+          ? scope.kind === 'viewer'
+          : false
+  if (!validScope) {
+    return invalidTaskViewApiInput('Task view surface and scope do not match.')
+  }
+  return {
+    surface,
+    scope,
+    filters: readTaskViewFilters(value.filters),
+    layout: readTaskViewLayout(value.layout),
+  }
+}
+
+/**
+ * Reads a task-view create payload.
+ *
+ * @param value - Untrusted request body.
+ * @returns Validated create input.
+ */
+function readCreateSavedTaskViewInput(value: unknown): CreateSavedTaskViewInput {
+  if (!isRecord(value)) {
+    return invalidTaskViewApiInput('Task view input is required.')
+  }
+  const visibility = readTaskViewVisibility(value.visibility)
+  const teamId = readOptionalTaskViewText(value.teamId, 'Task view Team ID', 256)
+  validateTaskViewVisibilityTeam(visibility, teamId)
+  const description = readOptionalTaskViewText(
+    value.description,
+    'Task view description',
+    1_000,
+  )
+  return {
+    name: readRequiredTaskViewText(value.name, 'Task view name', 120),
+    ...(description ? { description } : {}),
+    visibility,
+    ...(teamId ? { teamId } : {}),
+    definition: readTaskViewDefinition(value.definition),
+    ...(value.favorite === undefined
+      ? {}
+      : { favorite: readTaskViewBoolean(value.favorite, 'Task view favorite') }),
+    ...(value.pinned === undefined
+      ? {}
+      : { pinned: readTaskViewBoolean(value.pinned, 'Task view pinned') }),
+    ...(value.defaultSource === undefined
+      ? {}
+      : { defaultSource: readTaskViewDefaultSource(value.defaultSource) }),
+  }
+}
+
+/**
+ * Reads a revision-guarded task-view update payload.
+ *
+ * @param value - Untrusted request body.
+ * @returns Validated update input.
+ */
+function readUpdateSavedTaskViewInput(value: unknown): UpdateSavedTaskViewInput {
+  if (!isRecord(value)) {
+    return invalidTaskViewApiInput('Task view update is required.')
+  }
+  if (value.defaultSource !== undefined && value.clearDefaultSource !== undefined) {
+    return invalidTaskViewApiInput(
+      'Task view default assignment and clearing are mutually exclusive.',
+    )
+  }
+  return {
+    expectedRevision: readPositiveTaskViewInteger(
+      value.expectedRevision,
+      'Task view revision',
+    ),
+    ...(value.name === undefined
+      ? {}
+      : { name: readRequiredTaskViewText(value.name, 'Task view name', 120) }),
+    ...(value.description === undefined
+      ? {}
+      : {
+          description: value.description === null
+            ? null
+            : readRequiredTaskViewText(
+                value.description,
+                'Task view description',
+                1_000,
+              ),
+        }),
+    ...(value.visibility === undefined
+      ? {}
+      : { visibility: readTaskViewVisibility(value.visibility) }),
+    ...(value.teamId === undefined
+      ? {}
+      : {
+          teamId: value.teamId === null
+            ? null
+            : readRequiredTaskViewText(value.teamId, 'Task view Team ID', 256),
+        }),
+    ...(value.definition === undefined
+      ? {}
+      : { definition: readTaskViewDefinition(value.definition) }),
+    ...(value.favorite === undefined
+      ? {}
+      : { favorite: readTaskViewBoolean(value.favorite, 'Task view favorite') }),
+    ...(value.pinned === undefined
+      ? {}
+      : { pinned: readTaskViewBoolean(value.pinned, 'Task view pinned') }),
+    ...(value.defaultSource === undefined
+      ? {}
+      : {
+          defaultSource: value.defaultSource === null
+            ? null
+            : readTaskViewDefaultSource(value.defaultSource),
+        }),
+    ...(value.clearDefaultSource === undefined
+      ? {}
+      : { clearDefaultSource: readTaskViewDefaultSource(value.clearDefaultSource) }),
+  }
+}
+
+/**
+ * Reads task-view duplicate metadata.
+ *
+ * @param value - Untrusted request body.
+ * @returns Validated duplicate input.
+ */
+function readDuplicateSavedTaskViewInput(value: unknown): DuplicateSavedTaskViewInput {
+  if (!isRecord(value)) {
+    return invalidTaskViewApiInput('Task view duplicate input is required.')
+  }
+  return {
+    ...(value.name === undefined
+      ? {}
+      : { name: readRequiredTaskViewText(value.name, 'Task view name', 120) }),
+    ...(value.description === undefined
+      ? {}
+      : {
+          description: value.description === null
+            ? null
+            : readRequiredTaskViewText(
+                value.description,
+                'Task view description',
+                1_000,
+              ),
+        }),
+    ...(value.visibility === undefined
+      ? {}
+      : { visibility: readTaskViewVisibility(value.visibility) }),
+    ...(value.teamId === undefined
+      ? {}
+      : {
+          teamId: value.teamId === null
+            ? null
+            : readRequiredTaskViewText(value.teamId, 'Task view Team ID', 256),
+        }),
+    ...(value.favorite === undefined
+      ? {}
+      : { favorite: readTaskViewBoolean(value.favorite, 'Task view favorite') }),
+    ...(value.pinned === undefined
+      ? {}
+      : { pinned: readTaskViewBoolean(value.pinned, 'Task view pinned') }),
+    ...(value.defaultSource === undefined
+      ? {}
+      : { defaultSource: readTaskViewDefaultSource(value.defaultSource) }),
+  }
+}
+
+/**
+ * Reads filters shared by task-oriented surfaces and Workspace Search.
+ *
+ * @param value - Untrusted filter object.
+ * @returns Canonical task-view filters.
+ */
+function readTaskViewFilters(value: unknown): TaskViewFilters {
+  if (!isRecord(value)) {
+    return invalidTaskViewApiInput('Task view filters are invalid.')
+  }
+  const filters: TaskViewFilters = {}
+  const keyword = readOptionalTaskViewText(value.keyword, 'Task view keyword', 256)
+  if (keyword) filters.keyword = keyword
+  if (value.entityTypes !== undefined) {
+    if (!Array.isArray(value.entityTypes) || value.entityTypes.length > 6) {
+      return invalidTaskViewApiInput('Task view entity types are invalid.')
+    }
+    filters.entityTypes = [...new Set(value.entityTypes.map(readTaskViewEntityType))]
+  }
+  copyTaskViewStringFilter(filters, value, 'assigneeUserIds')
+  copyTaskViewStringFilter(filters, value, 'creatorUserIds')
+  copyTaskViewStringFilter(filters, value, 'statuses')
+  copyTaskViewStringFilter(filters, value, 'relationIds')
+  copyTaskViewStringFilter(filters, value, 'projectIds')
+  copyTaskViewStringFilter(filters, value, 'teamIds')
+  if (value.customFields !== undefined) {
+    if (!Array.isArray(value.customFields) || value.customFields.length > 50) {
+      return invalidTaskViewApiInput('Task view custom field filters are invalid.')
+    }
+    filters.customFields = value.customFields.map(readTaskViewCustomFieldFilter)
+  }
+  if (value.date !== undefined) {
+    filters.date = readTaskViewDateFilter(value.date)
+  }
+  if (value.workflowStatuses !== undefined) {
+    if (!Array.isArray(value.workflowStatuses) || value.workflowStatuses.length > 100) {
+      return invalidTaskViewApiInput('Task view workflow statuses are invalid.')
+    }
+    filters.workflowStatuses = value.workflowStatuses.map((status) => {
+      if (!isRecord(status)) {
+        return invalidTaskViewApiInput('Task view workflow status is invalid.')
+      }
+      return {
+        teamId: readRequiredTaskViewText(
+          status.teamId,
+          'Task view workflow status Team ID',
+          256,
+        ),
+        statusId: readRequiredTaskViewText(
+          status.statusId,
+          'Task view workflow status ID',
+          256,
+        ),
+      }
+    })
+  }
+  if (value.workflowCategories !== undefined) {
+    if (!Array.isArray(value.workflowCategories) || value.workflowCategories.length > 100) {
+      return invalidTaskViewApiInput('Task view workflow categories are invalid.')
+    }
+    filters.workflowCategories = [
+      ...new Set(value.workflowCategories.map(readTaskViewWorkflowCategory)),
+    ]
+  }
+  if (value.priorities !== undefined) {
+    if (!Array.isArray(value.priorities) || value.priorities.length > 100) {
+      return invalidTaskViewApiInput('Task view priorities are invalid.')
+    }
+    filters.priorities = [...new Set(value.priorities.map(readTaskViewPriority))]
+  }
+  if (value.dueDatePreset !== undefined) {
+    filters.dueDatePreset = readTaskViewDueDatePreset(value.dueDatePreset)
+  }
+  if (value.includeArchived !== undefined) {
+    filters.includeArchived = readTaskViewBoolean(
+      value.includeArchived,
+      'Task view include archived',
+    )
+  }
+  return filters
+}
+
+/**
+ * Copies one bounded string-list filter into a canonical task-view filter object.
+ *
+ * @param target - Canonical filter object being constructed.
+ * @param source - Untrusted source object.
+ * @param key - Supported string-list filter key.
+ */
+function copyTaskViewStringFilter(
+  target: TaskViewFilters,
+  source: Record<string, unknown>,
+  key: 'assigneeUserIds' | 'creatorUserIds' | 'statuses' | 'relationIds' | 'projectIds' | 'teamIds',
+): void {
+  const candidate = source[key]
+  if (candidate === undefined) return
+  target[key] = readTaskViewStringList(candidate, `Task view ${key}`, 100, 512)
+}
+
+/**
+ * Reads one Workspace Search entity discriminator used by a task-view filter.
+ *
+ * @param value - Untrusted entity type.
+ * @returns Supported entity type.
+ */
+function readTaskViewEntityType(
+  value: unknown,
+): NonNullable<TaskViewFilters['entityTypes']>[number] {
+  if (
+    value === 'work-item' ||
+    value === 'project' ||
+    value === 'team' ||
+    value === 'comment' ||
+    value === 'file' ||
+    value === 'document'
+  ) {
+    return value
+  }
+  return invalidTaskViewApiInput('Task view entity type is invalid.')
+}
+
+/**
+ * Reads one custom-field filter from a task-view definition.
+ *
+ * @param value - Untrusted custom-field filter.
+ * @returns Canonical custom-field filter.
+ */
+function readTaskViewCustomFieldFilter(value: unknown): SearchCustomFieldFilter {
+  if (!isRecord(value)) {
+    return invalidTaskViewApiInput('Task view custom field filter is invalid.')
+  }
+  const operator = readTaskViewCustomFieldOperator(value.operator)
+  if (operator !== 'is-empty' && operator !== 'is-not-empty' && value.value === undefined) {
+    return invalidTaskViewApiInput('Task view custom field filter value is required.')
+  }
+  return {
+    fieldId: readRequiredTaskViewText(value.fieldId, 'Task view custom field ID', 256),
+    operator,
+    ...(value.value === undefined ? {} : { value: readTaskViewCustomFieldValue(value.value) }),
+  }
+}
+
+/**
+ * Reads one custom-field comparison operator.
+ *
+ * @param value - Untrusted operator.
+ * @returns Supported comparison operator.
+ */
+function readTaskViewCustomFieldOperator(
+  value: unknown,
+): SearchCustomFieldFilter['operator'] {
+  if (
+    value === 'equals' ||
+    value === 'not-equals' ||
+    value === 'contains' ||
+    value === 'greater-than' ||
+    value === 'greater-than-or-equal' ||
+    value === 'less-than' ||
+    value === 'less-than-or-equal' ||
+    value === 'is-empty' ||
+    value === 'is-not-empty'
+  ) {
+    return value
+  }
+  return invalidTaskViewApiInput('Task view custom field operator is invalid.')
+}
+
+/**
+ * Reads one JSON-compatible custom-field filter value.
+ *
+ * @param value - Untrusted filter value.
+ * @returns Canonical custom-field filter value.
+ */
+function readTaskViewCustomFieldValue(value: unknown): SearchCustomFieldValue {
+  if (value === null || typeof value === 'boolean') return value
+  if (typeof value === 'string') {
+    if (value.length > 20_000) {
+      return invalidTaskViewApiInput('Task view custom field value is too large.')
+    }
+    return value
+  }
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) {
+      return invalidTaskViewApiInput('Task view custom field number is invalid.')
+    }
+    return value
+  }
+  if (Array.isArray(value)) {
+    return readTaskViewStringList(value, 'Task view custom field list', 100, 512)
+  }
+  return invalidTaskViewApiInput('Task view custom field value is invalid.')
+}
+
+/**
+ * Reads one inclusive task-view date range.
+ *
+ * @param value - Untrusted date filter.
+ * @returns Canonical date filter.
+ */
+function readTaskViewDateFilter(value: unknown): NonNullable<TaskViewFilters['date']> {
+  if (!isRecord(value)) {
+    return invalidTaskViewApiInput('Task view date filter is invalid.')
+  }
+  const field = value.field
+  if (field !== 'createdAt' && field !== 'updatedAt' && field !== 'dueDate') {
+    return invalidTaskViewApiInput('Task view date field is invalid.')
+  }
+  const from = readOptionalTaskViewText(value.from, 'Task view date lower bound', 128)
+  const to = readOptionalTaskViewText(value.to, 'Task view date upper bound', 128)
+  if (!from && !to) {
+    return invalidTaskViewApiInput('Task view date range is empty.')
+  }
+  if (from && to && from > to) {
+    return invalidTaskViewApiInput('Task view date range is reversed.')
+  }
+  return { field, ...(from ? { from } : {}), ...(to ? { to } : {}) }
+}
+
+/**
+ * Reads one stable workflow category.
+ *
+ * @param value - Untrusted category.
+ * @returns Supported workflow category.
+ */
+function readTaskViewWorkflowCategory(
+  value: unknown,
+): NonNullable<TaskViewFilters['workflowCategories']>[number] {
+  if (
+    value === 'backlog' ||
+    value === 'unstarted' ||
+    value === 'started' ||
+    value === 'completed' ||
+    value === 'canceled'
+  ) {
+    return value
+  }
+  return invalidTaskViewApiInput('Task view workflow category is invalid.')
+}
+
+/**
+ * Reads one Work Item priority filter.
+ *
+ * @param value - Untrusted priority.
+ * @returns Supported priority.
+ */
+function readTaskViewPriority(
+  value: unknown,
+): NonNullable<TaskViewFilters['priorities']>[number] {
+  if (value === 'high' || value === 'medium' || value === 'low') return value
+  return invalidTaskViewApiInput('Task view priority is invalid.')
+}
+
+/**
+ * Reads one relative due-date preset.
+ *
+ * @param value - Untrusted due-date preset.
+ * @returns Supported due-date preset.
+ */
+function readTaskViewDueDatePreset(
+  value: unknown,
+): NonNullable<TaskViewFilters['dueDatePreset']> {
+  if (
+    value === 'overdue' ||
+    value === 'today' ||
+    value === 'upcoming' ||
+    value === 'no-date'
+  ) {
+    return value
+  }
+  return invalidTaskViewApiInput('Task view due-date preset is invalid.')
+}
+
+/**
+ * Reads one complete task-view layout.
+ *
+ * @param value - Untrusted layout value.
+ * @returns Canonical task-view layout.
+ */
+function readTaskViewLayout(value: unknown): TaskViewLayout {
+  if (!isRecord(value)) {
+    return invalidTaskViewApiInput('Task view layout is invalid.')
+  }
+  if (!Array.isArray(value.sort) || value.sort.length > 10) {
+    return invalidTaskViewApiInput('Task view sort is invalid.')
+  }
+  if (!Array.isArray(value.columns) || value.columns.length > 100) {
+    return invalidTaskViewApiInput('Task view columns are invalid.')
+  }
+  const group = value.group === undefined
+    ? undefined
+    : readTaskViewGrouping(value.group, 'Task view group')
+  const subgroup = value.subgroup === undefined
+    ? undefined
+    : readTaskViewGrouping(value.subgroup, 'Task view subgroup')
+  return {
+    mode: readTaskViewLayoutMode(value.mode),
+    ...(group ? { group } : {}),
+    ...(subgroup ? { subgroup } : {}),
+    sort: value.sort.map((rule) => readTaskViewGrouping(rule, 'Task view sort')),
+    columns: value.columns.map(readTaskViewColumn),
+    density: readTaskViewDensity(value.density),
+    displayOptions: readTaskViewDisplayOptions(value.displayOptions),
+  }
+}
+
+/**
+ * Reads one task-view grouping or sort rule.
+ *
+ * @param value - Untrusted grouping rule.
+ * @param label - Stable validation label.
+ * @returns Canonical grouping rule.
+ */
+function readTaskViewGrouping(value: unknown, label: string): TaskViewGrouping {
+  if (!isRecord(value)) {
+    return invalidTaskViewApiInput(`${label} is invalid.`)
+  }
+  return {
+    field: readRequiredTaskViewText(value.field, `${label} field`, 256),
+    direction: readTaskViewSortDirection(value.direction, label),
+  }
+}
+
+/**
+ * Reads one task-view column.
+ *
+ * @param value - Untrusted column value.
+ * @returns Canonical task-view column.
+ */
+function readTaskViewColumn(value: unknown): TaskViewColumn {
+  if (!isRecord(value)) {
+    return invalidTaskViewApiInput('Task view column is invalid.')
+  }
+  let width: number | undefined
+  if (value.width !== undefined) {
+    if (
+      typeof value.width !== 'number' ||
+      !Number.isFinite(value.width) ||
+      value.width < 40 ||
+      value.width > 2_000
+    ) {
+      return invalidTaskViewApiInput('Task view column width is invalid.')
+    }
+    width = value.width
+  }
+  let pin: TaskViewColumn['pin']
+  if (value.pin !== undefined) {
+    if (value.pin !== 'start' && value.pin !== 'end') {
+      return invalidTaskViewApiInput('Task view column pin is invalid.')
+    }
+    pin = value.pin
+  }
+  return {
+    field: readRequiredTaskViewText(value.field, 'Task view column field', 256),
+    ...(width === undefined ? {} : { width }),
+    ...(pin === undefined ? {} : { pin }),
+  }
+}
+
+/**
+ * Reads all supported task-view display options without accepting coercion.
+ *
+ * @param value - Untrusted display-options object.
+ * @returns Canonical display options.
+ */
+function readTaskViewDisplayOptions(value: unknown): TaskViewDisplayOptions {
+  if (!isRecord(value)) {
+    return invalidTaskViewApiInput('Task view display options are invalid.')
+  }
+  return {
+    ...(value.showCompleted === undefined
+      ? {}
+      : {
+          showCompleted: readTaskViewBoolean(
+            value.showCompleted,
+            'Task view showCompleted',
+          ),
+        }),
+    ...(value.showArchived === undefined
+      ? {}
+      : {
+          showArchived: readTaskViewBoolean(
+            value.showArchived,
+            'Task view showArchived',
+          ),
+        }),
+    ...(value.showSubItems === undefined
+      ? {}
+      : {
+          showSubItems: readTaskViewBoolean(
+            value.showSubItems,
+            'Task view showSubItems',
+          ),
+        }),
+    ...(value.showEmptyGroups === undefined
+      ? {}
+      : {
+          showEmptyGroups: readTaskViewBoolean(
+            value.showEmptyGroups,
+            'Task view showEmptyGroups',
+          ),
+        }),
+    ...(value.wrapText === undefined
+      ? {}
+      : { wrapText: readTaskViewBoolean(value.wrapText, 'Task view wrapText') }),
+    ...(value.showAssigneeAvatars === undefined
+      ? {}
+      : {
+          showAssigneeAvatars: readTaskViewBoolean(
+            value.showAssigneeAvatars,
+            'Task view showAssigneeAvatars',
+          ),
+        }),
+  }
+}
+
+/**
+ * Reads one supported task-view layout mode.
+ *
+ * @param value - Untrusted layout mode.
+ * @returns Supported layout mode.
+ */
+function readTaskViewLayoutMode(value: unknown): TaskViewLayout['mode'] {
+  if (
+    value === 'table' ||
+    value === 'board' ||
+    value === 'list' ||
+    value === 'gantt' ||
+    value === 'calendar' ||
+    value === 'timeline'
+  ) {
+    return value
+  }
+  return invalidTaskViewApiInput('Task view layout mode is invalid.')
+}
+
+/**
+ * Reads one task-view density.
+ *
+ * @param value - Untrusted density.
+ * @returns Supported density.
+ */
+function readTaskViewDensity(value: unknown): TaskViewLayout['density'] {
+  if (value === 'compact' || value === 'comfortable' || value === 'spacious') return value
+  return invalidTaskViewApiInput('Task view density is invalid.')
+}
+
+/**
+ * Reads one task-view sort direction.
+ *
+ * @param value - Untrusted direction.
+ * @param label - Stable validation label.
+ * @returns Supported sort direction.
+ */
+function readTaskViewSortDirection(
+  value: unknown,
+  label: string,
+): TaskViewGrouping['direction'] {
+  if (value === 'asc' || value === 'desc') return value
+  return invalidTaskViewApiInput(`${label} direction is invalid.`)
+}
+
+/**
+ * Reads one saved task-view visibility.
+ *
+ * @param value - Untrusted visibility.
+ * @returns Supported visibility.
+ */
+function readTaskViewVisibility(
+  value: unknown,
+): CreateSavedTaskViewInput['visibility'] {
+  if (value === 'personal' || value === 'team' || value === 'shared') return value
+  return invalidTaskViewApiInput('Task view visibility is invalid.')
+}
+
+/**
+ * Validates the relationship between task-view visibility and Team ownership.
+ *
+ * @param visibility - Validated saved view visibility.
+ * @param teamId - Optional Team ownership identifier.
+ */
+function validateTaskViewVisibilityTeam(
+  visibility: CreateSavedTaskViewInput['visibility'],
+  teamId: string | undefined,
+): void {
+  if (visibility === 'team' && !teamId) {
+    invalidTaskViewApiInput('Team task views require a Team ID.')
+  }
+  if (visibility !== 'team' && teamId) {
+    invalidTaskViewApiInput('Only Team task views can contain a Team ID.')
+  }
+}
+
+/**
+ * Reads one mutable task-view default source.
+ *
+ * @param value - Untrusted default source.
+ * @returns Supported default source.
+ */
+function readTaskViewDefaultSource(
+  value: unknown,
+): NonNullable<CreateSavedTaskViewInput['defaultSource']> {
+  if (value === 'personal' || value === 'team') return value
+  return invalidTaskViewApiInput('Task view default source is invalid.')
+}
+
+/**
+ * Reads one boolean without coercion.
+ *
+ * @param value - Untrusted boolean value.
+ * @param label - Stable validation label.
+ * @returns Validated boolean.
+ */
+function readTaskViewBoolean(value: unknown, label: string): boolean {
+  if (typeof value !== 'boolean') {
+    return invalidTaskViewApiInput(`${label} is invalid.`)
+  }
+  return value
+}
+
+/**
+ * Reads one required positive integer.
+ *
+ * @param value - Untrusted number value.
+ * @param label - Stable validation label.
+ * @returns Positive safe integer.
+ */
+function readPositiveTaskViewInteger(value: unknown, label: string): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0) {
+    return invalidTaskViewApiInput(`${label} must be a positive integer.`)
+  }
+  return value
+}
+
+/**
+ * Reads one required bounded text value.
+ *
+ * @param value - Untrusted text value.
+ * @param label - Stable validation label.
+ * @param maximumLength - Maximum accepted trimmed length.
+ * @returns Trimmed non-empty text.
+ */
+function readRequiredTaskViewText(
+  value: unknown,
+  label: string,
+  maximumLength: number,
+): string {
+  if (typeof value !== 'string') {
+    return invalidTaskViewApiInput(`${label} is invalid.`)
+  }
+  const normalized = value.trim()
+  if (!normalized || normalized.length > maximumLength) {
+    return invalidTaskViewApiInput(`${label} is invalid.`)
+  }
+  return normalized
+}
+
+/**
+ * Reads one optional bounded text value.
+ *
+ * @param value - Untrusted optional text value.
+ * @param label - Stable validation label.
+ * @param maximumLength - Maximum accepted trimmed length.
+ * @returns Trimmed text when supplied.
+ */
+function readOptionalTaskViewText(
+  value: unknown,
+  label: string,
+  maximumLength: number,
+): string | undefined {
+  if (value === undefined || value === '') return undefined
+  return readRequiredTaskViewText(value, label, maximumLength)
+}
+
+/**
+ * Reads one bounded string list while preserving first occurrence order.
+ *
+ * @param value - Untrusted list value.
+ * @param label - Stable validation label.
+ * @param maximumItems - Maximum accepted item count.
+ * @param maximumLength - Maximum accepted length per item.
+ * @returns Deduplicated string list.
+ */
+function readTaskViewStringList(
+  value: unknown,
+  label: string,
+  maximumItems: number,
+  maximumLength: number,
+): string[] {
+  if (!Array.isArray(value) || value.length > maximumItems) {
+    return invalidTaskViewApiInput(`${label} is invalid.`)
+  }
+  return [
+    ...new Set(
+      value.map((item) => readRequiredTaskViewText(item, label, maximumLength)),
+    ),
+  ]
+}
+
+/**
+ * Creates a stable task-view validation error for the HTTP adapter boundary.
+ *
+ * @param message - Safe client-facing validation message.
+ * @param cause - Optional parse or validation cause retained internally.
+ * @returns Never returns because validation has failed.
+ */
+function invalidTaskViewApiInput(message: string, cause?: unknown): never {
+  throw new WorkspaceSearchError(
+    400,
+    'InvalidTaskView',
+    message,
+    cause === undefined ? undefined : { cause },
+  )
+}
+
 function readWorkspaceSearchFilters(value: string | undefined): WorkspaceSearchFilters {
   if (!value) return {}
   try {
@@ -19034,6 +20876,22 @@ function readOptionalPositiveQueryInteger(value: string | undefined, label: stri
   return readRequiredPositiveQueryInteger(value, label)
 }
 
+/**
+ * Reads the strict optional archived Work Item collection flag.
+ *
+ * @param value - Untrusted query value.
+ * @returns Whether archived Work Items should be included; omitted values default to false.
+ */
+function readOptionalIncludeArchivedQuery(value: string | undefined) {
+  if (value === undefined || value === 'false') return false
+  if (value === 'true') return true
+  throw new ProjectDataError(
+    400,
+    'InvalidWorkItemQuery',
+    'includeArchived must be "true" or "false".',
+  )
+}
+
 function readRequiredPositiveQueryInteger(value: string | undefined, label: string) {
   const parsed = value ? Number(value) : Number.NaN
   if (!Number.isSafeInteger(parsed) || parsed <= 0) {
@@ -19045,7 +20903,7 @@ function readRequiredPositiveQueryInteger(value: string | undefined, label: stri
 function toWorkspaceSearchErrorResponse(c: Context, error: unknown) {
   if (error instanceof WorkspaceSearchError) {
     const status = error.status === 400 || error.status === 403 || error.status === 404 ||
-      error.status === 409 || error.status === 503
+      error.status === 409 || error.status === 413 || error.status === 503
       ? error.status
       : 502
     return c.json({ code: error.code, message: error.message }, status)
@@ -19591,12 +21449,15 @@ async function createNotificationVisibilityFilter(
       projectTeamIds.set(project.id, teamIds)
     }
   }
-  const projectAccesses: ProjectAccessEntry[] = principal.isSystemAdmin
+  const projectScopeAccesses: ProjectAccessEntry[] = principal.isSystemAdmin
     ? [...projectTeamIds.keys()].map((projectId) => ({
         projectId,
         role: 'manager' as const,
       }))
-    : await getEffectiveProjectAccessList(principal)
+    : await getEffectiveProjectScopeAccessList(principal)
+  const projectAccesses = principal.isSystemAdmin
+    ? projectScopeAccesses
+    : collapseProjectAccessesById(projectScopeAccesses)
   const accessibleProjectIds = new Set(
     projectAccesses
       .filter((access) =>
@@ -19615,7 +21476,7 @@ async function createNotificationVisibilityFilter(
       }
     }
   } else {
-    for (const access of projectAccesses) {
+    for (const access of projectScopeAccesses) {
       if (!projectAccessAllows(access, 'viewer')) continue
       const ownerTeamIds = projectTeamIds.get(access.projectId)
       if (!ownerTeamIds) continue
@@ -19844,6 +21705,10 @@ function toProjectDataErrorResponse(c: Context, error: unknown) {
     return c.json({ code: error.code, message: error.message }, 400)
   }
 
+  if (error.code === 'InvalidWorkItemQuery') {
+    return c.json({ code: error.code, message: error.message }, 400)
+  }
+
   if (
     error.code.startsWith('InvalidWorkItemSchedule') ||
     error.code === 'WorkItemScheduleDurationMismatch'
@@ -20028,37 +21893,189 @@ async function requireProjectPermission(
   }
 }
 
-async function getEffectiveProjectAccessList(principal: ProjectPrincipal) {
+/**
+ * Reads effective Project roles while retaining an available owner Team qualifier.
+ *
+ * @param principal - Authenticated principal whose direct and enterprise access is merged.
+ * @returns Strongest role per Team-qualified or legacy-unqualified Project identity.
+ */
+async function getEffectiveProjectScopeAccessList(
+  principal: ProjectPrincipal,
+): Promise<ProjectAccessEntry[]> {
   const directAccesses = principal.enterpriseLegacyProjectAccessSuppressed
     ? []
     : await workspaceDependencies.projectDirectory.getProjectAccessList(
         principal.directoryId,
         principal.userKey,
       )
-  const accessByProjectScope = new Map<string, ProjectAccessEntry>()
-  for (const access of directAccesses) {
-    const key = `${access.teamId ?? ''}\0${access.projectId}`
-    accessByProjectScope.set(key, { ...access })
-  }
-  for (const enterpriseAccess of principal.enterpriseProjectAccesses ?? []) {
-    const key = `${enterpriseAccess.teamId ?? ''}\0${enterpriseAccess.projectId}`
-    const directAccess = accessByProjectScope.get(key)
-    const directRole = directAccess?.role
-    const enterpriseRole = enterpriseAccess.role
-    if (
-      enterpriseRole &&
-      (
-        !directRole ||
-        projectRoleWeights[enterpriseRole] > projectRoleWeights[directRole]
+  const enterpriseAccesses = principal.enterpriseProjectAccesses ?? []
+  const accessDirectory = [...directAccesses, ...enterpriseAccesses].some((access) =>
+    access.teamId === undefined
+  )
+    ? await workspaceDependencies.projectDirectory.getProjectDirectory(
+        principal.directoryId,
+        'ja',
+        true,
       )
+    : undefined
+  /**
+   * Adds the sole active owner Team to a legacy-unqualified access entry.
+   *
+   * @param access - Direct or enterprise Project access entry.
+   * @returns Team-qualified access when ownership is unique, otherwise the original scope.
+   */
+  const qualifyAccess = (access: ProjectAccessEntry): ProjectAccessEntry => {
+    if (access.teamId || !accessDirectory) return { ...access }
+    const teamId = resolveProjectAccessTeamId(access, accessDirectory)
+    return teamId ? { ...access, teamId } : { ...access }
+  }
+  /**
+   * Retains the strongest role when direct and enterprise access share a scope.
+   *
+   * @param current - Existing access for the scope, when present.
+   * @param incoming - Access entry being merged into the scope.
+   * @returns The access entry with the strongest available role.
+   */
+  const mergeAccess = (
+    current: ProjectAccessEntry | undefined,
+    incoming: ProjectAccessEntry,
+  ): ProjectAccessEntry => {
+    if (!current) return incoming
+    const currentRole = current.role
+    const incomingRole = incoming.role
+    if (
+      incomingRole &&
+      (!currentRole || projectRoleWeights[incomingRole] > projectRoleWeights[currentRole])
     ) {
-      accessByProjectScope.set(key, {
-        ...enterpriseAccess,
-        role: enterpriseRole,
-      })
+      return { ...current, role: incomingRole }
+    }
+    return current
+  }
+  const enterpriseScopesByProject = new Map<string, ProjectAccessEntry[]>()
+  for (const enterpriseAccessValue of enterpriseAccesses) {
+    if (enterpriseAccessValue.teamId === undefined) continue
+    const projectAccesses = enterpriseScopesByProject.get(enterpriseAccessValue.projectId) ?? []
+    projectAccesses.push(qualifyAccess(enterpriseAccessValue))
+    enterpriseScopesByProject.set(enterpriseAccessValue.projectId, projectAccesses)
+  }
+  const unresolvedLegacyRoleByProject = new Map<string, ProjectRole | undefined>()
+  const accessByScope = new Map<string, ProjectAccessEntry>()
+  for (const access of directAccesses) {
+    const qualifiedAccess = qualifyAccess(access)
+    if (
+      access.teamId === undefined &&
+      qualifiedAccess.teamId === undefined &&
+      enterpriseScopesByProject.has(access.projectId)
+    ) {
+      const currentRole = unresolvedLegacyRoleByProject.get(access.projectId)
+      if (
+        !unresolvedLegacyRoleByProject.has(access.projectId) ||
+        access.role && (!currentRole || projectRoleWeights[access.role] > projectRoleWeights[currentRole])
+      ) {
+        unresolvedLegacyRoleByProject.set(access.projectId, access.role)
+      }
+      continue
+    }
+    const scopeKey = `${qualifiedAccess.teamId ?? ''}\0${qualifiedAccess.projectId}`
+    accessByScope.set(scopeKey, mergeAccess(accessByScope.get(scopeKey), qualifiedAccess))
+  }
+  for (const enterpriseAccessValue of enterpriseAccesses) {
+    const enterpriseAccess = qualifyAccess(enterpriseAccessValue)
+    const unresolvedLegacyRole = unresolvedLegacyRoleByProject.get(enterpriseAccess.projectId)
+    const mergedEnterpriseAccess = unresolvedLegacyRoleByProject.has(enterpriseAccess.projectId) &&
+      unresolvedLegacyRole !== undefined
+      ? { ...enterpriseAccess, role: unresolvedLegacyRole && enterpriseAccess.role &&
+          projectRoleWeights[unresolvedLegacyRole] > projectRoleWeights[enterpriseAccess.role]
+          ? unresolvedLegacyRole
+          : enterpriseAccess.role ?? unresolvedLegacyRole }
+      : enterpriseAccess
+    const scopeKey = `${mergedEnterpriseAccess.teamId ?? ''}\0${mergedEnterpriseAccess.projectId}`
+    accessByScope.set(
+      scopeKey,
+      mergeAccess(accessByScope.get(scopeKey), mergedEnterpriseAccess),
+    )
+  }
+  return [...accessByScope.values()]
+}
+
+/**
+ * Collapses Team-qualified access to the strongest legacy role per bare Project ID.
+ *
+ * @param accesses - Team-qualified and legacy-unqualified Project access entries.
+ * @returns Strongest role for each Project ID expected by legacy authorization consumers.
+ */
+function collapseProjectAccessesById(
+  accesses: readonly ProjectAccessEntry[],
+): ProjectAccessEntry[] {
+  const roleByProjectId = new Map<string, ProjectRole | undefined>()
+  for (const access of accesses) {
+    const currentRole = roleByProjectId.get(access.projectId)
+    if (
+      !roleByProjectId.has(access.projectId) ||
+      access.role && (!currentRole || projectRoleWeights[access.role] > projectRoleWeights[currentRole])
+    ) {
+      roleByProjectId.set(access.projectId, access.role)
     }
   }
-  return [...accessByProjectScope.values()]
+  return [...roleByProjectId].map(([projectId, role]) => ({ projectId, role }))
+}
+
+/**
+ * Finds Project identifiers with exactly one active owner Team in the current directory.
+ *
+ * @param directory - Current active Team and Project hierarchy.
+ * @returns Project IDs that are safe to authorize without a Team qualifier.
+ */
+function getGloballyUniqueProjectIds(directory: ProjectDirectoryResponse): ReadonlySet<string> {
+  const ownerCountByProjectId = new Map<string, number>()
+  for (const team of directory.teams) {
+    for (const project of team.projects) {
+      ownerCountByProjectId.set(
+        project.id,
+        (ownerCountByProjectId.get(project.id) ?? 0) + 1,
+      )
+    }
+  }
+  return new Set(
+    [...ownerCountByProjectId].flatMap(([projectId, ownerCount]) =>
+      ownerCount === 1 ? [projectId] : []
+    ),
+  )
+}
+
+/**
+ * Resolves an access entry to one active owner Team without guessing across duplicate IDs.
+ *
+ * @param access - Direct or enterprise Project access entry.
+ * @param directory - Current active Team and Project hierarchy.
+ * @returns Canonical owner Team, or undefined for missing or ambiguous legacy ownership.
+ */
+function resolveProjectAccessTeamId(
+  access: ProjectAccessEntry,
+  directory: ProjectDirectoryResponse,
+): string | undefined {
+  if (access.teamId) {
+    return directory.teams.some((team) =>
+      team.id === access.teamId &&
+      team.projects.some((project) => project.id === access.projectId)
+    )
+      ? access.teamId
+      : undefined
+  }
+  const ownerTeams = directory.teams.filter((team) =>
+    team.projects.some((project) => project.id === access.projectId)
+  )
+  return ownerTeams.length === 1 ? ownerTeams[0]?.id : undefined
+}
+
+/**
+ * Reads effective legacy Project roles collapsed by bare Project ID.
+ *
+ * @param principal - Authenticated principal whose direct and enterprise access is merged.
+ * @returns Strongest role for each legacy Project identifier.
+ */
+async function getEffectiveProjectAccessList(principal: ProjectPrincipal) {
+  return collapseProjectAccessesById(await getEffectiveProjectScopeAccessList(principal))
 }
 
 /**
@@ -20127,7 +22144,7 @@ async function requireTeamPermission(
   }
 
   const teamProjectIds = new Set(team.projects.map((project) => project.id))
-  const projectAccesses = (await getEffectiveProjectAccessList(principal))
+  const projectAccesses = (await getEffectiveProjectScopeAccessList(principal))
     .filter((projectAccess) => teamProjectIds.has(projectAccess.projectId))
 
   for (const projectAccess of projectAccesses) {
@@ -21018,8 +23035,13 @@ async function readTeamIssues(
   directoryId: string,
   context: TeamPermissionContext,
   principal: ProjectPrincipal,
+  includeArchived = false,
 ) {
-  const storedIssues = await workItemDependencies.teamIssues.getTeamIssues(directoryId, context.team.id)
+  const storedIssues = await workItemDependencies.teamIssues.getTeamIssues(
+    directoryId,
+    context.team.id,
+    { includeArchived },
+  )
 
   return {
     teamId: context.team.id,
@@ -21327,6 +23349,63 @@ async function readPlanningWorkItemState(
   const response = await readAccessibleWorkItems(principal)
   return {
     workItems: response.workItems.map((workItem) => ({
+      id: workItem.id,
+      revision: workItem.revision,
+      teamId: workItem.teamId,
+      title: workItem.title,
+      ...(workItem.assignedProjectId
+        ? { projectId: workItem.assignedProjectId }
+        : {}),
+      statusCategory: workItem.statusCategory,
+      dueDate: workItem.dueDate,
+      schedule: workItem.schedule,
+    } satisfies PlanningWorkItemSummary)),
+  }
+}
+
+/**
+ * Reads the complete canonical Work Item projection used for an immutable Planning publish.
+ *
+ * The caller's visible projection is sufficient for route authorization, but it is not a
+ * canonical source for Workspace-scoped initiative progress. This internal service-authoritative
+ * read keeps hidden Work Items out of the public response while making the captured context
+ * independent of the publisher's project ACL.
+ *
+ * @param principal - Authenticated Workspace principal whose directory is being read.
+ * @returns Complete Work Item summaries bounded by the aggregate read limits.
+ */
+async function readCanonicalPlanningWorkItemState(
+  principal: ProjectPrincipal,
+): Promise<PlanningWorkItemState> {
+  const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(
+    principal.directoryId,
+    'ja',
+    true,
+  )
+  if (directory.teams.length > WORK_ITEMS_TEAM_READ_LIMIT) {
+    throw createWorkItemListLimitExceededError(
+      `Workspace has more than ${WORK_ITEMS_TEAM_READ_LIMIT} Teams for a Planning publish.`,
+    )
+  }
+  const servicePrincipal = { ...principal, isSystemAdmin: true }
+  const workItemsByKey = new Map<string, TeamIssueResponseItem>()
+  for (const team of directory.teams) {
+    const response = await readCanonicalTeamIssuesForAggregate(
+      principal.directoryId,
+      { team, directory } satisfies TeamPermissionContext,
+      servicePrincipal,
+    )
+    for (const workItem of response.issues) {
+      workItemsByKey.set(`${workItem.teamId}\0${workItem.id}`, workItem)
+      if (workItemsByKey.size > PLANNING_CANONICAL_WORK_ITEM_LIMIT) {
+        throw createWorkItemListLimitExceededError(
+          `Planning publish spans more than ${PLANNING_CANONICAL_WORK_ITEM_LIMIT} Work Items.`,
+        )
+      }
+    }
+  }
+  return {
+    workItems: [...workItemsByKey.values()].map((workItem) => ({
       id: workItem.id,
       revision: workItem.revision,
       teamId: workItem.teamId,
@@ -22211,6 +24290,7 @@ type PlanningUpdateAnnotationMutationCallbacks<Result> = {
     target: PlanningUpdateTarget
     updateVersion: number
     transaction: PlanningMutationTransaction<PlanningUpdateAnnotationTransactionResult>
+    authorizationConditionChecks: readonly PlanningCallerAuthorizationConditionCheck[]
   }) => Promise<Result>
   /** Creates the response for a completed durable mutation. */
   success: (context: Context, result: Result) => Response
@@ -22300,7 +24380,12 @@ async function executePlanningUpdateAnnotationMutation<Result>(
       receiptExpectation,
     )
     if (!transaction) throw planningUpdateAnnotationIdempotencyUnavailable()
-    const result = await callbacks.mutate({ target, updateVersion, transaction })
+    const result = await callbacks.mutate({
+      target,
+      updateVersion,
+      transaction,
+      authorizationConditionChecks: createPlanningCallerAuthorizationConditionChecks(principal),
+    })
     mutationCommitted = true
     return callbacks.success(context, result)
   } catch (error) {
@@ -23389,8 +25474,16 @@ function addAggregateWorkItem(
   }
 }
 
-async function readProjectIssues(directoryId: string, projectId: string) {
-  return workItemDependencies.teamIssues.getProjectIssues(directoryId, projectId)
+async function readProjectIssues(
+  directoryId: string,
+  projectId: string,
+  includeArchived = false,
+) {
+  return workItemDependencies.teamIssues.getProjectIssues(
+    directoryId,
+    projectId,
+    { includeArchived },
+  )
 }
 
 
@@ -24701,12 +26794,19 @@ async function createDependencyFencedWorkItemAuthorizationSnapshot(
  * role and assignment writes advance the optional CONTROL revision.
  *
  * @param principal - Principal whose endpoint-manager permissions were evaluated.
+ * @param additionalMembers - Additional active members whose future permissions are required.
  * @returns Workspace member and optional enterprise CONTROL condition checks.
  */
 function createPlanningCallerAuthorizationConditionChecks(
   principal: WorkspacePrincipal,
+  additionalMembers: readonly Pick<WorkspaceMember, 'memberKey' | 'version'>[] = [],
 ): PlanningCallerAuthorizationConditionCheck[] {
-  const workspaceMemberCheck = {
+  const members = new Map<string, Pick<WorkspaceMember, 'memberKey' | 'version'>>()
+  for (const member of [principal.workspaceMember, ...additionalMembers]) {
+    const memberKey = normalizeProjectMemberKey(member.memberKey)
+    if (!members.has(memberKey)) members.set(memberKey, member)
+  }
+  const workspaceMemberChecks = [...members.values()].map((member) => ({
     ConditionCheck: {
       TableName:
         getEnv('MUKUROJI_WORKSPACE_ACCESS_TABLE') ??
@@ -24714,7 +26814,7 @@ function createPlanningCallerAuthorizationConditionChecks(
         'mukuroji-workspace-access-local',
       Key: {
         workspaceId: principal.directoryId,
-        recordKey: `MEMBER#${normalizeProjectMemberKey(principal.userKey)}`,
+        recordKey: `MEMBER#${normalizeProjectMemberKey(member.memberKey)}`,
       },
       ConditionExpression:
         '#entryType = :memberEntryType AND #status = :active AND #version = :expectedVersion',
@@ -24726,13 +26826,13 @@ function createPlanningCallerAuthorizationConditionChecks(
       ExpressionAttributeValues: {
         ':memberEntryType': 'workspace-member',
         ':active': 'active',
-        ':expectedVersion': principal.workspaceMember.version,
+        ':expectedVersion': member.version,
       },
     },
-  } satisfies PlanningCallerAuthorizationConditionCheck
+  } satisfies PlanningCallerAuthorizationConditionCheck))
   const enterpriseTableName = getEnv('ENTERPRISE_IDENTITY_TABLE_NAME')?.trim()
   const controlRevision = principal.enterpriseIdentityControlRevision
-  if (!enterpriseTableName || controlRevision === undefined) return [workspaceMemberCheck]
+  if (!enterpriseTableName || controlRevision === undefined) return workspaceMemberChecks
 
   const expressionAttributeNames: Record<string, string> = {
     '#controlRevision': 'controlRevision',
@@ -24757,7 +26857,7 @@ function createPlanningCallerAuthorizationConditionChecks(
       },
     },
   } satisfies PlanningCallerAuthorizationConditionCheck
-  return [workspaceMemberCheck, enterpriseControlCheck]
+  return [...workspaceMemberChecks, enterpriseControlCheck]
 }
 
 async function resolveStableWorkItemAuthorization<T>(

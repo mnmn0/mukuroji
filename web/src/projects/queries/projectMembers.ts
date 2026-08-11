@@ -90,12 +90,17 @@ export async function loadActiveProjectMembers(
 }
 
 /**
- * Planning 画面で利用する Project ごとの member role を取得します。
+ * Loads the selected member's Project roles for Planning authorization.
  *
- * @param accessToken - Project member API の access token です。
- * @param memberKey - Role を解決する member ID です。
- * @param projectIds - 取得対象の Project ID 一覧です。
- * @returns Project ID ごとの role と取得 error です。
+ * Team-qualified scopes use a Team-aware API request and are returned under a composite
+ * `teamId\0projectId` key. An unqualified Project scope also receives a `projectId` key only when
+ * that Project appears once, which avoids ambiguity when the same Project ID exists in multiple
+ * Teams. Individual request failures are returned in `errors` instead of rejecting the aggregate.
+ *
+ * @param accessToken - Bearer token for the Project directory API.
+ * @param memberKey - Member ID whose role should be resolved.
+ * @param projectScopes - Unqualified Project IDs or Team-qualified Project scopes.
+ * @returns Resolved role keys and request errors for failed scopes.
  */
 export async function loadPlanningProjectRoles(
   accessToken: string,

@@ -21,6 +21,7 @@ const config = defineConfig({
   use: {
     baseURL: playwrightBaseUrl,
     trace: 'on-first-retry',
+    timezoneId: 'Asia/Tokyo',
   },
   projects: [
     {

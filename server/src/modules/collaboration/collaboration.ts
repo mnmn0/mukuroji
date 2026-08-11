@@ -468,7 +468,13 @@ export function createProjectCollaborationEntityKey(workspaceId: string, project
   return `${requireText(workspaceId, 'Workspace ID')}#project#${requireText(projectId, 'Project ID')}`
 }
 
-/** Planning update target scope の canonical collaboration entity key を作成します。 */
+/**
+ * Creates the collaboration entity key for one Planning update target scope.
+ *
+ * @param workspaceId - Workspace that owns the target.
+ * @param targetKey - Percent-encoded public target key.
+ * @returns Stable collaboration entity key.
+ */
 export function createPlanningUpdateCollaborationEntityKey(
   workspaceId: string,
   targetKey: string,
@@ -493,7 +499,12 @@ export type PlanningUpdateTargetKeyInput =
       entityId: string
     }
 
-/** Creates the shared public key used to store and query Planning update watchers. */
+/**
+ * Creates the shared public key used to store and query Planning update watchers.
+ *
+ * @param target - Canonical Project or Initiative target.
+ * @returns Percent-encoded public target key.
+ */
 export function createPlanningUpdatePublicTargetKey(
   target: PlanningUpdateTargetKeyInput,
 ): string {

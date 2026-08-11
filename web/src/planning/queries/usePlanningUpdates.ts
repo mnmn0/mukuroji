@@ -13,6 +13,7 @@ import {
   listPlanningUpdateReactions,
   listPlanningUpdates,
 } from '../api'
+import { createPlanningUpdateTargetKey } from '../model/targetKey'
 
 const planningUpdateQueryConfig = {
   dedupingInterval: 10_000,
@@ -21,6 +22,7 @@ const planningUpdateQueryConfig = {
 
 const planningUpdateAnnotationVersionLimit = 20
 const planningUpdateAnnotationPageSize = 100
+const planningUpdateAnnotationInFlightCacheLimit = 100
 
 /** One bounded annotation page cached for a target/version pair. */
 type PlanningUpdateAnnotationPage = {
@@ -48,7 +50,7 @@ export function usePlanningUpdates(
   target: PlanningUpdateTarget | undefined,
   enabled = true,
 ) {
-  const targetKey = target ? createPlanningUpdateTargetQueryKey(target) : undefined
+  const targetKey = target ? createPlanningUpdateTargetKey(target) : undefined
   const key = accessToken && target && targetKey && enabled
     ? ['planning-updates', accessToken, targetKey]
     : null
@@ -108,7 +110,7 @@ export function usePlanningUpdateWatch(
   target: PlanningUpdateTarget | undefined,
   enabled = true,
 ) {
-  const targetKey = target ? createPlanningUpdateTargetQueryKey(target) : undefined
+  const targetKey = target ? createPlanningUpdateTargetKey(target) : undefined
   const key = accessToken && target && targetKey && enabled
     ? ['planning-update-watch', accessToken, targetKey]
     : null
@@ -136,6 +138,7 @@ export type PlanningUpdateAnnotations = {
 
 /**
  * Loads comments and reactions for the visible immutable update versions.
+ * Only bounded in-flight requests are shared; resolved pages are revalidated on the next fetch.
  *
  * @param accessToken - Planning API access token.
  * @param target - Selected Project or Initiative target.
@@ -149,7 +152,7 @@ export function usePlanningUpdateAnnotations(
   updates: readonly PlanningUpdate[] | undefined,
   enabled = true,
 ) {
-  const targetKey = target ? createPlanningUpdateTargetQueryKey(target) : undefined
+  const targetKey = target ? createPlanningUpdateTargetKey(target) : undefined
   const updateVersions = selectPlanningUpdateAnnotationVersions(updates)
   const versionsKey = updateVersions.join(',')
   const key = accessToken && target && targetKey && updateVersions.length > 0 && enabled
@@ -274,7 +277,7 @@ async function loadCachedPlanningUpdateAnnotations(
 }
 
 /**
- * Loads one annotation page and shares the in-flight/resolved request by target/version.
+ * Loads one annotation page and shares a bounded in-flight request by target/version.
  *
  * @param accessToken - Planning API access token.
  * @param target - Selected Planning update target.
@@ -293,6 +296,11 @@ function loadCachedPlanningUpdateAnnotationPage(
   )
   const cached = planningUpdateAnnotationPageCache.get(cacheKey)
   if (cached) return cached
+  while (planningUpdateAnnotationPageCache.size >= planningUpdateAnnotationInFlightCacheLimit) {
+    const oldestKey = planningUpdateAnnotationPageCache.keys().next().value
+    if (oldestKey === undefined) break
+    planningUpdateAnnotationPageCache.delete(oldestKey)
+  }
   const request = Promise.all([
     listPlanningUpdateComments(accessToken, {
       limit: planningUpdateAnnotationPageSize,
@@ -309,11 +317,18 @@ function loadCachedPlanningUpdateAnnotationPage(
     reactions: reactions.reactions,
   }))
   planningUpdateAnnotationPageCache.set(cacheKey, request)
-  void request.catch(() => {
-    if (planningUpdateAnnotationPageCache.get(cacheKey) === request) {
-      planningUpdateAnnotationPageCache.delete(cacheKey)
-    }
-  })
+  void request.then(
+    () => {
+      if (planningUpdateAnnotationPageCache.get(cacheKey) === request) {
+        planningUpdateAnnotationPageCache.delete(cacheKey)
+      }
+    },
+    () => {
+      if (planningUpdateAnnotationPageCache.get(cacheKey) === request) {
+        planningUpdateAnnotationPageCache.delete(cacheKey)
+      }
+    },
+  )
   return request
 }
 
@@ -336,7 +351,7 @@ function createPlanningUpdateAnnotationPageCacheKey(
   target: PlanningUpdateTarget,
   updateVersion: number,
 ): string {
-  return `${accessToken}\n${createPlanningUpdateTargetQueryKey(target)}\n${updateVersion}`
+  return `${accessToken}\n${createPlanningUpdateTargetKey(target)}\n${updateVersion}`
 }
 
 /**
@@ -355,16 +370,4 @@ export async function revalidatePlanningUpdateHistoryAfterPublish(
   } catch {
     return false
   }
-}
-
-/**
- * Creates a Team-qualified cache key for a Project or Initiative update stream.
- *
- * @param target - Canonical update target.
- * @returns Stable SWR cache-key segment.
- */
-function createPlanningUpdateTargetQueryKey(target: PlanningUpdateTarget) {
-  return target.type === 'project'
-    ? `project:${target.teamId}\0${target.projectId}`
-    : `initiative:${target.entityId}`
 }

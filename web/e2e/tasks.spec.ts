@@ -649,6 +649,26 @@ async function mockAuthenticatedTaskPage(
     await route.fulfill({ json: projectQuickAccess })
   })
 
+  await page.route(/.*\/api\/task-views(?:\?.*)?$/, async (route) => {
+    expect(route.request().headers().authorization).toBe('Bearer test-access-token')
+    expect(route.request().method()).toBe('GET')
+    await route.fulfill({
+      json: {
+        capabilities: {
+          canManageSharedViews: true,
+          canSetTeamDefault: true,
+          canWrite: true,
+          writableProjectScopes: projectDirectory.flatMap((team) => team.projects.map((project) => ({
+            projectId: project.id,
+            teamId: team.id,
+          }))),
+          writableTeamIds: projectDirectory.map((team) => team.id),
+        },
+        views: [],
+      },
+    })
+  })
+
   await page.route('**/api/work-item-configuration', async (route) => {
     expect(route.request().headers().authorization).toBe('Bearer test-access-token')
 
@@ -880,7 +900,7 @@ async function mockAuthenticatedTaskPage(
     })
   })
 
-  await page.route(/.*\/api\/projects\/[^/]+\/issues$/, async (route) => {
+  await page.route(/.*\/api\/projects\/[^/]+\/issues(?:\?.*)?$/, async (route) => {
     const pathSegments = new URL(route.request().url()).pathname.split('/')
     const projectId = decodeURIComponent(pathSegments[3] ?? '')
     recordProjectTaskRequest(requestCounts, projectId)
@@ -912,7 +932,7 @@ async function mockAuthenticatedTaskPage(
     })
   })
 
-  await page.route('**/api/work-items', async (route) => {
+  await page.route('**/api/work-items**', async (route) => {
     requestCounts.workspaceWorkItems += 1
     expect(route.request().headers().authorization).toBe('Bearer test-access-token')
 
@@ -1089,7 +1109,7 @@ async function mockAuthenticatedTaskPage(
     await route.fulfill({ json: notificationPreferences })
   })
 
-  await page.route(/.*\/api\/teams\/[^/]+\/issues$/, async (route) => {
+  await page.route(/.*\/api\/teams\/[^/]+\/issues(?:\?.*)?$/, async (route) => {
     const teamId = decodeURIComponent(new URL(route.request().url()).pathname.split('/')[3] ?? '')
     const projects = projectDirectory.find((team) => team.id === teamId)?.projects ?? []
 
@@ -3725,9 +3745,9 @@ test.describe('authenticated task page', () => {
     await bar.focus()
     await page.keyboard.press('ArrowRight')
 
-    await expect(page.getByRole('alert').filter({
-      hasText: 'このスケジュールを変更する権限がありません。',
-    })).toBeVisible()
+    await expect(page.getByTestId('task-action-feedback')).toContainText(
+      'このスケジュールを変更する権限がありません。',
+    )
     await expect.poll(() => requestCounts.schedulePreviews).toBe(1)
     expect(requestCounts.issueUpdates).toBe(0)
     expect(requestCounts.scheduleConfirms).toBe(0)
@@ -3781,7 +3801,7 @@ test.describe('authenticated task page', () => {
     })
     let interceptedTaskRequestCount = 0
 
-    await page.route('**/api/projects/refero/issues', async (route) => {
+    await page.route('**/api/projects/refero/issues**', async (route) => {
       interceptedTaskRequestCount += 1
       markTaskRequestStarted()
       await taskResponseGate
@@ -3945,7 +3965,11 @@ test.describe('authenticated task page', () => {
     await expect(page.getByTestId('issue-row-wireframe')).toBeHidden()
     await expect(page.getByTestId('team-issues-count')).toContainText('1')
 
-    await page.getByRole('searchbox', { name: 'Issue を検索...' }).clear()
+    const issueSearchbox = page.getByRole('searchbox', { name: 'Issue を検索...' })
+
+    await issueSearchbox.clear()
+    await expect(issueSearchbox).toHaveValue('')
+    await expect(page.getByTestId('team-issues-count')).toContainText('4')
     await page.getByRole('combobox', { name: 'Issue ステータス' }).selectOption('review')
 
     await expect(page.getByTestId('issue-row-brand-guideline')).toBeVisible()
@@ -3985,7 +4009,9 @@ test.describe('authenticated task page', () => {
     await createIssueForm.getByLabel('Budget').fill('1200000')
     await createIssueForm.getByRole('button', { name: 'Issue を作成' }).click()
 
-    const issueRow = page.getByTestId('issue-row-configurable-delivery').locator('..').locator('..')
+    const issueRow = page.locator('tr').filter({
+      has: page.getByTestId('issue-row-configurable-delivery'),
+    })
 
     await expect(issueRow).toContainText('In progress')
     await expect(issueRow).toContainText(
@@ -5500,9 +5526,18 @@ test.describe('authenticated task page', () => {
 
     await page.getByRole('button', { exact: true, name: 'タスク詳細: Design ambiguous issue' }).click()
 
-    await expect(page).toHaveURL(
-      '/projects/shared-launch/issues?teamId=design-team&issueId=ambiguous-issue',
-    )
+    await expect.poll(() => {
+      const url = new URL(page.url())
+      return {
+        issueId: url.searchParams.get('issueId'),
+        pathname: url.pathname,
+        teamId: url.searchParams.get('teamId'),
+      }
+    }).toEqual({
+      issueId: 'ambiguous-issue',
+      pathname: '/projects/shared-launch/issues',
+      teamId: 'design-team',
+    })
     await expect(
       page.getByTestId('task-detail-pane').locator('textarea[name="description"]'),
     ).toHaveValue('design ambiguous detail')
@@ -6617,7 +6652,7 @@ test.describe('authenticated task page', () => {
   })
 
   test('タスク API 失敗時にエラーを表示する', async ({ page }) => {
-    await page.route('**/api/projects/refero/issues', async (route) => {
+    await page.route('**/api/projects/refero/issues**', async (route) => {
       await route.fulfill({
         status: 500,
         json: {
@@ -6634,7 +6669,7 @@ test.describe('authenticated task page', () => {
   })
 
   test('タスクが空の場合に empty 表示を出す', async ({ page }) => {
-    await page.route('**/api/projects/refero/issues', async (route) => {
+    await page.route('**/api/projects/refero/issues**', async (route) => {
       await route.fulfill({
         json: {
           projectId: 'refero',

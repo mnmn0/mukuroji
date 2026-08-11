@@ -404,8 +404,8 @@ export type PlanningUpdateTargetDetailView = {
   updateView: PlanningTargetUpdateView
 }
 
-/** Editable cadence values submitted by the update schedule form. */
-export type PlanningUpdateCadenceDraft = PlanningUpdateCadence
+/** Editable cadence values submitted by the update schedule form, or null to clear it. */
+export type PlanningUpdateCadenceDraft = PlanningUpdateCadence | null
 
 /** Manual update fields submitted by the structured composer. */
 export type PlanningStatusUpdateDraft = Omit<

@@ -80,6 +80,9 @@ function createProjectUpdateDetail(): PlanningUpdateTargetDetailView {
 /** Returns markup from one test marker through the requested closing element. */
 function sliceElement(html: string, marker: string, closingElement: string) {
   const startIndex = html.indexOf(marker)
+  if (startIndex < 0) {
+    throw new Error(`Test marker not found in markup: ${marker}`)
+  }
   return html.slice(
     html.lastIndexOf('<', startIndex),
     html.indexOf(closingElement, startIndex) + closingElement.length,

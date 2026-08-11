@@ -579,7 +579,7 @@ describe('notification schedule handler', () => {
     }))).toThrow('escalation hours and member must be configured together')
   })
 
-  test('logs and skips one malformed due-index row without stopping valid peers', async () => {
+  test('logs and fails the invocation for one malformed due-index row', async () => {
     const validTarget = createPlanningProjectUpdateTarget()
     const validIndexItem = createPlanningDueIndexItem(validTarget)
     const malformedIndexItem = {
@@ -622,11 +622,7 @@ describe('notification schedule handler', () => {
         now: new Date('2026-07-12T10:00:00.000Z'),
         planningTableName: 'PlanningTable',
         projectDirectoryTableName: 'ProjectDirectoryTable',
-      }))).resolves.toMatchObject({
-        emittedEvents: 1,
-        scannedItems: 2,
-        skippedItems: 1,
-      })
+      }))).rejects.toThrow('Planning update schedule row is invalid.')
       expect(errorLog).toHaveBeenCalledTimes(1)
       expect(errorLog).toHaveBeenCalledWith(
         'Planning update schedule row is invalid.',

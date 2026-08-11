@@ -86,6 +86,7 @@ test('accepts one Cognito workspace attribute with the legacy directory environm
       expect(response.status).toBe(200)
       expect(calls.directoryReads).toEqual([
         { directoryId: 'workspace#legacy', locale: 'ja' },
+        { consistentRead: true, directoryId: 'workspace#legacy', locale: 'ja' },
       ])
     },
   )

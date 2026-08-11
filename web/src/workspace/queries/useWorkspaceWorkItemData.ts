@@ -21,14 +21,16 @@ const emptyConfigurationLoadResult: TeamWorkItemConfigurationLoadResult = {
  * @param accessToken - Access token used by Workspace APIs.
  * @param enabled - Whether queries may run for the authenticated route.
  * @param teams - Workspace directory used to report the affected Project count.
+ * @param includeArchived - Whether archived Work Items should be loaded for the route.
  * @returns Work Items, configurations, query states, and cache mutation callbacks.
  */
 export function useWorkspaceWorkItemData(
   accessToken: string | undefined,
   enabled = true,
   teams: readonly ProjectDirectoryTeam[] = [],
+  includeArchived = false,
 ) {
-  const workItemsQuery = useWorkspaceWorkItems(accessToken, enabled)
+  const workItemsQuery = useWorkspaceWorkItems(accessToken, enabled, includeArchived)
   const tasks = workItemsQuery.data ?? emptyWorkspaceTasks
   const teamIds = useMemo(
     () => Array.from(new Set(tasks.map((task) => task.teamId))).sort(),

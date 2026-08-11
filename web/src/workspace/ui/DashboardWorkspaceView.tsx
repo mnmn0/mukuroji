@@ -193,6 +193,8 @@ export function DashboardWorkspaceView({
                 )
                 const updateState = updateTarget?.updateState ?? 'not-configured'
                 const health = updateTarget?.latestUpdate?.health ?? 'unknown'
+                const nextDueAt = updateTarget?.cadence?.nextDueAt
+                const nextDueTimeZone = updateTarget?.cadence?.timeZone
                 return (
                   <tr
                     className="border-b border-slate-100 text-sm font-medium text-[var(--workbench-text)]"
@@ -239,12 +241,13 @@ export function DashboardWorkspaceView({
                         ) : <span className="text-xs text-[var(--workbench-muted)]">—</span>}
                         <p className="text-xs font-medium tabular-nums text-[var(--workbench-muted)]">
                           {t('workspace.planningUpdate.column.nextDue')}: {' '}
-                          <time dateTime={updateTarget?.cadence?.nextDueAt}>
-                            {formatPlanningUpdateDate(
-                              updateTarget?.cadence?.nextDueAt,
-                              updateTarget?.cadence?.timeZone,
-                            )}
-                          </time>
+                          {nextDueAt ? (
+                            <time dateTime={nextDueAt}>
+                              {formatPlanningUpdateDate(nextDueAt, nextDueTimeZone)}
+                            </time>
+                          ) : (
+                            formatPlanningUpdateDate(undefined, nextDueTimeZone)
+                          )}
                         </p>
                       </div>
                     </td>
@@ -283,12 +286,13 @@ export function DashboardWorkspaceView({
                       ) : <span className="text-[var(--workbench-muted)]">—</span>}
                     </td>
                     <td className="px-5 py-4 tabular-nums text-[var(--workbench-muted)] max-[760px]:hidden">
-                      <time dateTime={updateTarget?.cadence?.nextDueAt}>
-                        {formatPlanningUpdateDate(
-                          updateTarget?.cadence?.nextDueAt,
-                          updateTarget?.cadence?.timeZone,
-                        )}
-                      </time>
+                      {nextDueAt ? (
+                        <time dateTime={nextDueAt}>
+                          {formatPlanningUpdateDate(nextDueAt, nextDueTimeZone)}
+                        </time>
+                      ) : (
+                        formatPlanningUpdateDate(undefined, nextDueTimeZone)
+                      )}
                     </td>
                   </tr>
                 )

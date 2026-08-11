@@ -448,7 +448,11 @@ export function PlanningPage() {
           }
         },
       )
-      await updateAnnotations.mutate()
+      try {
+        await updateAnnotations.mutate()
+      } catch {
+        // SWR preserves the annotation query error for the recoverable collaboration alert.
+      }
     } catch (error) {
       const sessionErrorAction = resolveEnterpriseSessionErrorsAction(
         undefined,

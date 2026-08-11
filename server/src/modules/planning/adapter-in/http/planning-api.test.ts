@@ -418,16 +418,16 @@ test('configures, publishes, pages, exports, and watches a qualified Project upd
     reactions: [{ emoji: '👍', memberKey: 'demo@example.com' }],
   })
   const removedReaction = await planningApiRequest(
-    `/api/planning/updates/1/reactions${query}`,
+    `/api/planning/updates/1/reactions${query}&emoji=%F0%9F%91%8D`,
     'DELETE',
-    { emoji: '👍' },
+    undefined,
     'planning-reaction-remove-request-1',
   )
   expect(removedReaction.status).toBe(204)
   const replayedRemoval = await planningApiRequest(
-    `/api/planning/updates/1/reactions${query}`,
+    `/api/planning/updates/1/reactions${query}&emoji=%F0%9F%91%8D`,
     'DELETE',
-    { emoji: '👍' },
+    undefined,
     'planning-reaction-remove-request-1',
   )
   expect(replayedRemoval.status).toBe(204)

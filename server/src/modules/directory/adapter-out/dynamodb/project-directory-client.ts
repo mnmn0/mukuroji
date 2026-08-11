@@ -1064,7 +1064,7 @@ export class DynamoDbProjectDirectoryClient {
    */
   async getProjectMembers(directoryId: string, projectId: string, teamId?: string) {
     try {
-      const items = await this.readValidDirectoryItems(directoryId)
+      const items = await this.readValidDirectoryItems(directoryId, true)
       this.requireActiveProject(items, projectId, teamId)
       const members = items
         .filter((item): item is ProjectMemberItem =>
@@ -2132,8 +2132,24 @@ export class DynamoDbProjectDirectoryClient {
         },
         UpdateExpression: 'SET archivedAt = :archivedAt REMOVE updateScheduleShard, nextNotificationAtRecordKey',
         ConditionExpression:
-          'attribute_exists(workspaceId) AND attribute_exists(recordKey) AND attribute_not_exists(archivedAt)',
-        ExpressionAttributeValues: { ':archivedAt': archivedAt },
+          'attribute_exists(workspaceId) AND attribute_exists(recordKey) AND ' +
+          'attribute_not_exists(archivedAt) AND #entryType = :entryType AND ' +
+          '#target.#type = :targetType AND #target.#teamId = :teamId AND ' +
+          '#target.#projectId = :projectId',
+        ExpressionAttributeNames: {
+          '#entryType': 'entryType',
+          '#target': 'target',
+          '#type': 'type',
+          '#teamId': 'teamId',
+          '#projectId': 'projectId',
+        },
+        ExpressionAttributeValues: {
+          ':archivedAt': archivedAt,
+          ':entryType': 'planning-update-target',
+          ':targetType': 'project',
+          ':teamId': teamId,
+          ':projectId': projectId,
+        },
       },
     }
   }

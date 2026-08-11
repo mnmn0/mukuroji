@@ -63,6 +63,8 @@ export type PlanningUpdateLabels = {
   escalationOwner: string
   /** Schedule save action label. */
   saveCadence: string
+  /** Schedule clear action label. */
+  clearCadence: string
   /** Read-only schedule explanation. */
   cadenceDisabled: string
   /** Structured composer heading. */
@@ -71,6 +73,8 @@ export type PlanningUpdateLabels = {
   composerDescription: string
   /** Required-field hint shown above the composer. */
   composerRequiredHint: string
+  /** Form validation error shown when a structured form cannot be submitted. */
+  formInvalid: string
   /** Health field label. */
   health: string
   /** Localized planning-health values. */
@@ -434,6 +438,11 @@ export function PlanningUpdateCadenceEditor({
 }: PlanningUpdateCadenceEditorProps) {
   const cadence = updateView.cadence
   const defaultCadence: PlanningCadence = cadence?.cadence ?? { unit: 'week', count: 1 }
+  const [formError, setFormError] = useState<string | undefined>()
+  const cadenceFormKey = JSON.stringify({
+    cadence,
+    defaultOwnerMemberKey: cadence ? undefined : defaultOwnerMemberKey,
+  })
 
   return (
     <section className="workbench-panel p-5" data-testid="planning-update-cadence">
@@ -444,9 +453,12 @@ export function PlanningUpdateCadenceEditor({
         {labels.cadenceDescription}
       </p>
       <form
+        key={cadenceFormKey}
         className="mt-4 grid gap-3"
+        noValidate
         onSubmit={(event) => {
           event.preventDefault()
+          setFormError(undefined)
           if (!onSave) return
           const data = new FormData(event.currentTarget)
           const cadenceUnit = readCadenceUnit(data.get('cadenceUnit'))
@@ -460,6 +472,11 @@ export function PlanningUpdateCadenceEditor({
           const nextDueAt = String(data.get('nextDueAt') ?? '').trim()
 
           if (!cadenceUnit || !cadenceCount || reminderHoursBefore === undefined || !updateOwnerMemberKey || !timeZone || !nextDueAt) {
+            setFormError(labels.formInvalid)
+            return
+          }
+          if (!isValidPlanningDateTime(nextDueAt)) {
+            setFormError(labels.formInvalid)
             return
           }
 
@@ -526,6 +543,8 @@ export function PlanningUpdateCadenceEditor({
             className="workbench-input h-10 px-3"
             defaultValue={cadence?.nextDueAt}
             disabled={!onSave}
+            aria-describedby={formError ? 'planning-update-cadence-error' : undefined}
+            aria-invalid={Boolean(formError)}
             name="nextDueAt"
             placeholder="2026-08-14T08:00:00.000Z"
             required
@@ -570,6 +589,15 @@ export function PlanningUpdateCadenceEditor({
             {labels.cadenceDisabled}
           </p>
         ) : null}
+        {formError ? (
+          <p
+            id="planning-update-cadence-error"
+            className="text-sm font-semibold text-red-700"
+            role="alert"
+          >
+            {formError}
+          </p>
+        ) : null}
         <button
           className="workbench-button-primary min-h-10 px-4 disabled:opacity-50"
           disabled={!onSave}
@@ -577,6 +605,15 @@ export function PlanningUpdateCadenceEditor({
         >
           {labels.saveCadence}
         </button>
+        {cadence && onSave ? (
+          <button
+            className="workbench-button-secondary min-h-10 px-4"
+            onClick={() => void onSave(null)}
+            type="button"
+          >
+            {labels.clearCadence}
+          </button>
+        ) : null}
       </form>
     </section>
   )
@@ -615,6 +652,7 @@ export function PlanningStatusUpdateComposer({
   const [evidenceType, setEvidenceType] = useState<PlanningUpdateEvidence['type'] | 'none'>(
     initialEvidenceType,
   )
+  const [formError, setFormError] = useState<string | undefined>()
 
   return (
     <section className="workbench-panel p-5" data-testid="planning-update-composer">
@@ -629,8 +667,10 @@ export function PlanningStatusUpdateComposer({
       </p>
       <form
         className="mt-4 grid gap-3"
+        noValidate
         onSubmit={(event) => {
           event.preventDefault()
+          setFormError(undefined)
           if (!onPublish) return
           const data = new FormData(event.currentTarget)
           const selectedHealth = readHealth(data.get('health'))
@@ -638,10 +678,16 @@ export function PlanningStatusUpdateComposer({
           const summary = String(data.get('summary') ?? '').trim()
           const nextAction = String(data.get('nextAction') ?? '').trim()
 
-          if (!selectedHealth || !selectedRisk || !summary || !nextAction) return
+          if (!selectedHealth || !selectedRisk || !summary || !nextAction) {
+            setFormError(labels.formInvalid)
+            return
+          }
 
           const evidence = readPlanningUpdateEvidence(data, evidenceCandidates)
-          if (!evidence) return
+          if (!evidence) {
+            setFormError(labels.formInvalid)
+            return
+          }
           void onPublish({
             decisionSummary: readOptionalText(data.get('decisionSummary')) ?? '',
             evidence,
@@ -661,6 +707,8 @@ export function PlanningStatusUpdateComposer({
               className="workbench-input h-10 px-3"
               defaultValue={health}
               disabled={!onPublish}
+              aria-describedby={formError ? 'planning-update-composer-error' : undefined}
+              aria-invalid={Boolean(formError)}
               name="health"
             >
               {planningHealthValues.map((value) => (
@@ -674,6 +722,8 @@ export function PlanningStatusUpdateComposer({
               className="workbench-input h-10 px-3"
               defaultValue="none"
               disabled={!onPublish}
+              aria-describedby={formError ? 'planning-update-composer-error' : undefined}
+              aria-invalid={Boolean(formError)}
               name="risk"
             >
               {planningRiskValues.map((value) => (
@@ -695,6 +745,8 @@ export function PlanningStatusUpdateComposer({
           <textarea
             className="workbench-input min-h-24 p-3"
             disabled={!onPublish}
+            aria-describedby={formError ? 'planning-update-composer-error' : undefined}
+            aria-invalid={Boolean(formError)}
             name="summary"
             required
           />
@@ -714,7 +766,14 @@ export function PlanningStatusUpdateComposer({
           </label>
           <label className="grid gap-2 text-sm font-semibold text-[var(--workbench-text)]">
             {labels.nextAction}
-            <textarea className="workbench-input min-h-20 p-3" disabled={!onPublish} name="nextAction" required />
+          <textarea
+            aria-describedby={formError ? 'planning-update-composer-error' : undefined}
+            aria-invalid={Boolean(formError)}
+            className="workbench-input min-h-20 p-3"
+            disabled={!onPublish}
+            name="nextAction"
+            required
+          />
           </label>
         </div>
         <fieldset className="grid gap-3 border-t border-[var(--workbench-border)] pt-4">
@@ -726,6 +785,8 @@ export function PlanningStatusUpdateComposer({
             <select
               className="workbench-input h-10 px-3"
               disabled={!onPublish}
+              aria-describedby={formError ? 'planning-update-composer-error' : undefined}
+              aria-invalid={Boolean(formError)}
               name="evidenceType"
               value={evidenceType}
               onChange={(event) => setEvidenceType(readPlanningUpdateEvidenceType(event.target.value))}
@@ -748,6 +809,8 @@ export function PlanningStatusUpdateComposer({
               className="workbench-input h-10 px-3"
               disabled={!onPublish}
               name="evidenceWorkItem"
+              aria-describedby={formError ? 'planning-update-composer-error' : undefined}
+              aria-invalid={Boolean(formError)}
               required
             >
               <option value="">{labels.evidenceWorkItemPlaceholder}</option>
@@ -762,6 +825,8 @@ export function PlanningStatusUpdateComposer({
               className="workbench-input h-10 px-3"
               disabled={!onPublish}
               name="evidencePlanningEntity"
+              aria-describedby={formError ? 'planning-update-composer-error' : undefined}
+              aria-invalid={Boolean(formError)}
               required
             >
               <option value="">{labels.evidencePlanningEntityPlaceholder}</option>
@@ -780,7 +845,12 @@ export function PlanningStatusUpdateComposer({
                 placeholder={labels.evidenceDecisionIdPlaceholder}
                 required
               />
-              <PlanningEvidenceUrlInput labels={labels} name="evidenceDecisionUrl" onPublish={onPublish} />
+              <PlanningEvidenceUrlInput
+                hasError={Boolean(formError)}
+                labels={labels}
+                name="evidenceDecisionUrl"
+                onPublish={onPublish}
+              />
             </div>
           ) : null}
           {evidenceType === 'file' ? (
@@ -793,7 +863,12 @@ export function PlanningStatusUpdateComposer({
                 placeholder={labels.evidenceFileIdPlaceholder}
                 required
               />
-              <PlanningEvidenceUrlInput labels={labels} name="evidenceFileUrl" onPublish={onPublish} />
+              <PlanningEvidenceUrlInput
+                hasError={Boolean(formError)}
+                labels={labels}
+                name="evidenceFileUrl"
+                onPublish={onPublish}
+              />
             </div>
           ) : null}
           {evidenceType === 'link' ? (
@@ -805,10 +880,24 @@ export function PlanningStatusUpdateComposer({
                 name="evidenceLabel"
                 placeholder={labels.evidenceLabelPlaceholder}
               />
-              <PlanningEvidenceUrlInput labels={labels} name="evidenceUrl" onPublish={onPublish} />
+              <PlanningEvidenceUrlInput
+                hasError={Boolean(formError)}
+                labels={labels}
+                name="evidenceUrl"
+                onPublish={onPublish}
+              />
             </div>
           ) : null}
         </fieldset>
+        {formError ? (
+          <p
+            id="planning-update-composer-error"
+            className="text-sm font-semibold text-red-700"
+            role="alert"
+          >
+            {formError}
+          </p>
+        ) : null}
         <button
           className="workbench-button-primary min-h-10 px-4 disabled:opacity-50"
           disabled={!onPublish}
@@ -828,10 +917,12 @@ export function PlanningStatusUpdateComposer({
  * @returns A URL input constrained to credential-free HTTPS permalinks.
  */
 function PlanningEvidenceUrlInput({
+  hasError = false,
   labels,
   name,
   onPublish,
 }: {
+  hasError?: boolean
   labels: Pick<PlanningUpdateLabels, 'evidenceUrlPlaceholder'>
   name: string
   onPublish: PlanningStatusUpdateComposerProps['onPublish']
@@ -841,6 +932,8 @@ function PlanningEvidenceUrlInput({
       aria-label={labels.evidenceUrlPlaceholder}
       className="workbench-input h-10 px-3"
       disabled={!onPublish}
+      aria-describedby={hasError ? 'planning-update-composer-error' : undefined}
+      aria-invalid={hasError}
       name={name}
       pattern="https://.*"
       placeholder={labels.evidenceUrlPlaceholder}
@@ -1267,6 +1360,11 @@ function readOptionalNonNegativeNumber(value: FormDataEntryValue | null) {
   return typeof value === 'string' && value.trim()
     ? readNonNegativeNumber(value)
     : undefined
+}
+
+/** Checks that a submitted cadence deadline can be represented as a Date. */
+function isValidPlanningDateTime(value: string) {
+  return Number.isFinite(Date.parse(value))
 }
 
 /**
