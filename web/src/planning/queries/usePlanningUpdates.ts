@@ -37,6 +37,7 @@ const planningUpdateAnnotationPageCache = new Map<
   string,
   Promise<PlanningUpdateAnnotationPage>
 >()
+const emptyPlanningUpdateAnnotationPages: Record<string, PlanningUpdateAnnotationPage> = {}
 
 /**
  * Loads the newest immutable update-history page for one selected target.
@@ -178,18 +179,33 @@ export function usePlanningUpdateAnnotations(
         updateVersions,
       )
     },
-    planningUpdateQueryConfig,
+    {
+      ...planningUpdateQueryConfig,
+      onError: () => {
+        setOnDemandState((current) => current.scopeKey === annotationScopeKey
+          ? { scopeKey: current.scopeKey, pages: {} }
+          : current)
+      },
+      onSuccess: () => {
+        setOnDemandState((current) => current.scopeKey === annotationScopeKey
+          ? { scopeKey: current.scopeKey, pages: {} }
+          : current)
+      },
+    },
   )
+  const visibleOnDemandPages = query.isValidating
+    ? emptyPlanningUpdateAnnotationPages
+    : onDemandPages
   const data = useMemo(() => {
     const pages = [
       ...(query.data ? [query.data] : []),
-      ...Object.values(onDemandPages),
+      ...Object.values(visibleOnDemandPages),
     ]
     return {
       comments: deduplicatePlanningUpdateComments(pages.flatMap((page) => page.comments)),
       reactions: deduplicatePlanningUpdateReactions(pages.flatMap((page) => page.reactions)),
     }
-  }, [onDemandPages, query.data])
+  }, [query.data, visibleOnDemandPages])
   const loadVersion = async (updateVersion: number) => {
     if (!accessToken || !target) return undefined
     invalidatePlanningUpdateAnnotationPageCache(accessToken, target, [updateVersion])
@@ -210,14 +226,14 @@ export function usePlanningUpdateAnnotations(
 
   return {
     ...query,
-    data: (query.data || Object.keys(onDemandPages).length > 0) ? data : query.data,
+    data: (query.data || Object.keys(visibleOnDemandPages).length > 0) ? data : query.data,
     loadVersion,
     mutate: () => {
       if (accessToken && target) {
         invalidatePlanningUpdateAnnotationPageCache(
           accessToken,
           target,
-          [...updateVersions, ...Object.keys(onDemandPages).map(Number)],
+          [...updateVersions, ...Object.keys(visibleOnDemandPages).map(Number)],
         )
       }
       return query.mutate()

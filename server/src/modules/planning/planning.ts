@@ -79,6 +79,7 @@ import {
 } from './planning-update-schedule-index'
 
 const META_RECORD_KEY = 'META'
+const META_WORKSPACE_KEY_PREFIX = 'FENCE#'
 const ENTITY_RECORD_PREFIX = 'ENTITY#'
 const DEPENDENCY_RECORD_PREFIX = 'DEPENDENCY#'
 const WORK_ITEM_DEPENDENCY_RECORD_PREFIX = 'WORK_ITEM_DEPENDENCY#'
@@ -2713,7 +2714,10 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
     try {
       const response = await this.documentClient.send(new GetCommand({
         TableName: this.tableName,
-        Key: { workspaceId, recordKey: META_RECORD_KEY },
+        Key: {
+          workspaceId: `${META_WORKSPACE_KEY_PREFIX}${workspaceId}`,
+          recordKey: META_RECORD_KEY,
+        },
         ConsistentRead: true,
       }))
       if (!response.Item) return { revision: 0, updatedAt: undefined }
@@ -4806,7 +4810,7 @@ function dependencyLatestStartConstraint(
 function createPlanningRowMap(workspaceId: string, state: PlanningWorkspaceState) {
   const rows = new Map<string, Record<string, unknown>>()
   rows.set(META_RECORD_KEY, {
-    workspaceId,
+    workspaceId: `${META_WORKSPACE_KEY_PREFIX}${workspaceId}`,
     recordKey: META_RECORD_KEY,
     entryType: 'planning-meta',
     schemaVersion: PLANNING_STORAGE_SCHEMA_VERSION,

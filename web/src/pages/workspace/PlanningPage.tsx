@@ -389,7 +389,6 @@ export function PlanningPage() {
     setMutationErrorMessage(undefined)
     setIsUpdateCollaborationPending(true)
     try {
-      await updateAnnotations.loadVersion(update.version)
       await mutationRequestRunner.run(
         `planning:update:${createPlanningUpdateTargetKey(selectedUpdateTarget)}:${update.version}:comment:${input.id}`,
         JSON.stringify(input),

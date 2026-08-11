@@ -3195,7 +3195,7 @@ function createPlanningRevisionMutation(
     Put: {
       TableName: tableName,
       Item: {
-        workspaceId,
+        workspaceId: `FENCE#${workspaceId}`,
         recordKey: 'META',
         entryType: 'planning-meta',
         schemaVersion: PLANNING_STORAGE_SCHEMA_VERSION,

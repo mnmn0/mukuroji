@@ -5,6 +5,8 @@ const {
   configureFakeProjectClients,
   createCollaborationStub,
   createCyclePlanningInput,
+  createFileProofingStub,
+  createFileUploadSessionFixture,
   getTestAppDependencies,
   planningApiRequest,
   resetTestApp,
@@ -443,6 +445,106 @@ test('configures, publishes, pages, exports, and watches a qualified Project upd
   )
   expect(watched.status).toBe(200)
   expect(await watched.json()).toHaveProperty('watch')
+})
+
+test('requires visible File evidence and fails closed for unsupported Decision evidence', async () => {
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'member' })
+  const planning = new InMemoryPlanningClient(() => new Date('2026-08-07T00:00:00.000Z'))
+  const uploadSession = createFileUploadSessionFixture()
+  const file = {
+    ...uploadSession.file,
+    targetType: 'project' as const,
+    targetId: 'refero',
+    capabilities: {
+      ...uploadSession.file.capabilities,
+      canDownload: true,
+    },
+  }
+  const seenScopes: string[] = []
+  setTestAppDependencies({
+    planning,
+    fileProofing: createFileProofingStub({
+      async list(scope) {
+        seenScopes.push(`${scope.kind}:${scope.projectId ?? scope.issueId ?? ''}`)
+        return {
+          files: scope.kind === 'project' ? [file] : [],
+          approvals: [],
+          capabilities: {
+            canUpload: false,
+            canRequestApproval: false,
+            canGrantGuestAccess: false,
+          },
+        }
+      },
+    }),
+  })
+  const target = { type: 'project' as const, teamId: 'core-team', projectId: 'refero' }
+  const configured = await planningApiRequest('/api/planning/updates/cadence', 'PUT', {
+    target,
+    cadence: {
+      updateOwnerMemberKey: 'demo@example.com',
+      cadence: { unit: 'week', count: 1 },
+      timeZone: 'UTC',
+      nextDueAt: '2026-08-10T00:00:00.000Z',
+      reminderHoursBefore: 24,
+    },
+    expectedRevision: 0,
+  })
+  expect(configured.status).toBe(200)
+
+  const published = await planningApiRequest('/api/planning/updates', 'POST', {
+    target,
+    id: 'project-file-evidence-update',
+    health: 'on-track',
+    risk: 'none',
+    summary: 'The project evidence is attached.',
+    riskSummary: '',
+    decisionSummary: '',
+    helpNeeded: '',
+    nextAction: '',
+    evidence: [{ type: 'file', fileId: file.id, url: 'https://example.com/files/file-1' }],
+    expectedRevision: 1,
+  })
+  expect(published.status).toBe(201)
+  expect(seenScopes).toContain('project:refero')
+
+  const missing = await planningApiRequest('/api/planning/updates', 'POST', {
+    target,
+    id: 'project-missing-file-evidence-update',
+    health: 'on-track',
+    risk: 'none',
+    summary: 'The missing file must not be accepted.',
+    riskSummary: '',
+    decisionSummary: '',
+    helpNeeded: '',
+    nextAction: '',
+    evidence: [{ type: 'file', fileId: 'missing-file', url: 'https://example.com/files/missing' }],
+    expectedRevision: 2,
+  })
+  expect(missing.status).toBe(400)
+  expect(await missing.json()).toMatchObject({ code: 'PlanningUpdateEvidenceInvalid' })
+
+  const unsupportedDecision = await planningApiRequest('/api/planning/updates', 'POST', {
+    target,
+    id: 'project-decision-evidence-update',
+    health: 'on-track',
+    risk: 'none',
+    summary: 'The unsupported decision must not be accepted.',
+    riskSummary: '',
+    decisionSummary: '',
+    helpNeeded: '',
+    nextAction: '',
+    evidence: [{
+      type: 'decision',
+      decisionId: 'decision-1',
+      url: 'https://example.com/decisions/decision-1',
+    }],
+    expectedRevision: 2,
+  })
+  expect(unsupportedDecision.status).toBe(400)
+  expect(await unsupportedDecision.json()).toMatchObject({
+    code: 'PlanningUpdateEvidenceInvalid',
+  })
 })
 
 test('keeps Project viewers read-only for update comments and reactions', async () => {

@@ -6546,7 +6546,7 @@ function authorizationSnapshotGuards(
           environment.PLANNING_TABLE_NAME ??
           'mukuroji-planning-local',
         key: {
-          workspaceId,
+          workspaceId: `FENCE#${workspaceId}`,
           recordKey: 'META',
         },
         generationAttribute: 'revision',

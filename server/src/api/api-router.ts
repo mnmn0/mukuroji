@@ -6110,13 +6110,22 @@ routeApp.post('/api/planning/updates', async (c) => {
     if (configuredTarget.cadence.updateOwnerMemberKey !== principal.userKey.toLowerCase()) {
       await requirePlanningUpdateTargetPermission(principal, visibleSnapshot, input.target, 'manager')
     }
+    const evidenceConditionChecks = await createPlanningUpdateEvidenceConditionChecks(
+      principal,
+      snapshot,
+      visibleSnapshot,
+      input,
+    )
     const canonicalWorkItemState = await readCanonicalPlanningWorkItemState(principal)
     const response = await workItemDependencies.planning.publishUpdate(
       principal.directoryId,
       input,
       principal.userKey,
       canonicalWorkItemState,
-      createPlanningCallerAuthorizationConditionChecks(principal),
+      [
+        ...createPlanningCallerAuthorizationConditionChecks(principal),
+        ...evidenceConditionChecks,
+      ],
       publishTransaction,
     )
     mutationCommitted = true
@@ -6566,6 +6575,10 @@ for (const planningUpdateWatchMethod of ['PUT', 'DELETE'] as const) {
         ...(target.type === 'project'
           ? { teamId: target.teamId, projectId: target.projectId }
           : {}),
+        authorizationConditionChecks: [
+          ...createPlanningCallerAuthorizationConditionChecks(principal),
+          createPlanningRevisionConditionCheck(principal.directoryId, snapshot.revision),
+        ],
         auditContext: createApiMutationContext(c, principal, {
           planningUpdateTargetKey: targetKey,
           method: planningUpdateWatchMethod,
@@ -18987,6 +19000,215 @@ function findPlanningUpdateTargetSummary(
   )
 }
 
+/**
+ * Validates external evidence references before an immutable update is committed.
+ *
+ * File references are resolved through the File Proofing read adapter and guarded by a
+ * transaction condition against deletion. Decision references are rejected until a canonical
+ * Decision visibility adapter exists; accepting an opaque ID and HTTPS URL would make an
+ * evidence record look authoritative without proving that it exists in this Workspace.
+ *
+ * @param principal - Authenticated publisher whose file visibility is being evaluated.
+ * @param snapshot - Unfiltered Planning snapshot used to resolve the target envelope.
+ * @param visibleSnapshot - Publisher-visible Work Item projection used to bound file scopes.
+ * @param input - Candidate publish request containing external evidence references.
+ * @returns File metadata condition checks to append to the publish transaction.
+ */
+async function createPlanningUpdateEvidenceConditionChecks(
+  principal: WorkspacePrincipal,
+  snapshot: PlanningSnapshot,
+  visibleSnapshot: PlanningSnapshot,
+  input: PublishPlanningUpdateInput,
+): Promise<PlanningCallerAuthorizationConditionCheck[]> {
+  const candidateEvidence = Array.isArray(input.evidence) ? input.evidence : []
+  if (candidateEvidence.some((candidate) =>
+    isRecord(candidate) && candidate.type === 'decision'
+  )) {
+    throw new PlanningError(
+      400,
+      'PlanningUpdateEvidenceInvalid',
+      'Decision evidence cannot be published until its canonical visibility adapter is available.',
+    )
+  }
+
+  const fileIds = new Set<string>()
+  for (const candidate of candidateEvidence) {
+    if (!isRecord(candidate) || candidate.type !== 'file' || typeof candidate.fileId !== 'string') {
+      continue
+    }
+    const fileId = candidate.fileId.trim()
+    if (fileId) fileIds.add(fileId)
+  }
+  if (fileIds.size === 0) return []
+
+  const actor: FileProofingActor = {
+    memberKey: principal.userKey,
+    guest: principal.workspaceRole === 'guest',
+    canWrite: false,
+    canManage: false,
+  }
+  const scopes = createPlanningUpdateEvidenceScopes(
+    principal.directoryId,
+    snapshot,
+    visibleSnapshot,
+    input.target,
+  )
+  const filesById = new Map<string, FileProofingScope>()
+  try {
+    const collections = await Promise.all(scopes.map(async (scope) => ({
+      scope,
+      collection: await workItemDependencies.fileProofing.list(scope, actor),
+    })))
+    for (const { scope, collection } of collections) {
+      for (const file of collection.files) {
+        if (file.capabilities.canDownload && !filesById.has(file.id)) {
+          filesById.set(file.id, scope)
+        }
+      }
+    }
+  } catch (error) {
+    if (error instanceof PlanningError) throw error
+    throw new PlanningError(
+      503,
+      'PlanningUpdateEvidenceUnavailable',
+      'File evidence visibility could not be verified.',
+    )
+  }
+
+  const tableName = getEnv('FILE_PROOFING_TABLE_NAME')?.trim() ?? 'mukuroji-file-proofing'
+  return [...fileIds].map((fileId) => {
+    const scope = filesById.get(fileId)
+    if (!scope) {
+      throw new PlanningError(
+        400,
+        'PlanningUpdateEvidenceInvalid',
+        `Evidence File "${fileId}" is unavailable for this update target.`,
+      )
+    }
+    return createPlanningUpdateFileEvidenceConditionCheck(
+      tableName,
+      scope,
+      fileId,
+      actor.guest,
+    )
+  })
+}
+
+/**
+ * Builds all File Proofing scopes that can be part of one update target's visibility envelope.
+ *
+ * @param workspaceId - Owning Workspace identifier.
+ * @param snapshot - Unfiltered Planning snapshot containing the target entity.
+ * @param visibleSnapshot - Publisher-visible Work Item projection.
+ * @param target - Project or Initiative update target.
+ * @returns Deduplicated Project and Work Item file scopes inside the target envelope.
+ */
+function createPlanningUpdateEvidenceScopes(
+  workspaceId: string,
+  snapshot: PlanningSnapshot,
+  visibleSnapshot: PlanningSnapshot,
+  target: PlanningUpdateTarget,
+): FileProofingScope[] {
+  const envelope = target.type === 'project'
+    ? { teamId: target.teamId, projectId: target.projectId }
+    : (() => {
+        const entity = snapshot.entities.find((candidate) => candidate.id === target.entityId)
+        return {
+          teamId: entity?.teamId,
+          projectId: entity?.projectId,
+        }
+      })()
+  const scopes: FileProofingScope[] = []
+  const seen = new Set<string>()
+  const addScope = (scope: FileProofingScope) => {
+    const key = createFileProofingScopeKey(scope)
+    if (seen.has(key)) return
+    seen.add(key)
+    scopes.push(scope)
+  }
+
+  if (envelope.teamId !== undefined && envelope.projectId !== undefined) {
+    addScope({
+      workspaceId,
+      teamId: envelope.teamId,
+      kind: 'project',
+      projectId: envelope.projectId,
+    })
+  }
+  for (const workItem of visibleSnapshot.workItems) {
+    if (!isPlanningUpdateEvidenceScopeVisible(
+      envelope,
+      workItem.teamId,
+      workItem.projectId,
+    )) {
+      continue
+    }
+    addScope({
+      workspaceId,
+      teamId: workItem.teamId,
+      kind: 'work-item',
+      issueId: workItem.id,
+      ...(workItem.projectId === undefined ? {} : { projectId: workItem.projectId }),
+    })
+  }
+  return scopes
+}
+
+/** Checks whether one Work Item scope is inside a Planning update envelope. */
+function isPlanningUpdateEvidenceScopeVisible(
+  envelope: { teamId?: string; projectId?: string },
+  teamId: string,
+  projectId: string | undefined,
+): boolean {
+  if (envelope.projectId !== undefined) {
+    return teamId === envelope.teamId && projectId === envelope.projectId
+  }
+  if (envelope.teamId !== undefined) {
+    return teamId === envelope.teamId && projectId === undefined
+  }
+  return true
+}
+
+/** Creates a commit-time File Proofing guard for one visible evidence file. */
+function createPlanningUpdateFileEvidenceConditionCheck(
+  tableName: string,
+  scope: FileProofingScope,
+  fileId: string,
+  guest: boolean,
+): PlanningCallerAuthorizationConditionCheck {
+  const expressionAttributeNames: Record<string, string> = {
+    '#entryType': 'entryType',
+    '#workspaceId': 'workspaceId',
+    '#fileId': 'fileId',
+    '#deletedAt': 'deletedAt',
+  }
+  const expressionAttributeValues: Record<string, string | boolean> = {
+    ':entryType': 'file',
+    ':workspaceId': scope.workspaceId,
+    ':fileId': fileId,
+  }
+  let conditionExpression =
+    '#entryType = :entryType AND #workspaceId = :workspaceId AND ' +
+    '#fileId = :fileId AND attribute_not_exists(#deletedAt)'
+  if (guest) {
+    expressionAttributeNames['#guestAccess'] = 'guestAccess'
+    expressionAttributeValues[':guestAccess'] = true
+    conditionExpression += ' AND #guestAccess = :guestAccess'
+  }
+  return {
+    ConditionCheck: {
+      TableName: tableName,
+      Key: {
+        scopeKey: createFileProofingScopeKey(scope),
+        recordKey: `FILE#${fileId}`,
+      },
+      ConditionExpression: conditionExpression,
+      ExpressionAttributeNames: expressionAttributeNames,
+      ExpressionAttributeValues: expressionAttributeValues,
+    },
+  }
+}
+
 async function requirePlanningLinkEntityPermissions(
   principal: WorkspacePrincipal,
   entities: readonly PlanningEntity[],
@@ -26910,6 +27132,49 @@ function createPlanningCallerAuthorizationConditionChecks(
     },
   } satisfies PlanningCallerAuthorizationConditionCheck
   return [...workspaceMemberChecks, enterpriseControlCheck]
+}
+
+/** Creates a commit-time Planning revision fence for a non-Planning transaction.
+ *
+ * @param workspaceId Workspace whose target snapshot authorized the mutation.
+ * @param expectedRevision Strongly read Planning revision.
+ * @returns A condition check for the isolated Planning revision-fence row.
+ */
+function createPlanningRevisionConditionCheck(
+  workspaceId: string,
+  expectedRevision: number,
+): PlanningCallerAuthorizationConditionCheck {
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
+    throw new PlanningError(500, 'PlanningRevisionInvalid', 'Planning revision is invalid.')
+  }
+  const tableName = getEnv('PLANNING_TABLE_NAME')?.trim() ?? 'mukuroji-planning-local'
+  return {
+    ConditionCheck: {
+      TableName: tableName,
+      Key: {
+        workspaceId: `FENCE#${workspaceId}`,
+        recordKey: 'META',
+      },
+      ConditionExpression: expectedRevision === 0
+        ? 'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)'
+        : '#entryType = :entryType AND #schemaVersion = :schemaVersion AND ' +
+          '#revision = :expectedRevision',
+      ...(expectedRevision === 0
+        ? {}
+        : {
+            ExpressionAttributeNames: {
+              '#entryType': 'entryType',
+              '#revision': 'revision',
+              '#schemaVersion': 'schemaVersion',
+            },
+            ExpressionAttributeValues: {
+              ':entryType': 'planning-meta',
+              ':expectedRevision': expectedRevision,
+              ':schemaVersion': 1,
+            },
+          }),
+    },
+  }
 }
 
 async function resolveStableWorkItemAuthorization<T>(

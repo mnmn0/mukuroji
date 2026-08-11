@@ -2562,7 +2562,7 @@ describe('planning persistence', () => {
       name: 'GetCommand',
       input: expect.objectContaining({
         TableName: 'PlanningTable',
-        Key: { workspaceId: 'workspace-1', recordKey: 'META' },
+        Key: { workspaceId: 'FENCE#workspace-1', recordKey: 'META' },
         ConsistentRead: true,
       }),
     }])
@@ -2652,7 +2652,7 @@ describe('planning persistence', () => {
       expect(barrier).toMatchObject({
         name: 'GetCommand',
         input: {
-          Key: { workspaceId: 'workspace-1', recordKey: 'META' },
+          Key: { workspaceId: 'FENCE#workspace-1', recordKey: 'META' },
           ConsistentRead: true,
         },
       })
@@ -2752,7 +2752,7 @@ describe('planning persistence', () => {
     expect(transaction).toHaveLength(2)
     expect(transaction[0]?.Put).toMatchObject({
       Item: {
-        workspaceId: 'workspace-1',
+        workspaceId: 'FENCE#workspace-1',
         recordKey: 'META',
         schemaVersion: PLANNING_STORAGE_SCHEMA_VERSION,
         revision: 1,

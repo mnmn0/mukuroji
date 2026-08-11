@@ -308,6 +308,8 @@ export type UpdateWatcherInput = {
   automatic?: boolean
   /** 自動 watch の理由です。 */
   reason?: CollaborationWatcherReason
+  /** Caller and target authorization conditions joined to the watcher transaction. */
+  authorizationConditionChecks?: NonNullable<TransactWriteCommandInput['TransactItems']>
   /** State と同じ transaction に保存する audit context です。 */
   auditContext?: MutationAuditContext
 }
@@ -913,11 +915,23 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
 
     try {
       await this.documentClient.send(new TransactWriteCommand({
-        TransactItems: [...parentConditions, update, ...(auditPut ? [auditPut] : [])],
+        TransactItems: [
+          ...parentConditions,
+          ...(input.authorizationConditionChecks ?? []),
+          update,
+          ...(auditPut ? [auditPut] : []),
+        ],
       }))
     } catch (error) {
       if (!isConditionalFailure(error)) {
         throw toCollaborationStoreError(error)
+      }
+      if (input.authorizationConditionChecks?.length) {
+        throw new CollaborationError(
+          409,
+          'CollaborationAuthorizationChanged',
+          'Watcher authorization changed. Reload and retry the request.',
+        )
       }
 
       const current = await this.getWatcherState({
@@ -963,6 +977,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       await this.documentClient.send(new TransactWriteCommand({
         TransactItems: [
           ...parentConditions,
+          ...(input.authorizationConditionChecks ?? []),
           manualWatcherUpdate(this.tableName, entityKey, memberKey, 'unsubscribed', occurredAt),
           ...(auditPut ? [auditPut] : []),
         ],
@@ -970,6 +985,13 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
     } catch (error) {
       if (!isConditionalFailure(error)) {
         throw toCollaborationStoreError(error)
+      }
+      if (input.authorizationConditionChecks?.length) {
+        throw new CollaborationError(
+          409,
+          'CollaborationAuthorizationChanged',
+          'Watcher authorization changed. Reload and retry the request.',
+        )
       }
 
       const current = await this.getWatcherState({

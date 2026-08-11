@@ -3,12 +3,12 @@ import type * as dynamodb from 'aws-cdk-lib/aws-dynamodb'
 import type * as lambda from 'aws-cdk-lib/aws-lambda'
 
 /**
- * Grants only the attribute-restricted Planning META update used by canonical Work Item writes.
+ * Grants only the attribute-restricted Planning revision-fence update used by canonical Work Item writes.
  *
  * The update is permitted only inside a DynamoDB transaction and only for the attributes
  * required by the META revision fence; callers cannot use this statement for ordinary writes.
  *
- * @param planningTable - Planning table containing the workspace META rows.
+ * @param planningTable - Planning table containing the isolated revision-fence rows.
  * @param target - Lambda that increments the canonical Work Item revision fence.
  */
 export function grantPlanningRevisionFenceAccess(
@@ -28,6 +28,9 @@ export function grantPlanningRevisionFenceAccess(
           'revision',
           'updatedAt',
         ],
+      },
+      'ForAllValues:StringLike': {
+        'dynamodb:LeadingKeys': ['FENCE#*'],
       },
       StringEquals: {
         'dynamodb:EnclosingOperation': 'TransactWriteItems',

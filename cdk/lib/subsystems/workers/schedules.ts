@@ -242,6 +242,10 @@ export function buildScheduleWorkers(
     actions: ['dynamodb:Query'],
     resources: [`${planningTable.tableArn}/index/UpdateScheduleDueIndex`],
   }));
+  notificationScheduleFunction.addToRolePolicy(new iam.PolicyStatement({
+    actions: ['dynamodb:UpdateItem'],
+    resources: [planningTable.tableArn],
+  }));
   projectDirectoryTable.grants.readData(notificationScheduleFunction);
   workItemsTable.grants.readData(notificationScheduleFunction);
   auditEventsTable.grants.writeData(notificationScheduleFunction);

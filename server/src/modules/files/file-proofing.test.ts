@@ -167,11 +167,16 @@ class MemoryDocumentClient {
           continue
         }
         if (values[':increment'] !== undefined && values[':entryType'] === 'planning-meta') {
+          const isEmptyMeta = existing === undefined || (
+            existing.entryType === undefined &&
+            existing.schemaVersion === undefined &&
+            existing.revision === undefined
+          )
+          const isValidMeta = existing?.entryType === values[':entryType'] &&
+            existing.schemaVersion === values[':schemaVersion'] &&
+            typeof existing.revision === 'number'
           if (
-            !existing ||
-            existing.entryType !== values[':entryType'] && existing.entryType !== undefined ||
-            existing.schemaVersion !== values[':schemaVersion'] && existing.schemaVersion !== undefined ||
-            (existing.revision !== undefined && typeof existing.revision !== 'number')
+            !isEmptyMeta && !isValidMeta
           ) {
             throw createTransactionCancelledError()
           }

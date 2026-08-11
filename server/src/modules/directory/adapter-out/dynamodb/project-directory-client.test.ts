@@ -1283,7 +1283,7 @@ test('DynamoDB directory client archives teams and projects with conditional upd
       Put: {
         TableName: 'mukuroji-planning-local',
         Item: {
-          workspaceId: 'user#demo@example.com',
+          workspaceId: 'FENCE#user#demo@example.com',
           recordKey: 'META',
           revision: 1,
         },
@@ -1373,7 +1373,7 @@ test('serializes directory archive with the Planning graph revision', async () =
         Put: {
           TableName: 'PlanningTable',
           Item: {
-            workspaceId: 'user#demo@example.com',
+            workspaceId: 'FENCE#user#demo@example.com',
             recordKey: 'META',
             entryType: 'planning-meta',
             schemaVersion: 1,

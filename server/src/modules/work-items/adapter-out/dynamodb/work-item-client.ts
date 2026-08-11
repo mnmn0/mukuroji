@@ -108,13 +108,14 @@ function createPlanningRevisionIncrementTransactionItem(
   return {
     Update: {
       TableName: planningTableName,
-      Key: { workspaceId, recordKey: PLANNING_META_RECORD_KEY },
+      Key: { workspaceId: `FENCE#${workspaceId}`, recordKey: PLANNING_META_RECORD_KEY },
       UpdateExpression:
         'SET #entryType = if_not_exists(#entryType, :entryType), ' +
         '#schemaVersion = if_not_exists(#schemaVersion, :schemaVersion), ' +
         '#updatedAt = :updatedAt ADD #revision :increment',
       ConditionExpression:
-        'attribute_not_exists(#entryType) OR (' +
+        '(attribute_not_exists(#entryType) AND ' +
+        'attribute_not_exists(#schemaVersion) AND attribute_not_exists(#revision)) OR (' +
         '#entryType = :entryType AND #schemaVersion = :schemaVersion AND ' +
         'attribute_exists(#revision))',
       ExpressionAttributeNames: {
@@ -255,7 +256,7 @@ function createPlanningRevisionFenceConditionEntries(
     kind: 'planning',
     tableName: environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
     key: {
-      workspaceId,
+      workspaceId: `FENCE#${workspaceId}`,
       recordKey: 'META',
     },
     generationAttribute: 'revision',
@@ -316,7 +317,7 @@ function createAuthorizationSnapshotConditionEntries(
       kind: 'planning',
       tableName: environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
       key: {
-        workspaceId: snapshot.workspaceId,
+        workspaceId: `FENCE#${snapshot.workspaceId}`,
         recordKey: 'META',
       },
       generationAttribute: 'revision',
@@ -1537,7 +1538,7 @@ export class DynamoDbTeamIssuesClient {
     this.dynamoDbClient = dynamoDbClient ?? createDynamoDbClient()
     this.bootstrapLocalTables = bootstrapLocalTables
     this.auditTableName = auditTableName
-    this.planningTableName = planningTableName
+    this.planningTableName = planningTableName?.trim() || undefined
   }
 
   /**

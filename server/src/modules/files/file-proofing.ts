@@ -91,13 +91,14 @@ function createPlanningRevisionIncrementTransactionItem(
   return {
     Update: {
       TableName: planningTableName,
-      Key: { workspaceId, recordKey: PLANNING_META_RECORD_KEY },
+      Key: { workspaceId: `FENCE#${workspaceId}`, recordKey: PLANNING_META_RECORD_KEY },
       UpdateExpression:
         'SET #entryType = if_not_exists(#entryType, :entryType), ' +
         '#schemaVersion = if_not_exists(#schemaVersion, :schemaVersion), ' +
         '#updatedAt = :updatedAt ADD #revision :increment',
       ConditionExpression:
-        'attribute_not_exists(#entryType) OR (' +
+        '(attribute_not_exists(#entryType) AND ' +
+        'attribute_not_exists(#schemaVersion) AND attribute_not_exists(#revision)) OR (' +
         '#entryType = :entryType AND #schemaVersion = :schemaVersion AND ' +
         'attribute_exists(#revision))',
       ExpressionAttributeNames: {

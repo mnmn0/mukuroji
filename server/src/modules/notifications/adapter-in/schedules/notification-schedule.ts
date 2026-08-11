@@ -577,8 +577,10 @@ async function advancePlanningUpdateNotificationIndex(
     '#updatedAt': 'updatedAt',
   }
   const expressionAttributeValues = {
-    ':expectedIndexKey': expectedIndexKey,
     ':updatedAt': record.updatedAt,
+    ...(record.nextNotificationAtRecordKey === undefined
+      ? {}
+      : { ':expectedIndexKey': expectedIndexKey }),
     ...(nextNotificationAt === undefined
       ? {}
       : {

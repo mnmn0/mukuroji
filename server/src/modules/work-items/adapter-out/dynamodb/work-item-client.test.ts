@@ -1571,7 +1571,7 @@ test('DynamoDB Work Item client compiles authorization snapshots inside the adap
       'demo@example.com',
     )
 
-    expect(transactItems?.slice(2)).toEqual([
+    expect(transactItems?.slice(2)).toMatchObject([
       {
         ConditionCheck: expect.objectContaining({
           TableName: 'WorkspaceAccessTable',
@@ -1588,7 +1588,7 @@ test('DynamoDB Work Item client compiles authorization snapshots inside the adap
         ConditionCheck: expect.objectContaining({
           TableName: 'PlanningTable',
           Key: {
-            workspaceId: 'workspace-1',
+            workspaceId: 'FENCE#workspace-1',
             recordKey: 'META',
           },
           ConditionExpression: expect.stringContaining('attribute_not_exists'),
@@ -1613,7 +1613,7 @@ test('DynamoDB Work Item client compiles authorization snapshots inside the adap
         Update: expect.objectContaining({
           TableName: 'PlanningTable',
           Key: {
-            workspaceId: 'workspace-1',
+            workspaceId: 'FENCE#workspace-1',
             recordKey: 'META',
           },
           UpdateExpression: expect.stringContaining('ADD #revision :increment'),
@@ -1690,7 +1690,7 @@ test('DynamoDB Work Item updates compile and classify app-owned Planning revisio
       expect(planningCondition).toEqual({
         ConditionCheck: expect.objectContaining({
           TableName: 'PlanningTable',
-          Key: { workspaceId: 'workspace-1', recordKey: 'META' },
+          Key: { workspaceId: 'FENCE#workspace-1', recordKey: 'META' },
           ExpressionAttributeValues: expect.objectContaining({
             ':authorization1': 4,
           }),

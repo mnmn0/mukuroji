@@ -2038,6 +2038,7 @@ test('hourly schedule emits deterministic events and surfaces bounded scan failu
   expect(serializedSchedulePolicy).toContain('dynamodb:Scan');
   expect(serializedSchedulePolicy).toContain('dynamodb:GetItem');
   expect(serializedSchedulePolicy).toContain('dynamodb:Query');
+  expect(serializedSchedulePolicy).toContain('dynamodb:UpdateItem');
   expect(serializedSchedulePolicy).toContain('dynamodb:PutItem');
   expect(serializedSchedulePolicy).toContain('sqs:SendMessage');
   template.hasOutput('NotificationScheduleDlqUrl', {});
@@ -2552,6 +2553,9 @@ test('automation workers consume the audit outbox and run recurring schedules wi
             'revision',
             'updatedAt',
           ],
+        },
+        'ForAllValues:StringLike': {
+          'dynamodb:LeadingKeys': ['FENCE#*'],
         },
         StringEquals: {
           'dynamodb:EnclosingOperation': 'TransactWriteItems',
