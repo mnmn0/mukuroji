@@ -1,10 +1,23 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type KeyboardEvent,
+} from 'react'
 import { Outlet, useLocation, useNavigate } from 'react-router'
 import type { SearchEntityType, WorkspaceSearchFilters, WorkspaceSearchResult } from '@mukuroji/contracts'
 import { getAuthSession } from '../../auth/session'
 import { createTranslator, getInitialLocale, type Locale, type MessageKey } from '../../shared/i18n/i18n'
 import { resolveSearchResultPath, searchWorkspaceAcrossCursors } from '../../search/api'
-import { WorkspaceCommandMenuContext, type WorkspaceCommandMenuContextValue } from './WorkspaceCommandMenuContext'
+import {
+  createWorkspaceCommandMenuWorkItemActionRegistry,
+  executeWorkspaceCommandMenuWorkItemAction,
+  type ResolvedWorkspaceCommandMenuWorkItemAction,
+  WorkspaceCommandMenuContext,
+  type WorkspaceCommandMenuContextValue,
+} from './WorkspaceCommandMenuContext'
 
 /**
  * Command menu内に表示する最近開いた検索結果です。
@@ -53,13 +66,17 @@ type CommandMenuItem = {
    */
   shortcut?: string
   /**
-   * 遷移先pathです。
+   * Optional same-origin navigation destination.
    */
-  path: string
+  path?: string
   /**
    * 検索結果由来の行です。
    */
   result?: WorkspaceSearchResult
+  /**
+   * Canonical action contributed by the currently mounted task surface.
+   */
+  workItemAction?: ResolvedWorkspaceCommandMenuWorkItemAction
 }
 
 /**
@@ -94,6 +111,10 @@ export type WorkspaceCommandMenuProps = {
    * 選択したcommandのpathへ遷移するcallbackです。
    */
   onNavigate: (path: string) => void
+  /**
+   * Canonical Work Item actions resolved from currently mounted task surfaces.
+   */
+  workItemActions?: readonly ResolvedWorkspaceCommandMenuWorkItemAction[]
 }
 
 const commandListId = 'workspace-command-menu-list'
@@ -116,9 +137,17 @@ export function WorkspaceCommandMenuLayout() {
   const [isOpen, setIsOpen] = useState(false)
   const [locale] = useState<Locale>(() => getInitialLocale())
   const [session] = useState(() => getAuthSession())
+  const [workItemActionRegistry] = useState(
+    () => createWorkspaceCommandMenuWorkItemActionRegistry(),
+  )
+  const workItemActions = useSyncExternalStore(
+    workItemActionRegistry.subscribe,
+    workItemActionRegistry.getSnapshot,
+    workItemActionRegistry.getSnapshot,
+  )
 
   useEffect(() => {
-    const handleShortcut = (event: KeyboardEvent) => {
+    const handleShortcut = (event: WindowEventMap['keydown']) => {
       if (event.repeat || event.key.toLowerCase() !== 'k' || (!event.metaKey && !event.ctrlKey)) {
         return
       }
@@ -132,8 +161,11 @@ export function WorkspaceCommandMenuLayout() {
   }, [])
 
   const contextValue = useMemo<WorkspaceCommandMenuContextValue>(
-    () => ({ open: () => setIsOpen(true) }),
-    [],
+    () => ({
+      open: () => setIsOpen(true),
+      registerWorkItemActions: workItemActionRegistry.register,
+    }),
+    [workItemActionRegistry],
   )
 
   return (
@@ -152,6 +184,7 @@ export function WorkspaceCommandMenuLayout() {
           navigate(path)
         }}
         recentIdentityToken={session?.idToken ?? session?.accessToken}
+        workItemActions={workItemActions}
       />
     </WorkspaceCommandMenuContext.Provider>
   )
@@ -168,6 +201,7 @@ export function WorkspaceCommandMenu({
   onClose,
   onNavigate,
   recentIdentityToken,
+  workItemActions = [],
 }: WorkspaceCommandMenuProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
   const scopedRecentStorageKey = useMemo(
@@ -241,22 +275,41 @@ export function WorkspaceCommandMenu({
     meta: item.meta,
     path: item.path,
   })), [recentItems])
+  const workItemCommandItems = useMemo<CommandMenuItem[]>(() => workItemActions.map((action) => ({
+    id: `work-item-action-${action.id}`,
+    label: action.label,
+    meta: action.description,
+    shortcut: action.shortcut,
+    workItemAction: action,
+  })), [workItemActions])
+  const matchingWorkItemCommandItems = normalizedQuery
+    ? workItemCommandItems.filter((item) => [
+        item.label,
+        item.meta,
+        item.shortcut,
+        item.workItemAction?.id,
+        item.workItemAction?.disabledReason,
+      ].filter((value) => value !== undefined).join(' ').toLocaleLowerCase().includes(normalizedQuery))
+    : workItemCommandItems
   const matchingNavigationItems = normalizedQuery
     ? navigationItems.filter((item) => `${item.label} ${item.meta ?? ''}`.toLocaleLowerCase().includes(normalizedQuery))
     : navigationItems
   const itemSections = normalizedQuery
     ? [
         { id: 'results', label: t('command.section.results'), items: resultItems },
+        { id: 'work-item-actions', label: t('tasks.action.more'), items: matchingWorkItemCommandItems },
         { id: 'navigation', label: t('command.section.navigation'), items: matchingNavigationItems },
       ]
     : [
         { id: 'quick', label: t('command.section.quick'), items: quickItems },
+        { id: 'work-item-actions', label: t('tasks.action.more'), items: workItemCommandItems },
         ...(recentCommandItems.length > 0
           ? [{ id: 'recent', label: t('command.section.recent'), items: recentCommandItems }]
           : []),
         { id: 'navigation', label: t('command.section.navigation'), items: navigationItems },
       ]
   const commandItems = itemSections.flatMap((section) => section.items)
+  const activeCommandIndex = findEnabledCommandIndex(commandItems, activeIndex, 1)
 
   useEffect(() => {
     if (!isOpen) {
@@ -287,7 +340,7 @@ export function WorkspaceCommandMenu({
       setLoadingQuery(normalizedQuery)
       setErrorMessage(undefined)
       setErrorQuery('')
-      const filters = { keyword: query.trim() } as WorkspaceSearchFilters
+      const filters: WorkspaceSearchFilters = { keyword: query.trim() }
 
       void searchWorkspaceAcrossCursors(accessToken, filters, {
         pageLimit: 5,
@@ -326,34 +379,47 @@ export function WorkspaceCommandMenu({
     }
 
     dialogRef.current
-      ?.querySelector<HTMLElement>(`[data-command-index="${activeIndex}"]`)
+      ?.querySelector<HTMLElement>(`[data-command-index="${activeCommandIndex}"]`)
       ?.scrollIntoView({ block: 'nearest' })
-  }, [activeIndex, isOpen])
+  }, [activeCommandIndex, isOpen])
 
   if (!isOpen) {
     return null
   }
 
   const executeItem = (item: CommandMenuItem) => {
+    if (item.workItemAction) {
+      if (item.workItemAction.disabledReason !== undefined) return
+
+      setQuery('')
+      onClose()
+      executeWorkspaceCommandMenuWorkItemAction(item.workItemAction)
+      return
+    }
+
+    if (!item.path) return
+    const path = item.path
+
     if (item.result) {
+      const result = item.result
       setRecentItems((currentItems) => {
         const nextItems = [{
-          entityType: item.result?.entityType ?? 'work-item',
-          id: `${item.result?.entityType}-${item.result?.teamId ?? ''}-${item.result?.id}`,
+          entityType: result.entityType,
+          id: `${result.entityType}-${result.teamId ?? ''}-${result.id}`,
           label: item.label,
           meta: item.meta,
-          path: item.path,
-        }, ...currentItems.filter((recentItem) => recentItem.path !== item.path)].slice(0, 6)
+          path,
+        }, ...currentItems.filter((recentItem) => recentItem.path !== path)].slice(0, 6)
 
         saveRecentCommandItems(scopedRecentStorageKey, nextItems)
         return nextItems
       })
     }
     setQuery('')
-    onNavigate(item.path)
+    onNavigate(path)
   }
 
-  const handleDialogKeyDown = (event: ReactKeyboardEvent<HTMLElement>) => {
+  const handleDialogKeyDown = (event: KeyboardEvent<HTMLElement>) => {
     if (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229) {
       return
     }
@@ -369,20 +435,26 @@ export function WorkspaceCommandMenu({
       event.preventDefault()
       if (commandItems.length > 0) {
         const direction = event.key === 'ArrowDown' ? 1 : -1
-        setActiveIndex((currentIndex) => (currentIndex + direction + commandItems.length) % commandItems.length)
+        setActiveIndex((currentIndex) => findEnabledCommandIndex(
+          commandItems,
+          currentIndex + direction,
+          direction,
+        ))
       }
       return
     }
 
     if (event.key === 'Home' || event.key === 'End') {
       event.preventDefault()
-      setActiveIndex(event.key === 'Home' ? 0 : Math.max(0, commandItems.length - 1))
+      setActiveIndex(event.key === 'Home'
+        ? findEnabledCommandIndex(commandItems, 0, 1)
+        : findEnabledCommandIndex(commandItems, commandItems.length - 1, -1))
       return
     }
 
-    if (event.key === 'Enter' && commandItems[activeIndex]) {
+    if (event.key === 'Enter' && commandItems[activeCommandIndex]) {
       event.preventDefault()
-      executeItem(commandItems[activeIndex])
+      executeItem(commandItems[activeCommandIndex])
       return
     }
 
@@ -415,7 +487,9 @@ export function WorkspaceCommandMenu({
         <div className="flex min-h-14 items-center gap-3 border-b border-[var(--workbench-border)] px-4">
           <SearchGlyph />
           <input
-            aria-activedescendant={commandItems[activeIndex] ? `command-option-${commandItems[activeIndex].id}` : undefined}
+            aria-activedescendant={commandItems[activeCommandIndex]
+              ? `command-option-${commandItems[activeCommandIndex].id}`
+              : undefined}
             aria-autocomplete="list"
             aria-controls={commandListId}
             aria-expanded="true"
@@ -459,19 +533,33 @@ export function WorkspaceCommandMenu({
                 {section.items.map((item) => {
                   itemIndex += 1
                   const currentIndex = itemIndex
-                  const isActive = activeIndex === currentIndex
+                  const disabledReason = item.workItemAction?.disabledReason
+                  const disabledReasonId = disabledReason
+                    ? `command-option-${item.id}-disabled-reason`
+                    : undefined
+                  const isDisabled = disabledReason !== undefined
+                  const isActive = activeCommandIndex === currentIndex
 
                   return (
                     <button
+                      aria-describedby={disabledReasonId}
+                      aria-disabled={isDisabled || undefined}
                       aria-selected={isActive}
-                      className={`grid min-h-12 w-full grid-cols-[32px_minmax(0,1fr)_auto] items-center gap-3 rounded-lg px-3 text-left transition ${
-                        isActive ? 'bg-[#e5f7f4] text-[var(--workbench-primary)]' : 'text-[var(--workbench-text)] hover:bg-[var(--workbench-surface-muted)]'
+                      className={`grid min-h-12 w-full grid-cols-[32px_minmax(0,1fr)_auto] items-center gap-3 rounded-lg px-3 py-2 text-left transition ${
+                        isDisabled
+                          ? 'cursor-not-allowed bg-[var(--workbench-surface-muted)] text-[var(--workbench-muted)]'
+                          : isActive
+                            ? 'bg-[#e5f7f4] text-[var(--workbench-primary)]'
+                            : 'text-[var(--workbench-text)] hover:bg-[var(--workbench-surface-muted)]'
                       }`}
-                      id={`command-option-${item.id}`}
                       data-command-index={currentIndex}
+                      disabled={isDisabled}
+                      id={`command-option-${item.id}`}
                       key={item.id}
                       onClick={() => executeItem(item)}
-                      onMouseEnter={() => setActiveIndex(currentIndex)}
+                      onMouseEnter={() => {
+                        if (!isDisabled) setActiveIndex(currentIndex)
+                      }}
                       role="option"
                       type="button"
                     >
@@ -489,6 +577,14 @@ export function WorkspaceCommandMenu({
                             {item.meta}
                           </span>
                         ) : null}
+                        {disabledReason ? (
+                          <span
+                            className="mt-0.5 block text-xs font-semibold text-amber-700"
+                            id={disabledReasonId}
+                          >
+                            {disabledReason}
+                          </span>
+                        ) : null}
                         {item.result?.body ? (
                           <span className="mt-0.5 line-clamp-1 block text-xs font-medium text-[var(--workbench-muted)]">
                             <HighlightedCommandField field="body" result={item.result} fallback={item.result.body} />
@@ -496,7 +592,7 @@ export function WorkspaceCommandMenu({
                         ) : null}
                       </span>
                       <span className="text-xs font-semibold text-[var(--workbench-muted-soft)]">
-                        {item.shortcut ?? '↵'}
+                        {item.shortcut ?? (isDisabled ? '—' : '↵')}
                       </span>
                     </button>
                   )
@@ -529,6 +625,31 @@ export function WorkspaceCommandMenu({
   )
 }
 
+/**
+ * Finds the next enabled command row while wrapping around the available items.
+ *
+ * @param items - Complete ordered command rows, including disabled actions.
+ * @param startIndex - First index to consider.
+ * @param direction - Positive for forward traversal and negative for reverse traversal.
+ * @returns The next enabled row index, or -1 when no enabled row exists.
+ */
+function findEnabledCommandIndex(
+  items: readonly CommandMenuItem[],
+  startIndex: number,
+  direction: number,
+): number {
+  if (items.length === 0) return -1
+
+  const step = direction < 0 ? -1 : 1
+  for (let offset = 0; offset < items.length; offset += 1) {
+    const rawIndex = startIndex + offset * step
+    const index = ((rawIndex % items.length) + items.length) % items.length
+    if (items[index]?.workItemAction?.disabledReason === undefined) return index
+  }
+
+  return -1
+}
+
 function HighlightedCommandField({
   fallback,
   field,
@@ -552,7 +673,7 @@ function HighlightedCommandField({
 }
 
 function createQuickCreatePath(currentLocation: string) {
-  const url = new URL(currentLocation, window.location.origin)
+  const url = new URL(currentLocation, 'http://localhost')
   const isWorkItemView = /^\/projects\/[^/]+\/issues$/.test(url.pathname) || /^\/teams\/[^/]+\/issues$/.test(url.pathname)
 
   if (!isWorkItemView) {
@@ -563,7 +684,7 @@ function createQuickCreatePath(currentLocation: string) {
   return `${url.pathname}?${url.searchParams.toString()}`
 }
 
-function trapFocus(event: ReactKeyboardEvent<HTMLElement>, container: HTMLElement | null) {
+function trapFocus(event: KeyboardEvent<HTMLElement>, container: HTMLElement | null) {
   if (!container) {
     return
   }
@@ -625,18 +746,15 @@ function readRecentCommandItems(storageKey: string | undefined) {
     }
 
     return stored.flatMap((item): RecentCommandItem[] => {
-      if (!item || typeof item !== 'object') {
+      if (!isUnknownRecord(item)) {
         return []
       }
 
-      const record = item as Record<string, unknown>
-      const entityType = typeof record.entityType === 'string' && Object.hasOwn(searchEntityLabelKeys, record.entityType)
-        ? record.entityType as SearchEntityType
-        : undefined
-      const id = typeof record.id === 'string' ? record.id : undefined
-      const label = typeof record.label === 'string' ? record.label : undefined
-      const meta = typeof record.meta === 'string' ? record.meta : undefined
-      const path = typeof record.path === 'string' && isSafeRecentPath(record.path) ? record.path : undefined
+      const entityType = isSearchEntityType(item.entityType) ? item.entityType : undefined
+      const id = typeof item.id === 'string' ? item.id : undefined
+      const label = typeof item.label === 'string' ? item.label : undefined
+      const meta = typeof item.meta === 'string' ? item.meta : undefined
+      const path = typeof item.path === 'string' && isSafeRecentPath(item.path) ? item.path : undefined
 
       return entityType && id && label && path
         ? [{ entityType, id, label, meta, path }]
@@ -679,7 +797,10 @@ function readTokenIdentityScope(accessToken: string) {
     }
     const normalizedPayload = encodedPayload.replace(/-/gu, '+').replace(/_/gu, '/')
     const paddedPayload = normalizedPayload.padEnd(Math.ceil(normalizedPayload.length / 4) * 4, '=')
-    const payload = JSON.parse(window.atob(paddedPayload)) as Record<string, unknown>
+    const parsedPayload: unknown = JSON.parse(window.atob(paddedPayload))
+    if (!isUnknownRecord(parsedPayload)) return undefined
+
+    const payload = parsedPayload
     const issuer = typeof payload.iss === 'string' ? payload.iss : ''
     const subject = typeof payload.sub === 'string'
       ? payload.sub
@@ -695,6 +816,26 @@ function readTokenIdentityScope(accessToken: string) {
   } catch {
     return undefined
   }
+}
+
+/**
+ * Narrows an unknown value to a string-keyed record.
+ *
+ * @param value - Unknown value read from browser storage or a token payload.
+ * @returns Whether record fields can be read safely.
+ */
+function isUnknownRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * Narrows an unknown value to a supported search entity identifier.
+ *
+ * @param value - Unknown value read from recent command-menu storage.
+ * @returns Whether the value is a canonical search entity identifier.
+ */
+function isSearchEntityType(value: unknown): value is SearchEntityType {
+  return typeof value === 'string' && Object.hasOwn(searchEntityLabelKeys, value)
 }
 
 function isSafeRecentPath(path: string) {

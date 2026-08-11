@@ -9,6 +9,8 @@ import {
   GetCommand,
   PutCommand,
   QueryCommand,
+  TransactWriteCommand,
+  type TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
 import {
   FOCUS_SCHEMA_VERSION,
@@ -77,6 +79,16 @@ export type SaveFocusPolicyInput = {
   now: Date
   /** Opaque identity used to recover a committed mutation after response loss. */
   mutationIdentity?: string
+  /** Current authorization source conditions to evaluate in the same transaction as the write. */
+  authorizationConditionChecks?: readonly FocusAuthorizationConditionCheck[]
+}
+
+/** Read-only DynamoDB conditions that fence a Focus policy write against authorization changes. */
+export type FocusAuthorizationConditionCheck = {
+  /** Source-of-truth row and condition that must remain current for the mutation. */
+  ConditionCheck: NonNullable<
+    NonNullable<TransactWriteCommandInput['TransactItems']>[number]['ConditionCheck']
+  >
 }
 
 /** Input for a version-checked Focus snooze replacement. */
@@ -351,20 +363,38 @@ export class DynamoDbFocusStateClient implements FocusStateClient {
     )
     const policy = createFocusPolicyMutationPreview(input)
     const mutationIdentity = normalizeMutationIdentity(input.mutationIdentity)
+    const item = {
+      scopeKey,
+      recordKey: userPolicyRecordKey,
+      entryType: 'policy',
+      version: policy.version,
+      policy,
+      updatedAt: policy.updatedAt,
+      ...(mutationIdentity === undefined ? {} : { mutationIdentity }),
+    }
+    const versionCondition = createVersionCondition(input.update.expectedVersion)
     try {
-      await this.documentClient.send(new PutCommand({
-        TableName: this.tableName,
-        Item: {
-          scopeKey,
-          recordKey: userPolicyRecordKey,
-          entryType: 'policy',
-          version: policy.version,
-          policy,
-          updatedAt: policy.updatedAt,
-          ...(mutationIdentity === undefined ? {} : { mutationIdentity }),
-        },
-        ...createVersionCondition(input.update.expectedVersion),
-      }))
+      const authorizationConditionChecks = input.authorizationConditionChecks ?? []
+      if (authorizationConditionChecks.length === 0) {
+        await this.documentClient.send(new PutCommand({
+          TableName: this.tableName,
+          Item: item,
+          ...versionCondition,
+        }))
+      } else {
+        await this.documentClient.send(new TransactWriteCommand({
+          TransactItems: [
+            ...authorizationConditionChecks,
+            {
+              Put: {
+                TableName: this.tableName,
+                Item: item,
+                ...versionCondition,
+              },
+            },
+          ],
+        }))
+      }
       return cloneFocusPolicy(policy)
     } catch (error) {
       throw mapConditionalError(error, 'Focus policy changed after it was read.')
@@ -465,7 +495,7 @@ export class DynamoDbFocusStateClient implements FocusStateClient {
         throw createSnoozeReadLimitError()
       }
       for (const item of items) {
-        snoozes.push(parseStoredSnooze(item))
+        snoozes.push(parseStoredSnooze(item, scopeKey))
       }
       exclusiveStartKey = response.LastEvaluatedKey
       if (exclusiveStartKey !== undefined) {
@@ -724,16 +754,33 @@ function arePolicyTargetsEqual(
     : right.type === 'team' && left.teamId === right.teamId
 }
 
-/** Parses and validates one stored Focus snooze row. */
-function parseStoredSnooze(value: Record<string, unknown>): FocusSnoozeRecord {
+/**
+ * Parses and validates one stored Focus snooze row against its queried physical scope.
+ *
+ * @param value - Untrusted DynamoDB row.
+ * @param expectedScopeKey - Exact partition key used by the bounded query.
+ * @returns Validated snooze detached from the persistence envelope.
+ */
+function parseStoredSnooze(
+  value: Record<string, unknown>,
+  expectedScopeKey: string,
+): FocusSnoozeRecord {
   if (value.entryType !== 'snooze') {
     throw createCorruptStateError('A Focus snooze row is malformed.')
   }
   try {
+    const teamId = requireText(value.teamId, 'Focus Team ID')
+    const workItemId = requireText(value.workItemId, 'Focus Work Item ID')
+    if (
+      value.scopeKey !== expectedScopeKey ||
+      value.recordKey !== createSnoozeRecordKey(teamId, workItemId)
+    ) {
+      throw new TypeError('Focus snooze identity does not match its physical scope.')
+    }
     const mutationIdentity = requireStoredMutationIdentity(value.mutationIdentity)
     return {
-      teamId: requireText(value.teamId, 'Focus Team ID'),
-      workItemId: requireText(value.workItemId, 'Focus Work Item ID'),
+      teamId,
+      workItemId,
       version: requireVersion(value.version),
       causeFingerprint: requireText(value.causeFingerprint, 'Focus cause fingerprint'),
       ...(value.snoozedUntil === undefined
@@ -828,9 +875,21 @@ function createQueryCursorFingerprint(key: Record<string, unknown>): string {
 
 /** Maps a conditional write failure while preserving unexpected infrastructure errors. */
 function mapConditionalError(error: unknown, message: string): unknown {
-  return isAwsNamedError(error, 'ConditionalCheckFailedException')
+  return isAwsNamedError(error, 'ConditionalCheckFailedException') ||
+    isConditionalTransactionFailure(error)
     ? createConflictError(message)
     : error
+}
+
+/** Returns whether a DynamoDB transaction was cancelled by a condition failure. */
+function isConditionalTransactionFailure(error: unknown): boolean {
+  if (!isAwsNamedError(error, 'TransactionCanceledException') || !isRecord(error)) {
+    return false
+  }
+  const reasons = error.CancellationReasons
+  return Array.isArray(reasons) && reasons.some((reason) =>
+    isRecord(reason) && reason.Code === 'ConditionalCheckFailed'
+  )
 }
 
 /** Creates one stable optimistic concurrency error. */

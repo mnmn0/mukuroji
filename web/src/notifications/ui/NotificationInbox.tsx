@@ -319,7 +319,7 @@ function NotificationRow({
       </button>
 
       <div className="flex flex-wrap items-center justify-end gap-2 self-center max-[760px]:justify-start max-[760px]:pl-[52px]">
-        {notification.teamId && notification.issueId ? (
+        {notification.reasons.includes('mention') && notification.teamId && notification.issueId ? (
           <a
             className="inline-flex min-h-9 items-center rounded-md border border-[var(--workbench-border)] bg-white px-2.5 text-xs font-semibold text-[var(--workbench-primary)] transition hover:border-[#99d7cf] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--workbench-primary)] max-[760px]:min-h-[44px]"
             data-testid={`notification-focus-${createNotificationTestToken(notification.id)}`}

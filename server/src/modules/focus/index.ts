@@ -18,6 +18,7 @@ export {
   createFocusStateClient,
   getConfiguredFocusTableName,
   type FocusSnoozeRecord,
+  type FocusAuthorizationConditionCheck,
   type FocusStateClient,
   type FocusStateSnapshot,
   type GetFocusStateInput,

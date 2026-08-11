@@ -1646,12 +1646,12 @@ function createActionability(
   if (terminal) {
     return { actionable: false, reasons: ['work-item-completed'] }
   }
-  if (signals.some((signal) => signal.type === 'blocker')) {
-    return { actionable: false, reasons: ['blocked'] }
-  }
   const hasReviewAction = capabilities.openSource && signals.some((signal) =>
     signal.type === 'review-request' || signal.type === 'mention'
   )
+  if (signals.some((signal) => signal.type === 'blocker') && !hasReviewAction) {
+    return { actionable: false, reasons: ['blocked'] }
+  }
   if (signals.some((signal) => signal.type === 'approval') && !hasReviewAction) {
     return { actionable: false, reasons: ['awaiting-external-action'] }
   }

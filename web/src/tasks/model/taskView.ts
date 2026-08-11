@@ -10,6 +10,7 @@ import type { BulkOperationSelection } from '../../bulk-operations/model/bulkOpe
 import type { ProjectDirectoryTeam } from '../../projects/api/directory'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import type { WorkspaceMember } from '../../workspace/api/access'
+import type { TaskViewGroupValue } from '../../task-views/model/taskViewPresentation'
 import {
   isCustomFieldApplicable,
   sortCustomFieldDefinitions,
@@ -20,6 +21,8 @@ import {
 } from '../../work-items/model/workItemFilters'
 import {
   formatWorkItemCustomFieldValue,
+  resolveWorkItemAssignee,
+  resolveWorkItemTitle,
   resolveWorkItemWorkflowStatusLabel,
   resolveWorkflowStatusCategory,
   sortWorkflowStatuses,
@@ -46,9 +49,10 @@ export const taskTabs: readonly ['table', 'board', 'gantt', 'calendar', 'file', 
 export const taskPriorities: readonly ['high', 'medium', 'low'] = ['high', 'medium', 'low']
 
 /** Due-date filters available to the task list. */
-export const taskDueDateFilters: readonly ['all', 'overdue', 'upcoming', 'no-date'] = [
+export const taskDueDateFilters: readonly ['all', 'overdue', 'today', 'upcoming', 'no-date'] = [
   'all',
   'overdue',
+  'today',
   'upcoming',
   'no-date',
 ]
@@ -76,6 +80,26 @@ export type DueDateFilter = (typeof taskDueDateFilters)[number]
 
 /** Due-date ordering selected in the task list. */
 export type TaskSortOrder = (typeof taskSortOrders)[number]
+
+/** Reproducible filter, sort, and layout state controlled by a task-view definition. */
+export type TaskScreenViewState = {
+  /** Active Project task layout or supporting Project tab. */
+  activeTab: TaskTab
+  /** Assignee identity filter or the all-assignee sentinel. */
+  assigneeFilter: AssigneeFilter
+  /** Workflow category and custom-field filter. */
+  definitionFilter: WorkItemDefinitionFilter
+  /** Relative due-date filter. */
+  dueDateFilter: DueDateFilter
+  /** Priority filter or the all-priority sentinel. */
+  priorityFilter: PriorityFilter
+  /** Case-insensitive task search query. */
+  searchQuery: string
+  /** Due-date ordering applied after filtering. */
+  sortOrder: TaskSortOrder
+  /** Team-qualified workflow status or the all-status sentinel. */
+  statusFilter: StatusFilter
+}
 
 /**
  * Context inherited when a Work Item is created from a task view.
@@ -468,6 +492,10 @@ export function matchesTaskDueDateFilter(
     return dueDate < today
   }
 
+  if (filter === 'today') {
+    return dueDate === today
+  }
+
   return dueDate >= today
 }
 
@@ -513,6 +541,7 @@ export function resolveDueDateFilterLabelKey(filter: DueDateFilter): MessageKey 
   const labelKeys: Record<DueDateFilter, MessageKey> = {
     all: 'tasks.filter.dueDateAll',
     overdue: 'tasks.filter.dueDateOverdue',
+    today: 'tasks.filter.dueDateToday',
     upcoming: 'tasks.filter.dueDateUpcoming',
     'no-date': 'tasks.filter.dueDateNoDate',
   }
@@ -608,6 +637,51 @@ export function resolveProjectTaskConfiguration(
   return Object.keys(configurationsByTeam).length === 0
     ? fallbackConfiguration
     : undefined
+}
+
+/**
+ * Resolves one consistent grouping key and label for a Project task.
+ *
+ * @param task - Project Work Item whose value is being grouped.
+ * @param field - Built-in or custom field used for grouping.
+ * @param configurationsByTeam - Team-specific configurations for aggregate Project views.
+ * @param fallbackConfiguration - Single-Team configuration used when no Team map is available.
+ * @param t - Translator used for localized priority labels.
+ * @returns Stable grouping key and human-readable label.
+ */
+export function resolveProjectTaskGroupValue(
+  task: ProjectTask,
+  field: string,
+  configurationsByTeam: Readonly<Record<string, ResolvedWorkItemConfiguration>>,
+  fallbackConfiguration: WorkItemConfiguration | undefined,
+  t: TaskTranslator,
+): TaskViewGroupValue {
+  const configuration = resolveProjectTaskConfiguration(
+    task,
+    configurationsByTeam,
+    fallbackConfiguration,
+  )
+  let value: string
+  switch (field) {
+    case 'title': value = resolveWorkItemTitle(task); break
+    case 'status': value = resolveWorkItemWorkflowStatusLabel(task, configuration); break
+    case 'assignee': value = resolveWorkItemAssignee(task); break
+    case 'dueDate': value = task.dueDate || '—'; break
+    case 'priority': value = t(`tasks.priority.${task.priority}`); break
+    case 'project': value = task.assignedProjectId ?? '—'; break
+    case 'team': value = task.teamId; break
+    default: {
+      const customValue = field.startsWith('custom:')
+        ? task.customFieldValues[field.slice('custom:'.length)]
+        : undefined
+      value = Array.isArray(customValue)
+        ? customValue.join(', ')
+        : customValue === undefined || customValue === null || customValue === ''
+          ? '—'
+          : String(customValue)
+    }
+  }
+  return { key: value, label: value }
 }
 
 /**
@@ -835,7 +909,7 @@ export function filterAndSortProjectTasks(
     options.definitionFilter,
     options.configuration,
   )
-  const normalizedQuery = options.searchQuery.trim().toLowerCase()
+  const normalizedQuery = options.searchQuery.trim().toLocaleLowerCase()
   const today = options.today ?? new Date()
   const filteredTasks = tasks.filter((task) => {
     const resolvedTaskConfiguration = resolveProjectTaskConfiguration(
@@ -868,27 +942,61 @@ export function filterAndSortProjectTasks(
       return false
     }
 
-    if (!normalizedQuery) {
-      return true
-    }
-
-    return [
-      task.title,
-      resolveTaskAssignee(task),
-      resolveWorkItemWorkflowStatusLabel(task, resolvedTaskConfiguration),
-      options.t(`tasks.priority.${task.priority}`),
-      deriveTaskScheduleDueDate(task.schedule),
-      ...resolveTaskCustomFieldSearchValues(
-        task,
-        resolvedTaskConfiguration,
-        options.locale,
-        options.personLabels,
-        options.t,
-      ),
-    ].some((value) => value.toLowerCase().includes(normalizedQuery))
+    return !normalizedQuery || matchesProjectTaskKeyword(
+      task,
+      normalizedQuery,
+      options.configuration,
+      options.configurationsByTeam,
+      options.locale,
+      options.personLabels,
+      options.t,
+    )
   })
 
   return sortTasksByDueDate(filteredTasks, options.sortOrder)
+}
+
+/**
+ * Matches the localized and formatted display values exposed by the Project task surface.
+ *
+ * @param task - Project Work Item evaluated by keyword filtering.
+ * @param normalizedKeyword - Trimmed lower-case keyword from the active task view.
+ * @param fallbackConfiguration - Single-Team configuration used when no Team map is available.
+ * @param configurationsByTeam - Team-specific configurations for aggregate Project results.
+ * @param locale - Locale used to format typed custom-field values.
+ * @param personLabels - Person identities mapped to display labels.
+ * @param t - Translator used for localized priority and custom-field labels.
+ * @returns Whether any Project-visible display value contains the keyword.
+ */
+export function matchesProjectTaskKeyword(
+  task: ProjectTask,
+  normalizedKeyword: string,
+  fallbackConfiguration: WorkItemConfiguration | undefined,
+  configurationsByTeam: Readonly<Record<string, ResolvedWorkItemConfiguration>>,
+  locale: Locale,
+  personLabels: Readonly<Record<string, string>>,
+  t: TaskTranslator,
+): boolean {
+  const configuration = resolveProjectTaskConfiguration(
+    task,
+    configurationsByTeam,
+    fallbackConfiguration,
+  )
+  return [
+    task.title,
+    resolveTaskAssignee(task),
+    resolveWorkItemWorkflowStatusLabel(task, configuration),
+    t(`tasks.priority.${task.priority}`),
+    task.dueDate,
+    deriveTaskScheduleDueDate(task.schedule),
+    ...resolveTaskCustomFieldSearchValues(
+      task,
+      configuration,
+      locale,
+      personLabels,
+      t,
+    ),
+  ].some((value) => value.toLocaleLowerCase().includes(normalizedKeyword))
 }
 
 /**

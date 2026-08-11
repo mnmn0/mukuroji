@@ -717,6 +717,49 @@ test('bounds watcher point reads to the accessible Focus item window', async () 
   expect(watcherReads).toBe(200)
 })
 
+test('drops Focus mention notifications whose collaboration source was removed', async () => {
+  configureFocusSources()
+  const notification = {
+    ...createFocusMention('deleted-source-event', 'unread'),
+    commentId: 'deleted-comment',
+  }
+  const notificationClient = createFocusNotificationClient([])
+  setTestAppDependencies({
+    notifications: {
+      ...notificationClient,
+      async list(input) {
+        if (input.filter !== 'all') return { notifications: [] }
+        if (input.isVisible && !(await input.isVisible(notification))) {
+          return { notifications: [] }
+        }
+        return { notifications: [notification] }
+      },
+    },
+    collaboration: createCollaborationStub({
+      async getCommentSnapshot() {
+        return undefined
+      },
+    }),
+  })
+
+  const response = await focusRequest('/api/focus')
+
+  expect(response.status).toBe(200)
+  const body: unknown = await response.json()
+  if (!isRecord(body) || !Array.isArray(body.sections)) {
+    throw new Error('Expected Focus sections.')
+  }
+  const containsDeletedSourceItem = body.sections.some((section) => {
+    if (!isRecord(section) || !Array.isArray(section.items)) return false
+    return section.items.some((item) =>
+      isRecord(item) &&
+      isRecord(item.workItem) &&
+      item.workItem.id === 'onboarding-friction'
+    )
+  })
+  expect(containsDeletedSourceItem).toBeFalse()
+})
+
 test('bounds reviewer approval pagination to the Focus source window', async () => {
   configureFocusSources()
   let approvalPageReads = 0

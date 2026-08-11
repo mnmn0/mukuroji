@@ -95,6 +95,29 @@ describe('Focus queue projection', () => {
     expect(unblockedQueue.metrics.blocked).toBe(0)
   })
 
+  test('keeps review and mention actions available when a Work Item is blocked', () => {
+    const predecessor = createWorkItem('review-predecessor', 'other-member')
+    const successor = createWorkItem('blocked-review', 'viewer')
+    const dependency: PlanningSnapshot['workItemDependencies'][number] = {
+      id: 'review-blocker',
+      predecessor: { teamId: 'team-a', workItemId: predecessor.id },
+      successor: { teamId: 'team-a', workItemId: successor.id },
+      type: 'finish-to-start',
+      lagDays: 0,
+      createdAt: '2026-08-09T09:00:00.000Z',
+      updatedAt: '2026-08-09T09:00:00.000Z',
+    }
+    const item = findFocusItem(projectQueue({
+      workItems: [predecessor, successor],
+      planning: createPlanningSnapshot([predecessor, successor], [dependency]),
+      notifications: [createMentionNotification(successor, 'blocked-mention')],
+      canWrite: { [createTestWorkItemKey(successor)]: false },
+    }), successor.id)
+
+    expect(item.actionability).toEqual({ actionable: true, reasons: [] })
+    expect(item.section).toBe('now')
+  })
+
   test('deduplicates equivalent semantic and schedule blocker sources', () => {
     const predecessor = createWorkItem('semantic-predecessor', 'other-member')
     const baseSuccessor = createWorkItem('semantic-successor')

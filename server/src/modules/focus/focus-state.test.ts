@@ -396,6 +396,92 @@ describe('DynamoDbFocusStateClient', () => {
     }
   })
 
+  test('fences policy writes with current authorization conditions in one transaction', async () => {
+    const requests: Record<string, unknown>[] = []
+    const lowLevelClient = new DynamoDBClient({
+      credentials: {
+        accessKeyId: 'test-access-key',
+        secretAccessKey: 'test-secret-key',
+      },
+      region: 'ap-northeast-1',
+      requestHandler: {
+        async handle(request: unknown) {
+          requests.push(readJsonRequestBody(request))
+          return {
+            response: {
+              body: new TextEncoder().encode('{}'),
+              headers: {},
+              statusCode: 200,
+            },
+          }
+        },
+      },
+    })
+    const documentClient = createDynamoDbDocumentClient(lowLevelClient)
+    const client = new DynamoDbFocusStateClient(
+      'focus-table',
+      documentClient,
+      lowLevelClient,
+      false,
+    )
+
+    try {
+      await client.savePolicy({
+        workspaceId,
+        memberKey,
+        update: {
+          target: { type: 'team', teamId: 'core-team' },
+          expectedVersion: 0,
+          overrides: { nowScoreThreshold: 90 },
+        },
+        now: mutationTime(0),
+        authorizationConditionChecks: [{
+          ConditionCheck: {
+            TableName: 'workspace-access',
+            Key: {
+              workspaceId,
+              recordKey: `MEMBER#${memberKey}`,
+            },
+            ConditionExpression: '#status = :active AND #version = :version',
+            ExpressionAttributeNames: {
+              '#status': 'status',
+              '#version': 'version',
+            },
+            ExpressionAttributeValues: {
+              ':active': 'active',
+              ':version': 3,
+            },
+          },
+        }],
+      })
+
+      expect(requests).toHaveLength(1)
+      expect(requests[0]).toMatchObject({
+        TransactItems: [
+          {
+            ConditionCheck: {
+              TableName: 'workspace-access',
+              Key: {
+                workspaceId: { S: workspaceId },
+                recordKey: { S: `MEMBER#${memberKey}` },
+              },
+              ConditionExpression: '#status = :active AND #version = :version',
+            },
+          },
+          {
+            Put: {
+              TableName: 'focus-table',
+              ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
+            },
+          },
+        ],
+      })
+    } finally {
+      documentClient.destroy()
+      lowLevelClient.destroy()
+    }
+  })
+
   test('rejects stored policies whose identity disagrees with the requested physical scope', async () => {
     const teamScopeKey = `WORKSPACE#${workspaceId}#TEAM#core-team`
     const updatedAt = mutationTime(1).toISOString()
@@ -522,8 +608,18 @@ describe('DynamoDbFocusStateClient', () => {
     }
   })
 
-  test('fails closed on a malformed stored snooze mutation identity', async () => {
-    let snoozeMutationIdentity = 'snooze-mutation-1'
+test('fails closed on a malformed stored snooze mutation identity', async () => {
+    let snoozeRow: Record<string, unknown> = {
+      scopeKey: { S: `WORKSPACE#${workspaceId}#USER#${memberKey}` },
+      recordKey: { S: 'SNOOZE#core-team#issue-1' },
+      entryType: { S: 'snooze' },
+      version: { N: '1' },
+      teamId: { S: 'core-team' },
+      workItemId: { S: 'issue-1' },
+      causeFingerprint: { S: 'cause-1' },
+      updatedAt: { S: mutationTime(1).toISOString() },
+      mutationIdentity: { S: 'snooze-mutation-1' },
+    }
     const lowLevelClient = new DynamoDBClient({
       credentials: {
         accessKeyId: 'test-access-key',
@@ -535,17 +631,7 @@ describe('DynamoDbFocusStateClient', () => {
           const body = readJsonRequestBody(request)
           const responseBody = 'KeyConditionExpression' in body
             ? {
-                Items: [{
-                  scopeKey: { S: `WORKSPACE#${workspaceId}#USER#${memberKey}` },
-                  recordKey: { S: 'SNOOZE#core-team#issue-1' },
-                  entryType: { S: 'snooze' },
-                  version: { N: '1' },
-                  teamId: { S: 'core-team' },
-                  workItemId: { S: 'issue-1' },
-                  causeFingerprint: { S: 'cause-1' },
-                  updatedAt: { S: mutationTime(1).toISOString() },
-                  mutationIdentity: { S: snoozeMutationIdentity },
-                }],
+                Items: [snoozeRow],
               }
             : {}
           return {
@@ -571,11 +657,36 @@ describe('DynamoDbFocusStateClient', () => {
       expect((await client.getState(input)).snoozes[0]?.mutationIdentity).toBe(
         'snooze-mutation-1',
       )
-      snoozeMutationIdentity = ' '
+      snoozeRow = { ...snoozeRow, mutationIdentity: { S: ' ' } }
       await expect(client.getState(input)).rejects.toMatchObject({
         code: 'FocusStateCorrupt',
         status: 503,
       })
+
+      const malformedIdentityRows = [
+        {
+          ...snoozeRow,
+          mutationIdentity: { S: 'snooze-mutation-1' },
+          scopeKey: { S: `WORKSPACE#${workspaceId}#USER#other@example.com` },
+        },
+        {
+          ...snoozeRow,
+          mutationIdentity: { S: 'snooze-mutation-1' },
+          recordKey: { S: 'SNOOZE#other-team#issue-1' },
+        },
+        {
+          ...snoozeRow,
+          mutationIdentity: { S: 'snooze-mutation-1' },
+          teamId: { S: 'other-team' },
+        },
+      ]
+      for (const malformedRow of malformedIdentityRows) {
+        snoozeRow = malformedRow
+        await expect(client.getState(input)).rejects.toMatchObject({
+          code: 'FocusStateCorrupt',
+          status: 503,
+        })
+      }
     } finally {
       documentClient.destroy()
       lowLevelClient.destroy()

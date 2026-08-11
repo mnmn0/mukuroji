@@ -789,6 +789,13 @@ export class DynamoDbNotificationsClient implements NotificationClient {
           )
         }
         visitedCursors.add(cursor)
+        if (pagesRead >= snoozeWakeMaximumPages || rowsRead >= snoozeWakeMaximumRows) {
+          throw new NotificationError(
+            503,
+            'NotificationSnoozeWakeLimitExceeded',
+            'Expired notification snoozes exceed the supported maintenance window.',
+          )
+        }
       }
     } while (exclusiveStartKey)
   }

@@ -9,6 +9,11 @@ import { TeamIssuesApiError } from '../../issues/api'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import { useModalFocus } from '../../shared/ui/useModalFocus'
 import {
+  isProjectTaskDirectScheduleCancelled,
+  type ProjectTaskDirectScheduleController,
+  type ProjectTaskDirectScheduleHandle,
+} from '../../task-views/model/projectTaskDirectActionRequest'
+import {
   resolveWorkItemAssignee,
   resolveWorkItemTitle,
 } from '../../work-items/model/workItemDisplay'
@@ -65,10 +70,8 @@ type CanonicalCalendarModel = {
 type PendingCalendarScheduleChange = {
   /** Task whose operation created the preview. */
   task: ProjectTask
-  /** Authoritative before/after preview. */
-  preview: WorkItemScheduleChangePreview
-  /** Original operation confirmed against the preview's graph revisions. */
-  operation: WorkItemScheduleOperation
+  /** Exact canonical invocation controlling preview confirmation and cancellation. */
+  controller: ProjectTaskDirectScheduleController
 }
 
 /** Props for the independent project task calendar view. */
@@ -83,17 +86,11 @@ export type TaskCalendarViewProps = {
   onCreateTaskOpen?: (context?: CalendarTaskCreateContext) => void
   /** Selects a task in the shared detail pane. */
   onSelectTask?: (task: ProjectTask) => void
-  /** Requests an authoritative preview before a schedule mutation. */
-  onPreviewScheduleChange?: (
+  /** Starts a canonical Schedule action and returns its exact preview controller. */
+  onRequestScheduleChange?: (
     task: ProjectTask,
     operation: WorkItemScheduleOperation,
-  ) => Promise<WorkItemScheduleChangePreview>
-  /** Atomically confirms the original operation and its dependency ripple. */
-  onConfirmScheduleChange?: (
-    task: ProjectTask,
-    operation: WorkItemScheduleOperation,
-    preview: WorkItemScheduleChangePreview,
-  ) => Promise<ProjectTask>
+  ) => ProjectTaskDirectScheduleHandle
 }
 
 /** Props for the Calendar schedule-preview dialog. */
@@ -120,9 +117,8 @@ type CalendarSchedulePreviewProps = {
  * @returns The independent project task calendar view.
  */
 export function TaskCalendarView({
-  onConfirmScheduleChange,
   onCreateTaskOpen,
-  onPreviewScheduleChange,
+  onRequestScheduleChange,
   onSelectTask,
   projectId,
   t,
@@ -136,9 +132,12 @@ export function TaskCalendarView({
   const [isApplying, setIsApplying] = useState(false)
   const [errorMessage, setErrorMessage] = useState<string>()
   const calendarSectionRef = useRef<HTMLElement>(null)
+  const isMountedRef = useRef(true)
+  const activeScheduleHandleRef = useRef<ProjectTaskDirectScheduleHandle | undefined>(undefined)
   const pendingFocusTaskKeyRef = useRef<string | undefined>(undefined)
-  const canEditSchedule = onPreviewScheduleChange !== undefined &&
-    onConfirmScheduleChange !== undefined
+  const pendingChangeRef = useRef<PendingCalendarScheduleChange | undefined>(undefined)
+  const nextScheduleRequestSequenceRef = useRef(0)
+  const canEditSchedule = onRequestScheduleChange !== undefined
   const entries = [...calendar.days.flatMap((day) => day.entries), ...calendar.unscheduledEntries]
 
   useEffect(() => {
@@ -150,37 +149,79 @@ export function TaskCalendarView({
       pendingFocusTaskKeyRef.current = undefined
     }
   }, [calendar, pendingChange])
+  useEffect(() => {
+    pendingChangeRef.current = pendingChange
+  }, [pendingChange])
+  useEffect(() => {
+    isMountedRef.current = true
+    return () => {
+      isMountedRef.current = false
+      nextScheduleRequestSequenceRef.current += 1
+      activeScheduleHandleRef.current?.cancel()
+    }
+  }, [])
 
   /** Requests the server-owned before/after schedule preview. */
   const previewScheduleChange = async (
     task: ProjectTask,
     operation: WorkItemScheduleOperation,
   ) => {
-    if (!onPreviewScheduleChange || !onConfirmScheduleChange) {
+    if (!onRequestScheduleChange) {
       return
     }
 
+    const sequence = nextScheduleRequestSequenceRef.current + 1
+    nextScheduleRequestSequenceRef.current = sequence
+    activeScheduleHandleRef.current?.cancel()
+    const handle = onRequestScheduleChange(task, operation)
+    activeScheduleHandleRef.current = handle
     const taskKey = createTaskKey(task)
     setBusyTaskKey(taskKey)
     setErrorMessage(undefined)
     try {
-      const preview = await onPreviewScheduleChange(task, operation)
-      setPendingChange({ operation, preview, task })
+      const controller = await handle.preview
+      if (!isMountedRef.current || nextScheduleRequestSequenceRef.current !== sequence) {
+        handle.cancel()
+        if (activeScheduleHandleRef.current?.token === handle.token) {
+          activeScheduleHandleRef.current = undefined
+        }
+        return
+      }
+      const pending = { controller, task }
+      pendingChangeRef.current = pending
+      setPendingChange(pending)
     } catch (error) {
-      setErrorMessage(resolveCalendarScheduleError(error, t))
+      if (
+        isMountedRef.current &&
+        nextScheduleRequestSequenceRef.current === sequence &&
+        !isProjectTaskDirectScheduleCancelled(error)
+      ) setErrorMessage(resolveCalendarScheduleError(error, t))
+      if (activeScheduleHandleRef.current?.token === handle.token) {
+        activeScheduleHandleRef.current = undefined
+      }
     } finally {
-      setBusyTaskKey(undefined)
+      if (isMountedRef.current && nextScheduleRequestSequenceRef.current === sequence) {
+        setBusyTaskKey(undefined)
+      }
     }
   }
 
   /** Persists the direct canonical result from the current preview. */
   const confirmScheduleChange = async () => {
-    if (!pendingChange || !onConfirmScheduleChange) {
+    if (!pendingChange) {
       return
     }
 
-    const schedule = findCalendarDirectPreviewSchedule(pendingChange.preview, pendingChange.task)
+    const schedule = findCalendarDirectPreviewSchedule(
+      pendingChange.controller.preview,
+      pendingChange.task,
+    )
     if (!schedule) {
+      pendingChange.controller.cancel()
+      if (activeScheduleHandleRef.current?.token === pendingChange.controller.token) {
+        activeScheduleHandleRef.current = undefined
+      }
+      pendingChangeRef.current = undefined
       setPendingChange(undefined)
       setErrorMessage(t('tasks.action.updateError'))
       return
@@ -190,18 +231,25 @@ export function TaskCalendarView({
     setErrorMessage(undefined)
     const taskToFocus = pendingChange.task
     try {
-      await onConfirmScheduleChange(
-        pendingChange.task,
-        pendingChange.operation,
-        pendingChange.preview,
-      )
-      setPendingChange(undefined)
+      await pendingChange.controller.confirm()
     } catch (error) {
-      setPendingChange(undefined)
-      setErrorMessage(resolveCalendarScheduleError(error, t))
+      if (isMountedRef.current && !isProjectTaskDirectScheduleCancelled(error)) {
+        setErrorMessage(resolveCalendarScheduleError(error, t))
+      }
     } finally {
-      setIsApplying(false)
-      pendingFocusTaskKeyRef.current = createTaskKey(taskToFocus)
+      if (pendingChangeRef.current?.controller.token === pendingChange.controller.token) {
+        pendingChangeRef.current = undefined
+      }
+      if (activeScheduleHandleRef.current?.token === pendingChange.controller.token) {
+        activeScheduleHandleRef.current = undefined
+      }
+      if (isMountedRef.current) {
+        setPendingChange((current) =>
+          current?.controller.token === pendingChange.controller.token ? undefined : current
+        )
+        setIsApplying(false)
+        pendingFocusTaskKeyRef.current = createTaskKey(taskToFocus)
+      }
     }
   }
 
@@ -424,7 +472,13 @@ export function TaskCalendarView({
         <CalendarSchedulePreview
           isApplying={isApplying}
           onCancel={() => {
-            if (!isApplying) setPendingChange(undefined)
+            if (isApplying) return
+            pendingChange.controller.cancel()
+            if (activeScheduleHandleRef.current?.token === pendingChange.controller.token) {
+              activeScheduleHandleRef.current = undefined
+            }
+            pendingChangeRef.current = undefined
+            setPendingChange(undefined)
           }}
           onConfirm={() => void confirmScheduleChange()}
           pending={pendingChange}
@@ -577,7 +631,7 @@ function CalendarSchedulePreview({
         </h2>
         <p className="mt-1 text-sm text-[#667085]">{resolveWorkItemTitle(pending.task)}</p>
         <ul className="mt-4 grid gap-3">
-          {pending.preview.impacts.map((impact) => (
+          {pending.controller.preview.impacts.map((impact) => (
             <li className="rounded-lg border border-[#d8dde5] bg-[#f8fafb] p-3" key={`${impact.teamId}:${impact.workItemId}`}>
               <div className="flex items-center justify-between gap-3">
                 <span className="font-mono text-xs font-semibold text-[#344054]">{impact.workItemId}</span>
@@ -595,14 +649,14 @@ function CalendarSchedulePreview({
             </li>
           ))}
         </ul>
-        <TaskSchedulePreviewMetadata preview={pending.preview} t={t} />
-        {pending.preview.warnings.length > 0 ? (
+        <TaskSchedulePreviewMetadata preview={pending.controller.preview} t={t} />
+        {pending.controller.preview.warnings.length > 0 ? (
           <div className="mt-4 rounded-lg border border-[#f4d38b] bg-[#fffaeb] p-3" role="status">
             <p className="text-xs font-bold uppercase tracking-wide text-[#93370d]">
               {t('tasks.schedule.warnings')}
             </p>
             <ul className="mt-1 list-disc pl-5 text-sm text-[#93370d]">
-              {pending.preview.warnings.map((warning) => (
+              {pending.controller.preview.warnings.map((warning) => (
                 <li key={warning}>{resolveCalendarScheduleWarning(warning, t)}</li>
               ))}
             </ul>
@@ -620,7 +674,7 @@ function CalendarSchedulePreview({
           <button
             className="rounded-md bg-[var(--workbench-primary)] px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
             data-modal-initial-focus
-            disabled={isApplying || pending.preview.conflicts.length > 0}
+            disabled={isApplying || pending.controller.preview.conflicts.length > 0}
             onClick={onConfirm}
             type="button"
           >

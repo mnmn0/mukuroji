@@ -190,7 +190,7 @@ export function useFocusQueueActions({
     patch: { assigneeUserId?: string; workflowStatusId?: string },
   ): Promise<void> => {
     if (!accessToken) return
-    const cacheScope = createFocusItemCacheRevalidationScope(item)
+    const cacheScope = createFocusItemCacheRevalidationScope(item, true)
     await runItemAction(item.id, action, cacheScope, async () => {
       await guardAuthenticatedRequest(mutationRunner.run(
         `focus:${action}:${item.workItem.teamId}:${item.workItem.id}`,
@@ -456,12 +456,19 @@ function createPendingKey(itemId: string, action: FocusQueueActionId): string {
   return `${itemId}\0${action}`
 }
 
-/** Creates the canonical cache scope for one direct Focus Work Item action. */
+/**
+ * Creates the canonical cache scope for one direct Focus Work Item action.
+ *
+ * @param item - Focus item whose canonical Work Item projections may be stale.
+ * @param includePlanning - Whether the Workspace Planning snapshot must revalidate.
+ * @returns Cache scope covering the affected Team and Project projections.
+ */
 function createFocusItemCacheRevalidationScope(
   item: FocusItem,
+  includePlanning = false,
 ): FocusCacheRevalidationScope {
   return {
-    includePlanning: false,
+    includePlanning,
     projectIds: item.workItem.assignedProjectId
       ? [item.workItem.assignedProjectId]
       : [],
