@@ -251,6 +251,9 @@ export function evaluateTriageAdmission(
       policyId: slaPolicy.id,
       dueAt: slaDueAt.toISOString(),
       ...(escalationDueAt ? { escalationDueAt: escalationDueAt.toISOString() } : {}),
+      ...(slaPolicy.escalationOwnerUserId
+        ? { escalationOwnerUserId: normalizeTriageMemberKey(slaPolicy.escalationOwnerUserId) }
+        : {}),
     }
   }
   return {

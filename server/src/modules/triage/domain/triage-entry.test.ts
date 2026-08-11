@@ -136,6 +136,7 @@ describe('triage entry state machine', () => {
         policyId: 'form-sla',
         dueAt: '2026-08-09T00:30:00.000Z',
         escalationDueAt: '2026-08-09T00:45:00.000Z',
+        escalationOwnerUserId: 'manager@example.com',
       },
       retention: { expiresAt: '2026-11-07T00:00:00.000Z' },
     })

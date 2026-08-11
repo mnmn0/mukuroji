@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   createMutationFingerprint,
   createMutationRequestRunner,
@@ -78,13 +78,27 @@ export type TriageMutationController = {
 export function useTriageMutations(
   options: UseTriageMutationsOptions,
 ): TriageMutationController {
-  const runner = useRef(createMutationRequestRunner()).current
+  const [runner] = useState(createMutationRequestRunner)
+  const activeScope = useRef<{ teamId?: string; active: boolean }>({
+    teamId: options.teamId,
+    active: true,
+  })
+  const [stateTeamId, setStateTeamId] = useState(options.teamId)
   const [error, setError] = useState<unknown>()
   const [pendingEntryId, setPendingEntryId] = useState<string>()
   const [isBulkPending, setIsBulkPending] = useState(false)
   const [isSavingSettings, setIsSavingSettings] = useState(false)
   const [didSaveSettings, setDidSaveSettings] = useState(false)
   const [bulkResults, setBulkResults] = useState<readonly TriageBulkItemResult[]>([])
+
+  useEffect(() => {
+    const scope = { teamId: options.teamId, active: true }
+    activeScope.current = scope
+    runner.discardRetainedContexts()
+    return () => {
+      scope.active = false
+    }
+  }, [options.teamId, runner])
 
   const applyAction = useCallback(async (
     entryId: string,
@@ -93,20 +107,28 @@ export function useTriageMutations(
     if (!options.accessToken || !options.teamId) {
       throw new TriageApiError(401, 'Team triage requires an authenticated session.')
     }
+    const teamId = options.teamId
+    const scope = activeScope.current
+    const isCurrentScope = () => activeScope.current === scope && scope.active && scope.teamId === teamId
 
+    setStateTeamId(teamId)
     setError(undefined)
+    setIsBulkPending(false)
+    setIsSavingSettings(false)
+    setDidSaveSettings(false)
+    setBulkResults([])
     setPendingEntryId(entryId)
     try {
       const fingerprint = await createMutationFingerprint(
-        options.teamId,
+        teamId,
         entryId,
         JSON.stringify(input),
       )
       const receipt = await runner.run(
-        `triage-entry:${options.teamId}:${entryId}:${input.action}`,
+        `triage-entry:${teamId}:${entryId}:${input.action}`,
         fingerprint,
         (context) => applyTriageEntryAction(
-          options.teamId ?? '',
+          teamId,
           entryId,
           input,
           options.accessToken ?? '',
@@ -114,12 +136,12 @@ export function useTriageMutations(
         ),
         shouldRetainMutationContext,
       )
-      await options.updateEntry(receipt.entry)
-      await options.refreshQueue()
+      if (isCurrentScope()) await options.updateEntry(receipt.entry)
+      if (isCurrentScope()) await options.refreshQueue()
       return receipt.entry
     } catch (actionError) {
-      setError(actionError)
-      if (isConflict(actionError)) {
+      if (isCurrentScope()) setError(actionError)
+      if (isCurrentScope() && isConflict(actionError)) {
         await Promise.all([
           options.refreshEntry().catch(() => undefined),
           options.refreshQueue().catch(() => undefined),
@@ -127,7 +149,7 @@ export function useTriageMutations(
       }
       throw actionError
     } finally {
-      setPendingEntryId(undefined)
+      if (isCurrentScope()) setPendingEntryId(undefined)
     }
   }, [options, runner])
 
@@ -135,35 +157,42 @@ export function useTriageMutations(
     if (!options.accessToken || !options.teamId) {
       throw new TriageApiError(401, 'Team triage requires an authenticated session.')
     }
+    const teamId = options.teamId
+    const scope = activeScope.current
+    const isCurrentScope = () => activeScope.current === scope && scope.active && scope.teamId === teamId
 
+    setStateTeamId(teamId)
     setError(undefined)
+    setPendingEntryId(undefined)
     setBulkResults([])
+    setIsSavingSettings(false)
+    setDidSaveSettings(false)
     setIsBulkPending(true)
     try {
       const fingerprint = await createMutationFingerprint(
-        options.teamId,
+        teamId,
         JSON.stringify(input),
       )
       const results = await runner.run(
-        `triage-bulk:${options.teamId}:${input.operation.action}`,
+        `triage-bulk:${teamId}:${input.operation.action}`,
         fingerprint,
         (context) => applyTriageBulkAction(
-          options.teamId ?? '',
+          teamId,
           input,
           options.accessToken ?? '',
           context,
         ),
         shouldRetainMutationContext,
       )
-      setBulkResults(results.results)
-      await options.refreshQueue()
-      await options.refreshEntry().catch(() => undefined)
+      if (isCurrentScope()) setBulkResults(results.results)
+      if (isCurrentScope()) await options.refreshQueue()
+      if (isCurrentScope()) await options.refreshEntry().catch(() => undefined)
       return results.results
     } catch (bulkError) {
-      setError(bulkError)
+      if (isCurrentScope()) setError(bulkError)
       throw bulkError
     } finally {
-      setIsBulkPending(false)
+      if (isCurrentScope()) setIsBulkPending(false)
     }
   }, [options, runner])
 
@@ -171,55 +200,63 @@ export function useTriageMutations(
     if (!options.accessToken || !options.teamId) {
       throw new TriageApiError(401, 'Team triage requires an authenticated session.')
     }
+    const teamId = options.teamId
+    const scope = activeScope.current
+    const isCurrentScope = () => activeScope.current === scope && scope.active && scope.teamId === teamId
 
+    setStateTeamId(teamId)
     setError(undefined)
+    setPendingEntryId(undefined)
+    setIsBulkPending(false)
     setDidSaveSettings(false)
+    setBulkResults([])
     setIsSavingSettings(true)
     try {
       const fingerprint = await createMutationFingerprint(
-        options.teamId,
+        teamId,
         JSON.stringify(input),
       )
       const settings = await runner.run(
-        `triage-settings:${options.teamId}`,
+        `triage-settings:${teamId}`,
         fingerprint,
         (context) => updateTriageSettings(
-          options.teamId ?? '',
+          teamId,
           input,
           options.accessToken ?? '',
           context,
         ),
         shouldRetainMutationContext,
       )
-      await options.updateSettings(settings)
-      setDidSaveSettings(true)
+      if (isCurrentScope()) await options.updateSettings(settings)
+      if (isCurrentScope()) setDidSaveSettings(true)
       return settings
     } catch (settingsError) {
-      setError(settingsError)
-      if (isConflict(settingsError)) {
+      if (isCurrentScope()) setError(settingsError)
+      if (isCurrentScope() && isConflict(settingsError)) {
         await options.refreshSettings().catch(() => undefined)
       }
       throw settingsError
     } finally {
-      setIsSavingSettings(false)
+      if (isCurrentScope()) setIsSavingSettings(false)
     }
   }, [options, runner])
 
   return {
     applyAction,
     applyBulkAction,
-    bulkResults,
+    bulkResults: stateTeamId === options.teamId ? bulkResults : [],
     clearFeedback: () => {
+      setStateTeamId(options.teamId)
       setBulkResults([])
       setDidSaveSettings(false)
       setError(undefined)
       runner.discardRetainedContexts()
     },
-    error,
-    didSaveSettings,
-    isBulkPending,
-    isSavingSettings,
-    pendingEntryId,
+    error: stateTeamId === options.teamId ? error : undefined,
+    didSaveSettings: stateTeamId === options.teamId && didSaveSettings,
+    isBulkPending: stateTeamId === options.teamId && isBulkPending,
+    isSavingSettings: stateTeamId === options.teamId && isSavingSettings,
+    pendingEntryId: stateTeamId === options.teamId ? pendingEntryId : undefined,
     saveSettings,
   }
 }

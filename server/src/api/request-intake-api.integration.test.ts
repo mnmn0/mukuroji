@@ -694,6 +694,17 @@ test.each([
       assigneeUserId: 'sato@example.com',
     },
     expectedTriageState: 'pending',
+    expectedTransactionItems: 7,
+  },
+  {
+    name: 'unassign',
+    body: {
+      action: 'assign' as const,
+      expectedRevision: 1,
+      assigneeUserId: null,
+    },
+    expectedTriageState: 'pending',
+    expectedTransactionItems: 6,
   },
   {
     name: 'request-more-info',
@@ -703,6 +714,7 @@ test.each([
       message: 'Please provide an exact timestamp.',
     },
     expectedTriageState: 'needs-information',
+    expectedTransactionItems: 3,
   },
   {
     name: 'reject',
@@ -712,10 +724,12 @@ test.each([
       reason: 'This request is outside our support scope.',
     },
     expectedTriageState: 'declined',
+    expectedTransactionItems: 3,
   },
 ])('commits legacy Request $name and matching Triage transition together', async ({
   body,
   expectedTriageState,
+  expectedTransactionItems,
 }) => {
   const submission = createLegacySubmission()
   const entry = createLegacyTriageEntry(submission)
@@ -762,7 +776,7 @@ test.each([
   expect(response.status).toBe(200)
   expect(responseCorrelationId).toBeString()
   expect(receivedAction).toEqual(body)
-  expect(receivedTransactionItems).toHaveLength(body.action === 'assign' ? 7 : 3)
+  expect(receivedTransactionItems).toHaveLength(expectedTransactionItems)
   const triageUpdate = receivedTransactionItems?.find((item) =>
     item.Update?.ConditionExpression === '#revision = :expectedRevision AND teamId = :teamId'
   )
@@ -797,10 +811,12 @@ test.each([
       metadata: {
         teamId: entry.teamId,
         triageEntryId: entry.id,
-        notificationCandidates: [{
-          memberKey: body.assigneeUserId,
-          reason: 'triage-assignment',
-        }],
+        notificationCandidates: body.assigneeUserId
+          ? [{
+              memberKey: body.assigneeUserId,
+              reason: 'triage-assignment',
+            }]
+          : [],
       },
       outboxStatus: 'pending',
       sourceDetails: {

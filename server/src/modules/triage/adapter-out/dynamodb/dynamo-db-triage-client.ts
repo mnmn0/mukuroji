@@ -123,6 +123,8 @@ export type DynamoDbTriageClientOptions = {
 export type TriageAdmissionTransactionContribution = {
   /** Entry after current Team routing and service configuration is applied. */
   entry: TriageEntry
+  /** Configuration revision used for the admission evaluation, when available. */
+  configurationRevision?: number
   /** Configuration guard or reservation followed by validated live-reference conditions. */
   transactItems: TriageTransactionItems
   /** Relative item indexes whose conditional races require fresh live validation. */
@@ -675,6 +677,7 @@ export class DynamoDbTriageClient implements TriageClient {
       ]
       return {
         entry: evaluation.entry,
+        configurationRevision: configuration.revision,
         transactItems,
         retryableConflictItemIndexes: transactItems.map((_, index) => index),
       }
@@ -707,6 +710,7 @@ export class DynamoDbTriageClient implements TriageClient {
     }, ...validation.transactItems]
     return {
       entry: evaluation.entry,
+      configurationRevision: configuration.revision,
       transactItems,
       retryableConflictItemIndexes: transactItems.map((_, index) => index),
     }
@@ -904,6 +908,27 @@ export class DynamoDbTriageClient implements TriageClient {
     const baseEntry = createManualEntry(workspaceId, teamId, actor, input, this.id(), now)
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const admission = await this.prepareEntryAdmission(baseEntry)
+      if (
+        input.preparedConfigurationRevision !== undefined &&
+        (!Number.isSafeInteger(input.preparedConfigurationRevision) ||
+          input.preparedConfigurationRevision < 0)
+      ) {
+        throw new TriageError(
+          400,
+          'InvalidTriageInput',
+          'The prepared Triage configuration revision is invalid.',
+        )
+      }
+      if (
+        input.preparedConfigurationRevision !== undefined &&
+        admission.configurationRevision !== input.preparedConfigurationRevision
+      ) {
+        throw new TriageError(
+          409,
+          'TriageConfigurationConflict',
+          'Triage settings changed while the handoff was prepared. Retry the request.',
+        )
+      }
       const entry = admission.entry
       requireSamePreparedManualProject(input, entry)
       const transactItems = createTriageEntryTransactionItems({
@@ -1025,11 +1050,13 @@ export class DynamoDbTriageClient implements TriageClient {
     const replay = await this.readReceipt(workspaceId, entryId, 'activity', idempotency)
     if (replay) return replay
     const current = await this.getEntryForMutation(workspaceId, teamId, entryId)
+    const processingNow = this.now().toISOString()
     const contribution = createTriageSourceActivityTransactionItems({
       tableName: this.tableName,
       entry: current,
       activity,
       idempotency,
+      now: processingNow,
       wakeShardCount: this.wakeShardCount,
     })
     try {
@@ -1476,6 +1503,10 @@ function matchesQueueFilter(
   now: Date,
 ): boolean {
   if (entry.workspaceId !== workspaceId || entry.teamId !== teamId) return false
+  if (
+    input.visibleProjectIds !== undefined &&
+    (entry.projectId === undefined || !input.visibleProjectIds.includes(entry.projectId))
+  ) return false
   if (input.state && entry.state !== input.state) return false
   if (input.sourceKind && entry.source.kind !== input.sourceKind) return false
   const normalizedEntryOwner = entry.ownerUserId?.trim().toLowerCase()

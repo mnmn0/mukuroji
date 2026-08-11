@@ -141,6 +141,8 @@ export type TriageSla = {
   breachedAt?: string
   /** The ISO 8601 instant when the entry should be escalated. */
   escalationDueAt?: string
+  /** The escalation recipient captured when the SLA was admitted. */
+  escalationOwnerUserId?: string
   /** The ISO 8601 instant when escalation was recorded. */
   escalatedAt?: string
 }
@@ -609,6 +611,8 @@ export type CreateManualTriageEntryInput = {
   slaDueAt?: string
   /** Optional escalation deadline derived from the selected SLA policy. */
   escalationDueAt?: string
+  /** Server-only configuration revision observed while preparing this handoff. */
+  preparedConfigurationRevision?: number
   /** The content retention deadline. */
   retentionExpiresAt: string
 }

@@ -1047,6 +1047,50 @@ describe('DynamoDbTriageClient queue indexes', () => {
     }
   })
 
+  test('fills a restricted Project queue page before returning visible entries', async () => {
+    const hiddenEntry = createEntry()
+    hiddenEntry.id = 'triage-hidden-project'
+    hiddenEntry.source.sourceId = 'message-hidden-project'
+    hiddenEntry.projectId = 'hidden-project'
+    const visibleEntry = createEntry()
+    visibleEntry.id = 'triage-visible-project'
+    visibleEntry.source.sourceId = 'message-visible-project'
+    visibleEntry.projectId = 'visible-project'
+    const hiddenRow = createTriageEntryTransactionItems({
+      tableName: 'RequestIntakeTable',
+      entry: hiddenEntry,
+      inputFingerprint: createTriageInputFingerprint({ sourceId: hiddenEntry.source.sourceId }),
+    })[0]?.Put?.Item
+    const visibleRow = createTriageEntryTransactionItems({
+      tableName: 'RequestIntakeTable',
+      entry: visibleEntry,
+      inputFingerprint: createTriageInputFingerprint({ sourceId: visibleEntry.source.sourceId }),
+    })[0]?.Put?.Item
+    if (!hiddenRow || !visibleRow) throw new TypeError('Expected stored Project-scoped entries.')
+    const harness = createHarness([
+      {},
+      {
+        Items: [
+          { scopeKey: 'WORKSPACE#workspace-1', recordKey: 'TRIAGE#triage-hidden-project' },
+          { scopeKey: 'WORKSPACE#workspace-1', recordKey: 'TRIAGE#triage-visible-project' },
+        ],
+      },
+      { Item: hiddenRow },
+      { Item: visibleRow },
+    ])
+
+    try {
+      const page = await harness.client.listEntries('workspace-1', 'support', {
+        limit: 1,
+        visibleProjectIds: ['visible-project'],
+      })
+
+      expect(page.entries.map(({ id }) => id)).toEqual(['triage-visible-project'])
+    } finally {
+      harness.restore()
+    }
+  })
+
   test('falls back from an unavailable owner index but not from unrelated validation failures', async () => {
     const missingIndex = new Error('The table does not have the specified index.')
     missingIndex.name = 'ValidationException'
@@ -1635,6 +1679,48 @@ describe('DynamoDbTriageClient source admission', () => {
         revision: 6,
         configuration: { rotations: [{ nextIndex: 0 }] },
       })
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('rejects a manual handoff prepared against an older configuration revision', async () => {
+    const harness = createHarness([
+      {},
+      {
+        Item: {
+          entryType: 'triage-configuration',
+          configuration: createConfigurationSnapshot(5),
+          revision: 5,
+        },
+      },
+    ])
+
+    try {
+      await expect(harness.client.createManualHandoff(
+        'workspace-1',
+        'support',
+        { id: 'operator@example.com' },
+        {
+          sourceId: 'handoff-stale-configuration',
+          title: 'Manual support request',
+          body: 'Please investigate this request.',
+          requesterDisplayName: 'Internal operator',
+          projectId: 'stale-project',
+          routingReason: 'Matched a rule that was removed.',
+          ownerUserId: 'stale-owner@example.com',
+          preparedConfigurationRevision: 4,
+          retentionExpiresAt: '2027-08-09T00:00:00.000Z',
+        },
+        {
+          key: 'manual-stale-configuration',
+          fingerprint: createTriageInputFingerprint({ sourceId: 'handoff-stale-configuration' }),
+        },
+      )).rejects.toMatchObject({
+        code: 'TriageConfigurationConflict',
+        status: 409,
+      })
+      expect(harness.commands.map(({ name }) => name)).toEqual(['GetCommand', 'GetCommand'])
     } finally {
       harness.restore()
     }

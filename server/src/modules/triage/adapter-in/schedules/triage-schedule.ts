@@ -279,6 +279,8 @@ async function readEscalationOwnerUserId(
   tableName: string,
   entry: TriageEntry,
 ): Promise<string | undefined> {
+  const snapshotOwnerUserId = readTriageNotificationMemberKey(entry.sla?.escalationOwnerUserId)
+  if (snapshotOwnerUserId) return snapshotOwnerUserId
   const policyId = entry.sla?.policyId
   if (!policyId) return undefined
   const response = await documentClient.send(new GetCommand({
@@ -296,13 +298,7 @@ async function readEscalationOwnerUserId(
   )
   if (!configuration) return undefined
   const policy = configuration.slaPolicies.find((candidate) => candidate.id === policyId)
-  if (!policy) {
-    throw new TriageError(
-      500,
-      'InvalidTriageConfiguration',
-      'The Triage SLA policy referenced by the entry is unavailable.',
-    )
-  }
+  if (!policy) return undefined
   return readTriageNotificationMemberKey(policy.escalationOwnerUserId)
 }
 

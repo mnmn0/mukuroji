@@ -5735,10 +5735,15 @@ routeApp.post('/api/request-submissions/:submissionId/actions', async (c) => {
     }
     if (body.action !== 'convert') {
       if (body.action === 'assign') {
-        if (typeof body.assigneeUserId !== 'string' || !body.assigneeUserId.trim()) {
+        if (
+          body.assigneeUserId !== null &&
+          (typeof body.assigneeUserId !== 'string' || !body.assigneeUserId.trim())
+        ) {
           throw new RequestIntakeError(400, 'InvalidRequestIntakeInput', 'Request assignee is required.')
         }
-        await requireActiveWorkspaceAssignee(principal.directoryId, body.assigneeUserId)
+        if (typeof body.assigneeUserId === 'string') {
+          await requireActiveWorkspaceAssignee(principal.directoryId, body.assigneeUserId)
+        }
       }
       const submission = await workItemDependencies.requestIntake.getSubmission(
         principal.directoryId,
@@ -17846,6 +17851,7 @@ async function prepareTriageManualHandoff(
           ...(escalationDueAt ? { escalationDueAt: escalationDueAt.toISOString() } : {}),
         }
       : {}),
+    preparedConfigurationRevision: configuration.revision,
     retentionExpiresAt: retentionExpiresAt.toISOString(),
   }
 }

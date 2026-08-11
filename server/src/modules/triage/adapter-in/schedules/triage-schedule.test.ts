@@ -474,6 +474,136 @@ describe('triage schedule adapter', () => {
     }
   })
 
+  test('uses the admission-time escalation recipient after its policy is removed', async () => {
+    const entry = createEntry()
+    entry.state = 'pending'
+    delete entry.snoozedUntil
+    entry.sla = {
+      policyId: 'removed-sla',
+      dueAt: '2026-08-09T00:05:00.000Z',
+      escalationDueAt: '2026-08-09T00:09:00.000Z',
+      escalationOwnerUserId: 'snapshotted@example.com',
+    }
+    entry.capabilities = createTriageCapabilities(entry)
+    const storedItem = createTriageEntryTransactionItems({
+      tableName: 'RequestIntakeTable',
+      entry,
+      inputFingerprint: createTriageInputFingerprint({ sourceId: entry.source.sourceId }),
+    })[0]?.Put?.Item
+    if (!storedItem) throw new TypeError('Expected a stored triage entry fixture.')
+    const harness = createHarness((commandName) => {
+      if (commandName === 'QueryCommand') {
+        return { Items: [{ scopeKey: 'WORKSPACE#workspace-1', recordKey: 'TRIAGE#triage-1' }] }
+      }
+      if (commandName === 'GetCommand') return { Item: storedItem }
+      return {}
+    })
+
+    try {
+      const result = await runTriageSchedule({
+        documentClient: harness.documentClient,
+        tableName: 'RequestIntakeTable',
+        auditTableName: 'AuditEventsTable',
+        auditRetentionDays: 365,
+        wakeIndexName: 'triage-wake-index',
+        wakeShardCount: 8,
+        batchSize: 1,
+        now: '2026-08-09T00:10:00.000Z',
+      })
+
+      expect(result).toMatchObject({ breachedEntries: 1, escalatedEntries: 1, conflicts: 0 })
+      expect(harness.calls).toEqual(['QueryCommand', 'GetCommand', 'TransactWriteCommand'])
+      expect(harness.inputs.at(-1)).toEqual(expect.objectContaining({
+        TransactItems: expect.arrayContaining([
+          expect.objectContaining({
+            Put: expect.objectContaining({
+              Item: expect.objectContaining({
+                eventType: 'triage.escalated',
+                metadata: expect.objectContaining({
+                  notificationCandidates: [{
+                    memberKey: 'snapshotted@example.com',
+                    reason: 'triage-escalation',
+                  }],
+                }),
+              }),
+            }),
+          }),
+        ]),
+      }))
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('marks an escalated entry when its legacy SLA policy has been deleted', async () => {
+    const entry = createEntry()
+    entry.state = 'pending'
+    delete entry.snoozedUntil
+    entry.sla = {
+      policyId: 'deleted-sla',
+      dueAt: '2026-08-09T00:05:00.000Z',
+      escalationDueAt: '2026-08-09T00:09:00.000Z',
+    }
+    entry.capabilities = createTriageCapabilities(entry)
+    const storedItem = createTriageEntryTransactionItems({
+      tableName: 'RequestIntakeTable',
+      entry,
+      inputFingerprint: createTriageInputFingerprint({ sourceId: entry.source.sourceId }),
+    })[0]?.Put?.Item
+    if (!storedItem) throw new TypeError('Expected a stored triage entry fixture.')
+    const harness = createHarness((commandName, input) => {
+      if (commandName === 'QueryCommand') {
+        return { Items: [{ scopeKey: 'WORKSPACE#workspace-1', recordKey: 'TRIAGE#triage-1' }] }
+      }
+      if (commandName === 'GetCommand') {
+        const key = isRecord(input.Key) ? input.Key : {}
+        if (key.recordKey === 'TRIAGE_CONFIG#TEAM#platform') {
+          return {
+            Item: {
+              entryType: 'triage-configuration',
+              revision: 2,
+              configuration: {
+                schemaVersion: 1,
+                workspaceId: 'workspace-1',
+                teamId: 'platform',
+                rules: [],
+                rotations: [],
+                slaPolicies: [],
+                allowedBulkActions: ['assign', 'decline', 'snooze'],
+                retentionDays: 365,
+                revision: 2,
+                updatedAt: '2026-08-09T00:00:00.000Z',
+              },
+            },
+          }
+        }
+        return { Item: storedItem }
+      }
+      return {}
+    })
+
+    try {
+      await expect(runTriageSchedule({
+        documentClient: harness.documentClient,
+        tableName: 'RequestIntakeTable',
+        auditTableName: 'AuditEventsTable',
+        auditRetentionDays: 365,
+        wakeIndexName: 'triage-wake-index',
+        wakeShardCount: 8,
+        batchSize: 1,
+        now: '2026-08-09T00:10:00.000Z',
+      })).resolves.toMatchObject({ breachedEntries: 1, escalatedEntries: 1, conflicts: 0 })
+      expect(harness.calls).toEqual([
+        'QueryCommand',
+        'GetCommand',
+        'GetCommand',
+        'TransactWriteCommand',
+      ])
+    } finally {
+      harness.restore()
+    }
+  })
+
   test('fails closed when the escalation configuration row is malformed', async () => {
     const entry = createEntry()
     entry.state = 'pending'

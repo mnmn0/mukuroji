@@ -123,11 +123,26 @@ function TriageSettingsEditor({
       sourceKinds: [...rule.sourceKinds],
     })),
   )
+  const [ruleSourceKindDrafts, setRuleSourceKindDrafts] = useState<Record<string, string>>(() =>
+    Object.fromEntries(configuration.rules.map((rule) => [rule.id, rule.sourceKinds.join(', ')])),
+  )
+  const [ruleKeywordDrafts, setRuleKeywordDrafts] = useState<Record<string, string>>(() =>
+    Object.fromEntries(configuration.rules.map((rule) => [rule.id, rule.keywords.join(', ')])),
+  )
+  const [ruleOwnerDrafts, setRuleOwnerDrafts] = useState<Record<string, string>>(() =>
+    Object.fromEntries(configuration.rules.map((rule) => [rule.id, formatOwnerStrategy(rule.owner)])),
+  )
   const [rotations, setRotations] = useState<TriageOwnerRotation[]>(() =>
     configuration.rotations.map((rotation) => ({
       ...rotation,
       memberUserIds: [...rotation.memberUserIds],
     })),
+  )
+  const [rotationMemberDrafts, setRotationMemberDrafts] = useState<Record<string, string>>(() =>
+    Object.fromEntries(configuration.rotations.map((rotation) => [
+      rotation.id,
+      rotation.memberUserIds.join(', '),
+    ])),
   )
   const [slaPolicies, setSlaPolicies] = useState<TriageSlaPolicy[]>(() =>
     configuration.slaPolicies.map((policy) => ({
@@ -135,24 +150,76 @@ function TriageSettingsEditor({
       sourceKinds: [...policy.sourceKinds],
     })),
   )
+  const [slaSourceKindDrafts, setSlaSourceKindDrafts] = useState<Record<string, string>>(() =>
+    Object.fromEntries(configuration.slaPolicies.map((policy) => [
+      policy.id,
+      policy.sourceKinds.join(', '),
+    ])),
+  )
   const [allowedBulkActions, setAllowedBulkActions] = useState<
     TriageBulkOperation['action'][]
   >(() => [...configuration.allowedBulkActions])
   const [retentionDays, setRetentionDays] = useState(configuration.retentionDays)
   const [localError, setLocalError] = useState(false)
 
+  /** Adds an empty routing rule while preserving raw text drafts. */
+  const addRule = () => {
+    const id = createUniqueTriageConfigurationId(
+      'rule',
+      rules.map((rule) => rule.id),
+    )
+    setRules((current) => [...current, createEmptyRule(configuration.teamId, current.length, id)])
+    setRuleSourceKindDrafts((current) => ({ ...current, [id]: '' }))
+    setRuleKeywordDrafts((current) => ({ ...current, [id]: '' }))
+    setRuleOwnerDrafts((current) => ({ ...current, [id]: 'unowned' }))
+  }
+
+  /** Adds an empty owner rotation while preserving raw member text. */
+  const addRotation = () => {
+    const id = createUniqueTriageConfigurationId(
+      'rotation',
+      rotations.map((rotation) => rotation.id),
+    )
+    setRotations((current) => [...current, {
+      id,
+      memberUserIds: [],
+      name: '',
+      nextIndex: 0,
+    }])
+    setRotationMemberDrafts((current) => ({ ...current, [id]: '' }))
+  }
+
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (!canManage || !onSave || isSaving) return
     setLocalError(false)
     try {
+      const submittedRules = rules.map((rule, index) => ({
+        ...rule,
+        keywords: parseList(ruleKeywordDrafts[rule.id] ?? rule.keywords.join(', ')),
+        order: index,
+        owner: parseOwnerStrategy(ruleOwnerDrafts[rule.id] ?? formatOwnerStrategy(rule.owner)),
+        sourceKinds: parseSourceKinds(
+          ruleSourceKindDrafts[rule.id] ?? rule.sourceKinds.join(', '),
+        ),
+      }))
+      const submittedRotations = rotations.map((rotation) => replaceTriageRotationMembers(
+        rotation,
+        parseList(rotationMemberDrafts[rotation.id] ?? rotation.memberUserIds.join(', ')),
+      ))
+      const submittedSlaPolicies = slaPolicies.map((policy) => ({
+        ...policy,
+        sourceKinds: parseSourceKinds(
+          slaSourceKindDrafts[policy.id] ?? policy.sourceKinds.join(', '),
+        ),
+      }))
       await onSave({
         allowedBulkActions,
         expectedRevision: configuration.revision,
         retentionDays,
-        rotations,
-        rules: rules.map((rule, index) => ({ ...rule, order: index })),
-        slaPolicies,
+        rotations: submittedRotations,
+        rules: submittedRules,
+        slaPolicies: submittedSlaPolicies,
       })
     } catch {
       setLocalError(true)
@@ -176,17 +243,7 @@ function TriageSettingsEditor({
 
       <SettingsSection
         action={canManage ? (
-          <button className="workbench-button-secondary min-h-10 px-4" onClick={() => setRules((current) => [
-            ...current,
-            createEmptyRule(
-              configuration.teamId,
-              current.length,
-              createUniqueTriageConfigurationId(
-                'rule',
-                current.map((rule) => rule.id),
-              ),
-            ),
-          ])} type="button">{t('triage.settings.addRule')}</button>
+          <button className="workbench-button-secondary min-h-10 px-4" onClick={addRule} type="button">{t('triage.settings.addRule')}</button>
         ) : undefined}
         description={t('triage.settings.rulesDescription')}
         title={t('triage.settings.rules')}
@@ -229,14 +286,14 @@ function TriageSettingsEditor({
                 <SettingsInput
                   disabled={!canManage}
                   label={t('triage.settings.sourceKinds')}
-                  value={rule.sourceKinds.join(', ')}
-                  onChange={(value) => setRules(updateAt(rules, index, { ...rule, sourceKinds: parseSourceKinds(value) }))}
+                  value={ruleSourceKindDrafts[rule.id] ?? rule.sourceKinds.join(', ')}
+                  onChange={(value) => setRuleSourceKindDrafts((current) => ({ ...current, [rule.id]: value }))}
                 />
                 <SettingsInput
                   disabled={!canManage}
                   label={t('triage.settings.keywords')}
-                  value={rule.keywords.join(', ')}
-                  onChange={(value) => setRules(updateAt(rules, index, { ...rule, keywords: parseList(value) }))}
+                  value={ruleKeywordDrafts[rule.id] ?? rule.keywords.join(', ')}
+                  onChange={(value) => setRuleKeywordDrafts((current) => ({ ...current, [rule.id]: value }))}
                 />
                 <SettingsInput
                   disabled={!canManage}
@@ -253,8 +310,8 @@ function TriageSettingsEditor({
                 <SettingsInput
                   disabled={!canManage}
                   label={t('triage.settings.ownerStrategy')}
-                  value={formatOwnerStrategy(rule.owner)}
-                  onChange={(value) => setRules(updateAt(rules, index, { ...rule, owner: parseOwnerStrategy(value) }))}
+                  value={ruleOwnerDrafts[rule.id] ?? formatOwnerStrategy(rule.owner)}
+                  onChange={(value) => setRuleOwnerDrafts((current) => ({ ...current, [rule.id]: value }))}
                 />
               </div>
             </div>
@@ -295,18 +352,7 @@ function TriageSettingsEditor({
 
       <SettingsSection
         action={canManage ? (
-          <button className="workbench-button-secondary min-h-10 px-4" onClick={() => setRotations((current) => [
-            ...current,
-            {
-              id: createUniqueTriageConfigurationId(
-                'rotation',
-                current.map((rotation) => rotation.id),
-              ),
-              memberUserIds: [],
-              name: '',
-              nextIndex: 0,
-            },
-          ])} type="button">{t('triage.settings.addRotation')}</button>
+          <button className="workbench-button-secondary min-h-10 px-4" onClick={addRotation} type="button">{t('triage.settings.addRotation')}</button>
         ) : undefined}
         description={t('triage.settings.rotationsDescription')}
         title={t('triage.settings.rotations')}
@@ -323,12 +369,8 @@ function TriageSettingsEditor({
               <SettingsInput
                 disabled={!canManage}
                 label={t('triage.settings.rotationMembers')}
-                value={rotation.memberUserIds.join(', ')}
-                onChange={(value) => setRotations(updateAt(
-                  rotations,
-                  index,
-                  replaceTriageRotationMembers(rotation, parseList(value)),
-                ))}
+                value={rotationMemberDrafts[rotation.id] ?? rotation.memberUserIds.join(', ')}
+                onChange={(value) => setRotationMemberDrafts((current) => ({ ...current, [rotation.id]: value }))}
               />
               {canManage ? (
                 <button className="min-h-10 self-end px-3 text-sm font-semibold text-red-700" onClick={() => setRotations(removeAt(rotations, index))} type="button">
@@ -386,8 +428,8 @@ function TriageSettingsEditor({
                 <SettingsInput
                   disabled={!canManage}
                   label={t('triage.settings.sourceKinds')}
-                  value={policy.sourceKinds.join(', ')}
-                  onChange={(value) => setSlaPolicies(updateAt(slaPolicies, index, { ...policy, sourceKinds: parseSourceKinds(value) }))}
+                  value={slaSourceKindDrafts[policy.id] ?? policy.sourceKinds.join(', ')}
+                  onChange={(value) => setSlaSourceKindDrafts((current) => ({ ...current, [policy.id]: value }))}
                 />
                 <SettingsNumberInput
                   disabled={!canManage}

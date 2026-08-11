@@ -590,6 +590,7 @@ export MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE=rollout-pending
 export MUKUROJI_RESTORE_DRILL_CLEANUP_APPROVER_ROLE_ARN=arn:aws:iam::<account-id>:role/<data-owner-role>
 
 bun --filter cdk cdk diff CdkStack \
+  -c triageIndexDeploymentStage=wake \
   --parameters CognitoUserPoolId="$COGNITO_USER_POOL_ID" \
   --parameters CognitoUserPoolClientId="$COGNITO_USER_POOL_CLIENT_ID" \
   --parameters CognitoSsoUserPoolClientId="$COGNITO_SSO_USER_POOL_CLIENT_ID" \
@@ -612,6 +613,7 @@ bun --filter cdk cdk diff CdkStack \
   --parameters TaskApiAllowedOrigins=https://app.example.com
 
 bun --filter cdk cdk deploy CdkStack \
+  -c triageIndexDeploymentStage=wake \
   --parameters CognitoUserPoolId="$COGNITO_USER_POOL_ID" \
   --parameters CognitoUserPoolClientId="$COGNITO_USER_POOL_CLIENT_ID" \
   --parameters CognitoSsoUserPoolClientId="$COGNITO_SSO_USER_POOL_CLIENT_ID" \
@@ -995,5 +997,5 @@ Cleanup workflowには明示的なphysical nameを与え、approval policyの`St
 bun run cdk:build
 bun run cdk:test
 bun run cdk:synth
-bun --filter cdk cdk diff CdkStack
+bun --filter cdk cdk diff CdkStack -c triageIndexDeploymentStage=wake
 ```

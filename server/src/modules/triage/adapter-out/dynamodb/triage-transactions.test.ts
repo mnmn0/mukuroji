@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { TRIAGE_ENTRY_SCHEMA_VERSION, type TriageEntry } from '@mukuroji/contracts'
 import { createMutationAuditContext } from '../../../audit'
-import { createTriageCapabilities } from '../../domain/triage-entry'
+import { createTriageCapabilities, redactExpiredTriageEntry } from '../../domain/triage-entry'
 import {
   createTriageActionAuditIdempotencyKey,
   createTriageInputFingerprint,
@@ -498,6 +498,95 @@ describe('triage DynamoDB transaction contributions', () => {
     expect(contribution.entry.state).toBe('pending')
     expect(contribution.transactItems.map((item) => item.Put?.Item?.entryType ?? 'update'))
       .toEqual(['update', 'triage-entry-event', 'triage-entry-event', 'triage-operation-receipt'])
+  })
+
+  test('persists a delayed retention redaction audit event with a source activity', () => {
+    const expired = redactExpiredTriageEntry(
+      createEntry(),
+      '2028-08-09T00:00:00.000Z',
+    )
+    const contribution = createTriageSourceActivityTransactionItems({
+      tableName: 'RequestIntakeTable',
+      entry: expired,
+      activity: {
+        activityId: 'email-message-retained',
+        actorId: 'source:email',
+        occurredAt: '2028-08-09T00:10:00.000Z',
+        summary: 'Requester replied after retention elapsed.',
+      },
+      idempotency: {
+        key: 'email-message-retained',
+        fingerprint: createTriageInputFingerprint({ messageId: 'email-message-retained' }),
+      },
+      now: '2028-08-09T00:10:05.000Z',
+    })
+
+    expect(contribution.entry.events.map((event) => event.type)).toEqual([
+      'created',
+      'activity-received',
+      'retention-redacted',
+    ])
+    expect(contribution.transactItems).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        Put: expect.objectContaining({
+          Item: expect.objectContaining({
+            entryType: 'triage-entry-event',
+            event: expect.objectContaining({ type: 'retention-redacted' }),
+          }),
+        }),
+      }),
+      expect.objectContaining({
+        Put: expect.objectContaining({
+          Item: expect.objectContaining({
+            entryType: 'triage-operation-receipt',
+            expiresAt: Math.floor(Date.parse('2028-11-07T00:10:05.000Z') / 1_000),
+          }),
+        }),
+      }),
+    ]))
+  })
+
+  test('persists a delayed retention redaction audit event with an operator action', () => {
+    const expired = redactExpiredTriageEntry(
+      createEntry(),
+      '2028-08-09T00:00:00.000Z',
+    )
+    const contribution = createTriageActionTransactionItems({
+      tableName: 'RequestIntakeTable',
+      entry: expired,
+      action: {
+        action: 'decline',
+        expectedRevision: expired.revision,
+        reason: 'No longer actionable.',
+      },
+      actorId: 'operator@example.com',
+      now: '2028-08-09T00:10:00.000Z',
+      idempotency: {
+        key: 'decline-retained',
+        fingerprint: createTriageInputFingerprint({ entryId: expired.id, action: 'decline' }),
+      },
+      audit: { tableName: 'AuditEventsTable', retentionDays: 365 },
+      auditContext: createAssignmentAuditContext({
+        entryId: expired.id,
+        idempotencyKey: 'decline-retained',
+      }),
+    })
+
+    expect(contribution.entry.events.map((event) => event.type)).toEqual([
+      'created',
+      'declined',
+      'retention-redacted',
+    ])
+    expect(contribution.transactItems).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        Put: expect.objectContaining({
+          Item: expect.objectContaining({
+            entryType: 'triage-entry-event',
+            event: expect.objectContaining({ type: 'retention-redacted' }),
+          }),
+        }),
+      }),
+    ]))
   })
 
   test('binds source claims to Workspace, kind, and stable source ID', () => {

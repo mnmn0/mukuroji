@@ -19,6 +19,7 @@ import {
 import type { TriageIdempotency } from '../../triage'
 import {
   createTriageAssignmentAuditTransactionItems,
+  readTriageNotificationMemberKey,
   type TriageAuditOutboxConfiguration,
 } from './triage-audit-events'
 
@@ -132,6 +133,8 @@ export type CreateTriageSourceActivityTransactionItemsInput = {
   idempotency: TriageIdempotency
   /** Optional receipt TTL instant, defaulting to ninety days after activity. */
   receiptExpiresAt?: string
+  /** ISO instant when this transaction is being composed, used for the default receipt TTL. */
+  now?: string
   /** Number of deterministic wake shards configured on the table. */
   wakeShardCount?: number
 }
@@ -271,7 +274,10 @@ export function createTriageSourceActivityTransactionItems(
   const tableName = requireText(input.tableName, 'Request Intake table name', 1_000)
   validateTriageEntryProjection(input.entry)
   validateIdempotency(input.idempotency)
-  const entry = recordTriageSourceActivity(input.entry, input.activity)
+  const entry = ensureRetentionRedactionEvent(
+    input.entry,
+    recordTriageSourceActivity(input.entry, input.activity),
+  )
   const newEvents = findNewEvents(input.entry, entry)
   return {
     entry,
@@ -288,7 +294,7 @@ export function createTriageSourceActivityTransactionItems(
         entry,
         'activity',
         input.idempotency,
-        input.receiptExpiresAt ?? addDays(input.activity.occurredAt, 90),
+        input.receiptExpiresAt ?? addDays(input.now ?? new Date().toISOString(), 90),
       ),
     ],
   }
@@ -556,18 +562,41 @@ function createActionContribution(
   wakeShardCount: number,
   associateWorkItem: boolean,
 ): TriageTransactionContribution {
-  const events = findNewEvents(current, entry)
+  const retainedEntry = ensureRetentionRedactionEvent(current, entry)
+  const events = findNewEvents(current, retainedEntry)
   const association = associateWorkItem
-    ? [createWorkItemAssociationPut(tableName, entry)]
+    ? [createWorkItemAssociationPut(tableName, retainedEntry)]
     : []
   return {
-    entry,
+    entry: retainedEntry,
     transactItems: [
-      createEntryUpdate(tableName, entry, current.revision, wakeShardCount),
-      ...events.map((event) => createEventPut(tableName, entry, event)),
+      createEntryUpdate(tableName, retainedEntry, current.revision, wakeShardCount),
+      ...events.map((event) => createEventPut(tableName, retainedEntry, event)),
       ...association,
-      createReceiptPut(tableName, entry, 'action', idempotency, receiptExpiresAt),
+      createReceiptPut(tableName, retainedEntry, 'action', idempotency, receiptExpiresAt),
     ],
+  }
+}
+
+/** Adds the retention audit event when a detached expiry projection enters a write. */
+function ensureRetentionRedactionEvent(
+  current: TriageEntry,
+  next: TriageEntry,
+): TriageEntry {
+  const redactedAt = current.retention.redactedAt
+  if (!redactedAt || current.events.some((event) =>
+    event.type === 'retention-redacted' && event.createdAt === redactedAt
+  )) return next
+  const event: TriageEntryEvent = {
+    id: `retention-redacted:${current.revision + 1}:${redactedAt}`,
+    type: 'retention-redacted',
+    actorId: 'system:triage-mutation',
+    summary: 'Retained source content was redacted.',
+    createdAt: redactedAt,
+  }
+  return {
+    ...next,
+    events: [...next.events, event].slice(-TRIAGE_ENTRY_EVENT_LIMIT),
   }
 }
 
@@ -1101,11 +1130,14 @@ function isSla(value: unknown): value is NonNullable<TriageEntry['sla']> {
     'breachedAt',
     'escalationDueAt',
     'escalatedAt',
+    'escalationOwnerUserId',
   ]) &&
     isIdentifier(value.policyId) && isIsoInstant(value.dueAt) &&
     (value.breachedAt === undefined || isIsoInstant(value.breachedAt)) &&
     (value.escalationDueAt === undefined || isIsoInstant(value.escalationDueAt)) &&
-    (value.escalatedAt === undefined || isIsoInstant(value.escalatedAt))
+    (value.escalatedAt === undefined || isIsoInstant(value.escalatedAt)) &&
+    (value.escalationOwnerUserId === undefined ||
+      readTriageNotificationMemberKey(value.escalationOwnerUserId) !== undefined)
 }
 
 /** Validates a canonical Work Item reference. */
