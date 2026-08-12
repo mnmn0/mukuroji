@@ -2572,7 +2572,7 @@ describe('planning persistence', () => {
       input: Record<string, unknown>
     }> = []
     let fencedMeta: Record<string, unknown> | undefined
-    const legacyMeta = {
+    let legacyMeta: Record<string, unknown> | undefined = {
       workspaceId: 'workspace-1',
       recordKey: 'META',
       entryType: 'planning-meta',
@@ -2614,6 +2614,7 @@ describe('planning persistence', () => {
           const item = put.Put.Item
           if (Array.isArray(item)) throw new Error('Expected a fenced META object.')
           fencedMeta = Object.fromEntries(Object.entries(item))
+          legacyMeta = undefined
         }
         return {}
       },
@@ -2645,7 +2646,7 @@ describe('planning persistence', () => {
     }
     expect(commands[2]?.input.TransactItems).toEqual([
       expect.objectContaining({
-        ConditionCheck: expect.objectContaining({
+        Delete: expect.objectContaining({
           Key: { workspaceId: 'workspace-1', recordKey: 'META' },
           ConditionExpression:
             '#entryType = :entryType AND #schemaVersion = :schemaVersion AND #revision = :revision',
@@ -2723,7 +2724,7 @@ describe('planning persistence', () => {
     }
     expect(commands[2]?.input.TransactItems).toEqual([
       expect.objectContaining({
-        ConditionCheck: expect.objectContaining({
+        Delete: expect.objectContaining({
           Key: { workspaceId: 'workspace-1', recordKey: 'META' },
           ExpressionAttributeValues: expect.objectContaining({ ':revision': 7 }),
         }),
@@ -2736,6 +2737,59 @@ describe('planning persistence', () => {
             ':fencedRevision': 2,
             ':revision': 7,
           }),
+        }),
+      }),
+    ])
+  })
+
+  test('retires a lower legacy META row when the fenced revision already wins', async () => {
+    let transaction: Record<string, unknown> | undefined
+    const documentClient = {
+      async send(command: {
+        /** AWS SDK command constructor. */
+        constructor: { name: string }
+        /** AWS SDK command input. */
+        input: Record<string, unknown>
+      }) {
+        if (command.constructor.name === 'GetCommand') {
+          const key = command.input.Key
+          const fenced = typeof key === 'object' && key !== null &&
+            'workspaceId' in key && key.workspaceId === 'FENCE#workspace-1'
+          return {
+            Item: {
+              workspaceId: fenced ? 'FENCE#workspace-1' : 'workspace-1',
+              recordKey: 'META',
+              entryType: 'planning-meta',
+              schemaVersion: 1,
+              revision: fenced ? 7 : 3,
+              updatedAt: NOW.toISOString(),
+            },
+          }
+        }
+        transaction = command.input
+        return {}
+      },
+    } as unknown as DynamoDBDocumentClient
+    const client = new DynamoDbPlanningClient(
+      'PlanningTable',
+      documentClient,
+      {} as DynamoDBClient,
+      false,
+      () => NOW,
+    )
+
+    expect(await client.getAuthorizationRevision('workspace-1')).toBe(7)
+    expect(transaction?.TransactItems).toEqual([
+      expect.objectContaining({
+        ConditionCheck: expect.objectContaining({
+          Key: { workspaceId: 'FENCE#workspace-1', recordKey: 'META' },
+          ExpressionAttributeValues: expect.objectContaining({ ':revision': 7 }),
+        }),
+      }),
+      expect.objectContaining({
+        Delete: expect.objectContaining({
+          Key: { workspaceId: 'workspace-1', recordKey: 'META' },
+          ExpressionAttributeValues: expect.objectContaining({ ':revision': 3 }),
         }),
       }),
     ])
@@ -2785,15 +2839,24 @@ describe('planning persistence', () => {
       }) {
         commands.push({ name: command.constructor.name, input: command.input })
         if (command.constructor.name === 'GetCommand') {
+          const key = command.input.Key
+          if (
+            typeof key === 'object' && key !== null &&
+            'workspaceId' in key && key.workspaceId === 'FENCE#workspace-1'
+          ) {
+            return {
+              Item: {
+                workspaceId: 'FENCE#workspace-1',
+                recordKey: 'META',
+                entryType: 'planning-meta',
+                schemaVersion: 1,
+                revision: 1,
+                updatedAt: NOW.toISOString(),
+              },
+            }
+          }
           return {
-            Item: {
-              workspaceId: 'workspace-1',
-              recordKey: 'META',
-              entryType: 'planning-meta',
-              schemaVersion: 1,
-              revision: 1,
-              updatedAt: NOW.toISOString(),
-            },
+            Item: undefined,
           }
         }
         if (command.constructor.name === 'QueryCommand') {
@@ -2979,9 +3042,13 @@ describe('planning persistence', () => {
         input: Record<string, unknown>
       }) {
         if (command.constructor.name === 'GetCommand') {
+          const key = command.input.Key
+          const fenced = typeof key === 'object' && key !== null &&
+            'workspaceId' in key && key.workspaceId === 'FENCE#workspace-1'
+          if (!fenced) return {}
           return {
             Item: {
-              workspaceId: 'workspace-1',
+              workspaceId: 'FENCE#workspace-1',
               recordKey: 'META',
               entryType: 'planning-meta',
               schemaVersion: 1,
@@ -3233,9 +3300,13 @@ describe('planning persistence', () => {
         input: Record<string, unknown>
       }) {
         if (command.constructor.name === 'GetCommand') {
+          const key = command.input.Key
+          const fenced = typeof key === 'object' && key !== null &&
+            'workspaceId' in key && key.workspaceId === 'FENCE#workspace-1'
+          if (!fenced) return {}
           return {
             Item: {
-              workspaceId: 'workspace-1',
+              workspaceId: 'FENCE#workspace-1',
               recordKey: 'META',
               entryType: 'planning-meta',
               schemaVersion: 1,
@@ -3525,9 +3596,13 @@ describe('planning persistence', () => {
         input: Record<string, unknown>
       }) {
         if (command.constructor.name === 'GetCommand') {
+          const key = command.input.Key
+          const fenced = typeof key === 'object' && key !== null &&
+            'workspaceId' in key && key.workspaceId === 'FENCE#workspace-1'
+          if (!fenced) return {}
           return {
             Item: {
-              workspaceId: 'workspace-1',
+              workspaceId: 'FENCE#workspace-1',
               recordKey: 'META',
               entryType: 'planning-meta',
               schemaVersion: 1,
@@ -3744,9 +3819,13 @@ describe('planning persistence', () => {
         input: Record<string, unknown>
       }) {
         if (command.constructor.name === 'GetCommand') {
+          const key = command.input.Key
+          const fenced = typeof key === 'object' && key !== null &&
+            'workspaceId' in key && key.workspaceId === 'FENCE#workspace-1'
+          if (!fenced) return {}
           return {
             Item: {
-              workspaceId: 'workspace-1',
+              workspaceId: 'FENCE#workspace-1',
               recordKey: 'META',
               entryType: 'planning-meta',
               schemaVersion: 1,
@@ -3793,9 +3872,13 @@ describe('planning persistence', () => {
         input: Record<string, unknown>
       }) {
         if (command.constructor.name === 'GetCommand') {
+          const key = command.input.Key
+          const fenced = typeof key === 'object' && key !== null &&
+            'workspaceId' in key && key.workspaceId === 'FENCE#workspace-1'
+          if (!fenced) return {}
           return {
             Item: {
-              workspaceId: 'workspace-1',
+              workspaceId: 'FENCE#workspace-1',
               recordKey: 'META',
               entryType: 'planning-meta',
               schemaVersion: 1,
@@ -3847,9 +3930,13 @@ describe('planning persistence', () => {
         input: Record<string, unknown>
       }) {
         if (command.constructor.name === 'GetCommand') {
+          const key = command.input.Key
+          const fenced = typeof key === 'object' && key !== null &&
+            'workspaceId' in key && key.workspaceId === 'FENCE#workspace-1'
+          if (!fenced) return {}
           return {
             Item: {
-              workspaceId: 'workspace-1',
+              workspaceId: 'FENCE#workspace-1',
               recordKey: 'META',
               entryType: 'planning-meta',
               schemaVersion: 1,
@@ -3932,7 +4019,14 @@ describe('planning persistence', () => {
         input: Record<string, unknown>
       }) {
         if (command.constructor.name === 'GetCommand') {
-          return { Item: storedAtLimit[0] }
+          const key = command.input.Key
+          if (
+            typeof key === 'object' && key !== null &&
+            'workspaceId' in key && key.workspaceId === 'FENCE#workspace-1'
+          ) {
+            return { Item: { ...storedAtLimit[0], workspaceId: 'FENCE#workspace-1' } }
+          }
+          return {}
         }
         if (command.constructor.name === 'QueryCommand') {
           return { Items: rowsForPlanningRecordPrefixQuery(command.input, storedAtLimit) }
@@ -4014,9 +4108,13 @@ describe('planning persistence', () => {
         input: Record<string, unknown>
       }) {
         if (command.constructor.name === 'GetCommand') {
+          const key = command.input.Key
+          const fenced = typeof key === 'object' && key !== null &&
+            'workspaceId' in key && key.workspaceId === 'FENCE#workspace-1'
+          if (!fenced) return {}
           return {
             Item: {
-              workspaceId: 'workspace-1',
+              workspaceId: 'FENCE#workspace-1',
               recordKey: 'META',
               entryType: 'planning-meta',
               schemaVersion: 1,

@@ -18,7 +18,13 @@ Issue #27 の Planning domain は、短期の Cycle と中長期の Portfolio / 
 - `UPDATE_COMMENT_ID#<target>#<version>#<commentId>`: update version 内で comment ID の再利用を防ぐ immutable marker
 - `UPDATE_REACTION#<target>#<version>#...`: immutable update に対する member reaction
 
-Planning API snapshot は `schemaVersion: 2` を返す。ローリングデプロイ中の新しい Web は v1 snapshot に不足する Work Item dependency 情報を空の既定値で補い、v2へ正規化する。DynamoDB の `META` row はAPI contractから独立したstorage schema version 1を維持し、既存Workspaceをmigrationなしで読み込む。
+Planning API snapshot は `schemaVersion: 2` を返す。ローリングデプロイ中の新しい Web は v1 snapshot に不足する Work Item dependency 情報を空の既定値で補い、v2へ正規化する。DynamoDB の storage schema version 1 は API contract から独立しています。Revision の正本は移行前の `META` から、移行後の `FENCE#<workspaceId>` partition にある `META` へ移されます。読み取り時の移行は legacy row の revision を条件検証しながら FENCE row を作成または更新し、同じ transaction で legacy row を削除します。FENCE writer は legacy row が存在しないことを同じ transaction で確認するため、旧 writer と新 writer の revision CAS が同時に成立しないようにします。
+
+### Revision fence の移行手順
+
+FENCE-only writer を有効にする前に、旧 `META` writer を停止し、実行中の旧 Lambda invocation が排出されるまで待機します。次に、現行版を migration barrier 有効状態でデプロイし、Planning の read / mutation を通じて各 Workspace の legacy `META` を条件付きで FENCE row へ移します。legacy row が残っている間は FENCE mutation が `PLANNING_REVISION_FENCE_BARRIER_REQUIRED` で fail-closed になるため、旧 writer と新 writer の混在を許可しません。
+
+移行監視では、対象 Workspace の legacy `META` がなくなり、FENCE `META` の revision が移行前の revision 以上であることを確認してから通常運用へ進めます。rollback で旧 writer を再開する場合も、実行中の FENCE writer を先に排出し、FENCE と legacy の両方を扱う互換版を経由します。現行版から旧 `META` writer へ直接戻すと、異なる revision fence を並行して更新するため許可しません。
 
 すべての mutation は snapshot の `expectedRevision` を必須とし、認可に使った snapshot と mutation の revision を一致させたうえで、`META` の revision CAS と対象 row を同じ DynamoDB transaction で更新します。Stale write は `409 PlanningRevisionConflict` で拒否し、階層、dependency、link の部分更新を残しません。Canonical Work Item projection は強整合 read で取得します。Workspace member の role / status 更新と Planning scope が参照する Team / Project の archive は、事前検査した `META` revision を directory mutation と同じ transaction で一つ進めます。並行する Planning create / move とは一方だけが成功し、競合側は最新 snapshot で再検査します。
 

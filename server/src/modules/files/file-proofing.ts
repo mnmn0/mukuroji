@@ -51,7 +51,7 @@ import {
 } from '../audit'
 import {
   createDynamoDbClient as createConfiguredDynamoDbClient,
-  createWorkspaceSearchWriterDynamoDbDocumentClient,
+  createPlanningRevisionFenceWriterDynamoDbDocumentClient,
   shouldBootstrapLocalDynamoDb,
 } from '../../infrastructure/aws/dynamodb-client'
 import { FILE_UPLOAD_MAX_SIZE_BYTES } from '../file-upload-policy'
@@ -2501,7 +2501,7 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
 export function createDefaultFileProofingClient(): FileProofingClient {
   const dynamoDbClient = createConfiguredDynamoDbClient()
   const documentClient =
-    createWorkspaceSearchWriterDynamoDbDocumentClient(dynamoDbClient)
+    createPlanningRevisionFenceWriterDynamoDbDocumentClient(dynamoDbClient)
   const s3Endpoint = readEnvironment('AWS_ENDPOINT_URL_S3') ?? readEnvironment('AWS_ENDPOINT_URL')
   const s3Client = new S3Client({
     ...createAwsClientConfiguration(s3Endpoint),

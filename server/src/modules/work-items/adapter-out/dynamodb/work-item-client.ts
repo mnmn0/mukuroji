@@ -3,7 +3,7 @@ import {
 } from '../../../../infrastructure/config/server-config'
 import {
   createDynamoDbClient as createConfiguredDynamoDbClient,
-  createWorkspaceSearchWriterDynamoDbDocumentClient,
+  createPlanningRevisionFenceWriterDynamoDbDocumentClient,
   shouldBootstrapLocalDynamoDb as shouldBootstrapConfiguredLocalDynamoDb,
 } from '../../../../infrastructure/aws/dynamodb-client'
 import {
@@ -3213,7 +3213,7 @@ function createDynamoDbClient() {
 }
 
 function createDynamoDbDocumentClient(dynamoDbClient = createDynamoDbClient()) {
-  return createWorkspaceSearchWriterDynamoDbDocumentClient(dynamoDbClient)
+  return createPlanningRevisionFenceWriterDynamoDbDocumentClient(dynamoDbClient)
 }
 
 const localDynamoDbTableInitializers = new Map<string, Promise<void>>()

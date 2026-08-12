@@ -15,7 +15,7 @@ import {
 import { PLANNING_STORAGE_SCHEMA_VERSION } from '../planning'
 import {
   createDynamoDbClient as createConfiguredDynamoDbClient,
-  createWorkspaceSearchWriterDynamoDbDocumentClient,
+  createPlanningRevisionFenceWriterDynamoDbDocumentClient,
 } from '../../infrastructure/aws/dynamodb-client'
 import {
   throwIfWorkspaceSearchWriterFenceTerminalError,
@@ -598,7 +598,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
           'mukuroji-workspace-access-local'
     this.dynamoDbClient = dynamoDbClient
     this.documentClient = documentClient ??
-      createWorkspaceSearchWriterDynamoDbDocumentClient(dynamoDbClient)
+      createPlanningRevisionFenceWriterDynamoDbDocumentClient(dynamoDbClient)
     this.bootstrapLocalTable = bootstrapLocalTable
     this.clock = clock
     this.planningTableName = planningTableName
