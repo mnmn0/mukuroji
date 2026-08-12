@@ -115,6 +115,11 @@ export function grantWorkspaceSearchProjectionAccess(
 ): void {
   target.addToRolePolicy(new iam.PolicyStatement({
     actions: ['dynamodb:PutItem', 'dynamodb:DeleteItem'],
+    conditions: {
+      'ForAnyValue:StringEquals': {
+        'dynamodb:EnclosingOperation': ['TransactWriteItems'],
+      },
+    },
     resources: [resources.workspaceSearchTable.tableArn],
   }));
 }

@@ -456,6 +456,11 @@ test('collaboration projection can converge current context search documents', (
       statementHasResource(candidate, workspaceSearchTableArn)
     );
     expect(readProperty(statement, 'Effect')).toBe('Allow');
+    expect(readProperty(statement, 'Condition')).toEqual({
+      'ForAnyValue:StringEquals': {
+        'dynamodb:EnclosingOperation': ['TransactWriteItems'],
+      },
+    });
   }
   for (const action of [
     'dynamodb:UpdateItem',
