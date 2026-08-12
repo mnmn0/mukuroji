@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import useSWR from 'swr'
 import useSWRInfinite from 'swr/infinite'
 import {
@@ -104,8 +104,11 @@ export function useTriageEntry(
   const { mutate } = query
 
   const expiresAt = query.data?.retention.expiresAt
+  const refreshedExpirationKey = useRef<string | undefined>(undefined)
   useEffect(() => {
-    if (!expiresAt) return
+    if (!expiresAt || !entryId) return
+    const expirationKey = `${entryId}:${expiresAt}`
+    if (refreshedExpirationKey.current === expirationKey) return
     const deadline = Date.parse(expiresAt)
     if (!Number.isFinite(deadline)) return
 
@@ -116,6 +119,7 @@ export function useTriageEntry(
         timer = setTimeout(refreshAtDeadline, Math.min(remaining, 2_147_000_000))
         return
       }
+      refreshedExpirationKey.current = expirationKey
       void mutate(undefined, { revalidate: false, populateCache: true })
         .then(() => mutate())
         .catch(() => undefined)
@@ -124,7 +128,7 @@ export function useTriageEntry(
     return () => {
       if (timer !== undefined) clearTimeout(timer)
     }
-  }, [expiresAt, mutate])
+  }, [entryId, expiresAt, mutate])
 
   return { ...query, key }
 }
