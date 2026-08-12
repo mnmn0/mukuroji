@@ -837,7 +837,7 @@ test('duplicate Triage context is atomically guarded and de-identified on the Wo
     events: [{
       eventId: 'triage-created-context-1',
       type: 'created',
-      summary: 'A provider-secret-free source event summary.',
+      summary: 'Triage entry was created.',
       createdAt: '2026-08-08T00:00:00.000Z',
     }],
     mergedAt: '2026-08-09T00:00:00.000Z',
@@ -878,6 +878,54 @@ test('duplicate Triage context is atomically guarded and de-identified on the Wo
   ]) {
     expect(persistedProjection).not.toContain(secret)
   }
+})
+
+test('duplicate Triage context replaces every lifecycle summary with a fixed allowlisted value', () => {
+  const client = new DynamoDbTeamIssuesClient('WorkItemsTable', 'IssueEventsTable')
+  const contribution = client.createTriageDuplicateContextTransactionItems({
+    directoryId: 'workspace-1',
+    teamId: 'core',
+    workItemId: 'canonical-work-item',
+    expectedWorkItemRevision: 7,
+    actorUserId: 'triager@example.com',
+    entry: createDuplicateContextEntry({
+      events: [
+        {
+          id: 'declined-secret',
+          type: 'declined',
+          actorId: 'operator-secret',
+          summary: 'Declined because provider-secret-customer-content was exposed.',
+          createdAt: '2026-08-08T02:00:00.000Z',
+        },
+        {
+          id: 'activity-secret',
+          type: 'activity-received',
+          actorId: 'provider-secret-actor',
+          summary: 'Provider payload contained customer-secret-message.',
+          createdAt: '2026-08-08T03:00:00.000Z',
+        },
+      ],
+    }),
+    mergedAt: '2026-08-09T00:00:00.000Z',
+  })
+
+  expect(contribution.snapshot.events).toEqual([
+    {
+      eventId: 'declined-secret',
+      type: 'declined',
+      summary: 'Triage entry was declined.',
+      createdAt: '2026-08-08T02:00:00.000Z',
+    },
+    {
+      eventId: 'activity-secret',
+      type: 'activity-received',
+      summary: 'New source activity was received.',
+      createdAt: '2026-08-08T03:00:00.000Z',
+    },
+  ])
+  const persistedProjection = JSON.stringify(contribution.transactItems)
+  expect(persistedProjection).not.toContain('provider-secret-customer-content')
+  expect(persistedProjection).not.toContain('customer-secret-message')
 })
 
 test('duplicate context retains only redaction provenance after source retention expires', () => {
@@ -969,7 +1017,7 @@ test('metadata-only duplicate context excludes internal lifecycle summaries', ()
     events: [],
   })
   expect(JSON.stringify(contribution.transactItems))
-    .not.toContain('A provider-secret-free source event summary.')
+    .not.toContain('Triage entry was created.')
 })
 
 test('Work Item detail re-reads retained duplicate context without the source row', async () => {

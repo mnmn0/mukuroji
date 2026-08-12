@@ -56,7 +56,11 @@ import {
   type UpdateRequestFormInput,
   type WorkItemPriority,
 } from '@mukuroji/contracts'
-import { getConfiguredDynamoDbEndpoint } from '../audit'
+import {
+  getConfiguredAuditRetentionDays,
+  getConfiguredAuditTableName,
+  getConfiguredDynamoDbEndpoint,
+} from '../audit'
 import {
   S3FileObjectClient,
   type FileObjectClient,
@@ -73,6 +77,7 @@ import {
   TRIAGE_TEAM_ACTIVITY_INDEX_NAME,
   TRIAGE_WAKE_INDEX_NAME,
   type TriageAdmissionTransactionContribution,
+  type TriageAuditOutboxConfiguration,
 } from '../triage'
 
 /** Request intake queue GSI の既定名です。 */
@@ -313,6 +318,8 @@ export type DynamoDbRequestIntakeClientOptions = {
   tenantAvailability?: RequestIntakeTenantAvailability
   /** Production callback that applies current Team Triage configuration. */
   prepareFormTriageAdmission?: FormTriageAdmissionPreparer
+  /** Immutable audit event outbox table configuration. */
+  audit?: TriageAuditOutboxConfiguration
 }
 
 /** Raw capability token を除いた form root row です。 */
@@ -1303,6 +1310,8 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
   private readonly tenantAvailability: RequestIntakeTenantAvailability
   /** Current Team configuration callback for Form Triage admission. */
   private readonly prepareFormTriageAdmission?: FormTriageAdmissionPreparer
+  /** Immutable audit outbox configuration used by Form Triage admission. */
+  private readonly audit: TriageAuditOutboxConfiguration
   /** In-flight local table bootstrap promise です。 */
   private tableReady?: Promise<void>
 
@@ -1328,6 +1337,10 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
     this.bootstrapLocalTable = options.bootstrapLocalTable ?? Boolean(endpoint)
     this.tenantAvailability = options.tenantAvailability ?? ALLOW_ACTIVE_TENANT
     this.prepareFormTriageAdmission = options.prepareFormTriageAdmission
+    this.audit = options.audit ?? {
+      tableName: getConfiguredAuditTableName() ?? 'mukuroji-audit-events',
+      retentionDays: getConfiguredAuditRetentionDays(),
+    }
   }
 
   /** Workspace の form 一覧を返します。 */
@@ -2070,6 +2083,7 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
         tableName: this.tableName,
         entry: admission.entry,
         inputFingerprint,
+        audit: this.audit,
       })
       const retryableConflictItemIndexes = admission.retryableConflictItemIndexes?.map(
         (itemIndex) => baseTransactItems.length + triageTransactItems.length + itemIndex,

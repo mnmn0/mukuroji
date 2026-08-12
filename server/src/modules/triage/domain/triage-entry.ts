@@ -699,7 +699,14 @@ export function evaluateTriageSchedule(
     resurfaced = true
   }
 
-  if (next.sla && !next.sla.breachedAt && Date.parse(next.sla.dueAt) <= Date.parse(now)) {
+  const snoozeActive = next.state === 'snoozed'
+
+  if (
+    !snoozeActive &&
+    next.sla &&
+    !next.sla.breachedAt &&
+    Date.parse(next.sla.dueAt) <= Date.parse(now)
+  ) {
     next = {
       ...next,
       sla: { ...next.sla, breachedAt: now },
@@ -720,6 +727,7 @@ export function evaluateTriageSchedule(
   }
 
   if (
+    !snoozeActive &&
     next.sla?.escalationDueAt &&
     !next.sla.escalatedAt &&
     Date.parse(next.sla.escalationDueAt) <= Date.parse(now)

@@ -424,6 +424,31 @@ describe('triage entry state machine', () => {
     })
   })
 
+  test('keeps SLA and escalation deadlines paused while an entry remains snoozed', () => {
+    const snoozed = createEntry({
+      state: 'snoozed',
+      snoozedUntil: '2026-08-09T02:00:00.000Z',
+    })
+
+    const evaluated = evaluateTriageSchedule(snoozed, '2026-08-09T01:00:00.000Z')
+
+    expect(evaluated).toMatchObject({
+      resurfaced: false,
+      breached: false,
+      escalated: false,
+      entry: {
+        state: 'snoozed',
+        snoozedUntil: '2026-08-09T02:00:00.000Z',
+        sla: {
+          dueAt: '2026-08-09T00:30:00.000Z',
+          escalationDueAt: '2026-08-09T01:00:00.000Z',
+        },
+      },
+    })
+    expect(evaluated.entry.events.map((event) => event.type)).not.toContain('sla-breached')
+    expect(evaluated.entry.events.map((event) => event.type)).not.toContain('escalated')
+  })
+
   test('redacts unavailable source content from response projections', () => {
     const metadata = projectTriageEntryForResponse(createEntry({
       permission: {

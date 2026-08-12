@@ -78,6 +78,7 @@ import type {
   RequestSubmissionEvent,
   ResolvedWorkItemConfiguration,
   TriageEntry,
+  TriageEntryEvent,
   WorkflowStatusCategory,
   WorkItemPriority,
   WorkItemRelation,
@@ -3751,13 +3752,8 @@ function createPermissionSafeTriageContextSnapshot(
   const redacted = entry.retention.redactedAt !== undefined || retentionElapsed
   const retainCounts = !redacted && entry.permission.visibility !== 'denied'
   const retainSummaries = !redacted && entry.permission.visibility === 'full'
-  const events: WorkItemTriageContextEventSnapshot[] = retainSummaries
-    ? entry.events.map((event) => ({
-        eventId: event.id,
-        type: event.type,
-        summary: event.summary,
-        createdAt: event.createdAt,
-      }))
+  const events = retainSummaries
+    ? createPermissionSafeTriageContextEvents(entry.events)
     : []
   const availability = redacted
     ? 'redacted'
@@ -3794,6 +3790,39 @@ function createPermissionSafeTriageContextSnapshot(
     )
   }
   return snapshot
+}
+
+/** Fixed provider-neutral summaries retained for each allowed Triage lifecycle event type. */
+const TRIAGE_CONTEXT_EVENT_SUMMARIES = {
+  created: 'Triage entry was created.',
+  assigned: 'Triage assignment changed.',
+  accepted: 'Triage entry was accepted.',
+  linked: 'Triage entry was linked to a Work Item.',
+  duplicate: 'Triage entry was marked as duplicate.',
+  declined: 'Triage entry was declined.',
+  snoozed: 'Triage entry was snoozed.',
+  'information-requested': 'More information was requested.',
+  'activity-received': 'New source activity was received.',
+  resurfaced: 'Triage entry resurfaced.',
+  'sla-breached': 'Triage response SLA was breached.',
+  escalated: 'Triage entry was escalated.',
+  'retention-redacted': 'Triage source content was redacted.',
+} satisfies Record<TriageEntryEvent['type'], string>
+
+/** Creates only fixed-summary lifecycle snapshots without copying source-controlled text.
+ *
+ * @param events Canonical Triage lifecycle events observed before duplicate resolution.
+ * @returns Provider-neutral history snapshots safe for canonical Work Item storage.
+ */
+function createPermissionSafeTriageContextEvents(
+  events: readonly TriageEntryEvent[],
+): WorkItemTriageContextEventSnapshot[] {
+  return events.map((event) => ({
+    eventId: event.id,
+    type: event.type,
+    summary: TRIAGE_CONTEXT_EVENT_SUMMARIES[event.type],
+    createdAt: event.createdAt,
+  }))
 }
 
 /**

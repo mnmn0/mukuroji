@@ -91,6 +91,9 @@ export const TRIAGE_OWNER_ACTIVITY_INDEX_NAME = 'triage-owner-activity-index'
 /** Maximum number of GSI pages inspected to fill one filtered queue page. */
 const TRIAGE_QUEUE_QUERY_PAGE_LIMIT = 20
 
+/** Maximum number of canonical queue rows read concurrently per GSI page. */
+const TRIAGE_CANONICAL_READ_CONCURRENCY = 16
+
 /** DynamoDB adapter construction options. */
 export type DynamoDbTriageClientOptions = {
   /** Request Intake table name. */
@@ -1022,6 +1025,7 @@ export class DynamoDbTriageClient implements TriageClient {
           tableName: this.tableName,
           entry,
           inputFingerprint: idempotency.fingerprint,
+          audit: this.audit,
           wakeShardCount: this.wakeShardCount,
         }),
         createTriageOperationReceiptTransactionPut({
@@ -1307,7 +1311,7 @@ export class DynamoDbTriageClient implements TriageClient {
       }))
       pages += 1
       exclusiveStartKey = response.LastEvaluatedKey
-      for (const item of response.Items ?? []) {
+      const keys = (response.Items ?? []).map((item) => {
         const key = readPrimaryKey(item)
         if (!key) {
           throw new TriageError(
@@ -1316,31 +1320,18 @@ export class DynamoDbTriageClient implements TriageClient {
             'The triage queue index contains an invalid row.',
           )
         }
-        const read = await this.documentClient.send(new GetCommand({
-          TableName: this.tableName,
-          Key: key,
-          ConsistentRead: true,
-        }))
-        if (read.Item === undefined) continue
-        const entry = decodeTriageEntryRow(read.Item, key)
-        if (!entry) {
-          throw new TriageError(
-            500,
-            'InvalidTriageEntry',
-            'The stored triage entry is invalid.',
-          )
-        }
-        if (entry.workspaceId !== workspaceId || entry.teamId !== teamId) {
-          throw new TriageError(
-            500,
-            'InvalidTriageEntry',
-            'The stored triage entry is outside the requested queue scope.',
-          )
-        }
-        const boundaryEntry = redactExpiredTriageEntry(entry, now.toISOString())
-        if (!matchesQueueFilter(boundaryEntry, workspaceId, teamId, input, ownerUserId, now)) continue
-        entries.push(projectTriageEntryForResponse(boundaryEntry, now.toISOString()))
-      }
+        return key
+      })
+      entries.push(...await readCanonicalQueueEntries(
+        this.documentClient,
+        this.tableName,
+        keys,
+        workspaceId,
+        teamId,
+        input,
+        ownerUserId,
+        now,
+      ))
     } while (
       entries.length < limit &&
       exclusiveStartKey !== undefined &&
@@ -1523,6 +1514,69 @@ export class DynamoDbTriageClient implements TriageClient {
       })
     }
   }
+}
+
+/** Reads one queue page's canonical rows with bounded strong-read concurrency.
+ *
+ * @param documentClient Request Intake DocumentClient.
+ * @param tableName Request Intake table containing canonical Triage rows.
+ * @param keys Base-table keys returned by the KEYS_ONLY queue index.
+ * @param workspaceId Requested Workspace scope.
+ * @param teamId Requested Team scope.
+ * @param input Queue filters applied only after the canonical read.
+ * @param ownerUserId Effective owner filter selected by the query strategy.
+ * @param now Shared queue evaluation instant.
+ * @returns Canonical entries that survive permission-safe projection and filters, in index order.
+ */
+async function readCanonicalQueueEntries(
+  documentClient: DynamoDBDocumentClient,
+  tableName: string,
+  keys: readonly { scopeKey: string; recordKey: string }[],
+  workspaceId: string,
+  teamId: string,
+  input: TriageEntryListInput,
+  ownerUserId: string | undefined,
+  now: Date,
+): Promise<TriageEntry[]> {
+  const results: Array<TriageEntry | undefined> = Array.from({ length: keys.length })
+  let nextIndex = 0
+  const workerCount = Math.min(TRIAGE_CANONICAL_READ_CONCURRENCY, keys.length)
+
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (true) {
+      const index = nextIndex
+      nextIndex += 1
+      const key = keys[index]
+      if (!key) return
+
+      const read = await documentClient.send(new GetCommand({
+        TableName: tableName,
+        Key: key,
+        ConsistentRead: true,
+      }))
+      if (read.Item === undefined) continue
+      const entry = decodeTriageEntryRow(read.Item, key)
+      if (!entry) {
+        throw new TriageError(
+          500,
+          'InvalidTriageEntry',
+          'The stored triage entry is invalid.',
+        )
+      }
+      if (entry.workspaceId !== workspaceId || entry.teamId !== teamId) {
+        throw new TriageError(
+          500,
+          'InvalidTriageEntry',
+          'The stored triage entry is outside the requested queue scope.',
+        )
+      }
+      const boundaryEntry = redactExpiredTriageEntry(entry, now.toISOString())
+      if (!matchesQueueFilter(boundaryEntry, workspaceId, teamId, input, ownerUserId, now)) continue
+      results[index] = projectTriageEntryForResponse(boundaryEntry, now.toISOString())
+    }
+  }))
+
+  return results.filter((entry): entry is TriageEntry => entry !== undefined)
 }
 
 /** Creates an initial manual handoff entry. */

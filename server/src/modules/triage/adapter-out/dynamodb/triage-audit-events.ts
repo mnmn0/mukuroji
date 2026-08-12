@@ -50,6 +50,14 @@ export type CreateTriageAssignmentAuditTransactionItemsInput = {
   auditContext: MutationAuditContext
 }
 
+/** Inputs used to append the initial-owner assignment event to source admission. */
+export type CreateTriageAdmissionAssignmentAuditTransactionItemsInput = {
+  /** Immutable audit event outbox configuration. */
+  audit: TriageAuditOutboxConfiguration
+  /** Fully normalized entry after routing and ownership admission. */
+  entry: TriageEntry
+}
+
 /** Builds immutable outbox events for newly fired SLA schedule transitions.
  *
  * @param input The fired schedule flags, recipient snapshots, and audit configuration.
@@ -135,6 +143,74 @@ export function createTriageAssignmentAuditTransactionItems(
     },
     expiresAt: calculateAuditExpiresAt(
       input.auditContext.occurredAt,
+      input.audit.retentionDays,
+    ),
+    outboxStatus: 'pending',
+  })
+  return [createAuditEventTransactPut(input.audit.tableName, event)]
+}
+
+/** Builds the atomic assignment notification emitted when admission selects an owner.
+ *
+ * @param input The admitted entry and immutable audit outbox configuration.
+ * @returns The single audit outbox transaction item, or no item for an unowned entry.
+ */
+export function createTriageAdmissionAssignmentAuditTransactionItems(
+  input: CreateTriageAdmissionAssignmentAuditTransactionItemsInput,
+): TriageAuditTransactionItems {
+  const notificationMemberKey = readTriageNotificationMemberKey(input.entry.ownerUserId)
+  if (!notificationMemberKey) return []
+
+  const eventType = 'triage.assigned'
+  const context = createMutationAuditContext({
+    workspaceId: input.entry.workspaceId,
+    actor: {
+      id: 'system:triage-admission',
+      kind: 'system',
+      displayName: 'Mukuroji Triage admission',
+    },
+    idempotencyKey: `triage-admission-v1:${input.entry.id}`,
+    occurredAt: input.entry.createdAt,
+    request: {
+      method: 'ADMISSION',
+      path: '/internal/triage-admission',
+      body: {
+        entryId: input.entry.id,
+        ownerUserId: notificationMemberKey,
+        projectId: input.entry.projectId,
+        teamId: input.entry.teamId,
+      },
+    },
+    source: {
+      kind: 'system',
+      method: 'ADMISSION',
+      route: '/internal/triage-admission',
+    },
+  })
+  const event = createAuditEvent({
+    context,
+    eventType,
+    entity: { type: 'triage-entry', id: input.entry.id },
+    action: 'assigned',
+    changes: [{
+      field: 'ownerUserId',
+      after: notificationMemberKey,
+    }],
+    summary: 'Triage assignment changed.',
+    metadata: {
+      actorMemberKey: 'system:triage-admission',
+      teamId: input.entry.teamId,
+      ...(input.entry.projectId ? { projectId: input.entry.projectId } : {}),
+      triageEntryId: input.entry.id,
+      deepLink: createTriageDeepLink(input.entry),
+      notificationTitle: 'Triage assignment',
+      notificationCandidates: [{
+        memberKey: notificationMemberKey,
+        reason: 'triage-assignment',
+      }],
+    },
+    expiresAt: calculateAuditExpiresAt(
+      input.entry.createdAt,
       input.audit.retentionDays,
     ),
     outboxStatus: 'pending',

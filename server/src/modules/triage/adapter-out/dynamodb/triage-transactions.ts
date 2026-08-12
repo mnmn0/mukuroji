@@ -18,6 +18,7 @@ import {
 } from '../../domain/triage-entry'
 import type { TriageIdempotency } from '../../triage'
 import {
+  createTriageAdmissionAssignmentAuditTransactionItems,
   createTriageAssignmentAuditTransactionItems,
   readTriageNotificationMemberKey,
   type TriageAuditOutboxConfiguration,
@@ -109,6 +110,8 @@ export type CreateTriageEntryTransactionItemsInput = {
   inputFingerprint: string
   /** Number of deterministic wake shards configured on the table. */
   wakeShardCount?: number
+  /** Optional audit outbox used to notify an owner selected during admission. */
+  audit?: TriageAuditOutboxConfiguration
 }
 
 /** Input for composing a form submission triage row. */
@@ -256,10 +259,17 @@ export function createTriageEntryTransactionItems(
   validateTriageEntryProjection(input.entry)
   requireFingerprint(input.inputFingerprint)
   const events = input.entry.events.map((event) => createEventPut(tableName, input.entry, event))
+  const admissionAssignmentAudit = input.audit
+    ? createTriageAdmissionAssignmentAuditTransactionItems({
+        audit: input.audit,
+        entry: input.entry,
+      })
+    : []
   return [
     createEntryPut(tableName, input.entry, normalizeWakeShardCount(input.wakeShardCount)),
     createSourceClaimPut(tableName, input.entry, input.inputFingerprint),
     ...events,
+    ...admissionAssignmentAudit,
   ]
 }
 

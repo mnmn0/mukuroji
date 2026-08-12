@@ -1706,8 +1706,8 @@ describe('DynamoDbTriageClient source admission', () => {
   test('re-evaluates a manual handoff after a rotation race and commits the current policy', async () => {
     const rotationRace = Object.assign(new Error('rotation cursor changed'), {
       name: 'TransactionCanceledException',
-      CancellationReasons: Array.from({ length: 5 }, (_value, index) => ({
-        Code: index === 4 ? 'ConditionalCheckFailed' : 'None',
+      CancellationReasons: Array.from({ length: 6 }, (_value, index) => ({
+        Code: index === 5 ? 'ConditionalCheckFailed' : 'None',
       })),
     })
     const harness = createHarness([
@@ -1847,8 +1847,8 @@ describe('DynamoDbTriageClient source admission', () => {
     let validationAttempts = 0
     const projectArchiveRace = Object.assign(new Error('Project archived'), {
       name: 'TransactionCanceledException',
-      CancellationReasons: Array.from({ length: 7 }, (_value, index) => ({
-        Code: index === 6 ? 'ConditionalCheckFailed' : 'None',
+      CancellationReasons: Array.from({ length: 8 }, (_value, index) => ({
+        Code: index === 7 ? 'ConditionalCheckFailed' : 'None',
       })),
     })
     const configuration = createManualRotationConfiguration(4, 0)
@@ -1914,7 +1914,7 @@ describe('DynamoDbTriageClient source admission', () => {
         'TransactWriteCommand',
         'GetCommand',
       ])
-      expect(harness.commands[2]?.input.TransactItems).toHaveLength(7)
+      expect(harness.commands[2]?.input.TransactItems).toHaveLength(8)
     } finally {
       harness.restore()
     }
@@ -1924,8 +1924,8 @@ describe('DynamoDbTriageClient source admission', () => {
     let validationAttempts = 0
     const memberDeactivationRace = Object.assign(new Error('Member deactivated'), {
       name: 'TransactionCanceledException',
-      CancellationReasons: Array.from({ length: 7 }, (_value, index) => ({
-        Code: index === 6 ? 'ConditionalCheckFailed' : 'None',
+      CancellationReasons: Array.from({ length: 8 }, (_value, index) => ({
+        Code: index === 7 ? 'ConditionalCheckFailed' : 'None',
       })),
     })
     const configuration = createManualRotationConfiguration(4, 0)
@@ -1991,7 +1991,7 @@ describe('DynamoDbTriageClient source admission', () => {
         'TransactWriteCommand',
         'GetCommand',
       ])
-      expect(harness.commands[2]?.input.TransactItems).toHaveLength(7)
+      expect(harness.commands[2]?.input.TransactItems).toHaveLength(8)
     } finally {
       harness.restore()
     }

@@ -140,6 +140,35 @@ describe('triage DynamoDB transaction contributions', () => {
     })
   })
 
+  test('atomically emits an assignment notification for an owner selected during admission', () => {
+    const entry = createEntry()
+    entry.ownerUserId = 'assignee@example.com'
+    entry.projectId = 'project-1'
+    const items = createFormTriageEntryTransactionItems({
+      tableName: 'RequestIntakeTable',
+      entry,
+      inputFingerprint: createTriageInputFingerprint({ submissionId: 'submission-1' }),
+      audit: { tableName: 'AuditEventsTable', retentionDays: 365 },
+    })
+
+    expect(items).toHaveLength(4)
+    expect(items[3]?.Put).toMatchObject({
+      TableName: 'AuditEventsTable',
+      Item: {
+        eventType: 'triage.assigned',
+        action: 'assigned',
+        summary: 'Triage assignment changed.',
+        metadata: {
+          triageEntryId: entry.id,
+          notificationCandidates: [{
+            memberKey: 'assignee@example.com',
+            reason: 'triage-assignment',
+          }],
+        },
+      },
+    })
+  })
+
   test('builds an unexecuted atomic acceptance contribution with reverse association and receipt', () => {
     const entry = createEntry()
     const contribution = createTriageAcceptanceTransactionItems({
