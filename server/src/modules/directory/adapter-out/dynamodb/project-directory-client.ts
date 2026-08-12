@@ -590,6 +590,32 @@ export type RemoveProjectMemberResponse = {
  * API handler から利用する team/project directory client の最小 interface です。
  */
 export type ProjectDirectoryClient = {
+  /** Builds commit-time conditions proving a Team and optional Project remain active.
+   *
+   * @param directoryId - Owning Workspace directory identifier.
+   * @param teamId - Team that must remain active through commit.
+   * @param projectId - Optional Project that must remain active through commit.
+   * @returns DynamoDB condition checks for the dependent transaction.
+   */
+  createActiveReferenceConditionChecks?(
+    directoryId: string,
+    teamId: string,
+    projectId?: string,
+  ): Promise<NonNullable<TransactWriteCommandInput['TransactItems']>>
+  /** Builds a condition proving a Project member retains the requested role at commit time.
+   *
+   * @param directoryId - Owning Workspace directory identifier.
+   * @param projectId - Project whose membership authorizes the action.
+   * @param memberKey - Workspace member key whose role must remain active.
+   * @param minimumRole - Minimum role required by the dependent transaction.
+   * @returns A membership condition, or undefined when no matching direct grant exists.
+   */
+  createProjectAccessConditionCheck?(
+    directoryId: string,
+    projectId: string,
+    memberKey: string,
+    minimumRole: ProjectRole,
+  ): Promise<NonNullable<TransactWriteCommandInput['TransactItems']>[number] | undefined>
   /**
    * DynamoDB から sidebar 用の team/project 階層を取得します。
    */
@@ -841,6 +867,108 @@ export class DynamoDbProjectDirectoryClient {
       }
 
       throw toProjectDataError(error)
+    }
+  }
+
+  /** Builds commit-time guards for active Team and optional Project references.
+   *
+   * The rows are strongly read before their exact primary keys are bound to active-state
+   * conditions, so an archive transaction cannot commit between validation and the caller's
+   * dependent write.
+   *
+   * @param directoryId Owning Workspace directory identifier.
+   * @param teamId Team that must remain active through commit.
+   * @param projectId Optional Project that must remain active in the Team through commit.
+   * @returns DynamoDB condition checks composable with a dependent transaction.
+   */
+  async createActiveReferenceConditionChecks(
+    directoryId: string,
+    teamId: string,
+    projectId?: string,
+  ): Promise<NonNullable<TransactWriteCommandInput['TransactItems']>> {
+    const items = await this.readValidDirectoryItems(directoryId, true)
+    const team = items.find((item): item is ProjectDirectoryTeamItem =>
+      item.entryType === 'team' && item.teamId === teamId && isActiveDirectoryItem(item)
+    )
+    if (!team) {
+      throw new ProjectDataError(404, 'TeamNotFound', `Team "${teamId}" was not found.`)
+    }
+    const checks: NonNullable<TransactWriteCommandInput['TransactItems']> = [{
+      ConditionCheck: this.createActiveTeamConditionCheck(directoryId, team.entryKey, teamId),
+    }]
+    if (projectId === undefined) return checks
+    const project = items.find((item): item is ProjectDirectoryProjectItem =>
+      item.entryType === 'project' &&
+      item.teamId === teamId &&
+      item.projectId === projectId &&
+      isActiveDirectoryItem(item)
+    )
+    if (!project) {
+      throw new ProjectDataError(
+        404,
+        'ProjectNotFound',
+        `Project "${projectId}" was not found in team "${teamId}".`,
+      )
+    }
+    checks.push({
+      ConditionCheck: {
+        TableName: this.tableName,
+        Key: { directoryId, entryKey: project.entryKey },
+        ConditionExpression:
+          '#entryType = :entryType AND #teamId = :teamId AND #projectId = :projectId AND attribute_not_exists(#archivedAt)',
+        ExpressionAttributeNames: {
+          '#archivedAt': 'archivedAt',
+          '#entryType': 'entryType',
+          '#projectId': 'projectId',
+          '#teamId': 'teamId',
+        },
+        ExpressionAttributeValues: {
+          ':entryType': 'project',
+          ':projectId': projectId,
+          ':teamId': teamId,
+        },
+      },
+    })
+    return checks
+  }
+
+  /** Builds a commit-time condition for one active direct Project membership. */
+  async createProjectAccessConditionCheck(
+    directoryId: string,
+    projectId: string,
+    memberKey: string,
+    minimumRole: ProjectRole,
+  ): Promise<NonNullable<TransactWriteCommandInput['TransactItems']>[number] | undefined> {
+    const items = await this.readValidDirectoryItems(directoryId, true)
+    const member = items.find((item): item is ProjectMemberItem =>
+      item.entryType === 'project-member' &&
+      item.projectId === projectId &&
+      item.memberKey === normalizeProjectMemberKey(memberKey) &&
+      item.archivedAt === undefined &&
+      projectRoleWeights[item.role] >= projectRoleWeights[minimumRole]
+    )
+    if (!member) return undefined
+    return {
+      ConditionCheck: {
+        TableName: this.tableName,
+        Key: { directoryId, entryKey: member.entryKey },
+        ConditionExpression:
+          '#entryType = :entryType AND #projectId = :projectId AND #memberKey = :memberKey AND ' +
+          '#role = :role AND attribute_not_exists(#archivedAt)',
+        ExpressionAttributeNames: {
+          '#archivedAt': 'archivedAt',
+          '#entryType': 'entryType',
+          '#memberKey': 'memberKey',
+          '#projectId': 'projectId',
+          '#role': 'role',
+        },
+        ExpressionAttributeValues: {
+          ':entryType': 'project-member',
+          ':memberKey': member.memberKey,
+          ':projectId': projectId,
+          ':role': member.role,
+        },
+      },
     }
   }
 
@@ -2377,17 +2505,40 @@ export class DynamoDbProjectDirectoryClient {
     throw toProjectDataError(originalError)
   }
 
-  /**
-   * project 作成時点でも team が active であることを検証する condition check を作ります。
+  /** Builds a commit-time guard for an active Team row.
+   *
+   * @param directoryId Owning Workspace directory identifier.
+   * @param entryKey Physical sort key obtained from the validated directory snapshot.
+   * @param expectedTeamId Optional semantic Team identifier bound to the row.
+   * @returns A DynamoDB condition check for the source transaction.
    */
-  private createActiveTeamConditionCheck(directoryId: string, entryKey: string) {
+  private createActiveTeamConditionCheck(
+    directoryId: string,
+    entryKey: string,
+    expectedTeamId?: string,
+  ) {
     return {
       TableName: this.tableName,
       Key: {
         directoryId,
         entryKey,
       },
-      ConditionExpression: 'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)',
+      ConditionExpression: expectedTeamId === undefined
+        ? 'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)'
+        : '#entryType = :entryType AND #teamId = :teamId AND attribute_not_exists(#archivedAt)',
+      ...(expectedTeamId === undefined
+        ? {}
+        : {
+            ExpressionAttributeNames: {
+              '#archivedAt': 'archivedAt',
+              '#entryType': 'entryType',
+              '#teamId': 'teamId',
+            },
+            ExpressionAttributeValues: {
+              ':entryType': 'team',
+              ':teamId': expectedTeamId,
+            },
+          }),
     }
   }
 

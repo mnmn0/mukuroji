@@ -633,6 +633,7 @@ export const workspaceMessages = {
   'sidebar.archive.cancel': 'Cancel',
   'sidebar.archive.confirm': 'Archive',
   'sidebar.teamOverview': 'Team overview',
+  'sidebar.triage': 'Triage',
   'sidebar.issues': 'Issues',
   'sidebar.members': 'Members',
   'sidebar.projectCount': '{count} projects',

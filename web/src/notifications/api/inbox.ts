@@ -68,6 +68,10 @@ export type InboxNotification = {
    */
   issueId?: string
   /**
+   * Team Triage queue の対象 Entry ID です。
+   */
+  triageEntryId?: string
+  /**
    * 通知対象の comment ID です。
    */
   commentId?: string

@@ -405,6 +405,7 @@ export function isCanonicalWorkItem(value: unknown): value is CanonicalWorkItem 
     isOptionalString(value.assigneeEmail) &&
     isOptionalString(value.assigneeName) &&
     isOptionalString(value.sourceRequestId) &&
+    isOptionalString(value.sourceTriageEntryId) &&
     isOptionalString(value.archivedAt) &&
     isOptionalString(value.archivedBy) &&
     isApprovalSummary(value.approvalSummary, value.createdAt)

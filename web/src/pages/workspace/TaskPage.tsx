@@ -218,6 +218,8 @@ export function TaskPage() {
     accessToken,
     Boolean(user && !currentUserError),
   )
+  const canAccessTriage = workspaceAccess?.currentMember.status === 'active' &&
+    workspaceAccess.currentMember.role !== 'guest'
   const {
     data: planningSnapshot,
     error: planningError,
@@ -1374,6 +1376,7 @@ export function TaskPage() {
       onAddRelation={canMutateProjectTasks ? handleAddRelation : undefined}
       assigneeErrorMessage={projectMembersErrorMessage}
       assigneeOptions={activeProjectMembers}
+      canAccessTriage={canAccessTriage}
       canManageProjectMembers={canManageProjectMembers}
       canManageScheduleDependencyEndpoint={canManageScheduleDependencyEndpoint}
       collaboration={collaboration}

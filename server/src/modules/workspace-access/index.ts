@@ -18,6 +18,7 @@ export {
   type WorkspaceAccessCapabilities,
   type WorkspaceAccessClient,
   type WorkspaceAccessResponse,
+  type WorkspaceActiveMemberConditionOptions,
   type WorkspaceIdentityOwnership,
   type WorkspaceInvitation,
   type WorkspaceInvitationDeliveryStatus,
@@ -27,4 +28,5 @@ export {
   type WorkspaceMemberProvisioningSource,
   type WorkspaceMemberResponse,
   type WorkspaceMemberStatus,
+  type WorkspaceAccessTransactWriteItem,
 } from './workspace-access'

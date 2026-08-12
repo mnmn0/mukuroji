@@ -2,6 +2,10 @@ import * as cdk from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as kms from 'aws-cdk-lib/aws-kms';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
+import {
+  triageIndexDeploymentIncludes,
+  type TriageIndexDeploymentStage,
+} from '../config/triage-index-deployment';
 
 /**
  * Inputs required to create the stack data stores.
@@ -9,6 +13,8 @@ import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 export interface DataStoreBuilderInput {
   /** Secret JSON configuration persisted for connector runtimes. */
   readonly connectorRuntimeConfiguration: cdk.CfnParameter;
+  /** Reviewed one-index-at-a-time rollout stage for Triage GSIs. */
+  readonly triageIndexDeploymentStage: TriageIndexDeploymentStage;
 }
 
 /**
@@ -295,6 +301,37 @@ export function buildDataStores(
     sortKey: { name: 'queueRecordKey', type: dynamodb.AttributeType.STRING },
     projectionType: dynamodb.ProjectionType.ALL,
   });
+
+  requestIntakeTable.addGlobalSecondaryIndex({
+    indexName: 'triage-team-activity-index',
+    partitionKey: { name: 'triageTeamKey', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'triageActivityKey', type: dynamodb.AttributeType.STRING },
+    projectionType: dynamodb.ProjectionType.ALL,
+  });
+
+  if (triageIndexDeploymentIncludes(
+    input.triageIndexDeploymentStage,
+    'owner',
+  )) {
+    requestIntakeTable.addGlobalSecondaryIndex({
+      indexName: 'triage-owner-activity-index',
+      partitionKey: { name: 'triageOwnerKey', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'triageActivityKey', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+  }
+
+  if (triageIndexDeploymentIncludes(
+    input.triageIndexDeploymentStage,
+    'wake',
+  )) {
+    requestIntakeTable.addGlobalSecondaryIndex({
+      indexName: 'triage-wake-index',
+      partitionKey: { name: 'triageWakeShard', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'triageNextWakeAt', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.KEYS_ONLY,
+    });
+  }
 
   const teamIssueEventsTable = new dynamodb.Table(stack, 'TeamIssueEventsTable', {
     partitionKey: { name: 'directoryTeamIssueId', type: dynamodb.AttributeType.STRING },

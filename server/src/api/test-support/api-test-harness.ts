@@ -43,6 +43,7 @@ import {
 } from '../api-router'
 import {
   DynamoDbProjectDirectoryClient,
+  ProjectDataError,
   type ProjectArchiveWorkItemRevisionGuard,
   type ProjectRole,
 } from '../../modules/directory'
@@ -610,6 +611,7 @@ function createWorkspaceAccessFake(
     throw new Error('Unexpected Workspace Access client call.')
   }
   return {
+    createActiveMemberConditionCheck: unsupported,
     getMember: unsupported,
     getActiveMember: unsupported,
     getAccessSnapshot: unsupported,
@@ -696,6 +698,9 @@ function createTeamIssuesFake(
     throw new Error('Unexpected Team Issues client call.')
   }
   return {
+    createTriageDuplicateContextTransactionItems: () => {
+      throw new Error('Unexpected Team Issues client call.')
+    },
     getTeamIssues: unsupported,
     getPublicWorkItemPage: unsupported,
     getProjectIssues: unsupported,
@@ -1255,6 +1260,8 @@ function configureFakeProjectClients(
     /** Cognito user 一覧 fake が返す次 page token です。 */
     cognitoUsersNextToken?: string
     profileError?: Error
+    /** 指定した active member を Workspace guest として返します。 */
+    guestWorkspaceMemberKeys?: string[]
     inactiveWorkspaceMemberKeys?: string[]
     mentionAccessDeniedMemberKeys?: string[]
     /** NEW_PASSWORD_REQUIRED challenge で Cognito が返す error です。 */
@@ -1544,7 +1551,11 @@ function configureFakeProjectClients(
     memberKey,
     email: memberKey,
     name: memberKey === 'demo@example.com' ? 'Demo User' : undefined,
-    role: memberKey === 'demo@example.com' ? workspaceRole : 'member' as WorkspaceRole,
+    role: memberKey === 'demo@example.com'
+      ? workspaceRole
+      : options.guestWorkspaceMemberKeys?.includes(memberKey)
+        ? 'guest' as WorkspaceRole
+        : 'member' as WorkspaceRole,
     status: memberKey === 'demo@example.com'
       ? workspaceStatus
       : options.inactiveWorkspaceMemberKeys?.includes(memberKey)
@@ -1822,6 +1833,39 @@ function configureFakeProjectClients(
       },
     }),
     projectDirectory: {
+      async createActiveReferenceConditionChecks(directoryId, teamId, projectId) {
+        if (projectId && !hasProjectAccess) {
+          throw new ProjectDataError(404, 'ProjectNotFound', 'Project is unavailable.')
+        }
+        return [
+          {
+            ConditionCheck: {
+              TableName: 'DirectoryTable',
+              Key: { directoryId, entryKey: `TEAM#${teamId}` },
+              ConditionExpression: 'attribute_exists(directoryId)',
+            },
+          },
+          ...(projectId
+            ? [{
+                ConditionCheck: {
+                  TableName: 'DirectoryTable',
+                  Key: { directoryId, entryKey: `PROJECT#${projectId}` },
+                  ConditionExpression: 'attribute_exists(directoryId)',
+                },
+              }]
+            : []),
+        ]
+      },
+      async createProjectAccessConditionCheck(directoryId, projectId, memberKey) {
+        if (!hasProjectAccess) return undefined
+        return {
+          ConditionCheck: {
+            TableName: 'DirectoryTable',
+            Key: { directoryId, entryKey: `PROJECT_MEMBER#${projectId}#${memberKey}` },
+            ConditionExpression: 'attribute_exists(directoryId)',
+          },
+        }
+      },
       async getProjectDirectory(directoryId, locale, consistentRead) {
         calls.directoryReads.push({
           directoryId,
@@ -2053,6 +2097,17 @@ function configureFakeProjectClients(
       },
     },
     workspaceAccess: {
+      async createActiveMemberConditionCheck(workspaceId, memberKey) {
+        const member = createWorkspaceMember(memberKey)
+        if (member.status !== 'active') return undefined
+        return {
+          ConditionCheck: {
+            TableName: 'WorkspaceAccessTable',
+            Key: { workspaceId, recordKey: `MEMBER#${memberKey}` },
+            ConditionExpression: 'attribute_exists(workspaceId)',
+          },
+        }
+      },
       async getMember(_workspaceId, memberKey) {
         return createWorkspaceMember(memberKey)
       },

@@ -277,6 +277,24 @@ link revision と parent fence snapshot を条件に inbound content と outboun
 先に確定し、receipt を `dead-lettered` へ終端化して identity/FIFO row を同じ transaction で除去する。
 crash replay は終端 receipt を返し、provider を再呼び出さない。
 
+## Triage queue との接続
+
+External chat の message/thread を Team が受け入れる場合、provider adapter が署名、
+installation tenant、scope、replay window を検証した normalized event だけを
+`TriageEntry` に投影する。Entry は body の bounded allowlist projection、provider source ID、
+permission/retention 状態、reply capability を持ち、credential、raw payload、temporary URL は持たない。
+
+Provider/workspace/conversation/thread/message に束縛した source claim で webhook 再配送を
+重複排除する。`accept` は canonical Work Item と external-chat link を関連付け、
+`duplicate` は新規 Work Item を作らず既存 canonical link へ provenance を移す。Permission loss、
+source deletion、retention expiry は Triage preview にも同じ restrictive lifecycle を適用し、
+本文や permalink だけが古い表示キャッシュに残らないようにする。
+
+Triage の `request-information` は current provider permission と link revision/fence を再評価し、
+external-chat の replay-safe outbound operation に委譲する。新しい requester activity は
+`snoozed` / `needs-information` Entry を一度だけ `pending` へ戻し、terminal Entry は再 open せず
+canonical thread に activity だけを追加する。
+
 ## Duplicate merge と canonical redirect
 
 duplicate Work Item の統合は canonical/duplicate Work Item revision と全 link revision を fence した

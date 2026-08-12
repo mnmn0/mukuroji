@@ -15,6 +15,7 @@ Mukuroji の Inbox は、Work Item の現在状態から都度組み立てる at
 - Work Item schedule 変更: `schedule-change`
 - 定期 due scan: `due` / `overdue`
 - comment / reply: `mention` / `reply` / `watcher` / `project-watcher`
+- Triage assignment / SLA / escalation: `triage-assignment` / `triage-sla` / `triage-escalation`
 
 Approval と automation の各 subsystem は、実装時に同じ契約で `approval` / `automation-failure` candidate と deep link を発行します。notification projector は event type を限定せず、候補を持つ audit event を同じ重複排除・認可ルールで扱います。
 
@@ -56,6 +57,16 @@ Work Item は実在する router contract に合わせて次の形式で開き�
 ```text
 /teams/<teamId>/issues?issueId=<issueId>
 ```
+
+Triage notification は `teamId` と `triageEntryId` の構造化 target から次を生成します。
+
+```text
+/teams/<teamId>/triage?entryId=<triageEntryId>
+```
+
+Web は構造化 target を保存済み `deepLink` より優先し、Team/Entry に束縛したルートを
+生成します。Triage から受け入れた Work Item と source へ移動し、Work Item 側の
+`sourceTriageEntryId` から元の受入判断へ戻れます。
 
 Comment notification は `commentId` と `rootCommentId` を追加します。Web は必要な reply page を取得した後、対象 comment を scroll/focus します。API は保存済みの内部相対 path だけを返し、外部 URL は deep link として扱いません。
 

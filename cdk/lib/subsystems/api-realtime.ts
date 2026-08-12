@@ -487,6 +487,9 @@ function bindApiRuntimeConfiguration(
       REQUEST_INTAKE_TABLE_NAME: requestIntakeTable.tableName,
       REQUEST_QUEUE_INDEX_NAME: 'RequestQueueIndex',
       REQUEST_RATE_LIMIT_PER_HOUR: requestRateLimitPerHour.valueAsString,
+      TRIAGE_OWNER_ACTIVITY_INDEX_NAME: 'triage-owner-activity-index',
+      TRIAGE_TEAM_ACTIVITY_INDEX_NAME: 'triage-team-activity-index',
+      TRIAGE_WAKE_INDEX_NAME: 'triage-wake-index',
       WEBHOOK_DELIVERY_QUEUE_URL: webhookDeliveryQueue.queueUrl,
       WORK_ITEM_CONFIGURATION_TABLE_NAME:
         workItemConfigurationTable.tableName,
@@ -743,6 +746,7 @@ export function buildApiRuntime(
         actions: ['dynamodb:ConditionCheckItem'],
         resources: [
           workItemsTable.tableArn,
+          requestIntakeTable.tableArn,
           projectDirectoryTable.tableArn,
           workspaceAccessTable.tableArn,
           planningTable.tableArn,

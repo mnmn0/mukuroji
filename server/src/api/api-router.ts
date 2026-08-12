@@ -7,9 +7,11 @@ import {
 import { resolve4, resolve6, resolveTxt } from 'node:dns/promises'
 import { request as requestHttps } from 'node:https'
 import { isIP } from 'node:net'
+import type { TransactWriteCommandInput } from '@aws-sdk/lib-dynamodb'
 import {
   PUBLIC_API_OPENAPI_DOCUMENT,
   ENTERPRISE_PERMISSION_IDS,
+  createDefaultUnscheduledWorkItemSchedule,
   WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS,
   WORK_ITEM_SCHEDULE_MIN_YEAR,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
@@ -18,6 +20,8 @@ import {
   type AnalyticsSnapshot,
   type AnalyticsSnapshotListResponse,
   type AnalyticsSnapshotRecord,
+  type AcceptCreateTriageAction,
+  type CreateManualTriageEntryInput,
   type CreateAnalyticsReportInput,
   type AutomationAction,
   type AutomationExecutionStatus,
@@ -46,7 +50,14 @@ import {
   type RequestFormDraft,
   type RequestFormField,
   type RequestFormRoutingTarget,
+  type RequestSubmission,
   type RequestSubmissionActionInput,
+  type TriageBulkActionInput,
+  type TriageBulkActionResult,
+  type TriageConfiguration,
+  type TriageActionInput,
+  type TriageEntry,
+  type UpdateTriageConfigurationInput,
   type ScheduleDependencyConstraint,
   type SearchCustomFieldFilter,
   type SearchCustomFieldValue,
@@ -243,6 +254,7 @@ import {
   createWorkItemDependencyKey,
   createWorkItemAuthorizationChangedError,
   createWorkItemRelationGraphRevisionConditionCheck,
+  createWorkItemRevisionConditionCheck,
   customFieldValueRecordsEqual,
   deriveWorkItemScheduleDueDate,
   isTeamIssueNotFoundError,
@@ -270,6 +282,7 @@ import {
   type TeamIssueDetailResponse,
   type TeamIssueResponseItem,
   type TeamIssuesResponse,
+  type TriageDuplicateContextTransactionContribution,
   type UpdateTeamIssueRequestBody,
   type UpdateTeamIssueResponse,
   type WorkItemIdempotencyTransaction,
@@ -286,6 +299,7 @@ import {
   WorkspaceAccessError,
   isWorkspaceIdentitySafeToDelete,
   type WorkspaceInvitation,
+  type WorkspaceActiveMemberConditionOptions,
   type WorkspaceMember,
   type WorkspaceMemberStatus,
   type WorkspaceRole,
@@ -355,6 +369,7 @@ import {
   type WorkspaceSearchDocument,
 } from '../modules/workspace-search/workspace-search'
 import {
+  createFormTriageEntryId,
   RequestIntakeError,
   createRequestWorkItemInput,
   type RequestExternalContext,
@@ -366,6 +381,22 @@ import {
 import {
   createPublicRequestIntakeRouter,
 } from '../modules/request-intake/adapter-in/http/public-request-intake-router'
+import {
+  createTriageAcceptanceTransactionItems,
+  createTriageActionAuditIdempotencyKey,
+  createTriageActionTransactionItems,
+  createTriageBulkTargetIdempotencyKey,
+  createTriageConfigurationRevisionConditionCheck,
+  createTriageInputFingerprint,
+  createTriageRouter,
+  TriageError,
+  type TriageAuthorizationConditionChecks,
+  type TriageIdempotency,
+  type TriageRouterBulkActionRequest,
+  type TriageTransactionContribution,
+  type TriageRouterActionRequest,
+  type TriageTeamAccess,
+} from '../modules/triage'
 import {
   ENTERPRISE_SCIM_DISPLAY_NAME_MAX_BYTES,
   ENTERPRISE_SCIM_EXTERNAL_ID_MAX_BYTES,
@@ -578,6 +609,11 @@ export type {
   WorkspaceMemberStatus,
   WorkspaceRole,
 } from '../modules/workspace-access/workspace-access'
+
+/** Workspace roles that may perform a Team Triage mutation. */
+const TRIAGE_NON_GUEST_MEMBER_CONDITION_OPTIONS: WorkspaceActiveMemberConditionOptions = {
+  allowedRoles: ['owner', 'admin', 'member'],
+}
 
 
 
@@ -1142,6 +1178,9 @@ const workItemDependencies: WorkItemDependencies = {
   get requestIntake() {
     return requireAppDependencies().workItems.requestIntake
   },
+  get triage() {
+    return requireAppDependencies().workItems.triage
+  },
   get analytics() {
     return requireAppDependencies().workItems.analytics
   },
@@ -1531,6 +1570,26 @@ const enterpriseRoutePermissionRules = [
   { method: 'GET', pathPattern: '/api/request-queue*', permission: 'requests.read' },
   { method: 'GET', pathPattern: '/api/request-submissions*', permission: 'requests.read' },
   { method: '*', pathPattern: '/api/request-submissions*', permission: 'requests.manage' },
+  {
+    method: 'PUT',
+    pathPattern: '/api/teams/:teamId/triage-settings',
+    permission: 'teams.manage',
+  },
+  {
+    method: 'GET',
+    pathPattern: '/api/teams/:teamId/triage*',
+    permission: 'teams.read',
+  },
+  {
+    method: '*',
+    pathPattern: '/api/teams/:teamId/triage*',
+    permission: 'teams.write',
+  },
+  {
+    method: 'GET',
+    pathPattern: '/api/teams/:teamId/work-items/:workItemId/triage-sources',
+    permission: 'teams.read',
+  },
   { method: 'GET', pathPattern: '/api/approvals*', permission: 'files.read' },
   { method: '*', pathPattern: '/api/approvals*', permission: 'files.approve' },
   {
@@ -5724,6 +5783,21 @@ routeApp.route('/', createAdminRequestIntakeRouter({
   mapError: toRequestIntakeErrorResponse,
 }))
 
+routeApp.route('/', createTriageRouter({
+  getTriage: () => workItemDependencies.triage,
+  requireTeamAccess: requireTriageTeamAccess,
+  requireWorkItemAccess: requireTriageWorkItemAccess,
+  readJson,
+  validateBulkAction: validateTriageBulkAction,
+  prepareManualHandoff: prepareTriageManualHandoff,
+  createManualHandoffAuthorizationConditionChecks:
+    createTriageManualHandoffAuthorizationConditionChecks,
+  validateConfiguration: validateTriageConfigurationReferences,
+  applyAction: applyTriageRouteAction,
+  applyBulkAction: applyTriageBulkRouteAction,
+  mapError: toTriageErrorResponse,
+}))
+
 /** Workspace admin が explicit triage transition または Work Item conversion を実行します。 */
 routeApp.post('/api/request-submissions/:submissionId/actions', async (c) => {
   try {
@@ -5745,20 +5819,57 @@ routeApp.post('/api/request-submissions/:submissionId/actions', async (c) => {
     }
     if (body.action !== 'convert') {
       if (body.action === 'assign') {
-        if (typeof body.assigneeUserId !== 'string' || !body.assigneeUserId.trim()) {
+        if (
+          body.assigneeUserId !== null &&
+          (typeof body.assigneeUserId !== 'string' || !body.assigneeUserId.trim())
+        ) {
           throw new RequestIntakeError(400, 'InvalidRequestIntakeInput', 'Request assignee is required.')
         }
-        await requireActiveWorkspaceAssignee(principal.directoryId, body.assigneeUserId)
+        if (typeof body.assigneeUserId === 'string') {
+          await requireActiveWorkspaceAssignee(principal.directoryId, body.assigneeUserId)
+        }
       }
+      const submission = await workItemDependencies.requestIntake.getSubmission(
+        principal.directoryId,
+        submissionId,
+      )
+      const triageEntry = await readLegacyConversionTriageEntry(
+        principal.directoryId,
+        submission.routingTarget.teamId,
+        createFormTriageEntryId(submissionId),
+      )
+      const triageContribution = triageEntry
+        ? await createLegacyRequestTriageContribution(
+            c,
+            principal,
+            submission,
+            triageEntry,
+            body,
+          )
+        : undefined
+      if (triageContribution?.replayed) return c.json(submission)
       return c.json(await workItemDependencies.requestIntake.applyAction(
         principal.directoryId,
         submissionId,
         { id: principal.userKey },
         body,
+        triageContribution?.contribution.transactItems,
       ))
     }
     const submission = await workItemDependencies.requestIntake.getSubmission(principal.directoryId, submissionId)
-    const conversion = createRequestWorkItemInput(submission, body)
+    if (submission.status === 'converted' && submission.workItem) {
+      await repairConvertedRequestTriageProjection(c, principal, submission)
+      return c.json(submission)
+    }
+    const triageEntryId = createFormTriageEntryId(submissionId)
+    const triageEntry = await readLegacyConversionTriageEntry(
+      principal.directoryId,
+      submission.routingTarget.teamId,
+      triageEntryId,
+    )
+    const conversion = triageEntry?.retention.redactedAt !== undefined
+      ? createRetentionSafeRequestWorkItemInput(submission, body)
+      : createRequestWorkItemInput(submission, body)
     const teamContext = await requireTeamPermission(principal, conversion.target.teamId, 'member')
     requireAssignedProjectPermission(
       principal,
@@ -5767,7 +5878,56 @@ routeApp.post('/api/request-submissions/:submissionId/actions', async (c) => {
       'member',
     )
     await validateRequestRoutingTarget(principal.directoryId, conversion.target)
-    const normalized = normalizeTeamIssueInput(conversion.input, teamContext.team)
+    if (triageEntry && conversion.target.teamId !== triageEntry.teamId) {
+      throw new RequestIntakeError(
+        409,
+        'RequestTriageTeamConflict',
+        'A Triage-backed Request must be accepted in its current Team.',
+      )
+    }
+    if (triageEntry && triageEntry.state !== 'pending' && triageEntry.state !== 'needs-information' &&
+      triageEntry.state !== 'snoozed') {
+      throw new RequestIntakeError(
+        409,
+        'RequestTriageStateConflict',
+        'The corresponding Triage entry is already resolved.',
+      )
+    }
+    const triageAction: AcceptCreateTriageAction | undefined = triageEntry
+      ? {
+          action: 'accept',
+          mode: 'create',
+          expectedRevision: triageEntry.revision,
+        }
+      : undefined
+    const triageIdempotency = triageAction
+      ? {
+          key: c.req.header('Idempotency-Key')?.trim() ||
+            `request-conversion:${submissionId}:${body.expectedRevision}`,
+          fingerprint: createTriageInputFingerprint({
+            workspaceId: principal.directoryId,
+            teamId: conversion.target.teamId,
+            entryId: triageEntryId,
+            action: triageAction,
+          }),
+        }
+      : undefined
+    const deterministicIssueId = triageEntry
+      ? createDeterministicTriageWorkItemId(
+          principal.directoryId,
+          conversion.target.teamId,
+          triageEntry.id,
+        )
+      : undefined
+    const normalized = normalizeTeamIssueInput({
+      ...conversion.input,
+      ...(deterministicIssueId && triageIdempotency
+        ? {
+            idempotentIssueId: deterministicIssueId,
+            idempotentRequestDigest: triageIdempotency.fingerprint,
+          }
+        : {}),
+    }, teamContext.team)
     const resolvedConfiguration = await workItemDependencies.workItemConfigurations.getTeamConfiguration(
       principal.directoryId,
       conversion.target.teamId,
@@ -5778,14 +5938,53 @@ routeApp.post('/api/request-submissions/:submissionId/actions', async (c) => {
       normalized,
       resolvedConfiguration,
     )
+    const authorizationConditionChecks = triageEntry
+      ? await createTriageProjectAuthorizationConditionChecks(
+          principal,
+          teamContext,
+          principal.directoryId,
+          conversion.target.teamId,
+          conversion.target.projectId,
+        )
+      : []
+    const guardedConfigured = authorizationConditionChecks.length === 0
+      ? configured
+      : {
+          ...configured,
+          authorizationConditionChecks: mergeTriageConditionChecks(
+            configured.authorizationConditionChecks ?? [],
+            authorizationConditionChecks,
+          ),
+        };
     await requireActiveWorkspaceAssignee(
       principal.directoryId,
-      readTeamIssueAssigneeUserId(configured),
+      readTeamIssueAssigneeUserId(guardedConfigured),
     )
+    const triageOccurredAt = triageEntry && triageAction && triageIdempotency && deterministicIssueId
+      ? new Date().toISOString()
+      : undefined
+    const triageAcceptance = triageEntry && triageAction && triageIdempotency &&
+      deterministicIssueId && triageOccurredAt
+      ? createTriageAcceptanceTransactionItems({
+          tableName: getEnv('REQUEST_INTAKE_TABLE_NAME') ?? 'mukuroji-request-intake-local',
+          entry: triageEntry,
+          action: triageAction,
+          canonicalWorkItem: {
+            teamId: conversion.target.teamId,
+            workItemId: deterministicIssueId,
+            ...(conversion.target.projectId
+              ? { projectId: conversion.target.projectId }
+              : {}),
+          },
+          actorId: principal.userKey,
+          now: triageOccurredAt,
+          idempotency: triageIdempotency,
+        })
+      : undefined
     const created = await hydrateCreateTeamIssueResponse(await workItemDependencies.teamIssues.createTeamIssue(
       principal.directoryId,
       conversion.target.teamId,
-      configured,
+      guardedConfigured,
       principal.userKey,
       createApiMutationContext(c, principal, {
         submissionId,
@@ -5801,6 +6000,13 @@ routeApp.post('/api/request-submissions/:submissionId/actions', async (c) => {
         submissionId,
         events: submission.events,
       },
+      triageAcceptance && triageOccurredAt
+        ? {
+            entryId: triageAcceptance.entry.id,
+            occurredAt: triageOccurredAt,
+            transactItems: triageAcceptance.transactItems,
+          }
+        : undefined,
     ))
     await projectWorkItemSearchDocumentBestEffort(
       principal.directoryId,
@@ -18699,6 +18905,1865 @@ function toRequestIntakeErrorResponse(
   return c.json({ code: error.code, message: error.message }, status)
 }
 
+/**
+ * Authenticates a Team Triage request and enforces its live Team authorization.
+ *
+ * Triage can contain requester identity and private routing rationale, so Workspace
+ * guests are denied even when they can view a related Project.
+ *
+ * @param context - Current Hono request context.
+ * @param teamId - Team queue identifier from the route.
+ * @param access - Minimum Triage access requested by the adapter.
+ * @returns The authenticated Workspace and member identifiers.
+ */
+async function requireTriageTeamAccess(
+  context: Context,
+  teamId: string,
+  access: TriageTeamAccess,
+) {
+  const accessToken = readBearerAccessToken(context)
+  if (!accessToken) {
+    throw new TriageError(401, 'TriageAuthenticationRequired', 'Bearer token is required.')
+  }
+  const principal = await authenticateWorkspacePrincipal(accessToken, undefined, context)
+  if (principal.workspaceRole === 'guest') {
+    throw new WorkspaceAccessError(
+      403,
+      'WorkspaceRoleDenied',
+      'Guest members cannot access the Team Triage queue.',
+    )
+  }
+  let teamContext: TeamPermissionContext | undefined
+  if (access === 'manage') {
+    requireWorkspaceBusinessWrite(principal)
+    if (
+      principal.enterpriseRouteAuthorizedAtResource &&
+      principal.enterprisePermissions !== undefined &&
+      principal.enterpriseGrantedRoutePermissions?.includes('teams.manage') !== true
+    ) {
+      throw new WorkspaceAccessError(
+        403,
+        'WorkspacePermissionDenied',
+        'Team management permission is required for Triage settings.',
+      )
+    }
+    await requireTeamConfigurationAdministration(principal, teamId)
+    teamContext = await requireFullTriageConfigurationScope(principal, teamId)
+  } else {
+    if (access === 'write') requireWorkspaceBusinessWrite(principal)
+    teamContext = await requireTeamPermission(
+      principal,
+      teamId,
+      access === 'write' ? 'member' : 'viewer',
+    )
+    if (isEnterpriseTriageTeamScope(principal, teamId)) {
+      teamContext = await mergeTriageProjectAccesses(principal, teamContext)
+    }
+  }
+  const visibleProjectIds = teamContext
+    ? resolveRestrictedTriageProjectIds(
+        principal,
+        teamContext,
+        access === 'write' ? 'member' : 'viewer',
+      )
+    : undefined
+  const teamAccess = resolveEffectiveTriageTeamAccess(principal, teamContext, teamId, access)
+  const writableProjectIds = resolveWritableTriageProjectIds(
+    principal,
+    teamContext,
+    teamId,
+    teamAccess,
+  )
+  const canManageConfiguration = resolveTriageConfigurationManagement(
+    principal,
+    teamContext,
+    visibleProjectIds,
+  )
+  return {
+    workspaceId: principal.directoryId,
+    userId: principal.userKey,
+    auditActor: {
+      id: principal.actorId,
+      kind: resolveEnterpriseAuditActorKind(principal),
+      displayName: principal.userKey,
+    },
+    ...(principal.enterpriseBreakGlassActivationId
+      ? { auditCorrelationId: principal.enterpriseBreakGlassActivationId }
+      : {}),
+    teamAccess,
+    ...(visibleProjectIds !== undefined ? { visibleProjectIds } : {}),
+    ...(writableProjectIds !== undefined ? { writableProjectIds } : {}),
+    canManageConfiguration,
+  }
+}
+
+/** Resolves the exact Team management capability used by the settings mutation route. */
+function resolveTriageConfigurationManagement(
+  principal: WorkspacePrincipal,
+  context: TeamPermissionContext | undefined,
+  visibleProjectIds: readonly string[] | undefined,
+): boolean {
+  if (visibleProjectIds !== undefined && !principal.isSystemAdmin) return false
+  if (principal.isSystemAdmin || principal.workspaceRole === 'owner' || principal.workspaceRole === 'admin') {
+    return true
+  }
+  if (principal.enterpriseRouteAuthorizedAtResource) {
+    return principal.enterpriseGrantedRoutePermissions?.includes('teams.manage') === true
+  }
+  if (principal.enterprisePermissions !== undefined) return false
+  return context?.team.projects.every((project) => {
+    const access = context.projectAccesses?.find((candidate) => candidate.projectId === project.id)
+    return access?.role === 'manager'
+  }) === true
+}
+
+/** Merges stronger Project-scoped Enterprise access into a Team-scoped read snapshot.
+ *
+ * Team-level Enterprise read grants synthesize viewer access for every active Project. A
+ * principal may simultaneously hold a stronger Project role, so Triage must preserve that
+ * narrower write authority without widening it to the whole Team.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param context - Live Team context initially resolved for the route.
+ * @returns The context with the strongest role retained for each Project in the Team.
+ */
+async function mergeTriageProjectAccesses(
+  principal: WorkspacePrincipal,
+  context: TeamPermissionContext,
+): Promise<TeamPermissionContext> {
+  if (principal.isSystemAdmin || context.projectAccesses === undefined) return context
+  const teamProjectIds = new Set(context.team.projects.map((project) => project.id))
+  const roleByProjectId = new Map(
+    context.projectAccesses.map((access) => [access.projectId, access.role] as const),
+  )
+  for (const access of await getEffectiveProjectAccessList(principal)) {
+    if (!teamProjectIds.has(access.projectId) || access.role === undefined) continue
+    const currentRole = roleByProjectId.get(access.projectId)
+    if (
+      currentRole === undefined ||
+      projectRoleWeights[access.role] > projectRoleWeights[currentRole]
+    ) {
+      roleByProjectId.set(access.projectId, access.role)
+    }
+  }
+  for (const project of context.team.projects) {
+    const enterpriseRole = resolveTriageEnterpriseProjectRole(
+      principal,
+      context.team.id,
+      project.id,
+    )
+    if (enterpriseRole === undefined) continue
+    const currentRole = roleByProjectId.get(project.id)
+    if (
+      currentRole === undefined ||
+      projectRoleWeights[enterpriseRole] > projectRoleWeights[currentRole]
+    ) {
+      roleByProjectId.set(project.id, enterpriseRole)
+    }
+  }
+  return {
+    ...context,
+    projectAccesses: [...roleByProjectId].map(([projectId, role]) => ({ projectId, role })),
+  }
+}
+
+/** Re-evaluates one Project's full Triage role from the authenticated Enterprise snapshot.
+ *
+ * The request-level Project list is intentionally derived from the GET route permission and can
+ * therefore collapse a stronger write grant to viewer. Re-evaluating the write/manage permissions
+ * against the same immutable authorization snapshot preserves the effective role without trusting
+ * client state or performing a second directory read.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param teamId - Parent Team for the Project resource.
+ * @param projectId - Project whose Triage role is being projected.
+ * @returns The strongest Enterprise Project role, or undefined when no Triage grant applies.
+ */
+function resolveTriageEnterpriseProjectRole(
+  principal: WorkspacePrincipal,
+  teamId: string,
+  projectId: string,
+): ProjectRole | undefined {
+  const evaluation = principal.enterpriseAuthorizationEvaluation
+  if (!evaluation) return undefined
+  const resource: EnterpriseAuthorizationResource = {
+    workspaceId: principal.directoryId,
+    kind: 'project',
+    targetId: projectId,
+    parentTeamId: teamId,
+  }
+  const allows = (permission: EnterprisePermissionId) =>
+    evaluateEnterpriseAccess({
+      permission,
+      principal: evaluation.principal,
+      assignments: evaluation.assignments,
+      customRoles: evaluation.snapshot.customRoles,
+      groupMappings: evaluation.groupMappings,
+      resource,
+    }).allowed
+  if (allows('teams.write')) {
+    return allows('teams.manage') ? 'manager' : 'member'
+  }
+  return allows('teams.read') ? 'viewer' : undefined
+}
+
+/**
+ * Resolves the strongest live Team access without widening a read-only Project role.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param context - Live Team and Project access context when the route reads entries.
+ * @param teamId - Team whose access is being projected.
+ * @param minimumAccess - Access already enforced for the current route.
+ * @returns Strongest access that may be advertised in Triage response capabilities.
+ */
+function resolveEffectiveTriageTeamAccess(
+  principal: WorkspacePrincipal,
+  context: TeamPermissionContext | undefined,
+  teamId: string,
+  minimumAccess: TriageTeamAccess,
+): TriageTeamAccess {
+  if (minimumAccess === 'manage' || principal.isSystemAdmin) return 'manage'
+  let effectiveAccess = minimumAccess
+  if (isEnterpriseTriageTeamScope(principal, teamId)) {
+    const canWrite = principal.enterprisePermissions?.includes('teams.write') === true
+    if (canWrite && principal.enterprisePermissions?.includes('teams.manage')) return 'manage'
+    if (canWrite) effectiveAccess = 'write'
+  }
+  if (context?.projectAccesses?.some((entry) => entry.role === 'manager')) return 'manage'
+  if (context?.projectAccesses?.some((entry) => entry.role === 'member')) return 'write'
+  return effectiveAccess
+}
+
+/**
+ * Resolves the Project subset for which entry mutations may truthfully be advertised.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param context - Live Team and Project access context.
+ * @param teamId - Team whose access is being projected.
+ * @param teamAccess - Strongest resolved Team access.
+ * @returns Writable Project IDs, an empty read-only set, or undefined for Team-wide write.
+ */
+function resolveWritableTriageProjectIds(
+  principal: WorkspacePrincipal,
+  context: TeamPermissionContext | undefined,
+  teamId: string,
+  teamAccess: TriageTeamAccess,
+): readonly string[] | undefined {
+  if (teamAccess === 'read') return []
+  if (
+    principal.isSystemAdmin ||
+    isEnterpriseTriageTeamScope(principal, teamId) &&
+      principal.enterprisePermissions?.includes('teams.write') === true
+  ) {
+    return undefined
+  }
+  if (!context) return undefined
+  return resolveRestrictedTriageProjectIds(principal, context, 'member')
+}
+
+/**
+ * Returns whether current Enterprise authorization covers the routed Team itself.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param teamId - Team route identifier.
+ * @returns Whether Team-wide Enterprise permissions are authoritative for this request.
+ */
+function isEnterpriseTriageTeamScope(
+  principal: WorkspacePrincipal,
+  teamId: string,
+): boolean {
+  return principal.enterpriseRouteAuthorizedAtResource === true &&
+    (
+      principal.enterpriseAuthorizationResource?.kind === 'workspace' ||
+      principal.enterpriseAuthorizationResource?.kind === 'team' &&
+        principal.enterpriseAuthorizationResource.targetId === teamId
+    )
+}
+
+/**
+ * Narrows a Team queue to the Projects for which the current principal has live access.
+ *
+ * A principal that can access every active Project receives full Team visibility, which
+ * also permits unassigned entries. A partially scoped principal receives only explicit
+ * Project IDs so unassigned or cross-Project source metadata is never disclosed.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param context - Live Team directory and Project access snapshot.
+ * @param minimumRole - Role required by the current Triage operation.
+ * @returns Explicit visible Project IDs, or undefined for full Team visibility.
+ */
+function resolveRestrictedTriageProjectIds(
+  principal: WorkspacePrincipal,
+  context: TeamPermissionContext,
+  minimumRole: ProjectRole,
+): readonly string[] | undefined {
+  if (principal.isSystemAdmin || context.projectAccesses === undefined) return undefined
+  const visibleProjectIds = context.projectAccesses
+    .filter((access) => projectAccessAllows(access, minimumRole))
+    .map((access) => access.projectId)
+  const activeProjectIds = new Set(context.team.projects.map((project) => project.id))
+  if (
+    activeProjectIds.size === visibleProjectIds.length &&
+    visibleProjectIds.every((projectId) => activeProjectIds.has(projectId))
+  ) {
+    return undefined
+  }
+  return visibleProjectIds
+}
+
+/**
+ * Validates live member and Project references used by one bulk Triage mutation.
+ *
+ * @param context - Authenticated Hono request context.
+ * @param teamId - Team whose entries will be changed.
+ * @param input - Strictly parsed bulk action.
+ */
+async function validateTriageBulkAction(
+  context: Context,
+  teamId: string,
+  input: TriageBulkActionInput,
+): Promise<number> {
+  const principal = await authenticateTriagePrincipal(context)
+  const configuration = await workItemDependencies.triage.getConfiguration(
+    principal.directoryId,
+    teamId,
+  )
+  if (!configuration.allowedBulkActions.includes(input.operation.action)) {
+    throw new TriageError(
+      409,
+      'TriageBulkActionDisabled',
+      'This bulk action is disabled by the current Team Triage configuration.',
+    )
+  }
+  if (input.operation.action !== 'assign') return configuration.revision
+  const teamContext = await requireTeamPermission(principal, teamId, 'member')
+  if (input.operation.ownerUserId) {
+    await requireActiveWorkspaceAssignee(
+      principal.directoryId,
+      input.operation.ownerUserId,
+    )
+  }
+  if (input.operation.projectId) {
+    requireAssignedProjectPermission(
+      principal,
+      teamContext,
+      input.operation.projectId,
+      'member',
+    )
+  }
+  return configuration.revision
+}
+
+/**
+ * Replaces caller-asserted manual routing metadata with current Team settings.
+ *
+ * @param context - Authenticated Hono request context.
+ * @param teamId - Team receiving the handoff.
+ * @param input - Strictly parsed source content.
+ * @returns A handoff carrying server-derived Project, owner, SLA, and retention values.
+ */
+async function prepareTriageManualHandoff(
+  context: Context,
+  teamId: string,
+  input: CreateManualTriageEntryInput,
+): Promise<CreateManualTriageEntryInput> {
+  const principal = await authenticateTriagePrincipal(context)
+  const teamContext = await requireTeamPermission(principal, teamId, 'member')
+  const configuration = await workItemDependencies.triage.getConfiguration(
+    principal.directoryId,
+    teamId,
+  )
+  const searchableText = `${input.title}\n${input.body}`.toLocaleLowerCase('en-US')
+  const rule = [...configuration.rules]
+    .sort((left, right) => left.order - right.order || left.id.localeCompare(right.id))
+    .find((candidate) =>
+      candidate.enabled &&
+      candidate.sourceKinds.includes('manual-handoff') &&
+      (
+        candidate.keywords.length === 0 ||
+        candidate.keywords.some((keyword) =>
+          searchableText.includes(keyword.toLocaleLowerCase('en-US'))
+        )
+      )
+    )
+  const projectId = rule?.projectId ?? input.projectId
+  requireAssignedProjectPermission(principal, teamContext, projectId, 'member')
+  const ownerStrategy = rule?.owner
+  const ownerUserId = resolveConfiguredTriageOwner(configuration, ownerStrategy)
+  const liveOwnerIds = ownerStrategy?.type === 'rotation'
+    ? configuration.rotations.find((rotation) => rotation.id === ownerStrategy.rotationId)
+      ?.memberUserIds ?? []
+    : ownerUserId ? [ownerUserId] : []
+  const slaPolicy = configuration.slaPolicies.find((policy) =>
+    policy.sourceKinds.includes('manual-handoff')
+  )
+  const configuredOwnerIds = new Set([
+    ...liveOwnerIds,
+    ...(slaPolicy?.escalationOwnerUserId ? [slaPolicy.escalationOwnerUserId] : []),
+  ])
+  await Promise.all([...configuredOwnerIds].map(async (memberUserId) => {
+    await requireTriageOwnerProjectAccess(
+      principal.directoryId,
+      projectId,
+      memberUserId,
+    )
+  }))
+  const now = new Date()
+  const slaDueAt = slaPolicy
+    ? new Date(now.getTime() + slaPolicy.responseMinutes * 60_000)
+    : undefined
+  const escalationDueAt = slaDueAt && slaPolicy?.escalationMinutes !== undefined
+    ? new Date(slaDueAt.getTime() + slaPolicy.escalationMinutes * 60_000)
+    : undefined
+  const retentionExpiresAt = new Date(now)
+  retentionExpiresAt.setUTCDate(retentionExpiresAt.getUTCDate() + configuration.retentionDays)
+  return {
+    sourceId: input.sourceId,
+    title: input.title,
+    body: input.body,
+    requesterDisplayName: input.requesterDisplayName,
+    ...(input.requesterEmail ? { requesterEmail: input.requesterEmail } : {}),
+    ...(projectId ? { projectId } : {}),
+    routingReason: rule
+      ? `Matched Team Triage routing rule "${rule.name}".`
+      : 'No enabled Team Triage routing rule matched; the handoff remained in the selected Team.',
+    ...(ownerUserId ? { ownerUserId } : {}),
+    ...(slaPolicy && slaDueAt
+      ? {
+          slaPolicyId: slaPolicy.id,
+          slaDueAt: slaDueAt.toISOString(),
+          ...(escalationDueAt ? { escalationDueAt: escalationDueAt.toISOString() } : {}),
+        }
+      : {}),
+    preparedConfigurationRevision: configuration.revision,
+    retentionExpiresAt: retentionExpiresAt.toISOString(),
+  }
+}
+
+/** Builds caller authorization fences for one manual Triage handoff. */
+async function createTriageManualHandoffAuthorizationConditionChecks(
+  context: Context,
+  teamId: string,
+  input: CreateManualTriageEntryInput,
+): Promise<TriageAuthorizationConditionChecks> {
+  const principal = await authenticateTriagePrincipal(context)
+  const teamContext = await requireTeamPermission(principal, teamId, 'member')
+  if (principal.isSystemAdmin) return []
+  return mergeTriageConditionChecks(
+    await createTriageActiveActorConditionChecks(
+      principal,
+      TRIAGE_NON_GUEST_MEMBER_CONDITION_OPTIONS,
+    ),
+    await createTriageProjectAuthorizationConditionChecks(
+      principal,
+      teamContext,
+      principal.directoryId,
+      teamId,
+      input.projectId,
+    ),
+    await createTriageAssigneeProjectAuthorizationConditionChecks(
+      principal.directoryId,
+      input.projectId,
+      input.ownerUserId,
+    ),
+  )
+}
+
+/** Validates that a configured Triage owner can work within the destination Project. */
+async function requireTriageOwnerProjectAccess(
+  workspaceId: string,
+  projectId: string | undefined,
+  ownerUserId: string,
+): Promise<void> {
+  await requireActiveWorkspaceAssignee(workspaceId, ownerUserId)
+  if (!projectId) return
+  const access = await workspaceDependencies.projectDirectory.getProjectAccess(
+    workspaceId,
+    projectId,
+    ownerUserId,
+  )
+  if (!access || !projectAccessAllows(access, 'member')) {
+    throw new ProjectDataError(
+      409,
+      'TriageAssigneeProjectAccessDenied',
+      'The configured Triage owner cannot access the destination Project.',
+    )
+  }
+}
+
+/** Builds the commit-time Project membership fence for the assigned Triage owner. */
+async function createTriageAssigneeProjectAuthorizationConditionChecks(
+  workspaceId: string,
+  projectId: string | undefined,
+  ownerUserId: string | undefined,
+): Promise<TriageAuthorizationConditionChecks> {
+  if (!projectId || !ownerUserId) return []
+  const createAccessConditionCheck = workspaceDependencies.projectDirectory
+    .createProjectAccessConditionCheck
+  if (!createAccessConditionCheck) {
+    throw new TriageError(
+      503,
+      'TriageAssigneeProjectAccessFenceUnavailable',
+      'Triage owner Project authorization fencing is unavailable. Retry the request.',
+    )
+  }
+  const conditionCheck = await createAccessConditionCheck(
+    workspaceId,
+    projectId,
+    ownerUserId,
+    'member',
+  )
+  if (!conditionCheck) {
+    throw new TriageError(
+      409,
+      'TriageAssigneeProjectAccessChanged',
+      'The assigned Triage owner no longer has access to the destination Project.',
+    )
+  }
+  return [conditionCheck]
+}
+
+/**
+ * Resolves a fixed or rotation-backed owner from one current Team configuration.
+ *
+ * @param configuration - Current Team Triage configuration.
+ * @param strategy - Matched routing rule owner strategy.
+ * @returns The selected active-member candidate, or undefined for unowned routing.
+ */
+function resolveConfiguredTriageOwner(
+  configuration: TriageConfiguration,
+  strategy: TriageConfiguration['rules'][number]['owner'] | undefined,
+): string | undefined {
+  if (!strategy || strategy.type === 'unowned') return undefined
+  if (strategy.type === 'fixed') return strategy.ownerUserId
+  const rotation = configuration.rotations.find((candidate) =>
+    candidate.id === strategy.rotationId
+  )
+  return rotation?.memberUserIds[rotation.nextIndex]
+}
+
+/**
+ * Validates every live directory reference before Team Triage settings are persisted.
+ *
+ * @param context - Authenticated Hono request context.
+ * @param teamId - Team owning the replacement configuration.
+ * @param input - Strictly parsed replacement settings.
+ */
+async function validateTriageConfigurationReferences(
+  context: Context,
+  teamId: string,
+  input: UpdateTriageConfigurationInput,
+): Promise<TriageAuthorizationConditionChecks> {
+  const principal = await authenticateTriagePrincipal(context)
+  const teamContext = await requireTeamPermission(principal, teamId, 'manager')
+  const memberUserIds = new Set<string>()
+  for (const rotation of input.rotations) {
+    for (const memberUserId of rotation.memberUserIds) memberUserIds.add(memberUserId)
+  }
+  for (const rule of input.rules) {
+    if (rule.teamId !== teamId) {
+      throw new TriageError(
+        400,
+        'InvalidTriageConfiguration',
+        'A routing rule cannot target another Team.',
+      )
+    }
+    requireAssignedProjectPermission(principal, teamContext, rule.projectId, 'manager')
+    if (rule.owner.type === 'fixed') memberUserIds.add(rule.owner.ownerUserId)
+  }
+  for (const policy of input.slaPolicies) {
+    if (policy.escalationOwnerUserId) memberUserIds.add(policy.escalationOwnerUserId)
+  }
+  await Promise.all([...memberUserIds].map(async (memberUserId) => {
+    await requireActiveWorkspaceAssignee(principal.directoryId, memberUserId)
+  }))
+  return await createTriageConfigurationAuthorizationConditionChecks(
+    principal,
+    teamContext,
+    principal.directoryId,
+    teamId,
+  )
+}
+
+/**
+ * Authenticates a Triage integration hook and denies Workspace guests.
+ *
+ * @param context - Current Hono request context.
+ * @returns The live Workspace principal.
+ */
+async function authenticateTriagePrincipal(context: Context): Promise<WorkspacePrincipal> {
+  const accessToken = readBearerAccessToken(context)
+  if (!accessToken) {
+    throw new TriageError(401, 'TriageAuthenticationRequired', 'Bearer token is required.')
+  }
+  const principal = await authenticateWorkspacePrincipal(accessToken, undefined, context)
+  if (principal.workspaceRole === 'guest') {
+    throw new WorkspaceAccessError(
+      403,
+      'WorkspaceRoleDenied',
+      'Guest members cannot mutate Team Triage.',
+    )
+  }
+  return principal
+}
+
+/**
+ * Enforces current Work Item scope before returning reverse Triage source links.
+ *
+ * @param context - Current Hono request context.
+ * @param teamId - Owning Team identifier.
+ * @param workItemId - Canonical Work Item identifier.
+ */
+async function requireTriageWorkItemAccess(
+  context: Context,
+  teamId: string,
+  workItemId: string,
+): Promise<void> {
+  const accessToken = readBearerAccessToken(context)
+  if (!accessToken) {
+    throw new TriageError(401, 'TriageAuthenticationRequired', 'Bearer token is required.')
+  }
+  const principal = await authenticateWorkspacePrincipal(accessToken, undefined, context)
+  if (principal.workspaceRole === 'guest') {
+    throw new WorkspaceAccessError(
+      403,
+      'WorkspaceRoleDenied',
+      'Guest members cannot access Triage source links.',
+    )
+  }
+  await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'viewer')
+}
+
+/**
+ * Applies an authorized Triage action, intercepting Work Item-dependent operations.
+ *
+ * @param request - Validated Triage action request from the HTTP adapter.
+ * @returns The replay-safe mutation receipt.
+ */
+async function applyTriageRouteAction(request: TriageRouterActionRequest) {
+  const accessToken = readBearerAccessToken(request.context)
+  if (!accessToken) {
+    throw new TriageError(401, 'TriageAuthenticationRequired', 'Bearer token is required.')
+  }
+  const principal = await authenticateWorkspacePrincipal(
+    accessToken,
+    undefined,
+    request.context,
+  )
+  if (principal.directoryId !== request.workspaceId || principal.userKey !== request.actor.id) {
+    throw new TriageError(404, 'TriageEntryNotFound', 'The triage entry was not found.')
+  }
+  const currentEntry = await workItemDependencies.triage.getEntryForMutation(
+    request.workspaceId,
+    request.teamId,
+    request.entryId,
+  )
+  const currentTeamContext = await requireTeamPermission(principal, request.teamId, 'member')
+  requireAssignedProjectPermission(
+    principal,
+    currentTeamContext,
+    currentEntry.projectId,
+    'member',
+  )
+  let authorizationConditionChecks = mergeTriageConditionChecks(
+    request.authorizationConditionChecks ?? [],
+    await createTriageProjectAuthorizationConditionChecks(
+      principal,
+      currentTeamContext,
+      request.workspaceId,
+      request.teamId,
+      currentEntry.projectId,
+    ),
+  )
+
+  if (request.action.action === 'assign') {
+    if (request.action.ownerUserId) {
+      const destinationProjectId = request.action.projectId === null
+        ? undefined
+        : request.action.projectId ?? currentEntry.projectId
+      await requireTriageOwnerProjectAccess(
+        request.workspaceId,
+        destinationProjectId,
+        request.action.ownerUserId,
+      )
+      authorizationConditionChecks = mergeTriageConditionChecks(
+        authorizationConditionChecks,
+        await createTriageAssigneeProjectAuthorizationConditionChecks(
+          request.workspaceId,
+          destinationProjectId,
+          request.action.ownerUserId,
+        ),
+      )
+    }
+    if (request.action.projectId) {
+      requireAssignedProjectPermission(
+        principal,
+        currentTeamContext,
+        request.action.projectId,
+        'member',
+      )
+      authorizationConditionChecks.push(...await createTriageProjectAuthorizationConditionChecks(
+        principal,
+        currentTeamContext,
+        request.workspaceId,
+        request.teamId,
+        request.action.projectId,
+      ))
+    }
+  }
+
+  const action = request.action
+  if (action.action === 'accept' && action.mode === 'create') {
+    authorizationConditionChecks = mergeTriageConditionChecks(
+      authorizationConditionChecks,
+      await createTriageProjectAuthorizationConditionChecks(
+        principal,
+        currentTeamContext,
+        request.workspaceId,
+        request.teamId,
+        action.projectId ?? currentEntry.projectId,
+      ),
+    )
+    return await acceptTriageEntryAsNewWorkItem(
+      principal,
+      { ...request, action, authorizationConditionChecks },
+    )
+  }
+
+  if (action.action === 'request-information') {
+    return await requestTriageInformationFromSource(principal, {
+      ...request,
+      action,
+      authorizationConditionChecks,
+    })
+  }
+
+  if (
+    currentEntry.source.kind === 'form' &&
+    currentEntry.source.submissionId &&
+    (action.action === 'assign' || action.action === 'decline')
+  ) {
+    const replay = await workItemDependencies.triage.getActionReceipt(
+      request.workspaceId,
+      request.teamId,
+      request.entryId,
+      request.idempotency,
+    )
+    if (replay) return replay
+    const submission = await workItemDependencies.requestIntake.getSubmission(
+      request.workspaceId,
+      currentEntry.source.submissionId,
+    )
+    const contribution = createTriageActionTransactionItems({
+      tableName: getEnv('REQUEST_INTAKE_TABLE_NAME') ?? 'mukuroji-request-intake-local',
+      audit: {
+        tableName: getConfiguredAuditTableName() ?? 'mukuroji-audit-events',
+        retentionDays: getConfiguredAuditRetentionDays(),
+      },
+      entry: currentEntry,
+      action,
+      actorId: principal.userKey,
+      now: new Date().toISOString(),
+      idempotency: request.idempotency,
+      auditContext: request.auditContext,
+    })
+    const referenceChecks = await createTriageActionReferenceConditionChecks(
+      request.workspaceId,
+      request.teamId,
+      currentEntry,
+      action,
+    )
+    const configurationCheck = request.configurationRevision === undefined
+      ? []
+      : [createTriageConfigurationRevisionConditionCheck(
+          getEnv('REQUEST_INTAKE_TABLE_NAME') ?? 'mukuroji-request-intake-local',
+          request.workspaceId,
+          request.teamId,
+          request.configurationRevision,
+        )]
+    await workItemDependencies.requestIntake.applyAction(
+      request.workspaceId,
+      submission.id,
+      { id: principal.userKey },
+      action.action === 'assign'
+        ? {
+            action: 'assign',
+            expectedRevision: submission.revision,
+            assigneeUserId: action.ownerUserId,
+          }
+        : {
+            action: 'reject',
+            expectedRevision: submission.revision,
+            reason: action.reason,
+          },
+      mergeTriageConditionChecks(
+        authorizationConditionChecks,
+        configurationCheck,
+        referenceChecks,
+        contribution.transactItems,
+      ),
+    )
+    return { entry: contribution.entry, replayed: false }
+  }
+
+  if (action.action === 'duplicate' || action.action === 'accept' && action.mode === 'link') {
+    const workItemId = action.action === 'duplicate'
+      ? action.canonicalWorkItemId
+      : action.workItemId
+    const { context: targetTeamContext, detail } = await loadAuthorizedTeamIssue(
+      principal,
+      request.teamId,
+      workItemId,
+      'member',
+    )
+    authorizationConditionChecks = mergeTriageConditionChecks(
+      authorizationConditionChecks,
+      await createTriageProjectAuthorizationConditionChecks(
+        principal,
+        targetTeamContext,
+        request.workspaceId,
+        request.teamId,
+        detail.issue.assignedProjectId,
+      ),
+    )
+    if (currentEntry.source.kind === 'form' && currentEntry.source.submissionId) {
+      const replay = await workItemDependencies.triage.getActionReceipt(
+        request.workspaceId,
+        request.teamId,
+        request.entryId,
+        request.idempotency,
+      )
+      if (replay) return replay
+      const now = new Date().toISOString()
+      const duplicateContext = action.action === 'duplicate'
+        ? workItemDependencies.teamIssues.createTriageDuplicateContextTransactionItems?.({
+            directoryId: request.workspaceId,
+            teamId: detail.issue.teamId,
+            workItemId: detail.issue.id,
+            expectedWorkItemRevision: detail.issue.revision,
+            actorUserId: principal.userKey,
+            entry: currentEntry,
+            mergedAt: now,
+          })
+        : undefined
+      if (action.action === 'duplicate' && !duplicateContext) {
+        throw new TriageError(
+          503,
+          'TriageDuplicateContextUnavailable',
+          'Duplicate context preservation is unavailable.',
+        )
+      }
+      const contribution = createTriageAcceptanceTransactionItems({
+        tableName: getEnv('REQUEST_INTAKE_TABLE_NAME') ?? 'mukuroji-request-intake-local',
+        entry: currentEntry,
+        action,
+        canonicalWorkItem: {
+          teamId: detail.issue.teamId,
+          workItemId: detail.issue.id,
+          ...(detail.issue.assignedProjectId
+            ? { projectId: detail.issue.assignedProjectId }
+            : {}),
+        },
+        actorId: principal.userKey,
+        now,
+        idempotency: request.idempotency,
+        ...(action.action === 'duplicate'
+          ? {
+              mergeReceipt: {
+                canonicalWorkItemId: detail.issue.id,
+                mergedSourceCount: 1,
+                mergedCommentCount: duplicateContext?.snapshot.commentMetadataCount ?? 0,
+                mergedAttachmentCount: duplicateContext?.snapshot.attachmentMetadataCount ?? 0,
+                mergedWatcherCount: duplicateContext?.snapshot.watcherMetadataCount ?? 0,
+                completedAt: now,
+              },
+            }
+          : {}),
+      })
+      const submission = await workItemDependencies.requestIntake.getSubmission(
+        request.workspaceId,
+        currentEntry.source.submissionId,
+      )
+      await workItemDependencies.requestIntake.completeConversion(
+        request.workspaceId,
+        submission.id,
+        { id: principal.userKey },
+        {
+          expectedRevision: submission.revision,
+          workItem: {
+            teamId: detail.issue.teamId,
+            workItemId: detail.issue.id,
+            ...(detail.issue.assignedProjectId
+              ? { projectId: detail.issue.assignedProjectId }
+              : {}),
+          },
+        },
+        [
+          ...authorizationConditionChecks,
+          ...(action.action === 'accept'
+            ? [createWorkItemRevisionConditionCheck(
+                getTeamIssuesTableName(),
+                request.workspaceId,
+                detail.issue.teamId,
+                detail.issue.id,
+                detail.issue.revision,
+              )]
+            : []),
+          ...(duplicateContext?.transactItems ?? []),
+          ...contribution.transactItems,
+        ],
+      )
+      return { entry: contribution.entry, replayed: false }
+    }
+  }
+
+  return await workItemDependencies.triage.applyAction(
+    request.workspaceId,
+    request.teamId,
+    request.entryId,
+    request.actor,
+    request.action,
+    request.idempotency,
+    request.auditContext,
+    request.configurationRevision,
+    mergeTriageConditionChecks(authorizationConditionChecks),
+  )
+}
+
+/** Builds commit-time conditions for the Workspace actor and Project access authorizing a Triage action. */
+async function createTriageProjectAuthorizationConditionChecks(
+  principal: WorkspacePrincipal,
+  context: TeamPermissionContext,
+  workspaceId: string,
+  teamId: string,
+  projectId: string | undefined,
+  minimumRole: ProjectRole = 'member',
+): Promise<TriageAuthorizationConditionChecks> {
+  if (principal.isSystemAdmin) {
+    return []
+  }
+  const actorMembershipChecks = await createTriageActiveActorConditionChecks(principal)
+  const enterpriseProjectAccess = projectId !== undefined &&
+    principal.enterpriseProjectAccesses?.some((access) =>
+      access.projectId === projectId && projectAccessAllows(access, minimumRole)
+    ) === true
+  if (isEnterpriseTriageTeamScope(principal, teamId) || enterpriseProjectAccess) {
+    const enterpriseControlCheck = createEnterpriseControlAuthorizationConditionCheck(principal)
+    return enterpriseControlCheck
+      ? [...actorMembershipChecks, enterpriseControlCheck]
+      : actorMembershipChecks
+  }
+  if (!projectId) return actorMembershipChecks
+  const access = context.projectAccesses?.find((candidate) => candidate.projectId === projectId)
+  if (!access || !projectAccessAllows(access, minimumRole)) {
+    throw new ProjectDataError(
+      403,
+      'ProjectAccessDenied',
+      `User "${principal.userKey}" cannot access assigned project "${projectId}".`,
+    )
+  }
+  const createAccessConditionCheck = workspaceDependencies.projectDirectory
+    .createProjectAccessConditionCheck
+  if (!createAccessConditionCheck) {
+    throw new TriageError(
+      503,
+      'TriageProjectAccessFenceUnavailable',
+      'Project authorization fencing is unavailable. Retry the request.',
+    )
+  }
+  const conditionCheck = await createAccessConditionCheck(
+    workspaceId,
+    projectId,
+    principal.userKey,
+    minimumRole,
+  )
+  if (!conditionCheck) {
+    throw new TriageError(
+      409,
+      'TriageProjectAccessChanged',
+      'Project authorization changed while the action was being prepared.',
+    )
+  }
+  return mergeTriageConditionChecks(actorMembershipChecks, [conditionCheck])
+}
+
+/** Builds commit-time authorization fences for replacing a full Team configuration. */
+async function createTriageConfigurationAuthorizationConditionChecks(
+  principal: WorkspacePrincipal,
+  context: TeamPermissionContext,
+  workspaceId: string,
+  teamId: string,
+): Promise<TriageAuthorizationConditionChecks> {
+  if (principal.isSystemAdmin) return []
+  if (isEnterpriseTriageTeamScope(principal, teamId)) {
+    const enterpriseControlCheck = createEnterpriseControlAuthorizationConditionCheck(principal)
+    return mergeTriageConditionChecks(
+      await createTriageActiveActorConditionChecks(
+        principal,
+        TRIAGE_NON_GUEST_MEMBER_CONDITION_OPTIONS,
+      ),
+      enterpriseControlCheck ? [enterpriseControlCheck] : [],
+    )
+  }
+  if (principal.workspaceRole === 'owner' || principal.workspaceRole === 'admin') {
+    return await createTriageActiveActorConditionChecks(principal, {
+      allowedRoles: ['owner', 'admin'],
+    })
+  }
+  const authorizationConditionChecks = await createTriageActiveActorConditionChecks(
+    principal,
+    TRIAGE_NON_GUEST_MEMBER_CONDITION_OPTIONS,
+  )
+  for (const project of context.team.projects) {
+    authorizationConditionChecks.push(...await createTriageProjectAuthorizationConditionChecks(
+      principal,
+      context,
+      workspaceId,
+      teamId,
+      project.id,
+      'manager',
+    ))
+  }
+  return mergeTriageConditionChecks(authorizationConditionChecks)
+}
+
+/** Builds the commit-time active-membership fence for a Triage mutation. */
+async function createTriageActiveActorConditionChecks(
+  principal: WorkspacePrincipal,
+  options?: WorkspaceActiveMemberConditionOptions,
+): Promise<TriageAuthorizationConditionChecks> {
+  const createMemberCheck = workspaceDependencies.workspaceAccess
+    .createActiveMemberConditionCheck
+  if (!createMemberCheck) {
+    throw new TriageError(
+      503,
+      'TriageActorAuthorizationFenceUnavailable',
+      'Workspace membership fencing is unavailable. Retry the Triage action.',
+    )
+  }
+  const conditionCheck = await createMemberCheck.call(
+    workspaceDependencies.workspaceAccess,
+    principal.directoryId,
+    normalizeProjectMemberKey(principal.userKey),
+    options ?? TRIAGE_NON_GUEST_MEMBER_CONDITION_OPTIONS,
+  )
+  if (!conditionCheck) {
+    throw new TriageError(
+      409,
+      'TriageActorMembershipChanged',
+      'Workspace membership changed while the Triage action was being prepared.',
+    )
+  }
+  return [conditionCheck]
+}
+
+/** Creates the commit-time Enterprise authorization generation fence for a Triage action.
+ *
+ * @param principal The Enterprise-authorized Workspace principal.
+ * @returns A CONTROL condition check when the Enterprise table is configured, or undefined for
+ * local in-memory Enterprise authorization.
+ */
+function createEnterpriseControlAuthorizationConditionCheck(
+  principal: WorkspacePrincipal,
+): TriageAuthorizationConditionChecks[number] | undefined {
+  const enterpriseTableName = getEnv('ENTERPRISE_IDENTITY_TABLE_NAME')?.trim()
+  const controlRevision = principal.enterpriseIdentityControlRevision
+  if (!enterpriseTableName) return undefined
+  if (controlRevision === undefined) {
+    throw new ProjectDataError(
+      503,
+      'EnterpriseAuthorizationUnavailable',
+      'Enterprise authorization state is unavailable for this Triage mutation.',
+    )
+  }
+  const expressionAttributeNames: Record<string, string> = {
+    '#controlRevision': 'controlRevision',
+    '#entryType': 'entryType',
+  }
+  if (controlRevision === 0) expressionAttributeNames['#scopeKey'] = 'scopeKey'
+  return {
+    ConditionCheck: {
+      TableName: enterpriseTableName,
+      Key: {
+        scopeKey: `WORKSPACE#${principal.directoryId}`,
+        recordKey: 'CONTROL',
+      },
+      ConditionExpression: controlRevision === 0
+        ? '(attribute_not_exists(#scopeKey) OR ' +
+          '(#entryType = :controlEntryType AND #controlRevision = :expectedControlRevision))'
+        : '#entryType = :controlEntryType AND #controlRevision = :expectedControlRevision',
+      ExpressionAttributeNames: expressionAttributeNames,
+      ExpressionAttributeValues: {
+        ':controlEntryType': 'enterprise-identity-control',
+        ':expectedControlRevision': controlRevision,
+      },
+    },
+  }
+}
+
+/** Removes duplicate DynamoDB condition checks when current and destination Projects coincide. */
+function mergeTriageConditionChecks(
+  ...groups: readonly (NonNullable<TransactWriteCommandInput['TransactItems']>)[]
+): NonNullable<TransactWriteCommandInput['TransactItems']> {
+  const seen = new Set<string>()
+  return groups.flatMap((group) => group.filter((item) => {
+    const condition = item.ConditionCheck
+    if (!condition?.TableName || !condition.Key) return true
+    const key = JSON.stringify([condition.TableName, condition.Key])
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  }))
+}
+
+/** Builds commit-time Team, Project, and owner fences for a Form-backed action. */
+async function createTriageActionReferenceConditionChecks(
+  workspaceId: string,
+  teamId: string,
+  entry: TriageEntry,
+  action: Exclude<TriageActionInput, { action: 'accept' | 'duplicate' }>,
+): Promise<NonNullable<TransactWriteCommandInput['TransactItems']>> {
+  const createDirectoryChecks = workspaceDependencies.projectDirectory
+    .createActiveReferenceConditionChecks
+  const createMemberCheck = workspaceDependencies.workspaceAccess
+    .createActiveMemberConditionCheck
+  if (!createDirectoryChecks || !createMemberCheck) {
+    throw new TriageError(
+      503,
+      'TriageAssignmentReferenceValidationUnavailable',
+      'Assignment reference validation is unavailable. Retry the request.',
+    )
+  }
+  const projectId = action.action === 'assign'
+    ? action.projectId === null
+      ? undefined
+      : action.projectId ?? entry.projectId
+    : entry.projectId
+  let directoryChecks
+  try {
+    directoryChecks = await createDirectoryChecks.call(
+      workspaceDependencies.projectDirectory,
+      workspaceId,
+      teamId,
+      projectId,
+    )
+  } catch (error) {
+    if (error instanceof ProjectDataError && error.code === 'TeamNotFound') {
+      throw new TriageError(409, 'TriageAssignmentTeamUnavailable', 'The target Team is not active.', { cause: error })
+    }
+    if (error instanceof ProjectDataError && error.code === 'ProjectNotFound') {
+      throw new TriageError(409, 'TriageAssignmentProjectUnavailable', 'The target Project is not active.', { cause: error })
+    }
+    throw error
+  }
+  if (action.action !== 'assign' || action.ownerUserId === null || action.ownerUserId === undefined) {
+    return directoryChecks
+  }
+  const memberCheck = await createMemberCheck.call(
+    workspaceDependencies.workspaceAccess,
+    workspaceId,
+    normalizeProjectMemberKey(action.ownerUserId),
+    TRIAGE_NON_GUEST_MEMBER_CONDITION_OPTIONS,
+  )
+  if (!memberCheck) {
+    throw new TriageError(
+      409,
+      'TriageAssignmentOwnerUnavailable',
+      'The assigned owner is not an active Workspace member.',
+    )
+  }
+  return [...directoryChecks, memberCheck]
+}
+
+/**
+ * Applies a bounded bulk operation through the same source-aware path as single actions.
+ *
+ * @param request - Authorized bulk action request from the HTTP adapter.
+ * @returns One independently classified result for every target.
+ */
+async function applyTriageBulkRouteAction(
+  request: TriageRouterBulkActionRequest,
+): Promise<TriageBulkActionResult> {
+  const results: TriageBulkActionResult['results'] = []
+  const preparedTargets = request.input.targets.map((target) => {
+    const action = createTriageBulkTargetAction(target, request.input.operation)
+    const idempotency = {
+      key: createTriageBulkTargetIdempotencyKey(
+        request.idempotencyKey,
+        target.entryId,
+      ),
+      fingerprint: createTriageInputFingerprint({
+        target,
+        operation: request.input.operation,
+      }),
+    }
+    const auditContext = request.createAuditContext(target.entryId, idempotency)
+    return { action, auditContext, idempotency, target }
+  })
+  for (const { action, auditContext, idempotency, target } of preparedTargets) {
+    try {
+      const receipt = await applyTriageRouteAction({
+        context: request.context,
+        workspaceId: request.workspaceId,
+        teamId: request.teamId,
+        entryId: target.entryId,
+        actor: request.actor,
+        action,
+        idempotency,
+        auditContext,
+        configurationRevision: request.configurationRevision,
+      })
+      results.push({ entryId: target.entryId, status: 'succeeded', entry: receipt.entry })
+    } catch (error) {
+      if (
+        error instanceof TriageError && error.status === 409 ||
+        error instanceof RequestIntakeError && error.status === 409
+      ) {
+        results.push({
+          entryId: target.entryId,
+          status: 'conflict',
+          errorCode: error.code,
+        })
+        continue
+      }
+      results.push({
+        entryId: target.entryId,
+        status: 'failed',
+        errorCode: error instanceof TriageError || error instanceof RequestIntakeError ||
+            error instanceof ProjectDataError || error instanceof WorkspaceAccessError
+          ? error.code
+          : 'TriageBulkTargetFailed',
+      })
+    }
+  }
+  return { results }
+}
+
+/**
+ * Expands one bulk operation into a revision-fenced single-entry action.
+ *
+ * @param target - Entry ID and revision viewed by the operator.
+ * @param operation - Validated operation shared by the bulk request.
+ * @returns The equivalent single-entry Triage action.
+ */
+function createTriageBulkTargetAction(
+  target: TriageBulkActionInput['targets'][number],
+  operation: TriageBulkActionInput['operation'],
+): Exclude<TriageActionInput, { action: 'accept' | 'duplicate' | 'request-information' }> {
+  if (operation.action === 'assign') {
+    return {
+      action: 'assign',
+      expectedRevision: target.expectedRevision,
+      ownerUserId: operation.ownerUserId,
+      ...(operation.projectId === undefined ? {} : { projectId: operation.projectId }),
+    }
+  }
+  if (operation.action === 'decline') {
+    return {
+      action: 'decline',
+      expectedRevision: target.expectedRevision,
+      reason: operation.reason,
+    }
+  }
+  return {
+    action: 'snooze',
+    expectedRevision: target.expectedRevision,
+    until: operation.until,
+  }
+}
+
+/**
+ * Delivers a Form-source information request and updates Triage in one transaction.
+ *
+ * Other source kinds fail closed until their production delivery adapter is composed;
+ * the queue must never claim that a message was requested when no provider send occurred.
+ *
+ * @param principal - Current live-authorized Workspace principal.
+ * @param request - Validated request-information action.
+ * @returns The newly committed or replayed Triage receipt.
+ */
+async function requestTriageInformationFromSource(
+  principal: WorkspacePrincipal,
+  request: TriageRouterActionRequest & {
+    action: Extract<TriageRouterActionRequest['action'], { action: 'request-information' }>
+  },
+) {
+  const replay = await workItemDependencies.triage.getActionReceipt(
+    request.workspaceId,
+    request.teamId,
+    request.entryId,
+    request.idempotency,
+  )
+  if (replay) return replay
+  const entry = await workItemDependencies.triage.getEntryForMutation(
+    request.workspaceId,
+    request.teamId,
+    request.entryId,
+  )
+  if (entry.source.kind !== 'form' || !entry.source.submissionId) {
+    throw new TriageError(
+      409,
+      'TriageReplyAdapterUnavailable',
+      'The source reply adapter is unavailable for this entry.',
+    )
+  }
+  const submission = await workItemDependencies.requestIntake.getSubmission(
+    request.workspaceId,
+    entry.source.submissionId,
+  )
+  const entryWithMessageCount = {
+    ...entry,
+    sourcePreview: {
+      ...entry.sourcePreview,
+      commentCount: entry.sourcePreview.commentCount + 1,
+    },
+  }
+  const contribution = createTriageActionTransactionItems({
+    tableName: getEnv('REQUEST_INTAKE_TABLE_NAME') ?? 'mukuroji-request-intake-local',
+    audit: {
+      tableName: getConfiguredAuditTableName() ?? 'mukuroji-audit-events',
+      retentionDays: getConfiguredAuditRetentionDays(),
+    },
+    entry: entryWithMessageCount,
+    action: request.action,
+    actorId: principal.userKey,
+    now: new Date().toISOString(),
+    idempotency: request.idempotency,
+    auditContext: request.auditContext,
+  })
+  const referenceChecks = await createTriageActionReferenceConditionChecks(
+    request.workspaceId,
+    request.teamId,
+    entry,
+    request.action,
+  )
+  await workItemDependencies.requestIntake.applyAction(
+    request.workspaceId,
+    submission.id,
+    { id: principal.userKey },
+    {
+      action: 'request-more-info',
+      expectedRevision: submission.revision,
+      message: request.action.message,
+    },
+    mergeTriageConditionChecks(
+      request.authorizationConditionChecks ?? [],
+      referenceChecks,
+      contribution.transactItems,
+    ),
+  )
+  return { entry: contribution.entry, replayed: false }
+}
+
+/**
+ * Reads the deterministic Form Triage Entry when converting through the legacy Request route.
+ *
+ * Submissions created before Team Triage existed retain the previous conversion behavior;
+ * every newer submission contributes its Triage acceptance to the Work Item transaction.
+ *
+ * @param workspaceId - Owning Workspace identifier.
+ * @param teamId - Work Item destination Team identifier.
+ * @param entryId - Deterministic Form Triage Entry identifier.
+ * @returns The canonical entry, or undefined for a pre-Triage legacy submission.
+ */
+async function readLegacyConversionTriageEntry(
+  workspaceId: string,
+  teamId: string,
+  entryId: string,
+) {
+  try {
+    return await workItemDependencies.triage.getEntryForMutation(
+      workspaceId,
+      teamId,
+      entryId,
+    )
+  } catch (error) {
+    if (error instanceof TriageError && error.status === 404) return undefined
+    throw error
+  }
+}
+
+/**
+ * Repairs a legacy response-loss window where the Request pointer committed before Triage.
+ *
+ * Current combined writes cannot enter this state, but an older converted Request may be
+ * retried after deployment. Same-Team pointers are linked idempotently; cross-Team legacy
+ * pointers remain readable without fabricating a new association.
+ *
+ * @param context - Current Request conversion retry context.
+ * @param principal - Authenticated Workspace administrator.
+ * @param submission - Already converted Request submission.
+ */
+async function repairConvertedRequestTriageProjection(
+  context: Context,
+  principal: WorkspacePrincipal,
+  submission: RequestSubmission,
+): Promise<void> {
+  if (!submission.workItem || submission.workItem.teamId !== submission.routingTarget.teamId) {
+    return
+  }
+  const entry = await readLegacyConversionTriageEntry(
+    principal.directoryId,
+    submission.routingTarget.teamId,
+    createFormTriageEntryId(submission.id),
+  )
+  if (!entry || entry.state === 'accepted' || entry.state === 'duplicate') return
+  if (entry.state === 'declined') {
+    throw new RequestIntakeError(
+      409,
+      'RequestTriageStateConflict',
+      'The corresponding Triage entry was declined.',
+    )
+  }
+  const action: TriageActionInput = {
+    action: 'accept',
+    mode: 'link',
+    expectedRevision: entry.revision,
+    workItemId: submission.workItem.workItemId,
+  }
+  const idempotency: TriageIdempotency = {
+    key: context.req.header('Idempotency-Key')?.trim() ||
+      `request-conversion-repair:${submission.id}:${submission.workItem.workItemId}`,
+    fingerprint: createTriageInputFingerprint({
+      workspaceId: principal.directoryId,
+      teamId: entry.teamId,
+      entryId: entry.id,
+      action,
+    }),
+  }
+  await workItemDependencies.triage.applyAction(
+    principal.directoryId,
+    entry.teamId,
+    entry.id,
+    { id: principal.userKey },
+    action,
+    idempotency,
+    createApiMutationContext(
+      context,
+      principal,
+      action,
+      createTriageActionAuditIdempotencyKey(entry.id, idempotency),
+    ),
+  )
+}
+
+/** Atomic Triage contribution paired with one legacy Request action. */
+type LegacyRequestTriageContribution =
+  | {
+      /** Indicates that the combined mutation was already committed. */
+      replayed: true
+    }
+  | {
+      /** Indicates that the caller must execute the returned contribution. */
+      replayed: false
+      /** Revision-fenced Triage writes appended to the Request transaction. */
+      contribution: TriageTransactionContribution
+    }
+
+/**
+ * Maps one legacy Request action to the canonical Form Triage state atomically.
+ *
+ * @param context - Current Request action context and idempotency header.
+ * @param principal - Authenticated Workspace administrator.
+ * @param submission - Strongly read Request submission.
+ * @param entry - Strongly read deterministic Form Triage entry.
+ * @param input - Non-conversion legacy Request action.
+ * @returns A replay marker or unexecuted Triage transaction contribution.
+ */
+async function createLegacyRequestTriageContribution(
+  context: Context,
+  principal: WorkspacePrincipal,
+  submission: RequestSubmission,
+  entry: TriageEntry,
+  input: Exclude<RequestSubmissionActionInput, { action: 'convert' }>,
+): Promise<LegacyRequestTriageContribution> {
+  let action: TriageActionInput
+  let duplicateContext: TriageDuplicateContextTransactionContribution | undefined
+  let duplicateMergedAt: string | undefined
+  if (input.action === 'assign') {
+    action = {
+      action: 'assign',
+      expectedRevision: entry.revision,
+      ownerUserId: input.assigneeUserId,
+    }
+  } else if (input.action === 'request-more-info') {
+    action = {
+      action: 'request-information',
+      expectedRevision: entry.revision,
+      message: input.message,
+    }
+  } else if (input.action === 'reject') {
+    action = {
+      action: 'decline',
+      expectedRevision: entry.revision,
+      reason: input.reason,
+    }
+  } else {
+    const duplicateTarget = await workItemDependencies.requestIntake.getSubmission(
+      principal.directoryId,
+      input.duplicateOfSubmissionId,
+    )
+    if (!duplicateTarget.workItem || duplicateTarget.workItem.teamId !== entry.teamId) {
+      throw new RequestIntakeError(
+        409,
+        'RequestDuplicateCanonicalWorkItemRequired',
+        'A Triage-backed duplicate must target a converted Request in the same Team.',
+      )
+    }
+    const { detail } = await loadAuthorizedTeamIssue(
+      principal,
+      duplicateTarget.workItem.teamId,
+      duplicateTarget.workItem.workItemId,
+      'member',
+    )
+    action = {
+      action: 'duplicate',
+      expectedRevision: entry.revision,
+      canonicalWorkItemId: duplicateTarget.workItem.workItemId,
+    }
+    const mergedAt = new Date().toISOString()
+    duplicateMergedAt = mergedAt
+    duplicateContext = workItemDependencies.teamIssues
+      .createTriageDuplicateContextTransactionItems?.({
+        directoryId: principal.directoryId,
+        teamId: detail.issue.teamId,
+        workItemId: detail.issue.id,
+        expectedWorkItemRevision: detail.issue.revision,
+        actorUserId: principal.userKey,
+        entry,
+        mergedAt,
+      })
+    if (!duplicateContext) {
+      throw new RequestIntakeError(
+        503,
+        'RequestDuplicateContextUnavailable',
+        'Duplicate context preservation is unavailable.',
+      )
+    }
+  }
+  const idempotency: TriageIdempotency = {
+    key: context.req.header('Idempotency-Key')?.trim() ||
+      `request-action:${submission.id}:${input.action}:${input.expectedRevision}`,
+    fingerprint: createTriageInputFingerprint({
+      workspaceId: principal.directoryId,
+      actorId: principal.userKey,
+      teamId: entry.teamId,
+      entryId: entry.id,
+      requestAction: input,
+    }),
+  }
+  const replay = await workItemDependencies.triage.getActionReceipt(
+    principal.directoryId,
+    entry.teamId,
+    entry.id,
+    idempotency,
+  )
+  if (replay) return { replayed: true }
+  const tableName = getEnv('REQUEST_INTAKE_TABLE_NAME') ?? 'mukuroji-request-intake-local'
+  if (action.action === 'duplicate') {
+    const completedAt = duplicateMergedAt ?? new Date().toISOString()
+    const triage = createTriageAcceptanceTransactionItems({
+      tableName,
+      entry,
+      action,
+      canonicalWorkItem: {
+        teamId: entry.teamId,
+        workItemId: action.canonicalWorkItemId,
+      },
+      actorId: principal.userKey,
+      now: completedAt,
+      idempotency,
+      mergeReceipt: {
+        canonicalWorkItemId: action.canonicalWorkItemId,
+        mergedSourceCount: 1,
+        mergedCommentCount: duplicateContext?.snapshot.commentMetadataCount ?? 0,
+        mergedAttachmentCount: duplicateContext?.snapshot.attachmentMetadataCount ?? 0,
+        mergedWatcherCount: duplicateContext?.snapshot.watcherMetadataCount ?? 0,
+        completedAt,
+      },
+    })
+    return {
+      replayed: false,
+      contribution: {
+        entry: triage.entry,
+        transactItems: [...(duplicateContext?.transactItems ?? []), ...triage.transactItems],
+      },
+    }
+  }
+  const entryForAction = action.action === 'request-information'
+    ? {
+        ...entry,
+        sourcePreview: {
+          ...entry.sourcePreview,
+          commentCount: entry.sourcePreview.commentCount + 1,
+        },
+      }
+    : entry
+  const contribution = createTriageActionTransactionItems({
+    tableName,
+    audit: {
+      tableName: getConfiguredAuditTableName() ?? 'mukuroji-audit-events',
+      retentionDays: getConfiguredAuditRetentionDays(),
+    },
+    entry: entryForAction,
+    action,
+    actorId: principal.userKey,
+    now: new Date().toISOString(),
+    idempotency,
+    auditContext: createApiMutationContext(
+      context,
+      principal,
+      input,
+      createTriageActionAuditIdempotencyKey(entry.id, idempotency),
+    ),
+  })
+  const referenceChecks = action.action === 'assign'
+    ? await createTriageActionReferenceConditionChecks(
+        principal.directoryId,
+        entry.teamId,
+        entry,
+        action,
+      )
+    : []
+  return {
+    replayed: false,
+    contribution: {
+      entry: contribution.entry,
+      transactItems: [...referenceChecks, ...contribution.transactItems],
+    },
+  }
+}
+
+/**
+ * Derives the canonical Work Item ID used by every accept-create retry path.
+ *
+ * @param workspaceId - Owning Workspace identifier.
+ * @param teamId - Destination Team identifier.
+ * @param entryId - Source Triage Entry identifier.
+ * @returns A Work Item adapter-compatible deterministic identifier.
+ */
+function createDeterministicTriageWorkItemId(
+  workspaceId: string,
+  teamId: string,
+  entryId: string,
+) {
+  const digest = createHash('sha256')
+    .update(`${workspaceId}\0${teamId}\0${entryId}`)
+    .digest('hex')
+  return `triage-${digest.slice(0, 48)}`
+}
+
+/**
+ * Creates a retention-safe legacy conversion input without reading source answers.
+ *
+ * Routing metadata and explicit operator overrides remain available, but mapped title,
+ * description, and custom fields cannot be copied after the source retention boundary.
+ *
+ * @param submission - Stored Request submission whose answers must be isolated.
+ * @param overrides - Validated conversion options supplied by the operator.
+ * @returns A Work Item input derived without retained source answers.
+ */
+function createRetentionSafeRequestWorkItemInput(
+  submission: RequestSubmission,
+  overrides: Extract<RequestSubmissionActionInput, { action: 'convert' }>,
+) {
+  return createRequestWorkItemInput(
+    { ...submission, answers: {} },
+    {
+      ...overrides,
+      title: overrides.title?.trim() || 'Retained source',
+    },
+  )
+}
+
+/**
+ * Creates a canonical Work Item and accepts its Triage Entry in one transaction.
+ *
+ * A Form source also converts its Request submission in the same transaction. The
+ * fingerprint-bound receipt is read first so a response-loss retry never creates a
+ * second Work Item or repeats the source conversion.
+ *
+ * @param principal - Current live-authorized Workspace principal.
+ * @param request - Validated accept-create action.
+ * @returns The newly committed or replayed Triage receipt.
+ */
+async function acceptTriageEntryAsNewWorkItem(
+  principal: WorkspacePrincipal,
+  request: TriageRouterActionRequest & {
+    action: Extract<TriageRouterActionRequest['action'], { action: 'accept'; mode: 'create' }>
+  },
+) {
+  const replay = await workItemDependencies.triage.getActionReceipt(
+    request.workspaceId,
+    request.teamId,
+    request.entryId,
+    request.idempotency,
+  )
+  if (replay) return replay
+
+  const entry = await workItemDependencies.triage.getEntryForMutation(
+    request.workspaceId,
+    request.teamId,
+    request.entryId,
+  )
+  const submission = entry.source.kind === 'form' && entry.source.submissionId
+    ? await workItemDependencies.requestIntake.getSubmission(
+        request.workspaceId,
+        entry.source.submissionId,
+      )
+    : undefined
+  const formConversion = submission && entry.retention.redactedAt === undefined
+    ? createRequestWorkItemInput(submission, {
+        action: 'convert',
+        expectedRevision: submission.revision,
+        target: {
+          teamId: request.teamId,
+          ...(request.action.projectId ? { projectId: request.action.projectId } : {}),
+        },
+      })
+    : undefined
+  const teamContext = await requireTeamPermission(principal, request.teamId, 'member')
+  const assignedProjectId = request.action.projectId ?? entry.projectId
+  requireAssignedProjectPermission(
+    principal,
+    teamContext,
+    assignedProjectId,
+    'member',
+  )
+  const assigneeUserId = entry.ownerUserId ?? principal.userKey
+  await requireActiveWorkspaceAssignee(request.workspaceId, assigneeUserId)
+
+  const issueId = createDeterministicTriageWorkItemId(
+    request.workspaceId,
+    request.teamId,
+    request.entryId,
+  )
+  const resolvedConfiguration = await workItemDependencies.workItemConfigurations
+    .getTeamConfiguration(request.workspaceId, request.teamId)
+  const normalized = normalizeTeamIssueInput({
+    ...(formConversion?.input ?? (entry.retention.redactedAt !== undefined
+      ? {
+          title: 'Retained source',
+          schedule: createDefaultUnscheduledWorkItemSchedule(),
+          priority: 'medium',
+        }
+      : {
+          title: entry.sourcePreview.title,
+          ...(entry.sourcePreview.body ? { description: entry.sourcePreview.body } : {}),
+          schedule: createDefaultUnscheduledWorkItemSchedule(),
+          priority: 'medium',
+        })),
+    assignedProjectId: assignedProjectId ?? null,
+    assigneeUserId,
+    idempotentIssueId: issueId,
+    idempotentRequestDigest: request.idempotency.fingerprint,
+  }, teamContext.team)
+  const configured = await prepareConfiguredCreateWorkItem(
+    request.workspaceId,
+    request.teamId,
+    normalized,
+    resolvedConfiguration,
+  )
+  const acceptanceReferenceConditionChecks =
+    await createTriageAcceptanceReferenceConditionChecks(
+      request.workspaceId,
+      request.teamId,
+      assignedProjectId,
+      assigneeUserId,
+    )
+  const guardedConfigured = {
+    ...configured,
+    authorizationConditionChecks: [
+      ...(configured.authorizationConditionChecks ?? []),
+      ...acceptanceReferenceConditionChecks,
+      ...(request.authorizationConditionChecks ?? []),
+    ],
+  }
+  const now = new Date().toISOString()
+  const canonicalWorkItem = {
+    teamId: request.teamId,
+    workItemId: issueId,
+    ...(assignedProjectId ? { projectId: assignedProjectId } : {}),
+  }
+  const acceptance = createTriageAcceptanceTransactionItems({
+    tableName: getEnv('REQUEST_INTAKE_TABLE_NAME') ?? 'mukuroji-request-intake-local',
+    entry,
+    action: request.action,
+    canonicalWorkItem,
+    actorId: principal.userKey,
+    now,
+    idempotency: request.idempotency,
+  })
+  const created = await workItemDependencies.teamIssues.createTeamIssue(
+    request.workspaceId,
+    request.teamId,
+    guardedConfigured,
+    principal.userKey,
+    createApiMutationContext(request.context, principal, {
+      action: 'triage.accept',
+      triageEntryId: request.entryId,
+      teamId: request.teamId,
+    }),
+    submission
+      ? {
+          tableName: getEnv('REQUEST_INTAKE_TABLE_NAME') ?? 'mukuroji-request-intake-local',
+          scopeKey: `WORKSPACE#${request.workspaceId}`,
+          recordKey: `SUBMISSION#${submission.id}`,
+          expectedRevision: submission.revision,
+          actorId: principal.userKey,
+          submissionId: submission.id,
+          events: submission.events,
+        }
+      : undefined,
+    {
+      entryId: entry.id,
+      occurredAt: now,
+      transactItems: acceptance.transactItems,
+    },
+  )
+  await projectWorkItemSearchDocumentBestEffort(
+    request.workspaceId,
+    created.issue,
+    'Triage acceptance',
+    [],
+  )
+  return { entry: acceptance.entry, replayed: false }
+}
+
+/** Converts Triage failures and existing application errors into the public API envelope. */
+function toTriageErrorResponse(context: Context, error: unknown) {
+  if (error instanceof CognitoServiceError) return toAuthErrorResponse(context, error)
+  if (error instanceof WorkspaceAccessError) return toWorkspaceAccessErrorResponse(context, error)
+  if (error instanceof WorkItemConfigurationError) {
+    return toWorkItemConfigurationErrorResponse(context, error)
+  }
+  if (error instanceof ProjectDataError || isTeamIssueNotFoundError(error)) {
+    return toProjectDataErrorResponse(context, error)
+  }
+  if (error instanceof RequestIntakeError) {
+    const status = error.status === 400 || error.status === 404 || error.status === 409 ||
+        error.status === 413 || error.status === 422 || error.status === 429 ||
+        error.status === 503
+      ? error.status
+      : 502
+    return context.json({ code: error.code, message: error.message }, status)
+  }
+  if (!(error instanceof TriageError)) {
+    console.error(error)
+    return context.json(
+      { code: 'TriageUnavailable', message: 'Team Triage is unavailable.' },
+      503,
+    )
+  }
+  if (error.status >= 500) console.error(error)
+  const status = error.status === 400 || error.status === 401 || error.status === 403 ||
+      error.status === 404 || error.status === 409 || error.status === 413 ||
+      error.status === 422 || error.status === 429 || error.status === 503
+    ? error.status
+    : 502
+  return context.json({ code: error.code, message: error.message }, status)
+}
+
 function requireSystemAdmin(principal: ProjectPrincipal) {
   if (
     principal.isSystemAdmin ||
@@ -21753,6 +23818,42 @@ async function requireTeamConfigurationAdministration(
   await requireTeamPermission(principal, teamId, 'manager')
 }
 
+/** Requires a settings replacement caller to manage every active Project in the Team.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param teamId - Team whose complete configuration would be replaced.
+ * @returns A Project-scoped Team context when legacy access was used, otherwise undefined.
+ */
+async function requireFullTriageConfigurationScope(
+  principal: WorkspacePrincipal,
+  teamId: string,
+): Promise<TeamPermissionContext | undefined> {
+  if (
+    principal.isSystemAdmin ||
+    principal.workspaceRole === 'owner' ||
+    principal.workspaceRole === 'admin' ||
+    isEnterpriseTriageTeamScope(principal, teamId) &&
+      principal.enterpriseGrantedRoutePermissions?.includes('teams.manage') === true
+  ) {
+    return undefined
+  }
+
+  const context = await requireTeamPermission(principal, teamId, 'manager')
+  const managedProjectIds = new Set(
+    context.projectAccesses
+      ?.filter((access) => projectAccessAllows(access, 'manager'))
+      .map((access) => access.projectId) ?? [],
+  )
+  if (context.team.projects.every((project) => managedProjectIds.has(project.id))) {
+    return context
+  }
+  throw new WorkspaceAccessError(
+    403,
+    'WorkspacePermissionDenied',
+    'Full Team management permission is required to replace Triage settings.',
+  )
+}
+
 async function authorizeRelationMutation(
   principal: WorkspacePrincipal,
   teamId: string,
@@ -22244,6 +24345,15 @@ function resolveCurrentPlanningNotificationScope(
   }
 }
 
+/** Returns whether a Triage notification is meaningful only to the current owner. */
+function requiresCurrentTriageOwner(notification: NotificationItem) {
+  return notification.reasons.length > 0 && notification.reasons.every((reason) =>
+    reason === 'assignee' || reason === 'assignment' || reason === 'due' ||
+    reason === 'overdue' || reason === 'sla' || reason === 'triage-sla' ||
+    reason === 'escalation' || reason === 'triage-assignment'
+  )
+}
+
 async function createNotificationVisibilityFilter(
   principal: WorkspacePrincipal,
 ) {
@@ -22317,10 +24427,34 @@ async function createNotificationVisibilityFilter(
             .filter((teamId) => activeTeamIds.has(teamId)),
         ],
       )
+  const fullyAccessibleTeamIds = new Set(
+    directory.teams
+      .filter((team) =>
+        principal.isSystemAdmin ||
+        principal.enterpriseAuthorizedTeamIds?.includes(team.id) === true ||
+        (
+          team.projects.length > 0 &&
+          team.projects.every((project) => accessibleProjectIds.has(project.id))
+        )
+      )
+      .map((team) => team.id),
+  )
   const workItemScopes = new Map<string, Promise<{
     assigneeMemberKey?: string
     exists: boolean
     projectId?: string
+  }>>()
+  const triageScopes = new Map<string, Promise<{
+    /** Whether the canonical Triage Entry still exists in this Team. */
+    exists: boolean
+    /** Current owner used to suppress stale owner-only notifications. */
+    ownerUserId?: string
+    /** Current assigned Project used to re-evaluate the notification scope. */
+    projectId?: string
+    /** Current permission-safe title replacing historical source content. */
+    title?: string
+    /** Whether event summary content must be removed from the response. */
+    restricted: boolean
   }>>()
   const enterpriseDocumentScopeAccess =
     resolveEnterpriseDocumentScopeAccess(
@@ -22430,6 +24564,60 @@ async function createNotificationVisibilityFilter(
         documentVisibilities.set(notification.entityId, visibility)
       }
       if (!await visibility) return false
+    }
+    if (notification.teamId && notification.triageEntryId) {
+      const scopeKey = `${notification.teamId}\0${notification.triageEntryId}`
+      let scope = triageScopes.get(scopeKey)
+      if (!scope) {
+        scope = workItemDependencies.triage.getEntry(
+          principal.directoryId,
+          notification.teamId,
+          notification.triageEntryId,
+        ).then((entry) => ({
+          exists: true,
+          ...(entry.ownerUserId ? { ownerUserId: entry.ownerUserId } : {}),
+          ...(entry.projectId ? { projectId: entry.projectId } : {}),
+          title: entry.permission.visibility === 'denied' ||
+              entry.retention.redactedAt !== undefined
+            ? 'Restricted source'
+            : entry.sourcePreview.title,
+          restricted: entry.permission.visibility !== 'full' ||
+            entry.retention.redactedAt !== undefined,
+        })).catch((error: unknown) => {
+          if (error instanceof TriageError && error.status === 404) {
+            return { exists: false, restricted: true }
+          }
+          throw error
+        })
+        triageScopes.set(scopeKey, scope)
+      }
+      const currentScope = await scope
+      if (!currentScope.exists) return false
+      if (currentScope.title) notification.title = currentScope.title
+      if (currentScope.restricted) delete notification.summary
+      if (
+        !notification.issueId &&
+        requiresCurrentTriageOwner(notification) &&
+        (
+          !currentScope.ownerUserId ||
+          normalizeProjectMemberKey(currentScope.ownerUserId) !==
+            normalizeProjectMemberKey(principal.userKey)
+        )
+      ) {
+        return false
+      }
+      if (currentScope.projectId) {
+        notification.projectId = currentScope.projectId
+        if (
+          projectTeamIds.get(currentScope.projectId)?.has(notification.teamId) !== true ||
+          !accessibleProjectIds.has(currentScope.projectId)
+        ) {
+          return false
+        }
+      } else {
+        delete notification.projectId
+        if (!fullyAccessibleTeamIds.has(notification.teamId)) return false
+      }
     }
     if (notification.teamId && notification.issueId) {
       const scopeKey = `${notification.teamId}\0${notification.issueId}`
@@ -23541,15 +25729,76 @@ async function requireActiveWorkspaceAssignee(
 ) {
   const member = await dependencies.workspaceAccess.getActiveMember(directoryId, userId)
 
-  if (!member) {
+  if (!member || member.role === 'guest') {
     throw new WorkspaceAccessError(
       409,
       'WorkspaceAssigneeInactive',
-      'Only active Workspace members can be assigned.',
+      'Only active non-guest Workspace members can be assigned.',
     )
   }
 
   return dependencies.cognito.getUserProfile(userId)
+}
+
+/** Returns the configured canonical Work Item table used by transaction fences. */
+function getTeamIssuesTableName(): string {
+  return getEnv('MUKUROJI_TEAM_ISSUES_TABLE') ??
+    getEnv('TEAM_ISSUES_TABLE_NAME') ??
+    'mukuroji-team-issues-local'
+}
+
+/** Builds commit-time Team, Project, and assignee fences for Triage acceptance.
+ *
+ * @param workspaceId - Owning Workspace directory identifier.
+ * @param teamId - Team that must remain active through Work Item creation.
+ * @param projectId - Optional Project that must remain active through commit.
+ * @param assigneeUserId - Member that must remain active through commit.
+ * @returns Directory and Workspace condition checks for the acceptance transaction.
+ */
+async function createTriageAcceptanceReferenceConditionChecks(
+  workspaceId: string,
+  teamId: string,
+  projectId: string | undefined,
+  assigneeUserId: string,
+): Promise<NonNullable<TransactWriteCommandInput['TransactItems']>> {
+  const createReferenceChecks = workspaceDependencies.projectDirectory.createActiveReferenceConditionChecks
+  const createMemberCheck = workspaceDependencies.workspaceAccess.createActiveMemberConditionCheck
+  if (!createReferenceChecks || !createMemberCheck) {
+    throw new TriageError(
+      503,
+      'TriageAcceptanceReferenceUnavailable',
+      'Acceptance reference fencing is unavailable.',
+    )
+  }
+  let referenceChecks
+  try {
+    referenceChecks = await createReferenceChecks(workspaceId, teamId, projectId)
+  } catch (error) {
+    if (error instanceof ProjectDataError) {
+      throw new TriageError(
+        409,
+        error.code === 'ProjectNotFound'
+          ? 'TriageAcceptanceProjectUnavailable'
+          : 'TriageAcceptanceTeamUnavailable',
+        'The selected acceptance destination is no longer active.',
+        { cause: error },
+      )
+    }
+    throw error
+  }
+  const memberCheck = await createMemberCheck(
+    workspaceId,
+    assigneeUserId,
+    TRIAGE_NON_GUEST_MEMBER_CONDITION_OPTIONS,
+  )
+  if (!memberCheck) {
+    throw new TriageError(
+      409,
+      'TriageAcceptanceOwnerUnavailable',
+      'The selected acceptance owner is no longer active.',
+    )
+  }
+  return [...referenceChecks, memberCheck]
 }
 
 async function hydrateProjectTasksResponse(response: ProjectTasksResponse) {

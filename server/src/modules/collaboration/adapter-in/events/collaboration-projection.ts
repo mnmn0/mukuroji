@@ -93,6 +93,8 @@ export type AuditProjectionEvent = {
   teamId?: string
   /** 現在の assigned project を再解決する Work Item ID です。 */
   issueId?: string
+  /** Team Triage notification の構造化 Entry target です。 */
+  triageEntryId?: string
   /** 現在権限の照合に使う project ID です。 */
   projectId?: string
   /** current comment ID です。 */
@@ -963,6 +965,7 @@ export function createNotificationProjectionItem(
     entityKey: event.scopeKey,
     targetId: event.targetId,
     issueId: event.issueId,
+    triageEntryId: event.triageEntryId,
     commentId: event.commentId,
     rootCommentId: event.rootCommentId,
     projectId: event.projectId,
@@ -1495,6 +1498,7 @@ export function parseAuditProjectionEvent(
     deepLink: readString(metadata.deepLink),
     teamId: readString(metadata.teamId),
     issueId: readString(metadata.issueId),
+    triageEntryId: readString(metadata.triageEntryId),
     projectId: readString(metadata.projectId),
     commentId: readString(metadata.commentId),
     fileId: readString(metadata.fileId),

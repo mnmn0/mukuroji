@@ -1,6 +1,7 @@
 /** Request Intake module public application and domain surface. */
 export {
   RequestIntakeError,
+  createFormTriageEntryId,
   createRequestSubmissionEventProjection,
   createRequestWorkItemInput,
   evaluateRequestConditionGroup,

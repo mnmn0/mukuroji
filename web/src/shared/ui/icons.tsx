@@ -84,6 +84,22 @@ export function ChevronIcon({ className = iconClass }: IconProps) {
 }
 
 /**
+ * Renders the shared form/document source icon.
+ *
+ * @param props - Optional CSS class override.
+ * @returns A decorative form icon.
+ */
+export function FormIcon({ className = iconClass }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M6 3.5h9l3 3V20.5H6z" />
+      <path d="M15 3.5v4h3" />
+      <path d="M9 11h6M9 15h6" />
+    </svg>
+  )
+}
+
+/**
  * Renders the shared copy outline icon.
  *
  * @param props - Optional icon presentation props.
@@ -103,6 +119,21 @@ export function CopyIcon({ className = iconClass }: IconProps) {
     >
       <rect height="12" rx="2" width="12" x="8" y="8" />
       <path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" />
+    </svg>
+  )
+}
+
+/**
+ * Renders the shared conversation source icon.
+ *
+ * @param props - Optional CSS class override.
+ * @returns A decorative chat icon.
+ */
+export function ChatIcon({ className = iconClass }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4 5.5h16v11H9l-5 4z" />
+      <path d="M8 9.5h8M8 12.5h5" />
     </svg>
   )
 }
@@ -133,6 +164,23 @@ export function SlidersIcon({ className = iconClass }: IconProps) {
 }
 
 /**
+ * Renders the shared webhook source icon.
+ *
+ * @param props - Optional CSS class override.
+ * @returns A decorative webhook icon.
+ */
+export function WebhookIcon({ className = iconClass }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M8.8 7.5a4 4 0 1 1 6.5 0" />
+      <path d="M15.2 16.5a4 4 0 1 1-6.5 0" />
+      <path d="M6.8 14a4 4 0 1 1 1.8-6.8" />
+      <path d="m12 6-2.5 4.5h5L12 15" />
+    </svg>
+  )
+}
+
+/**
  * Renders the shared star outline icon, optionally filled.
  *
  * @param props - Icon presentation and fill state.
@@ -153,6 +201,23 @@ export function StarIcon({ className = iconClass, filled = false }: IconProps & 
       viewBox="0 0 24 24"
     >
       <path d="m12 3 2.7 5.5 6.1.9-4.4 4.3 1 6.1-5.4-2.9-5.4 2.9 1-6.1-4.4-4.3 6.1-.9z" />
+    </svg>
+  )
+}
+
+/**
+ * Renders the shared manual handoff source icon.
+ *
+ * @param props - Optional CSS class override.
+ * @returns A decorative handoff icon.
+ */
+export function HandoffIcon({ className = iconClass }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M4 8h11" />
+      <path d="m12 5 3 3-3 3" />
+      <path d="M20 16H9" />
+      <path d="m12 13-3 3 3 3" />
     </svg>
   )
 }
@@ -183,6 +248,21 @@ export function PinIcon({ className = iconClass, filled = false }: IconProps & {
 }
 
 /**
+ * Renders the shared clock icon.
+ *
+ * @param props - Optional CSS class override.
+ * @returns A decorative clock icon.
+ */
+export function ClockIcon({ className = iconClass }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="12" cy="12" r="8.5" />
+      <path d="M12 7v5l3 2" />
+    </svg>
+  )
+}
+
+/**
  * Renders the shared checkmark outline icon.
  *
  * @param props - Optional icon presentation props.
@@ -201,6 +281,21 @@ export function CheckIcon({ className = iconClass }: IconProps) {
       viewBox="0 0 24 24"
     >
       <path d="m5 12 4.2 4.2L19 6.5" />
+    </svg>
+  )
+}
+
+/**
+ * Renders the shared shield icon.
+ *
+ * @param props - Optional CSS class override.
+ * @returns A decorative shield icon.
+ */
+export function ShieldIcon({ className = iconClass }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 3.5 19 6v5.5c0 4.2-2.8 7.2-7 9-4.2-1.8-7-4.8-7-9V6z" />
+      <path d="m9 12 2 2 4-4" />
     </svg>
   )
 }

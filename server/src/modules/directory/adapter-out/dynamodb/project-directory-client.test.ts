@@ -518,6 +518,88 @@ test('DynamoDB directory client rejects malformed workspace bootstrap rows', asy
   })
 })
 
+test('builds exact active Team and Project admission guards from a strong directory read', async () => {
+  const sentInputs: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sentInputs.push(command.input)
+      return {
+        Items: [{
+          directoryId: 'workspace-1',
+          entryKey: '000010#000000#TEAM#support',
+          entryType: 'team',
+          teamId: 'support',
+          teamSortOrder: 10,
+          nameJa: 'Support',
+          nameEn: 'Support',
+        }, {
+          directoryId: 'workspace-1',
+          entryKey: '000010#000010#PROJECT#intake',
+          entryType: 'project',
+          teamId: 'support',
+          teamSortOrder: 10,
+          projectId: 'intake',
+          projectSortOrder: 10,
+          nameJa: 'Intake',
+          nameEn: 'Intake',
+          tone: 'blue',
+        }],
+      }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbProjectDirectoryClient('DirectoryTable', documentClient)
+
+  await expect(client.createActiveReferenceConditionChecks(
+    'workspace-1',
+    'support',
+    'intake',
+  )).resolves.toEqual([{
+    ConditionCheck: {
+      TableName: 'DirectoryTable',
+      Key: {
+        directoryId: 'workspace-1',
+        entryKey: '000010#000000#TEAM#support',
+      },
+      ConditionExpression:
+        '#entryType = :entryType AND #teamId = :teamId AND attribute_not_exists(#archivedAt)',
+      ExpressionAttributeNames: {
+        '#archivedAt': 'archivedAt',
+        '#entryType': 'entryType',
+        '#teamId': 'teamId',
+      },
+      ExpressionAttributeValues: {
+        ':entryType': 'team',
+        ':teamId': 'support',
+      },
+    },
+  }, {
+    ConditionCheck: {
+      TableName: 'DirectoryTable',
+      Key: {
+        directoryId: 'workspace-1',
+        entryKey: '000010#000010#PROJECT#intake',
+      },
+      ConditionExpression:
+        '#entryType = :entryType AND #teamId = :teamId AND #projectId = :projectId AND attribute_not_exists(#archivedAt)',
+      ExpressionAttributeNames: {
+        '#archivedAt': 'archivedAt',
+        '#entryType': 'entryType',
+        '#projectId': 'projectId',
+        '#teamId': 'teamId',
+      },
+      ExpressionAttributeValues: {
+        ':entryType': 'project',
+        ':projectId': 'intake',
+        ':teamId': 'support',
+      },
+    },
+  }])
+  expect(sentInputs).toEqual([expect.objectContaining({
+    ConsistentRead: true,
+    TableName: 'DirectoryTable',
+  })])
+})
+
 test('DynamoDB directory client creates duplicate named teams with a unique id suffix', async () => {
   const sentInputs: Array<Record<string, unknown>> = []
   const documentClient = {
