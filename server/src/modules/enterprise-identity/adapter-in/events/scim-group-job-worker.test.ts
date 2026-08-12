@@ -157,7 +157,12 @@ function createDependencies(
     },
     planning: {
       async getAuthorizationState() {
-        return { revision: 11, entities: [], workItemLinks: [] }
+        return {
+          revision: 11,
+          entities: [],
+          workItemLinks: [],
+          workItemDependencies: [],
+        }
       },
     },
     projectManagerGuard: {
@@ -234,6 +239,7 @@ test('guards inactive users before deprovisioning and signs out only after succe
             ownerMemberKey: 'managed@example.com',
           }],
           workItemLinks: [],
+          workItemDependencies: [],
         }
       },
     },

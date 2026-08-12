@@ -31,6 +31,8 @@ export interface ApiAccessObservation {
   readonly requestId: string
   /** Coarse route group that excludes entity identifiers and query values. */
   readonly routeGroup: string
+  /** Whether the exact request method and path belong in the customer API SLI. */
+  readonly sliEligible: boolean
   /** Final HTTP response status. */
   readonly status: number
   /** X-Ray root trace identifier supplied by the runtime, when available. */
@@ -135,6 +137,13 @@ export function recordApiAccess(
           { Name: 'RequestCount', Unit: 'Count' },
           { Name: 'Latency', Unit: 'Milliseconds' },
           { Name: 'ServerErrorCount', Unit: 'Count' },
+          ...(observation.sliEligible
+            ? [
+              { Name: 'EligibleRequestCount', Unit: 'Count' },
+              { Name: 'EligibleLatency', Unit: 'Milliseconds' },
+              { Name: 'EligibleServerErrorCount', Unit: 'Count' },
+            ]
+            : []),
         ],
       }],
     },
@@ -145,6 +154,7 @@ export function recordApiAccess(
     requestId: observation.requestId,
     method: observation.method,
     routeGroup: observation.routeGroup,
+    sliEligible: observation.sliEligible,
     ...(observation.invocationId
       ? { invocationId: observation.invocationId }
       : {}),
@@ -154,7 +164,40 @@ export function recordApiAccess(
     RequestCount: 1,
     Latency: observation.durationMilliseconds,
     ServerErrorCount: observation.status >= 500 ? 1 : 0,
+    ...(observation.sliEligible
+      ? {
+        EligibleRequestCount: 1,
+        EligibleLatency: observation.durationMilliseconds,
+        EligibleServerErrorCount: observation.status >= 500 ? 1 : 0,
+      }
+      : {}),
   }))
+}
+
+/**
+ * Returns whether an exact API request belongs in the customer-traffic SLI.
+ *
+ * Liveness, readiness, and CORS preflight traffic remain in raw telemetry but
+ * are excluded from availability and latency objectives.
+ *
+ * @param method - HTTP request method supplied by Hono.
+ * @param path - Exact request path supplied by Hono.
+ * @returns Whether the request is eligible for API SLI metrics.
+ */
+export function isEligibleApiSliRequest(
+  method: string,
+  path: string,
+): boolean {
+  if (method.trim().toUpperCase() === 'OPTIONS') return false
+
+  const pathWithoutQuery = path.split(/[?#]/, 1)[0] ?? ''
+  if (
+    pathWithoutQuery === '/api/health' ||
+    pathWithoutQuery === '/api/ready'
+  ) {
+    return false
+  }
+  return pathWithoutQuery === '/api' || pathWithoutQuery.startsWith('/api/')
 }
 
 /**

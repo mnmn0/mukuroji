@@ -1,9 +1,11 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { teamWorkItemConfigurationFixture } from '../../work-items/fixtures'
+import { createWorkItemDependencySummaries } from '../../work-items/model/workItemDependencies'
 import { TaskBoardView } from './TaskBoardView'
 import {
   taskViewStoryConfigurationsByTeam,
+  taskViewStoryPlanningSnapshot,
   taskViewStoryStatusColumns,
   taskViewStoryTasks,
 } from './TaskView.stories.fixtures'
@@ -28,6 +30,7 @@ const meta = {
     configuration: teamWorkItemConfigurationFixture,
     configurationFailedTeamIds: [],
     configurationsByTeam: taskViewStoryConfigurationsByTeam,
+    dependencySummaries: createWorkItemDependencySummaries(taskViewStoryPlanningSnapshot),
     locale: 'ja',
     personLabels: {
       'sato@example.com': '佐藤 花子',
@@ -48,6 +51,26 @@ type Story = StoryObj<typeof meta>
 
 /** Standard workflow-column board. */
 export const Default: Story = {}
+
+/** Spacious board cards with minimal metadata and priority subgroups. */
+export const SavedViewPresentation: Story = {
+  args: {
+    presentation: {
+      columns: [{ field: 'title' }, { field: 'project' }],
+      density: 'spacious',
+      display: {
+        showArchived: false,
+        showAssigneeAvatars: true,
+        showCompleted: true,
+        showEmptyGroups: false,
+        showSubtasks: true,
+        wrapTitles: true,
+      },
+      groupBy: 'status',
+      subgroupBy: 'priority',
+    },
+  },
+}
 
 /** Board that retains work items whose team configuration failed. */
 export const ConfigurationUnavailable: Story = {

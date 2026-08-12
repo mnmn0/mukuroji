@@ -72,33 +72,39 @@ export function WorkspaceSidebar({
   )
 }
 
+/**
+ * Creates sidebar props that close the mobile drawer after selection.
+ *
+ * @param sidebarProps - Shared desktop sidebar behavior to adapt.
+ * @param onMobileSelect - Optional callback that closes the mobile drawer.
+ * @returns Sidebar props with mobile selection behavior applied.
+ */
 function createMobileSidebarProps(
   sidebarProps: Omit<SidebarProps, 'className'>,
   onMobileSelect?: () => void,
 ): SidebarProps {
+  /** Wraps a selection callback while preserving drawer close behavior. */
   const wrapSelection = <Arguments extends unknown[]>(
     callback: ((...args: Arguments) => void) | undefined,
   ) => (...args: Arguments) => {
     onMobileSelect?.()
     callback?.(...args)
   }
+  /** Keeps optional UI actions unavailable when their source callback is absent. */
+  const wrapOptionalSelection = <Arguments extends unknown[]>(
+    callback: ((...args: Arguments) => void) | undefined,
+  ) => callback ? wrapSelection(callback) : undefined
 
   return {
     ...sidebarProps,
     collapsed: undefined,
     defaultCollapsed: undefined,
     onCollapsedChange: undefined,
-    onOpenSearch: sidebarProps.onOpenSearch
-      ? () => {
-          onMobileSelect?.()
-          sidebarProps.onOpenSearch?.()
-        }
-      : undefined,
+    onOpenSearch: wrapOptionalSelection(sidebarProps.onOpenSearch),
     onSelectNav: wrapSelection(sidebarProps.onSelectNav),
     onSelectTeamView: wrapSelection(sidebarProps.onSelectTeamView),
-    onSelectTeam: sidebarProps.onSelectTeam
-      ? wrapSelection(sidebarProps.onSelectTeam)
-      : undefined,
     onSelectProject: wrapSelection(sidebarProps.onSelectProject),
+    onShowAllQuickAccess: wrapOptionalSelection(sidebarProps.onShowAllQuickAccess),
+    onShowAllProjects: wrapOptionalSelection(sidebarProps.onShowAllProjects),
   }
 }

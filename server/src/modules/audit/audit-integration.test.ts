@@ -1,6 +1,9 @@
 import { afterEach, expect, test } from 'bun:test'
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import {
+  createDefaultDueDateWorkItemSchedule,
+} from '@mukuroji/contracts'
+import {
   createAuditEvent,
   createMutationAuditContext,
   createWorkspaceInvitationAuditEntityId,
@@ -115,7 +118,15 @@ test('team issue mutations keep state, specialized activity, and generic audit a
       workflowStatusId: 'todo',
       statusCategory: 'unstarted',
       customFieldValues: {},
-      dueDate: '2026/07/31',
+      schedule: {
+        calendarPolicy: {
+          holidays: [],
+          timeZone: 'UTC',
+          workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+        },
+        dueDate: '2026-07-31',
+        mode: 'due-date',
+      },
       priority: 'high',
     },
     actorUserId,
@@ -133,9 +144,13 @@ test('team issue mutations keep state, specialized activity, and generic audit a
         directoryId: workspaceId,
         teamId: 'core-team',
         issueId: 'ship-audit-trail',
-        schemaVersion: 1,
+        schemaVersion: 2,
         revision: 1,
         relationIds: [],
+        schedule: {
+          dueDate: '2026-07-31',
+          mode: 'due-date',
+        },
       },
     },
   })
@@ -500,7 +515,7 @@ test('issue activity authorizes the parent and forwards its pagination cursor', 
     async getTeamIssueDetail(_directoryId: string, teamId: string) {
       return {
         issue: {
-          schemaVersion: 1 as const,
+          schemaVersion: 2 as const,
           revision: 1,
           id: 'issue-1',
           teamId,
@@ -512,7 +527,8 @@ test('issue activity authorizes the parent and forwards its pagination cursor', 
           statusCategory: 'unstarted' as const,
           customFieldValues: {},
           relationIds: [],
-          dueDate: '2026/07/31',
+          dueDate: '2026-07-31',
+          schedule: createDefaultDueDateWorkItemSchedule('2026-07-31'),
           priority: 'high' as const,
           createdAt: occurredAt,
           updatedAt: occurredAt,
@@ -659,7 +675,7 @@ function createTeamIssueItem(issueId: string) {
     directoryTeamId: `${workspaceId}#team#core-team`,
     teamId: 'core-team',
     issueId,
-    schemaVersion: 1,
+    schemaVersion: 2,
     revision: 1,
     sortOrder: 10,
     title: 'Audit integration',
@@ -670,7 +686,16 @@ function createTeamIssueItem(issueId: string) {
     statusCategory: 'unstarted',
     customFieldValues: {},
     relationIds: [],
-    dueDate: '2026/07/31',
+    dueDate: '2026-07-31',
+    schedule: {
+      calendarPolicy: {
+        holidays: [],
+        timeZone: 'UTC',
+        workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+      },
+      dueDate: '2026-07-31',
+      mode: 'due-date',
+    },
     priority: 'high',
     createdAt: occurredAt,
     updatedAt: occurredAt,

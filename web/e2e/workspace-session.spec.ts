@@ -100,6 +100,10 @@ async function mockWorkspaceSessionApis(
     })
   })
 
+  await page.route('**/api/projects/quick-access', async (route) => {
+    await route.fulfill({ json: { items: [], revision: 0 } })
+  })
+
   await page.route('**/api/notifications/unread-count', async (route) => {
     await route.fulfill({
       json: {
@@ -294,6 +298,7 @@ test('guarded Workspace mutation MFA failure clears the session and replaces his
   await expect(
     page.getByRole('heading', { level: 1, name: 'ダッシュボード' }),
   ).toBeVisible()
+  await page.getByRole('button', { name: 'その他', exact: true }).click()
   await page.getByRole('button', { name: '新規登録' }).click()
   await page.getByRole('button', { name: 'チーム', exact: true }).click()
   await page.getByLabel('チーム名').fill('セッション検証チーム')

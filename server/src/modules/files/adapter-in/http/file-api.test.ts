@@ -803,7 +803,7 @@ test('uses a strongly consistent Work Item read for authorization-sensitive deta
       sentInputs.push(command.input)
       return {
         Item: {
-          schemaVersion: 1,
+          schemaVersion: 2,
           revision: 1,
           workflowSchemaVersion: 1,
           directoryId: 'workspace-1',
@@ -818,7 +818,16 @@ test('uses a strongly consistent Work Item read for authorization-sensitive deta
           statusCategory: 'unstarted',
           customFieldValues: {},
           relationIds: [],
-          dueDate: '2026/07/12',
+          dueDate: '2026-07-12',
+          schedule: {
+            calendarPolicy: {
+              holidays: [],
+              timeZone: 'UTC',
+              workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+            },
+            dueDate: '2026-07-12',
+            mode: 'due-date',
+          },
           priority: 'medium',
           createdAt: '2026-07-12T00:00:00.000Z',
           updatedAt: '2026-07-12T00:00:00.000Z',
@@ -840,7 +849,11 @@ test('uses a strongly consistent Work Item read for authorization-sensitive deta
   })
 
   expect(sentInputs).toHaveLength(1)
-  expect(detail.issue).toMatchObject({ schemaVersion: 1, revision: 1 })
+  expect(detail.issue).toMatchObject({
+    revision: 1,
+    schedule: { dueDate: '2026-07-12', mode: 'due-date' },
+    schemaVersion: 2,
+  })
   expect(sentInputs[0]).toMatchObject({
     TableName: 'issues-table',
     ConsistentRead: true,

@@ -1,4 +1,5 @@
 import type { WorkflowDefinition } from './work-item-configuration'
+import type { WorkItemSchedule } from './work-items'
 
 /** Automation domain の現在の schema version です。 */
 export const AUTOMATION_SCHEMA_VERSION = 1 as const
@@ -339,8 +340,8 @@ export type AutomationWorkItemTemplatePayload = {
   customFieldValues?: Record<string, AutomationValue>
   /** Work Item の説明です。 */
   description?: string
-  /** `YYYY-MM-DD` 形式の期限です。 */
-  dueDate?: string
+  /** Work Item に保存する complete canonical schedule です。 */
+  schedule: WorkItemSchedule
   /** Work Item の優先度です。 */
   priority?: 'low' | 'medium' | 'high'
   /** Recurring/create action が利用する owner Team ID です。 */

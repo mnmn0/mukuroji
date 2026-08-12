@@ -1,8 +1,10 @@
 import { describe, expect, test } from 'bun:test'
 import { S3Client } from '@aws-sdk/client-s3'
-import type {
-  EnterpriseIdentitySnapshot,
-  EnterpriseSecurityPolicy,
+import {
+  WORK_ITEM_SCHEMA_VERSION,
+  createDefaultDueDateWorkItemSchedule,
+  type EnterpriseIdentitySnapshot,
+  type EnterpriseSecurityPolicy,
 } from '@mukuroji/contracts'
 import {
   cleanupDeletedFileProjection,
@@ -75,7 +77,7 @@ function createRealtimeWorkItem(
   overrides: Partial<RealtimeWorkItemRecord> = {},
 ): RealtimeWorkItemRecord {
   return {
-    schemaVersion: 1,
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
     revision: 1,
     workflowSchemaVersion: 1,
     directoryId: 'workspace-1',
@@ -92,7 +94,8 @@ function createRealtimeWorkItem(
     statusCategory: 'started',
     customFieldValues: {},
     relationIds: [],
-    dueDate: '2026/07/31',
+    dueDate: '2026-07-31',
+    schedule: createDefaultDueDateWorkItemSchedule('2026-07-31'),
     priority: 'medium',
     createdAt: '2026-07-01T09:00:00.000Z',
     updatedAt: '2026-07-12T09:00:00.000Z',
@@ -506,6 +509,59 @@ describe('collaboration projection pure helpers', () => {
     })
   })
 
+  test('preserves a structured Triage target from audit metadata into notification rows', () => {
+    const event = parseAuditProjectionEvent({
+      eventId: 'triage-sla-breached-1',
+      eventType: 'triage.sla-breached',
+      workspaceId: 'workspace-1',
+      occurredAt: '2026-08-09T12:00:00.000Z',
+      actorUserId: 'system:triage-schedule',
+      entityType: 'triage-entry',
+      entityId: 'triage_20260809_sla',
+      summary: 'Triage response SLA was breached.',
+      metadata: {
+        actorMemberKey: 'system:triage-schedule',
+        deepLink: '/teams/core-team/triage?entryId=triage_20260809_sla',
+        notificationCandidates: [{
+          memberKey: 'triager@example.com',
+          reason: 'triage-sla',
+        }],
+        notificationTitle: 'Triage SLA breached',
+        teamId: 'core-team',
+        triageEntryId: 'triage_20260809_sla',
+      },
+    })
+    expect(event).toBeDefined()
+    if (!event) throw new Error('Triage audit event was not parsed.')
+    const deliveryState = createNotificationProjectionDeliveryState(
+      'workspace-1#triager@example.com',
+      event.occurredAt,
+      {
+        version: 0,
+        channels: { inApp: true, email: false, push: false },
+        frequency: 'instant',
+        quietHours: {
+          enabled: false,
+          start: '22:00',
+          end: '07:00',
+          timeZone: 'UTC',
+        },
+      },
+    )
+
+    expect(createNotificationProjectionItem(
+      event,
+      { memberKey: 'triager@example.com', reasons: ['triage-sla'] },
+      deliveryState,
+      1_800_000_000,
+    )).toMatchObject({
+      deepLink: '/teams/core-team/triage?entryId=triage_20260809_sla',
+      entityId: 'triage_20260809_sla',
+      teamId: 'core-team',
+      triageEntryId: 'triage_20260809_sla',
+    })
+  })
+
   test('refreshes scheduled candidates from the current assignee and suppresses stale due state', () => {
     const scheduledEvent = createProjectionEvent({
       dueDate: '2026-07-12',
@@ -546,6 +602,26 @@ describe('collaboration projection pure helpers', () => {
       exists: true,
       statusCategory: 'completed',
     })).toBeUndefined()
+  })
+
+  test('accepts only canonical ISO Work Item due dates from audit metadata', () => {
+    const event = {
+      eventId: 'evt-due-date',
+      eventType: 'work-item.due',
+      workspaceId: 'workspace-1',
+      occurredAt: '2026-07-12T12:00:00.000Z',
+      entityType: 'work-item',
+      entityId: 'team/core/issue/example',
+    }
+
+    expect(parseAuditProjectionEvent({
+      ...event,
+      metadata: { dueDate: '2026-07-12' },
+    })?.dueDate).toBe('2026-07-12')
+    expect(parseAuditProjectionEvent({
+      ...event,
+      metadata: { dueDate: '2026/07/12' },
+    })?.dueDate).toBeUndefined()
   })
 
   test('tolerates legacy events without collaboration metadata', () => {

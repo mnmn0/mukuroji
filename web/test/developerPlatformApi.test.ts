@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import {
+  createDefaultDueDateWorkItemSchedule,
   PUBLIC_API_OPENAPI_DOCUMENT,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
@@ -493,7 +494,7 @@ describe('Developer Platform API', () => {
     expect(new Uint8Array(await csvExport.blob.arrayBuffer()).slice(0, 3))
       .toEqual(new Uint8Array([0xef, 0xbb, 0xbf]))
     expect(await csvExport.blob.text()).toContain(
-      'id,teamId,title,description,assignedProjectId,assigneeUserId,workflowStatusId,statusCategory,dueDate,priority,revision,createdAt,updatedAt,customFieldValues.labels,customFieldValues.risk\r\n',
+      'id,teamId,title,description,assignedProjectId,assigneeUserId,workflowStatusId,statusCategory,dueDate,schedule,priority,revision,createdAt,updatedAt,customFieldValues.labels,customFieldValues.risk\r\n',
     )
     expect(await csvExport.blob.text()).toContain(
       'work-item-1,team-product,"\'=HYPERLINK(""https://example.com"")"',
@@ -507,10 +508,12 @@ describe('Developer Platform API', () => {
         {
           id: 'work-item-1',
           customFieldValues: { risk: 'high' },
+          schedule: createDefaultDueDateWorkItemSchedule('2026-08-01'),
         },
         {
           id: 'work-item-2',
           customFieldValues: { labels: ['api', 'p1'] },
+          schedule: createDefaultDueDateWorkItemSchedule('2026-08-01'),
         },
       ],
     })
@@ -834,6 +837,7 @@ function createExportWorkItem(
     workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
     workflowStatusId: 'todo',
     dueDate: '2026-08-01',
+    schedule: createDefaultDueDateWorkItemSchedule('2026-08-01'),
     priority: 'medium',
     relationIds: [],
     source: 'dynamodb',

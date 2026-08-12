@@ -11,8 +11,16 @@ import * as lambdaNodejs from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import type { LambdaBuildPaths } from '../../config/lambda-build-paths';
 import type { StackParameters } from '../../config/stack-parameters';
+import {
+  bindWorkspaceSearchWriterFence,
+  type WorkspaceSearchWriterFenceResources,
+} from '../../policies/workspace-search-writer-fence';
 import type { DataStoreResources } from '../data-stores';
 import type { FileStorageResources } from '../file-storage';
+import {
+  bindRuntimeControls,
+  type RuntimeControlResources,
+} from '../runtime-controls';
 
 /**
  * Inputs required by automation event and schedule workers.
@@ -26,6 +34,10 @@ export interface AutomationWorkerInput {
   readonly lambdaBuildPaths: LambdaBuildPaths;
   /** Stack parameters used for secrets, authorization, and retention. */
   readonly parameters: StackParameters;
+  /** Dynamic operational controls shared by application runtimes. */
+  readonly runtimeControls: RuntimeControlResources;
+  /** Exact source, target, and state tables protected by the writer fence. */
+  readonly workspaceSearchWriterFence: WorkspaceSearchWriterFenceResources;
 }
 
 /**
@@ -54,6 +66,7 @@ export function buildAutomationWorkers(
     automationTable,
     projectDirectoryTable,
     teamIssueEventsTable,
+    tenantAdministrationTable,
     workItemConfigurationTable,
     workItemsTable,
     workspaceAccessTable,
@@ -115,12 +128,22 @@ export function buildAutomationWorkers(
         SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
         TEAM_ISSUE_EVENTS_TABLE_NAME: teamIssueEventsTable.tableName,
         TEAM_ISSUES_TABLE_NAME: workItemsTable.tableName,
+        TENANT_ADMINISTRATION_TABLE_NAME: tenantAdministrationTable.tableName,
         WORK_ITEM_CONFIGURATION_TABLE_NAME: workItemConfigurationTable.tableName,
         WORK_ITEMS_TABLE_NAME: workItemsTable.tableName,
         WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
         WORKSPACE_SEARCH_TABLE_NAME: workspaceSearchTable.tableName,
       },
     },
+  );
+  bindWorkspaceSearchWriterFence(
+    input.workspaceSearchWriterFence,
+    automationEventFunction,
+  );
+  bindRuntimeControls(
+    input.runtimeControls,
+    automationEventFunction,
+    'automation-event',
   );
   automationEventFunction.addEventSource(
     new lambdaEventSources.DynamoEventSource(auditEventsTable, {
@@ -142,6 +165,10 @@ export function buildAutomationWorkers(
   workspaceSearchTable.grants.readWriteData(automationEventFunction);
   workItemConfigurationTable.grants.readData(automationEventFunction);
   workspaceAccessTable.grants.readData(automationEventFunction);
+  automationEventFunction.addToRolePolicy(new iam.PolicyStatement({
+    actions: ['dynamodb:GetItem'],
+    resources: [tenantAdministrationTable.tableArn],
+  }));
   if (!automationEventFunction.role) {
     throw new Error('Automation event Lambda execution role was not created.');
   }
@@ -242,12 +269,22 @@ export function buildAutomationWorkers(
         SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
         TEAM_ISSUE_EVENTS_TABLE_NAME: teamIssueEventsTable.tableName,
         TEAM_ISSUES_TABLE_NAME: workItemsTable.tableName,
+        TENANT_ADMINISTRATION_TABLE_NAME: tenantAdministrationTable.tableName,
         WORK_ITEM_CONFIGURATION_TABLE_NAME: workItemConfigurationTable.tableName,
         WORK_ITEMS_TABLE_NAME: workItemsTable.tableName,
         WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
         WORKSPACE_SEARCH_TABLE_NAME: workspaceSearchTable.tableName,
       },
     },
+  );
+  bindWorkspaceSearchWriterFence(
+    input.workspaceSearchWriterFence,
+    automationScheduleFunction,
+  );
+  bindRuntimeControls(
+    input.runtimeControls,
+    automationScheduleFunction,
+    'automation-schedule',
   );
   automationTable.grants.readWriteData(automationScheduleFunction);
   auditEventsTable.grants.readWriteData(automationScheduleFunction);
@@ -258,6 +295,10 @@ export function buildAutomationWorkers(
   workspaceSearchTable.grants.readWriteData(automationScheduleFunction);
   workItemConfigurationTable.grants.readData(automationScheduleFunction);
   workspaceAccessTable.grants.readData(automationScheduleFunction);
+  automationScheduleFunction.addToRolePolicy(new iam.PolicyStatement({
+    actions: ['dynamodb:GetItem'],
+    resources: [tenantAdministrationTable.tableArn],
+  }));
   if (!automationScheduleFunction.role) {
     throw new Error('Automation schedule Lambda execution role was not created.');
   }

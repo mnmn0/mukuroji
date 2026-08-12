@@ -3,26 +3,100 @@ import { isValidElement } from 'react'
 import { matchRoutes, type RouteObject } from 'react-router'
 import { DashboardPage } from '../src/pages/workspace/DashboardPage'
 import { EnterpriseSecurityPage } from '../src/pages/workspace/EnterpriseSecurityPage'
+import { GoalDocumentsPage } from '../src/pages/workspace/GoalDocumentsPage'
 import { HelpPage } from '../src/pages/workspace/HelpPage'
 import { HomePage } from '../src/pages/workspace/HomePage'
+import { FocusPage } from '../src/pages/workspace/FocusPage'
 import { InboxPage } from '../src/pages/workspace/InboxPage'
 import { MyTasksPage } from '../src/pages/workspace/MyTasksPage'
+import { PlanningPage } from '../src/pages/workspace/PlanningPage'
+import { resolvePlanningProjectNavigationPath } from '../src/planning/model/navigation'
+import { ProjectsPage } from '../src/pages/workspace/ProjectsPage'
+import { ReportsPage } from '../src/pages/workspace/ReportsPage'
 import { SettingsPage } from '../src/pages/workspace/SettingsPage'
+import { TaskPage } from '../src/pages/workspace/TaskPage'
 import { TeamMembersPage } from '../src/pages/workspace/TeamMembersPage'
+import { TeamTriagePage } from '../src/pages/workspace/TeamTriagePage'
+import { TeamIssuePage } from '../src/pages/workspace/TeamIssuePage'
 import { TeamOverviewPage } from '../src/pages/workspace/TeamOverviewPage'
+import { DocumentPage } from '../src/documents/DocumentPage'
+import { RequestIntakePage } from '../src/requests/RequestIntakePage'
+import { SearchPage } from '../src/search/SearchPage'
 import {
+  createFocusPath,
   createPlanningPath,
+  createProjectsPath,
+  createQuickAccessProjectsPath,
   createPublicRequestPath,
   createProjectIssuesPath,
   createRequestsPath,
   createTeamIssuesPath,
+  createTeamTriagePath,
   createWorkItemSearchPath,
 } from '../src/shared/routing/paths'
 import { appRoutes } from '../src/app/router'
 import { WorkspaceRoute } from '../src/workspace/ui/WorkspaceRoute'
 import { WorkspaceRouteProvider } from '../src/workspace/ui/WorkspaceRouteProvider'
 
+/** A route path and the page component expected at the end of its match. */
+type WorkspaceRouteDefinition = {
+  /** Page component expected to render for the route. */
+  component: unknown
+  /** URL path used to resolve the route. */
+  path: string
+}
+
+/**
+ * Asserts that every supplied path renders through one shared Workspace shell.
+ *
+ * @param workspaceRoutes - Route/component pairs to verify.
+ * @returns Nothing; throws through the test assertions when a mapping is invalid.
+ */
+function expectSharedWorkspaceShell(
+  workspaceRoutes: readonly WorkspaceRouteDefinition[],
+) {
+  const shellRoutes = new Set<RouteObject>()
+
+  for (const { component, path } of workspaceRoutes) {
+    const matches = matchRoutes(appRoutes, path)
+    const providerMatch = matches?.find((match) =>
+      isValidElement(match.route.element) &&
+      match.route.element.type === WorkspaceRouteProvider
+    )
+    const shellMatch = matches?.find((match) =>
+      isValidElement(match.route.element) &&
+      match.route.element.type === WorkspaceRoute
+    )
+    const pageElement = matches?.at(-1)?.route.element
+
+    expect(providerMatch).toBeDefined()
+    expect(shellMatch).toBeDefined()
+    expect(isValidElement(pageElement)).toBe(true)
+
+    if (!shellMatch || !isValidElement(pageElement)) {
+      throw new Error(`Expected ${path} to render through the Workspace shell.`)
+    }
+
+    shellRoutes.add(shellMatch.route)
+    expect(pageElement.type).toBe(component)
+  }
+
+  expect(shellRoutes.size).toBe(1)
+}
+
 describe('Work Item detail paths', () => {
+  test('cross-links one notification event to a selected Focus Work Item', () => {
+    expect(createFocusPath('core/team', 'issue/42', 'event/9')).toBe(
+      '/focus?teamId=core%2Fteam&workItemId=issue%2F42&sourceEventId=event%2F9',
+    )
+    expect(createFocusPath()).toBe('/focus')
+    expect(createFocusPath('core-team')).toBe('/focus')
+    expect(createFocusPath(undefined, 'issue-42')).toBe('/focus')
+    expect(createFocusPath(undefined, undefined, 'event-9')).toBe(
+      '/focus?sourceEventId=event-9',
+    )
+  })
+
   test('keeps assigned Work Items scoped by project, team, and issue', () => {
     expect(createProjectIssuesPath('shared launch', 'design/team', 'issue/1')).toBe(
       '/projects/shared%20launch/issues?teamId=design%2Fteam&issueId=issue%2F1',
@@ -79,6 +153,49 @@ describe('Planning paths', () => {
 
     expect(matchRoutes(appRoutes, '/planning/invalid')?.at(-1)?.route.path).toBe('*')
   })
+
+  test('opens only uniquely owned Projects directly from Planning', () => {
+    const teams = [
+      {
+        id: 'core/team',
+        name: 'Core team',
+        projects: [
+          { id: 'unique/project', name: 'Unique Project' },
+          { id: 'shared project', name: 'Shared Project' },
+        ],
+      },
+      {
+        id: 'design-team',
+        name: 'Design team',
+        projects: [{ id: 'shared project', name: 'Shared Project' }],
+      },
+    ]
+
+    expect(resolvePlanningProjectNavigationPath(teams, 'unique/project')).toBe(
+      '/projects/unique%2Fproject/tasks?teamId=core%2Fteam',
+    )
+    expect(resolvePlanningProjectNavigationPath(teams, 'shared project')).toBe(
+      '/search?q=shared+project&type=project',
+    )
+    expect(resolvePlanningProjectNavigationPath(teams, 'missing-project')).toBe(
+      '/search?q=missing-project&type=project',
+    )
+  })
+})
+
+describe('Project directory paths', () => {
+  test('creates global and Team-scoped discovery URLs', () => {
+    expect(createProjectsPath()).toBe('/projects')
+    expect(createProjectsPath('design/team')).toBe('/teams/design%2Fteam/projects')
+    expect(createQuickAccessProjectsPath()).toBe('/projects?quickAccess=1')
+  })
+
+  test('registers both discovery routes inside the shared Workspace shell', () => {
+    expectSharedWorkspaceShell([
+      { component: ProjectsPage, path: '/projects' },
+      { component: ProjectsPage, path: '/teams/core-team/projects' },
+    ])
+  })
 })
 
 describe('Request intake paths', () => {
@@ -101,11 +218,28 @@ describe('Request intake paths', () => {
   })
 })
 
+describe('Team triage paths', () => {
+  test('creates queue and selected-entry deep links with encoded identifiers', () => {
+    expect(createTeamTriagePath('core/team')).toBe('/teams/core%2Fteam/triage')
+    expect(createTeamTriagePath('core/team', 'entry/42')).toBe(
+      '/teams/core%2Fteam/triage?entryId=entry%2F42',
+    )
+  })
+
+  test('registers Team triage inside the shared Workspace shell', () => {
+    expectSharedWorkspaceShell([{
+      component: TeamTriagePage,
+      path: '/teams/core-team/triage?entryId=entry-42',
+    }])
+  })
+})
+
 describe('Workspace route pages', () => {
   test('maps each split URL through one persistent shell to its direct page', () => {
-    const workspaceRoutes = [
+    expectSharedWorkspaceShell([
       { component: DashboardPage, path: '/dashboard' },
       { component: HomePage, path: '/home' },
+      { component: FocusPage, path: '/focus' },
       { component: MyTasksPage, path: '/my-tasks' },
       { component: InboxPage, path: '/inbox' },
       { component: HelpPage, path: '/help' },
@@ -113,36 +247,24 @@ describe('Workspace route pages', () => {
       { component: EnterpriseSecurityPage, path: '/settings/security' },
       { component: TeamOverviewPage, path: '/teams/core-team/overview' },
       { component: TeamMembersPage, path: '/teams/core-team/members' },
-    ]
-    const shellRoutes = new Set<RouteObject>()
+      { component: TeamTriagePage, path: '/teams/core-team/triage' },
+    ])
+  })
 
-    expect(new Set(workspaceRoutes.map(({ component }) => component)).size).toBe(9)
-
-    for (const { component, path } of workspaceRoutes) {
-      const matches = matchRoutes(appRoutes, path)
-      const providerMatch = matches?.find((match) =>
-        isValidElement(match.route.element) &&
-        match.route.element.type === WorkspaceRouteProvider
-      )
-      const shellMatch = matches?.find((match) =>
-        isValidElement(match.route.element) &&
-        match.route.element.type === WorkspaceRoute
-      )
-      const pageElement = matches?.at(-1)?.route.element
-
-      expect(providerMatch).toBeDefined()
-      expect(shellMatch).toBeDefined()
-      expect(isValidElement(pageElement)).toBe(true)
-
-      if (!shellMatch || !isValidElement(pageElement)) {
-        throw new Error(`Expected ${path} to render through the Workspace shell.`)
-      }
-
-      shellRoutes.add(shellMatch.route)
-      expect(pageElement.type).toBe(component)
-    }
-
-    expect(shellRoutes.size).toBe(1)
+  test('maps every authenticated workspace screen through the same persistent shell', () => {
+    expectSharedWorkspaceShell([
+      { component: RequestIntakePage, path: '/requests' },
+      { component: SearchPage, path: '/search' },
+      { component: PlanningPage, path: '/planning/timeline' },
+      { component: DocumentPage, path: '/documents' },
+      { component: GoalDocumentsPage, path: '/goals/goal-1/documents' },
+      { component: ReportsPage, path: '/reports' },
+      { component: TeamIssuePage, path: '/teams/core-team/issues' },
+      {
+        component: TaskPage,
+        path: '/projects/refero/issues?teamId=core-team',
+      },
+    ])
   })
 })
 

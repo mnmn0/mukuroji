@@ -1,6 +1,8 @@
 import { expect, test } from 'bun:test'
 import {
+  type ApiAccessObservation,
   classifyApiError,
+  isEligibleApiSliRequest,
   recordApiAccess,
   recordApiError,
   resolveApiRuntimeMetadata,
@@ -18,6 +20,7 @@ test('writes CloudWatch EMF access records without high-cardinality request data
     observedAtMilliseconds: 1_700_000_000_000,
     requestId: 'request-1',
     routeGroup: '/api/workspaces',
+    sliEligible: true,
     status: 503,
     traceId: '1-65f2c4a1-0123456789abcdef01234567',
   }, (record) => records.push(record))
@@ -33,6 +36,9 @@ test('writes CloudWatch EMF access records without high-cardinality request data
           { Name: 'RequestCount', Unit: 'Count' },
           { Name: 'Latency', Unit: 'Milliseconds' },
           { Name: 'ServerErrorCount', Unit: 'Count' },
+          { Name: 'EligibleRequestCount', Unit: 'Count' },
+          { Name: 'EligibleLatency', Unit: 'Milliseconds' },
+          { Name: 'EligibleServerErrorCount', Unit: 'Count' },
         ],
       }],
     },
@@ -41,12 +47,102 @@ test('writes CloudWatch EMF access records without high-cardinality request data
     RequestCount: 1,
     Latency: 42,
     ServerErrorCount: 1,
+    EligibleRequestCount: 1,
+    EligibleLatency: 42,
+    EligibleServerErrorCount: 1,
     correlationId: 'correlation-1',
     invocationId: 'lambda-invocation-1',
     requestId: 'request-1',
     routeGroup: '/api/workspaces',
+    sliEligible: true,
     status: 503,
     traceId: '1-65f2c4a1-0123456789abcdef01234567',
+  })
+})
+
+test('keeps health readiness and preflight in raw metrics only', () => {
+  const observations: readonly ApiAccessObservation[] = [
+    {
+      correlationId: 'health-correlation',
+      durationMilliseconds: 3,
+      method: 'GET',
+      observedAtMilliseconds: 1_700_000_000_000,
+      requestId: 'health-request',
+      routeGroup: '/api/health',
+      sliEligible: false,
+      status: 200,
+    },
+    {
+      correlationId: 'ready-correlation',
+      durationMilliseconds: 4,
+      method: 'GET',
+      observedAtMilliseconds: 1_700_000_000_001,
+      requestId: 'ready-request',
+      routeGroup: '/api/ready',
+      sliEligible: false,
+      status: 503,
+    },
+    {
+      correlationId: 'preflight-correlation',
+      durationMilliseconds: 2,
+      method: 'OPTIONS',
+      observedAtMilliseconds: 1_700_000_000_002,
+      requestId: 'preflight-request',
+      routeGroup: '/api/work-items',
+      sliEligible: false,
+      status: 204,
+    },
+  ]
+
+  for (const observation of observations) {
+    const records: string[] = []
+    recordApiAccess(observation, (record) => records.push(record))
+    const parsedRecord = JSON.parse(records[0] ?? '')
+
+    expect(parsedRecord._aws.CloudWatchMetrics[0].Metrics).toEqual([
+      { Name: 'RequestCount', Unit: 'Count' },
+      { Name: 'Latency', Unit: 'Milliseconds' },
+      { Name: 'ServerErrorCount', Unit: 'Count' },
+    ])
+    expect(parsedRecord).not.toHaveProperty('EligibleRequestCount')
+    expect(parsedRecord).not.toHaveProperty('EligibleLatency')
+    expect(parsedRecord).not.toHaveProperty('EligibleServerErrorCount')
+    expect(parsedRecord).toHaveProperty('sliEligible', false)
+  }
+})
+
+test('classifies SLI eligibility from the exact path and method', () => {
+  expect(isEligibleApiSliRequest('GET', '/api/health')).toBe(false)
+  expect(isEligibleApiSliRequest('HEAD', '/api/ready?probe=trusted')).toBe(
+    false,
+  )
+  expect(isEligibleApiSliRequest(' options ', '/api/work-items')).toBe(false)
+  expect(isEligibleApiSliRequest('GET', '/api/work-items/private-id')).toBe(
+    true,
+  )
+  expect(isEligibleApiSliRequest('POST', '/api/work-items')).toBe(true)
+  expect(isEligibleApiSliRequest('GET', '/api/health/private-id')).toBe(true)
+  expect(isEligibleApiSliRequest('GET', '/outside-api')).toBe(false)
+})
+
+test('keeps intended client failures in the eligible denominator', () => {
+  const records: string[] = []
+  recordApiAccess({
+    correlationId: 'rate-limit-correlation',
+    durationMilliseconds: 8,
+    method: 'POST',
+    observedAtMilliseconds: 1_700_000_000_003,
+    requestId: 'rate-limit-request',
+    routeGroup: '/api/request-submissions',
+    sliEligible: true,
+    status: 429,
+  }, (record) => records.push(record))
+
+  expect(JSON.parse(records[0] ?? '')).toMatchObject({
+    EligibleRequestCount: 1,
+    EligibleServerErrorCount: 0,
+    sliEligible: true,
+    status: 429,
   })
 })
 

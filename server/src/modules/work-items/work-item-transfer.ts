@@ -3,7 +3,12 @@ import type {
   CustomFieldValue,
   WorkItem,
   WorkItemPriority,
+  WorkItemSchedule,
 } from '@mukuroji/contracts'
+import {
+  normalizeWorkItemSchedule,
+  WorkItemScheduleError,
+} from './domain/work-item-schedule'
 
 /** Import/export で扱う file format です。 */
 export type WorkItemTransferFormat = 'csv' | 'json'
@@ -100,7 +105,7 @@ export const WORK_ITEM_IMPORT_MAX_BYTES = 2 * 1024 * 1024
 /** 一度の import で dry-run できる最大 row 数です。 */
 export const WORK_ITEM_IMPORT_MAX_ROWS = 1_000
 
-const requiredTargetFields = ['title', 'assigneeUserId', 'dueDate'] as const
+const requiredTargetFields = ['title', 'assigneeUserId', 'schedule'] as const
 const supportedTargetFields = new Set([
   ...requiredTargetFields,
   'description',
@@ -169,7 +174,10 @@ export function createWorkItemExport(
     'workflowStatusId',
     'statusCategory',
     'dueDate',
+    'schedule',
     'priority',
+    'priorityUpdatedAt',
+    'dueDateUpdatedAt',
     'revision',
     'createdAt',
     'updatedAt',
@@ -206,7 +214,14 @@ function toExportWorkItem(workItem: WorkItem) {
     customFieldValues: structuredClone(workItem.customFieldValues),
     relationIds: [...workItem.relationIds],
     dueDate: workItem.dueDate,
+    schedule: structuredClone(workItem.schedule),
     priority: workItem.priority,
+    ...(workItem.priorityUpdatedAt === undefined
+      ? {}
+      : { priorityUpdatedAt: workItem.priorityUpdatedAt }),
+    ...(workItem.dueDateUpdatedAt === undefined
+      ? {}
+      : { dueDateUpdatedAt: workItem.dueDateUpdatedAt }),
     revision: workItem.revision,
     createdAt: workItem.createdAt,
     updatedAt: workItem.updatedAt,
@@ -314,7 +329,7 @@ function mapImportRow(
     'assigneeUserId',
     errors,
   )
-  const dueDate = readRequiredImportString(read('dueDate'), row, 'dueDate', errors)
+  const schedule = readImportSchedule(read('schedule'), row, errors)
   const priority = readPriority(read('priority'), row, errors)
   const description = readOptionalImportString(read('description'), row, 'description', errors)
   const assignedProjectId = readOptionalImportString(
@@ -338,7 +353,7 @@ function mapImportRow(
     if (value !== undefined) customFieldValues[fieldId] = value
   }
 
-  if (errors.length > 0 || !title || !assigneeUserId || !dueDate || !priority) {
+  if (errors.length > 0 || !title || !assigneeUserId || !schedule || !priority) {
     return { row, errors }
   }
 
@@ -348,7 +363,7 @@ function mapImportRow(
     input: {
       title,
       assigneeUserId,
-      dueDate,
+      schedule,
       priority,
       ...(description ? { description } : {}),
       ...(assignedProjectId ? { assignedProjectId } : {}),
@@ -421,7 +436,7 @@ function transformImportValue(value: unknown, transform: WorkItemTransferTransfo
     if (!text || Number.isNaN(timestamp)) throw new TypeError('Not a date.')
     return /^\d{4}-\d{2}-\d{2}$/u.test(text)
       ? text
-      : new Date(timestamp).toISOString()
+      : new Date(timestamp).toISOString().slice(0, 10)
   }
   if (transform === 'split-comma') {
     if (Array.isArray(value) && value.every((entry) => typeof entry === 'string')) {
@@ -469,6 +484,58 @@ function readOptionalImportString(
     return undefined
   }
   return String(value).trim() || undefined
+}
+
+/**
+ * Reads and canonicalizes a complete schedule from a JSON import value.
+ *
+ * CSV cells carry the schedule as JSON text, while JSON imports may provide the object directly.
+ *
+ * @param value - Imported schedule object or JSON text.
+ * @param row - One-based data row number.
+ * @param errors - Mutable row error collection.
+ * @returns A canonical schedule, or undefined after recording an error.
+ */
+function readImportSchedule(
+  value: unknown,
+  row: number,
+  errors: WorkItemTransferRowError[],
+): WorkItemSchedule | undefined {
+  if (isEmptyImportValue(value)) {
+    if (!errors.some((error) => error.field === 'schedule')) {
+      errors.push({
+        row,
+        field: 'schedule',
+        code: 'RequiredFieldMissing',
+        message: 'schedule is required.',
+      })
+    }
+    return undefined
+  }
+
+  let candidate: unknown = value
+  if (typeof value === 'string') {
+    try {
+      candidate = JSON.parse(value)
+    } catch {
+      candidate = undefined
+    }
+  }
+
+  try {
+    return normalizeWorkItemSchedule(candidate)
+  } catch (error) {
+    const message = error instanceof WorkItemScheduleError
+      ? error.message
+      : 'schedule must be a canonical Work Item schedule.'
+    errors.push({
+      row,
+      field: 'schedule',
+      code: 'InvalidSchedule',
+      message,
+    })
+    return undefined
+  }
 }
 
 function readPriority(

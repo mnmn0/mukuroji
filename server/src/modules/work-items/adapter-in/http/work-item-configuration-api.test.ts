@@ -18,8 +18,9 @@ import type {
 import {
   WorkItemConfigurationError,
 } from '../../work-item-configuration'
-import type {
-  WorkItemConfiguration,
+import {
+  createDefaultDueDateWorkItemSchedule,
+  type WorkItemConfiguration,
 } from '@mukuroji/contracts'
 import {
   afterEach,
@@ -287,7 +288,7 @@ test('rejects missing required custom fields before creating a Work Item', async
       title: 'Missing effort',
       assignedProjectId: 'refero',
       assigneeUserId: 'sato@example.com',
-      dueDate: '2026/07/20',
+      schedule: createDefaultDueDateWorkItemSchedule('2026-07-20'),
       priority: 'medium',
       workflowStatusId: 'todo',
       customFieldValues: {},
@@ -302,7 +303,110 @@ test('rejects missing required custom fields before creating a Work Item', async
   expect(calls.issueCreates).toEqual([])
 })
 
-test('uses the configured initial workflow status when create omits legacy status', async () => {
+test('allows quick capture to defer required custom fields only in a backlog status', async () => {
+  const calls = configureFakeProjectClients(true)
+  const configuration = createTestWorkItemConfiguration('team', 'core-team')
+  configuration.customFields = [{
+    id: 'effort',
+    name: 'Effort',
+    type: 'number',
+    sortOrder: 10,
+    required: true,
+  }]
+  configuration.workflow.statuses.unshift({
+    id: 'triage',
+    name: 'Triage',
+    category: 'backlog',
+    sortOrder: 5,
+  })
+  configuration.workflow.initialStatusId = 'triage'
+  setTestAppDependencies({
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async getTeamConfiguration() {
+        return { configuration }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/issues', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      title: 'Quick capture',
+      assignedProjectId: 'refero',
+      assigneeUserId: 'sato@example.com',
+      schedule: createDefaultDueDateWorkItemSchedule('2026-07-20'),
+      priority: 'medium',
+      quickCapture: true,
+      workflowStatusId: 'triage',
+      customFieldValues: {},
+    }),
+  })
+
+  expect(response.status).toBe(201)
+  expect(calls.issueCreates).toContainEqual(expect.objectContaining({
+    statusCategory: 'backlog',
+    workflowStatusId: 'triage',
+  }))
+
+  const nonBacklogStatus = configuration.workflow.statuses.find((status) => status.category !== 'backlog')
+  if (!nonBacklogStatus) {
+    throw new Error('The test configuration must include a non-backlog status.')
+  }
+
+  const invalidStatusResponse = await app.request('/api/teams/core-team/issues', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      title: 'Invalid quick capture',
+      assignedProjectId: 'refero',
+      assigneeUserId: 'sato@example.com',
+      schedule: createDefaultDueDateWorkItemSchedule('2026-07-20'),
+      priority: 'medium',
+      quickCapture: true,
+      workflowStatusId: nonBacklogStatus.id,
+      customFieldValues: {},
+    }),
+  })
+
+  expect(invalidStatusResponse.status).toBe(400)
+  expect(await invalidStatusResponse.json()).toEqual({
+    code: 'InvalidQuickCaptureStatus',
+    message: 'Quick capture is only available in a backlog workflow status.',
+  })
+
+  const invalidTypeResponse = await app.request('/api/teams/core-team/issues', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      title: 'Invalid quick capture type',
+      assignedProjectId: 'refero',
+      assigneeUserId: 'sato@example.com',
+      schedule: createDefaultDueDateWorkItemSchedule('2026-07-20'),
+      priority: 'medium',
+      quickCapture: 'true',
+      workflowStatusId: 'triage',
+      customFieldValues: {},
+    }),
+  })
+
+  expect(invalidTypeResponse.status).toBe(400)
+  expect(await invalidTypeResponse.json()).toEqual({
+    code: 'InvalidQuickCapture',
+    message: 'Quick capture must be a boolean.',
+  })
+})
+
+test('uses the configured initial workflow status when create omits workflow status', async () => {
   const calls = configureFakeProjectClients(true)
   const configuration = createTestWorkItemConfiguration('team', 'core-team')
   configuration.workflow.initialStatusId = 'triage'
@@ -330,7 +434,7 @@ test('uses the configured initial workflow status when create omits legacy statu
       title: 'Starts in triage',
       assignedProjectId: 'refero',
       assigneeUserId: 'sato@example.com',
-      dueDate: '2026/07/20',
+      schedule: createDefaultDueDateWorkItemSchedule('2026-07-20'),
       priority: 'medium',
     }),
   })

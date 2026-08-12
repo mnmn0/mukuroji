@@ -1,4 +1,47 @@
 import * as cdk from 'aws-cdk-lib';
+import { RegionInfo } from 'aws-cdk-lib/region-info';
+
+const restoreDrillApproverRoleArnSuffix =
+  'iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/-]{1,512}$';
+
+/**
+ * Resolves a literal stack partition when CDK has a concrete deployment identity.
+ *
+ * Environment-agnostic stacks intentionally retain the deploy-time `AWS::Partition`
+ * token, which cannot be embedded in a CloudFormation parameter regex.
+ *
+ * @param stack Stack owning the restore-drill parameter.
+ * @returns Literal partition for a concrete stack, otherwise undefined.
+ */
+function resolveLiteralStackPartition(stack: cdk.Stack): string | undefined {
+  const identity = cdk.Stack.of(stack);
+  if (!cdk.Token.isUnresolved(identity.partition)) return identity.partition;
+  if (cdk.Token.isUnresolved(identity.region)) return undefined;
+  const partition = RegionInfo.get(identity.region).partition;
+  if (partition === undefined) {
+    throw new Error(
+      `Unable to resolve an AWS partition for concrete Region ${identity.region}.`,
+    );
+  }
+  return partition;
+}
+
+/**
+ * Builds an IAM role ARN pattern consistent with the stack deployment identity.
+ *
+ * @param stack Stack owning the restore-drill parameter.
+ * @returns Exact concrete-partition pattern or the supported agnostic partition set.
+ */
+function buildRestoreDrillApproverRoleArnPattern(stack: cdk.Stack): string {
+  const partition = resolveLiteralStackPartition(stack);
+  if (partition === undefined) {
+    return `^arn:(?:aws|aws-us-gov|aws-cn):${restoreDrillApproverRoleArnSuffix}`;
+  }
+  if (partition !== 'aws' && partition !== 'aws-us-gov' && partition !== 'aws-cn') {
+    throw new Error(`Restore drill does not support the ${partition} AWS partition.`);
+  }
+  return `^arn:${partition}:${restoreDrillApproverRoleArnSuffix}`;
+}
 
 /**
  * CloudFormation parameters and derived values shared by stack subsystems.
@@ -28,6 +71,12 @@ export interface StackParameters {
   readonly connectorRuntimeConfiguration: cdk.CfnParameter;
   /** Stable HMAC key used to pseudonymize workspace audit identities. */
   readonly workspaceAuditPseudonymKey: cdk.CfnParameter;
+  /** Existing IAM role exclusively authorized to approve restore-drill cleanup. */
+  readonly restoreDrillCleanupApproverRoleArn: cdk.CfnParameter;
+  /** Operator-incremented immutable API configuration revision. */
+  readonly apiRuntimeConfigurationRevision: cdk.CfnParameter;
+  /** Explicit two-phase production writer-fence rollout mode. */
+  readonly workspaceSearchWriterFenceMode: cdk.CfnParameter;
   /** Anonymous request submission limit per capability and hour. */
   readonly requestRateLimitPerHour: cdk.CfnParameter;
   /** Secret authenticating request intake email Webhooks. */
@@ -190,6 +239,42 @@ export function buildStackParameters(stack: cdk.Stack): StackParameters {
         'WorkspaceAuditPseudonymKey must be exactly 64 lowercase hexadecimal characters.',
       description:
         'Stable 32-byte random HMAC key encoded as lowercase hexadecimal for non-PII Workspace member and invitation audit identifiers.',
+    },
+  );
+  const restoreDrillCleanupApproverRoleArn = new cdk.CfnParameter(
+    stack,
+    'RestoreDrillCleanupApproverRoleArn',
+    {
+      type: 'String',
+      allowedPattern: buildRestoreDrillApproverRoleArnPattern(stack),
+      constraintDescription:
+        'RestoreDrillCleanupApproverRoleArn must be an explicit IAM role ARN in the supported deployment partition.',
+      description:
+        'Existing data-owner IAM role exclusively authorized to create and admit immutable restore-drill cleanup approvals.',
+    },
+  );
+  const apiRuntimeConfigurationRevision = new cdk.CfnParameter(
+    stack,
+    'ApiRuntimeConfigurationRevision',
+    {
+      type: 'String',
+      minLength: 1,
+      maxLength: 32,
+      allowedPattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$',
+      constraintDescription:
+        'ApiRuntimeConfigurationRevision must be a 1-32 character deployment revision.',
+      description:
+        'Operator-incremented revision that replaces immutable API configuration secrets and publishes a matching Lambda version.',
+    },
+  );
+  const workspaceSearchWriterFenceMode = new cdk.CfnParameter(
+    stack,
+    'WorkspaceSearchWriterFenceMode',
+    {
+      type: 'String',
+      allowedValues: ['rollout-pending', 'required'],
+      description:
+        'Explicit writer-fence rollout phase. Use rollout-pending only while AppConfig is disabled and writers are drained before the first open-row bootstrap; use required after bootstrap.',
     },
   );
   const requestRateLimitPerHour = new cdk.CfnParameter(stack, 'RequestRateLimitPerHour', {
@@ -357,6 +442,9 @@ export function buildStackParameters(stack: cdk.Stack): StackParameters {
     auditRetentionDays,
     connectorRuntimeConfiguration,
     workspaceAuditPseudonymKey,
+    restoreDrillCleanupApproverRoleArn,
+    apiRuntimeConfigurationRevision,
+    workspaceSearchWriterFenceMode,
     requestRateLimitPerHour,
     requestEmailWebhookSecret,
     requestTokenHashSecret,

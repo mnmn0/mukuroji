@@ -1,5 +1,8 @@
 /** Registers stack parameter and configuration tests. */
 import { expect, test } from '@jest/globals';
+import * as cdk from 'aws-cdk-lib';
+import { Template } from 'aws-cdk-lib/assertions';
+import { buildStackParameters } from '../lib/config/stack-parameters';
 import { synthesizedTemplate } from './test-support';
 
 test('fresh deployment requires explicit Cognito workspace and runtime secrets parameters', () => {
@@ -30,6 +33,29 @@ test('fresh deployment requires explicit Cognito workspace and runtime secrets p
     ConstraintDescription:
       'WorkspaceAuditPseudonymKey must be exactly 64 lowercase hexadecimal characters.',
   }));
+  expect(parameters.ApiRuntimeConfigurationRevision).toEqual({
+    AllowedPattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$',
+    ConstraintDescription:
+      'ApiRuntimeConfigurationRevision must be a 1-32 character deployment revision.',
+    Description:
+      'Operator-incremented revision that replaces immutable API configuration secrets and publishes a matching Lambda version.',
+    MaxLength: 32,
+    MinLength: 1,
+    Type: 'String',
+  });
+  expect(parameters.WorkspaceSearchMigrationEnvironment).toBeUndefined();
+  expect(
+    parameters.WorkspaceSearchMigrationProductionAccountId,
+  ).toBeUndefined();
+  expect(parameters.RestoreDrillCleanupApproverRoleArn).toEqual({
+    AllowedPattern:
+      '^arn:(?:aws|aws-us-gov|aws-cn):iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/-]{1,512}$',
+    ConstraintDescription:
+      'RestoreDrillCleanupApproverRoleArn must be an explicit IAM role ARN in the supported deployment partition.',
+    Description:
+      'Existing data-owner IAM role exclusively authorized to create and admit immutable restore-drill cleanup approvals.',
+    Type: 'String',
+  });
   expect(parameters.ConnectorRuntimeConfiguration).toEqual(expect.objectContaining({
     Type: 'String',
     Default: '{}',
@@ -111,6 +137,7 @@ test('fresh deployment requires explicit Cognito workspace and runtime secrets p
     'RequestTokenHashSecret',
     'AlarmPrimaryTopicName',
     'AlarmSecondaryTopicName',
+    'ApiRuntimeConfigurationRevision',
   ]) {
     expect(parameters[parameterName].Default).toBeUndefined();
   }
@@ -128,6 +155,9 @@ test('fresh deployment requires explicit Cognito workspace and runtime secrets p
         'AlarmPrimaryTopicName must differ from AlarmSecondaryTopicName.',
     }],
   });
+  expect(
+    template.toJSON().Rules.WorkspaceSearchMigrationAccountSeparation,
+  ).toBeUndefined();
   expect(template.toJSON().Rules.EnterpriseSecretSeparation).toEqual({
     Assertions: [{
       Assert: {
@@ -159,4 +189,57 @@ test('fresh deployment requires explicit Cognito workspace and runtime secrets p
 
   template.resourceCountIs('AWS::Cognito::UserPool', 0);
   template.resourceCountIs('AWS::Cognito::UserPoolClient', 0);
+});
+
+test('derives restore-drill approver ARN partitions from concrete stack Regions', () => {
+  const commercialStack = new cdk.Stack(
+    new cdk.App(),
+    'CommercialPartitionFixture',
+    { env: { account: '123456789012', region: 'ap-northeast-1' } },
+  );
+  const govCloudStack = new cdk.Stack(
+    new cdk.App(),
+    'GovCloudPartitionFixture',
+    { env: { account: '123456789012', region: 'us-gov-west-1' } },
+  );
+  const chinaStack = new cdk.Stack(
+    new cdk.App(),
+    'ChinaPartitionFixture',
+    { env: { account: '123456789012', region: 'cn-north-1' } },
+  );
+
+  for (const { partition, stack } of [
+    { partition: 'aws', stack: commercialStack },
+    { partition: 'aws-us-gov', stack: govCloudStack },
+    { partition: 'aws-cn', stack: chinaStack },
+  ]) {
+    buildStackParameters(stack);
+    expect(
+      Template.fromStack(stack).toJSON()
+        .Parameters.RestoreDrillCleanupApproverRoleArn.AllowedPattern,
+    ).toBe(
+      `^arn:${partition}:iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/-]{1,512}$`,
+    );
+  }
+});
+
+test('rejects concrete restore-drill stacks in unsupported ARN partitions', () => {
+  const stack = new cdk.Stack(
+    new cdk.App(),
+    'UnsupportedPartitionFixture',
+    { env: { account: '123456789012', region: 'us-iso-east-1' } },
+  );
+
+  expect(() => buildStackParameters(stack)).toThrow(
+    'Restore drill does not support the aws-iso AWS partition.',
+  );
+
+  const unknownRegionStack = new cdk.Stack(
+    new cdk.App(),
+    'UnknownPartitionFixture',
+    { env: { account: '123456789012', region: 'xx-unknown-1' } },
+  );
+  expect(() => buildStackParameters(unknownRegionStack)).toThrow(
+    'Unable to resolve an AWS partition for concrete Region xx-unknown-1.',
+  );
 });

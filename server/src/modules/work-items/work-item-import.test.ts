@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { S3Client } from '@aws-sdk/client-s3'
 import type { SQSClient } from '@aws-sdk/client-sqs'
+import { createDefaultDueDateWorkItemSchedule } from '@mukuroji/contracts'
 import {
   S3WorkItemImportSourceStore,
   SqsWorkItemImportQueue,
@@ -132,6 +133,46 @@ describe('durable Work Item import', () => {
     })
     expect(fixture.jobReports).toHaveLength(1)
     expect(fixture.jobEvents).toEqual(['running', 'failed:validation_failed'])
+  })
+
+  test('stops materialization when tenant closure begins between rows', async () => {
+    const fixture = createFixture()
+    const jobId = createWorkItemImportJobId(
+      'workspace-1',
+      'member@example.com',
+      'request-closing',
+    )
+    await stageWorkItemImport(createStageRequest(jobId), fixture)
+    let enabled = true
+    const createdRows: number[] = []
+    const dependencies = createWorkerDependencies(fixture, {
+      async assertTenantEnabled() {
+        if (!enabled) {
+          throw new WorkItemImportError(
+            'ImportTenantUnavailable',
+            'The tenant can no longer execute imports.',
+          )
+        }
+      },
+      async createWorkItem(request) {
+        createdRows.push(request.row)
+        enabled = false
+      },
+    })
+
+    const response = await processWorkItemImportBatch(
+      createSqsEvent(jobId),
+      dependencies,
+    )
+
+    expect(response).toEqual({ batchItemFailures: [] })
+    expect(createdRows).toEqual([1])
+    expect(fixture.execution?.status).toBe('failed')
+    expect(fixture.execution?.terminalReport).toMatchObject({
+      validRows: 1,
+      invalidRows: 1,
+      errors: [{ row: 2, code: 'ImportTenantUnavailable' }],
+    })
   })
 
   test('persists a bounded row report when asynchronous validation fails', async () => {
@@ -532,6 +573,10 @@ test('production Work Item import adapters fail closed when AWS resources are mi
 })
 
 function createStageRequest(jobId: string) {
+  const firstSchedule = JSON.stringify(createDefaultDueDateWorkItemSchedule('2026-07-31'))
+    .replaceAll('"', '""')
+  const secondSchedule = JSON.stringify(createDefaultDueDateWorkItemSchedule('2026-08-01'))
+    .replaceAll('"', '""')
   return {
     jobId,
     workspaceId: 'workspace-1',
@@ -540,12 +585,12 @@ function createStageRequest(jobId: string) {
     assignedProjectId: 'project-1',
     format: 'csv' as const,
     sourceContent:
-      'Title,Assignee,Due date\nShip durable import,member@example.com,2026/07/31\n' +
-      'Verify retry,member@example.com,2026/08/01\n',
+      `Title,Assignee,Schedule\nShip durable import,member@example.com,"${firstSchedule}"\n` +
+      `Verify retry,member@example.com,"${secondSchedule}"\n`,
     mapping: [
       { sourceField: 'Title', targetField: 'title' },
       { sourceField: 'Assignee', targetField: 'assigneeUserId' },
-      { sourceField: 'Due date', targetField: 'dueDate' },
+      { sourceField: 'Schedule', targetField: 'schedule' },
     ],
     requestFingerprint: 'fingerprint-1',
   }
@@ -718,6 +763,7 @@ function createWorkerDependencies(
       },
     },
     async authorize() {},
+    async assertTenantEnabled() {},
     async validate() {
       return {
         report: {
@@ -734,7 +780,15 @@ function createWorkerDependencies(
             input: {
               title: 'Ship durable import',
               assigneeUserId: 'member@example.com',
-              dueDate: '2026/07/31',
+              schedule: {
+                calendarPolicy: {
+                  holidays: [],
+                  timeZone: 'UTC',
+                  workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+                },
+                dueDate: '2026-07-31',
+                mode: 'due-date',
+              },
               priority: 'medium',
             },
           },
@@ -743,7 +797,15 @@ function createWorkerDependencies(
             input: {
               title: 'Verify retry',
               assigneeUserId: 'member@example.com',
-              dueDate: '2026/08/01',
+              schedule: {
+                calendarPolicy: {
+                  holidays: [],
+                  timeZone: 'UTC',
+                  workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+                },
+                dueDate: '2026-08-01',
+                mode: 'due-date',
+              },
               priority: 'medium',
             },
           },

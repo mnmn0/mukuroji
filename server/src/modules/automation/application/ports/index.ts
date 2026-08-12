@@ -17,6 +17,7 @@ export {
   type AutomationExecutionServicePort,
   type AutomationExecutionVariables,
 } from './execution-port'
+export { type AutomationFeatureEntitlementPort } from './feature-entitlement-port'
 export {
   type AutomationInboundWebhookDeliveryInput,
   type AutomationInboundWebhookDeliveryResult,

@@ -15,6 +15,8 @@ import {
   WorkspaceAccessError,
   isWorkspaceIdentitySafeToDelete,
   type WorkspaceMember,
+  type WorkspaceSeatMeter,
+  type WorkspaceSeatMutationInput,
 } from './workspace-access'
 
 const workspaceId = 'user#demo@example.com'
@@ -115,6 +117,7 @@ function createDocumentClient(
  * @param auditTableName - Optional Audit table name.
  * @param auditPseudonymKey - Optional audit pseudonym key.
  * @param documentsTableName - Optional Documents table name.
+ * @param seatMeter - Optional tenant seat-meter transaction contributor.
  * @returns Configured Workspace Access adapter.
  */
 function createWorkspaceAccessClientWithDocumentAuthorization(
@@ -127,6 +130,7 @@ function createWorkspaceAccessClientWithDocumentAuthorization(
   auditTableName?: string | null,
   auditPseudonymKey?: string,
   documentsTableName?: string,
+  seatMeter?: WorkspaceSeatMeter,
 ): DynamoDbWorkspaceAccessClient {
   return new DynamoDbWorkspaceAccessClient(
     tableName,
@@ -140,6 +144,7 @@ function createWorkspaceAccessClientWithDocumentAuthorization(
     new DynamoDbDocumentAuthorizationRevisionMutationAdapter(
       documentsTableName,
     ),
+    seatMeter,
   )
 }
 
@@ -186,6 +191,91 @@ function createInvitationLifecycleClient(
     () => now,
   )
 }
+
+test('builds an active member admission guard bound to the persisted version', async () => {
+  const inputs: Array<Record<string, unknown>> = []
+  const member = createWorkspaceMember('owner@example.com', 'member', 'active', 7)
+  const client = new DynamoDbWorkspaceAccessClient(
+    'WorkspaceAccessTable',
+    createDocumentClient((command) => {
+      inputs.push(command.input)
+      return { Item: toMemberItem(member) }
+    }),
+  )
+
+  await expect(client.createActiveMemberConditionCheck(
+    workspaceId,
+    'Owner@Example.com',
+  )).resolves.toEqual({
+    ConditionCheck: {
+      TableName: 'WorkspaceAccessTable',
+      Key: {
+        workspaceId,
+        recordKey: 'MEMBER#owner@example.com',
+      },
+      ConditionExpression:
+        '#entryType = :entryType AND #memberKey = :memberKey AND #status = :active AND #version = :version',
+      ExpressionAttributeNames: {
+        '#entryType': 'entryType',
+        '#memberKey': 'memberKey',
+        '#status': 'status',
+        '#version': 'version',
+      },
+      ExpressionAttributeValues: {
+        ':active': 'active',
+        ':entryType': 'workspace-member',
+        ':memberKey': 'owner@example.com',
+        ':version': 7,
+      },
+    },
+  })
+  expect(inputs).toEqual([expect.objectContaining({
+    ConsistentRead: true,
+    Key: {
+      workspaceId,
+      recordKey: 'MEMBER#owner@example.com',
+    },
+  })])
+})
+
+test('binds allowed Workspace roles to the active member guard', async () => {
+  const member = createWorkspaceMember('owner@example.com', 'member', 'active', 7)
+  const client = new DynamoDbWorkspaceAccessClient(
+    'WorkspaceAccessTable',
+    createDocumentClient(() => ({ Item: toMemberItem(member) })),
+  )
+
+  await expect(client.createActiveMemberConditionCheck(
+    workspaceId,
+    'owner@example.com',
+    { allowedRoles: ['owner', 'admin', 'member'] },
+  )).resolves.toMatchObject({
+    ConditionCheck: {
+      ConditionExpression:
+        '#entryType = :entryType AND #memberKey = :memberKey AND #status = :active AND #version = :version AND #role IN (:allowedRole0, :allowedRole1, :allowedRole2)',
+      ExpressionAttributeNames: { '#role': 'role' },
+      ExpressionAttributeValues: {
+        ':allowedRole0': 'owner',
+        ':allowedRole1': 'admin',
+        ':allowedRole2': 'member',
+      },
+    },
+  })
+})
+
+test('rejects a guest member when a non-guest role guard is requested', async () => {
+  const member = createWorkspaceMember('guest@example.com', 'guest', 'active', 3)
+  const client = new DynamoDbWorkspaceAccessClient(
+    'WorkspaceAccessTable',
+    createDocumentClient(() => ({ Item: toMemberItem(member) })),
+  )
+
+  await expect(client.createActiveMemberConditionCheck(
+    workspaceId,
+    'guest@example.com',
+    { allowedRoles: ['owner', 'admin', 'member'] },
+  )).resolves.toBeUndefined()
+})
 
 test('creates a seven-day invitation reservation before Cognito provisioning', async () => {
   const inputs: Array<Record<string, unknown>> = []
@@ -1376,6 +1466,76 @@ test('serializes member deactivation with the Planning graph revision', async ()
           },
           ConditionExpression:
             'revision = :expectedDocumentAuthorizationRevision',
+        },
+      },
+    ],
+  })
+})
+
+test('joins seat release to the authoritative member deactivation transaction', async () => {
+  const actor = createWorkspaceMember('demo@example.com')
+  const target = createWorkspaceMember('member@example.com', 'member')
+  const transactionInputs: Array<Record<string, unknown>> = []
+  const seatInputs: WorkspaceSeatMutationInput[] = []
+  const seatMeter: WorkspaceSeatMeter = {
+    async prepareSeatMutation(input) {
+      seatInputs.push(input)
+      return [{
+        Put: {
+          TableName: 'TenantAdministrationTable',
+          Item: {
+            workspaceId: input.workspaceId,
+            recordKey: 'USAGE',
+          },
+          ConditionExpression: 'revision = :expectedRevision',
+        },
+      }]
+    },
+  }
+  const client = createWorkspaceAccessClientWithDocumentAuthorization(
+    'WorkspaceAccessTable',
+    createDocumentClient((command) => {
+      if (command.constructor.name === 'GetCommand') {
+        const key = command.input.Key as { recordKey?: string }
+        return { Item: toMemberItem(key.recordKey?.includes('member@example.com') ? target : actor) }
+      }
+      transactionInputs.push(command.input)
+      return {}
+    }),
+    undefined,
+    false,
+    () => now,
+    'PlanningTable',
+    undefined,
+    undefined,
+    'DocumentsTable',
+    seatMeter,
+  )
+
+  await client.updateMember(workspaceId, actor.memberKey, target.memberKey, {
+    status: 'deactivated',
+    expectedVersion: target.version,
+    expectedPlanningRevision: 7,
+    expectedDocumentAuthorizationRevision: 3,
+  })
+
+  expect(seatInputs).toEqual([{
+    workspaceId,
+    memberKey: target.memberKey,
+    direction: 'deactivate',
+    occurredAt: now.toISOString(),
+  }])
+  expect(transactionInputs[0]).toMatchObject({
+    TransactItems: [
+      {},
+      {},
+      {},
+      {},
+      {
+        Put: {
+          TableName: 'TenantAdministrationTable',
+          Item: { workspaceId, recordKey: 'USAGE' },
+          ConditionExpression: 'revision = :expectedRevision',
         },
       },
     ],

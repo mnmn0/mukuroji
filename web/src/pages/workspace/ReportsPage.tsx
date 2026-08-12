@@ -30,10 +30,8 @@ import {
 } from '../../auth/session'
 import {
   MobileSidebarButton,
-  WorkspaceSidebar,
 } from '../../shared/ui/sidebar'
 import {
-  createSidebarLabels,
   createTranslator,
   getInitialLocale,
   type Locale,
@@ -76,11 +74,9 @@ import {
 } from '../../projects/api'
 import { useProjectDirectory } from '../../projects/queries/useProjectDirectory'
 import {
-  createProjectIssuesPath,
   createTeamIssuesPath,
-  createTeamViewPath,
-  workspaceNavPaths,
 } from '../../shared/routing/paths'
+import { useWorkspaceSidebarController } from '../../shared/ui/sidebar'
 
 const emptyReports: AnalyticsReport[] = []
 const emptyTeams: ProjectDirectoryTeam[] = []
@@ -108,11 +104,10 @@ export function ReportsPage() {
   const [evidenceInput, setEvidenceInput] = useState<AnalyticsEvidenceInput>()
   const [isEvidenceLoading, setIsEvidenceLoading] = useState(false)
   const evidenceRequest = useRef<AbortController | undefined>(undefined)
-  const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false)
   const [mutationErrorMessage, setMutationErrorMessage] = useState<string>()
   const [noticeMessage, setNoticeMessage] = useState<string>()
   const t = useMemo(() => createTranslator(locale), [locale])
-  const sidebarLabels = useMemo(() => createSidebarLabels(locale), [locale])
+  const { openMobileSidebar } = useWorkspaceSidebarController()
   const accessToken = session?.accessToken
 
   const {
@@ -671,26 +666,11 @@ export function ReportsPage() {
   }
 
   return (
-    <main className="workbench-shell flex h-svh min-h-0 overflow-hidden">
-      <WorkspaceSidebar
-        activeNavId="reports"
-        isMobileOpen={isMobileSidebarOpen}
-        labels={sidebarLabels}
-        mobileCloseLabel={t('sidebar.mobileClose')}
-        mobileDialogLabel={t('sidebar.mobileDialog')}
-        onMobileClose={() => setIsMobileSidebarOpen(false)}
-        onSelectNav={(navId) => navigate(workspaceNavPaths[navId])}
-        onSelectProject={(projectId, teamId) =>
-          navigate(createProjectIssuesPath(projectId, teamId))}
-        onSelectTeamView={(teamId, viewId) =>
-          navigate(createTeamViewPath(teamId, viewId))}
-        teams={teams}
-      />
-      <div className="relative min-h-0 min-w-0 flex-1 overflow-auto overscroll-contain">
+    <div className="relative min-h-0 min-w-0 flex-1">
         <div className="absolute left-4 top-4 z-30 min-[981px]:hidden">
           <MobileSidebarButton
             label={t('sidebar.mobileOpen')}
-            onClick={() => setIsMobileSidebarOpen(true)}
+            onClick={openMobileSidebar}
           />
         </div>
         <AnalyticsWorkbench
@@ -812,8 +792,7 @@ export function ReportsPage() {
           onWidgetsChange={(nextWidgets) =>
             refreshQuery({}, nextWidgets)}
         />
-      </div>
-    </main>
+    </div>
   )
 }
 

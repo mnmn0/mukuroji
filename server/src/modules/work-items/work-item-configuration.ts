@@ -27,10 +27,18 @@ import {
   type WorkItemRelationType,
 } from '@mukuroji/contracts'
 import {
+  createDynamoDbClient as createConfiguredDynamoDbClient,
+  createWorkspaceSearchWriterDynamoDbDocumentClient,
+} from '../../infrastructure/aws/dynamodb-client'
+import {
+  throwIfWorkspaceSearchWriterFenceTerminalError,
+} from '../../infrastructure/runtime/workspace-search-writer-fence-document-client'
+import {
   validateWorkflowDefinition as validateDomainWorkflowDefinition,
   WorkflowDefinitionValidationError,
 } from '../work-item-workflow'
 
+/** Re-exports the canonical relation identifier validator for consumers. */
 export { isCanonicalWorkItemRelationIds } from './canonical-work-item'
 
 const CONFIGURATION_RECORD_KEY = 'CONFIG'
@@ -67,6 +75,67 @@ export type WorkItemConfigurationGuard = {
   revision: number
 }
 
+/**
+ * Creates a DynamoDB guard for the semantic relation graph revision observed by a schedule preview.
+ *
+ * Schedule dependencies are owned by Planning, but a confirmed preview also preserves the
+ * separately displayed semantic-block warning. The guard prevents that warning context from
+ * changing between preview and the atomic schedule transaction.
+ *
+ * @param tableName - Work Item configuration table containing relation metadata.
+ * @param workspaceId - Owning Workspace identifier.
+ * @param teamId - Team whose semantic relation graph was read.
+ * @param expectedRevision - Non-negative graph revision returned by the preview.
+ * @returns One DynamoDB ConditionCheck ready for the schedule cascade transaction.
+ */
+export function createWorkItemRelationGraphRevisionConditionCheck(
+  tableName: string,
+  workspaceId: string,
+  teamId: string,
+  expectedRevision: number,
+): NonNullable<TransactWriteCommandInput['TransactItems']>[number] {
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
+    throw new WorkItemConfigurationError(
+      400,
+      'InvalidWorkItemRelationGraphRevision',
+      'Work Item relation graph revision must be a non-negative safe integer.',
+    )
+  }
+  const key = {
+    scopeKey: createWorkItemConfigurationScopeKey(workspaceId, 'team', teamId),
+    recordKey: RELATION_GRAPH_RECORD_KEY,
+  }
+  if (expectedRevision === 0) {
+    return {
+      ConditionCheck: {
+        TableName: tableName,
+        Key: key,
+        ConditionExpression:
+          'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
+      },
+    }
+  }
+  return {
+    ConditionCheck: {
+      TableName: tableName,
+      Key: key,
+      ConditionExpression:
+        '#entryType = :entryType AND #schemaVersion = :schemaVersion AND ' +
+        '#revision = :expectedRevision',
+      ExpressionAttributeNames: {
+        '#entryType': 'entryType',
+        '#schemaVersion': 'schemaVersion',
+        '#revision': 'revision',
+      },
+      ExpressionAttributeValues: {
+        ':entryType': 'relation-graph',
+        ':schemaVersion': WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+        ':expectedRevision': expectedRevision,
+      },
+    },
+  }
+}
+
 /** Configuration lock 取得後に実行する既存 Work Item の参照整合性検査です。 */
 export type WorkItemConfigurationUsageCheck = () => Promise<void>
 
@@ -78,6 +147,8 @@ export type NormalizeCustomFieldValuesOptions = {
   existingValues?: Readonly<Record<string, CustomFieldValue>>
   /** Project scoped field の適用判定に使う遂行先 Project ID です。 */
   projectId?: string
+  /** Backlog/Triage の quick capture では required value の欠落を許可します。 */
+  allowRequiredMissing?: boolean
 }
 
 /** Workflow status の解決結果です。 */
@@ -135,6 +206,22 @@ export type WorkItemConfigurationClient = {
     teamId: string,
     workItemId: string,
   ): Promise<WorkItemRelationsResponse>
+  /**
+   * Reads every relation and the stable graph revision for one Team.
+   *
+   * @param workspaceId - Workspace that owns the relation graph.
+   * @param teamId - Team whose complete relation graph is read.
+   * @returns All directed relations and their stable graph revision.
+   */
+  listRelationGraph?(workspaceId: string, teamId: string): Promise<WorkItemRelationsResponse>
+  /**
+   * Reads the current canonical relation graph revision for recurrence-sensitive projections.
+   *
+   * @param workspaceId - Workspace that owns the relation graph.
+   * @param teamId - Team whose relation graph is read.
+   * @returns Current positive revision, or zero before graph metadata exists.
+   */
+  getRelationGraphRevision?(workspaceId: string, teamId: string): Promise<number>
   /** Reciprocal relation を単一 transaction で作成します。 */
   createRelation(
     workspaceId: string,
@@ -343,7 +430,7 @@ export function normalizeCustomFieldValues(
     }
     const value = values[definition.id]
     if (value === undefined) {
-      if (definition.required) {
+      if (definition.required && !options.allowRequiredMissing) {
         throw invalidFieldValue(`Custom field "${definition.id}" is required.`)
       }
       continue
@@ -359,19 +446,39 @@ export function normalizeCustomFieldValues(
       .map((definition) => [definition.id, definition]),
   )
   const evaluatedFormulaIds = new Set<string>()
-  const evaluateFormulaField = (fieldId: string) => {
+  const deferredFormulaIds = new Set<string>()
+  const evaluateFormulaField = (fieldId: string): boolean => {
     if (evaluatedFormulaIds.has(fieldId)) {
-      return
+      return true
+    }
+    if (deferredFormulaIds.has(fieldId)) {
+      return false
     }
     const definition = applicableFormulaDefinitions.get(fieldId)
     if (!definition) {
-      return
+      return true
     }
     for (const reference of readFormulaReferences(definition.formulaExpression ?? '')) {
-      evaluateFormulaField(reference)
+      if (applicableFormulaDefinitions.has(reference) && !evaluateFormulaField(reference)) {
+        delete values[fieldId]
+        deferredFormulaIds.add(fieldId)
+        return false
+      }
+
+      const referenceDefinition = definitionsById.get(reference)
+      if (
+        options.allowRequiredMissing &&
+        referenceDefinition?.required &&
+        values[reference] === undefined
+      ) {
+        delete values[fieldId]
+        deferredFormulaIds.add(fieldId)
+        return false
+      }
     }
     values[fieldId] = evaluateFormula(definition.formulaExpression ?? '', values)
     evaluatedFormulaIds.add(fieldId)
+    return true
   }
   for (const fieldId of applicableFormulaDefinitions.keys()) {
     evaluateFormulaField(fieldId)
@@ -459,13 +566,14 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       process.env.MUKUROJI_WORK_ITEMS_TABLE ??
       process.env.TEAM_ISSUES_TABLE_NAME ??
       'mukuroji-team-issues-local',
-    documentClient = createDocumentClient(),
-    dynamoDbClient = new DynamoDBClient({}),
+    documentClient?: DynamoDBDocumentClient,
+    dynamoDbClient = createConfiguredDynamoDbClient(),
     bootstrapLocalTable = false,
   ) {
     this.tableName = tableName
     this.workItemsTableName = workItemsTableName
-    this.documentClient = documentClient
+    this.documentClient = documentClient ??
+      createDocumentClient(dynamoDbClient)
     this.dynamoDbClient = dynamoDbClient
     this.bootstrapLocalTable = bootstrapLocalTable
   }
@@ -540,12 +648,30 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
     return { configuration: saved } satisfies ResolvedWorkItemConfiguration
   }
 
-  /** Work Item から見た relation と graph revision を返します。 */
-  async listRelations(workspaceId: string, teamId: string, workItemId: string) {
+  /**
+   * Reads every relation and the stable graph revision for one Team.
+   *
+   * @param workspaceId - Workspace that owns the relation graph.
+   * @param teamId - Team whose complete relation graph is read.
+   * @returns All directed relations and their stable graph revision.
+   */
+  async listRelationGraph(
+    workspaceId: string,
+    teamId: string,
+  ): Promise<WorkItemRelationsResponse> {
     await this.ensureTable()
     const snapshot = await this.readStableRelationGraph(workspaceId, teamId)
     return {
       graphRevision: snapshot.revision,
+      relations: snapshot.relations,
+    } satisfies WorkItemRelationsResponse
+  }
+
+  /** Work Item から見た relation と graph revision を返します。 */
+  async listRelations(workspaceId: string, teamId: string, workItemId: string) {
+    const snapshot = await this.listRelationGraph(workspaceId, teamId)
+    return {
+      graphRevision: snapshot.graphRevision,
       relations: snapshot.relations.filter((relation) => relation.sourceWorkItemId === workItemId),
     } satisfies WorkItemRelationsResponse
   }
@@ -859,7 +985,14 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
     return { relations, revision: after }
   }
 
-  private async getRelationGraphRevision(workspaceId: string, teamId: string) {
+  /**
+   * Reads the current canonical relation graph revision with a strongly consistent read.
+   *
+   * @param workspaceId - Workspace that owns the relation graph.
+   * @param teamId - Team whose relation graph is read.
+   * @returns Current positive revision, or zero before graph metadata exists.
+   */
+  async getRelationGraphRevision(workspaceId: string, teamId: string): Promise<number> {
     const response = await this.documentClient.send(new GetCommand({
       TableName: this.tableName,
       Key: {
@@ -1866,10 +1999,10 @@ function isConfigurationTableDescription(table: TableDescription | undefined) {
     keys.some((key) => key.AttributeName === 'recordKey' && key.KeyType === 'RANGE')
 }
 
-function createDocumentClient() {
-  return DynamoDBDocumentClient.from(new DynamoDBClient({}), {
-    marshallOptions: { removeUndefinedValues: true },
-  })
+function createDocumentClient(dynamoDbClient: DynamoDBClient) {
+  return createWorkspaceSearchWriterDynamoDbDocumentClient(
+    dynamoDbClient,
+  )
 }
 
 function cloneCustomFieldValue(value: CustomFieldValue): CustomFieldValue {
@@ -2096,6 +2229,7 @@ function storedRelationInvalid() {
 }
 
 function toPersistenceError(error: unknown) {
+  throwIfWorkspaceSearchWriterFenceTerminalError(error)
   if (error instanceof WorkItemConfigurationError) {
     return error
   }

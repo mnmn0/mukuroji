@@ -56,12 +56,16 @@ export function createTranslator(locale: Locale) {
 }
 
 /**
- * Sidebar コンポーネントへ渡す i18n 済みラベルを生成します。
+ * Creates the localized labels consumed by the shared sidebar.
+ *
+ * @param locale - Locale used to resolve every sidebar message.
+ * @returns A complete set of localized sidebar labels.
  */
 export function createSidebarLabels(locale: Locale): SidebarLabels {
   const t = createTranslator(locale)
   const navKeyMap: Record<SidebarNavId, MessageKey> = {
     home: 'sidebar.nav.home',
+    focus: 'sidebar.nav.focus',
     'my-tasks': 'sidebar.nav.myTasks',
     inbox: 'sidebar.nav.inbox',
     requests: 'sidebar.nav.requests',
@@ -81,6 +85,22 @@ export function createSidebarLabels(locale: Locale): SidebarLabels {
     expand: t('sidebar.expand'),
     search: t('sidebar.search'),
     searchShortcut: t('sidebar.searchShortcut'),
+    quickAccess: t('sidebar.quickAccess'),
+    manageQuickAccess: t('sidebar.manageQuickAccess'),
+    quickAccessEmpty: t('sidebar.quickAccessEmpty'),
+    showAllQuickAccess: t('sidebar.showAllQuickAccess'),
+    quickAccessDialogTitle: t('sidebar.quickAccessDialogTitle'),
+    quickAccessDialogDescription: t('sidebar.quickAccessDialogDescription'),
+    closeQuickAccessDialog: t('sidebar.closeQuickAccessDialog'),
+    moveQuickAccessUp: t('sidebar.moveQuickAccessUp'),
+    moveQuickAccessDown: t('sidebar.moveQuickAccessDown'),
+    removeQuickAccess: t('sidebar.removeQuickAccess'),
+    currentTeam: t('sidebar.currentTeam'),
+    switchTeam: t('sidebar.switchTeam'),
+    searchTeams: t('sidebar.searchTeams'),
+    noTeamsFound: t('sidebar.noTeamsFound'),
+    more: t('sidebar.more'),
+    allProjects: t('sidebar.allProjects'),
     teamProjects: t('sidebar.teamProjects'),
     createTeam: t('sidebar.createTeam'),
     create: {
@@ -123,13 +143,17 @@ export function createSidebarLabels(locale: Locale): SidebarLabels {
       confirm: t('sidebar.archive.confirm'),
     },
     teamOverview: t('sidebar.teamOverview'),
+    triage: t('sidebar.triage'),
     issues: t('sidebar.issues'),
     members: t('sidebar.members'),
+    projectCount: (count) =>
+      t('sidebar.projectCount').replace('{count}', String(count)),
     projectGroup: t('sidebar.projectGroup'),
     unreadCount: (count) =>
       t('sidebar.unreadCount').replace('{count}', String(count)),
     nav: {
       home: t(navKeyMap.home),
+      focus: t(navKeyMap.focus),
       'my-tasks': t(navKeyMap['my-tasks']),
       inbox: t(navKeyMap.inbox),
       requests: t(navKeyMap.requests),

@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test'
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import {
+  handler,
   isCompleteHandler,
   processWebhookActiveLocatorRollbackPage,
   processWebhookAuthorizationBackfillEvent,
@@ -14,11 +15,487 @@ const backfillStartedAt = new Date('2026-07-18T00:00:00.000Z')
 const afterWriterDrain = new Date('2026-07-18T00:01:01.000Z')
 const afterLocatorCleanupDrain = new Date('2026-07-18T00:02:02.000Z')
 
+/**
+ * Runs one assertion with an isolated Lambda writer-fence mode.
+ *
+ * @param mode - Exact runtime mode to expose.
+ * @param callback - Assertion body.
+ * @returns Assertion result.
+ */
+async function withWriterFenceMode<T>(
+  mode: 'rollout-pending' | 'required',
+  callback: () => T | Promise<T>,
+): Promise<T> {
+  const name = 'MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE'
+  const previous = Bun.env[name]
+  Bun.env[name] = mode
+  try {
+    return await callback()
+  } finally {
+    if (previous === undefined) {
+      delete Bun.env[name]
+    } else {
+      Bun.env[name] = previous
+    }
+  }
+}
+
 test('accepts the replaced v1 custom resource delete without v3 validation', async () => {
-  await expect(isCompleteHandler({
+  await withWriterFenceMode('required', async () => {
+    await expect(isCompleteHandler({
+      RequestType: 'Delete',
+      ResourceProperties: { MigrationVersion: 'v1' },
+    })).resolves.toEqual({ IsComplete: true })
+  })
+})
+
+test('deletes the replaced v2 checkpoint without v3 validation', async () => {
+  const rows = new Map<string, Record<string, unknown>>()
+  const checkpoint = {
+    directoryId: 'WEBHOOK_AUTHORIZATION_BACKFILL#v2',
+    entryKey: 'CHECKPOINT',
+    entryType: 'webhook-authorization-backfill-checkpoint',
+  }
+  rows.set(createKey(checkpoint), checkpoint)
+  const fake = createDocumentClient(rows, 10)
+
+  await expect(processWebhookAuthorizationBackfillEvent({
     RequestType: 'Delete',
-    ResourceProperties: { MigrationVersion: 'v1' },
-  })).resolves.toEqual({ IsComplete: true })
+    PhysicalResourceId: 'webhook-authorization-projection-backfill-v2',
+    ResourceProperties: { MigrationVersion: 'v2' },
+  }, fake.client, 'ProjectDirectory', 'DeveloperPlatform'))
+    .resolves.toEqual({
+      PhysicalResourceId:
+        'webhook-authorization-projection-backfill-v2',
+      SkipMigration: true,
+    })
+
+  expect(rows.has(createKey(checkpoint))).toBe(false)
+  expect(fake.transactWriteCalls()).toBe(1)
+})
+
+test('skips pending rollout create and update before table access', async () => {
+  const rows = new Map<string, Record<string, unknown>>()
+  const fake = createDocumentClient(rows, 10)
+  const requestTypes: ReadonlyArray<'Create' | 'Update'> = [
+    'Create',
+    'Update',
+  ]
+
+  for (const requestType of requestTypes) {
+    await expect(processWebhookAuthorizationBackfillEvent({
+      RequestType: requestType,
+      PhysicalResourceId: 'existing-backfill',
+      ResourceProperties: {
+        MigrationVersion: 'v3',
+        WorkspaceSearchWriterFenceMode: 'rollout-pending',
+      },
+    }, fake.client, 'ProjectDirectory', 'DeveloperPlatform'))
+      .resolves.toEqual({
+        PhysicalResourceId: 'existing-backfill',
+        SkipMigration: true,
+      })
+  }
+
+  expect(fake.sendCalls()).toBe(0)
+  expect(fake.scanCalls()).toBe(0)
+  expect(fake.transactWriteCalls()).toBe(0)
+  expect(rows.size).toBe(0)
+  await withWriterFenceMode('rollout-pending', async () => {
+    await expect(isCompleteHandler({
+      RequestType: 'Create',
+      ResourceProperties: {
+        MigrationVersion: 'v3',
+        WorkspaceSearchWriterFenceMode: 'rollout-pending',
+      },
+    })).resolves.toEqual({ IsComplete: true })
+  })
+})
+
+test('skips an initial pending delete with no migration state', async () => {
+  const rows = new Map<string, Record<string, unknown>>()
+  const fake = createDocumentClient(rows, 10)
+
+  const event = {
+    RequestType: 'Delete',
+    PhysicalResourceId: 'webhook-authorization-projection-backfill-v3',
+    ResourceProperties: {
+      MigrationVersion: 'v3',
+      WorkspaceSearchWriterFenceMode: 'rollout-pending',
+    },
+  } satisfies Parameters<
+    typeof processWebhookAuthorizationBackfillEvent
+  >[0]
+  const response = await processWebhookAuthorizationBackfillEvent(
+    event,
+    fake.client,
+    'ProjectDirectory',
+    'DeveloperPlatform',
+  )
+
+  expect(response).toEqual({
+      PhysicalResourceId:
+        'webhook-authorization-projection-backfill-v3',
+      SkipMigration: true,
+  })
+
+  expect(fake.sendCalls()).toBe(3)
+  expect(fake.scanCalls()).toBe(0)
+  expect(fake.transactWriteCalls()).toBe(0)
+  expect(rows.size).toBe(0)
+  await withWriterFenceMode('rollout-pending', async () => {
+    await expect(isCompleteHandler({
+      ...event,
+      ...response,
+    })).resolves.toEqual({ IsComplete: true })
+  })
+})
+
+test('rejects pending delete checkpoints without their migration marker', async () => {
+  const rows = new Map<string, Record<string, unknown>>()
+  const forwardCheckpoint = {
+    directoryId: 'WEBHOOK_AUTHORIZATION_BACKFILL#v3',
+    entryKey: 'CHECKPOINT',
+    entryType: 'webhook-authorization-backfill-checkpoint',
+    migrationVersion: 'v3',
+    writerDrainUntil: '2026-07-18T00:01:00.000Z',
+    phase: 'projection',
+    revision: 1,
+    sourceRowsUpdated: 0,
+    sourceRowsVerified: 0,
+    grantsWritten: 0,
+    grantsDeleted: 0,
+    cleanupLocatorsWritten: 0,
+    activeLocatorsReconciled: 0,
+    legacyLookupsRemoved: 0,
+  }
+  rows.set(createKey(forwardCheckpoint), forwardCheckpoint)
+  const fake = createDocumentClient(rows, 10)
+
+  await expect(processWebhookAuthorizationBackfillEvent({
+    RequestType: 'Delete',
+    ResourceProperties: {
+      MigrationVersion: 'v3',
+      WorkspaceSearchWriterFenceMode: 'rollout-pending',
+    },
+  }, fake.client, 'ProjectDirectory', 'DeveloperPlatform'))
+    .rejects.toThrow(
+      'Webhook authorization rollback state is inconsistent.',
+    )
+
+  expect(fake.transactWriteCalls()).toBe(0)
+  expect(rows.get(createKey(forwardCheckpoint))).toEqual(
+    forwardCheckpoint,
+  )
+})
+
+test('starts rollback when a migrated resource is deleted in pending mode', async () => {
+  const rows = new Map<string, Record<string, unknown>>()
+  const marker = {
+    workspaceId: 'WEBHOOK_ACTIVE_LOCATOR_MIGRATION#v3',
+    recordKey: 'STATE',
+    entryType: 'webhook-active-locator-migration',
+    value: {
+      migrationVersion: 'v3',
+      state: 'complete',
+      writerDrainUntil: '2026-07-18T00:01:00.000Z',
+    },
+    version: 2,
+  }
+  rows.set(createKey(marker), marker)
+  const fake = createDocumentClient(rows, 10)
+
+  await expect(processWebhookAuthorizationBackfillEvent({
+    RequestType: 'Delete',
+    PhysicalResourceId: 'webhook-authorization-projection-backfill-v3',
+    ResourceProperties: {
+      MigrationVersion: 'v3',
+      WorkspaceSearchWriterFenceMode: 'rollout-pending',
+    },
+  }, fake.client, 'ProjectDirectory', 'DeveloperPlatform'))
+    .resolves.toEqual({
+      PhysicalResourceId:
+        'webhook-authorization-projection-backfill-v3',
+    })
+
+  expect(rows.get(createKey(marker))).toMatchObject({
+    value: {
+      state: 'rollback',
+    },
+    version: 3,
+  })
+  expect(rows.has(
+    'WEBHOOK_ACTIVE_LOCATOR_ROLLBACK#v3\0CHECKPOINT',
+  )).toBe(true)
+  expect(fake.transactWriteCalls()).toBeGreaterThan(0)
+})
+
+test('rejects a rollback checkpoint with a mismatched drain deadline', async () => {
+  const rows = new Map<string, Record<string, unknown>>()
+  const marker = {
+    workspaceId: 'WEBHOOK_ACTIVE_LOCATOR_MIGRATION#v3',
+    recordKey: 'STATE',
+    entryType: 'webhook-active-locator-migration',
+    value: {
+      migrationVersion: 'v3',
+      state: 'rollback',
+      writerDrainUntil: '2026-07-18T00:01:00.000Z',
+      rollbackDrainUntil: '2026-07-18T03:01:00.000Z',
+    },
+    version: 3,
+  }
+  const checkpoint = {
+    directoryId: 'WEBHOOK_ACTIVE_LOCATOR_ROLLBACK#v3',
+    entryKey: 'CHECKPOINT',
+    entryType: 'webhook-active-locator-rollback-checkpoint',
+    migrationVersion: 'v3',
+    writerDrainUntil: '2026-07-18T02:01:00.000Z',
+    revision: 0,
+    legacyLookupsReconciled: 0,
+  }
+  for (const row of [marker, checkpoint]) {
+    rows.set(createKey(row), row)
+  }
+  const fake = createDocumentClient(rows, 10)
+
+  await expect(startWebhookActiveLocatorRollback(
+    fake.client,
+    'ProjectDirectory',
+    'DeveloperPlatform',
+    new Date('2026-07-18T03:00:00.000Z'),
+  )).rejects.toThrow(
+    'Webhook active locator rollback checkpoint is inconsistent.',
+  )
+
+  expect(rows.get(createKey(marker))).toEqual(marker)
+  expect(rows.get(createKey(checkpoint))).toEqual(checkpoint)
+})
+
+test('keeps pending rollback state unchanged when its guard fails', async () => {
+  const rows = new Map<string, Record<string, unknown>>()
+  const marker = {
+    workspaceId: 'WEBHOOK_ACTIVE_LOCATOR_MIGRATION#v3',
+    recordKey: 'STATE',
+    entryType: 'webhook-active-locator-migration',
+    value: {
+      migrationVersion: 'v3',
+      state: 'complete',
+      writerDrainUntil: '2026-07-18T00:01:00.000Z',
+    },
+    version: 2,
+  }
+  rows.set(createKey(marker), marker)
+  const fake = createDocumentClient(rows, 10)
+  fake.failNextTransaction(new Error('durable guard unavailable'))
+
+  await expect(processWebhookAuthorizationBackfillEvent({
+    RequestType: 'Delete',
+    ResourceProperties: {
+      MigrationVersion: 'v3',
+      WorkspaceSearchWriterFenceMode: 'rollout-pending',
+    },
+  }, fake.client, 'ProjectDirectory', 'DeveloperPlatform'))
+    .rejects.toThrow('durable guard unavailable')
+
+  expect(rows.get(createKey(marker))).toMatchObject({
+    value: {
+      state: 'complete',
+    },
+    version: 2,
+  })
+  expect(rows.has(
+    'WEBHOOK_ACTIVE_LOCATOR_ROLLBACK#v3\0CHECKPOINT',
+  )).toBe(false)
+})
+
+test('rejects provider and Lambda rollout-phase mismatches before setup', async () => {
+  await withWriterFenceMode('rollout-pending', async () => {
+    await expect(handler({
+      RequestType: 'Update',
+      ResourceProperties: {
+        MigrationVersion: 'v3',
+        WorkspaceSearchWriterFenceMode: 'required',
+      },
+    })).rejects.toThrow(
+      'Workspace Search writer-fence rollout mode does not match the runtime.',
+    )
+  })
+  await withWriterFenceMode('required', async () => {
+    await expect(isCompleteHandler({
+      RequestType: 'Update',
+      ResourceProperties: {
+        MigrationVersion: 'v3',
+        WorkspaceSearchWriterFenceMode: 'rollout-pending',
+      },
+    })).rejects.toThrow(
+      'Workspace Search writer-fence rollout mode does not match the runtime.',
+    )
+  })
+})
+
+test('requires an explicit writer-fence mode before a v3 lifecycle write', async () => {
+  const rows = new Map<string, Record<string, unknown>>()
+  const fake = createDocumentClient(rows, 10)
+
+  await expect(processWebhookAuthorizationBackfillEvent({
+    RequestType: 'Create',
+    ResourceProperties: { MigrationVersion: 'v3' },
+  }, fake.client, 'ProjectDirectory', 'DeveloperPlatform'))
+    .rejects.toThrow(
+      'Workspace Search writer-fence rollout mode is invalid.',
+    )
+  expect(rows.size).toBe(0)
+})
+
+test('propagates non-conditional and malformed transaction cancellations', async () => {
+  const invalidCancellationReasons: readonly unknown[] = [
+    undefined,
+    [],
+    [{ Code: 'None' }],
+    [{ Code: 'TransactionConflict' }],
+    [
+      { Code: 'ConditionalCheckFailed' },
+      { Code: 'ProvisionedThroughputExceeded' },
+    ],
+    [{ Code: 'ConditionalCheckFailed' }, null],
+    [{ Code: 'ConditionalCheckFailed' }, {}],
+    'malformed',
+  ]
+
+  for (const cancellationReasons of invalidCancellationReasons) {
+    const checkpoint = {
+      directoryId: 'WEBHOOK_AUTHORIZATION_BACKFILL#v3',
+      entryKey: 'CHECKPOINT',
+      entryType: 'webhook-authorization-backfill-checkpoint',
+      migrationVersion: 'v3',
+      writerDrainUntil: '2026-07-18T00:01:00.000Z',
+      phase: 'projection',
+      revision: 1,
+      sourceRowsUpdated: 0,
+      sourceRowsVerified: 0,
+      grantsWritten: 0,
+      grantsDeleted: 0,
+      cleanupLocatorsWritten: 0,
+      activeLocatorsReconciled: 0,
+      legacyLookupsRemoved: 0,
+    }
+    const team = {
+      directoryId: 'workspace-conditional-classifier',
+      entryKey: 'TEAM#conditional-classifier',
+      entryType: 'team',
+      teamId: 'conditional-classifier',
+    }
+    const rows = new Map<string, Record<string, unknown>>()
+    rows.set(createKey(checkpoint), checkpoint)
+    rows.set(createKey(team), team)
+    const fake = createDocumentClient(rows, 10)
+    const failure = Object.assign(new Error('Transaction was canceled.'), {
+      name: 'TransactionCanceledException',
+      ...(cancellationReasons === undefined
+        ? {}
+        : { CancellationReasons: cancellationReasons }),
+    })
+    fake.failNextTransaction(failure)
+
+    await expect(processWebhookAuthorizationBackfillPage(
+      fake.client,
+      'ProjectDirectory',
+      'WebhookAuthorizationIndex',
+      afterWriterDrain,
+      'DeveloperPlatform',
+    )).rejects.toBe(failure)
+  }
+})
+
+test('propagates mixed cancellation reasons from checkpoint persistence', async () => {
+  const checkpoint = {
+    directoryId: 'WEBHOOK_AUTHORIZATION_BACKFILL#v3',
+    entryKey: 'CHECKPOINT',
+    entryType: 'webhook-authorization-backfill-checkpoint',
+    migrationVersion: 'v3',
+    writerDrainUntil: '2026-07-18T00:01:00.000Z',
+    phase: 'projection',
+    revision: 1,
+    sourceRowsUpdated: 0,
+    sourceRowsVerified: 0,
+    grantsWritten: 0,
+    grantsDeleted: 0,
+    cleanupLocatorsWritten: 0,
+    activeLocatorsReconciled: 0,
+    legacyLookupsRemoved: 0,
+  }
+  const rows = new Map<string, Record<string, unknown>>()
+  rows.set(createKey(checkpoint), checkpoint)
+  const fake = createDocumentClient(rows, 10)
+  const failure = Object.assign(new Error('Checkpoint transaction failed.'), {
+    name: 'TransactionCanceledException',
+    CancellationReasons: [
+      { Code: 'ConditionalCheckFailed' },
+      { Code: 'TransactionConflict' },
+    ],
+  })
+  fake.failNextCheckpointTransaction(failure)
+
+  await expect(processWebhookAuthorizationBackfillPage(
+    fake.client,
+    'ProjectDirectory',
+    'WebhookAuthorizationIndex',
+    afterWriterDrain,
+    'DeveloperPlatform',
+  )).rejects.toBe(failure)
+})
+
+test('accepts conditional transaction cancellations with None placeholders', async () => {
+  const checkpoint = {
+    directoryId: 'WEBHOOK_AUTHORIZATION_BACKFILL#v3',
+    entryKey: 'CHECKPOINT',
+    entryType: 'webhook-authorization-backfill-checkpoint',
+    migrationVersion: 'v3',
+    writerDrainUntil: '2026-07-18T00:01:00.000Z',
+    phase: 'projection',
+    revision: 1,
+    sourceRowsUpdated: 0,
+    sourceRowsVerified: 0,
+    grantsWritten: 0,
+    grantsDeleted: 0,
+    cleanupLocatorsWritten: 0,
+    activeLocatorsReconciled: 0,
+    legacyLookupsRemoved: 0,
+  }
+  const team = {
+    directoryId: 'workspace-conditional-classifier',
+    entryKey: 'TEAM#conditional-classifier',
+    entryType: 'team',
+    teamId: 'conditional-classifier',
+  }
+  const rows = new Map<string, Record<string, unknown>>()
+  rows.set(createKey(checkpoint), checkpoint)
+  rows.set(createKey(team), team)
+  const fake = createDocumentClient(rows, 10)
+  fake.failNextTransaction(Object.assign(
+    new Error('Transaction condition failed.'),
+    {
+      name: 'TransactionCanceledException',
+      CancellationReasons: [
+        { Code: 'ConditionalCheckFailed' },
+        { Code: 'None' },
+      ],
+    },
+  ))
+
+  await expect(processWebhookAuthorizationBackfillPage(
+    fake.client,
+    'ProjectDirectory',
+    'WebhookAuthorizationIndex',
+    afterWriterDrain,
+    'DeveloperPlatform',
+  )).resolves.toMatchObject({
+    madeProgress: true,
+    checkpoint: {
+      revision: 2,
+      sourceRowsUpdated: 0,
+    },
+  })
 })
 
 test('deletes the replaced v1 checkpoint without changing its physical ID', async () => {
@@ -44,13 +521,17 @@ test('deletes the replaced v1 checkpoint without changing its physical ID', asyn
     SkipMigration: true,
   })
   expect(commands).toHaveLength(1)
-  expect(commands[0]?.constructor.name).toBe('DeleteCommand')
+  expect(commands[0]?.constructor.name).toBe('TransactWriteCommand')
   expect(commands[0]?.input).toMatchObject({
-    TableName: 'ProjectDirectory',
-    Key: {
-      directoryId: 'WEBHOOK_AUTHORIZATION_BACKFILL#v1',
-      entryKey: 'CHECKPOINT',
-    },
+    TransactItems: [{
+      Delete: {
+        TableName: 'ProjectDirectory',
+        Key: {
+          directoryId: 'WEBHOOK_AUTHORIZATION_BACKFILL#v1',
+          entryKey: 'CHECKPOINT',
+        },
+      },
+    }],
   })
 })
 
@@ -813,7 +1294,6 @@ test('resumes pagewise, waits for the GSI, and skips archived member grants', as
     cleanupLocatorsWritten: 1,
   })
   expect(fake.scanCalls()).toBeGreaterThan(6)
-  expect(fake.updateCalls()).toBeGreaterThan(6)
 
   expect(rows.get('workspace-1\0TEAM#active')).toMatchObject({
     webhookAuthorizationKey: 'WEBHOOK_ACL#RESOURCE#workspace-1',
@@ -948,11 +1428,16 @@ function createDocumentClient(
   let scans = 0
   const scanLimits: number[] = []
   let updates = 0
+  let transactWrites = 0
+  let sends = 0
+  let nextTransactionFailure: { error: unknown } | undefined
+  let nextCheckpointTransactionFailure: { error: unknown } | undefined
   const client = {
     async send(command: {
       constructor: { name: string }
       input: Record<string, unknown>
     }) {
+      sends += 1
       if (command.constructor.name === 'ScanCommand') {
         scans += 1
         scanLimits.push(Number(command.input.Limit))
@@ -1144,6 +1629,12 @@ function createDocumentClient(
         return {}
       }
       if (command.constructor.name === 'TransactWriteCommand') {
+        transactWrites += 1
+        if (nextTransactionFailure) {
+          const failure = nextTransactionFailure.error
+          nextTransactionFailure = undefined
+          throw failure
+        }
         const transactItems = command.input.TransactItems as Array<{
           ConditionCheck?: {
             Key: Record<string, unknown>
@@ -1199,6 +1690,11 @@ function createDocumentClient(
           if (
             item.Put?.ConditionExpression?.includes('#revision')
           ) {
+            if (nextCheckpointTransactionFailure) {
+              const failure = nextCheckpointTransactionFailure.error
+              nextCheckpointTransactionFailure = undefined
+              throw failure
+            }
             if (checkpointWriteFailure) {
               checkpointWriteFailure = false
               throw new Error('interrupted after page writes')
@@ -1218,14 +1714,42 @@ function createDocumentClient(
               | Record<string, unknown>
               | undefined
             const values = item.Update.ExpressionAttributeValues ?? {}
+            if (values[':rollback'] !== undefined) {
+              updates += 1
+            }
+            if (
+              values[':rollback'] !== undefined &&
+              completeMarkerBeforeRollbackStart &&
+              existing &&
+              value
+            ) {
+              completeMarkerBeforeRollbackStart = false
+              value.state = 'complete'
+              existing.version = Number(existing.version) + 1
+            }
             if (
               existing?.entryType !== 'webhook-active-locator-migration' ||
               value?.migrationVersion !== 'v3' ||
-              value.state !== 'cutover' ||
+              (
+                values[':rollback'] === undefined
+                  ? value.state !== 'cutover'
+                  : (
+                      existing.version !== values[':expectedVersion'] ||
+                      value.state !== values[':expectedState']
+                    )
+              ) ||
               (
                 values[':expectedVersion'] !== undefined &&
                 existing.version !== values[':expectedVersion']
               )
+            ) throw transactionFailure()
+          }
+          if (item.Update?.Key.directoryId !== undefined) {
+            const existing = rows.get(createKey(item.Update.Key))
+            const values = item.Update.ExpressionAttributeValues ?? {}
+            if (
+              !existing ||
+              existing.entryType !== values[':entryType']
             ) throw transactionFailure()
           }
           if (
@@ -1238,9 +1762,30 @@ function createDocumentClient(
             const existing = rows.get(createKey(subscriptionMutation.Key))
             const values =
               subscriptionMutation.ExpressionAttributeValues ?? {}
+            const conditionExpression =
+              subscriptionMutation.ConditionExpression ?? ''
             const value = existing?.value as
               | Record<string, unknown>
               | undefined
+            const lookupKeyMatches = conditionExpression.includes(
+              'attribute_not_exists(lookupKey)',
+            )
+              ? existing?.lookupKey === undefined
+              : (
+                  ':observedLookupKey' in values
+                    ? existing?.lookupKey === values[':observedLookupKey']
+                    : existing?.lookupKey === values[':lookupKey']
+                )
+            const lookupSortKeyMatches = conditionExpression.includes(
+              'attribute_not_exists(lookupSortKey)',
+            )
+              ? existing?.lookupSortKey === undefined
+              : (
+                  ':observedLookupSortKey' in values
+                    ? existing?.lookupSortKey ===
+                      values[':observedLookupSortKey']
+                    : existing?.lookupSortKey === values[':lookupSortKey']
+                )
             if (
               !existing ||
               !value ||
@@ -1252,16 +1797,8 @@ function createDocumentClient(
               value.id !== values[':id'] ||
               value?.createdAt !== values[':createdAt'] ||
               value?.status !== values[':status'] ||
-              (
-                values[':lookupKey'] === undefined
-                  ? existing.lookupKey !== undefined
-                  : existing.lookupKey !== values[':lookupKey']
-              ) ||
-              (
-                values[':lookupSortKey'] === undefined
-                  ? existing.lookupSortKey !== undefined
-                  : existing.lookupSortKey !== values[':lookupSortKey']
-              ) ||
+              !lookupKeyMatches ||
+              !lookupSortKeyMatches ||
               (
                 values[':expiresAt'] === undefined
                   ? existing.expiresAt !== undefined
@@ -1409,7 +1946,10 @@ function createDocumentClient(
             const existing = rows.get(createKey(item.Update.Key))!
             const value = existing.value as Record<string, unknown>
             const values = item.Update.ExpressionAttributeValues ?? {}
-            if (
+            if (values[':rollback'] !== undefined) {
+              value.state = values[':rollback']
+              value.rollbackDrainUntil = values[':rollbackDrainUntil']
+            } else if (
               item.Update.UpdateExpression.includes('#writerDrainUntil')
             ) {
               value.writerDrainUntil = values[':writerDrainUntil']
@@ -1418,14 +1958,32 @@ function createDocumentClient(
             }
             existing.version = Number(existing.version) + 1
           }
+          if (item.Update?.Key.directoryId !== undefined) {
+            const existing = rows.get(createKey(item.Update.Key))!
+            const values = item.Update.ExpressionAttributeValues ?? {}
+            existing.webhookAuthorizationKey =
+              values[':authorizationKey']
+            existing.webhookAuthorizationSortKey =
+              values[':authorizationSortKey']
+          }
           if (
             item.Update?.Key.workspaceId !== undefined &&
             item.Update.Key.workspaceId !==
               'WEBHOOK_ACTIVE_LOCATOR_MIGRATION#v3'
           ) {
             const existing = rows.get(createKey(item.Update.Key))!
-            delete existing.lookupKey
-            delete existing.lookupSortKey
+            const values = item.Update.ExpressionAttributeValues ?? {}
+            if (
+              item.Update.UpdateExpression.startsWith('SET lookupKey') &&
+              typeof values[':lookupKey'] === 'string' &&
+              typeof values[':lookupSortKey'] === 'string'
+            ) {
+              existing.lookupKey = values[':lookupKey']
+              existing.lookupSortKey = values[':lookupSortKey']
+            } else {
+              delete existing.lookupKey
+              delete existing.lookupSortKey
+            }
           }
         }
         return {}
@@ -1437,6 +1995,14 @@ function createDocumentClient(
     client,
     failNextCheckpointWrite() {
       checkpointWriteFailure = true
+    },
+    /** Makes the next transaction fail with the exact supplied error. */
+    failNextTransaction(error: unknown) {
+      nextTransactionFailure = { error }
+    },
+    /** Makes the next checkpoint transaction fail with the supplied error. */
+    failNextCheckpointTransaction(error: unknown) {
+      nextCheckpointTransactionFailure = { error }
     },
     advanceWebhookSubscriptionHealthBeforeNextReconcile() {
       advanceWebhookSubscriptionHealth = true
@@ -1467,11 +2033,19 @@ function createDocumentClient(
     scanCalls() {
       return scans
     },
+    /** Returns the total number of attempted client commands. */
+    sendCalls() {
+      return sends
+    },
     scanLimits() {
       return [...scanLimits]
     },
     updateCalls() {
       return updates
+    },
+    /** Returns the number of attempted transaction writes. */
+    transactWriteCalls() {
+      return transactWrites
     },
   }
 }
@@ -1516,5 +2090,6 @@ function conditionalFailure() {
 function transactionFailure() {
   return Object.assign(new Error('Transaction condition failed.'), {
     name: 'TransactionCanceledException',
+    CancellationReasons: [{ Code: 'ConditionalCheckFailed' }],
   })
 }

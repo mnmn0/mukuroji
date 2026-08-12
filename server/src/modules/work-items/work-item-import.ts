@@ -321,6 +321,8 @@ export type WorkItemImportWorkerDependencies = {
   jobs: WorkItemImportJobLifecycle
   /** Creator/Team/Project の current RBAC を再評価します。 */
   authorize(execution: WorkItemImportExecution): Promise<void>
+  /** Tenant lifecycle と Developer Platform entitlement を再評価します。 */
+  assertTenantEnabled(execution: WorkItemImportExecution): Promise<void>
   /** Current RBAC/configuration で source を再検証します。 */
   validate(
     execution: WorkItemImportExecution,
@@ -594,6 +596,7 @@ async function processQueueRecord(
   let checkpointRow = execution.checkpointRow
   let processingRow: number | undefined
   try {
+    await dependencies.assertTenantEnabled(execution)
     await dependencies.jobs.markRunning(execution)
     await dependencies.authorize(execution)
     const sourceContent = await dependencies.sources.getVerified(execution.source, execution)
@@ -641,6 +644,7 @@ async function processQueueRecord(
         await deleteSourceBestEffort(cancelled, dependencies.sources)
         return
       }
+      await dependencies.assertTenantEnabled(current)
       await dependencies.authorize(current)
       const rowIdentity = createRowIdentity(current, item.row, item.input)
       await dependencies.createWorkItem({

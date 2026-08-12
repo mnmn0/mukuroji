@@ -10,15 +10,18 @@ import { EnterpriseSecurityPage } from '../pages/workspace/EnterpriseSecurityPag
 import { GoalDocumentsPage } from '../pages/workspace/GoalDocumentsPage'
 import { HelpPage } from '../pages/workspace/HelpPage'
 import { HomePage } from '../pages/workspace/HomePage'
+import { FocusPage } from '../pages/workspace/FocusPage'
 import { InboxPage } from '../pages/workspace/InboxPage'
 import { MyTasksPage } from '../pages/workspace/MyTasksPage'
 import { PlanningPage } from '../pages/workspace/PlanningPage'
+import { ProjectsPage } from '../pages/workspace/ProjectsPage'
 import { ReportsPage } from '../pages/workspace/ReportsPage'
 import { SettingsPage } from '../pages/workspace/SettingsPage'
 import { TaskPage } from '../pages/workspace/TaskPage'
 import { TeamIssuePage } from '../pages/workspace/TeamIssuePage'
 import { TeamMembersPage } from '../pages/workspace/TeamMembersPage'
 import { TeamOverviewPage } from '../pages/workspace/TeamOverviewPage'
+import { TeamTriagePage } from '../pages/workspace/TeamTriagePage'
 import { ProjectTasksRedirect } from './ProjectTasksRedirect'
 import { WorkspaceCommandMenuLayout } from '../commands/ui/WorkspaceCommandMenu'
 import { SearchPage } from '../search/SearchPage'
@@ -69,6 +72,10 @@ export const appRoutes: RouteObject[] = [
                 element: <HomePage />,
               },
               {
+                path: '/focus',
+                element: <FocusPage />,
+              },
+              {
                 path: '/my-tasks',
                 element: <MyTasksPage />,
               },
@@ -96,61 +103,73 @@ export const appRoutes: RouteObject[] = [
                 path: '/teams/:teamId/members',
                 element: <TeamMembersPage />,
               },
+              {
+                path: '/teams/:teamId/triage',
+                element: <TeamTriagePage />,
+              },
+              {
+                path: '/teams/:teamId/projects',
+                element: <ProjectsPage />,
+              },
+              {
+                path: '/projects',
+                element: <ProjectsPage />,
+              },
+              {
+                path: '/requests',
+                element: <RequestIntakePage />,
+              },
+              {
+                path: '/search',
+                element: <SearchPage />,
+              },
+              {
+                path: '/planning',
+                element: <Navigate replace to="/planning/timeline" />,
+              },
+              {
+                path: '/planning/timeline',
+                element: <PlanningPage />,
+              },
+              {
+                path: '/planning/roadmap',
+                element: <PlanningPage />,
+              },
+              {
+                path: '/planning/portfolio',
+                element: <PlanningPage />,
+              },
+              {
+                path: '/documents',
+                element: <DocumentPage />,
+              },
+              {
+                path: '/documents/:documentId',
+                element: <DocumentPage />,
+              },
+              {
+                path: '/goals/:goalId/documents',
+                element: <GoalDocumentsPage />,
+              },
+              {
+                path: '/reports',
+                element: <ReportsPage />,
+              },
+              {
+                path: '/teams/:teamId/issues',
+                element: <TeamIssuePage />,
+              },
+              {
+                path: '/projects/:projectId/issues',
+                element: <TaskPage />,
+              },
+              {
+                path: '/projects/:projectId/tasks',
+                element: <ProjectTasksRedirect />,
+              },
             ],
           },
         ],
-      },
-      {
-        path: '/requests',
-        element: <RequestIntakePage />,
-      },
-      {
-        path: '/search',
-        element: <SearchPage />,
-      },
-      {
-        path: '/planning',
-        element: <Navigate replace to="/planning/timeline" />,
-      },
-      {
-        path: '/planning/timeline',
-        element: <PlanningPage />,
-      },
-      {
-        path: '/planning/roadmap',
-        element: <PlanningPage />,
-      },
-      {
-        path: '/planning/portfolio',
-        element: <PlanningPage />,
-      },
-      {
-        path: '/documents',
-        element: <DocumentPage />,
-      },
-      {
-        path: '/documents/:documentId',
-        element: <DocumentPage />,
-      },
-      {
-        path: '/goals/:goalId/documents',
-        element: <GoalDocumentsPage />,
-      },
-      {
-        path: '/reports',
-        element: <ReportsPage />,
-      },
-      {
-        path: '/teams/:teamId/issues',
-        element: <TeamIssuePage />,
-      },
-      {
-        path: '/projects/:projectId/issues',
-        element: <TaskPage />,
-      },
-      {
-        path: '/projects/:projectId/tasks',
-        element: <ProjectTasksRedirect />,
       },
     ],
   },

@@ -143,6 +143,10 @@ bun run floci:deploy-backend
 
 `floci:deploy-backend` は `server/src/index.ts` を Node.js 22 Lambda 用に bundle し、Floci の REST API Gateway から Lambda に proxy します。React から Lambda 経由 API を呼ぶ場合は、生成された `.floci/generated/backend.env` の `VITE_API_BASE_URL` を使います。Deploy script は ready hook が生成した `ANALYTICS_TABLE_NAME` と `ANALYTICS_SCHEDULE_INDEX_NAME` を Lambda に渡します。また、確定した REST API URL を `AUTOMATION_INBOUND_WEBHOOK_BASE_URL` として Lambda にも渡し、Secrets Manager の内部 HTTP endpoint と明示的な `MUKUROJI_LOCAL_AWS_RUNTIME=floci` marker を組にして渡します。管理 API が返す signed inbound webhook URL は sender から到達可能な同じ API を指します。Lambda adapter は `/teams/projects` のような直下パスと `/api/teams/projects` の両方を同じ Hono route へ正規化します。
 
+Floci は CloudFormation を使わず、production の4分割 API runtime configuration secret
+pointerを渡さないため、`ApiRuntimeConfigurationRevision` は使いません。Local Lambdaには
+completeなdiscrete environmentを直接設定し、このfallbackをproduction deployへ流用しません。
+
 停止:
 
 ```sh
@@ -207,14 +211,17 @@ Web は Vite の proxy 経由で `/api` を `http://localhost:3000` に転送し
 - `MUKUROJI_COLLABORATION_TABLE` / `COLLABORATION_TABLE_NAME`: comment thread、reaction、watcher、presence を保存する DynamoDB table 名。未指定時は `mukuroji-collaboration-local`
 - `MUKUROJI_DOCUMENTS_TABLE` / `DOCUMENTS_TABLE_NAME`: Document tree、version、comment、presence、share、backlink を保存する DynamoDB table 名。未指定時は `mukuroji-documents-local`
 - `MUKUROJI_WORKSPACE_SEARCH_TABLE` / `WORKSPACE_SEARCH_TABLE_NAME`: Workspace search document、saved view、ユーザー別 view preference を保存する DynamoDB table 名。未指定時は `mukuroji-workspace-search-local`
+- `WORKSPACE_SEARCH_MIGRATION_STATE_TABLE_NAME`: Workspace Search migration の durable state、authority、application writer-fence row を保存する DynamoDB table 名。本番 writer runtime では必須です。
+- `MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE`: 本番CDKはCloudFormation parameter `WorkspaceSearchWriterFenceMode` で `rollout-pending` / `required` の明示選択を要求します。`rollout-pending` は初回open row bootstrap前にAppConfigを`disabled`としてwriter drainを実測した期間だけ使う一時的なproduction bridgeで、このmode自体も対象tableへのmutationをSDK middlewareで拒否します。通常運用やmigration実行には使いません。Bootstrap後は全Lambdaの`required`反映を確認してから再開します。Floci deployだけが、local HTTP DynamoDB/Secrets Manager endpointと`MUKUROJI_LOCAL_AWS_RUNTIME=floci`を併用して`local-floci-bypass`を設定します。
 - `ANALYTICS_TABLE_NAME`: 保存済みレポート、immutable snapshot、定期配信 receipt を保存する DynamoDB table 名。未指定時は `mukuroji-analytics-local`
 - `ANALYTICS_SCHEDULE_INDEX_NAME`: 定期配信対象の取得に使う `scheduleShard` / `nextDeliveryAtRecordKey` GSI 名。未指定時は `ScheduleDueIndex`
 - `MUKUROJI_NOTIFICATIONS_TABLE` / `NOTIFICATIONS_TABLE_NAME`: ユーザー別の durable notification timeline と配信設定を保存する DynamoDB table 名。未指定時は `mukuroji-notifications-local`
-- `PLANNING_TABLE_NAME`: Cycle、Milestone、Release、Phase、Goal/OKR、Initiative、Roadmap、Portfolio の Planning entity と、Dependency、Work Item link を保存する DynamoDB table 名。未指定時は `mukuroji-planning-local`
+- `PLANNING_TABLE_NAME`: Cycle、Milestone、Release、Phase、Goal/OKR、Initiative、Roadmap、Portfolio の Planning entity、entity dependency、qualified Work Item schedule dependency、Work Item link を保存する DynamoDB table 名。未指定時は `mukuroji-planning-local`
 - `NOTIFICATIONS_STATUS_INDEX_NAME`: unread/read/archive/snooze ごとの timeline query に使う GSI 名。未指定時は `RecipientStatusIndex`
 - `MUKUROJI_REALTIME_SESSIONS_TABLE` / `REALTIME_SESSIONS_TABLE_NAME`: WebSocket ticket と connection lease を保存する DynamoDB table 名。未指定時は `mukuroji-realtime-sessions-local`
 - `REALTIME_WEBSOCKET_URL`: production の collaboration invalidation/presence 用 WebSocket URL。未指定時は Web が polling fallback を使います。
 - `MUKUROJI_AUDIT_EVENTS_TABLE` / `AUDIT_EVENTS_TABLE_NAME`: immutable audit event/outbox を保存する DynamoDB table 名。ローカル既定値は `mukuroji-audit-events`
+- `TENANT_ADMINISTRATION_TABLE_NAME`: tenant profile、entitlement、governance、lifecycle を保存する DynamoDB table 名。ローカル既定値は `mukuroji-tenant-administration-local`
 - `ENTERPRISE_IDENTITY_TABLE_NAME`: Workspace generation/`CONTROL` checkpoint、global domain claim、SSO/domain/policy/role、SCIM identity/group、provisioning run、service account、break-glass metadata を保存する DynamoDB table 名。Enterprise Identity 専用 GSI はなく、ローカル既定値は `mukuroji-enterprise-identity-local`
 - `ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET`: SCIM bearer token と service account credential を HMAC-SHA-256 する32–256文字の安定した secret。DynamoDB には credential kind・Workspace・credential ID で domain-separated な digest だけを保存します。作成・rotate response の raw credential は通常一回だけ表示し、同じ idempotency request の応答消失時に限り10分以内は同じ値を回復できます。
 - `MUKUROJI_AUTOMATION_TABLE` / `AUTOMATION_TABLE_NAME`: rule/template/recurring/execution/bulk/template application に加え、inbound webhook endpoint と delivery/replay receipt を保存する DynamoDB table 名。ローカル既定値は `mukuroji-automation-local`
@@ -323,12 +330,16 @@ export MUKUROJI_REQUEST_EMAIL_WEBHOOK_SECRET=<at-least-32-random-characters>
 export MUKUROJI_REQUEST_TOKEN_HASH_SECRET=<different-at-least-32-random-characters>
 export MUKUROJI_ALARM_PRIMARY_TOPIC_NAME=<primary-standard-sns-topic-name>
 export MUKUROJI_ALARM_SECONDARY_TOPIC_NAME=<secondary-standard-sns-topic-name>
+export MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION=2026-07-28-01
+# 初回 writer-fence bootstrap 時のみ rollout-pending。
+# 既存環境の再 deploy では required を指定します（required からの巻き戻しは禁止）。
+export MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE=rollout-pending
 
 bash scripts/prepare-workspace-cognito.sh
 bun run cdk:build
 bun run cdk:test
 bun run cdk:synth
-bun --filter cdk cdk diff \
+bun --filter cdk cdk diff -c triageIndexDeploymentStage=wake \
   --parameters CognitoUserPoolId="$COGNITO_USER_POOL_ID" \
   --parameters CognitoUserPoolClientId="$COGNITO_USER_POOL_CLIENT_ID" \
   --parameters CognitoSsoUserPoolClientId="$COGNITO_SSO_USER_POOL_CLIENT_ID" \
@@ -344,10 +355,36 @@ bun --filter cdk cdk diff \
   --parameters RequestEmailWebhookSecret="$MUKUROJI_REQUEST_EMAIL_WEBHOOK_SECRET" \
   --parameters RequestTokenHashSecret="$MUKUROJI_REQUEST_TOKEN_HASH_SECRET" \
   --parameters AlarmPrimaryTopicName="$MUKUROJI_ALARM_PRIMARY_TOPIC_NAME" \
-  --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME"
+  --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
+  --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
+  --parameters WorkspaceSearchWriterFenceMode="$MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE"
 ```
 
 `MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY` は環境作成時に一度だけ `openssl rand -hex 32` などで生成し、64桁の小文字hex値を secret store に保存して、API deploy と audit backfill で再利用してください。通常の再 deploy で生成し直すと Workspace access の audit ID が変わります。
+
+`MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION` は1〜32文字のdeploy識別子です。APIの
+code、または4分割runtime configuration secretへ入るparameter/resource値を変更するdeployごとに
+新しい値へ進め、同じrevisionを異なる内容へ再利用しません。初回導入では物理Lambdaが`-api-v2`へ
+置換されるため、`ProjectTasksFunctionUrl`と後方互換の`ProjectTasksApiUrl`も変わります。
+Function URL利用者は新しいstack outputへの計画的な切替が必要です。
+`ProjectTasksApiGatewayUrl`は同じHTTP API endpointを維持し、default routeだけが新しい
+`live` Aliasへ切り替わります。以後のdeployは新しいimmutable configuration secretとLambda
+Versionの準備後に`live` Aliasでtrafficを切り替えます。旧secretは`Retain`されますが、
+CloudFormationが自動で再接続・削除するものではないため、rollback/recovery evidenceとして管理します。
+4分割secretはtransformを使わないv2 line envelopeでgroup identityと同一revisionを保持し、各値は
+canonical Base64として保存します。NoEchoの4値はrevision-boundな個別retained secretへ直接保存し、
+Document public-share secretとともにenvelopeにはARNだけを入れます。APIは4 group、同一revision、
+全canonical key、nested secret ARN/valueをすべて検証してから環境へ原子的に反映します。
+
+`MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE=rollout-pending` は初回writer-fence
+bootstrap前の一時値です。このdeployはAppConfigの初期baselineを`disabled`にし、controlled
+Lambdaはその反映完了後に更新されます。Webhook authorization backfillのCreate/Updateはpending中に
+tableへ触れません。Deleteはread-onlyでv3 migration stateが空であることを確認して短絡し、既存stateが
+あればdurable open-row guard付きtransactionでrollbackを完了するまで削除を成功させません。
+Application clientもpending中は通常のfenced mutationをnetwork I/O前に拒否するため、
+AppConfigが誤って`enabled`へ戻ってもunguarded writeを通しません。反映とwriter drainを確認した状態でopen rowをbootstrapし、全Lambdaを
+`required`へ更新してguarded backfillを完了させてから、新しい`enabled` revisionでwriterを
+再開してください。通常deployで`required`から`rollout-pending`へ戻してはいけません。
 
 SSO client は password client とは別に作成し、client secret なし、
 `ExplicitAuthFlows=ALLOW_REFRESH_TOKEN_AUTH` のみ、OAuth server 有効、flow は `code` のみ、
@@ -432,13 +469,21 @@ ISSUE_ID=<IssueId> \
 bun run issues:check-dynamodb
 ```
 
-CDK stack の demo seed は `WorkItemsTableName` が指す canonical store へ `schemaVersion=1`, `revision=1` で投入します。手動 seed も canonical store だけを対象とし、既存 row は conditional write で保持します。
+CDK stack の demo seed は stack 作成時だけ、`WorkItemsTableName` が指す canonical store へ
+`schemaVersion=2`, `revision=1` で投入します。手動 seed はローカル Floci 専用で、canonical store
+だけを対象とし、既存 row は conditional write で保持します。
 
 ```sh
-WORK_ITEMS_TABLE_NAME=<WorkItemsTableName> bun run work-items:seed-dynamodb
+DYNAMODB_ENDPOINT=http://localhost:4566 \
+MUKUROJI_LOCAL_AWS_RUNTIME=floci \
+WORK_ITEMS_TABLE_NAME=<LocalWorkItemsTableName> \
+bun run work-items:seed-dynamodb
 ```
 
-Canonical Work Item は現行 workflow schema の必須 field をすべて持つ row だけを読みます。開発中の古い row は自動変換せず、削除して現行 seed または API から作り直します。
+この legacy seed は remote AWS endpointや未指定endpointでは停止します。本番データは guarded API/
+workerまたは認可済みmigration workflowからだけ変更します。Canonical Work Item は現行 workflow
+schema の必須 field をすべて持つ row だけを読みます。開発中の古い row は自動変換せず、削除して現行
+seed または API から作り直します。
 
 ## 検証
 

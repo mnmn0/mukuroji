@@ -14,10 +14,12 @@ import {
 } from '../../adapter-out/dynamodb/project-directory-client'
 import {
   InMemoryPlanningClient,
+  type PlanningWorkItemState,
 } from '../../../planning/planning'
 import type {
   DynamoDBDocumentClient,
 } from '@aws-sdk/lib-dynamodb'
+import { createDefaultDueDateWorkItemSchedule } from '@mukuroji/contracts'
 import {
   afterEach,
   expect,
@@ -27,6 +29,49 @@ import {
 afterEach(() => {
   resetTestApp()
 })
+
+/**
+ * Creates a Planning graph with one dependency between canonical fixture Work Items.
+ *
+ * @returns Planning client whose global revision is one.
+ */
+async function createDirectoryDependencyPlanning() {
+  const planningClient = new InMemoryPlanningClient()
+  const schedule = createDefaultDueDateWorkItemSchedule('2026-06-18')
+  const workItemState: PlanningWorkItemState = {
+    workItems: [
+      {
+        id: 'onboarding-friction',
+        revision: 7,
+        teamId: 'core-team',
+        title: 'Predecessor',
+        projectId: 'refero',
+        statusCategory: 'started',
+        dueDate: '2026-06-18',
+        schedule,
+      },
+      {
+        id: 'work-item-1',
+        revision: 9,
+        teamId: 'core-team',
+        title: 'Successor',
+        projectId: 'refero',
+        statusCategory: 'started',
+        dueDate: '2026-06-18',
+        schedule,
+      },
+    ],
+  }
+  await planningClient.createWorkItemDependency('user#demo@example.com', {
+    id: 'directory-archive-dependency',
+    predecessor: { teamId: 'core-team', workItemId: 'onboarding-friction' },
+    successor: { teamId: 'core-team', workItemId: 'work-item-1' },
+    type: 'finish-to-finish',
+    lagDays: 0,
+    expectedRevision: 0,
+  }, workItemState)
+  return planningClient
+}
 
 test('denies project tasks when the project is outside the user directory', async () => {
   const calls = configureFakeProjectClients(false)
@@ -528,9 +573,29 @@ test('rejects archiving a Team referenced by an active Planning entity', async (
   expect(await response.json()).toEqual({
     code: 'PlanningTeamScopeInUse',
     message:
-      'Move or archive active Planning entities and remove Work Item links before archiving this Team.',
+      'Move or archive active Planning entities and remove Work Item links and dependencies before archiving this Team.',
   })
   expect(calls.teamArchives).toEqual([])
+})
+
+test('rejects archiving a Team with an incident Work Item dependency', async () => {
+  const planningClient = await createDirectoryDependencyPlanning()
+  const calls = configureFakeProjectClients(true)
+  setTestAppDependencies({ planning: planningClient })
+
+  const response = await app.request('/api/teams/core-team/archive', {
+    method: 'PATCH',
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toEqual({
+    code: 'PlanningTeamScopeInUse',
+    message:
+      'Move or archive active Planning entities and remove Work Item links and dependencies before archiving this Team.',
+  })
+  expect(calls.teamArchives).toEqual([])
+  expect(calls.issueDetails).toEqual([])
 })
 
 test('denies project-assigned Work Item creation when the project role is viewer', async () => {
@@ -546,7 +611,7 @@ test('denies project-assigned Work Item creation when the project role is viewer
       title: '新規タスク',
       assignedProjectId: 'refero',
       assigneeUserId: 'sato@example.com',
-      dueDate: '2026/06/20',
+      schedule: createDefaultDueDateWorkItemSchedule('2026-06-20'),
       priority: 'high',
       workflowStatusId: 'todo',
     }),
@@ -751,6 +816,103 @@ test('rejects archiving a Project referenced by an active Planning entity', asyn
   expect(calls.projectArchives).toEqual([])
 })
 
+test('rejects archiving a Project assigned to a dependency endpoint', async () => {
+  const planningClient = await createDirectoryDependencyPlanning()
+  const calls = configureFakeProjectClients(true)
+  setTestAppDependencies({ planning: planningClient })
+
+  const response = await app.request('/api/teams/core-team/projects/refero/archive', {
+    method: 'PATCH',
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toEqual({
+    code: 'PlanningProjectScopeInUse',
+    message:
+      'Move dependency Work Items to another Project or remove their dependencies before archiving this Project.',
+  })
+  expect(calls.projectArchives).toEqual([])
+  expect(calls.issueDetails).toHaveLength(2)
+  expect(calls.issueDetails.every((call) =>
+    call.readOptions?.consistentIssueRead === true && call.readOptions.eventLimit === 0
+  )).toBe(true)
+})
+
+test('fences dependency endpoint revisions while archiving an otherwise unused Project', async () => {
+  const planningClient = await createDirectoryDependencyPlanning()
+  const calls = configureFakeProjectClients(true, {
+    detailAssignedProjectIds: {
+      'onboarding-friction': 'archive-safe',
+      'work-item-1': 'archive-safe',
+    },
+    detailRevisions: {
+      ['core-team\0onboarding-friction']: 7,
+      ['core-team\0work-item-1']: 9,
+    },
+  })
+  setTestAppDependencies({ planning: planningClient })
+
+  const response = await app.request('/api/teams/core-team/projects/refero/archive', {
+    method: 'PATCH',
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(calls.projectArchives).toEqual([{
+    directoryId: 'user#demo@example.com',
+    expectedPlanningRevision: 1,
+    teamId: 'core-team',
+    projectId: 'refero',
+    workItemRevisionGuards: [
+      { teamId: 'core-team', workItemId: 'onboarding-friction', expectedRevision: 7 },
+      { teamId: 'core-team', workItemId: 'work-item-1', expectedRevision: 9 },
+    ],
+  }])
+})
+
+test('rejects Project archive dependency fan-out above the atomic guard limit', async () => {
+  const planningClient = new InMemoryPlanningClient()
+  const schedule = createDefaultDueDateWorkItemSchedule('2026-06-18')
+  const workItemState: PlanningWorkItemState = {
+    workItems: Array.from({ length: 97 }, (_, index) => ({
+      id: `work-item-${index}`,
+      revision: 1,
+      teamId: 'core-team',
+      title: `Work Item ${index}`,
+      projectId: 'archive-safe',
+      statusCategory: 'started',
+      dueDate: '2026-06-18',
+      schedule,
+    })),
+  }
+  for (let index = 0; index < 96; index += 1) {
+    await planningClient.createWorkItemDependency('user#demo@example.com', {
+      id: `directory-archive-dependency-${index}`,
+      predecessor: { teamId: 'core-team', workItemId: `work-item-${index}` },
+      successor: { teamId: 'core-team', workItemId: `work-item-${index + 1}` },
+      type: 'finish-to-finish',
+      lagDays: 0,
+      expectedRevision: index,
+    }, workItemState)
+  }
+  const calls = configureFakeProjectClients(true)
+  setTestAppDependencies({ planning: planningClient })
+
+  const response = await app.request('/api/teams/core-team/projects/refero/archive', {
+    method: 'PATCH',
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(413)
+  expect(await response.json()).toEqual({
+    code: 'PlanningProjectScopeDependencyLimitExceeded',
+    message: 'The Project has too many dependency endpoints to archive atomically.',
+  })
+  expect(calls.issueDetails).toEqual([])
+  expect(calls.projectArchives).toEqual([])
+})
+
 test('rejects archiving scopes referenced only by a stored Planning Work Item link', async () => {
   const planningClient = new InMemoryPlanningClient()
   const workItemState = {
@@ -762,6 +924,7 @@ test('rejects archiving scopes referenced only by a stored Planning Work Item li
       projectId: 'refero',
       statusCategory: 'completed' as const,
       dueDate: '2026-08-31',
+      schedule: createDefaultDueDateWorkItemSchedule('2026-08-31'),
     }],
   }
   await planningClient.create(

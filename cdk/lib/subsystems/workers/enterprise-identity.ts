@@ -8,7 +8,15 @@ import * as lambdaNodejs from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import type { LambdaBuildPaths } from '../../config/lambda-build-paths';
 import type { StackParameters } from '../../config/stack-parameters';
+import {
+  bindWorkspaceSearchWriterFence,
+  type WorkspaceSearchWriterFenceResources,
+} from '../../policies/workspace-search-writer-fence';
 import type { DataStoreResources } from '../data-stores';
+import {
+  bindRuntimeControls,
+  type RuntimeControlResources,
+} from '../runtime-controls';
 
 /**
  * Inputs required by enterprise identity background workers.
@@ -20,6 +28,10 @@ export interface EnterpriseIdentityWorkerInput {
   readonly lambdaBuildPaths: LambdaBuildPaths;
   /** Stack parameters and derived identity configuration. */
   readonly parameters: StackParameters;
+  /** Dynamic operational controls shared by application runtimes. */
+  readonly runtimeControls: RuntimeControlResources;
+  /** Exact source, target, and state tables protected by the writer fence. */
+  readonly workspaceSearchWriterFence: WorkspaceSearchWriterFenceResources;
 }
 
 /**
@@ -51,6 +63,7 @@ export function buildEnterpriseIdentityWorkers(
     enterpriseIdentityTable,
     planningTable,
     projectDirectoryTable,
+    tenantAdministrationTable,
     workspaceAccessTable,
   } = input.dataStores;
   const {
@@ -108,9 +121,20 @@ export function buildEnterpriseIdentityWorkers(
           workspaceAuditPseudonymKey.valueAsString,
         PLANNING_TABLE_NAME: planningTable.tableName,
         PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
+        TENANT_ADMINISTRATION_TABLE_NAME:
+          tenantAdministrationTable.tableName,
         WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
       },
     },
+  );
+  bindWorkspaceSearchWriterFence(
+    input.workspaceSearchWriterFence,
+    enterpriseScimGroupJobFunction,
+  );
+  bindRuntimeControls(
+    input.runtimeControls,
+    enterpriseScimGroupJobFunction,
+    'enterprise-scim-group-job',
   );
   enterpriseScimGroupJobFunction.addToRolePolicy(new iam.PolicyStatement({
     actions: [
@@ -146,6 +170,19 @@ export function buildEnterpriseIdentityWorkers(
   enterpriseScimGroupJobFunction.addToRolePolicy(new iam.PolicyStatement({
     actions: ['dynamodb:PutItem'],
     resources: [auditEventsTable.tableArn],
+  }));
+  enterpriseScimGroupJobFunction.addToRolePolicy(new iam.PolicyStatement({
+    actions: ['dynamodb:GetItem', 'dynamodb:Query'],
+    resources: [tenantAdministrationTable.tableArn],
+  }));
+  enterpriseScimGroupJobFunction.addToRolePolicy(new iam.PolicyStatement({
+    actions: ['dynamodb:ConditionCheckItem', 'dynamodb:PutItem'],
+    resources: [tenantAdministrationTable.tableArn],
+    conditions: {
+      'ForAnyValue:StringEquals': {
+        'dynamodb:EnclosingOperation': ['TransactWriteItems'],
+      },
+    },
   }));
   enterpriseScimGroupJobFunction.addToRolePolicy(new iam.PolicyStatement({
     actions: [
@@ -231,6 +268,11 @@ export function buildEnterpriseIdentityWorkers(
         ENTERPRISE_IDENTITY_TABLE_NAME: enterpriseIdentityTable.tableName,
       },
     },
+  );
+  bindRuntimeControls(
+    input.runtimeControls,
+    enterpriseIdentityMaintenanceFunction,
+    'enterprise-identity-maintenance',
   );
   enterpriseIdentityMaintenanceFunction.addEventSource(
     new lambdaEventSources.DynamoEventSource(enterpriseIdentityTable, {

@@ -5,6 +5,7 @@ import type { SidebarNavId, SidebarTeamViewId } from '../ui/sidebar'
  */
 export const workspaceNavPaths: Record<SidebarNavId, string> = {
   home: '/home',
+  focus: '/focus',
   'my-tasks': '/my-tasks',
   inbox: '/inbox',
   requests: '/requests',
@@ -14,6 +15,31 @@ export const workspaceNavPaths: Record<SidebarNavId, string> = {
   reports: '/reports',
   help: '/help',
   settings: '/settings',
+}
+
+/**
+ * Creates a Focus queue path that can select one Work Item and correlate its source event.
+ *
+ * @param teamId - Optional owning Team identifier.
+ * @param workItemId - Optional canonical Work Item identifier.
+ * @param sourceEventId - Optional immutable notification/audit event identifier.
+ * @returns The Focus route with permission-safe selection parameters.
+ */
+export function createFocusPath(
+  teamId?: string,
+  workItemId?: string,
+  sourceEventId?: string,
+) {
+  const query = new URLSearchParams()
+  if (teamId && workItemId) {
+    query.set('teamId', teamId)
+    query.set('workItemId', workItemId)
+  }
+  if (sourceEventId) {
+    query.set('sourceEventId', sourceEventId)
+  }
+  const encoded = query.toString()
+  return encoded ? `/focus?${encoded}` : '/focus'
 }
 
 /**
@@ -168,6 +194,28 @@ export function createProjectSearchPath(projectId: string) {
 }
 
 /**
+ * Creates the global or Team-scoped searchable Project directory path.
+ *
+ * @param teamId - Optional Team whose Project directory should open.
+ * @returns A canonical Project directory path.
+ */
+export function createProjectsPath(teamId?: string) {
+  return teamId
+    ? `/teams/${encodeURIComponent(teamId)}/projects`
+    : '/projects'
+}
+
+/**
+ * Creates the Workspace-wide Project directory path filtered to Quick Access.
+ *
+ * @returns A canonical Project directory path with the supported Quick Access query.
+ */
+export function createQuickAccessProjectsPath() {
+  const searchParams = new URLSearchParams({ quickAccess: '1' })
+  return `${createProjectsPath()}?${searchParams.toString()}`
+}
+
+/**
  * Goal と関連 Documents を開く URL を生成します。
  */
 export function createGoalDocumentsPath(goalId: string) {
@@ -252,6 +300,20 @@ export function createTeamIssuesPath(
     searchParams.set('rootCommentId', rootCommentId)
   }
 
+  return `${path}?${searchParams.toString()}`
+}
+
+/**
+ * Creates a canonical Team triage queue or selected-entry deep link.
+ *
+ * @param teamId - Team whose intake queue should open.
+ * @param entryId - Optional triage entry selected in the detail pane.
+ * @returns A same-origin Team triage path.
+ */
+export function createTeamTriagePath(teamId: string, entryId?: string) {
+  const path = `/teams/${encodeURIComponent(teamId)}/triage`
+  if (!entryId) return path
+  const searchParams = new URLSearchParams({ entryId })
   return `${path}?${searchParams.toString()}`
 }
 

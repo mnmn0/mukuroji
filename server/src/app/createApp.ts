@@ -12,7 +12,16 @@ import {
   registerApiRoutes,
 } from '../api/api-router'
 import type { AppDependencies } from './composition/app-dependencies'
-import { registerCommonMiddleware } from './middleware/common-middleware'
+import {
+  createRuntimeControlAwareReadinessProbe,
+} from './composition/runtime-control'
+import {
+  registerCommonMiddleware,
+  registerEnterpriseSecurityAuditMiddleware,
+} from './middleware/common-middleware'
+import {
+  registerRuntimeControlMiddleware,
+} from './middleware/runtime-control-middleware'
 import { createSystemRouter } from './routes/system-router'
 
 /**
@@ -26,14 +35,25 @@ export function createApp(dependencies: AppDependencies): Hono {
 
   registerCommonMiddleware(app, {
     getAllowedOrigins,
-    auditRejectedEnterpriseSecurityMutation,
     createIdentifier: () => crypto.randomUUID(),
     now: Date.now,
     recordAccess: dependencies.operational.recordAccess,
     recordError: dependencies.operational.recordError,
   })
+  registerRuntimeControlMiddleware(app, {
+    provider: dependencies.operational.runtimeControl,
+    recordObservation: dependencies.operational.recordRuntimeControl,
+  })
+  registerEnterpriseSecurityAuditMiddleware(
+    app,
+    auditRejectedEnterpriseSecurityMutation,
+  )
   app.route('/', createSystemRouter({
-    readiness: dependencies.operational.readiness,
+    readiness: createRuntimeControlAwareReadinessProbe(
+      dependencies.operational.readiness,
+      dependencies.operational.runtimeControl,
+      dependencies.operational.recordRuntimeControl,
+    ),
   }))
   registerApiRoutes(app)
 

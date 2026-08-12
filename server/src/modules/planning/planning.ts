@@ -14,8 +14,11 @@ import {
 } from '@aws-sdk/lib-dynamodb'
 import {
   PLANNING_SCHEMA_VERSION,
+  WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS,
+  WORK_ITEM_SCHEDULE_MIN_YEAR,
   type CreatePlanningDependencyInput,
   type CreatePlanningEntityInput,
+  type CreateWorkItemScheduleDependencyInput,
   type CycleRolloverInput,
   type DuplicatePlanningEntityInput,
   type MovePlanningEntityInput,
@@ -35,13 +38,23 @@ import {
   type PlanningStatusUpdateInput,
   type PlanningWorkItemLink,
   type PlanningWorkItemLinkInput,
+  type PlanningWorkItemDependencySummary,
   type PlanningWorkItemSummary,
+  type ScheduleDependencyConstraint,
   type UpdatePlanningEntityInput,
+  type UpdateWorkItemScheduleDependencyInput,
+  type WorkItemAffectedProject,
+  type WorkItemDependencyCriticalPath,
+  type WorkItemDependencyEndpoint,
+  type WorkItemSchedule,
+  type WorkItemScheduleDependency,
+  type WorkItemScheduleDependencyConflict,
 } from '@mukuroji/contracts'
 
 const META_RECORD_KEY = 'META'
 const ENTITY_RECORD_PREFIX = 'ENTITY#'
 const DEPENDENCY_RECORD_PREFIX = 'DEPENDENCY#'
+const WORK_ITEM_DEPENDENCY_RECORD_PREFIX = 'WORK_ITEM_DEPENDENCY#'
 const LINK_RECORD_PREFIX = 'LINK#'
 const PLANNING_READ_LIMIT = 2_000
 const TRANSACTION_ITEM_LIMIT = 100
@@ -53,6 +66,9 @@ const MAX_STATUS_MESSAGE_BYTES = 8_000
 const MAX_STATUS_UPDATES = 32
 const MAX_ROLLOVER_LINK_MUTATIONS = 49
 const ISO_DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/
+
+/** Schema version of the persisted Planning META fencing row. */
+export const PLANNING_STORAGE_SCHEMA_VERSION = 1 as const
 
 /** Planning domain / persistence error です。 */
 export class PlanningError extends Error {
@@ -72,6 +88,43 @@ export class PlanningError extends Error {
 export type PlanningWorkItemState = {
   /** 現在 user の planning snapshot に含める Work Item 一覧です。 */
   workItems: readonly PlanningWorkItemSummary[]
+}
+
+/** Caller authorization check appended to a Planning DynamoDB mutation transaction. */
+export type PlanningCallerAuthorizationConditionCheck = {
+  /** Read-only condition against one caller authorization source-of-truth row. */
+  ConditionCheck: NonNullable<
+    NonNullable<TransactWriteCommandInput['TransactItems']>[number]['ConditionCheck']
+  >
+}
+
+/** Minimal result exposed while preparing one durable Work Item dependency receipt. */
+export type PlanningWorkItemDependencyTransactionResult = {
+  /** Whether the committed dependency is present after the mutation or was deleted. */
+  kind: 'upsert' | 'delete'
+  /** Planning revision produced by the mutation. */
+  revision: number
+  /** Complete dependency value created, updated, or deleted by the mutation. */
+  dependency: WorkItemScheduleDependency
+}
+
+/** One external DynamoDB action prepared for the Planning mutation transaction. */
+type PlanningMutationTransactionContribution = {
+  /** Conditional receipt write committed after Planning row mutations. */
+  transactWriteItem: NonNullable<TransactWriteCommandInput['TransactItems']>[number]
+}
+
+/** Adds one durable completion receipt to a Work Item dependency mutation transaction. */
+export type PlanningMutationTransaction = {
+  /**
+   * Prepares a storage contribution from the minimal committed dependency result.
+   *
+   * @param result - Exact dependency and Planning revision produced by the mutation.
+   * @returns An opaque storage contribution validated inside the Planning adapter.
+   */
+  prepare(
+    result: PlanningWorkItemDependencyTransactionResult,
+  ): Promise<unknown>
 }
 
 /** Directory 破壊操作の認可に使う Planning entity 参照です。 */
@@ -98,6 +151,8 @@ export type PlanningAuthorizationState = {
   entities: PlanningEntityAuthorizationReference[]
   /** Scope guard に必要な未フィルタ Work Item link です。 */
   workItemLinks: PlanningWorkItemLink[]
+  /** Work Item deletion guard に利用する未フィルタ schedule dependency です。 */
+  workItemDependencies: WorkItemScheduleDependency[]
 }
 
 /** Planning domain を読み書きする client contract です。 */
@@ -169,6 +224,61 @@ export type PlanningClient = {
     input: PlanningRevisionInput,
     workItemState: PlanningWorkItemState,
   ): Promise<PlanningMutationResponse>
+  /**
+   * Creates one canonical schedule dependency between Work Items.
+   *
+   * @param workspaceId - Owning Workspace identifier.
+   * @param input - Candidate dependency and expected Planning revision.
+   * @param workItemState - Canonical endpoint schedules and revisions.
+   * @param authorizationConditionChecks - Caller authorization rows guarded during persistence.
+   * @param transaction - Optional durable completion receipt prepared for the same transaction.
+   * @returns The updated Planning snapshot.
+   */
+  createWorkItemDependency(
+    workspaceId: string,
+    input: CreateWorkItemScheduleDependencyInput,
+    workItemState: PlanningWorkItemState,
+    authorizationConditionChecks?: readonly PlanningCallerAuthorizationConditionCheck[],
+    transaction?: PlanningMutationTransaction,
+  ): Promise<PlanningMutationResponse>
+  /**
+   * Updates editable fields of a canonical Work Item schedule dependency.
+   *
+   * @param workspaceId - Owning Workspace identifier.
+   * @param dependencyId - Workspace-local dependency identifier.
+   * @param input - Patch and expected Planning revision.
+   * @param workItemState - Canonical endpoint schedules and revisions.
+   * @param authorizationConditionChecks - Caller authorization rows guarded during persistence.
+   * @param transaction - Optional durable completion receipt prepared for the same transaction.
+   * @returns The updated Planning snapshot.
+   */
+  updateWorkItemDependency(
+    workspaceId: string,
+    dependencyId: string,
+    input: UpdateWorkItemScheduleDependencyInput,
+    workItemState: PlanningWorkItemState,
+    authorizationConditionChecks?: readonly PlanningCallerAuthorizationConditionCheck[],
+    transaction?: PlanningMutationTransaction,
+  ): Promise<PlanningMutationResponse>
+  /**
+   * Deletes one canonical Work Item schedule dependency.
+   *
+   * @param workspaceId - Owning Workspace identifier.
+   * @param dependencyId - Workspace-local dependency identifier.
+   * @param input - Expected Planning revision.
+   * @param workItemState - Canonical endpoint schedules and revisions.
+   * @param authorizationConditionChecks - Caller authorization rows guarded during persistence.
+   * @param transaction - Optional durable completion receipt prepared for the same transaction.
+   * @returns The updated Planning snapshot.
+   */
+  deleteWorkItemDependency(
+    workspaceId: string,
+    dependencyId: string,
+    input: PlanningRevisionInput,
+    workItemState: PlanningWorkItemState,
+    authorizationConditionChecks?: readonly PlanningCallerAuthorizationConditionCheck[],
+    transaction?: PlanningMutationTransaction,
+  ): Promise<PlanningMutationResponse>
   /** Work Item planning link を作成または置換します。 */
   putWorkItemLink(
     workspaceId: string,
@@ -203,6 +313,8 @@ type PlanningWorkspaceState = {
   entities: StoredPlanningEntity[]
   /** Directed dependencies です。 */
   dependencies: PlanningDependency[]
+  /** Canonical Work Item 間の directed schedule dependencies です。 */
+  workItemDependencies: WorkItemScheduleDependency[]
   /** Work Item links です。 */
   workItemLinks: PlanningWorkItemLink[]
   /** Graph の最終更新日時です。 */
@@ -219,6 +331,14 @@ type PlanningWorkItemCondition = {
   revision: number
 }
 
+/** Work Item dependency result captured before the next Planning revision is assigned. */
+type PlanningWorkItemDependencyTransactionSource = {
+  /** Whether the dependency remains present after the mutation. */
+  kind: 'upsert' | 'delete'
+  /** Complete dependency value created, updated, or deleted by the mutation. */
+  dependency: WorkItemScheduleDependency
+}
+
 /** Mutation が返す rollover の追加情報です。 */
 type PlanningMutationResult = {
   /** Mutation 後の state です。 */
@@ -229,6 +349,8 @@ type PlanningMutationResult = {
   retainedWorkItemIds?: string[]
   /** Planning commit と同じ transaction で検証する Work Item revisions です。 */
   workItemConditions?: PlanningWorkItemCondition[]
+  /** Minimal Work Item dependency value used to prepare a durable completion receipt. */
+  workItemDependencyTransactionSource?: PlanningWorkItemDependencyTransactionSource
 }
 
 /** Storage 非依存の Planning mutation 実装です。 */
@@ -243,12 +365,23 @@ abstract class BasePlanningClient implements PlanningClient {
   /** Workspace state を storage から読み込みます。 */
   protected abstract readState(workspaceId: string): Promise<PlanningWorkspaceState>
 
-  /** Expected revision を条件に差分を保存します。 */
+  /**
+   * Persists one Planning state transition with all revision and authorization guards.
+   *
+   * @param workspaceId - Owning Workspace identifier.
+   * @param before - State used for the Planning META revision CAS.
+   * @param after - Fully validated replacement state.
+   * @param workItemConditions - Canonical endpoint revision guards.
+   * @param authorizationConditionChecks - Caller authorization source guards.
+   * @param transactionContribution - Optional external action committed after Planning row writes.
+   */
   protected abstract commitState(
     workspaceId: string,
     before: PlanningWorkspaceState,
     after: PlanningWorkspaceState,
     workItemConditions?: readonly PlanningWorkItemCondition[],
+    authorizationConditionChecks?: readonly PlanningCallerAuthorizationConditionCheck[],
+    transactionContribution?: PlanningMutationTransactionContribution,
   ): Promise<void>
 
   /** Workspace planning snapshot を返します。 */
@@ -292,6 +425,8 @@ abstract class BasePlanningClient implements PlanningClient {
         ...(entity.archivedAt === undefined ? {} : { archivedAt: entity.archivedAt }),
       })),
       workItemLinks: state.workItemLinks.map((link) => structuredClone(link)),
+      workItemDependencies: state.workItemDependencies
+        .map((dependency) => structuredClone(dependency)),
     }
   }
 
@@ -531,6 +666,9 @@ abstract class BasePlanningClient implements PlanningClient {
         successorId: readIdentifier(input.successorId, 'Successor ID'),
         type: readDependencyType(input.type),
         lagDays: readLagDays(input.lagDays),
+        ...(input.constraint === undefined
+          ? {}
+          : { constraint: readDependencyConstraint(input.constraint) }),
         createdAt: now,
       }
       requireActiveEntity(state, dependency.predecessorId)
@@ -560,6 +698,176 @@ abstract class BasePlanningClient implements PlanningClient {
         },
       }
     })
+  }
+
+  /**
+   * Creates one canonical schedule dependency between Work Items.
+   *
+   * @param workspaceId - Owning Workspace identifier.
+   * @param input - Candidate dependency and expected Planning revision.
+   * @param workItemState - Canonical endpoint schedules and revisions.
+   * @param authorizationConditionChecks - Caller authorization rows guarded during persistence.
+   * @param transaction - Optional durable completion receipt prepared for the same transaction.
+   * @returns The updated Planning snapshot.
+   */
+  async createWorkItemDependency(
+    workspaceId: string,
+    input: CreateWorkItemScheduleDependencyInput,
+    workItemState: PlanningWorkItemState,
+    authorizationConditionChecks: readonly PlanningCallerAuthorizationConditionCheck[] = [],
+    transaction?: PlanningMutationTransaction,
+  ) {
+    return this.mutate(workspaceId, input.expectedRevision, workItemState, (state, now) => {
+      const id = readIdentifier(input.id, 'Work Item dependency ID')
+      if (state.workItemDependencies.some((dependency) => dependency.id === id)) {
+        throw conflict(
+          'PlanningWorkItemDependencyExists',
+          `Work Item dependency "${id}" already exists.`,
+        )
+      }
+      const predecessor = readWorkItemDependencyEndpoint(input.predecessor, 'Predecessor')
+      const successor = readWorkItemDependencyEndpoint(input.successor, 'Successor')
+      const dependency: WorkItemScheduleDependency = {
+        id,
+        predecessor,
+        successor,
+        type: readDependencyType(input.type),
+        lagDays: readLagDays(input.lagDays),
+        ...(input.constraint === undefined
+          ? {}
+          : { constraint: readDependencyConstraint(input.constraint) }),
+        createdAt: now,
+        updatedAt: now,
+      }
+      const workItemConditions = requireWorkItemDependencyEndpoints(workItemState, dependency)
+      const next = {
+        ...state,
+        workItemDependencies: [...state.workItemDependencies, dependency],
+      }
+      validatePlanningState(next)
+      requireCurrentWorkItemDependencyIsSatisfied(workItemState, dependency)
+      return {
+        state: next,
+        workItemConditions,
+        workItemDependencyTransactionSource: { kind: 'upsert', dependency },
+      }
+    }, authorizationConditionChecks, transaction)
+  }
+
+  /**
+   * Updates editable fields of a canonical Work Item schedule dependency.
+   *
+   * @param workspaceId - Owning Workspace identifier.
+   * @param dependencyId - Workspace-local dependency identifier.
+   * @param input - Patch and expected Planning revision.
+   * @param workItemState - Canonical endpoint schedules and revisions.
+   * @param authorizationConditionChecks - Caller authorization rows guarded during persistence.
+   * @param transaction - Optional durable completion receipt prepared for the same transaction.
+   * @returns The updated Planning snapshot.
+   */
+  async updateWorkItemDependency(
+    workspaceId: string,
+    dependencyId: string,
+    input: UpdateWorkItemScheduleDependencyInput,
+    workItemState: PlanningWorkItemState,
+    authorizationConditionChecks: readonly PlanningCallerAuthorizationConditionCheck[] = [],
+    transaction?: PlanningMutationTransaction,
+  ) {
+    return this.mutate(workspaceId, input.expectedRevision, workItemState, (state, now) => {
+      const id = readIdentifier(dependencyId, 'Work Item dependency ID')
+      const current = state.workItemDependencies.find((dependency) => dependency.id === id)
+      if (!current) {
+        throw notFound(
+          'PlanningWorkItemDependencyNotFound',
+          `Work Item dependency "${id}" was not found.`,
+        )
+      }
+      if (!isRecord(input.patch)) {
+        throw invalid(
+          'PlanningWorkItemDependencyPatchInvalid',
+          'Work Item dependency patch must be an object.',
+        )
+      }
+      const patchKeys = Object.keys(input.patch)
+      if (
+        patchKeys.length === 0 ||
+        patchKeys.some((key) => key !== 'type' && key !== 'lagDays' && key !== 'constraint')
+      ) {
+        throw invalid(
+          'PlanningWorkItemDependencyPatchInvalid',
+          'Work Item dependency patch must contain only editable fields.',
+        )
+      }
+      const updated: WorkItemScheduleDependency = {
+        ...current,
+        ...(input.patch.type === undefined
+          ? {}
+          : { type: readDependencyType(input.patch.type) }),
+        ...(input.patch.lagDays === undefined
+          ? {}
+          : { lagDays: readLagDays(input.patch.lagDays) }),
+        updatedAt: now,
+      }
+      if (input.patch.constraint !== undefined) {
+        if (input.patch.constraint === null) delete updated.constraint
+        else updated.constraint = readDependencyConstraint(input.patch.constraint)
+      }
+      const workItemConditions = requireWorkItemDependencyEndpoints(workItemState, updated)
+      const next = {
+        ...state,
+        workItemDependencies: state.workItemDependencies.map((dependency) =>
+          dependency.id === id ? updated : dependency
+        ),
+      }
+      validatePlanningState(next)
+      requireCurrentWorkItemDependencyIsSatisfied(workItemState, updated)
+      return {
+        state: next,
+        workItemConditions,
+        workItemDependencyTransactionSource: { kind: 'upsert', dependency: updated },
+      }
+    }, authorizationConditionChecks, transaction)
+  }
+
+  /**
+   * Deletes one canonical Work Item schedule dependency.
+   *
+   * @param workspaceId - Owning Workspace identifier.
+   * @param dependencyId - Workspace-local dependency identifier.
+   * @param input - Expected Planning revision.
+   * @param workItemState - Canonical endpoint schedules and revisions.
+   * @param authorizationConditionChecks - Caller authorization rows guarded during persistence.
+   * @param transaction - Optional durable completion receipt prepared for the same transaction.
+   * @returns The updated Planning snapshot.
+   */
+  async deleteWorkItemDependency(
+    workspaceId: string,
+    dependencyId: string,
+    input: PlanningRevisionInput,
+    workItemState: PlanningWorkItemState,
+    authorizationConditionChecks: readonly PlanningCallerAuthorizationConditionCheck[] = [],
+    transaction?: PlanningMutationTransaction,
+  ) {
+    return this.mutate(workspaceId, input.expectedRevision, workItemState, (state) => {
+      const id = readIdentifier(dependencyId, 'Work Item dependency ID')
+      const current = state.workItemDependencies.find((dependency) => dependency.id === id)
+      if (!current) {
+        throw notFound(
+          'PlanningWorkItemDependencyNotFound',
+          `Work Item dependency "${id}" was not found.`,
+        )
+      }
+      return {
+        state: {
+          ...state,
+          workItemDependencies: state.workItemDependencies.filter((dependency) =>
+            dependency.id !== id
+          ),
+        },
+        workItemConditions: requireWorkItemDependencyEndpoints(workItemState, current),
+        workItemDependencyTransactionSource: { kind: 'delete', dependency: current },
+      }
+    }, authorizationConditionChecks, transaction)
   }
 
   /** Work Item planning link を作成または置換します。 */
@@ -741,12 +1049,24 @@ abstract class BasePlanningClient implements PlanningClient {
     })
   }
 
-  /** Global revision を検証し、mutation を保存して response を組み立てます。 */
+  /**
+   * Validates the global revision, applies a domain mutation, and commits its guarded state.
+   *
+   * @param workspaceIdValue - Candidate Workspace identifier.
+   * @param expectedRevisionValue - Planning revision required by the caller.
+   * @param workItemState - Canonical Work Item projection used by the mutation.
+   * @param mutation - Pure state transition applied after the revision check.
+   * @param authorizationConditionChecks - Caller authorization rows guarded during persistence.
+   * @param transaction - Optional durable completion receipt prepared before persistence.
+   * @returns The updated Planning snapshot and mutation metadata.
+   */
   private async mutate(
     workspaceIdValue: string,
     expectedRevisionValue: number,
     workItemState: PlanningWorkItemState,
     mutation: (state: PlanningWorkspaceState, now: string) => PlanningMutationResult,
+    authorizationConditionChecks: readonly PlanningCallerAuthorizationConditionCheck[] = [],
+    transaction?: PlanningMutationTransaction,
   ) {
     const workspaceId = readIdentifier(workspaceIdValue, 'Workspace ID')
     const expectedRevision = readRevision(expectedRevisionValue)
@@ -762,13 +1082,109 @@ abstract class BasePlanningClient implements PlanningClient {
       updatedAt: this.now().toISOString(),
     }
     const planning = createPlanningSnapshot(after, workItemState)
-    await this.commitState(workspaceId, before, after, result.workItemConditions)
+    const transactionContribution = transaction
+      ? await preparePlanningMutationTransactionContribution(
+          transaction,
+          result.workItemDependencyTransactionSource === undefined
+            ? undefined
+            : {
+                ...result.workItemDependencyTransactionSource,
+                revision: after.revision,
+                dependency: structuredClone(
+                  result.workItemDependencyTransactionSource.dependency,
+                ),
+              },
+        )
+      : undefined
+    await this.commitState(
+      workspaceId,
+      before,
+      after,
+      result.workItemConditions,
+      authorizationConditionChecks,
+      transactionContribution,
+    )
     return {
       planning,
       movedWorkItemIds: result.movedWorkItemIds ?? [],
       retainedWorkItemIds: result.retainedWorkItemIds ?? [],
     } satisfies PlanningMutationResponse
   }
+}
+
+/**
+ * Prepares and validates one external transaction contribution without exposing a full snapshot.
+ *
+ * @param transaction - Caller-provided durable receipt boundary.
+ * @param result - Minimal committed dependency result, when the mutation supports receipts.
+ * @returns The conditional DynamoDB action that must commit with Planning state.
+ */
+async function preparePlanningMutationTransactionContribution(
+  transaction: PlanningMutationTransaction,
+  result: PlanningWorkItemDependencyTransactionResult | undefined,
+): Promise<PlanningMutationTransactionContribution> {
+  if (!result) {
+    throw new PlanningError(
+      503,
+      'PlanningIdempotencyUnavailable',
+      'The durable Planning mutation receipt is unavailable.',
+    )
+  }
+  try {
+    const contribution = await transaction.prepare(result)
+    if (!isPlanningMutationTransactionContribution(contribution)) {
+      throw new Error('Planning receipt contribution is unavailable.')
+    }
+    return contribution
+  } catch (error) {
+    if (error instanceof PlanningError) throw error
+    throw new PlanningError(
+      503,
+      'PlanningIdempotencyUnavailable',
+      'The durable Planning mutation receipt could not be prepared.',
+    )
+  }
+}
+
+/**
+ * Validates an opaque caller contribution before it crosses into the Planning DynamoDB adapter.
+ *
+ * @param value - Unknown contribution returned by the application transaction port.
+ * @returns Whether the value contains exactly one supported DynamoDB transaction action.
+ */
+function isPlanningMutationTransactionContribution(
+  value: unknown,
+): value is PlanningMutationTransactionContribution {
+  if (!isRecord(value)) return false
+  return isPlanningTransactWriteItem(value.transactWriteItem)
+}
+
+/**
+ * Validates the required storage fields of one DynamoDB transaction action.
+ *
+ * @param value - Unknown transaction action candidate.
+ * @returns Whether exactly one condition, delete, put, or update action is complete.
+ */
+function isPlanningTransactWriteItem(
+  value: unknown,
+): value is NonNullable<TransactWriteCommandInput['TransactItems']>[number] {
+  if (!isRecord(value)) return false
+  const conditionIsValid = isRecord(value.ConditionCheck) &&
+    typeof value.ConditionCheck.TableName === 'string' &&
+    isRecord(value.ConditionCheck.Key) &&
+    typeof value.ConditionCheck.ConditionExpression === 'string'
+  const deleteIsValid = isRecord(value.Delete) &&
+    typeof value.Delete.TableName === 'string' &&
+    isRecord(value.Delete.Key)
+  const putIsValid = isRecord(value.Put) &&
+    typeof value.Put.TableName === 'string' &&
+    isRecord(value.Put.Item)
+  const updateIsValid = isRecord(value.Update) &&
+    typeof value.Update.TableName === 'string' &&
+    isRecord(value.Update.Key) &&
+    typeof value.Update.UpdateExpression === 'string'
+  return [conditionIsValid, deleteIsValid, putIsValid, updateIsValid]
+    .filter(Boolean).length === 1
 }
 
 /** Test / local domain 利用向けの in-memory Planning client です。 */
@@ -874,12 +1290,23 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
     )).revision
   }
 
-  /** Global META revision の CAS と row 差分を一つの transaction で保存します。 */
+  /**
+   * Persists the META CAS, row changes, endpoint revisions, and caller authorization atomically.
+   *
+   * @param workspaceId - Owning Workspace identifier.
+   * @param before - State used for the Planning META revision CAS.
+   * @param after - Fully validated replacement state.
+   * @param workItemConditions - Canonical endpoint revision guards.
+   * @param authorizationConditionChecks - Caller authorization source guards.
+   * @param transactionContribution - Optional external action committed after Planning row writes.
+   */
   protected async commitState(
     workspaceId: string,
     before: PlanningWorkspaceState,
     after: PlanningWorkspaceState,
     workItemConditions: readonly PlanningWorkItemCondition[] = [],
+    authorizationConditionChecks: readonly PlanningCallerAuthorizationConditionCheck[] = [],
+    transactionContribution?: PlanningMutationTransactionContribution,
   ) {
     await this.ensureTable()
     const beforeRows = createPlanningRowMap(workspaceId, before)
@@ -920,7 +1347,14 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
         ExpressionAttributeValues: { ':expectedRevision': condition.revision },
       },
     }))
-    if (mutations.length + canonicalConditions.length + 1 > TRANSACTION_ITEM_LIMIT) {
+    const transactionContributionItems = transactionContribution
+      ? [transactionContribution.transactWriteItem]
+      : []
+    if (
+      mutations.length + canonicalConditions.length +
+        authorizationConditionChecks.length + transactionContributionItems.length + 1 >
+          TRANSACTION_ITEM_LIMIT
+    ) {
       throw new PlanningError(
         413,
         'PlanningMutationLimitExceeded',
@@ -942,7 +1376,13 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
       },
     }
     if (
-      utf8ByteLength(JSON.stringify([metaMutation, ...canonicalConditions, ...mutations])) >
+      utf8ByteLength(JSON.stringify([
+        metaMutation,
+        ...canonicalConditions,
+        ...authorizationConditionChecks,
+        ...mutations,
+        ...transactionContributionItems,
+      ])) >
         MAX_PLANNING_TRANSACTION_BYTES
     ) {
       throw new PlanningError(
@@ -953,9 +1393,26 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
     }
     try {
       await this.documentClient.send(new TransactWriteCommand({
-        TransactItems: [metaMutation, ...canonicalConditions, ...mutations],
+        TransactItems: [
+          metaMutation,
+          ...canonicalConditions,
+          ...authorizationConditionChecks,
+          ...mutations,
+          ...transactionContributionItems,
+        ],
       }))
     } catch (error) {
+      const authorizationConditionStartIndex = 1 + canonicalConditions.length
+      if (isPlanningCallerAuthorizationTransactionCancellation(
+        error,
+        authorizationConditionStartIndex,
+        authorizationConditionChecks.length,
+      )) {
+        throw conflict(
+          'PlanningAuthorizationChanged',
+          'Planning authorization changed. Reload and try again.',
+        )
+      }
       if (
         isNamedError(error, 'ConditionalCheckFailedException') ||
         isPlanningRevisionTransactionCancellation(error)
@@ -966,6 +1423,17 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
         throw conflict(
           'PlanningWorkItemChanged',
           'A canonical Work Item changed. Reload Planning and try again.',
+        )
+      }
+      const transactionContributionIndex =
+        1 + canonicalConditions.length + authorizationConditionChecks.length + mutations.length
+      if (
+        transactionContribution &&
+        isPlanningTransactionConditionalFailureAt(error, transactionContributionIndex)
+      ) {
+        throw conflict(
+          'PlanningIdempotencyConflict',
+          'The durable Planning mutation receipt changed. Retry the request.',
         )
       }
       throw toPersistenceError(error)
@@ -990,7 +1458,7 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
       if (!response.Item) return { revision: 0, updatedAt: undefined }
       if (
         response.Item.entryType !== 'planning-meta' ||
-        response.Item.schemaVersion !== PLANNING_SCHEMA_VERSION ||
+        response.Item.schemaVersion !== PLANNING_STORAGE_SCHEMA_VERSION ||
         !isPositiveInteger(response.Item.revision) ||
         (response.Item.updatedAt !== undefined && (
           typeof response.Item.updatedAt !== 'string' ||
@@ -1050,7 +1518,13 @@ export async function ensureLocalPlanningTable(tableName: string, client: Dynamo
 }
 
 function createEmptyPlanningState(): PlanningWorkspaceState {
-  return { revision: 0, entities: [], dependencies: [], workItemLinks: [] }
+  return {
+    revision: 0,
+    entities: [],
+    dependencies: [],
+    workItemDependencies: [],
+    workItemLinks: [],
+  }
 }
 
 function createStoredEntity(input: CreatePlanningEntityInput, now: string): StoredPlanningEntity {
@@ -1098,6 +1572,7 @@ function validatePlanningState(state: PlanningWorkspaceState) {
   }
   for (const entity of state.entities) validateHierarchy(entity, state.entities)
   validateDependencies(state)
+  validateWorkItemDependencies(state.workItemDependencies)
   for (const link of state.workItemLinks) validateWorkItemLink(state, link)
   validateCycleCapacities(state)
 }
@@ -1215,6 +1690,9 @@ function validateDependencies(state: PlanningWorkspaceState) {
     readIdentifier(dependency.id, 'Dependency ID')
     readDependencyType(dependency.type)
     readLagDays(dependency.lagDays)
+    const constraint = dependency.constraint === undefined
+      ? undefined
+      : readDependencyConstraint(dependency.constraint)
     if (dependency.predecessorId === dependency.successorId) {
       throw invalid('PlanningDependencySelf', 'An entity cannot depend on itself.')
     }
@@ -1226,8 +1704,13 @@ function validateDependencies(state: PlanningWorkspaceState) {
       )
     }
     edges.add(edge)
-    if (!findEntity(state, dependency.predecessorId) || !findEntity(state, dependency.successorId)) {
+    const predecessor = findEntity(state, dependency.predecessorId)
+    const successor = findEntity(state, dependency.successorId)
+    if (!predecessor || !successor) {
       throw invalid('PlanningDependencyEntityNotFound', 'Planning dependency references a missing entity.')
+    }
+    if (constraint !== undefined) {
+      requirePlanningDependencyConstraintIsSatisfied(successor, constraint)
     }
     const targets = adjacency.get(dependency.predecessorId) ?? []
     targets.push(dependency.successorId)
@@ -1244,6 +1727,94 @@ function validateDependencies(state: PlanningWorkspaceState) {
     visited.add(id)
   }
   for (const id of adjacency.keys()) visit(id)
+}
+
+/**
+ * Enforces one explicit dependency constraint against the successor forecast.
+ *
+ * Persisted Planning dependency constraints are invariants rather than advisory
+ * annotations, so both dependency creation and later forecast updates pass through
+ * this check via {@link validatePlanningState}.
+ *
+ * @param successor - Successor Planning entity whose forecast owns the constrained anchor.
+ * @param constraint - Validated explicit successor date constraint.
+ */
+function requirePlanningDependencyConstraintIsSatisfied(
+  successor: StoredPlanningEntity,
+  constraint: ScheduleDependencyConstraint,
+): void {
+  const actualDate = constraint.anchor === 'start'
+    ? successor.forecast.startDate
+    : successor.forecast.endDate
+  if (!satisfiesDependencyConstraint(actualDate, constraint)) {
+    throw conflict(
+      'PlanningDependencyConstraintViolation',
+      'Planning dependency constraint conflicts with the successor forecast.',
+    )
+  }
+}
+
+/**
+ * Validates identities and acyclicity of the persisted qualified Work Item graph.
+ *
+ * @param dependencies - Persisted Work Item schedule dependencies.
+ */
+function validateWorkItemDependencies(
+  dependencies: readonly WorkItemScheduleDependency[],
+) {
+  const ids = new Set<string>()
+  const edges = new Set<string>()
+  const adjacency = new Map<string, string[]>()
+  for (const dependency of dependencies) {
+    const id = readIdentifier(dependency.id, 'Work Item dependency ID')
+    if (ids.has(id)) {
+      throw persistenceInvalid(`Duplicate Work Item dependency "${id}".`)
+    }
+    ids.add(id)
+    const predecessor = readWorkItemDependencyEndpoint(dependency.predecessor, 'Predecessor')
+    const successor = readWorkItemDependencyEndpoint(dependency.successor, 'Successor')
+    const predecessorKey = createWorkItemKey(predecessor.teamId, predecessor.workItemId)
+    const successorKey = createWorkItemKey(successor.teamId, successor.workItemId)
+    if (predecessorKey === successorKey) {
+      throw invalid(
+        'PlanningWorkItemDependencySelf',
+        'A Work Item cannot depend on itself.',
+      )
+    }
+    const edge = `${predecessorKey}\u0001${successorKey}`
+    if (edges.has(edge)) {
+      throw conflict(
+        'PlanningWorkItemDependencyDuplicate',
+        'Only one dependency can connect the same Work Item predecessor and successor.',
+      )
+    }
+    edges.add(edge)
+    readDependencyType(dependency.type)
+    readLagDays(dependency.lagDays)
+    if (dependency.constraint !== undefined) readDependencyConstraint(dependency.constraint)
+    readTimestamp(dependency.createdAt, 'Work Item dependency creation timestamp')
+    readTimestamp(dependency.updatedAt, 'Work Item dependency update timestamp')
+    const targets = adjacency.get(predecessorKey) ?? []
+    targets.push(successorKey)
+    adjacency.set(predecessorKey, targets)
+  }
+  const visiting = new Set<string>()
+  const visited = new Set<string>()
+  /** Visits one qualified endpoint while detecting a directed back edge. */
+  const visit = (key: string) => {
+    if (visiting.has(key)) {
+      throw conflict(
+        'PlanningWorkItemDependencyCycle',
+        'Work Item dependencies contain a cycle.',
+      )
+    }
+    if (visited.has(key)) return
+    visiting.add(key)
+    for (const target of adjacency.get(key) ?? []) visit(target)
+    visiting.delete(key)
+    visited.add(key)
+  }
+  for (const key of adjacency.keys()) visit(key)
 }
 
 function validateWorkItemLink(
@@ -1314,6 +1885,22 @@ function createPlanningSnapshot(
     })
     .map((link) => structuredClone(link))
     .sort(comparePlanningWorkItemLinks)
+  const visibleWorkItemDependencies = state.workItemDependencies
+    .filter((dependency) =>
+      workItemMap.has(createWorkItemKey(
+        dependency.predecessor.teamId,
+        dependency.predecessor.workItemId,
+      )) &&
+      workItemMap.has(createWorkItemKey(
+        dependency.successor.teamId,
+        dependency.successor.workItemId,
+      ))
+    )
+    .map((dependency) => structuredClone(dependency))
+    .sort((first, second) => compareText(first.id, second.id))
+  const visibleWorkItems = [...workItemState.workItems]
+    .map((item) => structuredClone(item))
+    .sort(comparePlanningWorkItems)
   const visibleState = { ...state, workItemLinks: visibleLinks }
   const rollups = calculateRollups(visibleState, workItemMap)
   const entities = state.entities.map((entity) => {
@@ -1330,11 +1917,15 @@ function createPlanningSnapshot(
     entities,
     dependencies: structuredClone(state.dependencies)
       .sort((first, second) => compareText(first.id, second.id)),
+    workItemDependencies: visibleWorkItemDependencies,
     workItemLinks: visibleLinks,
-    workItems: [...workItemState.workItems]
-      .map((item) => structuredClone(item))
-      .sort(comparePlanningWorkItems),
+    workItems: visibleWorkItems,
     criticalPath: calculateCriticalPath(state),
+    workItemDependencySummary: createPlanningWorkItemDependencySummary(
+      visibleWorkItemDependencies,
+      visibleWorkItems,
+      visibleLinks,
+    ),
     ...(state.updatedAt ? { updatedAt: state.updatedAt } : {}),
   } satisfies PlanningSnapshot
   if (utf8ByteLength(JSON.stringify(snapshot)) > MAX_PLANNING_SNAPSHOT_BYTES) {
@@ -1564,6 +2155,535 @@ function calculateCriticalPath(state: PlanningWorkspaceState): PlanningCriticalP
   }
 }
 
+/**
+ * Rejects canonical Work Item deletion while any incoming or outgoing schedule edge remains.
+ *
+ * Call this inside a stable Planning authorization read and carry that read's global revision
+ * into the canonical Work Item delete transaction so a concurrent edge creation cannot race it.
+ *
+ * @param dependencies - Unfiltered Workspace Work Item dependencies from authorization state.
+ * @param teamId - Team that owns the Work Item being deleted.
+ * @param workItemId - Team-local Work Item identifier being deleted.
+ * @throws {PlanningError} With `PlanningWorkItemDependencyInUse` when an edge still exists.
+ */
+export function requirePlanningWorkItemHasNoScheduleDependencies(
+  dependencies: readonly WorkItemScheduleDependency[],
+  teamId: string,
+  workItemId: string,
+) {
+  const key = createWorkItemKey(
+    readIdentifier(teamId, 'Team ID'),
+    readIdentifier(workItemId, 'Work Item ID'),
+  )
+  const dependency = dependencies.find((candidate) =>
+    createWorkItemKey(candidate.predecessor.teamId, candidate.predecessor.workItemId) === key ||
+    createWorkItemKey(candidate.successor.teamId, candidate.successor.workItemId) === key
+  )
+  if (dependency !== undefined) {
+    throw conflict(
+      'PlanningWorkItemDependencyInUse',
+      'Remove all incoming and outgoing schedule dependencies before deleting this Work Item.',
+    )
+  }
+}
+
+/**
+ * Derives management signals from exactly the Work Item dependency edges visible in a snapshot.
+ *
+ * @param dependencies - Dependencies whose two endpoints are visible.
+ * @param workItems - Visible canonical Work Item summaries.
+ * @param links - Visible Planning links used to resolve affected milestones.
+ * @returns Critical-path, conflict, blocker, Project, and Milestone summaries.
+ */
+export function createPlanningWorkItemDependencySummary(
+  dependencies: readonly WorkItemScheduleDependency[],
+  workItems: readonly PlanningWorkItemSummary[],
+  links: readonly PlanningWorkItemLink[],
+): PlanningWorkItemDependencySummary {
+  const workItemMap = new Map(workItems.map((item) => [
+    createWorkItemKey(item.teamId, item.id),
+    item,
+  ]))
+  const visibleDependencies = dependencies.filter((dependency) =>
+    workItemMap.has(createWorkItemKey(
+      dependency.predecessor.teamId,
+      dependency.predecessor.workItemId,
+    )) &&
+    workItemMap.has(createWorkItemKey(
+      dependency.successor.teamId,
+      dependency.successor.workItemId,
+    ))
+  )
+  const endpointKeys = new Set<string>()
+  let unresolvedBlockerCount = 0
+  for (const dependency of visibleDependencies) {
+    const predecessorKey = createWorkItemKey(
+      dependency.predecessor.teamId,
+      dependency.predecessor.workItemId,
+    )
+    const successorKey = createWorkItemKey(
+      dependency.successor.teamId,
+      dependency.successor.workItemId,
+    )
+    endpointKeys.add(predecessorKey)
+    endpointKeys.add(successorKey)
+    const predecessor = workItemMap.get(predecessorKey)
+    if (
+      predecessor &&
+      predecessor.statusCategory !== 'completed' &&
+      predecessor.statusCategory !== 'canceled'
+    ) {
+      unresolvedBlockerCount += 1
+    }
+  }
+  const affectedProjects = new Map<string, WorkItemAffectedProject>()
+  for (const key of endpointKeys) {
+    const workItem = workItemMap.get(key)
+    if (workItem?.projectId !== undefined) {
+      affectedProjects.set(`${workItem.teamId}\0${workItem.projectId}`, {
+        teamId: workItem.teamId,
+        projectId: workItem.projectId,
+      })
+    }
+  }
+  const affectedMilestoneIds = new Set<string>()
+  for (const link of links) {
+    if (
+      link.milestoneId !== undefined &&
+      endpointKeys.has(createWorkItemKey(link.teamId, link.workItemId))
+    ) {
+      affectedMilestoneIds.add(link.milestoneId)
+    }
+  }
+  return {
+    criticalPath: calculateWorkItemDependencyCriticalPath(visibleDependencies, workItemMap),
+    conflicts: calculateWorkItemDependencyConflicts(visibleDependencies, workItemMap),
+    unresolvedBlockerCount,
+    affectedProjects: [...affectedProjects.values()].sort((first, second) =>
+      compareText(first.teamId, second.teamId) || compareText(first.projectId, second.projectId)
+    ),
+    affectedProjectIds: [...new Set([...affectedProjects.values()].map(({ projectId }) => projectId))]
+      .sort(compareText),
+    affectedMilestoneIds: [...affectedMilestoneIds].sort(compareText),
+  }
+}
+
+/**
+ * Calculates stable lower-bound and explicit-constraint conflicts for visible dependencies.
+ *
+ * @param dependencies - Dependencies whose endpoints may be inspected.
+ * @param workItems - Visible canonical Work Item summaries keyed by qualified identity.
+ * @returns Deterministically ordered dependency conflicts.
+ */
+function calculateWorkItemDependencyConflicts(
+  dependencies: readonly WorkItemScheduleDependency[],
+  workItems: ReadonlyMap<string, PlanningWorkItemSummary>,
+) {
+  const conflicts: WorkItemScheduleDependencyConflict[] = []
+  for (const dependency of dependencies) {
+    const predecessor = workItems.get(createWorkItemKey(
+      dependency.predecessor.teamId,
+      dependency.predecessor.workItemId,
+    ))
+    const successor = workItems.get(createWorkItemKey(
+      dependency.successor.teamId,
+      dependency.successor.workItemId,
+    ))
+    if (!predecessor || !successor) continue
+    let hasMissingScheduleConflict = false
+    const predecessorAnchor = readScheduleAnchor(
+      predecessor.schedule,
+      dependency.type === 'finish-to-start' || dependency.type === 'finish-to-finish'
+        ? 'finish'
+        : 'start',
+    )
+    const successorAnchor = readScheduleAnchor(
+      successor.schedule,
+      dependency.type === 'finish-to-start' || dependency.type === 'start-to-start'
+        ? 'start'
+        : 'finish',
+    )
+    if (predecessorAnchor === undefined || successorAnchor === undefined) {
+      conflicts.push({
+        code: 'missing-schedule',
+        dependencyId: dependency.id,
+        workItem: structuredClone(dependency.successor),
+      })
+      hasMissingScheduleConflict = true
+    } else {
+      const requiredDate = shiftIsoDate(
+        predecessorAnchor,
+        dependency.lagDays + (dependency.type === 'finish-to-start' ? 1 : 0),
+      )
+      if (requiredDate === undefined || successorAnchor < requiredDate) {
+        conflicts.push({
+          code: 'dependency-violation',
+          dependencyId: dependency.id,
+          workItem: structuredClone(dependency.successor),
+          ...(requiredDate === undefined ? {} : { requiredDate }),
+          actualDate: successorAnchor,
+        })
+      }
+    }
+    if (dependency.constraint === undefined) continue
+    const constrainedAnchor = readScheduleAnchor(
+      successor.schedule,
+      dependency.constraint.anchor,
+    )
+    if (constrainedAnchor === undefined) {
+      if (!hasMissingScheduleConflict) {
+        conflicts.push({
+          code: 'missing-schedule',
+          dependencyId: dependency.id,
+          workItem: structuredClone(dependency.successor),
+        })
+      }
+      continue
+    }
+    if (!satisfiesDependencyConstraint(constrainedAnchor, dependency.constraint)) {
+      conflicts.push({
+        code: 'constraint-violation',
+        dependencyId: dependency.id,
+        workItem: structuredClone(dependency.successor),
+        requiredDate: dependency.constraint.date,
+        actualDate: constrainedAnchor,
+      })
+    }
+  }
+  return conflicts.sort((first, second) =>
+    compareText(first.dependencyId, second.dependencyId) ||
+    compareText(first.code, second.code) ||
+    compareText(first.requiredDate ?? '', second.requiredDate ?? '')
+  )
+}
+
+/**
+ * Calculates the longest topological path through visible Work Item dependencies.
+ *
+ * @param dependencies - Visible acyclic Work Item dependency edges.
+ * @param workItems - Visible canonical Work Item summaries keyed by qualified identity.
+ * @returns A deterministic critical path and slack for every participating Work Item.
+ */
+function calculateWorkItemDependencyCriticalPath(
+  dependencies: readonly WorkItemScheduleDependency[],
+  workItems: ReadonlyMap<string, PlanningWorkItemSummary>,
+): WorkItemDependencyCriticalPath {
+  const participatingKeys = new Set<string>()
+  const incomingCount = new Map<string, number>()
+  const outgoing = new Map<string, WorkItemScheduleDependency[]>()
+  for (const dependency of dependencies) {
+    const predecessorKey = createWorkItemKey(
+      dependency.predecessor.teamId,
+      dependency.predecessor.workItemId,
+    )
+    const successorKey = createWorkItemKey(
+      dependency.successor.teamId,
+      dependency.successor.workItemId,
+    )
+    participatingKeys.add(predecessorKey)
+    participatingKeys.add(successorKey)
+    if (!incomingCount.has(predecessorKey)) incomingCount.set(predecessorKey, 0)
+    incomingCount.set(successorKey, (incomingCount.get(successorKey) ?? 0) + 1)
+    const edges = outgoing.get(predecessorKey) ?? []
+    edges.push(dependency)
+    outgoing.set(predecessorKey, edges)
+  }
+  const pending = [...participatingKeys]
+    .filter((key) => incomingCount.get(key) === 0)
+    .sort(compareText)
+  const order: string[] = []
+  while (pending.length > 0) {
+    const key = pending.shift()
+    if (key === undefined) break
+    order.push(key)
+    for (const dependency of outgoing.get(key) ?? []) {
+      const successorKey = createWorkItemKey(
+        dependency.successor.teamId,
+        dependency.successor.workItemId,
+      )
+      const count = (incomingCount.get(successorKey) ?? 0) - 1
+      incomingCount.set(successorKey, count)
+      if (count === 0) {
+        pending.push(successorKey)
+        pending.sort(compareText)
+      }
+    }
+  }
+  if (order.length !== participatingKeys.size) {
+    throw new PlanningError(
+      503,
+      'PlanningWorkItemDependencyCycle',
+      'Stored Work Item dependencies contain a cycle.',
+    )
+  }
+  const durations = new Map<string, number>()
+  const scheduleSpans = new Map<string, number>()
+  for (const key of order) {
+    const schedule = workItems.get(key)?.schedule
+    durations.set(key, schedule === undefined ? 0 : workItemScheduleDurationDays(schedule))
+    scheduleSpans.set(key, schedule === undefined ? 0 : workItemScheduleSpanDays(schedule))
+  }
+  const earliestStart = new Map(order.map((key) => [key, 0]))
+  const pathPredecessor = new Map<string, string>()
+  const pathDepth = new Map(order.map((key) => [key, 0]))
+  for (const predecessorKey of order) {
+    const predecessorStart = earliestStart.get(predecessorKey) ?? 0
+    const predecessorSpan = scheduleSpans.get(predecessorKey) ?? 0
+    for (const dependency of outgoing.get(predecessorKey) ?? []) {
+      const successorKey = createWorkItemKey(
+        dependency.successor.teamId,
+        dependency.successor.workItemId,
+      )
+      const successorSpan = scheduleSpans.get(successorKey) ?? 0
+      const candidate = workItemDependencyStartConstraint(
+        dependency.type,
+        predecessorStart,
+        predecessorSpan,
+        successorSpan,
+        dependency.lagDays,
+      )
+      const currentStart = earliestStart.get(successorKey) ?? 0
+      const currentPredecessor = pathPredecessor.get(successorKey)
+      if (
+        candidate > currentStart ||
+        (
+          candidate === currentStart &&
+          (currentPredecessor === undefined || predecessorKey < currentPredecessor)
+        )
+      ) {
+        earliestStart.set(successorKey, candidate)
+        pathPredecessor.set(successorKey, predecessorKey)
+        pathDepth.set(successorKey, (pathDepth.get(predecessorKey) ?? 0) + 1)
+      }
+    }
+  }
+  let totalDurationDays = 0
+  let endKey: string | undefined
+  let endPathDepth = -1
+  for (const key of order) {
+    const finish = (earliestStart.get(key) ?? 0) + (durations.get(key) ?? 0)
+    const candidatePathDepth = pathDepth.get(key) ?? 0
+    const candidateIsSink = (outgoing.get(key)?.length ?? 0) === 0
+    const currentIsSink = endKey !== undefined && (outgoing.get(endKey)?.length ?? 0) === 0
+    if (
+      finish > totalDurationDays ||
+      (
+        finish === totalDurationDays &&
+        (
+          candidatePathDepth > endPathDepth ||
+          (
+            candidatePathDepth === endPathDepth &&
+            (candidateIsSink !== currentIsSink
+              ? candidateIsSink
+              : endKey === undefined || key < endKey)
+          )
+        )
+      )
+    ) {
+      totalDurationDays = finish
+      endKey = key
+      endPathDepth = candidatePathDepth
+    }
+  }
+  const latestStart = new Map(order.map((key) => [
+    key,
+    totalDurationDays - (durations.get(key) ?? 0),
+  ]))
+  for (const predecessorKey of [...order].reverse()) {
+    const predecessorSpan = scheduleSpans.get(predecessorKey) ?? 0
+    for (const dependency of outgoing.get(predecessorKey) ?? []) {
+      const successorKey = createWorkItemKey(
+        dependency.successor.teamId,
+        dependency.successor.workItemId,
+      )
+      const successorSpan = scheduleSpans.get(successorKey) ?? 0
+      const candidate = workItemDependencyLatestStartConstraint(
+        dependency.type,
+        latestStart.get(successorKey) ?? 0,
+        predecessorSpan,
+        successorSpan,
+        dependency.lagDays,
+      )
+      latestStart.set(
+        predecessorKey,
+        Math.min(latestStart.get(predecessorKey) ?? candidate, candidate),
+      )
+    }
+  }
+  const pathKeys: string[] = []
+  let cursor = endKey
+  while (cursor !== undefined) {
+    pathKeys.unshift(cursor)
+    cursor = pathPredecessor.get(cursor)
+  }
+  return {
+    workItems: pathKeys.flatMap((key) => {
+      const item = workItems.get(key)
+      return item === undefined ? [] : [{ teamId: item.teamId, workItemId: item.id }]
+    }),
+    totalDurationDays,
+    slackByWorkItemKey: Object.fromEntries(order.flatMap((key) => {
+      const item = workItems.get(key)
+      if (item === undefined) return []
+      return [[
+        createWorkItemSlackKey(item.teamId, item.id),
+        Math.max(0, (latestStart.get(key) ?? 0) - (earliestStart.get(key) ?? 0)),
+      ]]
+    })),
+  }
+}
+
+/**
+ * Returns one schedule boundary without inferring dates for an unscheduled Work Item.
+ *
+ * @param schedule - Canonical Work Item schedule.
+ * @param anchor - Boundary requested by a dependency or explicit constraint.
+ * @returns The local ISO date, or undefined when no schedule exists.
+ */
+function readScheduleAnchor(
+  schedule: WorkItemSchedule,
+  anchor: ScheduleDependencyConstraint['anchor'],
+) {
+  if (schedule.mode === 'unscheduled') return undefined
+  if (schedule.mode === 'due-date') {
+    return anchor === 'finish' ? schedule.dueDate : undefined
+  }
+  return anchor === 'start' ? schedule.startDate : schedule.endDate
+}
+
+/**
+ * Tests an explicit successor boundary against its persisted date constraint.
+ *
+ * @param actualDate - Current successor boundary date.
+ * @param constraint - Explicit equality, lower-bound, or upper-bound rule.
+ * @returns Whether the current date satisfies the rule.
+ */
+function satisfiesDependencyConstraint(
+  actualDate: string,
+  constraint: ScheduleDependencyConstraint,
+) {
+  if (constraint.kind === 'on') return actualDate === constraint.date
+  if (constraint.kind === 'not-before') return actualDate >= constraint.date
+  return actualDate <= constraint.date
+}
+
+/**
+ * Shifts a validated local date by a signed number of UTC calendar days.
+ *
+ * @param value - Local ISO date.
+ * @param days - Signed calendar-day offset.
+ * @returns Shifted ISO date, or undefined when arithmetic leaves the supported range.
+ */
+function shiftIsoDate(value: string, days: number) {
+  const timestamp = Date.parse(`${value}T00:00:00.000Z`) + days * 86_400_000
+  if (!Number.isFinite(timestamp)) return undefined
+  const shifted = new Date(timestamp)
+  if (Number.isNaN(shifted.getTime())) return undefined
+  const result = shifted.toISOString().slice(0, 10)
+  return ISO_DATE_PATTERN.test(result) && Number(result.slice(0, 4)) >= WORK_ITEM_SCHEDULE_MIN_YEAR
+    ? result
+    : undefined
+}
+
+/**
+ * Creates the reversible public record key used by critical-path slack output.
+ *
+ * @param teamId - Owning Team identifier.
+ * @param workItemId - Team-local Work Item identifier.
+ * @returns Percent-encoded `teamId/workItemId` key without delimiter collisions.
+ */
+function createWorkItemSlackKey(teamId: string, workItemId: string) {
+  return `${encodeURIComponent(teamId)}/${encodeURIComponent(workItemId)}`
+}
+
+/**
+ * Returns the calendar duration reported for one Work Item in critical-path output.
+ *
+ * @param schedule - Canonical schedule whose duration is required.
+ * @returns Calendar days occupied by the schedule; milestones and unscheduled items use zero.
+ */
+function workItemScheduleDurationDays(schedule: WorkItemSchedule) {
+  if (schedule.mode === 'unscheduled' || schedule.mode === 'milestone') return 0
+  if (schedule.mode === 'due-date') return 1
+  return durationDays({ startDate: schedule.startDate, endDate: schedule.endDate })
+}
+
+/**
+ * Returns the inclusive boundary span used to translate start and finish constraints.
+ *
+ * @param schedule - Canonical schedule whose boundary span is required.
+ * @returns Inclusive calendar span, with scheduled single-date items represented by one.
+ */
+function workItemScheduleSpanDays(schedule: WorkItemSchedule) {
+  if (schedule.mode === 'unscheduled') return 0
+  if (schedule.mode === 'due-date' || schedule.mode === 'milestone') return 1
+  return durationDays({ startDate: schedule.startDate, endDate: schedule.endDate })
+}
+
+/**
+ * Converts a Work Item dependency into a successor earliest-start lower bound.
+ *
+ * @param type - Dependency boundary relationship.
+ * @param predecessorStart - Predecessor earliest-start offset.
+ * @param predecessorSpan - Inclusive predecessor schedule span.
+ * @param successorSpan - Inclusive successor schedule span.
+ * @param lagDays - Signed lead or lag.
+ * @returns Successor earliest-start lower bound.
+ */
+function workItemDependencyStartConstraint(
+  type: PlanningDependencyType,
+  predecessorStart: number,
+  predecessorSpan: number,
+  successorSpan: number,
+  lagDays: number,
+) {
+  if (type === 'start-to-start') return predecessorStart + lagDays
+  if (type === 'finish-to-finish') {
+    return predecessorStart + predecessorSpan + lagDays - successorSpan
+  }
+  if (type === 'start-to-finish') {
+    return predecessorStart + lagDays - successorSpan + 1
+  }
+  return predecessorStart + predecessorSpan + lagDays
+}
+
+/**
+ * Converts a successor latest-start value into a predecessor latest-start upper bound.
+ *
+ * @param type - Dependency boundary relationship.
+ * @param successorLatestStart - Successor latest-start offset.
+ * @param predecessorSpan - Inclusive predecessor schedule span.
+ * @param successorSpan - Inclusive successor schedule span.
+ * @param lagDays - Signed lead or lag.
+ * @returns Predecessor latest-start upper bound.
+ */
+function workItemDependencyLatestStartConstraint(
+  type: PlanningDependencyType,
+  successorLatestStart: number,
+  predecessorSpan: number,
+  successorSpan: number,
+  lagDays: number,
+) {
+  if (type === 'start-to-start') return successorLatestStart - lagDays
+  if (type === 'finish-to-finish') {
+    return successorLatestStart + successorSpan - predecessorSpan - lagDays
+  }
+  if (type === 'start-to-finish') {
+    return successorLatestStart + successorSpan - 1 - lagDays
+  }
+  return successorLatestStart - predecessorSpan - lagDays
+}
+
+/**
+ * Resolves the earliest successor start imposed by one Planning entity dependency.
+ *
+ * @param type - Dependency boundary relationship.
+ * @param predecessorStart - Predecessor earliest-start offset.
+ * @param predecessorDuration - Inclusive predecessor duration.
+ * @param successorDuration - Inclusive successor duration.
+ * @param lagDays - Signed lead or lag.
+ * @returns Successor earliest-start lower bound.
+ */
 function dependencyStartConstraint(
   type: PlanningDependencyType,
   predecessorStart: number,
@@ -1575,9 +2695,22 @@ function dependencyStartConstraint(
   if (type === 'finish-to-finish') {
     return predecessorStart + predecessorDuration + lagDays - successorDuration
   }
+  if (type === 'start-to-finish') {
+    return predecessorStart + lagDays - successorDuration + 1
+  }
   return predecessorStart + predecessorDuration + lagDays
 }
 
+/**
+ * Resolves the latest predecessor start allowed by one Planning entity dependency.
+ *
+ * @param type - Dependency boundary relationship.
+ * @param successorLatestStart - Successor latest-start offset.
+ * @param predecessorDuration - Inclusive predecessor duration.
+ * @param successorDuration - Inclusive successor duration.
+ * @param lagDays - Signed lead or lag.
+ * @returns Predecessor latest-start upper bound.
+ */
 function dependencyLatestStartConstraint(
   type: PlanningDependencyType,
   successorLatestStart: number,
@@ -1589,6 +2722,9 @@ function dependencyLatestStartConstraint(
   if (type === 'finish-to-finish') {
     return successorLatestStart + successorDuration - predecessorDuration - lagDays
   }
+  if (type === 'start-to-finish') {
+    return successorLatestStart + successorDuration - 1 - lagDays
+  }
   return successorLatestStart - predecessorDuration - lagDays
 }
 
@@ -1598,7 +2734,7 @@ function createPlanningRowMap(workspaceId: string, state: PlanningWorkspaceState
     workspaceId,
     recordKey: META_RECORD_KEY,
     entryType: 'planning-meta',
-    schemaVersion: PLANNING_SCHEMA_VERSION,
+    schemaVersion: PLANNING_STORAGE_SCHEMA_VERSION,
     revision: state.revision,
     updatedAt: state.updatedAt,
   })
@@ -1609,6 +2745,15 @@ function createPlanningRowMap(workspaceId: string, state: PlanningWorkspaceState
   for (const dependency of state.dependencies) {
     const recordKey = createDependencyRecordKey(dependency.id)
     rows.set(recordKey, { workspaceId, recordKey, entryType: 'planning-dependency', ...dependency })
+  }
+  for (const dependency of state.workItemDependencies) {
+    const recordKey = createWorkItemDependencyRecordKey(dependency.id)
+    rows.set(recordKey, {
+      workspaceId,
+      recordKey,
+      entryType: 'planning-work-item-dependency',
+      ...dependency,
+    })
   }
   for (const link of state.workItemLinks) {
     const recordKey = createLinkRecordKey(link.teamId, link.workItemId)
@@ -1626,6 +2771,7 @@ function readPlanningRows(
     revision: meta.revision,
     entities: [],
     dependencies: [],
+    workItemDependencies: [],
     workItemLinks: [],
     ...(meta.updatedAt ? { updatedAt: meta.updatedAt } : {}),
   }
@@ -1639,6 +2785,8 @@ function readPlanningRows(
         state.entities.push(readStoredPlanningEntity(row))
       } else if (row.entryType === 'planning-dependency') {
         state.dependencies.push(readStoredPlanningDependency(row))
+      } else if (row.entryType === 'planning-work-item-dependency') {
+        state.workItemDependencies.push(readStoredPlanningWorkItemDependency(row))
       } else if (row.entryType === 'planning-work-item-link') {
         state.workItemLinks.push(readStoredPlanningWorkItemLink(row))
       } else {
@@ -1716,7 +2864,40 @@ function readStoredPlanningDependency(row: Record<string, unknown>): PlanningDep
     successorId: readIdentifier(row.successorId, 'Successor ID'),
     type: readDependencyType(row.type),
     lagDays: readLagDays(row.lagDays),
+    ...(row.constraint === undefined
+      ? {}
+      : { constraint: readDependencyConstraint(row.constraint) }),
     createdAt: readTimestamp(row.createdAt, 'Dependency timestamp'),
+  }
+}
+
+/**
+ * Reads and validates one persisted Work Item dependency row.
+ *
+ * @param row - DynamoDB row to decode.
+ * @returns Canonical Work Item schedule dependency.
+ */
+function readStoredPlanningWorkItemDependency(
+  row: Record<string, unknown>,
+): WorkItemScheduleDependency {
+  const id = readIdentifier(row.id, 'Work Item dependency ID')
+  if (row.recordKey !== createWorkItemDependencyRecordKey(id)) {
+    throw invalid(
+      'PlanningRecordKeyInvalid',
+      'Planning Work Item dependency record key does not match its ID.',
+    )
+  }
+  return {
+    id,
+    predecessor: readWorkItemDependencyEndpoint(row.predecessor, 'Predecessor'),
+    successor: readWorkItemDependencyEndpoint(row.successor, 'Successor'),
+    type: readDependencyType(row.type),
+    lagDays: readLagDays(row.lagDays),
+    ...(row.constraint === undefined
+      ? {}
+      : { constraint: readDependencyConstraint(row.constraint) }),
+    createdAt: readTimestamp(row.createdAt, 'Work Item dependency creation timestamp'),
+    updatedAt: readTimestamp(row.updatedAt, 'Work Item dependency update timestamp'),
   }
 }
 
@@ -1808,6 +2989,83 @@ function requireWorkItem(state: PlanningWorkItemState, teamId: string, workItemI
   return item
 }
 
+/**
+ * Resolves both dependency endpoints and creates canonical revision conditions.
+ *
+ * @param state - Canonical Work Items visible to the mutation.
+ * @param dependency - Dependency whose endpoints must exist.
+ * @returns Revision conditions for predecessor and successor rows.
+ */
+function requireWorkItemDependencyEndpoints(
+  state: PlanningWorkItemState,
+  dependency: WorkItemScheduleDependency,
+) {
+  const predecessor = requireWorkItem(
+    state,
+    dependency.predecessor.teamId,
+    dependency.predecessor.workItemId,
+  )
+  const successor = requireWorkItem(
+    state,
+    dependency.successor.teamId,
+    dependency.successor.workItemId,
+  )
+  return [predecessor, successor].map((summary) => ({
+    teamId: summary.teamId,
+    workItemId: summary.id,
+    revision: readRevision(summary.revision),
+  }))
+}
+
+/**
+ * Rejects a candidate edge when its current endpoint schedules cannot satisfy it.
+ *
+ * Existing persisted edges are intentionally evaluated only in derived summaries so a later
+ * Work Item schedule change can surface a conflict without corrupting the Planning graph. This
+ * pre-commit guard therefore applies only to the edge being created or updated.
+ *
+ * @param state - Canonical Work Item schedules visible to the mutation.
+ * @param dependency - Candidate dependency after input normalization.
+ */
+function requireCurrentWorkItemDependencyIsSatisfied(
+  state: PlanningWorkItemState,
+  dependency: WorkItemScheduleDependency,
+) {
+  const workItems = new Map(state.workItems.map((workItem) => [
+    createWorkItemKey(workItem.teamId, workItem.id),
+    workItem,
+  ]))
+  if (calculateWorkItemDependencyConflicts([dependency], workItems).length > 0) {
+    throw conflict(
+      'PlanningWorkItemDependencyConflict',
+      'Work Item dependency conflicts with the current endpoint schedules or constraint.',
+    )
+  }
+}
+
+/**
+ * Validates a qualified Work Item dependency endpoint.
+ *
+ * @param value - Endpoint value from an input or persisted row.
+ * @param label - Boundary name included in validation errors.
+ * @returns Normalized Team and Work Item identity.
+ */
+function readWorkItemDependencyEndpoint(
+  value: unknown,
+  label: string,
+): WorkItemDependencyEndpoint {
+  if (!isRecord(value)) {
+    throw invalid(
+      'PlanningWorkItemDependencyEndpointInvalid',
+      `${label} Work Item dependency endpoint must be an object.`,
+    )
+  }
+  return {
+    teamId: readIdentifier(value.teamId, `${label} Team ID`),
+    workItemId: readIdentifier(value.workItemId, `${label} Work Item ID`),
+  }
+}
+
 function createWorkItemKey(teamId: string, workItemId: string) {
   return `${teamId}\u0000${workItemId}`
 }
@@ -1849,6 +3107,19 @@ function createDependencyRecordKey(id: string) {
   return readRecordKey(
     `${DEPENDENCY_RECORD_PREFIX}${encodeRecordKeyIdentifier(id)}`,
     'Planning dependency record key',
+  )
+}
+
+/**
+ * Creates the DynamoDB sort key for one Work Item dependency.
+ *
+ * @param id - Workspace-local dependency identifier.
+ * @returns Encoded and size-checked record key.
+ */
+function createWorkItemDependencyRecordKey(id: string) {
+  return readRecordKey(
+    `${WORK_ITEM_DEPENDENCY_RECORD_PREFIX}${encodeRecordKeyIdentifier(id)}`,
+    'Planning Work Item dependency record key',
   )
 }
 
@@ -1960,10 +3231,57 @@ function readProgress(value: unknown, label: string) {
 }
 
 function readLagDays(value: unknown) {
-  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
-    throw invalid('PlanningDependencyLagInvalid', 'Dependency lagDays must be a non-negative integer.')
+  if (
+    typeof value !== 'number' ||
+    !Number.isSafeInteger(value) ||
+    Math.abs(value) > WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS
+  ) {
+    throw invalid(
+      'PlanningDependencyLagInvalid',
+      `Dependency lagDays must be a signed integer from -${WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS} ` +
+        `through ${WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS}.`,
+    )
   }
   return value
+}
+
+/**
+ * Validates an explicit dependency date constraint.
+ *
+ * @param value - Constraint value from an input or persisted row.
+ * @returns Normalized successor boundary constraint.
+ */
+function readDependencyConstraint(value: unknown): ScheduleDependencyConstraint {
+  if (!isRecord(value)) {
+    throw invalid(
+      'PlanningDependencyConstraintInvalid',
+      'Dependency constraint must be an object.',
+    )
+  }
+  if (value.anchor !== 'start' && value.anchor !== 'finish') {
+    throw invalid(
+      'PlanningDependencyConstraintInvalid',
+      'Dependency constraint anchor must be start or finish.',
+    )
+  }
+  if (value.kind !== 'on' && value.kind !== 'not-before' && value.kind !== 'not-after') {
+    throw invalid(
+      'PlanningDependencyConstraintInvalid',
+      'Dependency constraint kind is invalid.',
+    )
+  }
+  const date = readIsoDate(value.date, 'Dependency constraint date')
+  if (Number(date.slice(0, 4)) < WORK_ITEM_SCHEDULE_MIN_YEAR) {
+    throw invalid(
+      'PlanningDependencyConstraintInvalid',
+      `Dependency constraint date must be between ${WORK_ITEM_SCHEDULE_MIN_YEAR}-01-01 and 9999-12-31.`,
+    )
+  }
+  return {
+    anchor: value.anchor,
+    kind: value.kind,
+    date,
+  }
 }
 
 function readRevision(value: unknown) {
@@ -2127,7 +3445,12 @@ function readProgressMode(value: unknown): PlanningEntity['progressMode'] {
 }
 
 function readDependencyType(value: unknown): PlanningDependencyType {
-  if (value === 'finish-to-start' || value === 'start-to-start' || value === 'finish-to-finish') return value
+  if (
+    value === 'finish-to-start' ||
+    value === 'start-to-start' ||
+    value === 'finish-to-finish' ||
+    value === 'start-to-finish'
+  ) return value
   throw invalid('PlanningDependencyTypeInvalid', 'Planning dependency type is invalid.')
 }
 
@@ -2199,13 +3522,24 @@ function isNamedError(error: unknown, name: string) {
 }
 
 function isPlanningRevisionTransactionCancellation(error: unknown) {
+  return isPlanningTransactionConditionalFailureAt(error, 0)
+}
+
+/**
+ * Detects one conditional failure when every cancellation reason is safely classifiable.
+ *
+ * @param error - DynamoDB transaction error.
+ * @param index - Transaction action index to inspect.
+ * @returns Whether the selected action failed its condition without an infrastructure reason.
+ */
+function isPlanningTransactionConditionalFailureAt(error: unknown, index: number) {
   if (!isNamedError(error, 'TransactionCanceledException') || !isRecord(error)) {
     return false
   }
   const reasons = error.CancellationReasons
-  if (!Array.isArray(reasons) || reasons.length === 0) return false
-  return reasons.every((reason, index) =>
-    isRecord(reason) && reason.Code === (index === 0 ? 'ConditionalCheckFailed' : 'None')
+  if (!Array.isArray(reasons) || !isRecord(reasons[index])) return false
+  return reasons[index].Code === 'ConditionalCheckFailed' && reasons.every((reason) =>
+    isRecord(reason) && (reason.Code === 'None' || reason.Code === 'ConditionalCheckFailed')
   )
 }
 
@@ -2224,6 +3558,37 @@ function isPlanningWorkItemTransactionCancellation(
   if (!Array.isArray(reasons) || reasons.length < workItemConditionCount + 1) return false
   const workItemReasons = reasons.slice(1, workItemConditionCount + 1)
   const failed = workItemReasons.some((reason) =>
+    isRecord(reason) && reason.Code === 'ConditionalCheckFailed'
+  )
+  return failed && reasons.every((reason) =>
+    isRecord(reason) && (reason.Code === 'None' || reason.Code === 'ConditionalCheckFailed')
+  )
+}
+
+/**
+ * Detects a conditional failure in the caller-authorization portion of a transaction.
+ *
+ * @param error - DynamoDB transaction error.
+ * @param startIndex - First caller authorization check in the transaction.
+ * @param conditionCount - Number of caller authorization checks.
+ * @returns Whether a caller authorization row changed without an unrelated cancellation reason.
+ */
+function isPlanningCallerAuthorizationTransactionCancellation(
+  error: unknown,
+  startIndex: number,
+  conditionCount: number,
+) {
+  if (
+    conditionCount === 0 ||
+    !isNamedError(error, 'TransactionCanceledException') ||
+    !isRecord(error)
+  ) {
+    return false
+  }
+  const reasons = error.CancellationReasons
+  if (!Array.isArray(reasons) || reasons.length < startIndex + conditionCount) return false
+  const authorizationReasons = reasons.slice(startIndex, startIndex + conditionCount)
+  const failed = authorizationReasons.some((reason) =>
     isRecord(reason) && reason.Code === 'ConditionalCheckFailed'
   )
   return failed && reasons.every((reason) =>

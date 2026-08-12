@@ -8,6 +8,7 @@ import type {
 } from '../../infrastructure/observability/api-observability'
 import {
   classifyApiError,
+  isEligibleApiSliRequest,
   resolveApiRuntimeMetadata,
   summarizeApiMethod,
   summarizeApiRoute,
@@ -23,14 +24,17 @@ interface CanonicalRequestIdentifiers {
   readonly requestId: string
 }
 
+const identifiersByRequest = new WeakMap<
+  Request,
+  CanonicalRequestIdentifiers
+>()
+
 /**
  * API 共通 middleware の組み立てに必要な依存です。
  */
 export interface CommonMiddlewareDependencies {
   /** 現在許可されている browser origin を返します。 */
   getAllowedOrigins(): readonly string[]
-  /** Enterprise security mutation の拒否結果を audit します。 */
-  auditRejectedEnterpriseSecurityMutation: MiddlewareHandler
   /**
    * Generates a locally unique server-controlled request identifier.
    *
@@ -58,7 +62,7 @@ export interface CommonMiddlewareDependencies {
 }
 
 /**
- * Registers correlation, structured observability, CORS, and security middleware.
+ * Registers correlation, structured observability, CORS, and cache middleware.
  *
  * @param app - Hono application receiving the common middleware.
  * @param dependencies - Operational and security dependencies.
@@ -67,15 +71,14 @@ export function registerCommonMiddleware(
   app: Hono,
   dependencies: CommonMiddlewareDependencies,
 ): void {
-  const identifiersByRequest = new WeakMap<
-    Request,
-    CanonicalRequestIdentifiers
-  >()
-
   app.use('/api/*', async (context, next) => {
     const startedAt = dependencies.now()
     const identifiers = createCanonicalRequestIdentifiers(
       dependencies.createIdentifier,
+    )
+    const sliEligible = isEligibleApiSliRequest(
+      context.req.method,
+      context.req.path,
     )
     const method = summarizeApiMethod(context.req.method)
     const routeGroup = summarizeApiRoute(context.req.path)
@@ -116,6 +119,7 @@ export function registerCommonMiddleware(
       observedAtMilliseconds: completedAt,
       requestId: identifiers.requestId,
       routeGroup,
+      sliEligible,
       ...runtimeMetadata,
       status: context.res.status,
     })
@@ -173,6 +177,7 @@ export function registerCommonMiddleware(
   app.use('/api/*', async (context, next) => {
     await next()
     if (
+      context.req.path === '/api/ready' ||
       context.req.path.startsWith('/api/request-') ||
       context.req.path.startsWith('/api/enterprise/security') ||
       context.req.path.startsWith('/api/auth/sso') ||
@@ -183,15 +188,35 @@ export function registerCommonMiddleware(
       context.header('Referrer-Policy', 'no-referrer')
     }
   })
+}
 
-  app.use(
-    '/api/enterprise/security/*',
-    dependencies.auditRejectedEnterpriseSecurityMutation,
-  )
-  app.use(
-    '/api/scim/*',
-    dependencies.auditRejectedEnterpriseSecurityMutation,
-  )
+/**
+ * Reads the server-generated correlation identifier established by common middleware.
+ *
+ * @param request - Raw request used as the weakly referenced lookup key.
+ * @returns Canonical correlation identifier, or undefined when common middleware is absent.
+ */
+export function readCanonicalCorrelationId(
+  request: Request,
+): string | undefined {
+  return identifiersByRequest.get(request)?.correlationId
+}
+
+/**
+ * Registers the rejection-audit middleware after admission controls.
+ *
+ * Keeping this registration separate lets the runtime-control gate return
+ * before authentication or persistence-backed audit work begins.
+ *
+ * @param app - Hono application receiving security-audit middleware.
+ * @param middleware - Enterprise mutation rejection-audit middleware.
+ */
+export function registerEnterpriseSecurityAuditMiddleware(
+  app: Hono,
+  middleware: MiddlewareHandler,
+): void {
+  app.use('/api/enterprise/security/*', middleware)
+  app.use('/api/scim/*', middleware)
 }
 
 /**

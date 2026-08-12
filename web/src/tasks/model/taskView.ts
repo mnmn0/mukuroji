@@ -3,11 +3,14 @@ import type {
   ResolvedWorkItemConfiguration,
   WorkflowStatusDefinition,
   WorkItemConfiguration,
+  WorkItemPatch,
+  WorkItemSchedule,
 } from '@mukuroji/contracts'
 import type { BulkOperationSelection } from '../../bulk-operations/model/bulkOperation'
 import type { ProjectDirectoryTeam } from '../../projects/api/directory'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import type { WorkspaceMember } from '../../workspace/api/access'
+import type { TaskViewGroupValue } from '../../task-views/model/taskViewPresentation'
 import {
   isCustomFieldApplicable,
   sortCustomFieldDefinitions,
@@ -18,11 +21,19 @@ import {
 } from '../../work-items/model/workItemFilters'
 import {
   formatWorkItemCustomFieldValue,
+  resolveWorkItemAssignee,
+  resolveWorkItemTitle,
   resolveWorkItemWorkflowStatusLabel,
   resolveWorkflowStatusCategory,
   sortWorkflowStatuses,
 } from '../../work-items/model/workItemDisplay'
 import type { ProjectTask, TaskPriority } from '../api/tasks'
+import {
+  deriveTaskScheduleDueDate,
+  resolveTaskSchedule,
+  resolveTaskSchedulePrimaryDate,
+  taskScheduleInstantToLocalDate,
+} from './taskSchedule'
 
 /** Task views available within the project task workspace. */
 export const taskTabs: readonly ['table', 'board', 'gantt', 'calendar', 'file', 'permissions'] = [
@@ -38,9 +49,10 @@ export const taskTabs: readonly ['table', 'board', 'gantt', 'calendar', 'file', 
 export const taskPriorities: readonly ['high', 'medium', 'low'] = ['high', 'medium', 'low']
 
 /** Due-date filters available to the task list. */
-export const taskDueDateFilters: readonly ['all', 'overdue', 'upcoming', 'no-date'] = [
+export const taskDueDateFilters: readonly ['all', 'overdue', 'today', 'upcoming', 'no-date'] = [
   'all',
   'overdue',
+  'today',
   'upcoming',
   'no-date',
 ]
@@ -68,6 +80,44 @@ export type DueDateFilter = (typeof taskDueDateFilters)[number]
 
 /** Due-date ordering selected in the task list. */
 export type TaskSortOrder = (typeof taskSortOrders)[number]
+
+/** Reproducible filter, sort, and layout state controlled by a task-view definition. */
+export type TaskScreenViewState = {
+  /** Active Project task layout or supporting Project tab. */
+  activeTab: TaskTab
+  /** Assignee identity filter or the all-assignee sentinel. */
+  assigneeFilter: AssigneeFilter
+  /** Workflow category and custom-field filter. */
+  definitionFilter: WorkItemDefinitionFilter
+  /** Relative due-date filter. */
+  dueDateFilter: DueDateFilter
+  /** Priority filter or the all-priority sentinel. */
+  priorityFilter: PriorityFilter
+  /** Case-insensitive task search query. */
+  searchQuery: string
+  /** Due-date ordering applied after filtering. */
+  sortOrder: TaskSortOrder
+  /** Team-qualified workflow status or the all-status sentinel. */
+  statusFilter: StatusFilter
+}
+
+/**
+ * Context inherited when a Work Item is created from a task view.
+ */
+export type TaskCreateContext = {
+  /** Project receiving the new Work Item. */
+  projectId?: string
+  /** Team owning the destination workflow. */
+  teamId?: string
+  /** Workflow status inherited from a Board column or other status surface. */
+  workflowStatusId?: string
+  /** Explicit schedule inherited from a Calendar range or planning surface. */
+  schedule?: WorkItemSchedule
+  /** Assignee inherited from an assignee-oriented surface. */
+  assigneeUserId?: string
+  /** Surface that initiated the create action. */
+  source: 'header' | 'table' | 'board' | 'gantt' | 'calendar' | 'assignee'
+}
 
 /** A selectable assignee filter option derived from visible task data. */
 export type AssigneeFilterOption = {
@@ -129,6 +179,95 @@ export type TaskSummary = {
   doneCount: number
   /** Rounded percentage of completed tasks among all tasks. */
   completionRate: number
+}
+
+/**
+ * Returns the optimistic task projection for a canonical Work Item patch.
+ *
+ * @param task - Current Work Item snapshot.
+ * @param patch - Fields that will be sent to the Work Item API.
+ * @param configuration - Workflow configuration used to resolve a status category.
+ * @returns A task projection with the patch applied locally.
+ */
+export function applyTaskPatchOptimistically(
+  task: ProjectTask,
+  patch: WorkItemPatch,
+  configuration?: WorkItemConfiguration,
+) {
+  const nextCustomFieldValues = { ...task.customFieldValues }
+
+  for (const [fieldId, value] of Object.entries(patch.customFieldValues ?? {})) {
+    if (value === null) {
+      delete nextCustomFieldValues[fieldId]
+      continue
+    }
+
+    nextCustomFieldValues[fieldId] = value
+  }
+
+  const nextStatus = patch.workflowStatusId && configuration
+    ? configuration.workflow.statuses.find((status) => status.id === patch.workflowStatusId)
+    : undefined
+
+  return {
+    ...task,
+    ...(patch.title === undefined ? {} : { title: patch.title }),
+    ...(patch.description === undefined ? {} : { description: patch.description }),
+    ...(patch.assignedProjectId === undefined
+      ? {}
+      : patch.assignedProjectId === null
+        ? { assignedProjectId: undefined }
+        : { assignedProjectId: patch.assignedProjectId }),
+    ...(patch.assigneeUserId === undefined ? {} : { assigneeUserId: patch.assigneeUserId }),
+    ...(patch.schedule === undefined
+      ? {}
+      : {
+          dueDate: deriveTaskScheduleDueDate(patch.schedule),
+          schedule: patch.schedule,
+        }),
+    ...(patch.priority === undefined ? {} : { priority: patch.priority }),
+    ...(patch.workflowStatusId === undefined ? {} : { workflowStatusId: patch.workflowStatusId }),
+    ...(nextStatus ? { statusCategory: nextStatus.category } : {}),
+    ...(patch.customFieldValues === undefined ? {} : { customFieldValues: nextCustomFieldValues }),
+  }
+}
+
+/**
+ * Creates the inverse patch used by the common inline-edit undo action.
+ *
+ * @param task - Snapshot before the optimistic update.
+ * @param patch - Patch that was applied to the snapshot.
+ * @returns A patch that restores every field touched by the original patch.
+ */
+export function createTaskInversePatch(
+  task: ProjectTask,
+  patch: WorkItemPatch,
+): WorkItemPatch {
+  const inverseCustomFieldValues = patch.customFieldValues === undefined
+    ? undefined
+    : Object.fromEntries(
+        Object.keys(patch.customFieldValues).map((fieldId) => [
+          fieldId,
+          task.customFieldValues[fieldId] ?? null,
+        ]),
+      )
+
+  return {
+    ...(patch.title === undefined ? {} : { title: task.title }),
+    ...(patch.description === undefined ? {} : { description: task.description ?? '' }),
+    ...(patch.assignedProjectId === undefined
+      ? {}
+      : { assignedProjectId: task.assignedProjectId ?? null }),
+    ...(patch.assigneeUserId === undefined ? {} : { assigneeUserId: task.assigneeUserId }),
+    ...(patch.schedule === undefined
+      ? {}
+      : { schedule: task.schedule }),
+    ...(patch.priority === undefined ? {} : { priority: task.priority }),
+    ...(patch.workflowStatusId === undefined ? {} : { workflowStatusId: task.workflowStatusId }),
+    ...(inverseCustomFieldValues === undefined
+      ? {}
+      : { customFieldValues: inverseCustomFieldValues }),
+  }
 }
 
 /** A deduplicated Project option available to bulk move operations. */
@@ -209,6 +348,31 @@ export function findTaskBySelection(
 }
 
 /**
+ * Chooses one canonical snapshot for detail rendering and its revision-guarded mutation.
+ *
+ * A detail request and the project list revalidate independently, so either source can be newer.
+ * A candidate for another Team-local Work Item is ignored even when its local ID happens to match.
+ *
+ * @param listTask - Work Item selected from the project list.
+ * @param detailTask - Independently cached detail snapshot.
+ * @returns The matching snapshot with the greatest observed revision.
+ */
+export function resolveLatestTaskSnapshot(
+  listTask: ProjectTask | undefined,
+  detailTask: ProjectTask | undefined,
+): ProjectTask | undefined {
+  if (!listTask) {
+    return undefined
+  }
+  return detailTask &&
+      detailTask.id === listTask.id &&
+      detailTask.teamId === listTask.teamId &&
+      detailTask.revision >= listTask.revision
+    ? detailTask
+    : listTask
+}
+
+/**
  * Converts a task into the revision snapshot required by bulk operations.
  *
  * @param task - Task selected for a bulk operation.
@@ -247,13 +411,19 @@ export function formatTaskDateInputValue(
 }
 
 /**
- * Parses the task storage date format into a local midnight Date.
+ * Parses a canonical ISO task date into a local midnight Date.
  *
- * @param value - Date stored as a slash-delimited year, month, and day.
- * @returns Parsed local Date, or null when required numeric parts are missing.
+ * @param value - Date stored in `YYYY-MM-DD` form.
+ * @returns Parsed local Date, or null when the value is malformed or impossible.
  */
 export function parseTaskDueDate(value: string) {
-  const [year, month, day] = value.split('/').map(Number)
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/u.exec(value)
+  if (!match) {
+    return null
+  }
+  const year = Number(match[1])
+  const month = Number(match[2])
+  const day = Number(match[3])
 
   if (!year || !month || !day) {
     return null
@@ -262,7 +432,12 @@ export function parseTaskDueDate(value: string) {
   const date = new Date(year, month - 1, day)
   date.setHours(0, 0, 0, 0)
 
-  return Number.isNaN(date.getTime()) ? null : date
+  return Number.isNaN(date.getTime()) ||
+      date.getFullYear() !== year ||
+      date.getMonth() !== month - 1 ||
+      date.getDate() !== day
+    ? null
+    : date
 }
 
 /**
@@ -273,13 +448,13 @@ export function parseTaskDueDate(value: string) {
  * @returns True only for a parsed past date on a non-completed task.
  */
 export function isTaskOverdue(task: ProjectTask, now: Date = new Date()) {
-  const dueDate = parseTaskDueDate(task.dueDate)
+  const dueDate = deriveTaskScheduleDueDate(task.schedule)
 
-  if (resolveWorkflowStatusCategory(task) === 'completed' || !dueDate) {
+  if (resolveWorkflowStatusCategory(task) === 'completed' || !parseTaskDueDate(dueDate)) {
     return false
   }
 
-  const today = createLocalStartOfDay(now)
+  const today = taskScheduleInstantToLocalDate(now, task.schedule.calendarPolicy)
   return dueDate < today
 }
 
@@ -300,20 +475,25 @@ export function matchesTaskDueDateFilter(
     return true
   }
 
-  const dueDate = parseTaskDueDate(task.dueDate)
+  const dueDate = deriveTaskScheduleDueDate(task.schedule)
+  const parsedDueDate = parseTaskDueDate(dueDate)
 
   if (filter === 'no-date') {
-    return !dueDate
+    return !parsedDueDate
   }
 
-  if (resolveWorkflowStatusCategory(task) === 'completed' || !dueDate) {
+  if (resolveWorkflowStatusCategory(task) === 'completed' || !parsedDueDate) {
     return false
   }
 
-  const today = createLocalStartOfDay(now)
+  const today = taskScheduleInstantToLocalDate(now, task.schedule.calendarPolicy)
 
   if (filter === 'overdue') {
     return dueDate < today
+  }
+
+  if (filter === 'today') {
+    return dueDate === today
   }
 
   return dueDate >= today
@@ -334,8 +514,8 @@ export function sortTasksByDueDate(
   sortOrder: TaskSortOrder,
 ) {
   return [...tasks].sort((firstTask, secondTask) => {
-    const firstTime = parseTaskDueDate(firstTask.dueDate)?.getTime()
-    const secondTime = parseTaskDueDate(secondTask.dueDate)?.getTime()
+    const firstTime = parseTaskDueDate(deriveTaskScheduleDueDate(firstTask.schedule))?.getTime()
+    const secondTime = parseTaskDueDate(deriveTaskScheduleDueDate(secondTask.schedule))?.getTime()
     const firstSortTime = firstTime ?? Number.MAX_SAFE_INTEGER
     const secondSortTime = secondTime ?? Number.MAX_SAFE_INTEGER
 
@@ -361,6 +541,7 @@ export function resolveDueDateFilterLabelKey(filter: DueDateFilter): MessageKey 
   const labelKeys: Record<DueDateFilter, MessageKey> = {
     all: 'tasks.filter.dueDateAll',
     overdue: 'tasks.filter.dueDateOverdue',
+    today: 'tasks.filter.dueDateToday',
     upcoming: 'tasks.filter.dueDateUpcoming',
     'no-date': 'tasks.filter.dueDateNoDate',
   }
@@ -456,6 +637,51 @@ export function resolveProjectTaskConfiguration(
   return Object.keys(configurationsByTeam).length === 0
     ? fallbackConfiguration
     : undefined
+}
+
+/**
+ * Resolves one consistent grouping key and label for a Project task.
+ *
+ * @param task - Project Work Item whose value is being grouped.
+ * @param field - Built-in or custom field used for grouping.
+ * @param configurationsByTeam - Team-specific configurations for aggregate Project views.
+ * @param fallbackConfiguration - Single-Team configuration used when no Team map is available.
+ * @param t - Translator used for localized priority labels.
+ * @returns Stable grouping key and human-readable label.
+ */
+export function resolveProjectTaskGroupValue(
+  task: ProjectTask,
+  field: string,
+  configurationsByTeam: Readonly<Record<string, ResolvedWorkItemConfiguration>>,
+  fallbackConfiguration: WorkItemConfiguration | undefined,
+  t: TaskTranslator,
+): TaskViewGroupValue {
+  const configuration = resolveProjectTaskConfiguration(
+    task,
+    configurationsByTeam,
+    fallbackConfiguration,
+  )
+  let value: string
+  switch (field) {
+    case 'title': value = resolveWorkItemTitle(task); break
+    case 'status': value = resolveWorkItemWorkflowStatusLabel(task, configuration); break
+    case 'assignee': value = resolveWorkItemAssignee(task); break
+    case 'dueDate': value = task.dueDate || '—'; break
+    case 'priority': value = t(`tasks.priority.${task.priority}`); break
+    case 'project': value = task.assignedProjectId ?? '—'; break
+    case 'team': value = task.teamId; break
+    default: {
+      const customValue = field.startsWith('custom:')
+        ? task.customFieldValues[field.slice('custom:'.length)]
+        : undefined
+      value = Array.isArray(customValue)
+        ? customValue.join(', ')
+        : customValue === undefined || customValue === null || customValue === ''
+          ? '—'
+          : String(customValue)
+    }
+  }
+  return { key: value, label: value }
 }
 
 /**
@@ -600,7 +826,7 @@ export function resolveTaskCustomFieldSearchValues(
 }
 
 /**
- * Groups tasks by their stored due-date value for the calendar view.
+ * Groups tasks by the canonical schedule anchor for the calendar view.
  *
  * @param tasks - Tasks displayed by the calendar.
  * @returns Sorted date groups and the tasks without a trimmed due date.
@@ -608,18 +834,22 @@ export function resolveTaskCustomFieldSearchValues(
 export function createTaskCalendarModel(
   tasks: readonly ProjectTask[],
 ): TaskCalendarModel {
-  const dates = Array.from(new Set(tasks.map((task) => task.dueDate)))
-    .filter((date) => date.trim().length > 0)
+  const dates = Array.from(new Set(tasks.map((task) =>
+    resolveTaskSchedulePrimaryDate(resolveTaskSchedule(task)),
+  )))
+    .filter((date): date is string => date !== undefined)
     .sort()
 
   return {
     days: dates.map((date) => ({
       date,
       id: date,
-      items: tasks.filter((task) => task.dueDate === date),
+      items: tasks.filter((task) =>
+        resolveTaskSchedulePrimaryDate(resolveTaskSchedule(task)) === date
+      ),
       label: date,
     })),
-    unscheduledTasks: tasks.filter((task) => !task.dueDate.trim()),
+    unscheduledTasks: tasks.filter((task) => resolveTaskSchedule(task).mode === 'unscheduled'),
   }
 }
 
@@ -679,7 +909,7 @@ export function filterAndSortProjectTasks(
     options.definitionFilter,
     options.configuration,
   )
-  const normalizedQuery = options.searchQuery.trim().toLowerCase()
+  const normalizedQuery = options.searchQuery.trim().toLocaleLowerCase()
   const today = options.today ?? new Date()
   const filteredTasks = tasks.filter((task) => {
     const resolvedTaskConfiguration = resolveProjectTaskConfiguration(
@@ -712,27 +942,61 @@ export function filterAndSortProjectTasks(
       return false
     }
 
-    if (!normalizedQuery) {
-      return true
-    }
-
-    return [
-      task.title,
-      resolveTaskAssignee(task),
-      resolveWorkItemWorkflowStatusLabel(task, resolvedTaskConfiguration),
-      options.t(`tasks.priority.${task.priority}`),
-      task.dueDate,
-      ...resolveTaskCustomFieldSearchValues(
-        task,
-        resolvedTaskConfiguration,
-        options.locale,
-        options.personLabels,
-        options.t,
-      ),
-    ].some((value) => value.toLowerCase().includes(normalizedQuery))
+    return !normalizedQuery || matchesProjectTaskKeyword(
+      task,
+      normalizedQuery,
+      options.configuration,
+      options.configurationsByTeam,
+      options.locale,
+      options.personLabels,
+      options.t,
+    )
   })
 
   return sortTasksByDueDate(filteredTasks, options.sortOrder)
+}
+
+/**
+ * Matches the localized and formatted display values exposed by the Project task surface.
+ *
+ * @param task - Project Work Item evaluated by keyword filtering.
+ * @param normalizedKeyword - Trimmed lower-case keyword from the active task view.
+ * @param fallbackConfiguration - Single-Team configuration used when no Team map is available.
+ * @param configurationsByTeam - Team-specific configurations for aggregate Project results.
+ * @param locale - Locale used to format typed custom-field values.
+ * @param personLabels - Person identities mapped to display labels.
+ * @param t - Translator used for localized priority and custom-field labels.
+ * @returns Whether any Project-visible display value contains the keyword.
+ */
+export function matchesProjectTaskKeyword(
+  task: ProjectTask,
+  normalizedKeyword: string,
+  fallbackConfiguration: WorkItemConfiguration | undefined,
+  configurationsByTeam: Readonly<Record<string, ResolvedWorkItemConfiguration>>,
+  locale: Locale,
+  personLabels: Readonly<Record<string, string>>,
+  t: TaskTranslator,
+): boolean {
+  const configuration = resolveProjectTaskConfiguration(
+    task,
+    configurationsByTeam,
+    fallbackConfiguration,
+  )
+  return [
+    task.title,
+    resolveTaskAssignee(task),
+    resolveWorkItemWorkflowStatusLabel(task, configuration),
+    t(`tasks.priority.${task.priority}`),
+    task.dueDate,
+    deriveTaskScheduleDueDate(task.schedule),
+    ...resolveTaskCustomFieldSearchValues(
+      task,
+      configuration,
+      locale,
+      personLabels,
+      t,
+    ),
+  ].some((value) => value.toLocaleLowerCase().includes(normalizedKeyword))
 }
 
 /**
@@ -811,18 +1075,6 @@ export function resolveTaskPriority(value: unknown): TaskPriority {
   }
 
   return 'medium'
-}
-
-/**
- * Returns a copy of a reference time normalized to local midnight.
- *
- * @param value - Reference time to normalize without mutation.
- * @returns A new Date at the start of the same local day.
- */
-function createLocalStartOfDay(value: Date) {
-  const date = new Date(value)
-  date.setHours(0, 0, 0, 0)
-  return date
 }
 
 /**

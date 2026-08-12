@@ -38,12 +38,25 @@ export class PlanningApiError extends Error {
 export function resolvePlanningErrorMessageKey(
   error: unknown,
   operation: 'load' | 'mutation' = 'load',
-) {
+): 'planning.conflict' | 'planning.error' | 'planning.mutationError' {
   if (typeof error !== 'object' || error === null) {
-    return operation === 'mutation' ? 'planning.mutationError' as const : 'planning.error' as const
+    return operation === 'mutation' ? 'planning.mutationError' : 'planning.error'
   }
 
+  if (isPlanningSnapshotConflict(error)) return 'planning.conflict'
+  return operation === 'mutation' ? 'planning.mutationError' : 'planning.error'
+}
+
+/**
+ * Returns whether a Planning mutation failed because its revision or authorization view is stale.
+ *
+ * @param error - Unknown error returned by a Planning mutation boundary.
+ * @returns True when callers must revalidate the authoritative Planning snapshot.
+ */
+export function isPlanningSnapshotConflict(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false
   const code = 'code' in error && typeof error.code === 'string' ? error.code : undefined
-  if (code === 'PlanningRevisionConflict') return 'planning.conflict' as const
-  return operation === 'mutation' ? 'planning.mutationError' as const : 'planning.error' as const
+  return code === 'PlanningRevisionConflict' ||
+    code === 'PlanningAuthorizationChanged' ||
+    code === 'PlanningWorkItemChanged'
 }

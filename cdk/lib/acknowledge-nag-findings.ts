@@ -1,6 +1,7 @@
 import { Validations } from 'aws-cdk-lib';
 import type { Stack } from 'aws-cdk-lib';
 import type { IConstruct } from 'constructs';
+import { createRestoreDrillCleanupWorkflowName } from './subsystems/restore-drill';
 
 const secretPaths = [
   'ConnectorRuntimeSecret/Resource',
@@ -16,12 +17,16 @@ const deadLetterQueuePaths = [
   'RequestEmailIngestionDlq/Resource',
 ] as const;
 const lambdaPaths = [
+  'FileBucketIncarnationMarkerFunction/Resource',
+  'FileBucketIncarnationMarkerProvider/framework-onEvent/Resource',
   'ListProjectTasksFunction/Resource',
   'WorkItemImportFunction/Resource',
   'RealtimeHandlerFunction/Resource',
   'CollaborationProjectionFunction/Resource',
   'AutomationEventFunction/Resource',
   'AutomationScheduleFunction/Resource',
+  'RuntimeControlAlarmReadinessOnEventFunction/Resource',
+  'RuntimeControlAlarmReadinessPollFunction/Resource',
   'WebhookAuthorizationBackfillFunction/Resource',
   'WebhookAuthorizationBackfillProgressFunction/Resource',
   'WebhookDeliveryFunction/Resource',
@@ -33,12 +38,19 @@ const lambdaPaths = [
 ] as const;
 const managedPolicyRolePaths = [
   'BucketNotificationsHandler050a0587b7544547bf325f094a3db834/Role/Resource',
+  'FileBucketIncarnationMarkerFunction/ServiceRole/Resource',
+  'FileBucketIncarnationMarkerProvider/framework-onEvent/ServiceRole/Resource',
   'ListProjectTasksFunction/ServiceRole/Resource',
   'WorkItemImportFunction/ServiceRole/Resource',
   'RealtimeHandlerFunction/ServiceRole/Resource',
   'CollaborationProjectionFunction/ServiceRole/Resource',
   'AutomationEventFunction/ServiceRole/Resource',
   'AutomationScheduleFunction/ServiceRole/Resource',
+  'RuntimeControlAlarmReadinessOnEventFunction/ServiceRole/Resource',
+  'RuntimeControlAlarmReadinessPollFunction/ServiceRole/Resource',
+  'RuntimeControlAlarmReadinessProvider/framework-onEvent/ServiceRole/Resource',
+  'RuntimeControlAlarmReadinessProvider/framework-isComplete/ServiceRole/Resource',
+  'RuntimeControlAlarmReadinessProvider/framework-onTimeout/ServiceRole/Resource',
   'WebhookAuthorizationBackfillFunction/ServiceRole/Resource',
   'WebhookAuthorizationBackfillProgressFunction/ServiceRole/Resource',
   'WebhookAuthorizationBackfillProvider/framework-onEvent/ServiceRole/Resource',
@@ -63,6 +75,7 @@ const apiStagePaths = [
   'RealtimeWebSocketStage/Resource',
 ] as const;
 const waiterStateMachinePath = [
+  'RuntimeControlAlarmReadinessProvider/waiter-state-machine/Resource',
   'WebhookAuthorizationBackfillProvider/waiter-state-machine/Resource',
 ] as const;
 const iam5FindingScopePaths = new Map<string, readonly string[]>([
@@ -76,6 +89,15 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
       'FileMalwareProtectionPolicy/Resource',
       'ListProjectTasksFunction/ServiceRole/DefaultPolicy/Resource',
       'CollaborationProjectionFunction/ServiceRole/DefaultPolicy/Resource',
+      'TenantExportCapabilityFunction/ServiceRole/DefaultPolicy/Resource',
+      'TenantDataCapabilityFunction/ServiceRole/DefaultPolicy/Resource',
+    ],
+  ],
+  [
+    'AwsSolutions-IAM5[Resource::<TenantExportBucket06599E71.Arn>/tenant-exports/*]',
+    [
+      'ListProjectTasksFunction/ServiceRole/DefaultPolicy/Resource',
+      'TenantExportCapabilityFunction/ServiceRole/DefaultPolicy/Resource',
     ],
   ],
   [
@@ -140,7 +162,17 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
     [
       'ListProjectTasksFunction/ServiceRole/DefaultPolicy/Resource',
       'WorkItemImportFunction/ServiceRole/DefaultPolicy/Resource',
+      'TenantExportCapabilityFunction/ServiceRole/DefaultPolicy/Resource',
+      'TenantDataCapabilityFunction/ServiceRole/DefaultPolicy/Resource',
     ],
+  ],
+  [
+    'AwsSolutions-IAM5[Resource::<WorkspaceSearchMigrationJournalBucket4E515934.Arn>/workspace-search/v1/*]',
+    ['WorkspaceSearchMigrationOperatorPolicy/Resource'],
+  ],
+  [
+    'AwsSolutions-IAM5[Resource::<WorkspaceSearchMigrationJournalBucket4E515934.Arn>/workspace-search/v1/rehearsal/evidence-*]',
+    ['WorkspaceSearchMigrationOperatorPolicy/Resource'],
   ],
   [
     'AwsSolutions-IAM5[Resource::<AutomationTableE3D67F0D.Arn>/index/*]',
@@ -160,6 +192,7 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
       'ApiAutomationWebhookSecretPolicy/Resource',
       'AutomationEventWebhookSecretPolicy/Resource',
       'AutomationScheduleWebhookSecretPolicy/Resource',
+      'TenantSecretsCapabilityFunction/ServiceRole/DefaultPolicy/Resource',
     ],
   ],
   [
@@ -167,6 +200,7 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
     [
       'ApiAutomationInboundWebhookSecretPolicy/Resource',
       'AutomationScheduleInboundWebhookSecretCleanupPolicy/Resource',
+      'TenantSecretsCapabilityFunction/ServiceRole/DefaultPolicy/Resource',
     ],
   ],
   [
@@ -190,7 +224,41 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
     [
       'CollaborationProjectionFunction/ServiceRole/DefaultPolicy/Resource',
       'AutomationEventFunction/ServiceRole/DefaultPolicy/Resource',
+      'RuntimeControlAlarmReadinessPollFunction/ServiceRole/DefaultPolicy/Resource',
+      'RuntimeControlAlarmMonitorPolicy/Resource',
+      'TenantSecretsCapabilityFunction/ServiceRole/DefaultPolicy/Resource',
+      'TenantVerificationCapabilityFunction/ServiceRole/DefaultPolicy/Resource',
     ],
+  ],
+  [
+    'AwsSolutions-IAM5[Resource::<FileBucketIncarnationMarkerFunctionBCDA95D8.Arn>:*]',
+    [
+      'FileBucketIncarnationMarkerProvider/framework-onEvent/ServiceRole/DefaultPolicy/Resource',
+    ],
+  ],
+  [
+    'AwsSolutions-IAM5[Resource::<RuntimeControlAlarmReadinessOnEventFunctionA25C5A0C.Arn>:*]',
+    [
+      'RuntimeControlAlarmReadinessProvider/framework-onEvent/ServiceRole/DefaultPolicy/Resource',
+      'RuntimeControlAlarmReadinessProvider/framework-isComplete/ServiceRole/DefaultPolicy/Resource',
+      'RuntimeControlAlarmReadinessProvider/framework-onTimeout/ServiceRole/DefaultPolicy/Resource',
+    ],
+  ],
+  [
+    'AwsSolutions-IAM5[Resource::<RuntimeControlAlarmReadinessPollFunctionCD017060.Arn>:*]',
+    [
+      'RuntimeControlAlarmReadinessProvider/framework-onEvent/ServiceRole/DefaultPolicy/Resource',
+      'RuntimeControlAlarmReadinessProvider/framework-isComplete/ServiceRole/DefaultPolicy/Resource',
+      'RuntimeControlAlarmReadinessProvider/framework-onTimeout/ServiceRole/DefaultPolicy/Resource',
+    ],
+  ],
+  [
+    'AwsSolutions-IAM5[Resource::<RuntimeControlAlarmReadinessProviderframeworkisComplete30325ABD.Arn>:*]',
+    ['RuntimeControlAlarmReadinessProvider/waiter-state-machine/Role/DefaultPolicy/Resource'],
+  ],
+  [
+    'AwsSolutions-IAM5[Resource::<RuntimeControlAlarmReadinessProviderframeworkonTimeout38DF830E.Arn>:*]',
+    ['RuntimeControlAlarmReadinessProvider/waiter-state-machine/Role/DefaultPolicy/Resource'],
   ],
   [
     'AwsSolutions-IAM5[Resource::<WebhookAuthorizationBackfillFunction5ABBA705.Arn>:*]',
@@ -215,6 +283,70 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
   [
     'AwsSolutions-IAM5[Resource::<WebhookAuthorizationBackfillProviderframeworkonTimeoutB47F77F4.Arn>:*]',
     ['WebhookAuthorizationBackfillProvider/waiter-state-machine/Role/DefaultPolicy/Resource'],
+  ],
+  ...[
+    'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<AuditEventsTable0723963E>/export/*]',
+    'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<FileProofingTable81DA272F>/export/*]',
+    'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<ProjectDirectoryTable9ED01C01>/export/*]',
+    'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<TeamIssuesTable189D851D>/export/*]',
+    'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<WorkItemConfigurationTable35E94558>/export/*]',
+    'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<WorkspaceAccessTableD7C8D2C7>/export/*]',
+  ].map((id) => [
+    id,
+    ['RestoreDrillRunnerRole/DefaultPolicy/Resource'],
+  ] as const),
+  [
+    'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/mukuroji-restore-drill-*]',
+    [
+      'RestoreDrillRunnerRole/DefaultPolicy/Resource',
+      'RestoreDrillCleanupRole/DefaultPolicy/Resource',
+    ],
+  ],
+  ...[
+    'AwsSolutions-IAM5[Resource::<RestoreDrillScratchBucketFA7353CB.Arn>/restore-drill/*]',
+    'AwsSolutions-IAM5[Resource::<RestoreDrillScratchBucketFA7353CB.Arn>/workspaces/*]',
+    'AwsSolutions-IAM5[Action::kms:GenerateDataKey*]',
+    'AwsSolutions-IAM5[Action::kms:ReEncrypt*]',
+  ].map((id) => [
+    id,
+    [
+      'RestoreDrillRunnerRole/DefaultPolicy/Resource',
+      'RestoreDrillCleanupRole/DefaultPolicy/Resource',
+    ],
+  ] as const),
+  [
+    'AwsSolutions-IAM5[Resource::<RestoreDrillEvidenceBucketE764D707.Arn>/evidence/v1/runs/*/result.json]',
+    [
+      'RestoreDrillRunnerRole/DefaultPolicy/Resource',
+      'RestoreDrillCleanupRole/DefaultPolicy/Resource',
+    ],
+  ],
+  [
+    'AwsSolutions-IAM5[Resource::<RestoreDrillEvidenceBucketE764D707.Arn>/evidence/v1/runs/*/cleanup.json]',
+    ['RestoreDrillCleanupRole/DefaultPolicy/Resource'],
+  ],
+  [
+    'AwsSolutions-IAM5[Resource::<RestoreDrillEvidenceBucketE764D707.Arn>/approvals/v1/runs/*]',
+    [
+      'RestoreDrillCleanupRole/DefaultPolicy/Resource',
+      'RestoreDrillCleanupApprovalPolicy/Resource',
+    ],
+  ],
+  [
+    'AwsSolutions-IAM5[Resource::<RestoreDrillRunnerFunction5F951D72.Arn>:*]',
+    ['RestoreDrillWorkflow/Role/DefaultPolicy/Resource'],
+  ],
+  [
+    'AwsSolutions-IAM5[Resource::<RestoreDrillCleanupFunctionAB0B8AED.Arn>:*]',
+    ['RestoreDrillCleanupWorkflow/Role/DefaultPolicy/Resource'],
+  ],
+  [
+    'AwsSolutions-IAM5[Resource::<RestoreDrillEvidenceBucketE764D707.Arn>/evidence/v1/runs/*]',
+    ['RestoreDrillCleanupApprovalPolicy/Resource'],
+  ],
+  [
+    'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:states:<AWS::Region>:<AWS::AccountId>:execution:<RestoreDrillCleanupWorkflowBC990746.Name>:*]',
+    ['RestoreDrillCleanupApprovalPolicy/Resource'],
   ],
 ]);
 
@@ -267,6 +399,7 @@ const acknowledgedFindings = [
   ...[
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:events:<AWS::Region>:<AWS::AccountId>:rule/DO-NOT-DELETE-AmazonGuardDutyMalwareProtectionS3*]',
     'AwsSolutions-IAM5[Resource::<FileBucketCDFCD6DE.Arn>/workspaces/*]',
+    'AwsSolutions-IAM5[Resource::<TenantExportBucket06599E71.Arn>/tenant-exports/*]',
     'AwsSolutions-IAM5[Resource::<ProjectTasksTableE21F6637.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::<AuditEventsTable0723963E.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::<NotificationsTable76DCFC6C.Arn>/index/*]',
@@ -274,6 +407,8 @@ const acknowledgedFindings = [
     'AwsSolutions-IAM5[Resource::<TeamIssuesTable189D851D.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::<RealtimeSessionsTable607096EB.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::<WorkItemImportBucket14068778.Arn>/work-item-imports/*]',
+    'AwsSolutions-IAM5[Resource::<WorkspaceSearchMigrationJournalBucket4E515934.Arn>/workspace-search/v1/*]',
+    'AwsSolutions-IAM5[Resource::<WorkspaceSearchMigrationJournalBucket4E515934.Arn>/workspace-search/v1/rehearsal/evidence-*]',
     'AwsSolutions-IAM5[Resource::<AutomationTableE3D67F0D.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::<RequestIntakeTable608708D4.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:secretsmanager:<AWS::Region>:<AWS::AccountId>:secret:mukuroji/automation-webhooks/*]',
@@ -281,13 +416,36 @@ const acknowledgedFindings = [
     'AwsSolutions-IAM5[Resource::<DeveloperPlatformTable772E085C.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:execute-api:<AWS::Region>:<AWS::AccountId>:<RealtimeWebSocketApiC99C6240>/production/*/@connections/*]',
     'AwsSolutions-IAM5[Resource::*]',
+    'AwsSolutions-IAM5[Resource::<FileBucketIncarnationMarkerFunctionBCDA95D8.Arn>:*]',
+    'AwsSolutions-IAM5[Resource::<RuntimeControlAlarmReadinessOnEventFunctionA25C5A0C.Arn>:*]',
+    'AwsSolutions-IAM5[Resource::<RuntimeControlAlarmReadinessPollFunctionCD017060.Arn>:*]',
+    'AwsSolutions-IAM5[Resource::<RuntimeControlAlarmReadinessProviderframeworkisComplete30325ABD.Arn>:*]',
+    'AwsSolutions-IAM5[Resource::<RuntimeControlAlarmReadinessProviderframeworkonTimeout38DF830E.Arn>:*]',
     'AwsSolutions-IAM5[Resource::<WebhookAuthorizationBackfillFunction5ABBA705.Arn>:*]',
     'AwsSolutions-IAM5[Resource::<WebhookAuthorizationBackfillProgressFunction1FF04FD2.Arn>:*]',
     'AwsSolutions-IAM5[Resource::<WebhookAuthorizationBackfillProviderframeworkisComplete0B745C37.Arn>:*]',
     'AwsSolutions-IAM5[Resource::<WebhookAuthorizationBackfillProviderframeworkonTimeoutB47F77F4.Arn>:*]',
+    'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<AuditEventsTable0723963E>/export/*]',
+    'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<FileProofingTable81DA272F>/export/*]',
+    'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<ProjectDirectoryTable9ED01C01>/export/*]',
+    'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<TeamIssuesTable189D851D>/export/*]',
+    'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<WorkItemConfigurationTable35E94558>/export/*]',
+    'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<WorkspaceAccessTableD7C8D2C7>/export/*]',
+    'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/mukuroji-restore-drill-*]',
+    'AwsSolutions-IAM5[Resource::<RestoreDrillScratchBucketFA7353CB.Arn>/restore-drill/*]',
+    'AwsSolutions-IAM5[Resource::<RestoreDrillScratchBucketFA7353CB.Arn>/workspaces/*]',
+    'AwsSolutions-IAM5[Action::kms:GenerateDataKey*]',
+    'AwsSolutions-IAM5[Action::kms:ReEncrypt*]',
+    'AwsSolutions-IAM5[Resource::<RestoreDrillEvidenceBucketE764D707.Arn>/evidence/v1/runs/*/result.json]',
+    'AwsSolutions-IAM5[Resource::<RestoreDrillEvidenceBucketE764D707.Arn>/evidence/v1/runs/*/cleanup.json]',
+    'AwsSolutions-IAM5[Resource::<RestoreDrillEvidenceBucketE764D707.Arn>/approvals/v1/runs/*]',
+    'AwsSolutions-IAM5[Resource::<RestoreDrillRunnerFunction5F951D72.Arn>:*]',
+    'AwsSolutions-IAM5[Resource::<RestoreDrillCleanupFunctionAB0B8AED.Arn>:*]',
+    'AwsSolutions-IAM5[Resource::<RestoreDrillEvidenceBucketE764D707.Arn>/evidence/v1/runs/*]',
+    'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:states:<AWS::Region>:<AWS::AccountId>:execution:<RestoreDrillCleanupWorkflowBC990746.Name>:*]',
   ].map((id) => ({
     id,
-    reason: 'The wildcard is constrained to the required S3 prefix, DynamoDB index, Secrets Manager namespace, API Gateway connection, GuardDuty rule, or CDK custom-resource provider resource.',
+    reason: 'The wildcard is constrained to a reviewed S3 prefix, DynamoDB index/export or reserved restore-table namespace, Step Functions execution namespace, Secrets Manager namespace, API Gateway connection, GuardDuty rule, CDK provider resource, KMS grant action family, or CloudWatch DescribeAlarms action.',
     scopePaths: iam5FindingScopePaths.get(id),
   })),
 ] as const;
@@ -318,6 +476,19 @@ export function acknowledgeKnownNagFindings(stack: Stack): void {
       Validations.of(scope).acknowledge({ ...finding, id });
     }
   }
+
+  const cleanupExecutionFinding =
+    'AwsSolutions::AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:' +
+    'states:<AWS::Region>:<AWS::AccountId>:execution:' +
+    `${createRestoreDrillCleanupWorkflowName(stack)}:restore-cleanup-*]`;
+  const cleanupRolePolicy = findConstruct(
+    stack,
+    'RestoreDrillCleanupRole/DefaultPolicy/Resource',
+  );
+  cleanupRolePolicy.node.addMetadata(Validations.ACKNOWLEDGED_RULES_METADATA_KEY, {
+    [cleanupExecutionFinding]:
+      'The wildcard is restricted to approval-gated execution names on the one exact cleanup state machine.',
+  });
 }
 
 function findConstruct(stack: Stack, relativePath: string): IConstruct {

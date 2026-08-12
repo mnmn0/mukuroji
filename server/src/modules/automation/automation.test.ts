@@ -1,9 +1,12 @@
 import { describe, expect, test } from 'bun:test'
 import {
   AUTOMATION_SCHEMA_VERSION,
+  createDefaultDueDateWorkItemSchedule,
+  createDefaultUnscheduledWorkItemSchedule,
   type AutomationExecution,
   type AutomationRule,
   type AutomationTemplateApplication,
+  type AutomationValue,
   type BulkOperation,
   type BulkOperationRequest,
   type RecurringSchedule,
@@ -395,7 +398,10 @@ describe('automation management create idempotency', () => {
       kind: 'work-item' as const,
       name: 'Weekly review',
       enabled: true,
-      payload: { title: 'Review' },
+      payload: {
+        schedule: createDefaultUnscheduledWorkItemSchedule(),
+        title: 'Review',
+      },
     }
     const template = await client.createTemplate('workspace-1', templateInput, 'shared-key')
     expect(await client.createTemplate('workspace-1', templateInput, 'shared-key')).toEqual(template)
@@ -429,7 +435,10 @@ describe('automation management create idempotency', () => {
 
     await expect(client.createTemplate('workspace-1', {
       ...templateInput,
-      payload: { title: 'Changed' },
+      payload: {
+        schedule: createDefaultUnscheduledWorkItemSchedule(),
+        title: 'Changed',
+      },
     }, 'shared-key')).rejects.toMatchObject({ code: 'IdempotencyConflict' })
     await expect(client.createRecurringWork('workspace-1', {
       ...recurringInput,
@@ -444,7 +453,10 @@ describe('automation management create idempotency', () => {
       kind: 'work-item',
       name: 'Pinned template',
       enabled: true,
-      payload: { title: 'Version one' },
+      payload: {
+        schedule: createDefaultUnscheduledWorkItemSchedule(),
+        title: 'Version one',
+      },
     })
     const ruleV1 = await client.createRule('workspace-1', {
       name: 'Pinned rule',
@@ -463,7 +475,10 @@ describe('automation management create idempotency', () => {
 
     const templateV2 = await client.updateTemplate('workspace-1', templateV1.id, {
       expectedRevision: 1,
-      payload: { title: 'Version two' },
+      payload: {
+        schedule: createDefaultUnscheduledWorkItemSchedule(),
+        title: 'Version two',
+      },
     })
     const ruleV2 = await client.updateRule('workspace-1', ruleV1.id, {
       expectedRevision: ruleV1.revision,
@@ -476,7 +491,10 @@ describe('automation management create idempotency', () => {
     })
     expect(ruleRenamed.actions[0]).toMatchObject({ templateVersion: 2 })
     expect((await client.getTemplateVersion('workspace-1', templateV1.id, 1))?.payload)
-      .toEqual({ title: 'Version one' })
+      .toEqual({
+        schedule: createDefaultUnscheduledWorkItemSchedule(),
+        title: 'Version one',
+      })
 
     const recurringV1 = await client.createRecurringWork('workspace-1', {
       name: 'Pinned recurring work',
@@ -529,7 +547,10 @@ describe('automation management create idempotency', () => {
     expect(scheduleEdited.nextRunAt).toBe(recurringV1.nextRunAt)
     const templateV3 = await client.updateTemplate('workspace-1', templateV1.id, {
       expectedRevision: templateV2.revision,
-      payload: { title: 'Version three' },
+      payload: {
+        schedule: createDefaultUnscheduledWorkItemSchedule(),
+        title: 'Version three',
+      },
     })
     const renamed = await client.updateRecurringWork('workspace-1', recurringV1.id, {
       expectedRevision: scheduleEdited.revision,
@@ -604,8 +625,8 @@ describe('automation management create idempotency', () => {
         assigneeUserId: 'reviewer@example.com',
         customFieldValues: { effort: 3, labels: ['review'] },
         description: '',
-        dueDate: '2026-07-31',
         priority: 'high',
+        schedule: createDefaultDueDateWorkItemSchedule('2026-07-31'),
         teamId: 'core',
         title: 'Review',
         workflowStatusId: 'backlog',
@@ -617,8 +638,8 @@ describe('automation management create idempotency', () => {
         assigneeUserId: 'reviewer@example.com',
         customFieldValues: { effort: 3, labels: ['review'] },
         description: '',
-        dueDate: '2026-07-31',
         priority: 'high',
+        schedule: createDefaultDueDateWorkItemSchedule('2026-07-31'),
         teamId: 'core',
         title: 'Review',
         workflowStatusId: 'backlog',
@@ -630,7 +651,7 @@ describe('automation management create idempotency', () => {
       { assigneeUserId: null, title: 'Review' },
       { customFieldValues: [], title: 'Review' },
       { description: false, title: 'Review' },
-      { dueDate: 1, title: 'Review' },
+      { schedule: { mode: 'unscheduled' }, title: 'Review' },
       { teamId: {}, title: 'Review' },
       { title: 'Review', workflowStatusId: 2 },
     ]) {
@@ -641,6 +662,12 @@ describe('automation management create idempotency', () => {
         payload,
       })).toThrow('Work Item template')
     }
+    expect(() => validateCreateAutomationTemplateInput({
+      kind: 'work-item',
+      name: 'Legacy deadline',
+      enabled: true,
+      payload: { dueDate: '2026-07-31', title: 'Review' },
+    })).toThrow('unsupported fields')
   })
 
   test('keeps template kinds immutable and validates Project, Workflow, update, and approval payloads strictly', async () => {
@@ -702,6 +729,84 @@ describe('automation management create idempotency', () => {
       enabled: true,
       trigger: { type: 'status' },
       actions: [{ type: 'update', patch: { revision: 99 } }],
+    })).toThrow('unsupported fields')
+    expect(() => validateCreateAutomationRuleInput({
+      name: 'Derived deadline update',
+      enabled: true,
+      trigger: { type: 'status' },
+      actions: [{ type: 'update', patch: { dueDate: '2026-07-31' } }],
+    })).toThrow('unsupported fields')
+    expect(validateCreateAutomationRuleInput({
+      name: 'Schedule update',
+      enabled: true,
+      trigger: { type: 'status' },
+      actions: [{
+        type: 'update',
+        patch: { schedule: createDefaultDueDateWorkItemSchedule('2026-07-31') },
+      }],
+    }).actions[0]).toEqual({
+      type: 'update',
+      patch: { schedule: createDefaultDueDateWorkItemSchedule('2026-07-31') },
+    })
+    expect(() => validateCreateAutomationRuleInput({
+      name: 'Missing inline schedule',
+      enabled: true,
+      trigger: { type: 'status' },
+      actions: [{ type: 'create', values: { teamId: 'core', title: 'Review' } }],
+    })).toThrow('explicit schedule')
+    expect(validateCreateAutomationRuleInput({
+      name: 'Inline create',
+      enabled: true,
+      trigger: { type: 'status' },
+      actions: [{
+        type: 'create',
+        values: {
+          schedule: createDefaultUnscheduledWorkItemSchedule(),
+          teamId: 'core',
+          title: 'Review',
+        },
+      }],
+    }).actions[0]).toMatchObject({
+      type: 'create',
+      values: {
+        schedule: {
+          calendarPolicy: {
+            holidays: [],
+            timeZone: 'UTC',
+            workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+          },
+          mode: 'unscheduled',
+        },
+      },
+    })
+    expect(validateCreateAutomationRuleInput({
+      name: 'Scheduled inline create',
+      enabled: true,
+      trigger: { type: 'status' },
+      actions: [{
+        type: 'create',
+        values: {
+          schedule: createDefaultDueDateWorkItemSchedule('2026-07-31'),
+          teamId: 'core',
+          title: 'Review',
+        },
+      }],
+    }).actions[0]).toEqual({
+      type: 'create',
+      values: {
+        schedule: createDefaultDueDateWorkItemSchedule('2026-07-31'),
+        teamId: 'core',
+        title: 'Review',
+      },
+    })
+    expect(() => validateCreateAutomationRuleInput({
+      name: 'Legacy inline create',
+      enabled: true,
+      trigger: { type: 'status' },
+      actions: [{
+        type: 'create',
+        values: { dueDate: '2026-07-31', teamId: 'core', title: 'Review' },
+      }],
     })).toThrow('unsupported fields')
 
     const { documentClient } = createIdempotencyDocumentClient()
@@ -2420,6 +2525,30 @@ test('keeps bulk partial failures across retry and safe undo', async () => {
   expect(result.revision).toBe(persistedRevision)
 })
 
+test('accepts a canonical schedule Bulk edit before previewing items', async () => {
+  const schedule = createDefaultDueDateWorkItemSchedule('2026-07-31')
+  const adapter: BulkOperationAdapter = {
+    async preview() {
+      return { allowed: true }
+    },
+    async apply() {
+      return { resultingRevision: 2 }
+    },
+    async undo() {
+      return { resultingRevision: 3 }
+    },
+  }
+
+  expect(await previewBulkOperation({
+    workspaceId: 'workspace-1',
+    items: [{ teamId: 'core', workItemId: 'one', expectedRevision: 1 }],
+    action: { type: 'edit', patch: { schedule } },
+  }, adapter)).toMatchObject({
+    action: { type: 'edit', patch: { schedule } },
+    canApply: true,
+  })
+})
+
 test('rejects unsafe Bulk edit fields before previewing any item', async () => {
   let previewCalls = 0
   const adapter: BulkOperationAdapter = {
@@ -2434,14 +2563,21 @@ test('rejects unsafe Bulk edit fields before previewing any item', async () => {
       return { resultingRevision: 3 }
     },
   }
-  await expect(previewBulkOperation({
-    workspaceId: 'workspace-1',
-    items: [{ teamId: 'core', workItemId: 'one', expectedRevision: 1 }],
-    action: { type: 'edit', patch: { archivedAt: '2026-07-16T00:00:00.000Z' } },
-  }, adapter)).rejects.toMatchObject({
-    category: 'invalid-input',
-    code: 'InvalidAutomationInput',
-  })
+  const unsafePatches: Array<Record<string, AutomationValue>> = [
+    { archivedAt: '2026-07-16T00:00:00.000Z' },
+    { dueDate: '2026-07-31' },
+    { schedule: { mode: 'unscheduled' } },
+  ]
+  for (const patch of unsafePatches) {
+    await expect(previewBulkOperation({
+      workspaceId: 'workspace-1',
+      items: [{ teamId: 'core', workItemId: 'one', expectedRevision: 1 }],
+      action: { type: 'edit', patch },
+    }, adapter)).rejects.toMatchObject({
+      category: 'invalid-input',
+      code: 'InvalidAutomationInput',
+    })
+  }
   expect(previewCalls).toBe(0)
 })
 

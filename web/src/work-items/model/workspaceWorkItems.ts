@@ -1,9 +1,11 @@
-import type {
-  ResolvedWorkItemConfiguration,
-  WorkflowStatusDefinition,
+import {
+  deriveWorkItemScheduleDueDate,
+  type ResolvedWorkItemConfiguration,
+  type WorkflowStatusDefinition,
 } from '@mukuroji/contracts'
 import type { ProjectDirectoryTeam } from '../../projects/api'
 import type { ProjectTask } from '../../tasks/api'
+import { taskScheduleInstantToLocalDate } from '../../tasks/model/taskSchedule'
 import {
   isCompletedWorkItem,
   isOpenWorkItem,
@@ -32,7 +34,7 @@ export type WorkspaceSummary = {
   projects: number
   /** Number of incomplete Work Items. */
   tasks: number
-  /** Number of high-priority incomplete Work Items. */
+  /** Number of active Work Items blocked by canonical relation/dependency signals. */
   blocked: number
 }
 
@@ -236,16 +238,18 @@ export function filterTasksByTeamProjectIds(
  *
  * @param teams - Workspace directory.
  * @param tasks - Workspace Work Items.
+ * @param blockedCount - Count derived from active canonical relation/dependency signals.
  * @returns Project, incomplete, and attention counts.
  */
 export function createWorkspaceSummary(
   teams: readonly ProjectDirectoryTeam[],
   tasks: readonly ProjectTask[],
+  blockedCount: number,
 ): WorkspaceSummary {
   return {
     projects: countWorkspaceProjects(teams),
     tasks: tasks.filter((task) => isOpenWorkItem(task)).length,
-    blocked: tasks.filter((task) => task.priority === 'high' && isOpenWorkItem(task)).length,
+    blocked: blockedCount,
   }
 }
 
@@ -406,26 +410,28 @@ export function hasApprovalAttention(task: ProjectTask) {
  * @returns True when the Work Item is incomplete and overdue.
  */
 export function isWorkspaceTaskOverdue(task: ProjectTask, referenceDate: Date) {
-  const dueDate = parseWorkspaceTaskDueDate(task.dueDate)
+  const dueDate = deriveWorkItemScheduleDueDate(task.schedule)
 
-  if (!isOpenWorkItem(task) || !dueDate) {
+  if (!isOpenWorkItem(task) || !parseWorkspaceTaskDueDate(dueDate)) {
     return false
   }
 
-  const today = new Date(referenceDate)
-  today.setHours(0, 0, 0, 0)
+  const today = taskScheduleInstantToLocalDate(
+    referenceDate,
+    task.schedule.calendarPolicy,
+  )
 
   return dueDate < today
 }
 
 /**
- * Parses a Work Item's YYYY/MM/DD due date as a local date.
+ * Parses a Work Item's canonical ISO due-date projection as a local date.
  *
  * @param value - Work Item due-date string.
  * @returns The parsed date, or null when the value is invalid.
  */
 export function parseWorkspaceTaskDueDate(value: string) {
-  const match = /^(\d{4})\/(\d{2})\/(\d{2})$/.exec(value)
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/u.exec(value)
 
   if (!match) {
     return null
@@ -542,5 +548,7 @@ function normalizeWorkspaceSearchText(value?: string) {
  * @returns The due date in milliseconds, or the maximum safe integer when invalid.
  */
 function getWorkspaceDueTime(task: ProjectTask) {
-  return parseWorkspaceTaskDueDate(task.dueDate)?.getTime() ?? Number.MAX_SAFE_INTEGER
+  return parseWorkspaceTaskDueDate(
+    deriveWorkItemScheduleDueDate(task.schedule),
+  )?.getTime() ?? Number.MAX_SAFE_INTEGER
 }

@@ -1,14 +1,37 @@
 import type {
+  PlanningSnapshot,
   ResolvedWorkItemConfiguration,
+  TaskViewDefinition,
+  TaskViewScope,
+  TeamTaskViewScope,
+  WorkItemActionContext,
+  WorkItemActionId,
+  WorkItemActionResult,
+  WorkItemActionSelection,
   WorkflowStatusDefinition,
   WorkItemConfiguration,
   WorkItemRelation,
+  WorkItemDependencyEndpoint,
+  WorkItemSchedule,
+  WorkItemScheduleDependency,
+  WorkItemScheduleDependencyPatch,
 } from '@mukuroji/contracts'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import {
+  Fragment,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type DragEvent,
+  type ReactNode,
+} from 'react'
 import { useLocation, useNavigate, useParams, useSearchParams } from 'react-router'
 import {
   canManageWorkspaceStructure,
   canMutateWorkspaceContent,
+  type CurrentUser,
 } from '../../auth/api'
 import { useCurrentUser } from '../../auth/queries/useCurrentUser'
 import { resolveEnterpriseSessionErrorsAction } from '../../auth/enterpriseSessionErrors'
@@ -22,18 +45,14 @@ import {
 } from '../../files/mutations/useFileArtifacts'
 import {
   MobileSidebarButton,
-  WorkspaceSidebar,
-  type SidebarNavId,
-  type SidebarTeamViewId,
 } from '../../shared/ui/sidebar'
+import { MoreHorizontalIcon } from '../../shared/ui/icons'
 import {
-  createSidebarLabels,
   createTranslator,
   getInitialLocale,
   type Locale,
   type MessageKey,
 } from '../../shared/i18n/i18n'
-import { useUnreadNotificationCount } from '../../notifications/mutations/useNotifications'
 import {
   createTeamIssue,
   TeamIssuesApiError,
@@ -52,35 +71,49 @@ import {
   useIssueCollaboration,
 } from '../../issues/mutations/useIssueCollaboration'
 import {
-  archiveProjectDirectoryProject,
-  archiveProjectDirectoryTeam,
-  createProjectDirectoryProject,
-  createProjectDirectoryTeam,
-  type CreateProjectDirectoryProjectInput,
-  type CreateProjectDirectoryTeamInput,
+  canManagePlanningWorkItemDependencyEndpoint,
+  createPlanningAccessSnapshot,
+} from '../../planning/model/permissions'
+import { createWorkItemDependencyMutationController } from '../../planning/mutations/createWorkItemDependencyMutationController'
+import { usePlanningSnapshot } from '../../planning/queries/usePlanningSnapshot'
+import {
   type ProjectDirectoryTeam,
   type ProjectMember,
+  type ProjectMemberRole,
 } from '../../projects/api'
 import { useProjectDirectory } from '../../projects/queries/useProjectDirectory'
-import { useActiveProjectMembers } from '../../projects/queries/useProjectMembers'
 import {
-  createProjectIssuesPath,
+  useActiveProjectMembers,
+  usePlanningProjectRoles,
+} from '../../projects/queries/useProjectMembers'
+import {
   createTeamIssuesPath,
-  createTeamViewPath,
-  workspaceNavPaths,
 } from '../../shared/routing/paths'
 import type { TaskPriority } from '../../tasks/api'
+import {
+  createDefaultDueDateTaskSchedule,
+  createDefaultUnscheduledTaskSchedule,
+  formatTaskScheduleRange,
+  taskScheduleModeLabelKeys,
+} from '../../tasks/model/taskSchedule'
 import type { WorkspaceMember } from '../../workspace/api'
 import { useWorkspaceAccess } from '../../workspace/queries/useWorkspaceAccess'
-import { useWorkspaceCommandMenu } from '../../commands/ui/WorkspaceCommandMenuContext'
+import { useWorkspaceSidebarController } from '../../shared/ui/sidebar'
 import {
   createWorkItemRelation,
   deleteWorkItemRelation,
+  WorkItemConfigurationApiError,
 } from '../../work-items/api'
 import {
   useWorkItemConfiguration,
 } from '../../work-items/queries/useWorkItemConfigurations'
 import { WorkItemExternalLinksPanelContainer } from '../../work-items/ui/WorkItemExternalLinksPanel'
+import {
+  createWorkItemDependencySummaries,
+  resolveWorkItemDependencySummary,
+  type WorkItemDependencyCreateDraft,
+  type WorkItemDependencySummary,
+} from '../../work-items/model/workItemDependencies'
 import {
   createDefaultCustomFieldValues,
   isCustomFieldApplicable,
@@ -88,6 +121,10 @@ import {
   sortCustomFieldDefinitions,
 } from '../../work-items/model/customFields'
 import { WorkItemFieldsEditor } from '../../work-items/ui/WorkItemFieldsEditor'
+import { WorkItemDependencyChips } from '../../work-items/ui/WorkItemDependencyChips'
+import {
+  WorkItemDependencyPanel,
+} from '../../work-items/ui/WorkItemDependencyPanel'
 import {
   WorkItemDefinitionFilters,
 } from '../../work-items/ui/WorkItemDefinitionFilters'
@@ -118,12 +155,101 @@ import {
   resolveWorkflowStatusDefinition,
 } from '../../work-items/model/workItemDisplay'
 import { RelatedDocuments } from '../../documents/ui/RelatedDocuments'
+import {
+  createBuiltInTaskViewDefinition,
+  applyTaskViewDefinitionToTasks,
+  filterTaskViewAudienceTeams,
+  presentationSettingsToTaskViewDefinition,
+  taskViewDefinitionToPresentationSettings,
+  taskViewDefinitionToTeamState,
+  teamStateToTaskViewDefinition,
+  type TeamIssueViewState,
+} from '../../task-views/model/taskViewSurfaceState'
+import {
+  groupTaskViewItems,
+  resolveTaskViewTableColumnPlacements,
+  type TaskViewGroupValue,
+  type TaskViewPresentationSettings,
+  type TaskViewTableColumnPlacement,
+} from '../../task-views/model/taskViewPresentation'
+import { preserveTaskViewUrlState } from '../../task-views/model/taskViewUrlState'
+import { useTaskViewController } from '../../task-views/mutations/useTaskViewController'
+import {
+  createFocusedTaskViewActionSelection,
+  createTaskViewActionSelection,
+  createTaskViewItemKey,
+  createTaskViewSelectionKeyboardAction,
+  createTaskViewSelectionState,
+  reduceTaskViewSelection,
+  type TaskViewSelectionState,
+} from '../../task-views/model/taskViewSelection'
+import {
+  allowTaskAction,
+  createFailedTaskActionResult,
+  createSucceededTaskCreateActionResult,
+  createSucceededTaskActionResult,
+  createSucceededTaskActionMutationResult,
+  denyTaskAction,
+  resolveTaskActionExecutionFailureMessage,
+  type TaskActionExecutionResult,
+} from '../../task-views/model/taskActionRegistry'
+import {
+  canDismissCompletedTaskActionOwner,
+  createTaskActionCompletionBridge,
+  isPendingTaskActionFocusCurrent,
+  resolvePendingTaskActionContext,
+} from '../../task-views/model/taskActionCompletion'
+import {
+  clearTaskStatusMoveRequest,
+  createTaskStatusMoveRequest,
+  type TaskStatusMoveRequestSlot,
+} from '../../task-views/model/taskStatusMoveRequest'
+import {
+  executeTeamIssueDirectStatusMove,
+  isTeamIssueRevisionConflict,
+} from '../../task-views/model/teamIssueDirectMove'
+import { canWriteTaskViewWorkItem } from '../../task-views/model/taskViewWorkItemPermission'
+import {
+  createTaskSurfaceActionBaseContext,
+  resolveTaskSurfaceActionTarget,
+  resolveTaskSurfaceActionTargets,
+  useTaskSurfaceActions,
+  type TaskSurfaceActionDisabledReasons,
+  type TaskSurfaceActionHandlers,
+  type TaskSurfaceActionLabels,
+  type TaskSurfaceActionPermissions,
+} from '../../task-views/mutations/useTaskSurfaceActions'
+import {
+  createTaskSurfaceKeyboardInput,
+  formatTaskSurfaceKeyboardShortcut,
+} from '../../task-views/ui/taskSurfaceKeyboard'
+import type { TaskActionContextMenuAnchorPoint } from '../../task-views/model/taskActionContextMenu'
+import { TaskActionContextMenu } from '../../task-views/ui/TaskActionContextMenu'
+import {
+  TaskViewToolbar,
+  type TaskViewFieldOption,
+} from '../../task-views/ui/TaskViewToolbar'
+import {
+  createTaskViewOption,
+  formatTaskViewMigrationWarning,
+} from '../../task-views/ui/taskViewToolbarAdapter'
+import { WorkItemAssigneeAvatar } from '../../work-items/ui/WorkItemAssigneeAvatar'
 
 const issuePriorities = ['high', 'medium', 'low'] as const satisfies readonly TaskPriority[]
 const emptyTeams: ProjectDirectoryTeam[] = []
 const emptyIssues: TeamIssue[] = []
 const emptyMembers: ProjectMember[] = []
 const emptyWorkspaceMembers: WorkspaceMember[] = []
+const emptyProjectRoles: Readonly<Record<string, ProjectMemberRole>> = {}
+const taskViewBuiltInFields = [
+  'title',
+  'status',
+  'assignee',
+  'dueDate',
+  'priority',
+  'project',
+  'team',
+]
 /**
  * TeamIssueScreen で切り替える Issue 表示モードです。
  */
@@ -131,10 +257,68 @@ type IssueViewMode = 'table' | 'board'
 
 const issueViewPanelId = 'team-issue-view-panel'
 
+/** Transient Team Issue context-menu target retained independently from keyboard selection. */
+type TeamIssueActionContextMenuState = {
+  /** Pointer or overflow-control position used by the responsive menu layout. */
+  anchorPoint: TaskActionContextMenuAnchorPoint
+  /** Element that regains focus after the menu closes. */
+  returnFocusElement: HTMLElement
+  /** Revision-bound target selected by this row or card entrance. */
+  selection: WorkItemActionSelection
+}
+
+/**
+ * Opens the canonical action menu for one Team Issue row or card.
+ *
+ * @param issue - Team Issue represented by the triggering row or card.
+ * @param anchorPoint - Viewport coordinates used to anchor the menu.
+ * @param returnFocusElement - Trigger element that regains focus after dismissal.
+ * @returns Nothing.
+ */
+type TeamIssueActionMenuOpenHandler = (
+  issue: TeamIssue,
+  anchorPoint: TaskActionContextMenuAnchorPoint,
+  returnFocusElement: HTMLElement,
+) => void
+
+/**
+ * Evaluates whether the current user may manage one dependency endpoint.
+ *
+ * @param endpoint - Canonical dependency endpoint under evaluation.
+ * @returns Whether the current user may manage the endpoint.
+ */
+type CanManageWorkItemDependencyEndpoint = (endpoint: WorkItemDependencyEndpoint) => boolean
+
+/** Persisted Team Create outcome returned by the route-level mutation. */
+type CreatedTeamIssueMutation = {
+  /** Canonical Work Item created by persistence. */
+  issue: TeamIssue
+  /** Application-relative route opened after creation, including retained view state. */
+  navigationPath: string
+}
+
 /**
  * チーム所有 Issue 画面を描画する props です。
  */
 type TeamIssueScreenProps = {
+  /** Saved task view active when canonical Team actions are invoked. */
+  activeTaskViewId?: string
+  /** Shared saved-view lifecycle and display controls. */
+  taskViewToolbar?: ReactNode
+  /** Complete effective definition used for multi-value filtering and sorting. */
+  taskViewDefinition?: TaskViewDefinition
+  /** Presentation settings rendered by Team table and board layouts. */
+  taskViewPresentation?: TaskViewPresentationSettings
+  /** Optional route-controlled Team Issue view state. */
+  viewState?: TeamIssueViewState
+  /** Persists one complete next route-controlled Team Issue view state. */
+  onViewStateChange?: (state: TeamIssueViewState) => void
+  /** Checks whether one visible Team Issue belongs to a server-authorized write scope. */
+  canMutateIssue?: (issue: TeamIssue) => boolean
+  /** Whether the current viewer may create an unassigned Work Item in the Team scope. */
+  canCreateUnassignedIssue?: boolean
+  /** Project destinations where the current viewer may create a Team Issue. */
+  createIssueProjects?: ProjectDirectoryTeam['projects']
   /**
    * Related Documents を取得する access token です。
    */
@@ -160,10 +344,6 @@ type TeamIssueScreenProps = {
    */
   issues?: TeamIssue[]
   /**
-   * サイドバーに表示する通知の実未読件数です。
-   */
-  inboxCount?: number
-  /**
    * Team / Workspace から解決した workflow と custom field configuration です。
    */
   resolvedConfiguration?: ResolvedWorkItemConfiguration
@@ -171,6 +351,25 @@ type TeamIssueScreenProps = {
    * 選択中 Work Item から見た relation 一覧です。
    */
   relations?: readonly WorkItemRelation[]
+  /** Authoritative Planning snapshot used by every canonical dependency surface. */
+  planningSnapshot?: PlanningSnapshot
+  /** Whether canonical Planning dependency data is loading. */
+  isPlanningLoading?: boolean
+  /** Planning dependency load error shown without hiding Team Issues. */
+  planningErrorMessage?: string
+  /** Retries the canonical Planning dependency query. */
+  onRetryPlanning?: () => void
+  /** Determines whether the current user may manage one canonical dependency endpoint. */
+  canManageDependencyEndpoint?: CanManageWorkItemDependencyEndpoint
+  /** Creates a canonical Work Item schedule dependency. */
+  onCreateScheduleDependency?: (input: WorkItemDependencyCreateDraft) => void | Promise<void>
+  /** Deletes a canonical Work Item schedule dependency. */
+  onDeleteScheduleDependency?: (dependency: WorkItemScheduleDependency) => void | Promise<void>
+  /** Updates a canonical Work Item schedule dependency. */
+  onUpdateScheduleDependency?: (
+    dependency: WorkItemScheduleDependency,
+    patch: WorkItemScheduleDependencyPatch,
+  ) => void | Promise<void>
   /**
    * 選択中 Issue の comment thread、watcher、presence です。
    */
@@ -250,11 +449,14 @@ type TeamIssueScreenProps = {
   /**
    * Issue 作成時の callback です。
    */
-  onCreateIssue?: (input: CreateTeamIssueInput) => Promise<void>
+  onCreateIssue?: (input: CreateTeamIssueInput) => Promise<CreatedTeamIssueMutation | void>
   /**
    * Issue 更新時の callback です。
    */
-  onUpdateIssue?: (issueId: string, input: UpdateTeamIssueInput) => Promise<void>
+  onUpdateIssue?: (
+    issueId: string,
+    input: UpdateTeamIssueInput,
+  ) => Promise<TeamIssue | void>
   /**
    * 選択中 Work Item へ relation を追加する callback です。
    */
@@ -263,34 +465,6 @@ type TeamIssueScreenProps = {
    * 選択中 Work Item の relation を解除する callback です。
    */
   onDeleteRelation?: (issueId: string, relation: WorkItemRelation) => Promise<void>
-  /**
-   * サイドバーからプロジェクトを選択したときの callback です。
-   */
-  onSelectProject?: (projectId: string, teamId: string) => void
-  /**
-   * サイドバーの固定ナビを選択したときの callback です。
-   */
-  onSelectNav?: (navId: SidebarNavId) => void
-  /**
-   * サイドバーのチーム固定ビューを選択したときの callback です。
-   */
-  onSelectTeamView?: (teamId: string, viewId: SidebarTeamViewId) => void
-  /**
-   * チーム新規登録時の callback です。
-   */
-  onCreateTeam?: (input: CreateProjectDirectoryTeamInput) => Promise<void>
-  /**
-   * プロジェクト新規登録時の callback です。
-   */
-  onCreateProject?: (teamId: string, input: CreateProjectDirectoryProjectInput) => Promise<void>
-  /**
-   * チームアーカイブ時の callback です。
-   */
-  onArchiveTeam?: (teamId: string) => Promise<void>
-  /**
-   * プロジェクトアーカイブ時の callback です。
-   */
-  onArchiveProject?: (teamId: string, projectId: string) => Promise<void>
 }
 
 /**
@@ -301,7 +475,7 @@ export function TeamIssuePage() {
   const navigate = useNavigate()
   const params = useParams()
   const [searchParams, setSearchParams] = useSearchParams()
-  const mutationRequestRunner = useRef(createMutationRequestRunner()).current
+  const [mutationRequestRunner] = useState(() => createMutationRequestRunner())
   const teamId = params.teamId ?? 'core-team'
   const [session] = useState(() => getAuthSession())
   const [locale] = useState<Locale>(() => getInitialLocale())
@@ -317,31 +491,61 @@ export function TeamIssuePage() {
     error: currentUserError,
     isLoading: isCurrentUserLoading,
   } = useCurrentUser(accessToken)
-  const inboxCount = useUnreadNotificationCount(
-    accessToken,
-    Boolean(user && !currentUserError),
-  )
   const { data: workspaceAccess, error: workspaceAccessError } = useWorkspaceAccess(
     accessToken,
     Boolean(user && !currentUserError),
   )
   const {
+    data: planningSnapshot,
+    error: planningError,
+    isLoading: isPlanningSnapshotLoading,
+    key: planningKey,
+    mutate: mutatePlanning,
+  } = usePlanningSnapshot(accessToken, Boolean(user && !currentUserError))
+  const {
     data: teams = emptyTeams,
     error: projectDirectoryError,
     isLoading: isProjectDirectoryLoading,
-    mutate: mutateProjectDirectory,
   } = useProjectDirectory({
     accessToken,
     enabled: Boolean(user && !currentUserError),
     locale,
   })
+  const projectIds = useMemo(
+    () => [...new Set(teams.flatMap((team) => team.projects.map((project) => project.id)))],
+    [teams],
+  )
+  const currentUserProjectKey = resolveCurrentUserProjectKey(user)
+  const {
+    data: projectRolesResult,
+    error: projectRolesError,
+    isLoading: isProjectRolesLoading,
+    key: projectRolesKey,
+    mutate: mutateProjectRoles,
+  } = usePlanningProjectRoles(
+    accessToken,
+    currentUserProjectKey,
+    projectIds,
+    Boolean(
+      user &&
+      !currentUserError &&
+      !isProjectDirectoryLoading &&
+      !user.isSystemAdmin &&
+      canMutateWorkspaceContent(user)
+    ),
+  )
+  const projectRoles = projectRolesResult?.roles ?? emptyProjectRoles
+  const planningAccess = useMemo(
+    () => createPlanningAccessSnapshot(teams, projectRoles),
+    [projectRoles, teams],
+  )
   const activeTeam = teams.find((team) => team.id === teamId)
   const {
     data: issues = emptyIssues,
     error: issueError,
     isLoading: isIssuesLoading,
     mutate: mutateIssues,
-  } = useTeamIssues(accessToken, teamId, Boolean(user && !currentUserError))
+  } = useTeamIssues(accessToken, teamId, Boolean(user && !currentUserError), true)
   const {
     data: resolvedConfiguration,
     error: workItemConfigurationError,
@@ -397,12 +601,14 @@ export function TeamIssuePage() {
       .charAt(0)
       .toUpperCase() || 'J'
   const canManageStructure = canManageWorkspaceStructure(user)
-  const canMutateContent = canMutateWorkspaceContent(user)
   const currentUserErrorAction = resolveEnterpriseSessionErrorsAction(
     currentUserError,
     [
       workspaceAccessError,
+      planningError,
       projectDirectoryError,
+      projectRolesError,
+      ...(projectRolesResult?.errors ?? []),
       issueError,
       workItemConfigurationError,
       detailError,
@@ -422,6 +628,16 @@ export function TeamIssuePage() {
       throw error
     }
   }
+  const dependencyMutations = createWorkItemDependencyMutationController({
+    accessToken,
+    guardEnterpriseSession,
+    mutatePlanning,
+    mutationRequestRunner,
+    planningAccess,
+    planningSnapshot,
+    t,
+    user,
+  })
   const isLoading =
     !session ||
     isCurrentUserLoading ||
@@ -438,6 +654,101 @@ export function TeamIssuePage() {
   const configurationErrorMessage = workItemConfigurationError
     ? t('workItems.configuration.loadError')
     : undefined
+  const planningErrorMessage = planningError || projectRolesError ||
+    (projectRolesResult?.errors.length ?? 0) > 0
+    ? t('planning.error')
+    : undefined
+  const isPlanningLoading = Boolean(planningKey && isPlanningSnapshotLoading) ||
+    Boolean(projectRolesKey && isProjectRolesLoading)
+  const taskViewScope = useMemo<TaskViewScope>(
+    () => ({ kind: 'team', teamId }),
+    [teamId],
+  )
+  const taskViewConfiguration = (
+    resolvedConfiguration ?? issueDetail?.resolvedConfiguration
+  )?.configuration
+  const taskViewCustomFields = taskViewConfiguration?.customFields ?? []
+  const builtInTaskViewDefinition = useMemo(
+    () => createBuiltInTaskViewDefinition(
+      'team',
+      taskViewScope,
+      'table',
+      taskViewCustomFields.length > 0 ? ['customFields'] : [],
+    ),
+    [taskViewCustomFields.length, taskViewScope],
+  )
+  const taskViewColumns = [
+    ...taskViewBuiltInFields,
+    ...(taskViewCustomFields.length > 0 ? ['customFields'] : []),
+    ...taskViewCustomFields.map((field) => `custom:${field.id}`),
+  ]
+  const taskViewFields = [
+    ...taskViewBuiltInFields,
+    ...taskViewCustomFields.map((field) => `custom:${field.id}`),
+  ]
+  const taskViewWorkflowStatuses = (taskViewConfiguration?.workflow.statuses ?? []).map(
+    (status) => ({ statusId: status.id, teamId }),
+  )
+  const taskViewController = useTaskViewController({
+    accessToken,
+    builtInDefinition: builtInTaskViewDefinition,
+    capabilities: {
+      columns: taskViewColumns,
+      fields: taskViewFields,
+      layoutModes: ['table', 'board'],
+      legacyStatusIds: taskViewWorkflowStatuses.map((status) => status.statusId),
+      requiredColumns: ['title'],
+      workflowStatuses: taskViewWorkflowStatuses,
+    },
+    enabled: Boolean(accessToken && user && !currentUserError),
+    onSearchParamsChange: (nextSearchParams) => {
+      setSearchParams(nextSearchParams, { replace: true })
+    },
+    scope: taskViewScope,
+    searchParams,
+    surface: 'team',
+  })
+  /** Checks the current Team-qualified ownership scope before exposing a Work Item mutation. */
+  const canMutateTeamIssue = useCallback((issue: TeamIssue) => canWriteTaskViewWorkItem({
+    writableProjectScopes: taskViewController.writableProjectScopes,
+    writableTeamIds: taskViewController.writableTeamIds,
+  }, issue), [
+    taskViewController.writableProjectScopes,
+    taskViewController.writableTeamIds,
+  ])
+  const hasWritableWorkItemScope = taskViewController.writableTeamIds.length > 0 ||
+    taskViewController.writableProjectScopes.length > 0
+  const canCreateUnassignedIssue = taskViewController.writableTeamIds.includes(teamId)
+  const createIssueProjects = useMemo(() => activeTeam?.projects.filter((project) =>
+    taskViewController.writableProjectScopes.some((scope) =>
+      scope.teamId === teamId && scope.projectId === project.id
+    )
+  ) ?? [], [
+    activeTeam?.projects,
+    taskViewController.writableProjectScopes,
+    teamId,
+  ])
+  const canCreateTeamIssue = canCreateUnassignedIssue || createIssueProjects.length > 0
+  const taskViewState = taskViewDefinitionToTeamState(taskViewController.effectiveDefinition)
+  const taskViewTeams = useMemo(
+    () => {
+      const writableTeamIds = new Set(taskViewController.writableTeamIds)
+      return filterTaskViewAudienceTeams(
+        teams.map((team) => ({ id: team.id, name: team.name })),
+        taskViewScope,
+      ).filter((team) => writableTeamIds.has(team.id))
+    },
+    [taskViewController.writableTeamIds, taskViewScope, teams],
+  )
+
+  /** Mirrors the server's manager check for one visible dependency endpoint. */
+  const canManageDependencyEndpoint = (endpoint: WorkItemDependencyEndpoint) =>
+    canManagePlanningWorkItemDependencyEndpoint(
+      user,
+      endpoint,
+      planningSnapshot?.workItems ?? [],
+      planningAccess,
+    )
 
   useEffect(() => {
     document.documentElement.lang = locale
@@ -477,14 +788,29 @@ export function TeamIssuePage() {
     if (!accessToken) {
       return
     }
+    if (!canWriteTaskViewWorkItem({
+      writableProjectScopes: taskViewController.writableProjectScopes,
+      writableTeamIds: taskViewController.writableTeamIds,
+    }, { assignedProjectId: input.assignedProjectId, teamId })) {
+      throw new TeamIssuesApiError(
+        403,
+        t('taskViews.action.unavailable'),
+        'TeamTaskActionAccessDenied',
+      )
+    }
 
     const issue = await guardEnterpriseSession(mutationRequestRunner.run(
       `issue:create:${teamId}`,
       JSON.stringify(input),
       (context) => createTeamIssue(teamId, accessToken, input, context),
     ))
-    navigate(createTeamIssuesPath(teamId, issue.id))
+    const navigationPath = preserveTaskViewUrlState(
+      createTeamIssuesPath(teamId, issue.id),
+      searchParams,
+    )
+    navigate(navigationPath)
     await mutateIssues()
+    return { issue, navigationPath }
   }
 
   const handleUpdateIssue = async (issueId: string, input: UpdateTeamIssueInput) => {
@@ -496,12 +822,25 @@ export function TeamIssuePage() {
       ? issueDetail.issue
       : issues.find((issue) => issue.id === issueId)
 
-    if (!currentIssue) {
-      return
+    const nextOwnership = {
+      assignedProjectId: input.assignedProjectId === undefined
+        ? currentIssue?.assignedProjectId
+        : input.assignedProjectId ?? undefined,
+      teamId: currentIssue?.teamId ?? teamId,
+    }
+    if (!currentIssue || !canMutateTeamIssue(currentIssue) || !canWriteTaskViewWorkItem({
+      writableProjectScopes: taskViewController.writableProjectScopes,
+      writableTeamIds: taskViewController.writableTeamIds,
+    }, nextOwnership)) {
+      throw new TeamIssuesApiError(
+        403,
+        t('taskViews.action.unavailable'),
+        'TeamTaskActionAccessDenied',
+      )
     }
 
     try {
-      await guardEnterpriseSession(mutationRequestRunner.run(
+      const updatedIssue = await guardEnterpriseSession(mutationRequestRunner.run(
         `issue:update:${teamId}:${issueId}`,
         JSON.stringify([currentIssue.revision, input]),
         (context) => updateTeamIssue(
@@ -517,6 +856,7 @@ export function TeamIssuePage() {
       ))
       await mutateIssues()
       await mutateIssueDetail()
+      return updatedIssue
     } catch (error) {
       if (error instanceof TeamIssuesApiError && error.code === 'WorkItemRevisionConflict') {
         await Promise.all([mutateIssues(), mutateIssueDetail()])
@@ -533,6 +873,17 @@ export function TeamIssuePage() {
   ) => {
     if (!accessToken) {
       return
+    }
+
+    const currentIssue = issueDetail?.issue.id === issueId
+      ? issueDetail.issue
+      : issues.find((issue) => issue.id === issueId)
+    if (!currentIssue || !canMutateTeamIssue(currentIssue)) {
+      throw new TeamIssuesApiError(
+        403,
+        t('taskViews.action.unavailable'),
+        'TeamTaskActionAccessDenied',
+      )
     }
 
     const graphRevision = readSelectedRelationGraphRevision(issueDetail, issueId, t)
@@ -561,6 +912,17 @@ export function TeamIssuePage() {
       return
     }
 
+    const currentIssue = issueDetail?.issue.id === issueId
+      ? issueDetail.issue
+      : issues.find((issue) => issue.id === issueId)
+    if (!currentIssue || !canMutateTeamIssue(currentIssue)) {
+      throw new TeamIssuesApiError(
+        403,
+        t('taskViews.action.unavailable'),
+        'TeamTaskActionAccessDenied',
+      )
+    }
+
     const graphRevision = readSelectedRelationGraphRevision(issueDetail, issueId, t)
 
     try {
@@ -586,66 +948,79 @@ export function TeamIssuePage() {
     }
   }
 
-  const handleCreateTeam = async (input: CreateProjectDirectoryTeamInput) => {
-    if (!accessToken) {
-      return
-    }
-
-    await guardEnterpriseSession(mutationRequestRunner.run('team:create', JSON.stringify(input), (context) =>
-      createProjectDirectoryTeam(accessToken, input, context),
-    ))
-    await mutateProjectDirectory()
-  }
-
-  const handleCreateProject = async (
-    nextTeamId: string,
-    input: CreateProjectDirectoryProjectInput,
-  ) => {
-    if (!accessToken) {
-      return
-    }
-
-    await guardEnterpriseSession(mutationRequestRunner.run(
-      'project:create',
-      JSON.stringify([nextTeamId, input]),
-      (context) => createProjectDirectoryProject(accessToken, nextTeamId, input, context),
-    ))
-    await mutateProjectDirectory()
-  }
-
-  const handleArchiveTeam = async (nextTeamId: string) => {
-    if (!accessToken) {
-      return
-    }
-
-    await guardEnterpriseSession(mutationRequestRunner.run('team:archive', nextTeamId, (context) =>
-      archiveProjectDirectoryTeam(accessToken, nextTeamId, context),
-    ))
-    await mutateProjectDirectory()
-
-    if (nextTeamId === teamId) {
-      navigate(workspaceNavPaths.home)
-    }
-  }
-
-  const handleArchiveProject = async (nextTeamId: string, projectId: string) => {
-    if (!accessToken) {
-      return
-    }
-
-    await guardEnterpriseSession(mutationRequestRunner.run(
-      'project:archive',
-      JSON.stringify([nextTeamId, projectId]),
-      (context) => archiveProjectDirectoryProject(accessToken, nextTeamId, projectId, context),
-    ))
-    await mutateProjectDirectory()
-  }
+  const taskViewFieldOptions: TaskViewFieldOption[] = [
+    { id: 'title', label: t('tasks.column.name') },
+    { id: 'status', label: t('tasks.column.status') },
+    { id: 'assignee', label: t('tasks.column.assignee') },
+    { id: 'dueDate', label: t('tasks.column.dueDate') },
+    { id: 'priority', label: t('tasks.column.priority') },
+    { id: 'project', label: t('issues.column.project') },
+    ...(taskViewCustomFields.length > 0
+      ? [{ id: 'customFields', label: t('workItems.fields.title') }]
+      : []),
+    ...taskViewCustomFields.map((field) => ({
+      id: `custom:${field.id}`,
+      label: field.name,
+    })),
+  ]
+  const taskViewGroupOptions = taskViewFieldOptions.filter(
+    (option) => option.id !== 'customFields',
+  )
+  const taskViewOptions = taskViewController.views.map(createTaskViewOption)
+  const selectedTaskView = taskViewController.activeSavedView
+    ? createTaskViewOption(taskViewController.activeSavedView)
+    : undefined
+  const taskViewToolbar = (
+    <TaskViewToolbar
+      builtInName={t('issues.title')}
+      canManageShared={taskViewController.canManageShared}
+      canSetTeamDefault={taskViewController.canSetTeamDefault}
+      canWrite={taskViewController.canWrite}
+      columnOptions={taskViewFieldOptions}
+      errorMessage={taskViewController.errorMessage}
+      groupOptions={taskViewGroupOptions}
+      isDirty={taskViewController.isDirty}
+      isSaving={taskViewController.isSaving}
+      migrationWarnings={taskViewController.migrationWarnings.map(
+        formatTaskViewMigrationWarning,
+      )}
+      onCopyLink={taskViewController.copyPermalink}
+      onDelete={taskViewController.deleteView}
+      onDuplicate={taskViewController.duplicateView}
+      onPatchPreference={taskViewController.patchPreference}
+      onReset={taskViewController.resetOverrides}
+      onSaveAs={taskViewController.saveAs}
+      onSelectView={taskViewController.selectView}
+      onSettingsChange={(settings) => {
+        taskViewController.setEffectiveDefinition(
+          presentationSettingsToTaskViewDefinition(
+            taskViewController.effectiveDefinition,
+            settings,
+          ),
+        )
+      }}
+      onUpdate={taskViewController.updateActiveView}
+      selectedView={selectedTaskView}
+      settings={taskViewDefinitionToPresentationSettings(
+        taskViewController.effectiveDefinition,
+      )}
+      supportsColumnLayoutMetadata={taskViewState.viewMode === 'table'}
+      supportsEmptyGroups={taskViewState.viewMode === 'board'}
+      t={t}
+      teams={taskViewTeams}
+      views={taskViewOptions}
+    />
+  )
 
   return (
     <TeamIssueScreen
+      activeTaskViewId={taskViewController.activeSavedView?.id}
       accessToken={accessToken}
       assigneeOptions={assigneeOptions}
       artifacts={artifacts}
+      canCreateUnassignedIssue={canCreateUnassignedIssue}
+      canMutateIssue={canMutateTeamIssue}
+      canManageDependencyEndpoint={canManageDependencyEndpoint}
       collaboration={collaboration}
       canManageExternalLinks={canManageStructure}
       configurationErrorMessage={configurationErrorMessage}
@@ -655,34 +1030,64 @@ export function TeamIssuePage() {
       defaultCreateIssueOpen={isCreateIssueRequested}
       focusedCommentId={focusedCommentId}
       focusedRootCommentId={focusedRootCommentId}
-      inboxCount={inboxCount}
       issueErrorMessage={issueErrorMessage}
       issues={screenIssues}
       isLoading={isLoading}
+      isPlanningLoading={isPlanningLoading}
       isRelationsLoading={Boolean(detailKey && isIssueDetailLoading)}
       key={teamId}
       locale={locale}
-      onAddRelation={canMutateContent ? handleAddRelation : undefined}
-      onArchiveProject={canManageStructure ? handleArchiveProject : undefined}
-      onArchiveTeam={canManageStructure ? handleArchiveTeam : undefined}
-      onCreateIssue={canMutateContent && !workItemConfigurationError ? handleCreateIssue : undefined}
-      onCreateProject={canManageStructure ? handleCreateProject : undefined}
-      onCreateTeam={canManageStructure ? handleCreateTeam : undefined}
-      onDeleteRelation={canMutateContent ? handleDeleteRelation : undefined}
-      onSelectIssue={(issueId) => navigate(createTeamIssuesPath(teamId, issueId))}
-      onSelectNav={(navId) => navigate(workspaceNavPaths[navId])}
-      onSelectProject={(projectId, nextTeamId) => navigate(createProjectIssuesPath(projectId, nextTeamId))}
-      onSelectTeamView={(nextTeamId, viewId) => navigate(createTeamViewPath(nextTeamId, viewId))}
-      onUpdateIssue={canMutateContent && !workItemConfigurationError ? handleUpdateIssue : undefined}
+      onAddRelation={hasWritableWorkItemScope ? handleAddRelation : undefined}
+      createIssueProjects={createIssueProjects}
+      onCreateIssue={canCreateTeamIssue && !workItemConfigurationError
+        ? handleCreateIssue
+        : undefined}
+      onCreateScheduleDependency={accessToken && planningSnapshot
+        ? dependencyMutations.create
+        : undefined}
+      onDeleteRelation={hasWritableWorkItemScope ? handleDeleteRelation : undefined}
+      onDeleteScheduleDependency={accessToken && planningSnapshot
+        ? dependencyMutations.delete
+        : undefined}
+      onRetryPlanning={planningErrorMessage
+        ? () => void Promise.all([mutatePlanning(), mutateProjectRoles()])
+            .catch(() => undefined)
+        : undefined}
+      onSelectIssue={(issueId) => navigate(preserveTaskViewUrlState(
+        createTeamIssuesPath(teamId, issueId),
+        searchParams,
+      ))}
+      onUpdateIssue={hasWritableWorkItemScope && !workItemConfigurationError
+        ? handleUpdateIssue
+        : undefined}
+      onUpdateScheduleDependency={accessToken && planningSnapshot
+        ? dependencyMutations.update
+        : undefined}
+      planningErrorMessage={planningErrorMessage}
+      planningSnapshot={planningSnapshot}
       selectedIssueId={resolvedSelectedIssueId}
       relations={issueDetail && issueDetail.issue.id === resolvedSelectedIssueId
         ? issueDetail.relations ?? []
         : []}
       resolvedConfiguration={resolvedConfiguration ?? issueDetail?.resolvedConfiguration}
+      taskViewToolbar={taskViewToolbar}
+      taskViewDefinition={taskViewController.effectiveDefinition}
+      taskViewPresentation={taskViewDefinitionToPresentationSettings(
+        taskViewController.effectiveDefinition,
+      )}
       teamId={teamId}
       teamName={activeTeam?.name}
       teams={teams}
       userInitial={userInitial}
+      viewState={taskViewState}
+      onViewStateChange={(nextViewState) => {
+        taskViewController.setEffectiveDefinition(
+          teamStateToTaskViewDefinition(
+            taskViewController.effectiveDefinition,
+            nextViewState,
+          ),
+        )
+      }}
       workspaceMembers={workspaceAccess?.members ?? emptyWorkspaceMembers}
     />
   )
@@ -692,9 +1097,13 @@ export function TeamIssuePage() {
  * チーム所有 Issue の管理 UI を描画する Storybook 兼用 screen です。
  */
 export function TeamIssueScreen({
+  activeTaskViewId,
   accessToken,
   assigneeOptions = [],
   artifacts,
+  canCreateUnassignedIssue = true,
+  canMutateIssue,
+  canManageDependencyEndpoint,
   canManageExternalLinks = false,
   collaboration,
   configurationErrorMessage,
@@ -704,50 +1113,97 @@ export function TeamIssueScreen({
   externalLinksAccessToken,
   focusedCommentId,
   focusedRootCommentId,
-  inboxCount = 0,
   initialViewMode = 'table',
   issueErrorMessage,
   issues = [],
   isLoading = false,
+  isPlanningLoading = false,
   isRelationsLoading = false,
   locale,
   onAddRelation,
-  onArchiveProject,
-  onArchiveTeam,
   onCreateIssue,
-  onCreateProject,
-  onCreateTeam,
+  onCreateScheduleDependency,
   onDeleteRelation,
+  onDeleteScheduleDependency,
+  onRetryPlanning,
   onSelectIssue,
-  onSelectNav,
-  onSelectProject,
-  onSelectTeamView,
   onUpdateIssue,
+  onUpdateScheduleDependency,
+  planningErrorMessage,
+  planningSnapshot,
+  createIssueProjects,
   relations = [],
   resolvedConfiguration,
   selectedIssueId,
   teamId,
   teamName,
   teams,
+  taskViewToolbar,
+  taskViewDefinition,
+  taskViewPresentation,
   userInitial,
+  viewState,
+  onViewStateChange,
   workspaceMembers = emptyWorkspaceMembers,
 }: TeamIssueScreenProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
-  const sidebarLabels = useMemo(() => createSidebarLabels(locale), [locale])
-  const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false)
-  const [viewMode, setViewMode] = useState<IssueViewMode>(initialViewMode)
-  const [searchQuery, setSearchQuery] = useState('')
-  const [statusFilter, setStatusFilter] = useState<string>('all')
-  const [definitionFilter, setDefinitionFilter] = useState<WorkItemDefinitionFilter>({
+  const { openMobileSidebar } = useWorkspaceSidebarController()
+  const [localViewMode, setLocalViewMode] = useState<IssueViewMode>(initialViewMode)
+  const [localSearchQuery, setLocalSearchQuery] = useState('')
+  const [localStatusFilter, setLocalStatusFilter] = useState<string>('all')
+  const [localDefinitionFilter, setLocalDefinitionFilter] = useState<WorkItemDefinitionFilter>({
     category: 'all',
     customFieldId: '',
   })
   const [isCreateOpen, setIsCreateOpen] = useState(defaultCreateIssueOpen)
+  const [createWorkflowStatusId, setCreateWorkflowStatusId] = useState<string>()
   const [createErrorMessage, setCreateErrorMessage] = useState<string | undefined>()
   const [detailUpdateError, setDetailUpdateError] = useState<readonly [string, string] | undefined>()
-  const commandMenu = useWorkspaceCommandMenu()
+  const [taskViewSelection, setTaskViewSelection] = useState<TaskViewSelectionState>(
+    createTaskViewSelectionState,
+  )
+  const [taskActionErrorMessage, setTaskActionErrorMessage] = useState<string>()
+  const [taskActionContextMenuState, setTaskActionContextMenuState] = useState<
+    TeamIssueActionContextMenuState
+  >()
+  const [taskActionCompletion] = useState(createTaskActionCompletionBridge)
+  const directStatusMoveRequestSlotRef = useRef<TaskStatusMoveRequestSlot>({
+    current: undefined,
+  })
+  const pendingCreateWorkflowStatusIdRef = useRef<string | undefined>(undefined)
+  const onSelectIssueRef = useRef(onSelectIssue)
+
+  useEffect(() => {
+    onSelectIssueRef.current = onSelectIssue
+  }, [onSelectIssue])
+  useEffect(() => () => {
+    taskActionCompletion.cancel()
+  }, [taskActionCompletion])
+  const viewMode = viewState?.viewMode ?? localViewMode
+  const searchQuery = viewState?.searchQuery ?? localSearchQuery
+  const statusFilter = viewState?.statusFilter ?? localStatusFilter
+  const definitionFilter = viewState?.definitionFilter ?? localDefinitionFilter
+  const currentViewState: TeamIssueViewState = {
+    definitionFilter,
+    searchQuery,
+    statusFilter,
+    viewMode,
+  }
+
+  /** Applies one Team Issue view state locally and forwards it to the route controller. */
+  const commitViewState = (nextViewState: TeamIssueViewState) => {
+    setLocalDefinitionFilter(nextViewState.definitionFilter)
+    setLocalSearchQuery(nextViewState.searchQuery)
+    setLocalStatusFilter(nextViewState.statusFilter)
+    setLocalViewMode(nextViewState.viewMode)
+    onViewStateChange?.(nextViewState)
+  }
   const activeTeam = teams.find((team) => team.id === teamId)
   const selectedIssue = issues.find((issue) => issue.id === selectedIssueId)
+  const dependencySummaries = useMemo(
+    () => createWorkItemDependencySummaries(planningSnapshot),
+    [planningSnapshot],
+  )
 
   useEffect(() => {
     if (defaultCreateIssueOpen) {
@@ -784,9 +1240,40 @@ export function TeamIssueScreen({
     ? detailUpdateError[1]
     : undefined
 
+  /** Dismisses the Team create form without completing another invocation. */
+  const dismissCreateIssueEditor = useCallback(() => {
+    setCreateErrorMessage(undefined)
+    setCreateWorkflowStatusId(undefined)
+    setIsCreateOpen(false)
+  }, [])
+
+  /** Opens the Team create form for an already accepted canonical invocation. */
+  const showCreateIssueEditor = useCallback((workflowStatusId?: string) => {
+    setCreateErrorMessage(undefined)
+    setCreateWorkflowStatusId(workflowStatusId)
+    setIsCreateOpen(true)
+  }, [])
+
+  /** Closes the Team create form and clears its contextual defaults. */
+  const closeCreateIssue = useCallback(() => {
+    taskActionCompletion.cancel('create')
+    dismissCreateIssueEditor()
+  }, [dismissCreateIssueEditor, taskActionCompletion])
+
   const visibleIssues = useMemo(
-    () =>
-      issues.filter((issue) => {
+    () => taskViewDefinition
+      ? applyTaskViewDefinitionToTasks(issues, taskViewDefinition, {
+          keywordMatcher: (issue, normalizedKeyword) => matchesTeamIssueKeyword(
+            issue,
+            normalizedKeyword,
+            activeTeam,
+            configuration,
+            locale,
+            personLabels,
+            t,
+          ),
+        })
+      : issues.filter((issue) => {
         const matchesStatus = effectiveStatusFilter === 'all' ||
           resolveWorkItemWorkflowStatusId(issue) === effectiveStatusFilter
         const matchesDefinition = matchesWorkItemDefinitionFilter(
@@ -804,19 +1291,15 @@ export function TeamIssueScreen({
           return true
         }
 
-        return [
-          resolveIssueTitle(issue, t),
-          resolveWorkItemAssignee(issue),
-          resolveAssignedProjectName(issue, activeTeam, t),
-          resolveWorkItemWorkflowStatusLabel(issue, configuration),
-          t(`tasks.priority.${issue.priority}`),
-          ...resolveIssueCustomFieldSearchValues(
-            issue,
-            configuration,
-            locale,
-            personLabels,
-          ),
-        ].some((value) => value.toLowerCase().includes(normalizedQuery))
+        return matchesTeamIssueKeyword(
+          issue,
+          normalizedQuery,
+          activeTeam,
+          configuration,
+          locale,
+          personLabels,
+          t,
+        )
       }),
     [
       activeTeam,
@@ -828,38 +1311,684 @@ export function TeamIssueScreen({
       personLabels,
       searchQuery,
       t,
+      taskViewDefinition,
     ],
   )
+  const visibleIssueActionTargets = useMemo(
+    () => visibleIssues.map((issue) => ({
+      expectedRevision: issue.revision,
+      teamId: issue.teamId,
+      workItemId: issue.id,
+    })),
+    [visibleIssues],
+  )
+  const visibleIssueKeys = useMemo(
+    () => visibleIssueActionTargets.map((target) =>
+      createTaskViewItemKey(target.teamId, target.workItemId)
+    ),
+    [visibleIssueActionTargets],
+  )
+  const teamActionSelection = useMemo(
+    () => createTaskViewActionSelection(taskViewSelection, visibleIssueActionTargets),
+    [taskViewSelection, visibleIssueActionTargets],
+  )
+  useEffect(() => {
+    const pendingContext = taskActionCompletion.current()
+    if (
+      pendingContext &&
+      !isPendingTaskActionFocusCurrent(pendingContext, teamActionSelection)
+    ) taskActionCompletion.cancel(pendingContext.actionId)
+  }, [taskActionCompletion, teamActionSelection])
+  const teamActionScope = useMemo<TeamTaskViewScope>(
+    () => ({ kind: 'team', teamId }),
+    [teamId],
+  )
+  const canCreateIssueAction = onCreateIssue !== undefined
+  const canOpenIssueAction = onSelectIssue !== undefined
+  const canEditIssueAction = onUpdateIssue !== undefined && canOpenIssueAction
+  const canAssignIssueAction = canEditIssueAction && assigneeOptions.length > 0
+  const canManageIssueRelationAction = onAddRelation !== undefined && canOpenIssueAction
+  /** Checks the exact persisted Work Item ownership scope. */
+  const canMutateTeamIssueAction = useCallback((issue: TeamIssue) =>
+    canMutateIssue?.(issue) ?? true,
+  [canMutateIssue])
+  /** Checks whether one visible Team Issue has a different reachable workflow status. */
+  const canMoveTeamIssueAction = useCallback((issue: TeamIssue) =>
+    canEditIssueAction && canMutateTeamIssueAction(issue) &&
+      resolveEditableWorkflowStatuses(issue, configuration).some(
+      (status) => status.id !== issue.workflowStatusId,
+    ), [canEditIssueAction, canMutateTeamIssueAction, configuration])
+  const teamActionLabels = useMemo<TaskSurfaceActionLabels>(() => ({
+    archive: t('taskViews.action.archive'),
+    assign: t('taskViews.action.assign'),
+    create: t('taskViews.action.create'),
+    edit: t('taskViews.action.edit'),
+    move: t('taskViews.action.move'),
+    open: t('taskViews.action.open'),
+    relation: t('taskViews.action.relation'),
+    schedule: t('taskViews.action.schedule'),
+    watch: t('taskViews.action.watch'),
+  }), [t])
+  const teamActionDisabledReasons = useMemo<TaskSurfaceActionDisabledReasons>(() => ({
+    selectionRequired: t('taskViews.action.selectionRequired'),
+    singleSelectionRequired: t('taskViews.action.singleSelectionRequired'),
+    unavailable: t('taskViews.action.unavailable'),
+  }), [t])
+
+  /** Opens one Team Issue detail and focuses an existing mutation control when requested. */
+  const executeTeamIssueDetailAction = useCallback((
+    context: WorkItemActionContext,
+    controlSelector?: string,
+    waitForMutation = false,
+  ): Promise<WorkItemActionResult> | WorkItemActionResult => {
+    const target = resolveTaskSurfaceActionTarget(context)
+    const issue = target
+      ? visibleIssues.find((candidate) =>
+          candidate.teamId === target.teamId && candidate.id === target.workItemId
+        )
+      : undefined
+    if (!target || !issue) {
+      return createFailedTaskActionResult(
+        context.actionId,
+        target,
+        'TeamTaskActionTargetNotFound',
+        'not-found',
+        t('taskViews.action.notFound'),
+      )
+    }
+
+    const completion = waitForMutation
+      ? taskActionCompletion.begin(context, () => onSelectIssueRef.current?.(''))
+      : undefined
+    setDetailUpdateError(undefined)
+    if (!completion) taskActionCompletion.cancel()
+    setTaskViewSelection((currentSelection) => reduceTaskViewSelection(currentSelection, {
+      key: createTaskViewItemKey(issue.teamId, issue.id),
+      type: 'focus',
+    }))
+    onSelectIssueRef.current?.(issue.id)
+    if (controlSelector) focusTeamIssueDetailControl(controlSelector)
+    return completion ?? createSucceededTaskActionResult(context.actionId, target)
+  }, [t, taskActionCompletion, visibleIssues])
+
+  const currentTeamActionTarget = teamActionSelection.targets.length === 1
+    ? teamActionSelection.targets[0]
+    : teamActionSelection.targets.length === 0
+      ? teamActionSelection.focusedTarget
+      : undefined
+  const toggleIssueWatch = currentTeamActionTarget &&
+      selectedIssue?.teamId === currentTeamActionTarget.teamId &&
+      selectedIssue.id === currentTeamActionTarget.workItemId &&
+      collaboration?.watch &&
+      collaboration.capabilities.canWatch
+    ? collaboration.toggleWatch
+    : undefined
+  const canMutateSelectedIssue = selectedIssue !== undefined &&
+    canMutateTeamIssueAction(selectedIssue)
+
+  /** Executes a destination-bearing Board Move or reveals the detail selector for other entrances. */
+  const executeTeamIssueMoveAction = useCallback((
+    context: WorkItemActionContext,
+  ): WorkItemActionResult | Promise<WorkItemActionResult> => {
+    const requestSlot = directStatusMoveRequestSlotRef.current
+    if (!requestSlot.current) {
+      return executeTeamIssueDetailAction(
+        context,
+        'select[name="workflowStatusId"]',
+        true,
+      )
+    }
+
+    taskActionCompletion.cancel()
+    return executeTeamIssueDirectStatusMove(
+      context,
+      requestSlot,
+      visibleIssues,
+      configuration,
+      onUpdateIssue,
+      {
+        conflict: t('tasks.action.conflict'),
+        failed: t('taskViews.action.failed'),
+        unavailable: teamActionDisabledReasons.unavailable,
+      },
+    ) ?? createFailedTaskActionResult(
+      context.actionId,
+      resolveTaskSurfaceActionTarget(context),
+      'TeamTaskMoveRequestMismatch',
+      'validation',
+      teamActionDisabledReasons.unavailable,
+    )
+  }, [
+    configuration,
+    executeTeamIssueDetailAction,
+    onUpdateIssue,
+    t,
+    taskActionCompletion,
+    teamActionDisabledReasons.unavailable,
+    visibleIssues,
+  ])
+
+  const teamActionHandlers = useMemo<TaskSurfaceActionHandlers>(() => ({
+    ...(canCreateIssueAction
+      ? {
+          create: (context) => {
+            const workflowStatusId = pendingCreateWorkflowStatusIdRef.current
+            pendingCreateWorkflowStatusIdRef.current = undefined
+            const completion = taskActionCompletion.begin(context, dismissCreateIssueEditor)
+            showCreateIssueEditor(workflowStatusId)
+            return completion
+          },
+        }
+      : {}),
+    ...(canOpenIssueAction
+      ? {
+          open: (context) => executeTeamIssueDetailAction(context),
+        }
+      : {}),
+    ...(canEditIssueAction
+      ? {
+          edit: (context) => executeTeamIssueDetailAction(
+            context,
+            'input[name="title"]',
+            true,
+          ),
+          move: executeTeamIssueMoveAction,
+        }
+      : {}),
+    ...(canAssignIssueAction
+      ? {
+          assign: (context) => executeTeamIssueDetailAction(
+            context,
+            'select[name="assigneeUserId"]',
+            true,
+          ),
+        }
+      : {}),
+    ...(canManageIssueRelationAction
+      ? {
+          relation: (context) => executeTeamIssueDetailAction(
+            context,
+            '[data-testid="work-item-relations-editor"] select',
+            true,
+          ),
+        }
+      : {}),
+    ...(toggleIssueWatch
+      ? {
+          watch: async (context) => {
+            const target = resolveTaskSurfaceActionTarget(context)
+            if (
+              !target ||
+              !selectedIssue ||
+              selectedIssue.teamId !== target.teamId ||
+              selectedIssue.id !== target.workItemId
+            ) {
+              return createFailedTaskActionResult(
+                context.actionId,
+                target,
+                'TeamTaskActionTargetNotFound',
+                'not-found',
+                t('taskViews.action.notFound'),
+              )
+            }
+            const succeeded = await toggleIssueWatch()
+            return succeeded
+              ? createSucceededTaskActionResult(context.actionId, target)
+              : createFailedTaskActionResult(
+                  context.actionId,
+                  target,
+                  'TeamTaskWatchFailed',
+                  'unknown',
+                  t('taskViews.action.failed'),
+                )
+          },
+        }
+      : {}),
+  }), [
+    canAssignIssueAction,
+    canCreateIssueAction,
+    canEditIssueAction,
+    canManageIssueRelationAction,
+    canOpenIssueAction,
+    dismissCreateIssueEditor,
+    executeTeamIssueDetailAction,
+    executeTeamIssueMoveAction,
+    selectedIssue,
+    showCreateIssueEditor,
+    t,
+    taskActionCompletion,
+    toggleIssueWatch,
+  ])
+
+  /** Evaluates one Team detail entrance against its revision-bound visible target. */
+  const evaluateTeamIssueTargetPermission = useCallback((context: WorkItemActionContext) => {
+    const targets = resolveTaskSurfaceActionTargets(context)
+    if (targets.length === 0) return allowTaskAction()
+    if (targets.length !== 1) {
+      return denyTaskAction(teamActionDisabledReasons.singleSelectionRequired)
+    }
+    const target = targets[0]
+    return target && visibleIssues.some((issue) =>
+      issue.teamId === target.teamId && issue.id === target.workItemId
+    )
+      ? allowTaskAction()
+      : denyTaskAction(teamActionDisabledReasons.unavailable)
+  }, [teamActionDisabledReasons, visibleIssues])
+
+  /** Evaluates one canonical mutation against the current Team-qualified Work Item scope. */
+  const evaluateTeamIssueMutationPermission = useCallback((context: WorkItemActionContext) => {
+    const targets = resolveTaskSurfaceActionTargets(context)
+    if (targets.length === 0) return allowTaskAction()
+    if (targets.length !== 1) {
+      return denyTaskAction(teamActionDisabledReasons.singleSelectionRequired)
+    }
+    const target = targets[0]
+    const issue = target
+      ? visibleIssues.find((candidate) =>
+          candidate.teamId === target.teamId && candidate.id === target.workItemId
+        )
+      : undefined
+    return issue && canMutateTeamIssueAction(issue)
+      ? allowTaskAction()
+      : denyTaskAction(teamActionDisabledReasons.unavailable)
+  }, [
+    canMutateTeamIssueAction,
+    teamActionDisabledReasons,
+    visibleIssues,
+  ])
+
+  const teamActionPermissions = useMemo<TaskSurfaceActionPermissions>(() => ({
+    assign: evaluateTeamIssueMutationPermission,
+    edit: evaluateTeamIssueMutationPermission,
+    move: (context) => {
+      const targets = resolveTaskSurfaceActionTargets(context)
+      if (targets.length === 0) return allowTaskAction()
+      if (targets.length !== 1) {
+        return denyTaskAction(teamActionDisabledReasons.singleSelectionRequired)
+      }
+      const target = targets[0]
+      const issue = target
+        ? visibleIssues.find((candidate) =>
+            candidate.teamId === target.teamId && candidate.id === target.workItemId
+          )
+        : undefined
+      return issue && canMoveTeamIssueAction(issue)
+        ? allowTaskAction()
+        : denyTaskAction(teamActionDisabledReasons.unavailable)
+    },
+    open: evaluateTeamIssueTargetPermission,
+    relation: evaluateTeamIssueMutationPermission,
+    watch: (context) => {
+      const target = resolveTaskSurfaceActionTarget(context)
+      return target && selectedIssue && toggleIssueWatch &&
+          selectedIssue.teamId === target.teamId && selectedIssue.id === target.workItemId
+        ? allowTaskAction()
+        : denyTaskAction(teamActionDisabledReasons.unavailable)
+    },
+  }), [
+    canMoveTeamIssueAction,
+    evaluateTeamIssueMutationPermission,
+    evaluateTeamIssueTargetPermission,
+    selectedIssue,
+    teamActionDisabledReasons,
+    toggleIssueWatch,
+    visibleIssues,
+  ])
+
+  /**
+   * Projects normalized Team action failures into an accessible local notice.
+   *
+   * @param result - Canonical action execution result to present.
+   * @returns Nothing.
+   */
+  const handleTeamActionExecution = useCallback((result: TaskActionExecutionResult) => {
+    setTaskActionErrorMessage(resolveTaskActionExecutionFailureMessage(
+      result,
+      t('taskViews.action.failed'),
+    ))
+  }, [t])
+
+  const teamActions = useTaskSurfaceActions({
+    ...(activeTaskViewId !== undefined ? { activeViewId: activeTaskViewId } : {}),
+    disabledReasons: teamActionDisabledReasons,
+    handlers: teamActionHandlers,
+    labels: teamActionLabels,
+    onExecutionResult: handleTeamActionExecution,
+    permissions: teamActionPermissions,
+    registrationId: `team-task-actions:${teamId}`,
+    scope: teamActionScope,
+    selection: teamActionSelection,
+    surface: 'team',
+  })
+
+  /** Routes a Team Board status selection or drop through the canonical Move registry. */
+  const handleTeamIssueStatusMove = useCallback(async (
+    issue: TeamIssue,
+    destinationWorkflowStatusId: string,
+  ): Promise<void> => {
+    const target = {
+      expectedRevision: issue.revision,
+      teamId: issue.teamId,
+      workItemId: issue.id,
+    }
+    const request = createTaskStatusMoveRequest(target, destinationWorkflowStatusId)
+    const requestSlot = directStatusMoveRequestSlotRef.current
+    requestSlot.current = request
+    setTaskActionErrorMessage(undefined)
+    setTaskViewSelection((currentSelection) => reduceTaskViewSelection(currentSelection, {
+      key: createTaskViewItemKey(issue.teamId, issue.id),
+      type: 'focus',
+    }))
+
+    try {
+      await teamActions.execute(
+        'move',
+        'click',
+        undefined,
+        createFocusedTaskViewActionSelection(target),
+      )
+    } finally {
+      clearTaskStatusMoveRequest(requestSlot, request)
+    }
+  }, [teamActions])
+
+  /**
+   * Routes header and Board-column Create clicks through the canonical Team registry.
+   *
+   * @param workflowStatusId - Optional Board-column status default for the create editor.
+   */
+  const handleTeamCreateClick = useCallback((workflowStatusId?: string) => {
+    pendingCreateWorkflowStatusIdRef.current = workflowStatusId
+    void teamActions.execute(
+      'create',
+      'click',
+      undefined,
+      { mode: 'none', targets: [] },
+    )
+  }, [teamActions])
+
+  /**
+   * Returns a detail-form mutation outcome to a pending Edit, Move, or Assign action.
+   *
+   * @param issueId - Team Issue persisted by the existing detail form.
+   * @param input - Validated detail patch submitted by the form.
+   * @returns Nothing after the existing mutation and completion bridge settle.
+   */
+  const handleTeamIssueActionUpdate = useCallback(async (
+    issueId: string,
+    input: UpdateTeamIssueInput,
+  ): Promise<void> => {
+    if (!onUpdateIssue) return
+    const pendingCandidate = resolvePendingTaskActionContext(
+      taskActionCompletion,
+      ['assign', 'edit', 'move', 'relation'],
+      { teamId, workItemId: issueId },
+    )
+    const currentIssue = selectedIssue?.id === issueId ? selectedIssue : undefined
+    const pendingContext = pendingCandidate && (
+      pendingCandidate.actionId === 'edit' ||
+      (pendingCandidate.actionId === 'move' &&
+        currentIssue !== undefined &&
+        input.workflowStatusId !== resolveWorkItemWorkflowStatusId(currentIssue)) ||
+      (pendingCandidate.actionId === 'assign' &&
+        input.assigneeUserId !== undefined &&
+        input.assigneeUserId !== currentIssue?.assigneeUserId)
+    )
+      ? pendingCandidate
+      : undefined
+    if (pendingCandidate && !pendingContext) {
+      taskActionCompletion.cancelContext(pendingCandidate)
+    }
+    const target = pendingContext
+      ? resolveTaskSurfaceActionTarget(pendingContext)
+      : undefined
+    const claimedContext = pendingContext && target && taskActionCompletion.claim(pendingContext)
+      ? pendingContext
+      : undefined
+    setDetailUpdateError(undefined)
+
+    try {
+      const updatedIssue = await onUpdateIssue(issueId, input)
+      if (claimedContext && target) {
+        taskActionCompletion.settle(claimedContext, createSucceededTaskActionMutationResult(
+          claimedContext.actionId,
+          target,
+          updatedIssue?.revision,
+        ))
+      }
+    } catch (error) {
+      if (claimedContext) {
+        const isConflict = isTeamIssueRevisionConflict(error)
+        const canDismissOwner = canDismissCompletedTaskActionOwner(
+          taskActionCompletion,
+          claimedContext,
+        )
+        taskActionCompletion.settle(claimedContext, createFailedTaskActionResult(
+          claimedContext.actionId,
+          target,
+          isConflict ? 'WorkItemRevisionConflict' : 'TeamTaskActionMutationFailed',
+          isConflict ? 'conflict' : 'unknown',
+          isConflict ? t('tasks.action.conflict') : t('taskViews.action.failed'),
+          isConflict,
+        ))
+        if (canDismissOwner) onSelectIssueRef.current?.('')
+      }
+      if (
+        selectedIssueUpdateErrorKey &&
+        (!claimedContext || canDismissCompletedTaskActionOwner(
+          taskActionCompletion,
+          claimedContext,
+        ))
+      ) {
+        setDetailUpdateError([
+          selectedIssueUpdateErrorKey,
+          error instanceof Error ? error.message : t('issues.error.update'),
+        ])
+      }
+    }
+  }, [
+    onUpdateIssue,
+    selectedIssueUpdateErrorKey,
+    selectedIssue,
+    t,
+    taskActionCompletion,
+    teamId,
+  ])
+
+  /**
+   * Returns a relation editor mutation to a pending canonical Relation action.
+   *
+   * @param issueId - Team Issue whose relation graph is being changed.
+   * @param mutate - Existing add or delete relation mutation.
+   * @returns Nothing after the relation graph refresh completes.
+   */
+  const handleTeamIssueActionRelation = useCallback(async (
+    issueId: string,
+    mutate: () => Promise<void>,
+  ): Promise<void> => {
+    const pendingCandidate = resolvePendingTaskActionContext(
+      taskActionCompletion,
+      ['assign', 'edit', 'move', 'relation'],
+      { teamId, workItemId: issueId },
+    )
+    const pendingContext = pendingCandidate?.actionId === 'relation'
+      ? pendingCandidate
+      : undefined
+    if (pendingCandidate && !pendingContext) {
+      taskActionCompletion.cancelContext(pendingCandidate)
+    }
+    const target = pendingContext
+      ? resolveTaskSurfaceActionTarget(pendingContext)
+      : undefined
+    const claimedContext = pendingContext && target && taskActionCompletion.claim(pendingContext)
+      ? pendingContext
+      : undefined
+
+    try {
+      await mutate()
+      if (claimedContext && target) {
+        taskActionCompletion.settle(claimedContext, createSucceededTaskActionMutationResult(
+          claimedContext.actionId,
+          target,
+        ))
+      }
+    } catch (error) {
+      if (claimedContext) {
+        const isConflict = isWorkItemRelationGraphConflict(error)
+        const canDismissOwner = canDismissCompletedTaskActionOwner(
+          taskActionCompletion,
+          claimedContext,
+        )
+        taskActionCompletion.settle(claimedContext, createFailedTaskActionResult(
+          claimedContext.actionId,
+          target,
+          isConflict ? 'WorkItemRelationGraphConflict' : 'TeamTaskRelationMutationFailed',
+          isConflict ? 'conflict' : 'unknown',
+          t('taskViews.action.failed'),
+          isConflict,
+        ))
+        if (canDismissOwner) onSelectIssueRef.current?.('')
+      }
+      throw error
+    }
+  }, [t, taskActionCompletion, teamId])
+
+  const taskActionContextMenuContext = useMemo(() => {
+    if (!taskActionContextMenuState) return undefined
+    return createTaskSurfaceActionBaseContext(
+      'team',
+      teamActionScope,
+      taskActionContextMenuState.selection,
+      activeTaskViewId,
+    )
+  }, [
+    activeTaskViewId,
+    taskActionContextMenuState,
+    teamActionScope,
+  ])
+
+  useEffect(() => {
+    queueMicrotask(() => {
+      setTaskViewSelection((currentSelection) => reduceTaskViewSelection(currentSelection, {
+        availableKeys: visibleIssueKeys,
+        type: 'prune',
+      }))
+    })
+  }, [visibleIssueKeys])
+
+  /**
+   * Opens one clicked Team Issue through the canonical action registry.
+   *
+   * @param issue - Visible Team Issue activated by pointer input.
+   * @returns Nothing.
+   */
+  const handleOpenIssue = useCallback((issue: TeamIssue) => {
+    const issueKey = createTaskViewItemKey(issue.teamId, issue.id)
+    setTaskViewSelection((currentSelection) => reduceTaskViewSelection(currentSelection, {
+      key: issueKey,
+      type: 'focus',
+    }))
+    void teamActions.execute(
+      'open',
+      'click',
+      undefined,
+      createFocusedTaskViewActionSelection({
+        expectedRevision: issue.revision,
+        teamId: issue.teamId,
+        workItemId: issue.id,
+      }),
+    )
+  }, [teamActions])
+
+  /** Opens a revision-bound Team Issue menu without inheriting unrelated selection. */
+  const handleTeamIssueActionMenuOpen = useCallback<TeamIssueActionMenuOpenHandler>((
+    issue,
+    anchorPoint,
+    returnFocusElement,
+  ) => {
+    const issueKey = createTaskViewItemKey(issue.teamId, issue.id)
+    setTaskViewSelection((currentSelection) => reduceTaskViewSelection(currentSelection, {
+      key: issueKey,
+      type: 'focus',
+    }))
+    setTaskActionContextMenuState({
+      anchorPoint,
+      returnFocusElement,
+      selection: createFocusedTaskViewActionSelection({
+        expectedRevision: issue.revision,
+        teamId: issue.teamId,
+        workItemId: issue.id,
+      }),
+    })
+  }, [])
+
+  /** Routes one Team Issue menu activation through the canonical action registry. */
+  const handleTeamIssueActionMenuExecute = useCallback((actionId: WorkItemActionId) => {
+    if (!taskActionContextMenuState) return
+    void teamActions.execute(
+      actionId,
+      'context-menu',
+      undefined,
+      taskActionContextMenuState.selection,
+    )
+  }, [taskActionContextMenuState, teamActions])
+
+  useEffect(() => {
+    /**
+     * Routes Team navigation and action shortcuts through shared reducers and registry policy.
+     *
+     * @param event - Document keydown event to normalize and route.
+     * @returns Nothing.
+     */
+    const handleTeamKeyboard = (event: KeyboardEvent) => {
+      const input = createTaskSurfaceKeyboardInput(
+        event,
+        isCreateOpen || Boolean(taskActionContextMenuState),
+      )
+      const selectionAction = createTaskViewSelectionKeyboardAction(
+        input,
+        taskViewSelection,
+        visibleIssueKeys,
+      )
+      if (selectionAction) {
+        event.preventDefault()
+        taskActionCompletion.cancel()
+        setTaskActionErrorMessage(undefined)
+        setTaskViewSelection(reduceTaskViewSelection(taskViewSelection, selectionAction))
+        return
+      }
+
+      const definition = teamActions.resolveShortcut(input)
+      if (!definition) return
+      event.preventDefault()
+      void teamActions.execute(
+        definition.id,
+        'keyboard',
+        definition.shortcut
+          ? formatTaskSurfaceKeyboardShortcut(definition.shortcut)
+          : undefined,
+      )
+    }
+
+    document.addEventListener('keydown', handleTeamKeyboard)
+    return () => document.removeEventListener('keydown', handleTeamKeyboard)
+  }, [
+    isCreateOpen,
+    taskActionContextMenuState,
+    taskActionCompletion,
+    taskViewSelection,
+    teamActions,
+    visibleIssueKeys,
+  ])
 
   return (
-    <main className="workbench-shell flex h-svh min-h-0 overflow-hidden">
-      <WorkspaceSidebar
-        activeTeamId={teamId}
-        activeTeamViewId="issues"
-        inboxCount={inboxCount}
-        isMobileOpen={isMobileSidebarOpen}
-        labels={sidebarLabels}
-        mobileCloseLabel={t('sidebar.mobileClose')}
-        mobileDialogLabel={t('sidebar.mobileDialog')}
-        onArchiveProject={onArchiveProject}
-        onArchiveTeam={onArchiveTeam}
-        onCreateProject={onCreateProject}
-        onCreateTeam={onCreateTeam}
-        onMobileClose={() => setIsMobileSidebarOpen(false)}
-        onOpenSearch={commandMenu.open}
-        onSelectNav={onSelectNav}
-        onSelectProject={onSelectProject}
-        onSelectTeamView={onSelectTeamView}
-        teams={teams}
-      />
-
-      <section className="workbench-main flex min-w-0 flex-1 flex-col overflow-hidden">
+    <>
         <header className="workbench-header flex-none px-[clamp(20px,3vw,34px)] py-4">
           <div className="flex min-w-0 flex-wrap items-start justify-between gap-4">
             <div className="flex min-w-0 items-start gap-3">
               <MobileSidebarButton
                 label={t('sidebar.mobileOpen')}
-                onClick={() => setIsMobileSidebarOpen(true)}
+                onClick={openMobileSidebar}
               />
               <div className="min-w-0">
                 <p className="workbench-eyebrow">
@@ -881,7 +2010,7 @@ export function TeamIssueScreen({
                 <button
                   aria-expanded={isCreateOpen}
                   className="workbench-button-primary inline-flex h-10 items-center gap-2 px-4"
-                  onClick={() => setIsCreateOpen(!isCreateOpen)}
+                  onClick={() => isCreateOpen ? closeCreateIssue() : handleTeamCreateClick()}
                   type="button"
                 >
                   + {t('issues.action.new')}
@@ -899,7 +2028,7 @@ export function TeamIssueScreen({
             {t('issues.loading')}
           </div>
         ) : (
-          <div className="min-h-0 flex-1 overflow-auto overscroll-contain">
+          <div className="min-h-0 flex-1">
             <div className="grid min-h-full grid-cols-[minmax(0,1fr)_minmax(360px,440px)] gap-0 max-[1080px]:grid-cols-1">
               <section className="min-w-0 px-[clamp(20px,3vw,34px)] py-5">
                 {configurationErrorMessage ? (
@@ -912,13 +2041,15 @@ export function TeamIssueScreen({
                 ) : null}
                 {isCreateOpen && onCreateIssue ? (
                   <CreateIssuePanel
+                    key={`create-issue-${createWorkflowStatusId ?? ''}`}
                     assigneeOptions={assigneeOptions}
+                    canCreateUnassignedIssue={canCreateUnassignedIssue}
                     configuration={configuration}
                     errorMessage={createErrorMessage}
+                    workflowStatusId={createWorkflowStatusId}
                     locale={locale}
                     onCancel={() => {
-                      setCreateErrorMessage(undefined)
-                      setIsCreateOpen(false)
+                      closeCreateIssue()
                     }}
                     onSubmit={async (input) => {
                       if (!onCreateIssue) {
@@ -927,22 +2058,76 @@ export function TeamIssueScreen({
 
                       setCreateErrorMessage(undefined)
 
+                      const pendingContext = resolvePendingTaskActionContext(
+                        taskActionCompletion,
+                        ['create'],
+                      )
+                      const claimedContext = pendingContext &&
+                          taskActionCompletion.claim(pendingContext)
+                        ? pendingContext
+                        : undefined
                       try {
-                        await onCreateIssue(input)
-                        setIsCreateOpen(false)
+                        const createdMutation = await onCreateIssue(input)
+                        const canDismissOwner = claimedContext
+                          ? canDismissCompletedTaskActionOwner(
+                              taskActionCompletion,
+                              claimedContext,
+                            )
+                          : true
+                        if (claimedContext) {
+                          taskActionCompletion.settle(claimedContext, createSucceededTaskCreateActionResult(
+                            createdMutation
+                              ? {
+                                  expectedRevision: createdMutation.issue.revision,
+                                  teamId: createdMutation.issue.teamId,
+                                  workItemId: createdMutation.issue.id,
+                                }
+                              : undefined,
+                            createdMutation?.navigationPath,
+                          ))
+                        }
+                        if (canDismissOwner) dismissCreateIssueEditor()
                       } catch (error) {
-                        setCreateErrorMessage(error instanceof Error ? error.message : t('issues.error.create'))
+                        if (claimedContext) {
+                          const canDismissOwner = canDismissCompletedTaskActionOwner(
+                            taskActionCompletion,
+                            claimedContext,
+                          )
+                          taskActionCompletion.settle(claimedContext, createFailedTaskActionResult(
+                            claimedContext.actionId,
+                            undefined,
+                            'TeamTaskCreateFailed',
+                            'unknown',
+                            t('issues.error.create'),
+                          ))
+                          if (canDismissOwner) dismissCreateIssueEditor()
+                        }
+                        if (!claimedContext) {
+                          setCreateErrorMessage(
+                            error instanceof Error ? error.message : t('issues.error.create'),
+                          )
+                        }
                       }
                     }}
-                    projects={activeTeam?.projects ?? []}
+                    projects={createIssueProjects ?? activeTeam?.projects ?? []}
                     t={t}
                     workspaceMembers={workspaceMembers}
                   />
                 ) : null}
+                {taskViewToolbar}
                 <IssueToolbar
-                  onSearchQueryChange={setSearchQuery}
-                  onStatusFilterChange={setStatusFilter}
-                  onViewModeChange={setViewMode}
+                  onSearchQueryChange={(nextSearchQuery) => commitViewState({
+                    ...currentViewState,
+                    searchQuery: nextSearchQuery,
+                  })}
+                  onStatusFilterChange={(nextStatusFilter) => commitViewState({
+                    ...currentViewState,
+                    statusFilter: nextStatusFilter,
+                  })}
+                  onViewModeChange={(nextViewMode) => commitViewState({
+                    ...currentViewState,
+                    viewMode: nextViewMode,
+                  })}
                   searchQuery={searchQuery}
                   statusFilter={effectiveStatusFilter}
                   t={t}
@@ -954,7 +2139,10 @@ export function TeamIssueScreen({
                     configuration={configuration}
                     idPrefix="team-issues"
                     locale={locale}
-                    onChange={setDefinitionFilter}
+                    onChange={(nextDefinitionFilter) => commitViewState({
+                      ...currentViewState,
+                      definitionFilter: nextDefinitionFilter,
+                    })}
                     personOptions={resolveWorkItemPersonOptions(workspaceMembers)}
                     value={effectiveDefinitionFilter}
                   />
@@ -962,6 +2150,28 @@ export function TeamIssueScreen({
                 {issueErrorMessage ? (
                   <p className="mt-5 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-bold text-red-700">
                     {issueErrorMessage}
+                  </p>
+                ) : null}
+                {planningErrorMessage ? (
+                  <div className="mt-5 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3" role="alert">
+                    <p className="text-sm font-bold text-red-700">{planningErrorMessage}</p>
+                    {onRetryPlanning ? (
+                      <button className="workbench-button-secondary min-h-9 px-3" onClick={onRetryPlanning} type="button">
+                        {t('planning.action.retry')}
+                      </button>
+                    ) : null}
+                  </div>
+                ) : isPlanningLoading ? (
+                  <p className="mt-5 text-sm font-semibold text-[var(--workbench-muted)]">
+                    {t('planning.loading')}
+                  </p>
+                ) : null}
+                {taskActionErrorMessage ? (
+                  <p
+                    className="mt-5 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-bold text-red-700"
+                    role="alert"
+                  >
+                    {taskActionErrorMessage}
                   </p>
                 ) : null}
                 <div
@@ -973,12 +2183,14 @@ export function TeamIssueScreen({
                     <IssueTable
                       activeTeam={activeTeam}
                       configuration={configuration}
+                      dependencySummaries={dependencySummaries}
+                      focusedIssueKey={taskViewSelection.focusedKey}
                       issues={visibleIssues}
+                      presentation={taskViewPresentation}
                       locale={locale}
-                      onSelectIssue={(issueId) => {
-                        setDetailUpdateError(undefined)
-                        onSelectIssue?.(issueId)
-                      }}
+                      onIssueActionMenuOpen={handleTeamIssueActionMenuOpen}
+                      onOpenIssue={canOpenIssueAction ? handleOpenIssue : undefined}
+                      selectedIssueKeys={taskViewSelection.selectedKeys}
                       selectedIssueId={selectedIssueId}
                       t={t}
                       workspaceMembers={workspaceMembers}
@@ -987,12 +2199,19 @@ export function TeamIssueScreen({
                     <IssueBoard
                       activeTeam={activeTeam}
                       configuration={configuration}
+                      dependencySummaries={dependencySummaries}
+                      focusedIssueKey={taskViewSelection.focusedKey}
                       issues={visibleIssues}
+                      presentation={taskViewPresentation}
                       locale={locale}
-                      onSelectIssue={(issueId) => {
-                        setDetailUpdateError(undefined)
-                        onSelectIssue?.(issueId)
-                      }}
+                      canMoveIssueStatus={canMoveTeamIssueAction}
+                      onCreateIssueOpen={onCreateIssue ? handleTeamCreateClick : undefined}
+                      onIssueActionMenuOpen={handleTeamIssueActionMenuOpen}
+                      onMoveIssueStatus={canEditIssueAction
+                        ? handleTeamIssueStatusMove
+                        : undefined}
+                      onOpenIssue={canOpenIssueAction ? handleOpenIssue : undefined}
+                      selectedIssueKeys={taskViewSelection.selectedKeys}
                       selectedIssueId={selectedIssueId}
                       t={t}
                       workflowStatuses={workflowStatuses}
@@ -1005,6 +2224,7 @@ export function TeamIssueScreen({
                 accessToken={accessToken}
                 assigneeOptions={assigneeOptions}
                 artifacts={artifacts}
+                canManageDependencyEndpoint={canManageDependencyEndpoint}
                 canManageExternalLinks={canManageExternalLinks}
                 collaboration={collaboration}
                 configuration={configuration}
@@ -1016,23 +2236,33 @@ export function TeamIssueScreen({
                 issue={selectedIssue}
                 isRelationsLoading={isRelationsLoading}
                 locale={locale}
-                onAddRelation={onAddRelation}
-                onDeleteRelation={onDeleteRelation}
-                onUpdateIssue={onUpdateIssue ? async (issueId, input) => {
-                  setDetailUpdateError(undefined)
-
-                  try {
-                    await onUpdateIssue(issueId, input)
-                  } catch (error) {
-                    if (selectedIssueUpdateErrorKey) {
-                      setDetailUpdateError([
-                        selectedIssueUpdateErrorKey,
-                        error instanceof Error ? error.message : t('issues.error.update'),
-                      ])
-                    }
-                  }
-                } : undefined}
-                projects={activeTeam?.projects ?? []}
+                onAddRelation={canMutateSelectedIssue && onAddRelation
+                  ? (issueId, input) => handleTeamIssueActionRelation(
+                      issueId,
+                      () => onAddRelation(issueId, input),
+                    )
+                  : undefined}
+                onCreateScheduleDependency={canMutateSelectedIssue
+                  ? onCreateScheduleDependency
+                  : undefined}
+                onDeleteRelation={canMutateSelectedIssue && onDeleteRelation
+                  ? (issueId, relation) => handleTeamIssueActionRelation(
+                      issueId,
+                      () => onDeleteRelation(issueId, relation),
+                    )
+                  : undefined}
+                onDeleteScheduleDependency={canMutateSelectedIssue
+                  ? onDeleteScheduleDependency
+                  : undefined}
+                onUpdateIssue={canMutateSelectedIssue && onUpdateIssue
+                  ? handleTeamIssueActionUpdate
+                  : undefined}
+                onUpdateScheduleDependency={canMutateSelectedIssue
+                  ? onUpdateScheduleDependency
+                  : undefined}
+                planningSnapshot={planningSnapshot}
+                canAssignUnassigned={canCreateUnassignedIssue}
+                projects={createIssueProjects ?? activeTeam?.projects ?? []}
                 relationCandidates={issues}
                 relations={relations}
                 t={t}
@@ -1041,8 +2271,20 @@ export function TeamIssueScreen({
             </div>
           </div>
         )}
-      </section>
-    </main>
+        {taskActionContextMenuState && taskActionContextMenuContext ? (
+          <TaskActionContextMenu
+            anchorPoint={taskActionContextMenuState.anchorPoint}
+            context={taskActionContextMenuContext}
+            labels={teamActionLabels}
+            menuLabel={t('tasks.action.more')}
+            onClose={() => setTaskActionContextMenuState(undefined)}
+            onExecute={handleTeamIssueActionMenuExecute}
+            registry={teamActions.registry}
+            returnFocusElement={taskActionContextMenuState.returnFocusElement}
+            testId="team-issue-action-context-menu"
+          />
+        ) : null}
+    </>
   )
 }
 
@@ -1142,6 +2384,7 @@ function IssueToolbar({
 
 function CreateIssuePanel({
   assigneeOptions,
+  canCreateUnassignedIssue,
   configuration,
   errorMessage,
   locale,
@@ -1149,9 +2392,12 @@ function CreateIssuePanel({
   onSubmit,
   projects,
   t,
+  workflowStatusId,
   workspaceMembers,
 }: {
   assigneeOptions: ProjectMember[]
+  /** Whether an unassigned Team-owned Work Item is an authorized create destination. */
+  canCreateUnassignedIssue: boolean
   configuration?: WorkItemConfiguration
   errorMessage?: string
   locale: Locale
@@ -1159,13 +2405,19 @@ function CreateIssuePanel({
   onSubmit: (input: CreateTeamIssueInput) => Promise<void>
   projects: ProjectDirectoryTeam['projects']
   t: (key: MessageKey) => string
+  workflowStatusId?: string
   workspaceMembers: WorkspaceMember[]
 }) {
   const today = formatLocalDateInputValue()
-  const [selectedProjectId, setSelectedProjectId] = useState('')
+  const [selectedProjectId, setSelectedProjectId] = useState(
+    canCreateUnassignedIssue ? '' : projects[0]?.id ?? '',
+  )
   const [fieldErrors, setFieldErrors] = useState<Readonly<Record<string, string | undefined>>>({})
   const workflowStatuses = resolveCreateWorkflowStatuses(configuration)
-  const initialWorkflowStatusId = configuration?.workflow.initialStatusId ?? ''
+  const contextualWorkflowStatusId = workflowStatusId && workflowStatuses.some((status) => status.id === workflowStatusId)
+    ? workflowStatusId
+    : undefined
+  const initialWorkflowStatusId = contextualWorkflowStatusId ?? configuration?.workflow.initialStatusId ?? workflowStatuses[0]?.id ?? ''
   const personOptions = resolveWorkItemPersonOptions(workspaceMembers)
   const defaultCustomFieldValues = configuration
     ? createDefaultCustomFieldValues(configuration.customFields, selectedProjectId || undefined)
@@ -1186,7 +2438,10 @@ function CreateIssuePanel({
           const description = String(formData.get('description') ?? '').trim()
           const assignedProjectId = String(formData.get('assignedProjectId') ?? '').trim()
           const assigneeUserId = String(formData.get('assigneeUserId') ?? '').trim()
-          const dueDate = String(formData.get('dueDate') ?? today).replaceAll('-', '/')
+          const dueDate = String(formData.get('dueDate') ?? '').trim()
+          const schedule = dueDate
+            ? createDefaultDueDateTaskSchedule(dueDate)
+            : createDefaultUnscheduledTaskSchedule()
           const workflowStatusId = String(
             formData.get('workflowStatusId') ?? initialWorkflowStatusId,
           ).trim()
@@ -1215,8 +2470,8 @@ function CreateIssuePanel({
             assignedProjectId: assignedProjectId || undefined,
             assigneeUserId,
             customFieldValues: parsedCustomFields.values,
-            dueDate,
             priority: resolveIssuePriority(formData.get('priority')),
+            schedule,
             workflowStatusId,
           })
         }}
@@ -1239,7 +2494,9 @@ function CreateIssuePanel({
               onChange={(event) => setSelectedProjectId(event.target.value)}
               value={selectedProjectId}
             >
-              <option value="">{t('issues.project.unassigned')}</option>
+              {canCreateUnassignedIssue ? (
+                <option value="">{t('issues.project.unassigned')}</option>
+              ) : null}
               {projects.map((project) => (
                 <option key={project.id} value={project.id}>
                   {project.name}
@@ -1262,7 +2519,7 @@ function CreateIssuePanel({
           </label>
           <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
             {t('tasks.column.dueDate')}
-            <input className="workbench-input h-10 w-full min-w-0 px-3" defaultValue={today} name="dueDate" required type="date" />
+            <input className="workbench-input h-10 w-full min-w-0 px-3" defaultValue={today} name="dueDate" type="date" />
           </label>
           <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
             {t('tasks.column.status')}
@@ -1326,18 +2583,29 @@ function CreateIssuePanel({
 function IssueTable({
   activeTeam,
   configuration,
+  dependencySummaries,
+  focusedIssueKey,
   issues,
   locale,
-  onSelectIssue,
+  onIssueActionMenuOpen,
+  onOpenIssue,
+  presentation,
+  selectedIssueKeys,
   selectedIssueId,
   t,
   workspaceMembers,
 }: {
   activeTeam?: ProjectDirectoryTeam
   configuration?: WorkItemConfiguration
+  dependencySummaries: Readonly<Record<string, WorkItemDependencySummary>>
+  focusedIssueKey?: string
   issues: TeamIssue[]
   locale: Locale
-  onSelectIssue?: (issueId: string) => void
+  /** Opens the canonical action menu for one Team Issue row. */
+  onIssueActionMenuOpen?: TeamIssueActionMenuOpenHandler
+  onOpenIssue?: (issue: TeamIssue) => void
+  presentation?: TaskViewPresentationSettings
+  selectedIssueKeys: readonly string[]
   selectedIssueId?: string
   t: (key: MessageKey) => string
   workspaceMembers: WorkspaceMember[]
@@ -1345,63 +2613,241 @@ function IssueTable({
   const personLabels = Object.fromEntries(
     workspaceMembers.map((member) => [member.email, member.name ?? member.email]),
   )
+  const visibleColumns = (presentation?.columns ?? [
+    { field: 'title' },
+    { field: 'project' },
+    { field: 'assignee' },
+    { field: 'status' },
+    { field: 'customFields' },
+    { field: 'dueDate' },
+    { field: 'priority' },
+  ]).filter((column) => isSupportedTeamIssueColumn(column.field))
+  const renderedColumns = visibleColumns.some((column) => column.field === 'title')
+    ? visibleColumns
+    : [{ field: 'title' }, ...visibleColumns]
+  const tableColumnPlacements = resolveTaskViewTableColumnPlacements(renderedColumns)
+  const tableMinimumWidth = Math.max(
+    720,
+    tableColumnPlacements.reduce((total, placement) => total + placement.width, 0),
+  )
+  const cellPadding = resolveIssueTableCellPadding(presentation?.density)
+  const titleCellPadding = resolveIssueTableCellPadding(presentation?.density, true)
+  const wrapText = presentation?.display.wrapTitles ?? false
+  const showAssigneeAvatar = presentation?.display.showAssigneeAvatars ?? false
+  const groups = presentation?.groupBy
+    ? groupTaskViewItems(
+        issues,
+        presentation.groupBy,
+        (issue, field) => resolveTeamIssueGroupValue(issue, field, configuration, activeTeam, t),
+        presentation.groupDirection,
+      )
+    : undefined
+
+  /** Renders one Team Issue row under its current table presentation. */
+  const renderIssueRow = (issue: TeamIssue) => {
+    const issueKey = createTaskViewItemKey(issue.teamId, issue.id)
+    const focusedForAction = focusedIssueKey === issueKey
+    const selectedForAction = selectedIssueKeys.includes(issueKey)
+    const customFieldEntries = new Map(
+      resolveIssueCustomFieldEntries(issue, configuration, locale, personLabels).map(
+        (entry) => [entry.definition.id, entry.value],
+      ),
+    )
+    return (
+      <tr
+        className={`border-b border-slate-100 transition last:border-b-0 ${
+          selectedIssueId === issue.id ? 'workbench-row-selected' : ''
+        } ${selectedForAction ? 'bg-blue-50/70' : ''} ${
+          focusedForAction ? 'outline outline-2 -outline-offset-2 outline-blue-500/40' : ''
+        }`}
+        data-task-view-focused={focusedForAction ? 'true' : 'false'}
+        data-task-view-selected={selectedForAction ? 'true' : 'false'}
+        key={issue.id}
+        onContextMenu={(event) => {
+          if (!onIssueActionMenuOpen) return
+          event.preventDefault()
+          onIssueActionMenuOpen(
+            issue,
+            { x: event.clientX, y: event.clientY },
+            event.currentTarget,
+          )
+        }}
+        tabIndex={-1}
+      >
+        {tableColumnPlacements.map((placement) => {
+          const field = placement.column.field
+          const columnCellProps = {
+            'data-column-field': field,
+            'data-column-pin': placement.column.pin,
+            style: resolveIssueTableColumnCellStyle(placement),
+          }
+          switch (field) {
+            case 'title': return (
+              <td {...columnCellProps} className={`${titleCellPadding} text-sm font-semibold text-[var(--workbench-text)]`} key={field}>
+                <div className="flex min-w-0 items-start gap-2">
+                  <button
+                    aria-pressed={selectedForAction || selectedIssueId === issue.id}
+                    className={`min-w-0 flex-1 rounded-sm text-left font-semibold transition hover:text-[var(--workbench-primary)] focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-[#2563eb]/10 disabled:cursor-default disabled:text-[var(--workbench-text)] ${
+                      wrapText ? 'whitespace-normal break-words' : 'truncate'
+                    }`}
+                    data-testid={`issue-row-${issue.id}`}
+                    disabled={!onOpenIssue}
+                    onClick={() => onOpenIssue?.(issue)}
+                    type="button"
+                  >
+                    {resolveIssueTitle(issue, t)}
+                  </button>
+                  {onIssueActionMenuOpen ? (
+                    <button
+                      aria-label={`${t('tasks.action.more')}: ${resolveIssueTitle(issue, t)}`}
+                      className="grid h-9 w-9 flex-none place-items-center rounded text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary)] max-[640px]:h-11 max-[640px]:w-11"
+                      data-testid={`team-issue-row-actions-${issue.id}`}
+                      onClick={(event) => {
+                        const returnFocusElement = event.currentTarget
+                        const bounds = returnFocusElement.getBoundingClientRect()
+                        onIssueActionMenuOpen(
+                          issue,
+                          { x: bounds.right, y: bounds.bottom },
+                          returnFocusElement,
+                        )
+                      }}
+                      type="button"
+                    >
+                      <MoreHorizontalIcon className="h-5 w-5" />
+                    </button>
+                  ) : null}
+                </div>
+                <WorkItemDependencyChips
+                  className="pt-2"
+                  summary={resolveWorkItemDependencySummary(
+                    dependencySummaries,
+                    { teamId: issue.teamId, workItemId: issue.id },
+                  )}
+                  t={t}
+                />
+              </td>
+            )
+            case 'project': return (
+              <td {...columnCellProps} className={`${cellPadding} text-sm font-medium text-[var(--workbench-muted)]`} key={field}>
+                {resolveAssignedProjectName(issue, activeTeam, t)}
+              </td>
+            )
+            case 'assignee': return (
+              <td {...columnCellProps} className={`${cellPadding} text-sm font-medium text-[var(--workbench-muted)]`} key={field}>
+                <div className="flex min-w-0 items-center gap-2">
+                  {showAssigneeAvatar ? (
+                    <WorkItemAssigneeAvatar label={resolveWorkItemAssignee(issue)} />
+                  ) : null}
+                  <span className="truncate">{resolveWorkItemAssignee(issue)}</span>
+                </div>
+              </td>
+            )
+            case 'status': return (
+              <td {...columnCellProps} className={cellPadding} key={field}>
+                <IssueStatusBadge configuration={configuration} issue={issue} />
+              </td>
+            )
+            case 'customFields': return (
+              <td {...columnCellProps} className={`max-w-64 ${cellPadding}`} key={field}>
+                <IssueCustomFieldSummary
+                  configuration={configuration}
+                  issue={issue}
+                  locale={locale}
+                  personLabels={personLabels}
+                />
+              </td>
+            )
+            case 'dueDate': return (
+              <td {...columnCellProps} className={`${cellPadding} text-sm font-medium text-[var(--workbench-muted)]`} key={field}>
+                {issue.dueDate}
+              </td>
+            )
+            case 'priority': return (
+              <td {...columnCellProps} className={cellPadding} key={field}>
+                <IssuePriorityBadge priority={issue.priority} t={t} />
+              </td>
+            )
+            case 'team': return (
+              <td {...columnCellProps} className={`${cellPadding} text-sm font-medium text-[var(--workbench-muted)]`} key={field}>
+                {issue.teamId}
+              </td>
+            )
+            default: {
+              const customFieldId = field.slice('custom:'.length)
+              return (
+                <td {...columnCellProps} className={`${cellPadding} text-sm font-medium text-[var(--workbench-muted)]`} key={field}>
+                  {customFieldEntries.get(customFieldId) ?? '—'}
+                </td>
+              )
+            }
+          }
+        })}
+      </tr>
+    )
+  }
 
   return (
     <section className="workbench-table mt-5 overflow-hidden">
       <div className="overflow-x-auto">
-        <table className="w-full min-w-[1080px] border-collapse">
+        <table
+          className="w-full table-fixed border-collapse"
+          style={{ minWidth: tableMinimumWidth }}
+        >
+          <colgroup>
+            {tableColumnPlacements.map((placement) => (
+              <col key={placement.column.field} style={{ width: placement.width }} />
+            ))}
+          </colgroup>
           <thead>
             <tr className="workbench-table-head text-left">
-              <th className="px-5 py-4" scope="col">{t('issues.column.title')}</th>
-              <th className="px-4 py-4" scope="col">{t('issues.column.project')}</th>
-              <th className="px-4 py-4" scope="col">{t('tasks.column.assignee')}</th>
-              <th className="px-4 py-4" scope="col">{t('tasks.column.status')}</th>
-              <th className="px-4 py-4" scope="col">{t('workItems.fields.title')}</th>
-              <th className="px-4 py-4" scope="col">{t('tasks.column.dueDate')}</th>
-              <th className="px-4 py-4" scope="col">{t('tasks.column.priority')}</th>
+              {tableColumnPlacements.map((placement) => (
+                <th
+                  className={`${placement.column.field === 'title' ? 'px-5 py-3' : 'px-4 py-3'} ${
+                    placement.column.pin ? 'bg-[var(--workbench-surface-muted)]' : ''
+                  }`}
+                  data-column-field={placement.column.field}
+                  data-column-pin={placement.column.pin}
+                  key={placement.column.field}
+                  scope="col"
+                  style={resolveIssueTableColumnCellStyle(placement, true)}
+                >
+                  {resolveIssueTableColumnLabel(placement.column.field, configuration, t)}
+                </th>
+              ))}
             </tr>
           </thead>
           <tbody>
             {issues.length > 0 ? (
-              issues.map((issue) => (
-                <tr
-                  className={`border-b border-slate-100 transition last:border-b-0 ${
-                    selectedIssueId === issue.id ? 'workbench-row-selected' : ''
-                  }`}
-                  key={issue.id}
-                >
-                  <td className="p-0 text-sm font-semibold text-[var(--workbench-text)]">
-                    <button
-                      aria-pressed={selectedIssueId === issue.id}
-                      className="w-full rounded-sm px-5 py-3 text-left font-semibold transition hover:text-[var(--workbench-primary)] focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-[#2563eb]/10 disabled:cursor-default disabled:text-[var(--workbench-text)]"
-                      data-testid={`issue-row-${issue.id}`}
-                      disabled={!onSelectIssue}
-                      onClick={() => onSelectIssue?.(issue.id)}
-                      type="button"
-                    >
-                      {resolveIssueTitle(issue, t)}
-                    </button>
-                  </td>
-                  <td className="px-4 py-3 text-sm font-medium text-[var(--workbench-muted)]">{resolveAssignedProjectName(issue, activeTeam, t)}</td>
-                  <td className="px-4 py-3 text-sm font-medium text-[var(--workbench-muted)]">{resolveWorkItemAssignee(issue)}</td>
-                  <td className="px-4 py-4">
-                    <IssueStatusBadge configuration={configuration} issue={issue} />
-                  </td>
-                  <td className="max-w-64 px-4 py-3">
-                    <IssueCustomFieldSummary
-                      configuration={configuration}
-                      issue={issue}
-                      locale={locale}
-                      personLabels={personLabels}
-                    />
-                  </td>
-                  <td className="px-4 py-3 text-sm font-medium text-[var(--workbench-muted)]">{issue.dueDate}</td>
-                  <td className="px-4 py-4"><IssuePriorityBadge priority={issue.priority} t={t} /></td>
-                </tr>
-              ))
+              groups ? groups.map((group) => {
+                const subgroups = presentation?.subgroupBy
+                  ? groupTaskViewItems(
+                      group.items,
+                      presentation.subgroupBy,
+                      (issue, field) => resolveTeamIssueGroupValue(
+                        issue,
+                        field,
+                        configuration,
+                        activeTeam,
+                        t,
+                      ),
+                      presentation.subgroupDirection,
+                    )
+                  : undefined
+                return (
+                  <Fragment key={group.key}>
+                    <IssueTableGroupRow columnCount={tableColumnPlacements.length} count={group.items.length} label={group.label} />
+                    {subgroups ? subgroups.map((subgroup) => (
+                      <Fragment key={`${group.key}:${subgroup.key}`}>
+                        <IssueTableGroupRow columnCount={tableColumnPlacements.length} count={subgroup.items.length} label={subgroup.label} secondary />
+                        {subgroup.items.map(renderIssueRow)}
+                      </Fragment>
+                    )) : group.items.map(renderIssueRow)}
+                  </Fragment>
+                )
+              }) : issues.map(renderIssueRow)
             ) : (
               <tr>
-                <td className="px-5 py-8 text-sm font-medium text-[var(--workbench-muted)]" colSpan={7} data-testid="team-issues-empty">
+                <td className="px-5 py-8 text-sm font-medium text-[var(--workbench-muted)]" colSpan={tableColumnPlacements.length} data-testid="team-issues-empty">
                   {t('issues.empty')}
                 </td>
               </tr>
@@ -1416,22 +2862,208 @@ function IssueTable({
   )
 }
 
+/** Props for one primary or secondary Team Issue table group heading. */
+type IssueTableGroupRowProps = {
+  /** Number of visible columns spanned by the heading. */
+  columnCount: number
+  /** Number of Issues in the group. */
+  count: number
+  /** Human-readable group value. */
+  label: string
+  /** Whether the heading represents a subgroup. */
+  secondary?: boolean
+}
+
+/** Renders an accessible count-bearing Team Issue group heading. */
+function IssueTableGroupRow({
+  columnCount,
+  count,
+  label,
+  secondary = false,
+}: IssueTableGroupRowProps) {
+  return (
+    <tr data-testid={secondary ? 'team-issue-table-subgroup' : 'team-issue-table-group'}>
+      <th
+        className={secondary
+          ? 'bg-slate-50 px-7 py-2 text-left text-xs font-semibold text-[var(--workbench-muted)]'
+          : 'border-y border-[var(--workbench-border)] bg-[#f2f8f7] px-5 py-2.5 text-left text-sm font-bold text-[var(--workbench-text)]'}
+        colSpan={columnCount}
+        scope="rowgroup"
+      >
+        {label} <span className="font-medium text-[var(--workbench-muted)]">({count})</span>
+      </th>
+    </tr>
+  )
+}
+
+/** Reports whether a canonical field can be rendered as a Team Issue table column. */
+function isSupportedTeamIssueColumn(field: string): boolean {
+  return [
+    'title',
+    'project',
+    'assignee',
+    'status',
+    'customFields',
+    'dueDate',
+    'priority',
+    'team',
+  ].includes(field) || field.startsWith('custom:')
+}
+
+/** Resolves the localized or configured heading for one supported Team Issue table field. */
+function resolveIssueTableColumnLabel(
+  field: string,
+  configuration: WorkItemConfiguration | undefined,
+  t: (key: MessageKey) => string,
+): string {
+  switch (field) {
+    case 'title': return t('issues.column.title')
+    case 'project': return t('issues.column.project')
+    case 'assignee': return t('tasks.column.assignee')
+    case 'status': return t('tasks.column.status')
+    case 'customFields': return t('workItems.fields.title')
+    case 'dueDate': return t('tasks.column.dueDate')
+    case 'priority': return t('tasks.column.priority')
+    case 'team': return t('workspace.column.team')
+    default: {
+      const customFieldId = field.slice('custom:'.length)
+      return configuration?.customFields.find((item) => item.id === customFieldId)?.name ??
+        customFieldId
+    }
+  }
+}
+
+/** Resolves table-cell padding from the effective Team Issue density. */
+function resolveIssueTableCellPadding(
+  density: TaskViewPresentationSettings['density'] | undefined,
+  titleCell = false,
+): string {
+  const horizontalPadding = titleCell ? 'px-5' : 'px-4'
+  const verticalPadding = density === 'compact'
+    ? 'py-2'
+    : density === 'spacious'
+      ? 'py-5'
+      : 'py-3'
+  return `${horizontalPadding} ${verticalPadding}`
+}
+
+/**
+ * Focuses and reveals a control after React commits a selected Team Issue detail update.
+ *
+ * @param selector - Selector scoped to the active Team Issue detail pane.
+ * @returns Nothing.
+ */
+function focusTeamIssueDetailControl(selector: string): void {
+  requestAnimationFrame(() => {
+    const detailPane = document.querySelector<HTMLElement>(
+      '[data-testid="team-issue-detail-pane"]',
+    )
+    const control = detailPane?.querySelector<HTMLElement>(selector)
+    control?.focus()
+    control?.scrollIntoView({ block: 'nearest' })
+  })
+}
+
+/**
+ * Resolves width and sticky-edge styles for a persisted Team Issue table column.
+ *
+ * @param placement - Column width and cumulative pin offsets.
+ * @param header - Whether the style is applied to a table heading.
+ * @returns Inline table-cell styles that reproduce the saved layout.
+ */
+function resolveIssueTableColumnCellStyle(
+  placement: TaskViewTableColumnPlacement,
+  header = false,
+): CSSProperties {
+  const width = `${placement.width}px`
+  const baseStyle: CSSProperties = { maxWidth: width, minWidth: width, width }
+  if (placement.column.pin === 'start') {
+    return {
+      ...baseStyle,
+      backgroundColor: 'inherit',
+      left: placement.startOffset ?? 0,
+      position: 'sticky',
+      zIndex: header ? 20 : 10,
+    }
+  }
+  if (placement.column.pin === 'end') {
+    return {
+      ...baseStyle,
+      backgroundColor: 'inherit',
+      position: 'sticky',
+      right: placement.endOffset ?? 0,
+      zIndex: header ? 20 : 10,
+    }
+  }
+  return baseStyle
+}
+
+/** Resolves a stable key and visible label for one Team Issue grouping field. */
+function resolveTeamIssueGroupValue(
+  issue: TeamIssue,
+  field: string,
+  configuration: WorkItemConfiguration | undefined,
+  activeTeam: ProjectDirectoryTeam | undefined,
+  t: (key: MessageKey) => string,
+): TaskViewGroupValue {
+  let value: string
+  switch (field) {
+    case 'title': value = resolveIssueTitle(issue, t); break
+    case 'status': value = resolveWorkItemWorkflowStatusLabel(issue, configuration); break
+    case 'assignee': value = resolveWorkItemAssignee(issue); break
+    case 'dueDate': value = issue.dueDate || '—'; break
+    case 'priority': value = t(`tasks.priority.${issue.priority}`); break
+    case 'project': value = resolveAssignedProjectName(issue, activeTeam, t); break
+    case 'team': value = activeTeam?.name ?? issue.teamId; break
+    default: {
+      const customValue = field.startsWith('custom:')
+        ? issue.customFieldValues[field.slice('custom:'.length)]
+        : undefined
+      value = Array.isArray(customValue)
+        ? customValue.join(', ')
+        : customValue === undefined || customValue === null || customValue === ''
+          ? '—'
+          : String(customValue)
+    }
+  }
+  return { key: value, label: value }
+}
+
 function IssueBoard({
   activeTeam,
+  canMoveIssueStatus,
   configuration,
+  dependencySummaries,
+  focusedIssueKey,
   issues,
   locale,
-  onSelectIssue,
+  onCreateIssueOpen,
+  onIssueActionMenuOpen,
+  onMoveIssueStatus,
+  onOpenIssue,
+  presentation,
+  selectedIssueKeys,
   selectedIssueId,
   t,
   workflowStatuses,
   workspaceMembers,
 }: {
   activeTeam?: ProjectDirectoryTeam
+  /** Checks whether one Team Issue belongs to a server-authorized status mutation scope. */
+  canMoveIssueStatus?: (issue: TeamIssue) => boolean
   configuration?: WorkItemConfiguration
+  dependencySummaries: Readonly<Record<string, WorkItemDependencySummary>>
+  focusedIssueKey?: string
   issues: TeamIssue[]
   locale: Locale
-  onSelectIssue?: (issueId: string) => void
+  onCreateIssueOpen?: (workflowStatusId: string) => void
+  /** Opens the canonical action menu for one Team Issue card. */
+  onIssueActionMenuOpen?: TeamIssueActionMenuOpenHandler
+  /** Routes one Board status selection or drop through the canonical Move action. */
+  onMoveIssueStatus?: (issue: TeamIssue, workflowStatusId: string) => Promise<void>
+  onOpenIssue?: (issue: TeamIssue) => void
+  presentation?: TaskViewPresentationSettings
+  selectedIssueKeys: readonly string[]
   selectedIssueId?: string
   t: (key: MessageKey) => string
   workflowStatuses: readonly WorkflowStatusDefinition[]
@@ -1440,58 +3072,396 @@ function IssueBoard({
   const personLabels = Object.fromEntries(
     workspaceMembers.map((member) => [member.email, member.name ?? member.email]),
   )
+  const [draggedIssueId, setDraggedIssueId] = useState<string>()
+  const [dropTargetStatusId, setDropTargetStatusId] = useState<string>()
+  const [movingIssueIds, setMovingIssueIds] = useState<ReadonlySet<string>>(() => new Set())
+  /** Checks the Board callback and the current issue-specific write scope together. */
+  const canMoveIssue = (issue: TeamIssue) => Boolean(
+    onMoveIssueStatus && (canMoveIssueStatus?.(issue) ?? true),
+  )
+  const visibleFields = new Set((presentation?.columns ?? [
+    { field: 'title' },
+    { field: 'project' },
+    { field: 'assignee' },
+    { field: 'status' },
+    { field: 'dueDate' },
+    { field: 'priority' },
+  ]).map((column) => column.field))
+  const cardPadding = presentation?.density === 'compact'
+    ? 'p-2.5'
+    : presentation?.density === 'spacious'
+      ? 'p-5'
+      : 'p-4'
+  const cardListSpacing = presentation?.density === 'compact'
+    ? 'gap-2 p-2'
+    : presentation?.density === 'spacious'
+      ? 'gap-4 p-4'
+      : 'gap-3 p-3'
+  const wrapText = presentation?.display.wrapTitles ?? false
+  const showAssigneeAvatars = presentation?.display.showAssigneeAvatars ?? false
+  const showEmptyGroups = presentation?.display.showEmptyGroups ?? true
+  const visibleWorkflowStatuses = showEmptyGroups
+    ? workflowStatuses
+    : workflowStatuses.filter((status) =>
+        issues.some((issue) => resolveWorkItemWorkflowStatusId(issue) === status.id)
+      )
+
+  /** Validates and requests a Team workflow status change. */
+  const moveIssueToStatus = (issue: TeamIssue, workflowStatusId: string) => {
+    if (!onMoveIssueStatus || !canMoveIssue(issue) || issue.workflowStatusId === workflowStatusId) {
+      return
+    }
+
+    const editableStatuses = resolveEditableWorkflowStatuses(issue, configuration)
+
+    if (!editableStatuses.some((status) => status.id === workflowStatusId)) {
+      return
+    }
+
+    const issueId = issue.id
+    setMovingIssueIds((currentIds) => new Set(currentIds).add(issueId))
+    void onMoveIssueStatus(issue, workflowStatusId)
+      .catch(() => undefined)
+      .finally(() => {
+        setMovingIssueIds((currentIds) => {
+          const nextIds = new Set(currentIds)
+          nextIds.delete(issueId)
+          return nextIds
+        })
+      })
+  }
+
+  /** Starts a native drag for a Team Work Item. */
+  const handleDragStart = (event: DragEvent<HTMLElement>, issue: TeamIssue) => {
+    if (!canMoveIssue(issue)) {
+      return
+    }
+
+    event.dataTransfer.effectAllowed = 'move'
+    event.dataTransfer.setData('application/x-mukuroji-team-issue-id', issue.id)
+    event.dataTransfer.setData('text/plain', issue.id)
+    setDraggedIssueId(issue.id)
+  }
+
+  /** Resolves a dropped Team Work Item and requests a validated status change. */
+  const handleDrop = (event: DragEvent<HTMLElement>, status: WorkflowStatusDefinition) => {
+    event.preventDefault()
+    const issueId = event.dataTransfer.getData('application/x-mukuroji-team-issue-id') ||
+      event.dataTransfer.getData('text/plain') ||
+      draggedIssueId
+    const issue = issueId ? issues.find((candidate) => candidate.id === issueId) : undefined
+
+    setDraggedIssueId(undefined)
+    setDropTargetStatusId(undefined)
+
+    if (issue) {
+      moveIssueToStatus(issue, status.id)
+    }
+  }
 
   return (
-    <section className="mt-5 flex min-w-0 gap-4 overflow-x-auto pb-2">
-      {workflowStatuses.map((status) => {
-        const columnIssues = issues.filter(
-          (issue) => resolveWorkItemWorkflowStatusId(issue) === status.id,
-        )
+    <section className="mt-5 grid min-w-0 gap-3">
+      <div className="flex min-w-0 gap-4 overflow-x-auto pb-2">
+        {visibleWorkflowStatuses.map((status) => {
+          const columnIssues = issues.filter(
+            (issue) => resolveWorkItemWorkflowStatusId(issue) === status.id,
+          )
+          const primaryCardGroupField = presentation?.groupBy === 'status'
+            ? presentation.subgroupBy
+            : presentation?.groupBy
+          const secondaryCardGroupField = presentation?.groupBy !== 'status'
+            ? presentation?.subgroupBy
+            : undefined
+          const primaryCardGroups = primaryCardGroupField
+            ? groupTaskViewItems(
+                columnIssues,
+                primaryCardGroupField,
+                (issue, field) => resolveTeamIssueGroupValue(
+                  issue,
+                  field,
+                  configuration,
+                  activeTeam,
+                  t,
+                ),
+                presentation?.groupBy === 'status'
+                  ? presentation.subgroupDirection
+                  : presentation?.groupDirection,
+              )
+            : []
+          const orderedColumnIssues: TeamIssue[] = []
+          const primaryHeadingByIssueId = new Map<string, (typeof primaryCardGroups)[number]>()
+          const secondaryHeadingByIssueId = new Map<string, string>()
+          for (const primaryGroup of primaryCardGroups) {
+            const firstIssue = primaryGroup.items[0]
+            if (firstIssue) primaryHeadingByIssueId.set(firstIssue.id, primaryGroup)
+            const secondaryGroups = secondaryCardGroupField
+              ? groupTaskViewItems(
+                  primaryGroup.items,
+                  secondaryCardGroupField,
+                  (issue, field) => resolveTeamIssueGroupValue(
+                    issue,
+                    field,
+                    configuration,
+                    activeTeam,
+                    t,
+                  ),
+                  presentation?.subgroupDirection,
+                )
+              : []
+            if (secondaryGroups.length > 0) {
+              for (const secondaryGroup of secondaryGroups) {
+                const firstSecondaryIssue = secondaryGroup.items[0]
+                if (firstSecondaryIssue) {
+                  secondaryHeadingByIssueId.set(
+                    firstSecondaryIssue.id,
+                    `${secondaryGroup.label} (${secondaryGroup.items.length})`,
+                  )
+                }
+                orderedColumnIssues.push(...secondaryGroup.items)
+              }
+            } else {
+              orderedColumnIssues.push(...primaryGroup.items)
+            }
+          }
+          if (primaryCardGroups.length === 0) orderedColumnIssues.push(...columnIssues)
 
-        return (
-          <div className="workbench-panel min-h-[420px] w-[min(320px,82vw)] flex-none" key={status.id}>
-            <div className="flex items-center justify-between gap-3 border-b border-[var(--workbench-border)] px-4 py-3">
-              <IssueStatusBadge status={status} />
-              <span className="text-sm font-semibold text-[var(--workbench-muted)]">{columnIssues.length}</span>
+          return (
+            <div
+              className={`workbench-panel min-h-[420px] w-[min(320px,82vw)] flex-none transition ${dropTargetStatusId === status.id ? 'border-[#99d7cf] bg-[#e5f7f4] ring-2 ring-[#99d7cf]/40' : ''}`}
+              data-testid={`team-issue-column-${status.id}`}
+              key={status.id}
+              onDragLeave={() => setDropTargetStatusId(undefined)}
+              onDragOver={(event) => {
+                if (!onMoveIssueStatus || !draggedIssueId) {
+                  return
+                }
+
+                const issue = issues.find((candidate) => candidate.id === draggedIssueId)
+
+                if (
+                  !issue ||
+                  !canMoveIssue(issue) ||
+                  !resolveEditableWorkflowStatuses(issue, configuration).some(
+                    (candidate) => candidate.id === status.id,
+                  )
+                ) {
+                  return
+                }
+
+                event.preventDefault()
+                event.dataTransfer.dropEffect = 'move'
+                setDropTargetStatusId(status.id)
+              }}
+              onDrop={(event) => handleDrop(event, status)}
+            >
+              <div className="flex items-center justify-between gap-3 border-b border-[var(--workbench-border)] px-4 py-3">
+                <IssueStatusBadge status={status} />
+                <div className="flex items-center gap-2">
+                  <span className="text-sm font-semibold text-[var(--workbench-muted)]">{columnIssues.length}</span>
+                  {onCreateIssueOpen ? (
+                    <button
+                      aria-label={`${t('tasks.board.addInColumn')}: ${status.name}`}
+                      className="grid h-7 w-7 place-items-center rounded-md border border-[var(--workbench-border-strong)] bg-white text-lg leading-none text-[var(--workbench-primary)] hover:border-[#99d7cf] hover:bg-[#e5f7f4]"
+                      data-testid={`team-issue-add-${status.id}`}
+                      onClick={() => onCreateIssueOpen(status.id)}
+                      type="button"
+                    >
+                      +
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+              <div className={`grid ${cardListSpacing}`}>
+                {columnIssues.length > 0 ? (
+                  orderedColumnIssues.map((issue) => {
+                    const issueKey = createTaskViewItemKey(issue.teamId, issue.id)
+                    const focusedForAction = focusedIssueKey === issueKey
+                    const selectedForAction = selectedIssueKeys.includes(issueKey)
+                    const isMoving = movingIssueIds.has(issue.id)
+                    const editableStatuses = resolveEditableWorkflowStatuses(issue, configuration)
+                    const canMoveCurrentIssue = canMoveIssue(issue)
+                    const primaryHeading = primaryHeadingByIssueId.get(issue.id)
+                    const secondaryHeading = secondaryHeadingByIssueId.get(issue.id)
+                    const customFieldEntries = new Map(
+                      resolveIssueCustomFieldEntries(
+                        issue,
+                        configuration,
+                        locale,
+                        personLabels,
+                      ).map((entry) => [entry.definition.id, entry.value]),
+                    )
+                    const customColumns = [...visibleFields].flatMap((field) => {
+                      if (!field.startsWith('custom:')) return []
+                      const fieldId = field.slice('custom:'.length)
+                      return [{
+                        id: fieldId,
+                        label: configuration?.customFields.find(
+                          (definition) => definition.id === fieldId,
+                        )?.name ?? fieldId,
+                        value: customFieldEntries.get(fieldId) ?? '—',
+                      }]
+                    })
+
+                    return (
+                      <Fragment key={issue.id}>
+                      {primaryHeading ? (
+                        <h3 className="rounded bg-slate-100 px-2.5 py-1.5 text-xs font-bold text-[var(--workbench-muted)]">
+                          {primaryHeading.label} ({primaryHeading.items.length})
+                        </h3>
+                      ) : null}
+                      {secondaryHeading ? (
+                        <h4 className="px-2.5 py-1 text-[11px] font-semibold text-[var(--workbench-muted)]">
+                          {secondaryHeading}
+                        </h4>
+                      ) : null}
+                      <article
+                        aria-grabbed={draggedIssueId === issue.id || undefined}
+                        className={`rounded-lg border ${cardPadding} text-left transition ${
+                          selectedIssueId === issue.id
+                            ? 'border-[#99d7cf] bg-[#e5f7f4]'
+                            : 'border-[var(--workbench-border)] bg-white hover:border-[#99d7cf] hover:bg-[var(--workbench-surface-muted)]'
+                        } ${selectedForAction ? 'bg-blue-50/70' : ''} ${
+                          focusedForAction ? 'ring-2 ring-blue-500/40' : ''
+                        } ${draggedIssueId === issue.id ? 'opacity-50 ring-2 ring-[#99d7cf]' : ''} ${isMoving ? 'opacity-70' : ''}`}
+                        data-task-view-focused={focusedForAction ? 'true' : 'false'}
+                        data-task-view-selected={selectedForAction ? 'true' : 'false'}
+                        data-testid={`team-issue-card-${issue.id}`}
+                        draggable={canMoveCurrentIssue && !isMoving}
+                        onDragEnd={() => {
+                          setDraggedIssueId(undefined)
+                          setDropTargetStatusId(undefined)
+                        }}
+                        onDragStart={(event) => handleDragStart(event, issue)}
+                        onContextMenu={(event) => {
+                          if (!onIssueActionMenuOpen) return
+                          event.preventDefault()
+                          onIssueActionMenuOpen(
+                            issue,
+                            { x: event.clientX, y: event.clientY },
+                            event.currentTarget,
+                          )
+                        }}
+                        tabIndex={-1}
+                      >
+                        <div className="flex min-w-0 items-start gap-2">
+                          <button
+                            aria-pressed={selectedForAction || selectedIssueId === issue.id}
+                            className={`min-w-0 flex-1 text-left text-sm font-semibold leading-6 text-[var(--workbench-text)] hover:text-[var(--workbench-primary)] disabled:cursor-default disabled:text-[var(--workbench-text)] ${
+                              wrapText ? 'whitespace-normal break-words' : 'truncate'
+                            }`}
+                            disabled={!onOpenIssue}
+                            onClick={() => onOpenIssue?.(issue)}
+                            type="button"
+                          >
+                            {resolveIssueTitle(issue, t)}
+                          </button>
+                          {onIssueActionMenuOpen ? (
+                            <button
+                              aria-label={`${t('tasks.action.more')}: ${resolveIssueTitle(issue, t)}`}
+                              className="grid h-9 w-9 flex-none place-items-center rounded text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-primary)] max-[640px]:h-11 max-[640px]:w-11"
+                              data-testid={`team-issue-card-actions-${issue.id}`}
+                              onClick={(event) => {
+                                const returnFocusElement = event.currentTarget
+                                const bounds = returnFocusElement.getBoundingClientRect()
+                                onIssueActionMenuOpen(
+                                  issue,
+                                  { x: bounds.right, y: bounds.bottom },
+                                  returnFocusElement,
+                                )
+                              }}
+                              type="button"
+                            >
+                              <MoreHorizontalIcon className="h-5 w-5" />
+                            </button>
+                          ) : null}
+                        </div>
+                        <WorkItemDependencyChips
+                          className="mt-2"
+                          summary={resolveWorkItemDependencySummary(
+                            dependencySummaries,
+                            { teamId: issue.teamId, workItemId: issue.id },
+                          )}
+                          t={t}
+                        />
+                        {visibleFields.has('project') ? (
+                          <p className="mt-2 text-xs font-medium text-[var(--workbench-muted)]">{resolveAssignedProjectName(issue, activeTeam, t)}</p>
+                        ) : null}
+                        {!presentation || visibleFields.has('customFields') ? <div className="mt-3">
+                          <IssueCustomFieldSummary
+                            configuration={configuration}
+                            issue={issue}
+                            locale={locale}
+                            personLabels={personLabels}
+                          />
+                        </div> : null}
+                        {customColumns.length > 0 ? (
+                          <dl className="mt-3 grid gap-1.5 text-xs text-[var(--workbench-muted)]">
+                            {customColumns.map((item) => (
+                              <div className="flex min-w-0 items-baseline justify-between gap-2" key={item.id}>
+                                <dt className="truncate font-semibold">{item.label}</dt>
+                                <dd className={wrapText ? 'break-words text-right' : 'truncate text-right'}>
+                                  {item.value}
+                                </dd>
+                              </div>
+                            ))}
+                          </dl>
+                        ) : null}
+                        {visibleFields.has('assignee') ? (
+                          <div className="mt-2 flex min-w-0 items-center gap-2 text-xs font-medium text-[var(--workbench-muted)]">
+                            {showAssigneeAvatars ? (
+                              <WorkItemAssigneeAvatar label={resolveWorkItemAssignee(issue)} />
+                            ) : null}
+                            <span className="truncate">{resolveWorkItemAssignee(issue)}</span>
+                          </div>
+                        ) : null}
+                        {visibleFields.has('priority') || visibleFields.has('dueDate') ? (
+                          <div className="mt-4 flex flex-wrap items-center gap-2">
+                            {visibleFields.has('priority') ? <IssuePriorityBadge priority={issue.priority} t={t} /> : null}
+                            {visibleFields.has('dueDate') ? <span className="text-xs font-semibold text-[var(--workbench-muted)]">{issue.dueDate}</span> : null}
+                          </div>
+                        ) : null}
+                        {visibleFields.has('team') ? (
+                          <p className="mt-2 text-xs font-medium text-[var(--workbench-muted)]">{issue.teamId}</p>
+                        ) : null}
+                        {visibleFields.has('status') && canMoveCurrentIssue && editableStatuses.length > 0 ? (
+                          <select
+                            aria-label={`${resolveIssueTitle(issue, t)}: ${t('tasks.column.status')}`}
+                            className="workbench-input mt-3 h-8 w-full px-2 text-xs"
+                            disabled={isMoving}
+                            onChange={(event) => moveIssueToStatus(issue, event.target.value)}
+                            value={issue.workflowStatusId}
+                          >
+                            {editableStatuses.map((editableStatus) => (
+                              <option key={editableStatus.id} value={editableStatus.id}>
+                                {editableStatus.name}
+                              </option>
+                            ))}
+                          </select>
+                        ) : null}
+                        {canMoveCurrentIssue ? (
+                          <p className="mt-2 text-[11px] font-medium text-[var(--workbench-muted)]">
+                            {t('tasks.board.dragHint')}
+                          </p>
+                        ) : null}
+                      </article>
+                      </Fragment>
+                    )
+                  })
+                ) : (
+                  <p className="rounded-lg border border-dashed border-[var(--workbench-border-strong)] px-4 py-8 text-center text-sm font-medium text-[var(--workbench-muted)]">
+                    {t('tasks.board.empty')}
+                  </p>
+                )}
+              </div>
             </div>
-            <div className="grid gap-3 p-3">
-              {columnIssues.length > 0 ? (
-                columnIssues.map((issue) => (
-                  <button
-                    className={`rounded-lg border p-4 text-left transition ${
-                      selectedIssueId === issue.id
-                        ? 'border-[#99d7cf] bg-[#e5f7f4]'
-                        : 'border-[var(--workbench-border)] bg-white hover:border-[#99d7cf] hover:bg-[var(--workbench-surface-muted)]'
-                    }`}
-                    key={issue.id}
-                    onClick={() => onSelectIssue?.(issue.id)}
-                    type="button"
-                  >
-                    <p className="text-sm font-semibold leading-6 text-[var(--workbench-text)]">{resolveIssueTitle(issue, t)}</p>
-                    <p className="mt-2 text-xs font-medium text-[var(--workbench-muted)]">{resolveAssignedProjectName(issue, activeTeam, t)}</p>
-                    <div className="mt-3">
-                      <IssueCustomFieldSummary
-                        configuration={configuration}
-                        issue={issue}
-                        locale={locale}
-                        personLabels={personLabels}
-                      />
-                    </div>
-                    <div className="mt-4 flex flex-wrap items-center gap-2">
-                      <IssuePriorityBadge priority={issue.priority} t={t} />
-                      <span className="text-xs font-semibold text-[var(--workbench-muted)]">{issue.dueDate}</span>
-                    </div>
-                  </button>
-                ))
-              ) : (
-                <p className="rounded-lg border border-dashed border-[var(--workbench-border-strong)] px-4 py-8 text-center text-sm font-medium text-[var(--workbench-muted)]">
-                  {t('tasks.board.empty')}
-                </p>
-              )}
-            </div>
-          </div>
-        )
-      })}
+          )
+        })}
+        {visibleWorkflowStatuses.length === 0 ? (
+          <p className="w-full rounded-lg border border-dashed border-[var(--workbench-border-strong)] px-4 py-8 text-center text-sm font-medium text-[var(--workbench-muted)]">
+            {t('tasks.board.empty')}
+          </p>
+        ) : null}
+      </div>
     </section>
   )
 }
@@ -1500,6 +3470,8 @@ function IssueDetailPane({
   accessToken,
   assigneeOptions,
   artifacts,
+  canAssignUnassigned,
+  canManageDependencyEndpoint,
   canManageExternalLinks,
   collaboration,
   configuration,
@@ -1512,8 +3484,12 @@ function IssueDetailPane({
   isRelationsLoading,
   locale,
   onAddRelation,
+  onCreateScheduleDependency,
   onDeleteRelation,
+  onDeleteScheduleDependency,
   onUpdateIssue,
+  onUpdateScheduleDependency,
+  planningSnapshot,
   projects,
   relationCandidates,
   relations,
@@ -1523,6 +3499,10 @@ function IssueDetailPane({
   accessToken?: string
   assigneeOptions: ProjectMember[]
   artifacts?: FileArtifactsController
+  /** Whether the current viewer may move this Work Item out of a Project. */
+  canAssignUnassigned: boolean
+  /** Determines whether the current user may manage one canonical dependency endpoint. */
+  canManageDependencyEndpoint?: CanManageWorkItemDependencyEndpoint
   canManageExternalLinks: boolean
   collaboration?: IssueCollaborationController
   configuration?: WorkItemConfiguration
@@ -1535,8 +3515,16 @@ function IssueDetailPane({
   isRelationsLoading: boolean
   locale: Locale
   onAddRelation?: (issueId: string, input: WorkItemRelationEditorInput) => Promise<void>
+  /** Creates a canonical schedule dependency. */
+  onCreateScheduleDependency?: TeamIssueScreenProps['onCreateScheduleDependency']
   onDeleteRelation?: (issueId: string, relation: WorkItemRelation) => Promise<void>
+  /** Deletes a canonical schedule dependency. */
+  onDeleteScheduleDependency?: TeamIssueScreenProps['onDeleteScheduleDependency']
   onUpdateIssue?: (issueId: string, input: UpdateTeamIssueInput) => Promise<void>
+  /** Updates a canonical schedule dependency. */
+  onUpdateScheduleDependency?: TeamIssueScreenProps['onUpdateScheduleDependency']
+  /** Authoritative canonical dependency graph. */
+  planningSnapshot?: PlanningSnapshot
   projects: ProjectDirectoryTeam['projects']
   relationCandidates: TeamIssue[]
   relations: readonly WorkItemRelation[]
@@ -1556,6 +3544,8 @@ function IssueDetailPane({
       accessToken={accessToken}
       assigneeOptions={assigneeOptions}
       artifacts={artifacts}
+      canAssignUnassigned={canAssignUnassigned}
+      canManageDependencyEndpoint={canManageDependencyEndpoint}
       canManageExternalLinks={canManageExternalLinks}
       collaboration={collaboration}
       configuration={configuration}
@@ -1569,8 +3559,12 @@ function IssueDetailPane({
       key={issue.id}
       locale={locale}
       onAddRelation={onAddRelation}
+      onCreateScheduleDependency={onCreateScheduleDependency}
       onDeleteRelation={onDeleteRelation}
+      onDeleteScheduleDependency={onDeleteScheduleDependency}
       onUpdateIssue={onUpdateIssue}
+      onUpdateScheduleDependency={onUpdateScheduleDependency}
+      planningSnapshot={planningSnapshot}
       projects={projects}
       relationCandidates={relationCandidates}
       relations={relations}
@@ -1584,6 +3578,8 @@ function IssueDetailContent({
   accessToken,
   assigneeOptions,
   artifacts,
+  canAssignUnassigned,
+  canManageDependencyEndpoint,
   canManageExternalLinks,
   collaboration,
   configuration,
@@ -1596,8 +3592,12 @@ function IssueDetailContent({
   isRelationsLoading,
   locale,
   onAddRelation,
+  onCreateScheduleDependency,
   onDeleteRelation,
+  onDeleteScheduleDependency,
   onUpdateIssue,
+  onUpdateScheduleDependency,
+  planningSnapshot,
   projects,
   relationCandidates,
   relations,
@@ -1610,6 +3610,10 @@ function IssueDetailContent({
   assigneeOptions: ProjectMember[]
   /** 選択中 Issue の file/version/annotation/approval controller です。 */
   artifacts?: FileArtifactsController
+  /** Whether the current viewer may move this Work Item out of a Project. */
+  canAssignUnassigned: boolean
+  /** Determines whether the current user may manage one canonical dependency endpoint. */
+  canManageDependencyEndpoint?: CanManageWorkItemDependencyEndpoint
   /** External link の作成、更新、解除が許可されているかどうかです。 */
   canManageExternalLinks: boolean
   /** 選択中 Issue の discussion controller です。 */
@@ -1634,10 +3638,18 @@ function IssueDetailContent({
   locale: Locale
   /** Relation 追加 callback です。 */
   onAddRelation?: (issueId: string, input: WorkItemRelationEditorInput) => Promise<void>
+  /** Creates a canonical schedule dependency. */
+  onCreateScheduleDependency?: TeamIssueScreenProps['onCreateScheduleDependency']
   /** Relation 解除 callback です。 */
   onDeleteRelation?: (issueId: string, relation: WorkItemRelation) => Promise<void>
+  /** Deletes a canonical schedule dependency. */
+  onDeleteScheduleDependency?: TeamIssueScreenProps['onDeleteScheduleDependency']
   /** Issue 更新 callback です。 */
   onUpdateIssue?: (issueId: string, input: UpdateTeamIssueInput) => Promise<void>
+  /** Updates a canonical schedule dependency. */
+  onUpdateScheduleDependency?: TeamIssueScreenProps['onUpdateScheduleDependency']
+  /** Authoritative canonical dependency graph. */
+  planningSnapshot?: PlanningSnapshot
   /** Project selector の候補です。 */
   projects: ProjectDirectoryTeam['projects']
   /** Relation target の候補です。 */
@@ -1671,7 +3683,10 @@ function IssueDetailContent({
   ) ?? false
 
   return (
-    <aside className="workbench-detail-pane min-h-0 min-w-0 max-[1080px]:border-l-0 max-[1080px]:border-t">
+    <aside
+      className="workbench-detail-pane min-h-0 min-w-0 max-[1080px]:border-l-0 max-[1080px]:border-t"
+      data-testid="team-issue-detail-pane"
+    >
       <form
         className="grid min-w-0 gap-4 px-6 py-7"
         key={`${issue.id}:${issue.revision}`}
@@ -1713,7 +3728,6 @@ function IssueDetailContent({
               assignedProjectId || undefined,
             ),
             description: String(formData.get('description') ?? '').trim(),
-            dueDate: String(formData.get('dueDate') ?? '').replaceAll('-', '/'),
             priority: resolveIssuePriority(formData.get('priority')),
             title: String(formData.get('title') ?? '').trim(),
             workflowStatusId,
@@ -1756,7 +3770,9 @@ function IssueDetailContent({
                 })}
                 value={selectedProjectId}
               >
-                <option value="">{t('issues.project.unassigned')}</option>
+                {canAssignUnassigned ? (
+                  <option value="">{t('issues.project.unassigned')}</option>
+                ) : null}
                 {projects.map((project) => (
                   <option key={project.id} value={project.id}>{project.name}</option>
                 ))}
@@ -1793,10 +3809,12 @@ function IssueDetailContent({
                 ))}
               </select>
             </label>
-            <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
-              {t('tasks.column.dueDate')}
-              <input className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]" defaultValue={issue.dueDate.replaceAll('/', '-')} name="dueDate" type="date" />
-            </label>
+            <div className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
+              <span>{t('tasks.schedule.title')}</span>
+              <output className="min-h-9 rounded-md border border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-3 py-2 font-medium text-[var(--workbench-muted)]">
+                {describeTeamIssueSchedule(issue.schedule, t)}
+              </output>
+            </div>
           </div>
           {hasCustomFields ? (
             <div className="workbench-panel-muted p-4">
@@ -1821,6 +3839,19 @@ function IssueDetailContent({
         ) : null}
         {detailErrorMessage ? <p className="text-sm font-bold text-red-600">{detailErrorMessage}</p> : null}
       </form>
+      {planningSnapshot ? (
+        <div className="border-t border-[var(--workbench-border)] bg-white px-6 py-6">
+          <WorkItemDependencyPanel
+            canManageEndpoint={canManageDependencyEndpoint}
+            currentEndpoint={{ teamId: issue.teamId, workItemId: issue.id }}
+            onCreate={onCreateScheduleDependency}
+            onDelete={onDeleteScheduleDependency}
+            onUpdate={onUpdateScheduleDependency}
+            snapshot={planningSnapshot}
+            t={t}
+          />
+        </div>
+      ) : null}
       {artifacts ? (
         <IssueArtifactsPanel
           completionTransitions={workflowStatuses.filter(
@@ -1890,9 +3921,29 @@ function formatLocalDateInputValue(date = new Date()) {
   return `${year}-${month}-${day}`
 }
 
+/** Resolves the normalized directory key used to match the current user to Project roles. */
+function resolveCurrentUserProjectKey(user: CurrentUser | undefined) {
+  return (user?.attributes.email ?? user?.username ?? '').trim().toLowerCase()
+}
+
 function resolveIssueTitle(issue: TeamIssue, t: (key: MessageKey) => string) {
   void t
   return resolveWorkItemTitle(issue)
+}
+
+/**
+ * Formats an explicit schedule without collapsing its mode into a deadline projection.
+ *
+ * @param schedule - Canonical schedule displayed by the read-only Team detail summary.
+ * @param t - Translator used for the schedule mode label.
+ * @returns A compact localized mode and date-range description.
+ */
+function describeTeamIssueSchedule(
+  schedule: WorkItemSchedule,
+  t: (key: MessageKey) => string,
+): string {
+  const range = formatTaskScheduleRange(schedule)
+  return `${t(taskScheduleModeLabelKeys[schedule.mode])}${range ? `: ${range}` : ''}`
 }
 
 function resolveAssignedProjectName(
@@ -2046,4 +4097,53 @@ function resolveIssueCustomFieldSearchValues(
 ) {
   return resolveIssueCustomFieldEntries(issue, configuration, locale, personLabels)
     .flatMap(({ definition, value }) => [definition.name, value])
+}
+
+/**
+ * Identifies the canonical relation graph conflict returned by relation persistence.
+ *
+ * @param error - Unknown relation mutation failure.
+ * @returns Whether the failure invalidated the retained relation graph revision.
+ */
+function isWorkItemRelationGraphConflict(error: unknown): boolean {
+  return error instanceof WorkItemConfigurationApiError &&
+    error.code === 'WorkItemRelationGraphConflict'
+}
+
+/**
+ * Matches the localized and formatted display values exposed by the Team Issue surface.
+ *
+ * @param issue - Team Work Item evaluated by keyword filtering.
+ * @param normalizedKeyword - Trimmed lower-case keyword from the active task view.
+ * @param team - Active Team directory entry used to resolve Project names.
+ * @param configuration - Team workflow and custom-field configuration.
+ * @param locale - Locale used to format typed custom-field values.
+ * @param personLabels - Person identities mapped to display labels.
+ * @param t - Translator used for priority, schedule, and fallback labels.
+ * @returns Whether any Team-visible display value contains the keyword.
+ */
+function matchesTeamIssueKeyword(
+  issue: TeamIssue,
+  normalizedKeyword: string,
+  team: ProjectDirectoryTeam | undefined,
+  configuration: WorkItemConfiguration | undefined,
+  locale: Locale,
+  personLabels: Readonly<Record<string, string>>,
+  t: (key: MessageKey) => string,
+): boolean {
+  return [
+    resolveIssueTitle(issue, t),
+    resolveWorkItemAssignee(issue),
+    resolveAssignedProjectName(issue, team, t),
+    resolveWorkItemWorkflowStatusLabel(issue, configuration),
+    t(`tasks.priority.${issue.priority}`),
+    issue.dueDate,
+    issue.schedule ? describeTeamIssueSchedule(issue.schedule, t) : '',
+    ...resolveIssueCustomFieldSearchValues(
+      issue,
+      configuration,
+      locale,
+      personLabels,
+    ),
+  ].some((value) => value.toLocaleLowerCase().includes(normalizedKeyword))
 }

@@ -22,9 +22,39 @@ esac
 
 endpoint_args=()
 DYNAMODB_ENDPOINT="${DYNAMODB_ENDPOINT:-${AWS_ENDPOINT_URL_DYNAMODB:-${AWS_ENDPOINT_URL:-}}}"
-if [[ -n "$DYNAMODB_ENDPOINT" ]]; then
-  endpoint_args=(--endpoint-url "$DYNAMODB_ENDPOINT")
+if ! MUKUROJI_SEED_DYNAMODB_ENDPOINT="$DYNAMODB_ENDPOINT" bun -e '
+  const value = process.env.MUKUROJI_SEED_DYNAMODB_ENDPOINT
+  try {
+    const endpoint = new URL(value ?? "")
+    const localHosts = new Set([
+      "localhost",
+      "127.0.0.1",
+      "[::1]",
+      "0.0.0.0",
+      "floci",
+      "localstack",
+    ])
+    if (
+      endpoint.protocol !== "http:" ||
+      endpoint.username !== "" ||
+      endpoint.password !== "" ||
+      endpoint.pathname !== "/" ||
+      endpoint.search !== "" ||
+      endpoint.hash !== "" ||
+      !localHosts.has(endpoint.hostname)
+    ) process.exit(1)
+  } catch {
+    process.exit(1)
+  }
+'; then
+  echo "This legacy seed is local-only and requires an explicit local HTTP DynamoDB endpoint." >&2
+  exit 2
 fi
+if [[ "${MUKUROJI_LOCAL_AWS_RUNTIME:-}" != "floci" ]]; then
+  echo "This legacy seed requires MUKUROJI_LOCAL_AWS_RUNTIME=floci." >&2
+  exit 2
+fi
+endpoint_args=(--endpoint-url "$DYNAMODB_ENDPOINT")
 
 auth_args=()
 if [[ "${AWS_NO_SIGN_REQUEST:-}" == "1" ]]; then
@@ -57,7 +87,7 @@ seed_work_item() {
       \"teamId\": {\"S\": \"core-team\"},
       \"assignedProjectId\": {\"S\": \"refero\"},
       \"issueId\": {\"S\": \"$work_item_id\"},
-      \"schemaVersion\": {\"N\": \"1\"},
+      \"schemaVersion\": {\"N\": \"2\"},
       \"revision\": {\"N\": \"1\"},
       \"sortOrder\": {\"N\": \"$sort_order\"},
       \"title\": {\"S\": \"$title\"},
@@ -69,6 +99,21 @@ seed_work_item() {
       \"customFieldValues\": {\"M\": {}},
       \"relationIds\": {\"L\": []},
       \"dueDate\": {\"S\": \"$due_date\"},
+      \"schedule\": {\"M\": {
+        \"mode\": {\"S\": \"due-date\"},
+        \"dueDate\": {\"S\": \"$due_date\"},
+        \"calendarPolicy\": {\"M\": {
+          \"timeZone\": {\"S\": \"UTC\"},
+          \"workingWeekdays\": {\"L\": [
+            {\"S\": \"monday\"},
+            {\"S\": \"tuesday\"},
+            {\"S\": \"wednesday\"},
+            {\"S\": \"thursday\"},
+            {\"S\": \"friday\"}
+          ]},
+          \"holidays\": {\"L\": []}
+        }}
+      }},
       \"priority\": {\"S\": \"$priority\"},
       \"createdAt\": {\"S\": \"$SEED_TIMESTAMP\"},
       \"updatedAt\": {\"S\": \"$SEED_TIMESTAMP\"}
@@ -90,15 +135,15 @@ seed_work_item() {
   esac
 }
 
-seed_work_item "wireframe" 10 "新しいランディングページのワイヤーフレーム作成" "sato@example.com" "in-progress" "started" "2026/06/03" "high"
-seed_work_item "brand-guideline" 20 "ブランドガイドラインの更新" "suzuki@example.com" "review" "started" "2026/06/05" "medium"
-seed_work_item "pricing-content" 30 "料金ページのコンテンツ作成" "tanaka@example.com" "in-progress" "started" "2026/06/08" "high"
-seed_work_item "seo-research" 40 "SEO キーワードリサーチ" "yamamoto@example.com" "todo" "unstarted" "2026/06/09" "medium"
-seed_work_item "hero-design" 50 "ヒーロー画像のデザイン作成" "sato@example.com" "review" "started" "2026/06/10" "medium"
-seed_work_item "analytics-tags" 60 "アナリティクスタグの実装" "suzuki@example.com" "in-progress" "started" "2026/06/11" "low"
-seed_work_item "competitor-report" 70 "競合サイトの分析レポート作成" "tanaka@example.com" "done" "completed" "2026/06/02" "low"
-seed_work_item "terms-page" 80 "利用規約ページの作成" "yamamoto@example.com" "todo" "unstarted" "2026/06/12" "medium"
-seed_work_item "faq-content" 90 "FAQ セクションのコンテンツ作成" "sato@example.com" "todo" "unstarted" "2026/06/15" "low"
-seed_work_item "landing-release" 100 "ランディングページの公開" "suzuki@example.com" "todo" "unstarted" "2026/06/16" "high"
+seed_work_item "wireframe" 10 "新しいランディングページのワイヤーフレーム作成" "sato@example.com" "in-progress" "started" "2026-06-03" "high"
+seed_work_item "brand-guideline" 20 "ブランドガイドラインの更新" "suzuki@example.com" "review" "started" "2026-06-05" "medium"
+seed_work_item "pricing-content" 30 "料金ページのコンテンツ作成" "tanaka@example.com" "in-progress" "started" "2026-06-08" "high"
+seed_work_item "seo-research" 40 "SEO キーワードリサーチ" "yamamoto@example.com" "todo" "unstarted" "2026-06-09" "medium"
+seed_work_item "hero-design" 50 "ヒーロー画像のデザイン作成" "sato@example.com" "review" "started" "2026-06-10" "medium"
+seed_work_item "analytics-tags" 60 "アナリティクスタグの実装" "suzuki@example.com" "in-progress" "started" "2026-06-11" "low"
+seed_work_item "competitor-report" 70 "競合サイトの分析レポート作成" "tanaka@example.com" "done" "completed" "2026-06-02" "low"
+seed_work_item "terms-page" 80 "利用規約ページの作成" "yamamoto@example.com" "todo" "unstarted" "2026-06-12" "medium"
+seed_work_item "faq-content" 90 "FAQ セクションのコンテンツ作成" "sato@example.com" "todo" "unstarted" "2026-06-15" "low"
+seed_work_item "landing-release" 100 "ランディングページの公開" "suzuki@example.com" "todo" "unstarted" "2026-06-16" "high"
 
 echo "DynamoDB Work Item seed complete: table=$WORK_ITEMS_TABLE workspace=$WORKSPACE_DIRECTORY_ID team=core-team project=refero created=$seeded_count preserved=$preserved_count"

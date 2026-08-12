@@ -77,6 +77,9 @@ describe('PlanningScreen', () => {
         onCreateDependency={() => undefined}
         onCreateEntity={() => undefined}
         onDeleteDependency={() => undefined}
+        onOpenMilestone={() => undefined}
+        onOpenProject={() => undefined}
+        onOpenWorkItem={() => undefined}
         onRolloverCycle={() => undefined}
       />,
     )
@@ -85,6 +88,18 @@ describe('PlanningScreen', () => {
     expect(html).toContain('data-critical="true"')
     expect(html).toContain('data-testid="milestone-date-editor"')
     expect(html).toContain('data-testid="dependency-editor"')
+    expect(html).toContain('data-testid="planning-work-item-dependencies"')
+    expect(html).toContain('data-testid="work-item-dependency-panel"')
+    expect(html).toContain('work-item-dependency-copy-events')
+    expect(html).toContain('refero')
+    expect(html).toContain('milestone-beta')
+    expect(html).toContain('value="start-to-finish"')
+    expect(html).toContain('name="constraintKind"')
+    expect(html).toContain('name="constraintDate"')
+    expect(html).toContain('aria-label="Predecessor: Finalize onboarding copy"')
+    expect(html).toContain('aria-label="Successor: Instrument activation events"')
+    expect(html).toContain('aria-label="1 affected Projects: core-team / refero"')
+    expect(html).toContain('aria-label="1 affected Milestones: milestone-beta"')
     expect(html).toContain('data-testid="cycle-rollover"')
     expect(html).toContain('data-testid="planning-create-entity"')
     expect(html).toContain(labels.dependencyLag)

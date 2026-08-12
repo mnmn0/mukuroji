@@ -4,7 +4,12 @@ import {
   type CustomFieldValue,
   type WorkflowStatusCategory,
   type WorkItemPriority,
+  type WorkItemSchedule,
 } from '@mukuroji/contracts'
+import {
+  deriveWorkItemScheduleDueDate,
+  isCanonicalWorkItemSchedule,
+} from './domain/work-item-schedule'
 
 const WORK_ITEM_RELATION_ID_LIMIT = 100
 const WORK_ITEM_RELATION_ID_MAX_LENGTH = 512
@@ -44,6 +49,8 @@ export type CanonicalWorkItemRecord = Record<string, unknown> & {
   creatorMemberKey: string
   /** Request intake から作成された場合の source submission ID です。 */
   sourceRequestId?: string
+  /** Team Triage から作成された場合の source Entry ID です。 */
+  sourceTriageEntryId?: string
   /** Workflow 内の現在 status ID です。 */
   workflowStatusId: string
   /** 横断集計に利用する標準 status category です。 */
@@ -52,10 +59,16 @@ export type CanonicalWorkItemRecord = Record<string, unknown> & {
   customFieldValues: Record<string, CustomFieldValue>
   /** Relation Graph から同期した辞書順の派生 relation ID 一覧です。 */
   relationIds: string[]
-  /** YYYY/MM/DD または YYYY-MM-DD の UTC calendar day です。 */
+  /** Schedule から導出した YYYY-MM-DD の local calendar day projection です。 */
   dueDate: string
+  /** Canonical schedule used by every planning view. */
+  schedule: WorkItemSchedule
   /** Work Item の優先度です。 */
   priority: WorkItemPriority
+  /** Priority value の直近変更時刻です。 */
+  priorityUpdatedAt?: string
+  /** Derived due date の直近変更時刻です。 */
+  dueDateUpdatedAt?: string
   /** 作成日時の ISO 8601 timestamp です。 */
   createdAt: string
   /** 最終 state 更新日時の ISO 8601 timestamp です。 */
@@ -86,7 +99,18 @@ export function isCanonicalWorkItemRecord(value: unknown): value is CanonicalWor
   }
 
   return value.schemaVersion === WORK_ITEM_SCHEMA_VERSION &&
-    isPositiveInteger(value.revision) &&
+    hasCanonicalWorkItemRecordBase(value) &&
+    hasCanonicalScheduleProjection(value)
+}
+
+/**
+ * Validates the non-schedule fields of a canonical Work Item record.
+ *
+ * @param value - Candidate storage record.
+ * @returns Whether all version-independent fields are canonical.
+ */
+function hasCanonicalWorkItemRecordBase(value: Record<string, unknown>): boolean {
+  return isPositiveInteger(value.revision) &&
     value.workflowSchemaVersion === WORK_ITEM_CONFIGURATION_SCHEMA_VERSION &&
     isNonEmptyString(value.directoryId) &&
     isNonEmptyString(value.teamId) &&
@@ -101,18 +125,59 @@ export function isCanonicalWorkItemRecord(value: unknown): value is CanonicalWor
     isNonEmptyString(value.assigneeUserId) &&
     isNonEmptyString(value.creatorMemberKey) &&
     (value.sourceRequestId === undefined || isNonEmptyString(value.sourceRequestId)) &&
+    (value.sourceTriageEntryId === undefined ||
+      isNonEmptyString(value.sourceTriageEntryId)) &&
     hasCanonicalProjectAssignment(value) &&
     forbiddenCanonicalWorkItemFields.every((field) => value[field] === undefined) &&
     isNonEmptyString(value.workflowStatusId) &&
     isWorkflowStatusCategory(value.statusCategory) &&
     isCanonicalCustomFieldValues(value.customFieldValues) &&
     isCanonicalWorkItemRelationIds(value.relationIds) &&
-    isCanonicalWorkItemDueDate(value.dueDate) &&
     isWorkItemPriority(value.priority) &&
     isCanonicalUtcTimestamp(value.createdAt) &&
     isCanonicalUtcTimestamp(value.updatedAt) &&
     areUtcTimestampsChronological(value.createdAt, value.updatedAt) &&
+    isOptionalCanonicalMutationTimestamp(
+      value.priorityUpdatedAt,
+      value.createdAt,
+      value.updatedAt,
+    ) &&
+    isOptionalCanonicalMutationTimestamp(
+      value.dueDateUpdatedAt,
+      value.createdAt,
+      value.updatedAt,
+    ) &&
     hasCanonicalArchiveState(value)
+}
+
+/**
+ * Checks one optional field-specific occurrence inside the Work Item lifetime.
+ *
+ * @param value - Candidate field occurrence timestamp.
+ * @param createdAt - Canonical Work Item creation timestamp.
+ * @param updatedAt - Canonical latest aggregate update timestamp.
+ * @returns True when absent or chronologically contained by the aggregate.
+ */
+function isOptionalCanonicalMutationTimestamp(
+  value: unknown,
+  createdAt: string,
+  updatedAt: string,
+): boolean {
+  return value === undefined ||
+    isCanonicalUtcTimestamp(value) &&
+      areUtcTimestampsChronological(createdAt, value) &&
+      areUtcTimestampsChronological(value, updatedAt)
+}
+
+/**
+ * Checks that a schema-v2 schedule and its deadline projection agree exactly.
+ *
+ * @param value - Candidate schema-v2 row.
+ * @returns Whether the schedule is valid and `dueDate` is its canonical projection.
+ */
+function hasCanonicalScheduleProjection(value: Record<string, unknown>): boolean {
+  return isCanonicalWorkItemSchedule(value.schedule) &&
+    value.dueDate === deriveWorkItemScheduleDueDate(value.schedule)
 }
 
 /** Canonical Work Item の derived relation ID 一覧を厳密検証します。 */
@@ -213,7 +278,7 @@ function isPositiveInteger(value: unknown) {
 }
 
 /**
- * Checks a real UTC calendar day in either supported persisted Work Item date-only format.
+ * Checks a real canonical ISO Work Item date.
  *
  * @param value - Candidate due date.
  * @returns True for a canonical real calendar day.
@@ -222,13 +287,13 @@ export function isCanonicalWorkItemDueDate(value: unknown): value is string {
   if (typeof value !== 'string') {
     return false
   }
-  const match = /^(\d{4})([/-])(\d{2})\2(\d{2})$/.exec(value)
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/u.exec(value)
   if (!match) {
     return false
   }
   const yearText = match[1]
-  const monthText = match[3]
-  const dayText = match[4]
+  const monthText = match[2]
+  const dayText = match[3]
   if (!yearText || !monthText || !dayText) {
     return false
   }

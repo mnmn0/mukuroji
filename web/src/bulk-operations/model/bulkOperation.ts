@@ -1,8 +1,7 @@
-import type {
-  AutomationValue,
-  BulkOperation,
-  BulkOperationRequest,
-  WorkItemPriority,
+import {
+  type AutomationValue,
+  type BulkOperation,
+  type BulkOperationRequest,
 } from '@mukuroji/contracts'
 
 /** Bulk selection を API identity と table selection key へ結び付けます。 */
@@ -20,22 +19,26 @@ export type BulkOperationSelection = {
 }
 
 /** Bulk edit で更新できる Work Item fields です。 */
-export const bulkEditFields = ['workflowStatusId', 'assigneeUserId', 'dueDate', 'priority'] as const
+export const bulkEditFields = ['workflowStatusId', 'assigneeUserId', 'priority'] as const
 
 /** Bulk edit で更新できる Work Item field です。 */
 export type BulkEditField = (typeof bulkEditFields)[number]
 
-/** Bulk edit の入力値を Work Item の保存形式へ正規化した patch にします。 */
+/** Bulk edit の入力値を canonical Work Item patch へ正規化します。 */
 export function createBulkEditPatch(
   field: BulkEditField,
   value: string,
 ): Record<string, AutomationValue> {
   const normalizedValue = value.trim()
   if (field === 'priority') {
-    return { priority: normalizedValue as WorkItemPriority }
-  }
-  if (field === 'dueDate') {
-    return { dueDate: normalizedValue.replaceAll('-', '/') }
+    if (
+      normalizedValue !== 'high' &&
+      normalizedValue !== 'medium' &&
+      normalizedValue !== 'low'
+    ) {
+      throw new RangeError(`Invalid Work Item priority: ${normalizedValue}`)
+    }
+    return { priority: normalizedValue }
   }
   return { [field]: normalizedValue }
 }

@@ -29,6 +29,7 @@ NOTIFICATIONS_TABLE="${MUKUROJI_NOTIFICATIONS_TABLE:-${NOTIFICATIONS_TABLE_NAME:
 REALTIME_SESSIONS_TABLE="${MUKUROJI_REALTIME_SESSIONS_TABLE:-${REALTIME_SESSIONS_TABLE_NAME:-mukuroji-realtime-sessions-local}}"
 AUDIT_EVENTS_TABLE="${MUKUROJI_AUDIT_EVENTS_TABLE:-${AUDIT_EVENTS_TABLE_NAME:-mukuroji-audit-events}}"
 AUDIT_RETENTION_DAYS="${MUKUROJI_AUDIT_RETENTION_DAYS:-${AUDIT_RETENTION_DAYS:-2555}}"
+TENANT_ADMINISTRATION_TABLE="${TENANT_ADMINISTRATION_TABLE_NAME:-mukuroji-tenant-administration-local}"
 WORKSPACE_AUDIT_PSEUDONYM_KEY="${MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY:-}"
 WORKSPACE_ACCESS_TABLE="${MUKUROJI_WORKSPACE_ACCESS_TABLE:-mukuroji-workspace-access-local}"
 ENTERPRISE_IDENTITY_TABLE="${ENTERPRISE_IDENTITY_TABLE_NAME:-mukuroji-enterprise-identity-local}"
@@ -553,7 +554,7 @@ seed_work_item() {
       \"teamId\": {\"S\": \"core-team\"},
       \"assignedProjectId\": {\"S\": \"refero\"},
       \"issueId\": {\"S\": \"$work_item_id\"},
-      \"schemaVersion\": {\"N\": \"1\"},
+      \"schemaVersion\": {\"N\": \"2\"},
       \"revision\": {\"N\": \"1\"},
       \"sortOrder\": {\"N\": \"$sort_order\"},
       \"title\": {\"S\": \"$title\"},
@@ -565,6 +566,21 @@ seed_work_item() {
       \"customFieldValues\": {\"M\": {}},
       \"relationIds\": {\"L\": []},
       \"dueDate\": {\"S\": \"$due_date\"},
+      \"schedule\": {\"M\": {
+        \"mode\": {\"S\": \"due-date\"},
+        \"dueDate\": {\"S\": \"$due_date\"},
+        \"calendarPolicy\": {\"M\": {
+          \"timeZone\": {\"S\": \"UTC\"},
+          \"workingWeekdays\": {\"L\": [
+            {\"S\": \"monday\"},
+            {\"S\": \"tuesday\"},
+            {\"S\": \"wednesday\"},
+            {\"S\": \"thursday\"},
+            {\"S\": \"friday\"}
+          ]},
+          \"holidays\": {\"L\": []}
+        }}
+      }},
       \"priority\": {\"S\": \"$priority\"},
       \"createdAt\": {\"S\": \"$WORK_ITEM_SEED_TIMESTAMP\"},
       \"updatedAt\": {\"S\": \"$WORK_ITEM_SEED_TIMESTAMP\"}
@@ -578,16 +594,16 @@ seed_work_item() {
   fi
 }
 
-seed_work_item "wireframe" 10 "新しいランディングページのワイヤーフレーム作成" "sato@example.com" "in-progress" "started" "2026/06/03" "high"
-seed_work_item "brand-guideline" 20 "ブランドガイドラインの更新" "suzuki@example.com" "review" "started" "2026/06/05" "medium"
-seed_work_item "pricing-content" 30 "料金ページのコンテンツ作成" "tanaka@example.com" "in-progress" "started" "2026/06/08" "high"
-seed_work_item "seo-research" 40 "SEO キーワードリサーチ" "yamamoto@example.com" "todo" "unstarted" "2026/06/09" "medium"
-seed_work_item "hero-design" 50 "ヒーロー画像のデザイン作成" "sato@example.com" "review" "started" "2026/06/10" "medium"
-seed_work_item "analytics-tags" 60 "アナリティクスタグの実装" "suzuki@example.com" "in-progress" "started" "2026/06/11" "low"
-seed_work_item "competitor-report" 70 "競合サイトの分析レポート作成" "tanaka@example.com" "done" "completed" "2026/06/02" "low"
-seed_work_item "terms-page" 80 "利用規約ページの作成" "yamamoto@example.com" "todo" "unstarted" "2026/06/12" "medium"
-seed_work_item "faq-content" 90 "FAQ セクションのコンテンツ作成" "sato@example.com" "todo" "unstarted" "2026/06/15" "low"
-seed_work_item "landing-release" 100 "ランディングページの公開" "suzuki@example.com" "todo" "unstarted" "2026/06/16" "high"
+seed_work_item "wireframe" 10 "新しいランディングページのワイヤーフレーム作成" "sato@example.com" "in-progress" "started" "2026-06-03" "high"
+seed_work_item "brand-guideline" 20 "ブランドガイドラインの更新" "suzuki@example.com" "review" "started" "2026-06-05" "medium"
+seed_work_item "pricing-content" 30 "料金ページのコンテンツ作成" "tanaka@example.com" "in-progress" "started" "2026-06-08" "high"
+seed_work_item "seo-research" 40 "SEO キーワードリサーチ" "yamamoto@example.com" "todo" "unstarted" "2026-06-09" "medium"
+seed_work_item "hero-design" 50 "ヒーロー画像のデザイン作成" "sato@example.com" "review" "started" "2026-06-10" "medium"
+seed_work_item "analytics-tags" 60 "アナリティクスタグの実装" "suzuki@example.com" "in-progress" "started" "2026-06-11" "low"
+seed_work_item "competitor-report" 70 "競合サイトの分析レポート作成" "tanaka@example.com" "done" "completed" "2026-06-02" "low"
+seed_work_item "terms-page" 80 "利用規約ページの作成" "yamamoto@example.com" "todo" "unstarted" "2026-06-12" "medium"
+seed_work_item "faq-content" 90 "FAQ セクションのコンテンツ作成" "sato@example.com" "todo" "unstarted" "2026-06-15" "low"
+seed_work_item "landing-release" 100 "ランディングページの公開" "suzuki@example.com" "todo" "unstarted" "2026-06-16" "high"
 
 if ! aws_local dynamodb describe-table --table-name "$PROJECT_DIRECTORY_TABLE" >/dev/null 2>&1; then
   aws_local dynamodb create-table \
@@ -984,6 +1000,34 @@ fi
 
 aws_local dynamodb wait table-exists --table-name "$ANALYTICS_TABLE"
 
+if ! aws_local dynamodb describe-table --table-name "$TENANT_ADMINISTRATION_TABLE" >/dev/null 2>&1; then
+  aws_local dynamodb create-table \
+    --table-name "$TENANT_ADMINISTRATION_TABLE" \
+    --attribute-definitions \
+      AttributeName=workspaceId,AttributeType=S \
+      AttributeName=recordKey,AttributeType=S \
+    --key-schema \
+      AttributeName=workspaceId,KeyType=HASH \
+      AttributeName=recordKey,KeyType=RANGE \
+    --billing-mode PAY_PER_REQUEST \
+    >/dev/null
+fi
+
+aws_local dynamodb wait table-exists --table-name "$TENANT_ADMINISTRATION_TABLE"
+TENANT_ADMINISTRATION_TTL_STATUS="$(aws_local dynamodb describe-time-to-live \
+  --table-name "$TENANT_ADMINISTRATION_TABLE" \
+  --query TimeToLiveDescription.TimeToLiveStatus \
+  --output text 2>/dev/null || true)"
+case "$TENANT_ADMINISTRATION_TTL_STATUS" in
+  ENABLED | ENABLING) ;;
+  *)
+    aws_local dynamodb update-time-to-live \
+      --table-name "$TENANT_ADMINISTRATION_TABLE" \
+      --time-to-live-specification AttributeName=expiresAt,Enabled=true \
+      >/dev/null
+    ;;
+esac
+
 read_analytics_table_schema() {
   aws_local dynamodb describe-table \
     --table-name "$ANALYTICS_TABLE" \
@@ -1192,6 +1236,7 @@ MUKUROJI_WORKSPACE_DIRECTORY_ID=$WORKSPACE_DIRECTORY_ID
 MUKUROJI_PROJECT_DIRECTORY_ID=$WORKSPACE_DIRECTORY_ID
 MUKUROJI_AUDIT_EVENTS_TABLE=$AUDIT_EVENTS_TABLE
 MUKUROJI_AUDIT_RETENTION_DAYS=$AUDIT_RETENTION_DAYS
+TENANT_ADMINISTRATION_TABLE_NAME=$TENANT_ADMINISTRATION_TABLE
 MUKUROJI_WORKSPACE_ACCESS_TABLE=$WORKSPACE_ACCESS_TABLE
 ENTERPRISE_IDENTITY_TABLE_NAME=$ENTERPRISE_IDENTITY_TABLE
 DYNAMODB_ENDPOINT=$PUBLIC_ENDPOINT_URL
@@ -1207,6 +1252,7 @@ echo "mukuroji DynamoDB ready: table=$PROJECT_TASKS_TABLE legacyTasks=read-only"
 echo "mukuroji DynamoDB ready: table=$WORK_ITEMS_TABLE canonicalSeed=ready"
 echo "mukuroji DynamoDB ready: table=$PROJECT_DIRECTORY_TABLE workspaceDirectory=$WORKSPACE_DIRECTORY_ID"
 echo "mukuroji audit configured: table=$AUDIT_EVENTS_TABLE retentionDays=$AUDIT_RETENTION_DAYS"
+echo "mukuroji DynamoDB ready: table=$TENANT_ADMINISTRATION_TABLE tenantAdministration=ready"
 echo "mukuroji DynamoDB ready: table=$WORKSPACE_ACCESS_TABLE workspace=$WORKSPACE_DIRECTORY_ID"
 echo "mukuroji DynamoDB ready: table=$ENTERPRISE_IDENTITY_TABLE enterpriseIdentity=ready"
 echo "mukuroji DynamoDB ready: table=$REALTIME_SESSIONS_TABLE scopeIndex=ScopeConnectionsIndex"

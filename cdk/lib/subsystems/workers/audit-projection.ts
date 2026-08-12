@@ -9,8 +9,16 @@ import * as lambdaNodejs from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import type { LambdaBuildPaths } from '../../config/lambda-build-paths';
 import type { StackParameters } from '../../config/stack-parameters';
+import {
+  configureWorkspaceSearchWriterFence,
+  type WorkspaceSearchWriterFenceResources,
+} from '../../policies/workspace-search-writer-fence';
 import type { DataStoreResources } from '../data-stores';
 import type { FileStorageResources } from '../file-storage';
+import {
+  bindRuntimeControls,
+  type RuntimeControlResources,
+} from '../runtime-controls';
 import type { WorkerChannels } from './channels';
 
 /**
@@ -25,10 +33,14 @@ export type AuditProjectionWorkerInput = {
   readonly lambdaBuildPaths: LambdaBuildPaths;
   /** Stack parameters used for authorization. */
   readonly parameters: StackParameters;
+  /** Dynamic operational controls shared by application runtimes. */
+  readonly runtimeControls: RuntimeControlResources;
   /** WebSocket stage used for realtime callbacks. */
   readonly realtimeWebSocketStage: apigatewayv2.WebSocketStage;
   /** Delivery queues targeted by audit projections. */
   readonly workerChannels: WorkerChannels;
+  /** Exact writer-client table configuration without writer state permissions. */
+  readonly workspaceSearchWriterFence: WorkspaceSearchWriterFenceResources;
 };
 
 /**
@@ -59,6 +71,7 @@ export function buildAuditProjectionWorker(
     processedAuditEventsTable,
     projectDirectoryTable,
     realtimeSessionsTable,
+    tenantAdministrationTable,
     workItemsTable,
     workspaceAccessTable,
   } = input.dataStores;
@@ -108,6 +121,8 @@ export function buildAuditProjectionWorker(
           'WebhookAuthorizationIndex',
         REALTIME_SESSIONS_TABLE_NAME: realtimeSessionsTable.tableName,
         SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
+        TENANT_ADMINISTRATION_TABLE_NAME:
+          tenantAdministrationTable.tableName,
         MUKUROJI_RUNTIME_ROLE: 'audit-projection',
         MUKUROJI_WORK_ITEMS_TABLE: workItemsTable.tableName,
         TEAM_ISSUES_TABLE_NAME: workItemsTable.tableName,
@@ -117,6 +132,15 @@ export function buildAuditProjectionWorker(
         WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
       },
     },
+  );
+  configureWorkspaceSearchWriterFence(
+    input.workspaceSearchWriterFence,
+    collaborationProjectionFunction,
+  );
+  bindRuntimeControls(
+    input.runtimeControls,
+    collaborationProjectionFunction,
+    'audit-projection',
   );
 
   collaborationProjectionFunction.addEventSource(
@@ -150,6 +174,12 @@ export function buildAuditProjectionWorker(
   realtimeSessionsTable.grants.readWriteData(collaborationProjectionFunction);
   workItemsTable.grants.readData(collaborationProjectionFunction);
   workspaceAccessTable.grants.readData(collaborationProjectionFunction);
+  collaborationProjectionFunction.addToRolePolicy(
+    new iam.PolicyStatement({
+      actions: ['dynamodb:GetItem'],
+      resources: [tenantAdministrationTable.tableArn],
+    }),
+  );
   collaborationProjectionFunction.addToRolePolicy(
     new iam.PolicyStatement({
       actions: ['dynamodb:GetItem', 'dynamodb:Query'],

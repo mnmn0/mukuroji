@@ -8,8 +8,15 @@ import {
   type BulkOperation,
   type ApprovalRequest,
   type CustomFieldValue,
+  type ProjectQuickAccessItem,
+  type ProjectQuickAccessPreferences,
+  type UpdateProjectQuickAccessPreferencesInput,
   type WorkItemConfiguration,
+  type WorkItemRelation,
   type CanonicalWorkItem,
+  type WorkItemSchedule,
+  WORK_ITEM_SCHEMA_VERSION,
+  createDefaultDueDateWorkItemSchedule,
 } from '@mukuroji/contracts'
 import type { LambdaEvent } from 'hono/aws-lambda'
 import {
@@ -36,6 +43,8 @@ import {
 } from '../api-router'
 import {
   DynamoDbProjectDirectoryClient,
+  ProjectDataError,
+  type ProjectArchiveWorkItemRevisionGuard,
   type ProjectRole,
 } from '../../modules/directory'
 import type {
@@ -59,10 +68,13 @@ import {
   DEFAULT_WORK_ITEM_CONFIGURATION,
   type WorkItemConfigurationClient,
 } from '../../modules/work-items/work-item-configuration'
-import type {
-  CreateTeamIssueRequestBody,
-  TeamIssuesClient,
-  WorkItemAuthorizationSnapshot,
+import {
+  deriveWorkItemScheduleDueDate,
+  isWorkItemSchedule,
+  type CreateTeamIssueRequestBody,
+  type TeamIssuesClient,
+  type UpdateTeamIssueRequestBody,
+  type WorkItemAuthorizationSnapshot,
 } from '../../modules/work-items'
 import { type DocumentClient } from '../../modules/documents'
 import { InMemoryPlanningClient } from '../../modules/planning/planning'
@@ -141,8 +153,9 @@ function runWithTestAppDependencies<Result>(
 const originalBulkRecoveryTitle = 'Initial title'
 
 function createBulkRecoveryIssue() {
+  const schedule = createDefaultDueDateWorkItemSchedule('2026-07-31')
   return {
-    schemaVersion: 1,
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
     revision: 1,
     id: 'onboarding-friction',
     teamId: 'core-team',
@@ -156,12 +169,33 @@ function createBulkRecoveryIssue() {
     statusCategory: 'started',
     customFieldValues: {},
     relationIds: [],
-    dueDate: '2026/07/31',
+    dueDate: deriveWorkItemScheduleDueDate(schedule),
+    schedule,
     priority: 'high',
     createdAt: '2026-07-16T00:00:00.000Z',
     updatedAt: '2026-07-16T00:00:00.000Z',
     source: 'dynamodb',
   }
+}
+
+/**
+ * Resolves a canonical schedule for an API test double without inferring it from another field.
+ *
+ * @param value - Candidate schedule supplied by the request.
+ * @param currentSchedule - Existing canonical schedule retained by updates that omit schedule.
+ * @returns The validated request schedule or the existing schedule for a partial update.
+ */
+function resolveApiTestWorkItemSchedule(
+  value: unknown,
+  currentSchedule?: WorkItemSchedule,
+): WorkItemSchedule {
+  if (isWorkItemSchedule(value)) {
+    return value
+  }
+  if (value === undefined && currentSchedule) {
+    return currentSchedule
+  }
+  throw new Error('API test request must contain a canonical Work Item schedule.')
 }
 
 function createBulkOperationAutomationFake(initialOperation?: BulkOperation) {
@@ -554,6 +588,7 @@ function createCollaborationStub(
     addReaction: unsupported,
     removeReaction: unsupported,
     getWatcherState: unsupported,
+    getMemberWatcherState: unsupported,
     subscribe: unsupported,
     unsubscribe: unsupported,
     heartbeatPresence: unsupported,
@@ -575,6 +610,7 @@ function createWorkspaceAccessFake(
     throw new Error('Unexpected Workspace Access client call.')
   }
   return {
+    createActiveMemberConditionCheck: unsupported,
     getMember: unsupported,
     getActiveMember: unsupported,
     getAccessSnapshot: unsupported,
@@ -661,12 +697,16 @@ function createTeamIssuesFake(
     throw new Error('Unexpected Team Issues client call.')
   }
   return {
+    createTriageDuplicateContextTransactionItems: () => {
+      throw new Error('Unexpected Team Issues client call.')
+    },
     getTeamIssues: unsupported,
     getPublicWorkItemPage: unsupported,
     getProjectIssues: unsupported,
     getTeamIssueDetail: unsupported,
     createTeamIssue: unsupported,
     updateTeamIssue: unsupported,
+    updateTeamIssueSchedules: unsupported,
     deleteTeamIssue: unsupported,
     createTeamIssueComment: unsupported,
     ...overrides,
@@ -978,8 +1018,9 @@ function createAnalyticsAuditEvent(
 }
 
 function createHistoricalAnalyticsWorkItem(): CanonicalWorkItem {
+  const schedule = createDefaultDueDateWorkItemSchedule('2026-07-31')
   return {
-    schemaVersion: 1,
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
     revision: 4,
     id: 'historical-item',
     teamId: 'core-team',
@@ -992,7 +1033,8 @@ function createHistoricalAnalyticsWorkItem(): CanonicalWorkItem {
     workflowSchemaVersion: 1,
     customFieldValues: {},
     relationIds: [],
-    dueDate: '2026-07-31',
+    dueDate: deriveWorkItemScheduleDueDate(schedule),
+    schedule,
     priority: 'medium',
     createdAt: '2026-07-01T00:00:00.000Z',
     updatedAt: '2026-07-17T12:00:00.000Z',
@@ -1155,10 +1197,55 @@ function createHeadlessWorkItem(
       title: 'Headless Enterprise Work Item',
       assigneeUserId: 'sato@example.com',
       assignedProjectId,
-      dueDate: '2026-07-31',
+      schedule: createDefaultDueDateWorkItemSchedule('2026-07-31'),
       priority: 'medium',
     }),
   })
+}
+
+/**
+ * Detaches a quick-access preference returned by the shared HTTP fixture.
+ *
+ * @param preference - Versioned preference to copy.
+ * @returns A preference whose item collection shares no mutable references.
+ */
+function cloneProjectQuickAccessPreferences(
+  preference: ProjectQuickAccessPreferences,
+): ProjectQuickAccessPreferences {
+  return {
+    items: cloneProjectQuickAccessItems(preference.items),
+    revision: preference.revision,
+  }
+}
+
+/**
+ * Detaches a complete quick-access replacement input for call assertions.
+ *
+ * @param input - Replacement input supplied to the fake client.
+ * @returns An input whose item collection shares no mutable references.
+ */
+function cloneProjectQuickAccessInput(
+  input: UpdateProjectQuickAccessPreferencesInput,
+): UpdateProjectQuickAccessPreferencesInput {
+  return {
+    items: cloneProjectQuickAccessItems(input.items),
+    revision: input.revision,
+  }
+}
+
+/**
+ * Copies ordered Team-owned Project identities.
+ *
+ * @param items - Ordered identities to detach.
+ * @returns New identity objects in the same order.
+ */
+function cloneProjectQuickAccessItems(
+  items: readonly ProjectQuickAccessItem[],
+): ProjectQuickAccessItem[] {
+  return items.map((item) => ({
+    projectId: item.projectId,
+    teamId: item.teamId,
+  }))
 }
 
 function configureFakeProjectClients(
@@ -1172,6 +1259,8 @@ function configureFakeProjectClients(
     /** Cognito user 一覧 fake が返す次 page token です。 */
     cognitoUsersNextToken?: string
     profileError?: Error
+    /** 指定した active member を Workspace guest として返します。 */
+    guestWorkspaceMemberKeys?: string[]
     inactiveWorkspaceMemberKeys?: string[]
     mentionAccessDeniedMemberKeys?: string[]
     /** NEW_PASSWORD_REQUIRED challenge で Cognito が返す error です。 */
@@ -1197,7 +1286,14 @@ function configureFakeProjectClients(
     passwordMfaChallenge?: 'SOFTWARE_TOKEN_MFA' | 'SMS_MFA' | 'SMS_OTP' | 'EMAIL_OTP'
     passwordAuthChallenge?: boolean
     passwordAuthTokens?: boolean
-    projectAccesses?: Array<{ projectId: string; role?: ProjectRole }>
+    projectAccesses?: Array<{
+      /** Project identifier returned by the fake access directory. */
+      projectId: string
+      /** Optional role granted to the authenticated member. */
+      role?: ProjectRole
+      /** Canonical owner Team when the test exercises duplicate Project IDs. */
+      teamId?: string
+    }>
     role?: ProjectRole
     /** Cognito current group membership fake が返す group 名です。 */
     cognitoUserGroups?: string[]
@@ -1209,10 +1305,16 @@ function configureFakeProjectClients(
     detailAssignedProjectId?: string
     /** Work Item ID ごとに detail fake が返す現在 assigned Project ID です。 */
     detailAssignedProjectIds?: Record<string, string>
+    /** `${teamId}\0${workItemId}` key ごとに detail fake が返す current revision です。 */
+    detailRevisions?: Partial<Record<`${string}\0${string}`, number>>
     /** Notification 認可で再取得する Work Item の現在担当者です。 */
     detailAssigneeUserId?: string
     /** Detail fake が返す現在の設定済み custom field values です。 */
     detailCustomFieldValues?: Record<string, CustomFieldValue>
+    /** Detail fake が返す現在の canonical schedule です。 */
+    detailSchedule?: WorkItemSchedule
+    /** `${teamId}\0${workItemId}` key ごとに detail fake が返す canonical schedule です。 */
+    detailSchedules?: Partial<Record<`${string}\0${string}`, WorkItemSchedule>>
     /** Detail fake が返す legacy search custom fields です。 */
     /** Detail fake が TeamIssueNotFound を返す Work Item ID です。 */
     detailMissingIssueIds?: string[]
@@ -1226,13 +1328,33 @@ function configureFakeProjectClients(
     detailWorkflowStatusIds?: string[]
     /** Detail fake が read ごとに返す更新日時です。 */
     detailUpdatedAts?: string[]
+    /** Schedule preview fake が返す可視 Work Item relation です。 */
+    workItemRelations?: WorkItemRelation[]
+    /** Schedule preview fake が返す relation graph revision です。 */
+    workItemRelationGraphRevision?: number
     /** Project 作成 transaction と template application receipt の同時確定を再現する hook です。 */
     projectCreateHook?: (
       input: Record<string, unknown>,
       completionTransactItems: NonNullable<TransactWriteCommandInput['TransactItems']>,
     ) => Promise<void> | void
+    /** Project archive transaction guards observed after scope validation. */
+    projectArchiveHook?: (input: {
+      /** Planning revision that the directory transaction must advance. */
+      expectedPlanningRevision: number
+      /** Canonical dependency endpoint revisions checked by the transaction. */
+      workItemRevisionGuards: readonly ProjectArchiveWorkItemRevisionGuard[]
+    }) => Promise<void> | void
     /** Canonical Work Item create transaction 直前の競合を再現する hook です。 */
     issueCreateHook?: (input: CreateTeamIssueRequestBody) => Promise<void> | void
+    /** Canonical Work Item update transaction 直前の認可競合を再現する hook です。 */
+    issueUpdateHook?: (input: {
+      /** Application-level authorization generations supplied to the adapter. */
+      authorizationSnapshot?: WorkItemAuthorizationSnapshot
+      /** App-owned Planning revision fence supplied to the adapter. */
+      planningRevisionFence?: UpdateTeamIssueRequestBody['planningRevisionFence']
+      /** Updated Team-local Work Item identifier. */
+      issueId: string
+    }) => Promise<void> | void
     /** Canonical Work Item delete の transaction 配線を観測する hook です。 */
     issueDeleteHook?: (input: {
       /** Authorization generation checks です。 */
@@ -1268,6 +1390,8 @@ function configureFakeProjectClients(
     }>
     /** Project 別 canonical Work Item fake が返す Issue ID です。 */
     canonicalProjectIssueIds?: string[]
+    /** Project quick access fake が最初に返す viewer preference です。 */
+    projectQuickAccessPreference?: ProjectQuickAccessPreferences
     /** Team Issue fake が返す canonical Work Item 数です。 */
     teamIssueCount?: number
     /** Team Issue fake の先頭に置く閲覧不可 Work Item 数です。 */
@@ -1286,6 +1410,9 @@ function configureFakeProjectClients(
   const workspaceRole = options.workspaceRole ?? 'owner'
   const workspaceStatus = options.workspaceStatus ?? 'active'
   let workspaceReconcileFailures = options.workspaceReconcileFailures ?? 0
+  let projectQuickAccessPreference = options.projectQuickAccessPreference === undefined
+    ? { items: [], revision: 0 }
+    : cloneProjectQuickAccessPreferences(options.projectQuickAccessPreference)
   const calls = {
     accessChecks: [] as Array<{ directoryId: string; projectId: string }>,
     cognitoIdentityProviderDescriptions: [] as string[],
@@ -1308,6 +1435,7 @@ function configureFakeProjectClients(
       expectedPlanningRevision: number
       teamId: string
       projectId: string
+      workItemRevisionGuards?: ProjectArchiveWorkItemRevisionGuard[]
     }>,
     projectCreates: [] as Array<{
       creatorUserKey: string
@@ -1359,9 +1487,16 @@ function configureFakeProjectClients(
     issueUpdates: [] as Array<{
       actorUserId: string
       assignedProjectId?: unknown
+      authorizationSnapshot?: WorkItemAuthorizationSnapshot
+      planningRevisionFence?: UpdateTeamIssueRequestBody['planningRevisionFence']
       directoryId: string
       issueId: string
       teamId: string
+    }>,
+    scheduleCascades: [] as Array<{
+      directoryId: string
+      guardedWorkItemIds: string[]
+      updatedWorkItemIds: string[]
     }>,
     issueDeletes: [] as Array<{
       actorUserId: string
@@ -1370,6 +1505,16 @@ function configureFakeProjectClients(
       teamId: string
     }>,
     projectIssueReads: [] as Array<{ directoryId: string; limit?: number; projectId: string }>,
+    projectQuickAccessReads: [] as Array<{
+      consistentRead?: boolean
+      directoryId: string
+      memberKey: string
+    }>,
+    projectQuickAccessReplacements: [] as Array<{
+      directoryId: string
+      input: UpdateProjectQuickAccessPreferencesInput
+      memberKey: string
+    }>,
     taskReads: [] as Array<{ directoryId: string; limit?: number; projectId: string }>,
     userLists: [] as Array<{
       directoryId?: string
@@ -1405,7 +1550,11 @@ function configureFakeProjectClients(
     memberKey,
     email: memberKey,
     name: memberKey === 'demo@example.com' ? 'Demo User' : undefined,
-    role: memberKey === 'demo@example.com' ? workspaceRole : 'member' as WorkspaceRole,
+    role: memberKey === 'demo@example.com'
+      ? workspaceRole
+      : options.guestWorkspaceMemberKeys?.includes(memberKey)
+        ? 'guest' as WorkspaceRole
+        : 'member' as WorkspaceRole,
     status: memberKey === 'demo@example.com'
       ? workspaceStatus
       : options.inactiveWorkspaceMemberKeys?.includes(memberKey)
@@ -1417,13 +1566,15 @@ function configureFakeProjectClients(
   })
   const createFakeTeamIssues = (teamId: string) =>
     Array.from({ length: options.teamIssueCount ?? 1 }, (_, index) => ({
-      schemaVersion: 1 as const,
+      schemaVersion: WORK_ITEM_SCHEMA_VERSION,
       revision: 1,
       id: index === 0 ? 'onboarding-friction' : `work-item-${index}`,
       teamId,
-      assignedProjectId: index < (options.inaccessibleTeamIssueCount ?? 0)
+      assignedProjectId: options.detailAssignedProjectIds?.[
+        index === 0 ? 'onboarding-friction' : `work-item-${index}`
+      ] ?? (index < (options.inaccessibleTeamIssueCount ?? 0)
         ? 'private-project'
-        : options.unassignedIssue ? undefined : 'refero',
+        : options.unassignedIssue ? undefined : 'refero'),
       title: index === 0
         ? '初回オンボーディングの離脱要因を減らす'
         : `Work Item ${index}`,
@@ -1435,7 +1586,8 @@ function configureFakeProjectClients(
       statusCategory: 'started' as const,
       customFieldValues: {},
       relationIds: [],
-      dueDate: '2026/06/18',
+      dueDate: '2026-06-18',
+      schedule: createDefaultDueDateWorkItemSchedule('2026-06-18'),
       priority: 'high' as const,
       createdAt: '2026-06-08T00:00:00.000Z',
       updatedAt: '2026-06-08T00:00:00.000Z',
@@ -1671,8 +1823,48 @@ function configureFakeProjectClients(
         }
       },
     },
-    workItemConfigurations: createFakeWorkItemConfigurationClient(),
+    workItemConfigurations: createFakeWorkItemConfigurationClient({
+      async listRelations() {
+        return {
+          relations: (options.workItemRelations ?? []).map((relation) => ({ ...relation })),
+          graphRevision: options.workItemRelationGraphRevision ?? 0,
+        }
+      },
+    }),
     projectDirectory: {
+      async createActiveReferenceConditionChecks(directoryId, teamId, projectId) {
+        if (projectId && !hasProjectAccess) {
+          throw new ProjectDataError(404, 'ProjectNotFound', 'Project is unavailable.')
+        }
+        return [
+          {
+            ConditionCheck: {
+              TableName: 'DirectoryTable',
+              Key: { directoryId, entryKey: `TEAM#${teamId}` },
+              ConditionExpression: 'attribute_exists(directoryId)',
+            },
+          },
+          ...(projectId
+            ? [{
+                ConditionCheck: {
+                  TableName: 'DirectoryTable',
+                  Key: { directoryId, entryKey: `PROJECT#${projectId}` },
+                  ConditionExpression: 'attribute_exists(directoryId)',
+                },
+              }]
+            : []),
+        ]
+      },
+      async createProjectAccessConditionCheck(directoryId, projectId, memberKey) {
+        if (!hasProjectAccess) return undefined
+        return {
+          ConditionCheck: {
+            TableName: 'DirectoryTable',
+            Key: { directoryId, entryKey: `PROJECT_MEMBER#${projectId}#${memberKey}` },
+            ConditionExpression: 'attribute_exists(directoryId)',
+          },
+        }
+      },
       async getProjectDirectory(directoryId, locale, consistentRead) {
         calls.directoryReads.push({
           directoryId,
@@ -1700,6 +1892,27 @@ function configureFakeProjectClients(
             })),
           ],
         }
+      },
+      async getProjectQuickAccess(directoryId, memberKey, consistentRead) {
+        calls.projectQuickAccessReads.push({
+          directoryId,
+          memberKey,
+          ...(consistentRead === undefined ? {} : { consistentRead }),
+        })
+        return cloneProjectQuickAccessPreferences(projectQuickAccessPreference)
+      },
+      async replaceProjectQuickAccess(directoryId, memberKey, input) {
+        const detachedInput = cloneProjectQuickAccessInput(input)
+        calls.projectQuickAccessReplacements.push({
+          directoryId,
+          input: detachedInput,
+          memberKey,
+        })
+        projectQuickAccessPreference = {
+          items: detachedInput.items,
+          revision: detachedInput.revision + 1,
+        }
+        return cloneProjectQuickAccessPreferences(projectQuickAccessPreference)
       },
       async getProjectAccess(directoryId, projectId, memberKey = 'demo@example.com') {
         calls.accessChecks.push({ directoryId, projectId })
@@ -1858,8 +2071,22 @@ function configureFakeProjectClients(
         projectId,
         _auditContext,
         expectedPlanningRevision,
+        workItemRevisionGuards,
       ) {
-        calls.projectArchives.push({ directoryId, expectedPlanningRevision, teamId, projectId })
+        const detachedGuards = workItemRevisionGuards.map((guard) => ({ ...guard }))
+        calls.projectArchives.push({
+          directoryId,
+          expectedPlanningRevision,
+          teamId,
+          projectId,
+          ...(detachedGuards.length === 0
+            ? {}
+            : { workItemRevisionGuards: detachedGuards }),
+        })
+        await options.projectArchiveHook?.({
+          expectedPlanningRevision,
+          workItemRevisionGuards: detachedGuards,
+        })
 
         return {
           teamId,
@@ -1869,6 +2096,17 @@ function configureFakeProjectClients(
       },
     },
     workspaceAccess: {
+      async createActiveMemberConditionCheck(workspaceId, memberKey) {
+        const member = createWorkspaceMember(memberKey)
+        if (member.status !== 'active') return undefined
+        return {
+          ConditionCheck: {
+            TableName: 'WorkspaceAccessTable',
+            Key: { workspaceId, recordKey: `MEMBER#${memberKey}` },
+            ConditionExpression: 'attribute_exists(workspaceId)',
+          },
+        }
+      },
       async getMember(_workspaceId, memberKey) {
         return createWorkspaceMember(memberKey)
       },
@@ -2159,7 +2397,7 @@ function configureFakeProjectClients(
 
         const issues = options.canonicalProjectIssueIds
           ? options.canonicalProjectIssueIds.map((issueId, index) => ({
-              schemaVersion: 1 as const,
+              schemaVersion: WORK_ITEM_SCHEMA_VERSION,
               revision: 1,
               id: issueId,
               teamId: 'core-team',
@@ -2172,7 +2410,8 @@ function configureFakeProjectClients(
               statusCategory: 'started' as const,
               customFieldValues: {},
               relationIds: [],
-              dueDate: '2026/06/18',
+              dueDate: '2026-06-18',
+              schedule: createDefaultDueDateWorkItemSchedule('2026-06-18'),
               priority: 'high' as const,
               createdAt: '2026-06-08T00:00:00.000Z',
               updatedAt: '2026-06-08T00:00:00.000Z',
@@ -2180,7 +2419,7 @@ function configureFakeProjectClients(
             }))
           : [
               {
-                schemaVersion: 1 as const,
+                schemaVersion: WORK_ITEM_SCHEMA_VERSION,
                 revision: 1,
                 id: 'onboarding-friction',
                 teamId: 'core-team',
@@ -2193,7 +2432,8 @@ function configureFakeProjectClients(
                 statusCategory: 'started' as const,
                 customFieldValues: {},
                 relationIds: [],
-                dueDate: '2026/06/18',
+                dueDate: '2026-06-18',
+                schedule: createDefaultDueDateWorkItemSchedule('2026-06-18'),
                 priority: 'high' as const,
                 createdAt: '2026-06-08T00:00:00.000Z',
                 updatedAt: '2026-06-08T00:00:00.000Z',
@@ -2233,11 +2473,14 @@ function configureFakeProjectClients(
         const workflowStatusId = options.detailWorkflowStatusIds?.[detailReadIndex] ??
           options.detailWorkflowStatusId ??
           'in-progress'
+        const detailSchedule = options.detailSchedules?.[`${teamId}\0${issueId}`] ??
+          options.detailSchedule ??
+          createDefaultDueDateWorkItemSchedule('2026-06-18')
 
         return {
           issue: {
-            schemaVersion: 1,
-            revision: 1,
+            schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+            revision: options.detailRevisions?.[`${teamId}\0${issueId}`] ?? 1,
             id: issueId,
             teamId,
             assignedProjectId: options.detailAssignedProjectIds?.[issueId] ??
@@ -2256,7 +2499,8 @@ function configureFakeProjectClients(
                 : 'started',
             customFieldValues: options.detailCustomFieldValues ?? {},
             relationIds: [],
-            dueDate: '2026/06/18',
+            dueDate: deriveWorkItemScheduleDueDate(detailSchedule),
+            schedule: detailSchedule,
             priority: 'high',
             createdAt: '2026-06-08T00:00:00.000Z',
             updatedAt: options.detailUpdatedAts?.[detailReadIndex] ??
@@ -2298,9 +2542,10 @@ function configureFakeProjectClients(
             : { workflowStatusId: input.workflowStatusId }),
         })
 
+        const schedule = resolveApiTestWorkItemSchedule(input.schedule)
         return {
           issue: {
-            schemaVersion: 1,
+            schemaVersion: WORK_ITEM_SCHEMA_VERSION,
             revision: 1,
             id: 'new-issue',
             teamId,
@@ -2322,7 +2567,8 @@ function configureFakeProjectClients(
               : 'unstarted',
             customFieldValues: input.customFieldValues as Record<string, CustomFieldValue>,
             relationIds: [],
-            dueDate: String(input.dueDate),
+            dueDate: deriveWorkItemScheduleDueDate(schedule),
+            schedule,
             priority: 'medium',
             createdAt: '2026-06-08T00:00:00.000Z',
             updatedAt: '2026-06-08T00:00:00.000Z',
@@ -2331,17 +2577,32 @@ function configureFakeProjectClients(
         }
       },
       async updateTeamIssue(directoryId, teamId, issueId, input, actorUserId) {
+        await options.issueUpdateHook?.({
+          authorizationSnapshot: input.authorizationSnapshot,
+          planningRevisionFence: input.planningRevisionFence,
+          issueId,
+        })
         calls.issueUpdates.push({
           actorUserId,
           assignedProjectId: input.assignedProjectId,
+          ...(input.authorizationSnapshot
+            ? { authorizationSnapshot: input.authorizationSnapshot }
+            : {}),
+          ...(input.planningRevisionFence
+            ? { planningRevisionFence: input.planningRevisionFence }
+            : {}),
           directoryId,
           issueId,
           teamId,
         })
 
+        const schedule = resolveApiTestWorkItemSchedule(
+          input.schedule,
+          createDefaultDueDateWorkItemSchedule('2026-06-18'),
+        )
         return {
           issue: {
-            schemaVersion: 1,
+            schemaVersion: WORK_ITEM_SCHEMA_VERSION,
             revision: 2,
             id: issueId,
             teamId,
@@ -2364,13 +2625,59 @@ function configureFakeProjectClients(
               : 'started',
             customFieldValues: input.customFieldValues as Record<string, CustomFieldValue>,
             relationIds: [],
-            dueDate: typeof input.dueDate === 'string' ? input.dueDate : '2026/06/18',
+            dueDate: deriveWorkItemScheduleDueDate(schedule),
+            schedule,
             priority: input.priority === 'low' ? 'low' : 'high',
             createdAt: '2026-06-08T00:00:00.000Z',
             updatedAt: '2026-06-08T02:00:00.000Z',
             source: 'dynamodb',
           },
         }
+      },
+      async updateTeamIssueSchedules(
+        directoryId,
+        updates,
+        guardedRevisions,
+        _actorUserId,
+        _auditContext,
+        _relationGraphConditionChecks,
+        _authorizationSnapshot,
+        idempotency,
+      ) {
+        const issues = updates.map((update) => ({
+            ...createFakeTeamIssues(update.teamId)[0]!,
+            id: update.workItemId,
+            assignedProjectId: options.detailAssignedProjectIds?.[update.workItemId] ??
+              options.detailAssignedProjectId ??
+              createFakeTeamIssues(update.teamId)[0]!.assignedProjectId,
+            revision: update.expectedRevision + 1,
+            schedule: update.schedule,
+            dueDate: deriveWorkItemScheduleDueDate(update.schedule),
+            updatedAt: '2026-06-08T02:00:00.000Z',
+          }))
+        const response = {
+          issues,
+          confirmedSchedules: issues.map((issue) => ({
+            id: issue.id,
+            teamId: issue.teamId,
+            revision: issue.revision,
+            schedule: issue.schedule,
+            dueDate: issue.dueDate,
+            ...(issue.assignedProjectId
+              ? { assignedProjectId: issue.assignedProjectId }
+              : {}),
+          })),
+        }
+        await idempotency?.prepare({
+          status: 200,
+          body: { workItems: response.confirmedSchedules },
+        })
+        calls.scheduleCascades.push({
+          directoryId,
+          guardedWorkItemIds: guardedRevisions.map((guard) => guard.workItemId),
+          updatedWorkItemIds: updates.map((update) => update.workItemId),
+        })
+        return response
       },
       async deleteTeamIssue(
         directoryId,
@@ -2852,17 +3159,29 @@ function createAccessToken(groups: string[] = [], claims: Record<string, unknown
   return `header.${payload}.signature`
 }
 
+/**
+ * Sends one authenticated Planning API request through the suite-owned application.
+ *
+ * @param state - Mutable harness state.
+ * @param path - Planning API path.
+ * @param method - HTTP method.
+ * @param body - Optional JSON request body.
+ * @param idempotencyKey - Optional raw idempotency header value.
+ * @returns Pending HTTP response.
+ */
 function planningApiRequest(
   state: ApiTestHarnessState,
   path: string,
   method = 'GET',
   body?: unknown,
+  idempotencyKey?: string,
 ) {
   return state.application.request(path, {
     method,
     headers: {
       Authorization: 'Bearer test-token',
       ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
+      ...(idempotencyKey === undefined ? {} : { 'Idempotency-Key': idempotencyKey }),
     },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   })
@@ -2992,8 +3311,12 @@ export function createApiTestHarness() {
     enterpriseScimGroupJobProcessors,
     expectStableWorkspaceMutationAuditContexts,
     originalBulkRecoveryTitle,
-    planningApiRequest: (path: string, method = 'GET', body?: unknown) =>
-      planningApiRequest(state, path, method, body),
+    planningApiRequest: (
+      path: string,
+      method = 'GET',
+      body?: unknown,
+      idempotencyKey?: string,
+    ) => planningApiRequest(state, path, method, body, idempotencyKey),
     processEnterpriseScimGroupJobPage,
     putAppliedHeadlessScimUser,
     putHeadlessEnterpriseIdentityProvider,

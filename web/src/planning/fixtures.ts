@@ -1,4 +1,5 @@
 import {
+  createDefaultDueDateWorkItemSchedule,
   PLANNING_SCHEMA_VERSION,
   type PlanningSnapshot,
 } from '@mukuroji/contracts'
@@ -224,6 +225,22 @@ export const planningSnapshotFixture = {
       createdAt: '2026-07-10T00:00:00.000Z',
     },
   ],
+  workItemDependencies: [
+    {
+      id: 'work-item-dependency-copy-events',
+      predecessor: { teamId: 'core-team', workItemId: 'journey-copy' },
+      successor: { teamId: 'core-team', workItemId: 'journey-events' },
+      type: 'finish-to-finish',
+      lagDays: 1,
+      constraint: {
+        anchor: 'finish',
+        kind: 'not-before',
+        date: '2026-07-23',
+      },
+      createdAt: '2026-07-12T00:00:00.000Z',
+      updatedAt: '2026-07-16T03:00:00.000Z',
+    },
+  ],
   workItemLinks: [
     {
       teamId: 'core-team',
@@ -252,7 +269,8 @@ export const planningSnapshotFixture = {
       title: 'Finalize onboarding copy',
       projectId: 'refero',
       statusCategory: 'started',
-      dueDate: '2026/07/22',
+      dueDate: '2026-07-22',
+      schedule: createDefaultDueDateWorkItemSchedule('2026-07-22'),
     },
     {
       id: 'journey-events',
@@ -261,7 +279,8 @@ export const planningSnapshotFixture = {
       title: 'Instrument activation events',
       projectId: 'refero',
       statusCategory: 'unstarted',
-      dueDate: '2026/07/25',
+      dueDate: '2026-07-25',
+      schedule: createDefaultDueDateWorkItemSchedule('2026-07-25'),
     },
   ],
   criticalPath: {
@@ -273,6 +292,24 @@ export const planningSnapshotFixture = {
       'release-autumn': 0,
     },
   },
+  workItemDependencySummary: {
+    criticalPath: {
+      workItems: [
+        { teamId: 'core-team', workItemId: 'journey-copy' },
+        { teamId: 'core-team', workItemId: 'journey-events' },
+      ],
+      totalDurationDays: 4,
+      slackByWorkItemKey: {
+        'core-team/journey-copy': 0,
+        'core-team/journey-events': 0,
+      },
+    },
+    conflicts: [],
+    unresolvedBlockerCount: 1,
+    affectedProjects: [{ projectId: 'refero', teamId: 'core-team' }],
+    affectedProjectIds: ['refero'],
+    affectedMilestoneIds: ['milestone-beta'],
+  },
 } satisfies PlanningSnapshot
 
 /**
@@ -283,11 +320,24 @@ export const emptyPlanningSnapshotFixture = {
   revision: 0,
   entities: [],
   dependencies: [],
+  workItemDependencies: [],
   workItemLinks: [],
   workItems: [],
   criticalPath: {
     entityIds: [],
     totalDurationDays: 0,
     slackByEntityId: {},
+  },
+  workItemDependencySummary: {
+    criticalPath: {
+      workItems: [],
+      totalDurationDays: 0,
+      slackByWorkItemKey: {},
+    },
+    conflicts: [],
+    unresolvedBlockerCount: 0,
+    affectedProjects: [],
+    affectedProjectIds: [],
+    affectedMilestoneIds: [],
   },
 } satisfies PlanningSnapshot

@@ -18,6 +18,9 @@
 | `CognitoEnterpriseIdpName` | yes | Cognito に接続した SAML/OIDC provider 名。 |
 | `WorkspaceDirectoryId` | yes | Cognito の両 custom attribute と DynamoDB partition に使う canonical ID。例: `workspace#production`。 |
 | `WorkspaceAuditPseudonymKey` | yes | Workspace/member/invitation の公開 audit ID を HMAC 化する、32-byte random値を表す64桁の小文字hex固定 key。`openssl rand -hex 32` などで生成し、`NoEcho` で Lambda に渡してbackfillにも同じ値を設定します。 |
+| `RestoreDrillCleanupApproverRoleArn` | yes | Cleanup approval policyを一時attachできる唯一の既存data-owner IAM role ARN。別roleへpolicyをattachしてもapproval APIは許可されず、receipt内のSTS assumed-role sessionもこのroleへ帰属する必要があります。 |
+| `ApiRuntimeConfigurationRevision` | yes | 1〜32文字のoperator管理revision。先頭はASCII英数字、以降はASCII英数字と `.` `_` `-` だけを使えます（例: `2026-07-28-01`）。API code、または4分割runtime configuration secretへ入るparameter/resource値を変更するdeployごとに増分し、同じrevisionを異なる内容へ再利用しません。 |
+| `WorkspaceSearchWriterFenceMode` | yes | 初回bootstrap前の明示的な二段階rolloutでは`rollout-pending`、open row作成後の定常状態では`required`。既定値はなく、通常deployで`required`から戻しません。 |
 | `InitialOwnerEmail` | yes | lowercase の初期 owner email。Workspace/member/alias key に使います。 |
 | `InitialOwnerUsername` | yes | `AdminUpdateUserAttributes` に渡す Cognito username。email と異なる username も指定できます。 |
 | `TaskApiAllowedOrigins` | production では必須 | 空白なしの comma-separated CORS origin。既定値は local development 用です。 |
@@ -34,15 +37,32 @@
 
 `WorkspaceDirectoryId`、`WorkspaceAuditPseudonymKey`、owner email / username は data key と認可境界に使います。環境ごとに固定し、通常の application deploy で変更しないでください。pseudonym key を変更すると既存 resource の audit timeline が分裂するため、通常の rotation 対象にはしません。
 
+### Workspace Search migration deployment target
+
+Migration rehearsalのaccount、Region、environmentはCloudFormation parameterでは指定しません。
+CDK contextの`workspaceSearchMigrationDeploymentTarget`は、
+[`lib/config/workspace-search-migration-deployment-targets.ts`](lib/config/workspace-search-migration-deployment-targets.ts)
+にreview済みcodeとして固定したtarget IDを選ぶだけです。未知のID、不完全なtarget、stackの
+account/Regionとの不一致はsynth時に失敗します。現在のmapはrehearsal resourceを作成しない
+`production-disabled`だけを含みます。
+
+実non-production targetの追加は、具体的で互いに異なるdeployment accountとproduction-account digest、
+固定Region、`rehearsalEnabled=true`を同じsource mapへ追加する独立したreview対象です。追加時はcloud assemblyと
+`cdk diff`をreviewし、stack environmentとCloudFormation assertionがexact account/Regionへ固定されることを
+確認します。Production account IDそのものはsource、template、tag、outputへ保存せず、private permit入力から
+domain-separated SHA-256を計算してCDKのdigest tagと照合します。
+
 ## API observability
 
-Application Lambda 16個は X-Ray active tracing を有効にし、各 execution role には X-Ray が要求する
+Application Lambda 25個は X-Ray active tracing を有効にし、各 execution role には X-Ray が要求する
 trace/telemetry write action だけを追加します。API Lambda は readiness probe 用に
 `AuditEventsTable`、`WorkItemsTable`、`WorkspaceAccessTable` への `dynamodb:DescribeTable` だけを
 持つ独立 policy を使います。
 
 Stack は API Lambda の `Errors`、`Throttles`、p95 `Duration`（12秒）、HTTP API の 5xx、
-application EMF の `ServerErrorCount` を CloudWatch alarm として作成します。全21 alarm の
+application EMF の `ServerErrorCount` を CloudWatch alarm として作成します。Workspace Search
+migration専用の6 alarmを含む45 metric alarmと
+1 composite alarmの
 `AlarmActions` は、必須parameterで指定した既存のprimary/secondary SNS topicへ接続します。
 Stackはtopic、subscription、Incident Manager escalation planを作成・変更しません。Topic ownerは
 同一account/regionのstandard topicを用意し、managed rosterへのsubscription、暗号化key policy、
@@ -70,9 +90,32 @@ environment evidenceへ保存します。
 
 Operator自身の`sns:Publish`だけではCloudWatch principalとKMS経路を検証できません。Deploy後は
 同じ両topic actionを持つcontrolled test alarmを実際に`OK → ALARM`へ遷移させ、CloudWatch alarm
-history、両subscriptionの受信時刻/message ID、`ALARM → OK`への復帰を保存します。全21 alarmの
+history、両subscriptionの受信時刻/message ID、`ALARM → OK`への復帰を保存します。全46 alarmの
 `AlarmActions`がprimary/secondaryの2 ARNを含み、inventory済みの既存actionも保持していることを
 templateとdeployed configurationの両方で照合します。
+
+### Workspace Search migration alarms
+
+`Mukuroji/WorkspaceSearchMigration` namespaceには、
+`Service=mukuroji-workspace-search-migration`だけをdimensionとする次の6 alarmがあります。
+
+- `WorkspaceSearchMigrationDescribeTableThrottleAlarm`
+- `WorkspaceSearchMigrationDescribeTableBudgetStopAlarm`
+- `WorkspaceSearchMigrationRateBudgetExhaustionAlarm`
+- `WorkspaceSearchMigrationCheckpointStallAlarm`
+- `WorkspaceSearchMigrationQuarantineAlarm`
+- `WorkspaceSearchMigrationTerminalFailureAlarm`
+
+すべて5分`Sum >= 1`、evaluation/datapoints 1/1、`TreatMissingData=notBreaching`です。
+Run ID、table、tenant、operation、phase、outcome、correlationはdimensionにしません。既存のalarm routing
+aspectがprimary/secondaryの両SNS actionを付与します。Stackは追加topicやmigration用
+`PutMetricData`権限を作成しません。review済みtargetが`environment=non-production`かつ
+`rehearsalEnabled=true`のときだけ、
+6 alarmの`ALARM`通知を受けるprimary/secondary別のfilter済みSQS subscriptionと、未接続collector policyを
+作成します。CLIのterminal EMFと即時live-stall EMFをmetric化する実行surfaceは、
+そのstdout/stderrの両方をCloudWatch Logsへingestする必要があります。Alarm response、secret-free correlation、非本番の
+real metricによる`OK → ALARM → OK`と両receiptの手順は
+[`docs/operational-readiness.md`](../docs/operational-readiness.md)を参照してください。
 
 ## Outputs
 
@@ -90,6 +133,8 @@ templateとdeployed configurationの両方で照合します。
 - `RequestEmailIngestionFunctionName`, `RequestEmailIngestionDlqUrl`
 - `ProjectDirectoryTableName`, `TeamIssueEventsTableName`
 - `FileProofingTableName`, `FileBucketName`, `FileMalwareProtectionPlanId`
+- `FileBucketIncarnationMarkerKey`, `FileBucketIncarnationMarkerVersionId`, `FileBucketIncarnationMarkerChecksumSha256`, `FileBucketIncarnationMarkerSize`（同名 bucket 再作成を検出する固定 marker の exact S3 version、base64 SHA-256、byte size。cross-domain integrity operator の明示入力に使い、current version へ fallback しない）
+- `CrossDomainIntegrityOperatorPolicyArn`（6表の `Scan` / `DescribeTable`、exact FileBucket の `GetBucketVersioning`、`workspaces/*` の exact-version read、出力された marker VersionId に条件固定した marker exact-key read だけを持つ未接続 read-only policy）
 - `NotificationsTableName`, `CollaborationProjectionDlqUrl`, `NotificationScheduleDlqUrl`
 - `AnalyticsScheduleDlqUrl`
 - `AuditEventsTableName`, `ProcessedAuditEventsTableName`
@@ -97,7 +142,18 @@ templateとdeployed configurationの両方で照合します。
 - `EnterpriseScimGroupJobFunctionName`, `EnterpriseScimGroupJobDlqUrl`
 - `EnterpriseIdentityTableName`（Workspace generation/`CONTROL` checkpoint、global domain claim、SSO/policy/role、SCIM projection、provisioning run の store。Enterprise Identity 専用 GSI は持ちません）
 - `WorkItemCollaborationTableName`, `RealtimeSessionsTableName`, `RealtimeWebSocketUrl`
-- `WorkspaceSearchTableName`（検索文書、saved view、ユーザー別 view preference）
+- `WorkspaceSearchTableName`（検索文書、saved/task view、ユーザー別 view preference、24 時間保持の task view mutation receipt。receipt のみ `expiresAt` TTL で失効）
+- `WorkspaceSearchMigrationStateTableName`（lease、checkpoint、operation receipt 用の retained/PITR store）
+- `WorkspaceSearchMigrationDeploymentTargetId`, `WorkspaceSearchMigrationDeploymentTrustVersion`, `WorkspaceSearchMigrationDeploymentEnvironment`, `WorkspaceSearchMigrationDeploymentAccount`, `WorkspaceSearchMigrationDeploymentRegion`, `WorkspaceSearchMigrationProductionAccountDigest`, `WorkspaceSearchMigrationDeploymentTrustRootDigest`（review済みsource mapから決まるcanonical deployment trust root。raw production account IDは含めない）
+- `WorkspaceSearchMigrationJournalBucketName`, `WorkspaceSearchMigrationJournalKeyArn`（通常artifactは30–31日、`workspace-search/v1/rehearsal/evidence-*`だけ365–366日の Object Lock COMPLIANCE 付きlossless migration artifact store。Preimage journal segment は2 MiB以下、planning raw source/target artifact segment は16 MiB以下の単一 `PutObject` に限定し、multipart upload は許可しません。専用 access log bucket は current/noncurrent version を90日保持）
+- `WorkspaceSearchMigrationOperatorPolicyArn`（承認済み operator principal へ明示的に attach する未接続 policy。通常journalの30–31日保持権限だけを持つ）
+- `WorkspaceSearchMigrationRehearsalEvidencePolicyArn`（`non-production`だけに出力する未接続policy。Issue 167のimmutable evidenceを365–366日へ延長する実行時だけoperator policyと同じ短命roleへ追加する）
+- `WorkspaceSearchMigrationAlarmEvidenceAlarmArns`, `WorkspaceSearchMigrationAlarmEvidencePrimaryQueueUrl`, `WorkspaceSearchMigrationAlarmEvidenceSecondaryQueueUrl`, `WorkspaceSearchMigrationAlarmEvidenceCollectorPolicyArn`（`non-production`だけに出力する6 alarmのcanonical vector、route別receipt queue、未接続collector policy）
+- `WorkspaceSearchMigrationAlarmEvidenceSignalLogGroupName`, `WorkspaceSearchMigrationAlarmEvidenceSignalLogStreamName`, `WorkspaceSearchMigrationAlarmEvidenceSignalLogStreamArn`, `WorkspaceSearchMigrationAlarmEvidenceIngestionPolicyArn`（`non-production`だけに作成するretained 365日LogGroup、固定/precreated `alarm-signals-v1` stream、そのstreamへの`logs:PutLogEvents`だけを許す未接続ingestion policy。production operator policyには接続しない）
+- `WorkspaceSearchMigrationAlarmEvidenceDeploymentTrustRootDigest`, `WorkspaceSearchMigrationAlarmEvidenceDeploymentTargetId`（条件付きalarm evidence sinkを同じdeployment trust rootへ束縛する値）
+- `RestoreDrillStateMachineArn`, `RestoreDrillCleanupStateMachineArn`
+- `RestoreDrillEvidenceBucketName`, `RestoreDrillScratchBucketName`, `RestoreDrillStateTableName`
+- `RestoreDrillCleanupApprovalPolicyArn`, `RestoreDrillScheduleDlqUrl`
 - `DeveloperPlatformTableName`, `DeveloperPlatformLookupIndexName`
 - `WebhookDeliveryQueueUrl`, `WebhookDeliveryDlqUrl`
 - `WorkItemImportBucketName`, `WorkItemImportQueueUrl`, `WorkItemImportDlqUrl`
@@ -105,6 +161,23 @@ templateとdeployed configurationの両方で照合します。
 - `WorkspaceDirectoryId`
 
 Function URL と API Gateway は同じ Lambda を呼びます。いずれも `<base>/teams/projects` と `<base>/api/teams/projects` を同じ canonical `/api` route へ正規化します。
+
+Shared APIのproduction runtime configurationは4つのSecrets Manager secretへ分割し、Lambda
+environmentにはそのARNだけを渡します。各secret名は`ApiRuntimeConfigurationRevision`を含み、
+replacement時の旧secretは`Retain`されます。Retained secretはrollback/recovery evidenceであり、
+CloudFormationが旧resourceへ自動で再接続したり不要secretを削除したりはしません。
+各groupはCloudFormation transformを使わないv2 line envelopeで、固定group identity、同一revision、
+canonical Base64 valueまたはnested Secret ARNを保持します。NoEcho parameterの4値はprocessed
+templateへ展開させず、revision-boundな個別retained secretの`SecretString`へ直接`Ref`します。
+Document public-share secretを含む5つのnested secretはAPI roleだけが読みます。Loaderは4 groupの
+identity/revision、全canonical key、nested secretを検証し終えてから環境へ原子的に反映します。
+
+この仕組みを初めてdeployすると、既存の自動命名Lambdaから明示名末尾`-api-v2`のLambdaへ一度だけ
+置換されます。したがって`ProjectTasksFunctionUrl`と、その後方互換output
+`ProjectTasksApiUrl`は変わるため、Function URL consumerは新しいoutputへ計画的に切り替えてください。
+`ProjectTasksApiGatewayUrl`は同じHTTP API endpointを維持し、default routeだけを`live` Aliasへ
+切り替えます。以後は、新しいconfiguration secretとLambda Versionの準備完了後にAliasが新Versionへ
+切り替わるため、HTTP API trafficはcode/configurationが揃ったversion単位で切り替わります。
 
 ## Connector runtime configuration
 
@@ -406,6 +479,7 @@ poll job も再実行するため、対象と影響を棚卸しせず実施し�
 File body は API request body に通さず、認証・認可済み API が発行する短命 URL で `workspaces/<workspaceId>/...` の object key へ直接 upload / download します。client が任意の bucket key を指定する方式ではありません。
 
 - S3 bucket は Block Public Access、Bucket owner enforced、SSE-S3、TLS 強制、versioning、`Retain` を有効にします。
+- `system/data-integrity/file-bucket-incarnation/v1.json` は bucket policy と TLS 強制の適用後、custom provider が事前 GET を行わず `If-None-Match: *` の条件付き PUT を最初に1回だけ試みます。Policy は同 key の delete / version delete を全 principal に拒否し、provider role 以外の PUT と `If-None-Match: *` を欠く PUT を拒否します。条件不成立または Create response を失った再試行だけ current marker の checksum / size を照合して同じ VersionId を返し、新しい version を作りません。Provider に bucket-wide `ListBucket` は付与しません。Object Lock は有効化しません。
 - browser CORS は `TaskApiAllowedOrigins` と揃え、direct `PUT` / `GET` / `HEAD` と checksum / metadata header だけを許可します。
 - GuardDuty Malware Protection for S3 は `workspaces/` prefix を scan し、`GuardDutyMalwareScanStatus` tag を付けます。
 - bucket policy は GuardDuty 以外による scan status tag の追加・変更・削除を拒否し、API と cleanup consumer は既存 status を同値のまま保持する tag 更新だけを行います。
@@ -510,7 +584,13 @@ bun run cdk:build
 bun run cdk:test
 bun run cdk:synth
 
+# 初回writer-fence bootstrap前だけ rollout-pending。bootstrap後は required。
+export MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION=2026-07-28-01
+export MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE=rollout-pending
+export MUKUROJI_RESTORE_DRILL_CLEANUP_APPROVER_ROLE_ARN=arn:aws:iam::<account-id>:role/<data-owner-role>
+
 bun --filter cdk cdk diff CdkStack \
+  -c triageIndexDeploymentStage=wake \
   --parameters CognitoUserPoolId="$COGNITO_USER_POOL_ID" \
   --parameters CognitoUserPoolClientId="$COGNITO_USER_POOL_CLIENT_ID" \
   --parameters CognitoSsoUserPoolClientId="$COGNITO_SSO_USER_POOL_CLIENT_ID" \
@@ -519,6 +599,7 @@ bun --filter cdk cdk diff CdkStack \
   --parameters CognitoEnterpriseIdpName="$COGNITO_ENTERPRISE_IDP_NAME" \
   --parameters WorkspaceDirectoryId="$MUKUROJI_WORKSPACE_DIRECTORY_ID" \
   --parameters WorkspaceAuditPseudonymKey="$MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY" \
+  --parameters RestoreDrillCleanupApproverRoleArn="$MUKUROJI_RESTORE_DRILL_CLEANUP_APPROVER_ROLE_ARN" \
   --parameters EnterpriseIdentityTokenHashSecret="$ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET" \
   --parameters EnterpriseSsoStateSecret="$ENTERPRISE_SSO_STATE_SECRET" \
   --parameters InitialOwnerEmail="$MUKUROJI_INITIAL_OWNER_EMAIL" \
@@ -527,9 +608,12 @@ bun --filter cdk cdk diff CdkStack \
   --parameters RequestTokenHashSecret="$MUKUROJI_REQUEST_TOKEN_HASH_SECRET" \
   --parameters AlarmPrimaryTopicName="$MUKUROJI_ALARM_PRIMARY_TOPIC_NAME" \
   --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
+  --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
+  --parameters WorkspaceSearchWriterFenceMode="$MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE" \
   --parameters TaskApiAllowedOrigins=https://app.example.com
 
 bun --filter cdk cdk deploy CdkStack \
+  -c triageIndexDeploymentStage=wake \
   --parameters CognitoUserPoolId="$COGNITO_USER_POOL_ID" \
   --parameters CognitoUserPoolClientId="$COGNITO_USER_POOL_CLIENT_ID" \
   --parameters CognitoSsoUserPoolClientId="$COGNITO_SSO_USER_POOL_CLIENT_ID" \
@@ -538,6 +622,7 @@ bun --filter cdk cdk deploy CdkStack \
   --parameters CognitoEnterpriseIdpName="$COGNITO_ENTERPRISE_IDP_NAME" \
   --parameters WorkspaceDirectoryId="$MUKUROJI_WORKSPACE_DIRECTORY_ID" \
   --parameters WorkspaceAuditPseudonymKey="$MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY" \
+  --parameters RestoreDrillCleanupApproverRoleArn="$MUKUROJI_RESTORE_DRILL_CLEANUP_APPROVER_ROLE_ARN" \
   --parameters EnterpriseIdentityTokenHashSecret="$ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET" \
   --parameters EnterpriseSsoStateSecret="$ENTERPRISE_SSO_STATE_SECRET" \
   --parameters InitialOwnerEmail="$MUKUROJI_INITIAL_OWNER_EMAIL" \
@@ -546,9 +631,37 @@ bun --filter cdk cdk deploy CdkStack \
   --parameters RequestTokenHashSecret="$MUKUROJI_REQUEST_TOKEN_HASH_SECRET" \
   --parameters AlarmPrimaryTopicName="$MUKUROJI_ALARM_PRIMARY_TOPIC_NAME" \
   --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
+  --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
+  --parameters WorkspaceSearchWriterFenceMode="$MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE" \
   --parameters TaskApiAllowedOrigins=https://app.example.com \
   --outputs-file /tmp/mukuroji-cdk-outputs.json
 ```
+
+`--outputs-file`はdeploy直後のoutput照合用スナップショットです。`/tmp`のファイルだけを
+永続的な変更証跡とはせず、stack ID、deploy時刻、change set、API runtime revision、
+writer-fence mode、outputファイルのSHA-256をアクセス制御されたchange recordへ保存します。
+outputにはSecret ARNなどのresource metadataが含まれるため、access tokenやsecret値を追記せず、
+照合後のローカルファイルは削除します。
+
+初回配線を`rollout-pending`でdeployすると、AppConfigの初期baselineは`disabled`でall-at-once
+deployされ、controlled Lambdaはその完了に依存します。Webhook authorization backfill custom
+resourceも両handler Lambdaの更新完了に依存し、event propertyとLambda環境のmodeが一致しない場合は
+I/O前に停止します。pending中のCreate/Updateはtable access前に短絡します。Deleteはv3 markerと
+checkpointを強整合readし、stateが空ならwriteなしで完了し、既存stateがあればpending barrierを
+bypassせずdurable open-row guard付きtransactionでrollbackを完了するまで削除を成功させません。全writerの
+drainを確認してfresh authorityに束縛したopen rowをbootstrapし、続けて値を`required`へ変更します。
+Application clientもpending中はfenced mutationをnetwork I/O前に拒否し、AppConfig admissionの
+誤再開だけではunguarded writeへ戻りません。
+Guarded backfillの完了とwriter clientを構築する全12 Lambdaへの反映を確認した後、新しい
+AppConfig `enabled` revisionをdeployしてwriterを再開します。CloudFormation更新中の
+pending/required混在を許容してwriterを再開したり、通常rollbackとして`required`から
+`rollout-pending`へ戻したりしないでください。
+
+`MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION`はAPIのcode、またはruntime configuration secretへ
+入るparameter/resource値が変わるdeployごとに新しい値へ進め、`cdk diff`とdeployへ同じ値を渡します。
+同じrevisionのsecret内容を更新するとimmutable rolloutの前提が崩れるため、revisionを再利用しません。
+初回`-api-v2`置換時はFunction URL outputの切替計画をchange recordに含めます。HTTP API endpointは
+維持され、以後のtraffic切替は`live` Alias更新で行われます。
 
 Bootstrap は次を同一 `WorkspaceDirectoryId` partition に冪等投入します。
 
@@ -616,10 +729,10 @@ VITE_API_BASE_URL="$FUNCTION_URL" bun run web:dev
 
 Alarm routingを初めて追加するupgradeでは、同一account/regionに異なる2つのstandard SNS topicを
 先に作成し、上記policy、KMS、subscription、controlled alarm testの契約を満たします。既存環境で
-monitoring stack、custom resource、または手動操作が`AlarmActions`を管理している場合は、全21 alarmの
+monitoring stack、custom resource、または手動操作が`AlarmActions`を管理している場合は、全46 alarmの
 現行actionとownerをinventory化し、必要なdestinationを新topic側へ移行してから旧reconcilerを停止します。
 複数ownerが同じalarm propertyを更新する状態でdeployしません。`cdk diff`では
-2つの必須parameter、相異rule、既存21 alarmの`AlarmActions`以外にalarm resourceの置換や
+2つの必須parameter、相異rule、既存alarmの`AlarmActions`以外にalarm resourceの置換や
 SNS resourceの新設がないことを確認し、そのtopic名を以後の通常deployでも固定して渡します。
 
 bootstrap update は同じ key・同じ owner なら再実行できます。既存の異なる種類の row と key が衝突した場合は上書きせず stack update を失敗させるため、row を調査してから再実行します。
@@ -636,7 +749,7 @@ projectionを全件復元してから旧 Lambda への依存逆順rollbackを許
 この逆移行に失敗した stack で custom resource をskipして
 `continue-update-rollback`しないでください。
 
-通知 upgrade では `NotificationsTable` に `RecipientStatusIndex` が追加されます。deploy 前に GSI backfill の所要時間と table throttling を確認し、deploy 後は `CollaborationProjectionDlqUrl` と `NotificationScheduleDlqUrl` の滞留、Inbox の unread count を監視してください。期限 schedule は UTC date-only で1時間ごとに走査し、同じ Work Item / due date / reason の event を決定的に重複排除します。走査が `NOTIFICATION_SCHEDULE_MAX_PAGES` の上限に達した場合も例外として非同期 retry され、最終失敗は schedule DLQ に保存されます。DLQ の visible message が1件以上になると CloudWatch alarm が `ALARM` 状態になるため、alarm と DLQ message を調査し、再実行または due-date GSI への移行を判断してください。
+通知 upgrade では `NotificationsTable` に `RecipientStatusIndex` が追加されます。deploy 前に GSI backfill の所要時間と table throttling を確認し、deploy 後は `CollaborationProjectionDlqUrl` と `NotificationScheduleDlqUrl` の滞留、Inbox の unread count を監視してください。期限 schedule は1時間ごとに走査し、各 Work Item の canonical `schedule.calendarPolicy.timeZone` で due/overdue を評価して、同じ Work Item / due date / reason の event を決定的に重複排除します。走査が `NOTIFICATION_SCHEDULE_MAX_PAGES` の上限に達した場合も例外として非同期 retry され、最終失敗は schedule DLQ に保存されます。DLQ の visible message が1件以上になると CloudWatch alarm が `ALARM` 状態になるため、alarm と DLQ message を調査し、再実行または due-date GSI への移行を判断してください。
 
 `InitialOwnerEmail` / `InitialOwnerUsername` の変更は通常 deploy と分けて owner rotation として扱います。新 owner の検証後、旧 owner の Cognito attributes、system-admin group、workspace/member/alias row、各 project role を明示的に棚卸ししてください。parameter 変更だけでは旧 owner の row や group membership は削除されません。
 
@@ -691,6 +804,12 @@ CDK は configuration row を強制 seed しません。row が無い Workspace 
 
 Table は `PAY_PER_REQUEST`、`Retain`、PITR enabled で作成します。deploy 前後に `PlanningTableName` output と Lambda の `PLANNING_TABLE_NAME` が同じ table を指すこと、table replacement がないこと、API role 以外へ不要な planning data 権限が付いていないことを確認してください。
 
+## Capacity planning data
+
+`CapacityPlanningTable` は `workspaceId` / `recordKey` を primary key とし、Team ごとの working schedule、holiday / time-off、resource request、resource assignment を一つの CAS 管理レコードへ保存します。API Lambda には `CAPACITY_PLANNING_TABLE_NAME` を設定し、capacity planning table への `GetItem` / 条件付き `PutItem` / `DescribeTable` だけを許可します。
+
+Table は `PAY_PER_REQUEST`、`Retain`、PITR enabled で作成します。deploy 前後に `CapacityPlanningTableName` output と Lambda の `CAPACITY_PLANNING_TABLE_NAME` が同じ table を指すこと、table replacement がないこと、API role 以外へ workload の権限が付いていないことを確認してください。
+
 ## Analytics data and scheduled delivery
 
 `AnalyticsTable` は `workspaceId` / `recordKey` をprimary keyとし、saved report、immutable
@@ -726,7 +845,11 @@ Deploy前後に次を確認します。
 
 ## Rollback
 
-code / infrastructure rollback は、原則として直前に成功した revision を同じ必須 parameters（request intake 用の2 secretとalarm topic名を含む）で deploy します。現行 stack に存在する retained resource を rollback template から削除しないでください。DynamoDB table は `Retain` で、PITR も有効ですが、stack から外れた resource は自動で再接続されません。Cognito custom schema は rollback しても残ります。Alarm routing導入前のtemplateへ戻すと全alarm actionが外れるため、active incident中は使用せず、applicationだけを戻すforward-fixを優先します。
+code / infrastructure rollback は、原則として直前に成功したrevisionのcode/configurationを、
+review済みの新しい`ApiRuntimeConfigurationRevision`とその他の同じ必須parameters
+（request intake用の2 secretとalarm topic名を含む）でforward deployします。既にretainedされた
+旧API configuration secretは自動では再接続されないため、同じ物理名を再作成する目的で旧revisionを
+再利用しません。現行 stack に存在する retained resource を rollback template から削除しないでください。DynamoDB table は `Retain` で、PITR も有効ですが、stack から外れた resource は自動で再接続されません。Cognito custom schema は rollback しても残ります。Alarm routing導入前のtemplateへ戻すと全alarm actionが外れるため、active incident中は使用せず、applicationだけを戻すforward-fixを優先します。
 
 `RequestIntakeTable` または email DLQ を初めて追加した deploy から、それらを知らない旧 template へ直接 rollback しないでください。先に forward-fix revision で API/email ingestion を無効化し、retained resource と output を template に残したまま application code を戻します。どうしても旧 template を使う場合は resource import 用 template と logical ID を準備し、CloudFormation から外れた retained resource を放置した状態で同名 resource を再作成しません。
 
@@ -757,6 +880,89 @@ aws dynamodb wait table-exists \
 ```
 
 復元 table の key schema / GSI / item count / representative records を確認します。その後は、(a) reviewed conditional copy で元 table の対象 item を修復する、または (b) CDK を更新して復元 table を参照し resource import する、のどちらかを選びます。切替確認前に元 table や旧 partition を削除しません。
+
+## Scheduled isolated restore drill
+
+Incident recoveryとは別に、daily due scannerが直近の成功済みverificationから89日で同一regionの
+隔離drillをadmitし、90日でoverdue alarmを発火します。Standard Step Functions workflowは
+Work Items、Work Item Configuration、Project Directory、Workspace Access、Audit Events、
+File Proofingの6表を共通PITR pointへ`mukuroji-restore-drill-` prefixの別名tableとして復元します。
+API/workerのrole、runtime configuration、environment、traffic routeにはrestore tableやscratch
+bucketを渡しません。
+
+Exact content baselineは稼働中source tableのScanではなく、同じrestore pointの
+`DYNAMODB_JSON` exportです。File Proofingが参照するsource S3 VersionIdはprivate/KMS/versioned
+scratch bucketへexact copyします。Productionと共通の2 GiB上限まで、source/destination bodyを
+exact VersionId付きの最大16 MiB S3 Rangeで独立streamし、range digestとresponse identityを照合した
+authenticated chainをdurable CASします。`CopyObject`のSDK retry/応答消失で複数VersionIdが
+作られた場合はpre-copy baselineとの差分を全件cleanup scopeへ永続化し、決定的に選んだ1件だけを
+検証して隔離済みmetadataへ反映します。
+
+Export data file、restore Scan page、completed File proof、cross-domain semantic row/claimはboundedな
+単位でincrementalに処理します。上限超過はpartial successにせずfailed evidenceとalarm/remediationへ
+進みますが、failure finalizerのcleanup inventoryは検証上限で切り捨てません。Descriptor gateは
+attribute definitions、base key schema、GSI key/projection/ACTIVE、billing、SSE/KMS、source TTL contractと
+restore TTL disabledだけを検証します。DynamoDB Streams、CloudWatch alarm、resource tag、
+IAM/application binding、traffic routingはこのdata-verification gateの対象ではありません。
+RPO 300秒、RTO 14,400秒、descriptor、item/partition count、content aggregate、S3
+body/metadata/tag、cross-domain invariantのいずれかが未達ならrunはfailed evidenceをsealします。
+
+Main workflowのWaitはhandlerが返すdynamic秒数を使います。Durable cursor/stateだけが進んだ場合は
+0秒で再駆動し、AWS restore/export/delete/abortの収束またはcopy claim待ちだけをbounded pollします。
+Eligibleなverification stageは1 Lambda invocationで最大50 logical stepをbatchし、8分のelapsed-time
+guardでdurable checkpointへ戻ります。Semantic Scanは1 logical stepあたりraw row最大25件、
+requirement/Audit reducerは最大100 durable recordです。Logical data上限は全最大値を1 runのRTO内に
+処理できるというcapacity保証ではありません。1 normalized pageのclaim上限150,000は、DynamoDBの
+物理1 MiB pageから算出した最大143,485件を切り上げた値です。Main-loop `pending`は0秒redriveも含めて
+execution全体の1,200 poll-loop iteration fuseを共有し、なお継続が必要なら専用finalizerで非integrityの
+`WORKFLOW_POLL_BUDGET_EXCEEDED`をsealします。Initial/poll task errorはdurable failure-finalizer loopへ
+入り、main workflowの`FAILED`または270分`TIMED_OUT` statusは別のStandard finalizer workflowが同じ
+seal処理を再開します。Failure finalizerは最大50 zero-wait stepまたは8分を1 invocationで処理します。
+Generic Lambda/AWS/KMS/state-store failureは非integrityの`WORKFLOW_TASK_FAILED`としてsealし、
+全sealed failureを`DrillFailureCount`へ加算します。明示的なdescriptor/aggregate/cross-domain/
+File-copy mismatchだけを追加でintegrity metricへ加算します。
+Step Functions status eventが欠落しても、
+次のdaily scannerがdeadline超過runのrevisionとrunner execution ARNをCAS更新してownerを引き継ぎ、
+stale executionを拒否したうえでfailure evidenceをsealします。
+
+`RestoreDrillEvidenceBucketName`はKMS、versioning、Object Lock COMPLIANCE 400日、Retain、
+access logを持つappend-only evidence先です。`RestoreDrillStateTableName`はlease/checkpoint、
+exact resource locator、cleanup stateを保持するretained/PITR storeであり、外部へ公開する
+secret-free evidenceとは分離します。Raw object locatorやresume cursorはこのrestricted stateだけに
+保持し、semantic joinのdurable dataはopaque HMAC claimに変換します。Runner roleのwrite先は
+`evidence/v1/runs/<drill-id>/result.json`、cleanup roleのwrite先は同runの`cleanup.json`に分離し、
+相互のartifactを書き換えられないIAM境界にします。
+State tableにはTTLやrun完了後のDeleteItemを設定していないため、resource cleanup後もper-run recordを
+期限なく保持します。Capacity/costを監視し、将来のjanitor/retirementは別のreview済みlifecycle changeで
+導入してください。
+
+Pass/failどちらのrunも`awaiting-cleanup-approval`で停止します。Data ownerは短命sessionへ
+`RestoreDrillCleanupApproverRoleArn`で指定した既存roleだけに
+`RestoreDrillCleanupApprovalPolicyArn`を一時的にattachし、terminal evidence digest、exact isolated
+resource vector、change locator、有効期限を束縛したreceiptをObject Lock配下へno-clobber保存してから
+`RestoreDrillCleanupStateMachineArn`を開始します。Cleanup roleは記録済みrestore tableとscratch
+File/export object VersionId、およびrun-owned DynamoDB export prefixesのincomplete multipart uploadだけを
+削除・abortでき、source table/objectとevidence bucketへのdelete権限を持ちません。Multipart uploadも
+approvalのresource digest/inventoryへ含め、cleanupは1 logical step最大25 targetを処理します。
+1 invocationはRUNとpinned cleanup executionを各step前に再検証しながら最大50 zero-wait stepまたは
+8分までbatchし、`RUNNING`かつ`redriveCount=0`でないexecutionを拒否します。external waitが必要なら
+終了します。全resourceのabsence receiptと、run prefixに
+multipart uploadが残っていないことを確認するまでcleanupを完了扱いにしないでください。
+Cleanup targetはmutable run partitionとは別の`RESTORE_DRILL_LEDGER#<drill-id>`へappend-onlyで保存し、
+count/revisionとscope sealを同じcondition boundaryで固定します。CopyObject intentはrunner停止後に
+16分のquiet windowを挟んで2回全件reconcileし、digest/cursorが一致してからscopeをsealします。
+Cleanup roleはledgerをGet/Queryだけで読み、mutable progressを`RESTORE_DRILL_CLEANUP#<drill-id>`へ
+限定して書き、RUN/CADENCEはcleanup-owned属性だけをconditional Updateします。
+
+Cleanup workflowには明示的なphysical nameを与え、approval policyの`StartExecution`/
+`ListExecutions`とapproval/cleanup roleの`DescribeExecution`をその同じstate machine/execution ARNへ
+限定します。Timeout finalizer workflowのidentityをcleanup approvalやreapprovalへ流用しません。
+失敗・timeout・abortしたcleanupを再承認する場合は、pinned executionのterminal `stopDate`から
+16分経過後に新しいreceiptと実行名を発行します。既存receiptや実行名を再利用しません。
+
+詳細な判定・evidence・alarm responseは
+[`docs/restore-drill.md`](../docs/restore-drill.md) と
+[`docs/operational-readiness.md`](../docs/operational-readiness.md#pitr-restore-drill)を参照してください。
 
 ## Security and durability checks
 
@@ -791,5 +997,5 @@ aws dynamodb wait table-exists \
 bun run cdk:build
 bun run cdk:test
 bun run cdk:synth
-bun --filter cdk cdk diff CdkStack
+bun --filter cdk cdk diff CdkStack -c triageIndexDeploymentStage=wake
 ```

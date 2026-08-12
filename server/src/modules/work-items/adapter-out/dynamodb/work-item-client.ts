@@ -2,6 +2,14 @@ import {
   loadServerConfig,
 } from '../../../../infrastructure/config/server-config'
 import {
+  createDynamoDbClient as createConfiguredDynamoDbClient,
+  createWorkspaceSearchWriterDynamoDbDocumentClient,
+  shouldBootstrapLocalDynamoDb as shouldBootstrapConfiguredLocalDynamoDb,
+} from '../../../../infrastructure/aws/dynamodb-client'
+import {
+  throwIfWorkspaceSearchWriterFenceTerminalError,
+} from '../../../../infrastructure/runtime/workspace-search-writer-fence-document-client'
+import {
   createAuditFieldChanges,
   createMutationAuditEventPut,
   ensureLocalAuditEventsTable,
@@ -29,10 +37,17 @@ import {
 } from '../../../request-intake'
 import {
   isCanonicalWorkItemArchiveWindow,
-  isCanonicalWorkItemDueDate,
   isCanonicalWorkItemRecord,
 } from '../../canonical-work-item'
 import { createResourceId } from '../../domain/resource-id'
+import {
+  deriveWorkItemScheduleDueDate,
+  normalizeWorkItemSchedule,
+  WorkItemScheduleError,
+} from '../../domain/work-item-schedule'
+import {
+  WORK_ITEM_SCHEDULE_CASCADE_LIMIT,
+} from '../../domain/work-item-schedule-dependencies'
 import {
   CreateTableCommand,
   DescribeTableCommand,
@@ -52,19 +67,25 @@ import type {
   TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
 import {
-  PLANNING_SCHEMA_VERSION,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
 } from '@mukuroji/contracts'
+import { PLANNING_STORAGE_SCHEMA_VERSION } from '../../../planning'
 import type {
   CanonicalWorkItem,
+  ConfirmedWorkItemSchedule,
   CustomFieldValue,
   RequestSubmissionEvent,
   ResolvedWorkItemConfiguration,
+  TriageEntry,
+  TriageEntryEvent,
   WorkflowStatusCategory,
   WorkItemPriority,
   WorkItemRelation,
+  WorkItemSchedule,
   WorkItemStatus,
+  WorkItemTriageContextEventSnapshot,
+  WorkItemTriageContextSnapshot,
 } from '@mukuroji/contracts'
 
 /**
@@ -93,6 +114,8 @@ export type WorkItemAuthorizationSnapshot = {
 
 /** Source-of-truth row converted only inside the DynamoDB adapter. */
 type WorkItemAuthorizationGenerationGuard = {
+  /** Stable semantic purpose used to classify transaction cancellations safely. */
+  kind: 'workspace-member' | 'planning' | 'enterprise-control'
   /** DynamoDB table containing the authorization row. */
   tableName: string
   /** Complete primary key of the authorization row. */
@@ -159,11 +182,76 @@ function createDynamoDbWorkItemAuthorizationConditionChecks(
 function createAuthorizationSnapshotConditionChecks(
   snapshot: WorkItemAuthorizationSnapshot | undefined,
 ): NonNullable<TransactWriteCommandInput['TransactItems']> {
+  return createAuthorizationSnapshotConditionEntries(snapshot)
+    .map((entry) => entry.transactWriteItem)
+}
+
+/**
+ * Creates the app-owned Planning META fence used by Automation schedule updates.
+ *
+ * @param workspaceId - Workspace whose Planning state was checked.
+ * @param fence - Exact Planning revision observed before the mutation.
+ * @returns A single Planning META condition check, or no check when absent.
+ */
+function createPlanningRevisionFenceConditionEntries(
+  workspaceId: string,
+  fence: UpdateTeamIssueRequestBody['planningRevisionFence'],
+): WorkItemAuthorizationConditionEntry[] {
+  if (!fence) return []
+  if (!Number.isSafeInteger(fence.expectedRevision) || fence.expectedRevision < 0) {
+    throw new ProjectDataError(
+      500,
+      'InvalidWorkItemAuthorizationFence',
+      'Planning revision fence is invalid.',
+    )
+  }
+  const environment = loadServerConfig().environment
+  const guard: WorkItemAuthorizationGenerationGuard = {
+    kind: 'planning',
+    tableName: environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
+    key: {
+      workspaceId,
+      recordKey: 'META',
+    },
+    generationAttribute: 'revision',
+    expectedGeneration: fence.expectedRevision,
+    requiredAttributes: {
+      entryType: 'planning-meta',
+      schemaVersion: PLANNING_STORAGE_SCHEMA_VERSION,
+    },
+    ...(fence.expectedRevision === 0
+      ? { allowMissingWhenExpectedZero: true }
+      : {}),
+  }
+  const [transactWriteItem] = createDynamoDbWorkItemAuthorizationConditionChecks([guard])
+  return transactWriteItem
+    ? [{ kind: guard.kind, transactWriteItem }]
+    : []
+}
+
+/** One named authorization check in a canonical Work Item transaction. */
+type WorkItemAuthorizationConditionEntry = {
+  /** Authorization source guarded by this transaction item. */
+  kind: WorkItemAuthorizationGenerationGuard['kind']
+  /** DynamoDB condition check for the source-of-truth authorization row. */
+  transactWriteItem: NonNullable<TransactWriteCommandInput['TransactItems']>[number]
+}
+
+/**
+ * Creates named physical authorization checks from an application-level snapshot.
+ *
+ * @param snapshot - Authorization generations observed by the application layer.
+ * @returns Ordered checks whose semantic kinds remain available for error classification.
+ */
+function createAuthorizationSnapshotConditionEntries(
+  snapshot: WorkItemAuthorizationSnapshot | undefined,
+): WorkItemAuthorizationConditionEntry[] {
   if (!snapshot) return []
   const environment = loadServerConfig().environment
   const enterpriseTableName = environment.ENTERPRISE_IDENTITY_TABLE_NAME?.trim()
   const guards: WorkItemAuthorizationGenerationGuard[] = [
     {
+      kind: 'workspace-member',
       tableName:
         environment.MUKUROJI_WORKSPACE_ACCESS_TABLE ??
         environment.WORKSPACE_ACCESS_TABLE_NAME ??
@@ -180,6 +268,7 @@ function createAuthorizationSnapshotConditionChecks(
       },
     },
     {
+      kind: 'planning',
       tableName: environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
       key: {
         workspaceId: snapshot.workspaceId,
@@ -189,7 +278,7 @@ function createAuthorizationSnapshotConditionChecks(
       expectedGeneration: snapshot.planningRevision,
       requiredAttributes: {
         entryType: 'planning-meta',
-        schemaVersion: PLANNING_SCHEMA_VERSION,
+        schemaVersion: PLANNING_STORAGE_SCHEMA_VERSION,
       },
       ...(snapshot.planningRevision === 0
         ? { allowMissingWhenExpectedZero: true }
@@ -200,6 +289,7 @@ function createAuthorizationSnapshotConditionChecks(
         Number.isSafeInteger(snapshot.enterpriseControlRevision) &&
         snapshot.enterpriseControlRevision >= 0
       ? [{
+          kind: 'enterprise-control',
           tableName: enterpriseTableName,
           key: {
             scopeKey: `WORKSPACE#${snapshot.workspaceId}`,
@@ -216,7 +306,60 @@ function createAuthorizationSnapshotConditionChecks(
         } satisfies WorkItemAuthorizationGenerationGuard]
       : []),
   ]
-  return createDynamoDbWorkItemAuthorizationConditionChecks(guards)
+  const transactWriteItems = createDynamoDbWorkItemAuthorizationConditionChecks(guards)
+  return guards.flatMap((guard, index) => {
+    const transactWriteItem = transactWriteItems[index]
+    return transactWriteItem
+      ? [{ kind: guard.kind, transactWriteItem }]
+      : []
+  })
+}
+
+/**
+ * Names caller-provided authorization checks so transaction failures remain classifiable.
+ *
+ * @param checks - Existing authorization checks supplied by a trusted application caller.
+ * @returns Named authorization entries preserving their transaction order.
+ */
+function createCallerAuthorizationConditionEntries(
+  checks: NonNullable<TransactWriteCommandInput['TransactItems']> | undefined,
+): WorkItemAuthorizationConditionEntry[] {
+  return (checks ?? []).map((transactWriteItem) => ({
+    kind: 'workspace-member',
+    transactWriteItem,
+  }))
+}
+
+/**
+ * Raises a stable domain error for a failed named authorization transaction check.
+ *
+ * @param error - DynamoDB transaction failure candidate.
+ * @param startIndex - Index of the first authorization check in the transaction.
+ * @param entries - Ordered named authorization checks included in the transaction.
+ */
+function throwAuthorizationConditionFailureIfPresent(
+  error: unknown,
+  startIndex: number,
+  entries: readonly WorkItemAuthorizationConditionEntry[],
+): void {
+  const failureKinds = new Set(entries.flatMap((entry, index) =>
+    isTransactionConditionalFailureAt(error, startIndex + index)
+      ? [entry.kind]
+      : []
+  ))
+  if (
+    failureKinds.has('workspace-member') ||
+    failureKinds.has('enterprise-control')
+  ) {
+    throw createWorkItemAuthorizationChangedError()
+  }
+  if (failureKinds.has('planning')) {
+    throw new ProjectDataError(
+      409,
+      'PlanningRevisionConflict',
+      'Planning changed. Reload and try again.',
+    )
+  }
 }
 
 /**
@@ -346,7 +489,11 @@ export type ProjectTasksResponse = {
 /**
  * チーム所有 Issue の活動種別です。
  */
-type TeamIssueActivityType = 'created' | 'updated' | 'commented'
+type TeamIssueActivityType =
+  | 'created'
+  | 'updated'
+  | 'commented'
+  | 'triage-context-merged'
 
 /**
  * DynamoDB に保存する team issue item です。
@@ -414,6 +561,8 @@ type TeamIssueItem = {
   creatorMemberKey: string
   /** Request intake から作成された場合の source submission ID です。 */
   sourceRequestId?: string
+  /** Team Triage から作成された場合の source Entry ID です。 */
+  sourceTriageEntryId?: string
   /** Relation Graph から同期する search/backfill 用の派生 relation ID 一覧です。 */
   relationIds: string[]
   /**
@@ -432,10 +581,16 @@ type TeamIssueItem = {
    * 期限日として表示する文字列です。
    */
   dueDate: string
+  /** Canonical schedule shared by every Work Item planning surface. */
+  schedule: WorkItemSchedule
   /**
    * 優先度です。
    */
   priority: ProjectTaskPriority
+  /** Priority value の直近変更時刻です。 */
+  priorityUpdatedAt?: string
+  /** Derived due date の直近変更時刻です。 */
+  dueDateUpdatedAt?: string
   /**
    * 作成日時の ISO 8601 timestamp です。
    */
@@ -486,6 +641,8 @@ type TeamIssueEventItem = {
    * コメント本文です。comment event のみ設定します。
    */
   body?: string
+  /** Permission-safe source provenance retained by a duplicate Triage merge event. */
+  triageContextSnapshot?: WorkItemTriageContextSnapshot
   /**
    * 活動履歴に表示する概要です。
    */
@@ -650,6 +807,8 @@ export type TeamIssueDetailResponse = {
    * Issue 活動履歴一覧です。
    */
   activity: TeamIssueActivityResponseItem[]
+  /** De-identified duplicate-source context committed with this canonical Work Item. */
+  triageContextSnapshots?: WorkItemTriageContextSnapshot[]
   /** Bounded event 読み込みの次 page を指す opaque cursor です。 */
   nextEventCursor?: string
   /** Work Item に適用される解決済み workflow/custom field 定義です。 */
@@ -682,10 +841,8 @@ export type CreateTeamIssueRequestBody = {
    * Cognito user を参照する担当者 ID です。
    */
   assigneeUserId?: unknown
-  /**
-   * 期限日として保存する文字列です。
-   */
-  dueDate?: unknown
+  /** Explicit canonical schedule required for every new Work Item. */
+  schedule: unknown
   /**
    * 優先度です。
    */
@@ -698,6 +855,8 @@ export type CreateTeamIssueRequestBody = {
    * Custom field ID ごとの型付き値です。
    */
   customFieldValues?: unknown
+  /** Quick capture では required custom field の入力を後回しにします。 */
+  quickCapture?: unknown
   /** API handler が検証後に付与する workflow extension schema version です。 */
   workflowSchemaVersion?: unknown
   /** API handler が検証後に付与する workflow status category です。 */
@@ -712,6 +871,46 @@ export type CreateTeamIssueRequestBody = {
   idempotentIssueId?: string
   /** 既存 row と同一 request か検証する SHA-256 digest です。 */
   idempotentRequestDigest?: string
+}
+
+/** Creates a revision fence for an existing canonical Work Item reference.
+ *
+ * @param tableName - Canonical Work Item table name.
+ * @param directoryId - Owning Workspace directory identifier.
+ * @param teamId - Work Item Team identifier.
+ * @param workItemId - Canonical Work Item identifier.
+ * @param expectedRevision - Revision observed by the caller's strong read.
+ * @returns A DynamoDB condition check composable with a larger transaction.
+ */
+export function createWorkItemRevisionConditionCheck(
+  tableName: string,
+  directoryId: string,
+  teamId: string,
+  workItemId: string,
+  expectedRevision: number,
+): NonNullable<TransactWriteCommandInput['TransactItems']>[number] {
+  const normalizedTableName = readRequiredString(tableName, 'Work Item table name is required.')
+  const normalizedDirectoryId = readRequiredString(directoryId, 'Workspace ID is required.')
+  const normalizedTeamId = readRequiredString(teamId, 'Team ID is required.')
+  const normalizedWorkItemId = readRequiredString(workItemId, 'Work Item ID is required.')
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1) {
+    throw new ProjectDataError(
+      400,
+      'InvalidProjectWrite',
+      'Work Item revision is invalid.',
+    )
+  }
+  return {
+    ConditionCheck: {
+      TableName: normalizedTableName,
+      Key: {
+        directoryTeamId: createDirectoryTeamId(normalizedDirectoryId, normalizedTeamId),
+        issueId: normalizedWorkItemId,
+      },
+      ConditionExpression: 'revision = :expectedRevision',
+      ExpressionAttributeValues: { ':expectedRevision': expectedRevision },
+    },
+  }
 }
 
 /** Trusted request conversion handler が Work Item transactionへ追加する narrow projection です。 */
@@ -730,6 +929,42 @@ export type RequestConversionTransactionInput = {
   submissionId: string
   /** Mutation 前に読み込んだ append-only event 履歴です。 */
   events: readonly RequestSubmissionEvent[]
+}
+
+/** Triage compositionが Work Item 作成 transaction へ追加する受入更新です。 */
+export type TriageAcceptanceTransactionInput = {
+  /** Work Item から追跡する source Triage Entry ID です。 */
+  entryId: string
+  /** Triage Entry、Work Item、audit で共有する canonical mutation instant です。 */
+  occurredAt: string
+  /** Revision guard、association、event、receipt を含む transaction item です。 */
+  transactItems: NonNullable<TransactWriteCommandInput['TransactItems']>
+}
+
+/** Input used to prepare canonical Work Item provenance for a duplicate Triage merge. */
+export type CreateTriageDuplicateContextTransactionItemsInput = {
+  /** Owning Workspace directory identifier. */
+  directoryId: string
+  /** Team that owns the canonical Work Item. */
+  teamId: string
+  /** Canonical Work Item receiving the duplicate context. */
+  workItemId: string
+  /** Strongly read Work Item revision guarded by the combined transaction. */
+  expectedWorkItemRevision: number
+  /** Workspace member performing the duplicate merge. */
+  actorUserId: string
+  /** Strongly read Triage Entry supplying permission and retained metadata. */
+  entry: TriageEntry
+  /** Canonical ISO 8601 instant shared with the Triage mutation. */
+  mergedAt: string
+}
+
+/** Prepared Work Item provenance and unexecuted transaction actions. */
+export type TriageDuplicateContextTransactionContribution = {
+  /** De-identified context snapshot written to the Work Item event partition. */
+  snapshot: WorkItemTriageContextSnapshot
+  /** Work Item revision guard and immutable context event Put. */
+  transactItems: NonNullable<TransactWriteCommandInput['TransactItems']>
 }
 
 /**
@@ -756,10 +991,8 @@ export type PublicUpdateTeamIssueRequestBody = {
    * Cognito user を参照する担当者 ID です。
    */
   assigneeUserId?: unknown
-  /**
-   * 期限日として保存する文字列です。
-   */
-  dueDate?: unknown
+  /** Complete replacement schedule shared by every task view. */
+  schedule?: unknown
   /**
    * 優先度です。
    */
@@ -788,6 +1021,11 @@ export type UpdateTeamIssueRequestBody = PublicUpdateTeamIssueRequestBody & {
   authorizationConditionChecks?: NonNullable<TransactWriteCommandInput['TransactItems']>
   /** Application layer が認可時に読み込んだ source-of-truth generations です。 */
   authorizationSnapshot?: WorkItemAuthorizationSnapshot
+  /** App-owned Automation が schedule 検証時に読み込んだ Planning META revision です。 */
+  planningRevisionFence?: {
+    /** Mutation transaction が一致を要求する Planning revision です。 */
+    expectedRevision: number
+  }
   /** Internal bulk operation が設定または解除する archive timestamp です。 */
   archivedAt?: unknown
   /** Internal bulk operation が記録する archive actor member key です。 */
@@ -836,6 +1074,36 @@ export type UpdateTeamIssueResponse = {
    * 更新した Issue 行です。
    */
   issue: TeamIssueResponseItem
+}
+
+/** One revision-bound schedule write in an atomic dependency cascade. */
+export type WorkItemScheduleCascadeUpdate = {
+  /** Team that owns the affected Work Item. */
+  teamId: string
+  /** Team-local Work Item identifier. */
+  workItemId: string
+  /** Revision observed while recomputing the confirmed preview. */
+  expectedRevision: number
+  /** Complete canonical replacement schedule. */
+  schedule: WorkItemSchedule
+}
+
+/** One non-mutated Work Item revision that contributed to cascade recomputation. */
+export type WorkItemScheduleCascadeGuard = {
+  /** Team that owns the guarded Work Item. */
+  teamId: string
+  /** Team-local Work Item identifier. */
+  workItemId: string
+  /** Revision used by dependency schedule arithmetic. */
+  expectedRevision: number
+}
+
+/** Result of atomically persisting a Work Item schedule cascade. */
+export type WorkItemScheduleCascadeResponse = {
+  /** Updated canonical Work Items in the requested deterministic order. */
+  issues: TeamIssueResponseItem[]
+  /** Compact schedule results safe to persist in the atomic replay receipt. */
+  confirmedSchedules: ConfirmedWorkItemSchedule[]
 }
 
 /**
@@ -889,6 +1157,14 @@ export type NamedWorkItemDeletionFence = {
  * API handler から利用する team issue client の最小 interface です。
  */
 export type TeamIssuesClient = {
+  /** Prepares de-identified duplicate-source context for an atomic Triage merge.
+   *
+   * @param input - Strongly read Work Item and permission-safe Triage context.
+   * @returns The snapshot and unexecuted Work Item transaction actions.
+   */
+  createTriageDuplicateContextTransactionItems?(
+    input: CreateTriageDuplicateContextTransactionItemsInput,
+  ): TriageDuplicateContextTransactionContribution
   /**
    * DynamoDB から指定 team ID の Issue 一覧を取得します。
    */
@@ -935,6 +1211,7 @@ export type TeamIssuesClient = {
     actorUserId: string,
     auditContext?: MutationAuditContext,
     requestConversion?: RequestConversionTransactionInput,
+    triageAcceptance?: TriageAcceptanceTransactionInput,
   ): Promise<CreateTeamIssueResponse>
   /**
    * DynamoDB の team issue を更新します。
@@ -948,6 +1225,19 @@ export type TeamIssuesClient = {
     auditContext?: MutationAuditContext,
     idempotency?: WorkItemIdempotencyTransaction,
   ): Promise<UpdateTeamIssueResponse>
+  /**
+   * Atomically updates every revision-bound Work Item schedule in one dependency cascade.
+   */
+  updateTeamIssueSchedules?(
+    directoryId: string,
+    updates: readonly WorkItemScheduleCascadeUpdate[],
+    guardedRevisions: readonly WorkItemScheduleCascadeGuard[],
+    actorUserId: string,
+    auditContext?: MutationAuditContext,
+    relationGraphConditionChecks?: NonNullable<TransactWriteCommandInput['TransactItems']>,
+    authorizationSnapshot?: WorkItemAuthorizationSnapshot,
+    idempotency?: WorkItemIdempotencyTransaction,
+  ): Promise<WorkItemScheduleCascadeResponse>
   /**
    * DynamoDB の canonical Work Item を revision 条件付きで削除します。
    */
@@ -1081,7 +1371,7 @@ function createRequestConversionEventTransactionPut(
         entryType: 'submission-event',
         scopeKey: input.scopeKey,
         recordKey:
-          `EVENT#${input.submissionId}#${event.createdAt}#${event.id}`,
+          `SUBMISSION_EVENT#${input.submissionId}#${event.createdAt}#${event.id}`,
         submissionId: input.submissionId,
         ...event,
       },
@@ -1301,6 +1591,94 @@ export class DynamoDbTeamIssuesClient {
   }
 
   /**
+   * Prepares permission-safe duplicate-source provenance for a combined Triage transaction.
+   *
+   * The immutable event lives in the canonical Work Item event partition and deliberately omits
+   * source bodies, requester identity, provider IDs, attachment names, and watcher identities.
+   * A revision guard prevents the provenance from being attached to a stale or replaced target.
+   *
+   * @param input - Strongly read Work Item and Triage source context.
+   * @returns The retained snapshot and unexecuted Work Item transaction actions.
+   */
+  createTriageDuplicateContextTransactionItems(
+    input: CreateTriageDuplicateContextTransactionItemsInput,
+  ): TriageDuplicateContextTransactionContribution {
+    const directoryId = readRequiredString(
+      input.directoryId,
+      'Triage context Workspace ID is required.',
+    )
+    const teamId = readRequiredString(
+      input.teamId,
+      'Triage context Team ID is required.',
+    )
+    const workItemId = readRequiredString(
+      input.workItemId,
+      'Triage context Work Item ID is required.',
+    )
+    const actorUserId = readRequiredString(
+      input.actorUserId,
+      'Triage context actor ID is required.',
+    )
+    const mergedAt = readTriageAcceptanceInstant(input.mergedAt)
+    if (
+      !Number.isSafeInteger(input.expectedWorkItemRevision) ||
+      input.expectedWorkItemRevision < 1
+    ) {
+      throw new ProjectDataError(
+        400,
+        'InvalidProjectWrite',
+        'Triage context Work Item revision is invalid.',
+      )
+    }
+    if (input.entry.workspaceId !== directoryId || input.entry.teamId !== teamId) {
+      throw new ProjectDataError(
+        409,
+        'TriageContextScopeMismatch',
+        'Triage context does not belong to the canonical Work Item scope.',
+      )
+    }
+    const snapshot = createPermissionSafeTriageContextSnapshot(input.entry, mergedAt)
+    const eventItem = this.createIssueEventItem({
+      directoryId,
+      teamId,
+      issueId: workItemId,
+      eventId: `${mergedAt}#triage-context-merged#${snapshot.triageEntryId}`,
+      eventType: 'triage-context-merged',
+      actorUserId,
+      summary: 'Duplicate Team Triage context was retained.',
+      triageContextSnapshot: snapshot,
+      createdAt: mergedAt,
+    })
+
+    return {
+      snapshot,
+      transactItems: [
+        {
+          ConditionCheck: {
+            TableName: this.issueTableName,
+            Key: {
+              directoryTeamId: createDirectoryTeamId(directoryId, teamId),
+              issueId: workItemId,
+            },
+            ConditionExpression: 'revision = :expectedRevision',
+            ExpressionAttributeValues: {
+              ':expectedRevision': input.expectedWorkItemRevision,
+            },
+          },
+        },
+        {
+          Put: {
+            TableName: this.eventTableName,
+            Item: eventItem,
+            ConditionExpression:
+              'attribute_not_exists(directoryTeamIssueId) AND attribute_not_exists(eventId)',
+          },
+        },
+      ],
+    }
+  }
+
+  /**
    * DynamoDB から指定 team ID の Issue 一覧を取得します。
    */
   async getTeamIssues(
@@ -1482,6 +1860,9 @@ export class DynamoDbTeamIssuesClient {
         ? { items: [] as TeamIssueEventItem[] }
         : await this.queryTeamIssueEventItems(directoryId, teamId, issueId, options)
       const events = eventPage.items
+      const triageContextSnapshots = events
+        .map((event) => event.triageContextSnapshot)
+        .filter(isDefined)
 
       return {
         issue: toTeamIssueResponseItem(issue),
@@ -1489,6 +1870,7 @@ export class DynamoDbTeamIssuesClient {
           .filter((event) => event.eventType === 'commented' && event.body)
           .map(toTeamIssueCommentResponseItem),
         activity: events.map(toTeamIssueActivityResponseItem),
+        ...(triageContextSnapshots.length > 0 ? { triageContextSnapshots } : {}),
         ...(eventPage.nextCursor ? { nextEventCursor: eventPage.nextCursor } : {}),
       } satisfies TeamIssueDetailResponse
     } catch (error) {
@@ -1510,6 +1892,7 @@ export class DynamoDbTeamIssuesClient {
     actorUserId: string,
     auditContext?: MutationAuditContext,
     requestConversion?: RequestConversionTransactionInput,
+    triageAcceptance?: TriageAcceptanceTransactionInput,
   ) {
     await this.ensureLocalTables()
     let auditPut: ReturnType<typeof createMutationAuditEventPut> = undefined
@@ -1517,7 +1900,8 @@ export class DynamoDbTeamIssuesClient {
     const title = readRequiredString(input.title, 'Issue title is required.')
     const description = readOptionalString(input.description, 'Issue description is invalid.')
     const assigneeUserId = readTeamIssueAssigneeUserId(input)
-    const dueDate = readWorkItemDueDate(input.dueDate)
+    const schedule = readWorkItemScheduleInput(input.schedule)
+    const dueDate = deriveWorkItemScheduleDueDate(schedule)
     const priority = readTaskPriority(input.priority)
     const assignedProjectId = readAssignedProjectId(input.assignedProjectId)
     const workflowSchemaVersion = readWorkflowSchemaVersion(input.workflowSchemaVersion)
@@ -1540,7 +1924,7 @@ export class DynamoDbTeamIssuesClient {
       (idempotentIssueId === undefined) !==
         (idempotentRequestDigest === undefined) ||
       (idempotentIssueId !== undefined &&
-        !/^(?:api|import)-[a-f0-9]{48}$/u.test(idempotentIssueId)) ||
+      !/^(?:api|import|triage)-[a-f0-9]{48}$/u.test(idempotentIssueId)) ||
       (idempotentRequestDigest !== undefined &&
         !/^[a-f0-9]{64}$/u.test(idempotentRequestDigest))
     ) {
@@ -1553,6 +1937,19 @@ export class DynamoDbTeamIssuesClient {
     const sourceRequestId = requestConversion
       ? readSourceRequestId(requestConversion.submissionId)
       : undefined
+    const sourceTriageEntryId = triageAcceptance
+      ? readSourceTriageEntryId(triageAcceptance.entryId)
+      : undefined
+    if (
+      triageAcceptance &&
+      (idempotentIssueId === undefined || idempotentRequestDigest === undefined)
+    ) {
+      throw new ProjectDataError(
+        400,
+        'InvalidIdempotentWorkItemCreate',
+        'Triage acceptance requires deterministic Work Item create metadata.',
+      )
+    }
     const idempotencyResourceId = readIdempotencyResourceId(input.idempotencyResourceId)
     if (idempotentIssueId !== undefined && idempotencyResourceId !== undefined) {
       throw new ProjectDataError(
@@ -1562,7 +1959,17 @@ export class DynamoDbTeamIssuesClient {
       )
     }
     const directoryTeamId = createDirectoryTeamId(directoryId, teamId)
-    const now = new Date().toISOString()
+    const now = triageAcceptance
+      ? readTriageAcceptanceInstant(triageAcceptance.occurredAt)
+      : new Date().toISOString()
+    const configurationConditionChecks = input.configurationConditionChecks ?? []
+    const authorizationConditionEntries = [
+      ...createCallerAuthorizationConditionEntries(input.authorizationConditionChecks),
+      ...createAuthorizationSnapshotConditionEntries(input.authorizationSnapshot),
+    ]
+    const authorizationConditionChecks = authorizationConditionEntries.map((entry) =>
+      entry.transactWriteItem
+    )
 
     try {
       const currentIssues = await this.getTeamIssues(
@@ -1602,13 +2009,17 @@ export class DynamoDbTeamIssuesClient {
         assigneeUserId,
         creatorMemberKey: actorUserId,
         ...(sourceRequestId ? { sourceRequestId } : {}),
+        ...(sourceTriageEntryId ? { sourceTriageEntryId } : {}),
         workflowSchemaVersion,
         workflowStatusId,
         statusCategory,
         customFieldValues,
         relationIds: [],
         dueDate,
+        schedule,
         priority,
+        priorityUpdatedAt: now,
+        dueDateUpdatedAt: now,
         createdAt: now,
         updatedAt: now,
       }
@@ -1648,8 +2059,10 @@ export class DynamoDbTeamIssuesClient {
           'statusCategory',
           'customFieldValues',
           'dueDate',
+          'schedule',
           'priority',
           'sourceRequestId',
+          'sourceTriageEntryId',
         ]),
         metadata: {
           adapter: 'canonical-work-item',
@@ -1658,6 +2071,7 @@ export class DynamoDbTeamIssuesClient {
           issueId,
           projectId: assignedProjectId,
           sourceRequestId,
+          sourceTriageEntryId,
           deepLink: createTeamIssueDeepLink(teamId, issueId),
           notificationTitle: title,
           notificationCandidates: [
@@ -1666,11 +2080,6 @@ export class DynamoDbTeamIssuesClient {
           afterRevision: item.revision,
         },
       })
-      const configurationConditionChecks = input.configurationConditionChecks ?? []
-      const authorizationConditionChecks = [
-        ...(input.authorizationConditionChecks ?? []),
-        ...createAuthorizationSnapshotConditionChecks(input.authorizationSnapshot),
-      ]
       const requestConversionItems = requestConversion
         ? createRequestConversionTransactionItems(
             requestConversion,
@@ -1701,6 +2110,7 @@ export class DynamoDbTeamIssuesClient {
             ...configurationConditionChecks,
             ...authorizationConditionChecks,
             ...requestConversionItems,
+            ...(triageAcceptance?.transactItems ?? []),
           ],
         }),
       )
@@ -1709,26 +2119,21 @@ export class DynamoDbTeamIssuesClient {
         issue: toTeamIssueResponseItem(item),
       } satisfies CreateTeamIssueResponse
     } catch (error) {
-      const configurationConditionChecks = input.configurationConditionChecks ?? []
       const configurationConditionStartIndex = resolveConfigurationConditionStartIndex(
         2,
         auditPut,
+      )
+      const authorizationConditionStartIndex =
+        configurationConditionStartIndex + configurationConditionChecks.length
+      throwAuthorizationConditionFailureIfPresent(
+        error,
+        authorizationConditionStartIndex,
+        authorizationConditionEntries,
       )
       if (configurationConditionChecks.some((_, index) =>
         isTransactionConditionalFailureAt(error, configurationConditionStartIndex + index)
       )) {
         throw createWorkItemConfigurationRevisionConflictError()
-      }
-      const authorizationConditionChecks = [
-        ...(input.authorizationConditionChecks ?? []),
-        ...createAuthorizationSnapshotConditionChecks(input.authorizationSnapshot),
-      ]
-      const authorizationConditionStartIndex =
-        configurationConditionStartIndex + configurationConditionChecks.length
-      if (authorizationConditionChecks.some((_, index) =>
-        isTransactionConditionalFailureAt(error, authorizationConditionStartIndex + index)
-      )) {
-        throw createWorkItemAuthorizationChangedError()
       }
       if (
         isAwsNamedError(error, 'TransactionCanceledException') &&
@@ -1783,6 +2188,7 @@ export class DynamoDbTeamIssuesClient {
             customFieldValues,
             description,
             dueDate,
+            schedule,
             priority,
             statusCategory,
             title,
@@ -1804,6 +2210,298 @@ export class DynamoDbTeamIssuesClient {
   }
 
   /**
+   * Persists a bounded schedule cascade in one revision- and graph-guarded transaction.
+   *
+   * @param directoryId - Owning Workspace directory identifier.
+   * @param updates - Deterministically ordered replacement schedules.
+   * @param guardedRevisions - Non-mutated endpoint revisions used during recomputation.
+   * @param actorUserId - Workspace member that confirmed the cascade.
+   * @param auditContext - Optional immutable audit context shared by every impact.
+   * @param relationGraphConditionChecks - Semantic relation revision guards.
+   * @param authorizationSnapshot - Workspace and Planning generations observed at confirmation.
+   * @param idempotency - Optional completion receipt committed with the cascade.
+   * @returns Every updated canonical Work Item in input order.
+   */
+  async updateTeamIssueSchedules(
+    directoryId: string,
+    updates: readonly WorkItemScheduleCascadeUpdate[],
+    guardedRevisions: readonly WorkItemScheduleCascadeGuard[],
+    actorUserId: string,
+    auditContext?: MutationAuditContext,
+    relationGraphConditionChecks:
+      NonNullable<TransactWriteCommandInput['TransactItems']> = [],
+    authorizationSnapshot?: WorkItemAuthorizationSnapshot,
+    idempotency?: WorkItemIdempotencyTransaction,
+  ): Promise<WorkItemScheduleCascadeResponse> {
+    await this.ensureLocalTables()
+    if (updates.length === 0) {
+      throw new ProjectDataError(
+        400,
+        'InvalidWorkItemScheduleCascade',
+        'A schedule cascade must contain at least one Work Item.',
+      )
+    }
+    if (updates.length > WORK_ITEM_SCHEDULE_CASCADE_LIMIT) {
+      throw new ProjectDataError(
+        413,
+        'WorkItemScheduleCascadeLimitExceeded',
+        `A schedule cascade cannot exceed ${WORK_ITEM_SCHEDULE_CASCADE_LIMIT} Work Items.`,
+      )
+    }
+    const duplicateKeys = new Set<string>()
+    for (const update of updates) {
+      const key = `${update.teamId}\0${update.workItemId}`
+      if (duplicateKeys.has(key)) {
+        throw new ProjectDataError(
+          400,
+          'InvalidWorkItemScheduleCascade',
+          'A schedule cascade cannot update the same Work Item twice.',
+        )
+      }
+      duplicateKeys.add(key)
+    }
+    const guardedKeys = new Set<string>()
+    for (const guard of guardedRevisions) {
+      const key = `${guard.teamId}\0${guard.workItemId}`
+      readWorkItemExpectedRevision(guard.expectedRevision)
+      if (duplicateKeys.has(key) || guardedKeys.has(key)) {
+        throw new ProjectDataError(
+          400,
+          'InvalidWorkItemScheduleCascade',
+          'Cascade revision guards must be unique and cannot duplicate updated Work Items.',
+        )
+      }
+      guardedKeys.add(key)
+    }
+
+    const occurredAt = new Date().toISOString()
+    const prepared = await Promise.all(updates.map(async (update, sequence) => {
+      const expectedRevision = readWorkItemExpectedRevision(update.expectedRevision)
+      const beforeIssue = await this.getRequiredTeamIssueItem(
+        directoryId,
+        update.teamId,
+        update.workItemId,
+        true,
+      )
+      if (beforeIssue.revision !== expectedRevision) {
+        throw createWorkItemRevisionConflictError()
+      }
+      const schedule = readWorkItemScheduleInput(update.schedule)
+      const dueDate = deriveWorkItemScheduleDueDate(schedule)
+      const dueDateChanged = dueDate !== beforeIssue.dueDate
+      const afterIssue: TeamIssueItem = {
+        ...beforeIssue,
+        schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+        revision: expectedRevision + 1,
+        schedule,
+        dueDate,
+        ...(dueDateChanged ? { dueDateUpdatedAt: occurredAt } : {}),
+        updatedAt: occurredAt,
+      }
+      const eventItem = this.createIssueEventItem({
+        directoryId,
+        teamId: update.teamId,
+        issueId: update.workItemId,
+        eventType: 'updated',
+        actorUserId,
+        summary: 'Issue schedule was updated by a dependency cascade.',
+        createdAt: occurredAt,
+      })
+      const auditPut = createMutationAuditEventPut(this.auditTableName, auditContext, {
+        directoryId,
+        eventType: 'work-item.schedule-cascade-updated',
+        entityType: 'work-item',
+        entityId: createTeamIssueAuditEntityId(update.teamId, update.workItemId),
+        action: 'schedule-cascade-updated',
+        sequence,
+        occurredAt,
+        summary: createWorkItemNotificationSummary(beforeIssue, afterIssue),
+        changes: createAuditFieldChanges(beforeIssue, afterIssue, ['dueDate', 'schedule']),
+        metadata: {
+          adapter: 'canonical-work-item',
+          actorMemberKey: actorUserId,
+          teamId: update.teamId,
+          issueId: update.workItemId,
+          projectId: afterIssue.assignedProjectId,
+          deepLink: createTeamIssueDeepLink(update.teamId, update.workItemId),
+          notificationTitle: afterIssue.title,
+          notificationCandidates: createWorkItemNotificationCandidates(beforeIssue, afterIssue),
+          beforeRevision: expectedRevision,
+          afterRevision: expectedRevision + 1,
+          cascadeSize: updates.length,
+        },
+      })
+      return { update, expectedRevision, afterIssue, eventItem, auditPut, dueDateChanged }
+    }))
+    const authorizationConditionEntries = createAuthorizationSnapshotConditionEntries(
+      authorizationSnapshot,
+    )
+    const authorizationConditionChecks = authorizationConditionEntries.map((entry) =>
+      entry.transactWriteItem
+    )
+    const issues = prepared.map((entry) => toTeamIssueResponseItem(entry.afterIssue))
+    const response: WorkItemScheduleCascadeResponse = {
+      issues,
+      confirmedSchedules: issues.map((issue) => ({
+        id: issue.id,
+        teamId: issue.teamId,
+        revision: issue.revision,
+        schedule: issue.schedule,
+        dueDate: issue.dueDate,
+        ...(issue.assignedProjectId
+          ? { assignedProjectId: issue.assignedProjectId }
+          : {}),
+      } satisfies ConfirmedWorkItemSchedule)),
+    }
+    let idempotencyCompletion: IdempotencyCompletionTransactWrite | undefined
+    try {
+      idempotencyCompletion = await idempotency?.prepare({
+        status: 200,
+        body: { workItems: response.confirmedSchedules },
+      })
+    } catch (error) {
+      if (error instanceof ProjectDataError) throw error
+      throw new ProjectDataError(
+        503,
+        'WorkItemScheduleCascadeTransactionUnavailable',
+        'The durable schedule confirmation receipt could not be prepared.',
+      )
+    }
+    if (idempotency && !idempotencyCompletion) {
+      throw new ProjectDataError(
+        503,
+        'WorkItemScheduleCascadeTransactionUnavailable',
+        'The durable schedule confirmation receipt is not configured.',
+      )
+    }
+    const transactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = []
+    const updateConditionIndexes: number[] = []
+    for (const entry of prepared) {
+      updateConditionIndexes.push(transactItems.length)
+      transactItems.push({
+        Update: {
+          TableName: this.issueTableName,
+          Key: {
+            directoryTeamId: createDirectoryTeamId(directoryId, entry.update.teamId),
+            issueId: entry.update.workItemId,
+          },
+          UpdateExpression:
+            'SET #schemaVersion = :schemaVersion, #revision = :nextRevision, ' +
+            '#schedule = :schedule, #dueDate = :dueDate, #updatedAt = :updatedAt' +
+            (entry.dueDateChanged ? ', #dueDateUpdatedAt = :dueDateUpdatedAt' : ''),
+          ExpressionAttributeNames: {
+            '#schemaVersion': 'schemaVersion',
+            '#revision': 'revision',
+            '#schedule': 'schedule',
+            '#dueDate': 'dueDate',
+            '#updatedAt': 'updatedAt',
+            ...(entry.dueDateChanged
+              ? { '#dueDateUpdatedAt': 'dueDateUpdatedAt' }
+              : {}),
+          },
+          ExpressionAttributeValues: {
+            ':schemaVersion': WORK_ITEM_SCHEMA_VERSION,
+            ':expectedRevision': entry.expectedRevision,
+            ':nextRevision': entry.expectedRevision + 1,
+            ':schedule': entry.afterIssue.schedule,
+            ':dueDate': entry.afterIssue.dueDate,
+            ':updatedAt': occurredAt,
+            ...(entry.dueDateChanged ? { ':dueDateUpdatedAt': occurredAt } : {}),
+          },
+          ConditionExpression:
+            'attribute_exists(directoryTeamId) AND attribute_exists(issueId) AND ' +
+            '#revision = :expectedRevision',
+        },
+      })
+      transactItems.push({
+        Put: {
+          TableName: this.eventTableName,
+          Item: entry.eventItem,
+          ConditionExpression:
+            'attribute_not_exists(directoryTeamIssueId) AND attribute_not_exists(eventId)',
+        },
+      })
+      if (entry.auditPut) transactItems.push(entry.auditPut)
+    }
+    const guardedRevisionStartIndex = transactItems.length
+    for (const guard of guardedRevisions) {
+      transactItems.push({
+        ConditionCheck: {
+          TableName: this.issueTableName,
+          Key: {
+            directoryTeamId: createDirectoryTeamId(directoryId, guard.teamId),
+            issueId: guard.workItemId,
+          },
+          ConditionExpression:
+            'attribute_exists(directoryTeamId) AND attribute_exists(issueId) AND ' +
+            '#revision = :expectedRevision',
+          ExpressionAttributeNames: { '#revision': 'revision' },
+          ExpressionAttributeValues: { ':expectedRevision': guard.expectedRevision },
+        },
+      })
+    }
+    const relationConditionStartIndex = transactItems.length
+    transactItems.push(...relationGraphConditionChecks)
+    const authorizationConditionStartIndex = transactItems.length
+    transactItems.push(...authorizationConditionChecks)
+    if (idempotencyCompletion) {
+      transactItems.push(idempotencyCompletion.transactWriteItem)
+    }
+    if (transactItems.length > 100) {
+      throw new ProjectDataError(
+        413,
+        'WorkItemScheduleCascadeLimitExceeded',
+        'The schedule cascade exceeds the DynamoDB transaction item limit.',
+      )
+    }
+
+    try {
+      await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactItems }))
+    } catch (error) {
+      throwAuthorizationConditionFailureIfPresent(
+        error,
+        authorizationConditionStartIndex,
+        authorizationConditionEntries,
+      )
+      if (updateConditionIndexes.some((index) => isTransactionConditionalFailureAt(error, index))) {
+        throw createWorkItemRevisionConflictError()
+      }
+      if (guardedRevisions.some((_, index) =>
+        isTransactionConditionalFailureAt(error, guardedRevisionStartIndex + index)
+      )) {
+        throw createWorkItemRevisionConflictError()
+      }
+      if (relationGraphConditionChecks.some((_, index) =>
+        isTransactionConditionalFailureAt(error, relationConditionStartIndex + index)
+      )) {
+        throw new ProjectDataError(
+          409,
+          'WorkItemRelationGraphConflict',
+          'Work Item relations changed. Reload and try again.',
+        )
+      }
+      if (hasTransactionConditionalFailure(error)) {
+        throw new ProjectDataError(
+          409,
+          'WorkItemScheduleCascadeConflict',
+          'The schedule cascade changed during confirmation. Reload and try again.',
+        )
+      }
+      if (isAwsNamedError(error, 'TransactionCanceledException')) {
+        throw new ProjectDataError(
+          503,
+          'WorkItemScheduleCascadeTransactionUnavailable',
+          'The schedule cascade transaction could not be classified safely. Retry the request.',
+        )
+      }
+      if (error instanceof ProjectDataError) throw error
+      throw toProjectDataError(error)
+    }
+
+    return response
+  }
+
+  /**
    * DynamoDB の team issue を更新します。
    */
   async updateTeamIssue(
@@ -1819,6 +2517,23 @@ export class DynamoDbTeamIssuesClient {
     let auditPut: ReturnType<typeof createMutationAuditEventPut> = undefined
     const expectedRevision = readWorkItemExpectedRevision(input.expectedRevision)
     const nextRevision = expectedRevision + 1
+    if (input.authorizationSnapshot && input.planningRevisionFence) {
+      throw new ProjectDataError(
+        500,
+        'InvalidWorkItemAuthorizationFence',
+        'A Work Item update cannot contain overlapping authorization fences.',
+      )
+    }
+    const configurationConditionChecks = input.configurationConditionChecks ?? []
+    const authorizationConditionEntries = [
+      ...createCallerAuthorizationConditionEntries(input.authorizationConditionChecks),
+      ...createAuthorizationSnapshotConditionEntries(input.authorizationSnapshot),
+      ...createPlanningRevisionFenceConditionEntries(directoryId, input.planningRevisionFence),
+    ]
+    const authorizationConditionChecks = authorizationConditionEntries.map((entry) =>
+      entry.transactWriteItem
+    )
+    if ('schedule' in input) readWorkItemScheduleInput(input.schedule)
     const directoryTeamId = createDirectoryTeamId(directoryId, teamId)
     const expressionAttributeNames: Record<string, string> = {
       '#schemaVersion': 'schemaVersion',
@@ -1904,12 +2619,6 @@ export class DynamoDbTeamIssuesClient {
       setExpressions.push('#customFieldValues = :customFieldValues')
     }
 
-    if ('dueDate' in input) {
-      expressionAttributeNames['#dueDate'] = 'dueDate'
-      expressionAttributeValues[':dueDate'] = readWorkItemDueDate(input.dueDate)
-      setExpressions.push('#dueDate = :dueDate')
-    }
-
     if ('priority' in input) {
       expressionAttributeNames['#priority'] = 'priority'
       expressionAttributeValues[':priority'] = readTaskPriority(input.priority)
@@ -1938,16 +2647,37 @@ export class DynamoDbTeamIssuesClient {
       }
     }
 
-    const updateExpression = [
-      `SET ${setExpressions.join(', ')}`,
-      removeExpressions.length > 0 ? `REMOVE ${removeExpressions.join(', ')}` : undefined,
-    ].filter(isDefined).join(' ')
-
     try {
       const beforeIssue = await this.getRequiredTeamIssueItem(directoryId, teamId, issueId, true)
       if (beforeIssue.revision !== expectedRevision) {
         throw createWorkItemRevisionConflictError()
       }
+      const schedule = 'schedule' in input
+        ? readWorkItemScheduleInput(input.schedule)
+        : beforeIssue.schedule
+      expressionAttributeNames['#dueDate'] = 'dueDate'
+      expressionAttributeNames['#schedule'] = 'schedule'
+      expressionAttributeValues[':dueDate'] = deriveWorkItemScheduleDueDate(schedule)
+      expressionAttributeValues[':schedule'] = schedule
+      setExpressions.push('#dueDate = :dueDate')
+      setExpressions.push('#schedule = :schedule')
+      if (expressionAttributeValues[':dueDate'] !== beforeIssue.dueDate) {
+        expressionAttributeNames['#dueDateUpdatedAt'] = 'dueDateUpdatedAt'
+        expressionAttributeValues[':dueDateUpdatedAt'] = expressionAttributeValues[':updatedAt']
+        setExpressions.push('#dueDateUpdatedAt = :dueDateUpdatedAt')
+      }
+      if (
+        'priority' in input &&
+        expressionAttributeValues[':priority'] !== beforeIssue.priority
+      ) {
+        expressionAttributeNames['#priorityUpdatedAt'] = 'priorityUpdatedAt'
+        expressionAttributeValues[':priorityUpdatedAt'] = expressionAttributeValues[':updatedAt']
+        setExpressions.push('#priorityUpdatedAt = :priorityUpdatedAt')
+      }
+      const updateExpression = [
+        `SET ${setExpressions.join(', ')}`,
+        removeExpressions.length > 0 ? `REMOVE ${removeExpressions.join(', ')}` : undefined,
+      ].filter(isDefined).join(' ')
       const archivedAt = expressionAttributeValues[':archivedAt']
       if (
         archivedAt !== undefined &&
@@ -2007,6 +2737,7 @@ export class DynamoDbTeamIssuesClient {
           'statusCategory',
           'customFieldValues',
           'dueDate',
+          'schedule',
           'priority',
           'archivedAt',
           'archivedBy',
@@ -2024,11 +2755,6 @@ export class DynamoDbTeamIssuesClient {
           afterRevision: nextRevision,
         },
       })
-      const configurationConditionChecks = input.configurationConditionChecks ?? []
-      const authorizationConditionChecks = [
-        ...(input.authorizationConditionChecks ?? []),
-        ...createAuthorizationSnapshotConditionChecks(input.authorizationSnapshot),
-      ]
       const idempotencyCompletion = await idempotency?.prepare({
         status: 200,
         body: toTeamIssueResponseItem(afterIssue),
@@ -2084,26 +2810,21 @@ export class DynamoDbTeamIssuesClient {
           error.CancellationReasons.length === 0
         )
 
-      const configurationConditionChecks = input.configurationConditionChecks ?? []
       const configurationConditionStartIndex = resolveConfigurationConditionStartIndex(
         2,
         auditPut,
+      )
+      const authorizationConditionStartIndex =
+        configurationConditionStartIndex + configurationConditionChecks.length
+      throwAuthorizationConditionFailureIfPresent(
+        error,
+        authorizationConditionStartIndex,
+        authorizationConditionEntries,
       )
       if (configurationConditionChecks.some((_, index) =>
         isTransactionConditionalFailureAt(error, configurationConditionStartIndex + index)
       )) {
         throw createWorkItemConfigurationRevisionConflictError()
-      }
-      const authorizationConditionChecks = [
-        ...(input.authorizationConditionChecks ?? []),
-        ...createAuthorizationSnapshotConditionChecks(input.authorizationSnapshot),
-      ]
-      const authorizationConditionStartIndex =
-        configurationConditionStartIndex + configurationConditionChecks.length
-      if (authorizationConditionChecks.some((_, index) =>
-        isTransactionConditionalFailureAt(error, authorizationConditionStartIndex + index)
-      )) {
-        throw createWorkItemAuthorizationChangedError()
       }
 
       if (isTransactionConditionalFailureAt(error, 0) || cancellationReasonsMissing) {
@@ -2187,6 +2908,7 @@ export class DynamoDbTeamIssuesClient {
         'statusCategory',
         'customFieldValues',
         'dueDate',
+        'schedule',
         'priority',
       ]),
       metadata: {
@@ -2619,28 +3341,11 @@ function isDefined<T>(value: T | undefined): value is T {
 }
 
 function createDynamoDbClient() {
-  const endpoint = getDynamoDbEndpoint()
-
-  return new DynamoDBClient({
-    region: getAwsRegion(),
-    ...(endpoint
-      ? {
-          endpoint,
-          credentials: {
-            accessKeyId: getEnv('AWS_ACCESS_KEY_ID') ?? 'test',
-            secretAccessKey: getEnv('AWS_SECRET_ACCESS_KEY') ?? 'test',
-          },
-        }
-      : {}),
-  })
+  return createConfiguredDynamoDbClient()
 }
 
 function createDynamoDbDocumentClient(dynamoDbClient = createDynamoDbClient()) {
-  return DynamoDBDocumentClient.from(dynamoDbClient, {
-    marshallOptions: {
-      removeUndefinedValues: true,
-    },
-  })
+  return createWorkspaceSearchWriterDynamoDbDocumentClient(dynamoDbClient)
 }
 
 const localDynamoDbTableInitializers = new Map<string, Promise<void>>()
@@ -2902,12 +3607,7 @@ function hasKeySchema(
 }
 
 function shouldBootstrapLocalDynamoDb() {
-  const endpoint = getDynamoDbEndpoint()
-
-  return Boolean(
-    endpoint &&
-    /^https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|floci)(?::|\/|$)/.test(endpoint),
-  )
+  return shouldBootstrapConfiguredLocalDynamoDb()
 }
 
 function isResourceNotFoundError(error: unknown) {
@@ -3026,6 +3726,7 @@ async function sleep(ms: number) {
 }
 
 function toProjectDataError(error: unknown) {
+  throwIfWorkspaceSearchWriterFenceTerminalError(error)
   const awsError = error as {
     $metadata?: {
       httpStatusCode?: number
@@ -3056,6 +3757,122 @@ export function isTeamIssueNotFoundError(error: unknown) {
 }
 
 /**
+ * Creates a de-identified Work Item-owned snapshot from a strongly read Triage Entry.
+ *
+ * Full source visibility permits only provider-secret-free lifecycle summaries. Metadata-only
+ * visibility retains counts but no history summaries, while restricted or already-redacted
+ * sources retain provenance timestamps with zero context counts.
+ *
+ * @param entry - Canonical Triage Entry observed immediately before duplicate resolution.
+ * @param mergedAt - Canonical instant shared with the atomic duplicate transaction.
+ * @returns A bounded snapshot safe to expose under canonical Work Item authorization.
+ */
+function createPermissionSafeTriageContextSnapshot(
+  entry: TriageEntry,
+  mergedAt: string,
+): WorkItemTriageContextSnapshot {
+  const retentionDeadline = Date.parse(entry.retention.expiresAt)
+  const mergedAtTimestamp = Date.parse(mergedAt)
+  const retentionElapsed = Number.isFinite(retentionDeadline) &&
+    Number.isFinite(mergedAtTimestamp) &&
+    retentionDeadline <= mergedAtTimestamp
+  const redacted = entry.retention.redactedAt !== undefined || retentionElapsed
+  const retainCounts = !redacted && entry.permission.visibility !== 'denied'
+  const retainSummaries = !redacted && entry.permission.visibility === 'full'
+  const events = retainSummaries
+    ? createPermissionSafeTriageContextEvents(entry.events)
+    : []
+  const availability = redacted
+    ? 'redacted'
+    : entry.permission.visibility === 'denied'
+      ? 'restricted'
+      : retainSummaries
+        ? 'summary-metadata'
+        : 'counts-only'
+
+  const effectiveRedactedAt = entry.retention.redactedAt ??
+    (retentionElapsed ? entry.retention.expiresAt : undefined)
+  const snapshot: WorkItemTriageContextSnapshot = {
+    triageEntryId: readTriageContextEntryId(entry.id),
+    sourceKind: entry.source.kind,
+    visibilityAtMerge: entry.permission.visibility,
+    availability,
+    receivedAt: readTriageAcceptanceInstant(entry.receivedAt),
+    lastActivityAt: readTriageAcceptanceInstant(entry.lastActivityAt),
+    sourceRetentionExpiresAt: readTriageAcceptanceInstant(entry.retention.expiresAt),
+    ...(effectiveRedactedAt
+      ? { sourceRedactedAt: readTriageAcceptanceInstant(effectiveRedactedAt) }
+      : {}),
+    commentMetadataCount: retainCounts ? entry.sourcePreview.commentCount : 0,
+    attachmentMetadataCount: retainCounts ? entry.sourcePreview.attachmentCount : 0,
+    watcherMetadataCount: retainCounts ? entry.sourcePreview.watcherCount : 0,
+    events,
+    mergedAt,
+  }
+  if (!isWorkItemTriageContextSnapshot(snapshot)) {
+    throw new ProjectDataError(
+      409,
+      'InvalidTriageDuplicateContext',
+      'The permission-safe Triage context snapshot is invalid.',
+    )
+  }
+  return snapshot
+}
+
+/** Fixed provider-neutral summaries retained for each allowed Triage lifecycle event type. */
+const TRIAGE_CONTEXT_EVENT_SUMMARIES = {
+  created: 'Triage entry was created.',
+  assigned: 'Triage assignment changed.',
+  accepted: 'Triage entry was accepted.',
+  linked: 'Triage entry was linked to a Work Item.',
+  duplicate: 'Triage entry was marked as duplicate.',
+  declined: 'Triage entry was declined.',
+  snoozed: 'Triage entry was snoozed.',
+  'information-requested': 'More information was requested.',
+  'activity-received': 'New source activity was received.',
+  resurfaced: 'Triage entry resurfaced.',
+  'sla-breached': 'Triage response SLA was breached.',
+  escalated: 'Triage entry was escalated.',
+  'retention-redacted': 'Triage source content was redacted.',
+} satisfies Record<TriageEntryEvent['type'], string>
+
+/** Creates only fixed-summary lifecycle snapshots without copying source-controlled text.
+ *
+ * @param events Canonical Triage lifecycle events observed before duplicate resolution.
+ * @returns Provider-neutral history snapshots safe for canonical Work Item storage.
+ */
+function createPermissionSafeTriageContextEvents(
+  events: readonly TriageEntryEvent[],
+): WorkItemTriageContextEventSnapshot[] {
+  return events.map((event) => ({
+    eventId: event.id,
+    type: event.type,
+    summary: TRIAGE_CONTEXT_EVENT_SUMMARIES[event.type],
+    createdAt: event.createdAt,
+  }))
+}
+
+/**
+ * Validates the broader provider-neutral Triage Entry identifier used by duplicate provenance.
+ *
+ * @param value - Strongly read Triage Entry identifier.
+ * @returns The normalized identifier.
+ */
+function readTriageContextEntryId(value: unknown): string {
+  if (
+    typeof value !== 'string' ||
+    !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/u.test(value)
+  ) {
+    throw new ProjectDataError(
+      400,
+      'InvalidProjectWrite',
+      'Triage context Entry ID is invalid.',
+    )
+  }
+  return value
+}
+
+/**
  * Parses a stored canonical Work Item into its public response representation.
  *
  * @param value - Untrusted DynamoDB item or replay payload.
@@ -3077,7 +3894,10 @@ export function toTeamIssueResponseItem(value: unknown): TeamIssueResponseItem {
     customFieldValues: item.customFieldValues,
     relationIds: item.relationIds,
     dueDate: item.dueDate,
+    schedule: item.schedule,
     priority: item.priority,
+    priorityUpdatedAt: item.priorityUpdatedAt ?? item.createdAt,
+    dueDateUpdatedAt: item.dueDateUpdatedAt ?? item.createdAt,
     createdAt: item.createdAt,
     updatedAt: item.updatedAt,
     source: 'dynamodb',
@@ -3085,6 +3905,10 @@ export function toTeamIssueResponseItem(value: unknown): TeamIssueResponseItem {
 
   if (item.sourceRequestId) {
     issue.sourceRequestId = item.sourceRequestId
+  }
+
+  if (item.sourceTriageEntryId) {
+    issue.sourceTriageEntryId = item.sourceTriageEntryId
   }
 
   if (item.assignedProjectId) {
@@ -3132,7 +3956,7 @@ function toCreateTeamIssueCommentResponse(
 }
 
 function toTeamIssueItem(value: unknown): TeamIssueItem {
-  if (!isTeamIssueItem(value)) {
+  if (!isCanonicalWorkItemRecord(value)) {
     throw new ProjectDataError(
       503,
       'InvalidTeamIssue',
@@ -3195,10 +4019,6 @@ function toProjectTaskResponseItem(value: unknown): ProjectTaskResponseItem {
   return task
 }
 
-function isTeamIssueItem(value: unknown): value is TeamIssueItem {
-  return isCanonicalWorkItemRecord(value)
-}
-
 function isTeamIssueEventItem(value: unknown): value is TeamIssueEventItem {
   if (!isRecord(value)) {
     return false
@@ -3217,9 +4037,167 @@ function isTeamIssueEventItem(value: unknown): value is TeamIssueEventItem {
     isTeamIssueActivityType(value.eventType) &&
     typeof value.actorUserId === 'string' &&
     (value.body === undefined || typeof value.body === 'string') &&
+    hasCanonicalTriageContextSnapshot(value.eventType, value.triageContextSnapshot) &&
     typeof value.summary === 'string' &&
     typeof value.createdAt === 'string'
   )
+}
+
+/**
+ * Validates the optional duplicate-context payload and binds it to its dedicated event type.
+ *
+ * @param eventType - Stored Work Item event discriminator.
+ * @param snapshot - Optional source-context payload.
+ * @returns Whether the payload is absent for normal events or canonical for merge events.
+ */
+function hasCanonicalTriageContextSnapshot(
+  eventType: TeamIssueActivityType,
+  snapshot: unknown,
+): snapshot is WorkItemTriageContextSnapshot | undefined {
+  return eventType === 'triage-context-merged'
+    ? isWorkItemTriageContextSnapshot(snapshot)
+    : snapshot === undefined
+}
+
+/**
+ * Validates a de-identified duplicate-context snapshot before returning it from a Work Item read.
+ *
+ * Exact key allowlists prevent unknown persisted fields from becoming an accidental data leak.
+ *
+ * @param value - Untrusted event payload read from DynamoDB.
+ * @returns Whether the payload is a canonical permission-safe snapshot.
+ */
+function isWorkItemTriageContextSnapshot(value: unknown): value is WorkItemTriageContextSnapshot {
+  if (!isRecord(value) || !Object.keys(value).every((key) =>
+    key === 'triageEntryId' ||
+    key === 'sourceKind' ||
+    key === 'visibilityAtMerge' ||
+    key === 'availability' ||
+    key === 'receivedAt' ||
+    key === 'lastActivityAt' ||
+    key === 'sourceRetentionExpiresAt' ||
+    key === 'sourceRedactedAt' ||
+    key === 'commentMetadataCount' ||
+    key === 'attachmentMetadataCount' ||
+    key === 'watcherMetadataCount' ||
+    key === 'events' ||
+    key === 'mergedAt'
+  )) {
+    return false
+  }
+  const receivedAt = readCanonicalContextInstant(value.receivedAt)
+  const lastActivityAt = readCanonicalContextInstant(value.lastActivityAt)
+  const mergedAt = readCanonicalContextInstant(value.mergedAt)
+  const sourceRedactedAt = value.sourceRedactedAt === undefined
+    ? undefined
+    : readCanonicalContextInstant(value.sourceRedactedAt)
+  if (!receivedAt || !lastActivityAt || !mergedAt) return false
+  if (Date.parse(receivedAt) > Date.parse(lastActivityAt) ||
+      Date.parse(lastActivityAt) > Date.parse(mergedAt)) return false
+  if (
+    (value.sourceRedactedAt !== undefined && !sourceRedactedAt) ||
+    (sourceRedactedAt !== undefined && Date.parse(sourceRedactedAt) > Date.parse(mergedAt))
+  ) {
+    return false
+  }
+  if (
+    typeof value.triageEntryId !== 'string' ||
+    !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/u.test(value.triageEntryId) ||
+    !isTriageContextSourceKind(value.sourceKind) ||
+    !isTriageContextVisibility(value.visibilityAtMerge) ||
+    !isTriageContextAvailability(value.availability) ||
+    !readCanonicalContextInstant(value.sourceRetentionExpiresAt) ||
+    !isNonnegativeSafeInteger(value.commentMetadataCount) ||
+    !isNonnegativeSafeInteger(value.attachmentMetadataCount) ||
+    !isNonnegativeSafeInteger(value.watcherMetadataCount) ||
+    !Array.isArray(value.events) ||
+    value.events.length > 100 ||
+    !value.events.every(isWorkItemTriageContextEventSnapshot) ||
+    value.events.some((event) => Date.parse(event.createdAt) > Date.parse(mergedAt))
+  ) {
+    return false
+  }
+  if (value.availability === 'summary-metadata') {
+    return value.visibilityAtMerge === 'full' && sourceRedactedAt === undefined
+  }
+  if (value.events.length > 0) return false
+  if (value.availability === 'counts-only') {
+    return value.visibilityAtMerge === 'metadata-only' && sourceRedactedAt === undefined
+  }
+  if (value.availability === 'restricted') {
+    return value.visibilityAtMerge === 'denied' && sourceRedactedAt === undefined &&
+      hasNoTriageContextCounts(value)
+  }
+  return sourceRedactedAt !== undefined && hasNoTriageContextCounts(value)
+}
+
+/**
+ * Validates one allowlisted lifecycle summary embedded in a duplicate-context snapshot.
+ *
+ * @param value - Untrusted nested event payload.
+ * @returns Whether the event contains only the provider-secret-free summary contract.
+ */
+function isWorkItemTriageContextEventSnapshot(
+  value: unknown,
+): value is WorkItemTriageContextEventSnapshot {
+  return isRecord(value) &&
+    Object.keys(value).every((key) =>
+      key === 'eventId' || key === 'type' || key === 'summary' || key === 'createdAt'
+    ) &&
+    typeof value.eventId === 'string' && value.eventId.length > 0 && value.eventId.length <= 200 &&
+    isTriageContextEventType(value.type) &&
+    typeof value.summary === 'string' && value.summary.length > 0 && value.summary.length <= 2_000 &&
+    readCanonicalContextInstant(value.createdAt) !== undefined
+}
+
+/** Returns whether all de-identified context counts are zero. */
+function hasNoTriageContextCounts(
+  value: Record<string, unknown>,
+): boolean {
+  return value.commentMetadataCount === 0 &&
+    value.attachmentMetadataCount === 0 &&
+    value.watcherMetadataCount === 0
+}
+
+/** Returns a canonical ISO instant or undefined for malformed input. */
+function readCanonicalContextInstant(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const instant = new Date(value)
+  return Number.isFinite(instant.getTime()) && instant.toISOString() === value
+    ? value
+    : undefined
+}
+
+/** Returns whether an unknown value is a supported Triage source kind. */
+function isTriageContextSourceKind(value: unknown): boolean {
+  return value === 'form' || value === 'chat' || value === 'email' ||
+    value === 'webhook' || value === 'manual-handoff'
+}
+
+/** Returns whether an unknown value is a source visibility state. */
+function isTriageContextVisibility(value: unknown): boolean {
+  return value === 'full' || value === 'metadata-only' || value === 'denied'
+}
+
+/** Returns whether an unknown value is a retained-context availability state. */
+function isTriageContextAvailability(value: unknown): boolean {
+  return value === 'summary-metadata' || value === 'counts-only' ||
+    value === 'restricted' || value === 'redacted'
+}
+
+/** Returns whether an unknown value is a provider-neutral Triage lifecycle event type. */
+function isTriageContextEventType(value: unknown): boolean {
+  return value === 'created' || value === 'assigned' || value === 'accepted' ||
+    value === 'linked' || value === 'duplicate' || value === 'declined' ||
+    value === 'snoozed' || value === 'information-requested' ||
+    value === 'activity-received' || value === 'resurfaced' ||
+    value === 'sla-breached' || value === 'escalated' ||
+    value === 'retention-redacted'
+}
+
+/** Returns whether an unknown value is a nonnegative integer safe for JSON and DynamoDB. */
+function isNonnegativeSafeInteger(value: unknown): boolean {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
 }
 
 function isProjectTaskItem(value: unknown): value is ProjectTaskItem {
@@ -3274,7 +4252,8 @@ function isProjectTaskPriority(value: unknown): value is ProjectTaskPriority {
 }
 
 function isTeamIssueActivityType(value: unknown): value is TeamIssueActivityType {
-  return value === 'created' || value === 'updated' || value === 'commented'
+  return value === 'created' || value === 'updated' || value === 'commented' ||
+    value === 'triage-context-merged'
 }
 
 /**
@@ -3293,17 +4272,22 @@ export function readRequiredString(value: unknown, message: string) {
 }
 
 /**
- * Reads one required Work Item due date in a supported persisted date-only format.
+ * Reads and normalizes an explicit canonical schedule.
  *
- * @param value - Untrusted due date value.
- * @returns A canonical real calendar day.
+ * @param scheduleValue - Untrusted canonical schedule candidate.
+ * @returns A normalized canonical schedule whose dates use `YYYY-MM-DD`.
  */
-function readWorkItemDueDate(value: unknown): string {
-  const dueDate = readRequiredString(value, 'Issue due date is required.')
-  if (!isCanonicalWorkItemDueDate(dueDate)) {
-    throw new ProjectDataError(400, 'InvalidProjectWrite', 'Issue due date is invalid.')
+function readWorkItemScheduleInput(
+  scheduleValue: unknown,
+): WorkItemSchedule {
+  try {
+    return normalizeWorkItemSchedule(scheduleValue)
+  } catch (error) {
+    if (error instanceof WorkItemScheduleError) {
+      throw new ProjectDataError(400, error.code, error.message)
+    }
+    throw error
   }
-  return dueDate
 }
 
 /**
@@ -3462,6 +4446,52 @@ function readSourceRequestId(value: unknown) {
 }
 
 /**
+ * Validates the source Triage Entry identifier persisted on a canonical Work Item.
+ *
+ * @param value - Candidate Entry identifier supplied by trusted Triage composition.
+ * @returns The normalized identifier.
+ */
+function readSourceTriageEntryId(value: unknown) {
+  if (
+    typeof value !== 'string' ||
+    !/^[A-Za-z0-9_-]{12,200}$/u.test(value.trim())
+  ) {
+    throw new ProjectDataError(
+      400,
+      'InvalidProjectWrite',
+      'Source Triage Entry ID is invalid.',
+    )
+  }
+
+  return value.trim()
+}
+
+/**
+ * Validates the mutation instant shared by Triage and canonical Work Item writes.
+ *
+ * @param value - Candidate ISO 8601 instant supplied by trusted composition.
+ * @returns The exact canonical UTC instant.
+ */
+function readTriageAcceptanceInstant(value: unknown) {
+  if (typeof value !== 'string') {
+    throw new ProjectDataError(
+      400,
+      'InvalidProjectWrite',
+      'Triage acceptance time is invalid.',
+    )
+  }
+  const instant = new Date(value)
+  if (!Number.isFinite(instant.getTime()) || instant.toISOString() !== value) {
+    throw new ProjectDataError(
+      400,
+      'InvalidProjectWrite',
+      'Triage acceptance time is invalid.',
+    )
+  }
+  return value
+}
+
+/**
  * Reads an optional client-selected resource ID used by idempotent creation.
  *
  * @param value - Untrusted resource identifier.
@@ -3491,6 +4521,7 @@ function isMatchingIdempotentWorkItemCreate(
     customFieldValues: Record<string, CustomFieldValue>
     description: string | undefined
     dueDate: string
+    schedule: WorkItemSchedule
     priority: ProjectTaskPriority
     statusCategory: WorkflowStatusCategory
     title: string
@@ -3504,11 +4535,27 @@ function isMatchingIdempotentWorkItemCreate(
     customFieldValueRecordsEqual(issue.customFieldValues, expected.customFieldValues) &&
     issue.description === expected.description &&
     issue.dueDate === expected.dueDate &&
+    workItemSchedulesEqual(issue.schedule, expected.schedule) &&
     issue.priority === expected.priority &&
     issue.statusCategory === expected.statusCategory &&
     issue.title === expected.title &&
     issue.workflowSchemaVersion === expected.workflowSchemaVersion &&
     issue.workflowStatusId === expected.workflowStatusId
+}
+
+/**
+ * Compares schedule values after rebuilding their deterministic canonical representation.
+ *
+ * @param left - First normalized schedule.
+ * @param right - Second normalized schedule.
+ * @returns Whether both schedules serialize to the same canonical JSON value.
+ */
+function workItemSchedulesEqual(
+  left: WorkItemSchedule,
+  right: WorkItemSchedule,
+): boolean {
+  return JSON.stringify(normalizeWorkItemSchedule(left)) ===
+    JSON.stringify(normalizeWorkItemSchedule(right))
 }
 
 function readOptionalString(value: unknown, message: string) {
@@ -3730,8 +4777,8 @@ function createWorkItemNotificationCandidates(
     candidates.push({ memberKey: after.assigneeUserId, reason: 'status-change' })
   }
 
-  if (before.dueDate !== after.dueDate) {
-    candidates.push({ memberKey: after.assigneeUserId, reason: 'due-date-change' })
+  if (!workItemSchedulesEqual(before.schedule, after.schedule)) {
+    candidates.push({ memberKey: after.assigneeUserId, reason: 'schedule-change' })
   }
 
   if (before.archivedAt !== after.archivedAt) {
@@ -3757,8 +4804,8 @@ function createWorkItemNotificationSummary(before: TeamIssueItem, after: TeamIss
     return 'Work Item status changed.'
   }
 
-  if (before.dueDate !== after.dueDate) {
-    return 'Work Item due date changed.'
+  if (!workItemSchedulesEqual(before.schedule, after.schedule)) {
+    return 'Work Item schedule changed.'
   }
 
   return 'Work Item was updated.'
@@ -3773,10 +4820,6 @@ function createTeamIssueAuditCommentId(teamId: string, issueId: string, commentI
 
 function createTeamIssueEventId(createdAt: string, eventType: TeamIssueActivityType) {
   return `${createdAt}#${eventType}#${Math.random().toString(36).slice(2, 10)}`
-}
-
-function getAwsRegion() {
-  return loadServerConfig().awsRegion
 }
 
 function getDynamoDbEndpoint() {

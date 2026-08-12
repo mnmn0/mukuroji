@@ -3,6 +3,7 @@ import type { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import { createMutationAuditContext } from '../audit/audit'
 import {
+  type CollaborationAuthorizationConditionCheck,
   CollaborationError,
   createProjectCollaborationEntityKey,
   createWorkItemCollaborationEntityKey,
@@ -16,15 +17,24 @@ function readCommandInput(command: unknown) {
   return command.input as Record<string, unknown>
 }
 
+/**
+ * Creates a collaboration client with isolated DynamoDB transports.
+ *
+ * @param send - Document-client command implementation used by the test.
+ * @param auditTableName - Optional audit table included in mutation transactions.
+ * @param useConfiguredParentIssueTable - Whether the constructor should resolve its parent table from the environment.
+ * @returns An isolated collaboration client.
+ */
 function createClient(
   send: (command: unknown) => Promise<Record<string, unknown>>,
   auditTableName?: string,
+  useConfiguredParentIssueTable = false,
 ) {
   const documentClient = { send } as unknown as DynamoDBDocumentClient
   const lowLevelClient = { send } as unknown as DynamoDBClient
   return new DynamoDbCollaborationClient(
     'collaboration-table',
-    'issue-table',
+    useConfiguredParentIssueTable ? undefined : 'issue-table',
     auditTableName,
     documentClient,
     lowLevelClient,
@@ -39,6 +49,91 @@ test('creates stable collaboration keys for Work Item and project scopes', () =>
   expect(createProjectCollaborationEntityKey('workspace#one', 'project-a')).toBe(
     'workspace#one#project#project-a',
   )
+})
+
+test('prefers the canonical Work Items environment for parent mutation guards', async () => {
+  const originalWorkItemsTableName = Bun.env.WORK_ITEMS_TABLE_NAME
+  const originalLegacyTeamIssuesTableName = Bun.env.MUKUROJI_TEAM_ISSUES_TABLE
+  Bun.env.WORK_ITEMS_TABLE_NAME = 'canonical-work-items-table'
+  Bun.env.MUKUROJI_TEAM_ISSUES_TABLE = 'legacy-team-issues-table'
+  const transactions: Array<Record<string, unknown>> = []
+
+  try {
+    const client = createClient(async (command) => {
+      const input = readCommandInput(command)
+      if ('TransactItems' in input) transactions.push(input)
+      return {}
+    }, undefined, true)
+    await client.subscribe({
+      workspaceId: 'workspace#one',
+      entityKey: createWorkItemCollaborationEntityKey(
+        'workspace#one',
+        'team-a',
+        'issue-1',
+      ),
+      teamId: 'team-a',
+      issueId: 'issue-1',
+      memberKey: 'member@example.com',
+    })
+
+    expect(transactions[0]?.TransactItems).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        ConditionCheck: expect.objectContaining({
+          TableName: 'canonical-work-items-table',
+        }),
+      }),
+    ]))
+  } finally {
+    if (originalWorkItemsTableName === undefined) {
+      delete Bun.env.WORK_ITEMS_TABLE_NAME
+    } else {
+      Bun.env.WORK_ITEMS_TABLE_NAME = originalWorkItemsTableName
+    }
+    if (originalLegacyTeamIssuesTableName === undefined) {
+      delete Bun.env.MUKUROJI_TEAM_ISSUES_TABLE
+    } else {
+      Bun.env.MUKUROJI_TEAM_ISSUES_TABLE =
+        originalLegacyTeamIssuesTableName
+    }
+  }
+})
+
+test('includes caller authorization guards in watcher transactions', async () => {
+  let transaction: Record<string, unknown> | undefined
+  const client = createClient(async (command) => {
+    const input = readCommandInput(command)
+    if ('TransactItems' in input) transaction = input
+    return {}
+  })
+  const authorizationCheck: CollaborationAuthorizationConditionCheck = {
+    ConditionCheck: {
+      TableName: 'workspace-access-table',
+      Key: {
+        workspaceId: 'workspace#one',
+        recordKey: 'MEMBER#member@example.com',
+      },
+      ConditionExpression: '#version = :expectedVersion',
+      ExpressionAttributeNames: { '#version': 'version' },
+      ExpressionAttributeValues: { ':expectedVersion': 4 },
+    },
+  }
+
+  await client.subscribe({
+    authorizationConditionChecks: [authorizationCheck],
+    entityKey: createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1'),
+    expectedSubscribed: false,
+    issueId: 'issue-1',
+    memberKey: 'member@example.com',
+    teamId: 'team-a',
+    workspaceId: 'workspace#one',
+  })
+
+  expect(transaction?.TransactItems).toEqual(expect.arrayContaining([
+    authorizationCheck,
+    expect.objectContaining({
+      ConditionCheck: expect.objectContaining({ TableName: 'issue-table' }),
+    }),
+  ]))
 })
 
 test('reads soft-deleted comment snapshots consistently for search revalidation', async () => {
@@ -220,6 +315,318 @@ test('reads every watcher page before calculating subscription state and count',
     reasons: ['manual'],
     watcherCount: 2,
   })
+})
+
+test('reads one member watcher state with consistent point gets instead of queries', async () => {
+  const commands: Array<Record<string, unknown>> = []
+  const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
+  const projectEntityKey = createProjectCollaborationEntityKey('workspace#one', 'project-a')
+  const client = createClient(async (command) => {
+    const input = readCommandInput(command)
+    commands.push(input)
+    if (typeof input.Key !== 'object' || input.Key === null) {
+      throw new Error('Expected an exact watcher key read.')
+    }
+    const requestedEntityKey = Reflect.get(input.Key, 'entityKey')
+    return {
+      Item: {
+        entityKey: requestedEntityKey,
+        recordKey: 'WATCHER#member@example.com',
+        entryType: 'watcher',
+        memberKey: 'member@example.com',
+        state: requestedEntityKey === entityKey ? 'subscribed' : 'unsubscribed',
+        explicit: true,
+        reasons: new Set(requestedEntityKey === entityKey ? ['manual', 'comment'] : ['manual']),
+        createdAt: '2026-07-12T00:00:00.000Z',
+        updatedAt: '2026-07-12T00:00:00.000Z',
+        mutationIdentity: requestedEntityKey === entityKey
+          ? 'watch-mutation-1'
+          : 'project-watch-mutation-1',
+      },
+    }
+  })
+
+  const watch = await client.getMemberWatcherState({
+    entityKey,
+    memberKey: 'Member@Example.com',
+    projectEntityKey,
+  })
+
+  expect(watch).toEqual({
+    subscribed: true,
+    explicit: true,
+    automatic: true,
+    reasons: ['comment', 'manual'],
+    mutationIdentity: 'watch-mutation-1',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+    projectSubscribed: false,
+  })
+  expect(commands).toEqual([
+    {
+      TableName: 'collaboration-table',
+      Key: { entityKey, recordKey: 'WATCHER#member@example.com' },
+      ConsistentRead: true,
+    },
+    {
+      TableName: 'collaboration-table',
+      Key: { entityKey: projectEntityKey, recordKey: 'WATCHER#member@example.com' },
+      ConsistentRead: true,
+    },
+  ])
+  expect(commands.every((command) => !('KeyConditionExpression' in command))).toBeTrue()
+})
+
+test('conditions manual watcher updates on the optional expected subscription state', async () => {
+  const transactions: Array<Record<string, unknown>> = []
+  const postWriteReads: Array<Record<string, unknown>> = []
+  const client = createClient(async (command) => {
+    const input = readCommandInput(command)
+    if ('TransactItems' in input) {
+      transactions.push(input)
+    } else {
+      postWriteReads.push(input)
+    }
+    return { Items: [] }
+  })
+  const entityKey = createProjectCollaborationEntityKey('workspace#one', 'project-a')
+  const scope = {
+    workspaceId: 'workspace#one',
+    entityKey,
+    projectId: 'project-a',
+    memberKey: 'member@example.com',
+  }
+
+  await client.subscribe({
+    ...scope,
+    expectedSubscribed: false,
+    mutationIdentity: 'watch-mutation-1',
+  })
+  await client.unsubscribe({
+    ...scope,
+    expectedSubscribed: true,
+    mutationIdentity: 'watch-mutation-2',
+  })
+
+  expect(transactions[0]?.TransactItems).toEqual([
+    expect.objectContaining({
+      Update: expect.objectContaining({
+        ConditionExpression: 'attribute_not_exists(entityKey) OR #state = :expectedState',
+        ExpressionAttributeValues: expect.objectContaining({
+          ':state': 'subscribed',
+          ':expectedState': 'unsubscribed',
+          ':mutationIdentity': 'watch-mutation-1',
+        }),
+        UpdateExpression: expect.stringContaining('mutationIdentity = :mutationIdentity'),
+      }),
+    }),
+  ])
+  expect(transactions[1]?.TransactItems).toEqual([
+    expect.objectContaining({
+      Update: expect.objectContaining({
+        ConditionExpression: '#state = :expectedState',
+        ExpressionAttributeValues: expect.objectContaining({
+          ':state': 'unsubscribed',
+          ':expectedState': 'subscribed',
+          ':mutationIdentity': 'watch-mutation-2',
+        }),
+        UpdateExpression: expect.stringContaining('mutationIdentity = :mutationIdentity'),
+      }),
+    }),
+  ])
+  expect(postWriteReads).toEqual([
+    {
+      TableName: 'collaboration-table',
+      Key: { entityKey, recordKey: 'WATCHER#member@example.com' },
+      ConsistentRead: true,
+    },
+    {
+      TableName: 'collaboration-table',
+      Key: { entityKey, recordKey: 'WATCHER#member@example.com' },
+      ConsistentRead: true,
+    },
+  ])
+})
+
+test('returns the persisted marker after a same-state manual watcher compare-and-set', async () => {
+  let transaction: Record<string, unknown> | undefined
+  const entityKey = createProjectCollaborationEntityKey('workspace#one', 'project-a')
+  const client = createClient(async (command) => {
+    const input = readCommandInput(command)
+    if ('TransactItems' in input) {
+      transaction = input
+      return {}
+    }
+    return {
+      Item: {
+        entityKey,
+        recordKey: 'WATCHER#member@example.com',
+        entryType: 'watcher',
+        memberKey: 'member@example.com',
+        state: 'subscribed',
+        explicit: true,
+        reasons: new Set(['manual']),
+        createdAt: '2026-07-12T00:00:00.000Z',
+        updatedAt: '2026-07-12T01:00:00.000Z',
+        mutationIdentity: 'watch-mutation-same-state',
+      },
+    }
+  })
+
+  const state = await client.subscribe({
+    workspaceId: 'workspace#one',
+    entityKey,
+    projectId: 'project-a',
+    memberKey: 'member@example.com',
+    expectedSubscribed: true,
+    mutationIdentity: 'watch-mutation-same-state',
+  })
+
+  expect(transaction?.TransactItems).toEqual([
+    expect.objectContaining({
+      Update: expect.objectContaining({
+        ConditionExpression: '#state = :expectedState',
+        ExpressionAttributeValues: expect.objectContaining({
+          ':expectedState': 'subscribed',
+          ':mutationIdentity': 'watch-mutation-same-state',
+        }),
+      }),
+    }),
+  ])
+  expect(state).toEqual({
+    subscribed: true,
+    explicit: true,
+    automatic: false,
+    reasons: ['manual'],
+    mutationIdentity: 'watch-mutation-same-state',
+    updatedAt: '2026-07-12T01:00:00.000Z',
+  })
+})
+
+test('rejects automatic watcher requests that would ignore manual transition controls', async () => {
+  let commands = 0
+  const client = createClient(async () => {
+    commands += 1
+    return {}
+  })
+  const scope = {
+    workspaceId: 'workspace#one',
+    entityKey: createProjectCollaborationEntityKey('workspace#one', 'project-a'),
+    projectId: 'project-a',
+    memberKey: 'member@example.com',
+    automatic: true,
+  }
+
+  await expect(client.subscribe({
+    ...scope,
+    expectedSubscribed: false,
+  })).rejects.toMatchObject({
+    status: 400,
+    code: 'InvalidWatcherUpdate',
+  })
+  await expect(client.unsubscribe(scope)).rejects.toMatchObject({
+    status: 400,
+    code: 'InvalidWatcherUpdate',
+  })
+  await expect(client.subscribe({
+    ...scope,
+    automatic: false,
+    mutationIdentity: ' ',
+  })).rejects.toMatchObject({
+    status: 400,
+    code: 'InvalidWatcherMutationIdentity',
+  })
+  expect(commands).toBe(0)
+})
+
+test('persists an automatic watcher mutation identity when explicitly supplied', async () => {
+  let transaction: Record<string, unknown> | undefined
+  const entityKey = createProjectCollaborationEntityKey('workspace#one', 'project-a')
+  const client = createClient(async (command) => {
+    const input = readCommandInput(command)
+    if ('TransactItems' in input) {
+      transaction = input
+      return {}
+    }
+    return { Items: [] }
+  })
+
+  await client.subscribe({
+    workspaceId: 'workspace#one',
+    entityKey,
+    projectId: 'project-a',
+    memberKey: 'member@example.com',
+    automatic: true,
+    reason: 'comment',
+    mutationIdentity: 'automatic-watch-mutation-1',
+  })
+
+  expect(transaction?.TransactItems).toEqual([
+    expect.objectContaining({
+      Update: expect.objectContaining({
+        ExpressionAttributeValues: expect.objectContaining({
+          ':mutationIdentity': 'automatic-watch-mutation-1',
+        }),
+        UpdateExpression: expect.stringContaining('mutationIdentity = :mutationIdentity'),
+      }),
+    }),
+  ])
+})
+
+test('fails closed on a malformed stored watcher mutation identity', async () => {
+  const entityKey = createProjectCollaborationEntityKey('workspace#one', 'project-a')
+  const client = createClient(async () => ({
+    Item: {
+      entityKey,
+      recordKey: 'WATCHER#member@example.com',
+      entryType: 'watcher',
+      memberKey: 'member@example.com',
+      state: 'subscribed',
+      explicit: true,
+      reasons: new Set(['manual']),
+      createdAt: '2026-07-12T00:00:00.000Z',
+      updatedAt: '2026-07-12T00:00:00.000Z',
+      mutationIdentity: 'x'.repeat(257),
+    },
+  }))
+
+  await expect(client.getMemberWatcherState({
+    entityKey,
+    memberKey: 'member@example.com',
+  })).rejects.toMatchObject({
+    status: 503,
+    code: 'InvalidCollaborationRecord',
+  })
+})
+
+test('fails a watcher compare-and-set conflict without scanning the watcher scope', async () => {
+  let nonTransactionReads = 0
+  const client = createClient(async (command) => {
+    const input = readCommandInput(command)
+    if ('TransactItems' in input) {
+      throw Object.assign(new Error('conditional conflict'), {
+        name: 'TransactionCanceledException',
+        CancellationReasons: [{ Code: 'ConditionalCheckFailed' }],
+      })
+    }
+    nonTransactionReads += 1
+    return { Items: [] }
+  })
+  const scope = {
+    workspaceId: 'workspace#one',
+    entityKey: createProjectCollaborationEntityKey('workspace#one', 'project-a'),
+    projectId: 'project-a',
+    memberKey: 'member@example.com',
+  }
+
+  await expect(client.subscribe({ ...scope, expectedSubscribed: false })).rejects.toMatchObject({
+    status: 409,
+    code: 'CollaborationConflict',
+  })
+  await expect(client.unsubscribe({ ...scope, expectedSubscribed: true })).rejects.toMatchObject({
+    status: 409,
+    code: 'CollaborationConflict',
+  })
+  expect(nonTransactionReads).toBe(0)
 })
 
 test('seeds deduplicated automatic watchers when a comment is created', async () => {
@@ -752,13 +1159,27 @@ test('upserts and removes a presence lease with a normalized member key', async 
     clientId: 'browser-tab-1',
   })
 
-  expect(commands[0]?.Item).toEqual(expect.objectContaining({
-    entityKey,
-    recordKey: 'PRESENCE#member@example.com#browser-tab-1',
-    typing: true,
-  }))
-  expect(commands[1]?.Key).toEqual({
-    entityKey,
-    recordKey: 'PRESENCE#member@example.com#browser-tab-1',
+  expect(commands[0]).toMatchObject({
+    TransactItems: [{
+      Put: {
+        TableName: 'collaboration-table',
+        Item: {
+          entityKey,
+          recordKey: 'PRESENCE#member@example.com#browser-tab-1',
+          typing: true,
+        },
+      },
+    }],
+  })
+  expect(commands[1]).toMatchObject({
+    TransactItems: [{
+      Delete: {
+        TableName: 'collaboration-table',
+        Key: {
+          entityKey,
+          recordKey: 'PRESENCE#member@example.com#browser-tab-1',
+        },
+      },
+    }],
   })
 })

@@ -15,14 +15,27 @@ import { AutomationError } from './automation-error'
 import { requireAutomationRecord } from './automation-record'
 import { isAutomationValue } from './automation-value'
 import { validateRecurringSchedule } from './recurring-schedule'
+import { normalizeAutomationWorkItemScheduleField } from './work-item-schedule-validation'
 
 const AUTOMATION_UPDATE_FIELDS = new Set([
   'assignedProjectId',
   'assigneeUserId',
   'customFieldValues',
   'description',
-  'dueDate',
   'priority',
+  'schedule',
+  'title',
+  'workflowStatusId',
+])
+
+const AUTOMATION_CREATE_FIELDS = new Set([
+  'assignedProjectId',
+  'assigneeUserId',
+  'customFieldValues',
+  'description',
+  'priority',
+  'schedule',
+  'teamId',
   'title',
   'workflowStatusId',
 ])
@@ -263,15 +276,39 @@ function validateAutomationAction(value: unknown): AutomationAction {
           `Automation update patch contains unsupported fields: ${unsupportedFields.join(', ')}.`,
         )
       }
-      return { type: 'update', patch }
+      return {
+        type: 'update',
+        patch: normalizeAutomationWorkItemScheduleField(
+          patch,
+          'Automation update schedule',
+        ),
+      }
     }
     case 'create': {
       const templateId = action.templateId === undefined
         ? undefined
         : requireBoundedText(action.templateId, 'Automation template ID', 256)
-      const values = action.values === undefined
+      let values = action.values === undefined
         ? undefined
         : requireAutomationRecord(action.values, 'Automation create values')
+      if (values) {
+        const unsupportedFields = Object.keys(values)
+          .filter((field) => !AUTOMATION_CREATE_FIELDS.has(field))
+        if (unsupportedFields.length > 0) {
+          throw invalidInput(
+            `Automation create values contain unsupported fields: ${unsupportedFields.join(', ')}.`,
+          )
+        }
+        values = normalizeAutomationWorkItemScheduleField(
+          values,
+          'Automation create schedule',
+        )
+        if (!templateId && !Object.hasOwn(values, 'schedule')) {
+          throw invalidInput(
+            'Automation inline create values require an explicit schedule.',
+          )
+        }
+      }
       if (!templateId && !values) {
         throw invalidInput('Automation create action requires templateId or values.')
       }

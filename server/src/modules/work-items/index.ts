@@ -1,7 +1,39 @@
 /** Work Items module public application and domain surface. */
 export {
+  confirmWorkItemScheduleChange,
+  type ConfirmWorkItemScheduleChangeCommand,
+  type ConfirmWorkItemScheduleChangeDependencies,
+  type ConfirmWorkItemScheduleUpdate,
+  type PersistConfirmedWorkItemScheduleChange,
+  type WorkItemScheduleConfirmationReservation,
+  type WorkItemScheduleConfirmationReservationRequest,
+} from './application/use-cases/confirm-work-item-schedule-change'
+export {
   createResourceId,
 } from './domain/resource-id'
+export {
+  WorkItemScheduleError,
+  addWorkItemScheduleCalendarDays,
+  applyWorkItemScheduleOperation,
+  calculateWorkItemScheduleDurationDays,
+  calculateWorkItemScheduleDateDeltaDays,
+  calculateWorkItemScheduleEndDate,
+  deriveWorkItemScheduleDueDate,
+  isCanonicalWorkItemSchedule,
+  isWorkItemSchedule,
+  normalizeWorkItemSchedule,
+  normalizeWorkItemScheduleOperation,
+  previewWorkItemScheduleChange,
+  workItemScheduleInstantToLocalDate,
+} from './domain/work-item-schedule'
+export {
+  WORK_ITEM_SCHEDULE_CASCADE_LIMIT,
+  collectWorkItemScheduleEvaluationEndpoints,
+  createWorkItemDependencyKey,
+  previewWorkItemDependencyScheduleChange,
+  type PreviewWorkItemDependencyScheduleChangeInput,
+  type WorkItemDependencyScheduleState,
+} from './domain/work-item-schedule-dependencies'
 export {
   isCanonicalWorkItemRecord,
   isCanonicalWorkItemRelationIds,
@@ -11,6 +43,7 @@ export {
   WorkItemConfigurationError,
   assertWorkflowTransitionAllowed,
   createWorkItemConfigurationGuardConditionChecks,
+  createWorkItemRelationGraphRevisionConditionCheck,
   createWorkItemConfigurationScopeKey,
   createWorkItemRelationIds,
   isWorkflowTransitionAllowed,
@@ -65,6 +98,7 @@ export {
 export {
   createTeamIssueAuditEntityId,
   createTeamIssueDeepLink,
+  createWorkItemRevisionConditionCheck,
   createWorkItemAuthorizationChangedError,
   customFieldValueRecordsEqual,
   DynamoDbProjectTasksClient,
@@ -81,6 +115,7 @@ export {
   type CreateTeamIssueCommentResponse,
   type CreateTeamIssueRequestBody,
   type CreateTeamIssueResponse,
+  type CreateTriageDuplicateContextTransactionItemsInput,
   type NamedWorkItemDeletionFence,
   type ProjectIssuesResponse,
   type ProjectTaskResponseItem,
@@ -95,8 +130,13 @@ export {
   type TeamIssueResponseItem,
   type TeamIssuesClient,
   type TeamIssuesResponse,
+  type TriageAcceptanceTransactionInput,
+  type TriageDuplicateContextTransactionContribution,
   type UpdateTeamIssueRequestBody,
   type UpdateTeamIssueResponse,
+  type WorkItemScheduleCascadeResponse,
+  type WorkItemScheduleCascadeGuard,
+  type WorkItemScheduleCascadeUpdate,
   type WorkItemIdempotencyTransaction,
   type WorkItemListReadOptions,
   type WorkItemAuthorizationSnapshot,

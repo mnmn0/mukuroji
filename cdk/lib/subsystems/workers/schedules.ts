@@ -10,7 +10,15 @@ import * as lambdaNodejs from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import type { LambdaBuildPaths } from '../../config/lambda-build-paths';
 import type { StackParameters } from '../../config/stack-parameters';
+import {
+  configureWorkspaceSearchWriterFence,
+  type WorkspaceSearchWriterFenceResources,
+} from '../../policies/workspace-search-writer-fence';
 import type { DataStoreResources } from '../data-stores';
+import {
+  bindRuntimeControls,
+  type RuntimeControlResources,
+} from '../runtime-controls';
 
 /**
  * Inputs required by analytics and notification schedule workers.
@@ -22,6 +30,10 @@ export interface ScheduleWorkerInput {
   readonly lambdaBuildPaths: LambdaBuildPaths;
   /** Stack parameters used for authorization and retention. */
   readonly parameters: StackParameters;
+  /** Dynamic operational controls shared by application runtimes. */
+  readonly runtimeControls: RuntimeControlResources;
+  /** Exact writer-client table configuration without writer state permissions. */
+  readonly workspaceSearchWriterFence: WorkspaceSearchWriterFenceResources;
 }
 
 /**
@@ -49,6 +61,7 @@ export function buildScheduleWorkers(
     analyticsTable,
     auditEventsTable,
     projectDirectoryTable,
+    tenantAdministrationTable,
     workItemsTable,
     workspaceAccessTable,
   } = input.dataStores;
@@ -98,9 +111,19 @@ export function buildScheduleWorkers(
         MUKUROJI_PROJECT_DIRECTORY_TABLE: projectDirectoryTable.tableName,
         MUKUROJI_WORK_ITEMS_TABLE: workItemsTable.tableName,
         SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
+        TENANT_ADMINISTRATION_TABLE_NAME: tenantAdministrationTable.tableName,
         WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
       },
     },
+  );
+  configureWorkspaceSearchWriterFence(
+    input.workspaceSearchWriterFence,
+    analyticsScheduleFunction,
+  );
+  bindRuntimeControls(
+    input.runtimeControls,
+    analyticsScheduleFunction,
+    'analytics-schedule',
   );
   analyticsScheduleFunction.addToRolePolicy(new iam.PolicyStatement({
     actions: ['dynamodb:GetItem', 'dynamodb:PutItem'],
@@ -125,6 +148,10 @@ export function buildScheduleWorkers(
   analyticsScheduleFunction.addToRolePolicy(new iam.PolicyStatement({
     actions: ['dynamodb:GetItem'],
     resources: [workspaceAccessTable.tableArn],
+  }));
+  analyticsScheduleFunction.addToRolePolicy(new iam.PolicyStatement({
+    actions: ['dynamodb:GetItem'],
+    resources: [tenantAdministrationTable.tableArn],
   }));
 
   new cloudwatch.Alarm(scope, 'AnalyticsScheduleDlqAlarm', {
@@ -196,6 +223,11 @@ export function buildScheduleWorkers(
         WORK_ITEMS_TABLE_NAME: workItemsTable.tableName,
       },
     },
+  );
+  bindRuntimeControls(
+    input.runtimeControls,
+    notificationScheduleFunction,
+    'notification-schedule',
   );
   workItemsTable.grants.readData(notificationScheduleFunction);
   auditEventsTable.grants.writeData(notificationScheduleFunction);

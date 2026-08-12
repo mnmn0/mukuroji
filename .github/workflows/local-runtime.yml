@@ -113,10 +113,26 @@ jobs:
               .id == "wireframe" and
               .teamId == "core-team" and
               .assignedProjectId == "refero" and
-              .schemaVersion == 1 and
+              .schemaVersion == 2 and
               .workflowSchemaVersion == 1 and
               .workflowStatusId == "in-progress" and
-              .statusCategory == "started"
+              .statusCategory == "started" and
+              .dueDate == "2026-06-03" and
+              .schedule == {
+                "mode": "due-date",
+                "dueDate": "2026-06-03",
+                "calendarPolicy": {
+                  "timeZone": "UTC",
+                  "workingWeekdays": [
+                    "monday",
+                    "tuesday",
+                    "wednesday",
+                    "thursday",
+                    "friday"
+                  ],
+                  "holidays": []
+                }
+              }
             )' \
             <<< "${issues_response}" >/dev/null; then
             echo 'Work Item API did not return the expected seeded issue.' >&2

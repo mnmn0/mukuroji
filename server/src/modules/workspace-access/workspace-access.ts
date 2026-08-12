@@ -12,7 +12,14 @@ import {
   TransactWriteCommand,
   type TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
-import { PLANNING_SCHEMA_VERSION } from '@mukuroji/contracts'
+import { PLANNING_STORAGE_SCHEMA_VERSION } from '../planning'
+import {
+  createDynamoDbClient as createConfiguredDynamoDbClient,
+  createWorkspaceSearchWriterDynamoDbDocumentClient,
+} from '../../infrastructure/aws/dynamodb-client'
+import {
+  throwIfWorkspaceSearchWriterFenceTerminalError,
+} from '../../infrastructure/runtime/workspace-search-writer-fence-document-client'
 import {
   createAuditFieldChanges,
   createMutationAuditEventPut,
@@ -310,8 +317,26 @@ export class WorkspaceAccessError extends Error {
   }
 }
 
+/** Options for binding an active Workspace member to an allowed role set. */
+export type WorkspaceActiveMemberConditionOptions = {
+  /** Workspace roles that must remain assigned when the transaction commits. */
+  readonly allowedRoles?: readonly WorkspaceRole[]
+}
+
 /** Workspace access data store の公開契約です。 */
 export interface WorkspaceAccessClient {
+  /** Builds a commit-time condition proving a Workspace member remains active.
+   *
+   * @param workspaceId - Owning Workspace identifier.
+   * @param memberKey - Stable member key that must remain active through commit.
+   * @param options - Optional role set that must remain assigned through commit.
+   * @returns A DynamoDB condition check, or undefined when the member is inactive.
+   */
+  createActiveMemberConditionCheck?(
+    workspaceId: string,
+    memberKey: string,
+    options?: WorkspaceActiveMemberConditionOptions,
+  ): Promise<WorkspaceAccessTransactWriteItem | undefined>
   /** 指定 member を取得します。 */
   getMember(workspaceId: string, memberKey: string): Promise<WorkspaceMember | undefined>
   /** 指定 member が active な場合だけ返します。 */
@@ -450,9 +475,29 @@ export interface WorkspaceAccessClient {
 }
 
 /** DynamoDB transaction item used by the Workspace Access adapter. */
-type WorkspaceAccessTransactWriteItem = NonNullable<
+export type WorkspaceAccessTransactWriteItem = NonNullable<
   TransactWriteCommandInput['TransactItems']
 >[number]
+
+/** Input passed to the cross-module tenant seat meter. */
+export type WorkspaceSeatMutationInput = {
+  /** Canonical Workspace identifier. */
+  workspaceId: string
+  /** Stable member key whose active status changed. */
+  memberKey: string
+  /** Direction of the authoritative membership transition. */
+  direction: 'activate' | 'deactivate'
+  /** Timestamp shared by every item in the membership transaction. */
+  occurredAt: string
+}
+
+/** Capability that contributes tenant seat metering to a membership transaction. */
+export interface WorkspaceSeatMeter {
+  /** Prepares conditional seat counter and audit transaction items. */
+  prepareSeatMutation(
+    input: WorkspaceSeatMutationInput,
+  ): Promise<readonly WorkspaceAccessTransactWriteItem[]>
+}
 
 /** Production dependencies that are clearer to provide by name. */
 export type DynamoDbWorkspaceAccessClientOptions = {
@@ -461,6 +506,8 @@ export type DynamoDbWorkspaceAccessClientOptions = {
     DocumentAuthorizationRevisionMutationPort<
       WorkspaceAccessTransactWriteItem
     >
+  /** Optional tenant seat meter joined to membership state transitions. */
+  readonly seatMeter?: WorkspaceSeatMeter
 }
 
 /** `workspace-created` identity だけが補償処理で安全に削除できることを判定します。 */
@@ -487,6 +534,8 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     DocumentAuthorizationRevisionMutationPort<
       WorkspaceAccessTransactWriteItem
     >
+  /** Tenant seat meter that joins authoritative membership transactions. */
+  private readonly seatMeter?: WorkspaceSeatMeter
   /** immutable audit event を保存する DynamoDB table 名です。 */
   private readonly auditTableName?: string
   /** Workspace/member/invitation の公開 audit ID を導出する固定 HMAC key です。 */
@@ -512,6 +561,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
    * @param auditTableName - Optional Audit table name.
    * @param auditPseudonymKey - Optional audit pseudonym key.
    * @param documentAuthorizationRevisionMutationPort - Optional Documents revision port.
+   * @param seatMeter - Optional tenant seat metering transaction contributor.
    */
   constructor(
     tableName?: string,
@@ -526,6 +576,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       DocumentAuthorizationRevisionMutationPort<
         WorkspaceAccessTransactWriteItem
       >,
+    seatMeter?: WorkspaceSeatMeter,
   )
   constructor(
     tableNameOrOptions: string | DynamoDbWorkspaceAccessClientOptions =
@@ -547,6 +598,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       DocumentAuthorizationRevisionMutationPort<
         WorkspaceAccessTransactWriteItem
       >,
+    seatMeter?: WorkspaceSeatMeter,
   ) {
     const options =
       typeof tableNameOrOptions === 'string'
@@ -563,15 +615,15 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
           ) ??
           'mukuroji-workspace-access-local'
     this.dynamoDbClient = dynamoDbClient
-    this.documentClient = documentClient ?? DynamoDBDocumentClient.from(dynamoDbClient, {
-      marshallOptions: { removeUndefinedValues: true },
-    })
+    this.documentClient = documentClient ??
+      createWorkspaceSearchWriterDynamoDbDocumentClient(dynamoDbClient)
     this.bootstrapLocalTable = bootstrapLocalTable
     this.clock = clock
     this.planningTableName = planningTableName
     this.documentAuthorizationRevisionMutationPort =
       options?.documentAuthorizationRevisionMutationPort ??
       documentAuthorizationRevisionMutationPort
+    this.seatMeter = options?.seatMeter ?? seatMeter
     this.auditTableName = auditTableName ?? undefined
     this.auditPseudonymKey = auditPseudonymKey || undefined
   }
@@ -594,6 +646,60 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
   async getActiveMember(workspaceId: string, memberKey: string) {
     const member = await this.getMember(workspaceId, memberKey)
     return member?.status === 'active' ? member : undefined
+  }
+
+  /** Builds a commit-time guard for one currently active Workspace member.
+   *
+   * @param workspaceId Owning Workspace identifier.
+   * @param memberKey Stable member key that must remain active.
+   * @param options Optional role set that must remain assigned through commit.
+   * @returns A version-and-status condition, or undefined when the member is not active.
+   */
+  async createActiveMemberConditionCheck(
+    workspaceId: string,
+    memberKey: string,
+    options?: WorkspaceActiveMemberConditionOptions,
+  ): Promise<WorkspaceAccessTransactWriteItem | undefined> {
+    const member = await this.getActiveMember(workspaceId, memberKey)
+    if (!member) return undefined
+    const allowedRoles = options?.allowedRoles?.length === 0
+      ? undefined
+      : options?.allowedRoles
+    if (options?.allowedRoles !== undefined &&
+      (allowedRoles === undefined || !allowedRoles.includes(member.role))) {
+      return undefined
+    }
+    const roleCondition = allowedRoles === undefined
+      ? ''
+      : ' AND #role IN (' + allowedRoles.map((_, index) => `:allowedRole${index}`).join(', ') + ')'
+    return {
+      ConditionCheck: {
+        TableName: this.tableName,
+        Key: {
+          workspaceId,
+          recordKey: createMemberRecordKey(member.memberKey),
+        },
+        ConditionExpression:
+          '#entryType = :entryType AND #memberKey = :memberKey AND #status = :active AND #version = :version' +
+          roleCondition,
+        ExpressionAttributeNames: {
+          '#entryType': 'entryType',
+          '#memberKey': 'memberKey',
+          '#status': 'status',
+          '#version': 'version',
+          ...(allowedRoles === undefined ? {} : { '#role': 'role' }),
+        },
+        ExpressionAttributeValues: {
+          ':active': 'active',
+          ':entryType': 'workspace-member',
+          ':memberKey': member.memberKey,
+          ':version': member.version,
+          ...(allowedRoles === undefined
+            ? {}
+            : Object.fromEntries(allowedRoles.map((role, index) => [`:allowedRole${index}`, role]))),
+        },
+      },
+    }
   }
 
   /** 管理画面用の Workspace access snapshot を取得します。 */
@@ -1420,6 +1526,12 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       version: invitation.version + 1,
       updatedAt: nowIso,
     }
+    const seatMutations = await this.prepareSeatMutation(
+      normalizedWorkspaceId,
+      member.memberKey,
+      'activate',
+      nowIso,
+    )
     const memberAuditPut = this.createWorkspaceAuditPut(auditContext, {
       directoryId: normalizedWorkspaceId,
       eventType: 'member.created',
@@ -1482,6 +1594,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
     if (member.role === 'owner') {
       transactItems.push({ Update: createOwnerCountUpdate(this.tableName, normalizedWorkspaceId, 1, nowIso) })
     }
+    transactItems.push(...seatMutations)
     const aggregateItemCount = transactItems.length
 
     transactItems.push(
@@ -1600,6 +1713,15 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       return target
     }
 
+    const seatMutations = target.status === nextStatus
+      ? []
+      : await this.prepareSeatMutation(
+          normalizedWorkspaceId,
+          target.memberKey,
+          nextStatus === 'active' ? 'activate' : 'deactivate',
+          nowIso,
+        )
+
     const memberEventType = roleChanged && !statusChanged
       ? 'member.role-changed'
       : statusChanged && !roleChanged
@@ -1687,6 +1809,8 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
         ),
       )
     }
+
+    transactItems.push(...seatMutations)
 
     if (memberAuditPut) {
       transactItems.push(memberAuditPut)
@@ -1787,6 +1911,12 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
         createdAt: nowIso,
         updatedAt: nowIso,
       } satisfies WorkspaceMember
+      const seatMutations = await this.prepareSeatMutation(
+        normalizedWorkspaceId,
+        member.memberKey,
+        'activate',
+        nowIso,
+      )
       const auditPut = this.createWorkspaceAuditPut(auditContext, {
         directoryId: normalizedWorkspaceId,
         eventType: 'member.directory-provisioned',
@@ -1815,6 +1945,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
         input.expectedPlanningRevision,
         nowIso,
       )]
+      transactItems.push(...seatMutations)
       if (auditPut) transactItems.push(auditPut)
 
       try {
@@ -1921,6 +2052,15 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       )
     }
 
+    const seatMutations = existing.status === 'deactivated'
+      ? await this.prepareSeatMutation(
+          normalizedWorkspaceId,
+          existing.memberKey,
+          'activate',
+          nowIso,
+        )
+      : []
+
     const auditPut = this.createWorkspaceAuditPut(auditContext, {
       directoryId: normalizedWorkspaceId,
       eventType: existing.status === 'deactivated'
@@ -2005,6 +2145,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
         ),
       )
     }
+    transactItems.push(...seatMutations)
     if (auditPut) transactItems.push(auditPut)
 
     try {
@@ -2101,6 +2242,12 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       updatedAt: nowIso,
       deactivatedAt: nowIso,
     } satisfies WorkspaceMember
+    const seatMutations = await this.prepareSeatMutation(
+      normalizedWorkspaceId,
+      existing.memberKey,
+      'deactivate',
+      nowIso,
+    )
     const auditPut = this.createWorkspaceAuditPut(auditContext, {
       directoryId: normalizedWorkspaceId,
       eventType: 'member.directory-deprovisioned',
@@ -2154,6 +2301,7 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
         nowIso,
       ),
     )
+    transactItems.push(...seatMutations)
     if (auditPut) transactItems.push(auditPut)
 
     try {
@@ -2191,6 +2339,30 @@ export class DynamoDbWorkspaceAccessClient implements WorkspaceAccessClient {
       }
       throw toWorkspaceAccessError(error)
     }
+  }
+
+  /**
+   * Prepares tenant seat writes for one authoritative member status transition.
+   *
+   * @param workspaceId - Canonical Workspace identifier.
+   * @param memberKey - Stable member key whose status changed.
+   * @param direction - Whether a seat is being assigned or released.
+   * @param occurredAt - Timestamp shared with the membership mutation.
+   * @returns Transaction items contributed by the configured seat meter.
+   */
+  private async prepareSeatMutation(
+    workspaceId: string,
+    memberKey: string,
+    direction: 'activate' | 'deactivate',
+    occurredAt: string,
+  ): Promise<WorkspaceAccessTransactWriteItem[]> {
+    if (!this.seatMeter) return []
+    return [...await this.seatMeter.prepareSeatMutation({
+      workspaceId,
+      memberKey,
+      direction,
+      occurredAt,
+    })]
   }
 
   /** active actor を取得し、存在しない場合は拒否します。 */
@@ -2676,20 +2848,7 @@ function readEnvironment(name: string) {
 }
 
 function createDynamoDbClient() {
-  const endpoint = readEnvironment('DYNAMODB_ENDPOINT') ?? readEnvironment('AWS_ENDPOINT_URL')
-
-  return new DynamoDBClient({
-    region: readEnvironment('AWS_REGION') ?? readEnvironment('AWS_DEFAULT_REGION') ?? 'us-east-1',
-    endpoint,
-    ...(endpoint
-      ? {
-          credentials: {
-            accessKeyId: readEnvironment('AWS_ACCESS_KEY_ID') ?? 'test',
-            secretAccessKey: readEnvironment('AWS_SECRET_ACCESS_KEY') ?? 'test',
-          },
-        }
-      : {}),
-  })
+  return createConfiguredDynamoDbClient()
 }
 
 function normalizeRequired(value: string, label: string) {
@@ -3111,7 +3270,7 @@ function createPlanningRevisionMutation(
         workspaceId,
         recordKey: 'META',
         entryType: 'planning-meta',
-        schemaVersion: PLANNING_SCHEMA_VERSION,
+        schemaVersion: PLANNING_STORAGE_SCHEMA_VERSION,
         revision: expectedRevision + 1,
         updatedAt: nowIso,
       },
@@ -3180,6 +3339,7 @@ function isConditionalTransactionCancellation(error: unknown) {
 }
 
 function toWorkspaceAccessError(error: unknown) {
+  throwIfWorkspaceSearchWriterFenceTerminalError(error)
   if (error instanceof WorkspaceAccessError) {
     return error
   }

@@ -1,6 +1,16 @@
 import './alarm-routing.suite';
 import './parameters-config.suite';
+import './migration-deployment-targets.suite';
 import './data-storage.suite';
+import './migration-storage.suite';
+import './migration-observability.suite';
+import './migration-alarm-evidence.suite';
+import './cross-domain-integrity.suite';
+import './restore-drill.suite';
 import './security-iam-api.suite';
+import './api-environment-budget.suite';
 import './workers-observability.suite';
 import './bootstrap.suite';
+import './runtime-controls.suite';
+import './triage-index-deployment.suite';
+import './workspace-search-writer-fence.suite';

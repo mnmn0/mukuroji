@@ -13,7 +13,16 @@ import {
   type LambdaBuildPaths,
 } from '../../config/lambda-build-paths';
 import type { StackParameters } from '../../config/stack-parameters';
+import {
+  bindWorkspaceSearchWriterFence,
+  configureWorkspaceSearchWriterFence,
+  type WorkspaceSearchWriterFenceResources,
+} from '../../policies/workspace-search-writer-fence';
 import type { DataStoreResources } from '../data-stores';
+import {
+  bindRuntimeControls,
+  type RuntimeControlResources,
+} from '../runtime-controls';
 import type { WorkerChannels } from './channels';
 
 /**
@@ -26,8 +35,12 @@ export interface ConnectorWorkerInput {
   readonly lambdaBuildPaths: LambdaBuildPaths;
   /** Stack parameters used for connector authorization and audit behavior. */
   readonly parameters: StackParameters;
+  /** Dynamic operational controls shared by application runtimes. */
+  readonly runtimeControls: RuntimeControlResources;
   /** Connector queues and dead-letter queues. */
   readonly workerChannels: WorkerChannels;
+  /** Exact source, target, and state tables protected by the writer fence. */
+  readonly workspaceSearchWriterFence: WorkspaceSearchWriterFenceResources;
 }
 
 /**
@@ -75,6 +88,7 @@ export function buildConnectorWorkers(
     planningTable,
     projectDirectoryTable,
     teamIssueEventsTable,
+    tenantAdministrationTable,
     workItemConfigurationTable,
     workItemsTable,
     workspaceAccessTable,
@@ -153,12 +167,23 @@ export function buildConnectorWorkers(
         SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
         TEAM_ISSUE_EVENTS_TABLE_NAME: teamIssueEventsTable.tableName,
         TEAM_ISSUES_TABLE_NAME: workItemsTable.tableName,
+        TENANT_ADMINISTRATION_TABLE_NAME:
+          tenantAdministrationTable.tableName,
         WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
         WORKSPACE_SEARCH_TABLE_NAME: workspaceSearchTable.tableName,
         WORK_ITEM_CONFIGURATION_TABLE_NAME: workItemConfigurationTable.tableName,
         WORK_ITEMS_TABLE_NAME: workItemsTable.tableName,
       },
     },
+  );
+  bindWorkspaceSearchWriterFence(
+    input.workspaceSearchWriterFence,
+    connectorSyncFunction,
+  );
+  bindRuntimeControls(
+    input.runtimeControls,
+    connectorSyncFunction,
+    'connector-sync',
   );
   connectorSyncFunction.addEventSource(
     new lambdaEventSources.SqsEventSource(connectorSyncQueue, {
@@ -181,6 +206,10 @@ export function buildConnectorWorkers(
       planningTable.tableArn,
       enterpriseIdentityTable.tableArn,
     ],
+  }));
+  connectorSyncFunction.addToRolePolicy(new iam.PolicyStatement({
+    actions: ['dynamodb:GetItem'],
+    resources: [tenantAdministrationTable.tableArn],
   }));
   workItemConfigurationTable.grants.readData(connectorSyncFunction);
   workspaceSearchTable.grants.readWriteData(connectorSyncFunction);
@@ -257,8 +286,19 @@ export function buildConnectorWorkers(
         DEVELOPER_PLATFORM_LOOKUP_INDEX_NAME: 'LookupKeyIndex',
         DEVELOPER_PLATFORM_TABLE_NAME: developerPlatformTable.tableName,
         MUKUROJI_RUNTIME_ROLE: 'connector-poll',
+        TENANT_ADMINISTRATION_TABLE_NAME:
+          tenantAdministrationTable.tableName,
       },
     },
+  );
+  configureWorkspaceSearchWriterFence(
+    input.workspaceSearchWriterFence,
+    connectorPollFunction,
+  );
+  bindRuntimeControls(
+    input.runtimeControls,
+    connectorPollFunction,
+    'connector-poll',
   );
   connectorPollFunction.addToRolePolicy(new iam.PolicyStatement({
     actions: [
@@ -266,6 +306,10 @@ export function buildConnectorWorkers(
       'dynamodb:GetItem',
     ],
     resources: [developerPlatformTable.tableArn],
+  }));
+  connectorPollFunction.addToRolePolicy(new iam.PolicyStatement({
+    actions: ['dynamodb:GetItem'],
+    resources: [tenantAdministrationTable.tableArn],
   }));
   connectorPollFunction.addToRolePolicy(new iam.PolicyStatement({
     actions: ['dynamodb:Query'],

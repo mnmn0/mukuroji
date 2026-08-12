@@ -350,7 +350,7 @@ function createCanonicalItem(
     : ['alpha', 'zeta']
 
   return {
-    schemaVersion: numberAttribute('1'),
+    schemaVersion: numberAttribute('2'),
     revision: numberAttribute(options.invalidRevision ? '0' : '1'),
     workflowSchemaVersion: numberAttribute('1'),
     directoryId: stringAttribute(directoryId),
@@ -371,7 +371,22 @@ function createCanonicalItem(
       stringAttribute('blocks:blocked-item'),
       stringAttribute('related:related-item'),
     ]),
-    dueDate: stringAttribute('2026/07/31'),
+    dueDate: stringAttribute('2026-07-31'),
+    schedule: mapAttribute({
+      mode: stringAttribute('due-date'),
+      dueDate: stringAttribute('2026-07-31'),
+      calendarPolicy: mapAttribute({
+        timeZone: stringAttribute('UTC'),
+        workingWeekdays: listAttribute([
+          stringAttribute('monday'),
+          stringAttribute('tuesday'),
+          stringAttribute('wednesday'),
+          stringAttribute('thursday'),
+          stringAttribute('friday'),
+        ]),
+        holidays: listAttribute([]),
+      }),
+    }),
     priority: stringAttribute('medium'),
     createdAt: stringAttribute('2026-07-01T09:00:00.000Z'),
     updatedAt: stringAttribute('2026-07-12T09:00:00.000Z'),
@@ -808,7 +823,7 @@ describe('Work Items integrity manifest core', () => {
     })
 
     expect(source.manifest.digest.contentDigest)
-      .toBe('77e36340fa68c182ec717a3d5c2c0796d82786f4a62157f8b5ad1200a9f1f716')
+      .toBe('c583cc3b7f5bf04447e86e287983d82e7d97ad697d8e03ff93cd19d3fd738d10')
   })
 
   test('rejects string sets where canonical Work Item arrays require lists', async () => {
@@ -836,6 +851,42 @@ describe('Work Items integrity manifest core', () => {
     })
 
     await expect(customFieldAttempt.promise).rejects.toMatchObject({
+      code: 'INVALID_WORK_ITEM_RECORD',
+    })
+  })
+
+  test('requires schema-v2 schedules whose derived due-date projection matches', async () => {
+    const legacyItem = createCanonicalItem()
+    legacyItem.schemaVersion = numberAttribute('1')
+    delete legacyItem.schedule
+    const legacyAttempt = startManifestCreation({
+      role: 'source',
+      items: [legacyItem],
+    })
+
+    await expect(legacyAttempt.promise).rejects.toMatchObject({
+      code: 'INVALID_WORK_ITEM_RECORD',
+    })
+
+    const missingScheduleItem = createCanonicalItem()
+    delete missingScheduleItem.schedule
+    const missingScheduleAttempt = startManifestCreation({
+      role: 'source',
+      items: [missingScheduleItem],
+    })
+
+    await expect(missingScheduleAttempt.promise).rejects.toMatchObject({
+      code: 'INVALID_WORK_ITEM_RECORD',
+    })
+
+    const mismatchedProjectionItem = createCanonicalItem()
+    mismatchedProjectionItem.dueDate = stringAttribute('2026-08-01')
+    const mismatchedProjectionAttempt = startManifestCreation({
+      role: 'source',
+      items: [mismatchedProjectionItem],
+    })
+
+    await expect(mismatchedProjectionAttempt.promise).rejects.toMatchObject({
       code: 'INVALID_WORK_ITEM_RECORD',
     })
   })

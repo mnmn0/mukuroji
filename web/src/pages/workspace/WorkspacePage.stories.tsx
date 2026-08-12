@@ -1,10 +1,12 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { useState, type ReactElement } from 'react'
 import { MemoryRouter, Outlet, Route, Routes } from 'react-router'
+import { expect, fn, userEvent, within } from 'storybook/test'
 import {
   WorkspaceCommandMenuContext,
   type WorkspaceCommandMenuContextValue,
 } from '../../commands/ui/WorkspaceCommandMenuContext'
+import { focusQueueResponseFixture } from '../../features/focus-queue/fixtures'
 import { notificationInboxControllerFixture } from '../../notifications/fixtures'
 import { WorkspaceInboxView } from '../../notifications/ui/WorkspaceInboxView'
 import { projectDirectoryFixtures } from '../../projects/fixtures'
@@ -18,6 +20,7 @@ import { createTranslator } from '../../shared/i18n/i18n'
 import type { ProjectTask } from '../../tasks/api'
 import { referoTaskFixtures } from '../../tasks/fixtures'
 import { inheritedWorkItemConfigurationFixture } from '../../work-items/fixtures'
+import { createTaskViewItemKey } from '../../task-views/model/taskViewSelection'
 import type { WorkspaceSummary } from '../../work-items/model/workspaceWorkItems'
 import { DashboardWorkspaceView } from '../../workspace/ui/DashboardWorkspaceView'
 import { HelpWorkspaceView } from '../../workspace/ui/HelpWorkspaceView'
@@ -41,6 +44,8 @@ const storyTasks: ProjectTask[] = referoTaskFixtures.map((task) => ({
       ? 'active'
       : task.workflowStatusId,
 }))
+const onOpenMyTaskAction = fn()
+const onOpenMyTaskActionMenu = fn()
 
 const storySummary: WorkspaceSummary = {
   blocked: 2,
@@ -105,23 +110,35 @@ const storyWorkspaceRouteContext: WorkspaceRouteContextValue = {
   canMutateTeamConfiguration: true,
   fontSizePreference: 'standard',
   guardEnterpriseSession: (request) => request,
+  hasQuickAccessLoadError: false,
   inboxCount: 3,
+  isProjectQuickAccess: () => false,
   isLoading: false,
+  isQuickAccessLoading: false,
+  isQuickAccessSaving: false,
   locale: 'ja',
   onArchiveProject: () => Promise.resolve(),
   onArchiveTeam: () => Promise.resolve(),
   onCreateProject: () => Promise.resolve(),
   onCreateTeam: () => Promise.resolve(),
+  onDismissProjectQuickAccessFeedback: () => undefined,
   onFontSizePreferenceChange: () => undefined,
   onLocaleChange: () => undefined,
   onLogout: () => undefined,
   onOpenNotification: () => undefined,
   onOpenTask: () => undefined,
+  onMoveProjectQuickAccess: () => Promise.resolve(),
+  onRemoveProjectQuickAccess: () => Promise.resolve(),
   onRetryCommonData: () => Promise.resolve(),
+  onRetryProjectQuickAccess: () => Promise.resolve(),
   onSelectNav: () => undefined,
   onSelectProject: () => undefined,
   onSelectTeamView: () => undefined,
   onSessionErrorAction: () => undefined,
+  onToggleProjectQuickAccess: () => Promise.resolve(),
+  onUndoProjectQuickAccess: () => Promise.resolve(),
+  quickAccessItems: [],
+  quickAccessProjects: [],
   reportNotificationPreferencesError: () => undefined,
   resolveSessionErrors: () => undefined,
   teams: projectDirectoryFixtures,
@@ -215,9 +232,9 @@ function WorkspaceCommonErrorShellStory() {
       <WorkspaceRouteContent>
         <div className="grid gap-5 px-[clamp(20px,3vw,34px)] py-5">
           <HomeWorkspaceView
+            focusQueue={focusQueueResponseFixture}
             summary={storySummary}
             t={t}
-            tasks={storyTasks}
             teams={projectDirectoryFixtures}
             workItemConfigurationsByTeam={storyWorkItemConfigurations}
           />
@@ -256,9 +273,22 @@ type Story = StoryObj<typeof meta>
 export const HomeRoute: Story = {
   render: () => (
     <HomeWorkspaceView
+      focusQueue={focusQueueResponseFixture}
       summary={storySummary}
       t={t}
-      tasks={storyTasks}
+      teams={projectDirectoryFixtures}
+      workItemConfigurationsByTeam={storyWorkItemConfigurations}
+    />
+  ),
+}
+
+/** The `/home` route when Focus metrics and previews cannot be loaded. */
+export const HomeRouteFocusUnavailable: Story = {
+  render: () => (
+    <HomeWorkspaceView
+      isFocusUnavailable
+      summary={{ ...storySummary, blocked: 0 }}
+      t={t}
       teams={projectDirectoryFixtures}
       workItemConfigurationsByTeam={storyWorkItemConfigurations}
     />
@@ -272,6 +302,71 @@ export const MyTasksRoute: Story = {
       configurationFailedTeamIds={[]}
       configurationsByTeam={storyWorkItemConfigurations}
       onMoveTaskStatus={async () => undefined}
+      t={t}
+      tasks={storyTasks}
+      teams={projectDirectoryFixtures}
+    />
+  ),
+}
+
+/** The personal board reflects shared keyboard focus/selection and keeps click Open actionable. */
+export const MyTasksFocusedSelection: Story = {
+  render: () => {
+    const firstTask = storyTasks[0]
+    if (!firstTask) throw new Error('Expected a personal-task story fixture.')
+    const firstTaskKey = createTaskViewItemKey(firstTask.teamId, firstTask.id)
+    return (
+      <MyTasksWorkspaceView
+        configurationFailedTeamIds={[]}
+        configurationsByTeam={storyWorkItemConfigurations}
+        focusedTaskKey={firstTaskKey}
+        onOpenTask={onOpenMyTaskAction}
+        onTaskActionMenuOpen={onOpenMyTaskActionMenu}
+        selectedTaskKeys={[firstTaskKey]}
+        t={t}
+        tasks={storyTasks}
+        teams={projectDirectoryFixtures}
+      />
+    )
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+    const card = canvas.getByTestId('my-tasks-card-refero-wireframe')
+    const openButton = canvas.getByTestId('my-tasks-card-refero-wireframe-open')
+    const actionButton = canvas.getByTestId('my-tasks-card-refero-wireframe-actions')
+    onOpenMyTaskAction.mockClear()
+    onOpenMyTaskActionMenu.mockClear()
+
+    await expect(card).toHaveAttribute('data-task-view-focused', 'true')
+    await expect(card).toHaveAttribute('data-task-view-selected', 'true')
+    await expect(card).toHaveAttribute('aria-current', 'true')
+    await userEvent.click(openButton)
+    await expect(onOpenMyTaskAction).toHaveBeenCalledTimes(1)
+    await userEvent.click(actionButton)
+    await expect(onOpenMyTaskActionMenu).toHaveBeenCalledTimes(1)
+  },
+}
+
+/** The `/my-tasks` route with compact cards and priority subgroups from a saved view. */
+export const MyTasksSavedViewPresentation: Story = {
+  render: () => (
+    <MyTasksWorkspaceView
+      configurationFailedTeamIds={[]}
+      configurationsByTeam={storyWorkItemConfigurations}
+      presentation={{
+        columns: [{ field: 'title' }, { field: 'project' }, { field: 'team' }],
+        density: 'compact',
+        display: {
+          showArchived: false,
+          showAssigneeAvatars: true,
+          showCompleted: true,
+          showEmptyGroups: false,
+          showSubtasks: true,
+          wrapTitles: true,
+        },
+        groupBy: 'status',
+        subgroupBy: 'priority',
+      }}
       t={t}
       tasks={storyTasks}
       teams={projectDirectoryFixtures}
@@ -301,9 +396,6 @@ export const InboxRoute: Story = {
       locale="ja"
       notificationInbox={notificationInboxControllerFixture}
       t={t}
-      tasks={storyTasks}
-      teams={projectDirectoryFixtures}
-      workItemConfigurationsByTeam={storyWorkItemConfigurations}
     />
   ),
 }
@@ -320,9 +412,6 @@ export const InboxWithoutNotifications: Story = {
         unreadCount: 0,
       }}
       t={t}
-      tasks={storyTasks}
-      teams={projectDirectoryFixtures}
-      workItemConfigurationsByTeam={storyWorkItemConfigurations}
     />
   ),
 }
@@ -331,7 +420,22 @@ export const InboxWithoutNotifications: Story = {
 export const DashboardRoute: Story = {
   render: () => (
     <DashboardWorkspaceView
+      focusQueue={focusQueueResponseFixture}
       summary={storySummary}
+      t={t}
+      tasks={storyTasks}
+      teams={projectDirectoryFixtures}
+      workItemConfigurationsByTeam={storyWorkItemConfigurations}
+    />
+  ),
+}
+
+/** The `/dashboard` route when Focus metrics and previews cannot be loaded. */
+export const DashboardRouteFocusUnavailable: Story = {
+  render: () => (
+    <DashboardWorkspaceView
+      isFocusUnavailable
+      summary={{ ...storySummary, blocked: 0 }}
       t={t}
       tasks={storyTasks}
       teams={projectDirectoryFixtures}
@@ -362,6 +466,27 @@ export const SettingsRoute: Story = {
 /** The shared `/home` shell with its actual common error and retry boundary. */
 export const CommonDataErrorShell: Story = {
   render: () => <WorkspaceCommonErrorShellStory />,
+}
+
+/** The shared shell keeps route content usable while Quick Access is unavailable. */
+export const QuickAccessErrorShell: Story = {
+  render: () => (
+    <WorkspaceRouteStoryHarness
+      context={{
+        ...storyWorkspaceRouteContext,
+        hasQuickAccessLoadError: true,
+      }}
+      path="/home"
+    >
+      <WorkspaceRouteContent>
+        <div className="px-[clamp(20px,3vw,34px)] py-5">
+          <p className="text-sm text-[var(--workbench-muted)]">
+            Route content remains available.
+          </p>
+        </div>
+      </WorkspaceRouteContent>
+    </WorkspaceRouteStoryHarness>
+  ),
 }
 
 /** The `/settings/security` feature inside the real Workspace sidebar and header shell. */

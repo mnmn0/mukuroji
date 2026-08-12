@@ -47,13 +47,19 @@ import {
 import {
   createMutationAuditEventPut,
   getConfiguredAuditTableName,
-  getConfiguredDynamoDbEndpoint,
   type MutationAuditContext,
 } from '../audit'
+import {
+  createDynamoDbClient as createConfiguredDynamoDbClient,
+  createWorkspaceSearchWriterDynamoDbDocumentClient,
+  shouldBootstrapLocalDynamoDb,
+} from '../../infrastructure/aws/dynamodb-client'
+import { FILE_UPLOAD_MAX_SIZE_BYTES } from '../file-upload-policy'
 import { isMissingFileObjectVersionError } from './file-object-errors'
+import { isAllowedFileContentType, normalizeFileContentType } from './file-content-type'
 
-/** Browser から直接 upload できる既定の最大 byte 数です。 */
-export const FILE_UPLOAD_MAX_SIZE_BYTES = 2 * 1024 * 1024 * 1024
+/** Re-exports the production File upload ceiling for existing Files consumers. */
+export { FILE_UPLOAD_MAX_SIZE_BYTES } from '../file-upload-policy'
 
 /** 一つの approval request に指定できる reviewer 上限です。 */
 export const FILE_APPROVAL_MAX_REVIEWERS = APPROVAL_MAX_REVIEWERS
@@ -1657,6 +1663,12 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
           ...(status === 'changes-requested' ? { changesRequested: 1 } : {}),
         },
       ))
+    } else {
+      transactionItems.push(createApprovalSummaryTouch(
+        this.tableName,
+        scopeKey,
+        now,
+      ))
     }
     if (completionTransition && this.workItemsTableName) {
       transactionItems.push(...completionTransition.configurationConditionChecks)
@@ -1893,10 +1905,11 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
       createFileProofingScopeKey(scope),
       'APPROVAL_SUMMARY',
     )
-
-    return isStoredApprovalSummaryItem(summary)
-      ? toApprovalSummary(summary)
-      : createEmptyApprovalSummary()
+    if (summary === undefined) return createEmptyApprovalSummary()
+    if (!isStoredApprovalSummaryItem(summary)) {
+      throw createApprovalSummaryUnavailableError()
+    }
+    return toApprovalSummary(summary)
   }
 
   /** 複数 Work Item の approval summary projection を bounded batch read します。 */
@@ -1908,6 +1921,7 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
       requireWorkItemScope(scope)
       return createFileProofingScopeKey(scope)
     }))]
+    const requestedScopeKeys = new Set(scopeKeys)
     const summaries = new Map<string, ApprovalSummary>(scopeKeys.map((scopeKey) => [
       scopeKey,
       createEmptyApprovalSummary(),
@@ -1928,18 +1942,18 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
           },
         }))
         for (const item of response.Responses?.[this.tableName] ?? []) {
-          if (isStoredApprovalSummaryItem(item)) {
-            summaries.set(item.scopeKey, toApprovalSummary(item))
+          if (
+            !isStoredApprovalSummaryItem(item) ||
+            !requestedScopeKeys.has(item.scopeKey)
+          ) {
+            throw createApprovalSummaryUnavailableError()
           }
+          summaries.set(item.scopeKey, toApprovalSummary(item))
         }
         keys = response.UnprocessedKeys?.[this.tableName]?.Keys ?? []
       }
       if (keys.length > 0) {
-        throw new FileProofingError(
-          503,
-          'ApprovalSummaryUnavailable',
-          'Approval summaries could not be read completely.',
-        )
+        throw createApprovalSummaryUnavailableError()
       }
     }
 
@@ -2367,11 +2381,9 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
 
 /** Production/local environment から標準 file proofing client を作成します。 */
 export function createDefaultFileProofingClient(): FileProofingClient {
-  const dynamoDbEndpoint = getConfiguredDynamoDbEndpoint()
-  const dynamoDbClient = new DynamoDBClient(createAwsClientConfiguration(dynamoDbEndpoint))
-  const documentClient = DynamoDBDocumentClient.from(dynamoDbClient, {
-    marshallOptions: { removeUndefinedValues: true },
-  })
+  const dynamoDbClient = createConfiguredDynamoDbClient()
+  const documentClient =
+    createWorkspaceSearchWriterDynamoDbDocumentClient(dynamoDbClient)
   const s3Endpoint = readEnvironment('AWS_ENDPOINT_URL_S3') ?? readEnvironment('AWS_ENDPOINT_URL')
   const s3Client = new S3Client({
     ...createAwsClientConfiguration(s3Endpoint),
@@ -2395,7 +2407,7 @@ export function createDefaultFileProofingClient(): FileProofingClient {
       workItemsTableName: readEnvironment('WORK_ITEMS_TABLE_NAME') ??
         readEnvironment('TEAM_ISSUES_TABLE_NAME'),
       dynamoDbClient,
-      bootstrapLocalTable: Boolean(dynamoDbEndpoint),
+      bootstrapLocalTable: shouldBootstrapLocalDynamoDb(),
     },
   )
 }
@@ -2437,7 +2449,15 @@ export function mapGuardDutyScanStatus(tags: Tag[] | undefined): FileScanStatus 
 export function createApprovalSummary(approvals: readonly ApprovalRequest[]): ApprovalSummary {
   const now = Date.now()
   const pending = approvals.filter((approval) => approval.status === 'pending')
-  const nextDueAt = pending.map((approval) => approval.dueAt).sort()[0]
+  const pendingDueAt = pending.map((approval) => approval.dueAt).sort()
+  const nextDueAt = pendingDueAt[0]
+  const updatedAt = approvals.reduce<string | undefined>(
+    (latest, approval) =>
+      latest === undefined || Date.parse(approval.updatedAt) > Date.parse(latest)
+        ? approval.updatedAt
+        : latest,
+    undefined,
+  )
 
   return {
     pendingCount: pending.length,
@@ -2448,6 +2468,8 @@ export function createApprovalSummary(approvals: readonly ApprovalRequest[]): Ap
       (approval) => approval.status === 'changes-requested',
     ).length,
     ...(nextDueAt ? { nextDueAt } : {}),
+    ...(pendingDueAt.length > 0 ? { pendingDueAt } : {}),
+    ...(updatedAt ? { updatedAt } : {}),
   }
 }
 
@@ -2462,6 +2484,15 @@ function createEmptyApprovalSummary(): ApprovalSummary {
   }
 }
 
+/** Creates the safe availability error used for incomplete or malformed summary reads. */
+function createApprovalSummaryUnavailableError(): FileProofingError {
+  return new FileProofingError(
+    503,
+    'ApprovalSummaryUnavailable',
+    'Approval summaries could not be read completely.',
+  )
+}
+
 /** Stored aggregate projection を時点依存の overdue count 付き response へ変換します。 */
 function toApprovalSummary(item: StoredApprovalSummaryItem): ApprovalSummary {
   const dueDates = [...(item.pendingDueAt ?? [])].map(readApprovalDueAtKey).sort()
@@ -2473,6 +2504,8 @@ function toApprovalSummary(item: StoredApprovalSummaryItem): ApprovalSummary {
     rejectedCount: item.rejectedCount,
     changesRequestedCount: item.changesRequestedCount,
     ...(dueDates[0] ? { nextDueAt: dueDates[0] } : {}),
+    ...(dueDates.length > 0 ? { pendingDueAt: dueDates } : {}),
+    updatedAt: item.updatedAt,
   }
 }
 
@@ -2604,23 +2637,7 @@ function normalizeFileName(value: unknown) {
 
 /** MIME type parameter を除去して小文字化します。 */
 function normalizeContentType(value: unknown) {
-  return requireText(value, 'File media type').split(';')[0]!.trim().toLowerCase()
-}
-
-/** Upload を許可する MIME type かどうかを判定します。 */
-function isAllowedFileContentType(contentType: string) {
-  return contentType.startsWith('image/') ||
-    contentType === 'application/pdf' ||
-    contentType === 'video/mp4' ||
-    contentType === 'video/webm' ||
-    contentType === 'video/quicktime' ||
-    contentType === 'text/plain' ||
-    contentType === 'text/csv' ||
-    contentType === 'application/json' ||
-    contentType === 'application/zip' ||
-    contentType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
-    contentType === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
-    contentType === 'application/vnd.openxmlformats-officedocument.presentationml.presentation'
+  return normalizeFileContentType(requireText(value, 'File media type'))
 }
 
 /** MIME type を browser preview 種別へ変換します。 */
@@ -3133,6 +3150,40 @@ function createApprovalSummaryUpdate(
   }
 }
 
+/**
+ * Advances aggregate causal evidence when a reviewer decision keeps the approval pending.
+ *
+ * @param tableName - File proofing table that owns the aggregate.
+ * @param scopeKey - Work Item approval partition key.
+ * @param updatedAt - Canonical reviewer decision timestamp.
+ * @returns Conditional aggregate touch committed with the reviewer decision.
+ */
+function createApprovalSummaryTouch(
+  tableName: string,
+  scopeKey: string,
+  updatedAt: string,
+): NonNullable<TransactWriteCommandInput['TransactItems']>[number] {
+  return {
+    Update: {
+      TableName: tableName,
+      Key: { scopeKey, recordKey: 'APPROVAL_SUMMARY' },
+      UpdateExpression: 'SET #updatedAt = :updatedAt',
+      ConditionExpression:
+        'attribute_exists(scopeKey) AND #entryType = :entryType AND #pending >= :one',
+      ExpressionAttributeNames: {
+        '#entryType': 'entryType',
+        '#pending': 'pendingCount',
+        '#updatedAt': 'updatedAt',
+      },
+      ExpressionAttributeValues: {
+        ':entryType': 'approval-summary',
+        ':one': 1,
+        ':updatedAt': updatedAt,
+      },
+    },
+  }
+}
+
 /** Optional audit event を state transaction へ追加します。 */
 function addAuditItem(
   transactionItems: NonNullable<TransactWriteCommandInput['TransactItems']>,
@@ -3445,9 +3496,45 @@ function isStoredFileApprovalIndexItem(value: unknown): value is StoredFileAppro
 /** Approval summary projection row を判定します。 */
 function isStoredApprovalSummaryItem(value: unknown): value is StoredApprovalSummaryItem {
   return typeof value === 'object' && value !== null &&
-    'entryType' in value && value.entryType === 'approval-summary' && (
-      !('pendingDueAt' in value) || value.pendingDueAt instanceof Set
-    )
+    'scopeKey' in value && typeof value.scopeKey === 'string' &&
+    'recordKey' in value && value.recordKey === 'APPROVAL_SUMMARY' &&
+    'entryType' in value && value.entryType === 'approval-summary' &&
+    'pendingCount' in value && isNonnegativeSafeInteger(value.pendingCount) &&
+    'approvedCount' in value && isNonnegativeSafeInteger(value.approvedCount) &&
+    'rejectedCount' in value && isNonnegativeSafeInteger(value.rejectedCount) &&
+    'changesRequestedCount' in value &&
+      isNonnegativeSafeInteger(value.changesRequestedCount) &&
+    'updatedAt' in value && isValidTimestamp(value.updatedAt) &&
+    (!('pendingDueAt' in value) || (
+      value.pendingDueAt instanceof Set &&
+      [...value.pendingDueAt].every(isValidApprovalDueAtKey)
+    ))
+}
+
+/** Returns whether a stored counter is a nonnegative safe integer. */
+function isNonnegativeSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+}
+
+/** Returns whether a stored timestamp is a parseable string. */
+function isValidTimestamp(value: unknown): value is string {
+  return typeof value === 'string' && Number.isFinite(Date.parse(value))
+}
+
+/** Returns whether one timestamp is canonical ISO 8601 UTC text. */
+function isCanonicalTimestamp(value: unknown): value is string {
+  if (!isValidTimestamp(value)) return false
+  return new Date(Date.parse(value)).toISOString() === value
+}
+
+/** Returns whether one stored pending-due key contains a canonical due date. */
+function isValidApprovalDueAtKey(value: unknown): value is string {
+  if (typeof value !== 'string') return false
+  const separatorIndex = value.indexOf('#')
+  if (separatorIndex < 0) return isCanonicalTimestamp(value)
+  return separatorIndex > 0 &&
+    separatorIndex < value.length - 1 &&
+    isCanonicalTimestamp(value.slice(0, separatorIndex))
 }
 
 /** Reviewer projection row を判定します。 */

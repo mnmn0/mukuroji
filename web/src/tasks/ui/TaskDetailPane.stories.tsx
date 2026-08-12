@@ -8,6 +8,7 @@ import { teamWorkItemConfigurationFixture } from '../../work-items/fixtures'
 import { TaskDetailPane } from './TaskDetailPane'
 import {
   taskViewStoryProjectMembers,
+  taskViewStoryPlanningSnapshot,
   taskViewStorySelectedIssueDetail,
   taskViewStorySelectedTask,
   taskViewStoryTasks,
@@ -70,6 +71,7 @@ const meta = {
     isLoading: false,
     isRelationCandidatesLoading: false,
     locale: 'ja',
+    planningSnapshot: taskViewStoryPlanningSnapshot,
     projects: taskDetailStoryProjects,
     relationCandidates: taskViewStoryTasks.filter(
       (candidate) => candidate.id !== taskViewStorySelectedTask.id,

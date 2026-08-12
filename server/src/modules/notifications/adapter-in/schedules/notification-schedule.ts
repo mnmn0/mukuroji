@@ -4,12 +4,16 @@ import {
   ScanCommand,
   type DynamoDBDocumentClient,
 } from '@aws-sdk/lib-dynamodb'
+import { WORK_ITEM_SCHEDULE_MIN_YEAR } from '@mukuroji/contracts'
 import {
   calculateAuditExpiresAt,
   createAuditEvent,
   createMutationAuditContext,
 } from '../../../audit'
-import { isCanonicalWorkItemRecord } from '../../../work-items'
+import {
+  isCanonicalWorkItemRecord,
+  workItemScheduleInstantToLocalDate,
+} from '../../../work-items'
 
 /** 期限通知 schedule が生成する通知理由です。 */
 export type ScheduledNotificationReason = 'due' | 'overdue'
@@ -33,7 +37,7 @@ export type NotificationScheduleRunOptions = {
   workItemsTableName: string
   /** schema-v1 event を保存する AuditEvents table 名です。 */
   auditEventsTableName: string
-  /** UTC date-only の判定基準と event 発生時刻です。 */
+  /** Schedule timezone ごとの日付判定基準となる event 発生時刻です。 */
   now: Date
   /** 一度の DynamoDB Scan で評価する最大 item 数です。 */
   scanPageSize?: number
@@ -53,7 +57,7 @@ export type NotificationScheduleResult = {
   emittedEvents: number
   /** 再実行時に既存 event として重複排除した件数です。 */
   duplicateEvents: number
-  /** malformed、完了済み、未来期限などで通知しなかった item 数です。 */
+  /** 完了済み、未来期限など有効だが通知対象外だった item 数です。 */
   skippedItems: number
   /** 読み終えた DynamoDB scan page 数です。 */
   scannedPages: number
@@ -133,7 +137,6 @@ export async function runNotificationSchedule(
   const workItemsTableName = requireText(options.workItemsTableName, 'Work Items table name')
   const auditEventsTableName = requireText(options.auditEventsTableName, 'Audit Events table name')
   const now = normalizeDate(options.now, 'Notification schedule time')
-  const today = now.toISOString().slice(0, 10)
   const scanPageSize = normalizePositiveInteger(
     options.scanPageSize ?? defaultScanPageSize,
     'Notification schedule scan page size',
@@ -176,7 +179,7 @@ export async function runNotificationSchedule(
     result.scannedItems += response.ScannedCount ?? response.Items?.length ?? 0
 
     for (const item of response.Items ?? []) {
-      const candidate = createScheduledNotificationCandidate(item, today)
+      const candidate = createScheduledNotificationCandidate(item, now)
 
       if (!candidate) {
         result.skippedItems += 1
@@ -219,21 +222,30 @@ export async function runNotificationSchedule(
 }
 
 /**
- * `YYYY/MM/DD` または `YYYY-MM-DD` を UTC の ISO date-only へ正規化します。
+ * Validates a canonical `YYYY-MM-DD` UTC date-only value.
+ *
+ * @param value - Candidate canonical date-only value.
+ * @returns The validated date-only value, or undefined when invalid.
  */
 export function parseUtcDateOnly(value: unknown): string | undefined {
   const text = readText(value)
-  const match = text?.match(/^(\d{4})([-/])(\d{2})\2(\d{2})$/)
+  const match = text?.match(/^(\d{4})-(\d{2})-(\d{2})$/)
 
   if (!match) {
     return undefined
   }
 
   const year = Number(match[1])
-  const month = Number(match[3])
-  const day = Number(match[4])
+  const month = Number(match[2])
+  const day = Number(match[3])
 
-  if (year < 1_000 || month < 1 || month > 12 || day < 1 || day > 31) {
+  if (
+    year < WORK_ITEM_SCHEDULE_MIN_YEAR ||
+    month < 1 ||
+    month > 12 ||
+    day < 1 ||
+    day > 31
+  ) {
     return undefined
   }
 
@@ -247,19 +259,29 @@ export function parseUtcDateOnly(value: unknown): string | undefined {
     return undefined
   }
 
-  return `${match[1]}-${match[3]}-${match[4]}`
+  return text
 }
 
+/**
+ * Creates a due-notification candidate using the Work Item schedule's local calendar date.
+ *
+ * @param item - Candidate canonical Work Item row.
+ * @param now - Absolute schedule execution instant.
+ * @returns A due or overdue candidate, or undefined when no notification is required.
+ */
 function createScheduledNotificationCandidate(
   item: Record<string, unknown>,
-  today: string,
+  now: Date,
 ): ScheduledNotificationCandidate | undefined {
   if (!isCanonicalWorkItemRecord(item)) {
-    return undefined
+    throw new TypeError(
+      'Notification schedule encountered a non-canonical Work Item row.',
+    )
   }
 
   const assigneeMemberKey = item.assigneeUserId.toLowerCase()
   const dueDate = parseUtcDateOnly(item.dueDate)
+  const today = workItemScheduleInstantToLocalDate(now, item.schedule.calendarPolicy)
 
   if (
     !assigneeMemberKey ||

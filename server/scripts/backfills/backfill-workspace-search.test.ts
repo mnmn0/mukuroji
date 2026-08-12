@@ -1,19 +1,22 @@
 import { describe, expect, spyOn, test } from 'bun:test'
 import {
-  DeleteCommand,
-  type DeleteCommandInput,
   type DynamoDBDocumentClient,
-  PutCommand,
-  type PutCommandInput,
   ScanCommand,
   type ScanCommandInput,
+  TransactWriteCommand,
+  type TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
-import type { DocumentDetail } from '@mukuroji/contracts'
+import {
+  WORK_ITEM_SCHEMA_VERSION,
+  createDefaultDueDateWorkItemSchedule,
+  type DocumentDetail,
+} from '@mukuroji/contracts'
 import {
   createWorkspaceSearchDocument,
   createWorkspaceSearchDocumentRecordKey,
 } from '../../src/modules/workspace-search'
 import {
+  loadWorkspaceSearchBackfillServerConfig,
   mapCollaborationItem,
   mapDocumentItem,
   mapProjectDirectoryItem,
@@ -21,6 +24,27 @@ import {
   parseWorkItemCollaborationEntityKey,
   runBackfill,
 } from './backfill-workspace-search'
+
+describe('Workspace search backfill configuration', () => {
+  test('does not invent a local endpoint for an AWS dry-run', () => {
+    const config = loadWorkspaceSearchBackfillServerConfig({
+      AWS_REGION: 'ap-northeast-1',
+    })
+
+    expect(config.dynamoDbEndpoint).toBeUndefined()
+  })
+
+  test('isolates the documented shared local endpoint to DynamoDB', () => {
+    const config = loadWorkspaceSearchBackfillServerConfig({
+      AWS_ENDPOINT_URL: 'http://localhost:4566',
+      AWS_REGION: 'us-east-1',
+    })
+
+    expect(config.dynamoDbEndpoint).toBe('http://localhost:4566')
+    expect(config.secretsManagerEndpoint).toBeUndefined()
+    expect(config.environment.AWS_ENDPOINT_URL).toBeUndefined()
+  })
+})
 
 function mapRunnerItem(item: Record<string, unknown>) {
   const id = typeof item.id === 'string' ? item.id : 'unknown'
@@ -154,7 +178,7 @@ describe('Workspace search backfill mapping', () => {
 
   test('uses different document keys for the same Work Item ID in different Teams', () => {
     const first = mapWorkItem({
-      schemaVersion: 1,
+      schemaVersion: WORK_ITEM_SCHEMA_VERSION,
       revision: 3,
       directoryId: 'workspace#mukuroji',
       directoryTeamId: 'workspace#mukuroji#team#core-team',
@@ -168,14 +192,15 @@ describe('Workspace search backfill mapping', () => {
       workflowStatusId: 'review',
       statusCategory: 'started',
       customFieldValues: { effort: 8, approved: true },
-      dueDate: '2026/07/20',
+      dueDate: '2026-07-20',
+      schedule: createDefaultDueDateWorkItemSchedule('2026-07-20'),
       priority: 'high',
       createdAt: '2026-07-01T00:00:00.000Z',
       updatedAt: '2026-07-12T00:00:00.000Z',
       relationIds: ['blocks:launch'],
     })
     const second = mapWorkItem({
-      schemaVersion: 1,
+      schemaVersion: WORK_ITEM_SCHEMA_VERSION,
       revision: 1,
       directoryId: 'workspace#mukuroji',
       directoryTeamId: 'workspace#mukuroji#team#design-team',
@@ -190,7 +215,8 @@ describe('Workspace search backfill mapping', () => {
       statusCategory: 'unstarted',
       customFieldValues: {},
       relationIds: [],
-      dueDate: '2026/08/01',
+      dueDate: '2026-08-01',
+      schedule: createDefaultDueDateWorkItemSchedule('2026-08-01'),
       priority: 'medium',
       createdAt: '2026-07-02T00:00:00.000Z',
       updatedAt: '2026-07-11T00:00:00.000Z',
@@ -213,7 +239,7 @@ describe('Workspace search backfill mapping', () => {
 
   test('accepts the backlog workflow status category', () => {
     const operation = mapWorkItem({
-      schemaVersion: 1,
+      schemaVersion: WORK_ITEM_SCHEMA_VERSION,
       revision: 1,
       directoryId: 'workspace#mukuroji',
       directoryTeamId: 'workspace#mukuroji#team#core-team',
@@ -228,7 +254,8 @@ describe('Workspace search backfill mapping', () => {
       statusCategory: 'backlog',
       customFieldValues: {},
       relationIds: [],
-      dueDate: '2026/08/01',
+      dueDate: '2026-08-01',
+      schedule: createDefaultDueDateWorkItemSchedule('2026-08-01'),
       priority: 'medium',
       createdAt: '2026-07-02T00:00:00.000Z',
       updatedAt: '2026-07-11T00:00:00.000Z',
@@ -241,9 +268,9 @@ describe('Workspace search backfill mapping', () => {
     expect(operation.document.status).toBe('backlog')
   })
 
-  test('skips malformed canonical Work Item rows before indexing their Team scope', () => {
+  test('fails closed on malformed canonical Work Item rows before indexing', () => {
     const baseItem = {
-      schemaVersion: 1,
+      schemaVersion: WORK_ITEM_SCHEMA_VERSION,
       revision: 1,
       directoryId: 'workspace#mukuroji',
       directoryTeamId: 'workspace#mukuroji#team#core-team',
@@ -258,90 +285,44 @@ describe('Workspace search backfill mapping', () => {
       statusCategory: 'started',
       customFieldValues: {},
       relationIds: [],
-      dueDate: '2026/07/20',
+      dueDate: '2026-07-20',
+      schedule: createDefaultDueDateWorkItemSchedule('2026-07-20'),
       priority: 'high',
       createdAt: '2026-07-01T00:00:00.000Z',
       updatedAt: '2026-07-12T00:00:00.000Z',
     }
 
-    expect(mapWorkItem({ ...baseItem, schemaVersion: 0 })).toBeUndefined()
-    expect(mapWorkItem({ ...baseItem, revision: 0 })).toBeUndefined()
-    expect(mapWorkItem({
-      ...baseItem,
-      directoryTeamId: 'workspace#mukuroji#team#another-team',
-    })).toBeUndefined()
-    expect(mapWorkItem({
-      ...baseItem,
-      title: undefined,
-      titleKey: 'tasks.releaseCheck',
-    })).toBeUndefined()
-    expect(mapWorkItem({
-      ...baseItem,
-      workflowSchemaVersion: undefined,
-      status: 'review',
-    })).toBeUndefined()
-    expect(mapWorkItem({
-      ...baseItem,
-      workflowStatusId: undefined,
-      status: 'review',
-    })).toBeUndefined()
-    expect(mapWorkItem({
-      ...baseItem,
-      statusCategory: undefined,
-    })).toBeUndefined()
-    expect(mapWorkItem({
-      ...baseItem,
-      customFieldValues: undefined,
-      customFields: { effort: 8 },
-    })).toBeUndefined()
-    expect(mapWorkItem({
-      ...baseItem,
-      customFieldValues: { effort: null },
-    })).toBeUndefined()
-    expect(mapWorkItem({
-      ...baseItem,
-      creatorMemberKey: undefined,
-    })).toBeUndefined()
-    expect(mapWorkItem({
-      ...baseItem,
-      relationIds: undefined,
-    })).toBeUndefined()
-    expect(mapWorkItem({
-      ...baseItem,
-      relationIds: ['related:z', 'blocks:a'],
-    })).toBeUndefined()
-    expect(mapWorkItem({
-      ...baseItem,
-      relationIds: ['blocks:a', 'blocks:a'],
-    })).toBeUndefined()
-    expect(mapWorkItem({
-      ...baseItem,
-      relationIds: ['unknown:a'],
-    })).toBeUndefined()
-    expect(mapWorkItem({
-      ...baseItem,
-      status: 'review',
-    })).toBeUndefined()
-    expect(mapWorkItem({
-      ...baseItem,
-      customFields: { effort: 8 },
-    })).toBeUndefined()
-    expect(mapWorkItem({
-      ...baseItem,
-      assignee: '佐藤 花子',
-    })).toBeUndefined()
-    expect(mapWorkItem({
-      ...baseItem,
-      assigneeKey: 'tasks.assignee.sato',
-    })).toBeUndefined()
-    expect(mapWorkItem({
-      ...baseItem,
-      source: 'dynamodb',
-    })).toBeUndefined()
-    expect(mapWorkItem({
-      ...baseItem,
-      migrationSourceKey: 'workspace#mukuroji#project#refero#task#release-check',
-    })).toBeUndefined()
+    const malformedItems = [
+      { ...baseItem, schemaVersion: 0 },
+      { ...baseItem, revision: 0 },
+      { ...baseItem, directoryTeamId: 'workspace#mukuroji#team#another-team' },
+      { ...baseItem, title: undefined, titleKey: 'tasks.releaseCheck' },
+      { ...baseItem, workflowSchemaVersion: undefined, status: 'review' },
+      { ...baseItem, workflowStatusId: undefined, status: 'review' },
+      { ...baseItem, statusCategory: undefined },
+      { ...baseItem, customFieldValues: undefined, customFields: { effort: 8 } },
+      { ...baseItem, customFieldValues: { effort: null } },
+      { ...baseItem, creatorMemberKey: undefined },
+      { ...baseItem, relationIds: undefined },
+      { ...baseItem, relationIds: ['related:z', 'blocks:a'] },
+      { ...baseItem, relationIds: ['blocks:a', 'blocks:a'] },
+      { ...baseItem, relationIds: ['unknown:a'] },
+      { ...baseItem, status: 'review' },
+      { ...baseItem, customFields: { effort: 8 } },
+      { ...baseItem, assignee: '佐藤 花子' },
+      { ...baseItem, assigneeKey: 'tasks.assignee.sato' },
+      { ...baseItem, source: 'dynamodb' },
+      {
+        ...baseItem,
+        migrationSourceKey: 'workspace#mukuroji#project#refero#task#release-check',
+      },
+    ]
+
+    for (const malformedItem of malformedItems) {
+      expect(() => mapWorkItem(malformedItem)).toThrow(
+        'Workspace search backfill encountered a non-canonical Work Item row.',
+      )
+    }
   })
 
   test('strictly parses comment scope and deletes soft-deleted projections', () => {
@@ -417,6 +398,33 @@ describe('Workspace search backfill mapping', () => {
     )).toBeUndefined()
   })
 
+  test('fails closed for TTL-managed attributes on Collaboration target candidates', () => {
+    const comment = {
+      entityKey:
+        'workspace#mukuroji#work-item#team/core-team/issue/release-check',
+      recordKey: 'COMMENT#comment-1',
+      entryType: 'comment',
+      id: 'comment-1',
+      rootCommentId: 'comment-1',
+      authorMemberKey: 'sato@example.com',
+      bodyMarkdown: 'TTL-managed target candidate',
+      version: 1,
+      createdAt: '2026-07-12T00:00:00.000Z',
+      updatedAt: '2026-07-12T00:00:00.000Z',
+    }
+
+    // Explicit undefined still creates the own property that proves the source
+    // row participates in the TTL-managed schema and must fail closed.
+    for (const expiresAt of [2_000_000_000, undefined]) {
+      expect(() => mapCollaborationItem({
+        ...comment,
+        expiresAt,
+      })).toThrow(
+        'Workspace search backfill cannot reconcile a Collaboration target candidate that carries the TTL-managed expiresAt attribute.',
+      )
+    }
+  })
+
   test('projects current Document rows with searchable content and deterministic keys', () => {
     const first = mapDocumentItem(createDocumentRow())
     const second = mapDocumentItem(createDocumentRow())
@@ -474,6 +482,18 @@ describe('Workspace search backfill mapping', () => {
         { id: 'duplicate', type: 'paragraph', text: 'Second' },
       ],
     }))).toBeUndefined()
+  })
+
+  test('fails closed for TTL-managed attributes on Document target candidates', () => {
+    // Explicit undefined still creates the own property that proves the source
+    // row participates in the TTL-managed schema and must fail closed.
+    for (const expiresAtEpoch of [2_000_000_000, undefined]) {
+      expect(() => mapDocumentItem(createDocumentRow({}, {
+        expiresAtEpoch,
+      }))).toThrow(
+        'Workspace search backfill cannot reconcile a Document target candidate that carries the TTL-managed expiresAtEpoch attribute.',
+      )
+    }
   })
 })
 
@@ -585,8 +605,7 @@ describe('Workspace search backfill runner', () => {
   })
 
   test('write run applies both put and delete projection operations', async () => {
-    const putInputs: PutCommandInput[] = []
-    const deleteInputs: DeleteCommandInput[] = []
+    const transactionInputs: TransactWriteCommandInput[] = []
     const documentClient = {
       async send(command: unknown) {
         if (command instanceof ScanCommand) {
@@ -598,12 +617,8 @@ describe('Workspace search backfill runner', () => {
             ScannedCount: 2,
           }
         }
-        if (command instanceof PutCommand) {
-          putInputs.push(command.input)
-          return {}
-        }
-        if (command instanceof DeleteCommand) {
-          deleteInputs.push(command.input)
+        if (command instanceof TransactWriteCommand) {
+          transactionInputs.push(command.input)
           return {}
         }
         throw new Error('Unexpected DynamoDB command.')
@@ -617,31 +632,93 @@ describe('Workspace search backfill runner', () => {
       { dryRun: false, help: false },
     )
 
-    expect(putInputs).toHaveLength(1)
-    expect(putInputs[0]).toEqual(expect.objectContaining({
-      TableName: 'WorkspaceSearchTable',
-      Item: expect.objectContaining({
-        entityId: 'team/core-team/issue/issue-1',
-        entryType: 'search-document',
-      }),
-    }))
-    expect(deleteInputs).toEqual([
-      {
+    expect(transactionInputs).toHaveLength(2)
+    expect(transactionInputs[0]?.TransactItems?.[0]?.Put).toEqual(
+      expect.objectContaining({
         TableName: 'WorkspaceSearchTable',
-        Key: {
-          workspaceId: 'workspace#mukuroji',
-          recordKey: createWorkspaceSearchDocumentRecordKey(
-            'comment',
-            'team/core-team/issue/issue-1/comment/comment-1',
-          ),
-        },
+        Item: expect.objectContaining({
+          entityId: 'team/core-team/issue/issue-1',
+          entryType: 'search-document',
+        }),
+      }),
+    )
+    expect(transactionInputs[1]?.TransactItems?.[0]?.Delete).toEqual({
+      TableName: 'WorkspaceSearchTable',
+      Key: {
+        workspaceId: 'workspace#mukuroji',
+        recordKey: createWorkspaceSearchDocumentRecordKey(
+          'comment',
+          'team/core-team/issue/issue-1/comment/comment-1',
+        ),
       },
-    ])
+    })
     expect(counters['work-items']).toEqual({
       scanned: 2,
       projected: 1,
       deleted: 1,
       skipped: 0,
     })
+  })
+
+  test('write reconciliation aborts before mutating TTL-managed target candidates', async () => {
+    const collaborationRow = {
+      entityKey:
+        'workspace#mukuroji#work-item#team/core-team/issue/release-check',
+      recordKey: 'COMMENT#comment-1',
+      entryType: 'comment',
+      id: 'comment-1',
+      rootCommentId: 'comment-1',
+      authorMemberKey: 'sato@example.com',
+      bodyMarkdown: 'TTL-managed target candidate',
+      version: 1,
+      createdAt: '2026-07-12T00:00:00.000Z',
+      updatedAt: '2026-07-12T00:00:00.000Z',
+      expiresAt: 2_000_000_000,
+    }
+    const cases = [
+      {
+        name: 'collaboration' as const,
+        item: collaborationRow,
+        mapItem: mapCollaborationItem,
+        message:
+          'Workspace search backfill cannot reconcile a Collaboration target candidate that carries the TTL-managed expiresAt attribute.',
+      },
+      {
+        name: 'documents' as const,
+        item: createDocumentRow({}, { expiresAtEpoch: 2_000_000_000 }),
+        mapItem: mapDocumentItem,
+        message:
+          'Workspace search backfill cannot reconcile a Document target candidate that carries the TTL-managed expiresAtEpoch attribute.',
+      },
+    ]
+
+    for (const testCase of cases) {
+      let mutationCount = 0
+      const documentClient = {
+        async send(command: unknown) {
+          if (command instanceof ScanCommand) {
+            return {
+              Items: [testCase.item],
+              ScannedCount: 1,
+            }
+          }
+
+          mutationCount += 1
+          return {}
+        },
+      } as unknown as DynamoDBDocumentClient
+
+      await expect(runBackfill(
+        documentClient,
+        [{
+          name: testCase.name,
+          tableName: 'SourceTable',
+          mapItem: testCase.mapItem,
+        }],
+        'WorkspaceSearchTable',
+        { dryRun: false, help: false },
+      )).rejects.toThrow(testCase.message)
+      expect(mutationCount).toBe(0)
+    }
   })
 })

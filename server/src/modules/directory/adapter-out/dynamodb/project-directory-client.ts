@@ -2,6 +2,14 @@ import {
   loadServerConfig,
 } from '../../../../infrastructure/config/server-config'
 import {
+  createDynamoDbClient as createConfiguredDynamoDbClient,
+  createWorkspaceSearchWriterDynamoDbDocumentClient,
+  shouldBootstrapLocalDynamoDb as shouldBootstrapConfiguredLocalDynamoDb,
+} from '../../../../infrastructure/aws/dynamodb-client'
+import {
+  throwIfWorkspaceSearchWriterFenceTerminalError,
+} from '../../../../infrastructure/runtime/workspace-search-writer-fence-document-client'
+import {
   createAuditFieldChanges,
   createMutationAuditEventPut,
   ensureLocalAuditEventsTable,
@@ -30,6 +38,9 @@ import {
   ProjectDataError,
 } from '../../project-data-error'
 import {
+  isProjectQuickAccessItems,
+} from '../../domain/project-quick-access'
+import {
   CreateTableCommand,
   DescribeTableCommand,
   DynamoDBClient,
@@ -40,7 +51,6 @@ import type {
 import {
   DynamoDBDocumentClient,
   GetCommand,
-  PutCommand,
   QueryCommand,
   TransactWriteCommand,
 } from '@aws-sdk/lib-dynamodb'
@@ -48,8 +58,12 @@ import type {
   TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
 import {
-  PLANNING_SCHEMA_VERSION,
+  PROJECT_QUICK_ACCESS_MAX_REVISION,
+  type ProjectQuickAccessItem,
+  type ProjectQuickAccessPreferences,
+  type UpdateProjectQuickAccessPreferencesInput,
 } from '@mukuroji/contracts'
+import { PLANNING_STORAGE_SCHEMA_VERSION } from '../../../planning'
 
 /**
  * プロジェクトごとの権限ロールです。
@@ -60,6 +74,10 @@ export type ProjectRole = 'manager' | 'member' | 'viewer'
  * active project と現在ユーザーの role を 1 directory read で返す行です。
  */
 export type ProjectAccessEntry = {
+  /**
+   * Canonical owner Team when the access source can identify it.
+   */
+  teamId?: string
   /**
    * active project ID です。
    */
@@ -275,6 +293,26 @@ type ProjectMemberItem = {
  */
 type ProjectDirectoryItem = ProjectDirectoryTeamItem | ProjectDirectoryProjectItem | ProjectMemberItem
 
+/** Viewer-owned ordered Project shortcuts stored beside the canonical directory rows. */
+type ProjectQuickAccessPreferencesItem = {
+  /** Synthetic viewer-specific partition key. */
+  directoryId: string
+  /** Quick-access preference sort key. */
+  entryKey: string
+  /** Sidecar row discriminator. */
+  entryType: 'project-quick-access'
+  /** Authenticated member key that owns this preference. */
+  memberKey: string
+  /** Workspace that contains the referenced Projects. */
+  workspaceId: string
+  /** Projects in the viewer's stable preferred order. */
+  items: ProjectQuickAccessItem[]
+  /** Compare-and-swap revision. */
+  revision: number
+  /** ISO 8601 timestamp of the latest successful replacement. */
+  updatedAt: string
+}
+
 /** Webhook grant から強整合確認する Team / Project source locator です。 */
 type ProjectWebhookGrantSource = {
   /** Grant が対象にする Team ID です。 */
@@ -433,6 +471,16 @@ export type ArchiveProjectResponse = {
   archivedAt: string
 }
 
+/** Canonical Work Item revision that must remain unchanged while archiving a Project. */
+export type ProjectArchiveWorkItemRevisionGuard = {
+  /** Team that owns the dependency endpoint. */
+  teamId: string
+  /** Team-local canonical Work Item identifier. */
+  workItemId: string
+  /** Revision observed while checking the Work Item's assigned Project. */
+  expectedRevision: number
+}
+
 /**
  * プロジェクト権限管理画面に表示する member 行です。
  */
@@ -539,6 +587,32 @@ export type RemoveProjectMemberResponse = {
  * API handler から利用する team/project directory client の最小 interface です。
  */
 export type ProjectDirectoryClient = {
+  /** Builds commit-time conditions proving a Team and optional Project remain active.
+   *
+   * @param directoryId - Owning Workspace directory identifier.
+   * @param teamId - Team that must remain active through commit.
+   * @param projectId - Optional Project that must remain active through commit.
+   * @returns DynamoDB condition checks for the dependent transaction.
+   */
+  createActiveReferenceConditionChecks?(
+    directoryId: string,
+    teamId: string,
+    projectId?: string,
+  ): Promise<NonNullable<TransactWriteCommandInput['TransactItems']>>
+  /** Builds a condition proving a Project member retains the requested role at commit time.
+   *
+   * @param directoryId - Owning Workspace directory identifier.
+   * @param projectId - Project whose membership authorizes the action.
+   * @param memberKey - Workspace member key whose role must remain active.
+   * @param minimumRole - Minimum role required by the dependent transaction.
+   * @returns A membership condition, or undefined when no matching direct grant exists.
+   */
+  createProjectAccessConditionCheck?(
+    directoryId: string,
+    projectId: string,
+    memberKey: string,
+    minimumRole: ProjectRole,
+  ): Promise<NonNullable<TransactWriteCommandInput['TransactItems']>[number] | undefined>
   /**
    * DynamoDB から sidebar 用の team/project 階層を取得します。
    */
@@ -547,6 +621,32 @@ export type ProjectDirectoryClient = {
     locale: Locale,
     consistentRead?: boolean,
   ): Promise<ProjectDirectoryResponse>
+  /**
+   * Reads the authenticated member's ordered Project quick-access preference.
+   *
+   * @param directoryId - Authenticated Workspace directory ID.
+   * @param memberKey - Authenticated member key that owns the preference.
+   * @param consistentRead - Whether DynamoDB must return the latest committed value.
+   * @returns The stored preference or the revision-zero default.
+   */
+  getProjectQuickAccess(
+    directoryId: string,
+    memberKey: string,
+    consistentRead?: boolean,
+  ): Promise<ProjectQuickAccessPreferences>
+  /**
+   * Replaces the authenticated member's complete Project quick-access order.
+   *
+   * @param directoryId - Authenticated Workspace directory ID.
+   * @param memberKey - Authenticated member key that owns the preference.
+   * @param input - Complete next order and its expected revision.
+   * @returns The committed preference with its incremented revision.
+   */
+  replaceProjectQuickAccess(
+    directoryId: string,
+    memberKey: string,
+    input: UpdateProjectQuickAccessPreferencesInput,
+  ): Promise<ProjectQuickAccessPreferences>
   /**
    * active project と指定 member の role を 1 directory read で取得します。
    */
@@ -633,6 +733,7 @@ export type ProjectDirectoryClient = {
     projectId: string,
     auditContext: MutationAuditContext | undefined,
     expectedPlanningRevision: number,
+    workItemRevisionGuards: readonly ProjectArchiveWorkItemRevisionGuard[],
   ): Promise<ArchiveProjectResponse>
 }
 
@@ -648,8 +749,8 @@ export const projectRoleWeights = {
   manager: 3,
 } as const satisfies Record<ProjectRole, number>
 
-/** DynamoDB TransactWriteItems が受け付ける action 数の上限です。 */
-const DYNAMODB_TRANSACTION_MAX_ACTIONS = 100
+/** Writer-fence ConditionCheck を除く application action 数の上限です。 */
+const DYNAMODB_TRANSACTION_MAX_ACTIONS = 99
 
 function createOptionalAuditTransactItems(
   tableName: string | undefined,
@@ -703,6 +804,10 @@ export class DynamoDbProjectDirectoryClient {
    * Team / Project archive と直列化する Planning table 名です。
    */
   private readonly planningTableName: string
+  /**
+   * Canonical Work Item table used to fence dependency endpoint Project assignments.
+   */
+  private readonly workItemsTableName: string
 
   constructor(
     tableName =
@@ -718,6 +823,12 @@ export class DynamoDbProjectDirectoryClient {
       getEnv('WORKSPACE_ACCESS_TABLE_NAME') ??
       'mukuroji-workspace-access-local',
     planningTableName = getEnv('PLANNING_TABLE_NAME') ?? 'mukuroji-planning-local',
+    workItemsTableName =
+      getEnv('MUKUROJI_WORK_ITEMS_TABLE') ??
+      getEnv('WORK_ITEMS_TABLE_NAME') ??
+      getEnv('MUKUROJI_TEAM_ISSUES_TABLE') ??
+      getEnv('TEAM_ISSUES_TABLE_NAME') ??
+      'mukuroji-team-issues-local',
   ) {
     this.tableName = tableName
     this.documentClient = documentClient
@@ -726,6 +837,7 @@ export class DynamoDbProjectDirectoryClient {
     this.auditTableName = auditTableName
     this.workspaceAccessTableName = workspaceAccessTableName
     this.planningTableName = planningTableName
+    this.workItemsTableName = workItemsTableName
   }
 
   /**
@@ -743,6 +855,251 @@ export class DynamoDbProjectDirectoryClient {
         teams: toProjectDirectoryResponse(items, locale, directoryId),
       } satisfies ProjectDirectoryResponse
     } catch (error) {
+      if (error instanceof ProjectDataError) {
+        throw error
+      }
+
+      throw toProjectDataError(error)
+    }
+  }
+
+  /** Builds commit-time guards for active Team and optional Project references.
+   *
+   * The rows are strongly read before their exact primary keys are bound to active-state
+   * conditions, so an archive transaction cannot commit between validation and the caller's
+   * dependent write.
+   *
+   * @param directoryId Owning Workspace directory identifier.
+   * @param teamId Team that must remain active through commit.
+   * @param projectId Optional Project that must remain active in the Team through commit.
+   * @returns DynamoDB condition checks composable with a dependent transaction.
+   */
+  async createActiveReferenceConditionChecks(
+    directoryId: string,
+    teamId: string,
+    projectId?: string,
+  ): Promise<NonNullable<TransactWriteCommandInput['TransactItems']>> {
+    const items = await this.readValidDirectoryItems(directoryId, true)
+    const team = items.find((item): item is ProjectDirectoryTeamItem =>
+      item.entryType === 'team' && item.teamId === teamId && isActiveDirectoryItem(item)
+    )
+    if (!team) {
+      throw new ProjectDataError(404, 'TeamNotFound', `Team "${teamId}" was not found.`)
+    }
+    const checks: NonNullable<TransactWriteCommandInput['TransactItems']> = [{
+      ConditionCheck: this.createActiveTeamConditionCheck(directoryId, team.entryKey, teamId),
+    }]
+    if (projectId === undefined) return checks
+    const project = items.find((item): item is ProjectDirectoryProjectItem =>
+      item.entryType === 'project' &&
+      item.teamId === teamId &&
+      item.projectId === projectId &&
+      isActiveDirectoryItem(item)
+    )
+    if (!project) {
+      throw new ProjectDataError(
+        404,
+        'ProjectNotFound',
+        `Project "${projectId}" was not found in team "${teamId}".`,
+      )
+    }
+    checks.push({
+      ConditionCheck: {
+        TableName: this.tableName,
+        Key: { directoryId, entryKey: project.entryKey },
+        ConditionExpression:
+          '#entryType = :entryType AND #teamId = :teamId AND #projectId = :projectId AND attribute_not_exists(#archivedAt)',
+        ExpressionAttributeNames: {
+          '#archivedAt': 'archivedAt',
+          '#entryType': 'entryType',
+          '#projectId': 'projectId',
+          '#teamId': 'teamId',
+        },
+        ExpressionAttributeValues: {
+          ':entryType': 'project',
+          ':projectId': projectId,
+          ':teamId': teamId,
+        },
+      },
+    })
+    return checks
+  }
+
+  /** Builds a commit-time condition for one active direct Project membership. */
+  async createProjectAccessConditionCheck(
+    directoryId: string,
+    projectId: string,
+    memberKey: string,
+    minimumRole: ProjectRole,
+  ): Promise<NonNullable<TransactWriteCommandInput['TransactItems']>[number] | undefined> {
+    const items = await this.readValidDirectoryItems(directoryId, true)
+    const member = items.find((item): item is ProjectMemberItem =>
+      item.entryType === 'project-member' &&
+      item.projectId === projectId &&
+      item.memberKey === normalizeProjectMemberKey(memberKey) &&
+      item.archivedAt === undefined &&
+      projectRoleWeights[item.role] >= projectRoleWeights[minimumRole]
+    )
+    if (!member) return undefined
+    return {
+      ConditionCheck: {
+        TableName: this.tableName,
+        Key: { directoryId, entryKey: member.entryKey },
+        ConditionExpression:
+          '#entryType = :entryType AND #projectId = :projectId AND #memberKey = :memberKey AND ' +
+          '#role = :role AND attribute_not_exists(#archivedAt)',
+        ExpressionAttributeNames: {
+          '#archivedAt': 'archivedAt',
+          '#entryType': 'entryType',
+          '#memberKey': 'memberKey',
+          '#projectId': 'projectId',
+          '#role': 'role',
+        },
+        ExpressionAttributeValues: {
+          ':entryType': 'project-member',
+          ':memberKey': member.memberKey,
+          ':projectId': projectId,
+          ':role': member.role,
+        },
+      },
+    }
+  }
+
+  /**
+   * Reads one viewer's ordered quick-access preference.
+   *
+   * @param directoryId - Authenticated Workspace directory ID.
+   * @param memberKey - Authenticated member key.
+   * @param consistentRead - Whether DynamoDB must return the latest committed value.
+   * @returns The stored preference or the revision-zero default.
+   */
+  async getProjectQuickAccess(
+    directoryId: string,
+    memberKey: string,
+    consistentRead = false,
+  ): Promise<ProjectQuickAccessPreferences> {
+    try {
+      const preferenceDirectoryId = createProjectQuickAccessDirectoryId(directoryId, memberKey)
+      const response = await this.documentClient.send(new GetCommand({
+        TableName: this.tableName,
+        ConsistentRead: consistentRead,
+        Key: {
+          directoryId: preferenceDirectoryId,
+          entryKey: projectQuickAccessEntryKey,
+        },
+      }))
+
+      if (response.Item === undefined) {
+        return { items: [], revision: 0 }
+      }
+
+      if (!isProjectQuickAccessPreferencesItem(response.Item, directoryId, memberKey)) {
+        throw new ProjectDataError(
+          503,
+          'InvalidProjectQuickAccess',
+          'Project quick-access preference is missing or invalid.',
+        )
+      }
+
+      return toProjectQuickAccessPreferences(response.Item)
+    } catch (error) {
+      if (error instanceof ProjectDataError) {
+        throw error
+      }
+
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * Replaces one viewer's complete quick-access order with compare-and-swap protection.
+   *
+   * @param directoryId - Authenticated Workspace directory ID.
+   * @param memberKey - Authenticated member key.
+   * @param input - Complete next order and its expected revision.
+   * @returns The committed preference with its incremented revision.
+   */
+  async replaceProjectQuickAccess(
+    directoryId: string,
+    memberKey: string,
+    input: UpdateProjectQuickAccessPreferencesInput,
+  ): Promise<ProjectQuickAccessPreferences> {
+    if (
+      !Number.isSafeInteger(input.revision) ||
+      input.revision < 0 ||
+      input.revision >= PROJECT_QUICK_ACCESS_MAX_REVISION ||
+      !isProjectQuickAccessItems(input.items)
+    ) {
+      throw new ProjectDataError(
+        400,
+        'InvalidProjectQuickAccessInput',
+        'Project quick-access input is invalid.',
+      )
+    }
+    const preferenceDirectoryId = createProjectQuickAccessDirectoryId(directoryId, memberKey)
+    const nextItem: ProjectQuickAccessPreferencesItem = {
+      directoryId: preferenceDirectoryId,
+      entryKey: projectQuickAccessEntryKey,
+      entryType: 'project-quick-access',
+      items: input.items.map((item) => ({ ...item })),
+      memberKey,
+      revision: input.revision + 1,
+      updatedAt: new Date().toISOString(),
+      workspaceId: directoryId,
+    }
+    const conditionExpression = input.revision === 0
+      ? 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)'
+      : '#revision = :expectedRevision AND #entryType = :entryType AND #workspaceId = :workspaceId AND #memberKey = :memberKey'
+
+    try {
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [
+          {
+            Put: {
+              TableName: this.tableName,
+              Item: nextItem,
+              ConditionExpression: conditionExpression,
+              ExpressionAttributeNames: input.revision === 0
+                ? undefined
+                : {
+                    '#entryType': 'entryType',
+                    '#memberKey': 'memberKey',
+                    '#revision': 'revision',
+                    '#workspaceId': 'workspaceId',
+                  },
+              ExpressionAttributeValues: input.revision === 0
+                ? undefined
+                : {
+                    ':entryType': 'project-quick-access',
+                    ':expectedRevision': input.revision,
+                    ':memberKey': memberKey,
+                    ':workspaceId': directoryId,
+                  },
+            },
+          },
+        ],
+      }))
+      return toProjectQuickAccessPreferences(nextItem)
+    } catch (error) {
+      throwIfWorkspaceSearchWriterFenceTerminalError(error)
+
+      if (hasTransactionConditionalFailure(error)) {
+        const current = await this.getProjectQuickAccess(directoryId, memberKey, true)
+
+        if (
+          current.revision === nextItem.revision &&
+          projectQuickAccessItemsEqual(current.items, nextItem.items)
+        ) {
+          return current
+        }
+
+        throw new ProjectDataError(
+          409,
+          'ProjectQuickAccessConflict',
+          'Project quick access changed before this update was saved.',
+        )
+      }
+
       if (error instanceof ProjectDataError) {
         throw error
       }
@@ -1255,13 +1612,11 @@ export class DynamoDbProjectDirectoryClient {
         metadata: { kind: 'team', teamId },
       })
 
-      if (auditPut) {
-        await this.documentClient.send(
-          new TransactWriteCommand({ TransactItems: [statePut, auditPut] }),
-        )
-      } else {
-        await this.documentClient.send(new PutCommand(statePut.Put))
-      }
+      await this.documentClient.send(
+        new TransactWriteCommand({
+          TransactItems: [statePut, ...(auditPut ? [auditPut] : [])],
+        }),
+      )
 
       return {
         team: {
@@ -1642,9 +1997,11 @@ export class DynamoDbProjectDirectoryClient {
     projectId: string,
     auditContext: MutationAuditContext | undefined,
     expectedPlanningRevision: number,
+    workItemRevisionGuards: readonly ProjectArchiveWorkItemRevisionGuard[] = [],
   ) {
     await this.ensureLocalAuditTable()
     let planningRevisionItemIndex: number | undefined
+    let workItemRevisionGuardStartIndex: number | undefined
     try {
       const items = await this.readValidDirectoryItems(directoryId)
       const team = items.find((item) =>
@@ -1699,10 +2056,38 @@ export class DynamoDbProjectDirectoryClient {
         archivedAt,
       )
       planningRevisionItemIndex = 1 + auditItems.length
+      const workItemRevisionConditions = workItemRevisionGuards.map((guard) => ({
+        ConditionCheck: {
+          TableName: this.workItemsTableName,
+          Key: {
+            directoryTeamId: `${directoryId}#team#${guard.teamId}`,
+            issueId: guard.workItemId,
+          },
+          ConditionExpression:
+            'attribute_exists(directoryTeamId) AND attribute_exists(issueId) AND ' +
+            '#revision = :expectedRevision',
+          ExpressionAttributeNames: { '#revision': 'revision' },
+          ExpressionAttributeValues: { ':expectedRevision': guard.expectedRevision },
+        },
+      }))
+      workItemRevisionGuardStartIndex = planningRevisionItemIndex + 1
+      const transactItems = [
+        stateUpdate,
+        ...auditItems,
+        planningRevisionMutation,
+        ...workItemRevisionConditions,
+      ]
+      if (transactItems.length > DYNAMODB_TRANSACTION_MAX_ACTIONS) {
+        throw new ProjectDataError(
+          413,
+          'PlanningProjectScopeDependencyLimitExceeded',
+          'The Project has too many dependency endpoints to archive atomically.',
+        )
+      }
 
       await this.documentClient.send(
         new TransactWriteCommand({
-          TransactItems: [stateUpdate, ...auditItems, planningRevisionMutation],
+          TransactItems: transactItems,
         }),
       )
 
@@ -1721,7 +2106,6 @@ export class DynamoDbProjectDirectoryClient {
         )
       }
 
-
       if (
         planningRevisionItemIndex !== undefined &&
         isTransactionConditionalFailureAt(error, planningRevisionItemIndex)
@@ -1730,6 +2114,20 @@ export class DynamoDbProjectDirectoryClient {
           409,
           'PlanningRevisionConflict',
           'Planning changed. Reload and try again.',
+        )
+      }
+
+      const guardStartIndex = workItemRevisionGuardStartIndex
+      if (
+        guardStartIndex !== undefined &&
+        workItemRevisionGuards.some((_, index) =>
+          isTransactionConditionalFailureAt(error, guardStartIndex + index)
+        )
+      ) {
+        throw new ProjectDataError(
+          409,
+          'WorkItemRevisionConflict',
+          'Work Item changed. Reload and try again.',
         )
       }
 
@@ -1995,17 +2393,40 @@ export class DynamoDbProjectDirectoryClient {
     throw toProjectDataError(originalError)
   }
 
-  /**
-   * project 作成時点でも team が active であることを検証する condition check を作ります。
+  /** Builds a commit-time guard for an active Team row.
+   *
+   * @param directoryId Owning Workspace directory identifier.
+   * @param entryKey Physical sort key obtained from the validated directory snapshot.
+   * @param expectedTeamId Optional semantic Team identifier bound to the row.
+   * @returns A DynamoDB condition check for the source transaction.
    */
-  private createActiveTeamConditionCheck(directoryId: string, entryKey: string) {
+  private createActiveTeamConditionCheck(
+    directoryId: string,
+    entryKey: string,
+    expectedTeamId?: string,
+  ) {
     return {
       TableName: this.tableName,
       Key: {
         directoryId,
         entryKey,
       },
-      ConditionExpression: 'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)',
+      ConditionExpression: expectedTeamId === undefined
+        ? 'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)'
+        : '#entryType = :entryType AND #teamId = :teamId AND attribute_not_exists(#archivedAt)',
+      ...(expectedTeamId === undefined
+        ? {}
+        : {
+            ExpressionAttributeNames: {
+              '#archivedAt': 'archivedAt',
+              '#entryType': 'entryType',
+              '#teamId': 'teamId',
+            },
+            ExpressionAttributeValues: {
+              ':entryType': 'team',
+              ':teamId': expectedTeamId,
+            },
+          }),
     }
   }
 
@@ -2259,28 +2680,11 @@ export class DynamoDbProjectDirectoryClient {
 }
 
 function createDynamoDbClient() {
-  const endpoint = getDynamoDbEndpoint()
-
-  return new DynamoDBClient({
-    region: getAwsRegion(),
-    ...(endpoint
-      ? {
-          endpoint,
-          credentials: {
-            accessKeyId: getEnv('AWS_ACCESS_KEY_ID') ?? 'test',
-            secretAccessKey: getEnv('AWS_SECRET_ACCESS_KEY') ?? 'test',
-          },
-        }
-      : {}),
-  })
+  return createConfiguredDynamoDbClient()
 }
 
 function createDynamoDbDocumentClient(dynamoDbClient = createDynamoDbClient()) {
-  return DynamoDBDocumentClient.from(dynamoDbClient, {
-    marshallOptions: {
-      removeUndefinedValues: true,
-    },
-  })
+  return createWorkspaceSearchWriterDynamoDbDocumentClient(dynamoDbClient)
 }
 
 const localDynamoDbTableInitializers = new Map<string, Promise<void>>()
@@ -2416,12 +2820,7 @@ function hasKeySchema(
 }
 
 function shouldBootstrapLocalDynamoDb() {
-  const endpoint = getDynamoDbEndpoint()
-
-  return Boolean(
-    endpoint &&
-    /^https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|floci)(?::|\/|$)/.test(endpoint),
-  )
+  return shouldBootstrapConfiguredLocalDynamoDb()
 }
 
 function isResourceNotFoundError(error: unknown) {
@@ -2509,7 +2908,7 @@ function createPlanningRevisionBump(
         workspaceId,
         recordKey: 'META',
         entryType: 'planning-meta',
-        schemaVersion: PLANNING_SCHEMA_VERSION,
+        schemaVersion: PLANNING_STORAGE_SCHEMA_VERSION,
         revision: expectedRevision + 1,
         updatedAt,
       },
@@ -2532,6 +2931,7 @@ async function sleep(ms: number) {
 }
 
 function toProjectDataError(error: unknown) {
+  throwIfWorkspaceSearchWriterFenceTerminalError(error)
   const awsError = error as {
     $metadata?: {
       httpStatusCode?: number
@@ -2568,6 +2968,89 @@ function readProjectDirectoryItems(values: unknown[], directoryId: string) {
   }
 
   return directoryItems
+}
+
+/**
+ * Creates the isolated partition key for one authenticated member's preference.
+ *
+ * @param workspaceId - Workspace that owns the preference.
+ * @param memberKey - Authenticated member key.
+ * @returns A sidecar partition key that cannot overlap canonical directory rows.
+ */
+function createProjectQuickAccessDirectoryId(workspaceId: string, memberKey: string) {
+  return `PROJECT_QUICK_ACCESS#${encodeURIComponent(workspaceId)}#${encodeURIComponent(memberKey)}`
+}
+
+const projectQuickAccessEntryKey = 'PREFERENCE'
+
+/**
+ * Validates a stored quick-access sidecar row.
+ *
+ * @param value - Candidate DynamoDB value.
+ * @param directoryId - Expected Workspace partition key.
+ * @param memberKey - Optional expected preference owner.
+ * @returns Whether the value is a valid quick-access row.
+ */
+function isProjectQuickAccessPreferencesItem(
+  value: unknown,
+  directoryId: string,
+  memberKey?: string,
+): value is ProjectQuickAccessPreferencesItem {
+  if (!isRecord(value)) {
+    return false
+  }
+
+  const storedMemberKey = value.memberKey
+  if (typeof storedMemberKey !== 'string') {
+    return false
+  }
+
+  return (
+    value.directoryId === createProjectQuickAccessDirectoryId(directoryId, storedMemberKey) &&
+    value.workspaceId === directoryId &&
+    value.entryType === 'project-quick-access' &&
+    value.entryKey === projectQuickAccessEntryKey &&
+    (memberKey === undefined || storedMemberKey === memberKey) &&
+    Number.isSafeInteger(value.revision) &&
+    typeof value.revision === 'number' &&
+    value.revision > 0 &&
+    value.revision <= PROJECT_QUICK_ACCESS_MAX_REVISION &&
+    typeof value.updatedAt === 'string' &&
+    Array.isArray(value.items) &&
+    isProjectQuickAccessItems(value.items)
+  )
+}
+
+/**
+ * Copies a storage row into the public preference contract.
+ *
+ * @param item - Valid stored preference row.
+ * @returns A detached public preference value.
+ */
+function toProjectQuickAccessPreferences(
+  item: ProjectQuickAccessPreferencesItem,
+): ProjectQuickAccessPreferences {
+  return {
+    items: item.items.map((value) => ({ ...value })),
+    revision: item.revision,
+  }
+}
+
+/**
+ * Compares two ordered quick-access collections.
+ *
+ * @param first - First ordered collection.
+ * @param second - Second ordered collection.
+ * @returns Whether both collections contain the same identities in the same order.
+ */
+function projectQuickAccessItemsEqual(
+  first: readonly ProjectQuickAccessItem[],
+  second: readonly ProjectQuickAccessItem[],
+) {
+  return first.length === second.length && first.every((item, index) => {
+    const candidate = second[index]
+    return candidate?.projectId === item.projectId && candidate.teamId === item.teamId
+  })
 }
 
 function toProjectDirectoryResponse(
@@ -3059,10 +3542,6 @@ function padSortOrder(value: number) {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-function getAwsRegion() {
-  return loadServerConfig().awsRegion
 }
 
 function getDynamoDbEndpoint() {

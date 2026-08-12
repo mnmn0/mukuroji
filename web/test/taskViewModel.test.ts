@@ -11,9 +11,15 @@ import type { MessageKey } from '../src/shared/i18n/i18n'
 import type { WorkspaceMember } from '../src/workspace/api/access'
 import type { ProjectTask } from '../src/tasks/api/tasks'
 import {
+  createDefaultDueDateTaskSchedule,
+  createDefaultUnscheduledTaskSchedule,
+  deriveTaskScheduleDueDate,
+} from '../src/tasks/model/taskSchedule'
+import {
   createAssigneeFilterOptions,
   createBulkProjectOptions,
   createBulkOperationSelection,
+  createTaskInversePatch,
   createProjectStatusTestToken,
   createProjectTaskStatusColumns,
   createTaskCalendarModel,
@@ -23,12 +29,15 @@ import {
   filterAndSortProjectTasks,
   findTaskBySelection,
   formatTaskDateInputValue,
+  applyTaskPatchOptimistically,
   isTaskInProjectStatusColumn,
+  matchesProjectTaskKeyword,
   isTaskOverdue,
   matchesTaskDueDateFilter,
   parseTaskDueDate,
   resolveEffectiveDefinitionFilter,
   resolveEffectiveStatusFilter,
+  resolveLatestTaskSnapshot,
   resolveDueDateFilterLabelKey,
   resolveProjectTaskConfiguration,
   resolveTaskAssigneeFilterValue,
@@ -47,7 +56,7 @@ describe('task view constants and input normalization', () => {
   test('exposes the existing tabs, priorities, due-date filters, and sort orders', () => {
     expect(taskTabs).toEqual(['table', 'board', 'gantt', 'calendar', 'file', 'permissions'])
     expect(taskPriorities).toEqual(['high', 'medium', 'low'])
-    expect(taskDueDateFilters).toEqual(['all', 'overdue', 'upcoming', 'no-date'])
+    expect(taskDueDateFilters).toEqual(['all', 'overdue', 'today', 'upcoming', 'no-date'])
     expect(taskSortOrders).toEqual(['due-date-asc', 'due-date-desc'])
   })
 
@@ -71,6 +80,7 @@ describe('task view constants and input normalization', () => {
     expect(taskDueDateFilters.map(resolveDueDateFilterLabelKey)).toEqual([
       'tasks.filter.dueDateAll',
       'tasks.filter.dueDateOverdue',
+      'tasks.filter.dueDateToday',
       'tasks.filter.dueDateUpcoming',
       'tasks.filter.dueDateNoDate',
     ])
@@ -120,13 +130,81 @@ describe('task selection model', () => {
       workItemId: 'same-local-id',
     })
   })
+
+  test('uses the greatest matching revision for detail rendering and mutation', () => {
+    const listTask = createTask({ id: 'same-local-id', revision: 4, teamId: 'core-team' })
+    const newerDetail = createTask({ id: 'same-local-id', revision: 5, teamId: 'core-team' })
+    const olderDetail = createTask({ id: 'same-local-id', revision: 3, teamId: 'core-team' })
+    const otherTeamDetail = createTask({
+      id: 'same-local-id',
+      revision: 8,
+      teamId: 'design-team',
+    })
+
+    expect(resolveLatestTaskSnapshot(listTask, newerDetail)).toBe(newerDetail)
+    expect(resolveLatestTaskSnapshot(listTask, olderDetail)).toBe(listTask)
+    expect(resolveLatestTaskSnapshot(listTask, otherTeamDetail)).toBe(listTask)
+    expect(resolveLatestTaskSnapshot(undefined, newerDetail)).toBeUndefined()
+  })
+})
+
+describe('contextual task mutations', () => {
+  test('projects inline changes optimistically and restores touched fields for undo', () => {
+    const configuration = createConfiguration('core-team', [
+      createStatus('todo', 'To do', 'unstarted', 0),
+      createStatus('active', 'In progress', 'started', 1),
+    ], [
+      {
+        id: 'risk',
+        name: 'Risk',
+        options: [{ id: 'low', name: 'Low', sortOrder: 0 }],
+        required: false,
+        sortOrder: 0,
+        type: 'select',
+      },
+      {
+        id: 'note',
+        name: 'Note',
+        required: false,
+        sortOrder: 1,
+        type: 'text',
+      },
+    ])
+    const task = createTask({
+      customFieldValues: { note: 'Keep this', risk: 'low' },
+      schedule: createDefaultDueDateTaskSchedule('2026-07-23'),
+      workflowStatusId: 'todo',
+    })
+    const patch = {
+      customFieldValues: { note: null, risk: 'low' },
+      schedule: createDefaultDueDateTaskSchedule('2026-07-25'),
+      workflowStatusId: 'active',
+    }
+
+    const optimisticTask = applyTaskPatchOptimistically(task, patch, configuration)
+    const inversePatch = createTaskInversePatch(task, patch)
+
+    expect(optimisticTask).toMatchObject({
+      customFieldValues: { risk: 'low' },
+      dueDate: '2026-07-25',
+      schedule: createDefaultDueDateTaskSchedule('2026-07-25'),
+      statusCategory: 'started',
+      workflowStatusId: 'active',
+    })
+    expect(optimisticTask.customFieldValues).not.toHaveProperty('note')
+    expect(inversePatch).toEqual({
+      customFieldValues: { note: 'Keep this', risk: 'low' },
+      schedule: createDefaultDueDateTaskSchedule('2026-07-23'),
+      workflowStatusId: 'todo',
+    })
+  })
 })
 
 describe('task due-date model', () => {
   const referenceDay = new Date(2026, 6, 23, 15, 30)
 
-  test('parses slash-delimited dates at local midnight without mutating the reference day', () => {
-    const parsed = parseTaskDueDate('2026/07/23')
+  test('parses canonical ISO dates at local midnight without mutating the reference day', () => {
+    const parsed = parseTaskDueDate('2026-07-23')
     const referenceTime = referenceDay.getTime()
 
     expect(parsed?.getFullYear()).toBe(2026)
@@ -134,21 +212,34 @@ describe('task due-date model', () => {
     expect(parsed?.getDate()).toBe(23)
     expect(parsed?.getHours()).toBe(0)
     expect(parseTaskDueDate('')).toBeNull()
-    expect(parseTaskDueDate('2026/00/23')).toBeNull()
-    expect(isTaskOverdue(createTask({ dueDate: '2026/07/22' }), referenceDay)).toBe(true)
+    expect(parseTaskDueDate('2026-00-23')).toBeNull()
+    expect(parseTaskDueDate('2026/07/23')).toBeNull()
+    expect(isTaskOverdue(createTask({
+      schedule: createDefaultDueDateTaskSchedule('2026-07-22'),
+    }), referenceDay)).toBe(true)
     expect(referenceDay.getTime()).toBe(referenceTime)
   })
 
   test('excludes completed tasks and applies overdue, upcoming, and no-date boundaries', () => {
-    const overdue = createTask({ dueDate: '2026/07/22', statusCategory: 'started' })
-    const today = createTask({ dueDate: '2026/07/23', statusCategory: 'unstarted' })
-    const completed = createTask({ dueDate: '2026/07/22', statusCategory: 'completed' })
-    const undated = createTask({ dueDate: '' })
+    const overdue = createTask({
+      schedule: createDefaultDueDateTaskSchedule('2026-07-22'),
+      statusCategory: 'started',
+    })
+    const today = createTask({
+      schedule: createDefaultDueDateTaskSchedule('2026-07-23'),
+      statusCategory: 'unstarted',
+    })
+    const completed = createTask({
+      schedule: createDefaultDueDateTaskSchedule('2026-07-22'),
+      statusCategory: 'completed',
+    })
+    const undated = createTask({ schedule: createDefaultUnscheduledTaskSchedule() })
 
     expect(isTaskOverdue(overdue, referenceDay)).toBe(true)
     expect(isTaskOverdue(today, referenceDay)).toBe(false)
     expect(isTaskOverdue(completed, referenceDay)).toBe(false)
     expect(matchesTaskDueDateFilter(overdue, 'overdue', referenceDay)).toBe(true)
+    expect(matchesTaskDueDateFilter(today, 'today', referenceDay)).toBe(true)
     expect(matchesTaskDueDateFilter(today, 'upcoming', referenceDay)).toBe(true)
     expect(matchesTaskDueDateFilter(completed, 'overdue', referenceDay)).toBe(false)
     expect(matchesTaskDueDateFilter(completed, 'upcoming', referenceDay)).toBe(false)
@@ -156,12 +247,45 @@ describe('task due-date model', () => {
     expect(matchesTaskDueDateFilter(undated, 'all', referenceDay)).toBe(true)
   })
 
+  test('uses each canonical schedule timezone for overdue boundaries', () => {
+    const instant = new Date('2026-07-11T15:00:00.000Z')
+    const schedule = createDefaultDueDateTaskSchedule('2026-07-11')
+    const tokyoTask = createTask({
+      schedule: {
+        ...schedule,
+        calendarPolicy: { ...schedule.calendarPolicy, timeZone: 'Asia/Tokyo' },
+      },
+      statusCategory: 'started',
+    })
+    const newYorkTask = createTask({
+      schedule: {
+        ...schedule,
+        calendarPolicy: { ...schedule.calendarPolicy, timeZone: 'America/New_York' },
+      },
+      statusCategory: 'started',
+    })
+
+    expect(isTaskOverdue(tokyoTask, instant)).toBe(true)
+    expect(matchesTaskDueDateFilter(tokyoTask, 'overdue', instant)).toBe(true)
+    expect(isTaskOverdue(newYorkTask, instant)).toBe(false)
+    expect(matchesTaskDueDateFilter(newYorkTask, 'upcoming', instant)).toBe(true)
+  })
+
   test('preserves due-date ordering, ID tie-breakers, source order, and missing-date placement', () => {
     const source = [
-      createTask({ dueDate: '2026/07/23', id: 'same-date-b' }),
-      createTask({ dueDate: '', id: 'missing' }),
-      createTask({ dueDate: '2026/07/25', id: 'later' }),
-      createTask({ dueDate: '2026/07/23', id: 'same-date-a' }),
+      createTask({
+        id: 'same-date-b',
+        schedule: createDefaultDueDateTaskSchedule('2026-07-23'),
+      }),
+      createTask({ id: 'missing', schedule: createDefaultUnscheduledTaskSchedule() }),
+      createTask({
+        id: 'later',
+        schedule: createDefaultDueDateTaskSchedule('2026-07-25'),
+      }),
+      createTask({
+        id: 'same-date-a',
+        schedule: createDefaultDueDateTaskSchedule('2026-07-23'),
+      }),
     ]
 
     expect(sortTasksByDueDate(source, 'due-date-asc').map((task) => task.id)).toEqual([
@@ -384,9 +508,9 @@ describe('task custom-field display, filters, and sorting', () => {
       assigneeName: 'Alpha Person',
       assigneeUserId: 'alpha-user',
       customFieldValues: { risk: 'urgent' },
-      dueDate: '2026/07/24',
       id: 'matching',
       priority: 'high',
+      schedule: createDefaultDueDateTaskSchedule('2026-07-24'),
       statusCategory: 'unstarted',
       teamId: 'core-team',
       title: 'Release candidate',
@@ -431,6 +555,26 @@ describe('task custom-field display, filters, and sorting', () => {
     expect(result.map((task) => task.id)).toEqual(['matching'])
   })
 
+  test('matches Project task display labels, schedule dates, and formatted custom fields', () => {
+    const task = createTask({
+      customFieldValues: { risk: 'urgent' },
+      priority: 'high',
+      schedule: createDefaultDueDateTaskSchedule('2026-07-24'),
+      workflowStatusId: 'todo',
+    })
+    const queries = ['ready', 'high', '2026-07-24', 'urgent']
+
+    expect(queries.map((query) => matchesProjectTaskKeyword(
+      task,
+      query,
+      configuration,
+      resolvedConfigurations,
+      'en',
+      {},
+      translateTaskLabel,
+    ))).toEqual([true, true, true, true])
+  })
+
   test('falls back from stale status and custom-field filters without losing category', () => {
     const validDefinitionFilter = { category: 'started', customFieldId: 'risk' }
     const staleDefinitionFilter = { category: 'started', customFieldId: 'removed' }
@@ -448,11 +592,26 @@ describe('task custom-field display, filters, and sorting', () => {
 
 describe('task calendar and summary models', () => {
   test('groups equal due dates, sorts day values, and separates undated tasks', () => {
-    const later = createTask({ dueDate: '2026/07/25', id: 'later' })
-    const first = createTask({ dueDate: '2026/07/23', id: 'first' })
-    const second = createTask({ dueDate: '2026/07/23', id: 'second' })
-    const undated = createTask({ dueDate: '', id: 'undated' })
-    const whitespaceOnly = createTask({ dueDate: '   ', id: 'whitespace-only' })
+    const later = createTask({
+      id: 'later',
+      schedule: createDefaultDueDateTaskSchedule('2026-07-25'),
+    })
+    const first = createTask({
+      id: 'first',
+      schedule: createDefaultDueDateTaskSchedule('2026-07-23'),
+    })
+    const second = createTask({
+      id: 'second',
+      schedule: createDefaultDueDateTaskSchedule('2026-07-23'),
+    })
+    const undated = createTask({
+      id: 'undated',
+      schedule: createDefaultUnscheduledTaskSchedule(),
+    })
+    const whitespaceOnly = createTask({
+      id: 'whitespace-only',
+      schedule: createDefaultUnscheduledTaskSchedule(),
+    })
     const model = createTaskCalendarModel([
       later,
       first,
@@ -465,8 +624,8 @@ describe('task calendar and summary models', () => {
       date: day.date,
       ids: day.items.map((task) => task.id),
     }))).toEqual([
-      { date: '2026/07/23', ids: ['first', 'second'] },
-      { date: '2026/07/25', ids: ['later'] },
+      { date: '2026-07-23', ids: ['first', 'second'] },
+      { date: '2026-07-25', ids: ['later'] },
     ])
     expect(model.unscheduledTasks).toEqual([undated, whitespaceOnly])
   })
@@ -503,17 +662,22 @@ describe('task calendar and summary models', () => {
  * @param overrides - Fields that differ from the default task fixture.
  * @returns A canonical Project task.
  */
-function createTask(overrides: Partial<ProjectTask> = {}): ProjectTask {
+function createTask(
+  overrides: Omit<Partial<ProjectTask>, 'dueDate'> = {},
+): ProjectTask {
+  const schedule = overrides.schedule ?? createDefaultDueDateTaskSchedule('2026-07-23')
+
   return {
     assigneeUserId: 'user@example.com',
     createdAt: '2026-07-01T00:00:00.000Z',
     creatorMemberKey: 'creator@example.com',
     customFieldValues: {},
-    dueDate: '2026/07/23',
+    dueDate: deriveTaskScheduleDueDate(schedule),
     id: 'task-1',
     priority: 'medium',
     relationIds: [],
     revision: 1,
+    schedule,
     schemaVersion: WORK_ITEM_SCHEMA_VERSION,
     source: 'dynamodb',
     statusCategory: 'unstarted',

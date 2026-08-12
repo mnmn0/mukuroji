@@ -14,6 +14,7 @@ import {
   createMutationAuditContext,
   createWorkspaceInvitationAuditEntityId,
   createWorkspaceMemberAuditEntityId,
+  createWorkspaceMemberAuditEntityIdFromKeyBytes,
   DynamoDbAuditEventsClient,
   ensureLocalAuditEventsTable,
   getConfiguredAuditRetentionDays,
@@ -122,6 +123,27 @@ test('allows an omitted expiry only for an unknown-time backfill event', () => {
   expect(event.expiresAt).toBeUndefined()
 })
 
+test('omits audit expiry while retention is suspended by legal hold', () => {
+  const context = createMutationAuditContext({
+    workspaceId: 'workspace-1',
+    actor: { id: 'admin-1', kind: 'user' },
+    idempotencyKey: 'tenant-governance-2',
+    occurredAt: '2026-07-11T12:00:00.000Z',
+    request: { method: 'PATCH', path: '/api/tenant/governance', body: { legalHold: true } },
+    source: { kind: 'api', route: '/api/tenant/governance' },
+  })
+
+  const event = createAuditEvent({
+    context,
+    eventType: 'tenant.governance.updated',
+    entity: { type: 'tenant', id: 'workspace-1' },
+    action: 'updated',
+    retentionSuspended: true,
+  })
+
+  expect(event.expiresAt).toBeUndefined()
+})
+
 test('preserves a session-bound break-glass actor kind in immutable events', () => {
   const context = createMutationAuditContext({
     workspaceId: 'workspace-1',
@@ -205,6 +227,35 @@ test('creates stable keyed Workspace access IDs without exposing private identif
   expect(readWorkspaceAuditPseudonymKey({
     MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY: key,
   })).toBe(key)
+})
+
+test('creates the exact Workspace member pseudonym contract from caller-owned key bytes', () => {
+  const keyHex = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+  const storage = Buffer.alloc(34, 0x7f)
+  Buffer.from(keyHex, 'hex').copy(storage, 1)
+  const key = storage.subarray(1, 33)
+  const before = Buffer.from(storage)
+
+  expect(createWorkspaceMemberAuditEntityIdFromKeyBytes(
+    'user#owner@example.com',
+    'member@example.com',
+    key,
+  )).toBe(createWorkspaceMemberAuditEntityId(
+    'user#owner@example.com',
+    'member@example.com',
+    keyHex,
+  ))
+  expect(storage).toEqual(before)
+  expect(() => createWorkspaceMemberAuditEntityIdFromKeyBytes(
+    'workspace-1',
+    'member@example.com',
+    new Uint8Array(31),
+  )).toThrow('exactly 32 bytes')
+  expect(() => createWorkspaceMemberAuditEntityIdFromKeyBytes(
+    'workspace-1',
+    'member@example.com',
+    new Uint8Array(33),
+  )).toThrow('exactly 32 bytes')
 })
 
 test('uses the local audit table default for shared AWS endpoint variables', () => {

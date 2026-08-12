@@ -1,35 +1,56 @@
 import { expect, test } from '@playwright/test'
 import type { Locator, Page } from '@playwright/test'
 import {
+  DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY,
+  FOCUS_SCHEMA_VERSION,
+  PLANNING_SCHEMA_VERSION,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
   type AnalyticsExportInput,
   type AnalyticsQueryInput,
   type ApprovalRequest,
+  type ConfirmWorkItemScheduleChangeInput,
   type CustomFieldValue,
   type FileAnnotation,
   type FileAttachment,
   type FileVersion,
+  type FocusItem,
+  type FocusPolicy,
+  type FocusPolicyOverrides,
+  type FocusPolicySettings,
+  type FocusQueueResponse,
+  type FocusQueueSection,
+  type ProjectQuickAccessPreferences,
+  type PlanningSnapshot,
+  type PreviewWorkItemScheduleInput,
   type WorkItemConfiguration,
   type WorkItemRelation,
   type WorkItemRelationType,
+  type WorkItemSchedule,
+  type WorkItemScheduleChangePreview,
+  type WorkItemScheduleDependency,
+  type WorkItemScheduleDependencyConflict,
+  type WorkItemScheduleImpact,
+  type WorkItemScheduleOperation,
 } from '@mukuroji/contracts'
 import { readFile } from 'node:fs/promises'
 import {
   analyticsReportFixtures,
   analyticsSnapshotFixture,
 } from '../src/analytics/fixtures'
+import { focusQueueResponseFixture } from '../src/features/focus-queue/fixtures'
 import type { TeamIssue, TeamIssueActivity, TeamIssueComment } from '../src/issues/api'
 import type { InboxNotification, NotificationPreferences } from '../src/notifications/api'
-import { projectDirectoryFixtures } from '../src/projects/fixtures'
+import { planningSnapshotFixture } from '../src/planning/fixtures'
 import type { ProjectDirectoryTeam, ProjectMember, ProjectMemberRole, ProjectUser } from '../src/projects/api'
+import { projectDirectoryFixtures } from '../src/projects/fixtures'
 import type { ProjectTask } from '../src/tasks/api'
-import type { WorkspaceAccess } from '../src/workspace/api'
 import { referoTaskFixtures } from '../src/tasks/fixtures'
 import {
   teamWorkItemConfigurationFixture,
   workspaceWorkItemConfigurationFixture,
 } from '../src/work-items/fixtures'
+import type { WorkspaceAccess } from '../src/workspace/api'
 
 const authSession = {
   accessToken: 'test-access-token',
@@ -101,6 +122,26 @@ type MockRequestCounts = {
    */
   workspaceWorkItems: number
   /**
+   * Focus queue snapshot API request count.
+   */
+  focusReads: number
+  /**
+   * Focus snooze mutation API request count.
+   */
+  focusSnoozeUpdates: number
+  /**
+   * Focus watch mutation API request count.
+   */
+  focusWatchUpdates: number
+  /**
+   * Focus policy mutation API request count.
+   */
+  focusPolicyUpdates: number
+  /**
+   * Focus policy replacement inputs observed by the mock API.
+   */
+  focusPolicyInputs: unknown[]
+  /**
    * 通知一覧 API の request 数です。
    */
   notificationReads: number
@@ -156,6 +197,14 @@ type MockRequestCounts = {
    * チーム Issue 更新 API の request 数です。
    */
   issueUpdates: number
+  /**
+   * Work Item schedule preview API の request 数です。
+   */
+  schedulePreviews: number
+  /**
+   * Work Item schedule confirm API の request 数です。
+   */
+  scheduleConfirms: number
   /**
    * チーム Issue コメント API の request 数です。
    */
@@ -226,6 +275,19 @@ async function mockCurrentUser(
  */
 type MockAuthenticatedTaskPageOptions = {
   /**
+   * `/api/auth/me` が返す現在ユーザーの上書きです。
+   */
+  currentUser?: {
+    /** Cognito username と project member key です。 */
+    username: string
+    /** 画面に表示するユーザー名です。 */
+    name: string
+    /** Workspace 全体を管理できる system admin かどうかです。 */
+    isSystemAdmin: boolean
+    /** Workspace 内の content mutation を制御する role です。 */
+    workspaceRole: 'guest' | 'member' | 'admin' | 'owner'
+  }
+  /**
    * Team ID ごとに Sidebar の初期展開状態を上書きする値です。
    */
   teamExpandedById?: Partial<Record<string, boolean>>
@@ -234,6 +296,10 @@ type MockAuthenticatedTaskPageOptions = {
    */
   projectNamesByTeam?: Partial<Record<string, Partial<Record<string, string>>>>
   /**
+   * Project ごとの role 判定に使う member 一覧の上書きです。
+   */
+  projectMembersByProject?: Partial<Record<string, readonly ProjectMember[]>>
+  /**
    * チーム Issue API が初期状態として返す保存済み Issue 一覧です。
    */
   teamIssuesByTeam?: Partial<Record<string, TeamIssue[]>>
@@ -241,6 +307,24 @@ type MockAuthenticatedTaskPageOptions = {
    * 初回更新を revision conflict にする `teamId\0issueId` key の一覧です。
    */
   revisionConflictIssueKeys?: readonly string[]
+  /**
+   * Schedule preview を permission error にする `teamId\0issueId` key の一覧です。
+   */
+  forbiddenSchedulePreviewIssueKeys?: readonly string[]
+  /** One-based Focus snooze request numbers that should fail without mutating state. */
+  failedFocusSnoozeRequestNumbers?: readonly number[]
+  /**
+   * Planning snapshot と schedule preview に使う canonical dependency 一覧です。
+   */
+  workItemScheduleDependencies?: readonly WorkItemScheduleDependency[]
+  /**
+   * Planning snapshot と schedule preview に表示する blocking conflict 一覧です。
+   */
+  workItemScheduleDependencyConflicts?: readonly WorkItemScheduleDependencyConflict[]
+  /** Number of initial Planning snapshot requests that should fail before retry succeeds. */
+  planningFailureCount?: number
+  /** Number of Project Work Item GET requests to fail after schedule confirmation commits. */
+  postConfirmProjectIssueFailureCount?: number
   /**
    * Notification API が初期状態として返す recipient 通知です。
    */
@@ -265,6 +349,10 @@ type MockAuthenticatedTaskPageOptions = {
    * `teamId\0issueId` ごとの初期 Work Item relation です。
    */
   workItemRelationsByIssue?: Partial<Record<string, readonly WorkItemRelation[]>>
+  /**
+   * Focus API snapshot used by Workspace queue and attention previews.
+   */
+  focusQueue?: FocusQueueResponse
 }
 
 /**
@@ -284,6 +372,11 @@ async function mockAuthenticatedTaskPage(
     projectDirectory: 0,
     projectTasks: {},
     workspaceWorkItems: 0,
+    focusReads: 0,
+    focusSnoozeUpdates: 0,
+    focusWatchUpdates: 0,
+    focusPolicyUpdates: 0,
+    focusPolicyInputs: [],
     notificationReads: 0,
     notificationUpdates: 0,
     notificationPreferenceUpdates: 0,
@@ -298,6 +391,8 @@ async function mockAuthenticatedTaskPage(
     issueReads: 0,
     issueCreates: 0,
     issueUpdates: 0,
+    schedulePreviews: 0,
+    scheduleConfirms: 0,
     issueComments: 0,
     taskCreates: 0,
     taskStatusUpdates: 0,
@@ -311,6 +406,16 @@ async function mockAuthenticatedTaskPage(
     expanded: options.teamExpandedById?.[team.id] ?? team.expanded,
     projects: team.projects.map((project) => ({ ...project })),
   }))
+  let projectQuickAccess: ProjectQuickAccessPreferences = {
+    items: [
+      { projectId: 'refero', teamId: 'core-team' },
+      { projectId: 'product-roadmap', teamId: 'core-team' },
+      { projectId: 'shared-launch', teamId: 'core-team' },
+      { projectId: 'brand-refresh', teamId: 'design-team' },
+      { projectId: 'shared-launch', teamId: 'design-team' },
+    ],
+    revision: 1,
+  }
   for (const [teamId, projectNames] of Object.entries(options.projectNamesByTeam ?? {})) {
     const team = projectDirectory.find((candidate) => candidate.id === teamId)
 
@@ -334,6 +439,30 @@ async function mockAuthenticatedTaskPage(
     'design-team': [...(options.teamIssuesByTeam?.['design-team'] ?? [])],
   }
   const pendingRevisionConflictIssueKeys = new Set(options.revisionConflictIssueKeys ?? [])
+  const forbiddenSchedulePreviewIssueKeys = new Set(
+    options.forbiddenSchedulePreviewIssueKeys ?? [],
+  )
+  const failedFocusSnoozeRequestNumbers = new Set(
+    options.failedFocusSnoozeRequestNumbers ?? [],
+  )
+  const workItemScheduleDependencies = structuredClone([
+    ...(options.workItemScheduleDependencies ?? []),
+  ])
+  const workItemScheduleDependencyConflicts = structuredClone([
+    ...(options.workItemScheduleDependencyConflicts ?? []),
+  ])
+  const currentUser = options.currentUser ?? {
+    username: 'demo@example.com',
+    name: 'Demo User',
+    isSystemAdmin: true,
+    workspaceRole: 'owner' as const,
+  }
+  const planningRevision = 1
+  let remainingPlanningFailures = Math.max(0, options.planningFailureCount ?? 0)
+  let remainingPostConfirmProjectIssueFailures = Math.max(
+    0,
+    options.postConfirmProjectIssueFailureCount ?? 0,
+  )
   const failedWorkItemConfigurationTeamIds = new Set(
     options.failedWorkItemConfigurationTeamIds ?? [],
   )
@@ -343,6 +472,8 @@ async function mockAuthenticatedTaskPage(
     ...notification,
     reasons: [...notification.reasons],
   }))
+  let focusQueue = structuredClone(options.focusQueue ?? focusQueueResponseFixture)
+  const previousFocusSections = new Map<string, FocusQueueSection>()
   let notificationPreferences = cloneNotificationPreferences(
     options.notificationPreferences ?? createDefaultNotificationPreferences(),
   )
@@ -412,6 +543,11 @@ async function mockAuthenticatedTaskPage(
         workspaceStatus: 'active',
       },
     ],
+  }
+  for (const [projectId, members] of Object.entries(options.projectMembersByProject ?? {})) {
+    if (members) {
+      projectMembersByProject[projectId] = structuredClone([...members])
+    }
   }
   const projectUsers: ProjectUser[] = [
     {
@@ -532,16 +668,16 @@ async function mockAuthenticatedTaskPage(
   await page.route('**/api/auth/me', async (route) => {
     await route.fulfill({
       json: {
-        username: 'demo@example.com',
+        username: currentUser.username,
         attributes: {
           'custom:workspace_id': 'workspace-demo',
-          email: 'demo@example.com',
-          name: 'Demo User',
+          email: currentUser.username,
+          name: currentUser.name,
         },
-        groups: ['mukuroji-system-admins'],
-        isSystemAdmin: true,
+        groups: currentUser.isSystemAdmin ? ['mukuroji-system-admins'] : [],
+        isSystemAdmin: currentUser.isSystemAdmin,
         workspaceMemberStatus: 'active',
-        workspaceRole: 'owner',
+        workspaceRole: currentUser.workspaceRole,
       },
     })
   })
@@ -549,6 +685,32 @@ async function mockAuthenticatedTaskPage(
   await page.route('**/api/workspace/access', async (route) => {
     expect(route.request().headers().authorization).toBe('Bearer test-access-token')
     await route.fulfill({ json: workspaceAccess })
+  })
+
+  await page.route('**/api/projects/quick-access', async (route) => {
+    expect(route.request().headers().authorization).toBe('Bearer test-access-token')
+    expect(route.request().method()).toBe('GET')
+    await route.fulfill({ json: projectQuickAccess })
+  })
+
+  await page.route(/.*\/api\/task-views(?:\?.*)?$/, async (route) => {
+    expect(route.request().headers().authorization).toBe('Bearer test-access-token')
+    expect(route.request().method()).toBe('GET')
+    await route.fulfill({
+      json: {
+        capabilities: {
+          canManageSharedViews: true,
+          canSetTeamDefault: true,
+          canWrite: true,
+          writableProjectScopes: projectDirectory.flatMap((team) => team.projects.map((project) => ({
+            projectId: project.id,
+            teamId: team.id,
+          }))),
+          writableTeamIds: projectDirectory.map((team) => team.id),
+        },
+        views: [],
+      },
+    })
   })
 
   await page.route('**/api/work-item-configuration', async (route) => {
@@ -719,6 +881,10 @@ async function mockAuthenticatedTaskPage(
 
     if (teamIndex >= 0) {
       projectDirectory.splice(teamIndex, 1)
+      projectQuickAccess = {
+        items: projectQuickAccess.items.filter((item) => item.teamId !== teamId),
+        revision: projectQuickAccess.revision + 1,
+      }
     }
 
     await route.fulfill({
@@ -745,6 +911,12 @@ async function mockAuthenticatedTaskPage(
 
     if (team) {
       team.projects = team.projects.filter((project) => project.id !== projectId)
+      projectQuickAccess = {
+        items: projectQuickAccess.items.filter((item) =>
+          item.teamId !== teamId || item.projectId !== projectId,
+        ),
+        revision: projectQuickAccess.revision + 1,
+      }
     }
 
     await new Promise((resolve) => setTimeout(resolve, 150))
@@ -772,12 +944,24 @@ async function mockAuthenticatedTaskPage(
     })
   })
 
-  await page.route(/.*\/api\/projects\/[^/]+\/issues$/, async (route) => {
+  await page.route(/.*\/api\/projects\/[^/]+\/issues(?:\?.*)?$/, async (route) => {
     const pathSegments = new URL(route.request().url()).pathname.split('/')
     const projectId = decodeURIComponent(pathSegments[3] ?? '')
     recordProjectTaskRequest(requestCounts, projectId)
 
     expect(route.request().headers().authorization).toBe('Bearer test-access-token')
+
+    if (requestCounts.scheduleConfirms > 0 && remainingPostConfirmProjectIssueFailures > 0) {
+      remainingPostConfirmProjectIssueFailures -= 1
+      await route.fulfill({
+        json: {
+          code: 'ProjectIssuesUnavailable',
+          message: 'issues.error.loading',
+        },
+        status: 503,
+      })
+      return
+    }
 
     const projectIssues = taskResponsesByProject[projectId] ?? []
     const assignedIssues = Object.values(teamIssuesByTeam)
@@ -792,7 +976,7 @@ async function mockAuthenticatedTaskPage(
     })
   })
 
-  await page.route('**/api/work-items', async (route) => {
+  await page.route('**/api/work-items**', async (route) => {
     requestCounts.workspaceWorkItems += 1
     expect(route.request().headers().authorization).toBe('Bearer test-access-token')
 
@@ -801,6 +985,197 @@ async function mockAuthenticatedTaskPage(
     await route.fulfill({
       json: {
         workItems: [...projectWorkItems, ...Object.values(teamIssuesByTeam).flat()],
+      },
+    })
+  })
+
+  await page.route('**/api/planning', async (route) => {
+    expect(route.request().headers().authorization).toBe('Bearer test-access-token')
+    expect(route.request().method()).toBe('GET')
+
+    if (remainingPlanningFailures > 0) {
+      remainingPlanningFailures -= 1
+      await route.fulfill({
+        json: {
+          code: 'PlanningUnavailable',
+          message: 'Planning dependency data is temporarily unavailable.',
+        },
+        status: 503,
+      })
+      return
+    }
+
+    await route.fulfill({
+      json: createMockPlanningSnapshot(
+        taskResponsesByProject,
+        teamIssuesByTeam,
+        workItemScheduleDependencies,
+        workItemScheduleDependencyConflicts,
+        planningRevision,
+      ),
+    })
+  })
+
+  await page.route(/.*\/api\/focus(?:\?.*)?$/, async (route) => {
+    if (route.request().method() !== 'GET') {
+      await route.fallback()
+      return
+    }
+
+    requestCounts.focusReads += 1
+    expect(route.request().headers().authorization).toBe('Bearer test-access-token')
+    await route.fulfill({ json: focusQueue })
+  })
+
+  await page.route(
+    /.*\/api\/focus\/items\/[^/]+\/[^/]+\/snooze(?:\?.*)?$/,
+    async (route) => {
+      if (route.request().method() !== 'PUT') {
+        await route.fallback()
+        return
+      }
+
+      requestCounts.focusSnoozeUpdates += 1
+      expect(route.request().headers().authorization).toBe('Bearer test-access-token')
+      if (failedFocusSnoozeRequestNumbers.has(requestCounts.focusSnoozeUpdates)) {
+        await route.fulfill({
+          status: 503,
+          json: { code: 'FocusSnoozeUnavailable', message: 'Focus snooze failed.' },
+        })
+        return
+      }
+      const { teamId, workItemId } = readMockFocusItemRoute(route.request().url())
+      const body: unknown = route.request().postDataJSON()
+      const item = findMockFocusItem(focusQueue, teamId, workItemId)
+
+      if (!isMockFocusSnoozeInput(body) || !item) {
+        await route.fulfill({ status: 404, json: { message: 'Focus item not found.' } })
+        return
+      }
+      if (body.expectedVersion !== item.version) {
+        await route.fulfill({ status: 409, json: { message: 'Focus item version conflict.' } })
+        return
+      }
+
+      const itemKey = createMockFocusItemKey(teamId, workItemId)
+      if (body.snoozedUntil) previousFocusSections.set(itemKey, item.section)
+      const nextSection = body.snoozedUntil
+        ? 'snoozed'
+        : previousFocusSections.get(itemKey) ?? 'now'
+      const updatedItem = structuredClone(item)
+      updatedItem.section = nextSection
+      updatedItem.updatedAt = new Date().toISOString()
+      updatedItem.version += 1
+      updatedItem.snoozeRevision += 1
+      if (body.snoozedUntil) updatedItem.snoozedUntil = body.snoozedUntil
+      else delete updatedItem.snoozedUntil
+      focusQueue = moveMockFocusItem(focusQueue, updatedItem)
+
+      await route.fulfill({ json: { item: updatedItem } })
+    },
+  )
+
+  await page.route(
+    /.*\/api\/focus\/items\/[^/]+\/[^/]+\/watch(?:\?.*)?$/,
+    async (route) => {
+      if (route.request().method() !== 'PUT') {
+        await route.fallback()
+        return
+      }
+
+      requestCounts.focusWatchUpdates += 1
+      expect(route.request().headers().authorization).toBe('Bearer test-access-token')
+      const { teamId, workItemId } = readMockFocusItemRoute(route.request().url())
+      const body: unknown = route.request().postDataJSON()
+      const item = findMockFocusItem(focusQueue, teamId, workItemId)
+
+      if (!isMockFocusWatchInput(body) || !item) {
+        await route.fulfill({ status: 404, json: { message: 'Focus item not found.' } })
+        return
+      }
+      if (body.expectedVersion !== item.version) {
+        await route.fulfill({ status: 409, json: { message: 'Focus item version conflict.' } })
+        return
+      }
+
+      const updatedItem: FocusItem = {
+        ...item,
+        updatedAt: new Date().toISOString(),
+        version: item.version + 1,
+        watching: body.watching,
+      }
+      focusQueue = replaceMockFocusItem(focusQueue, updatedItem)
+      await route.fulfill({ json: { item: updatedItem } })
+    },
+  )
+
+  await page.route(/.*\/api\/focus\/policies(?:\?.*)?$/, async (route) => {
+    if (route.request().method() !== 'PUT') {
+      await route.fallback()
+      return
+    }
+
+    requestCounts.focusPolicyUpdates += 1
+    expect(route.request().headers().authorization).toBe('Bearer test-access-token')
+    const body: unknown = route.request().postDataJSON()
+    requestCounts.focusPolicyInputs.push(structuredClone(body))
+    const target: FocusPolicy['target'] = isMockRecord(body) &&
+      isMockRecord(body.target) &&
+      body.target.type === 'team' &&
+      typeof body.target.teamId === 'string'
+      ? { teamId: body.target.teamId, type: 'team' }
+      : { type: 'user' }
+    const overrides = isMockRecord(body)
+      ? readMockFocusPolicyOverrides(body.overrides)
+      : undefined
+    if (!overrides) {
+      await route.fulfill({ status: 400, json: { message: 'Invalid Focus policy overrides.' } })
+      return
+    }
+    const policy: FocusPolicy = {
+      id: target.type === 'team'
+        ? `mock-team-focus-policy-${target.teamId}`
+        : 'mock-user-focus-policy',
+      overrides,
+      schemaVersion: FOCUS_SCHEMA_VERSION,
+      target,
+      updatedAt: new Date().toISOString(),
+      version: requestCounts.focusPolicyUpdates + 3,
+    }
+    const effectivePolicies = focusQueue.effectivePolicies.map((effectivePolicy) => {
+      const applies = target.type === 'user' || effectivePolicy.teamId === target.teamId
+      if (!applies) return effectivePolicy
+      return {
+        ...effectivePolicy,
+        settings: applyMockFocusPolicyOverrides(effectivePolicy.settings, overrides),
+        ...(target.type === 'team'
+          ? {
+              teamSettings: applyMockFocusPolicyOverrides(
+                effectivePolicy.teamSettings,
+                overrides,
+              ),
+            }
+          : {}),
+      }
+    })
+    focusQueue = {
+      ...focusQueue,
+      effectivePolicies,
+      ...(target.type === 'user'
+        ? { userPolicy: policy }
+        : {
+            teamPolicies: [
+              ...focusQueue.teamPolicies.filter((candidate) =>
+                candidate.target.type !== 'team' || candidate.target.teamId !== target.teamId
+              ),
+              policy,
+            ],
+          }),
+    }
+    await route.fulfill({
+      json: {
+        effectivePolicies,
+        policy,
       },
     })
   })
@@ -942,7 +1317,7 @@ async function mockAuthenticatedTaskPage(
     await route.fulfill({ json: notificationPreferences })
   })
 
-  await page.route(/.*\/api\/teams\/[^/]+\/issues$/, async (route) => {
+  await page.route(/.*\/api\/teams\/[^/]+\/issues(?:\?.*)?$/, async (route) => {
     const teamId = decodeURIComponent(new URL(route.request().url()).pathname.split('/')[3] ?? '')
     const projects = projectDirectory.find((team) => team.id === teamId)?.projects ?? []
 
@@ -955,12 +1330,18 @@ async function mockAuthenticatedTaskPage(
         assigneeUserId?: string
         customFieldValues?: Record<string, CustomFieldValue>
         description?: string
-        dueDate?: string
         priority?: TeamIssue['priority']
+        schedule?: WorkItemSchedule
         title?: string
         workflowStatusId?: string
       }
       expect(body).not.toHaveProperty('status')
+      expect(body).not.toHaveProperty('dueDate')
+      expect(body.schedule).toBeDefined()
+      if (!body.schedule) {
+        await route.fulfill({ status: 400, json: { message: 'A canonical schedule is required.' } })
+        return
+      }
       const assigneeUser = projectUsers.find((user) => user.id === body.assigneeUserId)
       const configuration = teamWorkItemConfigurations[teamId] ?? workspaceWorkItemConfiguration
       const workflowStatus = configuration.workflow.statuses.find(
@@ -985,7 +1366,8 @@ async function mockAuthenticatedTaskPage(
         workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
         customFieldValues: structuredClone(body.customFieldValues ?? {}),
         relationIds: [],
-        dueDate: body.dueDate ?? '2026/06/20',
+        dueDate: projectMockScheduleDueDate(body.schedule),
+        schedule: structuredClone(body.schedule),
         priority: body.priority ?? 'medium',
         createdAt: '2026-06-08T00:00:00.000Z',
         updatedAt: '2026-06-08T00:00:00.000Z',
@@ -1012,6 +1394,178 @@ async function mockAuthenticatedTaskPage(
       json: {
         teamId,
         issues: [...projectIssues, ...(teamIssuesByTeam[teamId] ?? [])],
+      },
+    })
+  })
+
+  await page.route(/.*\/api\/teams\/[^/]+\/issues\/[^/]+\/schedule\/preview$/, async (route) => {
+    requestCounts.schedulePreviews += 1
+    expect(route.request().headers().authorization).toBe('Bearer test-access-token')
+    expect(route.request().method()).toBe('POST')
+
+    const pathSegments = new URL(route.request().url()).pathname.split('/')
+    const teamId = decodeURIComponent(pathSegments[3] ?? '')
+    const issueId = decodeURIComponent(pathSegments[5] ?? '')
+    const issue = findTeamIssue(teamIssuesByTeam, teamId, issueId)
+      ?? Object.values(taskResponsesByProject)
+        .flat()
+        .find((candidate) => candidate.teamId === teamId && candidate.id === issueId)
+    const body: PreviewWorkItemScheduleInput = route.request().postDataJSON()
+
+    if (!issue) {
+      await route.fulfill({ status: 404, json: { message: 'Issue was not found.' } })
+      return
+    }
+    if (forbiddenSchedulePreviewIssueKeys.has(createIssueCollaborationKey(teamId, issueId))) {
+      await route.fulfill({
+        status: 403,
+        json: {
+          code: 'WorkItemScheduleForbidden',
+          message: 'Schedule changes require member permission.',
+        },
+      })
+      return
+    }
+    if (body.expectedRevision !== issue.revision) {
+      await route.fulfill({
+        status: 409,
+        json: {
+          code: 'WorkItemRevisionConflict',
+          message: 'Work Item changed after it was loaded.',
+        },
+      })
+      return
+    }
+
+    const preview = createMockScheduleChangePreview(
+      taskResponsesByProject,
+      teamIssuesByTeam,
+      workItemScheduleDependencies,
+      workItemScheduleDependencyConflicts,
+      relationGraphRevisionByTeam[teamId] ?? 0,
+      planningRevision,
+      teamId,
+      issueId,
+      body.operation,
+    )
+
+    await route.fulfill({
+      json: preview,
+    })
+  })
+
+  await page.route(/.*\/api\/teams\/[^/]+\/issues\/[^/]+\/schedule\/confirm$/, async (route) => {
+    requestCounts.scheduleConfirms += 1
+    expect(route.request().headers().authorization).toBe('Bearer test-access-token')
+    expect(route.request().method()).toBe('POST')
+
+    const pathSegments = new URL(route.request().url()).pathname.split('/')
+    const teamId = decodeURIComponent(pathSegments[3] ?? '')
+    const issueId = decodeURIComponent(pathSegments[5] ?? '')
+    const issue = findStoredWorkItem(taskResponsesByProject, teamIssuesByTeam, teamId, issueId)
+    const body: ConfirmWorkItemScheduleChangeInput = route.request().postDataJSON()
+
+    if (!issue) {
+      await route.fulfill({ status: 404, json: { message: 'Issue was not found.' } })
+      return
+    }
+    if (body.expectedRevision !== issue.revision) {
+      await route.fulfill({
+        status: 409,
+        json: {
+          code: 'WorkItemRevisionConflict',
+          message: 'Work Item changed after it was loaded.',
+        },
+      })
+      return
+    }
+    const conflictIssueKey = createIssueCollaborationKey(teamId, issueId)
+    if (pendingRevisionConflictIssueKeys.delete(conflictIssueKey)) {
+      replaceStoredWorkItem(taskResponsesByProject, teamIssuesByTeam, teamId, {
+        ...issue,
+        description: '別のメンバーが更新した最新内容です。',
+        revision: issue.revision + 1,
+        statusCategory: 'started',
+        workflowStatusId: 'review',
+        updatedAt: '2026-06-08T02:30:00.000Z',
+      })
+      await route.fulfill({
+        status: 409,
+        json: {
+          code: 'WorkItemRevisionConflict',
+          message: 'Work Item changed after it was loaded.',
+        },
+      })
+      return
+    }
+    if (
+      body.expectedPlanningRevision !== planningRevision ||
+      body.expectedRelationGraphRevision !== (relationGraphRevisionByTeam[teamId] ?? 0)
+    ) {
+      await route.fulfill({
+        status: 409,
+        json: {
+          code: 'PlanningRevisionConflict',
+          message: 'Planning changed after the preview was loaded.',
+        },
+      })
+      return
+    }
+
+    const preview = createMockScheduleChangePreview(
+      taskResponsesByProject,
+      teamIssuesByTeam,
+      workItemScheduleDependencies,
+      workItemScheduleDependencyConflicts,
+      relationGraphRevisionByTeam[teamId] ?? 0,
+      planningRevision,
+      teamId,
+      issueId,
+      body.operation,
+    )
+    expect(body.confirmed).toBe(true)
+    expect(body.expectedEvaluatedRevisions).toEqual(preview.evaluatedRevisions)
+    expect(body.expectedImpacts).toEqual(preview.impacts)
+
+    const updatedIssues = preview.impacts.flatMap((impact) => {
+      const currentIssue = findStoredWorkItem(
+        taskResponsesByProject,
+        teamIssuesByTeam,
+        impact.teamId,
+        impact.workItemId,
+      )
+
+      if (!currentIssue) {
+        return []
+      }
+      const updatedIssue = {
+        ...currentIssue,
+        dueDate: projectMockScheduleDueDate(impact.after),
+        revision: currentIssue.revision + 1,
+        schedule: structuredClone(impact.after),
+        updatedAt: '2026-06-08T02:00:00.000Z',
+      } satisfies TeamIssue
+      replaceStoredWorkItem(
+        taskResponsesByProject,
+        teamIssuesByTeam,
+        impact.teamId,
+        updatedIssue,
+      )
+      return [updatedIssue]
+    })
+
+    await route.fulfill({
+      json: {
+        workItems: updatedIssues.map((updatedIssue) => ({
+          id: updatedIssue.id,
+          teamId: updatedIssue.teamId,
+          revision: updatedIssue.revision,
+          schedule: updatedIssue.schedule,
+          dueDate: updatedIssue.dueDate,
+          ...(updatedIssue.assignedProjectId
+            ? { assignedProjectId: updatedIssue.assignedProjectId }
+            : {}),
+        })),
       },
     })
   })
@@ -1044,6 +1598,7 @@ async function mockAuthenticatedTaskPage(
         expectedRevision?: number
       }
       expect(body).not.toHaveProperty('status')
+      expect(body).not.toHaveProperty('dueDate')
       const { expectedRevision, ...patch } = body
 
       expect(expectedRevision).toBe(issue.revision)
@@ -1091,6 +1646,9 @@ async function mockAuthenticatedTaskPage(
         assignedProjectId: body.assignedProjectId === null
           ? undefined
           : body.assignedProjectId ?? issue.assignedProjectId,
+        dueDate: patch.schedule
+          ? projectMockScheduleDueDate(patch.schedule)
+          : issue.dueDate,
         statusCategory: updatedWorkflowStatus?.category ?? issue.statusCategory,
         workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
         revision: issue.revision + 1,
@@ -1548,6 +2106,242 @@ async function mockAuthenticatedTaskPage(
 
 }
 
+/**
+ * Reads the encoded Team and Work Item identifiers from a Focus item mutation URL.
+ *
+ * @param url - Absolute request URL intercepted by Playwright.
+ * @returns Decoded identifiers used to locate the mocked Focus item.
+ */
+function readMockFocusItemRoute(url: string): { teamId: string; workItemId: string } {
+  const pathSegments = new URL(url).pathname.split('/')
+  return {
+    teamId: decodeURIComponent(pathSegments[4] ?? ''),
+    workItemId: decodeURIComponent(pathSegments[5] ?? ''),
+  }
+}
+
+/**
+ * Creates the collision-free key used to retain a pre-snooze section.
+ *
+ * @param teamId - Canonical Team identifier.
+ * @param workItemId - Canonical Work Item identifier.
+ * @returns Stable compound Focus item key.
+ */
+function createMockFocusItemKey(teamId: string, workItemId: string): string {
+  return `${teamId}\0${workItemId}`
+}
+
+/**
+ * Narrows an unknown request body to a property-readable object.
+ *
+ * @param value - Untrusted JSON value supplied by the browser.
+ * @returns Whether the value is a non-null object.
+ */
+function isMockRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * Reads the numeric fields supported by the Focus policy E2E mock.
+ *
+ * @param value - Untrusted policy override request value.
+ * @returns A validated sparse override or undefined for an invalid field.
+ */
+function readMockFocusPolicyOverrides(value: unknown): FocusPolicyOverrides | undefined {
+  if (!isMockRecord(value)) return undefined
+  const scalarFields: readonly (keyof FocusPolicyOverrides)[] = [
+    'cycleDueSoonDays',
+    'dueSoonDays',
+    'nowScoreThreshold',
+    'slaHours',
+  ]
+  if (scalarFields.some((field) =>
+    value[field] !== undefined && typeof value[field] !== 'number'
+  )) {
+    return undefined
+  }
+  if (value.weights !== undefined && !isMockRecord(value.weights)) return undefined
+  const weights = isMockRecord(value.weights) ? value.weights : undefined
+  const weightFields: readonly string[] = [
+    'approval',
+    'blocker',
+    'cycle',
+    'dueSoon',
+    'mention',
+    'overdue',
+    'reviewRequest',
+    'sla',
+    'urgent',
+  ]
+  if (weights && weightFields.some((field) =>
+    weights[field] !== undefined && typeof weights[field] !== 'number'
+  )) {
+    return undefined
+  }
+
+  return {
+    ...(typeof value.cycleDueSoonDays === 'number'
+      ? { cycleDueSoonDays: value.cycleDueSoonDays }
+      : {}),
+    ...(typeof value.dueSoonDays === 'number' ? { dueSoonDays: value.dueSoonDays } : {}),
+    ...(typeof value.nowScoreThreshold === 'number'
+      ? { nowScoreThreshold: value.nowScoreThreshold }
+      : {}),
+    ...(typeof value.slaHours === 'number' ? { slaHours: value.slaHours } : {}),
+    ...(weights
+      ? {
+          weights: {
+            ...(typeof weights.approval === 'number' ? { approval: weights.approval } : {}),
+            ...(typeof weights.blocker === 'number' ? { blocker: weights.blocker } : {}),
+            ...(typeof weights.cycle === 'number' ? { cycle: weights.cycle } : {}),
+            ...(typeof weights.dueSoon === 'number' ? { dueSoon: weights.dueSoon } : {}),
+            ...(typeof weights.mention === 'number' ? { mention: weights.mention } : {}),
+            ...(typeof weights.overdue === 'number' ? { overdue: weights.overdue } : {}),
+            ...(typeof weights.reviewRequest === 'number'
+              ? { reviewRequest: weights.reviewRequest }
+              : {}),
+            ...(typeof weights.sla === 'number' ? { sla: weights.sla } : {}),
+            ...(typeof weights.urgent === 'number' ? { urgent: weights.urgent } : {}),
+          },
+        }
+      : {}),
+  }
+}
+
+/**
+ * Applies one sparse policy layer to complete mocked effective settings.
+ *
+ * @param settings - Current complete settings.
+ * @param overrides - Sparse replacement observed by the mock endpoint.
+ * @returns Complete settings reflecting the submitted values.
+ */
+function applyMockFocusPolicyOverrides(
+  settings: FocusPolicySettings,
+  overrides: FocusPolicyOverrides,
+): FocusPolicySettings {
+  return {
+    ...settings,
+    ...overrides,
+    weights: {
+      ...settings.weights,
+      ...overrides.weights,
+    },
+  }
+}
+
+/**
+ * Validates the revision-bound fields used by the mocked Focus snooze endpoint.
+ *
+ * @param value - Untrusted request JSON.
+ * @returns Whether the input contains a version and nullable ISO timestamp string.
+ */
+function isMockFocusSnoozeInput(value: unknown): value is {
+  expectedVersion: number
+  snoozedUntil: string | null
+} {
+  return isMockRecord(value) &&
+    typeof value.expectedVersion === 'number' &&
+    (typeof value.snoozedUntil === 'string' || value.snoozedUntil === null)
+}
+
+/**
+ * Validates the revision-bound fields used by the mocked Focus watch endpoint.
+ *
+ * @param value - Untrusted request JSON.
+ * @returns Whether the input contains a version and watch state.
+ */
+function isMockFocusWatchInput(value: unknown): value is {
+  expectedVersion: number
+  watching: boolean
+} {
+  return isMockRecord(value) &&
+    typeof value.expectedVersion === 'number' &&
+    typeof value.watching === 'boolean'
+}
+
+/**
+ * Finds one Focus item without changing the server-provided queue order.
+ *
+ * @param response - Current mocked Focus snapshot.
+ * @param teamId - Canonical Team identifier.
+ * @param workItemId - Canonical Work Item identifier.
+ * @returns Matching Focus item, if it remains visible.
+ */
+function findMockFocusItem(
+  response: FocusQueueResponse,
+  teamId: string,
+  workItemId: string,
+): FocusItem | undefined {
+  return response.sections
+    .flatMap((group) => group.items)
+    .find((item) =>
+      item.workItem.teamId === teamId && item.workItem.id === workItemId)
+}
+
+/**
+ * Replaces a mocked Focus item in place while preserving its section order.
+ *
+ * @param response - Current mocked Focus snapshot.
+ * @param updatedItem - New server item representation.
+ * @returns Updated snapshot with the same item order.
+ */
+function replaceMockFocusItem(
+  response: FocusQueueResponse,
+  updatedItem: FocusItem,
+): FocusQueueResponse {
+  return {
+    ...response,
+    generatedAt: new Date().toISOString(),
+    sections: response.sections.map((group) => ({
+      ...group,
+      items: group.items.map((item) =>
+        isSameMockFocusItem(item, updatedItem) ? updatedItem : item),
+    })),
+  }
+}
+
+/**
+ * Moves a mocked Focus item to the leading position of its new section.
+ *
+ * @param response - Current mocked Focus snapshot.
+ * @param updatedItem - Item carrying the server-selected destination section.
+ * @returns Updated snapshot with no duplicate item entries.
+ */
+function moveMockFocusItem(
+  response: FocusQueueResponse,
+  updatedItem: FocusItem,
+): FocusQueueResponse {
+  if (!response.sections.some((group) => group.section === updatedItem.section)) {
+    throw new Error(`Mock Focus response is missing section ${updatedItem.section}.`)
+  }
+  return {
+    ...response,
+    generatedAt: new Date().toISOString(),
+    sections: response.sections.map((group) => {
+      const remainingItems = group.items.filter((item) =>
+        !isSameMockFocusItem(item, updatedItem))
+      return {
+        ...group,
+        items: group.section === updatedItem.section
+          ? [updatedItem, ...remainingItems]
+          : remainingItems,
+      }
+    }),
+  }
+}
+
+/**
+ * Compares mocked Focus items by their canonical Team and Work Item identity.
+ *
+ * @param left - Existing queue item.
+ * @param right - Candidate replacement item.
+ * @returns Whether both values represent the same canonical item.
+ */
+function isSameMockFocusItem(left: FocusItem, right: FocusItem): boolean {
+  return left.workItem.teamId === right.workItem.teamId &&
+    left.workItem.id === right.workItem.id
+}
+
 function createDefaultNotifications(): InboxNotification[] {
   return [
     {
@@ -1739,12 +2533,25 @@ async function mockAnalyticsReportsPage(
 }
 
 /**
- * サイドバーの新規登録パネルを開きます。
+ * Opens the Team or Project registration panel from the sidebar's More menu.
+ *
+ * @param page - Playwright page containing the authenticated Workspace shell.
+ * @param mode - Registration form to display.
+ * @returns A promise that resolves once the selected name field is visible.
  */
-async function openSidebarCreatePanel(page: Page) {
+async function openSidebarCreatePanel(
+  page: Page,
+  mode: 'team' | 'project' = 'team',
+) {
+  await page.getByRole('button', { name: 'その他', exact: true }).click()
   await page.getByRole('button', { name: '新規登録' }).click()
-  await page.getByRole('button', { name: 'チーム', exact: true }).click()
-  await expect(page.getByLabel('チーム名')).toBeVisible()
+  await page.getByRole('button', {
+    name: mode === 'team' ? 'チーム' : 'プロジェクト',
+    exact: true,
+  }).click()
+  await expect(page.getByLabel(
+    mode === 'team' ? 'チーム名' : 'プロジェクト名',
+  )).toBeVisible()
 }
 
 function recordProjectTaskRequest(requestCounts: MockRequestCounts, projectId: string) {
@@ -1854,7 +2661,12 @@ function createStoredTeamIssue(
     assigneeName: '佐藤 花子',
     customFieldValues: {},
     relationIds: [],
-    dueDate: '2026/06/22',
+    dueDate: '2026-06-22',
+    schedule: {
+      calendarPolicy: DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY,
+      dueDate: '2026-06-22',
+      mode: 'due-date',
+    },
     priority: 'medium',
     createdAt: '2026-06-08T00:00:00.000Z',
     updatedAt: '2026-06-08T00:00:00.000Z',
@@ -1891,6 +2703,401 @@ function findTeamIssue(
 }
 
 /**
+ * Finds one canonical Work Item across project and unassigned Team stores.
+ *
+ * @param taskResponsesByProject - Project-scoped canonical Work Item stores.
+ * @param teamIssuesByTeam - Team-scoped canonical Work Item stores.
+ * @param teamId - Owning Team identifier.
+ * @param issueId - Team-local Work Item identifier.
+ * @returns Matching canonical Work Item when the mock contains one.
+ */
+function findStoredWorkItem(
+  taskResponsesByProject: Record<string, ProjectTask[]>,
+  teamIssuesByTeam: Record<string, TeamIssue[]>,
+  teamId: string,
+  issueId: string,
+): TeamIssue | ProjectTask | undefined {
+  return findTeamIssue(teamIssuesByTeam, teamId, issueId)
+    ?? Object.values(taskResponsesByProject)
+      .flat()
+      .find((candidate) => candidate.teamId === teamId && candidate.id === issueId)
+}
+
+/**
+ * Lists each canonical Work Item once across the E2E mock's backing stores.
+ *
+ * @param taskResponsesByProject - Project-scoped canonical Work Item stores.
+ * @param teamIssuesByTeam - Team-scoped canonical Work Item stores.
+ * @returns Stable insertion-ordered canonical Work Items keyed by Team and ID.
+ */
+function listStoredWorkItems(
+  taskResponsesByProject: Record<string, ProjectTask[]>,
+  teamIssuesByTeam: Record<string, TeamIssue[]>,
+): Array<TeamIssue | ProjectTask> {
+  const workItemsByKey = new Map<string, TeamIssue | ProjectTask>()
+
+  for (const workItem of [
+    ...Object.values(taskResponsesByProject).flat(),
+    ...Object.values(teamIssuesByTeam).flat(),
+  ]) {
+    workItemsByKey.set(createIssueCollaborationKey(workItem.teamId, workItem.id), workItem)
+  }
+  return [...workItemsByKey.values()]
+}
+
+/**
+ * Creates the exact Planning snapshot consumed by task and Team Issue dependency surfaces.
+ *
+ * @param taskResponsesByProject - Project-scoped canonical Work Item stores.
+ * @param teamIssuesByTeam - Team-scoped canonical Work Item stores.
+ * @param dependencies - Canonical dependency graph configured for the test.
+ * @param conflicts - Authoritative dependency conflicts configured for the test.
+ * @param revision - Planning graph revision exposed to preview/confirm calls.
+ * @returns Contract-valid Planning snapshot projected from current mock state.
+ */
+function createMockPlanningSnapshot(
+  taskResponsesByProject: Record<string, ProjectTask[]>,
+  teamIssuesByTeam: Record<string, TeamIssue[]>,
+  dependencies: readonly WorkItemScheduleDependency[],
+  conflicts: readonly WorkItemScheduleDependencyConflict[],
+  revision: number,
+): PlanningSnapshot {
+  const storedWorkItems = listStoredWorkItems(taskResponsesByProject, teamIssuesByTeam)
+  const workItemByKey = new Map(storedWorkItems.map((workItem) => [
+    createIssueCollaborationKey(workItem.teamId, workItem.id),
+    workItem,
+  ]))
+  const criticalWorkItems = dependencies.flatMap((dependency) => [
+    dependency.predecessor,
+    dependency.successor,
+  ]).filter((endpoint, index, endpoints) =>
+    endpoints.findIndex((candidate) =>
+      candidate.teamId === endpoint.teamId && candidate.workItemId === endpoint.workItemId
+    ) === index
+  )
+  const affectedProjectIds = criticalWorkItems.flatMap((endpoint) => {
+    const workItem = workItemByKey.get(
+      createIssueCollaborationKey(endpoint.teamId, endpoint.workItemId),
+    )
+    return workItem?.assignedProjectId ? [workItem.assignedProjectId] : []
+  }).filter((projectId, index, projectIds) => projectIds.indexOf(projectId) === index)
+  const affectedProjects = criticalWorkItems.flatMap((endpoint) => {
+    const workItem = workItemByKey.get(
+      createIssueCollaborationKey(endpoint.teamId, endpoint.workItemId),
+    )
+    return workItem?.assignedProjectId
+      ? [{ projectId: workItem.assignedProjectId, teamId: workItem.teamId }]
+      : []
+  }).filter((project, index, projects) => projects.findIndex((candidate) =>
+    candidate.teamId === project.teamId && candidate.projectId === project.projectId
+  ) === index)
+
+  return {
+    schemaVersion: PLANNING_SCHEMA_VERSION,
+    revision,
+    entities: [],
+    dependencies: [],
+    workItemDependencies: structuredClone([...dependencies]),
+    workItemLinks: [],
+    workItems: storedWorkItems.map((workItem) => ({
+      dueDate: workItem.dueDate,
+      id: workItem.id,
+      projectId: workItem.assignedProjectId,
+      revision: workItem.revision,
+      schedule: structuredClone(workItem.schedule),
+      statusCategory: workItem.statusCategory,
+      teamId: workItem.teamId,
+      title: workItem.title,
+    })),
+    criticalPath: {
+      entityIds: [],
+      slackByEntityId: {},
+      totalDurationDays: 0,
+    },
+    workItemDependencySummary: {
+      affectedMilestoneIds: [],
+      affectedProjectIds,
+      affectedProjects,
+      conflicts: structuredClone([...conflicts]),
+      criticalPath: {
+        slackByWorkItemKey: Object.fromEntries(criticalWorkItems.map((endpoint) => [
+          `${endpoint.teamId}/${endpoint.workItemId}`,
+          0,
+        ])),
+        totalDurationDays: 0,
+        workItems: structuredClone(criticalWorkItems),
+      },
+      unresolvedBlockerCount: dependencies.filter((dependency) => {
+        const predecessor = workItemByKey.get(createIssueCollaborationKey(
+          dependency.predecessor.teamId,
+          dependency.predecessor.workItemId,
+        ))
+        return predecessor?.statusCategory !== 'completed'
+      }).length,
+    },
+    updatedAt: '2026-07-12T12:00:00.000Z',
+  }
+}
+
+/**
+ * Creates one revision-bound direct plus dependency-cascade schedule preview.
+ *
+ * @param taskResponsesByProject - Project-scoped canonical Work Item stores.
+ * @param teamIssuesByTeam - Team-scoped canonical Work Item stores.
+ * @param dependencies - Canonical dependency graph used for propagation.
+ * @param conflicts - Authoritative conflicts that block confirmation.
+ * @param relationGraphRevision - Team relation graph revision observed by the preview.
+ * @param planningRevision - Planning graph revision observed by the preview.
+ * @param teamId - Team that owns the direct Work Item.
+ * @param issueId - Direct Work Item identifier.
+ * @param operation - Schedule operation being previewed.
+ * @returns Contract-valid preview used by both preview and confirm E2E routes.
+ */
+function createMockScheduleChangePreview(
+  taskResponsesByProject: Record<string, ProjectTask[]>,
+  teamIssuesByTeam: Record<string, TeamIssue[]>,
+  dependencies: readonly WorkItemScheduleDependency[],
+  conflicts: readonly WorkItemScheduleDependencyConflict[],
+  relationGraphRevision: number,
+  planningRevision: number,
+  teamId: string,
+  issueId: string,
+  operation: WorkItemScheduleOperation,
+): WorkItemScheduleChangePreview {
+  const directWorkItem = findStoredWorkItem(
+    taskResponsesByProject,
+    teamIssuesByTeam,
+    teamId,
+    issueId,
+  )
+  if (!directWorkItem) {
+    throw new Error(`Missing mocked Work Item: ${teamId}/${issueId}`)
+  }
+
+  const directAfter = applyMockWorkItemScheduleOperation(directWorkItem.schedule, operation)
+  const impacts: WorkItemScheduleImpact[] = [{
+    after: directAfter,
+    before: structuredClone(directWorkItem.schedule),
+    dateDeltaDays: calculateMockScheduleDelta(directWorkItem.schedule, directAfter),
+    expectedRevision: directWorkItem.revision,
+    kind: 'direct',
+    teamId,
+    workItemId: issueId,
+  }]
+  const pendingImpacts = [...impacts]
+  const impactedKeys = new Set([createIssueCollaborationKey(teamId, issueId)])
+
+  while (pendingImpacts.length > 0) {
+    const predecessorImpact = pendingImpacts.shift()
+    if (!predecessorImpact) {
+      continue
+    }
+    const outgoingDependencies = dependencies.filter((dependency) =>
+      dependency.predecessor.teamId === predecessorImpact.teamId &&
+      dependency.predecessor.workItemId === predecessorImpact.workItemId
+    )
+
+    for (const dependency of outgoingDependencies) {
+      const successorKey = createIssueCollaborationKey(
+        dependency.successor.teamId,
+        dependency.successor.workItemId,
+      )
+      if (impactedKeys.has(successorKey)) {
+        continue
+      }
+      const successor = findStoredWorkItem(
+        taskResponsesByProject,
+        teamIssuesByTeam,
+        dependency.successor.teamId,
+        dependency.successor.workItemId,
+      )
+      if (!successor) {
+        continue
+      }
+      const successorAfter = applyMockDependencyCascade(
+        predecessorImpact.after,
+        successor.schedule,
+        dependency,
+      )
+      if (!successorAfter || schedulesAreEqual(successor.schedule, successorAfter)) {
+        continue
+      }
+      const successorImpact = {
+        after: successorAfter,
+        before: structuredClone(successor.schedule),
+        dateDeltaDays: calculateMockScheduleDelta(successor.schedule, successorAfter),
+        dependencyId: dependency.id,
+        expectedRevision: successor.revision,
+        kind: 'dependency' as const,
+        teamId: successor.teamId,
+        workItemId: successor.id,
+      }
+      impacts.push(successorImpact)
+      pendingImpacts.push(successorImpact)
+      impactedKeys.add(successorKey)
+    }
+  }
+
+  const affectedProjects = impacts.flatMap((impact) => {
+    const workItem = findStoredWorkItem(
+      taskResponsesByProject,
+      teamIssuesByTeam,
+      impact.teamId,
+      impact.workItemId,
+    )
+    return workItem?.assignedProjectId
+      ? [{ projectId: workItem.assignedProjectId, teamId: impact.teamId }]
+      : []
+  }).filter((project, index, projects) => projects.findIndex((candidate) =>
+    candidate.projectId === project.projectId && candidate.teamId === project.teamId
+  ) === index)
+  const affectedProjectIds = affectedProjects.map((project) => project.projectId)
+    .filter((projectId, index, projectIds) => projectIds.indexOf(projectId) === index)
+
+  return {
+    affectedMilestoneIds: [],
+    affectedProjectIds,
+    affectedProjects,
+    conflicts: structuredClone([...conflicts]),
+    evaluatedRevisions: impacts.map((impact) => ({
+      expectedRevision: impact.expectedRevision,
+      teamId: impact.teamId,
+      workItemId: impact.workItemId,
+    })),
+    expectedRevision: directWorkItem.revision,
+    impacts,
+    planningRevision,
+    relationGraphRevision,
+    requiresConfirmation: true,
+    warnings: [],
+  }
+}
+
+/**
+ * Applies one dependency anchor rule to a successor schedule for deterministic E2E propagation.
+ *
+ * @param predecessorSchedule - Proposed predecessor schedule.
+ * @param successorSchedule - Current successor schedule.
+ * @param dependency - Dependency whose type and lead/lag select the anchors.
+ * @returns Shifted successor schedule, or no value when either anchor is unscheduled.
+ */
+function applyMockDependencyCascade(
+  predecessorSchedule: WorkItemSchedule,
+  successorSchedule: WorkItemSchedule,
+  dependency: WorkItemScheduleDependency,
+): WorkItemSchedule | undefined {
+  const predecessorAnchor = dependency.type === 'start-to-start' ||
+      dependency.type === 'start-to-finish'
+    ? 'start'
+    : 'finish'
+  const successorAnchor = dependency.type === 'finish-to-finish' ||
+      dependency.type === 'start-to-finish'
+    ? 'finish'
+    : 'start'
+  const predecessorDate = resolveMockScheduleAnchor(predecessorSchedule, predecessorAnchor)
+  const successorDate = resolveMockScheduleAnchor(successorSchedule, successorAnchor)
+
+  if (!predecessorDate || !successorDate) {
+    return undefined
+  }
+  const dependencyDate = addMockScheduleDays(predecessorDate, dependency.lagDays)
+  const targetDate = applyMockScheduleConstraint(
+    dependencyDate,
+    dependency.constraint?.anchor === successorAnchor ? dependency.constraint : undefined,
+  )
+  const offsetDays = differenceMockScheduleDays(successorDate, targetDate)
+
+  switch (successorSchedule.mode) {
+    case 'unscheduled':
+      return undefined
+    case 'due-date':
+      return { ...structuredClone(successorSchedule), dueDate: targetDate }
+    case 'milestone':
+      return {
+        ...structuredClone(successorSchedule),
+        endDate: targetDate,
+        startDate: targetDate,
+      }
+    case 'date-range':
+      return {
+        ...structuredClone(successorSchedule),
+        endDate: addMockScheduleDays(successorSchedule.endDate, offsetDays),
+        startDate: addMockScheduleDays(successorSchedule.startDate, offsetDays),
+      }
+  }
+}
+
+/**
+ * Applies a matching explicit constraint to one dependency-derived date.
+ *
+ * @param dependencyDate - Date selected by dependency anchors and lead/lag.
+ * @param constraint - Optional constraint for the same successor anchor.
+ * @returns Date after enforcing the constraint kind.
+ */
+function applyMockScheduleConstraint(
+  dependencyDate: string,
+  constraint: WorkItemScheduleDependency['constraint'],
+): string {
+  if (!constraint || constraint.kind === 'on') {
+    return constraint?.date ?? dependencyDate
+  }
+  if (constraint.kind === 'not-before') {
+    return dependencyDate.localeCompare(constraint.date) < 0 ? constraint.date : dependencyDate
+  }
+  return dependencyDate.localeCompare(constraint.date) > 0 ? constraint.date : dependencyDate
+}
+
+/**
+ * Resolves a scheduled Work Item's start or finish anchor.
+ *
+ * @param schedule - Canonical schedule to inspect.
+ * @param anchor - Boundary required by a dependency type.
+ * @returns ISO date-only boundary, or no value for an unscheduled Work Item.
+ */
+function resolveMockScheduleAnchor(
+  schedule: WorkItemSchedule,
+  anchor: 'start' | 'finish',
+): string | undefined {
+  switch (schedule.mode) {
+    case 'unscheduled':
+      return undefined
+    case 'due-date':
+      return schedule.dueDate
+    case 'milestone':
+      return schedule.startDate
+    case 'date-range':
+      return anchor === 'start' ? schedule.startDate : schedule.endDate
+  }
+}
+
+/**
+ * Calculates primary-date movement between two schedules for preview metadata.
+ *
+ * @param before - Schedule before the operation.
+ * @param after - Schedule after the operation.
+ * @returns Signed calendar-day delta, or zero when either schedule is unscheduled.
+ */
+function calculateMockScheduleDelta(
+  before: WorkItemSchedule,
+  after: WorkItemSchedule,
+): number {
+  const beforeDate = resolveMockScheduleAnchor(before, 'finish')
+  const afterDate = resolveMockScheduleAnchor(after, 'finish')
+  return beforeDate && afterDate ? differenceMockScheduleDays(beforeDate, afterDate) : 0
+}
+
+/**
+ * Compares two detached schedule values in deterministic mock code.
+ *
+ * @param left - First canonical schedule.
+ * @param right - Second canonical schedule.
+ * @returns True when both serialized schedules are structurally equal.
+ */
+function schedulesAreEqual(left: WorkItemSchedule, right: WorkItemSchedule): boolean {
+  return JSON.stringify(left) === JSON.stringify(right)
+}
+
+/**
  * E2E mock の Team Issue を同じ team/id の最新 revision へ置き換えます。
  *
  * @param teamIssuesByTeam - team ごとの保存済み Issue mock です。
@@ -1911,6 +3118,244 @@ function replaceStoredTeamIssue(
   }
 
   teamIssuesByTeam[teamId] = [...issues, issue]
+}
+
+/**
+ * Applies one schedule operation in the browser API mock.
+ *
+ * The production calendar rules are covered by server domain tests; this mock only preserves the
+ * operation semantics needed to verify that browser interactions preview and persist canonical data.
+ *
+ * @param schedule - Current canonical schedule held by the mock API.
+ * @param operation - Preview operation posted by the browser.
+ * @returns The deterministic schedule returned by the mock preview endpoint.
+ */
+function applyMockWorkItemScheduleOperation(
+  schedule: WorkItemSchedule,
+  operation: WorkItemScheduleOperation,
+): WorkItemSchedule {
+  if (operation.type === 'replace') {
+    return structuredClone(operation.schedule)
+  }
+  if (operation.type === 'resize') {
+    if (schedule.mode !== 'date-range') {
+      return structuredClone(schedule)
+    }
+    return {
+      ...structuredClone(schedule),
+      durationDays: Math.max(
+        1,
+        differenceMockScheduleDays(schedule.startDate, operation.endDate) + 1,
+      ),
+      endDate: operation.endDate,
+    }
+  }
+
+  switch (schedule.mode) {
+    case 'unscheduled':
+      return structuredClone(schedule)
+    case 'due-date':
+      return { ...structuredClone(schedule), dueDate: operation.targetDate }
+    case 'milestone':
+      return {
+        ...structuredClone(schedule),
+        endDate: operation.targetDate,
+        startDate: operation.targetDate,
+      }
+    case 'date-range': {
+      const offsetDays = differenceMockScheduleDays(schedule.startDate, operation.targetDate)
+      return {
+        ...structuredClone(schedule),
+        endDate: addMockScheduleDays(schedule.endDate, offsetDays),
+        startDate: operation.targetDate,
+      }
+    }
+  }
+}
+
+/**
+ * Adds UTC calendar days for deterministic browser mock responses.
+ *
+ * @param date - ISO date-only value.
+ * @param days - Signed calendar-day offset.
+ * @returns Shifted ISO date-only value.
+ */
+function addMockScheduleDays(date: string, days: number): string {
+  const instant = new Date(`${date}T00:00:00.000Z`)
+  instant.setUTCDate(instant.getUTCDate() + days)
+  return instant.toISOString().slice(0, 10)
+}
+
+/**
+ * Calculates a signed UTC calendar-day difference for the browser mock.
+ *
+ * @param startDate - Start ISO date-only value.
+ * @param endDate - End ISO date-only value.
+ * @returns Signed number of calendar days from start to end.
+ */
+function differenceMockScheduleDays(startDate: string, endDate: string): number {
+  const start = new Date(`${startDate}T00:00:00.000Z`).getTime()
+  const end = new Date(`${endDate}T00:00:00.000Z`).getTime()
+  return Math.round((end - start) / 86_400_000)
+}
+
+/**
+ * Projects a canonical schedule into the derived deadline stored by the browser mock.
+ *
+ * @param schedule - Canonical schedule persisted by the mocked Work Item API.
+ * @returns Its final scheduled date, or an empty value for explicitly unscheduled work.
+ */
+function projectMockScheduleDueDate(schedule: WorkItemSchedule): string {
+  switch (schedule.mode) {
+    case 'unscheduled':
+      return ''
+    case 'due-date':
+      return schedule.dueDate
+    case 'date-range':
+    case 'milestone':
+      return schedule.endDate
+  }
+}
+
+/**
+ * Dispatches a native schedule-card drag with one render frame between drag start and drop.
+ *
+ * React must commit the dragged task identity before the destination handles the drop event. This
+ * mirrors a real pointer drag while keeping the E2E independent from layout-sensitive mouse paths.
+ *
+ * @param page - Playwright page owning the native `DataTransfer` object.
+ * @param source - Draggable Calendar task card.
+ * @param target - Calendar date or unscheduled bucket receiving the card.
+ */
+async function dragScheduleCard(page: Page, source: Locator, target: Locator): Promise<void> {
+  const dataTransfer = await page.evaluateHandle(() => new DataTransfer())
+
+  try {
+    await source.dispatchEvent('dragstart', { dataTransfer })
+    await page.evaluate(() => new Promise<void>((resolve) => {
+      requestAnimationFrame(() => resolve())
+    }))
+    await target.dispatchEvent('dragover', { dataTransfer })
+    await target.dispatchEvent('drop', { dataTransfer })
+    await source.dispatchEvent('dragend', { dataTransfer })
+  } finally {
+    await dataTransfer.dispose()
+  }
+}
+
+const ganttDropBottomOffset = 12
+
+/**
+ * Uses Playwright's real pointer drag sequence to drop a Gantt control on one visible date.
+ *
+ * @param page - Browser page containing the Gantt timeline.
+ * @param source - Draggable bar or resize handle.
+ * @param timeline - Complete row timeline receiving the bubbled native drop.
+ * @param date - Exact daily column on which the pointer is released.
+ */
+async function dragGanttControlToDate(
+  page: Page,
+  source: Locator,
+  timeline: Locator,
+  date: string,
+): Promise<void> {
+  const column = page.getByRole('columnheader', { exact: true, name: date })
+  await source.scrollIntoViewIfNeeded()
+  const [columnBounds, sourceBounds, timelineBounds] = await Promise.all([
+    column.boundingBox(),
+    source.boundingBox(),
+    timeline.boundingBox(),
+  ])
+
+  if (!columnBounds || !sourceBounds || !timelineBounds) {
+    throw new Error(`Gantt drag target is not visible: ${date}`)
+  }
+
+  const sourceX = sourceBounds.x + sourceBounds.width / 2
+  const sourceY = sourceBounds.y + sourceBounds.height / 2
+  const targetX = columnBounds.x + columnBounds.width / 2
+  const targetY = timelineBounds.y + timelineBounds.height - ganttDropBottomOffset
+  const sourceReceivesPointer = await source.evaluate((element, point) => {
+    const hitTarget = document.elementFromPoint(point.x, point.y)
+    return element === hitTarget || (hitTarget !== null && element.contains(hitTarget))
+  }, { x: sourceX, y: sourceY })
+  if (!sourceReceivesPointer) {
+    throw new Error(`Gantt drag source is covered: ${date}`)
+  }
+
+  const dataTransfer = await page.evaluateHandle(() => new DataTransfer())
+
+  try {
+    await source.dispatchEvent('dragstart', {
+      clientX: sourceX,
+      clientY: sourceY,
+      dataTransfer,
+    })
+    await page.evaluate(() => new Promise<void>((resolve) => {
+      requestAnimationFrame(() => resolve())
+    }))
+    await timeline.dispatchEvent('dragover', {
+      clientX: targetX,
+      clientY: targetY,
+      dataTransfer,
+    })
+    await timeline.dispatchEvent('drop', {
+      clientX: targetX,
+      clientY: targetY,
+      dataTransfer,
+    })
+    await source.dispatchEvent('dragend', {
+      clientX: targetX,
+      clientY: targetY,
+      dataTransfer,
+    })
+  } finally {
+    await dataTransfer.dispose()
+  }
+}
+
+/**
+ * Verifies one persisted date-range schedule across every task planning surface.
+ *
+ * @param page - Playwright page showing the Refero task workspace.
+ * @param startDate - Expected inclusive schedule start.
+ * @param endDate - Expected inclusive schedule end.
+ */
+async function expectWireframeScheduleAcrossTaskViews(
+  page: Page,
+  startDate: string,
+  endDate: string,
+): Promise<void> {
+  const dateRangeText = `${startDate} – ${endDate}`
+  const scheduleText = `期間: ${dateRangeText}`
+
+  await page.getByRole('tab', { name: 'テーブル', exact: true }).click()
+  await expect(page.getByTestId('task-row-wireframe')).toContainText(scheduleText)
+
+  await page.getByTestId('task-open-detail-wireframe').click()
+  const detailPane = page.getByTestId('task-detail-pane')
+
+  await expect(detailPane.locator('select[name="scheduleMode"]')).toHaveValue('date-range')
+  await expect(detailPane.locator('input[name="scheduleStartDate"]')).toHaveValue(startDate)
+  await expect(detailPane.locator('input[name="scheduleEndDate"]')).toHaveValue(endDate)
+  await detailPane.getByTestId('task-detail-close').click()
+
+  await page.getByRole('tab', { name: 'ボード', exact: true }).click()
+  await expect(page.getByTestId('project-task-card-wireframe')).toContainText(scheduleText)
+
+  await page.getByRole('tab', { name: '期限順', exact: true }).click()
+  const ganttBar = page.getByTestId('task-gantt-bar-wireframe')
+  const ganttRow = page.locator('article').filter({ has: ganttBar })
+
+  await expect(ganttRow.locator('select[id^="gantt-mode-"]')).toHaveValue('date-range')
+  await expect(ganttRow.locator('input[id^="gantt-start-"]')).toHaveValue(startDate)
+  await expect(ganttRow.locator('input[id^="gantt-end-"]')).toHaveValue(endDate)
+
+  await page.getByRole('tab', { name: '期限カレンダー', exact: true }).click()
+  const calendarCard = page.getByTestId('task-calendar-item-wireframe')
+
+  await expect(calendarCard).toContainText('期間')
+  await expect(calendarCard).toContainText(dateRangeText)
 }
 
 /**
@@ -2077,6 +3522,346 @@ test.describe('authenticated task page', () => {
     await mockAuthenticatedTaskPage(page)
   })
 
+  test('Issue #194: Focus は server 順・理由・keyboard・snooze・Inbox 相関を一続きで扱う', async ({ page }) => {
+    const focusQueue = structuredClone(focusQueueResponseFixture)
+    const mentionSignal = focusQueue.sections
+      .flatMap((group) => group.items)
+      .find((item) => item.workItem.id === 'WI-202')
+      ?.signals.find((signal) => signal.source.eventId === 'event-WI-202-mention')
+    if (!mentionSignal) throw new Error('The Focus fixture requires the WI-202 mention signal.')
+    mentionSignal.source.deepLink = '/inbox?eventId=event-WI-202-mention'
+
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      focusQueue,
+      notifications: [{
+        eventId: 'event-WI-202-mention',
+        eventType: 'comment.mentioned',
+        id: 'notification-focus-wi-202',
+        issueId: 'WI-202',
+        occurredAt: '2026-08-09T04:21:00.000Z',
+        projectId: 'refero',
+        reasons: ['mention'],
+        state: 'unread',
+        summary: 'Enterprise rollout question needs a response.',
+        teamId: 'core-team',
+        title: 'Answer the enterprise rollout question',
+      }],
+    })
+    const requestCounts = getMockRequestCounts(page)
+
+    await page.goto('/dashboard')
+    const sidebar = page.locator('aside[aria-label="メインサイドバー"]:visible')
+    await sidebar.getByRole('button', { name: 'フォーカス', exact: true }).click()
+    await expect(page).toHaveURL('/focus')
+
+    const queuePanel = page.getByRole('tabpanel', { name: /いま/ })
+    const orderedRows = queuePanel.locator('ol').first().locator(':scope > li')
+    const blockedItem = page.getByTestId('focus-item-core-team-WI-194')
+    const mentionItem = page.getByTestId('focus-item-core-team-WI-202')
+
+    await expect(orderedRows.nth(0)).toHaveAttribute(
+      'data-testid',
+      'focus-item-core-team-WI-194',
+    )
+    await expect(orderedRows.nth(1)).toHaveAttribute(
+      'data-testid',
+      'focus-item-core-team-WI-202',
+    )
+    await expect(blockedItem).toContainText('ブロッカー')
+    await expect(blockedItem).toContainText('期限超過')
+    await expect(blockedItem).toContainText('レビュー依頼')
+    await expect(blockedItem).toContainText('先行 Work Item を完了する')
+
+    await blockedItem.getByRole('button', { name: 'スヌーズ', exact: true }).click()
+    await blockedItem.getByLabel('再表示する時刻').selectOption('next-week')
+    await blockedItem.getByRole('button', { name: '確定', exact: true }).click()
+    await expect.poll(() => requestCounts.focusSnoozeUpdates).toBe(1)
+    await expect(blockedItem).toHaveCount(0)
+
+    const snoozeFeedback = page.getByRole('status').filter({ hasText: 'スヌーズしました' })
+    await expect(snoozeFeedback).toBeVisible()
+    await page.getByRole('tab', { name: /スヌーズ中/ }).click()
+    await expect(blockedItem).toBeVisible()
+    await snoozeFeedback.getByRole('button', { name: '元に戻す', exact: true }).click()
+    await expect.poll(() => requestCounts.focusSnoozeUpdates).toBe(2)
+    await expect(blockedItem).toHaveCount(0)
+
+    await page.getByRole('tab', { name: /いま/ }).click()
+    const blockedPrimary = blockedItem.locator('[data-focus-queue-primary]')
+    const mentionPrimary = mentionItem.locator('[data-focus-queue-primary]')
+    await blockedPrimary.focus()
+    await page.keyboard.press('j')
+    await expect(mentionPrimary).toBeFocused()
+    await page.keyboard.press('Enter')
+    await expect(page).toHaveURL(
+      '/projects/refero/issues?teamId=core-team&issueId=WI-202',
+    )
+
+    await page.goto('/inbox')
+    await expect(page.getByTestId('inbox-task-list')).toHaveCount(0)
+    await expect(page.locator('[data-testid^="focus-item-"]')).toHaveCount(0)
+    await page.getByTestId('notification-focus-notification-focus-wi-202').click()
+    await expect(page).toHaveURL(
+      '/focus?teamId=core-team&workItemId=WI-202&sourceEventId=event-WI-202-mention',
+    )
+    await expect(mentionPrimary).toHaveAttribute('aria-expanded', 'true')
+    await expect.poll(() => requestCounts.focusReads).toBeGreaterThanOrEqual(3)
+    await blockedPrimary.click()
+    await expect(blockedPrimary).toHaveAttribute('aria-expanded', 'true')
+    await expect(mentionPrimary).toHaveAttribute('aria-expanded', 'false')
+    await mentionPrimary.click()
+    await expect(mentionPrimary).toHaveAttribute('aria-expanded', 'true')
+
+    await mentionItem.getByRole('button', { name: '根拠を開く', exact: true }).click()
+    await expect(page).toHaveURL('/inbox?eventId=event-WI-202-mention')
+    const selectedNotification = page.getByTestId(
+      'notification-row-notification-focus-wi-202',
+    )
+    await expect(selectedNotification).toHaveAttribute('aria-current', 'true')
+    await expect(selectedNotification).toBeFocused()
+  })
+
+  test('Issue #194: archived mention の根拠は該当 Inbox page まで取得して focus する', async ({ page }) => {
+    const focusQueue = structuredClone(focusQueueResponseFixture)
+    const nowGroup = focusQueue.sections.find((group) => group.section === 'now')
+    const mentionItem = nowGroup?.items.find((item) => item.workItem.id === 'WI-202')
+    const mentionSignal = mentionItem?.signals.find((signal) =>
+      signal.source.eventId === 'event-WI-202-mention'
+    )
+    if (!nowGroup || !mentionItem || !mentionSignal) {
+      throw new Error('The Focus fixture requires the WI-202 mention signal.')
+    }
+    nowGroup.items = [mentionItem]
+    mentionSignal.source.deepLink =
+      '/inbox?eventId=event-WI-202-mention&filter=archived'
+    const archivedNotifications: InboxNotification[] = [
+      ...Array.from({ length: 30 }, (_, index) => ({
+        eventId: `archived-filler-event-${index}`,
+        eventType: 'comment.mentioned',
+        id: `archived-filler-${index}`,
+        occurredAt: `2026-08-08T${String(index % 24).padStart(2, '0')}:00:00.000Z`,
+        reasons: ['mention'],
+        state: 'archived' as const,
+      })),
+      {
+        eventId: 'event-WI-202-mention',
+        eventType: 'comment.mentioned',
+        id: 'notification-focus-wi-202-archived',
+        issueId: 'WI-202',
+        occurredAt: '2026-08-07T04:21:00.000Z',
+        reasons: ['mention'],
+        state: 'archived',
+        teamId: 'core-team',
+        title: 'Answer the enterprise rollout question',
+      },
+    ]
+
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      focusQueue,
+      notifications: archivedNotifications,
+    })
+    const requestCounts = getMockRequestCounts(page)
+    await page.goto('/focus')
+
+    await page.getByTestId('focus-item-core-team-WI-202')
+      .getByRole('button', { name: '根拠を開く', exact: true })
+      .click()
+    await expect(page).toHaveURL(
+      '/inbox?eventId=event-WI-202-mention&filter=archived',
+    )
+    const selectedNotification = page.getByTestId(
+      'notification-row-notification-focus-wi-202-archived',
+    )
+    await expect(selectedNotification).toHaveAttribute('aria-current', 'true')
+    await expect(selectedNotification).toBeFocused()
+    await expect.poll(() => requestCounts.notificationReads).toBeGreaterThanOrEqual(2)
+  })
+
+  test('Issue #194: 解決済みまたは閲覧不可の deep link は不在理由を表示する', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page)
+    await page.goto(
+      '/focus?teamId=core-team&workItemId=missing-item&sourceEventId=missing-event',
+    )
+
+    await expect(page.getByTestId('focus-deep-link-unavailable')).toContainText(
+      'リンク先の Work Item はフォーカスにないか、現在の権限では表示できません。',
+    )
+  })
+
+  test('Issue #194: Focus の inline 操作を閉じると trigger に戻り、最後の行を移すと active tab に戻る', async ({ page }) => {
+    const focusQueue = structuredClone(focusQueueResponseFixture)
+    const nowGroup = focusQueue.sections.find((group) => group.section === 'now')
+    if (!nowGroup?.items[0]) throw new Error('The Focus fixture requires one Now item.')
+    nowGroup.items = [nowGroup.items[0]]
+
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, { focusQueue })
+    const requestCounts = getMockRequestCounts(page)
+    await page.goto('/focus')
+
+    const activeTab = page.getByRole('tab', { name: /いま/ })
+    const onlyItem = page.getByTestId('focus-item-core-team-WI-194')
+    const scheduleTrigger = onlyItem.getByRole('button', {
+      name: '期限を設定',
+      exact: true,
+    })
+    const snoozeTrigger = onlyItem.getByRole('button', {
+      name: 'スヌーズ',
+      exact: true,
+    })
+
+    await scheduleTrigger.click()
+    await onlyItem.getByLabel('新しい期限').press('Escape')
+    await expect(scheduleTrigger).toBeFocused()
+    await scheduleTrigger.click()
+    await onlyItem.getByRole('button', { name: 'キャンセル', exact: true }).click()
+    await expect(scheduleTrigger).toBeFocused()
+
+    await snoozeTrigger.click()
+    await onlyItem.getByLabel('再表示する時刻').press('Escape')
+    await expect(snoozeTrigger).toBeFocused()
+    await snoozeTrigger.click()
+    await onlyItem.getByRole('button', { name: 'キャンセル', exact: true }).click()
+    await expect(snoozeTrigger).toBeFocused()
+
+    await snoozeTrigger.click()
+    await onlyItem.getByRole('button', { name: '確定', exact: true }).click()
+    await expect.poll(() => requestCounts.focusSnoozeUpdates).toBe(1)
+    await expect(onlyItem).toHaveCount(0)
+    await expect(activeTab).toBeFocused()
+  })
+
+  test('Issue #194: Focus の schedule preview 失敗は editor 内に理由を表示する', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page)
+    await page.route(
+      /.*\/api\/teams\/[^/]+\/issues\/[^/]+\/schedule\/preview$/,
+      async (route) => {
+        await route.fulfill({
+          status: 503,
+          json: { code: 'SchedulePreviewUnavailable', message: 'Preview failed.' },
+        })
+      },
+    )
+    await page.goto('/focus')
+
+    const item = page.getByTestId('focus-item-core-team-WI-194')
+    await item.getByRole('button', { name: '期限を設定', exact: true }).click()
+    await item.getByLabel('新しい期限').fill('2026-08-20')
+    await item.getByRole('button', { name: '影響を確認', exact: true }).click()
+
+    await expect(item.getByRole('alert')).toContainText(
+      '操作を完了できませんでした。もう一度お試しください。',
+    )
+    await expect(item.getByLabel('新しい期限')).toBeVisible()
+  })
+
+  test('Issue #194: snooze の Undo 失敗後も feedback を復元して再試行できる', async ({ page }) => {
+    const focusQueue = structuredClone(focusQueueResponseFixture)
+    const nowGroup = focusQueue.sections.find((group) => group.section === 'now')
+    if (!nowGroup?.items[0]) throw new Error('The Focus fixture requires one Now item.')
+    nowGroup.items = [nowGroup.items[0]]
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      failedFocusSnoozeRequestNumbers: [2],
+      focusQueue,
+    })
+    const requestCounts = getMockRequestCounts(page)
+    await page.goto('/focus')
+
+    const item = page.getByTestId('focus-item-core-team-WI-194')
+    await item.getByRole('button', { name: 'スヌーズ', exact: true }).click()
+    await item.getByRole('button', { name: '確定', exact: true }).click()
+    await expect.poll(() => requestCounts.focusSnoozeUpdates).toBe(1)
+    const undo = page.getByRole('button', { name: '元に戻す', exact: true })
+    await undo.click()
+    await expect.poll(() => requestCounts.focusSnoozeUpdates).toBe(2)
+
+    await expect(undo).toBeVisible()
+    await expect(page.getByRole('alert').filter({
+      hasText: '操作を完了できませんでした。',
+    })).toBeVisible()
+  })
+
+  test('Issue #194: Focus policy selector は個人と Team の sparse override を正しい target へ送る', async ({ page }) => {
+    const focusQueue = structuredClone(focusQueueResponseFixture)
+    delete focusQueue.userPolicy
+    focusQueue.teamPolicies = []
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, { focusQueue })
+    const requestCounts = getMockRequestCounts(page)
+    await page.goto('/focus')
+
+    const policyPanel = page.locator('details').filter({
+      hasText: 'フォーカスの優先ルール',
+    })
+    await policyPanel.locator('summary').click()
+    await policyPanel.locator('input[name="weight-urgent"]').fill('42')
+    await policyPanel.locator('input[name="dueSoonDays"]').fill('366')
+    await policyPanel.getByRole('button', { name: 'ルールを保存', exact: true }).click()
+    await expect(policyPanel.getByText('許可された範囲の値を入力してください。')).toBeVisible()
+    expect(requestCounts.focusPolicyUpdates).toBe(0)
+    await expect(policyPanel.locator('input[name="weight-urgent"]')).toHaveValue('42')
+    await policyPanel.locator('input[name="dueSoonDays"]').fill('')
+    await policyPanel.getByRole('button', { name: 'ルールを保存', exact: true }).click()
+    await expect.poll(() => requestCounts.focusPolicyUpdates).toBe(1)
+
+    await policyPanel.getByLabel('ルールの範囲').selectOption('team')
+    await policyPanel.locator('input[name="dueSoonDays"]').fill('5')
+    await policyPanel.getByRole('button', { name: 'ルールを保存', exact: true }).click()
+    await expect.poll(() => requestCounts.focusPolicyUpdates).toBe(2)
+    expect(requestCounts.focusPolicyInputs).toEqual([
+      {
+        expectedVersion: 0,
+        overrides: { weights: { urgent: 42 } },
+        target: { type: 'user' },
+      },
+      {
+        expectedVersion: 0,
+        overrides: { dueSoonDays: 5 },
+        target: { teamId: 'core-team', type: 'team' },
+      },
+    ])
+  })
+
+  test('Issue #194: Done の Focus 行は状態 selector から再オープンできる', async ({ page }) => {
+    const completedTask = referoTaskFixtures.find((task) => task.id === 'competitor-report')
+    const focusQueue = structuredClone(focusQueueResponseFixture)
+    const doneGroup = focusQueue.sections.find((group) => group.section === 'done')
+    const doneTemplate = doneGroup?.items[0]
+    if (!completedTask || !doneGroup || !doneTemplate) {
+      throw new Error('The task and Focus fixtures require one completed Work Item.')
+    }
+    doneGroup.items = [{
+      ...doneTemplate,
+      id: 'focus-competitor-report',
+      rank: {
+        ...doneTemplate.rank,
+        tieBreaker: 'core-team\0competitor-report',
+      },
+      workItem: structuredClone(completedTask),
+    }]
+    let reopenedWorkItemId = ''
+    let reopenedStatusId = ''
+
+    await mockAuthenticatedTaskPage(
+      page,
+      referoTaskFixtures,
+      (workItemId, workflowStatusId) => {
+        reopenedWorkItemId = workItemId
+        reopenedStatusId = workflowStatusId
+      },
+      { focusQueue },
+    )
+    const requestCounts = getMockRequestCounts(page)
+    await page.goto('/focus?section=done')
+
+    const doneItem = page.getByTestId('focus-item-core-team-competitor-report')
+    const statusSelector = doneItem.getByLabel('状態を変更')
+    await expect(statusSelector).toHaveValue('done')
+    await statusSelector.selectOption('in-progress')
+
+    await expect.poll(() => reopenedWorkItemId).toBe('competitor-report')
+    expect(reopenedStatusId).toBe('in-progress')
+    expect(requestCounts.issueUpdates).toBe(1)
+  })
+
   test('主要タスクビューの読み上げ構造とキーボードタブ操作を維持する', async ({ page }) => {
     await page.goto('/projects/refero/tasks')
 
@@ -2101,7 +3886,7 @@ test.describe('authenticated task page', () => {
       '- checkbox "新しいランディングページのワイヤーフレーム作成"',
     )
     expect(tableSnapshot).toContain(
-      '- button "新しいランディングページのワイヤーフレーム作成"',
+      '- \'button "タスク詳細: 新しいランディングページのワイヤーフレーム作成"\'',
     )
 
     const tableTab = tablist.getByRole('tab', { name: 'テーブル' })
@@ -2112,6 +3897,679 @@ test.describe('authenticated task page', () => {
     await expect(boardTab).toBeFocused()
     await expect(boardTab).toHaveAttribute('aria-selected', 'true')
     await expect(page.getByRole('tabpanel')).toContainText('ボードビュー')
+  })
+
+  test('Issue #190: Planning 障害でも Task を表示し dependency だけ再試行する', async ({ page }) => {
+    const dependency = {
+      id: 'dependency-planning-retry',
+      predecessor: { teamId: 'core-team', workItemId: 'wireframe' },
+      successor: { teamId: 'core-team', workItemId: 'brand-guideline' },
+      type: 'finish-to-start',
+      lagDays: 1,
+      createdAt: '2026-06-01T00:00:00.000Z',
+      updatedAt: '2026-06-01T00:00:00.000Z',
+    } satisfies WorkItemScheduleDependency
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      planningFailureCount: 1,
+      workItemScheduleDependencies: [dependency],
+    })
+    await page.goto('/projects/refero/tasks')
+
+    await expect(page.getByTestId('task-row-wireframe')).toBeVisible()
+    const planningError = page.getByTestId('project-planning-error')
+    await expect(planningError).toContainText('計画を取得できませんでした。')
+    await planningError.getByRole('button', { name: '再試行' }).click()
+
+    await expect(planningError).toHaveCount(0)
+    await expect(page.getByTestId('task-row-wireframe')).toContainText('1 件をブロック')
+  })
+
+  test('Issue #190: Planning の Project 導線は Team-qualified scope を直接開く', async ({ page }) => {
+    const snapshot: PlanningSnapshot = {
+      ...structuredClone(planningSnapshotFixture),
+      workItemDependencySummary: {
+        ...structuredClone(planningSnapshotFixture.workItemDependencySummary),
+        affectedProjectIds: ['refero', 'shared-launch'],
+        affectedProjects: [
+          { projectId: 'refero', teamId: 'core-team' },
+          { projectId: 'shared-launch', teamId: 'design-team' },
+        ],
+      },
+    }
+    await page.unroute('**/api/planning')
+    await page.route('**/api/planning', async (route) => {
+      await route.fulfill({ json: snapshot })
+    })
+    await page.goto('/planning/timeline')
+
+    const dependencyPanel = page.getByTestId('planning-work-item-dependencies')
+    await dependencyPanel.getByRole('button', {
+      name: '影響する Project 2 件: design-team / shared-launch',
+    }).click()
+    await expect(page).toHaveURL('/projects/shared-launch/issues?teamId=design-team')
+
+    await page.goto('/planning/timeline')
+    await dependencyPanel.getByRole('button', {
+      name: '影響する Project 2 件: core-team / refero',
+    }).click()
+    await expect(page).toHaveURL('/projects/refero/issues?teamId=core-team')
+  })
+
+  test('Issue #190: filter で隠れた同一 Project endpoint を外部扱いしない', async ({ page }) => {
+    const dependency = {
+      id: 'dependency-filtered-local',
+      predecessor: { teamId: 'core-team', workItemId: 'wireframe' },
+      successor: { teamId: 'core-team', workItemId: 'brand-guideline' },
+      type: 'finish-to-start',
+      lagDays: 1,
+      createdAt: '2026-06-01T00:00:00.000Z',
+      updatedAt: '2026-06-01T00:00:00.000Z',
+    } satisfies WorkItemScheduleDependency
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      workItemScheduleDependencies: [dependency],
+    })
+    await page.goto('/projects/refero/tasks')
+
+    await page.getByRole('searchbox', { name: '検索...' }).fill('ワイヤーフレーム')
+    await page.getByRole('tab', { name: '期限順', exact: true }).click()
+    const dependencySummary = page.getByTestId(`task-gantt-dependency-${dependency.id}`)
+
+    await expect(dependencySummary).toBeVisible()
+    await expect(dependencySummary).not.toContainText('外部 Project')
+    await expect(page.getByTestId('task-gantt-external-lane')).toHaveCount(0)
+    await expect(dependencySummary).toContainText('先行 Work Item')
+    await expect(dependencySummary).toContainText('後続 Work Item')
+  })
+
+  test('Issue #190: 依存先への日程波及を preview 後の confirm で一括保存する', async ({ page }) => {
+    const dependency = {
+      id: 'dependency-wireframe-brand',
+      predecessor: { teamId: 'core-team', workItemId: 'wireframe' },
+      successor: { teamId: 'core-team', workItemId: 'brand-guideline' },
+      type: 'finish-to-start',
+      lagDays: 2,
+      createdAt: '2026-06-01T00:00:00.000Z',
+      updatedAt: '2026-06-01T00:00:00.000Z',
+    } satisfies WorkItemScheduleDependency
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      workItemScheduleDependencies: [dependency],
+    })
+    await page.goto('/projects/refero/tasks')
+    const requestCounts = getMockRequestCounts(page)
+
+    await page.getByRole('tab', { name: '期限順', exact: true }).click()
+    const dependencySummary = page.getByTestId(`task-gantt-dependency-${dependency.id}`)
+
+    await expect(dependencySummary).toContainText('終了から開始')
+    await expect(dependencySummary).toContainText('+2日')
+    await expect(page.getByTestId(`task-gantt-connector-${dependency.id}`)).toBeVisible()
+
+    const wireframeBar = page.getByTestId('task-gantt-bar-wireframe')
+    await wireframeBar.focus()
+    await page.keyboard.press('ArrowRight')
+
+    const preview = page.getByRole('dialog', { name: '一括操作の事前確認' })
+
+    await expect(preview).toContainText('wireframe')
+    await expect(preview).toContainText('brand-guideline')
+    await expect(preview).toContainText('依存関係')
+    await expect(preview).toContainText(`依存関係 ${dependency.id} による変更`)
+    await expect(preview).toContainText('2026-06-06')
+    expect(requestCounts.issueUpdates).toBe(0)
+    expect(requestCounts.scheduleConfirms).toBe(0)
+
+    await preview.getByRole('button', { name: '適用', exact: true }).click()
+
+    const wireframeRow = page.locator('article').filter({
+      has: page.getByTestId('task-gantt-bar-wireframe'),
+    })
+    const brandRow = page.locator('article').filter({
+      has: page.getByTestId('task-gantt-bar-brand-guideline'),
+    })
+    await expect(wireframeRow.locator('input[id^="gantt-start-"]')).toHaveValue('2026-06-02')
+    await expect(brandRow.locator('input[id^="gantt-date-"]')).toHaveValue('2026-06-06')
+    await expect.poll(() => requestCounts.scheduleConfirms).toBe(1)
+    expect(requestCounts.issueUpdates).toBe(0)
+
+  })
+
+  test('Issue #190: confirm 後の GET 失敗でも全日程を成功状態へ反映する', async ({ page }) => {
+    const dependency = {
+      id: 'dependency-wireframe-brand-refresh-failure',
+      predecessor: { teamId: 'core-team', workItemId: 'wireframe' },
+      successor: { teamId: 'core-team', workItemId: 'brand-guideline' },
+      type: 'finish-to-start',
+      lagDays: 2,
+      createdAt: '2026-06-01T00:00:00.000Z',
+      updatedAt: '2026-06-01T00:00:00.000Z',
+    } satisfies WorkItemScheduleDependency
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      postConfirmProjectIssueFailureCount: 1,
+      workItemScheduleDependencies: [dependency],
+    })
+    await page.goto('/projects/refero/tasks')
+    const requestCounts = getMockRequestCounts(page)
+
+    await page.getByRole('tab', { name: '期限順', exact: true }).click()
+    const wireframeBar = page.getByTestId('task-gantt-bar-wireframe')
+
+    await wireframeBar.focus()
+    await page.keyboard.press('ArrowRight')
+
+    const preview = page.getByRole('dialog', { name: '一括操作の事前確認' })
+
+    await preview.getByRole('button', { name: '適用', exact: true }).click()
+    await expect.poll(() => requestCounts.scheduleConfirms).toBe(1)
+    await expect.poll(() => requestCounts.projectTasks.refero ?? 0).toBe(3)
+
+    const wireframeRow = page.locator('article').filter({
+      has: page.getByTestId('task-gantt-bar-wireframe'),
+    })
+    const brandRow = page.locator('article').filter({
+      has: page.getByTestId('task-gantt-bar-brand-guideline'),
+    })
+
+    await expect(page.getByTestId('task-action-feedback')).toContainText('変更を保存しました。')
+    await expect(wireframeRow.locator('input[id^="gantt-start-"]')).toHaveValue('2026-06-02')
+    await expect(wireframeRow.locator('input[id^="gantt-end-"]')).toHaveValue('2026-06-04')
+    await expect(brandRow.locator('input[id^="gantt-date-"]')).toHaveValue('2026-06-06')
+    await expect(page.getByTestId('tasks-error')).toHaveCount(0)
+    expect(requestCounts.scheduleConfirms).toBe(1)
+  })
+
+  test('Issue #190: dependency conflict preview は Gantt と Calendar で Cancel に focus する', async ({ page }) => {
+    const dependency = {
+      id: 'dependency-wireframe-brand-conflict',
+      predecessor: { teamId: 'core-team', workItemId: 'wireframe' },
+      successor: { teamId: 'core-team', workItemId: 'brand-guideline' },
+      type: 'finish-to-start',
+      lagDays: 2,
+      createdAt: '2026-06-01T00:00:00.000Z',
+      updatedAt: '2026-06-01T00:00:00.000Z',
+    } satisfies WorkItemScheduleDependency
+    const conflict = {
+      code: 'dependency-violation',
+      dependencyId: dependency.id,
+      workItem: dependency.successor,
+      requiredDate: '2026-06-06',
+      actualDate: '2026-06-05',
+    } satisfies WorkItemScheduleDependencyConflict
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      workItemScheduleDependencies: [dependency],
+      workItemScheduleDependencyConflicts: [conflict],
+    })
+    await page.goto('/projects/refero/tasks')
+    const requestCounts = getMockRequestCounts(page)
+
+    await page.getByRole('tab', { name: '期限順', exact: true }).click()
+    const wireframeBar = page.getByTestId('task-gantt-bar-wireframe')
+    await wireframeBar.focus()
+    await page.keyboard.press('ArrowRight')
+
+    const preview = page.getByRole('dialog', { name: '一括操作の事前確認' })
+    await expect(preview.getByRole('alert')).toContainText('依存関係のルールを満たせません。')
+    await expect(preview).toContainText('日程変更を確定する前に競合を解消してください。')
+    await expect(preview.getByRole('button', { name: '適用', exact: true })).toBeDisabled()
+    const ganttCancel = preview.getByRole('button', { name: 'キャンセル', exact: true })
+    await expect(ganttCancel).toBeFocused()
+    await ganttCancel.click()
+
+    await page.getByRole('tab', { name: '期限カレンダー', exact: true }).click()
+    await dragScheduleCard(
+      page,
+      page.getByTestId('task-calendar-item-wireframe'),
+      page.getByTestId('task-calendar-day-2026-06-07'),
+    )
+
+    const calendarPreview = page.getByRole('dialog', { name: '一括操作の事前確認' })
+    await expect(calendarPreview.getByRole('alert')).toContainText(
+      '依存関係のルールを満たせません。',
+    )
+    await expect(
+      calendarPreview.getByRole('button', { name: '適用', exact: true }),
+    ).toBeDisabled()
+    await expect(
+      calendarPreview.getByRole('button', { name: 'キャンセル', exact: true }),
+    ).toBeFocused()
+    expect(requestCounts.scheduleConfirms).toBe(0)
+    expect(requestCounts.issueUpdates).toBe(0)
+  })
+
+  test('Issue #190: 外部 Project 依存の connector と lead/lag を示し両端管理者以外は参照専用にする', async ({ page }) => {
+    const externalIssue = createStoredTeamIssue({
+      assignedProjectId: 'product-roadmap',
+      dueDate: '2026-06-08',
+      id: 'external-launch',
+      schedule: {
+        calendarPolicy: DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY,
+        dueDate: '2026-06-08',
+        mode: 'due-date',
+      },
+      title: '外部ローンチ準備',
+    })
+    const dependency = {
+      id: 'dependency-wireframe-external',
+      predecessor: { teamId: 'core-team', workItemId: 'wireframe' },
+      successor: { teamId: 'core-team', workItemId: externalIssue.id },
+      type: 'start-to-finish',
+      lagDays: -2,
+      createdAt: '2026-06-01T00:00:00.000Z',
+      updatedAt: '2026-06-01T00:00:00.000Z',
+    } satisfies WorkItemScheduleDependency
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      currentUser: {
+        username: 'demo@example.com',
+        name: 'Demo User',
+        isSystemAdmin: false,
+        workspaceRole: 'member',
+      },
+      projectMembersByProject: {
+        'product-roadmap': [{
+          id: 'demo@example.com',
+          email: 'demo@example.com',
+          name: 'Demo User',
+          role: 'viewer',
+          updatedAt: '2026-06-08T00:00:00.000Z',
+          workspaceStatus: 'active',
+        }],
+      },
+      teamIssuesByTeam: { 'core-team': [externalIssue] },
+      workItemScheduleDependencies: [dependency],
+    })
+    await page.goto('/projects/refero/tasks')
+
+    await page.getByRole('tab', { name: '期限順', exact: true }).click()
+    const dependencySummary = page.getByTestId(`task-gantt-dependency-${dependency.id}`)
+
+    await expect(dependencySummary).toContainText('外部 Project')
+    await expect(dependencySummary).toContainText('開始から終了')
+    await expect(dependencySummary).toContainText('-2日')
+    await expect(page.getByTestId('task-gantt-external-lane')).toBeVisible()
+    await expect(page.getByTestId(`task-gantt-external-${dependency.id}`)).toContainText(
+      '外部: 外部ローンチ準備',
+    )
+    await expect(page.getByTestId(`task-gantt-connector-${dependency.id}`)).toBeVisible()
+
+    const dependencyDetails = page.locator('details').filter({
+      hasText: 'スケジュール依存関係',
+    }).first()
+    await dependencyDetails.locator('summary').click()
+    const dependencyRow = dependencyDetails.getByTestId(`work-item-dependency-${dependency.id}`)
+    await expect(dependencyRow).toContainText('外部ローンチ準備')
+    await expect(dependencyRow).toContainText('スケジュール依存関係は参照専用です。')
+    await expect(dependencyRow.getByRole('button', { name: /^更新/u })).toHaveCount(0)
+    await expect(dependencyRow.getByRole('button', { name: /^削除/u })).toHaveCount(0)
+  })
+
+  test('Issue #190: Team Issue の Table・Board・詳細で同じ依存関係を示す', async ({ page }) => {
+    const dependency = {
+      id: 'dependency-team-surface',
+      predecessor: { teamId: 'core-team', workItemId: 'wireframe' },
+      successor: { teamId: 'core-team', workItemId: 'brand-guideline' },
+      type: 'finish-to-start',
+      lagDays: 1,
+      createdAt: '2026-06-01T00:00:00.000Z',
+      updatedAt: '2026-06-01T00:00:00.000Z',
+    } satisfies WorkItemScheduleDependency
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      workItemScheduleDependencies: [dependency],
+    })
+    await page.goto('/teams/core-team/issues')
+
+    const tableRow = page.locator('tr').filter({ has: page.getByTestId('issue-row-wireframe') })
+    await expect(tableRow).toContainText('1 件をブロック')
+    await page.getByRole('button', { name: 'ボード', exact: true }).click()
+    await expect(page.getByTestId('team-issue-card-wireframe')).toContainText('1 件をブロック')
+
+    await page.getByRole('button', { name: 'テーブル', exact: true }).click()
+    await page.getByTestId('issue-row-wireframe').click()
+    const detailPanel = page.locator('aside').getByTestId('work-item-dependency-panel')
+
+    await expect(detailPanel.getByTestId(`work-item-dependency-${dependency.id}`)).toContainText(
+      '新しいランディングページのワイヤーフレーム作成',
+    )
+    await expect(detailPanel.getByTestId(`work-item-dependency-${dependency.id}`)).toContainText(
+      'ブランドガイドラインの更新',
+    )
+  })
+
+  test('Issue #188: Table の期限編集も共通 preview を確認してから保存する', async ({ page }) => {
+    await page.goto('/projects/refero/tasks')
+    const requestCounts = getMockRequestCounts(page)
+    const dueDateField = page.getByTestId('task-inline-due-date-seo-research')
+
+    await dueDateField.click()
+    const dueDateInput = page.getByTestId('task-inline-due-date-seo-research-input')
+
+    await dueDateInput.fill('2026-06-10')
+    await dueDateInput.press('Enter')
+
+    const preview = page.getByTestId('task-schedule-update-preview')
+
+    await expect(preview).toHaveAccessibleName('一括操作の事前確認')
+    await expect(preview).toContainText('core-team / seo-research')
+    await expect(preview).toContainText('変更前: 期限のみ: 2026-06-09')
+    await expect(preview).toContainText('変更後: 期限のみ: 2026-06-10')
+    await expect.poll(() => requestCounts.schedulePreviews).toBe(1)
+    expect(requestCounts.issueUpdates).toBe(0)
+    expect(requestCounts.scheduleConfirms).toBe(0)
+
+    await preview.getByRole('button', { name: '適用', exact: true }).click()
+
+    await expect(page.getByTestId('task-inline-due-date-seo-research')).toContainText(
+      '期限のみ: 2026-06-10',
+    )
+    await expect.poll(() => requestCounts.scheduleConfirms).toBe(1)
+    expect(requestCounts.issueUpdates).toBe(0)
+  })
+
+  test('Issue #188: Gantt はキーボード移動を事前確認し undo・redo・resize できる', async ({ page }) => {
+    await page.goto('/projects/refero/tasks')
+    const requestCounts = getMockRequestCounts(page)
+
+    await page.getByRole('tab', { name: '期限順', exact: true }).click()
+
+    const bar = page.getByTestId('task-gantt-bar-wireframe')
+    const row = page.locator('article').filter({ has: bar })
+    const startDate = row.locator('input[id^="gantt-start-"]')
+    const endDate = row.locator('input[id^="gantt-end-"]')
+
+    await expect(startDate).toHaveValue('2026-06-01')
+    await expect(endDate).toHaveValue('2026-06-03')
+    await bar.focus()
+    await page.keyboard.press('ArrowRight')
+
+    const movePreview = page.getByRole('dialog', { name: '一括操作の事前確認' })
+
+    await expect(movePreview).toContainText('2026-06-01 – 2026-06-03')
+    await expect(movePreview).toContainText('2026-06-02 – 2026-06-04')
+    await movePreview.getByRole('button', { name: '適用', exact: true }).click()
+
+    await expect(startDate).toHaveValue('2026-06-02')
+    await expect(endDate).toHaveValue('2026-06-04')
+    await expect.poll(() => requestCounts.schedulePreviews).toBe(1)
+    await expect.poll(() => requestCounts.scheduleConfirms).toBe(1)
+
+    const feedback = page.getByTestId('task-action-feedback')
+
+    await feedback.getByRole('button', { name: '元に戻す', exact: true }).click()
+    const undoPreview = page.getByTestId('task-schedule-update-preview')
+    await expect(undoPreview).toContainText('2026-06-02 – 2026-06-04')
+    await expect(undoPreview).toContainText('2026-06-01 – 2026-06-03')
+    await undoPreview.getByRole('button', { name: '適用', exact: true }).click()
+    await expect(startDate).toHaveValue('2026-06-01')
+    await expect(endDate).toHaveValue('2026-06-03')
+    await expect.poll(() => requestCounts.schedulePreviews).toBe(2)
+    await expect.poll(() => requestCounts.scheduleConfirms).toBe(2)
+
+    await feedback.getByRole('button', { name: 'やり直す', exact: true }).click()
+    const redoPreview = page.getByTestId('task-schedule-update-preview')
+    await expect(redoPreview).toContainText('2026-06-01 – 2026-06-03')
+    await expect(redoPreview).toContainText('2026-06-02 – 2026-06-04')
+    await redoPreview.getByRole('button', { name: '適用', exact: true }).click()
+    await expect(startDate).toHaveValue('2026-06-02')
+    await expect(endDate).toHaveValue('2026-06-04')
+    await expect.poll(() => requestCounts.schedulePreviews).toBe(3)
+    await expect.poll(() => requestCounts.scheduleConfirms).toBe(3)
+
+    const resizeHandle = page.getByTestId('task-gantt-resize-wireframe')
+
+    await resizeHandle.focus()
+    await page.keyboard.press('ArrowRight')
+
+    const resizePreview = page.getByRole('dialog', { name: '一括操作の事前確認' })
+
+    await expect(resizePreview).toContainText('2026-06-02 – 2026-06-04')
+    await expect(resizePreview).toContainText('2026-06-02 – 2026-06-05')
+    await resizePreview.getByRole('button', { name: '適用', exact: true }).click()
+
+    await expect(endDate).toHaveValue('2026-06-05')
+    await expect.poll(() => requestCounts.schedulePreviews).toBe(4)
+    await expect.poll(() => requestCounts.scheduleConfirms).toBe(4)
+    await expect(resizePreview).toHaveCount(0)
+
+    await expectWireframeScheduleAcrossTaskViews(page, '2026-06-02', '2026-06-05')
+    await page.reload()
+    await expectWireframeScheduleAcrossTaskViews(page, '2026-06-02', '2026-06-05')
+    await page.getByRole('tab', { name: '期限順', exact: true }).click()
+
+    await row.locator('select[id^="gantt-mode-"]').selectOption('due-date')
+
+    const modePreview = page.getByRole('dialog', { name: '一括操作の事前確認' })
+
+    await expect(modePreview).toContainText('2026-06-02 – 2026-06-05')
+    await expect(modePreview).toContainText('期限: 2026-06-05')
+    await modePreview.getByRole('button', { name: '適用', exact: true }).click()
+
+    await expect(row.locator('input[id^="gantt-date-"]')).toHaveValue('2026-06-05')
+    await expect.poll(() => requestCounts.schedulePreviews).toBe(5)
+    await expect.poll(() => requestCounts.scheduleConfirms).toBe(5)
+  })
+
+  test('Issue #188: Gantt は既存 bar と重なる日へ pointer drag で移動・短縮できる', async ({ page }) => {
+    await page.goto('/projects/refero/tasks')
+    const requestCounts = getMockRequestCounts(page)
+
+    await page.getByRole('tab', { name: '期限順', exact: true }).click()
+
+    const bar = page.getByTestId('task-gantt-bar-wireframe')
+    const timeline = page.getByTestId('task-gantt-timeline-wireframe')
+
+    await dragGanttControlToDate(page, bar, timeline, '2026-06-02')
+
+    const movePreview = page.getByRole('dialog', { name: '一括操作の事前確認' })
+
+    await expect(movePreview).toContainText('2026-06-01 – 2026-06-03')
+    await expect(movePreview).toContainText('2026-06-02 – 2026-06-04')
+    await movePreview.getByRole('button', { name: '適用', exact: true }).click()
+
+    const movedRow = page.locator('article').filter({
+      has: page.getByTestId('task-gantt-bar-wireframe'),
+    })
+    await expect(movedRow.locator('input[id^="gantt-start-"]')).toHaveValue('2026-06-02')
+    await expect(movedRow.locator('input[id^="gantt-end-"]')).toHaveValue('2026-06-04')
+
+    await dragGanttControlToDate(
+      page,
+      page.getByTestId('task-gantt-resize-wireframe'),
+      page.getByTestId('task-gantt-timeline-wireframe'),
+      '2026-06-03',
+    )
+
+    const resizePreview = page.getByRole('dialog', { name: '一括操作の事前確認' })
+
+    await expect(resizePreview).toContainText('2026-06-02 – 2026-06-04')
+    await expect(resizePreview).toContainText('2026-06-02 – 2026-06-03')
+    await resizePreview.getByRole('button', { name: '適用', exact: true }).click()
+
+    await expect(movedRow.locator('input[id^="gantt-start-"]')).toHaveValue('2026-06-02')
+    await expect(movedRow.locator('input[id^="gantt-end-"]')).toHaveValue('2026-06-03')
+    await expect.poll(() => requestCounts.schedulePreviews).toBe(2)
+    await expect.poll(() => requestCounts.scheduleConfirms).toBe(2)
+  })
+
+  test('Issue #188: Gantt は未計画 row の明示日付から bar を作成し再読込後も保持する', async ({ page }) => {
+    await page.goto('/projects/refero/tasks')
+    const requestCounts = getMockRequestCounts(page)
+
+    await page.getByRole('tab', { name: '期限順', exact: true }).click()
+    const unscheduledRow = page.locator('article').filter({
+      hasText: '競合サイトの分析レポート作成',
+    })
+
+    await unscheduledRow.locator('input[id^="gantt-create-"]').fill('2026-06-08')
+
+    const preview = page.getByRole('dialog', { name: '一括操作の事前確認' })
+
+    await expect(preview).toContainText('予定なし')
+    await expect(preview).toContainText('2026-06-08')
+    await preview.getByRole('button', { name: '適用', exact: true }).click()
+
+    await expect(page.getByTestId('task-gantt-bar-competitor-report')).toBeVisible()
+    await expect(unscheduledRow.locator('select[id^="gantt-mode-"]')).toHaveValue('date-range')
+    await expect(unscheduledRow.locator('input[id^="gantt-start-"]')).toHaveValue('2026-06-08')
+    await expect(unscheduledRow.locator('input[id^="gantt-end-"]')).toHaveValue('2026-06-08')
+    await expect.poll(() => requestCounts.schedulePreviews).toBe(1)
+    await expect.poll(() => requestCounts.scheduleConfirms).toBe(1)
+
+    await page.reload()
+    await page.getByRole('tab', { name: '期限順', exact: true }).click()
+
+    const reloadedBar = page.getByTestId('task-gantt-bar-competitor-report')
+    const reloadedRow = page.locator('article').filter({ has: reloadedBar })
+
+    await expect(reloadedBar).toBeVisible()
+    await expect(reloadedRow.locator('select[id^="gantt-mode-"]')).toHaveValue('date-range')
+    await expect(reloadedRow.locator('input[id^="gantt-start-"]')).toHaveValue('2026-06-08')
+    await expect(reloadedRow.locator('input[id^="gantt-end-"]')).toHaveValue('2026-06-08')
+  })
+
+  test('Issue #188: Calendar は日付と未計画 bucket の間を drag and drop できる', async ({ page }) => {
+    await page.goto('/projects/refero/tasks')
+    const requestCounts = getMockRequestCounts(page)
+
+    await page.getByRole('tab', { name: '期限カレンダー', exact: true }).click()
+
+    const unscheduledBucket = page.getByTestId('task-calendar-unscheduled')
+    const calendarCard = page.getByTestId('task-calendar-item-wireframe')
+
+    await dragScheduleCard(page, calendarCard, unscheduledBucket)
+
+    const unschedulePreview = page.getByRole('dialog', { name: '一括操作の事前確認' })
+
+    await expect(unschedulePreview).toContainText('2026-06-01 – 2026-06-03')
+    await expect(unschedulePreview).toContainText('予定なし')
+    await unschedulePreview.getByRole('button', { name: '適用', exact: true }).click()
+
+    const unscheduledCard = unscheduledBucket.getByTestId('task-calendar-item-wireframe')
+
+    await expect(unscheduledCard).toBeVisible()
+    await expect(unscheduledCard).toBeFocused()
+    await expect.poll(() => requestCounts.schedulePreviews).toBe(1)
+    await expect.poll(() => requestCounts.scheduleConfirms).toBe(1)
+
+    const targetDay = page.getByTestId('task-calendar-day-2026-06-07')
+
+    await dragScheduleCard(
+      page,
+      unscheduledBucket.getByTestId('task-calendar-item-wireframe'),
+      targetDay,
+    )
+
+    const reschedulePreview = page.getByRole('dialog', { name: '一括操作の事前確認' })
+
+    await expect(reschedulePreview).toContainText('予定なし')
+    await expect(reschedulePreview).toContainText('2026-06-07')
+    await reschedulePreview.getByRole('button', { name: '適用', exact: true }).click()
+
+    const rescheduledCard = targetDay.getByTestId('task-calendar-item-wireframe')
+
+    await expect(rescheduledCard).toBeVisible()
+    await expect(rescheduledCard).toBeFocused()
+    await expect(unscheduledBucket.getByTestId('task-calendar-item-wireframe')).toHaveCount(0)
+    await expect.poll(() => requestCounts.schedulePreviews).toBe(2)
+    await expect.poll(() => requestCounts.scheduleConfirms).toBe(2)
+
+    await page.reload()
+    await page.getByRole('tab', { name: '期限カレンダー', exact: true }).click()
+    await expect(
+      page.getByTestId('task-calendar-day-2026-06-07')
+        .getByTestId('task-calendar-item-wireframe'),
+    ).toBeVisible()
+  })
+
+  test('Issue #188: Calendar は2日を選んだ期間 task を作成し再読込後も保持する', async ({ page }) => {
+    await page.goto('/projects/refero/tasks')
+    const requestCounts = getMockRequestCounts(page)
+
+    await page.getByRole('tab', { name: '期限カレンダー', exact: true }).click()
+    await page.getByRole('button', {
+      name: '2026-06-08 を始点または終点にして期間を作成',
+    }).click()
+    await page.getByRole('button', {
+      name: '2026-06-10 を始点または終点にして期間を作成',
+    }).click()
+
+    const createTaskForm = page.getByTestId('create-task-form')
+
+    await expect(createTaskForm.locator('select[name="scheduleMode"]')).toHaveValue('date-range')
+    await expect(createTaskForm.locator('input[name="scheduleStartDate"]')).toHaveValue('2026-06-08')
+    await expect(createTaskForm.locator('input[name="scheduleEndDate"]')).toHaveValue('2026-06-10')
+
+    await createTaskForm.locator('input[name="title"]').fill('Calendar range task')
+    await createTaskForm.locator('select[name="assigneeUserId"]').selectOption('sato@example.com')
+    await createTaskForm.getByRole('button', { name: '登録', exact: true }).click()
+
+    const createdCard = page.getByTestId('task-calendar-item-calendar-range-task')
+
+    await expect(createdCard).toContainText('Calendar range task')
+    await expect(createdCard).toContainText('期間')
+    await expect(createdCard).toContainText('2026-06-08 – 2026-06-10')
+    await expect.poll(() => requestCounts.issueCreates).toBe(1)
+
+    await page.reload()
+    await page.getByRole('tab', { name: '期限カレンダー', exact: true }).click()
+    await expect(page.getByTestId('task-calendar-item-calendar-range-task')).toContainText(
+      '2026-06-08 – 2026-06-10',
+    )
+  })
+
+  test('Issue #188: schedule preview の permission error は理由を表示し更新しない', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      forbiddenSchedulePreviewIssueKeys: [
+        createIssueCollaborationKey('core-team', 'wireframe'),
+      ],
+    })
+    await page.goto('/projects/refero/tasks')
+    const requestCounts = getMockRequestCounts(page)
+
+    await page.getByRole('tab', { name: '期限順', exact: true }).click()
+    const bar = page.getByTestId('task-gantt-bar-wireframe')
+
+    await bar.focus()
+    await page.keyboard.press('ArrowRight')
+
+    await expect(page.getByTestId('task-action-feedback')).toContainText(
+      'このスケジュールを変更する権限がありません。',
+    )
+    await expect.poll(() => requestCounts.schedulePreviews).toBe(1)
+    expect(requestCounts.issueUpdates).toBe(0)
+    expect(requestCounts.scheduleConfirms).toBe(0)
+    await expect(page.getByRole('dialog', { name: '一括操作の事前確認' })).toHaveCount(0)
+  })
+
+  test('Issue #188: schedule の revision conflict は optimistic 表示を戻して理由を示す', async ({ page }) => {
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      revisionConflictIssueKeys: [createIssueCollaborationKey('core-team', 'wireframe')],
+    })
+    await page.goto('/projects/refero/tasks')
+    const requestCounts = getMockRequestCounts(page)
+
+    await page.getByRole('tab', { name: '期限順', exact: true }).click()
+
+    const bar = page.getByTestId('task-gantt-bar-wireframe')
+    const row = page.locator('article').filter({ has: bar })
+    const startDate = row.locator('input[id^="gantt-start-"]')
+    const endDate = row.locator('input[id^="gantt-end-"]')
+
+    await expect(startDate).toHaveValue('2026-06-01')
+    await expect(endDate).toHaveValue('2026-06-03')
+    await bar.focus()
+    await page.keyboard.press('ArrowRight')
+
+    const preview = page.getByRole('dialog', { name: '一括操作の事前確認' })
+
+    await expect(preview).toContainText('2026-06-02 – 2026-06-04')
+    await preview.getByRole('button', { name: '適用', exact: true }).click()
+
+    await expect(preview).toHaveCount(0)
+    await expect(startDate).toHaveValue('2026-06-01')
+    await expect(endDate).toHaveValue('2026-06-03')
+    await expect(page.getByTestId('task-action-feedback')).toContainText(
+      '別の変更と競合しました。最新の内容を確認してください。',
+    )
+    await expect.poll(() => requestCounts.schedulePreviews).toBe(1)
+    await expect.poll(() => requestCounts.scheduleConfirms).toBe(1)
   })
 
   test('低速なタスクAPIを読み上げて一度だけ取得し、キーボード操作を保ったまま復帰する', async ({
@@ -2127,7 +4585,7 @@ test.describe('authenticated task page', () => {
     })
     let interceptedTaskRequestCount = 0
 
-    await page.route('**/api/projects/refero/issues', async (route) => {
+    await page.route('**/api/projects/refero/issues**', async (route) => {
       interceptedTaskRequestCount += 1
       markTaskRequestStarted()
       await taskResponseGate
@@ -2223,6 +4681,7 @@ test.describe('authenticated task page', () => {
 
     const searchbox = page.getByRole('searchbox', { name: '検索...' })
     const statusFilterButton = page.getByRole('button', {
+      exact: true,
       name: 'ステータス',
     })
 
@@ -2290,7 +4749,11 @@ test.describe('authenticated task page', () => {
     await expect(page.getByTestId('issue-row-wireframe')).toBeHidden()
     await expect(page.getByTestId('team-issues-count')).toContainText('1')
 
-    await page.getByRole('searchbox', { name: 'Issue を検索...' }).clear()
+    const issueSearchbox = page.getByRole('searchbox', { name: 'Issue を検索...' })
+
+    await issueSearchbox.clear()
+    await expect(issueSearchbox).toHaveValue('')
+    await expect(page.getByTestId('team-issues-count')).toContainText('4')
     await page.getByRole('combobox', { name: 'Issue ステータス' }).selectOption('review')
 
     await expect(page.getByTestId('issue-row-brand-guideline')).toBeVisible()
@@ -2330,7 +4793,9 @@ test.describe('authenticated task page', () => {
     await createIssueForm.getByLabel('Budget').fill('1200000')
     await createIssueForm.getByRole('button', { name: 'Issue を作成' }).click()
 
-    const issueRow = page.getByTestId('issue-row-configurable-delivery').locator('..').locator('..')
+    const issueRow = page.locator('tr').filter({
+      has: page.getByTestId('issue-row-configurable-delivery'),
+    })
 
     await expect(issueRow).toContainText('In progress')
     await expect(issueRow).toContainText(
@@ -2586,23 +5051,23 @@ test.describe('authenticated task page', () => {
     await expect(initialDetailPane.getByRole('button', { name: '変更を保存' })).toBeEnabled()
     await expect(page.getByRole('button', { name: 'コメントを追加' })).toBeVisible()
 
-    await page.getByRole('button', { name: '担当者' }).click()
+    await page.getByRole('button', { exact: true, name: '担当者' }).click()
     await page.getByRole('menuitemradio', { name: '佐藤 花子' }).click()
 
     await expect(page.getByTestId('task-row-wireframe')).toBeVisible()
     await expect(page.getByTestId('task-row-brand-guideline')).toBeHidden()
     await expect(page.getByTestId('tasks-count')).toContainText('1')
 
-    await page.getByRole('button', { name: '担当者' }).click()
+    await page.getByRole('button', { exact: true, name: '担当者' }).click()
     await page.getByRole('menuitemradio', { name: 'すべての担当者' }).click()
-    await page.getByRole('button', { name: '優先度' }).click()
+    await page.getByRole('button', { exact: true, name: '優先度' }).click()
     await page.getByRole('menuitemradio', { name: '高' }).click()
 
     await expect(page.getByTestId('task-row-wireframe')).toBeVisible()
     await expect(page.getByTestId('task-row-seo-research')).toBeHidden()
     await expect(page.getByTestId('tasks-count')).toContainText('1')
 
-    await page.getByRole('button', { name: '優先度' }).click()
+    await page.getByRole('button', { exact: true, name: '優先度' }).click()
     await page.getByRole('menuitemradio', { name: 'すべての優先度' }).click()
     await page.getByRole('button', { name: '期限', exact: true }).click()
     await page.getByRole('menuitemradio', { name: '期限切れ' }).click()
@@ -2617,9 +5082,14 @@ test.describe('authenticated task page', () => {
     await page.getByRole('button', { name: /期限が近い順/ }).click()
     await page.getByRole('menuitemradio', { name: '期限が遠い順' }).click()
 
+    await expect(page.getByTestId('task-row-competitor-report')).toBeVisible()
     await expect(page.getByTestId('task-row-seo-research')).toBeVisible()
     await expect(page.getByTestId('task-row-wireframe')).toBeVisible()
-    await expect(page.getByTestId('task-row-seo-research')).toHaveAttribute('data-row-index', '0')
+    await expect(page.getByTestId('task-row-competitor-report')).toHaveAttribute(
+      'data-row-index',
+      '0',
+    )
+    await expect(page.getByTestId('task-row-seo-research')).toHaveAttribute('data-row-index', '1')
 
     await page.goto('/teams/core-team/issues')
     await page.getByRole('button', { name: '新規 Issue' }).click()
@@ -2646,7 +5116,7 @@ test.describe('authenticated task page', () => {
     )
     await page.locator('textarea[name="body"]').fill('')
 
-    await page.getByTestId('task-row-seo-research').getByRole('button').click()
+    await page.getByTestId('task-open-detail-seo-research').click()
 
     await expect(page).toHaveURL(/issueId=seo-research/)
     await expect(page.getByTestId('task-detail-pane')).toContainText('SEO キーワードリサーチ')
@@ -2754,28 +5224,21 @@ test.describe('authenticated task page', () => {
     expect(Math.abs(drawerState.height - drawerState.viewportHeight)).toBeLessThanOrEqual(1)
     expect(drawerState.width).toBeLessThanOrEqual(drawerState.viewportWidth - 32)
 
-    const archiveButton = page.getByRole('button', { name: 'Refero をアーカイブ' })
+    const manageQuickAccessButton = sidebar.getByRole('button', {
+      name: 'クイックアクセスを管理',
+    })
 
-    await archiveButton.click()
-    const archiveDialog = page.getByRole('dialog', { name: 'アーカイブの確認' })
-    const archiveConfirmButton = archiveDialog.getByRole('button', { name: 'アーカイブ' })
+    await manageQuickAccessButton.click()
+    const quickAccessDialog = page.getByRole('dialog', {
+      name: 'クイックアクセスを管理',
+    })
 
-    await expect(archiveDialog).toContainText('現在この画面からは復元できません')
-    await expect(archiveDialog.getByRole('button', { name: 'キャンセル' })).toBeFocused()
-    await page.keyboard.press('Shift+Tab')
-    await expect(archiveConfirmButton).toBeFocused()
-    await page.keyboard.press('Escape')
-    await expect(archiveDialog).toHaveCount(0)
+    await expect(quickAccessDialog).toBeVisible()
+    await expect(quickAccessDialog.getByRole('button', { name: '閉じる' })).toBeFocused()
+    await quickAccessDialog.getByRole('button', { name: '閉じる' }).click()
+    await expect(quickAccessDialog).toHaveCount(0)
     await expect(drawer).toBeVisible()
-    await expect(archiveButton).toBeFocused()
-
-    await archiveButton.click()
-    await archiveDialog.getByRole('button', { name: 'アーカイブ' }).click()
-    await expect(archiveDialog).toHaveCount(0)
-    await expect(drawer).toBeVisible()
-    await expect(sidebar).toBeFocused()
-    await page.keyboard.press('Tab')
-    await expect(sidebar.getByRole('button', { name: 'サイドバーを折りたたむ' })).toBeFocused()
+    await expect(manageQuickAccessButton).toBeFocused()
 
     await page.mouse.move(180, 620)
     await page.mouse.wheel(0, 700)
@@ -2788,7 +5251,7 @@ test.describe('authenticated task page', () => {
 
     await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
     await expect(page.getByTestId('tasks-heading')).toBeVisible()
-    await page.getByTestId('task-row-brand-guideline').getByRole('button').click()
+    await page.getByTestId('task-open-detail-brand-guideline').click()
     await expect(page.getByTestId('task-detail-pane')).toContainText('ブランドガイドラインの更新')
 
     await page.goto('/teams/core-team/issues')
@@ -2805,14 +5268,14 @@ test.describe('authenticated task page', () => {
     expect(hasDocumentOverflow).toBe(false)
   })
 
-  test('DB のチーム別プロジェクトをサイドバーに表示し、選択したプロジェクトのタスクへ遷移する', async ({
+  test('DB の Quick Access と現在の Team をサイドバーに表示し、選択したプロジェクトのタスクへ遷移する', async ({
     page,
   }) => {
     await page.goto('/dashboard')
     const requestCounts = getMockRequestCounts(page)
 
     await expect(page.getByRole('button', { name: 'コアチーム', exact: true })).toBeVisible()
-    await expect(page.getByRole('button', { name: 'デザインチーム', exact: true })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'デザインチーム', exact: true })).toHaveCount(0)
     await expect(page.getByRole('button', { name: '共通ローンチ', exact: true })).toHaveCount(2)
     expect(requestCounts.projectDirectory).toBe(1)
     await expect.poll(() => requestCounts.workspaceWorkItems).toBe(1)
@@ -2848,12 +5311,14 @@ test.describe('authenticated task page', () => {
     await expectTeamIssueLayoutToStayInsideColumns(page)
     await createIssueForm.locator('input[name="title"]').fill('割当待ち Issue')
     await createIssueForm.locator('select[name="assigneeUserId"]').selectOption('sato@example.com')
+    await createIssueForm.locator('input[name="dueDate"]').fill('')
     await createIssueForm.getByRole('button', { name: 'Issue を作成' }).click()
 
     await expect(page.getByTestId('issue-row-割当待ち-issue')).toBeVisible()
     expect(requestCounts.issueCreates).toBe(1)
 
     await page.getByTestId('issue-row-割当待ち-issue').click()
+    await expect(page.locator('aside output')).toContainText('未計画')
     await page.locator('aside select[name="assignedProjectId"]').selectOption('refero')
     await page.getByRole('button', { name: '変更を保存' }).click()
 
@@ -2871,6 +5336,37 @@ test.describe('authenticated task page', () => {
     await page.goto('/projects/refero/issues?teamId=core-team')
 
     await expect(page.getByTestId('task-row-割当待ち-issue')).toContainText('割当待ち Issue')
+  })
+
+  test('Team Issue の単一期限 editor は range schedule を暗黙に変更しない', async ({ page }) => {
+    const rangedIssue = createStoredTeamIssue({
+      dueDate: '2026-08-07',
+      id: 'ranged-team-issue',
+      schedule: {
+        calendarPolicy: DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY,
+        durationDays: 5,
+        endDate: '2026-08-07',
+        mode: 'date-range',
+        startDate: '2026-08-03',
+      },
+      title: 'Range schedule を維持する Issue',
+    })
+    await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
+      teamIssuesByTeam: { 'core-team': [rangedIssue] },
+    })
+    await page.goto('/teams/core-team/issues')
+    const requestCounts = getMockRequestCounts(page)
+
+    await page.getByTestId('issue-row-ranged-team-issue').click()
+    const detailPane = page.locator('aside')
+    const scheduleOutput = detailPane.locator('output')
+
+    await expect(scheduleOutput).toContainText('期間: 2026-08-03 – 2026-08-07')
+    await detailPane.locator('input[name="title"]').fill('Range schedule を維持した Issue')
+    await detailPane.getByRole('button', { name: '変更を保存' }).click()
+
+    await expect.poll(() => requestCounts.issueUpdates).toBe(1)
+    await expect(scheduleOutput).toContainText('期間: 2026-08-03 – 2026-08-07')
   })
 
   test('成果物を API body 経由せず upload し、annotation と approval を保存できる', async ({ page }) => {
@@ -3399,7 +5895,7 @@ test.describe('authenticated task page', () => {
     await firstPanel.getByRole('button', { name: 'ダウンロード' }).click()
     await staleAccessStarted
 
-    await page.getByTestId('task-row-file-scope-second').getByRole('button').click()
+    await page.getByTestId('task-open-detail-file-scope-second').click()
     await expect(page).toHaveURL(/issueId=file-scope-second/)
     const secondPanel = page.getByTestId('issue-artifacts-panel')
     await expect(secondPanel.getByText('scope-first.png')).toHaveCount(0)
@@ -3629,18 +6125,19 @@ test.describe('authenticated task page', () => {
     await page.getByLabel('チーム名').fill('新規チーム')
     await page.getByRole('button', { name: 'チームを登録' }).click()
 
+    await page.getByRole('button', { name: 'コアチーム', exact: true }).click()
     await expect(page.getByRole('button', { name: '新規チーム', exact: true })).toBeVisible()
+    await page.keyboard.press('Escape')
     expect(requestCounts.teamCreates).toBe(1)
 
-    await page.getByRole('button', { name: '新規登録' }).click()
-    await page.getByRole('button', { name: 'プロジェクト', exact: true }).click()
+    await openSidebarCreatePanel(page, 'project')
     await page.getByLabel('プロジェクト名').fill('新規プロジェクト')
     await page.getByRole('button', { name: 'プロジェクトを登録' }).click()
 
-    await expect(page.getByRole('button', { name: '新規プロジェクト', exact: true })).toBeVisible()
     expect(requestCounts.projectCreates).toBe(1)
 
-    await page.getByRole('button', { name: '新規プロジェクト', exact: true }).click()
+    await page.getByRole('button', { name: 'プロジェクト 4', exact: true }).click()
+    await page.getByRole('button', { name: '新規プロジェクトを開く' }).click()
     await expect(page).toHaveURL('/projects/new-project/issues?teamId=core-team')
     await page.getByRole('tab', { name: /権限/ }).click()
     await expect(page.getByTestId('permission-member-row-demo-example-com')).toBeVisible()
@@ -3650,24 +6147,24 @@ test.describe('authenticated task page', () => {
   })
 
   test('ダッシュボードからプロジェクトをアーカイブできる', async ({ page }) => {
-    await page.goto('/dashboard')
+    await page.goto('/projects')
     const requestCounts = getMockRequestCounts(page)
 
-    await page.getByRole('button', { name: 'Refero をアーカイブ' }).click()
-    await expect(page.getByRole('dialog', { name: 'アーカイブの確認' })).toBeVisible()
+    await page.getByRole('button', { name: 'Referoをアーカイブ' }).click()
+    await expect(page.getByRole('dialog', { name: 'プロジェクトをアーカイブ' })).toBeVisible()
     expect(requestCounts.projectArchives).toBe(0)
 
     await page.getByRole('button', { name: 'キャンセル', exact: true }).click()
-    await expect(page.getByRole('button', { name: 'Refero', exact: true })).toHaveCount(1)
+    await expect(page.getByRole('button', { name: 'Referoを開く' })).toHaveCount(1)
 
-    await page.getByRole('button', { name: 'Refero をアーカイブ' }).click()
-    const archiveDialog = page.getByRole('dialog', { name: 'アーカイブの確認' })
+    await page.getByRole('button', { name: 'Referoをアーカイブ' }).click()
+    const archiveDialog = page.getByRole('dialog', { name: 'プロジェクトをアーカイブ' })
 
     await archiveDialog.getByRole('button', { name: 'アーカイブ', exact: true }).click()
     await expect(archiveDialog).toHaveAttribute('aria-busy', 'true')
-    await expect(archiveDialog).toBeFocused()
+    await expect(archiveDialog.getByRole('button', { name: 'キャンセル' })).toBeDisabled()
 
-    await expect(page.getByRole('button', { name: 'Refero', exact: true })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Referoを開く' })).toHaveCount(0)
     expect(requestCounts.projectArchives).toBe(1)
   })
 
@@ -3677,11 +6174,13 @@ test.describe('authenticated task page', () => {
 
     await expect(page.getByRole('button', { name: '共通ローンチ', exact: true })).toHaveCount(2)
 
+    await page.getByRole('button', { name: 'コアチーム', exact: true }).click()
+    await page.getByRole('button', { name: 'デザインチーム', exact: true }).click()
+    await page.getByRole('button', { name: 'その他', exact: true }).click()
     await page.getByRole('button', { name: 'デザインチーム をアーカイブ' }).click()
     await page.getByRole('button', { name: 'アーカイブ', exact: true }).click()
 
     await expect(page.getByRole('button', { name: 'デザインチーム', exact: true })).toHaveCount(0)
-    await expect(page.getByRole('button', { name: '共通ローンチ', exact: true })).toHaveCount(1)
     expect(requestCounts.teamArchives).toBe(1)
   })
 
@@ -3801,15 +6300,28 @@ test.describe('authenticated task page', () => {
 
     await expect(page).toHaveURL('/projects/shared-launch/issues')
     await expect(page.getByTestId('task-row-ambiguous-issue')).toHaveCount(2)
-    await expect(page.getByRole('button', { name: 'Core ambiguous issue' })).toBeVisible()
-    await expect(page.getByRole('button', { name: 'Design ambiguous issue' })).toBeVisible()
+    await expect(
+      page.getByRole('button', { exact: true, name: 'タスク詳細: Core ambiguous issue' }),
+    ).toBeVisible()
+    await expect(
+      page.getByRole('button', { exact: true, name: 'タスク詳細: Design ambiguous issue' }),
+    ).toBeVisible()
     expect(teamScopedIssueRequestPaths).toEqual([])
 
-    await page.getByRole('button', { name: 'Design ambiguous issue' }).click()
+    await page.getByRole('button', { exact: true, name: 'タスク詳細: Design ambiguous issue' }).click()
 
-    await expect(page).toHaveURL(
-      '/projects/shared-launch/issues?teamId=design-team&issueId=ambiguous-issue',
-    )
+    await expect.poll(() => {
+      const url = new URL(page.url())
+      return {
+        issueId: url.searchParams.get('issueId'),
+        pathname: url.pathname,
+        teamId: url.searchParams.get('teamId'),
+      }
+    }).toEqual({
+      issueId: 'ambiguous-issue',
+      pathname: '/projects/shared-launch/issues',
+      teamId: 'design-team',
+    })
     await expect(
       page.getByTestId('task-detail-pane').locator('textarea[name="description"]'),
     ).toHaveValue('design ambiguous detail')
@@ -3877,26 +6389,14 @@ test.describe('authenticated task page', () => {
       'コアチーム',
     )
     const coreTeamGroup = page.getByTestId('sidebar-team-core-team').first()
-    const designTeamGroup = page.getByTestId('sidebar-team-design-team').first()
-    const coreTeamButton = coreTeamGroup.getByRole('button', {
+
+    await expect(coreTeamGroup).toBeVisible()
+    await expect(page.getByTestId('sidebar-team-design-team')).toHaveCount(0)
+    await expect(coreTeamGroup.locator('[aria-current="page"]')).toHaveCount(0)
+    await expect(page.getByRole('button', {
       name: 'コアチーム',
       exact: true,
-    })
-    const designTeamButton = designTeamGroup.getByRole('button', {
-      name: 'デザインチーム',
-      exact: true,
-    })
-
-    await expect(coreTeamGroup).toHaveAttribute('data-project-ancestor', 'false')
-    await expect(coreTeamGroup).toHaveAttribute('data-team-active', 'false')
-    await expect(designTeamGroup).toHaveAttribute('data-project-ancestor', 'false')
-    await expect(designTeamGroup).toHaveAttribute('data-team-active', 'false')
-    await expect(coreTeamButton).toHaveAttribute('aria-expanded', 'false')
-    await expect(designTeamButton).toHaveAttribute('aria-expanded', 'false')
-    await expect(coreTeamButton).not.toHaveClass(/bg-white\/8|bg-teal-500\/20/)
-    await expect(designTeamButton).not.toHaveClass(/bg-white\/8|bg-teal-500\/20/)
-    await expect(coreTeamGroup.locator(':scope > div.relative > span.absolute')).toHaveCount(0)
-    await expect(designTeamGroup.locator(':scope > div.relative > span.absolute')).toHaveCount(0)
+    })).toHaveAttribute('aria-expanded', 'false')
     await expect(page.getByRole('button', { name: '新規タスク' })).toHaveCount(0)
     await expect.poll(() => [...new Set(requestedConfigurationTeamIds)].sort()).toEqual([
       'core-team',
@@ -4183,20 +6683,12 @@ test.describe('authenticated task page', () => {
 
     await expect(breadcrumb).toContainText('デザインチーム')
     await expect(breadcrumb).toContainText('Design shared launch')
-    await expect(page.getByTestId('sidebar-team-core-team').first()).toHaveAttribute(
-      'data-project-ancestor',
-      'false',
-    )
-    await expect(page.getByTestId('sidebar-team-design-team').first()).toHaveAttribute(
-      'data-project-ancestor',
-      'true',
-    )
-    await expect(
-      page.getByTestId('sidebar-team-design-team').first().getByRole('button', {
-        name: 'デザインチーム',
-        exact: true,
-      }),
-    ).toHaveAttribute('aria-expanded', 'true')
+    await expect(page.getByTestId('sidebar-team-core-team')).toHaveCount(0)
+    await expect(page.getByTestId('sidebar-team-design-team').first()).toBeVisible()
+    await expect(page.getByRole('button', {
+      name: 'デザインチーム',
+      exact: true,
+    })).toHaveAttribute('aria-expanded', 'false')
     await expect(coreRow).toContainText('Core configured')
     await expect(designRow).toContainText('Design configured')
     await expect(detailPane.locator('textarea[name="description"]')).toHaveValue(
@@ -4296,33 +6788,25 @@ test.describe('authenticated task page', () => {
     await expect(page.locator('aside textarea[name="description"]')).toHaveValue(issueDescription)
   })
 
-  test('Workspace 直下ルート間の遷移でサイドバーの手動状態を保持する', async ({ page }) => {
+  test('Workspace 直下ルート間の遷移でサイドバーの折りたたみ状態を保持する', async ({ page }) => {
     await page.goto('/home')
     const homeSidebar = await expectWorkspaceRouteShell(page, 'ホーム')
-    const coreTeamButton = homeSidebar
-      .getByTestId('sidebar-team-core-team')
-      .getByRole('button', { name: 'コアチーム', exact: true })
-
-    await expect(coreTeamButton).toHaveAttribute('aria-expanded', 'true')
-    await coreTeamButton.click()
-    await expect(coreTeamButton).toHaveAttribute('aria-expanded', 'false')
 
     await homeSidebar.getByRole('button', { name: 'サイドバーを折りたたむ' }).click()
     await expect(homeSidebar).toHaveAttribute('data-collapsed', 'true')
 
-    await homeSidebar.getByRole('button', { name: 'ダッシュボード', exact: true }).click()
-    await expect(page).toHaveURL('/dashboard')
+    await homeSidebar.getByRole('button', { name: 'マイタスク', exact: true }).click()
+    await expect(page).toHaveURL('/my-tasks')
 
-    const dashboardSidebar = await expectWorkspaceRouteShell(page, 'ダッシュボード')
+    const myTasksSidebar = await expectWorkspaceRouteShell(page, 'マイタスク')
 
-    await expect(dashboardSidebar).toHaveAttribute('data-collapsed', 'true')
-    await dashboardSidebar.getByRole('button', { name: 'サイドバーを展開する' }).click()
-    await expect(dashboardSidebar).toHaveAttribute('data-collapsed', 'false')
-    await expect(
-      dashboardSidebar
-        .getByTestId('sidebar-team-core-team')
-        .getByRole('button', { name: 'コアチーム', exact: true }),
-    ).toHaveAttribute('aria-expanded', 'false')
+    await expect(myTasksSidebar).toHaveAttribute('data-collapsed', 'true')
+    await myTasksSidebar.getByRole('button', { name: 'サイドバーを展開する' }).click()
+    await expect(myTasksSidebar).toHaveAttribute('data-collapsed', 'false')
+    await expect(myTasksSidebar.getByRole('button', {
+      name: 'コアチーム',
+      exact: true,
+    })).toBeVisible()
   })
 
   test('チーム概要では選択チームのプロジェクトタスクだけを集計する', async ({ page }) => {
@@ -4878,7 +7362,8 @@ test.describe('authenticated task page', () => {
 
     await createTaskForm.locator('input[name="title"]').fill('新規タスク')
     await createTaskForm.locator('select[name="assigneeUserId"]').selectOption('sato@example.com')
-    await createTaskForm.locator('input[name="dueDate"]').fill('2026-06-20')
+    await createTaskForm.locator('select[name="scheduleMode"]').selectOption('due-date')
+    await createTaskForm.locator('input[name="scheduleDueDate"]').fill('2026-06-20')
     await createTaskForm.getByRole('button', { name: '登録', exact: true }).click()
 
     await expect(page.getByTestId('task-row-new-task').getByText('新規タスク')).toBeVisible()
@@ -4910,7 +7395,8 @@ test.describe('authenticated task page', () => {
     const createTaskForm = page.getByTestId('create-task-form')
 
     await createTaskForm.locator('input[name="title"]').fill('担当者未選択タスク')
-    await createTaskForm.locator('input[name="dueDate"]').fill('2026-06-20')
+    await createTaskForm.locator('select[name="scheduleMode"]').selectOption('due-date')
+    await createTaskForm.locator('input[name="scheduleDueDate"]').fill('2026-06-20')
     await createTaskForm.getByRole('button', { name: '登録', exact: true }).click()
 
     await expect(createTaskForm.locator('select[name="assigneeUserId"]')).toHaveValue('')
@@ -4950,7 +7436,7 @@ test.describe('authenticated task page', () => {
   })
 
   test('タスク API 失敗時にエラーを表示する', async ({ page }) => {
-    await page.route('**/api/projects/refero/issues', async (route) => {
+    await page.route('**/api/projects/refero/issues**', async (route) => {
       await route.fulfill({
         status: 500,
         json: {
@@ -4967,7 +7453,7 @@ test.describe('authenticated task page', () => {
   })
 
   test('タスクが空の場合に empty 表示を出す', async ({ page }) => {
-    await page.route('**/api/projects/refero/issues', async (route) => {
+    await page.route('**/api/projects/refero/issues**', async (route) => {
       await route.fulfill({
         json: {
           projectId: 'refero',

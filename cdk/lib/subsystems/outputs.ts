@@ -2,10 +2,14 @@ import * as cdk from 'aws-cdk-lib';
 import * as apigatewayv2 from 'aws-cdk-lib/aws-apigatewayv2';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as guardduty from 'aws-cdk-lib/aws-guardduty';
+import * as iam from 'aws-cdk-lib/aws-iam';
+import * as kms from 'aws-cdk-lib/aws-kms';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
+import * as stepfunctions from 'aws-cdk-lib/aws-stepfunctions';
+import type { FileBucketIncarnationMarker } from './file-storage';
 
 /**
  * Resources whose deployment attributes are published as stack outputs.
@@ -23,6 +27,8 @@ export type StackOutputResources = {
   readonly automationTable: dynamodb.ITable;
   /** Planning and portfolio data table. */
   readonly planningTable: dynamodb.ITable;
+  /** Capacity planning availability and assignment data table. */
+  readonly capacityPlanningTable: dynamodb.ITable;
   /** Developer platform state table. */
   readonly developerPlatformTable: dynamodb.ITable;
   /** Analytics facts, reports, and snapshots table. */
@@ -41,20 +47,54 @@ export type StackOutputResources = {
   readonly workspaceAccessTable: dynamodb.ITable;
   /** Enterprise identity and security state table. */
   readonly enterpriseIdentityTable: dynamodb.ITable;
+  /** Tenant profile, entitlement, governance, and lifecycle table. */
+  readonly tenantAdministrationTable: dynamodb.ITable;
   /** Collaborative documents table. */
   readonly documentsTable: dynamodb.ITable;
   /** Work Item collaboration projection table. */
   readonly collaborationTable: dynamodb.ITable;
   /** Workspace search index table. */
   readonly workspaceSearchTable: dynamodb.ITable;
+  /** Durable Workspace Search migration checkpoint and operation state table. */
+  readonly workspaceSearchMigrationStateTable: dynamodb.ITable;
+  /** Write-once Workspace Search migration preimage journal bucket. */
+  readonly workspaceSearchMigrationJournalBucket: s3.IBucket;
+  /** Customer-managed encryption key for the migration journal. */
+  readonly workspaceSearchMigrationJournalKey: kms.IKey;
+  /** Least-privilege policy attached explicitly to an approved migration operator. */
+  readonly workspaceSearchMigrationOperatorPolicy: iam.IManagedPolicy;
+  /** Non-production-only retention extension attached alongside the migration operator policy. */
+  readonly workspaceSearchMigrationRehearsalEvidencePolicy: iam.IManagedPolicy;
+  /** Deployment condition guarding rehearsal-only evidence resources. */
+  readonly workspaceSearchMigrationRehearsalEvidenceCondition: cdk.CfnCondition;
+  /** Read-only policy attached explicitly to an approved integrity-check operator. */
+  readonly crossDomainIntegrityOperatorPolicy: iam.IManagedPolicy;
+  /** Standard state machine that performs an isolated restore drill. */
+  readonly workflow: stepfunctions.IStateMachine;
+  /** Standard state machine that performs approval-gated drill cleanup. */
+  readonly cleanupWorkflow: stepfunctions.IStateMachine;
+  /** Append-only immutable restore-drill evidence bucket. */
+  readonly evidenceBucket: s3.IBucket;
+  /** Isolated bucket containing temporary exports and exact object copies. */
+  readonly scratchBucket: s3.IBucket;
+  /** Durable restore-drill run, checkpoint, and cadence table. */
+  readonly stateTable: dynamodb.ITable;
+  /** Unattached policy for data-owner cleanup approval sessions. */
+  readonly cleanupApprovalPolicy: iam.IManagedPolicy;
+  /** Dead-letter queue for exhausted restore-drill schedule deliveries. */
+  readonly scheduleDlq: sqs.IQueue;
   /** Durable notification table. */
   readonly notificationsTable: dynamodb.ITable;
+  /** Focus queue preferences and snooze state table. */
+  readonly focusTable: dynamodb.ITable;
   /** Realtime connection and session table. */
   readonly realtimeSessionsTable: dynamodb.ITable;
   /** File proofing metadata table. */
   readonly fileProofingTable: dynamodb.ITable;
   /** Versioned workspace file bucket. */
   readonly fileBucket: s3.IBucket;
+  /** Exact immutable marker that identifies this file-bucket incarnation. */
+  readonly fileBucketIncarnationMarker: FileBucketIncarnationMarker;
   /** GuardDuty malware protection plan for workspace files. */
   readonly malwareProtectionPlan: guardduty.CfnMalwareProtectionPlan;
   /** Deployed realtime WebSocket stage. */
@@ -97,10 +137,38 @@ export type StackOutputResources = {
   readonly requestEmailIngestionFunction: lambda.IFunction;
   /** Dead-letter queue for request email ingestion failures. */
   readonly requestEmailIngestionDlq: sqs.IQueue;
+  /** Lambda function that processes scheduled Triage wake-ups. */
+  readonly triageScheduleFunction?: lambda.IFunction;
+  /** Dead-letter queue for scheduled Triage wake-up failures. */
+  readonly triageScheduleDlq?: sqs.IQueue;
+  /** Stream-only tenant lifecycle starter and retention worker. */
+  readonly tenantOperationFunction: lambda.IFunction;
+  /** Queued export artifact resource owner. */
+  readonly tenantExportCapabilityFunction: lambda.IFunction;
+  /** Queued access-revocation resource owner. */
+  readonly tenantAccessCapabilityFunction: lambda.IFunction;
+  /** Queued member-anonymization resource owner. */
+  readonly tenantIdentityCapabilityFunction: lambda.IFunction;
+  /** Queued data-deletion resource owner. */
+  readonly tenantDataCapabilityFunction: lambda.IFunction;
+  /** Queued secret-deletion resource owner. */
+  readonly tenantSecretsCapabilityFunction: lambda.IFunction;
+  /** Queued closure-verification resource owner. */
+  readonly tenantVerificationCapabilityFunction: lambda.IFunction;
+  /** Dead-letter queue for tenant lifecycle and retention stream failures. */
+  readonly tenantOperationDlq: sqs.IQueue;
   /** Lambda Function URL for the project task API. */
   readonly functionUrl: lambda.FunctionUrl;
   /** HTTP API Gateway endpoint for the project task API. */
   readonly httpApi: apigatewayv2.HttpApi;
+  /** AWS AppConfig application identifier for runtime controls. */
+  readonly applicationId: string;
+  /** AWS AppConfig environment identifier for runtime controls. */
+  readonly environmentId: string;
+  /** AWS AppConfig configuration profile identifier for runtime controls. */
+  readonly configurationProfileId: string;
+  /** AWS AppConfig canary deployment strategy identifier for operator changes. */
+  readonly canaryDeploymentStrategyId: string;
 };
 
 /**
@@ -134,6 +202,9 @@ export function buildStackOutputs(
   });
   new cdk.CfnOutput(scope, 'PlanningTableName', {
     value: resources.planningTable.tableName,
+  });
+  new cdk.CfnOutput(scope, 'CapacityPlanningTableName', {
+    value: resources.capacityPlanningTable.tableName,
   });
   new cdk.CfnOutput(scope, 'DeveloperPlatformTableName', {
     value: resources.developerPlatformTable.tableName,
@@ -173,6 +244,9 @@ export function buildStackOutputs(
   new cdk.CfnOutput(scope, 'EnterpriseIdentityTableName', {
     value: resources.enterpriseIdentityTable.tableName,
   });
+  new cdk.CfnOutput(scope, 'TenantAdministrationTableName', {
+    value: resources.tenantAdministrationTable.tableName,
+  });
   new cdk.CfnOutput(scope, 'DocumentsTableName', {
     value: resources.documentsTable.tableName,
   });
@@ -182,8 +256,58 @@ export function buildStackOutputs(
   new cdk.CfnOutput(scope, 'WorkspaceSearchTableName', {
     value: resources.workspaceSearchTable.tableName,
   });
+  new cdk.CfnOutput(scope, 'WorkspaceSearchMigrationStateTableName', {
+    value: resources.workspaceSearchMigrationStateTable.tableName,
+  });
+  new cdk.CfnOutput(scope, 'WorkspaceSearchMigrationJournalBucketName', {
+    value: resources.workspaceSearchMigrationJournalBucket.bucketName,
+  });
+  new cdk.CfnOutput(scope, 'WorkspaceSearchMigrationJournalKeyArn', {
+    value: resources.workspaceSearchMigrationJournalKey.keyArn,
+  });
+  new cdk.CfnOutput(scope, 'WorkspaceSearchMigrationOperatorPolicyArn', {
+    value: resources.workspaceSearchMigrationOperatorPolicy.managedPolicyArn,
+  });
+  const rehearsalEvidencePolicyOutput = new cdk.CfnOutput(
+    scope,
+    'WorkspaceSearchMigrationRehearsalEvidencePolicyArn',
+    {
+      value:
+        resources.workspaceSearchMigrationRehearsalEvidencePolicy
+          .managedPolicyArn,
+    },
+  );
+  rehearsalEvidencePolicyOutput.condition =
+    resources.workspaceSearchMigrationRehearsalEvidenceCondition;
+  new cdk.CfnOutput(scope, 'CrossDomainIntegrityOperatorPolicyArn', {
+    value: resources.crossDomainIntegrityOperatorPolicy.managedPolicyArn,
+  });
+  new cdk.CfnOutput(scope, 'RestoreDrillStateMachineArn', {
+    value: resources.workflow.stateMachineArn,
+  });
+  new cdk.CfnOutput(scope, 'RestoreDrillCleanupStateMachineArn', {
+    value: resources.cleanupWorkflow.stateMachineArn,
+  });
+  new cdk.CfnOutput(scope, 'RestoreDrillEvidenceBucketName', {
+    value: resources.evidenceBucket.bucketName,
+  });
+  new cdk.CfnOutput(scope, 'RestoreDrillScratchBucketName', {
+    value: resources.scratchBucket.bucketName,
+  });
+  new cdk.CfnOutput(scope, 'RestoreDrillStateTableName', {
+    value: resources.stateTable.tableName,
+  });
+  new cdk.CfnOutput(scope, 'RestoreDrillCleanupApprovalPolicyArn', {
+    value: resources.cleanupApprovalPolicy.managedPolicyArn,
+  });
+  new cdk.CfnOutput(scope, 'RestoreDrillScheduleDlqUrl', {
+    value: resources.scheduleDlq.queueUrl,
+  });
   new cdk.CfnOutput(scope, 'NotificationsTableName', {
     value: resources.notificationsTable.tableName,
+  });
+  new cdk.CfnOutput(scope, 'FocusTableName', {
+    value: resources.focusTable.tableName,
   });
   new cdk.CfnOutput(scope, 'RealtimeSessionsTableName', {
     value: resources.realtimeSessionsTable.tableName,
@@ -193,6 +317,18 @@ export function buildStackOutputs(
   });
   new cdk.CfnOutput(scope, 'FileBucketName', {
     value: resources.fileBucket.bucketName,
+  });
+  new cdk.CfnOutput(scope, 'FileBucketIncarnationMarkerKey', {
+    value: resources.fileBucketIncarnationMarker.key,
+  });
+  new cdk.CfnOutput(scope, 'FileBucketIncarnationMarkerVersionId', {
+    value: resources.fileBucketIncarnationMarker.versionId,
+  });
+  new cdk.CfnOutput(scope, 'FileBucketIncarnationMarkerChecksumSha256', {
+    value: resources.fileBucketIncarnationMarker.checksumSha256,
+  });
+  new cdk.CfnOutput(scope, 'FileBucketIncarnationMarkerSize', {
+    value: resources.fileBucketIncarnationMarker.size,
   });
   new cdk.CfnOutput(scope, 'FileMalwareProtectionPlanId', {
     value: resources.malwareProtectionPlan.attrMalwareProtectionPlanId,
@@ -257,6 +393,42 @@ export function buildStackOutputs(
   new cdk.CfnOutput(scope, 'RequestEmailIngestionDlqUrl', {
     value: resources.requestEmailIngestionDlq.queueUrl,
   });
+  if (resources.triageScheduleFunction && resources.triageScheduleDlq) {
+    new cdk.CfnOutput(scope, 'TriageScheduleFunctionName', {
+      value: resources.triageScheduleFunction.functionName,
+    });
+    new cdk.CfnOutput(scope, 'TriageScheduleDlqUrl', {
+      value: resources.triageScheduleDlq.queueUrl,
+    });
+  } else if (resources.triageScheduleFunction || resources.triageScheduleDlq) {
+    throw new Error(
+      'Triage schedule outputs require both the Lambda and dead-letter queue.',
+    );
+  }
+  new cdk.CfnOutput(scope, 'TenantOperationFunctionName', {
+    value: resources.tenantOperationFunction.functionName,
+  });
+  new cdk.CfnOutput(scope, 'TenantExportCapabilityFunctionName', {
+    value: resources.tenantExportCapabilityFunction.functionName,
+  });
+  new cdk.CfnOutput(scope, 'TenantAccessCapabilityFunctionName', {
+    value: resources.tenantAccessCapabilityFunction.functionName,
+  });
+  new cdk.CfnOutput(scope, 'TenantIdentityCapabilityFunctionName', {
+    value: resources.tenantIdentityCapabilityFunction.functionName,
+  });
+  new cdk.CfnOutput(scope, 'TenantDataCapabilityFunctionName', {
+    value: resources.tenantDataCapabilityFunction.functionName,
+  });
+  new cdk.CfnOutput(scope, 'TenantSecretsCapabilityFunctionName', {
+    value: resources.tenantSecretsCapabilityFunction.functionName,
+  });
+  new cdk.CfnOutput(scope, 'TenantVerificationCapabilityFunctionName', {
+    value: resources.tenantVerificationCapabilityFunction.functionName,
+  });
+  new cdk.CfnOutput(scope, 'TenantOperationDlqUrl', {
+    value: resources.tenantOperationDlq.queueUrl,
+  });
   new cdk.CfnOutput(scope, 'ProjectTasksApiUrl', {
     value: resources.functionUrl.url,
     description: 'Backward-compatible alias for the Lambda Function URL.',
@@ -266,5 +438,17 @@ export function buildStackOutputs(
   });
   new cdk.CfnOutput(scope, 'ProjectTasksApiGatewayUrl', {
     value: resources.httpApi.apiEndpoint,
+  });
+  new cdk.CfnOutput(scope, 'RuntimeControlApplicationId', {
+    value: resources.applicationId,
+  });
+  new cdk.CfnOutput(scope, 'RuntimeControlEnvironmentId', {
+    value: resources.environmentId,
+  });
+  new cdk.CfnOutput(scope, 'RuntimeControlConfigurationProfileId', {
+    value: resources.configurationProfileId,
+  });
+  new cdk.CfnOutput(scope, 'RuntimeControlCanaryDeploymentStrategyId', {
+    value: resources.canaryDeploymentStrategyId,
   });
 }

@@ -1,3 +1,8 @@
+import {
+  WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS,
+  WORK_ITEM_SCHEDULE_MAX_HOLIDAYS,
+} from './work-items'
+
 const apiScopes = [
   'work-items:read',
   'work-items:write',
@@ -300,6 +305,111 @@ const components = {
         errors: { type: 'array', items: schemaRef('ApiProblemViolation') },
       },
     },
+    WorkItemScheduleDate: {
+      type: 'string',
+      format: 'date',
+      pattern: '^[1-9][0-9]{3}-[0-9]{2}-[0-9]{2}$',
+      description: 'A real Gregorian date from 1000-01-01 through 9999-12-31.',
+    },
+    WorkItemScheduleCalendarPolicy: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['timeZone', 'workingWeekdays', 'holidays'],
+      properties: {
+        timeZone: { type: 'string', minLength: 1 },
+        workingWeekdays: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 7,
+          uniqueItems: true,
+          items: {
+            type: 'string',
+            enum: [
+              'monday',
+              'tuesday',
+              'wednesday',
+              'thursday',
+              'friday',
+              'saturday',
+              'sunday',
+            ],
+          },
+        },
+        holidays: {
+          type: 'array',
+          maxItems: WORK_ITEM_SCHEDULE_MAX_HOLIDAYS,
+          uniqueItems: true,
+          items: schemaRef('WorkItemScheduleDate'),
+        },
+      },
+    },
+    WorkItemSchedule: {
+      oneOf: [
+        {
+          type: 'object',
+          additionalProperties: false,
+          required: ['mode', 'calendarPolicy'],
+          properties: {
+            mode: { type: 'string', const: 'unscheduled' },
+            calendarPolicy: schemaRef('WorkItemScheduleCalendarPolicy'),
+            plannedEffortMinutes: { type: 'integer', minimum: 0 },
+          },
+        },
+        {
+          type: 'object',
+          additionalProperties: false,
+          required: ['mode', 'calendarPolicy', 'dueDate'],
+          properties: {
+            mode: { type: 'string', const: 'due-date' },
+            calendarPolicy: schemaRef('WorkItemScheduleCalendarPolicy'),
+            dueDate: schemaRef('WorkItemScheduleDate'),
+            plannedEffortMinutes: { type: 'integer', minimum: 0 },
+          },
+        },
+        {
+          type: 'object',
+          additionalProperties: false,
+          required: [
+            'mode',
+            'calendarPolicy',
+            'startDate',
+            'endDate',
+            'durationDays',
+          ],
+          properties: {
+            mode: { type: 'string', const: 'date-range' },
+            calendarPolicy: schemaRef('WorkItemScheduleCalendarPolicy'),
+            startDate: schemaRef('WorkItemScheduleDate'),
+            endDate: schemaRef('WorkItemScheduleDate'),
+            durationDays: {
+              type: 'integer',
+              minimum: 1,
+              maximum: WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS,
+            },
+            plannedEffortMinutes: { type: 'integer', minimum: 0 },
+          },
+        },
+        {
+          type: 'object',
+          additionalProperties: false,
+          required: [
+            'mode',
+            'calendarPolicy',
+            'startDate',
+            'endDate',
+            'durationDays',
+          ],
+          properties: {
+            mode: { type: 'string', const: 'milestone' },
+            calendarPolicy: schemaRef('WorkItemScheduleCalendarPolicy'),
+            startDate: schemaRef('WorkItemScheduleDate'),
+            endDate: schemaRef('WorkItemScheduleDate'),
+            durationDays: { type: 'integer', const: 0 },
+            plannedEffortMinutes: { type: 'integer', minimum: 0 },
+          },
+        },
+      ],
+    },
     WorkItem: {
       type: 'object',
       additionalProperties: false,
@@ -311,6 +421,7 @@ const components = {
         'title',
         'assigneeUserId',
         'dueDate',
+        'schedule',
         'priority',
         'creatorMemberKey',
         'workflowStatusId',
@@ -323,7 +434,7 @@ const components = {
         'source',
       ],
       properties: {
-        schemaVersion: { type: 'integer', const: 1 },
+        schemaVersion: { type: 'integer', const: 2 },
         revision: { type: 'integer', minimum: 1 },
         id: { type: 'string' },
         teamId: { type: 'string' },
@@ -333,7 +444,14 @@ const components = {
         assigneeUserId: { type: 'string' },
         assigneeEmail: { type: 'string', format: 'email' },
         assigneeName: { type: 'string' },
-        dueDate: { type: 'string', format: 'date' },
+        dueDate: {
+          anyOf: [
+            schemaRef('WorkItemScheduleDate'),
+            { type: 'string', const: '' },
+          ],
+          description: 'Deadline projection derived from schedule; empty when unscheduled.',
+        },
+        schedule: schemaRef('WorkItemSchedule'),
         priority: { type: 'string', enum: ['high', 'medium', 'low'] },
         creatorMemberKey: { type: 'string' },
         workflowStatusId: { type: 'string' },
@@ -352,7 +470,7 @@ const components = {
     CreatePublicWorkItemRequest: {
       type: 'object',
       additionalProperties: false,
-      required: ['teamId', 'title', 'assigneeUserId', 'dueDate', 'priority'],
+      required: ['teamId', 'title', 'assigneeUserId', 'schedule', 'priority'],
       properties: {
         teamId: { type: 'string' },
         title: { type: 'string', minLength: 1 },
@@ -361,7 +479,11 @@ const components = {
         assigneeUserId: { type: 'string' },
         workflowStatusId: { type: 'string' },
         customFieldValues: { type: 'object', additionalProperties: true },
-        dueDate: { type: 'string', format: 'date' },
+        quickCapture: {
+          type: 'boolean',
+          description: 'When true, workflowStatusId must identify a backlog status so required custom fields can be completed later.',
+        },
+        schedule: schemaRef('WorkItemSchedule'),
         priority: { type: 'string', enum: ['high', 'medium', 'low'] },
       },
     },
@@ -378,7 +500,7 @@ const components = {
         assigneeUserId: { type: 'string' },
         workflowStatusId: { type: 'string' },
         customFieldValues: { type: 'object', additionalProperties: true },
-        dueDate: { type: 'string', format: 'date' },
+        schedule: schemaRef('WorkItemSchedule'),
         priority: { type: 'string', enum: ['high', 'medium', 'low'] },
       },
     },

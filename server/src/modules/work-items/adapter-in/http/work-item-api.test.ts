@@ -5,7 +5,10 @@ const {
   app,
   configureFakeProjectClients,
   createCollaborationStub,
+  createDocumentFake,
   createFakeWorkItemConfigurationClient,
+  createTeamIssuesFake,
+  getTestAppDependencies,
   resetTestApp,
   runWithTestAppDependencies,
   setTestAppDependencies,
@@ -20,6 +23,14 @@ import {
   CollaborationError,
 } from '../../../collaboration/collaboration'
 import {
+  type CanonicalWorkItem,
+  createDefaultDueDateWorkItemSchedule,
+} from '@mukuroji/contracts'
+import { InMemoryPlanningClient } from '../../../planning/planning'
+import { createWorkItemAuthorizationChangedError } from '../../adapter-out/dynamodb/work-item-client'
+import { createInMemoryDeveloperPlatformAdapters } from '../../../developer-platform/adapter-out/in-memory/developer-platform-adapters'
+import type { AuthenticatedDeveloperCredential } from '../../../developer-platform/application/ports'
+import {
   afterEach,
   expect,
   test,
@@ -28,6 +39,41 @@ import {
 afterEach(() => {
   resetTestApp()
 })
+
+/**
+ * Adds every current server-only Work Item field to an API test fixture.
+ *
+ * @param workItem - Canonical fixture returned by the fake persistence port.
+ * @returns Fixture carrying causal, intake, archive, and approval internals.
+ */
+function addInternalWorkItemFields(workItem: CanonicalWorkItem): CanonicalWorkItem {
+  return {
+    ...workItem,
+    priorityUpdatedAt: '2026-06-08T01:00:00.000Z',
+    dueDateUpdatedAt: '2026-06-08T01:00:00.000Z',
+    sourceRequestId: 'request-internal-1',
+    archivedAt: '2026-06-08T02:00:00.000Z',
+    archivedBy: 'internal-operator@example.com',
+    approvalSummary: {
+      pendingCount: 1,
+      overdueCount: 0,
+      approvedCount: 0,
+      rejectedCount: 0,
+      changesRequestedCount: 0,
+      updatedAt: '2026-06-08T02:00:00.000Z',
+    },
+  }
+}
+
+/** Current internal Work Item fields excluded by the closed public schema. */
+const internalWorkItemFields = [
+  'priorityUpdatedAt',
+  'dueDateUpdatedAt',
+  'sourceRequestId',
+  'archivedAt',
+  'archivedBy',
+  'approvalSummary',
+]
 
 test('does not expose legacy project task mutation routes', async () => {
   const calls = configureFakeProjectClients(true)
@@ -100,10 +146,15 @@ test('loads all accessible canonical Work Items including unassigned items', asy
     'onboarding-friction',
   ])
   expect(body.workItems[0]).toMatchObject({
-    schemaVersion: 1,
+    schemaVersion: 2,
     revision: 1,
     teamId: 'core-team',
     source: 'dynamodb',
+    dueDate: '2026-06-18',
+    schedule: {
+      mode: 'due-date',
+      dueDate: '2026-06-18',
+    },
   })
   expect(body.workItems[0].assignedProjectId).toBeUndefined()
   expect(calls.issueReads).toEqual([
@@ -195,6 +246,340 @@ test('allows current system administrators to select an active Webhook Team', as
     locale: 'ja',
     consistentRead: true,
   })
+})
+
+test('projects every Public Work Item service result onto the closed response schema', async () => {
+  configureFakeProjectClients(true, {
+    directoryId: 'workspace-1',
+    workspaceRole: 'owner',
+  })
+  const baseTeamIssues = getTestAppDependencies().workItems.teamIssues
+  let preparedUpdateReceipt: unknown
+  const platform = createInMemoryDeveloperPlatformAdapters()
+  setTestAppDependencies({
+    ...platform,
+    documents: createDocumentFake({
+      async prepareWorkItemDeletionFenceTransactWrite() {
+        return {
+          transactWriteItem: {
+            Put: {
+              TableName: 'DocumentsTable',
+              Item: { activeBacklinkCount: 0 },
+            },
+          },
+        }
+      },
+    }),
+    transactions: {
+      async prepareIdempotencyCompletionTransactWrite(request) {
+        preparedUpdateReceipt = structuredClone(request.response)
+        return {
+          transactWriteItem: {
+            Put: {
+              TableName: 'DeveloperPlatformTable',
+              Item: { entryType: 'idempotency-completion' },
+            },
+          },
+        }
+      },
+    },
+    teamIssues: createTeamIssuesFake({
+      ...baseTeamIssues,
+      async getPublicWorkItemPage(directoryId, teamId, options) {
+        const page = await baseTeamIssues.getPublicWorkItemPage(directoryId, teamId, options)
+        return { ...page, issues: page.issues.map(addInternalWorkItemFields) }
+      },
+      async getTeamIssueDetail(directoryId, teamId, issueId, options) {
+        const detail = await baseTeamIssues.getTeamIssueDetail(
+          directoryId,
+          teamId,
+          issueId,
+          options,
+        )
+        return { ...detail, issue: addInternalWorkItemFields(detail.issue) }
+      },
+      async createTeamIssue(directoryId, teamId, input, actorUserId, auditContext) {
+        const response = await baseTeamIssues.createTeamIssue(
+          directoryId,
+          teamId,
+          input,
+          actorUserId,
+          auditContext,
+        )
+        return { issue: addInternalWorkItemFields(response.issue) }
+      },
+      async updateTeamIssue(
+        directoryId,
+        teamId,
+        issueId,
+        input,
+        actorUserId,
+        auditContext,
+        idempotency,
+      ) {
+        const response = await baseTeamIssues.updateTeamIssue(
+          directoryId,
+          teamId,
+          issueId,
+          input,
+          actorUserId,
+          auditContext,
+        )
+        const issue = addInternalWorkItemFields(response.issue)
+        await idempotency?.prepare({ status: 200, body: issue })
+        return { issue }
+      },
+      async deleteTeamIssue(
+        directoryId,
+        teamId,
+        issueId,
+        expectedRevision,
+        actorUserId,
+        auditContext,
+        idempotency,
+        deletionFences,
+        authorizationConditionChecks,
+        authorizationSnapshot,
+      ) {
+        if (baseTeamIssues.deleteTeamIssue === undefined) {
+          throw new Error('Expected the Public Work Item delete fake to be configured.')
+        }
+        const response = await baseTeamIssues.deleteTeamIssue(
+          directoryId,
+          teamId,
+          issueId,
+          expectedRevision,
+          actorUserId,
+          auditContext,
+          idempotency,
+          deletionFences,
+          authorizationConditionChecks,
+          authorizationSnapshot,
+        )
+        return { issue: addInternalWorkItemFields(response.issue) }
+      },
+    }),
+  })
+  const service = createCanonicalPublicWorkItemService()
+  const credential = {
+    kind: 'api-key',
+    workspaceId: 'workspace-1',
+    credentialId: 'closed-public-work-item-key',
+    subjectUserId: 'demo@example.com',
+    scopes: ['work-items:read', 'work-items:write', 'work-items:delete'],
+  } satisfies AuthenticatedDeveloperCredential
+  const mutationContext = {
+    requestId: 'closed-public-work-item-request',
+    idempotencyKey: 'closed-public-work-item-request',
+  }
+  const results = await runWithTestAppDependencies(async () => {
+    const page = await service.list(credential, { teamId: 'core-team' }, undefined, 10)
+    const item = await service.get(credential, 'core-team', 'onboarding-friction')
+    const created = await service.create(credential, {
+      teamId: 'core-team',
+      title: 'Public create projection',
+      assigneeUserId: 'sato@example.com',
+      assignedProjectId: 'refero',
+      schedule: createDefaultDueDateWorkItemSchedule('2026-06-18'),
+      priority: 'medium',
+    }, mutationContext)
+    const updated = await service.update(
+      credential,
+      'core-team',
+      'onboarding-friction',
+      { expectedRevision: 1, title: 'Public update projection' },
+      mutationContext,
+      {
+        credentialId: credential.credentialId,
+        idempotencyKey: mutationContext.idempotencyKey,
+        requestFingerprint: 'public-update-fingerprint',
+        reservationId: 'public-update-reservation',
+      },
+    )
+    const deleted = await service.delete(
+      credential,
+      'core-team',
+      'onboarding-friction',
+      1,
+      mutationContext,
+    )
+    return { page, item, created, updated, deleted }
+  })
+
+  const projectedItems = [
+    results.page.items[0],
+    results.item,
+    results.created,
+    results.updated,
+    results.deleted,
+  ]
+  for (const item of projectedItems) {
+    expect(item).toBeDefined()
+    expect(item).toMatchObject({
+      dueDate: '2026-06-18',
+      schedule: {
+        mode: 'due-date',
+        dueDate: '2026-06-18',
+      },
+    })
+    for (const field of internalWorkItemFields) {
+      expect(item).not.toHaveProperty(field)
+    }
+  }
+  expect(preparedUpdateReceipt).toBeDefined()
+  if (
+    typeof preparedUpdateReceipt !== 'object' ||
+    preparedUpdateReceipt === null ||
+    !('body' in preparedUpdateReceipt)
+  ) {
+    throw new Error('Expected a prepared Public Work Item replay receipt.')
+  }
+  for (const field of internalWorkItemFields) {
+    expect(preparedUpdateReceipt.body).not.toHaveProperty(field)
+  }
+  expect(preparedUpdateReceipt.body).toHaveProperty('schedule', expect.objectContaining({
+    mode: 'due-date',
+    dueDate: '2026-06-18',
+  }))
+})
+
+test('rejects Public Work Item deletion while an incident schedule dependency exists', async () => {
+  const calls = configureFakeProjectClients(true, { teamIssueCount: 2 })
+  const planning = new InMemoryPlanningClient()
+  const schedule = createDefaultDueDateWorkItemSchedule('2026-06-18')
+  const workItemState = {
+    workItems: [
+      {
+        id: 'onboarding-friction',
+        revision: 1,
+        teamId: 'core-team',
+        title: 'Delete target',
+        projectId: 'refero',
+        statusCategory: 'started' as const,
+        dueDate: '2026-06-18',
+        schedule,
+      },
+      {
+        id: 'work-item-1',
+        revision: 1,
+        teamId: 'core-team',
+        title: 'Successor',
+        projectId: 'refero',
+        statusCategory: 'started' as const,
+        dueDate: '2026-06-18',
+        schedule,
+      },
+    ],
+  }
+  await planning.createWorkItemDependency('user#demo@example.com', {
+    id: 'delete-dependency',
+    predecessor: { teamId: 'core-team', workItemId: 'onboarding-friction' },
+    successor: { teamId: 'core-team', workItemId: 'work-item-1' },
+    type: 'finish-to-finish',
+    lagDays: 0,
+    expectedRevision: 0,
+  }, workItemState)
+  setTestAppDependencies({ planning })
+  const service = createCanonicalPublicWorkItemService()
+
+  await expect(runWithTestAppDependencies(() => service.delete(
+    {
+      kind: 'api-key',
+      workspaceId: 'user#demo@example.com',
+      credentialId: 'delete-key',
+      subjectUserId: 'demo@example.com',
+      scopes: ['work-items:delete'],
+    },
+    'core-team',
+    'onboarding-friction',
+    1,
+    { requestId: 'delete-dependent', idempotencyKey: 'delete-dependent' },
+  ))).rejects.toMatchObject({
+    code: 'PlanningWorkItemDependencyInUse',
+    status: 409,
+  })
+  expect(calls.issueDeletes).toEqual([])
+})
+
+test('rejects Public Work Item deletion when a dependency is created after its precheck', async () => {
+  const planning = new InMemoryPlanningClient()
+  const schedule = createDefaultDueDateWorkItemSchedule('2026-06-18')
+  const workItemState = {
+    workItems: [
+      {
+        id: 'onboarding-friction',
+        revision: 1,
+        teamId: 'core-team',
+        title: 'Delete target',
+        projectId: 'refero',
+        statusCategory: 'started' as const,
+        dueDate: '2026-06-18',
+        schedule,
+      },
+      {
+        id: 'work-item-1',
+        revision: 1,
+        teamId: 'core-team',
+        title: 'Successor',
+        projectId: 'refero',
+        statusCategory: 'started' as const,
+        dueDate: '2026-06-18',
+        schedule,
+      },
+    ],
+  }
+  const calls = configureFakeProjectClients(true, {
+    directoryId: 'workspace-1',
+    teamIssueCount: 2,
+    async issueDeleteHook({ authorizationSnapshot }) {
+      expect(authorizationSnapshot?.planningRevision).toBe(0)
+      await planning.createWorkItemDependency('workspace-1', {
+        id: 'delete-race-dependency',
+        predecessor: { teamId: 'core-team', workItemId: 'onboarding-friction' },
+        successor: { teamId: 'core-team', workItemId: 'work-item-1' },
+        type: 'finish-to-finish',
+        lagDays: 0,
+        expectedRevision: 0,
+      }, workItemState)
+      throw createWorkItemAuthorizationChangedError()
+    },
+  })
+  const platform = createInMemoryDeveloperPlatformAdapters()
+  setTestAppDependencies({
+    ...platform,
+    documents: createDocumentFake({
+      async prepareWorkItemDeletionFenceTransactWrite() {
+        return {
+          transactWriteItem: {
+            Put: {
+              TableName: 'DocumentsTable',
+              Item: { activeBacklinkCount: 0 },
+            },
+          },
+        }
+      },
+    }),
+    planning,
+  })
+  const service = createCanonicalPublicWorkItemService()
+
+  await expect(runWithTestAppDependencies(() => service.delete(
+    {
+      kind: 'api-key',
+      workspaceId: 'workspace-1',
+      credentialId: 'delete-race-key',
+      subjectUserId: 'demo@example.com',
+      scopes: ['work-items:delete'],
+    },
+    'core-team',
+    'onboarding-friction',
+    1,
+    { requestId: 'delete-race', idempotencyKey: 'delete-race' },
+  ))).rejects.toMatchObject({
+    code: 'WorkItemAuthorizationChanged',
+    status: 409,
+  })
+  expect(calls.issueDeletes).toEqual([])
 })
 
 test('pages all accessible Work Items beyond aggregate Team and item hard caps', async () => {
@@ -349,7 +734,7 @@ test('creates a team-owned issue after team access is confirmed', async () => {
       description: 'Issue の説明',
       assignedProjectId: 'refero',
       assigneeUserId: 'sato@example.com',
-      dueDate: '2026/06/20',
+      schedule: createDefaultDueDateWorkItemSchedule('2026-06-20'),
       priority: 'medium',
       workflowStatusId: 'todo',
     }),
@@ -358,7 +743,7 @@ test('creates a team-owned issue after team access is confirmed', async () => {
   expect(response.status).toBe(201)
   expect(await response.json()).toEqual({
     issue: {
-      schemaVersion: 1,
+      schemaVersion: 2,
       revision: 1,
       id: 'new-issue',
       teamId: 'core-team',
@@ -374,7 +759,16 @@ test('creates a team-owned issue after team access is confirmed', async () => {
       statusCategory: 'unstarted',
       customFieldValues: {},
       relationIds: [],
-      dueDate: '2026/06/20',
+      dueDate: '2026-06-20',
+      schedule: {
+        mode: 'due-date',
+        dueDate: '2026-06-20',
+        calendarPolicy: {
+          timeZone: 'UTC',
+          workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+          holidays: [],
+        },
+      },
       priority: 'medium',
       createdAt: '2026-06-08T00:00:00.000Z',
       updatedAt: '2026-06-08T00:00:00.000Z',
@@ -394,6 +788,92 @@ test('creates a team-owned issue after team access is confirmed', async () => {
   ])
 })
 
+test('rejects a direct dueDate field even when create also includes a schedule', async () => {
+  const calls = configureFakeProjectClients(true)
+  const response = await app.request('/api/teams/core-team/issues', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      assigneeUserId: 'sato@example.com',
+      dueDate: '2026-06-20',
+      priority: 'medium',
+      schedule: createDefaultDueDateWorkItemSchedule('2026-06-20'),
+      title: 'Invalid direct deadline',
+      workflowStatusId: 'todo',
+    }),
+  })
+
+  expect(response.status).toBe(400)
+  expect(await response.json()).toEqual({
+    code: 'InvalidWorkItemSchedule',
+    message: 'dueDate is derived from schedule and cannot be written directly.',
+  })
+  expect(calls.issueCreates).toEqual([])
+})
+
+test('rejects internal adapter fields at the Work Item create boundary', async () => {
+  const calls = configureFakeProjectClients(true)
+  const internalFields: ReadonlyArray<readonly [string, unknown]> = [
+    ['authorizationConditionChecks', []],
+    ['authorizationSnapshot', { planningRevision: 0 }],
+    ['configurationConditionChecks', []],
+    ['idempotencyResourceId', 'caller-selected-id'],
+    ['idempotentIssueId', `api-${'a'.repeat(48)}`],
+    ['idempotentRequestDigest', 'b'.repeat(64)],
+    ['statusCategory', 'completed'],
+    ['workflowSchemaVersion', 99],
+  ]
+
+  for (const [field, value] of internalFields) {
+    const response = await app.request('/api/teams/core-team/issues', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        assigneeUserId: 'sato@example.com',
+        priority: 'medium',
+        schedule: createDefaultDueDateWorkItemSchedule('2026-06-20'),
+        title: 'Internal field injection',
+        workflowStatusId: 'todo',
+        [field]: value,
+      }),
+    })
+
+    expect(response.status).toBe(400)
+    expect(await response.json()).toMatchObject({
+      message: expect.stringContaining('internal fields'),
+    })
+  }
+  expect(calls.issueCreates).toEqual([])
+})
+
+test('rejects non-object Work Item create bodies before reading schedule fields', async () => {
+  const calls = configureFakeProjectClients(true)
+
+  for (const body of [JSON.stringify('not-an-object'), JSON.stringify([])]) {
+    const response = await app.request('/api/teams/core-team/issues', {
+      method: 'POST',
+      headers: {
+        Authorization: 'Bearer test-token',
+        'Content-Type': 'application/json',
+      },
+      body,
+    })
+
+    expect(response.status).toBe(400)
+      expect(await response.json()).toEqual({
+        message: 'Work Item body must be an object.',
+      })
+  }
+
+  expect(calls.issueCreates).toEqual([])
+})
+
 test('rejects a team issue assignment to a project outside the owning team', async () => {
   const calls = configureFakeProjectClients(true)
 
@@ -407,9 +887,9 @@ test('rejects a team issue assignment to a project outside the owning team', asy
       title: '不正な割り当て',
       assignedProjectId: 'unknown-project',
       assigneeUserId: 'sato@example.com',
-      dueDate: '2026/06/20',
+      schedule: createDefaultDueDateWorkItemSchedule('2026-06-20'),
       priority: 'medium',
-      status: 'todo',
+      workflowStatusId: 'todo',
     }),
   })
 
@@ -449,9 +929,9 @@ test('rejects a team issue assignment when the user lacks target project member 
       title: '権限外プロジェクトへの割り当て',
       assignedProjectId: 'product-roadmap',
       assigneeUserId: 'sato@example.com',
-      dueDate: '2026/06/20',
+      schedule: createDefaultDueDateWorkItemSchedule('2026-06-20'),
       priority: 'medium',
-      status: 'todo',
+      workflowStatusId: 'todo',
     }),
   })
 

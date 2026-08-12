@@ -2,7 +2,7 @@
 
 ## 目的
 
-この文書は、Workspace / Team ごとに設定できる workflow、custom field、Work Item relation の保存契約と運用手順を定義する。既存 canonical Work Item の `schemaVersion=1` は変更せず、設定拡張には独立した `workflowSchemaVersion=1` と `WorkItemConfigurationTable` を使う。
+この文書は、Workspace / Team ごとに設定できる workflow、custom field、Work Item relation の保存契約と運用手順を定義する。canonical Work Item の `schemaVersion=2` とは独立して、設定拡張には `workflowSchemaVersion=1` と `WorkItemConfigurationTable` を使う。
 
 設定が未登録でも既存 Workspace が停止しないこと、設定変更と Work Item 更新の競合を検出すること、relation の両側を同じ transaction で確定することを必須とする。
 
@@ -140,6 +140,8 @@ number         = digit , { digit } , [ "." , digit , { digit } ] ;
 `{estimate}` のように stable field ID だけを参照する。参照先は `number` / `currency` / `duration` / `formula` で、同じ解決済み scope に存在しなければならない。String concatenation、function call、property access、assignment、comment、指数演算、global identifier は許可しない。Definition 保存時に構文と dependency graph を検証し、direct / transitive self-cycle を拒否する。Work Item mutation ごとに formula を依存順で再計算し、算出値を list / filter / report 用 projection として `customFieldValues` に保存する。Division by zero、非有限結果、missing input は validation error とし、黙って `0` にしない。
 
 ## Work Item relation
+
+この graph は意味上の relation を所有する。`blocks` / `blockedBy` も blocker の意味と検索・表示を表すだけで、Work Item の日付を暗黙に移動しない。Cross-Team / cross-Project の日程制約、lead / lag、constraint、cascade preview は PlanningTable の canonical Work Item schedule dependency が所有する。
 
 Relation は同じ Team が所有する Work Item 間だけで作成できる。API は source / target を Team partition の strongly consistent read で確認し、同名 ID が別 Team に存在しても参照しない。
 

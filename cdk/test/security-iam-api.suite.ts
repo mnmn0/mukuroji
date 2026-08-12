@@ -2,6 +2,9 @@
 import { Match } from 'aws-cdk-lib/assertions';
 import { expect, test } from '@jest/globals';
 import {
+  API_CORE_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
+  API_DATA_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
+  findApiRuntimeConfigurationSource,
   findCustomResource,
   serializeAwsSdkCall,
   synthesizedTemplate,
@@ -21,117 +24,49 @@ test('shared server handler is bundled as a Lambda asset with production environ
     Timeout: 15,
     Environment: {
       Variables: Match.objectLike({
-        AUTOMATION_INBOUND_WEBHOOK_BASE_URL: Match.anyValue(),
-        AUTOMATION_INBOUND_WEBHOOK_SECRET_PREFIX: 'mukuroji/automation-inbound-webhooks',
-        AUTOMATION_TABLE_NAME: {
-          Ref: 'AutomationTableE3D67F0D',
+        MUKUROJI_API_CORE_CONFIG_SECRET_ARN: {
+          Ref: API_CORE_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
         },
-        AUTOMATION_WEBHOOK_SECRET_PREFIX: 'mukuroji/automation-webhooks',
-        COGNITO_CLIENT_ID: {
-          Ref: 'CognitoUserPoolClientId',
+        MUKUROJI_API_DATA_CONFIG_SECRET_ARN: {
+          Ref: API_DATA_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
         },
-        COGNITO_SSO_CLIENT_ID: {
-          Ref: 'CognitoSsoUserPoolClientId',
+        MUKUROJI_API_IDENTITY_CONFIG_SECRET_ARN: {
+          Ref: 'ApiIdentityRuntimeConfigurationSecret9BDC16DA',
         },
-        COGNITO_USER_POOL_ID: {
-          Ref: 'CognitoUserPoolId',
-        },
-        ENTERPRISE_IDENTITY_TABLE_NAME: Match.anyValue(),
-        ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET: {
-          Ref: 'EnterpriseIdentityTokenHashSecret',
-        },
-        DEVELOPER_PLATFORM_CONNECTOR_KMS_KEY_ID: Match.anyValue(),
-        DEVELOPER_PLATFORM_LOOKUP_INDEX_NAME: 'LookupKeyIndex',
-        DEVELOPER_PLATFORM_STATE_KMS_KEY_ID: Match.anyValue(),
-        DEVELOPER_PLATFORM_TABLE_NAME: {
-          Ref: 'DeveloperPlatformTable772E085C',
-        },
-        DEVELOPER_PLATFORM_WEBHOOK_KMS_KEY_ID: Match.anyValue(),
-        MUKUROJI_PROJECT_DIRECTORY_ID: {
-          Ref: 'WorkspaceDirectoryId',
-        },
-        MUKUROJI_WORKSPACE_DIRECTORY_ID: {
-          Ref: 'WorkspaceDirectoryId',
-        },
-        MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY: {
-          Ref: 'WorkspaceAuditPseudonymKey',
-        },
-        MUKUROJI_PROJECT_DIRECTORY_TABLE: {
-          Ref: 'ProjectDirectoryTable9ED01C01',
-        },
-        MUKUROJI_PROJECT_TASKS_TABLE: {
-          Ref: 'ProjectTasksTableE21F6637',
-        },
-        MUKUROJI_TEAM_ISSUES_TABLE: {
-          Ref: 'TeamIssuesTable189D851D',
-        },
-        MUKUROJI_WORK_ITEMS_TABLE: {
-          Ref: 'TeamIssuesTable189D851D',
-        },
-        TEAM_ISSUES_TABLE_NAME: {
-          Ref: 'TeamIssuesTable189D851D',
-        },
-        WORK_ITEMS_TABLE_NAME: {
-          Ref: 'TeamIssuesTable189D851D',
-        },
-        WORKSPACE_SEARCH_TABLE_NAME: {
-          Ref: 'WorkspaceSearchTable2575AD6B',
-        },
-        WORK_ITEM_CONFIGURATION_TABLE_NAME: {
-          Ref: 'WorkItemConfigurationTable35E94558',
-        },
-        COLLABORATION_TABLE_NAME: {
-          Ref: 'WorkItemCollaborationTableFDECF217',
-        },
-        DOCUMENTS_TABLE_NAME: {
-          Ref: 'DocumentsTable7E808EE5',
-        },
-        DOCUMENT_PUBLIC_SHARE_TOKEN_SECRET: Match.anyValue(),
-        MUKUROJI_DOCUMENTS_TABLE: {
-          Ref: 'DocumentsTable7E808EE5',
-        },
-        NOTIFICATIONS_TABLE_NAME: {
-          Ref: 'NotificationsTable76DCFC6C',
-        },
-        NOTIFICATIONS_STATUS_INDEX_NAME: 'RecipientStatusIndex',
-        PLANNING_TABLE_NAME: {
-          Ref: 'PlanningTable2A0D4CC5',
-        },
-        REALTIME_SESSIONS_TABLE_NAME: {
-          Ref: 'RealtimeSessionsTable607096EB',
-        },
-        REALTIME_WEBSOCKET_URL: Match.anyValue(),
-        WEBHOOK_DELIVERY_QUEUE_URL: {
-          Ref: 'WebhookDeliveryQueue2A244492',
-        },
-        REQUEST_INTAKE_TABLE_NAME: Match.anyValue(),
-        REQUEST_QUEUE_INDEX_NAME: 'RequestQueueIndex',
-        REQUEST_RATE_LIMIT_PER_HOUR: {
-          Ref: 'RequestRateLimitPerHour',
-        },
-        REQUEST_TOKEN_HASH_SECRET: {
-          Ref: 'RequestTokenHashSecret',
-        },
-        FILE_BUCKET_NAME: Match.anyValue(),
-        FILE_DOWNLOAD_URL_TTL_SECONDS: {
-          Ref: 'FileDownloadUrlTtlSeconds',
-        },
-        FILE_PROOFING_TABLE_NAME: Match.anyValue(),
-        FILE_RETENTION_DAYS: {
-          Ref: 'FileRetentionDays',
-        },
-        FILE_UPLOAD_URL_TTL_SECONDS: {
-          Ref: 'FileUploadUrlTtlSeconds',
+        MUKUROJI_API_WORKFLOW_CONFIG_SECRET_ARN: {
+          Ref: 'ApiWorkflowRuntimeConfigurationSecret225372D1',
         },
       }),
     },
+    FunctionName: 'Test-api-v2',
   });
 
   const lambdaResource = template.toJSON().Resources.ListProjectTasksFunction2134AF4A;
+  const variables = lambdaResource.Properties.Environment.Variables;
 
   expect(lambdaResource.Properties.Code.ZipFile).toBeUndefined();
-  expect(lambdaResource.Properties.Environment.Variables)
+  expect(Object.keys(variables).sort()).toEqual([
+    'MUKUROJI_API_CORE_CONFIG_SECRET_ARN',
+    'MUKUROJI_API_DATA_CONFIG_SECRET_ARN',
+    'MUKUROJI_API_IDENTITY_CONFIG_SECRET_ARN',
+    'MUKUROJI_API_WORKFLOW_CONFIG_SECRET_ARN',
+    'TENANT_EXPORT_BUCKET_NAME',
+  ]);
+  expect(variables)
     .not.toHaveProperty('MUKUROJI_WORK_ITEM_CONFIGURATION_TABLE');
+  for (const removedAlias of [
+    'MUKUROJI_DOCUMENTS_TABLE',
+    'MUKUROJI_PROJECT_DIRECTORY_ID',
+    'MUKUROJI_PROJECT_DIRECTORY_TABLE',
+    'MUKUROJI_WORK_ITEMS_TABLE',
+    'MUKUROJI_TEAM_ISSUES_TABLE',
+    'SYSTEM_ADMIN_GROUPS',
+    'TASKS_TABLE_NAME',
+    'TEAM_ISSUES_TABLE_NAME',
+    'TEAM_ISSUE_EVENTS_TABLE_NAME',
+  ]) {
+    expect(variables).not.toHaveProperty(removedAlias);
+  }
 });
 
 test('public API delivery queues are retained with TLS-only access and worker-safe visibility', () => {
@@ -199,17 +134,36 @@ test('public API delivery queues are retained with TLS-only access and worker-sa
 
 test('inbound automation webhook lifecycle uses a distinct public base URL and secret namespace', () => {
   const resources = synthesizedTemplate.toJSON().Resources;
-  const lambdaResource = resources.ListProjectTasksFunction2134AF4A;
-  const variables = lambdaResource.Properties.Environment.Variables;
+  const coreConfiguration =
+    resources[API_CORE_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID]
+      .Properties.SecretString;
+  const dataConfiguration =
+    resources[API_DATA_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID]
+      .Properties.SecretString;
 
-  expect(variables.AUTOMATION_INBOUND_WEBHOOK_SECRET_PREFIX)
-    .toBe('mukuroji/automation-inbound-webhooks');
-  expect(variables.AUTOMATION_INBOUND_WEBHOOK_SECRET_PREFIX)
-    .not.toBe(variables.AUTOMATION_WEBHOOK_SECRET_PREFIX);
-  const serializedBaseUrl = JSON.stringify(variables.AUTOMATION_INBOUND_WEBHOOK_BASE_URL);
-  expect(serializedBaseUrl).toContain('ProjectTasksHttpApi');
-  expect(serializedBaseUrl).toContain('ApiEndpoint');
-  expect(serializedBaseUrl).not.toContain('FunctionUrl');
+  expect(findApiRuntimeConfigurationSource(
+    coreConfiguration,
+    'AUTOMATION_INBOUND_WEBHOOK_BASE_URL',
+  )).toEqual({
+    'Fn::Base64': {
+      'Fn::GetAtt': ['ProjectTasksHttpApi4BD7BB44', 'ApiEndpoint'],
+    },
+  });
+  const inboundSecretPrefix = findApiRuntimeConfigurationSource(
+    dataConfiguration,
+    'AUTOMATION_INBOUND_WEBHOOK_SECRET_PREFIX',
+  );
+  const outboundSecretPrefix = findApiRuntimeConfigurationSource(
+    dataConfiguration,
+    'AUTOMATION_WEBHOOK_SECRET_PREFIX',
+  );
+  expect(inboundSecretPrefix).toEqual({
+    'Fn::Base64': 'mukuroji/automation-inbound-webhooks',
+  });
+  expect(outboundSecretPrefix).toEqual({
+    'Fn::Base64': 'mukuroji/automation-webhooks',
+  });
+  expect(inboundSecretPrefix).not.toEqual(outboundSecretPrefix);
 
   const inboundPolicy = Object.entries(resources).find(([logicalId, resource]) =>
     logicalId.startsWith('ApiAutomationInboundWebhookSecretPolicy') &&
@@ -237,21 +191,55 @@ test('inbound automation webhook lifecycle uses a distinct public base URL and s
   expect(inboundStatement?.Resource).not.toBe('*');
 });
 
-test('Function URL and API Gateway invoke the same Lambda handler', () => {
+test('Function URL and API Gateway invoke the same live Lambda alias', () => {
   const template = synthesizedTemplate;
+  const resources = template.toJSON().Resources;
   const functionLogicalId = 'ListProjectTasksFunction2134AF4A';
+  const versionLogicalId = Object.keys(
+    template.findResources('AWS::Lambda::Version'),
+  ).find((logicalId) =>
+    logicalId.startsWith('ListProjectTasksFunctionCurrentVersion')
+  );
+  expect(versionLogicalId).toBeDefined();
+  if (!versionLogicalId) {
+    throw new Error('The API Lambda version was not synthesized.');
+  }
+  const aliasLogicalId = 'ApiLiveAlias3A796568';
+
+  expect(resources[versionLogicalId].Properties).toEqual({
+    Description: {
+      'Fn::Join': [
+        ' ',
+        [
+          'API runtime configuration revision',
+          { Ref: 'ApiRuntimeConfigurationRevision' },
+        ],
+      ],
+    },
+    FunctionName: { Ref: functionLogicalId },
+  });
+  expect(resources[aliasLogicalId].Properties).toEqual({
+    FunctionName: { Ref: functionLogicalId },
+    FunctionVersion: {
+      'Fn::GetAtt': [versionLogicalId, 'Version'],
+    },
+    Name: 'live',
+  });
 
   template.hasResourceProperties('AWS::Lambda::Url', {
     AuthType: 'NONE',
+    Qualifier: 'live',
     TargetFunctionArn: {
       'Fn::GetAtt': [functionLogicalId, 'Arn'],
     },
   });
+  const functionUrl = Object.values(
+    template.findResources('AWS::Lambda::Url'),
+  )[0];
+  expect(functionUrl.DependsOn).toEqual([aliasLogicalId]);
   template.hasResourceProperties('AWS::ApiGatewayV2::Integration', {
     IntegrationType: 'AWS_PROXY',
-    IntegrationUri: {
-      'Fn::GetAtt': [functionLogicalId, 'Arn'],
-    },
+    IntegrationUri: { Ref: aliasLogicalId },
     PayloadFormatVersion: '2.0',
   });
   template.hasResourceProperties('AWS::ApiGatewayV2::Route', {
@@ -264,9 +252,7 @@ test('Function URL and API Gateway invoke the same Lambda handler', () => {
   });
   template.hasResourceProperties('AWS::Lambda::Permission', {
     Action: 'lambda:InvokeFunction',
-    FunctionName: {
-      'Fn::GetAtt': [functionLogicalId, 'Arn'],
-    },
+    FunctionName: { Ref: aliasLogicalId },
     Principal: 'apigateway.amazonaws.com',
     SourceArn: Match.anyValue(),
   });
@@ -298,6 +284,7 @@ test('Function URL and API Gateway invoke the same Lambda handler', () => {
   template.hasOutput('PlanningTableName', {
     Value: { Ref: 'PlanningTable2A0D4CC5' },
   });
+  template.hasOutput('FocusTableName', {});
   template.hasOutput('RequestIntakeTableName', {});
   template.hasOutput('DocumentsTableName', {
     Value: { Ref: 'DocumentsTable7E808EE5' },
@@ -308,12 +295,15 @@ test('developer platform and connector runtime secrets use rotated purpose-speci
   const template = synthesizedTemplate;
   const resources = template.toJSON().Resources;
 
-  template.resourceCountIs('AWS::KMS::Key', 4);
+  template.resourceCountIs('AWS::KMS::Key', 7);
   for (const description of [
     'Envelope key for developer platform Webhook signing secrets.',
     'Envelope key for developer platform connector credentials.',
     'Envelope key for developer platform cursors and idempotency state.',
     'Encryption key for connector provider runtime configuration.',
+    'Encrypts lossless Workspace Search migration preimage journal segments.',
+    'Encrypts isolated restore-drill exports and exact-version file copies.',
+    'Encrypts immutable secret-free restore-drill evidence.',
   ]) {
     template.hasResourceProperties('AWS::KMS::Key', {
       Description: description,
@@ -323,7 +313,7 @@ test('developer platform and connector runtime secrets use rotated purpose-speci
   const protectedKmsKeys = Object.values(resources).filter((resource) =>
     (resource as { Type?: string }).Type === 'AWS::KMS::Key'
   ) as Array<{ DeletionPolicy?: string; UpdateReplacePolicy?: string }>;
-  expect(protectedKmsKeys).toHaveLength(4);
+  expect(protectedKmsKeys).toHaveLength(7);
   expect(protectedKmsKeys.every((resource) =>
     resource.DeletionPolicy === 'Retain' &&
     resource.UpdateReplacePolicy === 'Retain'
@@ -393,10 +383,14 @@ test('Function URL and API Gateway expose the same restricted CORS contract', ()
 
 test('GuardDuty scanning and bucket policy quarantine files until a clean result', () => {
   const template = synthesizedTemplate;
-  const serializedBucketPolicy = JSON.stringify(
-    Object.values(template.findResources('AWS::S3::BucketPolicy'))[0],
+  const bucketPolicy = Object.values(
+    template.findResources('AWS::S3::BucketPolicy'),
+  ).find((resource) =>
+    JSON.stringify(resource).includes('ListProjectTasksFunctionServiceRole')
   );
+  const serializedBucketPolicy = JSON.stringify(bucketPolicy);
 
+  expect(bucketPolicy).toBeDefined();
   expect(serializedBucketPolicy).toContain('ListProjectTasksFunctionServiceRole');
 
   template.hasResourceProperties('AWS::IAM::Role', {
@@ -749,6 +743,12 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
       JSON.stringify(statement.Condition)?.includes('dynamodb:EnclosingOperation') === true &&
       JSON.stringify(statement.Resource).includes('WorkspaceSearchTable2575AD6B');
   });
+  const auditTransactionStatements = statements.filter((statement) => {
+    const actions = Array.isArray(statement.Action) ? statement.Action : [statement.Action];
+    return (actions.includes('dynamodb:PutItem') || actions.includes('dynamodb:ConditionCheckItem')) &&
+      JSON.stringify(statement.Resource).includes('AuditEventsTable') &&
+      JSON.stringify(statement.Condition)?.includes('dynamodb:EnclosingOperation') === true;
+  });
   const configurationDataStatement = statements.find((statement) =>
     JSON.stringify(statement.Resource) === JSON.stringify({
       'Fn::GetAtt': ['WorkItemConfigurationTable35E94558', 'Arn'],
@@ -812,6 +812,20 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
   const realtimeSessionStatements = statements.filter((statement) =>
     JSON.stringify(statement.Resource).includes('RealtimeSessionsTable607096EB')
   );
+  const focusTableLogicalId =
+    template.toJSON().Outputs.FocusTableName?.Value?.Ref;
+  expect(typeof focusTableLogicalId).toBe('string');
+  if (typeof focusTableLogicalId !== 'string') {
+    throw new Error('Focus table output was not synthesized.');
+  }
+  const focusStatements = statements.filter((statement) =>
+    JSON.stringify(statement.Resource).includes(focusTableLogicalId)
+  );
+  const focusDataStatement = focusStatements.find((statement) =>
+    Array.isArray(statement.Action) &&
+    statement.Action.includes('dynamodb:GetItem') &&
+    statement.Action.includes('dynamodb:PutItem')
+  );
   const cognitoStatement = statements.find((statement) =>
     (Array.isArray(statement.Action) ? statement.Action : [statement.Action])
       .includes('cognito-idp:AdminGetUser')
@@ -827,6 +841,7 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
     Effect: 'Allow',
     Resource: expect.arrayContaining([
       { 'Fn::GetAtt': ['TeamIssuesTable189D851D', 'Arn'] },
+      { 'Fn::GetAtt': [requestTableLogicalId, 'Arn'] },
       { 'Fn::GetAtt': ['ProjectDirectoryTable9ED01C01', 'Arn'] },
       { 'Fn::GetAtt': ['WorkspaceAccessTableD7C8D2C7', 'Arn'] },
       { 'Fn::GetAtt': ['WorkItemCollaborationTableFDECF217', 'Arn'] },
@@ -835,6 +850,7 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
       { 'Fn::GetAtt': ['WorkItemConfigurationTable35E94558', 'Arn'] },
       { 'Fn::GetAtt': ['PlanningTable2A0D4CC5', 'Arn'] },
       { 'Fn::GetAtt': [enterpriseIdentityTableLogicalId, 'Arn'] },
+      { 'Fn::GetAtt': [focusTableLogicalId, 'Arn'] },
       { 'Fn::GetAtt': ['WorkspaceSearchTable2575AD6B', 'Arn'] },
     ]),
   }));
@@ -857,6 +873,16 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
     .not.toContain('ProjectTasksTableE21F6637');
   expect(JSON.stringify(transactionConditionCheckStatement)).toContain('FileProofingTable');
   expect(serializedApiPolicies).not.toContain('dynamodb:TransactWriteItems');
+  expect(auditTransactionStatements).toEqual(expect.arrayContaining([
+    expect.objectContaining({
+      Action: expect.arrayContaining(['dynamodb:PutItem']),
+      Resource: { 'Fn::GetAtt': ['AuditEventsTable0723963E', 'Arn'] },
+    }),
+    expect.objectContaining({
+      Action: expect.arrayContaining(['dynamodb:ConditionCheckItem']),
+      Resource: { 'Fn::GetAtt': ['AuditEventsTable0723963E', 'Arn'] },
+    }),
+  ]));
   expect(fileObjectStatements).not.toHaveLength(0);
   expect(fileObjectStatements).toEqual(expect.arrayContaining([
     expect.objectContaining({ Effect: 'Allow' }),
@@ -923,12 +949,15 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
     Array.isArray(statement.Action) ? statement.Action : [statement.Action]
   );
   expect(requestIntakeActions).toEqual(expect.arrayContaining([
+    'dynamodb:ConditionCheckItem',
     'dynamodb:DescribeTable',
     'dynamodb:GetItem',
     'dynamodb:PutItem',
     'dynamodb:Query',
     'dynamodb:UpdateItem',
   ]));
+  expect(requestIntakeStatements).toHaveLength(2);
+  expect(requestIntakeStatements).toContain(transactionConditionCheckStatement);
   const enterpriseIdentityActions = enterpriseIdentityStatements.flatMap((statement) =>
     Array.isArray(statement.Action) ? statement.Action : [statement.Action]
   );
@@ -952,6 +981,16 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
     'dynamodb:GetItem',
     'dynamodb:PutItem',
   ]));
+  expect(focusDataStatement).toEqual({
+    Action: [
+      'dynamodb:GetItem',
+      'dynamodb:PutItem',
+      'dynamodb:Query',
+    ],
+    Effect: 'Allow',
+    Resource: { 'Fn::GetAtt': [focusTableLogicalId, 'Arn'] },
+  });
+  expect(focusStatements).toHaveLength(2);
   expect(planningDataStatement).toEqual(expect.objectContaining({
     Action: [
       'dynamodb:DeleteItem',
@@ -1179,6 +1218,80 @@ test('API runtime emits traces and alarms for errors throttles latency and gatew
     Threshold: 1,
     TreatMissingData: 'notBreaching',
   });
+  for (const burnWindow of [
+    {
+      description:
+        'Detects a 14.4x API availability error-budget burn over five minutes.',
+      period: 300,
+    },
+    {
+      description:
+        'Detects a 14.4x API availability error-budget burn over one hour.',
+      period: 3600,
+    },
+  ]) {
+    template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      ActionsEnabled: false,
+      AlarmDescription: burnWindow.description,
+      ComparisonOperator: 'GreaterThanOrEqualToThreshold',
+      DatapointsToAlarm: 1,
+      EvaluationPeriods: 1,
+      Metrics: Match.arrayWith([
+        Match.objectLike({
+          Expression:
+            'eligibleErrors / eligibleRequests',
+          ReturnData: true,
+        }),
+        Match.objectLike({
+          MetricStat: Match.objectLike({
+            Metric: {
+              Dimensions: [{
+                Name: 'Service',
+                Value: 'mukuroji-api',
+              }],
+              MetricName: 'EligibleServerErrorCount',
+              Namespace: 'Mukuroji/API',
+            },
+            Period: burnWindow.period,
+            Stat: 'Sum',
+          }),
+          ReturnData: false,
+        }),
+        Match.objectLike({
+          MetricStat: Match.objectLike({
+            Metric: {
+              Dimensions: [{
+                Name: 'Service',
+                Value: 'mukuroji-api',
+              }],
+              MetricName: 'EligibleRequestCount',
+              Namespace: 'Mukuroji/API',
+            },
+            Period: burnWindow.period,
+            Stat: 'Sum',
+          }),
+          ReturnData: false,
+        }),
+      ]),
+      Threshold: 0.0144,
+      TreatMissingData: 'missing',
+    });
+  }
+  template.hasResourceProperties('AWS::CloudWatch::CompositeAlarm', {
+    AlarmDescription:
+      'Pages when both API availability fast-burn windows exceed 14.4x.',
+    AlarmRule: Match.anyValue(),
+  });
+  const serializedCompositeAlarms = JSON.stringify(
+    template.findResources('AWS::CloudWatch::CompositeAlarm'),
+  );
+  expect(serializedCompositeAlarms).toContain(
+    'ApiAvailabilityFastBurnFiveMinuteAlarm',
+  );
+  expect(serializedCompositeAlarms).toContain(
+    'ApiAvailabilityFastBurnOneHourAlarm',
+  );
+  expect(serializedCompositeAlarms).toContain(' AND ALARM');
 });
 
 test('external Cognito client and initial owner attributes are validated on create and update', () => {

@@ -11,6 +11,9 @@ import {
   expect,
   test,
 } from 'bun:test'
+import {
+  createDefaultDueDateWorkItemSchedule,
+} from '@mukuroji/contracts'
 
 afterEach(() => {
   resetTestApp()
@@ -58,7 +61,7 @@ test('keeps guest Workspace members read-only even when they have a project role
       title: 'Guest must not create this task',
       assignedProjectId: 'refero',
       assigneeUserId: 'sato@example.com',
-      dueDate: '2026/07/20',
+      schedule: createDefaultDueDateWorkItemSchedule('2026-07-20'),
       priority: 'medium',
       workflowStatusId: 'todo',
     }),
@@ -99,7 +102,7 @@ test('rejects inactive Workspace members as task assignment candidates', async (
       title: 'Inactive assignee task',
       assignedProjectId: 'refero',
       assigneeUserId: 'sato@example.com',
-      dueDate: '2026/07/20',
+      schedule: createDefaultDueDateWorkItemSchedule('2026-07-20'),
       priority: 'medium',
       workflowStatusId: 'todo',
     }),

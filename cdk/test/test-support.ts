@@ -5,6 +5,14 @@ import { AwsSolutionsChecks } from 'cdk-nag';
 import { acknowledgeKnownNagFindings } from '../lib/acknowledge-nag-findings';
 import { CdkStack } from '../lib/cdk-stack';
 
+/** Stable logical ID of the core API runtime-configuration secret. */
+export const API_CORE_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID =
+  'ApiCoreRuntimeConfigurationSecret5550B12D';
+
+/** Stable logical ID of the data API runtime-configuration secret. */
+export const API_DATA_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID =
+  'ApiDataRuntimeConfigurationSecret9AB65533';
+
 /**
  * Synthesizes the application stack for infrastructure assertions.
  *
@@ -19,7 +27,9 @@ export function createTemplate(): Template {
     },
   });
   cdk.Validations.of(app).addPlugins(new AwsSolutionsChecks(app));
-  const stack = new CdkStack(app, 'Test');
+  const stack = new CdkStack(app, 'Test', {
+    triageIndexDeploymentStage: 'wake',
+  });
   acknowledgeKnownNagFindings(stack);
 
   return Template.fromStack(stack);
@@ -78,6 +88,52 @@ export function serializeAwsSdkCall(value: unknown): string {
   return entries
     .map(([key, entry]) => `${key}:${serializeAwsSdkCall(entry)}`)
     .join('');
+}
+
+/**
+ * Finds one encoded value source in a synthesized API configuration envelope.
+ *
+ * @param secretString - Synthesized transform-free SecretString expression.
+ * @param name - Canonical API environment-variable name.
+ * @param kind - Whether the envelope line holds a value or nested-secret ARN.
+ * @returns The Fn::Base64 expression following the exact named line prefix.
+ */
+export function findApiRuntimeConfigurationSource(
+  secretString: unknown,
+  name: string,
+  kind: 'secret' | 'value' = 'value',
+): unknown {
+  if (!secretString || typeof secretString !== 'object' ||
+      Array.isArray(secretString)) {
+    throw new Error('API runtime configuration SecretString is invalid.');
+  }
+  const joinExpression = Object.entries(secretString)
+    .find(([key]) => key === 'Fn::Join')?.[1];
+  if (!Array.isArray(joinExpression) ||
+      joinExpression[0] !== '' ||
+      !Array.isArray(joinExpression[1])) {
+    throw new Error('API runtime configuration envelope is invalid.');
+  }
+  const suffix = `${kind}:${name}:`;
+  const matchingIndexes = joinExpression[1]
+    .map((part, index) =>
+      typeof part === 'string' && part.endsWith(suffix)
+        ? index
+        : undefined)
+    .filter((index): index is number => index !== undefined);
+  if (matchingIndexes.length !== 1) {
+    throw new Error(
+      `API runtime configuration source ${kind}:${name} is not unique.`,
+    );
+  }
+  const source = joinExpression[1][matchingIndexes[0] + 1];
+  if (!source || typeof source !== 'object' || Array.isArray(source) ||
+      !Object.hasOwn(source, 'Fn::Base64')) {
+    throw new Error(
+      `API runtime configuration source ${kind}:${name} is invalid.`,
+    );
+  }
+  return source;
 }
 
 /**

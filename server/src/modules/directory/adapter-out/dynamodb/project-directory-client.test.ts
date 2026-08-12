@@ -19,6 +19,12 @@ import type {
   TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
 import {
+  PROJECT_QUICK_ACCESS_IDENTIFIER_MAX_LENGTH,
+  PROJECT_QUICK_ACCESS_MAX_ITEMS,
+  PROJECT_QUICK_ACCESS_MAX_REVISION,
+  type ProjectQuickAccessItem,
+} from '@mukuroji/contracts'
+import {
   afterEach,
   expect,
   test,
@@ -26,6 +32,381 @@ import {
 
 afterEach(() => {
   resetTestApp()
+})
+
+/** Creates the DynamoDB cancellation shape used for compare-and-swap failures. */
+function createConditionalTransactionCancellation() {
+  return Object.assign(new Error('Transaction was canceled.'), {
+    name: 'TransactionCanceledException',
+    CancellationReasons: [{ Code: 'ConditionalCheckFailed' }],
+  })
+}
+
+/**
+ * Creates one valid persisted quick-access sidecar fixture.
+ *
+ * @param workspaceId - Workspace that owns the preference.
+ * @param memberKey - Member that owns the preference.
+ * @param revision - Positive persisted revision.
+ * @param items - Ordered Team-owned Project identities.
+ * @returns A storage row accepted by the directory client.
+ */
+function createProjectQuickAccessStoredItem(
+  workspaceId: string,
+  memberKey: string,
+  revision: number,
+  items: readonly ProjectQuickAccessItem[],
+) {
+  return {
+    directoryId:
+      `PROJECT_QUICK_ACCESS#${encodeURIComponent(workspaceId)}#${encodeURIComponent(memberKey)}`,
+    entryKey: 'PREFERENCE',
+    entryType: 'project-quick-access',
+    items: items.map((item) => ({ ...item })),
+    memberKey,
+    revision,
+    updatedAt: '2026-08-01T00:00:00.000Z',
+    workspaceId,
+  }
+}
+
+test('DynamoDB directory client returns the revision-zero quick-access default', async () => {
+  const sentInputs: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sentInputs.push(command.input)
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbProjectDirectoryClient('DirectoryTable', documentClient)
+
+  await expect(client.getProjectQuickAccess(
+    'workspace/production',
+    'demo+member@example.com',
+    true,
+  )).resolves.toEqual({ items: [], revision: 0 })
+  expect(sentInputs).toEqual([{
+    ConsistentRead: true,
+    Key: {
+      directoryId:
+        'PROJECT_QUICK_ACCESS#workspace%2Fproduction#demo%2Bmember%40example.com',
+      entryKey: 'PREFERENCE',
+    },
+    TableName: 'DirectoryTable',
+  }])
+})
+
+test('DynamoDB directory client round-trips ordered quick-access preferences', async () => {
+  const sentInputs: Array<Record<string, unknown>> = []
+  const items = [
+    { projectId: 'shared-project', teamId: 'core-team' },
+    { projectId: 'shared-project', teamId: 'design-team' },
+  ]
+  let stored = false
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sentInputs.push(command.input)
+      if ('TransactItems' in command.input) {
+        stored = true
+        return {}
+      }
+      return stored
+        ? { Item: createProjectQuickAccessStoredItem('workspace#one', 'demo@example.com', 1, items) }
+        : {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbProjectDirectoryClient('DirectoryTable', documentClient)
+
+  await expect(client.replaceProjectQuickAccess(
+    'workspace#one',
+    'demo@example.com',
+    { items, revision: 0 },
+  )).resolves.toEqual({ items, revision: 1 })
+  await expect(client.getProjectQuickAccess(
+    'workspace#one',
+    'demo@example.com',
+  )).resolves.toEqual({ items, revision: 1 })
+  expect(sentInputs[0]).toMatchObject({
+    TransactItems: [{
+      Put: {
+        ConditionExpression:
+          'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+        Item: {
+          directoryId:
+            'PROJECT_QUICK_ACCESS#workspace%23one#demo%40example.com',
+          entryKey: 'PREFERENCE',
+          entryType: 'project-quick-access',
+          items,
+          memberKey: 'demo@example.com',
+          revision: 1,
+          workspaceId: 'workspace#one',
+        },
+        TableName: 'DirectoryTable',
+      },
+    }],
+  })
+})
+
+test('DynamoDB directory client rejects a stale quick-access replacement', async () => {
+  const sentInputs: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sentInputs.push(command.input)
+      if ('TransactItems' in command.input) {
+        throw createConditionalTransactionCancellation()
+      }
+      return {
+        Item: createProjectQuickAccessStoredItem(
+          'workspace-1',
+          'demo@example.com',
+          3,
+          [{ projectId: 'other-project', teamId: 'core-team' }],
+        ),
+      }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbProjectDirectoryClient('DirectoryTable', documentClient)
+
+  await expect(client.replaceProjectQuickAccess(
+    'workspace-1',
+    'demo@example.com',
+    {
+      items: [{ projectId: 'refero', teamId: 'core-team' }],
+      revision: 2,
+    },
+  )).rejects.toMatchObject({
+    code: 'ProjectQuickAccessConflict',
+    status: 409,
+  })
+  expect(sentInputs[0]).toMatchObject({
+    TransactItems: [{
+      Put: {
+        ConditionExpression:
+          '#revision = :expectedRevision AND #entryType = :entryType AND #workspaceId = :workspaceId AND #memberKey = :memberKey',
+        ExpressionAttributeNames: {
+          '#entryType': 'entryType',
+          '#memberKey': 'memberKey',
+          '#revision': 'revision',
+          '#workspaceId': 'workspaceId',
+        },
+        ExpressionAttributeValues: {
+          ':entryType': 'project-quick-access',
+          ':expectedRevision': 2,
+          ':memberKey': 'demo@example.com',
+          ':workspaceId': 'workspace-1',
+        },
+      },
+    }],
+  })
+  expect(sentInputs[1]).toMatchObject({ ConsistentRead: true })
+})
+
+test('DynamoDB directory client rejects a terminal quick-access revision before persistence', async () => {
+  const sentInputs: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sentInputs.push(command.input)
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbProjectDirectoryClient('DirectoryTable', documentClient)
+
+  await expect(client.replaceProjectQuickAccess(
+    'workspace-1',
+    'demo@example.com',
+    {
+      items: [{ projectId: 'refero', teamId: 'core-team' }],
+      revision: PROJECT_QUICK_ACCESS_MAX_REVISION,
+    },
+  )).rejects.toMatchObject({
+    code: 'InvalidProjectQuickAccessInput',
+    status: 400,
+  })
+  expect(sentInputs).toEqual([])
+})
+
+test('DynamoDB directory client rejects malformed quick-access items before persistence', async () => {
+  const sentInputs: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sentInputs.push(command.input)
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbProjectDirectoryClient('DirectoryTable', documentClient)
+  const invalidItems = [
+    Array.from({ length: PROJECT_QUICK_ACCESS_MAX_ITEMS + 1 }, (_, index) => ({
+      projectId: `project-${index}`,
+      teamId: 'core-team',
+    })),
+    [{ projectId: 'refero', teamId: ' core-team' }],
+    [{ projectId: 'refero/child', teamId: 'core-team' }],
+    [{
+      projectId: 'p'.repeat(PROJECT_QUICK_ACCESS_IDENTIFIER_MAX_LENGTH + 1),
+      teamId: 'core-team',
+    }],
+    [
+      { projectId: 'shared-project', teamId: 'core-team' },
+      { projectId: 'shared-project', teamId: 'core-team' },
+    ],
+  ]
+
+  for (const items of invalidItems) {
+    await expect(client.replaceProjectQuickAccess(
+      'workspace-1',
+      'demo@example.com',
+      { items, revision: 0 },
+    )).rejects.toMatchObject({
+      code: 'InvalidProjectQuickAccessInput',
+      status: 400,
+    })
+  }
+  expect(sentInputs).toEqual([])
+})
+
+test('DynamoDB directory client fails closed when quick-access CAS finds an invalid bound row', async () => {
+  const validItem = createProjectQuickAccessStoredItem(
+    'workspace-1',
+    'demo@example.com',
+    2,
+    [{ projectId: 'refero', teamId: 'core-team' }],
+  )
+  const invalidItems = [
+    { ...validItem, entryType: 'project' },
+    { ...validItem, memberKey: 'other@example.com' },
+    { ...validItem, revision: Number.MAX_SAFE_INTEGER },
+    { ...validItem, workspaceId: 'workspace-2' },
+  ]
+
+  for (const invalidItem of invalidItems) {
+    const sentInputs: Array<Record<string, unknown>> = []
+    const documentClient = {
+      async send(command: { input: Record<string, unknown> }) {
+        sentInputs.push(command.input)
+        if ('TransactItems' in command.input) {
+          throw createConditionalTransactionCancellation()
+        }
+        return { Item: invalidItem }
+      },
+    } as unknown as DynamoDBDocumentClient
+    const client = new DynamoDbProjectDirectoryClient('DirectoryTable', documentClient)
+
+    await expect(client.replaceProjectQuickAccess(
+      'workspace-1',
+      'demo@example.com',
+      {
+        items: [{ projectId: 'mobile-app', teamId: 'core-team' }],
+        revision: 2,
+      },
+    )).rejects.toMatchObject({
+      code: 'InvalidProjectQuickAccess',
+      status: 503,
+    })
+    expect(sentInputs[1]).toMatchObject({ ConsistentRead: true })
+  }
+})
+
+test('DynamoDB directory client replays a committed quick-access replacement', async () => {
+  const items = [{ projectId: 'refero', teamId: 'core-team' }]
+  const sentInputs: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sentInputs.push(command.input)
+      if ('TransactItems' in command.input) {
+        throw createConditionalTransactionCancellation()
+      }
+      return {
+        Item: createProjectQuickAccessStoredItem(
+          'workspace-1',
+          'demo@example.com',
+          3,
+          items,
+        ),
+      }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbProjectDirectoryClient('DirectoryTable', documentClient)
+
+  await expect(client.replaceProjectQuickAccess(
+    'workspace-1',
+    'demo@example.com',
+    { items, revision: 2 },
+  )).resolves.toEqual({ items, revision: 3 })
+  expect(sentInputs[1]).toMatchObject({ ConsistentRead: true })
+})
+
+test('DynamoDB directory client isolates each quick-access preference in a sidecar partition', async () => {
+  const sentInputs: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sentInputs.push(command.input)
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbProjectDirectoryClient('DirectoryTable', documentClient)
+
+  await client.getProjectQuickAccess('workspace-1', 'first@example.com')
+  await client.getProjectQuickAccess('workspace-1', 'second@example.com')
+
+  expect(sentInputs.map((input) => input.Key)).toEqual([
+    {
+      directoryId: 'PROJECT_QUICK_ACCESS#workspace-1#first%40example.com',
+      entryKey: 'PREFERENCE',
+    },
+    {
+      directoryId: 'PROJECT_QUICK_ACCESS#workspace-1#second%40example.com',
+      entryKey: 'PREFERENCE',
+    },
+  ])
+})
+
+test('DynamoDB directory client fails closed on a malformed quick-access sidecar row', async () => {
+  const malformedItem = createProjectQuickAccessStoredItem(
+    'workspace-1',
+    'demo@example.com',
+    1,
+    [{ projectId: ' refero', teamId: 'core-team' }],
+  )
+  const documentClient = {
+    async send() {
+      return { Item: malformedItem }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbProjectDirectoryClient('DirectoryTable', documentClient)
+
+  await expect(client.getProjectQuickAccess(
+    'workspace-1',
+    'demo@example.com',
+  )).rejects.toMatchObject({
+    code: 'InvalidProjectQuickAccess',
+    status: 503,
+  })
+})
+
+test('DynamoDB directory client rejects one canonical quick-access identity repeated', async () => {
+  const malformedItem = createProjectQuickAccessStoredItem(
+    'workspace-1',
+    'demo@example.com',
+    1,
+    [
+      { projectId: 'shared-project', teamId: 'core-team' },
+      { projectId: 'shared-project', teamId: 'core-team' },
+    ],
+  )
+  const documentClient = {
+    async send() {
+      return { Item: malformedItem }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbProjectDirectoryClient('DirectoryTable', documentClient)
+
+  await expect(client.getProjectQuickAccess(
+    'workspace-1',
+    'demo@example.com',
+  )).rejects.toMatchObject({
+    code: 'InvalidProjectQuickAccess',
+    status: 503,
+  })
 })
 
 test('DynamoDB directory client validates and ignores workspace bootstrap rows for reads and writes', async () => {
@@ -99,13 +480,18 @@ test('DynamoDB directory client validates and ignores workspace bootstrap rows f
     },
   })
   expect(sentInputs[2]).toMatchObject({
-    Item: {
-      directoryId: 'workspace#production',
-      entryType: 'team',
-      teamId: 'new-team',
-      webhookAuthorizationKey: 'WEBHOOK_ACL#RESOURCE#workspace#production',
-      webhookAuthorizationSortKey: 'TEAM#new-team',
-    },
+    TransactItems: [{
+      Put: {
+        Item: {
+          directoryId: 'workspace#production',
+          entryType: 'team',
+          teamId: 'new-team',
+          webhookAuthorizationKey:
+            'WEBHOOK_ACL#RESOURCE#workspace#production',
+          webhookAuthorizationSortKey: 'TEAM#new-team',
+        },
+      },
+    }],
   })
 })
 
@@ -130,6 +516,88 @@ test('DynamoDB directory client rejects malformed workspace bootstrap rows', asy
     status: 503,
     code: 'InvalidProjectDirectory',
   })
+})
+
+test('builds exact active Team and Project admission guards from a strong directory read', async () => {
+  const sentInputs: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sentInputs.push(command.input)
+      return {
+        Items: [{
+          directoryId: 'workspace-1',
+          entryKey: '000010#000000#TEAM#support',
+          entryType: 'team',
+          teamId: 'support',
+          teamSortOrder: 10,
+          nameJa: 'Support',
+          nameEn: 'Support',
+        }, {
+          directoryId: 'workspace-1',
+          entryKey: '000010#000010#PROJECT#intake',
+          entryType: 'project',
+          teamId: 'support',
+          teamSortOrder: 10,
+          projectId: 'intake',
+          projectSortOrder: 10,
+          nameJa: 'Intake',
+          nameEn: 'Intake',
+          tone: 'blue',
+        }],
+      }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbProjectDirectoryClient('DirectoryTable', documentClient)
+
+  await expect(client.createActiveReferenceConditionChecks(
+    'workspace-1',
+    'support',
+    'intake',
+  )).resolves.toEqual([{
+    ConditionCheck: {
+      TableName: 'DirectoryTable',
+      Key: {
+        directoryId: 'workspace-1',
+        entryKey: '000010#000000#TEAM#support',
+      },
+      ConditionExpression:
+        '#entryType = :entryType AND #teamId = :teamId AND attribute_not_exists(#archivedAt)',
+      ExpressionAttributeNames: {
+        '#archivedAt': 'archivedAt',
+        '#entryType': 'entryType',
+        '#teamId': 'teamId',
+      },
+      ExpressionAttributeValues: {
+        ':entryType': 'team',
+        ':teamId': 'support',
+      },
+    },
+  }, {
+    ConditionCheck: {
+      TableName: 'DirectoryTable',
+      Key: {
+        directoryId: 'workspace-1',
+        entryKey: '000010#000010#PROJECT#intake',
+      },
+      ConditionExpression:
+        '#entryType = :entryType AND #teamId = :teamId AND #projectId = :projectId AND attribute_not_exists(#archivedAt)',
+      ExpressionAttributeNames: {
+        '#archivedAt': 'archivedAt',
+        '#entryType': 'entryType',
+        '#projectId': 'projectId',
+        '#teamId': 'teamId',
+      },
+      ExpressionAttributeValues: {
+        ':entryType': 'project',
+        ':projectId': 'intake',
+        ':teamId': 'support',
+      },
+    },
+  }])
+  expect(sentInputs).toEqual([expect.objectContaining({
+    ConsistentRead: true,
+    TableName: 'DirectoryTable',
+  })])
 })
 
 test('DynamoDB directory client creates duplicate named teams with a unique id suffix', async () => {
@@ -176,17 +644,22 @@ test('DynamoDB directory client creates duplicate named teams with a unique id s
     },
   })
   expect(sentInputs[1]).toMatchObject({
-    TableName: 'DirectoryTable',
-    Item: {
-      directoryId: 'user#demo@example.com',
-      teamId: '新規チーム-2',
-      teamSortOrder: 20,
-      entryKey: '000020#000000#TEAM#新規チーム-2',
-      webhookAuthorizationKey:
-        'WEBHOOK_ACL#RESOURCE#user#demo@example.com',
-      webhookAuthorizationSortKey: 'TEAM#新規チーム-2',
-    },
-    ConditionExpression: 'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+    TransactItems: [{
+      Put: {
+        TableName: 'DirectoryTable',
+        Item: {
+          directoryId: 'user#demo@example.com',
+          teamId: '新規チーム-2',
+          teamSortOrder: 20,
+          entryKey: '000020#000000#TEAM#新規チーム-2',
+          webhookAuthorizationKey:
+            'WEBHOOK_ACL#RESOURCE#user#demo@example.com',
+          webhookAuthorizationSortKey: 'TEAM#新規チーム-2',
+        },
+        ConditionExpression:
+          'attribute_not_exists(directoryId) AND attribute_not_exists(entryKey)',
+      },
+    }],
   })
 })
 
@@ -542,11 +1015,15 @@ test('DynamoDB directory client initializes a missing local table before creatin
     }),
   ])
   expect(documentInputs.at(-1)).toMatchObject({
-    TableName: 'MissingDirectoryTable',
-    Item: {
-      directoryId: 'user#demo@example.com',
-      teamId: '復旧チーム',
-    },
+    TransactItems: [{
+      Put: {
+        TableName: 'MissingDirectoryTable',
+        Item: {
+          directoryId: 'user#demo@example.com',
+          teamId: '復旧チーム',
+        },
+      },
+    }],
   })
 })
 
@@ -856,7 +1333,17 @@ test('DynamoDB directory client archives teams and projects with conditional upd
     archivedAt: expect.any(String),
   })
   await expect(
-    client.archiveProject('user#demo@example.com', 'core-team', 'refero', undefined, 1),
+    client.archiveProject(
+      'user#demo@example.com',
+      'core-team',
+      'refero',
+      undefined,
+      1,
+      [
+        { teamId: 'core-team', workItemId: 'onboarding-friction', expectedRevision: 7 },
+        { teamId: 'core-team', workItemId: 'work-item-1', expectedRevision: 9 },
+      ],
+    ),
   ).resolves.toEqual({
     teamId: 'core-team',
     projectId: 'refero',
@@ -899,7 +1386,31 @@ test('DynamoDB directory client archives teams and projects with conditional upd
         ConditionExpression:
           'attribute_exists(directoryId) AND attribute_exists(entryKey) AND attribute_not_exists(archivedAt)',
       },
-    }, {}],
+    }, {}, {
+      ConditionCheck: {
+        TableName: 'mukuroji-team-issues-local',
+        Key: {
+          directoryTeamId: 'user#demo@example.com#team#core-team',
+          issueId: 'onboarding-friction',
+        },
+        ConditionExpression:
+          'attribute_exists(directoryTeamId) AND attribute_exists(issueId) AND ' +
+          '#revision = :expectedRevision',
+        ExpressionAttributeValues: { ':expectedRevision': 7 },
+      },
+    }, {
+      ConditionCheck: {
+        TableName: 'mukuroji-team-issues-local',
+        Key: {
+          directoryTeamId: 'user#demo@example.com#team#core-team',
+          issueId: 'work-item-1',
+        },
+        ConditionExpression:
+          'attribute_exists(directoryTeamId) AND attribute_exists(issueId) AND ' +
+          '#revision = :expectedRevision',
+        ExpressionAttributeValues: { ':expectedRevision': 9 },
+      },
+    }],
   })
 })
 
@@ -1023,6 +1534,134 @@ test('classifies a Planning revision race during directory archive', async () =>
     status: 409,
     code: 'PlanningRevisionConflict',
   })
+})
+
+test('classifies a dependency endpoint Project-move race during directory archive', async () => {
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      if ('KeyConditionExpression' in command.input) {
+        return {
+          Items: [
+            {
+              directoryId: 'user#demo@example.com',
+              entryKey: '000010#000000#TEAM#core-team',
+              entryType: 'team',
+              teamId: 'core-team',
+              teamSortOrder: 10,
+              nameJa: 'コアチーム',
+              nameEn: 'Core Team',
+              expanded: true,
+            },
+            {
+              directoryId: 'user#demo@example.com',
+              entryKey: '000010#000010#PROJECT#refero',
+              entryType: 'project',
+              teamId: 'core-team',
+              teamSortOrder: 10,
+              projectId: 'refero',
+              projectSortOrder: 10,
+              nameJa: 'Refero',
+              nameEn: 'Refero',
+              tone: 'blue',
+            },
+          ],
+        }
+      }
+      if (command.constructor.name === 'TransactWriteCommand') {
+        const error = new Error('canceled')
+        error.name = 'TransactionCanceledException'
+        Object.assign(error, {
+          CancellationReasons: [
+            { Code: 'None' },
+            { Code: 'None' },
+            { Code: 'ConditionalCheckFailed' },
+          ],
+        })
+        throw error
+      }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbProjectDirectoryClient(
+    'DirectoryTable',
+    documentClient,
+    undefined,
+    false,
+    undefined,
+    'WorkspaceAccessTable',
+    'PlanningTable',
+    'WorkItemsTable',
+  )
+
+  await expect(client.archiveProject(
+    'user#demo@example.com',
+    'core-team',
+    'refero',
+    undefined,
+    4,
+    [{ teamId: 'core-team', workItemId: 'onboarding-friction', expectedRevision: 7 }],
+  )).rejects.toMatchObject({
+    status: 409,
+    code: 'WorkItemRevisionConflict',
+  })
+})
+
+test('rejects a Project archive whose dependency guards exceed transaction capacity', async () => {
+  let transactWrites = 0
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      if ('KeyConditionExpression' in command.input) {
+        return {
+          Items: [
+            {
+              directoryId: 'user#demo@example.com',
+              entryKey: '000010#000000#TEAM#core-team',
+              entryType: 'team',
+              teamId: 'core-team',
+              teamSortOrder: 10,
+              nameJa: 'コアチーム',
+              nameEn: 'Core Team',
+              expanded: true,
+            },
+            {
+              directoryId: 'user#demo@example.com',
+              entryKey: '000010#000010#PROJECT#refero',
+              entryType: 'project',
+              teamId: 'core-team',
+              teamSortOrder: 10,
+              projectId: 'refero',
+              projectSortOrder: 10,
+              nameJa: 'Refero',
+              nameEn: 'Refero',
+              tone: 'blue',
+            },
+          ],
+        }
+      }
+      if (command.constructor.name === 'TransactWriteCommand') transactWrites += 1
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbProjectDirectoryClient('DirectoryTable', documentClient)
+  // DynamoDB's 100-item transaction limit leaves 98 slots after the two directory writes.
+  const guards = Array.from({ length: 98 }, (_, index) => ({
+    teamId: 'core-team',
+    workItemId: `work-item-${index}`,
+    expectedRevision: 1,
+  }))
+
+  await expect(client.archiveProject(
+    'user#demo@example.com',
+    'core-team',
+    'refero',
+    undefined,
+    4,
+    guards,
+  )).rejects.toMatchObject({
+    status: 413,
+    code: 'PlanningProjectScopeDependencyLimitExceeded',
+  })
+  expect(transactWrites).toBe(0)
 })
 
 test('DynamoDB directory client manages project member roles', async () => {

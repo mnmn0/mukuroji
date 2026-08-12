@@ -1,5 +1,6 @@
 import {
   AUTOMATION_SCHEMA_VERSION,
+  createDefaultUnscheduledWorkItemSchedule,
   type AutomationExecution,
   type AutomationInboundWebhookEndpoint,
   type AutomationInboundWebhookSecretResponse,
@@ -141,6 +142,7 @@ export const workItemAutomationTemplateFixture: Extract<
   name: '週次レビュー',
   payload: {
     priority: 'medium',
+    schedule: createDefaultUnscheduledWorkItemSchedule(),
     title: '週次レビュー',
   },
   revision: 3,

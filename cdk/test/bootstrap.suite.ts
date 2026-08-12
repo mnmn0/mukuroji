@@ -68,16 +68,59 @@ test('workspace metadata owner alias and project manager rows are idempotently b
   expect(createPayload.match(/#role = :role/g)).toHaveLength(1);
   expect(createPayload.match(/#role = if_not_exists\(#role, :role\)/g)).toHaveLength(4);
   expect(createPayload).toContain('attribute_not_exists(directoryId) OR');
-  expect(bootstrap.Properties.Update).toEqual(bootstrap.Properties.Create);
+  expect(bootstrap.Properties.Update).toBeUndefined();
 });
 
-test('bootstrap transactions synthesize enclosed DynamoDB write permissions for create and update', () => {
+test('fenced table bootstrap resources keep stable IDs and a create-only pre-fence boundary', () => {
+  const resources = synthesizedTemplate.findResources('Custom::AWS');
+  const createOnlySeeds = [
+    [
+      'SeedProjectTasks637E8868',
+      'canonical-work-items-seed-v1',
+      'TeamIssuesTable189D851D',
+    ],
+    [
+      'SeedProjectDirectory9B1D2A78',
+      'project-directory-seed-v3',
+      'ProjectDirectoryTable9ED01C01',
+    ],
+    [
+      'BootstrapWorkspace455B1D71',
+      'workspace-bootstrap-v2',
+      'ProjectDirectoryTable9ED01C01',
+    ],
+  ];
+
+  for (const [logicalId, physicalResourceId, tableLogicalId] of
+    createOnlySeeds) {
+    const resource = resources[logicalId];
+    expect(resource).toBeDefined();
+    const lifecycleActions = ['Create', 'Update', 'Delete'].filter(
+      (action) => resource?.Properties?.[action] !== undefined,
+    );
+    expect(lifecycleActions).toEqual(['Create']);
+    const createPayload = serializeAwsSdkCall(resource?.Properties.Create);
+    expect(createPayload).toContain('transactWriteItems');
+    expect(createPayload).toContain(physicalResourceId);
+    expect(createPayload).toContain(`{{Ref:${tableLogicalId}}}`);
+  }
+});
+
+test('bootstrap transactions synthesize enclosed DynamoDB write permissions at intended lifecycle boundaries', () => {
   const template = synthesizedTemplate;
   const customResources = template.findResources('Custom::AWS');
   const policies = template.findResources('AWS::IAM::Policy');
   const tables = template.findResources('AWS::DynamoDB::Table');
   const outputs = template.toJSON().Outputs;
   const transactionCases = [
+    {
+      customResourcePrefix: 'SeedProjectTasks',
+      policyPrefix: 'SeedProjectTasksCustomResourcePolicy',
+      itemActions: ['dynamodb:PutItem'],
+      tableOutputName: 'WorkItemsTableName',
+      physicalResourceId: 'canonical-work-items-seed-v1',
+      runsOnUpdate: false,
+    },
     {
       customResourcePrefix: 'SeedProjectDirectory',
       policyPrefix: 'SeedProjectDirectoryCustomResourcePolicy',
@@ -100,7 +143,7 @@ test('bootstrap transactions synthesize enclosed DynamoDB write permissions for 
       itemActions: ['dynamodb:UpdateItem', 'dynamodb:PutItem'],
       tableOutputName: 'ProjectDirectoryTableName',
       physicalResourceId: 'workspace-bootstrap-v2',
-      runsOnUpdate: true,
+      runsOnUpdate: false,
     },
     {
       customResourcePrefix: 'SeedWorkspaceDemoMembers',
@@ -215,7 +258,12 @@ test('canonical Work Item seed writes complete schema data and preserves demo da
   expect(workItemPayload.match(/statusCategory/g)).toHaveLength(10);
   expect(workItemPayload.match(/customFieldValues/g)).toHaveLength(10);
   expect(workItemPayload.match(/relationIds/g)).toHaveLength(10);
+  expect(workItemPayload.match(/schedule/g)).toHaveLength(10);
   expect(workItemPayload.match(/creatorMemberKey/g)).toHaveLength(10);
+  expect(workItemPayload).toContain('"schemaVersion":{"N":"2"}');
+  expect(workItemPayload).toContain('"mode":{"S":"due-date"}');
+  expect(workItemPayload).toContain('"timeZone":{"S":"UTC"}');
+  expect(workItemPayload).toContain('"dueDate":{"S":"2026-06-03"}');
   expect(workItemPayload).toContain('"statusCategory":{"S":"unstarted"}');
   expect(workItemPayload).toContain('"statusCategory":{"S":"started"}');
   expect(workItemPayload).toContain('"statusCategory":{"S":"completed"}');

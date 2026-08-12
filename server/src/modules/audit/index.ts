@@ -25,6 +25,7 @@ export {
   createRequestFingerprint,
   createWorkspaceInvitationAuditEntityId,
   createWorkspaceMemberAuditEntityId,
+  createWorkspaceMemberAuditEntityIdFromKeyBytes,
   ensureLocalAuditEventsTable,
   getConfiguredAuditRetentionDays,
   getConfiguredAuditTableName,

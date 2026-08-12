@@ -557,6 +557,8 @@ export type DocumentPublicShareRequest = {
  * Public token 解決結果です。
  */
 export type ResolvedDocumentPublicShare = {
+  /** Canonical Workspace ID resolved from the opaque public token. */
+  workspaceId: string
   /** Public viewer 用 Document snapshot です。 */
   document: DocumentDetail
   /** 有効な share metadata です。 */

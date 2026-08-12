@@ -1,5 +1,9 @@
 import { describe, expect, test } from 'bun:test'
-import type { WorkItem } from '@mukuroji/contracts'
+import {
+  WORK_ITEM_SCHEMA_VERSION,
+  createDefaultDueDateWorkItemSchedule,
+  type WorkItem,
+} from '@mukuroji/contracts'
 import {
   WorkItemTransferError,
   createWorkItemExport,
@@ -9,16 +13,19 @@ import {
 const mapping = [
   { sourceField: 'Name', targetField: 'title' },
   { sourceField: 'Owner', targetField: 'assigneeUserId' },
-  { sourceField: 'Due', targetField: 'dueDate' },
+  { sourceField: 'Schedule', targetField: 'schedule' },
   { sourceField: 'Priority', targetField: 'priority' },
   { sourceField: 'Estimate', targetField: 'customFieldValues.estimate' },
 ] as const
+
+const dueDateSchedule = createDefaultDueDateWorkItemSchedule('2026-08-01')
+const dueDateScheduleCsv = `"${JSON.stringify(dueDateSchedule).replaceAll('"', '""')}"`
 
 describe('Work Item import dry-run', () => {
   test('quoted CSV を mapping し、row-level error を返す', () => {
     const preview = previewWorkItemImport(
       'csv',
-      'Name,Owner,Due,Priority,Estimate\r\n"Landing, page",sato@example.com,2026-08-01,high,3\r\nBroken,,2026-08-02,urgent,\r\n',
+      `Name,Owner,Schedule,Priority,Estimate\r\n"Landing, page",sato@example.com,${dueDateScheduleCsv},high,3\r\nBroken,,${dueDateScheduleCsv},urgent,\r\n`,
       mapping,
     )
 
@@ -39,11 +46,16 @@ describe('Work Item import dry-run', () => {
   test('JSON array と string array custom field を扱う', () => {
     const preview = previewWorkItemImport(
       'json',
-      JSON.stringify([{ name: 'API', owner: 'owner@example.com', due: '2026-08-03', labels: ['api', 'p1'] }]),
+      JSON.stringify([{
+        name: 'API',
+        owner: 'owner@example.com',
+        schedule: createDefaultDueDateWorkItemSchedule('2026-08-03'),
+        labels: ['api', 'p1'],
+      }]),
       [
         { sourceField: 'name', targetField: 'title' },
         { sourceField: 'owner', targetField: 'assigneeUserId' },
-        { sourceField: 'due', targetField: 'dueDate' },
+        { sourceField: 'schedule', targetField: 'schedule' },
         { sourceField: 'labels', targetField: 'customFieldValues.labels' },
       ],
     )
@@ -66,7 +78,11 @@ describe('Work Item import dry-run', () => {
           transform: 'lowercase',
           required: true,
         },
-        { sourceField: 'due', targetField: 'dueDate', defaultValue: '2026-08-31' },
+        {
+          sourceField: 'schedule',
+          targetField: 'schedule',
+          defaultValue: createDefaultDueDateWorkItemSchedule('2026-08-31'),
+        },
         {
           sourceField: 'labels',
           targetField: 'customFieldValues.labels',
@@ -78,7 +94,7 @@ describe('Work Item import dry-run', () => {
     expect(preview.rows[0]?.input).toMatchObject({
       title: 'API Launch',
       assigneeUserId: 'owner@example.com',
-      dueDate: '2026-08-31',
+      schedule: { dueDate: '2026-08-31', mode: 'due-date' },
       customFieldValues: { labels: ['api', 'p1'] },
     })
     expect(preview.rows[1]?.errors).toContainEqual(expect.objectContaining({
@@ -91,16 +107,16 @@ describe('Work Item import dry-run', () => {
   test('変換できない値を row-level error として返す', () => {
     const preview = previewWorkItemImport(
       'json',
-      JSON.stringify([{ name: 'Task', owner: 'owner@example.com', due: 'not-a-date' }]),
+      JSON.stringify([{ name: 'Task', owner: 'owner@example.com', schedule: { mode: 'due-date' } }]),
       [
         { sourceField: 'name', targetField: 'title' },
         { sourceField: 'owner', targetField: 'assigneeUserId' },
-        { sourceField: 'due', targetField: 'dueDate', transform: 'parse-date' },
+        { sourceField: 'schedule', targetField: 'schedule' },
       ],
     )
 
     expect(preview.invalidRows).toBe(1)
-    expect(preview.errors.map((error) => error.code)).toContain('InvalidFieldTransform')
+    expect(preview.errors.map((error) => error.code)).toContain('InvalidSchedule')
     expect(preview.errors).toHaveLength(1)
   })
 
@@ -120,7 +136,7 @@ describe('Work Item import dry-run', () => {
 
 describe('Work Item export', () => {
   const workItem = {
-    schemaVersion: 1,
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
     revision: 2,
     id: 'api-key-ui',
     teamId: 'core',
@@ -133,7 +149,10 @@ describe('Work Item export', () => {
     customFieldValues: { labels: ['api', 'security'] },
     relationIds: [],
     dueDate: '2026-08-01',
+    schedule: createDefaultDueDateWorkItemSchedule('2026-08-01'),
     priority: 'high',
+    priorityUpdatedAt: '2026-07-18T00:30:00.000Z',
+    dueDateUpdatedAt: '2026-07-18T00:45:00.000Z',
     createdAt: '2026-07-18T00:00:00.000Z',
     updatedAt: '2026-07-18T01:00:00.000Z',
     source: 'dynamodb',
@@ -144,6 +163,12 @@ describe('Work Item export', () => {
     expect(result.contentType).toContain('text/csv')
     expect(result.fileName).toBe('mukuroji-work-items-2026-07-18.csv')
     expect(result.body).toContain('customFieldValues.labels')
+    expect(result.body).toContain('schedule')
+    expect(result.body).toContain('due-date')
+    expect(result.body).toContain('priorityUpdatedAt')
+    expect(result.body).toContain('2026-07-18T00:30:00.000Z')
+    expect(result.body).toContain('dueDateUpdatedAt')
+    expect(result.body).toContain('2026-07-18T00:45:00.000Z')
     expect(result.body).toContain("'=HYPERLINK")
   })
 
@@ -152,7 +177,12 @@ describe('Work Item export', () => {
     const exported = JSON.parse(result.body)
     expect(exported).toMatchObject({
       apiVersion: '2026-07-01',
-      workItems: [{ id: 'api-key-ui' }],
+      workItems: [{
+        id: 'api-key-ui',
+        schedule: workItem.schedule,
+        priorityUpdatedAt: workItem.priorityUpdatedAt,
+        dueDateUpdatedAt: workItem.dueDateUpdatedAt,
+      }],
     })
     expect(exported.workItems[0]).not.toHaveProperty('creatorMemberKey')
     expect(exported.workItems[0]).not.toHaveProperty('source')

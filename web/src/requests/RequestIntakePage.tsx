@@ -11,15 +11,11 @@ import {
 import { useCurrentUser } from '../auth/queries/useCurrentUser'
 import { resolveEnterpriseSessionErrorsAction } from '../auth/enterpriseSessionErrors'
 import { clearAuthSession, getAuthSession } from '../auth/session'
-import { useWorkspaceCommandMenu } from '../commands/ui/WorkspaceCommandMenuContext'
 import {
   MobileSidebarButton,
-  WorkspaceSidebar,
-  type SidebarNavId,
-  type SidebarTeamViewId,
+  useWorkspaceSidebarController,
 } from '../shared/ui/sidebar'
 import {
-  createSidebarLabels,
   createTranslator,
   getInitialLocale,
   type Locale,
@@ -29,9 +25,6 @@ import {
 } from '../projects/api'
 import { useProjectDirectory } from '../projects/queries/useProjectDirectory'
 import {
-  createProjectIssuesPath,
-  createTeamViewPath,
-  workspaceNavPaths,
   type RequestsView,
 } from '../shared/routing/paths'
 import {
@@ -80,15 +73,13 @@ export function RequestIntakePage() {
   const mutationRunner = useRef(createMutationRequestRunner()).current
   const [session] = useState(() => getAuthSession())
   const [locale] = useState<Locale>(() => getInitialLocale())
-  const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false)
   const [actionErrorMessage, setActionErrorMessage] = useState<string>()
   const [authenticatedApiError, setAuthenticatedApiError] = useState<unknown>()
   const handleAuthenticatedApiError = useCallback((error: unknown) => {
     setAuthenticatedApiError(() => error)
   }, [])
-  const commandMenu = useWorkspaceCommandMenu()
   const t = useMemo(() => createTranslator(locale), [locale])
-  const sidebarLabels = useMemo(() => createSidebarLabels(locale), [locale])
+  const { openMobileSidebar } = useWorkspaceSidebarController()
   const accessToken = session?.accessToken
   const requestedView = searchParams.get('view') === 'forms' ? 'forms' : 'queue'
   const {
@@ -208,11 +199,6 @@ export function RequestIntakePage() {
   const selectView = (view: RequestsView) => {
     setSearchParams(view === 'forms' ? { view: 'forms' } : {}, { replace: true })
   }
-  const selectNav = (navId: SidebarNavId) => navigate(workspaceNavPaths[navId])
-  const selectTeamView = (teamId: string, viewId: SidebarTeamViewId) =>
-    navigate(createTeamViewPath(teamId, viewId))
-  const selectProject = (projectId: string, teamId: string) =>
-    navigate(createProjectIssuesPath(projectId, teamId))
   const selectSubmission = (submissionId: string) =>
     setSearchParams({ submissionId }, { replace: true })
   const selectForm = (formId: string) =>
@@ -269,26 +255,11 @@ export function RequestIntakePage() {
   }
 
   return (
-    <main className="workbench-shell flex h-svh min-h-0 overflow-hidden">
-      <WorkspaceSidebar
-        activeNavId="requests"
-        isMobileOpen={isMobileSidebarOpen}
-        labels={sidebarLabels}
-        mobileCloseLabel={t('sidebar.mobileClose')}
-        mobileDialogLabel={t('sidebar.mobileDialog')}
-        onMobileClose={() => setIsMobileSidebarOpen(false)}
-        onOpenSearch={commandMenu.open}
-        onSelectNav={selectNav}
-        onSelectProject={selectProject}
-        onSelectTeamView={selectTeamView}
-        teams={teams}
-      />
-
-      <section className="workbench-main flex min-w-0 flex-1 flex-col overflow-hidden">
+    <>
         <header className="workbench-header flex-none px-[clamp(20px,3vw,34px)] py-4">
           <div className="flex min-w-0 flex-wrap items-start justify-between gap-4">
             <div className="flex min-w-0 items-start gap-3">
-              <MobileSidebarButton label={t('sidebar.mobileOpen')} onClick={() => setIsMobileSidebarOpen(true)} />
+              <MobileSidebarButton label={t('sidebar.mobileOpen')} onClick={openMobileSidebar} />
               <div className="min-w-0">
                 <p className="workbench-eyebrow">{t('requests.eyebrow')}</p>
                 <h1 className="workbench-title mt-2 text-page-title">{t('requests.title')}</h1>
@@ -312,7 +283,7 @@ export function RequestIntakePage() {
         {isLoading ? (
           <div className="grid min-h-0 flex-1 place-items-center text-sm font-semibold text-[var(--workbench-muted)]">{t('requests.loading')}</div>
         ) : currentUserErrorAction?.kind === 'stay' ? (
-          <div className="min-h-0 flex-1 overflow-auto overscroll-contain px-[clamp(20px,3vw,34px)] py-5">
+          <div className="min-h-0 flex-1 px-[clamp(20px,3vw,34px)] py-5">
             <p
               className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-700"
               role="alert"
@@ -321,7 +292,7 @@ export function RequestIntakePage() {
             </p>
           </div>
         ) : (
-          <div className="min-h-0 flex-1 overflow-auto overscroll-contain px-[clamp(20px,3vw,34px)] py-5">
+          <div className="min-h-0 flex-1 px-[clamp(20px,3vw,34px)] py-5">
             <div className="mb-5 flex flex-wrap gap-2 border-b border-[var(--workbench-border)] pb-3" role="tablist">
               <TabButton active={activeView === 'queue'} label={t('requests.tab.queue')} onClick={() => selectView('queue')} />
               {canManageForms ? <TabButton active={activeView === 'forms'} label={t('requests.tab.forms')} onClick={() => selectView('forms')} /> : null}
@@ -397,8 +368,7 @@ export function RequestIntakePage() {
             )}
           </div>
         )}
-      </section>
-    </main>
+    </>
   )
 }
 

@@ -548,6 +548,10 @@ export type CreateAuditEventInput = {
    */
   expiresAt?: number
   /**
+   * legal hold により DynamoDB TTL を一時停止するかどうかです。
+   */
+  retentionSuspended?: boolean
+  /**
    * schema の必須項目に含めない付加情報です。
    */
   metadata?: Readonly<Record<string, unknown>>
@@ -845,6 +849,31 @@ export function createWorkspaceMemberAuditEntityId(
   memberId: string,
   pseudonymKey: string,
 ) {
+  const key = decodeWorkspaceAuditPseudonymKey(pseudonymKey)
+  try {
+    return createWorkspaceMemberAuditEntityIdFromKeyBytes(
+      workspaceId,
+      memberId,
+      key,
+    )
+  } finally {
+    key.fill(0)
+  }
+}
+
+/**
+ * Creates the scoped, PII-free Workspace member Audit entity ID from key bytes.
+ *
+ * @param workspaceId - Canonical Workspace identifier.
+ * @param memberId - Private Workspace member identifier.
+ * @param pseudonymKey - Exact 32-byte Workspace Audit pseudonym key.
+ * @returns The same versioned pseudonym ID used by live writers and backfills.
+ */
+export function createWorkspaceMemberAuditEntityIdFromKeyBytes(
+  workspaceId: string,
+  memberId: string,
+  pseudonymKey: Uint8Array,
+): string {
   const normalizedWorkspaceId = requireText(workspaceId, 'Audit workspace ID')
   const normalizedMemberId = requireText(memberId, 'Audit member ID')
   const workspacePseudonym = createWorkspaceAccessPseudonym(
@@ -871,6 +900,31 @@ export function createWorkspaceInvitationAuditEntityId(
   invitationId: string,
   pseudonymKey: string,
 ) {
+  const key = decodeWorkspaceAuditPseudonymKey(pseudonymKey)
+  try {
+    return createWorkspaceInvitationAuditEntityIdFromKeyBytes(
+      workspaceId,
+      invitationId,
+      key,
+    )
+  } finally {
+    key.fill(0)
+  }
+}
+
+/**
+ * Creates one invitation pseudonym from already decoded key bytes.
+ *
+ * @param workspaceId - Canonical Workspace identifier.
+ * @param invitationId - Private Workspace invitation identifier.
+ * @param pseudonymKey - Exact 32-byte Workspace Audit pseudonym key.
+ * @returns The versioned invitation pseudonym used by Audit events.
+ */
+function createWorkspaceInvitationAuditEntityIdFromKeyBytes(
+  workspaceId: string,
+  invitationId: string,
+  pseudonymKey: Uint8Array,
+): string {
   const normalizedWorkspaceId = requireText(workspaceId, 'Audit workspace ID')
   const normalizedInvitationId = requireText(invitationId, 'Audit invitation ID')
   const workspacePseudonym = createWorkspaceAccessPseudonym(
@@ -988,8 +1042,13 @@ export function createAuditEvent(input: CreateAuditEventInput): AuditEventV1 {
     throw new RangeError('Audit expiresAt must be a positive integer epoch timestamp.')
   }
 
+  if (input.retentionSuspended === true && input.expiresAt !== undefined) {
+    throw new TypeError('Audit retention cannot be suspended while expiresAt is set.')
+  }
+
   if (
     input.expiresAt === undefined &&
+    input.retentionSuspended !== true &&
     !(
       input.context.source.kind === 'backfill' &&
       occurredAt === AUDIT_UNKNOWN_OCCURRED_AT &&
@@ -2435,23 +2494,35 @@ function hashText(value: string) {
 }
 
 function createWorkspaceAccessPseudonym(
-  pseudonymKey: string,
+  pseudonymKey: Uint8Array,
   kind: 'workspace' | 'member' | 'invitation',
   workspaceId: string,
   privateId?: string,
 ) {
+  if (pseudonymKey.byteLength !== 32) {
+    throw new TypeError('Workspace Audit pseudonym key must contain exactly 32 bytes.')
+  }
+  const hmac = createHmac('sha256', pseudonymKey)
+    .update(workspaceAccessEntityIdNamespace, 'utf8')
+    .update('\0', 'utf8')
+    .update(kind, 'utf8')
+    .update('\0', 'utf8')
+    .update(workspaceId, 'utf8')
+  if (privateId !== undefined) hmac.update('\0', 'utf8').update(privateId, 'utf8')
+  return hmac.digest('hex').slice(0, 48)
+}
+
+/**
+ * Decodes the exact lowercase hexadecimal Workspace Audit pseudonym key.
+ *
+ * @param pseudonymKey - Strict 64-character lowercase hexadecimal key.
+ * @returns A caller-owned temporary 32-byte Buffer.
+ */
+function decodeWorkspaceAuditPseudonymKey(pseudonymKey: string): Buffer {
   const encodedKey = readWorkspaceAuditPseudonymKey({
     [WORKSPACE_AUDIT_PSEUDONYM_KEY_ENV]: pseudonymKey,
   })
-  const key = Buffer.from(encodedKey, 'hex')
-  const payload = [
-    workspaceAccessEntityIdNamespace,
-    kind,
-    workspaceId,
-    ...(privateId === undefined ? [] : [privateId]),
-  ].join('\0')
-
-  return createHmac('sha256', key).update(payload).digest('hex').slice(0, 48)
+  return Buffer.from(encodedKey, 'hex')
 }
 
 function normalizeActor(actor: AuditActor): AuditActor {

@@ -3,6 +3,7 @@ import { AutomationEngine } from '../../application/execution-service'
 import type {
   AutomationActionExecutor,
   AutomationExecutionServicePort,
+  AutomationFeatureEntitlementPort,
   AutomationRuleTemplatePort,
 } from '../../application/ports'
 import { AutomationError } from '../../domain/automation-error'
@@ -115,9 +116,18 @@ export function parseAutomationStreamRecord(record: DynamoStreamRecord) {
   } satisfies AutomationEvent
 }
 
-/** Durable action failure を scheduler へ引き渡す audit event processor を作成します。 */
+/**
+ * Durable action failure を scheduler へ引き渡す audit event processor を作成します。
+ *
+ * @param client - Focused Automation persistence capabilities.
+ * @param entitlement - Server-side Automation feature gate.
+ * @param engine - Rule execution engine.
+ * @param workItems - Optional canonical Work Item reader used for hydration.
+ * @returns A durable Automation event processor.
+ */
 export function createAutomationEventProcessor(
   client: AutomationEventPort,
+  entitlement: AutomationFeatureEntitlementPort,
   engine: Pick<AutomationEngine, 'handleEvent'> = new AutomationEngine(
     client,
     createUnavailableAutomationActionExecutor(),
@@ -126,6 +136,7 @@ export function createAutomationEventProcessor(
 ): AutomationEventProcessor {
   return {
     async process(event) {
+      if (!await entitlement.isAutomationEnabled(event.workspaceId)) return
       const rules = await client.listRules(event.workspaceId)
       const hydratedEvent = await hydrateAutomationWorkItem(event, workItems)
       await Promise.all(rules.map(async (rule) =>

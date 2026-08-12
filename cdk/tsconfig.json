@@ -3,6 +3,12 @@
     "target": "ES2022",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
+    "baseUrl": ".",
+    "paths": {
+      "@mukuroji/contracts/workspace-search-migration-deployment-target": [
+        "../contracts/src/workspace-search-migration-deployment-target.ts"
+      ]
+    },
     "outDir": "dist",
     "lib": [
       "es2022"

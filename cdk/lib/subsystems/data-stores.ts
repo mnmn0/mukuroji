@@ -2,6 +2,10 @@ import * as cdk from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as kms from 'aws-cdk-lib/aws-kms';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
+import {
+  triageIndexDeploymentIncludes,
+  type TriageIndexDeploymentStage,
+} from '../config/triage-index-deployment';
 
 /**
  * Inputs required to create the stack data stores.
@@ -9,6 +13,8 @@ import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 export interface DataStoreBuilderInput {
   /** Secret JSON configuration persisted for connector runtimes. */
   readonly connectorRuntimeConfiguration: cdk.CfnParameter;
+  /** Reviewed one-index-at-a-time rollout stage for Triage GSIs. */
+  readonly triageIndexDeploymentStage: TriageIndexDeploymentStage;
 }
 
 /**
@@ -25,6 +31,8 @@ export type DataStoreResources = {
   readonly automationTable: dynamodb.Table;
   /** Planning domain state table. */
   readonly planningTable: dynamodb.Table;
+  /** Capacity planning availability, request, and assignment state table. */
+  readonly capacityPlanningTable: dynamodb.Table;
   /** Developer platform configuration and execution state table. */
   readonly developerPlatformTable: dynamodb.Table;
   /** Analytics definitions and scheduled delivery state table. */
@@ -53,6 +61,8 @@ export type DataStoreResources = {
   readonly workspaceAccessTable: dynamodb.Table;
   /** Enterprise identity configuration and maintenance table. */
   readonly enterpriseIdentityTable: dynamodb.Table;
+  /** Tenant profile, entitlement, governance, and lifecycle table. */
+  readonly tenantAdministrationTable: dynamodb.Table;
   /** Collaborative documents and whiteboards table. */
   readonly documentsTable: dynamodb.Table;
   /** HMAC secret for public document share tokens. */
@@ -63,6 +73,8 @@ export type DataStoreResources = {
   readonly workspaceSearchTable: dynamodb.Table;
   /** Durable collaboration notification table. */
   readonly notificationsTable: dynamodb.Table;
+  /** User and Team Focus queue preferences and snooze state. */
+  readonly focusTable: dynamodb.Table;
   /** Realtime connection and one-time ticket table. */
   readonly realtimeSessionsTable: dynamodb.Table;
   /** File upload, proofing, and retention metadata table. */
@@ -171,6 +183,15 @@ export function buildDataStores(
     removalPolicy: cdk.RemovalPolicy.RETAIN,
   });
 
+  const capacityPlanningTable = new dynamodb.Table(stack, 'CapacityPlanningTable', {
+    partitionKey: { name: 'workspaceId', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'recordKey', type: dynamodb.AttributeType.STRING },
+    billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+    encryption: dynamodb.TableEncryption.AWS_MANAGED,
+    pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+    removalPolicy: cdk.RemovalPolicy.RETAIN,
+  });
+
   const developerPlatformTable = new dynamodb.Table(stack, 'DeveloperPlatformTable', {
     partitionKey: { name: 'workspaceId', type: dynamodb.AttributeType.STRING },
     sortKey: { name: 'recordKey', type: dynamodb.AttributeType.STRING },
@@ -194,6 +215,13 @@ export function buildDataStores(
     partitionKey: { name: 'scheduleShard', type: dynamodb.AttributeType.STRING },
     sortKey: { name: 'nextDeliveryAtRecordKey', type: dynamodb.AttributeType.STRING },
     projectionType: dynamodb.ProjectionType.KEYS_ONLY,
+  });
+
+  analyticsTable.addGlobalSecondaryIndex({
+    indexName: 'TimeEntryTeamDateIndex',
+    partitionKey: { name: 'teamId', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'startAt', type: dynamodb.AttributeType.STRING },
+    projectionType: dynamodb.ProjectionType.ALL,
   });
 
   const requestIntakeTable = new dynamodb.Table(stack, 'RequestIntakeTable', {
@@ -266,6 +294,37 @@ export function buildDataStores(
     sortKey: { name: 'queueRecordKey', type: dynamodb.AttributeType.STRING },
     projectionType: dynamodb.ProjectionType.ALL,
   });
+
+  requestIntakeTable.addGlobalSecondaryIndex({
+    indexName: 'triage-team-activity-index',
+    partitionKey: { name: 'triageTeamKey', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'triageActivityKey', type: dynamodb.AttributeType.STRING },
+    projectionType: dynamodb.ProjectionType.ALL,
+  });
+
+  if (triageIndexDeploymentIncludes(
+    input.triageIndexDeploymentStage,
+    'owner',
+  )) {
+    requestIntakeTable.addGlobalSecondaryIndex({
+      indexName: 'triage-owner-activity-index',
+      partitionKey: { name: 'triageOwnerKey', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'triageActivityKey', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+  }
+
+  if (triageIndexDeploymentIncludes(
+    input.triageIndexDeploymentStage,
+    'wake',
+  )) {
+    requestIntakeTable.addGlobalSecondaryIndex({
+      indexName: 'triage-wake-index',
+      partitionKey: { name: 'triageWakeShard', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'triageNextWakeAt', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.KEYS_ONLY,
+    });
+  }
 
   const teamIssueEventsTable = new dynamodb.Table(stack, 'TeamIssueEventsTable', {
     partitionKey: { name: 'directoryTeamIssueId', type: dynamodb.AttributeType.STRING },
@@ -347,6 +406,17 @@ export function buildDataStores(
     timeToLiveAttribute: 'expiresAt',
   });
 
+  const tenantAdministrationTable = new dynamodb.Table(stack, 'TenantAdministrationTable', {
+    partitionKey: { name: 'workspaceId', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'recordKey', type: dynamodb.AttributeType.STRING },
+    billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+    encryption: dynamodb.TableEncryption.AWS_MANAGED,
+    pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+    removalPolicy: cdk.RemovalPolicy.RETAIN,
+    stream: dynamodb.StreamViewType.NEW_IMAGE,
+    timeToLiveAttribute: 'expiresAt',
+  });
+
   const documentsTable = new dynamodb.Table(stack, 'DocumentsTable', {
     partitionKey: { name: 'workspaceId', type: dynamodb.AttributeType.STRING },
     sortKey: { name: 'recordKey', type: dynamodb.AttributeType.STRING },
@@ -387,6 +457,7 @@ export function buildDataStores(
     billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
     pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
     removalPolicy: cdk.RemovalPolicy.RETAIN,
+    timeToLiveAttribute: 'expiresAt',
   });
 
   const notificationsTable = new dynamodb.Table(stack, 'NotificationsTable', {
@@ -403,6 +474,16 @@ export function buildDataStores(
     partitionKey: { name: 'recipientStatusKey', type: dynamodb.AttributeType.STRING },
     sortKey: { name: 'notificationKey', type: dynamodb.AttributeType.STRING },
     projectionType: dynamodb.ProjectionType.ALL,
+  });
+
+  const focusTable = new dynamodb.Table(stack, 'FocusTable', {
+    partitionKey: { name: 'scopeKey', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'recordKey', type: dynamodb.AttributeType.STRING },
+    billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+    encryption: dynamodb.TableEncryption.AWS_MANAGED,
+    pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+    removalPolicy: cdk.RemovalPolicy.RETAIN,
+    timeToLiveAttribute: 'expiresAt',
   });
 
   const realtimeSessionsTable = new dynamodb.Table(stack, 'RealtimeSessionsTable', {
@@ -428,6 +509,7 @@ export function buildDataStores(
     workItemConfigurationTable,
     automationTable,
     planningTable,
+    capacityPlanningTable,
     developerPlatformTable,
     analyticsTable,
     requestIntakeTable,
@@ -442,11 +524,13 @@ export function buildDataStores(
     processedAuditEventsTable,
     workspaceAccessTable,
     enterpriseIdentityTable,
+    tenantAdministrationTable,
     documentsTable,
     documentPublicShareTokenSecret,
     collaborationTable,
     workspaceSearchTable,
     notificationsTable,
+    focusTable,
     realtimeSessionsTable,
     fileProofingTable,
   };

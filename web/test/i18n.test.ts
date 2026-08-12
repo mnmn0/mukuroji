@@ -26,6 +26,7 @@ const representativeMessages: ReadonlyArray<{
   { key: 'analytics.title', ja: 'レポート', en: 'Reports' },
   { key: 'planning.title', ja: 'プランニング', en: 'Planning' },
   { key: 'requests.title', ja: 'リクエスト', en: 'Requests' },
+  { key: 'triage.tab.queue', ja: 'キュー', en: 'Queue' },
   {
     key: 'public.nav.aria',
     ja: '公開ページナビゲーション',
@@ -59,6 +60,41 @@ describe('sidebar shortcut labels', () => {
   test('localizes the Planning navigation entry', () => {
     expect(createSidebarLabels('ja').nav.planning).toBe('プランニング')
     expect(createSidebarLabels('en').nav.planning).toBe('Planning')
+  })
+
+  test('localizes the Team triage navigation entry', () => {
+    expect(createSidebarLabels('ja').triage).toBe('Triage')
+    expect(createSidebarLabels('en').triage).toBe('Triage')
+  })
+
+  test('localizes Quick Access and current Team navigation', () => {
+    const ja = createSidebarLabels('ja')
+    const en = createSidebarLabels('en')
+
+    expect(ja.quickAccess).toBe('クイックアクセス')
+    expect(en.quickAccess).toBe('Quick access')
+    expect(ja.showAllQuickAccess).toBe('すべて表示')
+    expect(en.showAllQuickAccess).toBe('Show all')
+    expect(ja.allProjects).toBe('すべてのプロジェクト')
+    expect(en.allProjects).toBe('All projects')
+    expect(ja.currentTeam).toBe('現在のチーム')
+    expect(en.currentTeam).toBe('Current team')
+    expect(ja.more).toBe('その他')
+    expect(en.more).toBe('More')
+  })
+
+  test('localizes optimistic Quick Access feedback', () => {
+    const ja = createTranslator('ja')
+    const en = createTranslator('en')
+
+    expect(ja('projects.quickAccess.feedback.added').replace('{name}', 'Refero')).toBe(
+      'Referoをクイックアクセスに追加しました',
+    )
+    expect(en('projects.quickAccess.feedback.removed').replace('{name}', 'Refero')).toBe(
+      'Removed Refero from quick access',
+    )
+    expect(ja('projects.quickAccess.retry')).toBe('クイックアクセスを再読み込み')
+    expect(en('projects.quickAccess.retry')).toBe('Retry quick access')
   })
 
   test('localizes Planning slack and entity type labels independently', () => {

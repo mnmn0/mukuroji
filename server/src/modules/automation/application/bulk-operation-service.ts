@@ -8,6 +8,7 @@ import {
 } from '@mukuroji/contracts'
 import { AutomationError } from '../domain/automation-error'
 import { requireAutomationRecord } from '../domain/automation-record'
+import { normalizeAutomationWorkItemScheduleField } from '../domain/work-item-schedule-validation'
 import { normalizeAutomationActionFailure } from './action-failure'
 import type {
   AutomationBulkOperationPort,
@@ -19,8 +20,8 @@ const bulkEditableWorkItemFields = new Set([
   'assigneeUserId',
   'customFieldValues',
   'description',
-  'dueDate',
   'priority',
+  'schedule',
   'title',
   'workflowStatusId',
 ])
@@ -359,7 +360,13 @@ function validateBulkOperationRequest(value: unknown): BulkOperationRequest {
     if (unsupportedFields.length > 0) {
       throw invalidInput(`Bulk edit cannot update fields: ${unsupportedFields.join(', ')}.`)
     }
-    normalizedAction = { type: 'edit', patch }
+    normalizedAction = {
+      type: 'edit',
+      patch: normalizeAutomationWorkItemScheduleField(
+        patch,
+        'Bulk edit schedule',
+      ),
+    }
   } else if (action.type === 'move') {
     normalizedAction = {
       type: 'move',

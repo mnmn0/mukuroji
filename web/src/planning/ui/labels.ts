@@ -140,7 +140,9 @@ export function createPlanningLabels(locale: Locale): PlanningLabels {
       'finish-to-start': t('planning.dependency.finish-to-start'),
       'start-to-start': t('planning.dependency.start-to-start'),
       'finish-to-finish': t('planning.dependency.finish-to-finish'),
+      'start-to-finish': t('planning.dependency.start-to-finish'),
     },
+    workItemDependencyT: t,
     goalFrameworkValues: {
       goal: t('planning.goalFramework.goal'),
       objective: t('planning.goalFramework.objective'),

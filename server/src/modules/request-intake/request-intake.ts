@@ -9,7 +9,6 @@ import { S3Client } from '@aws-sdk/client-s3'
 import {
   DynamoDBDocumentClient,
   GetCommand,
-  PutCommand,
   QueryCommand,
   TransactWriteCommand,
   UpdateCommand,
@@ -18,6 +17,7 @@ import {
 import {
   REQUEST_FORM_SCHEMA_VERSION,
   REQUEST_SUBMISSION_SCHEMA_VERSION,
+  TRIAGE_ENTRY_SCHEMA_VERSION,
   type CreateRequestFormInput,
   type MarkDuplicateRequestSubmissionAction,
   type PublicRequestForm,
@@ -52,15 +52,33 @@ import {
   type RequestSubmissionStatus,
   type RequestWorkItemReference,
   type SubmitRequestInput,
+  type TriageEntry,
   type UpdateRequestFormInput,
   type WorkItemPriority,
 } from '@mukuroji/contracts'
-import { getConfiguredDynamoDbEndpoint } from '../audit'
+import {
+  getConfiguredAuditRetentionDays,
+  getConfiguredAuditTableName,
+  getConfiguredDynamoDbEndpoint,
+} from '../audit'
 import {
   S3FileObjectClient,
   type FileObjectClient,
   type FileVersionAccess,
 } from '../files'
+import {
+  createFormTriageEntryTransactionItems,
+  createTriageCapabilities,
+  createTriageEntryKey,
+  createTriageSourceActivityTransactionItems,
+  decodeTriageEntryRow,
+  redactExpiredTriageEntry,
+  TRIAGE_OWNER_ACTIVITY_INDEX_NAME,
+  TRIAGE_TEAM_ACTIVITY_INDEX_NAME,
+  TRIAGE_WAKE_INDEX_NAME,
+  type TriageAdmissionTransactionContribution,
+  type TriageAuditOutboxConfiguration,
+} from '../triage'
 
 /** Request intake queue GSI の既定名です。 */
 export const REQUEST_QUEUE_INDEX_NAME = 'RequestQueueIndex'
@@ -202,19 +220,37 @@ export interface RequestIntakeClient {
   ): Promise<RequestSubmissionPage>
   /** Submission detail を strong read します。 */
   getSubmission(workspaceId: string, submissionId: string): Promise<RequestSubmission>
-  /** Convert 以外の explicit triage action を適用します。 */
+  /** Applies one non-conversion Request action and optional caller-owned atomic contributions.
+   *
+   * @param workspaceId - Owning Workspace identifier.
+   * @param submissionId - Target Request submission identifier.
+   * @param actor - Authenticated Request actor.
+   * @param input - Revision-fenced non-conversion action.
+   * @param additionalTransactionItems - Narrow cross-domain items committed with the Request.
+   * @returns The resulting Request submission view.
+   */
   applyAction(
     workspaceId: string,
     submissionId: string,
     actor: RequestIntakeActor,
     input: Exclude<RequestSubmissionActionInput, { action: 'convert' }>,
+    additionalTransactionItems?: NonNullable<TransactWriteCommandInput['TransactItems']>,
   ): Promise<RequestSubmission>
-  /** Work Item 作成後の trace projection を revision 条件付きで保存します。 */
+  /** Stores a revision-fenced Work Item trace projection and optional atomic contributions.
+   *
+   * @param workspaceId - Owning Workspace identifier.
+   * @param submissionId - Source Request submission identifier.
+   * @param actor - Authenticated Request actor.
+   * @param input - Canonical Work Item projection and expected revision.
+   * @param additionalTransactionItems - Narrow cross-domain items committed with the projection.
+   * @returns The resulting terminal Request submission.
+   */
   completeConversion(
     workspaceId: string,
     submissionId: string,
     actor: RequestIntakeActor,
     input: RequestConversionProjection,
+    additionalTransactionItems?: NonNullable<TransactWriteCommandInput['TransactItems']>,
   ): Promise<RequestSubmission>
   /** External capability thread の allowlist 済み message view を返します。 */
   getRequesterThread(
@@ -236,6 +272,25 @@ export interface RequestIntakeClient {
     attachmentId: string,
   ): Promise<RequestAttachmentAccess>
 }
+
+/** Tenant lifecycle boundary used by public Request Intake operations. */
+export interface RequestIntakeTenantAvailability {
+  /** Returns whether the tenant may serve public reads and writes. */
+  isActive(workspaceId: string): Promise<boolean>
+  /** Returns an atomic guard for a tenant-owned DynamoDB write when available. */
+  createActiveWriteCondition?(
+    workspaceId: string,
+  ): NonNullable<TransactWriteCommandInput['TransactItems']>[number]
+}
+
+/** Applies current Team Triage configuration before a Form entry is committed.
+ *
+ * @param entry - Normalized Form entry before Team configuration is applied.
+ * @returns The configured entry and optional Triage-owned transaction items.
+ */
+export type FormTriageAdmissionPreparer = (
+  entry: TriageEntry,
+) => Promise<TriageAdmissionTransactionContribution>
 
 /** DynamoDB/S3 client の差し替え option です。 */
 export type DynamoDbRequestIntakeClientOptions = {
@@ -259,6 +314,12 @@ export type DynamoDbRequestIntakeClientOptions = {
   token?: () => string
   /** Local DynamoDB table 欠落を作成するかどうかです。 */
   bootstrapLocalTable?: boolean
+  /** Public traffic を tenant closure と直列化する lifecycle boundary です。 */
+  tenantAvailability?: RequestIntakeTenantAvailability
+  /** Production callback that applies current Team Triage configuration. */
+  prepareFormTriageAdmission?: FormTriageAdmissionPreparer
+  /** Immutable audit event outbox table configuration. */
+  audit?: TriageAuditOutboxConfiguration
 }
 
 /** Raw capability token を除いた form root row です。 */
@@ -660,6 +721,7 @@ export function createRequestWorkItemInput(
   )
   const dueDate = new Date(`${submission.createdAt.slice(0, 10)}T00:00:00.000Z`)
   dueDate.setUTCDate(dueDate.getUTCDate() + target.dueDateOffsetDays)
+  const scheduleDueDate = dueDate.toISOString().slice(0, 10)
   return {
     target,
     input: {
@@ -669,7 +731,15 @@ export function createRequestWorkItemInput(
       assigneeUserId: target.assigneeUserId,
       ...(target.workflowStatusId ? { workflowStatusId: target.workflowStatusId } : {}),
       customFieldValues,
-      dueDate: dueDate.toISOString().slice(0, 10).replaceAll('-', '/'),
+      schedule: {
+        calendarPolicy: {
+          holidays: [],
+          timeZone: 'UTC',
+          workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+        },
+        dueDate: scheduleDueDate,
+        mode: 'due-date',
+      },
       priority: target.priority,
     },
   }
@@ -1236,6 +1306,12 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
   private readonly token: () => string
   /** Local table を自動作成するかどうかです。 */
   private readonly bootstrapLocalTable: boolean
+  /** Public Request Intake traffic の tenant lifecycle boundary です。 */
+  private readonly tenantAvailability: RequestIntakeTenantAvailability
+  /** Current Team configuration callback for Form Triage admission. */
+  private readonly prepareFormTriageAdmission?: FormTriageAdmissionPreparer
+  /** Immutable audit outbox configuration used by Form Triage admission. */
+  private readonly audit: TriageAuditOutboxConfiguration
   /** In-flight local table bootstrap promise です。 */
   private tableReady?: Promise<void>
 
@@ -1259,6 +1335,12 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
     this.now = options.now ?? (() => new Date())
     this.token = options.token ?? (() => randomBytes(32).toString('base64url'))
     this.bootstrapLocalTable = options.bootstrapLocalTable ?? Boolean(endpoint)
+    this.tenantAvailability = options.tenantAvailability ?? ALLOW_ACTIVE_TENANT
+    this.prepareFormTriageAdmission = options.prepareFormTriageAdmission
+    this.audit = options.audit ?? {
+      tableName: getConfiguredAuditTableName() ?? 'mukuroji-audit-events',
+      retentionDays: getConfiguredAuditRetentionDays(),
+    }
   }
 
   /** Workspace の form 一覧を返します。 */
@@ -1554,6 +1636,7 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
       lookup.revokedAt ||
       lookup.expiresAtIso && Date.parse(lookup.expiresAtIso) <= now.getTime()
     ) throw unavailableForm()
+    await this.requireTenantActive(lookup.workspaceId)
     const form = await this.getStoredForm(lookup.workspaceId, lookup.formId)
     if (
       form.status !== 'published' ||
@@ -1575,6 +1658,7 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
     context: RequestExternalContext,
   ) {
     await this.ensureReady()
+    await this.requireTenantActive(resolution.workspaceId)
     await this.consumeLinkRateLimits(
       resolution,
       context,
@@ -1607,11 +1691,24 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
       expiresAt: Math.floor(expiresAtDate.getTime() / 1_000),
     }
     assertStoredRequestItemSize(session)
-    await this.documentClient.send(new PutCommand({
-      TableName: this.tableName,
-      Item: session,
-      ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
-    }))
+    try {
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [
+          ...this.createTenantWriteGuard(resolution.workspaceId),
+          {
+            Put: {
+              TableName: this.tableName,
+              Item: session,
+              ConditionExpression:
+                'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
+            },
+          },
+        ],
+      }))
+    } catch (error) {
+      if (isConditionalFailure(error)) throw unavailableForm()
+      throw toRequestStoreError(error)
+    }
     return {
       schemaVersion: REQUEST_FORM_SCHEMA_VERSION,
       formId: version.formId,
@@ -1632,6 +1729,7 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
     input: RequestAttachmentUploadInput,
     context: RequestExternalContext,
   ) {
+    await this.requireTenantActive(resolution.workspaceId)
     const session = await this.getActiveSession(resolution, input.sessionToken, false)
     if (session.usedAt) {
       throw new RequestIntakeError(409, 'RequestSessionConsumed', 'Submission session was already used.')
@@ -1681,11 +1779,24 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
       expiresAt: Math.floor((now.getTime() + 24 * 60 * 60_000) / 1_000),
     }
     assertStoredRequestItemSize(stored)
-    await this.documentClient.send(new PutCommand({
-      TableName: this.tableName,
-      Item: stored,
-      ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
-    }))
+    try {
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [
+          ...this.createTenantWriteGuard(session.workspaceId),
+          {
+            Put: {
+              TableName: this.tableName,
+              Item: stored,
+              ConditionExpression:
+                'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
+            },
+          },
+        ],
+      }))
+    } catch (error) {
+      if (isConditionalFailure(error)) throw unavailableForm()
+      throw toRequestStoreError(error)
+    }
     return {
       attachmentId,
       fieldId,
@@ -1706,6 +1817,7 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
     input: SubmitRequestInput,
     context: RequestExternalContext,
   ) {
+    await this.requireTenantActive(resolution.workspaceId)
     if (typeof input.honeypot === 'string' && input.honeypot.trim()) {
       throw invalidInput('Request submission is invalid.')
     }
@@ -1856,6 +1968,11 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
       attachmentObjectKeys: Object.fromEntries(uploads.map(({ stored }) => [stored.attachmentId, stored.objectKey])),
       attachmentObjectVersionIds: Object.fromEntries(uploads.map(({ stored, verified }) => [stored.attachmentId, verified.objectVersionId])),
     }
+    const baseTriageEntry = createFormTriageEntry(
+      session.workspaceId,
+      submission,
+      resolution.accessMode,
+    )
     const confirmationMessage = resolveLocalizedText(
       version.snapshot.definition.confirmation.message,
       locale,
@@ -1884,7 +2001,8 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
     }
     assertStoredRequestItemSize(submission)
     assertStoredRequestItemSize(threadLookup)
-    const transactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [
+    const baseTransactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [
+      ...this.createTenantWriteGuard(session.workspaceId),
       {
         Put: {
           TableName: this.tableName,
@@ -1949,28 +2067,73 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
         event,
       ),
     ]
-    try {
-      await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactItems }))
-      await this.finalizeSubmissionAttachments(submission)
-      return receipt
-    } catch (error) {
-      if (isConditionalFailure(error)) {
-        const replay = await this.getSessionByDigest(this.hashToken('session', input.sessionToken))
-        if (replay.inputFingerprint === inputFingerprint && replay.receipt) {
-          await this.consumeReplayRateLimit(
-            { ...resolution, tokenDigest: replay.scopeKey },
-          )
-          const replayedSubmission = await this.getStoredSubmission(
-            replay.workspaceId,
-            replay.receipt.submissionId,
-          )
-          await this.finalizeSubmissionAttachments(replayedSubmission)
-          return this.toSubmissionReceipt(replay.workspaceId, replay.receipt)
-        }
-        throw new RequestIntakeError(409, 'RequestSessionConsumed', 'Submission session was already used.')
+    let commitError: unknown
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      let admission: TriageAdmissionTransactionContribution
+      try {
+        admission = this.prepareFormTriageAdmission
+          ? await this.prepareFormTriageAdmission(baseTriageEntry)
+          : { entry: baseTriageEntry, transactItems: [] }
+      } catch (error) {
+        commitError = error
+        break
       }
-      throw toRequestStoreError(error)
+      requireSameFormTriageAdmission(baseTriageEntry, admission.entry)
+      const triageTransactItems = createFormTriageEntryTransactionItems({
+        tableName: this.tableName,
+        entry: admission.entry,
+        inputFingerprint,
+        audit: this.audit,
+      })
+      const retryableConflictItemIndexes = admission.retryableConflictItemIndexes?.map(
+        (itemIndex) => baseTransactItems.length + triageTransactItems.length + itemIndex,
+      ) ?? []
+      const transactItems = [
+        ...baseTransactItems,
+        ...triageTransactItems,
+        ...admission.transactItems,
+      ]
+      try {
+        await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactItems }))
+        await this.finalizeSubmissionAttachments(submission)
+        return receipt
+      } catch (error) {
+        if (
+          retryableConflictItemIndexes.length > 0 &&
+          isOnlyConditionalFailureAtAny(error, retryableConflictItemIndexes)
+        ) {
+          if (attempt < 2) continue
+          commitError = new RequestIntakeError(
+            409,
+            'TriageAdmissionConflict',
+            'Triage routing changed while the request was submitted. Retry the submission.',
+            { cause: error },
+          )
+          break
+        }
+        commitError = error
+        break
+      }
     }
+    if (isConditionalFailure(commitError)) {
+      if (!await this.tenantAvailability.isActive(resolution.workspaceId)) {
+        throw unavailableForm()
+      }
+      const replay = await this.getSessionByDigest(this.hashToken('session', input.sessionToken))
+      if (replay.inputFingerprint === inputFingerprint && replay.receipt) {
+        await this.consumeReplayRateLimit(
+          { ...resolution, tokenDigest: replay.scopeKey },
+        )
+        const replayedSubmission = await this.getStoredSubmission(
+          replay.workspaceId,
+          replay.receipt.submissionId,
+        )
+        await this.finalizeSubmissionAttachments(replayedSubmission)
+        return this.toSubmissionReceipt(replay.workspaceId, replay.receipt)
+      }
+      throw new RequestIntakeError(409, 'RequestSessionConsumed', 'Submission session was already used.')
+    }
+    throw toRequestStoreError(commitError)
   }
 
   /** Workspace intake queue を cursor pagination します。 */
@@ -2065,6 +2228,7 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
     submissionId: string,
     actor: RequestIntakeActor,
     input: Exclude<RequestSubmissionActionInput, { action: 'convert' }>,
+    additionalTransactionItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [],
   ) {
     const current = await this.getStoredSubmission(workspaceId, submissionId)
     requireExpectedRevision(input.expectedRevision, current.revision)
@@ -2078,10 +2242,14 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
     let eventType: RequestSubmissionEvent['type']
     let summary: string
     if (input.action === 'assign') {
-      triageAssigneeUserId = requireText(input.assigneeUserId, 'Request assignee', 320).toLowerCase()
+      triageAssigneeUserId = input.assigneeUserId === null
+        ? undefined
+        : requireText(input.assigneeUserId, 'Request assignee', 320).toLowerCase()
       nextStatus = 'triaging'
       eventType = 'assigned'
-      summary = 'Request was assigned for triage.'
+      summary = triageAssigneeUserId
+        ? 'Request was assigned for triage.'
+        : 'Request was left unowned in triage.'
     } else if (input.action === 'request-more-info') {
       const body = requireText(input.message, 'More information message', 10_000)
       nextStatus = 'needs-more-info'
@@ -2124,11 +2292,13 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
       createdAt: now,
     }
     const persistedEvents = await this.getSubmissionEvents(workspaceId, submissionId)
+    const assignmentBase = triageAssigneeUserId
+      ? { ...current, triageAssigneeUserId }
+      : removeRequestTriageAssignee(current)
     const next = {
-      ...current,
+      ...assignmentBase,
       status: nextStatus,
       revision: current.revision + 1,
-      ...(triageAssigneeUserId ? { triageAssigneeUserId } : {}),
       ...(duplicateOfSubmissionId ? { duplicateOfSubmissionId } : {}),
       messages: messages.reduce<RequestSubmissionMessage[]>((history, message) =>
         appendRequestMessage(history, message), []),
@@ -2138,19 +2308,33 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
         ? terminalSubmissionCapabilities
         : activeSubmissionCapabilities,
     } satisfies StoredRequestSubmission
-    await this.putSubmissionWithRevision(next, current.revision, event)
+    await this.putSubmissionWithRevision(
+      next,
+      current.revision,
+      event,
+      additionalTransactionItems,
+    )
     return toRequestSubmissionView(
       next,
       appendCompleteRequestSubmissionEventHistory(current, persistedEvents, event),
     )
   }
 
-  /** Work Item 作成後の trace projection を保存します。 */
+  /** Stores the Work Item trace projection with optional cross-domain transaction items.
+   *
+   * @param workspaceId - Owning Workspace identifier.
+   * @param submissionId - Source Request submission identifier.
+   * @param actor - Authenticated Request actor.
+   * @param input - Canonical Work Item projection and expected revision.
+   * @param additionalTransactionItems - Narrow atomic contributions owned by another domain.
+   * @returns The resulting terminal Request submission.
+   */
   async completeConversion(
     workspaceId: string,
     submissionId: string,
     actor: RequestIntakeActor,
     input: RequestConversionProjection,
+    additionalTransactionItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [],
   ) {
     const current = await this.getStoredSubmission(workspaceId, submissionId)
     if (current.status === 'converted' && current.workItem && sameWorkItem(current.workItem, input.workItem)) {
@@ -2178,7 +2362,12 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
       updatedAt: now,
       capabilities: terminalSubmissionCapabilities,
     }
-    await this.putSubmissionWithRevision(next, current.revision, event)
+    await this.putSubmissionWithRevision(
+      next,
+      current.revision,
+      event,
+      additionalTransactionItems,
+    )
     return toRequestSubmissionView(
       next,
       appendCompleteRequestSubmissionEventHistory(current, persistedEvents, event),
@@ -2196,7 +2385,8 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
       requireCapabilityToken(threadToken, 'Request thread token'),
     )
     const lookup = await this.getThreadLookup(threadDigest)
-    await this.consumeThreadReadRateLimit(threadDigest, context)
+    await this.requireTenantActive(lookup.workspaceId)
+    await this.consumeThreadReadRateLimit(lookup.workspaceId, threadDigest, context)
     const submission = await this.getStoredSubmission(lookup.workspaceId, lookup.submissionId)
     return {
       status: terminalSubmissionStatuses.has(submission.status) ? 'closed' : 'open',
@@ -2219,6 +2409,7 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
     await this.ensureReady()
     const threadDigest = this.hashToken('thread', requireCapabilityToken(threadToken, 'Request thread token'))
     const lookup = await this.getThreadLookup(threadDigest)
+    await this.requireTenantActive(lookup.workspaceId)
     const body = requireText(input.body, 'Requester reply', 20_000)
     const inputFingerprint = stableHash({ body, threadDigest })
     const idempotencyKey = context.idempotencyKey === undefined
@@ -2227,7 +2418,7 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
     const replyDigest = idempotencyKey
       ? this.hashToken('reply-idempotency', `${threadDigest}\0${idempotencyKey}`)
       : undefined
-    await this.consumeThreadRateLimit(threadDigest, context)
+    await this.consumeThreadRateLimit(lookup.workspaceId, threadDigest, context)
     if (replyDigest) {
       const existing = await this.documentClient.send(new GetCommand({
         TableName: this.tableName,
@@ -2258,6 +2449,7 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
     const threadToken = requireCapabilityToken(envelope.threadToken, 'Request email thread token')
     const threadDigest = this.hashToken('thread', threadToken)
     const lookup = await this.getThreadLookup(threadDigest)
+    await this.requireTenantActive(lookup.workspaceId)
     const fromAddress = normalizeEmail(envelope.fromAddress)
     if (!lookup.requesterEmail || lookup.requesterEmail !== fromAddress) {
       throw new RequestIntakeError(403, 'RequestEmailSenderDenied', 'Email sender does not match the request thread.')
@@ -2447,22 +2639,32 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
   ) {
     const maximumBytesBeforeUpload = maxFiles * maxFileSizeBytes - sizeBytes
     try {
-      await this.documentClient.send(new UpdateCommand({
-        TableName: this.tableName,
-        Key: { scopeKey: session.scopeKey, recordKey: session.recordKey },
-        UpdateExpression: 'ADD uploadCount :one, uploadBytes :sizeBytes',
-        ConditionExpression:
-          'attribute_not_exists(usedAt) AND expiresAt >= :nowEpoch AND (attribute_not_exists(uploadCount) OR uploadCount < :maxFiles) AND (attribute_not_exists(uploadBytes) OR uploadBytes <= :maximumBytesBeforeUpload)',
-        ExpressionAttributeValues: {
-          ':one': 1,
-          ':sizeBytes': sizeBytes,
-          ':nowEpoch': Math.floor(this.now().getTime() / 1_000),
-          ':maxFiles': maxFiles,
-          ':maximumBytesBeforeUpload': maximumBytesBeforeUpload,
-        },
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [
+          ...this.createTenantWriteGuard(session.workspaceId),
+          {
+            Update: {
+              TableName: this.tableName,
+              Key: { scopeKey: session.scopeKey, recordKey: session.recordKey },
+              UpdateExpression: 'ADD uploadCount :one, uploadBytes :sizeBytes',
+              ConditionExpression:
+                'attribute_not_exists(usedAt) AND expiresAt >= :nowEpoch AND (attribute_not_exists(uploadCount) OR uploadCount < :maxFiles) AND (attribute_not_exists(uploadBytes) OR uploadBytes <= :maximumBytesBeforeUpload)',
+              ExpressionAttributeValues: {
+                ':one': 1,
+                ':sizeBytes': sizeBytes,
+                ':nowEpoch': Math.floor(this.now().getTime() / 1_000),
+                ':maxFiles': maxFiles,
+                ':maximumBytesBeforeUpload': maximumBytesBeforeUpload,
+              },
+            },
+          },
+        ],
       }))
     } catch (error) {
       if (isConditionalFailure(error)) {
+        if (!await this.tenantAvailability.isActive(session.workspaceId)) {
+          throw unavailableForm()
+        }
         throw new RequestIntakeError(409, 'RequestAttachmentLimitExceeded', 'Attachment upload limit was reached.')
       }
       throw toRequestStoreError(error)
@@ -2555,6 +2757,7 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
     next: StoredRequestSubmission,
     expectedRevision: number,
     event: RequestSubmissionEvent,
+    additionalTransactionItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [],
   ) {
     assertStoredRequestItemSize(next)
     try {
@@ -2577,6 +2780,7 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
             next.id,
             event,
           ),
+          ...additionalTransactionItems,
         ],
       }))
     } catch (error) {
@@ -2610,9 +2814,14 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
     },
   ) {
     const current = await this.getStoredSubmission(lookup.workspaceId, lookup.submissionId)
-    if (terminalSubmissionStatuses.has(current.status)) {
+    const terminal = terminalSubmissionStatuses.has(current.status)
+    if (terminal && source === 'web') {
       throw new RequestIntakeError(409, 'RequestThreadClosed', 'Request thread is closed.')
     }
+    const triageEntry = await this.getFormTriageEntry(
+      lookup.workspaceId,
+      lookup.submissionId,
+    )
     const nowDate = this.now()
     const now = nowDate.toISOString()
     const replyId = createSortableId('reply', nowDate, randomUUID())
@@ -2626,7 +2835,7 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
     }
     const next: StoredRequestSubmission = {
       ...current,
-      status: 'triaging',
+      status: terminal ? current.status : 'triaging',
       revision: current.revision + 1,
       messages: appendRequestMessage(current.messages, {
         id: replyId,
@@ -2637,10 +2846,11 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
       }),
       events: createRequestSubmissionEventProjection(current.events, event),
       updatedAt: now,
-      capabilities: activeSubmissionCapabilities,
+      capabilities: terminal ? current.capabilities : activeSubmissionCapabilities,
     }
     assertStoredRequestItemSize(next)
     const transactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [
+      ...this.createTenantWriteGuard(lookup.workspaceId),
       {
         Put: {
           TableName: this.tableName,
@@ -2659,6 +2869,36 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
         event,
       ),
     ]
+    if (triageEntry) {
+      const retentionSafeEntry = redactExpiredTriageEntry(triageEntry, now)
+      const triageEntryWithMessageCount = {
+        ...retentionSafeEntry,
+        sourcePreview: {
+          ...retentionSafeEntry.sourcePreview,
+          commentCount: retentionSafeEntry.sourcePreview.commentCount + 1,
+        },
+      }
+      const triageContribution = createTriageSourceActivityTransactionItems({
+        tableName: this.tableName,
+        entry: triageEntryWithMessageCount,
+        activity: {
+          activityId: event.id,
+          occurredAt: now,
+          summary: event.summary,
+          actorId: 'requester',
+        },
+        idempotency: {
+          key: dedupe?.digest ?? replyId,
+          fingerprint: dedupe?.inputFingerprint ?? stableHash({
+            workspaceId: lookup.workspaceId,
+            submissionId: lookup.submissionId,
+            source,
+            body,
+          }),
+        },
+      })
+      transactItems.push(...triageContribution.transactItems)
+    }
     if (dedupe) {
       const replyReceipt: StoredReplyReceipt = {
         entryType: dedupe.entryType,
@@ -2683,6 +2923,9 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
       return receipt
     } catch (error) {
       if (dedupe && isConditionalFailure(error)) {
+        if (!await this.tenantAvailability.isActive(lookup.workspaceId)) {
+          throw unavailableForm()
+        }
         const existing = await this.documentClient.send(new GetCommand({
           TableName: this.tableName,
           Key: { scopeKey: createLookupScopeKey(dedupe.scope, dedupe.digest), recordKey: 'RECEIPT' },
@@ -2699,6 +2942,35 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
       if (isConditionalFailure(error)) throw revisionConflict('Request submission')
       throw toRequestStoreError(error)
     }
+  }
+
+  /**
+   * Reads the deterministic Triage projection for a Form submission when it exists.
+   *
+   * @param workspaceId - Workspace that owns the Form submission.
+   * @param submissionId - Canonical Request submission identifier.
+   * @returns The canonical Triage Entry, or undefined for a pre-Triage legacy submission.
+   */
+  private async getFormTriageEntry(
+    workspaceId: string,
+    submissionId: string,
+  ): Promise<TriageEntry | undefined> {
+    const key = createTriageEntryKey(workspaceId, createFormTriageEntryId(submissionId))
+    const response = await this.documentClient.send(new GetCommand({
+      TableName: this.tableName,
+      Key: key,
+      ConsistentRead: true,
+    }))
+    if (response.Item === undefined) return undefined
+    const entry = decodeTriageEntryRow(response.Item, key)
+    if (!entry) {
+      throw new RequestIntakeError(
+        503,
+        'InvalidRequestTriageEntry',
+        'Stored request Triage entry is invalid.',
+      )
+    }
+    return entry
   }
 
   private createRateLimitUpdate(
@@ -2751,6 +3023,7 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
     try {
       await this.documentClient.send(new TransactWriteCommand({
         TransactItems: [
+          ...this.createTenantWriteGuard(resolution.workspaceId),
           this.createRateLimitUpdate(
             resolution,
             operation,
@@ -2770,7 +3043,12 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
         ],
       }))
     } catch (error) {
-      if (isConditionalFailure(error)) throw requestRateLimited()
+      if (isConditionalFailure(error)) {
+        if (!await this.tenantAvailability.isActive(resolution.workspaceId)) {
+          throw unavailableForm()
+        }
+        throw requestRateLimited()
+      }
       throw toRequestStoreError(error)
     }
   }
@@ -2792,9 +3070,13 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
     )
   }
 
-  private async consumeThreadRateLimit(threadDigest: string, context: RequestExternalContext) {
+  private async consumeThreadRateLimit(
+    workspaceId: string,
+    threadDigest: string,
+    context: RequestExternalContext,
+  ) {
     const resolution: RequestLinkResolution = {
-      workspaceId: 'thread',
+      workspaceId,
       formId: 'thread',
       accessMode: 'public',
       tokenDigest: threadDigest,
@@ -2811,11 +3093,12 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
   }
 
   private async consumeThreadReadRateLimit(
+    workspaceId: string,
     threadDigest: string,
     context: RequestExternalContext,
   ) {
     const resolution: RequestLinkResolution = {
-      workspaceId: 'thread',
+      workspaceId,
       formId: 'thread',
       accessMode: 'public',
       tokenDigest: threadDigest,
@@ -2841,9 +3124,19 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
       this.now(),
     )
     try {
-      await this.documentClient.send(new UpdateCommand(update.Update))
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [
+          ...this.createTenantWriteGuard(resolution.workspaceId),
+          update,
+        ],
+      }))
     } catch (error) {
-      if (isConditionalFailure(error)) throw requestRateLimited()
+      if (isConditionalFailure(error)) {
+        if (!await this.tenantAvailability.isActive(resolution.workspaceId)) {
+          throw unavailableForm()
+        }
+        throw requestRateLimited()
+      }
       throw toRequestStoreError(error)
     }
   }
@@ -2852,20 +3145,55 @@ export class DynamoDbRequestIntakeClient implements RequestIntakeClient {
     return createHmac('sha256', this.tokenHashSecret).update(`${kind}\0${value}`).digest('hex')
   }
 
+  /** Rejects public traffic after a tenant closure transition. */
+  private async requireTenantActive(workspaceId: string): Promise<void> {
+    if (!await this.tenantAvailability.isActive(workspaceId)) throw unavailableForm()
+  }
+
+  /** Returns a transaction guard when the configured lifecycle adapter supports one. */
+  private createTenantWriteGuard(
+    workspaceId: string,
+  ): NonNullable<TransactWriteCommandInput['TransactItems']> {
+    const condition = this.tenantAvailability.createActiveWriteCondition?.(workspaceId)
+    return condition ? [condition] : []
+  }
+
   private async ensureReady() {
     if (!this.bootstrapLocalTable) return
     this.tableReady ??= ensureLocalRequestIntakeTable(
       this.dynamoDbClient,
       this.tableName,
       this.queueIndexName,
+      readEnvironment('TRIAGE_TEAM_ACTIVITY_INDEX_NAME') ?? TRIAGE_TEAM_ACTIVITY_INDEX_NAME,
+      readEnvironment('TRIAGE_OWNER_ACTIVITY_INDEX_NAME') ?? TRIAGE_OWNER_ACTIVITY_INDEX_NAME,
+      readEnvironment('TRIAGE_WAKE_INDEX_NAME') ?? TRIAGE_WAKE_INDEX_NAME,
     )
     await this.tableReady
   }
 }
 
-/** Environment から標準 Request intake client を作成します。 */
-export function createDefaultRequestIntakeClient(): RequestIntakeClient {
-  return new DynamoDbRequestIntakeClient()
+/**
+ * Creates the production Request Intake client with a mandatory tenant lifecycle guard.
+ *
+ * @param tenantAvailability - Active-tenant read and atomic write boundary.
+ * @param prepareFormTriageAdmission - Optional current Team configuration callback.
+ * @returns A configured Request Intake client.
+ */
+export function createDefaultRequestIntakeClient(
+  tenantAvailability: RequestIntakeTenantAvailability,
+  prepareFormTriageAdmission?: FormTriageAdmissionPreparer,
+): RequestIntakeClient {
+  return new DynamoDbRequestIntakeClient({
+    tenantAvailability,
+    ...(prepareFormTriageAdmission ? { prepareFormTriageAdmission } : {}),
+  })
+}
+
+/** Explicit compatibility boundary used only by directly constructed test/local clients. */
+const ALLOW_ACTIVE_TENANT: RequestIntakeTenantAvailability = {
+  async isActive() {
+    return true
+  },
 }
 
 const editableFormCapabilities = {
@@ -3307,6 +3635,181 @@ function resolveLocalizedText(
   return value[locale] ?? value[fallback] ?? value.ja ?? value.en ?? ''
 }
 
+/**
+ * Creates the deterministic Team Triage projection committed with a Form submission.
+ *
+ * @param workspaceId - Workspace that owns the submission and target Team.
+ * @param submission - Canonical Request submission and immutable Form snapshot.
+ * @param accessMode - Capability mode used to classify the external requester.
+ * @returns A normalized pending Triage Entry owned by the saved routing Team.
+ */
+function createFormTriageEntry(
+  workspaceId: string,
+  submission: StoredRequestSubmission,
+  accessMode: RequestFormAccessMode,
+): TriageEntry {
+  const preview = createFormTriagePreview(submission)
+  const permission: TriageEntry['permission'] = {
+    visibility: 'full',
+    canReply: true,
+    guestVisible: false,
+    checkedAt: submission.createdAt,
+  }
+  const routingCandidate = {
+    teamId: submission.routingTarget.teamId,
+    ...(submission.routingTarget.projectId
+      ? { projectId: submission.routingTarget.projectId }
+      : {}),
+    reason: 'Published Request Form routing selected this destination.',
+    score: 1,
+    permitted: true,
+  }
+  const retentionDate = new Date(submission.createdAt)
+  retentionDate.setUTCDate(retentionDate.getUTCDate() + 365)
+  const entry: TriageEntry = {
+    schemaVersion: TRIAGE_ENTRY_SCHEMA_VERSION,
+    id: createFormTriageEntryId(submission.id),
+    workspaceId,
+    source: {
+      kind: 'form',
+      sourceId: submission.id,
+      formId: submission.formId,
+      submissionId: submission.id,
+    },
+    sourcePreview: {
+      title: resolveLocalizedText(
+        submission.formSnapshot.snapshot.definition.title,
+        submission.locale,
+        submission.formSnapshot.snapshot.definition.defaultLocale,
+      ),
+      body: preview.body,
+      channelLabel: 'Request Form',
+      attachmentCount: submission.attachments.length,
+      commentCount: submission.messages.length,
+      watcherCount: 0,
+      sanitized: true,
+      truncated: preview.truncated,
+    },
+    requester: {
+      displayName: submission.requesterEmail ?? 'Request Form requester',
+      ...(submission.requesterEmail ? { email: submission.requesterEmail } : {}),
+      guest: accessMode === 'public',
+    },
+    receivedAt: submission.createdAt,
+    lastActivityAt: submission.createdAt,
+    state: 'pending',
+    routing: {
+      reason: 'The published Request Form routing snapshot selected this Team.',
+      candidates: [routingCandidate],
+    },
+    teamId: submission.routingTarget.teamId,
+    ...(submission.routingTarget.projectId
+      ? { projectId: submission.routingTarget.projectId }
+      : {}),
+    ...(submission.triageAssigneeUserId
+      ? { ownerUserId: submission.triageAssigneeUserId }
+      : {}),
+    permission,
+    retention: { expiresAt: retentionDate.toISOString() },
+    capabilities: createTriageCapabilities({ state: 'pending', permission }),
+    events: [{
+      id: `triage-created-${submission.id}`,
+      type: 'created',
+      actorId: 'requester',
+      summary: 'A Request Form submission entered Team triage.',
+      createdAt: submission.createdAt,
+    }],
+    revision: 1,
+    createdAt: submission.createdAt,
+    updatedAt: submission.createdAt,
+  }
+  return entry
+}
+
+/**
+ * Removes a legacy queue assignee without retaining an undefined DynamoDB attribute.
+ *
+ * @param submission - Stored Request submission to copy.
+ * @returns A copy with no Triage assignee projection.
+ */
+function removeRequestTriageAssignee(
+  submission: StoredRequestSubmission,
+): StoredRequestSubmission {
+  const next = { ...submission }
+  delete next.triageAssigneeUserId
+  return next
+}
+
+/**
+ * Creates a bounded plain-text Form answer preview without attachment identifiers.
+ *
+ * @param submission - Canonical Request submission and immutable field definitions.
+ * @returns The bounded preview and whether content was truncated.
+ */
+function createFormTriagePreview(
+  submission: StoredRequestSubmission,
+): { body: string; truncated: boolean } {
+  const lines = submission.formSnapshot.snapshot.definition.sections.flatMap((section) =>
+    section.fields.flatMap((field) => {
+      if (field.type === 'attachment') return []
+      const value = submission.answers[field.id]
+      if (value === undefined) return []
+      const rendered = Array.isArray(value)
+        ? value.join(', ')
+        : String(value)
+      if (!rendered.trim()) return []
+      const label = resolveLocalizedText(
+        field.label,
+        submission.locale,
+        submission.formSnapshot.snapshot.definition.defaultLocale,
+      )
+      return [`${label}: ${rendered.replaceAll(/\s+/gu, ' ').trim()}`]
+    }),
+  )
+  const complete = lines.join('\n')
+  return {
+    body: complete.slice(0, 8_000),
+    truncated: complete.length > 8_000,
+  }
+}
+
+/**
+ * Derives the stable Triage Entry identifier for one Form submission.
+ *
+ * @param submissionId - Canonical Request submission identifier.
+ * @returns A conservative identifier reused by replies and conversion.
+ */
+export function createFormTriageEntryId(submissionId: string): string {
+  return `triage_${requireIdentifier(submissionId, 'Request submission ID')}`
+}
+
+/** Ensures a trusted admission callback changed only configurable Triage fields. */
+function requireSameFormTriageAdmission(
+  original: TriageEntry,
+  configured: TriageEntry,
+): void {
+  if (
+    original.id !== configured.id ||
+    original.workspaceId !== configured.workspaceId ||
+    original.teamId !== configured.teamId ||
+    original.source.kind !== 'form' ||
+    configured.source.kind !== 'form' ||
+    original.source.sourceId !== configured.source.sourceId ||
+    original.source.formId !== configured.source.formId ||
+    original.source.submissionId !== configured.source.submissionId ||
+    original.createdAt !== configured.createdAt ||
+    original.receivedAt !== configured.receivedAt ||
+    original.revision !== configured.revision ||
+    configured.state !== 'pending'
+  ) {
+    throw new RequestIntakeError(
+      500,
+      'InvalidTriageAdmission',
+      'The configured Triage admission changed immutable source identity.',
+    )
+  }
+}
+
 function readOptionalFutureTimestamp(value: unknown, now: Date, label: string) {
   if (value === undefined) return undefined
   const timestamp = requireIsoTimestamp(value, label)
@@ -3464,6 +3967,42 @@ function isConditionalFailure(error: unknown) {
     )
 }
 
+/** Detects a transaction cancellation caused only by retryable admission guards.
+ *
+ * @param error Untrusted DynamoDB transaction failure.
+ * @param itemIndexes Transaction positions owned by the admission snapshot.
+ * @returns Whether at least one expected guard failed and every other item was unaffected.
+ */
+function isOnlyConditionalFailureAtAny(
+  error: unknown,
+  itemIndexes: readonly number[],
+): boolean {
+  const expectedIndexes = new Set(itemIndexes)
+  if (expectedIndexes.size < 1 || [...expectedIndexes].some((itemIndex) =>
+    !Number.isSafeInteger(itemIndex) || itemIndex < 0
+  ) ||
+    typeof error !== 'object' || error === null ||
+    Reflect.get(error, 'name') !== 'TransactionCanceledException') {
+    return false
+  }
+  const cancellationReasons = Reflect.get(error, 'CancellationReasons')
+  if (!Array.isArray(cancellationReasons) ||
+    [...expectedIndexes].some((itemIndex) => itemIndex >= cancellationReasons.length)) {
+    return false
+  }
+  let hasExpectedConditionalFailure = false
+  return cancellationReasons.every((reason, index) => {
+    const code = typeof reason === 'object' && reason !== null
+      ? Reflect.get(reason, 'Code')
+      : undefined
+    if (code === 'ConditionalCheckFailed' && expectedIndexes.has(index)) {
+      hasExpectedConditionalFailure = true
+      return true
+    }
+    return code === 'None'
+  }) && hasExpectedConditionalFailure
+}
+
 function toRequestStoreError(error: unknown) {
   if (error instanceof RequestIntakeError) return error
   return requestStoreUnavailable(error)
@@ -3492,19 +4031,44 @@ async function ensureLocalRequestIntakeTable(
   client: DynamoDBClient,
   tableName: string,
   queueIndexName: string,
+  triageTeamIndexName: string,
+  triageOwnerIndexName: string,
+  triageWakeIndexName: string,
 ) {
   try {
     const response = await client.send(new DescribeTableCommand({ TableName: tableName }))
     const table = response.Table
-    const index = table?.GlobalSecondaryIndexes?.find((candidate) => candidate.IndexName === queueIndexName)
+    const indexes = table?.GlobalSecondaryIndexes ?? []
+    const queueIndex = indexes.find((candidate) => candidate.IndexName === queueIndexName)
+    const triageTeamIndex = indexes.find((candidate) =>
+      candidate.IndexName === triageTeamIndexName
+    )
+    const triageOwnerIndex = indexes.find((candidate) =>
+      candidate.IndexName === triageOwnerIndexName
+    )
+    const triageWakeIndex = indexes.find((candidate) =>
+      candidate.IndexName === triageWakeIndexName
+    )
     if (
       !sameKeyDefinition(table?.KeySchema, [
         { AttributeName: 'scopeKey', KeyType: 'HASH' },
         { AttributeName: 'recordKey', KeyType: 'RANGE' },
       ]) ||
-      !sameKeyDefinition(index?.KeySchema, [
+      !sameKeyDefinition(queueIndex?.KeySchema, [
         { AttributeName: 'queueKey', KeyType: 'HASH' },
         { AttributeName: 'queueRecordKey', KeyType: 'RANGE' },
+      ]) ||
+      !sameKeyDefinition(triageTeamIndex?.KeySchema, [
+        { AttributeName: 'triageTeamKey', KeyType: 'HASH' },
+        { AttributeName: 'triageActivityKey', KeyType: 'RANGE' },
+      ]) ||
+      !sameKeyDefinition(triageOwnerIndex?.KeySchema, [
+        { AttributeName: 'triageOwnerKey', KeyType: 'HASH' },
+        { AttributeName: 'triageActivityKey', KeyType: 'RANGE' },
+      ]) ||
+      !sameKeyDefinition(triageWakeIndex?.KeySchema, [
+        { AttributeName: 'triageWakeShard', KeyType: 'HASH' },
+        { AttributeName: 'triageNextWakeAt', KeyType: 'RANGE' },
       ])
     ) {
       throw new RequestIntakeError(
@@ -3525,19 +4089,50 @@ async function ensureLocalRequestIntakeTable(
       { AttributeName: 'recordKey', AttributeType: 'S' },
       { AttributeName: 'queueKey', AttributeType: 'S' },
       { AttributeName: 'queueRecordKey', AttributeType: 'S' },
+      { AttributeName: 'triageTeamKey', AttributeType: 'S' },
+      { AttributeName: 'triageOwnerKey', AttributeType: 'S' },
+      { AttributeName: 'triageActivityKey', AttributeType: 'S' },
+      { AttributeName: 'triageWakeShard', AttributeType: 'S' },
+      { AttributeName: 'triageNextWakeAt', AttributeType: 'S' },
     ],
     KeySchema: [
       { AttributeName: 'scopeKey', KeyType: 'HASH' },
       { AttributeName: 'recordKey', KeyType: 'RANGE' },
     ],
-    GlobalSecondaryIndexes: [{
-      IndexName: queueIndexName,
-      KeySchema: [
-        { AttributeName: 'queueKey', KeyType: 'HASH' },
-        { AttributeName: 'queueRecordKey', KeyType: 'RANGE' },
-      ],
-      Projection: { ProjectionType: 'ALL' },
-    }],
+    GlobalSecondaryIndexes: [
+      {
+        IndexName: queueIndexName,
+        KeySchema: [
+          { AttributeName: 'queueKey', KeyType: 'HASH' },
+          { AttributeName: 'queueRecordKey', KeyType: 'RANGE' },
+        ],
+        Projection: { ProjectionType: 'ALL' },
+      },
+      {
+        IndexName: triageTeamIndexName,
+        KeySchema: [
+          { AttributeName: 'triageTeamKey', KeyType: 'HASH' },
+          { AttributeName: 'triageActivityKey', KeyType: 'RANGE' },
+        ],
+        Projection: { ProjectionType: 'ALL' },
+      },
+      {
+        IndexName: triageOwnerIndexName,
+        KeySchema: [
+          { AttributeName: 'triageOwnerKey', KeyType: 'HASH' },
+          { AttributeName: 'triageActivityKey', KeyType: 'RANGE' },
+        ],
+        Projection: { ProjectionType: 'ALL' },
+      },
+      {
+        IndexName: triageWakeIndexName,
+        KeySchema: [
+          { AttributeName: 'triageWakeShard', KeyType: 'HASH' },
+          { AttributeName: 'triageNextWakeAt', KeyType: 'RANGE' },
+        ],
+        Projection: { ProjectionType: 'KEYS_ONLY' },
+      },
+    ],
   }))
   try {
     await client.send(new UpdateTimeToLiveCommand({

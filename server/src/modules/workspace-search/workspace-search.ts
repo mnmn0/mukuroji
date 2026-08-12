@@ -6,10 +6,8 @@ import {
   type TableDescription,
 } from '@aws-sdk/client-dynamodb'
 import {
-  DeleteCommand,
   DynamoDBDocumentClient,
   GetCommand,
-  PutCommand,
   QueryCommand,
   TransactWriteCommand,
   type TransactWriteCommandInput,
@@ -17,10 +15,18 @@ import {
 import {
   SAVED_VIEW_SCHEMA_VERSION,
   SEARCH_SCHEMA_VERSION,
+  TASK_VIEW_SCHEMA_VERSION,
+  WORK_ITEM_SCHEDULE_MIN_YEAR,
   type CreateSavedWorkspaceViewInput,
+  type CreateSavedTaskViewInput,
   type DocumentBlock,
   type DocumentDetail,
   type DocumentRelationTarget,
+  type DuplicateSavedTaskViewInput,
+  type SavedTaskView,
+  type SavedTaskViewCapabilities,
+  type SavedTaskViewDefaultSource,
+  type SavedTaskViewsResponse,
   type SavedViewMigrationWarning,
   type SavedViewVisibility,
   type SavedWorkspaceView,
@@ -29,12 +35,29 @@ import {
   type SearchCustomFieldValue,
   type SearchEntityType,
   type SearchViewLayout,
+  type TaskViewDefinition,
+  type TaskViewDueDatePreset,
+  type TaskViewFilters,
+  type TaskViewLayout,
+  type TaskViewMigrationSection,
+  type TaskViewMigrationWarning,
+  type TaskViewScope,
+  type TaskViewSurface,
+  type TaskViewWritableProjectScope,
+  type UpdateSavedTaskViewInput,
+  type WorkflowStatusCategory,
+  type WorkItemPriority,
   type UpdateSavedWorkspaceViewInput,
   type WorkspaceSearchFilters,
   type WorkspaceSearchHighlight,
   type WorkspaceSearchResponse,
   type WorkspaceSearchResult,
 } from '@mukuroji/contracts'
+import {
+  createDynamoDbClient as createConfiguredDynamoDbClient,
+  createWorkspaceSearchWriterDynamoDbDocumentClient,
+  shouldBootstrapLocalDynamoDb as shouldBootstrapConfiguredLocalDynamoDb,
+} from '../../infrastructure/aws/dynamodb-client'
 
 /** Workspace search table の search document prefix です。 */
 export const WORKSPACE_SEARCH_DOCUMENT_PREFIX = 'DOCUMENT#'
@@ -47,6 +70,24 @@ export const WORKSPACE_SAVED_VIEW_PREFERENCE_PREFIX = 'PREFERENCE#'
 
 /** Workspace search table の default view marker prefix です。 */
 export const WORKSPACE_SAVED_VIEW_DEFAULT_PREFIX = 'DEFAULT#'
+
+/** Workspace search table の汎用 task view prefix です。 */
+export const WORKSPACE_TASK_VIEW_PREFIX = 'TASK_VIEW#'
+
+/** Workspace search table の task view preference prefix です。 */
+export const WORKSPACE_TASK_VIEW_PREFERENCE_PREFIX = 'TASK_VIEW_PREFERENCE#'
+
+/** Workspace search table の task view default marker prefix です。 */
+export const WORKSPACE_TASK_VIEW_DEFAULT_PREFIX = 'TASK_VIEW_DEFAULT#'
+
+/** Workspace search table prefix for durable task view mutation receipts. */
+const WORKSPACE_TASK_VIEW_MUTATION_RECEIPT_PREFIX = 'TASK_VIEW_MUTATION_RECEIPT#'
+
+/** Workspace search table prefix for durable task view deletion tombstones. */
+const WORKSPACE_TASK_VIEW_TOMBSTONE_PREFIX = 'TASK_VIEW_TOMBSTONE#'
+
+/** Task view update/delete retries are replayable for 24 hours after commit. */
+const TASK_VIEW_MUTATION_RECEIPT_TTL_SECONDS = 24 * 60 * 60
 
 /** Search API が一 page で返す既定件数です。 */
 export const WORKSPACE_SEARCH_DEFAULT_LIMIT = 30
@@ -69,12 +110,32 @@ export const SAVED_VIEW_DEFAULT_LIMIT = 50
 /** Saved view 一覧が一 page で返せる最大件数です。 */
 export const SAVED_VIEW_MAX_LIMIT = 100
 
+/** Task view 一覧が一 page で返す既定件数です。 */
+export const TASK_VIEW_DEFAULT_LIMIT = 50
+
+/** Task view 一覧が一 page で返せる最大件数です。 */
+export const TASK_VIEW_MAX_LIMIT = 100
+
+/** 一回の read で lazy cleanup する orphan preference の最大数です。 */
+const TASK_VIEW_ORPHAN_CLEANUP_LIMIT = 20
+
+/** Shared task-view preference cleanup reads and deletes at most one bounded page at a time. */
+const TASK_VIEW_PREFERENCE_CLEANUP_PAGE_SIZE = 100
+
+/** Maximum UTF-8 size reserved for one normalized task view definition. */
+const TASK_VIEW_DEFINITION_MAX_BYTES = 300_000
+
+/** Discriminator used by durable task view deletion tombstones. */
+const TASK_VIEW_TOMBSTONE_ENTRY_TYPE = 'task-view-tombstone'
+
 /**
  * Workspace search index に保存する forward-compatible document です。
  */
 export type WorkspaceSearchDocument = {
   /** Search document schema version です。 */
   schemaVersion: typeof SEARCH_SCHEMA_VERSION
+  /** すべての application writer が束縛する canonical projection 内容の digest です。 */
+  projectionDigest: string
   /** DynamoDB partition key である canonical Workspace ID です。 */
   workspaceId: string
   /** DynamoDB sort key です。 */
@@ -238,6 +299,142 @@ export type DeleteSavedWorkspaceViewRequest = {
   access: SavedViewAccessScope
 }
 
+/** Candidate relation references that require current-source authorization before disclosure. */
+export type ResolveTaskViewRelationIdsInput = {
+  /** Persisted relation identifiers being considered for the current response. */
+  relationIds: readonly string[]
+  /** Product surface that evaluates the relation filter. */
+  surface: TaskViewSurface
+  /** Resource scope that qualifies Team-local relation target identifiers. */
+  scope: TaskViewScope
+}
+
+/** Task view の認可と read-time migration に使う current access scope です。 */
+export type TaskViewAccessScope = {
+  /** Current Workspace user ID です。 */
+  viewerUserId: string
+  /** System administrator かどうかです。 */
+  isSystemAdmin: boolean
+  /** Workspace 全体を対象とする task view scope を参照できるかどうかです。 */
+  canAccessWorkspaceScope: boolean
+  /** Workspace 全体を対象とする task view scope を更新できるかどうかです。 */
+  canWriteWorkspaceScope: boolean
+  /** Workspace 全体の shared task view を管理できるかどうかです。 */
+  canManageSharedViews: boolean
+  /** Preference を含む task view mutation が許可されるかどうかです。 */
+  canWrite: boolean
+  /** Current viewer が参照できる Team ID です。 */
+  teamIds: ReadonlySet<string>
+  /** Current viewer が task view scope を更新できる Team ID です。 */
+  writableTeamIds: ReadonlySet<string>
+  /** Current viewer が管理できる Team ID です。 */
+  manageableTeamIds: ReadonlySet<string>
+  /** Current viewer が参照できる Project ID です。 */
+  projectIds: ReadonlySet<string>
+  /** Current viewer が task view scope を更新できる Project ID です。 */
+  writableProjectIds: ReadonlySet<string>
+  /** Current viewer が参照できる `${teamId}\0${projectId}` 形式の Team-qualified Project key です。 */
+  projectScopeKeys: ReadonlySet<string>
+  /** Current viewer が更新できる `${teamId}\0${projectId}` 形式の Team-qualified Project key です。 */
+  writableProjectScopeKeys: ReadonlySet<string>
+  /** 現在存在する custom field ID です。未指定時は削除判定を保留します。 */
+  activeCustomFieldIds?: ReadonlySet<string>
+  /** Current viewer が値を参照できる custom field ID です。未指定時は active field をすべて許可します。 */
+  readableCustomFieldIds?: ReadonlySet<string>
+  /** 現在存在する `${teamId}\0${statusId}` 形式の Team-qualified workflow status key です。 */
+  activeStatusIds?: ReadonlySet<string>
+  /** Current viewer が layout で利用できる built-in field です。未指定時はすべて許可します。 */
+  readableColumnIds?: ReadonlySet<string>
+  /** Active actor identifiers whose filter references may be disclosed to the current viewer. */
+  readableActorIds?: ReadonlySet<string>
+  /** Static relation disclosure allowlist used when no current-source resolver is configured. */
+  readableRelationIds?: ReadonlySet<string>
+  /** Resolves relation references against current targets and current viewer authorization. */
+  resolveReadableRelationIds?: (
+    input: ResolveTaskViewRelationIdsInput,
+  ) => Promise<ReadonlySet<string>>
+}
+
+/** Task view 一覧を surface と scope で取得する input です。 */
+export type ListTaskViewsInput = {
+  /** Task view を保持する Workspace ID です。 */
+  workspaceId: string
+  /** 取得対象 product surface です。省略時は全 surface を対象にします。 */
+  surface?: TaskViewSurface
+  /** 取得対象 resource scope です。省略時は参照可能な全 scope を対象にします。 */
+  scope?: TaskViewScope
+  /** Current viewer access です。 */
+  access: TaskViewAccessScope
+  /** 一 page の最大 view 数です。 */
+  limit?: number
+  /** 前 page が返した opaque cursor です。 */
+  cursor?: string
+}
+
+/** Task view を ID 指定で取得する input です。 */
+export type GetTaskViewRequest = {
+  /** Task view を保持する Workspace ID です。 */
+  workspaceId: string
+  /** 取得対象 view ID です。 */
+  viewId: string
+  /** Current viewer access です。 */
+  access: TaskViewAccessScope
+}
+
+/** Task view を作成する request です。 */
+export type CreateTaskViewRequest = {
+  /** Task view を保持する Workspace ID です。 */
+  workspaceId: string
+  /** Current viewer access です。 */
+  access: TaskViewAccessScope
+  /** Ambiguous retry を同じ create 結果へ束縛する key です。 */
+  idempotencyKey?: string
+  /** API boundary で受け取った create payload です。 */
+  input: CreateSavedTaskViewInput
+}
+
+/** Task view を更新する request です。 */
+export type UpdateTaskViewRequest = {
+  /** Task view を保持する Workspace ID です。 */
+  workspaceId: string
+  /** 更新対象 view ID です。 */
+  viewId: string
+  /** Current viewer access です。 */
+  access: TaskViewAccessScope
+  /** Binds retries for 24 hours; replay rebuilds the authorized response from current view state. */
+  idempotencyKey?: string
+  /** API boundary で受け取った revision-guarded update payload です。 */
+  input: UpdateSavedTaskViewInput
+}
+
+/** Task view を複製する request です。 */
+export type DuplicateTaskViewRequest = {
+  /** Task view を保持する Workspace ID です。 */
+  workspaceId: string
+  /** 複製元 view ID です。 */
+  sourceViewId: string
+  /** Current viewer access です。 */
+  access: TaskViewAccessScope
+  /** Ambiguous retry を同じ duplicate 結果へ束縛する key です。 */
+  idempotencyKey?: string
+  /** 複製先 metadata と preference の override です。 */
+  input: DuplicateSavedTaskViewInput
+}
+
+/** Task view を削除する request です。 */
+export type DeleteTaskViewRequest = {
+  /** Task view を保持する Workspace ID です。 */
+  workspaceId: string
+  /** 削除対象 view ID です。 */
+  viewId: string
+  /** 読み込み時点の revision です。 */
+  expectedRevision: number
+  /** Current viewer access です。 */
+  access: TaskViewAccessScope
+  /** Binds ambiguous retries within 24 hours to the first committed delete result. */
+  idempotencyKey?: string
+}
+
 /**
  * Workspace search と saved view で扱う stable domain error です。
  */
@@ -254,6 +451,9 @@ export class WorkspaceSearchError extends Error {
     this.code = code
   }
 }
+
+/** Marks persisted projection content that disagrees with its server-owned digest. */
+class WorkspaceSearchProjectionDigestMismatchError extends WorkspaceSearchError {}
 
 /**
  * API handler と backfill が利用する Workspace search client contract です。
@@ -279,6 +479,94 @@ export type WorkspaceSearchClient = {
   updateSavedView(input: UpdateSavedWorkspaceViewRequest): Promise<SavedWorkspaceView>
   /** Saved view definition を revision 条件付きで削除します。 */
   deleteSavedView(input: DeleteSavedWorkspaceViewRequest): Promise<{ id: string; revision: number }>
+  /**
+   * Lists task views visible to the current viewer within optional surface and scope filters.
+   *
+   * @param input - Workspace, viewer access, filters, and cursor for the requested page.
+   * @returns A permission-filtered cursor page of sanitized task views.
+   */
+  listTaskViews?(input: ListTaskViewsInput): Promise<SavedTaskViewsResponse>
+  /**
+   * Reads one task view by ID without disclosing inaccessible definitions.
+   *
+   * @param input - Workspace, stable view ID, and current viewer access.
+   * @returns The sanitized task view with resolved current-viewer preference state.
+   */
+  getTaskView?(input: GetTaskViewRequest): Promise<SavedTaskView>
+  /**
+   * Creates a task view definition and the current viewer's initial preference.
+   *
+   * @param input - Authorized create input and optional idempotency key.
+   * @returns The newly persisted task view in its current viewer representation.
+   */
+  createTaskView?(input: CreateTaskViewRequest): Promise<SavedTaskView>
+  /**
+   * Updates a task view definition or the current viewer's preference.
+   *
+   * @param input - Revision-guarded definition and preference changes.
+   * @returns The updated and read-time-sanitized task view.
+   */
+  updateTaskView?(input: UpdateTaskViewRequest): Promise<SavedTaskView>
+  /**
+   * Duplicates one accessible task view into an independent lifecycle.
+   *
+   * @param input - Source view, destination metadata, and optional idempotency key.
+   * @returns The independent duplicated task view.
+   */
+  duplicateTaskView?(input: DuplicateTaskViewRequest): Promise<SavedTaskView>
+  /**
+   * Deletes a task view definition under an optimistic revision guard.
+   *
+   * @param input - Authorized target ID and expected definition revision.
+   * @returns The deleted view identity and acknowledged revision.
+   */
+  deleteTaskView?(input: DeleteTaskViewRequest): Promise<{ id: string; revision: number }>
+}
+
+/** Required application surface for the generic saved task view lifecycle. */
+export type TaskViewClient = {
+  /**
+   * Lists task views visible in an optional surface and scope filter.
+   *
+   * @param input - Permission-aware list request.
+   * @returns Cursor-paginated visible task views.
+   */
+  listTaskViews(input: ListTaskViewsInput): Promise<SavedTaskViewsResponse>
+  /**
+   * Reads one permission-safe task view by its stable ID.
+   *
+   * @param input - Workspace, view identity, and current access.
+   * @returns The sanitized task view.
+   */
+  getTaskView(input: GetTaskViewRequest): Promise<SavedTaskView>
+  /**
+   * Creates one task view and its initial current-viewer preference.
+   *
+   * @param input - Authorized create request.
+   * @returns The created task view.
+   */
+  createTaskView(input: CreateTaskViewRequest): Promise<SavedTaskView>
+  /**
+   * Updates one task view definition or current-viewer preference.
+   *
+   * @param input - Revision-guarded update request.
+   * @returns The updated task view.
+   */
+  updateTaskView(input: UpdateTaskViewRequest): Promise<SavedTaskView>
+  /**
+   * Duplicates one accessible task view into an independent lifecycle.
+   *
+   * @param input - Source identity and destination metadata.
+   * @returns The independent duplicate.
+   */
+  duplicateTaskView(input: DuplicateTaskViewRequest): Promise<SavedTaskView>
+  /**
+   * Deletes one task view under an optimistic revision guard.
+   *
+   * @param input - Authorized revision-bound delete request.
+   * @returns Deleted view identity and acknowledged revision.
+   */
+  deleteTaskView(input: DeleteTaskViewRequest): Promise<{ id: string; revision: number }>
 }
 
 /** DynamoDB に保存する saved view definition row です。 */
@@ -359,6 +647,160 @@ type StoredDefaultView = {
   updatedAt: string
 }
 
+/** DynamoDB に保存する汎用 task view definition row です。 */
+type StoredTaskView = {
+  /** 保存時の task view schema version です。 */
+  schemaVersion: typeof TASK_VIEW_SCHEMA_VERSION
+  /** DynamoDB partition key です。 */
+  workspaceId: string
+  /** DynamoDB sort key です。 */
+  recordKey: string
+  /** Single-table row discriminator です。 */
+  entryType: 'task-view'
+  /** Workspace 内で一意な task view ID です。 */
+  id: string
+  /** View 表示名です。 */
+  name: string
+  /** View の補足説明です。 */
+  description?: string
+  /** View の共有範囲です。 */
+  visibility: SavedViewVisibility
+  /** View owner の user ID です。 */
+  ownerUserId: string
+  /** Create retry key を生値で残さず照合する hash です。 */
+  createIdempotencyKeyHash?: string
+  /** 同じ retry key で異なる payload を拒否する fingerprint です。 */
+  createRequestFingerprint?: string
+  /** Team view の共有先 Team ID です。 */
+  teamId?: string
+  /** 保存した filter と layout definition です。 */
+  definition: TaskViewDefinition
+  /** Optimistic concurrency revision です。 */
+  revision: number
+  /** View 作成日時です。 */
+  createdAt: string
+  /** View 最終更新日時です。 */
+  updatedAt: string
+}
+
+/** Durable deletion marker that prevents an idempotency key from reviving an old view lifecycle. */
+type StoredTaskViewTombstone = {
+  /** Schema version of the deleted task view. */
+  schemaVersion: typeof TASK_VIEW_SCHEMA_VERSION
+  /** DynamoDB partition key. */
+  workspaceId: string
+  /** DynamoDB sort key in the dedicated tombstone namespace. */
+  recordKey: string
+  /** Single-table row discriminator. */
+  entryType: typeof TASK_VIEW_TOMBSTONE_ENTRY_TYPE
+  /** Stable ID of the deleted view. */
+  id: string
+  /** Last acknowledged optimistic concurrency revision. */
+  revision: number
+  /** Create retry hash retained without the caller's raw key. */
+  createIdempotencyKeyHash?: string
+  /** Original create request fingerprint used to detect ambiguous retries. */
+  createRequestFingerprint?: string
+  /** Timestamp at which the view was deleted. */
+  deletedAt: string
+}
+
+/** DynamoDB に保存する viewer 別 task view preference row です。 */
+type StoredTaskViewPreference = {
+  /** 保存時の task view schema version です。 */
+  schemaVersion: typeof TASK_VIEW_SCHEMA_VERSION
+  /** DynamoDB partition key です。 */
+  workspaceId: string
+  /** DynamoDB sort key です。 */
+  recordKey: string
+  /** Single-table row discriminator です。 */
+  entryType: 'task-view-preference'
+  /** Preference 対象 task view ID です。 */
+  viewId: string
+  /** Preference owner の user ID です。 */
+  userId: string
+  /** Favorite preference です。 */
+  favorite: boolean
+  /** Pin preference です。 */
+  pinned: boolean
+  /** Preference 最終更新日時です。 */
+  updatedAt: string
+}
+
+/** Task view default marker の owner 種別です。 */
+type StoredTaskViewDefaultOwner = 'personal' | 'team'
+
+/** DynamoDB に保存する personal または Team task view default marker です。 */
+type StoredTaskViewDefault = {
+  /** 保存時の task view schema version です。 */
+  schemaVersion: typeof TASK_VIEW_SCHEMA_VERSION
+  /** DynamoDB partition key です。 */
+  workspaceId: string
+  /** DynamoDB sort key です。 */
+  recordKey: string
+  /** Single-table row discriminator です。 */
+  entryType: 'task-view-default'
+  /** Personal または Team marker の所有種別です。 */
+  ownerType: StoredTaskViewDefaultOwner
+  /** Personal marker owner の user ID です。 */
+  userId?: string
+  /** Team marker owner の Team ID です。 */
+  teamId?: string
+  /** Marker が束縛される product surface です。 */
+  surface: TaskViewSurface
+  /** Marker が束縛される resource scope です。 */
+  scope: TaskViewScope
+  /** Default に指定した task view ID です。 */
+  viewId: string
+  /** Marker generation used to guard same-timestamp replacement races. */
+  generation?: string
+  /** Default marker 最終更新日時です。 */
+  updatedAt: string
+}
+
+/** Supported mutation operations persisted in a durable task view receipt. */
+type TaskViewMutationOperation = 'update' | 'delete'
+
+/** Twenty-four-hour receipt committed atomically with one task view update or delete. */
+type StoredTaskViewMutationReceipt = {
+  /** Schema version shared with the task view lifecycle. */
+  schemaVersion: typeof TASK_VIEW_SCHEMA_VERSION
+  /** DynamoDB partition key. */
+  workspaceId: string
+  /** DynamoDB sort key derived from the operation-bound idempotency hash. */
+  recordKey: string
+  /** Single-table row discriminator. */
+  entryType: 'task-view-mutation-receipt'
+  /** Mutation whose committed result can be replayed. */
+  operation: TaskViewMutationOperation
+  /** Stable target task view identifier. */
+  viewId: string
+  /** Workspace actor that owns the idempotency key. */
+  actorUserId: string
+  /** Hash of the workspace-, actor-, operation-, target-, and key-bound identity. */
+  idempotencyKeyHash: string
+  /** Canonical normalized request fingerprint. */
+  requestFingerprint: string
+  /** Task view revision acknowledged by the committed mutation. */
+  resultRevision: number
+  /** Timestamp at which the mutation and receipt committed. */
+  committedAt: string
+  /** DynamoDB TTL epoch seconds exactly 24 hours after the commit timestamp. */
+  expiresAt: number
+}
+
+/** 解決済み task view default です。 */
+type ResolvedTaskViewDefault = {
+  /** Effective task view default identifier. */
+  viewId?: string
+  /** Current viewer's personal default identifier. */
+  personalViewId?: string
+  /** Team default identifier for the resolved scope. */
+  teamViewId?: string
+  /** Source that supplied the effective default. */
+  source: 'personal' | 'team' | 'built-in'
+}
+
 /** Search cursor の scope-bound payload です。 */
 type SearchCursor = {
   /** Cursor schema version です。 */
@@ -389,6 +831,22 @@ type SavedViewCursor = {
   recordKey: string
 }
 
+/** Task view list cursor の query-bound payload です。 */
+type TaskViewCursor = {
+  /** Cursor schema version です。 */
+  version: 1
+  /** Cursor discriminator です。 */
+  kind: 'task-views'
+  /** Cursor を発行した Workspace ID です。 */
+  workspaceId: string
+  /** Cursor を発行した viewer user ID です。 */
+  viewerUserId: string
+  /** Surface と scope に束縛する canonical query hash です。 */
+  queryFingerprint: string
+  /** 最後に評価した DynamoDB record key です。 */
+  recordKey: string
+}
+
 const builtInLayoutFields = new Set([
   'id',
   'entityType',
@@ -411,6 +869,20 @@ const builtInLayoutFields = new Set([
   'relevance',
 ])
 
+const taskViewBuiltInLayoutFields = new Set([
+  ...builtInLayoutFields,
+  'customFields',
+  'identifier',
+  'statusId',
+  'startDate',
+  'estimate',
+  'progress',
+  'parent',
+  'labels',
+  'relations',
+  'watchers',
+])
+
 const searchEntityTypes = new Set<SearchEntityType>([
   'work-item',
   'project',
@@ -421,6 +893,23 @@ const searchEntityTypes = new Set<SearchEntityType>([
 ])
 
 const savedViewVisibilities = new Set<SavedViewVisibility>(['personal', 'team', 'shared'])
+const taskViewWorkflowCategories = new Set([
+  'backlog',
+  'unstarted',
+  'started',
+  'completed',
+  'canceled',
+])
+const taskViewPriorities = new Set(['high', 'medium', 'low'])
+const taskViewDueDatePresets = new Set(['overdue', 'today', 'upcoming', 'no-date'])
+const taskViewDisplayOptionKeys = [
+  'showCompleted',
+  'showArchived',
+  'showSubItems',
+  'showEmptyGroups',
+  'wrapText',
+  'showAssigneeAvatars',
+] as const
 
 /**
  * Entity type と canonical ID から search document record key を作成します。
@@ -438,10 +927,39 @@ export function createSavedWorkspaceViewRecordKey(viewId: string) {
 }
 
 /**
- * Search document input を DynamoDB 保存形式へ正規化します。
+ * Creates the canonical task view definition record key from a view ID.
+ *
+ * @param viewId - Workspace-unique task view identifier.
+ * @returns Server-owned DynamoDB record key for the task view definition.
+ */
+export function createTaskViewRecordKey(viewId: string) {
+  return `${WORKSPACE_TASK_VIEW_PREFIX}${requireIdentifier(viewId, 'Task view ID')}`
+}
+
+/**
+ * Creates the canonical deletion tombstone record key from a task view ID.
+ *
+ * @param viewId - Workspace-unique task view identifier.
+ * @returns Server-owned DynamoDB record key outside the live task view namespace.
+ */
+function createTaskViewTombstoneRecordKey(viewId: string) {
+  return `${WORKSPACE_TASK_VIEW_TOMBSTONE_PREFIX}${requireIdentifier(
+    viewId,
+    'Task view ID',
+  )}`
+}
+
+/**
+ * Normalizes one search document into its DynamoDB persistence shape.
+ *
+ * @param input - Untrusted projection fields supplied by an application writer.
+ * @returns A validated document with canonical keys and a server-owned digest.
  */
 export function createWorkspaceSearchDocument(
-  input: Omit<WorkspaceSearchDocument, 'schemaVersion' | 'entryType' | 'recordKey'> & {
+  input: Omit<
+    WorkspaceSearchDocument,
+    'schemaVersion' | 'entryType' | 'projectionDigest' | 'recordKey'
+  > & {
     /** Backfill が明示する場合の record key です。 */
     recordKey?: string
   },
@@ -457,7 +975,7 @@ export function createWorkspaceSearchDocument(
       'Search document record key does not match its entity identity.',
     )
   }
-  const document: WorkspaceSearchDocument = {
+  const document: Omit<WorkspaceSearchDocument, 'projectionDigest'> = {
     schemaVersion: SEARCH_SCHEMA_VERSION,
     workspaceId,
     recordKey: expectedRecordKey,
@@ -498,7 +1016,11 @@ export function createWorkspaceSearchDocument(
       input.sourceRevision
   }
   const dueDate = optionalText(input.dueDate, 'Search document dueDate', 128)
-  if (dueDate) document.dueDate = canonicalizeSearchDate(dueDate)
+  if (dueDate) {
+    document.dueDate = entityType === 'work-item'
+      ? requireCanonicalWorkItemSearchDate(dueDate)
+      : canonicalizeSearchDate(dueDate)
+  }
 
   if (input.customFields) {
     document.customFields = normalizeCustomFieldValues(input.customFields)
@@ -507,7 +1029,30 @@ export function createWorkspaceSearchDocument(
     document.relationIds = normalizeStringList(input.relationIds, 'Search relation IDs', 100)
   }
 
-  return document
+  return {
+    ...document,
+    projectionDigest: createWorkspaceSearchProjectionDigest(document),
+  }
+}
+
+/**
+ * Creates the server-owned digest used by migration and live-writer CAS checks.
+ *
+ * Increment `digestVersion` and update pinned digest fixtures whenever the
+ * canonicalization protocol changes.
+ *
+ * @param document - Fully normalized projection without its digest field.
+ * @returns Lowercase SHA-256 digest of the versioned canonical projection.
+ */
+export function createWorkspaceSearchProjectionDigest(
+  document: Readonly<Omit<WorkspaceSearchDocument, 'projectionDigest'>>,
+): string {
+  return createHash('sha256')
+    .update(canonicalWorkspaceSearchProjectionValue({
+      digestVersion: 1,
+      document,
+    }))
+    .digest('hex')
 }
 
 /** Team source を runtime/backfill 共通の search document へ変換します。 */
@@ -851,9 +1396,8 @@ export class DynamoDbWorkspaceSearchClient {
   ) {
     this.tableName = requireText(tableName, 'Workspace search table name')
     this.dynamoDbClient = dynamoDbClient
-    this.documentClient = documentClient ?? DynamoDBDocumentClient.from(dynamoDbClient, {
-      marshallOptions: { removeUndefinedValues: true },
-    })
+    this.documentClient = documentClient ??
+      createWorkspaceSearchWriterDynamoDbDocumentClient(dynamoDbClient)
     this.bootstrapLocalTable = bootstrapLocalTable
   }
 
@@ -863,9 +1407,13 @@ export class DynamoDbWorkspaceSearchClient {
   ) {
     await this.ensureLocalTable()
     const document = createWorkspaceSearchDocument(input)
-    await this.documentClient.send(new PutCommand({
-      TableName: this.tableName,
-      Item: document,
+    await this.documentClient.send(new TransactWriteCommand({
+      TransactItems: [{
+        Put: {
+          TableName: this.tableName,
+          Item: document,
+        },
+      }],
     }))
     return document
   }
@@ -873,12 +1421,19 @@ export class DynamoDbWorkspaceSearchClient {
   /** Search document を entity key で削除します。 */
   async deleteDocument(workspaceId: string, entityType: SearchEntityType, entityId: string) {
     await this.ensureLocalTable()
-    await this.documentClient.send(new DeleteCommand({
-      TableName: this.tableName,
-      Key: {
-        workspaceId: requireText(workspaceId, 'Search Workspace ID'),
-        recordKey: createWorkspaceSearchDocumentRecordKey(entityType, entityId),
-      },
+    await this.documentClient.send(new TransactWriteCommand({
+      TransactItems: [{
+        Delete: {
+          TableName: this.tableName,
+          Key: {
+            workspaceId: requireText(workspaceId, 'Search Workspace ID'),
+            recordKey: createWorkspaceSearchDocumentRecordKey(
+              entityType,
+              entityId,
+            ),
+          },
+        },
+      }],
     }))
   }
 
@@ -1165,7 +1720,12 @@ export class DynamoDbWorkspaceSearchClient {
     try {
       await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactItems }))
     } catch (error) {
-      if (!createIdempotencyKeyHash || !isTransactionConditionalCheckFailed(error)) throw error
+      if (
+        !createIdempotencyKeyHash ||
+        !idempotencyKey ||
+        !createRequestFingerprint ||
+        !isTransactionConditionalCheckFailed(error)
+      ) throw error
       const replay = await this.getRequiredSavedView(workspaceId, id)
       if (
         replay.ownerUserId !== ownerUserId ||
@@ -1390,6 +1950,883 @@ export class DynamoDbWorkspaceSearchClient {
     return { id: viewId, revision: expectedRevision }
   }
 
+  /**
+   * Lists task views visible to the current viewer within optional surface and scope filters.
+   *
+   * @param input - Workspace, viewer access, filters, and cursor for the requested page.
+   * @returns A permission-filtered cursor page of sanitized task views.
+   */
+  async listTaskViews(input: ListTaskViewsInput): Promise<SavedTaskViewsResponse> {
+    await this.ensureLocalTable()
+    const workspaceId = requireText(input.workspaceId, 'Task view Workspace ID')
+    const viewerUserId = requireText(input.access.viewerUserId, 'Task view viewer ID')
+    const surface = input.surface === undefined
+      ? undefined
+      : requireTaskViewSurface(input.surface)
+    const scope = input.scope === undefined ? undefined : normalizeTaskViewScope(input.scope)
+    if (surface && scope) validateTaskViewSurfaceScope(surface, scope)
+    if (scope && !canAccessTaskViewScope(scope, input.access)) {
+      throw new WorkspaceSearchError(403, 'TaskViewAccessDenied', 'Task view scope access is denied.')
+    }
+    const limit = normalizeLimit(input.limit, TASK_VIEW_DEFAULT_LIMIT, TASK_VIEW_MAX_LIMIT)
+    const queryFingerprint = createTaskViewListFingerprint(surface, scope)
+    const cursor = decodeTaskViewCursor(
+      input.cursor,
+      workspaceId,
+      viewerUserId,
+      queryFingerprint,
+    )
+    const views: StoredTaskView[] = []
+    let exclusiveStartKey = cursor
+      ? { workspaceId, recordKey: cursor.recordKey }
+      : undefined
+    let nextRecordKey: string | undefined
+
+    do {
+      const response = await this.documentClient.send(new QueryCommand({
+        TableName: this.tableName,
+        KeyConditionExpression: 'workspaceId = :workspaceId AND begins_with(recordKey, :prefix)',
+        ExpressionAttributeValues: {
+          ':workspaceId': workspaceId,
+          ':prefix': WORKSPACE_TASK_VIEW_PREFIX,
+        },
+        ConsistentRead: true,
+        ExclusiveStartKey: exclusiveStartKey,
+        ScanIndexForward: true,
+        Limit: limit,
+      }))
+      const items = response.Items ?? []
+      let lastProcessedRecordKey: string | undefined
+      for (const [itemIndex, item] of items.entries()) {
+        const view = readStoredTaskView(item)
+        lastProcessedRecordKey = view.recordKey
+        if (
+          matchesTaskViewListFilter(view, surface, scope) &&
+          canReadTaskView(view, input.access)
+        ) {
+          views.push(view)
+          if (views.length >= limit) {
+            nextRecordKey = itemIndex < items.length - 1 || response.LastEvaluatedKey
+              ? lastProcessedRecordKey
+              : undefined
+            break
+          }
+        }
+      }
+      if (views.length < limit) {
+        nextRecordKey = typeof response.LastEvaluatedKey?.recordKey === 'string'
+          ? response.LastEvaluatedKey.recordKey
+          : undefined
+      }
+      exclusiveStartKey = typeof response.LastEvaluatedKey?.recordKey === 'string'
+        ? { workspaceId, recordKey: response.LastEvaluatedKey.recordKey }
+        : undefined
+    } while (views.length < limit && nextRecordKey)
+
+    const retainedPreferences = (await mapWithConcurrency(
+      views,
+      TASK_VIEW_ORPHAN_CLEANUP_LIMIT,
+      (view) => this.getTaskViewPreference(workspaceId, viewerUserId, view.id),
+    )).filter((preference) => preference !== undefined)
+    const preferenceByViewId = new Map(
+      retainedPreferences.map((preference) => [preference.viewId, preference]),
+    )
+    const defaultByContext = new Map<string, Promise<ResolvedTaskViewDefault>>()
+    const responseViews = await mapWithConcurrency(views, 1, async (view) => {
+      const contextKey = createTaskViewContextKey(view.definition.surface, view.definition.scope)
+      let resolvedDefault = defaultByContext.get(contextKey)
+      if (!resolvedDefault) {
+        resolvedDefault = this.resolveTaskViewDefault(
+          workspaceId,
+          view.definition.surface,
+          view.definition.scope,
+          input.access,
+        )
+        defaultByContext.set(contextKey, resolvedDefault)
+      }
+      return toSavedTaskView(
+        view,
+        preferenceByViewId.get(view.id),
+        await resolvedDefault,
+        input.access,
+      )
+    })
+
+    return {
+      capabilities: createTaskViewListCapabilities(surface, scope, input.access),
+      views: responseViews,
+      ...(nextRecordKey
+        ? {
+            nextCursor: encodeCursor({
+              version: 1,
+              kind: 'task-views',
+              workspaceId,
+              viewerUserId,
+              queryFingerprint,
+              recordKey: nextRecordKey,
+            } satisfies TaskViewCursor),
+          }
+        : {}),
+    }
+  }
+
+  /**
+   * Reads one task view by ID without disclosing inaccessible definitions.
+   *
+   * @param request - Workspace, stable view ID, and current viewer access.
+   * @returns The sanitized task view with resolved current-viewer preference state.
+   */
+  async getTaskView(request: GetTaskViewRequest): Promise<SavedTaskView> {
+    await this.ensureLocalTable()
+    const workspaceId = requireText(request.workspaceId, 'Task view Workspace ID')
+    const viewId = requireIdentifier(request.viewId, 'Task view ID')
+    const viewerUserId = requireText(request.access.viewerUserId, 'Task view viewer ID')
+    const stored = await this.getTaskViewIfPresent(workspaceId, viewId)
+    if (!stored) {
+      await this.cleanupMissingTaskViewState(workspaceId, viewerUserId, viewId)
+      throw createTaskViewNotFound()
+    }
+    if (!canReadTaskView(stored, request.access)) {
+      throw createTaskViewNotFound()
+    }
+    const [preference, resolvedDefault] = await Promise.all([
+      this.getTaskViewPreference(workspaceId, viewerUserId, viewId),
+      this.resolveTaskViewDefault(
+        workspaceId,
+        stored.definition.surface,
+        stored.definition.scope,
+        request.access,
+      ),
+    ])
+    return toSavedTaskView(stored, preference, resolvedDefault, request.access)
+  }
+
+  /**
+   * Creates a task view definition and the current viewer's initial preference.
+   *
+   * @param request - Authorized create input and optional idempotency key.
+   * @returns The newly persisted task view in its current viewer representation.
+   */
+  async createTaskView(request: CreateTaskViewRequest): Promise<SavedTaskView> {
+    return this.createTaskViewWithFingerprint(request)
+  }
+
+  /**
+   * Creates a task view while allowing another operation to bind retries to its stable request.
+   *
+   * @param request - Authorized create input and optional idempotency key.
+   * @param requestFingerprintInput - Stable operation input used instead of the derived view body.
+   * @returns The newly persisted or idempotently replayed task view.
+   */
+  private async createTaskViewWithFingerprint(
+    request: CreateTaskViewRequest,
+    requestFingerprintInput?: unknown,
+  ): Promise<SavedTaskView> {
+    await this.ensureLocalTable()
+    requireTaskViewWriteAccess(request.access)
+    const workspaceId = requireText(request.workspaceId, 'Task view Workspace ID')
+    const ownerUserId = requireText(request.access.viewerUserId, 'Task view owner ID')
+    const normalized = normalizeCreateTaskViewInput(request.input)
+    requireCanCreateTaskView(
+      normalized.visibility,
+      normalized.teamId,
+      normalized.definition,
+      request.access,
+    )
+    requireCanSetTaskViewDefault(
+      normalized.defaultSource,
+      normalized.visibility,
+      normalized.teamId,
+      normalized.definition,
+      request.access,
+    )
+    const idempotencyKey = request.idempotencyKey === undefined
+      ? undefined
+      : requireText(request.idempotencyKey, 'Task view idempotency key', 256)
+    const createIdempotencyKeyHash = idempotencyKey
+      ? createTaskViewIdempotencyHash(workspaceId, ownerUserId, idempotencyKey)
+      : undefined
+    const createRequestFingerprint = createIdempotencyKeyHash
+      ? createTaskViewRequestFingerprint(requestFingerprintInput ?? normalized)
+      : undefined
+    const id = createIdempotencyKeyHash ?? randomUUID()
+    const now = new Date().toISOString()
+    const stored: StoredTaskView = {
+      schemaVersion: TASK_VIEW_SCHEMA_VERSION,
+      workspaceId,
+      recordKey: createTaskViewRecordKey(id),
+      entryType: 'task-view',
+      id,
+      name: normalized.name,
+      ...(normalized.description ? { description: normalized.description } : {}),
+      visibility: normalized.visibility,
+      ownerUserId,
+      ...(createIdempotencyKeyHash ? { createIdempotencyKeyHash } : {}),
+      ...(createRequestFingerprint ? { createRequestFingerprint } : {}),
+      ...(normalized.teamId ? { teamId: normalized.teamId } : {}),
+      definition: normalized.definition,
+      revision: 1,
+      createdAt: now,
+      updatedAt: now,
+    }
+    const preference = createStoredTaskViewPreference(
+      workspaceId,
+      ownerUserId,
+      id,
+      normalized.favorite ?? false,
+      normalized.pinned ?? false,
+      now,
+    )
+    const transactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [
+      {
+        Put: {
+          TableName: this.tableName,
+          Item: stored,
+          ConditionExpression: 'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
+        },
+      },
+      {
+        ConditionCheck: {
+          TableName: this.tableName,
+          Key: {
+            workspaceId,
+            recordKey: createTaskViewTombstoneRecordKey(id),
+          },
+          ConditionExpression: 'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
+        },
+      },
+      { Put: { TableName: this.tableName, Item: preference } },
+    ]
+    if (normalized.defaultSource) {
+      transactItems.push({
+        Put: {
+          TableName: this.tableName,
+          Item: createStoredTaskViewDefault(
+            workspaceId,
+            normalized.defaultSource,
+            ownerUserId,
+            normalized.teamId,
+            normalized.definition.surface,
+            normalized.definition.scope,
+            id,
+            now,
+          ),
+        },
+      })
+    }
+    try {
+      await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactItems }))
+    } catch (error) {
+      if (
+        !createIdempotencyKeyHash ||
+        !idempotencyKey ||
+        !createRequestFingerprint ||
+        !isTransactionConditionalCheckFailed(error)
+      ) throw error
+      const replay = await this.getTaskViewIdempotencyReplay(
+        workspaceId,
+        ownerUserId,
+        idempotencyKey,
+        createRequestFingerprint,
+        request.access,
+      )
+      if (replay) return replay
+      throw error
+    }
+    const resolvedDefault = await this.resolveTaskViewDefault(
+      workspaceId,
+      stored.definition.surface,
+      stored.definition.scope,
+      request.access,
+    )
+    return toSavedTaskView(stored, preference, resolvedDefault, request.access)
+  }
+
+  /**
+   * Updates a task view definition or the current viewer's preference.
+   *
+   * @param request - Revision-guarded definition and preference changes.
+   * @returns The updated and read-time-sanitized task view.
+   */
+  async updateTaskView(request: UpdateTaskViewRequest): Promise<SavedTaskView> {
+    await this.ensureLocalTable()
+    requireTaskViewWriteAccess(request.access)
+    const workspaceId = requireText(request.workspaceId, 'Task view Workspace ID')
+    const viewId = requireIdentifier(request.viewId, 'Task view ID')
+    const actorUserId = requireText(request.access.viewerUserId, 'Task view actor ID')
+    const input = normalizeUpdateTaskViewInput(request.input)
+    const idempotencyKey = request.idempotencyKey === undefined
+      ? undefined
+      : requireText(request.idempotencyKey, 'Task view idempotency key', 256)
+    const idempotencyKeyHash = idempotencyKey
+      ? createTaskViewMutationIdempotencyHash(
+          workspaceId,
+          actorUserId,
+          'update',
+          viewId,
+          idempotencyKey,
+        )
+      : undefined
+    const requestFingerprint = idempotencyKeyHash
+      ? createTaskViewRequestFingerprint({ operation: 'update-task-view', viewId, input })
+      : undefined
+    if (idempotencyKeyHash && requestFingerprint) {
+      const replay = await this.getTaskViewMutationReplayReceipt(
+        workspaceId,
+        'update',
+        viewId,
+        actorUserId,
+        idempotencyKeyHash,
+        requestFingerprint,
+      )
+      if (replay) return this.getTaskView({ workspaceId, viewId, access: request.access })
+    }
+    const current = await this.getRequiredTaskView(workspaceId, viewId)
+    if (!canReadTaskView(current, request.access)) throw createTaskViewNotFound()
+    requireTaskViewScopeWriteAccess(current.definition.scope, request.access)
+    if (current.revision !== input.expectedRevision) throw createTaskViewRevisionConflict()
+    const hasDefinitionChange = hasTaskViewDefinitionChange(input)
+    const now = new Date().toISOString()
+    const transactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = []
+    let stored = current
+    const visibility = input.visibility ?? current.visibility
+    const teamId = input.teamId === null ? undefined : input.teamId ?? current.teamId
+    const definition = input.definition ?? current.definition
+    const defaultContextChanged =
+      visibility !== current.visibility ||
+      teamId !== current.teamId ||
+      definition.surface !== current.definition.surface ||
+      !taskViewScopesEqual(definition.scope, current.definition.scope)
+    const [existingPreference, previousPersonalDefault, previousTeamDefault] = await Promise.all([
+      this.getTaskViewPreference(workspaceId, actorUserId, viewId),
+      defaultContextChanged
+        ? this.getTaskViewDefault(
+            workspaceId,
+            'personal',
+            actorUserId,
+            undefined,
+            current.definition.surface,
+            current.definition.scope,
+          )
+        : Promise.resolve(undefined),
+      defaultContextChanged && current.teamId
+        ? this.getTaskViewDefault(
+            workspaceId,
+            'team',
+            actorUserId,
+            current.teamId,
+            current.definition.surface,
+            current.definition.scope,
+          )
+        : Promise.resolve(undefined),
+    ])
+    const preference = createStoredTaskViewPreference(
+      workspaceId,
+      actorUserId,
+      viewId,
+      input.favorite ?? existingPreference?.favorite ?? false,
+      input.pinned ?? existingPreference?.pinned ?? false,
+      now,
+    )
+
+    if (hasDefinitionChange) {
+      requireCanEditTaskView(current, request.access)
+      requireCanCreateTaskView(visibility, teamId, definition, request.access)
+      const names: Record<string, string> = {
+        '#entryType': 'entryType',
+        '#revision': 'revision',
+        '#updatedAt': 'updatedAt',
+      }
+      const values: Record<string, unknown> = {
+        ':entryType': 'task-view',
+        ':expectedRevision': current.revision,
+        ':nextRevision': current.revision + 1,
+        ':updatedAt': now,
+      }
+      const sets = ['#revision = :nextRevision', '#updatedAt = :updatedAt']
+      const removes: string[] = []
+      addTaskViewUpdateExpression(input, names, values, sets, removes)
+      transactItems.push({
+        Update: {
+          TableName: this.tableName,
+          Key: { workspaceId, recordKey: current.recordKey },
+          UpdateExpression: [
+            `SET ${sets.join(', ')}`,
+            removes.length ? `REMOVE ${removes.join(', ')}` : undefined,
+          ].filter(Boolean).join(' '),
+          ConditionExpression: '#revision = :expectedRevision AND #entryType = :entryType',
+          ExpressionAttributeNames: names,
+          ExpressionAttributeValues: values,
+        },
+      })
+      stored = {
+        ...current,
+        ...(input.name === undefined ? {} : { name: input.name }),
+        ...(input.description === undefined
+          ? {}
+          : input.description === null
+            ? { description: undefined }
+            : { description: input.description }),
+        ...(input.visibility === undefined ? {} : { visibility: input.visibility }),
+        ...(input.teamId === undefined
+          ? {}
+          : input.teamId === null
+            ? { teamId: undefined }
+            : { teamId: input.teamId }),
+        ...(input.definition === undefined ? {} : { definition: input.definition }),
+        revision: current.revision + 1,
+        updatedAt: now,
+      }
+    } else {
+      transactItems.push({
+        ConditionCheck: {
+          TableName: this.tableName,
+          Key: { workspaceId, recordKey: current.recordKey },
+          ConditionExpression: '#revision = :expectedRevision AND #entryType = :entryType',
+          ExpressionAttributeNames: { '#revision': 'revision', '#entryType': 'entryType' },
+          ExpressionAttributeValues: {
+            ':expectedRevision': current.revision,
+            ':entryType': 'task-view',
+          },
+        },
+      })
+    }
+
+    transactItems.push(createTaskViewPreferenceUpdateTransactionItem(
+      this.tableName,
+      preference,
+      input.favorite,
+      input.pinned,
+    ))
+    const nextDefaultRecordKey = input.defaultSource === 'personal' ||
+        input.defaultSource === 'team'
+      ? createTaskViewDefaultRecordKey(
+          input.defaultSource,
+          actorUserId,
+          teamId,
+          definition.surface,
+          definition.scope,
+        )
+      : undefined
+    const previousDefaultRecordKeysToDelete = new Set<string>()
+    for (const previousDefault of [previousPersonalDefault, previousTeamDefault]) {
+      if (
+        previousDefault?.viewId === viewId &&
+        previousDefault.recordKey !== nextDefaultRecordKey
+      ) {
+        transactItems.push(createTaskViewDefaultGuardTransactionItem(
+          this.tableName,
+          workspaceId,
+          previousDefault.ownerType,
+          actorUserId,
+          previousDefault.teamId,
+          previousDefault.surface,
+          previousDefault.scope,
+          viewId,
+          previousDefault,
+        ))
+        previousDefaultRecordKeysToDelete.add(previousDefault.recordKey)
+      }
+    }
+    if (input.defaultSource === 'personal' || input.defaultSource === 'team') {
+      requireCanSetTaskViewDefault(
+        input.defaultSource,
+        visibility,
+        teamId,
+        definition,
+        request.access,
+      )
+      transactItems.push({
+        Put: {
+          TableName: this.tableName,
+          Item: createStoredTaskViewDefault(
+            workspaceId,
+            input.defaultSource,
+            request.access.viewerUserId,
+            teamId,
+            definition.surface,
+            definition.scope,
+            viewId,
+            now,
+          ),
+        },
+      })
+    } else if (input.defaultSource === null || input.clearDefaultSource !== undefined) {
+      const [personalDefault, teamDefault] = await Promise.all([
+        this.getTaskViewDefault(
+          workspaceId,
+          'personal',
+          request.access.viewerUserId,
+          undefined,
+          definition.surface,
+          definition.scope,
+        ),
+        teamId
+          ? this.getTaskViewDefault(
+              workspaceId,
+              'team',
+              request.access.viewerUserId,
+              teamId,
+              definition.surface,
+              definition.scope,
+            )
+          : Promise.resolve(undefined),
+      ])
+      const sourceToClear = input.clearDefaultSource ?? (
+        personalDefault?.viewId === viewId ? 'personal' : 'team'
+      )
+      if (
+        sourceToClear === 'team' &&
+        (!teamId ||
+          (!request.access.isSystemAdmin && !request.access.manageableTeamIds.has(teamId)))
+      ) {
+        throw new WorkspaceSearchError(
+          403,
+          'TaskViewAccessDenied',
+          'Team task view default management is denied.',
+        )
+      }
+      if (
+        sourceToClear === 'personal' &&
+        personalDefault?.viewId === viewId &&
+        !previousDefaultRecordKeysToDelete.has(personalDefault.recordKey)
+      ) {
+        transactItems.push(createTaskViewDefaultGuardTransactionItem(
+          this.tableName,
+          workspaceId,
+          'personal',
+          request.access.viewerUserId,
+          undefined,
+          definition.surface,
+          definition.scope,
+          viewId,
+          personalDefault,
+        ))
+      } else if (
+        sourceToClear === 'team' &&
+        teamId &&
+        teamDefault?.viewId === viewId &&
+        !previousDefaultRecordKeysToDelete.has(teamDefault.recordKey) &&
+        (request.access.isSystemAdmin || request.access.manageableTeamIds.has(teamId))
+      ) {
+        transactItems.push(createTaskViewDefaultGuardTransactionItem(
+          this.tableName,
+          workspaceId,
+          'team',
+          request.access.viewerUserId,
+          teamId,
+          definition.surface,
+          definition.scope,
+          viewId,
+          teamDefault,
+        ))
+      }
+    }
+
+    const mutationReceipt = idempotencyKeyHash && requestFingerprint
+      ? createStoredTaskViewMutationReceipt(
+          workspaceId,
+          'update',
+          viewId,
+          actorUserId,
+          idempotencyKeyHash,
+          requestFingerprint,
+          stored.revision,
+          now,
+        )
+      : undefined
+    if (mutationReceipt) {
+      transactItems.push(createTaskViewMutationReceiptTransactionItem(
+        this.tableName,
+        mutationReceipt,
+      ))
+    }
+
+    try {
+      await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactItems }))
+    } catch (error) {
+      if (isTransactionConditionalCheckFailed(error)) {
+        if (idempotencyKeyHash && requestFingerprint) {
+          const replay = await this.getTaskViewMutationReplayReceipt(
+            workspaceId,
+            'update',
+            viewId,
+            actorUserId,
+            idempotencyKeyHash,
+            requestFingerprint,
+          )
+          if (replay) return this.getTaskView({ workspaceId, viewId, access: request.access })
+        }
+        throw createTaskViewRevisionConflict()
+      }
+      throw error
+    }
+    const resolvedDefault = await this.resolveTaskViewDefault(
+      workspaceId,
+      stored.definition.surface,
+      stored.definition.scope,
+      request.access,
+    )
+    return toSavedTaskView(stored, preference, resolvedDefault, request.access)
+  }
+
+  /**
+   * Duplicates one accessible task view into an independent lifecycle.
+   *
+   * @param request - Source view, destination metadata, and optional idempotency key.
+   * @returns The independent duplicated task view.
+   */
+  async duplicateTaskView(request: DuplicateTaskViewRequest): Promise<SavedTaskView> {
+    await this.ensureLocalTable()
+    requireTaskViewWriteAccess(request.access)
+    const workspaceId = requireText(request.workspaceId, 'Task view Workspace ID')
+    const sourceViewId = requireIdentifier(request.sourceViewId, 'Task view source ID')
+    const input = normalizeDuplicateTaskViewInput(request.input)
+    const ownerUserId = requireText(request.access.viewerUserId, 'Task view owner ID')
+    const duplicateFingerprintInput = {
+      operation: 'duplicate-task-view',
+      sourceViewId,
+      input,
+    }
+    const idempotencyKey = request.idempotencyKey === undefined
+      ? undefined
+      : createHash('sha256')
+          .update(`duplicate\0${sourceViewId}\0${requireText(
+            request.idempotencyKey,
+            'Task view idempotency key',
+            256,
+          )}`)
+          .digest('base64url')
+    if (idempotencyKey) {
+      const replay = await this.getTaskViewIdempotencyReplay(
+        workspaceId,
+        ownerUserId,
+        idempotencyKey,
+        createTaskViewRequestFingerprint(duplicateFingerprintInput),
+        request.access,
+      )
+      if (replay) return replay
+    }
+    const source = await this.getTaskView({
+      workspaceId,
+      viewId: sourceViewId,
+      access: request.access,
+    })
+    requireTaskViewScopeWriteAccess(source.definition.scope, request.access)
+    const visibility = input.visibility ?? source.visibility
+    const teamId = visibility === 'team'
+      ? input.teamId === null ? undefined : input.teamId ?? source.teamId
+      : input.teamId === undefined || input.teamId === null ? undefined : input.teamId
+    const description = input.description === undefined
+      ? source.description
+      : input.description ?? undefined
+    return this.createTaskViewWithFingerprint({
+      workspaceId,
+      access: request.access,
+      ...(idempotencyKey ? { idempotencyKey } : {}),
+      input: {
+        name: input.name ?? createTaskViewCopyName(source.name),
+        ...(description ? { description } : {}),
+        visibility,
+        ...(teamId ? { teamId } : {}),
+        definition: source.definition,
+        ...(input.favorite === undefined ? {} : { favorite: input.favorite }),
+        ...(input.pinned === undefined ? {} : { pinned: input.pinned }),
+        ...(input.defaultSource === undefined ? {} : { defaultSource: input.defaultSource }),
+      },
+    }, duplicateFingerprintInput)
+  }
+
+  /**
+   * Deletes a task view definition under an optimistic revision guard.
+   *
+   * @param request - Authorized target ID and expected definition revision.
+   * @returns The deleted view identity and acknowledged revision.
+   */
+  async deleteTaskView(request: DeleteTaskViewRequest) {
+    await this.ensureLocalTable()
+    requireTaskViewWriteAccess(request.access)
+    const workspaceId = requireText(request.workspaceId, 'Task view Workspace ID')
+    const viewId = requireIdentifier(request.viewId, 'Task view ID')
+    const actorUserId = requireText(request.access.viewerUserId, 'Task view actor ID')
+    const expectedRevision = requirePositiveInteger(request.expectedRevision, 'Task view revision')
+    const idempotencyKey = request.idempotencyKey === undefined
+      ? undefined
+      : requireText(request.idempotencyKey, 'Task view idempotency key', 256)
+    const idempotencyKeyHash = idempotencyKey
+      ? createTaskViewMutationIdempotencyHash(
+          workspaceId,
+          actorUserId,
+          'delete',
+          viewId,
+          idempotencyKey,
+        )
+      : undefined
+    const requestFingerprint = idempotencyKeyHash
+      ? createTaskViewRequestFingerprint({
+          operation: 'delete-task-view',
+          viewId,
+          expectedRevision,
+        })
+      : undefined
+    if (idempotencyKeyHash && requestFingerprint) {
+      const replay = await this.getTaskViewMutationReplayReceipt(
+        workspaceId,
+        'delete',
+        viewId,
+        actorUserId,
+        idempotencyKeyHash,
+        requestFingerprint,
+      )
+      if (replay) return { id: replay.viewId, revision: replay.resultRevision }
+    }
+    const current = await this.getRequiredTaskView(workspaceId, viewId)
+    if (!canReadTaskView(current, request.access)) throw createTaskViewNotFound()
+    requireCanEditTaskView(current, request.access)
+    const context = current.definition
+    const tombstone: StoredTaskViewTombstone = {
+      schemaVersion: TASK_VIEW_SCHEMA_VERSION,
+      workspaceId,
+      recordKey: createTaskViewTombstoneRecordKey(current.id),
+      entryType: TASK_VIEW_TOMBSTONE_ENTRY_TYPE,
+      id: current.id,
+      revision: current.revision,
+      ...(current.createIdempotencyKeyHash
+        ? { createIdempotencyKeyHash: current.createIdempotencyKeyHash }
+        : {}),
+      ...(current.createRequestFingerprint
+        ? { createRequestFingerprint: current.createRequestFingerprint }
+        : {}),
+      deletedAt: new Date().toISOString(),
+    }
+    const [personalDefault, teamDefault] = await Promise.all([
+      this.getTaskViewDefault(
+        workspaceId,
+        'personal',
+        request.access.viewerUserId,
+        undefined,
+        context.surface,
+        context.scope,
+      ),
+      current.teamId
+        ? this.getTaskViewDefault(
+            workspaceId,
+            'team',
+            request.access.viewerUserId,
+            current.teamId,
+            context.surface,
+            context.scope,
+          )
+        : Promise.resolve(undefined),
+    ])
+    const transactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [
+      {
+        Delete: {
+          TableName: this.tableName,
+          Key: { workspaceId, recordKey: current.recordKey },
+          ConditionExpression: '#revision = :expectedRevision AND #entryType = :entryType',
+          ExpressionAttributeNames: { '#revision': 'revision', '#entryType': 'entryType' },
+          ExpressionAttributeValues: {
+            ':expectedRevision': expectedRevision,
+            ':entryType': 'task-view',
+          },
+        },
+      },
+      {
+        Put: {
+          TableName: this.tableName,
+          Item: tombstone,
+          ConditionExpression: 'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
+        },
+      },
+      {
+        Delete: {
+          TableName: this.tableName,
+          Key: {
+            workspaceId,
+            recordKey: createTaskViewPreferenceRecordKey(
+              request.access.viewerUserId,
+              viewId,
+            ),
+          },
+        },
+      },
+      createTaskViewDefaultGuardTransactionItem(
+        this.tableName,
+        workspaceId,
+        'personal',
+        request.access.viewerUserId,
+        undefined,
+        context.surface,
+        context.scope,
+        viewId,
+        personalDefault,
+      ),
+    ]
+    if (
+      current.teamId &&
+      (request.access.isSystemAdmin || request.access.manageableTeamIds.has(current.teamId))
+    ) {
+      transactItems.push(createTaskViewDefaultGuardTransactionItem(
+        this.tableName,
+        workspaceId,
+        'team',
+        request.access.viewerUserId,
+        current.teamId,
+        context.surface,
+        context.scope,
+        viewId,
+        teamDefault,
+      ))
+    }
+    if (idempotencyKeyHash && requestFingerprint) {
+      transactItems.push(createTaskViewMutationReceiptTransactionItem(
+        this.tableName,
+        createStoredTaskViewMutationReceipt(
+          workspaceId,
+          'delete',
+          viewId,
+          actorUserId,
+          idempotencyKeyHash,
+          requestFingerprint,
+          expectedRevision,
+          tombstone.deletedAt,
+        ),
+      ))
+    }
+    try {
+      await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactItems }))
+    } catch (error) {
+      if (isTransactionConditionalCheckFailed(error)) {
+        if (idempotencyKeyHash && requestFingerprint) {
+          const replay = await this.getTaskViewMutationReplayReceipt(
+            workspaceId,
+            'delete',
+            viewId,
+            actorUserId,
+            idempotencyKeyHash,
+            requestFingerprint,
+          )
+          if (replay) return { id: replay.viewId, revision: replay.resultRevision }
+        }
+        throw createTaskViewRevisionConflict()
+      }
+      throw error
+    }
+    try {
+      await this.cleanupTaskViewPreferences(workspaceId, viewId)
+    } catch (error) {
+      // The live row, tombstone, and optional receipt are already committed. Keep the
+      // acknowledged delete result stable when this best-effort cleanup is unavailable.
+      console.error('Task view preference cleanup failed after deletion commit.', {
+        error,
+        viewId,
+        workspaceId,
+      })
+    }
+    return { id: viewId, revision: expectedRevision }
+  }
+
   /** Local DynamoDB 用 search table を必要に応じて作成します。 */
   private async ensureLocalTable() {
     if (!this.bootstrapLocalTable) {
@@ -1452,6 +2889,413 @@ export class DynamoDbWorkspaceSearchClient {
     return response.Item ? readStoredDefaultView(response.Item) : undefined
   }
 
+  /** Strongly reads a live task view definition when one exists. */
+  private async getTaskViewIfPresent(workspaceId: string, viewId: string) {
+    const response = await this.documentClient.send(new GetCommand({
+      TableName: this.tableName,
+      Key: { workspaceId, recordKey: createTaskViewRecordKey(viewId) },
+      ConsistentRead: true,
+    }))
+    return response.Item ? readStoredTaskView(response.Item) : undefined
+  }
+
+  /** Strongly reads a task view deletion tombstone when one exists. */
+  private async getTaskViewTombstoneIfPresent(workspaceId: string, viewId: string) {
+    const response = await this.documentClient.send(new GetCommand({
+      TableName: this.tableName,
+      Key: { workspaceId, recordKey: createTaskViewTombstoneRecordKey(viewId) },
+      ConsistentRead: true,
+    }))
+    return response.Item ? readStoredTaskViewTombstone(response.Item) : undefined
+  }
+
+  /**
+   * Strongly reads and validates a task view mutation receipt when one exists.
+   *
+   * @param workspaceId - Workspace that owns the receipt.
+   * @param idempotencyKeyHash - Operation-bound receipt identity hash.
+   * @returns The durable receipt, or undefined when the caller key is unused.
+   */
+  private async getTaskViewMutationReceipt(
+    workspaceId: string,
+    idempotencyKeyHash: string,
+  ) {
+    const response = await this.documentClient.send(new GetCommand({
+      TableName: this.tableName,
+      Key: {
+        workspaceId,
+        recordKey: createTaskViewMutationReceiptRecordKey(idempotencyKeyHash),
+      },
+      ConsistentRead: true,
+    }))
+    if (!response.Item) return undefined
+    const receipt = readStoredTaskViewMutationReceipt(response.Item)
+    return receipt.expiresAt > Math.floor(Date.now() / 1_000) ? receipt : undefined
+  }
+
+  /**
+   * Resolves a receipt only when it exactly matches the current normalized request.
+   *
+   * @param workspaceId - Workspace that owns the receipt.
+   * @param operation - Current mutation operation.
+   * @param viewId - Current target task view ID.
+   * @param actorUserId - Current actor that owns the caller key.
+   * @param idempotencyKeyHash - Operation-bound receipt identity hash.
+   * @param requestFingerprint - Current normalized request fingerprint.
+   * @returns The matching receipt, or undefined when the caller key is unused.
+   */
+  private async getTaskViewMutationReplayReceipt(
+    workspaceId: string,
+    operation: TaskViewMutationOperation,
+    viewId: string,
+    actorUserId: string,
+    idempotencyKeyHash: string,
+    requestFingerprint: string,
+  ) {
+    const receipt = await this.getTaskViewMutationReceipt(workspaceId, idempotencyKeyHash)
+    if (!receipt) return undefined
+    if (
+      receipt.workspaceId !== workspaceId ||
+      receipt.operation !== operation ||
+      receipt.viewId !== viewId ||
+      receipt.actorUserId !== actorUserId ||
+      receipt.idempotencyKeyHash !== idempotencyKeyHash ||
+      receipt.requestFingerprint !== requestFingerprint
+    ) {
+      throw createTaskViewIdempotencyConflict()
+    }
+    return receipt
+  }
+
+  /**
+   * Resolves an idempotent create retry without re-evaluating mutable source state.
+   *
+   * @param workspaceId - Workspace that owns the idempotent operation.
+   * @param ownerUserId - User that owns the idempotency key.
+   * @param idempotencyKey - Validated operation-specific idempotency key.
+   * @param requestFingerprint - Stable request fingerprint expected on the persisted lifecycle.
+   * @param access - Current viewer access used to shape the replay response.
+   * @returns The prior live result, or undefined when the key has not been used.
+   */
+  private async getTaskViewIdempotencyReplay(
+    workspaceId: string,
+    ownerUserId: string,
+    idempotencyKey: string,
+    requestFingerprint: string,
+    access: TaskViewAccessScope,
+  ) {
+    const idempotencyHash = createTaskViewIdempotencyHash(
+      workspaceId,
+      ownerUserId,
+      idempotencyKey,
+    )
+    const liveView = await this.getTaskViewIfPresent(workspaceId, idempotencyHash)
+    if (liveView) {
+      if (
+        liveView.createIdempotencyKeyHash !== idempotencyHash ||
+        liveView.createRequestFingerprint !== requestFingerprint ||
+        liveView.ownerUserId !== ownerUserId
+      ) {
+        throw createTaskViewIdempotencyConflict()
+      }
+      try {
+        return await this.getTaskView({ workspaceId, viewId: liveView.id, access })
+      } catch (error) {
+        if (
+          !(error instanceof WorkspaceSearchError) ||
+          error.code !== 'TaskViewNotFound'
+        ) {
+          throw error
+        }
+        await this.rejectDeletedTaskViewIdempotencyReplay(
+          workspaceId,
+          idempotencyHash,
+          requestFingerprint,
+        )
+        throw error
+      }
+    }
+    await this.rejectDeletedTaskViewIdempotencyReplay(
+      workspaceId,
+      idempotencyHash,
+      requestFingerprint,
+    )
+    return undefined
+  }
+
+  /** Rejects a create replay when its deterministic lifecycle has been deleted. */
+  private async rejectDeletedTaskViewIdempotencyReplay(
+    workspaceId: string,
+    idempotencyHash: string,
+    requestFingerprint: string,
+  ) {
+    const tombstone = await this.getTaskViewTombstoneIfPresent(
+      workspaceId,
+      idempotencyHash,
+    )
+    if (!tombstone) return
+    if (
+      tombstone.createIdempotencyKeyHash !== idempotencyHash ||
+      tombstone.createRequestFingerprint !== requestFingerprint
+    ) {
+      throw createTaskViewIdempotencyConflict()
+    }
+    throw new WorkspaceSearchError(
+      409,
+      'TaskViewIdempotencyConflict',
+      'Idempotent task view result was deleted and cannot be recreated.',
+    )
+  }
+
+  /** Strongly reads a required task view definition or throws the stable not-found error. */
+  private async getRequiredTaskView(workspaceId: string, viewId: string) {
+    const stored = await this.getTaskViewIfPresent(workspaceId, viewId)
+    if (!stored) throw createTaskViewNotFound()
+    return stored
+  }
+
+  /** Strongly reads one task view preference for the current viewer. */
+  private async getTaskViewPreference(workspaceId: string, userId: string, viewId: string) {
+    const response = await this.documentClient.send(new GetCommand({
+      TableName: this.tableName,
+      Key: { workspaceId, recordKey: createTaskViewPreferenceRecordKey(userId, viewId) },
+      ConsistentRead: true,
+    }))
+    return response.Item ? readStoredTaskViewPreference(response.Item) : undefined
+  }
+
+  /** Removes every viewer preference for a deleted task view in bounded DynamoDB pages. */
+  private async cleanupTaskViewPreferences(workspaceId: string, viewId: string) {
+    const preferencePrefix = `${WORKSPACE_TASK_VIEW_PREFERENCE_PREFIX}`
+    let exclusiveStartKey: Record<string, unknown> | undefined
+    do {
+      const response = await this.documentClient.send(new QueryCommand({
+        TableName: this.tableName,
+        KeyConditionExpression: 'workspaceId = :workspaceId AND begins_with(recordKey, :prefix)',
+        FilterExpression: '#entryType = :entryType AND #viewId = :viewId',
+        ExpressionAttributeNames: {
+          '#entryType': 'entryType',
+          '#viewId': 'viewId',
+        },
+        ExpressionAttributeValues: {
+          ':entryType': 'task-view-preference',
+          ':viewId': viewId,
+          ':workspaceId': workspaceId,
+          ':prefix': preferencePrefix,
+        },
+        ExclusiveStartKey: exclusiveStartKey,
+        Limit: TASK_VIEW_PREFERENCE_CLEANUP_PAGE_SIZE,
+      }))
+      const preferenceKeys = (response.Items ?? [])
+        .filter((item) => isRecordValue(item) &&
+          item.entryType === 'task-view-preference' &&
+          item.viewId === viewId &&
+          typeof item.recordKey === 'string')
+        .map((item) => ({
+          workspaceId,
+          recordKey: String(item.recordKey),
+        }))
+      if (preferenceKeys.length > 0) {
+        await this.documentClient.send(new TransactWriteCommand({
+          TransactItems: preferenceKeys.map((key) => ({
+            Delete: {
+              TableName: this.tableName,
+              Key: key,
+            },
+          })),
+        }))
+      }
+      exclusiveStartKey = response.LastEvaluatedKey
+    } while (exclusiveStartKey)
+  }
+
+  /** Strongly reads one personal or Team default marker. */
+  private async getTaskViewDefault(
+    workspaceId: string,
+    ownerType: StoredTaskViewDefaultOwner,
+    userId: string,
+    teamId: string | undefined,
+    surface: TaskViewSurface,
+    scope: TaskViewScope,
+  ) {
+    const response = await this.documentClient.send(new GetCommand({
+      TableName: this.tableName,
+      Key: {
+        workspaceId,
+        recordKey: createTaskViewDefaultRecordKey(
+          ownerType,
+          userId,
+          teamId,
+          surface,
+          scope,
+        ),
+      },
+      ConsistentRead: true,
+    }))
+    return response.Item ? readStoredTaskViewDefault(response.Item) : undefined
+  }
+
+  /** Reads every page of personal default markers owned by one viewer. */
+  private async listPersonalTaskViewDefaults(workspaceId: string, userId: string) {
+    const prefix = createTaskViewDefaultOwnerPrefix('personal', userId, undefined)
+    const defaults: StoredTaskViewDefault[] = []
+    let exclusiveStartKey: Record<string, unknown> | undefined
+    do {
+      const response = await this.documentClient.send(new QueryCommand({
+        TableName: this.tableName,
+        KeyConditionExpression: 'workspaceId = :workspaceId AND begins_with(recordKey, :prefix)',
+        ExpressionAttributeValues: { ':workspaceId': workspaceId, ':prefix': prefix },
+        ExclusiveStartKey: exclusiveStartKey,
+      }))
+      defaults.push(...(response.Items ?? []).map(readStoredTaskViewDefault))
+      exclusiveStartKey = response.LastEvaluatedKey
+    } while (exclusiveStartKey)
+    return defaults
+  }
+
+  /** Resolves the effective task view default with personal precedence over Team. */
+  private async resolveTaskViewDefault(
+    workspaceId: string,
+    surface: TaskViewSurface,
+    scope: TaskViewScope,
+    access: TaskViewAccessScope,
+  ): Promise<ResolvedTaskViewDefault> {
+    let personalViewId: string | undefined
+    const personalDefault = await this.getTaskViewDefault(
+      workspaceId,
+      'personal',
+      access.viewerUserId,
+      undefined,
+      surface,
+      scope,
+    )
+    if (personalDefault) {
+      const target = await this.getTaskViewIfPresent(workspaceId, personalDefault.viewId)
+      if (
+        target &&
+        matchesTaskViewContext(target, surface, scope) &&
+        canReadTaskView(target, access)
+      ) {
+        personalViewId = target.id
+      } else {
+        await this.cleanupTaskViewDefaultMarker(personalDefault)
+      }
+    }
+
+    let teamViewId: string | undefined
+    const teamId = getTaskViewScopeTeamId(scope)
+    if (teamId && access.teamIds.has(teamId)) {
+      const teamDefault = await this.getTaskViewDefault(
+        workspaceId,
+        'team',
+        access.viewerUserId,
+        teamId,
+        surface,
+        scope,
+      )
+      if (teamDefault) {
+        const target = await this.getTaskViewIfPresent(workspaceId, teamDefault.viewId)
+        if (
+          target &&
+          target.visibility === 'team' &&
+          target.teamId === teamId &&
+          matchesTaskViewContext(target, surface, scope) &&
+          canReadTaskView(target, access)
+        ) {
+          teamViewId = target.id
+        } else {
+          await this.cleanupTaskViewDefaultMarker(teamDefault)
+        }
+      }
+    }
+    if (personalViewId) {
+      return {
+        viewId: personalViewId,
+        personalViewId,
+        ...(teamViewId ? { teamViewId } : {}),
+        source: 'personal',
+      }
+    }
+    if (teamViewId) return { viewId: teamViewId, teamViewId, source: 'team' }
+    return { source: 'built-in' }
+  }
+
+  /** Removes viewer preference and personal default state for a confirmed missing task view. */
+  private async cleanupMissingTaskViewState(
+    workspaceId: string,
+    userId: string,
+    viewId: string,
+  ) {
+    const [preference, defaults] = await Promise.all([
+      this.getTaskViewPreference(workspaceId, userId, viewId),
+      this.listPersonalTaskViewDefaults(workspaceId, userId),
+    ])
+    const matchingDefaults = defaults
+      .filter((marker) => marker.viewId === viewId)
+      .slice(0, TASK_VIEW_ORPHAN_CLEANUP_LIMIT)
+    if (!preference && !matchingDefaults.length) return
+    const transactItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [
+      {
+        ConditionCheck: {
+          TableName: this.tableName,
+          Key: { workspaceId, recordKey: createTaskViewRecordKey(viewId) },
+          ConditionExpression: 'attribute_not_exists(#recordKey)',
+          ExpressionAttributeNames: {
+            '#recordKey': 'recordKey',
+          },
+        },
+      },
+      ...(preference
+        ? [{
+            Delete: {
+              TableName: this.tableName,
+              Key: { workspaceId, recordKey: createTaskViewPreferenceRecordKey(userId, viewId) },
+            },
+          }]
+        : []),
+      ...matchingDefaults.map((marker) => ({
+        Delete: {
+          TableName: this.tableName,
+          Key: { workspaceId, recordKey: marker.recordKey },
+          ConditionExpression: '#viewId = :viewId',
+          ExpressionAttributeNames: { '#viewId': 'viewId' },
+          ExpressionAttributeValues: { ':viewId': viewId },
+        },
+      })),
+    ]
+    try {
+      await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactItems }))
+    } catch (error) {
+      if (!isTransactionConditionalCheckFailed(error)) throw error
+    }
+  }
+
+  /** Lazily removes one stale default marker only when its observed generation is unchanged. */
+  private async cleanupTaskViewDefaultMarker(marker: StoredTaskViewDefault) {
+    const generationCondition = createTaskViewDefaultGenerationCondition(marker)
+    try {
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [{
+          Delete: {
+            TableName: this.tableName,
+            Key: { workspaceId: marker.workspaceId, recordKey: marker.recordKey },
+            ConditionExpression: `#viewId = :viewId AND ${generationCondition.expression}`,
+            ExpressionAttributeNames: {
+              '#viewId': 'viewId',
+              ...generationCondition.names,
+            },
+            ExpressionAttributeValues: {
+              ':viewId': marker.viewId,
+              ...generationCondition.values,
+            },
+          },
+        }],
+      }))
+    } catch (error) {
+      if (!isTransactionConditionalCheckFailed(error)) throw error
+    }
+  }
+
 }
 
 /**
@@ -1504,6 +3348,334 @@ export function migrateSavedWorkspaceView(
     layout,
     ...(warnings.length ? { migrationWarnings: dedupeMigrationWarnings(warnings) } : {}),
   }
+}
+
+/**
+ * Creates the canonical Team-qualified key used by task view status allowlists.
+ *
+ * @param teamId - Team that owns the workflow status.
+ * @param statusId - Stable workflow status identifier within the Team.
+ * @returns Collision-safe allowlist key for the Team and status pair.
+ */
+export function createTaskViewStatusKey(teamId: string, statusId: string) {
+  return `${requireText(teamId, 'Task view status Team ID')}\0${requireText(
+    statusId,
+    'Task view status ID',
+  )}`
+}
+
+/**
+ * Creates the canonical Team-qualified key used by task view Project scopes.
+ *
+ * @param teamId - Team that owns the Project.
+ * @param projectId - Stable Project identifier within the Team.
+ * @returns Collision-safe authorization key for the Team and Project pair.
+ */
+export function createTaskViewProjectScopeKey(teamId: string, projectId: string) {
+  return `${requireText(teamId, 'Task view Project Team ID')}\0${requireText(
+    projectId,
+    'Task view Project ID',
+  )}`
+}
+
+/**
+ * Removes stale or permission-restricted references from a task view at read time.
+ *
+ * @param definition - Persisted task view definition to sanitize.
+ * @param access - Current access and current-source reference resolver.
+ * @returns A permission-safe definition together with stable migration warnings.
+ */
+async function sanitizeTaskViewDefinition(
+  definition: TaskViewDefinition,
+  access: TaskViewAccessScope,
+) {
+  const warnings: TaskViewMigrationWarning[] = []
+  const readableRelationIds =
+    definition.filters.relationIds === undefined ||
+      access.resolveReadableRelationIds === undefined
+      ? access.readableRelationIds
+      : await access.resolveReadableRelationIds({
+          relationIds: [...definition.filters.relationIds],
+          surface: definition.surface,
+          scope: definition.scope,
+        })
+  const filters: TaskViewFilters = {
+    ...definition.filters,
+    ...(definition.filters.teamIds === undefined
+      ? {}
+      : {
+          teamIds: definition.filters.teamIds.filter((teamId) => {
+            if (access.teamIds.has(teamId)) return true
+            addTaskViewMigrationWarning(warnings, 'permission-redacted', 'filter', 'removed')
+            return false
+          }),
+        }),
+    ...(definition.filters.projectIds === undefined
+      ? {}
+      : {
+          projectIds: definition.filters.projectIds.filter((projectId) => {
+            if (canReadTaskViewProjectFilter(projectId, definition.scope, access)) return true
+            addTaskViewMigrationWarning(warnings, 'permission-redacted', 'filter', 'removed')
+            return false
+          }),
+        }),
+    ...(definition.filters.assigneeUserIds === undefined
+      ? {}
+      : {
+          assigneeUserIds: retainTaskViewReferenceIds(
+            definition.filters.assigneeUserIds,
+            access.readableActorIds,
+            warnings,
+          ),
+        }),
+    ...(definition.filters.creatorUserIds === undefined
+      ? {}
+      : {
+          creatorUserIds: retainTaskViewReferenceIds(
+            definition.filters.creatorUserIds,
+            access.readableActorIds,
+            warnings,
+          ),
+        }),
+    ...(definition.filters.relationIds === undefined
+      ? {}
+      : {
+          relationIds: retainTaskViewReferenceIds(
+            definition.filters.relationIds,
+            readableRelationIds,
+            warnings,
+          ),
+        }),
+    ...(definition.filters.customFields === undefined
+      ? {}
+      : {
+          customFields: definition.filters.customFields.filter((filter) =>
+            retainTaskViewCustomField(filter.fieldId, access, warnings, 'filter')
+          ),
+        }),
+    ...(definition.filters.statuses === undefined
+      ? {}
+      : {
+          statuses: definition.filters.statuses.filter((statusId) => {
+            if (isTaskViewLegacyStatusActive(statusId, definition, access)) return true
+            addTaskViewMigrationWarning(
+              warnings,
+              'deleted-workflow-status',
+              'filter',
+              'removed',
+            )
+            return false
+          }),
+        }),
+    ...(definition.filters.workflowStatuses === undefined
+      ? {}
+      : {
+          workflowStatuses: definition.filters.workflowStatuses.filter((status) => {
+            if (!access.teamIds.has(status.teamId)) {
+              addTaskViewMigrationWarning(warnings, 'permission-redacted', 'filter', 'removed')
+              return false
+            }
+            if (
+              !access.activeStatusIds ||
+              access.activeStatusIds.has(createTaskViewStatusKey(status.teamId, status.statusId))
+            ) {
+              return true
+            }
+            addTaskViewMigrationWarning(
+              warnings,
+              'deleted-workflow-status',
+              'filter',
+              'removed',
+            )
+            return false
+          }),
+        }),
+  }
+  const group = definition.layout.group && retainTaskViewLayoutField(
+    definition.layout.group.field,
+    access,
+    warnings,
+    'group',
+    false,
+  )
+    ? definition.layout.group
+    : undefined
+  const subgroup = definition.layout.subgroup && retainTaskViewLayoutField(
+    definition.layout.subgroup.field,
+    access,
+    warnings,
+    'subgroup',
+    false,
+  )
+    ? definition.layout.subgroup
+    : undefined
+  const sort = definition.layout.sort.filter((rule) => retainTaskViewLayoutField(
+    rule.field,
+    access,
+    warnings,
+    'sort',
+    false,
+  ))
+  let columns = definition.layout.columns.filter((column) => retainTaskViewLayoutField(
+    column.field,
+    access,
+    warnings,
+    'column',
+    true,
+  ))
+  if (!columns.length && isReadableTaskViewBuiltInField('title', access, true)) {
+    columns = [{ field: 'title' }]
+    addTaskViewMigrationWarning(warnings, 'invalid-layout', 'column', 'reset-to-default')
+  }
+  return {
+    definition: {
+      ...definition,
+      filters,
+      layout: {
+        ...definition.layout,
+        ...(group ? { group } : { group: undefined }),
+        ...(subgroup ? { subgroup } : { subgroup: undefined }),
+        sort,
+        columns,
+      },
+    },
+    warnings: dedupeTaskViewMigrationWarnings(warnings),
+  }
+}
+
+/** Removes opaque filter references that are not present in the current disclosure allowlist. */
+function retainTaskViewReferenceIds(
+  referenceIds: readonly string[],
+  readableIds: ReadonlySet<string> | undefined,
+  warnings: TaskViewMigrationWarning[],
+): string[] {
+  if (!readableIds) return [...referenceIds]
+  return referenceIds.filter((referenceId) => {
+    if (readableIds.has(referenceId)) return true
+    addTaskViewMigrationWarning(warnings, 'permission-redacted', 'filter', 'removed')
+    return false
+  })
+}
+
+/**
+ * Checks a Project filter against either a globally unique ID or the definition's Team context.
+ *
+ * @param projectId - Bare Project identifier stored by the shared search filter contract.
+ * @param scope - Task-view scope that may safely qualify the Project's owner Team.
+ * @param access - Current viewer's bare and Team-qualified Project allowlists.
+ * @returns Whether the filter can be retained without confusing duplicate Project IDs.
+ */
+function canReadTaskViewProjectFilter(
+  projectId: string,
+  scope: TaskViewScope,
+  access: TaskViewAccessScope,
+): boolean {
+  if (access.projectIds.has(projectId)) return true
+  const teamId = getTaskViewScopeTeamId(scope)
+  return teamId !== undefined && access.projectScopeKeys.has(
+    createTaskViewProjectScopeKey(teamId, projectId),
+  )
+}
+
+/** Returns whether one custom field still exists and remains readable. */
+function retainTaskViewCustomField(
+  fieldId: string,
+  access: TaskViewAccessScope,
+  warnings: TaskViewMigrationWarning[],
+  section: TaskViewMigrationSection,
+) {
+  if (access.activeCustomFieldIds && !access.activeCustomFieldIds.has(fieldId)) {
+    addTaskViewMigrationWarning(warnings, 'deleted-custom-field', section, 'removed')
+    return false
+  }
+  if (access.readableCustomFieldIds && !access.readableCustomFieldIds.has(fieldId)) {
+    addTaskViewMigrationWarning(warnings, 'permission-redacted', section, 'removed')
+    return false
+  }
+  return true
+}
+
+/** Returns whether one persisted group, sort, or column field is still usable. */
+function retainTaskViewLayoutField(
+  field: string,
+  access: TaskViewAccessScope,
+  warnings: TaskViewMigrationWarning[],
+  section: TaskViewMigrationSection,
+  enforceColumnPermission: boolean,
+) {
+  if (field === 'customFields' && !enforceColumnPermission) {
+    addTaskViewMigrationWarning(warnings, 'invalid-layout', section, 'removed')
+    return false
+  }
+  if (field.startsWith('custom:')) {
+    const fieldId = field.slice('custom:'.length)
+    if (!fieldId) {
+      addTaskViewMigrationWarning(warnings, 'invalid-layout', section, 'removed')
+      return false
+    }
+    return retainTaskViewCustomField(fieldId, access, warnings, section)
+  }
+  if (!taskViewBuiltInLayoutFields.has(field)) {
+    addTaskViewMigrationWarning(warnings, 'invalid-layout', section, 'removed')
+    return false
+  }
+  if (enforceColumnPermission && !isReadableTaskViewBuiltInField(field, access, true)) {
+    addTaskViewMigrationWarning(warnings, 'permission-redacted', section, 'removed')
+    return false
+  }
+  return true
+}
+
+/** Returns whether a built-in layout field is readable in the current capability set. */
+function isReadableTaskViewBuiltInField(
+  field: string,
+  access: TaskViewAccessScope,
+  enforcePermission: boolean,
+) {
+  return !enforcePermission || !access.readableColumnIds || access.readableColumnIds.has(field)
+}
+
+/** Returns whether a legacy unqualified status still exists in any relevant Team workflow. */
+function isTaskViewLegacyStatusActive(
+  statusId: string,
+  definition: TaskViewDefinition,
+  access: TaskViewAccessScope,
+) {
+  if (!access.activeStatusIds) return true
+  const teamIds = new Set<string>()
+  const scopeTeamId = getTaskViewScopeTeamId(definition.scope)
+  if (scopeTeamId) teamIds.add(scopeTeamId)
+  for (const teamId of definition.filters.teamIds ?? []) {
+    if (access.teamIds.has(teamId)) teamIds.add(teamId)
+  }
+  if (!teamIds.size) {
+    for (const teamId of access.teamIds) teamIds.add(teamId)
+  }
+  if (teamIds.size) {
+    return [...teamIds].some((teamId) =>
+      access.activeStatusIds?.has(createTaskViewStatusKey(teamId, statusId))
+    )
+  }
+  const suffix = `\0${statusId}`
+  return [...access.activeStatusIds].some((key) => key.endsWith(suffix))
+}
+
+/** Appends one deterministic migration warning without exposing an unreadable identifier. */
+function addTaskViewMigrationWarning(
+  warnings: TaskViewMigrationWarning[],
+  code: TaskViewMigrationWarning['code'],
+  section: TaskViewMigrationWarning['section'],
+  fallback: TaskViewMigrationWarning['fallback'],
+) {
+  warnings.push({ code, section, fallback })
+}
+
+/** Deduplicates task view migration warnings while preserving their first occurrence order. */
+function dedupeTaskViewMigrationWarnings(warnings: TaskViewMigrationWarning[]) {
+  return [...new Map(warnings.map((warning) => [
+    `${warning.code}\0${warning.section}\0${warning.fallback}\0${warning.referenceId ?? ''}`,
+    warning,
+  ])).values()]
 }
 
 /** Local DynamoDB に workspace search table を作成します。 */
@@ -1565,8 +3737,8 @@ async function waitForWorkspaceSearchTable(
   throw new Error(`Local DynamoDB table "${tableName}" did not become active.`)
 }
 
-function normalizeWorkspaceSearchFilters(filters: WorkspaceSearchFilters) {
-  if (!filters || typeof filters !== 'object' || Array.isArray(filters)) {
+function normalizeWorkspaceSearchFilters(filters: unknown) {
+  if (!isRecordValue(filters)) {
     return invalidFilters('Search filters must be an object.')
   }
   const normalized: WorkspaceSearchFilters = {}
@@ -1591,7 +3763,11 @@ function normalizeWorkspaceSearchFilters(filters: WorkspaceSearchFilters) {
     normalized.customFields = filters.customFields.map(normalizeCustomFieldFilter)
   }
   if (filters.date) {
-    if (!['createdAt', 'updatedAt', 'dueDate'].includes(filters.date.field)) {
+    if (!isRecordValue(filters.date)) {
+      throw new WorkspaceSearchError(400, 'InvalidSearchFilters', 'Search date field is invalid.')
+    }
+    const field = filters.date.field
+    if (field !== 'createdAt' && field !== 'updatedAt' && field !== 'dueDate') {
       throw new WorkspaceSearchError(400, 'InvalidSearchFilters', 'Search date field is invalid.')
     }
     const from = optionalText(filters.date.from, 'Search date lower bound', 128)
@@ -1602,7 +3778,7 @@ function normalizeWorkspaceSearchFilters(filters: WorkspaceSearchFilters) {
     if (from && to && from > to) {
       throw new WorkspaceSearchError(400, 'InvalidSearchFilters', 'Search date range is reversed.')
     }
-    normalized.date = { field: filters.date.field, ...(from ? { from } : {}), ...(to ? { to } : {}) }
+    normalized.date = { field, ...(from ? { from } : {}), ...(to ? { to } : {}) }
   }
   return normalized
 }
@@ -1815,6 +3991,313 @@ function toSavedWorkspaceView(
   return migrateSavedWorkspaceView(view, activeCustomFieldIds)
 }
 
+/** Converts one stored task view into the permission-safe API representation. */
+async function toSavedTaskView(
+  stored: StoredTaskView,
+  preference: StoredTaskViewPreference | undefined,
+  resolvedDefault: ResolvedTaskViewDefault,
+  access: TaskViewAccessScope,
+): Promise<SavedTaskView> {
+  const sanitized = await sanitizeTaskViewDefinition(stored.definition, access)
+  const isDefault = resolvedDefault.viewId === stored.id
+  const isPersonalDefault = resolvedDefault.personalViewId === stored.id
+  const isTeamDefault = resolvedDefault.teamViewId === stored.id
+  return {
+    schemaVersion: TASK_VIEW_SCHEMA_VERSION,
+    id: stored.id,
+    name: stored.name,
+    ...(stored.description ? { description: stored.description } : {}),
+    visibility: stored.visibility,
+    ownerUserId: stored.ownerUserId,
+    ...(stored.teamId ? { teamId: stored.teamId } : {}),
+    definition: sanitized.definition,
+    revision: stored.revision,
+    canEdit: access.canWrite && canEditTaskViewDefinition(stored, access),
+    preference: {
+      favorite: preference?.favorite ?? false,
+      pinned: preference?.pinned ?? false,
+      isDefault,
+      isPersonalDefault,
+      isTeamDefault,
+      ...(isDefault ? { defaultSource: resolvedDefault.source } : {}),
+    },
+    createdAt: stored.createdAt,
+    updatedAt: stored.updatedAt,
+    ...(sanitized.warnings.length ? { migrationWarnings: sanitized.warnings } : {}),
+  }
+}
+
+/** Returns whether the current viewer may discover and evaluate a stored task view. */
+function canReadTaskView(view: StoredTaskView, access: TaskViewAccessScope) {
+  if (!canAccessTaskViewScope(view.definition.scope, access)) return false
+  if (view.visibility === 'personal') return view.ownerUserId === access.viewerUserId
+  if (view.visibility === 'shared') return true
+  return Boolean(view.teamId && access.teamIds.has(view.teamId))
+}
+
+/** Returns whether the current viewer may evaluate a task view resource scope. */
+function canAccessTaskViewScope(scope: TaskViewScope, access: TaskViewAccessScope) {
+  if (scope.kind === 'workspace') return access.canAccessWorkspaceScope
+  if (scope.kind === 'viewer') return true
+  if (scope.kind === 'team') return access.teamIds.has(scope.teamId)
+  return scope.teamId
+    ? access.projectScopeKeys.has(createTaskViewProjectScopeKey(scope.teamId, scope.projectId))
+    : access.projectIds.has(scope.projectId)
+}
+
+/** Returns whether the current viewer may mutate a task view in one resource scope. */
+function canWriteTaskViewScope(scope: TaskViewScope, access: TaskViewAccessScope) {
+  if (scope.kind === 'workspace') return access.canWriteWorkspaceScope
+  if (scope.kind === 'viewer') return access.canWrite
+  if (scope.kind === 'team') return access.writableTeamIds.has(scope.teamId)
+  return scope.teamId
+    ? access.writableProjectScopeKeys.has(
+        createTaskViewProjectScopeKey(scope.teamId, scope.projectId),
+      )
+    : access.writableProjectIds.has(scope.projectId)
+}
+
+/**
+ * Creates Saved View lifecycle and Work Item mutation capabilities for an exact list query.
+ *
+ * @param surface - Validated product surface filter, when supplied.
+ * @param scope - Validated resource scope filter, when supplied.
+ * @param access - Current viewer read and write authorization.
+ * @returns Server-authoritative capabilities that never infer write access from list rows.
+ */
+function createTaskViewListCapabilities(
+  surface: TaskViewSurface | undefined,
+  scope: TaskViewScope | undefined,
+  access: TaskViewAccessScope,
+): SavedTaskViewCapabilities {
+  if (!surface || !scope) {
+    return {
+      canWrite: false,
+      canManageSharedViews: false,
+      canSetTeamDefault: false,
+      writableTeamIds: [],
+      writableProjectScopes: [],
+    }
+  }
+  const canWrite = access.canWrite && canWriteTaskViewScope(scope, access)
+  const scopeTeamId = getTaskViewScopeTeamId(scope)
+  const candidateTeamIds = scopeTeamId ? [scopeTeamId] : [...access.writableTeamIds]
+  const writableTeamIds = candidateTeamIds
+    .filter((teamId) =>
+      access.teamIds.has(teamId) && access.writableTeamIds.has(teamId)
+    )
+    .sort()
+  return {
+    canWrite,
+    canManageSharedViews: canWrite && access.canManageSharedViews,
+    canSetTeamDefault: Boolean(
+      canWrite && scopeTeamId && access.manageableTeamIds.has(scopeTeamId),
+    ),
+    writableTeamIds,
+    writableProjectScopes: createTaskViewListWritableProjectScopes(scope, access),
+  }
+}
+
+/**
+ * Returns authoritative Team-qualified Project write scopes inside one exact task-view scope.
+ *
+ * @param scope - Exact resource scope requested by the current list operation.
+ * @param access - Current viewer read and write authorization.
+ * @returns Deterministically ordered readable Project scopes with Work Item write access.
+ */
+function createTaskViewListWritableProjectScopes(
+  scope: TaskViewScope,
+  access: TaskViewAccessScope,
+): TaskViewWritableProjectScope[] {
+  if (
+    scope.kind === 'project' &&
+    scope.teamId === undefined &&
+    !access.writableProjectIds.has(scope.projectId)
+  ) {
+    return []
+  }
+  return [...access.writableProjectScopeKeys]
+    .filter((scopeKey) => access.projectScopeKeys.has(scopeKey))
+    .flatMap((scopeKey) => {
+      const writableScope = parseTaskViewProjectScopeKey(scopeKey)
+      if (!writableScope || !taskViewWritableProjectScopeMatches(scope, writableScope)) {
+        return []
+      }
+      return [writableScope]
+    })
+    .sort(compareTaskViewWritableProjectScopes)
+}
+
+/**
+ * Parses one internal Team-qualified Project authorization key without trusting malformed data.
+ *
+ * @param scopeKey - Candidate `${teamId}\0${projectId}` authorization key.
+ * @returns Structured Project scope, or undefined when the key is malformed.
+ */
+function parseTaskViewProjectScopeKey(
+  scopeKey: string,
+): TaskViewWritableProjectScope | undefined {
+  const separatorIndex = scopeKey.indexOf('\0')
+  if (
+    separatorIndex <= 0 ||
+    separatorIndex === scopeKey.length - 1 ||
+    scopeKey.indexOf('\0', separatorIndex + 1) !== -1
+  ) {
+    return undefined
+  }
+  return {
+    teamId: scopeKey.slice(0, separatorIndex),
+    projectId: scopeKey.slice(separatorIndex + 1),
+  }
+}
+
+/**
+ * Checks whether one writable Project belongs to the exact task-view resource scope.
+ *
+ * @param scope - Exact resource scope requested by the current list operation.
+ * @param writableScope - Team-qualified Project scope from current authorization.
+ * @returns Whether the Project capability may be disclosed for the requested scope.
+ */
+function taskViewWritableProjectScopeMatches(
+  scope: TaskViewScope,
+  writableScope: TaskViewWritableProjectScope,
+): boolean {
+  if (scope.kind === 'workspace' || scope.kind === 'viewer') return true
+  if (scope.kind === 'team') return scope.teamId === writableScope.teamId
+  return scope.projectId === writableScope.projectId && (
+    scope.teamId === undefined || scope.teamId === writableScope.teamId
+  )
+}
+
+/**
+ * Orders Team-qualified Project capabilities for deterministic API responses.
+ *
+ * @param left - First writable Project scope.
+ * @param right - Second writable Project scope.
+ * @returns Negative, zero, or positive ordering value.
+ */
+function compareTaskViewWritableProjectScopes(
+  left: TaskViewWritableProjectScope,
+  right: TaskViewWritableProjectScope,
+): number {
+  const teamOrder = left.teamId.localeCompare(right.teamId)
+  return teamOrder || left.projectId.localeCompare(right.projectId)
+}
+
+/** Requires mutation authority for one concrete task view resource scope. */
+function requireTaskViewScopeWriteAccess(
+  scope: TaskViewScope,
+  access: TaskViewAccessScope,
+) {
+  if (canWriteTaskViewScope(scope, access)) return
+  throw new WorkspaceSearchError(
+    403,
+    'TaskViewAccessDenied',
+    'Task view scope mutation is denied.',
+  )
+}
+
+/** Requires permission to create a task view with the requested visibility and scope. */
+function requireCanCreateTaskView(
+  visibility: SavedViewVisibility,
+  teamId: string | undefined,
+  definition: TaskViewDefinition,
+  access: TaskViewAccessScope,
+) {
+  validateVisibilityTeam(visibility, teamId)
+  if (!canAccessTaskViewScope(definition.scope, access)) {
+    throw new WorkspaceSearchError(403, 'TaskViewAccessDenied', 'Task view scope access is denied.')
+  }
+  requireTaskViewScopeWriteAccess(definition.scope, access)
+  const scopeTeamId = getTaskViewScopeTeamId(definition.scope)
+  if (visibility === 'team' && scopeTeamId && teamId !== scopeTeamId) {
+    throw new WorkspaceSearchError(
+      403,
+      'TaskViewAccessDenied',
+      'Task view audience must match its Team-qualified scope.',
+    )
+  }
+  if (visibility === 'personal') return
+  if (visibility === 'shared') {
+    if (access.isSystemAdmin || access.canManageSharedViews) return
+    throw new WorkspaceSearchError(403, 'TaskViewAccessDenied', 'Shared task view management is denied.')
+  }
+  if (teamId && access.writableTeamIds.has(teamId)) return
+  throw new WorkspaceSearchError(403, 'TaskViewAccessDenied', 'Team task view access is denied.')
+}
+
+/** Requires authority to assign a personal or Team default marker. */
+function requireCanSetTaskViewDefault(
+  defaultSource: SavedTaskViewDefaultSource | undefined,
+  visibility: SavedViewVisibility,
+  teamId: string | undefined,
+  definition: TaskViewDefinition,
+  access: TaskViewAccessScope,
+) {
+  if (!defaultSource || defaultSource === 'personal') return
+  const scopeTeamId = getTaskViewScopeTeamId(definition.scope)
+  if (
+    visibility !== 'team' ||
+    !teamId ||
+    scopeTeamId !== teamId ||
+    (!access.isSystemAdmin && !access.manageableTeamIds.has(teamId))
+  ) {
+    throw new WorkspaceSearchError(
+      403,
+      'TaskViewAccessDenied',
+      'Team default task view management is denied.',
+    )
+  }
+}
+
+/** Requires definition edit or delete authority for one stored task view. */
+function requireCanEditTaskView(view: StoredTaskView, access: TaskViewAccessScope) {
+  if (canEditTaskViewDefinition(view, access)) return
+  throw new WorkspaceSearchError(403, 'TaskViewAccessDenied', 'Task view management is denied.')
+}
+
+/** Returns whether the current viewer may edit a stored task view definition. */
+function canEditTaskViewDefinition(view: StoredTaskView, access: TaskViewAccessScope) {
+  if (!canWriteTaskViewScope(view.definition.scope, access)) return false
+  if (
+    view.visibility === 'team' &&
+    (!view.teamId || !access.writableTeamIds.has(view.teamId))
+  ) return false
+  if (view.ownerUserId === access.viewerUserId || access.isSystemAdmin) return true
+  if (view.visibility === 'shared' && access.canManageSharedViews) return true
+  return Boolean(
+    view.visibility === 'team' &&
+    view.teamId &&
+    access.manageableTeamIds.has(view.teamId),
+  )
+}
+
+/** Requires mutation access for task view definitions or viewer preferences. */
+function requireTaskViewWriteAccess(access: TaskViewAccessScope) {
+  if (!access.canWrite) {
+    throw new WorkspaceSearchError(403, 'TaskViewAccessDenied', 'Task view mutations are denied.')
+  }
+}
+
+/** Returns whether a stored task view matches one exact surface and scope context. */
+function matchesTaskViewContext(
+  view: StoredTaskView,
+  surface: TaskViewSurface,
+  scope: TaskViewScope,
+) {
+  return view.definition.surface === surface && taskViewScopesEqual(view.definition.scope, scope)
+}
+
+/** Applies optional list filters without broadening the persisted view context. */
+function matchesTaskViewListFilter(
+  view: StoredTaskView,
+  surface: TaskViewSurface | undefined,
+  scope: TaskViewScope | undefined,
+) {
+  return (!surface || view.definition.surface === surface) &&
+    (!scope || taskViewScopesEqual(view.definition.scope, scope))
+}
+
 function canReadSavedView(view: StoredSavedWorkspaceView, access: SavedViewAccessScope) {
   if (view.visibility === 'personal') return view.ownerUserId === access.viewerUserId
   if (view.visibility === 'shared') return true
@@ -1929,13 +4412,422 @@ function normalizeSearchViewLayout(layout: SearchViewLayout) {
   } satisfies SearchViewLayout
 }
 
-function readWorkspaceSearchDocument(value: Record<string, unknown>) {
+/** Validates and normalizes a task view create payload. */
+function normalizeCreateTaskViewInput(input: CreateSavedTaskViewInput) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    return invalidTaskView('Task view input is required.')
+  }
+  const visibility = requireSavedViewVisibility(input.visibility)
+  const teamId = optionalText(input.teamId, 'Task view Team ID', 256)
+  validateVisibilityTeam(visibility, teamId)
+  const definition = normalizeTaskViewDefinition(input.definition)
+  requireTaskViewDefinitionSize(definition)
+  return {
+    name: requireText(input.name, 'Task view name', 120),
+    description: optionalText(input.description, 'Task view description', 1_000),
+    visibility,
+    teamId,
+    definition,
+    favorite: optionalBoolean(input.favorite, 'Task view favorite'),
+    pinned: optionalBoolean(input.pinned, 'Task view pinned'),
+    defaultSource: input.defaultSource === undefined
+      ? undefined
+      : requireSavedTaskViewDefaultSource(input.defaultSource),
+  }
+}
+
+/** Validates and normalizes a revision-guarded task view update payload. */
+function normalizeUpdateTaskViewInput(input: UpdateSavedTaskViewInput) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    return invalidTaskView('Task view update is required.')
+  }
+  if (input.defaultSource !== undefined && input.clearDefaultSource !== undefined) {
+    return invalidTaskView('Task view default assignment and clearing are mutually exclusive.')
+  }
+  const definition = input.definition === undefined
+    ? undefined
+    : normalizeTaskViewDefinition(input.definition)
+  if (definition) requireTaskViewDefinitionSize(definition)
+  return {
+    expectedRevision: requirePositiveInteger(input.expectedRevision, 'Task view revision'),
+    ...(input.name === undefined
+      ? {}
+      : { name: requireText(input.name, 'Task view name', 120) }),
+    ...(input.description === undefined
+      ? {}
+      : {
+          description: input.description === null
+            ? null
+            : optionalText(input.description, 'Task view description', 1_000) ?? null,
+        }),
+    ...(input.visibility === undefined
+      ? {}
+      : { visibility: requireSavedViewVisibility(input.visibility) }),
+    ...(input.teamId === undefined
+      ? {}
+      : {
+          teamId: input.teamId === null
+            ? null
+            : optionalText(input.teamId, 'Task view Team ID', 256) ?? null,
+        }),
+    ...(definition === undefined ? {} : { definition }),
+    ...(input.favorite === undefined
+      ? {}
+      : { favorite: requireBoolean(input.favorite, 'Task view favorite') }),
+    ...(input.pinned === undefined
+      ? {}
+      : { pinned: requireBoolean(input.pinned, 'Task view pinned') }),
+    ...(input.defaultSource === undefined
+      ? {}
+      : {
+          defaultSource: input.defaultSource === null
+            ? null
+            : requireSavedTaskViewDefaultSource(input.defaultSource),
+        }),
+    ...(input.clearDefaultSource === undefined
+      ? {}
+      : { clearDefaultSource: requireSavedTaskViewDefaultSource(input.clearDefaultSource) }),
+  }
+}
+
+/** Rejects definitions that cannot fit safely within the single-table DynamoDB item budget. */
+function requireTaskViewDefinitionSize(definition: TaskViewDefinition): void {
+  if (Buffer.byteLength(canonicalValue(definition), 'utf8') > TASK_VIEW_DEFINITION_MAX_BYTES) {
+    invalidTaskView('Task view definition is too large.')
+  }
+}
+
+/** Validates and normalizes task view duplicate metadata. */
+function normalizeDuplicateTaskViewInput(input: DuplicateSavedTaskViewInput) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    return invalidTaskView('Task view duplicate input is required.')
+  }
+  return {
+    ...(input.name === undefined
+      ? {}
+      : { name: requireText(input.name, 'Task view name', 120) }),
+    ...(input.description === undefined
+      ? {}
+      : {
+          description: input.description === null
+            ? null
+            : optionalText(input.description, 'Task view description', 1_000) ?? null,
+        }),
+    ...(input.visibility === undefined
+      ? {}
+      : { visibility: requireSavedViewVisibility(input.visibility) }),
+    ...(input.teamId === undefined
+      ? {}
+      : {
+          teamId: input.teamId === null
+            ? null
+            : optionalText(input.teamId, 'Task view Team ID', 256) ?? null,
+        }),
+    ...(input.favorite === undefined
+      ? {}
+      : { favorite: requireBoolean(input.favorite, 'Task view favorite') }),
+    ...(input.pinned === undefined
+      ? {}
+      : { pinned: requireBoolean(input.pinned, 'Task view pinned') }),
+    ...(input.defaultSource === undefined
+      ? {}
+      : { defaultSource: requireSavedTaskViewDefaultSource(input.defaultSource) }),
+  }
+}
+
+/** Derives a bounded copy label when duplicate input omits an explicit name. */
+function createTaskViewCopyName(sourceName: string) {
+  const suffix = ' copy'
+  return `${sourceName.slice(0, 120 - suffix.length)}${suffix}`
+}
+
+/** Validates a complete task view definition and returns its canonical representation. */
+function normalizeTaskViewDefinition(definition: unknown): TaskViewDefinition {
+  if (!isRecordValue(definition)) {
+    return invalidTaskView('Task view definition is required.')
+  }
+  const surface = requireTaskViewSurface(definition.surface)
+  const scope = normalizeTaskViewScope(definition.scope)
+  validateTaskViewSurfaceScope(surface, scope)
+  return {
+    surface,
+    scope,
+    filters: normalizeTaskViewFilters(definition.filters),
+    layout: normalizeTaskViewLayout(definition.layout),
+  }
+}
+
+/** Validates the resource scope used by a task view definition or list filter. */
+function normalizeTaskViewScope(scope: unknown): TaskViewScope {
+  if (!isRecordValue(scope)) {
+    return invalidTaskView('Task view scope is invalid.')
+  }
+  if (scope.kind === 'workspace') return { kind: 'workspace' }
+  if (scope.kind === 'viewer') return { kind: 'viewer' }
+  if (scope.kind === 'team') {
+    return { kind: 'team', teamId: requireText(scope.teamId, 'Task view scope Team ID', 256) }
+  }
+  if (scope.kind === 'project') {
+    const teamId = optionalText(scope.teamId, 'Task view scope Team ID', 256)
+    return {
+      kind: 'project',
+      projectId: requireText(scope.projectId, 'Task view scope Project ID', 256),
+      ...(teamId ? { teamId } : {}),
+    }
+  }
+  return invalidTaskView('Task view scope is invalid.')
+}
+
+/** Enforces the canonical product surface to resource scope mapping. */
+function validateTaskViewSurfaceScope(surface: TaskViewSurface, scope: TaskViewScope) {
+  const valid = surface === 'workspace-search'
+    ? scope.kind === 'workspace'
+    : surface === 'project'
+      ? scope.kind === 'project'
+      : surface === 'team'
+        ? scope.kind === 'team'
+        : surface === 'my-tasks' || surface === 'focus'
+          ? scope.kind === 'viewer'
+          : false
+  if (!valid) invalidTaskView('Task view surface and scope do not match.')
+}
+
+/** Validates filters shared by all task surfaces. */
+function normalizeTaskViewFilters(filters: unknown): TaskViewFilters {
+  if (!isRecordValue(filters)) {
+    return invalidTaskView('Task view filters are invalid.')
+  }
+  const base = normalizeWorkspaceSearchFilters(filters)
+  const workflowStatuses = filters.workflowStatuses === undefined
+    ? undefined
+    : normalizeTaskViewWorkflowStatuses(filters.workflowStatuses)
+  const workflowCategories = filters.workflowCategories === undefined
+    ? undefined
+    : normalizeTaskViewEnumList(
+        filters.workflowCategories,
+        isTaskViewWorkflowCategory,
+        'Task view workflow categories',
+      )
+  const priorities = filters.priorities === undefined
+    ? undefined
+    : normalizeTaskViewEnumList(filters.priorities, isTaskViewPriority, 'Task view priorities')
+  const dueDatePreset = filters.dueDatePreset === undefined
+    ? undefined
+    : requireTaskViewDueDatePreset(filters.dueDatePreset)
+  return {
+    ...base,
+    ...(workflowStatuses ? { workflowStatuses } : {}),
+    ...(workflowCategories ? { workflowCategories } : {}),
+    ...(priorities ? { priorities } : {}),
+    ...(dueDatePreset ? { dueDatePreset } : {}),
+    ...(filters.includeArchived === undefined
+      ? {}
+      : { includeArchived: requireBoolean(filters.includeArchived, 'Task view include archived') }),
+  }
+}
+
+/** Validates and deduplicates Team-qualified workflow status filters. */
+function normalizeTaskViewWorkflowStatuses(
+  values: unknown,
+): NonNullable<TaskViewFilters['workflowStatuses']> {
+  if (!Array.isArray(values) || values.length > 100) {
+    return invalidTaskView('Task view workflow statuses are invalid.')
+  }
+  const normalized = values.map((value) => {
+    if (!isRecordValue(value)) {
+      return invalidTaskView('Task view workflow status is invalid.')
+    }
+    return {
+      teamId: requireText(value.teamId, 'Task view workflow status Team ID', 256),
+      statusId: requireText(value.statusId, 'Task view workflow status ID', 256),
+    }
+  })
+  return [...new Map(normalized.map((value) => [createTaskViewStatusKey(
+    value.teamId,
+    value.statusId,
+  ), value])).values()]
+}
+
+/** Validates and deduplicates a bounded string enum list. */
+function normalizeTaskViewEnumList<TValue extends string>(
+  values: unknown,
+  isAllowed: (value: string) => value is TValue,
+  label: string,
+): TValue[] {
+  if (!Array.isArray(values) || values.length > 100) invalidTaskView(`${label} are invalid.`)
+  const normalized: TValue[] = []
+  for (const value of values) {
+    if (typeof value !== 'string' || !isAllowed(value)) invalidTaskView(`${label} are invalid.`)
+    normalized.push(value)
+  }
+  return [...new Set(normalized)]
+}
+
+/** Validates a complete task view layout. */
+function normalizeTaskViewLayout(layout: unknown): TaskViewLayout {
+  if (!isRecordValue(layout)) {
+    return invalidTaskView('Task view layout is invalid.')
+  }
+  const mode = requireTaskViewLayoutMode(layout.mode)
+  if (!Array.isArray(layout.sort) || layout.sort.length > 10) {
+    invalidTaskView('Task view sort is invalid.')
+  }
+  if (!Array.isArray(layout.columns) || layout.columns.length > 100) {
+    invalidTaskView('Task view columns are invalid.')
+  }
+  const group = layout.group === undefined
+    ? undefined
+    : normalizeTaskViewGrouping(layout.group, 'Task view group')
+  const subgroup = layout.subgroup === undefined
+    ? undefined
+    : normalizeTaskViewGrouping(layout.subgroup, 'Task view subgroup')
+  const sort = layout.sort.map((rule) => normalizeTaskViewGrouping(rule, 'Task view sort'))
+  const columns = layout.columns.map((column) => {
+    if (!isRecordValue(column)) {
+      return invalidTaskView('Task view column is invalid.')
+    }
+    const width = column.width === undefined
+      ? undefined
+      : requireTaskViewColumnWidth(column.width)
+    const pin = column.pin === undefined ? undefined : requireTaskViewColumnPin(column.pin)
+    return {
+      field: requireText(column.field, 'Task view column field', 256),
+      ...(width === undefined ? {} : { width }),
+      ...(pin === undefined ? {} : { pin }),
+    }
+  })
+  const density = requireTaskViewDensity(layout.density)
+  return {
+    mode,
+    ...(group ? { group } : {}),
+    ...(subgroup ? { subgroup } : {}),
+    sort,
+    columns,
+    density,
+    displayOptions: normalizeTaskViewDisplayOptions(layout.displayOptions),
+  }
+}
+
+/** Validates one grouping or sort field and direction. */
+function normalizeTaskViewGrouping(
+  value: unknown,
+  label: string,
+): NonNullable<TaskViewLayout['group']> {
+  if (!isRecordValue(value)) {
+    return invalidTaskView(`${label} is invalid.`)
+  }
+  const direction = requireTaskViewSortDirection(value.direction, label)
+  return {
+    field: requireText(value.field, `${label} field`, 256),
+    direction,
+  }
+}
+
+/** Validates the bounded persisted width of one task view column. */
+function requireTaskViewColumnWidth(value: unknown) {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 40 || value > 2_000) {
+    return invalidTaskView('Task view column width is invalid.')
+  }
+  return value
+}
+
+/** Validates every supported task view display option. */
+function normalizeTaskViewDisplayOptions(options: unknown) {
+  if (!isRecordValue(options)) {
+    return invalidTaskView('Task view display options are invalid.')
+  }
+  const normalized: TaskViewLayout['displayOptions'] = {}
+  for (const key of taskViewDisplayOptionKeys) {
+    if (options[key] !== undefined) normalized[key] = requireBoolean(options[key], `Task view ${key}`)
+  }
+  return normalized
+}
+
+/** Reads one supported task view surface from an untrusted boundary. */
+function requireTaskViewSurface(value: unknown): TaskViewSurface {
+  if (
+    value === 'workspace-search' ||
+    value === 'project' ||
+    value === 'team' ||
+    value === 'my-tasks' ||
+    value === 'focus' ||
+    value === 'triage'
+  ) return value
+  return invalidTaskView('Task view surface is invalid.')
+}
+
+/** Reads one supported task view layout mode. */
+function requireTaskViewLayoutMode(value: unknown): TaskViewLayout['mode'] {
+  if (
+    value === 'table' ||
+    value === 'board' ||
+    value === 'list' ||
+    value === 'gantt' ||
+    value === 'calendar' ||
+    value === 'timeline'
+  ) return value
+  return invalidTaskView('Task view layout mode is invalid.')
+}
+
+/** Reads one supported task view density. */
+function requireTaskViewDensity(value: unknown): TaskViewLayout['density'] {
+  if (value === 'compact' || value === 'comfortable' || value === 'spacious') return value
+  return invalidTaskView('Task view density is invalid.')
+}
+
+/** Reads one supported task view column pin. */
+function requireTaskViewColumnPin(value: unknown): NonNullable<TaskViewLayout['columns'][number]['pin']> {
+  if (value === 'start' || value === 'end') return value
+  return invalidTaskView('Task view column pin is invalid.')
+}
+
+/** Reads one supported task view sort direction. */
+function requireTaskViewSortDirection(
+  value: unknown,
+  label: string,
+): TaskViewLayout['sort'][number]['direction'] {
+  if (value === 'asc' || value === 'desc') return value
+  return invalidTaskView(`${label} direction is invalid.`)
+}
+
+/** Reads one mutable default source from an untrusted boundary. */
+function requireSavedTaskViewDefaultSource(value: unknown): SavedTaskViewDefaultSource {
+  if (value === 'personal' || value === 'team') return value
+  return invalidTaskView('Task view default source is invalid.')
+}
+
+/**
+ * Reads one strict current or legacy Workspace Search projection.
+ *
+ * Legacy rows may omit `projectionDigest`; when present, the digest must match
+ * the complete normalized projection or the read fails closed.
+ *
+ * @param value - Untrusted persisted projection fields.
+ * @returns Fully normalized document with its server-owned current digest.
+ */
+export function readWorkspaceSearchDocument(
+  value: Record<string, unknown>,
+): WorkspaceSearchDocument {
   if (value.schemaVersion !== SEARCH_SCHEMA_VERSION || value.entryType !== 'search-document') {
     throw new WorkspaceSearchError(503, 'InvalidSearchDocument', 'Search index contains an invalid document.')
   }
   try {
-    return createWorkspaceSearchDocument(value as WorkspaceSearchDocument)
+    const document = createWorkspaceSearchDocument(value as WorkspaceSearchDocument)
+    if (
+      value.projectionDigest !== undefined
+      && value.projectionDigest !== document.projectionDigest
+    ) {
+      throw new WorkspaceSearchProjectionDigestMismatchError(
+        503,
+        'InvalidSearchDocument',
+        'Search index projection digest is invalid.',
+      )
+    }
+    return document
   } catch (error) {
+    if (error instanceof WorkspaceSearchProjectionDigestMismatchError) {
+      throw error
+    }
     throw new WorkspaceSearchError(
       503,
       'InvalidSearchDocument',
@@ -1949,6 +4841,9 @@ function readWorkspaceSearchDocumentSafely(value: Record<string, unknown>) {
   try {
     return readWorkspaceSearchDocument(value)
   } catch (error) {
+    if (error instanceof WorkspaceSearchProjectionDigestMismatchError) {
+      throw error
+    }
     console.error('Workspace search skipped an invalid index document.', error)
     return undefined
   }
@@ -2033,8 +4928,294 @@ function readStoredDefaultView(value: Record<string, unknown>) {
   return value as StoredDefaultView
 }
 
+/** Reads and validates one durable task view deletion tombstone. */
+function readStoredTaskViewTombstone(value: Record<string, unknown>): StoredTaskViewTombstone {
+  if (
+    value.entryType !== TASK_VIEW_TOMBSTONE_ENTRY_TYPE ||
+    value.schemaVersion !== TASK_VIEW_SCHEMA_VERSION ||
+    typeof value.workspaceId !== 'string' ||
+    typeof value.recordKey !== 'string' ||
+    typeof value.id !== 'string' ||
+    typeof value.revision !== 'number' ||
+    typeof value.deletedAt !== 'string'
+  ) {
+    throw invalidStoredTaskView()
+  }
+  try {
+    const id = requireIdentifier(value.id, 'Task view ID')
+    const createIdempotencyKeyHash = optionalText(
+      value.createIdempotencyKeyHash,
+      'Task view idempotency hash',
+      256,
+    )
+    const createRequestFingerprint = optionalText(
+      value.createRequestFingerprint,
+      'Task view request fingerprint',
+      256,
+    )
+    if (value.recordKey !== createTaskViewTombstoneRecordKey(id)) {
+      throw invalidStoredTaskView()
+    }
+    return {
+      schemaVersion: TASK_VIEW_SCHEMA_VERSION,
+      workspaceId: requireText(value.workspaceId, 'Task view Workspace ID'),
+      recordKey: value.recordKey,
+      entryType: TASK_VIEW_TOMBSTONE_ENTRY_TYPE,
+      id,
+      revision: requirePositiveInteger(value.revision, 'Task view revision'),
+      ...(createIdempotencyKeyHash ? { createIdempotencyKeyHash } : {}),
+      ...(createRequestFingerprint ? { createRequestFingerprint } : {}),
+      deletedAt: requireText(value.deletedAt, 'Task view deletedAt', 128),
+    }
+  } catch (error) {
+    if (error instanceof WorkspaceSearchError && error.status === 503) throw error
+    throw new WorkspaceSearchError(503, 'InvalidTaskView', 'Task view data is invalid.', {
+      cause: error,
+    })
+  }
+}
+
+/** Reads and validates one persisted task view definition row. */
+function readStoredTaskView(value: Record<string, unknown>): StoredTaskView {
+  if (
+    value.entryType !== 'task-view' ||
+    value.schemaVersion !== TASK_VIEW_SCHEMA_VERSION ||
+    typeof value.workspaceId !== 'string' ||
+    typeof value.recordKey !== 'string' ||
+    typeof value.id !== 'string' ||
+    typeof value.name !== 'string' ||
+    typeof value.ownerUserId !== 'string' ||
+    typeof value.revision !== 'number' ||
+    typeof value.createdAt !== 'string' ||
+    typeof value.updatedAt !== 'string'
+  ) {
+    throw invalidStoredTaskView()
+  }
+  try {
+    const id = requireIdentifier(value.id, 'Task view ID')
+    const visibility = requireSavedViewVisibility(value.visibility)
+    const teamId = optionalText(value.teamId, 'Task view Team ID', 256)
+    const description = optionalText(value.description, 'Task view description', 1_000)
+    const createIdempotencyKeyHash = optionalText(
+      value.createIdempotencyKeyHash,
+      'Task view idempotency hash',
+      256,
+    )
+    const createRequestFingerprint = optionalText(
+      value.createRequestFingerprint,
+      'Task view request fingerprint',
+      256,
+    )
+    validateVisibilityTeam(visibility, teamId)
+    if (value.recordKey !== createTaskViewRecordKey(id)) {
+      return invalidTaskView('Task view record key does not match its ID.')
+    }
+    return {
+      schemaVersion: TASK_VIEW_SCHEMA_VERSION,
+      workspaceId: requireText(value.workspaceId, 'Task view Workspace ID'),
+      recordKey: value.recordKey,
+      entryType: 'task-view',
+      id,
+      name: requireText(value.name, 'Task view name', 120),
+      ...(description ? { description } : {}),
+      visibility,
+      ownerUserId: requireText(value.ownerUserId, 'Task view owner ID'),
+      ...(createIdempotencyKeyHash ? { createIdempotencyKeyHash } : {}),
+      ...(createRequestFingerprint ? { createRequestFingerprint } : {}),
+      ...(teamId ? { teamId } : {}),
+      definition: normalizeTaskViewDefinition(value.definition),
+      revision: requirePositiveInteger(value.revision, 'Task view revision'),
+      createdAt: requireText(value.createdAt, 'Task view createdAt', 128),
+      updatedAt: requireText(value.updatedAt, 'Task view updatedAt', 128),
+    }
+  } catch (error) {
+    if (error instanceof WorkspaceSearchError && error.status === 503) throw error
+    throw new WorkspaceSearchError(503, 'InvalidTaskView', 'Task view data is invalid.', {
+      cause: error,
+    })
+  }
+}
+
+/** Reads and validates one persisted viewer task view preference row. */
+function readStoredTaskViewPreference(value: Record<string, unknown>): StoredTaskViewPreference {
+  if (
+    value.entryType !== 'task-view-preference' ||
+    value.schemaVersion !== TASK_VIEW_SCHEMA_VERSION ||
+    typeof value.workspaceId !== 'string' ||
+    typeof value.recordKey !== 'string' ||
+    typeof value.viewId !== 'string' ||
+    typeof value.userId !== 'string' ||
+    typeof value.favorite !== 'boolean' ||
+    typeof value.pinned !== 'boolean' ||
+    typeof value.updatedAt !== 'string'
+  ) {
+    throw invalidStoredTaskView()
+  }
+  try {
+    if (value.recordKey !== createTaskViewPreferenceRecordKey(value.userId, value.viewId)) {
+      throw invalidStoredTaskView()
+    }
+  } catch (error) {
+    if (error instanceof WorkspaceSearchError && error.status === 503) throw error
+    throw new WorkspaceSearchError(503, 'InvalidTaskView', 'Task view data is invalid.', {
+      cause: error,
+    })
+  }
+  return {
+    schemaVersion: TASK_VIEW_SCHEMA_VERSION,
+    workspaceId: value.workspaceId,
+    recordKey: value.recordKey,
+    entryType: 'task-view-preference',
+    viewId: value.viewId,
+    userId: value.userId,
+    favorite: value.favorite,
+    pinned: value.pinned,
+    updatedAt: value.updatedAt,
+  }
+}
+
+/** Reads and validates one persisted personal or Team default marker. */
+function readStoredTaskViewDefault(value: Record<string, unknown>): StoredTaskViewDefault {
+  if (
+    value.entryType !== 'task-view-default' ||
+    value.schemaVersion !== TASK_VIEW_SCHEMA_VERSION ||
+    typeof value.workspaceId !== 'string' ||
+    typeof value.recordKey !== 'string' ||
+    (value.ownerType !== 'personal' && value.ownerType !== 'team') ||
+    typeof value.viewId !== 'string' ||
+    typeof value.updatedAt !== 'string'
+  ) {
+    throw invalidStoredTaskView()
+  }
+  try {
+    const surface = requireStoredTaskViewSurface(value.surface)
+    const scope = readStoredTaskViewScope(value.scope)
+    const userId = optionalStoredText(value.userId)
+    const teamId = optionalStoredText(value.teamId)
+    const generation = value.generation === undefined
+      ? undefined
+      : requireIdentifier(value.generation, 'Task view default generation')
+    const viewId = requireIdentifier(value.viewId, 'Task view default view ID')
+    if (
+      (value.ownerType === 'personal' && (!userId || teamId)) ||
+      (value.ownerType === 'team' && (!teamId || userId)) ||
+      value.recordKey !== createTaskViewDefaultRecordKey(
+        value.ownerType,
+        userId ?? '',
+        teamId,
+        surface,
+        scope,
+      )
+    ) {
+      throw invalidStoredTaskView()
+    }
+    return {
+      schemaVersion: TASK_VIEW_SCHEMA_VERSION,
+      workspaceId: requireText(value.workspaceId, 'Task view default Workspace ID'),
+      recordKey: value.recordKey,
+      entryType: 'task-view-default',
+      ownerType: value.ownerType,
+      ...(userId ? { userId } : {}),
+      ...(teamId ? { teamId } : {}),
+      surface,
+      scope,
+      viewId,
+      ...(generation ? { generation } : {}),
+      updatedAt: requireText(value.updatedAt, 'Task view default updatedAt', 128),
+    }
+  } catch (error) {
+    if (error instanceof WorkspaceSearchError && error.status === 503) throw error
+    throw new WorkspaceSearchError(503, 'InvalidTaskView', 'Task view data is invalid.', {
+      cause: error,
+    })
+  }
+}
+
+/** Reads and validates one durable task view mutation receipt. */
+function readStoredTaskViewMutationReceipt(
+  value: Record<string, unknown>,
+): StoredTaskViewMutationReceipt {
+  if (
+    value.entryType !== 'task-view-mutation-receipt' ||
+    value.schemaVersion !== TASK_VIEW_SCHEMA_VERSION ||
+    typeof value.workspaceId !== 'string' ||
+    typeof value.recordKey !== 'string' ||
+    (value.operation !== 'update' && value.operation !== 'delete') ||
+    typeof value.viewId !== 'string' ||
+    typeof value.actorUserId !== 'string' ||
+    typeof value.idempotencyKeyHash !== 'string' ||
+    typeof value.requestFingerprint !== 'string' ||
+    typeof value.resultRevision !== 'number' ||
+    typeof value.committedAt !== 'string' ||
+    typeof value.expiresAt !== 'number'
+  ) {
+    throw invalidStoredTaskView()
+  }
+  try {
+    const idempotencyKeyHash = requireText(
+      value.idempotencyKeyHash,
+      'Task view mutation idempotency hash',
+      256,
+    )
+    const requestFingerprint = requireText(
+      value.requestFingerprint,
+      'Task view mutation request fingerprint',
+      256,
+    )
+    if (
+      !/^[A-Za-z0-9_-]{43}$/u.test(idempotencyKeyHash) ||
+      !/^[A-Za-z0-9_-]{43}$/u.test(requestFingerprint) ||
+      value.recordKey !== createTaskViewMutationReceiptRecordKey(idempotencyKeyHash)
+    ) {
+      throw invalidStoredTaskView()
+    }
+    const committedAt = requireText(
+      value.committedAt,
+      'Task view mutation committedAt',
+      128,
+    )
+    const expiresAt = requirePositiveInteger(
+      value.expiresAt,
+      'Task view mutation expiresAt',
+    )
+    if (expiresAt !== createTaskViewMutationReceiptExpiresAt(committedAt)) {
+      throw invalidStoredTaskView()
+    }
+    return {
+      schemaVersion: TASK_VIEW_SCHEMA_VERSION,
+      workspaceId: requireText(value.workspaceId, 'Task view mutation Workspace ID'),
+      recordKey: value.recordKey,
+      entryType: 'task-view-mutation-receipt',
+      operation: value.operation,
+      viewId: requireIdentifier(value.viewId, 'Task view mutation view ID'),
+      actorUserId: requireText(value.actorUserId, 'Task view mutation actor ID'),
+      idempotencyKeyHash,
+      requestFingerprint,
+      resultRevision: requirePositiveInteger(
+        value.resultRevision,
+        'Task view mutation result revision',
+      ),
+      committedAt,
+      expiresAt,
+    }
+  } catch (error) {
+    if (error instanceof WorkspaceSearchError && error.status === 503) throw error
+    throw new WorkspaceSearchError(503, 'InvalidTaskView', 'Task view data is invalid.', {
+      cause: error,
+    })
+  }
+}
+
 function createSearchQueryFingerprint(filters: WorkspaceSearchFilters) {
   return createHash('sha256').update(canonicalValue(filters)).digest('base64url')
+}
+
+/** Creates the query fingerprint that binds task view cursors to surface and scope filters. */
+function createTaskViewListFingerprint(
+  surface: TaskViewSurface | undefined,
+  scope: TaskViewScope | undefined,
+) {
+  return createHash('sha256').update(canonicalValue({ surface, scope })).digest('base64url')
 }
 
 function decodeSearchCursor(
@@ -2073,7 +5254,36 @@ function decodeSavedViewCursor(value: string | undefined, workspaceId: string, v
   return cursor as SavedViewCursor
 }
 
-function encodeCursor(value: SearchCursor | SavedViewCursor) {
+/** Decodes and verifies a task view cursor against its viewer and list filter. */
+function decodeTaskViewCursor(
+  value: string | undefined,
+  workspaceId: string,
+  viewerUserId: string,
+  queryFingerprint: string,
+) {
+  if (!value) return undefined
+  const cursor = decodeCursor(value)
+  if (
+    cursor.kind !== 'task-views' ||
+    cursor.workspaceId !== workspaceId ||
+    cursor.viewerUserId !== viewerUserId ||
+    cursor.queryFingerprint !== queryFingerprint ||
+    typeof cursor.recordKey !== 'string' ||
+    !cursor.recordKey.startsWith(WORKSPACE_TASK_VIEW_PREFIX)
+  ) {
+    throw new WorkspaceSearchError(400, 'InvalidTaskViewCursor', 'Task view cursor is invalid.')
+  }
+  return {
+    version: 1,
+    kind: 'task-views',
+    workspaceId,
+    viewerUserId,
+    queryFingerprint,
+    recordKey: cursor.recordKey,
+  } satisfies TaskViewCursor
+}
+
+function encodeCursor(value: SearchCursor | SavedViewCursor | TaskViewCursor) {
   return Buffer.from(JSON.stringify(value), 'utf8').toString('base64url')
 }
 
@@ -2097,6 +5307,368 @@ function createSavedViewPreferenceRecordKey(userId: string, viewId: string) {
 
 function createSavedViewDefaultRecordKey(userId: string) {
   return `${WORKSPACE_SAVED_VIEW_DEFAULT_PREFIX}${encodeKeyPart(requireText(userId, 'Saved view user ID'))}`
+}
+
+/** Creates the canonical prefix for one task view default marker owner. */
+function createTaskViewDefaultOwnerPrefix(
+  ownerType: StoredTaskViewDefaultOwner,
+  userId: string,
+  teamId: string | undefined,
+) {
+  const ownerId = ownerType === 'personal'
+    ? requireText(userId, 'Task view default user ID')
+    : requireText(teamId, 'Task view default Team ID')
+  return `${WORKSPACE_TASK_VIEW_DEFAULT_PREFIX}${ownerType.toUpperCase()}#${encodeKeyPart(ownerId)}#`
+}
+
+/** Creates the canonical default marker key for one owner and task view context. */
+function createTaskViewDefaultRecordKey(
+  ownerType: StoredTaskViewDefaultOwner,
+  userId: string,
+  teamId: string | undefined,
+  surface: TaskViewSurface,
+  scope: TaskViewScope,
+) {
+  const contextHash = createHash('sha256')
+    .update(createTaskViewContextKey(surface, scope))
+    .digest('base64url')
+  return `${createTaskViewDefaultOwnerPrefix(ownerType, userId, teamId)}${contextHash}`
+}
+
+/** Creates the canonical prefix for one viewer's task view preferences. */
+function createTaskViewPreferencePrefix(userId: string) {
+  return `${WORKSPACE_TASK_VIEW_PREFERENCE_PREFIX}${encodeKeyPart(
+    requireText(userId, 'Task view user ID'),
+  )}#`
+}
+
+/** Creates the canonical task view preference key for one viewer and view. */
+function createTaskViewPreferenceRecordKey(userId: string, viewId: string) {
+  return `${createTaskViewPreferencePrefix(userId)}${requireIdentifier(viewId, 'Task view ID')}`
+}
+
+/** Creates the operation-bound deterministic task view ID for idempotent create retries. */
+function createTaskViewIdempotencyHash(
+  workspaceId: string,
+  ownerUserId: string,
+  idempotencyKey: string,
+) {
+  return createHash('sha256')
+    .update(`task-view-create\0${workspaceId}\0${ownerUserId}\0${idempotencyKey}`)
+    .digest('base64url')
+}
+
+/**
+ * Creates an operation-bound hash for one task view mutation idempotency key.
+ *
+ * @param workspaceId - Workspace that owns the mutation.
+ * @param actorUserId - Current actor that owns the caller key.
+ * @param operation - Mutation operation bound to the key.
+ * @param viewId - Stable target task view ID.
+ * @param idempotencyKey - Validated caller-provided key.
+ * @returns A collision-resistant hash that does not persist the raw key.
+ */
+function createTaskViewMutationIdempotencyHash(
+  workspaceId: string,
+  actorUserId: string,
+  operation: TaskViewMutationOperation,
+  viewId: string,
+  idempotencyKey: string,
+) {
+  return createHash('sha256')
+    .update(
+      `task-view-mutation:v1\0${workspaceId}\0${actorUserId}\0${operation}\0${viewId}\0${idempotencyKey}`,
+    )
+    .digest('base64url')
+}
+
+/**
+ * Creates the single-table record key for a task view mutation receipt.
+ *
+ * @param idempotencyKeyHash - Operation-bound caller-key hash.
+ * @returns Canonical receipt sort key.
+ */
+function createTaskViewMutationReceiptRecordKey(idempotencyKeyHash: string) {
+  return `${WORKSPACE_TASK_VIEW_MUTATION_RECEIPT_PREFIX}${requireText(
+    idempotencyKeyHash,
+    'Task view mutation idempotency hash',
+    256,
+  )}`
+}
+
+/** Creates a stable fingerprint for one idempotent task view operation payload. */
+function createTaskViewRequestFingerprint(input: unknown) {
+  return createHash('sha256').update(canonicalValue(input)).digest('base64url')
+}
+
+/**
+ * Calculates the application replay deadline and DynamoDB TTL for a mutation receipt.
+ *
+ * @param committedAt - ISO timestamp at which the mutation transaction commits.
+ * @returns Epoch seconds exactly 24 hours after the commit timestamp.
+ */
+function createTaskViewMutationReceiptExpiresAt(committedAt: string) {
+  const committedAtMilliseconds = Date.parse(committedAt)
+  if (!Number.isFinite(committedAtMilliseconds)) {
+    throw invalidTaskView('Task view mutation committedAt is invalid.')
+  }
+  return Math.floor(committedAtMilliseconds / 1_000) +
+    TASK_VIEW_MUTATION_RECEIPT_TTL_SECONDS
+}
+
+/**
+ * Creates a durable receipt committed atomically with one task view mutation.
+ *
+ * @param workspaceId - Workspace that owns the mutation.
+ * @param operation - Mutation operation to replay.
+ * @param viewId - Stable target task view ID.
+ * @param actorUserId - Current actor that owns the idempotency key.
+ * @param idempotencyKeyHash - Operation-bound caller-key hash.
+ * @param requestFingerprint - Canonical normalized request fingerprint.
+ * @param resultRevision - Revision acknowledged by the mutation.
+ * @param committedAt - Mutation commit timestamp.
+ * @returns A validated receipt row ready for a transactional put.
+ */
+function createStoredTaskViewMutationReceipt(
+  workspaceId: string,
+  operation: TaskViewMutationOperation,
+  viewId: string,
+  actorUserId: string,
+  idempotencyKeyHash: string,
+  requestFingerprint: string,
+  resultRevision: number,
+  committedAt: string,
+): StoredTaskViewMutationReceipt {
+  return {
+    schemaVersion: TASK_VIEW_SCHEMA_VERSION,
+    workspaceId,
+    recordKey: createTaskViewMutationReceiptRecordKey(idempotencyKeyHash),
+    entryType: 'task-view-mutation-receipt',
+    operation,
+    viewId,
+    actorUserId,
+    idempotencyKeyHash,
+    requestFingerprint,
+    resultRevision,
+    committedAt,
+    expiresAt: createTaskViewMutationReceiptExpiresAt(committedAt),
+  }
+}
+
+/**
+ * Creates a transactional write for one unexpired task view mutation receipt.
+ *
+ * @param tableName - Workspace Search table name.
+ * @param receipt - Receipt committed with the domain mutation.
+ * @returns A conditional transactional put that overwrites only an expired receipt.
+ */
+function createTaskViewMutationReceiptTransactionItem(
+  tableName: string,
+  receipt: StoredTaskViewMutationReceipt,
+): NonNullable<TransactWriteCommandInput['TransactItems']>[number] {
+  return {
+    Put: {
+      TableName: tableName,
+      Item: receipt,
+      ConditionExpression: 'attribute_not_exists(#workspaceId) OR #expiresAt <= :issuedAt',
+      ExpressionAttributeNames: {
+        '#workspaceId': 'workspaceId',
+        '#expiresAt': 'expiresAt',
+      },
+      ExpressionAttributeValues: {
+        ':issuedAt': receipt.expiresAt - TASK_VIEW_MUTATION_RECEIPT_TTL_SECONDS,
+      },
+    },
+  }
+}
+
+/** Creates one persisted viewer preference row for a task view. */
+function createStoredTaskViewPreference(
+  workspaceId: string,
+  userId: string,
+  viewId: string,
+  favorite: boolean,
+  pinned: boolean,
+  updatedAt: string,
+): StoredTaskViewPreference {
+  return {
+    schemaVersion: TASK_VIEW_SCHEMA_VERSION,
+    workspaceId,
+    recordKey: createTaskViewPreferenceRecordKey(userId, viewId),
+    entryType: 'task-view-preference',
+    viewId,
+    userId,
+    favorite,
+    pinned,
+    updatedAt,
+  }
+}
+
+/** Creates one persisted personal or Team default marker. */
+function createStoredTaskViewDefault(
+  workspaceId: string,
+  ownerType: StoredTaskViewDefaultOwner,
+  userId: string,
+  teamId: string | undefined,
+  surface: TaskViewSurface,
+  scope: TaskViewScope,
+  viewId: string,
+  updatedAt: string,
+): StoredTaskViewDefault {
+  return {
+    schemaVersion: TASK_VIEW_SCHEMA_VERSION,
+    workspaceId,
+    recordKey: createTaskViewDefaultRecordKey(
+      ownerType,
+      userId,
+      teamId,
+      surface,
+      scope,
+    ),
+    entryType: 'task-view-default',
+    ownerType,
+    ...(ownerType === 'personal'
+      ? { userId: requireText(userId, 'Task view default user ID') }
+      : { teamId: requireText(teamId, 'Task view default Team ID') }),
+    surface,
+    scope,
+    viewId: requireIdentifier(viewId, 'Task view ID'),
+    generation: randomUUID(),
+    updatedAt,
+  }
+}
+
+/** Creates an atomic partial viewer preference update for a task view. */
+function createTaskViewPreferenceUpdateTransactionItem(
+  tableName: string,
+  preference: StoredTaskViewPreference,
+  favorite: boolean | undefined,
+  pinned: boolean | undefined,
+): NonNullable<TransactWriteCommandInput['TransactItems']>[number] {
+  const favoriteValue = favorite === undefined
+    ? 'if_not_exists(#favorite, :false)'
+    : ':favorite'
+  const pinnedValue = pinned === undefined
+    ? 'if_not_exists(#pinned, :false)'
+    : ':pinned'
+  return {
+    Update: {
+      TableName: tableName,
+      Key: { workspaceId: preference.workspaceId, recordKey: preference.recordKey },
+      UpdateExpression:
+        'SET #schemaVersion = :schemaVersion, #entryType = :entryType, ' +
+        '#viewId = :viewId, #userId = :userId, ' +
+        `#favorite = ${favoriteValue}, #pinned = ${pinnedValue}, #updatedAt = :updatedAt`,
+      ExpressionAttributeNames: {
+        '#schemaVersion': 'schemaVersion',
+        '#entryType': 'entryType',
+        '#viewId': 'viewId',
+        '#userId': 'userId',
+        '#favorite': 'favorite',
+        '#pinned': 'pinned',
+        '#updatedAt': 'updatedAt',
+      },
+      ExpressionAttributeValues: {
+        ':schemaVersion': TASK_VIEW_SCHEMA_VERSION,
+        ':entryType': 'task-view-preference',
+        ':viewId': preference.viewId,
+        ':userId': preference.userId,
+        ':false': false,
+        ...(favorite === undefined ? {} : { ':favorite': favorite }),
+        ...(pinned === undefined ? {} : { ':pinned': pinned }),
+        ':updatedAt': preference.updatedAt,
+      },
+    },
+  }
+}
+
+/** Guards or removes a default marker only when its observed target is unchanged. */
+function createTaskViewDefaultGuardTransactionItem(
+  tableName: string,
+  workspaceId: string,
+  ownerType: StoredTaskViewDefaultOwner,
+  userId: string,
+  teamId: string | undefined,
+  surface: TaskViewSurface,
+  scope: TaskViewScope,
+  viewId: string,
+  currentDefault: StoredTaskViewDefault | undefined,
+): NonNullable<TransactWriteCommandInput['TransactItems']>[number] {
+  const key = {
+    workspaceId,
+    recordKey: createTaskViewDefaultRecordKey(
+      ownerType,
+      userId,
+      teamId,
+      surface,
+      scope,
+    ),
+  }
+  const generationCondition = currentDefault
+    ? createTaskViewDefaultGenerationCondition(currentDefault)
+    : undefined
+  if (currentDefault?.viewId === viewId) {
+    if (!generationCondition) throw invalidStoredTaskView()
+    return {
+      Delete: {
+        TableName: tableName,
+        Key: key,
+        ConditionExpression: `#viewId = :viewId AND ${generationCondition.expression}`,
+        ExpressionAttributeNames: {
+          '#viewId': 'viewId',
+          ...generationCondition.names,
+        },
+        ExpressionAttributeValues: {
+          ':viewId': viewId,
+          ...generationCondition.values,
+        },
+      },
+    }
+  }
+  if (currentDefault) {
+    if (!generationCondition) throw invalidStoredTaskView()
+    return {
+      ConditionCheck: {
+        TableName: tableName,
+        Key: key,
+        ConditionExpression:
+          `#viewId = :expectedDefaultViewId AND ${generationCondition.expression}`,
+        ExpressionAttributeNames: {
+          '#viewId': 'viewId',
+          ...generationCondition.names,
+        },
+        ExpressionAttributeValues: {
+          ':expectedDefaultViewId': currentDefault.viewId,
+          ...generationCondition.values,
+        },
+      },
+    }
+  }
+  return {
+    ConditionCheck: {
+      TableName: tableName,
+      Key: key,
+      ConditionExpression: 'attribute_not_exists(#viewId)',
+      ExpressionAttributeNames: { '#viewId': 'viewId' },
+    },
+  }
+}
+
+/**
+ * Creates a marker-generation condition with a legacy timestamp fallback.
+ *
+ * @param marker - Persisted marker generation observed by the current operation.
+ * @returns DynamoDB condition fragments that reject a replacement marker.
+ */
+function createTaskViewDefaultGenerationCondition(marker: StoredTaskViewDefault) {
+  if (marker.generation) {
+    const names: Record<string, string> = { '#generation': 'generation' }
+    const values: Record<string, unknown> = { ':generation': marker.generation }
+    return { expression: '#generation = :generation', names, values }
+  }
+  const names: Record<string, string> = { '#updatedAt': 'updatedAt' }
+  const values: Record<string, unknown> = { ':updatedAt': marker.updatedAt }
+  return { expression: '#updatedAt = :updatedAt', names, values }
 }
 
 function createSavedViewIdempotencyHash(
@@ -2318,10 +5890,14 @@ function normalizeStringList(values: unknown[], label: string, maxItems: number)
 
 function copyFilterStringList(
   target: WorkspaceSearchFilters,
-  source: WorkspaceSearchFilters,
+  source: Record<string, unknown>,
   key: 'assigneeUserIds' | 'creatorUserIds' | 'statuses' | 'relationIds' | 'projectIds' | 'teamIds',
 ) {
-  if (source[key]) target[key] = normalizeStringList(source[key] ?? [], `Search ${key}`, 100)
+  const value = source[key]
+  if (value !== undefined) {
+    if (!Array.isArray(value)) invalidFilters(`Search ${key} is invalid.`)
+    target[key] = normalizeStringList(value, `Search ${key}`, 100)
+  }
 }
 
 function normalizeSearchText(value: string) {
@@ -2341,6 +5917,34 @@ function canonicalizeSearchDate(value: string) {
   return match ? `${match[1]}-${match[2]}-${match[3]}${match[4]}` : value
 }
 
+/**
+ * Validates the strict ISO calendar date projected from a canonical Work Item.
+ *
+ * @param value - Candidate Work Item search due date.
+ * @returns The unchanged canonical date.
+ */
+function requireCanonicalWorkItemSearchDate(value: string): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/u.exec(value)
+  const year = Number(match?.[1])
+  const month = Number(match?.[2])
+  const day = Number(match?.[3])
+  const date = new Date(Date.UTC(year, month - 1, day))
+  if (
+    !match ||
+    year < WORK_ITEM_SCHEDULE_MIN_YEAR ||
+    date.getUTCFullYear() !== year ||
+    date.getUTCMonth() !== month - 1 ||
+    date.getUTCDate() !== day
+  ) {
+    throw new WorkspaceSearchError(
+      400,
+      'InvalidSearchDocument',
+      'Work Item search dueDate must be a real ISO date in YYYY-MM-DD format.',
+    )
+  }
+  return value
+}
+
 function matchesSearchDateRange(value: string, from?: string, to?: string) {
   const fromComparable = from?.length === 10 ? value.slice(0, 10) : value
   const toComparable = to?.length === 10 ? value.slice(0, 10) : value
@@ -2357,6 +5961,58 @@ function canonicalValue(value: unknown): string {
     return `{${Object.entries(value).sort(([left], [right]) => left.localeCompare(right)).map(([key, item]) => `${JSON.stringify(key)}:${canonicalValue(item)}`).join(',')}}`
   }
   return JSON.stringify(value)
+}
+
+/**
+ * Serializes one normalized projection value with locale-independent key order.
+ *
+ * @param value - JSON-compatible normalized projection value.
+ * @returns Canonical JSON text used only by the projection digest protocol.
+ */
+function canonicalWorkspaceSearchProjectionValue(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalWorkspaceSearchProjectionValue).join(',')}]`
+  }
+  if (value && typeof value === 'object') {
+    const properties = Object.entries(value)
+      .sort(([left], [right]) =>
+        compareWorkspaceSearchProjectionKeys(left, right)
+      )
+      .map(([key, item]) =>
+        `${JSON.stringify(key)}:${canonicalWorkspaceSearchProjectionValue(item)}`
+      )
+    return `{${properties.join(',')}}`
+  }
+  const serialized = JSON.stringify(value)
+  if (serialized === undefined) {
+    throw new WorkspaceSearchError(
+      500,
+      'InvalidSearchDocument',
+      'Search projection contains an unsupported value.',
+    )
+  }
+  return serialized
+}
+
+/**
+ * Orders projection keys by UTF-8 bytes with a code-unit tie-breaker.
+ *
+ * @param left - First projection key.
+ * @param right - Second projection key.
+ * @returns A negative, zero, or positive comparison result.
+ */
+function compareWorkspaceSearchProjectionKeys(
+  left: string,
+  right: string,
+): number {
+  const utf8Comparison = Buffer.compare(
+    Buffer.from(left, 'utf8'),
+    Buffer.from(right, 'utf8'),
+  )
+  if (utf8Comparison !== 0 || left === right) {
+    return utf8Comparison
+  }
+  return left < right ? -1 : 1
 }
 
 function addSavedViewUpdateExpression(
@@ -2385,6 +6041,37 @@ function addSavedViewUpdateExpression(
 
 function hasSavedViewDefinitionChange(input: ReturnType<typeof normalizeUpdateSavedViewInput>) {
   return ['name', 'description', 'visibility', 'teamId', 'filters', 'layout']
+    .some((field) => field in input)
+}
+
+/** Adds only present task view definition fields to a DynamoDB update expression. */
+function addTaskViewUpdateExpression(
+  input: ReturnType<typeof normalizeUpdateTaskViewInput>,
+  names: Record<string, string>,
+  values: Record<string, unknown>,
+  sets: string[],
+  removes: string[],
+) {
+  for (const field of ['name', 'visibility', 'definition'] as const) {
+    if (input[field] === undefined) continue
+    names[`#${field}`] = field
+    values[`:${field}`] = input[field]
+    sets.push(`#${field} = :${field}`)
+  }
+  for (const field of ['description', 'teamId'] as const) {
+    if (input[field] === undefined) continue
+    names[`#${field}`] = field
+    if (input[field] === null) removes.push(`#${field}`)
+    else {
+      values[`:${field}`] = input[field]
+      sets.push(`#${field} = :${field}`)
+    }
+  }
+}
+
+/** Returns whether an update changes shared task view definition metadata. */
+function hasTaskViewDefinitionChange(input: ReturnType<typeof normalizeUpdateTaskViewInput>) {
+  return ['name', 'description', 'visibility', 'teamId', 'definition']
     .some((field) => field in input)
 }
 
@@ -2463,6 +6150,12 @@ function optionalBoolean(value: unknown, label: string) {
   return value as boolean
 }
 
+/** Reads one required boolean without coercion. */
+function requireBoolean(value: unknown, label: string) {
+  if (typeof value !== 'boolean') invalidTaskView(`${label} is invalid.`)
+  return value
+}
+
 function requirePositiveInteger(value: unknown, label: string) {
   if (!Number.isSafeInteger(value) || (value as number) <= 0) {
     throw new WorkspaceSearchError(400, 'InvalidSavedView', `${label} must be a positive integer.`)
@@ -2498,6 +6191,77 @@ async function mapWithConcurrency<TInput, TOutput>(
   return output
 }
 
+/** Returns whether an unknown value is a non-array object record. */
+function isRecordValue(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** Creates a stable context key for one task view surface and resource scope. */
+function createTaskViewContextKey(surface: TaskViewSurface, scope: TaskViewScope) {
+  return `${surface}\0${canonicalValue(scope)}`
+}
+
+/** Compares two normalized task view scopes by their canonical structural value. */
+function taskViewScopesEqual(left: TaskViewScope, right: TaskViewScope) {
+  return canonicalValue(left) === canonicalValue(right)
+}
+
+/** Returns the Team that owns a Team-qualified task view scope when one exists. */
+function getTaskViewScopeTeamId(scope: TaskViewScope) {
+  if (scope.kind === 'team') return scope.teamId
+  if (scope.kind === 'project') return scope.teamId
+  return undefined
+}
+
+/** Returns whether a string is one supported workflow category. */
+function isTaskViewWorkflowCategory(value: string): value is WorkflowStatusCategory {
+  return taskViewWorkflowCategories.has(value)
+}
+
+/** Returns whether a string is one supported Work Item priority. */
+function isTaskViewPriority(value: string): value is WorkItemPriority {
+  return taskViewPriorities.has(value)
+}
+
+/** Reads one supported relative due-date preset. */
+function requireTaskViewDueDatePreset(value: unknown): TaskViewDueDatePreset {
+  if (typeof value === 'string' && taskViewDueDatePresets.has(value)) {
+    if (value === 'overdue' || value === 'today' || value === 'upcoming' || value === 'no-date') {
+      return value
+    }
+  }
+  return invalidTaskView('Task view due date preset is invalid.')
+}
+
+/** Reads a persisted task view surface without converting storage corruption into user input. */
+function requireStoredTaskViewSurface(value: unknown): TaskViewSurface {
+  try {
+    return requireTaskViewSurface(value)
+  } catch (error) {
+    throw new WorkspaceSearchError(503, 'InvalidTaskView', 'Task view data is invalid.', {
+      cause: error,
+    })
+  }
+}
+
+/** Reads a persisted task view scope without accepting an unknown discriminator. */
+function readStoredTaskViewScope(value: unknown): TaskViewScope {
+  try {
+    return normalizeTaskViewScope(value)
+  } catch (error) {
+    throw new WorkspaceSearchError(503, 'InvalidTaskView', 'Task view data is invalid.', {
+      cause: error,
+    })
+  }
+}
+
+/** Reads an optional persisted text field without accepting empty values. */
+function optionalStoredText(value: unknown) {
+  if (value === undefined) return undefined
+  if (typeof value === 'string' && value.trim()) return value.trim()
+  throw invalidStoredTaskView()
+}
+
 function encodeKeyPart(value: string) {
   return Buffer.from(value, 'utf8').toString('base64url')
 }
@@ -2510,12 +6274,45 @@ function createSavedViewRevisionConflict() {
   )
 }
 
+/** Creates the stable optimistic-concurrency conflict for task view mutations. */
+function createTaskViewRevisionConflict() {
+  return new WorkspaceSearchError(
+    409,
+    'TaskViewRevisionConflict',
+    'Task view changed. Reload and try again.',
+  )
+}
+
+/** Creates the stable conflict returned when an idempotency key is reused ambiguously. */
+function createTaskViewIdempotencyConflict() {
+  return new WorkspaceSearchError(
+    409,
+    'TaskViewIdempotencyConflict',
+    'Idempotency key was already used for another task view request.',
+  )
+}
+
+/** Creates a non-disclosing task view not-found error. */
+function createTaskViewNotFound() {
+  return new WorkspaceSearchError(404, 'TaskViewNotFound', 'Task view was not found.')
+}
+
 function invalidFilters(message: string): never {
   throw new WorkspaceSearchError(400, 'InvalidSearchFilters', message)
 }
 
 function invalidSavedView(message: string): never {
   throw new WorkspaceSearchError(400, 'InvalidSavedView', message)
+}
+
+/** Throws a stable task view input validation error. */
+function invalidTaskView(message: string): never {
+  throw new WorkspaceSearchError(400, 'InvalidTaskView', message)
+}
+
+/** Creates a stable error for malformed persisted task view state. */
+function invalidStoredTaskView() {
+  return new WorkspaceSearchError(503, 'InvalidTaskView', 'Task view data is invalid.')
 }
 
 function isTransactionConditionalCheckFailed(error: unknown) {
@@ -2543,32 +6340,11 @@ function isWorkspaceSearchTableDescription(table: TableDescription | undefined) 
 }
 
 function createDynamoDbClient() {
-  const endpoint = readEnvironment('DYNAMODB_ENDPOINT') ??
-    readEnvironment('AWS_ENDPOINT_URL_DYNAMODB') ??
-    readEnvironment('AWS_ENDPOINT_URL') ??
-    (typeof Bun !== 'undefined' && !readEnvironment('AWS_LAMBDA_FUNCTION_NAME')
-      ? 'http://localhost:4566'
-      : undefined)
-  return new DynamoDBClient({
-    region: readEnvironment('AWS_REGION') ?? readEnvironment('AWS_DEFAULT_REGION') ?? 'us-east-1',
-    ...(endpoint
-      ? {
-          endpoint,
-          credentials: {
-            accessKeyId: readEnvironment('AWS_ACCESS_KEY_ID') ?? 'test',
-            secretAccessKey: readEnvironment('AWS_SECRET_ACCESS_KEY') ?? 'test',
-          },
-        }
-      : {}),
-  })
+  return createConfiguredDynamoDbClient()
 }
 
 function shouldBootstrapLocalTable() {
-  return Boolean(
-    readEnvironment('DYNAMODB_ENDPOINT') ||
-    readEnvironment('AWS_ENDPOINT_URL_DYNAMODB') ||
-    (typeof Bun !== 'undefined' && !readEnvironment('AWS_LAMBDA_FUNCTION_NAME')),
-  )
+  return shouldBootstrapConfiguredLocalDynamoDb()
 }
 
 function readEnvironment(name: string) {

@@ -8,8 +8,16 @@ import * as lambdaNodejs from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import type { LambdaBuildPaths } from '../../config/lambda-build-paths';
 import type { StackParameters } from '../../config/stack-parameters';
+import {
+  bindWorkspaceSearchWriterFence,
+  type WorkspaceSearchWriterFenceResources,
+} from '../../policies/workspace-search-writer-fence';
 import type { DataStoreResources } from '../data-stores';
 import type { FileStorageResources } from '../file-storage';
+import {
+  bindRuntimeControls,
+  type RuntimeControlResources,
+} from '../runtime-controls';
 import type { WorkerChannels } from './channels';
 
 /**
@@ -24,8 +32,12 @@ export interface WorkItemImportWorkerInput {
   readonly lambdaBuildPaths: LambdaBuildPaths;
   /** Stack parameters used for authorization and audit behavior. */
   readonly parameters: StackParameters;
+  /** Dynamic operational controls shared by application runtimes. */
+  readonly runtimeControls: RuntimeControlResources;
   /** Durable import queue and dead-letter queue. */
   readonly workerChannels: WorkerChannels;
+  /** Exact source, target, and state tables protected by the writer fence. */
+  readonly workspaceSearchWriterFence: WorkspaceSearchWriterFenceResources;
 }
 
 /**
@@ -45,6 +57,7 @@ export function buildWorkItemImportWorker(
     planningTable,
     projectDirectoryTable,
     teamIssueEventsTable,
+    tenantAdministrationTable,
     workItemConfigurationTable,
     workItemsTable,
     workspaceAccessTable,
@@ -110,6 +123,7 @@ export function buildWorkItemImportWorker(
         SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
         TEAM_ISSUE_EVENTS_TABLE_NAME: teamIssueEventsTable.tableName,
         TEAM_ISSUES_TABLE_NAME: workItemsTable.tableName,
+        TENANT_ADMINISTRATION_TABLE_NAME: tenantAdministrationTable.tableName,
         WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
         WORKSPACE_SEARCH_TABLE_NAME: workspaceSearchTable.tableName,
         WORK_ITEM_CONFIGURATION_TABLE_NAME: workItemConfigurationTable.tableName,
@@ -118,6 +132,15 @@ export function buildWorkItemImportWorker(
         WORK_ITEMS_TABLE_NAME: workItemsTable.tableName,
       },
     },
+  );
+  bindWorkspaceSearchWriterFence(
+    input.workspaceSearchWriterFence,
+    workItemImportFunction,
+  );
+  bindRuntimeControls(
+    input.runtimeControls,
+    workItemImportFunction,
+    'work-item-import',
   );
   workItemImportFunction.addEventSource(
     new lambdaEventSources.SqsEventSource(workItemImportQueue, {
@@ -132,6 +155,7 @@ export function buildWorkItemImportWorker(
   auditEventsTable.grants.readWriteData(workItemImportFunction);
   projectDirectoryTable.grants.readData(workItemImportFunction);
   workspaceAccessTable.grants.readData(workItemImportFunction);
+  tenantAdministrationTable.grants.readData(workItemImportFunction);
   workItemImportFunction.addToRolePolicy(new iam.PolicyStatement({
     actions: ['dynamodb:GetItem', 'dynamodb:Query'],
     resources: [

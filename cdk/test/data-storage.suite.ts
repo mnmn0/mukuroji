@@ -1,7 +1,11 @@
 /** Registers durable data and file storage tests. */
 import { Match } from 'aws-cdk-lib/assertions';
 import { expect, test } from '@jest/globals';
-import { synthesizedTemplate } from './test-support';
+import {
+  API_DATA_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID,
+  findApiRuntimeConfigurationSource,
+  synthesizedTemplate,
+} from './test-support';
 
 test('upgrade keeps stateful resource logical IDs and enables retain with PITR', () => {
   const template = synthesizedTemplate;
@@ -15,11 +19,13 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
     'DeveloperPlatformTable772E085C',
     'TeamIssueEventsTableDD2B0F96',
     'ProjectDirectoryTable9ED01C01',
+    'TenantAdministrationTable621D59EB',
     'ListProjectTasksFunction2134AF4A',
     'DocumentsTable7E808EE5',
     'WorkItemCollaborationTableFDECF217',
     'WorkspaceSearchTable2575AD6B',
     'NotificationsTable76DCFC6C',
+    'FocusTable8B0E7E68',
     'RealtimeSessionsTable607096EB',
   ];
 
@@ -29,7 +35,7 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
 
   const tables = template.findResources('AWS::DynamoDB::Table');
 
-  expect(Object.keys(tables)).toHaveLength(20);
+  expect(Object.keys(tables)).toHaveLength(25);
 
   for (const table of Object.values(tables)) {
     expect(table).toEqual(expect.objectContaining({
@@ -44,6 +50,13 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
     }));
   }
 
+  expect(resources.CapacityPlanningTable0EECD517.Properties)
+    .toEqual(expect.objectContaining({
+      SSESpecification: {
+        SSEEnabled: true,
+      },
+    }));
+
   expect(resources.ProjectDirectoryTable9ED01C01.Properties)
     .toEqual(expect.objectContaining({
       GlobalSecondaryIndexes: expect.arrayContaining([
@@ -56,6 +69,13 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
           Projection: { ProjectionType: 'KEYS_ONLY' },
         }),
       ]),
+    }));
+  expect(resources.TenantAdministrationTable621D59EB.Properties)
+    .toEqual(expect.objectContaining({
+      TimeToLiveSpecification: {
+        AttributeName: 'expiresAt',
+        Enabled: true,
+      },
     }));
   expect(resources.TeamIssuesTable189D851D.Properties)
     .toEqual(expect.objectContaining({
@@ -97,6 +117,56 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
         }),
       ],
     }));
+});
+
+test('Focus state uses a retained expiring scope and record key table', () => {
+  const template = synthesizedTemplate;
+  const document = template.toJSON();
+  const focusTableLogicalId = document.Outputs.FocusTableName?.Value?.Ref;
+
+  expect(typeof focusTableLogicalId).toBe('string');
+  if (typeof focusTableLogicalId !== 'string') {
+    throw new Error('Focus table output was not synthesized.');
+  }
+
+  expect(document.Resources[focusTableLogicalId]).toEqual(expect.objectContaining({
+    DeletionPolicy: 'Retain',
+    UpdateReplacePolicy: 'Retain',
+    Properties: expect.objectContaining({
+      AttributeDefinitions: [
+        { AttributeName: 'scopeKey', AttributeType: 'S' },
+        { AttributeName: 'recordKey', AttributeType: 'S' },
+      ],
+      BillingMode: 'PAY_PER_REQUEST',
+      KeySchema: [
+        { AttributeName: 'scopeKey', KeyType: 'HASH' },
+        { AttributeName: 'recordKey', KeyType: 'RANGE' },
+      ],
+      PointInTimeRecoverySpecification: {
+        PointInTimeRecoveryEnabled: true,
+      },
+      SSESpecification: {
+        SSEEnabled: true,
+      },
+      TimeToLiveSpecification: {
+        AttributeName: 'expiresAt',
+        Enabled: true,
+      },
+    }),
+  }));
+  template.hasOutput('FocusTableName', {
+    Value: { Ref: focusTableLogicalId },
+  });
+
+  const workflowConfiguration =
+    document.Resources.ApiWorkflowRuntimeConfigurationSecret225372D1
+      .Properties.SecretString;
+  expect(findApiRuntimeConfigurationSource(
+    workflowConfiguration,
+    'FOCUS_TABLE_NAME',
+  )).toEqual({
+    'Fn::Base64': { Ref: focusTableLogicalId },
+  });
 });
 
 test('automation state is retained with due-schedule and execution history indexes', () => {
@@ -204,6 +274,8 @@ test('analytics state is retained with a due-delivery index and scoped API acces
         { AttributeName: 'recordKey', AttributeType: 'S' },
         { AttributeName: 'scheduleShard', AttributeType: 'S' },
         { AttributeName: 'nextDeliveryAtRecordKey', AttributeType: 'S' },
+        { AttributeName: 'teamId', AttributeType: 'S' },
+        { AttributeName: 'startAt', AttributeType: 'S' },
       ]),
       BillingMode: 'PAY_PER_REQUEST',
       GlobalSecondaryIndexes: [
@@ -214,6 +286,14 @@ test('analytics state is retained with a due-delivery index and scoped API acces
             { AttributeName: 'nextDeliveryAtRecordKey', KeyType: 'RANGE' },
           ],
           Projection: { ProjectionType: 'KEYS_ONLY' },
+        }),
+        expect.objectContaining({
+          IndexName: 'TimeEntryTeamDateIndex',
+          KeySchema: [
+            { AttributeName: 'teamId', KeyType: 'HASH' },
+            { AttributeName: 'startAt', KeyType: 'RANGE' },
+          ],
+          Projection: { ProjectionType: 'ALL' },
         }),
       ],
       KeySchema: [
@@ -226,10 +306,30 @@ test('analytics state is retained with a due-delivery index and scoped API acces
     }),
   }));
 
-  const apiFunction = template.toJSON().Resources.ListProjectTasksFunction2134AF4A;
-  expect(apiFunction.Properties.Environment.Variables).toEqual(expect.objectContaining({
-    ANALYTICS_SCHEDULE_INDEX_NAME: 'ScheduleDueIndex',
-    ANALYTICS_TABLE_NAME: { Ref: analyticsTableLogicalId },
+  const resources = template.toJSON().Resources;
+  const dataConfigurationSecretId =
+    API_DATA_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID;
+  const dataConfiguration = resources[dataConfigurationSecretId]
+    .Properties.SecretString;
+  expect(findApiRuntimeConfigurationSource(
+    dataConfiguration,
+    'ANALYTICS_SCHEDULE_INDEX_NAME',
+  )).toEqual({
+    'Fn::Base64': 'ScheduleDueIndex',
+  });
+  expect(findApiRuntimeConfigurationSource(
+    dataConfiguration,
+    'ANALYTICS_TABLE_NAME',
+  )).toEqual({
+    'Fn::Base64': { Ref: analyticsTableLogicalId },
+  });
+  expect(
+    resources.ListProjectTasksFunction2134AF4A
+      .Properties.Environment.Variables,
+  ).toEqual(expect.objectContaining({
+    MUKUROJI_API_DATA_CONFIG_SECRET_ARN: {
+      Ref: dataConfigurationSecretId,
+    },
   }));
 
   const apiAnalyticsPolicy = Object.entries(template.toJSON().Resources)
@@ -411,6 +511,11 @@ test('request intake uses a retained queue-indexed table with transient row expi
         { AttributeName: 'recordKey', AttributeType: 'S' },
         { AttributeName: 'queueKey', AttributeType: 'S' },
         { AttributeName: 'queueRecordKey', AttributeType: 'S' },
+        { AttributeName: 'triageActivityKey', AttributeType: 'S' },
+        { AttributeName: 'triageNextWakeAt', AttributeType: 'S' },
+        { AttributeName: 'triageOwnerKey', AttributeType: 'S' },
+        { AttributeName: 'triageTeamKey', AttributeType: 'S' },
+        { AttributeName: 'triageWakeShard', AttributeType: 'S' },
       ]),
       BillingMode: 'PAY_PER_REQUEST',
       KeySchema: [
@@ -425,6 +530,30 @@ test('request intake uses a retained queue-indexed table with transient row expi
             { AttributeName: 'queueRecordKey', KeyType: 'RANGE' },
           ],
           Projection: { ProjectionType: 'ALL' },
+        }),
+        expect.objectContaining({
+          IndexName: 'triage-team-activity-index',
+          KeySchema: [
+            { AttributeName: 'triageTeamKey', KeyType: 'HASH' },
+            { AttributeName: 'triageActivityKey', KeyType: 'RANGE' },
+          ],
+          Projection: { ProjectionType: 'ALL' },
+        }),
+        expect.objectContaining({
+          IndexName: 'triage-owner-activity-index',
+          KeySchema: [
+            { AttributeName: 'triageOwnerKey', KeyType: 'HASH' },
+            { AttributeName: 'triageActivityKey', KeyType: 'RANGE' },
+          ],
+          Projection: { ProjectionType: 'ALL' },
+        }),
+        expect.objectContaining({
+          IndexName: 'triage-wake-index',
+          KeySchema: [
+            { AttributeName: 'triageWakeShard', KeyType: 'HASH' },
+            { AttributeName: 'triageNextWakeAt', KeyType: 'RANGE' },
+          ],
+          Projection: { ProjectionType: 'KEYS_ONLY' },
         }),
       ]),
       PointInTimeRecoverySpecification: {
@@ -546,6 +675,185 @@ test('file bucket is private durable and scoped for direct browser transfers', (
   template.hasOutput('FileBucketName', {});
 });
 
+test('file bucket incarnation marker is create-once, immutable, and published exactly', () => {
+  const template = synthesizedTemplate;
+  const document = template.toJSON();
+  const fileBucketLogicalId = document.Outputs.FileBucketName?.Value?.Ref;
+  if (typeof fileBucketLogicalId !== 'string') {
+    throw new Error('File bucket output does not reference the retained bucket.');
+  }
+  expect(fileBucketLogicalId).toBe('FileBucketCDFCD6DE');
+
+  const markerEntries = Object.entries(
+    template.findResources('Custom::FileBucketIncarnationMarker'),
+  );
+  expect(markerEntries).toHaveLength(1);
+  const markerEntry = markerEntries[0];
+  if (!markerEntry) {
+    throw new Error('File bucket incarnation marker was not synthesized.');
+  }
+  const [markerLogicalId, markerResource] = markerEntry;
+  expect(markerResource).toEqual(expect.objectContaining({
+    Properties: expect.objectContaining({
+      BucketName: { Ref: fileBucketLogicalId },
+      ExpectedAccount: { Ref: 'AWS::AccountId' },
+      MarkerKey: 'system/data-integrity/file-bucket-incarnation/v1.json',
+      ServiceToken: expect.anything(),
+    }),
+  }));
+
+  expect(document.Outputs.FileBucketIncarnationMarkerKey?.Value).toEqual({
+    'Fn::GetAtt': [markerLogicalId, 'Key'],
+  });
+  expect(document.Outputs.FileBucketIncarnationMarkerVersionId?.Value).toEqual({
+    'Fn::GetAtt': [markerLogicalId, 'VersionId'],
+  });
+  expect(
+    document.Outputs.FileBucketIncarnationMarkerChecksumSha256?.Value,
+  ).toEqual({
+    'Fn::GetAtt': [markerLogicalId, 'ChecksumSHA256'],
+  });
+  expect(document.Outputs.FileBucketIncarnationMarkerSize?.Value).toEqual({
+    'Fn::GetAtt': [markerLogicalId, 'Size'],
+  });
+
+  const fileBucket = document.Resources[fileBucketLogicalId];
+  expect(fileBucket.Properties).not.toHaveProperty('ObjectLockEnabled');
+  expect(fileBucket.Properties).not.toHaveProperty('ObjectLockConfiguration');
+
+  const bucketPolicyEntry = Object.entries(
+    template.findResources('AWS::S3::BucketPolicy'),
+  ).find(([, resource]) =>
+    resource.Properties?.Bucket?.Ref === fileBucketLogicalId);
+  if (!bucketPolicyEntry) {
+    throw new Error('File bucket policy was not synthesized.');
+  }
+  const [bucketPolicyLogicalId, bucketPolicy] = bucketPolicyEntry;
+  const markerDependencies = Array.isArray(markerResource.DependsOn)
+    ? markerResource.DependsOn
+    : [markerResource.DependsOn];
+  expect(markerDependencies).toContain(bucketPolicyLogicalId);
+  const bucketPolicyDependencies = Array.isArray(bucketPolicy.DependsOn)
+    ? bucketPolicy.DependsOn
+    : [bucketPolicy.DependsOn];
+  expect(bucketPolicyDependencies).not.toContain(markerLogicalId);
+  const markerObjectArn = {
+    'Fn::Join': [
+      '',
+      [
+        { 'Fn::GetAtt': [fileBucketLogicalId, 'Arn'] },
+        '/system/data-integrity/file-bucket-incarnation/v1.json',
+      ],
+    ],
+  };
+  expect(bucketPolicy.Properties.PolicyDocument.Statement).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        Action: ['s3:DeleteObject', 's3:DeleteObjectVersion'],
+        Effect: 'Deny',
+        Principal: { AWS: '*' },
+        Resource: markerObjectArn,
+        Sid: 'FileBucketIncarnationMarkerCannotBeDeleted',
+      }),
+      expect.objectContaining({
+        Action: 's3:PutObject',
+        Condition: {
+          ArnNotEquals: {
+            'aws:PrincipalArn': expect.anything(),
+          },
+        },
+        Effect: 'Deny',
+        Principal: { AWS: '*' },
+        Resource: markerObjectArn,
+        Sid: 'OnlyFileBucketIncarnationMarkerProviderCanPut',
+      }),
+      expect.objectContaining({
+        Action: 's3:PutObject',
+        Condition: {
+          StringNotEquals: {
+            's3:if-none-match': '*',
+          },
+        },
+        Effect: 'Deny',
+        Principal: { AWS: '*' },
+        Resource: markerObjectArn,
+        Sid: 'FileBucketIncarnationMarkerRequiresCreateOnlyPut',
+      }),
+    ]),
+  );
+
+  const providerFunction = Object.values(
+    template.findResources('AWS::Lambda::Function'),
+  ).find((resource) =>
+    resource.Properties?.Description ===
+      'Creates or reconciles the immutable file-bucket incarnation marker.');
+  expect(providerFunction).toEqual(expect.objectContaining({
+    Properties: expect.objectContaining({
+      Handler: 'index.handler',
+      MemorySize: 256,
+      Runtime: 'nodejs22.x',
+      Timeout: 30,
+      TracingConfig: { Mode: 'Active' },
+    }),
+  }));
+  const providerPrincipalBoundary =
+    bucketPolicy.Properties.PolicyDocument.Statement.find(
+      (statement: unknown) =>
+        statement !== null &&
+        typeof statement === 'object' &&
+        Reflect.get(statement, 'Sid') ===
+          'OnlyFileBucketIncarnationMarkerProviderCanPut',
+    );
+  const providerPrincipalCondition =
+    providerPrincipalBoundary !== null &&
+    typeof providerPrincipalBoundary === 'object'
+      ? Reflect.get(providerPrincipalBoundary, 'Condition')
+      : undefined;
+  expect(providerPrincipalCondition).toEqual({
+    ArnNotEquals: {
+      'aws:PrincipalArn': providerFunction?.Properties.Role,
+    },
+  });
+
+  const providerPolicy = Object.values(
+    template.findResources('AWS::IAM::Policy'),
+  ).find((resource) => {
+    const serialized = JSON.stringify(resource);
+    return serialized.includes('FileBucketIncarnationMarkerFunction') &&
+      serialized.includes('s3:PutObject');
+  });
+  if (!providerPolicy) {
+    throw new Error('Marker provider IAM policy was not synthesized.');
+  }
+  expect(providerPolicy.Properties.PolicyDocument.Statement).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        Action: 's3:GetBucketVersioning',
+        Effect: 'Allow',
+        Resource: { 'Fn::GetAtt': [fileBucketLogicalId, 'Arn'] },
+      }),
+      expect.objectContaining({
+        Action: [
+          's3:GetObject',
+          's3:GetObjectVersion',
+          's3:PutObject',
+        ],
+        Effect: 'Allow',
+        Resource: {
+          'Fn::Join': [
+            '',
+            [
+              { 'Fn::GetAtt': [fileBucketLogicalId, 'Arn'] },
+              '/system/data-integrity/file-bucket-incarnation/v1.json',
+            ],
+          ],
+        },
+      }),
+    ]),
+  );
+  expect(JSON.stringify(providerPolicy)).not.toContain('"s3:ListBucket"');
+});
+
 test('collaboration notifications and realtime sessions use production-safe DynamoDB schemas', () => {
   const template = synthesizedTemplate;
   const bootstrapPayload = JSON.stringify(template.findResources('Custom::AWS'));
@@ -617,6 +925,10 @@ test('workspace search persists documents views and preferences in one retained 
     ],
     PointInTimeRecoverySpecification: {
       PointInTimeRecoveryEnabled: true,
+    },
+    TimeToLiveSpecification: {
+      AttributeName: 'expiresAt',
+      Enabled: true,
     },
   });
 
