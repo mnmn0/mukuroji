@@ -2,9 +2,19 @@ import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { createTranslator } from '../src/shared/i18n/i18n'
 import { triageConfigurationFixture } from '../src/triage/fixtures'
+import { parseOwnerStrategy } from '../src/triage/model/configurationDraft'
 import { TriageSettingsPanel } from '../src/triage/ui/TriageSettingsPanel'
 
 describe('TriageSettingsPanel', () => {
+  test('rejects malformed non-empty owner strategies instead of treating them as unowned', () => {
+    expect(parseOwnerStrategy('fixed')).toBeUndefined()
+    expect(parseOwnerStrategy('unowned')).toEqual({ type: 'unowned' })
+    expect(parseOwnerStrategy('fixed:user@example.com')).toEqual({
+      ownerUserId: 'user@example.com',
+      type: 'fixed',
+    })
+  })
+
   test('renders the configured bulk action checkboxes in a compact policy section', () => {
     const html = renderToStaticMarkup(
       <TriageSettingsPanel

@@ -187,4 +187,5 @@ export const triageMessages = {
   'triage.settings.saving': 'Saving',
   'triage.settings.saved': 'Triage settings saved.',
   'triage.settings.saveError': 'Triage settings could not be saved.',
+  'triage.settings.invalidOwnerStrategy': 'Enter unowned, fixed:user, or rotation:id for each owner strategy.',
 } as const

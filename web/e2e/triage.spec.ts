@@ -293,7 +293,7 @@ test('deep links, roving keyboard navigation, and Accept confirmation survive re
   await expect(page.getByTestId('triage-entry-detail')).toContainText('Accepted')
   await expect(page.getByRole('link', { name: 'Open canonical Work Item' })).toHaveAttribute(
     'href',
-    /\/projects\/refero\/issues\?teamId=core-team&issueId=triage-created-work-item/,
+    /\/teams\/core-team\/issues\?issueId=triage-created-work-item/,
   )
   expect(state.actionRequests).toBe(1)
   await page.reload()

@@ -87,6 +87,7 @@ import {
   TriageError,
   type TriageActionReferenceValidator,
   type TriageAdmissionValidator,
+  type TriageAuthorizationConditionChecks,
   type TriageConfigurationReferenceValidator,
 } from '../../modules/triage'
 import {
@@ -635,6 +636,92 @@ const TRIAGE_NON_GUEST_MEMBER_CONDITION_OPTIONS: WorkspaceActiveMemberConditionO
   allowedRoles: ['owner', 'admin', 'member'],
 }
 
+/** Identifies one configured owner that must retain access to a destination Project. */
+type TriageOwnerProjectReference = {
+  /** Workspace member selected as the owner. */
+  memberUserId: string
+  /** Project that the owner must be able to operate in. */
+  projectId: string
+}
+
+/** Builds commit-time Project membership fences for configured Triage owners.
+ *
+ * @param projectDirectory Authoritative Project membership reader.
+ * @param workspaceId Owning Workspace identifier.
+ * @param references Owner and destination Project pairs to fence.
+ * @param errorCode Stable error code when an owner lacks Project access.
+ * @param errorMessage Safe error message when an owner lacks Project access.
+ * @returns Deduplicated Project membership condition checks.
+ */
+async function createTriageOwnerProjectConditionChecks(
+  projectDirectory: Pick<DynamoDbProjectDirectoryClient, 'createProjectAccessConditionCheck'>,
+  workspaceId: string,
+  references: readonly TriageOwnerProjectReference[],
+  errorCode: string,
+  errorMessage: string,
+): Promise<TriageAuthorizationConditionChecks> {
+  const uniqueReferences = new Map<string, TriageOwnerProjectReference>()
+  for (const reference of references) {
+    const memberUserId = normalizeProjectMemberKey(reference.memberUserId)
+    uniqueReferences.set(`${reference.projectId}\u0000${memberUserId}`, {
+      memberUserId,
+      projectId: reference.projectId,
+    })
+  }
+  const conditionChecks = await Promise.all([...uniqueReferences.values()].map(async (reference) =>
+    await projectDirectory.createProjectAccessConditionCheck(
+      workspaceId,
+      reference.projectId,
+      reference.memberUserId,
+      'member',
+    )
+  ))
+  if (conditionChecks.some((conditionCheck) => conditionCheck === undefined)) {
+    throw new TriageError(409, errorCode, errorMessage)
+  }
+  return conditionChecks.flatMap((conditionCheck) =>
+    conditionCheck === undefined ? [] : [conditionCheck]
+  )
+}
+
+/** Collects every configured owner and Project pair that can be selected together.
+ *
+ * @param input Replacement Team Triage configuration.
+ * @returns Deduplicated candidate owner and Project references.
+ */
+function collectTriageConfigurationOwnerProjectReferences(
+  input: UpdateTriageConfigurationInput,
+): TriageOwnerProjectReference[] {
+  const rotationsById = new Map(input.rotations.map((rotation) => [rotation.id, rotation]))
+  const references: TriageOwnerProjectReference[] = []
+  for (const rule of input.rules) {
+    if (!rule.projectId) continue
+    if (rule.owner.type === 'fixed') {
+      references.push({ memberUserId: rule.owner.ownerUserId, projectId: rule.projectId })
+      continue
+    }
+    if (rule.owner.type !== 'rotation') continue
+    const rotation = rotationsById.get(rule.owner.rotationId)
+    if (!rotation) continue
+    for (const memberUserId of rotation.memberUserIds) {
+      references.push({ memberUserId, projectId: rule.projectId })
+    }
+  }
+  for (const policy of input.slaPolicies) {
+    if (!policy.escalationOwnerUserId) continue
+    for (const rule of input.rules) {
+      if (!rule.projectId || !rule.sourceKinds.some((kind) => policy.sourceKinds.includes(kind))) {
+        continue
+      }
+      references.push({
+        memberUserId: policy.escalationOwnerUserId,
+        projectId: rule.projectId,
+      })
+    }
+  }
+  return references
+}
+
 /** Creates live Project/member validation for every Triage admission attempt.
  *
  * @param projectDirectory Authoritative active Team and Project directory reader.
@@ -642,7 +729,10 @@ const TRIAGE_NON_GUEST_MEMBER_CONDITION_OPTIONS: WorkspaceActiveMemberConditionO
  * @returns A validator invoked after each current configuration evaluation.
  */
 export function createTriageAdmissionValidator(
-  projectDirectory: Pick<DynamoDbProjectDirectoryClient, 'createActiveReferenceConditionChecks'>,
+  projectDirectory: Pick<
+    DynamoDbProjectDirectoryClient,
+    'createActiveReferenceConditionChecks' | 'createProjectAccessConditionCheck'
+  >,
   workspaceAccess: Pick<DynamoDbWorkspaceAccessClient, 'createActiveMemberConditionCheck'>,
 ): TriageAdmissionValidator {
   return async (entry, configuration) => {
@@ -694,12 +784,26 @@ export function createTriageAdmissionValidator(
         'A configured Triage owner is not an active Workspace member.',
       )
     }
+    const admissionProjectId = entry.projectId
+    const ownerProjectConditionChecks = await createTriageOwnerProjectConditionChecks(
+      projectDirectory,
+      entry.workspaceId,
+      admissionProjectId
+        ? [...memberUserIds].map((memberUserId) => ({
+            memberUserId,
+            projectId: admissionProjectId,
+          }))
+        : [],
+      'TriageAdmissionOwnerProjectUnavailable',
+      'A configured Triage owner cannot access the destination Project.',
+    )
     return {
       transactItems: [
         ...directoryConditionChecks,
         ...memberConditionChecks.flatMap((conditionCheck) =>
           conditionCheck === undefined ? [] : [conditionCheck]
         ),
+        ...ownerProjectConditionChecks,
       ],
     }
   }
@@ -707,7 +811,10 @@ export function createTriageAdmissionValidator(
 
 /** Creates commit-time guards for every directory and member referenced by settings. */
 export function createTriageConfigurationReferenceValidator(
-  projectDirectory: Pick<DynamoDbProjectDirectoryClient, 'createActiveReferenceConditionChecks'>,
+  projectDirectory: Pick<
+    DynamoDbProjectDirectoryClient,
+    'createActiveReferenceConditionChecks' | 'createProjectAccessConditionCheck'
+  >,
   workspaceAccess: Pick<DynamoDbWorkspaceAccessClient, 'createActiveMemberConditionCheck'>,
 ): TriageConfigurationReferenceValidator {
   return async (workspaceId: string, teamId: string, input: UpdateTriageConfigurationInput) => {
@@ -780,11 +887,19 @@ export function createTriageConfigurationReferenceValidator(
         'A configured Triage owner is not an active Workspace member.',
       )
     }
+    const ownerProjectConditionChecks = await createTriageOwnerProjectConditionChecks(
+      projectDirectory,
+      workspaceId,
+      collectTriageConfigurationOwnerProjectReferences(input),
+      'TriageConfigurationOwnerProjectUnavailable',
+      'A configured Triage owner cannot access a referenced Project.',
+    )
     const transactItems = [
       ...directoryConditionChecks,
       ...memberConditionChecks.flatMap((conditionCheck) =>
         conditionCheck === undefined ? [] : [conditionCheck]
       ),
+      ...ownerProjectConditionChecks,
     ]
     if (transactItems.length > 98) {
       throw new TriageError(

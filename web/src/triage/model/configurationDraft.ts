@@ -1,4 +1,19 @@
-import type { TriageOwnerRotation } from '../api/types'
+import type { TriageOwnerRotation, TriageOwnerStrategy } from '../api/types'
+
+/** Parses compact owner-strategy text without accepting malformed non-empty input.
+ *
+ * @param value Editable owner-strategy text.
+ * @returns A supported owner strategy, or undefined when non-empty text is malformed.
+ */
+export function parseOwnerStrategy(value: string): TriageOwnerStrategy | undefined {
+  const normalized = value.trim()
+  if (!normalized || normalized === 'unowned') return { type: 'unowned' }
+  const [type, ...rest] = normalized.split(':')
+  const identifier = rest.join(':').trim()
+  if (type === 'fixed' && identifier) return { ownerUserId: identifier, type: 'fixed' }
+  if (type === 'rotation' && identifier) return { rotationId: identifier, type: 'rotation' }
+  return undefined
+}
 
 /**
  * Creates a non-reusable stable identifier for a new Triage configuration item.

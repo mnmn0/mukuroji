@@ -187,4 +187,5 @@ export const triageMessages = {
   'triage.settings.saving': '保存中',
   'triage.settings.saved': 'Triage 設定を保存しました。',
   'triage.settings.saveError': 'Triage 設定を保存できませんでした。',
+  'triage.settings.invalidOwnerStrategy': '担当には unowned、fixed:user、または rotation:id を入力してください。',
 } as const

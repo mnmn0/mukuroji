@@ -98,6 +98,10 @@ test('rejects Team-level admission when the strongly read Team is missing', asyn
       })
       throw new ProjectDataError(404, 'TeamNotFound', 'Team not found.')
     },
+    /** Is not reached when the active Team reference is unavailable. */
+    async createProjectAccessConditionCheck() {
+      throw new Error('Project access should not be read after Team validation fails.')
+    },
   }, {
     /** Records unexpected member reads after Team validation fails. */
     async createActiveMemberConditionCheck() {
@@ -138,6 +142,7 @@ test('returns distinct Team/Project guards and one version guard for a shared ow
   } satisfies TriageConfiguration
   let memberReads = 0
   const memberOptions: unknown[] = []
+  const projectAccessReads: string[] = []
   const validateAdmission = createTriageAdmissionValidator({
     /** Returns exact active Team and Project row guards. */
     async createActiveReferenceConditionChecks(directoryId, teamId, projectId) {
@@ -159,6 +164,17 @@ test('returns distinct Team/Project guards and one version guard for a shared ow
           ConditionExpression: '#entryType = :project',
         },
       }]
+    },
+    /** Returns the exact destination Project membership guard. */
+    async createProjectAccessConditionCheck(_workspaceId, projectId, memberUserId) {
+      projectAccessReads.push(`${projectId}:${memberUserId}`)
+      return {
+        ConditionCheck: {
+          TableName: 'ProjectDirectoryTable',
+          Key: { projectId, memberUserId },
+          ConditionExpression: '#entryType = :projectMember',
+        },
+      }
     },
   }, {
     /** Returns the exact active membership version guard. */
@@ -185,17 +201,53 @@ test('returns distinct Team/Project guards and one version guard for a shared ow
   expect(memberOptions).toEqual([{
     allowedRoles: ['owner', 'admin', 'member'],
   }])
-  expect(contribution.transactItems).toHaveLength(3)
+  expect(projectAccessReads).toEqual(['project-1:owner@example.com'])
+  expect(contribution.transactItems).toHaveLength(4)
   expect(contribution.transactItems.map((item) => item.ConditionCheck?.TableName)).toEqual([
     'ProjectDirectoryTable',
     'ProjectDirectoryTable',
     'WorkspaceAccessTable',
+    'ProjectDirectoryTable',
   ])
+})
+
+test('rejects admission when a configured owner lacks destination Project access', async () => {
+  const validateAdmission = createTriageAdmissionValidator({
+    /** Returns an active destination Project without a membership grant. */
+    async createActiveReferenceConditionChecks() {
+      return []
+    },
+    /** Simulates the owner Project membership disappearing before admission. */
+    async createProjectAccessConditionCheck() {
+      return undefined
+    },
+  }, {
+    /** Keeps Workspace membership valid so the Project check is reached. */
+    async createActiveMemberConditionCheck() {
+      return {
+        ConditionCheck: {
+          TableName: 'WorkspaceAccessTable',
+          Key: { workspaceId: 'workspace-1', recordKey: 'MEMBER#owner@example.com' },
+          ConditionExpression: '#status = :active',
+        },
+      }
+    },
+  })
+
+  await expect(validateAdmission({
+    ...ENTRY,
+    ownerUserId: 'owner@example.com',
+    projectId: 'project-1',
+  }, CONFIGURATION)).rejects.toMatchObject({
+    status: 409,
+    code: 'TriageAdmissionOwnerProjectUnavailable',
+  })
 })
 
 test('binds every configured Project and member reference to settings persistence', async () => {
   const projectReads: (string | undefined)[] = []
   const memberReads: string[] = []
+  const projectAccessReads: string[] = []
   const memberOptions: unknown[] = []
   const validate = createTriageConfigurationReferenceValidator({
     async createActiveReferenceConditionChecks(directoryId, teamId, projectId) {
@@ -213,6 +265,16 @@ test('binds every configured Project and member reference to settings persistenc
           ConditionExpression: 'attribute_not_exists(archivedAt)',
         },
       }] : [])]
+    },
+    async createProjectAccessConditionCheck(_workspaceId, projectId, memberUserId) {
+      projectAccessReads.push(`${projectId}:${memberUserId}`)
+      return {
+        ConditionCheck: {
+          TableName: 'ProjectDirectoryTable',
+          Key: { projectId, memberUserId },
+          ConditionExpression: '#entryType = :projectMember',
+        },
+      }
     },
   }, {
     async createActiveMemberConditionCheck(workspaceId, memberKey, options) {
@@ -269,7 +331,11 @@ test('binds every configured Project and member reference to settings persistenc
     { allowedRoles: ['owner', 'admin', 'member'] },
     { allowedRoles: ['owner', 'admin', 'member'] },
   ])
-  expect(contribution.transactItems).toHaveLength(5)
+  expect(projectAccessReads).toEqual([
+    'project-1:fixed@example.com',
+    'project-1:escalation@example.com',
+  ])
+  expect(contribution.transactItems).toHaveLength(7)
 })
 
 test('binds assignment destination and owner references to the action transaction', async () => {

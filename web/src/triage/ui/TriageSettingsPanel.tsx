@@ -12,6 +12,7 @@ import type {
 } from '../api'
 import {
   createUniqueTriageConfigurationId,
+  parseOwnerStrategy,
   replaceTriageRotationMembers,
 } from '../model/configurationDraft'
 
@@ -160,7 +161,7 @@ function TriageSettingsEditor({
     TriageBulkOperation['action'][]
   >(() => [...configuration.allowedBulkActions])
   const [retentionDays, setRetentionDays] = useState(configuration.retentionDays)
-  const [localError, setLocalError] = useState(false)
+  const [localError, setLocalError] = useState<MessageKey | undefined>()
 
   /** Adds an empty routing rule while preserving raw text drafts. */
   const addRule = () => {
@@ -192,17 +193,27 @@ function TriageSettingsEditor({
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (!canManage || !onSave || isSaving) return
-    setLocalError(false)
+    setLocalError(undefined)
+    let errorKey: MessageKey = 'triage.settings.saveError'
     try {
-      const submittedRules = rules.map((rule, index) => ({
-        ...rule,
-        keywords: parseList(ruleKeywordDrafts[rule.id] ?? rule.keywords.join(', ')),
-        order: index,
-        owner: parseOwnerStrategy(ruleOwnerDrafts[rule.id] ?? formatOwnerStrategy(rule.owner)),
-        sourceKinds: parseSourceKinds(
-          ruleSourceKindDrafts[rule.id] ?? rule.sourceKinds.join(', '),
-        ),
-      }))
+      const submittedRules = rules.map((rule, index) => {
+        const owner = parseOwnerStrategy(
+          ruleOwnerDrafts[rule.id] ?? formatOwnerStrategy(rule.owner),
+        )
+        if (!owner) {
+          errorKey = 'triage.settings.invalidOwnerStrategy'
+          throw new Error('Invalid Triage owner strategy.')
+        }
+        return {
+          ...rule,
+          keywords: parseList(ruleKeywordDrafts[rule.id] ?? rule.keywords.join(', ')),
+          order: index,
+          owner,
+          sourceKinds: parseSourceKinds(
+            ruleSourceKindDrafts[rule.id] ?? rule.sourceKinds.join(', '),
+          ),
+        }
+      })
       const submittedRotations = rotations.map((rotation) => replaceTriageRotationMembers(
         rotation,
         parseList(rotationMemberDrafts[rotation.id] ?? rotation.memberUserIds.join(', ')),
@@ -222,7 +233,7 @@ function TriageSettingsEditor({
         slaPolicies: submittedSlaPolicies,
       })
     } catch {
-      setLocalError(true)
+      setLocalError(errorKey)
     }
   }
 
@@ -465,7 +476,9 @@ function TriageSettingsEditor({
       </SettingsSection>
 
       {errorMessage || localError ? (
-        <p className="text-sm font-semibold text-red-700" role="alert">{errorMessage ?? t('triage.settings.saveError')}</p>
+        <p className="text-sm font-semibold text-red-700" role="alert">
+          {errorMessage ?? t(localError ?? 'triage.settings.saveError')}
+        </p>
       ) : didSave ? (
         <p className="text-sm font-semibold text-emerald-700" role="status">{t('triage.settings.saved')}</p>
       ) : null}
@@ -648,15 +661,6 @@ function formatOwnerStrategy(owner: TriageOwnerStrategy) {
   if (owner.type === 'fixed') return `fixed:${owner.ownerUserId}`
   if (owner.type === 'rotation') return `rotation:${owner.rotationId}`
   return 'unowned'
-}
-
-/** Parses a compact owner-strategy value with an unowned fallback. */
-function parseOwnerStrategy(value: string): TriageOwnerStrategy {
-  const [type, ...rest] = value.trim().split(':')
-  const identifier = rest.join(':').trim()
-  if (type === 'fixed' && identifier) return { ownerUserId: identifier, type: 'fixed' }
-  if (type === 'rotation' && identifier) return { rotationId: identifier, type: 'rotation' }
-  return { type: 'unowned' }
 }
 
 /** Replaces one immutable array entry by index. */
