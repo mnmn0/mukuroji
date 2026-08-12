@@ -239,6 +239,7 @@ export const workspaceMessages = {
   'workspace.planningUpdate.state.current': 'Current',
   'workspace.planningUpdate.state.stale': 'Stale',
   'workspace.planningUpdate.state.overdue': 'Overdue',
+  'workspace.planningUpdate.unavailable': 'Project update status unavailable.',
   'workspace.planningUpdate.error.loading': 'Project update status could not be loaded.',
   'workspace.dashboard.decisionTitle': 'Next decisions',
   'workspace.dashboard.decisionMeta': '{count} items waiting',

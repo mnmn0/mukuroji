@@ -6666,9 +6666,14 @@ routeApp.put('/api/planning/updates/cadence', async (c) => {
           expectation,
         )
         c.header('Idempotency-Replayed', 'true')
+        const replayPlanning = filterPlanningSnapshotForPrincipal(principal, snapshot)
         return c.json({
-          planning: filterPlanningSnapshotForPrincipal(principal, snapshot),
-          updateTarget: replay.updateTarget,
+          planning: replayPlanning,
+          updateTarget: filterPlanningUpdateTargetSummaryForPrincipal(
+            principal,
+            snapshot,
+            replay.updateTarget,
+          ),
         })
       }
       reservationToRelease = {
@@ -6722,9 +6727,15 @@ routeApp.put('/api/planning/updates/cadence', async (c) => {
       cadenceTransaction,
     )
     mutationCommitted = true
+    const filteredPlanning = filterPlanningSnapshotForPrincipal(principal, response.planning)
     return c.json({
       ...response,
-      planning: filterPlanningSnapshotForPrincipal(principal, response.planning),
+      planning: filteredPlanning,
+      updateTarget: filterPlanningUpdateTargetSummaryForPrincipal(
+        principal,
+        response.planning,
+        response.updateTarget,
+      ),
     })
   } catch (error) {
     if (reservationToRelease && !mutationCommitted) {
@@ -6897,12 +6908,15 @@ routeApp.get('/api/planning/updates', async (c) => {
     })
     const visibleUpdates = await filterPlanningUpdatesByCapturedScope(principal, page.updates)
     while (limit !== undefined && visibleUpdates.length < limit && page.nextCursor) {
+      const remaining = limit - visibleUpdates.length
       page = await workItemDependencies.planning.listUpdates(principal.directoryId, {
         target,
-        limit,
+        limit: remaining,
         cursor: page.nextCursor,
       })
-      visibleUpdates.push(...await filterPlanningUpdatesByCapturedScope(principal, page.updates))
+      visibleUpdates.push(
+        ...(await filterPlanningUpdatesByCapturedScope(principal, page.updates)).slice(0, remaining),
+      )
     }
     return c.json({
       ...page,
@@ -7472,6 +7486,7 @@ routeApp.post('/api/planning/entities/:entityId/move', async (c) => {
         'manager',
       )
     }
+    requirePlanningMoveDoesNotInvalidateUpdateCadence(snapshot, entityId, input)
     const response = await workItemDependencies.planning.move(principal.directoryId, entityId, input, workItemState)
     return c.json(filterPlanningSnapshotForPrincipal(principal, response.planning))
   } catch (error) {
@@ -21859,6 +21874,45 @@ function collectActivePlanningDescendants(
   return descendants
 }
 
+/**
+ * Rejects a Team / Project scope move that would leave an Initiative cadence owned by its old scope.
+ *
+ * @param snapshot - Complete Planning snapshot read before the move.
+ * @param entityId - Root entity being moved.
+ * @param input - Requested hierarchy and scope destination.
+ */
+function requirePlanningMoveDoesNotInvalidateUpdateCadence(
+  snapshot: PlanningSnapshot,
+  entityId: string,
+  input: MovePlanningEntityInput,
+): void {
+  const current = snapshot.entities.find((entity) => entity.id === entityId)
+  if (!current) return
+
+  const movedEntities = [
+    current,
+    ...collectActivePlanningDescendants(snapshot.entities, current.id),
+  ]
+  const movedEntityIdsWithScopeChange = new Set(
+    movedEntities
+      .filter((entity) => entity.teamId !== input.teamId || entity.projectId !== input.projectId)
+      .map((entity) => entity.id),
+  )
+  const cadenceTarget = snapshot.updateTargets.find((updateTarget) =>
+    updateTarget.target.type === 'initiative' &&
+    updateTarget.cadence !== undefined &&
+    updateTarget.archivedAt === undefined &&
+    movedEntityIdsWithScopeChange.has(updateTarget.target.entityId)
+  )
+  if (!cadenceTarget) return
+
+  throw new PlanningError(
+    409,
+    'PlanningMoveRequiresCadenceReconfiguration',
+    'Reconfigure or remove the active Planning update cadence before changing its Team or Project scope.',
+  )
+}
+
 /** Search と saved view authorization に使う current directory snapshot です。 */
 type WorkspaceSearchContext = {
   /** Active Team/Project hierarchy です。 */
@@ -31019,6 +31073,82 @@ function createPlanningProjectScopeKey(teamId: string, projectId: string): strin
 }
 
 /**
+ * Removes a latest update summary when its immutable captured scope is unavailable now.
+ *
+ * @param updateTarget - Candidate target summary from the canonical Planning snapshot.
+ * @param currentScope - Current scope of the target entity, or the qualified Project target.
+ * @param projectScopeKeys - Team-qualified Project scopes readable by the principal.
+ * @param teamIds - Team scopes readable by the principal.
+ * @returns Target summary with only currently readable latest content.
+ */
+function filterPlanningLatestUpdateSummaryForPrincipal(
+  updateTarget: PlanningUpdateTargetSummary,
+  currentScope: Pick<PlanningEntity, 'teamId' | 'projectId'> | undefined,
+  projectScopeKeys?: ReadonlySet<string>,
+  teamIds?: ReadonlySet<string>,
+): PlanningUpdateTargetSummary {
+  if (updateTarget.latestUpdate === undefined) return updateTarget
+
+  const capturedScope = updateTarget.latestUpdate.capturedScope
+  const currentScopeMatches = capturedScope !== undefined && currentScope !== undefined &&
+    capturedScope.teamId === currentScope.teamId &&
+    capturedScope.projectId === currentScope.projectId
+  const principalScopeMatches = projectScopeKeys === undefined || teamIds === undefined
+    ? true
+    : capturedScope !== undefined && (
+        capturedScope.projectId !== undefined
+          ? capturedScope.teamId !== undefined && projectScopeKeys.has(
+              createPlanningProjectScopeKey(capturedScope.teamId, capturedScope.projectId),
+            )
+          : capturedScope.teamId !== undefined && teamIds.has(capturedScope.teamId)
+      )
+  const filtered = structuredClone(updateTarget)
+  if (!currentScopeMatches || !principalScopeMatches) {
+    delete filtered.latestUpdate
+    return filtered
+  }
+  if (filtered.latestUpdate) delete filtered.latestUpdate.capturedScope
+  return filtered
+}
+
+/**
+ * Removes server-only captured-scope metadata from a readable latest summary.
+ *
+ * @param updateTarget - Target summary whose response representation is being detached.
+ * @returns Target summary without server-only captured-scope metadata.
+ */
+function stripPlanningLatestUpdateCapturedScope(
+  updateTarget: PlanningUpdateTargetSummary,
+): PlanningUpdateTargetSummary {
+  const filtered = structuredClone(updateTarget)
+  if (filtered.latestUpdate) delete filtered.latestUpdate.capturedScope
+  return filtered
+}
+
+/**
+ * Applies the current principal and target-scope filter to one idempotent response target.
+ *
+ * @param principal - Authenticated principal receiving the response.
+ * @param snapshot - Current canonical Planning snapshot used to resolve target scope.
+ * @param updateTarget - Receipt or mutation target summary to sanitize.
+ * @returns Target summary safe for the current principal, with stale latest content removed.
+ */
+function filterPlanningUpdateTargetSummaryForPrincipal(
+  principal: ProjectPrincipal,
+  snapshot: PlanningSnapshot,
+  updateTarget: PlanningUpdateTargetSummary,
+): PlanningUpdateTargetSummary {
+  const filtered = filterPlanningSnapshotForPrincipal(principal, {
+    ...snapshot,
+    updateTargets: [structuredClone(updateTarget)],
+  }).updateTargets[0]
+  if (filtered) return filtered
+  const redacted = structuredClone(updateTarget)
+  delete redacted.latestUpdate
+  return redacted
+}
+
+/**
  * Removes Planning records outside the principal's current Team and Project scope.
  *
  * @param principal - Authenticated principal whose current access bounds the response.
@@ -31031,11 +31161,26 @@ function filterPlanningSnapshotForPrincipal(
 ): PlanningSnapshot {
   if (
     principal.isSystemAdmin ||
-    principal.enterprisePermissions === undefined ||
     principal.enterpriseRouteAuthorizedAtResource &&
       principal.enterpriseAuthorizationResource?.kind === 'workspace'
   ) {
-    return snapshot
+    return {
+      ...snapshot,
+      updateTargets: snapshot.updateTargets.map(stripPlanningLatestUpdateCapturedScope),
+    }
+  }
+  if (principal.enterprisePermissions === undefined) {
+    const entityById = new Map(snapshot.entities.map((entity) => [entity.id, entity]))
+    return {
+      ...snapshot,
+      updateTargets: snapshot.updateTargets.map((updateTarget) => {
+        const target = updateTarget.target
+        const currentScope = target.type === 'initiative'
+          ? entityById.get(target.entityId)
+          : target
+        return filterPlanningLatestUpdateSummaryForPrincipal(updateTarget, currentScope)
+      }).map(stripPlanningLatestUpdateCapturedScope),
+    }
   }
 
   const projectScopeKeys = new Set(
@@ -31095,14 +31240,28 @@ function filterPlanningSnapshotForPrincipal(
         : { milestoneId: undefined }),
       goalIds: link.goalIds.filter((goalId) => entityIds.has(goalId)),
     }))
-  const updateTargets = snapshot.updateTargets.filter((updateTarget) =>
-    updateTarget.target.type === 'initiative'
-      ? entityIds.has(updateTarget.target.entityId)
-      : projectScopeKeys.has(createPlanningProjectScopeKey(
-          updateTarget.target.teamId,
-          updateTarget.target.projectId,
-        ))
-  )
+  const updateTargets = snapshot.updateTargets
+    .filter((updateTarget) =>
+      updateTarget.target.type === 'initiative'
+        ? entityIds.has(updateTarget.target.entityId)
+        : projectScopeKeys.has(createPlanningProjectScopeKey(
+            updateTarget.target.teamId,
+            updateTarget.target.projectId,
+          ))
+    )
+    .map((updateTarget) => {
+      const target = updateTarget.target
+      const currentScope = target.type === 'initiative'
+        ? entities.find((entity) => entity.id === target.entityId)
+        : target
+      return filterPlanningLatestUpdateSummaryForPrincipal(
+        updateTarget,
+        currentScope,
+        projectScopeKeys,
+        teamIds,
+      )
+    })
+    .map(stripPlanningLatestUpdateCapturedScope)
   const criticalEntityIds = snapshot.criticalPath.entityIds.filter((entityId) =>
     entityIds.has(entityId)
   )

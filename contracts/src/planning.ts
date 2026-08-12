@@ -330,7 +330,10 @@ export type PlanningLatestUpdateSummary = Pick<
   | 'authorMemberKey'
   | 'coveredDueAt'
   | 'createdAt'
->
+> & {
+  /** Latest update が publish された時点の immutable Team / Project scope です。 */
+  capturedScope?: PlanningUpdateScopeSnapshot
+}
 
 /** Snapshot 上の update target cadence と latest state です。 */
 export type PlanningUpdateTargetSummary = {

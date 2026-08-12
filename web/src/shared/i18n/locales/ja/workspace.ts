@@ -239,6 +239,7 @@ export const workspaceMessages = {
   'workspace.planningUpdate.state.current': '最新',
   'workspace.planningUpdate.state.stale': '更新待ち',
   'workspace.planningUpdate.state.overdue': '期限超過',
+  'workspace.planningUpdate.unavailable': 'プロジェクト更新状況を利用できません。',
   'workspace.planningUpdate.error.loading': 'プロジェクト更新状況を読み込めませんでした。',
   'workspace.dashboard.decisionTitle': '次の判断対象',
   'workspace.dashboard.decisionMeta': '{count}件の確認待ち',

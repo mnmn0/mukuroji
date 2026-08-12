@@ -21,6 +21,7 @@ import type { CompleteIdempotencyRequest } from '../../../developer-platform/app
 import type {
   PlanningMutationResponse,
   PlanningSnapshot,
+  PlanningUpdateTarget,
 } from '@mukuroji/contracts'
 import {
   PLANNING_SCHEMA_VERSION,
@@ -470,6 +471,126 @@ test('configures, publishes, pages, exports, and watches a qualified Project upd
   )
   expect(watched.status).toBe(200)
   expect(await watched.json()).toHaveProperty('watch')
+})
+
+test('keeps filtered Planning history within the requested limit while advancing the cursor', async () => {
+  const oldScope = {
+    teamId: 'other-team',
+    projectId: 'other-project',
+  }
+  const target: PlanningUpdateTarget = { type: 'initiative', entityId: 'paged-initiative' }
+  configureFakeProjectClients(true, {
+    role: 'manager',
+    workspaceRole: 'owner',
+    projectAccesses: [{ ...oldScope, role: 'manager' }],
+    additionalTeams: [{
+      id: oldScope.teamId,
+      name: 'Other Team',
+      projects: [{ id: oldScope.projectId, name: 'Other Project', tone: 'purple' }],
+    }],
+  })
+  const planning = new InMemoryPlanningClient(() => new Date('2026-08-07T00:00:00.000Z'))
+  await seedPlanningUpdateInitiative(planning, target.entityId, oldScope.teamId)
+  setTestAppDependencies({ planning })
+  await planningApiRequest('/api/planning/updates/cadence', 'PUT', {
+    target,
+    cadence: {
+      updateOwnerMemberKey: 'demo@example.com',
+      cadence: { unit: 'week', count: 1 },
+      timeZone: 'UTC',
+      nextDueAt: '2026-08-10T00:00:00.000Z',
+      reminderHoursBefore: 24,
+    },
+    expectedRevision: 3,
+  })
+  const firstPublished = await planningApiRequest('/api/planning/updates', 'POST', {
+    target,
+    id: 'paged-initiative-old-scope',
+    health: 'on-track',
+    risk: 'low',
+    summary: 'Old scope update.',
+    riskSummary: '',
+    decisionSummary: '',
+    helpNeeded: '',
+    nextAction: '',
+    evidence: [],
+    expectedRevision: 4,
+  })
+  expect(firstPublished.status).toBe(201)
+
+  await planning.move('user#demo@example.com', `${target.entityId}-portfolio`, {
+    teamId: 'core-team',
+    projectId: 'refero',
+    expectedRevision: 5,
+  }, { workItems: [] })
+  configureFakeProjectClients(true, {
+    role: 'manager',
+    workspaceRole: 'owner',
+    projectAccesses: [{ teamId: 'core-team', projectId: 'refero', role: 'manager' }],
+  })
+  const movedGraph = await planningApiRequest('/api/planning')
+  expect(movedGraph.status).toBe(200)
+  const movedGraphBody: PlanningSnapshot = await movedGraph.json()
+  expect(movedGraphBody.updateTargets.find((updateTarget) =>
+    updateTarget.target.type === 'initiative' &&
+    updateTarget.target.entityId === target.entityId
+  )?.latestUpdate).toBeUndefined()
+  const reconfigured = await planningApiRequest('/api/planning/updates/cadence', 'PUT', {
+    target,
+    cadence: {
+      updateOwnerMemberKey: 'demo@example.com',
+      cadence: { unit: 'week', count: 1 },
+      timeZone: 'UTC',
+      nextDueAt: '2026-08-10T00:00:00.000Z',
+      reminderHoursBefore: 24,
+    },
+    expectedRevision: 6,
+  })
+  expect(reconfigured.status).toBe(200)
+  expect((await reconfigured.json()).updateTarget.latestUpdate).toBeUndefined()
+  const secondPublished = await planningApiRequest('/api/planning/updates', 'POST', {
+    target,
+    id: 'paged-initiative-current-scope',
+    health: 'at-risk',
+    risk: 'medium',
+    summary: 'Current scope update.',
+    riskSummary: '',
+    decisionSummary: '',
+    helpNeeded: '',
+    nextAction: '',
+    evidence: [],
+    expectedRevision: 7,
+  })
+  expect(secondPublished.status).toBe(201)
+
+  const originalListUpdates = planning.listUpdates.bind(planning)
+  const firstPage = await originalListUpdates('user#demo@example.com', { target, limit: 2 })
+  const currentScopeUpdate = firstPage.updates[0]
+  const oldScopeUpdate = firstPage.updates[1]
+  if (!currentScopeUpdate || !oldScopeUpdate) {
+    throw new Error('Expected two Planning history updates for pagination regression test.')
+  }
+  const requestedLimits: Array<number | undefined> = []
+  planning.listUpdates = async (_workspaceId, input) => {
+    if (input.cursor === undefined) {
+      return { updates: [currentScopeUpdate, oldScopeUpdate], nextCursor: 'synthetic-next' }
+    }
+    requestedLimits.push(input.limit)
+    return { updates: [currentScopeUpdate, currentScopeUpdate], nextCursor: 'synthetic-end' }
+  }
+
+  const response = await planningApiRequest(
+    '/api/planning/updates?targetType=initiative&entityId=paged-initiative&limit=2',
+  )
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({
+    updates: [
+      { id: 'paged-initiative-current-scope' },
+      { id: 'paged-initiative-current-scope' },
+    ],
+    nextCursor: 'synthetic-end',
+  })
+  expect(requestedLimits).toEqual([1])
 })
 
 test('requires visible File evidence and fails closed for unsupported Decision evidence', async () => {
@@ -1237,6 +1358,49 @@ test('requires manager permission for every active descendant before subtree mov
 
   expect(response.status).toBe(403)
   expect(moveCalls).toBe(0)
+})
+
+test('rejects a scope move while an affected Initiative cadence is active', async () => {
+  configureFakeProjectClients(true, { role: 'manager', workspaceRole: 'owner' })
+  const planningClient = new InMemoryPlanningClient()
+  await seedPlanningUpdateInitiative(planningClient, 'cadenced-move-initiative', 'core-team')
+  setTestAppDependencies({ planning: planningClient })
+
+  const cadence = await planningApiRequest('/api/planning/updates/cadence', 'PUT', {
+    target: { type: 'initiative', entityId: 'cadenced-move-initiative' },
+    cadence: {
+      updateOwnerMemberKey: 'demo@example.com',
+      cadence: { unit: 'week', count: 1 },
+      timeZone: 'UTC',
+      nextDueAt: '2026-08-10T00:00:00.000Z',
+      reminderHoursBefore: 24,
+    },
+    expectedRevision: 3,
+  })
+  expect(cadence.status).toBe(200)
+
+  let moveCalls = 0
+  const move = planningClient.move.bind(planningClient)
+  planningClient.move = async (...input) => {
+    moveCalls += 1
+    return move(...input)
+  }
+  const response = await planningApiRequest(
+    '/api/planning/entities/cadenced-move-initiative/move',
+    'POST',
+    {
+      teamId: 'core-team',
+      projectId: 'refero',
+      expectedRevision: 4,
+    },
+  )
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toMatchObject({
+    code: 'PlanningMoveRequiresCadenceReconfiguration',
+  })
+  expect(moveCalls).toBe(0)
+  expect((await planningClient.get('user#demo@example.com', { workItems: [] })).revision).toBe(4)
 })
 
 test('denies guest Planning writes before invoking a mutation client', async () => {

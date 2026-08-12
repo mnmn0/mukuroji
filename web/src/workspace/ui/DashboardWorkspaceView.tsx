@@ -142,15 +142,18 @@ export function DashboardWorkspaceView({
     ...getFocusQueueItems(focusQueue, 'next'),
   ].slice(0, 5)
   const projects = createWorkspacePortfolioProjects(teams, tasks)
-  const reportingAttentionCount = projects.filter((project) => {
-    const update = findProjectUpdateTarget(
-      planningUpdateTargets,
-      project.teamId,
-      project.projectId,
-    )
-    return !update || update.updateState === 'not-configured' || update.updateState === 'missing' ||
-      update.updateState === 'stale' || update.updateState === 'overdue'
-  }).length
+  const planningUpdatesUnavailable = Boolean(planningUpdatesErrorMessage)
+  const reportingAttentionCount = planningUpdatesUnavailable
+    ? undefined
+    : projects.filter((project) => {
+        const update = findProjectUpdateTarget(
+          planningUpdateTargets,
+          project.teamId,
+          project.projectId,
+        )
+        return !update || update.updateState === 'not-configured' || update.updateState === 'missing' ||
+          update.updateState === 'stale' || update.updateState === 'overdue'
+      }).length
 
   return (
     <div className="grid gap-6">
@@ -167,9 +170,14 @@ export function DashboardWorkspaceView({
         <MetricCard label={t('workspace.reports.metric.completion')} value={`${calculateWorkspaceProgress(tasks)}%`} tone="amber" />
         <MetricCard
           label={t('workspace.planningUpdate.metric.attention')}
+          srValue={planningUpdatesUnavailable ? t('workspace.planningUpdate.unavailable') : undefined}
           testId="dashboard-update-attention"
-          tone={reportingAttentionCount > 0 ? 'red' : 'emerald'}
-          value={reportingAttentionCount}
+          tone={planningUpdatesUnavailable
+            ? 'amber'
+            : reportingAttentionCount !== undefined && reportingAttentionCount > 0
+              ? 'red'
+              : 'emerald'}
+          value={planningUpdatesUnavailable ? '—' : reportingAttentionCount ?? 0}
         />
       </div>
 
@@ -207,8 +215,15 @@ export function DashboardWorkspaceView({
                 )
                 const updateState = updateTarget?.updateState ?? 'not-configured'
                 const health = updateTarget?.latestUpdate?.health ?? 'unknown'
-                const nextDueAt = updateTarget?.cadence?.nextDueAt
-                const nextDueTimeZone = updateTarget?.cadence?.timeZone
+                const latestUpdate = planningUpdatesUnavailable
+                  ? undefined
+                  : updateTarget?.latestUpdate
+                const nextDueAt = planningUpdatesUnavailable
+                  ? undefined
+                  : updateTarget?.cadence?.nextDueAt
+                const nextDueTimeZone = planningUpdatesUnavailable
+                  ? undefined
+                  : updateTarget?.cadence?.timeZone
                 return (
                   <tr
                     className="border-b border-slate-100 text-sm font-medium text-[var(--workbench-text)]"
@@ -232,30 +247,38 @@ export function DashboardWorkspaceView({
                         data-testid={`dashboard-update-summary-${project.teamId}-${project.projectId}`}
                       >
                         <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-                          <span className={`inline-flex whitespace-nowrap rounded-full border px-2.5 py-1 text-xs font-semibold ${updateHealthClassNames[health]}`}>
-                            {t(updateHealthMessageKeys[health])}
-                          </span>
-                          <span className={`inline-flex whitespace-nowrap rounded-full border px-2.5 py-1 text-xs font-semibold ${updateStateClassNames[updateState]}`}>
-                            {t(updateStateMessageKeys[updateState])}
-                          </span>
+                          {planningUpdatesUnavailable ? (
+                            <span className="inline-flex whitespace-nowrap rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-xs font-semibold text-amber-800">
+                              {t('workspace.planningUpdate.unavailable')}
+                            </span>
+                          ) : (
+                            <>
+                              <span className={`inline-flex whitespace-nowrap rounded-full border px-2.5 py-1 text-xs font-semibold ${updateHealthClassNames[health]}`}>
+                                {t(updateHealthMessageKeys[health])}
+                              </span>
+                              <span className={`inline-flex whitespace-nowrap rounded-full border px-2.5 py-1 text-xs font-semibold ${updateStateClassNames[updateState]}`}>
+                                {t(updateStateMessageKeys[updateState])}
+                              </span>
+                            </>
+                          )}
                         </div>
-                        {updateTarget?.latestUpdate ? (
+                        {latestUpdate ? (
                           <div className="grid min-w-0 gap-0.5">
-                            <p className="truncate text-xs font-semibold">{updateTarget.latestUpdate.summary}</p>
+                            <p className="truncate text-xs font-semibold">{latestUpdate.summary}</p>
                             <p className="truncate text-xs text-[var(--workbench-muted)]">
-                              {updateTarget.latestUpdate.authorMemberKey} ·{' '}
-                              <time dateTime={updateTarget.latestUpdate.createdAt}>
+                              {latestUpdate.authorMemberKey} ·{' '}
+                              <time dateTime={latestUpdate.createdAt}>
                                 {formatPlanningUpdateDate(
-                                  updateTarget.latestUpdate.createdAt,
-                                  updateTarget.cadence?.timeZone,
+                                  latestUpdate.createdAt,
+                                  nextDueTimeZone,
                                 )}
                               </time>
                             </p>
                           </div>
-                        ) : <span className="text-xs text-[var(--workbench-muted)]">—</span>}
+                        ) : <span className="text-xs text-[var(--workbench-muted)]">{planningUpdatesUnavailable ? t('workspace.planningUpdate.unavailable') : '—'}</span>}
                         <p className="text-xs font-medium tabular-nums text-[var(--workbench-muted)]">
                           {t('workspace.planningUpdate.column.nextDue')}: {' '}
-                          {nextDueAt ? (
+                          {planningUpdatesUnavailable ? t('workspace.planningUpdate.unavailable') : nextDueAt ? (
                             <time dateTime={nextDueAt}>
                               {formatPlanningUpdateDate(nextDueAt, nextDueTimeZone)}
                             </time>
@@ -274,33 +297,45 @@ export function DashboardWorkspaceView({
                     </td>
                     <td className="px-5 py-4 max-[760px]:hidden">{t(resolvePortfolioRiskMessageKey(project.risk))}</td>
                     <td className="px-5 py-4 max-[760px]:hidden">
-                      <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-semibold ${updateHealthClassNames[health]}`}>
-                        {t(updateHealthMessageKeys[health])}
-                      </span>
+                      {planningUpdatesUnavailable ? (
+                        <span className="inline-flex rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-xs font-semibold text-amber-800">
+                          {t('workspace.planningUpdate.unavailable')}
+                        </span>
+                      ) : (
+                        <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-semibold ${updateHealthClassNames[health]}`}>
+                          {t(updateHealthMessageKeys[health])}
+                        </span>
+                      )}
                     </td>
                     <td className="px-5 py-4 max-[760px]:hidden">
-                      <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-semibold ${updateStateClassNames[updateState]}`}>
-                        {t(updateStateMessageKeys[updateState])}
-                      </span>
+                      {planningUpdatesUnavailable ? (
+                        <span className="inline-flex rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-xs font-semibold text-amber-800">
+                          {t('workspace.planningUpdate.unavailable')}
+                        </span>
+                      ) : (
+                        <span className={`inline-flex rounded-full border px-2.5 py-1 text-xs font-semibold ${updateStateClassNames[updateState]}`}>
+                          {t(updateStateMessageKeys[updateState])}
+                        </span>
+                      )}
                     </td>
                     <td className="max-w-[240px] px-5 py-4 max-[760px]:hidden">
-                      {updateTarget?.latestUpdate ? (
+                      {latestUpdate ? (
                         <div className="grid gap-1">
-                          <p className="truncate font-semibold">{updateTarget.latestUpdate.summary}</p>
+                          <p className="truncate font-semibold">{latestUpdate.summary}</p>
                           <p className="text-xs text-[var(--workbench-muted)]">
-                            {updateTarget.latestUpdate.authorMemberKey} ·{' '}
-                            <time dateTime={updateTarget.latestUpdate.createdAt}>
+                            {latestUpdate.authorMemberKey} ·{' '}
+                            <time dateTime={latestUpdate.createdAt}>
                               {formatPlanningUpdateDate(
-                                updateTarget.latestUpdate.createdAt,
-                                updateTarget.cadence?.timeZone,
+                                latestUpdate.createdAt,
+                                nextDueTimeZone,
                               )}
                             </time>
                           </p>
                         </div>
-                      ) : <span className="text-[var(--workbench-muted)]">—</span>}
+                      ) : <span className="text-[var(--workbench-muted)]">{planningUpdatesUnavailable ? t('workspace.planningUpdate.unavailable') : '—'}</span>}
                     </td>
                     <td className="px-5 py-4 tabular-nums text-[var(--workbench-muted)] max-[760px]:hidden">
-                      {nextDueAt ? (
+                      {planningUpdatesUnavailable ? t('workspace.planningUpdate.unavailable') : nextDueAt ? (
                         <time dateTime={nextDueAt}>
                           {formatPlanningUpdateDate(nextDueAt, nextDueTimeZone)}
                         </time>

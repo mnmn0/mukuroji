@@ -55,6 +55,7 @@ import {
   type PlanningUpdateReaction,
   type PlanningUpdateReactionInput,
   type PlanningUpdateReactionPage,
+  type PlanningUpdateScopeSnapshot,
   type PlanningUpdateTarget,
   type PlanningUpdateTargetSummary,
   type PlanningWorkItemLink,
@@ -3466,14 +3467,20 @@ function createPlanningUpdateTargetSummary(
   target: StoredPlanningUpdateTarget,
   evaluatedAt: string,
 ): PlanningUpdateTargetSummary {
+  const latestUpdate = target.latestUpdate === undefined
+    ? undefined
+    : {
+        ...structuredClone(target.latestUpdate),
+        ...(target.latestContextSnapshot === undefined
+          ? {}
+          : { capturedScope: structuredClone(target.latestContextSnapshot.scope) }),
+      }
   return {
     target: structuredClone(target.target),
     ...(target.cadence === undefined ? {} : { cadence: structuredClone(target.cadence) }),
     updateState: createPlanningUpdateState(target, evaluatedAt),
     latestVersion: target.latestVersion,
-    ...(target.latestUpdate === undefined
-      ? {}
-      : { latestUpdate: structuredClone(target.latestUpdate) }),
+    ...(latestUpdate === undefined ? {} : { latestUpdate }),
     ...(target.archivedAt === undefined ? {} : { archivedAt: target.archivedAt }),
     updatedAt: target.updatedAt,
   }
@@ -3496,6 +3503,7 @@ function createLatestPlanningUpdateSummary(update: PlanningUpdate) {
     authorMemberKey: update.authorMemberKey,
     coveredDueAt: update.coveredDueAt,
     createdAt: update.createdAt,
+    capturedScope: structuredClone(update.contextSnapshot.scope),
   }
 }
 
@@ -5327,6 +5335,9 @@ function readPlanningLatestUpdateSummary(
   if (!isRecord(value)) {
     throw invalid('PlanningUpdateInvalid', 'Latest Planning update summary is invalid.')
   }
+  const capturedScope = value.capturedScope === undefined
+    ? undefined
+    : readPlanningUpdateScopeSnapshot(value.capturedScope, 'Latest update scope')
   return {
     id: readIdentifier(value.id, 'Planning update ID'),
     version: readPlanningUpdateVersion(value.version),
@@ -5337,7 +5348,36 @@ function readPlanningLatestUpdateSummary(
     authorMemberKey: readOwnerMemberKey(value.authorMemberKey),
     coveredDueAt: readTimestamp(value.coveredDueAt, 'Covered due timestamp'),
     createdAt: readTimestamp(value.createdAt, 'Planning update timestamp'),
+    ...(capturedScope === undefined ? {} : { capturedScope }),
   }
+}
+
+/**
+ * Decodes a Team / Project scope stored with a bounded immutable update summary.
+ *
+ * @param value - Untrusted scope candidate.
+ * @param label - Human-readable field name used in validation errors.
+ * @returns Validated Planning update scope.
+ */
+function readPlanningUpdateScopeSnapshot(
+  value: unknown,
+  label: string,
+): PlanningUpdateScopeSnapshot {
+  if (!isRecord(value)) {
+    throw invalid('PlanningUpdateContextInvalid', `${label} is invalid.`)
+  }
+  const scope = {
+    ...(value.teamId === undefined
+      ? {}
+      : { teamId: readIdentifier(value.teamId, `${label} Team ID`) }),
+    ...(value.projectId === undefined
+      ? {}
+      : { projectId: readIdentifier(value.projectId, `${label} Project ID`) }),
+  }
+  if (scope.projectId !== undefined && scope.teamId === undefined) {
+    throw invalid('PlanningUpdateContextInvalid', `${label} Project ID requires a Team ID.`)
+  }
+  return scope
 }
 
 /**
