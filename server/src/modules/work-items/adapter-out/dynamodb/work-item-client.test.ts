@@ -1261,6 +1261,11 @@ test('DynamoDB Work Item persists and re-reads explicit schedule replacements', 
             revision: updateValues[':nextRevision'],
             updatedAt: updateValues[':updatedAt'],
             dueDate: updateValues[':dueDate'],
+            dueDateUpdatedAt:
+              updateValues[':dueDateUpdatedAt'] ?? persistedItem.dueDateUpdatedAt,
+            priority: updateValues[':priority'] ?? persistedItem.priority,
+            priorityUpdatedAt:
+              updateValues[':priorityUpdatedAt'] ?? persistedItem.priorityUpdatedAt,
             schedule: updateValues[':schedule'],
           }
         }
@@ -1309,6 +1314,8 @@ test('DynamoDB Work Item persists and re-reads explicit schedule replacements', 
     dueDate: '2026-08-07',
     schedule: dateRangeSchedule,
   })
+  expect(created.issue.priorityUpdatedAt).toBe(created.issue.createdAt)
+  expect(created.issue.dueDateUpdatedAt).toBe(created.issue.createdAt)
   await expect(client.getTeamIssueDetail(
     'user#demo@example.com',
     'core-team',
@@ -1350,6 +1357,8 @@ test('DynamoDB Work Item persists and re-reads explicit schedule replacements', 
     dueDate: '2026-08-12',
     schedule: milestoneSchedule,
   })
+  expect(updated.issue.dueDateUpdatedAt).toBe(updated.issue.updatedAt)
+  expect(updated.issue.priorityUpdatedAt).toBe(created.issue.priorityUpdatedAt)
   await expect(client.getTeamIssueDetail(
     'user#demo@example.com',
     'core-team',
@@ -1389,6 +1398,23 @@ test('DynamoDB Work Item persists and re-reads explicit schedule replacements', 
       plannedEffortMinutes: 60,
     },
   })
+  expect(deadlineUpdated.issue.dueDateUpdatedAt).toBe(deadlineUpdated.issue.updatedAt)
+  expect(deadlineUpdated.issue.priorityUpdatedAt).toBe(created.issue.priorityUpdatedAt)
+
+  const priorityUpdated = await client.updateTeamIssue(
+    'user#demo@example.com',
+    'core-team',
+    created.issue.id,
+    {
+      expectedRevision: 3,
+      priority: 'medium',
+    },
+    'demo@example.com',
+  )
+
+  expect(priorityUpdated.issue.priority).toBe('medium')
+  expect(priorityUpdated.issue.priorityUpdatedAt).toBe(priorityUpdated.issue.updatedAt)
+  expect(priorityUpdated.issue.dueDateUpdatedAt).toBe(deadlineUpdated.issue.dueDateUpdatedAt)
 })
 
 test('DynamoDB Work Item writes reject invalid schedules before persistence', async () => {

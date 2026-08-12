@@ -1,8 +1,8 @@
 import { describe, expect, test } from 'bun:test'
 import {
-  isSafeApplicationPath,
   resolveNotificationPath,
 } from '../src/notifications/model/paths'
+import { isSafeApplicationPath } from '../src/shared/routing/applicationPath'
 
 describe('notification deep links', () => {
   test('prefers a structured Team Triage target over a generic deep link', () => {
@@ -48,8 +48,12 @@ describe('notification deep links', () => {
   })
 
   test('rejects external and protocol-relative deep links', () => {
+    expect(isSafeApplicationPath('/focus?workItemId=work-item-1')).toBe(true)
     expect(isSafeApplicationPath('https://example.com/steal-session')).toBe(false)
     expect(isSafeApplicationPath('//example.com/steal-session')).toBe(false)
+    expect(isSafeApplicationPath('/focus\\attacker.example')).toBe(false)
+    expect(isSafeApplicationPath('/\n/attacker.example')).toBe(false)
+    expect(isSafeApplicationPath('/\t/attacker.example')).toBe(false)
     expect(resolveNotificationPath({
       deepLink: '//example.com/steal-session',
       eventType: 'automation.failed',

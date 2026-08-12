@@ -77,6 +77,7 @@ export type SidebarTeam = {
  */
 export type SidebarNavId =
   | 'home'
+  | 'focus'
   | 'my-tasks'
   | 'inbox'
   | 'requests'
@@ -530,6 +531,7 @@ type SidebarArchiveTarget = {
 
 const primaryNavItems: MainNavItem[] = [
   { id: 'home', icon: HomeIcon },
+  { id: 'focus', icon: FocusIcon },
   { id: 'my-tasks', icon: CheckCircleIcon },
   { id: 'inbox', icon: BellIcon },
   { id: 'requests', icon: PanelIcon },
@@ -621,6 +623,7 @@ const defaultLabels: SidebarLabels = {
   unreadCount: (count) => `${count}件の未読`,
   nav: {
     home: 'ホーム',
+    focus: 'フォーカス',
     'my-tasks': 'マイタスク',
     inbox: '受信箱',
     requests: 'リクエスト',
@@ -2427,6 +2430,17 @@ function HomeIcon({ className }: SidebarIconProps) {
       <path d="M5 9.5V21h14V9.5" />
       <path d="M9.5 21v-6h5v6" />
     </SvgBase>
+  )
+}
+
+/** Renders the Focus queue crosshair icon. */
+function FocusIcon({ className }: SidebarIconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" className={className} aria-hidden="true">
+      <circle cx="12" cy="12" r="6.5" />
+      <circle cx="12" cy="12" r="2" />
+      <path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3" />
+    </svg>
   )
 }
 

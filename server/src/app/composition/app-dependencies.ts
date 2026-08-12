@@ -42,6 +42,7 @@ import type {
 } from '../../modules/enterprise-identity'
 import type { EnterpriseSessionActivityClient } from '../../modules/enterprise-identity/enterprise-session-activity'
 import type { FileProofingClient } from '../../modules/files/file-proofing'
+import type { FocusStateClient } from '../../modules/focus'
 import type { NotificationClient } from '../../modules/notifications/notifications'
 import type { PlanningClient } from '../../modules/planning/planning'
 import type { CapacityPlanningService } from '../../modules/capacity-planning'
@@ -168,6 +169,8 @@ export interface WorkItemDependencies {
   fileProofing: FileProofingClient
   /** Provides notification persistence. */
   notifications: NotificationClient
+  /** Provides Focus policy and recipient snooze persistence. */
+  focusState: FocusStateClient
   /** Provides Workspace search persistence. */
   workspaceSearch: WorkspaceSearchClient
   /** Provides Document persistence. */

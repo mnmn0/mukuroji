@@ -5,6 +5,7 @@ import type { SidebarNavId, SidebarTeamViewId } from '../ui/sidebar'
  */
 export const workspaceNavPaths: Record<SidebarNavId, string> = {
   home: '/home',
+  focus: '/focus',
   'my-tasks': '/my-tasks',
   inbox: '/inbox',
   requests: '/requests',
@@ -14,6 +15,31 @@ export const workspaceNavPaths: Record<SidebarNavId, string> = {
   reports: '/reports',
   help: '/help',
   settings: '/settings',
+}
+
+/**
+ * Creates a Focus queue path that can select one Work Item and correlate its source event.
+ *
+ * @param teamId - Optional owning Team identifier.
+ * @param workItemId - Optional canonical Work Item identifier.
+ * @param sourceEventId - Optional immutable notification/audit event identifier.
+ * @returns The Focus route with permission-safe selection parameters.
+ */
+export function createFocusPath(
+  teamId?: string,
+  workItemId?: string,
+  sourceEventId?: string,
+) {
+  const query = new URLSearchParams()
+  if (teamId && workItemId) {
+    query.set('teamId', teamId)
+    query.set('workItemId', workItemId)
+  }
+  if (sourceEventId) {
+    query.set('sourceEventId', sourceEventId)
+  }
+  const encoded = query.toString()
+  return encoded ? `/focus?${encoded}` : '/focus'
 }
 
 /**

@@ -65,6 +65,10 @@ export type CanonicalWorkItemRecord = Record<string, unknown> & {
   schedule: WorkItemSchedule
   /** Work Item の優先度です。 */
   priority: WorkItemPriority
+  /** Priority value の直近変更時刻です。 */
+  priorityUpdatedAt?: string
+  /** Derived due date の直近変更時刻です。 */
+  dueDateUpdatedAt?: string
   /** 作成日時の ISO 8601 timestamp です。 */
   createdAt: string
   /** 最終 state 更新日時の ISO 8601 timestamp です。 */
@@ -133,7 +137,36 @@ function hasCanonicalWorkItemRecordBase(value: Record<string, unknown>): boolean
     isCanonicalUtcTimestamp(value.createdAt) &&
     isCanonicalUtcTimestamp(value.updatedAt) &&
     areUtcTimestampsChronological(value.createdAt, value.updatedAt) &&
+    isOptionalCanonicalMutationTimestamp(
+      value.priorityUpdatedAt,
+      value.createdAt,
+      value.updatedAt,
+    ) &&
+    isOptionalCanonicalMutationTimestamp(
+      value.dueDateUpdatedAt,
+      value.createdAt,
+      value.updatedAt,
+    ) &&
     hasCanonicalArchiveState(value)
+}
+
+/**
+ * Checks one optional field-specific occurrence inside the Work Item lifetime.
+ *
+ * @param value - Candidate field occurrence timestamp.
+ * @param createdAt - Canonical Work Item creation timestamp.
+ * @param updatedAt - Canonical latest aggregate update timestamp.
+ * @returns True when absent or chronologically contained by the aggregate.
+ */
+function isOptionalCanonicalMutationTimestamp(
+  value: unknown,
+  createdAt: string,
+  updatedAt: string,
+): boolean {
+  return value === undefined ||
+    isCanonicalUtcTimestamp(value) &&
+      areUtcTimestampsChronological(createdAt, value) &&
+      areUtcTimestampsChronological(value, updatedAt)
 }
 
 /**

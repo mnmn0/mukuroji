@@ -225,6 +225,7 @@ export function WorkspaceCommandMenu({
 
   const navigationItems = useMemo<CommandMenuItem[]>(() => [
     { id: 'nav-home', label: t('sidebar.nav.home'), path: '/home' },
+    { id: 'nav-focus', label: t('sidebar.nav.focus'), path: '/focus' },
     { id: 'nav-my-tasks', label: t('sidebar.nav.myTasks'), path: '/my-tasks' },
     { id: 'nav-inbox', label: t('sidebar.nav.inbox'), path: '/inbox' },
     { id: 'nav-requests', label: t('sidebar.nav.requests'), path: '/requests' },

@@ -9,6 +9,8 @@ export type MetricCardTone = 'amber' | 'teal' | 'emerald' | 'red'
  * Props for a Workbench metric card.
  */
 export type MetricCardProps = {
+  /** Textual value exposed to assistive technology when the visual value is symbolic. */
+  srValue?: string
   /** Label that describes the displayed metric. */
   label: string
   /** Optional test identifier for the metric card. */
@@ -27,6 +29,7 @@ export type MetricCardProps = {
  */
 export function MetricCard({
   label,
+  srValue,
   testId,
   tone,
   value,
@@ -44,7 +47,10 @@ export function MetricCard({
       data-testid={testId}
     >
       <p className="text-xs font-semibold text-[var(--workbench-text)]">{label}</p>
-      <p className="mt-2 text-3xl font-semibold leading-none text-current">{value}</p>
+      <p className="mt-2 text-3xl font-semibold leading-none text-current">
+        {srValue ? <span aria-hidden="true">{value}</span> : value}
+        {srValue ? <span className="sr-only">{srValue}</span> : null}
+      </p>
     </section>
   )
 }

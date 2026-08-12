@@ -299,6 +299,7 @@ function bindApiRuntimeConfiguration(
     tenantAdministrationTable,
     legacyTasksTable,
     notificationsTable,
+    focusTable,
     planningTable,
     projectDirectoryTable,
     realtimeSessionsTable,
@@ -479,6 +480,7 @@ function bindApiRuntimeConfiguration(
       FILE_UPLOAD_URL_TTL_SECONDS: fileUploadUrlTtlSeconds.valueAsString,
       NOTIFICATIONS_STATUS_INDEX_NAME: 'RecipientStatusIndex',
       NOTIFICATIONS_TABLE_NAME: notificationsTable.tableName,
+      FOCUS_TABLE_NAME: focusTable.tableName,
       CAPACITY_PLANNING_TABLE_NAME: capacityPlanningTable.tableName,
       PLANNING_TABLE_NAME: planningTable.tableName,
       REALTIME_SESSIONS_TABLE_NAME: realtimeSessionsTable.tableName,
@@ -561,6 +563,7 @@ export function buildApiRuntime(
     tenantAdministrationTable,
     legacyTasksTable,
     notificationsTable,
+    focusTable,
     planningTable,
     projectDirectoryTable,
     realtimeSessionsTable,
@@ -638,6 +641,14 @@ export function buildApiRuntime(
   collaborationTable.grants.readWriteData(apiFunction);
   fileProofingTable.grants.readWriteData(apiFunction);
   notificationsTable.grants.readWriteData(apiFunction);
+  apiFunction.addToRolePolicy(new iam.PolicyStatement({
+    actions: [
+      'dynamodb:GetItem',
+      'dynamodb:PutItem',
+      'dynamodb:Query',
+    ],
+    resources: [focusTable.tableArn],
+  }));
   workspaceSearchTable.grants.readWriteData(apiFunction);
   realtimeSessionsTable.grants.readWriteData(apiFunction);
   const apiCapacityPlanningDataPolicy = new iam.Policy(
@@ -744,6 +755,7 @@ export function buildApiRuntime(
           documentsTable.tableArn,
           collaborationTable.tableArn,
           fileProofingTable.tableArn,
+          focusTable.tableArn,
           workspaceSearchTable.tableArn,
         ],
         conditions: {

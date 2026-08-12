@@ -6,6 +6,7 @@ import {
   WorkspaceCommandMenuContext,
   type WorkspaceCommandMenuContextValue,
 } from '../../commands/ui/WorkspaceCommandMenuContext'
+import { focusQueueResponseFixture } from '../../features/focus-queue/fixtures'
 import { notificationInboxControllerFixture } from '../../notifications/fixtures'
 import { WorkspaceInboxView } from '../../notifications/ui/WorkspaceInboxView'
 import { projectDirectoryFixtures } from '../../projects/fixtures'
@@ -231,9 +232,9 @@ function WorkspaceCommonErrorShellStory() {
       <WorkspaceRouteContent>
         <div className="grid gap-5 px-[clamp(20px,3vw,34px)] py-5">
           <HomeWorkspaceView
+            focusQueue={focusQueueResponseFixture}
             summary={storySummary}
             t={t}
-            tasks={storyTasks}
             teams={projectDirectoryFixtures}
             workItemConfigurationsByTeam={storyWorkItemConfigurations}
           />
@@ -272,9 +273,22 @@ type Story = StoryObj<typeof meta>
 export const HomeRoute: Story = {
   render: () => (
     <HomeWorkspaceView
+      focusQueue={focusQueueResponseFixture}
       summary={storySummary}
       t={t}
-      tasks={storyTasks}
+      teams={projectDirectoryFixtures}
+      workItemConfigurationsByTeam={storyWorkItemConfigurations}
+    />
+  ),
+}
+
+/** The `/home` route when Focus metrics and previews cannot be loaded. */
+export const HomeRouteFocusUnavailable: Story = {
+  render: () => (
+    <HomeWorkspaceView
+      isFocusUnavailable
+      summary={{ ...storySummary, blocked: 0 }}
+      t={t}
       teams={projectDirectoryFixtures}
       workItemConfigurationsByTeam={storyWorkItemConfigurations}
     />
@@ -382,9 +396,6 @@ export const InboxRoute: Story = {
       locale="ja"
       notificationInbox={notificationInboxControllerFixture}
       t={t}
-      tasks={storyTasks}
-      teams={projectDirectoryFixtures}
-      workItemConfigurationsByTeam={storyWorkItemConfigurations}
     />
   ),
 }
@@ -401,9 +412,6 @@ export const InboxWithoutNotifications: Story = {
         unreadCount: 0,
       }}
       t={t}
-      tasks={storyTasks}
-      teams={projectDirectoryFixtures}
-      workItemConfigurationsByTeam={storyWorkItemConfigurations}
     />
   ),
 }
@@ -412,7 +420,22 @@ export const InboxWithoutNotifications: Story = {
 export const DashboardRoute: Story = {
   render: () => (
     <DashboardWorkspaceView
+      focusQueue={focusQueueResponseFixture}
       summary={storySummary}
+      t={t}
+      tasks={storyTasks}
+      teams={projectDirectoryFixtures}
+      workItemConfigurationsByTeam={storyWorkItemConfigurations}
+    />
+  ),
+}
+
+/** The `/dashboard` route when Focus metrics and previews cannot be loaded. */
+export const DashboardRouteFocusUnavailable: Story = {
+  render: () => (
+    <DashboardWorkspaceView
+      isFocusUnavailable
+      summary={{ ...storySummary, blocked: 0 }}
       t={t}
       tasks={storyTasks}
       teams={projectDirectoryFixtures}

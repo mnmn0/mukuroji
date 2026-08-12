@@ -10,6 +10,7 @@ import type {
 export const notificationFixtures: InboxNotification[] = [
   {
     id: 'notification-mention-1',
+    eventId: 'event-comment-mentioned-1',
     eventType: 'comment.mentioned',
     reasons: ['mention'],
     actorLabel: '佐藤 花子',
@@ -24,6 +25,7 @@ export const notificationFixtures: InboxNotification[] = [
   },
   {
     id: 'notification-assignment-1',
+    eventId: 'event-work-item-assigned-1',
     eventType: 'work-item.assigned',
     reasons: ['assignee'],
     actorLabel: '鈴木 大輔',

@@ -11,6 +11,7 @@ const serverModules = [
   'enterprise-identity',
   'file-upload-policy',
   'files',
+  'focus',
   'notifications',
   'planning',
   'realtime',

@@ -4,4 +4,5 @@
 export const coreMessages = {
   'app.title': 'mukuroji',
   'language.aria': 'Select display language',
+  'sidebar.nav.focus': 'Focus',
 } as const
