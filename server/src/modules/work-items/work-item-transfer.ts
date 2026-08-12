@@ -176,6 +176,8 @@ export function createWorkItemExport(
     'dueDate',
     'schedule',
     'priority',
+    'priorityUpdatedAt',
+    'dueDateUpdatedAt',
     'revision',
     'createdAt',
     'updatedAt',
@@ -214,6 +216,12 @@ function toExportWorkItem(workItem: WorkItem) {
     dueDate: workItem.dueDate,
     schedule: structuredClone(workItem.schedule),
     priority: workItem.priority,
+    ...(workItem.priorityUpdatedAt === undefined
+      ? {}
+      : { priorityUpdatedAt: workItem.priorityUpdatedAt }),
+    ...(workItem.dueDateUpdatedAt === undefined
+      ? {}
+      : { dueDateUpdatedAt: workItem.dueDateUpdatedAt }),
     revision: workItem.revision,
     createdAt: workItem.createdAt,
     updatedAt: workItem.updatedAt,

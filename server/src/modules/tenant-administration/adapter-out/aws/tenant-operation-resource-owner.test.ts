@@ -53,6 +53,7 @@ function createConfig(): TenantOperationResourceOwnerConfig {
     collaborationTableName: 'collaboration',
     workspaceSearchTableName: 'workspace-search',
     notificationsTableName: 'notifications',
+    focusTableName: 'focus',
     realtimeSessionsTableName: 'realtime-sessions',
     fileProofingTableName: 'file-proofing',
   }
@@ -269,13 +270,21 @@ describe('AwsTenantOperationResourceOwner', () => {
 
       await owner.execute(createDataJob(14), operation)
       expect(requests.at(-1)).toMatchObject({
+        TableName: 'focus',
+        ExpressionAttributeValues: {
+          ':tenant0': { S: 'WORKSPACE#workspace%2Fone#' },
+        },
+      })
+
+      await owner.execute(createDataJob(15), operation)
+      expect(requests.at(-1)).toMatchObject({
         TableName: 'realtime-sessions',
         ExpressionAttributeValues: {
           ':tenant0': { S: 'workspace/one' },
         },
       })
 
-      await owner.execute(createDataJob(15), operation)
+      await owner.execute(createDataJob(16), operation)
       expect(requests.at(-1)).toMatchObject({
         TableName: 'file-proofing',
         ExpressionAttributeValues: {
@@ -590,17 +599,19 @@ describe('AwsTenantOperationResourceOwner', () => {
   })
 
   test('redacts reusable credentials before writing an export page', async () => {
+    const dynamoRequests: unknown[] = []
     const lowLevelClient = new DynamoDBClient({
       credentials: testCredentials,
       region: 'ap-northeast-1',
       requestHandler: {
-        async handle() {
+        async handle(request: unknown) {
+          dynamoRequests.push(readJsonRequestBody(request))
           return {
             response: {
               body: new TextEncoder().encode(JSON.stringify({
                 Items: [{
-                  directoryProjectId: { S: 'workspace-1#project#one' },
-                  taskId: { S: 'task-1' },
+                  scopeKey: { S: 'WORKSPACE#workspace-1#USER#member-1' },
+                  recordKey: { S: 'SNOOZE#team-1#work-item-1' },
                   title: { S: 'Visible title' },
                   apiToken: { S: 'reusable-secret' },
                   tokenHash: { S: 'capability-digest' },
@@ -615,12 +626,17 @@ describe('AwsTenantOperationResourceOwner', () => {
     })
     const documentClient = DynamoDBDocumentClient.from(lowLevelClient)
     const exportBodies: string[] = []
+    const exportPaths: string[] = []
     const s3Client = new S3Client({
       credentials: testCredentials,
       region: 'ap-northeast-1',
       requestHandler: {
         async handle(request: unknown) {
           exportBodies.push(readTextRequestBody(request))
+          if (isRecord(request)) {
+            const path = Reflect.get(request, 'path')
+            if (typeof path === 'string') exportPaths.push(path)
+          }
           return {
             response: {
               body: new Uint8Array(),
@@ -657,6 +673,11 @@ describe('AwsTenantOperationResourceOwner', () => {
       workspaceId: 'workspace-1',
       operationId: 'operation-1',
       step: 'snapshot',
+      cursor: {
+        targetIndex: 18,
+        phase: 'snapshot',
+        processedCount: 0,
+      },
     }
 
     try {
@@ -668,6 +689,13 @@ describe('AwsTenantOperationResourceOwner', () => {
       expect(exportBodies[0]).toContain('[REDACTED]')
       expect(exportBodies[0]).not.toContain('reusable-secret')
       expect(exportBodies[0]).not.toContain('capability-digest')
+      expect(dynamoRequests[0]).toMatchObject({
+        TableName: 'focus',
+        ExpressionAttributeValues: {
+          ':tenant0': { S: 'WORKSPACE#workspace-1#' },
+        },
+      })
+      expect(exportPaths[0]).toContain('/snapshot/data/focus/')
     } finally {
       documentClient.destroy()
       s3Client.destroy()
@@ -760,7 +788,7 @@ describe('AwsTenantOperationResourceOwner', () => {
       operationId: operation.operationId,
       step: 'snapshot',
       cursor: {
-        targetIndex: 21,
+        targetIndex: 22,
         phase: 'snapshot',
         processedCount: 0,
       },
@@ -801,7 +829,7 @@ describe('AwsTenantOperationResourceOwner', () => {
       expect(copiedPaths[1]).toContain(
         '/snapshot/work-item-import-sources/job-1/source.source',
       )
-      expect(importSources.nextJob.cursor?.targetIndex).toBe(24)
+      expect(importSources.nextJob.cursor?.targetIndex).toBe(25)
     } finally {
       documentClient.destroy()
       s3Client.destroy()
@@ -878,7 +906,7 @@ describe('AwsTenantOperationResourceOwner', () => {
 
     try {
       const regularFiles = await owner.execute(
-        createDataJob(16, workspaceId),
+        createDataJob(17, workspaceId),
         operation,
       )
       if (regularFiles.status !== 'continuing') {
@@ -909,7 +937,7 @@ describe('AwsTenantOperationResourceOwner', () => {
       expect(deletionBodies[0]).toContain('version-2')
       expect(deletionBodies[1]).toContain(importObjectKey)
       expect(deletionBodies[1]).toContain('version-3')
-      expect(importSources.nextJob.cursor?.targetIndex).toBe(19)
+      expect(importSources.nextJob.cursor?.targetIndex).toBe(20)
     } finally {
       documentClient.destroy()
       s3Client.destroy()
@@ -1000,7 +1028,7 @@ describe('AwsTenantOperationResourceOwner', () => {
       workspaceId,
       operationId: operation.operationId,
       step: 'verify',
-      cursor: { targetIndex: 18, processedCount: 18 },
+      cursor: { targetIndex: 19, processedCount: 19 },
     }
 
     try {
@@ -1214,7 +1242,7 @@ describe('AwsTenantOperationResourceOwner', () => {
       workspaceId,
       operationId: operation.operationId,
       step: 'verify',
-      cursor: { targetIndex: 18, processedCount: 18 },
+      cursor: { targetIndex: 19, processedCount: 19 },
     }
 
     try {

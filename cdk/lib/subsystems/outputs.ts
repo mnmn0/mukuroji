@@ -85,6 +85,8 @@ export type StackOutputResources = {
   readonly scheduleDlq: sqs.IQueue;
   /** Durable notification table. */
   readonly notificationsTable: dynamodb.ITable;
+  /** Focus queue preferences and snooze state table. */
+  readonly focusTable: dynamodb.ITable;
   /** Realtime connection and session table. */
   readonly realtimeSessionsTable: dynamodb.ITable;
   /** File proofing metadata table. */
@@ -299,6 +301,9 @@ export function buildStackOutputs(
   });
   new cdk.CfnOutput(scope, 'NotificationsTableName', {
     value: resources.notificationsTable.tableName,
+  });
+  new cdk.CfnOutput(scope, 'FocusTableName', {
+    value: resources.focusTable.tableName,
   });
   new cdk.CfnOutput(scope, 'RealtimeSessionsTableName', {
     value: resources.realtimeSessionsTable.tableName,

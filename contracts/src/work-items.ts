@@ -350,6 +350,14 @@ export type ApprovalSummary = {
    * 判断待ち approval の最も近い期限です。
    */
   nextDueAt?: string
+  /**
+   * 判断待ち approval の期限一覧です。重複値は同一期限の別 approval を表します。
+   */
+  pendingDueAt?: string[]
+  /**
+   * Timestamp of the latest approval mutation represented by this aggregate.
+   */
+  updatedAt?: string
 }
 
 /**
@@ -402,6 +410,10 @@ type WorkItemBase = {
    * Work Item の優先度です。
    */
   priority: WorkItemPriority
+  /** Timestamp of the latest mutation that changed the priority value. */
+  priorityUpdatedAt?: string
+  /** Timestamp of the latest mutation that changed the derived due date. */
+  dueDateUpdatedAt?: string
   /**
    * 作成日時の ISO 8601 timestamp です。
    */

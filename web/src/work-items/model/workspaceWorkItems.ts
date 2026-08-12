@@ -34,7 +34,7 @@ export type WorkspaceSummary = {
   projects: number
   /** Number of incomplete Work Items. */
   tasks: number
-  /** Number of high-priority incomplete Work Items. */
+  /** Number of active Work Items blocked by canonical relation/dependency signals. */
   blocked: number
 }
 
@@ -242,16 +242,18 @@ export function filterTasksByTeamProjectIds(
  *
  * @param teams - Workspace directory.
  * @param tasks - Workspace Work Items.
+ * @param blockedCount - Count derived from active canonical relation/dependency signals.
  * @returns Project, incomplete, and attention counts.
  */
 export function createWorkspaceSummary(
   teams: readonly ProjectDirectoryTeam[],
   tasks: readonly ProjectTask[],
+  blockedCount: number,
 ): WorkspaceSummary {
   return {
     projects: countWorkspaceProjects(teams),
     tasks: tasks.filter((task) => isOpenWorkItem(task)).length,
-    blocked: tasks.filter((task) => task.priority === 'high' && isOpenWorkItem(task)).length,
+    blocked: blockedCount,
   }
 }
 

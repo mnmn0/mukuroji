@@ -21,6 +21,8 @@ import {
   useNotificationPreferencesQuery,
 } from '../queries/useNotificationPreferences'
 
+const notificationInboxMaximumAutomaticPageLoads = 7
+
 /**
  * 通知未読件数用の共有 SWR key を生成します。
  *
@@ -119,6 +121,14 @@ export type NotificationInboxController = {
   refresh: () => Promise<void>
 }
 
+/** URL-owned initial state and deep-link behavior for the notification Inbox. */
+export type NotificationInboxOptions = {
+  /** Notification state timeline selected by the current URL. */
+  initialFilter?: NotificationFilter
+  /** Immutable event that automatic bounded pagination should locate. */
+  selectedEventId?: string
+}
+
 /**
  * NotificationSettingsPanel が利用する data と action です。
  */
@@ -177,18 +187,24 @@ export function useUnreadNotificationCount(accessToken?: string, enabled = true)
  *
  * @param accessToken - Access token used by the Notifications API.
  * @param enabled - Whether the Inbox query may run.
+ * @param options - URL-selected filter and optional event correlation.
  * @returns The controller used to render and operate the Inbox.
  */
 export function useNotificationInbox(
   accessToken?: string,
   enabled = true,
+  options: NotificationInboxOptions = {},
 ): NotificationInboxController {
+  const initialFilter = options.initialFilter ?? 'all'
+  const selectedEventId = options.selectedEventId
   const mutationRunner = useRef(createMutationRequestRunner()).current
   const { mutate: mutateGlobal } = useSWRConfig()
-  const [filter, setFilterState] = useState<NotificationFilter>('all')
+  const [filterState, setFilterState] = useState<NotificationFilter>(initialFilter)
+  const [previousInitialFilter, setPreviousInitialFilter] = useState(initialFilter)
   const [eventType, setEventTypeState] = useState<string | undefined>()
   const [pendingNotificationId, setPendingNotificationId] = useState<string | undefined>()
   const [mutationError, setMutationError] = useState<unknown>()
+  const filter = previousInitialFilter === initialFilter ? filterState : initialFilter
   const isConfigured = Boolean(accessToken && enabled)
   const {
     data,
@@ -199,6 +215,11 @@ export function useNotificationInbox(
     setSize,
     size,
   } = useNotificationInboxPages(accessToken, isConfigured, filter, eventType)
+  if (previousInitialFilter !== initialFilter) {
+    setPreviousInitialFilter(initialFilter)
+    setFilterState(initialFilter)
+    setMutationError(undefined)
+  }
   const notifications = useMemo(
     () => mergeNotifications(data?.flatMap((page) => page.notifications) ?? []),
     [data],
@@ -254,7 +275,10 @@ export function useNotificationInbox(
           context,
         ),
       )
-      await refresh()
+      await Promise.allSettled([
+        refresh(),
+        mutateGlobal(['focus-queue', accessToken]),
+      ])
       return true
     } catch (actionError) {
       console.error('Notification action failed:', actionError)
@@ -268,7 +292,7 @@ export function useNotificationInbox(
     } finally {
       setPendingNotificationId(undefined)
     }
-  }, [accessToken, mutationRunner, refresh])
+  }, [accessToken, mutateGlobal, mutationRunner, refresh])
 
   const markAllRead = useCallback(async () => {
     if (!accessToken) {
@@ -284,7 +308,10 @@ export function useNotificationInbox(
         String(unreadCount),
         (context) => markAllNotificationsRead(accessToken, context),
       )
-      await refresh()
+      await Promise.allSettled([
+        refresh(),
+        mutateGlobal(['focus-queue', accessToken]),
+      ])
       return true
     } catch (markAllError) {
       console.error('Mark all notifications read failed:', markAllError)
@@ -293,7 +320,7 @@ export function useNotificationInbox(
     } finally {
       setPendingNotificationId(undefined)
     }
-  }, [accessToken, mutationRunner, refresh, unreadCount])
+  }, [accessToken, mutateGlobal, mutationRunner, refresh, unreadCount])
 
   const setFilter = useCallback((nextFilter: NotificationFilter) => {
     setFilterState(nextFilter)
@@ -314,6 +341,26 @@ export function useNotificationInbox(
 
     await setSize(size + 1)
   }, [lastPage?.nextCursor, setSize, size])
+
+  const automaticLoadState = useRef({ selection: '', loads: 0 })
+  useEffect(() => {
+    const selection = `${filter}\0${eventType ?? ''}\0${selectedEventId ?? ''}`
+    if (automaticLoadState.current.selection !== selection) {
+      automaticLoadState.current = { selection, loads: 0 }
+    }
+    if (
+      selectedEventId === undefined ||
+      notifications.some((notification) => notification.eventId === selectedEventId) ||
+      !lastPage?.nextCursor ||
+      isLoadingMore ||
+      Boolean(error) ||
+      automaticLoadState.current.loads >= notificationInboxMaximumAutomaticPageLoads
+    ) {
+      return
+    }
+    automaticLoadState.current.loads += 1
+    void loadMore()
+  }, [error, eventType, filter, isLoadingMore, lastPage?.nextCursor, loadMore, notifications, selectedEventId])
 
   return {
     archive: (notification) => runNotificationAction(notification, 'archive'),

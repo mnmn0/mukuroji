@@ -8,6 +8,7 @@ export {
   type CollaborationAutomaticWatcherCandidate,
   type CollaborationClient,
   type CollaborationComment,
+  type CollaborationMemberWatcherState,
   type CollaborationNotificationCandidate,
   type CollaborationPresence,
   type CollaborationReactionEmoji,

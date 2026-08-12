@@ -1,9 +1,11 @@
 import type {
+  FocusQueueResponse,
   PlanningHealth,
   PlanningUpdateState,
   PlanningUpdateTargetSummary,
   ResolvedWorkItemConfiguration,
 } from '@mukuroji/contracts'
+import { getFocusQueueItems } from '../../features/focus-queue/model/focusQueue'
 import type { ProjectDirectoryTeam } from '../../projects/api'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import {
@@ -14,9 +16,7 @@ import {
 import type { ProjectTask } from '../../tasks/api'
 import {
   calculateWorkspaceProgress,
-  createWorkspaceActionQueue,
   createWorkspacePortfolioProjects,
-  createWorkspaceTaskKey,
   resolveWorkspaceTaskConfiguration,
   type WorkspacePortfolioProject,
   type WorkspaceSummary,
@@ -28,6 +28,10 @@ import { formatPlanningUpdateDate } from '../../planning/model/date'
  * Props for the Workspace dashboard view.
  */
 export type DashboardWorkspaceViewProps = {
+  /** Server-ranked Focus queue used by the decision preview. */
+  focusQueue?: FocusQueueResponse
+  /** Whether Focus metrics and previews are unavailable rather than empty. */
+  isFocusUnavailable?: boolean
   /** Optional callback that opens a selected Work Item. */
   onOpenTask?: (task: ProjectTask) => void
   /** Summary metrics displayed at the top of the dashboard. */
@@ -121,6 +125,8 @@ function resolvePortfolioRiskMessageKey(
  * @returns The Workspace dashboard view.
  */
 export function DashboardWorkspaceView({
+  focusQueue,
+  isFocusUnavailable = false,
   onOpenTask,
   onOpenPlanningUpdate,
   planningUpdateTargets = [],
@@ -131,8 +137,10 @@ export function DashboardWorkspaceView({
   teams,
   workItemConfigurationsByTeam,
 }: DashboardWorkspaceViewProps) {
-  const referenceDate = new Date()
-  const decisionTasks = createWorkspaceActionQueue(tasks, referenceDate).slice(0, 5)
+  const decisionTasks = [
+    ...getFocusQueueItems(focusQueue, 'now'),
+    ...getFocusQueueItems(focusQueue, 'next'),
+  ].slice(0, 5)
   const projects = createWorkspacePortfolioProjects(teams, tasks)
   const reportingAttentionCount = projects.filter((project) => {
     const update = findProjectUpdateTarget(
@@ -149,7 +157,13 @@ export function DashboardWorkspaceView({
       <div className="grid grid-cols-5 gap-4 max-[1320px]:grid-cols-3 max-[900px]:grid-cols-2 max-[680px]:grid-cols-1">
         <MetricCard label={t('workspace.metric.activeProjects')} value={summary.projects} tone="teal" />
         <MetricCard label={t('workspace.metric.openTasks')} value={summary.tasks} tone="emerald" />
-        <MetricCard label={t('workspace.metric.blocked')} value={summary.blocked} tone="red" />
+        <MetricCard
+          label={t('workspace.metric.blocked')}
+          srValue={isFocusUnavailable ? t('workspace.focus.previewUnavailable') : undefined}
+          testId="workspace-focus-blocked-metric"
+          value={isFocusUnavailable ? '—' : summary.blocked}
+          tone="red"
+        />
         <MetricCard label={t('workspace.reports.metric.completion')} value={`${calculateWorkspaceProgress(tasks)}%`} tone="amber" />
         <MetricCard
           label={t('workspace.planningUpdate.metric.attention')}
@@ -305,19 +319,31 @@ export function DashboardWorkspaceView({
       <section className="workbench-panel">
         <SectionHeader
           title={t('workspace.dashboard.decisionTitle')}
-          meta={t('workspace.dashboard.decisionMeta').replace('{count}', String(decisionTasks.length))}
+          meta={isFocusUnavailable
+            ? undefined
+            : t('workspace.dashboard.decisionMeta').replace(
+                '{count}',
+                String(decisionTasks.length),
+              )}
         />
         <div className="divide-y divide-slate-100">
-          {decisionTasks.map((task) => (
+          {decisionTasks.map((item) => (
             <TaskListRow
-              configuration={resolveWorkspaceTaskConfiguration(task, workItemConfigurationsByTeam)}
-              key={createWorkspaceTaskKey(task)}
+              configuration={resolveWorkspaceTaskConfiguration(item.workItem, workItemConfigurationsByTeam)}
+              key={item.id}
               t={t}
-              task={task}
+              task={item.workItem}
               onOpenTask={onOpenTask}
             />
           ))}
-          {decisionTasks.length === 0 ? (
+          {isFocusUnavailable ? (
+            <p
+              className="px-5 py-8 text-sm font-medium text-[var(--workbench-muted)]"
+              data-testid="workspace-focus-preview-unavailable"
+            >
+              {t('workspace.focus.previewUnavailable')}
+            </p>
+          ) : decisionTasks.length === 0 ? (
             <p className="px-5 py-8 text-sm font-medium text-[var(--workbench-muted)]">
               {t('workspace.empty.tasks')}
             </p>

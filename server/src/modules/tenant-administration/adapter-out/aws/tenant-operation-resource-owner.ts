@@ -105,6 +105,8 @@ export type TenantOperationResourceOwnerConfig = {
   workspaceSearchTableName: string
   /** Notification table. */
   notificationsTableName: string
+  /** Focus queue state table. */
+  focusTableName: string
   /** Realtime session table. */
   realtimeSessionsTableName: string
   /** File proofing metadata table. */
@@ -383,6 +385,13 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
         this.config.notificationsTableName,
         'recipientKey',
         'notificationKey',
+      ),
+      attributeTarget(
+        'focus',
+        this.config.focusTableName,
+        'scopeKey',
+        'recordKey',
+        [encodedWorkspaceSelector('scopeKey', 'prefix', 'WORKSPACE#', '#')],
       ),
       attributeTarget('realtime', this.config.realtimeSessionsTableName, 'connectionId', undefined, [
         workspaceSelector('workspaceId', 'equals'),

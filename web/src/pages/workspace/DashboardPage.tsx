@@ -1,12 +1,16 @@
 import { useMemo } from 'react'
 import { useNavigate } from 'react-router'
 import { usePlanningSnapshot } from '../../planning/queries/usePlanningSnapshot'
+import { useWorkspaceFocusOverview } from '../../features/focus-queue/queries/useWorkspaceFocusOverview'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { createPlanningProjectUpdatePath } from '../../shared/routing/paths'
 import { createWorkspaceSummary } from '../../work-items/model/workspaceWorkItems'
 import { useWorkspaceWorkItemData } from '../../workspace/queries/useWorkspaceWorkItemData'
 import { DashboardWorkspaceView } from '../../workspace/ui/DashboardWorkspaceView'
-import { WorkspaceTaskLoadNotice } from '../../workspace/ui/WorkspaceDataNotices'
+import {
+  WorkspaceFocusLoadNotice,
+  WorkspaceTaskLoadNotice,
+} from '../../workspace/ui/WorkspaceDataNotices'
 import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
 import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
 
@@ -24,9 +28,17 @@ export function DashboardPage() {
     workspace.canLoadWorkspaceData,
     workspace.teams,
   )
+  const focus = useWorkspaceFocusOverview(
+    workspace.accessToken,
+    workspace.canLoadWorkspaceData,
+  )
   const summary = useMemo(
-    () => createWorkspaceSummary(workspace.teams, workItems.tasks),
-    [workItems.tasks, workspace.teams],
+    () => createWorkspaceSummary(
+      workspace.teams,
+      workItems.tasks,
+      focus.blockedCount,
+    ),
+    [focus.blockedCount, workItems.tasks, workspace.teams],
   )
   const planning = usePlanningSnapshot(
     workspace.accessToken,
@@ -34,7 +46,7 @@ export function DashboardPage() {
   )
   return (
     <WorkspaceRouteContent
-      isLoading={workItems.isLoading || Boolean(planning.key && planning.isLoading)}
+      isLoading={workItems.isLoading || focus.isLoading || Boolean(planning.key && planning.isLoading)}
       sessionErrors={[
         workItems.workItemsError,
         workItems.configurationsError,
@@ -43,7 +55,10 @@ export function DashboardPage() {
     >
       <div className="grid gap-5 px-[clamp(20px,3vw,34px)] py-5">
         <WorkspaceTaskLoadNotice failedProjectCount={workItems.failedProjectCount} t={t} />
+        <WorkspaceFocusLoadNotice {...focus.noticeProps} t={t} />
         <DashboardWorkspaceView
+          focusQueue={focus.response}
+          isFocusUnavailable={focus.isUnavailable}
           onOpenPlanningUpdate={(teamId, projectId) => navigate(
             createPlanningProjectUpdatePath(teamId, projectId),
           )}

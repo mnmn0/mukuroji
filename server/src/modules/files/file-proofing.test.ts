@@ -182,6 +182,15 @@ class MemoryDocumentClient {
           }
           continue
         }
+        if (values[':entryType'] === 'approval-summary') {
+          if (
+            existing?.entryType !== 'approval-summary' ||
+            Number(existing.pendingCount ?? 0) < 1
+          ) {
+            throw createTransactionCancelledError()
+          }
+          continue
+        }
         const expectedRevision = values[':expectedRevision'] ?? values[':fileRevision']
         const actualRevision = existing?.revision
         if (!existing || actualRevision !== expectedRevision) {
@@ -229,6 +238,13 @@ class MemoryDocumentClient {
             changesRequestedCount: Number(existing?.changesRequestedCount ?? 0) +
               Number(values[':changesDelta']),
             pendingDueAt,
+            updatedAt: values[':updatedAt'],
+          })
+          continue
+        }
+        if (values[':entryType'] === 'approval-summary') {
+          this.items.set(key, {
+            ...existing!,
             updatedAt: values[':updatedAt'],
           })
           continue
@@ -453,6 +469,7 @@ function createClient(
 function createAuditContext(
   idempotencyKey: string,
   body: Readonly<Record<string, unknown>> = { idempotencyKey },
+  occurredAt = '2026-07-13T00:00:00.000Z',
 ) {
   return createMutationAuditContext({
     workspaceId: scope.workspaceId,
@@ -460,7 +477,7 @@ function createAuditContext(
     idempotencyKey,
     request: { method: 'POST', path: '/api/files', body },
     source: { kind: 'api', route: '/api/files' },
-    occurredAt: '2026-07-13T00:00:00.000Z',
+    occurredAt,
   })
 }
 
@@ -1392,18 +1409,26 @@ describe('file proofing domain', () => {
       { memberKey: 'first@example.com', guest: false, canWrite: false, canManage: false },
       approval.id,
       { decision: 'approve', expectedRevision: approval.revision },
-      createAuditContext('first-decision'),
+      createAuditContext('first-decision', undefined, '2026-07-13T01:00:00.000Z'),
     )
     expect(first.status).toBe('pending')
+    expect(await client.getApprovalSummary(scope)).toMatchObject({
+      pendingCount: 1,
+      updatedAt: '2026-07-13T01:00:00.000Z',
+    })
     const second = await client.decideApproval(
       scope,
       { memberKey: 'second@example.com', guest: false, canWrite: false, canManage: false },
       approval.id,
       { decision: 'approve', expectedRevision: first.revision },
-      createAuditContext('second-decision'),
+      createAuditContext('second-decision', undefined, '2026-07-13T02:00:00.000Z'),
     )
     expect(second.status).toBe('approved')
-    expect(await client.getApprovalSummary(scope)).toMatchObject({ approvedCount: 1, pendingCount: 0 })
+    expect(await client.getApprovalSummary(scope)).toMatchObject({
+      approvedCount: 1,
+      pendingCount: 0,
+      updatedAt: '2026-07-13T02:00:00.000Z',
+    })
     expect((await client.listReviewerApprovals(scope.workspaceId, {
       memberKey: 'first@example.com',
       guest: false,
@@ -1626,7 +1651,9 @@ describe('file proofing domain', () => {
 
     expect(await client.getApprovalSummary(scope)).toMatchObject({
       nextDueAt: dueAt,
+      pendingDueAt: [dueAt, dueAt],
       pendingCount: 2,
+      updatedAt: expect.any(String),
     })
     const firstPage = await client.listReviewerApprovals(
       scope.workspaceId,
@@ -1652,6 +1679,7 @@ describe('file proofing domain', () => {
     )
     expect(await client.getApprovalSummary(scope)).toMatchObject({
       nextDueAt: dueAt,
+      pendingDueAt: [dueAt],
       pendingCount: 1,
     })
     await client.cancelApproval(
@@ -1662,8 +1690,62 @@ describe('file proofing domain', () => {
       createAuditContext('cancel-same-due-second'),
     )
     const summaries = await client.getApprovalSummaries([scope])
-    expect(summaries.get(createFileProofingScopeKey(scope))).toMatchObject({ pendingCount: 0 })
+    expect(summaries.get(createFileProofingScopeKey(scope))).toMatchObject({
+      pendingCount: 0,
+      updatedAt: expect.any(String),
+    })
     expect(summaries.get(createFileProofingScopeKey(scope))?.nextDueAt).toBeUndefined()
+  })
+
+  test('fails closed when a stored approval summary projection is malformed', async () => {
+    const state = createClient()
+    const scopeKey = createFileProofingScopeKey(scope)
+    state.documentClient.items.set(createMemoryKey({
+      scopeKey,
+      recordKey: 'APPROVAL_SUMMARY',
+    }), {
+      scopeKey,
+      recordKey: 'APPROVAL_SUMMARY',
+      entryType: 'approval-summary',
+      pendingCount: 1,
+      approvedCount: -1,
+      rejectedCount: 0,
+      changesRequestedCount: 0,
+      updatedAt: '2026-07-13T00:00:00.000Z',
+    })
+
+    await expect(state.client.getApprovalSummary(scope)).rejects.toMatchObject({
+      code: 'ApprovalSummaryUnavailable',
+      status: 503,
+    })
+    await expect(state.client.getApprovalSummaries([scope])).rejects.toMatchObject({
+      code: 'ApprovalSummaryUnavailable',
+      status: 503,
+    })
+  })
+
+  test('fails closed when a stored approval summary contains an invalid due-date key', async () => {
+    const state = createClient()
+    const scopeKey = createFileProofingScopeKey(scope)
+    state.documentClient.items.set(createMemoryKey({
+      scopeKey,
+      recordKey: 'APPROVAL_SUMMARY',
+    }), {
+      scopeKey,
+      recordKey: 'APPROVAL_SUMMARY',
+      entryType: 'approval-summary',
+      pendingCount: 1,
+      approvedCount: 0,
+      rejectedCount: 0,
+      changesRequestedCount: 0,
+      pendingDueAt: new Set(['not-a-date#approval-1']),
+      updatedAt: '2026-07-13T00:00:00.000Z',
+    })
+
+    await expect(state.client.getApprovalSummary(scope)).rejects.toMatchObject({
+      code: 'ApprovalSummaryUnavailable',
+      status: 503,
+    })
   })
 
   test('creates one durable Work Item approval across retries and transitions after unanimous approval', async () => {
@@ -2090,7 +2172,25 @@ describe('file proofing domain', () => {
         updatedAt: '2026-01-01T00:00:00.000Z',
         capabilities: { canCancel: false, canDecide: false },
       },
-    ])).toMatchObject({ changesRequestedCount: 1 })
+      {
+        id: 'approval-2',
+        subjectType: 'work-item',
+        revision: 2,
+        status: 'pending',
+        reviewers: [],
+        dueAt: '2026-02-01T00:00:00.000Z',
+        requestedByMemberKey: 'manager@example.com',
+        requestedByKind: 'member',
+        createdAt: '2026-01-02T00:00:00.000Z',
+        updatedAt: '2026-01-03T00:00:00.000Z',
+        capabilities: { canCancel: true, canDecide: false },
+      },
+    ])).toMatchObject({
+      changesRequestedCount: 1,
+      pendingCount: 1,
+      pendingDueAt: ['2026-02-01T00:00:00.000Z'],
+      updatedAt: '2026-01-03T00:00:00.000Z',
+    })
   })
 })
 
