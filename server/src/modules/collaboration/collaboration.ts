@@ -345,8 +345,6 @@ export type UpdateWatcherInput = {
   automatic?: boolean
   /** 自動 watch の理由です。 */
   reason?: CollaborationWatcherReason
-  /** Caller and target authorization conditions joined to the watcher transaction. */
-  authorizationConditionChecks?: NonNullable<TransactWriteCommandInput['TransactItems']>
   /** State と同じ transaction に保存する audit context です。 */
   auditContext?: MutationAuditContext
 }

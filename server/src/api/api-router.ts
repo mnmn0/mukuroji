@@ -6588,7 +6588,7 @@ routeApp.post('/api/planning/updates', async (c) => {
           replay.target,
           replay.version,
         )
-        if (update.id !== replay.id) {
+        if (!update || update.id !== replay.id) {
           throw planningUpdatePublishIdempotencyUnavailable()
         }
         await requirePlanningUpdateCapturedScopePermission(
@@ -27980,7 +27980,7 @@ async function readPlanningUpdateByVersion(
   workspaceId: string,
   target: PlanningUpdateTarget,
   version: number,
-): Promise<PlanningUpdate> {
+): Promise<PlanningUpdate | undefined> {
   let cursor: string | undefined
   do {
     const page = await workItemDependencies.planning.listUpdates(workspaceId, {
@@ -27992,7 +27992,7 @@ async function readPlanningUpdateByVersion(
     if (update) return update
     cursor = page.nextCursor
   } while (cursor)
-  throw planningUpdatePublishIdempotencyUnavailable()
+  return undefined
 }
 
 /** Rechecks the captured scope before exposing annotations for one immutable version. */
@@ -28015,7 +28015,7 @@ async function requirePlanningUpdateVersionCapturedScopePermission(
     )
   }
   const update = await readPlanningUpdateByVersion(workspaceId, target, version)
-  if (!planningUpdateTargetsEqual(update.target, target)) {
+  if (!update || !planningUpdateTargetsEqual(update.target, target)) {
     throw new PlanningError(
       404,
       'PlanningUpdateNotFound',

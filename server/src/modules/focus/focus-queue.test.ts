@@ -1028,6 +1028,7 @@ function createPlanningSnapshot(
     workItemDependencies: [...dependencies],
     workItemLinks: [...links],
     workItems: planningWorkItems,
+    updateTargets: [],
     criticalPath: { entityIds: [], totalDurationDays: 0, slackByEntityId: {} },
     workItemDependencySummary: {
       criticalPath: { workItems: [], totalDurationDays: 0, slackByWorkItemKey: {} },
