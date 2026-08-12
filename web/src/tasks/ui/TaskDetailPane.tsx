@@ -25,6 +25,8 @@ import { IssueCollaborationPanel } from '../../issues/ui/IssueCollaborationPanel
 import type { IssueCollaborationRoute } from '../../issues/model/collaborationTabs'
 import type { ProjectDirectoryTeam, ProjectMember } from '../../projects/api'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
+import { createTeamTriagePath } from '../../shared/routing/paths'
+import { useTriageWorkItemSources } from '../../triage/queries/useTriageQueries'
 import type { WorkspaceMember } from '../../workspace/api'
 import {
   isCustomFieldApplicable,
@@ -62,6 +64,8 @@ import { TaskPriorityBadge } from './TaskViewPrimitives'
 export type TaskDetailPaneProps = {
   /** Determines whether the current user may manage one canonical dependency endpoint. */
   canManageScheduleDependencyEndpoint?: (endpoint: WorkItemDependencyEndpoint) => boolean
+  /** Whether the current Workspace member may read Team Triage source links. */
+  canAccessTriage?: boolean
   /** Access token used by the related-document panel. */
   accessToken?: string
   /** Active project members available as assignees. */
@@ -138,6 +142,7 @@ export type TaskDetailPaneProps = {
 export function TaskDetailPane({
   accessToken,
   assigneeOptions,
+  canAccessTriage = false,
   artifacts,
   canManageScheduleDependencyEndpoint,
   collaboration,
@@ -174,6 +179,18 @@ export function TaskDetailPane({
     collaborationRoute?.onCollaborationTabChange,
   )
   const scheduleFormId = useId()
+  const {
+    data: triageSourcesPages,
+    error: triageSourcesError,
+    isValidating: isTriageSourcesValidating,
+    setSize: setTriageSourcesSize,
+    size: triageSourcesSize,
+  } = useTriageWorkItemSources(
+    accessToken,
+    task?.teamId,
+    task?.id,
+    Boolean(task && canAccessTriage),
+  )
   const hasMatchingIssueDetail = Boolean(
     task && detail?.issue.id === task.id && detail.issue.teamId === task.teamId,
   )
@@ -241,6 +258,18 @@ export function TaskDetailPane({
   const canonicalRelationCandidates = relationCandidates.filter((candidate) =>
     candidate.teamId === task.teamId,
   )
+  const sourceTriageEntryId = issue?.sourceTriageEntryId ?? task.sourceTriageEntryId
+  const triageContextSnapshots = hasMatchingIssueDetail
+    ? detail?.triageContextSnapshots ?? []
+    : []
+  const lastTriageSourcesPage = triageSourcesPages?.at(-1)
+  const hasMoreTriageSources = Boolean(lastTriageSourcesPage?.nextCursor)
+  const isLoadingMoreTriageSources = Boolean(
+    triageSourcesPages && triageSourcesSize > triageSourcesPages.length && isTriageSourcesValidating,
+  )
+  const reverseTriageSources = triageSourcesPages
+    ?.flatMap((page) => page.entries)
+    .filter((entry) => entry.id !== sourceTriageEntryId) ?? []
 
   return (
     <aside
@@ -307,6 +336,86 @@ export function TaskDetailPane({
             <h2 className="mt-1.5 text-lg font-semibold leading-6 text-[var(--workbench-text)]">{title}</h2>
             {isLoading ? (
               <p className="mt-2 text-sm font-medium text-[var(--workbench-muted)]">{t('tasks.detail.loading')}</p>
+            ) : null}
+            {canAccessTriage && sourceTriageEntryId ? (
+              <a
+                className="mt-2 inline-flex text-sm font-semibold text-[var(--workbench-primary)] underline-offset-4 hover:underline"
+                data-testid="task-detail-triage-source"
+                href={createTeamTriagePath(task.teamId, sourceTriageEntryId)}
+              >
+                {t('tasks.detail.openTriageSource')}
+              </a>
+            ) : null}
+            {reverseTriageSources.length > 0 || triageSourcesError ? (
+              <section
+                className="mt-3 rounded-md border border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-3 py-2.5"
+                data-testid="task-detail-triage-sources"
+              >
+                <p className="text-xs font-semibold uppercase tracking-wide text-[var(--workbench-muted)]">
+                  {t('tasks.detail.triageSources.title')}
+                </p>
+                <ul className="mt-2 grid gap-2">
+                  {reverseTriageSources.map((entry) => (
+                    <li key={entry.id}>
+                      <a
+                        className="text-xs font-semibold text-[var(--workbench-primary)] underline-offset-4 hover:underline"
+                        href={createTeamTriagePath(task.teamId, entry.id)}
+                      >
+                        {entry.sourcePreview.title || t(resolveTriageSourceMessageKey(entry.source.kind))}
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+                {triageSourcesError ? (
+                  <p className="mt-2 text-xs text-red-700" role="alert">
+                    {t('tasks.detail.triageSources.error')}
+                  </p>
+                ) : null}
+                {hasMoreTriageSources ? (
+                  <button
+                    className="workbench-button-secondary mt-3 min-h-9 px-3 text-xs"
+                    disabled={isLoadingMoreTriageSources}
+                    onClick={() => void setTriageSourcesSize(triageSourcesSize + 1)}
+                    type="button"
+                  >
+                    {isLoadingMoreTriageSources
+                      ? t('tasks.detail.triageSources.loadingMore')
+                      : t('tasks.detail.triageSources.loadMore')}
+                  </button>
+                ) : null}
+              </section>
+            ) : null}
+            {canAccessTriage && triageContextSnapshots.length > 0 ? (
+              <section
+                className="mt-3 rounded-md border border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-3 py-2.5"
+                data-testid="task-detail-triage-context"
+              >
+                <p className="text-xs font-semibold uppercase tracking-wide text-[var(--workbench-muted)]">
+                  {t('tasks.detail.triageContext.title')}
+                </p>
+                <ul className="mt-2 grid gap-2">
+                  {triageContextSnapshots.map((snapshot) => (
+                    <li className="text-xs leading-5 text-[var(--workbench-muted)]" key={snapshot.triageEntryId}>
+                      <a
+                        className="font-semibold text-[var(--workbench-primary)] underline-offset-4 hover:underline"
+                        href={createTeamTriagePath(task.teamId, snapshot.triageEntryId)}
+                      >
+                        {t(resolveTriageSourceMessageKey(snapshot.sourceKind))}
+                      </a>
+                      <span>
+                        {' · '}
+                        {t('tasks.detail.triageContext.counts')
+                          .replace('{comments}', String(snapshot.commentMetadataCount))
+                          .replace('{attachments}', String(snapshot.attachmentMetadataCount))
+                          .replace('{watchers}', String(snapshot.watcherMetadataCount))}
+                      </span>
+                      <span className="block">
+                        {t(resolveTriageContextAvailabilityMessageKey(snapshot.availability))}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </section>
             ) : null}
           </div>
           <div className="flex items-center gap-2">
@@ -752,6 +861,40 @@ function cloneScheduleCalendarPolicy(
 /** Formats a project member for an assignee select option. */
 function formatProjectMemberOption(member: ProjectMember) {
   return `${member.name ?? member.email} / ${member.email}`
+}
+
+/**
+ * Resolves one provider-neutral Triage source kind to an existing localized label.
+ *
+ * @param sourceKind - Source channel retained by the duplicate-context snapshot.
+ * @returns The message key for the source label.
+ */
+function resolveTriageSourceMessageKey(
+  sourceKind: 'form' | 'chat' | 'email' | 'webhook' | 'manual-handoff',
+): MessageKey {
+  if (sourceKind === 'manual-handoff') return 'triage.source.manualHandoff'
+  return `triage.source.${sourceKind}`
+}
+
+/**
+ * Resolves retained-context disclosure level to a concise localized explanation.
+ *
+ * @param availability - Permission-safe context level committed during the merge.
+ * @returns The matching Work Item detail message key.
+ */
+function resolveTriageContextAvailabilityMessageKey(
+  availability: 'summary-metadata' | 'counts-only' | 'restricted' | 'redacted',
+): MessageKey {
+  if (availability === 'summary-metadata') {
+    return 'tasks.detail.triageContext.availability.summaryMetadata'
+  }
+  if (availability === 'counts-only') {
+    return 'tasks.detail.triageContext.availability.countsOnly'
+  }
+  if (availability === 'restricted') {
+    return 'tasks.detail.triageContext.availability.restricted'
+  }
+  return 'tasks.detail.triageContext.availability.redacted'
 }
 
 /** Resolves a Team Issue title for relation candidate display. */

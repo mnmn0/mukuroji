@@ -19,6 +19,7 @@ export function resolveSafeLoginReturnPath(value: string | null | undefined) {
       [
         '/dashboard',
         '/home',
+        '/focus',
         '/my-tasks',
         '/inbox',
         '/requests',

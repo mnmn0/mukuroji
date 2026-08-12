@@ -5,6 +5,11 @@ import { configureAlarmRouting } from './aspects/alarm-routing';
 import { buildLambdaBuildPaths } from './config/lambda-build-paths';
 import { buildStackParameters } from './config/stack-parameters';
 import {
+  resolveTriageIndexDeploymentStage,
+  triageIndexDeploymentIncludes,
+  type TriageIndexDeploymentStage,
+} from './config/triage-index-deployment';
+import {
   DEFAULT_WORKSPACE_SEARCH_MIGRATION_DEPLOYMENT_TARGET_ID,
   bindWorkspaceSearchMigrationStackEnvironment,
   resolveWorkspaceSearchMigrationDeploymentTarget,
@@ -38,11 +43,14 @@ import { buildEnterpriseIdentityWorkers } from './subsystems/workers/enterprise-
 import { buildRequestEmailWorker } from './subsystems/workers/request-email';
 import { buildScheduleWorkers } from './subsystems/workers/schedules';
 import { buildTenantOperationWorker } from './subsystems/workers/tenant-operation';
+import { buildTriageScheduleWorker } from './subsystems/workers/triage';
 import { buildWebhookDeliveryWorkers } from './subsystems/workers/webhook-delivery';
 import { buildWorkItemImportWorker } from './subsystems/workers/work-item-import';
 
-/** Stack configuration plus the reviewed Workspace Search migration target. */
+/** Stack configuration plus reviewed migration and Triage rollout selections. */
 export interface CdkStackProps extends cdk.StackProps {
+  /** Reviewed one-index-at-a-time rollout stage for Triage GSIs. */
+  readonly triageIndexDeploymentStage?: TriageIndexDeploymentStage;
   /** Source-controlled target identifier; free-form target definitions are never accepted. */
   readonly workspaceSearchMigrationDeploymentTargetId?: string;
 }
@@ -60,9 +68,13 @@ export class CdkStack extends cdk.Stack {
    */
   constructor(scope: Construct, id: string, props?: CdkStackProps) {
     const {
+      triageIndexDeploymentStage: configuredTriageIndexDeploymentStage,
       workspaceSearchMigrationDeploymentTargetId,
       ...baseStackProps
     } = props ?? {};
+    const triageIndexDeploymentStage = resolveTriageIndexDeploymentStage(
+      configuredTriageIndexDeploymentStage,
+    );
     const deploymentTarget =
       resolveWorkspaceSearchMigrationDeploymentTarget(
         workspaceSearchMigrationDeploymentTargetId ??
@@ -126,12 +138,16 @@ export class CdkStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'WorkspaceSearchMigrationDeploymentTrustRootDigest', {
       value: deploymentTarget.digest,
     });
+    new cdk.CfnOutput(this, 'TriageIndexDeploymentStage', {
+      value: triageIndexDeploymentStage,
+    });
 
     const lambdaBuildPaths = buildLambdaBuildPaths();
     const parameters = buildStackParameters(this);
     const runtimeControls = buildRuntimeControls(this, { lambdaBuildPaths });
     const dataStores = buildDataStores(this, {
       connectorRuntimeConfiguration: parameters.connectorRuntimeConfiguration,
+      triageIndexDeploymentStage,
     });
     const migrationStorage = buildMigrationStorage(this, {
       collaborationTable: dataStores.collaborationTable,
@@ -285,6 +301,17 @@ export class CdkStack extends cdk.Stack {
       parameters,
       runtimeControls,
     });
+    const triageScheduleWorker = triageIndexDeploymentIncludes(
+      triageIndexDeploymentStage,
+      'wake',
+    )
+      ? buildTriageScheduleWorker(this, {
+        dataStores,
+        lambdaBuildPaths,
+        parameters,
+        runtimeControls,
+      })
+      : {};
     const tenantOperationWorker = buildTenantOperationWorker(this, {
       dataStores,
       fileStorage,
@@ -334,6 +361,7 @@ export class CdkStack extends cdk.Stack {
       ...automationWorkers,
       ...scheduleWorkers,
       ...requestEmailWorker,
+      ...triageScheduleWorker,
       ...tenantOperationWorker,
       ...runtimeControls,
       workspaceDirectoryId: parameters.workspaceDirectoryId,

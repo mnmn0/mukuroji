@@ -272,6 +272,7 @@ const expectedWorkflowConfiguration = {
   FILE_PROOFING_TABLE_NAME: base64(ref('FileProofingTable81DA272F')),
   FILE_RETENTION_DAYS: base64(ref('FileRetentionDays')),
   FILE_UPLOAD_URL_TTL_SECONDS: base64(ref('FileUploadUrlTtlSeconds')),
+  FOCUS_TABLE_NAME: base64(ref('FocusTable8B0E7E68')),
   MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY: nestedSecret(
     ref(API_WORKSPACE_AUDIT_PSEUDONYM_VALUE_SECRET_LOGICAL_ID),
   ),
@@ -288,6 +289,9 @@ const expectedWorkflowConfiguration = {
   REQUEST_TOKEN_HASH_SECRET: nestedSecret(
     ref(API_REQUEST_TOKEN_HASH_VALUE_SECRET_LOGICAL_ID),
   ),
+  TRIAGE_OWNER_ACTIVITY_INDEX_NAME: base64('triage-owner-activity-index'),
+  TRIAGE_TEAM_ACTIVITY_INDEX_NAME: base64('triage-team-activity-index'),
+  TRIAGE_WAKE_INDEX_NAME: base64('triage-wake-index'),
   WEBHOOK_DELIVERY_QUEUE_URL: base64(
     ref('WebhookDeliveryQueue2A244492'),
   ),

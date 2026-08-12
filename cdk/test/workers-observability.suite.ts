@@ -1978,7 +1978,7 @@ test('hourly schedule emits deterministic events and surfaces bounded scan failu
     },
     MaximumRetryAttempts: 2,
   });
-  template.resourceCountIs('AWS::SQS::Queue', 25);
+  template.resourceCountIs('AWS::SQS::Queue', 26);
   template.hasResourceProperties('AWS::SQS::Queue', {
     MessageRetentionPeriod: 1209600,
     SqsManagedSseEnabled: true,
@@ -2035,7 +2035,7 @@ test('application Lambdas emit active X-Ray traces and critical DLQs survive rep
 
   template.resourcePropertiesCountIs('AWS::Lambda::Function', {
     TracingConfig: { Mode: 'Active' },
-  }, 28);
+  }, 29);
 
   for (const logicalIdPrefix of [
     'CollaborationProjectionDlq',
@@ -2043,6 +2043,7 @@ test('application Lambdas emit active X-Ray traces and critical DLQs survive rep
     'AutomationScheduleDlq',
     'AnalyticsScheduleDlq',
     'NotificationScheduleDlq',
+    'TriageScheduleDlq',
     'EnterpriseScimGroupJobDlq',
     'EnterpriseIdentityMaintenanceDlq',
     'TenantOperationDlq',
@@ -2137,7 +2138,12 @@ test('tenant lifecycle execution is split into queued environment-bound resource
   const resources = document.Resources;
   const capacityPlanningTableId =
     document.Outputs.CapacityPlanningTableName?.Value?.Ref;
+  const focusTableId = document.Outputs.FocusTableName?.Value?.Ref;
   expect(typeof capacityPlanningTableId).toBe('string');
+  expect(typeof focusTableId).toBe('string');
+  if (typeof focusTableId !== 'string') {
+    throw new Error('Focus table output was not synthesized.');
+  }
   const specifications = [
     {
       functionId: 'TenantExportCapabilityFunction9B1A8023',
@@ -2206,6 +2212,7 @@ test('tenant lifecycle execution is split into queued environment-bound resource
             TENANT_OPERATION_RESOURCE_OWNER: specification.owner,
             TENANT_OPERATION_RESOURCE_OWNER_QUEUE_URL: expect.anything(),
             CAPACITY_PLANNING_TABLE_NAME: { Ref: capacityPlanningTableId },
+            FOCUS_TABLE_NAME: { Ref: focusTableId },
             AUTOMATION_INBOUND_WEBHOOK_SECRET_PREFIX:
               'mukuroji/automation-inbound-webhooks',
             AUTOMATION_WEBHOOK_SECRET_PREFIX:
@@ -2233,6 +2240,27 @@ test('tenant lifecycle execution is split into queued environment-bound resource
       )
     )?.[1];
     const serializedPolicy = JSON.stringify(policy);
+    const policyProperties = typeof policy === 'object' && policy !== null
+      ? Reflect.get(policy, 'Properties')
+      : undefined;
+    const policyDocument = typeof policyProperties === 'object' && policyProperties !== null
+      ? Reflect.get(policyProperties, 'PolicyDocument')
+      : undefined;
+    const policyStatements = typeof policyDocument === 'object' && policyDocument !== null
+      ? Reflect.get(policyDocument, 'Statement')
+      : undefined;
+    const focusStatements = (Array.isArray(policyStatements)
+      ? policyStatements.filter(
+        (statement): statement is Record<string, unknown> =>
+          typeof statement === 'object' && statement !== null && !Array.isArray(statement),
+      )
+      : [])
+      .filter((statement) =>
+        JSON.stringify(statement.Resource).includes(focusTableId)
+      );
+    const focusActions = focusStatements.flatMap((statement) =>
+      Array.isArray(statement.Action) ? statement.Action : [statement.Action]
+    );
     expect(policy).toBeDefined();
     expect(serializedPolicy).toContain('TenantAdministrationTable621D59EB');
     expect(serializedPolicy).toContain('AuditEventsTable0723963E');
@@ -2266,6 +2294,37 @@ test('tenant lifecycle execution is split into queued environment-bound resource
     } else {
       expect(serializedPolicy).not.toContain('s3:');
       expect(serializedPolicy).not.toContain('WorkItemImportBucket14068778');
+    }
+    if (
+      specification.owner === 'export' ||
+      specification.owner === 'data' ||
+      specification.owner === 'verification'
+    ) {
+      expect(focusStatements).toHaveLength(1);
+      expect(focusActions).toEqual(expect.arrayContaining([
+        'dynamodb:GetItem',
+        'dynamodb:Query',
+        'dynamodb:Scan',
+      ]));
+      if (specification.owner === 'data') {
+        expect(focusActions).toEqual(expect.arrayContaining([
+          'dynamodb:BatchWriteItem',
+          'dynamodb:DeleteItem',
+          'dynamodb:PutItem',
+          'dynamodb:UpdateItem',
+        ]));
+      } else {
+        for (const writeAction of [
+          'dynamodb:BatchWriteItem',
+          'dynamodb:DeleteItem',
+          'dynamodb:PutItem',
+          'dynamodb:UpdateItem',
+        ]) {
+          expect(focusActions).not.toContain(writeAction);
+        }
+      }
+    } else {
+      expect(focusStatements).toEqual([]);
     }
     const queueId = Object.keys(resources).find((logicalId) =>
       logicalId.startsWith(specification.queuePrefix) &&
@@ -2400,6 +2459,179 @@ test('request email ingestion is an asynchronous narrow-IAM Lambda with a monito
   expect(JSON.stringify(template.findResources('AWS::Lambda::Url')))
     .not.toContain(functionLogicalId);
   template.hasOutput('RequestEmailIngestionDlqUrl', {});
+});
+
+test('triage schedule wakes due entries through a narrow indexed worker', () => {
+  const template = synthesizedTemplate;
+  const resources = template.toJSON().Resources;
+  const requestTableLogicalId =
+    template.toJSON().Outputs.RequestIntakeTableName?.Value?.Ref;
+  const functionEntry = Object.entries(resources).find(([, resource]) =>
+    (resource as { Properties?: { Description?: string } }).Properties?.Description ===
+      'Processes due Triage snooze and SLA wake-ups with revision-fenced receipts.'
+  );
+
+  expect(typeof requestTableLogicalId).toBe('string');
+  expect(functionEntry).toBeDefined();
+  if (typeof requestTableLogicalId !== 'string' || !functionEntry) {
+    throw new Error('Triage schedule infrastructure was not synthesized.');
+  }
+  const [functionLogicalId, scheduleFunction] = functionEntry;
+  expect(scheduleFunction).toEqual(expect.objectContaining({
+    Type: 'AWS::Lambda::Function',
+    Properties: expect.objectContaining({
+      Handler: 'index.handler',
+      MemorySize: 512,
+      Runtime: 'nodejs22.x',
+      Timeout: 300,
+      Environment: expect.objectContaining({
+        Variables: expect.objectContaining({
+          AUDIT_EVENTS_TABLE_NAME: { Ref: 'AuditEventsTable0723963E' },
+          AUDIT_RETENTION_DAYS: { Ref: 'AuditRetentionDays' },
+          MUKUROJI_RUNTIME_ROLE: 'triage-schedule-worker',
+          REQUEST_INTAKE_TABLE_NAME: { Ref: requestTableLogicalId },
+          TRIAGE_SCHEDULE_BATCH_SIZE: '100',
+          TRIAGE_WAKE_INDEX_NAME: 'triage-wake-index',
+          TRIAGE_WAKE_SHARD_COUNT: '8',
+        }),
+      }),
+    }),
+  }));
+
+  const roleLogicalId = (
+    scheduleFunction as {
+      Properties?: { Role?: { 'Fn::GetAtt'?: string[] } };
+    }
+  ).Properties?.Role?.['Fn::GetAtt']?.[0];
+  expect(typeof roleLogicalId).toBe('string');
+  if (typeof roleLogicalId !== 'string') {
+    throw new Error('Triage schedule execution role was not synthesized.');
+  }
+  const policies = Object.values(resources).filter((resource) =>
+    (resource as { Type?: string }).Type === 'AWS::IAM::Policy' &&
+    ((resource as { Properties?: { Roles?: unknown[] } }).Properties?.Roles ?? [])
+      .some((role) => (role as { Ref?: string }).Ref === roleLogicalId)
+  );
+  const statements = policies.flatMap((policy) => {
+    const value = (policy as {
+      Properties?: { PolicyDocument?: { Statement?: unknown } };
+    }).Properties?.PolicyDocument?.Statement;
+    return Array.isArray(value) ? value as Array<Record<string, unknown>> : [];
+  });
+  const serializedPolicies = JSON.stringify(policies);
+  const queryStatement = statements.find((statement) =>
+    statement.Action === 'dynamodb:Query'
+  );
+  const getStatement = statements.find((statement) =>
+    statement.Action === 'dynamodb:GetItem'
+  );
+  const transactionStatement = statements.find((statement) => {
+    const actions = Array.isArray(statement.Action)
+      ? statement.Action
+      : [statement.Action];
+    return actions.includes('dynamodb:ConditionCheckItem');
+  });
+  const auditPutStatement = statements.find((statement) =>
+    statement.Action === 'dynamodb:PutItem' &&
+    JSON.stringify(statement.Resource).includes('AuditEventsTable0723963E')
+  );
+
+  expect(JSON.stringify(queryStatement?.Resource)).toContain(requestTableLogicalId);
+  expect(JSON.stringify(queryStatement?.Resource)).toContain(
+    'index/triage-wake-index',
+  );
+  expect(JSON.stringify(getStatement?.Resource)).toContain(requestTableLogicalId);
+  expect(transactionStatement).toEqual(expect.objectContaining({
+    Action: expect.arrayContaining([
+      'dynamodb:ConditionCheckItem',
+      'dynamodb:PutItem',
+      'dynamodb:UpdateItem',
+    ]),
+    Condition: {
+      'ForAnyValue:StringEquals': {
+        'dynamodb:EnclosingOperation': ['TransactWriteItems'],
+      },
+    },
+    Effect: 'Allow',
+  }));
+  expect(JSON.stringify(transactionStatement?.Resource))
+    .toContain(requestTableLogicalId);
+  expect(auditPutStatement).toEqual(expect.objectContaining({
+    Action: 'dynamodb:PutItem',
+    Condition: {
+      'ForAnyValue:StringEquals': {
+        'dynamodb:EnclosingOperation': ['TransactWriteItems'],
+      },
+    },
+    Effect: 'Allow',
+  }));
+  for (const forbiddenAction of [
+    'dynamodb:BatchGetItem',
+    'dynamodb:BatchWriteItem',
+    'dynamodb:DeleteItem',
+    'dynamodb:Scan',
+    'dynamodb:TransactWriteItems',
+  ]) {
+    expect(serializedPolicies).not.toContain(forbiddenAction);
+  }
+  for (const forbiddenResource of [
+    'DeveloperPlatformTable',
+    'TeamIssuesTable189D851D',
+  ]) {
+    expect(serializedPolicies).not.toContain(forbiddenResource);
+  }
+
+  const eventInvokeConfig = Object.values(resources).find((resource) =>
+    (resource as { Type?: string }).Type === 'AWS::Lambda::EventInvokeConfig' &&
+    (resource as { Properties?: { FunctionName?: { Ref?: string } } })
+      .Properties?.FunctionName?.Ref === functionLogicalId
+  ) as {
+    Properties?: {
+      DestinationConfig?: { OnFailure?: { Destination?: { 'Fn::GetAtt'?: string[] } } };
+      MaximumRetryAttempts?: number;
+    };
+  } | undefined;
+  expect(eventInvokeConfig?.Properties?.MaximumRetryAttempts).toBe(2);
+  const queueLogicalId = eventInvokeConfig?.Properties?.DestinationConfig
+    ?.OnFailure?.Destination?.['Fn::GetAtt']?.[0];
+  expect(typeof queueLogicalId).toBe('string');
+  if (typeof queueLogicalId !== 'string') {
+    throw new Error('Triage schedule DLQ destination was not synthesized.');
+  }
+  expect(resources[queueLogicalId]).toEqual(expect.objectContaining({
+    Type: 'AWS::SQS::Queue',
+    DeletionPolicy: 'Retain',
+    UpdateReplacePolicy: 'Retain',
+    Properties: expect.objectContaining({
+      MessageRetentionPeriod: 14 * 24 * 60 * 60,
+      SqsManagedSseEnabled: true,
+    }),
+  }));
+  expectQueueRequiresSsl(template, 'TriageScheduleDlq');
+
+  template.hasResourceProperties('AWS::Events::Rule', {
+    Description: 'Checks due Triage snooze and SLA wake-ups every minute.',
+    ScheduleExpression: 'rate(1 minute)',
+    State: 'ENABLED',
+  });
+  template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+    AlarmDescription:
+      'Detects Triage wake processing failures after asynchronous retries.',
+    MetricName: 'ApproximateNumberOfMessagesVisible',
+    Namespace: 'AWS/SQS',
+    Threshold: 1,
+    TreatMissingData: 'notBreaching',
+  });
+  template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+    AlarmDescription:
+      'Detects failures while Lambda delivers Triage schedule failures to the DLQ.',
+    MetricName: 'DestinationDeliveryFailures',
+    Namespace: 'AWS/Lambda',
+    Threshold: 1,
+    TreatMissingData: 'notBreaching',
+  });
+  template.hasOutput('TriageScheduleFunctionName', {});
+  template.hasOutput('TriageScheduleDlqUrl', {});
 });
 
 test('automation workers consume the audit outbox and run recurring schedules with DLQs', () => {

@@ -7,9 +7,11 @@ import {
 import { resolve4, resolve6, resolveTxt } from 'node:dns/promises'
 import { request as requestHttps } from 'node:https'
 import { isIP } from 'node:net'
+import type { TransactWriteCommandInput } from '@aws-sdk/lib-dynamodb'
 import {
   PUBLIC_API_OPENAPI_DOCUMENT,
   ENTERPRISE_PERMISSION_IDS,
+  createDefaultUnscheduledWorkItemSchedule,
   WORK_ITEM_SCHEDULE_MAX_DATE_SPAN_DAYS,
   WORK_ITEM_SCHEDULE_MIN_YEAR,
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
@@ -18,6 +20,8 @@ import {
   type AnalyticsSnapshot,
   type AnalyticsSnapshotListResponse,
   type AnalyticsSnapshotRecord,
+  type AcceptCreateTriageAction,
+  type CreateManualTriageEntryInput,
   type CreateAnalyticsReportInput,
   type AutomationAction,
   type AutomationExecutionStatus,
@@ -28,6 +32,7 @@ import {
   type BulkOperationPreview,
   type BulkOperationRequest,
   type ApprovalSummary,
+  type ApprovalRequest,
   type ApiProblem,
   type CanonicalWorkItem,
   type ConfirmedWorkItemSchedule,
@@ -49,7 +54,14 @@ import {
   type RequestFormDraft,
   type RequestFormField,
   type RequestFormRoutingTarget,
+  type RequestSubmission,
   type RequestSubmissionActionInput,
+  type TriageBulkActionInput,
+  type TriageBulkActionResult,
+  type TriageConfiguration,
+  type TriageActionInput,
+  type TriageEntry,
+  type UpdateTriageConfigurationInput,
   type ScheduleDependencyConstraint,
   type SearchCustomFieldFilter,
   type SearchCustomFieldValue,
@@ -114,7 +126,20 @@ import {
   type EnterpriseScimUserInput,
   type EnterpriseServiceAccount,
   type EnterpriseVerifiedDomain,
+  type FocusEffectivePolicy,
+  type FocusItem,
+  type FocusPolicy,
+  type FocusPolicyOverrides,
+  type FocusPolicyTarget,
+  type FocusQueueResponse,
+  type FocusSignalWeightOverrides,
   type TenantFeature,
+  type UpdateFocusPolicyInput,
+  type UpdateFocusPolicyResponse,
+  type UpdateFocusSnoozeInput,
+  type UpdateFocusSnoozeResponse,
+  type UpdateFocusWatchInput,
+  type UpdateFocusWatchResponse,
 } from '@mukuroji/contracts'
 import { Hono } from 'hono'
 import { getConnInfo, type LambdaEvent } from 'hono/aws-lambda'
@@ -227,6 +252,7 @@ import {
   createWorkItemDependencyKey,
   createWorkItemAuthorizationChangedError,
   createWorkItemRelationGraphRevisionConditionCheck,
+  createWorkItemRevisionConditionCheck,
   customFieldValueRecordsEqual,
   deriveWorkItemScheduleDueDate,
   isTeamIssueNotFoundError,
@@ -254,6 +280,7 @@ import {
   type TeamIssueDetailResponse,
   type TeamIssueResponseItem,
   type TeamIssuesResponse,
+  type TriageDuplicateContextTransactionContribution,
   type UpdateTeamIssueRequestBody,
   type UpdateTeamIssueResponse,
   type WorkItemIdempotencyTransaction,
@@ -270,6 +297,7 @@ import {
   WorkspaceAccessError,
   isWorkspaceIdentitySafeToDelete,
   type WorkspaceInvitation,
+  type WorkspaceActiveMemberConditionOptions,
   type WorkspaceMember,
   type WorkspaceMemberStatus,
   type WorkspaceRole,
@@ -302,10 +330,27 @@ import {
   type ListReviewerApprovalsOptions,
   type ReviewerApprovalPage,
 } from '../modules/files/file-proofing'
-import { NotificationError, type NotificationItem } from '../modules/notifications/notifications'
+import {
+  NotificationError,
+  type NotificationFilter,
+  type NotificationItem,
+} from '../modules/notifications/notifications'
 import {
   createNotificationRouter,
 } from '../modules/notifications/adapter-in/http/notification-router'
+import {
+  FocusStateError,
+  createFocusCauseFingerprint,
+  createFocusPolicyMutationPreview,
+  createFocusPolicyRevisionConditionCheck,
+  createFocusQueue,
+  createFocusWorkItemStateKey as createFocusWorkItemKey,
+  resolveFocusEffectivePolicies,
+  type CreateFocusQueueInput,
+  type FocusRelationGraphSource,
+  type FocusSnoozeRecord,
+  type FocusStateSnapshot,
+} from '../modules/focus'
 import {
   createCommentWorkspaceSearchDocument,
   createCuratedContextItemWorkspaceSearchDocument,
@@ -326,6 +371,7 @@ import {
   type WorkspaceSearchDocument,
 } from '../modules/workspace-search/workspace-search'
 import {
+  createFormTriageEntryId,
   RequestIntakeError,
   createRequestWorkItemInput,
   type RequestExternalContext,
@@ -337,6 +383,22 @@ import {
 import {
   createPublicRequestIntakeRouter,
 } from '../modules/request-intake/adapter-in/http/public-request-intake-router'
+import {
+  createTriageAcceptanceTransactionItems,
+  createTriageActionAuditIdempotencyKey,
+  createTriageActionTransactionItems,
+  createTriageBulkTargetIdempotencyKey,
+  createTriageConfigurationRevisionConditionCheck,
+  createTriageInputFingerprint,
+  createTriageRouter,
+  TriageError,
+  type TriageAuthorizationConditionChecks,
+  type TriageIdempotency,
+  type TriageRouterBulkActionRequest,
+  type TriageTransactionContribution,
+  type TriageRouterActionRequest,
+  type TriageTeamAccess,
+} from '../modules/triage'
 import {
   ENTERPRISE_SCIM_DISPLAY_NAME_MAX_BYTES,
   ENTERPRISE_SCIM_EXTERNAL_ID_MAX_BYTES,
@@ -545,6 +607,11 @@ export type {
   WorkspaceMemberStatus,
   WorkspaceRole,
 } from '../modules/workspace-access/workspace-access'
+
+/** Workspace roles that may perform a Team Triage mutation. */
+const TRIAGE_NON_GUEST_MEMBER_CONDITION_OPTIONS: WorkspaceActiveMemberConditionOptions = {
+  allowedRoles: ['owner', 'admin', 'member'],
+}
 
 
 
@@ -1079,6 +1146,9 @@ const workItemDependencies: WorkItemDependencies = {
   get notifications() {
     return requireAppDependencies().workItems.notifications
   },
+  get focusState() {
+    return requireAppDependencies().workItems.focusState
+  },
   get workspaceSearch() {
     return requireAppDependencies().workItems.workspaceSearch
   },
@@ -1096,6 +1166,9 @@ const workItemDependencies: WorkItemDependencies = {
   },
   get requestIntake() {
     return requireAppDependencies().workItems.requestIntake
+  },
+  get triage() {
+    return requireAppDependencies().workItems.triage
   },
   get analytics() {
     return requireAppDependencies().workItems.analytics
@@ -1486,6 +1559,26 @@ const enterpriseRoutePermissionRules = [
   { method: 'GET', pathPattern: '/api/request-queue*', permission: 'requests.read' },
   { method: 'GET', pathPattern: '/api/request-submissions*', permission: 'requests.read' },
   { method: '*', pathPattern: '/api/request-submissions*', permission: 'requests.manage' },
+  {
+    method: 'PUT',
+    pathPattern: '/api/teams/:teamId/triage-settings',
+    permission: 'teams.manage',
+  },
+  {
+    method: 'GET',
+    pathPattern: '/api/teams/:teamId/triage*',
+    permission: 'teams.read',
+  },
+  {
+    method: '*',
+    pathPattern: '/api/teams/:teamId/triage*',
+    permission: 'teams.write',
+  },
+  {
+    method: 'GET',
+    pathPattern: '/api/teams/:teamId/work-items/:workItemId/triage-sources',
+    permission: 'teams.read',
+  },
   { method: 'GET', pathPattern: '/api/approvals*', permission: 'files.read' },
   { method: '*', pathPattern: '/api/approvals*', permission: 'files.approve' },
   {
@@ -1521,6 +1614,23 @@ const enterpriseRoutePermissionRules = [
   {
     method: 'POST',
     pathPattern: '/api/realtime/tickets',
+    permission: 'work-items.read',
+  },
+  { method: 'GET', pathPattern: '/api/focus*', permission: 'work-items.read' },
+  {
+    method: 'PUT',
+    pathPattern: '/api/focus/policies',
+    permission: 'work-items.read',
+    alternativePermissions: ['teams.manage'],
+  },
+  {
+    method: 'PUT',
+    pathPattern: '/api/focus/items/:teamId/:workItemId/snooze',
+    permission: 'work-items.read',
+  },
+  {
+    method: 'PUT',
+    pathPattern: '/api/focus/items/:teamId/:workItemId/watch',
     permission: 'work-items.read',
   },
   { method: 'GET', pathPattern: '/api/work-items*', permission: 'work-items.read' },
@@ -5662,6 +5772,21 @@ routeApp.route('/', createAdminRequestIntakeRouter({
   mapError: toRequestIntakeErrorResponse,
 }))
 
+routeApp.route('/', createTriageRouter({
+  getTriage: () => workItemDependencies.triage,
+  requireTeamAccess: requireTriageTeamAccess,
+  requireWorkItemAccess: requireTriageWorkItemAccess,
+  readJson,
+  validateBulkAction: validateTriageBulkAction,
+  prepareManualHandoff: prepareTriageManualHandoff,
+  createManualHandoffAuthorizationConditionChecks:
+    createTriageManualHandoffAuthorizationConditionChecks,
+  validateConfiguration: validateTriageConfigurationReferences,
+  applyAction: applyTriageRouteAction,
+  applyBulkAction: applyTriageBulkRouteAction,
+  mapError: toTriageErrorResponse,
+}))
+
 /** Workspace admin が explicit triage transition または Work Item conversion を実行します。 */
 routeApp.post('/api/request-submissions/:submissionId/actions', async (c) => {
   try {
@@ -5683,20 +5808,57 @@ routeApp.post('/api/request-submissions/:submissionId/actions', async (c) => {
     }
     if (body.action !== 'convert') {
       if (body.action === 'assign') {
-        if (typeof body.assigneeUserId !== 'string' || !body.assigneeUserId.trim()) {
+        if (
+          body.assigneeUserId !== null &&
+          (typeof body.assigneeUserId !== 'string' || !body.assigneeUserId.trim())
+        ) {
           throw new RequestIntakeError(400, 'InvalidRequestIntakeInput', 'Request assignee is required.')
         }
-        await requireActiveWorkspaceAssignee(principal.directoryId, body.assigneeUserId)
+        if (typeof body.assigneeUserId === 'string') {
+          await requireActiveWorkspaceAssignee(principal.directoryId, body.assigneeUserId)
+        }
       }
+      const submission = await workItemDependencies.requestIntake.getSubmission(
+        principal.directoryId,
+        submissionId,
+      )
+      const triageEntry = await readLegacyConversionTriageEntry(
+        principal.directoryId,
+        submission.routingTarget.teamId,
+        createFormTriageEntryId(submissionId),
+      )
+      const triageContribution = triageEntry
+        ? await createLegacyRequestTriageContribution(
+            c,
+            principal,
+            submission,
+            triageEntry,
+            body,
+          )
+        : undefined
+      if (triageContribution?.replayed) return c.json(submission)
       return c.json(await workItemDependencies.requestIntake.applyAction(
         principal.directoryId,
         submissionId,
         { id: principal.userKey },
         body,
+        triageContribution?.contribution.transactItems,
       ))
     }
     const submission = await workItemDependencies.requestIntake.getSubmission(principal.directoryId, submissionId)
-    const conversion = createRequestWorkItemInput(submission, body)
+    if (submission.status === 'converted' && submission.workItem) {
+      await repairConvertedRequestTriageProjection(c, principal, submission)
+      return c.json(submission)
+    }
+    const triageEntryId = createFormTriageEntryId(submissionId)
+    const triageEntry = await readLegacyConversionTriageEntry(
+      principal.directoryId,
+      submission.routingTarget.teamId,
+      triageEntryId,
+    )
+    const conversion = triageEntry?.retention.redactedAt !== undefined
+      ? createRetentionSafeRequestWorkItemInput(submission, body)
+      : createRequestWorkItemInput(submission, body)
     const teamContext = await requireTeamPermission(principal, conversion.target.teamId, 'member')
     requireAssignedProjectPermission(
       principal,
@@ -5705,7 +5867,56 @@ routeApp.post('/api/request-submissions/:submissionId/actions', async (c) => {
       'member',
     )
     await validateRequestRoutingTarget(principal.directoryId, conversion.target)
-    const normalized = normalizeTeamIssueInput(conversion.input, teamContext.team)
+    if (triageEntry && conversion.target.teamId !== triageEntry.teamId) {
+      throw new RequestIntakeError(
+        409,
+        'RequestTriageTeamConflict',
+        'A Triage-backed Request must be accepted in its current Team.',
+      )
+    }
+    if (triageEntry && triageEntry.state !== 'pending' && triageEntry.state !== 'needs-information' &&
+      triageEntry.state !== 'snoozed') {
+      throw new RequestIntakeError(
+        409,
+        'RequestTriageStateConflict',
+        'The corresponding Triage entry is already resolved.',
+      )
+    }
+    const triageAction: AcceptCreateTriageAction | undefined = triageEntry
+      ? {
+          action: 'accept',
+          mode: 'create',
+          expectedRevision: triageEntry.revision,
+        }
+      : undefined
+    const triageIdempotency = triageAction
+      ? {
+          key: c.req.header('Idempotency-Key')?.trim() ||
+            `request-conversion:${submissionId}:${body.expectedRevision}`,
+          fingerprint: createTriageInputFingerprint({
+            workspaceId: principal.directoryId,
+            teamId: conversion.target.teamId,
+            entryId: triageEntryId,
+            action: triageAction,
+          }),
+        }
+      : undefined
+    const deterministicIssueId = triageEntry
+      ? createDeterministicTriageWorkItemId(
+          principal.directoryId,
+          conversion.target.teamId,
+          triageEntry.id,
+        )
+      : undefined
+    const normalized = normalizeTeamIssueInput({
+      ...conversion.input,
+      ...(deterministicIssueId && triageIdempotency
+        ? {
+            idempotentIssueId: deterministicIssueId,
+            idempotentRequestDigest: triageIdempotency.fingerprint,
+          }
+        : {}),
+    }, teamContext.team)
     const resolvedConfiguration = await workItemDependencies.workItemConfigurations.getTeamConfiguration(
       principal.directoryId,
       conversion.target.teamId,
@@ -5716,14 +5927,53 @@ routeApp.post('/api/request-submissions/:submissionId/actions', async (c) => {
       normalized,
       resolvedConfiguration,
     )
+    const authorizationConditionChecks = triageEntry
+      ? await createTriageProjectAuthorizationConditionChecks(
+          principal,
+          teamContext,
+          principal.directoryId,
+          conversion.target.teamId,
+          conversion.target.projectId,
+        )
+      : []
+    const guardedConfigured = authorizationConditionChecks.length === 0
+      ? configured
+      : {
+          ...configured,
+          authorizationConditionChecks: mergeTriageConditionChecks(
+            configured.authorizationConditionChecks ?? [],
+            authorizationConditionChecks,
+          ),
+        };
     await requireActiveWorkspaceAssignee(
       principal.directoryId,
-      readTeamIssueAssigneeUserId(configured),
+      readTeamIssueAssigneeUserId(guardedConfigured),
     )
+    const triageOccurredAt = triageEntry && triageAction && triageIdempotency && deterministicIssueId
+      ? new Date().toISOString()
+      : undefined
+    const triageAcceptance = triageEntry && triageAction && triageIdempotency &&
+      deterministicIssueId && triageOccurredAt
+      ? createTriageAcceptanceTransactionItems({
+          tableName: getEnv('REQUEST_INTAKE_TABLE_NAME') ?? 'mukuroji-request-intake-local',
+          entry: triageEntry,
+          action: triageAction,
+          canonicalWorkItem: {
+            teamId: conversion.target.teamId,
+            workItemId: deterministicIssueId,
+            ...(conversion.target.projectId
+              ? { projectId: conversion.target.projectId }
+              : {}),
+          },
+          actorId: principal.userKey,
+          now: triageOccurredAt,
+          idempotency: triageIdempotency,
+        })
+      : undefined
     const created = await hydrateCreateTeamIssueResponse(await workItemDependencies.teamIssues.createTeamIssue(
       principal.directoryId,
       conversion.target.teamId,
-      configured,
+      guardedConfigured,
       principal.userKey,
       createApiMutationContext(c, principal, {
         submissionId,
@@ -5739,6 +5989,13 @@ routeApp.post('/api/request-submissions/:submissionId/actions', async (c) => {
         submissionId,
         events: submission.events,
       },
+      triageAcceptance && triageOccurredAt
+        ? {
+            entryId: triageAcceptance.entry.id,
+            occurredAt: triageOccurredAt,
+            transactItems: triageAcceptance.transactItems,
+          }
+        : undefined,
     ))
     await projectWorkItemSearchDocumentBestEffort(
       principal.directoryId,
@@ -5918,6 +6175,405 @@ routeApp.get('/api/work-items', async (c) => {
     ))
   } catch (error) {
     return toWorkItemConfigurationErrorResponse(c, error)
+  }
+})
+
+/** Returns the current permission-filtered Focus queue. */
+routeApp.get('/api/focus', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+    return c.json(await readFocusQueue(principal, new Date()))
+  } catch (error) {
+    return toFocusErrorResponse(c, error)
+  }
+})
+
+/** Replaces one personal or Team Focus policy with optimistic concurrency. */
+routeApp.put('/api/focus/policies', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+    const input = readFocusPolicyInput(await readJson<unknown>(c.req))
+    if (input.target.type === 'team') {
+      requireWorkspaceBusinessWrite(principal)
+      await requireTeamPermission(principal, input.target.teamId, 'manager')
+    }
+    const operation = 'policy'
+    const targetIdentity = createFocusMutationTargetIdentity(operation, [
+      input.target.type,
+      ...(input.target.type === 'team' ? [input.target.teamId] : []),
+    ])
+    const reservationRequest = createFocusMutationReservationRequest(
+      principal,
+      readRequiredFocusIdempotencyKey(c.req.header('Idempotency-Key')),
+      c.req.method,
+      '/api/focus/policies',
+      input,
+    )
+    const reservation = await reserveFocusMutation(reservationRequest)
+    if (reservation.status === 'in-progress') {
+      throw focusIdempotencyInProgress()
+    }
+    if (reservation.status === 'replay') {
+      const outcome = readStoredFocusMutationReceipt(
+        reservation.response,
+        reservationRequest.workspaceId,
+        operation,
+        targetIdentity,
+      )
+      const response = await replayFocusPolicyMutation(
+        principal,
+        input,
+        outcome,
+      )
+      c.header('Idempotency-Replayed', 'true')
+      return c.json(response)
+    }
+
+    const token = createFocusIdempotencyMutationToken(
+      reservationRequest,
+      reservation.reservationId,
+    )
+    try {
+      const now = new Date()
+      const prepared = await prepareFocusPolicyMutation(
+        principal,
+        input,
+        now,
+        reservationRequest,
+        targetIdentity,
+      )
+      if (prepared.committedPolicy !== undefined) {
+        await completeFocusPolicyMutationReceipt(
+          reservationRequest,
+          token,
+          targetIdentity,
+          prepared.committedPolicy,
+          prepared.effectivePolicies,
+        )
+        c.header('Idempotency-Replayed', 'true')
+        return c.json({
+          policy: prepared.committedPolicy,
+          effectivePolicies: prepared.effectivePolicies,
+        } satisfies UpdateFocusPolicyResponse)
+      }
+      const policy = await workItemDependencies.focusState.savePolicy({
+        workspaceId: principal.directoryId,
+        memberKey: principal.userKey,
+        update: input,
+        now,
+        mutationIdentity: prepared.mutationIdentity,
+        authorizationConditionChecks: [
+          ...createPlanningCallerAuthorizationConditionChecks(principal),
+          ...prepared.policyConditionChecks,
+        ],
+      })
+      let effectivePolicies = prepared.effectivePolicies
+      try {
+        effectivePolicies = await readAndVerifyFocusPolicyEffectivePolicies(
+          principal,
+          input,
+          prepared.effectivePolicies,
+        )
+      } catch (error) {
+        if (
+          !(error instanceof FocusApiError) ||
+          error.code !== 'FocusPolicyContributingStateChanged'
+        ) {
+          throw error
+        }
+      }
+      const response = { policy, effectivePolicies } satisfies UpdateFocusPolicyResponse
+      await completeFocusPolicyMutationReceipt(
+        reservationRequest,
+        token,
+        targetIdentity,
+        policy,
+        effectivePolicies,
+      )
+      return c.json(response)
+    } catch (error) {
+      await releaseFocusMutationReservation(reservationRequest, token)
+      throw error
+    }
+  } catch (error) {
+    return toFocusErrorResponse(c, error)
+  }
+})
+
+/** Snoozes or unsnoozes one currently authorized Focus item. */
+routeApp.put('/api/focus/items/:teamId/:workItemId/snooze', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+    const teamId = readFocusRouteId(c.req.param('teamId'), 'Focus Team ID')
+    const workItemId = readFocusRouteId(c.req.param('workItemId'), 'Focus Work Item ID')
+    const now = new Date()
+    const input = readFocusSnoozeInput(await readJson<unknown>(c.req), now)
+    const queue = await readFocusQueue(principal, now)
+    const current = requireFocusItem(
+      queue,
+      teamId,
+      workItemId,
+    )
+    requireFocusItemCapability(current.capabilities.snooze, 'snooze')
+    await reauthorizeFocusItem(principal, current)
+    const operation = 'snooze'
+    const targetIdentity = createFocusMutationTargetIdentity(operation, [teamId, workItemId])
+    const reservationRequest = createFocusMutationReservationRequest(
+      principal,
+      readRequiredFocusIdempotencyKey(c.req.header('Idempotency-Key')),
+      c.req.method,
+      createFocusItemMutationPath(teamId, workItemId, operation),
+      input,
+    )
+    const reservation = await reserveFocusMutation(reservationRequest)
+    if (reservation.status === 'in-progress') {
+      throw focusIdempotencyInProgress()
+    }
+    if (reservation.status === 'replay') {
+      const outcome = readStoredFocusMutationReceipt(
+        reservation.response,
+        reservationRequest.workspaceId,
+        operation,
+        targetIdentity,
+      )
+      const item = replayFocusItemMutation(current, operation, outcome)
+      c.header('Idempotency-Replayed', 'true')
+      return c.json({ item } satisfies UpdateFocusSnoozeResponse)
+    }
+
+    const token = createFocusIdempotencyMutationToken(
+      reservationRequest,
+      reservation.reservationId,
+    )
+    try {
+      const mutationIdentity = createFocusItemMutationRecoveryIdentity(
+        reservationRequest,
+        operation,
+        targetIdentity,
+        current,
+        requireFocusEffectivePolicyFingerprint(queue, current),
+      )
+      const causeFingerprint = createFocusCauseFingerprint(current.signals)
+      const state = await workItemDependencies.focusState.getState({
+        workspaceId: principal.directoryId,
+        memberKey: principal.userKey,
+        teamIds: [teamId],
+      })
+      const committedSnooze = findCommittedFocusSnooze(
+        state,
+        teamId,
+        workItemId,
+        mutationIdentity,
+        input.snoozedUntil,
+        causeFingerprint,
+      )
+      if (committedSnooze !== undefined) {
+        const item = restoreFocusItemEvaluationTime(current, committedSnooze.updatedAt)
+        await completeFocusItemMutationReceipt(
+          reservationRequest,
+          token,
+          operation,
+          targetIdentity,
+          item,
+        )
+        c.header('Idempotency-Replayed', 'true')
+        return c.json({ item } satisfies UpdateFocusSnoozeResponse)
+      }
+      requireFocusItemVersion(current, input.expectedVersion)
+      await workItemDependencies.focusState.saveSnooze({
+        workspaceId: principal.directoryId,
+        memberKey: principal.userKey,
+        teamId,
+        workItemId,
+        expectedVersion: current.snoozeRevision,
+        causeFingerprint,
+        snoozedUntil: input.snoozedUntil,
+        now,
+        mutationIdentity,
+      })
+      const item = requireUpdatedFocusItem(
+        await readFocusQueue(principal, now),
+        teamId,
+        workItemId,
+      )
+      requireFocusSnoozePostcondition(item, causeFingerprint, input.snoozedUntil)
+      const response = { item } satisfies UpdateFocusSnoozeResponse
+      await completeFocusItemMutationReceipt(
+        reservationRequest,
+        token,
+        operation,
+        targetIdentity,
+        item,
+      )
+      return c.json(response)
+    } catch (error) {
+      await releaseFocusMutationReservation(reservationRequest, token)
+      throw error
+    }
+  } catch (error) {
+    return toFocusErrorResponse(c, error)
+  }
+})
+
+/** Changes the watcher state of one currently authorized Focus item. */
+routeApp.put('/api/focus/items/:teamId/:workItemId/watch', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+    requireWorkspaceBusinessWrite(principal)
+    const teamId = readFocusRouteId(c.req.param('teamId'), 'Focus Team ID')
+    const workItemId = readFocusRouteId(c.req.param('workItemId'), 'Focus Work Item ID')
+    const input = readFocusWatchInput(await readJson<unknown>(c.req))
+    const now = new Date()
+    const queue = await readFocusQueue(principal, now)
+    const current = requireFocusItem(
+      queue,
+      teamId,
+      workItemId,
+    )
+    const { context, detail } = await reauthorizeFocusItem(principal, current)
+    requireFocusWorkItemWatchPermission(principal, context, detail.issue)
+    requireFocusItemCapability(current.capabilities.watch, 'watch')
+    const operation = 'watch'
+    const targetIdentity = createFocusMutationTargetIdentity(operation, [teamId, workItemId])
+    const reservationRequest = createFocusMutationReservationRequest(
+      principal,
+      readRequiredFocusIdempotencyKey(c.req.header('Idempotency-Key')),
+      c.req.method,
+      createFocusItemMutationPath(teamId, workItemId, operation),
+      input,
+    )
+    const reservation = await reserveFocusMutation(reservationRequest)
+    if (reservation.status === 'in-progress') {
+      throw focusIdempotencyInProgress()
+    }
+    if (reservation.status === 'replay') {
+      const outcome = readStoredFocusMutationReceipt(
+        reservation.response,
+        reservationRequest.workspaceId,
+        operation,
+        targetIdentity,
+      )
+      const item = replayFocusItemMutation(current, operation, outcome)
+      c.header('Idempotency-Replayed', 'true')
+      return c.json({ item } satisfies UpdateFocusWatchResponse)
+    }
+
+    const token = createFocusIdempotencyMutationToken(
+      reservationRequest,
+      reservation.reservationId,
+    )
+    try {
+      const entityKey = createWorkItemCollaborationEntityKey(
+        principal.directoryId,
+        teamId,
+        workItemId,
+      )
+      const projectEntityKey = detail.issue.assignedProjectId
+        ? createProjectCollaborationEntityKey(
+            principal.directoryId,
+            detail.issue.assignedProjectId,
+          )
+        : undefined
+      const mutationIdentity = createFocusItemMutationRecoveryIdentity(
+        reservationRequest,
+        operation,
+        targetIdentity,
+        current,
+        requireFocusEffectivePolicyFingerprint(queue, current),
+      )
+      const storedWatcher = await workItemDependencies.collaboration
+        .getMemberWatcherState({
+          entityKey,
+          memberKey: principal.userKey,
+          projectEntityKey,
+        })
+      if (
+        storedWatcher.mutationIdentity === mutationIdentity &&
+        storedWatcher.subscribed === input.watching &&
+        storedWatcher.updatedAt !== undefined
+      ) {
+        requireFocusWatchPostcondition(current.watching, input.watching)
+        const item = restoreFocusItemEvaluationTime(current, storedWatcher.updatedAt)
+        await completeFocusItemMutationReceipt(
+          reservationRequest,
+          token,
+          operation,
+          targetIdentity,
+          item,
+        )
+        c.header('Idempotency-Replayed', 'true')
+        return c.json({ item } satisfies UpdateFocusWatchResponse)
+      }
+      requireFocusWatchPostcondition(storedWatcher.subscribed, current.watching)
+      requireFocusItemVersion(current, input.expectedVersion)
+      const auditContext = {
+        ...createApiMutationContext(c, principal, {
+          expectedVersion: input.expectedVersion,
+          teamId,
+          workItemId,
+          watching: input.watching,
+        }),
+        occurredAt: now.toISOString(),
+      }
+      const mutation = {
+        workspaceId: principal.directoryId,
+        teamId,
+        issueId: workItemId,
+        entityKey,
+        authorizationConditionChecks: createPlanningCallerAuthorizationConditionChecks(principal),
+        projectId: detail.issue.assignedProjectId,
+        projectEntityKey,
+        memberKey: principal.userKey,
+        expectedSubscribed: current.watching,
+        mutationIdentity,
+        auditContext,
+      }
+      const watch = input.watching
+        ? await workItemDependencies.collaboration.subscribe(mutation)
+        : await workItemDependencies.collaboration.unsubscribe(mutation)
+      const observedWatching = watch.subscribed
+      requireFocusWatchPostcondition(observedWatching, input.watching)
+      const item = requireUpdatedFocusItem(
+        await readFocusQueue(principal, now),
+        teamId,
+        workItemId,
+      )
+      requireFocusWatchPostcondition(item.watching, input.watching)
+      const response = { item } satisfies UpdateFocusWatchResponse
+      await completeFocusItemMutationReceipt(
+        reservationRequest,
+        token,
+        operation,
+        targetIdentity,
+        item,
+      )
+      return c.json(response)
+    } catch (error) {
+      await releaseFocusMutationReservation(reservationRequest, token)
+      throw error
+    }
+  } catch (error) {
+    return toFocusErrorResponse(c, error)
   }
 })
 
@@ -9362,9 +10018,18 @@ routeApp.get('/api/approvals/reviewer', async (c) => {
   }
 })
 
+/**
+ * Lists reviewer approvals after current Work Item authorization checks.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @param options - Reviewer projection cursor and requested authorized result limit.
+ * @param sourcePageBudget - Optional shared raw-port page budget decremented by each source read.
+ * @returns Current authorized approvals and the next unconsumed source cursor when present.
+ */
 async function listAuthorizedReviewerApprovals(
   principal: WorkspacePrincipal,
   options: ListReviewerApprovalsOptions,
+  sourcePageBudget?: { remaining: number },
 ): Promise<ReviewerApprovalPage> {
   const limit = options.limit ?? 50
   const approvals: ReviewerApprovalPage['approvals'] = []
@@ -9372,6 +10037,7 @@ async function listAuthorizedReviewerApprovals(
   const visitedCursors = new Set<string>()
 
   do {
+    if (sourcePageBudget !== undefined && sourcePageBudget.remaining <= 0) break
     const page = await workItemDependencies.fileProofing.listReviewerApprovals(
       principal.directoryId,
       {
@@ -9385,6 +10051,7 @@ async function listAuthorizedReviewerApprovals(
         limit: limit - approvals.length,
       },
     )
+    if (sourcePageBudget !== undefined) sourcePageBudget.remaining -= 1
     const authorized = await Promise.all(page.approvals.map(async (approval) => {
       if (!approval.teamId || !approval.issueId) {
         return undefined
@@ -9417,7 +10084,11 @@ async function listAuthorizedReviewerApprovals(
       visitedCursors.add(cursor)
     }
     cursor = page.nextCursor
-  } while (approvals.length < limit && cursor)
+  } while (
+    approvals.length < limit &&
+    cursor &&
+    (sourcePageBudget === undefined || sourcePageBudget.remaining > 0)
+  )
 
   return {
     approvals,
@@ -14537,7 +15208,7 @@ function shouldEvaluateEnterpriseProjectScopes(
   resource: EnterpriseAuthorizationResource,
 ) {
   if (resource.kind === 'project') return true
-  return /^\/api\/(?:analytics|approvals|bulk-operations|document-backlinks|documents|planning|projects|realtime\/tickets|task-views|teams|work-item-configuration|work-items)(?:\/|$)/u
+  return /^\/api\/(?:analytics|approvals|bulk-operations|document-backlinks|documents|focus|planning|projects|realtime\/tickets|task-views|teams|work-item-configuration|work-items)(?:\/|$)/u
     .test(path)
 }
 
@@ -17761,6 +18432,1865 @@ function toRequestIntakeErrorResponse(
   return c.json({ code: error.code, message: error.message }, status)
 }
 
+/**
+ * Authenticates a Team Triage request and enforces its live Team authorization.
+ *
+ * Triage can contain requester identity and private routing rationale, so Workspace
+ * guests are denied even when they can view a related Project.
+ *
+ * @param context - Current Hono request context.
+ * @param teamId - Team queue identifier from the route.
+ * @param access - Minimum Triage access requested by the adapter.
+ * @returns The authenticated Workspace and member identifiers.
+ */
+async function requireTriageTeamAccess(
+  context: Context,
+  teamId: string,
+  access: TriageTeamAccess,
+) {
+  const accessToken = readBearerAccessToken(context)
+  if (!accessToken) {
+    throw new TriageError(401, 'TriageAuthenticationRequired', 'Bearer token is required.')
+  }
+  const principal = await authenticateWorkspacePrincipal(accessToken, undefined, context)
+  if (principal.workspaceRole === 'guest') {
+    throw new WorkspaceAccessError(
+      403,
+      'WorkspaceRoleDenied',
+      'Guest members cannot access the Team Triage queue.',
+    )
+  }
+  let teamContext: TeamPermissionContext | undefined
+  if (access === 'manage') {
+    requireWorkspaceBusinessWrite(principal)
+    if (
+      principal.enterpriseRouteAuthorizedAtResource &&
+      principal.enterprisePermissions !== undefined &&
+      principal.enterpriseGrantedRoutePermissions?.includes('teams.manage') !== true
+    ) {
+      throw new WorkspaceAccessError(
+        403,
+        'WorkspacePermissionDenied',
+        'Team management permission is required for Triage settings.',
+      )
+    }
+    await requireTeamConfigurationAdministration(principal, teamId)
+    teamContext = await requireFullTriageConfigurationScope(principal, teamId)
+  } else {
+    if (access === 'write') requireWorkspaceBusinessWrite(principal)
+    teamContext = await requireTeamPermission(
+      principal,
+      teamId,
+      access === 'write' ? 'member' : 'viewer',
+    )
+    if (isEnterpriseTriageTeamScope(principal, teamId)) {
+      teamContext = await mergeTriageProjectAccesses(principal, teamContext)
+    }
+  }
+  const visibleProjectIds = teamContext
+    ? resolveRestrictedTriageProjectIds(
+        principal,
+        teamContext,
+        access === 'write' ? 'member' : 'viewer',
+      )
+    : undefined
+  const teamAccess = resolveEffectiveTriageTeamAccess(principal, teamContext, teamId, access)
+  const writableProjectIds = resolveWritableTriageProjectIds(
+    principal,
+    teamContext,
+    teamId,
+    teamAccess,
+  )
+  const canManageConfiguration = resolveTriageConfigurationManagement(
+    principal,
+    teamContext,
+    visibleProjectIds,
+  )
+  return {
+    workspaceId: principal.directoryId,
+    userId: principal.userKey,
+    auditActor: {
+      id: principal.actorId,
+      kind: resolveEnterpriseAuditActorKind(principal),
+      displayName: principal.userKey,
+    },
+    ...(principal.enterpriseBreakGlassActivationId
+      ? { auditCorrelationId: principal.enterpriseBreakGlassActivationId }
+      : {}),
+    teamAccess,
+    ...(visibleProjectIds !== undefined ? { visibleProjectIds } : {}),
+    ...(writableProjectIds !== undefined ? { writableProjectIds } : {}),
+    canManageConfiguration,
+  }
+}
+
+/** Resolves the exact Team management capability used by the settings mutation route. */
+function resolveTriageConfigurationManagement(
+  principal: WorkspacePrincipal,
+  context: TeamPermissionContext | undefined,
+  visibleProjectIds: readonly string[] | undefined,
+): boolean {
+  if (visibleProjectIds !== undefined && !principal.isSystemAdmin) return false
+  if (principal.isSystemAdmin || principal.workspaceRole === 'owner' || principal.workspaceRole === 'admin') {
+    return true
+  }
+  if (principal.enterpriseRouteAuthorizedAtResource) {
+    return principal.enterpriseGrantedRoutePermissions?.includes('teams.manage') === true
+  }
+  if (principal.enterprisePermissions !== undefined) return false
+  return context?.team.projects.every((project) => {
+    const access = context.projectAccesses?.find((candidate) => candidate.projectId === project.id)
+    return access?.role === 'manager'
+  }) === true
+}
+
+/** Merges stronger Project-scoped Enterprise access into a Team-scoped read snapshot.
+ *
+ * Team-level Enterprise read grants synthesize viewer access for every active Project. A
+ * principal may simultaneously hold a stronger Project role, so Triage must preserve that
+ * narrower write authority without widening it to the whole Team.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param context - Live Team context initially resolved for the route.
+ * @returns The context with the strongest role retained for each Project in the Team.
+ */
+async function mergeTriageProjectAccesses(
+  principal: WorkspacePrincipal,
+  context: TeamPermissionContext,
+): Promise<TeamPermissionContext> {
+  if (principal.isSystemAdmin || context.projectAccesses === undefined) return context
+  const teamProjectIds = new Set(context.team.projects.map((project) => project.id))
+  const roleByProjectId = new Map(
+    context.projectAccesses.map((access) => [access.projectId, access.role] as const),
+  )
+  for (const access of await getEffectiveProjectAccessList(principal)) {
+    if (!teamProjectIds.has(access.projectId) || access.role === undefined) continue
+    const currentRole = roleByProjectId.get(access.projectId)
+    if (
+      currentRole === undefined ||
+      projectRoleWeights[access.role] > projectRoleWeights[currentRole]
+    ) {
+      roleByProjectId.set(access.projectId, access.role)
+    }
+  }
+  for (const project of context.team.projects) {
+    const enterpriseRole = resolveTriageEnterpriseProjectRole(
+      principal,
+      context.team.id,
+      project.id,
+    )
+    if (enterpriseRole === undefined) continue
+    const currentRole = roleByProjectId.get(project.id)
+    if (
+      currentRole === undefined ||
+      projectRoleWeights[enterpriseRole] > projectRoleWeights[currentRole]
+    ) {
+      roleByProjectId.set(project.id, enterpriseRole)
+    }
+  }
+  return {
+    ...context,
+    projectAccesses: [...roleByProjectId].map(([projectId, role]) => ({ projectId, role })),
+  }
+}
+
+/** Re-evaluates one Project's full Triage role from the authenticated Enterprise snapshot.
+ *
+ * The request-level Project list is intentionally derived from the GET route permission and can
+ * therefore collapse a stronger write grant to viewer. Re-evaluating the write/manage permissions
+ * against the same immutable authorization snapshot preserves the effective role without trusting
+ * client state or performing a second directory read.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param teamId - Parent Team for the Project resource.
+ * @param projectId - Project whose Triage role is being projected.
+ * @returns The strongest Enterprise Project role, or undefined when no Triage grant applies.
+ */
+function resolveTriageEnterpriseProjectRole(
+  principal: WorkspacePrincipal,
+  teamId: string,
+  projectId: string,
+): ProjectRole | undefined {
+  const evaluation = principal.enterpriseAuthorizationEvaluation
+  if (!evaluation) return undefined
+  const resource: EnterpriseAuthorizationResource = {
+    workspaceId: principal.directoryId,
+    kind: 'project',
+    targetId: projectId,
+    parentTeamId: teamId,
+  }
+  const allows = (permission: EnterprisePermissionId) =>
+    evaluateEnterpriseAccess({
+      permission,
+      principal: evaluation.principal,
+      assignments: evaluation.assignments,
+      customRoles: evaluation.snapshot.customRoles,
+      groupMappings: evaluation.groupMappings,
+      resource,
+    }).allowed
+  if (allows('teams.write')) {
+    return allows('teams.manage') ? 'manager' : 'member'
+  }
+  return allows('teams.read') ? 'viewer' : undefined
+}
+
+/**
+ * Resolves the strongest live Team access without widening a read-only Project role.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param context - Live Team and Project access context when the route reads entries.
+ * @param teamId - Team whose access is being projected.
+ * @param minimumAccess - Access already enforced for the current route.
+ * @returns Strongest access that may be advertised in Triage response capabilities.
+ */
+function resolveEffectiveTriageTeamAccess(
+  principal: WorkspacePrincipal,
+  context: TeamPermissionContext | undefined,
+  teamId: string,
+  minimumAccess: TriageTeamAccess,
+): TriageTeamAccess {
+  if (minimumAccess === 'manage' || principal.isSystemAdmin) return 'manage'
+  let effectiveAccess = minimumAccess
+  if (isEnterpriseTriageTeamScope(principal, teamId)) {
+    const canWrite = principal.enterprisePermissions?.includes('teams.write') === true
+    if (canWrite && principal.enterprisePermissions?.includes('teams.manage')) return 'manage'
+    if (canWrite) effectiveAccess = 'write'
+  }
+  if (context?.projectAccesses?.some((entry) => entry.role === 'manager')) return 'manage'
+  if (context?.projectAccesses?.some((entry) => entry.role === 'member')) return 'write'
+  return effectiveAccess
+}
+
+/**
+ * Resolves the Project subset for which entry mutations may truthfully be advertised.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param context - Live Team and Project access context.
+ * @param teamId - Team whose access is being projected.
+ * @param teamAccess - Strongest resolved Team access.
+ * @returns Writable Project IDs, an empty read-only set, or undefined for Team-wide write.
+ */
+function resolveWritableTriageProjectIds(
+  principal: WorkspacePrincipal,
+  context: TeamPermissionContext | undefined,
+  teamId: string,
+  teamAccess: TriageTeamAccess,
+): readonly string[] | undefined {
+  if (teamAccess === 'read') return []
+  if (
+    principal.isSystemAdmin ||
+    isEnterpriseTriageTeamScope(principal, teamId) &&
+      principal.enterprisePermissions?.includes('teams.write') === true
+  ) {
+    return undefined
+  }
+  if (!context) return undefined
+  return resolveRestrictedTriageProjectIds(principal, context, 'member')
+}
+
+/**
+ * Returns whether current Enterprise authorization covers the routed Team itself.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param teamId - Team route identifier.
+ * @returns Whether Team-wide Enterprise permissions are authoritative for this request.
+ */
+function isEnterpriseTriageTeamScope(
+  principal: WorkspacePrincipal,
+  teamId: string,
+): boolean {
+  return principal.enterpriseRouteAuthorizedAtResource === true &&
+    (
+      principal.enterpriseAuthorizationResource?.kind === 'workspace' ||
+      principal.enterpriseAuthorizationResource?.kind === 'team' &&
+        principal.enterpriseAuthorizationResource.targetId === teamId
+    )
+}
+
+/**
+ * Narrows a Team queue to the Projects for which the current principal has live access.
+ *
+ * A principal that can access every active Project receives full Team visibility, which
+ * also permits unassigned entries. A partially scoped principal receives only explicit
+ * Project IDs so unassigned or cross-Project source metadata is never disclosed.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param context - Live Team directory and Project access snapshot.
+ * @param minimumRole - Role required by the current Triage operation.
+ * @returns Explicit visible Project IDs, or undefined for full Team visibility.
+ */
+function resolveRestrictedTriageProjectIds(
+  principal: WorkspacePrincipal,
+  context: TeamPermissionContext,
+  minimumRole: ProjectRole,
+): readonly string[] | undefined {
+  if (principal.isSystemAdmin || context.projectAccesses === undefined) return undefined
+  const visibleProjectIds = context.projectAccesses
+    .filter((access) => projectAccessAllows(access, minimumRole))
+    .map((access) => access.projectId)
+  const activeProjectIds = new Set(context.team.projects.map((project) => project.id))
+  if (
+    activeProjectIds.size === visibleProjectIds.length &&
+    visibleProjectIds.every((projectId) => activeProjectIds.has(projectId))
+  ) {
+    return undefined
+  }
+  return visibleProjectIds
+}
+
+/**
+ * Validates live member and Project references used by one bulk Triage mutation.
+ *
+ * @param context - Authenticated Hono request context.
+ * @param teamId - Team whose entries will be changed.
+ * @param input - Strictly parsed bulk action.
+ */
+async function validateTriageBulkAction(
+  context: Context,
+  teamId: string,
+  input: TriageBulkActionInput,
+): Promise<number> {
+  const principal = await authenticateTriagePrincipal(context)
+  const configuration = await workItemDependencies.triage.getConfiguration(
+    principal.directoryId,
+    teamId,
+  )
+  if (!configuration.allowedBulkActions.includes(input.operation.action)) {
+    throw new TriageError(
+      409,
+      'TriageBulkActionDisabled',
+      'This bulk action is disabled by the current Team Triage configuration.',
+    )
+  }
+  if (input.operation.action !== 'assign') return configuration.revision
+  const teamContext = await requireTeamPermission(principal, teamId, 'member')
+  if (input.operation.ownerUserId) {
+    await requireActiveWorkspaceAssignee(
+      principal.directoryId,
+      input.operation.ownerUserId,
+    )
+  }
+  if (input.operation.projectId) {
+    requireAssignedProjectPermission(
+      principal,
+      teamContext,
+      input.operation.projectId,
+      'member',
+    )
+  }
+  return configuration.revision
+}
+
+/**
+ * Replaces caller-asserted manual routing metadata with current Team settings.
+ *
+ * @param context - Authenticated Hono request context.
+ * @param teamId - Team receiving the handoff.
+ * @param input - Strictly parsed source content.
+ * @returns A handoff carrying server-derived Project, owner, SLA, and retention values.
+ */
+async function prepareTriageManualHandoff(
+  context: Context,
+  teamId: string,
+  input: CreateManualTriageEntryInput,
+): Promise<CreateManualTriageEntryInput> {
+  const principal = await authenticateTriagePrincipal(context)
+  const teamContext = await requireTeamPermission(principal, teamId, 'member')
+  const configuration = await workItemDependencies.triage.getConfiguration(
+    principal.directoryId,
+    teamId,
+  )
+  const searchableText = `${input.title}\n${input.body}`.toLocaleLowerCase('en-US')
+  const rule = [...configuration.rules]
+    .sort((left, right) => left.order - right.order || left.id.localeCompare(right.id))
+    .find((candidate) =>
+      candidate.enabled &&
+      candidate.sourceKinds.includes('manual-handoff') &&
+      (
+        candidate.keywords.length === 0 ||
+        candidate.keywords.some((keyword) =>
+          searchableText.includes(keyword.toLocaleLowerCase('en-US'))
+        )
+      )
+    )
+  const projectId = rule?.projectId ?? input.projectId
+  requireAssignedProjectPermission(principal, teamContext, projectId, 'member')
+  const ownerStrategy = rule?.owner
+  const ownerUserId = resolveConfiguredTriageOwner(configuration, ownerStrategy)
+  const liveOwnerIds = ownerStrategy?.type === 'rotation'
+    ? configuration.rotations.find((rotation) => rotation.id === ownerStrategy.rotationId)
+      ?.memberUserIds ?? []
+    : ownerUserId ? [ownerUserId] : []
+  const slaPolicy = configuration.slaPolicies.find((policy) =>
+    policy.sourceKinds.includes('manual-handoff')
+  )
+  const configuredOwnerIds = new Set([
+    ...liveOwnerIds,
+    ...(slaPolicy?.escalationOwnerUserId ? [slaPolicy.escalationOwnerUserId] : []),
+  ])
+  await Promise.all([...configuredOwnerIds].map(async (memberUserId) => {
+    await requireTriageOwnerProjectAccess(
+      principal.directoryId,
+      projectId,
+      memberUserId,
+    )
+  }))
+  const now = new Date()
+  const slaDueAt = slaPolicy
+    ? new Date(now.getTime() + slaPolicy.responseMinutes * 60_000)
+    : undefined
+  const escalationDueAt = slaDueAt && slaPolicy?.escalationMinutes !== undefined
+    ? new Date(slaDueAt.getTime() + slaPolicy.escalationMinutes * 60_000)
+    : undefined
+  const retentionExpiresAt = new Date(now)
+  retentionExpiresAt.setUTCDate(retentionExpiresAt.getUTCDate() + configuration.retentionDays)
+  return {
+    sourceId: input.sourceId,
+    title: input.title,
+    body: input.body,
+    requesterDisplayName: input.requesterDisplayName,
+    ...(input.requesterEmail ? { requesterEmail: input.requesterEmail } : {}),
+    ...(projectId ? { projectId } : {}),
+    routingReason: rule
+      ? `Matched Team Triage routing rule "${rule.name}".`
+      : 'No enabled Team Triage routing rule matched; the handoff remained in the selected Team.',
+    ...(ownerUserId ? { ownerUserId } : {}),
+    ...(slaPolicy && slaDueAt
+      ? {
+          slaPolicyId: slaPolicy.id,
+          slaDueAt: slaDueAt.toISOString(),
+          ...(escalationDueAt ? { escalationDueAt: escalationDueAt.toISOString() } : {}),
+        }
+      : {}),
+    preparedConfigurationRevision: configuration.revision,
+    retentionExpiresAt: retentionExpiresAt.toISOString(),
+  }
+}
+
+/** Builds caller authorization fences for one manual Triage handoff. */
+async function createTriageManualHandoffAuthorizationConditionChecks(
+  context: Context,
+  teamId: string,
+  input: CreateManualTriageEntryInput,
+): Promise<TriageAuthorizationConditionChecks> {
+  const principal = await authenticateTriagePrincipal(context)
+  const teamContext = await requireTeamPermission(principal, teamId, 'member')
+  if (principal.isSystemAdmin) return []
+  return mergeTriageConditionChecks(
+    await createTriageActiveActorConditionChecks(
+      principal,
+      TRIAGE_NON_GUEST_MEMBER_CONDITION_OPTIONS,
+    ),
+    await createTriageProjectAuthorizationConditionChecks(
+      principal,
+      teamContext,
+      principal.directoryId,
+      teamId,
+      input.projectId,
+    ),
+    await createTriageAssigneeProjectAuthorizationConditionChecks(
+      principal.directoryId,
+      input.projectId,
+      input.ownerUserId,
+    ),
+  )
+}
+
+/** Validates that a configured Triage owner can work within the destination Project. */
+async function requireTriageOwnerProjectAccess(
+  workspaceId: string,
+  projectId: string | undefined,
+  ownerUserId: string,
+): Promise<void> {
+  await requireActiveWorkspaceAssignee(workspaceId, ownerUserId)
+  if (!projectId) return
+  const access = await workspaceDependencies.projectDirectory.getProjectAccess(
+    workspaceId,
+    projectId,
+    ownerUserId,
+  )
+  if (!access || !projectAccessAllows(access, 'member')) {
+    throw new ProjectDataError(
+      409,
+      'TriageAssigneeProjectAccessDenied',
+      'The configured Triage owner cannot access the destination Project.',
+    )
+  }
+}
+
+/** Builds the commit-time Project membership fence for the assigned Triage owner. */
+async function createTriageAssigneeProjectAuthorizationConditionChecks(
+  workspaceId: string,
+  projectId: string | undefined,
+  ownerUserId: string | undefined,
+): Promise<TriageAuthorizationConditionChecks> {
+  if (!projectId || !ownerUserId) return []
+  const createAccessConditionCheck = workspaceDependencies.projectDirectory
+    .createProjectAccessConditionCheck
+  if (!createAccessConditionCheck) {
+    throw new TriageError(
+      503,
+      'TriageAssigneeProjectAccessFenceUnavailable',
+      'Triage owner Project authorization fencing is unavailable. Retry the request.',
+    )
+  }
+  const conditionCheck = await createAccessConditionCheck(
+    workspaceId,
+    projectId,
+    ownerUserId,
+    'member',
+  )
+  if (!conditionCheck) {
+    throw new TriageError(
+      409,
+      'TriageAssigneeProjectAccessChanged',
+      'The assigned Triage owner no longer has access to the destination Project.',
+    )
+  }
+  return [conditionCheck]
+}
+
+/**
+ * Resolves a fixed or rotation-backed owner from one current Team configuration.
+ *
+ * @param configuration - Current Team Triage configuration.
+ * @param strategy - Matched routing rule owner strategy.
+ * @returns The selected active-member candidate, or undefined for unowned routing.
+ */
+function resolveConfiguredTriageOwner(
+  configuration: TriageConfiguration,
+  strategy: TriageConfiguration['rules'][number]['owner'] | undefined,
+): string | undefined {
+  if (!strategy || strategy.type === 'unowned') return undefined
+  if (strategy.type === 'fixed') return strategy.ownerUserId
+  const rotation = configuration.rotations.find((candidate) =>
+    candidate.id === strategy.rotationId
+  )
+  return rotation?.memberUserIds[rotation.nextIndex]
+}
+
+/**
+ * Validates every live directory reference before Team Triage settings are persisted.
+ *
+ * @param context - Authenticated Hono request context.
+ * @param teamId - Team owning the replacement configuration.
+ * @param input - Strictly parsed replacement settings.
+ */
+async function validateTriageConfigurationReferences(
+  context: Context,
+  teamId: string,
+  input: UpdateTriageConfigurationInput,
+): Promise<TriageAuthorizationConditionChecks> {
+  const principal = await authenticateTriagePrincipal(context)
+  const teamContext = await requireTeamPermission(principal, teamId, 'manager')
+  const memberUserIds = new Set<string>()
+  for (const rotation of input.rotations) {
+    for (const memberUserId of rotation.memberUserIds) memberUserIds.add(memberUserId)
+  }
+  for (const rule of input.rules) {
+    if (rule.teamId !== teamId) {
+      throw new TriageError(
+        400,
+        'InvalidTriageConfiguration',
+        'A routing rule cannot target another Team.',
+      )
+    }
+    requireAssignedProjectPermission(principal, teamContext, rule.projectId, 'manager')
+    if (rule.owner.type === 'fixed') memberUserIds.add(rule.owner.ownerUserId)
+  }
+  for (const policy of input.slaPolicies) {
+    if (policy.escalationOwnerUserId) memberUserIds.add(policy.escalationOwnerUserId)
+  }
+  await Promise.all([...memberUserIds].map(async (memberUserId) => {
+    await requireActiveWorkspaceAssignee(principal.directoryId, memberUserId)
+  }))
+  return await createTriageConfigurationAuthorizationConditionChecks(
+    principal,
+    teamContext,
+    principal.directoryId,
+    teamId,
+  )
+}
+
+/**
+ * Authenticates a Triage integration hook and denies Workspace guests.
+ *
+ * @param context - Current Hono request context.
+ * @returns The live Workspace principal.
+ */
+async function authenticateTriagePrincipal(context: Context): Promise<WorkspacePrincipal> {
+  const accessToken = readBearerAccessToken(context)
+  if (!accessToken) {
+    throw new TriageError(401, 'TriageAuthenticationRequired', 'Bearer token is required.')
+  }
+  const principal = await authenticateWorkspacePrincipal(accessToken, undefined, context)
+  if (principal.workspaceRole === 'guest') {
+    throw new WorkspaceAccessError(
+      403,
+      'WorkspaceRoleDenied',
+      'Guest members cannot mutate Team Triage.',
+    )
+  }
+  return principal
+}
+
+/**
+ * Enforces current Work Item scope before returning reverse Triage source links.
+ *
+ * @param context - Current Hono request context.
+ * @param teamId - Owning Team identifier.
+ * @param workItemId - Canonical Work Item identifier.
+ */
+async function requireTriageWorkItemAccess(
+  context: Context,
+  teamId: string,
+  workItemId: string,
+): Promise<void> {
+  const accessToken = readBearerAccessToken(context)
+  if (!accessToken) {
+    throw new TriageError(401, 'TriageAuthenticationRequired', 'Bearer token is required.')
+  }
+  const principal = await authenticateWorkspacePrincipal(accessToken, undefined, context)
+  if (principal.workspaceRole === 'guest') {
+    throw new WorkspaceAccessError(
+      403,
+      'WorkspaceRoleDenied',
+      'Guest members cannot access Triage source links.',
+    )
+  }
+  await loadAuthorizedTeamIssue(principal, teamId, workItemId, 'viewer')
+}
+
+/**
+ * Applies an authorized Triage action, intercepting Work Item-dependent operations.
+ *
+ * @param request - Validated Triage action request from the HTTP adapter.
+ * @returns The replay-safe mutation receipt.
+ */
+async function applyTriageRouteAction(request: TriageRouterActionRequest) {
+  const accessToken = readBearerAccessToken(request.context)
+  if (!accessToken) {
+    throw new TriageError(401, 'TriageAuthenticationRequired', 'Bearer token is required.')
+  }
+  const principal = await authenticateWorkspacePrincipal(
+    accessToken,
+    undefined,
+    request.context,
+  )
+  if (principal.directoryId !== request.workspaceId || principal.userKey !== request.actor.id) {
+    throw new TriageError(404, 'TriageEntryNotFound', 'The triage entry was not found.')
+  }
+  const currentEntry = await workItemDependencies.triage.getEntryForMutation(
+    request.workspaceId,
+    request.teamId,
+    request.entryId,
+  )
+  const currentTeamContext = await requireTeamPermission(principal, request.teamId, 'member')
+  requireAssignedProjectPermission(
+    principal,
+    currentTeamContext,
+    currentEntry.projectId,
+    'member',
+  )
+  let authorizationConditionChecks = mergeTriageConditionChecks(
+    request.authorizationConditionChecks ?? [],
+    await createTriageProjectAuthorizationConditionChecks(
+      principal,
+      currentTeamContext,
+      request.workspaceId,
+      request.teamId,
+      currentEntry.projectId,
+    ),
+  )
+
+  if (request.action.action === 'assign') {
+    if (request.action.ownerUserId) {
+      const destinationProjectId = request.action.projectId === null
+        ? undefined
+        : request.action.projectId ?? currentEntry.projectId
+      await requireTriageOwnerProjectAccess(
+        request.workspaceId,
+        destinationProjectId,
+        request.action.ownerUserId,
+      )
+      authorizationConditionChecks = mergeTriageConditionChecks(
+        authorizationConditionChecks,
+        await createTriageAssigneeProjectAuthorizationConditionChecks(
+          request.workspaceId,
+          destinationProjectId,
+          request.action.ownerUserId,
+        ),
+      )
+    }
+    if (request.action.projectId) {
+      requireAssignedProjectPermission(
+        principal,
+        currentTeamContext,
+        request.action.projectId,
+        'member',
+      )
+      authorizationConditionChecks.push(...await createTriageProjectAuthorizationConditionChecks(
+        principal,
+        currentTeamContext,
+        request.workspaceId,
+        request.teamId,
+        request.action.projectId,
+      ))
+    }
+  }
+
+  const action = request.action
+  if (action.action === 'accept' && action.mode === 'create') {
+    authorizationConditionChecks = mergeTriageConditionChecks(
+      authorizationConditionChecks,
+      await createTriageProjectAuthorizationConditionChecks(
+        principal,
+        currentTeamContext,
+        request.workspaceId,
+        request.teamId,
+        action.projectId ?? currentEntry.projectId,
+      ),
+    )
+    return await acceptTriageEntryAsNewWorkItem(
+      principal,
+      { ...request, action, authorizationConditionChecks },
+    )
+  }
+
+  if (action.action === 'request-information') {
+    return await requestTriageInformationFromSource(principal, {
+      ...request,
+      action,
+      authorizationConditionChecks,
+    })
+  }
+
+  if (
+    currentEntry.source.kind === 'form' &&
+    currentEntry.source.submissionId &&
+    (action.action === 'assign' || action.action === 'decline')
+  ) {
+    const replay = await workItemDependencies.triage.getActionReceipt(
+      request.workspaceId,
+      request.teamId,
+      request.entryId,
+      request.idempotency,
+    )
+    if (replay) return replay
+    const submission = await workItemDependencies.requestIntake.getSubmission(
+      request.workspaceId,
+      currentEntry.source.submissionId,
+    )
+    const contribution = createTriageActionTransactionItems({
+      tableName: getEnv('REQUEST_INTAKE_TABLE_NAME') ?? 'mukuroji-request-intake-local',
+      audit: {
+        tableName: getConfiguredAuditTableName() ?? 'mukuroji-audit-events',
+        retentionDays: getConfiguredAuditRetentionDays(),
+      },
+      entry: currentEntry,
+      action,
+      actorId: principal.userKey,
+      now: new Date().toISOString(),
+      idempotency: request.idempotency,
+      auditContext: request.auditContext,
+    })
+    const referenceChecks = await createTriageActionReferenceConditionChecks(
+      request.workspaceId,
+      request.teamId,
+      currentEntry,
+      action,
+    )
+    const configurationCheck = request.configurationRevision === undefined
+      ? []
+      : [createTriageConfigurationRevisionConditionCheck(
+          getEnv('REQUEST_INTAKE_TABLE_NAME') ?? 'mukuroji-request-intake-local',
+          request.workspaceId,
+          request.teamId,
+          request.configurationRevision,
+        )]
+    await workItemDependencies.requestIntake.applyAction(
+      request.workspaceId,
+      submission.id,
+      { id: principal.userKey },
+      action.action === 'assign'
+        ? {
+            action: 'assign',
+            expectedRevision: submission.revision,
+            assigneeUserId: action.ownerUserId,
+          }
+        : {
+            action: 'reject',
+            expectedRevision: submission.revision,
+            reason: action.reason,
+          },
+      mergeTriageConditionChecks(
+        authorizationConditionChecks,
+        configurationCheck,
+        referenceChecks,
+        contribution.transactItems,
+      ),
+    )
+    return { entry: contribution.entry, replayed: false }
+  }
+
+  if (action.action === 'duplicate' || action.action === 'accept' && action.mode === 'link') {
+    const workItemId = action.action === 'duplicate'
+      ? action.canonicalWorkItemId
+      : action.workItemId
+    const { context: targetTeamContext, detail } = await loadAuthorizedTeamIssue(
+      principal,
+      request.teamId,
+      workItemId,
+      'member',
+    )
+    authorizationConditionChecks = mergeTriageConditionChecks(
+      authorizationConditionChecks,
+      await createTriageProjectAuthorizationConditionChecks(
+        principal,
+        targetTeamContext,
+        request.workspaceId,
+        request.teamId,
+        detail.issue.assignedProjectId,
+      ),
+    )
+    if (currentEntry.source.kind === 'form' && currentEntry.source.submissionId) {
+      const replay = await workItemDependencies.triage.getActionReceipt(
+        request.workspaceId,
+        request.teamId,
+        request.entryId,
+        request.idempotency,
+      )
+      if (replay) return replay
+      const now = new Date().toISOString()
+      const duplicateContext = action.action === 'duplicate'
+        ? workItemDependencies.teamIssues.createTriageDuplicateContextTransactionItems?.({
+            directoryId: request.workspaceId,
+            teamId: detail.issue.teamId,
+            workItemId: detail.issue.id,
+            expectedWorkItemRevision: detail.issue.revision,
+            actorUserId: principal.userKey,
+            entry: currentEntry,
+            mergedAt: now,
+          })
+        : undefined
+      if (action.action === 'duplicate' && !duplicateContext) {
+        throw new TriageError(
+          503,
+          'TriageDuplicateContextUnavailable',
+          'Duplicate context preservation is unavailable.',
+        )
+      }
+      const contribution = createTriageAcceptanceTransactionItems({
+        tableName: getEnv('REQUEST_INTAKE_TABLE_NAME') ?? 'mukuroji-request-intake-local',
+        entry: currentEntry,
+        action,
+        canonicalWorkItem: {
+          teamId: detail.issue.teamId,
+          workItemId: detail.issue.id,
+          ...(detail.issue.assignedProjectId
+            ? { projectId: detail.issue.assignedProjectId }
+            : {}),
+        },
+        actorId: principal.userKey,
+        now,
+        idempotency: request.idempotency,
+        ...(action.action === 'duplicate'
+          ? {
+              mergeReceipt: {
+                canonicalWorkItemId: detail.issue.id,
+                mergedSourceCount: 1,
+                mergedCommentCount: duplicateContext?.snapshot.commentMetadataCount ?? 0,
+                mergedAttachmentCount: duplicateContext?.snapshot.attachmentMetadataCount ?? 0,
+                mergedWatcherCount: duplicateContext?.snapshot.watcherMetadataCount ?? 0,
+                completedAt: now,
+              },
+            }
+          : {}),
+      })
+      const submission = await workItemDependencies.requestIntake.getSubmission(
+        request.workspaceId,
+        currentEntry.source.submissionId,
+      )
+      await workItemDependencies.requestIntake.completeConversion(
+        request.workspaceId,
+        submission.id,
+        { id: principal.userKey },
+        {
+          expectedRevision: submission.revision,
+          workItem: {
+            teamId: detail.issue.teamId,
+            workItemId: detail.issue.id,
+            ...(detail.issue.assignedProjectId
+              ? { projectId: detail.issue.assignedProjectId }
+              : {}),
+          },
+        },
+        [
+          ...authorizationConditionChecks,
+          ...(action.action === 'accept'
+            ? [createWorkItemRevisionConditionCheck(
+                getTeamIssuesTableName(),
+                request.workspaceId,
+                detail.issue.teamId,
+                detail.issue.id,
+                detail.issue.revision,
+              )]
+            : []),
+          ...(duplicateContext?.transactItems ?? []),
+          ...contribution.transactItems,
+        ],
+      )
+      return { entry: contribution.entry, replayed: false }
+    }
+  }
+
+  return await workItemDependencies.triage.applyAction(
+    request.workspaceId,
+    request.teamId,
+    request.entryId,
+    request.actor,
+    request.action,
+    request.idempotency,
+    request.auditContext,
+    request.configurationRevision,
+    mergeTriageConditionChecks(authorizationConditionChecks),
+  )
+}
+
+/** Builds commit-time conditions for the Workspace actor and Project access authorizing a Triage action. */
+async function createTriageProjectAuthorizationConditionChecks(
+  principal: WorkspacePrincipal,
+  context: TeamPermissionContext,
+  workspaceId: string,
+  teamId: string,
+  projectId: string | undefined,
+  minimumRole: ProjectRole = 'member',
+): Promise<TriageAuthorizationConditionChecks> {
+  if (principal.isSystemAdmin) {
+    return []
+  }
+  const actorMembershipChecks = await createTriageActiveActorConditionChecks(principal)
+  const enterpriseProjectAccess = projectId !== undefined &&
+    principal.enterpriseProjectAccesses?.some((access) =>
+      access.projectId === projectId && projectAccessAllows(access, minimumRole)
+    ) === true
+  if (isEnterpriseTriageTeamScope(principal, teamId) || enterpriseProjectAccess) {
+    const enterpriseControlCheck = createEnterpriseControlAuthorizationConditionCheck(principal)
+    return enterpriseControlCheck
+      ? [...actorMembershipChecks, enterpriseControlCheck]
+      : actorMembershipChecks
+  }
+  if (!projectId) return actorMembershipChecks
+  const access = context.projectAccesses?.find((candidate) => candidate.projectId === projectId)
+  if (!access || !projectAccessAllows(access, minimumRole)) {
+    throw new ProjectDataError(
+      403,
+      'ProjectAccessDenied',
+      `User "${principal.userKey}" cannot access assigned project "${projectId}".`,
+    )
+  }
+  const createAccessConditionCheck = workspaceDependencies.projectDirectory
+    .createProjectAccessConditionCheck
+  if (!createAccessConditionCheck) {
+    throw new TriageError(
+      503,
+      'TriageProjectAccessFenceUnavailable',
+      'Project authorization fencing is unavailable. Retry the request.',
+    )
+  }
+  const conditionCheck = await createAccessConditionCheck(
+    workspaceId,
+    projectId,
+    principal.userKey,
+    minimumRole,
+  )
+  if (!conditionCheck) {
+    throw new TriageError(
+      409,
+      'TriageProjectAccessChanged',
+      'Project authorization changed while the action was being prepared.',
+    )
+  }
+  return mergeTriageConditionChecks(actorMembershipChecks, [conditionCheck])
+}
+
+/** Builds commit-time authorization fences for replacing a full Team configuration. */
+async function createTriageConfigurationAuthorizationConditionChecks(
+  principal: WorkspacePrincipal,
+  context: TeamPermissionContext,
+  workspaceId: string,
+  teamId: string,
+): Promise<TriageAuthorizationConditionChecks> {
+  if (principal.isSystemAdmin) return []
+  if (isEnterpriseTriageTeamScope(principal, teamId)) {
+    const enterpriseControlCheck = createEnterpriseControlAuthorizationConditionCheck(principal)
+    return mergeTriageConditionChecks(
+      await createTriageActiveActorConditionChecks(
+        principal,
+        TRIAGE_NON_GUEST_MEMBER_CONDITION_OPTIONS,
+      ),
+      enterpriseControlCheck ? [enterpriseControlCheck] : [],
+    )
+  }
+  if (principal.workspaceRole === 'owner' || principal.workspaceRole === 'admin') {
+    return await createTriageActiveActorConditionChecks(principal, {
+      allowedRoles: ['owner', 'admin'],
+    })
+  }
+  const authorizationConditionChecks = await createTriageActiveActorConditionChecks(
+    principal,
+    TRIAGE_NON_GUEST_MEMBER_CONDITION_OPTIONS,
+  )
+  for (const project of context.team.projects) {
+    authorizationConditionChecks.push(...await createTriageProjectAuthorizationConditionChecks(
+      principal,
+      context,
+      workspaceId,
+      teamId,
+      project.id,
+      'manager',
+    ))
+  }
+  return mergeTriageConditionChecks(authorizationConditionChecks)
+}
+
+/** Builds the commit-time active-membership fence for a Triage mutation. */
+async function createTriageActiveActorConditionChecks(
+  principal: WorkspacePrincipal,
+  options?: WorkspaceActiveMemberConditionOptions,
+): Promise<TriageAuthorizationConditionChecks> {
+  const createMemberCheck = workspaceDependencies.workspaceAccess
+    .createActiveMemberConditionCheck
+  if (!createMemberCheck) {
+    throw new TriageError(
+      503,
+      'TriageActorAuthorizationFenceUnavailable',
+      'Workspace membership fencing is unavailable. Retry the Triage action.',
+    )
+  }
+  const conditionCheck = await createMemberCheck.call(
+    workspaceDependencies.workspaceAccess,
+    principal.directoryId,
+    normalizeProjectMemberKey(principal.userKey),
+    options ?? TRIAGE_NON_GUEST_MEMBER_CONDITION_OPTIONS,
+  )
+  if (!conditionCheck) {
+    throw new TriageError(
+      409,
+      'TriageActorMembershipChanged',
+      'Workspace membership changed while the Triage action was being prepared.',
+    )
+  }
+  return [conditionCheck]
+}
+
+/** Creates the commit-time Enterprise authorization generation fence for a Triage action.
+ *
+ * @param principal The Enterprise-authorized Workspace principal.
+ * @returns A CONTROL condition check when the Enterprise table is configured, or undefined for
+ * local in-memory Enterprise authorization.
+ */
+function createEnterpriseControlAuthorizationConditionCheck(
+  principal: WorkspacePrincipal,
+): TriageAuthorizationConditionChecks[number] | undefined {
+  const enterpriseTableName = getEnv('ENTERPRISE_IDENTITY_TABLE_NAME')?.trim()
+  const controlRevision = principal.enterpriseIdentityControlRevision
+  if (!enterpriseTableName) return undefined
+  if (controlRevision === undefined) {
+    throw new ProjectDataError(
+      503,
+      'EnterpriseAuthorizationUnavailable',
+      'Enterprise authorization state is unavailable for this Triage mutation.',
+    )
+  }
+  const expressionAttributeNames: Record<string, string> = {
+    '#controlRevision': 'controlRevision',
+    '#entryType': 'entryType',
+  }
+  if (controlRevision === 0) expressionAttributeNames['#scopeKey'] = 'scopeKey'
+  return {
+    ConditionCheck: {
+      TableName: enterpriseTableName,
+      Key: {
+        scopeKey: `WORKSPACE#${principal.directoryId}`,
+        recordKey: 'CONTROL',
+      },
+      ConditionExpression: controlRevision === 0
+        ? '(attribute_not_exists(#scopeKey) OR ' +
+          '(#entryType = :controlEntryType AND #controlRevision = :expectedControlRevision))'
+        : '#entryType = :controlEntryType AND #controlRevision = :expectedControlRevision',
+      ExpressionAttributeNames: expressionAttributeNames,
+      ExpressionAttributeValues: {
+        ':controlEntryType': 'enterprise-identity-control',
+        ':expectedControlRevision': controlRevision,
+      },
+    },
+  }
+}
+
+/** Removes duplicate DynamoDB condition checks when current and destination Projects coincide. */
+function mergeTriageConditionChecks(
+  ...groups: readonly (NonNullable<TransactWriteCommandInput['TransactItems']>)[]
+): NonNullable<TransactWriteCommandInput['TransactItems']> {
+  const seen = new Set<string>()
+  return groups.flatMap((group) => group.filter((item) => {
+    const condition = item.ConditionCheck
+    if (!condition?.TableName || !condition.Key) return true
+    const key = JSON.stringify([condition.TableName, condition.Key])
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  }))
+}
+
+/** Builds commit-time Team, Project, and owner fences for a Form-backed action. */
+async function createTriageActionReferenceConditionChecks(
+  workspaceId: string,
+  teamId: string,
+  entry: TriageEntry,
+  action: Exclude<TriageActionInput, { action: 'accept' | 'duplicate' }>,
+): Promise<NonNullable<TransactWriteCommandInput['TransactItems']>> {
+  const createDirectoryChecks = workspaceDependencies.projectDirectory
+    .createActiveReferenceConditionChecks
+  const createMemberCheck = workspaceDependencies.workspaceAccess
+    .createActiveMemberConditionCheck
+  if (!createDirectoryChecks || !createMemberCheck) {
+    throw new TriageError(
+      503,
+      'TriageAssignmentReferenceValidationUnavailable',
+      'Assignment reference validation is unavailable. Retry the request.',
+    )
+  }
+  const projectId = action.action === 'assign'
+    ? action.projectId === null
+      ? undefined
+      : action.projectId ?? entry.projectId
+    : entry.projectId
+  let directoryChecks
+  try {
+    directoryChecks = await createDirectoryChecks.call(
+      workspaceDependencies.projectDirectory,
+      workspaceId,
+      teamId,
+      projectId,
+    )
+  } catch (error) {
+    if (error instanceof ProjectDataError && error.code === 'TeamNotFound') {
+      throw new TriageError(409, 'TriageAssignmentTeamUnavailable', 'The target Team is not active.', { cause: error })
+    }
+    if (error instanceof ProjectDataError && error.code === 'ProjectNotFound') {
+      throw new TriageError(409, 'TriageAssignmentProjectUnavailable', 'The target Project is not active.', { cause: error })
+    }
+    throw error
+  }
+  if (action.action !== 'assign' || action.ownerUserId === null || action.ownerUserId === undefined) {
+    return directoryChecks
+  }
+  const memberCheck = await createMemberCheck.call(
+    workspaceDependencies.workspaceAccess,
+    workspaceId,
+    normalizeProjectMemberKey(action.ownerUserId),
+    TRIAGE_NON_GUEST_MEMBER_CONDITION_OPTIONS,
+  )
+  if (!memberCheck) {
+    throw new TriageError(
+      409,
+      'TriageAssignmentOwnerUnavailable',
+      'The assigned owner is not an active Workspace member.',
+    )
+  }
+  return [...directoryChecks, memberCheck]
+}
+
+/**
+ * Applies a bounded bulk operation through the same source-aware path as single actions.
+ *
+ * @param request - Authorized bulk action request from the HTTP adapter.
+ * @returns One independently classified result for every target.
+ */
+async function applyTriageBulkRouteAction(
+  request: TriageRouterBulkActionRequest,
+): Promise<TriageBulkActionResult> {
+  const results: TriageBulkActionResult['results'] = []
+  const preparedTargets = request.input.targets.map((target) => {
+    const action = createTriageBulkTargetAction(target, request.input.operation)
+    const idempotency = {
+      key: createTriageBulkTargetIdempotencyKey(
+        request.idempotencyKey,
+        target.entryId,
+      ),
+      fingerprint: createTriageInputFingerprint({
+        target,
+        operation: request.input.operation,
+      }),
+    }
+    const auditContext = request.createAuditContext(target.entryId, idempotency)
+    return { action, auditContext, idempotency, target }
+  })
+  for (const { action, auditContext, idempotency, target } of preparedTargets) {
+    try {
+      const receipt = await applyTriageRouteAction({
+        context: request.context,
+        workspaceId: request.workspaceId,
+        teamId: request.teamId,
+        entryId: target.entryId,
+        actor: request.actor,
+        action,
+        idempotency,
+        auditContext,
+        configurationRevision: request.configurationRevision,
+      })
+      results.push({ entryId: target.entryId, status: 'succeeded', entry: receipt.entry })
+    } catch (error) {
+      if (
+        error instanceof TriageError && error.status === 409 ||
+        error instanceof RequestIntakeError && error.status === 409
+      ) {
+        results.push({
+          entryId: target.entryId,
+          status: 'conflict',
+          errorCode: error.code,
+        })
+        continue
+      }
+      results.push({
+        entryId: target.entryId,
+        status: 'failed',
+        errorCode: error instanceof TriageError || error instanceof RequestIntakeError ||
+            error instanceof ProjectDataError || error instanceof WorkspaceAccessError
+          ? error.code
+          : 'TriageBulkTargetFailed',
+      })
+    }
+  }
+  return { results }
+}
+
+/**
+ * Expands one bulk operation into a revision-fenced single-entry action.
+ *
+ * @param target - Entry ID and revision viewed by the operator.
+ * @param operation - Validated operation shared by the bulk request.
+ * @returns The equivalent single-entry Triage action.
+ */
+function createTriageBulkTargetAction(
+  target: TriageBulkActionInput['targets'][number],
+  operation: TriageBulkActionInput['operation'],
+): Exclude<TriageActionInput, { action: 'accept' | 'duplicate' | 'request-information' }> {
+  if (operation.action === 'assign') {
+    return {
+      action: 'assign',
+      expectedRevision: target.expectedRevision,
+      ownerUserId: operation.ownerUserId,
+      ...(operation.projectId === undefined ? {} : { projectId: operation.projectId }),
+    }
+  }
+  if (operation.action === 'decline') {
+    return {
+      action: 'decline',
+      expectedRevision: target.expectedRevision,
+      reason: operation.reason,
+    }
+  }
+  return {
+    action: 'snooze',
+    expectedRevision: target.expectedRevision,
+    until: operation.until,
+  }
+}
+
+/**
+ * Delivers a Form-source information request and updates Triage in one transaction.
+ *
+ * Other source kinds fail closed until their production delivery adapter is composed;
+ * the queue must never claim that a message was requested when no provider send occurred.
+ *
+ * @param principal - Current live-authorized Workspace principal.
+ * @param request - Validated request-information action.
+ * @returns The newly committed or replayed Triage receipt.
+ */
+async function requestTriageInformationFromSource(
+  principal: WorkspacePrincipal,
+  request: TriageRouterActionRequest & {
+    action: Extract<TriageRouterActionRequest['action'], { action: 'request-information' }>
+  },
+) {
+  const replay = await workItemDependencies.triage.getActionReceipt(
+    request.workspaceId,
+    request.teamId,
+    request.entryId,
+    request.idempotency,
+  )
+  if (replay) return replay
+  const entry = await workItemDependencies.triage.getEntryForMutation(
+    request.workspaceId,
+    request.teamId,
+    request.entryId,
+  )
+  if (entry.source.kind !== 'form' || !entry.source.submissionId) {
+    throw new TriageError(
+      409,
+      'TriageReplyAdapterUnavailable',
+      'The source reply adapter is unavailable for this entry.',
+    )
+  }
+  const submission = await workItemDependencies.requestIntake.getSubmission(
+    request.workspaceId,
+    entry.source.submissionId,
+  )
+  const entryWithMessageCount = {
+    ...entry,
+    sourcePreview: {
+      ...entry.sourcePreview,
+      commentCount: entry.sourcePreview.commentCount + 1,
+    },
+  }
+  const contribution = createTriageActionTransactionItems({
+    tableName: getEnv('REQUEST_INTAKE_TABLE_NAME') ?? 'mukuroji-request-intake-local',
+    audit: {
+      tableName: getConfiguredAuditTableName() ?? 'mukuroji-audit-events',
+      retentionDays: getConfiguredAuditRetentionDays(),
+    },
+    entry: entryWithMessageCount,
+    action: request.action,
+    actorId: principal.userKey,
+    now: new Date().toISOString(),
+    idempotency: request.idempotency,
+    auditContext: request.auditContext,
+  })
+  const referenceChecks = await createTriageActionReferenceConditionChecks(
+    request.workspaceId,
+    request.teamId,
+    entry,
+    request.action,
+  )
+  await workItemDependencies.requestIntake.applyAction(
+    request.workspaceId,
+    submission.id,
+    { id: principal.userKey },
+    {
+      action: 'request-more-info',
+      expectedRevision: submission.revision,
+      message: request.action.message,
+    },
+    mergeTriageConditionChecks(
+      request.authorizationConditionChecks ?? [],
+      referenceChecks,
+      contribution.transactItems,
+    ),
+  )
+  return { entry: contribution.entry, replayed: false }
+}
+
+/**
+ * Reads the deterministic Form Triage Entry when converting through the legacy Request route.
+ *
+ * Submissions created before Team Triage existed retain the previous conversion behavior;
+ * every newer submission contributes its Triage acceptance to the Work Item transaction.
+ *
+ * @param workspaceId - Owning Workspace identifier.
+ * @param teamId - Work Item destination Team identifier.
+ * @param entryId - Deterministic Form Triage Entry identifier.
+ * @returns The canonical entry, or undefined for a pre-Triage legacy submission.
+ */
+async function readLegacyConversionTriageEntry(
+  workspaceId: string,
+  teamId: string,
+  entryId: string,
+) {
+  try {
+    return await workItemDependencies.triage.getEntryForMutation(
+      workspaceId,
+      teamId,
+      entryId,
+    )
+  } catch (error) {
+    if (error instanceof TriageError && error.status === 404) return undefined
+    throw error
+  }
+}
+
+/**
+ * Repairs a legacy response-loss window where the Request pointer committed before Triage.
+ *
+ * Current combined writes cannot enter this state, but an older converted Request may be
+ * retried after deployment. Same-Team pointers are linked idempotently; cross-Team legacy
+ * pointers remain readable without fabricating a new association.
+ *
+ * @param context - Current Request conversion retry context.
+ * @param principal - Authenticated Workspace administrator.
+ * @param submission - Already converted Request submission.
+ */
+async function repairConvertedRequestTriageProjection(
+  context: Context,
+  principal: WorkspacePrincipal,
+  submission: RequestSubmission,
+): Promise<void> {
+  if (!submission.workItem || submission.workItem.teamId !== submission.routingTarget.teamId) {
+    return
+  }
+  const entry = await readLegacyConversionTriageEntry(
+    principal.directoryId,
+    submission.routingTarget.teamId,
+    createFormTriageEntryId(submission.id),
+  )
+  if (!entry || entry.state === 'accepted' || entry.state === 'duplicate') return
+  if (entry.state === 'declined') {
+    throw new RequestIntakeError(
+      409,
+      'RequestTriageStateConflict',
+      'The corresponding Triage entry was declined.',
+    )
+  }
+  const action: TriageActionInput = {
+    action: 'accept',
+    mode: 'link',
+    expectedRevision: entry.revision,
+    workItemId: submission.workItem.workItemId,
+  }
+  const idempotency: TriageIdempotency = {
+    key: context.req.header('Idempotency-Key')?.trim() ||
+      `request-conversion-repair:${submission.id}:${submission.workItem.workItemId}`,
+    fingerprint: createTriageInputFingerprint({
+      workspaceId: principal.directoryId,
+      teamId: entry.teamId,
+      entryId: entry.id,
+      action,
+    }),
+  }
+  await workItemDependencies.triage.applyAction(
+    principal.directoryId,
+    entry.teamId,
+    entry.id,
+    { id: principal.userKey },
+    action,
+    idempotency,
+    createApiMutationContext(
+      context,
+      principal,
+      action,
+      createTriageActionAuditIdempotencyKey(entry.id, idempotency),
+    ),
+  )
+}
+
+/** Atomic Triage contribution paired with one legacy Request action. */
+type LegacyRequestTriageContribution =
+  | {
+      /** Indicates that the combined mutation was already committed. */
+      replayed: true
+    }
+  | {
+      /** Indicates that the caller must execute the returned contribution. */
+      replayed: false
+      /** Revision-fenced Triage writes appended to the Request transaction. */
+      contribution: TriageTransactionContribution
+    }
+
+/**
+ * Maps one legacy Request action to the canonical Form Triage state atomically.
+ *
+ * @param context - Current Request action context and idempotency header.
+ * @param principal - Authenticated Workspace administrator.
+ * @param submission - Strongly read Request submission.
+ * @param entry - Strongly read deterministic Form Triage entry.
+ * @param input - Non-conversion legacy Request action.
+ * @returns A replay marker or unexecuted Triage transaction contribution.
+ */
+async function createLegacyRequestTriageContribution(
+  context: Context,
+  principal: WorkspacePrincipal,
+  submission: RequestSubmission,
+  entry: TriageEntry,
+  input: Exclude<RequestSubmissionActionInput, { action: 'convert' }>,
+): Promise<LegacyRequestTriageContribution> {
+  let action: TriageActionInput
+  let duplicateContext: TriageDuplicateContextTransactionContribution | undefined
+  let duplicateMergedAt: string | undefined
+  if (input.action === 'assign') {
+    action = {
+      action: 'assign',
+      expectedRevision: entry.revision,
+      ownerUserId: input.assigneeUserId,
+    }
+  } else if (input.action === 'request-more-info') {
+    action = {
+      action: 'request-information',
+      expectedRevision: entry.revision,
+      message: input.message,
+    }
+  } else if (input.action === 'reject') {
+    action = {
+      action: 'decline',
+      expectedRevision: entry.revision,
+      reason: input.reason,
+    }
+  } else {
+    const duplicateTarget = await workItemDependencies.requestIntake.getSubmission(
+      principal.directoryId,
+      input.duplicateOfSubmissionId,
+    )
+    if (!duplicateTarget.workItem || duplicateTarget.workItem.teamId !== entry.teamId) {
+      throw new RequestIntakeError(
+        409,
+        'RequestDuplicateCanonicalWorkItemRequired',
+        'A Triage-backed duplicate must target a converted Request in the same Team.',
+      )
+    }
+    const { detail } = await loadAuthorizedTeamIssue(
+      principal,
+      duplicateTarget.workItem.teamId,
+      duplicateTarget.workItem.workItemId,
+      'member',
+    )
+    action = {
+      action: 'duplicate',
+      expectedRevision: entry.revision,
+      canonicalWorkItemId: duplicateTarget.workItem.workItemId,
+    }
+    const mergedAt = new Date().toISOString()
+    duplicateMergedAt = mergedAt
+    duplicateContext = workItemDependencies.teamIssues
+      .createTriageDuplicateContextTransactionItems?.({
+        directoryId: principal.directoryId,
+        teamId: detail.issue.teamId,
+        workItemId: detail.issue.id,
+        expectedWorkItemRevision: detail.issue.revision,
+        actorUserId: principal.userKey,
+        entry,
+        mergedAt,
+      })
+    if (!duplicateContext) {
+      throw new RequestIntakeError(
+        503,
+        'RequestDuplicateContextUnavailable',
+        'Duplicate context preservation is unavailable.',
+      )
+    }
+  }
+  const idempotency: TriageIdempotency = {
+    key: context.req.header('Idempotency-Key')?.trim() ||
+      `request-action:${submission.id}:${input.action}:${input.expectedRevision}`,
+    fingerprint: createTriageInputFingerprint({
+      workspaceId: principal.directoryId,
+      actorId: principal.userKey,
+      teamId: entry.teamId,
+      entryId: entry.id,
+      requestAction: input,
+    }),
+  }
+  const replay = await workItemDependencies.triage.getActionReceipt(
+    principal.directoryId,
+    entry.teamId,
+    entry.id,
+    idempotency,
+  )
+  if (replay) return { replayed: true }
+  const tableName = getEnv('REQUEST_INTAKE_TABLE_NAME') ?? 'mukuroji-request-intake-local'
+  if (action.action === 'duplicate') {
+    const completedAt = duplicateMergedAt ?? new Date().toISOString()
+    const triage = createTriageAcceptanceTransactionItems({
+      tableName,
+      entry,
+      action,
+      canonicalWorkItem: {
+        teamId: entry.teamId,
+        workItemId: action.canonicalWorkItemId,
+      },
+      actorId: principal.userKey,
+      now: completedAt,
+      idempotency,
+      mergeReceipt: {
+        canonicalWorkItemId: action.canonicalWorkItemId,
+        mergedSourceCount: 1,
+        mergedCommentCount: duplicateContext?.snapshot.commentMetadataCount ?? 0,
+        mergedAttachmentCount: duplicateContext?.snapshot.attachmentMetadataCount ?? 0,
+        mergedWatcherCount: duplicateContext?.snapshot.watcherMetadataCount ?? 0,
+        completedAt,
+      },
+    })
+    return {
+      replayed: false,
+      contribution: {
+        entry: triage.entry,
+        transactItems: [...(duplicateContext?.transactItems ?? []), ...triage.transactItems],
+      },
+    }
+  }
+  const entryForAction = action.action === 'request-information'
+    ? {
+        ...entry,
+        sourcePreview: {
+          ...entry.sourcePreview,
+          commentCount: entry.sourcePreview.commentCount + 1,
+        },
+      }
+    : entry
+  const contribution = createTriageActionTransactionItems({
+    tableName,
+    audit: {
+      tableName: getConfiguredAuditTableName() ?? 'mukuroji-audit-events',
+      retentionDays: getConfiguredAuditRetentionDays(),
+    },
+    entry: entryForAction,
+    action,
+    actorId: principal.userKey,
+    now: new Date().toISOString(),
+    idempotency,
+    auditContext: createApiMutationContext(
+      context,
+      principal,
+      input,
+      createTriageActionAuditIdempotencyKey(entry.id, idempotency),
+    ),
+  })
+  const referenceChecks = action.action === 'assign'
+    ? await createTriageActionReferenceConditionChecks(
+        principal.directoryId,
+        entry.teamId,
+        entry,
+        action,
+      )
+    : []
+  return {
+    replayed: false,
+    contribution: {
+      entry: contribution.entry,
+      transactItems: [...referenceChecks, ...contribution.transactItems],
+    },
+  }
+}
+
+/**
+ * Derives the canonical Work Item ID used by every accept-create retry path.
+ *
+ * @param workspaceId - Owning Workspace identifier.
+ * @param teamId - Destination Team identifier.
+ * @param entryId - Source Triage Entry identifier.
+ * @returns A Work Item adapter-compatible deterministic identifier.
+ */
+function createDeterministicTriageWorkItemId(
+  workspaceId: string,
+  teamId: string,
+  entryId: string,
+) {
+  const digest = createHash('sha256')
+    .update(`${workspaceId}\0${teamId}\0${entryId}`)
+    .digest('hex')
+  return `triage-${digest.slice(0, 48)}`
+}
+
+/**
+ * Creates a retention-safe legacy conversion input without reading source answers.
+ *
+ * Routing metadata and explicit operator overrides remain available, but mapped title,
+ * description, and custom fields cannot be copied after the source retention boundary.
+ *
+ * @param submission - Stored Request submission whose answers must be isolated.
+ * @param overrides - Validated conversion options supplied by the operator.
+ * @returns A Work Item input derived without retained source answers.
+ */
+function createRetentionSafeRequestWorkItemInput(
+  submission: RequestSubmission,
+  overrides: Extract<RequestSubmissionActionInput, { action: 'convert' }>,
+) {
+  return createRequestWorkItemInput(
+    { ...submission, answers: {} },
+    {
+      ...overrides,
+      title: overrides.title?.trim() || 'Retained source',
+    },
+  )
+}
+
+/**
+ * Creates a canonical Work Item and accepts its Triage Entry in one transaction.
+ *
+ * A Form source also converts its Request submission in the same transaction. The
+ * fingerprint-bound receipt is read first so a response-loss retry never creates a
+ * second Work Item or repeats the source conversion.
+ *
+ * @param principal - Current live-authorized Workspace principal.
+ * @param request - Validated accept-create action.
+ * @returns The newly committed or replayed Triage receipt.
+ */
+async function acceptTriageEntryAsNewWorkItem(
+  principal: WorkspacePrincipal,
+  request: TriageRouterActionRequest & {
+    action: Extract<TriageRouterActionRequest['action'], { action: 'accept'; mode: 'create' }>
+  },
+) {
+  const replay = await workItemDependencies.triage.getActionReceipt(
+    request.workspaceId,
+    request.teamId,
+    request.entryId,
+    request.idempotency,
+  )
+  if (replay) return replay
+
+  const entry = await workItemDependencies.triage.getEntryForMutation(
+    request.workspaceId,
+    request.teamId,
+    request.entryId,
+  )
+  const submission = entry.source.kind === 'form' && entry.source.submissionId
+    ? await workItemDependencies.requestIntake.getSubmission(
+        request.workspaceId,
+        entry.source.submissionId,
+      )
+    : undefined
+  const formConversion = submission && entry.retention.redactedAt === undefined
+    ? createRequestWorkItemInput(submission, {
+        action: 'convert',
+        expectedRevision: submission.revision,
+        target: {
+          teamId: request.teamId,
+          ...(request.action.projectId ? { projectId: request.action.projectId } : {}),
+        },
+      })
+    : undefined
+  const teamContext = await requireTeamPermission(principal, request.teamId, 'member')
+  const assignedProjectId = request.action.projectId ?? entry.projectId
+  requireAssignedProjectPermission(
+    principal,
+    teamContext,
+    assignedProjectId,
+    'member',
+  )
+  const assigneeUserId = entry.ownerUserId ?? principal.userKey
+  await requireActiveWorkspaceAssignee(request.workspaceId, assigneeUserId)
+
+  const issueId = createDeterministicTriageWorkItemId(
+    request.workspaceId,
+    request.teamId,
+    request.entryId,
+  )
+  const resolvedConfiguration = await workItemDependencies.workItemConfigurations
+    .getTeamConfiguration(request.workspaceId, request.teamId)
+  const normalized = normalizeTeamIssueInput({
+    ...(formConversion?.input ?? (entry.retention.redactedAt !== undefined
+      ? {
+          title: 'Retained source',
+          schedule: createDefaultUnscheduledWorkItemSchedule(),
+          priority: 'medium',
+        }
+      : {
+          title: entry.sourcePreview.title,
+          ...(entry.sourcePreview.body ? { description: entry.sourcePreview.body } : {}),
+          schedule: createDefaultUnscheduledWorkItemSchedule(),
+          priority: 'medium',
+        })),
+    assignedProjectId: assignedProjectId ?? null,
+    assigneeUserId,
+    idempotentIssueId: issueId,
+    idempotentRequestDigest: request.idempotency.fingerprint,
+  }, teamContext.team)
+  const configured = await prepareConfiguredCreateWorkItem(
+    request.workspaceId,
+    request.teamId,
+    normalized,
+    resolvedConfiguration,
+  )
+  const acceptanceReferenceConditionChecks =
+    await createTriageAcceptanceReferenceConditionChecks(
+      request.workspaceId,
+      request.teamId,
+      assignedProjectId,
+      assigneeUserId,
+    )
+  const guardedConfigured = {
+    ...configured,
+    authorizationConditionChecks: [
+      ...(configured.authorizationConditionChecks ?? []),
+      ...acceptanceReferenceConditionChecks,
+      ...(request.authorizationConditionChecks ?? []),
+    ],
+  }
+  const now = new Date().toISOString()
+  const canonicalWorkItem = {
+    teamId: request.teamId,
+    workItemId: issueId,
+    ...(assignedProjectId ? { projectId: assignedProjectId } : {}),
+  }
+  const acceptance = createTriageAcceptanceTransactionItems({
+    tableName: getEnv('REQUEST_INTAKE_TABLE_NAME') ?? 'mukuroji-request-intake-local',
+    entry,
+    action: request.action,
+    canonicalWorkItem,
+    actorId: principal.userKey,
+    now,
+    idempotency: request.idempotency,
+  })
+  const created = await workItemDependencies.teamIssues.createTeamIssue(
+    request.workspaceId,
+    request.teamId,
+    guardedConfigured,
+    principal.userKey,
+    createApiMutationContext(request.context, principal, {
+      action: 'triage.accept',
+      triageEntryId: request.entryId,
+      teamId: request.teamId,
+    }),
+    submission
+      ? {
+          tableName: getEnv('REQUEST_INTAKE_TABLE_NAME') ?? 'mukuroji-request-intake-local',
+          scopeKey: `WORKSPACE#${request.workspaceId}`,
+          recordKey: `SUBMISSION#${submission.id}`,
+          expectedRevision: submission.revision,
+          actorId: principal.userKey,
+          submissionId: submission.id,
+          events: submission.events,
+        }
+      : undefined,
+    {
+      entryId: entry.id,
+      occurredAt: now,
+      transactItems: acceptance.transactItems,
+    },
+  )
+  await projectWorkItemSearchDocumentBestEffort(
+    request.workspaceId,
+    created.issue,
+    'Triage acceptance',
+    [],
+  )
+  return { entry: acceptance.entry, replayed: false }
+}
+
+/** Converts Triage failures and existing application errors into the public API envelope. */
+function toTriageErrorResponse(context: Context, error: unknown) {
+  if (error instanceof CognitoServiceError) return toAuthErrorResponse(context, error)
+  if (error instanceof WorkspaceAccessError) return toWorkspaceAccessErrorResponse(context, error)
+  if (error instanceof WorkItemConfigurationError) {
+    return toWorkItemConfigurationErrorResponse(context, error)
+  }
+  if (error instanceof ProjectDataError || isTeamIssueNotFoundError(error)) {
+    return toProjectDataErrorResponse(context, error)
+  }
+  if (error instanceof RequestIntakeError) {
+    const status = error.status === 400 || error.status === 404 || error.status === 409 ||
+        error.status === 413 || error.status === 422 || error.status === 429 ||
+        error.status === 503
+      ? error.status
+      : 502
+    return context.json({ code: error.code, message: error.message }, status)
+  }
+  if (!(error instanceof TriageError)) {
+    console.error(error)
+    return context.json(
+      { code: 'TriageUnavailable', message: 'Team Triage is unavailable.' },
+      503,
+    )
+  }
+  if (error.status >= 500) console.error(error)
+  const status = error.status === 400 || error.status === 401 || error.status === 403 ||
+      error.status === 404 || error.status === 409 || error.status === 413 ||
+      error.status === 422 || error.status === 429 || error.status === 503
+    ? error.status
+    : 502
+  return context.json({ code: error.code, message: error.message }, status)
+}
+
 function requireSystemAdmin(principal: ProjectPrincipal) {
   if (
     principal.isSystemAdmin ||
@@ -20359,6 +22889,42 @@ async function requireTeamConfigurationAdministration(
   await requireTeamPermission(principal, teamId, 'manager')
 }
 
+/** Requires a settings replacement caller to manage every active Project in the Team.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param teamId - Team whose complete configuration would be replaced.
+ * @returns A Project-scoped Team context when legacy access was used, otherwise undefined.
+ */
+async function requireFullTriageConfigurationScope(
+  principal: WorkspacePrincipal,
+  teamId: string,
+): Promise<TeamPermissionContext | undefined> {
+  if (
+    principal.isSystemAdmin ||
+    principal.workspaceRole === 'owner' ||
+    principal.workspaceRole === 'admin' ||
+    isEnterpriseTriageTeamScope(principal, teamId) &&
+      principal.enterpriseGrantedRoutePermissions?.includes('teams.manage') === true
+  ) {
+    return undefined
+  }
+
+  const context = await requireTeamPermission(principal, teamId, 'manager')
+  const managedProjectIds = new Set(
+    context.projectAccesses
+      ?.filter((access) => projectAccessAllows(access, 'manager'))
+      .map((access) => access.projectId) ?? [],
+  )
+  if (context.team.projects.every((project) => managedProjectIds.has(project.id))) {
+    return context
+  }
+  throw new WorkspaceAccessError(
+    403,
+    'WorkspacePermissionDenied',
+    'Full Team management permission is required to replace Triage settings.',
+  )
+}
+
 async function authorizeRelationMutation(
   principal: WorkspacePrincipal,
   teamId: string,
@@ -20749,6 +23315,15 @@ function requiresCurrentWorkItemAssignee(notification: NotificationItem) {
   )
 }
 
+/** Returns whether a Triage notification is meaningful only to the current owner. */
+function requiresCurrentTriageOwner(notification: NotificationItem) {
+  return notification.reasons.length > 0 && notification.reasons.every((reason) =>
+    reason === 'assignee' || reason === 'assignment' || reason === 'due' ||
+    reason === 'overdue' || reason === 'sla' || reason === 'triage-sla' ||
+    reason === 'escalation' || reason === 'triage-assignment'
+  )
+}
+
 async function createNotificationVisibilityFilter(
   principal: WorkspacePrincipal,
 ) {
@@ -20786,10 +23361,34 @@ async function createNotificationVisibilityFilter(
             .filter((teamId) => activeTeamIds.has(teamId)),
         ],
       )
+  const fullyAccessibleTeamIds = new Set(
+    directory.teams
+      .filter((team) =>
+        principal.isSystemAdmin ||
+        principal.enterpriseAuthorizedTeamIds?.includes(team.id) === true ||
+        (
+          team.projects.length > 0 &&
+          team.projects.every((project) => accessibleProjectIds.has(project.id))
+        )
+      )
+      .map((team) => team.id),
+  )
   const workItemScopes = new Map<string, Promise<{
     assigneeMemberKey?: string
     exists: boolean
     projectId?: string
+  }>>()
+  const triageScopes = new Map<string, Promise<{
+    /** Whether the canonical Triage Entry still exists in this Team. */
+    exists: boolean
+    /** Current owner used to suppress stale owner-only notifications. */
+    ownerUserId?: string
+    /** Current assigned Project used to re-evaluate the notification scope. */
+    projectId?: string
+    /** Current permission-safe title replacing historical source content. */
+    title?: string
+    /** Whether event summary content must be removed from the response. */
+    restricted: boolean
   }>>()
   const enterpriseDocumentScopeAccess =
     resolveEnterpriseDocumentScopeAccess(
@@ -20834,6 +23433,60 @@ async function createNotificationVisibilityFilter(
         documentVisibilities.set(notification.entityId, visibility)
       }
       if (!await visibility) return false
+    }
+    if (notification.teamId && notification.triageEntryId) {
+      const scopeKey = `${notification.teamId}\0${notification.triageEntryId}`
+      let scope = triageScopes.get(scopeKey)
+      if (!scope) {
+        scope = workItemDependencies.triage.getEntry(
+          principal.directoryId,
+          notification.teamId,
+          notification.triageEntryId,
+        ).then((entry) => ({
+          exists: true,
+          ...(entry.ownerUserId ? { ownerUserId: entry.ownerUserId } : {}),
+          ...(entry.projectId ? { projectId: entry.projectId } : {}),
+          title: entry.permission.visibility === 'denied' ||
+              entry.retention.redactedAt !== undefined
+            ? 'Restricted source'
+            : entry.sourcePreview.title,
+          restricted: entry.permission.visibility !== 'full' ||
+            entry.retention.redactedAt !== undefined,
+        })).catch((error: unknown) => {
+          if (error instanceof TriageError && error.status === 404) {
+            return { exists: false, restricted: true }
+          }
+          throw error
+        })
+        triageScopes.set(scopeKey, scope)
+      }
+      const currentScope = await scope
+      if (!currentScope.exists) return false
+      if (currentScope.title) notification.title = currentScope.title
+      if (currentScope.restricted) delete notification.summary
+      if (
+        !notification.issueId &&
+        requiresCurrentTriageOwner(notification) &&
+        (
+          !currentScope.ownerUserId ||
+          normalizeProjectMemberKey(currentScope.ownerUserId) !==
+            normalizeProjectMemberKey(principal.userKey)
+        )
+      ) {
+        return false
+      }
+      if (currentScope.projectId) {
+        notification.projectId = currentScope.projectId
+        if (
+          projectTeamIds.get(currentScope.projectId)?.has(notification.teamId) !== true ||
+          !accessibleProjectIds.has(currentScope.projectId)
+        ) {
+          return false
+        }
+      } else {
+        delete notification.projectId
+        if (!fullyAccessibleTeamIds.has(notification.teamId)) return false
+      }
     }
     if (notification.teamId && notification.issueId) {
       const scopeKey = `${notification.teamId}\0${notification.issueId}`
@@ -21263,13 +23916,16 @@ async function requireTeamPermission(
       ? 'teams.write'
       : 'teams.read'
   if (
+    principal.enterpriseTeamAccesses?.some((access) =>
+      access.teamId === teamId && access.permissions.includes(enterprisePermission)
+    ) ||
     principal.enterpriseRouteAuthorizedAtResource &&
-    (
-      principal.enterpriseAuthorizationResource?.kind === 'workspace' ||
-      principal.enterpriseAuthorizationResource?.kind === 'team' &&
-        principal.enterpriseAuthorizationResource.targetId === teamId
-    ) &&
-    principal.enterprisePermissions?.includes(enterprisePermission)
+      (
+        principal.enterpriseAuthorizationResource?.kind === 'workspace' ||
+        principal.enterpriseAuthorizationResource?.kind === 'team' &&
+          principal.enterpriseAuthorizationResource.targetId === teamId
+      ) &&
+      principal.enterprisePermissions?.includes(enterprisePermission)
   ) {
     const role = minimumRole === 'manager'
       ? 'manager'
@@ -23031,15 +25687,76 @@ async function requireActiveWorkspaceAssignee(
 ) {
   const member = await dependencies.workspaceAccess.getActiveMember(directoryId, userId)
 
-  if (!member) {
+  if (!member || member.role === 'guest') {
     throw new WorkspaceAccessError(
       409,
       'WorkspaceAssigneeInactive',
-      'Only active Workspace members can be assigned.',
+      'Only active non-guest Workspace members can be assigned.',
     )
   }
 
   return dependencies.cognito.getUserProfile(userId)
+}
+
+/** Returns the configured canonical Work Item table used by transaction fences. */
+function getTeamIssuesTableName(): string {
+  return getEnv('MUKUROJI_TEAM_ISSUES_TABLE') ??
+    getEnv('TEAM_ISSUES_TABLE_NAME') ??
+    'mukuroji-team-issues-local'
+}
+
+/** Builds commit-time Team, Project, and assignee fences for Triage acceptance.
+ *
+ * @param workspaceId - Owning Workspace directory identifier.
+ * @param teamId - Team that must remain active through Work Item creation.
+ * @param projectId - Optional Project that must remain active through commit.
+ * @param assigneeUserId - Member that must remain active through commit.
+ * @returns Directory and Workspace condition checks for the acceptance transaction.
+ */
+async function createTriageAcceptanceReferenceConditionChecks(
+  workspaceId: string,
+  teamId: string,
+  projectId: string | undefined,
+  assigneeUserId: string,
+): Promise<NonNullable<TransactWriteCommandInput['TransactItems']>> {
+  const createReferenceChecks = workspaceDependencies.projectDirectory.createActiveReferenceConditionChecks
+  const createMemberCheck = workspaceDependencies.workspaceAccess.createActiveMemberConditionCheck
+  if (!createReferenceChecks || !createMemberCheck) {
+    throw new TriageError(
+      503,
+      'TriageAcceptanceReferenceUnavailable',
+      'Acceptance reference fencing is unavailable.',
+    )
+  }
+  let referenceChecks
+  try {
+    referenceChecks = await createReferenceChecks(workspaceId, teamId, projectId)
+  } catch (error) {
+    if (error instanceof ProjectDataError) {
+      throw new TriageError(
+        409,
+        error.code === 'ProjectNotFound'
+          ? 'TriageAcceptanceProjectUnavailable'
+          : 'TriageAcceptanceTeamUnavailable',
+        'The selected acceptance destination is no longer active.',
+        { cause: error },
+      )
+    }
+    throw error
+  }
+  const memberCheck = await createMemberCheck(
+    workspaceId,
+    assigneeUserId,
+    TRIAGE_NON_GUEST_MEMBER_CONDITION_OPTIONS,
+  )
+  if (!memberCheck) {
+    throw new TriageError(
+      409,
+      'TriageAcceptanceOwnerUnavailable',
+      'The selected acceptance owner is no longer active.',
+    )
+  }
+  return [...referenceChecks, memberCheck]
 }
 
 async function hydrateProjectTasksResponse(response: ProjectTasksResponse) {
@@ -23373,6 +26090,2383 @@ async function readCanonicalTeamIssuesForAggregate(
     teamId: context.team.id,
     issues: filterAccessibleTeamIssues(storedIssues.issues, principal, context),
   } satisfies TeamIssuesResponse
+}
+
+/** Maximum notification page size accepted by the durable Inbox port. */
+const FOCUS_NOTIFICATION_PAGE_LIMIT = 50
+
+/** Maximum Inbox pages read from each state partition for one Focus projection. */
+const FOCUS_NOTIFICATION_MAX_PAGES_PER_FILTER = 4
+
+/** Maximum age of mention events considered by the Focus queue. */
+const FOCUS_NOTIFICATION_LOOKBACK_DAYS = 90
+
+/** Maximum deduplicated mention events supplied to one Focus projection. */
+const FOCUS_NOTIFICATION_GLOBAL_LIMIT = 200
+
+/** Maximum mention events retained for one Team-qualified Work Item. */
+const FOCUS_NOTIFICATION_PER_WORK_ITEM_LIMIT = 10
+
+/** Inbox state partitions required to recover every visible Focus source event. */
+const FOCUS_NOTIFICATION_FILTERS: readonly NotificationFilter[] = [
+  'all',
+  'archived',
+  'snoozed',
+]
+
+/** Maximum reviewer approval page size accepted by the file-proofing port. */
+const FOCUS_APPROVAL_PAGE_LIMIT = 100
+
+/** Maximum reviewer approval pages read for one Focus projection. */
+const FOCUS_APPROVAL_MAX_PAGES = 4
+
+/** Maximum deduplicated reviewer approvals supplied to one Focus projection. */
+const FOCUS_APPROVAL_GLOBAL_LIMIT = 400
+
+/** Maximum future duration accepted for one recipient-specific Focus snooze. */
+const FOCUS_SNOOZE_MAXIMUM_MILLISECONDS = 365 * 24 * 60 * 60 * 1_000
+
+/** Maximum concurrent watcher reads performed while assembling one Focus queue. */
+const FOCUS_WATCHER_READ_BATCH_SIZE = 16
+
+/** Maximum Focus items whose watcher state is resolved for one queue. */
+const FOCUS_WATCHER_READ_LIMIT = 400
+
+/** Stable Focus HTTP boundary error. */
+class FocusApiError extends Error {
+  /** HTTP status returned for this failure. */
+  readonly status: number
+  /** Machine-readable failure code returned to clients. */
+  readonly code: string
+
+  /**
+   * Creates one safe Focus API failure.
+   *
+   * @param status - HTTP status returned for this failure.
+   * @param code - Machine-readable failure code.
+   * @param message - Safe client-facing failure description.
+   */
+  constructor(status: number, code: string, message: string) {
+    super(message)
+    this.name = 'FocusApiError'
+    this.status = status
+    this.code = code
+  }
+}
+
+/**
+ * Parses a complete Focus policy replacement from untrusted JSON.
+ *
+ * @param value - Unknown request body.
+ * @returns Validated policy replacement input.
+ */
+function readFocusPolicyInput(value: unknown): UpdateFocusPolicyInput {
+  const body = requireFocusInputRecord(value, 'A Focus policy object is required.')
+  requireFocusInputKeys(body, ['target', 'expectedVersion', 'overrides'])
+  return {
+    target: readFocusPolicyTarget(body.target),
+    expectedVersion: readFocusExpectedVersion(body.expectedVersion),
+    overrides: readFocusPolicyOverrides(body.overrides),
+  }
+}
+
+/**
+ * Parses a Focus policy target without accepting a caller-supplied user identity.
+ *
+ * @param value - Unknown target value.
+ * @returns Current-user or Team policy target.
+ */
+function readFocusPolicyTarget(value: unknown): FocusPolicyTarget {
+  const target = requireFocusInputRecord(value, 'Focus policy target is required.')
+  if (target.type === 'user') {
+    requireFocusInputKeys(target, ['type'])
+    return { type: 'user' }
+  }
+  if (target.type === 'team') {
+    requireFocusInputKeys(target, ['type', 'teamId'])
+    return {
+      type: 'team',
+      teamId: readFocusRouteId(target.teamId, 'Focus Team ID'),
+    }
+  }
+  throw invalidFocusInput('Focus policy target is invalid.')
+}
+
+/**
+ * Parses bounded policy override fields from an untrusted object.
+ *
+ * @param value - Unknown override value.
+ * @returns Validated complete replacement set of optional overrides.
+ */
+function readFocusPolicyOverrides(value: unknown): FocusPolicyOverrides {
+  const overrides = requireFocusInputRecord(value, 'Focus policy overrides are required.')
+  requireFocusInputKeys(overrides, [
+    'weights',
+    'dueSoonDays',
+    'cycleDueSoonDays',
+    'slaHours',
+    'nowScoreThreshold',
+  ])
+  const weights = overrides.weights === undefined
+    ? undefined
+    : readFocusSignalWeightOverrides(overrides.weights)
+  const dueSoonDays = readOptionalFocusPolicyNumber(
+    overrides.dueSoonDays,
+    'dueSoonDays',
+    0,
+    365,
+    true,
+  )
+  const cycleDueSoonDays = readOptionalFocusPolicyNumber(
+    overrides.cycleDueSoonDays,
+    'cycleDueSoonDays',
+    0,
+    365,
+    true,
+  )
+  const slaHours = readOptionalFocusPolicyNumber(
+    overrides.slaHours,
+    'slaHours',
+    1,
+    24 * 365,
+    true,
+  )
+  const nowScoreThreshold = readOptionalFocusPolicyNumber(
+    overrides.nowScoreThreshold,
+    'nowScoreThreshold',
+    0,
+    100_000,
+    false,
+  )
+  return {
+    ...(weights === undefined ? {} : { weights }),
+    ...(dueSoonDays === undefined ? {} : { dueSoonDays }),
+    ...(cycleDueSoonDays === undefined ? {} : { cycleDueSoonDays }),
+    ...(slaHours === undefined ? {} : { slaHours }),
+    ...(nowScoreThreshold === undefined ? {} : { nowScoreThreshold }),
+  }
+}
+
+/**
+ * Parses bounded per-signal weight replacements.
+ *
+ * @param value - Unknown signal weight map.
+ * @returns Validated signal weight overrides.
+ */
+function readFocusSignalWeightOverrides(
+  value: unknown,
+): FocusSignalWeightOverrides {
+  const weights = requireFocusInputRecord(value, 'Focus signal weights are invalid.')
+  requireFocusInputKeys(weights, [
+    'blocker',
+    'urgent',
+    'overdue',
+    'dueSoon',
+    'approval',
+    'reviewRequest',
+    'mention',
+    'sla',
+    'cycle',
+  ])
+  const blocker = readOptionalFocusPolicyNumber(weights.blocker, 'blocker', 0, 10_000, false)
+  const urgent = readOptionalFocusPolicyNumber(weights.urgent, 'urgent', 0, 10_000, false)
+  const overdue = readOptionalFocusPolicyNumber(weights.overdue, 'overdue', 0, 10_000, false)
+  const dueSoon = readOptionalFocusPolicyNumber(weights.dueSoon, 'dueSoon', 0, 10_000, false)
+  const approval = readOptionalFocusPolicyNumber(weights.approval, 'approval', 0, 10_000, false)
+  const reviewRequest = readOptionalFocusPolicyNumber(
+    weights.reviewRequest,
+    'reviewRequest',
+    0,
+    10_000,
+    false,
+  )
+  const mention = readOptionalFocusPolicyNumber(weights.mention, 'mention', 0, 10_000, false)
+  const sla = readOptionalFocusPolicyNumber(weights.sla, 'sla', 0, 10_000, false)
+  const cycle = readOptionalFocusPolicyNumber(weights.cycle, 'cycle', 0, 10_000, false)
+  return {
+    ...(blocker === undefined ? {} : { blocker }),
+    ...(urgent === undefined ? {} : { urgent }),
+    ...(overdue === undefined ? {} : { overdue }),
+    ...(dueSoon === undefined ? {} : { dueSoon }),
+    ...(approval === undefined ? {} : { approval }),
+    ...(reviewRequest === undefined ? {} : { reviewRequest }),
+    ...(mention === undefined ? {} : { mention }),
+    ...(sla === undefined ? {} : { sla }),
+    ...(cycle === undefined ? {} : { cycle }),
+  }
+}
+
+/**
+ * Parses one optional bounded Focus policy number.
+ *
+ * @param value - Unknown numeric value.
+ * @param field - Contract field name used in the error response.
+ * @param minimum - Inclusive lower bound.
+ * @param maximum - Inclusive upper bound.
+ * @param integer - Whether only safe integers are accepted.
+ * @returns Validated number or undefined when omitted.
+ */
+function readOptionalFocusPolicyNumber(
+  value: unknown,
+  field: string,
+  minimum: number,
+  maximum: number,
+  integer: boolean,
+): number | undefined {
+  if (value === undefined) return undefined
+  if (
+    typeof value !== 'number' ||
+    !Number.isFinite(value) ||
+    value < minimum ||
+    value > maximum ||
+    (integer && !Number.isSafeInteger(value))
+  ) {
+    throw invalidFocusInput(`Focus policy ${field} is outside its supported range.`)
+  }
+  return value
+}
+
+/**
+ * Parses a version-checked Focus snooze replacement.
+ *
+ * @param value - Unknown request body.
+ * @param now - Stable mutation clock used to reject expired wake times.
+ * @returns Validated snooze or unsnooze input.
+ */
+function readFocusSnoozeInput(
+  value: unknown,
+  now: Date,
+): UpdateFocusSnoozeInput {
+  const body = requireFocusInputRecord(value, 'A Focus snooze object is required.')
+  requireFocusInputKeys(body, ['expectedVersion', 'snoozedUntil'])
+  const expectedVersion = readFocusExpectedVersion(body.expectedVersion)
+  if (body.snoozedUntil === null) {
+    return { expectedVersion, snoozedUntil: null }
+  }
+  if (
+    typeof body.snoozedUntil !== 'string' ||
+    body.snoozedUntil.length === 0 ||
+    body.snoozedUntil !== body.snoozedUntil.trim()
+  ) {
+    throw invalidFocusInput('Focus snooze wake time must be an ISO 8601 timestamp or null.')
+  }
+  const snoozedUntil = new Date(body.snoozedUntil)
+  if (
+    Number.isNaN(snoozedUntil.getTime()) ||
+    snoozedUntil.getTime() <= now.getTime() ||
+    snoozedUntil.getTime() > now.getTime() + FOCUS_SNOOZE_MAXIMUM_MILLISECONDS
+  ) {
+    throw invalidFocusInput('Focus snooze wake time must be in the next 365 days.')
+  }
+  return { expectedVersion, snoozedUntil: snoozedUntil.toISOString() }
+}
+
+/**
+ * Parses a version-checked Focus watcher replacement.
+ *
+ * @param value - Unknown request body.
+ * @returns Validated watcher input.
+ */
+function readFocusWatchInput(value: unknown): UpdateFocusWatchInput {
+  const body = requireFocusInputRecord(value, 'A Focus watch object is required.')
+  requireFocusInputKeys(body, ['expectedVersion', 'watching'])
+  if (typeof body.watching !== 'boolean') {
+    throw invalidFocusInput('Focus watching must be a boolean.')
+  }
+  return {
+    expectedVersion: readFocusExpectedVersion(body.expectedVersion),
+    watching: body.watching,
+  }
+}
+
+/**
+ * Parses one nonnegative optimistic concurrency version.
+ *
+ * @param value - Unknown version value.
+ * @returns Validated version.
+ */
+function readFocusExpectedVersion(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+    throw invalidFocusInput('Focus expectedVersion must be a nonnegative safe integer.')
+  }
+  return value
+}
+
+/**
+ * Parses one bounded Focus route identifier.
+ *
+ * @param value - Unknown route identifier.
+ * @param label - Safe identifier label.
+ * @returns Validated unchanged identifier.
+ */
+function readFocusRouteId(value: unknown, label: string): string {
+  if (
+    typeof value !== 'string' ||
+    value.length === 0 ||
+    value !== value.trim() ||
+    value.length > 256
+  ) {
+    throw invalidFocusInput(`${label} is required.`)
+  }
+  return value
+}
+
+/**
+ * Requires an untrusted Focus value to be a JSON object.
+ *
+ * @param value - Unknown request value.
+ * @param message - Safe validation failure message.
+ * @returns Narrowed record value.
+ */
+function requireFocusInputRecord(
+  value: unknown,
+  message: string,
+): Record<string, unknown> {
+  if (!isRecord(value)) throw invalidFocusInput(message)
+  return value
+}
+
+/**
+ * Rejects unknown keys at the Focus HTTP contract boundary.
+ *
+ * @param value - Narrowed request object.
+ * @param allowedKeys - Complete allowed key list.
+ */
+function requireFocusInputKeys(
+  value: Record<string, unknown>,
+  allowedKeys: readonly string[],
+): void {
+  const allowed = new Set(allowedKeys)
+  if (Object.keys(value).some((key) => !allowed.has(key))) {
+    throw invalidFocusInput('Focus input contains an unknown field.')
+  }
+}
+
+/**
+ * Creates one stable invalid Focus request error.
+ *
+ * @param message - Safe validation failure description.
+ * @returns Focus API validation error.
+ */
+function invalidFocusInput(message: string): FocusApiError {
+  return new FocusApiError(400, 'InvalidFocusInput', message)
+}
+
+/** Mutation represented by one durable Focus response receipt. */
+type FocusMutationReceiptOperation = 'policy' | 'snooze' | 'watch'
+
+/** Stable schema discriminator for Focus mutation receipts. */
+const FOCUS_MUTATION_RECEIPT_SCHEMA = 'focus-mutation'
+
+/** Current Focus mutation receipt version. */
+const FOCUS_MUTATION_RECEIPT_VERSION = 1
+
+/**
+ * Validates the required caller-provided key for one Focus mutation.
+ *
+ * @param value - Raw `Idempotency-Key` header value.
+ * @returns Trimmed key safe for the shared idempotency port.
+ */
+function readRequiredFocusIdempotencyKey(value: string | undefined): string {
+  const key = value?.trim() ?? ''
+  const hasControlCharacter = [...key].some((character) => {
+    const codePoint = character.codePointAt(0)
+    return codePoint !== undefined && (codePoint <= 31 || codePoint === 127)
+  })
+  if (!key || key.length > 256 || hasControlCharacter) {
+    throw new FocusApiError(
+      400,
+      'InvalidFocusIdempotencyKey',
+      'Idempotency-Key must contain 1 to 256 characters without control characters.',
+    )
+  }
+  return key
+}
+
+/**
+ * Creates the actor-scoped reservation identity for one Focus mutation.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @param idempotencyKey - Validated caller-provided key.
+ * @param method - Canonical HTTP method.
+ * @param path - Canonical API path.
+ * @param body - Parsed request body bound to the key.
+ * @returns Shared idempotency reservation request.
+ */
+function createFocusMutationReservationRequest(
+  principal: WorkspacePrincipal,
+  idempotencyKey: string,
+  method: string,
+  path: string,
+  body: unknown,
+): ReserveIdempotencyRequest {
+  return {
+    workspaceId: createWorkItemScheduleIdempotencyWorkspaceId(principal.directoryId),
+    credentialId: createWorkItemScheduleIdempotencyUserId(
+      principal.directoryId,
+      principal.actorId,
+    ),
+    idempotencyKey,
+    requestFingerprint: createFocusMutationFingerprint(method, path, body),
+  }
+}
+
+/**
+ * Binds one Focus key to its exact method, canonical path, and parsed JSON body.
+ *
+ * @param method - Incoming HTTP method.
+ * @param path - Canonical API path.
+ * @param body - Parsed request body.
+ * @returns Stable SHA-256 request fingerprint.
+ */
+function createFocusMutationFingerprint(
+  method: string,
+  path: string,
+  body: unknown,
+): string {
+  return createHash('sha256')
+    .update(`${method.toUpperCase()}\n${path}\n${stableDigestStringify(body)}`)
+    .digest('hex')
+}
+
+/**
+ * Creates an opaque identity for the receipt target.
+ *
+ * @param operation - Focus mutation operation.
+ * @param identifiers - Validated target identifiers in canonical order.
+ * @returns Stable SHA-256 target identity.
+ */
+function createFocusMutationTargetIdentity(
+  operation: FocusMutationReceiptOperation,
+  identifiers: readonly string[],
+): string {
+  return createHash('sha256')
+    .update(stableDigestStringify([operation, ...identifiers]))
+    .digest('hex')
+}
+
+/**
+ * Creates a canonical item mutation path from validated route identifiers.
+ *
+ * @param teamId - Owning Team identifier.
+ * @param workItemId - Team-local Work Item identifier.
+ * @param operation - Item mutation operation.
+ * @returns Canonical encoded API path.
+ */
+function createFocusItemMutationPath(
+  teamId: string,
+  workItemId: string,
+  operation: 'snooze' | 'watch',
+): string {
+  return `/api/focus/items/${encodeURIComponent(teamId)}/${encodeURIComponent(workItemId)}/${operation}`
+}
+
+/**
+ * Prepares the exact policy snapshot and recovery marker used by one durable update.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @param input - Validated policy replacement.
+ * @param now - Stable mutation clock.
+ * @param request - Actor-scoped idempotency reservation identity.
+ * @param targetIdentity - Opaque policy target identity.
+ * @returns Predicted response, mutation marker, and an already committed policy when recoverable.
+ */
+async function prepareFocusPolicyMutation(
+  principal: WorkspacePrincipal,
+  input: UpdateFocusPolicyInput,
+  now: Date,
+  request: ReserveIdempotencyRequest,
+  targetIdentity: string,
+) {
+  const target = input.target
+  const accessibleTeamIds = await readFocusAccessibleTeamIds(principal)
+  if (
+    target.type === 'user' &&
+    accessibleTeamIds.length > WORK_ITEMS_TEAM_READ_LIMIT
+  ) {
+    throw createWorkItemListLimitExceededError(
+      `Workspace has more than ${WORK_ITEMS_TEAM_READ_LIMIT} accessible Teams.`,
+    )
+  }
+  const policyStateTeamIds = target.type === 'team'
+    ? [...new Set([...accessibleTeamIds, target.teamId])].sort()
+    : accessibleTeamIds
+  const state = await workItemDependencies.focusState.getState({
+    workspaceId: principal.directoryId,
+    memberKey: principal.userKey,
+    teamIds: policyStateTeamIds,
+  })
+  const preview = createFocusPolicyMutationPreview({
+    workspaceId: principal.directoryId,
+    memberKey: principal.userKey,
+    update: input,
+    now,
+  })
+  const teamPolicies = target.type === 'team'
+    ? [
+        ...state.teamPolicies.filter((policy) =>
+          policy.target.type !== 'team' || policy.target.teamId !== target.teamId
+        ),
+        preview,
+      ]
+    : state.teamPolicies
+  const userPolicy = target.type === 'user' ? preview : state.userPolicy
+  const effectivePolicyTeamIds = target.type === 'team'
+    ? [target.teamId]
+    : accessibleTeamIds
+  const effectivePolicies = resolveFocusEffectivePolicies({
+    teamIds: effectivePolicyTeamIds,
+    teamPolicies,
+    ...(userPolicy === undefined ? {} : { userPolicy }),
+  })
+  const policyConditionChecks = [
+    ...effectivePolicyTeamIds
+      .filter((teamId) => target.type !== 'team' || teamId !== target.teamId)
+      .map((teamId) => {
+        const teamPolicy = state.teamPolicies.find((policy) =>
+          policy.target.type === 'team' && policy.target.teamId === teamId
+        )
+        return createFocusPolicyRevisionConditionCheck(
+          principal.directoryId,
+          principal.userKey,
+          { type: 'team', teamId },
+          teamPolicy?.version ?? 0,
+        )
+      }),
+    ...(target.type === 'team'
+      ? [createFocusPolicyRevisionConditionCheck(
+          principal.directoryId,
+          principal.userKey,
+          { type: 'user' },
+          state.userPolicy?.version ?? 0,
+        )]
+      : []),
+  ]
+  const mutationIdentity = createFocusMutationRecoveryIdentity(
+    request,
+    'policy',
+    targetIdentity,
+    { policy: createFocusPolicyRecoveryEvidence(preview) },
+  )
+  const legacyMutationIdentity = createFocusMutationRecoveryIdentity(
+    request,
+    'policy',
+    targetIdentity,
+    {
+      policy: createFocusPolicyRecoveryEvidence(preview),
+      effectivePolicies: effectivePolicies.map((policy) => ({
+        teamId: policy.teamId,
+        fingerprint: policy.fingerprint,
+      })),
+    },
+  )
+  const storedPolicy = target.type === 'user'
+    ? state.userPolicy
+    : state.teamPolicies.find((policy) =>
+        policy.target.type === 'team' && policy.target.teamId === target.teamId
+      )
+  const storedMutationIdentity = target.type === 'user'
+    ? state.userPolicyMutationIdentity
+    : state.teamPolicyMutationIdentities[target.teamId]
+  const committedPolicy =
+    (storedMutationIdentity === mutationIdentity ||
+      storedMutationIdentity === legacyMutationIdentity) &&
+    storedPolicy !== undefined &&
+    stableDigestStringify(createFocusPolicyRecoveryEvidence(storedPolicy)) ===
+      stableDigestStringify(createFocusPolicyRecoveryEvidence(preview))
+      ? storedPolicy
+      : undefined
+
+  return {
+    committedPolicy,
+    effectivePolicies,
+    mutationIdentity,
+    policyConditionChecks,
+  }
+}
+
+/**
+ * Re-reads every policy layer contributing to a successful policy response.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @param input - Validated policy replacement.
+ * @param expectedEffectivePolicies - Effective policies computed before the write.
+ * @returns Effective policies verified against the post-write snapshot.
+ */
+async function readAndVerifyFocusPolicyEffectivePolicies(
+  principal: WorkspacePrincipal,
+  input: UpdateFocusPolicyInput,
+  expectedEffectivePolicies: readonly FocusEffectivePolicy[],
+): Promise<FocusEffectivePolicy[]> {
+  const accessibleTeamIds = await readFocusAccessibleTeamIds(principal)
+  const teamIds = input.target.type === 'team'
+    ? [input.target.teamId]
+    : accessibleTeamIds
+  const expectedTeamIds = expectedEffectivePolicies.flatMap((policy) =>
+    policy.teamId === undefined ? [] : [policy.teamId]
+  )
+  if (stableDigestStringify(teamIds) !== stableDigestStringify(expectedTeamIds)) {
+    throw focusPolicyContributingStateChanged()
+  }
+
+  const state = await workItemDependencies.focusState.getState({
+    workspaceId: principal.directoryId,
+    memberKey: principal.userKey,
+    teamIds,
+  })
+  const effectivePolicies = resolveFocusEffectivePolicies({
+    teamIds,
+    teamPolicies: state.teamPolicies,
+    ...(state.userPolicy === undefined ? {} : { userPolicy: state.userPolicy }),
+  })
+  const expectedOutcome = expectedEffectivePolicies.map((policy) => ({
+    teamId: policy.teamId,
+    fingerprint: policy.fingerprint,
+  }))
+  const currentOutcome = effectivePolicies.map((policy) => ({
+    teamId: policy.teamId,
+    fingerprint: policy.fingerprint,
+  }))
+  if (stableDigestStringify(currentOutcome) !== stableDigestStringify(expectedOutcome)) {
+    throw focusPolicyContributingStateChanged()
+  }
+  return effectivePolicies
+}
+
+/** Creates the conflict returned when a contributing Focus policy layer changes mid-write. */
+function focusPolicyContributingStateChanged(): FocusApiError {
+  return new FocusApiError(
+    409,
+    'FocusPolicyContributingStateChanged',
+    'A contributing Focus policy changed during the mutation. Reload and try again.',
+  )
+}
+
+/**
+ * Selects policy fields whose values are independent from the retry clock.
+ *
+ * @param policy - Stored or predicted policy.
+ * @returns Canonical recovery evidence excluding the mutation timestamp.
+ */
+function createFocusPolicyRecoveryEvidence(policy: FocusPolicy) {
+  return {
+    schemaVersion: policy.schemaVersion,
+    id: policy.id,
+    target: policy.target,
+    version: policy.version,
+    overrides: policy.overrides,
+  }
+}
+
+/**
+ * Creates a durable marker that binds a domain write to one exact logical request.
+ *
+ * @param request - Actor-scoped reservation identity.
+ * @param operation - Focus mutation kind.
+ * @param targetIdentity - Opaque identity of the mutation target.
+ * @param evidence - Operation-specific observable state that must remain unchanged.
+ * @returns Lowercase SHA-256 mutation identity.
+ */
+function createFocusMutationRecoveryIdentity(
+  request: ReserveIdempotencyRequest,
+  operation: FocusMutationReceiptOperation,
+  targetIdentity: string,
+  evidence: unknown,
+): string {
+  return createHash('sha256').update(stableDigestStringify({
+    credentialId: request.credentialId,
+    idempotencyKey: request.idempotencyKey,
+    operation,
+    requestFingerprint: request.requestFingerprint,
+    targetIdentity,
+    workspaceId: request.workspaceId,
+    evidence,
+  })).digest('hex')
+}
+
+/**
+ * Creates retry-stable evidence for one item mutation while omitting its own effects.
+ *
+ * @param request - Actor-scoped reservation identity.
+ * @param operation - Snooze or watcher operation.
+ * @param targetIdentity - Opaque Work Item target identity.
+ * @param item - Current permission-filtered Focus item.
+ * @param effectivePolicyFingerprint - Current effective policy fingerprint.
+ * @returns Lowercase SHA-256 mutation identity.
+ */
+function createFocusItemMutationRecoveryIdentity(
+  request: ReserveIdempotencyRequest,
+  operation: 'snooze' | 'watch',
+  targetIdentity: string,
+  item: FocusItem,
+  effectivePolicyFingerprint: string,
+): string {
+  const signals = item.signals.map((signal) => ({
+    ...signal,
+    freshness: {
+      ...(signal.freshness.validUntil === undefined
+        ? {}
+        : { validUntil: signal.freshness.validUntil }),
+      ...(signal.freshness.sourceVersion === undefined
+        ? {}
+        : { sourceVersion: signal.freshness.sourceVersion }),
+    },
+  }))
+  const operationStableEvidence = operation === 'snooze'
+    ? { watching: item.watching }
+    : {
+        section: item.section,
+        snoozeRevision: item.snoozeRevision,
+        snoozedUntil: item.snoozedUntil ?? null,
+      }
+  return createFocusMutationRecoveryIdentity(
+    request,
+    operation,
+    targetIdentity,
+    {
+      actionability: item.actionability,
+      capabilities: item.capabilities,
+      effectivePolicyFingerprint,
+      effectivePolicyId: item.effectivePolicyId,
+      id: item.id,
+      operationStableEvidence,
+      rank: item.rank,
+      schemaVersion: item.schemaVersion,
+      signals,
+      workItem: item.workItem,
+    },
+  )
+}
+
+/**
+ * Finds the exact snooze row produced by one previously committed logical request.
+ *
+ * @param state - Current recipient Focus state.
+ * @param teamId - Owning Team identifier.
+ * @param workItemId - Team-local Work Item identifier.
+ * @param mutationIdentity - Expected durable mutation marker.
+ * @param snoozedUntil - Desired wake time, or null for an unsnooze tombstone.
+ * @param causeFingerprint - Current exact signal-cause fingerprint.
+ * @returns Matching committed snooze row, or undefined.
+ */
+function findCommittedFocusSnooze(
+  state: FocusStateSnapshot,
+  teamId: string,
+  workItemId: string,
+  mutationIdentity: string,
+  snoozedUntil: string | null,
+  causeFingerprint: string,
+): FocusSnoozeRecord | undefined {
+  return state.snoozes.find((record) =>
+    record.teamId === teamId &&
+    record.workItemId === workItemId &&
+    record.mutationIdentity === mutationIdentity &&
+    record.causeFingerprint === causeFingerprint &&
+    (record.snoozedUntil ?? null) === snoozedUntil
+  )
+}
+
+/**
+ * Resolves the effective policy evidence referenced by one Focus item.
+ *
+ * @param queue - Queue snapshot containing the policy collection.
+ * @param item - Item whose policy reference must resolve exactly.
+ * @returns Current effective policy fingerprint.
+ */
+function requireFocusEffectivePolicyFingerprint(
+  queue: FocusQueueResponse,
+  item: FocusItem,
+): string {
+  const policy = queue.effectivePolicies.find((candidate) =>
+    candidate.id === item.effectivePolicyId &&
+    candidate.teamId === item.workItem.teamId
+  )
+  if (policy === undefined) throw focusIdempotencyUnavailable()
+  return policy.fingerprint
+}
+
+/**
+ * Rebuilds a Focus item with the original evaluation clock of a recovered mutation.
+ *
+ * @param item - Current item whose observable state matched the committed marker.
+ * @param evaluatedAt - Persisted canonical mutation timestamp.
+ * @returns Detached item matching the original response clock.
+ */
+function restoreFocusItemEvaluationTime(
+  item: FocusItem,
+  evaluatedAt: string,
+): FocusItem {
+  if (!isStoredFocusTimestamp(evaluatedAt)) throw focusIdempotencyUnavailable()
+  return {
+    ...item,
+    signals: item.signals.map((signal) => ({
+      ...signal,
+      freshness: {
+        ...signal.freshness,
+        evaluatedAt,
+      },
+    })),
+    updatedAt: evaluatedAt,
+  }
+}
+
+/**
+ * Reserves one Focus mutation and maps persistence failures to the Focus API contract.
+ *
+ * @param request - Actor-scoped reservation identity.
+ * @returns Reservation, in-progress, or completed replay decision.
+ */
+async function reserveFocusMutation(request: ReserveIdempotencyRequest) {
+  try {
+    return await developerPlatformDependencies.idempotency.reserveIdempotency(request)
+  } catch (error) {
+    if (error instanceof DeveloperPlatformError && error.code === 'IdempotencyKeyConflict') {
+      throw new FocusApiError(
+        409,
+        'FocusIdempotencyConflict',
+        'Idempotency-Key was already used for a different Focus mutation.',
+      )
+    }
+    throw focusIdempotencyUnavailable()
+  }
+}
+
+/** Creates the stable conflict returned while an equivalent Focus mutation is processing. */
+function focusIdempotencyInProgress(): FocusApiError {
+  return new FocusApiError(
+    409,
+    'FocusIdempotencyInProgress',
+    'An equivalent Focus mutation is still processing.',
+  )
+}
+
+/** Creates the stable failure returned when Focus idempotency persistence is unavailable. */
+function focusIdempotencyUnavailable(): FocusApiError {
+  return new FocusApiError(
+    503,
+    'FocusIdempotencyUnavailable',
+    'Focus mutation idempotency is unavailable.',
+  )
+}
+
+/**
+ * Creates the ownership token used to complete or release one reservation.
+ *
+ * @param request - Original reservation identity.
+ * @param reservationId - Reservation ownership identifier.
+ * @returns Complete immutable mutation token.
+ */
+function createFocusIdempotencyMutationToken(
+  request: ReserveIdempotencyRequest,
+  reservationId: string,
+): IdempotencyMutationToken {
+  return {
+    credentialId: request.credentialId,
+    idempotencyKey: request.idempotencyKey,
+    requestFingerprint: request.requestFingerprint,
+    reservationId,
+  }
+}
+
+/**
+ * Releases one pre-write Focus reservation without masking the original failure.
+ *
+ * @param request - Original reservation identity.
+ * @param token - Reservation ownership token.
+ */
+async function releaseFocusMutationReservation(
+  request: ReserveIdempotencyRequest,
+  token: IdempotencyMutationToken,
+): Promise<void> {
+  const release = {
+    ...request,
+    reservationId: token.reservationId,
+  } satisfies ReleaseIdempotencyRequest
+  await developerPlatformDependencies.idempotency
+    .releaseIdempotency(release)
+    .catch(() => undefined)
+}
+
+/**
+ * Completes one Focus reservation with a compact server-owned outcome.
+ *
+ * @param request - Original reservation identity.
+ * @param token - Reservation ownership token.
+ * @param operation - Committed Focus operation.
+ * @param targetIdentity - Opaque identity of the committed target.
+ * @param outcome - Closed operation-specific result evidence.
+ */
+async function completeFocusMutationReceipt(
+  request: ReserveIdempotencyRequest,
+  token: IdempotencyMutationToken,
+  operation: FocusMutationReceiptOperation,
+  targetIdentity: string,
+  outcome: Readonly<Record<string, unknown>>,
+): Promise<void> {
+  const receipt = {
+    schema: FOCUS_MUTATION_RECEIPT_SCHEMA,
+    version: FOCUS_MUTATION_RECEIPT_VERSION,
+    workspaceId: request.workspaceId,
+    operation,
+    targetIdentity,
+    status: 200,
+    outcome,
+  }
+  try {
+    await developerPlatformDependencies.idempotency.completeIdempotency({
+      ...request,
+      reservationId: token.reservationId,
+      response: { status: 200, body: receipt },
+    })
+  } catch {
+    throw focusIdempotencyUnavailable()
+  }
+}
+
+/**
+ * Completes one policy reservation with compact committed revision evidence.
+ *
+ * @param request - Original reservation identity.
+ * @param token - Reservation ownership token.
+ * @param targetIdentity - Opaque identity of the committed policy target.
+ * @param policy - Server-produced committed policy.
+ * @param effectivePolicies - Server-produced effective policies returned initially.
+ */
+async function completeFocusPolicyMutationReceipt(
+  request: ReserveIdempotencyRequest,
+  token: IdempotencyMutationToken,
+  targetIdentity: string,
+  policy: FocusPolicy,
+  effectivePolicies: readonly FocusEffectivePolicy[],
+): Promise<void> {
+  if (!isStoredFocusTimestamp(policy.updatedAt)) {
+    throw focusIdempotencyUnavailable()
+  }
+  const effectivePolicyOutcomes = effectivePolicies.map((effectivePolicy) => {
+    if (effectivePolicy.teamId === undefined) {
+      throw focusIdempotencyUnavailable()
+    }
+    return {
+      teamId: effectivePolicy.teamId,
+      fingerprint: effectivePolicy.fingerprint,
+    }
+  })
+  await completeFocusMutationReceipt(
+    request,
+    token,
+    'policy',
+    targetIdentity,
+    {
+      kind: 'policy',
+      policyVersion: policy.version,
+      policyUpdatedAt: policy.updatedAt,
+      effectivePolicies: effectivePolicyOutcomes,
+    },
+  )
+}
+
+/**
+ * Completes one item reservation with compact observable state evidence.
+ *
+ * @param request - Original reservation identity.
+ * @param token - Reservation ownership token.
+ * @param operation - Snooze or watcher mutation.
+ * @param targetIdentity - Opaque identity of the committed Work Item.
+ * @param item - Server-produced item returned initially.
+ */
+async function completeFocusItemMutationReceipt(
+  request: ReserveIdempotencyRequest,
+  token: IdempotencyMutationToken,
+  operation: 'snooze' | 'watch',
+  targetIdentity: string,
+  item: FocusItem,
+): Promise<void> {
+  if (
+    !isStoredFocusTimestamp(item.updatedAt) ||
+    item.signals.some((signal) => signal.freshness.evaluatedAt !== item.updatedAt)
+  ) {
+    throw focusIdempotencyUnavailable()
+  }
+  await completeFocusMutationReceipt(
+    request,
+    token,
+    operation,
+    targetIdentity,
+    {
+      kind: operation,
+      itemVersion: item.version,
+      snoozeRevision: item.snoozeRevision,
+      watching: item.watching,
+      snoozedUntil: item.snoozedUntil ?? null,
+      evaluatedAt: item.updatedAt,
+    },
+  )
+}
+
+/** Creates the stable failure used when a stored Focus receipt is malformed. */
+function invalidStoredFocusMutationReceipt(): FocusApiError {
+  return new FocusApiError(
+    503,
+    'InvalidStoredFocusMutationReceipt',
+    'The stored Focus mutation receipt is invalid.',
+  )
+}
+
+/**
+ * Strictly validates one stored Focus mutation receipt envelope.
+ *
+ * @param value - Candidate replay response from the shared idempotency port.
+ * @param workspaceId - Expected opaque Workspace reservation identity.
+ * @param operation - Expected Focus mutation operation.
+ * @param targetIdentity - Expected opaque mutation target identity.
+ * @returns Closed operation-specific outcome for further strict validation.
+ */
+function readStoredFocusMutationReceipt(
+  value: unknown,
+  workspaceId: string,
+  operation: FocusMutationReceiptOperation,
+  targetIdentity: string,
+): Record<string, unknown> {
+  if (!isRecord(value) || !isRecord(value.body)) {
+    throw invalidStoredFocusMutationReceipt()
+  }
+  const body = value.body
+  const outcomeCandidate = body.outcome
+  if (!isRecord(outcomeCandidate)) {
+    throw invalidStoredFocusMutationReceipt()
+  }
+  const outcome = outcomeCandidate
+  const receipt = {
+    schema: FOCUS_MUTATION_RECEIPT_SCHEMA,
+    version: FOCUS_MUTATION_RECEIPT_VERSION,
+    workspaceId,
+    operation,
+    targetIdentity,
+    status: 200,
+    outcome,
+  }
+  if (
+    value.status !== 200 ||
+    body.schema !== FOCUS_MUTATION_RECEIPT_SCHEMA ||
+    body.version !== FOCUS_MUTATION_RECEIPT_VERSION ||
+    body.workspaceId !== workspaceId ||
+    body.operation !== operation ||
+    body.targetIdentity !== targetIdentity ||
+    body.status !== 200 ||
+    stableDigestStringify({ status: 200, body: receipt }) !== stableDigestStringify(value)
+  ) {
+    throw invalidStoredFocusMutationReceipt()
+  }
+  return outcome
+}
+
+/**
+ * Tests whether a stored Focus timestamp is canonical ISO 8601 UTC.
+ *
+ * @param value - Candidate timestamp.
+ * @returns Whether the value round-trips through Date unchanged.
+ */
+function isStoredFocusTimestamp(value: unknown): value is string {
+  if (typeof value !== 'string') return false
+  const epoch = Date.parse(value)
+  return Number.isFinite(epoch) && new Date(epoch).toISOString() === value
+}
+
+/**
+ * Strictly reads the compact result of one policy mutation.
+ *
+ * @param value - Candidate operation-specific receipt outcome.
+ * @returns Committed policy revision and effective policy fingerprints.
+ */
+function readStoredFocusPolicyOutcome(value: Record<string, unknown>) {
+  if (
+    value.kind !== 'policy' ||
+    typeof value.policyVersion !== 'number' ||
+    !Number.isSafeInteger(value.policyVersion) ||
+    value.policyVersion < 1 ||
+    !isStoredFocusTimestamp(value.policyUpdatedAt) ||
+    !Array.isArray(value.effectivePolicies) ||
+    value.effectivePolicies.length > WORK_ITEMS_TEAM_READ_LIMIT
+  ) {
+    throw invalidStoredFocusMutationReceipt()
+  }
+  const effectivePolicies: Array<{ teamId: string; fingerprint: string }> = []
+  const teamIds = new Set<string>()
+  for (const entry of value.effectivePolicies) {
+    if (
+      !isRecord(entry) ||
+      typeof entry.teamId !== 'string' ||
+      !entry.teamId ||
+      entry.teamId !== entry.teamId.trim() ||
+      entry.teamId.length > 256 ||
+      typeof entry.fingerprint !== 'string' ||
+      !entry.fingerprint ||
+      entry.fingerprint !== entry.fingerprint.trim() ||
+      entry.fingerprint.length > 512
+    ) {
+      throw invalidStoredFocusMutationReceipt()
+    }
+    const normalized = {
+      teamId: entry.teamId,
+      fingerprint: entry.fingerprint,
+    }
+    if (
+      teamIds.has(entry.teamId) ||
+      stableDigestStringify(normalized) !== stableDigestStringify(entry)
+    ) {
+      throw invalidStoredFocusMutationReceipt()
+    }
+    teamIds.add(entry.teamId)
+    effectivePolicies.push(normalized)
+  }
+  const normalizedOutcome = {
+    kind: 'policy',
+    policyVersion: value.policyVersion,
+    policyUpdatedAt: value.policyUpdatedAt,
+    effectivePolicies,
+  }
+  if (stableDigestStringify(normalizedOutcome) !== stableDigestStringify(value)) {
+    throw invalidStoredFocusMutationReceipt()
+  }
+  return {
+    policyVersion: value.policyVersion,
+    policyUpdatedAt: value.policyUpdatedAt,
+    effectivePolicies,
+  }
+}
+
+/** Creates the stable conflict returned when committed Focus state has since changed. */
+function focusIdempotencyReplayChanged(): FocusApiError {
+  return new FocusApiError(
+    409,
+    'FocusIdempotencyReplayChanged',
+    'Focus state changed after the original mutation. Reload and try again.',
+  )
+}
+
+/**
+ * Reconstructs a policy replay from current authorized state and compact receipt evidence.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @param input - Request input bound to the receipt fingerprint.
+ * @param value - Strict receipt envelope outcome.
+ * @returns Current server-produced response matching the original committed outcome.
+ */
+async function replayFocusPolicyMutation(
+  principal: WorkspacePrincipal,
+  input: UpdateFocusPolicyInput,
+  value: Record<string, unknown>,
+): Promise<UpdateFocusPolicyResponse> {
+  const outcome = readStoredFocusPolicyOutcome(value)
+  const effectivePolicyTeamIds = outcome.effectivePolicies.map((policy) => policy.teamId)
+  if (input.target.type === 'team') {
+    if (
+      effectivePolicyTeamIds.length !== 1 ||
+      effectivePolicyTeamIds[0] !== input.target.teamId
+    ) {
+      throw invalidStoredFocusMutationReceipt()
+    }
+  } else {
+    const accessibleTeamIds = await readFocusAccessibleTeamIds(principal)
+    if (
+      stableDigestStringify([...effectivePolicyTeamIds].sort()) !==
+        stableDigestStringify(accessibleTeamIds)
+    ) {
+      throw new FocusApiError(
+        403,
+        'FocusPolicyReplayAccessChanged',
+        'Focus policy access changed after the original mutation.',
+      )
+    }
+  }
+
+  const state = await workItemDependencies.focusState.getState({
+    workspaceId: principal.directoryId,
+    memberKey: principal.userKey,
+    teamIds: effectivePolicyTeamIds,
+  })
+  let policy: FocusPolicy | undefined
+  if (input.target.type === 'user') {
+    policy = state.userPolicy
+  } else {
+    const teamId = input.target.teamId
+    policy = state.teamPolicies.find((candidate) =>
+      candidate.target.type === 'team' && candidate.target.teamId === teamId
+    )
+  }
+  if (
+    policy === undefined ||
+    policy.version !== input.expectedVersion + 1 ||
+    policy.version !== outcome.policyVersion ||
+    policy.updatedAt !== outcome.policyUpdatedAt ||
+    stableDigestStringify(policy.target) !== stableDigestStringify(input.target) ||
+    stableDigestStringify(policy.overrides) !== stableDigestStringify(input.overrides)
+  ) {
+    throw focusIdempotencyReplayChanged()
+  }
+  const effectivePolicies = resolveFocusEffectivePolicies({
+    teamIds: effectivePolicyTeamIds,
+    teamPolicies: state.teamPolicies,
+    ...(state.userPolicy === undefined ? {} : { userPolicy: state.userPolicy }),
+  })
+  const currentOutcome = effectivePolicies.map((effectivePolicy) => ({
+    teamId: effectivePolicy.teamId,
+    fingerprint: effectivePolicy.fingerprint,
+  }))
+  if (
+    stableDigestStringify(currentOutcome) !==
+      stableDigestStringify(outcome.effectivePolicies)
+  ) {
+    throw focusIdempotencyReplayChanged()
+  }
+  return { policy, effectivePolicies }
+}
+
+/**
+ * Strictly reads the compact result of one item mutation.
+ *
+ * @param value - Candidate operation-specific receipt outcome.
+ * @param operation - Expected snooze or watcher operation.
+ * @returns Committed item version, state, and original evaluation clock.
+ */
+function readStoredFocusItemOutcome(
+  value: Record<string, unknown>,
+  operation: 'snooze' | 'watch',
+) {
+  if (
+    value.kind !== operation ||
+    typeof value.itemVersion !== 'number' ||
+    !Number.isSafeInteger(value.itemVersion) ||
+    value.itemVersion < 1 ||
+    typeof value.snoozeRevision !== 'number' ||
+    !Number.isSafeInteger(value.snoozeRevision) ||
+    value.snoozeRevision < 0 ||
+    typeof value.watching !== 'boolean' ||
+    (value.snoozedUntil !== null && !isStoredFocusTimestamp(value.snoozedUntil)) ||
+    !isStoredFocusTimestamp(value.evaluatedAt)
+  ) {
+    throw invalidStoredFocusMutationReceipt()
+  }
+  const normalizedOutcome = {
+    kind: operation,
+    itemVersion: value.itemVersion,
+    snoozeRevision: value.snoozeRevision,
+    watching: value.watching,
+    snoozedUntil: value.snoozedUntil,
+    evaluatedAt: value.evaluatedAt,
+  }
+  if (stableDigestStringify(normalizedOutcome) !== stableDigestStringify(value)) {
+    throw invalidStoredFocusMutationReceipt()
+  }
+  return {
+    itemVersion: value.itemVersion,
+    snoozeRevision: value.snoozeRevision,
+    watching: value.watching,
+    snoozedUntil: value.snoozedUntil,
+    evaluatedAt: value.evaluatedAt,
+  }
+}
+
+/**
+ * Reconstructs one item replay from the current authorized projection.
+ *
+ * @param current - Current permission-filtered and strongly reauthorized item.
+ * @param operation - Expected snooze or watcher operation.
+ * @param value - Strict receipt envelope outcome.
+ * @returns Server-produced item with the original successful evaluation clock.
+ */
+function replayFocusItemMutation(
+  current: FocusItem,
+  operation: 'snooze' | 'watch',
+  value: Record<string, unknown>,
+): FocusItem {
+  const outcome = readStoredFocusItemOutcome(value, operation)
+  if (
+    current.version !== outcome.itemVersion ||
+    current.snoozeRevision !== outcome.snoozeRevision ||
+    current.watching !== outcome.watching ||
+    (current.snoozedUntil ?? null) !== outcome.snoozedUntil
+  ) {
+    throw focusIdempotencyReplayChanged()
+  }
+  return {
+    ...current,
+    signals: current.signals.map((signal) => ({
+      ...signal,
+      freshness: {
+        ...signal.freshness,
+        evaluatedAt: outcome.evaluatedAt,
+      },
+    })),
+    updatedAt: outcome.evaluatedAt,
+  }
+}
+/**
+ * Maps Focus source, persistence, and validation failures to existing API errors.
+ *
+ * @param context - Current Hono request context.
+ * @param error - Unknown route failure.
+ * @returns Safe HTTP response.
+ */
+function toFocusErrorResponse(context: Context, error: unknown): Response {
+  if (error instanceof CognitoServiceError) {
+    return toCognitoDirectoryErrorResponse(context, error)
+  }
+  if (error instanceof WorkspaceAccessError || error instanceof ProjectDataError) {
+    return toProjectDataErrorResponse(context, error)
+  }
+  if (error instanceof PlanningError) {
+    return toPlanningErrorResponse(context, error)
+  }
+  if (error instanceof FileProofingError) {
+    return toFileProofingErrorResponse(context, error)
+  }
+  if (error instanceof NotificationError) {
+    return toNotificationErrorResponse(context, error)
+  }
+  if (error instanceof CollaborationError) {
+    return toCollaborationErrorResponse(context, error)
+  }
+  if (error instanceof FocusApiError || error instanceof FocusStateError) {
+    if (error.status >= 500) console.error(error)
+    switch (error.status) {
+      case 400: return context.json({ code: error.code, message: error.message }, 400)
+      case 403: return context.json({ code: error.code, message: error.message }, 403)
+      case 404: return context.json({ code: error.code, message: error.message }, 404)
+      case 409: return context.json({ code: error.code, message: error.message }, 409)
+      case 413: return context.json({ code: error.code, message: error.message }, 413)
+      case 503: return context.json({ code: error.code, message: error.message }, 503)
+      default: return context.json({ code: 'FocusUnavailable', message: 'Focus queue is unavailable.' }, 502)
+    }
+  }
+  console.error(error)
+  return context.json(
+    { code: 'FocusUnavailable', message: 'Focus queue is unavailable.' },
+    502,
+  )
+}
+
+/**
+ * Reads every canonical source needed to build one permission-filtered Focus queue.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @param now - Stable evaluation clock shared by the complete projection.
+ * @returns A deterministic queue containing only currently authorized sources.
+ */
+async function readFocusQueue(
+  principal: WorkspacePrincipal,
+  now: Date,
+): Promise<FocusQueueResponse> {
+  const { workItems: accessibleWorkItems } = await readAccessibleWorkItems(principal)
+  const workItemsPromise = hydrateFocusApprovalSummaries(
+    principal,
+    accessibleWorkItems,
+  )
+  const accessibleTeamIdsPromise = readFocusAccessibleTeamIds(principal)
+  const planningWorkItems = createFocusPlanningWorkItemState(accessibleWorkItems)
+  const planningPromise = workItemDependencies.planning
+    .get(principal.directoryId, planningWorkItems)
+    .then((planning) => filterFocusPlanningSnapshotForPrincipal(
+      principal,
+      planning,
+      accessibleWorkItems,
+    ))
+  const relationGraphsPromise = readFocusRelationGraphs(
+    principal.directoryId,
+    accessibleWorkItems,
+  )
+  const approvalsPromise = readFocusReviewerApprovals(principal, accessibleWorkItems)
+  const notificationsPromise = readFocusNotifications(principal, now)
+  const workItemPermissionsPromise = readFocusWorkItemPermissionsByKey(
+    principal,
+    accessibleWorkItems,
+  )
+  const accessibleTeamIds = await accessibleTeamIdsPromise
+  const editableTeamPolicyIdsPromise = readFocusEditableTeamPolicyIds(
+    principal,
+    accessibleTeamIds,
+  )
+  const statePromise = workItemDependencies.focusState.getState({
+    workspaceId: principal.directoryId,
+    memberKey: principal.userKey,
+    teamIds: accessibleTeamIds,
+  })
+  const [
+    workItems,
+    planning,
+    relationGraphs,
+    reviewerApprovals,
+    notifications,
+    workItemPermissions,
+    editableTeamPolicyIds,
+    state,
+  ] =
+    await Promise.all([
+      workItemsPromise,
+      planningPromise,
+      relationGraphsPromise,
+      approvalsPromise,
+      notificationsPromise,
+      workItemPermissionsPromise,
+      editableTeamPolicyIdsPromise,
+      statePromise,
+    ])
+  const baseInput: CreateFocusQueueInput = {
+    now,
+    viewerMemberKey: principal.userKey,
+    workItems,
+    planning,
+    ...(relationGraphs === undefined ? {} : { relationGraphs }),
+    reviewerApprovals,
+    notifications,
+    teamPolicies: state.teamPolicies,
+    policyTeamIds: accessibleTeamIds,
+    editableTeamPolicyIds,
+    ...(state.userPolicy === undefined ? {} : { userPolicy: state.userPolicy }),
+    snoozeRecords: state.snoozes,
+    canApproveByWorkItemKey: workItemPermissions.canApproveByWorkItemKey,
+    canWriteByWorkItemKey: workItemPermissions.canWriteByWorkItemKey,
+    canWatchByWorkItemKey: workItemPermissions.canWatchByWorkItemKey,
+    watchingByWorkItemKey: {},
+  }
+  const candidateQueue = createFocusQueue(baseInput)
+  const candidateItems = candidateQueue.sections.flatMap((section) => section.items)
+  const watchingByWorkItemKey = await readFocusWatchingByWorkItemKey(
+    principal,
+    candidateItems,
+  )
+  return createFocusQueue({ ...baseInput, watchingByWorkItemKey })
+}
+
+/**
+ * Reads one authoritative relation graph per visible Team when the port is available.
+ *
+ * @param workspaceId - Workspace that owns the relation graphs.
+ * @param workItems - Current ACL-filtered canonical Work Items.
+ * @returns Endpoint-filtered Team graphs, or undefined for compatibility clients.
+ */
+async function readFocusRelationGraphs(
+  workspaceId: string,
+  workItems: readonly CanonicalWorkItem[],
+): Promise<FocusRelationGraphSource[] | undefined> {
+  const configuration = workItemDependencies.workItemConfigurations
+  if (configuration.listRelationGraph === undefined) return undefined
+  const listRelationGraph = configuration.listRelationGraph.bind(configuration)
+  const visibleIdsByTeam = new Map<string, Set<string>>()
+  for (const workItem of workItems) {
+    const visibleIds = visibleIdsByTeam.get(workItem.teamId) ?? new Set<string>()
+    visibleIds.add(workItem.id)
+    visibleIdsByTeam.set(workItem.teamId, visibleIds)
+  }
+  return Promise.all([...visibleIdsByTeam.entries()]
+    .sort(([leftTeamId], [rightTeamId]) => leftTeamId.localeCompare(rightTeamId))
+    .map(async ([teamId, visibleIds]) => {
+      const graph = await listRelationGraph(workspaceId, teamId)
+      return {
+        teamId,
+        graphRevision: graph.graphRevision,
+        relations: graph.relations.filter((relation) =>
+          visibleIds.has(relation.sourceWorkItemId) &&
+          visibleIds.has(relation.targetWorkItemId)
+        ),
+      }
+    }))
+}
+
+/**
+ * Builds the Planning Work Item projection from the exact canonical Focus snapshot.
+ *
+ * @param workItems - Current ACL-filtered canonical Work Items.
+ * @returns Planning input bound to the same Work Item revisions.
+ */
+function createFocusPlanningWorkItemState(
+  workItems: readonly CanonicalWorkItem[],
+): PlanningWorkItemState {
+  return {
+    workItems: workItems.map((workItem) => ({
+      id: workItem.id,
+      revision: workItem.revision,
+      teamId: workItem.teamId,
+      title: workItem.title,
+      ...(workItem.assignedProjectId
+        ? { projectId: workItem.assignedProjectId }
+        : {}),
+      statusCategory: workItem.statusCategory,
+      dueDate: workItem.dueDate,
+      schedule: workItem.schedule,
+    } satisfies PlanningWorkItemSummary)),
+  }
+}
+
+/**
+ * Re-evaluates a Focus source permission at its canonical resource scope.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @param permission - Independent source permission required by the projection.
+ * @param teamId - Canonical owner Team when the source is Team or Project scoped.
+ * @param projectId - Canonical Project when the source is Project scoped.
+ * @returns Whether the source may contribute data to the Focus projection.
+ */
+function canReadFocusScopedSource(
+  principal: WorkspacePrincipal,
+  permission: 'planning.read' | 'files.read',
+  teamId?: string,
+  projectId?: string,
+): boolean {
+  if (principal.isSystemAdmin) return true
+  const evaluation = principal.enterpriseAuthorizationEvaluation
+  if (evaluation === undefined) {
+    return principal.enterpriseLegacyProjectAccessSuppressed !== true
+  }
+  if (projectId !== undefined && teamId === undefined) return false
+  const resource: EnterpriseAuthorizationResource = projectId !== undefined
+    ? {
+        workspaceId: principal.directoryId,
+        kind: 'project',
+        targetId: projectId,
+        parentTeamId: teamId,
+      }
+    : teamId !== undefined
+      ? {
+          workspaceId: principal.directoryId,
+          kind: 'team',
+          targetId: teamId,
+        }
+      : {
+          workspaceId: principal.directoryId,
+          kind: 'workspace',
+        }
+  return evaluateEnterpriseAccess({
+    permission,
+    principal: evaluation.principal,
+    assignments: evaluation.assignments,
+    customRoles: evaluation.snapshot.customRoles,
+    groupMappings: evaluation.groupMappings,
+    resource,
+  }).allowed
+}
+
+/**
+ * Attaches approval aggregates only to Work Items whose Files source is readable.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @param workItems - Current ACL-filtered canonical Work Items.
+ * @returns Detached Work Items with permission-safe approval summaries.
+ */
+async function hydrateFocusApprovalSummaries(
+  principal: WorkspacePrincipal,
+  workItems: readonly CanonicalWorkItem[],
+): Promise<CanonicalWorkItem[]> {
+  const sanitizedWorkItems = workItems.map((workItem) => {
+    const sanitized = { ...workItem }
+    delete sanitized.approvalSummary
+    return sanitized
+  })
+  if (!getEnv('FILE_PROOFING_TABLE_NAME') && !getConfiguredDynamoDbEndpoint()) {
+    return sanitizedWorkItems
+  }
+  const scopes: FileProofingScope[] = sanitizedWorkItems
+    .filter((workItem) => canReadFocusScopedSource(
+      principal,
+      'files.read',
+      workItem.teamId,
+      workItem.assignedProjectId,
+    ))
+    .map((workItem) => ({
+      workspaceId: principal.directoryId,
+      teamId: workItem.teamId,
+      kind: 'work-item',
+      issueId: workItem.id,
+    }))
+  if (scopes.length === 0) return sanitizedWorkItems
+  const summaries = await workItemDependencies.fileProofing.getApprovalSummaries(scopes)
+  return sanitizedWorkItems.map((workItem) => {
+    const summary = summaries.get(createFileProofingScopeKey({
+      workspaceId: principal.directoryId,
+      teamId: workItem.teamId,
+      kind: 'work-item',
+      issueId: workItem.id,
+    }))
+    return summary !== undefined &&
+        canReadFocusScopedSource(
+          principal,
+          'files.read',
+          workItem.teamId,
+          workItem.assignedProjectId,
+        ) &&
+        hasApprovalSummaryContent(summary)
+      ? { ...workItem, approvalSummary: summary }
+      : workItem
+  })
+}
+
+/**
+ * Removes Planning records whose independent source scope is not readable in Focus.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @param snapshot - Complete Planning snapshot loaded from the canonical store.
+ * @param workItems - Current ACL-filtered canonical Work Items.
+ * @returns A detached Planning snapshot safe to use as Focus signal input.
+ */
+function filterFocusPlanningSnapshotForPrincipal(
+  principal: WorkspacePrincipal,
+  snapshot: PlanningSnapshot,
+  workItems: readonly CanonicalWorkItem[],
+): PlanningSnapshot {
+  if (principal.isSystemAdmin) return snapshot
+  const canonicalWorkItemsByKey = new Map(workItems.map((workItem) => [
+    createFocusWorkItemKey(workItem.teamId, workItem.id),
+    workItem,
+  ]))
+  const legacyReadableTeamIds = new Set(workItems.map((workItem) => workItem.teamId))
+  const legacyReadableProjectIds = new Set(workItems.flatMap((workItem) =>
+    workItem.assignedProjectId === undefined ? [] : [workItem.assignedProjectId]
+  ))
+  /** Restricts legacy sources to resources evidenced by the authorized Work Item window. */
+  const canReadPlanningResource = (teamId?: string, projectId?: string) =>
+    principal.enterpriseAuthorizationEvaluation === undefined
+      ? principal.enterpriseLegacyProjectAccessSuppressed !== true &&
+        teamId !== undefined &&
+        legacyReadableTeamIds.has(teamId) &&
+        (projectId === undefined || legacyReadableProjectIds.has(projectId))
+      : canReadFocusScopedSource(
+          principal,
+          'planning.read',
+          teamId,
+          projectId,
+        )
+  const readableWorkItemKeys = new Set(workItems
+    .filter((workItem) => canReadPlanningResource(
+      workItem.teamId,
+      workItem.assignedProjectId,
+    ))
+    .map((workItem) => createFocusWorkItemKey(workItem.teamId, workItem.id)))
+  const planningWorkItems = snapshot.workItems.filter((workItem) => {
+    const key = createFocusWorkItemKey(workItem.teamId, workItem.id)
+    return canonicalWorkItemsByKey.has(key) && readableWorkItemKeys.has(key)
+  })
+  const workItemDependencies = snapshot.workItemDependencies.filter((dependency) =>
+    readableWorkItemKeys.has(createFocusWorkItemKey(
+      dependency.predecessor.teamId,
+      dependency.predecessor.workItemId,
+    )) &&
+    readableWorkItemKeys.has(createFocusWorkItemKey(
+      dependency.successor.teamId,
+      dependency.successor.workItemId,
+    ))
+  )
+  const entities = snapshot.entities.filter((entity) =>
+    canReadPlanningResource(
+      entity.teamId,
+      entity.projectId,
+    )
+  )
+  const entityIds = new Set(entities.map((entity) => entity.id))
+  const scopedEntities = entities.map((entity) =>
+    entity.parentId !== undefined && !entityIds.has(entity.parentId)
+      ? { ...entity, parentId: undefined }
+      : entity
+  )
+  const dependencies = snapshot.dependencies.filter((dependency) =>
+    entityIds.has(dependency.predecessorId) && entityIds.has(dependency.successorId)
+  )
+  const workItemLinks = snapshot.workItemLinks
+    .filter((link) => readableWorkItemKeys.has(
+      createFocusWorkItemKey(link.teamId, link.workItemId),
+    ))
+    .map((link) => ({
+      ...link,
+      ...(link.cycleId !== undefined && entityIds.has(link.cycleId)
+        ? {}
+        : { cycleId: undefined }),
+      ...(link.milestoneId !== undefined && entityIds.has(link.milestoneId)
+        ? {}
+        : { milestoneId: undefined }),
+      goalIds: link.goalIds.filter((goalId) => entityIds.has(goalId)),
+    }))
+  const criticalEntityIds = snapshot.criticalPath.entityIds.filter((entityId) =>
+    entityIds.has(entityId)
+  )
+  return {
+    ...snapshot,
+    entities: scopedEntities,
+    dependencies,
+    workItemDependencies,
+    workItemLinks,
+    workItems: planningWorkItems,
+    criticalPath: {
+      entityIds: criticalEntityIds,
+      totalDurationDays: criticalEntityIds.length === snapshot.criticalPath.entityIds.length
+        ? snapshot.criticalPath.totalDurationDays
+        : 0,
+      slackByEntityId: Object.fromEntries(
+        Object.entries(snapshot.criticalPath.slackByEntityId)
+          .filter(([entityId]) => entityIds.has(entityId)),
+      ),
+    },
+    workItemDependencySummary: createPlanningWorkItemDependencySummary(
+      workItemDependencies,
+      planningWorkItems,
+      workItemLinks,
+    ),
+  }
+}
+
+/**
+ * Resolves all active Teams visible to the current principal.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @returns Stable accessible Team identifiers, including Teams without Work Items.
+ */
+async function readFocusAccessibleTeamIds(
+  principal: WorkspacePrincipal,
+): Promise<string[]> {
+  const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(
+    principal.directoryId,
+    'ja',
+  )
+  if (principal.isSystemAdmin) {
+    return directory.teams.map((team) => team.id).sort()
+  }
+  const projectAccesses = await getEffectiveProjectAccessList(principal)
+  const accessibleProjectIds = new Set(
+    projectAccesses
+      .filter((access) => projectAccessAllows(access, 'viewer'))
+      .map((access) => access.projectId),
+  )
+  const authorizedTeamIds = new Set(principal.enterpriseAuthorizedTeamIds ?? [])
+  return directory.teams
+    .filter((team) =>
+      authorizedTeamIds.has(team.id) ||
+      team.projects.some((project) => accessibleProjectIds.has(project.id))
+    )
+    .map((team) => team.id)
+    .sort()
+}
+
+/**
+ * Resolves visible Teams whose policy layer the current principal may manage.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @param accessibleTeamIds - Team identifiers already authorized for Focus reads.
+ * @returns Stable subset authorized by system administration, Team grants, or manager roles.
+ */
+async function readFocusEditableTeamPolicyIds(
+  principal: WorkspacePrincipal,
+  accessibleTeamIds: readonly string[],
+): Promise<string[]> {
+  if (principal.workspaceRole === 'guest') return []
+  if (principal.isSystemAdmin) return [...accessibleTeamIds].sort()
+  const accessibleTeamIdSet = new Set(accessibleTeamIds)
+  const enterpriseManagedTeamIds = new Set(
+    (principal.enterpriseTeamAccesses ?? [])
+      .filter((access) => access.permissions.includes('teams.manage'))
+      .map((access) => access.teamId),
+  )
+  const managerProjectIds = new Set(
+    (await getEffectiveProjectAccessList(principal))
+      .filter((access) => projectAccessAllows(access, 'manager'))
+      .map((access) => access.projectId),
+  )
+  const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(
+    principal.directoryId,
+    'ja',
+  )
+  return directory.teams
+    .filter((team) => accessibleTeamIdSet.has(team.id))
+    .filter((team) =>
+      enterpriseManagedTeamIds.has(team.id) ||
+      team.projects.some((project) => managerProjectIds.has(project.id))
+    )
+    .map((team) => team.id)
+    .sort()
+}
+
+/**
+ * Computes current Work Item mutation permissions without trusting the route's read grant.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @param workItems - Current ACL-filtered canonical Work Items.
+ * @returns Independent write and watch permission maps keyed by qualified Work Item identity.
+ */
+async function readFocusWorkItemPermissionsByKey(
+  principal: WorkspacePrincipal,
+  workItems: readonly CanonicalWorkItem[],
+) {
+  const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(
+    principal.directoryId,
+    'ja',
+  )
+  const projectAccesses = principal.isSystemAdmin
+    ? []
+    : await getEffectiveProjectAccessList(principal)
+  const teamById = new Map(directory.teams.map((team) => [team.id, team]))
+  const canWriteByWorkItemKey: Record<string, boolean> = {}
+  const canApproveByWorkItemKey: Record<string, boolean> = {}
+  const canWatchByWorkItemKey: Record<string, boolean> = {}
+
+  for (const workItem of workItems) {
+    const team = teamById.get(workItem.teamId)
+    if (team === undefined) continue
+    const teamProjectIds = new Set(team.projects.map((project) => project.id))
+    const context: TeamPermissionContext = {
+      team,
+      directory,
+      ...(principal.isSystemAdmin
+        ? {}
+        : {
+            projectAccesses: projectAccesses.filter((access) =>
+              teamProjectIds.has(access.projectId)
+            ),
+          }),
+    }
+    const key = createFocusWorkItemKey(workItem.teamId, workItem.id)
+    canWriteByWorkItemKey[key] = canWriteFocusWorkItem(principal, context, workItem)
+    canApproveByWorkItemKey[key] = canApproveFocusWorkItem(principal, context, workItem)
+    canWatchByWorkItemKey[key] = canWatchFocusWorkItem(principal, context, workItem)
+  }
+  return { canApproveByWorkItemKey, canWatchByWorkItemKey, canWriteByWorkItemKey }
+}
+
+/**
+ * Evaluates the canonical Work Item write permission for Focus capabilities.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @param context - Current Team and Project authorization context.
+ * @param workItem - Canonical Work Item whose write permission is evaluated.
+ * @returns Whether current source state authorizes a Work Item mutation.
+ */
+function canWriteFocusWorkItem(
+  principal: WorkspacePrincipal,
+  context: TeamPermissionContext,
+  workItem: CanonicalWorkItem,
+): boolean {
+  if (principal.workspaceRole === 'guest') return false
+  if (principal.isSystemAdmin) return true
+  const evaluation = principal.enterpriseAuthorizationEvaluation
+  if (evaluation === undefined) {
+    return canWriteTeamIssue(principal, context, workItem.assignedProjectId)
+  }
+  if (
+    workItem.assignedProjectId !== undefined &&
+    !context.team.projects.some((project) => project.id === workItem.assignedProjectId)
+  ) {
+    return false
+  }
+  return evaluateEnterpriseAccess({
+    permission: 'work-items.write',
+    principal: evaluation.principal,
+    assignments: evaluation.assignments,
+    customRoles: evaluation.snapshot.customRoles,
+    groupMappings: evaluation.groupMappings,
+    resource: workItem.assignedProjectId === undefined
+      ? {
+          workspaceId: principal.directoryId,
+          kind: 'team',
+          targetId: workItem.teamId,
+        }
+      : {
+          workspaceId: principal.directoryId,
+          kind: 'project',
+          targetId: workItem.assignedProjectId,
+          parentTeamId: workItem.teamId,
+        },
+  }).allowed
+}
+
+/**
+ * Evaluates the approval-decision permission for one Focus Work Item.
+ *
+ * @param principal - Authenticated Workspace principal whose approval access is evaluated.
+ * @param context - Current Team and Project authorization context.
+ * @param workItem - Canonical Work Item whose approval may be decided.
+ * @returns Whether the current source state authorizes an approval decision.
+ */
+function canApproveFocusWorkItem(
+  principal: WorkspacePrincipal,
+  context: TeamPermissionContext,
+  workItem: CanonicalWorkItem,
+): boolean {
+  if (principal.workspaceRole === 'guest') return false
+  if (principal.isSystemAdmin) return true
+  const evaluation = principal.enterpriseAuthorizationEvaluation
+  if (evaluation === undefined) {
+    return principal.enterpriseLegacyProjectAccessSuppressed !== true
+  }
+  if (
+    workItem.assignedProjectId !== undefined &&
+    !context.team.projects.some((project) => project.id === workItem.assignedProjectId)
+  ) {
+    return false
+  }
+  return evaluateEnterpriseAccess({
+    permission: 'files.approve',
+    principal: evaluation.principal,
+    assignments: evaluation.assignments,
+    customRoles: evaluation.snapshot.customRoles,
+    groupMappings: evaluation.groupMappings,
+    resource: workItem.assignedProjectId === undefined
+      ? {
+          workspaceId: principal.directoryId,
+          kind: 'team',
+          targetId: workItem.teamId,
+        }
+      : {
+          workspaceId: principal.directoryId,
+          kind: 'project',
+          targetId: workItem.assignedProjectId,
+          parentTeamId: workItem.teamId,
+        },
+  }).allowed
+}
+
+/**
+ * Evaluates the current canonical Work Item write permission for Focus watch changes.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @param context - Current Team and Project authorization context.
+ * @param workItem - Canonical Work Item whose watcher state may change.
+ * @returns Whether the viewer may mutate their canonical watcher state.
+ */
+function canWatchFocusWorkItem(
+  principal: WorkspacePrincipal,
+  context: TeamPermissionContext,
+  workItem: CanonicalWorkItem,
+): boolean {
+  return canWriteFocusWorkItem(principal, context, workItem)
+}
+
+/**
+ * Requires current canonical watch permission before a Focus watch mutation.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @param context - Strong-read Work Item Team and Project authorization context.
+ * @param workItem - Current canonical Work Item after revision reauthorization.
+ */
+function requireFocusWorkItemWatchPermission(
+  principal: WorkspacePrincipal,
+  context: TeamPermissionContext,
+  workItem: CanonicalWorkItem,
+): void {
+  if (canWatchFocusWorkItem(principal, context, workItem)) return
+  throw new FocusApiError(
+    403,
+    'FocusWatchAccessDenied',
+    'Current Work Item watch permission is required to change Focus watch state.',
+  )
+}
+
+/**
+ * Reads watcher state only for Work Items that survived Focus relevance projection.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @param items - Current projected Focus items.
+ * @returns Watch state keyed by Team-qualified Work Item identity.
+ */
+async function readFocusWatchingByWorkItemKey(
+  principal: WorkspacePrincipal,
+  items: readonly FocusItem[],
+): Promise<Record<string, boolean>> {
+  const uniqueItems = new Map(
+    items.map((item) => [
+      createFocusWorkItemKey(item.workItem.teamId, item.workItem.id),
+      item,
+    ]),
+  )
+  const watching: Record<string, boolean> = {}
+  const entries = [...uniqueItems.entries()].sort(([left], [right]) =>
+    left.localeCompare(right)
+  )
+  for (const [key] of entries.slice(FOCUS_WATCHER_READ_LIMIT)) {
+    watching[key] = false
+  }
+  const readableEntries = entries.slice(0, FOCUS_WATCHER_READ_LIMIT)
+  for (
+    let start = 0;
+    start < readableEntries.length;
+    start += FOCUS_WATCHER_READ_BATCH_SIZE
+  ) {
+    const batch = readableEntries.slice(start, start + FOCUS_WATCHER_READ_BATCH_SIZE)
+    const states = await Promise.all(batch.map(async ([key, item]) => {
+      const state = await workItemDependencies.collaboration.getMemberWatcherState({
+        entityKey: createWorkItemCollaborationEntityKey(
+          principal.directoryId,
+          item.workItem.teamId,
+          item.workItem.id,
+        ),
+        memberKey: principal.userKey,
+        projectEntityKey: item.workItem.assignedProjectId
+          ? createProjectCollaborationEntityKey(
+              principal.directoryId,
+              item.workItem.assignedProjectId,
+            )
+          : undefined,
+      })
+      return { key, subscribed: state.subscribed }
+    }))
+    for (const state of states) {
+      watching[state.key] = state.subscribed
+    }
+  }
+  return watching
+}
+
+/**
+ * Requires a watcher mutation or bounded re-read to match the requested Focus state.
+ *
+ * @param actual - Watcher state observed after the write or bounded re-read.
+ * @param expected - Watcher state requested by the client.
+ */
+function requireFocusWatchPostcondition(actual: boolean, expected: boolean): void {
+  if (actual === expected) return
+  throw new FocusApiError(
+    409,
+    'FocusWatchConflict',
+    'Focus watch state changed concurrently. Reload and try again.',
+  )
+}
+
+/**
+ * Reads a bounded pending-approval window through Work Item and Files reauthorization.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @param workItems - Current ACL-filtered canonical Work Items.
+ * @returns Deduplicated pending approvals currently assigned to the viewer.
+ */
+async function readFocusReviewerApprovals(
+  principal: WorkspacePrincipal,
+  workItems: readonly CanonicalWorkItem[],
+): Promise<ApprovalRequest[]> {
+  const readableWorkItemKeys = new Set(workItems
+    .filter((workItem) => canReadFocusScopedSource(
+      principal,
+      'files.read',
+      workItem.teamId,
+      workItem.assignedProjectId,
+    ))
+    .map((workItem) => createFocusWorkItemKey(workItem.teamId, workItem.id)))
+  if (readableWorkItemKeys.size === 0) return []
+  const approvals = new Map<string, ApprovalRequest>()
+  const visitedCursors = new Set<string>()
+  const sourcePageBudget = { remaining: FOCUS_APPROVAL_MAX_PAGES }
+  let cursor: string | undefined
+  do {
+    const page = await listAuthorizedReviewerApprovals(principal, {
+      limit: Math.min(
+        FOCUS_APPROVAL_PAGE_LIMIT,
+        FOCUS_APPROVAL_GLOBAL_LIMIT - approvals.size,
+      ),
+      ...(cursor === undefined ? {} : { cursor }),
+    }, sourcePageBudget)
+    for (const approval of page.approvals) {
+      if (approvals.size >= FOCUS_APPROVAL_GLOBAL_LIMIT) break
+      if (
+        approval.teamId !== undefined &&
+        approval.issueId !== undefined &&
+        readableWorkItemKeys.has(createFocusWorkItemKey(
+          approval.teamId,
+          approval.issueId,
+        )) &&
+        !approvals.has(approval.id)
+      ) {
+        approvals.set(approval.id, approval)
+      }
+    }
+    if (page.nextCursor !== undefined) {
+      if (visitedCursors.has(page.nextCursor)) {
+        throw new FocusApiError(
+          503,
+          'FocusApprovalCursorStalled',
+          'Focus approvals could not advance to the next page.',
+        )
+      }
+      visitedCursors.add(page.nextCursor)
+    }
+    cursor = page.nextCursor
+  } while (
+    cursor !== undefined &&
+    sourcePageBudget.remaining > 0 &&
+    approvals.size < FOCUS_APPROVAL_GLOBAL_LIMIT
+  )
+  if (cursor !== undefined) {
+    throw new FocusApiError(
+      503,
+      'FocusApprovalReadLimitExceeded',
+      'Focus approvals exceed the supported read window.',
+    )
+  }
+  return [...approvals.values()]
+}
+
+/**
+ * Reads bounded Inbox windows and deduplicates visible mention projections by event ID.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @param now - Stable queue evaluation clock.
+ * @returns Permission-filtered notification events independent of Inbox read state.
+ */
+async function readFocusNotifications(
+  principal: WorkspacePrincipal,
+  now: Date,
+): Promise<NotificationItem[]> {
+  const isVisible = await createNotificationVisibilityFilter(principal)
+  const notifications = new Map<string, NotificationItem>()
+  const commentSourceAvailability = new Map<string, boolean>()
+  const cutoffTime = now.getTime() -
+    FOCUS_NOTIFICATION_LOOKBACK_DAYS * 24 * 60 * 60 * 1_000
+  for (const filter of FOCUS_NOTIFICATION_FILTERS) {
+    const visitedCursors = new Set<string>()
+    let cursor: string | undefined
+    let pagesRead = 0
+    let cutoffReached = false
+    do {
+      const page = await workItemDependencies.notifications.list({
+        workspaceId: principal.directoryId,
+        memberKey: principal.userKey,
+        filter,
+        limit: FOCUS_NOTIFICATION_PAGE_LIMIT,
+        ...(cursor === undefined ? {} : { cursor }),
+        now,
+        isVisible,
+      })
+      pagesRead += 1
+      for (const notification of page.notifications) {
+        const occurredAt = Date.parse(notification.occurredAt)
+        // Notification pages are newest-first by their timestamp-prefixed key, so an old
+        // item proves that later pages cannot contain an in-window mention.
+        if (Number.isFinite(occurredAt) && occurredAt < cutoffTime) {
+          cutoffReached = true
+        }
+        if (
+          notification.reasons.includes('mention') &&
+          notification.teamId !== undefined &&
+          notification.issueId !== undefined &&
+          Number.isFinite(occurredAt) &&
+          occurredAt >= cutoffTime &&
+          !notifications.has(notification.eventId)
+        ) {
+          if (notification.commentId !== undefined) {
+            const commentSourceKey = JSON.stringify([
+              notification.teamId,
+              notification.issueId,
+              notification.commentId,
+            ])
+            let sourceAvailable = commentSourceAvailability.get(commentSourceKey)
+            if (sourceAvailable === undefined) {
+              const comment = await workItemDependencies.collaboration.getCommentSnapshot({
+                entityKey: createWorkItemCollaborationEntityKey(
+                  principal.directoryId,
+                  notification.teamId,
+                  notification.issueId,
+                ),
+                commentId: notification.commentId,
+              })
+              sourceAvailable = comment !== undefined && comment.deletedAt === undefined
+              commentSourceAvailability.set(commentSourceKey, sourceAvailable)
+            }
+            if (!sourceAvailable) continue
+          }
+          notifications.set(notification.eventId, notification)
+        }
+      }
+      if (cutoffReached) {
+        cursor = undefined
+      } else {
+        if (page.nextCursor !== undefined) {
+          if (visitedCursors.has(page.nextCursor)) {
+            throw new FocusApiError(
+              503,
+              'FocusNotificationCursorStalled',
+              'Focus notifications could not advance to the next page.',
+            )
+          }
+          visitedCursors.add(page.nextCursor)
+        }
+        cursor = page.nextCursor
+      }
+    } while (
+      !cutoffReached &&
+      cursor !== undefined &&
+      pagesRead < FOCUS_NOTIFICATION_MAX_PAGES_PER_FILTER
+    )
+    if (!cutoffReached && cursor !== undefined) {
+      throw new FocusApiError(
+        503,
+        'FocusNotificationReadLimitExceeded',
+        'Focus notifications exceed the supported read window.',
+      )
+    }
+  }
+  if (notifications.size > FOCUS_NOTIFICATION_GLOBAL_LIMIT) {
+    throw new FocusApiError(
+      503,
+      'FocusNotificationReadLimitExceeded',
+      'Focus notifications exceed the supported read window.',
+    )
+  }
+  const mentionCountsByWorkItemKey = new Map<string, number>()
+  const boundedNotifications: NotificationItem[] = []
+  const newestFirst = [...notifications.values()].sort((left, right) => {
+    const timeDifference = Date.parse(right.occurredAt) - Date.parse(left.occurredAt)
+    return timeDifference === 0
+      ? left.eventId.localeCompare(right.eventId)
+      : timeDifference
+  })
+  for (const notification of newestFirst) {
+    if (boundedNotifications.length >= FOCUS_NOTIFICATION_GLOBAL_LIMIT) break
+    if (notification.teamId === undefined || notification.issueId === undefined) continue
+    const key = createFocusWorkItemKey(notification.teamId, notification.issueId)
+    const currentCount = mentionCountsByWorkItemKey.get(key) ?? 0
+    if (currentCount >= FOCUS_NOTIFICATION_PER_WORK_ITEM_LIMIT) {
+      throw new FocusApiError(
+        503,
+        'FocusNotificationReadLimitExceeded',
+        'Focus mentions exceed the supported per-Work-Item read window.',
+      )
+    }
+    mentionCountsByWorkItemKey.set(key, currentCount + 1)
+    boundedNotifications.push(notification)
+  }
+  return boundedNotifications
+}
+
+/**
+ * Finds one currently projected Focus item or hides inaccessible source identity.
+ *
+ * @param queue - Current permission-filtered Focus queue.
+ * @param teamId - Owning Team identifier.
+ * @param workItemId - Team-local Work Item identifier.
+ * @returns Current Focus item.
+ */
+function requireFocusItem(
+  queue: FocusQueueResponse,
+  teamId: string,
+  workItemId: string,
+): FocusItem {
+  const item = queue.sections
+    .flatMap((section) => section.items)
+    .find((candidate) =>
+      candidate.workItem.teamId === teamId && candidate.workItem.id === workItemId
+    )
+  if (item === undefined) {
+    throw new FocusApiError(
+      404,
+      'FocusItemNotFound',
+      'Focus item was not found or is no longer accessible.',
+    )
+  }
+  return item
+}
+
+/**
+ * Finds a post-mutation Focus item and reports concurrent source changes as a conflict.
+ *
+ * @param queue - Recomputed permission-filtered Focus queue.
+ * @param teamId - Owning Team identifier.
+ * @param workItemId - Team-local Work Item identifier.
+ * @returns Recomputed Focus item.
+ */
+function requireUpdatedFocusItem(
+  queue: FocusQueueResponse,
+  teamId: string,
+  workItemId: string,
+): FocusItem {
+  try {
+    return requireFocusItem(queue, teamId, workItemId)
+  } catch (error) {
+    if (!(error instanceof FocusApiError) || error.code !== 'FocusItemNotFound') {
+      throw error
+    }
+    throw new FocusApiError(
+      409,
+      'FocusItemChanged',
+      'Focus item changed during the mutation. Reload and try again.',
+    )
+  }
+}
+
+/**
+ * Requires the client to mutate the currently projected Focus aggregate version.
+ *
+ * @param item - Current projected Focus item.
+ * @param expectedVersion - Version observed by the client.
+ */
+function requireFocusItemVersion(item: FocusItem, expectedVersion: number): void {
+  if (item.version !== expectedVersion) {
+    throw new FocusApiError(
+      409,
+      'FocusItemVersionConflict',
+      'Focus item changed after it was read. Reload and try again.',
+    )
+  }
+}
+
+/**
+ * Requires a snooze write to match the exact source evidence used to persist it.
+ *
+ * @param item - Focus item recomputed after the durable snooze write.
+ * @param expectedCauseFingerprint - Signal fingerprint captured before the write.
+ * @param expectedSnoozedUntil - Requested wake time, or null for an unsnooze.
+ */
+function requireFocusSnoozePostcondition(
+  item: FocusItem,
+  expectedCauseFingerprint: string,
+  expectedSnoozedUntil: string | null,
+): void {
+  const actualCauseFingerprint = createFocusCauseFingerprint(item.signals)
+  if (
+    actualCauseFingerprint !== expectedCauseFingerprint ||
+    (item.snoozedUntil ?? null) !== expectedSnoozedUntil
+  ) {
+    throw new FocusApiError(
+      409,
+      'FocusSnoozeConflict',
+      'Focus source evidence changed during the snooze mutation. Reload and try again.',
+    )
+  }
+}
+
+/**
+ * Requires a server-projected Focus capability before a mutation.
+ *
+ * @param allowed - Current server-authorized capability value.
+ * @param action - Safe action label used in the conflict response.
+ */
+function requireFocusItemCapability(allowed: boolean, action: string): void {
+  if (!allowed) {
+    throw new FocusApiError(
+      409,
+      'FocusActionUnavailable',
+      `Focus ${action} is no longer available. Reload and try again.`,
+    )
+  }
+}
+
+/**
+ * Strongly reauthorizes a Focus source immediately before a personal mutation.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @param item - Current projected Focus item.
+ * @returns Strongly read authorized Work Item detail and permission context.
+ */
+async function reauthorizeFocusItem(
+  principal: WorkspacePrincipal,
+  item: FocusItem,
+) {
+  const authorized = await loadAuthorizedTeamIssue(
+    principal,
+    item.workItem.teamId,
+    item.workItem.id,
+    'viewer',
+  )
+  if (authorized.detail.issue.revision !== item.workItem.revision) {
+    throw new FocusApiError(
+      409,
+      'FocusItemVersionConflict',
+      'Focus item source changed after it was read. Reload and try again.',
+    )
+  }
+  return authorized
 }
 
 async function readAccessibleWorkItems(
@@ -26424,6 +31518,176 @@ function createWorkItemIdempotencyTransaction(
   }
 }
 
+/** Top-level fields admitted by the closed public Work Item response schema. */
+const PUBLIC_WORK_ITEM_RESPONSE_FIELDS = [
+  'schemaVersion',
+  'revision',
+  'id',
+  'teamId',
+  'title',
+  'description',
+  'assignedProjectId',
+  'assigneeUserId',
+  'assigneeEmail',
+  'assigneeName',
+  'dueDate',
+  'schedule',
+  'priority',
+  'creatorMemberKey',
+  'workflowStatusId',
+  'statusCategory',
+  'workflowSchemaVersion',
+  'customFieldValues',
+  'relationIds',
+  'createdAt',
+  'updatedAt',
+  'source',
+] satisfies readonly (keyof CanonicalWorkItem)[]
+
+/**
+ * Projects one canonical Work Item onto the closed public response schema.
+ *
+ * @param workItem - Internal canonical Work Item containing optional server-only fields.
+ * @returns Detached public response without causal, archive, intake, or approval state.
+ */
+function projectPublicWorkItem(workItem: CanonicalWorkItem): CanonicalWorkItem {
+  return {
+    schemaVersion: workItem.schemaVersion,
+    revision: workItem.revision,
+    id: workItem.id,
+    teamId: workItem.teamId,
+    title: workItem.title,
+    ...(workItem.description === undefined ? {} : { description: workItem.description }),
+    ...(workItem.assignedProjectId === undefined
+      ? {}
+      : { assignedProjectId: workItem.assignedProjectId }),
+    assigneeUserId: workItem.assigneeUserId,
+    ...(workItem.assigneeEmail === undefined
+      ? {}
+      : { assigneeEmail: workItem.assigneeEmail }),
+    ...(workItem.assigneeName === undefined ? {} : { assigneeName: workItem.assigneeName }),
+    dueDate: workItem.dueDate,
+    schedule: projectPublicWorkItemSchedule(workItem.schedule),
+    priority: workItem.priority,
+    creatorMemberKey: workItem.creatorMemberKey,
+    workflowStatusId: workItem.workflowStatusId,
+    statusCategory: workItem.statusCategory,
+    workflowSchemaVersion: workItem.workflowSchemaVersion,
+    customFieldValues: structuredClone(workItem.customFieldValues),
+    relationIds: [...workItem.relationIds],
+    createdAt: workItem.createdAt,
+    updatedAt: workItem.updatedAt,
+    source: workItem.source,
+  }
+}
+
+/**
+ * Projects a canonical schedule without forwarding future internal schedule properties.
+ *
+ * @param schedule - Canonical Work Item schedule.
+ * @returns Detached schedule limited to the public schedule union.
+ */
+function projectPublicWorkItemSchedule(
+  schedule: CanonicalWorkItem['schedule'],
+): CanonicalWorkItem['schedule'] {
+  const calendarPolicy = {
+    timeZone: schedule.calendarPolicy.timeZone,
+    workingWeekdays: [...schedule.calendarPolicy.workingWeekdays],
+    holidays: [...schedule.calendarPolicy.holidays],
+  }
+  const plannedEffort = schedule.plannedEffortMinutes === undefined
+    ? {}
+    : { plannedEffortMinutes: schedule.plannedEffortMinutes }
+  switch (schedule.mode) {
+    case 'unscheduled':
+      return { mode: schedule.mode, calendarPolicy, ...plannedEffort }
+    case 'due-date':
+      return {
+        mode: schedule.mode,
+        calendarPolicy,
+        dueDate: schedule.dueDate,
+        ...plannedEffort,
+      }
+    case 'date-range':
+      return {
+        mode: schedule.mode,
+        calendarPolicy,
+        startDate: schedule.startDate,
+        endDate: schedule.endDate,
+        durationDays: schedule.durationDays,
+        ...plannedEffort,
+      }
+    case 'milestone':
+      return {
+        mode: schedule.mode,
+        calendarPolicy,
+        startDate: schedule.startDate,
+        endDate: schedule.endDate,
+        durationDays: schedule.durationDays,
+        ...plannedEffort,
+      }
+  }
+}
+
+/**
+ * Sanitizes an adapter-produced Work Item receipt before it is stored for replay.
+ *
+ * @param value - Unknown adapter response body.
+ * @returns Detached object containing only public Work Item response fields.
+ */
+function projectPublicWorkItemReceiptBody(value: unknown): Record<string, unknown> {
+  if (!isRecord(value)) {
+    throw new PublicApiServiceError(
+      503,
+      'temporarily_unavailable',
+      'The Work Item mutation produced an invalid replay receipt.',
+      true,
+    )
+  }
+  const projected: Record<string, unknown> = {}
+  for (const field of PUBLIC_WORK_ITEM_RESPONSE_FIELDS) {
+    if (field === 'schedule') continue
+    if (value[field] !== undefined) projected[field] = structuredClone(value[field])
+  }
+  if (value.schedule !== undefined) {
+    try {
+      projected.schedule = projectPublicWorkItemSchedule(
+        normalizeWorkItemSchedule(value.schedule),
+      )
+    } catch {
+      throw new PublicApiServiceError(
+        503,
+        'temporarily_unavailable',
+        'The Work Item mutation produced an invalid replay receipt.',
+        true,
+      )
+    }
+  }
+  return projected
+}
+
+/**
+ * Creates an atomic public Work Item receipt transaction with response allowlisting.
+ *
+ * @param workspaceId - Workspace that owns the idempotency reservation.
+ * @param token - Public API idempotency reservation token.
+ * @returns Transaction contribution that cannot persist internal Work Item fields.
+ */
+function createPublicWorkItemIdempotencyTransaction(
+  workspaceId: string,
+  token: IdempotencyMutationToken | undefined,
+): WorkItemIdempotencyTransaction | undefined {
+  const transaction = createWorkItemIdempotencyTransaction(workspaceId, token)
+  if (transaction === undefined) return undefined
+  return {
+    async prepare(response) {
+      return transaction.prepare(response.status === 200
+        ? { status: 200, body: projectPublicWorkItemReceiptBody(response.body) }
+        : response)
+    },
+  }
+}
+
 /**
  * Persists the adapter-produced compact schedule result as the exact replay response.
  *
@@ -26588,7 +31852,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
         },
       )
       return {
-        items: page.issues,
+        items: page.issues.map(projectPublicWorkItem),
         hasMore: page.nextCursor !== undefined,
         ...(page.nextCursor ? { nextContinuation: page.nextCursor } : {}),
       }
@@ -26600,12 +31864,12 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
         teamId,
         evaluateProjectScopes: true,
       })
-      return (await loadAuthorizedTeamIssue(
+      return projectPublicWorkItem((await loadAuthorizedTeamIssue(
         principal,
         teamId,
         workItemId,
         'viewer',
-      )).detail.issue
+      )).detail.issue)
     },
 
     async authorizeCreate(credential, input) {
@@ -26655,7 +31919,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
           )
         },
       )
-      return createCanonicalPublicWorkItem(
+      return projectPublicWorkItem(await createCanonicalPublicWorkItem(
         authorization.principal,
         teamId,
         workItemInput,
@@ -26669,7 +31933,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
           workItemInput,
         ),
         authorization.authorizationSnapshot,
-      )
+      ))
     },
 
     async authorizeUpdate(credential, teamId, workItemId, input) {
@@ -26793,7 +32057,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
           query: { teamId },
           body: input,
         }),
-        createWorkItemIdempotencyTransaction(
+        createPublicWorkItemIdempotencyTransaction(
           principal.directoryId,
           idempotency,
         ),
@@ -26803,7 +32067,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
         response.issue,
         'Public Work Item update',
       )
-      return response.issue
+      return projectPublicWorkItem(response.issue)
     },
 
     async authorizeDelete(credential, teamId, workItemId) {
@@ -26913,7 +32177,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
           query: { teamId },
           body: { expectedRevision },
         }),
-        createWorkItemIdempotencyTransaction(
+        createPublicWorkItemIdempotencyTransaction(
           principal.directoryId,
           idempotency,
         ),
@@ -26938,7 +32202,7 @@ export function createCanonicalPublicWorkItemService(): PublicWorkItemService {
         createTeamIssueAuditEntityId(teamId, workItemId),
         'Public Work Item deletion',
       )
-      return response.issue
+      return projectPublicWorkItem(response.issue)
     },
 
     async authorizeExternalLink(credential, teamId, workItemId, write) {

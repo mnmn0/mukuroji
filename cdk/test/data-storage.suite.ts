@@ -25,6 +25,7 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
     'WorkItemCollaborationTableFDECF217',
     'WorkspaceSearchTable2575AD6B',
     'NotificationsTable76DCFC6C',
+    'FocusTable8B0E7E68',
     'RealtimeSessionsTable607096EB',
   ];
 
@@ -34,7 +35,7 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
 
   const tables = template.findResources('AWS::DynamoDB::Table');
 
-  expect(Object.keys(tables)).toHaveLength(24);
+  expect(Object.keys(tables)).toHaveLength(25);
 
   for (const table of Object.values(tables)) {
     expect(table).toEqual(expect.objectContaining({
@@ -116,6 +117,56 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
         }),
       ],
     }));
+});
+
+test('Focus state uses a retained expiring scope and record key table', () => {
+  const template = synthesizedTemplate;
+  const document = template.toJSON();
+  const focusTableLogicalId = document.Outputs.FocusTableName?.Value?.Ref;
+
+  expect(typeof focusTableLogicalId).toBe('string');
+  if (typeof focusTableLogicalId !== 'string') {
+    throw new Error('Focus table output was not synthesized.');
+  }
+
+  expect(document.Resources[focusTableLogicalId]).toEqual(expect.objectContaining({
+    DeletionPolicy: 'Retain',
+    UpdateReplacePolicy: 'Retain',
+    Properties: expect.objectContaining({
+      AttributeDefinitions: [
+        { AttributeName: 'scopeKey', AttributeType: 'S' },
+        { AttributeName: 'recordKey', AttributeType: 'S' },
+      ],
+      BillingMode: 'PAY_PER_REQUEST',
+      KeySchema: [
+        { AttributeName: 'scopeKey', KeyType: 'HASH' },
+        { AttributeName: 'recordKey', KeyType: 'RANGE' },
+      ],
+      PointInTimeRecoverySpecification: {
+        PointInTimeRecoveryEnabled: true,
+      },
+      SSESpecification: {
+        SSEEnabled: true,
+      },
+      TimeToLiveSpecification: {
+        AttributeName: 'expiresAt',
+        Enabled: true,
+      },
+    }),
+  }));
+  template.hasOutput('FocusTableName', {
+    Value: { Ref: focusTableLogicalId },
+  });
+
+  const workflowConfiguration =
+    document.Resources.ApiWorkflowRuntimeConfigurationSecret225372D1
+      .Properties.SecretString;
+  expect(findApiRuntimeConfigurationSource(
+    workflowConfiguration,
+    'FOCUS_TABLE_NAME',
+  )).toEqual({
+    'Fn::Base64': { Ref: focusTableLogicalId },
+  });
 });
 
 test('automation state is retained with due-schedule and execution history indexes', () => {
@@ -460,6 +511,11 @@ test('request intake uses a retained queue-indexed table with transient row expi
         { AttributeName: 'recordKey', AttributeType: 'S' },
         { AttributeName: 'queueKey', AttributeType: 'S' },
         { AttributeName: 'queueRecordKey', AttributeType: 'S' },
+        { AttributeName: 'triageActivityKey', AttributeType: 'S' },
+        { AttributeName: 'triageNextWakeAt', AttributeType: 'S' },
+        { AttributeName: 'triageOwnerKey', AttributeType: 'S' },
+        { AttributeName: 'triageTeamKey', AttributeType: 'S' },
+        { AttributeName: 'triageWakeShard', AttributeType: 'S' },
       ]),
       BillingMode: 'PAY_PER_REQUEST',
       KeySchema: [
@@ -474,6 +530,30 @@ test('request intake uses a retained queue-indexed table with transient row expi
             { AttributeName: 'queueRecordKey', KeyType: 'RANGE' },
           ],
           Projection: { ProjectionType: 'ALL' },
+        }),
+        expect.objectContaining({
+          IndexName: 'triage-team-activity-index',
+          KeySchema: [
+            { AttributeName: 'triageTeamKey', KeyType: 'HASH' },
+            { AttributeName: 'triageActivityKey', KeyType: 'RANGE' },
+          ],
+          Projection: { ProjectionType: 'ALL' },
+        }),
+        expect.objectContaining({
+          IndexName: 'triage-owner-activity-index',
+          KeySchema: [
+            { AttributeName: 'triageOwnerKey', KeyType: 'HASH' },
+            { AttributeName: 'triageActivityKey', KeyType: 'RANGE' },
+          ],
+          Projection: { ProjectionType: 'ALL' },
+        }),
+        expect.objectContaining({
+          IndexName: 'triage-wake-index',
+          KeySchema: [
+            { AttributeName: 'triageWakeShard', KeyType: 'HASH' },
+            { AttributeName: 'triageNextWakeAt', KeyType: 'RANGE' },
+          ],
+          Projection: { ProjectionType: 'KEYS_ONLY' },
         }),
       ]),
       PointInTimeRecoverySpecification: {

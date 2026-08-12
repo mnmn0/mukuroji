@@ -15,6 +15,7 @@ import {
   updateTeamIssue,
 } from '../src/issues/api'
 import { getProjectTasks, ProjectTasksApiError } from '../src/tasks/api'
+import { isCanonicalWorkItem } from '../src/work-items/api/contractValidation'
 
 const originalFetch = globalThis.fetch
 const mutationContext = {
@@ -27,6 +28,51 @@ afterEach(() => {
 })
 
 describe('canonical Work Item API', () => {
+  test('validates canonical causal timestamps at the response boundary', () => {
+    const valid = createWorkItem({
+      approvalSummary: {
+        approvedCount: 0,
+        changesRequestedCount: 0,
+        overdueCount: 0,
+        pendingCount: 1,
+        rejectedCount: 0,
+        updatedAt: '2026-07-12T03:00:00.000Z',
+      },
+      dueDate: '2026-07-12',
+      dueDateUpdatedAt: '2026-07-12T02:00:00.000Z',
+      priorityUpdatedAt: '2026-07-12T01:00:00.000Z',
+      schedule: createDefaultTestSchedule('2026-07-12'),
+      updatedAt: '2026-07-12T02:00:00.000Z',
+    })
+
+    expect(isCanonicalWorkItem(valid)).toBeTrue()
+
+    const invalidCandidates = [
+      { ...valid, createdAt: '2026-07-12T00:00:00Z' },
+      { ...valid, updatedAt: '2026-07-11T23:59:59.999Z' },
+      { ...valid, priorityUpdatedAt: '2026-07-11T23:59:59.999Z' },
+      { ...valid, dueDateUpdatedAt: '2026-07-12T02:00:00.001Z' },
+      { ...valid, dueDateUpdatedAt: '2026-07-12T02:00:00Z' },
+      {
+        ...valid,
+        approvalSummary: {
+          ...valid.approvalSummary,
+          updatedAt: '2026-07-12T03:00:00Z',
+        },
+      },
+      {
+        ...valid,
+        approvalSummary: {
+          ...valid.approvalSummary,
+          updatedAt: '2026-07-11T23:59:59.999Z',
+        },
+      },
+    ]
+    for (const candidate of invalidCandidates) {
+      expect(isCanonicalWorkItem(candidate)).toBeFalse()
+    }
+  })
+
   test('loads unassigned Work Items from the workspace-wide endpoint', async () => {
     const workItem = createWorkItem({ assignedProjectId: undefined })
     const requests = installFetchRecorder({ workItems: [workItem] })

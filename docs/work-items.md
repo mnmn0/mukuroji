@@ -30,22 +30,26 @@ Canonical row は次の field を持つ。
 | `description` | no | 詳細説明。 |
 | `assigneeUserId` | yes | Workspace member の安定 ID。 |
 | `creatorMemberKey` | yes | Work Item を作成した Workspace member key。 |
+| `sourceTriageEntryId` | no | Team Triage から作成された場合の source Entry ID。 |
+| `sourceRequestId` | no | Form source から作成された場合の Request submission ID。 |
 | `workflowSchemaVersion` | yes | 値を検証した Work Item configuration schema version。現在は `1`。 |
 | `workflowStatusId` | yes | 解決済み workflow の status ID。 |
 | `statusCategory` | yes | status 定義から確定した `backlog`、`unstarted`、`started`、`completed`、`canceled` のいずれか。 |
 | `customFieldValues` | yes | configuration に対して検証済みの field ID / value map。値がなくても `{}` を保存する。 |
 | `relationIds` | yes | Relation Graph から導出した `type:targetWorkItemId` の辞書順・重複なし配列。最大100件で、relation がなくても `[]` を保存する。 |
 | `priority` | yes | `low`、`medium`、`high`。 |
+| `priorityUpdatedAt` | no | `priority` の値が最後に変わった UTC ISO 8601 timestamp。新規 row は `createdAt` と同時に設定する。 |
 | `schedule` | yes | 日付の意味、予定工数、timezone、稼働曜日、祝日を固定する canonical schedule。 |
 | `dueDate` | yes | `schedule` から導出する projection。`unscheduled` では空文字、それ以外は `YYYY-MM-DD`。 |
+| `dueDateUpdatedAt` | no | 導出済み `dueDate` の値が最後に変わった UTC ISO 8601 timestamp。新規 row は `createdAt` と同時に設定する。 |
 | `sortOrder` | yes | Team/project list の安定表示順。 |
 | `createdAt` / `updatedAt` | yes | UTC ISO 8601 timestamp。 |
 
 Canonical row と API response は旧固定 `status`、`titleKey`、`assignee`、`assigneeKey` を持たない。API response は上記に `id` と `source=dynamodb` を加える。
 
-Strict reader は必須 workflow field がない row、未知の schema version、型が不正な status/custom field、不正または欠落した `relationIds`、不正な `schedule`、`dueDate` と schedule の不一致を canonical Work Item として返さない。現在の configuration との整合は configuration 更新時の usage 検証と mutation 時の再検証で保証し、read 時に configuration は取得しない。
+Strict reader は必須 workflow field がない row、未知の schema version、型が不正な status/custom field、不正または欠落した `relationIds`、不正な `schedule`、`dueDate` と schedule の不一致を canonical Work Item として返さない。field-specific timestamp がある場合は canonical UTC で `createdAt` 以上 `updatedAt` 以下であることも検証する。現在の configuration との整合は configuration 更新時の usage 検証と mutation 時の再検証で保証し、read 時に configuration は取得しない。
 
-Schema v1 row の read-time upcast や自動補完は行わない。未知の version と v2 の必須 field を欠く row は fail-closed とする。
+Schema v1 row の read-time upcast や自動補完は行わない。未知の version と v2 の必須 field を欠く row は fail-closed とする。field-specific timestamp 導入前の v2 row は互換のため保持し、内部 canonical response は `createdAt` を保守的な occurrence fallback として返す。汎用 `updatedAt` は priority や期限の発生時刻として代用しない。
 
 ### Schedule state
 
@@ -72,7 +76,7 @@ Relation の正本は `WorkItemConfigurationTable` の Relation Graph row であ
 
 Work Item configuration は Workspace default、Team override、built-in default の順で解決する。作成時に `workflowStatusId` を省略した場合は、解決済み workflow の `initialStatusId` を使用する。指定した status ID と custom field value は同じ解決済み configuration に対して検証する。
 
-更新では `workflowStatusId` を patch し、server が status 定義から `statusCategory` を再計算する。Client が category を直接指定することはできない。
+更新では `workflowStatusId` を patch し、server が status 定義から `statusCategory` を再計算する。Client が category を直接指定することはできない。priority と schedule は値が実際に変わった場合だけ対応する field-specific timestamp を進め、title や description など無関係な変更では保持する。dependency-aware schedule cascade も各 Work Item の導出済み `dueDate` が変わった行だけ `dueDateUpdatedAt` を進める。
 
 ```json
 {

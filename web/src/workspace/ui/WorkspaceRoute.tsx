@@ -73,6 +73,12 @@ const homeRouteMetadata: WorkspaceRouteMetadata = {
   titleKey: 'workspace.home.title',
   descriptionKey: 'workspace.home.description',
 }
+const focusRouteMetadata: WorkspaceRouteMetadata = {
+  activeNavId: 'focus',
+  eyebrowKey: 'workspace.focus.eyebrow',
+  titleKey: 'workspace.focus.title',
+  descriptionKey: 'workspace.focus.description',
+}
 const myTasksRouteMetadata: WorkspaceRouteMetadata = {
   activeNavId: 'my-tasks',
   eyebrowKey: 'workspace.myTasks.eyebrow',
@@ -173,6 +179,12 @@ const teamIssuesRouteMetadata: WorkspaceRouteMetadata = {
   eyebrowKey: 'issues.eyebrow',
   titleKey: 'issues.title',
   descriptionKey: 'issues.description',
+}
+const teamTriageRouteMetadata: WorkspaceRouteMetadata = {
+  activeTeamViewId: 'triage',
+  eyebrowKey: 'triage.eyebrow',
+  titleKey: 'triage.title',
+  descriptionKey: 'triage.description',
 }
 const projectIssuesRouteMetadata: WorkspaceRouteMetadata = {
   customHeader: true,
@@ -628,6 +640,10 @@ function resolveWorkspaceRouteMetadata(
     return homeRouteMetadata
   }
 
+  if (matchPath('/focus', pathname)) {
+    return focusRouteMetadata
+  }
+
   if (matchPath('/my-tasks', pathname)) {
     return myTasksRouteMetadata
   }
@@ -695,6 +711,15 @@ function resolveWorkspaceRouteMetadata(
     return {
       ...teamIssuesRouteMetadata,
       activeTeamId: decodeWorkspaceRouteParameter(teamIssuesMatch.params.teamId),
+    }
+  }
+
+  const teamTriageMatch = matchPath('/teams/:teamId/triage', pathname)
+
+  if (teamTriageMatch?.params.teamId) {
+    return {
+      ...teamTriageRouteMetadata,
+      activeTeamId: decodeWorkspaceRouteParameter(teamTriageMatch.params.teamId),
     }
   }
 

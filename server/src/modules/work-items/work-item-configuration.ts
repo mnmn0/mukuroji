@@ -206,6 +206,22 @@ export type WorkItemConfigurationClient = {
     teamId: string,
     workItemId: string,
   ): Promise<WorkItemRelationsResponse>
+  /**
+   * Reads every relation and the stable graph revision for one Team.
+   *
+   * @param workspaceId - Workspace that owns the relation graph.
+   * @param teamId - Team whose complete relation graph is read.
+   * @returns All directed relations and their stable graph revision.
+   */
+  listRelationGraph?(workspaceId: string, teamId: string): Promise<WorkItemRelationsResponse>
+  /**
+   * Reads the current canonical relation graph revision for recurrence-sensitive projections.
+   *
+   * @param workspaceId - Workspace that owns the relation graph.
+   * @param teamId - Team whose relation graph is read.
+   * @returns Current positive revision, or zero before graph metadata exists.
+   */
+  getRelationGraphRevision?(workspaceId: string, teamId: string): Promise<number>
   /** Reciprocal relation を単一 transaction で作成します。 */
   createRelation(
     workspaceId: string,
@@ -632,12 +648,30 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
     return { configuration: saved } satisfies ResolvedWorkItemConfiguration
   }
 
-  /** Work Item から見た relation と graph revision を返します。 */
-  async listRelations(workspaceId: string, teamId: string, workItemId: string) {
+  /**
+   * Reads every relation and the stable graph revision for one Team.
+   *
+   * @param workspaceId - Workspace that owns the relation graph.
+   * @param teamId - Team whose complete relation graph is read.
+   * @returns All directed relations and their stable graph revision.
+   */
+  async listRelationGraph(
+    workspaceId: string,
+    teamId: string,
+  ): Promise<WorkItemRelationsResponse> {
     await this.ensureTable()
     const snapshot = await this.readStableRelationGraph(workspaceId, teamId)
     return {
       graphRevision: snapshot.revision,
+      relations: snapshot.relations,
+    } satisfies WorkItemRelationsResponse
+  }
+
+  /** Work Item から見た relation と graph revision を返します。 */
+  async listRelations(workspaceId: string, teamId: string, workItemId: string) {
+    const snapshot = await this.listRelationGraph(workspaceId, teamId)
+    return {
+      graphRevision: snapshot.graphRevision,
       relations: snapshot.relations.filter((relation) => relation.sourceWorkItemId === workItemId),
     } satisfies WorkItemRelationsResponse
   }
@@ -951,7 +985,14 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
     return { relations, revision: after }
   }
 
-  private async getRelationGraphRevision(workspaceId: string, teamId: string) {
+  /**
+   * Reads the current canonical relation graph revision with a strongly consistent read.
+   *
+   * @param workspaceId - Workspace that owns the relation graph.
+   * @param teamId - Team whose relation graph is read.
+   * @returns Current positive revision, or zero before graph metadata exists.
+   */
+  async getRelationGraphRevision(workspaceId: string, teamId: string): Promise<number> {
     const response = await this.documentClient.send(new GetCommand({
       TableName: this.tableName,
       Key: {

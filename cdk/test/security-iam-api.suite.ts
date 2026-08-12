@@ -284,6 +284,7 @@ test('Function URL and API Gateway invoke the same live Lambda alias', () => {
   template.hasOutput('PlanningTableName', {
     Value: { Ref: 'PlanningTable2A0D4CC5' },
   });
+  template.hasOutput('FocusTableName', {});
   template.hasOutput('RequestIntakeTableName', {});
   template.hasOutput('DocumentsTableName', {
     Value: { Ref: 'DocumentsTable7E808EE5' },
@@ -811,6 +812,20 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
   const realtimeSessionStatements = statements.filter((statement) =>
     JSON.stringify(statement.Resource).includes('RealtimeSessionsTable607096EB')
   );
+  const focusTableLogicalId =
+    template.toJSON().Outputs.FocusTableName?.Value?.Ref;
+  expect(typeof focusTableLogicalId).toBe('string');
+  if (typeof focusTableLogicalId !== 'string') {
+    throw new Error('Focus table output was not synthesized.');
+  }
+  const focusStatements = statements.filter((statement) =>
+    JSON.stringify(statement.Resource).includes(focusTableLogicalId)
+  );
+  const focusDataStatement = focusStatements.find((statement) =>
+    Array.isArray(statement.Action) &&
+    statement.Action.includes('dynamodb:GetItem') &&
+    statement.Action.includes('dynamodb:PutItem')
+  );
   const cognitoStatement = statements.find((statement) =>
     (Array.isArray(statement.Action) ? statement.Action : [statement.Action])
       .includes('cognito-idp:AdminGetUser')
@@ -826,6 +841,7 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
     Effect: 'Allow',
     Resource: expect.arrayContaining([
       { 'Fn::GetAtt': ['TeamIssuesTable189D851D', 'Arn'] },
+      { 'Fn::GetAtt': [requestTableLogicalId, 'Arn'] },
       { 'Fn::GetAtt': ['ProjectDirectoryTable9ED01C01', 'Arn'] },
       { 'Fn::GetAtt': ['WorkspaceAccessTableD7C8D2C7', 'Arn'] },
       { 'Fn::GetAtt': ['WorkItemCollaborationTableFDECF217', 'Arn'] },
@@ -834,6 +850,7 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
       { 'Fn::GetAtt': ['WorkItemConfigurationTable35E94558', 'Arn'] },
       { 'Fn::GetAtt': ['PlanningTable2A0D4CC5', 'Arn'] },
       { 'Fn::GetAtt': [enterpriseIdentityTableLogicalId, 'Arn'] },
+      { 'Fn::GetAtt': [focusTableLogicalId, 'Arn'] },
       { 'Fn::GetAtt': ['WorkspaceSearchTable2575AD6B', 'Arn'] },
     ]),
   }));
@@ -935,12 +952,15 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
     Array.isArray(statement.Action) ? statement.Action : [statement.Action]
   );
   expect(requestIntakeActions).toEqual(expect.arrayContaining([
+    'dynamodb:ConditionCheckItem',
     'dynamodb:DescribeTable',
     'dynamodb:GetItem',
     'dynamodb:PutItem',
     'dynamodb:Query',
     'dynamodb:UpdateItem',
   ]));
+  expect(requestIntakeStatements).toHaveLength(2);
+  expect(requestIntakeStatements).toContain(transactionConditionCheckStatement);
   const enterpriseIdentityActions = enterpriseIdentityStatements.flatMap((statement) =>
     Array.isArray(statement.Action) ? statement.Action : [statement.Action]
   );
@@ -964,6 +984,16 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
     'dynamodb:GetItem',
     'dynamodb:PutItem',
   ]));
+  expect(focusDataStatement).toEqual({
+    Action: [
+      'dynamodb:GetItem',
+      'dynamodb:PutItem',
+      'dynamodb:Query',
+    ],
+    Effect: 'Allow',
+    Resource: { 'Fn::GetAtt': [focusTableLogicalId, 'Arn'] },
+  });
+  expect(focusStatements).toHaveLength(2);
   expect(planningDataStatement).toEqual(expect.objectContaining({
     Action: [
       'dynamodb:DeleteItem',

@@ -30,6 +30,7 @@ export type RuntimeControlSurface =
   | 'realtime'
   | 'request-intake-email'
   | 'tenant-operation-execution'
+  | 'triage-schedule'
   | 'webhook-delivery'
   | 'work-item-import'
 

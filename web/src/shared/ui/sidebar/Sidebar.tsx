@@ -1,6 +1,7 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import type { ComponentType, FormEvent, ReactNode, RefObject } from 'react'
 import { BrandMark } from '../BrandMark'
+import { HandoffIcon } from '../icons'
 
 /**
  * サイドバー内の SVG アイコンに渡す共通 props です。
@@ -76,6 +77,7 @@ export type SidebarTeam = {
  */
 export type SidebarNavId =
   | 'home'
+  | 'focus'
   | 'my-tasks'
   | 'inbox'
   | 'requests'
@@ -89,7 +91,7 @@ export type SidebarNavId =
 /**
  * チーム配下で選択できる固定ビューです。
  */
-export type SidebarTeamViewId = 'overview' | 'issues' | 'projects' | 'members'
+export type SidebarTeamViewId = 'overview' | 'triage' | 'issues' | 'projects' | 'members'
 
 /**
  * 新規作成モーダルで選択できる作成対象です。
@@ -304,6 +306,10 @@ export type SidebarLabels = {
    * チーム概要ビューの文言です。
    */
   teamOverview: string
+  /**
+   * Team triage queue view label.
+   */
+  triage: string
   /**
    * Issue ビューの文言です。
    */
@@ -525,6 +531,7 @@ type SidebarArchiveTarget = {
 
 const primaryNavItems: MainNavItem[] = [
   { id: 'home', icon: HomeIcon },
+  { id: 'focus', icon: FocusIcon },
   { id: 'my-tasks', icon: CheckCircleIcon },
   { id: 'inbox', icon: BellIcon },
   { id: 'requests', icon: PanelIcon },
@@ -608,6 +615,7 @@ const defaultLabels: SidebarLabels = {
     confirm: 'アーカイブ',
   },
   teamOverview: 'チーム概要',
+  triage: 'Triage',
   issues: 'Issues',
   members: 'メンバー',
   projectCount: (count) => `プロジェクト ${count}`,
@@ -615,6 +623,7 @@ const defaultLabels: SidebarLabels = {
   unreadCount: (count) => `${count}件の未読`,
   nav: {
     home: 'ホーム',
+    focus: 'フォーカス',
     'my-tasks': 'マイタスク',
     inbox: '受信箱',
     requests: 'リクエスト',
@@ -2161,7 +2170,7 @@ function NavButton({
   )
 }
 
-/** Renders the four stable views owned by the single current Team. */
+/** Renders the five stable views owned by the single current Team. */
 function CurrentTeamNavigation({
   activeTeamId,
   activeTeamViewId,
@@ -2193,6 +2202,13 @@ function CurrentTeamNavigation({
         icon={PanelIcon}
         label={labels.teamOverview}
         onClick={() => onSelectTeamView(team.id, 'overview')}
+      />
+      <SubNavButton
+        active={isTeamActive && activeTeamViewId === 'triage'}
+        collapsed={collapsed}
+        icon={HandoffIcon}
+        label={labels.triage}
+        onClick={() => onSelectTeamView(team.id, 'triage')}
       />
       <SubNavButton
         active={isTeamActive && activeTeamViewId === 'issues'}
@@ -2414,6 +2430,17 @@ function HomeIcon({ className }: SidebarIconProps) {
       <path d="M5 9.5V21h14V9.5" />
       <path d="M9.5 21v-6h5v6" />
     </SvgBase>
+  )
+}
+
+/** Renders the Focus queue crosshair icon. */
+function FocusIcon({ className }: SidebarIconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" className={className} aria-hidden="true">
+      <circle cx="12" cy="12" r="6.5" />
+      <circle cx="12" cy="12" r="2" />
+      <path d="M12 2.5v3M12 18.5v3M2.5 12h3M18.5 12h3" />
+    </svg>
   )
 }
 

@@ -31,6 +31,7 @@ import {
 import {
   WORK_ITEM_SCHEMA_VERSION,
   type DueDateWorkItemSchedule,
+  type TriageEntry,
 } from '@mukuroji/contracts'
 
 afterEach(() => {
@@ -81,6 +82,73 @@ function createScheduleCascadeIssue(teamId: string, issueId: string) {
     priority: 'medium',
     createdAt: '2026-07-12T00:00:00.000Z',
     updatedAt: '2026-07-12T00:00:00.000Z',
+  }
+}
+
+/** Creates a full-visibility Triage source containing secrets that must not cross the merge. */
+function createDuplicateContextEntry(overrides: Partial<TriageEntry> = {}): TriageEntry {
+  return {
+    schemaVersion: 1,
+    id: 'triage-context-1',
+    workspaceId: 'workspace-1',
+    source: {
+      kind: 'email',
+      sourceId: 'provider-secret-source-id',
+      provider: 'provider-secret-name',
+      containerId: 'provider-secret-mailbox',
+      messageId: 'provider-secret-message',
+    },
+    sourcePreview: {
+      title: 'Sensitive customer subject',
+      body: 'Sensitive customer body that must not be copied.',
+      channelLabel: 'Restricted support mailbox',
+      permalink: 'https://provider.example/private/message',
+      attachmentCount: 2,
+      commentCount: 3,
+      watcherCount: 4,
+      sanitized: true,
+      truncated: false,
+    },
+    requester: {
+      displayName: 'Private Requester',
+      email: 'private-requester@example.com',
+      externalId: 'provider-secret-requester',
+      guest: true,
+    },
+    receivedAt: '2026-08-08T00:00:00.000Z',
+    lastActivityAt: '2026-08-08T01:00:00.000Z',
+    state: 'pending',
+    routing: { reason: 'Private routing reason', candidates: [] },
+    teamId: 'core',
+    permission: {
+      visibility: 'full',
+      canReply: true,
+      guestVisible: false,
+      checkedAt: '2026-08-08T01:00:00.000Z',
+    },
+    retention: { expiresAt: '2026-09-08T00:00:00.000Z' },
+    capabilities: {
+      canAssign: true,
+      canAcceptCreate: true,
+      canAcceptLink: true,
+      canMarkDuplicate: true,
+      canDecline: true,
+      canSnooze: true,
+      canRequestInformation: true,
+      canReply: true,
+      canViewInternalContext: true,
+    },
+    events: [{
+      id: 'triage-created-context-1',
+      type: 'created',
+      actorId: 'provider-secret-actor',
+      summary: 'A provider-secret-free source event summary.',
+      createdAt: '2026-08-08T00:00:00.000Z',
+    }],
+    revision: 2,
+    createdAt: '2026-08-08T00:00:00.000Z',
+    updatedAt: '2026-08-08T01:00:00.000Z',
+    ...overrides,
   }
 }
 
@@ -743,6 +811,433 @@ test('DynamoDB Work Item creation allocates IDs and sort order across archived r
   })
 })
 
+test('duplicate Triage context is atomically guarded and de-identified on the Work Item', () => {
+  const client = new DynamoDbTeamIssuesClient('WorkItemsTable', 'IssueEventsTable')
+  const contribution = client.createTriageDuplicateContextTransactionItems({
+    directoryId: 'workspace-1',
+    teamId: 'core',
+    workItemId: 'canonical-work-item',
+    expectedWorkItemRevision: 7,
+    actorUserId: 'triager@example.com',
+    entry: createDuplicateContextEntry(),
+    mergedAt: '2026-08-09T00:00:00.000Z',
+  })
+
+  expect(contribution.snapshot).toEqual({
+    triageEntryId: 'triage-context-1',
+    sourceKind: 'email',
+    visibilityAtMerge: 'full',
+    availability: 'summary-metadata',
+    receivedAt: '2026-08-08T00:00:00.000Z',
+    lastActivityAt: '2026-08-08T01:00:00.000Z',
+    sourceRetentionExpiresAt: '2026-09-08T00:00:00.000Z',
+    commentMetadataCount: 3,
+    attachmentMetadataCount: 2,
+    watcherMetadataCount: 4,
+    events: [{
+      eventId: 'triage-created-context-1',
+      type: 'created',
+      summary: 'Triage entry was created.',
+      createdAt: '2026-08-08T00:00:00.000Z',
+    }],
+    mergedAt: '2026-08-09T00:00:00.000Z',
+  })
+  expect(contribution.transactItems).toEqual([
+    {
+      ConditionCheck: {
+        TableName: 'WorkItemsTable',
+        Key: {
+          directoryTeamId: 'workspace-1#team#core',
+          issueId: 'canonical-work-item',
+        },
+        ConditionExpression: 'revision = :expectedRevision',
+        ExpressionAttributeValues: { ':expectedRevision': 7 },
+      },
+    },
+    {
+      Put: expect.objectContaining({
+        TableName: 'IssueEventsTable',
+        ConditionExpression:
+          'attribute_not_exists(directoryTeamIssueId) AND attribute_not_exists(eventId)',
+        Item: expect.objectContaining({
+          eventType: 'triage-context-merged',
+          triageContextSnapshot: contribution.snapshot,
+        }),
+      }),
+    },
+  ])
+  const persistedProjection = JSON.stringify(contribution.transactItems)
+  for (const secret of [
+    'Sensitive customer subject',
+    'Sensitive customer body that must not be copied.',
+    'private-requester@example.com',
+    'provider-secret-source-id',
+    'provider-secret-message',
+    'provider-secret-actor',
+    'https://provider.example/private/message',
+  ]) {
+    expect(persistedProjection).not.toContain(secret)
+  }
+})
+
+test('duplicate Triage context replaces every lifecycle summary with a fixed allowlisted value', () => {
+  const client = new DynamoDbTeamIssuesClient('WorkItemsTable', 'IssueEventsTable')
+  const contribution = client.createTriageDuplicateContextTransactionItems({
+    directoryId: 'workspace-1',
+    teamId: 'core',
+    workItemId: 'canonical-work-item',
+    expectedWorkItemRevision: 7,
+    actorUserId: 'triager@example.com',
+    entry: createDuplicateContextEntry({
+      events: [
+        {
+          id: 'declined-secret',
+          type: 'declined',
+          actorId: 'operator-secret',
+          summary: 'Declined because provider-secret-customer-content was exposed.',
+          createdAt: '2026-08-08T02:00:00.000Z',
+        },
+        {
+          id: 'activity-secret',
+          type: 'activity-received',
+          actorId: 'provider-secret-actor',
+          summary: 'Provider payload contained customer-secret-message.',
+          createdAt: '2026-08-08T03:00:00.000Z',
+        },
+      ],
+    }),
+    mergedAt: '2026-08-09T00:00:00.000Z',
+  })
+
+  expect(contribution.snapshot.events).toEqual([
+    {
+      eventId: 'declined-secret',
+      type: 'declined',
+      summary: 'Triage entry was declined.',
+      createdAt: '2026-08-08T02:00:00.000Z',
+    },
+    {
+      eventId: 'activity-secret',
+      type: 'activity-received',
+      summary: 'New source activity was received.',
+      createdAt: '2026-08-08T03:00:00.000Z',
+    },
+  ])
+  const persistedProjection = JSON.stringify(contribution.transactItems)
+  expect(persistedProjection).not.toContain('provider-secret-customer-content')
+  expect(persistedProjection).not.toContain('customer-secret-message')
+})
+
+test('duplicate context retains only redaction provenance after source retention expires', () => {
+  const client = new DynamoDbTeamIssuesClient('WorkItemsTable', 'IssueEventsTable')
+  const contribution = client.createTriageDuplicateContextTransactionItems({
+    directoryId: 'workspace-1',
+    teamId: 'core',
+    workItemId: 'canonical-work-item',
+    expectedWorkItemRevision: 7,
+    actorUserId: 'triager@example.com',
+    entry: createDuplicateContextEntry({
+      permission: {
+        visibility: 'metadata-only',
+        canReply: false,
+        guestVisible: false,
+        reasonCode: 'retention-expired',
+        checkedAt: '2026-08-09T00:00:00.000Z',
+      },
+      retention: {
+        expiresAt: '2026-08-09T00:00:00.000Z',
+        redactedAt: '2026-08-09T00:00:00.000Z',
+      },
+    }),
+    mergedAt: '2026-08-09T00:00:01.000Z',
+  })
+
+  expect(contribution.snapshot).toMatchObject({
+    availability: 'redacted',
+    visibilityAtMerge: 'metadata-only',
+    sourceRedactedAt: '2026-08-09T00:00:00.000Z',
+    commentMetadataCount: 0,
+    attachmentMetadataCount: 0,
+    watcherMetadataCount: 0,
+    events: [],
+  })
+})
+
+test('duplicate context treats an elapsed retention deadline as redacted', () => {
+  const client = new DynamoDbTeamIssuesClient('WorkItemsTable', 'IssueEventsTable')
+  const contribution = client.createTriageDuplicateContextTransactionItems({
+    directoryId: 'workspace-1',
+    teamId: 'core',
+    workItemId: 'canonical-work-item',
+    expectedWorkItemRevision: 7,
+    actorUserId: 'triager@example.com',
+    entry: createDuplicateContextEntry({
+      retention: {
+        expiresAt: '2026-08-09T00:00:00.000Z',
+      },
+    }),
+    mergedAt: '2026-08-09T00:00:01.000Z',
+  })
+
+  expect(contribution.snapshot).toMatchObject({
+    availability: 'redacted',
+    commentMetadataCount: 0,
+    attachmentMetadataCount: 0,
+    watcherMetadataCount: 0,
+    events: [],
+  })
+})
+
+test('metadata-only duplicate context excludes internal lifecycle summaries', () => {
+  const client = new DynamoDbTeamIssuesClient('WorkItemsTable', 'IssueEventsTable')
+  const contribution = client.createTriageDuplicateContextTransactionItems({
+    directoryId: 'workspace-1',
+    teamId: 'core',
+    workItemId: 'canonical-work-item',
+    expectedWorkItemRevision: 7,
+    actorUserId: 'triager@example.com',
+    entry: createDuplicateContextEntry({
+      permission: {
+        visibility: 'metadata-only',
+        canReply: false,
+        guestVisible: false,
+        reasonCode: 'provider-metadata-only',
+        checkedAt: '2026-08-09T00:00:00.000Z',
+      },
+    }),
+    mergedAt: '2026-08-09T00:00:01.000Z',
+  })
+
+  expect(contribution.snapshot).toMatchObject({
+    availability: 'counts-only',
+    visibilityAtMerge: 'metadata-only',
+    commentMetadataCount: 3,
+    attachmentMetadataCount: 2,
+    watcherMetadataCount: 4,
+    events: [],
+  })
+  expect(JSON.stringify(contribution.transactItems))
+    .not.toContain('Triage entry was created.')
+})
+
+test('Work Item detail re-reads retained duplicate context without the source row', async () => {
+  const preparingClient = new DynamoDbTeamIssuesClient('WorkItemsTable', 'IssueEventsTable')
+  const contribution = preparingClient.createTriageDuplicateContextTransactionItems({
+    directoryId: 'workspace-1',
+    teamId: 'core',
+    workItemId: 'canonical-work-item',
+    expectedWorkItemRevision: 1,
+    actorUserId: 'triager@example.com',
+    entry: createDuplicateContextEntry(),
+    mergedAt: '2026-08-09T00:00:00.000Z',
+  })
+  const eventItem = contribution.transactItems[1]?.Put?.Item
+  const documentClient = {
+    async send(command: { constructor: { name: string } }) {
+      if (command.constructor.name === 'GetCommand') {
+        return { Item: createScheduleCascadeIssue('core', 'canonical-work-item') }
+      }
+      if (command.constructor.name === 'QueryCommand') {
+        return { Items: eventItem ? [eventItem] : [] }
+      }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  const detail = await client.getTeamIssueDetail(
+    'workspace-1',
+    'core',
+    'canonical-work-item',
+  )
+
+  expect(detail.triageContextSnapshots).toEqual([contribution.snapshot])
+  expect(detail.activity).toEqual([
+    expect.objectContaining({ type: 'triage-context-merged' }),
+  ])
+})
+
+test('Work Item detail rejects unknown duplicate-context fields instead of leaking them', async () => {
+  const preparingClient = new DynamoDbTeamIssuesClient('WorkItemsTable', 'IssueEventsTable')
+  const contribution = preparingClient.createTriageDuplicateContextTransactionItems({
+    directoryId: 'workspace-1',
+    teamId: 'core',
+    workItemId: 'canonical-work-item',
+    expectedWorkItemRevision: 1,
+    actorUserId: 'triager@example.com',
+    entry: createDuplicateContextEntry(),
+    mergedAt: '2026-08-09T00:00:00.000Z',
+  })
+  const eventItem = contribution.transactItems[1]?.Put?.Item
+  if (!eventItem || !isUnknownRecord(eventItem.triageContextSnapshot)) {
+    throw new TypeError('Expected a duplicate-context event fixture.')
+  }
+  const contaminatedEvent = {
+    ...eventItem,
+    triageContextSnapshot: {
+      ...eventItem.triageContextSnapshot,
+      requesterEmail: 'must-not-leak@example.com',
+    },
+  }
+  const documentClient = {
+    async send(command: { constructor: { name: string } }) {
+      if (command.constructor.name === 'GetCommand') {
+        return { Item: createScheduleCascadeIssue('core', 'canonical-work-item') }
+      }
+      if (command.constructor.name === 'QueryCommand') {
+        return { Items: [contaminatedEvent] }
+      }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  await expect(client.getTeamIssueDetail(
+    'workspace-1',
+    'core',
+    'canonical-work-item',
+  )).rejects.toMatchObject({ code: 'InvalidTeamIssue', status: 503 })
+})
+
+test('DynamoDB Work Item creation commits a deterministic Triage acceptance contribution', async () => {
+  const sentCommands: Array<{ input: Record<string, unknown>; name: string }> = []
+  let persistedItem: Record<string, unknown> | undefined
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      sentCommands.push({ input: command.input, name: command.constructor.name })
+      if (command.constructor.name === 'QueryCommand') {
+        return { Items: persistedItem ? [persistedItem] : [] }
+      }
+      if (command.constructor.name === 'GetCommand') {
+        return { Item: persistedItem }
+      }
+      if (command.constructor.name === 'TransactWriteCommand') {
+        const nextItem = readTransactionPutItem(command.input, 'WorkItemsTable')
+        if (!persistedItem) {
+          if (!nextItem) throw new Error('Work Item transaction Put was not captured.')
+          persistedItem = nextItem
+          return {}
+        }
+        const transactItems = command.input.TransactItems
+        const error = new Error('The deterministic Work Item already exists.')
+        error.name = 'TransactionCanceledException'
+        Object.assign(error, {
+          CancellationReasons: Array.isArray(transactItems)
+            ? transactItems.map((_, index) => ({
+                Code: index === 0 ? 'ConditionalCheckFailed' : 'None',
+              }))
+            : [],
+        })
+        throw error
+      }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+  const entryId = 'triage_20260809_acceptance'
+  const contribution = {
+    ConditionCheck: {
+      TableName: 'RequestIntakeTable',
+      Key: { scopeKey: 'WORKSPACE#workspace-1', recordKey: `TRIAGE#${entryId}` },
+      ConditionExpression: 'revision = :expectedRevision',
+      ExpressionAttributeValues: { ':expectedRevision': 1 },
+    },
+  }
+
+  const response = await client.createTeamIssue(
+    'workspace-1',
+    'core-team',
+    {
+      title: 'Accepted Triage request',
+      assigneeUserId: 'demo@example.com',
+      workflowSchemaVersion: 1,
+      workflowStatusId: 'todo',
+      statusCategory: 'unstarted',
+      customFieldValues: {},
+      schedule: createDueDateSchedule('2026-08-14'),
+      priority: 'high',
+      idempotentIssueId: `triage-${'a'.repeat(48)}`,
+      idempotentRequestDigest: 'b'.repeat(64),
+    },
+    'demo@example.com',
+    undefined,
+    undefined,
+    {
+      entryId,
+      occurredAt: '2026-08-09T00:00:00.000Z',
+      transactItems: [contribution],
+    },
+  )
+  const replay = await client.createTeamIssue(
+    'workspace-1',
+    'core-team',
+    {
+      title: 'Accepted Triage request',
+      assigneeUserId: 'demo@example.com',
+      workflowSchemaVersion: 1,
+      workflowStatusId: 'todo',
+      statusCategory: 'unstarted',
+      customFieldValues: {},
+      schedule: createDueDateSchedule('2026-08-14'),
+      priority: 'high',
+      idempotentIssueId: `triage-${'a'.repeat(48)}`,
+      idempotentRequestDigest: 'b'.repeat(64),
+    },
+    'demo@example.com',
+    undefined,
+    undefined,
+    {
+      entryId,
+      occurredAt: '2026-08-09T00:00:00.000Z',
+      transactItems: [contribution],
+    },
+  )
+
+  expect(response.issue).toMatchObject({
+    id: `triage-${'a'.repeat(48)}`,
+    sourceTriageEntryId: entryId,
+  })
+  expect(replay).toEqual(response)
+  const transaction = sentCommands.find((command) =>
+    command.name === 'TransactWriteCommand'
+  )
+  const transactionItems = (transaction?.input as TransactWriteCommandInput | undefined)
+    ?.TransactItems
+  expect(transactionItems?.[0]).toMatchObject({
+    Put: {
+      Item: {
+        importRequestDigest: 'b'.repeat(64),
+        sourceTriageEntryId: entryId,
+      },
+    },
+  })
+  expect(transactionItems?.at(-1)).toEqual(contribution)
+  expect(sentCommands.filter((command) =>
+    command.name === 'TransactWriteCommand'
+  )).toHaveLength(2)
+  expect(sentCommands.filter((command) =>
+    command.name === 'GetCommand'
+  )).toHaveLength(1)
+})
+
 test('DynamoDB Work Item persists and re-reads explicit schedule replacements', async () => {
   let persistedItem: Record<string, unknown> | undefined
   const documentClient = {
@@ -766,6 +1261,11 @@ test('DynamoDB Work Item persists and re-reads explicit schedule replacements', 
             revision: updateValues[':nextRevision'],
             updatedAt: updateValues[':updatedAt'],
             dueDate: updateValues[':dueDate'],
+            dueDateUpdatedAt:
+              updateValues[':dueDateUpdatedAt'] ?? persistedItem.dueDateUpdatedAt,
+            priority: updateValues[':priority'] ?? persistedItem.priority,
+            priorityUpdatedAt:
+              updateValues[':priorityUpdatedAt'] ?? persistedItem.priorityUpdatedAt,
             schedule: updateValues[':schedule'],
           }
         }
@@ -814,6 +1314,8 @@ test('DynamoDB Work Item persists and re-reads explicit schedule replacements', 
     dueDate: '2026-08-07',
     schedule: dateRangeSchedule,
   })
+  expect(created.issue.priorityUpdatedAt).toBe(created.issue.createdAt)
+  expect(created.issue.dueDateUpdatedAt).toBe(created.issue.createdAt)
   await expect(client.getTeamIssueDetail(
     'user#demo@example.com',
     'core-team',
@@ -855,6 +1357,8 @@ test('DynamoDB Work Item persists and re-reads explicit schedule replacements', 
     dueDate: '2026-08-12',
     schedule: milestoneSchedule,
   })
+  expect(updated.issue.dueDateUpdatedAt).toBe(updated.issue.updatedAt)
+  expect(updated.issue.priorityUpdatedAt).toBe(created.issue.priorityUpdatedAt)
   await expect(client.getTeamIssueDetail(
     'user#demo@example.com',
     'core-team',
@@ -894,6 +1398,23 @@ test('DynamoDB Work Item persists and re-reads explicit schedule replacements', 
       plannedEffortMinutes: 60,
     },
   })
+  expect(deadlineUpdated.issue.dueDateUpdatedAt).toBe(deadlineUpdated.issue.updatedAt)
+  expect(deadlineUpdated.issue.priorityUpdatedAt).toBe(created.issue.priorityUpdatedAt)
+
+  const priorityUpdated = await client.updateTeamIssue(
+    'user#demo@example.com',
+    'core-team',
+    created.issue.id,
+    {
+      expectedRevision: 3,
+      priority: 'medium',
+    },
+    'demo@example.com',
+  )
+
+  expect(priorityUpdated.issue.priority).toBe('medium')
+  expect(priorityUpdated.issue.priorityUpdatedAt).toBe(priorityUpdated.issue.updatedAt)
+  expect(priorityUpdated.issue.dueDateUpdatedAt).toBe(deadlineUpdated.issue.dueDateUpdatedAt)
 })
 
 test('DynamoDB Work Item writes reject invalid schedules before persistence', async () => {

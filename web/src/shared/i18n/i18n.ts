@@ -65,6 +65,7 @@ export function createSidebarLabels(locale: Locale): SidebarLabels {
   const t = createTranslator(locale)
   const navKeyMap: Record<SidebarNavId, MessageKey> = {
     home: 'sidebar.nav.home',
+    focus: 'sidebar.nav.focus',
     'my-tasks': 'sidebar.nav.myTasks',
     inbox: 'sidebar.nav.inbox',
     requests: 'sidebar.nav.requests',
@@ -142,6 +143,7 @@ export function createSidebarLabels(locale: Locale): SidebarLabels {
       confirm: t('sidebar.archive.confirm'),
     },
     teamOverview: t('sidebar.teamOverview'),
+    triage: t('sidebar.triage'),
     issues: t('sidebar.issues'),
     members: t('sidebar.members'),
     projectCount: (count) =>
@@ -151,6 +153,7 @@ export function createSidebarLabels(locale: Locale): SidebarLabels {
       t('sidebar.unreadCount').replace('{count}', String(count)),
     nav: {
       home: t(navKeyMap.home),
+      focus: t(navKeyMap.focus),
       'my-tasks': t(navKeyMap['my-tasks']),
       inbox: t(navKeyMap.inbox),
       requests: t(navKeyMap.requests),

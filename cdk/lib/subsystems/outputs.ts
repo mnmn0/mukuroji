@@ -85,6 +85,8 @@ export type StackOutputResources = {
   readonly scheduleDlq: sqs.IQueue;
   /** Durable notification table. */
   readonly notificationsTable: dynamodb.ITable;
+  /** Focus queue preferences and snooze state table. */
+  readonly focusTable: dynamodb.ITable;
   /** Realtime connection and session table. */
   readonly realtimeSessionsTable: dynamodb.ITable;
   /** File proofing metadata table. */
@@ -135,6 +137,10 @@ export type StackOutputResources = {
   readonly requestEmailIngestionFunction: lambda.IFunction;
   /** Dead-letter queue for request email ingestion failures. */
   readonly requestEmailIngestionDlq: sqs.IQueue;
+  /** Lambda function that processes scheduled Triage wake-ups. */
+  readonly triageScheduleFunction?: lambda.IFunction;
+  /** Dead-letter queue for scheduled Triage wake-up failures. */
+  readonly triageScheduleDlq?: sqs.IQueue;
   /** Stream-only tenant lifecycle starter and retention worker. */
   readonly tenantOperationFunction: lambda.IFunction;
   /** Queued export artifact resource owner. */
@@ -300,6 +306,9 @@ export function buildStackOutputs(
   new cdk.CfnOutput(scope, 'NotificationsTableName', {
     value: resources.notificationsTable.tableName,
   });
+  new cdk.CfnOutput(scope, 'FocusTableName', {
+    value: resources.focusTable.tableName,
+  });
   new cdk.CfnOutput(scope, 'RealtimeSessionsTableName', {
     value: resources.realtimeSessionsTable.tableName,
   });
@@ -384,6 +393,18 @@ export function buildStackOutputs(
   new cdk.CfnOutput(scope, 'RequestEmailIngestionDlqUrl', {
     value: resources.requestEmailIngestionDlq.queueUrl,
   });
+  if (resources.triageScheduleFunction && resources.triageScheduleDlq) {
+    new cdk.CfnOutput(scope, 'TriageScheduleFunctionName', {
+      value: resources.triageScheduleFunction.functionName,
+    });
+    new cdk.CfnOutput(scope, 'TriageScheduleDlqUrl', {
+      value: resources.triageScheduleDlq.queueUrl,
+    });
+  } else if (resources.triageScheduleFunction || resources.triageScheduleDlq) {
+    throw new Error(
+      'Triage schedule outputs require both the Lambda and dead-letter queue.',
+    );
+  }
   new cdk.CfnOutput(scope, 'TenantOperationFunctionName', {
     value: resources.tenantOperationFunction.functionName,
   });

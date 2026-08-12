@@ -28,6 +28,10 @@ export type InboxNotification = {
    */
   id: string
   /**
+   * Immutable source event shared with a continuing Focus signal when available.
+   */
+  eventId?: string
+  /**
    * 通知元 event の種別です。
    */
   eventType: string
@@ -63,6 +67,10 @@ export type InboxNotification = {
    * 通知対象の canonical Work Item ID です。
    */
   issueId?: string
+  /**
+   * Team Triage queue の対象 Entry ID です。
+   */
+  triageEntryId?: string
   /**
    * 通知対象の comment ID です。
    */

@@ -615,8 +615,8 @@ export type AssignRequestSubmissionAction = {
   action: 'assign'
   /** 読み込み時点の submission revision です。 */
   expectedRevision: number
-  /** 新しい queue assignee member ID です。 */
-  assigneeUserId: string
+  /** New queue assignee member ID, or null to leave the Triage entry unowned. */
+  assigneeUserId: string | null
 }
 
 /** Requester へ追加情報を求める action です。 */

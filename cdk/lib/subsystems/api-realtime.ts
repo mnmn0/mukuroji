@@ -299,6 +299,7 @@ function bindApiRuntimeConfiguration(
     tenantAdministrationTable,
     legacyTasksTable,
     notificationsTable,
+    focusTable,
     planningTable,
     projectDirectoryTable,
     realtimeSessionsTable,
@@ -479,12 +480,16 @@ function bindApiRuntimeConfiguration(
       FILE_UPLOAD_URL_TTL_SECONDS: fileUploadUrlTtlSeconds.valueAsString,
       NOTIFICATIONS_STATUS_INDEX_NAME: 'RecipientStatusIndex',
       NOTIFICATIONS_TABLE_NAME: notificationsTable.tableName,
+      FOCUS_TABLE_NAME: focusTable.tableName,
       CAPACITY_PLANNING_TABLE_NAME: capacityPlanningTable.tableName,
       PLANNING_TABLE_NAME: planningTable.tableName,
       REALTIME_SESSIONS_TABLE_NAME: realtimeSessionsTable.tableName,
       REQUEST_INTAKE_TABLE_NAME: requestIntakeTable.tableName,
       REQUEST_QUEUE_INDEX_NAME: 'RequestQueueIndex',
       REQUEST_RATE_LIMIT_PER_HOUR: requestRateLimitPerHour.valueAsString,
+      TRIAGE_OWNER_ACTIVITY_INDEX_NAME: 'triage-owner-activity-index',
+      TRIAGE_TEAM_ACTIVITY_INDEX_NAME: 'triage-team-activity-index',
+      TRIAGE_WAKE_INDEX_NAME: 'triage-wake-index',
       WEBHOOK_DELIVERY_QUEUE_URL: webhookDeliveryQueue.queueUrl,
       WORK_ITEM_CONFIGURATION_TABLE_NAME:
         workItemConfigurationTable.tableName,
@@ -558,6 +563,7 @@ export function buildApiRuntime(
     tenantAdministrationTable,
     legacyTasksTable,
     notificationsTable,
+    focusTable,
     planningTable,
     projectDirectoryTable,
     realtimeSessionsTable,
@@ -635,6 +641,14 @@ export function buildApiRuntime(
   collaborationTable.grants.readWriteData(apiFunction);
   fileProofingTable.grants.readWriteData(apiFunction);
   notificationsTable.grants.readWriteData(apiFunction);
+  apiFunction.addToRolePolicy(new iam.PolicyStatement({
+    actions: [
+      'dynamodb:GetItem',
+      'dynamodb:PutItem',
+      'dynamodb:Query',
+    ],
+    resources: [focusTable.tableArn],
+  }));
   workspaceSearchTable.grants.readWriteData(apiFunction);
   realtimeSessionsTable.grants.readWriteData(apiFunction);
   const apiCapacityPlanningDataPolicy = new iam.Policy(
@@ -732,6 +746,7 @@ export function buildApiRuntime(
         actions: ['dynamodb:ConditionCheckItem'],
         resources: [
           workItemsTable.tableArn,
+          requestIntakeTable.tableArn,
           projectDirectoryTable.tableArn,
           workspaceAccessTable.tableArn,
           planningTable.tableArn,
@@ -740,6 +755,7 @@ export function buildApiRuntime(
           documentsTable.tableArn,
           collaborationTable.tableArn,
           fileProofingTable.tableArn,
+          focusTable.tableArn,
           workspaceSearchTable.tableArn,
         ],
         conditions: {

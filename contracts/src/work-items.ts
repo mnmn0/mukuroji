@@ -7,6 +7,11 @@ import type {
   WorkItemAffectedProject,
   WorkItemScheduleDependencyConflict,
 } from './schedule-dependencies'
+import type {
+  TriageEntryEvent,
+  TriagePermissionVisibility,
+  TriageSourceKind,
+} from './triage'
 
 /**
  * 現在の canonical Work Item schema version です。
@@ -350,6 +355,14 @@ export type ApprovalSummary = {
    * 判断待ち approval の最も近い期限です。
    */
   nextDueAt?: string
+  /**
+   * 判断待ち approval の期限一覧です。重複値は同一期限の別 approval を表します。
+   */
+  pendingDueAt?: string[]
+  /**
+   * Timestamp of the latest approval mutation represented by this aggregate.
+   */
+  updatedAt?: string
 }
 
 /**
@@ -402,6 +415,10 @@ type WorkItemBase = {
    * Work Item の優先度です。
    */
   priority: WorkItemPriority
+  /** Timestamp of the latest mutation that changed the priority value. */
+  priorityUpdatedAt?: string
+  /** Timestamp of the latest mutation that changed the derived due date. */
+  dueDateUpdatedAt?: string
   /**
    * 作成日時の ISO 8601 timestamp です。
    */
@@ -436,6 +453,8 @@ export type CanonicalWorkItem = WorkItemBase & {
   creatorMemberKey: string
   /** Request intake から作成された場合の source submission ID です。 */
   sourceRequestId?: string
+  /** Team Triage から作成された場合の source Entry ID です。 */
+  sourceTriageEntryId?: string
   /** Canonical Work Item は legacy の担当者 literal を持ちません。 */
   assignee?: never
   /** Canonical Work Item は legacy の担当者表示文言 key を持ちません。 */
@@ -458,6 +477,61 @@ export type CanonicalWorkItem = WorkItemBase & {
   updatedAt: string
   /** Canonical table を保存元とすることを表します。 */
   source: 'dynamodb'
+}
+
+/** The permission-safe amount of source context retained with a duplicate Work Item merge. */
+export type WorkItemTriageContextAvailability =
+  | 'summary-metadata'
+  | 'counts-only'
+  | 'restricted'
+  | 'redacted'
+
+/** One allowlisted Triage history summary retained with a canonical Work Item. */
+export type WorkItemTriageContextEventSnapshot = {
+  /** Stable Triage event identifier retained for provenance and de-duplication. */
+  eventId: string
+  /** Provider-neutral Triage lifecycle event type. */
+  type: TriageEntryEvent['type']
+  /** Bounded provider-secret-free summary captured by Team Triage. */
+  summary: string
+  /** ISO 8601 instant when the source-side event occurred. */
+  createdAt: string
+}
+
+/**
+ * De-identified source provenance retained atomically on a canonical Work Item duplicate merge.
+ *
+ * Source bodies, requester identity, raw provider IDs, permalinks, attachment names, and watcher
+ * identities are deliberately excluded. Access is therefore governed by the canonical Work Item,
+ * while source retention or later redaction cannot erase this bounded operational snapshot.
+ */
+export type WorkItemTriageContextSnapshot = {
+  /** Triage Entry that contributed the duplicate context. */
+  triageEntryId: string
+  /** Provider-neutral intake channel. */
+  sourceKind: TriageSourceKind
+  /** Source visibility that was live-authorized when the merge was prepared. */
+  visibilityAtMerge: TriagePermissionVisibility
+  /** Amount of permission-safe context included in this snapshot. */
+  availability: WorkItemTriageContextAvailability
+  /** Source receipt instant retained for provenance ordering. */
+  receivedAt: string
+  /** Most recent source activity instant observed before the merge. */
+  lastActivityAt: string
+  /** Source retention boundary observed before the merge. */
+  sourceRetentionExpiresAt: string
+  /** Source redaction instant when redaction had already occurred before the merge. */
+  sourceRedactedAt?: string
+  /** Number of source comments represented by retained metadata at merge time. */
+  commentMetadataCount: number
+  /** Number of source attachments represented by retained metadata at merge time. */
+  attachmentMetadataCount: number
+  /** Number of source watchers represented by retained metadata at merge time. */
+  watcherMetadataCount: number
+  /** Bounded internal lifecycle summaries included only under full source visibility. */
+  events: WorkItemTriageContextEventSnapshot[]
+  /** ISO 8601 instant when the snapshot and duplicate resolution committed atomically. */
+  mergedAt: string
 }
 
 /** Canonical Team/project/Workspace API と画面が共有する Work Item です。 */

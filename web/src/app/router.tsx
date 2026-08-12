@@ -10,6 +10,7 @@ import { EnterpriseSecurityPage } from '../pages/workspace/EnterpriseSecurityPag
 import { GoalDocumentsPage } from '../pages/workspace/GoalDocumentsPage'
 import { HelpPage } from '../pages/workspace/HelpPage'
 import { HomePage } from '../pages/workspace/HomePage'
+import { FocusPage } from '../pages/workspace/FocusPage'
 import { InboxPage } from '../pages/workspace/InboxPage'
 import { MyTasksPage } from '../pages/workspace/MyTasksPage'
 import { PlanningPage } from '../pages/workspace/PlanningPage'
@@ -20,6 +21,7 @@ import { TaskPage } from '../pages/workspace/TaskPage'
 import { TeamIssuePage } from '../pages/workspace/TeamIssuePage'
 import { TeamMembersPage } from '../pages/workspace/TeamMembersPage'
 import { TeamOverviewPage } from '../pages/workspace/TeamOverviewPage'
+import { TeamTriagePage } from '../pages/workspace/TeamTriagePage'
 import { ProjectTasksRedirect } from './ProjectTasksRedirect'
 import { WorkspaceCommandMenuLayout } from '../commands/ui/WorkspaceCommandMenu'
 import { SearchPage } from '../search/SearchPage'
@@ -70,6 +72,10 @@ export const appRoutes: RouteObject[] = [
                 element: <HomePage />,
               },
               {
+                path: '/focus',
+                element: <FocusPage />,
+              },
+              {
                 path: '/my-tasks',
                 element: <MyTasksPage />,
               },
@@ -96,6 +102,10 @@ export const appRoutes: RouteObject[] = [
               {
                 path: '/teams/:teamId/members',
                 element: <TeamMembersPage />,
+              },
+              {
+                path: '/teams/:teamId/triage',
+                element: <TeamTriagePage />,
               },
               {
                 path: '/teams/:teamId/projects',

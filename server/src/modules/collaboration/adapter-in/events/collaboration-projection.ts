@@ -86,6 +86,8 @@ export type AuditProjectionEvent = {
   teamId?: string
   /** 現在の assigned project を再解決する Work Item ID です。 */
   issueId?: string
+  /** Team Triage notification の構造化 Entry target です。 */
+  triageEntryId?: string
   /** 現在権限の照合に使う project ID です。 */
   projectId?: string
   /** current comment ID です。 */
@@ -528,6 +530,13 @@ async function processRecord(
     return
   }
 
+  const parentCondition = currentScope.checked && authorizationEvent.teamId && authorizationEvent.issueId
+    ? createCuratedContextSearchParentCondition(
+        requireEnv('TEAM_ISSUES_TABLE_NAME'),
+        authorizationEvent,
+        currentScope,
+      )
+    : undefined
   const watcherCandidates = await readSubscribedWatcherCandidates(authorizationEvent)
   const candidates = groupNotificationCandidates({
     ...authorizationEvent,
@@ -555,7 +564,11 @@ async function processRecord(
   ).filter(isDefined)
 
   await Promise.all(
-    eligibleCandidates.map((candidate) => projectNotification(authorizationEvent, candidate)),
+    eligibleCandidates.map((candidate) => projectNotification(
+      authorizationEvent,
+      candidate,
+      parentCondition,
+    )),
   )
   await publishRealtimeInvalidation(event, dependencies.realtime)
   await markProjectionProcessed(event.eventId)
@@ -985,6 +998,7 @@ export function createCuratedContextSearchParentCondition(
 async function projectNotification(
   event: AuditProjectionEvent,
   candidate: GroupedNotificationCandidate,
+  parentCondition?: ReturnType<typeof createCuratedContextSearchParentCondition>,
 ) {
   const {
     recipientKey,
@@ -1006,6 +1020,7 @@ async function projectNotification(
     await documentClient.send(
       new TransactWriteCommand({
         TransactItems: [
+          ...(parentCondition ? [parentCondition] : []),
           {
             Put: {
               TableName: requireEnv('NOTIFICATIONS_TABLE_NAME'),
@@ -1034,6 +1049,9 @@ async function projectNotification(
       }),
     )
   } catch (error) {
+    if (parentCondition && isConditionalTransactionCancellationAt(error, 0)) {
+      throw error
+    }
     if (!isConditionalTransactionCancellation(error)) {
       throw error
     }
@@ -1160,6 +1178,7 @@ export function createNotificationProjectionItem(
     entityKey: event.scopeKey,
     targetId: event.targetId,
     issueId: event.issueId,
+    triageEntryId: event.triageEntryId,
     commentId: event.commentId,
     rootCommentId: event.rootCommentId,
     projectId: event.projectId,
@@ -1554,6 +1573,7 @@ export function parseAuditProjectionEvent(
     deepLink: readString(metadata.deepLink),
     teamId: readString(metadata.teamId),
     issueId: readString(metadata.issueId),
+    triageEntryId: readString(metadata.triageEntryId),
     projectId: readString(metadata.projectId),
     commentId: readString(metadata.commentId),
     contextItemId: readString(metadata.contextItemId),
@@ -1663,6 +1683,23 @@ function isConditionalTransactionCancellation(error: unknown) {
   return Array.isArray(reasons) && reasons.some((reason) =>
     isRecord(reason) && reason.Code === 'ConditionalCheckFailed'
   )
+}
+
+/**
+ * Checks whether one transaction item failed its conditional expression.
+ *
+ * @param error - DynamoDB transaction error.
+ * @param index - Zero-based transaction item index to inspect.
+ * @returns Whether the selected transaction item failed conditionally.
+ */
+function isConditionalTransactionCancellationAt(error: unknown, index: number) {
+  if (!isAwsNamedError(error, 'TransactionCanceledException') || !isRecord(error)) {
+    return false
+  }
+
+  const reasons = error.CancellationReasons
+  const reason = Array.isArray(reasons) ? reasons[index] : undefined
+  return isRecord(reason) && reason.Code === 'ConditionalCheckFailed'
 }
 
 function currentEpochSeconds() {

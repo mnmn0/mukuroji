@@ -2,6 +2,8 @@
 
 Mukuroji の Inbox は、Work Item の現在状態から都度組み立てる attention queue ではなく、ユーザー別に永続化した notification timeline を正本とします。
 
+現在も継続する blocker、review、期限、approval などは [Focus queue](./focus.md) が canonical source を再評価して表示します。通知の read/archive/snooze は Focus signal を解消せず、両画面は共通の `eventId` と Work Item scope で相互リンクします。Focus から archived / snoozed event を開く場合は該当 state filter も URL に束縛し、Web は Focus source の bounded windowを覆う範囲でcursor pageを自動取得してexact rowへscroll/focusします。
+
 ## Event から notification まで
 
 状態変更と同じ DynamoDB transaction に保存された `AuditEventsTable` の event を、`CollaborationProjectionFunction` が stream から処理します。recipient ごとの notification と processed receipt は同じ transaction に保存し、同じ event が再配送されても notification は一度だけ作成されます。
@@ -13,6 +15,7 @@ Mukuroji の Inbox は、Work Item の現在状態から都度組み立てる at
 - Work Item schedule 変更: `schedule-change`
 - 定期 due scan: `due` / `overdue`
 - comment / reply: `mention` / `reply` / `watcher` / `project-watcher`
+- Triage assignment / SLA / escalation: `triage-assignment` / `triage-sla` / `triage-escalation`
 
 Approval と automation の各 subsystem は、実装時に同じ契約で `approval` / `automation-failure` candidate と deep link を発行します。notification projector は event type を限定せず、候補を持つ audit event を同じ重複排除・認可ルールで扱います。
 
@@ -30,7 +33,7 @@ recipientStatusKey    = <recipientKey>#<unread|read|archived|snoozed>
 
 `RecipientStatusIndex` 導入前の notification row は、recipient の初回 read 時に base partition を bounded pagination で強整合走査し、state key と version を条件付きで補完します。完了 marker も同じ partition に保存するため、以後の request は一度きりの移行を繰り返しません。
 
-read、archive、snooze は notification row に version 付きで保存します。snooze 期限を過ぎた row は次の Inbox/count read で read/unread state に戻ります。`mark-all-read` は active unread row のみを更新し、archive や有効な snooze は解除しません。
+read、archive、snooze は notification row に version 付きで保存します。snooze 期限を過ぎた row は次の Inbox/count read で read/unread state に戻ります。この解除処理は250件 × 4 page（最大1,000行）で正常に打ち切り、残りは次回の read へ持ち越します。cursor が進まない場合だけ `503` で fail closed します。`mark-all-read` は active unread row のみを更新し、archive や有効な snooze は解除しません。
 
 ## API
 
@@ -54,6 +57,16 @@ Work Item は実在する router contract に合わせて次の形式で開き�
 ```text
 /teams/<teamId>/issues?issueId=<issueId>
 ```
+
+Triage notification は `teamId` と `triageEntryId` の構造化 target から次を生成します。
+
+```text
+/teams/<teamId>/triage?entryId=<triageEntryId>
+```
+
+Web は構造化 target を保存済み `deepLink` より優先し、Team/Entry に束縛したルートを
+生成します。Triage から受け入れた Work Item と source へ移動し、Work Item 側の
+`sourceTriageEntryId` から元の受入判断へ戻れます。
 
 Comment notification は `commentId` と `rootCommentId` を追加します。Web は必要な reply page を取得した後、対象 comment を scroll/focus します。API は保存済みの内部相対 path だけを返し、外部 URL は deep link として扱いません。
 

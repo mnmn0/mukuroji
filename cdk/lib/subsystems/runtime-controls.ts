@@ -29,6 +29,7 @@ export type RuntimeControlScope =
   | 'realtime'
   | 'request-intake-email'
   | 'tenant-operation-execution'
+  | 'triage-schedule'
   | 'webhook-delivery'
   | 'work-item-import';
 

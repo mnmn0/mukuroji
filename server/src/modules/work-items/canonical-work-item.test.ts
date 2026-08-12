@@ -59,6 +59,9 @@ describe('canonical Work Item validation', () => {
     expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({ sourceRequestId: 'req_20260716_example' })))
       .toBe(true)
     expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({
+      sourceTriageEntryId: 'triage_20260809_example',
+    }))).toBe(true)
+    expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({
       importRequestDigest: 'a'.repeat(64),
     }))).toBe(true)
     expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({
@@ -172,6 +175,10 @@ describe('canonical Work Item validation', () => {
   test('rejects an invalid request source reference', () => {
     expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({ sourceRequestId: '' }))).toBe(false)
     expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({ sourceRequestId: 42 }))).toBe(false)
+    expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({ sourceTriageEntryId: '' })))
+      .toBe(false)
+    expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({ sourceTriageEntryId: 42 })))
+      .toBe(false)
   })
 
   test('rejects legacy and response-only fields', () => {
@@ -278,6 +285,19 @@ describe('canonical Work Item validation', () => {
     }))).toBe(false)
     expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({
       updatedAt: '2026-06-30T09:00:00.000Z',
+    }))).toBe(false)
+    expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({
+      dueDateUpdatedAt: '2026-07-10T09:00:00.000Z',
+      priorityUpdatedAt: '2026-07-11T09:00:00.000Z',
+    }))).toBe(true)
+    expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({
+      priorityUpdatedAt: '2026-06-30T09:00:00.000Z',
+    }))).toBe(false)
+    expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({
+      dueDateUpdatedAt: '2026-07-13T09:00:00.000Z',
+    }))).toBe(false)
+    expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({
+      priorityUpdatedAt: '2026-07-10T09:00:00Z',
     }))).toBe(false)
     expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({
       createdAt: '9999-12-31T23:59:59.999Z',

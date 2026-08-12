@@ -1,4 +1,9 @@
-import { createProjectIssuesPath, createTeamIssuesPath } from '../../shared/routing/paths'
+import {
+  createProjectIssuesPath,
+  createTeamIssuesPath,
+  createTeamTriagePath,
+} from '../../shared/routing/paths'
+import { isSafeApplicationPath } from '../../shared/routing/applicationPath'
 import type { InboxNotification } from '../api'
 
 /**
@@ -8,6 +13,10 @@ import type { InboxNotification } from '../api'
  * @returns 現在の router が扱える同一 origin path です。
  */
 export function resolveNotificationPath(notification: InboxNotification) {
+  if (notification.teamId && notification.triageEntryId) {
+    return createTeamTriagePath(notification.teamId, notification.triageEntryId)
+  }
+
   if (notification.teamId && notification.issueId) {
     return notification.projectId
       ? createProjectIssuesPath(
@@ -53,16 +62,6 @@ export function resolveNotificationPath(notification: InboxNotification) {
   }
 
   return `${path}?${searchParams.toString()}${hash ? `#${hash}` : ''}`
-}
-
-/**
- * 同一 origin の absolute path として安全に扱えるか判定します。
- *
- * @param value - API が返した deep link 候補です。
- * @returns 外部 URL や protocol-relative URL でなければ true です。
- */
-export function isSafeApplicationPath(value: string) {
-  return value.startsWith('/') && !value.startsWith('//') && !value.includes('\\')
 }
 
 function normalizeLegacyTeamIssuePath(value: string, commentId?: string) {

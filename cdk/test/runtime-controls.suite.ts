@@ -38,6 +38,7 @@ const controlledFunctionScopes = new Map([
   ['TenantOperationFunction9BEB780E', 'tenant-operation-execution'],
   ['TenantSecretsCapabilityFunctionAA395B2E', 'tenant-operation-execution'],
   ['TenantVerificationCapabilityFunctionFBC78F82', 'tenant-operation-execution'],
+  ['TriageScheduleFunctionE7D8D4C9', 'triage-schedule'],
   ['WebhookDeliveryFunctionEA305509', 'webhook-delivery'],
   ['WorkItemImportFunction651B2883', 'work-item-import'],
 ]);
@@ -455,7 +456,7 @@ test('waits read-only for a naturally OK actionable alarm before environment cre
   }]);
 });
 
-test('grants the fourteen data-plane roles only the exact configuration ARN', () => {
+test('grants every controlled data-plane role only the exact configuration ARN', () => {
   const resources = synthesizedTemplate.toJSON().Resources;
   const readPolicy = resources.RuntimeControlReadPolicyF2A31863.Properties;
   const controlledRoleReferences = [...controlledFunctionScopes.keys()]
@@ -499,13 +500,13 @@ test('grants the fourteen data-plane roles only the exact configuration ARN', ()
     }],
     Version: '2012-10-17',
   });
-  expect(readPolicy.Roles).toHaveLength(21);
+  expect(readPolicy.Roles).toHaveLength(22);
   expect(readPolicy.Roles).toEqual(
     expect.arrayContaining(controlledRoleReferences),
   );
 });
 
-test('binds exact runtime-control settings through API config and twenty direct environments', () => {
+test('binds exact runtime-control settings through API config and twenty-one direct environments', () => {
   const resources = synthesizedTemplate.toJSON().Resources;
   const lambdaEntries = Object.entries(
     synthesizedTemplate.findResources('AWS::Lambda::Function'),
