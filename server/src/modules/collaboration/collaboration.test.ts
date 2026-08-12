@@ -1667,6 +1667,66 @@ test('fences a captured Document source and its authorization generation in the 
   }))
 })
 
+test('deduplicates the Enterprise control fence when mutation and source snapshots agree', async () => {
+  const configuredTableName = Bun.env.ENTERPRISE_IDENTITY_TABLE_NAME
+  Bun.env.ENTERPRISE_IDENTITY_TABLE_NAME = 'enterprise-identity-table'
+  try {
+    const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
+    const memory = createCollaborationMemory([], 'audit-table')
+    const actor = { id: 'author@example.com', displayName: 'Author' }
+    await memory.client.createCuratedContextItem({
+      workspaceId: 'workspace#one',
+      teamId: 'team-a',
+      issueId: 'issue-1',
+      entityKey,
+      actor,
+      authorizationSnapshot: {
+        memberKey: actor.id,
+        workspaceMemberVersion: 4,
+        enterpriseControlRevision: 11,
+      },
+      kind: 'decision',
+      title: 'Use one Enterprise fence',
+      body: 'The mutation and source observed the same authorization generation.',
+      source: {
+        kind: 'document',
+        sourceId: 'document-1',
+        capturedRevision: 7,
+        currentRevision: 7,
+        occurredAt: '2026-07-12T00:00:00.000Z',
+        availability: 'available',
+      },
+      sourceAuthorizationSnapshot: {
+        sourceId: 'document-1',
+        documentRevision: 7,
+        documentAuthorizationRevision: 3,
+        workspaceMemberKey: actor.id,
+        workspaceMemberVersion: 4,
+        planningRevision: 9,
+        enterpriseControlRevision: 11,
+      },
+    })
+
+    const transactionItems = memory.transactions[0]?.TransactItems
+    if (!Array.isArray(transactionItems)) {
+      throw new Error('Expected a context create transaction.')
+    }
+    const enterpriseConditions = transactionItems.filter((item): item is Record<string, unknown> => {
+      if (!isTestRecord(item) || !isTestRecord(item.ConditionCheck)) return false
+      const condition = item.ConditionCheck
+      return condition.TableName === 'enterprise-identity-table' &&
+        isTestRecord(condition.Key) && condition.Key.recordKey === 'CONTROL'
+    })
+    expect(enterpriseConditions).toHaveLength(1)
+  } finally {
+    if (configuredTableName === undefined) {
+      delete Bun.env.ENTERPRISE_IDENTITY_TABLE_NAME
+    } else {
+      Bun.env.ENTERPRISE_IDENTITY_TABLE_NAME = configuredTableName
+    }
+  }
+})
+
 test('fences Activity source capture against the audit retention deadline', async () => {
   const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
   const memory = createCollaborationMemory([], 'audit-table')

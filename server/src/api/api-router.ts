@@ -18534,22 +18534,52 @@ async function createWorkspaceSearchContext(
  *
  * @param workspaceId - Workspace whose Project authorization is being checked.
  * @param expectedPlanningRevision - Generation captured when the search context was built.
+ * @param expectedDocumentAuthorizationRevision - Document ACL generation captured with the context.
+ * @param expectedDocumentAccess - Document authorization generations captured with the context.
  * @returns Whether the original Project access snapshot is still current.
  */
 async function isWorkspaceSearchAuthorizationCurrent(
   workspaceId: string,
   expectedPlanningRevision: number,
   expectedDocumentAuthorizationRevision?: number,
+  expectedDocumentAccess?: DocumentAccessContext,
 ): Promise<boolean> {
-  const [planningRevision, documentAuthorizationRevision] = await Promise.all([
+  const authorizationSnapshots = expectedDocumentAccess?.authorizationSnapshots ?? []
+  const memberSnapshots = authorizationSnapshots.filter((snapshot) =>
+    snapshot.workspaceMemberKey !== undefined || snapshot.workspaceMemberVersion !== undefined
+  )
+  const enterpriseSnapshots = authorizationSnapshots.filter((snapshot) =>
+    snapshot.enterpriseControlRevision !== undefined
+  )
+  const [planningRevision, documentAuthorizationRevision, enterpriseSnapshot, members] = await Promise.all([
     workItemDependencies.planning.getAuthorizationRevision(workspaceId),
     expectedDocumentAuthorizationRevision === undefined
       ? Promise.resolve(undefined)
       : workItemDependencies.documents.getAuthorizationRevision(workspaceId),
+    enterpriseSnapshots.length === 0
+      ? Promise.resolve(undefined)
+      : workspaceDependencies.enterpriseIdentity.read.getSnapshot(workspaceId),
+    Promise.all(memberSnapshots.map((snapshot) =>
+      snapshot.workspaceMemberKey === undefined
+        ? Promise.resolve(undefined)
+        : workspaceDependencies.workspaceAccess.getActiveMember(
+            workspaceId,
+            snapshot.workspaceMemberKey,
+          )
+    )),
   ])
-  return planningRevision === expectedPlanningRevision &&
+  return authorizationSnapshots.every((snapshot) => snapshot.workspaceId === workspaceId) &&
+    planningRevision === expectedPlanningRevision &&
     (expectedDocumentAuthorizationRevision === undefined ||
-      documentAuthorizationRevision === expectedDocumentAuthorizationRevision)
+      documentAuthorizationRevision === expectedDocumentAuthorizationRevision) &&
+    memberSnapshots.every((snapshot, index) =>
+      snapshot.workspaceMemberKey !== undefined &&
+      snapshot.workspaceMemberVersion !== undefined &&
+      members[index]?.version === snapshot.workspaceMemberVersion
+    ) &&
+    enterpriseSnapshots.every((snapshot) =>
+      enterpriseSnapshot?.controlRevision === snapshot.enterpriseControlRevision
+    )
 }
 
 /**
@@ -19163,6 +19193,8 @@ async function resolveCurrentWorkspaceSearchScope(
       if (!await isWorkspaceSearchAuthorizationCurrent(
         workspaceId,
         context.planningRevision,
+        undefined,
+        context.documentAccess,
       )) {
         return undefined
       }
@@ -22154,6 +22186,7 @@ async function reconcileCuratedContextSourcesForViewer(
         principal.directoryId,
         searchContext.planningRevision,
         searchContext.documentAuthorizationRevision,
+        searchContext.documentAccess,
       )
     ) {
       return reconciled

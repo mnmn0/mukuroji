@@ -110,6 +110,8 @@ type ResolutionSourceTarget = {
   commentId: string
   /** Root thread that owns the accepted source. */
   rootCommentId: string
+  /** Route target that was active when this local source was selected. */
+  routeTargetKey: string
 }
 
 /**
@@ -167,10 +169,20 @@ export function IssueConversationTab({
   const focusLoadMore = controller.loadMore
   const focusLoadMoreReplies = controller.loadMoreReplies
   const focusReplyPagination = controller.replyPagination
-  const focusedCommentTargetId =
-    resolutionSourceTarget?.commentId ?? focusedCommentId
-  const focusedRootTargetId =
-    resolutionSourceTarget?.rootCommentId ?? focusedRootCommentId
+  const routeTargetKey = JSON.stringify([focusedCommentId ?? null, focusedRootCommentId ?? null])
+  const activeResolutionSourceTarget = resolutionSourceTarget?.routeTargetKey === routeTargetKey
+    ? resolutionSourceTarget
+    : undefined
+  const focusedCommentTargetId = activeResolutionSourceTarget?.commentId ?? focusedCommentId
+  const focusedRootTargetId = activeResolutionSourceTarget?.rootCommentId ?? focusedRootCommentId
+
+  useEffect(() => {
+    queueMicrotask(() => {
+      setResolutionSourceTarget((target) =>
+        target?.routeTargetKey === routeTargetKey ? target : undefined
+      )
+    })
+  }, [routeTargetKey])
 
   /**
    * Opens the accepted-resolution editor and remembers its keyboard trigger.
@@ -417,6 +429,7 @@ export function IssueConversationTab({
                     setResolutionSourceTarget({
                       commentId: resolution.sourceCommentId,
                       rootCommentId: resolution.sourceRootCommentId,
+                      routeTargetKey,
                     })
                   }
                   onLoadMoreHistory={

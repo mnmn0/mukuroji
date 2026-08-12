@@ -4885,6 +4885,18 @@ function assertCuratedContextDocumentSourceAuthorizationSnapshot(
     )
   }
   if (
+    snapshot.enterpriseControlRevision !== undefined &&
+    input.authorizationSnapshot?.enterpriseControlRevision !== undefined &&
+    snapshot.enterpriseControlRevision !==
+      input.authorizationSnapshot.enterpriseControlRevision
+  ) {
+    throw new CollaborationError(
+      409,
+      'CuratedContextSourceAuthorizationChanged',
+      'Enterprise authorization changed while the Document source was being read.',
+    )
+  }
+  if (
     snapshot.workspaceMemberKey === undefined &&
     snapshot.workspaceMemberVersion !== undefined
   ) {
@@ -5137,7 +5149,11 @@ function curatedContextDocumentSourceConditions(
   }
 
   const enterpriseTableName = readEnvironment('ENTERPRISE_IDENTITY_TABLE_NAME')
-  if (enterpriseTableName && snapshot.enterpriseControlRevision !== undefined) {
+  if (
+    enterpriseTableName &&
+    snapshot.enterpriseControlRevision !== undefined &&
+    mutationAuthorizationSnapshot?.enterpriseControlRevision === undefined
+  ) {
     conditions.push({
       ConditionCheck: {
         TableName: enterpriseTableName,
