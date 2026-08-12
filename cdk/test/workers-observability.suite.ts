@@ -210,6 +210,7 @@ test('enterprise SCIM group jobs run in a dedicated bounded worker', () => {
   ]);
   expect(actionsForTable('PlanningTable2A0D4CC5')).toEqual([
     'dynamodb:ConditionCheckItem',
+    'dynamodb:DeleteItem',
     'dynamodb:GetItem',
     'dynamodb:PutItem',
     'dynamodb:Query',

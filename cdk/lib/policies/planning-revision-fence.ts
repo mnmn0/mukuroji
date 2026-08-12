@@ -43,8 +43,9 @@ export function grantPlanningRevisionFenceAccess(
  * Grants the bounded transaction permissions required to copy a legacy META row into its fence.
  *
  * The condition check is read-only and may inspect the legacy partition only inside the
- * migration transaction.  The accompanying PutItem is limited to fence partitions and the
- * exact metadata attributes, so migration cannot create or overwrite ordinary Planning rows.
+ * migration transaction.  The legacy DeleteItem and accompanying PutItem are transaction-only;
+ * PutItem is limited to fence partitions and the exact metadata attributes, so migration cannot
+ * create or overwrite ordinary Planning rows.
  *
  * @param planningTable - Planning table containing legacy and isolated META rows.
  * @param target - Lambda that may lazily initialize the revision fence.
@@ -54,7 +55,7 @@ export function grantPlanningRevisionFenceMigrationAccess(
   target: lambda.Function,
 ): void {
   target.addToRolePolicy(new iam.PolicyStatement({
-    actions: ['dynamodb:ConditionCheckItem'],
+    actions: ['dynamodb:ConditionCheckItem', 'dynamodb:DeleteItem'],
     resources: [planningTable.tableArn],
     conditions: {
       StringEquals: {
