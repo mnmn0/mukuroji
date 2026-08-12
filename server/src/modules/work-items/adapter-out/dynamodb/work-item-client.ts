@@ -2513,7 +2513,8 @@ export class DynamoDbTeamIssuesClient {
       occurredAt,
     )
     if (planningRevisionMutation) transactItems.push(planningRevisionMutation)
-    if (transactItems.length > 100) {
+    const planningRevisionFenceBarrierItems = planningRevisionMutation === undefined ? 0 : 1
+    if (transactItems.length + planningRevisionFenceBarrierItems > 100) {
       throw new ProjectDataError(
         413,
         'WorkItemScheduleCascadeLimitExceeded',

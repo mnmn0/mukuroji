@@ -2652,7 +2652,7 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
     if (
       mutations.length + canonicalConditions.length +
         authorizationConditionChecks.length + transactionContributionItems.length +
-          publishedUpdateItems.length + 1 >
+          publishedUpdateItems.length + 2 >
           TRANSACTION_ITEM_LIMIT
     ) {
       throw new PlanningError(
