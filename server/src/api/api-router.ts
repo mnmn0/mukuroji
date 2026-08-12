@@ -18636,6 +18636,7 @@ async function applyTriageRouteAction(request: TriageRouterActionRequest) {
   ) {
     const replay = await workItemDependencies.triage.getActionReceipt(
       request.workspaceId,
+      request.teamId,
       request.entryId,
       request.idempotency,
     )
@@ -18719,6 +18720,7 @@ async function applyTriageRouteAction(request: TriageRouterActionRequest) {
     if (currentEntry.source.kind === 'form' && currentEntry.source.submissionId) {
       const replay = await workItemDependencies.triage.getActionReceipt(
         request.workspaceId,
+        request.teamId,
         request.entryId,
         request.idempotency,
       )
@@ -19179,6 +19181,7 @@ async function requestTriageInformationFromSource(
 ) {
   const replay = await workItemDependencies.triage.getActionReceipt(
     request.workspaceId,
+    request.teamId,
     request.entryId,
     request.idempotency,
   )
@@ -19442,6 +19445,7 @@ async function createLegacyRequestTriageContribution(
   }
   const replay = await workItemDependencies.triage.getActionReceipt(
     principal.directoryId,
+    entry.teamId,
     entry.id,
     idempotency,
   )
@@ -19582,6 +19586,7 @@ async function acceptTriageEntryAsNewWorkItem(
 ) {
   const replay = await workItemDependencies.triage.getActionReceipt(
     request.workspaceId,
+    request.teamId,
     request.entryId,
     request.idempotency,
   )

@@ -7,7 +7,7 @@ import { createTriageInputFingerprint } from '../../triage'
 import {
   createTriageEntryTransactionItems,
 } from '../../adapter-out/dynamodb/triage-transactions'
-import { runTriageSchedule } from './triage-schedule'
+import { createTriageScheduleHandler, runTriageSchedule } from './triage-schedule'
 
 /** Stable schedule test instant. */
 const NOW = '2026-08-09T00:00:00.000Z'
@@ -175,6 +175,33 @@ describe('triage schedule adapter', () => {
         batchSize: 100,
         now: '2026-08-09T00:10:00.000Z',
       })).resolves.toMatchObject({ disabled: true, evaluatedCandidates: 0 })
+      expect(harness.calls).toEqual(['QueryCommand'])
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('fails the configured handler when the wake index is disabled', async () => {
+    const harness = createHarness(() => {
+      const error = new Error('The table does not have the specified index.')
+      error.name = 'ValidationException'
+      throw error
+    })
+    const handler = createTriageScheduleHandler(harness.documentClient, {
+      tableName: 'RequestIntakeTable',
+      auditTableName: 'AuditEventsTable',
+      auditRetentionDays: 365,
+      wakeIndexName: 'triage-wake-index',
+      wakeShardCount: 8,
+      batchSize: 100,
+      failOnDisabled: true,
+    })
+
+    try {
+      await expect(handler({ time: '2026-08-09T00:10:00.000Z' })).rejects.toMatchObject({
+        code: 'TriageWakeIndexUnavailable',
+        status: 503,
+      })
       expect(harness.calls).toEqual(['QueryCommand'])
     } finally {
       harness.restore()

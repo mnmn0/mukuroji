@@ -109,6 +109,7 @@ export function createProductionTriageScheduleHandler(): (
       128,
     ),
     batchSize: readPositiveIntegerEnvironment('TRIAGE_SCHEDULE_BATCH_SIZE', 100, 1_000),
+    failOnDisabled: true,
   })
 }
 
@@ -126,6 +127,8 @@ export type TriageScheduleHandlerConfiguration = {
   wakeShardCount: number
   /** Maximum candidates evaluated in one invocation. */
   batchSize: number
+  /** Whether an unavailable wake index should fail the invocation for operational alerting. */
+  failOnDisabled?: boolean
 }
 
 /** Creates a schedule handler with injected persistence dependencies.
@@ -138,16 +141,26 @@ export function createTriageScheduleHandler(
   documentClient: TriageScheduleDocumentClient,
   configuration: TriageScheduleHandlerConfiguration,
 ): (event?: TriageScheduleEvent) => Promise<TriageScheduleResult> {
-  return async (event = {}) => runTriageSchedule({
-    documentClient,
-    tableName: configuration.tableName,
-    auditTableName: configuration.auditTableName,
-    auditRetentionDays: configuration.auditRetentionDays,
-    wakeIndexName: configuration.wakeIndexName,
-    wakeShardCount: configuration.wakeShardCount,
-    batchSize: configuration.batchSize,
-    now: normalizeScheduleTime(event.time),
-  })
+  return async (event = {}) => {
+    const result = await runTriageSchedule({
+      documentClient,
+      tableName: configuration.tableName,
+      auditTableName: configuration.auditTableName,
+      auditRetentionDays: configuration.auditRetentionDays,
+      wakeIndexName: configuration.wakeIndexName,
+      wakeShardCount: configuration.wakeShardCount,
+      batchSize: configuration.batchSize,
+      now: normalizeScheduleTime(event.time),
+    })
+    if (configuration.failOnDisabled && result.disabled) {
+      throw new TriageError(
+        503,
+        'TriageWakeIndexUnavailable',
+        'The Triage wake index is unavailable; retry the schedule invocation.',
+      )
+    }
+    return result
+  }
 }
 
 /** Evaluates due sparse-index candidates without scanning the table.

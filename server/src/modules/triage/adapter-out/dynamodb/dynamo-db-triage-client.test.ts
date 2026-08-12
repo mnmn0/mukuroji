@@ -353,7 +353,7 @@ describe('DynamoDbTriageClient action receipt lookup', () => {
     ])
 
     try {
-      const receipt = await harness.client.getActionReceipt('workspace-1', 'triage-1', {
+      const receipt = await harness.client.getActionReceipt('workspace-1', 'support', 'triage-1', {
         key: 'accept-1',
         fingerprint,
       })
@@ -371,8 +371,8 @@ describe('DynamoDbTriageClient action receipt lookup', () => {
       expect(harness.calls()).toBe(2)
     } finally {
       harness.restore()
-  }
-})
+    }
+  })
 
   test('rejects an idempotency key reused with another semantic input', async () => {
     const originalFingerprint = createTriageInputFingerprint({ action: 'accept' })
@@ -387,11 +387,44 @@ describe('DynamoDbTriageClient action receipt lookup', () => {
     }])
 
     try {
-      await expect(harness.client.getActionReceipt('workspace-1', 'triage-1', {
+      await expect(harness.client.getActionReceipt('workspace-1', 'support', 'triage-1', {
         key: 'accept-1',
         fingerprint: createTriageInputFingerprint({ action: 'decline' }),
       })).rejects.toMatchObject({ code: 'TriageIdempotencyConflict', status: 409 })
       expect(harness.calls()).toBe(1)
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('does not replay an action receipt through a different Team route', async () => {
+    const entry = createEntry()
+    const fingerprint = createTriageInputFingerprint({ action: 'accept', entryId: entry.id })
+    const storedEntry = createTriageEntryTransactionItems({
+      tableName: 'RequestIntakeTable',
+      entry,
+      inputFingerprint: createTriageInputFingerprint({ sourceId: entry.source.sourceId }),
+    })[0]?.Put?.Item
+    if (!storedEntry) throw new TypeError('Expected a stored entry fixture.')
+    const harness = createHarness([
+      {
+        Item: {
+          entryType: 'triage-operation-receipt',
+          workspaceId: 'workspace-1',
+          entryId: entry.id,
+          inputFingerprint: fingerprint,
+          resultRevision: entry.revision,
+        },
+      },
+      { Item: storedEntry },
+    ])
+
+    try {
+      await expect(harness.client.getActionReceipt('workspace-1', 'other-team', entry.id, {
+        key: 'accept-1',
+        fingerprint,
+      })).resolves.toBeUndefined()
+      expect(harness.calls()).toBe(2)
     } finally {
       harness.restore()
     }
@@ -967,6 +1000,54 @@ describe('DynamoDbTriageClient queue indexes', () => {
         createTestAuditContext,
       )).rejects.toMatchObject({ code: 'TriageBulkActionDisabled', status: 409 })
       expect(harness.calls()).toBe(1)
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('re-reads an ambiguous bulk target receipt before returning a failed result', async () => {
+    const entry = createEntry()
+    entry.state = 'pending'
+    entry.revision = 1
+    entry.capabilities = createTriageCapabilities(entry)
+    const storedEntry = createTriageEntryTransactionItems({
+      tableName: 'RequestIntakeTable',
+      entry,
+      inputFingerprint: createTriageInputFingerprint({ sourceId: entry.source.sourceId }),
+    })[0]?.Put?.Item
+    if (!storedEntry) throw new TypeError('Expected a stored triage entry fixture.')
+    const responseLoss = new Error('The transaction response was lost.')
+    const configuration = createConfigurationSnapshot(4)
+    const harness = createHarness([
+      { Item: { entryType: 'triage-configuration', configuration, revision: configuration.revision } },
+      {},
+      { Item: storedEntry },
+      responseLoss,
+      {},
+    ])
+
+    try {
+      await expect(harness.client.applyBulkAction(
+        'workspace-1',
+        'support',
+        { id: 'member@example.com' },
+        {
+          targets: [{ entryId: entry.id, expectedRevision: entry.revision }],
+          operation: { action: 'decline', reason: 'No longer actionable.' },
+        },
+        'bulk-response-loss',
+        createTestAuditContext,
+      )).rejects.toMatchObject({
+        code: 'TriageBulkActionResultUnavailable',
+        status: 503,
+      })
+      expect(harness.commands.map(({ name }) => name)).toEqual([
+        'GetCommand',
+        'GetCommand',
+        'GetCommand',
+        'TransactWriteCommand',
+        'GetCommand',
+      ])
     } finally {
       harness.restore()
     }

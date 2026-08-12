@@ -874,6 +874,7 @@ describe('independent task views', () => {
     const html = renderToStaticMarkup(
       <TaskDetailPane
         assigneeOptions={taskViewStoryProjectMembers}
+        canAccessTriage
         configuration={teamWorkItemConfigurationFixture}
         detail={detail}
         isLoading={false}
@@ -912,6 +913,7 @@ describe('independent task views', () => {
     const html = renderToStaticMarkup(
       <TaskDetailPane
         assigneeOptions={taskViewStoryProjectMembers}
+        canAccessTriage
         configuration={teamWorkItemConfigurationFixture}
         detail={detail}
         isLoading={false}

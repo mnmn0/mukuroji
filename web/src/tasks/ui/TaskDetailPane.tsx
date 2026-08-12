@@ -62,6 +62,8 @@ import { TaskPriorityBadge } from './TaskViewPrimitives'
 export type TaskDetailPaneProps = {
   /** Determines whether the current user may manage one canonical dependency endpoint. */
   canManageScheduleDependencyEndpoint?: (endpoint: WorkItemDependencyEndpoint) => boolean
+  /** Whether the current Workspace member may read Team Triage source links. */
+  canAccessTriage?: boolean
   /** Access token used by the related-document panel. */
   accessToken?: string
   /** Active project members available as assignees. */
@@ -136,6 +138,7 @@ export type TaskDetailPaneProps = {
 export function TaskDetailPane({
   accessToken,
   assigneeOptions,
+  canAccessTriage = false,
   artifacts,
   canManageScheduleDependencyEndpoint,
   collaboration,
@@ -176,7 +179,7 @@ export function TaskDetailPane({
     accessToken,
     task?.teamId,
     task?.id,
-    Boolean(task),
+    Boolean(task && canAccessTriage),
   )
   const hasMatchingIssueDetail = Boolean(
     task && detail?.issue.id === task.id && detail.issue.teamId === task.teamId,
@@ -324,7 +327,7 @@ export function TaskDetailPane({
             {isLoading ? (
               <p className="mt-2 text-sm font-medium text-[var(--workbench-muted)]">{t('tasks.detail.loading')}</p>
             ) : null}
-            {sourceTriageEntryId ? (
+            {canAccessTriage && sourceTriageEntryId ? (
               <a
                 className="mt-2 inline-flex text-sm font-semibold text-[var(--workbench-primary)] underline-offset-4 hover:underline"
                 data-testid="task-detail-triage-source"
@@ -372,7 +375,7 @@ export function TaskDetailPane({
                 ) : null}
               </section>
             ) : null}
-            {triageContextSnapshots.length > 0 ? (
+            {canAccessTriage && triageContextSnapshots.length > 0 ? (
               <section
                 className="mt-3 rounded-md border border-[var(--workbench-border)] bg-[var(--workbench-surface-muted)] px-3 py-2.5"
                 data-testid="task-detail-triage-context"

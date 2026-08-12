@@ -465,16 +465,18 @@ export class DynamoDbTriageClient implements TriageClient {
   /** Looks up an existing fingerprint-bound action receipt.
    *
    * @param workspaceId The owning Workspace ID.
+   * @param teamId The Team route scope that must own the receipt entry.
    * @param entryId The entry whose action may have committed.
    * @param idempotency The original key and semantic fingerprint.
    * @returns The current permission-safe result, or undefined before the first commit.
    */
   async getActionReceipt(
     workspaceId: string,
+    teamId: string,
     entryId: string,
     idempotency: TriageIdempotency,
   ): Promise<TriageMutationReceipt | undefined> {
-    return await this.readReceipt(workspaceId, entryId, 'action', idempotency)
+    return await this.readReceipt(workspaceId, entryId, 'action', idempotency, teamId)
   }
 
   /** Strongly reads one canonical stored entry without applying a response projection. */
@@ -523,7 +525,7 @@ export class DynamoDbTriageClient implements TriageClient {
     configurationRevision?: number,
     authorizationConditionChecks?: TriageAuthorizationConditionChecks,
   ): Promise<TriageMutationReceipt> {
-    const replay = await this.readReceipt(workspaceId, entryId, 'action', idempotency)
+    const replay = await this.readReceipt(workspaceId, entryId, 'action', idempotency, teamId)
     if (replay) return replay
     const entry = await this.getEntryForMutation(workspaceId, teamId, entryId)
     const contribution = await this.createActionContribution(
@@ -559,7 +561,13 @@ export class DynamoDbTriageClient implements TriageClient {
       }
     } catch (error) {
       if (!isConditionalConflict(error)) throw error
-      const concurrentReplay = await this.readReceipt(workspaceId, entryId, 'action', idempotency)
+      const concurrentReplay = await this.readReceipt(
+        workspaceId,
+        entryId,
+        'action',
+        idempotency,
+        teamId,
+      )
       if (concurrentReplay) return concurrentReplay
       throw new TriageError(409, 'TriageRevisionConflict', 'The triage entry changed.', {
         cause: error,
@@ -623,6 +631,28 @@ export class DynamoDbTriageClient implements TriageClient {
       } catch (error) {
         if (error instanceof TriageError && error.status === 409) {
           results.push({ entryId: target.entryId, status: 'conflict', errorCode: error.code })
+        } else if (isAmbiguousTriageMutationError(error)) {
+          const concurrentReplay = await this.readReceipt(
+            workspaceId,
+            target.entryId,
+            'action',
+            idempotency,
+            teamId,
+          )
+          if (concurrentReplay) {
+            results.push({
+              entryId: target.entryId,
+              status: 'succeeded',
+              entry: concurrentReplay.entry,
+            })
+            continue
+          }
+          throw new TriageError(
+            503,
+            'TriageBulkActionResultUnavailable',
+            'A bulk target mutation may have committed. Retry with the same Idempotency-Key.',
+            { cause: error },
+          )
         } else {
           results.push({
             entryId: target.entryId,
@@ -1350,6 +1380,7 @@ export class DynamoDbTriageClient implements TriageClient {
     entryId: string,
     operation: string,
     idempotency: TriageIdempotency,
+    expectedTeamId?: string,
   ): Promise<TriageMutationReceipt | undefined> {
     const response = await this.documentClient.send(new GetCommand({
       TableName: this.tableName,
@@ -1369,6 +1400,7 @@ export class DynamoDbTriageClient implements TriageClient {
       throw new TriageError(500, 'InvalidTriageReceipt', 'The triage receipt scope is invalid.')
     }
     const entry = await this.readStoredEntry(workspaceId, stored.entryId)
+    if (expectedTeamId !== undefined && entry.teamId !== expectedTeamId) return undefined
     if (entry.revision < stored.resultRevision) {
       throw new TriageError(
         500,
@@ -1514,6 +1546,11 @@ export class DynamoDbTriageClient implements TriageClient {
       })
     }
   }
+}
+
+/** Treats unknown transaction failures as ambiguous until the durable receipt proves otherwise. */
+function isAmbiguousTriageMutationError(error: unknown): boolean {
+  return !(error instanceof TriageError)
 }
 
 /** Reads one queue page's canonical rows with bounded strong-read concurrency.

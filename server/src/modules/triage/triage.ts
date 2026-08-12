@@ -159,12 +159,14 @@ export interface TriageClient {
   /** Looks up an existing action receipt before externally composed Work Item creation.
    *
    * @param workspaceId The owning Workspace ID.
+   * @param teamId The Team route scope that must own the receipt entry.
    * @param entryId The target triage entry ID.
    * @param idempotency Replay protection bound to the semantic action.
    * @returns The current permission-safe entry receipt, or undefined before the first write.
    */
   getActionReceipt(
     workspaceId: string,
+    teamId: string,
     entryId: string,
     idempotency: TriageIdempotency,
   ): Promise<TriageMutationReceipt | undefined>

@@ -982,7 +982,7 @@ test.each(legacyRequestReplayCases)(
       triage: createLegacyTriageClient(currentEntry, {
         getEntry: async () => currentEntry,
         getEntryForMutation: async () => currentEntry,
-        getActionReceipt: async (_workspaceId, _entryId, idempotency) => {
+        getActionReceipt: async (_workspaceId, _teamId, _entryId, idempotency) => {
           if (committedFingerprint === undefined) {
             committedFingerprint = idempotency.fingerprint
             return undefined

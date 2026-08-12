@@ -333,6 +333,7 @@ export function createTriageRouter(dependencies: TriageRouterDependencies) {
         }
         const replayed = await dependencies.getTriage().getActionReceipt(
           principal.workspaceId,
+          teamId,
           target.entryId,
           targetIdempotency,
         )
