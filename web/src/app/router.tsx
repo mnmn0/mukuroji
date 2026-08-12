@@ -10,6 +10,7 @@ import { EnterpriseSecurityPage } from '../pages/workspace/EnterpriseSecurityPag
 import { GoalDocumentsPage } from '../pages/workspace/GoalDocumentsPage'
 import { HelpPage } from '../pages/workspace/HelpPage'
 import { HomePage } from '../pages/workspace/HomePage'
+import { FocusPage } from '../pages/workspace/FocusPage'
 import { InboxPage } from '../pages/workspace/InboxPage'
 import { MyTasksPage } from '../pages/workspace/MyTasksPage'
 import { PlanningPage } from '../pages/workspace/PlanningPage'
@@ -68,6 +69,10 @@ export const appRoutes: RouteObject[] = [
               {
                 path: '/home',
                 element: <HomePage />,
+              },
+              {
+                path: '/focus',
+                element: <FocusPage />,
               },
               {
                 path: '/my-tasks',

@@ -6,6 +6,7 @@ import { EnterpriseSecurityPage } from '../src/pages/workspace/EnterpriseSecurit
 import { GoalDocumentsPage } from '../src/pages/workspace/GoalDocumentsPage'
 import { HelpPage } from '../src/pages/workspace/HelpPage'
 import { HomePage } from '../src/pages/workspace/HomePage'
+import { FocusPage } from '../src/pages/workspace/FocusPage'
 import { InboxPage } from '../src/pages/workspace/InboxPage'
 import { MyTasksPage } from '../src/pages/workspace/MyTasksPage'
 import { PlanningPage } from '../src/pages/workspace/PlanningPage'
@@ -21,6 +22,7 @@ import { DocumentPage } from '../src/documents/DocumentPage'
 import { RequestIntakePage } from '../src/requests/RequestIntakePage'
 import { SearchPage } from '../src/search/SearchPage'
 import {
+  createFocusPath,
   createPlanningPath,
   createProjectsPath,
   createQuickAccessProjectsPath,
@@ -81,6 +83,18 @@ function expectSharedWorkspaceShell(
 }
 
 describe('Work Item detail paths', () => {
+  test('cross-links one notification event to a selected Focus Work Item', () => {
+    expect(createFocusPath('core/team', 'issue/42', 'event/9')).toBe(
+      '/focus?teamId=core%2Fteam&workItemId=issue%2F42&sourceEventId=event%2F9',
+    )
+    expect(createFocusPath()).toBe('/focus')
+    expect(createFocusPath('core-team')).toBe('/focus')
+    expect(createFocusPath(undefined, 'issue-42')).toBe('/focus')
+    expect(createFocusPath(undefined, undefined, 'event-9')).toBe(
+      '/focus?sourceEventId=event-9',
+    )
+  })
+
   test('keeps assigned Work Items scoped by project, team, and issue', () => {
     expect(createProjectIssuesPath('shared launch', 'design/team', 'issue/1')).toBe(
       '/projects/shared%20launch/issues?teamId=design%2Fteam&issueId=issue%2F1',
@@ -207,6 +221,7 @@ describe('Workspace route pages', () => {
     expectSharedWorkspaceShell([
       { component: DashboardPage, path: '/dashboard' },
       { component: HomePage, path: '/home' },
+      { component: FocusPage, path: '/focus' },
       { component: MyTasksPage, path: '/my-tasks' },
       { component: InboxPage, path: '/inbox' },
       { component: HelpPage, path: '/help' },

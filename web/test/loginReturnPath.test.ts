@@ -25,6 +25,11 @@ describe('resolveSafeLoginReturnPath', () => {
   test('preserves authenticated workspace context after fresh authentication', () => {
     expect(
       resolveSafeLoginReturnPath(
+        '/focus?teamId=core-team&workItemId=issue-34',
+      ),
+    ).toBe('/focus?teamId=core-team&workItemId=issue-34')
+    expect(
+      resolveSafeLoginReturnPath(
         '/teams/core-team/issues?issueId=issue-34#activity',
       ),
     ).toBe('/teams/core-team/issues?issueId=issue-34#activity')

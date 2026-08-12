@@ -2135,7 +2135,12 @@ test('tenant lifecycle execution is split into queued environment-bound resource
   const resources = document.Resources;
   const capacityPlanningTableId =
     document.Outputs.CapacityPlanningTableName?.Value?.Ref;
+  const focusTableId = document.Outputs.FocusTableName?.Value?.Ref;
   expect(typeof capacityPlanningTableId).toBe('string');
+  expect(typeof focusTableId).toBe('string');
+  if (typeof focusTableId !== 'string') {
+    throw new Error('Focus table output was not synthesized.');
+  }
   const specifications = [
     {
       functionId: 'TenantExportCapabilityFunction9B1A8023',
@@ -2204,6 +2209,7 @@ test('tenant lifecycle execution is split into queued environment-bound resource
             TENANT_OPERATION_RESOURCE_OWNER: specification.owner,
             TENANT_OPERATION_RESOURCE_OWNER_QUEUE_URL: expect.anything(),
             CAPACITY_PLANNING_TABLE_NAME: { Ref: capacityPlanningTableId },
+            FOCUS_TABLE_NAME: { Ref: focusTableId },
             AUTOMATION_INBOUND_WEBHOOK_SECRET_PREFIX:
               'mukuroji/automation-inbound-webhooks',
             AUTOMATION_WEBHOOK_SECRET_PREFIX:
@@ -2231,6 +2237,27 @@ test('tenant lifecycle execution is split into queued environment-bound resource
       )
     )?.[1];
     const serializedPolicy = JSON.stringify(policy);
+    const policyProperties = typeof policy === 'object' && policy !== null
+      ? Reflect.get(policy, 'Properties')
+      : undefined;
+    const policyDocument = typeof policyProperties === 'object' && policyProperties !== null
+      ? Reflect.get(policyProperties, 'PolicyDocument')
+      : undefined;
+    const policyStatements = typeof policyDocument === 'object' && policyDocument !== null
+      ? Reflect.get(policyDocument, 'Statement')
+      : undefined;
+    const focusStatements = (Array.isArray(policyStatements)
+      ? policyStatements.filter(
+        (statement): statement is Record<string, unknown> =>
+          typeof statement === 'object' && statement !== null && !Array.isArray(statement),
+      )
+      : [])
+      .filter((statement) =>
+        JSON.stringify(statement.Resource).includes(focusTableId)
+      );
+    const focusActions = focusStatements.flatMap((statement) =>
+      Array.isArray(statement.Action) ? statement.Action : [statement.Action]
+    );
     expect(policy).toBeDefined();
     expect(serializedPolicy).toContain('TenantAdministrationTable621D59EB');
     expect(serializedPolicy).toContain('AuditEventsTable0723963E');
@@ -2264,6 +2291,37 @@ test('tenant lifecycle execution is split into queued environment-bound resource
     } else {
       expect(serializedPolicy).not.toContain('s3:');
       expect(serializedPolicy).not.toContain('WorkItemImportBucket14068778');
+    }
+    if (
+      specification.owner === 'export' ||
+      specification.owner === 'data' ||
+      specification.owner === 'verification'
+    ) {
+      expect(focusStatements).toHaveLength(1);
+      expect(focusActions).toEqual(expect.arrayContaining([
+        'dynamodb:GetItem',
+        'dynamodb:Query',
+        'dynamodb:Scan',
+      ]));
+      if (specification.owner === 'data') {
+        expect(focusActions).toEqual(expect.arrayContaining([
+          'dynamodb:BatchWriteItem',
+          'dynamodb:DeleteItem',
+          'dynamodb:PutItem',
+          'dynamodb:UpdateItem',
+        ]));
+      } else {
+        for (const writeAction of [
+          'dynamodb:BatchWriteItem',
+          'dynamodb:DeleteItem',
+          'dynamodb:PutItem',
+          'dynamodb:UpdateItem',
+        ]) {
+          expect(focusActions).not.toContain(writeAction);
+        }
+      }
+    } else {
+      expect(focusStatements).toEqual([]);
     }
     const queueId = Object.keys(resources).find((logicalId) =>
       logicalId.startsWith(specification.queuePrefix) &&

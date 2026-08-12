@@ -73,6 +73,12 @@ const homeRouteMetadata: WorkspaceRouteMetadata = {
   titleKey: 'workspace.home.title',
   descriptionKey: 'workspace.home.description',
 }
+const focusRouteMetadata: WorkspaceRouteMetadata = {
+  activeNavId: 'focus',
+  eyebrowKey: 'workspace.focus.eyebrow',
+  titleKey: 'workspace.focus.title',
+  descriptionKey: 'workspace.focus.description',
+}
 const myTasksRouteMetadata: WorkspaceRouteMetadata = {
   activeNavId: 'my-tasks',
   eyebrowKey: 'workspace.myTasks.eyebrow',
@@ -626,6 +632,10 @@ function resolveWorkspaceRouteMetadata(
 
   if (matchPath('/home', pathname)) {
     return homeRouteMetadata
+  }
+
+  if (matchPath('/focus', pathname)) {
+    return focusRouteMetadata
   }
 
   if (matchPath('/my-tasks', pathname)) {

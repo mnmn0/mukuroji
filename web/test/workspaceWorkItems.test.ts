@@ -207,8 +207,8 @@ describe('Workspace Work Item model', () => {
     const openHigh = createTask({ id: 'open-high', priority: 'high' })
 
     expect(calculateWorkspaceProgress([completed, openHigh])).toBe(50)
-    expect(createWorkspaceSummary(projectDirectoryFixtures, [completed, openHigh])).toEqual({
-      blocked: 1,
+    expect(createWorkspaceSummary(projectDirectoryFixtures, [completed, openHigh], 3)).toEqual({
+      blocked: 3,
       projects: 4,
       tasks: 1,
     })

@@ -68,6 +68,10 @@ import {
   createEnterpriseSessionActivityClient,
 } from '../../modules/enterprise-identity/enterprise-session-activity'
 import { createDefaultFileProofingClient } from '../../modules/files/file-proofing'
+import {
+  InMemoryFocusStateClient,
+  createFocusStateClient,
+} from '../../modules/focus'
 import { DynamoDbNotificationsClient } from '../../modules/notifications/notifications'
 import {
   DynamoDbPlanningClient,
@@ -474,6 +478,7 @@ export function createProductionWorkItemDependencies(): WorkItemDependencies {
     collaboration: new DynamoDbCollaborationClient(),
     fileProofing: createDefaultFileProofingClient(),
     notifications: new DynamoDbNotificationsClient(),
+    focusState: createFocusStateClient(),
     workspaceSearch: new DynamoDbWorkspaceSearchClient(),
     documents: new DynamoDbDocumentsClient(),
     workspaceSearchProjectionEnabled: shouldEnableWorkspaceSearchProjection(),
@@ -704,6 +709,7 @@ export function createTestAppDependencies(): AppDependencies {
       ...production.workItems,
       workItemConfigurations: createDefaultWorkItemConfigurationClient(),
       planning: new InMemoryPlanningClient(),
+      focusState: new InMemoryFocusStateClient(),
       analytics: new InMemoryAnalyticsRepository(),
     },
     timeTracking: { timeTrackingService },
@@ -796,6 +802,7 @@ export function overrideAppDependencies(
       ...(overrides.collaboration ? { collaboration: overrides.collaboration } : {}),
       ...(overrides.fileProofing ? { fileProofing: overrides.fileProofing } : {}),
       ...(overrides.notifications ? { notifications: overrides.notifications } : {}),
+      ...(overrides.focusState ? { focusState: overrides.focusState } : {}),
       ...(overrides.workspaceSearch
         ? { workspaceSearch: overrides.workspaceSearch }
         : {}),

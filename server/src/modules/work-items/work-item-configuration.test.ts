@@ -657,6 +657,111 @@ test('preserves unexpected usage validation failures after releasing the lock', 
   expect(sentCommands).toEqual(['PutCommand', 'DeleteCommand'])
 })
 
+test('reads zero and the stored canonical relation graph revision consistently', async () => {
+  const reads: Record<string, unknown>[] = []
+  let storedRevision: number | undefined
+  const documentClient = {
+    async send(command: { constructor: { name: string }; input: Record<string, unknown> }) {
+      expect(command.constructor.name).toBe('GetCommand')
+      reads.push(command.input)
+      return storedRevision === undefined
+        ? {}
+        : {
+            Item: {
+              entryType: 'relation-graph',
+              schemaVersion: 1,
+              revision: storedRevision,
+            },
+          }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbWorkItemConfigurationClient(
+    'configuration-table',
+    'work-items-table',
+    documentClient,
+    {} as DynamoDBClient,
+  )
+
+  expect(await client.getRelationGraphRevision('workspace-1', 'core-team')).toBe(0)
+  storedRevision = 7
+  expect(await client.getRelationGraphRevision('workspace-1', 'core-team')).toBe(7)
+  expect(reads).toEqual([
+    {
+      TableName: 'configuration-table',
+      Key: {
+        scopeKey: 'workspace-1#team#core-team#work-item-configuration',
+        recordKey: 'RELATION_GRAPH',
+      },
+      ConsistentRead: true,
+    },
+    {
+      TableName: 'configuration-table',
+      Key: {
+        scopeKey: 'workspace-1#team#core-team#work-item-configuration',
+        recordKey: 'RELATION_GRAPH',
+      },
+      ConsistentRead: true,
+    },
+  ])
+})
+
+test('reads the complete stable relation graph before Work Item source filtering', async () => {
+  const relations = [
+    relationItem('source-a', 'target-a', 'blocks'),
+    relationItem('source-b', 'target-b', 'related'),
+  ]
+  const documentClient = {
+    async send(command: { constructor: { name: string } }) {
+      if (command.constructor.name === 'GetCommand') {
+        return {
+          Item: {
+            entryType: 'relation-graph',
+            schemaVersion: 1,
+            revision: 9,
+          },
+        }
+      }
+      if (command.constructor.name === 'QueryCommand') {
+        return { Items: relations }
+      }
+      return {}
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbWorkItemConfigurationClient(
+    'configuration-table',
+    'work-items-table',
+    documentClient,
+    {} as DynamoDBClient,
+  )
+
+  expect(await client.listRelationGraph('workspace-1', 'core-team')).toEqual({
+    graphRevision: 9,
+    relations: [
+      {
+        sourceWorkItemId: 'source-a',
+        targetWorkItemId: 'target-a',
+        type: 'blocks',
+        createdAt: '2026-07-12T00:00:00.000Z',
+      },
+      {
+        sourceWorkItemId: 'source-b',
+        targetWorkItemId: 'target-b',
+        type: 'related',
+        createdAt: '2026-07-12T00:00:00.000Z',
+      },
+    ],
+  })
+  expect(await client.listRelations('workspace-1', 'core-team', 'source-a')).toEqual({
+    graphRevision: 9,
+    relations: [{
+      sourceWorkItemId: 'source-a',
+      targetWorkItemId: 'target-a',
+      type: 'blocks',
+      createdAt: '2026-07-12T00:00:00.000Z',
+    }],
+  })
+})
+
 test('creates reciprocal relation edges with endpoint and graph guards in one transaction', async () => {
   const sent: Array<{ name: string; input: Record<string, unknown> }> = []
   const documentClient = {

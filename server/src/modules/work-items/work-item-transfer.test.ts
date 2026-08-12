@@ -151,6 +151,8 @@ describe('Work Item export', () => {
     dueDate: '2026-08-01',
     schedule: createDefaultDueDateWorkItemSchedule('2026-08-01'),
     priority: 'high',
+    priorityUpdatedAt: '2026-07-18T00:30:00.000Z',
+    dueDateUpdatedAt: '2026-07-18T00:45:00.000Z',
     createdAt: '2026-07-18T00:00:00.000Z',
     updatedAt: '2026-07-18T01:00:00.000Z',
     source: 'dynamodb',
@@ -163,6 +165,10 @@ describe('Work Item export', () => {
     expect(result.body).toContain('customFieldValues.labels')
     expect(result.body).toContain('schedule')
     expect(result.body).toContain('due-date')
+    expect(result.body).toContain('priorityUpdatedAt')
+    expect(result.body).toContain('2026-07-18T00:30:00.000Z')
+    expect(result.body).toContain('dueDateUpdatedAt')
+    expect(result.body).toContain('2026-07-18T00:45:00.000Z')
     expect(result.body).toContain("'=HYPERLINK")
   })
 
@@ -171,7 +177,12 @@ describe('Work Item export', () => {
     const exported = JSON.parse(result.body)
     expect(exported).toMatchObject({
       apiVersion: '2026-07-01',
-      workItems: [{ id: 'api-key-ui', schedule: workItem.schedule }],
+      workItems: [{
+        id: 'api-key-ui',
+        schedule: workItem.schedule,
+        priorityUpdatedAt: workItem.priorityUpdatedAt,
+        dueDateUpdatedAt: workItem.dueDateUpdatedAt,
+      }],
     })
     expect(exported.workItems[0]).not.toHaveProperty('creatorMemberKey')
     expect(exported.workItems[0]).not.toHaveProperty('source')

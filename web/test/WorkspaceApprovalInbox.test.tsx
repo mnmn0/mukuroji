@@ -5,6 +5,8 @@ import {
   type ResolvedWorkItemConfiguration,
 } from '@mukuroji/contracts'
 import { renderToStaticMarkup } from 'react-dom/server'
+import { MemoryRouter } from 'react-router'
+import { focusQueueResponseFixture } from '../src/features/focus-queue/fixtures'
 import { notificationInboxControllerFixture } from '../src/notifications/fixtures'
 import { WorkspaceInboxView } from '../src/notifications/ui/WorkspaceInboxView'
 import { projectDirectoryFixtures } from '../src/projects/fixtures'
@@ -17,7 +19,7 @@ import { HomeWorkspaceView } from '../src/workspace/ui/HomeWorkspaceView'
 import { MyTasksWorkspaceView } from '../src/workspace/ui/MyTasksWorkspaceView'
 import {
   WorkspaceConfigurationLoadNotice,
-  WorkspaceTaskLoadNotice,
+  WorkspaceFocusLoadNotice,
 } from '../src/workspace/ui/WorkspaceDataNotices'
 
 const coreTeam = projectDirectoryFixtures.find((team) => team.id === 'core-team')
@@ -82,24 +84,16 @@ describe('Workspace approval Inbox', () => {
     const t = createTranslator('en')
     const views = [
       <HomeWorkspaceView
+        focusQueue={focusQueueResponseFixture}
         summary={summary}
         t={t}
-        tasks={[task]}
         teams={projectDirectoryFixtures}
         workItemConfigurationsByTeam={workItemConfigurationsByTeam}
         onOpenTask={() => undefined}
       />,
       <DashboardWorkspaceView
+        focusQueue={focusQueueResponseFixture}
         summary={summary}
-        t={t}
-        tasks={[task]}
-        teams={projectDirectoryFixtures}
-        workItemConfigurationsByTeam={workItemConfigurationsByTeam}
-        onOpenTask={() => undefined}
-      />,
-      <WorkspaceInboxView
-        locale="en"
-        notificationInbox={notificationInboxControllerFixture}
         t={t}
         tasks={[task]}
         teams={projectDirectoryFixtures}
@@ -123,105 +117,105 @@ describe('Workspace approval Inbox', () => {
     }
   })
 
-  test('keeps durable notifications while exposing only actionable approval summaries', () => {
-    const tasks: ProjectTask[] = [
-      {
-        approvalSummary: {
-          approvedCount: 0,
-          changesRequestedCount: 0,
-          overdueCount: 1,
-          pendingCount: 2,
-          rejectedCount: 0,
-        },
-        assignedProjectId: 'refero',
-        assigneeUserId: 'demo@example.com',
-        creatorMemberKey: 'demo@example.com',
-        customFieldValues: {},
-        createdAt: '2026-07-14T00:00:00.000Z',
-        dueDate: '2099-12-31',
-        id: 'approval-proof',
-        priority: 'low',
-        relationIds: [],
-        revision: 1,
-        schedule: createDefaultDueDateTaskSchedule('2099-12-31'),
-        schemaVersion: WORK_ITEM_SCHEMA_VERSION,
-        source: 'dynamodb',
-        statusCategory: 'unstarted',
-        teamId: 'core-team',
-        title: '承認待ち成果物',
-        updatedAt: '2026-07-14T00:00:00.000Z',
-        workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
-        workflowStatusId: 'todo',
-      },
-      {
-        approvalSummary: {
-          approvedCount: 1,
-          changesRequestedCount: 1,
-          overdueCount: 0,
-          pendingCount: 0,
-          rejectedCount: 1,
-        },
-        assignedProjectId: 'refero',
-        assigneeUserId: 'demo@example.com',
-        creatorMemberKey: 'demo@example.com',
-        customFieldValues: {},
-        createdAt: '2026-07-14T00:00:00.000Z',
-        dueDate: '2099-12-31',
-        id: 'approval-history-only',
-        priority: 'low',
-        relationIds: [],
-        revision: 1,
-        schedule: createDefaultDueDateTaskSchedule('2099-12-31'),
-        schemaVersion: WORK_ITEM_SCHEMA_VERSION,
-        source: 'dynamodb',
-        statusCategory: 'unstarted',
-        teamId: 'core-team',
-        title: '過去の承認判断だけがある成果物',
-        updatedAt: '2026-07-14T00:00:00.000Z',
-        workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
-        workflowStatusId: 'todo',
-      },
-    ]
-    const html = renderToStaticMarkup(
-      <WorkspaceInboxView
-        locale="ja"
-        notificationInbox={notificationInboxControllerFixture}
-        t={createTranslator('ja')}
-        tasks={tasks}
-        teams={projectDirectoryFixtures}
-        workItemConfigurationsByTeam={{}}
-        onOpenTask={() => undefined}
-      />,
-    )
+  for (const viewName of ['Home', 'Dashboard']) {
+    test(`marks unavailable Focus metrics and previews instead of reporting real zeroes on ${viewName}`, () => {
+      const t = createTranslator('en')
+      const summary = { blocked: 0, projects: 1, tasks: 0 }
+      const view = viewName === 'Home'
+        ? (
+            <HomeWorkspaceView
+              isFocusUnavailable
+              summary={summary}
+              t={t}
+              teams={projectDirectoryFixtures}
+              workItemConfigurationsByTeam={{}}
+            />
+          )
+        : (
+            <DashboardWorkspaceView
+              isFocusUnavailable
+              summary={summary}
+              t={t}
+              tasks={[]}
+              teams={projectDirectoryFixtures}
+              workItemConfigurationsByTeam={{}}
+            />
+          )
+      const html = renderToStaticMarkup(view)
+      expect(html).toContain('data-testid="workspace-focus-blocked-metric"')
+      expect(html).toContain('aria-hidden="true">—</span>')
+      expect(html).toContain('<span class="sr-only">Focus data is unavailable.</span>')
+      expect(html).toContain('data-testid="workspace-focus-preview-unavailable"')
+      expect(html).toContain('Focus data is unavailable.')
+    })
+  }
 
-    expect(html).toContain('data-testid="inbox-filter-approval"')
-    expect(html).toContain('data-testid="inbox-task-core-team-refero-approval-proof"')
-    expect(html).not.toContain('data-testid="inbox-task-core-team-refero-approval-history-only"')
-    expect(html).toContain('Approval 期限超過')
-    expect(html).toContain('data-testid="notification-row-notification-mention-1"')
-    expect(html).toContain('data-testid="notification-load-more"')
-  })
-
-  test('keeps durable notifications visible beside a Work Item partial error', () => {
-    const t = createTranslator('ja')
+  test('renders route-specific retry notices for Focus and Team configuration failures', () => {
+    const t = createTranslator('en')
     const html = renderToStaticMarkup(
       <>
-        <WorkspaceTaskLoadNotice failedProjectCount={1} t={t} />
-        <WorkspaceInboxView
-          locale="ja"
-          notificationInbox={notificationInboxControllerFixture}
+        <WorkspaceFocusLoadNotice
+          hasCachedData={false}
+          hasError
+          onRetry={() => undefined}
           t={t}
-          tasks={[]}
-          teams={projectDirectoryFixtures}
-          workItemConfigurationsByTeam={{}}
+        />
+        <WorkspaceConfigurationLoadNotice
+          failedTeamCount={1}
+          onRetry={() => undefined}
+          t={t}
+          testId="focus-configuration-error"
         />
       </>,
     )
 
-    expect(html).toContain('data-testid="workspace-task-partial-error"')
-    expect(html).toContain('タスク一覧を取得できませんでした (1)')
+    expect(html).toContain('data-testid="workspace-focus-load-error"')
+    expect(html).toContain('Affected metrics and previews are shown as —.')
+    expect(html).toContain('data-testid="focus-configuration-error"')
+    expect(html).toContain('>Reload</button>')
+  })
+
+  test('keeps Inbox event-only while cross-linking continuing attention to Focus', () => {
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <WorkspaceInboxView
+          locale="ja"
+          notificationInbox={notificationInboxControllerFixture}
+          selectedEventId="event-comment-mentioned-1"
+          t={createTranslator('ja')}
+        />
+      </MemoryRouter>,
+    )
+
+    expect(html).toContain('data-testid="inbox-open-focus"')
+    expect(html).not.toContain('data-testid="inbox-task-list"')
     expect(html).toContain('data-testid="notification-row-notification-mention-1"')
+    expect(html).toContain('data-testid="notification-focus-notification-mention-1"')
+    expect(html).toContain('teamId=core-team&amp;workItemId=wireframe')
+    expect(html).toContain('aria-current="true"')
     expect(html).toContain('data-testid="notification-load-more"')
+  })
+
+  test('renders an explicit empty state when the available Home Focus preview has no items', () => {
+    const emptyFocusQueue = {
+      ...focusQueueResponseFixture,
+      sections: focusQueueResponseFixture.sections.map((group) => ({
+        ...group,
+        items: [],
+      })),
+    }
+    const html = renderToStaticMarkup(
+      <HomeWorkspaceView
+        focusQueue={emptyFocusQueue}
+        summary={{ blocked: 0, projects: 1, tasks: 0 }}
+        t={createTranslator('en')}
+        teams={projectDirectoryFixtures}
+        workItemConfigurationsByTeam={{}}
+      />,
+    )
+
+    expect(html).toContain('No tasks have been registered yet.')
+    expect(html).not.toContain('data-testid="workspace-focus-preview-unavailable"')
   })
 
   test('keeps canonical My Tasks visible when its Team configuration is unavailable', () => {

@@ -67,6 +67,8 @@ export type DataStoreResources = {
   readonly workspaceSearchTable: dynamodb.Table;
   /** Durable collaboration notification table. */
   readonly notificationsTable: dynamodb.Table;
+  /** User and Team Focus queue preferences and snooze state. */
+  readonly focusTable: dynamodb.Table;
   /** Realtime connection and one-time ticket table. */
   readonly realtimeSessionsTable: dynamodb.Table;
   /** File upload, proofing, and retention metadata table. */
@@ -437,6 +439,16 @@ export function buildDataStores(
     projectionType: dynamodb.ProjectionType.ALL,
   });
 
+  const focusTable = new dynamodb.Table(stack, 'FocusTable', {
+    partitionKey: { name: 'scopeKey', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'recordKey', type: dynamodb.AttributeType.STRING },
+    billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+    encryption: dynamodb.TableEncryption.AWS_MANAGED,
+    pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+    removalPolicy: cdk.RemovalPolicy.RETAIN,
+    timeToLiveAttribute: 'expiresAt',
+  });
+
   const realtimeSessionsTable = new dynamodb.Table(stack, 'RealtimeSessionsTable', {
     partitionKey: { name: 'connectionId', type: dynamodb.AttributeType.STRING },
     billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
@@ -481,6 +493,7 @@ export function buildDataStores(
     collaborationTable,
     workspaceSearchTable,
     notificationsTable,
+    focusTable,
     realtimeSessionsTable,
     fileProofingTable,
   };

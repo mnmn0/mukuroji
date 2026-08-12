@@ -28,6 +28,10 @@ export type InboxNotification = {
    */
   id: string
   /**
+   * Immutable source event shared with a continuing Focus signal when available.
+   */
+  eventId?: string
+  /**
    * 通知元 event の種別です。
    */
   eventType: string

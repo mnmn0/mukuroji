@@ -577,6 +577,10 @@ type TeamIssueItem = {
    * 優先度です。
    */
   priority: ProjectTaskPriority
+  /** Priority value の直近変更時刻です。 */
+  priorityUpdatedAt?: string
+  /** Derived due date の直近変更時刻です。 */
+  dueDateUpdatedAt?: string
   /**
    * 作成日時の ISO 8601 timestamp です。
    */
@@ -1806,6 +1810,8 @@ export class DynamoDbTeamIssuesClient {
         dueDate,
         schedule,
         priority,
+        priorityUpdatedAt: now,
+        dueDateUpdatedAt: now,
         createdAt: now,
         updatedAt: now,
       }
@@ -2070,12 +2076,15 @@ export class DynamoDbTeamIssuesClient {
         throw createWorkItemRevisionConflictError()
       }
       const schedule = readWorkItemScheduleInput(update.schedule)
+      const dueDate = deriveWorkItemScheduleDueDate(schedule)
+      const dueDateChanged = dueDate !== beforeIssue.dueDate
       const afterIssue: TeamIssueItem = {
         ...beforeIssue,
         schemaVersion: WORK_ITEM_SCHEMA_VERSION,
         revision: expectedRevision + 1,
         schedule,
-        dueDate: deriveWorkItemScheduleDueDate(schedule),
+        dueDate,
+        ...(dueDateChanged ? { dueDateUpdatedAt: occurredAt } : {}),
         updatedAt: occurredAt,
       }
       const eventItem = this.createIssueEventItem({
@@ -2111,7 +2120,7 @@ export class DynamoDbTeamIssuesClient {
           cascadeSize: updates.length,
         },
       })
-      return { update, expectedRevision, afterIssue, eventItem, auditPut }
+      return { update, expectedRevision, afterIssue, eventItem, auditPut, dueDateChanged }
     }))
     const authorizationConditionEntries = createAuthorizationSnapshotConditionEntries(
       authorizationSnapshot,
@@ -2167,13 +2176,17 @@ export class DynamoDbTeamIssuesClient {
           },
           UpdateExpression:
             'SET #schemaVersion = :schemaVersion, #revision = :nextRevision, ' +
-            '#schedule = :schedule, #dueDate = :dueDate, #updatedAt = :updatedAt',
+            '#schedule = :schedule, #dueDate = :dueDate, #updatedAt = :updatedAt' +
+            (entry.dueDateChanged ? ', #dueDateUpdatedAt = :dueDateUpdatedAt' : ''),
           ExpressionAttributeNames: {
             '#schemaVersion': 'schemaVersion',
             '#revision': 'revision',
             '#schedule': 'schedule',
             '#dueDate': 'dueDate',
             '#updatedAt': 'updatedAt',
+            ...(entry.dueDateChanged
+              ? { '#dueDateUpdatedAt': 'dueDateUpdatedAt' }
+              : {}),
           },
           ExpressionAttributeValues: {
             ':schemaVersion': WORK_ITEM_SCHEMA_VERSION,
@@ -2182,6 +2195,7 @@ export class DynamoDbTeamIssuesClient {
             ':schedule': entry.afterIssue.schedule,
             ':dueDate': entry.afterIssue.dueDate,
             ':updatedAt': occurredAt,
+            ...(entry.dueDateChanged ? { ':dueDateUpdatedAt': occurredAt } : {}),
           },
           ConditionExpression:
             'attribute_exists(directoryTeamId) AND attribute_exists(issueId) AND ' +
@@ -2436,6 +2450,19 @@ export class DynamoDbTeamIssuesClient {
       expressionAttributeValues[':schedule'] = schedule
       setExpressions.push('#dueDate = :dueDate')
       setExpressions.push('#schedule = :schedule')
+      if (expressionAttributeValues[':dueDate'] !== beforeIssue.dueDate) {
+        expressionAttributeNames['#dueDateUpdatedAt'] = 'dueDateUpdatedAt'
+        expressionAttributeValues[':dueDateUpdatedAt'] = expressionAttributeValues[':updatedAt']
+        setExpressions.push('#dueDateUpdatedAt = :dueDateUpdatedAt')
+      }
+      if (
+        'priority' in input &&
+        expressionAttributeValues[':priority'] !== beforeIssue.priority
+      ) {
+        expressionAttributeNames['#priorityUpdatedAt'] = 'priorityUpdatedAt'
+        expressionAttributeValues[':priorityUpdatedAt'] = expressionAttributeValues[':updatedAt']
+        setExpressions.push('#priorityUpdatedAt = :priorityUpdatedAt')
+      }
       const updateExpression = [
         `SET ${setExpressions.join(', ')}`,
         removeExpressions.length > 0 ? `REMOVE ${removeExpressions.join(', ')}` : undefined,
@@ -3542,6 +3569,8 @@ export function toTeamIssueResponseItem(value: unknown): TeamIssueResponseItem {
     dueDate: item.dueDate,
     schedule: item.schedule,
     priority: item.priority,
+    priorityUpdatedAt: item.priorityUpdatedAt ?? item.createdAt,
+    dueDateUpdatedAt: item.dueDateUpdatedAt ?? item.createdAt,
     createdAt: item.createdAt,
     updatedAt: item.updatedAt,
     source: 'dynamodb',

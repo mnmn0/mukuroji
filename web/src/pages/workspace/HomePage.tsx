@@ -1,8 +1,12 @@
 import { useMemo } from 'react'
+import { useWorkspaceFocusOverview } from '../../features/focus-queue/queries/useWorkspaceFocusOverview'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { createWorkspaceSummary } from '../../work-items/model/workspaceWorkItems'
 import { useWorkspaceWorkItemData } from '../../workspace/queries/useWorkspaceWorkItemData'
-import { WorkspaceTaskLoadNotice } from '../../workspace/ui/WorkspaceDataNotices'
+import {
+  WorkspaceFocusLoadNotice,
+  WorkspaceTaskLoadNotice,
+} from '../../workspace/ui/WorkspaceDataNotices'
 import { HomeWorkspaceView } from '../../workspace/ui/HomeWorkspaceView'
 import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
 import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
@@ -20,13 +24,21 @@ export function HomePage() {
     workspace.canLoadWorkspaceData,
     workspace.teams,
   )
+  const focus = useWorkspaceFocusOverview(
+    workspace.accessToken,
+    workspace.canLoadWorkspaceData,
+  )
   const summary = useMemo(
-    () => createWorkspaceSummary(workspace.teams, workItems.tasks),
-    [workItems.tasks, workspace.teams],
+    () => createWorkspaceSummary(
+      workspace.teams,
+      workItems.tasks,
+      focus.blockedCount,
+    ),
+    [focus.blockedCount, workItems.tasks, workspace.teams],
   )
   return (
     <WorkspaceRouteContent
-      isLoading={workItems.isLoading}
+      isLoading={workItems.isLoading || focus.isLoading}
       sessionErrors={[
         workItems.workItemsError,
         workItems.configurationsError,
@@ -38,11 +50,13 @@ export function HomePage() {
           failedProjectCount={workItems.failedProjectCount}
           t={t}
         />
+        <WorkspaceFocusLoadNotice {...focus.noticeProps} t={t} />
         <HomeWorkspaceView
+          focusQueue={focus.response}
+          isFocusUnavailable={focus.isUnavailable}
           onOpenTask={workspace.onOpenTask}
           summary={summary}
           t={t}
-          tasks={workItems.tasks}
           teams={workspace.teams}
           workItemConfigurationsByTeam={workItems.configurationsByTeam}
         />
