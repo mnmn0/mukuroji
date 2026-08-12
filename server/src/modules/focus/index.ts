@@ -15,6 +15,7 @@ export {
   FocusStateError,
   InMemoryFocusStateClient,
   createFocusPolicyMutationPreview,
+  createFocusPolicyRevisionConditionCheck,
   createFocusStateClient,
   getConfiguredFocusTableName,
   type FocusSnoozeRecord,

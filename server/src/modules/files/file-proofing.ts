@@ -3507,7 +3507,7 @@ function isStoredApprovalSummaryItem(value: unknown): value is StoredApprovalSum
     'updatedAt' in value && isValidTimestamp(value.updatedAt) &&
     (!('pendingDueAt' in value) || (
       value.pendingDueAt instanceof Set &&
-      [...value.pendingDueAt].every((entry) => typeof entry === 'string')
+      [...value.pendingDueAt].every(isValidApprovalDueAtKey)
     ))
 }
 
@@ -3519,6 +3519,22 @@ function isNonnegativeSafeInteger(value: unknown): value is number {
 /** Returns whether a stored timestamp is a parseable string. */
 function isValidTimestamp(value: unknown): value is string {
   return typeof value === 'string' && Number.isFinite(Date.parse(value))
+}
+
+/** Returns whether one timestamp is canonical ISO 8601 UTC text. */
+function isCanonicalTimestamp(value: unknown): value is string {
+  if (!isValidTimestamp(value)) return false
+  return new Date(Date.parse(value)).toISOString() === value
+}
+
+/** Returns whether one stored pending-due key contains a canonical due date. */
+function isValidApprovalDueAtKey(value: unknown): value is string {
+  if (typeof value !== 'string') return false
+  const separatorIndex = value.indexOf('#')
+  if (separatorIndex < 0) return isCanonicalTimestamp(value)
+  return separatorIndex > 0 &&
+    separatorIndex < value.length - 1 &&
+    isCanonicalTimestamp(value.slice(0, separatorIndex))
 }
 
 /** Reviewer projection row を判定します。 */

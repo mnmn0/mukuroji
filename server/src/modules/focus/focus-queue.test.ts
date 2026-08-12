@@ -536,8 +536,58 @@ describe('Focus queue projection', () => {
     const effectivePolicy = queue.effectivePolicies.find((policy) =>
       policy.id === item.effectivePolicyId
     )
-    expect(slaSignal?.source.id).toContain(effectivePolicy?.fingerprint)
+    if (!effectivePolicy) throw new Error('Expected an effective Focus policy.')
+    expect(slaSignal?.source.id).not.toContain(effectivePolicy.fingerprint)
     expect(slaSignal?.freshness.sourceVersion).toBeUndefined()
+  })
+
+  test('keeps an SLA snooze across unrelated policy revisions', () => {
+    const workItem = createWorkItem(
+      'sla-snoozed',
+      'viewer',
+      'medium',
+      'started',
+      '',
+      1,
+      '2026-08-09T09:00:00.000Z',
+      '2026-08-05T08:00:00.000Z',
+    )
+    const firstPolicy = createPolicy(
+      'user-policy',
+      { type: 'user' },
+      1,
+      { weights: { mention: 45 } },
+    )
+    const initial = findFocusItem(projectQueue({
+      workItems: [workItem],
+      userPolicy: firstPolicy,
+    }), workItem.id)
+    const firstSla = initial.signals.find((signal) => signal.type === 'sla')
+    if (!firstSla) throw new Error('Expected an SLA signal.')
+    const snooze: FocusSnoozeRecord = {
+      teamId: workItem.teamId,
+      workItemId: workItem.id,
+      version: 1,
+      causeFingerprint: createFocusCauseFingerprint(initial.signals),
+      snoozedUntil: '2026-08-10T12:00:00.000Z',
+      updatedAt: '2026-08-09T10:00:00.000Z',
+    }
+    const secondPolicy = createPolicy(
+      'user-policy',
+      { type: 'user' },
+      2,
+      { weights: { mention: 46 } },
+    )
+    const revised = findFocusItem(projectQueue({
+      workItems: [workItem],
+      userPolicy: secondPolicy,
+      snoozes: [snooze],
+    }), workItem.id)
+    const secondSla = revised.signals.find((signal) => signal.type === 'sla')
+
+    expect(secondSla?.source.id).toBe(firstSla.source.id)
+    expect(revised.section).toBe('snoozed')
+    expect(revised.snoozedUntil).toBe(snooze.snoozedUntil)
   })
 
   test('applies Team overrides before user overrides and preserves deterministic Team order', () => {

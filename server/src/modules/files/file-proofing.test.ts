@@ -1685,6 +1685,30 @@ describe('file proofing domain', () => {
     })
   })
 
+  test('fails closed when a stored approval summary contains an invalid due-date key', async () => {
+    const state = createClient()
+    const scopeKey = createFileProofingScopeKey(scope)
+    state.documentClient.items.set(createMemoryKey({
+      scopeKey,
+      recordKey: 'APPROVAL_SUMMARY',
+    }), {
+      scopeKey,
+      recordKey: 'APPROVAL_SUMMARY',
+      entryType: 'approval-summary',
+      pendingCount: 1,
+      approvedCount: 0,
+      rejectedCount: 0,
+      changesRequestedCount: 0,
+      pendingDueAt: new Set(['not-a-date#approval-1']),
+      updatedAt: '2026-07-13T00:00:00.000Z',
+    })
+
+    await expect(state.client.getApprovalSummary(scope)).rejects.toMatchObject({
+      code: 'ApprovalSummaryUnavailable',
+      status: 503,
+    })
+  })
+
   test('creates one durable Work Item approval across retries and transitions after unanimous approval', async () => {
     const state = createClient('work-items', 'audit-events')
     const workItemKey = {

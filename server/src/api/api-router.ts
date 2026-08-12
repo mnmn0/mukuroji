@@ -316,6 +316,7 @@ import {
   FocusStateError,
   createFocusCauseFingerprint,
   createFocusPolicyMutationPreview,
+  createFocusPolicyRevisionConditionCheck,
   createFocusQueue,
   createFocusWorkItemStateKey as createFocusWorkItemKey,
   resolveFocusEffectivePolicies,
@@ -6051,13 +6052,26 @@ routeApp.put('/api/focus/policies', async (c) => {
         update: input,
         now,
         mutationIdentity: prepared.mutationIdentity,
-        authorizationConditionChecks: createPlanningCallerAuthorizationConditionChecks(principal),
+        authorizationConditionChecks: [
+          ...createPlanningCallerAuthorizationConditionChecks(principal),
+          ...prepared.policyConditionChecks,
+        ],
       })
-      const effectivePolicies = await readAndVerifyFocusPolicyEffectivePolicies(
-        principal,
-        input,
-        prepared.effectivePolicies,
-      )
+      let effectivePolicies = prepared.effectivePolicies
+      try {
+        effectivePolicies = await readAndVerifyFocusPolicyEffectivePolicies(
+          principal,
+          input,
+          prepared.effectivePolicies,
+        )
+      } catch (error) {
+        if (
+          !(error instanceof FocusApiError) ||
+          error.code !== 'FocusPolicyContributingStateChanged'
+        ) {
+          throw error
+        }
+      }
       const response = { policy, effectivePolicies } satisfies UpdateFocusPolicyResponse
       await completeFocusPolicyMutationReceipt(
         reservationRequest,
@@ -22427,6 +22441,14 @@ async function prepareFocusPolicyMutation(
 ) {
   const target = input.target
   const accessibleTeamIds = await readFocusAccessibleTeamIds(principal)
+  if (
+    target.type === 'user' &&
+    accessibleTeamIds.length > WORK_ITEMS_TEAM_READ_LIMIT
+  ) {
+    throw createWorkItemListLimitExceededError(
+      `Workspace has more than ${WORK_ITEMS_TEAM_READ_LIMIT} accessible Teams.`,
+    )
+  }
   const policyStateTeamIds = target.type === 'team'
     ? [...new Set([...accessibleTeamIds, target.teamId])].sort()
     : accessibleTeamIds
@@ -22458,7 +22480,36 @@ async function prepareFocusPolicyMutation(
     teamPolicies,
     ...(userPolicy === undefined ? {} : { userPolicy }),
   })
+  const policyConditionChecks = [
+    ...effectivePolicyTeamIds
+      .filter((teamId) => target.type !== 'team' || teamId !== target.teamId)
+      .map((teamId) => {
+        const teamPolicy = state.teamPolicies.find((policy) =>
+          policy.target.type === 'team' && policy.target.teamId === teamId
+        )
+        return createFocusPolicyRevisionConditionCheck(
+          principal.directoryId,
+          principal.userKey,
+          { type: 'team', teamId },
+          teamPolicy?.version ?? 0,
+        )
+      }),
+    ...(target.type === 'team'
+      ? [createFocusPolicyRevisionConditionCheck(
+          principal.directoryId,
+          principal.userKey,
+          { type: 'user' },
+          state.userPolicy?.version ?? 0,
+        )]
+      : []),
+  ]
   const mutationIdentity = createFocusMutationRecoveryIdentity(
+    request,
+    'policy',
+    targetIdentity,
+    { policy: createFocusPolicyRecoveryEvidence(preview) },
+  )
+  const legacyMutationIdentity = createFocusMutationRecoveryIdentity(
     request,
     'policy',
     targetIdentity,
@@ -22479,7 +22530,8 @@ async function prepareFocusPolicyMutation(
     ? state.userPolicyMutationIdentity
     : state.teamPolicyMutationIdentities[target.teamId]
   const committedPolicy =
-    storedMutationIdentity === mutationIdentity &&
+    (storedMutationIdentity === mutationIdentity ||
+      storedMutationIdentity === legacyMutationIdentity) &&
     storedPolicy !== undefined &&
     stableDigestStringify(createFocusPolicyRecoveryEvidence(storedPolicy)) ===
       stableDigestStringify(createFocusPolicyRecoveryEvidence(preview))
@@ -22490,6 +22542,7 @@ async function prepareFocusPolicyMutation(
     committedPolicy,
     effectivePolicies,
     mutationIdentity,
+    policyConditionChecks,
   }
 }
 

@@ -1484,7 +1484,7 @@ function createSlaSignal(
   return [createProjectedSignal({
     type: 'sla',
     sourceKind: 'service-level-policy',
-    sourceId: `${policy.id}:${policy.fingerprint}:${createWorkItemSourceId(workItem)}:${encodeURIComponent(dueAt.toISOString())}`,
+    sourceId: `${policy.id}:${createWorkItemSourceId(workItem)}:${encodeURIComponent(dueAt.toISOString())}`,
     occurredAt: dueAt.toISOString(),
     evaluatedAt: context.evaluatedAt,
     deepLink: createWorkItemDeepLink(workItem),

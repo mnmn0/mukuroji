@@ -1326,10 +1326,11 @@ test('validates and version-checks user policy replacements', async () => {
   expect(await invalid.json()).toMatchObject({ code: 'InvalidFocusInput' })
 })
 
-test('rejects a policy response when a contributing layer changes after the write', async () => {
+test('returns the committed policy when a contributing layer changes after the write', async () => {
   configureFocusSources('manager')
   const baseFocusState = new InMemoryFocusStateClient()
   let stateReads = 0
+  let policySaveInput: Parameters<FocusStateClient['savePolicy']>[0] | undefined
   const focusState: FocusStateClient = {
     async getState(input) {
       stateReads += 1
@@ -1348,7 +1349,10 @@ test('rejects a policy response when a contributing layer changes after the writ
       }
       return baseFocusState.getState(input)
     },
-    savePolicy: (input) => baseFocusState.savePolicy(input),
+    savePolicy: (input) => {
+      policySaveInput = input
+      return baseFocusState.savePolicy(input)
+    },
     saveSnooze: (input) => baseFocusState.saveSnooze(input),
   }
   setTestAppDependencies({ focusState })
@@ -1364,15 +1368,67 @@ test('rejects a policy response when a contributing layer changes after the writ
     'focus-policy-contributing-race',
   )
 
-  expect(response.status).toBe(409)
+  expect(response.status).toBe(200)
   expect(await response.json()).toMatchObject({
-    code: 'FocusPolicyContributingStateChanged',
+    policy: {
+      target: { type: 'user' },
+      version: 1,
+      overrides: { dueSoonDays: 4 },
+    },
+    effectivePolicies: [{
+      teamId: 'core-team',
+      settings: { dueSoonDays: 4 },
+    }],
   })
+  expect(policySaveInput?.authorizationConditionChecks).toEqual(expect.arrayContaining([
+    expect.objectContaining({
+      ConditionCheck: expect.objectContaining({
+        TableName: 'mukuroji-focus-local',
+        Key: {
+          scopeKey: 'WORKSPACE#user%23demo%40example.com#TEAM#core-team',
+          recordKey: 'POLICY',
+        },
+        ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
+      }),
+    }),
+  ]))
   expect((await baseFocusState.getState({
     workspaceId: 'user#demo@example.com',
     memberKey: 'demo@example.com',
     teamIds: ['core-team'],
   })).userPolicy).toMatchObject({ version: 1 })
+})
+
+test('rejects personal policy updates beyond the Focus Team limit before persistence', async () => {
+  configureFocusSources('manager')
+  const additionalTeams = Array.from({ length: 20 }, (_, index) => ({
+    id: `team-${String(index + 1).padStart(2, '0')}`,
+    name: `Team ${index + 1}`,
+    projects: [{
+      id: `project-${String(index + 1).padStart(2, '0')}`,
+      name: `Project ${index + 1}`,
+      tone: 'blue' as const,
+    }],
+  }))
+  configureFakeProjectClients(true, {
+    additionalTeams,
+    projectAccesses: [
+      { projectId: 'refero', role: 'manager' },
+      ...additionalTeams.map((team) => ({
+        projectId: team.projects[0]!.id,
+        role: 'manager' as const,
+      })),
+    ],
+  })
+
+  const response = await focusRequest('/api/focus/policies', 'PUT', {
+    target: { type: 'user' },
+    expectedVersion: 0,
+    overrides: { dueSoonDays: 4 },
+  })
+
+  expect(response.status).toBe(413)
+  expect(await response.json()).toMatchObject({ code: 'WorkItemListLimitExceeded' })
 })
 
 test('replays a lost-response policy retry and rejects key reuse with another payload', async () => {

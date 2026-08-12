@@ -91,6 +91,50 @@ export type FocusAuthorizationConditionCheck = {
   >
 }
 
+/**
+ * Creates a condition check that fences one stored Focus policy revision.
+ *
+ * @param workspaceId - Workspace whose Focus table partition is checked.
+ * @param memberKey - Authenticated member key used for personal policy scope.
+ * @param target - Policy scope whose stored revision is checked.
+ * @param expectedVersion - Policy version observed before the mutation.
+ * @returns DynamoDB condition check for the observed policy row.
+ */
+export function createFocusPolicyRevisionConditionCheck(
+  workspaceId: string,
+  memberKey: string,
+  target: FocusPolicyTarget,
+  expectedVersion: number,
+): FocusAuthorizationConditionCheck {
+  const scopeKey = createPolicyScopeKey(workspaceId, memberKey, target)
+  const version = requireVersion(expectedVersion)
+  const condition = version === 0
+    ? {
+        ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
+      }
+    : {
+        ConditionExpression: '#entryType = :entryType AND #version = :expectedVersion',
+        ExpressionAttributeNames: {
+          '#entryType': 'entryType',
+          '#version': 'version',
+        },
+        ExpressionAttributeValues: {
+          ':entryType': 'policy',
+          ':expectedVersion': version,
+        },
+      }
+  return {
+    ConditionCheck: {
+      TableName: getConfiguredFocusTableName(),
+      Key: {
+        scopeKey,
+        recordKey: userPolicyRecordKey,
+      },
+      ...condition,
+    },
+  }
+}
+
 /** Input for a version-checked Focus snooze replacement. */
 export type SaveFocusSnoozeInput = {
   /** Canonical Workspace identifier. */
