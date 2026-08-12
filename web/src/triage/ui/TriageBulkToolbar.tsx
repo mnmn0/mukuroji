@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from 'react'
+import { TRIAGE_BULK_ACTION_LIMIT } from '@mukuroji/contracts'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import type {
   TriageBulkActionInput,
@@ -48,12 +49,17 @@ export function TriageBulkToolbar({
 }: TriageBulkToolbarProps) {
   const [mode, setMode] = useState<TriageBulkActionMode>()
   const [localError, setLocalError] = useState(false)
+  const exceedsBulkLimit = entries.length > TRIAGE_BULK_ACTION_LIMIT
 
   if (entries.length === 0) return null
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (!mode || isPending) return
+    if (exceedsBulkLimit) {
+      setLocalError(true)
+      return
+    }
     const input = createTriageBulkInput(entries, mode, new FormData(event.currentTarget))
     if (!input) {
       setLocalError(true)
@@ -79,13 +85,28 @@ export function TriageBulkToolbar({
           {t('triage.bulk.selectedCount').replace('{count}', String(entries.length))}
         </strong>
         {allowedActions.includes('assign') ? (
-          <BulkModeButton label={t('triage.bulk.assign')} mode="assign" onSelect={setMode} />
+          <BulkModeButton
+            disabled={isPending || exceedsBulkLimit}
+            label={t('triage.bulk.assign')}
+            mode="assign"
+            onSelect={setMode}
+          />
         ) : null}
         {allowedActions.includes('snooze') ? (
-          <BulkModeButton label={t('triage.bulk.snooze')} mode="snooze" onSelect={setMode} />
+          <BulkModeButton
+            disabled={isPending || exceedsBulkLimit}
+            label={t('triage.bulk.snooze')}
+            mode="snooze"
+            onSelect={setMode}
+          />
         ) : null}
         {allowedActions.includes('decline') ? (
-          <BulkModeButton label={t('triage.bulk.decline')} mode="decline" onSelect={setMode} />
+          <BulkModeButton
+            disabled={isPending || exceedsBulkLimit}
+            label={t('triage.bulk.decline')}
+            mode="decline"
+            onSelect={setMode}
+          />
         ) : null}
         <button
           className="ml-auto min-h-10 px-3 text-sm font-semibold text-[var(--workbench-muted)]"
@@ -135,9 +156,11 @@ export function TriageBulkToolbar({
         </form>
       ) : null}
 
-      {errorMessage || localError ? (
+      {errorMessage || localError || exceedsBulkLimit ? (
         <p className="mt-3 text-sm font-semibold text-red-700" role="alert">
-          {errorMessage ?? t('triage.bulk.error')}
+          {errorMessage ?? (exceedsBulkLimit
+            ? t('triage.bulk.limit').replace('{limit}', String(TRIAGE_BULK_ACTION_LIMIT))
+            : t('triage.bulk.error'))}
         </p>
       ) : null}
 
@@ -164,13 +187,19 @@ export function TriageBulkToolbar({
 }
 
 /** Opens one bulk-operation confirmation form. */
-function BulkModeButton({ label, mode, onSelect }: {
+function BulkModeButton({ disabled = false, label, mode, onSelect }: {
+  disabled?: boolean
   label: string
   mode: TriageBulkActionMode
   onSelect: (mode: TriageBulkActionMode) => void
 }) {
   return (
-    <button className="workbench-button-secondary min-h-10 px-4" onClick={() => onSelect(mode)} type="button">
+    <button
+      className="workbench-button-secondary min-h-10 px-4"
+      disabled={disabled}
+      onClick={() => onSelect(mode)}
+      type="button"
+    >
       {label}
     </button>
   )

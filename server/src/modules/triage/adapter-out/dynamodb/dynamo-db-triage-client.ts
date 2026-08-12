@@ -1,4 +1,10 @@
-import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto'
+import {
+  createCipheriv,
+  createDecipheriv,
+  createHash,
+  randomBytes,
+  randomUUID,
+} from 'node:crypto'
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import {
   DynamoDBDocumentClient,
@@ -212,7 +218,7 @@ type StoredTriageConfigurationReceipt = {
   configuration: TriageConfiguration
 }
 
-/** Signed pagination payload. */
+/** Encrypted pagination payload. */
 type TriageCursorPayload = {
   /** Scope fingerprint binding Workspace, Team, filters, and index. */
   scope: string
@@ -250,8 +256,8 @@ export class DynamoDbTriageClient implements TriageClient {
   /** Number of deterministic sparse wake partitions. */
   private readonly wakeShardCount: number
 
-  /** HMAC secret for scope-bound pagination cursors. */
-  private readonly cursorSecret: string
+  /** AES key derived from the secret used for scope-bound pagination cursors. */
+  private readonly cursorKey: Buffer
 
   /** Optional Work Item action resolver supplied by composition. */
   private readonly resolveWorkItemAction?: ResolveTriageWorkItemAction
@@ -330,12 +336,13 @@ export class DynamoDbTriageClient implements TriageClient {
       'Triage wake shard count',
       128,
     )
-    this.cursorSecret = requireText(
+    const cursorSecret = requireText(
       options.cursorSecret ?? readEnvironment('TRIAGE_CURSOR_SECRET') ??
         readEnvironment('REQUEST_TOKEN_HASH_SECRET') ?? 'local-triage-cursor-secret',
       'Triage cursor secret',
       4_096,
     )
+    this.cursorKey = createHash('sha256').update(cursorSecret).digest()
     this.resolveWorkItemAction = options.resolveWorkItemAction
     this.validateAdmission = options.validateAdmission
     this.validateConfigurationReferences = options.validateConfigurationReferences
@@ -1008,6 +1015,7 @@ export class DynamoDbTriageClient implements TriageClient {
       }
       const entry = admission.entry
       requireSamePreparedManualProject(input, entry)
+      const admissionItems = admission.transactItems
       const transactItems = dedupeTriageConditionChecks([
         ...(authorizationConditionChecks ?? []),
         ...createTriageEntryTransactionItems({
@@ -1016,18 +1024,28 @@ export class DynamoDbTriageClient implements TriageClient {
           inputFingerprint: idempotency.fingerprint,
           wakeShardCount: this.wakeShardCount,
         }),
+        createTriageOperationReceiptTransactionPut({
+          tableName: this.tableName,
+          entry,
+          operation: 'manual-handoff',
+          idempotency,
+          expiresAt: addDays(now, 90),
+        }),
+        ...admissionItems,
       ])
-      transactItems.push(createTriageOperationReceiptTransactionPut({
-        tableName: this.tableName,
-        entry,
-        operation: 'manual-handoff',
-        idempotency,
-        expiresAt: addDays(now, 90),
-      }))
-      const retryableConflictItemIndexes = admission.retryableConflictItemIndexes?.map(
-        (itemIndex) => transactItems.length + itemIndex,
-      ) ?? []
-      transactItems.push(...admission.transactItems)
+      const retryableConflictItemIndexes = (admission.retryableConflictItemIndexes ?? [])
+        .flatMap((itemIndex) => {
+          const admissionItem = admissionItems[itemIndex]
+          if (!admissionItem) return []
+          const directIndex = transactItems.indexOf(admissionItem)
+          if (directIndex >= 0) return [directIndex]
+          const key = triageConditionCheckKey(admissionItem)
+          if (key === undefined) return []
+          const deduplicatedIndex = transactItems.findIndex((item) =>
+            triageConditionCheckKey(item) === key
+          )
+          return deduplicatedIndex >= 0 ? [deduplicatedIndex] : []
+        })
       if (transactItems.length > 100) {
         throw new TriageError(
           409,
@@ -1409,9 +1427,17 @@ export class DynamoDbTriageClient implements TriageClient {
     index: string,
     key: Record<string, unknown>,
   ): string {
-    const payload = Buffer.from(JSON.stringify({ scope, index, key })).toString('base64url')
-    const signature = createHmac('sha256', this.cursorSecret).update(payload).digest('base64url')
-    return `${payload}.${signature}`
+    const iv = randomBytes(12)
+    const cipher = createCipheriv('aes-256-gcm', this.cursorKey, iv)
+    const payload = Buffer.from(JSON.stringify({ scope, index, key }), 'utf8')
+    const ciphertext = Buffer.concat([cipher.update(payload), cipher.final()])
+    const tag = cipher.getAuthTag()
+    return [
+      'v1',
+      iv.toString('base64url'),
+      ciphertext.toString('base64url'),
+      tag.toString('base64url'),
+    ].join('.')
   }
 
   /** Resolves the queue index selected by a previously issued cursor.
@@ -1459,37 +1485,43 @@ export class DynamoDbTriageClient implements TriageClient {
    * @returns The authenticated payload before its semantic scope is selected.
    */
   private decodeCursorPayload(cursor: string): TriageCursorPayload {
-    const [payload, signature, extra] = cursor.split('.')
-    if (!payload || !signature || extra !== undefined) throw invalidCursor()
-    const expected = createHmac('sha256', this.cursorSecret).update(payload).digest()
-    let received: Buffer
+    const [version, ivText, ciphertextText, tagText, extra] = cursor.split('.')
+    if (!version || !ivText || !ciphertextText || !tagText || extra !== undefined || version !== 'v1') {
+      throw invalidCursor()
+    }
+    let iv: Buffer
+    let ciphertext: Buffer
+    let tag: Buffer
     try {
-      received = Buffer.from(signature, 'base64url')
+      iv = Buffer.from(ivText, 'base64url')
+      ciphertext = Buffer.from(ciphertextText, 'base64url')
+      tag = Buffer.from(tagText, 'base64url')
     } catch (error) {
       throw new TriageError(400, 'InvalidTriageCursor', 'The triage cursor is invalid.', {
         cause: error,
       })
     }
-    if (received.length !== expected.length || !timingSafeEqual(received, expected)) {
-      throw invalidCursor()
-    }
-    let value: unknown
     try {
-      value = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'))
+      if (iv.length !== 12 || tag.length !== 16) throw invalidCursor()
+      const decipher = createDecipheriv('aes-256-gcm', this.cursorKey, iv)
+      decipher.setAuthTag(tag)
+      const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()])
+      const value: unknown = JSON.parse(plaintext.toString('utf8'))
+      if (
+        !isRecord(value) ||
+        typeof value.scope !== 'string' ||
+        typeof value.index !== 'string' ||
+        !isRecord(value.key)
+      ) {
+        throw invalidCursor()
+      }
+      return { scope: value.scope, index: value.index, key: value.key }
     } catch (error) {
+      if (error instanceof TriageError) throw error
       throw new TriageError(400, 'InvalidTriageCursor', 'The triage cursor is invalid.', {
         cause: error,
       })
     }
-    if (
-      !isRecord(value) ||
-      typeof value.scope !== 'string' ||
-      typeof value.index !== 'string' ||
-      !isRecord(value.key)
-    ) {
-      throw invalidCursor()
-    }
-    return { scope: value.scope, index: value.index, key: value.key }
   }
 }
 
@@ -1674,13 +1706,21 @@ function resolveQueueSlaFilter(
 function dedupeTriageConditionChecks(items: TriageTransactionItems): TriageTransactionItems {
   const seen = new Set<string>()
   return items.filter((item) => {
-    const condition = item.ConditionCheck
-    if (!condition?.TableName || !condition.Key) return true
-    const key = JSON.stringify([condition.TableName, condition.Key])
+    const key = triageConditionCheckKey(item)
+    if (key === undefined) return true
     if (seen.has(key)) return false
     seen.add(key)
     return true
   })
+}
+
+/** Returns the physical identity of one DynamoDB condition check. */
+function triageConditionCheckKey(
+  item: TriageTransactionItems[number],
+): string | undefined {
+  const condition = item.ConditionCheck
+  if (!condition?.TableName || !condition.Key) return undefined
+  return JSON.stringify([condition.TableName, condition.Key])
 }
 
 /** Creates a filter- and index-bound queue cursor scope. */

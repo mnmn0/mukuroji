@@ -17820,18 +17820,20 @@ async function prepareTriageManualHandoff(
     ? configuration.rotations.find((rotation) => rotation.id === ownerStrategy.rotationId)
       ?.memberUserIds ?? []
     : ownerUserId ? [ownerUserId] : []
-  await Promise.all(liveOwnerIds.map(async (memberUserId) => {
-    await requireActiveWorkspaceAssignee(principal.directoryId, memberUserId)
-  }))
   const slaPolicy = configuration.slaPolicies.find((policy) =>
     policy.sourceKinds.includes('manual-handoff')
   )
-  if (slaPolicy?.escalationOwnerUserId) {
-    await requireActiveWorkspaceAssignee(
+  const configuredOwnerIds = new Set([
+    ...liveOwnerIds,
+    ...(slaPolicy?.escalationOwnerUserId ? [slaPolicy.escalationOwnerUserId] : []),
+  ])
+  await Promise.all([...configuredOwnerIds].map(async (memberUserId) => {
+    await requireTriageOwnerProjectAccess(
       principal.directoryId,
-      slaPolicy.escalationOwnerUserId,
+      projectId,
+      memberUserId,
     )
-  }
+  }))
   const now = new Date()
   const slaDueAt = slaPolicy
     ? new Date(now.getTime() + slaPolicy.responseMinutes * 60_000)
@@ -17885,7 +17887,66 @@ async function createTriageManualHandoffAuthorizationConditionChecks(
       teamId,
       input.projectId,
     ),
+    await createTriageAssigneeProjectAuthorizationConditionChecks(
+      principal.directoryId,
+      input.projectId,
+      input.ownerUserId,
+    ),
   )
+}
+
+/** Validates that a configured Triage owner can work within the destination Project. */
+async function requireTriageOwnerProjectAccess(
+  workspaceId: string,
+  projectId: string | undefined,
+  ownerUserId: string,
+): Promise<void> {
+  await requireActiveWorkspaceAssignee(workspaceId, ownerUserId)
+  if (!projectId) return
+  const access = await workspaceDependencies.projectDirectory.getProjectAccess(
+    workspaceId,
+    projectId,
+    ownerUserId,
+  )
+  if (!access || !projectAccessAllows(access, 'member')) {
+    throw new ProjectDataError(
+      409,
+      'TriageAssigneeProjectAccessDenied',
+      'The configured Triage owner cannot access the destination Project.',
+    )
+  }
+}
+
+/** Builds the commit-time Project membership fence for the assigned Triage owner. */
+async function createTriageAssigneeProjectAuthorizationConditionChecks(
+  workspaceId: string,
+  projectId: string | undefined,
+  ownerUserId: string | undefined,
+): Promise<TriageAuthorizationConditionChecks> {
+  if (!projectId || !ownerUserId) return []
+  const createAccessConditionCheck = workspaceDependencies.projectDirectory
+    .createProjectAccessConditionCheck
+  if (!createAccessConditionCheck) {
+    throw new TriageError(
+      503,
+      'TriageAssigneeProjectAccessFenceUnavailable',
+      'Triage owner Project authorization fencing is unavailable. Retry the request.',
+    )
+  }
+  const conditionCheck = await createAccessConditionCheck(
+    workspaceId,
+    projectId,
+    ownerUserId,
+    'member',
+  )
+  if (!conditionCheck) {
+    throw new TriageError(
+      409,
+      'TriageAssigneeProjectAccessChanged',
+      'The assigned Triage owner no longer has access to the destination Project.',
+    )
+  }
+  return [conditionCheck]
 }
 
 /**
@@ -18043,7 +18104,22 @@ async function applyTriageRouteAction(request: TriageRouterActionRequest) {
 
   if (request.action.action === 'assign') {
     if (request.action.ownerUserId) {
-      await requireActiveWorkspaceAssignee(request.workspaceId, request.action.ownerUserId)
+      const destinationProjectId = request.action.projectId === null
+        ? undefined
+        : request.action.projectId ?? currentEntry.projectId
+      await requireTriageOwnerProjectAccess(
+        request.workspaceId,
+        destinationProjectId,
+        request.action.ownerUserId,
+      )
+      authorizationConditionChecks = mergeTriageConditionChecks(
+        authorizationConditionChecks,
+        await createTriageAssigneeProjectAuthorizationConditionChecks(
+          request.workspaceId,
+          destinationProjectId,
+          request.action.ownerUserId,
+        ),
+      )
     }
     if (request.action.projectId) {
       requireAssignedProjectPermission(

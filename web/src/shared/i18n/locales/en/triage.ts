@@ -136,6 +136,7 @@ export const triageMessages = {
   'triage.bulk.until': 'Resurface at',
   'triage.bulk.submit': 'Apply bulk action',
   'triage.bulk.pending': 'Applying bulk action',
+  'triage.bulk.limit': 'Select no more than {limit} entries for one bulk action.',
   'triage.bulk.error': 'The bulk action could not be completed.',
   'triage.bulk.results': 'Bulk action results',
   'triage.bulk.succeeded': 'Completed',

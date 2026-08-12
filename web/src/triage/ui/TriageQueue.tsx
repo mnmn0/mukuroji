@@ -1,4 +1,5 @@
 import { useRef, type KeyboardEvent } from 'react'
+import { TRIAGE_BULK_ACTION_LIMIT } from '@mukuroji/contracts'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import { ClockIcon, ShieldIcon } from '../../shared/ui/icons'
 import type {
@@ -125,8 +126,9 @@ export function TriageQueue({
   const rowButtons = useRef(new Map<string, HTMLButtonElement>())
   const selectedIdSet = new Set(selectedEntryIds)
   const selectableEntries = entries.filter((view) => canBulkAct(view, allowedBulkActions))
-  const allVisibleSelected = selectableEntries.length > 0 &&
-    selectableEntries.every((view) => selectedIdSet.has(view.entry.id))
+  const visibleSelectionCandidates = selectableEntries.slice(0, TRIAGE_BULK_ACTION_LIMIT)
+  const allVisibleSelected = visibleSelectionCandidates.length > 0 &&
+    visibleSelectionCandidates.every((view) => selectedIdSet.has(view.entry.id))
 
   const handleRowKeyDown = (
     event: KeyboardEvent<HTMLButtonElement>,
@@ -164,10 +166,15 @@ export function TriageQueue({
               checked={allVisibleSelected}
               className="h-4 w-4 rounded border-[var(--workbench-border-strong)] text-[var(--workbench-primary)]"
               disabled={selectableEntries.length === 0}
-              onChange={(event) => onVisibleSelectionChange(
-                selectableEntries.map((view) => view.entry.id),
-                event.target.checked,
-              )}
+              onChange={(event) => {
+                const ids = event.target.checked
+                  ? selectableEntries
+                    .filter((view) => !selectedIdSet.has(view.entry.id))
+                    .slice(0, Math.max(0, TRIAGE_BULK_ACTION_LIMIT - selectedIdSet.size))
+                    .map((view) => view.entry.id)
+                  : selectableEntries.map((view) => view.entry.id)
+                onVisibleSelectionChange(ids, event.target.checked)
+              }}
               type="checkbox"
             />
             {t('triage.bulk.selectVisible')}
@@ -299,7 +306,8 @@ export function TriageQueue({
                     <input
                       checked={selectedIdSet.has(entry.id)}
                       className="h-4 w-4 rounded border-[var(--workbench-border-strong)] text-[var(--workbench-primary)]"
-                      disabled={!isBulkSelectable}
+                      disabled={!isBulkSelectable ||
+                        (!selectedIdSet.has(entry.id) && selectedIdSet.size >= TRIAGE_BULK_ACTION_LIMIT)}
                       onChange={(event) => onEntrySelectionChange(entry.id, event.target.checked)}
                       type="checkbox"
                     />

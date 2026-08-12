@@ -990,7 +990,9 @@ function isTriageEntry(value: unknown): value is TriageEntry {
     (value.ownerUserId === undefined || isMemberKey(value.ownerUserId)) &&
     isPermission(value.permission) &&
     (value.sla === undefined || isSla(value.sla)) &&
-    (value.snoozedUntil === undefined || isIsoInstant(value.snoozedUntil)) &&
+    (value.state === 'snoozed'
+      ? isIsoInstant(value.snoozedUntil)
+      : value.snoozedUntil === undefined) &&
     isRetention(value.retention) &&
     (value.canonicalWorkItem === undefined || isWorkItemReference(value.canonicalWorkItem)) &&
     (value.mergeReceipt === undefined || isMergeReceipt(value.mergeReceipt)) &&

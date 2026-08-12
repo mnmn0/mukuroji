@@ -648,6 +648,22 @@ describe('triage DynamoDB transaction contributions', () => {
       ...storedItem,
       entry: {
         ...entry,
+        state: 'snoozed',
+        snoozedUntil: undefined,
+      },
+    }, key)).toBeUndefined()
+    expect(decodeTriageEntryRow({
+      ...storedItem,
+      entry: {
+        ...entry,
+        state: 'pending',
+        snoozedUntil: '2026-08-09T00:10:00.000Z',
+      },
+    }, key)).toBeUndefined()
+    expect(decodeTriageEntryRow({
+      ...storedItem,
+      entry: {
+        ...entry,
         events: [{ ...entry.events[0], type: 'unrecognized-event' }],
       },
     }, key)).toBeUndefined()

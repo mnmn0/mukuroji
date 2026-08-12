@@ -321,21 +321,48 @@ export function createTriageRouter(dependencies: TriageRouterDependencies) {
       const principal = await dependencies.requireTeamAccess(context, teamId, 'write')
       const idempotencyKey = readIdempotencyKey(context.req.header('Idempotency-Key'))
       const input = readBulkAction(await dependencies.readJson(context.req))
+      const replayedReceipts = new Map<string, TriageMutationReceipt>()
+      const pendingTargets = []
       for (const target of input.targets) {
+        const targetIdempotency = {
+          key: createTriageBulkTargetIdempotencyKey(idempotencyKey, target.entryId),
+          fingerprint: createTriageInputFingerprint({
+            target,
+            operation: input.operation,
+          }),
+        }
+        const replayed = await dependencies.getTriage().getActionReceipt(
+          principal.workspaceId,
+          target.entryId,
+          targetIdempotency,
+        )
+        if (replayed) {
+          requireVisibleTriageEntry(principal, replayed.entry)
+          replayedReceipts.set(target.entryId, replayed)
+          continue
+        }
         const entry = await dependencies.getTriage().getEntry(
           principal.workspaceId,
           teamId,
           target.entryId,
         )
         requireVisibleTriageEntry(principal, entry)
+        pendingTargets.push(target)
       }
-      requireVisibleBulkProject(principal, input.operation)
-      const configurationRevision = await dependencies.validateBulkAction?.(
-        context,
-        teamId,
-        input,
-      )
-      const preparedAuditContexts = new Map(input.targets.map((target) => {
+      const pendingInput = pendingTargets.length === input.targets.length
+        ? input
+        : { ...input, targets: pendingTargets }
+      if (pendingTargets.length > 0) {
+        requireVisibleBulkProject(principal, pendingInput.operation)
+      }
+      const configurationRevision = pendingTargets.length === 0
+        ? undefined
+        : await dependencies.validateBulkAction?.(
+            context,
+            teamId,
+            pendingInput,
+          )
+      const preparedAuditContexts = new Map(pendingTargets.map((target) => {
         const targetIdempotency = {
           key: createTriageBulkTargetIdempotencyKey(idempotencyKey, target.entryId),
           fingerprint: createTriageInputFingerprint({
@@ -376,27 +403,49 @@ export function createTriageRouter(dependencies: TriageRouterDependencies) {
         }
         return prepared.context
       }
-      const result = dependencies.applyBulkAction
-        ? await dependencies.applyBulkAction({
-            context,
-            workspaceId: principal.workspaceId,
-            teamId,
-            actor: { id: principal.userId },
-            input,
-            idempotencyKey,
-            ...(configurationRevision === undefined ? {} : { configurationRevision }),
-            createAuditContext,
-          })
-        : await dependencies.getTriage().applyBulkAction(
-            principal.workspaceId,
-            teamId,
-            { id: principal.userId },
-            input,
-            idempotencyKey,
-            createAuditContext,
-          )
+      const result = pendingTargets.length === 0
+        ? { results: [] }
+        : dependencies.applyBulkAction
+          ? await dependencies.applyBulkAction({
+              context,
+              workspaceId: principal.workspaceId,
+              teamId,
+              actor: { id: principal.userId },
+              input: pendingInput,
+              idempotencyKey,
+              ...(configurationRevision === undefined ? {} : { configurationRevision }),
+              createAuditContext,
+            })
+          : await dependencies.getTriage().applyBulkAction(
+              principal.workspaceId,
+              teamId,
+              { id: principal.userId },
+              pendingInput,
+              idempotencyKey,
+              createAuditContext,
+            )
+      const appliedResults = new Map(result.results.map((item) => [item.entryId, item]))
+      const results = input.targets.map((target) => {
+        const replayed = replayedReceipts.get(target.entryId)
+        if (replayed) {
+          return {
+            entryId: target.entryId,
+            status: 'succeeded' as const,
+            entry: replayed.entry,
+          }
+        }
+        const applied = appliedResults.get(target.entryId)
+        if (!applied) {
+          return {
+            entryId: target.entryId,
+            status: 'failed' as const,
+            errorCode: 'TriageBulkResultMissing',
+          }
+        }
+        return applied
+      })
       return context.json({
-        results: result.results.map((item) => item.entry
+        results: results.map((item) => item.entry
           ? { ...item, entry: projectTriageEntryForPrincipal(principal, item.entry) }
           : item),
       })

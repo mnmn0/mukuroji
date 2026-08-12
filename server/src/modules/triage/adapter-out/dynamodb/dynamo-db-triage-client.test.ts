@@ -1,4 +1,4 @@
-import { createHmac } from 'node:crypto'
+import { createCipheriv, createHash } from 'node:crypto'
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
 import { describe, expect, spyOn, test } from 'bun:test'
@@ -285,7 +285,7 @@ function findTransactionConfiguration(
   return undefined
 }
 
-/** Input used to reproduce the signed queue cursor format issued before this change. */
+/** Input used to reproduce an encrypted queue cursor issued by an earlier client instance. */
 type PreviouslyIssuedQueueCursorInput = {
   /** Workspace bound into the cursor scope. */
   workspaceId: string
@@ -299,7 +299,7 @@ type PreviouslyIssuedQueueCursorInput = {
   key: Record<string, unknown>
 }
 
-/** Reproduces the existing signed queue cursor format for compatibility tests.
+/** Reproduces the encrypted queue cursor format for compatibility tests.
  *
  * @param input Scope, index, and DynamoDB key issued by an earlier client version.
  * @returns An opaque cursor signed with the test harness secret.
@@ -316,12 +316,17 @@ function createPreviouslyIssuedQueueCursor(input: PreviouslyIssuedQueueCursorInp
   const index = input.indexKind === 'owner'
     ? 'triage-owner-activity-index'
     : 'triage-team-activity-index'
-  const payload = Buffer.from(JSON.stringify({ scope, index, key: input.key }))
-    .toString('base64url')
-  const signature = createHmac('sha256', 'test-cursor-secret')
-    .update(payload)
-    .digest('base64url')
-  return `${payload}.${signature}`
+  const plaintext = Buffer.from(JSON.stringify({ scope, index, key: input.key }), 'utf8')
+  const key = createHash('sha256').update('test-cursor-secret').digest()
+  const iv = createHash('sha256').update(plaintext).digest().subarray(0, 12)
+  const cipher = createCipheriv('aes-256-gcm', key, iv)
+  const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()])
+  return [
+    'v1',
+    iv.toString('base64url'),
+    ciphertext.toString('base64url'),
+    cipher.getAuthTag().toString('base64url'),
+  ].join('.')
 }
 
 describe('DynamoDbTriageClient action receipt lookup', () => {
@@ -1283,8 +1288,8 @@ describe('DynamoDbTriageClient queue indexes', () => {
         cursor,
       })).rejects.toMatchObject({ code: 'InvalidTriageCursor', status: 400 })
 
-      const signature = cursor.split('.')[1]
-      if (!signature) throw new TypeError('Expected a signed cursor fixture.')
+      const cursorParts = cursor.split('.')
+      if (cursorParts.length !== 4) throw new TypeError('Expected an encrypted cursor fixture.')
       const tamperedPayload = Buffer.from(JSON.stringify({
         scope: 'tampered-scope',
         index: 'triage-team-activity-index',
@@ -1292,7 +1297,7 @@ describe('DynamoDbTriageClient queue indexes', () => {
       })).toString('base64url')
       await expect(harness.client.listEntries('workspace-1', 'support', {
         ownerUserId: 'owner@example.com',
-        cursor: `${tamperedPayload}.${signature}`,
+        cursor: `${cursorParts[0]}.${cursorParts[1]}.${tamperedPayload}.${cursorParts[3]}`,
       })).rejects.toMatchObject({ code: 'InvalidTriageCursor', status: 400 })
       expect(harness.calls()).toBe(2)
     } finally {

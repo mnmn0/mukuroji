@@ -136,6 +136,7 @@ export const triageMessages = {
   'triage.bulk.until': '再表示日時',
   'triage.bulk.submit': '一括操作を実行',
   'triage.bulk.pending': '一括処理中',
+  'triage.bulk.limit': '一括操作では {limit} 件以内を選択してください。',
   'triage.bulk.error': '一括操作を完了できませんでした。',
   'triage.bulk.results': '一括操作の結果',
   'triage.bulk.succeeded': '完了',

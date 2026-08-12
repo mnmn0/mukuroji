@@ -136,8 +136,12 @@ export function useTriageMutations(
         ),
         shouldRetainMutationContext,
       )
-      if (isCurrentScope()) await options.updateEntry(receipt.entry)
-      if (isCurrentScope()) await options.refreshQueue()
+      if (isCurrentScope()) {
+        await Promise.allSettled([
+          options.updateEntry(receipt.entry),
+          options.refreshQueue(),
+        ])
+      }
       return receipt.entry
     } catch (actionError) {
       if (isCurrentScope()) setError(actionError)
@@ -185,8 +189,12 @@ export function useTriageMutations(
         shouldRetainMutationContext,
       )
       if (isCurrentScope()) setBulkResults(results.results)
-      if (isCurrentScope()) await options.refreshQueue()
-      if (isCurrentScope()) await options.refreshEntry().catch(() => undefined)
+      if (isCurrentScope()) {
+        await Promise.allSettled([
+          options.refreshQueue(),
+          options.refreshEntry(),
+        ])
+      }
       return results.results
     } catch (bulkError) {
       if (isCurrentScope()) setError(bulkError)
