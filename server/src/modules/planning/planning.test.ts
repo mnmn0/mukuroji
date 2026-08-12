@@ -2640,6 +2640,9 @@ describe('planning persistence', () => {
       'GetCommand',
       'TransactWriteCommand',
     ])
+    for (const command of commands.filter((entry) => entry.name === 'GetCommand')) {
+      expect(command.input).toMatchObject({ ConsistentRead: true })
+    }
     expect(commands[2]?.input.TransactItems).toEqual([
       expect.objectContaining({
         ConditionCheck: expect.objectContaining({
@@ -2715,6 +2718,9 @@ describe('planning persistence', () => {
       'GetCommand',
       'TransactWriteCommand',
     ])
+    for (const command of commands.filter((entry) => entry.name === 'GetCommand')) {
+      expect(command.input).toMatchObject({ ConsistentRead: true })
+    }
     expect(commands[2]?.input.TransactItems).toEqual([
       expect.objectContaining({
         ConditionCheck: expect.objectContaining({

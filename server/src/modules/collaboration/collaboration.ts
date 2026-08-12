@@ -286,7 +286,9 @@ export type GetWatcherStateInput = {
   projectEntityKey?: string
 }
 
-/** Watcher 更新入力です。 */
+/**
+ * Represents watcher mutation input for subscribe and unsubscribe operations.
+ */
 export type UpdateWatcherInput = {
   /** Canonical Workspace ID です。 */
   workspaceId: string
