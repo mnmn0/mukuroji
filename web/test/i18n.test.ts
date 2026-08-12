@@ -26,6 +26,7 @@ const representativeMessages: ReadonlyArray<{
   { key: 'analytics.title', ja: 'レポート', en: 'Reports' },
   { key: 'planning.title', ja: 'プランニング', en: 'Planning' },
   { key: 'requests.title', ja: 'リクエスト', en: 'Requests' },
+  { key: 'triage.tab.queue', ja: 'キュー', en: 'Queue' },
   {
     key: 'public.nav.aria',
     ja: '公開ページナビゲーション',
@@ -59,6 +60,11 @@ describe('sidebar shortcut labels', () => {
   test('localizes the Planning navigation entry', () => {
     expect(createSidebarLabels('ja').nav.planning).toBe('プランニング')
     expect(createSidebarLabels('en').nav.planning).toBe('Planning')
+  })
+
+  test('localizes the Team triage navigation entry', () => {
+    expect(createSidebarLabels('ja').triage).toBe('Triage')
+    expect(createSidebarLabels('en').triage).toBe('Triage')
   })
 
   test('localizes Quick Access and current Team navigation', () => {

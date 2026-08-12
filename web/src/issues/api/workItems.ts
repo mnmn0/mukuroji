@@ -7,6 +7,7 @@ import type {
   UpdateWorkItemInput,
   WorkItemPatch,
   WorkItemRelation,
+  WorkItemTriageContextSnapshot,
 } from '@mukuroji/contracts'
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import {
@@ -38,6 +39,8 @@ export type TeamIssueDetail = {
    * Issue 活動履歴一覧です。
    */
   activity: TeamIssueActivity[]
+  /** De-identified duplicate-source context retained with the canonical Work Item. */
+  triageContextSnapshots?: WorkItemTriageContextSnapshot[]
   /**
    * Work Item に適用される Team / Workspace workflow configuration です。
    */

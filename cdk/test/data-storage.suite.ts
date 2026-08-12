@@ -511,6 +511,11 @@ test('request intake uses a retained queue-indexed table with transient row expi
         { AttributeName: 'recordKey', AttributeType: 'S' },
         { AttributeName: 'queueKey', AttributeType: 'S' },
         { AttributeName: 'queueRecordKey', AttributeType: 'S' },
+        { AttributeName: 'triageActivityKey', AttributeType: 'S' },
+        { AttributeName: 'triageNextWakeAt', AttributeType: 'S' },
+        { AttributeName: 'triageOwnerKey', AttributeType: 'S' },
+        { AttributeName: 'triageTeamKey', AttributeType: 'S' },
+        { AttributeName: 'triageWakeShard', AttributeType: 'S' },
       ]),
       BillingMode: 'PAY_PER_REQUEST',
       KeySchema: [
@@ -525,6 +530,30 @@ test('request intake uses a retained queue-indexed table with transient row expi
             { AttributeName: 'queueRecordKey', KeyType: 'RANGE' },
           ],
           Projection: { ProjectionType: 'ALL' },
+        }),
+        expect.objectContaining({
+          IndexName: 'triage-team-activity-index',
+          KeySchema: [
+            { AttributeName: 'triageTeamKey', KeyType: 'HASH' },
+            { AttributeName: 'triageActivityKey', KeyType: 'RANGE' },
+          ],
+          Projection: { ProjectionType: 'ALL' },
+        }),
+        expect.objectContaining({
+          IndexName: 'triage-owner-activity-index',
+          KeySchema: [
+            { AttributeName: 'triageOwnerKey', KeyType: 'HASH' },
+            { AttributeName: 'triageActivityKey', KeyType: 'RANGE' },
+          ],
+          Projection: { ProjectionType: 'ALL' },
+        }),
+        expect.objectContaining({
+          IndexName: 'triage-wake-index',
+          KeySchema: [
+            { AttributeName: 'triageWakeShard', KeyType: 'HASH' },
+            { AttributeName: 'triageNextWakeAt', KeyType: 'RANGE' },
+          ],
+          Projection: { ProjectionType: 'KEYS_ONLY' },
         }),
       ]),
       PointInTimeRecoverySpecification: {

@@ -1,7 +1,7 @@
 import { createHmac } from 'node:crypto'
-import { expect, test } from 'bun:test'
-import type { DynamoDBClient } from '@aws-sdk/client-dynamodb'
-import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
+import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
+import { expect, spyOn, test } from 'bun:test'
 import type {
   RequestForm,
   RequestFormDefinition,
@@ -9,6 +9,7 @@ import type {
   RequestFormVersion,
   RequestSubmission,
   SubmitRequestInput,
+  TriageEntry,
 } from '@mukuroji/contracts'
 import type { FileObjectClient } from '../files/file-proofing'
 import {
@@ -20,6 +21,7 @@ import {
   validateRequestAnswers,
   validateRequestFormDefinition,
   validateRequestFormDraft,
+  type FormTriageAdmissionPreparer,
   type RequestLinkResolution,
   type RequestIntakeTenantAvailability,
 } from './request-intake'
@@ -437,6 +439,8 @@ function createClient(
     rateLimitPerHour?: number
     tenantAvailability?: RequestIntakeTenantAvailability
     token?: () => string
+    /** Applies current Team configuration before the Form Triage entry is committed. */
+    prepareFormTriageAdmission?: FormTriageAdmissionPreparer
   } = {},
 ) {
   return new DynamoDbRequestIntakeClient({
@@ -452,6 +456,9 @@ function createClient(
     bootstrapLocalTable: false,
     ...(options.tenantAvailability
       ? { tenantAvailability: options.tenantAvailability }
+      : {}),
+    ...(options.prepareFormTriageAdmission
+      ? { prepareFormTriageAdmission: options.prepareFormTriageAdmission }
       : {}),
   })
 }
@@ -480,6 +487,92 @@ function expectIntakeError(
   expect(callback).toThrow(RequestIntakeError)
   expect(callback).toThrow(message)
 }
+
+test('local Request Intake bootstrap creates all Triage indexes before a real client read', async () => {
+  const lowLevelClient = new DynamoDBClient({
+    region: 'us-east-1',
+    credentials: { accessKeyId: 'test', secretAccessKey: 'test' },
+  })
+  const documentClient = DynamoDBDocumentClient.from(lowLevelClient)
+  const lowLevelCalls: Array<{ name: string; input: Record<string, unknown> }> = []
+  const lowLevelSendSpy = spyOn(lowLevelClient, 'send')
+  lowLevelSendSpy.mockImplementation(async (command) => {
+    const constructorValue = Reflect.get(command, 'constructor')
+    const input = Reflect.get(command, 'input')
+    if (typeof constructorValue !== 'function' || typeof constructorValue.name !== 'string' ||
+      typeof input !== 'object' || input === null || Array.isArray(input)) {
+      throw new TypeError('Expected a low-level DynamoDB command.')
+    }
+    lowLevelCalls.push({
+      name: constructorValue.name,
+      input: Object.fromEntries(Object.entries(input)),
+    })
+    if (constructorValue.name === 'DescribeTableCommand') {
+      const error = new Error('missing local Request Intake table')
+      error.name = 'ResourceNotFoundException'
+      throw error
+    }
+    return {}
+  })
+  const documentSendSpy = spyOn(documentClient, 'send')
+  documentSendSpy.mockImplementation(async () => ({ Items: [] }))
+  const client = new DynamoDbRequestIntakeClient({
+    tableName: 'RequestIntakeTable',
+    queueIndexName: 'RequestQueueIndex',
+    documentClient,
+    dynamoDbClient: lowLevelClient,
+    objectClient: createObjectClient(),
+    tokenHashSecret,
+    bootstrapLocalTable: true,
+  })
+
+  try {
+    await expect(client.listForms('workspace-1')).resolves.toEqual({ forms: [] })
+    expect(lowLevelCalls.map((call) => call.name)).toEqual([
+      'DescribeTableCommand',
+      'CreateTableCommand',
+      'UpdateTimeToLiveCommand',
+    ])
+    const createInput = lowLevelCalls.find((call) => call.name === 'CreateTableCommand')?.input
+    expect(createInput).toMatchObject({
+      TableName: 'RequestIntakeTable',
+      BillingMode: 'PAY_PER_REQUEST',
+      GlobalSecondaryIndexes: expect.arrayContaining([
+        expect.objectContaining({
+          IndexName: 'RequestQueueIndex',
+          Projection: { ProjectionType: 'ALL' },
+        }),
+        expect.objectContaining({
+          IndexName: 'triage-team-activity-index',
+          KeySchema: [
+            { AttributeName: 'triageTeamKey', KeyType: 'HASH' },
+            { AttributeName: 'triageActivityKey', KeyType: 'RANGE' },
+          ],
+          Projection: { ProjectionType: 'ALL' },
+        }),
+        expect.objectContaining({
+          IndexName: 'triage-owner-activity-index',
+          KeySchema: [
+            { AttributeName: 'triageOwnerKey', KeyType: 'HASH' },
+            { AttributeName: 'triageActivityKey', KeyType: 'RANGE' },
+          ],
+          Projection: { ProjectionType: 'ALL' },
+        }),
+        expect.objectContaining({
+          IndexName: 'triage-wake-index',
+          KeySchema: [
+            { AttributeName: 'triageWakeShard', KeyType: 'HASH' },
+            { AttributeName: 'triageNextWakeAt', KeyType: 'RANGE' },
+          ],
+          Projection: { ProjectionType: 'KEYS_ONLY' },
+        }),
+      ]),
+    })
+  } finally {
+    documentSendSpy.mockRestore()
+    lowLevelSendSpy.mockRestore()
+  }
+})
 
 test('validates a complete form draft and rejects unknown or forward conditional references', () => {
   expect(validateRequestFormDraft(draft)).toEqual(draft)
@@ -1235,7 +1328,10 @@ test('claims an attachment after submission session renewal without persisting t
   const renewedSession = createSession(renewedSessionToken)
   let storedUpload: Record<string, unknown> | undefined
   let transaction: Array<{
-    Put?: { Item?: Record<string, unknown> }
+    Put?: {
+      ConditionExpression?: string
+      Item?: Record<string, unknown>
+    }
     Update?: { ExpressionAttributeValues?: Record<string, unknown> }
   }> | undefined
   const generatedTokens = [claimToken, threadToken]
@@ -1320,10 +1416,238 @@ test('claims an attachment after submission session renewal without persisting t
     ?.Update?.ExpressionAttributeValues).toMatchObject({
     ':claimDigest': storedUpload?.claimDigest,
   })
-  expect(transaction?.at(-1)?.Put?.Item).toMatchObject({
+  expect(transaction?.find(({ Put }) =>
+    Put?.Item?.entryType === 'submission-event'
+  )?.Put?.Item).toMatchObject({
     entryType: 'submission-event',
     type: 'submitted',
   })
+  const submissionItem = transaction?.find(({ Put }) =>
+    Put?.Item?.entryType === 'submission'
+  )?.Put?.Item
+  const submissionId = typeof submissionItem?.id === 'string'
+    ? submissionItem.id
+    : 'invalid-submission-id'
+  expect(transaction?.find(({ Put }) =>
+    Put?.Item?.entryType === 'triage-entry'
+  )?.Put).toMatchObject({
+    ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
+    Item: {
+      entryType: 'triage-entry',
+      recordKey: `TRIAGE#triage_${submissionId}`,
+      entry: {
+        id: `triage_${submissionId}`,
+        source: {
+          kind: 'form',
+          sourceId: submissionId,
+          submissionId,
+        },
+        state: 'pending',
+        teamId: 'team-core',
+      },
+    },
+  })
+  expect(transaction?.find(({ Put }) =>
+    Put?.Item?.entryType === 'triage-source-claim'
+  )?.Put).toMatchObject({
+    ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
+    Item: {
+      entryId: `triage_${submissionId}`,
+      entryType: 'triage-source-claim',
+      inputFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/u),
+      recordKey: 'LOOKUP',
+      sourceId: submissionId,
+      sourceKind: 'form',
+    },
+  })
+  expect(transaction?.find(({ Put }) =>
+    Put?.Item?.entryType === 'triage-entry-event'
+  )?.Put).toMatchObject({
+    ConditionExpression: 'attribute_not_exists(scopeKey) AND attribute_not_exists(recordKey)',
+    Item: {
+      entryId: `triage_${submissionId}`,
+      entryType: 'triage-entry-event',
+      event: {
+        id: `triage-created-${submissionId}`,
+        type: 'created',
+      },
+      recordKey: expect.stringMatching(
+        new RegExp(`^TRIAGE_EVENT#triage_${submissionId}#`, 'u'),
+      ),
+    },
+  })
+})
+
+test('re-evaluates Form Triage admission after a rotation cursor race and commits it atomically', async () => {
+  const sessionDigest = createHmac('sha256', tokenHashSecret)
+    .update(`session\0${sessionToken}`)
+    .digest('hex')
+  const session = {
+    entryType: 'submission-session',
+    scopeKey: `SESSION#${sessionDigest}`,
+    recordKey: 'LOOKUP',
+    workspaceId: 'workspace-1',
+    formId: 'form-1',
+    formVersion: 1,
+    linkDigest: resolution.tokenDigest,
+    minimumSubmitAt: '2026-07-16T08:59:00.000Z',
+    expiresAtIso: '2026-07-16T09:15:00.000Z',
+    expiresAt: Math.floor(Date.parse('2026-07-16T09:15:00.000Z') / 1_000),
+  }
+  const version = createStoredVersion()
+  const transactionAttempts: FakeCommand[] = []
+  let admissionAttempt = 0
+  const client = createClient(createDocumentClient((command) => {
+    if (command.input.UpdateExpression) return {}
+    const key = command.input.Key
+    if (key && typeof key === 'object') {
+      const scopeKey = Reflect.get(key, 'scopeKey')
+      const recordKey = Reflect.get(key, 'recordKey')
+      if (scopeKey === session.scopeKey) return { Item: session }
+      if (typeof recordKey === 'string' && recordKey.includes('#VERSION#')) {
+        return { Item: version }
+      }
+      if (typeof scopeKey === 'string' && scopeKey.startsWith('DUPLICATE#')) return {}
+    }
+    const items = command.input.TransactItems
+    if (Array.isArray(items)) {
+      transactionAttempts.push(command)
+      if (transactionAttempts.length === 1) {
+        throw Object.assign(new Error('rotation cursor changed'), {
+          name: 'TransactionCanceledException',
+          CancellationReasons: items.map((_item, index) => ({
+            Code: index === items.length - 1 ? 'ConditionalCheckFailed' : 'None',
+          })),
+        })
+      }
+      return {}
+    }
+    throw new Error(`Unexpected command: ${JSON.stringify(command.input)}`)
+  }), {
+    token: () => threadToken,
+    prepareFormTriageAdmission: async (entry) => {
+      admissionAttempt += 1
+      const ownerUserId = admissionAttempt === 1
+        ? 'rotation-first@example.com'
+        : 'rotation-second@example.com'
+      return {
+        entry: {
+          ...entry,
+          projectId: 'triage-project',
+          ownerUserId,
+          routing: {
+            reason: 'Matched the current Form routing rule.',
+            candidates: [{
+              teamId: entry.teamId,
+              projectId: 'triage-project',
+              reason: 'Matched the current Form routing rule.',
+              ruleId: 'form-rule',
+              score: 1,
+              permitted: true,
+            }],
+          },
+          sla: {
+            policyId: 'form-sla',
+            dueAt: '2026-07-16T09:30:00.000Z',
+            escalationDueAt: '2026-07-16T10:00:00.000Z',
+          },
+          retention: { expiresAt: '2026-08-15T09:00:00.000Z' },
+        },
+        transactItems: [{
+          Put: {
+            TableName: 'request-intake-table',
+            Item: {
+              entryType: 'triage-configuration',
+              scopeKey: 'WORKSPACE#workspace-1',
+              recordKey: 'TRIAGE_CONFIG#team-core',
+              revision: admissionAttempt + 1,
+            },
+            ConditionExpression: '#revision = :expectedRevision',
+            ExpressionAttributeNames: { '#revision': 'revision' },
+            ExpressionAttributeValues: { ':expectedRevision': admissionAttempt },
+          },
+        }, {
+          ConditionCheck: {
+            TableName: 'project-directory-table',
+            Key: {
+              directoryId: 'workspace-1',
+              entryKey: 'PROJECT#triage-project',
+            },
+            ConditionExpression: '#entryType = :project AND attribute_not_exists(#archivedAt)',
+          },
+        }, {
+          ConditionCheck: {
+            TableName: 'workspace-access-table',
+            Key: {
+              workspaceId: 'workspace-1',
+              recordKey: `MEMBER#${ownerUserId}`,
+            },
+            ConditionExpression: '#status = :active AND #version = :version',
+          },
+        }],
+        retryableConflictItemIndexes: [0, 1, 2],
+      }
+    },
+  })
+
+  await expect(client.submit(resolution, {
+    sessionToken,
+    locale: 'ja',
+    answers: {
+      category: 'general',
+      title: 'Alpha request',
+      estimate: 10,
+      email: 'requester@example.com',
+    },
+    consentAccepted: true,
+  }, { clientKey: 'client-1' })).resolves.toMatchObject({
+    confirmationMessage: '受け付けました。',
+  })
+
+  expect(admissionAttempt).toBe(2)
+  expect(transactionAttempts).toHaveLength(2)
+  const committedItems = transactionAttempts[1]?.input.TransactItems
+  expect(Array.isArray(committedItems)).toBe(true)
+  if (!Array.isArray(committedItems)) throw new Error('Expected a committed transaction.')
+  const triageEntryPut = committedItems.find((item) =>
+    item && typeof item === 'object' &&
+    Reflect.get(Reflect.get(item, 'Put') ?? {}, 'Item') &&
+    Reflect.get(Reflect.get(Reflect.get(item, 'Put'), 'Item'), 'entryType') === 'triage-entry'
+  )
+  expect(Reflect.get(Reflect.get(triageEntryPut, 'Put'), 'Item')).toMatchObject({
+    entry: {
+      projectId: 'triage-project',
+      ownerUserId: 'rotation-second@example.com',
+      routing: { candidates: [{ ruleId: 'form-rule' }] },
+      sla: {
+        policyId: 'form-sla',
+        dueAt: '2026-07-16T09:30:00.000Z',
+        escalationDueAt: '2026-07-16T10:00:00.000Z',
+      },
+      retention: { expiresAt: '2026-08-15T09:00:00.000Z' },
+    },
+  })
+  const configurationItem = committedItems.find((item) =>
+    item && typeof item === 'object' &&
+    Reflect.get(Reflect.get(item, 'Put') ?? {}, 'Item') &&
+    Reflect.get(Reflect.get(Reflect.get(item, 'Put'), 'Item'), 'entryType') ===
+      'triage-configuration'
+  )
+  expect(configurationItem).toMatchObject({
+    Put: {
+      Item: { entryType: 'triage-configuration', revision: 3 },
+      ConditionExpression: '#revision = :expectedRevision',
+      ExpressionAttributeValues: { ':expectedRevision': 2 },
+    },
+  })
+  expect(committedItems.slice(-2)).toEqual([
+    expect.objectContaining({
+      ConditionCheck: expect.objectContaining({ TableName: 'project-directory-table' }),
+    }),
+    expect.objectContaining({
+      ConditionCheck: expect.objectContaining({ TableName: 'workspace-access-table' }),
+    }),
+  ])
 })
 
 test('rate limits an unused submission session and hashes the external client key', async () => {
@@ -1412,7 +1736,9 @@ test('fixes submission history to the session version and replays only an identi
       session.usedAt = values[':usedAt']
       session.inputFingerprint = values[':fingerprint']
       session.receipt = values[':receipt']
-      expect(transactItems.at(-1)?.Put?.Item).toMatchObject({
+      expect(transactItems.find(({ Put }) =>
+        Put?.Item?.entryType === 'submission-event'
+      )?.Put?.Item).toMatchObject({
         entryType: 'submission-event',
         type: 'submitted',
       })
@@ -1989,6 +2315,7 @@ test('hashes requester thread tokens and appends a web reply to an open request'
       return { Attributes: { count: 1 } }
     }
     if (key?.recordKey === 'SUBMISSION#req-1') return { Item: stored }
+    if (key?.recordKey === 'TRIAGE#triage_req-1') return {}
     const items = command.input.TransactItems as Array<{ Put?: { Item?: Record<string, unknown> } }> | undefined
     if (items) {
       stored = items[0]!.Put!.Item as RequestSubmission & Record<string, unknown>
@@ -2055,6 +2382,7 @@ test('binds email replies to the original sender and deduplicates Message-ID', a
     }
     if (key?.scopeKey?.startsWith('EMAIL#')) return emailReceipt ? { Item: emailReceipt } : {}
     if (key?.recordKey === 'SUBMISSION#req-1') return { Item: stored }
+    if (key?.recordKey === 'TRIAGE#triage_req-1') return {}
     const items = command.input.TransactItems as Array<{ Put?: { Item?: Record<string, unknown> } }> | undefined
     if (items) {
       transactionCount += 1
@@ -2090,6 +2418,208 @@ test('binds email replies to the original sender and deduplicates Message-ID', a
     direction: 'requester',
     source: 'email',
     body: 'The order number is 12345.',
+  })
+})
+
+test('appends signed email activity to terminal Form and Triage records without reopening them', async () => {
+  const threadDigest = createHmac('sha256', tokenHashSecret)
+    .update(`thread\0${threadToken}`)
+    .digest('hex')
+  let stored = createStoredSubmission({
+    status: 'converted',
+    revision: 2,
+    workItem: {
+      teamId: 'team-core',
+      workItemId: 'accepted-work-item',
+      projectId: 'project-urgent',
+    },
+  })
+  const triageEntry = {
+    schemaVersion: 1,
+    id: 'triage_req-1',
+    workspaceId: 'workspace-1',
+    source: {
+      kind: 'form',
+      sourceId: 'req-1',
+      formId: 'form-1',
+      submissionId: 'req-1',
+    },
+    sourcePreview: {
+      title: 'Support request',
+      body: 'Alpha outage',
+      attachmentCount: 0,
+      commentCount: 0,
+      watcherCount: 0,
+      sanitized: true,
+      truncated: false,
+    },
+    requester: {
+      displayName: 'requester@example.com',
+      email: 'requester@example.com',
+      guest: true,
+    },
+    receivedAt: '2026-07-16T08:30:00.000Z',
+    lastActivityAt: '2026-07-16T08:30:00.000Z',
+    state: 'accepted',
+    routing: {
+      reason: 'Published Request Form routing selected this destination.',
+      candidates: [{
+        teamId: 'team-core',
+        projectId: 'project-urgent',
+        reason: 'Published Request Form routing selected this destination.',
+        permitted: true,
+      }],
+    },
+    teamId: 'team-core',
+    projectId: 'project-urgent',
+    ownerUserId: 'triage@example.com',
+    permission: {
+      visibility: 'full',
+      canReply: true,
+      guestVisible: false,
+      checkedAt: '2026-07-16T08:30:00.000Z',
+    },
+    retention: { expiresAt: '2027-07-16T08:30:00.000Z' },
+    canonicalWorkItem: {
+      teamId: 'team-core',
+      workItemId: 'accepted-work-item',
+      projectId: 'project-urgent',
+    },
+    capabilities: {
+      canAssign: false,
+      canAcceptCreate: false,
+      canAcceptLink: false,
+      canMarkDuplicate: false,
+      canDecline: false,
+      canSnooze: false,
+      canRequestInformation: false,
+      canReply: false,
+      canViewInternalContext: true,
+    },
+    events: [{
+      id: 'accepted-1',
+      type: 'accepted',
+      actorId: 'triager@example.com',
+      summary: 'Triage entry was accepted.',
+      createdAt: '2026-07-16T08:45:00.000Z',
+    }],
+    revision: 2,
+    createdAt: '2026-07-16T08:30:00.000Z',
+    updatedAt: '2026-07-16T08:45:00.000Z',
+  } satisfies TriageEntry
+  let emailReceipt: Record<string, unknown> | undefined
+  let replyTransaction: Array<{
+    Put?: { Item?: Record<string, unknown> }
+    Update?: {
+      ExpressionAttributeValues?: Record<string, unknown>
+      Key?: Record<string, unknown>
+    }
+  }> | undefined
+  const client = createClient(createDocumentClient((command) => {
+    const key = command.input.Key as { scopeKey?: string; recordKey?: string } | undefined
+    if (key?.scopeKey === `THREAD#${threadDigest}`) {
+      return { Item: {
+        entryType: 'thread-lookup',
+        scopeKey: key.scopeKey,
+        recordKey: 'LOOKUP',
+        workspaceId: 'workspace-1',
+        submissionId: 'req-1',
+        expiresAt: 1_815_897_600,
+        requesterEmail: 'requester@example.com',
+      } }
+    }
+    if (key?.scopeKey?.startsWith('EMAIL#')) {
+      return emailReceipt ? { Item: emailReceipt } : {}
+    }
+    if (key?.recordKey === 'SUBMISSION#req-1') return { Item: stored }
+    if (key?.recordKey === 'TRIAGE#triage_req-1') {
+      return {
+        Item: {
+          entryType: 'triage-entry',
+          scopeKey: 'WORKSPACE#workspace-1',
+          recordKey: 'TRIAGE#triage_req-1',
+          entry: triageEntry,
+        },
+      }
+    }
+    const items = command.input.TransactItems as typeof replyTransaction
+    if (items) {
+      replyTransaction = items
+      const submissionItem = items.find(({ Put }) =>
+        Put?.Item?.entryType === 'submission'
+      )?.Put?.Item
+      if (submissionItem) stored = { ...stored, ...submissionItem }
+      emailReceipt = items.find(({ Put }) =>
+        Put?.Item?.entryType === 'email-receipt'
+      )?.Put?.Item
+      return {}
+    }
+    throw new Error(`Unexpected command: ${JSON.stringify(command.input)}`)
+  }))
+  const envelope = {
+    threadToken,
+    messageId: '<terminal-message-1@example.com>',
+    fromAddress: 'requester@example.com',
+    subject: 'Re: accepted request',
+    textBody: 'One last detail after acceptance.',
+    receivedAt: now.toISOString(),
+  }
+
+  triageEntry.id = 'triage_other'
+  await expect(client.ingestEmail(envelope)).rejects.toMatchObject({
+    code: 'InvalidRequestTriageEntry',
+    status: 503,
+  })
+  triageEntry.id = 'triage_req-1'
+  await expect(client.ingestEmail(envelope)).resolves.toMatchObject({
+    receivedAt: now.toISOString(),
+  })
+
+  expect(replyTransaction?.find(({ Put }) =>
+    Put?.Item?.entryType === 'submission'
+  )?.Put?.Item).toMatchObject({
+    revision: 3,
+    status: 'converted',
+  })
+  const triageUpdate = replyTransaction?.find(({ Update }) =>
+    Update?.Key?.recordKey === 'TRIAGE#triage_req-1'
+  )?.Update
+  expect(triageUpdate?.ExpressionAttributeValues?.[':entry']).toMatchObject({
+    id: 'triage_req-1',
+    revision: 3,
+    state: 'accepted',
+    sourcePreview: { commentCount: 1 },
+    events: expect.arrayContaining([expect.objectContaining({
+      actorId: 'requester',
+      summary: 'Requester replied by email.',
+      type: 'activity-received',
+    })]),
+  })
+  expect(JSON.stringify(triageUpdate?.ExpressionAttributeValues?.[':entry']))
+    .not.toContain('resurfaced')
+  expect(replyTransaction?.find(({ Put }) =>
+    Put?.Item?.entryType === 'triage-entry-event'
+  )?.Put?.Item).toMatchObject({
+    entryId: 'triage_req-1',
+    event: { type: 'activity-received' },
+  })
+  await expect(client.getRequesterThread(
+    threadToken,
+    { clientKey: 'client-1' },
+  )).resolves.toMatchObject({
+    status: 'closed',
+    messages: [expect.objectContaining({
+      body: 'One last detail after acceptance.',
+      direction: 'requester',
+    })],
+  })
+  await expect(client.replyToThread(
+    threadToken,
+    { body: 'Web reply must remain closed.' },
+    { clientKey: 'client-1' },
+  )).rejects.toMatchObject({
+    code: 'RequestThreadClosed',
+    status: 409,
   })
 })
 

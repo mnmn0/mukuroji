@@ -316,6 +316,8 @@ export type TaskScreenProps = {
   canManageProjectMembers?: boolean
   /** Checks exact Team-qualified Project write scope for one concrete Work Item. */
   canMutateTask?: (task: ProjectTask) => boolean
+  /** Whether the current Workspace member may read Team Triage source links. */
+  canAccessTriage?: boolean
   /** Error shown when Project permissions could not be loaded or changed. */
   projectMembersErrorMessage?: string
   /** Error shown when Project tasks could not be loaded. */
@@ -462,6 +464,7 @@ export function TaskScreen({
   activeProjectTeamId,
   assigneeErrorMessage,
   assigneeOptions = emptyProjectMembers,
+  canAccessTriage = false,
   canManageProjectMembers = false,
   canMutateTask,
   canManageScheduleDependencyEndpoint,
@@ -2703,6 +2706,7 @@ export function TaskScreen({
                   accessToken={accessToken}
                   assigneeOptions={assigneeOptions}
                   artifacts={artifacts}
+                  canAccessTriage={canAccessTriage}
                   canManageScheduleDependencyEndpoint={canManageScheduleDependencyEndpoint}
                   collaboration={collaboration}
                   configuration={detailTask

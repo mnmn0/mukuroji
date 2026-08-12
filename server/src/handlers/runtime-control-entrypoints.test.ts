@@ -82,6 +82,11 @@ const runtimeControlledEntrypoints: readonly RuntimeControlledEntrypoint[] = [
     surface: 'tenant-operation-execution',
   },
   {
+    filename: 'triage-schedule-handler.ts',
+    exportName: 'handler',
+    surface: 'triage-schedule',
+  },
+  {
     filename: 'webhook-handler.ts',
     exportName: 'deliveryHandler',
     surface: 'webhook-delivery',

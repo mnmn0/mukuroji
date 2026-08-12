@@ -1,4 +1,8 @@
-import { createProjectIssuesPath, createTeamIssuesPath } from '../../shared/routing/paths'
+import {
+  createProjectIssuesPath,
+  createTeamIssuesPath,
+  createTeamTriagePath,
+} from '../../shared/routing/paths'
 import { isSafeApplicationPath } from '../../shared/routing/applicationPath'
 import type { InboxNotification } from '../api'
 
@@ -9,6 +13,10 @@ import type { InboxNotification } from '../api'
  * @returns 現在の router が扱える同一 origin path です。
  */
 export function resolveNotificationPath(notification: InboxNotification) {
+  if (notification.teamId && notification.triageEntryId) {
+    return createTeamTriagePath(notification.teamId, notification.triageEntryId)
+  }
+
   if (notification.teamId && notification.issueId) {
     return notification.projectId
       ? createProjectIssuesPath(

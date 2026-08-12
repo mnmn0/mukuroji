@@ -59,6 +59,9 @@ describe('canonical Work Item validation', () => {
     expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({ sourceRequestId: 'req_20260716_example' })))
       .toBe(true)
     expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({
+      sourceTriageEntryId: 'triage_20260809_example',
+    }))).toBe(true)
+    expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({
       importRequestDigest: 'a'.repeat(64),
     }))).toBe(true)
     expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({
@@ -172,6 +175,10 @@ describe('canonical Work Item validation', () => {
   test('rejects an invalid request source reference', () => {
     expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({ sourceRequestId: '' }))).toBe(false)
     expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({ sourceRequestId: 42 }))).toBe(false)
+    expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({ sourceTriageEntryId: '' })))
+      .toBe(false)
+    expect(isCanonicalWorkItemRecord(createCanonicalWorkItem({ sourceTriageEntryId: 42 })))
+      .toBe(false)
   })
 
   test('rejects legacy and response-only fields', () => {

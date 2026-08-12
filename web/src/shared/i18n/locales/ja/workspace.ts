@@ -617,6 +617,7 @@ export const workspaceMessages = {
   'sidebar.archive.cancel': 'キャンセル',
   'sidebar.archive.confirm': 'アーカイブ',
   'sidebar.teamOverview': 'チーム概要',
+  'sidebar.triage': 'Triage',
   'sidebar.issues': 'Issues',
   'sidebar.members': 'メンバー',
   'sidebar.projectCount': 'プロジェクト {count}',

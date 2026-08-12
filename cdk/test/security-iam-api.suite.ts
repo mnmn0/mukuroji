@@ -841,6 +841,7 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
     Effect: 'Allow',
     Resource: expect.arrayContaining([
       { 'Fn::GetAtt': ['TeamIssuesTable189D851D', 'Arn'] },
+      { 'Fn::GetAtt': [requestTableLogicalId, 'Arn'] },
       { 'Fn::GetAtt': ['ProjectDirectoryTable9ED01C01', 'Arn'] },
       { 'Fn::GetAtt': ['WorkspaceAccessTableD7C8D2C7', 'Arn'] },
       { 'Fn::GetAtt': ['WorkItemCollaborationTableFDECF217', 'Arn'] },
@@ -948,12 +949,15 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
     Array.isArray(statement.Action) ? statement.Action : [statement.Action]
   );
   expect(requestIntakeActions).toEqual(expect.arrayContaining([
+    'dynamodb:ConditionCheckItem',
     'dynamodb:DescribeTable',
     'dynamodb:GetItem',
     'dynamodb:PutItem',
     'dynamodb:Query',
     'dynamodb:UpdateItem',
   ]));
+  expect(requestIntakeStatements).toHaveLength(2);
+  expect(requestIntakeStatements).toContain(transactionConditionCheckStatement);
   const enterpriseIdentityActions = enterpriseIdentityStatements.flatMap((statement) =>
     Array.isArray(statement.Action) ? statement.Action : [statement.Action]
   );

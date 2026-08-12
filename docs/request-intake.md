@@ -2,6 +2,11 @@
 
 Issue #30 の request intake は、外部 requester が見る公開契約と、Workspace 内部の routing・権限・Work Item 変換を明確に分離する。
 
+Form submission は保存時に Team-scoped `TriageEntry` も同じ transaction で作成する。
+`/api/request-queue` は Form の公開・回答・attachment を管理する互換面として残し、
+Team の受入判断、owner、SLA、snooze、複数 source の一覧は
+`/teams/{teamId}/triage` を正本とする。個人の Inbox に Triage state を複製しない。
+
 ## Domain model
 
 Request Form の root row は管理名、scope、draft、link、revision、現在の公開 version を保持する。draft の保存は公開済み response を変更しない。publish は次の version row を immutable snapshot として追加し、link が参照する version を進める。version row を更新・削除する API は提供しない。
@@ -30,7 +35,10 @@ Link mode は次の3種類である。
 
 Invalid、expired、revoked、archived link は同じ `RequestFormUnavailable` response を返す。public GET は `definition` と短命 one-time submission session だけを返し、Workspace ID、Team、Project、workflow、assignee、role、capability、rate-limit 設定を返さない。submit 成功 response も opaque receipt、confirmation、reply thread token だけである。
 
-Form 管理、queue read、triage、attachment download は Workspace owner/admin に限定する。外部 thread token は追加情報 reply だけを許可し、任意の宛先、routing、status、assignee を指定できない。
+Form 管理、legacy queue read、attachment download は Workspace owner/admin に限定する。
+Team Triage の read/action はそれぞれ対象 Team の viewer/member access を再検証し、
+guest は source の `guestVisible` projection 以外を読めない。外部 thread token は追加情報
+reply だけを許可し、任意の宛先、routing、status、assignee を指定できない。
 
 ## Storage and abuse controls
 
@@ -64,9 +72,16 @@ Email ingestion は既存 submission の reply thread 専用であり、宛先�
 
 ## Work Item conversion and trace
 
-`convert` action は saved routing と operator override を組み合わせ、current Team directory、Project access、active assignee、workflow、custom field validation を再実行する。Work Item は `sourceRequestId` を保持する。
+Triage の `accept/create` action は saved routing と operator override を組み合わせ、current
+Team directory、Project access、active assignee、workflow、custom field validation を再実行する。
+Work Item は `sourceTriageEntryId` を保持し、Form source では従来の `sourceRequestId` も保持する。
 
-Work Item row、specialized event、generic audit event、configuration guards、submission の `converted` status と Work Item pointer は一つの `TransactWriteItems` で確定する。同じ request を retry した場合は `sourceRequestId` で既存 Work Item を返すため、response loss で二重 Work Item を作らない。Submission detail と Work Item の双方から source ID を追跡できる。
+Work Item row、specialized event、generic audit event、configuration/authorization guards、Triage の
+`accepted` state、source association、operation receipt、Form submission の `converted` status と pointer は
+一つの `TransactWriteItems` で確定する。同じ action を retry した場合は Entry-bound な
+deterministic Work Item ID と receipt から既存結果を返すため、response loss で二重
+Work Item を作らない。Submission、Triage Entry、Work Item のそれぞれから source を
+双方向に追跡できる。
 
 ## API
 

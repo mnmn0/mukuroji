@@ -16,6 +16,7 @@ import { ReportsPage } from '../src/pages/workspace/ReportsPage'
 import { SettingsPage } from '../src/pages/workspace/SettingsPage'
 import { TaskPage } from '../src/pages/workspace/TaskPage'
 import { TeamMembersPage } from '../src/pages/workspace/TeamMembersPage'
+import { TeamTriagePage } from '../src/pages/workspace/TeamTriagePage'
 import { TeamIssuePage } from '../src/pages/workspace/TeamIssuePage'
 import { TeamOverviewPage } from '../src/pages/workspace/TeamOverviewPage'
 import { DocumentPage } from '../src/documents/DocumentPage'
@@ -30,6 +31,7 @@ import {
   createProjectIssuesPath,
   createRequestsPath,
   createTeamIssuesPath,
+  createTeamTriagePath,
   createWorkItemSearchPath,
 } from '../src/shared/routing/paths'
 import { appRoutes } from '../src/app/router'
@@ -216,6 +218,22 @@ describe('Request intake paths', () => {
   })
 })
 
+describe('Team triage paths', () => {
+  test('creates queue and selected-entry deep links with encoded identifiers', () => {
+    expect(createTeamTriagePath('core/team')).toBe('/teams/core%2Fteam/triage')
+    expect(createTeamTriagePath('core/team', 'entry/42')).toBe(
+      '/teams/core%2Fteam/triage?entryId=entry%2F42',
+    )
+  })
+
+  test('registers Team triage inside the shared Workspace shell', () => {
+    expectSharedWorkspaceShell([{
+      component: TeamTriagePage,
+      path: '/teams/core-team/triage?entryId=entry-42',
+    }])
+  })
+})
+
 describe('Workspace route pages', () => {
   test('maps each split URL through one persistent shell to its direct page', () => {
     expectSharedWorkspaceShell([
@@ -229,6 +247,7 @@ describe('Workspace route pages', () => {
       { component: EnterpriseSecurityPage, path: '/settings/security' },
       { component: TeamOverviewPage, path: '/teams/core-team/overview' },
       { component: TeamMembersPage, path: '/teams/core-team/members' },
+      { component: TeamTriagePage, path: '/teams/core-team/triage' },
     ])
   })
 

@@ -1,4 +1,4 @@
-import type { EnterpriseIdentityProvider } from '@mukuroji/contracts'
+import type { EnterpriseIdentityProvider, TriageEntry } from '@mukuroji/contracts'
 import type { TransactWriteCommandInput } from '@aws-sdk/lib-dynamodb'
 import type { DashboardSummaryClient } from '../../modules/analytics'
 import type { AnalyticsRepository } from '../../modules/analytics/analytics'
@@ -48,6 +48,7 @@ import type { PlanningClient } from '../../modules/planning/planning'
 import type { CapacityPlanningService } from '../../modules/capacity-planning'
 import type { RealtimeTicketsClient } from '../../modules/realtime/realtime-ticket'
 import type { RequestIntakeClient } from '../../modules/request-intake/request-intake'
+import type { TriageClient } from '../../modules/triage'
 import type {
   ProjectTasksClient,
   TeamIssuesClient,
@@ -138,6 +139,22 @@ export interface WorkspaceDependencies {
   tenantEntitlementEnforcement: TenantEntitlementEnforcement
 }
 
+/** Triage application surface reserved for trusted cross-domain transaction composition. */
+export interface TriageCompositionClient extends TriageClient {
+  /** Strongly reads the canonical entry used only to construct a guarded transaction.
+   *
+   * @param workspaceId - Owning Workspace identifier.
+   * @param teamId - Expected Team identifier.
+   * @param entryId - Target Triage Entry identifier.
+   * @returns The unprojected canonical entry. Callers must never return it directly.
+   */
+  getEntryForMutation(
+    workspaceId: string,
+    teamId: string,
+    entryId: string,
+  ): Promise<TriageEntry>
+}
+
 /** Dependencies required by Work Item and collaboration routes. */
 export interface WorkItemDependencies {
   /** Provides Project task persistence. */
@@ -166,6 +183,8 @@ export interface WorkItemDependencies {
   planning: PlanningClient
   /** Provides Request Intake persistence. */
   requestIntake: RequestIntakeClient
+  /** Provides the Team Triage queue and replay-safe mutation surface. */
+  triage: TriageCompositionClient
   /** Provides Analytics report and snapshot persistence. */
   analytics: AnalyticsRepository
 }
