@@ -849,6 +849,7 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
       { 'Fn::GetAtt': ['WorkItemConfigurationTable35E94558', 'Arn'] },
       { 'Fn::GetAtt': ['PlanningTable2A0D4CC5', 'Arn'] },
       { 'Fn::GetAtt': [enterpriseIdentityTableLogicalId, 'Arn'] },
+      { 'Fn::GetAtt': [focusTableLogicalId, 'Arn'] },
       { 'Fn::GetAtt': ['WorkspaceSearchTable2575AD6B', 'Arn'] },
     ]),
   }));
@@ -985,7 +986,7 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
     Effect: 'Allow',
     Resource: { 'Fn::GetAtt': [focusTableLogicalId, 'Arn'] },
   });
-  expect(focusStatements).toHaveLength(1);
+  expect(focusStatements).toHaveLength(2);
   expect(planningDataStatement).toEqual(expect.objectContaining({
     Action: [
       'dynamodb:DeleteItem',

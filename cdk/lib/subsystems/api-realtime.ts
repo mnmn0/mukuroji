@@ -751,6 +751,7 @@ export function buildApiRuntime(
           documentsTable.tableArn,
           collaborationTable.tableArn,
           fileProofingTable.tableArn,
+          focusTable.tableArn,
           workspaceSearchTable.tableArn,
         ],
         conditions: {
