@@ -99,6 +99,10 @@ export type AuditProjectionEvent = {
   projectId?: string
   /** current comment ID です。 */
   commentId?: string
+  /** Curated context item ID targeted by the durable Workspace Search projection. */
+  contextItemId?: string
+  /** Canonical curated-context revision represented by this audit event. */
+  sourceRevision?: number
   /** File proofing cleanup の対象 file ID です。 */
   fileId?: string
   /** Reply が属する root comment ID です。 */
@@ -155,12 +159,38 @@ export interface DeletedFileCleanupDependencies {
   ): Promise<void>
 }
 
-/** Collaboration projection batch の外部依存です。 */
+/** External ports used by one collaboration projection batch. */
 export interface CollaborationProjectionDependencies {
-  /** Durable file delete cleanup を実行する port です。 */
+  /** Port that performs durable file-delete cleanup. */
   deletedFileCleanup: DeletedFileCleanupDependencies
-  /** Realtime invalidation を配送する port です。 */
+  /** Port that maintains durable Workspace Search context projections. */
+  curatedContextSearch: CuratedContextSearchProjectionDependencies
+  /** Port that publishes realtime invalidations. */
   realtime: CollaborationRealtimePublisher
+}
+
+/** Canonical scope passed to the curated context Search projection. */
+export type CuratedContextSearchProjectionInput = {
+  /** Canonical Workspace identifier. */
+  workspaceId: string
+  /** Team identifier that owns the parent Work Item. */
+  teamId: string
+  /** Parent Work Item identifier. */
+  issueId: string
+  /** Current assigned Project identifier, when assigned. */
+  projectId?: string
+  /** Curated context item identifier that changed. */
+  contextItemId: string
+  /** Canonical revision represented by the audit event, when available. */
+  sourceRevision?: number
+}
+
+/** Idempotent port for the current curated context Search document. */
+export interface CuratedContextSearchProjectionDependencies {
+  /** Upserts the current canonical context item into Search. */
+  upsertCurrent(input: CuratedContextSearchProjectionInput): Promise<void>
+  /** Deletes a superseded or orphaned context item Search document. */
+  deleteCurrent(input: CuratedContextSearchProjectionInput): Promise<void>
 }
 
 /**
@@ -276,6 +306,22 @@ export type CurrentPlanningUpdateNotificationScope = {
   projectId?: string
 }
 
+/** Indicates that a Search projection receipt lost its parent Work Item fence. */
+class CuratedContextSearchParentScopeChangedError extends Error {
+  constructor() {
+    super('Curated context search parent scope changed before receipt acknowledgement.')
+    this.name = 'CuratedContextSearchParentScopeChangedError'
+  }
+}
+
+/** Parent snapshot used to fence a curated-context Search receipt write. */
+type CuratedContextSearchReceiptFence = {
+  /** Audit event whose parent row is being fenced. */
+  event: AuditProjectionEvent
+  /** Parent scope observed immediately before the receipt write. */
+  scope: CurrentWorkItemNotificationScope
+}
+
 const dynamoDbClient = new DynamoDBClient({ region: getAwsRegion() })
 const cognitoClient = new CognitoIdentityProviderClient({ region: getAwsRegion() })
 const documentClient = DynamoDBDocumentClient.from(dynamoDbClient, {
@@ -283,6 +329,160 @@ const documentClient = DynamoDBDocumentClient.from(dynamoDbClient, {
 })
 const s3Client = new S3Client({ region: getAwsRegion() })
 const projectionConsumerName = 'collaboration-projection-v1'
+/** Independent receipt namespace for context search during rolling deployments. */
+const curatedContextSearchProjectionConsumerName = 'collaboration-context-search-v2'
+const watcherNotificationEventTypes = new Set([
+  'comment.created',
+  'comment.replied',
+  'comment.edited',
+  'planning-update.reminder',
+  'planning-update.overdue',
+  'planning-update.escalation',
+  'context-item.created',
+  'context-item.updated',
+  'accepted-resolution.selected',
+  'accepted-resolution.replaced',
+  'accepted-resolution.edited',
+])
+const curatedContextSearchUpsertEventTypes = new Set([
+  'context-item.created',
+  'context-item.updated',
+])
+const curatedContextSearchProjectionEventTypes = new Set([
+  ...curatedContextSearchUpsertEventTypes,
+  'context-item.superseded',
+])
+
+/**
+ * Reports whether one collaboration audit event should notify current scope watchers.
+ *
+ * @param eventType - Canonical append-only audit event type.
+ * @returns Whether watcher candidates must be resolved for the event.
+ */
+export function supportsCollaborationWatcherNotifications(eventType: string) {
+  return watcherNotificationEventTypes.has(eventType)
+}
+
+/**
+ * Projects one curated-context audit event into Workspace search.
+ *
+ * @param event - Parsed canonical audit event.
+ * @param dependencies - Idempotent search projection operations.
+ * @param workItemExists - Whether the parent Work Item still exists at projection time.
+ * @returns A promise that resolves after a relevant event is projected.
+ */
+export async function projectCuratedContextSearchEvent(
+  event: AuditProjectionEvent,
+  dependencies: CuratedContextSearchProjectionDependencies,
+  workItemExists = true,
+): Promise<void> {
+  if (!curatedContextSearchProjectionEventTypes.has(event.eventType)) {
+    return
+  }
+
+  const teamId = requireContextSearchProjectionIdentifier(event.teamId, 'team ID')
+  const issueId = requireContextSearchProjectionIdentifier(event.issueId, 'Work Item ID')
+  const contextItemId = requireContextSearchProjectionIdentifier(
+    event.contextItemId,
+    'context item ID',
+  )
+  const entityId = `team/${teamId}/issue/${issueId}`
+  const scopeKey = `${event.workspaceId}#work-item#${entityId}`
+  const targetId = `${entityId}/context-item/${contextItemId}`
+  if (
+    event.entityId !== entityId ||
+    event.scopeKey !== scopeKey ||
+    event.targetId !== targetId
+  ) {
+    throw new Error('Curated context search projection scope is invalid.')
+  }
+
+  const input: CuratedContextSearchProjectionInput = {
+    workspaceId: event.workspaceId,
+    teamId,
+    issueId,
+    contextItemId,
+    ...(event.sourceRevision === undefined ? {} : { sourceRevision: event.sourceRevision }),
+    ...(event.projectId ? { projectId: event.projectId } : {}),
+  }
+  if (workItemExists && curatedContextSearchUpsertEventTypes.has(event.eventType)) {
+    await dependencies.upsertCurrent(input)
+    return
+  }
+  await dependencies.deleteCurrent(input)
+}
+
+/**
+ * Projects a context-search event while fencing the parent Work Item scope.
+ *
+ * The parent assignment can change independently of the audit stream event.
+ * A fresh read immediately before and after the Search write keeps stale
+ * project documents from being acknowledged as processed; a changed scope
+ * deletes the old projection and leaves the stream record retryable.
+ *
+ * @param event - Parsed canonical audit event.
+ * @param dependencies - Idempotent search projection operations.
+ * @param readParentScope - Strongly consistent parent Work Item reader.
+ * @returns The latest parent scope for the notification projection.
+ * @throws Error when the parent scope changes around the Search write.
+ */
+export async function projectCuratedContextSearchEventWithParentFence(
+  event: AuditProjectionEvent,
+  dependencies: CuratedContextSearchProjectionDependencies,
+  readParentScope: (
+    event: AuditProjectionEvent,
+  ) => Promise<CurrentWorkItemNotificationScope> = readCurrentWorkItemScope,
+): Promise<CurrentWorkItemNotificationScope> {
+  const before = await readParentScope(event)
+  const scopedEvent = before.checked
+    ? { ...event, projectId: before.projectId }
+    : event
+  await projectCuratedContextSearchEvent(scopedEvent, dependencies, before.exists)
+
+  const after = await readParentScope(event)
+  if (sameCuratedContextParentScope(before, after)) {
+    return after
+  }
+
+  // Remove a document written under the stale scope before the event is
+  // retried. The retry will resolve the new project or delete the orphan.
+  await projectCuratedContextSearchEvent(scopedEvent, dependencies, false)
+  throw new Error('Curated context search parent scope changed during projection.')
+}
+
+/**
+ * Compares the parent fields that determine a context Search document scope.
+ *
+ * @param left - Scope observed before the Search write.
+ * @param right - Scope observed after the Search write.
+ * @returns Whether both reads describe the same parent assignment/existence.
+ */
+function sameCuratedContextParentScope(
+  left: CurrentWorkItemNotificationScope,
+  right: CurrentWorkItemNotificationScope,
+) {
+  return left.checked === right.checked &&
+    left.exists === right.exists &&
+    left.projectId === right.projectId
+}
+
+/**
+ * Requires one non-empty identifier from curated-context audit metadata.
+ *
+ * @param value - Candidate identifier.
+ * @param label - Safe diagnostic label.
+ * @returns The validated identifier.
+ */
+function requireContextSearchProjectionIdentifier(
+  value: string | undefined,
+  label: string,
+) {
+  const normalized = value?.trim()
+  if (!normalized) {
+    throw new Error(`Curated context search projection ${label} is missing.`)
+  }
+  return normalized
+}
 
 /**
  * Audit stream batch を処理し、cleanup 失敗を record 単位の retry response に変換します。
@@ -327,17 +527,53 @@ async function processRecord(
 
   await cleanupDeletedFileProjection(event, dependencies.deletedFileCleanup)
 
-  if (event.outboxStatus !== 'pending' || await isProjectionProcessed(event.eventId)) {
+  if (event.outboxStatus !== 'pending') {
     return
   }
 
-  const currentScope = await readCurrentWorkItemScope(event)
+  const isCuratedContextEvent = curatedContextSearchProjectionEventTypes.has(event.eventType)
+  const searchProjectionProcessed = isCuratedContextEvent
+    ? await isProjectionProcessed(event.eventId, curatedContextSearchProjectionConsumerName)
+    : true
+  let currentScope: CurrentWorkItemNotificationScope | undefined
+  if (isCuratedContextEvent && !searchProjectionProcessed) {
+    currentScope = await readCurrentWorkItemScope(event)
+  }
+  if (await isProjectionProcessed(event.eventId)) {
+    if (isCuratedContextEvent && !searchProjectionProcessed && currentScope) {
+      currentScope = await projectCuratedContextSearchEventWithParentFence(
+        event,
+        dependencies.curatedContextSearch,
+      )
+      await acknowledgeCuratedContextSearchProjection(
+        event.eventId,
+        event,
+        currentScope,
+        dependencies.curatedContextSearch,
+      )
+    }
+    return
+  }
+
+  currentScope ??= await readCurrentWorkItemScope(event)
+  if (isCuratedContextEvent && !searchProjectionProcessed) {
+    currentScope = await projectCuratedContextSearchEventWithParentFence(
+      event,
+      dependencies.curatedContextSearch,
+    )
+    await acknowledgeCuratedContextSearchProjection(
+      event.eventId,
+      event,
+      currentScope,
+      dependencies.curatedContextSearch,
+    )
+  }
   if (!currentScope.exists) {
     await markProjectionProcessed(event.eventId)
     return
   }
   const workItemScopedEvent = currentScope.checked
-    ? { ...event, projectId: currentScope.projectId }
+    ? overlayCurrentWorkItemNotificationScope(event, currentScope)
     : event
   const workItemAuthorizationEvent = refreshScheduledNotificationEvent(
     workItemScopedEvent,
@@ -369,6 +605,13 @@ async function processRecord(
     return
   }
 
+  const parentCondition = currentScope.checked && authorizationEvent.teamId && authorizationEvent.issueId
+    ? createCuratedContextSearchParentCondition(
+        requireEnv('TEAM_ISSUES_TABLE_NAME'),
+        authorizationEvent,
+        currentScope,
+      )
+    : undefined
   const watcherCandidates = await readSubscribedWatcherCandidates(authorizationEvent)
   const candidates = groupNotificationCandidates({
     ...authorizationEvent,
@@ -396,7 +639,11 @@ async function processRecord(
   ).filter(isDefined)
 
   await Promise.all(
-    eligibleCandidates.map((candidate) => projectNotification(authorizationEvent, candidate)),
+    eligibleCandidates.map((candidate) => projectNotification(
+      authorizationEvent,
+      candidate,
+      parentCondition,
+    )),
   )
   await publishRealtimeInvalidation(event, dependencies.realtime)
   await markProjectionProcessed(event.eventId)
@@ -626,7 +873,7 @@ function deduplicateMetadataKeys(keys: DeletedFileMetadataKey[]) {
 }
 
 async function readSubscribedWatcherCandidates(event: AuditProjectionEvent) {
-  if (!projectsSubscribedWatchers(event.eventType)) {
+  if (!supportsCollaborationWatcherNotifications(event.eventType)) {
     return []
   }
 
@@ -748,12 +995,15 @@ export function toSubscribedWatcherCandidates(
   })
 }
 
-async function isProjectionProcessed(eventId: string) {
+async function isProjectionProcessed(
+  eventId: string,
+  consumerName = projectionConsumerName,
+) {
   const result = await documentClient.send(
     new GetCommand({
       TableName: requireEnv('PROCESSED_AUDIT_EVENTS_TABLE_NAME'),
       Key: {
-        consumerName: projectionConsumerName,
+        consumerName,
         eventId,
       },
       ConsistentRead: true,
@@ -763,33 +1013,136 @@ async function isProjectionProcessed(eventId: string) {
   return result.Item !== undefined
 }
 
-async function markProjectionProcessed(eventId: string) {
+async function markProjectionProcessed(
+  eventId: string,
+  consumerName = projectionConsumerName,
+  parentFence?: CuratedContextSearchReceiptFence,
+) {
+  const item = {
+    consumerName,
+    eventId,
+    processedAt: new Date().toISOString(),
+    expiresAt: currentEpochSeconds() + readPositiveIntegerEnv(
+      'PROCESSED_AUDIT_EVENT_RETENTION_SECONDS',
+      30 * 24 * 60 * 60,
+    ),
+  }
+  const parentCondition = parentFence === undefined
+    ? undefined
+    : createCuratedContextSearchParentCondition(
+        requireEnv('TEAM_ISSUES_TABLE_NAME'),
+        parentFence.event,
+        parentFence.scope,
+      )
   try {
-    await documentClient.send(
-      new PutCommand({
+    const receiptPut = {
+      Put: {
         TableName: requireEnv('PROCESSED_AUDIT_EVENTS_TABLE_NAME'),
-        Item: {
-          consumerName: projectionConsumerName,
-          eventId,
-          processedAt: new Date().toISOString(),
-          expiresAt: currentEpochSeconds() + readPositiveIntegerEnv(
-            'PROCESSED_AUDIT_EVENT_RETENTION_SECONDS',
-            30 * 24 * 60 * 60,
-          ),
-        },
+        Item: item,
         ConditionExpression: 'attribute_not_exists(consumerName) AND attribute_not_exists(eventId)',
-      }),
+      },
+    }
+    if (parentCondition) {
+      await documentClient.send(new TransactWriteCommand({
+        TransactItems: [parentCondition, receiptPut],
+      }))
+    } else {
+      await documentClient.send(new PutCommand({
+        TableName: requireEnv('PROCESSED_AUDIT_EVENTS_TABLE_NAME'),
+        Item: item,
+        ConditionExpression: receiptPut.Put.ConditionExpression,
+      }))
+    }
+  } catch (error) {
+    if (isAwsNamedError(error, 'ConditionalCheckFailedException')) {
+      return
+    }
+    if (isConditionalTransactionCancellation(error)) {
+      if (await isProjectionProcessed(eventId, consumerName)) {
+        return
+      }
+      throw new CuratedContextSearchParentScopeChangedError()
+    }
+    throw error
+  }
+}
+
+/** Acknowledges Search only while the parent Work Item still has the captured scope. */
+async function acknowledgeCuratedContextSearchProjection(
+  eventId: string,
+  event: AuditProjectionEvent,
+  scope: CurrentWorkItemNotificationScope,
+  dependencies: CuratedContextSearchProjectionDependencies,
+): Promise<void> {
+  try {
+    await markProjectionProcessed(
+      eventId,
+      curatedContextSearchProjectionConsumerName,
+      { event, scope },
     )
   } catch (error) {
-    if (!isAwsNamedError(error, 'ConditionalCheckFailedException')) {
+    if (!(error instanceof CuratedContextSearchParentScopeChangedError)) {
       throw error
     }
+
+    const latestScope = await readCurrentWorkItemScope(event)
+    if (!sameCuratedContextParentScope(scope, latestScope)) {
+      await projectCuratedContextSearchEvent(
+        { ...event, projectId: scope.projectId },
+        dependencies,
+        false,
+      )
+    }
+    throw error
+  }
+}
+
+/**
+ * Builds the parent condition used by a Search receipt transaction.
+ *
+ * @param tableName - Team Issues table containing the current parent Work Item.
+ * @param event - Audit event identifying the parent Work Item.
+ * @param scope - Parent scope captured before the receipt write.
+ * @returns A DynamoDB condition check, or undefined when the event has no readable parent scope.
+ */
+export function createCuratedContextSearchParentCondition(
+  tableName: string,
+  event: AuditProjectionEvent,
+  scope: CurrentWorkItemNotificationScope,
+) {
+  if (!scope.checked || !event.teamId || !event.issueId) {
+    return undefined
+  }
+
+  const conditionExpression = !scope.exists
+    ? 'attribute_not_exists(directoryTeamId) AND attribute_not_exists(issueId)'
+    : scope.projectId === undefined
+      ? 'attribute_exists(directoryTeamId) AND attribute_exists(issueId) AND attribute_not_exists(#assignedProjectId)'
+      : 'attribute_exists(directoryTeamId) AND attribute_exists(issueId) AND #assignedProjectId = :assignedProjectId'
+  return {
+    ConditionCheck: {
+      TableName: tableName,
+      Key: {
+        directoryTeamId: `${event.workspaceId}#team#${event.teamId}`,
+        issueId: event.issueId,
+      },
+      ConditionExpression: conditionExpression,
+      ...(scope.exists && scope.projectId !== undefined
+        ? {
+            ExpressionAttributeNames: { '#assignedProjectId': 'assignedProjectId' },
+            ExpressionAttributeValues: { ':assignedProjectId': scope.projectId },
+          }
+        : scope.exists
+          ? { ExpressionAttributeNames: { '#assignedProjectId': 'assignedProjectId' } }
+          : {}),
+    },
   }
 }
 
 async function projectNotification(
   event: AuditProjectionEvent,
   candidate: GroupedNotificationCandidate,
+  parentCondition?: ReturnType<typeof createCuratedContextSearchParentCondition>,
 ) {
   const {
     recipientKey,
@@ -811,6 +1164,7 @@ async function projectNotification(
     await documentClient.send(
       new TransactWriteCommand({
         TransactItems: [
+          ...(parentCondition ? [parentCondition] : []),
           {
             Put: {
               TableName: requireEnv('NOTIFICATIONS_TABLE_NAME'),
@@ -839,6 +1193,9 @@ async function projectNotification(
       }),
     )
   } catch (error) {
+    if (parentCondition && isConditionalTransactionCancellationAt(error, 0)) {
+      throw error
+    }
     if (!isConditionalTransactionCancellation(error)) {
       throw error
     }
@@ -1070,6 +1427,24 @@ export function refreshPlanningScheduledNotificationEvent(
     projectId: scope.projectId,
     notificationCandidates: [{ memberKey: currentRecipient, reason: kind }],
   }
+}
+
+/**
+ * Overlays the current Work Item project onto a curated-context audit event.
+ *
+ * @param event - Audit event whose captured project may be stale.
+ * @param scope - Current parent Work Item scope read by the projection.
+ * @returns Event carrying the current project assignment, when one exists.
+ */
+export function overlayCurrentWorkItemNotificationScope(
+  event: AuditProjectionEvent,
+  scope: CurrentWorkItemNotificationScope,
+): AuditProjectionEvent {
+  if (scope.projectId !== undefined) {
+    return { ...event, projectId: scope.projectId }
+  }
+  const { projectId: _staleProjectId, ...eventWithoutProject } = event
+  return eventWithoutProject
 }
 
 async function readProjectionNotificationPreferences(recipientKey: string) {
@@ -1344,12 +1719,16 @@ async function readCurrentWorkItemScope(
   }))
   const item = result.Item
 
+  if (item === undefined) {
+    return { checked: true, exists: false, projectId: undefined }
+  }
+
   if (
     !isCanonicalWorkItemRecord(item) ||
     item.directoryTeamId !== directoryTeamId ||
     item.issueId !== event.issueId
   ) {
-    return { checked: true, exists: false, projectId: undefined }
+    throw new Error('Current Work Item row is invalid for collaboration projection.')
   }
 
   return {
@@ -1501,6 +1880,8 @@ export function parseAuditProjectionEvent(
     triageEntryId: readString(metadata.triageEntryId),
     projectId: readString(metadata.projectId),
     commentId: readString(metadata.commentId),
+    contextItemId: readString(metadata.contextItemId),
+    sourceRevision: readPositiveInteger(metadata.sourceRevision),
     fileId: readString(metadata.fileId),
     rootCommentId: readString(metadata.rootCommentId),
     notificationTitle: readString(metadata.notificationTitle) ?? readString(metadata.title),
@@ -1646,6 +2027,23 @@ function isConditionalTransactionCancellation(error: unknown) {
   return Array.isArray(reasons) && reasons.some((reason) =>
     isRecord(reason) && reason.Code === 'ConditionalCheckFailed'
   )
+}
+
+/**
+ * Checks whether one transaction item failed its conditional expression.
+ *
+ * @param error - DynamoDB transaction error.
+ * @param index - Zero-based transaction item index to inspect.
+ * @returns Whether the selected transaction item failed conditionally.
+ */
+function isConditionalTransactionCancellationAt(error: unknown, index: number) {
+  if (!isAwsNamedError(error, 'TransactionCanceledException') || !isRecord(error)) {
+    return false
+  }
+
+  const reasons = error.CancellationReasons
+  const reason = Array.isArray(reasons) ? reasons[index] : undefined
+  return isRecord(reason) && reason.Code === 'ConditionalCheckFailed'
 }
 
 function currentEpochSeconds() {

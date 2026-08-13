@@ -530,10 +530,7 @@ function ProjectDirectoryListRow({
           >
             {onOpenPlanningUpdate ? (
               <button
-                aria-label={formatProjectDirectoryMessage(
-                  t('projects.directory.open'),
-                  { name: project.projectName },
-                )}
+                aria-label={t('planning.action.openUpdateDetails')}
                 className="min-h-8 min-w-0 truncate rounded-md px-1 text-left text-xs font-semibold text-[var(--workbench-primary)] underline-offset-4 hover:underline focus:outline-none focus:ring-2 focus:ring-[var(--workbench-focus)]"
                 type="button"
                 onClick={onOpenPlanningUpdate}

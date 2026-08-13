@@ -32,6 +32,7 @@ import {
 import { RelatedDocuments } from '../../documents/ui/RelatedDocuments'
 import type { FileArtifactsController } from '../../files/mutations/useFileArtifacts'
 import type { IssueCollaborationController } from '../../issues/mutations/useIssueCollaboration'
+import type { IssueCollaborationRoute } from '../../issues/model/collaborationTabs'
 import { TeamIssuesApiError, type TeamIssue, type TeamIssueDetail, type UpdateTeamIssueInput } from '../../issues/api'
 import type {
   ProjectDirectoryTeam,
@@ -370,6 +371,8 @@ export type TaskScreenProps = {
   focusedCommentId?: string
   /** Root comment containing the selected reply. */
   focusedRootCommentId?: string
+  /** Route-owned collaboration section and deep-link state. */
+  collaborationRoute?: IssueCollaborationRoute
   /** Whether the selected Work Item detail is being loaded. */
   isSelectedIssueDetailLoading?: boolean
   /** Error shown when selected Work Item detail could not be loaded or updated. */
@@ -469,6 +472,7 @@ export function TaskScreen({
   canMutateTask,
   canManageScheduleDependencyEndpoint,
   collaboration,
+  collaborationRoute,
   artifacts,
   configurationErrorMessage,
   currentWorkspaceMemberKey,
@@ -2709,6 +2713,7 @@ export function TaskScreen({
                   canAccessTriage={canAccessTriage}
                   canManageScheduleDependencyEndpoint={canManageScheduleDependencyEndpoint}
                   collaboration={collaboration}
+                  collaborationRoute={collaborationRoute}
                   configuration={detailTask
                     ? resolveProjectTaskConfiguration(
                         detailTask,

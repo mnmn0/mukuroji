@@ -45,6 +45,7 @@ export const planningMessages = {
   'planning.action.comparePrevious': '前回の更新と比較',
   'planning.action.hideComparison': '比較を閉じる',
   'planning.action.openEvidence': '根拠を開く',
+  'planning.action.openUpdateDetails': '更新詳細を開く',
   'planning.action.exportHistory': '履歴をエクスポート',
   'planning.action.watchUpdates': '更新をウォッチ',
   'planning.action.watchingUpdates': 'ウォッチ中',

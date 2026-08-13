@@ -209,8 +209,6 @@ test('enterprise SCIM group jobs run in a dedicated bounded worker', () => {
     'dynamodb:UpdateItem',
   ]);
   expect(actionsForTable('PlanningTable2A0D4CC5')).toEqual([
-    'dynamodb:ConditionCheckItem',
-    'dynamodb:DeleteItem',
     'dynamodb:GetItem',
     'dynamodb:PutItem',
     'dynamodb:Query',
@@ -1026,6 +1024,8 @@ test('audit stream isolates downstream delivery and retention consumers', () => 
     .toContain('dynamodb:PutItem');
   expect(actionsForProjectionTable('PlanningTable2A0D4CC5'))
     .toContain('dynamodb:GetItem');
+  expect(actionsForProjectionTable('TeamIssuesTable189D851D'))
+    .toContain('dynamodb:ConditionCheckItem');
   expect(serializedProjectionPolicy).toContain('sqs:SendMessage');
   expect(serializedProjectionPolicy).toContain('FileProofingTable');
   expect(serializedProjectionPolicy).toContain('dynamodb:GetItem');
@@ -2778,7 +2778,7 @@ test('automation workers consume the audit outbox and run recurring schedules wi
       JSON.stringify(statement.Condition).includes('TransactWriteItems')
     );
     expect(planningRevisionFenceStatement).toEqual({
-      Action: ['dynamodb:PutItem', 'dynamodb:UpdateItem'],
+      Action: 'dynamodb:UpdateItem',
       Condition: {
         'ForAllValues:StringEquals': {
           'dynamodb:Attributes': [
@@ -2843,23 +2843,18 @@ test('automation workers consume the audit outbox and run recurring schedules wi
       'cognito-idp:AdminListGroupsForUser',
     ]));
     expect(JSON.stringify(cognitoStatement?.Resource)).toContain('CognitoUserPoolId');
-    const workspaceSearchStatement = statements.find((statement) => {
+    const workspaceSearchWriteStatement = statements.find((statement) => {
       const actions = Array.isArray(statement.Action)
         ? statement.Action
         : [statement.Action];
-      return actions.includes('dynamodb:GetItem') &&
+      return actions.some((action) =>
+        action === 'dynamodb:PutItem' || action === 'dynamodb:UpdateItem' ||
+        action === 'dynamodb:DeleteItem'
+      ) &&
         JSON.stringify(statement.Resource)
           .includes('WorkspaceSearchTable2575AD6B');
     });
-    expect(workspaceSearchStatement).toEqual(expect.objectContaining({
-      Effect: 'Allow',
-      Action: expect.arrayContaining([
-        'dynamodb:GetItem',
-        'dynamodb:PutItem',
-        'dynamodb:UpdateItem',
-        'dynamodb:DeleteItem',
-      ]),
-    }));
+    expect(workspaceSearchWriteStatement).toBeUndefined();
     const projectDirectoryStatement = statements.find((statement) => {
       const actions = Array.isArray(statement.Action)
         ? statement.Action

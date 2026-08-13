@@ -4,6 +4,7 @@ import {
   type NotificationAction,
   type NotificationClient,
   type NotificationFilter,
+  type NotificationItem,
   type NotificationVisibilityFilter,
   type UpdateNotificationPreferencesInput,
 } from '../../notifications'
@@ -80,7 +81,11 @@ export function createNotificationRouter<
         }),
       ])
 
-      return context.json({ ...page, unreadCount })
+      return context.json({
+        ...page,
+        notifications: page.notifications.map(toPublicNotification),
+        unreadCount,
+      })
     } catch (error) {
       return dependencies.mapError(context, error)
     }
@@ -150,7 +155,7 @@ export function createNotificationRouter<
         snoozedUntil: readOptionalNotificationTimestamp(body.snoozedUntil),
         isVisible,
       })
-      return context.json(notification)
+      return context.json(toPublicNotification(notification))
     } catch (error) {
       return dependencies.mapError(context, error)
     }
@@ -195,6 +200,15 @@ export function createNotificationRouter<
   })
 
   return router
+}
+
+/** Removes persistence-only authorization metadata before a notification is serialized. */
+function toPublicNotification(
+  notification: NotificationItem,
+): Omit<NotificationItem, 'planningTargetRecordKey'> {
+  const publicNotification = { ...notification }
+  delete publicNotification.planningTargetRecordKey
+  return publicNotification
 }
 
 function readBearerAccessToken(context: Context) {

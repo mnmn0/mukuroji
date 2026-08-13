@@ -5,12 +5,14 @@ import {
   DynamoDBClient,
 } from '@aws-sdk/client-dynamodb'
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
+import { COLLABORATION_CONTEXT_SCHEMA_VERSION } from '@mukuroji/contracts'
 import type { TaskViewDefinition } from '@mukuroji/contracts'
 import {
   type CreateTaskViewRequest,
   DynamoDbWorkspaceSearchClient,
   WorkspaceSearchError,
   createCommentWorkspaceSearchDocument,
+  createCuratedContextItemWorkspaceSearchDocument,
   createDocumentWorkspaceSearchSourceDocument,
   createDocumentWorkspaceSearchDocument,
   createTaskViewRecordKey,
@@ -112,6 +114,49 @@ test('derives document keys from entity identity instead of trusting producer in
     title: 'Document',
     url: '/documents/document-1',
   })).toThrow('record key does not match')
+})
+
+test('does not let an older source projection replace or remove a newer document', async () => {
+  const current = createWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    entityType: 'context-item',
+    entityId: 'team/core/issue/issue-1/context-item/context-1',
+    title: 'Current context',
+    url: '/teams/core/issues?issueId=issue-1&contextItemId=context-1',
+    teamId: 'core',
+    sourceRevision: 2,
+  })
+  const older = createWorkspaceSearchDocument({
+    ...current,
+    title: 'Older context',
+    sourceRevision: 1,
+  })
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([current]),
+    {} as DynamoDBClient,
+    false,
+  )
+
+  await client.upsertDocument(older, { sourceRevision: 1 })
+  await client.deleteDocument(
+    'workspace-1',
+    'context-item',
+    'team/core/issue/issue-1/context-item/context-1',
+    { sourceRevision: 1 },
+  )
+
+  const response = await client.search({
+    workspaceId: 'workspace-1',
+    access: {
+      viewerUserId: 'viewer@example.com',
+      isSystemAdmin: false,
+      projectIds: new Set<string>(),
+      teamIds: new Set(['core']),
+    },
+  })
+  expect(response.results).toHaveLength(1)
+  expect(response.results[0]?.title).toBe('Current context')
 })
 
 test('requires canonical ISO dates for Work Item search projections', () => {
@@ -243,6 +288,7 @@ test('normalizes realtime and backfill Work Item and comment projection fields c
     commentId: 'comment-1',
     body: 'Approved for release.\nProceed with rollout.',
     creatorUserId: 'owner@example.com',
+    rootCommentId: 'root-comment',
   })
 
   expect(workItem).toMatchObject({
@@ -254,6 +300,43 @@ test('normalizes realtime and backfill Work Item and comment projection fields c
     title: 'Approved for release.',
     subtitle: 'owner@example.com',
     parentId: 'team/core/issue/issue-1',
+    url: '/teams/core/issues?issueId=issue-1&commentId=comment-1&rootCommentId=root-comment',
+  })
+})
+
+test('projects curated context with a stable Work Item deep link and source revision', () => {
+  const document = createCuratedContextItemWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    projectId: 'project-1',
+    item: {
+      schemaVersion: 1,
+      id: 'context-1',
+      teamId: 'core',
+      workItemId: 'issue-1',
+      kind: 'decision',
+      state: 'accepted',
+      title: 'Ship the release',
+      body: 'The release is approved after the final regression pass.',
+      mentionMemberKeys: ['owner@example.com'],
+      createdBy: { id: 'owner@example.com', displayName: 'Owner' },
+      createdAt: '2026-08-09T01:00:00.000Z',
+      updatedBy: { id: 'manager@example.com', displayName: 'Manager' },
+      updatedAt: '2026-08-09T02:00:00.000Z',
+      revision: 3,
+    },
+  })
+
+  expect(document).toMatchObject({
+    entityType: 'context-item',
+    entityId: 'team/core/issue/issue-1/context-item/context-1',
+    parentId: 'team/core/issue/issue-1',
+    title: 'Ship the release',
+    subtitle: 'decision',
+    status: 'accepted',
+    projectId: 'project-1',
+    creatorUserId: 'owner@example.com',
+    sourceRevision: 3,
+    url: '/projects/project-1/issues?teamId=core&issueId=issue-1&contextItemId=context-1',
   })
 })
 
@@ -444,6 +527,67 @@ test('applies current resolved scope before RBAC and composite project filters',
   expect(response.results[0]?.highlights).toEqual(expect.arrayContaining([
     expect.objectContaining({ field: 'body' }),
   ]))
+})
+
+test('does not authorize a context item from its stale indexed project scope', async () => {
+  const contextItem = createCuratedContextItemWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    item: {
+      schemaVersion: COLLABORATION_CONTEXT_SCHEMA_VERSION,
+      id: 'context-1',
+      teamId: 'core',
+      workItemId: 'issue-1',
+      kind: 'decision',
+      title: 'Release decision',
+      body: 'Move the release to Friday.',
+      state: 'active',
+      createdAt: '2026-07-20T00:00:00.000Z',
+      updatedAt: '2026-07-20T00:00:00.000Z',
+      createdBy: { id: 'creator@example.com', displayName: 'Creator' },
+      updatedBy: { id: 'creator@example.com', displayName: 'Creator' },
+      mentionMemberKeys: [],
+      revision: 1,
+    },
+    projectId: 'project-a',
+  })
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([contextItem]),
+    {} as DynamoDBClient,
+    false,
+  )
+  const resolveCurrentScope = async () => ({
+    teamId: 'core',
+    projectId: 'project-b',
+    currentDocument: {
+      ...contextItem,
+      projectId: 'project-b',
+    },
+  })
+
+  const projectAResponse = await client.search({
+    workspaceId: 'workspace-1',
+    access: {
+      viewerUserId: 'project-a-viewer@example.com',
+      isSystemAdmin: false,
+      projectIds: new Set(['project-a']),
+      teamIds: new Set(['core']),
+    },
+    resolveCurrentScope,
+  })
+  const projectBResponse = await client.search({
+    workspaceId: 'workspace-1',
+    access: {
+      viewerUserId: 'project-b-viewer@example.com',
+      isSystemAdmin: false,
+      projectIds: new Set(['project-b']),
+      teamIds: new Set(['core']),
+    },
+    resolveCurrentScope,
+  })
+
+  expect(projectAResponse.results).toHaveLength(0)
+  expect(projectBResponse.results.map(({ id }) => id)).toEqual([contextItem.entityId])
 })
 
 test('requires a source-of-truth permission decision for Workspace-scoped documents', async () => {

@@ -45,6 +45,7 @@ export const planningMessages = {
   'planning.action.comparePrevious': 'Compare with previous',
   'planning.action.hideComparison': 'Close comparison',
   'planning.action.openEvidence': 'Open evidence',
+  'planning.action.openUpdateDetails': 'Open update details',
   'planning.action.exportHistory': 'Export history',
   'planning.action.watchUpdates': 'Watch updates',
   'planning.action.watchingUpdates': 'Watching',

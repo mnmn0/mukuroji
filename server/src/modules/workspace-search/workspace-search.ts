@@ -18,6 +18,7 @@ import {
   TASK_VIEW_SCHEMA_VERSION,
   WORK_ITEM_SCHEDULE_MIN_YEAR,
   type CreateSavedWorkspaceViewInput,
+  type CuratedContextItem,
   type CreateSavedTaskViewInput,
   type DocumentBlock,
   type DocumentDetail,
@@ -452,6 +453,12 @@ export class WorkspaceSearchError extends Error {
   }
 }
 
+/** Conditional revision guard used by asynchronous source projections. */
+export type WorkspaceSearchProjectionWriteOptions = {
+  /** Only replace or remove a document whose stored source revision is not newer. */
+  sourceRevision?: number
+}
+
 /** Marks persisted projection content that disagrees with its server-owned digest. */
 class WorkspaceSearchProjectionDigestMismatchError extends WorkspaceSearchError {}
 
@@ -462,12 +469,14 @@ export type WorkspaceSearchClient = {
   /** Search document を idempotent に作成または置換します。 */
   upsertDocument(
     input: Parameters<typeof createWorkspaceSearchDocument>[0] | WorkspaceSearchDocument,
+    options?: WorkspaceSearchProjectionWriteOptions,
   ): Promise<WorkspaceSearchDocument>
   /** Search document を entity key で削除します。 */
   deleteDocument(
     workspaceId: string,
     entityType: SearchEntityType,
     entityId: string,
+    options?: WorkspaceSearchProjectionWriteOptions,
   ): Promise<void>
   /** Composite filter と current RBAC を適用して検索します。 */
   search(input: WorkspaceSearchQueryInput): Promise<WorkspaceSearchResponse>
@@ -888,6 +897,7 @@ const searchEntityTypes = new Set<SearchEntityType>([
   'project',
   'team',
   'comment',
+  'context-item',
   'file',
   'document',
 ])
@@ -1344,6 +1354,8 @@ export function createCommentWorkspaceSearchDocument(input: {
   issueId: string
   /** Canonical Comment ID です。 */
   commentId: string
+  /** Root thread identifier that contains the comment. */
+  rootCommentId?: string
   /** Comment の現在 Markdown 本文です。 */
   body: string
   /** Comment author の Workspace member key です。 */
@@ -1354,7 +1366,11 @@ export function createCommentWorkspaceSearchDocument(input: {
   updatedAt?: string
 }) {
   const parentId = `team/${input.teamId}/issue/${input.issueId}`
-  const query = new URLSearchParams({ issueId: input.issueId, commentId: input.commentId })
+  const query = new URLSearchParams({
+    issueId: input.issueId,
+    commentId: input.commentId,
+    rootCommentId: input.rootCommentId ?? input.commentId,
+  })
   return createWorkspaceSearchDocument({
     workspaceId: input.workspaceId,
     entityType: 'comment',
@@ -1368,6 +1384,42 @@ export function createCommentWorkspaceSearchDocument(input: {
     ...(input.creatorUserId ? { creatorUserId: input.creatorUserId } : {}),
     ...(input.createdAt ? { createdAt: input.createdAt } : {}),
     ...(input.updatedAt ? { updatedAt: input.updatedAt } : {}),
+  })
+}
+
+/** Converts a curated context item into a runtime/backfill Search document. */
+export function createCuratedContextItemWorkspaceSearchDocument(input: {
+  /** Canonical Workspace identifier. */
+  workspaceId: string
+  /** Current canonical curated context item snapshot. */
+  item: CuratedContextItem
+  /** Current assigned Project identifier for the parent Work Item. */
+  projectId?: string
+}) {
+  const parentId = `team/${input.item.teamId}/issue/${input.item.workItemId}`
+  const query = new URLSearchParams({
+    teamId: input.item.teamId,
+    issueId: input.item.workItemId,
+    contextItemId: input.item.id,
+  })
+  return createWorkspaceSearchDocument({
+    workspaceId: input.workspaceId,
+    entityType: 'context-item',
+    entityId: `${parentId}/context-item/${input.item.id}`,
+    title: input.item.title,
+    subtitle: input.item.kind,
+    body: input.item.body,
+    url: input.projectId
+      ? `/projects/${encodeURIComponent(input.projectId)}/issues?${query.toString()}`
+      : `/teams/${encodeURIComponent(input.item.teamId)}/issues?${query.toString()}`,
+    teamId: input.item.teamId,
+    ...(input.projectId ? { projectId: input.projectId } : {}),
+    parentId,
+    creatorUserId: input.item.createdBy.id,
+    status: input.item.state,
+    createdAt: input.item.createdAt,
+    updatedAt: input.item.updatedAt,
+    sourceRevision: input.item.revision,
   })
 }
 
@@ -1404,37 +1456,77 @@ export class DynamoDbWorkspaceSearchClient {
   /** Search document を idempotent に作成または置換します。 */
   async upsertDocument(
     input: Parameters<typeof createWorkspaceSearchDocument>[0] | WorkspaceSearchDocument,
+    options?: WorkspaceSearchProjectionWriteOptions,
   ) {
     await this.ensureLocalTable()
     const document = createWorkspaceSearchDocument(input)
-    await this.documentClient.send(new TransactWriteCommand({
-      TransactItems: [{
-        Put: {
-          TableName: this.tableName,
-          Item: document,
-        },
-      }],
-    }))
+    const sourceRevision = normalizeProjectionSourceRevision(options?.sourceRevision)
+    try {
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [{
+          Put: {
+            TableName: this.tableName,
+            Item: document,
+            ...(sourceRevision === undefined
+              ? {}
+              : {
+                  ConditionExpression:
+                    'attribute_not_exists(#recordKey) OR attribute_not_exists(#sourceRevision) OR ' +
+                    '#sourceRevision <= :sourceRevision',
+                  ExpressionAttributeNames: {
+                    '#recordKey': 'recordKey',
+                    '#sourceRevision': 'sourceRevision',
+                  },
+                  ExpressionAttributeValues: { ':sourceRevision': sourceRevision },
+                }),
+          },
+        }],
+      }))
+    } catch (error) {
+      if (sourceRevision === undefined || !isTransactionConditionalCheckFailed(error)) {
+        throw error
+      }
+    }
     return document
   }
 
   /** Search document を entity key で削除します。 */
-  async deleteDocument(workspaceId: string, entityType: SearchEntityType, entityId: string) {
+  async deleteDocument(
+    workspaceId: string,
+    entityType: SearchEntityType,
+    entityId: string,
+    options?: WorkspaceSearchProjectionWriteOptions,
+  ) {
     await this.ensureLocalTable()
-    await this.documentClient.send(new TransactWriteCommand({
-      TransactItems: [{
-        Delete: {
-          TableName: this.tableName,
-          Key: {
-            workspaceId: requireText(workspaceId, 'Search Workspace ID'),
-            recordKey: createWorkspaceSearchDocumentRecordKey(
-              entityType,
-              entityId,
-            ),
+    const sourceRevision = normalizeProjectionSourceRevision(options?.sourceRevision)
+    try {
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [{
+          Delete: {
+            TableName: this.tableName,
+            Key: {
+              workspaceId: requireText(workspaceId, 'Search Workspace ID'),
+              recordKey: createWorkspaceSearchDocumentRecordKey(
+                entityType,
+                entityId,
+              ),
+            },
+            ...(sourceRevision === undefined
+              ? {}
+              : {
+                  ConditionExpression:
+                    'attribute_not_exists(#sourceRevision) OR #sourceRevision <= :sourceRevision',
+                  ExpressionAttributeNames: { '#sourceRevision': 'sourceRevision' },
+                  ExpressionAttributeValues: { ':sourceRevision': sourceRevision },
+                }),
           },
-        },
-      }],
-    }))
+        }],
+      }))
+    } catch (error) {
+      if (sourceRevision === undefined || !isTransactionConditionalCheckFailed(error)) {
+        throw error
+      }
+    }
   }
 
   /** Composite filter、current RBAC、cursor pagination を適用して検索します。 */
@@ -1507,11 +1599,10 @@ export class DynamoDbWorkspaceSearchClient {
                   ...(storedDocument.projectId ? { projectId: storedDocument.projectId } : {}),
                 }
             if (!resolvedScope) return undefined
-            const document = {
-              ...(resolvedScope.currentDocument ?? storedDocument),
-              teamId: resolvedScope.teamId,
-              projectId: resolvedScope.projectId,
-            }
+            const document = applyResolvedWorkspaceSearchScope(
+              resolvedScope.currentDocument ?? storedDocument,
+              resolvedScope,
+            )
             return canAccessWorkspaceSearchDocument(
               document,
               input.access,
@@ -3888,6 +3979,31 @@ function canAccessWorkspaceSearchDocument(
   if (document.projectId) return access.projectIds.has(document.projectId)
   if (document.teamId) return access.teamIds.has(document.teamId)
   return false
+}
+
+/**
+ * Replaces indexed Team/Project ownership with the source-of-truth scope.
+ *
+ * @param document - Current or indexed search document to scope.
+ * @param resolvedScope - Scope resolved from the canonical Work Item.
+ * @returns A document whose ownership fields cannot retain stale index values.
+ */
+function applyResolvedWorkspaceSearchScope(
+  document: WorkspaceSearchDocument,
+  resolvedScope: WorkspaceSearchResolvedScope,
+): WorkspaceSearchDocument {
+  const scopedDocument = { ...document }
+  if (resolvedScope.teamId) {
+    scopedDocument.teamId = resolvedScope.teamId
+  } else {
+    delete scopedDocument.teamId
+  }
+  if (resolvedScope.projectId) {
+    scopedDocument.projectId = resolvedScope.projectId
+  } else {
+    delete scopedDocument.projectId
+  }
+  return scopedDocument
 }
 
 function toWorkspaceSearchResult(
@@ -6313,6 +6429,19 @@ function invalidTaskView(message: string): never {
 /** Creates a stable error for malformed persisted task view state. */
 function invalidStoredTaskView() {
   return new WorkspaceSearchError(503, 'InvalidTaskView', 'Task view data is invalid.')
+}
+
+/** Validates the optional source revision used by an asynchronous projection guard. */
+function normalizeProjectionSourceRevision(value: number | undefined) {
+  if (value === undefined) return undefined
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new WorkspaceSearchError(
+      400,
+      'InvalidSearchProjectionRevision',
+      'Search projection source revision must be a positive integer.',
+    )
+  }
+  return value
 }
 
 function isTransactionConditionalCheckFailed(error: unknown) {

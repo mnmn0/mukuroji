@@ -17,7 +17,6 @@ import {
 } from '../../policies/workspace-search-writer-fence';
 import {
   grantPlanningRevisionFenceAccess,
-  grantPlanningRevisionFenceMigrationAccess,
 } from '../../policies/planning-revision-fence';
 import type { DataStoreResources } from '../data-stores';
 import type { FileStorageResources } from '../file-storage';
@@ -170,8 +169,6 @@ export function buildAutomationWorkers(
   workItemsTable.grants.readWriteData(automationEventFunction);
   planningTable.grants.readData(automationEventFunction);
   grantPlanningRevisionFenceAccess(planningTable, automationEventFunction);
-  grantPlanningRevisionFenceMigrationAccess(planningTable, automationEventFunction);
-  workspaceSearchTable.grants.readWriteData(automationEventFunction);
   workItemConfigurationTable.grants.readData(automationEventFunction);
   workspaceAccessTable.grants.readData(automationEventFunction);
   automationEventFunction.addToRolePolicy(new iam.PolicyStatement({
@@ -304,8 +301,6 @@ export function buildAutomationWorkers(
   workItemsTable.grants.readWriteData(automationScheduleFunction);
   planningTable.grants.readData(automationScheduleFunction);
   grantPlanningRevisionFenceAccess(planningTable, automationScheduleFunction);
-  grantPlanningRevisionFenceMigrationAccess(planningTable, automationScheduleFunction);
-  workspaceSearchTable.grants.readWriteData(automationScheduleFunction);
   workItemConfigurationTable.grants.readData(automationScheduleFunction);
   workspaceAccessTable.grants.readData(automationScheduleFunction);
   automationScheduleFunction.addToRolePolicy(new iam.PolicyStatement({

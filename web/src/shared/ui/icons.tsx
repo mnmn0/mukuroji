@@ -6,6 +6,8 @@ type IconProps = {
 
 const iconClass =
   'h-[23px] w-[23px] fill-none stroke-current stroke-2 [stroke-linecap:round] [stroke-linejoin:round]'
+const iconStrokeClass =
+  'h-[23px] w-[23px] stroke-current stroke-2 [stroke-linecap:round] [stroke-linejoin:round]'
 
 /**
  * Renders the shared mail outline icon.
@@ -79,6 +81,27 @@ export function ChevronIcon({ className = iconClass }: IconProps) {
   return (
     <svg className={className} viewBox="0 0 24 24" aria-hidden="true">
       <path d="m7 9 5 5 5-5" />
+    </svg>
+  )
+}
+
+/**
+ * Renders the shared notification-watch icon.
+ *
+ * @param props - Optional class name and filled state. Custom class names should not add `fill-*` utilities.
+ * @returns A decorative bell icon.
+ */
+export function WatchIcon({
+  className = iconStrokeClass,
+  filled = false,
+}: IconProps & { filled?: boolean }) {
+  return (
+    <svg
+      aria-hidden="true"
+      className={`${className} ${filled ? 'fill-current' : 'fill-none'}`}
+      viewBox="0 0 24 24"
+    >
+      <path d="M18 8a6 6 0 1 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4" />
     </svg>
   )
 }
@@ -206,6 +229,21 @@ export function StarIcon({ className = iconClass, filled = false }: IconProps & 
 }
 
 /**
+ * Renders the shared completed or accepted-state icon.
+ *
+ * @param props - Optional class name.
+ * @returns A decorative check enclosed by a circle.
+ */
+export function CheckCircleIcon({ className = iconClass }: IconProps) {
+  return (
+    <svg aria-hidden="true" className={className} viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="9" />
+      <path d="m8 12 2.5 2.5L16.5 9" />
+    </svg>
+  )
+}
+
+/**
  * Renders the shared manual handoff source icon.
  *
  * @param props - Optional CSS class override.
@@ -243,6 +281,22 @@ export function PinIcon({ className = iconClass, filled = false }: IconProps & {
       viewBox="0 0 24 24"
     >
       <path d="m9 4 6 0-.8 5 3.3 3.3v1.2h-4.7L12 21l-.8-7.5H6.5v-1.2L9.8 9z" />
+    </svg>
+  )
+}
+
+/**
+ * Renders the shared external-link icon.
+ *
+ * @param props - Optional class name.
+ * @returns A decorative arrow leaving a square.
+ */
+export function ExternalLinkIcon({ className = iconClass }: IconProps) {
+  return (
+    <svg aria-hidden="true" className={className} viewBox="0 0 24 24">
+      <path d="M14 5h5v5" />
+      <path d="m12 12 7-7" />
+      <path d="M19 13v6H5V5h6" />
     </svg>
   )
 }

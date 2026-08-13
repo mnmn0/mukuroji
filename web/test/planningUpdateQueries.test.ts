@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { PlanningUpdateReactionPage, PlanningUpdateTarget } from '@mukuroji/contracts'
 import {
+  deduplicatePlanningUpdateComments,
   hasPlanningUpdateViewerReaction,
   loadBoundedPlanningUpdateAnnotations,
   revalidatePlanningUpdateHistoryAfterPublish,
@@ -27,6 +28,24 @@ describe('Planning update query coordination', () => {
     expect(selectPlanningUpdateAnnotationVersions(updates)).toEqual(
       Array.from({ length: 20 }, (_, index) => 25 - index),
     )
+  })
+
+  test('keeps comments with the same ID from different immutable versions', () => {
+    const target = {
+      type: 'project',
+      projectId: 'refero',
+      teamId: 'core-team',
+    } satisfies PlanningUpdateTarget
+    const comments = [1, 2].map((updateVersion) => ({
+      authorMemberKey: 'author@example.com',
+      body: `Comment ${updateVersion}`,
+      createdAt: '2026-08-10T00:00:00.000Z',
+      id: 'comment-reused-by-fixture',
+      target,
+      updateVersion,
+    }))
+
+    expect(deduplicatePlanningUpdateComments(comments)).toEqual(comments)
   })
 
   test('loads only the first bounded annotation page for twenty versions', async () => {

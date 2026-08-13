@@ -3,6 +3,7 @@ import type { Context } from 'hono'
 import {
   DEFAULT_NOTIFICATION_PREFERENCES,
   NotificationError,
+  type NotificationItem,
   type NotificationClient,
 } from '../../notifications'
 import { createNotificationRouter } from './notification-router'
@@ -56,6 +57,55 @@ describe('createNotificationRouter', () => {
       code: 'InvalidNotificationAction',
       message: 'Notification action is invalid.',
     })
+  })
+
+  test('does not expose Planning table keys in list or mutation responses', async () => {
+    const notification: NotificationItem = {
+      id: 'notification-1',
+      eventId: 'event-1',
+      eventType: 'planning-update.overdue',
+      reasons: ['overdue'],
+      planningTargetType: 'project',
+      planningTargetId: 'project-1',
+      planningTargetRecordKey: 'UPDATE_TARGET#PROJECT#team-1#project-1',
+      planningNextDueAt: '2026-08-12T00:00:00.000Z',
+      planningNotificationKind: 'overdue',
+      occurredAt: '2026-08-12T00:00:00.000Z',
+      state: 'unread',
+    }
+    const dependencies = createDependencies(1)
+    const notifications = {
+      ...dependencies.getNotifications(),
+      async list() {
+        return { notifications: [notification] }
+      },
+      async update() {
+        return notification
+      },
+    } satisfies NotificationClient
+    const router = createNotificationRouter({
+      ...dependencies,
+      getNotifications: () => notifications,
+    })
+
+    const listResponse = await router.request('/api/notifications', {
+      headers: { Authorization: 'Bearer token' },
+    })
+    expect(JSON.stringify(await listResponse.json())).not.toContain(
+      'planningTargetRecordKey',
+    )
+
+    const updateResponse = await router.request('/api/notifications/notification-1', {
+      method: 'PATCH',
+      headers: {
+        Authorization: 'Bearer token',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ action: 'mark-read' }),
+    })
+    expect(JSON.stringify(await updateResponse.json())).not.toContain(
+      'planningTargetRecordKey',
+    )
   })
 })
 

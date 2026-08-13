@@ -1,5 +1,11 @@
 import { createMutationHeaders, type MutationRequestContext } from '../../shared/api/mutationHeaders'
 import { TeamIssuesApiError } from './errors'
+import {
+  createTeamIssuePath,
+  readApiError,
+  readJson,
+  trimTrailingSlash,
+} from './http'
 
 /**
  * Work Item の watcher 状態です。
@@ -49,14 +55,12 @@ const issuesApiBaseUrl = trimTrailingSlash(
   import.meta.env.VITE_TASKS_API_BASE_URL ?? import.meta.env.VITE_API_BASE_URL ?? '/api',
 )
 
-const defaultIssuesApiErrorMessage = 'Unable to complete the Work Item request.'
-
 /**
  * Work Item の現在の watcher 状態を取得します。
  */
 export async function getTeamIssueWatch(teamId: string, issueId: string, accessToken: string) {
   const response = await requestJson<TeamIssueWatchResponse>(
-    `${createTeamIssuePath(teamId, issueId)}/watch`,
+    `${createTeamIssuePath(issuesApiBaseUrl, teamId, issueId)}/watch`,
     accessToken,
   )
 
@@ -73,7 +77,7 @@ export async function subscribeTeamIssueWatch(
   mutationContext: MutationRequestContext,
 ) {
   const response = await requestJson<TeamIssueWatchResponse>(
-    `${createTeamIssuePath(teamId, issueId)}/watch`,
+    `${createTeamIssuePath(issuesApiBaseUrl, teamId, issueId)}/watch`,
     accessToken,
     {
       headers: createMutationHeaders(mutationContext),
@@ -94,7 +98,7 @@ export async function unsubscribeTeamIssueWatch(
   mutationContext: MutationRequestContext,
 ) {
   const response = await requestJson<TeamIssueWatchResponse>(
-    `${createTeamIssuePath(teamId, issueId)}/watch`,
+    `${createTeamIssuePath(issuesApiBaseUrl, teamId, issueId)}/watch`,
     accessToken,
     {
       headers: createMutationHeaders(mutationContext),
@@ -157,10 +161,6 @@ export async function unsubscribeProjectWatch(
   return response.watch
 }
 
-function createTeamIssuePath(teamId: string, issueId: string) {
-  return `${issuesApiBaseUrl}/teams/${encodeURIComponent(teamId)}/issues/${encodeURIComponent(issueId)}`
-}
-
 async function requestJson<TResponse>(
   url: string,
   accessToken?: string,
@@ -186,40 +186,4 @@ async function requestJson<TResponse>(
   }
 
   return data as TResponse
-}
-
-function readApiError(data: unknown) {
-  const message = typeof data === 'object' &&
-    data !== null &&
-    'message' in data &&
-    typeof data.message === 'string' &&
-    data.message.trim().length > 0
-    ? data.message
-    : defaultIssuesApiErrorMessage
-  const code = typeof data === 'object' &&
-    data !== null &&
-    'code' in data &&
-    typeof data.code === 'string'
-    ? data.code
-    : undefined
-
-  return { code, message }
-}
-
-async function readJson<T>(response: Response): Promise<T> {
-  const text = await response.text()
-
-  if (!text) {
-    return {} as T
-  }
-
-  try {
-    return JSON.parse(text) as T
-  } catch {
-    return {} as T
-  }
-}
-
-function trimTrailingSlash(value: string) {
-  return value.replace(/\/+$/, '')
 }

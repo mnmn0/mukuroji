@@ -1,4 +1,10 @@
 import { TeamIssuesApiError } from './errors'
+import {
+  createTeamIssuePath,
+  readApiError,
+  readJson,
+  trimTrailingSlash,
+} from './http'
 
 /**
  * チーム所有 Issue の活動種別です。
@@ -83,17 +89,21 @@ const issuesApiBaseUrl = trimTrailingSlash(
   import.meta.env.VITE_TASKS_API_BASE_URL ?? import.meta.env.VITE_API_BASE_URL ?? '/api',
 )
 
-const defaultIssuesApiErrorMessage = 'Unable to complete the Work Item request.'
-
 /**
- * append-only audit 基盤から Work Item activity を cursor 付きで取得します。
+ * Loads one cursor page of Work Item activity from the append-only audit log.
+ *
+ * @param teamId - Team that owns the Work Item.
+ * @param issueId - Work Item identifier.
+ * @param accessToken - Access token for the Issues API.
+ * @param options - Opaque cursor and page-size options.
+ * @returns A runtime-validated activity page.
  */
-export function getTeamIssueActivity(
+export async function getTeamIssueActivity(
   teamId: string,
   issueId: string,
   accessToken: string,
   options: { limit?: number; cursor?: string } = {},
-) {
+): Promise<TeamIssueActivityPage> {
   const query = new URLSearchParams()
 
   if (options.limit !== undefined) {
@@ -106,14 +116,67 @@ export function getTeamIssueActivity(
 
   const queryString = query.toString()
 
-  return requestJson<TeamIssueActivityPage>(
-    `${createTeamIssuePath(teamId, issueId)}/activity${queryString ? `?${queryString}` : ''}`,
+  const data = await requestJson<unknown>(
+    `${createTeamIssuePath(issuesApiBaseUrl, teamId, issueId)}/activity${queryString ? `?${queryString}` : ''}`,
     accessToken,
+  )
+
+  if (!isTeamIssueActivityPage(data)) {
+    throw new TeamIssuesApiError(
+      502,
+      'The issue activity response was invalid.',
+      'InvalidIssueActivityResponse',
+    )
+  }
+
+  return data
+}
+
+/**
+ * Validates a cursor page of Work Item activity at the API boundary.
+ *
+ * @param value - Untrusted decoded JSON.
+ * @returns Whether the value is a complete activity page.
+ */
+function isTeamIssueActivityPage(
+  value: unknown,
+): value is TeamIssueActivityPage {
+  return (
+    isRecord(value) &&
+    Array.isArray(value.events) &&
+    value.events.every(isTeamIssueActivityEvent) &&
+    (value.nextCursor === undefined || typeof value.nextCursor === 'string')
   )
 }
 
-function createTeamIssuePath(teamId: string, issueId: string) {
-  return `${issuesApiBaseUrl}/teams/${encodeURIComponent(teamId)}/issues/${encodeURIComponent(issueId)}`
+/**
+ * Validates one Work Item activity event.
+ *
+ * @param value - Untrusted activity event candidate.
+ * @returns Whether the value contains the complete activity event shape.
+ */
+function isTeamIssueActivityEvent(
+  value: unknown,
+): value is TeamIssueActivityEvent {
+  return (
+    isRecord(value) &&
+    typeof value.eventId === 'string' &&
+    typeof value.eventType === 'string' &&
+    typeof value.occurredAt === 'string' &&
+    typeof value.actorUserId === 'string' &&
+    (value.summary === undefined || typeof value.summary === 'string') &&
+    (value.metadata === undefined || isRecord(value.metadata))
+  )
+}
+
+/**
+ * Narrows an unknown JSON value to a non-array object.
+ *
+ * @param value - Untrusted decoded JSON.
+ * @returns Whether the value is a JSON object candidate.
+ */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 async function requestJson<TResponse>(
@@ -141,40 +204,4 @@ async function requestJson<TResponse>(
   }
 
   return data as TResponse
-}
-
-function readApiError(data: unknown) {
-  const message = typeof data === 'object' &&
-    data !== null &&
-    'message' in data &&
-    typeof data.message === 'string' &&
-    data.message.trim().length > 0
-    ? data.message
-    : defaultIssuesApiErrorMessage
-  const code = typeof data === 'object' &&
-    data !== null &&
-    'code' in data &&
-    typeof data.code === 'string'
-    ? data.code
-    : undefined
-
-  return { code, message }
-}
-
-async function readJson<T>(response: Response): Promise<T> {
-  const text = await response.text()
-
-  if (!text) {
-    return {} as T
-  }
-
-  try {
-    return JSON.parse(text) as T
-  } catch {
-    return {} as T
-  }
-}
-
-function trimTrailingSlash(value: string) {
-  return value.replace(/\/+$/, '')
 }

@@ -2766,10 +2766,9 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
    * Strongly reads the fenced META row and reconciles one valid legacy META row when needed.
    *
    * Existing Planning graph rows remain under the workspace partition.  A conditional
-   * transaction moves the legacy revision into the isolated fence and retires the legacy
-   * row before any caller can observe a new revision, so source projections cannot restart
-   * an existing workspace at 1.  When the fence already wins, the same transaction retires
-   * the legacy row after checking that it did not change behind the strong reads.
+   * transaction copies the legacy revision into the isolated fence without deleting the
+   * legacy row, so migration does not require a table-wide DeleteItem permission.  Once the
+   * fence exists it is authoritative; the legacy row is retained as inert compatibility data.
    *
    * @param workspaceId - Workspace identifier whose revision is requested.
    * @returns The current Planning revision metadata.
@@ -2785,49 +2784,11 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
         if (fenced) {
           if (!legacy) return fenced
 
-          if (legacy.revision <= fenced.revision) {
-            try {
-              await this.documentClient.send(new TransactWriteCommand({
-                TransactItems: [
-                  {
-                    ConditionCheck: {
-                      TableName: this.tableName,
-                      Key: {
-                        workspaceId: `${META_WORKSPACE_KEY_PREFIX}${workspaceId}`,
-                        recordKey: META_RECORD_KEY,
-                      },
-                      ConditionExpression:
-                        '#entryType = :entryType AND #schemaVersion = :schemaVersion AND ' +
-                        '#revision = :revision',
-                      ExpressionAttributeNames: {
-                        '#entryType': 'entryType',
-                        '#revision': 'revision',
-                        '#schemaVersion': 'schemaVersion',
-                      },
-                      ExpressionAttributeValues: {
-                        ':entryType': 'planning-meta',
-                        ':revision': fenced.revision,
-                        ':schemaVersion': PLANNING_STORAGE_SCHEMA_VERSION,
-                      },
-                    },
-                  },
-                  this.createLegacyMetaDelete(workspaceId, legacy),
-                ],
-              }))
-              return fenced
-            } catch (error) {
-              if (!isPlanningTransactionConditionalFailureAt(error, 0) &&
-                !isPlanningTransactionConditionalFailureAt(error, 1)) {
-                throw error
-              }
-              continue
-            }
-          }
+          if (legacy.revision <= fenced.revision) return fenced
 
           try {
             await this.documentClient.send(new TransactWriteCommand({
               TransactItems: [
-                this.createLegacyMetaDelete(workspaceId, legacy),
                 {
                   Update: {
                     TableName: this.tableName,
@@ -2862,8 +2823,7 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
             }))
             return legacy
           } catch (error) {
-            if (!isPlanningTransactionConditionalFailureAt(error, 0) &&
-              !isPlanningTransactionConditionalFailureAt(error, 1)) {
+            if (!isPlanningTransactionConditionalFailureAt(error, 0)) {
               throw error
             }
             continue
@@ -2875,30 +2835,41 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
         try {
           await this.documentClient.send(new TransactWriteCommand({
             TransactItems: [
-              this.createLegacyMetaDelete(workspaceId, legacy),
               {
-                Put: {
+                Update: {
                   TableName: this.tableName,
-                  Item: {
+                  Key: {
                     workspaceId: `${META_WORKSPACE_KEY_PREFIX}${workspaceId}`,
                     recordKey: META_RECORD_KEY,
-                    entryType: 'planning-meta',
-                    schemaVersion: PLANNING_STORAGE_SCHEMA_VERSION,
-                    revision: legacy.revision,
-                    ...(legacy.updatedAt === undefined
-                      ? {}
-                      : { updatedAt: legacy.updatedAt }),
                   },
+                  UpdateExpression: legacy.updatedAt === undefined
+                    ? 'SET #entryType = :entryType, #schemaVersion = :schemaVersion, ' +
+                      '#revision = :revision REMOVE #updatedAt'
+                    : 'SET #entryType = :entryType, #schemaVersion = :schemaVersion, ' +
+                      '#revision = :revision, #updatedAt = :updatedAt',
                   ConditionExpression:
                     'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
+                  ExpressionAttributeNames: {
+                    '#entryType': 'entryType',
+                    '#revision': 'revision',
+                    '#schemaVersion': 'schemaVersion',
+                    '#updatedAt': 'updatedAt',
+                  },
+                  ExpressionAttributeValues: {
+                    ':entryType': 'planning-meta',
+                    ':revision': legacy.revision,
+                    ':schemaVersion': PLANNING_STORAGE_SCHEMA_VERSION,
+                    ...(legacy.updatedAt === undefined
+                      ? {}
+                      : { ':updatedAt': legacy.updatedAt }),
+                  },
                 },
               },
             ],
           }))
           return legacy
         } catch (error) {
-          if (!isPlanningTransactionConditionalFailureAt(error, 0) &&
-            !isPlanningTransactionConditionalFailureAt(error, 1)) {
+          if (!isPlanningTransactionConditionalFailureAt(error, 0)) {
             throw error
           }
         }
@@ -2910,41 +2881,6 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
     } catch (error) {
       if (error instanceof PlanningError) throw error
       throw toPersistenceError(error)
-    }
-  }
-
-  /**
-   * Builds the conditional delete that retires one validated legacy META row.
-   *
-   * A Delete action is used instead of a separate ConditionCheck because
-   * DynamoDB transactions cannot address the same item with both actions.
-   *
-   * @param workspaceId - Workspace identifier whose legacy row is retired.
-   * @param legacy - Strongly read legacy metadata to match conditionally.
-   * @returns A transaction item that deletes only that exact revision.
-   */
-  private createLegacyMetaDelete(
-    workspaceId: string,
-    legacy: PlanningMeta,
-  ): NonNullable<TransactWriteCommandInput['TransactItems']>[number] {
-    return {
-      Delete: {
-        TableName: this.tableName,
-        Key: { workspaceId, recordKey: META_RECORD_KEY },
-        ConditionExpression:
-          '#entryType = :entryType AND #schemaVersion = :schemaVersion AND ' +
-          '#revision = :revision',
-        ExpressionAttributeNames: {
-          '#entryType': 'entryType',
-          '#revision': 'revision',
-          '#schemaVersion': 'schemaVersion',
-        },
-        ExpressionAttributeValues: {
-          ':entryType': 'planning-meta',
-          ':revision': legacy.revision,
-          ':schemaVersion': PLANNING_STORAGE_SCHEMA_VERSION,
-        },
-      },
     }
   }
 

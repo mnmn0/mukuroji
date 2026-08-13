@@ -338,7 +338,7 @@ export type WorkspaceSearchMigrationOperation = {
   /** Exact intended target state. */
   after: MigrationItemSnapshot
   /** Covered Workspace Search entity family. */
-  entityType: 'comment' | 'document' | 'project' | 'team' | 'work-item'
+  entityType: 'comment' | 'context-item' | 'document' | 'project' | 'team' | 'work-item'
 }
 
 /** Active fenced lease required by every mutating transaction. */

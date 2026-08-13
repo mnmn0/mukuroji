@@ -60,7 +60,7 @@ function createMiddlewareHarness() {
   }
 }
 
-test('adds a legacy META absence check to normal fenced transactions', async () => {
+test('leaves normal fenced transactions untouched', async () => {
   const harness = createMiddlewareHarness()
   try {
     const forwarded = await harness.invoke({
@@ -78,38 +78,21 @@ test('adds a legacy META absence check to normal fenced transactions', async () 
     })
 
     expect(forwarded).toHaveLength(1)
-    expect(forwarded[0]).toMatchObject({
-      TransactItems: [
-        expect.objectContaining({ Update: expect.any(Object) }),
-        {
-          ConditionCheck: {
-            TableName: 'PlanningTable',
-            Key: { workspaceId: 'workspace-1', recordKey: 'META' },
-            ConditionExpression:
-              'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
-          },
-        },
-      ],
+    const transactionItems = Reflect.get(forwarded[0], 'TransactItems')
+    expect(transactionItems).toHaveLength(1)
+    expect(Array.isArray(transactionItems) ? transactionItems[0] : undefined).toMatchObject({
+      Update: expect.any(Object),
     })
   } finally {
     harness.destroy()
   }
 })
 
-test('does not add a second barrier to the legacy-to-fence migration transaction', async () => {
+test('leaves fence initialization transactions untouched', async () => {
   const harness = createMiddlewareHarness()
   try {
     const forwarded = await harness.invoke({
       TransactItems: [
-        {
-          Delete: {
-            TableName: 'PlanningTable',
-            Key: { workspaceId: 'workspace-1', recordKey: 'META' },
-            ConditionExpression: '#revision = :revision',
-            ExpressionAttributeNames: { '#revision': 'revision' },
-            ExpressionAttributeValues: { ':revision': 7 },
-          },
-        },
         {
           Put: {
             TableName: 'PlanningTable',
@@ -124,10 +107,7 @@ test('does not add a second barrier to the legacy-to-fence migration transaction
     })
 
     expect(forwarded[0]).toMatchObject({
-      TransactItems: expect.arrayContaining([
-        expect.objectContaining({ Delete: expect.any(Object) }),
-        expect.objectContaining({ Put: expect.any(Object) }),
-      ]),
+      TransactItems: [expect.objectContaining({ Put: expect.any(Object) })],
     })
     expect(forwarded[0]).not.toMatchObject({
       TransactItems: expect.arrayContaining([

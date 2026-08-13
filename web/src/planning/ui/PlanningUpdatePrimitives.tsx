@@ -1334,8 +1334,8 @@ function readPositiveNumber(value: FormDataEntryValue | null) {
  * @param value - Raw FormData value.
  * @returns A non-negative integer, or undefined.
  */
-function readNonNegativeNumber(value: FormDataEntryValue | null) {
-  const parsed = typeof value === 'string' ? Number(value) : Number.NaN
+export function readNonNegativeNumber(value: FormDataEntryValue | null) {
+  const parsed = typeof value === 'string' && value.trim() ? Number(value) : Number.NaN
   return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : undefined
 }
 

@@ -30,6 +30,10 @@ import {
   useIssueActivityPages,
   useIssueCollaborationPages,
 } from '../queries/useIssueCollaborationPages'
+import {
+  useIssueContext,
+  type IssueContextController,
+} from './useIssueContext'
 
 const presenceHeartbeatInterval = 12_000
 const typingIdleDelay = 1_800
@@ -84,6 +88,10 @@ export type UseIssueCollaborationOptions = {
  * IssueCollaborationPanel が利用する data と action です。
  */
 export type IssueCollaborationController = {
+  /**
+   * Independently paginated human-curated decisions and sources.
+   */
+  context: IssueContextController
   /**
    * 読み込み済みの comment / reply 一覧です。
    */
@@ -240,6 +248,13 @@ export function useIssueCollaboration({
   const typing = typingState.scope === collaborationScope && typingState.active
   const activeMutationError = mutationError?.scope === collaborationScope ? mutationError : undefined
   const isConfigured = Boolean(enabled && accessToken && teamId && issueId)
+  const context = useIssueContext({
+    accessToken,
+    enabled,
+    issueId,
+    teamId,
+  })
+  const refreshContext = context.refresh
 
   useEffect(() => {
     replyPageStateRef.current = replyPageState
@@ -704,7 +719,7 @@ export function useIssueCollaboration({
             return
           }
 
-          void refresh()
+          void Promise.all([refresh(), refreshContext()])
         })
         socket.addEventListener('close', () => {
           if (realtimeSocketRef.current === socket) {
@@ -719,7 +734,7 @@ export function useIssueCollaboration({
       realtimeSocketRef.current?.close()
       realtimeSocketRef.current = null
     }
-  }, [accessToken, clientId, isConfigured, issueId, mutate, refresh, teamId])
+  }, [accessToken, clientId, isConfigured, issueId, mutate, refresh, refreshContext, teamId])
 
   useEffect(() => {
     if (!isConfigured || !accessToken || !teamId || !issueId) {
@@ -761,6 +776,7 @@ export function useIssueCollaboration({
     activity,
     capabilities: firstPage?.capabilities ?? emptyCapabilities,
     comments,
+    context,
     createComment,
     deleteComment,
     hasActivityLoadError: Boolean(activityError),
@@ -780,7 +796,12 @@ export function useIssueCollaboration({
     presence: firstPage?.presence ?? [],
     refresh,
     replyPagination,
-    sessionErrors: [error, activityError, activeMutationError],
+    sessionErrors: [
+      error,
+      activityError,
+      activeMutationError,
+      ...(context.sessionErrors ?? []),
+    ],
     setResolved,
     toggleReaction,
     toggleProjectWatch: projectId ? toggleProjectWatch : undefined,

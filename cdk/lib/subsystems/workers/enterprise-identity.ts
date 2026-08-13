@@ -14,7 +14,6 @@ import {
 } from '../../policies/workspace-search-writer-fence';
 import {
   grantPlanningRevisionFenceAccess,
-  grantPlanningRevisionFenceMigrationAccess,
 } from '../../policies/planning-revision-fence';
 import type { DataStoreResources } from '../data-stores';
 import {
@@ -155,7 +154,6 @@ export function buildEnterpriseIdentityWorkers(
     resources: [planningTable.tableArn],
   }));
   grantPlanningRevisionFenceAccess(planningTable, enterpriseScimGroupJobFunction);
-  grantPlanningRevisionFenceMigrationAccess(planningTable, enterpriseScimGroupJobFunction);
   enterpriseScimGroupJobFunction.addToRolePolicy(new iam.PolicyStatement({
     actions: [
       'dynamodb:GetItem',

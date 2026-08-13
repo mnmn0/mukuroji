@@ -8,12 +8,21 @@ import {
   readPlanningUpdateEvidence,
   submitPlanningUpdateCommentAndReset,
 } from '../src/planning/model/statusUpdateView'
-import { PlanningStatusUpdateComposer } from '../src/planning/ui/PlanningUpdatePrimitives'
+import {
+  PlanningStatusUpdateComposer,
+  readNonNegativeNumber,
+} from '../src/planning/ui/PlanningUpdatePrimitives'
 import { createPlanningLabels } from '../src/planning/ui/labels'
 
 const labels = createPlanningLabels('en')
 
 describe('Planning update evidence composer', () => {
+  test('rejects an empty non-negative number instead of converting it to zero', () => {
+    expect(readNonNegativeNumber('')).toBeUndefined()
+    expect(readNonNegativeNumber('   ')).toBeUndefined()
+    expect(readNonNegativeNumber('0')).toBe(0)
+  })
+
   test('preserves special characters in Team-qualified Work Item form values', () => {
     const teamId = 'team/"north"\0'
     const workItemId = 'issue?42&next=🚀'

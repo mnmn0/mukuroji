@@ -2564,7 +2564,7 @@ describe('planning persistence', () => {
     ])
   })
 
-  test('migrates a legacy META row before exposing the isolated revision fence', async () => {
+  test('copies a legacy META row before exposing the isolated revision fence', async () => {
     const commands: Array<{
       /** AWS SDK command class name. */
       name: string
@@ -2572,7 +2572,7 @@ describe('planning persistence', () => {
       input: Record<string, unknown>
     }> = []
     let fencedMeta: Record<string, unknown> | undefined
-    let legacyMeta: Record<string, unknown> | undefined = {
+    const legacyMeta: Record<string, unknown> = {
       workspaceId: 'workspace-1',
       recordKey: 'META',
       entryType: 'planning-meta',
@@ -2601,20 +2601,36 @@ describe('planning persistence', () => {
         if (command.constructor.name === 'TransactWriteCommand') {
           const items = command.input.TransactItems
           if (!Array.isArray(items)) throw new Error('Expected migration transaction items.')
-          const put = items.find((item) =>
-            typeof item === 'object' && item !== null && 'Put' in item
+          const update = items.find((item) =>
+            typeof item === 'object' && item !== null && 'Update' in item
           )
           if (
-            typeof put !== 'object' || put === null ||
-            !('Put' in put) || typeof put.Put !== 'object' || put.Put === null ||
-            !('Item' in put.Put) || typeof put.Put.Item !== 'object' || put.Put.Item === null
+            typeof update !== 'object' || update === null ||
+            !('Update' in update) || typeof update.Update !== 'object' || update.Update === null
           ) {
-            throw new Error('Expected fenced META Put.')
+            throw new Error('Expected fenced META Update.')
           }
-          const item = put.Put.Item
-          if (Array.isArray(item)) throw new Error('Expected a fenced META object.')
-          fencedMeta = Object.fromEntries(Object.entries(item))
-          legacyMeta = undefined
+          const updateInput = update.Update
+          if (
+            !('Key' in updateInput) || typeof updateInput.Key !== 'object' ||
+            updateInput.Key === null || Array.isArray(updateInput.Key) ||
+            !('ExpressionAttributeValues' in updateInput) ||
+            typeof updateInput.ExpressionAttributeValues !== 'object' ||
+            updateInput.ExpressionAttributeValues === null ||
+            Array.isArray(updateInput.ExpressionAttributeValues)
+          ) {
+            throw new Error('Expected fenced META Update input.')
+          }
+          const key = updateInput.Key
+          const values = updateInput.ExpressionAttributeValues
+          fencedMeta = {
+            workspaceId: key.workspaceId,
+            recordKey: key.recordKey,
+            entryType: values[':entryType'],
+            schemaVersion: values[':schemaVersion'],
+            revision: values[':revision'],
+            updatedAt: values[':updatedAt'],
+          }
         }
         return {}
       },
@@ -2644,16 +2660,10 @@ describe('planning persistence', () => {
     for (const command of commands.filter((entry) => entry.name === 'GetCommand')) {
       expect(command.input).toMatchObject({ ConsistentRead: true })
     }
-    expect(commands[2]?.input.TransactItems).toEqual([
+      expect(commands[2]?.input.TransactItems).toEqual([
       expect.objectContaining({
-        Delete: expect.objectContaining({
-          Key: { workspaceId: 'workspace-1', recordKey: 'META' },
-          ConditionExpression:
-            '#entryType = :entryType AND #schemaVersion = :schemaVersion AND #revision = :revision',
-        }),
-      }),
-      expect.objectContaining({
-        Put: expect.objectContaining({
+        Update: expect.objectContaining({
+          Key: { workspaceId: 'FENCE#workspace-1', recordKey: 'META' },
           ConditionExpression:
             'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)',
         }),
@@ -2724,12 +2734,6 @@ describe('planning persistence', () => {
     }
     expect(commands[2]?.input.TransactItems).toEqual([
       expect.objectContaining({
-        Delete: expect.objectContaining({
-          Key: { workspaceId: 'workspace-1', recordKey: 'META' },
-          ExpressionAttributeValues: expect.objectContaining({ ':revision': 7 }),
-        }),
-      }),
-      expect.objectContaining({
         Update: expect.objectContaining({
           Key: { workspaceId: 'FENCE#workspace-1', recordKey: 'META' },
           UpdateExpression: 'SET #revision = :revision, #updatedAt = :updatedAt',
@@ -2742,7 +2746,7 @@ describe('planning persistence', () => {
     ])
   })
 
-  test('retires a lower legacy META row when the fenced revision already wins', async () => {
+  test('ignores a lower legacy META row when the fenced revision already wins', async () => {
     let transaction: Record<string, unknown> | undefined
     const documentClient = {
       async send(command: {
@@ -2779,20 +2783,7 @@ describe('planning persistence', () => {
     )
 
     expect(await client.getAuthorizationRevision('workspace-1')).toBe(7)
-    expect(transaction?.TransactItems).toEqual([
-      expect.objectContaining({
-        ConditionCheck: expect.objectContaining({
-          Key: { workspaceId: 'FENCE#workspace-1', recordKey: 'META' },
-          ExpressionAttributeValues: expect.objectContaining({ ':revision': 7 }),
-        }),
-      }),
-      expect.objectContaining({
-        Delete: expect.objectContaining({
-          Key: { workspaceId: 'workspace-1', recordKey: 'META' },
-          ExpressionAttributeValues: expect.objectContaining({ ':revision': 3 }),
-        }),
-      }),
-    ])
+    expect(transaction).toBeUndefined()
   })
 
   test('reads only bounded graph prefixes between strong META barriers', async () => {

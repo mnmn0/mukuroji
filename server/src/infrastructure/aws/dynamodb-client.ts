@@ -105,7 +105,7 @@ export function createDynamoDbDocumentClient(
  *
  * @param dynamoDbClient - Low-level DynamoDB client to wrap.
  * @param config - Configuration snapshot that supplies the Planning table name.
- * @returns A DocumentClient that rejects fenced writes while legacy META exists.
+ * @returns A DocumentClient that rejects direct fenced writes outside transactions.
  */
 export function createPlanningRevisionFenceWriterDynamoDbDocumentClient(
   dynamoDbClient: DynamoDBClient = createDynamoDbClient(),

@@ -242,11 +242,19 @@ export function usePlanningUpdateAnnotations(
   }
 }
 
-/** Removes duplicate comment rows when eager and on-demand pages overlap. */
-function deduplicatePlanningUpdateComments(
+/**
+ * Removes duplicate comment rows while preserving comments from different immutable versions.
+ *
+ * @param comments - Annotation rows collected from eager and on-demand pages.
+ * @returns Comments deduplicated by immutable update version and comment ID.
+ */
+export function deduplicatePlanningUpdateComments(
   comments: readonly PlanningUpdateComment[],
 ): PlanningUpdateComment[] {
-  return [...new Map(comments.map((comment) => [comment.id, comment])).values()]
+  return [...new Map(comments.map((comment) => [
+    `${comment.updateVersion}\0${comment.id}`,
+    comment,
+  ])).values()]
 }
 
 /** Removes duplicate reaction rows when eager and on-demand pages overlap. */

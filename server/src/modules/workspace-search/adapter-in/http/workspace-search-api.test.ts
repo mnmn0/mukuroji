@@ -1006,6 +1006,7 @@ test('search endpoint refreshes comment content from its current source snapshot
           mentionMemberKeys: [],
           createdAt: '2026-06-08T01:00:00.000Z',
           updatedAt: '2026-07-12T02:00:00.000Z',
+          acceptedResolutions: [],
           reactions: [],
         }
       },
@@ -1044,6 +1045,190 @@ test('search endpoint refreshes comment content from its current source snapshot
   })
 })
 
+test('search endpoint rehydrates curated context and drops superseded projections', async () => {
+  configureFakeProjectClients(true)
+  const resolvedScopes: Array<WorkspaceSearchResolvedScope | undefined> = []
+  setTestAppDependencies({
+    collaboration: createCollaborationStub({
+      async getCuratedContextItemSnapshot(input) {
+        return {
+          schemaVersion: 1,
+          id: input.itemId,
+          teamId: 'core-team',
+          workItemId: 'issue-1',
+          kind: 'decision',
+          state: input.itemId === 'superseded' ? 'superseded' : 'accepted',
+          title: 'Current release decision',
+          body: 'Current source-of-truth decision body',
+          mentionMemberKeys: [],
+          createdBy: { id: 'sato@example.com', displayName: 'Sato' },
+          createdAt: '2026-06-08T01:00:00.000Z',
+          updatedBy: { id: 'demo@example.com', displayName: 'Demo' },
+          updatedAt: '2026-07-12T02:00:00.000Z',
+          revision: 4,
+        }
+      },
+    }),
+    workspaceSearch: createWorkspaceSearchFake({
+      async search(input) {
+        for (const itemId of ['current', 'superseded']) {
+          resolvedScopes.push(await input.resolveCurrentScope?.(createWorkspaceSearchDocument({
+            workspaceId: input.workspaceId,
+            entityType: 'context-item',
+            entityId: `team/core-team/issue/issue-1/context-item/${itemId}`,
+            parentId: 'team/core-team/issue/issue-1',
+            title: 'Stale context',
+            body: 'Stale context body',
+            url: `/teams/core-team/issues?issueId=issue-1&contextItemId=${itemId}`,
+            teamId: 'core-team',
+            sourceRevision: 1,
+          })))
+        }
+        return { schemaVersion: 1, results: [] }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/search', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(resolvedScopes[0]).toMatchObject({
+    teamId: 'core-team',
+    projectId: 'refero',
+    currentDocument: {
+      entityType: 'context-item',
+      title: 'Current release decision',
+      body: 'Current source-of-truth decision body',
+      status: 'accepted',
+      sourceRevision: 4,
+    },
+  })
+  expect(resolvedScopes[1]).toBeUndefined()
+})
+
+test('search endpoint drops a context item when Project authorization changes during rehydration', async () => {
+  configureFakeProjectClients(true)
+  let planningRevision = 0
+  let resolvedScope: WorkspaceSearchResolvedScope | undefined
+  setTestAppDependencies({
+    planning: {
+      async getAuthorizationRevision() {
+        return planningRevision
+      },
+    } as unknown as PlanningClient,
+    collaboration: createCollaborationStub({
+      async getCuratedContextItemSnapshot(input) {
+        planningRevision = 1
+        return {
+          schemaVersion: 1,
+          id: input.itemId,
+          teamId: 'core-team',
+          workItemId: 'issue-1',
+          kind: 'decision',
+          state: 'accepted',
+          title: 'Private release decision',
+          body: 'This must not be returned after access revocation.',
+          mentionMemberKeys: [],
+          createdBy: { id: 'sato@example.com', displayName: 'Sato' },
+          createdAt: '2026-06-08T01:00:00.000Z',
+          updatedBy: { id: 'demo@example.com', displayName: 'Demo' },
+          updatedAt: '2026-07-12T02:00:00.000Z',
+          revision: 4,
+        }
+      },
+    }),
+    workspaceSearch: createWorkspaceSearchFake({
+      async search(input) {
+        resolvedScope = await input.resolveCurrentScope?.(createWorkspaceSearchDocument({
+          workspaceId: input.workspaceId,
+          entityType: 'context-item',
+          entityId: 'team/core-team/issue/issue-1/context-item/private',
+          parentId: 'team/core-team/issue/issue-1',
+          title: 'Stale context',
+          body: 'Stale context body',
+          url: '/teams/core-team/issues?issueId=issue-1&contextItemId=private',
+          teamId: 'core-team',
+          sourceRevision: 1,
+        }))
+        return { schemaVersion: 1, results: [] }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/search', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(resolvedScope).toBeUndefined()
+})
+
+test('search endpoint drops a context item when its Work Item assignment changes during rehydration', async () => {
+  const assignedProjectIds: Record<string, string> = { 'issue-1': 'refero' }
+  let detailReadCount = 0
+  configureFakeProjectClients(true, {
+    detailAssignedProjectIds: assignedProjectIds,
+    detailReadHook: async (issueId) => {
+      detailReadCount += 1
+      if (issueId === 'issue-1' && detailReadCount === 2) {
+        assignedProjectIds[issueId] = 'other-project'
+      }
+    },
+  })
+  let resolvedScope: WorkspaceSearchResolvedScope | undefined
+  let searchCalled = false
+  setTestAppDependencies({
+    collaboration: createCollaborationStub({
+      async getCuratedContextItemSnapshot(input) {
+        return {
+          schemaVersion: 1,
+          id: input.itemId,
+          teamId: 'core-team',
+          workItemId: 'issue-1',
+          kind: 'decision',
+          state: 'accepted',
+          title: 'Current release decision',
+          body: 'Current source-of-truth decision body',
+          mentionMemberKeys: [],
+          createdBy: { id: 'sato@example.com', displayName: 'Sato' },
+          createdAt: '2026-06-08T01:00:00.000Z',
+          updatedBy: { id: 'demo@example.com', displayName: 'Demo' },
+          updatedAt: '2026-07-12T02:00:00.000Z',
+          revision: 4,
+        }
+      },
+    }),
+    workspaceSearch: createWorkspaceSearchFake({
+      async search(input) {
+        searchCalled = true
+        resolvedScope = await input.resolveCurrentScope?.(createWorkspaceSearchDocument({
+          workspaceId: input.workspaceId,
+          entityType: 'context-item',
+          entityId: 'team/core-team/issue/issue-1/context-item/current',
+          parentId: 'team/core-team/issue/issue-1',
+          title: 'Stale context',
+          body: 'Stale context body',
+          url: '/teams/core-team/issues?issueId=issue-1&contextItemId=current',
+          teamId: 'core-team',
+          sourceRevision: 1,
+        }))
+        return { schemaVersion: 1, results: [] }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/search', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(searchCalled).toBe(true)
+  expect(detailReadCount).toBeGreaterThanOrEqual(2)
+  expect(resolvedScope).toBeUndefined()
+})
+
 test('search endpoint fails closed for missing, deleted, or malformed comment sources', async () => {
   configureFakeProjectClients(true)
   const resolvedScopes: Array<WorkspaceSearchResolvedScope | undefined> = []
@@ -1063,6 +1248,7 @@ test('search endpoint fails closed for missing, deleted, or malformed comment so
           createdAt: '2026-06-08T01:00:00.000Z',
           updatedAt: '2026-07-12T02:00:00.000Z',
           deletedAt: '2026-07-12T02:00:00.000Z',
+          acceptedResolutions: [],
           reactions: [],
         }
       },

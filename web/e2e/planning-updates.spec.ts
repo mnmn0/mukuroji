@@ -264,7 +264,7 @@ test('Issue #195: configures cadence, publishes manually, and shows the latest i
   const cadence = page.getByTestId('planning-update-cadence')
   const composer = page.getByTestId('planning-update-composer')
 
-  await expect(detail.getByTestId('planning-update-freshness')).toHaveText('期限未設定')
+  await expect(detail.getByTestId('planning-update-freshness')).toHaveText('更新スケジュール未設定')
   await expect(composer.getByRole('button', { name: '更新を公開' })).toBeDisabled()
 
   await cadence.locator('[name="updateOwnerMemberKey"]').fill('publisher@example.com')

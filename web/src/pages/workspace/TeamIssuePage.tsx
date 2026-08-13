@@ -70,6 +70,15 @@ import {
   type IssueCollaborationController,
   useIssueCollaboration,
 } from '../../issues/mutations/useIssueCollaboration'
+import { useDocumentContextPromotion } from '../../issues/mutations/useDocumentContextPromotion'
+import {
+  applyIssueCollaborationTabToSearchParams,
+  applyIssueCollaborationSourceToSearchParams,
+  resolveIssueCollaborationTab,
+  type IssueCollaborationRoute,
+  type IssueCollaborationTab,
+} from '../../issues/model/collaborationTabs'
+import { readIssueSourceKind } from '../../issues/model/contextSources'
 import {
   canManagePlanningWorkItemDependencyEndpoint,
   createPlanningAccessSnapshot,
@@ -402,6 +411,8 @@ type TeamIssueScreenProps = {
    * notification deep link の reply が属する root comment ID です。
    */
   focusedRootCommentId?: string
+  /** Route-owned collaboration section and deep-link state. */
+  collaborationRoute?: IssueCollaborationRoute
   /**
    * タスク担当者として選択できる project member 一覧です。
    */
@@ -483,6 +494,17 @@ export function TeamIssuePage() {
   const requestedIssueId = searchParams.get('issueId')?.trim() || undefined
   const focusedCommentId = searchParams.get('commentId')?.trim() || undefined
   const focusedRootCommentId = searchParams.get('rootCommentId')?.trim() || undefined
+  const focusedContextItemId = searchParams.get('contextItemId')?.trim() || undefined
+  const focusedSourceId = searchParams.get('sourceId')?.trim() || undefined
+  const focusedSourceKind = readIssueSourceKind(searchParams.get('sourceKind'))
+  const focusedActivityEventId = searchParams.get('activityEventId')?.trim() || undefined
+  const requestedCollaborationTab = searchParams.get('collaborationTab')
+  const collaborationTab = resolveIssueCollaborationTab({
+    requestedTab: requestedCollaborationTab,
+    focusedContextItemId,
+    focusedSourceId,
+    focusedActivityEventId,
+  })
   const isCreateIssueRequested = searchParams.get('create') === '1'
   const t = useMemo(() => createTranslator(locale), [locale])
   const accessToken = session?.accessToken
@@ -951,6 +973,22 @@ export function TeamIssuePage() {
     }
   }
 
+  /** Persists collaboration section navigation for the selected Team Work Item. */
+  const handleCollaborationTabChange = (tab: IssueCollaborationTab) => {
+    setSearchParams(
+      applyIssueCollaborationTabToSearchParams(searchParams, tab),
+      { replace: true },
+    )
+  }
+
+  /** Persists a source provenance target in the selected Work Item route. */
+  const handleCollaborationSourceChange = (target: Parameters<NonNullable<IssueCollaborationRoute['onCollaborationSourceChange']>>[0]) => {
+    setSearchParams(
+      applyIssueCollaborationSourceToSearchParams(searchParams, target),
+      { replace: true },
+    )
+  }
+
   const taskViewFieldOptions: TaskViewFieldOption[] = [
     { id: 'title', label: t('tasks.column.name') },
     { id: 'status', label: t('tasks.column.status') },
@@ -1025,6 +1063,15 @@ export function TeamIssuePage() {
       canMutateIssue={canMutateTeamIssue}
       canManageDependencyEndpoint={canManageDependencyEndpoint}
       collaboration={collaboration}
+      collaborationRoute={{
+        collaborationTab,
+        focusedContextItemId,
+        focusedSourceId,
+        focusedSourceKind,
+        focusedActivityEventId,
+        onCollaborationTabChange: handleCollaborationTabChange,
+        onCollaborationSourceChange: handleCollaborationSourceChange,
+      }}
       canManageExternalLinks={canManageStructure}
       configurationErrorMessage={configurationErrorMessage}
       currentWorkspaceMemberKey={workspaceAccess?.currentMember.memberKey}
@@ -1109,6 +1156,7 @@ export function TeamIssueScreen({
   canManageDependencyEndpoint,
   canManageExternalLinks = false,
   collaboration,
+  collaborationRoute,
   configurationErrorMessage,
   currentWorkspaceMemberKey,
   defaultCreateIssueOpen = false,
@@ -2230,6 +2278,7 @@ export function TeamIssueScreen({
                 canManageDependencyEndpoint={canManageDependencyEndpoint}
                 canManageExternalLinks={canManageExternalLinks}
                 collaboration={collaboration}
+                collaborationRoute={collaborationRoute}
                 configuration={configuration}
                 currentWorkspaceMemberKey={currentWorkspaceMemberKey}
                 detailErrorMessage={detailErrorMessage ?? detailErrorMessageLocal}
@@ -3477,6 +3526,7 @@ function IssueDetailPane({
   canManageDependencyEndpoint,
   canManageExternalLinks,
   collaboration,
+  collaborationRoute,
   configuration,
   currentWorkspaceMemberKey,
   detailErrorMessage,
@@ -3508,6 +3558,7 @@ function IssueDetailPane({
   canManageDependencyEndpoint?: CanManageWorkItemDependencyEndpoint
   canManageExternalLinks: boolean
   collaboration?: IssueCollaborationController
+  collaborationRoute?: IssueCollaborationRoute
   configuration?: WorkItemConfiguration
   currentWorkspaceMemberKey?: string
   detailErrorMessage?: string
@@ -3551,6 +3602,7 @@ function IssueDetailPane({
       canManageDependencyEndpoint={canManageDependencyEndpoint}
       canManageExternalLinks={canManageExternalLinks}
       collaboration={collaboration}
+      collaborationRoute={collaborationRoute}
       configuration={configuration}
       currentWorkspaceMemberKey={currentWorkspaceMemberKey}
       detailErrorMessage={detailErrorMessage}
@@ -3585,6 +3637,7 @@ function IssueDetailContent({
   canManageDependencyEndpoint,
   canManageExternalLinks,
   collaboration,
+  collaborationRoute,
   configuration,
   currentWorkspaceMemberKey,
   detailErrorMessage,
@@ -3621,6 +3674,8 @@ function IssueDetailContent({
   canManageExternalLinks: boolean
   /** 選択中 Issue の discussion controller です。 */
   collaboration?: IssueCollaborationController
+  /** Collaboration section selected by route state. */
+  collaborationRoute?: IssueCollaborationRoute
   /** 選択中 Issue に適用する configuration です。 */
   configuration?: WorkItemConfiguration
   /** 現在の Workspace member key です。 */
@@ -3669,6 +3724,11 @@ function IssueDetailContent({
     value: issue.assignedProjectId ?? '',
   })
   const [fieldErrors, setFieldErrors] = useState<Readonly<Record<string, string | undefined>>>({})
+  const documentContextPromotion = useDocumentContextPromotion(
+    Boolean(collaboration?.context.capabilities.canCreate),
+    `${issue.teamId}:${issue.id}`,
+    collaborationRoute?.onCollaborationTabChange,
+  )
   const selectedProjectId = selectedProject.revision === issue.revision
     ? selectedProject.value
     : issue.assignedProjectId ?? ''
@@ -3896,13 +3956,16 @@ function IssueDetailContent({
       </div>
       <RelatedDocuments
         accessToken={accessToken}
+        onPromoteToContext={documentContextPromotion.onPromoteToContext}
         t={t}
         targetId={`team/${issue.teamId}/issue/${issue.id}`}
         targetKind="work-item"
       />
       {collaboration ? (
         <IssueCollaborationPanel
+          route={collaborationRoute}
           artifacts={artifacts}
+          contextDraft={documentContextPromotion.documentContextDraft}
           key={`${issue.teamId}:${issue.id}`}
           controller={collaboration}
           currentMemberKey={currentWorkspaceMemberKey}
@@ -3910,6 +3973,7 @@ function IssueDetailContent({
           focusedRootCommentId={focusedRootCommentId}
           locale={locale}
           members={workspaceMembers}
+          onContextDraftConsumed={documentContextPromotion.onContextDraftConsumed}
         />
       ) : null}
     </aside>

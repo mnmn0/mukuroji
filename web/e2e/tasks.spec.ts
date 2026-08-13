@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test'
 import type { Locator, Page } from '@playwright/test'
 import {
+  COLLABORATION_CONTEXT_SCHEMA_VERSION,
   DEFAULT_WORK_ITEM_SCHEDULE_CALENDAR_POLICY,
   FOCUS_SCHEMA_VERSION,
   PLANNING_SCHEMA_VERSION,
@@ -10,6 +11,7 @@ import {
   type AnalyticsQueryInput,
   type ApprovalRequest,
   type ConfirmWorkItemScheduleChangeInput,
+  type CuratedContextItem,
   type CustomFieldValue,
   type FileAnnotation,
   type FileAttachment,
@@ -3896,7 +3898,7 @@ test.describe('authenticated task page', () => {
 
     await expect(boardTab).toBeFocused()
     await expect(boardTab).toHaveAttribute('aria-selected', 'true')
-    await expect(page.getByRole('tabpanel')).toContainText('ボードビュー')
+    await expect(page.getByRole('tabpanel', { name: 'ボード' })).toContainText('ボードビュー')
   })
 
   test('Issue #190: Planning 障害でも Task を表示し dependency だけ再試行する', async ({ page }) => {
@@ -5330,7 +5332,11 @@ test.describe('authenticated task page', () => {
     await expect(
       page.getByTestId('comment-thread-comment-2').getByText('プロジェクト側で着手します。'),
     ).toBeVisible()
-    await expect(page.getByText('Demo User がコメントしました。')).toBeVisible()
+    const collaborationPanel = page.getByTestId('issue-collaboration-panel')
+    await collaborationPanel.getByRole('tab', { name: '活動' }).click()
+    await expect(collaborationPanel.getByRole('tabpanel', { name: '活動' })).toContainText(
+      'Demo User がコメントしました。',
+    )
     expect(requestCounts.issueComments).toBe(1)
 
     await page.goto('/projects/refero/issues?teamId=core-team')
@@ -6955,6 +6961,366 @@ test.describe('authenticated task page', () => {
     await expect(snoozedUnreadNotification).toBeVisible()
     await expect(snoozedUnreadNotification.getByLabel('未読')).toHaveCount(0)
     await expect.poll(() => requestCounts.notificationUpdates).toBeGreaterThanOrEqual(4)
+  })
+
+  test('Issue #192 の共同作業タブで判断のページング、採用解決策、利用不能な情報源を操作できる', async ({ page }) => {
+    const contextItems = [
+      {
+        schemaVersion: COLLABORATION_CONTEXT_SCHEMA_VERSION,
+        id: 'context-current',
+        teamId: 'core-team',
+        workItemId: 'wireframe',
+        kind: 'decision',
+        state: 'accepted',
+        title: 'モバイルでは操作を固定フッターへ置く',
+        body: '主要操作は狭い詳細ペインでも常に見える位置へ置きます。',
+        source: {
+          kind: 'comment',
+          sourceId: 'reply-1',
+          containerId: 'root-1',
+          originalBody: '固定フッターなら狭い画面でも操作を見失いません。',
+          quote: { text: '狭い画面でも操作を見失いません' },
+          permalink: '?commentId=reply-1&rootCommentId=root-1',
+          actor: { id: 'sato@example.com', displayName: '佐藤 花子' },
+          occurredAt: '2026-08-09T01:10:00.000Z',
+          capturedRevision: 1,
+          currentRevision: 1,
+          availability: 'available',
+        },
+        mentionMemberKeys: [],
+        createdBy: { id: 'demo@example.com', displayName: 'Demo User' },
+        createdAt: '2026-08-09T01:20:00.000Z',
+        updatedBy: { id: 'demo@example.com', displayName: 'Demo User' },
+        updatedAt: '2026-08-09T01:20:00.000Z',
+        revision: 1,
+      },
+      {
+        schemaVersion: COLLABORATION_CONTEXT_SCHEMA_VERSION,
+        id: 'context-unavailable',
+        teamId: 'core-team',
+        workItemId: 'wireframe',
+        kind: 'risk',
+        state: 'active',
+        title: '顧客チャットのアクセス権が失われた',
+        body: '出典の状態を明示し、現在参照できない内容へ誘導しません。',
+        source: {
+          kind: 'external-chat',
+          sourceId: 'external-message-42',
+          containerId: 'customer-channel',
+          originalBody: 'E2E_SECRET_ORIGINAL',
+          quote: { text: 'E2E_SECRET_QUOTE' },
+          permalink: 'https://example.invalid/sensitive-message-42',
+          actor: {
+            id: 'external-participant',
+            displayName: 'Research participant',
+          },
+          occurredAt: '2026-08-08T04:00:00.000Z',
+          capturedRevision: '1717556400.000100',
+          availability: 'permission-lost',
+          availabilityReason: '接続済みアカウントの権限が失われました。',
+        },
+        mentionMemberKeys: [],
+        createdBy: { id: 'demo@example.com', displayName: 'Demo User' },
+        createdAt: '2026-08-08T05:00:00.000Z',
+        updatedBy: { id: 'demo@example.com', displayName: 'Demo User' },
+        updatedAt: '2026-08-08T05:00:00.000Z',
+        revision: 1,
+      },
+    ] satisfies CuratedContextItem[]
+    let acceptedSummary: string | undefined
+    let threadResolved = false
+    let requestedSecondContextPage = false
+
+    await page.route(
+      /.*\/api\/teams\/core-team\/issues\/wireframe\/collaboration(?:\?.*)?$/,
+      async (route) => {
+        await route.fulfill({
+          json: {
+            comments: [
+              {
+                id: 'root-1',
+                rootCommentId: 'root-1',
+                authorMemberKey: 'demo@example.com',
+                bodyMarkdown: '狭い詳細ペインの操作位置を決めます。',
+                version: threadResolved ? 3 : acceptedSummary ? 2 : 1,
+                createdAt: '2026-08-09T01:00:00.000Z',
+                updatedAt: '2026-08-09T01:00:00.000Z',
+                resolvedAt: threadResolved
+                  ? '2026-08-09T01:30:00.000Z'
+                  : undefined,
+                resolvedByMemberKey: threadResolved
+                  ? 'demo@example.com'
+                  : undefined,
+                acceptedResolutions: acceptedSummary
+                  ? [
+                      {
+                        id: 'resolution-current',
+                        sourceCommentId: 'reply-1',
+                        sourceRootCommentId: 'root-1',
+                        capturedCommentRevision: 1,
+                        capturedCommentBody:
+                          '固定フッターなら狭い画面でも操作を見失いません。',
+                        summary: acceptedSummary,
+                        acceptedBy: {
+                          id: 'demo@example.com',
+                          displayName: 'Demo User',
+                        },
+                        acceptedAt: '2026-08-09T01:30:00.000Z',
+                        state: 'accepted',
+                      },
+                    ]
+                  : [],
+                mentionMemberKeys: [],
+                reactions: [],
+                capabilities: {
+                  canEdit: true,
+                  canDelete: true,
+                  canResolve: true,
+                },
+              },
+              {
+                id: 'reply-1',
+                rootCommentId: 'root-1',
+                parentCommentId: 'root-1',
+                authorMemberKey: 'sato@example.com',
+                bodyMarkdown:
+                  '固定フッターなら狭い画面でも操作を見失いません。',
+                version: 1,
+                createdAt: '2026-08-09T01:10:00.000Z',
+                updatedAt: '2026-08-09T01:10:00.000Z',
+                mentionMemberKeys: [],
+                reactions: [],
+                capabilities: {
+                  canEdit: false,
+                  canDelete: false,
+                  canResolve: false,
+                },
+              },
+            ],
+            watch: {
+              subscribed: false,
+              explicit: false,
+              automatic: false,
+              reasons: [],
+              watcherCount: 0,
+            },
+            presence: [],
+            capabilities: {
+              canComment: true,
+              canReact: true,
+              canWatch: true,
+            },
+          },
+        })
+      },
+    )
+    await page.route(
+      /.*\/api\/teams\/core-team\/issues\/wireframe\/context-items(?:\?.*)?$/,
+      async (route) => {
+        if (route.request().method() !== 'GET') {
+          await route.fallback()
+          return
+        }
+
+        const cursor = new URL(route.request().url()).searchParams.get('cursor')
+        requestedSecondContextPage ||= cursor === 'context-page-2'
+        await route.fulfill({
+          json: {
+            schemaVersion: COLLABORATION_CONTEXT_SCHEMA_VERSION,
+            items: cursor === 'context-page-2'
+              ? [contextItems[1]]
+              : [contextItems[0]],
+            nextCursor: cursor ? undefined : 'context-page-2',
+            capabilities: {
+              canCreate: true,
+              canEdit: true,
+              canReplace: true,
+              canAcceptResolution: true,
+            },
+          },
+        })
+      },
+    )
+    await page.route(
+      /.*\/api\/teams\/core-team\/issues\/wireframe\/comments\/root-1\/accepted-resolution$/,
+      async (route) => {
+        expect(route.request().method()).toBe('PUT')
+        const body: unknown = route.request().postDataJSON()
+
+        expect(body).toEqual({
+          commentId: 'reply-1',
+          expectedThreadVersion: 1,
+          summary: '固定フッターを採用し、両方の viewport で確認する。',
+        })
+        if (
+          typeof body === 'object' &&
+          body !== null &&
+          'summary' in body &&
+          typeof body.summary === 'string'
+        ) {
+          acceptedSummary = body.summary
+        }
+        await route.fulfill({ json: {} })
+      },
+    )
+    await page.route(
+      /.*\/api\/teams\/core-team\/issues\/wireframe\/comments\/root-1\/resolve$/,
+      async (route) => {
+        expect(route.request().method()).toBe('POST')
+        expect(route.request().postDataJSON()).toEqual({ expectedVersion: 2 })
+        threadResolved = true
+        await route.fulfill({ json: {} })
+      },
+    )
+    await page.route(/.*\/api\/document-backlinks(?:\?.*)?$/, async (route) => {
+      await route.fulfill({
+        json: {
+          backlinks: [
+            {
+              documentId: 'document-onboarding-research',
+              documentTitle: 'オンボーディング調査',
+              relation: {
+                id: 'relation-wireframe-research',
+                source: { kind: 'document' },
+                target: { kind: 'work-item', workItemId: 'wireframe' },
+                createdByUserId: 'demo@example.com',
+                createdAt: '2026-08-09T00:30:00.000Z',
+              },
+            },
+          ],
+        },
+      })
+    })
+    await page.route(
+      /.*\/api\/documents\/document-onboarding-research$/,
+      async (route) => {
+        await route.fulfill({
+          json: {
+            document: {
+              id: 'document-onboarding-research',
+              title: 'オンボーディング調査',
+              kind: 'page',
+              revision: 7,
+              createdAt: '2026-08-09T00:20:00.000Z',
+              blocks: [
+                {
+                  id: 'research-summary',
+                  type: 'paragraph',
+                  text: '初回利用者は次に何をすべきかを最初の画面で判断できる必要があります。',
+                },
+              ],
+            },
+          },
+        })
+      },
+    )
+
+    await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
+    const panel = page.getByTestId('issue-collaboration-panel')
+    const conversationTab = panel.getByRole('tab', { name: /会話/ })
+    const decisionsTab = panel.getByRole('tab', { name: /判断/ })
+    const sourcesTab = panel.getByRole('tab', { name: /情報源/ })
+    const collaborationTablist = panel.getByRole('tablist', {
+      name: '共同作業のセクション',
+    })
+
+    await expect(conversationTab).toHaveAttribute('aria-selected', 'true')
+    await expect(
+      collaborationTablist.getByRole('tab', { name: '会話 1' }),
+    ).toHaveAttribute('aria-selected', 'true')
+    await expect(
+      collaborationTablist.getByRole('tab', { name: '判断 1' }),
+    ).toBeVisible()
+    const collaborationPanelId = await conversationTab.getAttribute(
+      'aria-controls',
+    )
+    if (!collaborationPanelId) {
+      throw new Error('Conversation tab did not expose its collaboration panel ID.')
+    }
+    await expect(panel.getByRole('tabpanel')).toHaveAttribute(
+      'id',
+      collaborationPanelId,
+    )
+    await conversationTab.focus()
+    await page.keyboard.press('ArrowRight')
+    await expect(decisionsTab).toBeFocused()
+    await expect(decisionsTab).toHaveAttribute('aria-selected', 'true')
+    await expect(panel.getByText('モバイルでは操作を固定フッターへ置く')).toBeVisible()
+    await expect(panel.getByText('顧客チャットのアクセス権が失われた')).toHaveCount(0)
+
+    await panel.getByRole('button', { name: '過去の判断を読み込む' }).click()
+    await expect(panel.getByText('顧客チャットのアクセス権が失われた')).toBeVisible()
+    expect(requestedSecondContextPage).toBe(true)
+
+    await decisionsTab.press('End')
+    await expect(sourcesTab).toBeFocused()
+    await expect(sourcesTab).toHaveAttribute('aria-selected', 'true')
+    await expect(
+      panel.getByRole('status').getByText('アクセス権を喪失'),
+    ).toBeVisible()
+    await expect(panel.getByText('この外部メッセージを表示する権限がありません。')).toBeVisible()
+    await expect(panel.getByText('E2E_SECRET_QUOTE')).toHaveCount(0)
+    await expect(panel.getByText('E2E_SECRET_ORIGINAL')).toHaveCount(0)
+    await expect(
+      panel.locator('a[href="https://example.invalid/sensitive-message-42"]'),
+    ).toHaveCount(0)
+
+    await sourcesTab.press('Home')
+    await expect(conversationTab).toBeFocused()
+    const acceptResolution = panel.getByRole('button', {
+      name: '解決策として採用',
+    })
+
+    await expect(acceptResolution).toHaveCount(1)
+    await acceptResolution.click()
+    let summary = panel.getByRole('textbox', { name: '手動の解決要約' })
+    await expect(summary).toBeFocused()
+    await panel.getByRole('button', { name: 'キャンセル' }).click()
+    await expect(acceptResolution).toBeFocused()
+    await acceptResolution.click()
+    summary = panel.getByRole('textbox', { name: '手動の解決要約' })
+    const saveResolution = panel.getByRole('button', { name: '解決策を保存' })
+
+    await expect(saveResolution).toBeDisabled()
+    await summary.fill('固定フッターを採用し、両方の viewport で確認する。')
+    await saveResolution.click()
+    await expect(panel.getByTestId('accepted-resolution-summary')).toContainText(
+      '固定フッターを採用し、両方の viewport で確認する。',
+    )
+    await expect(
+      panel.getByTestId('accepted-resolution-summary'),
+    ).toContainText('採用時の返信 · revision 1')
+    await panel
+      .getByTestId('comment-thread-root-1')
+      .getByRole('button', { name: '解決済みにする' })
+      .click()
+    await expect(
+      panel.getByTestId('comment-thread-root-1').locator('details'),
+    ).not.toHaveAttribute('open', '')
+
+    await page.getByTestId(
+      'related-document-promote-document-onboarding-research-relation-wireframe-research',
+    ).click()
+    await expect(decisionsTab).toHaveAttribute('aria-selected', 'true')
+    await expect(panel.getByText(/根拠を添付: ドキュメント/)).toBeVisible()
+    await expect(
+      panel.getByRole('textbox', { name: '短いタイトル' }),
+    ).toBeFocused()
+    const documentQuote = panel.getByRole('textbox', {
+      name: '正確な引用範囲',
+    })
+    await expect(documentQuote).toHaveValue(
+      '初回利用者は次に何をすべきかを最初の画面で判断できる必要があります。',
+    )
+    await documentQuote.fill('次に何をすべきか')
+    await expect(documentQuote).toHaveValue('次に何をすべきか')
+
+    await page.setViewportSize({ width: 390, height: 844 })
+    for (const tab of [conversationTab, decisionsTab, sourcesTab]) {
+      await expect
+        .poll(async () => (await tab.boundingBox())?.height ?? 0)
+        .toBeGreaterThanOrEqual(44)
+    }
   })
 
   test('コメント通知から Work Item と対象コメントへ deep link できる', async ({ page }) => {

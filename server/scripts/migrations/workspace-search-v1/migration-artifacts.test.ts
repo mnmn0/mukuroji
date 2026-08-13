@@ -1,6 +1,11 @@
 import { describe, expect, test } from 'bun:test'
 import type { AttributeValue } from '@aws-sdk/client-dynamodb'
 import {
+  COLLABORATION_CONTEXT_SCHEMA_VERSION,
+  type CuratedContextItem,
+} from '@mukuroji/contracts'
+import {
+  createCuratedContextItemWorkspaceSearchDocument,
   createTeamWorkspaceSearchDocument,
 } from '../../../src/modules/workspace-search'
 import {
@@ -189,6 +194,124 @@ function createPlannedOperation(): WorkspaceSearchPlannedOperation {
   }
   const operationDigest =
     createWorkspaceSearchMigrationOperationDigest(operation)
+  const planSequence = 1
+  const planDigest = createWorkspaceSearchPlanLeafDigest({
+    planSequence,
+    operationDigest,
+  })
+  return {
+    runId: 'run-20260726',
+    configurationHash,
+    planDigest,
+    planSequence,
+    operationDigest,
+    membershipProof: [],
+    operation,
+  }
+}
+
+/**
+ * Creates one valid planned curated-context projection.
+ *
+ * @returns Planned operation whose source and target are both collaboration-owned.
+ */
+function createPlannedContextOperation(): WorkspaceSearchPlannedOperation {
+  const configurationHash = 'a'.repeat(64)
+  const sourceKey = {
+    entityKey: {
+      S: 'workspace-1#work-item#team/team-1/issue/issue-1',
+    },
+    recordKey: { S: 'CONTEXT#context-1' },
+  }
+  const sourceItem: Record<string, AttributeValue> = {
+    ...sourceKey,
+    entryType: { S: 'context' },
+    schemaVersion: { N: String(COLLABORATION_CONTEXT_SCHEMA_VERSION) },
+    id: { S: 'context-1' },
+    teamId: { S: 'team-1' },
+    workItemId: { S: 'issue-1' },
+    kind: { S: 'context' },
+    state: { S: 'active' },
+    title: { S: 'Release context' },
+    body: { S: 'The release is ready after verification.' },
+    mentionMemberKeys: { L: [] },
+    createdBy: {
+      M: {
+        id: { S: 'creator@example.com' },
+        displayName: { S: 'Creator' },
+      },
+    },
+    createdAt: { S: '2026-07-24T01:00:00.000Z' },
+    updatedBy: {
+      M: {
+        id: { S: 'editor@example.com' },
+        displayName: { S: 'Editor' },
+      },
+    },
+    updatedAt: { S: '2026-07-24T02:00:00.000Z' },
+    revision: { N: '2' },
+  }
+  const item: CuratedContextItem = {
+    schemaVersion: COLLABORATION_CONTEXT_SCHEMA_VERSION,
+    id: 'context-1',
+    teamId: 'team-1',
+    workItemId: 'issue-1',
+    kind: 'context',
+    state: 'active',
+    title: 'Release context',
+    body: 'The release is ready after verification.',
+    mentionMemberKeys: [],
+    createdBy: { id: 'creator@example.com', displayName: 'Creator' },
+    createdAt: '2026-07-24T01:00:00.000Z',
+    updatedBy: { id: 'editor@example.com', displayName: 'Editor' },
+    updatedAt: '2026-07-24T02:00:00.000Z',
+    revision: 2,
+  }
+  const document = createCuratedContextItemWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    item,
+  })
+  const targetItem = encodeWorkspaceSearchMigrationDocument(document)
+  const targetKey = {
+    workspaceId: targetItem.workspaceId,
+    recordKey: targetItem.recordKey,
+  }
+  if (!targetKey.workspaceId || !targetKey.recordKey) {
+    throw new Error('Fixture target key is incomplete.')
+  }
+  const sourceKeyDigest = createAttributeMapDigest(sourceKey)
+  const targetKeyDigest = createAttributeMapDigest(targetKey)
+  const operation: WorkspaceSearchMigrationOperation = {
+    operationId: createWorkspaceSearchOperationId({
+      configurationHash,
+      sourceTableId: '00000000-0000-0000-0000-000000000002',
+      sourceKeyDigest,
+      targetKeyDigest,
+    }),
+    sourceCondition: {
+      exists: true,
+      source: 'collaboration',
+      tableId: '00000000-0000-0000-0000-000000000002',
+      tableName: 'collaboration-production',
+      key: sourceKey,
+      keyDigest: sourceKeyDigest,
+      item: sourceItem,
+      itemDigest: createAttributeMapDigest(sourceItem),
+    },
+    targetKey,
+    targetKeyDigest,
+    before: {
+      exists: false,
+      digest: createAbsentMigrationItemDigest(),
+    },
+    after: {
+      exists: true,
+      item: targetItem,
+      digest: createAttributeMapDigest(targetItem),
+    },
+    entityType: 'context-item',
+  }
+  const operationDigest = createWorkspaceSearchMigrationOperationDigest(operation)
   const planSequence = 1
   const planDigest = createWorkspaceSearchPlanLeafDigest({
     planSequence,
@@ -514,6 +637,15 @@ describe('Workspace Search planned-operation artifact codec', () => {
     expect(parsed.operation.sourceCondition.item.opaqueBytes).toEqual({
       B: new Uint8Array([0, 127, 255]),
     })
+  })
+
+  test('round-trips the curated context entity type', () => {
+    const contextPlanned = createPlannedContextOperation()
+    const parsed = parseWorkspaceSearchPlannedOperation(
+      serializeWorkspaceSearchPlannedOperation(contextPlanned),
+    )
+
+    expect(parsed).toEqual(contextPlanned)
   })
 
   test('rejects encoded item, operation digest, plan root, and shape tampering', () => {
