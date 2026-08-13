@@ -5275,15 +5275,16 @@ test.describe('authenticated task page', () => {
   }) => {
     await page.goto('/dashboard')
     const requestCounts = getMockRequestCounts(page)
+    const sidebar = page.getByLabel('メインサイドバー')
 
-    await expect(page.getByRole('button', { name: 'コアチーム', exact: true })).toBeVisible()
-    await expect(page.getByRole('button', { name: 'デザインチーム', exact: true })).toHaveCount(0)
-    await expect(page.getByRole('button', { name: '共通ローンチ', exact: true })).toHaveCount(2)
+    await expect(sidebar.getByRole('button', { name: 'コアチーム', exact: true })).toBeVisible()
+    await expect(sidebar.getByRole('button', { name: 'デザインチーム', exact: true })).toHaveCount(0)
+    await expect(sidebar.getByRole('button', { name: '共通ローンチ', exact: true })).toHaveCount(2)
     expect(requestCounts.projectDirectory).toBe(1)
     await expect.poll(() => requestCounts.workspaceWorkItems).toBe(1)
     expect(requestCounts.projectTasks).toEqual({})
 
-    await page.getByRole('button', { name: 'ブランド刷新', exact: true }).click()
+    await sidebar.getByRole('button', { name: 'ブランド刷新', exact: true }).click()
 
     await expect(page).toHaveURL('/projects/brand-refresh/issues?teamId=design-team')
     await expect(page.getByTestId('tasks-heading')).toHaveText('ブランド刷新')
