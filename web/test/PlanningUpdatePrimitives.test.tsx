@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { planningSnapshotFixture } from '../src/planning/fixtures'
+import { readNonNegativeNumber } from '../src/planning/model/cadenceForm'
 import {
   createPlanningUpdateEvidenceCandidates,
   createPlanningUpdateWorkItemEvidenceValue,
@@ -8,10 +9,7 @@ import {
   readPlanningUpdateEvidence,
   submitPlanningUpdateCommentAndReset,
 } from '../src/planning/model/statusUpdateView'
-import {
-  PlanningStatusUpdateComposer,
-  readNonNegativeNumber,
-} from '../src/planning/ui/PlanningUpdatePrimitives'
+import { PlanningStatusUpdateComposer } from '../src/planning/ui/PlanningUpdatePrimitives'
 import { createPlanningLabels } from '../src/planning/ui/labels'
 
 const labels = createPlanningLabels('en')

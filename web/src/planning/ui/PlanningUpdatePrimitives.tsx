@@ -5,6 +5,7 @@ import type {
   PlanningUpdateEvidence,
 } from '@mukuroji/contracts'
 import { useState } from 'react'
+import { readNonNegativeNumber } from '../model/cadenceForm'
 import {
   readPlanningUpdateEvidence,
   readPlanningUpdateEvidenceType,
@@ -1326,17 +1327,6 @@ function readRisk(value: FormDataEntryValue | null): PlanningRisk | undefined {
 function readPositiveNumber(value: FormDataEntryValue | null) {
   const parsed = typeof value === 'string' ? Number(value) : Number.NaN
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined
-}
-
-/**
- * Parses a non-negative integer from FormData.
- *
- * @param value - Raw FormData value.
- * @returns A non-negative integer, or undefined.
- */
-export function readNonNegativeNumber(value: FormDataEntryValue | null) {
-  const parsed = typeof value === 'string' && value.trim() ? Number(value) : Number.NaN
-  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : undefined
 }
 
 /**
