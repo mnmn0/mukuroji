@@ -68,6 +68,7 @@ export const searchMessages = {
   'search.entity.project': 'プロジェクト',
   'search.entity.team': 'チーム',
   'search.entity.comment': 'コメント',
+  'search.entity.context-item': '整理済みの判断',
   'search.entity.file': 'ファイル',
   'search.entity.document': 'ドキュメント',
   'search.operator.equals': '等しい',

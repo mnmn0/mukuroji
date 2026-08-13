@@ -336,6 +336,18 @@ export function isCanonicalWorkspaceSearchMigrationEntityId(
   ) {
     return true
   }
+  if (
+    entityType === 'context-item' &&
+    parts.length === 6 &&
+    parts[0] === 'team' &&
+    isCanonicalEntityIdPart(parts[1]) &&
+    parts[2] === 'issue' &&
+    isCanonicalEntityIdPart(parts[3]) &&
+    parts[4] === 'context-item' &&
+    isCanonicalEntityIdPart(parts[5])
+  ) {
+    return true
+  }
   return false
 }
 
@@ -358,6 +370,7 @@ function isCanonicalEntityIdPart(value: string | undefined): value is string {
 function requireMigrationEntityType(value: unknown): SearchEntityType {
   if (
     value === 'comment' ||
+    value === 'context-item' ||
     value === 'document' ||
     value === 'project' ||
     value === 'team' ||

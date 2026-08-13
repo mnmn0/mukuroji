@@ -17,6 +17,12 @@ import {
 import type { TeamIssueActivity } from './activity'
 import type { TeamIssueComment } from './comments'
 import { TeamIssuesApiError } from './errors'
+import {
+  defaultIssuesApiErrorMessage,
+  readApiError,
+  readJson,
+  trimTrailingSlash,
+} from './http'
 
 /**
  * チーム所有の canonical Issue です。
@@ -131,8 +137,6 @@ type UpdateTeamIssueResponse = {
 const issuesApiBaseUrl = trimTrailingSlash(
   import.meta.env.VITE_TASKS_API_BASE_URL ?? import.meta.env.VITE_API_BASE_URL ?? '/api',
 )
-
-const defaultIssuesApiErrorMessage = 'Unable to complete the Work Item request.'
 
 /**
  * Loads Team-owned Work Items through the canonical list endpoint.
@@ -387,40 +391,4 @@ async function requestJson<TResponse>(
   }
 
   return data as TResponse
-}
-
-function readApiError(data: unknown) {
-  const message = typeof data === 'object' &&
-    data !== null &&
-    'message' in data &&
-    typeof data.message === 'string' &&
-    data.message.trim().length > 0
-    ? data.message
-    : defaultIssuesApiErrorMessage
-  const code = typeof data === 'object' &&
-    data !== null &&
-    'code' in data &&
-    typeof data.code === 'string'
-    ? data.code
-    : undefined
-
-  return { code, message }
-}
-
-async function readJson<T>(response: Response): Promise<T> {
-  const text = await response.text()
-
-  if (!text) {
-    return {} as T
-  }
-
-  try {
-    return JSON.parse(text) as T
-  } catch {
-    return {} as T
-  }
-}
-
-function trimTrailingSlash(value: string) {
-  return value.replace(/\/+$/, '')
 }

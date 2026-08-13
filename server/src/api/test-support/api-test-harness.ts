@@ -580,6 +580,16 @@ function createCollaborationStub(
     getThread: unsupported,
     hasAttachableComment: unsupported,
     getCommentSnapshot: unsupported,
+    getCuratedContext: unsupported,
+    async getCuratedContextMutationReplay() {
+      return undefined
+    },
+    getCuratedContextRevisions: unsupported,
+    getCuratedContextItemSnapshot: unsupported,
+    getAcceptedResolutionHistory: unsupported,
+    createCuratedContextItem: unsupported,
+    updateCuratedContextItem: unsupported,
+    setAcceptedResolution: unsupported,
     createComment: unsupported,
     updateComment: unsupported,
     deleteComment: unsupported,
@@ -1619,6 +1629,7 @@ function configureFakeProjectClients(
           mentionMemberKeys: [],
           createdAt: '2026-06-08T01:00:00.000Z',
           updatedAt: '2026-06-08T01:00:00.000Z',
+          acceptedResolutions: [],
           reactions: [],
         }
       },

@@ -1,0 +1,57 @@
+/** Maximum cursor pages followed automatically for an unresolved deep link. */
+export const MAX_DEEP_LINK_AUTO_PAGES = 5
+
+/**
+ * Mutable traversal snapshot retained by a deep-linking component ref.
+ */
+export type DeepLinkTraversalState = {
+  /** Target identifier associated with the traversal count. */
+  targetId?: string
+  /** Number of cursor pages requested automatically for the target. */
+  requestedPages: number
+}
+
+/**
+ * Advances a bounded automatic deep-link traversal.
+ * The page counter advances only while the target is unresolved and another
+ * page is available; once the budget is spent, callers should surface an
+ * explicit manual retry instead of continuing automatic loading.
+ *
+ * @param current - Current target and automatic request count.
+ * @param targetId - Deep-linked entity identifier.
+ * @param canLoad - Whether another cursor page is currently available and idle.
+ * @returns Updated state, the next-load decision, and bounded-exhaustion status.
+ */
+export function advanceDeepLinkTraversal(
+  current: DeepLinkTraversalState,
+  targetId: string | undefined,
+  canLoad: boolean,
+): {
+  state: DeepLinkTraversalState
+  shouldLoad: boolean
+  /** Whether the bounded automatic traversal stopped before finding the target. */
+  exhausted: boolean
+} {
+  if (!targetId) {
+    return {
+      shouldLoad: false,
+      exhausted: false,
+      state: { requestedPages: 0 },
+    }
+  }
+
+  const requestedPages =
+    current.targetId === targetId ? current.requestedPages : 0
+  const shouldLoad =
+    canLoad && requestedPages < MAX_DEEP_LINK_AUTO_PAGES
+
+  return {
+    shouldLoad,
+    exhausted:
+      !shouldLoad && canLoad && requestedPages >= MAX_DEEP_LINK_AUTO_PAGES,
+    state: {
+      requestedPages: shouldLoad ? requestedPages + 1 : requestedPages,
+      targetId,
+    },
+  }
+}

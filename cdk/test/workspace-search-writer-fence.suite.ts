@@ -10,6 +10,10 @@ import {
 /** Exact application writer Lambda and execution-role construct prefixes. */
 const writerFunctions: ReadonlyArray<readonly [string, string]> = [
   [
+    'CollaborationProjectionFunction1AAC5764',
+    'CollaborationProjectionFunctionServiceRole',
+  ],
+  [
     'ListProjectTasksFunction2134AF4A',
     'ListProjectTasksFunctionServiceRole',
   ],
@@ -51,10 +55,6 @@ const writerFunctions: ReadonlyArray<readonly [string, string]> = [
 const configurationOnlyFunctions: ReadonlyArray<
   readonly [string, string]
 > = [
-  [
-    'CollaborationProjectionFunction1AAC5764',
-    'CollaborationProjectionFunctionServiceRole',
-  ],
   [
     'ConnectorPollFunctionB3EBB19B',
     'ConnectorPollFunctionServiceRole',
@@ -217,12 +217,12 @@ test('strict writer-client compositions receive canonical tables and the explici
     'DocumentsTable',
     'AWS::DynamoDB::Table',
   );
-  const workspaceSearchTableId = requireResourceId(
-    'WorkspaceSearchTable',
-    'AWS::DynamoDB::Table',
-  );
   const migrationStateTableId = requireResourceId(
     'WorkspaceSearchMigrationStateTable',
+    'AWS::DynamoDB::Table',
+  );
+  const workspaceSearchTableId = requireResourceId(
+    'WorkspaceSearchTable',
     'AWS::DynamoDB::Table',
   );
 
@@ -315,7 +315,7 @@ test('strict writer-client compositions receive canonical tables and the explici
   );
 });
 
-test('writer-fence grants describe exact six tables and read or condition-check migration state', () => {
+test('writer-fence grants describe source and migration tables and read or condition-check migration state', () => {
   const projectDirectoryTableId = requireResourceId(
     'ProjectDirectoryTable',
     'AWS::DynamoDB::Table',
@@ -332,12 +332,12 @@ test('writer-fence grants describe exact six tables and read or condition-check 
     'DocumentsTable',
     'AWS::DynamoDB::Table',
   );
-  const workspaceSearchTableId = requireResourceId(
-    'WorkspaceSearchTable',
-    'AWS::DynamoDB::Table',
-  );
   const migrationStateTableId = requireResourceId(
     'WorkspaceSearchMigrationStateTable',
+    'AWS::DynamoDB::Table',
+  );
+  const workspaceSearchTableId = requireResourceId(
+    'WorkspaceSearchTable',
     'AWS::DynamoDB::Table',
   );
   const migrationStateTableArn = {
@@ -433,5 +433,74 @@ test('configuration-only strict compositions have no migration-state IAM access'
     expect(JSON.stringify(rolePolicies)).not.toContain(
       migrationStateTableId,
     );
+  }
+});
+
+test('collaboration projection can converge current context search documents', () => {
+  const roleLogicalId = requireResourceId(
+    'CollaborationProjectionFunctionServiceRole',
+    'AWS::IAM::Role',
+  );
+  const workspaceSearchTableId = requireResourceId(
+    'WorkspaceSearchTable',
+    'AWS::DynamoDB::Table',
+  );
+  const workspaceSearchTableArn = {
+    'Fn::GetAtt': [workspaceSearchTableId, 'Arn'],
+  };
+  const statements = requirePolicyStatementsForRole(roleLogicalId);
+
+  for (const action of ['dynamodb:PutItem', 'dynamodb:DeleteItem']) {
+    const statement = statements.find((candidate) =>
+      statementHasAction(candidate, action) &&
+      statementHasResource(candidate, workspaceSearchTableArn)
+    );
+    expect(readProperty(statement, 'Effect')).toBe('Allow');
+    expect(readProperty(statement, 'Condition')).toEqual({
+      'ForAnyValue:StringEquals': {
+        'dynamodb:EnclosingOperation': ['TransactWriteItems'],
+      },
+    });
+  }
+  for (const action of [
+    'dynamodb:UpdateItem',
+    'dynamodb:BatchWriteItem',
+  ]) {
+    const statement = statements.find((candidate) =>
+      statementHasAction(candidate, action) &&
+      statementHasResource(candidate, workspaceSearchTableArn)
+    );
+    expect(statement).toBeUndefined();
+  }
+  const describeStatement = statements.find((candidate) =>
+    statementHasAction(candidate, 'dynamodb:DescribeTable') &&
+    statementHasResource(candidate, workspaceSearchTableArn)
+  );
+  expect(readProperty(describeStatement, 'Effect')).toBe('Allow');
+});
+
+test('non-projection writer-fence roles cannot mutate Workspace Search documents', () => {
+  const workspaceSearchTableId = requireResourceId(
+    'WorkspaceSearchTable',
+    'AWS::DynamoDB::Table',
+  );
+  const workspaceSearchTableArn = {
+    'Fn::GetAtt': [workspaceSearchTableId, 'Arn'],
+  };
+
+  for (const [, roleLogicalIdPrefix] of writerFunctions
+    .slice(1)
+    .filter(([functionLogicalId]) => functionLogicalId !== apiFunctionLogicalId)) {
+    const roleLogicalId = requireResourceId(
+      roleLogicalIdPrefix,
+      'AWS::IAM::Role',
+    );
+    const statements = requirePolicyStatementsForRole(roleLogicalId);
+    const projectionWriteStatements = statements.filter((statement) =>
+      (statementHasAction(statement, 'dynamodb:PutItem') ||
+        statementHasAction(statement, 'dynamodb:DeleteItem')) &&
+      statementHasResource(statement, workspaceSearchTableArn)
+    );
+    expect(projectionWriteStatements).toHaveLength(0);
   }
 });

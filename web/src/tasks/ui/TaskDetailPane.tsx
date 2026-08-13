@@ -15,12 +15,14 @@ import { IssueArtifactsPanel } from '../../files/ui/IssueArtifactsPanel'
 import type {
   IssueCollaborationController,
 } from '../../issues/mutations/useIssueCollaboration'
+import { useDocumentContextPromotion } from '../../issues/mutations/useDocumentContextPromotion'
 import type { TeamIssue, TeamIssueDetail, UpdateTeamIssueInput } from '../../issues/api'
 import {
   resolveWorkItemAssignee,
   resolveWorkItemTitle,
 } from '../../work-items/model/workItemDisplay'
 import { IssueCollaborationPanel } from '../../issues/ui/IssueCollaborationPanel'
+import type { IssueCollaborationRoute } from '../../issues/model/collaborationTabs'
 import type { ProjectDirectoryTeam, ProjectMember } from '../../projects/api'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import { createTeamTriagePath } from '../../shared/routing/paths'
@@ -84,6 +86,8 @@ export type TaskDetailPaneProps = {
   focusedCommentId?: string
   /** Root comment containing the selected reply. */
   focusedRootCommentId?: string
+  /** Route-owned collaboration section and deep-link state. */
+  collaborationRoute?: IssueCollaborationRoute
   /** Whether the selected Work Item detail is loading. */
   isLoading: boolean
   /** Whether relation candidates are loading. */
@@ -147,6 +151,7 @@ export function TaskDetailPane({
   detail,
   errorMessage,
   focusedCommentId,
+  collaborationRoute,
   focusedRootCommentId,
   isLoading,
   isRelationCandidatesLoading,
@@ -168,6 +173,11 @@ export function TaskDetailPane({
   workspaceMembers,
 }: TaskDetailPaneProps) {
   const [fieldErrors, setFieldErrors] = useState<Readonly<Record<string, string | undefined>>>({})
+  const documentContextPromotion = useDocumentContextPromotion(
+    Boolean(collaboration?.context.capabilities.canCreate),
+    `${task?.teamId ?? ''}:${task?.id ?? ''}`,
+    collaborationRoute?.onCollaborationTabChange,
+  )
   const scheduleFormId = useId()
   const {
     data: triageSourcesPages,
@@ -677,13 +687,16 @@ export function TaskDetailPane({
       </div>
       <RelatedDocuments
         accessToken={accessToken}
+        onPromoteToContext={documentContextPromotion.onPromoteToContext}
         t={t}
         targetId={task.teamId ? `team/${task.teamId}/issue/${task.id}` : undefined}
         targetKind="work-item"
       />
       {collaboration ? (
         <IssueCollaborationPanel
+          route={collaborationRoute}
           artifacts={artifacts}
+          contextDraft={documentContextPromotion.documentContextDraft}
           key={`${task.teamId ?? ''}:${task.id}`}
           controller={collaboration}
           currentMemberKey={currentWorkspaceMemberKey}
@@ -691,6 +704,7 @@ export function TaskDetailPane({
           focusedRootCommentId={focusedRootCommentId}
           locale={locale}
           members={workspaceMembers}
+          onContextDraftConsumed={documentContextPromotion.onContextDraftConsumed}
         />
       ) : null}
     </aside>

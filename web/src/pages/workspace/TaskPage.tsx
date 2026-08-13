@@ -2,6 +2,7 @@ import type {
   BulkOperation,
   BulkOperationPreview,
   BulkOperationRequest,
+  CuratedContextSourceKind,
   ResolvedWorkItemConfiguration,
   TaskViewScope,
   WorkItemDependencyEndpoint,
@@ -63,6 +64,15 @@ import {
   useTeamIssues,
 } from '../../issues/queries/useWorkItems'
 import { useIssueCollaboration } from '../../issues/mutations/useIssueCollaboration'
+import {
+  applyIssueCollaborationTabToSearchParams,
+  applyIssueCollaborationSourceToSearchParams,
+  issueCollaborationTargetSearchParams,
+  resolveIssueCollaborationTab,
+  type IssueCollaborationRoute,
+  type IssueCollaborationTab,
+} from '../../issues/model/collaborationTabs'
+import { readIssueSourceKind } from '../../issues/model/contextSources'
 import {
   createProjectIssuesPath,
 } from '../../shared/routing/paths'
@@ -198,6 +208,18 @@ export function TaskPage() {
   const selectedIssueId = searchParams.get('issueId') ?? undefined
   const focusedCommentId = searchParams.get('commentId')?.trim() || undefined
   const focusedRootCommentId = searchParams.get('rootCommentId')?.trim() || undefined
+  const focusedContextItemId = searchParams.get('contextItemId')?.trim() || undefined
+  const focusedSourceId = searchParams.get('sourceId')?.trim() || undefined
+  const focusedSourceKind: CuratedContextSourceKind | undefined =
+    readIssueSourceKind(searchParams.get('sourceKind'))
+  const focusedActivityEventId = searchParams.get('activityEventId')?.trim() || undefined
+  const requestedCollaborationTab = searchParams.get('collaborationTab')
+  const collaborationTab = resolveIssueCollaborationTab({
+    requestedTab: requestedCollaborationTab,
+    focusedContextItemId,
+    focusedSourceId,
+    focusedActivityEventId,
+  })
   const isCreateTaskRequested = searchParams.get('create') === '1'
   const [session] = useState(() => getAuthSession())
   const [locale] = useState<Locale>(() => getInitialLocale())
@@ -711,8 +733,9 @@ export function TaskPage() {
     const nextSearchParams = new URLSearchParams(searchParams)
 
     nextSearchParams.delete('issueId')
-    nextSearchParams.delete('commentId')
-    nextSearchParams.delete('rootCommentId')
+    for (const key of issueCollaborationTargetSearchParams) {
+      nextSearchParams.delete(key)
+    }
     setSearchParams(nextSearchParams, {
       replace: true,
       state: ambiguousIssueSelectionLocationState,
@@ -915,6 +938,22 @@ export function TaskPage() {
       createProjectIssuesPath(task.assignedProjectId ?? projectId, nextTeamId, task.id),
       searchParams,
     ))
+  }
+
+  /** Persists collaboration section navigation without leaving the selected Work Item. */
+  const handleCollaborationTabChange = (tab: IssueCollaborationTab) => {
+    setSearchParams(
+      applyIssueCollaborationTabToSearchParams(searchParams, tab),
+      { replace: true },
+    )
+  }
+
+  /** Persists a source provenance target in the selected Work Item route. */
+  const handleCollaborationSourceChange = (target: Parameters<NonNullable<IssueCollaborationRoute['onCollaborationSourceChange']>>[0]) => {
+    setSearchParams(
+      applyIssueCollaborationSourceToSearchParams(searchParams, target),
+      { replace: true },
+    )
   }
 
   /** Updates a visible Work Item with optimistic cache projection and conflict rollback. */
@@ -1377,6 +1416,17 @@ export function TaskPage() {
       canManageProjectMembers={canManageProjectMembers}
       canManageScheduleDependencyEndpoint={canManageScheduleDependencyEndpoint}
       collaboration={collaboration}
+      collaborationRoute={
+        {
+          collaborationTab,
+          focusedContextItemId,
+          focusedSourceId,
+          focusedSourceKind,
+          focusedActivityEventId,
+          onCollaborationTabChange: handleCollaborationTabChange,
+          onCollaborationSourceChange: handleCollaborationSourceChange,
+        } satisfies IssueCollaborationRoute
+      }
       artifacts={issueArtifacts}
       currentWorkspaceMemberKey={workspaceAccess?.currentMember.memberKey}
       detailErrorMessage={detailErrorMessage}

@@ -39,6 +39,7 @@ const entityLabelKeys: Record<SearchEntityType, MessageKey> = {
   project: 'search.entity.project',
   team: 'search.entity.team',
   comment: 'search.entity.comment',
+  'context-item': 'search.entity.context-item',
   file: 'search.entity.file',
   document: 'search.entity.document',
 }
@@ -47,6 +48,23 @@ const statusLabelKeys: Record<string, MessageKey> = {
   'in-progress': 'tasks.status.in-progress',
   review: 'tasks.status.review',
   done: 'tasks.status.done',
+}
+const contextKindLabelKeys: Record<string, MessageKey> = {
+  decision: 'collaboration.decisions.kind.decision',
+  action: 'collaboration.decisions.kind.action',
+  risk: 'collaboration.decisions.kind.risk',
+  context: 'collaboration.decisions.kind.context',
+}
+
+/** Localizes a context-item kind while preserving unknown search subtitles. */
+function formatSearchSubtitle(
+  result: WorkspaceSearchResult,
+  translate: (key: MessageKey) => string,
+): string | undefined {
+  if (!result.subtitle) return result.subtitle
+  if (result.entityType !== 'context-item') return result.subtitle
+  const key = contextKindLabelKeys[result.subtitle]
+  return key ? translate(key) : result.subtitle
 }
 
 /**
@@ -61,6 +79,7 @@ export function SearchResultCollection({
 }: SearchResultCollectionProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
   const formatStatus = (status: string) => formatSearchStatus(status, statusLabels, t)
+  const formatSubtitle = (result: WorkspaceSearchResult) => formatSearchSubtitle(result, t)
   const mode = getSearchLayoutMode(layout)
   const sortedResults = useMemo(
     () => sortWorkspaceSearchResults(results, layout),
@@ -68,22 +87,23 @@ export function SearchResultCollection({
   )
 
   if (mode === 'board') {
-    return <SearchBoard formatStatus={formatStatus} layout={layout} locale={locale} onNavigate={onNavigate} results={sortedResults} t={t} />
+    return <SearchBoard formatStatus={formatStatus} formatSubtitle={formatSubtitle} layout={layout} locale={locale} onNavigate={onNavigate} results={sortedResults} t={t} />
   }
 
   if (mode === 'calendar') {
-    return <SearchCalendar formatStatus={formatStatus} locale={locale} onNavigate={onNavigate} results={sortedResults} t={t} />
+    return <SearchCalendar formatStatus={formatStatus} formatSubtitle={formatSubtitle} locale={locale} onNavigate={onNavigate} results={sortedResults} t={t} />
   }
 
   if (mode === 'timeline') {
-    return <SearchTimeline formatStatus={formatStatus} locale={locale} onNavigate={onNavigate} results={sortedResults} t={t} />
+    return <SearchTimeline formatStatus={formatStatus} formatSubtitle={formatSubtitle} locale={locale} onNavigate={onNavigate} results={sortedResults} t={t} />
   }
 
-  return <SearchTable formatStatus={formatStatus} layout={layout} locale={locale} onNavigate={onNavigate} results={sortedResults} t={t} />
+  return <SearchTable formatStatus={formatStatus} formatSubtitle={formatSubtitle} layout={layout} locale={locale} onNavigate={onNavigate} results={sortedResults} t={t} />
 }
 
 function SearchTable({
   formatStatus,
+  formatSubtitle,
   layout,
   locale,
   onNavigate,
@@ -91,6 +111,7 @@ function SearchTable({
   t,
 }: {
   formatStatus: (status: string) => string
+  formatSubtitle: (result: WorkspaceSearchResult) => string | undefined
   layout: SearchViewLayout
   locale: Locale
   onNavigate: (path: string) => void
@@ -130,7 +151,7 @@ function SearchTable({
                       </span>
                       {result.subtitle || result.body ? (
                         <span className="mt-1 line-clamp-2 block text-xs font-medium leading-5 text-[var(--workbench-muted)]">
-                          <HighlightedField field="body" result={result} fallback={result.subtitle ?? result.body ?? ''} />
+                          <HighlightedField field="body" result={result} fallback={formatSubtitle(result) ?? result.body ?? ''} />
                         </span>
                       ) : null}
                     </button>
@@ -152,6 +173,7 @@ function SearchTable({
 
 function SearchBoard({
   formatStatus,
+  formatSubtitle,
   layout,
   locale,
   onNavigate,
@@ -159,6 +181,7 @@ function SearchBoard({
   t,
 }: {
   formatStatus: (status: string) => string
+  formatSubtitle: (result: WorkspaceSearchResult) => string | undefined
   layout: SearchViewLayout
   locale: Locale
   onNavigate: (path: string) => void
@@ -187,7 +210,7 @@ function SearchBoard({
           </header>
           <div className="grid gap-2 p-3">
             {group.results.map((result) => (
-              <SearchResultCard formatStatus={formatStatus} key={createResultKey(result)} locale={locale} onNavigate={onNavigate} result={result} t={t} />
+              <SearchResultCard formatStatus={formatStatus} formatSubtitle={formatSubtitle} key={createResultKey(result)} locale={locale} onNavigate={onNavigate} result={result} t={t} />
             ))}
           </div>
         </article>
@@ -198,12 +221,14 @@ function SearchBoard({
 
 function SearchCalendar({
   formatStatus,
+  formatSubtitle,
   locale,
   onNavigate,
   results,
   t,
 }: {
   formatStatus: (status: string) => string
+  formatSubtitle: (result: WorkspaceSearchResult) => string | undefined
   locale: Locale
   onNavigate: (path: string) => void
   results: WorkspaceSearchResult[]
@@ -223,7 +248,7 @@ function SearchCalendar({
           </h2>
           <div className="mt-3 grid gap-2">
             {group.results.map((result) => (
-              <SearchResultCard compact formatStatus={formatStatus} key={createResultKey(result)} locale={locale} onNavigate={onNavigate} result={result} t={t} />
+              <SearchResultCard compact formatStatus={formatStatus} formatSubtitle={formatSubtitle} key={createResultKey(result)} locale={locale} onNavigate={onNavigate} result={result} t={t} />
             ))}
           </div>
         </article>
@@ -234,12 +259,14 @@ function SearchCalendar({
 
 function SearchTimeline({
   formatStatus,
+  formatSubtitle,
   locale,
   onNavigate,
   results,
   t,
 }: {
   formatStatus: (status: string) => string
+  formatSubtitle: (result: WorkspaceSearchResult) => string | undefined
   locale: Locale
   onNavigate: (path: string) => void
   results: WorkspaceSearchResult[]
@@ -268,7 +295,7 @@ function SearchTimeline({
                   <HighlightedField field="title" result={result} fallback={result.title} />
                 </span>
                 <span className="mt-1 block truncate text-xs font-medium text-[var(--workbench-muted)]">
-                  {t(entityLabelKeys[result.entityType])} {result.subtitle ? `· ${result.subtitle}` : ''}
+                  {t(entityLabelKeys[result.entityType])} {formatSubtitle(result) ? `· ${formatSubtitle(result)}` : ''}
                 </span>
                 {result.body ? (
                   <span className="mt-1 line-clamp-1 block text-xs font-medium text-[var(--workbench-muted)]">
@@ -290,6 +317,7 @@ function SearchTimeline({
 function SearchResultCard({
   compact = false,
   formatStatus,
+  formatSubtitle,
   locale,
   onNavigate,
   result,
@@ -297,6 +325,7 @@ function SearchResultCard({
 }: {
   compact?: boolean
   formatStatus: (status: string) => string
+  formatSubtitle: (result: WorkspaceSearchResult) => string | undefined
   locale: Locale
   onNavigate: (path: string) => void
   result: WorkspaceSearchResult
@@ -315,7 +344,7 @@ function SearchResultCard({
         <HighlightedField field="title" result={result} fallback={result.title} />
       </span>
       <span className="mt-2 block text-xs font-medium text-[var(--workbench-muted)]">
-        {t(entityLabelKeys[result.entityType])}{result.subtitle ? ` · ${result.subtitle}` : ''}
+        {t(entityLabelKeys[result.entityType])}{formatSubtitle(result) ? ` · ${formatSubtitle(result)}` : ''}
       </span>
       {result.body ? (
         <span className="mt-2 line-clamp-2 block text-xs font-medium leading-5 text-[var(--workbench-muted)]">

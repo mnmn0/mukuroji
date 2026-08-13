@@ -74,17 +74,17 @@ export function grantWorkspaceSearchWriterFenceAccess(
   resources: WorkspaceSearchWriterFenceResources,
   target: lambda.Function,
 ): void {
-  const tableArns = [
+  const sourceTableArns = [
     resources.projectDirectoryTable.tableArn,
     resources.workItemsTable.tableArn,
     resources.collaborationTable.tableArn,
     resources.documentsTable.tableArn,
-    resources.workspaceSearchTable.tableArn,
     resources.migrationStateTable.tableArn,
+    resources.workspaceSearchTable.tableArn,
   ];
   target.addToRolePolicy(new iam.PolicyStatement({
     actions: ['dynamodb:DescribeTable'],
-    resources: tableArns,
+    resources: sourceTableArns,
   }));
   target.addToRolePolicy(new iam.PolicyStatement({
     actions: ['dynamodb:GetItem'],
@@ -98,6 +98,29 @@ export function grantWorkspaceSearchWriterFenceAccess(
       },
     },
     resources: [resources.migrationStateTable.tableArn],
+  }));
+}
+
+/**
+ * Grants the collaboration projection Lambda access to mutate Workspace
+ * Search projection documents.
+ *
+ * @param resources - Exact Workspace Search target table.
+ * @param target - Collaboration projection Lambda that owns the projection.
+ * @returns Nothing.
+ */
+export function grantWorkspaceSearchProjectionAccess(
+  resources: WorkspaceSearchWriterFenceResources,
+  target: lambda.Function,
+): void {
+  target.addToRolePolicy(new iam.PolicyStatement({
+    actions: ['dynamodb:PutItem', 'dynamodb:DeleteItem'],
+    conditions: {
+      'ForAnyValue:StringEquals': {
+        'dynamodb:EnclosingOperation': ['TransactWriteItems'],
+      },
+    },
+    resources: [resources.workspaceSearchTable.tableArn],
   }));
 }
 

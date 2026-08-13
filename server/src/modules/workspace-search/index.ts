@@ -2,6 +2,7 @@
 export {
   WorkspaceSearchError,
   createCommentWorkspaceSearchDocument,
+  createCuratedContextItemWorkspaceSearchDocument,
   createDocumentWorkspaceSearchBody,
   createDocumentWorkspaceSearchDocument,
   createDocumentWorkspaceSearchSourceDocument,

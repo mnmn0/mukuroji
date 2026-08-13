@@ -162,7 +162,6 @@ export function buildAutomationWorkers(
   projectDirectoryTable.grants.readData(automationEventFunction);
   teamIssueEventsTable.grants.readWriteData(automationEventFunction);
   workItemsTable.grants.readWriteData(automationEventFunction);
-  workspaceSearchTable.grants.readWriteData(automationEventFunction);
   workItemConfigurationTable.grants.readData(automationEventFunction);
   workspaceAccessTable.grants.readData(automationEventFunction);
   automationEventFunction.addToRolePolicy(new iam.PolicyStatement({
@@ -292,7 +291,6 @@ export function buildAutomationWorkers(
   projectDirectoryTable.grants.readData(automationScheduleFunction);
   teamIssueEventsTable.grants.readWriteData(automationScheduleFunction);
   workItemsTable.grants.readWriteData(automationScheduleFunction);
-  workspaceSearchTable.grants.readWriteData(automationScheduleFunction);
   workItemConfigurationTable.grants.readData(automationScheduleFunction);
   workspaceAccessTable.grants.readData(automationScheduleFunction);
   automationScheduleFunction.addToRolePolicy(new iam.PolicyStatement({

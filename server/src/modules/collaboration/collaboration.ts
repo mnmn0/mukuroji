@@ -13,6 +13,25 @@ import {
   type TransactWriteCommandInput,
 } from '@aws-sdk/lib-dynamodb'
 import {
+  COLLABORATION_CONTEXT_SCHEMA_VERSION,
+  type AcceptedResolution,
+  type AcceptedResolutionPage,
+  type CreateCuratedContextItemRequest,
+  type CuratedContextActorSnapshot,
+  type CuratedContextCapabilities,
+  type CuratedContextItem,
+  type CuratedContextItemKind,
+  type CuratedContextItemState,
+  type CuratedContextPage,
+  type CuratedContextQuote,
+  type CuratedContextRevisionPage,
+  type CuratedContextSource,
+  type CuratedContextSourceAvailability,
+  type CuratedContextSourceKind,
+  type SetAcceptedResolutionRequest,
+  type UpdateCuratedContextItemRequest,
+} from '@mukuroji/contracts'
+import {
   createDynamoDbClient as createConfiguredDynamoDbClient,
   createWorkspaceSearchWriterDynamoDbDocumentClient,
   shouldBootstrapLocalDynamoDb as shouldBootstrapConfiguredLocalDynamoDb,
@@ -33,11 +52,22 @@ export const COLLABORATION_COMMENT_MAX_LENGTH = 20_000
 /** 一つの comment で解決できる mention 数です。 */
 export const COLLABORATION_MENTION_MAX_COUNT = 20
 
+/** Curated context title に保存できる文字数です。 */
+export const COLLABORATION_CONTEXT_TITLE_MAX_LENGTH = 200
+
+/** Curated context body と accepted resolution summary に保存できる文字数です。 */
+export const COLLABORATION_CONTEXT_BODY_MAX_LENGTH = 20_000
+
+/** Record key for the per-entity curated-context pagination generation. */
+const CURATED_CONTEXT_LEDGER_RECORD_KEY = 'CONTEXT_LEDGER'
 /** Maximum length of one opaque watcher mutation identity. */
 const watcherMutationIdentityMaximumLength = 256
 
 /** UI と API が受け付ける reaction emoji です。 */
 export const COLLABORATION_REACTIONS = ['👍', '❤️', '🎉', '👀', '✅'] as const
+
+/** Minimum retention headroom required before an Activity source can be committed. */
+const curatedContextActivityMinimumRemainingSeconds = 5
 
 /** 保存できる reaction emoji です。 */
 export type CollaborationReactionEmoji = typeof COLLABORATION_REACTIONS[number]
@@ -107,6 +137,8 @@ export type CollaborationComment = {
   resolvedByMemberKey?: string
   /** Reaction の集計です。 */
   reactions: CollaborationReactionSummary[]
+  /** Root thread の current accepted resolution です。全履歴は専用 cursor page で取得します。 */
+  acceptedResolutions: AcceptedResolution[]
 }
 
 /** 現在 user の watcher 状態です。 */
@@ -169,6 +201,55 @@ export type CollaborationThreadPage = {
   threadResolved?: boolean
 }
 
+/** Authorization generation observed before a curated context mutation. */
+export type CuratedContextAuthorizationSnapshot = {
+  /** Workspace member whose authorization was checked. */
+  memberKey: string
+  /** Membership generation observed during authorization. */
+  workspaceMemberVersion: number
+  /** Enterprise Identity authorization generation observed during authorization. */
+  enterpriseControlRevision?: number
+}
+
+/**
+ * Authorization and source revisions captured while reading a Document source.
+ *
+ * This is intentionally a server-side mutation input rather than part of the
+ * public provenance contract.  The Documents adapter owns the rows and the
+ * collaboration adapter turns this semantic snapshot into transaction
+ * conditions.
+ */
+export type CuratedContextDocumentSourceAuthorizationSnapshot = {
+  /** Canonical Document identifier that was read. */
+  sourceId: string
+  /** Document content/metadata revision observed during the read. */
+  documentRevision: number
+  /** Workspace-wide Documents authorization generation observed during the read. */
+  documentAuthorizationRevision: number
+  /** Workspace member whose access was checked, when applicable. */
+  workspaceMemberKey?: string
+  /** Workspace membership generation observed during the read, when applicable. */
+  workspaceMemberVersion?: number
+  /** Planning authorization generation observed during the read, when applicable. */
+  planningRevision?: number
+  /** Enterprise Identity authorization generation observed during the read, when applicable. */
+  enterpriseControlRevision?: number
+}
+
+/**
+ * Retention snapshot captured while reading an Activity source.
+ *
+ * This server-only snapshot is converted into an audit-row condition so a
+ * source cannot cross its retention boundary between the API read and the
+ * context-item transaction.
+ */
+export type CuratedContextActivitySourceAuthorizationSnapshot = {
+  /** Immutable audit event identifier that was read. */
+  sourceId: string
+  /** Audit retention deadline in epoch seconds, when the event has one. */
+  expiresAt?: number
+}
+
 /** Team-owned Work Item scope の共通入力です。 */
 export type WorkItemCollaborationScope = {
   /** Canonical Workspace ID です。 */
@@ -187,6 +268,8 @@ export type WorkItemCollaborationScope = {
   projectEntityKey?: string
   /** Resolve/reopen 認可時に読み込んだ Work Item assignee key です。 */
   assigneeMemberKey?: string
+  /** Authorization generation observed before the context mutation. */
+  authorizationSnapshot?: CuratedContextAuthorizationSnapshot
 }
 
 /** Read-only authorization row guard appended to a watcher mutation transaction. */
@@ -221,6 +304,114 @@ export type GetCollaborationCommentSnapshotInput = {
   entityKey: string
   /** 読み込む Comment ID です。 */
   commentId: string
+}
+
+/** Curated context page 取得入力です。 */
+export type GetCuratedContextInput = {
+  /** Work Item の collaboration entity key です。 */
+  entityKey: string
+  /** 一 page の最大件数です。 */
+  limit?: number
+  /** 前 page が返した scope-bound opaque cursor です。 */
+  cursor?: string
+  /** Caller が認可結果から組み立てた操作 capability です。 */
+  capabilities: CuratedContextCapabilities
+}
+
+/** Curated context snapshot 取得入力です。 */
+export type GetCuratedContextItemSnapshotInput = {
+  /** Work Item の collaboration entity key です。 */
+  entityKey: string
+  /** 読み込む curated context item ID です。 */
+  itemId: string
+}
+
+/** Curated context revision page 取得入力です。 */
+export type GetCuratedContextRevisionsInput = {
+  /** Work Item の collaboration entity key です。 */
+  entityKey: string
+  /** 履歴を所有する curated context item ID です。 */
+  itemId: string
+  /** 一 page の最大件数です。 */
+  limit?: number
+  /** 前 page が返した item-bound opaque cursor です。 */
+  cursor?: string
+}
+
+/** Durable curated-context mutation replay preflight input. */
+export type GetCuratedContextMutationReplayInput = {
+  /** Work Item collaboration entity key that owns the mutation receipt. */
+  entityKey: string
+  /** Curated-context mutation kind bound to the idempotency key. */
+  operation: 'create' | 'update'
+  /** Updated item identifier. It is required only for update mutations. */
+  itemId?: string
+  /** Request identity and fingerprint used to locate and validate the receipt. */
+  auditContext: MutationAuditContext
+}
+
+/** Curated context mutation で共通する caller 解決済み入力です。 */
+export type CuratedContextMutationInput = WorkItemCollaborationScope & {
+  /** Mutation actor の display-safe snapshot です。 */
+  actor: CuratedContextActorSnapshot
+  /** Caller が追加する notification 候補です。 */
+  notificationCandidates?: CollaborationNotificationCandidate[]
+  /** Work Item creator/assignee など caller が解決した自動 watcher 候補です。 */
+  automaticWatcherCandidates?: CollaborationAutomaticWatcherCandidate[]
+  /** Notification から戻る Web path です。 */
+  deepLink?: string
+  /** State と同じ transaction に保存する audit context です。 */
+  auditContext?: MutationAuditContext
+  /** Document source authorization snapshot fenced by the create transaction. */
+  sourceAuthorizationSnapshot?: CuratedContextDocumentSourceAuthorizationSnapshot
+  /** Activity retention snapshot fenced by the create transaction. */
+  activitySourceAuthorizationSnapshot?: CuratedContextActivitySourceAuthorizationSnapshot
+}
+
+/** Common actor-bearing input accepted by authorization-fenced context mutations. */
+type CuratedContextAuthorizationInput = WorkItemCollaborationScope & {
+  /** Mutation actor whose membership generation is fenced. */
+  actor: CuratedContextActorSnapshot
+}
+
+/** Curated context item 作成入力です。 */
+export type CreateCuratedContextItemInput = CuratedContextMutationInput &
+  CreateCuratedContextItemRequest
+
+/** Curated context item 更新入力です。 */
+export type UpdateCuratedContextItemInput = CuratedContextMutationInput &
+  UpdateCuratedContextItemRequest & {
+    /** 更新対象の curated context item ID です。 */
+    itemId: string
+  }
+
+/** Accepted resolution 選択・要約更新入力です。 */
+export type SetAcceptedResolutionInput = WorkItemCollaborationScope &
+  SetAcceptedResolutionRequest & {
+    /** Accepted resolution を所有する root comment ID です。 */
+    rootCommentId: string
+    /** Mutation actor の display-safe snapshot です。 */
+    actor: CuratedContextActorSnapshot
+    /** Root author 以外による mutation を許可するかどうかです。 */
+    canModerate: boolean
+    /** Notification から戻る Web path です。 */
+    deepLink?: string
+    /** State と同じ transaction に保存する audit context です。 */
+    auditContext?: MutationAuditContext
+    /** Authorization generations observed before the mutation. */
+    authorizationSnapshot?: CuratedContextAuthorizationSnapshot
+  }
+
+/** Accepted resolution history page 取得入力です。 */
+export type GetAcceptedResolutionHistoryInput = {
+  /** Work Item の collaboration entity key です。 */
+  entityKey: string
+  /** 履歴を所有する root comment ID です。 */
+  rootCommentId: string
+  /** 一 page の最大件数です。 */
+  limit?: number
+  /** 前 page が返した thread-bound opaque cursor です。 */
+  cursor?: string
 }
 
 /** Comment 作成入力です。 */
@@ -379,6 +570,30 @@ export interface CollaborationClient {
   getCommentSnapshot(
     input: GetCollaborationCommentSnapshotInput,
   ): Promise<CollaborationComment | undefined>
+  /** Work Item の curated context items を page 取得します。 */
+  getCuratedContext(input: GetCuratedContextInput): Promise<CuratedContextPage>
+  /** Curated context item の current snapshot を consistent read します。 */
+  getCuratedContextItemSnapshot(
+    input: GetCuratedContextItemSnapshotInput,
+  ): Promise<CuratedContextItem | undefined>
+  /** Curated context item の immutable revision history を新しい順に page 取得します。 */
+  getCuratedContextRevisions(
+    input: GetCuratedContextRevisionsInput,
+  ): Promise<CuratedContextRevisionPage>
+  /** Returns the immutable response for a previously committed idempotent context mutation. */
+  getCuratedContextMutationReplay(
+    input: GetCuratedContextMutationReplayInput,
+  ): Promise<CuratedContextItem | undefined>
+  /** Curated context item を作成し、任意の既存 item を atomically supersede します。 */
+  createCuratedContextItem(input: CreateCuratedContextItemInput): Promise<CuratedContextItem>
+  /** Curated context item を revision 条件付きで更新します。 */
+  updateCuratedContextItem(input: UpdateCuratedContextItemInput): Promise<CuratedContextItem>
+  /** Root thread の accepted resolution を version 条件付きで保存します。 */
+  setAcceptedResolution(input: SetAcceptedResolutionInput): Promise<CollaborationComment>
+  /** Root thread の accepted resolution history を新しい順に page 取得します。 */
+  getAcceptedResolutionHistory(
+    input: GetAcceptedResolutionHistoryInput,
+  ): Promise<AcceptedResolutionPage>
   /** Root comment または reply を作成します。 */
   createComment(input: CreateCollaborationCommentInput): Promise<CollaborationComment>
   /** Comment 本文と mention を version 条件付きで更新します。 */
@@ -442,6 +657,1650 @@ export class CollaborationError extends Error {
   }
 }
 
+/**
+ * Normalizes permission-derived curated context capabilities.
+ *
+ * @param value - Caller-supplied capability object.
+ * @returns A complete capability snapshot.
+ */
+function normalizeContextCapabilities(value: CuratedContextCapabilities) {
+  if (!isRecord(value) ||
+      typeof value.canCreate !== 'boolean' ||
+      typeof value.canEdit !== 'boolean' ||
+      typeof value.canReplace !== 'boolean' ||
+      typeof value.canAcceptResolution !== 'boolean') {
+    throw new CollaborationError(
+      400,
+      'InvalidContextCapabilities',
+      'Curated context capabilities are invalid.',
+    )
+  }
+  return {
+    canCreate: value.canCreate,
+    canEdit: value.canEdit,
+    canReplace: value.canReplace,
+    canAcceptResolution: value.canAcceptResolution,
+  } satisfies CuratedContextCapabilities
+}
+
+/**
+ * Converts a stored context item into its public contract without physical keys.
+ *
+ * @param value - Stored current snapshot.
+ * @returns Public curated context item.
+ */
+function toCuratedContextItem(value: StoredCuratedContextItem): CuratedContextItem {
+  return {
+    schemaVersion: COLLABORATION_CONTEXT_SCHEMA_VERSION,
+    id: value.id,
+    teamId: value.teamId,
+    workItemId: value.workItemId,
+    kind: value.kind,
+    state: value.state,
+    title: value.title,
+    body: value.body,
+    ...(value.source ? { source: value.source } : {}),
+    mentionMemberKeys: [...value.mentionMemberKeys],
+    createdBy: value.createdBy,
+    createdAt: value.createdAt,
+    updatedBy: value.updatedBy,
+    updatedAt: value.updatedAt,
+    revision: value.revision,
+    ...(value.supersededByItemId
+      ? { supersededByItemId: value.supersededByItemId }
+      : {}),
+  }
+}
+
+/**
+ * Parses and validates a curated context current snapshot row.
+ *
+ * @param value - DynamoDB document value.
+ * @returns Validated stored item.
+ */
+function toStoredCuratedContextItem(value: Record<string, unknown>): StoredCuratedContextItem {
+  try {
+    if (value.entryType !== 'context' ||
+        typeof value.entityKey !== 'string' ||
+        typeof value.recordKey !== 'string' ||
+        value.schemaVersion !== COLLABORATION_CONTEXT_SCHEMA_VERSION ||
+        typeof value.id !== 'string' ||
+        typeof value.teamId !== 'string' ||
+        typeof value.workItemId !== 'string' ||
+        !isPositiveSafeInteger(value.revision) ||
+        (value.lastMutationKey !== undefined &&
+          typeof value.lastMutationKey !== 'string') ||
+        !Array.isArray(value.mentionMemberKeys)) {
+      throw new Error('invalid context row')
+    }
+    const id = requireIdentifier(value.id, 'Curated context item ID')
+    if (value.recordKey !== contextItemRecordKey(id)) {
+      throw new Error('invalid context record key')
+    }
+    const entityOwner = parseWorkItemEntityOwner(value.entityKey)
+    if (entityOwner.teamId !== value.teamId || entityOwner.issueId !== value.workItemId) {
+      throw new Error('curated context owner does not match entity key')
+    }
+    const mentionMemberKeys = normalizeMentionMemberKeys(
+      value.mentionMemberKeys.filter((entry): entry is string => typeof entry === 'string'),
+    )
+    if (mentionMemberKeys.length !== value.mentionMemberKeys.length) {
+      throw new Error('invalid context mentions')
+    }
+    const source = value.source === undefined
+      ? undefined
+      : normalizeCuratedContextSource(value.source)
+    return {
+      entityKey: requireIdentifier(value.entityKey, 'Collaboration entity key'),
+      recordKey: value.recordKey,
+      entryType: 'context',
+      schemaVersion: COLLABORATION_CONTEXT_SCHEMA_VERSION,
+      id,
+      teamId: requireText(value.teamId, 'Team ID'),
+      workItemId: requireText(value.workItemId, 'Work Item ID'),
+      kind: requireCuratedContextKind(value.kind),
+      state: requireCuratedContextState(value.state),
+      title: normalizeContextTitle(value.title),
+      body: normalizeContextBody(value.body, 'Curated context body'),
+      ...(source ? { source } : {}),
+      mentionMemberKeys,
+      createdBy: normalizeContextActor(value.createdBy, 'Curated context creator'),
+      createdAt: normalizeIsoTimestamp(value.createdAt, 'Curated context createdAt'),
+      updatedBy: normalizeContextActor(value.updatedBy, 'Curated context updater'),
+      updatedAt: normalizeIsoTimestamp(value.updatedAt, 'Curated context updatedAt'),
+      revision: value.revision,
+      ...(typeof value.lastMutationKey === 'string'
+        ? {
+            lastMutationKey: requireTextValue(
+              value.lastMutationKey,
+              'Curated context mutation key',
+              64,
+            ),
+          }
+        : {}),
+      ...(typeof value.supersededByItemId === 'string'
+        ? {
+            supersededByItemId: requireIdentifier(
+              value.supersededByItemId,
+              'Superseding curated context item ID',
+            ),
+          }
+        : {}),
+    }
+  } catch (error) {
+    throw new CollaborationError(
+      503,
+      'InvalidCollaborationRecord',
+      'Curated context record is invalid.',
+      { cause: error },
+    )
+  }
+}
+
+/**
+ * Parses a persisted curated-context current snapshot for maintenance tooling.
+ *
+ * @param value - Untrusted DynamoDB document row.
+ * @returns Validated public curated-context snapshot without physical keys.
+ */
+export function parseCuratedContextItemRow(
+  value: Record<string, unknown>,
+): CuratedContextItem {
+  return toCuratedContextItem(toStoredCuratedContextItem(value))
+}
+
+/**
+ * Parses the canonical Team and Work Item owner embedded in a collaboration entity key.
+ *
+ * @param entityKey - Persisted collaboration entity key.
+ * @returns Canonical owner identifiers encoded by the key.
+ */
+function parseWorkItemEntityOwner(entityKey: string): { teamId: string; issueId: string } {
+  const marker = '#work-item#team/'
+  const markerIndex = entityKey.indexOf(marker)
+  const issueMarker = '/issue/'
+  const issueMarkerIndex = markerIndex < 0
+    ? -1
+    : entityKey.indexOf(issueMarker, markerIndex + marker.length)
+  if (markerIndex < 0 || issueMarkerIndex < 0) {
+    throw new Error('invalid work item entity key')
+  }
+  const teamId = entityKey.slice(markerIndex + marker.length, issueMarkerIndex)
+  const issueId = entityKey.slice(issueMarkerIndex + issueMarker.length)
+  if (!teamId || !issueId) {
+    throw new Error('invalid work item entity owner')
+  }
+  return { teamId, issueId }
+}
+
+/**
+ * Parses and validates a curated context order projection row.
+ *
+ * @param value - DynamoDB document value.
+ * @returns Validated order row.
+ */
+function toStoredCuratedContextOrder(value: Record<string, unknown>): StoredCuratedContextOrder {
+  try {
+    if (value.entryType !== 'context-order' ||
+        typeof value.entityKey !== 'string' ||
+        typeof value.recordKey !== 'string' ||
+        typeof value.itemId !== 'string' ||
+        typeof value.createdAt !== 'string') {
+      throw new Error('invalid context order row')
+    }
+    const row: StoredCuratedContextOrder = {
+      entityKey: requireIdentifier(value.entityKey, 'Collaboration entity key'),
+      recordKey: value.recordKey,
+      entryType: 'context-order',
+      itemId: requireIdentifier(value.itemId, 'Curated context item ID'),
+      createdAt: normalizeIsoTimestamp(value.createdAt, 'Curated context createdAt'),
+    }
+    if (row.recordKey !== contextOrderRecordKey(row.createdAt, row.itemId)) {
+      throw new Error('invalid context order record key')
+    }
+    return row
+  } catch (error) {
+    throw new CollaborationError(
+      503,
+      'InvalidCollaborationRecord',
+      'Curated context order record is invalid.',
+      { cause: error },
+    )
+  }
+}
+
+/**
+ * Parses and strictly validates an append-only curated context revision row.
+ *
+ * @param value - DynamoDB document value.
+ * @param expectedEntityKey - Collaboration scope requested by the caller.
+ * @param expectedItemId - Curated context item requested by the caller.
+ * @returns Validated immutable revision row.
+ */
+function toStoredCuratedContextRevision(
+  value: Record<string, unknown>,
+  expectedEntityKey: string,
+  expectedItemId: string,
+): StoredCuratedContextRevision {
+  try {
+    if (value.entryType !== 'context-revision' ||
+        value.entityKey !== expectedEntityKey ||
+        typeof value.recordKey !== 'string' ||
+        value.itemId !== expectedItemId ||
+        !isPositiveSafeInteger(value.revision) ||
+        typeof value.createdAt !== 'string' ||
+        !isRecord(value.snapshot)) {
+      throw new Error('invalid context revision row')
+    }
+    const itemId = requireIdentifier(expectedItemId, 'Curated context item ID')
+    if (value.recordKey !== contextRevisionRecordKey(itemId, value.revision)) {
+      throw new Error('invalid context revision record key')
+    }
+    const snapshot = toCuratedContextItem(toStoredCuratedContextItem({
+      ...value.snapshot,
+      entityKey: expectedEntityKey,
+      recordKey: contextItemRecordKey(itemId),
+      entryType: 'context',
+    }))
+    const createdAt = normalizeIsoTimestamp(value.createdAt, 'Curated context revision createdAt')
+    if (snapshot.id !== itemId ||
+        snapshot.revision !== value.revision ||
+        snapshot.updatedAt !== createdAt) {
+      throw new Error('context revision snapshot mismatch')
+    }
+    return {
+      entityKey: expectedEntityKey,
+      recordKey: value.recordKey,
+      entryType: 'context-revision',
+      itemId,
+      revision: value.revision,
+      snapshot,
+      createdAt,
+    }
+  } catch (error) {
+    throw new CollaborationError(
+      503,
+      'InvalidCollaborationRecord',
+      'Curated context revision record is invalid.',
+      { cause: error },
+    )
+  }
+}
+
+/**
+ * Parses and strictly validates a durable curated-context mutation receipt.
+ *
+ * @param value - DynamoDB document value.
+ * @param expectedEntityKey - Collaboration scope requested by the caller.
+ * @param expectedRecordKey - Receipt key derived from the caller's idempotency identity.
+ * @returns Validated mutation receipt.
+ */
+function toStoredCuratedContextMutationReceipt(
+  value: Record<string, unknown>,
+  expectedEntityKey: string,
+  expectedRecordKey: string,
+): StoredCuratedContextMutationReceipt {
+  try {
+    if (value.entryType !== 'context-mutation-receipt' ||
+        value.entityKey !== expectedEntityKey ||
+        value.recordKey !== expectedRecordKey ||
+        (value.operation !== 'create' && value.operation !== 'update') ||
+        typeof value.requestFingerprint !== 'string' ||
+        typeof value.itemId !== 'string' ||
+        !isPositiveSafeInteger(value.responseRevision)) {
+      throw new Error('invalid context mutation receipt')
+    }
+    return {
+      entityKey: expectedEntityKey,
+      recordKey: expectedRecordKey,
+      entryType: 'context-mutation-receipt',
+      operation: value.operation,
+      requestFingerprint: requireTextValue(
+        value.requestFingerprint,
+        'Curated context request fingerprint',
+        256,
+      ),
+      itemId: requireIdentifier(value.itemId, 'Curated context item ID'),
+      responseRevision: value.responseRevision,
+    }
+  } catch (error) {
+    throw new CollaborationError(
+      503,
+      'InvalidCollaborationRecord',
+      'Curated context mutation receipt is invalid.',
+      { cause: error },
+    )
+  }
+}
+
+/**
+ * Builds a deterministic context current-snapshot write with a revision fence.
+ *
+ * @param tableName - Collaboration table name.
+ * @param item - New current snapshot.
+ * @param expectedRevision - Revision expected in the current row.
+ * @returns DynamoDB transaction item.
+ */
+function contextSnapshotPut(
+  tableName: string,
+  item: StoredCuratedContextItem,
+  expectedRevision: number,
+) {
+  return {
+    Put: {
+      TableName: tableName,
+      Item: item,
+      ConditionExpression: 'attribute_exists(entityKey) AND attribute_exists(recordKey) AND #revision = :expectedRevision',
+      ExpressionAttributeNames: { '#revision': 'revision' },
+      ExpressionAttributeValues: { ':expectedRevision': expectedRevision },
+    },
+  }
+}
+
+/**
+ * Builds an append-only context revision transaction row.
+ *
+ * @param tableName - Collaboration table name.
+ * @param item - Snapshot represented by the revision.
+ * @returns DynamoDB transaction item.
+ */
+function contextRevisionPut(tableName: string, item: StoredCuratedContextItem) {
+  return {
+    Put: {
+      TableName: tableName,
+      Item: {
+        entityKey: item.entityKey,
+        recordKey: contextRevisionRecordKey(item.id, item.revision),
+        entryType: 'context-revision',
+        itemId: item.id,
+        revision: item.revision,
+        snapshot: toCuratedContextItem(item),
+        createdAt: item.updatedAt,
+      },
+      ConditionExpression: 'attribute_not_exists(entityKey) AND attribute_not_exists(recordKey)',
+    },
+  }
+}
+
+/**
+ * Builds the atomic generation increment for one curated-context ledger.
+ *
+ * @param tableName - Collaboration table name.
+ * @param entityKey - Work Item collaboration entity key.
+ * @returns DynamoDB transaction item that increments the ledger generation.
+ */
+function contextLedgerIncrement(tableName: string, entityKey: string) {
+  return {
+    Update: {
+      TableName: tableName,
+      Key: { entityKey, recordKey: CURATED_CONTEXT_LEDGER_RECORD_KEY },
+      UpdateExpression:
+        'SET #entryType = :entryType, #generation = if_not_exists(#generation, :zero) + :one',
+      ConditionExpression:
+        'attribute_not_exists(#entityKey) OR ' +
+        '(#entryType = :entryType AND #generation >= :zero)',
+      ExpressionAttributeNames: {
+        '#entityKey': 'entityKey',
+        '#entryType': 'entryType',
+        '#generation': 'generation',
+      },
+      ExpressionAttributeValues: {
+        ':entryType': 'context-ledger',
+        ':zero': 0,
+        ':one': 1,
+      },
+    },
+  }
+}
+
+/**
+ * Builds an append-only receipt that points to an immutable mutation response revision.
+ *
+ * @param tableName - Collaboration table name.
+ * @param context - Request identity and fingerprint.
+ * @param operation - Curated-context mutation kind.
+ * @param item - Successful response snapshot stored in the same transaction.
+ * @returns DynamoDB transaction item.
+ */
+function contextMutationReceiptPut(
+  tableName: string,
+  context: MutationAuditContext,
+  operation: StoredCuratedContextMutationReceipt['operation'],
+  item: StoredCuratedContextItem,
+) {
+  return {
+    Put: {
+      TableName: tableName,
+      Item: {
+        entityKey: item.entityKey,
+        recordKey: contextMutationReceiptRecordKey(context),
+        entryType: 'context-mutation-receipt',
+        operation,
+        requestFingerprint: context.requestFingerprint,
+        itemId: item.id,
+        responseRevision: item.revision,
+      } satisfies StoredCuratedContextMutationReceipt,
+      ConditionExpression: 'attribute_not_exists(entityKey) AND attribute_not_exists(recordKey)',
+    },
+  }
+}
+
+/**
+ * Creates the immutable order projection for a new context item.
+ *
+ * @param item - Stored current snapshot.
+ * @returns Order projection row.
+ */
+function createContextOrderRow(item: StoredCuratedContextItem): StoredCuratedContextOrder {
+  return {
+    entityKey: item.entityKey,
+    recordKey: contextOrderRecordKey(item.createdAt, item.id),
+    entryType: 'context-order',
+    itemId: item.id,
+    createdAt: item.createdAt,
+  }
+}
+
+/**
+ * Creates a non-public marker for replaying one curated-context mutation.
+ *
+ * @param context - Optional request idempotency and fingerprint context.
+ * @returns A deterministic marker, or undefined for non-idempotent internal calls.
+ */
+function createCuratedContextMutationKey(
+  context: MutationAuditContext | undefined,
+): string | undefined {
+  if (!context) return undefined
+
+  return createHash('sha256')
+    .update(`${context.idempotencyKeyHash}\0${context.requestFingerprint}`)
+    .digest('hex')
+}
+
+/**
+ * Creates a receipt key from the idempotency identity without the request fingerprint.
+ *
+ * Keeping the fingerprint out of the physical key lets a reused idempotency key be
+ * detected and rejected instead of silently creating a second receipt.
+ *
+ * @param context - Request identity whose raw idempotency key has already been hashed.
+ * @returns DynamoDB record key for the mutation receipt.
+ */
+function contextMutationReceiptRecordKey(context: MutationAuditContext) {
+  const idempotencyKeyHash = requireTextValue(
+    context.idempotencyKeyHash,
+    'Curated context idempotency key hash',
+    256,
+  )
+  const digest = createHash('sha256')
+    .update(`curated-context-receipt-v1\0${idempotencyKeyHash}`)
+    .digest('hex')
+  return `CONTEXT_RECEIPT#${digest}`
+}
+
+/**
+ * Creates a deterministic curated context item identifier.
+ *
+ * @param occurredAt - Mutation timestamp.
+ * @param context - Optional idempotent audit context.
+ * @param entityKey - Collaboration entity key.
+ * @returns Stable context item identifier.
+ */
+function createContextItemId(
+  occurredAt: string,
+  context: MutationAuditContext | undefined,
+  entityKey: string,
+) {
+  if (context) {
+    const digest = createHash('sha256')
+      .update(`${entityKey}\0context\0${context.idempotencyKeyHash}\0${context.requestFingerprint}`)
+      .digest('hex')
+      .slice(0, 40)
+    return `ctx_${digest}`
+  }
+  const digest = createHash('sha256')
+    .update(`${entityKey}\0${occurredAt}\0${randomUUID()}`)
+    .digest('hex')
+    .slice(0, 24)
+  return `ctx_${occurredAt.replace(/[^0-9]/g, '').slice(0, 17)}_${digest}`
+}
+
+/**
+ * Creates a deterministic accepted resolution identifier.
+ *
+ * @param occurredAt - Mutation timestamp.
+ * @param context - Optional idempotent audit context.
+ * @param entityKey - Collaboration entity key.
+ * @param rootCommentId - Owning root comment identifier.
+ * @param sourceCommentId - Accepted source comment identifier.
+ * @param rootVersion - Root version before the mutation.
+ * @returns Stable accepted resolution identifier.
+ */
+function createAcceptedResolutionId(
+  occurredAt: string,
+  context: MutationAuditContext | undefined,
+  entityKey: string,
+  rootCommentId: string,
+  sourceCommentId: string,
+  rootVersion: number,
+) {
+  const seed = context
+    ? `${context.idempotencyKeyHash}\0${context.requestFingerprint}`
+    : `${occurredAt}\0${randomUUID()}`
+  const digest = createHash('sha256')
+    .update(`${entityKey}\0${rootCommentId}\0${sourceCommentId}\0${rootVersion}\0${seed}`)
+    .digest('hex')
+    .slice(0, 40)
+  return `res_${digest}`
+}
+
+/**
+ * Creates the current-snapshot record key for a context item.
+ *
+ * @param itemId - Curated context item identifier.
+ * @returns DynamoDB record key.
+ */
+function contextItemRecordKey(itemId: string) {
+  return `CONTEXT#${encodeURIComponent(requireIdentifier(itemId, 'Curated context item ID'))}`
+}
+
+/**
+ * Creates the deterministic order projection key for a context item.
+ *
+ * @param createdAt - Item creation timestamp.
+ * @param itemId - Curated context item identifier.
+ * @returns DynamoDB record key.
+ */
+function contextOrderRecordKey(createdAt: string, itemId: string) {
+  return `CONTEXT_ORDER#${createdAt}#${encodeURIComponent(itemId)}`
+}
+
+/**
+ * Creates the append-only revision key for a context item.
+ *
+ * @param itemId - Curated context item identifier.
+ * @param revision - Positive item revision.
+ * @returns DynamoDB record key.
+ */
+function contextRevisionRecordKey(itemId: string, revision: number) {
+  return `CONTEXT_REVISION#${encodeURIComponent(itemId)}#${String(revision).padStart(12, '0')}`
+}
+
+/**
+ * Encodes a scope-bound curated context cursor.
+ *
+ * @param cursor - Validated cursor payload.
+ * @returns Opaque cursor string.
+ */
+function encodeCuratedContextCursor(cursor: CuratedContextCursor) {
+  return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url')
+}
+
+/**
+ * Decodes and validates a scope-bound curated context cursor.
+ *
+ * @param value - Opaque cursor string.
+ * @param entityKey - Expected collaboration scope.
+ * @returns DynamoDB exclusive-start key when supplied.
+ */
+function decodeCuratedContextCursor(value: string | undefined, entityKey: string) {
+  if (!value) {
+    return undefined
+  }
+  try {
+    const parsed: unknown = JSON.parse(Buffer.from(value, 'base64url').toString('utf8'))
+    if (!isRecord(parsed) ||
+        parsed.version !== 2 ||
+        parsed.entityKey !== entityKey ||
+        parsed.prefix !== 'CONTEXT_ORDER#' ||
+        typeof parsed.recordKey !== 'string' ||
+        !parsed.recordKey.startsWith('CONTEXT_ORDER#') ||
+        !isNonNegativeSafeInteger(parsed.generation)) {
+      throw new Error('cursor mismatch')
+    }
+    return {
+      key: { entityKey, recordKey: parsed.recordKey },
+      generation: parsed.generation,
+    }
+  } catch (error) {
+    throw new CollaborationError(
+      400,
+      'InvalidCollaborationCursor',
+      'Curated context cursor is invalid.',
+      { cause: error },
+    )
+  }
+}
+
+/**
+ * Encodes a scope- and thread-bound accepted resolution history cursor.
+ *
+ * @param cursor - Validated cursor payload.
+ * @returns Opaque cursor string.
+ */
+function encodeAcceptedResolutionCursor(cursor: AcceptedResolutionCursor) {
+  return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url')
+}
+
+/**
+ * Captures the root snapshot that an accepted-resolution cursor must continue from.
+ *
+ * @param root - Current root comment snapshot.
+ * @returns Version and accepted-resolution pointer bound to the cursor.
+ */
+function acceptedResolutionCursorSnapshot(
+  root: Pick<StoredComment, 'version' | 'acceptedResolutionId'>,
+): Pick<AcceptedResolutionCursor, 'rootVersion' | 'acceptedResolutionId'> {
+  return {
+    rootVersion: root.version,
+    acceptedResolutionId: root.acceptedResolutionId ?? null,
+  }
+}
+
+/**
+ * Decodes and validates an accepted resolution history cursor.
+ *
+ * @param value - Opaque cursor string.
+ * @param entityKey - Expected collaboration scope.
+ * @param rootCommentId - Expected owning root comment.
+ * @returns Validated cursor, or undefined for the first page.
+ */
+function decodeAcceptedResolutionCursor(
+  value: string | undefined,
+  entityKey: string,
+  rootCommentId: string,
+): AcceptedResolutionCursor | undefined {
+  if (!value) {
+    return undefined
+  }
+  try {
+    const parsed: unknown = JSON.parse(Buffer.from(value, 'base64url').toString('utf8'))
+    if (!isRecord(parsed) ||
+        parsed.version !== 2 ||
+        parsed.entityKey !== entityKey ||
+        parsed.rootCommentId !== rootCommentId ||
+        (parsed.phase !== 'append' && parsed.phase !== 'legacy')) {
+      throw new Error('cursor mismatch')
+    }
+    const rawAcceptedResolutionId = parsed.acceptedResolutionId
+    if (!isPositiveSafeInteger(parsed.rootVersion) ||
+        !(rawAcceptedResolutionId === null || typeof rawAcceptedResolutionId === 'string')) {
+      throw new Error('root snapshot mismatch')
+    }
+    const acceptedResolutionId = rawAcceptedResolutionId === null
+      ? null
+      : requireIdentifier(rawAcceptedResolutionId, 'Accepted resolution pointer')
+    if (parsed.phase === 'append') {
+      if (typeof parsed.recordKey !== 'string' ||
+          !parsed.recordKey.startsWith(acceptedResolutionRecordPrefix(rootCommentId))) {
+        throw new Error('append cursor mismatch')
+      }
+      return {
+        version: 2,
+        entityKey,
+        rootCommentId,
+        rootVersion: parsed.rootVersion,
+        acceptedResolutionId,
+        phase: 'append',
+        recordKey: parsed.recordKey,
+      }
+    }
+    if (!isNonNegativeSafeInteger(parsed.legacyOffset)) {
+      throw new Error('legacy cursor mismatch')
+    }
+    return {
+      version: 2,
+      entityKey,
+      rootCommentId,
+      rootVersion: parsed.rootVersion,
+      acceptedResolutionId,
+      phase: 'legacy',
+      legacyOffset: parsed.legacyOffset,
+    }
+  } catch (error) {
+    throw new CollaborationError(
+      400,
+      'InvalidCollaborationCursor',
+      'Accepted resolution cursor is invalid.',
+      { cause: error },
+    )
+  }
+}
+
+/**
+ * Builds context mention notification candidates with actor suppression.
+ *
+ * @param input - Context mutation input.
+ * @returns Deduplicated notification candidates.
+ */
+function buildContextNotificationCandidates(input: CuratedContextMutationInput & {
+  /** Mention member keys present in the mutation payload. */
+  mentionMemberKeys?: string[]
+}) {
+  const candidates: CollaborationNotificationCandidate[] = [
+    ...(input.notificationCandidates ?? []),
+    ...normalizeMentionMemberKeys(input.mentionMemberKeys).map((memberKey) => ({
+      memberKey,
+      reason: 'mention',
+    })),
+  ]
+  return dedupeNotificationCandidates(candidates, input.actor.id)
+}
+
+/**
+ * Creates notification and activity metadata for a context mutation.
+ *
+ * @param input - Context mutation scope.
+ * @param actorMemberKey - Normalized actor member key.
+ * @param contextItemId - Mutated context item identifier.
+ * @param sourceRevision - Canonical revision represented by the audit event.
+ * @param notificationCandidates - Deduplicated recipient candidates.
+ * @returns Audit metadata.
+ */
+function createContextAuditMetadata(
+  input: CuratedContextMutationInput,
+  actorMemberKey: string,
+  contextItemId: string,
+  sourceRevision: number,
+  notificationCandidates: CollaborationNotificationCandidate[],
+) {
+  return {
+    actorMemberKey: normalizeMemberKey(actorMemberKey),
+    contextItemId,
+    sourceRevision,
+    teamId: input.teamId,
+    issueId: input.issueId,
+    projectId: input.projectId,
+    notificationTitle: input.workItemTitle,
+    deepLink: appendContextDeepLink(input.deepLink, contextItemId),
+    notificationCandidates,
+  }
+}
+
+/**
+ * Adds context focus to an optional collaboration deep link.
+ *
+ * @param deepLink - Base Web path.
+ * @param contextItemId - Context item to focus.
+ * @returns Focused deep link when a base path exists.
+ */
+function appendContextDeepLink(deepLink: string | undefined, contextItemId: string) {
+  if (!deepLink) {
+    return undefined
+  }
+  const [pathAndQuery, fragment] = deepLink.split('#', 2)
+  const separator = pathAndQuery.includes('?') ? '&' : '?'
+  const focusedPath = `${pathAndQuery}${separator}${new URLSearchParams({ contextItemId }).toString()}`
+  return fragment ? `${focusedPath}#${fragment}` : focusedPath
+}
+
+/**
+ * Creates audit metadata for accepted resolution mutations.
+ *
+ * @param input - Accepted resolution mutation input.
+ * @param actorMemberKey - Normalized actor member key.
+ * @param acceptedCommentId - Accepted or superseded source comment identifier.
+ * @returns Audit metadata.
+ */
+function createAcceptedResolutionAuditMetadata(
+  input: SetAcceptedResolutionInput,
+  actorMemberKey: string,
+  acceptedCommentId: string,
+) {
+  return {
+    actorMemberKey: normalizeMemberKey(actorMemberKey),
+    acceptedCommentId,
+    rootCommentId: input.rootCommentId,
+    teamId: input.teamId,
+    issueId: input.issueId,
+    projectId: input.projectId,
+    notificationTitle: input.workItemTitle,
+    deepLink: appendCommentDeepLink(
+      input.deepLink,
+      acceptedCommentId,
+      input.rootCommentId,
+    ),
+    notificationCandidates: [],
+  }
+}
+
+/**
+ * Validates a display-safe actor snapshot.
+ *
+ * @param value - Untrusted actor snapshot.
+ * @param label - Validation label.
+ * @returns Normalized actor snapshot.
+ */
+function normalizeContextActor(value: unknown, label: string): CuratedContextActorSnapshot {
+  if (!isRecord(value)) {
+    throw new CollaborationError(400, 'InvalidContextActor', `${label} is invalid.`)
+  }
+  const id = requireTextValue(value.id, `${label} ID`, 512)
+  const displayName = requireTextValue(value.displayName, `${label} display name`, 200)
+  const avatarUrl = value.avatarUrl === undefined
+    ? undefined
+    : requireSafeUrl(value.avatarUrl, `${label} avatar URL`)
+  return {
+    id,
+    displayName,
+    ...(avatarUrl ? { avatarUrl } : {}),
+  }
+}
+
+/**
+ * Validates a curated context provenance snapshot.
+ *
+ * @param value - Untrusted provenance value.
+ * @returns Normalized provenance.
+ */
+function normalizeCuratedContextSource(value: unknown): CuratedContextSource {
+  if (!isRecord(value)) {
+    throw new CollaborationError(400, 'InvalidContextSource', 'Curated context source is invalid.')
+  }
+  const kind = requireCuratedContextSourceKind(value.kind)
+  const sourceId = requireTextValue(value.sourceId, 'Curated context source ID', 1_024)
+  const containerId = value.containerId === undefined
+    ? undefined
+    : requireTextValue(value.containerId, 'Curated context source container ID', 1_024)
+  const originalBody = value.originalBody === undefined
+    ? undefined
+    : requireBoundedExactText(
+        value.originalBody,
+        'Curated context source original body',
+        COLLABORATION_CONTEXT_BODY_MAX_LENGTH,
+      )
+  const quote = value.quote === undefined
+    ? undefined
+    : normalizeCuratedContextQuote(value.quote, originalBody)
+  const permalink = value.permalink === undefined
+    ? undefined
+    : requireSafeUrl(value.permalink, 'Curated context source permalink', true)
+  const actor = value.actor === undefined
+    ? undefined
+    : normalizeContextActor(value.actor, 'Curated context source actor')
+  const occurredAt = normalizeIsoTimestamp(value.occurredAt, 'Curated context source occurredAt')
+  const capturedRevision = normalizeSourceRevision(
+    value.capturedRevision,
+    'Curated context captured source revision',
+  )
+  const currentRevision = normalizeSourceRevision(
+    value.currentRevision,
+    'Curated context current source revision',
+  )
+  const availability = requireCuratedContextSourceAvailability(value.availability)
+  const availabilityReason = value.availabilityReason === undefined
+    ? undefined
+    : requireTextValue(
+        value.availabilityReason,
+        'Curated context source availability reason',
+        1_000,
+      )
+  return {
+    kind,
+    sourceId,
+    ...(containerId ? { containerId } : {}),
+    ...(originalBody !== undefined ? { originalBody } : {}),
+    ...(quote ? { quote } : {}),
+    ...(permalink ? { permalink } : {}),
+    ...(actor ? { actor } : {}),
+    occurredAt,
+    ...(capturedRevision !== undefined ? { capturedRevision } : {}),
+    ...(currentRevision !== undefined ? { currentRevision } : {}),
+    availability,
+    ...(availabilityReason ? { availabilityReason } : {}),
+  }
+}
+
+/**
+ * Validates a quote and its optional UTF-16 range against an original body.
+ *
+ * @param value - Untrusted quote value.
+ * @param originalBody - Capture-time original body when available.
+ * @returns Normalized quote.
+ */
+function normalizeCuratedContextQuote(
+  value: unknown,
+  originalBody: string | undefined,
+): CuratedContextQuote {
+  if (!isRecord(value)) {
+    throw new CollaborationError(400, 'InvalidContextQuote', 'Curated context quote is invalid.')
+  }
+  const text = requireTextValue(
+    value.text,
+    'Curated context quote text',
+    COLLABORATION_CONTEXT_BODY_MAX_LENGTH,
+    false,
+    true,
+    true,
+  )
+  const hasStart = value.startOffset !== undefined
+  const hasEnd = value.endOffset !== undefined
+  if (hasStart !== hasEnd) {
+    throw new CollaborationError(
+      400,
+      'InvalidContextQuote',
+      'Quote startOffset and endOffset must be supplied together.',
+    )
+  }
+  if (!hasStart || !hasEnd) {
+    if (originalBody !== undefined && !originalBody.includes(text)) {
+      throw new CollaborationError(
+        400,
+        'InvalidContextQuote',
+        'Quote text is not present in the captured source body.',
+      )
+    }
+    return { text }
+  }
+  if (!isNonNegativeSafeInteger(value.startOffset) ||
+      !isNonNegativeSafeInteger(value.endOffset) ||
+      value.startOffset >= value.endOffset ||
+      (originalBody !== undefined && value.endOffset > originalBody.length) ||
+      (originalBody !== undefined &&
+        originalBody.slice(value.startOffset, value.endOffset) !== text)) {
+    throw new CollaborationError(
+      400,
+      'InvalidContextQuote',
+      'Curated context quote range is invalid.',
+    )
+  }
+  return { text, startOffset: value.startOffset, endOffset: value.endOffset }
+}
+
+/**
+ * Validates a source-native revision value.
+ *
+ * @param value - Untrusted revision.
+ * @param label - Validation label.
+ * @returns Normalized optional revision.
+ */
+function normalizeSourceRevision(value: unknown, label: string) {
+  if (value === undefined) {
+    return undefined
+  }
+  if (typeof value === 'string') {
+    return requireTextValue(value, label, 512)
+  }
+  if (isNonNegativeSafeInteger(value)) {
+    return value
+  }
+  throw new CollaborationError(400, 'InvalidContextSource', `${label} is invalid.`)
+}
+
+/**
+ * Validates a curated context semantic kind.
+ *
+ * @param value - Untrusted kind.
+ * @returns Supported semantic kind.
+ */
+function requireCuratedContextKind(value: unknown): CuratedContextItemKind {
+  if (value === 'decision' || value === 'action' || value === 'risk' || value === 'context') {
+    return value
+  }
+  throw new CollaborationError(400, 'InvalidContextKind', 'Curated context kind is invalid.')
+}
+
+/**
+ * Validates any persisted curated context state.
+ *
+ * @param value - Untrusted state.
+ * @returns Supported state.
+ */
+function requireCuratedContextState(value: unknown): CuratedContextItemState {
+  if (value === 'active' || value === 'accepted' || value === 'completed' || value === 'superseded') {
+    return value
+  }
+  throw new CollaborationError(400, 'InvalidContextState', 'Curated context state is invalid.')
+}
+
+/**
+ * Validates a state available to in-place context updates.
+ *
+ * @param value - Untrusted state.
+ * @returns Mutable state.
+ */
+function requireMutableCuratedContextState(value: unknown): Exclude<CuratedContextItemState, 'superseded'> {
+  const state = requireCuratedContextState(value)
+  if (state === 'superseded') {
+    throw new CollaborationError(
+      400,
+      'InvalidContextState',
+      'Use atomic replacement to supersede a curated context item.',
+    )
+  }
+  return state
+}
+
+/**
+ * Validates a curated context source kind.
+ *
+ * @param value - Untrusted source kind.
+ * @returns Supported source kind.
+ */
+function requireCuratedContextSourceKind(value: unknown): CuratedContextSourceKind {
+  if (value === 'comment' || value === 'external-chat' || value === 'document' || value === 'activity') {
+    return value
+  }
+  throw new CollaborationError(400, 'InvalidContextSource', 'Curated context source kind is invalid.')
+}
+
+/**
+ * Validates a curated context source availability state.
+ *
+ * @param value - Untrusted availability state.
+ * @returns Supported availability state.
+ */
+function requireCuratedContextSourceAvailability(
+  value: unknown,
+): CuratedContextSourceAvailability {
+  if (value === 'available' ||
+      value === 'edited' ||
+      value === 'deleted' ||
+      value === 'permission-lost' ||
+      value === 'retention-expired') {
+    return value
+  }
+  throw new CollaborationError(
+    400,
+    'InvalidContextSource',
+    'Curated context source availability is invalid.',
+  )
+}
+
+/**
+ * Normalizes a curated context title.
+ *
+ * @param value - Untrusted title.
+ * @returns Normalized title.
+ */
+function normalizeContextTitle(value: unknown) {
+  return requireTextValue(
+    value,
+    'Curated context title',
+    COLLABORATION_CONTEXT_TITLE_MAX_LENGTH,
+  )
+}
+
+/**
+ * Normalizes a curated context Markdown body or accepted-resolution summary.
+ *
+ * @param value - Untrusted text.
+ * @param label - Validation label.
+ * @returns Normalized text.
+ */
+function normalizeContextBody(value: unknown, label: string) {
+  return requireTextValue(value, label, COLLABORATION_CONTEXT_BODY_MAX_LENGTH, false)
+}
+
+/**
+ * Validates a positive context revision.
+ *
+ * @param value - Untrusted expected revision.
+ */
+function assertExpectedContextRevision(value: number) {
+  if (!isPositiveSafeInteger(value)) {
+    throw new CollaborationError(
+      400,
+      'InvalidContextRevision',
+      'A positive expectedRevision is required.',
+    )
+  }
+}
+
+/**
+ * Validates and canonicalizes an ISO 8601 timestamp.
+ *
+ * @param value - Untrusted timestamp.
+ * @param label - Validation label.
+ * @returns Canonical timestamp.
+ */
+function normalizeIsoTimestamp(value: unknown, label: string) {
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new CollaborationError(400, 'InvalidContextTimestamp', `${label} is required.`)
+  }
+  const timestamp = new Date(value)
+  if (!Number.isFinite(timestamp.getTime())) {
+    throw new CollaborationError(400, 'InvalidContextTimestamp', `${label} is invalid.`)
+  }
+  return timestamp.toISOString()
+}
+
+/**
+ * Validates bounded, non-empty text and optionally trims surrounding whitespace.
+ *
+ * @param value - Untrusted text.
+ * @param label - Validation label.
+ * @param maxLength - Maximum UTF-16 length.
+ * @param trim - Whether to trim surrounding whitespace.
+ * @param allowCarriageReturn - Whether carriage returns are valid in exact text.
+ * @param preserveLineEndings - Whether line endings must remain byte-for-byte unchanged.
+ * @returns Validated text.
+ */
+function requireTextValue(
+  value: unknown,
+  label: string,
+  maxLength: number,
+  trim = true,
+  allowCarriageReturn = false,
+  preserveLineEndings = false,
+) {
+  if (typeof value !== 'string') {
+    throw new CollaborationError(400, 'InvalidCollaborationInput', `${label} must be text.`)
+  }
+  const normalized = preserveLineEndings
+    ? value
+    : trim
+      ? value.replace(/\r\n?/g, '\n').trim()
+      : value.replace(/\r\n?/g, '\n')
+  if (!normalized.trim()) {
+    throw new CollaborationError(400, 'InvalidCollaborationInput', `${label} is required.`)
+  }
+  if (normalized.length > maxLength) {
+    throw new CollaborationError(400, 'InvalidCollaborationInput', `${label} is too long.`)
+  }
+  if (hasUnsafeControlCharacter(normalized, allowCarriageReturn)) {
+    throw new CollaborationError(
+      400,
+      'InvalidCollaborationInput',
+      `${label} contains control characters.`,
+    )
+  }
+  return normalized
+}
+
+/**
+ * Validates bounded exact text while preserving whitespace.
+ *
+ * @param value - Untrusted text.
+ * @param label - Validation label.
+ * @param maxLength - Maximum UTF-16 length.
+ * @returns Validated exact text.
+ */
+function requireBoundedExactText(value: unknown, label: string, maxLength: number) {
+  if (
+    typeof value !== 'string' ||
+    value.length > maxLength ||
+    hasUnsafeControlCharacter(value, true)
+  ) {
+    throw new CollaborationError(400, 'InvalidContextSource', `${label} is invalid.`)
+  }
+  return value
+}
+
+/**
+ * Validates a retained URL or application-relative permalink.
+ *
+ * @param value - Untrusted URL.
+ * @param label - Validation label.
+ * @param allowRelative - Whether an application-relative path is accepted.
+ * @returns Validated URL.
+ */
+function requireSafeUrl(value: unknown, label: string, allowRelative = false) {
+  const url = requireTextValue(value, label, 2_048)
+  if (allowRelative && url.startsWith('/') && !url.startsWith('//')) {
+    return url
+  }
+  try {
+    const parsed = new URL(url)
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+      throw new Error('unsupported protocol')
+    }
+    return parsed.toString()
+  } catch (error) {
+    throw new CollaborationError(400, 'InvalidContextSource', `${label} is invalid.`, {
+      cause: error,
+    })
+  }
+}
+
+/**
+ * Tests whether a value is a plain object-like record.
+ *
+ * @param value - Unknown value.
+ * @returns Whether record property access is safe.
+ */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * Tests whether a value is a positive safe integer.
+ *
+ * @param value - Unknown value.
+ * @returns Whether the value is a positive safe integer.
+ */
+function isPositiveSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 1
+}
+
+/**
+ * Tests whether a value is a non-negative safe integer.
+ *
+ * @param value - Unknown value.
+ * @returns Whether the value is a non-negative safe integer.
+ */
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+}
+
+/**
+ * Parses accepted resolution history from a stored root comment.
+ *
+ * @param value - Untrusted stored history.
+ * @param rootCommentId - Root comment owning the history.
+ * @returns Validated accepted and superseded resolution entries.
+ */
+function normalizeAcceptedResolutions(value: unknown, rootCommentId: string) {
+  if (value === undefined) {
+    return []
+  }
+  if (!Array.isArray(value)) {
+    throw new CollaborationError(
+      503,
+      'InvalidCollaborationRecord',
+      'Accepted resolution history is invalid.',
+    )
+  }
+  const resolutions = value.map((entry): AcceptedResolution => {
+    if (!isRecord(entry) ||
+        !isPositiveSafeInteger(entry.capturedCommentRevision) ||
+        (entry.state !== 'accepted' && entry.state !== 'superseded')) {
+      throw new CollaborationError(
+        503,
+        'InvalidCollaborationRecord',
+        'Accepted resolution history is invalid.',
+      )
+    }
+    try {
+      const id = requireIdentifierValue(entry.id, 'Accepted resolution ID')
+      const sourceCommentId = requireIdentifierValue(
+        entry.sourceCommentId,
+        'Accepted resolution source comment ID',
+      )
+      const sourceRootCommentId = requireIdentifierValue(
+        entry.sourceRootCommentId,
+        'Accepted resolution source root comment ID',
+      )
+      if (sourceRootCommentId !== rootCommentId) {
+        throw new Error('accepted resolution root mismatch')
+      }
+      const base = {
+        id,
+        sourceCommentId,
+        sourceRootCommentId,
+        capturedCommentRevision: entry.capturedCommentRevision,
+        capturedCommentBody: requireTextValue(
+          entry.capturedCommentBody,
+          'Accepted resolution captured comment body',
+          COLLABORATION_COMMENT_MAX_LENGTH,
+          false,
+        ),
+        summary: normalizeContextBody(entry.summary, 'Accepted resolution summary'),
+        acceptedBy: normalizeContextActor(entry.acceptedBy, 'Accepted resolution actor'),
+        acceptedAt: normalizeIsoTimestamp(entry.acceptedAt, 'Accepted resolution acceptedAt'),
+      }
+      if (entry.state === 'accepted') {
+        return { ...base, state: 'accepted' }
+      }
+      return {
+        ...base,
+        state: 'superseded',
+        supersededByResolutionId: requireIdentifierValue(
+          entry.supersededByResolutionId,
+          'Superseding accepted resolution ID',
+        ),
+        supersededBy: normalizeContextActor(
+          entry.supersededBy,
+          'Accepted resolution superseding actor',
+        ),
+        supersededAt: normalizeIsoTimestamp(
+          entry.supersededAt,
+          'Accepted resolution supersededAt',
+        ),
+      }
+    } catch (error) {
+      throw new CollaborationError(
+        503,
+        'InvalidCollaborationRecord',
+        'Accepted resolution history is invalid.',
+        { cause: error },
+      )
+    }
+  })
+  if (new Set(resolutions.map((resolution) => resolution.id)).size !== resolutions.length ||
+      resolutions.filter((resolution) => resolution.state === 'accepted').length > 1) {
+    throw new CollaborationError(
+      503,
+      'InvalidCollaborationRecord',
+      'Accepted resolution history is invalid.',
+    )
+  }
+  return resolutions
+}
+
+/**
+ * Validates a required identifier from an unknown stored value.
+ *
+ * @param value - Untrusted identifier.
+ * @param label - Validation label.
+ * @returns Validated identifier.
+ */
+function requireIdentifierValue(value: unknown, label: string) {
+  if (typeof value !== 'string') {
+    throw new CollaborationError(400, 'InvalidCollaborationIdentifier', `${label} is required.`)
+  }
+  return requireIdentifier(value, label)
+}
+
+/**
+ * Serializes a hydrated comment without derived reactions or resolution history.
+ *
+ * @param comment - Hydrated stored comment.
+ * @returns Bounded physical comment row.
+ */
+function toStoredCommentStorageItem(comment: StoredComment) {
+  const currentResolution = comment.acceptedResolutions.find(
+    (resolution) => resolution.state === 'accepted',
+  )
+  return {
+    entityKey: comment.entityKey,
+    recordKey: comment.recordKey,
+    entryType: 'comment',
+    id: comment.id,
+    rootCommentId: comment.rootCommentId,
+    ...(comment.parentCommentId ? { parentCommentId: comment.parentCommentId } : {}),
+    authorMemberKey: comment.authorMemberKey,
+    bodyMarkdown: comment.bodyMarkdown,
+    version: comment.version,
+    mentionMemberKeys: comment.mentionMemberKeys,
+    createdAt: comment.createdAt,
+    updatedAt: comment.updatedAt,
+    ...(comment.editedAt ? { editedAt: comment.editedAt } : {}),
+    ...(comment.deletedAt ? { deletedAt: comment.deletedAt } : {}),
+    ...(comment.resolvedAt ? { resolvedAt: comment.resolvedAt } : {}),
+    ...(comment.resolvedByMemberKey
+      ? { resolvedByMemberKey: comment.resolvedByMemberKey }
+      : {}),
+    ...(comment.acceptedResolutionId
+      ? { acceptedResolutionId: comment.acceptedResolutionId }
+      : {}),
+    ...(currentResolution ? { acceptedResolution: currentResolution } : {}),
+    ...(comment.legacyAcceptedResolutions.length > 0
+      ? { acceptedResolutions: comment.legacyAcceptedResolutions }
+      : {}),
+  }
+}
+
+/**
+ * Serializes the original successful accepted-resolution response for a receipt.
+ *
+ * @param comment - Successful bounded root response.
+ * @returns Physical comment-shaped snapshot without legacy inline history.
+ */
+function toAcceptedResolutionReceiptStorageResponse(comment: StoredComment) {
+  return toStoredCommentStorageItem({
+    ...comment,
+    bodyMarkdown: '',
+    mentionMemberKeys: [],
+    legacyAcceptedResolutions: [],
+  })
+}
+
+/**
+ * Builds an append-only accepted resolution transaction row.
+ *
+ * @param tableName - Collaboration table name.
+ * @param entityKey - Collaboration entity key.
+ * @param rootCommentId - Owning root comment identifier.
+ * @param resolution - Accepted or superseded resolution snapshot.
+ * @param recordedAt - Mutation timestamp for the append-only row.
+ * @returns DynamoDB transaction item.
+ */
+function acceptedResolutionPut(
+  tableName: string,
+  entityKey: string,
+  rootCommentId: string,
+  resolution: AcceptedResolution,
+  recordedAt: string,
+) {
+  const item: StoredAcceptedResolution = {
+    entityKey,
+    recordKey: acceptedResolutionRecordKey(
+      rootCommentId,
+      recordedAt,
+      resolution.id,
+      resolution.state,
+    ),
+    entryType: 'accepted-resolution',
+    rootCommentId,
+    resolution,
+    recordedAt,
+  }
+  return {
+    Put: {
+      TableName: tableName,
+      Item: item,
+      ConditionExpression: 'attribute_not_exists(entityKey) AND attribute_not_exists(recordKey)',
+    },
+  }
+}
+
+/**
+ * Builds a durable accepted-resolution idempotency receipt transaction row.
+ *
+ * @param tableName - Collaboration table name.
+ * @param entityKey - Collaboration entity key.
+ * @param rootCommentId - Owning root comment identifier.
+ * @param resolutionId - Deterministic resolution identifier.
+ * @param context - Request identity and fingerprint bound to the receipt.
+ * @param response - Original successful bounded root response.
+ * @returns DynamoDB transaction item.
+ */
+function acceptedResolutionReceiptPut(
+  tableName: string,
+  entityKey: string,
+  rootCommentId: string,
+  resolutionId: string,
+  context: MutationAuditContext,
+  response: StoredComment,
+) {
+  const item = {
+    entityKey,
+    recordKey: acceptedResolutionReceiptRecordKey(context),
+    entryType: 'accepted-resolution-receipt',
+    rootCommentId,
+    resolutionId,
+    requestFingerprint: context.requestFingerprint,
+    response: toAcceptedResolutionReceiptStorageResponse(response),
+  } satisfies StoredAcceptedResolutionReceipt
+  return {
+    Put: {
+      TableName: tableName,
+      Item: item,
+      ConditionExpression: 'attribute_not_exists(entityKey) AND attribute_not_exists(recordKey)',
+    },
+  }
+}
+
+/**
+ * Parses an append-only accepted resolution row.
+ *
+ * @param value - DynamoDB document value.
+ * @param expectedRootCommentId - Root comment being hydrated.
+ * @returns Validated append-only row.
+ */
+function toStoredAcceptedResolution(
+  value: Record<string, unknown>,
+  expectedRootCommentId: string,
+): StoredAcceptedResolution {
+  try {
+    if (value.entryType !== 'accepted-resolution' ||
+        typeof value.entityKey !== 'string' ||
+        typeof value.recordKey !== 'string' ||
+        value.rootCommentId !== expectedRootCommentId ||
+        typeof value.recordedAt !== 'string') {
+      throw new Error('invalid accepted resolution row')
+    }
+    const [resolution] = normalizeAcceptedResolutions([value.resolution], expectedRootCommentId)
+    if (!resolution) {
+      throw new Error('missing accepted resolution snapshot')
+    }
+    const recordedAt = normalizeIsoTimestamp(value.recordedAt, 'Accepted resolution recordedAt')
+    const currentRecordKey = acceptedResolutionRecordKey(
+      expectedRootCommentId,
+      recordedAt,
+      resolution.id,
+      resolution.state,
+    )
+    const legacyRecordKey = legacyAcceptedResolutionRecordKey(
+      expectedRootCommentId,
+      recordedAt,
+      resolution.id,
+      resolution.state,
+    )
+    if (value.recordKey !== currentRecordKey && value.recordKey !== legacyRecordKey) {
+      throw new Error('invalid accepted resolution record key')
+    }
+    return {
+      entityKey: requireIdentifier(value.entityKey, 'Collaboration entity key'),
+      recordKey: value.recordKey,
+      entryType: 'accepted-resolution',
+      rootCommentId: expectedRootCommentId,
+      resolution,
+      recordedAt,
+    }
+  } catch (error) {
+    throw new CollaborationError(
+      503,
+      'InvalidCollaborationRecord',
+      'Accepted resolution row is invalid.',
+      { cause: error },
+    )
+  }
+}
+
+/**
+ * Parses a durable accepted-resolution idempotency receipt.
+ *
+ * @param value - DynamoDB document value.
+ * @param expectedEntityKey - Collaboration scope expected by the caller.
+ * @param expectedRecordKey - Receipt key derived from the idempotency identity.
+ * @returns Validated receipt and original successful response snapshot.
+ */
+function toStoredAcceptedResolutionReceipt(
+  value: Record<string, unknown>,
+  expectedEntityKey: string,
+  expectedRecordKey: string,
+) {
+  try {
+    if (value.entryType !== 'accepted-resolution-receipt' ||
+        value.entityKey !== expectedEntityKey ||
+        value.recordKey !== expectedRecordKey ||
+        typeof value.rootCommentId !== 'string' ||
+        typeof value.resolutionId !== 'string' ||
+        typeof value.requestFingerprint !== 'string' ||
+        !isRecord(value.response)) {
+      throw new Error('invalid accepted resolution receipt')
+    }
+    const rootCommentId = requireIdentifier(value.rootCommentId, 'Root comment ID')
+    const resolutionId = requireIdentifier(value.resolutionId, 'Accepted resolution ID')
+    const requestFingerprint = requireTextValue(
+      value.requestFingerprint,
+      'Accepted resolution request fingerprint',
+      256,
+    )
+    const response = toStoredComment(value.response)
+    if (response.entityKey !== expectedEntityKey ||
+        response.id !== rootCommentId ||
+        response.acceptedResolutionId !== resolutionId ||
+        response.acceptedResolutions[0]?.id !== resolutionId) {
+      throw new Error('accepted resolution receipt response mismatch')
+    }
+    return {
+      entityKey: expectedEntityKey,
+      recordKey: expectedRecordKey,
+      entryType: 'accepted-resolution-receipt',
+      rootCommentId,
+      resolutionId,
+      requestFingerprint,
+      response,
+    }
+  } catch (error) {
+    throw new CollaborationError(
+      503,
+      'InvalidCollaborationRecord',
+      'Accepted resolution receipt is invalid.',
+      { cause: error },
+    )
+  }
+}
+
+/**
+ * Creates the query prefix for one root's append-only resolution history.
+ *
+ * @param rootCommentId - Root comment identifier.
+ * @returns DynamoDB record-key prefix.
+ */
+function acceptedResolutionRecordPrefix(rootCommentId: string) {
+  return `RESOLUTION#${encodeURIComponent(rootCommentId)}#`
+}
+
+/**
+ * Creates a deterministic receipt key for one accepted-resolution mutation.
+ *
+ * @param context - Request identity whose raw idempotency key has already been hashed.
+ * @returns DynamoDB record key.
+ */
+function acceptedResolutionReceiptRecordKey(context: MutationAuditContext) {
+  const idempotencyKeyHash = requireTextValue(
+    context.idempotencyKeyHash,
+    'Accepted resolution idempotency key hash',
+    256,
+  )
+  const digest = createHash('sha256')
+    .update(`accepted-resolution-receipt-v2\0${idempotencyKeyHash}`)
+    .digest('hex')
+  return `RESOLUTION_RECEIPT#${digest}`
+}
+
+/**
+ * Creates an append-only resolution history record key.
+ *
+ * @param rootCommentId - Root comment identifier.
+ * @param recordedAt - Mutation timestamp.
+ * @param resolutionId - Resolution identifier.
+ * @param state - Snapshot state.
+ * @returns DynamoDB record key.
+ */
+function acceptedResolutionRecordKey(
+  rootCommentId: string,
+  recordedAt: string,
+  resolutionId: string,
+  state: AcceptedResolution['state'],
+) {
+  const stateRank = state === 'accepted' ? '1' : '0'
+  return `${acceptedResolutionRecordPrefix(rootCommentId)}${recordedAt}#${stateRank}#${encodeURIComponent(resolutionId)}#${state}`
+}
+
+/**
+ * Creates the pre-rank history key retained for read compatibility.
+ *
+ * @param rootCommentId - Root comment identifier.
+ * @param recordedAt - Mutation timestamp.
+ * @param resolutionId - Resolution identifier.
+ * @param state - Snapshot state.
+ * @returns Legacy DynamoDB record key.
+ */
+function legacyAcceptedResolutionRecordKey(
+  rootCommentId: string,
+  recordedAt: string,
+  resolutionId: string,
+  state: AcceptedResolution['state'],
+) {
+  return `${acceptedResolutionRecordPrefix(rootCommentId)}${recordedAt}#${encodeURIComponent(resolutionId)}#${state}`
+}
+
+/** Physical comment row with the current accepted-resolution pointer. */
 type StoredComment = CollaborationComment & {
   /** DynamoDB partition key です。 */
   entityKey: string
@@ -449,6 +2308,128 @@ type StoredComment = CollaborationComment & {
   recordKey: string
   /** Row discriminator です。 */
   entryType: 'comment'
+  /** Physical current snapshot と一致する accepted resolution ID です。 */
+  acceptedResolutionId?: string
+  /** 旧 schema の physical root row に残る inline history です。 */
+  legacyAcceptedResolutions: AcceptedResolution[]
+}
+
+/** Accepted resolution history の append-only row です。 */
+type StoredAcceptedResolution = {
+  /** DynamoDB partition key です。 */
+  entityKey: string
+  /** DynamoDB sort key です。 */
+  recordKey: string
+  /** Row discriminator です。 */
+  entryType: 'accepted-resolution'
+  /** Resolution を所有する root comment ID です。 */
+  rootCommentId: string
+  /** Append-only snapshot です。 */
+  resolution: AcceptedResolution
+  /** Snapshot を記録した日時です。 */
+  recordedAt: string
+}
+
+/** Accepted resolution mutation の durable idempotency receipt です。 */
+type StoredAcceptedResolutionReceipt = {
+  /** DynamoDB partition key です。 */
+  entityKey: string
+  /** DynamoDB sort key です。 */
+  recordKey: string
+  /** Row discriminator です。 */
+  entryType: 'accepted-resolution-receipt'
+  /** Resolution を所有する root comment ID です。 */
+  rootCommentId: string
+  /** Deterministic accepted resolution ID です。 */
+  resolutionId: string
+  /** Canonical request fingerprint bound to the idempotency identity. */
+  requestFingerprint: string
+  /** Original successful mutation response の bounded snapshot です。 */
+  response: ReturnType<typeof toAcceptedResolutionReceiptStorageResponse>
+}
+
+/** DynamoDB に保存する curated context current snapshot です。 */
+type StoredCuratedContextItem = CuratedContextItem & {
+  /** DynamoDB partition key です。 */
+  entityKey: string
+  /** DynamoDB sort key です。 */
+  recordKey: string
+  /** Row discriminator です。 */
+  entryType: 'context'
+  /** 最後に commit した API mutation を response-loss retry と照合する marker です。 */
+  lastMutationKey?: string
+}
+
+/** Canonical source capture and the optional comment snapshot fenced at commit time. */
+type CapturedCuratedContextSource = {
+  /** Permission-checked immutable provenance stored on the context item. */
+  source: CuratedContextSource
+  /** Comment snapshot whose version and deletion state must still match at commit time. */
+  comment?: StoredComment
+}
+
+/** Curated context 一覧の作成日時順 projection row です。 */
+type StoredCuratedContextOrder = {
+  /** DynamoDB partition key です。 */
+  entityKey: string
+  /** DynamoDB sort key です。 */
+  recordKey: string
+  /** Row discriminator です。 */
+  entryType: 'context-order'
+  /** Current snapshot を参照する item ID です。 */
+  itemId: string
+  /** Item の作成日時です。 */
+  createdAt: string
+}
+
+/** Curated context item の append-only revision row です。 */
+type StoredCuratedContextRevision = {
+  /** DynamoDB partition key です。 */
+  entityKey: string
+  /** DynamoDB sort key です。 */
+  recordKey: string
+  /** Row discriminator です。 */
+  entryType: 'context-revision'
+  /** Revision history を所有する item ID です。 */
+  itemId: string
+  /** Snapshot と一致する positive revision です。 */
+  revision: number
+  /** Immutable public item snapshot です。 */
+  snapshot: CuratedContextItem
+  /** Snapshot を保存した ISO 8601 timestamp です。 */
+  createdAt: string
+}
+
+/** Append-only receipt for one idempotent curated-context mutation. */
+type StoredCuratedContextMutationReceipt = {
+  /** DynamoDB partition key. */
+  entityKey: string
+  /** DynamoDB sort key derived from the idempotency identity. */
+  recordKey: string
+  /** Row discriminator. */
+  entryType: 'context-mutation-receipt'
+  /** Mutation kind bound to the receipt. */
+  operation: 'create' | 'update'
+  /** Canonical request fingerprint bound to the idempotency identity. */
+  requestFingerprint: string
+  /** Curated-context item returned by the original successful mutation. */
+  itemId: string
+  /** Immutable item revision returned by the original successful mutation. */
+  responseRevision: number
+}
+
+/** Curated context cursor payload です。 */
+type CuratedContextCursor = {
+  /** Cursor schema version です。 */
+  version: 2
+  /** Cursor を発行した entity key です。 */
+  entityKey: string
+  /** Cursor を発行した row prefix です。 */
+  prefix: 'CONTEXT_ORDER#'
+  /** DynamoDB last evaluated sort key です。 */
+  recordKey: string
+  /** Context-ledger generation observed when the cursor was issued. */
+  generation: number
 }
 
 type StoredWatcher = {
@@ -504,7 +2485,30 @@ type DiscussionCursor = {
   recordKey: string
 }
 
+/** Accepted resolution history cursor payload です。 */
+type AcceptedResolutionCursor = {
+  /** Cursor schema version です。 */
+  version: 2
+  /** Cursor を発行した entity key です。 */
+  entityKey: string
+  /** Cursor を発行した root comment ID です。 */
+  rootCommentId: string
+  /** Root comment revision observed when the cursor was issued. */
+  rootVersion: number
+  /** Accepted-resolution pointer observed when the cursor was issued. */
+  acceptedResolutionId: string | null
+  /** Append-only rows または legacy inline history の pagination phase です。 */
+  phase: 'append' | 'legacy'
+  /** Append phase の直前 page で最後に処理した physical row key です。 */
+  recordKey?: string
+  /** Legacy phase の直前 page までに返した item 数です。 */
+  legacyOffset?: number
+}
+
 const defaultPresenceTtlSeconds = 45
+const acceptedResolutionHistoryDefaultLimit = 10
+const acceptedResolutionHistoryMaxLimit = 10
+const curatedContextPageLimit = 10
 const localTableInitializers = new WeakMap<DynamoDBClient, Map<string, Promise<void>>>()
 
 /** Work Item scope の canonical collaboration entity key を作成します。 */
@@ -641,6 +2645,950 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
     )
   }
 
+  /** Root thread の accepted resolution history を新しい順に page 取得します。 */
+  async getAcceptedResolutionHistory(
+    input: GetAcceptedResolutionHistoryInput,
+  ): Promise<AcceptedResolutionPage> {
+    await this.ensureLocalTable()
+    return this.readAcceptedResolutionHistoryPage(input, 0)
+  }
+
+  /** Reads one history page and retries once when the root pointer changes mid-read. */
+  private async readAcceptedResolutionHistoryPage(
+    input: GetAcceptedResolutionHistoryInput,
+    attempt: number,
+  ): Promise<AcceptedResolutionPage> {
+    const entityKey = requireIdentifier(input.entityKey, 'Collaboration entity key')
+    const rootCommentId = requireIdentifier(input.rootCommentId, 'Root comment ID')
+    const limit = clampAcceptedResolutionHistoryLimit(input.limit)
+    const cursor = decodeAcceptedResolutionCursor(input.cursor, entityKey, rootCommentId)
+    const root = await this.getRequiredStoredComment(entityKey, rootCommentId)
+    if (root.parentCommentId || root.rootCommentId !== root.id) {
+      throw new CollaborationError(400, 'CommentNotRoot', 'Only root comments own accepted resolutions.')
+    }
+    if (
+      cursor &&
+      (cursor.rootVersion !== root.version ||
+        cursor.acceptedResolutionId !== (root.acceptedResolutionId ?? null))
+    ) {
+      throw new CollaborationError(
+        409,
+        'AcceptedResolutionHistoryConflict',
+        'Accepted resolution history changed before the next page was read.',
+      )
+    }
+
+    const legacyHistory = [...root.legacyAcceptedResolutions].sort((left, right) => {
+      const leftAt = left.supersededAt ?? left.acceptedAt
+      const rightAt = right.supersededAt ?? right.acceptedAt
+      return rightAt.localeCompare(leftAt) || right.id.localeCompare(left.id)
+    })
+    if (cursor?.phase === 'legacy') {
+      const offset = cursor.legacyOffset ?? 0
+      const items = legacyHistory.slice(offset, offset + limit)
+      const nextOffset = offset + items.length
+      return {
+        items,
+        ...(nextOffset < legacyHistory.length
+          ? {
+              nextCursor: encodeAcceptedResolutionCursor({
+                version: 2,
+                entityKey,
+                rootCommentId,
+                ...acceptedResolutionCursorSnapshot(root),
+                phase: 'legacy',
+                legacyOffset: nextOffset,
+              }),
+            }
+          : {}),
+      }
+    }
+
+    const prefix = acceptedResolutionRecordPrefix(rootCommentId)
+    const exclusiveStartKey = cursor?.recordKey
+      ? { entityKey, recordKey: cursor.recordKey }
+      : undefined
+    const response = await this.documentClient.send(new QueryCommand({
+      TableName: this.tableName,
+      KeyConditionExpression: 'entityKey = :entityKey AND begins_with(recordKey, :prefix)',
+      ExpressionAttributeValues: { ':entityKey': entityKey, ':prefix': prefix },
+      ExclusiveStartKey: exclusiveStartKey,
+      ConsistentRead: true,
+      ScanIndexForward: false,
+      // One logical resolution produces at most an accepted and a superseded snapshot.
+      Limit: limit * 2,
+    }))
+    const latestRoot = await this.getRequiredStoredComment(entityKey, rootCommentId)
+    if (
+      latestRoot.version !== root.version ||
+      latestRoot.acceptedResolutionId !== root.acceptedResolutionId
+    ) {
+      if (attempt < 1) {
+        return this.readAcceptedResolutionHistoryPage(input, attempt + 1)
+      }
+      throw new CollaborationError(
+        409,
+        'AcceptedResolutionHistoryConflict',
+        'Accepted resolution history changed while it was being read.',
+      )
+    }
+    const physicalRows = response.Items ?? []
+    const items: AcceptedResolution[] = []
+    let lastProcessedRecordKey: string | undefined
+    let stoppedBeforeBatchEnd = false
+    for (const [index, physicalRow] of physicalRows.entries()) {
+      const stored = toStoredAcceptedResolution(physicalRow, rootCommentId)
+      lastProcessedRecordKey = stored.recordKey
+      if (stored.resolution.state === 'superseded' ||
+          stored.resolution.id === root.acceptedResolutionId) {
+        items.push(stored.resolution)
+      }
+      if (items.length === limit) {
+        stoppedBeforeBatchEnd = index < physicalRows.length - 1
+        break
+      }
+    }
+
+    const hasMoreAppendRows = stoppedBeforeBatchEnd || Boolean(response.LastEvaluatedKey)
+    if (hasMoreAppendRows && lastProcessedRecordKey) {
+      return {
+        items,
+        nextCursor: encodeAcceptedResolutionCursor({
+          version: 2,
+          entityKey,
+          rootCommentId,
+          ...acceptedResolutionCursorSnapshot(root),
+          phase: 'append',
+          recordKey: lastProcessedRecordKey,
+        }),
+      }
+    }
+
+    const remaining = limit - items.length
+    const legacyItems = legacyHistory.slice(0, remaining)
+    items.push(...legacyItems)
+    return {
+      items,
+      ...(legacyItems.length < legacyHistory.length
+        ? {
+            nextCursor: encodeAcceptedResolutionCursor({
+              version: 2,
+              entityKey,
+              rootCommentId,
+              ...acceptedResolutionCursorSnapshot(root),
+              phase: 'legacy',
+              legacyOffset: legacyItems.length,
+            }),
+          }
+        : {}),
+    }
+  }
+
+  /** Work Item の curated context items を page 取得します。 */
+  async getCuratedContext(input: GetCuratedContextInput) {
+    await this.ensureLocalTable()
+    const entityKey = requireIdentifier(input.entityKey, 'Collaboration entity key')
+    const prefix: CuratedContextCursor['prefix'] = 'CONTEXT_ORDER#'
+    const limit = clampCuratedContextLimit(input.limit)
+    const capabilities = normalizeContextCapabilities(input.capabilities)
+    const generation = await this.getCuratedContextLedgerGeneration(entityKey)
+    const decodedCursor = decodeCuratedContextCursor(input.cursor, entityKey)
+    if (decodedCursor && decodedCursor.generation !== generation) {
+      throw new CollaborationError(
+        409,
+        'CollaborationCursorExpired',
+        'Curated context changed while paging. Restart from the first page.',
+      )
+    }
+
+    try {
+      const response = await this.documentClient.send(new QueryCommand({
+        TableName: this.tableName,
+        KeyConditionExpression: 'entityKey = :entityKey AND begins_with(recordKey, :prefix)',
+        ExpressionAttributeValues: { ':entityKey': entityKey, ':prefix': prefix },
+        ExclusiveStartKey: decodedCursor?.key,
+        ConsistentRead: true,
+        ScanIndexForward: false,
+        Limit: limit,
+      }))
+      const orderRows = (response.Items ?? []).map(toStoredCuratedContextOrder)
+      const items = await Promise.all(orderRows.map(async (row) => {
+        const item = await this.getStoredCuratedContextItem(entityKey, row.itemId)
+        if (!item || item.createdAt !== row.createdAt) {
+          throw new CollaborationError(
+            503,
+            'InvalidCollaborationRecord',
+            'Curated context order record is invalid.',
+          )
+        }
+        return this.reconcileCuratedContextItemSource(item)
+      }))
+      const currentGeneration = await this.getCuratedContextLedgerGeneration(entityKey)
+      if (currentGeneration !== generation) {
+        throw new CollaborationError(
+          409,
+          'CollaborationCursorExpired',
+          'Curated context changed while paging. Restart from the first page.',
+        )
+      }
+
+      return {
+        schemaVersion: COLLABORATION_CONTEXT_SCHEMA_VERSION,
+        items,
+        ...(response.LastEvaluatedKey?.recordKey &&
+            typeof response.LastEvaluatedKey.recordKey === 'string'
+          ? {
+              nextCursor: encodeCuratedContextCursor({
+                version: 2,
+                entityKey,
+                prefix,
+                recordKey: response.LastEvaluatedKey.recordKey,
+                generation,
+              }),
+            }
+          : {}),
+        capabilities,
+      } satisfies CuratedContextPage
+    } catch (error) {
+      throw toCollaborationStoreError(error)
+    }
+  }
+
+  /** Curated context item の current snapshot を consistent read します。 */
+  async getCuratedContextItemSnapshot(input: GetCuratedContextItemSnapshotInput) {
+    await this.ensureLocalTable()
+    const entityKey = requireIdentifier(input.entityKey, 'Collaboration entity key')
+    const item = await this.getStoredCuratedContextItem(
+      entityKey,
+      requireIdentifier(input.itemId, 'Curated context item ID'),
+    )
+    return item ? this.reconcileCuratedContextItemSource(item) : undefined
+  }
+
+  /** Curated context item の immutable revision history を新しい順に page 取得します。 */
+  async getCuratedContextRevisions(
+    input: GetCuratedContextRevisionsInput,
+  ): Promise<CuratedContextRevisionPage> {
+    await this.ensureLocalTable()
+    const entityKey = requireIdentifier(input.entityKey, 'Collaboration entity key')
+    const itemId = requireIdentifier(input.itemId, 'Curated context item ID')
+    const prefix = `CONTEXT_REVISION#${encodeURIComponent(itemId)}#`
+    const limit = clampCuratedContextLimit(input.limit)
+    const exclusiveStartKey = decodeCursor(input.cursor, entityKey, prefix)
+    await this.getRequiredStoredCuratedContextItem(entityKey, itemId)
+
+    try {
+      const response = await this.documentClient.send(new QueryCommand({
+        TableName: this.tableName,
+        KeyConditionExpression: 'entityKey = :entityKey AND begins_with(recordKey, :prefix)',
+        ExpressionAttributeValues: { ':entityKey': entityKey, ':prefix': prefix },
+        ExclusiveStartKey: exclusiveStartKey,
+        ConsistentRead: true,
+        ScanIndexForward: false,
+        Limit: limit,
+      }))
+      const items = (response.Items ?? []).map((row) =>
+        toStoredCuratedContextRevision(row, entityKey, itemId).snapshot
+      )
+      return {
+        items,
+        ...(response.LastEvaluatedKey?.recordKey &&
+            typeof response.LastEvaluatedKey.recordKey === 'string'
+          ? {
+              nextCursor: encodeCursor({
+                version: 1,
+                entityKey,
+                prefix,
+                recordKey: response.LastEvaluatedKey.recordKey,
+              }),
+            }
+          : {}),
+      }
+    } catch (error) {
+      throw toCollaborationStoreError(error)
+    }
+  }
+
+  /** Returns the immutable response for a previously committed idempotent context mutation. */
+  async getCuratedContextMutationReplay(
+    input: GetCuratedContextMutationReplayInput,
+  ): Promise<CuratedContextItem | undefined> {
+    await this.ensureLocalTable()
+    const entityKey = requireIdentifier(input.entityKey, 'Collaboration entity key')
+    const workspaceId = requireIdentifier(
+      input.auditContext.workspaceId,
+      'Curated context workspace ID',
+    )
+    if (!entityKey.startsWith(`${workspaceId}#`)) {
+      throw new CollaborationError(
+        400,
+        'InvalidCollaborationScope',
+        'Curated context mutation receipt scope is invalid.',
+      )
+    }
+    if (input.operation !== 'create' && input.operation !== 'update') {
+      throw new CollaborationError(
+        400,
+        'InvalidCollaborationInput',
+        'Curated context mutation operation is invalid.',
+      )
+    }
+    const requestedItemId = input.operation === 'update'
+      ? requireIdentifier(input.itemId ?? '', 'Curated context item ID')
+      : undefined
+    const receipt = await this.getStoredCuratedContextMutationReceipt(
+      entityKey,
+      input.auditContext,
+    )
+    if (!receipt) return undefined
+
+    if (receipt.operation !== input.operation ||
+        receipt.requestFingerprint !== input.auditContext.requestFingerprint ||
+        (requestedItemId !== undefined && receipt.itemId !== requestedItemId)) {
+      throw new CollaborationError(
+        409,
+        'CollaborationIdempotencyConflict',
+        'Curated context idempotency key was reused with different input.',
+      )
+    }
+    const revision = await this.getStoredCuratedContextRevision(
+      entityKey,
+      receipt.itemId,
+      receipt.responseRevision,
+    )
+    if (!revision) {
+      throw new CollaborationError(
+        503,
+        'InvalidCollaborationRecord',
+        'Curated context mutation receipt response is missing.',
+      )
+    }
+    return revision.snapshot
+  }
+
+  /** Curated context item を作成し、任意の既存 item を atomically supersede します。 */
+  async createCuratedContextItem(input: CreateCuratedContextItemInput) {
+    await this.ensureLocalTable()
+    assertWorkItemScope(input)
+    assertCuratedContextAuthorizationSnapshot(input)
+    assertCuratedContextDocumentSourceAuthorizationSnapshot(input)
+    assertCuratedContextActivitySourceAuthorizationSnapshot(input)
+    if (input.auditContext) {
+      const replayed = await this.getCuratedContextMutationReplay({
+        entityKey: input.entityKey,
+        operation: 'create',
+        auditContext: input.auditContext,
+      })
+      if (replayed) return replayed
+    }
+    const actor = normalizeContextActor(input.actor, 'Curated context actor')
+    const occurredAt = normalizeIsoTimestamp(
+      input.auditContext?.occurredAt ?? new Date().toISOString(),
+      'Curated context createdAt',
+    )
+    const id = createContextItemId(occurredAt, input.auditContext, input.entityKey)
+    const lastMutationKey = createCuratedContextMutationKey(input.auditContext)
+    if (lastMutationKey) {
+      const existing = await this.getStoredCuratedContextItem(input.entityKey, id)
+      if (existing?.lastMutationKey === lastMutationKey) {
+        return this.reconcileCuratedContextItemSource(existing)
+      }
+    }
+
+    const mentionMemberKeys = normalizeMentionMemberKeys(input.mentionMemberKeys)
+    const superseded = input.supersedesItemId
+      ? await this.getRequiredStoredCuratedContextItem(input.entityKey, input.supersedesItemId)
+      : undefined
+    const capturedSource = input.source
+      ? await this.captureCuratedContextSource(input.entityKey, input.source)
+      : undefined
+    const source = capturedSource?.source ?? superseded?.source
+    const item: StoredCuratedContextItem = {
+      entityKey: input.entityKey,
+      recordKey: contextItemRecordKey(id),
+      entryType: 'context',
+      schemaVersion: COLLABORATION_CONTEXT_SCHEMA_VERSION,
+      id,
+      teamId: requireText(input.teamId, 'Team ID'),
+      workItemId: requireText(input.issueId, 'Work Item ID'),
+      kind: requireCuratedContextKind(input.kind),
+      state: 'active',
+      title: normalizeContextTitle(input.title),
+      body: normalizeContextBody(input.body, 'Curated context body'),
+      ...(source ? { source } : {}),
+      mentionMemberKeys,
+      createdBy: actor,
+      createdAt: occurredAt,
+      updatedBy: actor,
+      updatedAt: occurredAt,
+      revision: 1,
+      ...(lastMutationKey ? { lastMutationKey } : {}),
+    }
+
+    if (superseded?.state === 'superseded' || superseded?.supersededByItemId) {
+      throw new CollaborationError(
+        409,
+        'ContextAlreadySuperseded',
+        'A superseded curated context item cannot be replaced again.',
+      )
+    }
+    if (superseded?.id === item.id) {
+      throw new CollaborationError(400, 'InvalidContextReplacement', 'An item cannot replace itself.')
+    }
+
+    const supersededAfter: StoredCuratedContextItem | undefined = superseded
+      ? {
+          ...superseded,
+          state: 'superseded',
+          supersededByItemId: item.id,
+          updatedBy: actor,
+          updatedAt: occurredAt,
+          revision: superseded.revision + 1,
+          ...(lastMutationKey ? { lastMutationKey } : {}),
+        }
+      : undefined
+    const notificationCandidates = buildContextNotificationCandidates(input)
+    const automaticWatchers = buildAutomaticWatcherCandidates(
+      actor.id,
+      mentionMemberKeys,
+      undefined,
+      input.automaticWatcherCandidates,
+    )
+    const createdAuditPut = createMutationAuditEventPut(this.auditTableName, input.auditContext, {
+      directoryId: input.workspaceId,
+      eventType: 'context-item.created',
+      entityType: 'work-item',
+      entityId: workItemEntityId(input.teamId, input.issueId),
+      target: {
+        type: 'context-item',
+        id: `${workItemEntityId(input.teamId, input.issueId)}/context-item/${item.id}`,
+      },
+      action: 'created',
+      occurredAt,
+      summary: `Curated ${item.kind} “${item.title}” was created.`,
+      changes: createAuditFieldChanges(
+        undefined,
+        { kind: item.kind, state: item.state, title: item.title, body: item.body },
+        ['kind', 'state', 'title', 'body'],
+        ['body'],
+      ),
+      metadata: createContextAuditMetadata(
+        input,
+        actor.id,
+        item.id,
+        item.revision,
+        notificationCandidates,
+      ),
+      sequence: 0,
+    })
+    const supersededAuditPut = supersededAfter
+      ? createMutationAuditEventPut(this.auditTableName, input.auditContext, {
+          directoryId: input.workspaceId,
+          eventType: 'context-item.superseded',
+          entityType: 'work-item',
+          entityId: workItemEntityId(input.teamId, input.issueId),
+          target: {
+            type: 'context-item',
+            id: `${workItemEntityId(input.teamId, input.issueId)}/context-item/${supersededAfter.id}`,
+          },
+          action: 'superseded',
+          occurredAt,
+          summary: `Curated ${supersededAfter.kind} “${supersededAfter.title}” was superseded.`,
+          changes: createAuditFieldChanges(
+            { state: superseded?.state, supersededByItemId: superseded?.supersededByItemId },
+            { state: 'superseded', supersededByItemId: item.id },
+            ['state', 'supersededByItemId'],
+          ),
+          metadata: createContextAuditMetadata(
+            input,
+            actor.id,
+            supersededAfter.id,
+            supersededAfter.revision,
+            [],
+          ),
+          sequence: 1,
+        })
+      : undefined
+    const transactionItems: NonNullable<TransactWriteCommandInput['TransactItems']> = [
+      parentIssueCondition(this.parentIssueTableName, input),
+      ...curatedContextAuthorizationConditions(input),
+      contextLedgerIncrement(this.tableName, input.entityKey),
+      ...(input.sourceAuthorizationSnapshot
+        ? curatedContextDocumentSourceConditions(input, input.sourceAuthorizationSnapshot)
+        : []),
+      ...(input.activitySourceAuthorizationSnapshot
+        ? curatedContextActivitySourceConditions(input, input.activitySourceAuthorizationSnapshot)
+        : []),
+      ...(capturedSource?.comment
+        ? [commentVersionCondition(this.tableName, input.entityKey, capturedSource.comment)]
+        : []),
+      ...(supersededAfter && superseded
+        ? [contextSnapshotPut(this.tableName, supersededAfter, superseded.revision)]
+        : []),
+      ...(supersededAfter ? [contextRevisionPut(this.tableName, supersededAfter)] : []),
+      {
+        Put: {
+          TableName: this.tableName,
+          Item: item,
+          ConditionExpression: 'attribute_not_exists(entityKey) AND attribute_not_exists(recordKey)',
+        },
+      },
+      {
+        Put: {
+          TableName: this.tableName,
+          Item: createContextOrderRow(item),
+          ConditionExpression: 'attribute_not_exists(entityKey) AND attribute_not_exists(recordKey)',
+        },
+      },
+      contextRevisionPut(this.tableName, item),
+      ...(input.auditContext
+        ? [contextMutationReceiptPut(this.tableName, input.auditContext, 'create', item)]
+        : []),
+      ...automaticWatchers.map(({ memberKey, reasons }) =>
+        autoWatcherUpdate(this.tableName, input.entityKey, memberKey, reasons, occurredAt)
+      ),
+      ...(createdAuditPut ? [createdAuditPut] : []),
+      ...(supersededAuditPut ? [supersededAuditPut] : []),
+    ]
+
+    try {
+      await this.documentClient.send(new TransactWriteCommand({ TransactItems: transactionItems }))
+      return toCuratedContextItem(item)
+    } catch (error) {
+      if (isConditionalFailure(error) && input.auditContext) {
+        const replayed = await this.getCuratedContextMutationReplay({
+          entityKey: input.entityKey,
+          operation: 'create',
+          auditContext: input.auditContext,
+        })
+        if (replayed) return replayed
+        const existing = await this.getStoredCuratedContextItem(input.entityKey, item.id)
+        if (existing && lastMutationKey && existing.lastMutationKey === lastMutationKey) {
+          return this.reconcileCuratedContextItemSource(existing)
+        }
+      }
+      throw await this.classifyContextWriteError(
+        error,
+        input.entityKey,
+        superseded?.id ?? item.id,
+        superseded?.revision,
+        capturedSource?.comment,
+      )
+    }
+  }
+
+  /** Curated context item を revision 条件付きで更新します。 */
+  async updateCuratedContextItem(input: UpdateCuratedContextItemInput) {
+    await this.ensureLocalTable()
+    assertWorkItemScope(input)
+    assertExpectedContextRevision(input.expectedRevision)
+    assertCuratedContextAuthorizationSnapshot(input)
+    if (input.auditContext) {
+      const replayed = await this.getCuratedContextMutationReplay({
+        entityKey: input.entityKey,
+        operation: 'update',
+        itemId: input.itemId,
+        auditContext: input.auditContext,
+      })
+      if (replayed) return replayed
+    }
+    const before = await this.getRequiredStoredCuratedContextItem(input.entityKey, input.itemId)
+    const lastMutationKey = createCuratedContextMutationKey(input.auditContext)
+    if (
+      lastMutationKey &&
+      before.lastMutationKey === lastMutationKey &&
+      before.revision === input.expectedRevision + 1
+    ) {
+      return this.reconcileCuratedContextItemSource(before)
+    }
+    if (before.state === 'superseded' || before.supersededByItemId) {
+      throw new CollaborationError(
+        409,
+        'ContextAlreadySuperseded',
+        'Superseded curated context items are immutable.',
+      )
+    }
+
+    const actor = normalizeContextActor(input.actor, 'Curated context actor')
+    const occurredAt = normalizeIsoTimestamp(
+      input.auditContext?.occurredAt ?? new Date().toISOString(),
+      'Curated context updatedAt',
+    )
+    const kind = input.kind === undefined ? before.kind : requireCuratedContextKind(input.kind)
+    const state = input.state === undefined ? before.state : requireMutableCuratedContextState(input.state)
+    const title = input.title === undefined ? before.title : normalizeContextTitle(input.title)
+    const body = input.body === undefined
+      ? before.body
+      : normalizeContextBody(input.body, 'Curated context body')
+    const mentionMemberKeys = input.mentionMemberKeys === undefined
+      ? before.mentionMemberKeys
+      : normalizeMentionMemberKeys(input.mentionMemberKeys)
+    const after: StoredCuratedContextItem = {
+      entityKey: before.entityKey,
+      recordKey: before.recordKey,
+      entryType: 'context',
+      schemaVersion: COLLABORATION_CONTEXT_SCHEMA_VERSION,
+      id: before.id,
+      teamId: before.teamId,
+      workItemId: before.workItemId,
+      kind,
+      state,
+      title,
+      body,
+      ...(before.source ? { source: before.source } : {}),
+      mentionMemberKeys,
+      createdBy: before.createdBy,
+      createdAt: before.createdAt,
+      updatedBy: actor,
+      updatedAt: occurredAt,
+      revision: before.revision + 1,
+      ...(lastMutationKey ? { lastMutationKey } : {}),
+      ...(before.supersededByItemId
+        ? { supersededByItemId: before.supersededByItemId }
+        : {}),
+    }
+    const notificationCandidates = buildContextNotificationCandidates(input)
+    const automaticWatchers = buildAutomaticWatcherCandidates(
+      actor.id,
+      mentionMemberKeys,
+      undefined,
+      input.automaticWatcherCandidates,
+    )
+    const auditPut = createMutationAuditEventPut(this.auditTableName, input.auditContext, {
+      directoryId: input.workspaceId,
+      eventType: 'context-item.updated',
+      entityType: 'work-item',
+      entityId: workItemEntityId(input.teamId, input.issueId),
+      target: {
+        type: 'context-item',
+        id: `${workItemEntityId(input.teamId, input.issueId)}/context-item/${after.id}`,
+      },
+      action: 'updated',
+      occurredAt,
+      summary: `Curated ${after.kind} “${after.title}” was updated.`,
+      changes: createAuditFieldChanges(
+        { kind: before.kind, state: before.state, title: before.title, body: before.body },
+        { kind: after.kind, state: after.state, title: after.title, body: after.body },
+        ['kind', 'state', 'title', 'body'],
+        ['body'],
+      ),
+      metadata: createContextAuditMetadata(
+        input,
+        actor.id,
+        after.id,
+        after.revision,
+        notificationCandidates,
+      ),
+    })
+
+    try {
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [
+          parentIssueCondition(this.parentIssueTableName, input),
+          ...curatedContextAuthorizationConditions(input),
+          contextLedgerIncrement(this.tableName, input.entityKey),
+          contextSnapshotPut(this.tableName, after, input.expectedRevision),
+          contextRevisionPut(this.tableName, after),
+          ...(input.auditContext
+            ? [contextMutationReceiptPut(this.tableName, input.auditContext, 'update', after)]
+            : []),
+          ...automaticWatchers.map(({ memberKey, reasons }) =>
+            autoWatcherUpdate(this.tableName, input.entityKey, memberKey, reasons, occurredAt)
+          ),
+          ...(auditPut ? [auditPut] : []),
+        ],
+      }))
+      return toCuratedContextItem(after)
+    } catch (error) {
+      if (isConditionalFailure(error) && input.auditContext) {
+        const durableReplay = await this.getCuratedContextMutationReplay({
+          entityKey: input.entityKey,
+          operation: 'update',
+          itemId: input.itemId,
+          auditContext: input.auditContext,
+        })
+        if (durableReplay) return durableReplay
+      }
+      if (isConditionalFailure(error) && lastMutationKey) {
+        const replayed = await this.getStoredCuratedContextItem(input.entityKey, before.id)
+        if (
+          replayed?.lastMutationKey === lastMutationKey &&
+          replayed.revision === input.expectedRevision + 1
+        ) {
+          return this.reconcileCuratedContextItemSource(replayed)
+        }
+      }
+      throw await this.classifyContextWriteError(
+        error,
+        input.entityKey,
+        before.id,
+        input.expectedRevision,
+      )
+    }
+  }
+
+  /** Root thread の accepted resolution を version 条件付きで保存します。 */
+  async setAcceptedResolution(input: SetAcceptedResolutionInput) {
+    await this.ensureLocalTable()
+    assertWorkItemScope(input)
+    assertExpectedVersion(input.expectedThreadVersion)
+    assertCuratedContextAuthorizationSnapshot(input)
+    const rootCommentId = requireIdentifier(input.rootCommentId, 'Root comment ID')
+    const sourceCommentId = requireIdentifier(input.commentId, 'Comment ID')
+    const actor = normalizeContextActor(input.actor, 'Accepted resolution actor')
+    const summary = normalizeContextBody(input.summary, 'Accepted resolution summary')
+    const occurredAt = normalizeIsoTimestamp(
+      input.auditContext?.occurredAt ?? new Date().toISOString(),
+      'Accepted resolution timestamp',
+    )
+    const resolutionId = createAcceptedResolutionId(
+      occurredAt,
+      input.auditContext,
+      input.entityKey,
+      rootCommentId,
+      sourceCommentId,
+      input.expectedThreadVersion,
+    )
+    if (input.auditContext) {
+      const receipt = await this.getAcceptedResolutionReceipt(
+        input.entityKey,
+        input.auditContext,
+      )
+      if (receipt) {
+        if (receipt.rootCommentId === rootCommentId &&
+            receipt.requestFingerprint === input.auditContext.requestFingerprint &&
+            receipt.response.version === input.expectedThreadVersion + 1 &&
+            isSameAcceptedResolutionReplay(
+              receipt.response,
+              sourceCommentId,
+              summary,
+              actor.id,
+            )) {
+          return await this.reconcileAcceptedResolutionReceiptResponse(
+            input.entityKey,
+            receipt.response,
+          )
+        }
+        throw new CollaborationError(
+          409,
+          'CollaborationIdempotencyConflict',
+          'Accepted resolution idempotency key was reused with different input.',
+        )
+      }
+    }
+
+    const root = await this.getRequiredStoredComment(input.entityKey, rootCommentId)
+    if (sourceCommentId === root.id) {
+      throw new CollaborationError(
+        400,
+        'AcceptedResolutionNotReply',
+        'Accepted resolution source must be a reply in the thread.',
+      )
+    }
+    if (root.parentCommentId || root.rootCommentId !== root.id) {
+      throw new CollaborationError(400, 'CommentNotRoot', 'Only root comments can own accepted resolutions.')
+    }
+    if (root.deletedAt) {
+      throw new CollaborationError(409, 'CommentDeleted', 'Deleted threads cannot accept resolutions.')
+    }
+    if (root.authorMemberKey !== normalizeMemberKey(actor.id) && !input.canModerate) {
+      throw new CollaborationError(
+        403,
+        'AcceptedResolutionDenied',
+        'Thread ownership or moderation permission is required.',
+      )
+    }
+    const replayed = input.auditContext
+      ? root.acceptedResolutions.find((resolution) => resolution.id === resolutionId)
+      : undefined
+    if (replayed) {
+      if (isSameAcceptedResolutionReplay(root, sourceCommentId, summary, actor.id)) {
+        return root
+      }
+      throw new CollaborationError(
+        409,
+        'CollaborationIdempotencyConflict',
+        'Accepted resolution idempotency key was reused with different input.',
+      )
+    }
+
+    const current = root.acceptedResolutions.find((resolution) => resolution.state === 'accepted')
+    const editingCurrent = current?.sourceCommentId === sourceCommentId
+    let selected: StoredComment | undefined
+    let capturedCommentRevision: number
+    let capturedCommentBody: string
+    if (editingCurrent && current) {
+      selected = await this.getStoredComment(input.entityKey, sourceCommentId)
+      capturedCommentRevision = current.capturedCommentRevision
+      capturedCommentBody = current.capturedCommentBody
+    } else {
+      selected = await this.getRequiredStoredComment(input.entityKey, sourceCommentId)
+      if (selected.rootCommentId !== root.id) {
+        throw new CollaborationError(
+          400,
+          'AcceptedResolutionCrossThread',
+          'Accepted resolution source must belong to the same thread.',
+        )
+      }
+      if (selected.deletedAt) {
+        throw new CollaborationError(
+          409,
+          'AcceptedResolutionSourceDeleted',
+          'Deleted comments cannot be accepted as resolutions.',
+        )
+      }
+      capturedCommentRevision = selected.version
+      capturedCommentBody = selected.bodyMarkdown
+    }
+    const accepted: AcceptedResolution = {
+      id: resolutionId,
+      sourceCommentId,
+      sourceRootCommentId: root.id,
+      capturedCommentRevision,
+      capturedCommentBody,
+      summary,
+      acceptedBy: actor,
+      acceptedAt: occurredAt,
+      state: 'accepted',
+    }
+    const superseded = current
+      ? {
+          ...current,
+          state: 'superseded',
+          supersededByResolutionId: accepted.id,
+          supersededBy: actor,
+          supersededAt: occurredAt,
+        } satisfies AcceptedResolution
+      : undefined
+    const currentWasLegacy = Boolean(
+      current && root.legacyAcceptedResolutions.some((resolution) => resolution.id === current.id),
+    )
+    const legacyAcceptedResolutions = superseded && currentWasLegacy
+      ? root.legacyAcceptedResolutions.map((resolution) =>
+          resolution.id === superseded.id ? superseded : resolution
+        )
+      : root.legacyAcceptedResolutions
+    const after: StoredComment = {
+      ...root,
+      acceptedResolutions: [accepted],
+      legacyAcceptedResolutions,
+      acceptedResolutionId: accepted.id,
+      version: root.version + 1,
+      updatedAt: occurredAt,
+    }
+    const acceptedAuditPut = createMutationAuditEventPut(this.auditTableName, input.auditContext, {
+      directoryId: input.workspaceId,
+      eventType: !current
+        ? 'accepted-resolution.selected'
+        : editingCurrent
+        ? 'accepted-resolution.edited'
+        : 'accepted-resolution.replaced',
+      entityType: 'work-item',
+      entityId: workItemEntityId(input.teamId, input.issueId),
+      target: {
+        type: 'comment',
+        id: `${workItemEntityId(input.teamId, input.issueId)}/comment/${root.id}`,
+      },
+      action: !current ? 'selected' : editingCurrent ? 'edited' : 'replaced',
+      occurredAt,
+      summary: !current
+        ? 'An accepted resolution was selected.'
+        : editingCurrent
+          ? 'An accepted resolution summary was edited.'
+          : 'An accepted resolution was replaced.',
+      changes: createAuditFieldChanges(
+        current ? { summary: current.summary } : undefined,
+        { summary },
+        ['summary'],
+        ['summary'],
+      ),
+      metadata: createAcceptedResolutionAuditMetadata(input, actor.id, sourceCommentId),
+      sequence: 0,
+    })
+    const automaticWatchers = buildAutomaticWatcherCandidates(
+      actor.id,
+      [],
+      selected,
+      undefined,
+    )
+
+    try {
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [
+          parentIssueCondition(this.parentIssueTableName, input),
+          ...curatedContextAuthorizationConditions(input),
+          ...(!editingCurrent && selected
+            ? [commentVersionCondition(this.tableName, input.entityKey, selected)]
+            : []),
+          {
+            Put: {
+              TableName: this.tableName,
+              Item: toStoredCommentStorageItem(after),
+              ConditionExpression: 'attribute_exists(entityKey) AND attribute_exists(recordKey) AND #version = :expectedVersion AND attribute_not_exists(deletedAt)',
+              ExpressionAttributeNames: { '#version': 'version' },
+              ExpressionAttributeValues: { ':expectedVersion': input.expectedThreadVersion },
+            },
+          },
+          ...(superseded && !currentWasLegacy
+            ? [acceptedResolutionPut(this.tableName, input.entityKey, root.id, superseded, occurredAt)]
+            : []),
+          acceptedResolutionPut(this.tableName, input.entityKey, root.id, accepted, occurredAt),
+          ...(input.auditContext
+            ? [acceptedResolutionReceiptPut(
+                this.tableName,
+                input.entityKey,
+                root.id,
+                resolutionId,
+                input.auditContext,
+                after,
+              )]
+            : []),
+          ...automaticWatchers.map(({ memberKey, reasons }) =>
+            autoWatcherUpdate(this.tableName, input.entityKey, memberKey, reasons, occurredAt)
+          ),
+          ...(acceptedAuditPut ? [acceptedAuditPut] : []),
+        ],
+      }))
+      return after
+    } catch (error) {
+      if (isConditionalFailure(error) && input.auditContext) {
+        const receipt = await this.getAcceptedResolutionReceipt(
+          input.entityKey,
+          input.auditContext,
+        )
+        if (receipt) {
+          if (receipt.rootCommentId === root.id &&
+              receipt.requestFingerprint === input.auditContext.requestFingerprint &&
+              receipt.response.version === input.expectedThreadVersion + 1 &&
+              isSameAcceptedResolutionReplay(
+                receipt.response,
+                sourceCommentId,
+                summary,
+                actor.id,
+              )) {
+            return await this.reconcileAcceptedResolutionReceiptResponse(
+              input.entityKey,
+              receipt.response,
+            )
+          }
+          throw new CollaborationError(
+            409,
+            'CollaborationIdempotencyConflict',
+            'Accepted resolution idempotency key was reused with different input.',
+          )
+        }
+      }
+      throw await this.classifyAcceptedResolutionWriteError(
+        error,
+        input.entityKey,
+        root.id,
+        input.expectedThreadVersion,
+        editingCurrent ? undefined : selected?.id,
+        editingCurrent ? undefined : selected?.version,
+      )
+    }
+  }
+
   /** Root comment または reply を作成します。 */
   async createComment(input: CreateCollaborationCommentInput) {
     await this.ensureLocalTable()
@@ -679,6 +3627,8 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       createdAt: occurredAt,
       updatedAt: occurredAt,
       reactions: [],
+      acceptedResolutions: [],
+      legacyAcceptedResolutions: [],
     }
     const discussionRecordKey = parent
       ? `DISCUSSION#THREAD#${rootCommentId}#${occurredAt}#${commentId}`
@@ -713,7 +3663,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       {
         Put: {
           TableName: this.tableName,
-          Item: comment,
+          Item: toStoredCommentStorageItem(comment),
           ConditionExpression: 'attribute_not_exists(entityKey) AND attribute_not_exists(recordKey)',
         },
       },
@@ -1312,7 +4262,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
           {
             Put: {
               TableName: this.tableName,
-              Item: after,
+              Item: toStoredCommentStorageItem(after),
               ConditionExpression: 'attribute_exists(entityKey) AND attribute_exists(recordKey) AND #version = :expectedVersion',
               ExpressionAttributeNames: { '#version': 'version' },
               ExpressionAttributeValues: { ':expectedVersion': input.expectedVersion },
@@ -1348,7 +4298,10 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       Key: { entityKey, recordKey: commentRecordKey(commentId) },
       ConsistentRead: true,
     }))
-    return response.Item ? toStoredComment(response.Item) : undefined
+    if (!response.Item) {
+      return undefined
+    }
+    return toStoredComment(response.Item)
   }
 
   private async getRequiredStoredComment(entityKey: string, commentId: string) {
@@ -1359,6 +4312,330 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
     }
 
     return comment
+  }
+
+  /**
+   * Reads one deterministic accepted-resolution receipt directly.
+   *
+   * @param entityKey - Collaboration scope key.
+   * @param context - Request identity used to derive and validate the receipt key.
+   * @returns Validated receipt, or undefined when no receipt exists.
+   */
+  private async getAcceptedResolutionReceipt(
+    entityKey: string,
+    context: MutationAuditContext,
+  ) {
+    const recordKey = acceptedResolutionReceiptRecordKey(context)
+    const response = await this.documentClient.send(new GetCommand({
+      TableName: this.tableName,
+      Key: {
+        entityKey,
+        recordKey,
+      },
+      ConsistentRead: true,
+    }))
+    return response.Item
+      ? toStoredAcceptedResolutionReceipt(
+          response.Item,
+          entityKey,
+          recordKey,
+        )
+      : undefined
+  }
+
+  /**
+   * Rehydrates non-resolution root fields without replaying text removed by a
+   * later edit or soft deletion.
+   *
+   * @param entityKey - Collaboration scope key.
+   * @param response - Bounded accepted-resolution response retained by the receipt.
+   * @returns Receipt resolution evidence with current permission-safe root text.
+   */
+  private async reconcileAcceptedResolutionReceiptResponse(
+    entityKey: string,
+    response: StoredComment,
+  ) {
+    const current = await this.getStoredComment(entityKey, response.id)
+    if (!current) {
+      return {
+        ...response,
+        bodyMarkdown: '',
+        mentionMemberKeys: [],
+        deletedAt: response.deletedAt ?? response.updatedAt,
+      } satisfies StoredComment
+    }
+    return {
+      ...response,
+      bodyMarkdown: current.bodyMarkdown,
+      mentionMemberKeys: current.mentionMemberKeys,
+      editedAt: current.editedAt,
+      deletedAt: current.deletedAt,
+    } satisfies StoredComment
+  }
+
+  /**
+   * Validates and captures immutable provenance for a context mutation.
+   *
+   * @param entityKey - Collaboration entity containing any referenced comment.
+   * @param source - Caller-supplied source provenance.
+   * @returns Canonical capture-time provenance.
+   */
+  private async captureCuratedContextSource(
+    entityKey: string,
+    source: CuratedContextSource,
+  ): Promise<CapturedCuratedContextSource> {
+    const normalized = normalizeCuratedContextSource(source)
+    if (normalized.availability !== 'available') {
+      throw new CollaborationError(
+        409,
+        'ContextSourceUnavailable',
+        'Only currently available sources can be captured.',
+      )
+    }
+    if (normalized.kind !== 'comment') {
+      return { source: normalized }
+    }
+
+    const comment = await this.getRequiredStoredComment(entityKey, normalized.sourceId)
+    if (comment.deletedAt) {
+      throw new CollaborationError(
+        409,
+        'ContextSourceDeleted',
+        'Deleted comments cannot be captured as context sources.',
+      )
+    }
+    if (normalized.containerId && normalized.containerId !== comment.rootCommentId) {
+      throw new CollaborationError(
+        400,
+        'InvalidContextSource',
+        'Comment source container does not match its thread.',
+      )
+    }
+    if (normalized.originalBody !== undefined && normalized.originalBody !== comment.bodyMarkdown) {
+      throw new CollaborationError(
+        409,
+        'ContextSourceRevisionConflict',
+        'Comment source changed before it could be captured.',
+      )
+    }
+    if (normalized.capturedRevision !== undefined &&
+        normalized.capturedRevision !== comment.version) {
+      throw new CollaborationError(
+        409,
+        'ContextSourceRevisionConflict',
+        'Comment source changed before it could be captured.',
+      )
+    }
+    if (normalized.actor && normalizeMemberKey(normalized.actor.id) !== comment.authorMemberKey) {
+      throw new CollaborationError(
+        400,
+        'InvalidContextSource',
+        'Comment source actor does not match the comment author.',
+      )
+    }
+    const quote = normalized.quote
+      ? normalizeCuratedContextQuote(normalized.quote, comment.bodyMarkdown)
+      : undefined
+
+    return {
+      comment,
+      source: {
+        ...normalized,
+        containerId: comment.rootCommentId,
+        originalBody: comment.bodyMarkdown,
+        ...(quote ? { quote } : {}),
+        occurredAt: comment.createdAt,
+        capturedRevision: comment.version,
+        currentRevision: comment.version,
+        availability: 'available',
+        availabilityReason: undefined,
+      },
+    }
+  }
+
+  /**
+   * Reconciles a stored comment source with the current comment without mutating capture evidence.
+   *
+   * @param stored - Stored curated context current snapshot.
+   * @returns Public item with current source availability.
+   */
+  private async reconcileCuratedContextItemSource(stored: StoredCuratedContextItem) {
+    const item = toCuratedContextItem(stored)
+    if (item.source?.kind !== 'comment') {
+      return item
+    }
+
+    const current = await this.getStoredComment(stored.entityKey, item.source.sourceId)
+    const source = item.source
+    if (!current) {
+      return {
+        ...item,
+        source: {
+          ...source,
+          availability: 'deleted',
+          currentRevision: undefined,
+          availabilityReason: 'The source comment is no longer available.',
+        },
+      } satisfies CuratedContextItem
+    }
+    if (current.deletedAt) {
+      return {
+        ...item,
+        source: {
+          ...source,
+          availability: 'deleted',
+          currentRevision: current.version,
+          availabilityReason: 'The source comment was deleted after capture.',
+        },
+      } satisfies CuratedContextItem
+    }
+    const bodyWasEdited = source.originalBody === undefined
+      ? source.capturedRevision !== current.version
+      : source.originalBody !== current.bodyMarkdown
+    if (bodyWasEdited) {
+      return {
+        ...item,
+        source: {
+          ...source,
+          availability: 'edited',
+          currentRevision: current.version,
+          availabilityReason: 'The source comment was edited after capture.',
+        },
+      } satisfies CuratedContextItem
+    }
+    return {
+      ...item,
+      source: {
+        ...source,
+        availability: 'available',
+        currentRevision: current.version,
+        availabilityReason: undefined,
+      },
+    } satisfies CuratedContextItem
+  }
+
+  /**
+   * Reads a curated context current snapshot consistently.
+   *
+   * @param entityKey - Collaboration entity key.
+   * @param itemId - Curated context item identifier.
+   * @returns Stored item when present.
+   */
+  private async getStoredCuratedContextItem(entityKey: string, itemId: string) {
+    try {
+      const response = await this.documentClient.send(new GetCommand({
+        TableName: this.tableName,
+        Key: { entityKey, recordKey: contextItemRecordKey(itemId) },
+        ConsistentRead: true,
+      }))
+      return response.Item ? toStoredCuratedContextItem(response.Item) : undefined
+    } catch (error) {
+      throw toCollaborationStoreError(error)
+    }
+  }
+
+  /**
+   * Reads the current curated-context ledger generation consistently.
+   *
+   * @param entityKey - Work Item collaboration entity key.
+   * @returns The current generation, or zero for a legacy scope without a ledger row.
+   */
+  private async getCuratedContextLedgerGeneration(entityKey: string): Promise<number> {
+    try {
+      const response = await this.documentClient.send(new GetCommand({
+        TableName: this.tableName,
+        Key: { entityKey, recordKey: CURATED_CONTEXT_LEDGER_RECORD_KEY },
+        ConsistentRead: true,
+      }))
+      const item = response.Item
+      if (item === undefined) return 0
+      if (
+        item.entryType !== 'context-ledger' ||
+        item.entityKey !== entityKey ||
+        item.recordKey !== CURATED_CONTEXT_LEDGER_RECORD_KEY ||
+        !isNonNegativeSafeInteger(item.generation)
+      ) {
+        throw new CollaborationError(
+          503,
+          'InvalidCollaborationRecord',
+          'Curated context ledger record is invalid.',
+        )
+      }
+      return item.generation
+    } catch (error) {
+      throw toCollaborationStoreError(error)
+    }
+  }
+
+  /**
+   * Reads a curated-context mutation receipt consistently.
+   *
+   * @param entityKey - Collaboration entity key.
+   * @param context - Request identity used to derive and validate the receipt key.
+   * @returns Stored receipt when present.
+   */
+  private async getStoredCuratedContextMutationReceipt(
+    entityKey: string,
+    context: MutationAuditContext,
+  ) {
+    const recordKey = contextMutationReceiptRecordKey(context)
+    try {
+      const response = await this.documentClient.send(new GetCommand({
+        TableName: this.tableName,
+        Key: { entityKey, recordKey },
+        ConsistentRead: true,
+      }))
+      return response.Item
+        ? toStoredCuratedContextMutationReceipt(response.Item, entityKey, recordKey)
+        : undefined
+    } catch (error) {
+      throw toCollaborationStoreError(error)
+    }
+  }
+
+  /**
+   * Reads one immutable curated-context revision consistently.
+   *
+   * @param entityKey - Collaboration entity key.
+   * @param itemId - Curated-context item identifier.
+   * @param revision - Positive immutable revision number.
+   * @returns Stored revision when present.
+   */
+  private async getStoredCuratedContextRevision(
+    entityKey: string,
+    itemId: string,
+    revision: number,
+  ) {
+    try {
+      const response = await this.documentClient.send(new GetCommand({
+        TableName: this.tableName,
+        Key: { entityKey, recordKey: contextRevisionRecordKey(itemId, revision) },
+        ConsistentRead: true,
+      }))
+      return response.Item
+        ? toStoredCuratedContextRevision(response.Item, entityKey, itemId)
+        : undefined
+    } catch (error) {
+      throw toCollaborationStoreError(error)
+    }
+  }
+
+  /**
+   * Reads a required curated context current snapshot.
+   *
+   * @param entityKey - Collaboration entity key.
+   * @param itemId - Curated context item identifier.
+   * @returns Stored item.
+   */
+  private async getRequiredStoredCuratedContextItem(entityKey: string, itemId: string) {
+    const item = await this.getStoredCuratedContextItem(
+      entityKey,
+      requireIdentifier(itemId, 'Curated context item ID'),
+    )
+    if (!item) {
+      throw new CollaborationError(404, 'ContextNotFound', 'Curated context item was not found.')
+    }
+    return item
   }
 
   private async readReactionSummaries(entityKey: string, commentId: string, viewerMemberKey: string) {
@@ -1529,6 +4806,100 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
     return new CollaborationError(409, 'CollaborationConflict', 'Collaboration mutation conflicted.')
   }
 
+  /**
+   * Classifies a conditional context mutation failure using a consistent current read.
+   *
+   * @param error - DynamoDB mutation error.
+   * @param entityKey - Collaboration entity key.
+   * @param itemId - Curated context item identifier.
+   * @param expectedRevision - Revision fenced by the mutation.
+   * @param sourceComment - Optional comment snapshot fenced as newly captured evidence.
+   * @returns Stable collaboration error.
+   */
+  private async classifyContextWriteError(
+    error: unknown,
+    entityKey: string,
+    itemId: string,
+    expectedRevision?: number,
+    sourceComment?: StoredComment,
+  ) {
+    if (!isConditionalFailure(error)) {
+      return toCollaborationStoreError(error)
+    }
+    const current = await this.getStoredCuratedContextItem(entityKey, itemId)
+    if (!current && expectedRevision !== undefined) {
+      return new CollaborationError(404, 'ContextNotFound', 'Curated context item was not found.')
+    }
+    if (expectedRevision !== undefined && current?.revision !== expectedRevision) {
+      return new CollaborationError(
+        409,
+        'ContextRevisionConflict',
+        'Curated context changed after it was loaded.',
+      )
+    }
+    if (sourceComment) {
+      const currentSource = await this.getStoredComment(entityKey, sourceComment.id)
+      if (
+        !currentSource ||
+        currentSource.deletedAt ||
+        currentSource.version !== sourceComment.version
+      ) {
+        return new CollaborationError(
+          409,
+          'ContextSourceRevisionConflict',
+          'Curated context source changed before the item could be saved.',
+        )
+      }
+    }
+    return new CollaborationError(409, 'CollaborationConflict', 'Collaboration mutation conflicted.')
+  }
+
+  /**
+   * Classifies a conditional accepted-resolution mutation failure.
+   *
+   * @param error - DynamoDB mutation error.
+   * @param entityKey - Collaboration entity key.
+   * @param rootCommentId - Root comment identifier.
+   * @param expectedVersion - Root version fenced by the mutation.
+   * @param sourceCommentId - Accepted reply identifier when the source is transaction-fenced.
+   * @param capturedSourceVersion - Reply version captured before a source-fenced transaction.
+   * @returns Stable collaboration error.
+   */
+  private async classifyAcceptedResolutionWriteError(
+    error: unknown,
+    entityKey: string,
+    rootCommentId: string,
+    expectedVersion: number,
+    sourceCommentId?: string,
+    capturedSourceVersion?: number,
+  ) {
+    if (!isConditionalFailure(error)) {
+      return toCollaborationStoreError(error)
+    }
+    const current = await this.getStoredComment(entityKey, rootCommentId)
+    if (!current) {
+      return new CollaborationError(404, 'CommentNotFound', 'Root comment was not found.')
+    }
+    if (current.version !== expectedVersion) {
+      return new CollaborationError(
+        409,
+        'ThreadVersionConflict',
+        'Thread changed after it was loaded.',
+      )
+    }
+    if (sourceCommentId !== undefined && capturedSourceVersion !== undefined) {
+      const source = await this.getStoredComment(entityKey, sourceCommentId)
+      if (!source || source.deletedAt || source.version !== capturedSourceVersion) {
+        return new CollaborationError(
+          409,
+          'AcceptedResolutionSourceConflict',
+          'Accepted resolution source changed after it was loaded.',
+        )
+      }
+    }
+    return new CollaborationError(409, 'CollaborationConflict', 'Accepted resolution mutation conflicted.')
+  }
+
   private async ensureLocalTable() {
     if (!this.bootstrapLocalTable) {
       return
@@ -1645,6 +5016,429 @@ function parentIssueCondition(tableName: string, input: WorkItemCollaborationSco
   }
 }
 
+/**
+ * Validates the caller authorization generation carried into a context mutation.
+ *
+ * @param input - Context mutation scope and actor.
+ * @returns Nothing when the snapshot is valid or omitted for trusted internal callers.
+ * @throws CollaborationError when the snapshot does not identify the actor.
+ */
+function assertCuratedContextAuthorizationSnapshot(
+  input: CuratedContextAuthorizationInput,
+): void {
+  const snapshot = input.authorizationSnapshot
+  if (!snapshot) return
+  if (
+    typeof snapshot.memberKey !== 'string' ||
+    snapshot.memberKey.trim().length === 0 ||
+    snapshot.memberKey !== input.actor.id ||
+    !Number.isSafeInteger(snapshot.workspaceMemberVersion) ||
+    snapshot.workspaceMemberVersion < 0 ||
+    (snapshot.enterpriseControlRevision !== undefined &&
+      (!Number.isSafeInteger(snapshot.enterpriseControlRevision) ||
+        snapshot.enterpriseControlRevision < 0))
+  ) {
+    throw new CollaborationError(
+      400,
+      'InvalidAuthorizationSnapshot',
+      'Curated context authorization snapshot is invalid.',
+    )
+  }
+}
+
+/**
+ * Validates a Document source snapshot before it is converted into DynamoDB
+ * conditions.  The source snapshot is required whenever a mutation captures
+ * a fresh Document; replacements that inherit an existing source do not need
+ * to re-fence the source.
+ *
+ * @param input - Curated-context mutation carrying an optional Document source.
+ * @returns Nothing when the snapshot is valid.
+ * @throws CollaborationError when the source and authorization snapshots do not match.
+ */
+function assertCuratedContextDocumentSourceAuthorizationSnapshot(
+  input: CreateCuratedContextItemInput,
+): void {
+  const source = input.source
+  const snapshot = input.sourceAuthorizationSnapshot
+  if (source?.kind !== 'document') {
+    if (snapshot !== undefined) {
+      throw new CollaborationError(
+        400,
+        'InvalidDocumentSourceAuthorizationSnapshot',
+        'A Document authorization snapshot requires a Document source.',
+      )
+    }
+    return
+  }
+  if (snapshot === undefined || snapshot.sourceId !== source.sourceId) {
+    throw new CollaborationError(
+      400,
+      'InvalidDocumentSourceAuthorizationSnapshot',
+      'A Document source must carry the authorization snapshot used to read it.',
+    )
+  }
+  if (
+    !Number.isSafeInteger(snapshot.documentRevision) ||
+    snapshot.documentRevision < 1 ||
+    source.capturedRevision !== snapshot.documentRevision ||
+    !Number.isSafeInteger(snapshot.documentAuthorizationRevision) ||
+    snapshot.documentAuthorizationRevision < 0
+  ) {
+    throw new CollaborationError(
+      400,
+      'InvalidDocumentSourceAuthorizationSnapshot',
+      'The Document source revision snapshot is invalid.',
+    )
+  }
+  if (
+    snapshot.workspaceMemberKey !== undefined &&
+    (
+      snapshot.workspaceMemberVersion === undefined ||
+      snapshot.workspaceMemberKey !== input.authorizationSnapshot?.memberKey ||
+      snapshot.workspaceMemberVersion !== input.authorizationSnapshot.workspaceMemberVersion
+    )
+  ) {
+    throw new CollaborationError(
+      400,
+      'InvalidDocumentSourceAuthorizationSnapshot',
+      'The Document source membership snapshot does not match the mutation actor.',
+    )
+  }
+  if (
+    snapshot.enterpriseControlRevision !== undefined &&
+    input.authorizationSnapshot?.enterpriseControlRevision !== undefined &&
+    snapshot.enterpriseControlRevision !==
+      input.authorizationSnapshot.enterpriseControlRevision
+  ) {
+    throw new CollaborationError(
+      409,
+      'CuratedContextSourceAuthorizationChanged',
+      'Enterprise authorization changed while the Document source was being read.',
+    )
+  }
+  if (
+    snapshot.workspaceMemberKey === undefined &&
+    snapshot.workspaceMemberVersion !== undefined
+  ) {
+    throw new CollaborationError(
+      400,
+      'InvalidDocumentSourceAuthorizationSnapshot',
+      'The Document source membership snapshot must include a member key.',
+    )
+  }
+  for (const generation of [
+    snapshot.workspaceMemberVersion,
+    snapshot.planningRevision,
+    snapshot.enterpriseControlRevision,
+  ]) {
+    if (
+      generation !== undefined &&
+      (!Number.isSafeInteger(generation) || generation < 0)
+    ) {
+      throw new CollaborationError(
+        400,
+        'InvalidDocumentSourceAuthorizationSnapshot',
+        'The Document source authorization generation is invalid.',
+      )
+    }
+  }
+}
+
+/**
+ * Validates an Activity retention snapshot before it is converted into a
+ * DynamoDB condition.
+ *
+ * @param input - Curated-context create input carrying an optional activity source.
+ * @returns Nothing when the snapshot is valid.
+ * @throws CollaborationError when the snapshot does not identify the source.
+ */
+function assertCuratedContextActivitySourceAuthorizationSnapshot(
+  input: CreateCuratedContextItemInput,
+): void {
+  const source = input.source
+  const snapshot = input.activitySourceAuthorizationSnapshot
+  if (source?.kind !== 'activity') {
+    if (snapshot !== undefined) {
+      throw new CollaborationError(
+        400,
+        'InvalidActivitySourceAuthorizationSnapshot',
+        'An Activity authorization snapshot requires an Activity source.',
+      )
+    }
+    return
+  }
+  if (snapshot === undefined) {
+    throw new CollaborationError(
+      400,
+      'InvalidActivitySourceAuthorizationSnapshot',
+      'An Activity source must carry the retention snapshot used to read it.',
+    )
+  }
+  if (
+    snapshot.sourceId !== source.sourceId ||
+    snapshot.sourceId.trim().length === 0 ||
+    (snapshot.expiresAt !== undefined &&
+      (!Number.isSafeInteger(snapshot.expiresAt) ||
+        snapshot.expiresAt <= Math.floor(Date.now() / 1_000) +
+          curatedContextActivityMinimumRemainingSeconds))
+  ) {
+    throw new CollaborationError(
+      400,
+      'InvalidActivitySourceAuthorizationSnapshot',
+      'The Activity source retention snapshot is invalid.',
+    )
+  }
+}
+
+/**
+ * Creates the membership generation condition used by curated-context writes.
+ *
+ * @param input - Context mutation scope containing the authorization snapshot.
+ * @returns DynamoDB transaction conditions for the current membership row.
+ */
+function curatedContextAuthorizationConditions(
+  input: CuratedContextAuthorizationInput,
+): NonNullable<TransactWriteCommandInput['TransactItems']> {
+  const snapshot = input.authorizationSnapshot
+  if (!snapshot) return []
+  const tableName =
+    readEnvironment('MUKUROJI_WORKSPACE_ACCESS_TABLE') ??
+    readEnvironment('WORKSPACE_ACCESS_TABLE_NAME') ??
+    'mukuroji-workspace-access-local'
+  const conditions: NonNullable<TransactWriteCommandInput['TransactItems']> = [{
+    ConditionCheck: {
+      TableName: tableName,
+      Key: {
+        workspaceId: input.workspaceId,
+        recordKey: `MEMBER#${normalizeMemberKey(snapshot.memberKey)}`,
+      },
+      ConditionExpression:
+        'entryType = :workspaceMemberEntryType AND #status = :activeStatus AND #version = :workspaceMemberVersion',
+      ExpressionAttributeNames: {
+        '#status': 'status',
+        '#version': 'version',
+      },
+      ExpressionAttributeValues: {
+        ':workspaceMemberEntryType': 'workspace-member',
+        ':activeStatus': 'active',
+        ':workspaceMemberVersion': snapshot.workspaceMemberVersion,
+      },
+    },
+  }]
+  const enterpriseTableName = readEnvironment('ENTERPRISE_IDENTITY_TABLE_NAME')
+  if (enterpriseTableName && snapshot.enterpriseControlRevision !== undefined) {
+    const controlRevision = snapshot.enterpriseControlRevision
+    conditions.push({
+      ConditionCheck: {
+        TableName: enterpriseTableName,
+        Key: {
+          scopeKey: `WORKSPACE#${input.workspaceId}`,
+          recordKey: 'CONTROL',
+        },
+        ConditionExpression: controlRevision === 0
+          ? '(attribute_not_exists(#scopeKey) OR ' +
+            '(#entryType = :controlEntryType AND #controlRevision = :expectedControlRevision))'
+          : '#entryType = :controlEntryType AND #controlRevision = :expectedControlRevision',
+        ExpressionAttributeNames: {
+          '#scopeKey': 'scopeKey',
+          '#entryType': 'entryType',
+          '#controlRevision': 'controlRevision',
+        },
+        ExpressionAttributeValues: {
+          ':controlEntryType': 'enterprise-identity-control',
+          ':expectedControlRevision': controlRevision,
+        },
+      },
+    })
+  }
+  return conditions
+}
+
+/**
+ * Creates transaction conditions for the Document source and its authorization
+ * generations.  These conditions are intentionally built in the collaboration
+ * adapter so source access cannot change between permission-checked read and
+ * context-item commit.
+ *
+ * @param input - Curated-context mutation scope.
+ * @param snapshot - Document source snapshot captured by the API adapter.
+ * @returns DynamoDB transaction conditions for the source rows.
+ */
+function curatedContextDocumentSourceConditions(
+  input: CuratedContextMutationInput,
+  snapshot: CuratedContextDocumentSourceAuthorizationSnapshot,
+): NonNullable<TransactWriteCommandInput['TransactItems']> {
+  const documentsTableName =
+    readEnvironment('DOCUMENTS_TABLE_NAME') ??
+    readEnvironment('MUKUROJI_DOCUMENTS_TABLE') ??
+    'mukuroji-documents-local'
+  const conditions: NonNullable<TransactWriteCommandInput['TransactItems']> = [
+    {
+      ConditionCheck: {
+        TableName: documentsTableName,
+        Key: {
+          workspaceId: input.workspaceId,
+          recordKey: `DOCUMENT#${snapshot.sourceId}`,
+        },
+        ConditionExpression:
+          'entryType = :documentEntryType AND documentId = :documentId AND #revision = :documentRevision',
+        ExpressionAttributeNames: { '#revision': 'revision' },
+        ExpressionAttributeValues: {
+          ':documentEntryType': 'document',
+          ':documentId': snapshot.sourceId,
+          ':documentRevision': snapshot.documentRevision,
+        },
+      },
+    },
+    {
+      ConditionCheck: {
+        TableName: documentsTableName,
+        Key: {
+          workspaceId: input.workspaceId,
+          recordKey: 'DOCUMENT_AUTHORIZATION_REVISION',
+        },
+        ConditionExpression:
+          snapshot.documentAuthorizationRevision === 0
+            ? 'attribute_not_exists(workspaceId)'
+            : 'entryType = :authorizationEntryType AND #revision = :documentAuthorizationRevision',
+        ...(snapshot.documentAuthorizationRevision === 0
+          ? {}
+          : {
+              ExpressionAttributeNames: { '#revision': 'revision' },
+              ExpressionAttributeValues: {
+                ':authorizationEntryType': 'document-authorization-revision',
+                ':documentAuthorizationRevision': snapshot.documentAuthorizationRevision,
+              },
+            }),
+      },
+    },
+  ]
+
+  const mutationAuthorizationSnapshot = input.authorizationSnapshot
+  if (
+    snapshot.workspaceMemberKey !== undefined &&
+    mutationAuthorizationSnapshot === undefined
+  ) {
+    conditions.push({
+      ConditionCheck: {
+        TableName:
+          readEnvironment('MUKUROJI_WORKSPACE_ACCESS_TABLE') ??
+          readEnvironment('WORKSPACE_ACCESS_TABLE_NAME') ??
+          'mukuroji-workspace-access-local',
+        Key: {
+          workspaceId: input.workspaceId,
+          recordKey: `MEMBER#${normalizeMemberKey(snapshot.workspaceMemberKey)}`,
+        },
+        ConditionExpression:
+          'entryType = :workspaceMemberEntryType AND #status = :activeStatus AND #version = :workspaceMemberVersion',
+        ExpressionAttributeNames: {
+          '#status': 'status',
+          '#version': 'version',
+        },
+        ExpressionAttributeValues: {
+          ':workspaceMemberEntryType': 'workspace-member',
+          ':activeStatus': 'active',
+          ':workspaceMemberVersion': snapshot.workspaceMemberVersion,
+        },
+      },
+    })
+  }
+
+  if (snapshot.planningRevision !== undefined) {
+    conditions.push({
+      ConditionCheck: {
+        TableName: readEnvironment('PLANNING_TABLE_NAME') ?? 'mukuroji-planning-local',
+        Key: {
+          workspaceId: input.workspaceId,
+          recordKey: 'META',
+        },
+        ConditionExpression: snapshot.planningRevision === 0
+          ? 'attribute_not_exists(workspaceId)'
+          : 'entryType = :planningEntryType AND #revision = :planningRevision',
+        ...(snapshot.planningRevision === 0
+          ? {}
+          : {
+              ExpressionAttributeNames: { '#revision': 'revision' },
+              ExpressionAttributeValues: {
+                ':planningEntryType': 'planning-meta',
+                ':planningRevision': snapshot.planningRevision,
+              },
+            }),
+      },
+    })
+  }
+
+  const enterpriseTableName = readEnvironment('ENTERPRISE_IDENTITY_TABLE_NAME')
+  if (
+    enterpriseTableName &&
+    snapshot.enterpriseControlRevision !== undefined &&
+    mutationAuthorizationSnapshot?.enterpriseControlRevision === undefined
+  ) {
+    conditions.push({
+      ConditionCheck: {
+        TableName: enterpriseTableName,
+        Key: {
+          scopeKey: `WORKSPACE#${input.workspaceId}`,
+          recordKey: 'CONTROL',
+        },
+        ConditionExpression: snapshot.enterpriseControlRevision === 0
+          ? 'attribute_not_exists(scopeKey)'
+          : 'entryType = :enterpriseEntryType AND #controlRevision = :enterpriseControlRevision',
+        ...(snapshot.enterpriseControlRevision === 0
+          ? {}
+          : {
+              ExpressionAttributeNames: { '#controlRevision': 'controlRevision' },
+              ExpressionAttributeValues: {
+                ':enterpriseEntryType': 'enterprise-identity-control',
+                ':enterpriseControlRevision': snapshot.enterpriseControlRevision,
+              },
+            }),
+      },
+    })
+  }
+  return conditions
+}
+
+/**
+ * Creates the audit-row retention condition for an Activity source capture.
+ *
+ * @param input - Curated-context mutation scope.
+ * @param snapshot - Retention deadline captured from the audit source read.
+ * @returns DynamoDB transaction conditions for the source row.
+ */
+function curatedContextActivitySourceConditions(
+  input: CuratedContextMutationInput,
+  snapshot: CuratedContextActivitySourceAuthorizationSnapshot,
+): NonNullable<TransactWriteCommandInput['TransactItems']> {
+  const auditTableName =
+    readEnvironment('MUKUROJI_AUDIT_EVENTS_TABLE') ??
+    readEnvironment('AUDIT_EVENTS_TABLE_NAME') ??
+    'mukuroji-audit-events'
+  const hasRetentionDeadline = snapshot.expiresAt !== undefined
+  return [{
+    ConditionCheck: {
+      TableName: auditTableName,
+      Key: {
+        directoryId: input.workspaceId,
+        eventId: snapshot.sourceId,
+      },
+      ConditionExpression: hasRetentionDeadline
+        ? 'attribute_exists(directoryId) AND attribute_exists(eventId) AND #expiresAt = :capturedExpiresAt AND #expiresAt > :nowEpoch'
+        : 'attribute_exists(directoryId) AND attribute_exists(eventId)',
+      ...(hasRetentionDeadline
+        ? {
+            ExpressionAttributeNames: { '#expiresAt': 'expiresAt' },
+            ExpressionAttributeValues: {
+              ':capturedExpiresAt': snapshot.expiresAt,
+              ':nowEpoch': Math.floor(Date.now() / 1_000),
+            },
+          }
+        : {}),
+    },
+  }]
+}
+
 function watcherParentIssueConditions(tableName: string, input: UpdateWatcherInput) {
   const parentConditions = input.issueId === undefined
     ? []
@@ -1665,6 +5459,30 @@ function commentCondition(tableName: string, entityKey: string, commentId: strin
       TableName: tableName,
       Key: { entityKey, recordKey: commentRecordKey(commentId) },
       ConditionExpression: 'attribute_exists(entityKey) AND attribute_exists(recordKey) AND attribute_not_exists(deletedAt)',
+    },
+  }
+}
+
+/**
+ * Builds a non-deleted comment condition fenced to captured source evidence.
+ *
+ * @param tableName - Collaboration table name.
+ * @param entityKey - Collaboration entity key.
+ * @param comment - Comment snapshot captured before the transaction.
+ * @returns DynamoDB transaction condition.
+ */
+function commentVersionCondition(
+  tableName: string,
+  entityKey: string,
+  comment: StoredComment,
+) {
+  return {
+    ConditionCheck: {
+      TableName: tableName,
+      Key: { entityKey, recordKey: commentRecordKey(comment.id) },
+      ConditionExpression: 'attribute_exists(entityKey) AND attribute_exists(recordKey) AND attribute_not_exists(deletedAt) AND #version = :capturedVersion',
+      ExpressionAttributeNames: { '#version': 'version' },
+      ExpressionAttributeValues: { ':capturedVersion': comment.version },
     },
   }
 }
@@ -1884,10 +5702,22 @@ function normalizeCommentBody(value: string) {
   return normalized
 }
 
-function hasUnsafeControlCharacter(value: string) {
+/**
+ * Detects control characters that are unsafe for persisted collaboration text.
+ *
+ * @param value - Text to inspect.
+ * @param allowCarriageReturn - Whether carriage returns are preserved as source evidence.
+ * @returns Whether the text contains an unsafe control character.
+ */
+function hasUnsafeControlCharacter(value: string, allowCarriageReturn = false) {
   return [...value].some((character) => {
     const codePoint = character.codePointAt(0) ?? 0
-    return codePoint === 127 || (codePoint < 32 && codePoint !== 9 && codePoint !== 10)
+    return codePoint === 127 || (
+      codePoint < 32 &&
+      codePoint !== 9 &&
+      codePoint !== 10 &&
+      !(allowCarriageReturn && codePoint === 13)
+    )
   })
 }
 
@@ -1912,11 +5742,55 @@ function toStoredComment(value: Record<string, unknown>) {
     typeof value.rootCommentId !== 'string' ||
     typeof value.authorMemberKey !== 'string' ||
     typeof value.bodyMarkdown !== 'string' ||
-    !Number.isSafeInteger(value.version) ||
+    !isPositiveSafeInteger(value.version) ||
     typeof value.createdAt !== 'string' ||
     typeof value.updatedAt !== 'string'
   ) {
     throw new CollaborationError(503, 'InvalidCollaborationRecord', 'Comment record is invalid.')
+  }
+
+  const legacyAcceptedResolutions = normalizeAcceptedResolutions(
+    value.acceptedResolutions,
+    value.rootCommentId,
+  )
+  const storedCurrentResolution = value.acceptedResolution === undefined
+    ? undefined
+    : normalizeAcceptedResolutions([value.acceptedResolution], value.rootCommentId)[0]
+  if (storedCurrentResolution?.state === 'superseded') {
+    throw new CollaborationError(
+      503,
+      'InvalidCollaborationRecord',
+      'Accepted resolution current snapshot is invalid.',
+    )
+  }
+  const acceptedResolutionId = value.acceptedResolutionId === undefined
+    ? undefined
+    : requireIdentifierValue(value.acceptedResolutionId, 'Accepted resolution ID')
+  if (acceptedResolutionId !== undefined && !storedCurrentResolution) {
+    throw new CollaborationError(
+      503,
+      'InvalidCollaborationRecord',
+      'Accepted resolution pointer requires a current snapshot.',
+    )
+  }
+  if (storedCurrentResolution && acceptedResolutionId === undefined) {
+    throw new CollaborationError(
+      503,
+      'InvalidCollaborationRecord',
+      'Accepted resolution current snapshot requires a root pointer.',
+    )
+  }
+  const legacyCurrentResolution = legacyAcceptedResolutions.find(
+    (resolution) => resolution.state === 'accepted',
+  )
+  const currentResolution = storedCurrentResolution ?? legacyCurrentResolution
+  const normalizedAcceptedResolutionId = acceptedResolutionId ?? currentResolution?.id
+  if (storedCurrentResolution && acceptedResolutionId !== storedCurrentResolution.id) {
+    throw new CollaborationError(
+      503,
+      'InvalidCollaborationRecord',
+      'Accepted resolution current snapshot does not match the root pointer.',
+    )
   }
 
   return {
@@ -1928,7 +5802,7 @@ function toStoredComment(value: Record<string, unknown>) {
     ...(typeof value.parentCommentId === 'string' ? { parentCommentId: value.parentCommentId } : {}),
     authorMemberKey: normalizeMemberKey(value.authorMemberKey),
     bodyMarkdown: value.bodyMarkdown,
-    version: value.version as number,
+    version: value.version,
     mentionMemberKeys: Array.isArray(value.mentionMemberKeys)
       ? value.mentionMemberKeys.filter((entry): entry is string => typeof entry === 'string')
       : [],
@@ -1940,7 +5814,12 @@ function toStoredComment(value: Record<string, unknown>) {
     ...(typeof value.resolvedByMemberKey === 'string'
       ? { resolvedByMemberKey: normalizeMemberKey(value.resolvedByMemberKey) }
       : {}),
+    ...(normalizedAcceptedResolutionId
+      ? { acceptedResolutionId: normalizedAcceptedResolutionId }
+      : {}),
     reactions: [],
+    acceptedResolutions: currentResolution ? [currentResolution] : [],
+    legacyAcceptedResolutions,
   } satisfies StoredComment
 }
 
@@ -2025,6 +5904,28 @@ function isSameCreatedComment(existing: StoredComment, expected: StoredComment) 
     existing.rootCommentId === expected.rootCommentId &&
     existing.mentionMemberKeys.length === expected.mentionMemberKeys.length &&
     existing.mentionMemberKeys.every((memberKey, index) => memberKey === expected.mentionMemberKeys[index])
+}
+
+/**
+ * Tests whether a bounded root response matches an accepted-resolution retry.
+ *
+ * @param response - Current or receipt-backed root response.
+ * @param sourceCommentId - Requested source reply identifier.
+ * @param summary - Normalized manual summary.
+ * @param actorId - Mutation actor identifier.
+ * @returns Whether the successful response belongs to the same logical mutation.
+ */
+function isSameAcceptedResolutionReplay(
+  response: CollaborationComment,
+  sourceCommentId: string,
+  summary: string,
+  actorId: string,
+) {
+  const resolution = response.acceptedResolutions[0]
+  return resolution?.state === 'accepted' &&
+    resolution.sourceCommentId === sourceCommentId &&
+    resolution.summary === summary &&
+    normalizeMemberKey(resolution.acceptedBy.id) === normalizeMemberKey(actorId)
 }
 
 function workItemEntityId(teamId: string, issueId: string) {
@@ -2142,6 +6043,42 @@ function clampLimit(value: number | undefined) {
     throw new CollaborationError(400, 'InvalidCollaborationCursor', 'Page limit is invalid.')
   }
   return Math.max(1, Math.min(100, Math.floor(value)))
+}
+
+/**
+ * Clamps curated context pages below the generic collaboration limit.
+ *
+ * Each item can contain multiple bounded Markdown/evidence fields, so ten items
+ * keeps the serialized API response below the service payload ceiling even for
+ * worst-case UTF-8 and JSON escaping.
+ *
+ * @param value - Requested page size.
+ * @returns Validated page size capped at ten items.
+ */
+function clampCuratedContextLimit(value: number | undefined) {
+  if (value === undefined) {
+    return curatedContextPageLimit
+  }
+  if (!Number.isFinite(value)) {
+    throw new CollaborationError(400, 'InvalidCollaborationCursor', 'Page limit is invalid.')
+  }
+  return Math.max(1, Math.min(curatedContextPageLimit, Math.floor(value)))
+}
+
+/**
+ * Clamps accepted resolution history pages to a hard payload-safe maximum.
+ *
+ * @param value - Requested page size.
+ * @returns Validated accepted resolution page size.
+ */
+function clampAcceptedResolutionHistoryLimit(value: number | undefined) {
+  if (value === undefined) {
+    return acceptedResolutionHistoryDefaultLimit
+  }
+  if (!Number.isFinite(value)) {
+    throw new CollaborationError(400, 'InvalidCollaborationCursor', 'Page limit is invalid.')
+  }
+  return Math.max(1, Math.min(acceptedResolutionHistoryMaxLimit, Math.floor(value)))
 }
 
 function clampPresenceTtl(value: number | undefined) {

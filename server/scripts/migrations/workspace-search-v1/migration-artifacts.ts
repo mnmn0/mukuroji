@@ -817,6 +817,7 @@ function requireEntityType(
 ): WorkspaceSearchMigrationOperation['entityType'] {
   if (
     value === 'comment' ||
+    value === 'context-item' ||
     value === 'document' ||
     value === 'project' ||
     value === 'team' ||

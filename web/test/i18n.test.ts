@@ -21,7 +21,7 @@ const representativeMessages: ReadonlyArray<{
   },
   { key: 'issues.eyebrow', ja: 'プロダクト Issue', en: 'Product issues' },
   { key: 'documents.title', ja: 'ドキュメント', en: 'Documents' },
-  { key: 'collaboration.title', ja: 'ディスカッション', en: 'Discussion' },
+  { key: 'collaboration.title', ja: '共同作業', en: 'Collaboration' },
   { key: 'automation.title', ja: 'オートメーション', en: 'Automation' },
   { key: 'analytics.title', ja: 'レポート', en: 'Reports' },
   { key: 'planning.title', ja: 'プランニング', en: 'Planning' },
