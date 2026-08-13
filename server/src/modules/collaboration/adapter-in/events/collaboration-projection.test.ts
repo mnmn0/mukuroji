@@ -18,6 +18,7 @@ import {
   hasActiveNotificationScope,
   isActiveWorkspaceNotificationMember,
   hasCurrentSystemAdminMembership,
+  hasEligibleEnterpriseNotificationAccess,
   hasEligibleProjectAccess,
   mergeDeletedObjectTags,
   overlayCurrentWorkItemNotificationScope,
@@ -1207,6 +1208,46 @@ describe('collaboration projection pure helpers', () => {
       { teamId: 'design', projectId: 'shared-launch' },
       'member@example.com',
       qualifiedDirectory,
+    )).toBe(false)
+  })
+
+  test('uses authoritative Enterprise role assignments for cadence notifications', () => {
+    const event = {
+      workspaceId: 'workspace-1',
+      teamId: 'core',
+      projectId: 'platform',
+      planningNotificationKind: 'overdue',
+    } satisfies Pick<
+      AuditProjectionEvent,
+      'workspaceId' | 'projectId' | 'teamId' | 'planningNotificationKind'
+    >
+    const snapshot = createRealtimeEnterpriseSnapshot({
+      roleAssignments: [{
+        workspaceId: 'workspace-1',
+        assignmentId: 'assignment-1',
+        principalKind: 'member',
+        principalId: 'member@example.com',
+        roleId: 'project:member',
+        scope: {
+          workspaceId: 'workspace-1',
+          kind: 'project',
+          targetId: 'platform',
+        },
+        source: 'direct',
+      }],
+    })
+
+    expect(hasEligibleEnterpriseNotificationAccess(
+      event,
+      'MEMBER@example.com',
+      'member',
+      snapshot,
+    )).toBe(true)
+    expect(hasEligibleEnterpriseNotificationAccess(
+      event,
+      'other@example.com',
+      'member',
+      snapshot,
     )).toBe(false)
   })
 

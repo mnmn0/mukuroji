@@ -868,6 +868,8 @@ test('public API workers and the migration provider use retained 90-day log grou
 test('audit stream isolates downstream delivery and retention consumers', () => {
   const template = synthesizedTemplate;
   const resources = template.toJSON().Resources;
+  const enterpriseIdentityTableId = template.toJSON().Outputs
+    .EnterpriseIdentityTableName?.Value?.Ref;
 
   template.hasResourceProperties('AWS::Lambda::Function', {
     Code: {
@@ -888,6 +890,9 @@ test('audit stream isolates downstream delivery and retention consumers', () => 
         },
         COGNITO_USER_POOL_ID: {
           Ref: 'CognitoUserPoolId',
+        },
+        ENTERPRISE_IDENTITY_TABLE_NAME: {
+          Ref: enterpriseIdentityTableId,
         },
         FILE_BUCKET_NAME: Match.anyValue(),
         FILE_PROOFING_TABLE_NAME: Match.anyValue(),
@@ -1010,6 +1015,7 @@ test('audit stream isolates downstream delivery and retention consumers', () => 
   expect(serializedProjectionPolicy).toContain('WorkItemCollaborationTableFDECF217');
   expect(serializedProjectionPolicy).toContain('cognito-idp:AdminListGroupsForUser');
   expect(serializedProjectionPolicy).toContain('CognitoUserPoolId');
+  expect(serializedProjectionPolicy).toContain(String(enterpriseIdentityTableId));
   expect(serializedProjectionPolicy).toContain('TeamIssuesTable189D851D');
   expect(serializedProjectionPolicy).toContain('PlanningTable2A0D4CC5');
   expect(serializedProjectionPolicy).toContain('TenantAdministrationTable621D59EB');
@@ -1024,6 +1030,8 @@ test('audit stream isolates downstream delivery and retention consumers', () => 
     .toContain('dynamodb:PutItem');
   expect(actionsForProjectionTable('PlanningTable2A0D4CC5'))
     .toContain('dynamodb:GetItem');
+  expect(actionsForProjectionTable(String(enterpriseIdentityTableId)))
+    .toEqual(expect.arrayContaining(['dynamodb:GetItem', 'dynamodb:Query']));
   expect(actionsForProjectionTable('TeamIssuesTable189D851D'))
     .toContain('dynamodb:ConditionCheckItem');
   expect(serializedProjectionPolicy).toContain('sqs:SendMessage');
@@ -2032,6 +2040,15 @@ test('hourly schedule emits deterministic events and surfaces bounded scan failu
     logicalId.startsWith('NotificationScheduleFunctionServiceRoleDefaultPolicy')
   )?.[1];
   const serializedSchedulePolicy = JSON.stringify(schedulePolicy);
+  const scheduleStatements = (
+    schedulePolicy as {
+      Properties?: { PolicyDocument?: { Statement?: Array<Record<string, unknown>> } };
+    } | undefined
+  )?.Properties?.PolicyDocument?.Statement ?? [];
+  const planningUpdateStatement = scheduleStatements.find((statement) =>
+    JSON.stringify(statement.Resource).includes('PlanningTable2A0D4CC5') &&
+    JSON.stringify(statement.Action).includes('dynamodb:UpdateItem')
+  );
 
   expect(serializedSchedulePolicy).toContain('TeamIssuesTable189D851D');
   expect(serializedSchedulePolicy).toContain('PlanningTable2A0D4CC5');
@@ -2044,6 +2061,17 @@ test('hourly schedule emits deterministic events and surfaces bounded scan failu
   expect(serializedSchedulePolicy).toContain('dynamodb:UpdateItem');
   expect(serializedSchedulePolicy).toContain('dynamodb:PutItem');
   expect(serializedSchedulePolicy).toContain('sqs:SendMessage');
+  expect(planningUpdateStatement?.Condition).toEqual({
+    'ForAllValues:StringEquals': {
+      'dynamodb:Attributes': [
+        'workspaceId',
+        'recordKey',
+        'nextNotificationAtRecordKey',
+        'updateScheduleShard',
+        'updatedAt',
+      ],
+    },
+  });
   template.hasOutput('NotificationScheduleDlqUrl', {});
 });
 

@@ -25,12 +25,20 @@ const planningUpdateAnnotationVersionLimit = 20
 const planningUpdateAnnotationPageSize = 100
 const planningUpdateAnnotationInFlightCacheLimit = 100
 
-/** One bounded annotation page cached for a target/version pair. */
+/** All annotation rows loaded for one bounded target/version pair. */
 type PlanningUpdateAnnotationPage = {
-  /** Comments returned by the first page. */
+  /** Comments returned by every available cursor page. */
   comments: PlanningUpdateComment[]
-  /** Reactions returned by the first page. */
+  /** Reactions returned by every available cursor page. */
   reactions: PlanningUpdateReaction[]
+}
+
+/** One cursor page returned by a Planning annotation endpoint. */
+type PlanningUpdateAnnotationItemPage<Item> = {
+  /** Annotation rows returned by this page. */
+  items: Item[]
+  /** Opaque cursor for the next page, when more rows exist. */
+  nextCursor?: string
 }
 
 const planningUpdateAnnotationPageCache = new Map<
@@ -295,7 +303,7 @@ export function selectPlanningUpdateAnnotationVersions(
  * @param updateVersions - Immutable update versions ordered newest first.
  * @param loadComments - Comment page loader overridden by focused tests.
  * @param loadReactions - Reaction page loader overridden by focused tests.
- * @returns Flattened first-page annotations for at most twenty update versions.
+ * @returns Flattened annotations for at most twenty update versions.
  */
 export async function loadBoundedPlanningUpdateAnnotations(
   accessToken: string,
@@ -309,20 +317,32 @@ export async function loadBoundedPlanningUpdateAnnotations(
       .slice(0, planningUpdateAnnotationVersionLimit)
       .map(async (updateVersion) => {
         const [comments, reactions] = await Promise.all([
-          loadComments(accessToken, {
-            limit: planningUpdateAnnotationPageSize,
-            target,
-            updateVersion,
-          }),
-          loadReactions(accessToken, {
-            limit: planningUpdateAnnotationPageSize,
-            target,
-            updateVersion,
-          }),
+          loadAllPlanningUpdateAnnotationItems((cursor) =>
+            loadComments(accessToken, {
+              limit: planningUpdateAnnotationPageSize,
+              target,
+              updateVersion,
+              ...(cursor ? { cursor } : {}),
+            }).then((page) => ({
+              items: page.comments,
+              nextCursor: page.nextCursor,
+            }))
+          ),
+          loadAllPlanningUpdateAnnotationItems((cursor) =>
+            loadReactions(accessToken, {
+              limit: planningUpdateAnnotationPageSize,
+              target,
+              updateVersion,
+              ...(cursor ? { cursor } : {}),
+            }).then((page) => ({
+              items: page.reactions,
+              nextCursor: page.nextCursor,
+            }))
+          ),
         ])
         return {
-          comments: comments.comments,
-          reactions: reactions.reactions,
+          comments,
+          reactions,
         }
       }),
   )
@@ -378,7 +398,7 @@ export async function hasPlanningUpdateViewerReaction(
  * @param accessToken - Planning API access token.
  * @param target - Selected Planning update target.
  * @param updateVersions - Immutable update versions ordered newest first.
- * @returns Flattened first-page annotations for the newest distinct versions.
+ * @returns Flattened annotations for the newest distinct versions.
  */
 async function loadCachedPlanningUpdateAnnotations(
   accessToken: string,
@@ -401,12 +421,12 @@ async function loadCachedPlanningUpdateAnnotations(
 }
 
 /**
- * Loads one annotation page and shares a bounded in-flight request by target/version.
+ * Loads all annotation pages and shares a bounded in-flight request by target/version.
  *
  * @param accessToken - Planning API access token.
  * @param target - Selected Planning update target.
  * @param updateVersion - Immutable update version.
- * @returns One bounded comment/reaction page.
+ * @returns All comments and reactions for the selected version.
  */
 function loadCachedPlanningUpdateAnnotationPage(
   accessToken: string,
@@ -426,19 +446,31 @@ function loadCachedPlanningUpdateAnnotationPage(
     planningUpdateAnnotationPageCache.delete(oldestKey)
   }
   const request = Promise.all([
-    listPlanningUpdateComments(accessToken, {
-      limit: planningUpdateAnnotationPageSize,
-      target,
-      updateVersion,
-    }),
-    listPlanningUpdateReactions(accessToken, {
-      limit: planningUpdateAnnotationPageSize,
-      target,
-      updateVersion,
-    }),
+    loadAllPlanningUpdateAnnotationItems((cursor) =>
+      listPlanningUpdateComments(accessToken, {
+        limit: planningUpdateAnnotationPageSize,
+        target,
+        updateVersion,
+        ...(cursor ? { cursor } : {}),
+      }).then((page) => ({
+        items: page.comments,
+        nextCursor: page.nextCursor,
+      }))
+    ),
+    loadAllPlanningUpdateAnnotationItems((cursor) =>
+      listPlanningUpdateReactions(accessToken, {
+        limit: planningUpdateAnnotationPageSize,
+        target,
+        updateVersion,
+        ...(cursor ? { cursor } : {}),
+      }).then((page) => ({
+        items: page.reactions,
+        nextCursor: page.nextCursor,
+      }))
+    ),
   ]).then(([comments, reactions]) => ({
-    comments: comments.comments,
-    reactions: reactions.reactions,
+    comments,
+    reactions,
   }))
   planningUpdateAnnotationPageCache.set(cacheKey, request)
   void request.then(
@@ -454,6 +486,30 @@ function loadCachedPlanningUpdateAnnotationPage(
     },
   )
   return request
+}
+
+/**
+ * Follows an annotation endpoint's opaque cursor until the collection is exhausted.
+ *
+ * @param loadPage - Loader for one page, given the cursor from the previous page.
+ * @returns All annotation rows returned by the cursor sequence.
+ */
+async function loadAllPlanningUpdateAnnotationItems<Item>(
+  loadPage: (cursor?: string) => Promise<PlanningUpdateAnnotationItemPage<Item>>,
+): Promise<Item[]> {
+  const items: Item[] = []
+  const visitedCursors = new Set<string>()
+  let cursor: string | undefined
+  while (true) {
+    const page = await loadPage(cursor)
+    items.push(...page.items)
+    if (!page.nextCursor) return items
+    if (visitedCursors.has(page.nextCursor)) {
+      throw new Error('Planning update annotation pagination repeated a cursor.')
+    }
+    visitedCursors.add(page.nextCursor)
+    cursor = page.nextCursor
+  }
 }
 
 /** Removes cached annotation pages so a successful comment/reaction mutation is visible. */

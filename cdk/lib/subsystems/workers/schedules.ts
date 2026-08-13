@@ -245,6 +245,17 @@ export function buildScheduleWorkers(
   notificationScheduleFunction.addToRolePolicy(new iam.PolicyStatement({
     actions: ['dynamodb:UpdateItem'],
     resources: [planningTable.tableArn],
+    conditions: {
+      'ForAllValues:StringEquals': {
+        'dynamodb:Attributes': [
+          'workspaceId',
+          'recordKey',
+          'nextNotificationAtRecordKey',
+          'updateScheduleShard',
+          'updatedAt',
+        ],
+      },
+    },
   }));
   projectDirectoryTable.grants.readData(notificationScheduleFunction);
   workItemsTable.grants.readData(notificationScheduleFunction);

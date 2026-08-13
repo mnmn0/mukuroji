@@ -6780,11 +6780,7 @@ routeApp.post('/api/planning/updates', async (c) => {
       ...candidate,
       target: readPlanningUpdateTarget(candidate.target),
     }
-    const workItemState = await readPlanningWorkItemState(principal)
-    const snapshot = await workItemDependencies.planning.get(
-      principal.directoryId,
-      workItemState,
-    )
+    const { snapshot, targetScope } = await readPlanningPublishState(principal, input.target)
     const visibleSnapshot = filterPlanningSnapshotForPrincipal(principal, snapshot)
     const idempotencyKey = c.req.header('Idempotency-Key')?.trim()
     let publishTransaction: PlanningMutationTransaction<PlanningUpdatePublishTransactionResult> | undefined
@@ -6868,7 +6864,10 @@ routeApp.post('/api/planning/updates', async (c) => {
       visibleSnapshot,
       input,
     )
-    const canonicalWorkItemState = await readCanonicalPlanningWorkItemState(principal)
+    const canonicalWorkItemState = await readCanonicalPlanningWorkItemState(
+      principal,
+      targetScope,
+    )
     const response = await workItemDependencies.planning.publishUpdate(
       principal.directoryId,
       input,
@@ -6919,12 +6918,17 @@ routeApp.get('/api/planning/updates', async (c) => {
       'viewer',
     )
     const limit = readPlanningUpdateHistoryLimit(c.req.query('limit'))
+    const capturedScopeAuthorizationCache = new Map<string, Promise<void>>()
     let page = await workItemDependencies.planning.listUpdates(principal.directoryId, {
       target,
       ...(limit === undefined ? {} : { limit }),
       ...(c.req.query('cursor') ? { cursor: c.req.query('cursor') } : {}),
     })
-    const visibleUpdates = await filterPlanningUpdatesByCapturedScope(principal, page.updates)
+    const visibleUpdates = await filterPlanningUpdatesByCapturedScope(
+      principal,
+      page.updates,
+      capturedScopeAuthorizationCache,
+    )
     while (limit !== undefined && visibleUpdates.length < limit && page.nextCursor) {
       const remaining = limit - visibleUpdates.length
       page = await workItemDependencies.planning.listUpdates(principal.directoryId, {
@@ -6933,7 +6937,11 @@ routeApp.get('/api/planning/updates', async (c) => {
         cursor: page.nextCursor,
       })
       visibleUpdates.push(
-        ...(await filterPlanningUpdatesByCapturedScope(principal, page.updates)).slice(0, remaining),
+        ...(await filterPlanningUpdatesByCapturedScope(
+          principal,
+          page.updates,
+          capturedScopeAuthorizationCache,
+        )).slice(0, remaining),
       )
     }
     return c.json({
@@ -7225,6 +7233,7 @@ routeApp.get('/api/planning/updates/export', async (c) => {
       'viewer',
     )
     const updates: PlanningUpdate[] = []
+    const capturedScopeAuthorizationCache = new Map<string, Promise<void>>()
     let cursor: string | undefined
     do {
       const page = await workItemDependencies.planning.listUpdates(principal.directoryId, {
@@ -7232,7 +7241,11 @@ routeApp.get('/api/planning/updates/export', async (c) => {
         limit: 100,
         ...(cursor ? { cursor } : {}),
       })
-      updates.push(...await filterPlanningUpdatesByCapturedScope(principal, page.updates))
+      updates.push(...await filterPlanningUpdatesByCapturedScope(
+        principal,
+        page.updates,
+        capturedScopeAuthorizationCache,
+      ))
       cursor = page.nextCursor
       if (
         updates.length > MAX_PLANNING_UPDATE_EXPORT_COUNT ||
@@ -22013,19 +22026,25 @@ async function requirePlanningUpdateCapturedScopePermission(
  *
  * @param principal - Current authenticated Workspace principal.
  * @param updates - Immutable updates returned by the canonical history store.
+ * @param authorizationCache - Per-request cache for captured-scope authorization results.
  * @returns Only updates whose captured scope remains visible.
  */
 async function filterPlanningUpdatesByCapturedScope(
   principal: WorkspacePrincipal,
   updates: readonly PlanningUpdate[],
+  authorizationCache: Map<string, Promise<void>>,
 ): Promise<PlanningUpdate[]> {
   const visible: PlanningUpdate[] = []
   for (const update of updates) {
+    const scope = update.contextSnapshot.scope
+    const scopeKey = JSON.stringify([scope.teamId ?? null, scope.projectId ?? null])
+    let authorization = authorizationCache.get(scopeKey)
+    if (!authorization) {
+      authorization = requirePlanningUpdateCapturedScopePermission(principal, scope)
+      authorizationCache.set(scopeKey, authorization)
+    }
     try {
-      await requirePlanningUpdateCapturedScopePermission(
-        principal,
-        update.contextSnapshot.scope,
-      )
+      await authorization
       visible.push(update)
     } catch (error) {
       if (isPlanningVisibilityAuthorizationError(error)) continue
@@ -30458,23 +30477,36 @@ async function reauthorizeFocusItem(
   return authorized
 }
 
+/** Optional Team/Project envelope used to bound a canonical Work Item read. */
+type PlanningWorkItemReadScope = {
+  /** Team whose Work Item partition should be read. */
+  teamId?: string
+  /** Project whose assigned Work Items should be retained. */
+  projectId?: string
+}
+
 async function readAccessibleWorkItems(
   principal: ProjectPrincipal,
   includeArchived = false,
+  scope?: PlanningWorkItemReadScope,
 ): Promise<WorkItemsResponse> {
   const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja')
   const projectAccesses = principal.isSystemAdmin
     ? undefined
     : await getEffectiveProjectAccessList(principal)
   const authorizedTeamIds = new Set(principal.enterpriseAuthorizedTeamIds ?? [])
-  const contexts: TeamPermissionContext[] = directory.teams.flatMap((team) => {
+  const selectedTeams = scope?.teamId === undefined
+    ? directory.teams
+    : directory.teams.filter((team) => team.id === scope.teamId)
+  const contexts: TeamPermissionContext[] = selectedTeams.flatMap((team) => {
     if (principal.isSystemAdmin) {
       return [{ team, directory } satisfies TeamPermissionContext]
     }
 
     const teamProjectIds = new Set(team.projects.map((project) => project.id))
     const teamProjectAccesses = (projectAccesses ?? []).filter((access) =>
-      teamProjectIds.has(access.projectId)
+      teamProjectIds.has(access.projectId) &&
+      (scope?.projectId === undefined || access.projectId === scope.projectId)
     )
     if (
       !authorizedTeamIds.has(team.id) &&
@@ -30501,6 +30533,9 @@ async function readAccessibleWorkItems(
       includeArchived,
     )
     for (const workItem of response.issues) {
+      if (scope?.projectId !== undefined && workItem.assignedProjectId !== scope.projectId) {
+        continue
+      }
       addAggregateWorkItem(workItemsById, workItem)
     }
   }
@@ -30730,8 +30765,9 @@ function assertAnalyticsPartitionSize(
 
 async function readPlanningWorkItemState(
   principal: ProjectPrincipal,
+  scope?: PlanningWorkItemReadScope,
 ): Promise<PlanningWorkItemState> {
-  const response = await readAccessibleWorkItems(principal)
+  const response = await readAccessibleWorkItems(principal, false, scope)
   return {
     workItems: response.workItems.map((workItem) => ({
       id: workItem.id,
@@ -30757,30 +30793,45 @@ async function readPlanningWorkItemState(
  * independent of the publisher's project ACL.
  *
  * @param principal - Authenticated Workspace principal whose directory is being read.
+ * @param scope - Optional target envelope. Workspace-scoped targets omit this value.
  * @returns Complete Work Item summaries bounded by the aggregate read limits.
  */
 async function readCanonicalPlanningWorkItemState(
   principal: ProjectPrincipal,
+  scope?: PlanningWorkItemReadScope,
 ): Promise<PlanningWorkItemState> {
   const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(
     principal.directoryId,
     'ja',
     true,
   )
-  if (directory.teams.length > WORK_ITEMS_TEAM_READ_LIMIT) {
+  if (scope?.projectId !== undefined && scope.teamId === undefined) {
+    throw new PlanningError(
+      409,
+      'PlanningUpdateScopeInvalid',
+      'A Project-scoped Planning update requires its owning Team scope.',
+    )
+  }
+  const selectedTeams = scope?.teamId === undefined
+    ? directory.teams
+    : directory.teams.filter((team) => team.id === scope.teamId)
+  if (scope?.teamId === undefined && selectedTeams.length > WORK_ITEMS_TEAM_READ_LIMIT) {
     throw createWorkItemListLimitExceededError(
       `Workspace has more than ${WORK_ITEMS_TEAM_READ_LIMIT} Teams for a Planning publish.`,
     )
   }
   const servicePrincipal = { ...principal, isSystemAdmin: true }
   const workItemsByKey = new Map<string, TeamIssueResponseItem>()
-  for (const team of directory.teams) {
+  for (const team of selectedTeams) {
     const response = await readCanonicalTeamIssuesForAggregate(
       principal.directoryId,
       { team, directory } satisfies TeamPermissionContext,
       servicePrincipal,
     )
     for (const workItem of response.issues) {
+      if (scope?.projectId !== undefined && workItem.assignedProjectId !== scope.projectId) {
+        continue
+      }
       workItemsByKey.set(`${workItem.teamId}\0${workItem.id}`, workItem)
       if (workItemsByKey.size > PLANNING_CANONICAL_WORK_ITEM_LIMIT) {
         throw createWorkItemListLimitExceededError(
@@ -30803,6 +30854,111 @@ async function readCanonicalPlanningWorkItemState(
       schedule: workItem.schedule,
     } satisfies PlanningWorkItemSummary)),
   }
+}
+
+/** Planning publish reads that share the target envelope resolved from the current snapshot. */
+type PlanningPublishReadState = {
+  /** Current principal-visible Planning Work Item state. */
+  workItemState: PlanningWorkItemState
+  /** Current unfiltered Planning snapshot used for route authorization. */
+  snapshot: PlanningSnapshot
+  /** Target envelope used to bound canonical Work Item reads. */
+  targetScope?: PlanningWorkItemReadScope
+}
+
+/**
+ * Resolves the canonical Work Item envelope for a Project or Initiative target.
+ *
+ * @param snapshot - Planning snapshot containing the current target entity.
+ * @param target - Validated Project or Initiative target.
+ * @returns Team/Project envelope, or undefined for a Workspace-scoped Initiative.
+ */
+function resolvePlanningPublishTargetScope(
+  snapshot: PlanningSnapshot,
+  target: PlanningUpdateTarget,
+): PlanningWorkItemReadScope | undefined {
+  if (target.type === 'project') {
+    return { teamId: target.teamId, projectId: target.projectId }
+  }
+
+  const entity = snapshot.entities.find((candidate) =>
+    candidate.id === target.entityId && candidate.type === 'initiative'
+  )
+  if (!entity) {
+    throw new PlanningError(
+      404,
+      'PlanningUpdateTargetNotFound',
+      'Planning Initiative update target was not found.',
+    )
+  }
+  if (entity.projectId !== undefined && entity.teamId === undefined) {
+    throw new PlanningError(
+      409,
+      'PlanningUpdateScopeInvalid',
+      'A Project-scoped Planning Initiative requires its owning Team scope.',
+    )
+  }
+  if (entity.teamId === undefined && entity.projectId === undefined) return undefined
+  return {
+    ...(entity.teamId === undefined ? {} : { teamId: entity.teamId }),
+    ...(entity.projectId === undefined ? {} : { projectId: entity.projectId }),
+  }
+}
+
+/**
+ * Compares two optional Planning publish envelopes without conflating workspace scope.
+ *
+ * @param first - First optional Team/Project envelope.
+ * @param second - Second optional Team/Project envelope.
+ * @returns Whether both envelopes describe the same scope.
+ */
+function planningPublishScopesEqual(
+  first: PlanningWorkItemReadScope | undefined,
+  second: PlanningWorkItemReadScope | undefined,
+): boolean {
+  return first?.teamId === second?.teamId && first?.projectId === second?.projectId
+}
+
+/**
+ * Resolves the target envelope before reading Work Items for a Planning publish.
+ *
+ * Initiative scope is stored in the Planning graph, so an empty Work Item projection is used
+ * only to resolve that envelope before the bounded canonical read.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param target - Validated Project or Initiative publish target.
+ * @returns Planning snapshot and Work Item state read within the target envelope.
+ */
+async function readPlanningPublishState(
+  principal: ProjectPrincipal,
+  target: PlanningUpdateTarget,
+): Promise<PlanningPublishReadState> {
+  let targetScope: PlanningWorkItemReadScope | undefined
+  if (target.type === 'project') {
+    targetScope = { teamId: target.teamId, projectId: target.projectId }
+  } else {
+    const preliminarySnapshot = await workItemDependencies.planning.get(
+      principal.directoryId,
+      { workItems: [] },
+    )
+    targetScope = resolvePlanningPublishTargetScope(preliminarySnapshot, target)
+  }
+
+  let workItemState = await readPlanningWorkItemState(principal, targetScope)
+  let snapshot = await workItemDependencies.planning.get(
+    principal.directoryId,
+    workItemState,
+  )
+  const currentTargetScope = resolvePlanningPublishTargetScope(snapshot, target)
+  if (!planningPublishScopesEqual(targetScope, currentTargetScope)) {
+    targetScope = currentTargetScope
+    workItemState = await readPlanningWorkItemState(principal, targetScope)
+    snapshot = await workItemDependencies.planning.get(
+      principal.directoryId,
+      workItemState,
+    )
+  }
+  return { workItemState, snapshot, targetScope }
 }
 
 /**

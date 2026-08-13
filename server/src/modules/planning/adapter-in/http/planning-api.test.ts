@@ -473,6 +473,55 @@ test('configures, publishes, pages, exports, and watches a qualified Project upd
   expect(await watched.json()).toHaveProperty('watch')
 })
 
+test('bounds Project publish canonical reads to the selected Team and Project', async () => {
+  const calls = configureFakeProjectClients(true, {
+    role: 'manager',
+    workspaceRole: 'member',
+    additionalTeams: Array.from({ length: 20 }, (_, index) => ({
+      id: `unrelated-team-${index}`,
+      name: `Unrelated Team ${index}`,
+      projects: [{
+        id: `unrelated-project-${index}`,
+        name: `Unrelated Project ${index}`,
+        tone: 'purple' as const,
+      }],
+    })),
+  })
+  const planning = new InMemoryPlanningClient(() => new Date('2026-08-07T00:00:00.000Z'))
+  configurePlanningAnnotationIdempotency(planning)
+  const target = { type: 'project', teamId: 'core-team', projectId: 'refero' }
+
+  const configured = await planningApiRequest('/api/planning/updates/cadence', 'PUT', {
+    target,
+    cadence: {
+      updateOwnerMemberKey: 'demo@example.com',
+      cadence: { unit: 'week', count: 1 },
+      timeZone: 'UTC',
+      nextDueAt: '2026-08-10T00:00:00.000Z',
+      reminderHoursBefore: 24,
+    },
+    expectedRevision: 0,
+  }, 'project-scope-cadence-request')
+  expect(configured.status).toBe(200)
+
+  const published = await planningApiRequest('/api/planning/updates', 'POST', {
+    target,
+    id: 'project-scope-update',
+    health: 'on-track',
+    risk: 'low',
+    summary: 'The selected Project remains on track.',
+    riskSummary: '',
+    decisionSummary: '',
+    helpNeeded: '',
+    nextAction: '',
+    evidence: [],
+    expectedRevision: 1,
+  })
+
+  expect(published.status).toBe(201)
+  expect(new Set(calls.issueReads.map((read) => read.teamId))).toEqual(new Set(['core-team']))
+})
+
 test('keeps filtered Planning history within the requested limit while advancing the cursor', async () => {
   const oldScope = {
     teamId: 'other-team',

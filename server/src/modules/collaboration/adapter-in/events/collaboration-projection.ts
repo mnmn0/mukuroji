@@ -17,7 +17,13 @@ import {
   S3Client,
   type Tag,
 } from '@aws-sdk/client-s3'
+import type { EnterpriseIdentitySnapshot } from '@mukuroji/contracts'
 import { isCanonicalWorkItemRecord } from '../../../work-items'
+import {
+  evaluateEnterpriseAccess,
+  resolveEnterpriseDirectoryPrincipal,
+  type EnterpriseIdentityReadCapability,
+} from '../../../enterprise-identity'
 import type {
   CollaborationRealtimePublisher,
 } from '../../application/ports/realtime-publisher'
@@ -167,6 +173,8 @@ export interface CollaborationProjectionDependencies {
   curatedContextSearch: CuratedContextSearchProjectionDependencies
   /** Port that publishes realtime invalidations. */
   realtime: CollaborationRealtimePublisher
+  /** Optional authoritative Enterprise Identity reader for cadence authorization. */
+  enterpriseIdentity?: Pick<EnterpriseIdentityReadCapability, 'getSnapshot'>
 }
 
 /** Canonical scope passed to the curated context Search projection. */
@@ -493,10 +501,16 @@ export async function processCollaborationProjectionBatch(
 ): Promise<BatchResponse> {
   const records = event.Records ?? []
   const currentSystemAdminCache = new Map<string, Promise<boolean>>()
+  const enterpriseSnapshotCache = new Map<string, Promise<EnterpriseIdentitySnapshot>>()
   const results = await Promise.all(
     records.map(async (record) => {
       try {
-        await processRecord(record, currentSystemAdminCache, dependencies)
+        await processRecord(
+          record,
+          currentSystemAdminCache,
+          enterpriseSnapshotCache,
+          dependencies,
+        )
         return undefined
       } catch (error) {
         console.error('Collaboration projection failed:', error)
@@ -513,6 +527,7 @@ export async function processCollaborationProjectionBatch(
 async function processRecord(
   record: DynamoStreamRecord,
   currentSystemAdminCache: Map<string, Promise<boolean>>,
+  enterpriseSnapshotCache: Map<string, Promise<EnterpriseIdentitySnapshot>>,
   dependencies: CollaborationProjectionDependencies,
 ) {
   if (record.eventName !== 'INSERT' || !record.dynamodb?.NewImage) {
@@ -631,6 +646,8 @@ async function processRecord(
           candidate.memberKey,
           directoryItems,
           currentSystemAdminCache,
+          dependencies.enterpriseIdentity,
+          enterpriseSnapshotCache,
         )
           ? candidate
           : undefined,
@@ -1473,6 +1490,88 @@ export function createDynamoBatchItemFailure(record: DynamoStreamRecord): BatchI
   return { itemIdentifier: sequenceNumber }
 }
 
+/** Workspace member roles accepted by the Enterprise authorization evaluator. */
+type WorkspaceNotificationRole = 'owner' | 'admin' | 'member' | 'guest'
+
+/**
+ * Evaluates the authoritative Enterprise access required by one cadence notification.
+ *
+ * Legacy project-member access remains the first authorization path. This evaluator is used
+ * only when the current Enterprise snapshot makes legacy access non-authoritative, matching the
+ * cadence configuration path's fallback boundary.
+ *
+ * @param event - Scheduled Planning notification scope and notification kind.
+ * @param memberKey - Active Workspace member key being considered.
+ * @param workspaceRole - Current Workspace role from the active member row.
+ * @param snapshot - Authoritative Enterprise Identity snapshot.
+ * @returns Whether the member can perform the action represented by the notification.
+ */
+export function hasEligibleEnterpriseNotificationAccess(
+  event: Pick<AuditProjectionEvent, 'workspaceId' | 'projectId' | 'teamId' | 'planningNotificationKind'>,
+  memberKey: string,
+  workspaceRole: WorkspaceNotificationRole,
+  snapshot: EnterpriseIdentitySnapshot,
+): boolean {
+  if (snapshot.workspaceId !== event.workspaceId || event.planningNotificationKind === undefined) {
+    return false
+  }
+  const normalizedMemberKey = normalizeMemberKey(memberKey)
+  if (!normalizedMemberKey) return false
+
+  const directoryPrincipal = resolveEnterpriseDirectoryPrincipal(snapshot, memberKey, [])
+  const suppressLegacyWorkspaceRole = directoryPrincipal.directoryManaged ||
+    directoryPrincipal.compatibleRoleAssignments.some((assignment) =>
+      assignment.principalKind === 'member' &&
+        normalizeMemberKey(assignment.principalId) === normalizedMemberKey ||
+      assignment.principalKind === 'directory-group' && (
+        assignment.source === 'directory-mapping' ||
+        directoryPrincipal.directoryGroupIds.includes(assignment.principalId)
+      )
+    ) || directoryPrincipal.compatibleGroupMappings.some((mapping) => mapping.enabled)
+  if (!suppressLegacyWorkspaceRole) return false
+
+  const resource = event.projectId !== undefined
+    ? event.teamId === undefined
+      ? undefined
+      : {
+          workspaceId: event.workspaceId,
+          kind: 'project' as const,
+          targetId: event.projectId,
+          parentTeamId: event.teamId,
+        }
+    : event.teamId === undefined
+      ? undefined
+      : {
+          workspaceId: event.workspaceId,
+          kind: 'team' as const,
+          targetId: event.teamId,
+        }
+  if (!resource) return false
+
+  const permission = event.planningNotificationKind === 'reminder' ||
+    event.planningNotificationKind === 'overdue'
+    ? 'work-items.write'
+    : 'work-items.read'
+  const access = evaluateEnterpriseAccess({
+    permission,
+    principal: {
+      kind: 'member',
+      principalId: normalizedMemberKey,
+      directoryGroupIds: directoryPrincipal.directoryGroupIds,
+      directoryGroupMemberships: directoryPrincipal.directoryGroupMemberships,
+      workspaceRole,
+      includeWorkspaceRolePermissions: false,
+      directPermissions: ['workspace.read'],
+      systemAdministrator: false,
+    },
+    assignments: directoryPrincipal.compatibleRoleAssignments,
+    customRoles: snapshot.customRoles,
+    groupMappings: directoryPrincipal.compatibleGroupMappings,
+    resource,
+  })
+  return access.allowed
+}
+
 /**
  * 現在の active team/project/member snapshot から notification recipient の閲覧権限を判定します。
  */
@@ -1595,6 +1694,8 @@ async function isEligibleRecipient(
   memberKey: string,
   directoryItems: ProjectDirectoryItem[],
   currentSystemAdminCache: Map<string, Promise<boolean>>,
+  enterpriseIdentity: Pick<EnterpriseIdentityReadCapability, 'getSnapshot'> | undefined,
+  enterpriseSnapshotCache: Map<string, Promise<EnterpriseIdentitySnapshot>>,
 ) {
   const memberResult = await documentClient.send(
     new GetCommand({
@@ -1620,6 +1721,29 @@ async function isEligibleRecipient(
     return true
   }
 
+  if (
+    enterpriseIdentity &&
+    event.planningNotificationKind !== undefined &&
+    (event.projectId !== undefined || event.teamId !== undefined)
+  ) {
+    const role = readWorkspaceNotificationRole(member.role)
+    if (role) {
+      let snapshotPromise = enterpriseSnapshotCache.get(event.workspaceId)
+      if (!snapshotPromise) {
+        snapshotPromise = enterpriseIdentity.getSnapshot(event.workspaceId)
+        enterpriseSnapshotCache.set(event.workspaceId, snapshotPromise)
+      }
+      if (hasEligibleEnterpriseNotificationAccess(
+        event,
+        memberKey,
+        role,
+        await snapshotPromise,
+      )) {
+        return true
+      }
+    }
+  }
+
   const username = readString(member.username) ?? readString(member.email) ?? memberKey
   let currentSystemAdmin = currentSystemAdminCache.get(username)
 
@@ -1629,6 +1753,15 @@ async function isEligibleRecipient(
   }
 
   return currentSystemAdmin
+}
+
+/** Reads a supported Workspace role from a notification member row. */
+function readWorkspaceNotificationRole(
+  value: unknown,
+): WorkspaceNotificationRole | undefined {
+  return value === 'owner' || value === 'admin' || value === 'member' || value === 'guest'
+    ? value
+    : undefined
 }
 
 /** Workspace member row が現在も notification recipient として有効かを判定します。 */

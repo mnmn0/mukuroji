@@ -48,7 +48,7 @@ describe('Planning update query coordination', () => {
     expect(deduplicatePlanningUpdateComments(comments)).toEqual(comments)
   })
 
-  test('loads only the first bounded annotation page for twenty versions', async () => {
+  test('follows annotation cursors for twenty versions', async () => {
     const target = {
       type: 'project',
       projectId: 'refero',
@@ -64,26 +64,28 @@ describe('Planning update query coordination', () => {
       versions,
       async (_accessToken, input) => {
         commentRequests.push(input)
+        const isFirstPage = input.cursor === undefined
         return {
           comments: [{
             authorMemberKey: 'author@example.com',
-            body: `Comment ${input.updateVersion}`,
+            body: `Comment ${input.updateVersion}-${isFirstPage ? 'first' : 'second'}`,
             createdAt: '2026-08-10T00:00:00.000Z',
-            id: `comment-${input.updateVersion}`,
+            id: `comment-${input.updateVersion}-${isFirstPage ? 'first' : 'second'}`,
             target,
             updateVersion: input.updateVersion,
           }],
-          nextCursor: `comment-page-2-${input.updateVersion}`,
+          ...(isFirstPage ? { nextCursor: `comment-page-2-${input.updateVersion}` } : {}),
         }
       },
       async (_accessToken, input) => {
         reactionRequests.push(input)
+        const isFirstPage = input.cursor === undefined
         return {
-          nextCursor: `reaction-page-2-${input.updateVersion}`,
+          ...(isFirstPage ? { nextCursor: `reaction-page-2-${input.updateVersion}` } : {}),
           reactions: [{
             createdAt: '2026-08-10T00:00:00.000Z',
             emoji: '👍',
-            memberKey: 'member@example.com',
+            memberKey: `${isFirstPage ? 'member' : 'other'}@example.com`,
             target,
             updateVersion: input.updateVersion,
           }],
@@ -91,18 +93,22 @@ describe('Planning update query coordination', () => {
       },
     )
 
-    expect(commentRequests).toHaveLength(20)
-    expect(reactionRequests).toHaveLength(20)
+    expect(commentRequests).toHaveLength(40)
+    expect(reactionRequests).toHaveLength(40)
     expect(commentRequests.map(({ updateVersion }) => updateVersion)).toEqual(
-      versions.slice(0, 20),
+      [...versions.slice(0, 20), ...versions.slice(0, 20)],
     )
     expect(reactionRequests.map(({ updateVersion }) => updateVersion)).toEqual(
-      versions.slice(0, 20),
+      [...versions.slice(0, 20), ...versions.slice(0, 20)],
     )
-    expect(commentRequests.every(({ cursor, limit }) => cursor === undefined && limit === 100)).toBe(true)
-    expect(reactionRequests.every(({ cursor, limit }) => cursor === undefined && limit === 100)).toBe(true)
-    expect(annotations.comments).toHaveLength(20)
-    expect(annotations.reactions).toHaveLength(20)
+    expect(commentRequests.filter(({ cursor }) => cursor === undefined)).toHaveLength(20)
+    expect(commentRequests.filter(({ cursor }) => cursor !== undefined)).toHaveLength(20)
+    expect(reactionRequests.filter(({ cursor }) => cursor === undefined)).toHaveLength(20)
+    expect(reactionRequests.filter(({ cursor }) => cursor !== undefined)).toHaveLength(20)
+    expect(commentRequests.every(({ limit }) => limit === 100)).toBe(true)
+    expect(reactionRequests.every(({ limit }) => limit === 100)).toBe(true)
+    expect(annotations.comments).toHaveLength(40)
+    expect(annotations.reactions).toHaveLength(40)
   })
 
   test('follows reaction pages until the viewer reaction is found', async () => {
