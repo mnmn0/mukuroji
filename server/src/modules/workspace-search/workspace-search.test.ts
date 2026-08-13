@@ -116,6 +116,49 @@ test('derives document keys from entity identity instead of trusting producer in
   })).toThrow('record key does not match')
 })
 
+test('does not let an older source projection replace or remove a newer document', async () => {
+  const current = createWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    entityType: 'context-item',
+    entityId: 'team/core/issue/issue-1/context-item/context-1',
+    title: 'Current context',
+    url: '/teams/core/issues?issueId=issue-1&contextItemId=context-1',
+    teamId: 'core',
+    sourceRevision: 2,
+  })
+  const older = createWorkspaceSearchDocument({
+    ...current,
+    title: 'Older context',
+    sourceRevision: 1,
+  })
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([current]),
+    {} as DynamoDBClient,
+    false,
+  )
+
+  await client.upsertDocument(older, { sourceRevision: 1 })
+  await client.deleteDocument(
+    'workspace-1',
+    'context-item',
+    'team/core/issue/issue-1/context-item/context-1',
+    { sourceRevision: 1 },
+  )
+
+  const response = await client.search({
+    workspaceId: 'workspace-1',
+    access: {
+      viewerUserId: 'viewer@example.com',
+      isSystemAdmin: false,
+      projectIds: new Set<string>(),
+      teamIds: new Set(['core']),
+    },
+  })
+  expect(response.results).toHaveLength(1)
+  expect(response.results[0]?.title).toBe('Current context')
+})
+
 test('requires canonical ISO dates for Work Item search projections', () => {
   const input = {
     workspaceId: 'workspace-1',

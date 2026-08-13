@@ -1393,6 +1393,7 @@ function buildContextNotificationCandidates(input: CuratedContextMutationInput &
  * @param input - Context mutation scope.
  * @param actorMemberKey - Normalized actor member key.
  * @param contextItemId - Mutated context item identifier.
+ * @param sourceRevision - Canonical revision represented by the audit event.
  * @param notificationCandidates - Deduplicated recipient candidates.
  * @returns Audit metadata.
  */
@@ -1400,11 +1401,13 @@ function createContextAuditMetadata(
   input: CuratedContextMutationInput,
   actorMemberKey: string,
   contextItemId: string,
+  sourceRevision: number,
   notificationCandidates: CollaborationNotificationCandidate[],
 ) {
   return {
     actorMemberKey: normalizeMemberKey(actorMemberKey),
     contextItemId,
+    sourceRevision,
     teamId: input.teamId,
     issueId: input.issueId,
     projectId: input.projectId,
@@ -3069,7 +3072,13 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
         ['kind', 'state', 'title', 'body'],
         ['body'],
       ),
-      metadata: createContextAuditMetadata(input, actor.id, item.id, notificationCandidates),
+      metadata: createContextAuditMetadata(
+        input,
+        actor.id,
+        item.id,
+        item.revision,
+        notificationCandidates,
+      ),
       sequence: 0,
     })
     const supersededAuditPut = supersededAfter
@@ -3094,6 +3103,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
             input,
             actor.id,
             supersededAfter.id,
+            supersededAfter.revision,
             [],
           ),
           sequence: 1,
@@ -3262,7 +3272,13 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
         ['kind', 'state', 'title', 'body'],
         ['body'],
       ),
-      metadata: createContextAuditMetadata(input, actor.id, after.id, notificationCandidates),
+      metadata: createContextAuditMetadata(
+        input,
+        actor.id,
+        after.id,
+        after.revision,
+        notificationCandidates,
+      ),
     })
 
     try {

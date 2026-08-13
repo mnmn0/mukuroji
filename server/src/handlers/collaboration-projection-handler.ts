@@ -33,11 +33,15 @@ const curatedContextSearch = {
   async upsertCurrent(input: CuratedContextSearchProjectionInput) {
     if (!workspaceSearch) return
     const item = await readMatchingCuratedContextItem(input)
+    const writeOptions = input.sourceRevision === undefined
+      ? undefined
+      : { sourceRevision: input.sourceRevision }
     if (item.state === 'superseded') {
       await workspaceSearch.deleteDocument(
         input.workspaceId,
         'context-item',
         createCuratedContextSearchEntityId(input),
+        writeOptions,
       )
       return
     }
@@ -47,15 +51,20 @@ const curatedContextSearch = {
         item,
         ...(input.projectId ? { projectId: input.projectId } : {}),
       }),
+      writeOptions,
     )
   },
   /** Deletes a superseded or orphaned context item from Workspace search idempotently. */
   async deleteCurrent(input: CuratedContextSearchProjectionInput) {
     if (!workspaceSearch) return
+    const writeOptions = input.sourceRevision === undefined
+      ? undefined
+      : { sourceRevision: input.sourceRevision }
     await workspaceSearch.deleteDocument(
       input.workspaceId,
       'context-item',
       createCuratedContextSearchEntityId(input),
+      writeOptions,
     )
   },
 } satisfies CuratedContextSearchProjectionDependencies

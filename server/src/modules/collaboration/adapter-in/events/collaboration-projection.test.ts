@@ -425,8 +425,9 @@ describe('collaboration projection pure helpers', () => {
         teamId: 'core',
         issueId: 'example',
         contextItemId: 'context-1',
+        sourceRevision: 4,
       },
-    })).toMatchObject({ contextItemId: 'context-1' })
+    })).toMatchObject({ contextItemId: 'context-1', sourceRevision: 4 })
   })
 
   test('parses actor member metadata and preserves suppressed outbox events', () => {
@@ -874,9 +875,9 @@ describe('collaboration projection pure helpers', () => {
     })).toBeUndefined()
   })
 
-  test('overlays the current assigned Project on curated context notifications', () => {
+  test('overlays the current assigned Project on every checked Work Item notification', () => {
     const event = createProjectionEvent({
-      eventType: 'context-item.created',
+      eventType: 'comment.created',
       issueId: 'context-issue',
       projectId: 'project-a',
       teamId: 'core-team',

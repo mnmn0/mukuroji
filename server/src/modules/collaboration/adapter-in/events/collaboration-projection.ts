@@ -94,6 +94,8 @@ export type AuditProjectionEvent = {
   commentId?: string
   /** Curated context item ID targeted by the durable Workspace Search projection. */
   contextItemId?: string
+  /** Canonical curated-context revision represented by this audit event. */
+  sourceRevision?: number
   /** File proofing cleanup の対象 file ID です。 */
   fileId?: string
   /** Reply が属する root comment ID です。 */
@@ -162,6 +164,8 @@ export type CuratedContextSearchProjectionInput = {
   projectId?: string
   /** Curated context item identifier that changed. */
   contextItemId: string
+  /** Canonical revision represented by the audit event, when available. */
+  sourceRevision?: number
 }
 
 /** Idempotent port for the current curated context Search document. */
@@ -352,6 +356,7 @@ export async function projectCuratedContextSearchEvent(
     teamId,
     issueId,
     contextItemId,
+    ...(event.sourceRevision === undefined ? {} : { sourceRevision: event.sourceRevision }),
     ...(event.projectId ? { projectId: event.projectId } : {}),
   }
   if (workItemExists && curatedContextSearchUpsertEventTypes.has(event.eventType)) {
@@ -521,7 +526,7 @@ async function processRecord(
     await markProjectionProcessed(event.eventId)
     return
   }
-  const scopedEvent = isCuratedContextEvent
+  const scopedEvent = currentScope.checked
     ? overlayCurrentWorkItemNotificationScope(event, currentScope)
     : event
   const authorizationEvent = refreshScheduledNotificationEvent(scopedEvent, currentScope)
@@ -1577,6 +1582,7 @@ export function parseAuditProjectionEvent(
     projectId: readString(metadata.projectId),
     commentId: readString(metadata.commentId),
     contextItemId: readString(metadata.contextItemId),
+    sourceRevision: readPositiveInteger(metadata.sourceRevision),
     fileId: readString(metadata.fileId),
     rootCommentId: readString(metadata.rootCommentId),
     notificationTitle: readString(metadata.notificationTitle) ?? readString(metadata.title),

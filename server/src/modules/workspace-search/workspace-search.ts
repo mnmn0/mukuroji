@@ -453,6 +453,12 @@ export class WorkspaceSearchError extends Error {
   }
 }
 
+/** Conditional revision guard used by asynchronous source projections. */
+export type WorkspaceSearchProjectionWriteOptions = {
+  /** Only replace or remove a document whose stored source revision is not newer. */
+  sourceRevision?: number
+}
+
 /** Marks persisted projection content that disagrees with its server-owned digest. */
 class WorkspaceSearchProjectionDigestMismatchError extends WorkspaceSearchError {}
 
@@ -463,12 +469,14 @@ export type WorkspaceSearchClient = {
   /** Search document を idempotent に作成または置換します。 */
   upsertDocument(
     input: Parameters<typeof createWorkspaceSearchDocument>[0] | WorkspaceSearchDocument,
+    options?: WorkspaceSearchProjectionWriteOptions,
   ): Promise<WorkspaceSearchDocument>
   /** Search document を entity key で削除します。 */
   deleteDocument(
     workspaceId: string,
     entityType: SearchEntityType,
     entityId: string,
+    options?: WorkspaceSearchProjectionWriteOptions,
   ): Promise<void>
   /** Composite filter と current RBAC を適用して検索します。 */
   search(input: WorkspaceSearchQueryInput): Promise<WorkspaceSearchResponse>
@@ -1448,37 +1456,77 @@ export class DynamoDbWorkspaceSearchClient {
   /** Search document を idempotent に作成または置換します。 */
   async upsertDocument(
     input: Parameters<typeof createWorkspaceSearchDocument>[0] | WorkspaceSearchDocument,
+    options?: WorkspaceSearchProjectionWriteOptions,
   ) {
     await this.ensureLocalTable()
     const document = createWorkspaceSearchDocument(input)
-    await this.documentClient.send(new TransactWriteCommand({
-      TransactItems: [{
-        Put: {
-          TableName: this.tableName,
-          Item: document,
-        },
-      }],
-    }))
+    const sourceRevision = normalizeProjectionSourceRevision(options?.sourceRevision)
+    try {
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [{
+          Put: {
+            TableName: this.tableName,
+            Item: document,
+            ...(sourceRevision === undefined
+              ? {}
+              : {
+                  ConditionExpression:
+                    'attribute_not_exists(#recordKey) OR attribute_not_exists(#sourceRevision) OR ' +
+                    '#sourceRevision <= :sourceRevision',
+                  ExpressionAttributeNames: {
+                    '#recordKey': 'recordKey',
+                    '#sourceRevision': 'sourceRevision',
+                  },
+                  ExpressionAttributeValues: { ':sourceRevision': sourceRevision },
+                }),
+          },
+        }],
+      }))
+    } catch (error) {
+      if (sourceRevision === undefined || !isTransactionConditionalCheckFailed(error)) {
+        throw error
+      }
+    }
     return document
   }
 
   /** Search document を entity key で削除します。 */
-  async deleteDocument(workspaceId: string, entityType: SearchEntityType, entityId: string) {
+  async deleteDocument(
+    workspaceId: string,
+    entityType: SearchEntityType,
+    entityId: string,
+    options?: WorkspaceSearchProjectionWriteOptions,
+  ) {
     await this.ensureLocalTable()
-    await this.documentClient.send(new TransactWriteCommand({
-      TransactItems: [{
-        Delete: {
-          TableName: this.tableName,
-          Key: {
-            workspaceId: requireText(workspaceId, 'Search Workspace ID'),
-            recordKey: createWorkspaceSearchDocumentRecordKey(
-              entityType,
-              entityId,
-            ),
+    const sourceRevision = normalizeProjectionSourceRevision(options?.sourceRevision)
+    try {
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [{
+          Delete: {
+            TableName: this.tableName,
+            Key: {
+              workspaceId: requireText(workspaceId, 'Search Workspace ID'),
+              recordKey: createWorkspaceSearchDocumentRecordKey(
+                entityType,
+                entityId,
+              ),
+            },
+            ...(sourceRevision === undefined
+              ? {}
+              : {
+                  ConditionExpression:
+                    'attribute_not_exists(#sourceRevision) OR #sourceRevision <= :sourceRevision',
+                  ExpressionAttributeNames: { '#sourceRevision': 'sourceRevision' },
+                  ExpressionAttributeValues: { ':sourceRevision': sourceRevision },
+                }),
           },
-        },
-      }],
-    }))
+        }],
+      }))
+    } catch (error) {
+      if (sourceRevision === undefined || !isTransactionConditionalCheckFailed(error)) {
+        throw error
+      }
+    }
   }
 
   /** Composite filter、current RBAC、cursor pagination を適用して検索します。 */
@@ -6381,6 +6429,19 @@ function invalidTaskView(message: string): never {
 /** Creates a stable error for malformed persisted task view state. */
 function invalidStoredTaskView() {
   return new WorkspaceSearchError(503, 'InvalidTaskView', 'Task view data is invalid.')
+}
+
+/** Validates the optional source revision used by an asynchronous projection guard. */
+function normalizeProjectionSourceRevision(value: number | undefined) {
+  if (value === undefined) return undefined
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new WorkspaceSearchError(
+      400,
+      'InvalidSearchProjectionRevision',
+      'Search projection source revision must be a positive integer.',
+    )
+  }
+  return value
 }
 
 function isTransactionConditionalCheckFailed(error: unknown) {

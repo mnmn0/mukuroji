@@ -3,6 +3,7 @@ import useSWRInfinite from 'swr/infinite'
 import { getTeamIssueContextItems } from '../api/contextItems'
 
 const contextPageSize = 10
+const contextPageRefreshInterval = 4_000
 
 /**
  * Loads human-curated context through an independent opaque cursor.
@@ -41,6 +42,7 @@ export function useIssueContextPages(
       dedupingInterval: 1_000,
       revalidateAll: false,
       revalidateFirstPage: true,
+      refreshInterval: contextPageRefreshInterval,
       refreshWhenHidden: false,
       refreshWhenOffline: false,
       revalidateOnFocus: true,
