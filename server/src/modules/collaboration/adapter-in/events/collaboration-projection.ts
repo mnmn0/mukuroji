@@ -1493,33 +1493,40 @@ export function createDynamoBatchItemFailure(record: DynamoStreamRecord): BatchI
 /** Workspace member roles accepted by the Enterprise authorization evaluator. */
 type WorkspaceNotificationRole = 'owner' | 'admin' | 'member' | 'guest'
 
+/** Enterprise authorization result for one scheduled notification recipient. */
+export type EnterpriseNotificationAuthorization = {
+  /** Whether Enterprise Identity makes the legacy Workspace ACL non-authoritative. */
+  authoritative: boolean
+  /** Whether the recipient has the permission required by the notification. */
+  allowed: boolean
+}
+
 /**
- * Evaluates the authoritative Enterprise access required by one cadence notification.
+ * Resolves the authoritative Enterprise access required by one cadence notification.
  *
- * Legacy project-member access remains the first authorization path. This evaluator is used
- * only when the current Enterprise snapshot makes legacy access non-authoritative, matching the
- * cadence configuration path's fallback boundary.
+ * Legacy project-member access remains the fallback path when the current Enterprise snapshot
+ * does not make it non-authoritative, matching the cadence configuration path's boundary.
  *
  * @param event - Scheduled Planning notification scope and notification kind.
  * @param memberKey - Active Workspace member key being considered.
  * @param workspaceRole - Current Workspace role from the active member row.
  * @param snapshot - Authoritative Enterprise Identity snapshot.
- * @returns Whether the member can perform the action represented by the notification.
+ * @returns Whether Enterprise is authoritative and whether the member can perform the action.
  */
-export function hasEligibleEnterpriseNotificationAccess(
+export function resolveEnterpriseNotificationAuthorization(
   event: Pick<AuditProjectionEvent, 'workspaceId' | 'projectId' | 'teamId' | 'planningNotificationKind'>,
   memberKey: string,
   workspaceRole: WorkspaceNotificationRole,
   snapshot: EnterpriseIdentitySnapshot,
-): boolean {
+): EnterpriseNotificationAuthorization {
   if (snapshot.workspaceId !== event.workspaceId || event.planningNotificationKind === undefined) {
-    return false
+    return { authoritative: false, allowed: false }
   }
   const normalizedMemberKey = normalizeMemberKey(memberKey)
-  if (!normalizedMemberKey) return false
+  if (!normalizedMemberKey) return { authoritative: false, allowed: false }
 
   const directoryPrincipal = resolveEnterpriseDirectoryPrincipal(snapshot, memberKey, [])
-  const suppressLegacyWorkspaceRole = directoryPrincipal.directoryManaged ||
+  const authoritative = directoryPrincipal.directoryManaged ||
     directoryPrincipal.compatibleRoleAssignments.some((assignment) =>
       assignment.principalKind === 'member' &&
         normalizeMemberKey(assignment.principalId) === normalizedMemberKey ||
@@ -1528,7 +1535,7 @@ export function hasEligibleEnterpriseNotificationAccess(
         directoryPrincipal.directoryGroupIds.includes(assignment.principalId)
       )
     ) || directoryPrincipal.compatibleGroupMappings.some((mapping) => mapping.enabled)
-  if (!suppressLegacyWorkspaceRole) return false
+  if (!authoritative) return { authoritative: false, allowed: false }
 
   const resource = event.projectId !== undefined
     ? event.teamId === undefined
@@ -1546,7 +1553,7 @@ export function hasEligibleEnterpriseNotificationAccess(
           kind: 'team' as const,
           targetId: event.teamId,
         }
-  if (!resource) return false
+  if (!resource) return { authoritative: true, allowed: false }
 
   const permission = event.planningNotificationKind === 'reminder' ||
     event.planningNotificationKind === 'overdue'
@@ -1569,7 +1576,30 @@ export function hasEligibleEnterpriseNotificationAccess(
     groupMappings: directoryPrincipal.compatibleGroupMappings,
     resource,
   })
-  return access.allowed
+  return { authoritative: true, allowed: access.allowed }
+}
+
+/**
+ * Evaluates whether a recipient has the Enterprise permission required by a cadence notification.
+ *
+ * @param event - Scheduled Planning notification scope and notification kind.
+ * @param memberKey - Active Workspace member key being considered.
+ * @param workspaceRole - Current Workspace role from the active member row.
+ * @param snapshot - Authoritative Enterprise Identity snapshot.
+ * @returns Whether the member can perform the action represented by the notification.
+ */
+export function hasEligibleEnterpriseNotificationAccess(
+  event: Pick<AuditProjectionEvent, 'workspaceId' | 'projectId' | 'teamId' | 'planningNotificationKind'>,
+  memberKey: string,
+  workspaceRole: WorkspaceNotificationRole,
+  snapshot: EnterpriseIdentitySnapshot,
+): boolean {
+  return resolveEnterpriseNotificationAuthorization(
+    event,
+    memberKey,
+    workspaceRole,
+    snapshot,
+  ).allowed
 }
 
 /**
@@ -1717,10 +1747,7 @@ async function isEligibleRecipient(
     return false
   }
 
-  if (hasEligibleProjectAccess(event, memberKey, directoryItems)) {
-    return true
-  }
-
+  let enterpriseAuthorization: EnterpriseNotificationAuthorization | undefined
   if (
     enterpriseIdentity &&
     event.planningNotificationKind !== undefined &&
@@ -1733,15 +1760,19 @@ async function isEligibleRecipient(
         snapshotPromise = enterpriseIdentity.getSnapshot(event.workspaceId)
         enterpriseSnapshotCache.set(event.workspaceId, snapshotPromise)
       }
-      if (hasEligibleEnterpriseNotificationAccess(
+      enterpriseAuthorization = resolveEnterpriseNotificationAuthorization(
         event,
         memberKey,
         role,
         await snapshotPromise,
-      )) {
-        return true
-      }
+      )
     }
+  }
+
+  if (enterpriseAuthorization?.authoritative) {
+    if (enterpriseAuthorization.allowed) return true
+  } else if (hasEligibleProjectAccess(event, memberKey, directoryItems)) {
+    return true
   }
 
   const username = readString(member.username) ?? readString(member.email) ?? memberKey

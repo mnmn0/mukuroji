@@ -30,6 +30,7 @@ import {
   publishRealtimeInvalidation,
   refreshPlanningScheduledNotificationEvent,
   refreshScheduledNotificationEvent,
+  resolveEnterpriseNotificationAuthorization,
   supportsCollaborationWatcherNotifications,
   tagDeletedFileObjectVersion,
   toSubscribedWatcherCandidates,
@@ -1249,6 +1250,52 @@ describe('collaboration projection pure helpers', () => {
       'member',
       snapshot,
     )).toBe(false)
+  })
+
+  test('does not fall back to a legacy project ACL after an authoritative Enterprise denial', () => {
+    const event = {
+      workspaceId: 'workspace-1',
+      teamId: 'core',
+      projectId: 'platform',
+      planningNotificationKind: 'overdue',
+    } satisfies Pick<
+      AuditProjectionEvent,
+      'workspaceId' | 'projectId' | 'teamId' | 'planningNotificationKind'
+    >
+    const snapshot = createRealtimeEnterpriseSnapshot({
+      roleAssignments: [{
+        workspaceId: 'workspace-1',
+        assignmentId: 'assignment-viewer',
+        principalKind: 'member',
+        principalId: 'member@example.com',
+        roleId: 'project:viewer',
+        scope: {
+          workspaceId: 'workspace-1',
+          kind: 'project',
+          targetId: 'platform',
+        },
+        source: 'direct',
+      }],
+    })
+    const legacyDirectory: ProjectDirectoryItem[] = [
+      { entryType: 'team', teamId: 'core' },
+      { entryType: 'project', teamId: 'core', projectId: 'platform' },
+      {
+        entryType: 'project-member',
+        teamId: 'core',
+        projectId: 'platform',
+        memberKey: 'member@example.com',
+        role: 'viewer',
+      },
+    ]
+
+    expect(hasEligibleProjectAccess(event, 'member@example.com', legacyDirectory)).toBe(true)
+    expect(resolveEnterpriseNotificationAuthorization(
+      event,
+      'member@example.com',
+      'member',
+      snapshot,
+    )).toEqual({ authoritative: true, allowed: false })
   })
 
   test('excludes deactivated Workspace members from notification recipients', () => {
