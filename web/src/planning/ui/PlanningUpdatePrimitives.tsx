@@ -5,7 +5,7 @@ import type {
   PlanningUpdateEvidence,
 } from '@mukuroji/contracts'
 import { useState } from 'react'
-import { readNonNegativeNumber } from '../model/cadenceForm'
+import { isValidPlanningDateTime, readNonNegativeNumber } from '../model/cadenceForm'
 import {
   readPlanningUpdateEvidence,
   readPlanningUpdateEvidenceType,
@@ -1352,17 +1352,6 @@ function readOptionalNonNegativeNumber(value: FormDataEntryValue | null) {
   return typeof value === 'string' && value.trim()
     ? readNonNegativeNumber(value)
     : undefined
-}
-
-/**
- * Checks that a submitted cadence deadline includes an explicit timezone offset.
- *
- * @param value - Candidate ISO timestamp from the cadence form.
- * @returns Whether the timestamp is parseable and timezone-qualified.
- */
-export function isValidPlanningDateTime(value: string) {
-  return Number.isFinite(Date.parse(value)) &&
-    /T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/u.test(value)
 }
 
 /**
