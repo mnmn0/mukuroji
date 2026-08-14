@@ -1379,6 +1379,16 @@ function getEnterpriseCognitoSsoAppClientBindingCache() {
   }
   return cache
 }
+
+const ENTERPRISE_NOTIFICATION_SCOPE_PERMISSIONS = [
+  'teams.read',
+  'projects.read',
+  'work-items.read',
+  'documents.read',
+  'files.read',
+  'planning.read',
+] satisfies EnterprisePermissionId[]
+
 const enterpriseRoutePermissionRules = [
   {
     method: 'POST',
@@ -1760,6 +1770,12 @@ const enterpriseRoutePermissionRules = [
   { method: 'GET', pathPattern: '/api/projects*', permission: 'projects.read' },
   { method: '*', pathPattern: '/api/projects*', permission: 'projects.write' },
   { method: '*', pathPattern: '/api/developer*', permission: 'workspace.manage' },
+  {
+    method: 'GET',
+    pathPattern: '/api/notifications*',
+    permission: 'workspace.read',
+    alternativePermissions: ENTERPRISE_NOTIFICATION_SCOPE_PERMISSIONS,
+  },
   { method: 'GET', pathPattern: '/api/*', permission: 'workspace.read' },
   { method: '*', pathPattern: '/api/*', permission: 'workspace.write' },
 ] as const satisfies readonly EnterpriseRoutePermissionRule[]
@@ -15534,7 +15550,13 @@ async function authenticateWorkspacePrincipal(
     : await evaluateEnterpriseRequestAccess({
         workspaceId: principal.directoryId,
         context,
+        ...(shouldEvaluateEnterpriseNotificationScopes(context)
+          ? { scopePermissions: ENTERPRISE_NOTIFICATION_SCOPE_PERMISSIONS }
+          : {}),
         requiredPermissions,
+        ...(shouldEvaluateAllPlanningHistoryScopes(context)
+          ? { evaluateAllProjectScopes: true }
+          : {}),
         ...enterpriseAuthorizationEvaluation,
       })
   if (!requestAccess.allowed) {
@@ -15816,7 +15838,13 @@ async function authenticateEnterpriseServiceAccount(
         await evaluateEnterpriseRequestAccess({
           workspaceId,
           context,
+          ...(shouldEvaluateEnterpriseNotificationScopes(context)
+            ? { scopePermissions: ENTERPRISE_NOTIFICATION_SCOPE_PERMISSIONS }
+            : {}),
           requiredPermissions,
+          ...(shouldEvaluateAllPlanningHistoryScopes(context)
+            ? { evaluateAllProjectScopes: true }
+            : {}),
           ...enterpriseAuthorizationEvaluation,
         })
       if (!requestAccess.allowed) {
@@ -15983,6 +16011,10 @@ type EnterpriseRequestAccessInput = {
   resource?: EnterpriseAuthorizationResource
   /** Headless collection 操作で Team/Project descendant scope を列挙するかどうかです。 */
   evaluateProjectScopes?: boolean
+  /** Whether history/export collection must enumerate every descendant Project scope. */
+  evaluateAllProjectScopes?: boolean
+  /** Permissions used to enumerate descendant scopes instead of the route permission set. */
+  scopePermissions?: readonly EnterprisePermissionId[]
   /** Route rule が要求する primary/alternative permission です。 */
   requiredPermissions?: readonly EnterprisePermissionId[]
   /** Directory、guest ceiling、principal kind を解決済みの principal です。 */
@@ -16063,6 +16095,25 @@ async function evaluateEnterpriseRequestAccess(
       granted: decisions.find((decision) => decision.access.allowed),
     }
   }
+  /** Evaluates the permissions used to enumerate a descendant Team or Project scope. */
+  const evaluateScopeResource = (candidateResource: EnterpriseAuthorizationResource) => {
+    const permissions = input.scopePermissions ?? input.requiredPermissions!
+    const decisions = permissions.map((permission) => ({
+      permission,
+      access: evaluateEnterpriseAccess({
+        permission,
+        principal: input.principal,
+        assignments: input.assignments,
+        customRoles: input.snapshot.customRoles,
+        groupMappings: input.groupMappings,
+        resource: candidateResource,
+      }),
+    }))
+    return {
+      decisions,
+      granted: decisions.find((decision) => decision.access.allowed),
+    }
+  }
   const direct = evaluateResource(resource)
   const grantedRoutePermissions = new Set<EnterprisePermissionId>()
   for (const decision of direct.decisions) {
@@ -16073,6 +16124,7 @@ async function evaluateEnterpriseRequestAccess(
   const teamPermissionsById = new Map<string, Set<EnterprisePermissionId>>()
   const scopedPermissions = new Set<EnterprisePermissionId>()
   let scopedGrantedRoutePermission: EnterprisePermissionId | undefined
+  const evaluateAllProjectScopes = input.evaluateAllProjectScopes === true
   const addTeamAccess = (
     teamId: string,
     permissions: readonly EnterprisePermissionId[],
@@ -16090,6 +16142,7 @@ async function evaluateEnterpriseRequestAccess(
 
   if (
     input.evaluateProjectScopes === true ||
+    evaluateAllProjectScopes ||
     (
       input.context &&
       shouldEvaluateEnterpriseProjectScopes(input.context.req.path, resource)
@@ -16097,15 +16150,16 @@ async function evaluateEnterpriseRequestAccess(
   ) {
     const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(input.workspaceId, 'ja')
     const teams = directory.teams.filter((team) =>
+      evaluateAllProjectScopes ||
       resource.kind === 'workspace' ||
       resource.kind === 'team' && resource.targetId === team.id ||
       resource.kind === 'project' && team.projects.some((project) =>
         resource.targetId === project.id
       )
     )
-    if (resource.kind === 'workspace') {
+    if (resource.kind === 'workspace' || evaluateAllProjectScopes) {
       for (const team of teams) {
-        const scoped = evaluateResource({
+        const scoped = evaluateScopeResource({
           workspaceId: input.workspaceId,
           kind: 'team',
           targetId: team.id,
@@ -16123,14 +16177,16 @@ async function evaluateEnterpriseRequestAccess(
     }
     const projects = teams.flatMap((team) =>
       team.projects
-        .filter((project) => resource.kind !== 'project' || resource.targetId === project.id)
+        .filter((project) =>
+          evaluateAllProjectScopes || resource.kind !== 'project' || resource.targetId === project.id
+        )
         .map((project) => ({
           projectId: project.id,
           teamId: team.id,
         }))
     )
     for (const project of projects) {
-      const scoped = evaluateResource({
+      const scoped = evaluateScopeResource({
         workspaceId: input.workspaceId,
         kind: 'project',
         targetId: project.projectId,
@@ -16182,8 +16238,24 @@ function shouldEvaluateEnterpriseProjectScopes(
   resource: EnterpriseAuthorizationResource,
 ) {
   if (resource.kind === 'project') return true
-  return /^\/api\/(?:analytics|approvals|bulk-operations|document-backlinks|documents|focus|planning|projects|realtime\/tickets|task-views|teams|work-item-configuration|work-items)(?:\/|$)/u
+  return /^\/api\/(?:analytics|approvals|bulk-operations|document-backlinks|documents|focus|notifications|planning|projects|realtime\/tickets|task-views|teams|work-item-configuration|work-items)(?:\/|$)/u
     .test(path)
+}
+
+/** Returns whether Planning history reads must authorize every captured Project scope. */
+function shouldEvaluateAllPlanningHistoryScopes(context?: Context): boolean {
+  return context?.req.method === 'GET' && (
+    context.req.path === '/api/planning/updates' ||
+    context.req.path === '/api/planning/updates/export'
+  )
+}
+
+/** Returns whether the notification list needs Enterprise content scopes for visibility checks. */
+function shouldEvaluateEnterpriseNotificationScopes(context?: Context): boolean {
+  return context?.req.method === 'GET' && (
+    context.req.path === '/api/notifications' ||
+    context.req.path.startsWith('/api/notifications/')
+  )
 }
 
 /**
@@ -25266,6 +25338,29 @@ async function createNotificationVisibilityFilter(
         teamAccess.permissions.includes('work-items.write')
       ) {
         writablePlanningTeamIds.add(teamAccess.teamId)
+      }
+    }
+    const enterpriseEvaluation = principal.enterpriseAuthorizationEvaluation
+    if (principal.enterprisePermissions !== undefined && enterpriseEvaluation) {
+      for (const team of directory.teams) {
+        for (const project of team.projects) {
+          const canWrite = evaluateEnterpriseAccess({
+            permission: 'work-items.write',
+            principal: enterpriseEvaluation.principal,
+            assignments: enterpriseEvaluation.assignments,
+            customRoles: enterpriseEvaluation.snapshot.customRoles,
+            groupMappings: enterpriseEvaluation.groupMappings,
+            resource: {
+              workspaceId: principal.directoryId,
+              kind: 'project',
+              targetId: project.id,
+              parentTeamId: team.id,
+            },
+          }).allowed
+          if (canWrite) {
+            writableProjectScopeKeys.add(`${team.id}\0${project.id}`)
+          }
+        }
       }
     }
   }

@@ -14,12 +14,14 @@ const {
 } = createApiTestHarness()
 import {
   TRIAGE_ENTRY_SCHEMA_VERSION,
+  type EnterpriseRoleAssignment,
   type TriageEntry,
 } from '@mukuroji/contracts'
 import type { TriageCompositionClient } from '../app/composition/app-dependencies'
 import type {
   NotificationClient,
 } from '../modules/notifications'
+import { InMemoryEnterpriseIdentityClient } from '../modules/enterprise-identity/enterprise-identity'
 import { createTriageCapabilities } from '../modules/triage'
 import {
   afterEach,
@@ -690,6 +692,88 @@ test('hides stored Planning reminders and overdue notifications after a viewer d
     [overdue.id, false],
   ]))
   expect(await response.json()).toMatchObject({ notifications: [], unreadCount: 0 })
+})
+
+test('shows Planning cadence notifications for an Enterprise-managed Project member', async () => {
+  configureFakeProjectClients(true, {
+    workspaceRole: 'member',
+    projectAccesses: [],
+    teamProjects: [{ id: 'refero', name: 'Refero', tone: 'blue' }],
+  })
+  const identity = new InMemoryEnterpriseIdentityClient()
+  const assignment: EnterpriseRoleAssignment = {
+    workspaceId: 'user#demo@example.com',
+    assignmentId: 'notification-project-member',
+    principalKind: 'member',
+    principalId: 'demo@example.com',
+    roleId: 'project:member',
+    scope: {
+      workspaceId: 'user#demo@example.com',
+      kind: 'project',
+      targetId: 'refero',
+    },
+    source: 'direct',
+  }
+  const readSnapshot = identity.getSnapshot.bind(identity)
+  identity.getSnapshot = async (workspaceId) => {
+    const snapshot = await readSnapshot(workspaceId)
+    return {
+      ...snapshot,
+      roleAssignments: [assignment],
+    }
+  }
+  const planning = getTestAppDependencies().workItems.planning
+  const nextDueAt = '2026-08-10T00:00:00.000Z'
+  await planning.configureUpdateCadence('user#demo@example.com', {
+    target: { type: 'project', teamId: 'core-team', projectId: 'refero' },
+    cadence: {
+      updateOwnerMemberKey: 'demo@example.com',
+      escalationHoursAfter: 4,
+      escalationMemberKey: 'demo@example.com',
+      cadence: { unit: 'week', count: 1 },
+      timeZone: 'UTC',
+      nextDueAt,
+      reminderHoursBefore: 24,
+    },
+    expectedRevision: 0,
+  }, { workItems: [] })
+  const reminder = createNotificationItem({
+    id: 'enterprise-planning-reminder',
+    eventType: 'planning-update.reminder',
+    reasons: ['reminder'],
+    issueId: undefined,
+    planningTargetType: 'project',
+    planningTargetId: 'refero',
+    planningTargetRecordKey: 'UPDATE_TARGET#PROJECT#core-team#refero',
+    planningNextDueAt: nextDueAt,
+    planningNotificationKind: 'reminder',
+  })
+  const escalation = createNotificationItem({
+    ...reminder,
+    id: 'enterprise-planning-escalation',
+    eventType: 'planning-update.escalation',
+    reasons: ['escalation'],
+    planningNotificationKind: 'escalation',
+  })
+  const probe = createNotificationVisibilityProbe([reminder, escalation])
+  setTestAppDependencies({
+    enterpriseIdentity: identity,
+    notifications: probe.client,
+  })
+
+  const response = await app.request('/api/notifications', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(probe.visibility).toEqual(new Map([
+    [reminder.id, true],
+    [escalation.id, true],
+  ]))
+  expect(await response.json()).toMatchObject({
+    notifications: [{ id: reminder.id }, { id: escalation.id }],
+    unreadCount: 2,
+  })
 })
 
 test('denies a Team-qualified Planning Project notification for an inaccessible duplicate ID', async () => {

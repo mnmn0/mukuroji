@@ -57,11 +57,13 @@ function createWorkItemDependencyInput(expectedRevision = 0) {
  * @param planning - Isolated Planning client to populate.
  * @param entityId - Initiative identifier used by update requests.
  * @param teamId - Optional Team-only scope; omitted for Workspace scope.
+ * @param projectId - Optional Project scope owned by the Team.
  */
 async function seedPlanningUpdateInitiative(
   planning: InMemoryPlanningClient,
   entityId: string,
   teamId?: string,
+  projectId?: string,
 ): Promise<void> {
   const workspaceId = 'user#demo@example.com'
   const portfolioId = `${entityId}-portfolio`
@@ -96,7 +98,7 @@ async function seedPlanningUpdateInitiative(
     title: `${entityId} initiative`,
     parentId: roadmapId,
     teamId,
-    projectId: undefined,
+    projectId,
     cadence: undefined,
     capacity: undefined,
     carryOverPolicy: undefined,
@@ -682,6 +684,95 @@ test('keeps filtered Planning history within the requested limit while advancing
     nextCursor: 'synthetic-end',
   })
   expect(requestedLimits).toEqual([1])
+})
+
+test('keeps Enterprise-authorized history after an Initiative moves between Projects', async () => {
+  const oldScope = { teamId: 'other-team', projectId: 'other-project' }
+  const currentScope = { teamId: 'core-team', projectId: 'refero' }
+  const target: PlanningUpdateTarget = { type: 'initiative', entityId: 'moved-initiative' }
+  configureFakeProjectClients(true, {
+    role: 'member',
+    workspaceRole: 'member',
+    projectAccesses: [],
+    teamProjects: [{ id: currentScope.projectId, name: 'Refero', tone: 'blue' }],
+    additionalTeams: [{
+      id: oldScope.teamId,
+      name: 'Other Team',
+      projects: [{ id: oldScope.projectId, name: 'Other Project', tone: 'purple' }],
+    }],
+  })
+  const identity = new InMemoryEnterpriseIdentityClient()
+  const assignments: EnterpriseRoleAssignment[] = [oldScope, currentScope].map((scope, index) => ({
+    workspaceId: 'user#demo@example.com',
+    assignmentId: `history-project-member-${index}`,
+    principalKind: 'member',
+    principalId: 'demo@example.com',
+    roleId: 'project:viewer',
+    scope: {
+      workspaceId: 'user#demo@example.com',
+      kind: 'project',
+      targetId: scope.projectId,
+    },
+    source: 'direct',
+  }))
+  const readSnapshot = identity.getSnapshot.bind(identity)
+  identity.getSnapshot = async (workspaceId) => {
+    const snapshot = await readSnapshot(workspaceId)
+    return { ...snapshot, roleAssignments: assignments }
+  }
+  const planning = new InMemoryPlanningClient(() => new Date('2026-08-07T00:00:00.000Z'))
+  await seedPlanningUpdateInitiative(
+    planning,
+    target.entityId,
+    oldScope.teamId,
+    oldScope.projectId,
+  )
+  setTestAppDependencies({ enterpriseIdentity: identity, planning })
+
+  await planning.configureUpdateCadence('user#demo@example.com', {
+    target,
+    cadence: {
+      updateOwnerMemberKey: 'demo@example.com',
+      cadence: { unit: 'week', count: 1 },
+      timeZone: 'UTC',
+      nextDueAt: '2026-08-10T00:00:00.000Z',
+      reminderHoursBefore: 24,
+    },
+    expectedRevision: 3,
+  }, { workItems: [] })
+
+  await planning.publishUpdate('user#demo@example.com', {
+    target,
+    id: 'moved-initiative-history',
+    health: 'on-track',
+    risk: 'low',
+    summary: 'The original Project scope remains readable.',
+    riskSummary: '',
+    decisionSummary: '',
+    helpNeeded: '',
+    nextAction: '',
+    evidence: [],
+    expectedRevision: 4,
+  }, 'demo@example.com', { workItems: [] })
+
+  await planning.move('user#demo@example.com', `${target.entityId}-portfolio`, {
+    teamId: currentScope.teamId,
+    projectId: currentScope.projectId,
+    expectedRevision: 5,
+  }, { workItems: [] })
+  const query = '?targetType=initiative&entityId=moved-initiative'
+  const history = await planningApiRequest(`/api/planning/updates${query}`)
+  expect(history.status).toBe(200)
+  expect(await history.json()).toMatchObject({
+    updates: [{ id: 'moved-initiative-history' }],
+  })
+
+  const exported = await planningApiRequest(`/api/planning/updates/export${query}`)
+  expect(exported.status).toBe(200)
+  expect(await exported.json()).toMatchObject({
+    target,
+    updates: [{ id: 'moved-initiative-history' }],
+  })
 })
 
 test('requires visible File evidence and fails closed for unsupported Decision evidence', async () => {
