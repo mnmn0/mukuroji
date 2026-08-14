@@ -1030,12 +1030,14 @@ async function readPlanningScheduledTargetScope(
     return { active: false }
   }
 
-  const teamId = entity.teamId === undefined
-    ? undefined
-    : requireText(entity.teamId, 'Planning Initiative Team scope')
-  const projectId = entity.projectId === undefined
-    ? undefined
-    : requireText(entity.projectId, 'Planning Initiative Project scope')
+  const teamId = readOptionalPlanningScopeId(
+    entity.teamId,
+    'Planning Initiative Team scope',
+  )
+  const projectId = readOptionalPlanningScopeId(
+    entity.projectId,
+    'Planning Initiative Project scope',
+  )
   if (projectId && !teamId) {
     throw new TypeError('Planning update Initiative Project scope requires a Team scope.')
   }
@@ -1386,6 +1388,17 @@ function requireText(value: unknown, label: string) {
   }
 
   return text
+}
+
+/**
+ * Reads an optional persisted Planning scope field without treating malformed values as absent.
+ *
+ * @param value - Raw persisted scope value.
+ * @param label - Field name used in the schedule error.
+ * @returns A trimmed scope identifier, or undefined when the field is absent.
+ */
+function readOptionalPlanningScopeId(value: unknown, label: string) {
+  return value === undefined ? undefined : requireText(value, label)
 }
 
 /** Requires a non-array object at an untrusted persistence boundary. */

@@ -87,6 +87,11 @@ export type EvaluateEnterpriseAccessInput = {
   groupMappings: EnterpriseDirectoryGroupMapping[]
   /** 評価対象 resource です。 */
   resource: EnterpriseAuthorizationResource
+  /**
+   * Team ID uniquely resolved from the current Project Directory for a legacy Project scope.
+   * Only callers that need backward-compatible evaluation of an unqualified scope provide it.
+   */
+  projectScopeOwnerTeamId?: string
 }
 
 /** Enterprise authorization の決定と effective permission set です。 */
@@ -393,7 +398,7 @@ export function evaluateEnterpriseAccess(
         )
     if (
       principalMatches &&
-      scopeMatches(assignment.scope, input.resource)
+      scopeMatches(assignment.scope, input.resource, input.projectScopeOwnerTeamId)
     ) {
       roleIds.add(assignment.roleId)
       matchingScopedGrant = true
@@ -406,7 +411,7 @@ export function evaluateEnterpriseAccess(
         input.principal.directoryGroupMemberships,
         mapping,
       ) &&
-      scopeMatches(mapping.scope, input.resource)
+      scopeMatches(mapping.scope, input.resource, input.projectScopeOwnerTeamId)
     ) {
       roleIds.add(mapping.roleId)
       matchingScopedGrant = true
@@ -594,6 +599,7 @@ function escapeRegExp(value: string) {
 function scopeMatches(
   scope: EnterpriseRoleAssignment['scope'],
   resource: EnterpriseAuthorizationResource,
+  projectScopeOwnerTeamId?: string,
 ) {
   if (scope.workspaceId !== resource.workspaceId) return false
   if (scope.kind === 'workspace') return true
@@ -601,7 +607,10 @@ function scopeMatches(
     return resource.kind === 'team' && scope.targetId === resource.targetId ||
       resource.kind === 'project' && scope.targetId === resource.parentTeamId
   }
-  return resource.kind === 'project' && scope.targetId === resource.targetId
+  return resource.kind === 'project' &&
+    scope.targetId === resource.targetId &&
+    (scope.parentTeamId ?? projectScopeOwnerTeamId) !== undefined &&
+    (scope.parentTeamId ?? projectScopeOwnerTeamId) === resource.parentTeamId
 }
 
 /** Normalizes an IPv4-mapped IPv6 address to its embedded canonical IPv4 address. */

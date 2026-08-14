@@ -402,12 +402,22 @@ test('enforces custom role differences and the guest permission ceiling', () => 
       principalKind: 'member',
       principalId: 'reviewer@example.com',
       roleId: customRole.roleId,
-      scope: { workspaceId, kind: 'project', targetId: 'project-1' },
+      scope: {
+        workspaceId,
+        kind: 'project',
+        targetId: 'project-1',
+        parentTeamId: 'team-1',
+      },
       source: 'direct',
     }] satisfies EnterpriseRoleAssignment[],
     customRoles: [customRole],
     groupMappings: [],
-    resource: { workspaceId, kind: 'project', targetId: 'project-1' } as const,
+    resource: {
+      workspaceId,
+      kind: 'project',
+      targetId: 'project-1',
+      parentTeamId: 'team-1',
+    } as const,
   }
 
   expect(evaluateEnterpriseAccess({

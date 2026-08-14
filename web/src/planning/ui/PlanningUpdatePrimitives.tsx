@@ -436,10 +436,20 @@ export function PlanningUpdateCadenceEditor({
   const cadence = updateView.cadence
   const defaultCadence: PlanningCadence = cadence?.cadence ?? { unit: 'week', count: 1 }
   const [formError, setFormError] = useState<string | undefined>()
+  const [isSaving, setIsSaving] = useState(false)
   const cadenceFormKey = JSON.stringify({
     cadence,
     defaultOwnerMemberKey: cadence ? undefined : defaultOwnerMemberKey,
   })
+  /** Saves one cadence draft while preventing concurrent submissions. */
+  const saveCadence = (draft: PlanningUpdateCadenceDraft) => {
+    if (!onSave || isSaving) return
+    setIsSaving(true)
+    void Promise.resolve().then(() => onSave(draft)).then(
+      () => setIsSaving(false),
+      () => setIsSaving(false),
+    )
+  }
 
   return (
     <section className="workbench-panel p-5" data-testid="planning-update-cadence">
@@ -452,9 +462,11 @@ export function PlanningUpdateCadenceEditor({
       <form
         key={cadenceFormKey}
         className="mt-4 grid gap-3"
+        aria-busy={isSaving}
         noValidate
         onSubmit={(event) => {
           event.preventDefault()
+          if (isSaving) return
           setFormError(undefined)
           if (!onSave) return
           const data = new FormData(event.currentTarget)
@@ -477,7 +489,7 @@ export function PlanningUpdateCadenceEditor({
             return
           }
 
-          void onSave({
+          saveCadence({
             cadence: { unit: cadenceUnit, count: cadenceCount },
             escalationHoursAfter,
             escalationMemberKey: readOptionalText(data.get('escalationMemberKey')),
@@ -493,7 +505,7 @@ export function PlanningUpdateCadenceEditor({
           <input
             className="workbench-input h-10 px-3"
             defaultValue={cadence?.updateOwnerMemberKey ?? defaultOwnerMemberKey}
-            disabled={!onSave}
+            disabled={!onSave || isSaving}
             name="updateOwnerMemberKey"
             required
           />
@@ -504,7 +516,7 @@ export function PlanningUpdateCadenceEditor({
             <input
               className="workbench-input h-10 px-3"
               defaultValue={defaultCadence.count}
-              disabled={!onSave}
+              disabled={!onSave || isSaving}
               min="1"
               name="cadenceCount"
               required
@@ -516,7 +528,7 @@ export function PlanningUpdateCadenceEditor({
             <select
               className="workbench-input h-10 px-3"
               defaultValue={defaultCadence.unit}
-              disabled={!onSave}
+              disabled={!onSave || isSaving}
               name="cadenceUnit"
             >
               <option value="week">{labels.cadenceWeek}</option>
@@ -529,7 +541,7 @@ export function PlanningUpdateCadenceEditor({
           <input
             className="workbench-input h-10 px-3"
             defaultValue={cadence?.timeZone ?? 'Asia/Tokyo'}
-            disabled={!onSave}
+            disabled={!onSave || isSaving}
             name="timeZone"
             required
           />
@@ -539,7 +551,7 @@ export function PlanningUpdateCadenceEditor({
           <input
             className="workbench-input h-10 px-3"
             defaultValue={cadence?.nextDueAt}
-            disabled={!onSave}
+            disabled={!onSave || isSaving}
             aria-describedby={formError ? 'planning-update-cadence-error' : undefined}
             aria-invalid={Boolean(formError)}
             name="nextDueAt"
@@ -553,7 +565,7 @@ export function PlanningUpdateCadenceEditor({
             <input
               className="workbench-input h-10 px-3"
               defaultValue={cadence?.reminderHoursBefore ?? 24}
-              disabled={!onSave}
+              disabled={!onSave || isSaving}
               min="0"
               name="reminderHoursBefore"
               required
@@ -565,7 +577,7 @@ export function PlanningUpdateCadenceEditor({
             <input
               className="workbench-input h-10 px-3"
               defaultValue={cadence?.escalationHoursAfter}
-              disabled={!onSave}
+              disabled={!onSave || isSaving}
               min="0"
               name="escalationHoursAfter"
               type="number"
@@ -577,7 +589,7 @@ export function PlanningUpdateCadenceEditor({
           <input
             className="workbench-input h-10 px-3"
             defaultValue={cadence?.escalationMemberKey}
-            disabled={!onSave}
+            disabled={!onSave || isSaving}
             name="escalationMemberKey"
           />
         </label>
@@ -597,7 +609,7 @@ export function PlanningUpdateCadenceEditor({
         ) : null}
         <button
           className="workbench-button-primary min-h-10 px-4 disabled:opacity-50"
-          disabled={!onSave}
+          disabled={!onSave || isSaving}
           type="submit"
         >
           {labels.saveCadence}
@@ -605,7 +617,8 @@ export function PlanningUpdateCadenceEditor({
         {cadence && onSave ? (
           <button
             className="workbench-button-secondary min-h-10 px-4"
-            onClick={() => void onSave(null)}
+            disabled={isSaving}
+            onClick={() => saveCadence(null)}
             type="button"
           >
             {labels.clearCadence}
@@ -1341,9 +1354,15 @@ function readOptionalNonNegativeNumber(value: FormDataEntryValue | null) {
     : undefined
 }
 
-/** Checks that a submitted cadence deadline can be represented as a Date. */
-function isValidPlanningDateTime(value: string) {
-  return Number.isFinite(Date.parse(value))
+/**
+ * Checks that a submitted cadence deadline includes an explicit timezone offset.
+ *
+ * @param value - Candidate ISO timestamp from the cadence form.
+ * @returns Whether the timestamp is parseable and timezone-qualified.
+ */
+export function isValidPlanningDateTime(value: string) {
+  return Number.isFinite(Date.parse(value)) &&
+    /T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/u.test(value)
 }
 
 /**

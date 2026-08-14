@@ -776,6 +776,161 @@ test('shows Planning cadence notifications for an Enterprise-managed Project mem
   })
 })
 
+test('does not reuse an unrelated Enterprise Project permission for notifications', async () => {
+  configureFakeProjectClients(true, {
+    detailAssignedProjectId: 'refero',
+    detailAssigneeUserId: 'demo@example.com',
+    projectAccesses: [],
+    teamProjects: [{ id: 'refero', name: 'Refero', tone: 'blue' }],
+  })
+  const identity = new InMemoryEnterpriseIdentityClient()
+  const workspaceId = 'user#demo@example.com'
+  await identity.putCustomRole({
+    workspaceId,
+    roleId: 'custom:files-only',
+    name: 'Files only',
+    permissions: ['files.read'],
+    guestAssignable: false,
+    revision: 1,
+    createdAt: '2026-08-09T00:00:00.000Z',
+    updatedAt: '2026-08-09T00:00:00.000Z',
+  })
+  const assignment: EnterpriseRoleAssignment = {
+    workspaceId,
+    assignmentId: 'notification-files-only',
+    principalKind: 'member',
+    principalId: 'demo@example.com',
+    roleId: 'custom:files-only',
+    scope: {
+      workspaceId,
+      kind: 'project',
+      targetId: 'refero',
+      parentTeamId: 'core-team',
+    },
+    source: 'direct',
+  }
+  const readSnapshot = identity.getSnapshot.bind(identity)
+  identity.getSnapshot = async (currentWorkspaceId) => {
+    const snapshot = await readSnapshot(currentWorkspaceId)
+    return {
+      ...snapshot,
+      roleAssignments: [assignment],
+    }
+  }
+  const planning = getTestAppDependencies().workItems.planning
+  const nextDueAt = '2026-08-10T00:00:00.000Z'
+  await planning.configureUpdateCadence(workspaceId, {
+    target: { type: 'project', teamId: 'core-team', projectId: 'refero' },
+    cadence: {
+      updateOwnerMemberKey: 'demo@example.com',
+      cadence: { unit: 'week', count: 1 },
+      timeZone: 'UTC',
+      nextDueAt,
+      reminderHoursBefore: 24,
+    },
+    expectedRevision: 0,
+  }, { workItems: [] })
+  const planningNotification = createNotificationItem({
+    id: 'files-only-planning-notification',
+    eventType: 'planning-update.escalation',
+    reasons: ['escalation'],
+    issueId: undefined,
+    planningTargetType: 'project',
+    planningTargetId: 'refero',
+    planningTargetRecordKey: 'UPDATE_TARGET#PROJECT#core-team#refero',
+    planningNextDueAt: nextDueAt,
+    planningNotificationKind: 'escalation',
+  })
+  const workItemNotification = createNotificationItem({
+    id: 'files-only-work-item-notification',
+    eventType: 'work-item.updated',
+    reasons: ['status-change'],
+    issueId: 'notification-files-only',
+    projectId: 'refero',
+  })
+  const probe = createNotificationVisibilityProbe([
+    planningNotification,
+    workItemNotification,
+  ])
+  setTestAppDependencies({
+    enterpriseIdentity: identity,
+    notifications: probe.client,
+  })
+
+  const response = await app.request('/api/notifications', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(probe.visibility).toEqual(new Map([
+    [planningNotification.id, false],
+    [workItemNotification.id, false],
+  ]))
+  expect(await response.json()).toMatchObject({
+    notifications: [],
+    unreadCount: 0,
+  })
+})
+
+test('does not use a Project-only notification permission without an unambiguous owner Team', async () => {
+  configureFakeProjectClients(true, {
+    workspaceRole: 'member',
+    projectAccesses: [],
+    teamProjects: [{ id: 'shared-launch', name: 'Shared launch', tone: 'green' }],
+    additionalTeams: [{
+      id: 'design-team',
+      name: 'Design Team',
+      projects: [{ id: 'shared-launch', name: 'Shared launch', tone: 'green' }],
+    }],
+  })
+  const identity = new InMemoryEnterpriseIdentityClient()
+  const workspaceId = 'user#demo@example.com'
+  const assignment: EnterpriseRoleAssignment = {
+    workspaceId,
+    assignmentId: 'notification-shared-project-reader',
+    principalKind: 'member',
+    principalId: 'demo@example.com',
+    roleId: 'project:member',
+    scope: {
+      workspaceId,
+      kind: 'project',
+      targetId: 'shared-launch',
+      parentTeamId: 'core-team',
+    },
+    source: 'direct',
+  }
+  const readSnapshot = identity.getSnapshot.bind(identity)
+  identity.getSnapshot = async (currentWorkspaceId) => {
+    const snapshot = await readSnapshot(currentWorkspaceId)
+    return {
+      ...snapshot,
+      roleAssignments: [assignment],
+    }
+  }
+  const notification = createNotificationItem({
+    id: 'ambiguous-project-notification',
+    teamId: undefined,
+    projectId: 'shared-launch',
+    issueId: undefined,
+  })
+  const probe = createNotificationVisibilityProbe([notification])
+  setTestAppDependencies({
+    enterpriseIdentity: identity,
+    notifications: probe.client,
+  })
+
+  const response = await app.request('/api/notifications', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(probe.visibility.get(notification.id)).toBe(false)
+  expect(await response.json()).toMatchObject({
+    notifications: [],
+    unreadCount: 0,
+  })
+})
+
 test('denies a Team-qualified Planning Project notification for an inaccessible duplicate ID', async () => {
   configureFakeProjectClients(true, {
     workspaceRole: 'member',

@@ -1511,6 +1511,7 @@ export type EnterpriseNotificationAuthorization = {
  * @param memberKey - Active Workspace member key being considered.
  * @param workspaceRole - Current Workspace role from the active member row.
  * @param snapshot - Authoritative Enterprise Identity snapshot.
+ * @param projectScopeOwnerTeamId - Uniquely resolved owner Team for a legacy Project scope.
  * @returns Whether Enterprise is authoritative and whether the member can perform the action.
  */
 export function resolveEnterpriseNotificationAuthorization(
@@ -1518,6 +1519,7 @@ export function resolveEnterpriseNotificationAuthorization(
   memberKey: string,
   workspaceRole: WorkspaceNotificationRole,
   snapshot: EnterpriseIdentitySnapshot,
+  projectScopeOwnerTeamId?: string,
 ): EnterpriseNotificationAuthorization {
   if (snapshot.workspaceId !== event.workspaceId || event.planningNotificationKind === undefined) {
     return { authoritative: false, allowed: false }
@@ -1575,6 +1577,7 @@ export function resolveEnterpriseNotificationAuthorization(
     customRoles: snapshot.customRoles,
     groupMappings: directoryPrincipal.compatibleGroupMappings,
     resource,
+    ...(projectScopeOwnerTeamId !== undefined ? { projectScopeOwnerTeamId } : {}),
   })
   return { authoritative: true, allowed: access.allowed }
 }
@@ -1586,6 +1589,7 @@ export function resolveEnterpriseNotificationAuthorization(
  * @param memberKey - Active Workspace member key being considered.
  * @param workspaceRole - Current Workspace role from the active member row.
  * @param snapshot - Authoritative Enterprise Identity snapshot.
+ * @param projectScopeOwnerTeamId - Uniquely resolved owner Team for a legacy Project scope.
  * @returns Whether the member can perform the action represented by the notification.
  */
 export function hasEligibleEnterpriseNotificationAccess(
@@ -1593,12 +1597,14 @@ export function hasEligibleEnterpriseNotificationAccess(
   memberKey: string,
   workspaceRole: WorkspaceNotificationRole,
   snapshot: EnterpriseIdentitySnapshot,
+  projectScopeOwnerTeamId?: string,
 ): boolean {
   return resolveEnterpriseNotificationAuthorization(
     event,
     memberKey,
     workspaceRole,
     snapshot,
+    projectScopeOwnerTeamId,
   ).allowed
 }
 
@@ -1691,6 +1697,31 @@ export function hasActiveNotificationScope(
   return event.teamId !== undefined && activeTeamIds.has(event.teamId)
 }
 
+/**
+ * Resolves a Project's owner Team only when the active directory contains one owner.
+ *
+ * @param event - Notification target containing the Project identifier.
+ * @param directoryItems - Current Project Directory rows.
+ * @returns The unique owner Team ID, or undefined for an absent or ambiguous Project.
+ */
+function readUniqueNotificationProjectOwnerTeamId(
+  event: Pick<AuditProjectionEvent, 'projectId'>,
+  directoryItems: ProjectDirectoryItem[],
+) {
+  if (event.projectId === undefined) return undefined
+  const ownerTeamIds = new Set(
+    directoryItems
+      .filter((item) =>
+        item.entryType === 'project' &&
+        item.projectId === event.projectId &&
+        typeof item.teamId === 'string' &&
+        !item.archivedAt
+      )
+      .flatMap((item) => typeof item.teamId === 'string' ? [item.teamId] : []),
+  )
+  return ownerTeamIds.size === 1 ? [...ownerTeamIds][0] : undefined
+}
+
 /** Cognito の全 group pages から現在の system-admin membership を判定します。 */
 export async function hasCurrentSystemAdminMembership(
   systemAdminGroups: string[],
@@ -1765,6 +1796,7 @@ async function isEligibleRecipient(
         memberKey,
         role,
         await snapshotPromise,
+        readUniqueNotificationProjectOwnerTeamId(event, directoryItems),
       )
     }
   }
@@ -1988,8 +2020,14 @@ async function readCurrentPlanningUpdateScope(
   ) {
     throw new Error('Planning notification Initiative source row is invalid.')
   }
-  const teamId = readString(initiative.teamId)
-  const projectId = readString(initiative.projectId)
+  const teamId = readOptionalPlanningScopeId(
+    initiative.teamId,
+    'Planning notification Initiative Team scope',
+  )
+  const projectId = readOptionalPlanningScopeId(
+    initiative.projectId,
+    'Planning notification Initiative Project scope',
+  )
   if (projectId && !teamId) {
     throw new Error('Planning notification Initiative Project scope requires a Team scope.')
   }
@@ -2156,6 +2194,21 @@ function normalizeStoredDateOnly(value: string | undefined) {
 
 function readString(value: unknown) {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+/**
+ * Reads an optional persisted Planning scope field without coercing malformed values to absent.
+ *
+ * @param value - Raw persisted scope value.
+ * @param label - Field name used in the projection error.
+ * @returns A trimmed scope identifier, or undefined when the field is absent.
+ */
+function readOptionalPlanningScopeId(value: unknown, label: string) {
+  if (value === undefined) return undefined
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new Error(label + ' is invalid.')
+  }
+  return value.trim()
 }
 
 /** Reads and canonicalizes a valid timestamp from untrusted event metadata. */

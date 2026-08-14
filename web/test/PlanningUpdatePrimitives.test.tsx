@@ -9,12 +9,21 @@ import {
   readPlanningUpdateEvidence,
   submitPlanningUpdateCommentAndReset,
 } from '../src/planning/model/statusUpdateView'
-import { PlanningStatusUpdateComposer } from '../src/planning/ui/PlanningUpdatePrimitives'
+import {
+  isValidPlanningDateTime,
+  PlanningStatusUpdateComposer,
+} from '../src/planning/ui/PlanningUpdatePrimitives'
 import { createPlanningLabels } from '../src/planning/ui/labels'
 
 const labels = createPlanningLabels('en')
 
 describe('Planning update evidence composer', () => {
+  test('requires an explicit timezone offset for cadence deadlines', () => {
+    expect(isValidPlanningDateTime('2026-03-01T15:00:00')).toBe(false)
+    expect(isValidPlanningDateTime('2026-03-01T15:00:00.000Z')).toBe(true)
+    expect(isValidPlanningDateTime('2026-03-01T15:00:00+09:00')).toBe(true)
+  })
+
   test('rejects an empty non-negative number instead of converting it to zero', () => {
     expect(readNonNegativeNumber('')).toBeUndefined()
     expect(readNonNegativeNumber('   ')).toBeUndefined()

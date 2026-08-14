@@ -240,6 +240,8 @@ export type EvaluateRealtimeEnterpriseAccessInput = {
   teamId: string
   /** Assigned Project がある場合の Project ID です。 */
   projectId?: string
+  /** Team ID uniquely resolved from the current Project Directory for a legacy Project scope. */
+  projectScopeOwnerTeamId?: string
 }
 
 /**
@@ -477,6 +479,9 @@ export function evaluateRealtimeEnterpriseAccess(
     customRoles: input.snapshot.customRoles,
     groupMappings: compatibleGroupMappings,
     resource,
+    ...(input.projectScopeOwnerTeamId !== undefined
+      ? { projectScopeOwnerTeamId: input.projectScopeOwnerTeamId }
+      : {}),
   })
   const writeAccess = evaluateEnterpriseAccess({
     permission: 'work-items.write',
@@ -485,6 +490,9 @@ export function evaluateRealtimeEnterpriseAccess(
     customRoles: input.snapshot.customRoles,
     groupMappings: compatibleGroupMappings,
     resource,
+    ...(input.projectScopeOwnerTeamId !== undefined
+      ? { projectScopeOwnerTeamId: input.projectScopeOwnerTeamId }
+      : {}),
   })
   const enterpriseBoundaryDenied =
     guestDenied || collaboratorDenied || directoryPrincipal.deprovisioned
@@ -1066,6 +1074,31 @@ export function hasActiveRealtimeResourceScope(
   )
 }
 
+/**
+ * Resolves a Project's owner Team only when the active directory contains one owner.
+ *
+ * @param session - Realtime session scope containing the Project identifier.
+ * @param items - Current Project Directory rows.
+ * @returns The unique owner Team ID, or undefined for an absent or ambiguous Project.
+ */
+function readUniqueRealtimeProjectOwnerTeamId(
+  session: Pick<RealtimeSessionItem, 'projectId'>,
+  items: RealtimeAuthorizationDirectoryItem[],
+) {
+  if (session.projectId === undefined) return undefined
+  const ownerTeamIds = new Set(
+    items
+      .filter((item) =>
+        item.entryType === 'project' &&
+        item.projectId === session.projectId &&
+        typeof item.teamId === 'string' &&
+        !item.archivedAt
+      )
+      .flatMap((item) => typeof item.teamId === 'string' ? [item.teamId] : []),
+  )
+  return ownerTeamIds.size === 1 ? [...ownerTeamIds][0] : undefined
+}
+
 /** Authoritative enterprise grant がない principal の legacy Project ACL を判定します。 */
 export function hasRealtimeLegacyDirectoryAccess(
   session: Pick<RealtimeSessionItem, 'memberKey' | 'projectId' | 'systemAdmin' | 'teamId'>,
@@ -1208,6 +1241,10 @@ async function isRealtimeSessionAuthorized(
     return false
   }
   const legacyReadAllowed = hasRealtimeLegacyDirectoryAccess(session, directoryItems)
+  const projectScopeOwnerTeamId = readUniqueRealtimeProjectOwnerTeamId(
+    session,
+    directoryItems,
+  )
 
   let snapshotPromise = enterpriseSnapshotCache.get(session.workspaceId)
   if (!snapshotPromise) {
@@ -1267,6 +1304,7 @@ async function isRealtimeSessionAuthorized(
     ),
     teamId: session.teamId,
     ...(session.projectId ? { projectId: session.projectId } : {}),
+    ...(projectScopeOwnerTeamId !== undefined ? { projectScopeOwnerTeamId } : {}),
   })
   session.canWrite = authorization.canWrite
   return authorization.allowed && isRealtimeEnterpriseSessionFresh(

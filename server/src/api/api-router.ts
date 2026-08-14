@@ -129,6 +129,7 @@ import {
   type EnterpriseProvisioningPreview,
   type EnterpriseProvisioningRun,
   type EnterpriseRoleId,
+  type EnterpriseRoleScope,
   type EnterpriseRoutePermissionRule,
   type EnterpriseScimGroup,
   type EnterpriseScimGroupInput,
@@ -743,6 +744,16 @@ type EnterpriseTeamAccess = {
   permissions: EnterprisePermissionId[]
 }
 
+/** Enterprise permission set retained for one Team-qualified Project scope. */
+type EnterpriseProjectScopeAccess = {
+  /** Team that owns the Project scope. */
+  teamId: string
+  /** Project identifier within the owning Team. */
+  projectId: string
+  /** Permissions granted at this exact qualified scope. */
+  permissions: EnterprisePermissionId[]
+}
+
 /**
  * Current request と独立した resource permission を再評価する Enterprise snapshot です。
  */
@@ -821,6 +832,10 @@ type ProjectPrincipal = {
    * Current request の permission でアクセスできる Project と相当 role です。
    */
   enterpriseProjectAccesses?: ProjectAccessEntry[]
+  /**
+   * Current request permission set for each Team-qualified Project scope.
+   */
+  enterpriseProjectScopeAccesses?: EnterpriseProjectScopeAccess[]
   /**
    * Current request の permission で独立してアクセスできる Team ID 一覧です。
    */
@@ -1382,12 +1397,32 @@ function getEnterpriseCognitoSsoAppClientBindingCache() {
 
 const ENTERPRISE_NOTIFICATION_SCOPE_PERMISSIONS = [
   'teams.read',
+  'teams.write',
   'projects.read',
+  'projects.write',
   'work-items.read',
+  'work-items.write',
   'documents.read',
+  'documents.write',
   'files.read',
+  'files.write',
   'planning.read',
+  'planning.write',
 ] satisfies EnterprisePermissionId[]
+
+const ENTERPRISE_PLANNING_READ_PERMISSIONS = [
+  'planning.read',
+  'work-items.read',
+] satisfies readonly EnterprisePermissionId[]
+
+const ENTERPRISE_PLANNING_WRITE_PERMISSIONS = [
+  'planning.write',
+  'work-items.write',
+] satisfies readonly EnterprisePermissionId[]
+
+const ENTERPRISE_WORK_ITEM_READ_PERMISSIONS = [
+  'work-items.read',
+] satisfies readonly EnterprisePermissionId[]
 
 const enterpriseRoutePermissionRules = [
   {
@@ -15467,6 +15502,22 @@ async function authenticateWorkspacePrincipal(
     directoryGroupIds,
     directoryGroupMemberships,
   } = directoryPrincipal
+  const needsProjectScopeQualification =
+    hasUnqualifiedEnterpriseProjectScope(compatibleRoleAssignments) ||
+    hasUnqualifiedEnterpriseProjectScope(compatibleGroupMappings)
+  const enterpriseDirectory = needsProjectScopeQualification
+    ? await workspaceDependencies.projectDirectory.getProjectDirectory(
+        principal.directoryId,
+        'ja',
+        true,
+      )
+    : undefined
+  const qualifiedRoleAssignments = enterpriseDirectory
+    ? qualifyEnterpriseProjectScopes(compatibleRoleAssignments, enterpriseDirectory)
+    : compatibleRoleAssignments
+  const qualifiedGroupMappings = enterpriseDirectory
+    ? qualifyEnterpriseProjectScopes(compatibleGroupMappings, enterpriseDirectory)
+    : compatibleGroupMappings
   const requiredPermissions = context
     ? resolveRoutePermissions(
         context.req.method,
@@ -15475,7 +15526,7 @@ async function authenticateWorkspacePrincipal(
       )
     : undefined
   const suppressLegacyWorkspaceRole = directoryPrincipal.directoryManaged ||
-    compatibleRoleAssignments.some((assignment) =>
+    qualifiedRoleAssignments.some((assignment) =>
     (
       assignment.principalKind === 'member' && assignment.principalId === principal.userKey ||
       assignment.principalKind === 'directory-group' &&
@@ -15484,7 +15535,7 @@ async function authenticateWorkspacePrincipal(
           directoryGroupIds.includes(assignment.principalId)
         )
     )
-  ) || compatibleGroupMappings.some((mapping) =>
+  ) || qualifiedGroupMappings.some((mapping) =>
     mapping.enabled
   )
   const enterprisePrincipal = {
@@ -15510,8 +15561,8 @@ async function authenticateWorkspacePrincipal(
   const enterpriseAuthorizationEvaluation = {
     principal: enterprisePrincipal,
     snapshot,
-    assignments: compatibleRoleAssignments,
-    groupMappings: compatibleGroupMappings,
+    assignments: qualifiedRoleAssignments,
+    groupMappings: qualifiedGroupMappings,
   } satisfies EnterpriseAuthorizationEvaluationSnapshot
   const defersToLegacyBusinessAuthorization =
     !suppressLegacyWorkspaceRole &&
@@ -15533,6 +15584,7 @@ async function authenticateWorkspacePrincipal(
         grantedRoutePermissions: [] as EnterprisePermissionId[],
         authorizedAtResource: false,
         projectAccesses: [] as ProjectAccessEntry[],
+        projectScopeAccesses: [] as EnterpriseProjectScopeAccess[],
         authorizedTeamIds: [] as string[],
         teamAccesses: [] as EnterpriseTeamAccess[],
       }
@@ -15544,6 +15596,7 @@ async function authenticateWorkspacePrincipal(
           grantedRoutePermissions: [],
           authorizedAtResource: false,
           projectAccesses: [],
+          projectScopeAccesses: [],
           authorizedTeamIds: [],
           teamAccesses: [],
         }
@@ -15649,6 +15702,7 @@ async function authenticateWorkspacePrincipal(
     enterpriseGrantedRoutePermissions: requestAccess.grantedRoutePermissions,
     enterpriseRouteAuthorizedAtResource: requestAccess.authorizedAtResource,
     enterpriseProjectAccesses: requestAccess.projectAccesses,
+    enterpriseProjectScopeAccesses: requestAccess.projectScopeAccesses,
     enterpriseAuthorizedTeamIds: requestAccess.authorizedTeamIds,
     enterpriseTeamAccesses: requestAccess.teamAccesses,
     enterpriseLegacyProjectAccessSuppressed: suppressLegacyWorkspaceRole,
@@ -15827,12 +15881,27 @@ async function authenticateEnterpriseServiceAccount(
           source: 'system' as const,
         },
       ]
+      const needsProjectScopeQualification =
+        hasUnqualifiedEnterpriseProjectScope(serviceAccountAssignments) ||
+        hasUnqualifiedEnterpriseProjectScope(snapshot.groupMappings)
+      const enterpriseDirectory = needsProjectScopeQualification
+        ? await workspaceDependencies.projectDirectory.getProjectDirectory(
+            workspaceId,
+            'ja',
+            true,
+          )
+        : undefined
+      const qualifiedServiceAccountAssignments = enterpriseDirectory
+        ? qualifyEnterpriseProjectScopes(serviceAccountAssignments, enterpriseDirectory)
+        : serviceAccountAssignments
+      const qualifiedGroupMappings = enterpriseDirectory
+        ? qualifyEnterpriseProjectScopes(snapshot.groupMappings, enterpriseDirectory)
+        : snapshot.groupMappings
       const enterpriseAuthorizationEvaluation = {
         principal: serviceAccountPrincipal,
         snapshot,
-        assignments:
-          serviceAccountAssignments,
-        groupMappings: snapshot.groupMappings,
+        assignments: qualifiedServiceAccountAssignments,
+        groupMappings: qualifiedGroupMappings,
       } satisfies EnterpriseAuthorizationEvaluationSnapshot
       const requestAccess =
         await evaluateEnterpriseRequestAccess({
@@ -15989,6 +16058,7 @@ async function authenticateEnterpriseServiceAccount(
     enterpriseGrantedRoutePermissions: requestAccess.grantedRoutePermissions,
     enterpriseRouteAuthorizedAtResource: requestAccess.authorizedAtResource,
     enterpriseProjectAccesses: requestAccess.projectAccesses,
+    enterpriseProjectScopeAccesses: requestAccess.projectScopeAccesses,
     enterpriseAuthorizedTeamIds: requestAccess.authorizedTeamIds,
     enterpriseTeamAccesses: requestAccess.teamAccesses,
     enterpriseLegacyProjectAccessSuppressed: true,
@@ -16045,6 +16115,8 @@ type EnterpriseRequestAccess = {
   authorizedAtResource: boolean
   /** Current route permission で読み書きできる Project と相当 role です。 */
   projectAccesses: ProjectAccessEntry[]
+  /** Permission set retained for each Team-qualified Project scope. */
+  projectScopeAccesses: EnterpriseProjectScopeAccess[]
   /** Current route permission で独立して読み書きできる Team ID です。 */
   authorizedTeamIds: string[]
   /** Current route で Team ごとに有効な enterprise permission です。 */
@@ -16073,6 +16145,7 @@ async function evaluateEnterpriseRequestAccess(
       grantedRoutePermissions: [],
       authorizedAtResource: input.context === undefined,
       projectAccesses: [],
+      projectScopeAccesses: [],
       authorizedTeamIds: [],
       teamAccesses: [],
     }
@@ -16120,6 +16193,7 @@ async function evaluateEnterpriseRequestAccess(
     if (decision.access.allowed) grantedRoutePermissions.add(decision.permission)
   }
   const projectAccesses: ProjectAccessEntry[] = []
+  const projectScopeAccesses: EnterpriseProjectScopeAccess[] = []
   const authorizedTeamIds = new Set<string>()
   const teamPermissionsById = new Map<string, Set<EnterprisePermissionId>>()
   const scopedPermissions = new Set<EnterprisePermissionId>()
@@ -16149,14 +16223,17 @@ async function evaluateEnterpriseRequestAccess(
     )
   ) {
     const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(input.workspaceId, 'ja')
-    const teams = directory.teams.filter((team) =>
-      evaluateAllProjectScopes ||
-      resource.kind === 'workspace' ||
-      resource.kind === 'team' && resource.targetId === team.id ||
-      resource.kind === 'project' && team.projects.some((project) =>
-        resource.targetId === project.id
+    const teams = resource.kind === 'project' && resource.parentTeamId === undefined
+      ? []
+      : directory.teams.filter((team) =>
+        evaluateAllProjectScopes ||
+        resource.kind === 'workspace' ||
+        resource.kind === 'team' && resource.targetId === team.id ||
+        resource.kind === 'project' && team.projects.some((project) =>
+          resource.targetId === project.id &&
+          (resource.parentTeamId === undefined || resource.parentTeamId === team.id)
+        )
       )
-    )
     if (resource.kind === 'workspace' || evaluateAllProjectScopes) {
       for (const team of teams) {
         const scoped = evaluateScopeResource({
@@ -16196,6 +16273,9 @@ async function evaluateEnterpriseRequestAccess(
         if (decision.access.allowed) grantedRoutePermissions.add(decision.permission)
       }
       if (!scoped.granted) continue
+      const grantedScopePermissions = scoped.decisions
+        .filter((decision) => decision.access.allowed)
+        .map((decision) => decision.permission)
       scopedGrantedRoutePermission ??= scoped.granted.permission
       for (const permission of scoped.granted.access.permissions) {
         scopedPermissions.add(permission)
@@ -16204,6 +16284,11 @@ async function evaluateEnterpriseRequestAccess(
         projectId: project.projectId,
         role: resolveEnterpriseProjectRole([scoped.granted.permission]),
         teamId: project.teamId,
+      })
+      projectScopeAccesses.push({
+        teamId: project.teamId,
+        projectId: project.projectId,
+        permissions: grantedScopePermissions,
       })
     }
   }
@@ -16222,6 +16307,7 @@ async function evaluateEnterpriseRequestAccess(
     grantedRoutePermissions: [...grantedRoutePermissions],
     authorizedAtResource: direct.granted !== undefined,
     projectAccesses,
+    projectScopeAccesses,
     authorizedTeamIds: [...authorizedTeamIds],
     teamAccesses: [...teamPermissionsById].map(([teamId, permissions]) => ({
       teamId,
@@ -16288,6 +16374,55 @@ function resolveEnterpriseProjectRole(
     return 'member'
   }
   return 'viewer'
+}
+
+/**
+ * Adds the unique owner Team to legacy Project scopes before authorization evaluation.
+ *
+ * Ambiguous or unknown Project IDs remain unqualified and are rejected by the evaluator
+ * once a qualified Project resource is available.
+ *
+ * @param entries - Assignment or group-mapping records carrying an Enterprise scope.
+ * @param directory - Current Team-qualified Project directory.
+ * @returns Entries with uniquely resolvable Project scopes qualified by owner Team.
+ */
+function qualifyEnterpriseProjectScopes<T extends { scope: EnterpriseRoleScope }>(
+  entries: readonly T[],
+  directory: ProjectDirectoryResponse,
+): T[] {
+  const ownerTeamIdsByProjectId = new Map<string, Set<string>>()
+  for (const team of directory.teams) {
+    for (const project of team.projects) {
+      const ownerTeamIds = ownerTeamIdsByProjectId.get(project.id) ?? new Set<string>()
+      ownerTeamIds.add(team.id)
+      ownerTeamIdsByProjectId.set(project.id, ownerTeamIds)
+    }
+  }
+  return entries.map((entry) => {
+    if (
+      entry.scope.kind !== 'project' ||
+      entry.scope.parentTeamId !== undefined
+    ) {
+      return entry
+    }
+    const ownerTeamIds = ownerTeamIdsByProjectId.get(entry.scope.targetId ?? '')
+    if (ownerTeamIds?.size !== 1) return entry
+    const parentTeamId = ownerTeamIds.values().next().value
+    if (!parentTeamId) return entry
+    return {
+      ...entry,
+      scope: { ...entry.scope, parentTeamId },
+    }
+  })
+}
+
+/** Returns whether any Enterprise scope still needs Team qualification. */
+function hasUnqualifiedEnterpriseProjectScope(
+  entries: readonly { scope: EnterpriseRoleScope }[],
+) {
+  return entries.some((entry) =>
+    entry.scope.kind === 'project' && entry.scope.parentTeamId === undefined,
+  )
 }
 
 async function resolveEnterpriseAuthorizationResource(
@@ -16430,9 +16565,14 @@ async function resolveEnterpriseAuthorizationResource(
   if (projectId) {
     const decodedProjectId = decodeURIComponent(projectId)
     const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(workspaceId, 'ja')
-    const parentTeamId = directory.teams.find((team) =>
-      team.projects.some((project) => project.id === decodedProjectId)
-    )?.id
+    const ownerTeamIds = new Set(
+      directory.teams
+        .filter((team) => team.projects.some((project) => project.id === decodedProjectId))
+        .map((team) => team.id),
+    )
+    const parentTeamId = ownerTeamIds.size === 1
+      ? ownerTeamIds.values().next().value
+      : undefined
     return {
       workspaceId,
       kind: 'project' as const,
@@ -21664,14 +21804,36 @@ async function requirePlanningCadenceRecipientTargetPermission(
     memberKey,
     candidateGroups,
   )
+  const needsProjectScopeQualification =
+    hasUnqualifiedEnterpriseProjectScope(directoryPrincipal.compatibleRoleAssignments) ||
+    hasUnqualifiedEnterpriseProjectScope(directoryPrincipal.compatibleGroupMappings)
+  const enterpriseDirectory = needsProjectScopeQualification
+    ? await workspaceDependencies.projectDirectory.getProjectDirectory(
+        principal.directoryId,
+        'ja',
+        true,
+      )
+    : undefined
+  const qualifiedRoleAssignments = enterpriseDirectory
+    ? qualifyEnterpriseProjectScopes(
+        directoryPrincipal.compatibleRoleAssignments,
+        enterpriseDirectory,
+      )
+    : directoryPrincipal.compatibleRoleAssignments
+  const qualifiedGroupMappings = enterpriseDirectory
+    ? qualifyEnterpriseProjectScopes(
+        directoryPrincipal.compatibleGroupMappings,
+        enterpriseDirectory,
+      )
+    : directoryPrincipal.compatibleGroupMappings
   const suppressLegacyWorkspaceRole = directoryPrincipal.directoryManaged ||
-    directoryPrincipal.compatibleRoleAssignments.some((assignment) =>
+    qualifiedRoleAssignments.some((assignment) =>
       assignment.principalKind === 'member' && assignment.principalId === memberKey ||
       assignment.principalKind === 'directory-group' && (
         assignment.source === 'directory-mapping' ||
         directoryPrincipal.directoryGroupIds.includes(assignment.principalId)
       )
-    ) || directoryPrincipal.compatibleGroupMappings.some((mapping) => mapping.enabled)
+    ) || qualifiedGroupMappings.some((mapping) => mapping.enabled)
   if (suppressLegacyWorkspaceRole) {
     const candidateAccess = evaluateEnterpriseAccess({
       permission: minimumRole === 'member' ? 'work-items.write' : 'work-items.read',
@@ -21687,9 +21849,9 @@ async function requirePlanningCadenceRecipientTargetPermission(
           : {}),
         systemAdministrator: false,
       },
-      assignments: directoryPrincipal.compatibleRoleAssignments,
+      assignments: qualifiedRoleAssignments,
       customRoles: enterpriseSnapshot.customRoles,
-      groupMappings: directoryPrincipal.compatibleGroupMappings,
+      groupMappings: qualifiedGroupMappings,
       resource: projectId
         ? {
             workspaceId: principal.directoryId,
@@ -25272,6 +25434,108 @@ async function createNotificationVisibilityFilter(
   const projectAccesses = principal.isSystemAdmin
     ? projectScopeAccesses
     : collapseProjectAccessesById(projectScopeAccesses)
+  const enterpriseEvaluation = principal.enterpriseAuthorizationEvaluation
+  const isEnterpriseContentPrincipal =
+    !principal.isSystemAdmin && principal.enterprisePermissions !== undefined
+  const enterpriseProjectScopeAccesses =
+    principal.enterpriseProjectScopeAccesses ?? []
+  const enterpriseProjectHasPermission = (
+    access: EnterpriseProjectScopeAccess,
+    permissions: readonly EnterprisePermissionId[],
+  ) => permissions.some((permission) => access.permissions.includes(permission))
+  const enterpriseTeamHasPermission = (
+    teamId: string,
+    permissions: readonly EnterprisePermissionId[],
+  ) => (principal.enterpriseTeamAccesses ?? []).some((access) =>
+    access.teamId === teamId &&
+    permissions.some((permission) => access.permissions.includes(permission))
+  )
+  const enterprisePlanningReadableProjectScopeKeys = new Set(
+    enterpriseProjectScopeAccesses
+      .filter((access) => enterpriseProjectHasPermission(
+        access,
+        ENTERPRISE_PLANNING_READ_PERMISSIONS,
+      ))
+      .map((access) => `${access.teamId}\0${access.projectId}`),
+  )
+  const enterprisePlanningWritableProjectScopeKeys = new Set(
+    enterpriseProjectScopeAccesses
+      .filter((access) => enterpriseProjectHasPermission(
+        access,
+        ENTERPRISE_PLANNING_WRITE_PERMISSIONS,
+      ))
+      .map((access) => `${access.teamId}\0${access.projectId}`),
+  )
+  const enterpriseWorkItemReadableProjectScopeKeys = new Set(
+    enterpriseProjectScopeAccesses
+      .filter((access) => enterpriseProjectHasPermission(
+        access,
+        ENTERPRISE_WORK_ITEM_READ_PERMISSIONS,
+      ))
+      .map((access) => `${access.teamId}\0${access.projectId}`),
+  )
+  const enterprisePlanningReadableTeamIds = new Set(
+    (principal.enterpriseTeamAccesses ?? [])
+      .filter((access) => enterpriseTeamHasPermission(
+        access.teamId,
+        ENTERPRISE_PLANNING_READ_PERMISSIONS,
+      ))
+      .map((access) => access.teamId),
+  )
+  const enterprisePlanningWritableTeamIds = new Set(
+    (principal.enterpriseTeamAccesses ?? [])
+      .filter((access) => enterpriseTeamHasPermission(
+        access.teamId,
+        ENTERPRISE_PLANNING_WRITE_PERMISSIONS,
+      ))
+      .map((access) => access.teamId),
+  )
+  const enterpriseWorkItemReadableTeamIds = new Set(
+    (principal.enterpriseTeamAccesses ?? [])
+      .filter((access) => enterpriseTeamHasPermission(
+        access.teamId,
+        ENTERPRISE_WORK_ITEM_READ_PERMISSIONS,
+      ))
+      .map((access) => access.teamId),
+  )
+  const enterpriseWorkItemReadableProjectIds = new Set(
+    enterpriseProjectScopeAccesses
+      .filter((access) => enterpriseProjectHasPermission(
+        access,
+        ENTERPRISE_WORK_ITEM_READ_PERMISSIONS,
+      ) && projectTeamIds.get(access.projectId)?.size === 1 &&
+        projectTeamIds.get(access.projectId)?.has(access.teamId) === true)
+      .map((access) => access.projectId),
+  )
+  const enterpriseFullyAccessibleWorkItemTeamIds = new Set(
+    directory.teams
+      .filter((team) => enterpriseWorkItemReadableTeamIds.has(team.id))
+      .map((team) => team.id),
+  )
+  const enterprisePlanningWorkspaceReadable = enterpriseEvaluation
+    ? ENTERPRISE_PLANNING_READ_PERMISSIONS.some((permission) =>
+        evaluateEnterpriseAccess({
+          permission,
+          principal: enterpriseEvaluation.principal,
+          assignments: enterpriseEvaluation.assignments,
+          customRoles: enterpriseEvaluation.snapshot.customRoles,
+          groupMappings: enterpriseEvaluation.groupMappings,
+          resource: { workspaceId: principal.directoryId, kind: 'workspace' },
+        }).allowed
+      )
+    : false
+  const enterprisePlanningWorkspaceWritable = enterpriseEvaluation
+    ? ENTERPRISE_PLANNING_WRITE_PERMISSIONS.some((permission) =>
+        evaluateEnterpriseAccess({
+          permission,
+          principal: enterpriseEvaluation.principal,
+          assignments: enterpriseEvaluation.assignments,
+          customRoles: enterpriseEvaluation.snapshot.customRoles,
+          groupMappings: enterpriseEvaluation.groupMappings,
+          resource: { workspaceId: principal.directoryId, kind: 'workspace' },
+        }).allowed
+      )
+    : false
   const accessibleProjectIds = new Set(
     projectAccesses
       .filter((access) =>
@@ -25340,7 +25604,6 @@ async function createNotificationVisibilityFilter(
         writablePlanningTeamIds.add(teamAccess.teamId)
       }
     }
-    const enterpriseEvaluation = principal.enterpriseAuthorizationEvaluation
     if (principal.enterprisePermissions !== undefined && enterpriseEvaluation) {
       for (const team of directory.teams) {
         for (const project of team.projects) {
@@ -25386,6 +25649,30 @@ async function createNotificationVisibilityFilter(
       )
       .map((team) => team.id),
   )
+  const planningReadableProjectScopeKeys = isEnterpriseContentPrincipal
+    ? enterprisePlanningReadableProjectScopeKeys
+    : accessibleProjectScopeKeys
+  const planningWritableProjectScopeKeys = isEnterpriseContentPrincipal
+    ? enterprisePlanningWritableProjectScopeKeys
+    : writableProjectScopeKeys
+  const planningReadableTeamIds = isEnterpriseContentPrincipal
+    ? enterprisePlanningReadableTeamIds
+    : accessiblePlanningTeamIds
+  const planningWritableTeamIds = isEnterpriseContentPrincipal
+    ? enterprisePlanningWritableTeamIds
+    : writablePlanningTeamIds
+  const workItemReadableProjectScopeKeys = isEnterpriseContentPrincipal
+    ? enterpriseWorkItemReadableProjectScopeKeys
+    : new Set(accessibleProjectScopeKeys)
+  const workItemReadableProjectIds = isEnterpriseContentPrincipal
+    ? enterpriseWorkItemReadableProjectIds
+    : accessibleProjectIds
+  const workItemReadableTeamIds = isEnterpriseContentPrincipal
+    ? enterpriseWorkItemReadableTeamIds
+    : accessibleTeamIds
+  const fullyAccessibleWorkItemTeamIds = isEnterpriseContentPrincipal
+    ? enterpriseFullyAccessibleWorkItemTeamIds
+    : fullyAccessibleTeamIds
   const workItemScopes = new Map<string, Promise<{
     assigneeMemberKey?: string
     exists: boolean
@@ -25441,7 +25728,7 @@ async function createNotificationVisibilityFilter(
         currentPlanningScope.projectId &&
         (
           !currentPlanningScope.teamId ||
-          !accessibleProjectScopeKeys.has(
+          !planningReadableProjectScopeKeys.has(
             `${currentPlanningScope.teamId}\0${currentPlanningScope.projectId}`,
           )
         )
@@ -25451,23 +25738,36 @@ async function createNotificationVisibilityFilter(
       if (
         currentPlanningScope.teamId &&
         !currentPlanningScope.projectId &&
-        !accessiblePlanningTeamIds.has(currentPlanningScope.teamId)
+        !planningReadableTeamIds.has(currentPlanningScope.teamId)
       ) {
         return false
       }
       const directScopeVisible = currentPlanningScope.projectId
         ? (currentPlanningScope.notificationKind === 'escalation'
-            ? accessibleProjectScopeKeys
-            : writableProjectScopeKeys
+            ? planningReadableProjectScopeKeys
+            : planningWritableProjectScopeKeys
           ).has(
             `${currentPlanningScope.teamId ?? ''}\0${currentPlanningScope.projectId}`,
           )
         : currentPlanningScope.teamId
           ? (currentPlanningScope.notificationKind === 'escalation'
-              ? accessiblePlanningTeamIds
-              : writablePlanningTeamIds
+              ? planningReadableTeamIds
+              : planningWritableTeamIds
             ).has(currentPlanningScope.teamId)
-          : principal.workspaceRole !== 'guest'
+          : isEnterpriseContentPrincipal
+            ? currentPlanningScope.notificationKind === 'escalation'
+              ? enterprisePlanningWorkspaceReadable
+              : enterprisePlanningWorkspaceWritable
+            : principal.workspaceRole !== 'guest'
+      const watcherScopeVisible = currentPlanningScope.projectId
+        ? planningReadableProjectScopeKeys.has(
+            (currentPlanningScope.teamId ?? '') + '\0' + currentPlanningScope.projectId,
+          )
+        : currentPlanningScope.teamId
+          ? planningReadableTeamIds.has(currentPlanningScope.teamId)
+          : isEnterpriseContentPrincipal
+            ? enterprisePlanningWorkspaceReadable
+            : principal.workspaceRole !== 'guest'
       const directRecipientVisible =
         currentPlanningScope.currentRecipientMatches &&
         notification.reasons.includes(currentPlanningScope.notificationKind) &&
@@ -25493,7 +25793,11 @@ async function createNotificationVisibilityFilter(
           break
         }
       }
-      if (!directRecipientVisible && !currentWatcherVisible) return false
+      if (
+        (!directScopeVisible && !currentWatcherVisible) ||
+        (currentWatcherVisible && !watcherScopeVisible) ||
+        (!directRecipientVisible && !currentWatcherVisible)
+      ) return false
       if (currentPlanningScope.teamId) {
         notification.teamId = currentPlanningScope.teamId
       } else {
@@ -25525,6 +25829,7 @@ async function createNotificationVisibilityFilter(
         documentVisibilities.set(notification.entityId, visibility)
       }
       if (!await visibility) return false
+      return true
     }
     if (notification.teamId && notification.triageEntryId) {
       const scopeKey = `${notification.teamId}\0${notification.triageEntryId}`
@@ -25569,15 +25874,21 @@ async function createNotificationVisibilityFilter(
       }
       if (currentScope.projectId) {
         notification.projectId = currentScope.projectId
+        if (projectTeamIds.get(currentScope.projectId)?.has(notification.teamId) !== true) {
+          return false
+        }
         if (
-          projectTeamIds.get(currentScope.projectId)?.has(notification.teamId) !== true ||
-          !accessibleProjectIds.has(currentScope.projectId)
-        ) {
+          isEnterpriseContentPrincipal &&
+          !workItemReadableProjectScopeKeys.has(
+            `${notification.teamId}\0${currentScope.projectId}`,
+          )
+        ) return false
+        if (!isEnterpriseContentPrincipal && !accessibleProjectIds.has(currentScope.projectId)) {
           return false
         }
       } else {
         delete notification.projectId
-        if (!fullyAccessibleTeamIds.has(notification.teamId)) return false
+        if (!fullyAccessibleWorkItemTeamIds.has(notification.teamId)) return false
       }
     }
     if (notification.teamId && notification.issueId) {
@@ -25617,20 +25928,32 @@ async function createNotificationVisibilityFilter(
       }
       if (currentScope.projectId) {
         notification.projectId = currentScope.projectId
-        return projectTeamIds.get(currentScope.projectId)?.has(notification.teamId) === true &&
-          accessibleProjectIds.has(currentScope.projectId)
+        if (projectTeamIds.get(currentScope.projectId)?.has(notification.teamId) !== true) {
+          return false
+        }
+        return isEnterpriseContentPrincipal
+          ? workItemReadableProjectScopeKeys.has(
+              `${notification.teamId}\0${currentScope.projectId}`,
+            )
+          : accessibleProjectIds.has(currentScope.projectId)
       }
       delete notification.projectId
-      return activeTeamIds.has(notification.teamId) && accessibleTeamIds.has(notification.teamId)
+      return activeTeamIds.has(notification.teamId) && workItemReadableTeamIds.has(notification.teamId)
     }
     if (notification.projectId) {
       const teamIds = projectTeamIds.get(notification.projectId)
       return teamIds !== undefined &&
         (!notification.teamId || teamIds.has(notification.teamId)) &&
-        accessibleProjectIds.has(notification.projectId)
+        (isEnterpriseContentPrincipal
+          ? notification.teamId
+            ? workItemReadableProjectScopeKeys.has(
+                `${notification.teamId}\0${notification.projectId}`,
+              )
+            : workItemReadableProjectIds.has(notification.projectId)
+          : accessibleProjectIds.has(notification.projectId))
     }
     if (notification.teamId) {
-      return activeTeamIds.has(notification.teamId) && accessibleTeamIds.has(notification.teamId)
+      return activeTeamIds.has(notification.teamId) && workItemReadableTeamIds.has(notification.teamId)
     }
     return true
   }
@@ -34716,8 +35039,24 @@ async function resolveDeveloperCredentialPrincipal(
     directoryGroupIds,
     directoryGroupMemberships,
   } = directoryPrincipal
+  const needsProjectScopeQualification =
+    hasUnqualifiedEnterpriseProjectScope(compatibleRoleAssignments) ||
+    hasUnqualifiedEnterpriseProjectScope(compatibleGroupMappings)
+  const enterpriseDirectory = needsProjectScopeQualification
+    ? await workspaceDependencies.projectDirectory.getProjectDirectory(
+        credential.workspaceId,
+        'ja',
+        true,
+      )
+    : undefined
+  const qualifiedRoleAssignments = enterpriseDirectory
+    ? qualifyEnterpriseProjectScopes(compatibleRoleAssignments, enterpriseDirectory)
+    : compatibleRoleAssignments
+  const qualifiedGroupMappings = enterpriseDirectory
+    ? qualifyEnterpriseProjectScopes(compatibleGroupMappings, enterpriseDirectory)
+    : compatibleGroupMappings
   const suppressLegacyWorkspaceRole = directoryPrincipal.directoryManaged ||
-    compatibleRoleAssignments.some((assignment) =>
+    qualifiedRoleAssignments.some((assignment) =>
       assignment.principalKind === 'member' &&
         assignment.principalId === member.memberKey ||
       assignment.principalKind === 'directory-group' &&
@@ -34726,7 +35065,7 @@ async function resolveDeveloperCredentialPrincipal(
           directoryGroupIds.includes(assignment.principalId)
         )
     ) ||
-    compatibleGroupMappings.some((mapping) => mapping.enabled)
+    qualifiedGroupMappings.some((mapping) => mapping.enabled)
   const enterprisePrincipal = {
     kind: 'member',
     principalId: member.memberKey,
@@ -34750,8 +35089,8 @@ async function resolveDeveloperCredentialPrincipal(
   const enterpriseAuthorizationEvaluation = {
     principal: enterprisePrincipal,
     snapshot,
-    assignments: compatibleRoleAssignments,
-    groupMappings: compatibleGroupMappings,
+    assignments: qualifiedRoleAssignments,
+    groupMappings: qualifiedGroupMappings,
   } satisfies EnterpriseAuthorizationEvaluationSnapshot
   const resource = resolveDeveloperAuthorizationResource(
     credential.workspaceId,
@@ -34769,6 +35108,7 @@ async function resolveDeveloperCredentialPrincipal(
         grantedRoutePermissions: [],
         authorizedAtResource: false,
         projectAccesses: [],
+        projectScopeAccesses: [],
         authorizedTeamIds: [],
         teamAccesses: [],
       }
@@ -34804,6 +35144,7 @@ async function resolveDeveloperCredentialPrincipal(
     enterpriseGrantedRoutePermissions: requestAccess.grantedRoutePermissions,
     enterpriseRouteAuthorizedAtResource: requestAccess.authorizedAtResource,
     enterpriseProjectAccesses: requestAccess.projectAccesses,
+    enterpriseProjectScopeAccesses: requestAccess.projectScopeAccesses,
     enterpriseAuthorizedTeamIds: requestAccess.authorizedTeamIds,
     enterpriseTeamAccesses: requestAccess.teamAccesses,
     enterpriseLegacyProjectAccessSuppressed: suppressLegacyWorkspaceRole,

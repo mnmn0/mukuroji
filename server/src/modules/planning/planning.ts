@@ -3093,7 +3093,7 @@ function readPlanningUpdateCadence(value: unknown): PlanningUpdateCadence {
     )
   }
   const timeZone = readPlanningTimeZone(value.timeZone)
-  const rawNextDueAt = readTimestamp(value.nextDueAt, 'Planning update next due timestamp')
+  const rawNextDueAt = readPlanningUpdateNextDueAt(value.nextDueAt)
   const nextDueAt = new Date(Date.parse(rawNextDueAt)).toISOString()
   const reminderHoursBefore = readPlanningUpdateHourOffset(
     value.reminderHoursBefore,
@@ -3123,6 +3123,25 @@ function readPlanningUpdateCadence(value: unknown): PlanningUpdateCadence {
         }
       : {}),
   }
+}
+
+/**
+ * Validates a cadence deadline with an explicit timezone offset.
+ *
+ * @param value - Untrusted cadence deadline candidate.
+ * @returns The original timestamp after offset validation.
+ */
+function readPlanningUpdateNextDueAt(value: unknown) {
+  const timestamp = readTimestamp(value, 'Planning update next due timestamp')
+  if (
+    !/T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/u.test(timestamp)
+  ) {
+    throw invalid(
+      'PlanningUpdateCadenceInvalid',
+      'Planning update next due timestamp must include an explicit timezone offset.',
+    )
+  }
+  return timestamp
 }
 
 /**

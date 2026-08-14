@@ -1886,6 +1886,24 @@ describe('planning domain', () => {
 })
 
 describe('planning structured updates', () => {
+  test('rejects cadence deadlines without an explicit timezone offset', async () => {
+    const client = new InMemoryPlanningClient(() => NOW)
+
+    await expect(client.configureUpdateCadence('workspace-1', {
+      target: { type: 'project', teamId: 'team-1', projectId: 'project-1' },
+      cadence: {
+        updateOwnerMemberKey: 'owner@example.com',
+        cadence: { unit: 'week', count: 1 },
+        timeZone: 'UTC',
+        nextDueAt: '2026-03-01T15:00:00',
+        reminderHoursBefore: 24,
+      },
+      expectedRevision: 0,
+    }, EMPTY_WORK_ITEMS)).rejects.toMatchObject({
+      code: 'PlanningUpdateCadenceInvalid',
+    })
+  })
+
   test('keeps freshness separate from health and advances weekly cadence through DST', async () => {
     let current = new Date('2026-02-28T12:00:00.000Z')
     const client = new InMemoryPlanningClient(() => current)

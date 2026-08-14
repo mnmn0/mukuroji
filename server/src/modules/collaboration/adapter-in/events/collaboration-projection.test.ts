@@ -1243,12 +1243,14 @@ describe('collaboration projection pure helpers', () => {
       'MEMBER@example.com',
       'member',
       snapshot,
+      'core',
     )).toBe(true)
     expect(hasEligibleEnterpriseNotificationAccess(
       event,
       'other@example.com',
       'member',
       snapshot,
+      'core',
     )).toBe(false)
   })
 
@@ -1295,6 +1297,7 @@ describe('collaboration projection pure helpers', () => {
       'member@example.com',
       'member',
       snapshot,
+      'core',
     )).toEqual({ authoritative: true, allowed: false })
   })
 
@@ -1489,6 +1492,7 @@ describe('collaboration projection pure helpers', () => {
       legacyWriteAllowed: false,
       teamId: 'core',
       projectId: 'platform',
+      projectScopeOwnerTeamId: 'core',
     })
 
     expect(access).toMatchObject({
@@ -1547,6 +1551,7 @@ describe('collaboration projection pure helpers', () => {
       legacyWriteAllowed: true,
       teamId: 'core',
       projectId: 'platform',
+      projectScopeOwnerTeamId: 'core',
     })
     expect(unqualifiedCognitoMappingAccess).toMatchObject({
       allowed: true,
@@ -1572,6 +1577,7 @@ describe('collaboration projection pure helpers', () => {
       legacyWriteAllowed: true,
       teamId: 'core',
       projectId: 'platform',
+      projectScopeOwnerTeamId: 'core',
     })
     expect(mismatchedProviderAccess).toMatchObject({
       allowed: false,
@@ -1609,6 +1615,7 @@ describe('collaboration projection pure helpers', () => {
       legacyWriteAllowed: false,
       teamId: 'core',
       projectId: 'platform',
+      projectScopeOwnerTeamId: 'core',
     })
     expect(directMemberAssignmentAccess).toMatchObject({
       allowed: true,
@@ -1642,6 +1649,7 @@ describe('collaboration projection pure helpers', () => {
       legacyWriteAllowed: false,
       teamId: 'core',
       projectId: 'platform',
+      projectScopeOwnerTeamId: 'core',
     })
     expect(directGroupAssignmentAccess).toMatchObject({
       allowed: true,
@@ -1671,6 +1679,7 @@ describe('collaboration projection pure helpers', () => {
       legacyWriteAllowed: false,
       teamId: 'core',
       projectId: 'platform',
+      projectScopeOwnerTeamId: 'core',
     })
     expect(projectScopedAccess).toMatchObject({
       allowed: true,
@@ -1883,6 +1892,7 @@ describe('collaboration projection pure helpers', () => {
       legacyWriteAllowed: true,
       teamId: 'core',
       projectId: 'platform',
+      projectScopeOwnerTeamId: 'core',
     } satisfies EvaluateRealtimeEnterpriseAccessInput
 
     expect(evaluateRealtimeEnterpriseAccess(baseInput)).toMatchObject({
