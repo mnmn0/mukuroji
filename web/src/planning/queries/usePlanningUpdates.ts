@@ -21,7 +21,6 @@ const planningUpdateQueryConfig = {
   shouldRetryOnError: false,
 } as const
 
-const planningUpdateAnnotationVersionLimit = 20
 const planningUpdateAnnotationPageSize = 100
 const planningUpdateAnnotationInFlightCacheLimit = 100
 
@@ -276,10 +275,10 @@ function deduplicatePlanningUpdateReactions(
 }
 
 /**
- * Selects only the newest distinct update versions used by the annotation preview.
+ * Selects every distinct update version used by the displayed annotation preview.
  *
  * @param updates - Visible immutable update history ordered newest first.
- * @returns At most one history page of distinct update versions.
+ * @returns Distinct update versions in their displayed newest-first order.
  */
 export function selectPlanningUpdateAnnotationVersions(
   updates: readonly Pick<PlanningUpdate, 'version'>[] | undefined,
@@ -290,20 +289,19 @@ export function selectPlanningUpdateAnnotationVersions(
     if (seenVersions.has(update.version)) continue
     seenVersions.add(update.version)
     versions.push(update.version)
-    if (versions.length === planningUpdateAnnotationVersionLimit) break
   }
   return versions
 }
 
 /**
- * Loads one bounded comment and reaction preview page for each newest update version.
+ * Loads comment and reaction preview pages for each displayed update version.
  *
  * @param accessToken - Planning API access token.
  * @param target - Selected Planning update target.
  * @param updateVersions - Immutable update versions ordered newest first.
  * @param loadComments - Comment page loader overridden by focused tests.
  * @param loadReactions - Reaction page loader overridden by focused tests.
- * @returns Flattened annotations for at most twenty update versions.
+ * @returns Flattened annotations for every provided update version.
  */
 export async function loadBoundedPlanningUpdateAnnotations(
   accessToken: string,
@@ -314,7 +312,6 @@ export async function loadBoundedPlanningUpdateAnnotations(
 ): Promise<PlanningUpdateAnnotations> {
   const pages = await Promise.all(
     updateVersions
-      .slice(0, planningUpdateAnnotationVersionLimit)
       .map(async (updateVersion) => {
         const [comments, reactions] = await Promise.all([
           loadAllPlanningUpdateAnnotationItems((cursor) =>
@@ -393,12 +390,12 @@ export async function hasPlanningUpdateViewerReaction(
 }
 
 /**
- * Loads the bounded annotation preview while reusing one cache entry per target/version.
+ * Loads the annotation preview while reusing one cache entry per target/version.
  *
  * @param accessToken - Planning API access token.
  * @param target - Selected Planning update target.
  * @param updateVersions - Immutable update versions ordered newest first.
- * @returns Flattened annotations for the newest distinct versions.
+ * @returns Flattened annotations for every provided update version.
  */
 async function loadCachedPlanningUpdateAnnotations(
   accessToken: string,
@@ -407,7 +404,6 @@ async function loadCachedPlanningUpdateAnnotations(
 ): Promise<PlanningUpdateAnnotations> {
   const pages = await Promise.all(
     updateVersions
-      .slice(0, planningUpdateAnnotationVersionLimit)
       .map((updateVersion) => loadCachedPlanningUpdateAnnotationPage(
         accessToken,
         target,
@@ -518,7 +514,7 @@ function invalidatePlanningUpdateAnnotationPageCache(
   target: PlanningUpdateTarget,
   updateVersions: readonly number[],
 ): void {
-  for (const updateVersion of updateVersions.slice(0, planningUpdateAnnotationVersionLimit)) {
+  for (const updateVersion of updateVersions) {
     planningUpdateAnnotationPageCache.delete(
       createPlanningUpdateAnnotationPageCacheKey(accessToken, target, updateVersion),
     )

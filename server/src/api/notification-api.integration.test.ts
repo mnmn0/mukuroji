@@ -523,8 +523,8 @@ test('revalidates current Planning cadence, recipient, occurrence, kind, and Pro
   configureFakeProjectClients(true, {
     workspaceRole: 'member',
     projectAccesses: [
-      { projectId: 'refero', role: 'viewer' },
-      { projectId: 'handoff', role: 'viewer' },
+      { projectId: 'refero', role: 'member' },
+      { projectId: 'handoff', role: 'member' },
     ],
     teamProjects: [
       { id: 'refero', name: 'Refero', tone: 'blue' },
@@ -641,13 +641,64 @@ test('revalidates current Planning cadence, recipient, occurrence, kind, and Pro
   })
 })
 
+test('hides stored Planning reminders and overdue notifications after a viewer downgrade', async () => {
+  configureFakeProjectClients(true, {
+    workspaceRole: 'member',
+    projectAccesses: [{ teamId: 'core-team', projectId: 'refero', role: 'viewer' }],
+  })
+  const planning = getTestAppDependencies().workItems.planning
+  const nextDueAt = '2026-08-10T00:00:00.000Z'
+  await planning.configureUpdateCadence('user#demo@example.com', {
+    target: { type: 'project', teamId: 'core-team', projectId: 'refero' },
+    cadence: {
+      updateOwnerMemberKey: 'demo@example.com',
+      cadence: { unit: 'week', count: 1 },
+      timeZone: 'UTC',
+      nextDueAt,
+      reminderHoursBefore: 24,
+    },
+    expectedRevision: 0,
+  }, { workItems: [] })
+  const reminder = createNotificationItem({
+    id: 'planning-downgraded-reminder',
+    eventType: 'planning-update.reminder',
+    reasons: ['reminder'],
+    issueId: undefined,
+    planningTargetType: 'project',
+    planningTargetId: 'refero',
+    planningTargetRecordKey: 'UPDATE_TARGET#PROJECT#core-team#refero',
+    planningNextDueAt: nextDueAt,
+    planningNotificationKind: 'reminder',
+  })
+  const overdue = createNotificationItem({
+    ...reminder,
+    id: 'planning-downgraded-overdue',
+    eventType: 'planning-update.overdue',
+    reasons: ['overdue'],
+    planningNotificationKind: 'overdue',
+  })
+  const probe = createNotificationVisibilityProbe([reminder, overdue])
+  setTestAppDependencies({ notifications: probe.client })
+
+  const response = await app.request('/api/notifications', {
+    headers: { Authorization: 'Bearer test-token' },
+  })
+
+  expect(response.status).toBe(200)
+  expect(probe.visibility).toEqual(new Map([
+    [reminder.id, false],
+    [overdue.id, false],
+  ]))
+  expect(await response.json()).toMatchObject({ notifications: [], unreadCount: 0 })
+})
+
 test('denies a Team-qualified Planning Project notification for an inaccessible duplicate ID', async () => {
   configureFakeProjectClients(true, {
     workspaceRole: 'member',
     projectAccesses: [{
       teamId: 'core-team',
       projectId: 'shared-launch',
-      role: 'viewer',
+      role: 'member',
     }],
     teamProjects: [{ id: 'shared-launch', name: 'Shared launch', tone: 'green' }],
     additionalTeams: [{
@@ -712,7 +763,7 @@ test('denies a Team-scoped Initiative notification through a duplicate Project I
     projectAccesses: [{
       teamId: 'core-team',
       projectId: 'shared-launch',
-      role: 'viewer',
+      role: 'member',
     }],
     teamProjects: [{ id: 'shared-launch', name: 'Shared launch', tone: 'green' }],
     additionalTeams: [{

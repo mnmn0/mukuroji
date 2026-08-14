@@ -18,7 +18,7 @@ describe('Planning update query coordination', () => {
     )).toBe(true)
   })
 
-  test('selects at most the newest twenty distinct update versions', () => {
+  test('selects every distinct displayed update version', () => {
     const updates = [
       { version: 25 },
       { version: 25 },
@@ -26,7 +26,7 @@ describe('Planning update query coordination', () => {
     ]
 
     expect(selectPlanningUpdateAnnotationVersions(updates)).toEqual(
-      Array.from({ length: 20 }, (_, index) => 25 - index),
+      Array.from({ length: 25 }, (_, index) => 25 - index),
     )
   })
 
@@ -48,7 +48,7 @@ describe('Planning update query coordination', () => {
     expect(deduplicatePlanningUpdateComments(comments)).toEqual(comments)
   })
 
-  test('follows annotation cursors for twenty versions', async () => {
+  test('follows annotation cursors for every displayed version', async () => {
     const target = {
       type: 'project',
       projectId: 'refero',
@@ -93,22 +93,22 @@ describe('Planning update query coordination', () => {
       },
     )
 
-    expect(commentRequests).toHaveLength(40)
-    expect(reactionRequests).toHaveLength(40)
+    expect(commentRequests).toHaveLength(50)
+    expect(reactionRequests).toHaveLength(50)
     expect(commentRequests.map(({ updateVersion }) => updateVersion)).toEqual(
-      [...versions.slice(0, 20), ...versions.slice(0, 20)],
+      [...versions, ...versions],
     )
     expect(reactionRequests.map(({ updateVersion }) => updateVersion)).toEqual(
-      [...versions.slice(0, 20), ...versions.slice(0, 20)],
+      [...versions, ...versions],
     )
-    expect(commentRequests.filter(({ cursor }) => cursor === undefined)).toHaveLength(20)
-    expect(commentRequests.filter(({ cursor }) => cursor !== undefined)).toHaveLength(20)
-    expect(reactionRequests.filter(({ cursor }) => cursor === undefined)).toHaveLength(20)
-    expect(reactionRequests.filter(({ cursor }) => cursor !== undefined)).toHaveLength(20)
+    expect(commentRequests.filter(({ cursor }) => cursor === undefined)).toHaveLength(25)
+    expect(commentRequests.filter(({ cursor }) => cursor !== undefined)).toHaveLength(25)
+    expect(reactionRequests.filter(({ cursor }) => cursor === undefined)).toHaveLength(25)
+    expect(reactionRequests.filter(({ cursor }) => cursor !== undefined)).toHaveLength(25)
     expect(commentRequests.every(({ limit }) => limit === 100)).toBe(true)
     expect(reactionRequests.every(({ limit }) => limit === 100)).toBe(true)
-    expect(annotations.comments).toHaveLength(40)
-    expect(annotations.reactions).toHaveLength(40)
+    expect(annotations.comments).toHaveLength(50)
+    expect(annotations.reactions).toHaveLength(50)
   })
 
   test('follows reaction pages until the viewer reaction is found', async () => {

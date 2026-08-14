@@ -16,9 +16,11 @@ const {
 import {
   InMemoryPlanningClient,
 } from '../../planning'
+import { InMemoryEnterpriseIdentityClient } from '../../../enterprise-identity/enterprise-identity'
 import { createInMemoryDeveloperPlatformAdapters } from '../../../developer-platform/adapter-out/in-memory/developer-platform-adapters'
 import type { CompleteIdempotencyRequest } from '../../../developer-platform/application/ports'
 import type {
+  EnterpriseRoleAssignment,
   PlanningMutationResponse,
   PlanningSnapshot,
   PlanningUpdateTarget,
@@ -260,6 +262,46 @@ test('returns an authenticated empty Planning graph with accessible Work Item pr
       statusCategory: 'started',
     }),
   ])
+})
+
+test('filters legacy Planning update targets by their Team-qualified Project ACL', async () => {
+  configureFakeProjectClients(true, {
+    workspaceRole: 'member',
+    projectAccesses: [{ teamId: 'core-team', projectId: 'refero', role: 'viewer' }],
+    teamProjects: [
+      { id: 'refero', name: 'Refero', tone: 'blue' },
+      { id: 'private-project', name: 'Private', tone: 'purple' },
+    ],
+  })
+  const planning = new InMemoryPlanningClient()
+  const cadence = {
+    updateOwnerMemberKey: 'demo@example.com',
+    cadence: { unit: 'week' as const, count: 1 },
+    timeZone: 'UTC',
+    nextDueAt: '2026-08-10T00:00:00.000Z',
+    reminderHoursBefore: 24,
+  }
+  await planning.configureUpdateCadence('user#demo@example.com', {
+    target: { type: 'project', teamId: 'core-team', projectId: 'refero' },
+    cadence,
+    expectedRevision: 0,
+  }, { workItems: [] })
+  await planning.configureUpdateCadence('user#demo@example.com', {
+    target: { type: 'project', teamId: 'core-team', projectId: 'private-project' },
+    cadence,
+    expectedRevision: 1,
+  }, { workItems: [] })
+  setTestAppDependencies({ planning })
+
+  const response = await planningApiRequest('/api/planning')
+
+  expect(response.status).toBe(200)
+  const body: PlanningSnapshot = await response.json()
+  expect(body.updateTargets.map(({ target }) => target)).toEqual([{
+    type: 'project',
+    teamId: 'core-team',
+    projectId: 'refero',
+  }])
 })
 
 test('configures, publishes, pages, exports, and watches a qualified Project update', async () => {
@@ -857,6 +899,105 @@ test('rejects cadence recipients that cannot act in the current target scope', a
   })
   expect(escalationDenied.status).toBe(409)
   expect(await escalationDenied.json()).toMatchObject({
+    code: 'PlanningUpdateRecipientAccessDenied',
+  })
+})
+
+test('uses the candidate Enterprise assignment when the configuring caller uses legacy ACLs', async () => {
+  configureFakeProjectClients(false, {
+    workspaceRole: 'owner',
+    projectAccesses: [],
+    systemAdminMemberKeys: ['demo@example.com'],
+  })
+  const identity = new InMemoryEnterpriseIdentityClient()
+  const assignment: EnterpriseRoleAssignment = {
+    workspaceId: 'user#demo@example.com',
+    assignmentId: 'candidate-project-member',
+    principalKind: 'member',
+    principalId: 'owner@example.com',
+    roleId: 'project:member',
+    scope: {
+      workspaceId: 'user#demo@example.com',
+      kind: 'project',
+      targetId: 'refero',
+    },
+    source: 'direct',
+  }
+  const readSnapshot = identity.getSnapshot.bind(identity)
+  identity.getSnapshot = async (workspaceId) => {
+    const snapshot = await readSnapshot(workspaceId)
+    return {
+      ...snapshot,
+      roleAssignments: [assignment],
+    }
+  }
+  setTestAppDependencies({
+    enterpriseIdentity: identity,
+    planning: new InMemoryPlanningClient(),
+  })
+
+  const response = await planningApiRequest('/api/planning/updates/cadence', 'PUT', {
+    target: { type: 'project', teamId: 'core-team', projectId: 'refero' },
+    cadence: {
+      updateOwnerMemberKey: 'owner@example.com',
+      cadence: { unit: 'week', count: 1 },
+      timeZone: 'UTC',
+      nextDueAt: '2026-08-10T00:00:00.000Z',
+      reminderHoursBefore: 24,
+    },
+    expectedRevision: 0,
+  })
+
+  expect(response.status).toBe(200)
+})
+
+test('does not fall back to legacy ACLs for an Enterprise-managed recipient', async () => {
+  configureFakeProjectClients(true, {
+    workspaceRole: 'owner',
+    projectAccesses: [{ teamId: 'core-team', projectId: 'refero', role: 'member' }],
+    systemAdminMemberKeys: ['demo@example.com'],
+  })
+  const identity = new InMemoryEnterpriseIdentityClient()
+  const assignment: EnterpriseRoleAssignment = {
+    workspaceId: 'user#demo@example.com',
+    assignmentId: 'candidate-project-viewer',
+    principalKind: 'member',
+    principalId: 'owner@example.com',
+    roleId: 'project:viewer',
+    scope: {
+      workspaceId: 'user#demo@example.com',
+      kind: 'project',
+      targetId: 'refero',
+    },
+    source: 'direct',
+  }
+  const readSnapshot = identity.getSnapshot.bind(identity)
+  identity.getSnapshot = async (workspaceId) => {
+    const snapshot = await readSnapshot(workspaceId)
+    return {
+      ...snapshot,
+      roleAssignments: [assignment],
+    }
+  }
+  setTestAppDependencies({
+    enterpriseIdentity: identity,
+    planning: new InMemoryPlanningClient(),
+  })
+
+  const response = await planningApiRequest('/api/planning/updates/cadence', 'PUT', {
+    target: { type: 'project', teamId: 'core-team', projectId: 'refero' },
+    cadence: {
+      updateOwnerMemberKey: 'owner@example.com',
+      cadence: { unit: 'week', count: 1 },
+      timeZone: 'UTC',
+      nextDueAt: '2026-08-10T00:00:00.000Z',
+      reminderHoursBefore: 24,
+    },
+    expectedRevision: 0,
+  })
+
+  expect(response.status).toBe(409)
+  expect(await response.json()).toMatchObject({
     code: 'PlanningUpdateRecipientAccessDenied',
   })
 })

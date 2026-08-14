@@ -278,10 +278,11 @@ export async function runNotificationSchedule(
     skippedItems: 0,
     scannedPages: 0,
   }
+  let workItemScannedPages = 0
   let exclusiveStartKey: Record<string, unknown> | undefined
 
   do {
-    if (result.scannedPages >= maxScanPages) {
+    if (workItemScannedPages >= maxScanPages) {
       throw new Error(
         `Notification schedule exceeded the configured ${maxScanPages} scan page limit.`,
       )
@@ -294,6 +295,7 @@ export async function runNotificationSchedule(
       ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
     }))
 
+    workItemScannedPages += 1
     result.scannedPages += 1
     result.scannedItems += response.ScannedCount ?? response.Items?.length ?? 0
 
@@ -394,11 +396,12 @@ async function queryDuePlanningUpdateTargets(
   const scopeCache = new Map<string, Promise<PlanningScheduledTargetScope>>()
   const activeProjectsByWorkspace = new Map<string, Promise<ReadonlySet<string>>>()
   const upperBound = createPlanningUpdateScheduleUpperBound(input.now.toISOString())
+  let planningScannedPages = 0
   for (let shardIndex = 0; shardIndex < PLANNING_UPDATE_SCHEDULE_SHARD_COUNT; shardIndex += 1) {
     const scheduleShard = createPlanningUpdateScheduleShardName(shardIndex)
     let exclusiveStartKey: Record<string, unknown> | undefined
     do {
-      if (input.result.scannedPages >= input.maxScanPages) {
+      if (planningScannedPages >= input.maxScanPages) {
         throw new Error(
           `Notification schedule exceeded the configured ${input.maxScanPages} Planning query page limit.`,
         )
@@ -416,6 +419,7 @@ async function queryDuePlanningUpdateTargets(
         ScanIndexForward: true,
         ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
       }))
+      planningScannedPages += 1
       input.result.scannedPages += 1
       input.result.scannedItems += response.ScannedCount ?? response.Items?.length ?? 0
 
@@ -468,7 +472,17 @@ async function queryDuePlanningUpdateTargets(
           )
           scopeCache.set(scopeCacheKey, scope)
         }
-        const currentScope = await scope
+        let currentScope: PlanningScheduledTargetScope
+        try {
+          currentScope = await scope
+        } catch (error) {
+          if (!(error instanceof TypeError)) throw error
+          console.error('Planning update schedule row is invalid.', {
+            requestId: input.options.requestId,
+            scheduleShard,
+          })
+          throw new Error('Planning update schedule row is invalid.', { cause: error })
+        }
         if (!currentScope.active) {
           await advancePlanningUpdateNotificationIndex(
             input,
@@ -1016,8 +1030,12 @@ async function readPlanningScheduledTargetScope(
     return { active: false }
   }
 
-  const teamId = readText(entity.teamId)
-  const projectId = readText(entity.projectId)
+  const teamId = entity.teamId === undefined
+    ? undefined
+    : requireText(entity.teamId, 'Planning Initiative Team scope')
+  const projectId = entity.projectId === undefined
+    ? undefined
+    : requireText(entity.projectId, 'Planning Initiative Project scope')
   if (projectId && !teamId) {
     throw new TypeError('Planning update Initiative Project scope requires a Team scope.')
   }

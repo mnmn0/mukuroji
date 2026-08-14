@@ -210,7 +210,7 @@ export function readPlanningEvidenceHttpsUrl(
   if (typeof value !== 'string' || !value.trim()) return undefined
   try {
     const parsed = new URL(value.trim())
-    return parsed.protocol === 'https:' && !parsed.username && !parsed.password
+    return parsed.protocol === 'https:' && !parsed.username && !parsed.password && !parsed.search
       ? parsed.toString()
       : undefined
   } catch {

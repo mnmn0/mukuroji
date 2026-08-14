@@ -115,6 +115,7 @@ describe('Planning update evidence composer', () => {
     expect(readPlanningEvidenceHttpsUrl('http://example.com/path')).toBeUndefined()
     expect(readPlanningEvidenceHttpsUrl('https://user@example.com/path')).toBeUndefined()
     expect(readPlanningEvidenceHttpsUrl('https://user:secret@example.com/path')).toBeUndefined()
+    expect(readPlanningEvidenceHttpsUrl('https://example.com/path?token=secret')).toBeUndefined()
   })
 
   test('keeps Team-only Initiative evidence outside Project-specific records', () => {

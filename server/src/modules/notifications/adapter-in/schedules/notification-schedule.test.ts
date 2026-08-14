@@ -546,7 +546,7 @@ describe('notification schedule handler', () => {
     ).rejects.toThrow('exceeded the configured 1 scan page limit')
   })
 
-  test('shares the page bound between Work Item scans and Planning queries', async () => {
+  test('gives Work Item scans and Planning queries independent page budgets', async () => {
     const recording = createRecordingDocumentClient((name) => {
       if (name === 'ScanCommand') return { Items: [] }
       return { Items: [] }
@@ -554,11 +554,12 @@ describe('notification schedule handler', () => {
 
     await expect(
       runNotificationSchedule(createRunOptions(recording.client, {
-        maxScanPages: 1,
+        maxScanPages: 16,
         planningTableName: 'PlanningTable',
       })),
-    ).rejects.toThrow('exceeded the configured 1 Planning query page limit')
-    expect(recording.commands.filter((command) => command.name === 'QueryCommand')).toHaveLength(0)
+    ).resolves.toMatchObject({ scannedPages: 17 })
+    expect(recording.commands.filter((command) => command.name === 'ScanCommand')).toHaveLength(1)
+    expect(recording.commands.filter((command) => command.name === 'QueryCommand')).toHaveLength(16)
   })
 
   test('decodes Planning update targets and derives reminder, overdue, and escalation stages', () => {
@@ -656,6 +657,40 @@ describe('notification schedule handler', () => {
           scheduleShard: validIndexItem.updateScheduleShard,
         },
       )
+    } finally {
+      errorLog.mockRestore()
+    }
+  })
+
+  test('rejects malformed Initiative scope fields before emitting notifications', async () => {
+    const initiativeRow = createPlanningInitiativeUpdateTarget()
+    const recording = createRecordingDocumentClient((name, input) => {
+      if (name === 'ScanCommand') return { Items: [] }
+      if (name === 'QueryCommand') {
+        return resolvePlanningDueIndexQuery(input, [initiativeRow]) ?? { Items: [] }
+      }
+      if (name === 'GetCommand') {
+        const target = resolvePlanningTargetGet(input, [initiativeRow])
+        if (target) return target
+        return {
+          Item: {
+            workspaceId: 'workspace-1',
+            recordKey: 'ENTITY#launch',
+            entryType: 'planning-entity',
+            type: 'initiative',
+            id: 'launch',
+            teamId: 123,
+          },
+        }
+      }
+      return {}
+    })
+    const errorLog = spyOn(console, 'error').mockImplementation(() => undefined)
+    try {
+      await expect(runNotificationSchedule(createRunOptions(recording.client, {
+        now: new Date('2026-07-11T10:00:00.000Z'),
+        planningTableName: 'PlanningTable',
+      }))).rejects.toThrow('Planning update schedule row is invalid.')
     } finally {
       errorLog.mockRestore()
     }
