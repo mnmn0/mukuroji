@@ -3105,6 +3105,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       mentionMemberKeys,
       undefined,
       input.automaticWatcherCandidates,
+      input.auditContext?.actor.kind === 'service',
     )
     const createdAuditPut = createMutationAuditEventPut(this.auditTableName, input.auditContext, {
       directoryId: input.workspaceId,
@@ -3305,6 +3306,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       mentionMemberKeys,
       undefined,
       input.automaticWatcherCandidates,
+      input.auditContext?.actor.kind === 'service',
     )
     const auditPut = createMutationAuditEventPut(this.auditTableName, input.auditContext, {
       directoryId: input.workspaceId,
@@ -3562,6 +3564,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       [],
       selected,
       undefined,
+      input.auditContext?.actor.kind === 'service',
     )
 
     try {
@@ -3691,6 +3694,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       mentionMemberKeys,
       parent,
       input.automaticWatcherCandidates,
+      input.auditContext?.actor.kind === 'service',
     )
     const auditPut = createMutationAuditEventPut(this.auditTableName, input.auditContext, {
       directoryId: input.workspaceId,
@@ -3786,6 +3790,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       mentionMemberKeys,
       undefined,
       input.automaticWatcherCandidates,
+      input.auditContext?.actor.kind === 'service',
     )
     await this.updateCommentSnapshot(
       input,
@@ -5637,11 +5642,22 @@ function autoWatcherUpdate(
   }
 }
 
+/**
+ * Builds deduplicated automatic watcher updates for a collaboration mutation.
+ *
+ * @param actorMemberKey - Member key of the mutation actor.
+ * @param mentionMemberKeys - Member keys mentioned by the mutation.
+ * @param parent - Parent comment, when the mutation is a reply.
+ * @param supplied - Additional watcher candidates supplied by the caller.
+ * @param actorIsService - Whether the actor is a non-member service identity.
+ * @returns Deduplicated watcher members with their accumulated reasons.
+ */
 function buildAutomaticWatcherCandidates(
   actorMemberKey: string,
   mentionMemberKeys: string[],
   parent: StoredComment | undefined,
   supplied: CollaborationAutomaticWatcherCandidate[] | undefined,
+  actorIsService: boolean,
 ) {
   const grouped = new Map<string, Set<CollaborationWatcherReason>>()
   const add = (memberKey: string, reason: CollaborationWatcherReason) => {
@@ -5651,7 +5667,9 @@ function buildAutomaticWatcherCandidates(
     grouped.set(normalizedMemberKey, reasons)
   }
 
-  add(actorMemberKey, 'comment')
+  if (!actorIsService) {
+    add(actorMemberKey, 'comment')
+  }
   for (const memberKey of mentionMemberKeys) {
     add(memberKey, 'mention')
   }

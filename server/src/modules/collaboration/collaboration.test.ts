@@ -986,6 +986,59 @@ test('seeds deduplicated automatic watchers when a comment is created', async ()
   expect(mentionedValues[':reasons']).toEqual(new Set(['mention']))
 })
 
+test('does not subscribe service actors as automatic watchers', async () => {
+  let transaction: Record<string, unknown> | undefined
+  const client = createClient(async (command) => {
+    const input = readCommandInput(command)
+    if ('TransactItems' in input) {
+      transaction = input
+      return {}
+    }
+    return { Items: [] }
+  })
+  const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
+
+  await client.createComment({
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'issue-1',
+    entityKey,
+    actorMemberKey: 'automation:rule-1',
+    bodyMarkdown: 'An automation comment.',
+    automaticWatcherCandidates: [
+      { memberKey: 'creator@example.com', reason: 'creator' },
+      { memberKey: 'assignee@example.com', reason: 'assignee' },
+    ],
+    auditContext: createMutationAuditContext({
+      workspaceId: 'workspace#one',
+      actor: { id: 'automation:rule-1', kind: 'service' },
+      idempotencyKey: 'service-comment',
+      occurredAt: '2026-07-12T00:00:00.000Z',
+      request: {
+        method: 'AUTOMATION',
+        path: '/automation/comments',
+        body: { bodyMarkdown: 'An automation comment.' },
+      },
+      source: { kind: 'system', requestId: 'service-comment' },
+    }),
+  })
+
+  const items = transaction?.TransactItems as Array<Record<string, unknown>>
+  const watcherKeys = items.flatMap((item) => {
+    const update = item.Update as Record<string, unknown> | undefined
+    const key = update?.Key as Record<string, unknown> | undefined
+    return update !== undefined && typeof key?.recordKey === 'string' &&
+        key.recordKey.startsWith('WATCHER#')
+      ? [key.recordKey]
+      : []
+  })
+  expect(watcherKeys.sort()).toEqual([
+    'WATCHER#assignee@example.com',
+    'WATCHER#creator@example.com',
+  ])
+  expect(watcherKeys).not.toContain('WATCHER#automation:rule-1')
+})
+
 test('binds comment, reaction, and Work Item watch transactions to the loaded project assignment', async () => {
   const transactions: Array<Record<string, unknown>> = []
   const client = createClient(async (command) => {
