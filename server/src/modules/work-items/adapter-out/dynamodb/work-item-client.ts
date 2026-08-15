@@ -59,7 +59,6 @@ import type {
 import {
   DynamoDBDocumentClient,
   GetCommand,
-  PutCommand,
   QueryCommand,
   TransactWriteCommand,
 } from '@aws-sdk/lib-dynamodb'
@@ -766,28 +765,6 @@ type PublicWorkItemPageCursor = {
 }
 
 /**
- * チーム Issue コメントレスポンスです。
- */
-export type TeamIssueCommentResponseItem = {
-  /**
-   * コメント ID です。
-   */
-  id: string
-  /**
-   * コメントした actor user key です。
-   */
-  actorUserId: string
-  /**
-   * コメント本文です。
-   */
-  body: string
-  /**
-   * 作成日時の ISO 8601 timestamp です。
-   */
-  createdAt: string
-}
-
-/**
  * チーム Issue 活動履歴レスポンスです。
  */
 type TeamIssueActivityResponseItem = {
@@ -1080,12 +1057,6 @@ export type UpdateTeamIssueRequestBody = PublicUpdateTeamIssueRequestBody & {
  * チーム Issue コメント作成 API が受け取る request body です。
  */
 export type CreateTeamIssueCommentRequestBody = {
-  /** Internal automation comment action が再配送間で固定する event ID です。 */
-  idempotencyEventId?: unknown
-  /**
-   * Internal Automation が送信する plain text コメント本文です。
-   */
-  body?: unknown
   /**
    * Markdown source として保存するコメント本文です。
    */
@@ -1148,20 +1119,6 @@ export type WorkItemScheduleCascadeResponse = {
   issues: TeamIssueResponseItem[]
   /** Compact schedule results safe to persist in the atomic replay receipt. */
   confirmedSchedules: ConfirmedWorkItemSchedule[]
-}
-
-/**
- * チーム Issue コメント作成 API が返す response body です。
- */
-export type CreateTeamIssueCommentResponse = {
-  /**
-   * 作成したコメントです。
-   */
-  comment: TeamIssueCommentResponseItem
-  /**
-   * コメント追加に対応する活動履歴です。
-   */
-  activity: TeamIssueActivityResponseItem
 }
 
 /**
@@ -1297,17 +1254,6 @@ export type TeamIssuesClient = {
     authorizationConditionChecks?: NonNullable<TransactWriteCommandInput['TransactItems']>,
     authorizationSnapshot?: WorkItemAuthorizationSnapshot,
   ): Promise<{ issue: TeamIssueResponseItem }>
-  /**
-   * DynamoDB に team issue コメントを追加します。
-   */
-  createTeamIssueComment(
-    directoryId: string,
-    teamId: string,
-    issueId: string,
-    input: CreateTeamIssueCommentRequestBody,
-    actorUserId: string,
-    auditContext?: MutationAuditContext,
-  ): Promise<CreateTeamIssueCommentResponse>
 }
 
 /** Team Issue detail の event 読み込み量と順序を制御します。 */
@@ -3063,133 +3009,6 @@ export class DynamoDbTeamIssuesClient {
     }
   }
 
-  /**
-   * DynamoDB に team issue コメントを追加します。
-   */
-  async createTeamIssueComment(
-    directoryId: string,
-    teamId: string,
-    issueId: string,
-    input: CreateTeamIssueCommentRequestBody,
-    actorUserId: string,
-    auditContext?: MutationAuditContext,
-  ) {
-    await this.ensureLocalTables()
-    await this.getRequiredTeamIssueItem(directoryId, teamId, issueId)
-
-    const createdAt = new Date().toISOString()
-    const body = readRequiredCommentBody(input.body)
-    const idempotencyEventId = readIdempotencyResourceId(input.idempotencyEventId)
-    const item = this.createIssueEventItem({
-      directoryId,
-      teamId,
-      issueId,
-      eventType: 'commented',
-      actorUserId,
-      body,
-      summary: 'Comment was added.',
-      createdAt,
-      ...(idempotencyEventId ? { eventId: idempotencyEventId } : {}),
-    })
-    const auditPut = createMutationAuditEventPut(this.auditTableName, auditContext, {
-      directoryId,
-      eventType: 'comment.created',
-      entityType: 'work-item',
-      entityId: createTeamIssueAuditEntityId(teamId, issueId),
-      target: {
-        type: 'comment',
-        id: createTeamIssueAuditCommentId(teamId, issueId, item.eventId),
-      },
-      action: 'commented',
-      occurredAt: createdAt,
-      changes: createAuditFieldChanges(undefined, { body }, ['body'], ['body']),
-      metadata: { adapter: 'team-issue', teamId, issueId, commentId: item.eventId },
-    })
-
-    try {
-      if (auditPut) {
-        await this.documentClient.send(
-          new TransactWriteCommand({
-            TransactItems: [
-              {
-                ConditionCheck: {
-                  TableName: this.issueTableName,
-                  Key: {
-                    directoryTeamId: createDirectoryTeamId(directoryId, teamId),
-                    issueId,
-                  },
-                  ConditionExpression: 'attribute_exists(directoryTeamId) AND attribute_exists(issueId)',
-                },
-              },
-              {
-                Put: {
-                  TableName: this.eventTableName,
-                  Item: item,
-                  ConditionExpression:
-                    'attribute_not_exists(directoryTeamIssueId) AND attribute_not_exists(eventId)',
-                },
-              },
-              auditPut,
-            ],
-          }),
-        )
-      } else {
-        await this.documentClient.send(
-          new PutCommand({
-            TableName: this.eventTableName,
-            Item: item,
-            ConditionExpression:
-              'attribute_not_exists(directoryTeamIssueId) AND attribute_not_exists(eventId)',
-          }),
-        )
-      }
-    } catch (error) {
-      if (
-        idempotencyEventId &&
-        (
-          isAwsNamedError(error, 'ConditionalCheckFailedException') ||
-          hasTransactionConditionalFailure(error)
-        )
-      ) {
-        const existing = await this.documentClient.send(new GetCommand({
-          TableName: this.eventTableName,
-          Key: {
-            directoryTeamIssueId: createDirectoryTeamIssueId(directoryId, teamId, issueId),
-            eventId: idempotencyEventId,
-          },
-          ConsistentRead: true,
-        }))
-        if (
-          isTeamIssueEventItem(existing.Item) &&
-          existing.Item.eventType === 'commented' &&
-          existing.Item.actorUserId === actorUserId &&
-          existing.Item.body === body
-        ) {
-          return toCreateTeamIssueCommentResponse(existing.Item)
-        }
-      }
-      if (isTransactionConditionalFailureAt(error, 0)) {
-        if (!await this.hasTeamIssueItem(directoryId, teamId, issueId)) {
-          throw new ProjectDataError(404, 'TeamIssueNotFound', 'Issue was not found.')
-        }
-
-        throw createProjectDataConflictError()
-      }
-
-      if (hasTransactionConditionalFailure(error)) {
-        throw createProjectDataConflictError()
-      }
-
-      if (error instanceof ProjectDataError) {
-        throw error
-      }
-
-      throw toProjectDataError(error)
-    }
-
-    return toCreateTeamIssueCommentResponse(item)
-  }
-
   private async hasTeamIssueItem(directoryId: string, teamId: string, issueId: string) {
     try {
       await this.getRequiredTeamIssueItem(directoryId, teamId, issueId, true)
@@ -3973,15 +3792,6 @@ export function toTeamIssueResponseItem(value: unknown): TeamIssueResponseItem {
   return issue
 }
 
-function toTeamIssueCommentResponseItem(value: TeamIssueEventItem): TeamIssueCommentResponseItem {
-  return {
-    id: value.eventId,
-    actorUserId: value.actorUserId,
-    body: value.body ?? '',
-    createdAt: value.createdAt,
-  }
-}
-
 function toTeamIssueActivityResponseItem(value: TeamIssueEventItem): TeamIssueActivityResponseItem {
   return {
     id: value.eventId,
@@ -3989,15 +3799,6 @@ function toTeamIssueActivityResponseItem(value: TeamIssueEventItem): TeamIssueAc
     actorUserId: value.actorUserId,
     summary: value.summary,
     createdAt: value.createdAt,
-  }
-}
-
-function toCreateTeamIssueCommentResponse(
-  value: TeamIssueEventItem,
-): CreateTeamIssueCommentResponse {
-  return {
-    comment: toTeamIssueCommentResponseItem(value),
-    activity: toTeamIssueActivityResponseItem(value),
   }
 }
 
@@ -4799,13 +4600,6 @@ function createWorkItemNotificationSummary(before: TeamIssueItem, after: TeamIss
   }
 
   return 'Work Item was updated.'
-}
-
-/**
- * Team Issue comment を Workspace 内で一意な audit target ID に変換します。
- */
-function createTeamIssueAuditCommentId(teamId: string, issueId: string, commentId: string) {
-  return `${createTeamIssueAuditEntityId(teamId, issueId)}/comment/${commentId}`
 }
 
 function createTeamIssueEventId(createdAt: string, eventType: TeamIssueActivityType) {

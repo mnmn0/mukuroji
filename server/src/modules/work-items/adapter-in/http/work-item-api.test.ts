@@ -1010,10 +1010,10 @@ test('loads team issue detail and creates comments after team access is confirme
   })
 
   expect(commentResponse.status).toBe(201)
-  expect(await commentResponse.json()).toMatchObject({
+  const commentResponseBody = await commentResponse.json()
+  expect(commentResponseBody).toMatchObject({
     comment: {
       id: 'comment-2',
-      source: 'collaboration',
       authorMemberKey: 'demo@example.com',
       bodyMarkdown: '追加コメント',
       version: 1,
@@ -1026,6 +1026,7 @@ test('loads team issue detail and creates comments after team access is confirme
       createdAt: '2026-06-08T02:00:00.000Z',
     },
   })
+  expect(commentResponseBody.comment).not.toHaveProperty('source')
   expect(calls.issueDetails).toEqual([
     {
       directoryId: 'user#demo@example.com',
@@ -1040,7 +1041,6 @@ test('loads team issue detail and creates comments after team access is confirme
       readOptions: { consistentIssueRead: true, eventLimit: 0 },
     },
   ])
-  expect(calls.issueComments).toEqual([])
   expect(collaborationCreates).toHaveLength(1)
   expect(collaborationCreates[0]).toMatchObject({
     actorMemberKey: 'demo@example.com',
@@ -1275,13 +1275,19 @@ test('returns persisted collaboration comments and reply cursors', async () => {
   })
 
   expect(response.status).toBe(200)
-  expect(await response.json()).toMatchObject({
+  const responseBody = await response.json()
+  expect(responseBody).toMatchObject({
     comments: [
-      { id: 'stored-root', source: 'collaboration' },
-      { id: 'stored-reply', source: 'collaboration' },
+      { id: 'stored-root' },
+      { id: 'stored-reply' },
     ],
     replyNextCursors: { 'stored-root': 'older-replies' },
   })
+  expect(responseBody.comments).toEqual(
+    expect.not.arrayContaining([
+      expect.objectContaining({ source: expect.anything() }),
+    ]),
+  )
   expect(threadInputs).toHaveLength(2)
   expect(threadInputs[0]?.rootCommentId).toBeUndefined()
   expect(threadInputs[0]?.limit).toBe(10)
@@ -1299,6 +1305,60 @@ test('returns persisted collaboration comments and reply cursors', async () => {
       eventLimit: 0,
     },
   }])
+})
+
+test('serves one requested reply page without refetching reply roots', async () => {
+  configureFakeProjectClients(true)
+  const threadInputs: Parameters<CollaborationClient['getThread']>[0][] = []
+  setTestAppDependencies({
+    collaboration: createCollaborationStub({
+      async getThread(input) {
+        threadInputs.push(input)
+        return {
+          comments: [{
+            id: 'stored-reply-page',
+            rootCommentId: input.rootCommentId ?? 'stored-root',
+            parentCommentId: input.rootCommentId ?? 'stored-root',
+            authorMemberKey: 'sato@example.com',
+            bodyMarkdown: 'Persisted reply page',
+            version: 1,
+            mentionMemberKeys: [],
+            createdAt: '2026-07-12T00:01:00.000Z',
+            updatedAt: '2026-07-12T00:01:00.000Z',
+            acceptedResolutions: [],
+            reactions: [],
+          }],
+          nextCursor: 'older-replies',
+          watch: {
+            subscribed: true,
+            explicit: true,
+            automatic: false,
+            reasons: ['manual'],
+            watcherCount: 2,
+          },
+          presence: [],
+        }
+      },
+    }),
+  })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction/collaboration?rootCommentId=stored-root&cursor=reply-cursor',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({
+    comments: [{ id: 'stored-reply-page' }],
+    nextCursor: 'older-replies',
+    replyRootCommentId: 'stored-root',
+  })
+  expect(threadInputs).toHaveLength(1)
+  expect(threadInputs[0]).toMatchObject({
+    rootCommentId: 'stored-root',
+    cursor: 'reply-cursor',
+    limit: 20,
+  })
 })
 
 test('rejects a legacy collaboration cursor instead of reading it as a current page', async () => {

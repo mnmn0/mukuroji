@@ -21,6 +21,7 @@ import {
   resolveAutomationScheduleProcessingTime,
 } from '../../modules/automation'
 import { createCognitoClient } from '../../modules/authentication'
+import { DynamoDbCollaborationClient } from '../../modules/collaboration/collaboration'
 import { DynamoDbProjectDirectoryClient } from '../../modules/directory'
 import {
   DynamoDbDocumentAuthorizationRevisionMutationAdapter,
@@ -51,6 +52,7 @@ function createAutomationActionDependencies(
     }),
     auditEvents: createAuditEventsClient(),
     teamIssues,
+    collaboration: new DynamoDbCollaborationClient(),
     workItemConfigurations: createWorkItemConfigurationClient(),
     planning: createPlanningClient(),
     fileProofing: createDefaultFileProofingClient(),

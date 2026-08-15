@@ -86,11 +86,14 @@ Comment edit/resolve/delete は `expectedVersion` を要求します。読み込
 
 Collaboration comment の正本は Collaboration table の persisted root/reply row だけです。旧 `TeamIssueEventsTable` の `commented` row は comment response へ読み込まず、`legacy.` で始まる旧 cursor も `InvalidCollaborationCursor` として拒否します。旧 row の存在確認と必要な backfill は runtime の fallback とは分離した検証・運用手順で扱います。
 
-開発／検証環境で旧 row が残っていないことを確認する場合は、対象 Issue の `ISSUE_ID` を指定して既存の bounded check を実行します。`legacy_commented_event_count=0` 以外の場合は non-zero で終了します。
+開発／検証環境で旧 row が残っていないことを確認する場合は、scope を明示した `ISSUE_ID` を指定して検証モードを実行します。このモードは対象 Issue の event 件数を読み取るだけでなく、`TeamIssueEventsTable` 全体を scan して、ページごとの `commented` 件数を合計します。`legacy_commented_event_count=0` 以外の場合は non-zero で終了します。
 
 ```sh
 TEAM_ISSUES_TABLE_NAME=<team-issues-table> \
 TEAM_ISSUE_EVENTS_TABLE_NAME=<team-issue-events-table> \
+MUKUROJI_WORKSPACE_DIRECTORY_ID=<workspace-directory-id> \
+TEAM_ID=<team-id> \
+PROJECT_ID=<project-id> \
 ISSUE_ID=<issue-id> \
 AWS_REGION=<region> \
 bash scripts/check-team-issues-dynamodb.sh

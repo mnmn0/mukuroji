@@ -13155,6 +13155,8 @@ export interface AutomationActionExecutorDependencies {
   auditEvents: WorkspaceDependencies['auditEvents']
   /** Provides canonical Work Item persistence. */
   teamIssues: WorkItemDependencies['teamIssues']
+  /** Provides canonical Work Item collaboration persistence. */
+  collaboration: WorkItemDependencies['collaboration']
   /** Provides Work Item workflow and relation configuration. */
   workItemConfigurations: WorkItemDependencies['workItemConfigurations']
   /** Provides unfiltered Planning dependency state for schedule mutation fencing. */
@@ -13184,6 +13186,9 @@ const ambientAutomationActionExecutorDependencies: AutomationActionExecutorDepen
   },
   get teamIssues() {
     return workItemDependencies.teamIssues
+  },
+  get collaboration() {
+    return workItemDependencies.collaboration
   },
   get workItemConfigurations() {
     return workItemDependencies.workItemConfigurations
@@ -13714,22 +13719,52 @@ async function executeAutomationComment(
   dependencies: AutomationActionExecutorDependencies,
 ) {
   const target = readAutomationWorkItemTarget(context.event)
-  await requireAutomationTeam(
+  const team = await requireAutomationTeam(
     context.execution.workspaceId,
     target.teamId,
     dependencies,
   )
-  await dependencies.teamIssues.createTeamIssueComment(
+  const detail = await dependencies.teamIssues.getTeamIssueDetail(
     context.execution.workspaceId,
     target.teamId,
     target.workItemId,
-    {
-      body,
-      idempotencyEventId: `${context.execution.id}_comment_${context.actionIndex}`,
-    },
-    `automation:${context.execution.ruleId}`,
-    createAutomationMutationContext(context, { body }),
+    { consistentIssueRead: true, eventLimit: 0 },
   )
+  if (
+    detail.issue.assignedProjectId &&
+    !team.projects.some((project) => project.id === detail.issue.assignedProjectId)
+  ) {
+    throw new AutomationError(
+      'conflict',
+      'AutomationCommentTargetUnavailable',
+      'The comment Work Item project is not active in its owner Team.',
+    )
+  }
+  const entityKey = createWorkItemCollaborationEntityKey(
+    context.execution.workspaceId,
+    target.teamId,
+    target.workItemId,
+  )
+  const projectEntityKey = detail.issue.assignedProjectId
+    ? createProjectCollaborationEntityKey(
+        context.execution.workspaceId,
+        detail.issue.assignedProjectId,
+      )
+    : undefined
+  await dependencies.collaboration.createComment({
+    workspaceId: context.execution.workspaceId,
+    teamId: target.teamId,
+    issueId: target.workItemId,
+    workItemTitle: detail.issue.title,
+    entityKey,
+    projectId: detail.issue.assignedProjectId,
+    projectEntityKey,
+    actorMemberKey: `automation:${context.execution.ruleId}`,
+    bodyMarkdown: body,
+    automaticWatcherCandidates: createTeamIssueAutomaticWatcherCandidates(detail.issue),
+    deepLink: createTeamIssueDeepLink(target.teamId, target.workItemId),
+    auditContext: createAutomationMutationContext(context, { body }),
+  })
 }
 
 /**
@@ -27904,7 +27939,6 @@ function toCollaborationCommentResponse(
 
   return {
     id: comment.id,
-    source: 'collaboration' as const,
     rootCommentId: comment.rootCommentId,
     ...(comment.parentCommentId ? { parentCommentId: comment.parentCommentId } : {}),
     authorMemberKey: comment.authorMemberKey,

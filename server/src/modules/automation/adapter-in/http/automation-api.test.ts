@@ -6,6 +6,7 @@ const {
   configureFakeProjectClients,
   createBulkOperationAutomationFake,
   createBulkRecoveryIssue,
+  createCollaborationStub,
   createFakeWorkItemConfigurationClient,
   createFileProofingStub,
   createInboundWebhookEndpointRecord,
@@ -32,6 +33,9 @@ import {
 import type {
   FileProofingActor,
 } from '../../../files/file-proofing'
+import type {
+  CollaborationClient,
+} from '../../../collaboration/collaboration'
 import {
   DEFAULT_WORK_ITEM_CONFIGURATION,
 } from '../../../work-items/work-item-configuration'
@@ -1981,7 +1985,7 @@ test('fails closed when automation targets a Project outside the owner Team', as
 })
 
 test('fails closed before an automation comment targets a removed Team', async () => {
-  const calls = configureFakeProjectClients(true)
+  configureFakeProjectClients(true)
   const context = {
     execution: {
       schemaVersion: AUTOMATION_SCHEMA_VERSION,
@@ -2017,7 +2021,80 @@ test('fails closed before an automation comment targets a removed Team', async (
     category: 'conflict',
     code: 'AutomationTeamUnavailable',
   })
-  expect(calls.issueComments).toHaveLength(0)
+})
+
+test('writes automation comments to the canonical Collaboration store', async () => {
+  configureFakeProjectClients(true)
+  const writes: Parameters<CollaborationClient['createComment']>[0][] = []
+  setTestAppDependencies({
+    collaboration: createCollaborationStub({
+      async createComment(input) {
+        writes.push(input)
+        return {
+          id: 'automation-comment',
+          rootCommentId: 'automation-comment',
+          authorMemberKey: input.actorMemberKey,
+          bodyMarkdown: input.bodyMarkdown,
+          version: 1,
+          mentionMemberKeys: input.mentionMemberKeys ?? [],
+          createdAt: '2026-07-16T00:00:00.000Z',
+          updatedAt: '2026-07-16T00:00:00.000Z',
+          acceptedResolutions: [],
+          reactions: [],
+        }
+      },
+    }),
+  })
+  const context = {
+    execution: {
+      schemaVersion: AUTOMATION_SCHEMA_VERSION,
+      id: 'automation-comment-canonical',
+      workspaceId: 'workspace-1',
+      ruleId: 'rule-1',
+      ruleVersion: 1,
+      triggerEventId: 'event-1',
+      status: 'running',
+      attempts: 1,
+      actions: [],
+      startedAt: '2026-07-16T00:00:00.000Z',
+      retryable: false,
+    },
+    event: {
+      eventId: 'event-1',
+      eventType: 'work-item.updated',
+      workspaceId: 'workspace-1',
+      occurredAt: '2026-07-16T00:00:00.000Z',
+      changes: [],
+      metadata: { teamId: 'core-team', issueId: 'onboarding-friction' },
+    },
+    actionIndex: 0,
+    idempotencyKey: 'automation-comment-canonical:action:0000',
+  } satisfies AutomationActionExecutionContext
+
+  await runWithTestAppDependencies(() =>
+    createAutomationActionExecutor().execute({
+      type: 'comment',
+      body: 'Automated canonical comment',
+    }, context)
+  )
+
+  expect(writes).toHaveLength(1)
+  expect(writes[0]).toMatchObject({
+    workspaceId: 'workspace-1',
+    teamId: 'core-team',
+    issueId: 'onboarding-friction',
+    entityKey: 'workspace-1#work-item#team/core-team/issue/onboarding-friction',
+    projectId: 'refero',
+    projectEntityKey: 'workspace-1#project#refero',
+    actorMemberKey: 'automation:rule-1',
+    bodyMarkdown: 'Automated canonical comment',
+    deepLink: expect.stringContaining('/teams/core-team/issues?'),
+    auditContext: {
+      correlationId: 'automation-comment-canonical',
+      idempotencyKeyHash: expect.any(String),
+      requestFingerprint: expect.any(String),
+    },
+  })
 })
 
 test('rejects removed recurring-work Teams on create and update before saving a definition', async () => {
