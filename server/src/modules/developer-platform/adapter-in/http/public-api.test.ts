@@ -354,19 +354,17 @@ test('rejects legacy-only display fields on canonical rows', async () => {
   }
 })
 
-test('pages filtered legacy comments with a scope-bound opaque event cursor', async () => {
-  const sentInputs: Array<Record<string, unknown>> = []
-  let queryPage = 0
+test('keeps legacy commented events in activity without projecting them as comments', async () => {
   const issueItem = {
     schemaVersion: WORK_ITEM_SCHEMA_VERSION,
     revision: 1,
     workflowSchemaVersion: 1,
     directoryId: 'workspace-1',
-    teamId: 'core-team',
     directoryTeamId: 'workspace-1#team#core-team',
+    teamId: 'core-team',
     issueId: 'issue-1',
     sortOrder: 1,
-    title: 'Legacy comments',
+    title: 'Canonical Work Item',
     assigneeUserId: 'member@example.com',
     creatorMemberKey: 'member@example.com',
     workflowStatusId: 'todo',
@@ -379,72 +377,46 @@ test('pages filtered legacy comments with a scope-bound opaque event cursor', as
     createdAt: '2026-07-12T00:00:00.000Z',
     updatedAt: '2026-07-12T00:00:00.000Z',
   }
+  const commentedEvent = {
+    directoryId: 'workspace-1',
+    teamId: 'core-team',
+    issueId: 'issue-1',
+    directoryTeamIssueId: 'workspace-1#team#core-team#issue#issue-1',
+    eventId: '2026-07-12T00:02:00.000Z#commented',
+    eventType: 'commented',
+    actorUserId: 'member@example.com',
+    body: 'Historical comment',
+    summary: 'Comment was added.',
+    createdAt: '2026-07-12T00:02:00.000Z',
+  }
   const documentClient = {
-    async send(command: { input: Record<string, unknown> }) {
-      sentInputs.push(command.input)
-      if (!('KeyConditionExpression' in command.input)) {
+    async send(command: { constructor: { name: string } }) {
+      if (command.constructor.name === 'GetCommand') {
         return { Item: issueItem }
       }
-
-      queryPage += 1
-      const eventId = queryPage === 1 ? '2026-07-12T00:02:00.000Z#newer' : '2026-07-12T00:01:00.000Z#older'
-      return {
-        Items: [{
-          directoryId: 'workspace-1',
-          teamId: 'core-team',
-          issueId: 'issue-1',
-          directoryTeamIssueId: 'workspace-1#team#core-team#issue#issue-1',
-          eventId,
-          eventType: 'commented',
-          actorUserId: 'member@example.com',
-          body: queryPage === 1 ? 'Newer legacy comment' : 'Older legacy comment',
-          summary: 'Comment was added.',
-          createdAt: eventId.slice(0, 24),
-        }],
-        ...(queryPage === 1
-          ? {
-              LastEvaluatedKey: {
-                directoryTeamIssueId: 'workspace-1#team#core-team#issue#issue-1',
-                eventId,
-              },
-            }
-          : {}),
-      }
+      return { Items: [commentedEvent] }
     },
   } as unknown as DynamoDBDocumentClient
   const client = new DynamoDbTeamIssuesClient(
     'issues-table',
     'events-table',
     documentClient,
-    { send: async () => ({}) } as unknown as DynamoDBClient,
+    {} as DynamoDBClient,
     false,
   )
-  const options = {
-    consistentIssueRead: true,
-    eventLimit: 1,
-    eventType: 'commented' as const,
-    newestEventsFirst: true,
-  }
 
-  const first = await client.getTeamIssueDetail('workspace-1', 'core-team', 'issue-1', options)
-  const second = await client.getTeamIssueDetail('workspace-1', 'core-team', 'issue-1', {
-    ...options,
-    eventCursor: first.nextEventCursor,
-  })
+  const detail = await client.getTeamIssueDetail('workspace-1', 'core-team', 'issue-1')
 
-  expect(first.comments.map((comment) => comment.body)).toEqual(['Newer legacy comment'])
-  expect(first.nextEventCursor).toBeString()
-  expect(second.comments.map((comment) => comment.body)).toEqual(['Older legacy comment'])
-  expect(sentInputs[1]).toMatchObject({
-    TableName: 'events-table',
-    FilterExpression: 'eventType = :eventType',
-    Limit: 1,
-    ScanIndexForward: false,
-  })
-  expect(sentInputs[3]?.ExclusiveStartKey).toEqual({
-    directoryTeamIssueId: 'workspace-1#team#core-team#issue#issue-1',
-    eventId: '2026-07-12T00:02:00.000Z#newer',
-  })
+  expect(detail.comments).toEqual([])
+  expect(detail.activity).toEqual([
+    {
+      id: '2026-07-12T00:02:00.000Z#commented',
+      type: 'commented',
+      actorUserId: 'member@example.com',
+      summary: 'Comment was added.',
+      createdAt: '2026-07-12T00:02:00.000Z',
+    },
+  ])
 })
 
 test('serves the same authenticated API contract from Function URL root and /api paths', async () => {

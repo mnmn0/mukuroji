@@ -30,21 +30,13 @@ export type TeamIssueComment = {
    */
   authorMemberKey?: string
   /**
-   * 旧 comment API が返す actor user ID です。
-   */
-  actorUserId?: string
-  /**
    * Markdown で保存されたコメント本文です。
    */
-  bodyMarkdown?: string
-  /**
-   * 移行期間の旧 comment API が返す plain text 本文です。
-   */
-  body?: string
+  bodyMarkdown: string
   /**
    * optimistic concurrency に使う comment revision です。
    */
-  version?: number
+  version: number
   /**
    * 作成日時の ISO 8601 timestamp です。
    */
@@ -85,10 +77,6 @@ export type TeamIssueComment = {
    * 現在のユーザーがコメントに行える操作です。
    */
   capabilities?: TeamIssueCommentCapabilities
-  /**
-   * collaboration store または移行前データのどちらから取得したかを表します。
-   */
-  source?: 'collaboration' | 'legacy'
 }
 
 /**

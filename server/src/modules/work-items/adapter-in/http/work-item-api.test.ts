@@ -990,12 +990,7 @@ test('loads team issue detail and creates comments after team access is confirme
       id: 'onboarding-friction',
       assigneeEmail: 'sato@example.com',
     },
-    comments: [
-      {
-        id: 'comment-1',
-        body: '背景を確認します。',
-      },
-    ],
+    comments: [],
     activity: [
       {
         id: 'activity-1',
@@ -1011,17 +1006,18 @@ test('loads team issue detail and creates comments after team access is confirme
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      body: '追加コメント',
+      bodyMarkdown: '追加コメント',
     }),
   })
 
   expect(commentResponse.status).toBe(201)
-  expect(await commentResponse.json()).toEqual({
+  const createdCommentResponse = await commentResponse.json()
+  expect(createdCommentResponse).toMatchObject({
     comment: {
       id: 'comment-2',
-      actorUserId: 'demo@example.com',
-      body: '追加コメント',
-      createdAt: '2026-06-08T02:00:00.000Z',
+      authorMemberKey: 'demo@example.com',
+      bodyMarkdown: '追加コメント',
+      version: 1,
     },
     activity: {
       id: 'comment-2',
@@ -1031,6 +1027,9 @@ test('loads team issue detail and creates comments after team access is confirme
       createdAt: '2026-06-08T02:00:00.000Z',
     },
   })
+  expect(createdCommentResponse.comment).not.toHaveProperty('source')
+  expect(createdCommentResponse.comment).not.toHaveProperty('actorUserId')
+  expect(createdCommentResponse.comment).not.toHaveProperty('body')
   expect(calls.issueDetails).toEqual([
     {
       directoryId: 'user#demo@example.com',
@@ -1060,8 +1059,12 @@ test('loads team issue detail and creates comments after team access is confirme
   expect(refreshedDetailResponse.status).toBe(200)
   expect(await refreshedDetailResponse.json()).toMatchObject({
     comments: [
-      { id: 'comment-1', body: '背景を確認します。' },
-      { id: 'comment-2', body: '追加コメント' },
+      {
+        id: 'comment-2',
+        authorMemberKey: 'demo@example.com',
+        bodyMarkdown: '追加コメント',
+        version: 1,
+      },
     ],
   })
 })
@@ -1213,7 +1216,7 @@ test('fails closed when a persisted relation target Work Item is missing', async
   ])
 })
 
-test('returns persisted collaboration comments together with inert legacy comments and reply cursors', async () => {
+test('returns persisted collaboration comments and reply cursors', async () => {
   const calls = configureFakeProjectClients(true)
   const threadInputs: Parameters<CollaborationClient['getThread']>[0][] = []
   setTestAppDependencies({
@@ -1274,18 +1277,19 @@ test('returns persisted collaboration comments together with inert legacy commen
   })
 
   expect(response.status).toBe(200)
-  expect(await response.json()).toMatchObject({
+  const collaborationResponse = await response.json()
+  expect(collaborationResponse).toMatchObject({
     comments: [
-      { id: 'stored-root', source: 'collaboration' },
-      { id: 'stored-reply', source: 'collaboration' },
-      {
-        id: 'comment-1',
-        source: 'legacy',
-        capabilities: { canReply: false, canReact: false },
-      },
+      { id: 'stored-root', authorMemberKey: 'demo@example.com', version: 2 },
+      { id: 'stored-reply', authorMemberKey: 'sato@example.com', version: 1 },
     ],
     replyNextCursors: { 'stored-root': 'older-replies' },
   })
+  for (const comment of collaborationResponse.comments) {
+    expect(comment).not.toHaveProperty('source')
+    expect(comment).not.toHaveProperty('actorUserId')
+    expect(comment).not.toHaveProperty('body')
+  }
   expect(threadInputs).toHaveLength(2)
   expect(threadInputs[0]?.rootCommentId).toBeUndefined()
   expect(threadInputs[0]?.limit).toBe(10)
@@ -1294,17 +1298,34 @@ test('returns persisted collaboration comments together with inert legacy commen
     limit: 5,
     includeScopeState: false,
   })
-  expect(calls.issueDetails).toContainEqual({
-    directoryId: 'user#demo@example.com',
-    teamId: 'core-team',
-    issueId: 'onboarding-friction',
-    readOptions: {
-      consistentIssueRead: true,
-      eventLimit: 50,
-      newestEventsFirst: true,
-      eventType: 'commented',
-    },
+  expect(calls.issueDetails).not.toContainEqual(expect.objectContaining({
+    readOptions: expect.objectContaining({ eventLimit: 50 }),
+  }))
+})
+
+test('rejects legacy collaboration cursors without reading comments', async () => {
+  configureFakeProjectClients(true)
+  let collaborationReads = 0
+  setTestAppDependencies({
+    collaboration: createCollaborationStub({
+      async getThread() {
+        collaborationReads += 1
+        throw new Error('Legacy cursors must not reach the collaboration store.')
+      },
+    }),
   })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction/collaboration?cursor=legacy.cursor',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+
+  expect(response.status).toBe(400)
+  expect(await response.json()).toEqual({
+    code: 'InvalidCollaborationCursor',
+    message: 'Collaboration cursor is invalid.',
+  })
+  expect(collaborationReads).toBe(0)
 })
 
 test('keeps a departed author in history while blocking deactivated member mutations', async () => {

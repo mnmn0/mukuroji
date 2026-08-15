@@ -334,8 +334,11 @@ describe('team issue collaboration API', () => {
               summary: 'Old summary',
             },
           ],
+          authorMemberKey: 'demo@example.com',
+          bodyMarkdown: 'Canonical comment body',
           createdAt: '2026-08-09T00:00:00.000Z',
           id: 'root-1',
+          version: 1,
         },
       ],
       watch: {

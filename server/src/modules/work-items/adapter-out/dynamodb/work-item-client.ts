@@ -859,8 +859,6 @@ export type TeamIssueDetailResponse = {
   activity: TeamIssueActivityResponseItem[]
   /** De-identified duplicate-source context committed with this canonical Work Item. */
   triageContextSnapshots?: WorkItemTriageContextSnapshot[]
-  /** Bounded event 読み込みの次 page を指す opaque cursor です。 */
-  nextEventCursor?: string
   /** Work Item に適用される解決済み workflow/custom field 定義です。 */
   resolvedConfiguration?: ResolvedWorkItemConfiguration
   /** Work Item から見た reciprocal relation 一覧です。 */
@@ -1322,22 +1320,6 @@ export type TeamIssueDetailReadOptions = {
   consistentIssueRead?: boolean
   /** 読み込む event の最大件数です。0 の場合は event partition を読みません。 */
   eventLimit?: number
-  /** 新しい event から読み込む場合は true です。 */
-  newestEventsFirst?: boolean
-  /** 指定 event 種別だけを返す DynamoDB filter です。 */
-  eventType?: TeamIssueActivityType
-  /** 前 page が返した event cursor です。 */
-  eventCursor?: string
-}
-
-/** Team Issue event page cursor の署名対象 payload です。 */
-type TeamIssueEventCursor = {
-  /** Cursor schema version です。 */
-  version: 1
-  /** Cursor を別 Issue へ流用できないよう束縛する partition key です。 */
-  directoryTeamIssueId: string
-  /** DynamoDB event sort key です。 */
-  eventId: string
 }
 
 function createRequestConversionTransactionItems(
@@ -1920,12 +1902,9 @@ export class DynamoDbTeamIssuesClient {
 
       return {
         issue: toTeamIssueResponseItem(issue),
-        comments: events
-          .filter((event) => event.eventType === 'commented' && event.body)
-          .map(toTeamIssueCommentResponseItem),
+        comments: [],
         activity: events.map(toTeamIssueActivityResponseItem),
         ...(triageContextSnapshots.length > 0 ? { triageContextSnapshots } : {}),
-        ...(eventPage.nextCursor ? { nextEventCursor: eventPage.nextCursor } : {}),
       } satisfies TeamIssueDetailResponse
     } catch (error) {
       if (error instanceof ProjectDataError) {
@@ -3354,10 +3333,7 @@ export class DynamoDbTeamIssuesClient {
       ? undefined
       : Math.max(1, Math.floor(options.eventLimit))
     const directoryTeamIssueId = createDirectoryTeamIssueId(directoryId, teamId, issueId)
-    let exclusiveStartKey: Record<string, unknown> | undefined = decodeTeamIssueEventCursor(
-      options.eventCursor,
-      directoryTeamIssueId,
-    )
+    let exclusiveStartKey: Record<string, unknown> | undefined
 
     do {
       const remaining = eventLimit === undefined ? undefined : eventLimit - items.length
@@ -3367,11 +3343,8 @@ export class DynamoDbTeamIssuesClient {
           KeyConditionExpression: 'directoryTeamIssueId = :directoryTeamIssueId',
           ExpressionAttributeValues: {
             ':directoryTeamIssueId': directoryTeamIssueId,
-            ...(options.eventType ? { ':eventType': options.eventType } : {}),
           },
-          ...(options.eventType ? { FilterExpression: 'eventType = :eventType' } : {}),
           ExclusiveStartKey: exclusiveStartKey,
-          ScanIndexForward: options.newestEventsFirst !== true,
           ...(remaining === undefined ? {} : { Limit: remaining }),
         }),
       )
@@ -3383,12 +3356,7 @@ export class DynamoDbTeamIssuesClient {
       }
     } while (exclusiveStartKey)
 
-    return {
-      items: items.map(toTeamIssueEventItem),
-      ...(exclusiveStartKey
-        ? { nextCursor: encodeTeamIssueEventCursor(directoryTeamIssueId, exclusiveStartKey) }
-        : {}),
-    }
+    return { items: items.map(toTeamIssueEventItem) }
   }
 
   private createIssueEventItem(
@@ -4766,62 +4734,6 @@ function decodePublicWorkItemPageCursor(
       400,
       'InvalidWorkItemPageCursor',
       'Work Item page cursor is invalid.',
-    )
-  }
-}
-
-/** Team Issue event の DynamoDB key を scope-bound opaque cursor に変換します。 */
-function encodeTeamIssueEventCursor(
-  directoryTeamIssueId: string,
-  key: Record<string, unknown>,
-) {
-  const eventId = typeof key.eventId === 'string' ? key.eventId : undefined
-  if (!eventId) {
-    throw new ProjectDataError(
-      503,
-      'InvalidTeamIssue',
-      'Team Issue event page did not include a valid continuation key.',
-    )
-  }
-
-  const cursor: TeamIssueEventCursor = {
-    version: 1,
-    directoryTeamIssueId,
-    eventId,
-  }
-  return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url')
-}
-
-/** Team Issue event cursor を検証し DynamoDB key に戻します。 */
-function decodeTeamIssueEventCursor(
-  value: string | undefined,
-  directoryTeamIssueId: string,
-) {
-  if (!value) {
-    return undefined
-  }
-
-  try {
-    const cursor = JSON.parse(
-      Buffer.from(value, 'base64url').toString('utf8'),
-    ) as Partial<TeamIssueEventCursor>
-    if (
-      cursor.version !== 1 ||
-      cursor.directoryTeamIssueId !== directoryTeamIssueId ||
-      typeof cursor.eventId !== 'string' ||
-      !cursor.eventId
-    ) {
-      throw new TypeError('Invalid cursor payload.')
-    }
-    return {
-      directoryTeamIssueId,
-      eventId: cursor.eventId,
-    }
-  } catch {
-    throw new ProjectDataError(
-      400,
-      'InvalidTeamIssueCursor',
-      'Team Issue event cursor is invalid.',
     )
   }
 }

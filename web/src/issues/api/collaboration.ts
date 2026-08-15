@@ -142,7 +142,12 @@ function isTeamIssueComment(value: unknown): value is TeamIssueComment {
   return (
     isRecord(value) &&
     typeof value.id === 'string' &&
-    typeof value.createdAt === 'string'
+    typeof value.createdAt === 'string' &&
+    typeof value.authorMemberKey === 'string' &&
+    typeof value.bodyMarkdown === 'string' &&
+    typeof value.version === 'number' &&
+    Number.isSafeInteger(value.version) &&
+    value.version > 0
   )
 }
 

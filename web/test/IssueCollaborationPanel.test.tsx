@@ -41,50 +41,43 @@ describe('IssueCollaborationPanel', () => {
     expect(html).toContain('Demo User が解決策を採用しました。')
   })
 
-  test('does not let a later legacy page replace a persisted comment with the same ID', () => {
+  test('keeps the latest canonical comment when pages overlap', () => {
     const persisted = issueCollaborationControllerFixture.comments[0]
+    const updated = {
+      ...persisted,
+      bodyMarkdown: 'Updated canonical comment',
+      version: persisted.version + 1,
+    }
     const merged = mergeIssueComments([
       persisted,
-      {
-        ...persisted,
-        bodyMarkdown: 'Legacy fallback',
-        source: 'legacy',
-        capabilities: {
-          canDelete: false,
-          canEdit: false,
-          canReact: false,
-          canReply: false,
-          canResolve: false,
-        },
-      },
+      updated,
     ])
 
     expect(merged).toHaveLength(1)
-    expect(merged[0]).toEqual(persisted)
+    expect(merged[0]).toEqual(updated)
   })
 
-  test('keeps legacy comments readable without unsupported reply and reaction actions', () => {
-    const legacyComment = {
+  test('renders canonical comments with reply and reaction actions', () => {
+    const canonicalComment = {
       ...issueCollaborationControllerFixture.comments[0],
+      acceptedResolutions: [],
       capabilities: {
-        canDelete: false,
-        canEdit: false,
-        canReact: false,
-        canReply: false,
-        canResolve: false,
+        canDelete: true,
+        canEdit: true,
+        canReact: true,
+        canReply: true,
+        canResolve: true,
       },
-      reactions: [],
-      source: 'legacy' as const,
+      resolvedAt: undefined,
+      resolvedByMemberKey: undefined,
     }
     const html = renderToStaticMarkup(
       <IssueCollaborationPanel
         controller={{
           ...issueCollaborationControllerFixture,
-          comments: [legacyComment],
+          comments: [canonicalComment],
           hasMore: false,
-          replyPagination: {
-            [legacyComment.id]: { hasMore: true, isLoading: false },
-          },
+          replyPagination: {},
         }}
         currentMemberKey="demo@example.com"
         locale="en"
@@ -92,13 +85,11 @@ describe('IssueCollaborationPanel', () => {
       />,
     )
 
-    expect(html).toContain('Load earlier replies')
-    expect(html).toContain('Watching project')
-    expect(html).not.toContain('>Reply<')
-    expect(html).not.toContain('aria-label="Add reaction"')
+    expect(html).toContain('>Reply<')
+    expect(html).toContain('aria-label="Add reaction"')
   })
 
-  test('orders roots by newest timestamp across collaboration and legacy pages', () => {
+  test('orders roots by newest timestamp across canonical pages', () => {
     const rootComment = issueCollaborationControllerFixture.comments[0]
     const html = renderToStaticMarkup(
       <IssueCollaborationPanel

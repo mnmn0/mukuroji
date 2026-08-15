@@ -490,7 +490,7 @@ export function useIssueCollaboration({
       return false
     }
 
-    const expectedVersion = resolveCommentVersion(comment)
+    const expectedVersion = comment.version
 
     return runMutation(
       `issue:comment:delete:${teamId}:${issueId}:${comment.id}`,
@@ -511,7 +511,7 @@ export function useIssueCollaboration({
       return false
     }
 
-    const expectedVersion = resolveCommentVersion(comment)
+    const expectedVersion = comment.version
     const action = resolved ? 'resolve' : 'reopen'
 
     return runMutation(
@@ -815,19 +815,11 @@ function createPresenceClientId() {
   return globalThis.crypto?.randomUUID?.() ?? `presence-${Date.now()}-${Math.random().toString(16).slice(2)}`
 }
 
-function resolveCommentVersion(comment: TeamIssueComment) {
-  return Number.isInteger(comment.version) && (comment.version ?? 0) > 0 ? comment.version ?? 1 : 1
-}
-
-/** Paginated comments を ID で統合し、persisted row を legacy fallback より優先します。 */
+/** Paginated canonical comments を ID で統合します。 */
 export function mergeIssueComments(comments: TeamIssueComment[]) {
   const commentsById = new Map<string, TeamIssueComment>()
 
   for (const comment of comments) {
-    const current = commentsById.get(comment.id)
-    if (current && current.source !== 'legacy' && comment.source === 'legacy') {
-      continue
-    }
     commentsById.set(comment.id, comment)
   }
 

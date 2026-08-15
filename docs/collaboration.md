@@ -82,6 +82,6 @@ Presence と typing は短い TTL を持つ lease です。WebSocket 接続が�
 
 Comment edit/resolve/delete は `expectedVersion` を要求します。読み込み後に別 user が変更した場合は `409 CommentVersionConflict` を返し、client は最新内容を再取得します。push/polling は表示の鮮度を上げる仕組みであり、整合性の最終防衛線は version 条件です。
 
-## Legacy migration
+## Canonical comment reads
 
-既存の `TeamIssueEventsTable` にある `commented` row は、同じ comment ID と作成日時を使って collaboration comment へ backfill できます。Backfill は notification を生成せず、audit event では `outboxStatus=suppressed` とします。移行期間中は persisted root page を読み終えた後、legacy event を新しい順に最大 50 件ずつ評価し、`commented` row を read-only comment として統合します。opaque cursor で event partition の末尾まで継続できるため、全件一括読込と無制限な response 拡大を避けながら過去 comment へ到達できます。backfill 済み ID と legacy row が別 page に現れた場合も Web は persisted comment を優先します。migration marker の確認後に fallback を削除します。
+Comment と reply の response は Collaboration table に保存された canonical row だけを返します。`TeamIssueEventsTable` の旧 `commented` event は activity/audit 用途として保持されますが、comment response へ fallback 投影しません。Collaboration cursor は現在の persisted thread 用だけを受け付け、旧 comment cursor は invalid cursor として拒否します。
