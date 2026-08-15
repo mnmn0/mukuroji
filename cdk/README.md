@@ -772,11 +772,11 @@ projectionを全件復元してから旧 Lambda への依存逆順rollbackを許
 
 ## Canonical Work Item deploy
 
-CDK は既存 `TeamIssuesTable` construct と key schema を維持し、`WorkItemsTableName` という canonical alias を公開します。旧 Project Task table、adapter、route は削除し、API Lambda には canonical Work Item / Issue resources の権限だけを付与します。
+CDK は既存 `TeamIssuesTable` construct と key schema を維持し、`WorkItemsTableName` という canonical alias を公開します。旧 Project Task table は既存 logical ID のまま `RETAIN` の decommission resource として保持し、tenant lifecycle の export、delete、verify capability だけが参照します。旧 adapter、route、GSI は削除し、API Lambda には canonical Work Item / Issue resources の権限だけを付与します。
 
 Demo seed の custom resource は canonical `WorkItemsTable` だけに `creatorMemberKey`、`workflowSchemaVersion`、`workflowStatusId`、`statusCategory`、`customFieldValues`、空の `relationIds` を含む strict row を作成します。既存 row の upcast や legacy task からの copy は行いません。
 
-Deploy 時は `cdk diff` で canonical table の意図しない replacement/deletion がなく、旧 Project Task table や route への互換 IAM が残っていないことを確認します。Deploy 後は Team/project/Workspace list、任意の workflow status への detail update、stale revision の `409 WorkItemRevisionConflict` を Function URL と API Gateway の両方で確認します。Strict schema を満たさない開発用 row は削除し、現行 seed または API から作り直します。
+Deploy 時は `cdk diff` で canonical table の意図しない replacement/deletion がなく、旧 Project Task table が `RETAIN` と base-table key schema を維持し、旧 GSI、API、route への互換 IAM が残っていないことを確認します。Deploy 後は Team/project/Workspace list、任意の workflow status への detail update、stale revision の `409 WorkItemRevisionConflict` を Function URL と API Gateway の両方で確認します。Strict schema を満たさない開発用 row は削除し、現行 seed または API から作り直します。旧 table の残存行は tenant lifecycle の export/delete/verify で drain します。
 
 ## Work Item configuration
 
