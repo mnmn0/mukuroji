@@ -283,8 +283,6 @@ import {
   type CreateTeamIssueResponse,
   type ConfirmWorkItemScheduleChangeCommand,
   type ProjectIssuesResponse,
-  type ProjectTaskResponseItem,
-  type ProjectTasksResponse,
   type PublicUpdateTeamIssueRequestBody,
   type TeamIssueCommentResponseItem,
   type TeamIssueDetailReadOptions,
@@ -301,7 +299,6 @@ import {
 } from '../modules/work-items'
 
 export {
-  DynamoDbProjectTasksClient,
   DynamoDbTeamIssuesClient,
 } from '../modules/work-items'
 import {
@@ -1176,9 +1173,6 @@ const workspaceDependencies: WorkspaceDependencies = {
   },
 }
 const workItemDependencies: WorkItemDependencies = {
-  get projectTasks() {
-    return requireAppDependencies().workItems.projectTasks
-  },
   get teamIssues() {
     return requireAppDependencies().workItems.teamIssues
   },
@@ -1750,8 +1744,6 @@ const enterpriseRoutePermissionRules = [
     pathPattern: '/api/teams/:teamId/issues*',
     permission: 'work-items.write',
   },
-  { method: 'GET', pathPattern: '/api/projects/:projectId/tasks*', permission: 'work-items.read' },
-  { method: '*', pathPattern: '/api/projects/:projectId/tasks*', permission: 'work-items.write' },
   { method: 'GET', pathPattern: '/api/projects/:projectId/issues*', permission: 'work-items.read' },
   { method: '*', pathPattern: '/api/projects/:projectId/issues*', permission: 'work-items.write' },
   {
@@ -8459,35 +8451,6 @@ routeApp.delete('/api/task-views/:viewId', async (c) => {
     }))
   } catch (error) {
     return toWorkspaceSearchErrorResponse(c, error)
-  }
-})
-
-/** Issue #20 の legacy project task を read-only で返します。 */
-routeApp.get('/api/projects/:projectId/tasks', async (c) => {
-  const accessToken = readBearerAccessToken(c)
-  const projectId = c.req.param('projectId')
-
-  if (!accessToken) {
-    return c.json({ message: 'Bearer token is required.' }, 401)
-  }
-
-  if (!projectId) {
-    return c.json({ message: 'Project ID is required.' }, 400)
-  }
-
-  try {
-    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-    await requireProjectPermission(principal, projectId, 'viewer')
-
-    return c.json(await hydrateProjectTasksResponse(
-      await workItemDependencies.projectTasks.getProjectTasks(principal.directoryId, projectId),
-    ))
-  } catch (error) {
-    if (error instanceof CognitoServiceError) {
-      return toCognitoDirectoryErrorResponse(c, error)
-    }
-
-    return toProjectDataErrorResponse(c, error)
   }
 })
 
@@ -26026,10 +25989,6 @@ function toProjectDataErrorResponse(c: Context, error: unknown) {
     return c.json({ message: 'Project was not found.' }, 404)
   }
 
-  if (error.code === 'ProjectTaskNotFound') {
-    return c.json({ message: 'Task was not found.' }, 404)
-  }
-
   if (error.code === 'ProjectMemberNotFound') {
     return c.json({ message: 'Project member was not found.' }, 404)
   }
@@ -26107,7 +26066,6 @@ function toProjectDataErrorResponse(c: Context, error: unknown) {
   }
 
   if (
-    error.code === 'InvalidProjectTask' ||
     error.code === 'InvalidProjectDirectory' ||
     error.code === 'InvalidProjectQuickAccess' ||
     error.code === 'InvalidTeamIssue'
@@ -28266,15 +28224,6 @@ async function createTriageAcceptanceReferenceConditionChecks(
     )
   }
   return [...referenceChecks, memberCheck]
-}
-
-async function hydrateProjectTasksResponse(response: ProjectTasksResponse) {
-  const profiles = await readTaskAssigneeProfiles(response.tasks)
-
-  return {
-    ...response,
-    tasks: response.tasks.map((task) => hydrateProjectTask(task, profiles)),
-  } satisfies ProjectTasksResponse
 }
 
 async function hydrateTeamIssuesResponse(response: TeamIssuesResponse) {
@@ -33987,46 +33936,6 @@ function hydrateTeamIssue(
     assigneeEmail: profile.email,
     assigneeName: profile.name,
   } satisfies TeamIssueResponseItem
-}
-
-async function readTaskAssigneeProfiles(tasks: ProjectTaskResponseItem[]) {
-  const profiles = new Map<string, CognitoUserProfile>()
-  const userIds = new Set(tasks.map((task) => task.assigneeUserId).filter(isDefined))
-
-  await Promise.all(
-    Array.from(userIds).map(async (userId) => {
-      try {
-        profiles.set(userId, await authenticationDependencies.cognito.getUserProfile(userId))
-      } catch (error) {
-        if (!isCognitoUserNotFoundError(error)) {
-          console.warn('Failed to hydrate task assignee from Cognito:', error)
-        }
-      }
-    }),
-  )
-
-  return profiles
-}
-
-function hydrateProjectTask(
-  task: ProjectTaskResponseItem,
-  profiles: Map<string, CognitoUserProfile>,
-) {
-  if (!task.assigneeUserId) {
-    return task
-  }
-
-  const profile = profiles.get(task.assigneeUserId)
-
-  if (!profile) {
-    return task
-  }
-
-  return {
-    ...task,
-    assigneeEmail: profile.email,
-    assigneeName: profile.name,
-  } satisfies ProjectTaskResponseItem
 }
 
 function toCognitoDirectoryErrorResponse(c: Context, error: unknown) {

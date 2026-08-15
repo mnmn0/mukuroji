@@ -29,7 +29,6 @@ const scanPageSize = 100
 const sourceNames = [
   'team-issue-events',
   'team-issues',
-  'project-tasks',
   'project-directory',
   'workspace-access',
 ] as const
@@ -219,10 +218,6 @@ type TableNames = {
    */
   teamIssues: string
   /**
-   * Legacy project task table 名です。
-   */
-  projectTasks: string
-  /**
    * Team/project/member directory table 名です。
    */
   projectDirectory: string
@@ -400,12 +395,12 @@ Options:
   --dry-run                 Scan and map items without writing events/checkpoint.
   --checkpoint <path>      Checkpoint JSON path (default: ./audit-event-backfill-v2.checkpoint.json).
   --limit <count>          Maximum source items scanned in this run.
-  --source <name>          Run only team-issue-events, team-issues, project-tasks,
-                           project-directory, or workspace-access.
+  --source <name>          Run only team-issue-events, team-issues, project-directory,
+                           or workspace-access.
   --help, -h               Show this help.
 
 Required production environment:
-  TEAM_ISSUE_EVENTS_TABLE_NAME, TEAM_ISSUES_TABLE_NAME, TASKS_TABLE_NAME,
+  TEAM_ISSUE_EVENTS_TABLE_NAME, TEAM_ISSUES_TABLE_NAME,
   PROJECT_DIRECTORY_TABLE_NAME, WORKSPACE_ACCESS_TABLE_NAME, AUDIT_EVENTS_TABLE_NAME,
   MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY (exactly 64 lowercase hexadecimal characters)
 
@@ -425,11 +420,6 @@ function resolveTableNames(endpoint: string | undefined): TableNames {
     teamIssues: resolveTableName(
       ['MUKUROJI_TEAM_ISSUES_TABLE', 'TEAM_ISSUES_TABLE_NAME'],
       'mukuroji-team-issues-local',
-      allowLocalDefaults,
-    ),
-    projectTasks: resolveTableName(
-      ['MUKUROJI_PROJECT_TASKS_TABLE', 'TASKS_TABLE_NAME'],
-      'mukuroji-project-tasks-v2-local',
       allowLocalDefaults,
     ),
     projectDirectory: resolveTableName(
@@ -514,11 +504,6 @@ function createSourceDefinitions(
       name: 'team-issues',
       tableName: tables.teamIssues,
       mapItem: mapCurrentTeamIssue,
-    },
-    {
-      name: 'project-tasks',
-      tableName: tables.projectTasks,
-      mapItem: mapCurrentProjectTask,
     },
     {
       name: 'project-directory',
@@ -736,51 +721,6 @@ export function mapCurrentTeamIssue(item: Record<string, unknown>) {
     metadata: {
       adapter: 'team-issue',
       teamId,
-    },
-  })
-}
-
-function mapCurrentProjectTask(item: Record<string, unknown>) {
-  const directoryId = readRequiredString(item, 'directoryId')
-  const projectId = readRequiredString(item, 'projectId')
-  const taskId = readRequiredString(item, 'taskId')
-  const directoryProjectId = readRequiredString(item, 'directoryProjectId')
-
-  if (!directoryId || !projectId || !taskId || !directoryProjectId) {
-    return undefined
-  }
-
-  const workItemId = createProjectTaskWorkItemId(projectId, taskId)
-
-  return createAuditEvent({
-    legacySource: 'project-tasks',
-    legacyKey: `${directoryProjectId}#${taskId}`,
-    eventType: 'work-item.backfilled',
-    directoryId,
-    occurredAt: normalizeTimestamp(item.updatedAt ?? item.createdAt),
-    actorUserId: 'system:backfill',
-    entityType: 'work-item',
-    entityId: workItemId,
-    targetType: 'work-item',
-    targetId: workItemId,
-    action: 'backfilled',
-    changes: createSnapshotChanges(item, [
-      ['projectId', false],
-      ['title', false],
-      ['titleKey', false],
-      ['assigneeUserId', true],
-      ['assigneeKey', false],
-      ['assignee', true],
-      ['status', false],
-      ['dueDate', false],
-      ['priority', false],
-      ['sortOrder', false],
-    ]),
-    reason: 'Legacy project task snapshot backfilled for Work Item migration.',
-    source: 'backfill',
-    metadata: {
-      adapter: 'legacy-project-task',
-      projectId,
     },
   })
 }
@@ -1331,10 +1271,6 @@ function createTeamIssueWorkItemId(teamId: string, issueId: string) {
   return limitBackfillText(`team/${teamId}/issue/${issueId}`)
 }
 
-function createProjectTaskWorkItemId(projectId: string, taskId: string) {
-  return limitBackfillText(`project/${projectId}/task/${taskId}`)
-}
-
 function createTeamIssueCommentId(workItemId: string, legacyEventId: string) {
   return limitBackfillText(`${workItemId}/comment/${legacyEventId}`)
 }
@@ -1435,7 +1371,6 @@ function createEmptyCheckpoint(configurationHash: string): CheckpointState {
     sources: {
       'team-issue-events': createEmptySourceCheckpoint(),
       'team-issues': createEmptySourceCheckpoint(),
-      'project-tasks': createEmptySourceCheckpoint(),
       'project-directory': createEmptySourceCheckpoint(),
       'workspace-access': createEmptySourceCheckpoint(),
     },

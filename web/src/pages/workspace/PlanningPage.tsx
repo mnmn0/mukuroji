@@ -97,7 +97,6 @@ import { createWorkItemDependencyMutationId } from '../../work-items/model/workI
 import {
   createPlanningPath,
   createProjectIssuesPath,
-  createProjectTasksPath,
   createTeamIssuesPath,
   type PlanningViewId,
 } from '../../shared/routing/paths'
@@ -608,7 +607,7 @@ export function PlanningPage() {
           )}
           onOpenMilestone={(milestoneId) => navigate(createPlanningPath('timeline', milestoneId))}
           onOpenProject={(project) => navigate(
-            createProjectTasksPath(project.projectId, project.teamId),
+            createProjectIssuesPath(project.projectId, project.teamId),
           )}
           onCreateEntity={canManagePlanning && snapshot && accessToken
             ? (input) => {

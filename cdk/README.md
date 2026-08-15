@@ -119,10 +119,8 @@ real metricによる`OK → ALARM → OK`と両receiptの手順は
 
 ## Outputs
 
-- `ProjectTasksFunctionUrl`: Lambda Function URL
-- `ProjectTasksApiGatewayUrl`: API Gateway HTTP API URL
-- `ProjectTasksApiUrl`: Function URL の後方互換 output
-- `ProjectTasksTableName`（legacy read-only compatibility）
+- `ApiFunctionUrl`: Lambda Function URL
+- `ApiGatewayUrl`: API Gateway HTTP API URL
 - `WorkItemsTableName`（既存 `TeamIssuesTable` を昇格した canonical store）
 - `TeamIssuesTableName`（`WorkItemsTableName` と同じ table を指す互換 output）
 - `WorkItemConfigurationTableName`（workflow、custom field、relation graph の scope store）
@@ -173,9 +171,8 @@ Document public-share secretを含む5つのnested secretはAPI roleだけが読
 identity/revision、全canonical key、nested secretを検証し終えてから環境へ原子的に反映します。
 
 この仕組みを初めてdeployすると、既存の自動命名Lambdaから明示名末尾`-api-v2`のLambdaへ一度だけ
-置換されます。したがって`ProjectTasksFunctionUrl`と、その後方互換output
-`ProjectTasksApiUrl`は変わるため、Function URL consumerは新しいoutputへ計画的に切り替えてください。
-`ProjectTasksApiGatewayUrl`は同じHTTP API endpointを維持し、default routeだけを`live` Aliasへ
+置換されます。Function URL consumerは`ApiFunctionUrl`へ、API Gateway consumerは
+`ApiGatewayUrl`へ切り替えてください。いずれも同じHTTP API endpointを維持し、default routeだけを`live` Aliasへ
 切り替えます。以後は、新しいconfiguration secretとLambda Versionの準備完了後にAliasが新Versionへ
 切り替わるため、HTTP API trafficはcode/configurationが揃ったversion単位で切り替わります。
 
@@ -694,12 +691,12 @@ Workspace metadata/owner/alias、全 seed project の manager row を consistent
 export FUNCTION_URL="$(aws cloudformation describe-stacks \
   --region "$AWS_REGION" \
   --stack-name CdkStack \
-  --query "Stacks[0].Outputs[?OutputKey=='ProjectTasksFunctionUrl'].OutputValue | [0]" \
+  --query "Stacks[0].Outputs[?OutputKey=='ApiFunctionUrl'].OutputValue | [0]" \
   --output text)"
 export API_GATEWAY_URL="$(aws cloudformation describe-stacks \
   --region "$AWS_REGION" \
   --stack-name CdkStack \
-  --query "Stacks[0].Outputs[?OutputKey=='ProjectTasksApiGatewayUrl'].OutputValue | [0]" \
+  --query "Stacks[0].Outputs[?OutputKey=='ApiGatewayUrl'].OutputValue | [0]" \
   --output text)"
 export ACCESS_TOKEN=<fresh-owner-access-token>
 
@@ -761,8 +758,7 @@ projectionを全件復元してから旧 Lambda への依存逆順rollbackを許
 
 1. maintenance window を設定し、write を停止する。
 2. source table 名、旧/new Workspace ID、item count、最新 timestamp を記録し、PITR / on-demand backup を確認する。
-3. 同じ table 内の新 partition へ conditional put で copy する。task / issue / event は全 row の payload `directoryId` を new Workspace ID に更新し、最低限、次の derived key を再構築する。
-   - tasks: `directoryId=<workspace>`、`directoryProjectId=<workspace>#project#<projectId>`
+3. 同じ table 内の新 partition へ conditional put で copy する。Work Item / issue / event は全 row の payload `directoryId` を new Workspace ID に更新し、最低限、次の derived key を再構築する。
    - directory: team / project / project-member row の `directoryId=<workspace>`。通常の `entryKey` は維持する。
    - team issues: `directoryId=<workspace>`、`directoryTeamId=<workspace>#team#<teamId>`、存在する `directoryProjectId=<workspace>#project#<projectId>`
    - issue events: `directoryId=<workspace>`、`directoryTeamIssueId=<workspace>#team#<teamId>#issue#<issueId>`
@@ -776,11 +772,11 @@ projectionを全件復元してから旧 Lambda への依存逆順rollbackを許
 
 ## Canonical Work Item deploy
 
-CDK は既存 `TeamIssuesTable` construct と key schema を維持し、`WorkItemsTableName` という canonical alias を公開します。`ProjectTasksTable` は Issue #20 の read-only adapter 用に Retain/PITR のまま残しますが、API Lambda には read permission だけを付与します。
+CDK は既存 `TeamIssuesTable` construct と key schema を維持し、`WorkItemsTableName` という canonical alias を公開します。旧 Project Task table、adapter、route は削除し、API Lambda には canonical Work Item / Issue resources の権限だけを付与します。
 
 Demo seed の custom resource は canonical `WorkItemsTable` だけに `creatorMemberKey`、`workflowSchemaVersion`、`workflowStatusId`、`statusCategory`、`customFieldValues`、空の `relationIds` を含む strict row を作成します。既存 row の upcast や legacy task からの copy は行いません。
 
-Deploy 時は `cdk diff` で table replacement/deletion がなく、legacy task table の write IAM が付与されていないことを確認します。Deploy 後は Team/project/Workspace list、任意の workflow status への detail update、stale revision の `409 WorkItemRevisionConflict` を Function URL と API Gateway の両方で確認します。Strict schema を満たさない開発用 row は削除し、現行 seed または API から作り直します。
+Deploy 時は `cdk diff` で canonical table の意図しない replacement/deletion がなく、旧 Project Task table や route への互換 IAM が残っていないことを確認します。Deploy 後は Team/project/Workspace list、任意の workflow status への detail update、stale revision の `409 WorkItemRevisionConflict` を Function URL と API Gateway の両方で確認します。Strict schema を満たさない開発用 row は削除し、現行 seed または API から作り直します。
 
 ## Work Item configuration
 

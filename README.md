@@ -121,14 +121,14 @@ secret は owner-only の root `.env` だけに保持します。Workspace audit
 `--env-file=.env` を指定して host process へ明示的に渡します。
 
 同じ ready hook で DynamoDB table `mukuroji-dashboard-local`,
-`mukuroji-project-tasks-v2-local`, `mukuroji-project-directory-local`,
+`mukuroji-team-issues-local`, `mukuroji-project-directory-local`,
 `mukuroji-workspace-access-local`, `mukuroji-enterprise-identity-local`,
 `mukuroji-workspace-search-local`, `mukuroji-analytics-local` も作成し、
-ダッシュボード集計、Refero のタスク、
+ダッシュボード集計、canonical Work Item、
 サイドバー用チーム/プロジェクト階層、Workspace metadata/member を投入します。
 Analytics table は保存済みレポート、immutable snapshot、定期配信 receipt を保持し、
 `ScheduleDueIndex` で配信対象を取得できる本番同等の key schema を使います。
-チーム/プロジェクト階層は `workspace#mukuroji-local` partition に seed され、タスク API はその directory に含まれる project だけを返します。
+チーム/プロジェクト階層は `workspace#mukuroji-local` partition に seed され、Project Issue API はその directory に含まれる project だけを返します。
 Workspace access table では `demo@example.com` を active owner、既存の project user を
 active member、`viewer@example.com` を active guest として初回だけ seed します。
 ready hook の再実行は既存 role/status を上書きしないため、利用停止した member が
@@ -188,9 +188,8 @@ bun run web:dev
 Web は Vite の proxy 経由で `/api` を `http://localhost:3000` に転送します。必要に応じて以下の環境変数を上書きできます。
 
 - `VITE_API_BASE_URL`: ブラウザから呼ぶ API の base URL。未指定時は `/api`
-- `VITE_TASKS_API_BASE_URL`: Work Item API を取得する Lambda Function URL。環境変数名は旧 client 互換で維持しています。CDK デプロイ後の `ProjectTasksApiUrl` 出力値を指定し、未指定時は `VITE_API_BASE_URL` または `/api` を使います。
-- `VITE_PROJECTS_API_BASE_URL`: DynamoDB のチーム/プロジェクト階層を取得する Lambda Function URL。未指定時は `VITE_TASKS_API_BASE_URL`、`VITE_API_BASE_URL`、`/api` の順に使います。
-- `VITE_WORKSPACE_API_BASE_URL`: 本番環境で Workspace member / invitation API を呼ぶ base URL。未指定時は `VITE_PROJECTS_API_BASE_URL`、`VITE_TASKS_API_BASE_URL`、`VITE_API_BASE_URL`、`/api` の順に使います。
+- `VITE_PROJECTS_API_BASE_URL`: DynamoDB のチーム/プロジェクト階層を取得する Lambda Function URL。未指定時は `VITE_API_BASE_URL`、`/api` の順に使います。
+- `VITE_WORKSPACE_API_BASE_URL`: 本番環境で Workspace member / invitation API を呼ぶ base URL。未指定時は `VITE_PROJECTS_API_BASE_URL`、`VITE_API_BASE_URL`、`/api` の順に使います。
 - `VITE_ENTERPRISE_IDENTITY_API_BASE_URL`: Enterprise identity/security 管理 API を呼ぶ base URL。未指定時は `VITE_WORKSPACE_API_BASE_URL`、`VITE_API_BASE_URL`、`/api` の順に使います。
 - `VITE_API_PROXY_TARGET`: Vite dev server が proxy する API。未指定時は `http://localhost:3000`
 - `COGNITO_ENDPOINT` / `AWS_ENDPOINT_URL`: API サーバーから見る Floci endpoint。未指定時は `http://localhost:4566`
@@ -202,7 +201,6 @@ Web は Vite の proxy 経由で `/api` を `http://localhost:3000` に転送し
 - `ENTERPRISE_SSO_STATE_SECRET`: SSO state 署名専用の 32–256 文字 secret
 - `DYNAMODB_ENDPOINT` / `AWS_ENDPOINT_URL_DYNAMODB` / `AWS_ENDPOINT_URL`: API サーバーから見る Floci DynamoDB endpoint。未指定時は `http://localhost:4566`
 - `MUKUROJI_DASHBOARD_TABLE`: ダッシュボード集計値を保存する DynamoDB table 名。未指定時は `mukuroji-dashboard-local`
-- `MUKUROJI_PROJECT_TASKS_TABLE`: プロジェクト別タスクを保存する DynamoDB table 名。未指定時は `mukuroji-project-tasks-v2-local`
 - `MUKUROJI_PROJECT_DIRECTORY_TABLE`: サイドバー用チーム/プロジェクト階層を保存する DynamoDB table 名。未指定時は `mukuroji-project-directory-local`
 - `MUKUROJI_WORKSPACE_ACCESS_TABLE`: Workspace metadata、member、invitation lifecycle を保存する DynamoDB table 名。未指定時は `mukuroji-workspace-access-local`
 - `MUKUROJI_TEAM_ISSUES_TABLE`: チーム所有 Issue を保存する DynamoDB table 名。未指定時は `mukuroji-team-issues-local`
@@ -240,7 +238,7 @@ Web は Vite の proxy 経由で `/api` を `http://localhost:3000` に転送し
 
 API サーバーは `/api/workspace/access`, `/api/dashboard/summary`, `/api/teams/projects`, `/api/work-items`,
 `/api/teams/{teamId}/issues`, `/api/projects/{projectId}/issues`,
-`/api/projects/{projectId}/tasks`, `/api/search`, `/api/saved-views`, `/api/audit/events`,
+`/api/search`, `/api/saved-views`, `/api/audit/events`,
 `/api/notifications`, `/api/documents`, `/api/automation/rules`, `/api/automation/templates`,
 `/api/automation/inbound-webhooks`, `/api/recurring-work`,
 `/api/automation/executions`, `/api/bulk-operations`, `/api/planning`,
@@ -310,7 +308,7 @@ backfill の両方が owner-only の root `.env` から同じ値を読み込み�
 CDK stack も同じタスクデータと指定した Workspace 用の
 チーム/プロジェクト階層に加え、Workspace metadata と初期 active owner を
 DynamoDB に idempotent に seed し、Lambda Function URL 経由で取得できます。
-AWS 環境で確認する場合は以下の順に実行し、出力された `ProjectTasksApiUrl` を
+AWS 環境で確認する場合は以下の順に実行し、出力された `ApiFunctionUrl` を
 Web の環境変数へ渡してください。
 
 ```sh
@@ -365,9 +363,9 @@ bun --filter cdk cdk diff -c triageIndexDeploymentStage=wake \
 `MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION` は1〜32文字のdeploy識別子です。APIの
 code、または4分割runtime configuration secretへ入るparameter/resource値を変更するdeployごとに
 新しい値へ進め、同じrevisionを異なる内容へ再利用しません。初回導入では物理Lambdaが`-api-v2`へ
-置換されるため、`ProjectTasksFunctionUrl`と後方互換の`ProjectTasksApiUrl`も変わります。
+置換されるため、`ApiFunctionUrl`も変わります。
 Function URL利用者は新しいstack outputへの計画的な切替が必要です。
-`ProjectTasksApiGatewayUrl`は同じHTTP API endpointを維持し、default routeだけが新しい
+`ApiGatewayUrl`は同じHTTP API endpointを維持し、default routeだけが新しい
 `live` Aliasへ切り替わります。以後のdeployは新しいimmutable configuration secretとLambda
 Versionの準備後に`live` Aliasでtrafficを切り替えます。旧secretは`Retain`されますが、
 CloudFormationが自動で再接続・削除するものではないため、rollback/recovery evidenceとして管理します。
@@ -402,7 +400,7 @@ Workspace partition は `WorkspaceDirectoryId`、初期 owner の小文字メー
 `InitialOwnerEmail` で指定します。Cognito の
 `custom:directory_id` / `custom:workspace_id` は `WorkspaceDirectoryId` と一致させてください。
 同じ Function URL から `/teams/projects`, `/teams/{teamId}/issues`,
-`/projects/{projectId}/issues`, `/projects/{projectId}/tasks`,
+`/projects/{projectId}/issues`,
 `/api/workspace/access` などの Workspace invitation API も取得できます。
 
 ### Workspace invitation lifecycle
@@ -437,19 +435,11 @@ membership 確定失敗は通常ログイン時にも再照合されるため、
 deploy 後は Function URL または API Gateway URL の output を Web に設定します。どちらも base URL の直下パスと `/api` prefix を受け付けます。
 
 ```sh
-VITE_TASKS_API_BASE_URL=<ProjectTasksApiUrl>
-VITE_WORKSPACE_API_BASE_URL=<ProjectTasksApiUrl>
+VITE_API_BASE_URL=<ApiFunctionUrl>
 ```
 
 fresh deploy、既存 stack upgrade、bootstrap 検証、rollback、PITR recovery の手順は [cdk/README.md](./cdk/README.md) を参照してください。
 
-`ProjectTasksTableName` は Issue #20 の legacy read-only adapter が参照する table です。旧 row を直接確認する場合だけ次を利用します。
-
-```sh
-TASKS_TABLE_NAME=<ProjectTasksTableName> bun run tasks:check-dynamodb
-```
-
-`TASKS_TABLE_NAME` は legacy check の必須環境変数です。新しい seed / API mutation はこの table に書き込みません。
 `PROJECT_DIRECTORY_ID` には CDK parameter `WorkspaceDirectoryId` と同じ値を指定します。
 チーム/プロジェクト階層の table 名は CDK output の
 `ProjectDirectoryTableName` で確認できます。

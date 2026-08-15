@@ -2343,5 +2343,4 @@ test('loads only canonical project execution Work Items', async () => {
   expect(calls.projectIssueReads).toEqual([
     { directoryId: 'user#demo@example.com', projectId: 'refero' },
   ])
-  expect(calls.taskReads).toEqual([])
 })

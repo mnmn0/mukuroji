@@ -4,6 +4,9 @@ import {
 } from '../../application/tenant-operation-resource-owner'
 import { TenantAdministrationError } from '../../domain/tenant-administration'
 
+/** Previous queue protocol version whose table target cursor needs rebasing. */
+const PREVIOUS_TENANT_OPERATION_EXECUTION_JOB_VERSION = 1 as const
+
 /** Minimal SQS record accepted by a tenant resource-owner Lambda. */
 export type TenantOperationSqsRecord = {
   /** Stable SQS message identifier used for partial batch failure. */
@@ -82,7 +85,8 @@ export function readTenantOperationExecutionJob(
   }
   if (
     !isRecord(value) ||
-    value.version !== TENANT_OPERATION_EXECUTION_JOB_VERSION ||
+    (value.version !== TENANT_OPERATION_EXECUTION_JOB_VERSION &&
+      value.version !== PREVIOUS_TENANT_OPERATION_EXECUTION_JOB_VERSION) ||
     !isIdentifier(value.workspaceId) ||
     !isIdentifier(value.operationId) ||
     !isTenantOperationStep(value.step)
@@ -92,13 +96,53 @@ export function readTenantOperationExecutionJob(
   const cursor = value.cursor === undefined
     ? undefined
     : readCursor(value.cursor)
+  const normalizedCursor = value.version === PREVIOUS_TENANT_OPERATION_EXECUTION_JOB_VERSION
+    ? rebasePreviousTargetCursor(value.step, cursor)
+    : cursor
   return {
     version: TENANT_OPERATION_EXECUTION_JOB_VERSION,
     workspaceId: value.workspaceId,
     operationId: value.operationId,
     step: value.step,
-    ...(cursor ? { cursor } : {}),
+    ...(normalizedCursor ? { cursor: normalizedCursor } : {}),
   }
+}
+
+/**
+ * Rebases a previous queue cursor after removing its first DynamoDB target.
+ *
+ * @param step - Lifecycle step owning the cursor.
+ * @param cursor - Validated cursor from the previous protocol version.
+ * @returns A cursor aligned with the current target list.
+ */
+function rebasePreviousTargetCursor(
+  step: TenantOperationExecutionJob['step'],
+  cursor: TenantOperationExecutionJob['cursor'],
+): TenantOperationExecutionJob['cursor'] {
+  if (!cursor || !usesRemovedFirstTarget(step, cursor.phase)) return cursor
+
+  if (cursor.targetIndex === 0) {
+    return {
+      targetIndex: 0,
+      processedCount: cursor.processedCount,
+      ...(cursor.phase ? { phase: cursor.phase } : {}),
+    }
+  }
+
+  return {
+    ...cursor,
+    targetIndex: cursor.targetIndex - 1,
+  }
+}
+
+/** Returns whether a lifecycle cursor used the removed first DynamoDB target. */
+function usesRemovedFirstTarget(
+  step: TenantOperationExecutionJob['step'],
+  phase: NonNullable<TenantOperationExecutionJob['cursor']>['phase'],
+): boolean {
+  return step === 'delete-data' ||
+    step === 'verify' ||
+    (step === 'export' && (phase === undefined || phase === 'snapshot'))
 }
 
 /** Validates one bounded secret-free continuation cursor. */

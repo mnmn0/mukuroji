@@ -3,9 +3,10 @@ import {
   RuntimeControlBlockedError,
   createStaticRuntimeControlProvider,
 } from '../infrastructure/runtime/runtime-control'
-import type {
-  ExecuteTenantOperationInput,
-  TenantOperationExecutionJob,
+import {
+  TENANT_OPERATION_EXECUTION_JOB_VERSION,
+  type ExecuteTenantOperationInput,
+  type TenantOperationExecutionJob,
 } from '../modules/tenant-administration'
 import {
   createTenantOperationExecutionEntrypoint,
@@ -98,7 +99,7 @@ test('runs a capability-isolated owner only from validated SQS records', async (
     Records: [{
       messageId: 'message-1',
       body: JSON.stringify({
-        version: 1,
+        version: TENANT_OPERATION_EXECUTION_JOB_VERSION,
         workspaceId: 'workspace-1',
         operationId: 'operation-1',
         step: 'delete-secrets',
@@ -109,7 +110,7 @@ test('runs a capability-isolated owner only from validated SQS records', async (
 
   expect(response).toEqual({ batchItemFailures: [] })
   expect(jobs).toEqual([{
-    version: 1,
+    version: TENANT_OPERATION_EXECUTION_JOB_VERSION,
     workspaceId: 'workspace-1',
     operationId: 'operation-1',
     step: 'delete-secrets',

@@ -16,7 +16,6 @@ INITIAL_OWNER_USERNAME="${MUKUROJI_INITIAL_OWNER_USERNAME:-$TEST_USERNAME}"
 INITIAL_OWNER_EMAIL="${MUKUROJI_INITIAL_OWNER_EMAIL:-$TEST_USERNAME}"
 SYSTEM_ADMIN_GROUP="${MUKUROJI_SYSTEM_ADMIN_GROUP:-mukuroji-system-admins}"
 DASHBOARD_TABLE="${MUKUROJI_DASHBOARD_TABLE:-mukuroji-dashboard-local}"
-PROJECT_TASKS_TABLE="${MUKUROJI_PROJECT_TASKS_TABLE:-mukuroji-project-tasks-v2-local}"
 PROJECT_DIRECTORY_TABLE="${MUKUROJI_PROJECT_DIRECTORY_TABLE:-mukuroji-project-directory-local}"
 WORK_ITEMS_TABLE="${MUKUROJI_WORK_ITEMS_TABLE:-${WORK_ITEMS_TABLE_NAME:-${MUKUROJI_TEAM_ISSUES_TABLE:-mukuroji-team-issues-local}}}"
 TEAM_ISSUES_TABLE="$WORK_ITEMS_TABLE"
@@ -428,32 +427,6 @@ aws_local dynamodb put-item \
     \"updatedAt\": {\"S\": \"$DASHBOARD_UPDATED_AT\"}
   }" \
   >/dev/null
-
-if ! aws_local dynamodb describe-table --table-name "$PROJECT_TASKS_TABLE" >/dev/null 2>&1; then
-  aws_local dynamodb create-table \
-    --table-name "$PROJECT_TASKS_TABLE" \
-    --attribute-definitions \
-      AttributeName=directoryProjectId,AttributeType=S \
-      AttributeName=taskId,AttributeType=S \
-      AttributeName=sortOrder,AttributeType=N \
-    --key-schema \
-      AttributeName=directoryProjectId,KeyType=HASH \
-      AttributeName=taskId,KeyType=RANGE \
-    --global-secondary-indexes '[
-      {
-        "IndexName": "ProjectSortOrderIndex",
-        "KeySchema": [
-          {"AttributeName": "directoryProjectId", "KeyType": "HASH"},
-          {"AttributeName": "sortOrder", "KeyType": "RANGE"}
-        ],
-        "Projection": {"ProjectionType": "ALL"}
-      }
-    ]' \
-    --billing-mode PAY_PER_REQUEST \
-    >/dev/null
-fi
-
-aws_local dynamodb wait table-exists --table-name "$PROJECT_TASKS_TABLE"
 
 if ! aws_local dynamodb describe-table --table-name "$WORK_ITEMS_TABLE" >/dev/null 2>&1; then
   aws_local dynamodb create-table \
@@ -1214,12 +1187,10 @@ MUKUROJI_INITIAL_OWNER_USERNAME=$INITIAL_OWNER_USERNAME
 MUKUROJI_INITIAL_OWNER_EMAIL=$PROJECT_MEMBER_KEY
 MUKUROJI_SYSTEM_ADMIN_GROUPS=$SYSTEM_ADMIN_GROUP
 MUKUROJI_DASHBOARD_TABLE=$DASHBOARD_TABLE
-MUKUROJI_PROJECT_TASKS_TABLE=$PROJECT_TASKS_TABLE
 MUKUROJI_PROJECT_DIRECTORY_TABLE=$PROJECT_DIRECTORY_TABLE
 MUKUROJI_TEAM_ISSUES_TABLE=$TEAM_ISSUES_TABLE
 MUKUROJI_WORK_ITEMS_TABLE=$WORK_ITEMS_TABLE
 MUKUROJI_TEAM_ISSUE_EVENTS_TABLE=$TEAM_ISSUE_EVENTS_TABLE
-PROJECT_TASKS_TABLE_NAME=$PROJECT_TASKS_TABLE
 TEAM_ISSUES_TABLE_NAME=$TEAM_ISSUES_TABLE
 WORK_ITEMS_TABLE_NAME=$WORK_ITEMS_TABLE
 MUKUROJI_COLLABORATION_TABLE=$COLLABORATION_TABLE
@@ -1248,7 +1219,7 @@ mv -f "$COGNITO_ENV_TEMP_FILE" "$COGNITO_ENV_FILE"
 
 echo "mukuroji Cognito ready: userPoolId=$POOL_ID clientId=$CLIENT_ID ssoClientId=$SSO_CLIENT_ID username=$INITIAL_OWNER_USERNAME adminGroup=$SYSTEM_ADMIN_GROUP"
 echo "mukuroji DynamoDB ready: table=$DASHBOARD_TABLE item=summary"
-echo "mukuroji DynamoDB ready: table=$PROJECT_TASKS_TABLE legacyTasks=read-only"
+echo "mukuroji DynamoDB ready: workItems=$WORK_ITEMS_TABLE projectDirectory=$PROJECT_DIRECTORY_TABLE"
 echo "mukuroji DynamoDB ready: table=$WORK_ITEMS_TABLE canonicalSeed=ready"
 echo "mukuroji DynamoDB ready: table=$PROJECT_DIRECTORY_TABLE workspaceDirectory=$WORKSPACE_DIRECTORY_ID"
 echo "mukuroji audit configured: table=$AUDIT_EVENTS_TABLE retentionDays=$AUDIT_RETENTION_DAYS"

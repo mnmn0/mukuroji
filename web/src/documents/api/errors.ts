@@ -68,9 +68,7 @@ export function resolveDocumentsApiBaseUrl(
       ? environment.VITE_WORKSPACE_API_BASE_URL
       : typeof environment.VITE_PROJECTS_API_BASE_URL === 'string'
         ? environment.VITE_PROJECTS_API_BASE_URL
-        : typeof environment.VITE_TASKS_API_BASE_URL === 'string'
-          ? environment.VITE_TASKS_API_BASE_URL
-          : typeof environment.VITE_API_BASE_URL === 'string'
+        : typeof environment.VITE_API_BASE_URL === 'string'
             ? environment.VITE_API_BASE_URL
             : '/api',
   )

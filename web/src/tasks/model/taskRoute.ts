@@ -5,7 +5,6 @@ import type {
   ProjectDirectoryTeam,
   ProjectUser,
 } from '../../projects/api'
-import { ProjectTasksApiError } from '../api/errors'
 
 /** Inputs used to resolve Project, Team, and Issue context for the task route. */
 export type ResolveProjectTaskRouteContextInput = {
@@ -101,14 +100,14 @@ export function mergeProjectUsers(
 }
 
 /**
- * Adapts the canonical Project issue load error to the legacy Project-task copy contract.
+ * Adapts the canonical Project issue load error to the Task UI copy contract.
  *
  * @param error - The error raised by the Project issue query.
- * @returns The task-specific error when the canonical fallback key is used, otherwise the input.
+ * @returns A canonical API error with Task UI copy, otherwise the input error.
  */
 export function normalizeProjectIssueError(error: unknown) {
   if (error instanceof TeamIssuesApiError && error.message === 'issues.error.loading') {
-    return new ProjectTasksApiError(error.status, 'tasks.error.loading', error.code)
+    return new TeamIssuesApiError(error.status, 'tasks.error.loading', error.code)
   }
 
   return error

@@ -47,7 +47,7 @@ export function isFocusAffectedCacheKey(
   if (scope.includePlanning && cacheScope === 'planning-snapshot') return true
 
   if (
-    cacheScope === 'project-tasks' &&
+    cacheScope === 'project-issues' &&
     typeof key[2] === 'string'
   ) {
     return scope.projectIds.includes(key[2])

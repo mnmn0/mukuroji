@@ -1526,7 +1526,6 @@ function configureFakeProjectClients(
       input: UpdateProjectQuickAccessPreferencesInput
       memberKey: string
     }>,
-    taskReads: [] as Array<{ directoryId: string; limit?: number; projectId: string }>,
     userLists: [] as Array<{
       directoryId?: string
       limit?: number
@@ -2346,32 +2345,6 @@ function configureFakeProjectClients(
           role: input.role ?? createWorkspaceMember(memberKey).role,
           status: input.status ?? createWorkspaceMember(memberKey).status,
           version: input.expectedVersion + 1,
-        }
-      },
-    },
-    projectTasks: {
-      async getProjectTasks(directoryId, projectId, readOptions) {
-        calls.taskReads.push({
-          directoryId,
-          projectId,
-          ...(readOptions?.limit === undefined ? {} : { limit: readOptions.limit }),
-        })
-
-        const tasks = ['wireframe'].map((taskId, index) => ({
-          source: 'legacy' as const,
-          id: taskId,
-          ...(taskId === 'wireframe'
-            ? { titleKey: 'tasks.item.wireframe' as const }
-            : { title: `Legacy Work Item ${index}` }),
-          assigneeKey: 'tasks.assignee.sato' as const,
-          assigneeUserId: options.taskAssigneeUserId,
-          status: 'in-progress' as const,
-          dueDate: '2026/06/03',
-          priority: 'high' as const,
-        }))
-        return {
-          projectId,
-          tasks: readOptions?.limit === undefined ? tasks : tasks.slice(0, readOptions.limit),
         }
       },
     },

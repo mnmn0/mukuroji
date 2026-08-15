@@ -1964,7 +1964,7 @@ test('Project-scoped Enterprise readers see Project and viewer task views withou
   expect(createCalls).toBe(0)
 })
 
-test('Project-scoped Enterprise writers can mutate Project task views but cannot manage Team defaults', async () => {
+test('Project-scoped Enterprise writers can mutate Project Work Item views but cannot manage Team defaults', async () => {
   configureFakeProjectClients(false, {
     workspaceRole: 'admin',
     projectAccesses: [],

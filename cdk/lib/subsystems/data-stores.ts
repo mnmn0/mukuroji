@@ -21,8 +21,6 @@ export interface DataStoreBuilderInput {
  * Stateful resources shared by API, worker, storage, bootstrap, and output subsystems.
  */
 export type DataStoreResources = {
-  /** Legacy project task table retained for compatibility reads. */
-  readonly legacyTasksTable: dynamodb.Table;
   /** Canonical team-owned Work Item table. */
   readonly workItemsTable: dynamodb.Table;
   /** Work Item field and workflow configuration table. */
@@ -92,21 +90,6 @@ export function buildDataStores(
   stack: cdk.Stack,
   input: DataStoreBuilderInput,
 ): DataStoreResources {
-  const legacyTasksTable = new dynamodb.Table(stack, 'ProjectTasksTable', {
-    partitionKey: { name: 'directoryProjectId', type: dynamodb.AttributeType.STRING },
-    sortKey: { name: 'taskId', type: dynamodb.AttributeType.STRING },
-    billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-    pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
-    removalPolicy: cdk.RemovalPolicy.RETAIN,
-  });
-
-  legacyTasksTable.addGlobalSecondaryIndex({
-    indexName: 'ProjectSortOrderIndex',
-    partitionKey: { name: 'directoryProjectId', type: dynamodb.AttributeType.STRING },
-    sortKey: { name: 'sortOrder', type: dynamodb.AttributeType.NUMBER },
-    projectionType: dynamodb.ProjectionType.ALL,
-  });
-
   const workItemsTable = new dynamodb.Table(stack, 'TeamIssuesTable', {
     partitionKey: { name: 'directoryTeamId', type: dynamodb.AttributeType.STRING },
     sortKey: { name: 'issueId', type: dynamodb.AttributeType.STRING },
@@ -517,7 +500,6 @@ export function buildDataStores(
   });
 
   return {
-    legacyTasksTable,
     workItemsTable,
     workItemConfigurationTable,
     automationTable,

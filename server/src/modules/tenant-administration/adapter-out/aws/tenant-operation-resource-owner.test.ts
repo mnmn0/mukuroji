@@ -33,7 +33,6 @@ function createConfig(): TenantOperationResourceOwnerConfig {
     fileBucketName: 'tenant-files',
     workItemImportBucketName: 'work-item-imports',
     cognitoUserPoolId: 'user-pool-1',
-    legacyTasksTableName: 'legacy-tasks',
     workItemsTableName: 'work-items',
     workItemEventsTableName: 'work-item-events',
     workItemConfigurationTableName: 'work-item-configuration',
@@ -199,14 +198,14 @@ describe('AwsTenantOperationResourceOwner', () => {
     try {
       await owner.execute(createDataJob(0), operation)
       expect(requests.at(-1)).toMatchObject({
-        TableName: 'legacy-tasks',
+        TableName: 'work-items',
         FilterExpression: '(begins_with(#tenant0, :tenant0))',
         ExpressionAttributeValues: {
           ':tenant0': { S: 'workspace/one#' },
         },
       })
 
-      await owner.execute(createDataJob(3), operation)
+      await owner.execute(createDataJob(2), operation)
       expect(requests.at(-1)).toMatchObject({
         TableName: 'work-item-configuration',
         ExpressionAttributeValues: {
@@ -215,7 +214,7 @@ describe('AwsTenantOperationResourceOwner', () => {
         },
       })
 
-      await owner.execute(createDataJob(4), operation)
+      await owner.execute(createDataJob(3), operation)
       expect(requests.at(-1)).toMatchObject({
         TableName: 'automation',
         ExpressionAttributeValues: {
@@ -225,7 +224,7 @@ describe('AwsTenantOperationResourceOwner', () => {
         },
       })
 
-      await owner.execute(createDataJob(6), operation)
+      await owner.execute(createDataJob(5), operation)
       expect(requests.at(-1)).toMatchObject({
         TableName: 'capacity-planning',
         KeyConditionExpression: '#partitionKey = :tenantValue',
@@ -234,7 +233,7 @@ describe('AwsTenantOperationResourceOwner', () => {
         },
       })
 
-      await owner.execute(createDataJob(8), operation)
+      await owner.execute(createDataJob(7), operation)
       expect(requests.at(-1)).toMatchObject({
         TableName: 'request-intake',
         ExpressionAttributeValues: {
@@ -243,7 +242,7 @@ describe('AwsTenantOperationResourceOwner', () => {
         },
       })
 
-      await owner.execute(createDataJob(10), operation)
+      await owner.execute(createDataJob(9), operation)
       expect(requests.at(-1)).toMatchObject({
         TableName: 'documents',
         ExpressionAttributeValues: {
@@ -252,7 +251,7 @@ describe('AwsTenantOperationResourceOwner', () => {
         },
       })
 
-      await owner.execute(createDataJob(11), operation)
+      await owner.execute(createDataJob(10), operation)
       expect(requests.at(-1)).toMatchObject({
         TableName: 'collaboration',
         ExpressionAttributeValues: {
@@ -260,7 +259,7 @@ describe('AwsTenantOperationResourceOwner', () => {
         },
       })
 
-      await owner.execute(createDataJob(13), operation)
+      await owner.execute(createDataJob(12), operation)
       expect(requests.at(-1)).toMatchObject({
         TableName: 'notifications',
         ExpressionAttributeValues: {
@@ -268,7 +267,7 @@ describe('AwsTenantOperationResourceOwner', () => {
         },
       })
 
-      await owner.execute(createDataJob(14), operation)
+      await owner.execute(createDataJob(13), operation)
       expect(requests.at(-1)).toMatchObject({
         TableName: 'focus',
         ExpressionAttributeValues: {
@@ -276,7 +275,7 @@ describe('AwsTenantOperationResourceOwner', () => {
         },
       })
 
-      await owner.execute(createDataJob(15), operation)
+      await owner.execute(createDataJob(14), operation)
       expect(requests.at(-1)).toMatchObject({
         TableName: 'realtime-sessions',
         ExpressionAttributeValues: {
@@ -284,7 +283,7 @@ describe('AwsTenantOperationResourceOwner', () => {
         },
       })
 
-      await owner.execute(createDataJob(16), operation)
+      await owner.execute(createDataJob(15), operation)
       expect(requests.at(-1)).toMatchObject({
         TableName: 'file-proofing',
         ExpressionAttributeValues: {
@@ -674,7 +673,7 @@ describe('AwsTenantOperationResourceOwner', () => {
       operationId: 'operation-1',
       step: 'snapshot',
       cursor: {
-        targetIndex: 18,
+        targetIndex: 17,
         phase: 'snapshot',
         processedCount: 0,
       },
@@ -788,7 +787,7 @@ describe('AwsTenantOperationResourceOwner', () => {
       operationId: operation.operationId,
       step: 'snapshot',
       cursor: {
-        targetIndex: 22,
+        targetIndex: 21,
         phase: 'snapshot',
         processedCount: 0,
       },
@@ -829,7 +828,7 @@ describe('AwsTenantOperationResourceOwner', () => {
       expect(copiedPaths[1]).toContain(
         '/snapshot/work-item-import-sources/job-1/source.source',
       )
-      expect(importSources.nextJob.cursor?.targetIndex).toBe(25)
+      expect(importSources.nextJob.cursor?.targetIndex).toBe(24)
     } finally {
       documentClient.destroy()
       s3Client.destroy()
@@ -906,7 +905,7 @@ describe('AwsTenantOperationResourceOwner', () => {
 
     try {
       const regularFiles = await owner.execute(
-        createDataJob(17, workspaceId),
+        createDataJob(16, workspaceId),
         operation,
       )
       if (regularFiles.status !== 'continuing') {
@@ -937,7 +936,7 @@ describe('AwsTenantOperationResourceOwner', () => {
       expect(deletionBodies[0]).toContain('version-2')
       expect(deletionBodies[1]).toContain(importObjectKey)
       expect(deletionBodies[1]).toContain('version-3')
-      expect(importSources.nextJob.cursor?.targetIndex).toBe(20)
+      expect(importSources.nextJob.cursor?.targetIndex).toBe(19)
     } finally {
       documentClient.destroy()
       s3Client.destroy()
@@ -1028,7 +1027,7 @@ describe('AwsTenantOperationResourceOwner', () => {
       workspaceId,
       operationId: operation.operationId,
       step: 'verify',
-      cursor: { targetIndex: 19, processedCount: 19 },
+      cursor: { targetIndex: 18, processedCount: 18 },
     }
 
     try {
@@ -1242,7 +1241,7 @@ describe('AwsTenantOperationResourceOwner', () => {
       workspaceId,
       operationId: operation.operationId,
       step: 'verify',
-      cursor: { targetIndex: 19, processedCount: 19 },
+      cursor: { targetIndex: 18, processedCount: 18 },
     }
 
     try {

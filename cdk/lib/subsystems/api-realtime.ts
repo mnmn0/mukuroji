@@ -297,7 +297,6 @@ function bindApiRuntimeConfiguration(
     documentsTable,
     enterpriseIdentityTable,
     tenantAdministrationTable,
-    legacyTasksTable,
     notificationsTable,
     focusTable,
     planningTable,
@@ -454,7 +453,6 @@ function bindApiRuntimeConfiguration(
       DOCUMENTS_TABLE_NAME: documentsTable.tableName,
       ENTERPRISE_IDENTITY_TABLE_NAME: enterpriseIdentityTable.tableName,
       TENANT_ADMINISTRATION_TABLE_NAME: tenantAdministrationTable.tableName,
-      MUKUROJI_PROJECT_TASKS_TABLE: legacyTasksTable.tableName,
       MUKUROJI_TEAM_ISSUE_EVENTS_TABLE: teamIssueEventsTable.tableName,
       PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
       WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
@@ -561,7 +559,6 @@ export function buildApiRuntime(
     documentsTable,
     enterpriseIdentityTable,
     tenantAdministrationTable,
-    legacyTasksTable,
     notificationsTable,
     focusTable,
     planningTable,
@@ -630,7 +627,6 @@ export function buildApiRuntime(
   );
   bindRuntimeControls(input.runtimeControls, apiFunction, 'api', false);
 
-  legacyTasksTable.grants.readData(apiFunction);
   workItemsTable.grants.readWriteData(apiFunction);
   teamIssueEventsTable.grants.readWriteData(apiFunction);
   projectDirectoryTable.grants.readWriteData(apiFunction);

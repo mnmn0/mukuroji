@@ -114,7 +114,7 @@ export function buildBootstrapResources(
   };
   const seedCanonicalWorkItems = new customResources.AwsCustomResource(
     scope,
-    'SeedProjectTasks',
+    'SeedWorkItems',
     createPreFenceBootstrapAwsCustomResourceProps(
       seedCanonicalWorkItemsCall,
       customResources.AwsCustomResourcePolicy.fromStatements([

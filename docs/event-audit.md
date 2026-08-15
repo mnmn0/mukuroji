@@ -185,11 +185,10 @@ consumer の DynamoDB projection と checkpoint は同じ transaction で更新�
 
 reader は `schemaVersion` ごとの decoder/upcaster を持ち、未知 version は黙って読み飛ばさず quarantine/error にする。schema を変更するときは古い event を in-place update せず、read-time upcast または新しい migration event を使う。
 
-初期 migration は [backfill-audit-events.ts](../server/scripts/backfills/backfill-audit-events.ts) を使用する。対象は次の 5 source である。
+初期 migration は [backfill-audit-events.ts](../server/scripts/backfills/backfill-audit-events.ts) を使用する。対象は次の 4 source である。
 
 - 既存 Team Issue event: `created` / `updated` / `commented` を汎用 event に変換する。
 - current Team Issue: `work-item.backfilled` snapshot を作る。
-- legacy project task: `work-item.backfilled` snapshot を作る。
 - project directory: team、project、project-member の `*.backfilled` snapshot を作る。
 - Workspace access: Workspace member と invitation の current row から、それぞれ `member.backfilled` と `invitation.backfilled` snapshot を作る。Workspace metadata row は対象外とする。
 
@@ -206,7 +205,6 @@ bun server/scripts/backfills/backfill-audit-events.ts --dry-run --limit 100
 AWS_ENDPOINT_URL=http://localhost:4566 \
 TEAM_ISSUE_EVENTS_TABLE_NAME=mukuroji-team-issue-events-local \
 TEAM_ISSUES_TABLE_NAME=mukuroji-team-issues-local \
-TASKS_TABLE_NAME=mukuroji-project-tasks-v2-local \
 PROJECT_DIRECTORY_TABLE_NAME=mukuroji-project-directory-local \
 WORKSPACE_ACCESS_TABLE_NAME=mukuroji-workspace-access-local \
 AUDIT_EVENTS_TABLE_NAME=mukuroji-audit-events \
@@ -216,7 +214,7 @@ bun server/scripts/backfills/backfill-audit-events.ts \
   --limit 1000
 ```
 
-`--limit` は 1 run で scan する source item 数の上限であり、event 数ではない。source は consistent read で scan する。checkpoint v2 は DynamoDB `LastEvaluatedKey` と累積 counter を 5 source のそれぞれに保持し、endpoint、region、profile、account hint、table 名、pseudonym key fingerprint、ID contract version の configuration hash が異なる環境では再利用を拒否する。hex decode前のWorkspace access ID contract v1で作成したcheckpoint v2も、ID contract v2のconfiguration hashとは一致せずfail-closedで拒否する。既定 path は `./audit-event-backfill-v2.checkpoint.json` で、file は owner のみが読める mode で作成する。`LastEvaluatedKey` には source identifier が含まれ得るため、checkpoint は機密情報として保管し、完了後に削除する。Workspace access source 追加前の checkpoint v1 は互換ではないため、新しい checkpoint path で再実行する。既存の 4 source を再走査しても conditional Put により event は重複しない。page 処理中に停止した場合は同じ page を再処理するが、同じ duplicate guard により安全である。`--dry-run` は table、event、checkpoint のいずれも書き込まず、log に entity/target ID を出力しない。local endpoint の本実行は共通 bootstrap を呼び、`mukuroji-audit-events` が未作成なら本番と同じ key/GSI/Stream を持つ table を作成してから書き込む。
+`--limit` は 1 run で scan する source item 数の上限であり、event 数ではない。source は consistent read で scan する。checkpoint v2 は DynamoDB `LastEvaluatedKey` と累積 counter を 4 source のそれぞれに保持し、endpoint、region、profile、account hint、table 名、pseudonym key fingerprint、ID contract version の configuration hash が異なる環境では再利用を拒否する。hex decode前のWorkspace access ID contract v1で作成したcheckpoint v2も、ID contract v2のconfiguration hashとは一致せずfail-closedで拒否する。既定 path は `./audit-event-backfill-v2.checkpoint.json` で、file は owner のみが読める mode で作成する。`LastEvaluatedKey` には source identifier が含まれ得るため、checkpoint は機密情報として保管し、完了後に削除する。Workspace access source 追加前の checkpoint v1 は互換ではないため、新しい checkpoint path で再実行する。既存の 4 source を再走査しても conditional Put により event は重複しない。page 処理中に停止した場合は同じ page を再処理するが、同じ duplicate guard により安全である。`--dry-run` は table、event、checkpoint のいずれも書き込まず、log に entity/target ID を出力しない。local endpoint の本実行は共通 bootstrap を呼び、`mukuroji-audit-events` が未作成なら本番と同じ key/GSI/Stream を持つ table を作成してから書き込む。
 
 WorkspaceAccess row は `recordKey=WORKSPACE` / `entryType=workspace-meta` だけを `ignored` とし、member/invitation の record key と identifier の一致、role/status/delivery/ownership enum、version、必須 field、canonical timestamp を検証する。公開 entity/target ID は API writer と同じ固定 HMAC key から導出し、raw Workspace ID や email を保存しない。未知 row または認識できる破損 row は skip せず migration を停止する。backfill は現在値だけを復元するため、過去の招待再送、取消、受諾、role/status 変更の順序や actor は復元せず、`system:backfill` actor の snapshot event として記録する。changes 内の email、member key、表示名、failure message は write-time に redact し、Cognito identity ID/username は snapshot payload に含めない。
 
@@ -261,9 +259,9 @@ project member event の entity/target ID は `<projectId>/<memberId>` とする
 
 ### Canonical Work Item
 
-event builder は Work Item store と legacy project task table を直接参照せず、canonical mutation adapter が entity ID、before/after revision、field changes を返す。Team-owned Work Item mutation は `metadata.adapter=canonical-work-item` を保存し、公開契約も `WorkItem` に統一する。
+event builder は canonical Work Item store を直接参照せず、canonical mutation adapter が entity ID、before/after revision、field changes を返す。Team-owned Work Item mutation は `metadata.adapter=canonical-work-item` を保存し、公開契約も `WorkItem` に統一する。
 
-`expectedRevision` は state transaction condition と event の `beforeRevision` / `afterRevision` に反映する。legacy project task は read compatibility と backfill sourceだけに限定し、新規 write を API code と Lambda IAM の両方で停止する。scope は ID と metadata の両方に保持し、別 Team/project の同名 ID を混同しない。詳細は [`work-items.md`](./work-items.md) を参照する。
+`expectedRevision` は state transaction condition と event の `beforeRevision` / `afterRevision` に反映する。scope は ID と metadata の両方に保持し、別 Team/project の同名 ID を混同しない。詳細は [`work-items.md`](./work-items.md) を参照する。
 
 ## 運用確認
 

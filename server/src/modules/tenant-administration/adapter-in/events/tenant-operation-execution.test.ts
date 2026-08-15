@@ -1,6 +1,9 @@
 import { expect, test } from 'bun:test'
 import type { ExecuteTenantOperationInput } from '../../application/tenant-operation-executor'
-import type { TenantOperationExecutionJob } from '../../application/tenant-operation-resource-owner'
+import {
+  TENANT_OPERATION_EXECUTION_JOB_VERSION,
+  type TenantOperationExecutionJob,
+} from '../../application/tenant-operation-resource-owner'
 import {
   processTenantOperationExecutionBatch,
   readRequestedTenantOperation,
@@ -90,13 +93,13 @@ test('dispatches each running operation revision to its current resource owner',
 
   expect(result).toEqual({ batchItemFailures: [] })
   expect(readRunnableTenantOperation(record)).toEqual({
-    version: 1,
+    version: TENANT_OPERATION_EXECUTION_JOB_VERSION,
     workspaceId: 'workspace-1',
     operationId: 'operation-1',
     step: 'delete-data',
   })
   expect(jobs).toEqual([{
-    version: 1,
+    version: TENANT_OPERATION_EXECUTION_JOB_VERSION,
     workspaceId: 'workspace-1',
     operationId: 'operation-1',
     step: 'delete-data',

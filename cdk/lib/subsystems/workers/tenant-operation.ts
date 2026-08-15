@@ -421,7 +421,6 @@ function buildTenantOperationCapabilityFunction(
       FILE_BUCKET_NAME: input.fileStorage.fileBucket.bucketName,
       FILE_PROOFING_TABLE_NAME: input.dataStores.fileProofingTable.tableName,
       FOCUS_TABLE_NAME: input.dataStores.focusTable.tableName,
-      MUKUROJI_PROJECT_TASKS_TABLE: input.dataStores.legacyTasksTable.tableName,
       MUKUROJI_TEAM_ISSUE_EVENTS_TABLE:
         input.dataStores.teamIssueEventsTable.tableName,
       NOTIFICATIONS_TABLE_NAME: input.dataStores.notificationsTable.tableName,
@@ -492,7 +491,6 @@ function grantTenantResourceOwner(
 ): void {
   const stores = input.dataStores;
   const dataTables = [
-    stores.legacyTasksTable,
     stores.workItemsTable,
     stores.teamIssueEventsTable,
     stores.workItemConfigurationTable,

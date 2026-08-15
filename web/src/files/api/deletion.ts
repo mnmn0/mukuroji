@@ -2,7 +2,7 @@ import { createMutationHeaders, type MutationRequestContext } from '../../shared
 import { FilesApiError } from './errors'
 
 const filesApiBaseUrl = trimTrailingSlash(
-  import.meta.env.VITE_TASKS_API_BASE_URL ?? import.meta.env.VITE_API_BASE_URL ?? '/api',
+  import.meta.env.VITE_API_BASE_URL ?? '/api',
 )
 
 /**

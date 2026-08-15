@@ -12,7 +12,7 @@ import {
 } from './tenant-operation-executor'
 
 /** Version of the durable tenant resource-owner queue protocol. */
-export const TENANT_OPERATION_EXECUTION_JOB_VERSION = 1 as const
+export const TENANT_OPERATION_EXECUTION_JOB_VERSION = 2 as const
 
 /** Capability-isolated owner responsible for one tenant lifecycle resource set. */
 export type TenantOperationResourceOwnerKind =

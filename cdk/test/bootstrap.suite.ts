@@ -75,7 +75,7 @@ test('fenced table bootstrap resources keep stable IDs and a create-only pre-fen
   const resources = synthesizedTemplate.findResources('Custom::AWS');
   const createOnlySeeds = [
     [
-      'SeedProjectTasks637E8868',
+      'SeedWorkItems1A607C25',
       'canonical-work-items-seed-v1',
       'TeamIssuesTable189D851D',
     ],
@@ -114,8 +114,8 @@ test('bootstrap transactions synthesize enclosed DynamoDB write permissions at i
   const outputs = template.toJSON().Outputs;
   const transactionCases = [
     {
-      customResourcePrefix: 'SeedProjectTasks',
-      policyPrefix: 'SeedProjectTasksCustomResourcePolicy',
+      customResourcePrefix: 'SeedWorkItems',
+      policyPrefix: 'SeedWorkItemsCustomResourcePolicy',
       itemActions: ['dynamodb:PutItem'],
       tableOutputName: 'WorkItemsTableName',
       physicalResourceId: 'canonical-work-items-seed-v1',
@@ -224,21 +224,20 @@ test('canonical Work Item seed writes complete schema data and preserves demo da
     JSON.stringify(resource).includes('transactWriteItems'),
   );
   const canonicalWorkItemSeedEntry = Object.entries(customResources).find(([logicalId]) =>
-    logicalId === 'SeedProjectTasks637E8868'
+    logicalId === 'SeedWorkItems1A607C25'
   );
   const canonicalWorkItemSeed = canonicalWorkItemSeedEntry?.[1];
   const canonicalWorkItemSeedPolicyEntry = Object.entries(
     template.findResources('AWS::IAM::Policy'),
-  ).find(([logicalId]) => logicalId === 'SeedProjectTasksCustomResourcePolicy924038FB');
+  ).find(([logicalId]) => logicalId === 'SeedWorkItemsCustomResourcePolicyA1DDF8BA');
   const projectDirectorySeed = transactWriteResources.find((resource) =>
     JSON.stringify(resource).includes('project-directory-seed-v3'),
   );
 
-  expect(canonicalWorkItemSeedEntry?.[0]).toBe('SeedProjectTasks637E8868');
+  expect(canonicalWorkItemSeedEntry?.[0]).toBe('SeedWorkItems1A607C25');
   expect(canonicalWorkItemSeed).toBeDefined();
   expect(canonicalWorkItemSeedPolicyEntry).toBeDefined();
   expect(projectDirectorySeed).toBeDefined();
-  expect(JSON.stringify(customResources)).not.toContain('refero-project-tasks-seed-v3');
   expect(Object.keys(customResources).join(',')).not.toContain('SeedCanonicalWorkItems');
 
   const workItemPayload = serializeAwsSdkCall(canonicalWorkItemSeed?.Properties.Create);
@@ -246,7 +245,6 @@ test('canonical Work Item seed writes complete schema data and preserves demo da
 
   expect(workItemPayload).toContain('WorkspaceDirectoryId');
   expect(workItemPayload).toContain('TeamIssuesTable189D851D');
-  expect(workItemPayload).not.toContain('ProjectTasksTableE21F6637');
   expect(workItemPayload).toContain('attribute_not_exists(directoryTeamId)');
   expect(workItemPayload).toContain('attribute_not_exists(issueId)');
   expect(workItemPayload).toContain('core-team');
@@ -297,7 +295,6 @@ test('canonical Work Item seed writes complete schema data and preserves demo da
   );
   expect(JSON.stringify(canonicalWorkItemSeedPolicy))
     .not.toContain('dynamodb:TransactWriteItems');
-  expect(JSON.stringify(canonicalWorkItemSeedPolicy)).not.toContain('ProjectTasksTableE21F6637');
   expect(directoryPayload).toContain('WorkspaceDirectoryId');
   expect(directoryPayload.match(/"teamSourceEntryKey"/g)).toHaveLength(2);
   expect(directoryPayload.match(/"projectSourceEntryKey"/g)).toHaveLength(2);

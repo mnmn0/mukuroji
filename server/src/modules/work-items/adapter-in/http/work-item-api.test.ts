@@ -75,34 +75,6 @@ const internalWorkItemFields = [
   'approvalSummary',
 ]
 
-test('does not expose legacy project task mutation routes', async () => {
-  const calls = configureFakeProjectClients(true)
-  const headers = {
-    Authorization: 'Bearer test-token',
-    'Content-Type': 'application/json',
-  }
-
-  const [createResponse, updateResponse] = await Promise.all([
-    app.request('/api/projects/refero/tasks', {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ title: '新規タスク' }),
-    }),
-    app.request('/api/projects/refero/tasks/wireframe', {
-      method: 'PATCH',
-      headers,
-      body: JSON.stringify({ status: 'done' }),
-    }),
-  ])
-
-  expect(createResponse.status).toBe(404)
-  expect(updateResponse.status).toBe(404)
-  expect(calls.accessChecks).toEqual([])
-  expect(calls.issueCreates).toEqual([])
-  expect(calls.issueUpdates).toEqual([])
-  expect(calls.taskReads).toEqual([])
-})
-
 test('loads only canonical team-owned Work Items after team access is confirmed', async () => {
   const calls = configureFakeProjectClients(true, { taskAssigneeUserId: 'sato@example.com' })
 
@@ -127,7 +99,6 @@ test('loads only canonical team-owned Work Items after team access is confirmed'
   expect(calls.issueReads).toEqual([
     { directoryId: 'user#demo@example.com', teamId: 'core-team' },
   ])
-  expect(calls.taskReads).toEqual([])
 })
 
 test('loads all accessible canonical Work Items including unassigned items', async () => {
@@ -160,7 +131,6 @@ test('loads all accessible canonical Work Items including unassigned items', asy
   expect(calls.issueReads).toEqual([
     { directoryId: 'user#demo@example.com', limit: 1001, teamId: 'core-team' },
   ])
-  expect(calls.taskReads).toEqual([])
   expect(calls.projectIssueReads).toEqual([])
 })
 
@@ -213,7 +183,6 @@ test('rejects Work Item aggregate Team fan-out beyond the hard cap before item r
   expect(response.status).toBe(413)
   expect(await response.json()).toMatchObject({ code: 'WorkItemListLimitExceeded' })
   expect(calls.issueReads).toEqual([])
-  expect(calls.taskReads).toEqual([])
   expect(calls.projectIssueReads).toEqual([])
 })
 
@@ -683,41 +652,7 @@ test('rejects a canonical partition that exceeds the bounded Work Item scan budg
   expect(calls.issueReads).toEqual([
     { directoryId: 'user#demo@example.com', limit: 1001, teamId: 'core-team' },
   ])
-  expect(calls.taskReads).toEqual([])
   expect(calls.projectIssueReads).toEqual([])
-})
-
-test('keeps shared-project legacy rows isolated to the read-only task adapter', async () => {
-  const calls = configureFakeProjectClients(true, {
-    additionalTeams: [{
-      id: 'design-team',
-      name: 'デザインチーム',
-      projects: [{ id: 'refero', name: 'Refero', tone: 'purple' }],
-    }],
-    projectAccesses: [{ projectId: 'refero', role: 'manager' }],
-  })
-  const headers = { Authorization: 'Bearer test-token' }
-
-  const projectResponse = await app.request('/api/projects/refero/tasks', { headers })
-  const teamResponse = await app.request('/api/teams/core-team/issues', { headers })
-  const detailResponse = await app.request('/api/teams/core-team/issues/wireframe', { headers })
-  const aggregateResponse = await app.request('/api/work-items', { headers })
-
-  expect(projectResponse.status).toBe(200)
-  expect(teamResponse.status).toBe(200)
-  expect(detailResponse.status).toBe(404)
-  expect(aggregateResponse.status).toBe(200)
-  expect((await projectResponse.json()).tasks).toEqual([
-    expect.objectContaining({ id: 'wireframe', source: 'legacy' }),
-  ])
-  expect((await teamResponse.json()).issues).toEqual([
-    expect.objectContaining({ id: 'onboarding-friction', source: 'dynamodb' }),
-  ])
-  expect((await aggregateResponse.json()).workItems)
-    .not.toContainEqual(expect.objectContaining({ id: 'wireframe' }))
-  expect(calls.taskReads).toEqual([
-    { directoryId: 'user#demo@example.com', projectId: 'refero' },
-  ])
 })
 
 test('creates a team-owned issue after team access is confirmed', async () => {

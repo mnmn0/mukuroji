@@ -50,11 +50,11 @@ test('evaluates role and guest ceilings without AWS or Hono adapters', () => {
 test('denies unregistered routes and matches parameterized routes', () => {
   const rules = [{
     method: 'GET',
-    pathPattern: '/api/projects/:projectId/tasks',
+    pathPattern: '/api/projects/:projectId/issues',
     permission: 'work-items.read',
   }] satisfies EnterpriseRoutePermissionRule[]
 
-  expect(resolveRoutePermission('GET', '/api/projects/project-1/tasks', rules))
+  expect(resolveRoutePermission('GET', '/api/projects/project-1/issues', rules))
     .toBe('work-items.read')
   expect(resolveRoutePermission('GET', '/api/projects/project-1/files', rules))
     .toBeUndefined()
