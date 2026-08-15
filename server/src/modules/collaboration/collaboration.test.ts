@@ -1008,6 +1008,7 @@ test('does not subscribe service actors as automatic watchers', async () => {
     automaticWatcherCandidates: [
       { memberKey: 'creator@example.com', reason: 'creator' },
       { memberKey: 'assignee@example.com', reason: 'assignee' },
+      { memberKey: 'automation:rule-1', reason: 'creator' },
     ],
     auditContext: createMutationAuditContext({
       workspaceId: 'workspace#one',

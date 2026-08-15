@@ -5660,16 +5660,18 @@ function buildAutomaticWatcherCandidates(
   actorIsService: boolean,
 ) {
   const grouped = new Map<string, Set<CollaborationWatcherReason>>()
+  const serviceActorMemberKey = actorIsService ? normalizeMemberKey(actorMemberKey) : undefined
   const add = (memberKey: string, reason: CollaborationWatcherReason) => {
     const normalizedMemberKey = normalizeMemberKey(memberKey)
+    if (normalizedMemberKey === serviceActorMemberKey) {
+      return
+    }
     const reasons = grouped.get(normalizedMemberKey) ?? new Set<CollaborationWatcherReason>()
     reasons.add(reason)
     grouped.set(normalizedMemberKey, reasons)
   }
 
-  if (!actorIsService) {
-    add(actorMemberKey, 'comment')
-  }
+  add(actorMemberKey, 'comment')
   for (const memberKey of mentionMemberKeys) {
     add(memberKey, 'mention')
   }
