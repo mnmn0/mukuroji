@@ -238,6 +238,8 @@ test('canonical Work Item seed writes complete schema data and preserves demo da
   expect(canonicalWorkItemSeed).toBeDefined();
   expect(canonicalWorkItemSeedPolicyEntry).toBeDefined();
   expect(projectDirectorySeed).toBeDefined();
+  expect(JSON.stringify(canonicalWorkItemSeed)).not.toContain('ProjectTasksTableE21F6637');
+  expect(JSON.stringify(transactWriteResources)).not.toContain('ProjectTasksTableE21F6637');
   expect(Object.keys(customResources).join(',')).not.toContain('SeedCanonicalWorkItems');
 
   const workItemPayload = serializeAwsSdkCall(canonicalWorkItemSeed?.Properties.Create);

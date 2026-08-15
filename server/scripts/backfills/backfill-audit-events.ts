@@ -206,28 +206,18 @@ type CheckpointState = {
 }
 
 /**
- * Backfill で利用する table 名です。
+ * DynamoDB table names used by the audit-event backfill.
  */
 type TableNames = {
-  /**
-   * 旧 Team Issue event table 名です。
-   */
+  /** Legacy Team Issue event table name. */
   teamIssueEvents: string
-  /**
-   * Current Team Issue table 名です。
-   */
+  /** Current Team Issue table name. */
   teamIssues: string
-  /**
-   * Team/project/member directory table 名です。
-   */
+  /** Team, project, and member directory table name. */
   projectDirectory: string
-  /**
-   * Workspace member / invitation lifecycle table 名です。
-   */
+  /** Workspace membership and invitation lifecycle table name. */
   workspaceAccess: string
-  /**
-   * Backfill 先の汎用 AuditEvents table 名です。
-   */
+  /** Destination audit-events table name. */
   auditEvents: string
 }
 
@@ -388,6 +378,7 @@ function parsePositiveInteger(value: string, optionName: string) {
   return parsed
 }
 
+/** Prints the command-line usage and required environment variables. */
 function printHelp() {
   console.info(`Usage: bun server/scripts/backfills/backfill-audit-events.ts [options]
 
@@ -408,6 +399,13 @@ For a local endpoint, repository-local default table names are used when omitted
 Write runs bootstrap mukuroji-audit-events with the shared schema when it is missing.`)
 }
 
+/**
+ * Resolves source and destination table names from the environment.
+ *
+ * @param endpoint Optional DynamoDB endpoint used to determine whether local defaults are allowed.
+ * @returns Resolved table names for the backfill.
+ * @throws When a required table name is missing outside a local DynamoDB endpoint.
+ */
 function resolveTableNames(endpoint: string | undefined): TableNames {
   const allowLocalDefaults = endpoint !== undefined && isLocalEndpoint(endpoint)
 
@@ -490,6 +488,13 @@ function createDocumentClient(baseClient: DynamoDBClient) {
   })
 }
 
+/**
+ * Creates the ordered source mappings consumed by the audit-event backfill.
+ *
+ * @param tables Resolved source and destination table names.
+ * @param workspaceAuditPseudonymKey Key used to pseudonymize workspace audit data.
+ * @returns Source definitions in checkpoint and processing order.
+ */
 function createSourceDefinitions(
   tables: TableNames,
   workspaceAuditPseudonymKey: string,

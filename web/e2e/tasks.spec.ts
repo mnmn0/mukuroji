@@ -107,17 +107,11 @@ const reciprocalWorkItemRelationTypes = {
   duplicate: 'duplicate',
 } as const satisfies Record<WorkItemRelationType, WorkItemRelationType>
 
-/**
- * API stub が受けた request 数です。
- */
+/** Counts requests received by the API stub. */
 type MockRequestCounts = {
-  /**
-   * チーム/プロジェクト一覧 API の request 数です。
-   */
+  /** Number of team and project directory API requests. */
   projectDirectory: number
-  /**
-   * プロジェクト別 Issue API の request 数です。
-   */
+  /** Number of Issue API requests grouped by project. */
   projectIssues: Record<string, number>
   /**
    * Workspace 全体の Work Item 一覧 API request 数です。
