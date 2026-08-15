@@ -286,7 +286,6 @@ import {
   type ProjectTaskResponseItem,
   type ProjectTasksResponse,
   type PublicUpdateTeamIssueRequestBody,
-  type TeamIssueCommentResponseItem,
   type TeamIssueDetailReadOptions,
   type TeamIssueDetailResponse,
   type TeamIssueResponseItem,
@@ -8865,18 +8864,7 @@ routeApp.get('/api/teams/:teamId/issues/:issueId', async (c) => {
       { consistentIssueRead: true },
     )
     requireAssignedProjectPermission(principal, context, detail.issue.assignedProjectId, 'viewer')
-    const entityKey = createWorkItemCollaborationEntityKey(principal.directoryId, teamId, issueId)
-    const projectEntityKey = detail.issue.assignedProjectId
-      ? createProjectCollaborationEntityKey(principal.directoryId, detail.issue.assignedProjectId)
-      : undefined
-    const [collaborationPreview, resolvedConfiguration, relationPage] = await Promise.all([
-      workItemDependencies.collaboration.getThread({
-        entityKey,
-        viewerMemberKey: principal.userKey,
-        projectEntityKey,
-        limit: 50,
-        includeScopeState: false,
-      }),
+    const [resolvedConfiguration, relationPage] = await Promise.all([
       workItemDependencies.workItemConfigurations.getTeamConfiguration(principal.directoryId, teamId),
       workItemDependencies.workItemConfigurations.listRelations(principal.directoryId, teamId, issueId),
     ])
@@ -8891,10 +8879,6 @@ routeApp.get('/api/teams/:teamId/issues/:issueId', async (c) => {
       await hydrateTeamIssueDetailResponse(
         {
           ...detail,
-          comments: mergeLegacyCompatibleComments(
-            detail.comments,
-            collaborationPreview.comments,
-          ),
           resolvedConfiguration,
           relations: visibleRelations,
           relationGraphRevision: relationPage.graphRevision,
@@ -9181,11 +9165,6 @@ routeApp.patch('/api/teams/:teamId/issues/:issueId', async (c) => {
   }
 })
 
-/** 一度の legacy collaboration page で評価する旧 event の最大件数です。 */
-const LEGACY_COLLABORATION_EVENT_PREVIEW_LIMIT = 50
-/** Root page cursor と legacy event cursor を区別する接頭辞です。 */
-const LEGACY_COLLABORATION_CURSOR_PREFIX = 'legacy.'
-
 /**
  * Team-owned Work Item の root comments、replies、watch、presence を page 取得します。
  */
@@ -9213,13 +9192,12 @@ routeApp.get('/api/teams/:teamId/issues/:issueId/collaboration', async (c) => {
     const limit = limitValue === undefined ? undefined : Number(limitValue)
     const requestedRootCommentId = c.req.query('rootCommentId')
     const requestedCursor = c.req.query('cursor')
-    const isLegacyPage = !requestedRootCommentId &&
-      requestedCursor?.startsWith(LEGACY_COLLABORATION_CURSOR_PREFIX) === true
-    const legacyEventCursor = isLegacyPage
-      ? requestedCursor.slice(LEGACY_COLLABORATION_CURSOR_PREFIX.length)
-      : undefined
-    if (isLegacyPage && !legacyEventCursor) {
-      throw new CollaborationError(400, 'InvalidCollaborationCursor', 'Legacy comment cursor is invalid.')
+    if (requestedCursor?.startsWith('legacy.') === true) {
+      throw new CollaborationError(
+        400,
+        'InvalidCollaborationCursor',
+        'Collaboration cursor is invalid.',
+      )
     }
     const canWrite = canWriteTeamIssue(principal, context, detail.issue.assignedProjectId)
 
@@ -9259,11 +9237,11 @@ routeApp.get('/api/teams/:teamId/issues/:issueId/collaboration', async (c) => {
       entityKey,
       viewerMemberKey: principal.userKey,
       projectEntityKey,
-      cursor: isLegacyPage ? undefined : requestedCursor,
-      limit: isLegacyPage ? 1 : limit === undefined ? 10 : Math.min(limit, 20),
+      cursor: requestedCursor,
+      limit: limit === undefined ? 10 : Math.min(limit, 20),
     })
     const replyPages = await Promise.all(
-      (isLegacyPage ? [] : roots.comments).map((root) => workItemDependencies.collaboration.getThread({
+      roots.comments.map((root) => workItemDependencies.collaboration.getThread({
         entityKey,
         viewerMemberKey: principal.userKey,
         projectEntityKey,
@@ -9272,86 +9250,28 @@ routeApp.get('/api/teams/:teamId/issues/:issueId/collaboration', async (c) => {
         includeScopeState: false,
       })),
     )
-    const comments = (isLegacyPage ? [] : roots.comments).flatMap((root, index) => [
+    const comments = roots.comments.flatMap((root, index) => [
       root,
       ...[...(replyPages[index]?.comments ?? [])].reverse(),
     ])
-    const storedCommentIds = new Set(comments.map((comment) => comment.id))
-    const legacyDetail = isLegacyPage || !roots.nextCursor
-      ? await workItemDependencies.teamIssues.getTeamIssueDetail(
-          principal.directoryId,
-          teamId,
-          issueId,
-          {
-            consistentIssueRead: true,
-            eventLimit: LEGACY_COLLABORATION_EVENT_PREVIEW_LIMIT,
-            newestEventsFirst: true,
-            eventType: 'commented',
-            eventCursor: legacyEventCursor,
-          },
-        )
-      : undefined
-    if (legacyDetail) {
-      requireAssignedProjectPermission(
+    const collaborationComments = comments.map((comment) =>
+      toCollaborationCommentResponse(
+        comment,
         principal,
         context,
-        legacyDetail.issue.assignedProjectId,
-        'viewer',
-      )
-      if (legacyDetail.issue.assignedProjectId !== detail.issue.assignedProjectId) {
-        throw new CollaborationError(
-          409,
-          'CollaborationConflict',
-          'Work Item assignment changed while comments were loading.',
-        )
-      }
-    }
-    const legacyComments = (legacyDetail?.comments ?? [])
-      .filter((comment) => !storedCommentIds.has(comment.id)).map((comment) => ({
-          id: comment.id,
-          rootCommentId: comment.id,
-          authorMemberKey: comment.actorUserId,
-          bodyMarkdown: comment.body,
-          version: 1,
-          mentionMemberKeys: [],
-          createdAt: comment.createdAt,
-          updatedAt: comment.createdAt,
-          acceptedResolutions: [],
-          reactions: [],
-          source: 'legacy' as const,
-          capabilities: {
-            canEdit: false,
-            canDelete: false,
-            canResolve: false,
-            canReply: false,
-            canReact: false,
-          },
-        }))
-    const collaborationComments = [
-      ...comments.map((comment) =>
-        toCollaborationCommentResponse(
-          comment,
-          principal,
-          context,
-          detail.issue,
-          replyPages.some((page, index) =>
-            roots.comments[index]?.id === comment.rootCommentId && page.threadResolved === true
-          ),
+        detail.issue,
+        replyPages.some((page, index) =>
+          roots.comments[index]?.id === comment.rootCommentId && page.threadResolved === true
         ),
       ),
-      ...legacyComments,
-    ]
+    )
     const replyNextCursors = Object.fromEntries(
-      (isLegacyPage ? [] : roots.comments).flatMap((root, index) => {
+      roots.comments.flatMap((root, index) => {
         const cursor = replyPages[index]?.nextCursor
         return cursor ? [[root.id, cursor] as const] : []
       }),
     )
-    const nextCursor = !isLegacyPage && roots.nextCursor
-      ? roots.nextCursor
-      : legacyDetail?.nextEventCursor
-        ? `${LEGACY_COLLABORATION_CURSOR_PREFIX}${legacyDetail.nextEventCursor}`
-        : undefined
+    const nextCursor = roots.nextCursor
 
     return c.json({
       comments: collaborationComments,
@@ -9883,7 +9803,6 @@ routeApp.post('/api/teams/:teamId/issues/:issueId/comments', async (c) => {
     const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
     requireWorkspaceBusinessWrite(principal)
     const body = await readJson<CreateTeamIssueCommentRequestBody>(c.req) ?? {}
-    const modernContract = body.bodyMarkdown !== undefined
     const { context, detail } = await loadAuthorizedTeamIssue(principal, teamId, issueId, 'member')
     const mentionMemberKeys = readCommentMentionMemberKeys(body.mentionMemberKeys)
     await requireValidCommentMentions(
@@ -9906,7 +9825,7 @@ routeApp.post('/api/teams/:teamId/issues/:issueId/comments', async (c) => {
       projectId: detail.issue.assignedProjectId,
       projectEntityKey,
       actorMemberKey: principal.userKey,
-      bodyMarkdown: readRequiredCommentBody(modernContract ? body.bodyMarkdown : body.body),
+      bodyMarkdown: readRequiredCommentBody(body.bodyMarkdown),
       parentCommentId: readOptionalCommentId(body.parentCommentId, 'Parent comment ID'),
       mentionMemberKeys,
       automaticWatcherCandidates,
@@ -9930,20 +9849,10 @@ routeApp.post('/api/teams/:teamId/issues/:issueId/comments', async (c) => {
       'comment creation',
     )
 
-    return modernContract
-      ? c.json({
-          comment: toCollaborationCommentResponse(comment, principal, context, detail.issue),
-          activity,
-        }, 201)
-      : c.json({
-          comment: {
-            id: comment.id,
-            actorUserId: comment.authorMemberKey,
-            body: comment.bodyMarkdown,
-            createdAt: comment.createdAt,
-          },
-          activity,
-        }, 201)
+    return c.json({
+      comment: toCollaborationCommentResponse(comment, principal, context, detail.issue),
+      activity,
+    }, 201)
   } catch (error) {
     return toCollaborationErrorResponse(c, error)
   }
@@ -28517,30 +28426,6 @@ async function readWorkItemApprovalSummary(directoryId: string, workItem: TeamIs
 function hasApprovalSummaryContent(summary: ApprovalSummary) {
   return summary.pendingCount + summary.approvedCount + summary.rejectedCount +
     summary.changesRequestedCount > 0
-}
-
-function mergeLegacyCompatibleComments(
-  legacyComments: TeamIssueCommentResponseItem[],
-  collaborationComments: CollaborationComment[],
-) {
-  const commentsById = new Map(legacyComments.map((comment) => [comment.id, comment]))
-
-  for (const comment of collaborationComments) {
-    if (comment.deletedAt) {
-      commentsById.delete(comment.id)
-      continue
-    }
-    commentsById.set(comment.id, {
-      id: comment.id,
-      actorUserId: comment.authorMemberKey,
-      body: comment.bodyMarkdown,
-      createdAt: comment.createdAt,
-    })
-  }
-
-  return [...commentsById.values()].sort((left, right) =>
-    left.createdAt.localeCompare(right.createdAt)
-  )
 }
 
 async function hydrateCreateTeamIssueResponse(response: CreateTeamIssueResponse) {

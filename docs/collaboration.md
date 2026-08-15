@@ -82,6 +82,16 @@ Presence と typing は短い TTL を持つ lease です。WebSocket 接続が�
 
 Comment edit/resolve/delete は `expectedVersion` を要求します。読み込み後に別 user が変更した場合は `409 CommentVersionConflict` を返し、client は最新内容を再取得します。push/polling は表示の鮮度を上げる仕組みであり、整合性の最終防衛線は version 条件です。
 
-## Legacy migration
+## Canonical comment source
 
-既存の `TeamIssueEventsTable` にある `commented` row は、同じ comment ID と作成日時を使って collaboration comment へ backfill できます。Backfill は notification を生成せず、audit event では `outboxStatus=suppressed` とします。移行期間中は persisted root page を読み終えた後、legacy event を新しい順に最大 50 件ずつ評価し、`commented` row を read-only comment として統合します。opaque cursor で event partition の末尾まで継続できるため、全件一括読込と無制限な response 拡大を避けながら過去 comment へ到達できます。backfill 済み ID と legacy row が別 page に現れた場合も Web は persisted comment を優先します。migration marker の確認後に fallback を削除します。
+Collaboration comment の正本は Collaboration table の persisted root/reply row だけです。旧 `TeamIssueEventsTable` の `commented` row は comment response へ読み込まず、`legacy.` で始まる旧 cursor も `InvalidCollaborationCursor` として拒否します。旧 row の存在確認と必要な backfill は runtime の fallback とは分離した検証・運用手順で扱います。
+
+開発／検証環境で旧 row が残っていないことを確認する場合は、対象 Issue の `ISSUE_ID` を指定して既存の bounded check を実行します。`legacy_commented_event_count=0` 以外の場合は non-zero で終了します。
+
+```sh
+TEAM_ISSUES_TABLE_NAME=<team-issues-table> \
+TEAM_ISSUE_EVENTS_TABLE_NAME=<team-issue-events-table> \
+ISSUE_ID=<issue-id> \
+AWS_REGION=<region> \
+bash scripts/check-team-issues-dynamodb.sh
+```

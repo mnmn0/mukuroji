@@ -20,7 +20,7 @@ export type TeamIssueComment = {
   /**
    * thread のルートコメント ID です。
    */
-  rootCommentId?: string
+  rootCommentId: string
   /**
    * 返信先コメント ID です。root comment では未設定です。
    */
@@ -28,23 +28,15 @@ export type TeamIssueComment = {
   /**
    * コメント作成者の Workspace member key です。
    */
-  authorMemberKey?: string
-  /**
-   * 旧 comment API が返す actor user ID です。
-   */
-  actorUserId?: string
+  authorMemberKey: string
   /**
    * Markdown で保存されたコメント本文です。
    */
-  bodyMarkdown?: string
-  /**
-   * 移行期間の旧 comment API が返す plain text 本文です。
-   */
-  body?: string
+  bodyMarkdown: string
   /**
    * optimistic concurrency に使う comment revision です。
    */
-  version?: number
+  version: number
   /**
    * 作成日時の ISO 8601 timestamp です。
    */
@@ -52,7 +44,7 @@ export type TeamIssueComment = {
   /**
    * 最終更新日時の ISO 8601 timestamp です。
    */
-  updatedAt?: string
+  updatedAt: string
   /**
    * コメントが編集された日時です。
    */
@@ -76,19 +68,15 @@ export type TeamIssueComment = {
   /**
    * 本文中で mention された Workspace member key の重複除外済み一覧です。
    */
-  mentionMemberKeys?: string[]
+  mentionMemberKeys: string[]
   /**
    * コメントに付いた reaction 集計です。
    */
-  reactions?: TeamIssueCommentReaction[]
+  reactions: TeamIssueCommentReaction[]
   /**
    * 現在のユーザーがコメントに行える操作です。
    */
-  capabilities?: TeamIssueCommentCapabilities
-  /**
-   * collaboration store または移行前データのどちらから取得したかを表します。
-   */
-  source?: 'collaboration' | 'legacy'
+  capabilities: TeamIssueCommentCapabilities
 }
 
 /**

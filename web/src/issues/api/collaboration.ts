@@ -139,10 +139,29 @@ function isTeamIssueCollaborationPage(
 
 /** Validates the stable fields required by one collaboration comment. */
 function isTeamIssueComment(value: unknown): value is TeamIssueComment {
+  if (!isRecord(value)) {
+    return false
+  }
+
+  const capabilities = value.capabilities
+
   return (
-    isRecord(value) &&
     typeof value.id === 'string' &&
-    typeof value.createdAt === 'string'
+    typeof value.rootCommentId === 'string' &&
+    typeof value.authorMemberKey === 'string' &&
+    typeof value.bodyMarkdown === 'string' &&
+    typeof value.version === 'number' &&
+    Number.isSafeInteger(value.version) &&
+    value.version > 0 &&
+    typeof value.createdAt === 'string' &&
+    typeof value.updatedAt === 'string' &&
+    Array.isArray(value.mentionMemberKeys) &&
+    value.mentionMemberKeys.every((memberKey) => typeof memberKey === 'string') &&
+    Array.isArray(value.reactions) &&
+    isRecord(capabilities) &&
+    typeof capabilities.canEdit === 'boolean' &&
+    typeof capabilities.canDelete === 'boolean' &&
+    typeof capabilities.canResolve === 'boolean'
   )
 }
 

@@ -943,11 +943,11 @@ test('loads team issue detail and creates comments after team access is confirme
   const calls = configureFakeProjectClients(true)
   const collaborationCreates: Parameters<CollaborationClient['createComment']>[0][] = []
   const collaborationComments: Awaited<ReturnType<CollaborationClient['createComment']>>[] = []
-  setTestAppDependencies({
+    setTestAppDependencies({
     collaboration: createCollaborationStub({
-      async getThread() {
+      async getThread(input) {
         return {
-          comments: collaborationComments,
+          comments: input.rootCommentId ? [] : collaborationComments,
           watch: {
             subscribed: false,
             explicit: false,
@@ -990,12 +990,6 @@ test('loads team issue detail and creates comments after team access is confirme
       id: 'onboarding-friction',
       assigneeEmail: 'sato@example.com',
     },
-    comments: [
-      {
-        id: 'comment-1',
-        body: '背景を確認します。',
-      },
-    ],
     activity: [
       {
         id: 'activity-1',
@@ -1011,17 +1005,18 @@ test('loads team issue detail and creates comments after team access is confirme
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      body: '追加コメント',
+      bodyMarkdown: '追加コメント',
     }),
   })
 
   expect(commentResponse.status).toBe(201)
-  expect(await commentResponse.json()).toEqual({
+  expect(await commentResponse.json()).toMatchObject({
     comment: {
       id: 'comment-2',
-      actorUserId: 'demo@example.com',
-      body: '追加コメント',
-      createdAt: '2026-06-08T02:00:00.000Z',
+      source: 'collaboration',
+      authorMemberKey: 'demo@example.com',
+      bodyMarkdown: '追加コメント',
+      version: 1,
     },
     activity: {
       id: 'comment-2',
@@ -1058,10 +1053,16 @@ test('loads team issue detail and creates comments after team access is confirme
     { headers: { Authorization: 'Bearer test-token' } },
   )
   expect(refreshedDetailResponse.status).toBe(200)
-  expect(await refreshedDetailResponse.json()).toMatchObject({
+  expect(await refreshedDetailResponse.json()).not.toHaveProperty('comments')
+
+  const collaborationResponse = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction/collaboration',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+  expect(collaborationResponse.status).toBe(200)
+  expect(await collaborationResponse.json()).toMatchObject({
     comments: [
-      { id: 'comment-1', body: '背景を確認します。' },
-      { id: 'comment-2', body: '追加コメント' },
+      { id: 'comment-2', bodyMarkdown: '追加コメント' },
     ],
   })
 })
@@ -1213,7 +1214,7 @@ test('fails closed when a persisted relation target Work Item is missing', async
   ])
 })
 
-test('returns persisted collaboration comments together with inert legacy comments and reply cursors', async () => {
+test('returns persisted collaboration comments and reply cursors', async () => {
   const calls = configureFakeProjectClients(true)
   const threadInputs: Parameters<CollaborationClient['getThread']>[0][] = []
   setTestAppDependencies({
@@ -1278,11 +1279,6 @@ test('returns persisted collaboration comments together with inert legacy commen
     comments: [
       { id: 'stored-root', source: 'collaboration' },
       { id: 'stored-reply', source: 'collaboration' },
-      {
-        id: 'comment-1',
-        source: 'legacy',
-        capabilities: { canReply: false, canReact: false },
-      },
     ],
     replyNextCursors: { 'stored-root': 'older-replies' },
   })
@@ -1294,17 +1290,27 @@ test('returns persisted collaboration comments together with inert legacy commen
     limit: 5,
     includeScopeState: false,
   })
-  expect(calls.issueDetails).toContainEqual({
+  expect(calls.issueDetails).toEqual([{
     directoryId: 'user#demo@example.com',
     teamId: 'core-team',
     issueId: 'onboarding-friction',
     readOptions: {
       consistentIssueRead: true,
-      eventLimit: 50,
-      newestEventsFirst: true,
-      eventType: 'commented',
+      eventLimit: 0,
     },
-  })
+  }])
+})
+
+test('rejects a legacy collaboration cursor instead of reading it as a current page', async () => {
+  configureFakeProjectClients(true)
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction/collaboration?cursor=legacy.old',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+
+  expect(response.status).toBe(400)
+  expect(await response.json()).toMatchObject({ code: 'InvalidCollaborationCursor' })
 })
 
 test('keeps a departed author in history while blocking deactivated member mutations', async () => {

@@ -1482,10 +1482,7 @@ function configureFakeProjectClients(
       teamId: string
       readOptions?: {
         consistentIssueRead?: boolean
-        eventCursor?: string
         eventLimit?: number
-        eventType?: string
-        newestEventsFirst?: boolean
       }
     }>,
     issueReads: [] as Array<{ directoryId: string; limit?: number; teamId: string }>,
@@ -2519,14 +2516,6 @@ function configureFakeProjectClients(
               '2026-06-08T00:00:00.000Z',
             source: 'dynamodb',
           },
-          comments: [
-            {
-              id: 'comment-1',
-              actorUserId: 'demo@example.com',
-              body: '背景を確認します。',
-              createdAt: '2026-06-08T01:00:00.000Z',
-            },
-          ],
           activity: [
             {
               id: 'activity-1',

@@ -800,11 +800,11 @@ function CommentCard({
   const isConfirmingDelete = deleteConfirmationId === comment.id
   const isReactionMenuOpen = reactionMenuId === comment.id
   const canReply = controller.capabilities.canComment
-    && (capabilities?.canReply ?? comment.source !== 'legacy')
+    && (capabilities?.canReply ?? true)
     && !rootComment.resolvedAt
     && !comment.deletedAt
   const canReact = controller.capabilities.canReact
-    && (capabilities?.canReact ?? comment.source !== 'legacy')
+    && (capabilities?.canReact ?? true)
     && !comment.deletedAt
   const bodyMarkdown = resolveCommentBody(comment)
   const acceptedResolution = resolveCurrentAcceptedResolution(rootComment)
@@ -952,7 +952,7 @@ function CommentCard({
                   onClick={() => onReplyingChange(isReplying ? undefined : comment.id)}
                 />
               ) : null}
-              {onPromote && !comment.deletedAt && comment.source !== 'legacy' ? (
+              {onPromote && !comment.deletedAt ? (
                 <CommentActionButton
                   label={t('collaboration.comment.promote')}
                   onClick={() => onPromote(comment)}
@@ -1373,7 +1373,7 @@ function CommentFileAttachments({
   const files = artifacts.files.filter((file) =>
     file.targetType === 'comment' && file.targetId === comment.id && !file.deletedAt
   )
-  const canAttach = artifacts.capabilities.canUpload && comment.source !== 'legacy'
+  const canAttach = artifacts.capabilities.canUpload
   const canGrantGuestAccess = canAttach && artifacts.capabilities.canGrantGuestAccess
 
   return files.length > 0 || canAttach ? (
@@ -1914,14 +1914,14 @@ function createCommentAnchorId(commentId: string) {
   return `comment-${encodeURIComponent(commentId)}`
 }
 
-/** Resolves the stable author key across legacy and collaboration comments. */
+/** Resolves the stable author key for a canonical collaboration comment. */
 function resolveCommentAuthorKey(comment: TeamIssueComment) {
-  return comment.authorMemberKey ?? comment.actorUserId ?? 'unknown-member'
+  return comment.authorMemberKey
 }
 
-/** Resolves the Markdown body across legacy and collaboration comments. */
+/** Resolves the Markdown body for a canonical collaboration comment. */
 function resolveCommentBody(comment: TeamIssueComment) {
-  return comment.bodyMarkdown ?? comment.body ?? ''
+  return comment.bodyMarkdown
 }
 
 /**
@@ -1951,7 +1951,13 @@ function createCapturedResolutionSourceComment(
   resolution: AcceptedResolution,
 ): TeamIssueComment {
   return {
+    authorMemberKey: resolution.acceptedBy.id,
     bodyMarkdown: resolution.capturedCommentBody,
+    capabilities: {
+      canDelete: false,
+      canEdit: false,
+      canResolve: false,
+    },
     createdAt: resolution.acceptedAt,
     id: resolution.sourceCommentId,
     mentionMemberKeys: [],
@@ -1960,6 +1966,7 @@ function createCapturedResolutionSourceComment(
         ? undefined
         : resolution.sourceRootCommentId,
     rootCommentId: resolution.sourceRootCommentId,
+    reactions: [],
     updatedAt: resolution.acceptedAt,
     version: resolution.capturedCommentRevision,
   }

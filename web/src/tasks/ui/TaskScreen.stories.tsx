@@ -26,7 +26,6 @@ import {
   collaborationWorkspaceMemberFixtures,
   issueCollaborationControllerFixture,
   teamIssueActivityFixtures,
-  teamIssueCommentFixtures,
 } from '../../issues/fixtures'
 import { projectDirectoryFixtures } from '../../projects/fixtures'
 import type { ProjectMember, ProjectUser } from '../../projects/api'
@@ -137,7 +136,6 @@ const denseStoryTasks = Array.from({ length: 24 }, (_, index) => {
 
 const selectedIssueDetail: TeamIssueDetail = {
   activity: teamIssueActivityFixtures,
-  comments: teamIssueCommentFixtures,
   issue: {
     schemaVersion: WORK_ITEM_SCHEMA_VERSION,
     revision: 1,

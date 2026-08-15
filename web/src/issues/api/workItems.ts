@@ -15,7 +15,6 @@ import {
   readWorkItemScheduleChangePreviewForEndpoint,
 } from '../../work-items/api/contractValidation'
 import type { TeamIssueActivity } from './activity'
-import type { TeamIssueComment } from './comments'
 import { TeamIssuesApiError } from './errors'
 import {
   defaultIssuesApiErrorMessage,
@@ -37,10 +36,6 @@ export type TeamIssueDetail = {
    * Issue 本体です。
    */
   issue: TeamIssue
-  /**
-   * Issue コメント一覧です。
-   */
-  comments: TeamIssueComment[]
   /**
    * Issue 活動履歴一覧です。
    */
