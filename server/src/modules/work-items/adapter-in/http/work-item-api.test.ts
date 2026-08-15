@@ -1005,7 +1005,7 @@ test('loads team issue detail and creates comments after team access is confirme
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      bodyMarkdown: '追加コメント',
+      body: '追加コメント',
     }),
   })
 

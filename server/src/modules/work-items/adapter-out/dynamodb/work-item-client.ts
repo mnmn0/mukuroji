@@ -1062,6 +1062,10 @@ export type CreateTeamIssueCommentRequestBody = {
    */
   bodyMarkdown?: unknown
   /**
+   * 旧クライアントが送信するコメント本文です。保存時は canonical bodyMarkdown へ変換します。
+   */
+  body?: unknown
+  /**
    * reply 先の comment ID です。
    */
   parentCommentId?: unknown

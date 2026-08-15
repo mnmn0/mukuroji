@@ -9825,7 +9825,7 @@ routeApp.post('/api/teams/:teamId/issues/:issueId/comments', async (c) => {
       projectId: detail.issue.assignedProjectId,
       projectEntityKey,
       actorMemberKey: principal.userKey,
-      bodyMarkdown: readRequiredCommentBody(body.bodyMarkdown),
+      bodyMarkdown: readRequiredCommentBody(body.bodyMarkdown ?? body.body),
       parentCommentId: readOptionalCommentId(body.parentCommentId, 'Parent comment ID'),
       mentionMemberKeys,
       automaticWatcherCandidates,
@@ -13719,6 +13719,18 @@ async function executeAutomationComment(
   dependencies: AutomationActionExecutorDependencies,
 ) {
   const target = readAutomationWorkItemTarget(context.event)
+  const entityKey = createWorkItemCollaborationEntityKey(
+    context.execution.workspaceId,
+    target.teamId,
+    target.workItemId,
+  )
+  const auditContext = createAutomationMutationContext(context, { body })
+  const replay = await dependencies.collaboration.getCommentMutationReplay({
+    entityKey,
+    auditContext,
+  })
+  if (replay) return
+
   const team = await requireAutomationTeam(
     context.execution.workspaceId,
     target.teamId,
@@ -13740,11 +13752,6 @@ async function executeAutomationComment(
       'The comment Work Item project is not active in its owner Team.',
     )
   }
-  const entityKey = createWorkItemCollaborationEntityKey(
-    context.execution.workspaceId,
-    target.teamId,
-    target.workItemId,
-  )
   const projectEntityKey = detail.issue.assignedProjectId
     ? createProjectCollaborationEntityKey(
         context.execution.workspaceId,
@@ -13763,7 +13770,7 @@ async function executeAutomationComment(
     bodyMarkdown: body,
     automaticWatcherCandidates: createTeamIssueAutomaticWatcherCandidates(detail.issue),
     deepLink: createTeamIssueDeepLink(target.teamId, target.workItemId),
-    auditContext: createAutomationMutationContext(context, { body }),
+    auditContext,
   })
 }
 

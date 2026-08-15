@@ -173,6 +173,7 @@ export function IssueConversationTab({
   const activeResolutionSourceTarget = resolutionSourceTarget?.routeTargetKey === routeTargetKey
     ? resolutionSourceTarget
     : undefined
+  const resolutionSourceAuthorMemberKey = resolutionEditor?.sourceComment.authorMemberKey
   const focusedCommentTargetId = activeResolutionSourceTarget?.commentId ?? focusedCommentId
   const focusedRootTargetId = activeResolutionSourceTarget?.rootCommentId ?? focusedRootCommentId
 
@@ -499,15 +500,14 @@ export function IssueConversationTab({
                       value={resolutionEditor.summary}
                     />
                   </label>
-                  <p className="text-[0.68rem] text-[var(--workbench-muted)]">
-                    {t('collaboration.resolution.sourceReply')}: {formatMemberName(
-                      findWorkspaceMember(
-                        resolveCommentAuthorKey(resolutionEditor.sourceComment),
-                        members,
-                      ),
-                      resolveCommentAuthorKey(resolutionEditor.sourceComment),
-                    )}
-                  </p>
+                  {resolutionSourceAuthorMemberKey ? (
+                    <p className="text-[0.68rem] text-[var(--workbench-muted)]">
+                      {t('collaboration.resolution.sourceReply')}: {formatMemberName(
+                        findWorkspaceMember(resolutionSourceAuthorMemberKey, members),
+                        resolutionSourceAuthorMemberKey,
+                      )}
+                    </p>
+                  ) : null}
                   <div className="flex flex-wrap items-center gap-2">
                     <button
                       className="workbench-button-primary min-h-[44px] px-3 text-xs"
@@ -1951,7 +1951,7 @@ function createCapturedResolutionSourceComment(
   resolution: AcceptedResolution,
 ): TeamIssueComment {
   return {
-    authorMemberKey: resolution.acceptedBy.id,
+    authorMemberKey: resolution.capturedCommentAuthorMemberKey ?? '',
     bodyMarkdown: resolution.capturedCommentBody,
     capabilities: {
       canDelete: false,

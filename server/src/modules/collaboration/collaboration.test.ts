@@ -986,6 +986,38 @@ test('seeds deduplicated automatic watchers when a comment is created', async ()
   expect(mentionedValues[':reasons']).toEqual(new Set(['mention']))
 })
 
+test('finds a committed comment by its deterministic mutation identity', async () => {
+  const memory = createCollaborationMemory()
+  const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
+  const auditContext = createTestAuditContext(
+    'automation-comment-replay',
+    '2026-07-12T00:00:00.000Z',
+    { bodyMarkdown: 'Replay this comment.' },
+  )
+  const created = await memory.client.createComment({
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'issue-1',
+    entityKey,
+    actorMemberKey: 'author@example.com',
+    bodyMarkdown: 'Replay this comment.',
+    auditContext,
+  })
+
+  await expect(memory.client.getCommentMutationReplay({ entityKey, auditContext })).resolves.toMatchObject({
+    id: created.id,
+    bodyMarkdown: 'Replay this comment.',
+  })
+  await expect(memory.client.getCommentMutationReplay({
+    entityKey,
+    auditContext: createTestAuditContext(
+      'different-comment-replay',
+      '2026-07-12T00:00:00.000Z',
+      { bodyMarkdown: 'Replay this comment.' },
+    ),
+  })).resolves.toBeUndefined()
+})
+
 test('does not subscribe service actors as automatic watchers', async () => {
   let transaction: Record<string, unknown> | undefined
   const client = createClient(async (command) => {
@@ -2637,6 +2669,7 @@ async function createAcceptedResolutionHistoryState() {
   expect(first.acceptedResolutions).toHaveLength(1)
   expect(first.acceptedResolutions[0]).toMatchObject({
     sourceCommentId: 'reply-1',
+    capturedCommentAuthorMemberKey: 'reply-1@example.com',
     capturedCommentRevision: 1,
     capturedCommentBody: 'First answer',
     state: 'accepted',

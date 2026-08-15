@@ -306,6 +306,14 @@ export type GetCollaborationCommentSnapshotInput = {
   commentId: string
 }
 
+/** Deterministic comment mutation replay lookup input. */
+export type GetCollaborationCommentMutationReplayInput = {
+  /** Work Item collaboration entity key that owns the comment. */
+  entityKey: string
+  /** Request identity used to derive the committed comment identifier. */
+  auditContext: MutationAuditContext
+}
+
 /** Curated context page 取得入力です。 */
 export type GetCuratedContextInput = {
   /** Work Item の collaboration entity key です。 */
@@ -573,6 +581,10 @@ export interface CollaborationClient {
   /** Comment の current snapshot を consistent read します。 */
   getCommentSnapshot(
     input: GetCollaborationCommentSnapshotInput,
+  ): Promise<CollaborationComment | undefined>
+  /** Returns a previously committed comment for a deterministic mutation identity. */
+  getCommentMutationReplay(
+    input: GetCollaborationCommentMutationReplayInput,
   ): Promise<CollaborationComment | undefined>
   /** Work Item の curated context items を page 取得します。 */
   getCuratedContext(input: GetCuratedContextInput): Promise<CuratedContextPage>
@@ -1928,6 +1940,12 @@ function normalizeAcceptedResolutions(value: unknown, rootCommentId: string) {
       if (sourceRootCommentId !== rootCommentId) {
         throw new Error('accepted resolution root mismatch')
       }
+      const capturedCommentAuthorMemberKey = entry.capturedCommentAuthorMemberKey === undefined
+        ? undefined
+        : requireIdentifierValue(
+            entry.capturedCommentAuthorMemberKey,
+            'Accepted resolution captured comment author member key',
+          )
       const base = {
         id,
         sourceCommentId,
@@ -1939,6 +1957,9 @@ function normalizeAcceptedResolutions(value: unknown, rootCommentId: string) {
           COLLABORATION_COMMENT_MAX_LENGTH,
           false,
         ),
+        ...(capturedCommentAuthorMemberKey
+          ? { capturedCommentAuthorMemberKey }
+          : {}),
         summary: normalizeContextBody(entry.summary, 'Accepted resolution summary'),
         acceptedBy: normalizeContextActor(entry.acceptedBy, 'Accepted resolution actor'),
         acceptedAt: normalizeIsoTimestamp(entry.acceptedAt, 'Accepted resolution acceptedAt'),
@@ -2695,6 +2716,14 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       requireIdentifier(input.entityKey, 'Collaboration entity key'),
       requireIdentifier(input.commentId, 'Comment ID'),
     )
+  }
+
+  /** Returns a previously committed comment for a deterministic mutation identity. */
+  async getCommentMutationReplay(input: GetCollaborationCommentMutationReplayInput) {
+    await this.ensureLocalTable()
+    const entityKey = requireIdentifier(input.entityKey, 'Collaboration entity key')
+    const commentId = createCommentId('', input.auditContext, entityKey)
+    return this.getStoredComment(entityKey, commentId)
   }
 
   /** Root thread の accepted resolution history を新しい順に page 取得します。 */
@@ -3471,10 +3500,12 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
     let selected: StoredComment | undefined
     let capturedCommentRevision: number
     let capturedCommentBody: string
+    let capturedCommentAuthorMemberKey: string | undefined
     if (editingCurrent && current) {
       selected = await this.getStoredComment(input.entityKey, sourceCommentId)
       capturedCommentRevision = current.capturedCommentRevision
       capturedCommentBody = current.capturedCommentBody
+      capturedCommentAuthorMemberKey = current.capturedCommentAuthorMemberKey
     } else {
       selected = await this.getRequiredStoredComment(input.entityKey, sourceCommentId)
       if (selected.rootCommentId !== root.id) {
@@ -3493,6 +3524,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       }
       capturedCommentRevision = selected.version
       capturedCommentBody = selected.bodyMarkdown
+      capturedCommentAuthorMemberKey = selected.authorMemberKey
     }
     const accepted: AcceptedResolution = {
       id: resolutionId,
@@ -3500,6 +3532,9 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       sourceRootCommentId: root.id,
       capturedCommentRevision,
       capturedCommentBody,
+      ...(capturedCommentAuthorMemberKey
+        ? { capturedCommentAuthorMemberKey }
+        : {}),
       summary,
       acceptedBy: actor,
       acceptedAt: occurredAt,

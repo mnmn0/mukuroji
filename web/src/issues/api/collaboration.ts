@@ -228,6 +228,8 @@ export function isAcceptedResolution(
     typeof value.capturedCommentRevision === 'number' &&
     'capturedCommentBody' in value &&
     typeof value.capturedCommentBody === 'string' &&
+    (!('capturedCommentAuthorMemberKey' in value) ||
+      typeof value.capturedCommentAuthorMemberKey === 'string') &&
     'summary' in value &&
     typeof value.summary === 'string' &&
     'acceptedAt' in value &&

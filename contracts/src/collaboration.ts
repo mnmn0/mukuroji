@@ -339,6 +339,13 @@ export type AcceptedResolution = {
    */
   capturedCommentBody: string
   /**
+   * Stable author key captured from the source comment when available.
+   *
+   * This remains optional so older accepted-resolution snapshots can still be
+   * read safely; the UI omits the source-author label when it is absent.
+   */
+  capturedCommentAuthorMemberKey?: string
+  /**
    * Required manually edited summary that remains authoritative after source changes.
    */
   summary: string

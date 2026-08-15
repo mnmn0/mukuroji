@@ -581,6 +581,9 @@ function createCollaborationStub(
     getThread: unsupported,
     hasAttachableComment: unsupported,
     getCommentSnapshot: unsupported,
+    async getCommentMutationReplay() {
+      return undefined
+    },
     getCuratedContext: unsupported,
     async getCuratedContextMutationReplay() {
       return undefined
