@@ -140,8 +140,8 @@ const {
 複数の API を組み合わせて一つの画面用データを作る場合も、ページ内に取得処理を並べるのではなく、画面または feature 用の query wrapper にまとめる。
 
 ```text
-features/work-items/queries/
-└── useProjectWorkItemWorkbench.ts
+web/src/workspace/queries/
+└── useWorkspaceWorkItemData.ts
 ```
 
 ### `mutations/`

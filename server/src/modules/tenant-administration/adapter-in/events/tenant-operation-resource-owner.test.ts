@@ -57,37 +57,23 @@ describe('tenant operation resource-owner SQS adapter', () => {
     }
   })
 
-  test('rebases a previous target cursor after the removed table target', () => {
+  test('keeps a version-one standalone snapshot continuation cursor stable', () => {
     expect(readTenantOperationExecutionJob(JSON.stringify({
       ...createJob(),
       version: 1,
+      step: 'snapshot',
       cursor: {
-        targetIndex: 4,
+        targetIndex: 1,
         position: 'canonical-target-position',
         processedCount: 40,
       },
     }))).toEqual({
       ...createJob(),
+      step: 'snapshot',
       cursor: {
-        targetIndex: 3,
+        targetIndex: 1,
         position: 'canonical-target-position',
         processedCount: 40,
-      },
-    })
-
-    expect(readTenantOperationExecutionJob(JSON.stringify({
-      ...createJob(),
-      version: 1,
-      cursor: {
-        targetIndex: 0,
-        position: 'removed-target-position',
-        processedCount: 12,
-      },
-    }))).toEqual({
-      ...createJob(),
-      cursor: {
-        targetIndex: 0,
-        processedCount: 12,
       },
     })
   })

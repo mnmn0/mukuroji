@@ -65,6 +65,8 @@ export type TenantOperationResourceOwnerConfig = {
   workItemImportBucketName: string
   /** Cognito user pool whose tenant sessions are revoked. */
   cognitoUserPoolId: string
+  /** Retained legacy Project Task table drained by tenant decommission cleanup. */
+  legacyTasksTableName: string
   /** Canonical Work Item table. */
   workItemsTableName: string
   /** Work Item event table. */
@@ -292,6 +294,12 @@ export class AwsTenantOperationResourceOwner implements TenantOperationResourceO
   /** Returns every tenant-owned table included in export snapshots. */
   private exportTargets(): TenantDynamoTarget[] {
     return [
+      delimitedPrefixTarget(
+        'legacy-tasks',
+        this.config.legacyTasksTableName,
+        'directoryProjectId',
+        'taskId',
+      ),
       delimitedPrefixTarget(
         'work-items',
         this.config.workItemsTableName,

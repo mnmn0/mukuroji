@@ -75,7 +75,7 @@ test('fenced table bootstrap resources keep stable IDs and a create-only pre-fen
   const resources = synthesizedTemplate.findResources('Custom::AWS');
   const createOnlySeeds = [
     [
-      'SeedWorkItems1A607C25',
+      'SeedProjectTasks637E8868',
       'canonical-work-items-seed-v1',
       'TeamIssuesTable189D851D',
     ],
@@ -114,8 +114,8 @@ test('bootstrap transactions synthesize enclosed DynamoDB write permissions at i
   const outputs = template.toJSON().Outputs;
   const transactionCases = [
     {
-      customResourcePrefix: 'SeedWorkItems',
-      policyPrefix: 'SeedWorkItemsCustomResourcePolicy',
+      customResourcePrefix: 'SeedProjectTasks',
+      policyPrefix: 'SeedProjectTasksCustomResourcePolicy',
       itemActions: ['dynamodb:PutItem'],
       tableOutputName: 'WorkItemsTableName',
       physicalResourceId: 'canonical-work-items-seed-v1',
@@ -224,17 +224,17 @@ test('canonical Work Item seed writes complete schema data and preserves demo da
     JSON.stringify(resource).includes('transactWriteItems'),
   );
   const canonicalWorkItemSeedEntry = Object.entries(customResources).find(([logicalId]) =>
-    logicalId === 'SeedWorkItems1A607C25'
+    logicalId === 'SeedProjectTasks637E8868'
   );
   const canonicalWorkItemSeed = canonicalWorkItemSeedEntry?.[1];
   const canonicalWorkItemSeedPolicyEntry = Object.entries(
     template.findResources('AWS::IAM::Policy'),
-  ).find(([logicalId]) => logicalId === 'SeedWorkItemsCustomResourcePolicyA1DDF8BA');
+  ).find(([logicalId]) => logicalId === 'SeedProjectTasksCustomResourcePolicy924038FB');
   const projectDirectorySeed = transactWriteResources.find((resource) =>
     JSON.stringify(resource).includes('project-directory-seed-v3'),
   );
 
-  expect(canonicalWorkItemSeedEntry?.[0]).toBe('SeedWorkItems1A607C25');
+  expect(canonicalWorkItemSeedEntry?.[0]).toBe('SeedProjectTasks637E8868');
   expect(canonicalWorkItemSeed).toBeDefined();
   expect(canonicalWorkItemSeedPolicyEntry).toBeDefined();
   expect(projectDirectorySeed).toBeDefined();

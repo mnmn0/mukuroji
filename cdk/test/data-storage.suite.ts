@@ -11,6 +11,7 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
   const template = synthesizedTemplate;
   const resources = template.toJSON().Resources;
   const stableResourceIds = [
+    'ProjectTasksTableE21F6637',
     'TeamIssuesTable189D851D',
     'WorkItemConfigurationTable35E94558',
     'AutomationTableE3D67F0D',
@@ -34,7 +35,7 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
 
   const tables = template.findResources('AWS::DynamoDB::Table');
 
-  expect(Object.keys(tables)).toHaveLength(24);
+  expect(Object.keys(tables)).toHaveLength(25);
 
   for (const table of Object.values(tables)) {
     expect(table).toEqual(expect.objectContaining({
@@ -48,6 +49,18 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
       }),
     }));
   }
+
+  expect(resources.ProjectTasksTableE21F6637.Properties).toEqual(expect.objectContaining({
+    AttributeDefinitions: [
+      { AttributeName: 'directoryProjectId', AttributeType: 'S' },
+      { AttributeName: 'taskId', AttributeType: 'S' },
+    ],
+    KeySchema: [
+      { AttributeName: 'directoryProjectId', KeyType: 'HASH' },
+      { AttributeName: 'taskId', KeyType: 'RANGE' },
+    ],
+  }));
+  expect(resources.ProjectTasksTableE21F6637.Properties.GlobalSecondaryIndexes).toBeUndefined();
 
   expect(resources.CapacityPlanningTable0EECD517.Properties)
     .toEqual(expect.objectContaining({
