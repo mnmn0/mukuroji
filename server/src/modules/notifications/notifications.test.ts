@@ -92,6 +92,41 @@ describe('notification store', () => {
     expect(parseStoredNotificationPreferences(undefined).channels.inApp).toBe(true)
   })
 
+  test('preserves Planning target metadata for current-visibility checks', async () => {
+    let queryCount = 0
+    const recording = createClient(({ constructor }) => {
+      if (constructor.name !== 'QueryCommand') return {}
+      queryCount += 1
+      return queryCount === 1
+        ? { Items: [] }
+        : {
+          Items: [createNotificationRow({
+            eventType: 'planning-update.overdue',
+            planningTargetType: 'project',
+            planningTargetId: 'platform',
+            planningTargetRecordKey: 'UPDATE_TARGET#PROJECT#core#platform',
+            planningNextDueAt: '2026-07-12T09:00:00.000Z',
+            planningNotificationKind: 'overdue',
+          })],
+        }
+    })
+
+    const page = await recording.client.list({
+      workspaceId: 'workspace-1',
+      memberKey: 'member@example.com',
+      limit: 1,
+      now: new Date('2026-07-12T13:00:00.000Z'),
+    })
+
+    expect(page.notifications[0]).toMatchObject({
+      planningTargetType: 'project',
+      planningTargetId: 'platform',
+      planningTargetRecordKey: 'UPDATE_TARGET#PROJECT#core#platform',
+      planningNextDueAt: '2026-07-12T09:00:00.000Z',
+      planningNotificationKind: 'overdue',
+    })
+  })
+
   test('backfills pre-index notification rows once before filtered reads', async () => {
     let baseQueryCount = 0
     let migratedRow: Record<string, unknown> | undefined

@@ -68,7 +68,9 @@ export function buildAuditProjectionWorker(
   const {
     auditEventsTable,
     collaborationTable,
+    enterpriseIdentityTable,
     notificationsTable,
+    planningTable,
     processedAuditEventsTable,
     projectDirectoryTable,
     realtimeSessionsTable,
@@ -112,10 +114,12 @@ export function buildAuditProjectionWorker(
         COLLABORATION_TABLE_NAME: collaborationTable.tableName,
         CONNECTOR_SYNC_QUEUE_URL: connectorSyncQueue.queueUrl,
         COGNITO_USER_POOL_ID: cognitoUserPoolId.valueAsString,
+        ENTERPRISE_IDENTITY_TABLE_NAME: enterpriseIdentityTable.tableName,
         FILE_BUCKET_NAME: fileBucket.bucketName,
         FILE_PROOFING_TABLE_NAME: fileProofingTable.tableName,
         NOTIFICATIONS_TABLE_NAME: notificationsTable.tableName,
         NOTIFICATION_RETENTION_SECONDS: String(365 * 24 * 60 * 60),
+        PLANNING_TABLE_NAME: planningTable.tableName,
         PROCESSED_AUDIT_EVENTS_TABLE_NAME: processedAuditEventsTable.tableName,
         PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
         PROJECT_DIRECTORY_WEBHOOK_AUTHORIZATION_INDEX_NAME:
@@ -174,6 +178,18 @@ export function buildAuditProjectionWorker(
   auditEventsTable.grantStreamRead(collaborationProjectionFunction);
   collaborationTable.grants.readData(collaborationProjectionFunction);
   notificationsTable.grants.readWriteData(collaborationProjectionFunction);
+  collaborationProjectionFunction.addToRolePolicy(
+    new iam.PolicyStatement({
+      actions: ['dynamodb:GetItem'],
+      resources: [planningTable.tableArn],
+    }),
+  );
+  collaborationProjectionFunction.addToRolePolicy(
+    new iam.PolicyStatement({
+      actions: ['dynamodb:GetItem', 'dynamodb:Query'],
+      resources: [enterpriseIdentityTable.tableArn],
+    }),
+  );
   processedAuditEventsTable.grants.readWriteData(collaborationProjectionFunction);
   projectDirectoryTable.grants.readData(collaborationProjectionFunction);
   realtimeSessionsTable.grants.readWriteData(collaborationProjectionFunction);

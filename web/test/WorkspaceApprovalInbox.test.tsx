@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
+  type PlanningUpdateTargetSummary,
   type ResolvedWorkItemConfiguration,
 } from '@mukuroji/contracts'
 import { renderToStaticMarkup } from 'react-dom/server'
@@ -115,6 +116,53 @@ describe('Workspace approval Inbox', () => {
     for (const view of views) {
       expect(renderToStaticMarkup(view)).toContain('Configured active')
     }
+  })
+
+  test('keeps reported health separate from overdue freshness in Project portfolio rows', () => {
+    const planningUpdateTargets: PlanningUpdateTargetSummary[] = [{
+      target: { type: 'project', teamId: 'core-team', projectId: 'refero' },
+      cadence: {
+        updateOwnerMemberKey: 'demo@example.com',
+        cadence: { unit: 'week', count: 1 },
+        timeZone: 'UTC',
+        nextDueAt: '2026-08-08T09:00:00.000Z',
+        reminderHoursBefore: 24,
+      },
+      updateState: 'overdue',
+      latestVersion: 2,
+      latestUpdate: {
+        id: 'dashboard-update-2',
+        version: 2,
+        health: 'on-track',
+        risk: 'low',
+        summary: 'Launch scope remains healthy.',
+        progressSnapshot: { percent: 75, linkedWorkItemCount: 4 },
+        authorMemberKey: 'demo@example.com',
+        coveredDueAt: '2026-08-01T09:00:00.000Z',
+        createdAt: '2026-08-01T08:30:00.000Z',
+      },
+      updatedAt: '2026-08-01T08:30:00.000Z',
+    }]
+    const html = renderToStaticMarkup(
+      <DashboardWorkspaceView
+        planningUpdateTargets={planningUpdateTargets}
+        summary={{ blocked: 0, projects: 1, tasks: 0 }}
+        t={createTranslator('en')}
+        tasks={[]}
+        teams={projectDirectoryFixtures}
+        workItemConfigurationsByTeam={{}}
+      />,
+    )
+
+    expect(html).toContain('On track')
+    expect(html).toContain('Overdue')
+    expect(html).toContain('Launch scope remains healthy.')
+    expect(html).toContain('data-testid="dashboard-update-summary-core-team-refero"')
+    expect(html).toContain('demo@example.com')
+    expect(html).toContain('2026-08-01')
+    expect(html).toContain('2026-08-08')
+    expect(html).toContain('min-[761px]:min-w-[1180px]')
+    expect(html).not.toContain('Off track')
   })
 
   for (const viewName of ['Home', 'Dashboard']) {

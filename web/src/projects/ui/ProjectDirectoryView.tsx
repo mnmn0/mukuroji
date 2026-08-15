@@ -1,4 +1,9 @@
 import { useCallback, useId, useRef, useState } from 'react'
+import type {
+  PlanningHealth,
+  PlanningUpdateState,
+  PlanningUpdateTargetSummary,
+} from '@mukuroji/contracts'
 import type { ProjectDirectoryTeam } from '../api/directory'
 import {
   PROJECT_DIRECTORY_UNASSIGNED_ID,
@@ -12,6 +17,7 @@ import {
 import type { MessageKey } from '../../shared/i18n/i18n'
 import { ProgressBar } from '../../shared/ui/WorkbenchPrimitives'
 import { useModalFocus } from '../../shared/ui/useModalFocus'
+import { formatPlanningUpdateDate } from '../../planning/model/date'
 
 /** Props for the searchable, filterable Project directory view. */
 export type ProjectDirectoryViewProps = {
@@ -61,6 +67,10 @@ export type ProjectDirectoryViewProps = {
   onToggleQuickAccess: (project: ProjectDirectoryRow) => void | Promise<void>
   /** Archives a Project after explicit confirmation when authorized. */
   onArchiveProject?: (project: ProjectDirectoryRow) => Promise<void>
+  /** Project update projections keyed by Team and Project identity. */
+  planningUpdateTargets?: readonly PlanningUpdateTargetSummary[]
+  /** Opens the selected Project's Planning update detail. */
+  onOpenPlanningUpdate?: (project: ProjectDirectoryRow) => void
 }
 
 const statusFilters: readonly ProjectDirectoryStatusFilter[] = [
@@ -95,6 +105,35 @@ const statusMessageKeys: Record<ProjectDirectoryStatus, MessageKey> = {
   'not-started': 'projects.directory.status.notStarted',
 }
 
+/** Badge tokens for Project update freshness, kept separate from reported health. */
+const planningUpdateStateClassNames: Record<PlanningUpdateState, string> = {
+  'not-configured': 'border-slate-200 bg-slate-50 text-slate-600',
+  missing: 'border-slate-300 bg-white text-slate-700',
+  current: 'border-emerald-200 bg-emerald-50 text-emerald-700',
+  stale: 'border-amber-200 bg-amber-50 text-amber-800',
+  overdue: 'border-red-200 bg-red-50 text-red-700',
+}
+
+/** Badge tokens for latest reported Project health. */
+const planningUpdateHealthClassNames: Record<PlanningHealth, string> = {
+  unknown: 'border-slate-200 bg-slate-50 text-slate-600',
+  'on-track': 'border-emerald-200 bg-emerald-50 text-emerald-700',
+  'at-risk': 'border-amber-200 bg-amber-50 text-amber-800',
+  'off-track': 'border-red-200 bg-red-50 text-red-700',
+}
+
+/** Finds one Team-qualified Project update target. */
+function findProjectPlanningUpdate(
+  targets: readonly PlanningUpdateTargetSummary[],
+  project: ProjectDirectoryRow,
+) {
+  return targets.find((candidate) =>
+    candidate.target.type === 'project' &&
+    candidate.target.teamId === project.teamId &&
+    candidate.target.projectId === project.projectId
+  )
+}
+
 /**
  * Renders scalable Project discovery with URL-owned filters and bounded pagination.
  *
@@ -116,6 +155,7 @@ export function ProjectDirectoryView({
   teams,
   totalCount,
   onArchiveProject,
+  onOpenPlanningUpdate,
   onAssigneeChange,
   onClearFilters,
   onOpenProject,
@@ -125,6 +165,7 @@ export function ProjectDirectoryView({
   onStatusChange,
   onTeamChange,
   onToggleQuickAccess,
+  planningUpdateTargets = [],
 }: ProjectDirectoryViewProps) {
   const [archiveTarget, setArchiveTarget] = useState<ProjectDirectoryRow>()
   const [isArchiving, setIsArchiving] = useState(false)
@@ -316,6 +357,7 @@ export function ProjectDirectoryView({
                 isQuickAccessUnavailable={isQuickAccessUnavailable}
                 key={row.key}
                 project={row}
+                planningUpdate={findProjectPlanningUpdate(planningUpdateTargets, row)}
                 t={t}
                 onArchiveProject={onArchiveProject
                   ? () => {
@@ -324,6 +366,9 @@ export function ProjectDirectoryView({
                     }
                   : undefined}
                 onOpenProject={() => onOpenProject(row)}
+                onOpenPlanningUpdate={onOpenPlanningUpdate
+                  ? () => onOpenPlanningUpdate(row)
+                  : undefined}
                 onToggleQuickAccess={() => void onToggleQuickAccess(row)}
               />
             ))}
@@ -378,6 +423,8 @@ export function ProjectDirectoryView({
 type ProjectDirectoryListRowProps = {
   /** Project data rendered in the row. */
   project: ProjectDirectoryRow
+  /** Latest/cadence projection for this Team-qualified Project. */
+  planningUpdate?: PlanningUpdateTargetSummary
   /** Whether a quick-access request is currently being persisted. */
   isQuickAccessSaving: boolean
   /** Whether Quick Access is not ready and the star cannot be changed. */
@@ -386,6 +433,8 @@ type ProjectDirectoryListRowProps = {
   t: (key: MessageKey) => string
   /** Opens the Project detail route. */
   onOpenProject: () => void
+  /** Opens the Project update detail without changing the task-list action. */
+  onOpenPlanningUpdate?: () => void
   /** Adds or removes the Project from quick access. */
   onToggleQuickAccess: () => void
   /** Opens the archive confirmation when available. */
@@ -402,9 +451,11 @@ function ProjectDirectoryListRow({
   isQuickAccessSaving,
   isQuickAccessUnavailable,
   project,
+  planningUpdate,
   t,
   onArchiveProject,
   onOpenProject,
+  onOpenPlanningUpdate,
   onToggleQuickAccess,
 }: ProjectDirectoryListRowProps) {
   const tone = project.tone ?? 'blue'
@@ -415,6 +466,8 @@ function ProjectDirectoryListRow({
       : 'projects.directory.quickAccess.add'),
     { name: project.projectName },
   )
+  const updateState = planningUpdate?.updateState ?? 'not-configured'
+  const updateHealth = planningUpdate?.latestUpdate?.health ?? 'unknown'
 
   return (
     <div
@@ -464,6 +517,60 @@ function ProjectDirectoryListRow({
         <p className="mt-1 hidden truncate text-xs font-medium text-[var(--workbench-muted)] max-[760px]:block">
           {project.teamName} · {statusLabel}
         </p>
+        <div className="mt-2 flex min-w-0 flex-wrap items-center gap-1.5">
+          <span className={`rounded-full border px-2 py-0.5 text-[11px] font-semibold ${planningUpdateHealthClassNames[updateHealth]}`}>
+            {t(`planning.health.${updateHealth}`)}
+          </span>
+          <span className={`rounded-full border px-2 py-0.5 text-[11px] font-semibold ${planningUpdateStateClassNames[updateState]}`}>
+            {t(`planning.updateState.${updateState}`)}
+          </span>
+          <div
+            className="grid min-w-0 basis-full gap-0.5"
+            data-testid={`project-update-summary-${project.teamId}-${project.projectId}`}
+          >
+            {onOpenPlanningUpdate ? (
+              <button
+                aria-label={t('planning.action.openUpdateDetails')}
+                className="min-h-8 min-w-0 truncate rounded-md px-1 text-left text-xs font-semibold text-[var(--workbench-primary)] underline-offset-4 hover:underline focus:outline-none focus:ring-2 focus:ring-[var(--workbench-focus)]"
+                type="button"
+                onClick={onOpenPlanningUpdate}
+              >
+                {planningUpdate?.latestUpdate?.summary ?? t('planning.updateState.neverUpdated')}
+                {planningUpdate?.cadence?.nextDueAt
+                  ? ` · ${formatProjectDirectoryMessage(t('planning.updateState.dueMeta'), {
+                      date: formatPlanningUpdateDate(
+                        planningUpdate.cadence.nextDueAt,
+                        planningUpdate.cadence.timeZone,
+                      ),
+                    })}`
+                  : ''}
+              </button>
+            ) : (
+              <span className="min-w-0 truncate px-1 text-xs font-semibold text-[var(--workbench-muted)]">
+                {planningUpdate?.latestUpdate?.summary ?? t('planning.updateState.neverUpdated')}
+                {planningUpdate?.cadence?.nextDueAt
+                  ? ` · ${formatProjectDirectoryMessage(t('planning.updateState.dueMeta'), {
+                      date: formatPlanningUpdateDate(
+                        planningUpdate.cadence.nextDueAt,
+                        planningUpdate.cadence.timeZone,
+                      ),
+                    })}`
+                  : ''}
+              </span>
+            )}
+            {planningUpdate?.latestUpdate ? (
+              <span className="min-w-0 truncate px-1 text-[11px] font-medium text-[var(--workbench-muted)]">
+                {formatProjectDirectoryMessage(t('planning.updateState.updatedMeta'), {
+                  author: planningUpdate.latestUpdate.authorMemberKey,
+                  date: formatPlanningUpdateDate(
+                    planningUpdate.latestUpdate.createdAt,
+                    planningUpdate.cadence?.timeZone,
+                  ),
+                })}
+              </span>
+            ) : null}
+          </div>
+        </div>
       </div>
 
       <p className="truncate text-sm font-medium text-[var(--workbench-muted)] max-[760px]:hidden">

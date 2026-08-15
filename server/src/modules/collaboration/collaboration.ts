@@ -498,7 +498,7 @@ export type CollaborationReactionInput = WorkItemCollaborationScope & {
 
 /** Watcher state 取得入力です。 */
 export type GetWatcherStateInput = {
-  /** Work Item または project entity key です。 */
+  /** Work Item、Project、または Planning update target の entity key です。 */
   entityKey: string
   /** 現在 user の member key です。 */
   memberKey: string
@@ -506,7 +506,9 @@ export type GetWatcherStateInput = {
   projectEntityKey?: string
 }
 
-/** Watcher 更新入力です。 */
+/**
+ * Represents watcher mutation input for subscribe and unsubscribe operations.
+ */
 export type UpdateWatcherInput = {
   /** Canonical Workspace ID です。 */
   workspaceId: string
@@ -518,6 +520,8 @@ export type UpdateWatcherInput = {
   issueId?: string
   /** Assigned project または watch 対象 project ID です。 */
   projectId?: string
+  /** Project/Initiative を一意に表す Planning update target key です。 */
+  planningUpdateTargetKey?: string
   /** Work Item 取得時に併記する assigned project entity key です。 */
   projectEntityKey?: string
   /** Subscribe/unsubscribe 対象 member key です。 */
@@ -2432,6 +2436,7 @@ type CuratedContextCursor = {
   generation: number
 }
 
+/** Persisted watcher row with its current subscription state. */
 type StoredWatcher = {
   /** DynamoDB partition key です。 */
   entityKey: string
@@ -2455,6 +2460,7 @@ type StoredWatcher = {
   mutationIdentity?: string
 }
 
+/** Persisted browser presence lease row. */
 type StoredPresence = {
   /** DynamoDB partition key です。 */
   entityKey: string
@@ -2474,6 +2480,7 @@ type StoredPresence = {
   expiresAt: number
 }
 
+/** Cursor used to continue reading one collaboration discussion prefix. */
 type DiscussionCursor = {
   /** Cursor schema version です。 */
   version: 1
@@ -2523,6 +2530,51 @@ export function createWorkItemCollaborationEntityKey(
 /** Project scope の canonical collaboration entity key を作成します。 */
 export function createProjectCollaborationEntityKey(workspaceId: string, projectId: string) {
   return `${requireText(workspaceId, 'Workspace ID')}#project#${requireText(projectId, 'Project ID')}`
+}
+
+/**
+ * Creates the collaboration entity key for one Planning update target scope.
+ *
+ * @param workspaceId - Workspace that owns the target.
+ * @param targetKey - Percent-encoded public target key.
+ * @returns Stable collaboration entity key.
+ */
+export function createPlanningUpdateCollaborationEntityKey(
+  workspaceId: string,
+  targetKey: string,
+) {
+  return `${requireText(workspaceId, 'Workspace ID')}#planning-update#${requireText(targetKey, 'Planning update target key')}`
+}
+
+/** Canonical target identity used by Planning update APIs, watchers, and notifications. */
+export type PlanningUpdateTargetKeyInput =
+  | {
+      /** Target discriminator for a Team-qualified Project. */
+      type: 'project'
+      /** Team that owns the Project. */
+      teamId: string
+      /** Team-local Project identifier. */
+      projectId: string
+    }
+  | {
+      /** Target discriminator for an Initiative. */
+      type: 'initiative'
+      /** Workspace-local Initiative identifier. */
+      entityId: string
+    }
+
+/**
+ * Creates the shared public key used to store and query Planning update watchers.
+ *
+ * @param target - Canonical Project or Initiative target.
+ * @returns Percent-encoded public target key.
+ */
+export function createPlanningUpdatePublicTargetKey(
+  target: PlanningUpdateTargetKeyInput,
+): string {
+  return target.type === 'project'
+    ? `project/${encodeURIComponent(requireText(target.teamId, 'Team ID'))}/${encodeURIComponent(requireText(target.projectId, 'Project ID'))}`
+    : `initiative/${encodeURIComponent(requireText(target.entityId, 'Initiative ID'))}`
 }
 
 /** DynamoDB collaboration table を操作する client です。 */
@@ -3924,17 +3976,34 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
         teamId: input.teamId,
         issueId: input.issueId,
         projectId: input.projectId,
+        planningUpdateTargetKey: input.planningUpdateTargetKey,
         kind: reason,
       },
     })
 
     try {
       await this.documentClient.send(new TransactWriteCommand({
-        TransactItems: [...parentConditions, update, ...(auditPut ? [auditPut] : [])],
+        TransactItems: [
+          ...parentConditions,
+          ...(input.authorizationConditionChecks ?? []),
+          update,
+          ...(auditPut ? [auditPut] : []),
+        ],
       }))
     } catch (error) {
       if (!isConditionalFailure(error)) {
         throw toCollaborationStoreError(error)
+      }
+      if (isAuthorizationConditionFailure(
+        error,
+        parentConditions.length,
+        input.authorizationConditionChecks?.length ?? 0,
+      )) {
+        throw new CollaborationError(
+          409,
+          'CollaborationAuthorizationChanged',
+          'Watcher authorization changed. Reload and retry the request.',
+        )
       }
       if (input.expectedSubscribed !== undefined) {
         throw new CollaborationError(409, 'CollaborationConflict', 'Watcher subscription conflicted.')
@@ -3993,12 +4062,14 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
         teamId: input.teamId,
         issueId: input.issueId,
         projectId: input.projectId,
+        planningUpdateTargetKey: input.planningUpdateTargetKey,
       },
     })
     try {
       await this.documentClient.send(new TransactWriteCommand({
         TransactItems: [
           ...parentConditions,
+          ...(input.authorizationConditionChecks ?? []),
           manualWatcherUpdate(
             this.tableName,
             entityKey,
@@ -4014,6 +4085,17 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
     } catch (error) {
       if (!isConditionalFailure(error)) {
         throw toCollaborationStoreError(error)
+      }
+      if (isAuthorizationConditionFailure(
+        error,
+        parentConditions.length,
+        input.authorizationConditionChecks?.length ?? 0,
+      )) {
+        throw new CollaborationError(
+          409,
+          'CollaborationAuthorizationChanged',
+          'Watcher authorization changed. Reload and retry the request.',
+        )
       }
       if (input.expectedSubscribed !== undefined) {
         throw new CollaborationError(409, 'CollaborationConflict', 'Watcher unsubscription conflicted.')
@@ -4956,6 +5038,27 @@ function validateWatcherScope(input: UpdateWatcherInput) {
     }
   }
 
+  if (input.planningUpdateTargetKey) {
+    const targetKey = requireText(
+      input.planningUpdateTargetKey,
+      'Planning update target key',
+    )
+    if (
+      entityKey !== createPlanningUpdateCollaborationEntityKey(workspaceId, targetKey)
+    ) {
+      throw new CollaborationError(
+        400,
+        'InvalidCollaborationScope',
+        'Planning update watcher scope is invalid.',
+      )
+    }
+    return {
+      entityKey,
+      entityType: 'planning-update-target' as const,
+      entityId: targetKey,
+    }
+  }
+
   const projectId = requireText(input.projectId ?? '', 'Project ID')
   if (entityKey !== createProjectCollaborationEntityKey(workspaceId, projectId)) {
     throw new CollaborationError(400, 'InvalidCollaborationScope', 'Project watcher scope is invalid.')
@@ -5350,11 +5453,11 @@ function curatedContextDocumentSourceConditions(
       ConditionCheck: {
         TableName: readEnvironment('PLANNING_TABLE_NAME') ?? 'mukuroji-planning-local',
         Key: {
-          workspaceId: input.workspaceId,
+          workspaceId: `FENCE#${input.workspaceId}`,
           recordKey: 'META',
         },
         ConditionExpression: snapshot.planningRevision === 0
-          ? 'attribute_not_exists(workspaceId)'
+          ? 'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)'
           : 'entryType = :planningEntryType AND #revision = :planningRevision',
         ...(snapshot.planningRevision === 0
           ? {}
@@ -6127,6 +6230,42 @@ function isConditionalFailure(error: unknown) {
 
   const reasons = (error as { CancellationReasons?: Array<{ Code?: string }> }).CancellationReasons
   return Array.isArray(reasons) && reasons.some((reason) => reason.Code === 'ConditionalCheckFailed')
+}
+
+/**
+ * Checks whether one DynamoDB transaction failed in the caller-authorization slice.
+ *
+ * Direct conditional failures have no per-item reason and therefore remain on the
+ * idempotent replay path; only an indexed authorization condition is authoritative here.
+ *
+ * @param error - DynamoDB transaction error.
+ * @param startIndex - First authorization condition index in the transaction.
+ * @param count - Number of authorization conditions.
+ * @returns Whether an authorization condition failed.
+ */
+function isAuthorizationConditionFailure(
+  error: unknown,
+  startIndex: number,
+  count: number,
+): boolean {
+  if (
+    count === 0 ||
+    typeof error !== 'object' ||
+    error === null ||
+    !('name' in error) ||
+    error.name !== 'TransactionCanceledException' ||
+    !('CancellationReasons' in error) ||
+    !Array.isArray(error.CancellationReasons)
+  ) {
+    return false
+  }
+  const reasons = error.CancellationReasons
+  if (reasons.length < startIndex + count) return false
+  const authorizationReasons = reasons.slice(startIndex, startIndex + count)
+  return authorizationReasons.some((reason) =>
+    typeof reason === 'object' && reason !== null &&
+    'Code' in reason && reason.Code === 'ConditionalCheckFailed'
+  )
 }
 
 function toCollaborationStoreError(error: unknown) {

@@ -2,6 +2,7 @@
 export {
   PLANNING_STORAGE_SCHEMA_VERSION,
   createPlanningWorkItemDependencySummary,
+  createPlanningUpdateProjectTargetRecordKey,
   PlanningError,
   requirePlanningWorkItemHasNoScheduleDependencies,
   type PlanningAuthorizationState,
@@ -9,6 +10,21 @@ export {
   type PlanningClient,
   type PlanningEntityAuthorizationReference,
   type PlanningMutationTransaction,
+  type PlanningMutationTransactionResult,
+  type PlanningUpdateAnnotationTransactionResult,
+  type PlanningUpdateCadenceTransactionResult,
+  type PlanningUpdatePublishTransactionResult,
+  type PlanningUpdateTargetAuthorizationReference,
   type PlanningWorkItemDependencyTransactionResult,
   type PlanningWorkItemState,
 } from './planning'
+
+export {
+  createPlanningUpdateNextNotificationAtRecordKey,
+  createPlanningUpdateNotificationAtRecordKey,
+  createPlanningUpdateScheduleShard,
+  createPlanningUpdateScheduleShardName,
+  createPlanningUpdateScheduleUpperBound,
+  PLANNING_UPDATE_SCHEDULE_DUE_INDEX_NAME,
+  PLANNING_UPDATE_SCHEDULE_SHARD_COUNT,
+} from './planning-update-schedule-index'

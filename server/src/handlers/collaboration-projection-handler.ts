@@ -10,6 +10,10 @@ import {
   DynamoDbCollaborationClient,
 } from '../modules/collaboration/collaboration'
 import {
+  DynamoDbEnterpriseIdentityReadClient,
+  type EnterpriseIdentityReadCapability,
+} from '../modules/enterprise-identity'
+import {
   listScopeConnections,
   postRealtimeMessage,
 } from '../modules/realtime/adapter-in/events/realtime'
@@ -27,6 +31,11 @@ const collaboration = workspaceSearchTableName
 const workspaceSearch = workspaceSearchTableName
   ? new DynamoDbWorkspaceSearchClient(workspaceSearchTableName)
   : undefined
+const enterpriseIdentityTableName = readOptionalEnvironment('ENTERPRISE_IDENTITY_TABLE_NAME')
+const enterpriseIdentity: Pick<EnterpriseIdentityReadCapability, 'getSnapshot'> | undefined =
+  enterpriseIdentityTableName
+    ? new DynamoDbEnterpriseIdentityReadClient(enterpriseIdentityTableName)
+    : undefined
 
 const curatedContextSearch = {
   /** Upserts the latest canonical non-superseded context item into Workspace search. */
@@ -137,6 +146,7 @@ export async function handler(event: DynamoStreamEvent) {
   return await processCollaborationProjectionBatch(event, {
     deletedFileCleanup,
     curatedContextSearch,
+    enterpriseIdentity,
     realtime,
   })
 }

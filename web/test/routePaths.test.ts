@@ -24,7 +24,10 @@ import { RequestIntakePage } from '../src/requests/RequestIntakePage'
 import { SearchPage } from '../src/search/SearchPage'
 import {
   createFocusPath,
+  createPlanningDependencyAnchorId,
+  createPlanningDependencyPath,
   createPlanningPath,
+  createPlanningProjectUpdatePath,
   createProjectsPath,
   createQuickAccessProjectsPath,
   createPublicRequestPath,
@@ -141,6 +144,23 @@ describe('Planning paths', () => {
     expect(createPlanningPath('timeline')).toBe('/planning/timeline')
     expect(createPlanningPath('roadmap', 'goal/launch')).toBe(
       '/planning/roadmap?entityId=goal%2Flaunch',
+    )
+  })
+
+  test('keeps Project update targets qualified by Team in portfolio links', () => {
+    expect(createPlanningProjectUpdatePath('core/team', 'shared project')).toBe(
+      '/planning/portfolio?targetType=project&teamId=core%2Fteam&projectId=shared+project',
+    )
+  })
+
+  test('encodes Planning dependency anchors without collisions', () => {
+    const inputs = ['a/b', 'a-2Fb', 'a%b', '依存/🚀']
+    const anchors = inputs.map(createPlanningDependencyAnchorId)
+
+    expect(new Set(anchors).size).toBe(inputs.length)
+    expect(anchors.every((anchor) => /^planning-dependency-[0-9a-f]+$/.test(anchor))).toBe(true)
+    expect(createPlanningDependencyPath('a/b')).toBe(
+      `/planning/timeline#${createPlanningDependencyAnchorId('a/b')}`,
     )
   })
 

@@ -1,5 +1,7 @@
 import type {
   PlanningEntity,
+  PlanningUpdateTarget,
+  PlanningUpdateTargetSummary,
   PlanningWorkItemSummary,
   WorkItemDependencyEndpoint,
   WorkItemScheduleDependency,
@@ -14,10 +16,20 @@ import type {
  * Planning UI が現在ユーザーの project role を判定するための access snapshot です。
  */
 export type PlanningAccessSnapshot = {
+  /** Project IDs that occur under more than one Team and cannot use unqualified roles safely. */
+  ambiguousProjectIds: ReadonlySet<string>
   /** Project ID ごとの現在ユーザーの role です。 */
   projectRoles: Readonly<Record<string, ProjectMemberRole>>
   /** Team ID ごとの active Project ID 一覧です。 */
   projectIdsByTeamId: Readonly<Record<string, readonly string[]>>
+}
+
+/** Team-qualified Project scope used when loading UI role assignments. */
+export type PlanningProjectRoleScope = {
+  /** Owning Team identifier. */
+  teamId: string
+  /** Team-local Project identifier. */
+  projectId: string
 }
 
 /**
@@ -41,7 +53,16 @@ export function createPlanningAccessSnapshot(
   teams: readonly ProjectDirectoryTeam[],
   projectRoles: Readonly<Record<string, ProjectMemberRole>>,
 ): PlanningAccessSnapshot {
+  const projectIdCounts = new Map<string, number>()
+  for (const project of teams.flatMap((team) => team.projects)) {
+    projectIdCounts.set(project.id, (projectIdCounts.get(project.id) ?? 0) + 1)
+  }
   return {
+    ambiguousProjectIds: new Set(
+      [...projectIdCounts]
+        .filter(([, count]) => count > 1)
+        .map(([projectId]) => projectId),
+    ),
     projectRoles,
     projectIdsByTeamId: Object.fromEntries(
       teams.map((team) => [team.id, team.projects.map((project) => project.id)]),
@@ -79,6 +100,77 @@ export function canUpdatePlanningEntityStatus(
   access: PlanningAccessSnapshot,
 ) {
   return canUsePlanningScope(user, entity, access, 'member', false)
+}
+
+/**
+ * Determines whether the current user may configure one Project or Initiative update cadence.
+ *
+ * @param user - Current authenticated user.
+ * @param target - Project or Initiative update target.
+ * @param entities - Visible Planning entities used to resolve Initiative scope.
+ * @param access - Current user's Project role snapshot.
+ * @returns True when the target scope satisfies the manager requirement.
+ */
+export function canManagePlanningUpdateTarget(
+  user: CurrentUser | null | undefined,
+  target: PlanningUpdateTarget,
+  entities: readonly PlanningEntity[],
+  access: PlanningAccessSnapshot,
+) {
+  const scope = resolvePlanningUpdateTargetScope(target, entities)
+  return scope ? canManagePlanningScope(user, scope, access) : false
+}
+
+/**
+ * Determines whether the current user may comment or react on one update target.
+ *
+ * @param user - Current authenticated user.
+ * @param target - Project or Initiative update target.
+ * @param entities - Visible Planning entities used to resolve Initiative scope.
+ * @param access - Current user's Project role snapshot.
+ * @returns True when the target scope satisfies the member requirement.
+ */
+export function canAnnotatePlanningUpdateTarget(
+  user: CurrentUser | null | undefined,
+  target: PlanningUpdateTarget,
+  entities: readonly PlanningEntity[],
+  access: PlanningAccessSnapshot,
+) {
+  const scope = resolvePlanningUpdateTargetScope(target, entities)
+  return scope ? canUsePlanningScope(user, scope, access, 'member', true) : false
+}
+
+/**
+ * Determines whether the current user may publish a manual Project or Initiative update.
+ *
+ * @param user - Current authenticated user.
+ * @param target - Project or Initiative update target.
+ * @param entities - Visible Planning entities used to resolve Initiative scope.
+ * @param updateTargets - Cadence summaries used to enforce owner-only publishing.
+ * @param access - Current user's Project role snapshot.
+ * @returns True for the cadence owner or a target manager override.
+ */
+export function canPublishPlanningUpdateTarget(
+  user: CurrentUser | null | undefined,
+  target: PlanningUpdateTarget,
+  entities: readonly PlanningEntity[],
+  updateTargets: readonly PlanningUpdateTargetSummary[],
+  access: PlanningAccessSnapshot,
+) {
+  const cadence = updateTargets.find((candidate) => planningUpdateTargetsMatch(
+    candidate.target,
+    target,
+  ))?.cadence
+  if (!cadence) return false
+  const scope = resolvePlanningUpdateTargetScope(target, entities)
+  if (!scope) return false
+  const currentMemberKey = (user?.attributes.email ?? user?.username ?? '')
+    .trim()
+    .toLowerCase()
+  if (cadence.updateOwnerMemberKey.trim().toLowerCase() === currentMemberKey) {
+    return canUsePlanningScope(user, scope, access, 'member', true)
+  }
+  return canUsePlanningScope(user, scope, access, 'manager', false)
 }
 
 /**
@@ -175,7 +267,12 @@ export function canManageAnyPlanningScope(
 ) {
   if (!canWritePlanning(user)) return false
   if (user?.isSystemAdmin || isWorkspaceAdministrator(user)) return true
-  return Object.values(access.projectRoles).some((role) => role === 'manager')
+  return Object.entries(access.projectRoles).some(([key, role]) => {
+    if (role !== 'manager') return false
+    const separator = key.indexOf('\0')
+    const projectId = separator < 0 ? key : key.slice(separator + 1)
+    return separator >= 0 || !access.ambiguousProjectIds.has(projectId)
+  })
 }
 
 /**
@@ -218,14 +315,20 @@ function canUsePlanningScope(
   const scopedProjectIds = scope.teamId
     ? access.projectIdsByTeamId[scope.teamId] ?? []
     : []
+  const roleForProject = (teamId: string, projectId: string) =>
+    access.projectRoles[`${teamId}\0${projectId}`] ??
+    (access.ambiguousProjectIds.has(projectId) ? undefined : access.projectRoles[projectId])
   if (
     scope.teamId &&
-    !scopedProjectIds.some((projectId) => roleAllows(access.projectRoles[projectId], minimumRole))
+    !scopedProjectIds.some((projectId) =>
+      roleAllows(roleForProject(scope.teamId!, projectId), minimumRole)
+    )
   ) {
     return false
   }
   if (scope.projectId) {
-    if (!roleAllows(access.projectRoles[scope.projectId], minimumRole)) return false
+    const role = roleForProject(scope.teamId ?? '', scope.projectId)
+    if (!roleAllows(role, minimumRole)) return false
     if (scope.teamId && !scopedProjectIds.includes(scope.projectId)) return false
   }
   if (!scope.teamId && !scope.projectId) {
@@ -234,10 +337,50 @@ function canUsePlanningScope(
   return true
 }
 
+/**
+ * Compares canonical Project and Initiative update target identities.
+ *
+ * @param left - First target identity.
+ * @param right - Second target identity.
+ * @returns True when both targets refer to the same Team-qualified Project or Initiative.
+ */
+function planningUpdateTargetsMatch(
+  left: PlanningUpdateTarget,
+  right: PlanningUpdateTarget,
+) {
+  if (left.type === 'initiative' && right.type === 'initiative') {
+    return left.entityId === right.entityId
+  }
+  if (left.type === 'project' && right.type === 'project') {
+    return left.teamId === right.teamId && left.projectId === right.projectId
+  }
+  return false
+}
+
+/**
+ * Resolves the authorization scope represented by an update target.
+ *
+ * @param target - Project or Initiative update target.
+ * @param entities - Visible Planning entities used to resolve Initiative scope.
+ * @returns Team and Project scope, or undefined when the Initiative is not visible.
+ */
+function resolvePlanningUpdateTargetScope(
+  target: PlanningUpdateTarget,
+  entities: readonly PlanningEntity[],
+): PlanningScope | undefined {
+  if (target.type === 'project') {
+    return { projectId: target.projectId, teamId: target.teamId }
+  }
+  return entities.find((entity) =>
+    entity.type === 'initiative' && entity.id === target.entityId
+  )
+}
+
 function canWritePlanning(
   user: CurrentUser | null | undefined,
 ): user is CurrentUser {
-  return user !== null && user !== undefined && user.workspaceRole !== 'guest'
+  return user !== null && user !== undefined &&
+    user.workspaceMemberStatus === 'active' && user.workspaceRole !== 'guest'
 }
 
 function isWorkspaceAdministrator(user: CurrentUser) {

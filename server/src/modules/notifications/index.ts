@@ -27,4 +27,9 @@ export {
 } from './notifications'
 export {
   createNotificationScheduleHandler,
+  parsePlanningUpdateTargetScheduleProjection,
+  type PlanningScheduledNotificationKind,
+  type PlanningUpdateNotificationCadence,
+  type PlanningUpdateTargetReference,
+  type PlanningUpdateTargetScheduleProjection,
 } from './adapter-in/schedules/notification-schedule'

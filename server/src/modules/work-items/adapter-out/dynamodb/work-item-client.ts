@@ -3,7 +3,7 @@ import {
 } from '../../../../infrastructure/config/server-config'
 import {
   createDynamoDbClient as createConfiguredDynamoDbClient,
-  createWorkspaceSearchWriterDynamoDbDocumentClient,
+  createPlanningRevisionFenceWriterDynamoDbDocumentClient,
   shouldBootstrapLocalDynamoDb as shouldBootstrapConfiguredLocalDynamoDb,
 } from '../../../../infrastructure/aws/dynamodb-client'
 import {
@@ -87,6 +87,56 @@ import type {
   WorkItemTriageContextEventSnapshot,
   WorkItemTriageContextSnapshot,
 } from '@mukuroji/contracts'
+
+/** Physical Planning META key that serializes canonical Work Item projections. */
+const PLANNING_META_RECORD_KEY = 'META'
+
+/**
+ * Creates the Planning META update shared by canonical Work Item mutations.
+ *
+ * The Planning revision is also the bounded source-version fence for roll-ups. Updating it
+ * in the same transaction as every canonical Work Item mutation lets a Planning publish use
+ * one condition instead of one condition per source Work Item.
+ *
+ * @param planningTableName - Optional Planning table configured for the runtime.
+ * @param workspaceId - Workspace whose canonical Work Item projection changes.
+ * @param updatedAt - Mutation timestamp written to Planning META.
+ * @returns A transaction update, or undefined when Planning storage is not configured.
+ */
+function createPlanningRevisionIncrementTransactionItem(
+  planningTableName: string | undefined,
+  workspaceId: string,
+  updatedAt: string,
+): NonNullable<TransactWriteCommandInput['TransactItems']>[number] | undefined {
+  if (!planningTableName) return undefined
+  return {
+    Update: {
+      TableName: planningTableName,
+      Key: { workspaceId: `FENCE#${workspaceId}`, recordKey: PLANNING_META_RECORD_KEY },
+      UpdateExpression:
+        'SET #entryType = if_not_exists(#entryType, :entryType), ' +
+        '#schemaVersion = if_not_exists(#schemaVersion, :schemaVersion), ' +
+        '#updatedAt = :updatedAt ADD #revision :increment',
+      ConditionExpression:
+        '(attribute_not_exists(#entryType) AND ' +
+        'attribute_not_exists(#schemaVersion) AND attribute_not_exists(#revision)) OR (' +
+        '#entryType = :entryType AND #schemaVersion = :schemaVersion AND ' +
+        'attribute_exists(#revision))',
+      ExpressionAttributeNames: {
+        '#entryType': 'entryType',
+        '#schemaVersion': 'schemaVersion',
+        '#updatedAt': 'updatedAt',
+        '#revision': 'revision',
+      },
+      ExpressionAttributeValues: {
+        ':entryType': 'planning-meta',
+        ':schemaVersion': PLANNING_STORAGE_SCHEMA_VERSION,
+        ':updatedAt': updatedAt,
+        ':increment': 1,
+      },
+    },
+  }
+}
 
 /**
  * タスクの進捗状態を表す API code です。
@@ -210,7 +260,7 @@ function createPlanningRevisionFenceConditionEntries(
     kind: 'planning',
     tableName: environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
     key: {
-      workspaceId,
+      workspaceId: `FENCE#${workspaceId}`,
       recordKey: 'META',
     },
     generationAttribute: 'revision',
@@ -271,7 +321,7 @@ function createAuthorizationSnapshotConditionEntries(
       kind: 'planning',
       tableName: environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
       key: {
-        workspaceId: snapshot.workspaceId,
+        workspaceId: `FENCE#${snapshot.workspaceId}`,
         recordKey: 'META',
       },
       generationAttribute: 'revision',
@@ -1566,6 +1616,8 @@ export class DynamoDbTeamIssuesClient {
    * immutable audit event を保存する DynamoDB table 名です。
    */
   private readonly auditTableName?: string
+  /** Planning table whose META revision fences canonical Work Item roll-ups. */
+  private readonly planningTableName?: string
   constructor(
     issueTableName =
       getEnv('MUKUROJI_WORK_ITEMS_TABLE') ??
@@ -1581,6 +1633,7 @@ export class DynamoDbTeamIssuesClient {
     dynamoDbClient?: DynamoDBClient,
     bootstrapLocalTables = dynamoDbClient === undefined && shouldBootstrapLocalDynamoDb(),
     auditTableName = getConfiguredAuditTableName(),
+    planningTableName = getEnv('PLANNING_TABLE_NAME'),
   ) {
     this.issueTableName = issueTableName
     this.eventTableName = eventTableName
@@ -1588,6 +1641,7 @@ export class DynamoDbTeamIssuesClient {
     this.dynamoDbClient = dynamoDbClient ?? createDynamoDbClient()
     this.bootstrapLocalTables = bootstrapLocalTables
     this.auditTableName = auditTableName
+    this.planningTableName = planningTableName?.trim() || undefined
   }
 
   /**
@@ -2089,6 +2143,11 @@ export class DynamoDbTeamIssuesClient {
             now,
           )
         : []
+      const planningRevisionMutation = createPlanningRevisionIncrementTransactionItem(
+        this.planningTableName,
+        directoryId,
+        now,
+      )
       await this.documentClient.send(
         new TransactWriteCommand({
           TransactItems: [
@@ -2110,6 +2169,7 @@ export class DynamoDbTeamIssuesClient {
             ...configurationConditionChecks,
             ...authorizationConditionChecks,
             ...requestConversionItems,
+            ...(planningRevisionMutation ? [planningRevisionMutation] : []),
             ...(triageAcceptance?.transactItems ?? []),
           ],
         }),
@@ -2447,7 +2507,14 @@ export class DynamoDbTeamIssuesClient {
     if (idempotencyCompletion) {
       transactItems.push(idempotencyCompletion.transactWriteItem)
     }
-    if (transactItems.length > 100) {
+    const planningRevisionMutation = createPlanningRevisionIncrementTransactionItem(
+      this.planningTableName,
+      directoryId,
+      occurredAt,
+    )
+    if (planningRevisionMutation) transactItems.push(planningRevisionMutation)
+    const planningRevisionFenceBarrierItems = planningRevisionMutation === undefined ? 0 : 1
+    if (transactItems.length + planningRevisionFenceBarrierItems > 100) {
       throw new ProjectDataError(
         413,
         'WorkItemScheduleCascadeLimitExceeded',
@@ -2540,11 +2607,12 @@ export class DynamoDbTeamIssuesClient {
       '#revision': 'revision',
       '#updatedAt': 'updatedAt',
     }
+    const updatedAt = new Date().toISOString()
     const expressionAttributeValues: Record<string, unknown> = {
       ':schemaVersion': WORK_ITEM_SCHEMA_VERSION,
       ':expectedRevision': expectedRevision,
       ':nextRevision': nextRevision,
-      ':updatedAt': new Date().toISOString(),
+      ':updatedAt': updatedAt,
     }
     const setExpressions = [
       '#schemaVersion = :schemaVersion',
@@ -2759,6 +2827,11 @@ export class DynamoDbTeamIssuesClient {
         status: 200,
         body: toTeamIssueResponseItem(afterIssue),
       })
+      const planningRevisionMutation = createPlanningRevisionIncrementTransactionItem(
+        this.planningTableName,
+        directoryId,
+        updatedAt,
+      )
       await this.documentClient.send(
         new TransactWriteCommand({
           TransactItems: [
@@ -2790,6 +2863,7 @@ export class DynamoDbTeamIssuesClient {
             ...(idempotencyCompletion
               ? [idempotencyCompletion.transactWriteItem]
               : []),
+            ...(planningRevisionMutation ? [planningRevisionMutation] : []),
           ],
         }),
       )
@@ -2925,6 +2999,11 @@ export class DynamoDbTeamIssuesClient {
       status: 204,
       body: null,
     })
+    const planningRevisionMutation = createPlanningRevisionIncrementTransactionItem(
+      this.planningTableName,
+      directoryId,
+      occurredAt,
+    )
     const effectiveAuthorizationConditionChecks = [
       ...authorizationConditionChecks,
       ...createAuthorizationSnapshotConditionChecks(authorizationSnapshot),
@@ -2950,6 +3029,7 @@ export class DynamoDbTeamIssuesClient {
             ...(idempotencyCompletion
               ? [idempotencyCompletion.transactWriteItem]
               : []),
+            ...(planningRevisionMutation ? [planningRevisionMutation] : []),
           ],
         }),
       )
@@ -3345,7 +3425,7 @@ function createDynamoDbClient() {
 }
 
 function createDynamoDbDocumentClient(dynamoDbClient = createDynamoDbClient()) {
-  return createWorkspaceSearchWriterDynamoDbDocumentClient(dynamoDbClient)
+  return createPlanningRevisionFenceWriterDynamoDbDocumentClient(dynamoDbClient)
 }
 
 const localDynamoDbTableInitializers = new Map<string, Promise<void>>()

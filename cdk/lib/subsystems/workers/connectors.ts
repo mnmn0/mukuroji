@@ -18,6 +18,7 @@ import {
   configureWorkspaceSearchWriterFence,
   type WorkspaceSearchWriterFenceResources,
 } from '../../policies/workspace-search-writer-fence';
+import { grantPlanningRevisionFenceAccess } from '../../policies/planning-revision-fence';
 import type { DataStoreResources } from '../data-stores';
 import {
   bindRuntimeControls,
@@ -207,6 +208,7 @@ export function buildConnectorWorkers(
       enterpriseIdentityTable.tableArn,
     ],
   }));
+  grantPlanningRevisionFenceAccess(planningTable, connectorSyncFunction);
   connectorSyncFunction.addToRolePolicy(new iam.PolicyStatement({
     actions: ['dynamodb:GetItem'],
     resources: [tenantAdministrationTable.tableArn],

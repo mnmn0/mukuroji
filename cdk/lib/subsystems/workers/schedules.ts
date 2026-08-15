@@ -60,6 +60,7 @@ export function buildScheduleWorkers(
   const {
     analyticsTable,
     auditEventsTable,
+    planningTable,
     projectDirectoryTable,
     tenantAdministrationTable,
     workItemsTable,
@@ -206,7 +207,8 @@ export function buildScheduleWorkers(
       projectRoot,
       timeout: cdk.Duration.minutes(5),
       memorySize: 512,
-      description: 'Emits deterministic due and overdue Work Item notification events.',
+      description:
+        'Emits deterministic Work Item and Planning health update notification events.',
       onFailure: new lambdaDestinations.SqsDestination(notificationScheduleDlq),
       retryAttempts: 2,
       bundling: {
@@ -220,6 +222,9 @@ export function buildScheduleWorkers(
         AUDIT_RETENTION_DAYS: auditRetentionDays.valueAsString,
         NOTIFICATION_SCHEDULE_MAX_PAGES: '1000',
         NOTIFICATION_SCHEDULE_SCAN_PAGE_SIZE: '100',
+        PLANNING_TABLE_NAME: planningTable.tableName,
+        PLANNING_UPDATE_SCHEDULE_INDEX_NAME: 'UpdateScheduleDueIndex',
+        PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
         WORK_ITEMS_TABLE_NAME: workItemsTable.tableName,
       },
     },
@@ -229,6 +234,30 @@ export function buildScheduleWorkers(
     notificationScheduleFunction,
     'notification-schedule',
   );
+  notificationScheduleFunction.addToRolePolicy(new iam.PolicyStatement({
+    actions: ['dynamodb:GetItem'],
+    resources: [planningTable.tableArn],
+  }));
+  notificationScheduleFunction.addToRolePolicy(new iam.PolicyStatement({
+    actions: ['dynamodb:Query'],
+    resources: [`${planningTable.tableArn}/index/UpdateScheduleDueIndex`],
+  }));
+  notificationScheduleFunction.addToRolePolicy(new iam.PolicyStatement({
+    actions: ['dynamodb:UpdateItem'],
+    resources: [planningTable.tableArn],
+    conditions: {
+      'ForAllValues:StringEquals': {
+        'dynamodb:Attributes': [
+          'workspaceId',
+          'recordKey',
+          'nextNotificationAtRecordKey',
+          'updateScheduleShard',
+          'updatedAt',
+        ],
+      },
+    },
+  }));
+  projectDirectoryTable.grants.readData(notificationScheduleFunction);
   workItemsTable.grants.readData(notificationScheduleFunction);
   auditEventsTable.grants.writeData(notificationScheduleFunction);
 
@@ -261,7 +290,8 @@ export function buildScheduleWorkers(
   });
 
   new events.Rule(scope, 'NotificationScheduleRule', {
-    description: 'Checks canonical Work Items for due and overdue notifications.',
+    description:
+      'Checks canonical Work Items and Planning update targets for scheduled notifications.',
     schedule: events.Schedule.rate(cdk.Duration.hours(1)),
     targets: [new eventsTargets.LambdaFunction(notificationScheduleFunction)],
   });

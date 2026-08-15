@@ -1,7 +1,9 @@
 import {
   createDefaultDueDateWorkItemSchedule,
   PLANNING_SCHEMA_VERSION,
+  PLANNING_UPDATE_CONTENT_VERSION,
   type PlanningSnapshot,
+  type PlanningUpdate,
 } from '@mukuroji/contracts'
 
 /**
@@ -283,6 +285,60 @@ export const planningSnapshotFixture = {
       schedule: createDefaultDueDateWorkItemSchedule('2026-07-25'),
     },
   ],
+  updateTargets: [
+    {
+      target: { type: 'project', teamId: 'core-team', projectId: 'refero' },
+      cadence: {
+        updateOwnerMemberKey: 'builder@example.com',
+        cadence: { unit: 'week', count: 1 },
+        timeZone: 'Asia/Tokyo',
+        nextDueAt: '2026-07-18T00:00:00.000Z',
+        reminderHoursBefore: 24,
+        escalationHoursAfter: 12,
+        escalationMemberKey: 'lead@example.com',
+      },
+      updateState: 'overdue',
+      latestVersion: 1,
+      latestUpdate: {
+        id: 'update-project-refero-1',
+        version: 1,
+        health: 'on-track',
+        risk: 'low',
+        summary: 'Implementation is progressing against the current milestone.',
+        progressSnapshot: { percent: 60, linkedWorkItemCount: 2 },
+        authorMemberKey: 'builder@example.com',
+        coveredDueAt: '2026-07-11T00:00:00.000Z',
+        createdAt: '2026-07-11T02:00:00.000Z',
+      },
+      updatedAt: '2026-07-11T02:00:00.000Z',
+    },
+    {
+      target: { type: 'initiative', entityId: 'initiative-onboarding' },
+      cadence: {
+        updateOwnerMemberKey: 'lead@example.com',
+        cadence: { unit: 'week', count: 1 },
+        timeZone: 'Asia/Tokyo',
+        nextDueAt: '2026-07-22T00:00:00.000Z',
+        reminderHoursBefore: 24,
+        escalationHoursAfter: 24,
+        escalationMemberKey: 'owner@example.com',
+      },
+      updateState: 'current',
+      latestVersion: 2,
+      latestUpdate: {
+        id: 'update-initiative-2',
+        version: 2,
+        health: 'at-risk',
+        risk: 'high',
+        summary: 'Research is complete; implementation risk remains.',
+        progressSnapshot: { percent: 58, linkedWorkItemCount: 3 },
+        authorMemberKey: 'lead@example.com',
+        coveredDueAt: '2026-07-15T00:00:00.000Z',
+        createdAt: '2026-07-15T09:00:00.000Z',
+      },
+      updatedAt: '2026-07-15T09:00:00.000Z',
+    },
+  ],
   criticalPath: {
     entityIds: ['phase-build', 'milestone-beta', 'release-autumn'],
     totalDurationDays: 96,
@@ -312,6 +368,97 @@ export const planningSnapshotFixture = {
   },
 } satisfies PlanningSnapshot
 
+/** Immutable structured update history used by detail-pane stories and tests. */
+export const planningUpdateHistoryFixture = [
+  {
+    id: 'update-initiative-2',
+    target: { type: 'initiative', entityId: 'initiative-onboarding' },
+    version: 2,
+    contentVersion: PLANNING_UPDATE_CONTENT_VERSION,
+    origin: 'manual',
+    health: 'at-risk',
+    risk: 'high',
+    summary: 'Research is complete; implementation risk remains.',
+    riskSummary: 'The instrumentation path still depends on the analytics schema review.',
+    decisionSummary: 'Keep the beta milestone and narrow the first cohort.',
+    helpNeeded: 'Analytics review by Friday.',
+    nextAction: 'Finish event instrumentation and validate the beta cohort.',
+    progressSnapshot: { percent: 58, linkedWorkItemCount: 3 },
+    contextSnapshot: {
+      health: 'at-risk',
+      risk: 'high',
+      progress: { percent: 58, linkedWorkItemCount: 3 },
+      scope: { teamId: 'core-team' },
+      targetDate: '2026-09-28',
+      milestones: [{
+        entityId: 'milestone-beta',
+        title: 'Beta ready',
+        status: 'planned',
+        forecast: { startDate: '2026-08-28', endDate: '2026-08-28' },
+      }],
+      dependencies: [{
+        dependencyId: 'dependency-build-beta',
+        predecessorId: 'phase-build',
+        successorId: 'milestone-beta',
+        type: 'finish-to-start',
+        lagDays: 2,
+      }],
+    },
+    changes: [
+      { type: 'progress', before: 42, after: 58 },
+      { type: 'target-date', before: '2026-09-21', after: '2026-09-28' },
+      {
+        type: 'dependencies',
+        addedIds: ['dependency-build-beta'],
+        removedIds: [],
+        changedIds: [],
+      },
+    ],
+    evidence: [
+      { type: 'work-item', teamId: 'core-team', workItemId: 'journey-events' },
+      { type: 'planning-entity', entityId: 'milestone-beta' },
+      {
+        type: 'file',
+        fileId: 'research-findings.pdf',
+        url: 'https://example.com/files/research-findings.pdf',
+      },
+      { type: 'link', url: 'https://example.com/research', label: 'Research findings' },
+    ],
+    authorMemberKey: 'lead@example.com',
+    coveredDueAt: '2026-07-15T00:00:00.000Z',
+    createdAt: '2026-07-15T09:00:00.000Z',
+  },
+  {
+    id: 'update-initiative-1',
+    target: { type: 'initiative', entityId: 'initiative-onboarding' },
+    version: 1,
+    contentVersion: PLANNING_UPDATE_CONTENT_VERSION,
+    origin: 'manual',
+    health: 'on-track',
+    risk: 'medium',
+    summary: 'Research interviews are complete and implementation has started.',
+    riskSummary: 'No blocking risk is confirmed.',
+    decisionSummary: '',
+    helpNeeded: '',
+    nextAction: 'Confirm the event taxonomy.',
+    progressSnapshot: { percent: 42, linkedWorkItemCount: 3 },
+    contextSnapshot: {
+      health: 'on-track',
+      risk: 'medium',
+      progress: { percent: 42, linkedWorkItemCount: 3 },
+      scope: { teamId: 'core-team' },
+      targetDate: '2026-09-21',
+      milestones: [],
+      dependencies: [],
+    },
+    changes: [],
+    evidence: [],
+    authorMemberKey: 'lead@example.com',
+    coveredDueAt: '2026-07-08T00:00:00.000Z',
+    createdAt: '2026-07-08T09:00:00.000Z',
+  },
+] satisfies PlanningUpdate[]
+
 /**
  * Planning entity がまだない empty state 用 snapshot です。
  */
@@ -323,6 +470,7 @@ export const emptyPlanningSnapshotFixture = {
   workItemDependencies: [],
   workItemLinks: [],
   workItems: [],
+  updateTargets: [],
   criticalPath: {
     entityIds: [],
     totalDurationDays: 0,

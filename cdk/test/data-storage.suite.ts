@@ -417,7 +417,7 @@ test('Work Item configuration uses a retained scope and record key table', () =>
   }));
 });
 
-test('planning data uses a retained point-in-time recoverable workspace table', () => {
+test('planning data uses retained storage with a sparse update schedule due index', () => {
   const template = synthesizedTemplate;
   const table = template.toJSON().Resources.PlanningTable2A0D4CC5;
 
@@ -427,8 +427,18 @@ test('planning data uses a retained point-in-time recoverable workspace table', 
       AttributeDefinitions: [
         { AttributeName: 'workspaceId', AttributeType: 'S' },
         { AttributeName: 'recordKey', AttributeType: 'S' },
+        { AttributeName: 'updateScheduleShard', AttributeType: 'S' },
+        { AttributeName: 'nextNotificationAtRecordKey', AttributeType: 'S' },
       ],
       BillingMode: 'PAY_PER_REQUEST',
+      GlobalSecondaryIndexes: [{
+        IndexName: 'UpdateScheduleDueIndex',
+        KeySchema: [
+          { AttributeName: 'updateScheduleShard', KeyType: 'HASH' },
+          { AttributeName: 'nextNotificationAtRecordKey', KeyType: 'RANGE' },
+        ],
+        Projection: { ProjectionType: 'KEYS_ONLY' },
+      }],
       KeySchema: [
         { AttributeName: 'workspaceId', KeyType: 'HASH' },
         { AttributeName: 'recordKey', KeyType: 'RANGE' },

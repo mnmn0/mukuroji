@@ -32,6 +32,7 @@ export {
   type FileProofingActor,
   type FileProofingClient,
   type FileProofingCollection,
+  type FileProofingFileLookup,
   type FileProofingScope,
   type FileUploadSession,
   type FileVersionAccess,

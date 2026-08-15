@@ -1,5 +1,8 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import type { ProjectQuickAccessItem } from '@mukuroji/contracts'
+import type {
+  PlanningUpdateTargetSummary,
+  ProjectQuickAccessItem,
+} from '@mukuroji/contracts'
 import { useMemo, useState } from 'react'
 import type { ProjectDirectoryTeam } from '../api/directory'
 import { projectDirectoryFixtures } from '../fixtures'
@@ -24,6 +27,30 @@ const defaultRows = createProjectDirectoryRows(
   (item) => item.projectId === 'refero' || item.projectId === 'brand-refresh',
 )
 const defaultAssigneeOptions = createProjectDirectoryAssigneeOptions(defaultRows)
+const defaultPlanningUpdateTargets: readonly PlanningUpdateTargetSummary[] = [{
+  target: { type: 'project', teamId: 'core-team', projectId: 'refero' },
+  cadence: {
+    updateOwnerMemberKey: 'demo@example.com',
+    cadence: { unit: 'week', count: 1 },
+    timeZone: 'Asia/Tokyo',
+    nextDueAt: '2026-08-14T08:00:00.000Z',
+    reminderHoursBefore: 24,
+  },
+  updateState: 'overdue',
+  latestVersion: 3,
+  latestUpdate: {
+    id: 'project-directory-update-3',
+    version: 3,
+    health: 'on-track',
+    risk: 'low',
+    summary: 'Release scope is stable; final evidence review remains.',
+    progressSnapshot: { percent: 78, linkedWorkItemCount: 6 },
+    authorMemberKey: 'demo@example.com',
+    coveredDueAt: '2026-08-07T08:00:00.000Z',
+    createdAt: '2026-08-07T07:30:00.000Z',
+  },
+  updatedAt: '2026-08-07T07:30:00.000Z',
+}]
 
 const meta = {
   title: 'Projects/ProjectDirectoryView',
@@ -49,6 +76,7 @@ const meta = {
     hasUnassignedProjects: defaultAssigneeOptions.hasUnassignedProjects,
     page: 1,
     pageCount: 1,
+    planningUpdateTargets: defaultPlanningUpdateTargets,
     rows: defaultRows,
     t: createTranslator('ja'),
     teams: projectDirectoryFixtures,
@@ -56,6 +84,7 @@ const meta = {
     onAssigneeChange: () => undefined,
     onClearFilters: () => undefined,
     onOpenProject: () => undefined,
+    onOpenPlanningUpdate: () => undefined,
     onPageChange: () => undefined,
     onQuickAccessOnlyChange: () => undefined,
     onSearchChange: () => undefined,

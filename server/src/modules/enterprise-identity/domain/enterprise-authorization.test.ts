@@ -60,6 +60,53 @@ test('denies unregistered routes and matches parameterized routes', () => {
     .toBeUndefined()
 })
 
+test('requires a matching owner Team for qualified Project scopes', () => {
+  const input = {
+    assignments: [{
+      workspaceId: 'workspace-1',
+      assignmentId: 'assignment-qualified-project',
+      principalKind: 'member' as const,
+      principalId: 'member-1',
+      roleId: 'project:viewer' as const,
+      scope: {
+        workspaceId: 'workspace-1',
+        kind: 'project' as const,
+        targetId: 'shared-project',
+        parentTeamId: 'team-a',
+      },
+      source: 'direct' as const,
+    }],
+    customRoles: [],
+    groupMappings: [],
+    principal: {
+      kind: 'member' as const,
+      principalId: 'member-1',
+      directoryGroupIds: [],
+    },
+  }
+
+  expect(evaluateEnterpriseAccess({
+    ...input,
+    permission: 'work-items.read',
+    resource: {
+      workspaceId: 'workspace-1',
+      kind: 'project',
+      targetId: 'shared-project',
+      parentTeamId: 'team-a',
+    },
+  })).toMatchObject({ allowed: true })
+  expect(evaluateEnterpriseAccess({
+    ...input,
+    permission: 'work-items.read',
+    resource: {
+      workspaceId: 'workspace-1',
+      kind: 'project',
+      targetId: 'shared-project',
+      parentTeamId: 'team-b',
+    },
+  })).toMatchObject({ allowed: false, reason: 'scope-mismatch' })
+})
+
 test('validates MFA, session lifetime, and IPv4/IPv6 allowlists', () => {
   const policy = {
     workspaceId: 'workspace-1',

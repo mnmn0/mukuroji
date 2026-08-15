@@ -13,6 +13,9 @@ import {
   bindWorkspaceSearchWriterFenceRolloutPendingDocumentClient,
 } from '../runtime/workspace-search-writer-fence-document-client'
 import {
+  bindPlanningRevisionFenceBarrierDocumentClient,
+} from '../runtime/planning-revision-fence-barrier'
+import {
   createWorkspaceSearchWriterFenceGuardProvider,
   type WorkspaceSearchWriterFenceGuardProvider,
 } from '../runtime/workspace-search-writer-fence-invocation'
@@ -90,6 +93,28 @@ export function createDynamoDbDocumentClient(
   return DynamoDBDocumentClient.from(dynamoDbClient, {
     marshallOptions: { removeUndefinedValues: true },
   })
+}
+
+/**
+ * Creates the scoped DocumentClient used by writers that advance Planning's
+ * isolated revision fence.
+ *
+ * This barrier is intentionally opt-in.  Installing it on the generic
+ * DynamoDB factory would make unrelated tables depend on Planning migration
+ * state and could turn a local migration issue into a repository-wide outage.
+ *
+ * @param dynamoDbClient - Low-level DynamoDB client to wrap.
+ * @param config - Configuration snapshot that supplies the Planning table name.
+ * @returns A DocumentClient that rejects direct fenced writes outside transactions.
+ */
+export function createPlanningRevisionFenceWriterDynamoDbDocumentClient(
+  dynamoDbClient: DynamoDBClient = createDynamoDbClient(),
+  config: ServerConfig = loadServerConfig(),
+): DynamoDBDocumentClient {
+  return bindPlanningRevisionFenceBarrierDocumentClient(
+    createDynamoDbDocumentClient(dynamoDbClient),
+    config.environment.PLANNING_TABLE_NAME,
+  )
 }
 
 /**

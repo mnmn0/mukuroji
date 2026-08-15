@@ -482,7 +482,9 @@ test('serves the same authenticated API contract from Function URL root and /api
       expect(JSON.parse(directResponse.body)).toEqual(JSON.parse(prefixedResponse.body))
       expect(calls.directoryReads).toEqual([
         { directoryId: 'workspace#production', locale: 'ja' },
+        { consistentRead: true, directoryId: 'workspace#production', locale: 'ja' },
         { directoryId: 'workspace#production', locale: 'ja' },
+        { consistentRead: true, directoryId: 'workspace#production', locale: 'ja' },
       ])
     },
   )

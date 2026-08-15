@@ -24,6 +24,7 @@ import type {
 import {
   createDynamoDbClient,
   createDynamoDbDocumentClient,
+  createPlanningRevisionFenceWriterDynamoDbDocumentClient,
   createWorkspaceSearchWriterDynamoDbDocumentClient,
   shouldBootstrapLocalDynamoDb,
 } from '../../infrastructure/aws/dynamodb-client'
@@ -258,7 +259,10 @@ export function createPlanningClient(): DynamoDbPlanningClient {
 
   return new DynamoDbPlanningClient(
     config.environment.PLANNING_TABLE_NAME ?? 'mukuroji-planning-local',
-    createDynamoDbDocumentClient(dynamoDbClient),
+    createPlanningRevisionFenceWriterDynamoDbDocumentClient(
+      dynamoDbClient,
+      config,
+    ),
     dynamoDbClient,
     shouldBootstrapLocalDynamoDb(),
     () => new Date(),

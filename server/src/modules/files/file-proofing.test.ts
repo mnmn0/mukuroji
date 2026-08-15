@@ -78,10 +78,10 @@ class MemoryDocumentClient {
       const scopeKey = values[':scopeKey']
       const prefix = values[':recordPrefix']
       this.queryPrefixes.push(prefix)
-      const matchingItems = [...this.items.values()].filter((item) =>
-        item.scopeKey === scopeKey &&
-        (!prefix || String(item.recordKey).startsWith(prefix))
-      )
+      const matchingItems = [...this.items.values()].filter((item) => input.IndexName === 'FileIdIndex'
+        ? item.fileId === values[':fileId']
+        : item.scopeKey === scopeKey &&
+          (!prefix || String(item.recordKey).startsWith(prefix)))
       const exclusiveKey = input.ExclusiveStartKey as Record<string, unknown> | undefined
       const startIndex = exclusiveKey
         ? matchingItems.findIndex((item) => createMemoryKey(item) === createMemoryKey(exclusiveKey)) + 1
@@ -166,6 +166,22 @@ class MemoryDocumentClient {
           }
           continue
         }
+        if (values[':increment'] !== undefined && values[':entryType'] === 'planning-meta') {
+          const isEmptyMeta = existing === undefined || (
+            existing.entryType === undefined &&
+            existing.schemaVersion === undefined &&
+            existing.revision === undefined
+          )
+          const isValidMeta = existing?.entryType === values[':entryType'] &&
+            existing.schemaVersion === values[':schemaVersion'] &&
+            typeof existing.revision === 'number'
+          if (
+            !isEmptyMeta && !isValidMeta
+          ) {
+            throw createTransactionCancelledError()
+          }
+          continue
+        }
         if (values[':entryType'] === 'approval-summary') {
           if (
             existing?.entryType !== 'approval-summary' ||
@@ -194,6 +210,16 @@ class MemoryDocumentClient {
         const key = createMemoryKey(update.Key as Record<string, unknown>)
         const existing = this.items.get(key)
         const values = update.ExpressionAttributeValues as Record<string, unknown>
+        if (values[':increment'] !== undefined && values[':entryType'] === 'planning-meta') {
+          this.items.set(key, {
+            ...existing,
+            entryType: values[':entryType'],
+            schemaVersion: values[':schemaVersion'],
+            updatedAt: values[':updatedAt'],
+            revision: Number(existing?.revision ?? 0) + Number(values[':increment']),
+          })
+          continue
+        }
         if (values[':pendingDelta'] !== undefined) {
           const dueAt = [...values[':dueAtSet'] as Set<string>][0]!
           const pendingDueAt = new Set(existing?.pendingDueAt as Set<string> | undefined)
@@ -424,14 +450,18 @@ const manager: FileProofingActor = {
   canManage: true,
 }
 
-function createClient(workItemsTableName?: string, auditTableName?: string) {
+function createClient(
+  workItemsTableName?: string,
+  auditTableName?: string,
+  planningTableName?: string,
+) {
   const documentClient = new MemoryDocumentClient()
   const objectClient = new FakeFileObjectClient()
   const client = new DynamoDbFileProofingClient(
     documentClient as unknown as DynamoDBDocumentClient,
     'file-proofing',
     objectClient,
-    { auditTableName, workItemsTableName },
+    { auditTableName, planningTableName, workItemsTableName },
   )
   return { client, documentClient, objectClient }
 }
@@ -477,6 +507,15 @@ async function createAvailableFile() {
 }
 
 describe('file proofing domain', () => {
+  test('resolves a visible file through the File ID reverse index', async () => {
+    const { client, session } = await createAvailableFile()
+
+    await expect(client.findFileById(scope.workspaceId, manager, session.file.id)).resolves.toEqual({
+      file: expect.objectContaining({ id: session.file.id }),
+      scope,
+    })
+  })
+
   test('signs upload length and media type so object metadata cannot bypass validation', async () => {
     const client = new S3FileObjectClient(
       new S3Client({
@@ -1710,7 +1749,17 @@ describe('file proofing domain', () => {
   })
 
   test('creates one durable Work Item approval across retries and transitions after unanimous approval', async () => {
-    const state = createClient('work-items', 'audit-events')
+    const state = createClient('work-items', 'audit-events', 'planning')
+    state.documentClient.items.set(createMemoryKey({
+      workspaceId: scope.workspaceId,
+      recordKey: 'META',
+    }), {
+      workspaceId: scope.workspaceId,
+      recordKey: 'META',
+      entryType: 'planning-meta',
+      schemaVersion: 1,
+      revision: 0,
+    })
     const workItemKey = {
       directoryTeamId: 'workspace-1#team#core',
       issueId: 'work-item-1',
@@ -1837,6 +1886,13 @@ describe('file proofing domain', () => {
       revision: 5,
       workflowStatusId: 'qa-approved',
       statusCategory: 'completed',
+    })
+    expect(state.documentClient.items.get(createMemoryKey({
+      workspaceId: scope.workspaceId,
+      recordKey: 'META',
+    }))).toMatchObject({
+      entryType: 'planning-meta',
+      revision: 1,
     })
     expect(await state.client.getApprovalSummary(scope)).toMatchObject({
       pendingCount: 0,

@@ -15,6 +15,9 @@ import {
   bindWorkspaceSearchWriterFence,
   type WorkspaceSearchWriterFenceResources,
 } from '../../policies/workspace-search-writer-fence';
+import {
+  grantPlanningRevisionFenceAccess,
+} from '../../policies/planning-revision-fence';
 import type { DataStoreResources } from '../data-stores';
 import type { FileStorageResources } from '../file-storage';
 import {
@@ -64,6 +67,7 @@ export function buildAutomationWorkers(
   const {
     auditEventsTable,
     automationTable,
+    planningTable,
     projectDirectoryTable,
     teamIssueEventsTable,
     tenantAdministrationTable,
@@ -124,6 +128,7 @@ export function buildAutomationWorkers(
         MUKUROJI_SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
         MUKUROJI_TEAM_ISSUE_EVENTS_TABLE: teamIssueEventsTable.tableName,
         MUKUROJI_WORK_ITEMS_TABLE: workItemsTable.tableName,
+        PLANNING_TABLE_NAME: planningTable.tableName,
         PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
         SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
         TEAM_ISSUE_EVENTS_TABLE_NAME: teamIssueEventsTable.tableName,
@@ -162,6 +167,8 @@ export function buildAutomationWorkers(
   projectDirectoryTable.grants.readData(automationEventFunction);
   teamIssueEventsTable.grants.readWriteData(automationEventFunction);
   workItemsTable.grants.readWriteData(automationEventFunction);
+  planningTable.grants.readData(automationEventFunction);
+  grantPlanningRevisionFenceAccess(planningTable, automationEventFunction);
   workItemConfigurationTable.grants.readData(automationEventFunction);
   workspaceAccessTable.grants.readData(automationEventFunction);
   automationEventFunction.addToRolePolicy(new iam.PolicyStatement({
@@ -264,6 +271,7 @@ export function buildAutomationWorkers(
         MUKUROJI_SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
         MUKUROJI_TEAM_ISSUE_EVENTS_TABLE: teamIssueEventsTable.tableName,
         MUKUROJI_WORK_ITEMS_TABLE: workItemsTable.tableName,
+        PLANNING_TABLE_NAME: planningTable.tableName,
         PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
         SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
         TEAM_ISSUE_EVENTS_TABLE_NAME: teamIssueEventsTable.tableName,
@@ -291,6 +299,8 @@ export function buildAutomationWorkers(
   projectDirectoryTable.grants.readData(automationScheduleFunction);
   teamIssueEventsTable.grants.readWriteData(automationScheduleFunction);
   workItemsTable.grants.readWriteData(automationScheduleFunction);
+  planningTable.grants.readData(automationScheduleFunction);
+  grantPlanningRevisionFenceAccess(planningTable, automationScheduleFunction);
   workItemConfigurationTable.grants.readData(automationScheduleFunction);
   workspaceAccessTable.grants.readData(automationScheduleFunction);
   automationScheduleFunction.addToRolePolicy(new iam.PolicyStatement({

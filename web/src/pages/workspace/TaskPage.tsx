@@ -289,8 +289,11 @@ export function TaskPage() {
   )
   const currentUserProjectKey = resolveCurrentUserProjectKey(user)
   const canMutateContent = canMutateWorkspaceContent(user)
-  const planningProjectIds = useMemo(
-    () => [...new Set(teams.flatMap((team) => team.projects.map((project) => project.id)))],
+  const planningProjectScopes = useMemo(
+    () => teams.flatMap((team) => team.projects.map((project) => ({
+      teamId: team.id,
+      projectId: project.id,
+    }))),
     [teams],
   )
   const {
@@ -302,7 +305,7 @@ export function TaskPage() {
   } = usePlanningProjectRoles(
     accessToken,
     currentUserProjectKey,
-    planningProjectIds,
+    planningProjectScopes,
     Boolean(user && !currentUserError && !user.isSystemAdmin && canMutateContent),
   )
   const planningProjectRoles = planningProjectRolesResult?.roles ?? emptyProjectRoles

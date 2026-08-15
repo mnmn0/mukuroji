@@ -23,6 +23,7 @@ import type { MessageKey } from '../../shared/i18n/i18n'
 import type { WorkItemDependencyCreateDraft } from '../../work-items/model/workItemDependencies'
 import { WorkItemDependencyPanel } from '../../work-items/ui/WorkItemDependencyPanel'
 import {
+  createPlanningDependencyAnchorId,
   resolvePlanningViewTabTarget,
   type PlanningViewId,
 } from '../../shared/routing/paths'
@@ -33,16 +34,35 @@ import {
 } from '../model/hierarchy'
 import type { PlanningScope } from '../model/permissions'
 import {
+  createPlanningUpdateEvidenceCandidates,
+  createMissingPlanningTargetUpdateView,
+  planningUpdateTargetsAreEqual,
+  type PlanningStatusUpdateDraft,
+  type PlanningTargetUpdateView,
+  type PlanningUpdateCadenceDraft,
+  type PlanningUpdateCollaborationController,
+  type PlanningUpdateTargetDetailView,
+  type PlanningUpdateTargetSummaryView,
+  type PlanningUpdateTargetView,
+} from '../model/statusUpdateView'
+import {
   createPlanningEntityDetailKey,
   isOpenPlanningEntity,
   isPlanningWorkItemLinkCandidate,
   resolvePlanningCycleRolloverTargets,
 } from '../model/selectors'
+import { createPlanningUpdateTargetKey } from '../model/targetKey'
+import {
+  PlanningLatestUpdateSummary,
+  PlanningUpdateDetailPane,
+  PlanningUpdateFreshnessBadge,
+  type PlanningUpdateLabels,
+} from './PlanningUpdatePrimitives'
 
 /**
  * PlanningScreen が表示する locale 済み文言です。
  */
-export type PlanningLabels = {
+export type PlanningLabels = PlanningUpdateLabels & {
   /** Planning 画面の eyebrow です。 */
   eyebrow: string
   /** Planning 画面の見出しです。 */
@@ -247,8 +267,24 @@ export type PlanningScreenProps = {
   isLoading?: boolean
   /** Snapshot 取得または mutation の error message です。 */
   errorMessage?: string
+  /** Recoverable Project directory or role verification error shown without hiding Planning data. */
+  accessErrorMessage?: string
   /** URL から初期選択する entity ID です。 */
   initialSelectedEntityId?: string
+  /** URL から初期選択する Project または Initiative update target です。 */
+  initialSelectedUpdateTarget?: PlanningUpdateTargetView
+  /** 表示可能な Project / Initiative update stream です。 */
+  updateTargetDetails?: readonly PlanningUpdateTargetDetailView[]
+  /** 選択 target の full immutable history を読み込み中かどうかです。 */
+  isUpdateHistoryLoading?: boolean
+  /** 選択 target に次の immutable history page があるかどうかです。 */
+  hasMoreUpdateHistory?: boolean
+  /** 選択 target の次の immutable history page を読み込み中かどうかです。 */
+  isLoadingMoreUpdateHistory?: boolean
+  /** 選択 target の history query error message です。 */
+  updateHistoryErrorMessage?: string
+  /** 選択 target の watch/export/comment/reaction controller です。 */
+  updateCollaboration?: PlanningUpdateCollaborationController
   /** Current user が entity の構造を管理できるか判定する callback です。 */
   canManageEntity?: (entity: PlanningEntity) => boolean
   /** Current user が entity を指定 scope に作成できるか判定する callback です。 */
@@ -257,6 +293,10 @@ export type PlanningScreenProps = {
   createScopeTeams?: readonly ProjectDirectoryTeam[]
   /** Current user が entity に status update を追加できるか判定する callback です。 */
   canUpdateEntityStatus?: (entity: PlanningEntity) => boolean
+  /** Current user が target の update schedule を管理できるか判定する callback です。 */
+  canManageUpdateCadence?: (target: PlanningUpdateTargetView) => boolean
+  /** Current user が target に manual update を公開できるか判定する callback です。 */
+  canPublishUpdate?: (target: PlanningUpdateTargetView) => boolean
   /** Current user が canonical Work Item の Planning link を更新できるか判定する callback です。 */
   canUpdateWorkItemLink?: (workItem: PlanningWorkItemSummary) => boolean
   /** Current user が canonical dependency endpoint を管理できるか判定する callback です。 */
@@ -265,8 +305,16 @@ export type PlanningScreenProps = {
   canLinkEntity?: (entity: PlanningEntity) => boolean
   /** View tab 選択時の callback です。 */
   onViewChange?: (view: PlanningViewId) => void
+  /** Project または Initiative update target 選択時の callback です。 */
+  onSelectUpdateTarget?: (target: PlanningUpdateTargetView) => void
   /** Snapshot 再取得 callback です。 */
   onRetry?: () => void
+  /** Retries Project directory and role verification queries. */
+  onRetryAccess?: () => void
+  /** 選択 target の immutable history を再取得する callback です。 */
+  onRetryUpdateHistory?: () => void
+  /** 選択 target の次の immutable history page を取得する callback です。 */
+  onLoadMoreUpdateHistory?: () => void | Promise<void>
   /** Planning entity 作成 callback です。 */
   onCreateEntity?: (
     input: Omit<CreatePlanningEntityInput, 'expectedRevision'>,
@@ -317,6 +365,16 @@ export type PlanningScreenProps = {
     health: PlanningHealth,
     risk: PlanningRisk,
   ) => void | Promise<void>
+  /** Project または Initiative の recurring update schedule を保存する callback です。 */
+  onSaveUpdateCadence?: (
+    target: PlanningUpdateTargetView,
+    draft: PlanningUpdateCadenceDraft,
+  ) => void | Promise<void>
+  /** Project または Initiative の structured manual update を公開する callback です。 */
+  onPublishUpdate?: (
+    target: PlanningUpdateTargetView,
+    draft: PlanningStatusUpdateDraft,
+  ) => void | Promise<void>
   /** Work Item planning link 保存 callback です。 */
   onSaveWorkItemLink?: (
     workItem: PlanningWorkItemSummary,
@@ -346,19 +404,24 @@ const planningViews: readonly PlanningViewId[] = ['timeline', 'roadmap', 'portfo
  * Timeline、roadmap、portfolio を同じ snapshot から描画します。
  */
 export function PlanningScreen({
+  accessErrorMessage,
   activeView,
   canCreateInScope,
   canLinkEntity,
+  canManageUpdateCadence,
   canManageEntity,
   canManageWorkItemDependencyEndpoint,
-  canUpdateEntityStatus,
+  canPublishUpdate,
   canUpdateWorkItemLink,
   createScopeTeams = [],
   errorMessage,
+  hasMoreUpdateHistory = false,
   initialSelectedEntityId,
+  initialSelectedUpdateTarget,
   isLoading = false,
+  isUpdateHistoryLoading = false,
+  isLoadingMoreUpdateHistory = false,
   labels,
-  onAddStatusUpdate,
   onArchiveEntity,
   onChangeMilestoneDate,
   onCreateDependency,
@@ -369,24 +432,69 @@ export function PlanningScreen({
   onDeleteWorkItemLink,
   onDuplicateEntity,
   onMoveEntity,
+  onLoadMoreUpdateHistory,
   onOpenMilestone,
   onOpenProject,
   onOpenWorkItem,
+  onPublishUpdate,
+  onSaveUpdateCadence,
   onSaveWorkItemLink,
+  onSelectUpdateTarget,
   onRetry,
+  onRetryAccess,
+  onRetryUpdateHistory,
   onRolloverCycle,
   onViewChange,
   onUpdateWorkItemDependency,
   snapshot,
+  updateCollaboration,
+  updateHistoryErrorMessage,
+  updateTargetDetails = [],
 }: PlanningScreenProps) {
   const activeEntities = useMemo(
     () => snapshot?.entities.filter((entity) => !entity.archivedAt) ?? [],
     [snapshot],
   )
   const [selectedEntityId, setSelectedEntityId] = useState(initialSelectedEntityId)
+  const [selectedUpdateTarget, setSelectedUpdateTarget] = useState(initialSelectedUpdateTarget)
   const pendingViewFocus = useRef<PlanningViewId | undefined>(undefined)
   const selectedEntity = activeEntities.find((entity) => entity.id === selectedEntityId) ??
     activeEntities.find((entity) => entity.type === 'goal') ?? activeEntities[0]
+  const resolvedSelectedUpdateTarget = selectedUpdateTarget ??
+    (selectedEntity ? resolvePlanningEntityUpdateTarget(selectedEntity) : undefined)
+  const selectedEntityUpdateTarget = selectedEntity
+    ? resolvePlanningEntityUpdateTarget(selectedEntity)
+    : undefined
+  const selectedUpdateDetail = resolvedSelectedUpdateTarget
+    ? resolvePlanningUpdateTargetDetail(updateTargetDetails, resolvedSelectedUpdateTarget)
+    : undefined
+  const selectedUpdateSummary = selectedUpdateDetail?.summary ?? (
+    selectedEntity && selectedEntityUpdateTarget && resolvedSelectedUpdateTarget &&
+      planningUpdateTargetsAreEqual(selectedEntityUpdateTarget, resolvedSelectedUpdateTarget)
+      ? createPlanningUpdateTargetSummary(
+          selectedEntity,
+          resolvedSelectedUpdateTarget,
+          createScopeTeams,
+        )
+      : undefined
+  )
+  const selectedUpdateView = selectedUpdateDetail?.updateView ?? (
+    resolvedSelectedUpdateTarget
+      ? createMissingPlanningTargetUpdateView(resolvedSelectedUpdateTarget)
+      : undefined
+  )
+  const selectedUpdateEvidenceCandidates = snapshot && resolvedSelectedUpdateTarget
+    ? createPlanningUpdateEvidenceCandidates(snapshot, resolvedSelectedUpdateTarget)
+    : undefined
+
+  /** Selects a planning row and forwards its Project or Initiative update target. */
+  const handleSelectEntity = (entityId: string) => {
+    const entity = activeEntities.find((candidate) => candidate.id === entityId)
+    const target = entity ? resolvePlanningEntityUpdateTarget(entity) : undefined
+    setSelectedEntityId(entityId)
+    setSelectedUpdateTarget(target)
+    if (target) onSelectUpdateTarget?.(target)
+  }
 
   useEffect(() => {
     if (pendingViewFocus.current !== activeView) return
@@ -456,85 +564,125 @@ export function PlanningScreen({
             ) : null}
           </div>
         ) : null}
+        {accessErrorMessage ? (
+          <div
+            className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3"
+            data-testid="planning-access-error"
+            role="alert"
+          >
+            <p className="max-w-[820px] text-sm font-semibold text-amber-900">
+              {accessErrorMessage}
+            </p>
+            {onRetryAccess ? (
+              <button
+                className="workbench-button-secondary min-h-9 px-3"
+                onClick={onRetryAccess}
+                type="button"
+              >
+                {labels.retry}
+              </button>
+            ) : null}
+          </div>
+        ) : null}
         {isLoading ? (
           <p className="py-16 text-center text-sm font-semibold text-[var(--workbench-muted)]">
             {labels.loading}
           </p>
-        ) : activeEntities.length === 0 ? (
-          <>
-            <section className="workbench-panel px-6 py-16 text-center">
-              <h2 className="text-lg font-semibold text-[var(--workbench-text)]">{labels.emptyTitle}</h2>
-              <p className="mt-2 text-sm font-medium text-[var(--workbench-muted)]">{labels.emptyDescription}</p>
-            </section>
-            {snapshot ? (
+        ) : snapshot ? (
+          <div
+            className={selectedUpdateSummary && selectedUpdateView
+              ? 'grid min-w-0 grid-cols-[minmax(0,1fr)_minmax(360px,440px)] items-start gap-5 max-[1180px]:grid-cols-1'
+              : 'grid min-w-0 grid-cols-1 gap-5'}
+            data-testid="planning-view-layout"
+          >
+            <div className="grid min-w-0 content-start gap-5">
+              {activeEntities.length === 0 ? (
+                <section className="workbench-panel px-6 py-16 text-center">
+                  <h2 className="text-lg font-semibold text-[var(--workbench-text)]">{labels.emptyTitle}</h2>
+                  <p className="mt-2 text-sm font-medium text-[var(--workbench-muted)]">{labels.emptyDescription}</p>
+                </section>
+              ) : null}
+              {activeEntities.length > 0 && activeView === 'timeline' ? (
+                <TimelineView
+                  canManageEntity={canManageEntity}
+                  canManageWorkItemDependencyEndpoint={canManageWorkItemDependencyEndpoint}
+                  labels={labels}
+                  selectedEntity={selectedEntity}
+                  snapshot={snapshot}
+                  updateTargetDetails={updateTargetDetails}
+                  onArchiveEntity={onArchiveEntity}
+                  onChangeMilestoneDate={onChangeMilestoneDate}
+                  onCreateDependency={onCreateDependency}
+                  onCreateWorkItemDependency={onCreateWorkItemDependency}
+                  onDeleteDependency={onDeleteDependency}
+                  onDeleteWorkItemDependency={onDeleteWorkItemDependency}
+                  onDuplicateEntity={onDuplicateEntity}
+                  onMoveEntity={onMoveEntity}
+                  onOpenMilestone={onOpenMilestone}
+                  onOpenProject={onOpenProject}
+                  onOpenWorkItem={onOpenWorkItem}
+                  onRolloverCycle={onRolloverCycle}
+                  onSelectEntity={handleSelectEntity}
+                  onUpdateWorkItemDependency={onUpdateWorkItemDependency}
+                />
+              ) : null}
+              {activeEntities.length > 0 && activeView === 'roadmap' ? (
+                <RoadmapView
+                  canLinkEntity={canLinkEntity}
+                  canManageEntity={canManageEntity}
+                  canUpdateWorkItemLink={canUpdateWorkItemLink}
+                  labels={labels}
+                  selectedEntity={selectedEntity}
+                  snapshot={snapshot}
+                  onArchiveEntity={onArchiveEntity}
+                  onDeleteWorkItemLink={onDeleteWorkItemLink}
+                  onDuplicateEntity={onDuplicateEntity}
+                  onMoveEntity={onMoveEntity}
+                  onOpenWorkItem={onOpenWorkItem}
+                  onSaveWorkItemLink={onSaveWorkItemLink}
+                  onSelectEntity={handleSelectEntity}
+                />
+              ) : null}
+              {activeEntities.length > 0 && activeView === 'portfolio' ? (
+                <PortfolioView
+                  labels={labels}
+                  onSelectEntity={handleSelectEntity}
+                  snapshot={snapshot}
+                  updateTargetDetails={updateTargetDetails}
+                />
+              ) : null}
               <CreateEntityPanel
                 canCreateInScope={canCreateInScope}
                 canManageEntity={canManageEntity}
                 createScopeTeams={createScopeTeams}
-                entities={[]}
+                entities={activeEntities}
                 labels={labels}
                 onCreate={onCreateEntity}
               />
-            ) : null}
-          </>
-        ) : snapshot ? (
-          <>
-            {activeView === 'timeline' ? (
-              <TimelineView
-                canManageEntity={canManageEntity}
-                canManageWorkItemDependencyEndpoint={canManageWorkItemDependencyEndpoint}
-                canUpdateEntityStatus={canUpdateEntityStatus}
+            </div>
+            {selectedUpdateSummary && selectedUpdateView && resolvedSelectedUpdateTarget ? (
+              <PlanningUpdateDetailPane
+                evidenceCandidates={selectedUpdateEvidenceCandidates}
+                key={createPlanningUpdateTargetKey(resolvedSelectedUpdateTarget)}
                 labels={labels}
-                selectedEntity={selectedEntity}
-                snapshot={snapshot}
-                onAddStatusUpdate={onAddStatusUpdate}
-                onArchiveEntity={onArchiveEntity}
-                onChangeMilestoneDate={onChangeMilestoneDate}
-                onCreateDependency={onCreateDependency}
-                onCreateWorkItemDependency={onCreateWorkItemDependency}
-                onDeleteDependency={onDeleteDependency}
-                onDeleteWorkItemDependency={onDeleteWorkItemDependency}
-                onDuplicateEntity={onDuplicateEntity}
-                onMoveEntity={onMoveEntity}
-                onOpenMilestone={onOpenMilestone}
-                onOpenProject={onOpenProject}
-                onOpenWorkItem={onOpenWorkItem}
-                onRolloverCycle={onRolloverCycle}
-                onSelectEntity={setSelectedEntityId}
-                onUpdateWorkItemDependency={onUpdateWorkItemDependency}
+                summary={selectedUpdateSummary}
+                updateView={selectedUpdateView}
+                collaboration={updateCollaboration}
+                historyErrorMessage={updateHistoryErrorMessage}
+                hasMoreHistory={hasMoreUpdateHistory}
+                isHistoryLoading={isUpdateHistoryLoading}
+                isLoadingMoreHistory={isLoadingMoreUpdateHistory}
+                onLoadMoreHistory={onLoadMoreUpdateHistory}
+                onPublish={onPublishUpdate && (canPublishUpdate?.(resolvedSelectedUpdateTarget) ?? true)
+                  ? (draft) => onPublishUpdate(resolvedSelectedUpdateTarget, draft)
+                  : undefined}
+                onSaveCadence={onSaveUpdateCadence && (canManageUpdateCadence?.(resolvedSelectedUpdateTarget) ?? true)
+                  ? (draft) => onSaveUpdateCadence(resolvedSelectedUpdateTarget, draft)
+                  : undefined}
+                onRetryHistory={onRetryUpdateHistory}
               />
             ) : null}
-            {activeView === 'roadmap' ? (
-              <RoadmapView
-                canLinkEntity={canLinkEntity}
-                canManageEntity={canManageEntity}
-                canUpdateEntityStatus={canUpdateEntityStatus}
-                canUpdateWorkItemLink={canUpdateWorkItemLink}
-                labels={labels}
-                selectedEntity={selectedEntity}
-                snapshot={snapshot}
-                onArchiveEntity={onArchiveEntity}
-                onAddStatusUpdate={onAddStatusUpdate}
-                onDeleteWorkItemLink={onDeleteWorkItemLink}
-                onDuplicateEntity={onDuplicateEntity}
-                onMoveEntity={onMoveEntity}
-                onOpenWorkItem={onOpenWorkItem}
-                onSaveWorkItemLink={onSaveWorkItemLink}
-                onSelectEntity={setSelectedEntityId}
-              />
-            ) : null}
-            {activeView === 'portfolio' ? (
-              <PortfolioView labels={labels} snapshot={snapshot} />
-            ) : null}
-            <CreateEntityPanel
-              canCreateInScope={canCreateInScope}
-              canManageEntity={canManageEntity}
-              createScopeTeams={createScopeTeams}
-              entities={activeEntities}
-              labels={labels}
-              onCreate={onCreateEntity}
-            />
-          </>
+          </div>
         ) : null}
       </div>
     </section>
@@ -544,9 +692,7 @@ export function PlanningScreen({
 function TimelineView({
   canManageEntity,
   canManageWorkItemDependencyEndpoint,
-  canUpdateEntityStatus,
   labels,
-  onAddStatusUpdate,
   onArchiveEntity,
   onChangeMilestoneDate,
   onCreateDependency,
@@ -563,12 +709,11 @@ function TimelineView({
   onSelectEntity,
   selectedEntity,
   snapshot,
+  updateTargetDetails,
 }: {
   canManageEntity?: PlanningScreenProps['canManageEntity']
   canManageWorkItemDependencyEndpoint?: PlanningScreenProps['canManageWorkItemDependencyEndpoint']
-  canUpdateEntityStatus?: PlanningScreenProps['canUpdateEntityStatus']
   labels: PlanningLabels
-  onAddStatusUpdate?: PlanningScreenProps['onAddStatusUpdate']
   onArchiveEntity?: PlanningScreenProps['onArchiveEntity']
   onChangeMilestoneDate?: PlanningScreenProps['onChangeMilestoneDate']
   onCreateDependency?: PlanningScreenProps['onCreateDependency']
@@ -585,6 +730,7 @@ function TimelineView({
   onSelectEntity: (entityId: string) => void
   selectedEntity?: PlanningEntity
   snapshot: PlanningSnapshot
+  updateTargetDetails: readonly PlanningUpdateTargetDetailView[]
 }) {
   const entities = snapshot.entities.filter(
     (entity) => !entity.archivedAt && timelineEntityTypes.has(entity.type),
@@ -608,19 +754,22 @@ function TimelineView({
           title={labels.timelineTitle}
         />
         <div className="overflow-x-auto border-t border-[var(--workbench-border)]">
-          <table className="w-full min-w-[900px] border-collapse text-left">
+          <table className="w-full min-w-full border-collapse text-left min-[761px]:min-w-[1180px]">
             <thead>
               <tr className="workbench-table-head">
                 <th className="px-5 py-3" scope="col">{labels.entity}</th>
-                <th className="px-5 py-3" scope="col">{labels.baseline}</th>
-                <th className="px-5 py-3" scope="col">{labels.forecast}</th>
-                <th className="px-5 py-3" scope="col">{labels.progress}</th>
-                <th className="px-5 py-3" scope="col">{labels.health}</th>
+                <th className="px-5 py-3 max-[760px]:hidden" scope="col">{labels.baseline}</th>
+                <th className="px-5 py-3 max-[760px]:hidden" scope="col">{labels.forecast}</th>
+                <th className="px-5 py-3 max-[760px]:hidden" scope="col">{labels.progress}</th>
+                <th className="px-5 py-3 max-[760px]:hidden" scope="col">{labels.health}</th>
+                <th className="px-5 py-3 max-[760px]:hidden" scope="col">{labels.updateState}</th>
+                <th className="px-5 py-3 max-[760px]:hidden" scope="col">{labels.latestUpdate}</th>
               </tr>
             </thead>
             <tbody>
               {entities.map((entity) => {
                 const critical = criticalEntityIds.has(entity.id)
+                const updateView = resolvePlanningEntityUpdateView(entity, updateTargetDetails)
                 return (
                   <tr
                     className={`border-b border-[var(--workbench-border)] ${critical ? 'bg-red-50/70' : 'bg-white'}`}
@@ -628,26 +777,48 @@ function TimelineView({
                     data-testid={`timeline-entity-${entity.id}`}
                     key={entity.id}
                   >
-                    <td className="px-5 py-4">
-                      <button className="text-left" type="button" onClick={() => onSelectEntity(entity.id)}>
-                        <span className="block text-sm font-semibold text-[var(--workbench-text)]">{entity.title}</span>
+                    <td className="w-full px-5 py-4">
+                      <button className="min-w-0 max-w-full text-left" type="button" onClick={() => onSelectEntity(entity.id)}>
+                        <span className="block truncate text-sm font-semibold text-[var(--workbench-text)]">{entity.title}</span>
                         <span className="mt-1 flex flex-wrap items-center gap-2 text-xs font-semibold text-[var(--workbench-muted)]">
                           {labels.entityTypes[entity.type]}
                           {critical ? <span className="workbench-badge-danger">{labels.criticalPath}</span> : null}
                         </span>
                       </button>
+                      {updateView ? (
+                        <div
+                          className="mt-3 hidden min-w-0 gap-2 max-[760px]:grid"
+                          data-testid={`timeline-update-summary-${entity.id}`}
+                        >
+                          <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                            <HealthBadge health={entity.rollupHealth} labels={labels} />
+                            <PlanningUpdateFreshnessBadge freshness={updateView.freshness} labels={labels} />
+                          </div>
+                          <PlanningLatestUpdateSummary labels={labels} updateView={updateView} />
+                        </div>
+                      ) : null}
                     </td>
-                    <td className="px-5 py-4 text-sm font-medium text-[var(--workbench-muted)]">
+                    <td className="px-5 py-4 text-sm font-medium text-[var(--workbench-muted)] max-[760px]:hidden">
                       {formatRange(entity.baseline)}
                     </td>
-                    <td className="px-5 py-4 text-sm font-semibold text-[var(--workbench-text)]">
+                    <td className="px-5 py-4 text-sm font-semibold text-[var(--workbench-text)] max-[760px]:hidden">
                       {formatRange(entity.forecast)}
                     </td>
-                    <td className="px-5 py-4">
+                    <td className="px-5 py-4 max-[760px]:hidden">
                       <Progress value={entity.progress} labels={labels} />
                     </td>
-                    <td className="px-5 py-4">
+                    <td className="px-5 py-4 max-[760px]:hidden">
                       <HealthBadge health={entity.rollupHealth} labels={labels} />
+                    </td>
+                    <td className="px-5 py-4 max-[760px]:hidden">
+                      {updateView ? (
+                        <PlanningUpdateFreshnessBadge freshness={updateView.freshness} labels={labels} />
+                      ) : <span className="text-sm text-[var(--workbench-muted)]">—</span>}
+                    </td>
+                    <td className="px-5 py-4 max-[760px]:hidden">
+                      {updateView ? (
+                        <PlanningLatestUpdateSummary labels={labels} updateView={updateView} />
+                      ) : <span className="text-sm text-[var(--workbench-muted)]">—</span>}
                     </td>
                   </tr>
                 )
@@ -684,7 +855,12 @@ function TimelineView({
         <h2 className="text-base font-semibold text-[var(--workbench-text)]">{labels.dependencyEditor}</h2>
         <div className="mt-4 grid gap-2">
           {snapshot.dependencies.map((dependency) => (
-            <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-[var(--workbench-border)] p-3" key={dependency.id}>
+            <div
+              className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-[var(--workbench-border)] p-3 target:border-[var(--workbench-primary)] target:bg-[#e5f7f4]"
+              id={createPlanningDependencyAnchorId(dependency.id)}
+              key={dependency.id}
+              tabIndex={-1}
+            >
               <p className="text-sm font-semibold text-[var(--workbench-text)]">
                 {resolveEntityTitle(snapshot.entities, dependency.predecessorId)} → {resolveEntityTitle(snapshot.entities, dependency.successorId)}
               </p>
@@ -716,17 +892,10 @@ function TimelineView({
       </section>
       {detailEntity ? (
         <div
-          className="grid grid-cols-2 items-start gap-5 max-[900px]:grid-cols-1"
+          className="grid grid-cols-1 items-start gap-5"
           data-testid="planning-timeline-entity-detail"
           key={`timeline-detail:${createPlanningEntityDetailKey(detailEntity)}`}
         >
-          <StatusUpdateEditor
-            entity={detailEntity}
-            labels={labels}
-            onAdd={(canUpdateEntityStatus?.(detailEntity) ?? true)
-              ? onAddStatusUpdate
-              : undefined}
-          />
           <EntityActions
             canManageEntity={canManageEntity}
             entities={snapshot.entities.filter((entity) => !entity.archivedAt)}
@@ -931,10 +1100,8 @@ function CycleRollover({
 function RoadmapView({
   canLinkEntity,
   canManageEntity,
-  canUpdateEntityStatus,
   canUpdateWorkItemLink,
   labels,
-  onAddStatusUpdate,
   onArchiveEntity,
   onDeleteWorkItemLink,
   onDuplicateEntity,
@@ -947,10 +1114,8 @@ function RoadmapView({
 }: {
   canLinkEntity?: PlanningScreenProps['canLinkEntity']
   canManageEntity?: PlanningScreenProps['canManageEntity']
-  canUpdateEntityStatus?: PlanningScreenProps['canUpdateEntityStatus']
   canUpdateWorkItemLink?: PlanningScreenProps['canUpdateWorkItemLink']
   labels: PlanningLabels
-  onAddStatusUpdate?: PlanningScreenProps['onAddStatusUpdate']
   onArchiveEntity?: PlanningScreenProps['onArchiveEntity']
   onDeleteWorkItemLink?: PlanningScreenProps['onDeleteWorkItemLink']
   onDuplicateEntity?: PlanningScreenProps['onDuplicateEntity']
@@ -971,12 +1136,9 @@ function RoadmapView({
   const canManageSelectedEntity = selectedEntity
     ? canManageEntity?.(selectedEntity) ?? true
     : false
-  const canUpdateSelectedEntityStatus = selectedEntity
-    ? canUpdateEntityStatus?.(selectedEntity) ?? true
-    : false
 
   return (
-    <div className="grid grid-cols-[minmax(0,1.4fr)_minmax(300px,0.8fr)] items-start gap-5 max-[1000px]:grid-cols-1" data-testid="planning-roadmap">
+    <div className="grid items-start gap-5" data-testid="planning-roadmap">
       <section className="workbench-panel overflow-hidden">
         <PlanningSectionHeader title={labels.roadmapTitle} description={labels.roadmapDescription} />
         <div className="grid gap-2 border-t border-[var(--workbench-border)] p-4">
@@ -993,7 +1155,7 @@ function RoadmapView({
           ))}
         </div>
       </section>
-      <div className="grid content-start gap-5">
+      <div className="grid content-start gap-5 min-[760px]:grid-cols-2">
         <section className="workbench-panel p-5" data-testid="goal-work-items">
           <h2 className="text-base font-semibold text-[var(--workbench-text)]">{labels.goalWorkItems}</h2>
           <div className="mt-4 grid gap-2">
@@ -1024,12 +1186,6 @@ function RoadmapView({
         </section>
         {selectedEntity ? (
           <>
-            <StatusUpdateEditor
-              entity={selectedEntity}
-              key={`roadmap-status:${createPlanningEntityDetailKey(selectedEntity)}`}
-              labels={labels}
-              onAdd={canUpdateSelectedEntityStatus ? onAddStatusUpdate : undefined}
-            />
             <EntityActions
               canManageEntity={canManageEntity}
               entities={entities}
@@ -1075,20 +1231,32 @@ function RoadmapNode({
     <div>
       <button
         aria-current={selectedEntityId === entity.id ? 'true' : undefined}
-        className={`grid w-full grid-cols-[minmax(0,1fr)_100px_110px] items-center gap-3 rounded-lg border p-3 text-left ${selectedEntityId === entity.id ? 'border-[#6fbfb4] bg-[#e5f7f4]' : 'border-[var(--workbench-border)] bg-white hover:border-[#99d7cf]'}`}
+        className={`grid w-full min-w-0 grid-cols-[minmax(0,1fr)_minmax(72px,auto)] items-center gap-2 rounded-lg border p-3 text-left min-[640px]:grid-cols-[minmax(0,1fr)_100px_110px] min-[640px]:gap-3 ${selectedEntityId === entity.id ? 'border-[#6fbfb4] bg-[#e5f7f4]' : 'border-[var(--workbench-border)] bg-white hover:border-[#99d7cf]'}`}
         data-testid={`roadmap-entity-${entity.id}`}
-        style={{ paddingLeft: `${12 + depth * 20}px` }}
+        style={{
+          paddingLeft: `clamp(12px, calc(12px + ${depth * 2.5}vw), ${12 + depth * 20}px)`,
+        }}
         type="button"
         onClick={() => onSelectEntity(entity.id)}
       >
         <span className="min-w-0">
           <span className="block truncate text-sm font-semibold text-[var(--workbench-text)]">{entity.title}</span>
-          <span className="mt-1 block text-xs font-medium text-[var(--workbench-muted)]">
-            {labels.entityTypes[entity.type]} · {labels.workItemCount(entity.linkedWorkItemCount)}
+          <span className="mt-1 flex min-w-0 flex-wrap items-center gap-x-1 gap-y-0.5 text-xs font-medium text-[var(--workbench-muted)]">
+            <span className="max-w-full truncate whitespace-nowrap">
+              {labels.entityTypes[entity.type]}
+            </span>
+            <span aria-hidden="true">·</span>
+            <span className="whitespace-nowrap">
+              {labels.workItemCount(entity.linkedWorkItemCount)}
+            </span>
           </span>
         </span>
-        <span className="text-sm font-semibold text-[var(--workbench-text)]">{labels.percent(entity.progress)}</span>
-        <HealthBadge health={entity.rollupHealth} labels={labels} />
+        <span className="grid min-w-[72px] justify-items-end gap-1 min-[640px]:contents">
+          <span className="whitespace-nowrap text-sm font-semibold text-[var(--workbench-text)]">
+            {labels.percent(entity.progress)}
+          </span>
+          <HealthBadge health={entity.rollupHealth} labels={labels} />
+        </span>
       </button>
       <div className="mt-2 grid gap-2">
         {(childrenByParent.get(entity.id) ?? []).map((child) => (
@@ -1374,58 +1542,6 @@ function CreateEntityPanel({
   )
 }
 
-function StatusUpdateEditor({
-  entity,
-  labels,
-  onAdd,
-}: {
-  entity: PlanningEntity
-  labels: PlanningLabels
-  onAdd?: PlanningScreenProps['onAddStatusUpdate']
-}) {
-  return (
-    <section className="workbench-panel grid gap-4 p-5" data-testid="planning-status-update">
-      <h2 className="text-base font-semibold text-[var(--workbench-text)]">{labels.statusUpdate}</h2>
-      <div className="grid gap-3" data-testid="planning-status-update-history">
-        {entity.statusUpdates.map((update) => (
-          <article className="rounded-lg border border-[var(--workbench-border)] bg-white p-3" key={update.id}>
-            <p className="text-sm font-medium text-[var(--workbench-text)]">{update.message}</p>
-            <p className="mt-2 text-xs font-medium text-[var(--workbench-muted)]">
-              {labels.statusUpdateMeta(update.authorMemberKey, update.createdAt)}
-            </p>
-            {update.health || update.risk ? (
-              <div className="mt-2 flex flex-wrap items-center gap-2">
-                {update.health ? <HealthBadge health={update.health} labels={labels} /> : null}
-                {update.risk ? (
-                  <span className="workbench-badge">{labels.risk}: {labels.riskValues[update.risk]}</span>
-                ) : null}
-              </div>
-            ) : null}
-          </article>
-        ))}
-        {entity.statusUpdates.length === 0 ? (
-          <p className="text-sm font-medium text-[var(--workbench-muted)]">{labels.noStatusUpdates}</p>
-        ) : null}
-      </div>
-      <form className="grid gap-3 border-t border-[var(--workbench-border)] pt-4" onSubmit={(event) => {
-        event.preventDefault()
-        const data = new FormData(event.currentTarget)
-        const message = String(data.get('message') ?? '').trim()
-        const health = readHealth(data.get('health'))
-        const risk = readRisk(data.get('risk'))
-        if (message) void onAdd?.(entity, message, health, risk)
-      }}>
-        <label className="grid gap-2 text-sm font-semibold">{labels.statusMessage}<textarea className="workbench-input min-h-20 p-3" name="message" required /></label>
-        <div className="grid grid-cols-2 gap-3">
-          <label className="grid gap-2 text-sm font-semibold">{labels.health}<select className="workbench-input h-10 px-3" defaultValue={entity.health} name="health">{(Object.keys(labels.healthValues) as PlanningHealth[]).map((value) => <option key={value} value={value}>{labels.healthValues[value]}</option>)}</select></label>
-          <label className="grid gap-2 text-sm font-semibold">{labels.risk}<select className="workbench-input h-10 px-3" defaultValue={entity.risk} name="risk">{(Object.keys(labels.riskValues) as PlanningRisk[]).map((value) => <option key={value} value={value}>{labels.riskValues[value]}</option>)}</select></label>
-        </div>
-        <button className="workbench-button-primary min-h-10 px-4 disabled:opacity-50" disabled={!onAdd} type="submit">{labels.addStatusUpdate}</button>
-      </form>
-    </section>
-  )
-}
-
 function WorkItemLinkEditor({
   canLinkEntity,
   canUpdateWorkItemLink,
@@ -1508,7 +1624,17 @@ function WorkItemLinkEditor({
   )
 }
 
-function PortfolioView({ labels, snapshot }: { labels: PlanningLabels; snapshot: PlanningSnapshot }) {
+function PortfolioView({
+  labels,
+  onSelectEntity,
+  snapshot,
+  updateTargetDetails,
+}: {
+  labels: PlanningLabels
+  onSelectEntity: (entityId: string) => void
+  snapshot: PlanningSnapshot
+  updateTargetDetails: readonly PlanningUpdateTargetDetailView[]
+}) {
   const rows = snapshot.entities.filter((entity) =>
     !entity.archivedAt && ['portfolio', 'roadmap', 'initiative'].includes(entity.type),
   )
@@ -1516,9 +1642,66 @@ function PortfolioView({ labels, snapshot }: { labels: PlanningLabels; snapshot:
     <section className="workbench-panel overflow-hidden" data-testid="planning-portfolio">
       <PlanningSectionHeader title={labels.portfolioTitle} description={labels.portfolioDescription} />
       <div className="overflow-x-auto border-t border-[var(--workbench-border)]">
-        <table className="w-full min-w-[900px] border-collapse text-left">
-          <thead><tr className="workbench-table-head"><th className="px-5 py-3">{labels.entity}</th><th className="px-5 py-3">{labels.progress}</th><th className="px-5 py-3">{labels.reportedHealth}</th><th className="px-5 py-3">{labels.rollupHealth}</th><th className="px-5 py-3">{labels.risk}</th><th className="px-5 py-3">{labels.linkedWorkItems}</th><th className="px-5 py-3">{labels.forecast}</th></tr></thead>
-          <tbody>{rows.map((entity) => <tr className="border-b border-[var(--workbench-border)] bg-white" data-testid={`portfolio-entity-${entity.id}`} key={entity.id}><td className="px-5 py-4"><span className="block text-sm font-semibold">{entity.title}</span><span className="mt-1 block text-xs text-[var(--workbench-muted)]">{labels.entityTypes[entity.type]}</span></td><td className="px-5 py-4"><Progress labels={labels} value={entity.progress} /></td><td className="px-5 py-4"><HealthBadge health={entity.health} labels={labels} /></td><td className="px-5 py-4"><HealthBadge health={entity.rollupHealth} labels={labels} /></td><td className="px-5 py-4 text-sm font-semibold">{labels.riskValues[entity.risk]}</td><td className="px-5 py-4 text-sm font-semibold">{labels.workItemCount(entity.linkedWorkItemCount)}</td><td className="px-5 py-4 text-sm font-medium">{formatRange(entity.forecast)}</td></tr>)}</tbody>
+        <table className="w-full min-w-full border-collapse text-left min-[761px]:min-w-[1320px]">
+          <thead>
+            <tr className="workbench-table-head">
+              <th className="px-5 py-3" scope="col">{labels.entity}</th>
+              <th className="px-5 py-3 max-[760px]:hidden" scope="col">{labels.progress}</th>
+              <th className="px-5 py-3 max-[760px]:hidden" scope="col">{labels.reportedHealth}</th>
+              <th className="px-5 py-3 max-[760px]:hidden" scope="col">{labels.rollupHealth}</th>
+              <th className="px-5 py-3 max-[760px]:hidden" scope="col">{labels.updateState}</th>
+              <th className="px-5 py-3 max-[760px]:hidden" scope="col">{labels.latestUpdate}</th>
+              <th className="px-5 py-3 max-[760px]:hidden" scope="col">{labels.risk}</th>
+              <th className="px-5 py-3 max-[760px]:hidden" scope="col">{labels.linkedWorkItems}</th>
+              <th className="px-5 py-3 max-[760px]:hidden" scope="col">{labels.forecast}</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((entity) => {
+              const updateView = resolvePlanningEntityUpdateView(entity, updateTargetDetails)
+              return (
+                <tr className="border-b border-[var(--workbench-border)] bg-white" data-testid={`portfolio-entity-${entity.id}`} key={entity.id}>
+                  <td className="w-full px-5 py-4">
+                    <button className="min-w-0 max-w-full text-left" onClick={() => onSelectEntity(entity.id)} type="button">
+                      <span className="block truncate text-sm font-semibold">{entity.title}</span>
+                      <span className="mt-1 block text-xs text-[var(--workbench-muted)]">{labels.entityTypes[entity.type]}</span>
+                    </button>
+                    {updateView ? (
+                      <div
+                        className="mt-3 hidden min-w-0 gap-2 max-[760px]:grid"
+                        data-testid={`portfolio-update-summary-${entity.id}`}
+                      >
+                        <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                          <HealthBadge
+                            health={entity.health}
+                            labels={labels}
+                          />
+                          <PlanningUpdateFreshnessBadge freshness={updateView.freshness} labels={labels} />
+                        </div>
+                        <PlanningLatestUpdateSummary labels={labels} updateView={updateView} />
+                      </div>
+                    ) : null}
+                  </td>
+                  <td className="px-5 py-4 max-[760px]:hidden"><Progress labels={labels} value={entity.progress} /></td>
+                  <td className="px-5 py-4 max-[760px]:hidden"><HealthBadge health={entity.health} labels={labels} /></td>
+                  <td className="px-5 py-4 max-[760px]:hidden"><HealthBadge health={entity.rollupHealth} labels={labels} /></td>
+                  <td className="px-5 py-4 max-[760px]:hidden">
+                    {updateView ? (
+                      <PlanningUpdateFreshnessBadge freshness={updateView.freshness} labels={labels} />
+                    ) : <span className="text-sm text-[var(--workbench-muted)]">—</span>}
+                  </td>
+                  <td className="px-5 py-4 max-[760px]:hidden">
+                    {updateView ? (
+                      <PlanningLatestUpdateSummary labels={labels} updateView={updateView} />
+                    ) : <span className="text-sm text-[var(--workbench-muted)]">—</span>}
+                  </td>
+                  <td className="px-5 py-4 text-sm font-semibold max-[760px]:hidden">{labels.riskValues[entity.risk]}</td>
+                  <td className="px-5 py-4 text-sm font-semibold max-[760px]:hidden">{labels.workItemCount(entity.linkedWorkItemCount)}</td>
+                  <td className="px-5 py-4 text-sm font-medium max-[760px]:hidden">{formatRange(entity.forecast)}</td>
+                </tr>
+              )
+            })}
+          </tbody>
         </table>
       </div>
     </section>
@@ -1552,9 +1735,96 @@ function Progress({ labels, value }: { labels: PlanningLabels; value: number }) 
 
 function HealthBadge({ health, labels }: { health: PlanningHealth; labels: PlanningLabels }) {
   const classes: Record<PlanningHealth, string> = { unknown: 'workbench-badge', 'on-track': 'workbench-badge-success', 'at-risk': 'workbench-badge-warning', 'off-track': 'workbench-badge-danger' }
-  return <span className={classes[health]}>{labels.healthValues[health]}</span>
+  return <span className={`${classes[health]} whitespace-nowrap`}>{labels.healthValues[health]}</span>
 }
 
+/**
+ * Resolves the Project or Initiative update target represented by a planning row.
+ *
+ * @param entity - Planning entity rendered by a list or hierarchy row.
+ * @returns A canonical update target, or undefined for non-target aggregate rows.
+ */
+function resolvePlanningEntityUpdateTarget(
+  entity: PlanningEntity,
+): PlanningUpdateTargetView | undefined {
+  if (entity.type === 'initiative') {
+    return { type: 'initiative', entityId: entity.id }
+  }
+  if (entity.teamId && entity.projectId) {
+    return {
+      type: 'project',
+      projectId: entity.projectId,
+      teamId: entity.teamId,
+    }
+  }
+  return undefined
+}
+
+/**
+ * Creates fallback target display metadata from one visible planning entity.
+ *
+ * @param entity - Visible planning entity that resolved to the target.
+ * @param target - Canonical Project or Initiative update target.
+ * @returns Display metadata used until an authoritative target projection loads.
+ */
+function createPlanningUpdateTargetSummary(
+  entity: PlanningEntity,
+  target: PlanningUpdateTargetView,
+  scopeTeams: readonly ProjectDirectoryTeam[],
+): PlanningUpdateTargetSummaryView {
+  const team = target.type === 'project'
+    ? scopeTeams.find((candidate) => candidate.id === target.teamId)
+    : undefined
+  const project = target.type === 'project'
+    ? team?.projects.find((candidate) => candidate.id === target.projectId)
+    : undefined
+  return {
+    context: target.type === 'project' ? team?.name ?? entity.teamId : undefined,
+    health: entity.health,
+    ownerMemberKey: entity.ownerMemberKey,
+    progress: entity.progress,
+    target,
+    title: target.type === 'project' ? project?.name ?? target.projectId : entity.title,
+  }
+}
+
+/**
+ * Finds the loaded detail projection matching a canonical update target.
+ *
+ * @param details - Visible update target projections.
+ * @param target - Canonical target selected by the route or a row.
+ * @returns The matching projection, or undefined while it is not loaded.
+ */
+function resolvePlanningUpdateTargetDetail(
+  details: readonly PlanningUpdateTargetDetailView[],
+  target: PlanningUpdateTargetView,
+) {
+  return details.find((detail) => planningUpdateTargetsAreEqual(detail.summary.target, target))
+}
+
+/**
+ * Resolves a row's update projection while preserving an explicit not-configured state.
+ *
+ * @param entity - Planning row being rendered.
+ * @param details - Loaded Project and Initiative update projections.
+ * @returns A loaded or fallback update projection, or undefined for non-target rows.
+ */
+function resolvePlanningEntityUpdateView(
+  entity: PlanningEntity,
+  details: readonly PlanningUpdateTargetDetailView[],
+): PlanningTargetUpdateView | undefined {
+  const target = resolvePlanningEntityUpdateTarget(entity)
+  if (!target) return undefined
+  return resolvePlanningUpdateTargetDetail(details, target)?.updateView ??
+    createMissingPlanningTargetUpdateView(target)
+}
+
+/**
+ * Creates a collision-resistant React key for a Project or Initiative target.
+ *
+ * @param target - Canonical update target.
+ * @returns A key that preserves Team identity for duplicate Project IDs.
+ */
 function groupChildren(entities: PlanningEntity[]) {
   const result = new Map<string, PlanningEntity[]>()
   for (const entity of entities) {
@@ -1712,12 +1982,4 @@ function readPlanningDependencyConstraint(
   return kind && anchor && /^\d{4}-\d{2}-\d{2}$/.test(date)
     ? { anchor, date, kind }
     : undefined
-}
-
-function readHealth(value: FormDataEntryValue | null): PlanningHealth {
-  return value === 'on-track' || value === 'at-risk' || value === 'off-track' ? value : 'unknown'
-}
-
-function readRisk(value: FormDataEntryValue | null): PlanningRisk {
-  return value === 'low' || value === 'medium' || value === 'high' || value === 'critical' ? value : 'none'
 }

@@ -131,16 +131,34 @@ const projectsApiBaseUrl = trimTrailingSlash(
 )
 
 /**
- * DynamoDB に保存されたプロジェクトメンバー一覧を取得します。
+ * Loads the active members and project roles for one Project.
+ *
+ * When the optional third argument is a Team ID, it is sent as a query parameter; when it is
+ * an AbortSignal, it is used as the request signal. A fourth signal is used only with the Team
+ * ID form, so the two overload forms retain the same cancellation behavior.
+ *
+ * @param accessToken - Bearer token for the Project directory API.
+ * @param projectId - Project identifier to load.
+ * @param teamIdOrSignal - Optional qualified Team ID or request cancellation signal.
+ * @param signal - Optional cancellation signal when the third argument is a Team ID.
+ * @returns Project members with their current roles.
  */
-export async function getProjectMembers(accessToken: string, projectId: string, signal?: AbortSignal) {
+export async function getProjectMembers(
+  accessToken: string,
+  projectId: string,
+  teamIdOrSignal?: string | AbortSignal,
+  signal?: AbortSignal,
+) {
+  const teamId = typeof teamIdOrSignal === 'string' ? teamIdOrSignal : undefined
+  const requestSignal = typeof teamIdOrSignal === 'string' ? signal : teamIdOrSignal ?? signal
+  const query = teamId ? `?teamId=${encodeURIComponent(teamId)}` : ''
   const response = await fetch(
-    `${projectsApiBaseUrl}/projects/${encodeURIComponent(projectId)}/members`,
+    `${projectsApiBaseUrl}/projects/${encodeURIComponent(projectId)}/members${query}`,
     {
       headers: {
         Authorization: `Bearer ${accessToken}`,
       },
-      signal,
+      signal: requestSignal,
     },
   )
   const data = await readJson<unknown>(response)

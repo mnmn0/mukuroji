@@ -44,6 +44,10 @@ export type WorkspaceSummary = {
 export type WorkspacePortfolioProject = {
   /** Unique row ID composed from the Team and Project IDs. */
   id: string
+  /** Team ID that qualifies the Project identity. */
+  teamId: string
+  /** Team-local Project ID used to join Planning update targets safely. */
+  projectId: string
   /** Project name. */
   name: string
   /** Name of the Team that owns the Project. */
@@ -510,6 +514,8 @@ export function createWorkspacePortfolioProjects(
       return {
         progress: calculateWorkspaceProgress(projectTasks),
         id: `${team.id}-${project.id}`,
+        teamId: team.id,
+        projectId: project.id,
         name: project.name,
         teamName: team.name,
         risk: resolveWorkspacePortfolioRisk(projectTasks),

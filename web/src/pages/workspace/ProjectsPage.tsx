@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo } from 'react'
-import { useParams, useSearchParams } from 'react-router'
+import { useNavigate, useParams, useSearchParams } from 'react-router'
+import { usePlanningSnapshot } from '../../planning/queries/usePlanningSnapshot'
 import {
   createProjectDirectoryAssigneeOptions,
   createProjectDirectoryRows,
@@ -11,6 +12,7 @@ import {
 import { ProjectDirectoryView } from '../../projects/ui/ProjectDirectoryView'
 import { useWorkspaceWorkItems } from '../../issues/queries/useWorkItems'
 import { createTranslator } from '../../shared/i18n/i18n'
+import { createPlanningProjectUpdatePath } from '../../shared/routing/paths'
 import {
   MobileSidebarButton,
   useWorkspaceSidebarController,
@@ -25,11 +27,16 @@ import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvi
  */
 export function ProjectsPage() {
   const workspace = useWorkspaceRouteContext()
+  const navigate = useNavigate()
   const { openMobileSidebar } = useWorkspaceSidebarController()
   const { teamId: routeTeamId } = useParams()
   const [searchParams, setSearchParams] = useSearchParams()
   const t = useMemo(() => createTranslator(workspace.locale), [workspace.locale])
   const workItems = useWorkspaceWorkItems(
+    workspace.accessToken,
+    workspace.canLoadWorkspaceData,
+  )
+  const planning = usePlanningSnapshot(
     workspace.accessToken,
     workspace.canLoadWorkspaceData,
   )
@@ -144,7 +151,9 @@ export function ProjectsPage() {
       </header>
 
       <WorkspaceRouteContent
-        isLoading={Boolean(workItems.key && workItems.isLoading)}
+        isLoading={Boolean(
+          workItems.key && workItems.isLoading || planning.key && planning.isLoading,
+        )}
         sessionErrors={[workItems.error]}
       >
         <div className="grid gap-5 px-[clamp(20px,3vw,34px)] py-5">
@@ -163,7 +172,16 @@ export function ProjectsPage() {
               </button>
             </div>
           ) : (
-            <ProjectDirectoryView
+            <>
+              {planning.error ? (
+                <p
+                  className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-800"
+                  role="status"
+                >
+                  {t('workspace.planningUpdate.error.loading')}
+                </p>
+              ) : null}
+              <ProjectDirectoryView
               assignees={assigneeOptions.assignees}
               filteredCount={filteredRows.length}
               filters={filters}
@@ -175,6 +193,7 @@ export function ProjectsPage() {
               isTeamFilterLocked={routeTeamId !== undefined}
               page={page.page}
               pageCount={page.pageCount}
+              planningUpdateTargets={planning.data?.updateTargets}
               rows={page.rows}
               t={t}
               teams={routeTeamId
@@ -195,6 +214,9 @@ export function ProjectsPage() {
                 project.projectId,
                 project.teamId,
               )}
+              onOpenPlanningUpdate={(project) => navigate(
+                createPlanningProjectUpdatePath(project.teamId, project.projectId),
+              )}
               onPageChange={replacePage}
               onQuickAccessOnlyChange={(quickAccessOnly) =>
                 replaceFilter('quickAccess', quickAccessOnly ? 'true' : undefined)}
@@ -206,7 +228,8 @@ export function ProjectsPage() {
                 { projectId: project.projectId, teamId: project.teamId },
                 project.projectName,
               )}
-            />
+              />
+            </>
           )}
         </div>
       </WorkspaceRouteContent>

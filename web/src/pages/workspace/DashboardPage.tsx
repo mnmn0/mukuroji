@@ -1,6 +1,9 @@
 import { useMemo } from 'react'
+import { useNavigate } from 'react-router'
+import { usePlanningSnapshot } from '../../planning/queries/usePlanningSnapshot'
 import { useWorkspaceFocusOverview } from '../../features/focus-queue/queries/useWorkspaceFocusOverview'
 import { createTranslator } from '../../shared/i18n/i18n'
+import { createPlanningProjectUpdatePath } from '../../shared/routing/paths'
 import { createWorkspaceSummary } from '../../work-items/model/workspaceWorkItems'
 import { useWorkspaceWorkItemData } from '../../workspace/queries/useWorkspaceWorkItemData'
 import { DashboardWorkspaceView } from '../../workspace/ui/DashboardWorkspaceView'
@@ -18,6 +21,7 @@ import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvi
  */
 export function DashboardPage() {
   const workspace = useWorkspaceRouteContext()
+  const navigate = useNavigate()
   const t = useMemo(() => createTranslator(workspace.locale), [workspace.locale])
   const workItems = useWorkspaceWorkItemData(
     workspace.accessToken,
@@ -36,9 +40,13 @@ export function DashboardPage() {
     ),
     [focus.blockedCount, workItems.tasks, workspace.teams],
   )
+  const planning = usePlanningSnapshot(
+    workspace.accessToken,
+    workspace.canLoadWorkspaceData,
+  )
   return (
     <WorkspaceRouteContent
-      isLoading={workItems.isLoading || focus.isLoading}
+      isLoading={workItems.isLoading || focus.isLoading || Boolean(planning.key && planning.isLoading)}
       sessionErrors={[
         workItems.workItemsError,
         workItems.configurationsError,
@@ -51,7 +59,14 @@ export function DashboardPage() {
         <DashboardWorkspaceView
           focusQueue={focus.response}
           isFocusUnavailable={focus.isUnavailable}
+          onOpenPlanningUpdate={(teamId, projectId) => navigate(
+            createPlanningProjectUpdatePath(teamId, projectId),
+          )}
           onOpenTask={workspace.onOpenTask}
+          planningUpdateTargets={planning.data?.updateTargets}
+          planningUpdatesErrorMessage={planning.error
+            ? t('workspace.planningUpdate.error.loading')
+            : undefined}
           summary={summary}
           t={t}
           tasks={workItems.tasks}

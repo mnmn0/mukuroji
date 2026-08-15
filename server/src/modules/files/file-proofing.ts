@@ -51,10 +51,11 @@ import {
 } from '../audit'
 import {
   createDynamoDbClient as createConfiguredDynamoDbClient,
-  createWorkspaceSearchWriterDynamoDbDocumentClient,
+  createPlanningRevisionFenceWriterDynamoDbDocumentClient,
   shouldBootstrapLocalDynamoDb,
 } from '../../infrastructure/aws/dynamodb-client'
 import { FILE_UPLOAD_MAX_SIZE_BYTES } from '../file-upload-policy'
+import { PLANNING_STORAGE_SCHEMA_VERSION } from '../planning'
 import { isMissingFileObjectVersionError } from './file-object-errors'
 import { isAllowedFileContentType, normalizeFileContentType } from './file-content-type'
 
@@ -69,6 +70,55 @@ export const FILE_APPROVAL_COMMENT_MAX_LENGTH = 2_000
 
 /** GuardDuty が object tag に保存する malware scan status key です。 */
 export const GUARDDUTY_SCAN_STATUS_TAG = 'GuardDutyMalwareScanStatus'
+
+/** Physical Planning META key that serializes canonical Work Item projections. */
+const PLANNING_META_RECORD_KEY = 'META'
+
+/** DynamoDB reverse index used for direct File ID evidence resolution. */
+const FILE_ID_INDEX_NAME = 'FileIdIndex'
+
+/**
+ * Creates the Planning META update for a canonical Work Item transition.
+ *
+ * @param planningTableName - Optional Planning table configured for the runtime.
+ * @param workspaceId - Workspace whose canonical Work Item projection changes.
+ * @param updatedAt - Mutation timestamp written to Planning META.
+ * @returns A transaction update, or undefined when Planning storage is not configured.
+ */
+function createPlanningRevisionIncrementTransactionItem(
+  planningTableName: string | undefined,
+  workspaceId: string,
+  updatedAt: string,
+): NonNullable<TransactWriteCommandInput['TransactItems']>[number] | undefined {
+  if (!planningTableName) return undefined
+  return {
+    Update: {
+      TableName: planningTableName,
+      Key: { workspaceId: `FENCE#${workspaceId}`, recordKey: PLANNING_META_RECORD_KEY },
+      UpdateExpression:
+        'SET #entryType = if_not_exists(#entryType, :entryType), ' +
+        '#schemaVersion = if_not_exists(#schemaVersion, :schemaVersion), ' +
+        '#updatedAt = :updatedAt ADD #revision :increment',
+      ConditionExpression:
+        '(attribute_not_exists(#entryType) AND ' +
+        'attribute_not_exists(#schemaVersion) AND attribute_not_exists(#revision)) OR (' +
+        '#entryType = :entryType AND #schemaVersion = :schemaVersion AND ' +
+        'attribute_exists(#revision))',
+      ExpressionAttributeNames: {
+        '#entryType': 'entryType',
+        '#schemaVersion': 'schemaVersion',
+        '#updatedAt': 'updatedAt',
+        '#revision': 'revision',
+      },
+      ExpressionAttributeValues: {
+        ':entryType': 'planning-meta',
+        ':schemaVersion': PLANNING_STORAGE_SCHEMA_VERSION,
+        ':updatedAt': updatedAt,
+        ':increment': 1,
+      },
+    },
+  }
+}
 
 /** File proofing API が扱う安定 error です。 */
 export class FileProofingError extends Error {
@@ -176,6 +226,14 @@ export type FileProofingCollection = {
     /** 新規 file を Workspace guest と共有できるかどうかです。 */
     canGrantGuestAccess: boolean
   }
+}
+
+/** One file resolved through the canonical File ID reverse index. */
+export type FileProofingFileLookup = {
+  /** File metadata projected for the current actor. */
+  file: FileAttachment
+  /** Scope that owns the file metadata row. */
+  scope: FileProofingScope
 }
 
 /** Annotation 作成入力です。 */
@@ -515,6 +573,12 @@ export interface FileObjectClient {
 export interface FileProofingClient {
   /** Scope の file と approval を取得します。 */
   list(scope: FileProofingScope, actor: FileProofingActor): Promise<FileProofingCollection>
+  /** Resolves one visible file by its canonical File ID reverse index. */
+  findFileById(
+    workspaceId: string,
+    actor: FileProofingActor,
+    fileId: string,
+  ): Promise<FileProofingFileLookup | undefined>
   /** 新規 file upload session を作成します。 */
   createUpload(
     scope: FileProofingScope,
@@ -825,6 +889,9 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
   /** Approval 完了時に transition する canonical Work Item table 名です。 */
   private readonly workItemsTableName?: string
 
+  /** Approval 完了時に canonical Work Item と同時更新する Planning table 名です。 */
+  private readonly planningTableName?: string
+
   /** Soft delete 後の保持日数です。 */
   private readonly retentionDays: number
 
@@ -849,6 +916,8 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
       retentionDays?: number
       /** Canonical Work Item table 名です。 */
       workItemsTableName?: string
+      /** Canonical Work Item transition と同時更新する Planning table 名です。 */
+      planningTableName?: string
       /** Local bootstrap 用の DynamoDB client です。 */
       dynamoDbClient?: DynamoDBClient
       /** Local table を自動作成するかどうかです。 */
@@ -860,6 +929,7 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
     this.objectClient = objectClient
     this.auditTableName = options.auditTableName?.trim() || undefined
     this.workItemsTableName = options.workItemsTableName?.trim() || undefined
+    this.planningTableName = options.planningTableName?.trim() || undefined
     this.retentionDays = requirePositiveInteger(options.retentionDays ?? 30, 'File retention days')
     this.dynamoDbClient = options.dynamoDbClient
     this.bootstrapLocalTable = options.bootstrapLocalTable === true
@@ -899,6 +969,46 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
         canRequestApproval: scope.kind === 'work-item' && actor.canWrite,
         canGrantGuestAccess: actor.canManage,
       },
+    }
+  }
+
+  /** Resolves one visible file without scanning every file scope in the workspace. */
+  async findFileById(
+    workspaceId: string,
+    actor: FileProofingActor,
+    fileId: string,
+  ): Promise<FileProofingFileLookup | undefined> {
+    await this.ensureReady()
+    const normalizedWorkspaceId = requireText(workspaceId, 'Workspace ID')
+    const normalizedFileId = requireText(fileId, 'File ID')
+    const response = await this.documentClient.send(new QueryCommand({
+      TableName: this.tableName,
+      IndexName: FILE_ID_INDEX_NAME,
+      KeyConditionExpression: '#fileId = :fileId',
+      ExpressionAttributeNames: { '#fileId': 'fileId' },
+      ExpressionAttributeValues: { ':fileId': normalizedFileId },
+    }))
+    const matches = (response.Items ?? [])
+      .filter(isStoredFileItem)
+      .filter((item) => item.workspaceId === normalizedWorkspaceId)
+    if (matches.length > 1) {
+      throw new FileProofingError(
+        503,
+        'FileLookupUnavailable',
+        'The canonical File ID lookup returned duplicate file records.',
+      )
+    }
+    const stored = matches[0]
+    if (!stored || stored.deletedAt || (actor.guest && !stored.guestAccess)) {
+      return undefined
+    }
+    const refreshed = await this.refreshScanStatuses(stored)
+    if (refreshed.deletedAt || (actor.guest && !refreshed.guestAccess)) {
+      return undefined
+    }
+    return {
+      file: toFileAttachment(refreshed, actor),
+      scope: createFileScopeFromStoredItem(refreshed),
     }
   }
 
@@ -1703,6 +1813,14 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
           },
         },
       })
+      const planningRevisionMutation = createPlanningRevisionIncrementTransactionItem(
+        this.planningTableName,
+        scope.workspaceId,
+        now,
+      )
+      if (planningRevisionMutation) {
+        transactionItems.push(planningRevisionMutation)
+      }
     }
     addAuditItem(transactionItems, this.auditTableName, auditContext, {
       directoryId: scope.workspaceId,
@@ -2383,7 +2501,7 @@ export class DynamoDbFileProofingClient implements FileProofingClient {
 export function createDefaultFileProofingClient(): FileProofingClient {
   const dynamoDbClient = createConfiguredDynamoDbClient()
   const documentClient =
-    createWorkspaceSearchWriterDynamoDbDocumentClient(dynamoDbClient)
+    createPlanningRevisionFenceWriterDynamoDbDocumentClient(dynamoDbClient)
   const s3Endpoint = readEnvironment('AWS_ENDPOINT_URL_S3') ?? readEnvironment('AWS_ENDPOINT_URL')
   const s3Client = new S3Client({
     ...createAwsClientConfiguration(s3Endpoint),
@@ -2406,6 +2524,7 @@ export function createDefaultFileProofingClient(): FileProofingClient {
       retentionDays: readPositiveIntegerEnvironment('FILE_RETENTION_DAYS', 30),
       workItemsTableName: readEnvironment('WORK_ITEMS_TABLE_NAME') ??
         readEnvironment('TEAM_ISSUES_TABLE_NAME'),
+      planningTableName: readEnvironment('PLANNING_TABLE_NAME'),
       dynamoDbClient,
       bootstrapLocalTable: shouldBootstrapLocalDynamoDb(),
     },
@@ -2523,6 +2642,19 @@ function readApprovalDueAtKey(value: string) {
 /** File record key を作成します。 */
 function createFileRecordKey(fileId: string) {
   return `FILE#${requireText(fileId, 'File ID')}`
+}
+
+/** Creates the public file scope represented by one stored file row. */
+function createFileScopeFromStoredItem(item: StoredFileItem): FileProofingScope {
+  return {
+    workspaceId: item.workspaceId,
+    teamId: item.teamId,
+    kind: item.issueId === undefined ? 'project' : 'work-item',
+    ...(item.issueId === undefined
+      ? { projectId: requireText(item.projectId, 'Project ID') }
+      : { issueId: item.issueId }),
+    ...(item.projectId === undefined ? {} : { projectId: item.projectId }),
+  }
 }
 
 /** Approval record key を作成します。 */
@@ -3558,6 +3690,7 @@ async function ensureLocalFileProofingTable(client: DynamoDBClient, tableName: s
       TableName: tableName,
       BillingMode: 'PAY_PER_REQUEST',
       AttributeDefinitions: [
+        { AttributeName: 'fileId', AttributeType: 'S' },
         { AttributeName: 'scopeKey', AttributeType: 'S' },
         { AttributeName: 'recordKey', AttributeType: 'S' },
       ],
@@ -3565,6 +3698,14 @@ async function ensureLocalFileProofingTable(client: DynamoDBClient, tableName: s
         { AttributeName: 'scopeKey', KeyType: 'HASH' },
         { AttributeName: 'recordKey', KeyType: 'RANGE' },
       ],
+      GlobalSecondaryIndexes: [{
+        IndexName: FILE_ID_INDEX_NAME,
+        KeySchema: [
+          { AttributeName: 'fileId', KeyType: 'HASH' },
+          { AttributeName: 'scopeKey', KeyType: 'RANGE' },
+        ],
+        Projection: { ProjectionType: 'ALL' },
+      }],
     }))
   } catch (error) {
     if (!isResourceInUseError(error)) {

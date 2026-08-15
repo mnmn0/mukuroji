@@ -59,6 +59,300 @@ export type PlanningCadence = {
   count: number
 }
 
+/** Structured Planning update content の現行 version です。 */
+export const PLANNING_UPDATE_CONTENT_VERSION = 1 as const
+
+/** Project または Initiative の定期 update target です。 */
+export type PlanningUpdateTarget =
+  | {
+      /** Directory project を target にする discriminator です。 */
+      type: 'project'
+      /** Project を所有する Team ID です。 */
+      teamId: string
+      /** Directory Project ID です。 */
+      projectId: string
+    }
+  | {
+      /** Planning initiative を target にする discriminator です。 */
+      type: 'initiative'
+      /** Initiative の Planning entity ID です。 */
+      entityId: string
+    }
+
+/** Project / Initiative update の提出 cadence と通知先です。 */
+export type PlanningUpdateCadence = {
+  /** Update を提出する Workspace member key です。 */
+  updateOwnerMemberKey: string
+  /** Update の calendar-based interval です。 */
+  cadence: PlanningCadence
+  /** Due instant の local calendar 解釈に使う IANA time zone です。 */
+  timeZone: string
+  /** 次回提出期限の ISO 8601 timestamp です。 */
+  nextDueAt: string
+  /** Due より何時間前に owner へ reminder を送るかを表す非負整数です。 */
+  reminderHoursBefore: number
+  /** Due より何時間後に escalation するかを表す非負整数です。 */
+  escalationHoursAfter?: number
+  /** Escalation 通知を受け取る Workspace member key です。 */
+  escalationMemberKey?: string
+}
+
+/** Health とは独立して算出する update の鮮度状態です。 */
+export type PlanningUpdateState =
+  | 'not-configured'
+  | 'missing'
+  | 'current'
+  | 'overdue'
+  | 'stale'
+
+/** Publish 時に server が canonical state から固定する進捗 snapshot です。 */
+export type PlanningUpdateProgressSnapshot = {
+  /** 0 以上 100 以下の算出済み progress です。 */
+  percent: number
+  /** Progress 算出対象となった一意な Work Item 件数です。 */
+  linkedWorkItemCount: number
+}
+
+/** Publish 時点の target scope です。 */
+export type PlanningUpdateScopeSnapshot = {
+  /** Target が属する Team ID です。 */
+  teamId?: string
+  /** Target が属する Project ID です。 */
+  projectId?: string
+}
+
+/** Publish 時点に target 配下で観測した Milestone です。 */
+export type PlanningUpdateMilestoneSnapshot = {
+  /** Milestone の Planning entity ID です。 */
+  entityId: string
+  /** Milestone title です。 */
+  title: string
+  /** Milestone lifecycle status です。 */
+  status: PlanningEntityStatus
+  /** Milestone forecast range です。 */
+  forecast: PlanningDateRange
+}
+
+/** Publish 時点に target と関係する Planning dependency です。 */
+export type PlanningUpdateDependencySnapshot = {
+  /** Planning dependency ID です。 */
+  dependencyId: string
+  /** 先行 Planning entity ID です。 */
+  predecessorId: string
+  /** 後続 Planning entity ID です。 */
+  successorId: string
+  /** Dependency の scheduling constraint 種別です。 */
+  type: PlanningDependencyType
+  /** Signed calendar-day lead / lag です。 */
+  lagDays: number
+}
+
+/** Update 比較の基準となる immutable server snapshot です。 */
+export type PlanningUpdateContextSnapshot = {
+  /** Submitter が明示した health です。 */
+  health: PlanningHealth
+  /** Submitter が明示した risk level です。 */
+  risk: PlanningRisk
+  /** Canonical state から算出した progress です。 */
+  progress: PlanningUpdateProgressSnapshot
+  /** Target の Team / Project scope です。 */
+  scope: PlanningUpdateScopeSnapshot
+  /** Target の forecast end date です。 */
+  targetDate?: string
+  /** Target 配下の active Milestone snapshot です。 */
+  milestones: PlanningUpdateMilestoneSnapshot[]
+  /** Target に関係する Planning dependency snapshot です。 */
+  dependencies: PlanningUpdateDependencySnapshot[]
+}
+
+/** Canonical Work Item を根拠として参照します。 */
+export type PlanningUpdateWorkItemEvidence = {
+  /** Work Item evidence の discriminator です。 */
+  type: 'work-item'
+  /** Work Item を所有する Team ID です。 */
+  teamId: string
+  /** Team 内の Work Item ID です。 */
+  workItemId: string
+}
+
+/** Planning entity を根拠として参照します。 */
+export type PlanningUpdateEntityEvidence = {
+  /** Planning entity evidence の discriminator です。 */
+  type: 'planning-entity'
+  /** Planning entity ID です。 */
+  entityId: string
+}
+
+/** Workspace file を根拠として参照します。 */
+export type PlanningUpdateFileEvidence = {
+  /** File evidence の discriminator です。 */
+  type: 'file'
+  /** Workspace 内の File ID です。 */
+  fileId: string
+  /** File を開くための credential-free HTTPS permalink です。 */
+  url: string
+}
+
+/** HTTPS link を根拠として参照します。 */
+export type PlanningUpdateLinkEvidence = {
+  /** Link evidence の discriminator です。 */
+  type: 'link'
+  /** Evidence の HTTPS URL です。 */
+  url: string
+  /** Link の任意表示 label です。 */
+  label?: string
+}
+
+/** Manual update に紐付けられる typed evidence です。 */
+export type PlanningUpdateEvidence =
+  | PlanningUpdateWorkItemEvidence
+  | PlanningUpdateEntityEvidence
+  | PlanningUpdateFileEvidence
+  | PlanningUpdateLinkEvidence
+
+/** Scalar context field の前回 update との差分です。 */
+export type PlanningUpdateScalarChange =
+  | {
+      /** Health change の discriminator です。 */
+      type: 'health'
+      /** 前回 update の health です。 */
+      before: PlanningHealth
+      /** 今回 update の health です。 */
+      after: PlanningHealth
+    }
+  | {
+      /** Risk change の discriminator です。 */
+      type: 'risk'
+      /** 前回 update の risk です。 */
+      before: PlanningRisk
+      /** 今回 update の risk です。 */
+      after: PlanningRisk
+    }
+  | {
+      /** Progress change の discriminator です。 */
+      type: 'progress'
+      /** 前回 update の progress percentage です。 */
+      before: number
+      /** 今回 update の progress percentage です。 */
+      after: number
+    }
+
+/** Forecast target date の前回 update との差分です。 */
+export type PlanningUpdateTargetDateChange = {
+  /** Target date change の discriminator です。 */
+  type: 'target-date'
+  /** 前回 update の target date です。 */
+  before?: string
+  /** 今回 update の target date です。 */
+  after?: string
+}
+
+/** Scope の前回 update との差分です。 */
+export type PlanningUpdateScopeChange = {
+  /** Scope change の discriminator です。 */
+  type: 'scope'
+  /** 前回 update の scope です。 */
+  before: PlanningUpdateScopeSnapshot
+  /** 今回 update の scope です。 */
+  after: PlanningUpdateScopeSnapshot
+}
+
+/** Collection context の前回 update との差分です。 */
+export type PlanningUpdateCollectionChange = {
+  /** 比較対象 collection の discriminator です。 */
+  type: 'milestones' | 'dependencies'
+  /** 今回追加された canonical ID です。 */
+  addedIds: string[]
+  /** 今回削除された canonical ID です。 */
+  removedIds: string[]
+  /** 同じ ID の snapshot 内容が変わった canonical ID です。 */
+  changedIds: string[]
+}
+
+/** Server が immutable context snapshots から算出した差分です。 */
+export type PlanningUpdateChange =
+  | PlanningUpdateScalarChange
+  | PlanningUpdateTargetDateChange
+  | PlanningUpdateScopeChange
+  | PlanningUpdateCollectionChange
+
+/** Full history に保存する immutable structured update です。 */
+export type PlanningUpdate = {
+  /** Client が割り当てる target-local update ID です。 */
+  id: string
+  /** Update 対象です。 */
+  target: PlanningUpdateTarget
+  /** Target 内で単調増加する version です。 */
+  version: number
+  /** Structured content schema version です。 */
+  contentVersion: typeof PLANNING_UPDATE_CONTENT_VERSION
+  /** Canonical update が manual publish されたことを示します。 */
+  origin: 'manual'
+  /** Submitter が明示した health です。 */
+  health: PlanningHealth
+  /** Submitter が明示した risk level です。 */
+  risk: PlanningRisk
+  /** Update の executive summary です。 */
+  summary: string
+  /** Risk の背景と影響です。 */
+  riskSummary: string
+  /** 今回の decision summary です。 */
+  decisionSummary: string
+  /** 必要な支援です。 */
+  helpNeeded: string
+  /** 次に実行する action です。 */
+  nextAction: string
+  /** Publish 時に server が算出した progress です。 */
+  progressSnapshot: PlanningUpdateProgressSnapshot
+  /** Publish 時に server が固定した比較用 context です。 */
+  contextSnapshot: PlanningUpdateContextSnapshot
+  /** 前回 immutable context との差分です。 */
+  changes: PlanningUpdateChange[]
+  /** Update の根拠一覧です。 */
+  evidence: PlanningUpdateEvidence[]
+  /** Update を作成した Workspace member key です。 */
+  authorMemberKey: string
+  /** この update が充足した due occurrence です。 */
+  coveredDueAt: string
+  /** Publish 日時の ISO 8601 timestamp です。 */
+  createdAt: string
+}
+
+/** Planning graph snapshot に埋め込む latest update の bounded summary です。 */
+export type PlanningLatestUpdateSummary = Pick<
+  PlanningUpdate,
+  | 'id'
+  | 'version'
+  | 'health'
+  | 'risk'
+  | 'summary'
+  | 'progressSnapshot'
+  | 'authorMemberKey'
+  | 'coveredDueAt'
+  | 'createdAt'
+> & {
+  /** Latest update が publish された時点の immutable Team / Project scope です。 */
+  capturedScope?: PlanningUpdateScopeSnapshot
+}
+
+/** Snapshot 上の update target cadence と latest state です。 */
+export type PlanningUpdateTargetSummary = {
+  /** Project または Initiative target です。 */
+  target: PlanningUpdateTarget
+  /** Configured cadence です。未設定なら updateState は not-configured です。 */
+  cadence?: PlanningUpdateCadence
+  /** Health とは独立した read-time freshness です。 */
+  updateState: PlanningUpdateState
+  /** 最後に publish された immutable version。未投稿なら 0 です。 */
+  latestVersion: number
+  /** Latest update の bounded summary です。 */
+  latestUpdate?: PlanningLatestUpdateSummary
+  /** Initiative archive に伴い通知を停止した日時です。 */
+  archivedAt?: string
+  /** Target configuration または latest pointer の更新日時です。 */
+  updatedAt: string
+}
+
 /** Cycle 終了時の未完了 Work Item の扱いです。 */
 export type CycleCarryOverPolicy = 'move-incomplete' | 'keep-incomplete'
 
@@ -222,6 +516,8 @@ export type PlanningSnapshot = {
   workItemLinks: PlanningWorkItemLink[]
   /** Roll-up に利用した Work Item projection 一覧です。 */
   workItems: PlanningWorkItemSummary[]
+  /** Cadence と latest update だけを含む bounded target summary 一覧です。 */
+  updateTargets: PlanningUpdateTargetSummary[]
   /** Snapshot から算出した critical path です。 */
   criticalPath: PlanningCriticalPath
   /** Work Item dependency graph summary derived from this exact snapshot. */
@@ -428,6 +724,168 @@ export type PlanningStatusUpdateInput = {
   risk?: PlanningRisk
   /** 読み込み時点の planning graph revision です。 */
   expectedRevision: number
+}
+
+/** Project / Initiative update cadence を設定または解除する入力です。 */
+export type ConfigurePlanningUpdateCadenceInput = {
+  /** Cadence を設定する Project または Initiative です。 */
+  target: PlanningUpdateTarget
+  /** 新しい cadence です。null で解除します。 */
+  cadence: PlanningUpdateCadence | null
+  /** 読み込み時点の Planning global revision です。 */
+  expectedRevision: number
+}
+
+/** Human-authored structured update を immutable publish する入力です。 */
+export type PublishPlanningUpdateInput = {
+  /** Update を publish する Project または Initiative です。 */
+  target: PlanningUpdateTarget
+  /** Client が割り当てる target-local update ID です。 */
+  id: string
+  /** Submitter が明示する health です。 */
+  health: PlanningHealth
+  /** Submitter が明示する risk level です。 */
+  risk: PlanningRisk
+  /** Update の executive summary です。 */
+  summary: string
+  /** Risk の背景と影響です。 */
+  riskSummary: string
+  /** 今回の decision summary です。 */
+  decisionSummary: string
+  /** 必要な支援です。 */
+  helpNeeded: string
+  /** 次に実行する action です。 */
+  nextAction: string
+  /** Update の根拠一覧です。 */
+  evidence: PlanningUpdateEvidence[]
+  /** 読み込み時点の Planning global revision です。 */
+  expectedRevision: number
+}
+
+/** Immutable update history を cursor pagination で取得する入力です。 */
+export type ListPlanningUpdatesInput = {
+  /** History を取得する Project または Initiative です。 */
+  target: PlanningUpdateTarget
+  /** 1 page に返す件数です。 */
+  limit?: number
+  /** Server が返した opaque pagination cursor です。 */
+  cursor?: string
+}
+
+/** Target-local immutable update history の1 page です。 */
+export type PlanningUpdateHistoryPage = {
+  /** 新しい順に並んだ immutable update 一覧です。 */
+  updates: PlanningUpdate[]
+  /** 続きがある場合に返す opaque cursor です。 */
+  nextCursor?: string
+}
+
+/** Immutable Planning update に付与する append-only comment です。 */
+export type PlanningUpdateComment = {
+  /** Update 内で comment を識別する client-generated ID です。 */
+  id: string
+  /** Comment 対象の Project または Initiative です。 */
+  target: PlanningUpdateTarget
+  /** Comment 対象の immutable update version です。 */
+  updateVersion: number
+  /** Comment 本文です。 */
+  body: string
+  /** Comment を作成した Workspace member key です。 */
+  authorMemberKey: string
+  /** Comment 作成日時の ISO 8601 timestamp です。 */
+  createdAt: string
+}
+
+/** Immutable update comment を作成する入力です。 */
+export type CreatePlanningUpdateCommentInput = {
+  /** Comment 対象の Project または Initiative です。 */
+  target: PlanningUpdateTarget
+  /** Comment 対象の immutable update version です。 */
+  updateVersion: number
+  /** Client-generated comment ID です。 */
+  id: string
+  /** Comment 本文です。 */
+  body: string
+}
+
+/** Update comment history を cursor pagination で取得する入力です。 */
+export type ListPlanningUpdateCommentsInput = {
+  /** Comment 対象の Project または Initiative です。 */
+  target: PlanningUpdateTarget
+  /** Comment 対象の immutable update version です。 */
+  updateVersion: number
+  /** 1 page に返す件数です。 */
+  limit?: number
+  /** Server が返した opaque pagination cursor です。 */
+  cursor?: string
+}
+
+/** Immutable update comments の1 page です。 */
+export type PlanningUpdateCommentPage = {
+  /** 新しい順に並んだ append-only comments です。 */
+  comments: PlanningUpdateComment[]
+  /** 続きがある場合に返す opaque cursor です。 */
+  nextCursor?: string
+}
+
+/** Immutable Planning update に付与する member reaction です。 */
+export type PlanningUpdateReaction = {
+  /** Reaction 対象の Project または Initiative です。 */
+  target: PlanningUpdateTarget
+  /** Reaction 対象の immutable update version です。 */
+  updateVersion: number
+  /** Unicode emoji または bounded reaction token です。 */
+  emoji: string
+  /** Reaction を付与した Workspace member key です。 */
+  memberKey: string
+  /** Reaction 作成日時の ISO 8601 timestamp です。 */
+  createdAt: string
+}
+
+/** Planning update reaction の追加・削除入力です。 */
+export type PlanningUpdateReactionInput = {
+  /** Reaction 対象の Project または Initiative です。 */
+  target: PlanningUpdateTarget
+  /** Reaction 対象の immutable update version です。 */
+  updateVersion: number
+  /** Unicode emoji または bounded reaction token です。 */
+  emoji: string
+}
+
+/** Update reactions を cursor pagination で取得する入力です。 */
+export type ListPlanningUpdateReactionsInput = {
+  /** Reaction 対象の Project または Initiative です。 */
+  target: PlanningUpdateTarget
+  /** Reaction 対象の immutable update version です。 */
+  updateVersion: number
+  /** 1 page に返す件数です。 */
+  limit?: number
+  /** Server が返した opaque pagination cursor です。 */
+  cursor?: string
+}
+
+/** Immutable update reactions の1 page です。 */
+export type PlanningUpdateReactionPage = {
+  /** Stable key 順に並んだ member reactions です。 */
+  reactions: PlanningUpdateReaction[]
+  /** 続きがある場合に返す opaque pagination cursor です。 */
+  nextCursor?: string
+}
+
+/** Cadence mutation の response です。 */
+export type PlanningUpdateCadenceMutationResponse = {
+  /** Mutation 後の Planning graph snapshot です。 */
+  planning: PlanningSnapshot
+  /** Mutation 後の target summary です。 */
+  updateTarget: PlanningUpdateTargetSummary
+}
+
+/** Manual structured update publish の response です。 */
+export type PlanningUpdatePublishResponse = {
+  /** Mutation 後の Planning graph snapshot です。 */
+  planning: PlanningSnapshot
+  /** 今回 append-only 保存した immutable update です。 */
+  update: PlanningUpdate
 }
 
 /** Cycle rollover API の入力です。 */

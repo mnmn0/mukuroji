@@ -1349,7 +1349,7 @@ test('DynamoDB directory client archives teams and projects with conditional upd
     projectId: 'refero',
     archivedAt: expect.any(String),
   })
-  expect(sentInputs[1]).toMatchObject({
+  expect(sentInputs[2]).toMatchObject({
     TransactItems: [{
       Update: {
         TableName: 'DirectoryTable',
@@ -1365,7 +1365,7 @@ test('DynamoDB directory client archives teams and projects with conditional upd
       Put: {
         TableName: 'mukuroji-planning-local',
         Item: {
-          workspaceId: 'user#demo@example.com',
+          workspaceId: 'FENCE#user#demo@example.com',
           recordKey: 'META',
           revision: 1,
         },
@@ -1374,7 +1374,7 @@ test('DynamoDB directory client archives teams and projects with conditional upd
       },
     }],
   })
-  expect(sentInputs[3]).toMatchObject({
+  expect(sentInputs[5]).toMatchObject({
     TransactItems: [{
       Update: {
         TableName: 'DirectoryTable',
@@ -1455,7 +1455,7 @@ test('serializes directory archive with the Planning graph revision', async () =
         Put: {
           TableName: 'PlanningTable',
           Item: {
-            workspaceId: 'user#demo@example.com',
+            workspaceId: 'FENCE#user#demo@example.com',
             recordKey: 'META',
             entryType: 'planning-meta',
             schemaVersion: 1,

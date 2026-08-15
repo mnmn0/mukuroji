@@ -212,6 +212,7 @@ test('enterprise SCIM group jobs run in a dedicated bounded worker', () => {
     'dynamodb:GetItem',
     'dynamodb:PutItem',
     'dynamodb:Query',
+    'dynamodb:UpdateItem',
   ]);
   expect(actionsForTable('DocumentsTable7E808EE5')).toEqual([
     'dynamodb:DescribeTable',
@@ -867,6 +868,8 @@ test('public API workers and the migration provider use retained 90-day log grou
 test('audit stream isolates downstream delivery and retention consumers', () => {
   const template = synthesizedTemplate;
   const resources = template.toJSON().Resources;
+  const enterpriseIdentityTableId = template.toJSON().Outputs
+    .EnterpriseIdentityTableName?.Value?.Ref;
 
   template.hasResourceProperties('AWS::Lambda::Function', {
     Code: {
@@ -888,10 +891,16 @@ test('audit stream isolates downstream delivery and retention consumers', () => 
         COGNITO_USER_POOL_ID: {
           Ref: 'CognitoUserPoolId',
         },
+        ENTERPRISE_IDENTITY_TABLE_NAME: {
+          Ref: enterpriseIdentityTableId,
+        },
         FILE_BUCKET_NAME: Match.anyValue(),
         FILE_PROOFING_TABLE_NAME: Match.anyValue(),
         NOTIFICATIONS_TABLE_NAME: {
           Ref: 'NotificationsTable76DCFC6C',
+        },
+        PLANNING_TABLE_NAME: {
+          Ref: 'PlanningTable2A0D4CC5',
         },
         PROCESSED_AUDIT_EVENTS_TABLE_NAME: {
           Ref: 'ProcessedAuditEventsTableFF485133',
@@ -1006,7 +1015,9 @@ test('audit stream isolates downstream delivery and retention consumers', () => 
   expect(serializedProjectionPolicy).toContain('WorkItemCollaborationTableFDECF217');
   expect(serializedProjectionPolicy).toContain('cognito-idp:AdminListGroupsForUser');
   expect(serializedProjectionPolicy).toContain('CognitoUserPoolId');
+  expect(serializedProjectionPolicy).toContain(String(enterpriseIdentityTableId));
   expect(serializedProjectionPolicy).toContain('TeamIssuesTable189D851D');
+  expect(serializedProjectionPolicy).toContain('PlanningTable2A0D4CC5');
   expect(serializedProjectionPolicy).toContain('TenantAdministrationTable621D59EB');
   expect(serializedProjectionPolicy).not.toContain('DeveloperPlatformTable772E085C');
   expect(serializedProjectionPolicy).not.toContain('LookupKeyIndex');
@@ -1017,6 +1028,10 @@ test('audit stream isolates downstream delivery and retention consumers', () => 
     .toContain('dynamodb:PutItem');
   expect(actionsForProjectionTable('ProcessedAuditEventsTableFF485133'))
     .toContain('dynamodb:PutItem');
+  expect(actionsForProjectionTable('PlanningTable2A0D4CC5'))
+    .toContain('dynamodb:GetItem');
+  expect(actionsForProjectionTable(String(enterpriseIdentityTableId)))
+    .toEqual(expect.arrayContaining(['dynamodb:GetItem', 'dynamodb:Query']));
   expect(actionsForProjectionTable('TeamIssuesTable189D851D'))
     .toContain('dynamodb:ConditionCheckItem');
   expect(serializedProjectionPolicy).toContain('sqs:SendMessage');
@@ -1956,7 +1971,8 @@ test('hourly schedule emits deterministic events and surfaces bounded scan failu
   const template = synthesizedTemplate;
 
   template.hasResourceProperties('AWS::Lambda::Function', {
-    Description: 'Emits deterministic due and overdue Work Item notification events.',
+    Description:
+      'Emits deterministic Work Item and Planning health update notification events.',
     Handler: 'index.handler',
     Runtime: 'nodejs22.x',
     Timeout: 300,
@@ -1966,6 +1982,9 @@ test('hourly schedule emits deterministic events and surfaces bounded scan failu
         AUDIT_RETENTION_DAYS: { Ref: 'AuditRetentionDays' },
         NOTIFICATION_SCHEDULE_MAX_PAGES: '1000',
         NOTIFICATION_SCHEDULE_SCAN_PAGE_SIZE: '100',
+        PLANNING_TABLE_NAME: { Ref: 'PlanningTable2A0D4CC5' },
+        PLANNING_UPDATE_SCHEDULE_INDEX_NAME: 'UpdateScheduleDueIndex',
+        PROJECT_DIRECTORY_TABLE_NAME: { Ref: 'ProjectDirectoryTable9ED01C01' },
         WORK_ITEMS_TABLE_NAME: { Ref: 'TeamIssuesTable189D851D' },
       }),
     },
@@ -2005,7 +2024,8 @@ test('hourly schedule emits deterministic events and surfaces bounded scan failu
     TreatMissingData: 'notBreaching',
   });
   template.hasResourceProperties('AWS::Events::Rule', {
-    Description: 'Checks canonical Work Items for due and overdue notifications.',
+    Description:
+      'Checks canonical Work Items and Planning update targets for scheduled notifications.',
     ScheduleExpression: 'rate(1 hour)',
     State: 'ENABLED',
     Targets: Match.arrayWith([
@@ -2020,12 +2040,38 @@ test('hourly schedule emits deterministic events and surfaces bounded scan failu
     logicalId.startsWith('NotificationScheduleFunctionServiceRoleDefaultPolicy')
   )?.[1];
   const serializedSchedulePolicy = JSON.stringify(schedulePolicy);
+  const scheduleStatements = (
+    schedulePolicy as {
+      Properties?: { PolicyDocument?: { Statement?: Array<Record<string, unknown>> } };
+    } | undefined
+  )?.Properties?.PolicyDocument?.Statement ?? [];
+  const planningUpdateStatement = scheduleStatements.find((statement) =>
+    JSON.stringify(statement.Resource).includes('PlanningTable2A0D4CC5') &&
+    JSON.stringify(statement.Action).includes('dynamodb:UpdateItem')
+  );
 
   expect(serializedSchedulePolicy).toContain('TeamIssuesTable189D851D');
+  expect(serializedSchedulePolicy).toContain('PlanningTable2A0D4CC5');
+  expect(serializedSchedulePolicy).toContain('UpdateScheduleDueIndex');
+  expect(serializedSchedulePolicy).toContain('ProjectDirectoryTable9ED01C01');
   expect(serializedSchedulePolicy).toContain('AuditEventsTable0723963E');
   expect(serializedSchedulePolicy).toContain('dynamodb:Scan');
+  expect(serializedSchedulePolicy).toContain('dynamodb:GetItem');
+  expect(serializedSchedulePolicy).toContain('dynamodb:Query');
+  expect(serializedSchedulePolicy).toContain('dynamodb:UpdateItem');
   expect(serializedSchedulePolicy).toContain('dynamodb:PutItem');
   expect(serializedSchedulePolicy).toContain('sqs:SendMessage');
+  expect(planningUpdateStatement?.Condition).toEqual({
+    'ForAllValues:StringEquals': {
+      'dynamodb:Attributes': [
+        'workspaceId',
+        'recordKey',
+        'nextNotificationAtRecordKey',
+        'updateScheduleShard',
+        'updatedAt',
+      ],
+    },
+  });
   template.hasOutput('NotificationScheduleDlqUrl', {});
 });
 
@@ -2658,6 +2704,7 @@ test('automation workers consume the audit outbox and run recurring schedules wi
         TENANT_ADMINISTRATION_TABLE_NAME: { Ref: 'TenantAdministrationTable621D59EB' },
         WORK_ITEM_CONFIGURATION_TABLE_NAME: { Ref: 'WorkItemConfigurationTable35E94558' },
         WORK_ITEMS_TABLE_NAME: { Ref: 'TeamIssuesTable189D851D' },
+        PLANNING_TABLE_NAME: { Ref: 'PlanningTable2A0D4CC5' },
         WORKSPACE_SEARCH_TABLE_NAME: { Ref: 'WorkspaceSearchTable2575AD6B' },
       }),
     },
@@ -2683,6 +2730,7 @@ test('automation workers consume the audit outbox and run recurring schedules wi
         TENANT_ADMINISTRATION_TABLE_NAME: { Ref: 'TenantAdministrationTable621D59EB' },
         WORK_ITEM_CONFIGURATION_TABLE_NAME: { Ref: 'WorkItemConfigurationTable35E94558' },
         WORK_ITEMS_TABLE_NAME: { Ref: 'TeamIssuesTable189D851D' },
+        PLANNING_TABLE_NAME: { Ref: 'PlanningTable2A0D4CC5' },
         WORKSPACE_SEARCH_TABLE_NAME: { Ref: 'WorkspaceSearchTable2575AD6B' },
       }),
     },
@@ -2751,6 +2799,37 @@ test('automation workers consume the audit outbox and run recurring schedules wi
     const statements = (policy as {
       Properties?: { PolicyDocument?: { Statement?: Array<Record<string, unknown>> } };
     } | undefined)?.Properties?.PolicyDocument?.Statement ?? [];
+    const planningRevisionFenceStatement = statements.find((statement) =>
+      (statement.Action === 'dynamodb:UpdateItem' ||
+        Array.isArray(statement.Action) && statement.Action.includes('dynamodb:UpdateItem')) &&
+      JSON.stringify(statement.Resource).includes('PlanningTable2A0D4CC5') &&
+      JSON.stringify(statement.Condition).includes('TransactWriteItems')
+    );
+    expect(planningRevisionFenceStatement).toEqual({
+      Action: 'dynamodb:UpdateItem',
+      Condition: {
+        'ForAllValues:StringEquals': {
+          'dynamodb:Attributes': [
+            'workspaceId',
+            'recordKey',
+            'entryType',
+            'schemaVersion',
+            'revision',
+            'updatedAt',
+          ],
+        },
+        'ForAllValues:StringLike': {
+          'dynamodb:LeadingKeys': ['FENCE#*'],
+        },
+        StringEquals: {
+          'dynamodb:EnclosingOperation': 'TransactWriteItems',
+        },
+      },
+      Effect: 'Allow',
+      Resource: {
+        'Fn::GetAtt': ['PlanningTable2A0D4CC5', 'Arn'],
+      },
+    });
     const conditionCheckStatements = (conditionCheckPolicy as {
       Properties?: { PolicyDocument?: { Statement?: Array<Record<string, unknown>> } };
     } | undefined)?.Properties?.PolicyDocument?.Statement ?? [];

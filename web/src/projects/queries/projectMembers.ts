@@ -6,6 +6,7 @@ import {
 } from '../api/members'
 import type { ProjectDirectoryProject } from '../api/directory'
 import type { TeamProjectMemberAccess } from '../model/teamInsights'
+import type { PlanningProjectRoleScope } from '../../planning/model/permissions'
 
 /**
  * 複数 Project の member を Workspace の Team 表示用にまとめて取得します。
@@ -89,22 +90,34 @@ export async function loadActiveProjectMembers(
 }
 
 /**
- * Planning 画面で利用する Project ごとの member role を取得します。
+ * Loads the selected member's Project roles for Planning authorization.
  *
- * @param accessToken - Project member API の access token です。
- * @param memberKey - Role を解決する member ID です。
- * @param projectIds - 取得対象の Project ID 一覧です。
- * @returns Project ID ごとの role と取得 error です。
+ * Team-qualified scopes use a Team-aware API request and are returned under a composite
+ * `teamId\0projectId` key. An unqualified Project scope also receives a `projectId` key only when
+ * that Project appears once, which avoids ambiguity when the same Project ID exists in multiple
+ * Teams. Individual request failures are returned in `errors` instead of rejecting the aggregate.
+ *
+ * @param accessToken - Bearer token for the Project directory API.
+ * @param memberKey - Member ID whose role should be resolved.
+ * @param projectScopes - Unqualified Project IDs or Team-qualified Project scopes.
+ * @returns Resolved role keys and request errors for failed scopes.
  */
 export async function loadPlanningProjectRoles(
   accessToken: string,
   memberKey: string,
-  projectIds: readonly string[],
+  projectScopes: readonly (string | PlanningProjectRoleScope)[],
 ) {
+  const scopes: Array<{ projectId: string; teamId?: string }> = projectScopes.map((scope) => typeof scope === 'string'
+    ? { projectId: scope }
+    : scope)
+  const projectIdCounts = new Map<string, number>()
+  for (const scope of scopes) {
+    projectIdCounts.set(scope.projectId, (projectIdCounts.get(scope.projectId) ?? 0) + 1)
+  }
   const responses = await Promise.allSettled(
-    projectIds.map(async (projectId) => ({
-      projectId,
-      members: await getProjectMembers(accessToken, projectId),
+    scopes.map(async (scope) => ({
+      scope,
+      members: await getProjectMembers(accessToken, scope.projectId, scope.teamId),
     })),
   )
   const roles: Record<string, ProjectMemberRole> = {}
@@ -119,7 +132,9 @@ export async function loadPlanningProjectRoles(
     )
 
     if (member) {
-      roles[response.value.projectId] = member.role
+      const { projectId, teamId } = response.value.scope
+      if (teamId !== undefined) roles[`${teamId}\0${projectId}`] = member.role
+      if (projectIdCounts.get(projectId) === 1) roles[projectId] = member.role
     }
   }
 

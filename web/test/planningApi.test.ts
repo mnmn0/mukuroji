@@ -1,7 +1,15 @@
 import { afterEach, describe, expect, test } from 'bun:test'
-import { LEGACY_PLANNING_SCHEMA_VERSION } from '@mukuroji/contracts'
 import {
+  LEGACY_PLANNING_SCHEMA_VERSION,
+  type PlanningUpdate,
+  type PlanningUpdateTarget,
+  type PlanningUpdateTargetSummary,
+} from '@mukuroji/contracts'
+import {
+  addPlanningUpdateReaction,
   archivePlanningEntity,
+  configurePlanningUpdateCadence,
+  createPlanningUpdateComment,
   createPlanningDependency,
   createPlanningEntity,
   createWorkItemScheduleDependency,
@@ -9,22 +17,43 @@ import {
   deletePlanningWorkItemLink,
   deleteWorkItemScheduleDependency,
   duplicatePlanningEntity,
+  exportPlanningUpdates,
+  getPlanningUpdateWatch,
   getPlanningSnapshot,
+  listPlanningUpdateComments,
+  listPlanningUpdateReactions,
+  listPlanningUpdates,
   movePlanningEntity,
   PlanningApiError,
+  publishPlanningUpdate,
   putPlanningWorkItemLink,
   resolvePlanningErrorMessageKey,
   rolloverPlanningCycle,
+  removePlanningUpdateReaction,
+  subscribePlanningUpdateWatch,
+  unsubscribePlanningUpdateWatch,
   updatePlanningEntity,
   updateWorkItemScheduleDependency,
 } from '../src/planning/api'
-import { planningSnapshotFixture } from '../src/planning/fixtures'
+import {
+  planningSnapshotFixture,
+  planningUpdateHistoryFixture,
+} from '../src/planning/fixtures'
 
 const originalFetch = globalThis.fetch
 const mutationContext = {
   correlationId: 'correlation-planning',
   idempotencyKey: 'idempotency-planning',
 }
+const projectUpdateTarget = {
+  projectId: 'refero',
+  teamId: 'core-team',
+  type: 'project',
+} satisfies PlanningUpdateTarget
+const initiativeUpdateTarget = {
+  entityId: 'initiative-onboarding',
+  type: 'initiative',
+} satisfies PlanningUpdateTarget
 
 afterEach(() => {
   globalThis.fetch = originalFetch
@@ -38,6 +67,27 @@ describe('Planning API', () => {
     expect(requests).toHaveLength(1)
     expect(requests[0]?.url).toBe('/api/planning')
     expect(requests[0]?.init.headers).toMatchObject({ Authorization: 'Bearer access-token' })
+  })
+
+  test('defaults update targets during a rolling v2 deployment', async () => {
+    const rollingSnapshot = {
+      criticalPath: planningSnapshotFixture.criticalPath,
+      dependencies: planningSnapshotFixture.dependencies,
+      entities: planningSnapshotFixture.entities,
+      revision: planningSnapshotFixture.revision,
+      schemaVersion: planningSnapshotFixture.schemaVersion,
+      updatedAt: planningSnapshotFixture.updatedAt,
+      workItemDependencies: planningSnapshotFixture.workItemDependencies,
+      workItemDependencySummary: planningSnapshotFixture.workItemDependencySummary,
+      workItemLinks: planningSnapshotFixture.workItemLinks,
+      workItems: planningSnapshotFixture.workItems,
+    }
+    installFetchRecorder(rollingSnapshot)
+
+    await expect(getPlanningSnapshot('access-token')).resolves.toMatchObject({
+      schemaVersion: 2,
+      updateTargets: [],
+    })
   })
 
   test('upgrades a dependency-free v1 snapshot during a rolling deployment', async () => {
@@ -271,6 +321,304 @@ describe('Planning API', () => {
     })
   })
 
+  test('configures cadence, publishes an update, and lists validated immutable history', async () => {
+    const update = getPlanningUpdateFixture()
+    const updateTarget = getPlanningUpdateTargetSummary('project')
+    const cadenceInput = {
+      cadence: updateTarget.cadence ?? null,
+      expectedRevision: planningSnapshotFixture.revision,
+      target: projectUpdateTarget,
+    }
+    const publishInput = {
+      decisionSummary: update.decisionSummary,
+      evidence: update.evidence,
+      expectedRevision: planningSnapshotFixture.revision,
+      health: update.health,
+      helpNeeded: update.helpNeeded,
+      id: 'update-initiative-3',
+      nextAction: update.nextAction,
+      risk: update.risk,
+      riskSummary: update.riskSummary,
+      summary: update.summary,
+      target: initiativeUpdateTarget,
+    }
+    const cadenceResponse = {
+      planning: planningSnapshotFixture,
+      updateTarget,
+    }
+    const publishResponse = {
+      planning: planningSnapshotFixture,
+      update,
+    }
+    const historyResponse = {
+      nextCursor: 'history/cursor',
+      updates: planningUpdateHistoryFixture,
+    }
+    const requests = installFetchRecorder((url, init) => {
+      if (url.endsWith('/cadence')) return cadenceResponse
+      if (init.method === 'POST') return publishResponse
+      return historyResponse
+    })
+
+    await expect(configurePlanningUpdateCadence(
+      'access-token',
+      cadenceInput,
+      mutationContext,
+    )).resolves.toEqual(cadenceResponse)
+    await expect(publishPlanningUpdate(
+      'access-token',
+      publishInput,
+      mutationContext,
+    )).resolves.toEqual(publishResponse)
+    await expect(listPlanningUpdates('access-token', {
+      cursor: 'cursor/next',
+      limit: 25,
+      target: initiativeUpdateTarget,
+    })).resolves.toEqual(historyResponse)
+
+    expect(requests.map((request) => [request.init.method, request.url])).toEqual([
+      ['PUT', '/api/planning/updates/cadence'],
+      ['POST', '/api/planning/updates'],
+      [
+        'GET',
+        '/api/planning/updates?targetType=initiative&entityId=initiative-onboarding&limit=25&cursor=cursor%2Fnext',
+      ],
+    ])
+    expect(JSON.parse(String(requests[0]?.init.body))).toEqual(cadenceInput)
+    expect(JSON.parse(String(requests[1]?.init.body))).toEqual(publishInput)
+    for (const request of requests.slice(0, 2)) {
+      expect(request.init.headers).toMatchObject({
+        Authorization: 'Bearer access-token',
+        'Content-Type': 'application/json',
+        'Idempotency-Key': 'idempotency-planning',
+        'X-Correlation-Id': 'correlation-planning',
+      })
+    }
+  })
+
+  test('gets, subscribes, and unsubscribes a Team-qualified Project update watch', async () => {
+    const watchResponse = {
+      watch: {
+        automatic: false,
+        explicit: true,
+        reasons: ['explicit'],
+        subscribed: true,
+        watcherCount: 3,
+      },
+    }
+    const requests = installFetchRecorder(watchResponse)
+
+    await expect(getPlanningUpdateWatch(
+      'access-token',
+      projectUpdateTarget,
+    )).resolves.toEqual(watchResponse.watch)
+    await expect(subscribePlanningUpdateWatch(
+      'access-token',
+      projectUpdateTarget,
+      mutationContext,
+    )).resolves.toEqual(watchResponse.watch)
+    await expect(unsubscribePlanningUpdateWatch(
+      'access-token',
+      projectUpdateTarget,
+      mutationContext,
+    )).resolves.toEqual(watchResponse.watch)
+
+    expect(requests.map((request) => [request.init.method, request.url])).toEqual([
+      [
+        'GET',
+        '/api/planning/update-watch?targetType=project&teamId=core-team&projectId=refero',
+      ],
+      [
+        'PUT',
+        '/api/planning/update-watch?targetType=project&teamId=core-team&projectId=refero',
+      ],
+      [
+        'DELETE',
+        '/api/planning/update-watch?targetType=project&teamId=core-team&projectId=refero',
+      ],
+    ])
+    for (const request of requests.slice(1)) {
+      expect(request.init.headers).toMatchObject({
+        Authorization: 'Bearer access-token',
+        'Idempotency-Key': 'idempotency-planning',
+        'X-Correlation-Id': 'correlation-planning',
+      })
+    }
+  })
+
+  test('exports Team-qualified Project update history with a server filename', async () => {
+    const exportBody = {
+      exportedAt: '2026-07-16T03:00:00.000Z',
+      schemaVersion: 1,
+      target: projectUpdateTarget,
+      updates: [],
+    }
+    const requests = installFetchRecorder(exportBody, {
+      'Content-Disposition': 'attachment; filename="planning-updates-core-team-refero.json"',
+      'Content-Type': 'application/json',
+    })
+
+    const artifact = await exportPlanningUpdates('access-token', projectUpdateTarget)
+
+    expect(artifact.filename).toBe('planning-updates-core-team-refero.json')
+    expect(await artifact.blob.text()).toBe(JSON.stringify(exportBody))
+    expect(requests).toEqual([{
+      init: {
+        headers: { Authorization: 'Bearer access-token' },
+        method: 'GET',
+      },
+      url: '/api/planning/updates/export?targetType=project&teamId=core-team&projectId=refero',
+    }])
+  })
+
+  test('lists and mutates immutable update comments and reactions by target-local version', async () => {
+    const comment = {
+      authorMemberKey: 'reviewer@example.com',
+      body: 'Please confirm the analytics review date.',
+      createdAt: '2026-07-15T10:00:00.000Z',
+      id: 'comment-1',
+      target: initiativeUpdateTarget,
+      updateVersion: 2,
+    }
+    const reaction = {
+      createdAt: '2026-07-15T10:05:00.000Z',
+      emoji: '👍',
+      memberKey: 'reviewer@example.com',
+      target: initiativeUpdateTarget,
+      updateVersion: 2,
+    }
+    const requests = installFetchRecorder((url, init) => {
+      if (url.includes('/comments')) {
+        return init.method === 'POST' ? { comment } : { comments: [comment] }
+      }
+      return init.method === 'PUT' ? { reaction } : { reactions: [reaction] }
+    })
+
+    await expect(listPlanningUpdateComments('access-token', {
+      cursor: 'comment/cursor',
+      limit: 50,
+      target: initiativeUpdateTarget,
+      updateVersion: 2,
+    })).resolves.toEqual({ comments: [comment], nextCursor: undefined })
+    await expect(createPlanningUpdateComment('access-token', {
+      body: comment.body,
+      id: comment.id,
+      target: initiativeUpdateTarget,
+      updateVersion: 2,
+    }, mutationContext)).resolves.toEqual({ comment })
+    await expect(listPlanningUpdateReactions('access-token', {
+      limit: 100,
+      target: initiativeUpdateTarget,
+      updateVersion: 2,
+    })).resolves.toEqual({ nextCursor: undefined, reactions: [reaction] })
+    await expect(addPlanningUpdateReaction('access-token', {
+      emoji: reaction.emoji,
+      target: initiativeUpdateTarget,
+      updateVersion: 2,
+    }, mutationContext)).resolves.toEqual({ reaction })
+
+    expect(requests.map((request) => [request.init.method, request.url])).toEqual([
+      [
+        'GET',
+        '/api/planning/updates/2/comments?targetType=initiative&entityId=initiative-onboarding&limit=50&cursor=comment%2Fcursor',
+      ],
+      [
+        'POST',
+        '/api/planning/updates/2/comments?targetType=initiative&entityId=initiative-onboarding',
+      ],
+      [
+        'GET',
+        '/api/planning/updates/2/reactions?targetType=initiative&entityId=initiative-onboarding&limit=100',
+      ],
+      [
+        'PUT',
+        '/api/planning/updates/2/reactions?targetType=initiative&entityId=initiative-onboarding',
+      ],
+    ])
+    expect(JSON.parse(String(requests[1]?.init.body))).toEqual({
+      body: comment.body,
+      id: comment.id,
+    })
+    expect(JSON.parse(String(requests[3]?.init.body))).toEqual({ emoji: reaction.emoji })
+    for (const request of [requests[1], requests[3]]) {
+      expect(request?.init.headers).toMatchObject({
+        Authorization: 'Bearer access-token',
+        'Content-Type': 'application/json',
+        'Idempotency-Key': 'idempotency-planning',
+        'X-Correlation-Id': 'correlation-planning',
+      })
+    }
+
+    const deleteRequests = installFetchRecorder(undefined, {}, 204)
+    await expect(removePlanningUpdateReaction('access-token', {
+      emoji: reaction.emoji,
+      target: projectUpdateTarget,
+      updateVersion: 2,
+    }, mutationContext)).resolves.toBeUndefined()
+    expect(deleteRequests[0]).toMatchObject({
+      init: {
+        method: 'DELETE',
+      },
+      url: '/api/planning/updates/2/reactions?targetType=project&teamId=core-team&projectId=refero&emoji=%F0%9F%91%8D',
+    })
+  })
+
+  test('rejects malformed cadence, publish, history, and watch success responses', async () => {
+    installFetchRecorder({ planning: planningSnapshotFixture })
+    await expect(configurePlanningUpdateCadence('access-token', {
+      cadence: null,
+      expectedRevision: 12,
+      target: projectUpdateTarget,
+    }, mutationContext)).rejects.toMatchObject({ code: 'InvalidPlanningUpdateResponse' })
+
+    installFetchRecorder({ planning: planningSnapshotFixture, update: { version: 1 } })
+    await expect(publishPlanningUpdate('access-token', {
+      decisionSummary: '',
+      evidence: [],
+      expectedRevision: 12,
+      health: 'on-track',
+      helpNeeded: '',
+      id: 'update-malformed',
+      nextAction: 'Continue.',
+      risk: 'low',
+      riskSummary: '',
+      summary: 'Malformed response test.',
+      target: initiativeUpdateTarget,
+    }, mutationContext)).rejects.toMatchObject({ code: 'InvalidPlanningUpdateResponse' })
+
+    installFetchRecorder({ updates: [{ version: 1 }] })
+    await expect(listPlanningUpdates('access-token', {
+      target: initiativeUpdateTarget,
+    })).rejects.toMatchObject({ code: 'InvalidPlanningUpdateResponse' })
+
+    installFetchRecorder({
+      watch: {
+        automatic: false,
+        explicit: true,
+        reasons: [],
+        subscribed: true,
+        watcherCount: -1,
+      },
+    })
+    await expect(getPlanningUpdateWatch(
+      'access-token',
+      initiativeUpdateTarget,
+    )).rejects.toMatchObject({ code: 'InvalidPlanningUpdateResponse' })
+
+    installFetchRecorder({ comments: [{ updateVersion: 2 }] })
+    await expect(listPlanningUpdateComments('access-token', {
+      target: initiativeUpdateTarget,
+      updateVersion: 2,
+    })).rejects.toMatchObject({ code: 'InvalidPlanningUpdateResponse' })
+
+    installFetchRecorder({ reaction: { emoji: '👍' } })
+    await expect(addPlanningUpdateReaction('access-token', {
+      emoji: '👍',
+      target: initiativeUpdateTarget,
+      updateVersion: 2,
+    }, mutationContext)).rejects.toMatchObject({ code: 'InvalidPlanningUpdateResponse' })
+  })
+
   test('rejects a malformed successful dependency mutation response at the API boundary', async () => {
     installFetchRecorder({ revision: 13 })
 
@@ -348,7 +696,30 @@ function createMutationResponse() {
   }
 }
 
-function installFetchRecorder(responseBody: unknown | ((url: string) => unknown)) {
+/** Returns the newest immutable update fixture or fails with a focused message. */
+function getPlanningUpdateFixture(): PlanningUpdate {
+  const update = planningUpdateHistoryFixture[0]
+  if (!update) throw new Error('Planning update history fixture is empty.')
+  return update
+}
+
+/** Returns a fixture summary for one target discriminator. */
+function getPlanningUpdateTargetSummary(
+  type: PlanningUpdateTarget['type'],
+): PlanningUpdateTargetSummary {
+  const summary = planningSnapshotFixture.updateTargets.find(
+    (candidate) => candidate.target.type === type,
+  )
+  if (!summary) throw new Error(`Planning ${type} update target fixture is missing.`)
+  return summary
+}
+
+/** Installs a JSON fetch recorder with optional per-request response selection. */
+function installFetchRecorder(
+  responseBody: unknown | ((url: string, init: RequestInit) => unknown),
+  responseHeaders: HeadersInit = { 'Content-Type': 'application/json' },
+  responseStatus = 200,
+) {
   const requests: Array<{ url: string; init: RequestInit }> = []
   globalThis.fetch = (async (input: string | URL | Request, init: RequestInit = {}) => {
     requests.push({
@@ -356,11 +727,12 @@ function installFetchRecorder(responseBody: unknown | ((url: string) => unknown)
       init,
     })
     const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
-    return new Response(JSON.stringify(
-      typeof responseBody === 'function' ? responseBody(url) : responseBody,
-    ), {
-      headers: { 'Content-Type': 'application/json' },
-      status: 200,
+    const resolvedBody = typeof responseBody === 'function'
+      ? responseBody(url, init)
+      : responseBody
+    return new Response(responseStatus === 204 ? null : JSON.stringify(resolvedBody), {
+      headers: responseHeaders,
+      status: responseStatus,
     })
   }) as typeof fetch
   return requests

@@ -94,6 +94,8 @@ export type EnterpriseRoleScope = {
    * Team または Project の ID です。Workspace scope では指定しません。
    */
   targetId?: string
+  /** Team that owns a Project scope; required whenever the scope kind is project. */
+  parentTeamId?: string
 }
 
 /**

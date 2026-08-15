@@ -183,6 +183,13 @@ export function buildDataStores(
     removalPolicy: cdk.RemovalPolicy.RETAIN,
   });
 
+  planningTable.addGlobalSecondaryIndex({
+    indexName: 'UpdateScheduleDueIndex',
+    partitionKey: { name: 'updateScheduleShard', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'nextNotificationAtRecordKey', type: dynamodb.AttributeType.STRING },
+    projectionType: dynamodb.ProjectionType.KEYS_ONLY,
+  });
+
   const capacityPlanningTable = new dynamodb.Table(stack, 'CapacityPlanningTable', {
     partitionKey: { name: 'workspaceId', type: dynamodb.AttributeType.STRING },
     sortKey: { name: 'recordKey', type: dynamodb.AttributeType.STRING },
@@ -501,6 +508,12 @@ export function buildDataStores(
     pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
     removalPolicy: cdk.RemovalPolicy.RETAIN,
     timeToLiveAttribute: 'expiresAt',
+  });
+  fileProofingTable.addGlobalSecondaryIndex({
+    indexName: 'FileIdIndex',
+    partitionKey: { name: 'fileId', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'scopeKey', type: dynamodb.AttributeType.STRING },
+    projectionType: dynamodb.ProjectionType.ALL,
   });
 
   return {

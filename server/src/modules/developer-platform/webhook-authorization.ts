@@ -109,6 +109,8 @@ export type EvaluateWebhookEnterpriseTeamAccessInput = {
   teamId: string
   /** Project event の場合の評価対象 Project ID です。 */
   projectId?: string
+  /** Team ID uniquely resolved from the current Project Directory for a legacy Project scope. */
+  projectScopeOwnerTeamId?: string
 }
 
 /** Webhook Enterprise Team access 評価結果です。 */
@@ -275,6 +277,9 @@ export function evaluateWebhookEnterpriseTeamAccess(
     customRoles: input.snapshot.customRoles,
     groupMappings: compatibleGroupMappings,
     resource,
+    ...(input.projectScopeOwnerTeamId !== undefined
+      ? { projectScopeOwnerTeamId: input.projectScopeOwnerTeamId }
+      : {}),
   })
   const enterpriseAuthoritative = workspaceRoleSuppressed ||
     external && input.snapshot.policy !== undefined ||
@@ -536,6 +541,9 @@ implements WebhookSubscriptionAuthorizer {
       legacyReadAllowed,
       teamId,
       ...(projectId ? { projectId } : {}),
+      ...(projectId !== undefined && activeProject
+        ? { projectScopeOwnerTeamId: teamId }
+        : {}),
     })
   }
 

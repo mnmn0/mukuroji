@@ -42,5 +42,8 @@ test('loads project directory from the authenticated user scoped partition', asy
       },
     ],
   })
-  expect(calls.directoryReads).toEqual([{ directoryId: 'user#demo@example.com', locale: 'en' }])
+  expect(calls.directoryReads).toEqual([
+    { directoryId: 'user#demo@example.com', locale: 'en' },
+    { consistentRead: true, directoryId: 'user#demo@example.com', locale: 'ja' },
+  ])
 })

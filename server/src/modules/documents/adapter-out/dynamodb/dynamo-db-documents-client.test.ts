@@ -5950,7 +5950,7 @@ function seedPlanningAuthorization(
   revision: number,
 ): void {
   memory.put({
-    workspaceId: 'workspace-1',
+    workspaceId: 'FENCE#workspace-1',
     recordKey: 'META',
     entryType: 'planning-meta',
     schemaVersion: 1,

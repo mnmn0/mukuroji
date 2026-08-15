@@ -13,10 +13,12 @@ import {
   createNotificationProjectionDeliveryState,
   createNotificationProjectionItem,
   createNotificationProjectionKeys,
+  createSubscribedWatcherScopes,
   groupNotificationCandidates,
   hasActiveNotificationScope,
   isActiveWorkspaceNotificationMember,
   hasCurrentSystemAdminMembership,
+  hasEligibleEnterpriseNotificationAccess,
   hasEligibleProjectAccess,
   mergeDeletedObjectTags,
   overlayCurrentWorkItemNotificationScope,
@@ -24,12 +26,16 @@ import {
   projectCuratedContextSearchEvent,
   projectCuratedContextSearchEventWithParentFence,
   processCollaborationProjectionBatch,
+  projectsSubscribedWatchers,
   publishRealtimeInvalidation,
+  refreshPlanningScheduledNotificationEvent,
   refreshScheduledNotificationEvent,
+  resolveEnterpriseNotificationAuthorization,
   supportsCollaborationWatcherNotifications,
   tagDeletedFileObjectVersion,
   toSubscribedWatcherCandidates,
   type AuditProjectionEvent,
+  type CurrentPlanningUpdateNotificationScope,
   type CuratedContextSearchProjectionInput,
   type DeletedFileCleanupDependencies,
   type DeletedFileMetadataKey,
@@ -169,8 +175,30 @@ describe('collaboration projection pure helpers', () => {
     ])
   })
 
+  test('fans scheduled Planning update events out only to the qualified target watcher', () => {
+    expect(projectsSubscribedWatchers('planning-update.reminder')).toBe(true)
+    expect(projectsSubscribedWatchers('planning-update.overdue')).toBe(true)
+    expect(projectsSubscribedWatchers('planning-update.escalation')).toBe(true)
+    expect(projectsSubscribedWatchers('planning-update.published')).toBe(false)
+    expect(createSubscribedWatcherScopes(createProjectionEvent({
+      eventType: 'planning-update.overdue',
+      workspaceId: 'workspace/one',
+      entityId: 'project/team%2Falpha%20space/project%2Fbeta%3F',
+      projectId: 'project/beta?',
+    }))).toEqual([
+      {
+        entityKey:
+          'workspace/one#planning-update#project/team%2Falpha%20space/project%2Fbeta%3F',
+        reason: 'watcher',
+      },
+    ])
+  })
+
   test('resolves watchers for curated context and accepted-resolution audit events', () => {
     for (const eventType of [
+      'planning-update.reminder',
+      'planning-update.overdue',
+      'planning-update.escalation',
       'context-item.created',
       'context-item.updated',
       'accepted-resolution.selected',
@@ -284,6 +312,31 @@ describe('collaboration projection pure helpers', () => {
         contextItemId: 'context-1',
       },
     ])
+  })
+
+  test('isolates duplicate Project IDs in different Teams when resolving Planning watchers', () => {
+    const coreScopes = createSubscribedWatcherScopes(createProjectionEvent({
+      eventType: 'planning-update.overdue',
+      workspaceId: 'workspace-1',
+      entityId: 'project/core-team/shared-launch',
+      projectId: 'shared-launch',
+    }))
+    const designScopes = createSubscribedWatcherScopes(createProjectionEvent({
+      eventType: 'planning-update.overdue',
+      workspaceId: 'workspace-1',
+      entityId: 'project/design-team/shared-launch',
+      projectId: 'shared-launch',
+    }))
+
+    expect(coreScopes).toEqual([{
+      entityKey: 'workspace-1#planning-update#project/core-team/shared-launch',
+      reason: 'watcher',
+    }])
+    expect(designScopes).toEqual([{
+      entityKey: 'workspace-1#planning-update#project/design-team/shared-launch',
+      reason: 'watcher',
+    }])
+    expect(coreScopes[0]?.entityKey).not.toBe(designScopes[0]?.entityKey)
   })
 
   test('propagates context search failures so the stream record remains retryable', async () => {
@@ -875,6 +928,136 @@ describe('collaboration projection pure helpers', () => {
     })).toBeUndefined()
   })
 
+  test('parses and revalidates scheduled Planning notifications against current cadence state', () => {
+    const parsed = parseAuditProjectionEvent({
+      eventId: 'evt-planning-overdue',
+      eventType: 'planning-update.overdue',
+      workspaceId: 'workspace-1',
+      occurredAt: '2026-07-12T10:00:00.000Z',
+      entity: { type: 'planning-update-target', id: 'project/core/platform' },
+      metadata: {
+        teamId: 'core',
+        projectId: 'platform',
+        planningTargetType: 'project',
+        planningTargetId: 'platform',
+        planningTargetRecordKey: 'UPDATE_TARGET#PROJECT#core#platform',
+        planningNextDueAt: '2026-07-12T09:00:00.000Z',
+        planningNotificationKind: 'overdue',
+        notificationCandidates: [{
+          memberKey: 'owner@example.com',
+          reason: 'overdue',
+        }],
+      },
+    })
+    expect(parsed).toMatchObject({
+      planningTargetType: 'project',
+      planningTargetId: 'platform',
+      planningTargetRecordKey: 'UPDATE_TARGET#PROJECT#core#platform',
+      planningNextDueAt: '2026-07-12T09:00:00.000Z',
+      planningNotificationKind: 'overdue',
+    })
+    if (!parsed) throw new Error('Expected a parsed Planning notification event.')
+    const deliveryState = createNotificationProjectionDeliveryState(
+      'workspace-1#owner@example.com',
+      parsed.occurredAt,
+      {
+        version: 0,
+        channels: { inApp: true, email: false, push: false },
+        frequency: 'instant',
+        quietHours: {
+          enabled: false,
+          start: '22:00',
+          end: '07:00',
+          timeZone: 'UTC',
+        },
+      },
+    )
+    expect(createNotificationProjectionItem(
+      parsed,
+      { memberKey: 'owner@example.com', reasons: ['overdue'] },
+      deliveryState,
+      1_800_000_000,
+    )).toMatchObject({
+      planningTargetType: 'project',
+      planningTargetId: 'platform',
+      planningTargetRecordKey: 'UPDATE_TARGET#PROJECT#core#platform',
+      planningNextDueAt: '2026-07-12T09:00:00.000Z',
+      planningNotificationKind: 'overdue',
+    })
+
+    const current: CurrentPlanningUpdateNotificationScope = {
+      checked: true,
+      exists: true,
+      archived: false,
+      targetType: 'project',
+      targetId: 'platform',
+      targetRecordKey: 'UPDATE_TARGET#PROJECT#core#platform',
+      ownerMemberKey: 'owner@example.com',
+      escalationMemberKey: 'manager@example.com',
+      nextDueAt: '2026-07-12T09:00:00.000Z',
+      teamId: 'core',
+      projectId: 'platform',
+    }
+    expect(refreshPlanningScheduledNotificationEvent(parsed, current))
+      .toMatchObject({
+        notificationCandidates: [{
+          memberKey: 'owner@example.com',
+          reason: 'overdue',
+        }],
+      })
+    expect(refreshPlanningScheduledNotificationEvent(parsed, {
+      ...current,
+      ownerMemberKey: 'new-owner@example.com',
+    })).toBeUndefined()
+    expect(refreshPlanningScheduledNotificationEvent(parsed, {
+      ...current,
+      nextDueAt: '2026-07-19T09:00:00.000Z',
+    })).toBeUndefined()
+    expect(refreshPlanningScheduledNotificationEvent(parsed, {
+      ...current,
+      archived: true,
+    })).toBeUndefined()
+  })
+
+  test('requires the current explicit escalation recipient for Planning escalation events', () => {
+    const event = createProjectionEvent({
+      eventType: 'planning-update.escalation',
+      planningTargetType: 'initiative',
+      planningTargetId: 'launch',
+      planningTargetRecordKey: 'UPDATE_TARGET#INITIATIVE#launch',
+      planningNextDueAt: '2026-07-12T09:00:00.000Z',
+      planningNotificationKind: 'escalation',
+      notificationCandidates: [{
+        memberKey: 'manager@example.com',
+        reason: 'escalation',
+      }],
+    })
+    const current: CurrentPlanningUpdateNotificationScope = {
+      checked: true,
+      exists: true,
+      archived: false,
+      targetType: 'initiative',
+      targetId: 'launch',
+      targetRecordKey: 'UPDATE_TARGET#INITIATIVE#launch',
+      ownerMemberKey: 'owner@example.com',
+      escalationMemberKey: 'manager@example.com',
+      nextDueAt: '2026-07-12T09:00:00.000Z',
+      teamId: 'core',
+      projectId: 'platform',
+    }
+
+    expect(refreshPlanningScheduledNotificationEvent(event, current))
+      .toBeDefined()
+    expect(refreshPlanningScheduledNotificationEvent(event, {
+      ...current,
+      escalationMemberKey: 'director@example.com',
+    })).toBeUndefined()
+    expect(refreshPlanningScheduledNotificationEvent(event, {
+      ...current,
+      escalationMemberKey: undefined,
+    })).toBeUndefined()
+  })
+
   test('overlays the current assigned Project on every checked Work Item notification', () => {
     const event = createProjectionEvent({
       eventType: 'comment.created',
@@ -987,6 +1170,135 @@ describe('collaboration projection pure helpers', () => {
       { entryType: 'team', teamId: 'core', archivedAt: '2026-07-12T12:00:00.000Z' },
       ...activeDirectory.slice(1),
     ])).toBe(false)
+  })
+
+  test('fails closed for duplicate Project IDs unless membership is Team-qualified', () => {
+    const directory: ProjectDirectoryItem[] = [
+      { entryType: 'team', teamId: 'design' },
+      { entryType: 'team', teamId: 'core' },
+      { entryType: 'project', teamId: 'design', projectId: 'shared-launch' },
+      { entryType: 'project', teamId: 'core', projectId: 'shared-launch' },
+      {
+        entryType: 'project-member',
+        projectId: 'shared-launch',
+        memberKey: 'member@example.com',
+        role: 'viewer',
+      },
+    ]
+
+    expect(hasEligibleProjectAccess(
+      { teamId: 'core', projectId: 'shared-launch' },
+      'member@example.com',
+      directory,
+    )).toBe(false)
+    expect(hasEligibleProjectAccess(
+      { teamId: 'design', projectId: 'shared-launch' },
+      'member@example.com',
+      directory,
+    )).toBe(false)
+
+    const qualifiedDirectory = directory.map((item) =>
+      item.entryType === 'project-member' ? { ...item, teamId: 'core' } : item
+    )
+    expect(hasEligibleProjectAccess(
+      { teamId: 'core', projectId: 'shared-launch' },
+      'member@example.com',
+      qualifiedDirectory,
+    )).toBe(true)
+    expect(hasEligibleProjectAccess(
+      { teamId: 'design', projectId: 'shared-launch' },
+      'member@example.com',
+      qualifiedDirectory,
+    )).toBe(false)
+  })
+
+  test('uses authoritative Enterprise role assignments for cadence notifications', () => {
+    const event = {
+      workspaceId: 'workspace-1',
+      teamId: 'core',
+      projectId: 'platform',
+      planningNotificationKind: 'overdue',
+    } satisfies Pick<
+      AuditProjectionEvent,
+      'workspaceId' | 'projectId' | 'teamId' | 'planningNotificationKind'
+    >
+    const snapshot = createRealtimeEnterpriseSnapshot({
+      roleAssignments: [{
+        workspaceId: 'workspace-1',
+        assignmentId: 'assignment-1',
+        principalKind: 'member',
+        principalId: 'member@example.com',
+        roleId: 'project:member',
+        scope: {
+          workspaceId: 'workspace-1',
+          kind: 'project',
+          targetId: 'platform',
+        },
+        source: 'direct',
+      }],
+    })
+
+    expect(hasEligibleEnterpriseNotificationAccess(
+      event,
+      'MEMBER@example.com',
+      'member',
+      snapshot,
+      'core',
+    )).toBe(true)
+    expect(hasEligibleEnterpriseNotificationAccess(
+      event,
+      'other@example.com',
+      'member',
+      snapshot,
+      'core',
+    )).toBe(false)
+  })
+
+  test('does not fall back to a legacy project ACL after an authoritative Enterprise denial', () => {
+    const event = {
+      workspaceId: 'workspace-1',
+      teamId: 'core',
+      projectId: 'platform',
+      planningNotificationKind: 'overdue',
+    } satisfies Pick<
+      AuditProjectionEvent,
+      'workspaceId' | 'projectId' | 'teamId' | 'planningNotificationKind'
+    >
+    const snapshot = createRealtimeEnterpriseSnapshot({
+      roleAssignments: [{
+        workspaceId: 'workspace-1',
+        assignmentId: 'assignment-viewer',
+        principalKind: 'member',
+        principalId: 'member@example.com',
+        roleId: 'project:viewer',
+        scope: {
+          workspaceId: 'workspace-1',
+          kind: 'project',
+          targetId: 'platform',
+        },
+        source: 'direct',
+      }],
+    })
+    const legacyDirectory: ProjectDirectoryItem[] = [
+      { entryType: 'team', teamId: 'core' },
+      { entryType: 'project', teamId: 'core', projectId: 'platform' },
+      {
+        entryType: 'project-member',
+        teamId: 'core',
+        projectId: 'platform',
+        memberKey: 'member@example.com',
+        role: 'viewer',
+      },
+    ]
+
+    expect(hasEligibleProjectAccess(event, 'member@example.com', legacyDirectory)).toBe(true)
+    expect(resolveEnterpriseNotificationAuthorization(
+      event,
+      'member@example.com',
+      'member',
+      snapshot,
+      'core',
+    )).toEqual({ authoritative: true, allowed: false })
   })
 
   test('excludes deactivated Workspace members from notification recipients', () => {
@@ -1180,6 +1492,7 @@ describe('collaboration projection pure helpers', () => {
       legacyWriteAllowed: false,
       teamId: 'core',
       projectId: 'platform',
+      projectScopeOwnerTeamId: 'core',
     })
 
     expect(access).toMatchObject({
@@ -1238,6 +1551,7 @@ describe('collaboration projection pure helpers', () => {
       legacyWriteAllowed: true,
       teamId: 'core',
       projectId: 'platform',
+      projectScopeOwnerTeamId: 'core',
     })
     expect(unqualifiedCognitoMappingAccess).toMatchObject({
       allowed: true,
@@ -1263,6 +1577,7 @@ describe('collaboration projection pure helpers', () => {
       legacyWriteAllowed: true,
       teamId: 'core',
       projectId: 'platform',
+      projectScopeOwnerTeamId: 'core',
     })
     expect(mismatchedProviderAccess).toMatchObject({
       allowed: false,
@@ -1300,6 +1615,7 @@ describe('collaboration projection pure helpers', () => {
       legacyWriteAllowed: false,
       teamId: 'core',
       projectId: 'platform',
+      projectScopeOwnerTeamId: 'core',
     })
     expect(directMemberAssignmentAccess).toMatchObject({
       allowed: true,
@@ -1333,6 +1649,7 @@ describe('collaboration projection pure helpers', () => {
       legacyWriteAllowed: false,
       teamId: 'core',
       projectId: 'platform',
+      projectScopeOwnerTeamId: 'core',
     })
     expect(directGroupAssignmentAccess).toMatchObject({
       allowed: true,
@@ -1362,6 +1679,7 @@ describe('collaboration projection pure helpers', () => {
       legacyWriteAllowed: false,
       teamId: 'core',
       projectId: 'platform',
+      projectScopeOwnerTeamId: 'core',
     })
     expect(projectScopedAccess).toMatchObject({
       allowed: true,
@@ -1574,6 +1892,7 @@ describe('collaboration projection pure helpers', () => {
       legacyWriteAllowed: true,
       teamId: 'core',
       projectId: 'platform',
+      projectScopeOwnerTeamId: 'core',
     } satisfies EvaluateRealtimeEnterpriseAccessInput
 
     expect(evaluateRealtimeEnterpriseAccess(baseInput)).toMatchObject({

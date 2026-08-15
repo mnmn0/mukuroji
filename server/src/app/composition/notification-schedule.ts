@@ -9,7 +9,7 @@ import {
 /**
  * Creates the production Notification schedule handler.
  *
- * @returns A handler for due canonical Work Item notifications.
+ * @returns A handler for due Work Item and Planning health update notifications.
  */
 export function createProductionNotificationScheduleHandler() {
   const documentClient = createDynamoDbDocumentClient(createDynamoDbClient())

@@ -37,6 +37,8 @@ import {
   type CanonicalWorkItem,
   type ConfirmedWorkItemSchedule,
   type ConfirmWorkItemScheduleChangeResponse,
+  type ConfigurePlanningUpdateCadenceInput,
+  type CreatePlanningUpdateCommentInput,
   type CreateCuratedContextItemRequest,
   type CreateSavedTaskViewInput,
   type CreateWorkItemInput,
@@ -74,6 +76,14 @@ import {
   type PlanningRevisionInput,
   type PlanningSnapshot,
   type PlanningStatusUpdateInput,
+  type PlanningUpdateCadence,
+  type PlanningUpdateTargetSummary,
+  type PlanningUpdate,
+  type PlanningUpdateComment,
+  type PlanningUpdateReaction,
+  type PlanningUpdateReactionInput,
+  type PlanningUpdateTarget,
+  type PublishPlanningUpdateInput,
   type PlanningWorkItemLinkInput,
   type PlanningWorkItemSummary,
   PROJECT_QUICK_ACCESS_MAX_REVISION,
@@ -119,6 +129,7 @@ import {
   type EnterpriseProvisioningPreview,
   type EnterpriseProvisioningRun,
   type EnterpriseRoleId,
+  type EnterpriseRoleScope,
   type EnterpriseRoutePermissionRule,
   type EnterpriseScimGroup,
   type EnterpriseScimGroupInput,
@@ -305,6 +316,8 @@ import {
 import { createRealtimeTicketRouter } from '../modules/realtime'
 import {
   CollaborationError,
+  createPlanningUpdateCollaborationEntityKey,
+  createPlanningUpdatePublicTargetKey,
   COLLABORATION_CONTEXT_BODY_MAX_LENGTH,
   COLLABORATION_CONTEXT_TITLE_MAX_LENGTH,
   createProjectCollaborationEntityKey,
@@ -493,8 +506,12 @@ import {
   createPlanningWorkItemDependencySummary,
   PlanningError,
   requirePlanningWorkItemHasNoScheduleDependencies,
+  type PlanningAuthorizationState,
   type PlanningCallerAuthorizationConditionCheck,
+  type PlanningUpdateCadenceTransactionResult,
   type PlanningMutationTransaction,
+  type PlanningUpdateAnnotationTransactionResult,
+  type PlanningUpdatePublishTransactionResult,
   type PlanningWorkItemState,
 } from '../modules/planning'
 import type {
@@ -727,6 +744,16 @@ type EnterpriseTeamAccess = {
   permissions: EnterprisePermissionId[]
 }
 
+/** Enterprise permission set retained for one Team-qualified Project scope. */
+type EnterpriseProjectScopeAccess = {
+  /** Team that owns the Project scope. */
+  teamId: string
+  /** Project identifier within the owning Team. */
+  projectId: string
+  /** Permissions granted at this exact qualified scope. */
+  permissions: EnterprisePermissionId[]
+}
+
 /**
  * Current request と独立した resource permission を再評価する Enterprise snapshot です。
  */
@@ -806,6 +833,10 @@ type ProjectPrincipal = {
    */
   enterpriseProjectAccesses?: ProjectAccessEntry[]
   /**
+   * Current request permission set for each Team-qualified Project scope.
+   */
+  enterpriseProjectScopeAccesses?: EnterpriseProjectScopeAccess[]
+  /**
    * Current request の permission で独立してアクセスできる Team ID 一覧です。
    */
   enterpriseAuthorizedTeamIds?: string[]
@@ -821,6 +852,14 @@ type ProjectPrincipal = {
    * Search/notification など current route と異なる resource permission を安全に再評価する snapshot です。
    */
   enterpriseAuthorizationEvaluation?: EnterpriseAuthorizationEvaluationSnapshot
+  /**
+   * Team-qualified Project access for a principal whose content authorization is delegated to legacy ACLs.
+   */
+  legacyProjectScopeAccesses?: ProjectAccessEntry[]
+  /**
+   * Whether a principal delegated to legacy ACLs can read Workspace-scoped Planning content.
+   */
+  legacyWorkspaceScopeReadable?: boolean
 }
 
 /**
@@ -840,6 +879,12 @@ type WorkspacePrincipal = ProjectPrincipal & {
    */
   workspaceMemberStatus: WorkspaceMemberStatus
 }
+
+/** Maximum number of immutable updates included in one Planning export. */
+const MAX_PLANNING_UPDATE_EXPORT_COUNT = 10_000
+
+/** Maximum UTF-8 payload size accepted for one Planning export. */
+const MAX_PLANNING_UPDATE_EXPORT_BYTES = 16_000_000
 
 /**
  * Enterprise security route の current permission set を検証済みの principal です。
@@ -952,6 +997,9 @@ const WORK_ITEMS_RESPONSE_LIMIT = 200
 const WORK_ITEMS_TEAM_READ_LIMIT = 20
 /** `/api/work-items` が 1 partition で filter/dedupe 前に評価する最大 item 数です。 */
 const WORK_ITEMS_PARTITION_SCAN_LIMIT = 1_000
+/** Planning publish が一度に評価する canonical Work Item の最大数です。 */
+const PLANNING_CANONICAL_WORK_ITEM_LIMIT =
+  WORK_ITEMS_TEAM_READ_LIMIT * WORK_ITEMS_PARTITION_SCAN_LIMIT
 /** Analytics が一つの entity query で読む audit event page size です。 */
 const ANALYTICS_AUDIT_PAGE_SIZE = 100
 /** Analytics が一つの Work Item identity で読む最大 audit page 数です。 */
@@ -1346,6 +1394,36 @@ function getEnterpriseCognitoSsoAppClientBindingCache() {
   }
   return cache
 }
+
+const ENTERPRISE_NOTIFICATION_SCOPE_PERMISSIONS = [
+  'teams.read',
+  'teams.write',
+  'projects.read',
+  'projects.write',
+  'work-items.read',
+  'work-items.write',
+  'documents.read',
+  'documents.write',
+  'files.read',
+  'files.write',
+  'planning.read',
+  'planning.write',
+] satisfies EnterprisePermissionId[]
+
+const ENTERPRISE_PLANNING_READ_PERMISSIONS = [
+  'planning.read',
+  'work-items.read',
+] satisfies readonly EnterprisePermissionId[]
+
+const ENTERPRISE_PLANNING_WRITE_PERMISSIONS = [
+  'planning.write',
+  'work-items.write',
+] satisfies readonly EnterprisePermissionId[]
+
+const ENTERPRISE_WORK_ITEM_READ_PERMISSIONS = [
+  'work-items.read',
+] satisfies readonly EnterprisePermissionId[]
+
 const enterpriseRoutePermissionRules = [
   {
     method: 'POST',
@@ -1727,6 +1805,12 @@ const enterpriseRoutePermissionRules = [
   { method: 'GET', pathPattern: '/api/projects*', permission: 'projects.read' },
   { method: '*', pathPattern: '/api/projects*', permission: 'projects.write' },
   { method: '*', pathPattern: '/api/developer*', permission: 'workspace.manage' },
+  {
+    method: 'GET',
+    pathPattern: '/api/notifications*',
+    permission: 'workspace.read',
+    alternativePermissions: ENTERPRISE_NOTIFICATION_SCOPE_PERMISSIONS,
+  },
   { method: 'GET', pathPattern: '/api/*', permission: 'workspace.read' },
   { method: '*', pathPattern: '/api/*', permission: 'workspace.write' },
 ] as const satisfies readonly EnterpriseRoutePermissionRule[]
@@ -6596,6 +6680,756 @@ routeApp.get('/api/planning', async (c) => {
   }
 })
 
+/** Project / Initiative の recurring health-update cadence を設定または解除します。 */
+routeApp.put('/api/planning/updates/cadence', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  let reservationToRelease: ReleaseIdempotencyRequest | undefined
+  let mutationCommitted = false
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+    requireWorkspaceBusinessWrite(principal)
+    const candidate = await readPlanningJson<ConfigurePlanningUpdateCadenceInput>(c.req)
+    const input: ConfigurePlanningUpdateCadenceInput = {
+      ...candidate,
+      target: readPlanningUpdateTarget(candidate.target),
+    }
+    const workItemState = await readPlanningWorkItemState(principal)
+    const snapshot = await workItemDependencies.planning.get(
+      principal.directoryId,
+      workItemState,
+    )
+    const visibleSnapshot = filterPlanningSnapshotForPrincipal(principal, snapshot)
+    const idempotencyKey = c.req.header('Idempotency-Key')?.trim()
+    let cadenceTransaction: PlanningMutationTransaction<PlanningUpdateCadenceTransactionResult> | undefined
+    if (idempotencyKey) {
+      const validatedKey = readRequiredPlanningUpdateCadenceIdempotencyKey(idempotencyKey)
+      const expectation: PlanningUpdateCadenceReceiptExpectation = {
+        target: input.target,
+        request: input,
+      }
+      const reservationRequest = createPlanningUpdateCadenceReservationRequest(
+        principal,
+        validatedKey,
+        c.req.method,
+        '/api/planning/updates/cadence',
+        expectation,
+      )
+      const reservation = await reservePlanningUpdateCadenceMutation(reservationRequest)
+      if (reservation.status === 'in-progress') {
+        throw new PlanningError(
+          409,
+          'PlanningUpdateCadenceIdempotencyInProgress',
+          'The same Planning update cadence mutation is still in progress.',
+        )
+      }
+      if (reservation.status === 'replay') {
+        await requirePlanningUpdateTargetPermission(
+          principal,
+          visibleSnapshot,
+          input.target,
+          'manager',
+        )
+        const replay = readStoredPlanningUpdateCadenceMutationReceipt(
+          reservation.response,
+          reservationRequest.workspaceId,
+          expectation,
+        )
+        c.header('Idempotency-Replayed', 'true')
+        const replayPlanning = filterPlanningSnapshotForPrincipal(principal, snapshot)
+        const replayTarget = findPlanningUpdateTargetSummary(snapshot, replay.target)
+        if (!replayTarget) {
+          throw planningUpdateCadenceIdempotencyUnavailable()
+        }
+        return c.json({
+          planning: replayPlanning,
+          updateTarget: filterPlanningUpdateTargetSummaryForPrincipal(
+            principal,
+            snapshot,
+            replayTarget,
+          ),
+        })
+      }
+      reservationToRelease = {
+        ...reservationRequest,
+        reservationId: reservation.reservationId,
+      }
+      cadenceTransaction = createPlanningUpdateCadenceIdempotencyTransaction(
+        reservationRequest.workspaceId,
+        {
+          credentialId: reservationRequest.credentialId,
+          idempotencyKey: validatedKey,
+          requestFingerprint: reservationRequest.requestFingerprint,
+          reservationId: reservation.reservationId,
+        },
+        expectation,
+      )
+      if (!cadenceTransaction) throw planningUpdateCadenceIdempotencyUnavailable()
+    }
+    requirePlanningAuthorizationRevision(snapshot.revision, input.expectedRevision)
+    await requirePlanningUpdateTargetPermission(
+      principal,
+      visibleSnapshot,
+      input.target,
+      'manager',
+    )
+    const cadenceRecipientMembers = input.cadence
+      ? await Promise.all([
+        requirePlanningCadenceRecipientTargetPermission(
+          principal,
+          visibleSnapshot,
+          input.target,
+          input.cadence.updateOwnerMemberKey,
+          'member',
+        ),
+        ...(input.cadence.escalationMemberKey
+          ? [requirePlanningCadenceRecipientTargetPermission(
+              principal,
+              visibleSnapshot,
+              input.target,
+              input.cadence.escalationMemberKey,
+              'viewer',
+            )]
+          : []),
+      ])
+      : []
+    const response = await workItemDependencies.planning.configureUpdateCadence(
+      principal.directoryId,
+      input,
+      workItemState,
+      createPlanningCallerAuthorizationConditionChecks(principal, cadenceRecipientMembers),
+      cadenceTransaction,
+    )
+    mutationCommitted = true
+    const filteredPlanning = filterPlanningSnapshotForPrincipal(principal, response.planning)
+    return c.json({
+      ...response,
+      planning: filteredPlanning,
+      updateTarget: filterPlanningUpdateTargetSummaryForPrincipal(
+        principal,
+        response.planning,
+        response.updateTarget,
+      ),
+    })
+  } catch (error) {
+    if (reservationToRelease && !mutationCommitted) {
+      await releasePlanningUpdateCadenceReservation(reservationToRelease)
+    }
+    return toPlanningErrorResponse(c, error)
+  }
+})
+
+/** Human-authored structured Project / Initiative update を immutable publish します。 */
+routeApp.post('/api/planning/updates', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  let reservationToRelease: ReleaseIdempotencyRequest | undefined
+  let mutationCommitted = false
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+    requireWorkspaceBusinessWrite(principal)
+    const candidate = await readPlanningJson<PublishPlanningUpdateInput>(c.req)
+    const input: PublishPlanningUpdateInput = {
+      ...candidate,
+      target: readPlanningUpdateTarget(candidate.target),
+    }
+    const { snapshot, targetScope } = await readPlanningPublishState(principal, input.target)
+    const visibleSnapshot = filterPlanningSnapshotForPrincipal(principal, snapshot)
+    const idempotencyKey = c.req.header('Idempotency-Key')?.trim()
+    let publishTransaction: PlanningMutationTransaction<PlanningUpdatePublishTransactionResult> | undefined
+    if (idempotencyKey) {
+      const validatedKey = readRequiredPlanningUpdatePublishIdempotencyKey(idempotencyKey)
+      const expectation: PlanningUpdatePublishReceiptExpectation = {
+        target: input.target,
+        id: input.id,
+        authorMemberKey: principal.userKey.toLowerCase(),
+        request: input,
+      }
+      const reservationRequest = createPlanningUpdatePublishReservationRequest(
+        principal,
+        validatedKey,
+        c.req.method,
+        '/api/planning/updates',
+        expectation,
+      )
+      const reservation = await reservePlanningUpdatePublishMutation(reservationRequest)
+      if (reservation.status === 'in-progress') {
+        throw new PlanningError(
+          409,
+          'PlanningUpdatePublishIdempotencyInProgress',
+          'The same Planning update publish is still in progress.',
+        )
+      }
+      if (reservation.status === 'replay') {
+        await requirePlanningUpdateTargetPermission(principal, visibleSnapshot, input.target, 'member')
+        const replay = readStoredPlanningUpdatePublishMutationReceipt(
+          reservation.response,
+          reservationRequest.workspaceId,
+          expectation,
+        )
+        const update = await readPlanningUpdateByVersion(
+          principal.directoryId,
+          replay.target,
+          replay.version,
+        )
+        if (!update || update.id !== replay.id) {
+          throw planningUpdatePublishIdempotencyUnavailable()
+        }
+        await requirePlanningUpdateCapturedScopePermission(
+          principal,
+          update.contextSnapshot.scope,
+        )
+        c.header('Idempotency-Replayed', 'true')
+        return c.json({
+          planning: filterPlanningSnapshotForPrincipal(principal, snapshot),
+          update,
+        }, 201)
+      }
+      reservationToRelease = { ...reservationRequest, reservationId: reservation.reservationId }
+      publishTransaction = createPlanningUpdatePublishIdempotencyTransaction(
+        reservationRequest.workspaceId,
+        {
+          credentialId: reservationRequest.credentialId,
+          idempotencyKey: validatedKey,
+          requestFingerprint: reservationRequest.requestFingerprint,
+          reservationId: reservation.reservationId,
+        },
+        expectation,
+      )
+      if (!publishTransaction) throw planningUpdatePublishIdempotencyUnavailable()
+    }
+    requirePlanningAuthorizationRevision(snapshot.revision, input.expectedRevision)
+    await requirePlanningUpdateTargetPermission(principal, visibleSnapshot, input.target, 'member')
+    const configuredTarget = findPlanningUpdateTargetSummary(snapshot, input.target)
+    if (!configuredTarget?.cadence) {
+      throw new PlanningError(
+        409,
+        'PlanningUpdateCadenceNotConfigured',
+        'Configure an update cadence before publishing.',
+      )
+    }
+    if (configuredTarget.cadence.updateOwnerMemberKey !== principal.userKey.toLowerCase()) {
+      await requirePlanningUpdateTargetPermission(principal, visibleSnapshot, input.target, 'manager')
+    }
+    const evidenceConditionChecks = await createPlanningUpdateEvidenceConditionChecks(
+      principal,
+      snapshot,
+      visibleSnapshot,
+      input,
+    )
+    const canonicalWorkItemState = await readCanonicalPlanningWorkItemState(
+      principal,
+      targetScope,
+    )
+    const response = await workItemDependencies.planning.publishUpdate(
+      principal.directoryId,
+      input,
+      principal.userKey,
+      canonicalWorkItemState,
+      [
+        ...createPlanningCallerAuthorizationConditionChecks(principal),
+        ...evidenceConditionChecks,
+      ],
+      publishTransaction,
+    )
+    mutationCommitted = true
+    return c.json({
+      ...response,
+      planning: filterPlanningSnapshotForPrincipal(principal, response.planning),
+    }, 201)
+  } catch (error) {
+    if (reservationToRelease && !mutationCommitted) {
+      await releasePlanningUpdatePublishReservation(reservationToRelease)
+    }
+    return toPlanningErrorResponse(c, error)
+  }
+})
+
+/** Project / Initiative の immutable structured update history を page 取得します。 */
+routeApp.get('/api/planning/updates', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+    const target = readPlanningUpdateTargetQuery(
+      c.req.query('targetType'),
+      c.req.query('teamId'),
+      c.req.query('projectId'),
+      c.req.query('entityId'),
+    )
+    const snapshot = await workItemDependencies.planning.get(
+      principal.directoryId,
+      await readPlanningWorkItemState(principal),
+    )
+    await requirePlanningUpdateTargetPermission(
+      principal,
+      filterPlanningSnapshotForPrincipal(principal, snapshot),
+      target,
+      'viewer',
+    )
+    const limit = readPlanningUpdateHistoryLimit(c.req.query('limit'))
+    const capturedScopeAuthorizationCache = new Map<string, Promise<void>>()
+    let page = await workItemDependencies.planning.listUpdates(principal.directoryId, {
+      target,
+      ...(limit === undefined ? {} : { limit }),
+      ...(c.req.query('cursor') ? { cursor: c.req.query('cursor') } : {}),
+    })
+    const visibleUpdates = await filterPlanningUpdatesByCapturedScope(
+      principal,
+      page.updates,
+      capturedScopeAuthorizationCache,
+    )
+    while (limit !== undefined && visibleUpdates.length < limit && page.nextCursor) {
+      const remaining = limit - visibleUpdates.length
+      page = await workItemDependencies.planning.listUpdates(principal.directoryId, {
+        target,
+        limit: remaining,
+        cursor: page.nextCursor,
+      })
+      visibleUpdates.push(
+        ...(await filterPlanningUpdatesByCapturedScope(
+          principal,
+          page.updates,
+          capturedScopeAuthorizationCache,
+        )).slice(0, remaining),
+      )
+    }
+    return c.json({
+      ...page,
+      updates: visibleUpdates,
+    })
+  } catch (error) {
+    return toPlanningErrorResponse(c, error)
+  }
+})
+
+/** Immutable Planning update に append-only comment を作成します。 */
+routeApp.post('/api/planning/updates/:updateVersion/comments', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+    const candidate = await readPlanningJson<Pick<
+      CreatePlanningUpdateCommentInput,
+      'body' | 'id'
+    >>(c.req)
+    const id = readPlanningIdentifier(candidate.id, 'Planning update comment ID')
+    const body = readPlanningUpdateCommentBody(candidate.body)
+    const snapshot = await workItemDependencies.planning.get(
+      principal.directoryId,
+      await readPlanningWorkItemState(principal),
+    )
+    return await executePlanningUpdateAnnotationMutation(c, principal, snapshot, {
+      targetType: c.req.query('targetType'),
+      teamId: c.req.query('teamId'),
+      projectId: c.req.query('projectId'),
+      entityId: c.req.query('entityId'),
+      updateVersion: c.req.param('updateVersion'),
+      path: `/api/planning/updates/${c.req.param('updateVersion')}/comments`,
+    }, {
+      createExpectation: (target, updateVersion) => ({
+        operation: 'comment-create',
+        target,
+        updateVersion,
+        memberKey: principal.userKey.toLowerCase(),
+        id,
+        body,
+      }),
+      mutate: ({ target, updateVersion, transaction, authorizationConditionChecks }) =>
+        workItemDependencies.planning.createUpdateComment(
+          principal.directoryId,
+          { target, updateVersion, id, body },
+          principal.userKey,
+          transaction,
+          authorizationConditionChecks,
+        ),
+      replay: (context, replay) => {
+        if (replay.operation !== 'comment-create') {
+          throw invalidStoredPlanningUpdateAnnotationMutationReceipt()
+        }
+        context.header('Idempotency-Replayed', 'true')
+        return context.json(replay.body, replay.status)
+      },
+      success: (context, comment) => context.json({ comment }, 201),
+    })
+  } catch (error) {
+    return toPlanningErrorResponse(c, error)
+  }
+})
+
+/** Immutable Planning update comments を cursor pagination で返します。 */
+routeApp.get('/api/planning/updates/:updateVersion/comments', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+    const target = readPlanningUpdateTargetQuery(
+      c.req.query('targetType'),
+      c.req.query('teamId'),
+      c.req.query('projectId'),
+      c.req.query('entityId'),
+    )
+    const updateVersion = readPlanningUpdateVersion(c.req.param('updateVersion'))
+    const snapshot = await workItemDependencies.planning.get(
+      principal.directoryId,
+      await readPlanningWorkItemState(principal),
+    )
+    await requirePlanningUpdateTargetPermission(
+      principal,
+      filterPlanningSnapshotForPrincipal(principal, snapshot),
+      target,
+      'viewer',
+    )
+    await requirePlanningUpdateVersionCapturedScopePermission(
+      principal.directoryId,
+      principal,
+      target,
+      updateVersion,
+    )
+    const limit = readPlanningUpdateHistoryLimit(c.req.query('limit'))
+    return c.json(await workItemDependencies.planning.listUpdateComments(
+      principal.directoryId,
+      {
+        target,
+        updateVersion,
+        ...(limit === undefined ? {} : { limit }),
+        ...(c.req.query('cursor') ? { cursor: c.req.query('cursor') } : {}),
+      },
+    ))
+  } catch (error) {
+    return toPlanningErrorResponse(c, error)
+  }
+})
+
+/** Current member の reaction を immutable Planning update に追加します。 */
+routeApp.put('/api/planning/updates/:updateVersion/reactions', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+    const candidate = await readPlanningJson<Pick<PlanningUpdateReactionInput, 'emoji'>>(c.req)
+    const emoji = readPlanningUpdateReactionToken(candidate.emoji)
+    const snapshot = await workItemDependencies.planning.get(
+      principal.directoryId,
+      await readPlanningWorkItemState(principal),
+    )
+    return await executePlanningUpdateAnnotationMutation(c, principal, snapshot, {
+      targetType: c.req.query('targetType'),
+      teamId: c.req.query('teamId'),
+      projectId: c.req.query('projectId'),
+      entityId: c.req.query('entityId'),
+      updateVersion: c.req.param('updateVersion'),
+      path: `/api/planning/updates/${c.req.param('updateVersion')}/reactions`,
+    }, {
+      createExpectation: (target, updateVersion) => ({
+        operation: 'reaction-add',
+        target,
+        updateVersion,
+        memberKey: principal.userKey.toLowerCase(),
+        emoji,
+      }),
+      mutate: ({ target, updateVersion, transaction, authorizationConditionChecks }) =>
+        workItemDependencies.planning.addUpdateReaction(
+          principal.directoryId,
+          { target, updateVersion, emoji },
+          principal.userKey,
+          transaction,
+          authorizationConditionChecks,
+        ),
+      replay: (context, replay) => {
+        if (replay.operation !== 'reaction-add') {
+          throw invalidStoredPlanningUpdateAnnotationMutationReceipt()
+        }
+        context.header('Idempotency-Replayed', 'true')
+        return context.json(replay.body, replay.status)
+      },
+      success: (context, reaction) => context.json({ reaction }, 201),
+    })
+  } catch (error) {
+    return toPlanningErrorResponse(c, error)
+  }
+})
+
+/** Current member の reaction を immutable Planning update から削除します。 */
+routeApp.delete('/api/planning/updates/:updateVersion/reactions', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+    const emoji = readPlanningUpdateReactionToken(c.req.query('emoji'))
+    const snapshot = await workItemDependencies.planning.get(
+      principal.directoryId,
+      await readPlanningWorkItemState(principal),
+    )
+    return await executePlanningUpdateAnnotationMutation(c, principal, snapshot, {
+      targetType: c.req.query('targetType'),
+      teamId: c.req.query('teamId'),
+      projectId: c.req.query('projectId'),
+      entityId: c.req.query('entityId'),
+      updateVersion: c.req.param('updateVersion'),
+      path: `/api/planning/updates/${c.req.param('updateVersion')}/reactions`,
+    }, {
+      createExpectation: (target, updateVersion) => ({
+        operation: 'reaction-remove',
+        target,
+        updateVersion,
+        memberKey: principal.userKey.toLowerCase(),
+        emoji,
+      }),
+      mutate: ({ target, updateVersion, transaction, authorizationConditionChecks }) =>
+        workItemDependencies.planning.removeUpdateReaction(
+          principal.directoryId,
+          { target, updateVersion, emoji },
+          principal.userKey,
+          transaction,
+          authorizationConditionChecks,
+        ).then(() => undefined),
+      replay: (context, replay) => {
+        if (replay.operation !== 'reaction-remove') {
+          throw invalidStoredPlanningUpdateAnnotationMutationReceipt()
+        }
+        context.header('Idempotency-Replayed', 'true')
+        return context.body(null, replay.status)
+      },
+      success: (context) => context.body(null, 204),
+    })
+  } catch (error) {
+    return toPlanningErrorResponse(c, error)
+  }
+})
+
+/** Immutable Planning update reactions を cursor pagination で返します。 */
+routeApp.get('/api/planning/updates/:updateVersion/reactions', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+    const target = readPlanningUpdateTargetQuery(
+      c.req.query('targetType'),
+      c.req.query('teamId'),
+      c.req.query('projectId'),
+      c.req.query('entityId'),
+    )
+    const updateVersion = readPlanningUpdateVersion(c.req.param('updateVersion'))
+    const snapshot = await workItemDependencies.planning.get(
+      principal.directoryId,
+      await readPlanningWorkItemState(principal),
+    )
+    await requirePlanningUpdateTargetPermission(
+      principal,
+      filterPlanningSnapshotForPrincipal(principal, snapshot),
+      target,
+      'viewer',
+    )
+    await requirePlanningUpdateVersionCapturedScopePermission(
+      principal.directoryId,
+      principal,
+      target,
+      updateVersion,
+    )
+    const limit = readPlanningUpdateHistoryLimit(c.req.query('limit'))
+    return c.json(await workItemDependencies.planning.listUpdateReactions(
+      principal.directoryId,
+      {
+        target,
+        updateVersion,
+        ...(limit === undefined ? {} : { limit }),
+        ...(c.req.query('cursor') ? { cursor: c.req.query('cursor') } : {}),
+      },
+    ))
+  } catch (error) {
+    return toPlanningErrorResponse(c, error)
+  }
+})
+
+/** Project / Initiative の全 immutable update history を versioned JSON で export します。 */
+routeApp.get('/api/planning/updates/export', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+    const target = readPlanningUpdateTargetQuery(
+      c.req.query('targetType'),
+      c.req.query('teamId'),
+      c.req.query('projectId'),
+      c.req.query('entityId'),
+    )
+    const snapshot = await workItemDependencies.planning.get(
+      principal.directoryId,
+      await readPlanningWorkItemState(principal),
+    )
+    await requirePlanningUpdateTargetPermission(
+      principal,
+      filterPlanningSnapshotForPrincipal(principal, snapshot),
+      target,
+      'viewer',
+    )
+    const updates: PlanningUpdate[] = []
+    const capturedScopeAuthorizationCache = new Map<string, Promise<void>>()
+    let cursor: string | undefined
+    do {
+      const page = await workItemDependencies.planning.listUpdates(principal.directoryId, {
+        target,
+        limit: 100,
+        ...(cursor ? { cursor } : {}),
+      })
+      updates.push(...await filterPlanningUpdatesByCapturedScope(
+        principal,
+        page.updates,
+        capturedScopeAuthorizationCache,
+      ))
+      cursor = page.nextCursor
+      if (
+        updates.length > MAX_PLANNING_UPDATE_EXPORT_COUNT ||
+        Buffer.byteLength(JSON.stringify(updates), 'utf8') > MAX_PLANNING_UPDATE_EXPORT_BYTES
+      ) {
+        throw new PlanningError(
+          413,
+          'PlanningUpdateExportLimitExceeded',
+          'Planning update export exceeds the safe size limit.',
+        )
+      }
+    } while (cursor)
+    const targetKey = createPlanningUpdatePublicTargetKey(target)
+    c.header(
+      'Content-Disposition',
+      `attachment; filename="planning-updates-${createSafeExportFileToken(targetKey)}.json"`,
+    )
+    return c.json({
+      schemaVersion: 1,
+      exportedAt: new Date().toISOString(),
+      target,
+      updates,
+    })
+  } catch (error) {
+    return toPlanningErrorResponse(c, error)
+  }
+})
+
+/** Current user の qualified Project / Initiative update watcher state を返します。 */
+routeApp.get('/api/planning/update-watch', async (c) => {
+  const accessToken = readBearerAccessToken(c)
+  if (!accessToken) {
+    return c.json({ message: 'Bearer token is required.' }, 401)
+  }
+
+  try {
+    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+    const target = readPlanningUpdateTargetQuery(
+      c.req.query('targetType'),
+      c.req.query('teamId'),
+      c.req.query('projectId'),
+      c.req.query('entityId'),
+    )
+    const snapshot = await workItemDependencies.planning.get(
+      principal.directoryId,
+      await readPlanningWorkItemState(principal),
+    )
+    await requirePlanningUpdateTargetPermission(
+      principal,
+      filterPlanningSnapshotForPrincipal(principal, snapshot),
+      target,
+      'viewer',
+    )
+    const targetKey = createPlanningUpdatePublicTargetKey(target)
+    const watch = await workItemDependencies.collaboration.getWatcherState({
+      entityKey: createPlanningUpdateCollaborationEntityKey(
+        principal.directoryId,
+        targetKey,
+      ),
+      memberKey: principal.userKey,
+    })
+    return c.json({ watch })
+  } catch (error) {
+    return toPlanningErrorResponse(c, error)
+  }
+})
+
+for (const planningUpdateWatchMethod of ['PUT', 'DELETE'] as const) {
+  /** Qualified Project / Initiative update watcher を subscribe/unsubscribe します。 */
+  routeApp.on(planningUpdateWatchMethod, '/api/planning/update-watch', async (c) => {
+    const accessToken = readBearerAccessToken(c)
+    if (!accessToken) {
+      return c.json({ message: 'Bearer token is required.' }, 401)
+    }
+
+    try {
+      const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
+      requireWorkspaceBusinessWrite(principal)
+      const target = readPlanningUpdateTargetQuery(
+        c.req.query('targetType'),
+        c.req.query('teamId'),
+        c.req.query('projectId'),
+        c.req.query('entityId'),
+      )
+      const snapshot = await workItemDependencies.planning.get(
+        principal.directoryId,
+        await readPlanningWorkItemState(principal),
+      )
+      await requirePlanningUpdateTargetPermission(
+        principal,
+        filterPlanningSnapshotForPrincipal(principal, snapshot),
+        target,
+        'viewer',
+      )
+      const targetKey = createPlanningUpdatePublicTargetKey(target)
+      const mutationInput = {
+        workspaceId: principal.directoryId,
+        entityKey: createPlanningUpdateCollaborationEntityKey(
+          principal.directoryId,
+          targetKey,
+        ),
+        planningUpdateTargetKey: targetKey,
+        memberKey: principal.userKey,
+        ...(target.type === 'project'
+          ? { teamId: target.teamId, projectId: target.projectId }
+          : {}),
+        authorizationConditionChecks: [
+          ...createPlanningCallerAuthorizationConditionChecks(principal),
+          createPlanningRevisionConditionCheck(principal.directoryId, snapshot.revision),
+        ],
+        auditContext: createApiMutationContext(c, principal, {
+          planningUpdateTargetKey: targetKey,
+          method: planningUpdateWatchMethod,
+        }),
+      }
+      const watch = planningUpdateWatchMethod === 'PUT'
+        ? await workItemDependencies.collaboration.subscribe(mutationInput)
+        : await workItemDependencies.collaboration.unsubscribe(mutationInput)
+      return c.json({ watch })
+    } catch (error) {
+      return toPlanningErrorResponse(c, error)
+    }
+  })
+}
+
 /** Planning hierarchy に entity を作成します。 */
 routeApp.post('/api/planning/entities', async (c) => {
   const accessToken = readBearerAccessToken(c)
@@ -6742,6 +7576,7 @@ routeApp.post('/api/planning/entities/:entityId/move', async (c) => {
         'manager',
       )
     }
+    requirePlanningMoveDoesNotInvalidateUpdateCadence(snapshot, entityId, input)
     const response = await workItemDependencies.planning.move(principal.directoryId, entityId, input, workItemState)
     return c.json(filterPlanningSnapshotForPrincipal(principal, response.planning))
   } catch (error) {
@@ -7691,6 +8526,7 @@ routeApp.get('/api/projects/:projectId/users', async (c) => {
 routeApp.get('/api/projects/:projectId/members', async (c) => {
   const accessToken = readBearerAccessToken(c)
   const projectId = c.req.param('projectId')
+  const teamIdCandidate = c.req.query('teamId')
 
   if (!accessToken) {
     return c.json({ message: 'Bearer token is required.' }, 401)
@@ -7702,11 +8538,22 @@ routeApp.get('/api/projects/:projectId/members', async (c) => {
 
   try {
     const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-    await requireProjectPermission(principal, projectId, 'member')
+    const teamId = teamIdCandidate === undefined
+      ? undefined
+      : readPlanningIdentifier(teamIdCandidate, 'Team ID')
+    if (teamId === undefined) {
+      await requireProjectPermission(principal, projectId, 'member')
+    } else {
+      await requirePlanningUpdateProjectPermission(principal, teamId, projectId, 'member')
+    }
 
     return c.json(
       await hydrateProjectMembersResponse(
-        await workspaceDependencies.projectDirectory.getProjectMembers(principal.directoryId, projectId),
+        await workspaceDependencies.projectDirectory.getProjectMembers(
+          principal.directoryId,
+          projectId,
+          teamId,
+        ),
         principal.directoryId,
       ),
     )
@@ -13137,6 +13984,176 @@ async function readPlanningJson<T>(request: { json: () => Promise<unknown> }) {
   return body as T
 }
 
+/**
+ * Validates an untrusted Project/Initiative update target at the HTTP boundary.
+ *
+ * @param value - Candidate target from a request body.
+ * @returns A normalized target suitable for authorization and the Planning domain.
+ */
+function readPlanningUpdateTarget(value: unknown): PlanningUpdateTarget {
+  if (!isRecord(value)) {
+    throw new PlanningError(
+      400,
+      'PlanningUpdateTargetInvalid',
+      'Planning update target must be an object.',
+    )
+  }
+  if (value.type === 'project') {
+    return {
+      type: 'project',
+      teamId: readPlanningIdentifier(value.teamId, 'Update target Team ID'),
+      projectId: readPlanningIdentifier(value.projectId, 'Update target Project ID'),
+    }
+  }
+  if (value.type === 'initiative') {
+    return {
+      type: 'initiative',
+      entityId: readPlanningIdentifier(value.entityId, 'Update target Initiative ID'),
+    }
+  }
+  throw new PlanningError(
+    400,
+    'PlanningUpdateTargetInvalid',
+    'Planning update target type is invalid.',
+  )
+}
+
+/**
+ * Builds one update target from explicit query parameters without accepting ambiguous IDs.
+ *
+ * @param targetType - Project/Initiative discriminator.
+ * @param teamId - Required Team ID for a Project target.
+ * @param projectId - Required Project ID for a Project target.
+ * @param entityId - Required entity ID for an Initiative target.
+ * @returns Validated update target.
+ */
+function readPlanningUpdateTargetQuery(
+  targetType: string | undefined,
+  teamId: string | undefined,
+  projectId: string | undefined,
+  entityId: string | undefined,
+): PlanningUpdateTarget {
+  if (targetType === 'project') {
+    return readPlanningUpdateTarget({ type: targetType, teamId, projectId })
+  }
+  if (targetType === 'initiative') {
+    return readPlanningUpdateTarget({ type: targetType, entityId })
+  }
+  throw new PlanningError(
+    400,
+    'PlanningUpdateTargetInvalid',
+    'targetType must be project or initiative.',
+  )
+}
+
+/**
+ * Creates a bounded ASCII token for a Content-Disposition filename.
+ *
+ * @param value - Logical target key.
+ * @returns Safe non-empty filename component.
+ */
+function createSafeExportFileToken(value: string) {
+  return value.replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 128) ||
+    'history'
+}
+
+/**
+ * Parses an optional bounded update-history page size.
+ *
+ * @param value - Query-string value.
+ * @returns A positive integer up to 100, or undefined when omitted.
+ */
+function readPlanningUpdateHistoryLimit(value: string | undefined) {
+  if (value === undefined) return undefined
+  if (!/^\d+$/.test(value)) {
+    throw new PlanningError(400, 'PlanningUpdateHistoryLimitInvalid', 'History limit is invalid.')
+  }
+  const limit = Number(value)
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+    throw new PlanningError(
+      400,
+      'PlanningUpdateHistoryLimitInvalid',
+      'History limit must be between 1 and 100.',
+    )
+  }
+  return limit
+}
+
+/**
+ * Parses one positive target-local immutable update version from a route segment.
+ *
+ * @param value - Encoded route parameter supplied by the caller.
+ * @returns A positive safe integer version.
+ */
+function readPlanningUpdateVersion(value: string | undefined) {
+  if (value === undefined || !/^\d+$/.test(value)) {
+    throw new PlanningError(
+      400,
+      'PlanningUpdateVersionInvalid',
+      'Planning update version is invalid.',
+    )
+  }
+  const version = Number(value)
+  if (!Number.isSafeInteger(version) || version < 1) {
+    throw new PlanningError(
+      400,
+      'PlanningUpdateVersionInvalid',
+      'Planning update version must be a positive integer.',
+    )
+  }
+  return version
+}
+
+/**
+ * Validates and normalizes one append-only Planning update comment body.
+ *
+ * @param value - Untrusted JSON body field.
+ * @returns Trimmed comment text within the domain byte limit.
+ */
+function readPlanningUpdateCommentBody(value: unknown): string {
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new PlanningError(
+      400,
+      'PlanningUpdateCommentInvalid',
+      'Planning update comment body is required.',
+    )
+  }
+  const body = value.trim()
+  if (Buffer.byteLength(body, 'utf8') > 4_000) {
+    throw new PlanningError(
+      400,
+      'PlanningUpdateCommentInvalid',
+      'Planning update comment cannot exceed 4000 UTF-8 bytes.',
+    )
+  }
+  return body
+}
+
+/**
+ * Validates and normalizes one Planning update reaction token.
+ *
+ * @param value - Untrusted JSON emoji field.
+ * @returns Trimmed reaction token within the domain byte limit.
+ */
+function readPlanningUpdateReactionToken(value: unknown): string {
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new PlanningError(
+      400,
+      'PlanningUpdateReactionInvalid',
+      'Planning update reaction is required.',
+    )
+  }
+  const emoji = value.trim()
+  if (Buffer.byteLength(emoji, 'utf8') > 64) {
+    throw new PlanningError(
+      400,
+      'PlanningUpdateReactionInvalid',
+      'Planning update reaction cannot exceed 64 UTF-8 bytes.',
+    )
+  }
+  return emoji
+}
+
 function readPlanningRouteId(value: string | undefined, label: string) {
   return readPlanningIdentifier(value, label)
 }
@@ -14485,6 +15502,22 @@ async function authenticateWorkspacePrincipal(
     directoryGroupIds,
     directoryGroupMemberships,
   } = directoryPrincipal
+  const needsProjectScopeQualification =
+    hasUnqualifiedEnterpriseProjectScope(compatibleRoleAssignments) ||
+    hasUnqualifiedEnterpriseProjectScope(compatibleGroupMappings)
+  const enterpriseDirectory = needsProjectScopeQualification
+    ? await workspaceDependencies.projectDirectory.getProjectDirectory(
+        principal.directoryId,
+        'ja',
+        true,
+      )
+    : undefined
+  const qualifiedRoleAssignments = enterpriseDirectory
+    ? qualifyEnterpriseProjectScopes(compatibleRoleAssignments, enterpriseDirectory)
+    : compatibleRoleAssignments
+  const qualifiedGroupMappings = enterpriseDirectory
+    ? qualifyEnterpriseProjectScopes(compatibleGroupMappings, enterpriseDirectory)
+    : compatibleGroupMappings
   const requiredPermissions = context
     ? resolveRoutePermissions(
         context.req.method,
@@ -14493,7 +15526,7 @@ async function authenticateWorkspacePrincipal(
       )
     : undefined
   const suppressLegacyWorkspaceRole = directoryPrincipal.directoryManaged ||
-    compatibleRoleAssignments.some((assignment) =>
+    qualifiedRoleAssignments.some((assignment) =>
     (
       assignment.principalKind === 'member' && assignment.principalId === principal.userKey ||
       assignment.principalKind === 'directory-group' &&
@@ -14502,7 +15535,7 @@ async function authenticateWorkspacePrincipal(
           directoryGroupIds.includes(assignment.principalId)
         )
     )
-  ) || compatibleGroupMappings.some((mapping) =>
+  ) || qualifiedGroupMappings.some((mapping) =>
     mapping.enabled
   )
   const enterprisePrincipal = {
@@ -14528,8 +15561,8 @@ async function authenticateWorkspacePrincipal(
   const enterpriseAuthorizationEvaluation = {
     principal: enterprisePrincipal,
     snapshot,
-    assignments: compatibleRoleAssignments,
-    groupMappings: compatibleGroupMappings,
+    assignments: qualifiedRoleAssignments,
+    groupMappings: qualifiedGroupMappings,
   } satisfies EnterpriseAuthorizationEvaluationSnapshot
   const defersToLegacyBusinessAuthorization =
     !suppressLegacyWorkspaceRole &&
@@ -14538,6 +15571,8 @@ async function authenticateWorkspacePrincipal(
     !principal.isSystemAdmin &&
     context !== undefined &&
     shouldDeferEnterpriseContentAuthorization(context.req.path)
+  const loadsLegacyPlanningScopeAccess = context !== undefined &&
+    (context.req.path === '/api/planning' || context.req.path.startsWith('/api/planning/'))
   const requestAccess: EnterpriseRequestAccess = options.breakGlassCandidate && recoveryAccount
     ? {
         allowed: true,
@@ -14549,6 +15584,7 @@ async function authenticateWorkspacePrincipal(
         grantedRoutePermissions: [] as EnterprisePermissionId[],
         authorizedAtResource: false,
         projectAccesses: [] as ProjectAccessEntry[],
+        projectScopeAccesses: [] as EnterpriseProjectScopeAccess[],
         authorizedTeamIds: [] as string[],
         teamAccesses: [] as EnterpriseTeamAccess[],
       }
@@ -14560,13 +15596,20 @@ async function authenticateWorkspacePrincipal(
           grantedRoutePermissions: [],
           authorizedAtResource: false,
           projectAccesses: [],
+          projectScopeAccesses: [],
           authorizedTeamIds: [],
           teamAccesses: [],
         }
     : await evaluateEnterpriseRequestAccess({
         workspaceId: principal.directoryId,
         context,
+        ...(shouldEvaluateEnterpriseNotificationScopes(context)
+          ? { scopePermissions: ENTERPRISE_NOTIFICATION_SCOPE_PERMISSIONS }
+          : {}),
         requiredPermissions,
+        ...(shouldEvaluateAllPlanningHistoryScopes(context)
+          ? { evaluateAllProjectScopes: true }
+          : {}),
         ...enterpriseAuthorizationEvaluation,
       })
   if (!requestAccess.allowed) {
@@ -14659,9 +15702,16 @@ async function authenticateWorkspacePrincipal(
     enterpriseGrantedRoutePermissions: requestAccess.grantedRoutePermissions,
     enterpriseRouteAuthorizedAtResource: requestAccess.authorizedAtResource,
     enterpriseProjectAccesses: requestAccess.projectAccesses,
+    enterpriseProjectScopeAccesses: requestAccess.projectScopeAccesses,
     enterpriseAuthorizedTeamIds: requestAccess.authorizedTeamIds,
     enterpriseTeamAccesses: requestAccess.teamAccesses,
     enterpriseLegacyProjectAccessSuppressed: suppressLegacyWorkspaceRole,
+    ...(defersToLegacyBusinessAuthorization && loadsLegacyPlanningScopeAccess
+      ? {
+          legacyProjectScopeAccesses: await readLegacyProjectScopeAccesses(principal),
+          legacyWorkspaceScopeReadable: workspaceMember.role !== 'guest',
+        }
+      : {}),
     ...(defersToLegacyBusinessAuthorization
       ? {}
       : { enterpriseAuthorizationEvaluation }),
@@ -14831,18 +15881,39 @@ async function authenticateEnterpriseServiceAccount(
           source: 'system' as const,
         },
       ]
+      const needsProjectScopeQualification =
+        hasUnqualifiedEnterpriseProjectScope(serviceAccountAssignments) ||
+        hasUnqualifiedEnterpriseProjectScope(snapshot.groupMappings)
+      const enterpriseDirectory = needsProjectScopeQualification
+        ? await workspaceDependencies.projectDirectory.getProjectDirectory(
+            workspaceId,
+            'ja',
+            true,
+          )
+        : undefined
+      const qualifiedServiceAccountAssignments = enterpriseDirectory
+        ? qualifyEnterpriseProjectScopes(serviceAccountAssignments, enterpriseDirectory)
+        : serviceAccountAssignments
+      const qualifiedGroupMappings = enterpriseDirectory
+        ? qualifyEnterpriseProjectScopes(snapshot.groupMappings, enterpriseDirectory)
+        : snapshot.groupMappings
       const enterpriseAuthorizationEvaluation = {
         principal: serviceAccountPrincipal,
         snapshot,
-        assignments:
-          serviceAccountAssignments,
-        groupMappings: snapshot.groupMappings,
+        assignments: qualifiedServiceAccountAssignments,
+        groupMappings: qualifiedGroupMappings,
       } satisfies EnterpriseAuthorizationEvaluationSnapshot
       const requestAccess =
         await evaluateEnterpriseRequestAccess({
           workspaceId,
           context,
+          ...(shouldEvaluateEnterpriseNotificationScopes(context)
+            ? { scopePermissions: ENTERPRISE_NOTIFICATION_SCOPE_PERMISSIONS }
+            : {}),
           requiredPermissions,
+          ...(shouldEvaluateAllPlanningHistoryScopes(context)
+            ? { evaluateAllProjectScopes: true }
+            : {}),
           ...enterpriseAuthorizationEvaluation,
         })
       if (!requestAccess.allowed) {
@@ -14987,6 +16058,7 @@ async function authenticateEnterpriseServiceAccount(
     enterpriseGrantedRoutePermissions: requestAccess.grantedRoutePermissions,
     enterpriseRouteAuthorizedAtResource: requestAccess.authorizedAtResource,
     enterpriseProjectAccesses: requestAccess.projectAccesses,
+    enterpriseProjectScopeAccesses: requestAccess.projectScopeAccesses,
     enterpriseAuthorizedTeamIds: requestAccess.authorizedTeamIds,
     enterpriseTeamAccesses: requestAccess.teamAccesses,
     enterpriseLegacyProjectAccessSuppressed: true,
@@ -15009,6 +16081,10 @@ type EnterpriseRequestAccessInput = {
   resource?: EnterpriseAuthorizationResource
   /** Headless collection 操作で Team/Project descendant scope を列挙するかどうかです。 */
   evaluateProjectScopes?: boolean
+  /** Whether history/export collection must enumerate every descendant Project scope. */
+  evaluateAllProjectScopes?: boolean
+  /** Permissions used to enumerate descendant scopes instead of the route permission set. */
+  scopePermissions?: readonly EnterprisePermissionId[]
   /** Route rule が要求する primary/alternative permission です。 */
   requiredPermissions?: readonly EnterprisePermissionId[]
   /** Directory、guest ceiling、principal kind を解決済みの principal です。 */
@@ -15039,6 +16115,8 @@ type EnterpriseRequestAccess = {
   authorizedAtResource: boolean
   /** Current route permission で読み書きできる Project と相当 role です。 */
   projectAccesses: ProjectAccessEntry[]
+  /** Permission set retained for each Team-qualified Project scope. */
+  projectScopeAccesses: EnterpriseProjectScopeAccess[]
   /** Current route permission で独立して読み書きできる Team ID です。 */
   authorizedTeamIds: string[]
   /** Current route で Team ごとに有効な enterprise permission です。 */
@@ -15067,6 +16145,7 @@ async function evaluateEnterpriseRequestAccess(
       grantedRoutePermissions: [],
       authorizedAtResource: input.context === undefined,
       projectAccesses: [],
+      projectScopeAccesses: [],
       authorizedTeamIds: [],
       teamAccesses: [],
     }
@@ -15089,16 +16168,37 @@ async function evaluateEnterpriseRequestAccess(
       granted: decisions.find((decision) => decision.access.allowed),
     }
   }
+  /** Evaluates the permissions used to enumerate a descendant Team or Project scope. */
+  const evaluateScopeResource = (candidateResource: EnterpriseAuthorizationResource) => {
+    const permissions = input.scopePermissions ?? input.requiredPermissions!
+    const decisions = permissions.map((permission) => ({
+      permission,
+      access: evaluateEnterpriseAccess({
+        permission,
+        principal: input.principal,
+        assignments: input.assignments,
+        customRoles: input.snapshot.customRoles,
+        groupMappings: input.groupMappings,
+        resource: candidateResource,
+      }),
+    }))
+    return {
+      decisions,
+      granted: decisions.find((decision) => decision.access.allowed),
+    }
+  }
   const direct = evaluateResource(resource)
   const grantedRoutePermissions = new Set<EnterprisePermissionId>()
   for (const decision of direct.decisions) {
     if (decision.access.allowed) grantedRoutePermissions.add(decision.permission)
   }
   const projectAccesses: ProjectAccessEntry[] = []
+  const projectScopeAccesses: EnterpriseProjectScopeAccess[] = []
   const authorizedTeamIds = new Set<string>()
   const teamPermissionsById = new Map<string, Set<EnterprisePermissionId>>()
   const scopedPermissions = new Set<EnterprisePermissionId>()
   let scopedGrantedRoutePermission: EnterprisePermissionId | undefined
+  const evaluateAllProjectScopes = input.evaluateAllProjectScopes === true
   const addTeamAccess = (
     teamId: string,
     permissions: readonly EnterprisePermissionId[],
@@ -15116,22 +16216,27 @@ async function evaluateEnterpriseRequestAccess(
 
   if (
     input.evaluateProjectScopes === true ||
+    evaluateAllProjectScopes ||
     (
       input.context &&
       shouldEvaluateEnterpriseProjectScopes(input.context.req.path, resource)
     )
   ) {
     const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(input.workspaceId, 'ja')
-    const teams = directory.teams.filter((team) =>
-      resource.kind === 'workspace' ||
-      resource.kind === 'team' && resource.targetId === team.id ||
-      resource.kind === 'project' && team.projects.some((project) =>
-        resource.targetId === project.id
+    const teams = resource.kind === 'project' && resource.parentTeamId === undefined
+      ? []
+      : directory.teams.filter((team) =>
+        evaluateAllProjectScopes ||
+        resource.kind === 'workspace' ||
+        resource.kind === 'team' && resource.targetId === team.id ||
+        resource.kind === 'project' && team.projects.some((project) =>
+          resource.targetId === project.id &&
+          (resource.parentTeamId === undefined || resource.parentTeamId === team.id)
+        )
       )
-    )
-    if (resource.kind === 'workspace') {
+    if (resource.kind === 'workspace' || evaluateAllProjectScopes) {
       for (const team of teams) {
-        const scoped = evaluateResource({
+        const scoped = evaluateScopeResource({
           workspaceId: input.workspaceId,
           kind: 'team',
           targetId: team.id,
@@ -15149,14 +16254,16 @@ async function evaluateEnterpriseRequestAccess(
     }
     const projects = teams.flatMap((team) =>
       team.projects
-        .filter((project) => resource.kind !== 'project' || resource.targetId === project.id)
+        .filter((project) =>
+          evaluateAllProjectScopes || resource.kind !== 'project' || resource.targetId === project.id
+        )
         .map((project) => ({
           projectId: project.id,
           teamId: team.id,
         }))
     )
     for (const project of projects) {
-      const scoped = evaluateResource({
+      const scoped = evaluateScopeResource({
         workspaceId: input.workspaceId,
         kind: 'project',
         targetId: project.projectId,
@@ -15166,6 +16273,9 @@ async function evaluateEnterpriseRequestAccess(
         if (decision.access.allowed) grantedRoutePermissions.add(decision.permission)
       }
       if (!scoped.granted) continue
+      const grantedScopePermissions = scoped.decisions
+        .filter((decision) => decision.access.allowed)
+        .map((decision) => decision.permission)
       scopedGrantedRoutePermission ??= scoped.granted.permission
       for (const permission of scoped.granted.access.permissions) {
         scopedPermissions.add(permission)
@@ -15174,6 +16284,11 @@ async function evaluateEnterpriseRequestAccess(
         projectId: project.projectId,
         role: resolveEnterpriseProjectRole([scoped.granted.permission]),
         teamId: project.teamId,
+      })
+      projectScopeAccesses.push({
+        teamId: project.teamId,
+        projectId: project.projectId,
+        permissions: grantedScopePermissions,
       })
     }
   }
@@ -15192,6 +16307,7 @@ async function evaluateEnterpriseRequestAccess(
     grantedRoutePermissions: [...grantedRoutePermissions],
     authorizedAtResource: direct.granted !== undefined,
     projectAccesses,
+    projectScopeAccesses,
     authorizedTeamIds: [...authorizedTeamIds],
     teamAccesses: [...teamPermissionsById].map(([teamId, permissions]) => ({
       teamId,
@@ -15208,8 +16324,24 @@ function shouldEvaluateEnterpriseProjectScopes(
   resource: EnterpriseAuthorizationResource,
 ) {
   if (resource.kind === 'project') return true
-  return /^\/api\/(?:analytics|approvals|bulk-operations|document-backlinks|documents|focus|planning|projects|realtime\/tickets|task-views|teams|work-item-configuration|work-items)(?:\/|$)/u
+  return /^\/api\/(?:analytics|approvals|bulk-operations|document-backlinks|documents|focus|notifications|planning|projects|realtime\/tickets|task-views|teams|work-item-configuration|work-items)(?:\/|$)/u
     .test(path)
+}
+
+/** Returns whether Planning history reads must authorize every captured Project scope. */
+function shouldEvaluateAllPlanningHistoryScopes(context?: Context): boolean {
+  return context?.req.method === 'GET' && (
+    context.req.path === '/api/planning/updates' ||
+    context.req.path === '/api/planning/updates/export'
+  )
+}
+
+/** Returns whether the notification list needs Enterprise content scopes for visibility checks. */
+function shouldEvaluateEnterpriseNotificationScopes(context?: Context): boolean {
+  return context?.req.method === 'GET' && (
+    context.req.path === '/api/notifications' ||
+    context.req.path.startsWith('/api/notifications/')
+  )
 }
 
 /**
@@ -15244,11 +16376,65 @@ function resolveEnterpriseProjectRole(
   return 'viewer'
 }
 
+/**
+ * Adds the unique owner Team to legacy Project scopes before authorization evaluation.
+ *
+ * Ambiguous or unknown Project IDs remain unqualified and are rejected by the evaluator
+ * once a qualified Project resource is available.
+ *
+ * @param entries - Assignment or group-mapping records carrying an Enterprise scope.
+ * @param directory - Current Team-qualified Project directory.
+ * @returns Entries with uniquely resolvable Project scopes qualified by owner Team.
+ */
+function qualifyEnterpriseProjectScopes<T extends { scope: EnterpriseRoleScope }>(
+  entries: readonly T[],
+  directory: ProjectDirectoryResponse,
+): T[] {
+  const ownerTeamIdsByProjectId = new Map<string, Set<string>>()
+  for (const team of directory.teams) {
+    for (const project of team.projects) {
+      const ownerTeamIds = ownerTeamIdsByProjectId.get(project.id) ?? new Set<string>()
+      ownerTeamIds.add(team.id)
+      ownerTeamIdsByProjectId.set(project.id, ownerTeamIds)
+    }
+  }
+  return entries.map((entry) => {
+    if (
+      entry.scope.kind !== 'project' ||
+      entry.scope.parentTeamId !== undefined
+    ) {
+      return entry
+    }
+    const ownerTeamIds = ownerTeamIdsByProjectId.get(entry.scope.targetId ?? '')
+    if (ownerTeamIds?.size !== 1) return entry
+    const parentTeamId = ownerTeamIds.values().next().value
+    if (!parentTeamId) return entry
+    return {
+      ...entry,
+      scope: { ...entry.scope, parentTeamId },
+    }
+  })
+}
+
+/** Returns whether any Enterprise scope still needs Team qualification. */
+function hasUnqualifiedEnterpriseProjectScope(
+  entries: readonly { scope: EnterpriseRoleScope }[],
+) {
+  return entries.some((entry) =>
+    entry.scope.kind === 'project' && entry.scope.parentTeamId === undefined,
+  )
+}
+
 async function resolveEnterpriseAuthorizationResource(
   workspaceId: string,
   context: Context | undefined,
 ): Promise<EnterpriseAuthorizationResource> {
   const path = context?.req.path
+  const planningUpdateResource = await resolvePlanningUpdateAuthorizationResource(
+    workspaceId,
+    context,
+  )
+  if (planningUpdateResource) return planningUpdateResource
   const issueMatch = path?.match(/\/teams\/([^/]+)\/issues\/([^/]+)/u)
   let teamId = issueMatch?.[1] ? decodeURIComponent(issueMatch[1]) : undefined
   let issueId = issueMatch?.[2] ? decodeURIComponent(issueMatch[2]) : undefined
@@ -15379,9 +16565,14 @@ async function resolveEnterpriseAuthorizationResource(
   if (projectId) {
     const decodedProjectId = decodeURIComponent(projectId)
     const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(workspaceId, 'ja')
-    const parentTeamId = directory.teams.find((team) =>
-      team.projects.some((project) => project.id === decodedProjectId)
-    )?.id
+    const ownerTeamIds = new Set(
+      directory.teams
+        .filter((team) => team.projects.some((project) => project.id === decodedProjectId))
+        .map((team) => team.id),
+    )
+    const parentTeamId = ownerTeamIds.size === 1
+      ? ownerTeamIds.values().next().value
+      : undefined
     return {
       workspaceId,
       kind: 'project' as const,
@@ -15401,6 +16592,84 @@ async function resolveEnterpriseAuthorizationResource(
     }
   }
   return { workspaceId, kind: 'workspace' as const }
+}
+
+/**
+ * Resolves a qualified Planning update target before enterprise route authorization runs.
+ *
+ * @param workspaceId - Authenticated Workspace identifier.
+ * @param context - Current HTTP context containing the target query or mutation body.
+ * @returns The exact Workspace, Team, or Project resource, or undefined for another route.
+ */
+async function resolvePlanningUpdateAuthorizationResource(
+  workspaceId: string,
+  context: Context | undefined,
+): Promise<EnterpriseAuthorizationResource | undefined> {
+  const path = context?.req.path
+  if (
+    !path ||
+    !path.startsWith('/api/planning/updates') &&
+      path !== '/api/planning/update-watch'
+  ) {
+    return undefined
+  }
+
+  let target: unknown
+  if (
+    context.req.method !== 'GET' &&
+    (path === '/api/planning/updates' || path === '/api/planning/updates/cadence')
+  ) {
+    const body = await context.req.raw.clone().json().catch(() => undefined)
+    target = isRecord(body) ? body.target : undefined
+  } else {
+    target = {
+      type: context.req.query('targetType'),
+      teamId: context.req.query('teamId'),
+      projectId: context.req.query('projectId'),
+      entityId: context.req.query('entityId'),
+    }
+  }
+
+  if (!isRecord(target)) return { workspaceId, kind: 'workspace' }
+  if (
+    target.type === 'project' &&
+    typeof target.teamId === 'string' &&
+    target.teamId.trim() &&
+    typeof target.projectId === 'string' &&
+    target.projectId.trim()
+  ) {
+    return {
+      workspaceId,
+      kind: 'project',
+      targetId: target.projectId.trim(),
+      parentTeamId: target.teamId.trim(),
+    }
+  }
+  if (
+    target.type !== 'initiative' ||
+    typeof target.entityId !== 'string' ||
+    !target.entityId.trim()
+  ) {
+    return { workspaceId, kind: 'workspace' }
+  }
+
+  const entityId = target.entityId.trim()
+  const authorizationState = await workItemDependencies.planning.getAuthorizationState(workspaceId)
+  const entity = authorizationState.entities.find((candidate) =>
+    candidate.id === entityId && candidate.type === 'initiative'
+  )
+  if (entity?.projectId) {
+    return {
+      workspaceId,
+      kind: 'project',
+      targetId: entity.projectId,
+      parentTeamId: entity.teamId,
+    }
+  }
+  if (entity?.teamId) {
+    return { workspaceId, kind: 'team', targetId: entity.teamId }
+  }
+  return { workspaceId, kind: 'workspace' }
 }
 
 function readNumericClaim(value: unknown) {
@@ -20340,6 +21609,68 @@ function requireWorkspaceBusinessWrite(principal: WorkspacePrincipal) {
   )
 }
 
+/**
+ * Requires a non-guest Workspace member for business data reads.
+ *
+ * Enterprise-scoped requests must carry a read-capable permission as well as an
+ * active membership.  This guard is intentionally narrower than a generic
+ * workspace authentication check so workspace-scoped Planning history cannot
+ * be read by guests.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ */
+function requireWorkspaceBusinessRead(principal: WorkspacePrincipal) {
+  if (principal.workspaceRole === 'guest') {
+    throw new WorkspaceAccessError(
+      403,
+      'WorkspaceRoleDenied',
+      'Guest members have read-only access to business data.',
+    )
+  }
+  if (
+    principal.enterprisePermissions !== undefined &&
+    !principal.enterprisePermissions.some((permission) =>
+      permission.endsWith('.read') ||
+      permission.endsWith('.write') ||
+      permission.endsWith('.manage') ||
+      permission === 'files.approve'
+    )
+  ) {
+    throw new WorkspaceAccessError(
+      403,
+      'WorkspaceRoleDenied',
+      'A read-capable Workspace permission is required.',
+    )
+  }
+}
+
+/**
+ * Requires a current Workspace-scoped route for Workspace-scoped Planning data.
+ *
+ * Enterprise permissions are resource-bound.  A caller authorized only at a
+ * Team or Project resource may still carry a read-capable permission, but that
+ * permission must not unlock immutable Planning context captured while an
+ * Initiative was Workspace-scoped.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ */
+function requirePlanningWorkspaceScopeRead(principal: WorkspacePrincipal): void {
+  requireWorkspaceBusinessRead(principal)
+  if (
+    principal.enterprisePermissions !== undefined &&
+    !(
+      principal.enterpriseRouteAuthorizedAtResource === true &&
+      principal.enterpriseAuthorizationResource?.kind === 'workspace'
+    )
+  ) {
+    throw new PlanningError(
+      403,
+      'PlanningUpdateScopeAccessDenied',
+      'Workspace-scoped Planning access requires Workspace permission.',
+    )
+  }
+}
+
 function requireWorkspaceAdministration(principal: WorkspacePrincipal) {
   if (principal.enterpriseRouteAuthorizedAtResource) {
     return
@@ -20412,6 +21743,174 @@ async function requirePlanningActiveOwner(
       'Planning owner must be an active Workspace member.',
     )
   }
+  return owner
+}
+
+/**
+ * Requires a cadence recipient to retain the role needed for its future action.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @param snapshot - Current principal-filtered Planning snapshot.
+ * @param target - Cadence target being configured.
+ * @param memberKeyValue - Candidate update owner or escalation recipient.
+ * @param minimumRole - Member for publishers and viewer for escalation recipients.
+ */
+async function requirePlanningCadenceRecipientTargetPermission(
+  principal: WorkspacePrincipal,
+  snapshot: PlanningSnapshot,
+  target: PlanningUpdateTarget,
+  memberKeyValue: unknown,
+  minimumRole: Extract<ProjectRole, 'viewer' | 'member'>,
+): Promise<WorkspaceMember> {
+  const member = await requirePlanningActiveOwner(principal, memberKeyValue)
+  const memberKey = member.memberKey.toLowerCase()
+  let teamId: string | undefined
+  let projectId: string | undefined
+  if (target.type === 'project') {
+    teamId = target.teamId
+    projectId = target.projectId
+  } else {
+    const entity = snapshot.entities.find((candidate) =>
+      candidate.id === target.entityId && candidate.type === 'initiative'
+    )
+    if (!entity) {
+      throw new PlanningError(
+        404,
+        'PlanningUpdateTargetNotFound',
+        'Planning Initiative update target was not found.',
+      )
+    }
+    teamId = entity.teamId
+    projectId = entity.projectId
+  }
+
+  if (!teamId && !projectId) {
+    if (member.role === 'guest') {
+      throw new PlanningError(
+        409,
+        'PlanningUpdateRecipientAccessDenied',
+        'The update recipient must have business access to the Workspace target.',
+      )
+    }
+    return member
+  }
+  if (await authenticationDependencies.cognito.isSystemAdmin(memberKey)) return member
+
+  const enterpriseSnapshot = principal.enterpriseAuthorizationEvaluation?.snapshot ??
+    await workspaceDependencies.enterpriseIdentity.read.getSnapshot(principal.directoryId)
+  const candidateGroups = await authenticationDependencies.cognito.getUserGroups(memberKey)
+  const directoryPrincipal = resolveEnterpriseDirectoryPrincipal(
+    enterpriseSnapshot,
+    memberKey,
+    candidateGroups,
+  )
+  const needsProjectScopeQualification =
+    hasUnqualifiedEnterpriseProjectScope(directoryPrincipal.compatibleRoleAssignments) ||
+    hasUnqualifiedEnterpriseProjectScope(directoryPrincipal.compatibleGroupMappings)
+  const enterpriseDirectory = needsProjectScopeQualification
+    ? await workspaceDependencies.projectDirectory.getProjectDirectory(
+        principal.directoryId,
+        'ja',
+        true,
+      )
+    : undefined
+  const qualifiedRoleAssignments = enterpriseDirectory
+    ? qualifyEnterpriseProjectScopes(
+        directoryPrincipal.compatibleRoleAssignments,
+        enterpriseDirectory,
+      )
+    : directoryPrincipal.compatibleRoleAssignments
+  const qualifiedGroupMappings = enterpriseDirectory
+    ? qualifyEnterpriseProjectScopes(
+        directoryPrincipal.compatibleGroupMappings,
+        enterpriseDirectory,
+      )
+    : directoryPrincipal.compatibleGroupMappings
+  const suppressLegacyWorkspaceRole = directoryPrincipal.directoryManaged ||
+    qualifiedRoleAssignments.some((assignment) =>
+      assignment.principalKind === 'member' && assignment.principalId === memberKey ||
+      assignment.principalKind === 'directory-group' && (
+        assignment.source === 'directory-mapping' ||
+        directoryPrincipal.directoryGroupIds.includes(assignment.principalId)
+      )
+    ) || qualifiedGroupMappings.some((mapping) => mapping.enabled)
+  if (suppressLegacyWorkspaceRole) {
+    const candidateAccess = evaluateEnterpriseAccess({
+      permission: minimumRole === 'member' ? 'work-items.write' : 'work-items.read',
+      principal: {
+        kind: 'member',
+        principalId: memberKey,
+        directoryGroupIds: directoryPrincipal.directoryGroupIds,
+        directoryGroupMemberships: directoryPrincipal.directoryGroupMemberships,
+        workspaceRole: member.role,
+        includeWorkspaceRolePermissions: !suppressLegacyWorkspaceRole,
+        ...(suppressLegacyWorkspaceRole
+          ? { directPermissions: ['workspace.read' as const] }
+          : {}),
+        systemAdministrator: false,
+      },
+      assignments: qualifiedRoleAssignments,
+      customRoles: enterpriseSnapshot.customRoles,
+      groupMappings: qualifiedGroupMappings,
+      resource: projectId
+        ? {
+            workspaceId: principal.directoryId,
+            kind: 'project',
+            targetId: projectId,
+            parentTeamId: teamId,
+          }
+        : {
+            workspaceId: principal.directoryId,
+            kind: 'team',
+            targetId: teamId,
+          },
+    })
+    if (candidateAccess.allowed) return member
+  }
+
+  if (!suppressLegacyWorkspaceRole) {
+    const [directory, accesses] = await Promise.all([
+      workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja', true),
+      workspaceDependencies.projectDirectory.getProjectAccessList(principal.directoryId, memberKey),
+    ])
+    if (projectId) {
+      const resolvedTeamIds = teamId
+        ? [teamId]
+        : directory.teams
+          .filter((team) => team.projects.some((project) => project.id === projectId))
+          .map((team) => team.id)
+      if (
+        resolvedTeamIds.length === 1 &&
+        accesses.some((access) =>
+          planningProjectAccessMatchesQualifiedScope(
+            access,
+            directory,
+            resolvedTeamIds[0]!,
+            projectId,
+          ) && projectAccessAllows(access, minimumRole)
+        )
+      ) {
+        return member
+      }
+    } else if (teamId) {
+      const team = directory.teams.find((candidate) => candidate.id === teamId)
+      if (team?.projects.some((project) =>
+        accesses.some((access) =>
+          planningProjectAccessMatchesQualifiedScope(access, directory, teamId, project.id) &&
+          projectAccessAllows(access, minimumRole)
+        )
+      )) {
+        return member
+      }
+    }
+  }
+  throw new PlanningError(
+    409,
+    'PlanningUpdateRecipientAccessDenied',
+    minimumRole === 'member'
+      ? 'The update owner must be able to publish to the current target scope.'
+      : 'The escalation recipient must be able to view the current target scope.',
+  )
 }
 
 /**
@@ -20684,6 +22183,455 @@ async function requirePlanningEntityPermission(
   return entity
 }
 
+/**
+ * Authorizes one Project/Initiative update target against its current canonical scope.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param snapshot - Current Planning snapshot used for Initiative scope resolution.
+ * @param target - Validated Project or Initiative target.
+ * @param minimumRole - Minimum Project-style role required by the operation.
+ * @returns The matching Initiative entity for Initiative targets, otherwise undefined.
+ */
+async function requirePlanningUpdateTargetPermission(
+  principal: WorkspacePrincipal,
+  snapshot: PlanningSnapshot,
+  target: PlanningUpdateTarget,
+  minimumRole: ProjectRole,
+) {
+  if (target.type === 'project') {
+    await requirePlanningUpdateProjectPermission(
+      principal,
+      target.teamId,
+      target.projectId,
+      minimumRole,
+    )
+    return undefined
+  }
+
+  const entity = snapshot.entities.find((candidate) => candidate.id === target.entityId)
+  if (!entity || entity.type !== 'initiative') {
+    throw new PlanningError(
+      404,
+      'PlanningUpdateTargetNotFound',
+      'Planning Initiative update target was not found.',
+    )
+  }
+  if (entity.teamId && entity.projectId) {
+    await requirePlanningUpdateProjectPermission(
+      principal,
+      entity.teamId,
+      entity.projectId,
+      minimumRole,
+    )
+  } else if (entity.projectId) {
+    await requireProjectPermission(principal, entity.projectId, minimumRole)
+  } else if (entity.teamId) {
+    await requirePlanningUpdateTeamPermission(principal, entity.teamId, minimumRole)
+  } else {
+    requirePlanningWorkspaceScopeRead(principal)
+    if (minimumRole === 'manager') requireWorkspaceAdministration(principal)
+  }
+  return entity
+}
+
+/**
+ * Rechecks the scope captured in an immutable update before returning it.
+ *
+ * Immutable context can outlive a current Initiative move or an ACL change.
+ * Authorizing only the current target would therefore expose historical
+ * milestones, dependencies, or evidence from the former scope.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @param scope - Scope captured by the immutable update.
+ */
+async function requirePlanningUpdateCapturedScopePermission(
+  principal: WorkspacePrincipal,
+  scope: { teamId?: string; projectId?: string },
+): Promise<void> {
+  if (scope.projectId !== undefined) {
+    if (scope.teamId === undefined) {
+      throw new PlanningError(
+        403,
+        'PlanningUpdateScopeAccessDenied',
+        'The immutable update scope is incomplete.',
+      )
+    }
+    await requirePlanningUpdateProjectPermission(
+      principal,
+      scope.teamId,
+      scope.projectId,
+      'viewer',
+    )
+    return
+  }
+  if (scope.teamId !== undefined) {
+    await requirePlanningUpdateTeamPermission(principal, scope.teamId, 'viewer')
+    return
+  }
+  requirePlanningWorkspaceScopeRead(principal)
+}
+
+/**
+ * Removes immutable updates whose captured scope is no longer readable.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @param updates - Immutable updates returned by the canonical history store.
+ * @param authorizationCache - Per-request cache for captured-scope authorization results.
+ * @returns Only updates whose captured scope remains visible.
+ */
+async function filterPlanningUpdatesByCapturedScope(
+  principal: WorkspacePrincipal,
+  updates: readonly PlanningUpdate[],
+  authorizationCache: Map<string, Promise<void>>,
+): Promise<PlanningUpdate[]> {
+  const visible: PlanningUpdate[] = []
+  for (const update of updates) {
+    const scope = update.contextSnapshot.scope
+    const scopeKey = JSON.stringify([scope.teamId ?? null, scope.projectId ?? null])
+    let authorization = authorizationCache.get(scopeKey)
+    if (!authorization) {
+      authorization = requirePlanningUpdateCapturedScopePermission(principal, scope)
+      authorizationCache.set(scopeKey, authorization)
+    }
+    try {
+      await authorization
+      visible.push(update)
+    } catch (error) {
+      if (isPlanningVisibilityAuthorizationError(error)) continue
+      throw error
+    }
+  }
+  return visible
+}
+
+/** Returns whether an authorization failure should hide one historical row. */
+function isPlanningVisibilityAuthorizationError(error: unknown): boolean {
+  return isRecord(error) &&
+    typeof error.status === 'number' &&
+    (error.status === 403 || error.status === 404)
+}
+
+/**
+ * Authorizes a Team-scoped update target without trusting ambiguous Project IDs.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param teamId - Team that owns the Initiative target.
+ * @param minimumRole - Required role on at least one Project in that Team.
+ */
+async function requirePlanningUpdateTeamPermission(
+  principal: WorkspacePrincipal,
+  teamId: string,
+  minimumRole: ProjectRole,
+): Promise<void> {
+  const context = await requireTeamPermission(principal, teamId, minimumRole)
+  if (principal.isSystemAdmin || context.projectAccesses === undefined) return
+  const hasQualifiedAccess = context.team.projects.some((project) =>
+    context.projectAccesses?.some((access) =>
+      planningProjectAccessMatchesQualifiedScope(
+        access,
+        context.directory,
+        teamId,
+        project.id,
+      ) && projectAccessAllows(access, minimumRole)
+    ) ?? false
+  )
+  if (!hasQualifiedAccess) {
+    throw new PlanningError(
+      403,
+      'ProjectAccessDenied',
+      'Current Team permission does not allow this Planning update operation.',
+    )
+  }
+}
+
+/**
+ * Authorizes a Team-qualified Project and rejects a mismatched directory hierarchy.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param teamId - Owning Team identifier.
+ * @param projectId - Team-local Project identifier.
+ * @param minimumRole - Required Project role.
+ */
+async function requirePlanningUpdateProjectPermission(
+  principal: WorkspacePrincipal,
+  teamId: string,
+  projectId: string,
+  minimumRole: ProjectRole,
+) {
+  const context = await requireTeamPermission(principal, teamId, minimumRole)
+  if (!context.team.projects.some((project) => project.id === projectId)) {
+    throw new PlanningError(
+      404,
+      'PlanningUpdateTargetNotFound',
+      'Planning Project update target was not found.',
+    )
+  }
+  if (principal.isSystemAdmin || context.projectAccesses === undefined) return
+  const access = context.projectAccesses.find((candidate) =>
+    planningProjectAccessMatchesQualifiedScope(
+      candidate,
+      context.directory,
+      teamId,
+      projectId,
+    )
+  )
+  if (!access || !projectAccessAllows(access, minimumRole)) {
+    throw new PlanningError(
+      403,
+      'ProjectAccessDenied',
+      'Current Project permission does not allow this Planning update operation.',
+    )
+  }
+}
+
+/**
+ * Matches one Project access entry to an exact Team-qualified Project identity.
+ *
+ * @param access - Current member access entry.
+ * @param directory - Current active Team/Project hierarchy.
+ * @param teamId - Required owner Team.
+ * @param projectId - Required Team-local Project ID.
+ * @returns Whether the access is explicitly qualified or safely inferable from a unique owner Team.
+ */
+function planningProjectAccessMatchesQualifiedScope(
+  access: ProjectAccessEntry,
+  directory: ProjectDirectoryResponse,
+  teamId: string,
+  projectId: string,
+): boolean {
+  if (access.projectId !== projectId) return false
+  if (access.teamId !== undefined) return access.teamId === teamId
+  const ownerTeamIds = directory.teams
+    .filter((team) => team.projects.some((project) => project.id === projectId))
+    .map((team) => team.id)
+  return ownerTeamIds.length === 1 && ownerTeamIds[0] === teamId
+}
+
+/**
+ * Finds one bounded update target summary by its qualified identity.
+ *
+ * @param snapshot - Current Planning snapshot.
+ * @param target - Target to locate.
+ * @returns Matching summary when configured or historically known.
+ */
+function findPlanningUpdateTargetSummary(
+  snapshot: PlanningSnapshot,
+  target: PlanningUpdateTarget,
+) {
+  return snapshot.updateTargets.find((candidate) =>
+    candidate.target.type === target.type && (
+      target.type === 'initiative'
+        ? candidate.target.type === 'initiative' &&
+          candidate.target.entityId === target.entityId
+        : candidate.target.type === 'project' &&
+          candidate.target.teamId === target.teamId &&
+          candidate.target.projectId === target.projectId
+    )
+  )
+}
+
+/**
+ * Validates external evidence references before an immutable update is committed.
+ *
+ * File references are resolved through the File Proofing read adapter and guarded by a
+ * transaction condition against deletion. Unsupported external references are rejected rather
+ * than accepting an opaque ID and HTTPS URL that cannot be proven to exist in this Workspace.
+ *
+ * @param principal - Authenticated publisher whose file visibility is being evaluated.
+ * @param snapshot - Unfiltered Planning snapshot used to resolve the target envelope.
+ * @param visibleSnapshot - Publisher-visible Work Item projection used to bound file scopes.
+ * @param input - Candidate publish request containing external evidence references.
+ * @returns File metadata condition checks to append to the publish transaction.
+ */
+async function createPlanningUpdateEvidenceConditionChecks(
+  principal: WorkspacePrincipal,
+  snapshot: PlanningSnapshot,
+  visibleSnapshot: PlanningSnapshot,
+  input: PublishPlanningUpdateInput,
+): Promise<PlanningCallerAuthorizationConditionCheck[]> {
+  const candidateEvidence = Array.isArray(input.evidence) ? input.evidence : []
+  const fileIds = new Set<string>()
+  for (const candidate of candidateEvidence) {
+    if (!isRecord(candidate) || candidate.type !== 'file' || typeof candidate.fileId !== 'string') {
+      continue
+    }
+    const fileId = candidate.fileId.trim()
+    if (fileId) fileIds.add(fileId)
+  }
+  if (fileIds.size === 0) return []
+
+  const actor: FileProofingActor = {
+    memberKey: principal.userKey,
+    guest: principal.workspaceRole === 'guest',
+    canWrite: false,
+    canManage: false,
+  }
+  const scopes = createPlanningUpdateEvidenceScopes(
+    principal.directoryId,
+    snapshot,
+    visibleSnapshot,
+    input.target,
+  )
+  const scopesByKey = new Map(scopes.map((scope) => [createFileProofingScopeKey(scope), scope]))
+  try {
+    const lookups = await Promise.all([...fileIds].map(async (fileId) => ({
+      fileId,
+      lookup: await workItemDependencies.fileProofing.findFileById(
+        principal.directoryId,
+        actor,
+        fileId,
+      ),
+    })))
+    for (const { fileId, lookup } of lookups) {
+      if (!lookup?.file.capabilities.canDownload) continue
+      const scope = scopesByKey.get(createFileProofingScopeKey(lookup.scope))
+      if (scope) {
+        scopesByKey.set(fileId, scope)
+      }
+    }
+  } catch (error) {
+    if (error instanceof PlanningError) throw error
+    throw new PlanningError(
+      503,
+      'PlanningUpdateEvidenceUnavailable',
+      'File evidence visibility could not be verified.',
+    )
+  }
+
+  const tableName = getEnv('FILE_PROOFING_TABLE_NAME')?.trim() ?? 'mukuroji-file-proofing'
+  return [...fileIds].map((fileId) => {
+    const scope = scopesByKey.get(fileId)
+    if (!scope) {
+      throw new PlanningError(
+        400,
+        'PlanningUpdateEvidenceInvalid',
+        `Evidence File "${fileId}" is unavailable for this update target.`,
+      )
+    }
+    return createPlanningUpdateFileEvidenceConditionCheck(
+      tableName,
+      scope,
+      fileId,
+      actor.guest,
+    )
+  })
+}
+
+/**
+ * Builds all File Proofing scopes that can be part of one update target's visibility envelope.
+ *
+ * @param workspaceId - Owning Workspace identifier.
+ * @param snapshot - Unfiltered Planning snapshot containing the target entity.
+ * @param visibleSnapshot - Publisher-visible Work Item projection.
+ * @param target - Project or Initiative update target.
+ * @returns Deduplicated Project and Work Item file scopes inside the target envelope.
+ */
+function createPlanningUpdateEvidenceScopes(
+  workspaceId: string,
+  snapshot: PlanningSnapshot,
+  visibleSnapshot: PlanningSnapshot,
+  target: PlanningUpdateTarget,
+): FileProofingScope[] {
+  const envelope = target.type === 'project'
+    ? { teamId: target.teamId, projectId: target.projectId }
+    : (() => {
+        const entity = snapshot.entities.find((candidate) => candidate.id === target.entityId)
+        return {
+          teamId: entity?.teamId,
+          projectId: entity?.projectId,
+        }
+      })()
+  const scopes: FileProofingScope[] = []
+  const seen = new Set<string>()
+  const addScope = (scope: FileProofingScope) => {
+    const key = createFileProofingScopeKey(scope)
+    if (seen.has(key)) return
+    seen.add(key)
+    scopes.push(scope)
+  }
+
+  if (envelope.teamId !== undefined && envelope.projectId !== undefined) {
+    addScope({
+      workspaceId,
+      teamId: envelope.teamId,
+      kind: 'project',
+      projectId: envelope.projectId,
+    })
+  }
+  for (const workItem of visibleSnapshot.workItems) {
+    if (!isPlanningUpdateEvidenceScopeVisible(
+      envelope,
+      workItem.teamId,
+      workItem.projectId,
+    )) {
+      continue
+    }
+    addScope({
+      workspaceId,
+      teamId: workItem.teamId,
+      kind: 'work-item',
+      issueId: workItem.id,
+      ...(workItem.projectId === undefined ? {} : { projectId: workItem.projectId }),
+    })
+  }
+  return scopes
+}
+
+/** Checks whether one Work Item scope is inside a Planning update envelope. */
+function isPlanningUpdateEvidenceScopeVisible(
+  envelope: { teamId?: string; projectId?: string },
+  teamId: string,
+  projectId: string | undefined,
+): boolean {
+  if (envelope.projectId !== undefined) {
+    return teamId === envelope.teamId && projectId === envelope.projectId
+  }
+  if (envelope.teamId !== undefined) {
+    return teamId === envelope.teamId && projectId === undefined
+  }
+  return true
+}
+
+/** Creates a commit-time File Proofing guard for one visible evidence file. */
+function createPlanningUpdateFileEvidenceConditionCheck(
+  tableName: string,
+  scope: FileProofingScope,
+  fileId: string,
+  guest: boolean,
+): PlanningCallerAuthorizationConditionCheck {
+  const expressionAttributeNames: Record<string, string> = {
+    '#entryType': 'entryType',
+    '#workspaceId': 'workspaceId',
+    '#fileId': 'fileId',
+    '#deletedAt': 'deletedAt',
+  }
+  const expressionAttributeValues: Record<string, string | boolean> = {
+    ':entryType': 'file',
+    ':workspaceId': scope.workspaceId,
+    ':fileId': fileId,
+  }
+  let conditionExpression =
+    '#entryType = :entryType AND #workspaceId = :workspaceId AND ' +
+    '#fileId = :fileId AND attribute_not_exists(#deletedAt)'
+  if (guest) {
+    expressionAttributeNames['#guestAccess'] = 'guestAccess'
+    expressionAttributeValues[':guestAccess'] = true
+    conditionExpression += ' AND #guestAccess = :guestAccess'
+  }
+  return {
+    ConditionCheck: {
+      TableName: tableName,
+      Key: {
+        scopeKey: createFileProofingScopeKey(scope),
+        recordKey: `FILE#${fileId}`,
+      },
+      ConditionExpression: conditionExpression,
+      ExpressionAttributeNames: expressionAttributeNames,
+      ExpressionAttributeValues: expressionAttributeValues,
+    },
+  }
+}
+
 async function requirePlanningLinkEntityPermissions(
   principal: WorkspacePrincipal,
   entities: readonly PlanningEntity[],
@@ -20733,6 +22681,45 @@ function collectActivePlanningDescendants(
     }
   }
   return descendants
+}
+
+/**
+ * Rejects a Team / Project scope move that would leave an Initiative cadence owned by its old scope.
+ *
+ * @param snapshot - Complete Planning snapshot read before the move.
+ * @param entityId - Root entity being moved.
+ * @param input - Requested hierarchy and scope destination.
+ */
+function requirePlanningMoveDoesNotInvalidateUpdateCadence(
+  snapshot: PlanningSnapshot,
+  entityId: string,
+  input: MovePlanningEntityInput,
+): void {
+  const current = snapshot.entities.find((entity) => entity.id === entityId)
+  if (!current) return
+
+  const movedEntities = [
+    current,
+    ...collectActivePlanningDescendants(snapshot.entities, current.id),
+  ]
+  const movedEntityIdsWithScopeChange = new Set(
+    movedEntities
+      .filter((entity) => entity.teamId !== input.teamId || entity.projectId !== input.projectId)
+      .map((entity) => entity.id),
+  )
+  const cadenceTarget = snapshot.updateTargets.find((updateTarget) =>
+    updateTarget.target.type === 'initiative' &&
+    updateTarget.cadence !== undefined &&
+    updateTarget.archivedAt === undefined &&
+    movedEntityIdsWithScopeChange.has(updateTarget.target.entityId)
+  )
+  if (!cadenceTarget) return
+
+  throw new PlanningError(
+    409,
+    'PlanningMoveRequiresCadenceReconfiguration',
+    'Reconfigure or remove the active Planning update cadence before changing its Team or Project scope.',
+  )
 }
 
 /** Search と saved view authorization に使う current directory snapshot です。 */
@@ -23315,6 +25302,107 @@ function requiresCurrentWorkItemAssignee(notification: NotificationItem) {
   )
 }
 
+/**
+ * Detects notifications whose visibility depends on current Planning update cadence state.
+ *
+ * Metadata-bearing non-Planning events are included so malformed persisted rows fail closed.
+ *
+ * @param notification - Persisted Inbox notification candidate.
+ * @returns Whether the notification requires current Planning revalidation.
+ */
+function requiresCurrentPlanningUpdateTarget(notification: NotificationItem) {
+  return notification.eventType.startsWith('planning-update.') ||
+    notification.planningTargetType !== undefined ||
+    notification.planningTargetId !== undefined ||
+    notification.planningTargetRecordKey !== undefined ||
+    notification.planningNextDueAt !== undefined ||
+    notification.planningNotificationKind !== undefined
+}
+
+/**
+ * Revalidates one scheduled Planning notification against the strong authorization snapshot.
+ *
+ * @param notification - Persisted notification whose target metadata is untrusted.
+ * @param state - Current strongly read Planning authorization state.
+ * @param recipientMemberKey - Authenticated Inbox recipient.
+ * @returns Current target, scope, and direct-recipient match, or undefined when stale.
+ */
+function resolveCurrentPlanningNotificationScope(
+  notification: NotificationItem,
+  state: PlanningAuthorizationState,
+  recipientMemberKey: string,
+) {
+  const kind = notification.planningNotificationKind
+  if (
+    !kind ||
+    notification.eventType !== `planning-update.${kind}` ||
+    !notification.planningTargetType ||
+    !notification.planningTargetId ||
+    !notification.planningTargetRecordKey ||
+    !notification.planningNextDueAt
+  ) {
+    return undefined
+  }
+
+  const updateTarget = state.updateTargets.find((candidate) => {
+    if (candidate.target.type !== notification.planningTargetType) return false
+    if (candidate.target.type === 'project') {
+      return candidate.target.projectId === notification.planningTargetId &&
+        notification.planningTargetRecordKey === [
+          'UPDATE_TARGET',
+          'PROJECT',
+          encodeURIComponent(candidate.target.teamId),
+          encodeURIComponent(candidate.target.projectId),
+        ].join('#')
+    }
+    return candidate.target.entityId === notification.planningTargetId &&
+      notification.planningTargetRecordKey === [
+        'UPDATE_TARGET',
+        'INITIATIVE',
+        encodeURIComponent(candidate.target.entityId),
+      ].join('#')
+  })
+  if (!updateTarget || updateTarget.archivedAt || !updateTarget.cadence) {
+    return undefined
+  }
+
+  const cadence = updateTarget.cadence
+  const currentRecipient = kind === 'escalation'
+    ? cadence.escalationMemberKey
+    : cadence.updateOwnerMemberKey
+  if (cadence.nextDueAt !== notification.planningNextDueAt) {
+    return undefined
+  }
+  const currentRecipientMatches =
+    currentRecipient?.trim().toLowerCase() === recipientMemberKey.trim().toLowerCase()
+
+  const currentTarget = updateTarget.target
+  const planningUpdateTargetKey = createPlanningUpdatePublicTargetKey(currentTarget)
+  if (currentTarget.type === 'project') {
+    return {
+      currentRecipientMatches,
+      notificationKind: kind,
+      planningUpdateTargetKey,
+      teamId: currentTarget.teamId,
+      projectId: currentTarget.projectId,
+    }
+  }
+
+  const initiative = state.entities.find((entity) =>
+    entity.id === currentTarget.entityId && entity.type === 'initiative'
+  )
+  if (!initiative || initiative.archivedAt || (initiative.projectId && !initiative.teamId)) {
+    return undefined
+  }
+  return {
+    currentRecipientMatches,
+    notificationKind: kind,
+    planningUpdateTargetKey,
+    ...(initiative.teamId ? { teamId: initiative.teamId } : {}),
+    ...(initiative.projectId ? { projectId: initiative.projectId } : {}),
+  }
+}
+
 /** Returns whether a Triage notification is meaningful only to the current owner. */
 function requiresCurrentTriageOwner(notification: NotificationItem) {
   return notification.reasons.length > 0 && notification.reasons.every((reason) =>
@@ -23337,12 +25425,117 @@ async function createNotificationVisibilityFilter(
       projectTeamIds.set(project.id, teamIds)
     }
   }
-  const projectAccesses = principal.isSystemAdmin
+  const projectScopeAccesses: ProjectAccessEntry[] = principal.isSystemAdmin
     ? [...projectTeamIds.keys()].map((projectId) => ({
         projectId,
         role: 'manager' as const,
       }))
-    : await getEffectiveProjectAccessList(principal)
+    : await getEffectiveProjectScopeAccessList(principal)
+  const projectAccesses = principal.isSystemAdmin
+    ? projectScopeAccesses
+    : collapseProjectAccessesById(projectScopeAccesses)
+  const enterpriseEvaluation = principal.enterpriseAuthorizationEvaluation
+  const isEnterpriseContentPrincipal =
+    !principal.isSystemAdmin && principal.enterprisePermissions !== undefined
+  const enterpriseProjectScopeAccesses =
+    principal.enterpriseProjectScopeAccesses ?? []
+  const enterpriseProjectHasPermission = (
+    access: EnterpriseProjectScopeAccess,
+    permissions: readonly EnterprisePermissionId[],
+  ) => permissions.some((permission) => access.permissions.includes(permission))
+  const enterpriseTeamHasPermission = (
+    teamId: string,
+    permissions: readonly EnterprisePermissionId[],
+  ) => (principal.enterpriseTeamAccesses ?? []).some((access) =>
+    access.teamId === teamId &&
+    permissions.some((permission) => access.permissions.includes(permission))
+  )
+  const enterprisePlanningReadableProjectScopeKeys = new Set(
+    enterpriseProjectScopeAccesses
+      .filter((access) => enterpriseProjectHasPermission(
+        access,
+        ENTERPRISE_PLANNING_READ_PERMISSIONS,
+      ))
+      .map((access) => `${access.teamId}\0${access.projectId}`),
+  )
+  const enterprisePlanningWritableProjectScopeKeys = new Set(
+    enterpriseProjectScopeAccesses
+      .filter((access) => enterpriseProjectHasPermission(
+        access,
+        ENTERPRISE_PLANNING_WRITE_PERMISSIONS,
+      ))
+      .map((access) => `${access.teamId}\0${access.projectId}`),
+  )
+  const enterpriseWorkItemReadableProjectScopeKeys = new Set(
+    enterpriseProjectScopeAccesses
+      .filter((access) => enterpriseProjectHasPermission(
+        access,
+        ENTERPRISE_WORK_ITEM_READ_PERMISSIONS,
+      ))
+      .map((access) => `${access.teamId}\0${access.projectId}`),
+  )
+  const enterprisePlanningReadableTeamIds = new Set(
+    (principal.enterpriseTeamAccesses ?? [])
+      .filter((access) => enterpriseTeamHasPermission(
+        access.teamId,
+        ENTERPRISE_PLANNING_READ_PERMISSIONS,
+      ))
+      .map((access) => access.teamId),
+  )
+  const enterprisePlanningWritableTeamIds = new Set(
+    (principal.enterpriseTeamAccesses ?? [])
+      .filter((access) => enterpriseTeamHasPermission(
+        access.teamId,
+        ENTERPRISE_PLANNING_WRITE_PERMISSIONS,
+      ))
+      .map((access) => access.teamId),
+  )
+  const enterpriseWorkItemReadableTeamIds = new Set(
+    (principal.enterpriseTeamAccesses ?? [])
+      .filter((access) => enterpriseTeamHasPermission(
+        access.teamId,
+        ENTERPRISE_WORK_ITEM_READ_PERMISSIONS,
+      ))
+      .map((access) => access.teamId),
+  )
+  const enterpriseWorkItemReadableProjectIds = new Set(
+    enterpriseProjectScopeAccesses
+      .filter((access) => enterpriseProjectHasPermission(
+        access,
+        ENTERPRISE_WORK_ITEM_READ_PERMISSIONS,
+      ) && projectTeamIds.get(access.projectId)?.size === 1 &&
+        projectTeamIds.get(access.projectId)?.has(access.teamId) === true)
+      .map((access) => access.projectId),
+  )
+  const enterpriseFullyAccessibleWorkItemTeamIds = new Set(
+    directory.teams
+      .filter((team) => enterpriseWorkItemReadableTeamIds.has(team.id))
+      .map((team) => team.id),
+  )
+  const enterprisePlanningWorkspaceReadable = enterpriseEvaluation
+    ? ENTERPRISE_PLANNING_READ_PERMISSIONS.some((permission) =>
+        evaluateEnterpriseAccess({
+          permission,
+          principal: enterpriseEvaluation.principal,
+          assignments: enterpriseEvaluation.assignments,
+          customRoles: enterpriseEvaluation.snapshot.customRoles,
+          groupMappings: enterpriseEvaluation.groupMappings,
+          resource: { workspaceId: principal.directoryId, kind: 'workspace' },
+        }).allowed
+      )
+    : false
+  const enterprisePlanningWorkspaceWritable = enterpriseEvaluation
+    ? ENTERPRISE_PLANNING_WRITE_PERMISSIONS.some((permission) =>
+        evaluateEnterpriseAccess({
+          permission,
+          principal: enterpriseEvaluation.principal,
+          assignments: enterpriseEvaluation.assignments,
+          customRoles: enterpriseEvaluation.snapshot.customRoles,
+          groupMappings: enterpriseEvaluation.groupMappings,
+          resource: { workspaceId: principal.directoryId, kind: 'workspace' },
+        }).allowed
+      )
+    : false
   const accessibleProjectIds = new Set(
     projectAccesses
       .filter((access) =>
@@ -23351,6 +25544,89 @@ async function createNotificationVisibilityFilter(
       )
       .map((access) => access.projectId),
   )
+  const accessibleProjectScopeKeys = new Set<string>()
+  const accessiblePlanningTeamIds = new Set<string>()
+  const writableProjectScopeKeys = new Set<string>()
+  const writablePlanningTeamIds = new Set<string>()
+  if (principal.isSystemAdmin) {
+    for (const team of directory.teams) {
+      accessiblePlanningTeamIds.add(team.id)
+      writablePlanningTeamIds.add(team.id)
+      for (const project of team.projects) {
+        accessibleProjectScopeKeys.add(`${team.id}\0${project.id}`)
+        writableProjectScopeKeys.add(`${team.id}\0${project.id}`)
+      }
+    }
+  } else {
+    for (const access of projectScopeAccesses) {
+      const canView = projectAccessAllows(access, 'viewer')
+      const canWrite = projectAccessAllows(access, 'member')
+      if (!canView && !canWrite) continue
+      const ownerTeamIds = projectTeamIds.get(access.projectId)
+      if (!ownerTeamIds) continue
+      if (access.teamId) {
+        if (ownerTeamIds.has(access.teamId)) {
+          const scopeKey = `${access.teamId}\0${access.projectId}`
+          if (canView) {
+            accessibleProjectScopeKeys.add(scopeKey)
+            accessiblePlanningTeamIds.add(access.teamId)
+          }
+          if (canWrite) {
+            writableProjectScopeKeys.add(scopeKey)
+            writablePlanningTeamIds.add(access.teamId)
+          }
+        }
+        continue
+      }
+      if (ownerTeamIds.size === 1) {
+        const ownerTeamId = ownerTeamIds.values().next().value
+        if (ownerTeamId) {
+          const scopeKey = `${ownerTeamId}\0${access.projectId}`
+          if (canView) {
+            accessibleProjectScopeKeys.add(scopeKey)
+            accessiblePlanningTeamIds.add(ownerTeamId)
+          }
+          if (canWrite) {
+            writableProjectScopeKeys.add(scopeKey)
+            writablePlanningTeamIds.add(ownerTeamId)
+          }
+        }
+      }
+    }
+    for (const teamId of principal.enterpriseAuthorizedTeamIds ?? []) {
+      if (activeTeamIds.has(teamId)) accessiblePlanningTeamIds.add(teamId)
+    }
+    for (const teamAccess of principal.enterpriseTeamAccesses ?? []) {
+      if (
+        activeTeamIds.has(teamAccess.teamId) &&
+        teamAccess.permissions.includes('work-items.write')
+      ) {
+        writablePlanningTeamIds.add(teamAccess.teamId)
+      }
+    }
+    if (principal.enterprisePermissions !== undefined && enterpriseEvaluation) {
+      for (const team of directory.teams) {
+        for (const project of team.projects) {
+          const canWrite = evaluateEnterpriseAccess({
+            permission: 'work-items.write',
+            principal: enterpriseEvaluation.principal,
+            assignments: enterpriseEvaluation.assignments,
+            customRoles: enterpriseEvaluation.snapshot.customRoles,
+            groupMappings: enterpriseEvaluation.groupMappings,
+            resource: {
+              workspaceId: principal.directoryId,
+              kind: 'project',
+              targetId: project.id,
+              parentTeamId: team.id,
+            },
+          }).allowed
+          if (canWrite) {
+            writableProjectScopeKeys.add(`${team.id}\0${project.id}`)
+          }
+        }
+      }
+    }
+  }
   const accessibleTeamIds = principal.isSystemAdmin
     ? activeTeamIds
     : new Set(
@@ -23373,6 +25649,30 @@ async function createNotificationVisibilityFilter(
       )
       .map((team) => team.id),
   )
+  const planningReadableProjectScopeKeys = isEnterpriseContentPrincipal
+    ? enterprisePlanningReadableProjectScopeKeys
+    : accessibleProjectScopeKeys
+  const planningWritableProjectScopeKeys = isEnterpriseContentPrincipal
+    ? enterprisePlanningWritableProjectScopeKeys
+    : writableProjectScopeKeys
+  const planningReadableTeamIds = isEnterpriseContentPrincipal
+    ? enterprisePlanningReadableTeamIds
+    : accessiblePlanningTeamIds
+  const planningWritableTeamIds = isEnterpriseContentPrincipal
+    ? enterprisePlanningWritableTeamIds
+    : writablePlanningTeamIds
+  const workItemReadableProjectScopeKeys = isEnterpriseContentPrincipal
+    ? enterpriseWorkItemReadableProjectScopeKeys
+    : new Set(accessibleProjectScopeKeys)
+  const workItemReadableProjectIds = isEnterpriseContentPrincipal
+    ? enterpriseWorkItemReadableProjectIds
+    : accessibleProjectIds
+  const workItemReadableTeamIds = isEnterpriseContentPrincipal
+    ? enterpriseWorkItemReadableTeamIds
+    : accessibleTeamIds
+  const fullyAccessibleWorkItemTeamIds = isEnterpriseContentPrincipal
+    ? enterpriseFullyAccessibleWorkItemTeamIds
+    : fullyAccessibleTeamIds
   const workItemScopes = new Map<string, Promise<{
     assigneeMemberKey?: string
     exists: boolean
@@ -23411,8 +25711,104 @@ async function createNotificationVisibilityFilter(
     }),
   }
   const documentVisibilities = new Map<string, Promise<boolean>>()
+  const watcherVisibilities = new Map<string, Promise<boolean>>()
+  let planningAuthorizationState: Promise<PlanningAuthorizationState> | undefined
 
   return async (notification: NotificationItem) => {
+    if (requiresCurrentPlanningUpdateTarget(notification)) {
+      planningAuthorizationState ??=
+        workItemDependencies.planning.getAuthorizationState(principal.directoryId)
+      const currentPlanningScope = resolveCurrentPlanningNotificationScope(
+        notification,
+        await planningAuthorizationState,
+        principal.userKey,
+      )
+      if (!currentPlanningScope) return false
+      if (
+        currentPlanningScope.projectId &&
+        (
+          !currentPlanningScope.teamId ||
+          !planningReadableProjectScopeKeys.has(
+            `${currentPlanningScope.teamId}\0${currentPlanningScope.projectId}`,
+          )
+        )
+      ) {
+        return false
+      }
+      if (
+        currentPlanningScope.teamId &&
+        !currentPlanningScope.projectId &&
+        !planningReadableTeamIds.has(currentPlanningScope.teamId)
+      ) {
+        return false
+      }
+      const directScopeVisible = currentPlanningScope.projectId
+        ? (currentPlanningScope.notificationKind === 'escalation'
+            ? planningReadableProjectScopeKeys
+            : planningWritableProjectScopeKeys
+          ).has(
+            `${currentPlanningScope.teamId ?? ''}\0${currentPlanningScope.projectId}`,
+          )
+        : currentPlanningScope.teamId
+          ? (currentPlanningScope.notificationKind === 'escalation'
+              ? planningReadableTeamIds
+              : planningWritableTeamIds
+            ).has(currentPlanningScope.teamId)
+          : isEnterpriseContentPrincipal
+            ? currentPlanningScope.notificationKind === 'escalation'
+              ? enterprisePlanningWorkspaceReadable
+              : enterprisePlanningWorkspaceWritable
+            : principal.workspaceRole !== 'guest'
+      const watcherScopeVisible = currentPlanningScope.projectId
+        ? planningReadableProjectScopeKeys.has(
+            (currentPlanningScope.teamId ?? '') + '\0' + currentPlanningScope.projectId,
+          )
+        : currentPlanningScope.teamId
+          ? planningReadableTeamIds.has(currentPlanningScope.teamId)
+          : isEnterpriseContentPrincipal
+            ? enterprisePlanningWorkspaceReadable
+            : principal.workspaceRole !== 'guest'
+      const directRecipientVisible =
+        currentPlanningScope.currentRecipientMatches &&
+        notification.reasons.includes(currentPlanningScope.notificationKind) &&
+        directScopeVisible
+      const watcherEntityKeys = notification.reasons.includes('watcher')
+        ? [createPlanningUpdateCollaborationEntityKey(
+            principal.directoryId,
+            currentPlanningScope.planningUpdateTargetKey,
+          )]
+        : []
+      let currentWatcherVisible = false
+      for (const entityKey of watcherEntityKeys) {
+        let visibility = watcherVisibilities.get(entityKey)
+        if (!visibility) {
+          visibility = workItemDependencies.collaboration.getWatcherState({
+            entityKey,
+            memberKey: principal.userKey,
+          }).then((watch) => watch.subscribed)
+          watcherVisibilities.set(entityKey, visibility)
+        }
+        if (await visibility) {
+          currentWatcherVisible = true
+          break
+        }
+      }
+      if (
+        (!directScopeVisible && !currentWatcherVisible) ||
+        (currentWatcherVisible && !watcherScopeVisible) ||
+        (!directRecipientVisible && !currentWatcherVisible)
+      ) return false
+      if (currentPlanningScope.teamId) {
+        notification.teamId = currentPlanningScope.teamId
+      } else {
+        delete notification.teamId
+      }
+      if (currentPlanningScope.projectId) {
+        notification.projectId = currentPlanningScope.projectId
+      } else {
+        delete notification.projectId
+      }
+    }
     if (notification.eventType.startsWith('document.')) {
       if (!notification.entityId) return false
       let visibility = documentVisibilities.get(notification.entityId)
@@ -23433,6 +25829,7 @@ async function createNotificationVisibilityFilter(
         documentVisibilities.set(notification.entityId, visibility)
       }
       if (!await visibility) return false
+      return true
     }
     if (notification.teamId && notification.triageEntryId) {
       const scopeKey = `${notification.teamId}\0${notification.triageEntryId}`
@@ -23477,15 +25874,21 @@ async function createNotificationVisibilityFilter(
       }
       if (currentScope.projectId) {
         notification.projectId = currentScope.projectId
+        if (projectTeamIds.get(currentScope.projectId)?.has(notification.teamId) !== true) {
+          return false
+        }
         if (
-          projectTeamIds.get(currentScope.projectId)?.has(notification.teamId) !== true ||
-          !accessibleProjectIds.has(currentScope.projectId)
-        ) {
+          isEnterpriseContentPrincipal &&
+          !workItemReadableProjectScopeKeys.has(
+            `${notification.teamId}\0${currentScope.projectId}`,
+          )
+        ) return false
+        if (!isEnterpriseContentPrincipal && !accessibleProjectIds.has(currentScope.projectId)) {
           return false
         }
       } else {
         delete notification.projectId
-        if (!fullyAccessibleTeamIds.has(notification.teamId)) return false
+        if (!fullyAccessibleWorkItemTeamIds.has(notification.teamId)) return false
       }
     }
     if (notification.teamId && notification.issueId) {
@@ -23525,20 +25928,32 @@ async function createNotificationVisibilityFilter(
       }
       if (currentScope.projectId) {
         notification.projectId = currentScope.projectId
-        return projectTeamIds.get(currentScope.projectId)?.has(notification.teamId) === true &&
-          accessibleProjectIds.has(currentScope.projectId)
+        if (projectTeamIds.get(currentScope.projectId)?.has(notification.teamId) !== true) {
+          return false
+        }
+        return isEnterpriseContentPrincipal
+          ? workItemReadableProjectScopeKeys.has(
+              `${notification.teamId}\0${currentScope.projectId}`,
+            )
+          : accessibleProjectIds.has(currentScope.projectId)
       }
       delete notification.projectId
-      return activeTeamIds.has(notification.teamId) && accessibleTeamIds.has(notification.teamId)
+      return activeTeamIds.has(notification.teamId) && workItemReadableTeamIds.has(notification.teamId)
     }
     if (notification.projectId) {
       const teamIds = projectTeamIds.get(notification.projectId)
       return teamIds !== undefined &&
         (!notification.teamId || teamIds.has(notification.teamId)) &&
-        accessibleProjectIds.has(notification.projectId)
+        (isEnterpriseContentPrincipal
+          ? notification.teamId
+            ? workItemReadableProjectScopeKeys.has(
+                `${notification.teamId}\0${notification.projectId}`,
+              )
+            : workItemReadableProjectIds.has(notification.projectId)
+          : accessibleProjectIds.has(notification.projectId))
     }
     if (notification.teamId) {
-      return activeTeamIds.has(notification.teamId) && accessibleTeamIds.has(notification.teamId)
+      return activeTeamIds.has(notification.teamId) && workItemReadableTeamIds.has(notification.teamId)
     }
     return true
   }
@@ -23773,24 +26188,92 @@ async function getEffectiveProjectScopeAccessList(
         principal.directoryId,
         principal.userKey,
       )
+  const enterpriseAccesses = principal.enterpriseProjectAccesses ?? []
+  const accessDirectory = [...directAccesses, ...enterpriseAccesses].some((access) =>
+    access.teamId === undefined
+  )
+    ? await workspaceDependencies.projectDirectory.getProjectDirectory(
+        principal.directoryId,
+        'ja',
+        true,
+      )
+    : undefined
+  /**
+   * Adds the sole active owner Team to a legacy-unqualified access entry.
+   *
+   * @param access - Direct or enterprise Project access entry.
+   * @returns Team-qualified access when ownership is unique, otherwise the original scope.
+   */
+  const qualifyAccess = (access: ProjectAccessEntry): ProjectAccessEntry => {
+    if (access.teamId || !accessDirectory) return { ...access }
+    const teamId = resolveProjectAccessTeamId(access, accessDirectory)
+    return teamId ? { ...access, teamId } : { ...access }
+  }
+  /**
+   * Retains the strongest role when direct and enterprise access share a scope.
+   *
+   * @param current - Existing access for the scope, when present.
+   * @param incoming - Access entry being merged into the scope.
+   * @returns The access entry with the strongest available role.
+   */
+  const mergeAccess = (
+    current: ProjectAccessEntry | undefined,
+    incoming: ProjectAccessEntry,
+  ): ProjectAccessEntry => {
+    if (!current) return incoming
+    const currentRole = current.role
+    const incomingRole = incoming.role
+    if (
+      incomingRole &&
+      (!currentRole || projectRoleWeights[incomingRole] > projectRoleWeights[currentRole])
+    ) {
+      return { ...current, role: incomingRole }
+    }
+    return current
+  }
+  const enterpriseScopesByProject = new Map<string, ProjectAccessEntry[]>()
+  for (const enterpriseAccessValue of enterpriseAccesses) {
+    if (enterpriseAccessValue.teamId === undefined) continue
+    const projectAccesses = enterpriseScopesByProject.get(enterpriseAccessValue.projectId) ?? []
+    projectAccesses.push(qualifyAccess(enterpriseAccessValue))
+    enterpriseScopesByProject.set(enterpriseAccessValue.projectId, projectAccesses)
+  }
+  const unresolvedLegacyRoleByProject = new Map<string, ProjectRole | undefined>()
   const accessByScope = new Map<string, ProjectAccessEntry>()
   for (const access of directAccesses) {
-    accessByScope.set(`${access.teamId ?? ''}\0${access.projectId}`, { ...access })
-  }
-  for (const enterpriseAccess of principal.enterpriseProjectAccesses ?? []) {
-    const scopeKey = `${enterpriseAccess.teamId ?? ''}\0${enterpriseAccess.projectId}`
-    const directAccess = accessByScope.get(scopeKey)
-    const directRole = directAccess?.role
-    const enterpriseRole = enterpriseAccess.role
+    const qualifiedAccess = qualifyAccess(access)
     if (
-      enterpriseRole &&
-      (
-        !directRole ||
-        projectRoleWeights[enterpriseRole] > projectRoleWeights[directRole]
-      )
+      access.teamId === undefined &&
+      qualifiedAccess.teamId === undefined &&
+      enterpriseScopesByProject.has(access.projectId)
     ) {
-      accessByScope.set(scopeKey, { ...enterpriseAccess, role: enterpriseRole })
+      const currentRole = unresolvedLegacyRoleByProject.get(access.projectId)
+      if (
+        !unresolvedLegacyRoleByProject.has(access.projectId) ||
+        access.role && (!currentRole || projectRoleWeights[access.role] > projectRoleWeights[currentRole])
+      ) {
+        unresolvedLegacyRoleByProject.set(access.projectId, access.role)
+      }
+      continue
     }
+    const scopeKey = `${qualifiedAccess.teamId ?? ''}\0${qualifiedAccess.projectId}`
+    accessByScope.set(scopeKey, mergeAccess(accessByScope.get(scopeKey), qualifiedAccess))
+  }
+  for (const enterpriseAccessValue of enterpriseAccesses) {
+    const enterpriseAccess = qualifyAccess(enterpriseAccessValue)
+    const unresolvedLegacyRole = unresolvedLegacyRoleByProject.get(enterpriseAccess.projectId)
+    const mergedEnterpriseAccess = unresolvedLegacyRoleByProject.has(enterpriseAccess.projectId) &&
+      unresolvedLegacyRole !== undefined
+      ? { ...enterpriseAccess, role: unresolvedLegacyRole && enterpriseAccess.role &&
+          projectRoleWeights[unresolvedLegacyRole] > projectRoleWeights[enterpriseAccess.role]
+          ? unresolvedLegacyRole
+          : enterpriseAccess.role ?? unresolvedLegacyRole }
+      : enterpriseAccess
+    const scopeKey = `${mergedEnterpriseAccess.teamId ?? ''}\0${mergedEnterpriseAccess.projectId}`
+    accessByScope.set(
+      scopeKey,
+      mergeAccess(accessByScope.get(scopeKey), mergedEnterpriseAccess),
+    )
   }
   return [...accessByScope.values()]
 }
@@ -23866,6 +26349,31 @@ function resolveProjectAccessTeamId(
 }
 
 /**
+ * Reads legacy Project ACLs and qualifies every entry against the current directory.
+ *
+ * @param principal - Principal whose legacy ACLs should be loaded.
+ * @returns Only active, unambiguous Team-qualified Project access entries.
+ */
+async function readLegacyProjectScopeAccesses(
+  principal: Pick<ProjectPrincipal, 'directoryId' | 'userKey'>,
+): Promise<ProjectAccessEntry[]> {
+  const accesses = await workspaceDependencies.projectDirectory.getProjectAccessList(
+    principal.directoryId,
+    principal.userKey,
+  )
+  if (accesses.length === 0) return []
+  const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(
+    principal.directoryId,
+    'ja',
+    true,
+  )
+  return accesses.flatMap((access) => {
+    const teamId = resolveProjectAccessTeamId(access, directory)
+    return teamId ? [{ ...access, teamId }] : []
+  })
+}
+
+/**
  * Reads effective legacy Project roles collapsed by bare Project ID.
  *
  * @param principal - Authenticated principal whose direct and enterprise access is merged.
@@ -23936,6 +26444,7 @@ async function requireTeamPermission(
       team,
       directory,
       projectAccesses: team.projects.map((project) => ({
+        teamId,
         projectId: project.id,
         role,
       })),
@@ -23943,7 +26452,7 @@ async function requireTeamPermission(
   }
 
   const teamProjectIds = new Set(team.projects.map((project) => project.id))
-  const projectAccesses = (await getEffectiveProjectAccessList(principal))
+  const projectAccesses = (await getEffectiveProjectScopeAccessList(principal))
     .filter((projectAccess) => teamProjectIds.has(projectAccess.projectId))
 
   for (const projectAccess of projectAccesses) {
@@ -28469,23 +30978,36 @@ async function reauthorizeFocusItem(
   return authorized
 }
 
+/** Optional Team/Project envelope used to bound a canonical Work Item read. */
+type PlanningWorkItemReadScope = {
+  /** Team whose Work Item partition should be read. */
+  teamId?: string
+  /** Project whose assigned Work Items should be retained. */
+  projectId?: string
+}
+
 async function readAccessibleWorkItems(
   principal: ProjectPrincipal,
   includeArchived = false,
+  scope?: PlanningWorkItemReadScope,
 ): Promise<WorkItemsResponse> {
   const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(principal.directoryId, 'ja')
   const projectAccesses = principal.isSystemAdmin
     ? undefined
     : await getEffectiveProjectAccessList(principal)
   const authorizedTeamIds = new Set(principal.enterpriseAuthorizedTeamIds ?? [])
-  const contexts: TeamPermissionContext[] = directory.teams.flatMap((team) => {
+  const selectedTeams = scope?.teamId === undefined
+    ? directory.teams
+    : directory.teams.filter((team) => team.id === scope.teamId)
+  const contexts: TeamPermissionContext[] = selectedTeams.flatMap((team) => {
     if (principal.isSystemAdmin) {
       return [{ team, directory } satisfies TeamPermissionContext]
     }
 
     const teamProjectIds = new Set(team.projects.map((project) => project.id))
     const teamProjectAccesses = (projectAccesses ?? []).filter((access) =>
-      teamProjectIds.has(access.projectId)
+      teamProjectIds.has(access.projectId) &&
+      (scope?.projectId === undefined || access.projectId === scope.projectId)
     )
     if (
       !authorizedTeamIds.has(team.id) &&
@@ -28512,6 +31034,9 @@ async function readAccessibleWorkItems(
       includeArchived,
     )
     for (const workItem of response.issues) {
+      if (scope?.projectId !== undefined && workItem.assignedProjectId !== scope.projectId) {
+        continue
+      }
       addAggregateWorkItem(workItemsById, workItem)
     }
   }
@@ -28741,8 +31266,9 @@ function assertAnalyticsPartitionSize(
 
 async function readPlanningWorkItemState(
   principal: ProjectPrincipal,
+  scope?: PlanningWorkItemReadScope,
 ): Promise<PlanningWorkItemState> {
-  const response = await readAccessibleWorkItems(principal)
+  const response = await readAccessibleWorkItems(principal, false, scope)
   return {
     workItems: response.workItems.map((workItem) => ({
       id: workItem.id,
@@ -28757,6 +31283,183 @@ async function readPlanningWorkItemState(
       schedule: workItem.schedule,
     } satisfies PlanningWorkItemSummary)),
   }
+}
+
+/**
+ * Reads the complete canonical Work Item projection used for an immutable Planning publish.
+ *
+ * The caller's visible projection is sufficient for route authorization, but it is not a
+ * canonical source for Workspace-scoped initiative progress. This internal service-authoritative
+ * read keeps hidden Work Items out of the public response while making the captured context
+ * independent of the publisher's project ACL.
+ *
+ * @param principal - Authenticated Workspace principal whose directory is being read.
+ * @param scope - Optional target envelope. Workspace-scoped targets omit this value.
+ * @returns Complete Work Item summaries bounded by the aggregate read limits.
+ */
+async function readCanonicalPlanningWorkItemState(
+  principal: ProjectPrincipal,
+  scope?: PlanningWorkItemReadScope,
+): Promise<PlanningWorkItemState> {
+  const directory = await workspaceDependencies.projectDirectory.getProjectDirectory(
+    principal.directoryId,
+    'ja',
+    true,
+  )
+  if (scope?.projectId !== undefined && scope.teamId === undefined) {
+    throw new PlanningError(
+      409,
+      'PlanningUpdateScopeInvalid',
+      'A Project-scoped Planning update requires its owning Team scope.',
+    )
+  }
+  const selectedTeams = scope?.teamId === undefined
+    ? directory.teams
+    : directory.teams.filter((team) => team.id === scope.teamId)
+  if (scope?.teamId === undefined && selectedTeams.length > WORK_ITEMS_TEAM_READ_LIMIT) {
+    throw createWorkItemListLimitExceededError(
+      `Workspace has more than ${WORK_ITEMS_TEAM_READ_LIMIT} Teams for a Planning publish.`,
+    )
+  }
+  const servicePrincipal = { ...principal, isSystemAdmin: true }
+  const workItemsByKey = new Map<string, TeamIssueResponseItem>()
+  for (const team of selectedTeams) {
+    const response = await readCanonicalTeamIssuesForAggregate(
+      principal.directoryId,
+      { team, directory } satisfies TeamPermissionContext,
+      servicePrincipal,
+    )
+    for (const workItem of response.issues) {
+      if (scope?.projectId !== undefined && workItem.assignedProjectId !== scope.projectId) {
+        continue
+      }
+      workItemsByKey.set(`${workItem.teamId}\0${workItem.id}`, workItem)
+      if (workItemsByKey.size > PLANNING_CANONICAL_WORK_ITEM_LIMIT) {
+        throw createWorkItemListLimitExceededError(
+          `Planning publish spans more than ${PLANNING_CANONICAL_WORK_ITEM_LIMIT} Work Items.`,
+        )
+      }
+    }
+  }
+  return {
+    workItems: [...workItemsByKey.values()].map((workItem) => ({
+      id: workItem.id,
+      revision: workItem.revision,
+      teamId: workItem.teamId,
+      title: workItem.title,
+      ...(workItem.assignedProjectId
+        ? { projectId: workItem.assignedProjectId }
+        : {}),
+      statusCategory: workItem.statusCategory,
+      dueDate: workItem.dueDate,
+      schedule: workItem.schedule,
+    } satisfies PlanningWorkItemSummary)),
+  }
+}
+
+/** Planning publish reads that share the target envelope resolved from the current snapshot. */
+type PlanningPublishReadState = {
+  /** Current principal-visible Planning Work Item state. */
+  workItemState: PlanningWorkItemState
+  /** Current unfiltered Planning snapshot used for route authorization. */
+  snapshot: PlanningSnapshot
+  /** Target envelope used to bound canonical Work Item reads. */
+  targetScope?: PlanningWorkItemReadScope
+}
+
+/**
+ * Resolves the canonical Work Item envelope for a Project or Initiative target.
+ *
+ * @param snapshot - Planning snapshot containing the current target entity.
+ * @param target - Validated Project or Initiative target.
+ * @returns Team/Project envelope, or undefined for a Workspace-scoped Initiative.
+ */
+function resolvePlanningPublishTargetScope(
+  snapshot: PlanningSnapshot,
+  target: PlanningUpdateTarget,
+): PlanningWorkItemReadScope | undefined {
+  if (target.type === 'project') {
+    return { teamId: target.teamId, projectId: target.projectId }
+  }
+
+  const entity = snapshot.entities.find((candidate) =>
+    candidate.id === target.entityId && candidate.type === 'initiative'
+  )
+  if (!entity) {
+    throw new PlanningError(
+      404,
+      'PlanningUpdateTargetNotFound',
+      'Planning Initiative update target was not found.',
+    )
+  }
+  if (entity.projectId !== undefined && entity.teamId === undefined) {
+    throw new PlanningError(
+      409,
+      'PlanningUpdateScopeInvalid',
+      'A Project-scoped Planning Initiative requires its owning Team scope.',
+    )
+  }
+  if (entity.teamId === undefined && entity.projectId === undefined) return undefined
+  return {
+    ...(entity.teamId === undefined ? {} : { teamId: entity.teamId }),
+    ...(entity.projectId === undefined ? {} : { projectId: entity.projectId }),
+  }
+}
+
+/**
+ * Compares two optional Planning publish envelopes without conflating workspace scope.
+ *
+ * @param first - First optional Team/Project envelope.
+ * @param second - Second optional Team/Project envelope.
+ * @returns Whether both envelopes describe the same scope.
+ */
+function planningPublishScopesEqual(
+  first: PlanningWorkItemReadScope | undefined,
+  second: PlanningWorkItemReadScope | undefined,
+): boolean {
+  return first?.teamId === second?.teamId && first?.projectId === second?.projectId
+}
+
+/**
+ * Resolves the target envelope before reading Work Items for a Planning publish.
+ *
+ * Initiative scope is stored in the Planning graph, so an empty Work Item projection is used
+ * only to resolve that envelope before the bounded canonical read.
+ *
+ * @param principal - Authenticated Workspace principal.
+ * @param target - Validated Project or Initiative publish target.
+ * @returns Planning snapshot and Work Item state read within the target envelope.
+ */
+async function readPlanningPublishState(
+  principal: ProjectPrincipal,
+  target: PlanningUpdateTarget,
+): Promise<PlanningPublishReadState> {
+  let targetScope: PlanningWorkItemReadScope | undefined
+  if (target.type === 'project') {
+    targetScope = { teamId: target.teamId, projectId: target.projectId }
+  } else {
+    const preliminarySnapshot = await workItemDependencies.planning.get(
+      principal.directoryId,
+      { workItems: [] },
+    )
+    targetScope = resolvePlanningPublishTargetScope(preliminarySnapshot, target)
+  }
+
+  let workItemState = await readPlanningWorkItemState(principal, targetScope)
+  let snapshot = await workItemDependencies.planning.get(
+    principal.directoryId,
+    workItemState,
+  )
+  const currentTargetScope = resolvePlanningPublishTargetScope(snapshot, target)
+  if (!planningPublishScopesEqual(targetScope, currentTargetScope)) {
+    targetScope = currentTargetScope
+    workItemState = await readPlanningWorkItemState(principal, targetScope)
+    snapshot = await workItemDependencies.planning.get(
+      principal.directoryId,
+      workItemState,
+    )
+  }
+  return { workItemState, snapshot, targetScope }
 }
 
 /**
@@ -29417,6 +32120,999 @@ async function releasePlanningWorkItemDependencyReservation(
     .catch(() => undefined)
 }
 
+/** Stable operation stored in one Planning update annotation mutation receipt. */
+type PlanningUpdateAnnotationReceiptOperation =
+  | 'comment-create'
+  | 'reaction-add'
+  | 'reaction-remove'
+
+/** Canonical request identity retained by a durable Planning publish receipt. */
+type PlanningUpdatePublishReceiptExpectation = {
+  /** Project or Initiative that owns the immutable update. */
+  target: PlanningUpdateTarget
+  /** Client-generated target-local update ID. */
+  id: string
+  /** Authenticated member key that published the update. */
+  authorMemberKey: string
+  /** Exact request body bound to the idempotency fingerprint. */
+  request: PublishPlanningUpdateInput
+}
+
+/** Canonical request identity retained by a durable Planning cadence receipt. */
+type PlanningUpdateCadenceReceiptExpectation = {
+  /** Project or Initiative whose recurring cadence changes. */
+  target: PlanningUpdateTarget
+  /** Exact request body bound to the idempotency fingerprint. */
+  request: ConfigurePlanningUpdateCadenceInput
+}
+
+/** Stable schema discriminator for Planning publish receipts. */
+const PLANNING_UPDATE_PUBLISH_RECEIPT_SCHEMA = 'planning-update-publish'
+
+/** Current Planning publish receipt version. */
+const PLANNING_UPDATE_PUBLISH_RECEIPT_VERSION = 1
+
+/** Stable schema discriminator for Planning cadence receipts. */
+const PLANNING_UPDATE_CADENCE_RECEIPT_SCHEMA = 'planning-update-cadence'
+
+/** Current Planning cadence receipt version. */
+const PLANNING_UPDATE_CADENCE_RECEIPT_VERSION = 1
+
+/** Target and actor fields shared by every Planning update annotation receipt. */
+type PlanningUpdateAnnotationReceiptBase = {
+  /** Receipt operation discriminator. */
+  operation: PlanningUpdateAnnotationReceiptOperation
+  /** Project or Initiative that owns the immutable update. */
+  target: PlanningUpdateTarget
+  /** Target-local immutable update version. */
+  updateVersion: number
+  /** Authenticated Workspace member performing the mutation. */
+  memberKey: string
+}
+
+/** Canonical request identity bound to one Planning update annotation receipt. */
+type PlanningUpdateAnnotationReceiptExpectation = PlanningUpdateAnnotationReceiptBase & (
+  | {
+      /** Append-only comment operation. */
+      operation: 'comment-create'
+      /** Client-generated comment identifier. */
+      id: string
+      /** Normalized comment body. */
+      body: string
+    }
+  | {
+      /** Current-member reaction operation. */
+      operation: 'reaction-add' | 'reaction-remove'
+      /** Normalized reaction token. */
+      emoji: string
+    }
+)
+
+/** Strictly decoded successful Planning update annotation replay. */
+type PlanningUpdateAnnotationReplay =
+  | {
+      /** Append-only comment operation. */
+      operation: 'comment-create'
+      /** Original successful response status. */
+      status: 201
+      /** Original comment response envelope. */
+      body: { comment: PlanningUpdateComment }
+    }
+  | {
+      /** Current-member reaction addition. */
+      operation: 'reaction-add'
+      /** Original successful response status. */
+      status: 201
+      /** Original reaction response envelope. */
+      body: { reaction: PlanningUpdateReaction }
+    }
+  | {
+      /** Current-member reaction removal. */
+      operation: 'reaction-remove'
+      /** Original successful response status. */
+      status: 204
+      /** No-content response body. */
+      body: null
+    }
+
+/** Stable schema discriminator for Planning update annotation receipts. */
+const PLANNING_UPDATE_ANNOTATION_RECEIPT_SCHEMA = 'planning-update-annotation-mutation'
+
+/** Current Planning update annotation receipt version. */
+const PLANNING_UPDATE_ANNOTATION_RECEIPT_VERSION = 1
+
+/**
+ * Validates the caller-provided idempotency key required by annotation mutations.
+ *
+ * @param value - Raw `Idempotency-Key` header value.
+ * @returns A bounded key safe for the durable reservation port.
+ */
+function readRequiredPlanningUpdateAnnotationIdempotencyKey(
+  value: string | undefined,
+): string {
+  const key = value?.trim() ?? ''
+  const hasControlCharacter = [...key].some((character) => {
+    const codePoint = character.codePointAt(0)
+    return codePoint !== undefined && (codePoint <= 31 || codePoint === 127)
+  })
+  if (!key || key.length > 256 || hasControlCharacter) {
+    throw new PlanningError(
+      400,
+      'InvalidPlanningUpdateAnnotationIdempotencyKey',
+      'Idempotency-Key must contain 1 to 256 characters without control characters.',
+    )
+  }
+  return key
+}
+
+/**
+ * Creates a user-scoped durable reservation for one annotation request.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @param idempotencyKey - Validated caller key.
+ * @param method - Canonical HTTP method.
+ * @param path - Canonical annotation path without query aliases.
+ * @param body - Normalized request identity including its qualified target.
+ * @returns Developer Platform reservation request bound to method, path, and body.
+ */
+function createPlanningUpdateAnnotationReservationRequest(
+  principal: WorkspacePrincipal,
+  idempotencyKey: string,
+  method: string,
+  path: string,
+  body: PlanningUpdateAnnotationReceiptExpectation,
+): ReserveIdempotencyRequest {
+  return {
+    workspaceId: createWorkItemScheduleIdempotencyWorkspaceId(principal.directoryId),
+    credentialId: createWorkItemScheduleIdempotencyUserId(
+      principal.directoryId,
+      principal.actorId,
+    ),
+    idempotencyKey,
+    requestFingerprint: createHash('sha256')
+      .update(`${method.toUpperCase()}\n${path}\n${stableDigestStringify(body)}`)
+      .digest('hex'),
+  }
+}
+
+/**
+ * Reserves one Planning update annotation mutation.
+ *
+ * @param request - User-scoped request identity.
+ * @returns Reservation, in-progress, or completed replay decision.
+ */
+async function reservePlanningUpdateAnnotationMutation(request: ReserveIdempotencyRequest) {
+  try {
+    return await developerPlatformDependencies.idempotency.reserveIdempotency(request)
+  } catch (error) {
+    if (error instanceof DeveloperPlatformError && error.code === 'IdempotencyKeyConflict') {
+      throw new PlanningError(
+        409,
+        'PlanningUpdateAnnotationIdempotencyConflict',
+        'Idempotency-Key was already used for a different Planning update annotation mutation.',
+      )
+    }
+    throw planningUpdateAnnotationIdempotencyUnavailable()
+  }
+}
+
+/** Creates the stable failure returned when annotation receipt persistence is unavailable. */
+function planningUpdateAnnotationIdempotencyUnavailable(): PlanningError {
+  return new PlanningError(
+    503,
+    'PlanningUpdateAnnotationIdempotencyUnavailable',
+    'Planning update annotation idempotency is unavailable.',
+  )
+}
+
+/**
+ * Releases an uncommitted annotation reservation without masking the original route error.
+ *
+ * @param request - Caller-owned incomplete reservation.
+ */
+async function releasePlanningUpdateAnnotationReservation(
+  request: ReleaseIdempotencyRequest,
+): Promise<void> {
+  await developerPlatformDependencies.idempotency
+    .releaseIdempotency(request)
+    .catch(() => undefined)
+}
+
+/** Query and path values shared by Planning update annotation mutations. */
+type PlanningUpdateAnnotationMutationInput = {
+  /** Requested target discriminator. */
+  targetType: string | undefined
+  /** Qualified Project Team identifier, when applicable. */
+  teamId: string | undefined
+  /** Qualified Project identifier, when applicable. */
+  projectId: string | undefined
+  /** Initiative identifier, when applicable. */
+  entityId: string | undefined
+  /** Raw immutable update version path parameter. */
+  updateVersion: string
+  /** Canonical route path used for the idempotency fingerprint. */
+  path: string
+}
+
+/** Callbacks that retain the operation-specific part of an annotation mutation. */
+type PlanningUpdateAnnotationMutationCallbacks<Result> = {
+  /** Builds the receipt identity after target and version validation. */
+  createExpectation: (
+    target: PlanningUpdateTarget,
+    updateVersion: number,
+  ) => PlanningUpdateAnnotationReceiptExpectation
+  /** Executes the domain mutation with its durable receipt transaction. */
+  mutate: (input: {
+    target: PlanningUpdateTarget
+    updateVersion: number
+    transaction: PlanningMutationTransaction<PlanningUpdateAnnotationTransactionResult>
+    authorizationConditionChecks: readonly PlanningCallerAuthorizationConditionCheck[]
+  }) => Promise<Result>
+  /** Creates the response for a completed durable mutation. */
+  success: (context: Context, result: Result) => Response
+  /** Creates the response for a durable replay. */
+  replay: (context: Context, replay: PlanningUpdateAnnotationReplay) => Response
+}
+
+/**
+ * Executes the shared authorization and idempotency flow for one annotation mutation.
+ *
+ * Target/version parsing, captured-scope authorization, durable reservation, replay, and
+ * failed-mutation cleanup intentionally live here so comment and reaction routes cannot drift.
+ *
+ * @param context - Hono request context used to create the response and replay header.
+ * @param principal - Authenticated Workspace principal.
+ * @param snapshot - Current Planning snapshot used for target authorization.
+ * @param input - Raw target/version/path values from the route.
+ * @param callbacks - Operation-specific receipt, domain, and response callbacks.
+ * @returns The operation-specific HTTP response.
+ */
+async function executePlanningUpdateAnnotationMutation<Result>(
+  context: Context,
+  principal: WorkspacePrincipal,
+  snapshot: PlanningSnapshot,
+  input: PlanningUpdateAnnotationMutationInput,
+  callbacks: PlanningUpdateAnnotationMutationCallbacks<Result>,
+): Promise<Response> {
+  let reservationToRelease: ReleaseIdempotencyRequest | undefined
+  let mutationCommitted = false
+  try {
+    requireWorkspaceBusinessWrite(principal)
+    const idempotencyKey = readRequiredPlanningUpdateAnnotationIdempotencyKey(
+      context.req.header('Idempotency-Key'),
+    )
+    const target = readPlanningUpdateTargetQuery(
+      input.targetType,
+      input.teamId,
+      input.projectId,
+      input.entityId,
+    )
+    const updateVersion = readPlanningUpdateVersion(input.updateVersion)
+    await requirePlanningUpdateTargetPermission(
+      principal,
+      filterPlanningSnapshotForPrincipal(principal, snapshot),
+      target,
+      'member',
+    )
+    await requirePlanningUpdateVersionCapturedScopePermission(
+      principal.directoryId,
+      principal,
+      target,
+      updateVersion,
+    )
+    const receiptExpectation = callbacks.createExpectation(target, updateVersion)
+    const reservationRequest = createPlanningUpdateAnnotationReservationRequest(
+      principal,
+      idempotencyKey,
+      context.req.method,
+      input.path,
+      receiptExpectation,
+    )
+    const reservation = await reservePlanningUpdateAnnotationMutation(reservationRequest)
+    if (reservation.status === 'in-progress') {
+      throw new PlanningError(
+        409,
+        'PlanningUpdateAnnotationIdempotencyInProgress',
+        'The same Planning update annotation mutation is still in progress.',
+      )
+    }
+    if (reservation.status === 'replay') {
+      const replay = readStoredPlanningUpdateAnnotationMutationReceipt(
+        reservation.response,
+        reservationRequest.workspaceId,
+        receiptExpectation,
+      )
+      return callbacks.replay(context, replay)
+    }
+    reservationToRelease = { ...reservationRequest, reservationId: reservation.reservationId }
+    const transaction = createPlanningUpdateAnnotationIdempotencyTransaction(
+      reservationRequest.workspaceId,
+      {
+        credentialId: reservationRequest.credentialId,
+        idempotencyKey,
+        requestFingerprint: reservationRequest.requestFingerprint,
+        reservationId: reservation.reservationId,
+      },
+      receiptExpectation,
+    )
+    if (!transaction) throw planningUpdateAnnotationIdempotencyUnavailable()
+    const result = await callbacks.mutate({
+      target,
+      updateVersion,
+      transaction,
+      authorizationConditionChecks: [
+        ...createPlanningCallerAuthorizationConditionChecks(principal),
+        createPlanningRevisionConditionCheck(principal.directoryId, snapshot.revision),
+      ],
+    })
+    mutationCommitted = true
+    return callbacks.success(context, result)
+  } catch (error) {
+    if (reservationToRelease && !mutationCommitted) {
+      await releasePlanningUpdateAnnotationReservation(reservationToRelease)
+    }
+    throw error
+  }
+}
+
+/** Validates the required idempotency key for one Planning cadence mutation. */
+function readRequiredPlanningUpdateCadenceIdempotencyKey(value: string): string {
+  const key = value.trim()
+  const hasControlCharacter = [...key].some((character) => {
+    const codePoint = character.codePointAt(0)
+    return codePoint !== undefined && (codePoint <= 31 || codePoint === 127)
+  })
+  if (!key || key.length > 256 || hasControlCharacter) {
+    throw new PlanningError(
+      400,
+      'InvalidPlanningUpdateCadenceIdempotencyKey',
+      'Idempotency-Key must contain 1 to 256 characters without control characters.',
+    )
+  }
+  return key
+}
+
+/** Creates the user-scoped reservation identity for one cadence mutation. */
+function createPlanningUpdateCadenceReservationRequest(
+  principal: WorkspacePrincipal,
+  idempotencyKey: string,
+  method: string,
+  path: string,
+  expectation: PlanningUpdateCadenceReceiptExpectation,
+): ReserveIdempotencyRequest {
+  return {
+    workspaceId: createWorkItemScheduleIdempotencyWorkspaceId(principal.directoryId),
+    credentialId: createWorkItemScheduleIdempotencyUserId(
+      principal.directoryId,
+      principal.actorId,
+    ),
+    idempotencyKey,
+    requestFingerprint: createHash('sha256')
+      .update(`${method.toUpperCase()}\n${path}\n${stableDigestStringify(expectation.request)}`)
+      .digest('hex'),
+  }
+}
+
+/** Reserves one Planning cadence mutation and maps storage failures to a stable API error. */
+async function reservePlanningUpdateCadenceMutation(request: ReserveIdempotencyRequest) {
+  try {
+    return await developerPlatformDependencies.idempotency.reserveIdempotency(request)
+  } catch (error) {
+    if (error instanceof DeveloperPlatformError && error.code === 'IdempotencyKeyConflict') {
+      throw new PlanningError(
+        409,
+        'PlanningUpdateCadenceIdempotencyConflict',
+        'Idempotency-Key was already used for a different Planning update cadence mutation.',
+      )
+    }
+    throw planningUpdateCadenceIdempotencyUnavailable()
+  }
+}
+
+/** Creates the stable failure returned when cadence receipt persistence is unavailable. */
+function planningUpdateCadenceIdempotencyUnavailable(): PlanningError {
+  return new PlanningError(
+    503,
+    'PlanningUpdateCadenceIdempotencyUnavailable',
+    'Planning update cadence idempotency is unavailable.',
+  )
+}
+
+/** Releases an uncommitted Planning cadence reservation without masking the route error. */
+async function releasePlanningUpdateCadenceReservation(
+  request: ReleaseIdempotencyRequest,
+): Promise<void> {
+  await developerPlatformDependencies.idempotency.releaseIdempotency(request).catch(() => undefined)
+}
+
+/** Creates a durable cadence receipt contribution for the Planning transaction. */
+function createPlanningUpdateCadenceIdempotencyTransaction(
+  workspaceId: string,
+  token: IdempotencyMutationToken,
+  expectation: PlanningUpdateCadenceReceiptExpectation,
+): PlanningMutationTransaction<PlanningUpdateCadenceTransactionResult> | undefined {
+  const prepare = developerPlatformDependencies.transactions
+    .prepareIdempotencyCompletionTransactWrite
+  if (!prepare) return undefined
+  return {
+    async prepare(result) {
+      return prepare.call(developerPlatformDependencies.transactions, {
+        workspaceId,
+        credentialId: token.credentialId,
+        idempotencyKey: token.idempotencyKey,
+        requestFingerprint: token.requestFingerprint,
+        reservationId: token.reservationId,
+        response: createPlanningUpdateCadenceReceiptResponse(workspaceId, expectation, result),
+      })
+    },
+  }
+}
+
+/** Creates the compact durable payload used to replay a cadence mutation. */
+function createPlanningUpdateCadenceReceiptResponse(
+  workspaceId: string,
+  expectation: PlanningUpdateCadenceReceiptExpectation,
+  result: PlanningUpdateCadenceTransactionResult,
+) {
+  if (
+    result.kind !== 'cadence' ||
+    !planningUpdateTargetsEqual(result.updateTarget.target, expectation.target)
+  ) {
+    throw planningUpdateCadenceIdempotencyUnavailable()
+  }
+  return {
+    status: 200 as const,
+    body: {
+      schema: PLANNING_UPDATE_CADENCE_RECEIPT_SCHEMA,
+      version: PLANNING_UPDATE_CADENCE_RECEIPT_VERSION,
+      workspaceId,
+      status: 200,
+      payload: {
+        target: structuredClone(result.updateTarget.target),
+        revision: result.revision,
+        updateTarget: structuredClone(result.updateTarget),
+      },
+    },
+  }
+}
+
+/** Decoded identity stored in a successful Planning cadence receipt. */
+type PlanningUpdateCadenceReplay = {
+  /** Project or Initiative target. */
+  target: PlanningUpdateTarget
+  /** Planning revision committed by the cadence mutation. */
+  revision: number
+  /** Target summary committed by the cadence mutation. */
+  updateTarget: PlanningUpdateTargetSummary
+}
+
+/** Strictly decodes one completed Planning cadence receipt. */
+function readStoredPlanningUpdateCadenceMutationReceipt(
+  value: unknown,
+  workspaceId: string,
+  expectation: PlanningUpdateCadenceReceiptExpectation,
+): PlanningUpdateCadenceReplay {
+  if (!isRecord(value) || value.status !== 200 || !isRecord(value.body)) {
+    throw planningUpdateCadenceIdempotencyUnavailable()
+  }
+  const receipt = value.body
+  const payload = isRecord(receipt.payload) ? receipt.payload : undefined
+  if (
+    receipt.schema !== PLANNING_UPDATE_CADENCE_RECEIPT_SCHEMA ||
+    receipt.version !== PLANNING_UPDATE_CADENCE_RECEIPT_VERSION ||
+    receipt.workspaceId !== workspaceId ||
+    receipt.status !== 200 ||
+    !payload ||
+    typeof payload.revision !== 'number' ||
+    !Number.isSafeInteger(payload.revision) ||
+    payload.revision < 1 ||
+    !isPlanningUpdateTargetSummary(payload.updateTarget) ||
+    !isPlanningUpdateTarget(payload.target) ||
+    stableDigestStringify(payload.target) !== stableDigestStringify(expectation.target) ||
+    stableDigestStringify(payload.updateTarget.target) !== stableDigestStringify(expectation.target) ||
+    stableDigestStringify({ status: 200, body: receipt }) !== stableDigestStringify(value)
+  ) {
+    throw planningUpdateCadenceIdempotencyUnavailable()
+  }
+  return {
+    target: structuredClone(expectation.target),
+    revision: payload.revision,
+    updateTarget: structuredClone(payload.updateTarget),
+  }
+}
+
+/** Checks the persisted shape of one Planning update target. */
+function isPlanningUpdateTarget(value: unknown): value is PlanningUpdateTarget {
+  if (!isRecord(value) || typeof value.type !== 'string') return false
+  if (value.type === 'initiative') return typeof value.entityId === 'string'
+  return value.type === 'project' &&
+    typeof value.teamId === 'string' &&
+    typeof value.projectId === 'string'
+}
+
+/** Checks the persisted shape of one Planning cadence. */
+function isPlanningUpdateCadence(value: unknown): value is PlanningUpdateCadence {
+  if (!isRecord(value) || typeof value.updateOwnerMemberKey !== 'string' ||
+    typeof value.timeZone !== 'string' || typeof value.nextDueAt !== 'string' ||
+    typeof value.reminderHoursBefore !== 'number' ||
+    !Number.isSafeInteger(value.reminderHoursBefore) || value.reminderHoursBefore < 0 ||
+    !isRecord(value.cadence) ||
+    (value.cadence.unit !== 'week' && value.cadence.unit !== 'month') ||
+    typeof value.cadence.count !== 'number' ||
+    !Number.isSafeInteger(value.cadence.count) || value.cadence.count < 1) {
+    return false
+  }
+  return (value.escalationHoursAfter === undefined ||
+      (typeof value.escalationHoursAfter === 'number' &&
+        Number.isSafeInteger(value.escalationHoursAfter) &&
+        value.escalationHoursAfter >= 0)) &&
+    (value.escalationMemberKey === undefined || typeof value.escalationMemberKey === 'string')
+}
+
+/** Checks the persisted shape of one Planning update target summary. */
+function isPlanningUpdateTargetSummary(value: unknown): value is PlanningUpdateTargetSummary {
+  if (!isRecord(value) || !isPlanningUpdateTarget(value.target) ||
+    (value.cadence !== undefined && !isPlanningUpdateCadence(value.cadence)) ||
+    typeof value.latestVersion !== 'number' ||
+    !Number.isSafeInteger(value.latestVersion) || value.latestVersion < 0 ||
+    (value.updateState !== 'not-configured' && value.updateState !== 'missing' &&
+      value.updateState !== 'current' && value.updateState !== 'overdue' &&
+      value.updateState !== 'stale') ||
+    typeof value.updatedAt !== 'string') {
+    return false
+  }
+  return true
+}
+
+/** Validates the optional publish idempotency key when one is supplied. */
+function readRequiredPlanningUpdatePublishIdempotencyKey(value: string): string {
+  const key = value.trim()
+  const hasControlCharacter = [...key].some((character) => {
+    const codePoint = character.codePointAt(0)
+    return codePoint !== undefined && (codePoint <= 31 || codePoint === 127)
+  })
+  if (!key || key.length > 256 || hasControlCharacter) {
+    throw new PlanningError(
+      400,
+      'InvalidPlanningUpdatePublishIdempotencyKey',
+      'Idempotency-Key must contain 1 to 256 characters without control characters.',
+    )
+  }
+  return key
+}
+
+/** Creates the user-scoped reservation identity for one publish request. */
+function createPlanningUpdatePublishReservationRequest(
+  principal: WorkspacePrincipal,
+  idempotencyKey: string,
+  method: string,
+  path: string,
+  expectation: PlanningUpdatePublishReceiptExpectation,
+): ReserveIdempotencyRequest {
+  return {
+    workspaceId: createWorkItemScheduleIdempotencyWorkspaceId(principal.directoryId),
+    credentialId: createWorkItemScheduleIdempotencyUserId(
+      principal.directoryId,
+      principal.actorId,
+    ),
+    idempotencyKey,
+    requestFingerprint: createHash('sha256')
+      .update(`${method.toUpperCase()}\n${path}\n${stableDigestStringify(expectation.request)}`)
+      .digest('hex'),
+  }
+}
+
+/** Reserves one Planning publish and maps storage failures to its stable error. */
+async function reservePlanningUpdatePublishMutation(request: ReserveIdempotencyRequest) {
+  try {
+    return await developerPlatformDependencies.idempotency.reserveIdempotency(request)
+  } catch (error) {
+    if (error instanceof DeveloperPlatformError && error.code === 'IdempotencyKeyConflict') {
+      throw new PlanningError(
+        409,
+        'PlanningUpdatePublishIdempotencyConflict',
+        'Idempotency-Key was already used for a different Planning update publish.',
+      )
+    }
+    throw planningUpdatePublishIdempotencyUnavailable()
+  }
+}
+
+/** Creates the stable failure returned when publish receipt persistence is unavailable. */
+function planningUpdatePublishIdempotencyUnavailable(): PlanningError {
+  return new PlanningError(
+    503,
+    'PlanningUpdatePublishIdempotencyUnavailable',
+    'Planning update publish idempotency is unavailable.',
+  )
+}
+
+/** Releases an uncommitted Planning publish reservation without masking the original error. */
+async function releasePlanningUpdatePublishReservation(
+  request: ReleaseIdempotencyRequest,
+): Promise<void> {
+  await developerPlatformDependencies.idempotency.releaseIdempotency(request).catch(() => undefined)
+}
+
+/** Creates a durable publish receipt contribution for the Planning transaction. */
+function createPlanningUpdatePublishIdempotencyTransaction(
+  workspaceId: string,
+  token: IdempotencyMutationToken,
+  expectation: PlanningUpdatePublishReceiptExpectation,
+): PlanningMutationTransaction<PlanningUpdatePublishTransactionResult> | undefined {
+  const prepare = developerPlatformDependencies.transactions
+    .prepareIdempotencyCompletionTransactWrite
+  if (!prepare) return undefined
+  return {
+    async prepare(result) {
+      return prepare.call(developerPlatformDependencies.transactions, {
+        workspaceId,
+        credentialId: token.credentialId,
+        idempotencyKey: token.idempotencyKey,
+        requestFingerprint: token.requestFingerprint,
+        reservationId: token.reservationId,
+        response: createPlanningUpdatePublishReceiptResponse(workspaceId, expectation, result),
+      })
+    },
+  }
+}
+
+/** Creates the compact durable payload used to replay the immutable update. */
+function createPlanningUpdatePublishReceiptResponse(
+  workspaceId: string,
+  expectation: PlanningUpdatePublishReceiptExpectation,
+  result: PlanningUpdatePublishTransactionResult,
+) {
+  if (
+    result.kind !== 'publish' ||
+    result.update.id !== expectation.id ||
+    result.update.authorMemberKey !== expectation.authorMemberKey ||
+    !planningUpdateTargetsEqual(result.update.target, expectation.target)
+  ) {
+    throw planningUpdatePublishIdempotencyUnavailable()
+  }
+  return {
+    status: 201 as const,
+    body: {
+      schema: PLANNING_UPDATE_PUBLISH_RECEIPT_SCHEMA,
+      version: PLANNING_UPDATE_PUBLISH_RECEIPT_VERSION,
+      workspaceId,
+      status: 201,
+      payload: {
+        target: structuredClone(result.update.target),
+        id: result.update.id,
+        version: result.update.version,
+      },
+    },
+  }
+}
+
+/** Decoded identity stored in a successful Planning publish receipt. */
+type PlanningUpdatePublishReplay = {
+  /** Project or Initiative target. */
+  target: PlanningUpdateTarget
+  /** Immutable update ID. */
+  id: string
+  /** Target-local immutable version. */
+  version: number
+}
+
+/** Strictly decodes one completed Planning publish receipt. */
+function readStoredPlanningUpdatePublishMutationReceipt(
+  value: unknown,
+  workspaceId: string,
+  expectation: PlanningUpdatePublishReceiptExpectation,
+): PlanningUpdatePublishReplay {
+  if (!isRecord(value) || value.status !== 201 || !isRecord(value.body)) {
+    throw planningUpdatePublishIdempotencyUnavailable()
+  }
+  const receipt = value.body
+  const payload = isRecord(receipt.payload) ? receipt.payload : undefined
+  if (
+    receipt.schema !== PLANNING_UPDATE_PUBLISH_RECEIPT_SCHEMA ||
+    receipt.version !== PLANNING_UPDATE_PUBLISH_RECEIPT_VERSION ||
+    receipt.workspaceId !== workspaceId ||
+    receipt.status !== 201 ||
+    !payload ||
+    typeof payload.id !== 'string' ||
+    typeof payload.version !== 'number' ||
+    !Number.isSafeInteger(payload.version) ||
+    payload.version < 1 ||
+    !isRecord(payload.target) ||
+    stableDigestStringify(payload.target) !== stableDigestStringify(expectation.target) ||
+    payload.id !== expectation.id ||
+    stableDigestStringify({ status: 201, body: receipt }) !== stableDigestStringify(value)
+  ) {
+    throw planningUpdatePublishIdempotencyUnavailable()
+  }
+  return {
+    target: structuredClone(expectation.target),
+    id: expectation.id,
+    version: payload.version,
+  }
+}
+
+/** Reads one immutable update version, paging only when the receipt is not latest. */
+async function readPlanningUpdateByVersion(
+  workspaceId: string,
+  target: PlanningUpdateTarget,
+  version: number,
+): Promise<PlanningUpdate | undefined> {
+  let cursor: string | undefined
+  do {
+    const page = await workItemDependencies.planning.listUpdates(workspaceId, {
+      target,
+      limit: 100,
+      ...(cursor ? { cursor } : {}),
+    })
+    const update = page.updates.find((candidate) => candidate.version === version)
+    if (update) return update
+    cursor = page.nextCursor
+  } while (cursor)
+  return undefined
+}
+
+/** Rechecks the captured scope before exposing annotations for one immutable version. */
+async function requirePlanningUpdateVersionCapturedScopePermission(
+  workspaceId: string,
+  principal: WorkspacePrincipal,
+  target: PlanningUpdateTarget,
+  version: number,
+): Promise<void> {
+  const snapshot = await workItemDependencies.planning.get(
+    workspaceId,
+    await readPlanningWorkItemState(principal),
+  )
+  const targetSummary = findPlanningUpdateTargetSummary(snapshot, target)
+  if (!targetSummary || version > targetSummary.latestVersion) {
+    throw new PlanningError(
+      404,
+      'PlanningUpdateNotFound',
+      'Planning update was not found.',
+    )
+  }
+  const update = await readPlanningUpdateByVersion(workspaceId, target, version)
+  if (!update || !planningUpdateTargetsEqual(update.target, target)) {
+    throw new PlanningError(
+      404,
+      'PlanningUpdateNotFound',
+      'Planning update was not found.',
+    )
+  }
+  await requirePlanningUpdateCapturedScopePermission(
+    principal,
+    update.contextSnapshot.scope,
+  )
+}
+
+/** Creates the stable failure used when a stored annotation receipt is malformed. */
+function invalidStoredPlanningUpdateAnnotationMutationReceipt(): PlanningError {
+  return new PlanningError(
+    503,
+    'InvalidStoredPlanningUpdateAnnotationMutationReceipt',
+    'The stored Planning update annotation mutation receipt is invalid.',
+  )
+}
+
+/**
+ * Compares two qualified Planning update targets without relying on object identity.
+ *
+ * @param first - First target.
+ * @param second - Second target.
+ * @returns Whether both targets have the same type and qualified identifiers.
+ */
+function planningUpdateTargetsEqual(
+  first: PlanningUpdateTarget,
+  second: PlanningUpdateTarget,
+): boolean {
+  return stableDigestStringify(first) === stableDigestStringify(second)
+}
+
+/**
+ * Validates a domain mutation result and creates its compact replay payload.
+ *
+ * @param workspaceId - Opaque reservation Workspace identity.
+ * @param expectation - Canonical request identity.
+ * @param result - Domain-produced result committed with the receipt.
+ * @returns Exact HTTP response wrapper stored by the idempotency port.
+ */
+function createPlanningUpdateAnnotationReceiptResponse(
+  workspaceId: string,
+  expectation: PlanningUpdateAnnotationReceiptExpectation,
+  result: PlanningUpdateAnnotationTransactionResult,
+) {
+  let replay: PlanningUpdateAnnotationReplay
+  if (expectation.operation === 'comment-create') {
+    if (
+      result.kind !== 'comment-create' ||
+      result.comment.id !== expectation.id ||
+      result.comment.body !== expectation.body ||
+      result.comment.updateVersion !== expectation.updateVersion ||
+      result.comment.authorMemberKey !== expectation.memberKey ||
+      !planningUpdateTargetsEqual(result.comment.target, expectation.target)
+    ) {
+      throw invalidStoredPlanningUpdateAnnotationMutationReceipt()
+    }
+    replay = {
+      operation: 'comment-create',
+      status: 201,
+      body: { comment: structuredClone(result.comment) },
+    }
+  } else if (expectation.operation === 'reaction-add') {
+    if (
+      result.kind !== 'reaction-add' ||
+      result.reaction.emoji !== expectation.emoji ||
+      result.reaction.updateVersion !== expectation.updateVersion ||
+      result.reaction.memberKey !== expectation.memberKey ||
+      !planningUpdateTargetsEqual(result.reaction.target, expectation.target)
+    ) {
+      throw invalidStoredPlanningUpdateAnnotationMutationReceipt()
+    }
+    replay = {
+      operation: 'reaction-add',
+      status: 201,
+      body: { reaction: structuredClone(result.reaction) },
+    }
+  } else {
+    if (
+      result.kind !== 'reaction-remove' ||
+      result.emoji !== expectation.emoji ||
+      result.updateVersion !== expectation.updateVersion ||
+      result.memberKey !== expectation.memberKey ||
+      !planningUpdateTargetsEqual(result.target, expectation.target)
+    ) {
+      throw invalidStoredPlanningUpdateAnnotationMutationReceipt()
+    }
+    replay = { operation: 'reaction-remove', status: 204, body: null }
+  }
+  const receipt = {
+    schema: PLANNING_UPDATE_ANNOTATION_RECEIPT_SCHEMA,
+    version: PLANNING_UPDATE_ANNOTATION_RECEIPT_VERSION,
+    workspaceId,
+    operation: replay.operation,
+    status: replay.status,
+    payload: replay.body,
+  }
+  return { status: replay.status, body: receipt }
+}
+
+/**
+ * Creates an atomic annotation receipt contribution for the Planning transaction.
+ *
+ * @param workspaceId - Opaque reservation Workspace identity.
+ * @param token - Reservation token owned by the current request.
+ * @param expectation - Canonical annotation request identity.
+ * @returns Planning transaction contribution, or undefined when unavailable.
+ */
+function createPlanningUpdateAnnotationIdempotencyTransaction(
+  workspaceId: string,
+  token: IdempotencyMutationToken,
+  expectation: PlanningUpdateAnnotationReceiptExpectation,
+): PlanningMutationTransaction<PlanningUpdateAnnotationTransactionResult> | undefined {
+  const prepare = developerPlatformDependencies.transactions
+    .prepareIdempotencyCompletionTransactWrite
+  if (!prepare) return undefined
+  return {
+    async prepare(result) {
+      return prepare.call(developerPlatformDependencies.transactions, {
+        workspaceId,
+        credentialId: token.credentialId,
+        idempotencyKey: token.idempotencyKey,
+        requestFingerprint: token.requestFingerprint,
+        reservationId: token.reservationId,
+        response: createPlanningUpdateAnnotationReceiptResponse(
+          workspaceId,
+          expectation,
+          result,
+        ),
+      })
+    },
+  }
+}
+
+/**
+ * Validates one canonical ISO timestamp stored in an annotation replay receipt.
+ *
+ * @param value - Candidate timestamp.
+ * @returns Exact ISO timestamp.
+ */
+function readStoredPlanningUpdateAnnotationTimestamp(value: unknown): string {
+  if (typeof value !== 'string') {
+    throw invalidStoredPlanningUpdateAnnotationMutationReceipt()
+  }
+  const epoch = Date.parse(value)
+  if (!Number.isFinite(epoch) || new Date(epoch).toISOString() !== value) {
+    throw invalidStoredPlanningUpdateAnnotationMutationReceipt()
+  }
+  return value
+}
+
+/**
+ * Strictly validates one completed Planning update annotation replay receipt.
+ *
+ * @param value - Candidate Developer Platform replay response.
+ * @param workspaceId - Opaque Workspace identity expected by the route.
+ * @param expectation - Canonical annotation request identity.
+ * @returns Original successful HTTP response envelope.
+ */
+function readStoredPlanningUpdateAnnotationMutationReceipt(
+  value: unknown,
+  workspaceId: string,
+  expectation: PlanningUpdateAnnotationReceiptExpectation,
+): PlanningUpdateAnnotationReplay {
+  if (!isRecord(value) || !isRecord(value.body)) {
+    throw invalidStoredPlanningUpdateAnnotationMutationReceipt()
+  }
+  const receipt = value.body
+  if (
+    receipt.schema !== PLANNING_UPDATE_ANNOTATION_RECEIPT_SCHEMA ||
+    receipt.version !== PLANNING_UPDATE_ANNOTATION_RECEIPT_VERSION ||
+    receipt.workspaceId !== workspaceId ||
+    receipt.operation !== expectation.operation
+  ) {
+    throw invalidStoredPlanningUpdateAnnotationMutationReceipt()
+  }
+
+  let replay: PlanningUpdateAnnotationReplay
+  if (expectation.operation === 'comment-create') {
+    if (!isRecord(receipt.payload) || !isRecord(receipt.payload.comment)) {
+      throw invalidStoredPlanningUpdateAnnotationMutationReceipt()
+    }
+    const rawComment = receipt.payload.comment
+    const comment: PlanningUpdateComment = {
+      id: expectation.id,
+      target: structuredClone(expectation.target),
+      updateVersion: expectation.updateVersion,
+      body: expectation.body,
+      authorMemberKey: expectation.memberKey,
+      createdAt: readStoredPlanningUpdateAnnotationTimestamp(rawComment.createdAt),
+    }
+    if (stableDigestStringify(comment) !== stableDigestStringify(rawComment)) {
+      throw invalidStoredPlanningUpdateAnnotationMutationReceipt()
+    }
+    replay = { operation: 'comment-create', status: 201, body: { comment } }
+  } else if (expectation.operation === 'reaction-add') {
+    if (!isRecord(receipt.payload) || !isRecord(receipt.payload.reaction)) {
+      throw invalidStoredPlanningUpdateAnnotationMutationReceipt()
+    }
+    const rawReaction = receipt.payload.reaction
+    const reaction: PlanningUpdateReaction = {
+      target: structuredClone(expectation.target),
+      updateVersion: expectation.updateVersion,
+      emoji: expectation.emoji,
+      memberKey: expectation.memberKey,
+      createdAt: readStoredPlanningUpdateAnnotationTimestamp(rawReaction.createdAt),
+    }
+    if (stableDigestStringify(reaction) !== stableDigestStringify(rawReaction)) {
+      throw invalidStoredPlanningUpdateAnnotationMutationReceipt()
+    }
+    replay = { operation: 'reaction-add', status: 201, body: { reaction } }
+  } else {
+    if (receipt.payload !== null) {
+      throw invalidStoredPlanningUpdateAnnotationMutationReceipt()
+    }
+    replay = { operation: 'reaction-remove', status: 204, body: null }
+  }
+
+  const canonicalReceipt = {
+    schema: PLANNING_UPDATE_ANNOTATION_RECEIPT_SCHEMA,
+    version: PLANNING_UPDATE_ANNOTATION_RECEIPT_VERSION,
+    workspaceId,
+    operation: replay.operation,
+    status: replay.status,
+    payload: replay.body,
+  }
+  if (
+    receipt.status !== replay.status ||
+    value.status !== replay.status ||
+    stableDigestStringify({ status: replay.status, body: canonicalReceipt }) !==
+      stableDigestStringify(value)
+  ) {
+    throw invalidStoredPlanningUpdateAnnotationMutationReceipt()
+  }
+  return replay
+}
+
 /** Creates the stable failure used when a durable dependency replay receipt is malformed. */
 function invalidStoredPlanningWorkItemDependencyMutationReceipt(): PlanningError {
   return new PlanningError(
@@ -29931,6 +33627,86 @@ function createPlanningProjectScopeKey(teamId: string, projectId: string): strin
 }
 
 /**
+ * Removes a latest update summary when its immutable captured scope is unavailable now.
+ *
+ * @param updateTarget - Candidate target summary from the canonical Planning snapshot.
+ * @param currentScope - Current scope of the target entity, or the qualified Project target.
+ * @param projectScopeKeys - Team-qualified Project scopes readable by the principal.
+ * @param teamIds - Team scopes readable by the principal.
+ * @param workspaceScopeReadable - Whether a Workspace-scoped target is readable.
+ * @returns Target summary with only currently readable latest content.
+ */
+function filterPlanningLatestUpdateSummaryForPrincipal(
+  updateTarget: PlanningUpdateTargetSummary,
+  currentScope: Pick<PlanningEntity, 'teamId' | 'projectId'> | undefined,
+  projectScopeKeys?: ReadonlySet<string>,
+  teamIds?: ReadonlySet<string>,
+  workspaceScopeReadable = false,
+): PlanningUpdateTargetSummary {
+  if (updateTarget.latestUpdate === undefined) return updateTarget
+
+  const capturedScope = updateTarget.latestUpdate.capturedScope
+  const currentScopeMatches = capturedScope !== undefined && currentScope !== undefined &&
+    capturedScope.teamId === currentScope.teamId &&
+    capturedScope.projectId === currentScope.projectId
+  const principalScopeMatches = projectScopeKeys === undefined || teamIds === undefined
+    ? true
+    : capturedScope !== undefined && (
+        capturedScope.projectId !== undefined
+          ? capturedScope.teamId !== undefined && projectScopeKeys.has(
+              createPlanningProjectScopeKey(capturedScope.teamId, capturedScope.projectId),
+            )
+          : capturedScope.teamId !== undefined
+            ? teamIds.has(capturedScope.teamId)
+            : workspaceScopeReadable
+      )
+  const filtered = structuredClone(updateTarget)
+  if (!currentScopeMatches || !principalScopeMatches) {
+    delete filtered.latestUpdate
+    return filtered
+  }
+  if (filtered.latestUpdate) delete filtered.latestUpdate.capturedScope
+  return filtered
+}
+
+/**
+ * Removes server-only captured-scope metadata from a readable latest summary.
+ *
+ * @param updateTarget - Target summary whose response representation is being detached.
+ * @returns Target summary without server-only captured-scope metadata.
+ */
+function stripPlanningLatestUpdateCapturedScope(
+  updateTarget: PlanningUpdateTargetSummary,
+): PlanningUpdateTargetSummary {
+  const filtered = structuredClone(updateTarget)
+  if (filtered.latestUpdate) delete filtered.latestUpdate.capturedScope
+  return filtered
+}
+
+/**
+ * Applies the current principal and target-scope filter to one idempotent response target.
+ *
+ * @param principal - Authenticated principal receiving the response.
+ * @param snapshot - Current canonical Planning snapshot used to resolve target scope.
+ * @param updateTarget - Receipt or mutation target summary to sanitize.
+ * @returns Target summary safe for the current principal, with stale latest content removed.
+ */
+function filterPlanningUpdateTargetSummaryForPrincipal(
+  principal: ProjectPrincipal,
+  snapshot: PlanningSnapshot,
+  updateTarget: PlanningUpdateTargetSummary,
+): PlanningUpdateTargetSummary {
+  const filtered = filterPlanningSnapshotForPrincipal(principal, {
+    ...snapshot,
+    updateTargets: [structuredClone(updateTarget)],
+  }).updateTargets[0]
+  if (filtered) return filtered
+  const redacted = structuredClone(updateTarget)
+  delete redacted.latestUpdate
+  return redacted
+}
+
+/**
  * Removes Planning records outside the principal's current Team and Project scope.
  *
  * @param principal - Authenticated principal whose current access bounds the response.
@@ -29943,11 +33719,74 @@ function filterPlanningSnapshotForPrincipal(
 ): PlanningSnapshot {
   if (
     principal.isSystemAdmin ||
-    principal.enterprisePermissions === undefined ||
     principal.enterpriseRouteAuthorizedAtResource &&
       principal.enterpriseAuthorizationResource?.kind === 'workspace'
   ) {
-    return snapshot
+    return {
+      ...snapshot,
+      updateTargets: snapshot.updateTargets.map(stripPlanningLatestUpdateCapturedScope),
+    }
+  }
+  if (principal.enterprisePermissions === undefined) {
+    const projectScopeKeys = new Set(
+      (principal.legacyProjectScopeAccesses ?? []).flatMap((access) =>
+        access.teamId && projectAccessAllows(access, 'viewer')
+          ? [createPlanningProjectScopeKey(access.teamId, access.projectId)]
+          : []
+      ),
+    )
+    const teamIds = new Set(
+      (principal.legacyProjectScopeAccesses ?? []).flatMap((access) =>
+        access.teamId && projectAccessAllows(access, 'viewer')
+          ? [access.teamId]
+          : []
+      ),
+    )
+    const workspaceScopeReadable = principal.legacyWorkspaceScopeReadable === true
+    /** Returns whether one Planning scope is readable through the legacy ACL boundary. */
+    const isLegacyPlanningScopeVisible = (
+      scope: Pick<PlanningEntity, 'teamId' | 'projectId'>,
+    ): boolean => {
+      if (scope.projectId !== undefined) {
+        return scope.teamId !== undefined && projectScopeKeys.has(
+          createPlanningProjectScopeKey(scope.teamId, scope.projectId),
+        )
+      }
+      if (scope.teamId !== undefined) return teamIds.has(scope.teamId)
+      return workspaceScopeReadable
+    }
+    const updateTargets = snapshot.updateTargets
+      .filter((updateTarget) => {
+        const target = updateTarget.target
+        if (target.type === 'initiative') {
+          const entity = snapshot.entities.find((candidate) =>
+            candidate.id === target.entityId
+          )
+          return entity !== undefined && isLegacyPlanningScopeVisible(entity)
+        }
+        return projectScopeKeys.has(createPlanningProjectScopeKey(
+          target.teamId,
+          target.projectId,
+        ))
+      })
+      .map((updateTarget) => {
+        const target = updateTarget.target
+        const currentScope = target.type === 'initiative'
+          ? snapshot.entities.find((entity) => entity.id === target.entityId)
+          : target
+        return filterPlanningLatestUpdateSummaryForPrincipal(
+          updateTarget,
+          currentScope,
+          projectScopeKeys,
+          teamIds,
+          workspaceScopeReadable,
+        )
+      })
+      .map(stripPlanningLatestUpdateCapturedScope)
+    return {
+      ...snapshot,
+      updateTargets,
+    }
   }
 
   const projectScopeKeys = new Set(
@@ -30007,6 +33846,28 @@ function filterPlanningSnapshotForPrincipal(
         : { milestoneId: undefined }),
       goalIds: link.goalIds.filter((goalId) => entityIds.has(goalId)),
     }))
+  const updateTargets = snapshot.updateTargets
+    .filter((updateTarget) =>
+      updateTarget.target.type === 'initiative'
+        ? entityIds.has(updateTarget.target.entityId)
+        : projectScopeKeys.has(createPlanningProjectScopeKey(
+            updateTarget.target.teamId,
+            updateTarget.target.projectId,
+          ))
+    )
+    .map((updateTarget) => {
+      const target = updateTarget.target
+      const currentScope = target.type === 'initiative'
+        ? entities.find((entity) => entity.id === target.entityId)
+        : target
+      return filterPlanningLatestUpdateSummaryForPrincipal(
+        updateTarget,
+        currentScope,
+        projectScopeKeys,
+        teamIds,
+      )
+    })
+    .map(stripPlanningLatestUpdateCapturedScope)
   const criticalEntityIds = snapshot.criticalPath.entityIds.filter((entityId) =>
     entityIds.has(entityId)
   )
@@ -30021,6 +33882,7 @@ function filterPlanningSnapshotForPrincipal(
     dependencies,
     workItemDependencies,
     workItemLinks,
+    updateTargets,
     workItems,
     criticalPath: {
       entityIds: criticalEntityIds,
@@ -31177,8 +35039,24 @@ async function resolveDeveloperCredentialPrincipal(
     directoryGroupIds,
     directoryGroupMemberships,
   } = directoryPrincipal
+  const needsProjectScopeQualification =
+    hasUnqualifiedEnterpriseProjectScope(compatibleRoleAssignments) ||
+    hasUnqualifiedEnterpriseProjectScope(compatibleGroupMappings)
+  const enterpriseDirectory = needsProjectScopeQualification
+    ? await workspaceDependencies.projectDirectory.getProjectDirectory(
+        credential.workspaceId,
+        'ja',
+        true,
+      )
+    : undefined
+  const qualifiedRoleAssignments = enterpriseDirectory
+    ? qualifyEnterpriseProjectScopes(compatibleRoleAssignments, enterpriseDirectory)
+    : compatibleRoleAssignments
+  const qualifiedGroupMappings = enterpriseDirectory
+    ? qualifyEnterpriseProjectScopes(compatibleGroupMappings, enterpriseDirectory)
+    : compatibleGroupMappings
   const suppressLegacyWorkspaceRole = directoryPrincipal.directoryManaged ||
-    compatibleRoleAssignments.some((assignment) =>
+    qualifiedRoleAssignments.some((assignment) =>
       assignment.principalKind === 'member' &&
         assignment.principalId === member.memberKey ||
       assignment.principalKind === 'directory-group' &&
@@ -31187,7 +35065,7 @@ async function resolveDeveloperCredentialPrincipal(
           directoryGroupIds.includes(assignment.principalId)
         )
     ) ||
-    compatibleGroupMappings.some((mapping) => mapping.enabled)
+    qualifiedGroupMappings.some((mapping) => mapping.enabled)
   const enterprisePrincipal = {
     kind: 'member',
     principalId: member.memberKey,
@@ -31211,8 +35089,8 @@ async function resolveDeveloperCredentialPrincipal(
   const enterpriseAuthorizationEvaluation = {
     principal: enterprisePrincipal,
     snapshot,
-    assignments: compatibleRoleAssignments,
-    groupMappings: compatibleGroupMappings,
+    assignments: qualifiedRoleAssignments,
+    groupMappings: qualifiedGroupMappings,
   } satisfies EnterpriseAuthorizationEvaluationSnapshot
   const resource = resolveDeveloperAuthorizationResource(
     credential.workspaceId,
@@ -31230,6 +35108,7 @@ async function resolveDeveloperCredentialPrincipal(
         grantedRoutePermissions: [],
         authorizedAtResource: false,
         projectAccesses: [],
+        projectScopeAccesses: [],
         authorizedTeamIds: [],
         teamAccesses: [],
       }
@@ -31265,6 +35144,7 @@ async function resolveDeveloperCredentialPrincipal(
     enterpriseGrantedRoutePermissions: requestAccess.grantedRoutePermissions,
     enterpriseRouteAuthorizedAtResource: requestAccess.authorizedAtResource,
     enterpriseProjectAccesses: requestAccess.projectAccesses,
+    enterpriseProjectScopeAccesses: requestAccess.projectScopeAccesses,
     enterpriseAuthorizedTeamIds: requestAccess.authorizedTeamIds,
     enterpriseTeamAccesses: requestAccess.teamAccesses,
     enterpriseLegacyProjectAccessSuppressed: suppressLegacyWorkspaceRole,
@@ -31369,12 +35249,19 @@ async function createDependencyFencedWorkItemAuthorizationSnapshot(
  * role and assignment writes advance the optional CONTROL revision.
  *
  * @param principal - Principal whose endpoint-manager permissions were evaluated.
+ * @param additionalMembers - Additional active members whose future permissions are required.
  * @returns Workspace member and optional enterprise CONTROL condition checks.
  */
 function createPlanningCallerAuthorizationConditionChecks(
   principal: WorkspacePrincipal,
+  additionalMembers: readonly Pick<WorkspaceMember, 'memberKey' | 'version'>[] = [],
 ): PlanningCallerAuthorizationConditionCheck[] {
-  const workspaceMemberCheck = {
+  const members = new Map<string, Pick<WorkspaceMember, 'memberKey' | 'version'>>()
+  for (const member of [principal.workspaceMember, ...additionalMembers]) {
+    const memberKey = normalizeProjectMemberKey(member.memberKey)
+    if (!members.has(memberKey)) members.set(memberKey, member)
+  }
+  const workspaceMemberChecks = [...members.values()].map((member) => ({
     ConditionCheck: {
       TableName:
         getEnv('MUKUROJI_WORKSPACE_ACCESS_TABLE') ??
@@ -31382,7 +35269,7 @@ function createPlanningCallerAuthorizationConditionChecks(
         'mukuroji-workspace-access-local',
       Key: {
         workspaceId: principal.directoryId,
-        recordKey: `MEMBER#${normalizeProjectMemberKey(principal.userKey)}`,
+        recordKey: `MEMBER#${normalizeProjectMemberKey(member.memberKey)}`,
       },
       ConditionExpression:
         '#entryType = :memberEntryType AND #status = :active AND #version = :expectedVersion',
@@ -31394,13 +35281,13 @@ function createPlanningCallerAuthorizationConditionChecks(
       ExpressionAttributeValues: {
         ':memberEntryType': 'workspace-member',
         ':active': 'active',
-        ':expectedVersion': principal.workspaceMember.version,
+        ':expectedVersion': member.version,
       },
     },
-  } satisfies PlanningCallerAuthorizationConditionCheck
+  } satisfies PlanningCallerAuthorizationConditionCheck))
   const enterpriseTableName = getEnv('ENTERPRISE_IDENTITY_TABLE_NAME')?.trim()
   const controlRevision = principal.enterpriseIdentityControlRevision
-  if (!enterpriseTableName || controlRevision === undefined) return [workspaceMemberCheck]
+  if (!enterpriseTableName || controlRevision === undefined) return workspaceMemberChecks
 
   const expressionAttributeNames: Record<string, string> = {
     '#controlRevision': 'controlRevision',
@@ -31425,7 +35312,50 @@ function createPlanningCallerAuthorizationConditionChecks(
       },
     },
   } satisfies PlanningCallerAuthorizationConditionCheck
-  return [workspaceMemberCheck, enterpriseControlCheck]
+  return [...workspaceMemberChecks, enterpriseControlCheck]
+}
+
+/** Creates a commit-time Planning revision fence for a non-Planning transaction.
+ *
+ * @param workspaceId Workspace whose target snapshot authorized the mutation.
+ * @param expectedRevision Strongly read Planning revision.
+ * @returns A condition check for the isolated Planning revision-fence row.
+ */
+function createPlanningRevisionConditionCheck(
+  workspaceId: string,
+  expectedRevision: number,
+): PlanningCallerAuthorizationConditionCheck {
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
+    throw new PlanningError(500, 'PlanningRevisionInvalid', 'Planning revision is invalid.')
+  }
+  const tableName = getEnv('PLANNING_TABLE_NAME')?.trim() ?? 'mukuroji-planning-local'
+  return {
+    ConditionCheck: {
+      TableName: tableName,
+      Key: {
+        workspaceId: `FENCE#${workspaceId}`,
+        recordKey: 'META',
+      },
+      ConditionExpression: expectedRevision === 0
+        ? 'attribute_not_exists(workspaceId) AND attribute_not_exists(recordKey)'
+        : '#entryType = :entryType AND #schemaVersion = :schemaVersion AND ' +
+          '#revision = :expectedRevision',
+      ...(expectedRevision === 0
+        ? {}
+        : {
+            ExpressionAttributeNames: {
+              '#entryType': 'entryType',
+              '#revision': 'revision',
+              '#schemaVersion': 'schemaVersion',
+            },
+            ExpressionAttributeValues: {
+              ':entryType': 'planning-meta',
+              ':expectedRevision': expectedRevision,
+              ':schemaVersion': 1,
+            },
+          }),
+    },
+  }
 }
 
 async function resolveStableWorkItemAuthorization<T>(

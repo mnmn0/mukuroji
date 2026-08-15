@@ -1398,7 +1398,7 @@ test('protects the last active owner with metadata and member conditions in one 
         Put: {
           TableName: 'mukuroji-planning-local',
           Item: {
-            workspaceId,
+            workspaceId: `FENCE#${workspaceId}`,
             recordKey: 'META',
             revision: 1,
           },
@@ -1445,7 +1445,7 @@ test('serializes member deactivation with the Planning graph revision', async ()
         Put: {
           TableName: 'PlanningTable',
           Item: {
-            workspaceId,
+            workspaceId: `FENCE#${workspaceId}`,
             recordKey: 'META',
             entryType: 'planning-meta',
             schemaVersion: 1,

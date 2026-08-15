@@ -14,7 +14,7 @@ const getProductionHandler = createLazySingleton(
 )
 
 /**
- * Processes an admitted Work Item due-date notification schedule event.
+ * Processes an admitted Work Item and Planning health update notification schedule event.
  *
  * @param event - Optional EventBridge schedule time override.
  * @returns The notification schedule processing summary.
