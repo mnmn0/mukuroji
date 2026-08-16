@@ -1074,6 +1074,107 @@ test('loads team issue detail and creates comments after team access is confirme
   })
 })
 
+test('loads every canonical comment page for team issue detail', async () => {
+  configureFakeProjectClients(true)
+  const rootComment = {
+    id: 'root-comment',
+    rootCommentId: 'root-comment',
+    authorMemberKey: 'author@example.com',
+    bodyMarkdown: 'Root comment',
+    version: 1,
+    mentionMemberKeys: [],
+    createdAt: '2026-06-08T01:00:00.000Z',
+    updatedAt: '2026-06-08T01:00:00.000Z',
+    acceptedResolutions: [],
+    reactions: [],
+  } satisfies Awaited<ReturnType<CollaborationClient['createComment']>>
+  const replyComment = {
+    id: 'reply-comment',
+    rootCommentId: 'root-comment',
+    parentCommentId: 'root-comment',
+    authorMemberKey: 'reply-author@example.com',
+    bodyMarkdown: 'Reply comment',
+    version: 1,
+    mentionMemberKeys: [],
+    createdAt: '2026-06-08T02:00:00.000Z',
+    updatedAt: '2026-06-08T02:00:00.000Z',
+    acceptedResolutions: [],
+    reactions: [],
+  } satisfies Awaited<ReturnType<CollaborationClient['createComment']>>
+  const secondReplyComment = {
+    id: 'second-reply-comment',
+    rootCommentId: 'root-comment',
+    parentCommentId: 'root-comment',
+    authorMemberKey: 'second-reply-author@example.com',
+    bodyMarkdown: 'Second reply comment',
+    version: 1,
+    mentionMemberKeys: [],
+    createdAt: '2026-06-08T03:00:00.000Z',
+    updatedAt: '2026-06-08T03:00:00.000Z',
+    acceptedResolutions: [],
+    reactions: [],
+  } satisfies Awaited<ReturnType<CollaborationClient['createComment']>>
+  const secondRootComment = {
+    id: 'second-root-comment',
+    rootCommentId: 'second-root-comment',
+    authorMemberKey: 'second-author@example.com',
+    bodyMarkdown: 'Second root comment',
+    version: 1,
+    mentionMemberKeys: [],
+    createdAt: '2026-06-08T04:00:00.000Z',
+    updatedAt: '2026-06-08T04:00:00.000Z',
+    acceptedResolutions: [],
+    reactions: [],
+  } satisfies Awaited<ReturnType<CollaborationClient['createComment']>>
+  const threadState = {
+    watch: {
+      subscribed: false,
+      explicit: false,
+      automatic: false,
+      reasons: [],
+      watcherCount: 0,
+    },
+    presence: [],
+  }
+
+  setTestAppDependencies({
+    collaboration: createCollaborationStub({
+      async getThread(input) {
+        if (!input.rootCommentId && input.cursor === undefined) {
+          return { ...threadState, comments: [rootComment], nextCursor: 'roots-page-2' }
+        }
+        if (!input.rootCommentId && input.cursor === 'roots-page-2') {
+          return { ...threadState, comments: [secondRootComment] }
+        }
+        if (input.rootCommentId === rootComment.id && input.cursor === undefined) {
+          return { ...threadState, comments: [replyComment], nextCursor: 'replies-page-2' }
+        }
+        if (input.rootCommentId === rootComment.id && input.cursor === 'replies-page-2') {
+          return { ...threadState, comments: [secondReplyComment] }
+        }
+        if (input.rootCommentId === secondRootComment.id) {
+          return { ...threadState, comments: [] }
+        }
+        throw new Error(`Unexpected collaboration cursor: ${input.cursor ?? 'none'}`)
+      },
+    }),
+  })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+
+  expect(response.status).toBe(200)
+  const body = await response.json()
+  expect(body.comments.map((comment: { id: string }) => comment.id)).toEqual([
+    'root-comment',
+    'reply-comment',
+    'second-reply-comment',
+    'second-root-comment',
+  ])
+})
+
 test('returns the canonical comment response for bodyMarkdown requests', async () => {
   configureFakeProjectClients(true)
   setTestAppDependencies({
@@ -1105,7 +1206,8 @@ test('returns the canonical comment response for bodyMarkdown requests', async (
   })
 
   expect(response.status).toBe(201)
-  expect(await response.json()).toMatchObject({
+  const responseBody = await response.json()
+  expect(responseBody).toMatchObject({
     comment: {
       id: 'canonical-comment',
       authorMemberKey: 'demo@example.com',
@@ -1113,6 +1215,8 @@ test('returns the canonical comment response for bodyMarkdown requests', async (
       version: 1,
     },
   })
+  expect(responseBody.comment).not.toHaveProperty('actorUserId')
+  expect(responseBody.comment).not.toHaveProperty('body')
 })
 
 test('omits relations whose target Project is outside the viewer access scope', async () => {

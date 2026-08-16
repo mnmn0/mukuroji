@@ -323,9 +323,11 @@ import {
   createProjectCollaborationEntityKey,
   createWorkItemCollaborationEntityKey,
   type CollaborationAutomaticWatcherCandidate,
+  type CollaborationClient,
   type CollaborationComment,
   type CuratedContextActivitySourceAuthorizationSnapshot,
   type CuratedContextDocumentSourceAuthorizationSnapshot,
+  type GetCollaborationThreadInput,
 } from '../modules/collaboration/collaboration'
 import {
   FILE_APPROVAL_MAX_REVIEWERS,
@@ -1029,6 +1031,8 @@ const ANALYTICS_SNAPSHOT_ACL_INSPECTION_LIMIT = 1_000
 const ANALYTICS_SNAPSHOT_REPOSITORY_PAGE_LIMIT = 10
 /** Relation target の強整合 detail read を同時実行する最大数です。 */
 const WORK_ITEM_RELATION_TARGET_READ_CONCURRENCY = 8
+/** Issue detail の canonical reply read を同時実行する最大数です。 */
+const TEAM_ISSUE_DETAIL_REPLY_READ_CONCURRENCY = 8
 /** One task-view request may strongly inspect at most one full 20-Team relation filter. */
 const TASK_VIEW_RELATION_TARGET_READ_LIMIT = WORK_ITEMS_TEAM_READ_LIMIT * 100
 /** One task-view request may resolve at most one full legacy relation filter through Search. */
@@ -8869,31 +8873,48 @@ routeApp.get('/api/teams/:teamId/issues/:issueId', async (c) => {
     const projectEntityKey = detail.issue.assignedProjectId
       ? createProjectCollaborationEntityKey(principal.directoryId, detail.issue.assignedProjectId)
       : undefined
-    const [collaborationPreview, resolvedConfiguration, relationPage] = await Promise.all([
-      workItemDependencies.collaboration.getThread({
+    const [collaborationComments, resolvedConfiguration, relationPage] = await Promise.all([
+      readAllCollaborationThreadComments(workItemDependencies.collaboration, {
         entityKey,
         viewerMemberKey: principal.userKey,
         projectEntityKey,
-        limit: 50,
+        limit: 100,
         includeScopeState: false,
       }),
       workItemDependencies.workItemConfigurations.getTeamConfiguration(principal.directoryId, teamId),
       workItemDependencies.workItemConfigurations.listRelations(principal.directoryId, teamId, issueId),
     ])
-    const collaborationReplyPages = await Promise.all(
-      collaborationPreview.comments.map((root) => workItemDependencies.collaboration.getThread({
-        entityKey,
-        viewerMemberKey: principal.userKey,
-        projectEntityKey,
-        rootCommentId: root.id,
-        limit: 5,
-        includeScopeState: false,
-      })),
+    const collaborationRootComments = collaborationComments.filter(
+      (comment) => comment.rootCommentId === comment.id,
     )
-    const collaborationComments = collaborationPreview.comments.flatMap((root, index) => [
-      root,
-      ...(collaborationReplyPages[index]?.comments ?? []),
-    ]).sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+    const collaborationReplyComments: CollaborationComment[][] = []
+    for (
+      let offset = 0;
+      offset < collaborationRootComments.length;
+      offset += TEAM_ISSUE_DETAIL_REPLY_READ_CONCURRENCY
+    ) {
+      const rootBatch = collaborationRootComments.slice(
+        offset,
+        offset + TEAM_ISSUE_DETAIL_REPLY_READ_CONCURRENCY,
+      )
+      collaborationReplyComments.push(...await Promise.all(
+        rootBatch.map((root) => readAllCollaborationThreadComments(
+          workItemDependencies.collaboration,
+          {
+            entityKey,
+            viewerMemberKey: principal.userKey,
+            projectEntityKey,
+            rootCommentId: root.id,
+            limit: 100,
+            includeScopeState: false,
+          },
+        )),
+      ))
+    }
+    const allCollaborationComments = [
+      ...collaborationComments,
+      ...collaborationReplyComments.flat(),
+    ].sort((left, right) => left.createdAt.localeCompare(right.createdAt))
     const visibleRelations = await filterVisibleWorkItemRelations(
       principal,
       context,
@@ -8905,7 +8926,7 @@ routeApp.get('/api/teams/:teamId/issues/:issueId', async (c) => {
       await hydrateTeamIssueDetailResponse(
         {
           ...detail,
-          comments: collaborationComments
+          comments: allCollaborationComments
             .filter((comment) => !comment.deletedAt)
             .map(toTeamIssueDetailCommentResponse),
           resolvedConfiguration,
@@ -27964,6 +27985,39 @@ function createTeamIssueAutomaticWatcherCandidates(
       ? [{ memberKey: issue.assigneeUserId, reason: 'assignee' as const }]
       : []),
   ]
+}
+
+/**
+ * Reads every page in one Collaboration comment scope.
+ *
+ * @param collaboration - Canonical Collaboration client to query.
+ * @param input - Thread scope and page settings without a cursor.
+ * @returns All comments returned by the thread pages in store order.
+ */
+async function readAllCollaborationThreadComments(
+  collaboration: CollaborationClient,
+  input: Omit<GetCollaborationThreadInput, 'cursor'>,
+): Promise<CollaborationComment[]> {
+  const comments: CollaborationComment[] = []
+  const seenCursors = new Set<string>()
+  let cursor: string | undefined
+
+  while (true) {
+    const page = await collaboration.getThread({
+      ...input,
+      ...(cursor === undefined ? {} : { cursor }),
+    })
+    comments.push(...page.comments)
+
+    if (page.nextCursor === undefined) {
+      return comments
+    }
+    if (seenCursors.has(page.nextCursor)) {
+      throw new Error('Collaboration thread pagination cursor did not advance.')
+    }
+    seenCursors.add(page.nextCursor)
+    cursor = page.nextCursor
+  }
 }
 
 /**

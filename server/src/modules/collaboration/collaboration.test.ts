@@ -1056,10 +1056,20 @@ test('does not subscribe service actors as automatic watchers', async () => {
     }),
   })
 
-  const items = transaction?.TransactItems as Array<Record<string, unknown>>
+  const rawItems = transaction?.TransactItems
+  if (!Array.isArray(rawItems)) {
+    throw new Error('Expected the comment transaction items.')
+  }
+  const items: Array<Record<string, unknown>> = []
+  for (const item of rawItems) {
+    if (!isTestRecord(item)) {
+      throw new Error('Expected every comment transaction item to be a record.')
+    }
+    items.push(item)
+  }
   const watcherKeys = items.flatMap((item) => {
-    const update = item.Update as Record<string, unknown> | undefined
-    const key = update?.Key as Record<string, unknown> | undefined
+    const update = isTestRecord(item.Update) ? item.Update : undefined
+    const key = update && isTestRecord(update.Key) ? update.Key : undefined
     return update !== undefined && typeof key?.recordKey === 'string' &&
         key.recordKey.startsWith('WATCHER#')
       ? [key.recordKey]
