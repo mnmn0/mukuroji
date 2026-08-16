@@ -503,7 +503,9 @@ async function writeBackfillAuditEvents(
         kind: 'system',
         displayName: 'system:backfill',
       },
-      idempotencyKey: `team-issue-comment-backfill-v1:${runContext.correlationId}:${workspaceId}`,
+      idempotencyKey: `team-issue-comment-backfill-v1:${createDigest(
+        `${runContext.configurationHash}\0${workspaceId}`,
+      )}`,
       request: {
         method: 'BACKFILL',
         path: '/backfills/team-issue-comments/v1',

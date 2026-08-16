@@ -336,6 +336,39 @@ test('backfills legacy comments idempotently and gates canonical-only reads with
   )).toMatchObject({ state: 'complete', sourceTableName: 'events-table' })
 })
 
+test('reconciles a canonical Automation comment created before its legacy row is backfilled', async () => {
+  const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
+  const memory = createCollaborationMemory([{
+    entityKey,
+    recordKey: 'COMMENT#automation-execution_comment_0',
+    entryType: 'comment',
+    id: 'automation-execution_comment_0',
+    rootCommentId: 'automation-execution_comment_0',
+    authorMemberKey: 'automation:rule-1',
+    bodyMarkdown: 'Automation comment',
+    version: 1,
+    mentionMemberKeys: [],
+    createdAt: '2026-07-12T00:01:00.000Z',
+    updatedAt: '2026-07-12T00:01:00.000Z',
+  }])
+
+  const comment = await memory.client.backfillTeamIssueComment({
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'issue-1',
+    entityKey,
+    commentId: 'automation-execution_comment_0',
+    actorMemberKey: 'automation:rule-1',
+    bodyMarkdown: 'Automation comment',
+    occurredAt: '2026-07-12T00:00:00.000Z',
+  })
+
+  expect(comment.createdAt).toBe('2026-07-12T00:01:00.000Z')
+  expect(memory.rows.get(
+    `${entityKey}\0DISCUSSION#ROOT#2026-07-12T00:01:00.000Z#automation-execution_comment_0`,
+  )).toMatchObject({ commentId: 'automation-execution_comment_0' })
+})
+
 test('rejects curated context rows whose owner disagrees with the entity key', async () => {
   const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
   const client = createClient(async (command) => {
@@ -1296,6 +1329,56 @@ test('derives the same comment ID when an idempotent create request is retried',
 
   expect(commentIds).toHaveLength(2)
   expect(commentIds[0]).toBe(commentIds[1])
+})
+
+test('accepts an explicit comment ID only for trusted service writers', async () => {
+  const client = createClient(async () => ({ Items: [] }))
+  const input = {
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'issue-1',
+    entityKey: createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1'),
+    actorMemberKey: 'member@example.com',
+    bodyMarkdown: 'Stable identifier',
+    commentId: 'automation-execution_comment_0',
+  }
+
+  await expect(client.createComment(input)).rejects.toMatchObject({
+    status: 400,
+    code: 'InvalidCommentIdentifier',
+  })
+
+  const auditContext = createMutationAuditContext({
+    workspaceId: 'workspace#one',
+    actor: { id: 'automation:rule-1', kind: 'service' },
+    idempotencyKey: 'automation-comment-identifier',
+    request: { method: 'AUTOMATION', path: '/automation/comment' },
+    source: { kind: 'system' },
+  })
+  const commentIds: string[] = []
+  const serviceClient = createClient(async (command) => {
+    const commandInput = readCommandInput(command)
+    const items = Array.isArray(commandInput.TransactItems)
+      ? commandInput.TransactItems.filter(isTestRecord)
+      : []
+    const commentPut = items.find((item) =>
+      isTestRecord(item.Put) &&
+      isTestRecord(item.Put.Item) &&
+      item.Put.Item.entryType === 'comment'
+    )
+    if (
+      commentPut &&
+      isTestRecord(commentPut.Put) &&
+      isTestRecord(commentPut.Put.Item) &&
+      typeof commentPut.Put.Item.id === 'string'
+    ) {
+      commentIds.push(commentPut.Put.Item.id)
+    }
+    return { Items: [] }
+  })
+
+  await serviceClient.createComment({ ...input, actorMemberKey: 'automation:rule-1', auditContext })
+  expect(commentIds).toEqual(['automation-execution_comment_0'])
 })
 
 test('rejects replies to a resolved root before writing', async () => {

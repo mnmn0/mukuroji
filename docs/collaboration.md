@@ -93,10 +93,14 @@ Comment と reply の response は、移行完了 marker がある workspace で
 まず dry-run で source row を検証し、その後 checkpoint を指定して実行します。source table の全 scan が完了した後にだけ、検出した各 workspace の marker が保存されます。
 
 ```sh
-AWS_ENDPOINT_URL=http://localhost:4566 bun run team-issue-comments:backfill -- --dry-run --limit 100
-AWS_ENDPOINT_URL=http://localhost:4566 bun run team-issue-comments:backfill -- \
+AWS_ENDPOINT_URL=http://localhost:4566 \
+MUKUROJI_LOCAL_AWS_RUNTIME=floci \
+bun run team-issue-comments:backfill -- --dry-run --limit 100
+AWS_ENDPOINT_URL=http://localhost:4566 \
+MUKUROJI_LOCAL_AWS_RUNTIME=floci \
+bun run team-issue-comments:backfill -- \
   --checkpoint /tmp/mukuroji-team-issue-comments-v1.json
 ```
 
-AWS では `AWS_ACCOUNT_ID`、`MUKUROJI_BACKFILL_OPERATOR_ID`、`TEAM_ISSUE_EVENTS_TABLE_NAME`、`COLLABORATION_TABLE_NAME`、`TEAM_ISSUES_TABLE_NAME`、`AUDIT_EVENTS_TABLE_NAME` を明示してください。checkpoint には DynamoDB の continuation key が含まれるため owner-only で保存され、移行完了後に削除します。source/target/audit table、account、region、workspace filter が異なる checkpoint は拒否されます。
+AWS では `AWS_ACCOUNT_ID`、`MUKUROJI_BACKFILL_OPERATOR_ID`、`TEAM_ISSUE_EVENTS_TABLE_NAME`、`COLLABORATION_TABLE_NAME`、`TEAM_ISSUES_TABLE_NAME`、`AUDIT_EVENTS_TABLE_NAME` を明示してください。checkpoint には DynamoDB の continuation key が含まれるため owner-only で保存され、移行完了後に削除します。source/target/audit table、account、region、workspace filter が異なる checkpoint は拒否されます。完了 audit は設定に束縛した idempotency key を使うため、同じ checkpoint の再実行で重複しません。
 特定 workspace だけを先に処理する場合は `--workspace-id <id>` を繰り返し指定できます。その場合も指定 workspace の source scan が末尾まで到達した後にだけ marker が保存されます。

@@ -440,6 +440,8 @@ export type CreateCollaborationCommentInput = WorkItemCollaborationScope & {
   actorMemberKey: string
   /** Markdown source の本文です。 */
   bodyMarkdown: string
+  /** Optional deterministic identifier reserved for trusted service writers. */
+  commentId?: string
   /** Reply 先 comment ID です。 */
   parentCommentId?: string
   /** 解決済み mention member keys です。 */
@@ -2742,9 +2744,9 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
         if (existing && isSameBackfilledComment(existing, comment)) {
           await this.ensureBackfilledDiscussionRecord(
             input.entityKey,
-            discussionRecordKey,
+            `DISCUSSION#ROOT#${existing.createdAt}#${commentId}`,
             commentId,
-            occurredAt,
+            existing.createdAt,
           )
           return existing
         }
@@ -3865,7 +3867,9 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
     const bodyMarkdown = normalizeCommentBody(input.bodyMarkdown)
     const mentionMemberKeys = normalizeMentionMemberKeys(input.mentionMemberKeys)
     const occurredAt = input.auditContext?.occurredAt ?? new Date().toISOString()
-    const commentId = createCommentId(occurredAt, input.auditContext, input.entityKey)
+    const commentId = input.commentId === undefined
+      ? createCommentId(occurredAt, input.auditContext, input.entityKey)
+      : createTrustedCommentId(input.commentId, input.auditContext)
     const parent = input.parentCommentId
       ? await this.getRequiredStoredComment(input.entityKey, input.parentCommentId)
       : undefined
@@ -6274,6 +6278,27 @@ function createCommentId(
   return `cmt_${occurredAt.replace(/[^0-9]/g, '').slice(0, 17)}_${digest}`
 }
 
+/**
+ * Validates a caller-supplied comment identifier for a trusted service mutation.
+ *
+ * @param commentId - Candidate deterministic comment identifier.
+ * @param context - Audit context proving that the caller is a service actor.
+ * @returns A validated comment identifier.
+ */
+function createTrustedCommentId(
+  commentId: string,
+  context: MutationAuditContext | undefined,
+) {
+  if (context?.actor.kind !== 'service') {
+    throw new CollaborationError(
+      400,
+      'InvalidCommentIdentifier',
+      'Explicit comment identifiers require a service audit context.',
+    )
+  }
+  return requireIdentifier(commentId, 'Comment ID')
+}
+
 function isSameCreatedComment(existing: StoredComment, expected: StoredComment) {
   return existing.authorMemberKey === expected.authorMemberKey &&
     existing.bodyMarkdown === expected.bodyMarkdown &&
@@ -6296,8 +6321,6 @@ function isSameBackfilledComment(existing: StoredComment, expected: StoredCommen
     existing.authorMemberKey === expected.authorMemberKey &&
     existing.bodyMarkdown === expected.bodyMarkdown &&
     existing.version === expected.version &&
-    existing.createdAt === expected.createdAt &&
-    existing.updatedAt === expected.updatedAt &&
     existing.parentCommentId === expected.parentCommentId
 }
 

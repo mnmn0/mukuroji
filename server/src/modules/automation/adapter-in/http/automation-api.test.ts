@@ -2080,6 +2080,7 @@ test('writes an Automation comment through canonical Collaboration persistence',
   expect(collaborationWrites[0]).toMatchObject({
     actorMemberKey: 'automation:rule-1',
     bodyMarkdown: 'A canonical automation comment.',
+    commentId: 'automation-comment-canonical_comment_0',
     entityKey: 'workspace-1#work-item#team/core-team/issue/onboarding-friction',
   })
 })

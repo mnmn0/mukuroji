@@ -1085,12 +1085,6 @@ export type UpdateTeamIssueRequestBody = PublicUpdateTeamIssueRequestBody & {
  * チーム Issue コメント作成 API が受け取る request body です。
  */
 export type CreateTeamIssueCommentRequestBody = {
-  /** Internal automation comment action が再配送間で固定する event ID です。 */
-  idempotencyEventId?: unknown
-  /**
-   * 旧 client が送信する plain text コメント本文です。
-   */
-  body?: unknown
   /**
    * Markdown source として保存するコメント本文です。
    */

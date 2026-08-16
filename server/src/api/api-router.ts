@@ -474,6 +474,7 @@ import {
   AutomationError,
   applyBulkOperation,
   deliverAutomationWebhook,
+  createAutomationCommentId,
   isAutomationInboundWebhookJsonContentType,
   isAutomationValue,
   normalizeAutomationActionFailure,
@@ -13854,6 +13855,7 @@ async function executeAutomationComment(
     projectEntityKey,
     actorMemberKey: `automation:${context.execution.ruleId}`,
     bodyMarkdown: body,
+    commentId: createAutomationCommentId(context.execution.id, context.actionIndex),
     automaticWatcherCandidates: createTeamIssueAutomaticWatcherCandidates(detail.issue),
     deepLink: createTeamIssueDeepLink(target.teamId, target.workItemId),
     auditContext: createAutomationMutationContext(context, { body }),
@@ -28060,6 +28062,7 @@ function toCollaborationCommentResponse(
   }
 }
 
+/** HTTP response shape shared by canonical and transitional comment projections. */
 type CollaborationCommentResponse = ReturnType<typeof toCollaborationCommentResponse>
 
 /**
