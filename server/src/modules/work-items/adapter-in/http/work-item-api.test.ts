@@ -1011,12 +1011,12 @@ test('loads team issue detail and creates comments after team access is confirme
 
   expect(commentResponse.status).toBe(201)
   const commentResponseBody = await commentResponse.json()
-  expect(commentResponseBody).toMatchObject({
+  expect(commentResponseBody).toEqual({
     comment: {
       id: 'comment-2',
-      authorMemberKey: 'demo@example.com',
-      bodyMarkdown: '追加コメント',
-      version: 1,
+      actorUserId: 'demo@example.com',
+      body: '追加コメント',
+      createdAt: '2026-06-08T02:00:00.000Z',
     },
     activity: {
       id: 'comment-2',
@@ -1026,7 +1026,7 @@ test('loads team issue detail and creates comments after team access is confirme
       createdAt: '2026-06-08T02:00:00.000Z',
     },
   })
-  expect(commentResponseBody.comment).not.toHaveProperty('source')
+  expect(commentResponseBody.comment).not.toHaveProperty('authorMemberKey')
   expect(calls.issueDetails).toEqual([
     {
       directoryId: 'user#demo@example.com',
@@ -1053,7 +1053,14 @@ test('loads team issue detail and creates comments after team access is confirme
     { headers: { Authorization: 'Bearer test-token' } },
   )
   expect(refreshedDetailResponse.status).toBe(200)
-  expect(await refreshedDetailResponse.json()).not.toHaveProperty('comments')
+  expect(await refreshedDetailResponse.json()).toMatchObject({
+    comments: [{
+      id: 'comment-2',
+      actorUserId: 'demo@example.com',
+      body: '追加コメント',
+      createdAt: '2026-06-08T02:00:00.000Z',
+    }],
+  })
 
   const collaborationResponse = await app.request(
     '/api/teams/core-team/issues/onboarding-friction/collaboration',
@@ -1064,6 +1071,47 @@ test('loads team issue detail and creates comments after team access is confirme
     comments: [
       { id: 'comment-2', bodyMarkdown: '追加コメント' },
     ],
+  })
+})
+
+test('returns the canonical comment response for bodyMarkdown requests', async () => {
+  configureFakeProjectClients(true)
+  setTestAppDependencies({
+    collaboration: createCollaborationStub({
+      async createComment(input) {
+        return {
+          id: 'canonical-comment',
+          rootCommentId: 'canonical-comment',
+          authorMemberKey: input.actorMemberKey,
+          bodyMarkdown: input.bodyMarkdown,
+          version: 1,
+          mentionMemberKeys: [],
+          createdAt: '2026-06-08T03:00:00.000Z',
+          updatedAt: '2026-06-08T03:00:00.000Z',
+          acceptedResolutions: [],
+          reactions: [],
+        }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/issues/onboarding-friction/comments', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ bodyMarkdown: 'Canonical comment' }),
+  })
+
+  expect(response.status).toBe(201)
+  expect(await response.json()).toMatchObject({
+    comment: {
+      id: 'canonical-comment',
+      authorMemberKey: 'demo@example.com',
+      bodyMarkdown: 'Canonical comment',
+      version: 1,
+    },
   })
 })
 

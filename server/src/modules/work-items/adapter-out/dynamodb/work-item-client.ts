@@ -765,6 +765,21 @@ type PublicWorkItemPageCursor = {
 }
 
 /**
+ * Team Issue detail and legacy-compatible comment creation responses use this
+ * stable comment shape while the underlying row is stored canonically.
+ */
+export type TeamIssueCommentResponseItem = {
+  /** Comment identifier. */
+  id: string
+  /** Workspace member key of the comment author. */
+  actorUserId: string
+  /** Markdown comment body. */
+  body: string
+  /** ISO 8601 creation timestamp. */
+  createdAt: string
+}
+
+/**
  * チーム Issue 活動履歴レスポンスです。
  */
 type TeamIssueActivityResponseItem = {
@@ -826,6 +841,11 @@ export type TeamIssueDetailResponse = {
    * Issue 本体です。
    */
   issue: TeamIssueResponseItem
+  /**
+   * Canonical Collaboration comments projected into the stable detail shape.
+   * The adapter does not load this field from the legacy event table.
+   */
+  comments?: TeamIssueCommentResponseItem[]
   /**
    * Issue 活動履歴一覧です。
    */

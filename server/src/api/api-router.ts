@@ -286,6 +286,7 @@ import {
   type ProjectTaskResponseItem,
   type ProjectTasksResponse,
   type PublicUpdateTeamIssueRequestBody,
+  type TeamIssueCommentResponseItem,
   type TeamIssueDetailReadOptions,
   type TeamIssueDetailResponse,
   type TeamIssueResponseItem,
@@ -8864,10 +8865,35 @@ routeApp.get('/api/teams/:teamId/issues/:issueId', async (c) => {
       { consistentIssueRead: true },
     )
     requireAssignedProjectPermission(principal, context, detail.issue.assignedProjectId, 'viewer')
-    const [resolvedConfiguration, relationPage] = await Promise.all([
+    const entityKey = createWorkItemCollaborationEntityKey(principal.directoryId, teamId, issueId)
+    const projectEntityKey = detail.issue.assignedProjectId
+      ? createProjectCollaborationEntityKey(principal.directoryId, detail.issue.assignedProjectId)
+      : undefined
+    const [collaborationPreview, resolvedConfiguration, relationPage] = await Promise.all([
+      workItemDependencies.collaboration.getThread({
+        entityKey,
+        viewerMemberKey: principal.userKey,
+        projectEntityKey,
+        limit: 50,
+        includeScopeState: false,
+      }),
       workItemDependencies.workItemConfigurations.getTeamConfiguration(principal.directoryId, teamId),
       workItemDependencies.workItemConfigurations.listRelations(principal.directoryId, teamId, issueId),
     ])
+    const collaborationReplyPages = await Promise.all(
+      collaborationPreview.comments.map((root) => workItemDependencies.collaboration.getThread({
+        entityKey,
+        viewerMemberKey: principal.userKey,
+        projectEntityKey,
+        rootCommentId: root.id,
+        limit: 5,
+        includeScopeState: false,
+      })),
+    )
+    const collaborationComments = collaborationPreview.comments.flatMap((root, index) => [
+      root,
+      ...(collaborationReplyPages[index]?.comments ?? []),
+    ]).sort((left, right) => left.createdAt.localeCompare(right.createdAt))
     const visibleRelations = await filterVisibleWorkItemRelations(
       principal,
       context,
@@ -8879,6 +8905,9 @@ routeApp.get('/api/teams/:teamId/issues/:issueId', async (c) => {
       await hydrateTeamIssueDetailResponse(
         {
           ...detail,
+          comments: collaborationComments
+            .filter((comment) => !comment.deletedAt)
+            .map(toTeamIssueDetailCommentResponse),
           resolvedConfiguration,
           relations: visibleRelations,
           relationGraphRevision: relationPage.graphRevision,
@@ -9803,6 +9832,7 @@ routeApp.post('/api/teams/:teamId/issues/:issueId/comments', async (c) => {
     const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
     requireWorkspaceBusinessWrite(principal)
     const body = await readJson<CreateTeamIssueCommentRequestBody>(c.req) ?? {}
+    const modernContract = body.bodyMarkdown !== undefined
     const { context, detail } = await loadAuthorizedTeamIssue(principal, teamId, issueId, 'member')
     const mentionMemberKeys = readCommentMentionMemberKeys(body.mentionMemberKeys)
     await requireValidCommentMentions(
@@ -9825,7 +9855,7 @@ routeApp.post('/api/teams/:teamId/issues/:issueId/comments', async (c) => {
       projectId: detail.issue.assignedProjectId,
       projectEntityKey,
       actorMemberKey: principal.userKey,
-      bodyMarkdown: readRequiredCommentBody(body.bodyMarkdown ?? body.body),
+      bodyMarkdown: readRequiredCommentBody(modernContract ? body.bodyMarkdown : body.body),
       parentCommentId: readOptionalCommentId(body.parentCommentId, 'Parent comment ID'),
       mentionMemberKeys,
       automaticWatcherCandidates,
@@ -9849,10 +9879,20 @@ routeApp.post('/api/teams/:teamId/issues/:issueId/comments', async (c) => {
       'comment creation',
     )
 
-    return c.json({
-      comment: toCollaborationCommentResponse(comment, principal, context, detail.issue),
-      activity,
-    }, 201)
+    return modernContract
+      ? c.json({
+          comment: toCollaborationCommentResponse(comment, principal, context, detail.issue),
+          activity,
+        }, 201)
+      : c.json({
+          comment: {
+            id: comment.id,
+            actorUserId: comment.authorMemberKey,
+            body: comment.bodyMarkdown,
+            createdAt: comment.createdAt,
+          },
+          activity,
+        }, 201)
   } catch (error) {
     return toCollaborationErrorResponse(c, error)
   }
@@ -27924,6 +27964,24 @@ function createTeamIssueAutomaticWatcherCandidates(
       ? [{ memberKey: issue.assigneeUserId, reason: 'assignee' as const }]
       : []),
   ]
+}
+
+/**
+ * Projects a canonical Collaboration comment into the stable Work Item detail
+ * response shape retained for older clients.
+ *
+ * @param comment - Canonical comment loaded from the Collaboration store.
+ * @returns The compatibility response representation.
+ */
+function toTeamIssueDetailCommentResponse(
+  comment: CollaborationComment,
+): TeamIssueCommentResponseItem {
+  return {
+    id: comment.id,
+    actorUserId: comment.authorMemberKey,
+    body: comment.bodyMarkdown,
+    createdAt: comment.createdAt,
+  }
 }
 
 function toCollaborationCommentResponse(

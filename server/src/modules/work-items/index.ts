@@ -124,6 +124,7 @@ export {
   type PublicWorkItemPageReadOptions,
   type RequestConversionTransactionInput,
   type TeamIssueDetailReadOptions,
+  type TeamIssueCommentResponseItem,
   type TeamIssueDetailResponse,
   type TeamIssueResponseItem,
   type TeamIssuesClient,

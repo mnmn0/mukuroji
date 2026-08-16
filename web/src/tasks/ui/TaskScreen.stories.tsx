@@ -136,6 +136,7 @@ const denseStoryTasks = Array.from({ length: 24 }, (_, index) => {
 
 const selectedIssueDetail: TeamIssueDetail = {
   activity: teamIssueActivityFixtures,
+  comments: [],
   issue: {
     schemaVersion: WORK_ITEM_SCHEMA_VERSION,
     revision: 1,
