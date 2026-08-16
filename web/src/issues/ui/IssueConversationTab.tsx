@@ -952,7 +952,7 @@ function CommentCard({
                   onClick={() => onReplyingChange(isReplying ? undefined : comment.id)}
                 />
               ) : null}
-              {onPromote && !comment.deletedAt ? (
+              {onPromote && (capabilities?.canPromote ?? true) && !comment.deletedAt ? (
                 <CommentActionButton
                   label={t('collaboration.comment.promote')}
                   onClick={() => onPromote(comment)}
@@ -1373,7 +1373,7 @@ function CommentFileAttachments({
   const files = artifacts.files.filter((file) =>
     file.targetType === 'comment' && file.targetId === comment.id && !file.deletedAt
   )
-  const canAttach = artifacts.capabilities.canUpload
+  const canAttach = artifacts.capabilities.canUpload && (comment.capabilities?.canAttach ?? true)
   const canGrantGuestAccess = canAttach && artifacts.capabilities.canGrantGuestAccess
 
   return files.length > 0 || canAttach ? (

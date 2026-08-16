@@ -2693,6 +2693,7 @@ test('automation workers consume the audit outbox and run recurring schedules wi
         AUTOMATION_TABLE_NAME: { Ref: 'AutomationTableE3D67F0D' },
         AUTOMATION_WEBHOOK_SECRET_PREFIX: 'mukuroji/automation-webhooks',
         AUDIT_EVENTS_TABLE_NAME: { Ref: 'AuditEventsTable0723963E' },
+        COLLABORATION_TABLE_NAME: { Ref: 'WorkItemCollaborationTableFDECF217' },
         COGNITO_CLIENT_ID: { Ref: 'CognitoUserPoolClientId' },
         COGNITO_USER_POOL_ID: { Ref: 'CognitoUserPoolId' },
         FILE_PROOFING_TABLE_NAME: { Ref: 'FileProofingTable81DA272F' },
@@ -2719,6 +2720,7 @@ test('automation workers consume the audit outbox and run recurring schedules wi
         AUTOMATION_TABLE_NAME: { Ref: 'AutomationTableE3D67F0D' },
         AUTOMATION_WEBHOOK_SECRET_PREFIX: 'mukuroji/automation-webhooks',
         AUDIT_EVENTS_TABLE_NAME: { Ref: 'AuditEventsTable0723963E' },
+        COLLABORATION_TABLE_NAME: { Ref: 'WorkItemCollaborationTableFDECF217' },
         COGNITO_CLIENT_ID: { Ref: 'CognitoUserPoolClientId' },
         COGNITO_USER_POOL_ID: { Ref: 'CognitoUserPoolId' },
         FILE_PROOFING_TABLE_NAME: { Ref: 'FileProofingTable81DA272F' },
@@ -2791,6 +2793,7 @@ test('automation workers consume the audit outbox and run recurring schedules wi
     const serialized = JSON.stringify(policy);
     expect(serialized).toContain('AutomationTableE3D67F0D');
     expect(serialized).toContain('AuditEventsTable0723963E');
+    expect(serialized).toContain('WorkItemCollaborationTableFDECF217');
     expect(serialized).toContain('FileProofingTable81DA272F');
     expect(serialized).toContain('ProjectDirectoryTable9ED01C01');
     expect(serialized).toContain('TeamIssuesTable189D851D');

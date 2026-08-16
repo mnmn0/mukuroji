@@ -28054,6 +28054,8 @@ function toCollaborationCommentResponse(
       canResolve,
       canReply: canWrite && !comment.deletedAt && !comment.resolvedAt && !threadResolved,
       canReact: canWrite && !comment.deletedAt,
+      canAttach: !comment.deletedAt,
+      canPromote: !comment.deletedAt,
     },
   }
 }
@@ -28086,6 +28088,8 @@ function toLegacyCollaborationCommentResponse(
       canResolve: false,
       canReply: false,
       canReact: false,
+      canAttach: false,
+      canPromote: false,
     },
   }
 }

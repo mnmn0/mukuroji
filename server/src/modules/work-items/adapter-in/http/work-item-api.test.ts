@@ -1368,6 +1368,8 @@ test('keeps legacy comments visible through a read-only cursor until backfill co
         canResolve: false,
         canReply: false,
         canReact: false,
+        canAttach: false,
+        canPromote: false,
       },
     }],
     nextCursor: 'legacy.legacy-event-cursor',

@@ -1,10 +1,18 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import {
   createDynamoDbClient,
   createDynamoDbDocumentClient,
 } from '../../src/infrastructure/aws/dynamodb-client'
+import {
+  calculateAuditExpiresAt,
+  createAuditEvent,
+  createAuditFieldChanges,
+  createMutationAuditContext,
+  DynamoDbAuditEventsClient,
+  getConfiguredAuditRetentionDays,
+} from '../../src/modules/audit'
 import {
   createWorkItemCollaborationEntityKey,
 } from '../../src/modules/collaboration'
@@ -80,6 +88,18 @@ type TableNames = {
   target: string
   /** Canonical Work Item table used by the parent condition. */
   workItems: string
+  /** Audit table used for the operational backfill receipt. */
+  auditEvents: string
+}
+
+/** Operator and correlation context for one backfill invocation. */
+type BackfillRunContext = {
+  /** Stable operator identity recorded in private audit metadata. */
+  operatorId: string
+  /** Process-generated correlation identifier shared by completion receipts. */
+  correlationId: string
+  /** Digest that binds the checkpoint and audit receipt to one environment. */
+  configurationHash: string
 }
 
 /** Minimal named error shape used for filesystem error narrowing. */
@@ -101,11 +121,13 @@ async function main() {
     readEnvironment('AWS_ENDPOINT_URL')
   const region = readEnvironment('AWS_REGION') ?? readEnvironment('AWS_DEFAULT_REGION') ?? 'us-east-1'
   const tables = resolveTableNames(endpoint)
+  const account = resolveAccountId(endpoint)
+  const operatorId = resolveOperatorId(endpoint)
   const configurationHash = createDigest(JSON.stringify({
     endpoint: endpoint ?? 'aws-default',
     region,
     profile: readEnvironment('AWS_PROFILE') ?? 'default-provider-chain',
-    account: readEnvironment('AWS_ACCOUNT_ID') ?? 'unknown-account',
+    account,
     tables,
     requestedWorkspaceIds: options.workspaceIds,
     migration: 'team-issue-comments-v1',
@@ -113,6 +135,13 @@ async function main() {
   const checkpoint = await readCheckpoint(options.checkpointPath, configurationHash)
   const dynamoDbClient = createDynamoDbClient()
   const sourceClient = createDynamoDbDocumentClient(dynamoDbClient)
+  const auditEvents = new DynamoDbAuditEventsClient(
+    sourceClient,
+    tables.auditEvents,
+    undefined,
+    dynamoDbClient,
+    endpoint !== undefined && isLocalEndpoint(endpoint),
+  )
   const collaboration = new DynamoDbCollaborationClient(
     tables.target,
     tables.workItems,
@@ -122,13 +151,26 @@ async function main() {
     undefined,
     tables.source,
   )
+  const runContext: BackfillRunContext = {
+    operatorId,
+    correlationId: randomUUID(),
+    configurationHash,
+  }
 
   console.info(
     `Team Issue comment backfill started: source=${tables.source} target=${tables.target} ` +
       `dryRun=${options.dryRun} limit=${options.limit ?? 'unlimited'} ` +
       `checkpoint=${options.checkpointPath}`,
   )
-  await runBackfill(sourceClient, collaboration, tables.source, checkpoint, options)
+  await runBackfill(
+    sourceClient,
+    collaboration,
+    auditEvents,
+    tables.source,
+    checkpoint,
+    options,
+    runContext,
+  )
   printSummary(checkpoint, options)
 }
 
@@ -222,7 +264,9 @@ Options:
   --help, -h               Show this help.
 
 Required in AWS environments:
-  TEAM_ISSUE_EVENTS_TABLE_NAME, COLLABORATION_TABLE_NAME, TEAM_ISSUES_TABLE_NAME
+  AWS_ACCOUNT_ID, MUKUROJI_BACKFILL_OPERATOR_ID,
+  TEAM_ISSUE_EVENTS_TABLE_NAME, COLLABORATION_TABLE_NAME, TEAM_ISSUES_TABLE_NAME,
+  AUDIT_EVENTS_TABLE_NAME
 
 The marker is written only after the source Scan reaches its end. A repeated run
 is safe because comment and discussion rows use the legacy event ID and conditional writes.`)
@@ -253,7 +297,36 @@ function resolveTableNames(endpoint: string | undefined): TableNames {
       'TEAM_ISSUES_TABLE_NAME',
       allowLocalDefaults ? 'mukuroji-team-issues-local' : undefined,
     ),
+    auditEvents: resolveTableName(
+      readEnvironment('MUKUROJI_AUDIT_EVENTS_TABLE') ?? readEnvironment('AUDIT_EVENTS_TABLE_NAME'),
+      'AUDIT_EVENTS_TABLE_NAME',
+      allowLocalDefaults ? 'mukuroji-audit-events' : undefined,
+    ),
   }
+}
+
+/** Resolves the account binding used to reject a checkpoint from another AWS account.
+ *
+ * @param endpoint - Configured DynamoDB endpoint, if any.
+ * @returns The explicit AWS account or a local-only sentinel.
+ */
+function resolveAccountId(endpoint: string | undefined) {
+  const configured = readEnvironment('AWS_ACCOUNT_ID')
+  if (configured) return requireText(configured, 'AWS_ACCOUNT_ID')
+  if (endpoint !== undefined && isLocalEndpoint(endpoint)) return 'local-account'
+  throw new Error('AWS_ACCOUNT_ID is required when DynamoDB is not a loopback endpoint.')
+}
+
+/** Resolves the authenticated operator identity stored with the completion audit.
+ *
+ * @param endpoint - Configured DynamoDB endpoint, if any.
+ * @returns The explicit operator identity or a local-only sentinel.
+ */
+function resolveOperatorId(endpoint: string | undefined) {
+  const configured = readEnvironment('MUKUROJI_BACKFILL_OPERATOR_ID')
+  if (configured) return requireText(configured, 'MUKUROJI_BACKFILL_OPERATOR_ID')
+  if (endpoint !== undefined && isLocalEndpoint(endpoint)) return 'local:backfill'
+  throw new Error('MUKUROJI_BACKFILL_OPERATOR_ID is required in AWS environments.')
 }
 
 /** Resolves one table name while allowing defaults only for local DynamoDB.
@@ -326,9 +399,11 @@ async function readCheckpoint(path: string, configurationHash: string): Promise<
 async function runBackfill(
   sourceClient: DynamoDBDocumentClient,
   collaboration: DynamoDbCollaborationClient,
+  auditEvents: DynamoDbAuditEventsClient,
   sourceTableName: string,
   checkpoint: CheckpointState,
   options: BackfillOptions,
+  runContext: BackfillRunContext,
 ) {
   let processedThisRun = 0
   const workspaceIds = new Set([...checkpoint.workspaceIds, ...options.workspaceIds])
@@ -396,6 +471,84 @@ async function runBackfill(
     for (const workspaceId of workspaceIds) {
       await collaboration.markTeamIssueCommentBackfillComplete(workspaceId)
     }
+    await writeBackfillAuditEvents(auditEvents, workspaceIds, checkpoint, options, runContext)
+  }
+}
+
+/** Writes one suppressed operational audit receipt per affected workspace.
+ *
+ * @param auditEvents - Audit event writer.
+ * @param workspaceIds - Workspaces selected or observed by the scan.
+ * @param checkpoint - Cumulative migration counters and completion state.
+ * @param options - Scope filter used by the invocation.
+ * @param runContext - Authenticated operator and environment binding.
+ */
+async function writeBackfillAuditEvents(
+  auditEvents: DynamoDbAuditEventsClient,
+  workspaceIds: Set<string>,
+  checkpoint: CheckpointState,
+  options: BackfillOptions,
+  runContext: BackfillRunContext,
+) {
+  const occurredAt = new Date().toISOString()
+  const retentionDays = getConfiguredAuditRetentionDays()
+  const scope = options.workspaceIds.length > 0 ? 'explicit-workspaces' : 'all-workspaces'
+  const requestedWorkspaceIds = options.workspaceIds.length > 0 ? options.workspaceIds : ['*']
+
+  for (const workspaceId of [...workspaceIds].sort()) {
+    const context = createMutationAuditContext({
+      workspaceId,
+      actor: {
+        id: 'system:backfill',
+        kind: 'system',
+        displayName: 'system:backfill',
+      },
+      idempotencyKey: `team-issue-comment-backfill-v1:${runContext.correlationId}:${workspaceId}`,
+      request: {
+        method: 'BACKFILL',
+        path: '/backfills/team-issue-comments/v1',
+        query: { workspaceId, scope },
+        body: {
+          version: 1,
+          configurationHash: runContext.configurationHash,
+          requestedWorkspaceIds,
+        },
+      },
+      source: {
+        kind: 'backfill',
+        method: 'BACKFILL',
+        requestId: runContext.correlationId,
+        route: '/backfills/team-issue-comments/v1',
+      },
+      correlationId: `${runContext.correlationId}:${workspaceId}`,
+      occurredAt,
+    })
+    const event = createAuditEvent({
+      context,
+      eventType: 'collaboration.comment-backfill.completed',
+      entity: { type: 'migration', id: 'team-issue-comments/v1' },
+      action: 'backfilled',
+      changes: createAuditFieldChanges(
+        undefined,
+        {
+          sourceRowsScanned: checkpoint.scanned,
+          canonicalRowsBackfilled: checkpoint.backfilled,
+          completed: checkpoint.completed,
+        },
+        ['sourceRowsScanned', 'canonicalRowsBackfilled', 'completed'],
+      ),
+      summary: 'Completed Team Issue comment canonical backfill.',
+      metadata: {
+        migration: 'team-issue-comments-v1',
+        operatorId: runContext.operatorId,
+        scope,
+        requestedWorkspaceIds,
+        configurationHash: runContext.configurationHash,
+      },
+      expiresAt: calculateAuditExpiresAt(occurredAt, retentionDays),
+      outboxStatus: 'suppressed',
+    })
+    await auditEvents.putEvent(event)
   }
 }
 
