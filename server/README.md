@@ -355,6 +355,32 @@ it after the migration is complete. Checkpoints created with the pre-hex-decodin
 Workspace access ID contract are rejected by the configuration hash. Unknown-timestamp snapshot events omit TTL so
 they are not immediately deleted.
 
+## Team Issue comment backfill
+
+Team Issue `commented` events are copied to the canonical Collaboration table
+with their stable event IDs. The resumable runner writes a checkpoint after
+each DynamoDB scan page and publishes one completion marker per observed
+workspace only after the source scan reaches its end. Until that marker exists,
+the API keeps a bounded, read-only legacy comment fallback; after the marker it
+serves canonical comments only.
+
+Preview and run the migration locally with:
+
+```sh
+AWS_ENDPOINT_URL=http://localhost:4566 bun run team-issue-comments:backfill -- --dry-run --limit 100
+AWS_ENDPOINT_URL=http://localhost:4566 bun run team-issue-comments:backfill -- \
+  --checkpoint /tmp/mukuroji-team-issue-comments-v1.json
+```
+
+AWS runs require `TEAM_ISSUE_EVENTS_TABLE_NAME`, `COLLABORATION_TABLE_NAME`, and
+`TEAM_ISSUES_TABLE_NAME`. The checkpoint is owner-only because its continuation
+key can contain source identifiers. Reusing a checkpoint against different
+tables, region, account, or workspace filters is rejected. The write run is
+idempotent; malformed scope, missing Work Items, or conflicting canonical rows
+stop the migration without publishing a completion marker.
+Use repeated `--workspace-id <id>` options to scan and mark a selected set of
+workspaces before processing the rest of the environment.
+
 ## Workspace search backfill
 
 Workspace search は `WorkspaceSearchTable` の `workspaceId` / `recordKey` に、検索文書、

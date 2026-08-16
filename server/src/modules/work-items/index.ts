@@ -112,7 +112,6 @@ export {
   readWorkItemExpectedRevision,
   toTeamIssueResponseItem,
   type CreateTeamIssueCommentRequestBody,
-  type CreateTeamIssueCommentResponse,
   type CreateTeamIssueRequestBody,
   type CreateTeamIssueResponse,
   type CreateTriageDuplicateContextTransactionItemsInput,

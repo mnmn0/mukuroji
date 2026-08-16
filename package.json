@@ -45,6 +45,7 @@
     "tasks:check-dynamodb": "bash scripts/check-project-tasks-dynamodb.sh",
     "issues:check-dynamodb": "bash scripts/check-team-issues-dynamodb.sh",
     "audit:backfill": "bun --env-file=.env --filter server audit:backfill",
+    "team-issue-comments:backfill": "bun --env-file=.env --filter server team-issue-comments:backfill",
     "search:backfill": "bun --filter server search:backfill",
     "search:migration:control": "bun server/scripts/migrations/workspace-search-v1/migration-control-cli.ts",
     "search:migration:rehearsal:root": "bun --filter server search:migration:rehearsal:root",

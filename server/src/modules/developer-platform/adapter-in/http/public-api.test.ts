@@ -354,7 +354,7 @@ test('rejects legacy-only display fields on canonical rows', async () => {
   }
 })
 
-test('keeps legacy commented events in activity without projecting them as comments', async () => {
+test('keeps legacy commented events in activity and exposes transitional comments', async () => {
   const issueItem = {
     schemaVersion: WORK_ITEM_SCHEMA_VERSION,
     revision: 1,
@@ -407,7 +407,14 @@ test('keeps legacy commented events in activity without projecting them as comme
 
   const detail = await client.getTeamIssueDetail('workspace-1', 'core-team', 'issue-1')
 
-  expect(detail.comments).toEqual([])
+  expect(detail.comments).toEqual([
+    {
+      id: '2026-07-12T00:02:00.000Z#commented',
+      actorUserId: 'member@example.com',
+      body: 'Historical comment',
+      createdAt: '2026-07-12T00:02:00.000Z',
+    },
+  ])
   expect(detail.activity).toEqual([
     {
       id: '2026-07-12T00:02:00.000Z#commented',

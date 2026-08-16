@@ -8,6 +8,7 @@ import {
 import {
   DynamoDBDocumentClient,
   GetCommand,
+  PutCommand,
   QueryCommand,
   TransactWriteCommand,
   type TransactWriteCommandInput,
@@ -57,6 +58,13 @@ export const COLLABORATION_CONTEXT_TITLE_MAX_LENGTH = 200
 
 /** Curated context body と accepted resolution summary に保存できる文字数です。 */
 export const COLLABORATION_CONTEXT_BODY_MAX_LENGTH = 20_000
+
+/** Version of the Team Issue legacy-comment migration contract. */
+export const TEAM_ISSUE_COMMENT_BACKFILL_VERSION = 1
+
+/** Record key for a completed Team Issue comment backfill marker. */
+export const TEAM_ISSUE_COMMENT_BACKFILL_MARKER_RECORD_KEY =
+  `TEAM_ISSUE_COMMENTS#v${TEAM_ISSUE_COMMENT_BACKFILL_VERSION}`
 
 /** Record key for the per-entity curated-context pagination generation. */
 const CURATED_CONTEXT_LEDGER_RECORD_KEY = 'CONTEXT_LEDGER'
@@ -270,6 +278,18 @@ export type WorkItemCollaborationScope = {
   assigneeMemberKey?: string
   /** Authorization generation observed before the context mutation. */
   authorizationSnapshot?: CuratedContextAuthorizationSnapshot
+}
+
+/** Input used to copy one legacy Team Issue comment into Collaboration. */
+export type BackfillCollaborationCommentInput = WorkItemCollaborationScope & {
+  /** Stable event identifier reused as the canonical comment identifier. */
+  commentId: string
+  /** Legacy event actor preserved as the canonical comment author. */
+  actorMemberKey: string
+  /** Legacy Markdown/plain-text body. */
+  bodyMarkdown: string
+  /** Original legacy event timestamp. */
+  occurredAt: string
 }
 
 /** Read-only authorization row guard appended to a watcher mutation transaction. */
@@ -566,6 +586,8 @@ export type PresenceLeaveInput = {
 
 /** Collaboration data store の公開契約です。 */
 export interface CollaborationClient {
+  /** Returns whether the environment marker allows canonical-only Team Issue comment reads. */
+  isTeamIssueCommentBackfillComplete(workspaceId: string): Promise<boolean>
   /** Root comments または replies を page 取得します。 */
   getThread(input: GetCollaborationThreadInput): Promise<CollaborationThreadPage>
   /** File 添付先として保存済み・未削除の comment が存在するか確認します。 */
@@ -2527,6 +2549,16 @@ export function createWorkItemCollaborationEntityKey(
   return `${requireText(workspaceId, 'Workspace ID')}#work-item#team/${requireText(teamId, 'Team ID')}/issue/${requireText(issueId, 'Issue ID')}`
 }
 
+/**
+ * Creates the environment/workspace scope used by the legacy comment migration marker.
+ *
+ * @param workspaceId - Workspace whose legacy comment rows were backfilled.
+ * @returns Stable migration-marker entity key.
+ */
+export function createTeamIssueCommentBackfillMarkerEntityKey(workspaceId: string) {
+  return `${requireText(workspaceId, 'Workspace ID')}#collaboration-migration`
+}
+
 /** Project scope の canonical collaboration entity key を作成します。 */
 export function createProjectCollaborationEntityKey(workspaceId: string, projectId: string) {
   return `${requireText(workspaceId, 'Workspace ID')}#project#${requireText(projectId, 'Project ID')}`
@@ -2591,6 +2623,8 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
   private readonly dynamoDbClient: DynamoDBClient
   /** Local table がない場合に自動作成するかどうかです。 */
   private readonly bootstrapLocalTable: boolean
+  /** Legacy Team Issue event table bound into the migration marker. */
+  private readonly teamIssueEventsTableName: string
 
   constructor(
     tableName = readEnvironment('MUKUROJI_COLLABORATION_TABLE') ??
@@ -2605,6 +2639,9 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
     documentClient?: DynamoDBDocumentClient,
     dynamoDbClient = createDynamoDbClient(),
     bootstrapLocalTable = documentClient === undefined && shouldBootstrapLocalTable(),
+    teamIssueEventsTableName = readEnvironment('MUKUROJI_TEAM_ISSUE_EVENTS_TABLE') ??
+      readEnvironment('TEAM_ISSUE_EVENTS_TABLE_NAME') ??
+      'mukuroji-team-issue-events-local',
   ) {
     this.tableName = requireText(tableName, 'Collaboration table name')
     this.parentIssueTableName = requireText(parentIssueTableName, 'Team issues table name')
@@ -2613,6 +2650,182 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
     this.documentClient = documentClient ??
       createWorkspaceSearchWriterDynamoDbDocumentClient(dynamoDbClient)
     this.bootstrapLocalTable = bootstrapLocalTable
+    this.teamIssueEventsTableName = requireText(
+      teamIssueEventsTableName,
+      'Team issue events table name',
+    )
+  }
+
+  /** Returns whether the environment marker allows canonical-only Team Issue comment reads. */
+  async isTeamIssueCommentBackfillComplete(workspaceId: string): Promise<boolean> {
+    await this.ensureLocalTable()
+    const response = await this.documentClient.send(new GetCommand({
+      TableName: this.tableName,
+      Key: {
+        entityKey: createTeamIssueCommentBackfillMarkerEntityKey(workspaceId),
+        recordKey: TEAM_ISSUE_COMMENT_BACKFILL_MARKER_RECORD_KEY,
+      },
+      ConsistentRead: true,
+    }))
+    const marker = response.Item
+    return isCompletedTeamIssueCommentBackfillMarker(
+      marker,
+      this.tableName,
+      this.teamIssueEventsTableName,
+    )
+  }
+
+  /**
+   * Copies one legacy comment into Collaboration without notifications or audit delivery.
+   *
+   * @param input - Validated legacy comment and Work Item scope.
+   * @returns The idempotently persisted canonical comment.
+   */
+  async backfillTeamIssueComment(
+    input: BackfillCollaborationCommentInput,
+  ): Promise<CollaborationComment> {
+    await this.ensureLocalTable()
+    assertWorkItemScope(input)
+    const commentId = requireIdentifier(input.commentId, 'Comment ID')
+    const actorMemberKey = normalizeMemberKey(input.actorMemberKey)
+    const bodyMarkdown = normalizeCommentBody(input.bodyMarkdown)
+    const occurredAt = normalizeBackfillTimestamp(input.occurredAt)
+    const comment: StoredComment = {
+      entityKey: input.entityKey,
+      recordKey: commentRecordKey(commentId),
+      entryType: 'comment',
+      id: commentId,
+      rootCommentId: commentId,
+      authorMemberKey: actorMemberKey,
+      bodyMarkdown,
+      version: 1,
+      mentionMemberKeys: [],
+      createdAt: occurredAt,
+      updatedAt: occurredAt,
+      reactions: [],
+      acceptedResolutions: [],
+      legacyAcceptedResolutions: [],
+    }
+    const discussionRecordKey = `DISCUSSION#ROOT#${occurredAt}#${commentId}`
+
+    try {
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [
+          parentIssueExistsCondition(this.parentIssueTableName, input),
+          {
+            Put: {
+              TableName: this.tableName,
+              Item: toStoredCommentStorageItem(comment),
+              ConditionExpression: 'attribute_not_exists(entityKey) AND attribute_not_exists(recordKey)',
+            },
+          },
+          {
+            Put: {
+              TableName: this.tableName,
+              Item: {
+                entityKey: input.entityKey,
+                recordKey: discussionRecordKey,
+                entryType: 'discussion',
+                commentId,
+                rootCommentId: commentId,
+                createdAt: occurredAt,
+              },
+              ConditionExpression: 'attribute_not_exists(entityKey) AND attribute_not_exists(recordKey)',
+            },
+          },
+        ],
+      }))
+      return comment
+    } catch (error) {
+      if (isTransactionConditionalFailureAt(error, 1)) {
+        const existing = await this.getStoredComment(input.entityKey, commentId)
+        if (existing && isSameBackfilledComment(existing, comment)) {
+          await this.ensureBackfilledDiscussionRecord(
+            input.entityKey,
+            discussionRecordKey,
+            commentId,
+            occurredAt,
+          )
+          return existing
+        }
+      }
+      throw new CollaborationError(
+        409,
+        'CollaborationBackfillConflict',
+        'The legacy comment could not be copied into Collaboration.',
+        { cause: error },
+      )
+    }
+  }
+
+  /** Repairs the discussion projection when a backfill comment already exists. */
+  private async ensureBackfilledDiscussionRecord(
+    entityKey: string,
+    recordKey: string,
+    commentId: string,
+    occurredAt: string,
+  ) {
+    try {
+      await this.documentClient.send(new PutCommand({
+        TableName: this.tableName,
+        Item: {
+          entityKey,
+          recordKey,
+          entryType: 'discussion',
+          commentId,
+          rootCommentId: commentId,
+          createdAt: occurredAt,
+        },
+        ConditionExpression: 'attribute_not_exists(entityKey) AND attribute_not_exists(recordKey)',
+      }))
+    } catch (error) {
+      if (!isConditionalFailure(error)) throw error
+    }
+  }
+
+  /**
+   * Publishes the completion marker after the legacy source scan reaches its end.
+   *
+   * @param workspaceId - Workspace whose source rows were fully processed.
+   * @param completedAt - Completion timestamp, primarily supplied by a checkpointed runner.
+   */
+  async markTeamIssueCommentBackfillComplete(
+    workspaceId: string,
+    completedAt = new Date().toISOString(),
+  ): Promise<void> {
+    await this.ensureLocalTable()
+    const entityKey = createTeamIssueCommentBackfillMarkerEntityKey(workspaceId)
+    const marker = {
+      entityKey,
+      recordKey: TEAM_ISSUE_COMMENT_BACKFILL_MARKER_RECORD_KEY,
+      entryType: 'migration-marker',
+      migration: 'team-issue-comments',
+      version: TEAM_ISSUE_COMMENT_BACKFILL_VERSION,
+      state: 'complete',
+      sourceTableName: this.teamIssueEventsTableName,
+      targetTableName: this.tableName,
+      completedAt: normalizeBackfillTimestamp(completedAt),
+    }
+    try {
+      await this.documentClient.send(new PutCommand({
+        TableName: this.tableName,
+        Item: marker,
+        ConditionExpression: 'attribute_not_exists(entityKey) AND attribute_not_exists(recordKey)',
+      }))
+    } catch (error) {
+      if (
+        isConditionalFailure(error) &&
+        await this.isTeamIssueCommentBackfillComplete(workspaceId)
+      ) {
+        return
+      }
+      throw new CollaborationError(
+        409,
+        'CollaborationBackfillMarkerConflict',
+        'The Team Issue comment backfill marker already exists with different data.',
+        { cause: error },
+      )
+    }
   }
 
   /** Root comments または replies を page 取得します。 */
@@ -3105,6 +3318,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       mentionMemberKeys,
       undefined,
       input.automaticWatcherCandidates,
+      input.auditContext?.actor.kind === 'service',
     )
     const createdAuditPut = createMutationAuditEventPut(this.auditTableName, input.auditContext, {
       directoryId: input.workspaceId,
@@ -3305,6 +3519,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       mentionMemberKeys,
       undefined,
       input.automaticWatcherCandidates,
+      input.auditContext?.actor.kind === 'service',
     )
     const auditPut = createMutationAuditEventPut(this.auditTableName, input.auditContext, {
       directoryId: input.workspaceId,
@@ -3562,6 +3777,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       [],
       selected,
       undefined,
+      input.auditContext?.actor.kind === 'service',
     )
 
     try {
@@ -3691,6 +3907,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       mentionMemberKeys,
       parent,
       input.automaticWatcherCandidates,
+      input.auditContext?.actor.kind === 'service',
     )
     const auditPut = createMutationAuditEventPut(this.auditTableName, input.auditContext, {
       directoryId: input.workspaceId,
@@ -3786,6 +4003,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       mentionMemberKeys,
       undefined,
       input.automaticWatcherCandidates,
+      input.auditContext?.actor.kind === 'service',
     )
     await this.updateCommentSnapshot(
       input,
@@ -5120,6 +5338,59 @@ function parentIssueCondition(tableName: string, input: WorkItemCollaborationSco
 }
 
 /**
+ * Builds the weaker parent condition used while copying a legacy comment.
+ *
+ * Legacy events do not retain the assigned-project snapshot required by a live
+ * collaboration mutation, so migration only fences the existence of the owner
+ * Work Item and never invents an assignment value.
+ *
+ * @param tableName - Canonical Work Item table name.
+ * @param input - Legacy comment scope.
+ * @returns A DynamoDB condition check for the parent Work Item.
+ */
+function parentIssueExistsCondition(
+  tableName: string,
+  input: WorkItemCollaborationScope,
+) {
+  return {
+    ConditionCheck: {
+      TableName: tableName,
+      Key: {
+        directoryTeamId: `${input.workspaceId}#team#${input.teamId}`,
+        issueId: input.issueId,
+      },
+      ConditionExpression: 'attribute_exists(directoryTeamId) AND attribute_exists(issueId)',
+    },
+  }
+}
+
+/** Validates the immutable timestamp copied from a legacy event. */
+function normalizeBackfillTimestamp(value: string) {
+  const normalized = requireText(value, 'Backfill timestamp')
+  if (!Number.isFinite(Date.parse(normalized))) {
+    throw new CollaborationError(400, 'InvalidCollaborationInput', 'Backfill timestamp is invalid.')
+  }
+  return normalized
+}
+
+/** Validates one persisted Team Issue comment backfill marker. */
+function isCompletedTeamIssueCommentBackfillMarker(
+  value: unknown,
+  targetTableName: string,
+  sourceTableName: string,
+): boolean {
+  return isRecord(value) &&
+    value.entryType === 'migration-marker' &&
+    value.migration === 'team-issue-comments' &&
+    value.version === TEAM_ISSUE_COMMENT_BACKFILL_VERSION &&
+    value.state === 'complete' &&
+    value.targetTableName === targetTableName &&
+    value.sourceTableName === sourceTableName &&
+    typeof value.completedAt === 'string' &&
+    Number.isFinite(Date.parse(value.completedAt))
+}
+
+/**
  * Validates the caller authorization generation carried into a context mutation.
  *
  * @param input - Context mutation scope and actor.
@@ -5642,10 +5913,13 @@ function buildAutomaticWatcherCandidates(
   mentionMemberKeys: string[],
   parent: StoredComment | undefined,
   supplied: CollaborationAutomaticWatcherCandidate[] | undefined,
+  actorIsService: boolean,
 ) {
   const grouped = new Map<string, Set<CollaborationWatcherReason>>()
+  const serviceActorMemberKey = actorIsService ? normalizeMemberKey(actorMemberKey) : undefined
   const add = (memberKey: string, reason: CollaborationWatcherReason) => {
     const normalizedMemberKey = normalizeMemberKey(memberKey)
+    if (normalizedMemberKey === serviceActorMemberKey) return
     const reasons = grouped.get(normalizedMemberKey) ?? new Set<CollaborationWatcherReason>()
     reasons.add(reason)
     grouped.set(normalizedMemberKey, reasons)
@@ -6010,6 +6284,24 @@ function isSameCreatedComment(existing: StoredComment, expected: StoredComment) 
 }
 
 /**
+ * Tests whether a canonical comment is the exact result expected from a legacy row.
+ *
+ * @param existing - Current canonical comment.
+ * @param expected - Comment reconstructed from the legacy event.
+ * @returns Whether the existing row can be treated as an idempotent replay.
+ */
+function isSameBackfilledComment(existing: StoredComment, expected: StoredComment) {
+  return existing.id === expected.id &&
+    existing.rootCommentId === expected.rootCommentId &&
+    existing.authorMemberKey === expected.authorMemberKey &&
+    existing.bodyMarkdown === expected.bodyMarkdown &&
+    existing.version === expected.version &&
+    existing.createdAt === expected.createdAt &&
+    existing.updatedAt === expected.updatedAt &&
+    existing.parentCommentId === expected.parentCommentId
+}
+
+/**
  * Tests whether a bounded root response matches an accepted-resolution retry.
  *
  * @param response - Current or receipt-backed root response.
@@ -6230,6 +6522,17 @@ function isConditionalFailure(error: unknown) {
 
   const reasons = (error as { CancellationReasons?: Array<{ Code?: string }> }).CancellationReasons
   return Array.isArray(reasons) && reasons.some((reason) => reason.Code === 'ConditionalCheckFailed')
+}
+
+/** Returns whether a transaction cancellation failed at one known item index. */
+function isTransactionConditionalFailureAt(error: unknown, index: number) {
+  if (!isAwsNamedError(error, 'TransactionCanceledException') || !isRecord(error)) {
+    return false
+  }
+  const reasons = error.CancellationReasons
+  if (!Array.isArray(reasons)) return false
+  const reason = reasons[index] ?? (reasons.length === 1 ? reasons[0] : undefined)
+  return isRecord(reason) && reason.Code === 'ConditionalCheckFailed'
 }
 
 /**

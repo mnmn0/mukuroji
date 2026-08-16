@@ -25,6 +25,7 @@ import { DynamoDbProjectDirectoryClient } from '../../modules/directory'
 import {
   DynamoDbDocumentAuthorizationRevisionMutationAdapter,
 } from '../../modules/documents/adapter-out/dynamodb/document-authorization'
+import { DynamoDbCollaborationClient } from '../../modules/collaboration/collaboration'
 import { createDefaultFileProofingClient } from '../../modules/files/file-proofing'
 import { DynamoDbTeamIssuesClient } from '../../modules/work-items'
 import { DynamoDbWorkspaceAccessClient } from '../../modules/workspace-access/workspace-access'
@@ -51,6 +52,7 @@ function createAutomationActionDependencies(
     }),
     auditEvents: createAuditEventsClient(),
     teamIssues,
+    collaboration: new DynamoDbCollaborationClient(),
     workItemConfigurations: createWorkItemConfigurationClient(),
     planning: createPlanningClient(),
     fileProofing: createDefaultFileProofingClient(),

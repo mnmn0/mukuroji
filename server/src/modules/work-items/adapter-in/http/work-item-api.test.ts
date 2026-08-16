@@ -1044,7 +1044,6 @@ test('loads team issue detail and creates comments after team access is confirme
       readOptions: { consistentIssueRead: true, eventLimit: 0 },
     },
   ])
-  expect(calls.issueComments).toEqual([])
   expect(collaborationCreates).toHaveLength(1)
   expect(collaborationCreates[0]).toMatchObject({
     actorMemberKey: 'demo@example.com',
@@ -1301,6 +1300,178 @@ test('returns persisted collaboration comments and reply cursors', async () => {
   expect(calls.issueDetails).not.toContainEqual(expect.objectContaining({
     readOptions: expect.objectContaining({ eventLimit: 50 }),
   }))
+})
+
+test('keeps legacy comments visible through a read-only cursor until backfill completes', async () => {
+  configureFakeProjectClients(true)
+  const currentTeamIssues = getTestAppDependencies().workItems.teamIssues
+  setTestAppDependencies({
+    teamIssues: {
+      ...currentTeamIssues,
+      async getTeamIssueDetail(directoryId, teamId, issueId, options = {}) {
+        const detail = await currentTeamIssues.getTeamIssueDetail(
+          directoryId,
+          teamId,
+          issueId,
+          options,
+        )
+        if (options.eventType !== 'commented') return detail
+        return {
+          ...detail,
+          comments: [{
+            id: 'legacy-event-1',
+            actorUserId: 'legacy@example.com',
+            body: 'Legacy comment',
+            createdAt: '2026-07-12T00:00:00.000Z',
+          }],
+          nextEventCursor: 'legacy-event-cursor',
+        }
+      },
+    },
+    collaboration: createCollaborationStub({
+      async isTeamIssueCommentBackfillComplete() {
+        return false
+      },
+      async getThread() {
+        return {
+          comments: [],
+          watch: {
+            subscribed: false,
+            explicit: false,
+            automatic: false,
+            reasons: [],
+            watcherCount: 0,
+          },
+          presence: [],
+        }
+      },
+      async getCommentSnapshot() {
+        return undefined
+      },
+    }),
+  })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction/collaboration',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({
+    comments: [{
+      id: 'legacy-event-1',
+      authorMemberKey: 'legacy@example.com',
+      bodyMarkdown: 'Legacy comment',
+      capabilities: {
+        canEdit: false,
+        canDelete: false,
+        canResolve: false,
+        canReply: false,
+        canReact: false,
+      },
+    }],
+    nextCursor: 'legacy.legacy-event-cursor',
+  })
+})
+
+test('does not re-project a canonical comment from an earlier collaboration page', async () => {
+  configureFakeProjectClients(true)
+  const currentTeamIssues = getTestAppDependencies().workItems.teamIssues
+  let snapshotReads = 0
+  setTestAppDependencies({
+    teamIssues: {
+      ...currentTeamIssues,
+      async getTeamIssueDetail(directoryId, teamId, issueId, options = {}) {
+        const detail = await currentTeamIssues.getTeamIssueDetail(
+          directoryId,
+          teamId,
+          issueId,
+          options,
+        )
+        if (options.eventType !== 'commented') return detail
+        return {
+          ...detail,
+          comments: [{
+            id: 'canonical-comment-1',
+            actorUserId: 'legacy@example.com',
+            body: 'Legacy projection of canonical comment',
+            createdAt: '2026-07-12T00:00:00.000Z',
+          }],
+          nextEventCursor: undefined,
+        }
+      },
+    },
+    collaboration: createCollaborationStub({
+      async isTeamIssueCommentBackfillComplete() {
+        return false
+      },
+      async getThread(input) {
+        const comment = {
+          id: 'canonical-comment-1',
+          rootCommentId: 'canonical-comment-1',
+          authorMemberKey: 'demo@example.com',
+          bodyMarkdown: 'Canonical comment',
+          version: 1,
+          mentionMemberKeys: [],
+          createdAt: '2026-07-12T00:00:00.000Z',
+          updatedAt: '2026-07-12T00:00:00.000Z',
+          acceptedResolutions: [],
+          reactions: [],
+        }
+        return {
+          comments: input.rootCommentId
+            ? []
+            : input.cursor
+              ? []
+              : [comment],
+          ...(!input.rootCommentId && !input.cursor ? { nextCursor: 'canonical-next' } : {}),
+          watch: {
+            subscribed: false,
+            explicit: false,
+            automatic: false,
+            reasons: [],
+            watcherCount: 0,
+          },
+          presence: [],
+        }
+      },
+      async getCommentSnapshot(input) {
+        snapshotReads += 1
+        return input.commentId === 'canonical-comment-1'
+          ? {
+              id: input.commentId,
+              rootCommentId: input.commentId,
+              authorMemberKey: 'demo@example.com',
+              bodyMarkdown: 'Canonical comment',
+              version: 1,
+              mentionMemberKeys: [],
+              createdAt: '2026-07-12T00:00:00.000Z',
+              updatedAt: '2026-07-12T00:00:00.000Z',
+              acceptedResolutions: [],
+              reactions: [],
+            }
+          : undefined
+      },
+    }),
+  })
+
+  const firstPageResponse = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction/collaboration',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+  expect(firstPageResponse.status).toBe(200)
+  expect(await firstPageResponse.json()).toMatchObject({
+    comments: [{ id: 'canonical-comment-1', bodyMarkdown: 'Canonical comment' }],
+    nextCursor: 'canonical-next',
+  })
+
+  const secondPageResponse = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction/collaboration?cursor=canonical-next',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+  expect(secondPageResponse.status).toBe(200)
+  expect(await secondPageResponse.json()).toMatchObject({ comments: [] })
+  expect(snapshotReads).toBe(1)
 })
 
 test('rejects legacy collaboration cursors without reading comments', async () => {
