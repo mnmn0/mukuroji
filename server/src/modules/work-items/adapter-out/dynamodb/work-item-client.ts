@@ -1927,32 +1927,37 @@ export class DynamoDbTeamIssuesClient {
         'Automation comment replay event ID is invalid.',
       )
     }
-    const response = await this.documentClient.send(new GetCommand({
-      TableName: this.eventTableName,
-      Key: {
-        directoryTeamIssueId: createDirectoryTeamIssueId(directoryId, teamId, issueId),
-        eventId: normalizedEventId,
-      },
-      ConsistentRead: true,
-    }))
-    if (response.Item === undefined) return false
+    try {
+      const response = await this.documentClient.send(new GetCommand({
+        TableName: this.eventTableName,
+        Key: {
+          directoryTeamIssueId: createDirectoryTeamIssueId(directoryId, teamId, issueId),
+          eventId: normalizedEventId,
+        },
+        ConsistentRead: true,
+      }))
+      if (response.Item === undefined) return false
 
-    if (!isTeamIssueEventItem(response.Item) || response.Item.eventType !== 'commented') {
-      throw new ProjectDataError(
-        503,
-        'AutomationCommentReplayUnavailable',
-        'The pre-cutover comment replay record is invalid.',
-      )
-    }
-    if (response.Item.actorUserId !== actorUserId || response.Item.body !== body) {
-      throw new ProjectDataError(
-        409,
-        'AutomationCommentIdempotencyConflict',
-        'The Automation comment action was reused with different input.',
-      )
-    }
+      if (!isTeamIssueEventItem(response.Item) || response.Item.eventType !== 'commented') {
+        throw new ProjectDataError(
+          503,
+          'AutomationCommentReplayUnavailable',
+          'The pre-cutover comment replay record is invalid.',
+        )
+      }
+      if (response.Item.actorUserId !== actorUserId || response.Item.body !== body) {
+        throw new ProjectDataError(
+          409,
+          'AutomationCommentIdempotencyConflict',
+          'The Automation comment action was reused with different input.',
+        )
+      }
 
-    return true
+      return true
+    } catch (error) {
+      if (error instanceof ProjectDataError) throw error
+      throw toProjectDataError(error)
+    }
   }
 
   /**

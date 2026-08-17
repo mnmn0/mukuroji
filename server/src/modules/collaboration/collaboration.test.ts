@@ -513,7 +513,7 @@ test('pages roots and replies through one bounded discussion prefix when request
   const client = createClient(async (command) => {
     const input = readCommandInput(command)
     const values = input.ExpressionAttributeValues as Record<string, unknown> | undefined
-    if (values?.[':prefix'] === 'DISCUSSION#') {
+    if (values?.[':prefix'] === 'DISCUSSION#V2#' || values?.[':prefix'] === 'DISCUSSION#') {
       discussionQueries.push(input)
       return { Items: [] }
     }
@@ -526,14 +526,103 @@ test('pages roots and replies through one bounded discussion prefix when request
     includeReplies: true,
   })
 
-  expect(discussionQueries).toHaveLength(1)
+  expect(discussionQueries).toHaveLength(2)
   expect(discussionQueries[0]).toMatchObject({
     KeyConditionExpression: 'entityKey = :entityKey AND begins_with(recordKey, :prefix)',
     ExpressionAttributeValues: {
-      ':prefix': 'DISCUSSION#',
+      ':prefix': 'DISCUSSION#V2#',
     },
     ScanIndexForward: false,
   })
+  expect(discussionQueries[1]).toMatchObject({
+    ExpressionAttributeValues: { ':prefix': 'DISCUSSION#' },
+    ScanIndexForward: false,
+  })
+})
+
+/** Verifies that newly written discussion indexes sort timestamps before comment kind. */
+test('writes timestamp-first discussion indexes for roots and replies', async () => {
+  const transactions: Array<Record<string, unknown>> = []
+  let rootCommentId: string | undefined
+  const client = createClient(async (command) => {
+    const input = readCommandInput(command)
+    if ('TransactItems' in input) {
+      transactions.push(input)
+    } else if (
+      rootCommentId &&
+      isTestRecord(input.Key) &&
+      input.Key.recordKey === `COMMENT#${rootCommentId}`
+    ) {
+      return {
+        Item: {
+          entityKey,
+          recordKey: `COMMENT#${rootCommentId}`,
+          entryType: 'comment',
+          id: rootCommentId,
+          rootCommentId,
+          authorMemberKey: 'author@example.com',
+          bodyMarkdown: 'New comment',
+          version: 1,
+          mentionMemberKeys: [],
+          createdAt: '2026-07-12T03:00:00.000Z',
+          updatedAt: '2026-07-12T03:00:00.000Z',
+          reactions: [],
+          acceptedResolutions: [],
+        },
+      }
+    }
+    return {}
+  })
+  const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
+  const created = await client.createComment({
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'issue-1',
+    entityKey,
+    actorMemberKey: 'author@example.com',
+    bodyMarkdown: 'New comment',
+    auditContext: createTestAuditContext(
+      'timeline-index',
+      '2026-07-12T03:00:00.000Z',
+      { bodyMarkdown: 'New comment' },
+    ),
+  })
+  rootCommentId = created.id
+  const reply = await client.createComment({
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'issue-1',
+    entityKey,
+    actorMemberKey: 'reply@example.com',
+    bodyMarkdown: 'Reply',
+    parentCommentId: created.id,
+    auditContext: createTestAuditContext(
+      'timeline-index-reply',
+      '2026-07-12T04:00:00.000Z',
+      { bodyMarkdown: 'Reply' },
+    ),
+  })
+
+  const discussionKeys = transactions.flatMap((transaction) => {
+    if (!Array.isArray(transaction.TransactItems)) {
+      throw new Error('Expected a comment transaction.')
+    }
+    return transaction.TransactItems.flatMap((item) => {
+      if (!isTestRecord(item) || !isTestRecord(item.Put) || !isTestRecord(item.Put.Item)) {
+        return []
+      }
+      return item.Put.Item.entryType === 'discussion' && typeof item.Put.Item.recordKey === 'string'
+        ? [item.Put.Item.recordKey]
+        : []
+    })
+  })
+
+  expect(discussionKeys).toEqual([
+    `DISCUSSION#V2#2026-07-12T03:00:00.000Z#ROOT#${created.id}`,
+    `DISCUSSION#V2S#ROOT#2026-07-12T03:00:00.000Z#${created.id}`,
+    `DISCUSSION#V2#2026-07-12T04:00:00.000Z#THREAD#${created.id}#${reply.id}`,
+    `DISCUSSION#V2S#THREAD#${created.id}#2026-07-12T04:00:00.000Z#${reply.id}`,
+  ])
 })
 
 test('stores a project watcher in the project scope', async () => {

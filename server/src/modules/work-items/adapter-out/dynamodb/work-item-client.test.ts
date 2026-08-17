@@ -619,6 +619,37 @@ test('DynamoDB Team Work Item client reads a matching pre-cutover Automation com
   }])
 })
 
+/** Verifies that pre-cutover replay transport failures use the Work Item error contract. */
+test('DynamoDB Team Work Item client classifies pre-cutover replay transport failures', async () => {
+  const documentClient = {
+    async send() {
+      throw Object.assign(new Error('DynamoDB throttled'), {
+        name: 'ThrottlingException',
+        $metadata: { httpStatusCode: 429 },
+      })
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  await expect(client.getAutomationCommentReplay(
+    'workspace-1',
+    'core-team',
+    'onboarding-friction',
+    'automation-execution-1_comment_0',
+    'automation:rule-1',
+    'Pre-cutover comment',
+  )).rejects.toMatchObject({
+    status: 429,
+    code: 'ThrottlingException',
+  })
+})
+
 test('DynamoDB Team and project Work Item clients read every page without a default Limit', async () => {
   const sentInputs: Array<Record<string, unknown>> = []
   const pageCounts = new Map<string, number>()

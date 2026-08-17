@@ -288,7 +288,7 @@ export type GetCollaborationThreadInput = {
   viewerMemberKey: string
   /** Reply page を取得する root comment ID です。 */
   rootCommentId?: string
-  /** Root と reply を同じ bounded page stream で取得するかどうかです。 */
+  /** Whether to read root comments and replies through one bounded page stream. */
   includeReplies?: boolean
   /** 一 page の最大件数です。 */
   limit?: number
@@ -2505,16 +2505,79 @@ type StoredPresence = {
   expiresAt: number
 }
 
-/** Cursor used to continue reading one collaboration discussion prefix. */
+/** Cursor used to continue reading the migration-aware discussion indexes. */
 type DiscussionCursor = {
-  /** Cursor schema version です。 */
-  version: 1
-  /** Cursor を発行した entity key です。 */
+  /** Cursor schema version. */
+  version: 2
+  /** Entity key that owns the cursor. */
   entityKey: string
-  /** Cursor を発行した discussion prefix です。 */
+  /** Current discussion index prefix bound to the cursor. */
+  currentPrefix: string
+  /** Legacy discussion index prefix bound to the cursor. */
+  legacyPrefix: string
+  /** Index phase used by the next page. */
+  phase: 'current' | 'legacy'
+  /** DynamoDB last evaluated sort key for the current phase. */
+  recordKey?: string
+}
+
+/** Cursor shape emitted by the pre-timeline discussion index. */
+type LegacyDiscussionCursor = {
+  /** Cursor schema version. */
+  version: 1
+  /** Entity key that owns the cursor. */
+  entityKey: string
+  /** Legacy discussion prefix bound to the cursor. */
   prefix: string
-  /** DynamoDB last evaluated sort key です。 */
+  /** DynamoDB last evaluated sort key. */
   recordKey: string
+}
+
+/** Generic version-one cursor used by older single-prefix Collaboration readers. */
+type PrefixCursor = {
+  /** Cursor schema version. */
+  version: 1
+  /** Entity key that owns the cursor. */
+  entityKey: string
+  /** Physical row prefix bound to the cursor. */
+  prefix: string
+  /** DynamoDB last evaluated sort key. */
+  recordKey: string
+}
+
+/** Two physical discussion indexes that make a read migration-safe. */
+type DiscussionReadPlan = {
+  /** Chronologically ordered index prefix introduced by the migration. */
+  currentPrefix: string
+  /** Pre-migration discussion index prefix. */
+  legacyPrefix: string
+  /** Prefixes excluded from the legacy all-comments query. */
+  legacyExcludedPrefixes: string[]
+}
+
+/** Decoded cursor variant used by the discussion page reader. */
+type DecodedDiscussionCursor =
+  | {
+      /** Identifies the pre-migration cursor shape. */
+      kind: 'legacy'
+      /** Last legacy sort key. */
+      recordKey: string
+    }
+  | {
+      /** Identifies the current migration-aware cursor shape. */
+      kind: 'current'
+      /** Index phase used by the next page. */
+      phase: DiscussionCursor['phase']
+      /** Last sort key in the current phase, when pagination has started. */
+      recordKey?: string
+    }
+
+/** One query page returned by the discussion index reader. */
+type DiscussionQueryPage = {
+  /** Physical discussion index rows returned by DynamoDB. */
+  items: Record<string, unknown>[]
+  /** Last evaluated sort key, when more rows remain. */
+  lastRecordKey?: string
 }
 
 /** Accepted resolution history cursor payload です。 */
@@ -2541,6 +2604,8 @@ const defaultPresenceTtlSeconds = 45
 const acceptedResolutionHistoryDefaultLimit = 10
 const acceptedResolutionHistoryMaxLimit = 10
 const curatedContextPageLimit = 10
+const discussionTimelinePrefix = 'DISCUSSION#V2#'
+const discussionScopedPrefix = 'DISCUSSION#V2S#'
 const localTableInitializers = new WeakMap<DynamoDBClient, Map<string, Promise<void>>>()
 
 /** Work Item scope の canonical collaboration entity key を作成します。 */
@@ -2602,6 +2667,37 @@ export function createPlanningUpdatePublicTargetKey(
     : `initiative/${encodeURIComponent(requireText(target.entityId, 'Initiative ID'))}`
 }
 
+/**
+ * Builds the current and pre-migration discussion prefixes for one read scope.
+ *
+ * @param input - Thread read input whose scope determines the prefixes.
+ * @returns Prefixes used to read the current and legacy discussion indexes.
+ */
+function createDiscussionReadPlan(input: GetCollaborationThreadInput): DiscussionReadPlan {
+  if (input.rootCommentId) {
+    const rootCommentId = requireIdentifier(input.rootCommentId, 'Root comment ID')
+    return {
+      currentPrefix: `${discussionScopedPrefix}THREAD#${rootCommentId}#`,
+      legacyPrefix: `DISCUSSION#THREAD#${rootCommentId}#`,
+      legacyExcludedPrefixes: [],
+    }
+  }
+
+  if (input.includeReplies === true) {
+    return {
+      currentPrefix: discussionTimelinePrefix,
+      legacyPrefix: 'DISCUSSION#',
+      legacyExcludedPrefixes: [discussionTimelinePrefix, discussionScopedPrefix],
+    }
+  }
+
+  return {
+    currentPrefix: `${discussionScopedPrefix}ROOT#`,
+    legacyPrefix: 'DISCUSSION#ROOT#',
+    legacyExcludedPrefixes: [],
+  }
+}
+
 /** DynamoDB collaboration table を操作する client です。 */
 export class DynamoDbCollaborationClient implements CollaborationClient {
   /** Collaboration rows を保存する table 名です。 */
@@ -2645,26 +2741,11 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
     await this.ensureLocalTable()
     const entityKey = requireText(input.entityKey, 'Collaboration entity key')
     const viewerMemberKey = normalizeMemberKey(input.viewerMemberKey)
-    const prefix = input.rootCommentId
-      ? `DISCUSSION#THREAD#${requireIdentifier(input.rootCommentId, 'Root comment ID')}#`
-      : input.includeReplies === true
-        ? 'DISCUSSION#'
-        : 'DISCUSSION#ROOT#'
+    const plan = createDiscussionReadPlan(input)
     const limit = clampLimit(input.limit)
-    const exclusiveStartKey = decodeCursor(input.cursor, entityKey, prefix)
-    const response = await this.documentClient.send(
-      new QueryCommand({
-        TableName: this.tableName,
-        KeyConditionExpression: 'entityKey = :entityKey AND begins_with(recordKey, :prefix)',
-        ExpressionAttributeValues: { ':entityKey': entityKey, ':prefix': prefix },
-        ExclusiveStartKey: exclusiveStartKey,
-        ConsistentRead: true,
-        // Root/reply とも新着が常に先頭 page へ入るよう新しい順で取得する。
-        ScanIndexForward: false,
-        Limit: limit,
-      }),
-    )
-    const commentIds = (response.Items ?? []).flatMap((item) =>
+    const cursor = decodeDiscussionCursor(input.cursor, entityKey, plan)
+    const page = await this.readDiscussionPage(plan, entityKey, cursor, limit)
+    const commentIds = page.items.flatMap((item) =>
       typeof item.commentId === 'string' ? [item.commentId] : [],
     )
     const comments = (
@@ -2695,18 +2776,201 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
 
     return {
       comments,
-      ...(response.LastEvaluatedKey?.recordKey && typeof response.LastEvaluatedKey.recordKey === 'string'
-        ? { nextCursor: encodeCursor({
-            version: 1,
-            entityKey,
-            prefix,
-            recordKey: response.LastEvaluatedKey.recordKey,
-          }) }
-        : {}),
+      ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
       watch,
       presence,
       ...(replyRoot?.resolvedAt ? { threadResolved: true } : {}),
     } satisfies CollaborationThreadPage
+  }
+
+  /**
+   * Reads one bounded page from the current discussion index and then the legacy index.
+   *
+   * @param plan - Current and legacy prefixes for the requested scope.
+   * @param entityKey - Collaboration entity key being read.
+   * @param cursor - Validated cursor from the previous page, when supplied.
+   * @param limit - Maximum number of index rows to return.
+   * @returns Discussion rows and an opaque cursor when another page exists.
+   */
+  private async readDiscussionPage(
+    plan: DiscussionReadPlan,
+    entityKey: string,
+    cursor: DecodedDiscussionCursor | undefined,
+    limit: number,
+  ) {
+    if (cursor?.kind === 'legacy') {
+      const legacyPage = await this.queryDiscussionPage(
+        plan,
+        entityKey,
+        'legacy',
+        cursor.recordKey,
+        limit,
+      )
+      return {
+        items: legacyPage.items,
+        ...(legacyPage.lastRecordKey
+          ? {
+              nextCursor: encodeLegacyDiscussionCursor({
+                version: 1,
+                entityKey,
+                prefix: plan.legacyPrefix,
+                recordKey: legacyPage.lastRecordKey,
+              }),
+            }
+          : {}),
+      }
+    }
+
+    const phase = cursor?.kind === 'current' ? cursor.phase : 'current'
+    if (phase === 'legacy') {
+      const legacyPage = await this.queryDiscussionPage(
+        plan,
+        entityKey,
+        'legacy',
+        cursor?.kind === 'current' ? cursor.recordKey : undefined,
+        limit,
+      )
+      return {
+        items: legacyPage.items,
+        ...(legacyPage.lastRecordKey
+          ? {
+              nextCursor: encodeDiscussionCursor({
+                version: 2,
+                entityKey,
+                currentPrefix: plan.currentPrefix,
+                legacyPrefix: plan.legacyPrefix,
+                phase: 'legacy',
+                recordKey: legacyPage.lastRecordKey,
+              }),
+            }
+          : {}),
+      }
+    }
+
+    const currentPage = await this.queryDiscussionPage(
+      plan,
+      entityKey,
+      'current',
+      cursor?.kind === 'current' ? cursor.recordKey : undefined,
+      limit,
+    )
+    if (currentPage.lastRecordKey) {
+      return {
+        items: currentPage.items,
+        nextCursor: encodeDiscussionCursor({
+          version: 2,
+          entityKey,
+          currentPrefix: plan.currentPrefix,
+          legacyPrefix: plan.legacyPrefix,
+          phase: 'current',
+          recordKey: currentPage.lastRecordKey,
+        }),
+      }
+    }
+
+    if (currentPage.items.length >= limit) {
+      const legacyProbe = await this.queryDiscussionPage(plan, entityKey, 'legacy', undefined, 1)
+      return {
+        items: currentPage.items,
+        ...(legacyProbe.items.length > 0 || legacyProbe.lastRecordKey
+          ? {
+              nextCursor: encodeDiscussionCursor({
+                version: 2,
+                entityKey,
+                currentPrefix: plan.currentPrefix,
+                legacyPrefix: plan.legacyPrefix,
+                phase: 'legacy',
+              }),
+            }
+          : {}),
+      }
+    }
+
+    const legacyPage = await this.queryDiscussionPage(
+      plan,
+      entityKey,
+      'legacy',
+      undefined,
+      limit - currentPage.items.length,
+    )
+    return {
+      items: [...currentPage.items, ...legacyPage.items],
+      ...(legacyPage.lastRecordKey
+        ? {
+            nextCursor: encodeDiscussionCursor({
+              version: 2,
+              entityKey,
+              currentPrefix: plan.currentPrefix,
+              legacyPrefix: plan.legacyPrefix,
+              phase: 'legacy',
+              recordKey: legacyPage.lastRecordKey,
+            }),
+          }
+        : {}),
+    }
+  }
+
+  /**
+   * Queries one physical discussion index and advances through filtered pages as needed.
+   *
+   * @param plan - Current and legacy prefixes for the requested scope.
+   * @param entityKey - Collaboration entity key being read.
+   * @param phase - Physical index phase to query.
+   * @param recordKey - Exclusive start key from the previous query page.
+   * @param limit - Maximum number of matching rows to return.
+   * @returns Matching rows and the last evaluated sort key.
+   */
+  private async queryDiscussionPage(
+    plan: DiscussionReadPlan,
+    entityKey: string,
+    phase: DiscussionCursor['phase'],
+    recordKey: string | undefined,
+    limit: number,
+  ): Promise<DiscussionQueryPage> {
+    const prefix = phase === 'current' ? plan.currentPrefix : plan.legacyPrefix
+    const expressionAttributeValues: Record<string, string> = {
+      ':entityKey': entityKey,
+      ':prefix': prefix,
+    }
+    const filterExpression = phase === 'legacy' && plan.legacyExcludedPrefixes.length > 0
+      ? plan.legacyExcludedPrefixes.map((excludedPrefix, index) => {
+          const key = `:excludedPrefix${index}`
+          expressionAttributeValues[key] = excludedPrefix
+          return `NOT begins_with(recordKey, ${key})`
+        }).join(' AND ')
+      : undefined
+
+    const items: Record<string, unknown>[] = []
+    let exclusiveStartKey = recordKey ? { entityKey, recordKey } : undefined
+    let lastRecordKey: string | undefined
+    while (true) {
+      const response = await this.documentClient.send(new QueryCommand({
+        TableName: this.tableName,
+        KeyConditionExpression: 'entityKey = :entityKey AND begins_with(recordKey, :prefix)',
+        ExpressionAttributeValues: expressionAttributeValues,
+        ...(filterExpression ? { FilterExpression: filterExpression } : {}),
+        ExclusiveStartKey: exclusiveStartKey,
+        ConsistentRead: true,
+        ScanIndexForward: false,
+        Limit: limit - items.length,
+      }))
+      for (const item of response.Items ?? []) {
+        if (isRecord(item)) items.push(item)
+      }
+      lastRecordKey = readDiscussionLastRecordKey(response.LastEvaluatedKey)
+      if (
+        phase === 'current' ||
+        plan.legacyExcludedPrefixes.length === 0 ||
+        items.length >= limit ||
+        lastRecordKey === undefined
+      ) {
+        return {
+          items: items.slice(0, limit),
+          ...(lastRecordKey ? { lastRecordKey } : {}),
+        }
+      }
+      exclusiveStartKey = { entityKey, recordKey: lastRecordKey }
+    }
   }
 
   /** File 添付先として保存済み・未削除の comment が存在するか確認します。 */
@@ -3726,9 +3990,16 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       acceptedResolutions: [],
       legacyAcceptedResolutions: [],
     }
-    const discussionRecordKey = parent
-      ? `DISCUSSION#THREAD#${rootCommentId}#${occurredAt}#${commentId}`
-      : `DISCUSSION#ROOT#${occurredAt}#${commentId}`
+    const discussionTimelineKey = discussionTimelineRecordKey(
+      occurredAt,
+      commentId,
+      parent ? rootCommentId : undefined,
+    )
+    const discussionScopedKey = discussionScopedRecordKey(
+      occurredAt,
+      commentId,
+      parent ? rootCommentId : undefined,
+    )
     const notificationCandidates = await this.buildNotificationCandidates(input, parent)
     const automaticWatchers = buildAutomaticWatcherCandidates(
       actorMemberKey,
@@ -3769,7 +4040,22 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
           TableName: this.tableName,
           Item: {
             entityKey: input.entityKey,
-            recordKey: discussionRecordKey,
+            recordKey: discussionTimelineKey,
+            entryType: 'discussion',
+            commentId,
+            rootCommentId,
+            ...(parent ? { parentCommentId: parent.id } : {}),
+            createdAt: occurredAt,
+          },
+          ConditionExpression: 'attribute_not_exists(entityKey) AND attribute_not_exists(recordKey)',
+        },
+      },
+      {
+        Put: {
+          TableName: this.tableName,
+          Item: {
+            entityKey: input.entityKey,
+            recordKey: discussionScopedKey,
             entryType: 'discussion',
             commentId,
             rootCommentId,
@@ -6101,6 +6387,42 @@ function commentRecordKey(commentId: string) {
   return `COMMENT#${requireIdentifier(commentId, 'Comment ID')}`
 }
 
+/**
+ * Creates the chronological discussion index key used for aggregate reads.
+ *
+ * @param occurredAt - Canonical comment creation timestamp.
+ * @param commentId - Comment identifier.
+ * @param rootCommentId - Root identifier for a reply, or undefined for a root.
+ * @returns Chronologically sortable discussion record key.
+ */
+function discussionTimelineRecordKey(
+  occurredAt: string,
+  commentId: string,
+  rootCommentId: string | undefined,
+) {
+  const kind = rootCommentId ? `THREAD#${requireIdentifier(rootCommentId, 'Root comment ID')}` : 'ROOT'
+  return `${discussionTimelinePrefix}${occurredAt}#${kind}#${requireIdentifier(commentId, 'Comment ID')}`
+}
+
+/**
+ * Creates the scoped discussion index key used for root and reply reads.
+ *
+ * @param occurredAt - Canonical comment creation timestamp.
+ * @param commentId - Comment identifier.
+ * @param rootCommentId - Root identifier for a reply, or undefined for a root.
+ * @returns Chronologically sortable scoped discussion record key.
+ */
+function discussionScopedRecordKey(
+  occurredAt: string,
+  commentId: string,
+  rootCommentId: string | undefined,
+) {
+  const scope = rootCommentId
+    ? `THREAD#${requireIdentifier(rootCommentId, 'Root comment ID')}#`
+    : 'ROOT#'
+  return `${discussionScopedPrefix}${scope}${occurredAt}#${requireIdentifier(commentId, 'Comment ID')}`
+}
+
 function watcherRecordKey(memberKey: string) {
   return `WATCHER#${normalizeMemberKey(memberKey)}`
 }
@@ -6256,27 +6578,106 @@ function clampPresenceTtl(value: number | undefined) {
   return value
 }
 
-function encodeCursor(cursor: DiscussionCursor) {
+/** Encodes a migration-aware discussion cursor. */
+function encodeDiscussionCursor(cursor: DiscussionCursor) {
   return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url')
 }
 
+/** Encodes a pre-migration discussion cursor for compatibility callers. */
+function encodeLegacyDiscussionCursor(cursor: LegacyDiscussionCursor) {
+  return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url')
+}
+
+/** Encodes a version-one cursor used by other single-prefix Collaboration readers. */
+function encodeCursor(cursor: PrefixCursor) {
+  return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url')
+}
+
+/** Decodes a version-one cursor used by other single-prefix Collaboration readers. */
 function decodeCursor(value: string | undefined, entityKey: string, prefix: string) {
   if (!value) {
     return undefined
   }
 
   try {
-    const parsed = JSON.parse(Buffer.from(value, 'base64url').toString('utf8')) as Partial<DiscussionCursor>
-    if (
-      parsed.version !== 1 ||
-      parsed.entityKey !== entityKey ||
-      parsed.prefix !== prefix ||
-      typeof parsed.recordKey !== 'string' ||
-      !parsed.recordKey.startsWith(prefix)
-    ) {
+    const parsed: unknown = JSON.parse(Buffer.from(value, 'base64url').toString('utf8'))
+    if (!isRecord(parsed) ||
+        parsed.version !== 1 ||
+        parsed.entityKey !== entityKey ||
+        parsed.prefix !== prefix ||
+        typeof parsed.recordKey !== 'string' ||
+        !parsed.recordKey.startsWith(prefix)) {
       throw new Error('cursor mismatch')
     }
     return { entityKey, recordKey: parsed.recordKey }
+  } catch (error) {
+    throw new CollaborationError(400, 'InvalidCollaborationCursor', 'Collaboration cursor is invalid.', { cause: error })
+  }
+}
+
+/** Reads a DynamoDB last-evaluated discussion sort key without trusting its shape. */
+function readDiscussionLastRecordKey(value: unknown) {
+  if (!isRecord(value) || typeof value.recordKey !== 'string') {
+    return undefined
+  }
+  return value.recordKey
+}
+
+/**
+ * Decodes a discussion cursor and accepts both the current and pre-migration shapes.
+ *
+ * @param value - Opaque cursor supplied by the caller.
+ * @param entityKey - Expected collaboration entity key.
+ * @param plan - Prefix plan for the requested scope.
+ * @returns Validated cursor, or undefined for the first page.
+ */
+function decodeDiscussionCursor(
+  value: string | undefined,
+  entityKey: string,
+  plan: DiscussionReadPlan,
+): DecodedDiscussionCursor | undefined {
+  if (!value) {
+    return undefined
+  }
+
+  try {
+    const parsed: unknown = JSON.parse(Buffer.from(value, 'base64url').toString('utf8'))
+    if (!isRecord(parsed) || parsed.entityKey !== entityKey) {
+      throw new Error('cursor mismatch')
+    }
+
+    if (parsed.version === 1) {
+      if (
+        parsed.prefix !== plan.legacyPrefix ||
+        typeof parsed.recordKey !== 'string' ||
+        !parsed.recordKey.startsWith(plan.legacyPrefix)
+      ) {
+        throw new Error('legacy cursor mismatch')
+      }
+      return { kind: 'legacy', recordKey: parsed.recordKey }
+    }
+
+    if (
+      parsed.version !== 2 ||
+      parsed.currentPrefix !== plan.currentPrefix ||
+      parsed.legacyPrefix !== plan.legacyPrefix ||
+      (parsed.phase !== 'current' && parsed.phase !== 'legacy')
+    ) {
+      throw new Error('cursor mismatch')
+    }
+    if (parsed.recordKey !== undefined) {
+      const expectedPrefix = parsed.phase === 'current'
+        ? plan.currentPrefix
+        : plan.legacyPrefix
+      if (typeof parsed.recordKey !== 'string' || !parsed.recordKey.startsWith(expectedPrefix)) {
+        throw new Error('record key mismatch')
+      }
+    }
+    return {
+      kind: 'current',
+      phase: parsed.phase,
+      ...(typeof parsed.recordKey === 'string' ? { recordKey: parsed.recordKey } : {}),
+    }
   } catch (error) {
     throw new CollaborationError(400, 'InvalidCollaborationCursor', 'Collaboration cursor is invalid.', { cause: error })
   }
