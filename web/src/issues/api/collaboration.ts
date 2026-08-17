@@ -144,6 +144,7 @@ function isTeamIssueComment(value: unknown): value is TeamIssueComment {
   }
 
   const capabilities = value.capabilities
+  const source = value.source
 
   return (
     typeof value.id === 'string' &&
@@ -161,7 +162,8 @@ function isTeamIssueComment(value: unknown): value is TeamIssueComment {
     isRecord(capabilities) &&
     typeof capabilities.canEdit === 'boolean' &&
     typeof capabilities.canDelete === 'boolean' &&
-    typeof capabilities.canResolve === 'boolean'
+    typeof capabilities.canResolve === 'boolean' &&
+    (source === undefined || source === 'collaboration' || source === 'legacy')
   )
 }
 

@@ -77,6 +77,10 @@ export type TeamIssueComment = {
    * Operations available to the current user for this comment.
    */
   capabilities: TeamIssueCommentCapabilities
+  /**
+   * Optional source discriminator retained while older readers are drained.
+   */
+  source?: 'collaboration' | 'legacy'
 }
 
 /**

@@ -799,11 +799,14 @@ function CommentCard({
   const isReplying = replyingToId === comment.id
   const isConfirmingDelete = deleteConfirmationId === comment.id
   const isReactionMenuOpen = reactionMenuId === comment.id
+  const isLegacyComment = comment.source === 'legacy'
   const canReply = controller.capabilities.canComment
+    && !isLegacyComment
     && (capabilities?.canReply ?? true)
     && !rootComment.resolvedAt
     && !comment.deletedAt
   const canReact = controller.capabilities.canReact
+    && !isLegacyComment
     && (capabilities?.canReact ?? true)
     && !comment.deletedAt
   const bodyMarkdown = resolveCommentBody(comment)
@@ -952,7 +955,7 @@ function CommentCard({
                   onClick={() => onReplyingChange(isReplying ? undefined : comment.id)}
                 />
               ) : null}
-              {onPromote && !comment.deletedAt ? (
+              {onPromote && !comment.deletedAt && !isLegacyComment ? (
                 <CommentActionButton
                   label={t('collaboration.comment.promote')}
                   onClick={() => onPromote(comment)}
@@ -1373,7 +1376,7 @@ function CommentFileAttachments({
   const files = artifacts.files.filter((file) =>
     file.targetType === 'comment' && file.targetId === comment.id && !file.deletedAt
   )
-  const canAttach = artifacts.capabilities.canUpload
+  const canAttach = artifacts.capabilities.canUpload && comment.source !== 'legacy'
   const canGrantGuestAccess = canAttach && artifacts.capabilities.canGrantGuestAccess
 
   return files.length > 0 || canAttach ? (

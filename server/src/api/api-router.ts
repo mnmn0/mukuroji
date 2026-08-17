@@ -1034,6 +1034,8 @@ const ANALYTICS_SNAPSHOT_REPOSITORY_PAGE_LIMIT = 10
 const WORK_ITEM_RELATION_TARGET_READ_CONCURRENCY = 8
 /** Issue detail の canonical comment read に許容する合計 page 数です。 */
 const TEAM_ISSUE_DETAIL_COMMENT_READ_MAX_PAGES = 50
+/** Issue detail の互換 comments projection に許容する UTF-8 byte 数です。 */
+const TEAM_ISSUE_DETAIL_COMMENT_MAX_BYTES = 4_000_000
 /** One task-view request may strongly inspect at most one full 20-Team relation filter. */
 const TASK_VIEW_RELATION_TARGET_READ_LIMIT = WORK_ITEMS_TEAM_READ_LIMIT * 100
 /** One task-view request may resolve at most one full legacy relation filter through Search. */
@@ -8876,6 +8878,8 @@ routeApp.get('/api/teams/:teamId/issues/:issueId', async (c) => {
       : undefined
     const collaborationReadBudget: CollaborationThreadReadBudget = {
       maxPages: TEAM_ISSUE_DETAIL_COMMENT_READ_MAX_PAGES,
+      maxBytes: TEAM_ISSUE_DETAIL_COMMENT_MAX_BYTES,
+      bytesRead: 2,
       pagesRead: 0,
     }
     const [collaborationComments, resolvedConfiguration, relationPage] = await Promise.all([
@@ -28077,6 +28081,10 @@ function readCollaborationAuthorizationConditionChecks(
 type CollaborationThreadReadBudget = {
   /** Maximum number of Collaboration pages allowed for one aggregate read. */
   maxPages: number
+  /** Maximum serialized UTF-8 bytes allowed for the compatibility comments projection. */
+  maxBytes: number
+  /** Serialized UTF-8 bytes reserved by comments already collected. */
+  bytesRead: number
   /** Number of Collaboration pages already reserved by the aggregate read. */
   pagesRead: number
 }
@@ -28094,6 +28102,8 @@ async function readAllCollaborationThreadComments(
   input: Omit<GetCollaborationThreadInput, 'cursor'>,
   budget: CollaborationThreadReadBudget = {
     maxPages: TEAM_ISSUE_DETAIL_COMMENT_READ_MAX_PAGES,
+    maxBytes: TEAM_ISSUE_DETAIL_COMMENT_MAX_BYTES,
+    bytesRead: 2,
     pagesRead: 0,
   },
 ): Promise<CollaborationComment[]> {
@@ -28114,7 +28124,21 @@ async function readAllCollaborationThreadComments(
       ...input,
       ...(cursor === undefined ? {} : { cursor }),
     })
-    comments.push(...page.comments)
+    for (const comment of page.comments) {
+      const commentBytes = Buffer.byteLength(
+        JSON.stringify(toTeamIssueDetailCommentResponse(comment)),
+        'utf8',
+      ) + 1
+      if (budget.bytesRead + commentBytes > budget.maxBytes) {
+        throw new CollaborationError(
+          413,
+          'CollaborationThreadPayloadTooLarge',
+          'Collaboration comments exceed the supported response size.',
+        )
+      }
+      budget.bytesRead += commentBytes
+      comments.push(comment)
+    }
 
     if (page.nextCursor === undefined) {
       return comments

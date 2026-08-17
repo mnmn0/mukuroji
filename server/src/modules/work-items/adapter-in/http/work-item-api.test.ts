@@ -1302,6 +1302,59 @@ test('rejects team issue detail when canonical comment pages exceed the aggregat
   expect(pageReads).toBe(50)
 })
 
+/** Verifies that a large canonical comments projection fails before transport serialization. */
+test('rejects team issue detail when canonical comments exceed the payload budget', async () => {
+  configureFakeProjectClients(true)
+  const bodyMarkdown = 'x'.repeat(20_000)
+  const oversizedComments = Array.from({ length: 220 }, (_, index) => ({
+    id: `payload-comment-${index}`,
+    rootCommentId: `payload-comment-${index}`,
+    authorMemberKey: 'author@example.com',
+    bodyMarkdown,
+    version: 1,
+    mentionMemberKeys: [],
+    createdAt: `2026-06-08T01:${String(index % 60).padStart(2, '0')}:00.000Z`,
+    updatedAt: `2026-06-08T01:${String(index % 60).padStart(2, '0')}:00.000Z`,
+    acceptedResolutions: [],
+    reactions: [],
+  })) satisfies Awaited<ReturnType<CollaborationClient['createComment']>>[]
+  const threadState = {
+    watch: {
+      subscribed: false,
+      explicit: false,
+      automatic: false,
+      reasons: [],
+      watcherCount: 0,
+    },
+    presence: [],
+  }
+  let pageReads = 0
+
+  setTestAppDependencies({
+    collaboration: createCollaborationStub({
+      /** Returns one oversized canonical page to exercise the serialized projection bound. */
+      async getThread(input) {
+        pageReads += 1
+        expect(input.includeReplies).toBe(true)
+        expect(input.cursor).toBeUndefined()
+        return { ...threadState, comments: oversizedComments }
+      },
+    }),
+  })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+
+  expect(response.status).toBe(413)
+  expect(await response.json()).toEqual({
+    code: 'CollaborationThreadPayloadTooLarge',
+    message: 'Collaboration comments exceed the supported response size.',
+  })
+  expect(pageReads).toBe(1)
+})
+
 /** Verifies that a stalled canonical cursor is reported as an unavailable read. */
 test('rejects team issue detail when canonical comment pagination stalls', async () => {
   configureFakeProjectClients(true)
