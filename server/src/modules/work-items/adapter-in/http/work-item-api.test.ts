@@ -1194,6 +1194,18 @@ test('loads every canonical comment page for team issue detail', async () => {
 /** Verifies that an oversized aggregate comment read fails closed after its page budget. */
 test('rejects team issue detail when canonical comment pages exceed the aggregate read budget', async () => {
   configureFakeProjectClients(true)
+  const rootComment = {
+    id: 'budget-root-comment',
+    rootCommentId: 'budget-root-comment',
+    authorMemberKey: 'author@example.com',
+    bodyMarkdown: 'Budget root comment',
+    version: 1,
+    mentionMemberKeys: [],
+    createdAt: '2026-06-08T01:00:00.000Z',
+    updatedAt: '2026-06-08T01:00:00.000Z',
+    acceptedResolutions: [],
+    reactions: [],
+  } satisfies Awaited<ReturnType<CollaborationClient['createComment']>>
   let pageReads = 0
   const threadState = {
     watch: {
@@ -1208,14 +1220,20 @@ test('rejects team issue detail when canonical comment pages exceed the aggregat
 
   setTestAppDependencies({
     collaboration: createCollaborationStub({
-      /** Returns another root page until the aggregate read budget is exhausted. */
-      async getThread() {
+      /** Returns a root page followed by reply pages until the aggregate read budget is exhausted. */
+      async getThread(input) {
         pageReads += 1
-        return {
-          ...threadState,
-          comments: [],
-          nextCursor: `root-page-${pageReads + 1}`,
+        if (!input.rootCommentId && input.cursor === undefined) {
+          return { ...threadState, comments: [rootComment] }
         }
+        if (input.rootCommentId === rootComment.id) {
+          return {
+            ...threadState,
+            comments: [],
+            nextCursor: `reply-page-${pageReads + 1}`,
+          }
+        }
+        throw new Error(`Unexpected collaboration cursor: ${input.cursor ?? 'none'}`)
       },
     }),
   })
@@ -1236,6 +1254,18 @@ test('rejects team issue detail when canonical comment pages exceed the aggregat
 /** Verifies that a stalled canonical cursor is reported as an unavailable read. */
 test('rejects team issue detail when canonical comment pagination stalls', async () => {
   configureFakeProjectClients(true)
+  const rootComment = {
+    id: 'stalled-root-comment',
+    rootCommentId: 'stalled-root-comment',
+    authorMemberKey: 'author@example.com',
+    bodyMarkdown: 'Stalled root comment',
+    version: 1,
+    mentionMemberKeys: [],
+    createdAt: '2026-06-08T01:00:00.000Z',
+    updatedAt: '2026-06-08T01:00:00.000Z',
+    acceptedResolutions: [],
+    reactions: [],
+  } satisfies Awaited<ReturnType<CollaborationClient['createComment']>>
   let pageReads = 0
   const threadState = {
     watch: {
@@ -1250,14 +1280,20 @@ test('rejects team issue detail when canonical comment pagination stalls', async
 
   setTestAppDependencies({
     collaboration: createCollaborationStub({
-      /** Returns the same cursor to simulate a non-advancing canonical page. */
-      async getThread() {
+      /** Returns the same cursor in a reply scope to simulate non-advancing pagination. */
+      async getThread(input) {
         pageReads += 1
-        return {
-          ...threadState,
-          comments: [],
-          nextCursor: 'stalled-cursor',
+        if (!input.rootCommentId && input.cursor === undefined) {
+          return { ...threadState, comments: [rootComment] }
         }
+        if (input.rootCommentId === rootComment.id) {
+          return {
+            ...threadState,
+            comments: [],
+            nextCursor: 'stalled-cursor',
+          }
+        }
+        throw new Error(`Unexpected collaboration cursor: ${input.cursor ?? 'none'}`)
       },
     }),
   })
@@ -1272,7 +1308,7 @@ test('rejects team issue detail when canonical comment pagination stalls', async
     code: 'CollaborationThreadPaginationStalled',
     message: 'Collaboration thread pagination did not advance.',
   })
-  expect(pageReads).toBe(2)
+  expect(pageReads).toBe(3)
 })
 
 test('returns the canonical comment response for bodyMarkdown requests', async () => {
