@@ -1034,7 +1034,7 @@ const ANALYTICS_SNAPSHOT_REPOSITORY_PAGE_LIMIT = 10
 const WORK_ITEM_RELATION_TARGET_READ_CONCURRENCY = 8
 /** Issue detail の canonical comment read に許容する合計 page 数です。 */
 const TEAM_ISSUE_DETAIL_COMMENT_READ_MAX_PAGES = 50
-/** Issue detail の互換 comments projection に許容する UTF-8 byte 数です。 */
+/** Maximum UTF-8 bytes allowed for the compatibility comments projection in an issue detail. */
 const TEAM_ISSUE_DETAIL_COMMENT_MAX_BYTES = 4_000_000
 /** One task-view request may strongly inspect at most one full 20-Team relation filter. */
 const TASK_VIEW_RELATION_TARGET_READ_LIMIT = WORK_ITEMS_TEAM_READ_LIMIT * 100
