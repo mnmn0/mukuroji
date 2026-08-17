@@ -2551,8 +2551,8 @@ type DiscussionReadPlan = {
   currentPrefix: string
   /** Pre-migration discussion index prefix. */
   legacyPrefix: string
-  /** Prefixes excluded from the legacy all-comments query. */
-  legacyExcludedPrefixes: string[]
+  /** Exclusive upper bound that keeps a legacy aggregate query before the current index. */
+  legacyUpperBound?: string
 }
 
 /** Decoded cursor variant used by the discussion page reader. */
@@ -2606,6 +2606,7 @@ const acceptedResolutionHistoryMaxLimit = 10
 const curatedContextPageLimit = 10
 const discussionTimelinePrefix = 'DISCUSSION#V2#'
 const discussionScopedPrefix = 'DISCUSSION#V2S#'
+const discussionLegacyUpperBound = discussionTimelinePrefix
 const localTableInitializers = new WeakMap<DynamoDBClient, Map<string, Promise<void>>>()
 
 /** Work Item scope の canonical collaboration entity key を作成します。 */
@@ -2679,7 +2680,6 @@ function createDiscussionReadPlan(input: GetCollaborationThreadInput): Discussio
     return {
       currentPrefix: `${discussionScopedPrefix}THREAD#${rootCommentId}#`,
       legacyPrefix: `DISCUSSION#THREAD#${rootCommentId}#`,
-      legacyExcludedPrefixes: [],
     }
   }
 
@@ -2687,14 +2687,13 @@ function createDiscussionReadPlan(input: GetCollaborationThreadInput): Discussio
     return {
       currentPrefix: discussionTimelinePrefix,
       legacyPrefix: 'DISCUSSION#',
-      legacyExcludedPrefixes: [discussionTimelinePrefix, discussionScopedPrefix],
+      legacyUpperBound: discussionLegacyUpperBound,
     }
   }
 
   return {
     currentPrefix: `${discussionScopedPrefix}ROOT#`,
     legacyPrefix: 'DISCUSSION#ROOT#',
-    legacyExcludedPrefixes: [],
   }
 }
 
@@ -2911,7 +2910,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
   }
 
   /**
-   * Queries one physical discussion index and advances through filtered pages as needed.
+   * Queries one physical discussion index within its migration-safe key range.
    *
    * @param plan - Current and legacy prefixes for the requested scope.
    * @param entityKey - Collaboration entity key being read.
@@ -2928,48 +2927,29 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
     limit: number,
   ): Promise<DiscussionQueryPage> {
     const prefix = phase === 'current' ? plan.currentPrefix : plan.legacyPrefix
-    const expressionAttributeValues: Record<string, string> = {
-      ':entityKey': entityKey,
-      ':prefix': prefix,
+    const expressionAttributeValues: Record<string, string> = { ':entityKey': entityKey }
+    let keyConditionExpression = 'entityKey = :entityKey AND begins_with(recordKey, :prefix)'
+    if (phase === 'legacy' && plan.legacyUpperBound !== undefined) {
+      expressionAttributeValues[':legacyLowerBound'] = plan.legacyPrefix
+      expressionAttributeValues[':legacyUpperBound'] = plan.legacyUpperBound
+      keyConditionExpression =
+        'entityKey = :entityKey AND recordKey BETWEEN :legacyLowerBound AND :legacyUpperBound'
+    } else {
+      expressionAttributeValues[':prefix'] = prefix
     }
-    const filterExpression = phase === 'legacy' && plan.legacyExcludedPrefixes.length > 0
-      ? plan.legacyExcludedPrefixes.map((excludedPrefix, index) => {
-          const key = `:excludedPrefix${index}`
-          expressionAttributeValues[key] = excludedPrefix
-          return `NOT begins_with(recordKey, ${key})`
-        }).join(' AND ')
-      : undefined
-
-    const items: Record<string, unknown>[] = []
-    let exclusiveStartKey = recordKey ? { entityKey, recordKey } : undefined
-    let lastRecordKey: string | undefined
-    while (true) {
-      const response = await this.documentClient.send(new QueryCommand({
-        TableName: this.tableName,
-        KeyConditionExpression: 'entityKey = :entityKey AND begins_with(recordKey, :prefix)',
-        ExpressionAttributeValues: expressionAttributeValues,
-        ...(filterExpression ? { FilterExpression: filterExpression } : {}),
-        ExclusiveStartKey: exclusiveStartKey,
-        ConsistentRead: true,
-        ScanIndexForward: false,
-        Limit: limit - items.length,
-      }))
-      for (const item of response.Items ?? []) {
-        if (isRecord(item)) items.push(item)
-      }
-      lastRecordKey = readDiscussionLastRecordKey(response.LastEvaluatedKey)
-      if (
-        phase === 'current' ||
-        plan.legacyExcludedPrefixes.length === 0 ||
-        items.length >= limit ||
-        lastRecordKey === undefined
-      ) {
-        return {
-          items: items.slice(0, limit),
-          ...(lastRecordKey ? { lastRecordKey } : {}),
-        }
-      }
-      exclusiveStartKey = { entityKey, recordKey: lastRecordKey }
+    const response = await this.documentClient.send(new QueryCommand({
+      TableName: this.tableName,
+      KeyConditionExpression: keyConditionExpression,
+      ExpressionAttributeValues: expressionAttributeValues,
+      ExclusiveStartKey: recordKey ? { entityKey, recordKey } : undefined,
+      ConsistentRead: true,
+      ScanIndexForward: false,
+      Limit: limit,
+    }))
+    const lastRecordKey = readDiscussionLastRecordKey(response.LastEvaluatedKey)
+    return {
+      items: (response.Items ?? []).filter(isRecord).slice(0, limit),
+      ...(lastRecordKey ? { lastRecordKey } : {}),
     }
   }
 
@@ -6623,6 +6603,17 @@ function readDiscussionLastRecordKey(value: unknown) {
   return value.recordKey
 }
 
+/** Validates that a discussion cursor key belongs to the requested physical range. */
+function isDiscussionCursorRecordKey(
+  recordKey: string,
+  phase: DiscussionCursor['phase'],
+  plan: DiscussionReadPlan,
+) {
+  const prefix = phase === 'current' ? plan.currentPrefix : plan.legacyPrefix
+  return recordKey.startsWith(prefix) &&
+    (phase !== 'legacy' || plan.legacyUpperBound === undefined || recordKey < plan.legacyUpperBound)
+}
+
 /**
  * Decodes a discussion cursor and accepts both the current and pre-migration shapes.
  *
@@ -6650,7 +6641,7 @@ function decodeDiscussionCursor(
       if (
         parsed.prefix !== plan.legacyPrefix ||
         typeof parsed.recordKey !== 'string' ||
-        !parsed.recordKey.startsWith(plan.legacyPrefix)
+        !isDiscussionCursorRecordKey(parsed.recordKey, 'legacy', plan)
       ) {
         throw new Error('legacy cursor mismatch')
       }
@@ -6666,10 +6657,10 @@ function decodeDiscussionCursor(
       throw new Error('cursor mismatch')
     }
     if (parsed.recordKey !== undefined) {
-      const expectedPrefix = parsed.phase === 'current'
-        ? plan.currentPrefix
-        : plan.legacyPrefix
-      if (typeof parsed.recordKey !== 'string' || !parsed.recordKey.startsWith(expectedPrefix)) {
+      if (
+        typeof parsed.recordKey !== 'string' ||
+        !isDiscussionCursorRecordKey(parsed.recordKey, parsed.phase, plan)
+      ) {
         throw new Error('record key mismatch')
       }
     }

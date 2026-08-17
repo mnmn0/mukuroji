@@ -513,7 +513,11 @@ test('pages roots and replies through one bounded discussion prefix when request
   const client = createClient(async (command) => {
     const input = readCommandInput(command)
     const values = input.ExpressionAttributeValues as Record<string, unknown> | undefined
-    if (values?.[':prefix'] === 'DISCUSSION#V2#' || values?.[':prefix'] === 'DISCUSSION#') {
+    if (
+      values?.[':prefix'] === 'DISCUSSION#V2#' ||
+      input.KeyConditionExpression ===
+        'entityKey = :entityKey AND recordKey BETWEEN :legacyLowerBound AND :legacyUpperBound'
+    ) {
       discussionQueries.push(input)
       return { Items: [] }
     }
@@ -535,7 +539,11 @@ test('pages roots and replies through one bounded discussion prefix when request
     ScanIndexForward: false,
   })
   expect(discussionQueries[1]).toMatchObject({
-    ExpressionAttributeValues: { ':prefix': 'DISCUSSION#' },
+    KeyConditionExpression: 'entityKey = :entityKey AND recordKey BETWEEN :legacyLowerBound AND :legacyUpperBound',
+    ExpressionAttributeValues: {
+      ':legacyLowerBound': 'DISCUSSION#',
+      ':legacyUpperBound': 'DISCUSSION#V2#',
+    },
     ScanIndexForward: false,
   })
 })
