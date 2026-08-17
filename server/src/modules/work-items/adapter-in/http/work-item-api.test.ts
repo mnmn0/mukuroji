@@ -943,8 +943,9 @@ test('loads team issue detail and creates comments after team access is confirme
   const calls = configureFakeProjectClients(true)
   const collaborationCreates: Parameters<CollaborationClient['createComment']>[0][] = []
   const collaborationComments: Awaited<ReturnType<CollaborationClient['createComment']>>[] = []
-    setTestAppDependencies({
+  setTestAppDependencies({
     collaboration: createCollaborationStub({
+      /** Returns canonical root comments and no reply preview for this detail test. */
       async getThread(input) {
         return {
           comments: input.rootCommentId ? [] : collaborationComments,
@@ -958,6 +959,7 @@ test('loads team issue detail and creates comments after team access is confirme
           presence: [],
         }
       },
+      /** Persists the test comment in the in-memory canonical comment collection. */
       async createComment(input) {
         collaborationCreates.push(input)
         const comment = {
@@ -1046,6 +1048,7 @@ test('loads team issue detail and creates comments after team access is confirme
     actorMemberKey: 'demo@example.com',
     bodyMarkdown: '追加コメント',
     entityKey: 'user#demo@example.com#work-item#team/core-team/issue/onboarding-friction',
+    assigneeMemberKey: 'sato@example.com',
     authorizationConditionChecks: expect.arrayContaining([
       expect.objectContaining({
         ConditionCheck: expect.objectContaining({
@@ -1088,7 +1091,7 @@ test('loads team issue detail and creates comments after team access is confirme
   })
 })
 
-/** Verifies that team issue detail loads every canonical root-comment and reply page. */
+/** Verifies that team issue detail loads every canonical root and reply page. */
 test('loads every canonical comment page for team issue detail', async () => {
   configureFakeProjectClients(true)
   const rootComment = {
@@ -1154,22 +1157,17 @@ test('loads every canonical comment page for team issue detail', async () => {
 
   setTestAppDependencies({
     collaboration: createCollaborationStub({
-      /** Returns the deterministic canonical page for the requested root comment and cursor. */
+      /** Returns deterministic canonical pages containing roots and replies in one stream. */
       async getThread(input) {
-        if (!input.rootCommentId && input.cursor === undefined) {
-          return { ...threadState, comments: [rootComment], nextCursor: 'roots-page-2' }
+        if (input.includeReplies && input.cursor === undefined) {
+          return {
+            ...threadState,
+            comments: [rootComment, replyComment],
+            nextCursor: 'comments-page-2',
+          }
         }
-        if (!input.rootCommentId && input.cursor === 'roots-page-2') {
-          return { ...threadState, comments: [secondRootComment] }
-        }
-        if (input.rootCommentId === rootComment.id && input.cursor === undefined) {
-          return { ...threadState, comments: [replyComment], nextCursor: 'replies-page-2' }
-        }
-        if (input.rootCommentId === rootComment.id && input.cursor === 'replies-page-2') {
-          return { ...threadState, comments: [secondReplyComment] }
-        }
-        if (input.rootCommentId === secondRootComment.id) {
-          return { ...threadState, comments: [] }
+        if (input.includeReplies && input.cursor === 'comments-page-2') {
+          return { ...threadState, comments: [secondReplyComment, secondRootComment] }
         }
         throw new Error(`Unexpected collaboration cursor: ${input.cursor ?? 'none'}`)
       },
@@ -1189,6 +1187,55 @@ test('loads every canonical comment page for team issue detail', async () => {
     'second-reply-comment',
     'second-root-comment',
   ])
+})
+
+/** Verifies that a large root page does not trigger one empty reply probe per root. */
+test('loads a large canonical comment stream without per-root reply probes', async () => {
+  configureFakeProjectClients(true)
+  const rootComments = Array.from({ length: 50 }, (_, index) => ({
+    id: `root-comment-${index}`,
+    rootCommentId: `root-comment-${index}`,
+    authorMemberKey: 'demo@example.com',
+    bodyMarkdown: `Root comment ${index}`,
+    version: 1,
+    mentionMemberKeys: [],
+    createdAt: `2026-06-08T00:${String(index).padStart(2, '0')}:00.000Z`,
+    updatedAt: `2026-06-08T00:${String(index).padStart(2, '0')}:00.000Z`,
+    acceptedResolutions: [],
+    reactions: [],
+  }))
+  let pageReads = 0
+  const threadState = {
+    watch: {
+      subscribed: false,
+      explicit: false,
+      automatic: false,
+      reasons: [],
+      watcherCount: 0,
+    },
+    presence: [],
+  }
+
+  setTestAppDependencies({
+    collaboration: createCollaborationStub({
+      /** Returns the single bounded root-and-reply page for the detail request. */
+      async getThread(input) {
+        pageReads += 1
+        expect(input.includeReplies).toBe(true)
+        expect(input.rootCommentId).toBeUndefined()
+        return { ...threadState, comments: rootComments }
+      },
+    }),
+  })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+
+  expect(response.status).toBe(200)
+  expect((await response.json()).comments).toHaveLength(50)
+  expect(pageReads).toBe(1)
 })
 
 /** Verifies that an oversized aggregate comment read fails closed after its page budget. */
@@ -1220,17 +1267,21 @@ test('rejects team issue detail when canonical comment pages exceed the aggregat
 
   setTestAppDependencies({
     collaboration: createCollaborationStub({
-      /** Returns a root page followed by reply pages until the aggregate read budget is exhausted. */
+      /** Returns all-comment pages until the aggregate read budget is exhausted. */
       async getThread(input) {
         pageReads += 1
-        if (!input.rootCommentId && input.cursor === undefined) {
-          return { ...threadState, comments: [rootComment] }
+        if (input.includeReplies && input.cursor === undefined) {
+          return {
+            ...threadState,
+            comments: [rootComment],
+            nextCursor: 'comments-page-2',
+          }
         }
-        if (input.rootCommentId === rootComment.id) {
+        if (input.includeReplies) {
           return {
             ...threadState,
             comments: [],
-            nextCursor: `reply-page-${pageReads + 1}`,
+            nextCursor: `comments-page-${pageReads + 1}`,
           }
         }
         throw new Error(`Unexpected collaboration cursor: ${input.cursor ?? 'none'}`)
@@ -1280,13 +1331,17 @@ test('rejects team issue detail when canonical comment pagination stalls', async
 
   setTestAppDependencies({
     collaboration: createCollaborationStub({
-      /** Returns the same cursor in a reply scope to simulate non-advancing pagination. */
+      /** Returns the same cursor in the aggregate stream to simulate non-advancing pagination. */
       async getThread(input) {
         pageReads += 1
-        if (!input.rootCommentId && input.cursor === undefined) {
-          return { ...threadState, comments: [rootComment] }
+        if (input.includeReplies && input.cursor === undefined) {
+          return {
+            ...threadState,
+            comments: [rootComment],
+            nextCursor: 'stalled-cursor',
+          }
         }
-        if (input.rootCommentId === rootComment.id) {
+        if (input.includeReplies) {
           return {
             ...threadState,
             comments: [],
@@ -1308,7 +1363,7 @@ test('rejects team issue detail when canonical comment pagination stalls', async
     code: 'CollaborationThreadPaginationStalled',
     message: 'Collaboration thread pagination did not advance.',
   })
-  expect(pageReads).toBe(3)
+  expect(pageReads).toBe(2)
 })
 
 test('returns the canonical comment response for bodyMarkdown requests', async () => {

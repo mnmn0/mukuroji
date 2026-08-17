@@ -570,6 +570,55 @@ test('DynamoDB Team Work Item reads can use the strongly consistent base table',
   }])
 })
 
+/** Verifies that pre-cutover Automation replay reads use the exact event key and strong consistency. */
+test('DynamoDB Team Work Item client reads a matching pre-cutover Automation comment replay', async () => {
+  const sentInputs: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sentInputs.push(command.input)
+      return {
+        Item: {
+          directoryId: 'workspace-1',
+          directoryTeamId: 'workspace-1#team#core-team',
+          directoryTeamIssueId: 'workspace-1#team#core-team#issue#onboarding-friction',
+          teamId: 'core-team',
+          issueId: 'onboarding-friction',
+          eventId: 'automation-execution-1_comment_0',
+          eventType: 'commented',
+          actorUserId: 'automation:rule-1',
+          body: 'Pre-cutover comment',
+          summary: 'Comment was added.',
+          createdAt: '2026-07-16T00:00:00.000Z',
+        },
+      }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  await expect(client.getAutomationCommentReplay(
+    'workspace-1',
+    'core-team',
+    'onboarding-friction',
+    'automation-execution-1_comment_0',
+    'automation:rule-1',
+    'Pre-cutover comment',
+  )).resolves.toBe(true)
+  expect(sentInputs).toEqual([{
+    TableName: 'IssueEventsTable',
+    Key: {
+      directoryTeamIssueId: 'workspace-1#team#core-team#issue#onboarding-friction',
+      eventId: 'automation-execution-1_comment_0',
+    },
+    ConsistentRead: true,
+  }])
+})
+
 test('DynamoDB Team and project Work Item clients read every page without a default Limit', async () => {
   const sentInputs: Array<Record<string, unknown>> = []
   const pageCounts = new Map<string, number>()

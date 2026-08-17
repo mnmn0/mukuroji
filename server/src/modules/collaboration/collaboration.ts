@@ -288,6 +288,8 @@ export type GetCollaborationThreadInput = {
   viewerMemberKey: string
   /** Reply page を取得する root comment ID です。 */
   rootCommentId?: string
+  /** Root と reply を同じ bounded page stream で取得するかどうかです。 */
+  includeReplies?: boolean
   /** 一 page の最大件数です。 */
   limit?: number
   /** 前 page が返した opaque cursor です。 */
@@ -2645,7 +2647,9 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
     const viewerMemberKey = normalizeMemberKey(input.viewerMemberKey)
     const prefix = input.rootCommentId
       ? `DISCUSSION#THREAD#${requireIdentifier(input.rootCommentId, 'Root comment ID')}#`
-      : 'DISCUSSION#ROOT#'
+      : input.includeReplies === true
+        ? 'DISCUSSION#'
+        : 'DISCUSSION#ROOT#'
     const limit = clampLimit(input.limit)
     const exclusiveStartKey = decodeCursor(input.cursor, entityKey, prefix)
     const response = await this.documentClient.send(

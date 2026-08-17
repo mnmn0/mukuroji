@@ -718,6 +718,7 @@ function createTeamIssuesFake(
     getPublicWorkItemPage: unsupported,
     getProjectIssues: unsupported,
     getTeamIssueDetail: unsupported,
+    getAutomationCommentReplay: async () => false,
     createTeamIssue: unsupported,
     updateTeamIssue: unsupported,
     updateTeamIssueSchedules: unsupported,

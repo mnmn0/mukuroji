@@ -12,6 +12,7 @@ const {
   createInboundWebhookEndpointRecord,
   createInboundWebhookProvisioning,
   createTestWorkItemConfiguration,
+  getTestAppDependencies,
   originalBulkRecoveryTitle,
   resetTestApp,
   runWithTestAppDependencies,
@@ -2086,6 +2087,7 @@ test('writes automation comments to the canonical Collaboration store', async ()
     entityKey: 'workspace-1#work-item#team/core-team/issue/onboarding-friction',
     projectId: 'refero',
     projectEntityKey: 'workspace-1#project#refero',
+    assigneeMemberKey: 'sato@example.com',
     actorMemberKey: 'automation:rule-1',
     bodyMarkdown: 'Automated canonical comment',
     deepLink: expect.stringContaining('/teams/core-team/issues?'),
@@ -2109,6 +2111,73 @@ test('writes automation comments to the canonical Collaboration store', async ()
       requestFingerprint: expect.any(String),
     },
   })
+})
+
+/** Verifies that a pre-cutover comment replay prevents a duplicate canonical write. */
+test('replays a pre-cutover automation comment before creating a canonical duplicate', async () => {
+  configureFakeProjectClients(true)
+  let legacyReplayLookups = 0
+  let createCalls = 0
+  const existingTeamIssues = getTestAppDependencies().workItems.teamIssues
+  setTestAppDependencies({
+    teamIssues: {
+      ...existingTeamIssues,
+      /** Returns a matching durable pre-cutover comment action. */
+      async getAutomationCommentReplay(directoryId, teamId, issueId, eventId, actorUserId, body) {
+        legacyReplayLookups += 1
+        expect({ directoryId, teamId, issueId, eventId, actorUserId, body }).toEqual({
+          directoryId: 'workspace-1',
+          teamId: 'core-team',
+          issueId: 'onboarding-friction',
+          eventId: 'automation-comment-legacy-replay_comment_0',
+          actorUserId: 'automation:rule-1',
+          body: 'Pre-cutover comment',
+        })
+        return true
+      },
+    },
+    collaboration: createCollaborationStub({
+      async createComment() {
+        createCalls += 1
+        throw new Error('A pre-cutover replay must not create a canonical duplicate.')
+      },
+    }),
+  })
+  const context = {
+    execution: {
+      schemaVersion: AUTOMATION_SCHEMA_VERSION,
+      id: 'automation-comment-legacy-replay',
+      workspaceId: 'workspace-1',
+      ruleId: 'rule-1',
+      ruleVersion: 1,
+      triggerEventId: 'event-1',
+      status: 'running',
+      attempts: 2,
+      actions: [],
+      startedAt: '2026-07-16T00:00:00.000Z',
+      retryable: false,
+    },
+    event: {
+      eventId: 'event-1',
+      eventType: 'work-item.updated',
+      workspaceId: 'workspace-1',
+      occurredAt: '2026-07-16T00:00:00.000Z',
+      changes: [],
+      metadata: { teamId: 'core-team', issueId: 'onboarding-friction' },
+    },
+    actionIndex: 0,
+    idempotencyKey: 'automation-comment-legacy-replay:action:0000',
+  } satisfies AutomationActionExecutionContext
+
+  await expect(runWithTestAppDependencies(() =>
+    createAutomationActionExecutor().execute({
+      type: 'comment',
+      body: 'Pre-cutover comment',
+    }, context)
+  )).resolves.toBeUndefined()
+
+  expect(legacyReplayLookups).toBe(1)
+  expect(createCalls).toBe(0)
 })
 
 test('replays an automation comment before checking a changed project assignment', async () => {

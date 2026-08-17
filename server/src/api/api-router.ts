@@ -1032,8 +1032,6 @@ const ANALYTICS_SNAPSHOT_ACL_INSPECTION_LIMIT = 1_000
 const ANALYTICS_SNAPSHOT_REPOSITORY_PAGE_LIMIT = 10
 /** Relation target の強整合 detail read を同時実行する最大数です。 */
 const WORK_ITEM_RELATION_TARGET_READ_CONCURRENCY = 8
-/** Issue detail の canonical reply read を同時実行する最大数です。 */
-const TEAM_ISSUE_DETAIL_REPLY_READ_CONCURRENCY = 8
 /** Issue detail の canonical comment read に許容する合計 page 数です。 */
 const TEAM_ISSUE_DETAIL_COMMENT_READ_MAX_PAGES = 50
 /** One task-view request may strongly inspect at most one full 20-Team relation filter. */
@@ -8886,43 +8884,15 @@ routeApp.get('/api/teams/:teamId/issues/:issueId', async (c) => {
         viewerMemberKey: principal.userKey,
         projectEntityKey,
         limit: 100,
+        includeReplies: true,
         includeScopeState: false,
       }, collaborationReadBudget),
       workItemDependencies.workItemConfigurations.getTeamConfiguration(principal.directoryId, teamId),
       workItemDependencies.workItemConfigurations.listRelations(principal.directoryId, teamId, issueId),
     ])
-    const collaborationRootComments = collaborationComments.filter(
-      (comment) => comment.rootCommentId === comment.id,
+    const allCollaborationComments = collaborationComments.sort(
+      (left, right) => left.createdAt.localeCompare(right.createdAt),
     )
-    const collaborationReplyComments: CollaborationComment[][] = []
-    for (
-      let offset = 0;
-      offset < collaborationRootComments.length;
-      offset += TEAM_ISSUE_DETAIL_REPLY_READ_CONCURRENCY
-    ) {
-      const rootBatch = collaborationRootComments.slice(
-        offset,
-        offset + TEAM_ISSUE_DETAIL_REPLY_READ_CONCURRENCY,
-      )
-      collaborationReplyComments.push(...await Promise.all(
-        rootBatch.map((root) => readAllCollaborationThreadComments(
-          workItemDependencies.collaboration,
-          {
-            entityKey,
-            viewerMemberKey: principal.userKey,
-            projectEntityKey,
-            rootCommentId: root.id,
-            limit: 100,
-            includeScopeState: false,
-          },
-          collaborationReadBudget,
-        )),
-      ))
-    }
-    const allCollaborationComments = [
-      ...collaborationComments,
-      ...collaborationReplyComments.flat(),
-    ].sort((left, right) => left.createdAt.localeCompare(right.createdAt))
     const visibleRelations = await filterVisibleWorkItemRelations(
       principal,
       context,
@@ -9900,6 +9870,7 @@ routeApp.post('/api/teams/:teamId/issues/:issueId/comments', async (c) => {
       entityKey,
       projectId: detail.issue.assignedProjectId,
       projectEntityKey,
+      assigneeMemberKey: detail.issue.assigneeUserId,
       actorMemberKey: principal.userKey,
       bodyMarkdown: readRequiredCommentBody(modernContract ? body.bodyMarkdown : body.body),
       parentCommentId: readOptionalCommentId(body.parentCommentId, 'Parent comment ID'),
@@ -13817,6 +13788,19 @@ async function executeAutomationComment(
     auditContext,
   })
   if (replay) return
+  if (
+    dependencies.teamIssues.getAutomationCommentReplay &&
+    await dependencies.teamIssues.getAutomationCommentReplay(
+      context.execution.workspaceId,
+      target.teamId,
+      target.workItemId,
+      createAutomationCommentEventId(context),
+      `automation:${context.execution.ruleId}`,
+      body,
+    )
+  ) {
+    return
+  }
 
   const team = await requireAutomationTeam(
     context.execution.workspaceId,
@@ -13883,6 +13867,7 @@ async function executeAutomationComment(
     entityKey,
     projectId: detail.issue.assignedProjectId,
     projectEntityKey,
+    assigneeMemberKey: detail.issue.assigneeUserId,
     actorMemberKey: `automation:${context.execution.ruleId}`,
     bodyMarkdown: body,
     automaticWatcherCandidates: createTeamIssueAutomaticWatcherCandidates(detail.issue),
@@ -13984,6 +13969,11 @@ function createAutomationMutationContext(
       route: `automation-lineage:${createAutomationRuleLineage(context).join(',')}`,
     },
   })
+}
+
+/** Creates the deterministic pre-cutover Automation comment event identity. */
+function createAutomationCommentEventId(context: AutomationActionExecutionContext) {
+  return `${context.execution.id}_comment_${context.actionIndex}`
 }
 
 function createAutomationRuleLineage(context: AutomationActionExecutionContext) {

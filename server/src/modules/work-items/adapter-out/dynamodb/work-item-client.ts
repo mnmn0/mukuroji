@@ -1227,6 +1227,25 @@ export type TeamIssuesClient = {
     options?: TeamIssueDetailReadOptions,
   ): Promise<TeamIssueDetailResponse>
   /**
+   * Reads a pre-cutover Automation comment by its deterministic legacy action identity.
+   *
+   * @param directoryId - Workspace directory identifier.
+   * @param teamId - Owning Team identifier.
+   * @param issueId - Team-local Work Item identifier.
+   * @param eventId - Deterministic comment action event identifier.
+   * @param actorUserId - Expected Automation actor identifier.
+   * @param body - Expected comment body.
+   * @returns Whether a matching pre-cutover comment event already exists.
+   */
+  getAutomationCommentReplay?(
+    directoryId: string,
+    teamId: string,
+    issueId: string,
+    eventId: string,
+    actorUserId: string,
+    body: string,
+  ): Promise<boolean>
+  /**
    * DynamoDB に team issue を作成します。
    */
   createTeamIssue(
@@ -1878,6 +1897,62 @@ export class DynamoDbTeamIssuesClient {
 
       throw toProjectDataError(error)
     }
+  }
+
+  /**
+   * Reads one pre-cutover Automation comment event for response-loss replay.
+   *
+   * @param directoryId - Workspace directory identifier.
+   * @param teamId - Owning Team identifier.
+   * @param issueId - Team-local Work Item identifier.
+   * @param eventId - Deterministic comment action event identifier.
+   * @param actorUserId - Expected Automation actor identifier.
+   * @param body - Expected comment body.
+   * @returns Whether the matching event is already durable.
+   */
+  async getAutomationCommentReplay(
+    directoryId: string,
+    teamId: string,
+    issueId: string,
+    eventId: string,
+    actorUserId: string,
+    body: string,
+  ) {
+    await this.ensureLocalTables()
+    const normalizedEventId = readIdempotencyResourceId(eventId)
+    if (!normalizedEventId) {
+      throw new ProjectDataError(
+        400,
+        'InvalidProjectWrite',
+        'Automation comment replay event ID is invalid.',
+      )
+    }
+    const response = await this.documentClient.send(new GetCommand({
+      TableName: this.eventTableName,
+      Key: {
+        directoryTeamIssueId: createDirectoryTeamIssueId(directoryId, teamId, issueId),
+        eventId: normalizedEventId,
+      },
+      ConsistentRead: true,
+    }))
+    if (response.Item === undefined) return false
+
+    if (!isTeamIssueEventItem(response.Item) || response.Item.eventType !== 'commented') {
+      throw new ProjectDataError(
+        503,
+        'AutomationCommentReplayUnavailable',
+        'The pre-cutover comment replay record is invalid.',
+      )
+    }
+    if (response.Item.actorUserId !== actorUserId || response.Item.body !== body) {
+      throw new ProjectDataError(
+        409,
+        'AutomationCommentIdempotencyConflict',
+        'The Automation comment action was reused with different input.',
+      )
+    }
+
+    return true
   }
 
   /**

@@ -95,6 +95,8 @@ Collaboration comment の正本は Collaboration table の persisted root/reply 
 3. 必要な既存 comment を Collaboration table へ backfill し、対象環境の全 `TeamIssueEventsTable` partition に対して下記の検証コマンドを実行します。`legacy_commented_event_count=0` にならない場合は次へ進みません。
 4. 検証後にこの canonical-only reader と旧 cursor 拒否を含むリリースをデプロイし、Automation worker を再開します。再開後も旧 writer、DLQ、canonical comment count を監視します。
 
+互換期間中に旧 worker が comment row を永続化した後、response を失って canonical writer へ retry が到達する可能性があります。Automation writer は canonical write の前に、旧 writer と同じ決定的な `${execution.id}_comment_${actionIndex}` event ID を `ConsistentRead` で照合します。actor と本文が一致する旧 `commented` row は完了済みとして扱い、異なる入力や不正な row は fail closed します。この参照は response-loss retry の橋渡しだけに使い、canonical comment response の旧 table fallback には使いません。旧 worker の drain、backfill、全 partition scan は引き続き必要です。
+
 検証と reader 切り替えの間に旧 worker を稼働させないことが重要です。旧 worker が残る環境で検証結果が 0 でも、reader 削除後に新しい legacy row が発生するため、デプロイを中止して drain 状態を復旧してください。
 
 開発／検証環境で旧 row が残っていないことを確認する場合は、scope を明示した `ISSUE_ID` を指定して検証モードを実行します。このモードは対象 Issue の event 件数を読み取るだけでなく、`TeamIssueEventsTable` 全体を scan して、ページごとの `commented` 件数を合計します。`legacy_commented_event_count=0` 以外の場合は non-zero で終了します。

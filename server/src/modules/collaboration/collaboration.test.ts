@@ -507,6 +507,35 @@ test('pages root comments newest-first and binds cursors to their entity scope',
   })
 })
 
+/** Verifies that detail reads can page roots and replies through one bounded stream. */
+test('pages roots and replies through one bounded discussion prefix when requested', async () => {
+  const discussionQueries: Array<Record<string, unknown>> = []
+  const client = createClient(async (command) => {
+    const input = readCommandInput(command)
+    const values = input.ExpressionAttributeValues as Record<string, unknown> | undefined
+    if (values?.[':prefix'] === 'DISCUSSION#') {
+      discussionQueries.push(input)
+      return { Items: [] }
+    }
+    return { Items: [] }
+  })
+
+  await client.getThread({
+    entityKey: createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1'),
+    viewerMemberKey: 'member@example.com',
+    includeReplies: true,
+  })
+
+  expect(discussionQueries).toHaveLength(1)
+  expect(discussionQueries[0]).toMatchObject({
+    KeyConditionExpression: 'entityKey = :entityKey AND begins_with(recordKey, :prefix)',
+    ExpressionAttributeValues: {
+      ':prefix': 'DISCUSSION#',
+    },
+    ScanIndexForward: false,
+  })
+})
+
 test('stores a project watcher in the project scope', async () => {
   const transactions: Array<Record<string, unknown>> = []
   const client = createClient(async (command) => {
@@ -984,6 +1013,42 @@ test('seeds deduplicated automatic watchers when a comment is created', async ()
   )
   const mentionedValues = mentionedUpdate?.ExpressionAttributeValues as Record<string, unknown>
   expect(mentionedValues[':reasons']).toEqual(new Set(['mention']))
+})
+
+/** Verifies automatic watcher creation is fenced by the captured Work Item assignee. */
+test('binds automatic watcher creation to the captured Work Item assignee', async () => {
+  let transaction: Record<string, unknown> | undefined
+  const client = createClient(async (command) => {
+    const input = readCommandInput(command)
+    if ('TransactItems' in input) {
+      transaction = input
+      return {}
+    }
+    return { Items: [] }
+  })
+
+  await client.createComment({
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'issue-1',
+    entityKey: createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1'),
+    assigneeMemberKey: 'assignee@example.com',
+    actorMemberKey: 'author@example.com',
+    bodyMarkdown: 'Please review this.',
+    automaticWatcherCandidates: [
+      { memberKey: 'assignee@example.com', reason: 'assignee' },
+    ],
+  })
+
+  if (!transaction) {
+    throw new Error('Expected an automatic watcher transaction.')
+  }
+  const parentCheck = (transaction.TransactItems as Array<Record<string, unknown>>)[0]
+    ?.ConditionCheck as Record<string, unknown>
+  expect(parentCheck.ConditionExpression).toContain('assigneeUserId = :assigneeMemberKey')
+  expect(parentCheck.ExpressionAttributeValues).toEqual({
+    ':assigneeMemberKey': 'assignee@example.com',
+  })
 })
 
 /** Ensures comment writes carry caller authorization conditions in the same transaction. */
