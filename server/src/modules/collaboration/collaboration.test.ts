@@ -544,6 +544,7 @@ test('pages roots and replies through one bounded discussion prefix when request
       ':legacyLowerBound': 'DISCUSSION#',
       ':legacyUpperBound': 'DISCUSSION#V2#',
     },
+    FilterExpression: 'attribute_not_exists(discussionIndexVersion)',
     ScanIndexForward: false,
   })
 })
@@ -628,9 +629,28 @@ test('writes timestamp-first discussion indexes for roots and replies', async ()
   expect(discussionKeys).toEqual([
     `DISCUSSION#V2#2026-07-12T03:00:00.000Z#ROOT#${created.id}`,
     `DISCUSSION#V2S#ROOT#2026-07-12T03:00:00.000Z#${created.id}`,
+    `DISCUSSION#ROOT#2026-07-12T03:00:00.000Z#${created.id}`,
     `DISCUSSION#V2#2026-07-12T04:00:00.000Z#THREAD#${created.id}#${reply.id}`,
     `DISCUSSION#V2S#THREAD#${created.id}#2026-07-12T04:00:00.000Z#${reply.id}`,
+    `DISCUSSION#THREAD#${created.id}#2026-07-12T04:00:00.000Z#${reply.id}`,
   ])
+  const legacyDiscussionItems = transactions.flatMap((transaction) => {
+    if (!Array.isArray(transaction.TransactItems)) return []
+    return transaction.TransactItems.flatMap((item) => {
+      if (!isTestRecord(item) || !isTestRecord(item.Put) || !isTestRecord(item.Put.Item)) {
+        return []
+      }
+      const putItem = item.Put.Item
+      return putItem.entryType === 'discussion' &&
+          typeof putItem.recordKey === 'string' &&
+          putItem.recordKey.startsWith('DISCUSSION#') &&
+          !putItem.recordKey.startsWith('DISCUSSION#V2')
+        ? [putItem]
+        : []
+    })
+  })
+  expect(legacyDiscussionItems).toHaveLength(2)
+  expect(legacyDiscussionItems.every((item) => item.discussionIndexVersion === 2)).toBeTrue()
 })
 
 test('stores a project watcher in the project scope', async () => {

@@ -2607,6 +2607,8 @@ const curatedContextPageLimit = 10
 const discussionTimelinePrefix = 'DISCUSSION#V2#'
 const discussionScopedPrefix = 'DISCUSSION#V2S#'
 const discussionLegacyUpperBound = discussionTimelinePrefix
+/** Marker used to exclude new compatibility rows from migration fallback reads. */
+const discussionLegacyIndexVersion = 2
 const localTableInitializers = new WeakMap<DynamoDBClient, Map<string, Promise<void>>>()
 
 /** Work Item scope の canonical collaboration entity key を作成します。 */
@@ -2945,6 +2947,9 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       ConsistentRead: true,
       ScanIndexForward: false,
       Limit: limit,
+      ...(phase === 'legacy'
+        ? { FilterExpression: 'attribute_not_exists(discussionIndexVersion)' }
+        : {}),
     }))
     const lastRecordKey = readDiscussionLastRecordKey(response.LastEvaluatedKey)
     return {
@@ -3980,6 +3985,11 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       commentId,
       parent ? rootCommentId : undefined,
     )
+    const discussionLegacyKey = discussionLegacyRecordKey(
+      occurredAt,
+      commentId,
+      parent ? rootCommentId : undefined,
+    )
     const notificationCandidates = await this.buildNotificationCandidates(input, parent)
     const automaticWatchers = buildAutomaticWatcherCandidates(
       actorMemberKey,
@@ -4037,6 +4047,22 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
             entityKey: input.entityKey,
             recordKey: discussionScopedKey,
             entryType: 'discussion',
+            commentId,
+            rootCommentId,
+            ...(parent ? { parentCommentId: parent.id } : {}),
+            createdAt: occurredAt,
+          },
+          ConditionExpression: 'attribute_not_exists(entityKey) AND attribute_not_exists(recordKey)',
+        },
+      },
+      {
+        Put: {
+          TableName: this.tableName,
+          Item: {
+            entityKey: input.entityKey,
+            recordKey: discussionLegacyKey,
+            entryType: 'discussion',
+            discussionIndexVersion: discussionLegacyIndexVersion,
             commentId,
             rootCommentId,
             ...(parent ? { parentCommentId: parent.id } : {}),
@@ -6401,6 +6427,25 @@ function discussionScopedRecordKey(
     ? `THREAD#${requireIdentifier(rootCommentId, 'Root comment ID')}#`
     : 'ROOT#'
   return `${discussionScopedPrefix}${scope}${occurredAt}#${requireIdentifier(commentId, 'Comment ID')}`
+}
+
+/**
+ * Creates the pre-migration discussion index key retained for rollback compatibility.
+ *
+ * @param occurredAt - Canonical comment creation timestamp.
+ * @param commentId - Comment identifier.
+ * @param rootCommentId - Root identifier for a reply, or undefined for a root.
+ * @returns Legacy discussion record key understood by the previous reader.
+ */
+function discussionLegacyRecordKey(
+  occurredAt: string,
+  commentId: string,
+  rootCommentId: string | undefined,
+) {
+  const scope = rootCommentId
+    ? `THREAD#${requireIdentifier(rootCommentId, 'Root comment ID')}#`
+    : 'ROOT#'
+  return `DISCUSSION#${scope}${occurredAt}#${requireIdentifier(commentId, 'Comment ID')}`
 }
 
 function watcherRecordKey(memberKey: string) {
