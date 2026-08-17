@@ -257,6 +257,7 @@ describe('team issue collaboration API', () => {
           sourceRootCommentId: 'root/1',
           capturedCommentRevision: 2,
           capturedCommentBody: 'Captured answer',
+          capturedCommentAuthorMemberKey: 'member-2',
           summary: 'Adopt the captured answer.',
           acceptedBy: { id: 'member-1', displayName: 'Demo User' },
           acceptedAt: '2026-08-09T00:20:00.000Z',
@@ -277,6 +278,7 @@ describe('team issue collaboration API', () => {
     expect(resolutionPage.items[0]?.summary).toBe(
       'Adopt the captured answer.',
     )
+    expect(resolutionPage.items[0]?.capturedCommentAuthorMemberKey).toBe('member-2')
     expect(resolutionRequests[0]?.url).toBe(
       '/api/teams/core%20team/issues/issue%2F1/comments/root%2F1/accepted-resolutions?limit=10&cursor=resolution%2Fa%2Bb',
     )
@@ -334,8 +336,20 @@ describe('team issue collaboration API', () => {
               summary: 'Old summary',
             },
           ],
+          authorMemberKey: 'demo@example.com',
+          bodyMarkdown: 'Current conclusion',
+          capabilities: {
+            canDelete: true,
+            canEdit: true,
+            canResolve: true,
+          },
           createdAt: '2026-08-09T00:00:00.000Z',
           id: 'root-1',
+          mentionMemberKeys: [],
+          reactions: [],
+          rootCommentId: 'root-1',
+          updatedAt: '2026-08-09T00:00:00.000Z',
+          version: 1,
         },
       ],
       watch: {

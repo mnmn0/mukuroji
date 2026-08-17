@@ -67,6 +67,7 @@ export function buildAutomationWorkers(
   const {
     auditEventsTable,
     automationTable,
+    collaborationTable,
     planningTable,
     projectDirectoryTable,
     teamIssueEventsTable,
@@ -120,6 +121,7 @@ export function buildAutomationWorkers(
         AUTOMATION_WEBHOOK_SECRET_PREFIX: automationWebhookSecretPrefix,
         AUDIT_EVENTS_TABLE_NAME: auditEventsTable.tableName,
         AUDIT_RETENTION_DAYS: auditRetentionDays.valueAsString,
+        COLLABORATION_TABLE_NAME: collaborationTable.tableName,
         COGNITO_CLIENT_ID: cognitoUserPoolClientId.valueAsString,
         COGNITO_USER_POOL_ID: cognitoUserPoolId.valueAsString,
         FILE_PROOFING_TABLE_NAME: fileProofingTable.tableName,
@@ -162,6 +164,7 @@ export function buildAutomationWorkers(
   );
   auditEventsTable.grantStreamRead(automationEventFunction);
   automationTable.grants.readWriteData(automationEventFunction);
+  collaborationTable.grants.readWriteData(automationEventFunction);
   auditEventsTable.grants.readWriteData(automationEventFunction);
   fileProofingTable.grants.readWriteData(automationEventFunction);
   projectDirectoryTable.grants.readData(automationEventFunction);
@@ -186,7 +189,9 @@ export function buildAutomationWorkers(
         actions: ['dynamodb:ConditionCheckItem'],
         resources: [
           automationTable.tableArn,
+          collaborationTable.tableArn,
           fileProofingTable.tableArn,
+          projectDirectoryTable.tableArn,
           workItemConfigurationTable.tableArn,
           workItemsTable.tableArn,
           workspaceSearchTable.tableArn,
@@ -263,6 +268,7 @@ export function buildAutomationWorkers(
         AUTOMATION_WEBHOOK_SECRET_PREFIX: automationWebhookSecretPrefix,
         AUDIT_EVENTS_TABLE_NAME: auditEventsTable.tableName,
         AUDIT_RETENTION_DAYS: auditRetentionDays.valueAsString,
+        COLLABORATION_TABLE_NAME: collaborationTable.tableName,
         COGNITO_CLIENT_ID: cognitoUserPoolClientId.valueAsString,
         COGNITO_USER_POOL_ID: cognitoUserPoolId.valueAsString,
         FILE_PROOFING_TABLE_NAME: fileProofingTable.tableName,
@@ -294,6 +300,7 @@ export function buildAutomationWorkers(
     'automation-schedule',
   );
   automationTable.grants.readWriteData(automationScheduleFunction);
+  collaborationTable.grants.readWriteData(automationScheduleFunction);
   auditEventsTable.grants.readWriteData(automationScheduleFunction);
   fileProofingTable.grants.readWriteData(automationScheduleFunction);
   projectDirectoryTable.grants.readData(automationScheduleFunction);
@@ -318,7 +325,9 @@ export function buildAutomationWorkers(
         actions: ['dynamodb:ConditionCheckItem'],
         resources: [
           automationTable.tableArn,
+          collaborationTable.tableArn,
           fileProofingTable.tableArn,
+          projectDirectoryTable.tableArn,
           workItemConfigurationTable.tableArn,
           workItemsTable.tableArn,
           workspaceSearchTable.tableArn,

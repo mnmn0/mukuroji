@@ -570,6 +570,86 @@ test('DynamoDB Team Work Item reads can use the strongly consistent base table',
   }])
 })
 
+/** Verifies that pre-cutover Automation replay reads use the exact event key and strong consistency. */
+test('DynamoDB Team Work Item client reads a matching pre-cutover Automation comment replay', async () => {
+  const sentInputs: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      sentInputs.push(command.input)
+      return {
+        Item: {
+          directoryId: 'workspace-1',
+          directoryTeamId: 'workspace-1#team#core-team',
+          directoryTeamIssueId: 'workspace-1#team#core-team#issue#onboarding-friction',
+          teamId: 'core-team',
+          issueId: 'onboarding-friction',
+          eventId: 'automation-execution-1_comment_0',
+          eventType: 'commented',
+          actorUserId: 'automation:rule-1',
+          body: 'Pre-cutover comment',
+          summary: 'Comment was added.',
+          createdAt: '2026-07-16T00:00:00.000Z',
+        },
+      }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  await expect(client.getAutomationCommentReplay(
+    'workspace-1',
+    'core-team',
+    'onboarding-friction',
+    'automation-execution-1_comment_0',
+    'automation:rule-1',
+    'Pre-cutover comment',
+  )).resolves.toBe(true)
+  expect(sentInputs).toEqual([{
+    TableName: 'IssueEventsTable',
+    Key: {
+      directoryTeamIssueId: 'workspace-1#team#core-team#issue#onboarding-friction',
+      eventId: 'automation-execution-1_comment_0',
+    },
+    ConsistentRead: true,
+  }])
+})
+
+/** Verifies that pre-cutover replay transport failures use the Work Item error contract. */
+test('DynamoDB Team Work Item client classifies pre-cutover replay transport failures', async () => {
+  const documentClient = {
+    async send() {
+      throw Object.assign(new Error('DynamoDB throttled'), {
+        name: 'ThrottlingException',
+        $metadata: { httpStatusCode: 429 },
+      })
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  await expect(client.getAutomationCommentReplay(
+    'workspace-1',
+    'core-team',
+    'onboarding-friction',
+    'automation-execution-1_comment_0',
+    'automation:rule-1',
+    'Pre-cutover comment',
+  )).rejects.toMatchObject({
+    status: 429,
+    code: 'ThrottlingException',
+  })
+})
+
 test('DynamoDB Team and project Work Item clients read every page without a default Limit', async () => {
   const sentInputs: Array<Record<string, unknown>> = []
   const pageCounts = new Map<string, number>()
@@ -1593,91 +1673,6 @@ test('DynamoDB Work Item archive updates reject timestamps outside the canonical
     'GetCommand',
     'TransactWriteCommand',
   ])
-})
-
-test('DynamoDB Work Item comment idempotent replay returns comment and activity', async () => {
-  const issue = {
-    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
-    revision: 1,
-    directoryId: 'workspace-1',
-    directoryTeamId: 'workspace-1#team#core-team',
-    teamId: 'core-team',
-    issueId: 'issue-1',
-    sortOrder: 10,
-    title: 'Idempotent comments',
-    assigneeUserId: 'member@example.com',
-    creatorMemberKey: 'member@example.com',
-    workflowSchemaVersion: 1,
-    workflowStatusId: 'todo',
-    statusCategory: 'unstarted',
-    customFieldValues: {},
-    relationIds: [],
-    dueDate: '2026-07-20',
-    schedule: createDueDateSchedule('2026-07-20'),
-    priority: 'medium',
-    createdAt: '2026-07-17T00:00:00.000Z',
-    updatedAt: '2026-07-17T00:00:00.000Z',
-  }
-  const existingComment = {
-    directoryId: 'workspace-1',
-    teamId: 'core-team',
-    issueId: 'issue-1',
-    directoryTeamIssueId: 'workspace-1#team#core-team#issue#issue-1',
-    eventId: 'automation-comment-1',
-    eventType: 'commented',
-    actorUserId: 'automation:rule-1',
-    body: 'Already delivered',
-    summary: 'Comment was added.',
-    createdAt: '2026-07-17T00:01:00.000Z',
-  }
-  let getCount = 0
-  const documentClient = {
-    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
-      if (command.constructor.name === 'GetCommand') {
-        getCount += 1
-        return { Item: getCount === 1 ? issue : existingComment }
-      }
-      if (command.constructor.name === 'PutCommand') {
-        const error = new Error('The comment already exists.')
-        error.name = 'ConditionalCheckFailedException'
-        throw error
-      }
-      return {}
-    },
-  } as unknown as DynamoDBDocumentClient
-  const client = new DynamoDbTeamIssuesClient(
-    'WorkItemsTable',
-    'IssueEventsTable',
-    documentClient,
-    {} as DynamoDBClient,
-    false,
-  )
-
-  await expect(client.createTeamIssueComment(
-    'workspace-1',
-    'core-team',
-    'issue-1',
-    {
-      body: 'Already delivered',
-      idempotencyEventId: 'automation-comment-1',
-    },
-    'automation:rule-1',
-  )).resolves.toEqual({
-    comment: {
-      id: 'automation-comment-1',
-      actorUserId: 'automation:rule-1',
-      body: 'Already delivered',
-      createdAt: '2026-07-17T00:01:00.000Z',
-    },
-    activity: {
-      id: 'automation-comment-1',
-      type: 'commented',
-      actorUserId: 'automation:rule-1',
-      summary: 'Comment was added.',
-      createdAt: '2026-07-17T00:01:00.000Z',
-    },
-  })
-  expect(getCount).toBe(2)
 })
 
 test('DynamoDB Work Item client increments revision with an atomic CAS update', async () => {

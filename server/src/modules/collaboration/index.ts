@@ -28,6 +28,7 @@ export {
   type CuratedContextDocumentSourceAuthorizationSnapshot,
   type CuratedContextMutationInput,
   type DeleteCollaborationCommentInput,
+  type GetCollaborationCommentMutationReplayInput,
   type GetCollaborationCommentSnapshotInput,
   type GetCollaborationThreadInput,
   type GetCuratedContextInput,

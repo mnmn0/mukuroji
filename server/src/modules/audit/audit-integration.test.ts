@@ -222,69 +222,6 @@ test('canonical Work Item audit diff is guarded by expected revision CAS', async
   })
 })
 
-test('comment mutation condition-checks its parent and writes specialized and generic events atomically', async () => {
-  const issueItem = createTeamIssueItem('issue-1')
-  const recording = createRecordingDocumentClient((name) =>
-    name === 'GetCommand' ? { Item: issueItem } : {},
-  )
-  const client = new DynamoDbTeamIssuesClient(
-    'IssuesTable',
-    'IssueEventsTable',
-    recording.client,
-    undefined,
-    false,
-    'AuditTable',
-  )
-
-  await client.createTeamIssueComment(
-    workspaceId,
-    'core-team',
-    'issue-1',
-    { body: 'Please review the audit event.' },
-    actorUserId,
-    createAuditContext('comment-request'),
-  )
-
-  const transaction = recording.commands.find((command) => command.name === 'TransactWriteCommand')
-  const items = readTransactItems(transaction)
-
-  expect(items).toHaveLength(3)
-  expect(items[0]).toEqual({
-    ConditionCheck: {
-      TableName: 'IssuesTable',
-      Key: {
-        directoryTeamId: `${workspaceId}#team#core-team`,
-        issueId: 'issue-1',
-      },
-      ConditionExpression: 'attribute_exists(directoryTeamId) AND attribute_exists(issueId)',
-    },
-  })
-  expect(items[1]).toMatchObject({
-    Put: {
-      TableName: 'IssueEventsTable',
-      Item: {
-        issueId: 'issue-1',
-        eventType: 'commented',
-        body: 'Please review the audit event.',
-      },
-    },
-  })
-  const specializedEvent = readPutItem(items[1])
-
-  expect(items[2]).toMatchObject({
-    Put: {
-      TableName: 'AuditTable',
-      Item: {
-        eventType: 'comment.created',
-        entityType: 'work-item',
-        entityId: 'team/core-team/issue/issue-1',
-        targetType: 'comment',
-        targetId: `team/core-team/issue/issue-1/comment/${String(specializedEvent.eventId)}`,
-      },
-    },
-  })
-})
-
 test('workspace audit requires system admin and forwards pagination filters', async () => {
   const queries: Array<Record<string, unknown>> = []
   const auditWrites: Array<Record<string, unknown>> = []
@@ -781,20 +718,7 @@ function readTransactItems(
 }
 
 /**
- * transaction item の Put payload から保存 item を読み取ります。
- */
-function readPutItem(item: Record<string, unknown> | undefined) {
-  const put = item?.Put
-
-  if (!isRecord(put) || !isRecord(put.Item)) {
-    throw new TypeError('Expected a transaction Put item.')
-  }
-
-  return put.Item
-}
-
-/**
- * comment integration test 用の有効な Team Issue item を作成します。
+ * Creates a valid Team Issue item for canonical Work Item integration tests.
  */
 function createTeamIssueItem(issueId: string) {
   return {

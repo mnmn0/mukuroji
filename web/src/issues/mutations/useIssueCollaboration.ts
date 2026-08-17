@@ -283,7 +283,10 @@ export function useIssueCollaboration({
       ? replyPageState.comments
       : []
 
-    return mergeIssueComments([...(data?.flatMap((page) => page.comments) ?? []), ...loadedReplyComments])
+    return deduplicateIssueComments([
+      ...(data?.flatMap((page) => page.comments) ?? []),
+      ...loadedReplyComments,
+    ])
   }, [collaborationScope, data, replyPageState.comments, replyPageState.scope])
   const activity = useMemo(
     () => mergeActivity(activityPages?.flatMap((page) => page.events) ?? []),
@@ -396,7 +399,7 @@ export function useIssueCollaboration({
 
       return {
         ...current,
-        comments: mergeIssueComments([
+        comments: deduplicateIssueComments([
           ...retainedComments,
           ...successfulThreads.flatMap((thread) => thread.comments),
         ]),
@@ -635,7 +638,7 @@ export function useIssueCollaboration({
 
         return {
           ...current,
-          comments: mergeIssueComments([...current.comments, ...page.comments]),
+          comments: deduplicateIssueComments([...current.comments, ...page.comments]),
           cursors: {
             ...current.cursors,
             [rootCommentId]: page.replyNextCursors?.[rootCommentId] ?? page.nextCursor,
@@ -819,15 +822,11 @@ function resolveCommentVersion(comment: TeamIssueComment) {
   return Number.isInteger(comment.version) && (comment.version ?? 0) > 0 ? comment.version ?? 1 : 1
 }
 
-/** Paginated comments を ID で統合し、persisted row を legacy fallback より優先します。 */
-export function mergeIssueComments(comments: TeamIssueComment[]) {
+/** Deduplicates canonical comments loaded from overlapping pages or refreshes. */
+function deduplicateIssueComments(comments: TeamIssueComment[]) {
   const commentsById = new Map<string, TeamIssueComment>()
 
   for (const comment of comments) {
-    const current = commentsById.get(comment.id)
-    if (current && current.source !== 'legacy' && comment.source === 'legacy') {
-      continue
-    }
     commentsById.set(comment.id, comment)
   }
 

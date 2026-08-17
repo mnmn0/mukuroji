@@ -173,6 +173,7 @@ export function IssueConversationTab({
   const activeResolutionSourceTarget = resolutionSourceTarget?.routeTargetKey === routeTargetKey
     ? resolutionSourceTarget
     : undefined
+  const resolutionSourceAuthorMemberKey = resolutionEditor?.sourceComment.authorMemberKey
   const focusedCommentTargetId = activeResolutionSourceTarget?.commentId ?? focusedCommentId
   const focusedRootTargetId = activeResolutionSourceTarget?.rootCommentId ?? focusedRootCommentId
 
@@ -499,15 +500,14 @@ export function IssueConversationTab({
                       value={resolutionEditor.summary}
                     />
                   </label>
-                  <p className="text-[0.68rem] text-[var(--workbench-muted)]">
-                    {t('collaboration.resolution.sourceReply')}: {formatMemberName(
-                      findWorkspaceMember(
-                        resolveCommentAuthorKey(resolutionEditor.sourceComment),
-                        members,
-                      ),
-                      resolveCommentAuthorKey(resolutionEditor.sourceComment),
-                    )}
-                  </p>
+                  {resolutionSourceAuthorMemberKey ? (
+                    <p className="text-[0.68rem] text-[var(--workbench-muted)]">
+                      {t('collaboration.resolution.sourceReply')}: {formatMemberName(
+                        findWorkspaceMember(resolutionSourceAuthorMemberKey, members),
+                        resolutionSourceAuthorMemberKey,
+                      )}
+                    </p>
+                  ) : null}
                   <div className="flex flex-wrap items-center gap-2">
                     <button
                       className="workbench-button-primary min-h-[44px] px-3 text-xs"
@@ -799,12 +799,15 @@ function CommentCard({
   const isReplying = replyingToId === comment.id
   const isConfirmingDelete = deleteConfirmationId === comment.id
   const isReactionMenuOpen = reactionMenuId === comment.id
+  const isLegacyComment = comment.source === 'legacy'
   const canReply = controller.capabilities.canComment
-    && (capabilities?.canReply ?? comment.source !== 'legacy')
+    && !isLegacyComment
+    && (capabilities?.canReply ?? true)
     && !rootComment.resolvedAt
     && !comment.deletedAt
   const canReact = controller.capabilities.canReact
-    && (capabilities?.canReact ?? comment.source !== 'legacy')
+    && !isLegacyComment
+    && (capabilities?.canReact ?? true)
     && !comment.deletedAt
   const bodyMarkdown = resolveCommentBody(comment)
   const acceptedResolution = resolveCurrentAcceptedResolution(rootComment)
@@ -952,7 +955,7 @@ function CommentCard({
                   onClick={() => onReplyingChange(isReplying ? undefined : comment.id)}
                 />
               ) : null}
-              {onPromote && !comment.deletedAt && comment.source !== 'legacy' ? (
+              {onPromote && !comment.deletedAt && !isLegacyComment ? (
                 <CommentActionButton
                   label={t('collaboration.comment.promote')}
                   onClick={() => onPromote(comment)}
@@ -1914,14 +1917,14 @@ function createCommentAnchorId(commentId: string) {
   return `comment-${encodeURIComponent(commentId)}`
 }
 
-/** Resolves the stable author key across legacy and collaboration comments. */
+/** Resolves the stable author key for a canonical collaboration comment. */
 function resolveCommentAuthorKey(comment: TeamIssueComment) {
-  return comment.authorMemberKey ?? comment.actorUserId ?? 'unknown-member'
+  return comment.authorMemberKey
 }
 
-/** Resolves the Markdown body across legacy and collaboration comments. */
+/** Resolves the Markdown body for a canonical collaboration comment. */
 function resolveCommentBody(comment: TeamIssueComment) {
-  return comment.bodyMarkdown ?? comment.body ?? ''
+  return comment.bodyMarkdown
 }
 
 /**
@@ -1951,7 +1954,13 @@ function createCapturedResolutionSourceComment(
   resolution: AcceptedResolution,
 ): TeamIssueComment {
   return {
+    authorMemberKey: resolution.capturedCommentAuthorMemberKey ?? '',
     bodyMarkdown: resolution.capturedCommentBody,
+    capabilities: {
+      canDelete: false,
+      canEdit: false,
+      canResolve: false,
+    },
     createdAt: resolution.acceptedAt,
     id: resolution.sourceCommentId,
     mentionMemberKeys: [],
@@ -1960,6 +1969,7 @@ function createCapturedResolutionSourceComment(
         ? undefined
         : resolution.sourceRootCommentId,
     rootCommentId: resolution.sourceRootCommentId,
+    reactions: [],
     updatedAt: resolution.acceptedAt,
     version: resolution.capturedCommentRevision,
   }

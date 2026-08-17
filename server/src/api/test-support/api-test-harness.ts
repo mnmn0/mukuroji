@@ -581,6 +581,9 @@ function createCollaborationStub(
     getThread: unsupported,
     hasAttachableComment: unsupported,
     getCommentSnapshot: unsupported,
+    async getCommentMutationReplay() {
+      return undefined
+    },
     getCuratedContext: unsupported,
     async getCuratedContextMutationReplay() {
       return undefined
@@ -715,11 +718,11 @@ function createTeamIssuesFake(
     getPublicWorkItemPage: unsupported,
     getProjectIssues: unsupported,
     getTeamIssueDetail: unsupported,
+    getAutomationCommentReplay: async () => false,
     createTeamIssue: unsupported,
     updateTeamIssue: unsupported,
     updateTeamIssueSchedules: unsupported,
     deleteTeamIssue: unsupported,
-    createTeamIssueComment: unsupported,
     ...overrides,
   } satisfies Required<TeamIssuesClient>
 }
@@ -1466,7 +1469,6 @@ function configureFakeProjectClients(
       teamId: string
     }>,
     teamCreates: [] as Array<{ directoryId: string; name: string }>,
-    issueComments: [] as Array<{ actorUserId: string; directoryId: string; issueId: string; teamId: string }>,
     issueCreates: [] as Array<{
       actorUserId: string
       assignedProjectId?: unknown
@@ -1482,10 +1484,7 @@ function configureFakeProjectClients(
       teamId: string
       readOptions?: {
         consistentIssueRead?: boolean
-        eventCursor?: string
         eventLimit?: number
-        eventType?: string
-        newestEventsFirst?: boolean
       }
     }>,
     issueReads: [] as Array<{ directoryId: string; limit?: number; teamId: string }>,
@@ -2519,14 +2518,6 @@ function configureFakeProjectClients(
               '2026-06-08T00:00:00.000Z',
             source: 'dynamodb',
           },
-          comments: [
-            {
-              id: 'comment-1',
-              actorUserId: 'demo@example.com',
-              body: '背景を確認します。',
-              createdAt: '2026-06-08T01:00:00.000Z',
-            },
-          ],
           activity: [
             {
               id: 'activity-1',
@@ -2715,25 +2706,6 @@ function configureFakeProjectClients(
           issue: {
             ...createFakeTeamIssues(teamId)[0]!,
             id: issueId,
-          },
-        }
-      },
-      async createTeamIssueComment(directoryId, teamId, issueId, input, actorUserId) {
-        calls.issueComments.push({ actorUserId, directoryId, issueId, teamId })
-
-        return {
-          comment: {
-            id: 'comment-2',
-            actorUserId,
-            body: String(input.body),
-            createdAt: '2026-06-08T02:00:00.000Z',
-          },
-          activity: {
-            id: 'activity-2',
-            type: 'commented',
-            actorUserId,
-            summary: 'Comment was added.',
-            createdAt: '2026-06-08T02:00:00.000Z',
           },
         }
       },
