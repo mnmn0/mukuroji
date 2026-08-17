@@ -28073,6 +28073,13 @@ function readCollaborationAuthorizationConditionChecks(
     }
     checks.push({ ConditionCheck: item.ConditionCheck })
   }
+  if (checks.length === 0) {
+    throw new CollaborationError(
+      503,
+      'CollaborationAuthorizationUnavailable',
+      'Comment authorization fencing is unavailable. Retry the request.',
+    )
+  }
   return checks
 }
 

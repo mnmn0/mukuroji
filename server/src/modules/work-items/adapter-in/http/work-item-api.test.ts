@@ -1319,6 +1319,38 @@ test('returns the canonical comment response for bodyMarkdown requests', async (
   expect(responseBody.comment).not.toHaveProperty('body')
 })
 
+/** Verifies that comment creation fails closed when authorization fencing is empty. */
+test('rejects comment creation without authorization condition checks', async () => {
+  configureFakeProjectClients(true)
+  const projectDirectory = getTestAppDependencies().workspace.projectDirectory
+  projectDirectory.createActiveReferenceConditionChecks = async () => []
+  let writes = 0
+  setTestAppDependencies({
+    collaboration: createCollaborationStub({
+      async createComment() {
+        writes += 1
+        throw new Error('Collaboration comment must not be written.')
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/issues/onboarding-friction/comments', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ bodyMarkdown: 'Unfenced comment' }),
+  })
+
+  expect(response.status).toBe(503)
+  expect(await response.json()).toEqual({
+    code: 'CollaborationAuthorizationUnavailable',
+    message: 'Comment authorization fencing is unavailable. Retry the request.',
+  })
+  expect(writes).toBe(0)
+})
+
 test('omits relations whose target Project is outside the viewer access scope', async () => {
   const calls = configureFakeProjectClients(true, {
     detailAssignedProjectIds: { 'onboarding-friction': 'private-project' },
