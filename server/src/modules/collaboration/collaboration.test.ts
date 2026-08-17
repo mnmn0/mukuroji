@@ -477,7 +477,9 @@ test('pages root comments newest-first and binds cursors to their entity scope',
   const discussionQueries: Array<Record<string, unknown>> = []
   const client = createClient(async (command) => {
     const input = readCommandInput(command)
-    const values = input.ExpressionAttributeValues as Record<string, unknown> | undefined
+    const values = isTestRecord(input.ExpressionAttributeValues)
+      ? input.ExpressionAttributeValues
+      : undefined
     if (values?.[':prefix'] === 'DISCUSSION#ROOT#') {
       discussionQueries.push(input)
       return {
@@ -504,6 +506,68 @@ test('pages root comments newest-first and binds cursors to their entity scope',
   })).rejects.toMatchObject({
     status: 400,
     code: 'InvalidCollaborationCursor',
+  })
+})
+
+/** Verifies that rolling compatibility callers receive cursors readable by the old reader. */
+test('emits a version-one discussion cursor for rolling compatibility callers', async () => {
+  const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
+  const legacyRecordKey = 'DISCUSSION#ROOT#2026-07-12T00:00:00.000Z#comment-1'
+  const discussionQueries: Array<Record<string, unknown>> = []
+  const client = createClient(async (command) => {
+    const input = readCommandInput(command)
+    if (isTestRecord(input.Key) && input.Key.recordKey === 'COMMENT#comment-1') {
+      return {
+        Item: {
+          entityKey,
+          recordKey: 'COMMENT#comment-1',
+          entryType: 'comment',
+          id: 'comment-1',
+          rootCommentId: 'comment-1',
+          authorMemberKey: 'author@example.com',
+          bodyMarkdown: 'Compatibility comment',
+          version: 1,
+          mentionMemberKeys: [],
+          createdAt: '2026-07-12T00:00:00.000Z',
+          updatedAt: '2026-07-12T00:00:00.000Z',
+        },
+      }
+    }
+    const values = isTestRecord(input.ExpressionAttributeValues)
+      ? input.ExpressionAttributeValues
+      : undefined
+    if (values?.[':prefix'] === 'DISCUSSION#ROOT#') {
+      discussionQueries.push(input)
+      return {
+        Items: [{ entityKey, recordKey: legacyRecordKey, commentId: 'comment-1' }],
+        LastEvaluatedKey: { entityKey, recordKey: legacyRecordKey },
+      }
+    }
+    return { Items: [] }
+  })
+
+  const page = await client.getThread({
+    entityKey,
+    viewerMemberKey: 'member@example.com',
+    legacyCursorCompatible: true,
+    limit: 1,
+  })
+
+  expect(page.comments).toHaveLength(1)
+  expect(page.comments[0]).toMatchObject({ id: 'comment-1' })
+  expect(discussionQueries).toHaveLength(1)
+  expect(discussionQueries[0]?.FilterExpression).toBeUndefined()
+  expect(page.nextCursor).toBeString()
+  const nextCursor = page.nextCursor
+  if (!nextCursor) throw new Error('Expected a compatibility cursor.')
+  const cursorPayload: unknown = JSON.parse(
+    Buffer.from(nextCursor, 'base64url').toString('utf8'),
+  )
+  expect(cursorPayload).toMatchObject({
+    version: 1,
+    entityKey,
+    prefix: 'DISCUSSION#ROOT#',
+    recordKey: legacyRecordKey,
   })
 })
 

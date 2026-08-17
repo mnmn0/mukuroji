@@ -90,7 +90,7 @@ Collaboration comment の正本は Collaboration table の persisted root/reply 
 
 この canonical-only reader を本番へ適用する前に、次の順序で段階的に切り替えます。writer の切り替えと reader の削除を同じデプロイで開始してはいけません。
 
-1. canonical Collaboration writer と従来 reader を同居させた互換リリースを先にデプロイします。この期間の writer は新しい V2 discussion index と旧 reader 用の discussion index を同じ transaction で dual-write し、新 reader は互換用の重複 row を fallback read から除外します。Automation worker、schedule worker、API の旧プロセスが残っている間はこの状態を維持します。
+1. canonical Collaboration writer と従来 reader を同居させた互換リリースを先にデプロイします。この期間の writer は新しい V2 discussion index と旧 reader 用の discussion index を同じ transaction で dual-write し、新 reader は互換用の重複 row を fallback read から除外します。公開 root/reply page は旧 reader が解釈できる version-one discussion cursor を先に発行し、内部の bounded aggregate read だけが V2 cursor を使います。Automation worker、schedule worker、API の旧プロセスが残っている間はこの状態を維持します。
 2. 旧 Automation worker の実行を停止または drain し、in-flight execution と queue が完了してから、旧 `commented` writer が新しい row を追加しないことを確認します。
 3. 必要な既存 comment を Collaboration table へ backfill し、対象環境の全 `TeamIssueEventsTable` partition に対して下記の検証コマンドを実行します。`legacy_commented_event_count=0` にならない場合は次へ進みません。
 4. 検証後にこの canonical-only reader と旧 cursor 拒否を含むリリースをデプロイし、Automation worker を再開します。再開後も旧 writer、DLQ、canonical comment count を監視します。

@@ -290,6 +290,8 @@ export type GetCollaborationThreadInput = {
   rootCommentId?: string
   /** Whether to read root comments and replies through one bounded page stream. */
   includeReplies?: boolean
+  /** Whether a rolling compatibility deployment requires a cursor readable by pre-migration servers. */
+  legacyCursorCompatible?: boolean
   /** 一 page の最大件数です。 */
   limit?: number
   /** 前 page が返した opaque cursor です。 */
@@ -2553,6 +2555,8 @@ type DiscussionReadPlan = {
   legacyPrefix: string
   /** Exclusive upper bound that keeps a legacy aggregate query before the current index. */
   legacyUpperBound?: string
+  /** Whether compatibility callers should read the pre-migration index before the current index. */
+  legacyFirst: boolean
 }
 
 /** Decoded cursor variant used by the discussion page reader. */
@@ -2682,6 +2686,7 @@ function createDiscussionReadPlan(input: GetCollaborationThreadInput): Discussio
     return {
       currentPrefix: `${discussionScopedPrefix}THREAD#${rootCommentId}#`,
       legacyPrefix: `DISCUSSION#THREAD#${rootCommentId}#`,
+      legacyFirst: input.legacyCursorCompatible === true,
     }
   }
 
@@ -2690,12 +2695,14 @@ function createDiscussionReadPlan(input: GetCollaborationThreadInput): Discussio
       currentPrefix: discussionTimelinePrefix,
       legacyPrefix: 'DISCUSSION#',
       legacyUpperBound: discussionLegacyUpperBound,
+      legacyFirst: false,
     }
   }
 
   return {
     currentPrefix: `${discussionScopedPrefix}ROOT#`,
     legacyPrefix: 'DISCUSSION#ROOT#',
+    legacyFirst: input.legacyCursorCompatible === true,
   }
 }
 
@@ -2786,6 +2793,8 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
 
   /**
    * Reads one bounded page from the current discussion index and then the legacy index.
+   * Compatibility callers start at the legacy index so their first cursor remains readable by
+   * pre-migration servers during a rolling deployment.
    *
    * @param plan - Current and legacy prefixes for the requested scope.
    * @param entityKey - Collaboration entity key being read.
@@ -2819,6 +2828,31 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
               }),
             }
           : {}),
+      }
+    }
+
+    if (plan.legacyFirst && cursor === undefined) {
+      const legacyPage = await this.queryDiscussionPage(
+        plan,
+        entityKey,
+        'legacy',
+        undefined,
+        limit,
+      )
+      if (legacyPage.items.length > 0 || legacyPage.lastRecordKey) {
+        return {
+          items: legacyPage.items,
+          ...(legacyPage.lastRecordKey
+            ? {
+                nextCursor: encodeLegacyDiscussionCursor({
+                  version: 1,
+                  entityKey,
+                  prefix: plan.legacyPrefix,
+                  recordKey: legacyPage.lastRecordKey,
+                }),
+              }
+            : {}),
+        }
       }
     }
 
@@ -2947,7 +2981,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       ConsistentRead: true,
       ScanIndexForward: false,
       Limit: limit,
-      ...(phase === 'legacy'
+      ...(phase === 'legacy' && !plan.legacyFirst
         ? { FilterExpression: 'attribute_not_exists(discussionIndexVersion)' }
         : {}),
     }))

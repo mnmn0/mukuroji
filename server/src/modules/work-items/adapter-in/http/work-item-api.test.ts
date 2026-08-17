@@ -1062,6 +1062,21 @@ test('loads team issue detail and creates comments after team access is confirme
           Key: { directoryId: 'user#demo@example.com', entryKey: 'PROJECT#refero' },
         }),
       }),
+      expect.objectContaining({
+        ConditionCheck: expect.objectContaining({
+          TableName: 'WorkspaceAccessTable',
+          Key: { workspaceId: 'user#demo@example.com', recordKey: 'MEMBER#demo@example.com' },
+        }),
+      }),
+      expect.objectContaining({
+        ConditionCheck: expect.objectContaining({
+          TableName: 'DirectoryTable',
+          Key: {
+            directoryId: 'user#demo@example.com',
+            entryKey: 'PROJECT_MEMBER#refero#demo@example.com',
+          },
+        }),
+      }),
     ]),
   })
 
@@ -1719,10 +1734,12 @@ test('returns persisted collaboration comments and reply cursors', async () => {
   expect(threadInputs).toHaveLength(2)
   expect(threadInputs[0]?.rootCommentId).toBeUndefined()
   expect(threadInputs[0]?.limit).toBe(10)
+  expect(threadInputs[0]?.legacyCursorCompatible).toBe(true)
   expect(threadInputs[1]).toMatchObject({
     rootCommentId: 'stored-root',
     limit: 5,
     includeScopeState: false,
+    legacyCursorCompatible: true,
   })
   expect(calls.issueDetails).toEqual([{
     directoryId: 'user#demo@example.com',
@@ -1786,6 +1803,7 @@ test('serves one requested reply page without refetching reply roots', async () 
     rootCommentId: 'stored-root',
     cursor: 'reply-cursor',
     limit: 20,
+    legacyCursorCompatible: true,
   })
 })
 

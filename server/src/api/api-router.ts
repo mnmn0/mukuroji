@@ -9240,6 +9240,7 @@ routeApp.get('/api/teams/:teamId/issues/:issueId/collaboration', async (c) => {
         projectEntityKey,
         rootCommentId: readOptionalCommentId(requestedRootCommentId, 'Root comment ID'),
         cursor: requestedCursor,
+        legacyCursorCompatible: true,
         limit: limit === undefined ? 20 : Math.min(limit, 20),
       })
       return c.json({
@@ -9270,6 +9271,7 @@ routeApp.get('/api/teams/:teamId/issues/:issueId/collaboration', async (c) => {
       viewerMemberKey: principal.userKey,
       projectEntityKey,
       cursor: requestedCursor,
+      legacyCursorCompatible: true,
       limit: limit === undefined ? 10 : Math.min(limit, 20),
     })
     const replyPages = await Promise.all(
@@ -9278,6 +9280,7 @@ routeApp.get('/api/teams/:teamId/issues/:issueId/collaboration', async (c) => {
         viewerMemberKey: principal.userKey,
         projectEntityKey,
         rootCommentId: root.id,
+        legacyCursorCompatible: true,
         limit: 5,
         includeScopeState: false,
       })),
@@ -9849,23 +9852,13 @@ routeApp.post('/api/teams/:teamId/issues/:issueId/comments', async (c) => {
       ? createProjectCollaborationEntityKey(principal.directoryId, detail.issue.assignedProjectId)
       : undefined
     const automaticWatcherCandidates = createTeamIssueAutomaticWatcherCandidates(detail.issue)
-    const createActiveReferenceConditionChecks =
-      workspaceDependencies.projectDirectory.createActiveReferenceConditionChecks
-    if (!createActiveReferenceConditionChecks) {
-      throw new CollaborationError(
-        503,
-        'CollaborationAuthorizationUnavailable',
-        'Comment authorization fencing is unavailable. Retry the request.',
-      )
-    }
-    const authorizationConditionChecks = readCollaborationAuthorizationConditionChecks(
-      await createActiveReferenceConditionChecks.call(
-        workspaceDependencies.projectDirectory,
-        principal.directoryId,
+    const authorizationConditionChecks =
+      await createCollaborationCommentAuthorizationConditionChecks(
+        principal,
+        context,
         teamId,
         detail.issue.assignedProjectId,
-      ),
-    )
+      )
     const comment = await workItemDependencies.collaboration.createComment({
       workspaceId: principal.directoryId,
       teamId,
@@ -28040,6 +28033,122 @@ function createTeamIssueAutomaticWatcherCandidates(
       ? [{ memberKey: issue.assigneeUserId, reason: 'assignee' as const }]
       : []),
   ]
+}
+
+/** Builds commit-time authorization fences for a direct Work Item comment mutation.
+ *
+ * @param principal - Authenticated Workspace principal making the comment request.
+ * @param context - Team and Project authorization snapshot used to authorize the request.
+ * @param teamId - Team owning the Work Item.
+ * @param projectId - Project currently assigned to the Work Item, when present.
+ * @returns Condition checks that must pass in the same transaction as the comment write.
+ */
+async function createCollaborationCommentAuthorizationConditionChecks(
+  principal: WorkspacePrincipal,
+  context: TeamPermissionContext,
+  teamId: string,
+  projectId: string | undefined,
+): Promise<CollaborationAuthorizationConditionCheck[]> {
+  const createActiveReferenceConditionChecks =
+    workspaceDependencies.projectDirectory.createActiveReferenceConditionChecks
+  if (!createActiveReferenceConditionChecks) {
+    throw new CollaborationError(
+      503,
+      'CollaborationAuthorizationUnavailable',
+      'Comment authorization fencing is unavailable. Retry the request.',
+    )
+  }
+  const checks = readCollaborationAuthorizationConditionChecks(
+    await createActiveReferenceConditionChecks.call(
+      workspaceDependencies.projectDirectory,
+      principal.directoryId,
+      teamId,
+      projectId,
+    ),
+  )
+
+  if (principal.isSystemAdmin) return checks
+
+  const createActiveMemberConditionCheck =
+    workspaceDependencies.workspaceAccess.createActiveMemberConditionCheck
+  if (!createActiveMemberConditionCheck) {
+    throw new CollaborationError(
+      503,
+      'CollaborationAuthorizationUnavailable',
+      'Comment authorization fencing is unavailable. Retry the request.',
+    )
+  }
+  const actorMembershipCheck = await createActiveMemberConditionCheck.call(
+    workspaceDependencies.workspaceAccess,
+    principal.directoryId,
+    normalizeProjectMemberKey(principal.userKey),
+    { allowedRoles: ['owner', 'admin', 'member'] },
+  )
+  if (!actorMembershipCheck) {
+    throw new CollaborationError(
+      409,
+      'CollaborationActorMembershipChanged',
+      'Workspace membership changed while the comment was being prepared.',
+    )
+  }
+  checks.push(...readCollaborationAuthorizationConditionChecks([actorMembershipCheck]))
+
+  if (!projectId) return checks
+
+  const enterpriseProjectAccess = principal.enterpriseProjectAccesses?.some((access) =>
+    access.projectId === projectId && projectAccessAllows(access, 'member')
+  ) === true
+  const enterpriseTeamAccess = principal.enterpriseTeamAccesses?.some((access) =>
+    access.teamId === teamId && access.permissions.includes('teams.write')
+  ) === true
+  const enterpriseRouteAccess = principal.enterpriseRouteAuthorizedAtResource === true &&
+    (
+      principal.enterpriseAuthorizationResource?.kind === 'workspace' ||
+      principal.enterpriseAuthorizationResource?.kind === 'team' &&
+        principal.enterpriseAuthorizationResource.targetId === teamId
+    ) && principal.enterprisePermissions?.includes('teams.write') === true
+
+  if (enterpriseProjectAccess || enterpriseTeamAccess || enterpriseRouteAccess) {
+    const enterpriseControlCheck = createEnterpriseControlAuthorizationConditionCheck(principal)
+    if (enterpriseControlCheck) {
+      checks.push(...readCollaborationAuthorizationConditionChecks([enterpriseControlCheck]))
+    }
+    return checks
+  }
+
+  const projectAccess = context.projectAccesses?.find((access) => access.projectId === projectId)
+  if (!projectAccess || !projectAccessAllows(projectAccess, 'member')) {
+    throw new CollaborationError(
+      403,
+      'CollaborationProjectAccessDenied',
+      'The caller no longer has access to the assigned Project.',
+    )
+  }
+  const createProjectAccessConditionCheck =
+    workspaceDependencies.projectDirectory.createProjectAccessConditionCheck
+  if (!createProjectAccessConditionCheck) {
+    throw new CollaborationError(
+      503,
+      'CollaborationAuthorizationUnavailable',
+      'Comment authorization fencing is unavailable. Retry the request.',
+    )
+  }
+  const projectAccessCheck = await createProjectAccessConditionCheck.call(
+    workspaceDependencies.projectDirectory,
+    principal.directoryId,
+    projectId,
+    normalizeProjectMemberKey(principal.userKey),
+    'member',
+  )
+  if (!projectAccessCheck) {
+    throw new CollaborationError(
+      409,
+      'CollaborationProjectAccessChanged',
+      'Project authorization changed while the comment was being prepared.',
+    )
+  }
+  checks.push(...readCollaborationAuthorizationConditionChecks([projectAccessCheck]))
+  return checks
 }
 
 /**
