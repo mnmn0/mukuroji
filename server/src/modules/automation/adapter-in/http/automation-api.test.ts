@@ -2089,6 +2089,20 @@ test('writes automation comments to the canonical Collaboration store', async ()
     actorMemberKey: 'automation:rule-1',
     bodyMarkdown: 'Automated canonical comment',
     deepLink: expect.stringContaining('/teams/core-team/issues?'),
+    authorizationConditionChecks: expect.arrayContaining([
+      expect.objectContaining({
+        ConditionCheck: expect.objectContaining({
+          TableName: 'DirectoryTable',
+          Key: { directoryId: 'workspace-1', entryKey: 'TEAM#core-team' },
+        }),
+      }),
+      expect.objectContaining({
+        ConditionCheck: expect.objectContaining({
+          TableName: 'DirectoryTable',
+          Key: { directoryId: 'workspace-1', entryKey: 'PROJECT#refero' },
+        }),
+      }),
+    ]),
     auditContext: {
       correlationId: 'automation-comment-canonical',
       idempotencyKeyHash: expect.any(String),

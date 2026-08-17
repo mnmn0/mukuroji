@@ -87,6 +87,7 @@ if [[ -n "${ISSUE_ID:-}" ]]; then
       --table-name "$TEAM_ISSUE_EVENTS_TABLE_NAME" \
       --filter-expression "eventType = :eventType" \
       --expression-attribute-values "{\":eventType\":{\"S\":\"commented\"}}" \
+      --consistent-read \
       --select COUNT \
       --query 'Count' \
       --output text \

@@ -189,7 +189,9 @@ export function buildAutomationWorkers(
         actions: ['dynamodb:ConditionCheckItem'],
         resources: [
           automationTable.tableArn,
+          collaborationTable.tableArn,
           fileProofingTable.tableArn,
+          projectDirectoryTable.tableArn,
           workItemConfigurationTable.tableArn,
           workItemsTable.tableArn,
           workspaceSearchTable.tableArn,
@@ -323,7 +325,9 @@ export function buildAutomationWorkers(
         actions: ['dynamodb:ConditionCheckItem'],
         resources: [
           automationTable.tableArn,
+          collaborationTable.tableArn,
           fileProofingTable.tableArn,
+          projectDirectoryTable.tableArn,
           workItemConfigurationTable.tableArn,
           workItemsTable.tableArn,
           workspaceSearchTable.tableArn,

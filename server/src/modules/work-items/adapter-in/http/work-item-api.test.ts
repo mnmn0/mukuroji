@@ -1046,6 +1046,20 @@ test('loads team issue detail and creates comments after team access is confirme
     actorMemberKey: 'demo@example.com',
     bodyMarkdown: '追加コメント',
     entityKey: 'user#demo@example.com#work-item#team/core-team/issue/onboarding-friction',
+    authorizationConditionChecks: expect.arrayContaining([
+      expect.objectContaining({
+        ConditionCheck: expect.objectContaining({
+          TableName: 'DirectoryTable',
+          Key: { directoryId: 'user#demo@example.com', entryKey: 'TEAM#core-team' },
+        }),
+      }),
+      expect.objectContaining({
+        ConditionCheck: expect.objectContaining({
+          TableName: 'DirectoryTable',
+          Key: { directoryId: 'user#demo@example.com', entryKey: 'PROJECT#refero' },
+        }),
+      }),
+    ]),
   })
 
   const refreshedDetailResponse = await app.request(
@@ -1074,6 +1088,7 @@ test('loads team issue detail and creates comments after team access is confirme
   })
 })
 
+/** Verifies that team issue detail loads every canonical root-comment and reply page. */
 test('loads every canonical comment page for team issue detail', async () => {
   configureFakeProjectClients(true)
   const rootComment = {
@@ -1139,6 +1154,7 @@ test('loads every canonical comment page for team issue detail', async () => {
 
   setTestAppDependencies({
     collaboration: createCollaborationStub({
+      /** Returns the deterministic canonical page for the requested root comment and cursor. */
       async getThread(input) {
         if (!input.rootCommentId && input.cursor === undefined) {
           return { ...threadState, comments: [rootComment], nextCursor: 'roots-page-2' }
@@ -1173,6 +1189,90 @@ test('loads every canonical comment page for team issue detail', async () => {
     'second-reply-comment',
     'second-root-comment',
   ])
+})
+
+/** Verifies that an oversized aggregate comment read fails closed after its page budget. */
+test('rejects team issue detail when canonical comment pages exceed the aggregate read budget', async () => {
+  configureFakeProjectClients(true)
+  let pageReads = 0
+  const threadState = {
+    watch: {
+      subscribed: false,
+      explicit: false,
+      automatic: false,
+      reasons: [],
+      watcherCount: 0,
+    },
+    presence: [],
+  }
+
+  setTestAppDependencies({
+    collaboration: createCollaborationStub({
+      /** Returns another root page until the aggregate read budget is exhausted. */
+      async getThread() {
+        pageReads += 1
+        return {
+          ...threadState,
+          comments: [],
+          nextCursor: `root-page-${pageReads + 1}`,
+        }
+      },
+    }),
+  })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+
+  expect(response.status).toBe(413)
+  expect(await response.json()).toEqual({
+    code: 'CollaborationThreadReadLimitExceeded',
+    message: 'Collaboration thread exceeds the supported read window.',
+  })
+  expect(pageReads).toBe(50)
+})
+
+/** Verifies that a stalled canonical cursor is reported as an unavailable read. */
+test('rejects team issue detail when canonical comment pagination stalls', async () => {
+  configureFakeProjectClients(true)
+  let pageReads = 0
+  const threadState = {
+    watch: {
+      subscribed: false,
+      explicit: false,
+      automatic: false,
+      reasons: [],
+      watcherCount: 0,
+    },
+    presence: [],
+  }
+
+  setTestAppDependencies({
+    collaboration: createCollaborationStub({
+      /** Returns the same cursor to simulate a non-advancing canonical page. */
+      async getThread() {
+        pageReads += 1
+        return {
+          ...threadState,
+          comments: [],
+          nextCursor: 'stalled-cursor',
+        }
+      },
+    }),
+  })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+
+  expect(response.status).toBe(503)
+  expect(await response.json()).toEqual({
+    code: 'CollaborationThreadPaginationStalled',
+    message: 'Collaboration thread pagination did not advance.',
+  })
+  expect(pageReads).toBe(2)
 })
 
 test('returns the canonical comment response for bodyMarkdown requests', async () => {

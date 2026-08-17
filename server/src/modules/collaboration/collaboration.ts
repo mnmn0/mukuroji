@@ -438,6 +438,8 @@ export type CreateCollaborationCommentInput = WorkItemCollaborationScope & {
   automaticWatcherCandidates?: CollaborationAutomaticWatcherCandidate[]
   /** Notification から戻る Web path です。 */
   deepLink?: string
+  /** Caller authorization rows guarded in the same transaction as the comment write. */
+  authorizationConditionChecks?: readonly CollaborationAuthorizationConditionCheck[]
   /** State と同じ transaction に保存する audit context です。 */
   auditContext?: MutationAuditContext
 }
@@ -3773,6 +3775,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
           ConditionExpression: 'attribute_not_exists(entityKey) AND attribute_not_exists(recordKey)',
         },
       },
+      ...(input.authorizationConditionChecks ?? []),
       ...automaticWatchers.map(({ memberKey, reasons }) =>
         autoWatcherUpdate(this.tableName, input.entityKey, memberKey, reasons, occurredAt)
       ),

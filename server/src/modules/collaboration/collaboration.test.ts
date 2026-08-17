@@ -986,6 +986,45 @@ test('seeds deduplicated automatic watchers when a comment is created', async ()
   expect(mentionedValues[':reasons']).toEqual(new Set(['mention']))
 })
 
+/** Ensures comment writes carry caller authorization conditions in the same transaction. */
+test('includes caller authorization guards in comment transactions', async () => {
+  let transaction: Record<string, unknown> | undefined
+  const client = createClient(async (command) => {
+    const input = readCommandInput(command)
+    if ('TransactItems' in input) transaction = input
+    return {}
+  })
+  const authorizationCheck: CollaborationAuthorizationConditionCheck = {
+    ConditionCheck: {
+      TableName: 'workspace-access-table',
+      Key: {
+        workspaceId: 'workspace#one',
+        recordKey: 'MEMBER#member@example.com',
+      },
+      ConditionExpression: '#version = :expectedVersion',
+      ExpressionAttributeNames: { '#version': 'version' },
+      ExpressionAttributeValues: { ':expectedVersion': 4 },
+    },
+  }
+
+  await client.createComment({
+    authorizationConditionChecks: [authorizationCheck],
+    entityKey: createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1'),
+    issueId: 'issue-1',
+    teamId: 'team-a',
+    workspaceId: 'workspace#one',
+    actorMemberKey: 'member@example.com',
+    bodyMarkdown: 'Guarded comment',
+  })
+
+  expect(transaction?.TransactItems).toEqual(expect.arrayContaining([
+    authorizationCheck,
+    expect.objectContaining({
+      ConditionCheck: expect.objectContaining({ TableName: 'issue-table' }),
+    }),
+  ]))
+})
+
 test('finds a committed comment by its deterministic mutation identity', async () => {
   const memory = createCollaborationMemory()
   const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')

@@ -323,6 +323,7 @@ import {
   createProjectCollaborationEntityKey,
   createWorkItemCollaborationEntityKey,
   type CollaborationAutomaticWatcherCandidate,
+  type CollaborationAuthorizationConditionCheck,
   type CollaborationClient,
   type CollaborationComment,
   type CuratedContextActivitySourceAuthorizationSnapshot,
@@ -1033,6 +1034,8 @@ const ANALYTICS_SNAPSHOT_REPOSITORY_PAGE_LIMIT = 10
 const WORK_ITEM_RELATION_TARGET_READ_CONCURRENCY = 8
 /** Issue detail の canonical reply read を同時実行する最大数です。 */
 const TEAM_ISSUE_DETAIL_REPLY_READ_CONCURRENCY = 8
+/** Issue detail の canonical comment read に許容する合計 page 数です。 */
+const TEAM_ISSUE_DETAIL_COMMENT_READ_MAX_PAGES = 50
 /** One task-view request may strongly inspect at most one full 20-Team relation filter. */
 const TASK_VIEW_RELATION_TARGET_READ_LIMIT = WORK_ITEMS_TEAM_READ_LIMIT * 100
 /** One task-view request may resolve at most one full legacy relation filter through Search. */
@@ -8873,6 +8876,10 @@ routeApp.get('/api/teams/:teamId/issues/:issueId', async (c) => {
     const projectEntityKey = detail.issue.assignedProjectId
       ? createProjectCollaborationEntityKey(principal.directoryId, detail.issue.assignedProjectId)
       : undefined
+    const collaborationReadBudget: CollaborationThreadReadBudget = {
+      maxPages: TEAM_ISSUE_DETAIL_COMMENT_READ_MAX_PAGES,
+      pagesRead: 0,
+    }
     const [collaborationComments, resolvedConfiguration, relationPage] = await Promise.all([
       readAllCollaborationThreadComments(workItemDependencies.collaboration, {
         entityKey,
@@ -8880,7 +8887,7 @@ routeApp.get('/api/teams/:teamId/issues/:issueId', async (c) => {
         projectEntityKey,
         limit: 100,
         includeScopeState: false,
-      }),
+      }, collaborationReadBudget),
       workItemDependencies.workItemConfigurations.getTeamConfiguration(principal.directoryId, teamId),
       workItemDependencies.workItemConfigurations.listRelations(principal.directoryId, teamId, issueId),
     ])
@@ -8908,6 +8915,7 @@ routeApp.get('/api/teams/:teamId/issues/:issueId', async (c) => {
             limit: 100,
             includeScopeState: false,
           },
+          collaborationReadBudget,
         )),
       ))
     }
@@ -9867,6 +9875,23 @@ routeApp.post('/api/teams/:teamId/issues/:issueId/comments', async (c) => {
       ? createProjectCollaborationEntityKey(principal.directoryId, detail.issue.assignedProjectId)
       : undefined
     const automaticWatcherCandidates = createTeamIssueAutomaticWatcherCandidates(detail.issue)
+    const createActiveReferenceConditionChecks =
+      workspaceDependencies.projectDirectory.createActiveReferenceConditionChecks
+    if (!createActiveReferenceConditionChecks) {
+      throw new CollaborationError(
+        503,
+        'CollaborationAuthorizationUnavailable',
+        'Comment authorization fencing is unavailable. Retry the request.',
+      )
+    }
+    const authorizationConditionChecks = readCollaborationAuthorizationConditionChecks(
+      await createActiveReferenceConditionChecks.call(
+        workspaceDependencies.projectDirectory,
+        principal.directoryId,
+        teamId,
+        detail.issue.assignedProjectId,
+      ),
+    )
     const comment = await workItemDependencies.collaboration.createComment({
       workspaceId: principal.directoryId,
       teamId,
@@ -9881,6 +9906,7 @@ routeApp.post('/api/teams/:teamId/issues/:issueId/comments', async (c) => {
       mentionMemberKeys,
       automaticWatcherCandidates,
       deepLink: createTeamIssueDeepLink(teamId, issueId),
+      authorizationConditionChecks,
       auditContext: createApiMutationContext(c, principal, { teamId, issueId, ...body }),
     })
     const activity = {
@@ -13813,6 +13839,36 @@ async function executeAutomationComment(
       'The comment Work Item project is not active in its owner Team.',
     )
   }
+  const createActiveReferenceConditionChecks = dependencies.projectDirectory
+    .createActiveReferenceConditionChecks
+  if (!createActiveReferenceConditionChecks) {
+    throw new AutomationError(
+      'unavailable',
+      'AutomationCommentAuthorizationUnavailable',
+      'Comment authorization fencing is unavailable.',
+      true,
+    )
+  }
+  let authorizationConditionChecks: CollaborationAuthorizationConditionCheck[]
+  try {
+    authorizationConditionChecks = readCollaborationAuthorizationConditionChecks(
+      await createActiveReferenceConditionChecks.call(
+        dependencies.projectDirectory,
+        context.execution.workspaceId,
+        target.teamId,
+        detail.issue.assignedProjectId,
+      ),
+    )
+  } catch (error) {
+    if (error instanceof ProjectDataError) {
+      throw new AutomationError(
+        'conflict',
+        'AutomationCommentTargetUnavailable',
+        'The comment Work Item Team or Project is no longer active.',
+      )
+    }
+    throw error
+  }
   const projectEntityKey = detail.issue.assignedProjectId
     ? createProjectCollaborationEntityKey(
         context.execution.workspaceId,
@@ -13831,6 +13887,7 @@ async function executeAutomationComment(
     bodyMarkdown: body,
     automaticWatcherCandidates: createTeamIssueAutomaticWatcherCandidates(detail.issue),
     deepLink: createTeamIssueDeepLink(target.teamId, target.workItemId),
+    authorizationConditionChecks,
     auditContext,
   })
 }
@@ -19320,6 +19377,9 @@ function toTenantAdministrationErrorResponse(c: Context, error: unknown) {
 function toWorkItemConfigurationErrorResponse(c: Context, error: unknown) {
   if (error instanceof CognitoServiceError) {
     return toCognitoDirectoryErrorResponse(c, error)
+  }
+  if (error instanceof CollaborationError) {
+    return toCollaborationErrorResponse(c, error)
   }
   if (
     error instanceof WorkspaceAccessError ||
@@ -25192,6 +25252,7 @@ function toCollaborationErrorResponse(c: Context, error: unknown) {
     error.status === 403 ||
     error.status === 404 ||
     error.status === 409 ||
+    error.status === 413 ||
     error.status === 503
     ? error.status
     : 502
@@ -27988,21 +28049,70 @@ function createTeamIssueAutomaticWatcherCandidates(
 }
 
 /**
+ * Narrows directory transaction contributions to read-only condition checks.
+ *
+ * @param items - Directory transaction contributions returned by the authoritative reader.
+ * @returns Condition checks safe to append to a Collaboration comment transaction.
+ */
+function readCollaborationAuthorizationConditionChecks(
+  items: NonNullable<TransactWriteCommandInput['TransactItems']>,
+): CollaborationAuthorizationConditionCheck[] {
+  const checks: CollaborationAuthorizationConditionCheck[] = []
+  for (const item of items) {
+    if (
+      item.ConditionCheck === undefined ||
+      item.Delete !== undefined ||
+      item.Put !== undefined ||
+      item.Update !== undefined
+    ) {
+      throw new CollaborationError(
+        503,
+        'CollaborationAuthorizationUnavailable',
+        'Comment authorization fencing is unavailable. Retry the request.',
+      )
+    }
+    checks.push({ ConditionCheck: item.ConditionCheck })
+  }
+  return checks
+}
+
+/** Tracks the finite page budget shared by one aggregate Collaboration read. */
+type CollaborationThreadReadBudget = {
+  /** Maximum number of Collaboration pages allowed for one aggregate read. */
+  maxPages: number
+  /** Number of Collaboration pages already reserved by the aggregate read. */
+  pagesRead: number
+}
+
+/**
  * Reads every page in one Collaboration comment scope.
  *
  * @param collaboration - Canonical Collaboration client to query.
  * @param input - Thread scope and page settings without a cursor.
+ * @param budget - Shared page budget for the aggregate detail read.
  * @returns All comments returned by the thread pages in store order.
  */
 async function readAllCollaborationThreadComments(
   collaboration: CollaborationClient,
   input: Omit<GetCollaborationThreadInput, 'cursor'>,
+  budget: CollaborationThreadReadBudget = {
+    maxPages: TEAM_ISSUE_DETAIL_COMMENT_READ_MAX_PAGES,
+    pagesRead: 0,
+  },
 ): Promise<CollaborationComment[]> {
   const comments: CollaborationComment[] = []
   const seenCursors = new Set<string>()
   let cursor: string | undefined
 
   while (true) {
+    if (budget.pagesRead >= budget.maxPages) {
+      throw new CollaborationError(
+        413,
+        'CollaborationThreadReadLimitExceeded',
+        'Collaboration thread exceeds the supported read window.',
+      )
+    }
+    budget.pagesRead += 1
     const page = await collaboration.getThread({
       ...input,
       ...(cursor === undefined ? {} : { cursor }),
@@ -28013,7 +28123,11 @@ async function readAllCollaborationThreadComments(
       return comments
     }
     if (seenCursors.has(page.nextCursor)) {
-      throw new Error('Collaboration thread pagination cursor did not advance.')
+      throw new CollaborationError(
+        503,
+        'CollaborationThreadPaginationStalled',
+        'Collaboration thread pagination did not advance.',
+      )
     }
     seenCursors.add(page.nextCursor)
     cursor = page.nextCursor
