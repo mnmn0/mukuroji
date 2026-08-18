@@ -1479,6 +1479,47 @@ test('returns the canonical comment response for bodyMarkdown requests', async (
   expect(responseBody.comment).not.toHaveProperty('body')
 })
 
+test('preserves the legacy comment response for body requests', async () => {
+  configureFakeProjectClients(true)
+  setTestAppDependencies({
+    collaboration: createCollaborationStub({
+      async createComment(input) {
+        return {
+          id: 'legacy-comment',
+          rootCommentId: 'legacy-comment',
+          authorMemberKey: input.actorMemberKey,
+          bodyMarkdown: input.bodyMarkdown,
+          version: 1,
+          mentionMemberKeys: [],
+          createdAt: '2026-06-08T03:00:00.000Z',
+          updatedAt: '2026-06-08T03:00:00.000Z',
+          acceptedResolutions: [],
+          reactions: [],
+        }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/issues/onboarding-friction/comments', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ body: 'Legacy comment' }),
+  })
+
+  expect(response.status).toBe(201)
+  expect(await response.json()).toMatchObject({
+    comment: {
+      id: 'legacy-comment',
+      actorUserId: 'demo@example.com',
+      body: 'Legacy comment',
+      createdAt: '2026-06-08T03:00:00.000Z',
+    },
+  })
+})
+
 /** Verifies that comment creation fails closed when authorization fencing is empty. */
 test('rejects comment creation without authorization condition checks', async () => {
   configureFakeProjectClients(true)

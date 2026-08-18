@@ -9923,6 +9923,7 @@ routeApp.post('/api/teams/:teamId/issues/:issueId/comments', async (c) => {
     const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
     requireWorkspaceBusinessWrite(principal)
     const body = await readJson<CreateTeamIssueCommentRequestBody>(c.req) ?? {}
+    const modernContract = body.bodyMarkdown !== undefined
     const { context, detail } = await loadAuthorizedTeamIssue(principal, teamId, issueId, 'member')
     const mentionMemberKeys = readCommentMentionMemberKeys(body.mentionMemberKeys)
     await requireValidCommentMentions(
@@ -9978,10 +9979,20 @@ routeApp.post('/api/teams/:teamId/issues/:issueId/comments', async (c) => {
       'comment creation',
     )
 
-    return c.json({
-      comment: toCollaborationCommentResponse(comment, principal, context, detail.issue),
-      activity,
-    }, 201)
+    return modernContract
+      ? c.json({
+          comment: toCollaborationCommentResponse(comment, principal, context, detail.issue),
+          activity,
+        }, 201)
+      : c.json({
+          comment: {
+            id: comment.id,
+            actorUserId: comment.authorMemberKey,
+            body: comment.bodyMarkdown,
+            createdAt: comment.createdAt,
+          },
+          activity,
+        }, 201)
   } catch (error) {
     return toCollaborationErrorResponse(c, error)
   }
