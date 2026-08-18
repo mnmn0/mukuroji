@@ -2191,6 +2191,7 @@ test('replays an automation comment before checking a changed project assignment
         expect(input.entityKey).toBe(
           'workspace-1#work-item#team/core-team/issue/onboarding-friction',
         )
+        expect(input.commentId).toBe('automation-comment-replay_comment_0')
         return {
           id: 'replayed-automation-comment',
           rootCommentId: 'replayed-automation-comment',

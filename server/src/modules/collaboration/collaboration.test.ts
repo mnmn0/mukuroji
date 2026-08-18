@@ -12,6 +12,7 @@ import {
   CollaborationError,
   createPlanningUpdateCollaborationEntityKey,
   createProjectCollaborationEntityKey,
+  TEAM_ISSUE_COMMENT_BACKFILL_ALL_WORKSPACES,
   createWorkItemCollaborationEntityKey,
   DynamoDbCollaborationClient,
 } from './collaboration'
@@ -365,6 +366,19 @@ test('writes the comment backfill completion marker through a transaction', asyn
   ).resolves.toBe(true)
 })
 
+test('uses the environment marker for workspaces with no legacy comments', async () => {
+  const memory = createCollaborationMemory()
+
+  await memory.client.markTeamIssueCommentBackfillComplete(
+    TEAM_ISSUE_COMMENT_BACKFILL_ALL_WORKSPACES,
+    '2026-08-18T00:00:00.000Z',
+  )
+
+  await expect(
+    memory.client.isTeamIssueCommentBackfillComplete('workspace#without-comments'),
+  ).resolves.toBe(true)
+})
+
 test('rejects backfill validation when the parent Work Item is malformed', async () => {
   const directoryTeamId = 'workspace#one#team#team-a'
   const client = createClient(async (command) => {
@@ -522,6 +536,40 @@ test('backfills V2 discussion projections and upgrades an old legacy projection'
   expect(memory.rows.get(`${entityKey}\0${legacyRecordKey}`)?.discussionIndexVersion).toBe(2)
 })
 
+test('recognizes a completed backfill after a later comment mutation', async () => {
+  const memory = createCollaborationMemory()
+  const input = {
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'issue-1',
+    entityKey: createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1'),
+    commentId: 'legacy-comment-1',
+    actorMemberKey: 'author@example.com',
+    bodyMarkdown: 'Historical comment',
+    occurredAt: '2026-08-18T00:00:00.000Z',
+  }
+
+  await memory.client.backfillTeamIssueComment(input)
+  const commentKey = `${input.entityKey}\0COMMENT#${input.commentId}`
+  const existing = memory.rows.get(commentKey)
+  if (!existing) {
+    throw new Error('Expected the backfilled comment to be persisted.')
+  }
+  memory.rows.set(commentKey, {
+    ...existing,
+    bodyMarkdown: 'Edited after migration',
+    version: 2,
+    updatedAt: '2026-08-18T01:00:00.000Z',
+    editedAt: '2026-08-18T01:00:00.000Z',
+  })
+
+  await expect(memory.client.backfillTeamIssueComment(input)).resolves.toMatchObject({
+    id: input.commentId,
+    bodyMarkdown: 'Edited after migration',
+    version: 2,
+  })
+})
+
 test('preserves legacy comment bodies longer than the current composer limit', async () => {
   const memory = createCollaborationMemory()
   const bodyMarkdown = 'Historical comment. '.repeat(1_100).trim()
@@ -579,6 +627,36 @@ test('rejects an existing backfill comment whose timestamps do not match the sou
   await expect(memory.client.backfillTeamIssueComment(input)).rejects.toMatchObject({
     status: 409,
     code: 'CollaborationBackfillConflict',
+  })
+})
+
+test('preserves retryable backfill store failures instead of reporting a conflict', async () => {
+  const directoryTeamId = 'workspace#one#team#team-a'
+  const client = createClient(async (command) => {
+    const input = readCommandInput(command)
+    if (isTestRecord(input.Key) && input.Key.directoryTeamId === directoryTeamId) {
+      return { Item: createTestCanonicalParentWorkItem(directoryTeamId, 'issue-1') }
+    }
+    if (Array.isArray(input.TransactItems)) {
+      throw Object.assign(new Error('DynamoDB throttled the migration transaction.'), {
+        name: 'ProvisionedThroughputExceededException',
+      })
+    }
+    return {}
+  })
+
+  await expect(client.backfillTeamIssueComment({
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'issue-1',
+    entityKey: createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1'),
+    commentId: 'legacy-comment-1',
+    actorMemberKey: 'author@example.com',
+    bodyMarkdown: 'Historical comment',
+    occurredAt: '2026-08-18T00:00:00.000Z',
+  })).rejects.toMatchObject({
+    status: 503,
+    code: 'CollaborationUnavailable',
   })
 })
 
@@ -1602,6 +1680,61 @@ test('finds a committed comment by its deterministic mutation identity', async (
       { bodyMarkdown: 'Replay this comment.' },
     ),
   })).resolves.toBeUndefined()
+})
+
+test('finds an explicit automation comment replay even after soft deletion', async () => {
+  const memory = createCollaborationMemory()
+  const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
+  const auditContext = createMutationAuditContext({
+    workspaceId: 'workspace#one',
+    actor: {
+      id: 'automation:rule-1',
+      kind: 'service',
+      displayName: 'Automation',
+    },
+    idempotencyKey: 'automation-explicit-comment',
+    occurredAt: '2026-07-12T00:00:00.000Z',
+    request: { method: 'AUTOMATION', path: '/automation/comment', body: { body: 'Comment' } },
+    source: { kind: 'system' },
+  })
+  const comment = await memory.client.createComment({
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'issue-1',
+    entityKey,
+    actorMemberKey: 'automation:rule-1',
+    bodyMarkdown: 'Comment',
+    commentId: 'automation-execution_comment_0',
+    auditContext,
+  })
+  await memory.client.deleteComment({
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'issue-1',
+    entityKey,
+    actorMemberKey: 'automation:rule-1',
+    commentId: comment.id,
+    expectedVersion: comment.version,
+    canModerate: true,
+    auditContext: createMutationAuditContext({
+      workspaceId: 'workspace#one',
+      actor: {
+        id: 'automation:rule-1',
+        kind: 'service',
+        displayName: 'Automation',
+      },
+      idempotencyKey: 'automation-explicit-comment-delete',
+      occurredAt: '2026-07-12T00:01:00.000Z',
+      request: { method: 'AUTOMATION', path: '/automation/comment/delete' },
+      source: { kind: 'system' },
+    }),
+  })
+
+  await expect(memory.client.getCommentMutationReplay({
+    entityKey,
+    auditContext,
+    commentId: comment.id,
+  })).resolves.toMatchObject({ id: comment.id, deletedAt: expect.any(String) })
 })
 
 test('does not subscribe service actors as automatic watchers', async () => {

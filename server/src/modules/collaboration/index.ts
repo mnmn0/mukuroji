@@ -8,6 +8,7 @@ export {
   createPlanningUpdatePublicTargetKey,
   createTeamIssueCommentBackfillMarkerEntityKey,
   createWorkItemCollaborationEntityKey,
+  TEAM_ISSUE_COMMENT_BACKFILL_ALL_WORKSPACES,
   TEAM_ISSUE_COMMENT_BACKFILL_MARKER_RECORD_KEY,
   TEAM_ISSUE_COMMENT_BACKFILL_VERSION,
   parseCuratedContextItemRow,

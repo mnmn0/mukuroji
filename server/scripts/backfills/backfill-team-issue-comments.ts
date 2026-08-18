@@ -18,6 +18,7 @@ import {
   getConfiguredAuditRetentionDays,
 } from '../../src/modules/audit'
 import {
+  TEAM_ISSUE_COMMENT_BACKFILL_ALL_WORKSPACES,
   createWorkItemCollaborationEntityKey,
 } from '../../src/modules/collaboration'
 import { DynamoDbCollaborationClient } from '../../src/modules/collaboration/collaboration'
@@ -28,8 +29,9 @@ import {
   ScanCommand,
   type DynamoDBDocumentClient,
 } from '@aws-sdk/lib-dynamodb'
+import { isLocalDynamoDbEndpoint } from './backfill-endpoint'
 
-const checkpointVersion = 1
+const checkpointVersion = 2
 const scanPageSize = 100
 
 /** A validated legacy Team Issue comment event. */
@@ -70,7 +72,7 @@ type DynamoKey = Record<string, unknown>
 /** Durable state for one source-table scan. */
 type CheckpointState = {
   /** Checkpoint schema version. */
-  version: 1
+  version: 2
   /** Configuration digest binding the checkpoint to one environment. */
   configurationHash: string
   /** Last checkpoint update time. */
@@ -85,6 +87,16 @@ type CheckpointState = {
   backfilled: number
   /** Workspaces observed in the source rows. */
   workspaceIds: string[]
+  /** Cumulative source and canonical counts per workspace. */
+  workspaceCounts: Record<string, WorkspaceBackfillCounts>
+}
+
+/** Cumulative source and canonical counters for one workspace. */
+type WorkspaceBackfillCounts = {
+  /** Number of matching legacy rows scanned for the workspace. */
+  scanned: number
+  /** Number of canonical rows written or replayed for the workspace. */
+  backfilled: number
 }
 
 /** Resolved table names for one migration environment. */
@@ -160,7 +172,7 @@ async function main() {
     tables.auditEvents,
     undefined,
     dynamoDbClient,
-    endpoint !== undefined && isLocalEndpoint(endpoint),
+    endpoint !== undefined && isLocalDynamoDbEndpoint(endpoint),
   )
   const collaboration = new DynamoDbCollaborationClient(
     tables.target,
@@ -205,7 +217,7 @@ function parseArguments(args: string[]): BackfillOptions {
   const options: BackfillOptions = {
     dryRun: false,
     help: false,
-    checkpointPath: resolve(process.cwd(), 'team-issue-comment-backfill-v1.checkpoint.json'),
+    checkpointPath: resolve(process.cwd(), 'team-issue-comment-backfill-v2.checkpoint.json'),
     workspaceIds: [],
   }
 
@@ -280,7 +292,7 @@ function printHelp() {
 
 Options:
   --dry-run                 Scan and validate without writing rows or checkpoint state.
-  --checkpoint <path>      Checkpoint JSON path (default: ./team-issue-comment-backfill-v1.checkpoint.json).
+  --checkpoint <path>      Checkpoint JSON path (default: ./team-issue-comment-backfill-v2.checkpoint.json).
   --limit <count>          Maximum matching source rows processed in this run.
   --workspace-id <id>      Restrict the scan and marker publication to this workspace; repeatable.
   --help, -h               Show this help.
@@ -297,8 +309,11 @@ AWS_ACCOUNT_ID is optional and, when supplied, is checked against the account
 returned by STS GetCallerIdentity. The checkpoint and audit principal use the
 verified account rather than this optional expectation.
 
-The marker is written only after the source Scan reaches its end. A repeated run
-is safe because comment and discussion rows use the legacy event ID and conditional writes.`)
+The per-workspace marker is written only after the source Scan reaches its end.
+An unfiltered run also writes an environment-wide marker so workspaces with no
+legacy comments can switch to canonical-only reads. A repeated run is safe
+because comment, provenance, and discussion rows use the legacy event ID and
+conditional writes.`)
 }
 
 /** Resolves source, target, and parent table names for one migration run.
@@ -307,7 +322,7 @@ is safe because comment and discussion rows use the legacy event ID and conditio
  * @returns Validated table names.
  */
 function resolveTableNames(endpoint: string | undefined): TableNames {
-  const allowLocalDefaults = endpoint !== undefined && isLocalEndpoint(endpoint)
+  const allowLocalDefaults = endpoint !== undefined && isLocalDynamoDbEndpoint(endpoint)
   return {
     source: resolveTableName(
       readEnvironment('MUKUROJI_TEAM_ISSUE_EVENTS_TABLE') ?? readEnvironment('TEAM_ISSUE_EVENTS_TABLE_NAME'),
@@ -346,7 +361,7 @@ export async function resolveBackfillIdentity(
 ): Promise<BackfillIdentity> {
   const configured = readEnvironment('AWS_ACCOUNT_ID')
   const operatorLabel = readEnvironment('MUKUROJI_BACKFILL_OPERATOR_ID')
-  if (endpoint !== undefined && isLocalEndpoint(endpoint)) {
+  if (endpoint !== undefined && isLocalDynamoDbEndpoint(endpoint)) {
     return {
       accountId: configured ? requireAwsAccountId(configured) : 'local-account',
       operatorId: 'local:backfill',
@@ -407,20 +422,6 @@ function resolveTableName(value: string | undefined, variableName: string, fallb
   throw new Error(`${variableName} is required.`)
 }
 
-/** Returns whether an endpoint targets a loopback host.
- *
- * @param endpoint - Endpoint URL to inspect.
- * @returns Whether local table defaults are safe to use.
- */
-function isLocalEndpoint(endpoint: string) {
-  try {
-    const url = new URL(endpoint)
-    return url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '::1'
-  } catch {
-    return false
-  }
-}
-
 /** Loads a checkpoint and rejects it when it belongs to another environment.
  *
  * @param path - JSON checkpoint path.
@@ -447,6 +448,7 @@ async function readCheckpoint(path: string, configurationHash: string): Promise<
         scanned: 0,
         backfilled: 0,
         workspaceIds: [],
+        workspaceCounts: {},
       }
     }
     throw error
@@ -473,6 +475,17 @@ async function runBackfill(
   let processedThisRun = 0
   const validationFailures: string[] = []
   const workspaceIds = new Set([...checkpoint.workspaceIds, ...options.workspaceIds])
+  const workspaceCounts = new Map<string, WorkspaceBackfillCounts>(
+    Object.entries(checkpoint.workspaceCounts).map(([workspaceId, counts]) => [
+      workspaceId,
+      { ...counts },
+    ]),
+  )
+  for (const workspaceId of options.workspaceIds) {
+    if (!workspaceCounts.has(workspaceId)) {
+      workspaceCounts.set(workspaceId, { scanned: 0, backfilled: 0 })
+    }
+  }
 
   while (!checkpoint.completed && (options.limit === undefined || processedThisRun < options.limit)) {
     const remaining = options.limit === undefined ? scanPageSize : Math.max(1, options.limit - processedThisRun)
@@ -500,6 +513,9 @@ async function runBackfill(
       processedThisRun += 1
       checkpoint.scanned += 1
       workspaceIds.add(legacy.workspaceId)
+      const counts = workspaceCounts.get(legacy.workspaceId) ?? { scanned: 0, backfilled: 0 }
+      counts.scanned += 1
+      workspaceCounts.set(legacy.workspaceId, counts)
       const input = createBackfillInput(legacy)
       try {
         if (options.dryRun) {
@@ -507,6 +523,7 @@ async function runBackfill(
         } else {
           await collaboration.backfillTeamIssueComment(input)
           checkpoint.backfilled += 1
+          counts.backfilled += 1
         }
       } catch (error) {
         if (!options.dryRun) throw error
@@ -520,6 +537,9 @@ async function runBackfill(
     if (!response.LastEvaluatedKey) {
       checkpoint.completed = true
     }
+    checkpoint.workspaceCounts = Object.fromEntries(
+      [...workspaceCounts.entries()].sort(([left], [right]) => left.localeCompare(right)),
+    )
     if (!options.dryRun) {
       await writeCheckpoint(options.checkpointPath, checkpoint)
     }
@@ -531,9 +551,21 @@ async function runBackfill(
   if (checkpoint.completed && !options.dryRun) {
     // Persist the audit receipt first. If marker publication fails, the receipt
     // makes the incomplete marker state observable and the retry remains idempotent.
-    await writeBackfillAuditEvents(auditEvents, workspaceIds, checkpoint, options, runContext)
+    await writeBackfillAuditEvents(
+      auditEvents,
+      workspaceIds,
+      workspaceCounts,
+      checkpoint,
+      options,
+      runContext,
+    )
     for (const workspaceId of workspaceIds) {
       await collaboration.markTeamIssueCommentBackfillComplete(workspaceId)
+    }
+    if (options.workspaceIds.length === 0) {
+      await collaboration.markTeamIssueCommentBackfillComplete(
+        TEAM_ISSUE_COMMENT_BACKFILL_ALL_WORKSPACES,
+      )
     }
   }
 
@@ -572,6 +604,7 @@ function createBackfillInput(legacy: LegacyCommentEvent) {
  *
  * @param auditEvents - Audit event writer.
  * @param workspaceIds - Workspaces selected or observed by the scan.
+ * @param workspaceCounts - Cumulative counters keyed by workspace.
  * @param checkpoint - Cumulative migration counters and completion state.
  * @param options - Scope filter used by the invocation.
  * @param runContext - Authenticated operator and environment binding.
@@ -579,6 +612,7 @@ function createBackfillInput(legacy: LegacyCommentEvent) {
 async function writeBackfillAuditEvents(
   auditEvents: DynamoDbAuditEventsClient,
   workspaceIds: Set<string>,
+  workspaceCounts: Map<string, WorkspaceBackfillCounts>,
   checkpoint: CheckpointState,
   options: BackfillOptions,
   runContext: BackfillRunContext,
@@ -589,6 +623,7 @@ async function writeBackfillAuditEvents(
   const requestedWorkspaceIds = options.workspaceIds.length > 0 ? options.workspaceIds : ['*']
 
   for (const workspaceId of [...workspaceIds].sort()) {
+    const counts = workspaceCounts.get(workspaceId) ?? { scanned: 0, backfilled: 0 }
     const context = createMutationAuditContext({
       workspaceId,
       actor: {
@@ -627,8 +662,8 @@ async function writeBackfillAuditEvents(
       changes: createAuditFieldChanges(
         undefined,
         {
-          sourceRowsScanned: checkpoint.scanned,
-          canonicalRowsBackfilled: checkpoint.backfilled,
+          sourceRowsScanned: counts.scanned,
+          canonicalRowsBackfilled: counts.backfilled,
           completed: checkpoint.completed,
         },
         ['sourceRowsScanned', 'canonicalRowsBackfilled', 'completed'],
@@ -776,7 +811,23 @@ function isCheckpointState(value: unknown): value is CheckpointState {
     Array.isArray(value.workspaceIds) &&
     value.workspaceIds.every((workspaceId): workspaceId is string =>
       typeof workspaceId === 'string' && workspaceId.length > 0,
+    ) &&
+    isRecord(value.workspaceCounts) &&
+    Object.entries(value.workspaceCounts).every(([workspaceId, counts]) =>
+      workspaceId.length > 0 && isWorkspaceBackfillCounts(counts),
     )
+}
+
+/** Validates one persisted workspace counter pair. */
+function isWorkspaceBackfillCounts(value: unknown): value is WorkspaceBackfillCounts {
+  return isRecord(value) &&
+    typeof value.scanned === 'number' &&
+    Number.isSafeInteger(value.scanned) &&
+    value.scanned >= 0 &&
+    typeof value.backfilled === 'number' &&
+    Number.isSafeInteger(value.backfilled) &&
+    value.backfilled >= 0 &&
+    value.backfilled <= value.scanned
 }
 
 /** Validates the scalar-only key shape accepted by the DocumentClient.
@@ -818,5 +869,12 @@ function readEnvironment(name: string) {
 }
 
 if (import.meta.main) {
-  await main()
+  try {
+    await main()
+  } catch (error) {
+    console.error(
+      `Team Issue comment backfill failed: ${readErrorMessage(error)}`,
+    )
+    process.exitCode = 1
+  }
 }

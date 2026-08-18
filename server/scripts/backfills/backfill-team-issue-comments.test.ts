@@ -4,6 +4,7 @@ import {
   resolveAccountId,
   resolveBackfillIdentity,
 } from './backfill-team-issue-comments'
+import { isLocalDynamoDbEndpoint } from './backfill-endpoint'
 
 const originalStsSend = Reflect.get(STSClient.prototype, 'send')
 const originalAccountId = Bun.env.AWS_ACCOUNT_ID
@@ -27,6 +28,18 @@ test('uses the local account sentinel for a Floci endpoint', async () => {
   delete Bun.env.AWS_ACCOUNT_ID
 
   await expect(resolveAccountId('http://localhost:4566', 'us-east-1')).resolves.toBe('local-account')
+})
+
+test('recognizes all supported local DynamoDB endpoint hosts', () => {
+  for (const host of ['localhost', '127.0.0.1', '0.0.0.0', 'floci', 'localstack', '[::1]']) {
+    expect(isLocalDynamoDbEndpoint(`http://${host}:4566`)).toBe(true)
+  }
+  expect(isLocalDynamoDbEndpoint('https://dynamodb.us-east-1.amazonaws.com')).toBe(false)
+  expect(isLocalDynamoDbEndpoint('https://floci:4566')).toBe(false)
+  expect(isLocalDynamoDbEndpoint('http://user@floci:4566')).toBe(false)
+  expect(isLocalDynamoDbEndpoint('http://floci:4566/path')).toBe(false)
+  expect(isLocalDynamoDbEndpoint('http://floci:4566?service=dynamodb')).toBe(false)
+  expect(isLocalDynamoDbEndpoint(undefined)).toBe(false)
 })
 
 test('keeps the local audit sentinel separate from the optional operator label', async () => {

@@ -88,7 +88,7 @@ Collaboration comment の正本は Collaboration table の persisted root/reply 
 
 旧 `commented` event は、workspace 単位の完了 marker が書かれるまで削除・非表示にしません。backfill は source event ID を canonical comment ID として使い、comment と root discussion row を条件付きで保存するため、checkpoint を使った中断・再実行に耐えます。Work Item が存在しない、row の scope が partition key と一致しない、既存 canonical row の内容が異なる場合は fail-closed で停止します。コメントごとの通知・activity audit は backfill から生成しませんが、完了した実行については実行者、検証済み AWS account、scope、件数を suppressed な運用 audit として記録します。
 
-まず dry-run で source row を検証し、その後 checkpoint を指定して実行します。source table の全 scan が完了した後にだけ、検出した各 workspace の marker が保存されます。AWS の marker、repair row、checkpoint は writer-fence invocation の内側で扱います。
+まず dry-run で source row を検証し、その後 checkpoint を指定して実行します。source table の全 scan が完了した後にだけ、検出した各 workspace の marker が保存されます。workspace filter を指定しない実行では、legacy comment が一件もない workspace も canonical-only に切り替えられる環境全体 marker を追加で保存します。AWS の marker、provenance receipt、repair row、checkpoint は writer-fence invocation の内側で扱います。
 
 ```sh
 AWS_ENDPOINT_URL=http://localhost:4566 \
@@ -97,7 +97,7 @@ bun run team-issue-comments:backfill -- --dry-run --limit 100
 AWS_ENDPOINT_URL=http://localhost:4566 \
 MUKUROJI_LOCAL_AWS_RUNTIME=floci \
 bun run team-issue-comments:backfill -- \
-  --checkpoint /tmp/mukuroji-team-issue-comments-v1.json
+  --checkpoint /tmp/mukuroji-team-issue-comments-v2.json
 ```
 
 AWS では `TEAM_ISSUE_EVENTS_TABLE_NAME`、`COLLABORATION_TABLE_NAME`、`TEAM_ISSUES_TABLE_NAME`、`AUDIT_EVENTS_TABLE_NAME` を明示してください。`MUKUROJI_BACKFILL_OPERATOR_ID` は任意の運用ラベルとして指定できますが、AWSの監査上の operator identity は STS `GetCallerIdentity` の caller ARN から取得します。local実行では `local:backfill` sentinel を使います。実行時に STS で account を検証し、`AWS_ACCOUNT_ID` を設定した場合は期待値として検証済み account と一致することを要求します。checkpoint には DynamoDB の continuation key が含まれるため owner-only で保存され、移行完了後に削除します。source/target/audit table、account、region、workspace filter が異なる checkpoint は拒否されます。特定 workspace だけを先に処理する場合は `--workspace-id <id>` を繰り返し指定できます。

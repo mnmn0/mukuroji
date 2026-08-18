@@ -360,9 +360,10 @@ they are not immediately deleted.
 Team Issue `commented` events are copied to the canonical Collaboration table
 with their stable event IDs. The resumable runner writes a checkpoint after
 each DynamoDB scan page and publishes one completion marker per observed
-workspace only after the source scan reaches its end. Until that marker exists,
-the API keeps a bounded, read-only legacy comment fallback; after the marker it
-serves canonical comments only.
+workspace only after the source scan reaches its end. An unfiltered run also
+publishes an environment-wide marker for workspaces with no legacy comments.
+Until an applicable marker exists, the API keeps a bounded, read-only legacy
+comment fallback; after the marker it serves canonical comments only.
 
 Preview and run the migration locally with:
 
@@ -373,7 +374,7 @@ bun run team-issue-comments:backfill -- --dry-run --limit 100
 AWS_ENDPOINT_URL=http://localhost:4566 \
 MUKUROJI_LOCAL_AWS_RUNTIME=floci \
 bun run team-issue-comments:backfill -- \
-  --checkpoint /tmp/mukuroji-team-issue-comments-v1.json
+  --checkpoint /tmp/mukuroji-team-issue-comments-v2.json
 ```
 
 AWS runs require `TEAM_ISSUE_EVENTS_TABLE_NAME`, `COLLABORATION_TABLE_NAME`,
@@ -389,7 +390,9 @@ an operator label, while AWS audit records use the authenticated STS caller ARN;
 local runs use the `local:backfill` sentinel. Canonical repairs and marker
 publication run inside the workspace-search writer-fence invocation.
 Use repeated `--workspace-id <id>` options to scan and mark a selected set of
-workspaces before processing the rest of the environment.
+workspaces before processing the rest of the environment. An unfiltered run
+marks the environment-wide scope after the complete source scan, including
+workspaces with no matching legacy comments.
 
 ## Workspace search backfill
 

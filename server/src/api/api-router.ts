@@ -13868,9 +13868,11 @@ async function executeAutomationComment(
     target.workItemId,
   )
   const auditContext = createAutomationMutationContext(context, { body })
+  const commentId = createAutomationCommentEventId(context)
   const replay = await dependencies.collaboration.getCommentMutationReplay({
     entityKey,
     auditContext,
+    commentId,
   })
   if (replay) return
   if (
@@ -13955,7 +13957,7 @@ async function executeAutomationComment(
     assigneeMemberKey: detail.issue.assigneeUserId,
     actorMemberKey: `automation:${context.execution.ruleId}`,
     bodyMarkdown: body,
-    commentId: createAutomationCommentId(context.execution.id, context.actionIndex),
+    commentId,
     automaticWatcherCandidates: createTeamIssueAutomaticWatcherCandidates(detail.issue),
     deepLink: createTeamIssueDeepLink(target.teamId, target.workItemId),
     authorizationConditionChecks,
@@ -14059,7 +14061,7 @@ function createAutomationMutationContext(
 
 /** Creates the deterministic pre-cutover Automation comment event identity. */
 function createAutomationCommentEventId(context: AutomationActionExecutionContext) {
-  return `${context.execution.id}_comment_${context.actionIndex}`
+  return createAutomationCommentId(context.execution.id, context.actionIndex)
 }
 
 function createAutomationRuleLineage(context: AutomationActionExecutionContext) {

@@ -71,6 +71,9 @@ export const TEAM_ISSUE_COMMENT_BACKFILL_VERSION = 1
 export const TEAM_ISSUE_COMMENT_BACKFILL_MARKER_RECORD_KEY =
   `TEAM_ISSUE_COMMENTS#v${TEAM_ISSUE_COMMENT_BACKFILL_VERSION}`
 
+/** Scope identifier for an environment-wide completed Team Issue comment backfill marker. */
+export const TEAM_ISSUE_COMMENT_BACKFILL_ALL_WORKSPACES = '__all-workspaces__'
+
 /** Record key for the per-entity curated-context pagination generation. */
 const CURATED_CONTEXT_LEDGER_RECORD_KEY = 'CONTEXT_LEDGER'
 /** Maximum length of one opaque watcher mutation identity. */
@@ -341,6 +344,8 @@ export type GetCollaborationCommentMutationReplayInput = {
   entityKey: string
   /** Request identity used to derive the committed comment identifier. */
   auditContext: MutationAuditContext
+  /** Optional explicit identifier used by trusted service mutations with legacy IDs. */
+  commentId?: string
 }
 
 /** Curated context page 取得入力です。 */
@@ -2376,6 +2381,24 @@ type StoredComment = CollaborationComment & {
   legacyAcceptedResolutions: AcceptedResolution[]
 }
 
+/** Durable provenance receipt for one successfully copied legacy comment. */
+type StoredBackfillReceipt = {
+  /** DynamoDB partition key shared with the copied comment. */
+  entityKey: string
+  /** DynamoDB sort key for the immutable migration receipt. */
+  recordKey: string
+  /** Row discriminator. */
+  entryType: 'team-issue-comment-backfill-receipt'
+  /** Stable legacy event identifier. */
+  commentId: string
+  /** Normalized actor copied from the legacy event. */
+  sourceActorMemberKey: string
+  /** Normalized timestamp copied from the legacy event. */
+  sourceOccurredAt: string
+  /** Digest of the legacy source identity and body. */
+  sourceBodyFingerprint: string
+}
+
 /** Accepted resolution history の append-only row です。 */
 type StoredAcceptedResolution = {
   /** DynamoDB partition key です。 */
@@ -2797,6 +2820,29 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
   /** Returns whether the environment marker allows canonical-only Team Issue comment reads. */
   async isTeamIssueCommentBackfillComplete(workspaceId: string): Promise<boolean> {
     await this.ensureLocalTable()
+    const workspaceMarker = await this.readTeamIssueCommentBackfillMarker(workspaceId)
+    if (isCompletedTeamIssueCommentBackfillMarker(
+      workspaceMarker,
+      this.tableName,
+      this.teamIssueEventsTableName,
+    )) {
+      return true
+    }
+    if (workspaceId === TEAM_ISSUE_COMMENT_BACKFILL_ALL_WORKSPACES) {
+      return false
+    }
+    const environmentMarker = await this.readTeamIssueCommentBackfillMarker(
+      TEAM_ISSUE_COMMENT_BACKFILL_ALL_WORKSPACES,
+    )
+    return isCompletedTeamIssueCommentBackfillMarker(
+      environmentMarker,
+      this.tableName,
+      this.teamIssueEventsTableName,
+    )
+  }
+
+  /** Reads one migration marker with strong consistency. */
+  private async readTeamIssueCommentBackfillMarker(workspaceId: string) {
     const response = await this.documentClient.send(new GetCommand({
       TableName: this.tableName,
       Key: {
@@ -2805,12 +2851,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       },
       ConsistentRead: true,
     }))
-    const marker = response.Item
-    return isCompletedTeamIssueCommentBackfillMarker(
-      marker,
-      this.tableName,
-      this.teamIssueEventsTableName,
-    )
+    return response.Item
   }
 
   /**
@@ -2902,45 +2943,37 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
               ConditionExpression: 'attribute_not_exists(entityKey) AND attribute_not_exists(recordKey)',
             },
           })),
+          {
+            Put: {
+              TableName: this.tableName,
+              Item: createBackfillReceiptRecord(normalizedInput),
+              ConditionExpression: 'attribute_not_exists(entityKey) AND attribute_not_exists(recordKey)',
+            },
+          },
         ],
       }))
       return comment
     } catch (error) {
-      if (isTransactionConditionalFailureAt(error, 1)) {
-        const existing = await this.getStoredComment(normalizedInput.entityKey, commentId)
-        if (existing && isSameBackfilledComment(existing, comment)) {
-          const existingDiscussionRecords = [
-            createBackfillDiscussionRecord(
-              normalizedInput.entityKey,
-              discussionTimelineRecordKey(existing.createdAt, commentId, undefined),
-              commentId,
-              existing.createdAt,
-            ),
-            createBackfillDiscussionRecord(
-              normalizedInput.entityKey,
-              discussionScopedRecordKey(existing.createdAt, commentId, undefined),
-              commentId,
-              existing.createdAt,
-            ),
-            createBackfillDiscussionRecord(
-              normalizedInput.entityKey,
-              discussionLegacyRecordKey(existing.createdAt, commentId, undefined),
-              commentId,
-              existing.createdAt,
-              discussionLegacyIndexVersion,
-            ),
-          ]
-          for (const record of existingDiscussionRecords) {
-            await this.ensureBackfilledDiscussionRecord(
-              normalizedInput.entityKey,
-              record.recordKey,
-              commentId,
-              existing.createdAt,
-              record.discussionIndexVersion,
-            )
-          }
-          return existing
-        }
+      if (!isBackfillConditionalFailure(error)) {
+        throw toCollaborationStoreError(error)
+      }
+      const existing = await this.getStoredComment(normalizedInput.entityKey, commentId)
+      const receipt = await this.getBackfillReceipt(normalizedInput.entityKey, commentId)
+      if (
+        existing &&
+        receipt &&
+        isSameBackfillReceipt(receipt, normalizedInput) &&
+        isBackfilledCommentIdentity(existing, normalizedInput)
+      ) {
+        await this.repairBackfilledDiscussion(normalizedInput, existing)
+        return existing
+      }
+      if (isTransactionConditionalFailureAt(error, 1) &&
+          existing &&
+          isSameBackfilledComment(existing, comment)) {
+        await this.ensureBackfillReceipt(normalizedInput)
+        await this.repairBackfilledDiscussion(normalizedInput, existing)
+        return existing
       }
       throw new CollaborationError(
         409,
@@ -2971,6 +3004,85 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       )
     }
     return response.Item
+  }
+
+  /** Reads one immutable backfill provenance receipt with strong consistency. */
+  private async getBackfillReceipt(entityKey: string, commentId: string) {
+    const recordKey = backfillReceiptRecordKey(commentId)
+    const response = await this.documentClient.send(new GetCommand({
+      TableName: this.tableName,
+      Key: { entityKey, recordKey },
+      ConsistentRead: true,
+    }))
+    return response.Item
+      ? toStoredBackfillReceipt(response.Item, entityKey, recordKey)
+      : undefined
+  }
+
+  /** Persists one immutable backfill provenance receipt idempotently. */
+  private async ensureBackfillReceipt(input: BackfillCollaborationCommentInput): Promise<void> {
+    const expected = createBackfillReceiptRecord(input)
+    try {
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [{
+          Put: {
+            TableName: this.tableName,
+            Item: expected,
+            ConditionExpression: 'attribute_not_exists(entityKey) AND attribute_not_exists(recordKey)',
+          },
+        }],
+      }))
+    } catch (error) {
+      if (!isBackfillConditionalFailure(error)) {
+        throw toCollaborationStoreError(error)
+      }
+      const existing = await this.getBackfillReceipt(input.entityKey, input.commentId)
+      if (!existing || !isSameBackfillReceipt(existing, input)) {
+        throw new CollaborationError(
+          409,
+          'CollaborationBackfillConflict',
+          'The legacy comment backfill receipt already exists with different data.',
+          { cause: error },
+        )
+      }
+    }
+  }
+
+  /** Repairs all discussion projections for an already copied comment. */
+  private async repairBackfilledDiscussion(
+    input: BackfillCollaborationCommentInput,
+    existing: StoredComment,
+  ): Promise<void> {
+    const existingDiscussionRecords = [
+      createBackfillDiscussionRecord(
+        input.entityKey,
+        discussionTimelineRecordKey(existing.createdAt, input.commentId, undefined),
+        input.commentId,
+        existing.createdAt,
+      ),
+      createBackfillDiscussionRecord(
+        input.entityKey,
+        discussionScopedRecordKey(existing.createdAt, input.commentId, undefined),
+        input.commentId,
+        existing.createdAt,
+      ),
+      createBackfillDiscussionRecord(
+        input.entityKey,
+        discussionLegacyRecordKey(existing.createdAt, input.commentId, undefined),
+        input.commentId,
+        existing.createdAt,
+        discussionLegacyIndexVersion,
+      ),
+    ]
+    for (const record of existingDiscussionRecords) {
+      await this.ensureBackfilledDiscussionRecord(
+        input.entityKey,
+        record.recordKey,
+        input.commentId,
+        existing.createdAt,
+        record.discussionIndexVersion,
+      )
+    }
   }
 
   /** Repairs the discussion projection when a backfill comment already exists. */
@@ -3381,7 +3493,9 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
   async getCommentMutationReplay(input: GetCollaborationCommentMutationReplayInput) {
     await this.ensureLocalTable()
     const entityKey = requireIdentifier(input.entityKey, 'Collaboration entity key')
-    const commentId = createCommentId('', input.auditContext, entityKey)
+    const commentId = input.commentId === undefined
+      ? createCommentId('', input.auditContext, entityKey)
+      : createTrustedCommentId(input.commentId, input.auditContext)
     return this.getStoredComment(entityKey, commentId)
   }
 
@@ -5975,6 +6089,89 @@ function normalizeBackfillCollaborationCommentInput(
   }
 }
 
+/** Creates the stable record key for one immutable backfill provenance receipt. */
+function backfillReceiptRecordKey(commentId: string) {
+  return `BACKFILL#${requireIdentifier(commentId, 'Comment ID')}`
+}
+
+/** Creates a digest that binds a receipt to the original legacy comment payload. */
+function createBackfillSourceBodyFingerprint(input: BackfillCollaborationCommentInput) {
+  return createHash('sha256')
+    .update(`${input.commentId}\0${input.actorMemberKey}\0${input.occurredAt}\0${input.bodyMarkdown}`)
+    .digest('hex')
+}
+
+/** Creates the immutable provenance row written with a canonical backfill comment. */
+function createBackfillReceiptRecord(
+  input: BackfillCollaborationCommentInput,
+): StoredBackfillReceipt {
+  return {
+    entityKey: input.entityKey,
+    recordKey: backfillReceiptRecordKey(input.commentId),
+    entryType: 'team-issue-comment-backfill-receipt',
+    commentId: input.commentId,
+    sourceActorMemberKey: input.actorMemberKey,
+    sourceOccurredAt: input.occurredAt,
+    sourceBodyFingerprint: createBackfillSourceBodyFingerprint(input),
+  }
+}
+
+/** Validates one immutable backfill provenance row read from DynamoDB. */
+function toStoredBackfillReceipt(
+  value: Record<string, unknown>,
+  entityKey: string,
+  recordKey: string,
+): StoredBackfillReceipt {
+  if (
+    value.entryType !== 'team-issue-comment-backfill-receipt' ||
+    value.entityKey !== entityKey ||
+    value.recordKey !== recordKey ||
+    typeof value.commentId !== 'string' ||
+    typeof value.sourceActorMemberKey !== 'string' ||
+    typeof value.sourceOccurredAt !== 'string' ||
+    typeof value.sourceBodyFingerprint !== 'string'
+  ) {
+    throw new CollaborationError(
+      503,
+      'InvalidCollaborationRecord',
+      'Backfill provenance receipt is invalid.',
+    )
+  }
+  return {
+    entityKey,
+    recordKey,
+    entryType: 'team-issue-comment-backfill-receipt',
+    commentId: requireIdentifier(value.commentId, 'Backfill receipt comment ID'),
+    sourceActorMemberKey: normalizeMemberKey(value.sourceActorMemberKey),
+    sourceOccurredAt: normalizeBackfillTimestamp(value.sourceOccurredAt),
+    sourceBodyFingerprint: value.sourceBodyFingerprint,
+  }
+}
+
+/** Checks whether a receipt belongs to the currently scanned legacy comment. */
+function isSameBackfillReceipt(
+  receipt: StoredBackfillReceipt,
+  input: BackfillCollaborationCommentInput,
+) {
+  return receipt.entityKey === input.entityKey &&
+    receipt.recordKey === backfillReceiptRecordKey(input.commentId) &&
+    receipt.commentId === input.commentId &&
+    receipt.sourceActorMemberKey === input.actorMemberKey &&
+    receipt.sourceOccurredAt === input.occurredAt &&
+    receipt.sourceBodyFingerprint === createBackfillSourceBodyFingerprint(input)
+}
+
+/** Checks immutable comment identity while allowing later body and lifecycle mutations. */
+function isBackfilledCommentIdentity(
+  existing: StoredComment,
+  input: BackfillCollaborationCommentInput,
+) {
+  return existing.id === input.commentId &&
+    existing.rootCommentId === input.commentId &&
+    existing.authorMemberKey === input.actorMemberKey &&
+    existing.createdAt === input.occurredAt
+}
+
 /** Validates one persisted Team Issue comment backfill marker. */
 function isCompletedTeamIssueCommentBackfillMarker(
   value: unknown,
@@ -7378,6 +7575,23 @@ function isConditionalFailure(error: unknown) {
 
   const reasons = (error as { CancellationReasons?: Array<{ Code?: string }> }).CancellationReasons
   return Array.isArray(reasons) && reasons.some((reason) => reason.Code === 'ConditionalCheckFailed')
+}
+
+/** Returns whether a transaction failed only because of conditional guards. */
+function isBackfillConditionalFailure(error: unknown) {
+  if (isAwsNamedError(error, 'ConditionalCheckFailedException')) {
+    return true
+  }
+  if (!isAwsNamedError(error, 'TransactionCanceledException') || !isRecord(error)) {
+    return false
+  }
+  const reasons = error.CancellationReasons
+  if (!Array.isArray(reasons) || reasons.length === 0) {
+    return false
+  }
+  const codes = reasons.map((reason) => isRecord(reason) ? reason.Code : undefined)
+  return codes.includes('ConditionalCheckFailed') &&
+    codes.every((code) => code === 'None' || code === 'ConditionalCheckFailed')
 }
 
 /** Returns whether a transaction cancellation failed at one known item index. */
