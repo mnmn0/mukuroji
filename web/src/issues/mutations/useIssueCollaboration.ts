@@ -833,7 +833,7 @@ function deduplicateIssueComments(comments: TeamIssueComment[]) {
   return Array.from(commentsById.values())
 }
 
-/** Paginated canonical comments を ID で統合します。 */
+/** Merges paginated canonical comments by their stable identifier. */
 export function mergeIssueComments(comments: TeamIssueComment[]) {
   return deduplicateIssueComments(comments)
 }

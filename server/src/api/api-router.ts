@@ -9212,9 +9212,9 @@ routeApp.patch('/api/teams/:teamId/issues/:issueId', async (c) => {
   }
 })
 
-/** 移行未完了の環境で一度に評価する旧 event の最大件数です。 */
+/** Maximum legacy event rows evaluated in one request before migration completes. */
 const LEGACY_COLLABORATION_EVENT_PREVIEW_LIMIT = 50
-/** 移行未完了の旧 event cursor を canonical cursor と区別する接頭辞です。 */
+/** Prefix that keeps legacy event cursors distinct from canonical cursors. */
 const LEGACY_COLLABORATION_CURSOR_PREFIX = 'legacy.'
 
 /**
