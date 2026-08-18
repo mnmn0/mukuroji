@@ -441,50 +441,46 @@ async function runBackfill(
   runContext: BackfillRunContext,
 ) {
   let processedThisRun = 0
+  const validationFailures: string[] = []
   const workspaceIds = new Set([...checkpoint.workspaceIds, ...options.workspaceIds])
 
   while (!checkpoint.completed && (options.limit === undefined || processedThisRun < options.limit)) {
     const remaining = options.limit === undefined ? scanPageSize : Math.max(1, options.limit - processedThisRun)
-    const filterExpressions = ['eventType = :eventType']
-    const expressionAttributeValues: Record<string, string> = { ':eventType': 'commented' }
-    if (options.workspaceIds.length > 0) {
-      const workspacePlaceholders = options.workspaceIds.map((workspaceId, index) => {
-        const placeholder = `:workspaceId${index}`
-        expressionAttributeValues[placeholder] = workspaceId
-        return placeholder
-      })
-      filterExpressions.push(`directoryId IN (${workspacePlaceholders.join(', ')})`)
-    }
     const response = await sourceClient.send(new ScanCommand({
       TableName: sourceTableName,
-      FilterExpression: filterExpressions.join(' AND '),
-      ExpressionAttributeValues: expressionAttributeValues,
+      FilterExpression: 'eventType = :eventType',
+      ExpressionAttributeValues: { ':eventType': 'commented' },
       ConsistentRead: true,
       ExclusiveStartKey: checkpoint.lastEvaluatedKey,
       Limit: Math.min(scanPageSize, remaining),
     }))
     const items = response.Items ?? []
     for (const item of items) {
-      const legacy = readLegacyCommentEvent(item)
+      let legacy: LegacyCommentEvent
+      try {
+        legacy = readLegacyCommentEvent(item)
+      } catch (error) {
+        if (!options.dryRun) throw error
+        validationFailures.push(readErrorMessage(error))
+        continue
+      }
+      if (options.workspaceIds.length > 0 && !options.workspaceIds.includes(legacy.workspaceId)) {
+        continue
+      }
       processedThisRun += 1
       checkpoint.scanned += 1
       workspaceIds.add(legacy.workspaceId)
-      if (!options.dryRun) {
-        await collaboration.backfillTeamIssueComment({
-          workspaceId: legacy.workspaceId,
-          teamId: legacy.teamId,
-          issueId: legacy.issueId,
-          entityKey: createWorkItemCollaborationEntityKey(
-            legacy.workspaceId,
-            legacy.teamId,
-            legacy.issueId,
-          ),
-          commentId: legacy.eventId,
-          actorMemberKey: legacy.actorUserId,
-          bodyMarkdown: legacy.body,
-          occurredAt: legacy.createdAt,
-        })
-        checkpoint.backfilled += 1
+      const input = createBackfillInput(legacy)
+      try {
+        if (options.dryRun) {
+          await collaboration.validateBackfillTeamIssueComment(input)
+        } else {
+          await collaboration.backfillTeamIssueComment(input)
+          checkpoint.backfilled += 1
+        }
+      } catch (error) {
+        if (!options.dryRun) throw error
+        validationFailures.push(`event ${legacy.eventId}: ${readErrorMessage(error)}`)
       }
     }
 
@@ -503,10 +499,42 @@ async function runBackfill(
   }
 
   if (checkpoint.completed && !options.dryRun) {
+    // Persist the audit receipt first. If marker publication fails, the receipt
+    // makes the incomplete marker state observable and the retry remains idempotent.
+    await writeBackfillAuditEvents(auditEvents, workspaceIds, checkpoint, options, runContext)
     for (const workspaceId of workspaceIds) {
       await collaboration.markTeamIssueCommentBackfillComplete(workspaceId)
     }
-    await writeBackfillAuditEvents(auditEvents, workspaceIds, checkpoint, options, runContext)
+  }
+
+  if (options.dryRun && validationFailures.length > 0) {
+    const preview = validationFailures.slice(0, 20).join('\n')
+    throw new Error(
+      `Dry-run found ${validationFailures.length} invalid legacy comment row(s).\n${preview}`,
+    )
+  }
+}
+
+/**
+ * Builds the canonical backfill input from one validated legacy event.
+ *
+ * @param legacy - Validated source event.
+ * @returns Canonical collaboration backfill input.
+ */
+function createBackfillInput(legacy: LegacyCommentEvent) {
+  return {
+    workspaceId: legacy.workspaceId,
+    teamId: legacy.teamId,
+    issueId: legacy.issueId,
+    entityKey: createWorkItemCollaborationEntityKey(
+      legacy.workspaceId,
+      legacy.teamId,
+      legacy.issueId,
+    ),
+    commentId: legacy.eventId,
+    actorMemberKey: legacy.actorUserId,
+    bodyMarkdown: legacy.body,
+    occurredAt: legacy.createdAt,
   }
 }
 
@@ -634,6 +662,16 @@ function requireTextValue(value: unknown, label: string) {
     throw new Error(`Legacy comment ${label} is invalid.`)
   }
   return value.trim()
+}
+
+/**
+ * Converts an unknown validation failure into a concise dry-run diagnostic.
+ *
+ * @param error - Failure raised while validating one source row.
+ * @returns Human-readable failure message.
+ */
+function readErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : 'Unknown validation failure.'
 }
 
 /** Requires a non-empty CLI or environment string.

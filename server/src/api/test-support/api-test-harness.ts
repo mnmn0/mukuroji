@@ -581,6 +581,7 @@ function createCollaborationStub(
     async isTeamIssueCommentBackfillComplete() {
       return true
     },
+    validateBackfillTeamIssueComment: unsupported,
     getThread: unsupported,
     hasAttachableComment: unsupported,
     getCommentSnapshot: unsupported,

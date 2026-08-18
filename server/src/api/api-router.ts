@@ -9295,7 +9295,7 @@ routeApp.get('/api/teams/:teamId/issues/:issueId/collaboration', async (c) => {
       // fallback below, not to the Collaboration discussion reader.
       cursor: isLegacyPage ? undefined : requestedCursor,
       legacyCursorCompatible: true,
-      limit: limit === undefined ? 10 : Math.min(limit, 20),
+      limit: limit === undefined ? 10 : Math.min(Math.max(limit, 1), 20),
     })
     const replyPages = isLegacyPage
       ? []
@@ -9329,7 +9329,9 @@ routeApp.get('/api/teams/:teamId/issues/:issueId/collaboration', async (c) => {
           issueId,
           {
             consistentIssueRead: true,
-            eventLimit: LEGACY_COLLABORATION_EVENT_PREVIEW_LIMIT,
+            eventLimit: limit === undefined
+              ? LEGACY_COLLABORATION_EVENT_PREVIEW_LIMIT
+              : Math.min(Math.max(limit, 1), LEGACY_COLLABORATION_EVENT_PREVIEW_LIMIT),
             newestEventsFirst: true,
             eventType: 'commented',
             eventCursor: legacyEventCursor,
@@ -9951,7 +9953,7 @@ routeApp.post('/api/teams/:teamId/issues/:issueId/comments', async (c) => {
       projectEntityKey,
       assigneeMemberKey: detail.issue.assigneeUserId,
       actorMemberKey: principal.userKey,
-      bodyMarkdown: readRequiredCommentBody(body.bodyMarkdown),
+      bodyMarkdown: readRequiredCommentBody(body.bodyMarkdown ?? body.body),
       parentCommentId: readOptionalCommentId(body.parentCommentId, 'Parent comment ID'),
       mentionMemberKeys,
       automaticWatcherCandidates,
@@ -28397,8 +28399,8 @@ function toCollaborationCommentResponse(
       canResolve,
       canReply: canWrite && !comment.deletedAt && !comment.resolvedAt && !threadResolved,
       canReact: canWrite && !comment.deletedAt,
-      canAttach: !comment.deletedAt,
-      canPromote: !comment.deletedAt,
+      canAttach: canWrite && !comment.deletedAt,
+      canPromote: canWrite && !comment.deletedAt,
     },
   }
 }

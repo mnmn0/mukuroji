@@ -603,6 +603,8 @@ export type PresenceLeaveInput = {
 export interface CollaborationClient {
   /** Returns whether the environment marker allows canonical-only Team Issue comment reads. */
   isTeamIssueCommentBackfillComplete(workspaceId: string): Promise<boolean>
+  /** Validates one legacy Team Issue comment without writing migration state. */
+  validateBackfillTeamIssueComment(input: BackfillCollaborationCommentInput): Promise<void>
   /** Root comments または replies を page 取得します。 */
   getThread(input: GetCollaborationThreadInput): Promise<CollaborationThreadPage>
   /** File 添付先として保存済み・未削除の comment が存在するか確認します。 */
@@ -2806,6 +2808,33 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
   }
 
   /**
+   * Validates one legacy comment and its parent Work Item without writing data.
+   *
+   * @param input - Legacy comment and Work Item scope to validate.
+   */
+  async validateBackfillTeamIssueComment(
+    input: BackfillCollaborationCommentInput,
+  ): Promise<void> {
+    await this.ensureLocalTable()
+    const normalizedInput = normalizeBackfillCollaborationCommentInput(input)
+    const response = await this.documentClient.send(new GetCommand({
+      TableName: this.parentIssueTableName,
+      Key: {
+        directoryTeamId: `${normalizedInput.workspaceId}#team#${normalizedInput.teamId}`,
+        issueId: normalizedInput.issueId,
+      },
+      ConsistentRead: true,
+    }))
+    if (response.Item === undefined) {
+      throw new CollaborationError(
+        409,
+        'CollaborationBackfillConflict',
+        'The parent Work Item does not exist.',
+      )
+    }
+  }
+
+  /**
    * Copies one legacy comment into Collaboration without notifications or audit delivery.
    *
    * @param input - Validated legacy comment and Work Item scope.
@@ -2815,13 +2844,13 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
     input: BackfillCollaborationCommentInput,
   ): Promise<CollaborationComment> {
     await this.ensureLocalTable()
-    assertWorkItemScope(input)
-    const commentId = requireIdentifier(input.commentId, 'Comment ID')
-    const actorMemberKey = normalizeMemberKey(input.actorMemberKey)
-    const bodyMarkdown = normalizeCommentBody(input.bodyMarkdown)
-    const occurredAt = normalizeBackfillTimestamp(input.occurredAt)
+    const normalizedInput = normalizeBackfillCollaborationCommentInput(input)
+    const commentId = normalizedInput.commentId
+    const actorMemberKey = normalizedInput.actorMemberKey
+    const bodyMarkdown = normalizedInput.bodyMarkdown
+    const occurredAt = normalizedInput.occurredAt
     const comment: StoredComment = {
-      entityKey: input.entityKey,
+      entityKey: normalizedInput.entityKey,
       recordKey: commentRecordKey(commentId),
       entryType: 'comment',
       id: commentId,
@@ -2836,12 +2865,32 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       acceptedResolutions: [],
       legacyAcceptedResolutions: [],
     }
-    const discussionRecordKey = `DISCUSSION#ROOT#${occurredAt}#${commentId}`
+    const discussionRecords = [
+      createBackfillDiscussionRecord(
+        normalizedInput.entityKey,
+        discussionTimelineRecordKey(occurredAt, commentId, undefined),
+        commentId,
+        occurredAt,
+      ),
+      createBackfillDiscussionRecord(
+        normalizedInput.entityKey,
+        discussionScopedRecordKey(occurredAt, commentId, undefined),
+        commentId,
+        occurredAt,
+      ),
+      createBackfillDiscussionRecord(
+        normalizedInput.entityKey,
+        discussionLegacyRecordKey(occurredAt, commentId, undefined),
+        commentId,
+        occurredAt,
+        discussionLegacyIndexVersion,
+      ),
+    ]
 
     try {
       await this.documentClient.send(new TransactWriteCommand({
         TransactItems: [
-          parentIssueExistsCondition(this.parentIssueTableName, input),
+          parentIssueExistsCondition(this.parentIssueTableName, normalizedInput),
           {
             Put: {
               TableName: this.tableName,
@@ -2849,33 +2898,50 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
               ConditionExpression: 'attribute_not_exists(entityKey) AND attribute_not_exists(recordKey)',
             },
           },
-          {
+          ...discussionRecords.map((Item) => ({
             Put: {
               TableName: this.tableName,
-              Item: {
-                entityKey: input.entityKey,
-                recordKey: discussionRecordKey,
-                entryType: 'discussion',
-                commentId,
-                rootCommentId: commentId,
-                createdAt: occurredAt,
-              },
+              Item,
               ConditionExpression: 'attribute_not_exists(entityKey) AND attribute_not_exists(recordKey)',
             },
-          },
+          })),
         ],
       }))
       return comment
     } catch (error) {
       if (isTransactionConditionalFailureAt(error, 1)) {
-        const existing = await this.getStoredComment(input.entityKey, commentId)
+        const existing = await this.getStoredComment(normalizedInput.entityKey, commentId)
         if (existing && isSameBackfilledComment(existing, comment)) {
-          await this.ensureBackfilledDiscussionRecord(
-            input.entityKey,
-            `DISCUSSION#ROOT#${existing.createdAt}#${commentId}`,
-            commentId,
-            existing.createdAt,
-          )
+          const existingDiscussionRecords = [
+            createBackfillDiscussionRecord(
+              normalizedInput.entityKey,
+              discussionTimelineRecordKey(existing.createdAt, commentId, undefined),
+              commentId,
+              existing.createdAt,
+            ),
+            createBackfillDiscussionRecord(
+              normalizedInput.entityKey,
+              discussionScopedRecordKey(existing.createdAt, commentId, undefined),
+              commentId,
+              existing.createdAt,
+            ),
+            createBackfillDiscussionRecord(
+              normalizedInput.entityKey,
+              discussionLegacyRecordKey(existing.createdAt, commentId, undefined),
+              commentId,
+              existing.createdAt,
+              discussionLegacyIndexVersion,
+            ),
+          ]
+          for (const record of existingDiscussionRecords) {
+            await this.ensureBackfilledDiscussionRecord(
+              normalizedInput.entityKey,
+              record.recordKey,
+              commentId,
+              existing.createdAt,
+              record.discussionIndexVersion,
+            )
+          }
           return existing
         }
       }
@@ -2894,20 +2960,21 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
     recordKey: string,
     commentId: string,
     occurredAt: string,
-  ) {
+    discussionIndexVersion?: number,
+  ): Promise<void> {
+    const expected = createBackfillDiscussionRecord(
+      entityKey,
+      recordKey,
+      commentId,
+      occurredAt,
+      discussionIndexVersion,
+    )
     try {
       await this.documentClient.send(new TransactWriteCommand({
         TransactItems: [{
           Put: {
             TableName: this.tableName,
-            Item: {
-              entityKey,
-              recordKey,
-              entryType: 'discussion',
-              commentId,
-              rootCommentId: commentId,
-              createdAt: occurredAt,
-            },
+            Item: expected,
             ConditionExpression: 'attribute_not_exists(entityKey) AND attribute_not_exists(recordKey)',
           },
         }],
@@ -2919,14 +2986,63 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
         Key: { entityKey, recordKey },
         ConsistentRead: true,
       }))
-      if (!isSameBackfilledDiscussion(existing.Item, entityKey, recordKey, commentId, occurredAt)) {
-        throw new CollaborationError(
-          409,
-          'CollaborationBackfillConflict',
-          'The legacy discussion projection already exists with different data.',
-          { cause: error },
-        )
+      if (isSameBackfilledDiscussion(
+        existing.Item,
+        entityKey,
+        recordKey,
+        commentId,
+        occurredAt,
+        discussionIndexVersion,
+      )) {
+        return
       }
+      if (
+        discussionIndexVersion === discussionLegacyIndexVersion &&
+        isSameBackfilledDiscussion(existing.Item, entityKey, recordKey, commentId, occurredAt)
+      ) {
+        try {
+          await this.documentClient.send(new TransactWriteCommand({
+            TransactItems: [{
+              Put: {
+                TableName: this.tableName,
+                Item: expected,
+                ConditionExpression:
+                  'entryType = :entryType AND commentId = :commentId AND rootCommentId = :rootCommentId AND createdAt = :createdAt AND attribute_not_exists(discussionIndexVersion)',
+                ExpressionAttributeValues: {
+                  ':entryType': 'discussion',
+                  ':commentId': commentId,
+                  ':rootCommentId': commentId,
+                  ':createdAt': occurredAt,
+                },
+              },
+            }],
+          }))
+          return
+        } catch (upgradeError) {
+          if (!isTransactionConditionalFailureAt(upgradeError, 0)) throw upgradeError
+          const upgraded = await this.documentClient.send(new GetCommand({
+            TableName: this.tableName,
+            Key: { entityKey, recordKey },
+            ConsistentRead: true,
+          }))
+          if (isSameBackfilledDiscussion(
+            upgraded.Item,
+            entityKey,
+            recordKey,
+            commentId,
+            occurredAt,
+            discussionIndexVersion,
+          )) {
+            return
+          }
+        }
+      }
+      throw new CollaborationError(
+        409,
+        'CollaborationBackfillConflict',
+        'The discussion projection already exists with different data.',
+        { cause: error },
+      )
     }
   }
 
@@ -5759,10 +5875,30 @@ function parentIssueExistsCondition(
 /** Validates the immutable timestamp copied from a legacy event. */
 function normalizeBackfillTimestamp(value: string) {
   const normalized = requireText(value, 'Backfill timestamp')
-  if (!Number.isFinite(Date.parse(normalized))) {
+  const parsed = Date.parse(normalized)
+  if (!Number.isFinite(parsed)) {
     throw new CollaborationError(400, 'InvalidCollaborationInput', 'Backfill timestamp is invalid.')
   }
-  return normalized
+  return new Date(parsed).toISOString()
+}
+
+/**
+ * Normalizes and validates one legacy comment before dry-run or write processing.
+ *
+ * @param input - Untrusted legacy comment and Work Item scope.
+ * @returns The input with canonical identifier, body, and timestamp values.
+ */
+function normalizeBackfillCollaborationCommentInput(
+  input: BackfillCollaborationCommentInput,
+): BackfillCollaborationCommentInput {
+  assertWorkItemScope(input)
+  return {
+    ...input,
+    commentId: requireIdentifier(input.commentId, 'Comment ID'),
+    actorMemberKey: normalizeMemberKey(input.actorMemberKey),
+    bodyMarkdown: normalizeCommentBody(input.bodyMarkdown),
+    occurredAt: normalizeBackfillTimestamp(input.occurredAt),
+  }
 }
 
 /** Validates one persisted Team Issue comment backfill marker. */
@@ -6734,6 +6870,7 @@ function isSameBackfilledComment(existing: StoredComment, expected: StoredCommen
  * @param recordKey - Expected discussion record key.
  * @param commentId - Expected canonical comment identifier.
  * @param occurredAt - Expected comment creation timestamp.
+ * @param discussionIndexVersion - Expected compatibility-index version, when applicable.
  * @returns Whether the persisted row is the exact repair target.
  */
 function isSameBackfilledDiscussion(
@@ -6742,6 +6879,7 @@ function isSameBackfilledDiscussion(
   recordKey: string,
   commentId: string,
   occurredAt: string,
+  discussionIndexVersion?: number,
 ) {
   return isRecord(value) &&
     value.entityKey === entityKey &&
@@ -6749,7 +6887,10 @@ function isSameBackfilledDiscussion(
     value.entryType === 'discussion' &&
     value.commentId === commentId &&
     value.rootCommentId === commentId &&
-    value.createdAt === occurredAt
+    value.createdAt === occurredAt &&
+    (discussionIndexVersion === undefined
+      ? value.discussionIndexVersion === undefined
+      : value.discussionIndexVersion === discussionIndexVersion)
 }
 
 /**
@@ -6780,6 +6921,34 @@ function workItemEntityId(teamId: string, issueId: string) {
 
 function commentRecordKey(commentId: string) {
   return `COMMENT#${requireIdentifier(commentId, 'Comment ID')}`
+}
+
+/**
+ * Creates one deterministic discussion projection row for a legacy comment.
+ *
+ * @param entityKey - Collaboration partition key.
+ * @param recordKey - Physical discussion index key.
+ * @param commentId - Canonical comment identifier.
+ * @param occurredAt - Canonical comment creation timestamp.
+ * @param discussionIndexVersion - Compatibility-index version, when applicable.
+ * @returns A discussion row suitable for a guarded DynamoDB transaction.
+ */
+function createBackfillDiscussionRecord(
+  entityKey: string,
+  recordKey: string,
+  commentId: string,
+  occurredAt: string,
+  discussionIndexVersion?: number,
+) {
+  return {
+    entityKey,
+    recordKey,
+    entryType: 'discussion',
+    commentId,
+    rootCommentId: commentId,
+    createdAt: occurredAt,
+    ...(discussionIndexVersion === undefined ? {} : { discussionIndexVersion }),
+  }
 }
 
 /**
@@ -7127,7 +7296,7 @@ function isTransactionConditionalFailureAt(error: unknown, index: number) {
   }
   const reasons = error.CancellationReasons
   if (!Array.isArray(reasons)) return false
-  const reason = reasons[index] ?? (reasons.length === 1 ? reasons[0] : undefined)
+  const reason = reasons[index]
   return isRecord(reason) && reason.Code === 'ConditionalCheckFailed'
 }
 

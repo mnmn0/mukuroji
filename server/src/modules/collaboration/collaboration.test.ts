@@ -57,12 +57,16 @@ function isTestRecord(value: unknown): value is Record<string, unknown> {
 /**
  * Creates a DynamoDB transaction cancellation used by optimistic-lock tests.
  *
+ * @param itemCount - Number of transaction items represented by the error.
+ * @param failedIndex - Transaction item whose condition failed.
  * @returns An AWS-shaped conditional transaction error.
  */
-function createConditionalTransactionError() {
+function createConditionalTransactionError(itemCount = 1, failedIndex = 0) {
   return Object.assign(new Error('conditional transaction failed'), {
     name: 'TransactionCanceledException',
-    CancellationReasons: [{ Code: 'ConditionalCheckFailed' }],
+    CancellationReasons: Array.from({ length: itemCount }, (_, index) => ({
+      Code: index === failedIndex ? 'ConditionalCheckFailed' : 'None',
+    })),
   })
 }
 
@@ -147,7 +151,7 @@ function createCollaborationMemory(
       commentToMutateBeforeNextTransaction = undefined
     }
 
-    for (const transactionItem of input.TransactItems) {
+    for (const [transactionIndex, transactionItem] of input.TransactItems.entries()) {
       if (!isTestRecord(transactionItem)) continue
       const condition = isTestRecord(transactionItem.ConditionCheck)
         ? transactionItem.ConditionCheck
@@ -166,7 +170,7 @@ function createCollaborationMemory(
             (expression.includes('attribute_not_exists(deletedAt)') && current?.deletedAt) ||
             (typeof values[':capturedVersion'] === 'number' &&
               current?.version !== values[':capturedVersion'])) {
-          throw createConditionalTransactionError()
+          throw createConditionalTransactionError(input.TransactItems.length, transactionIndex)
         }
       }
 
@@ -181,11 +185,17 @@ function createCollaborationMemory(
         ? put.ExpressionAttributeValues
         : {}
       if ((expression.includes('attribute_not_exists(entityKey)') && current) ||
+          (expression.includes('attribute_not_exists(discussionIndexVersion)') &&
+            current?.discussionIndexVersion !== undefined) ||
+          (typeof values[':entryType'] === 'string' && current?.entryType !== values[':entryType']) ||
+          (typeof values[':commentId'] === 'string' && current?.commentId !== values[':commentId']) ||
+          (typeof values[':rootCommentId'] === 'string' && current?.rootCommentId !== values[':rootCommentId']) ||
+          (typeof values[':createdAt'] === 'string' && current?.createdAt !== values[':createdAt']) ||
           (typeof values[':expectedRevision'] === 'number' &&
             current?.revision !== values[':expectedRevision']) ||
           (typeof values[':expectedVersion'] === 'number' &&
             current?.version !== values[':expectedVersion'])) {
-        throw createConditionalTransactionError()
+        throw createConditionalTransactionError(input.TransactItems.length, transactionIndex)
       }
     }
 
@@ -218,7 +228,7 @@ function createCollaborationMemory(
     }
     if (reportCommittedTransactionAsConditionalFailure) {
       reportCommittedTransactionAsConditionalFailure = false
-      throw createConditionalTransactionError()
+      throw createConditionalTransactionError(input.TransactItems.length, 0)
     }
     return {}
   }, auditTableName)
@@ -333,6 +343,53 @@ test('rejects a mismatched discussion projection during an idempotent backfill r
     status: 409,
     code: 'CollaborationBackfillConflict',
   })
+})
+
+test('backfills V2 discussion projections and upgrades an old legacy projection', async () => {
+  const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
+  const occurredAt = '2026-08-18T00:00:00.000Z'
+  const commentId = 'legacy-comment-1'
+  const legacyRecordKey = `DISCUSSION#ROOT#${occurredAt}#${commentId}`
+  const memory = createCollaborationMemory([
+    {
+      entityKey,
+      recordKey: `COMMENT#${commentId}`,
+      entryType: 'comment',
+      id: commentId,
+      rootCommentId: commentId,
+      authorMemberKey: 'author@example.com',
+      bodyMarkdown: 'Historical comment',
+      version: 1,
+      mentionMemberKeys: [],
+      createdAt: occurredAt,
+      updatedAt: occurredAt,
+      acceptedResolutions: [],
+      reactions: [],
+    },
+    {
+      entityKey,
+      recordKey: legacyRecordKey,
+      entryType: 'discussion',
+      commentId,
+      rootCommentId: commentId,
+      createdAt: occurredAt,
+    },
+  ])
+
+  await memory.client.backfillTeamIssueComment({
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'issue-1',
+    entityKey,
+    commentId,
+    actorMemberKey: 'Author@Example.com',
+    bodyMarkdown: 'Historical comment',
+    occurredAt: '2026-08-18T09:00:00+09:00',
+  })
+
+  expect(memory.rows.get(`${entityKey}\0DISCUSSION#V2#${occurredAt}#ROOT#${commentId}`)).toBeDefined()
+  expect(memory.rows.get(`${entityKey}\0DISCUSSION#V2S#ROOT#${occurredAt}#${commentId}`)).toBeDefined()
+  expect(memory.rows.get(`${entityKey}\0${legacyRecordKey}`)?.discussionIndexVersion).toBe(2)
 })
 
 test('rejects an existing backfill comment whose timestamps do not match the source', async () => {
