@@ -82,15 +82,13 @@ Presence と typing は短い TTL を持つ lease です。WebSocket 接続が�
 
 Comment edit/resolve/delete は `expectedVersion` を要求します。読み込み後に別 user が変更した場合は `409 CommentVersionConflict` を返し、client は最新内容を再取得します。push/polling は表示の鮮度を上げる仕組みであり、整合性の最終防衛線は version 条件です。
 
-## Canonical comment reads
+## Canonical comment source and legacy backfill
 
-Comment と reply の response は、移行完了 marker がある workspace では Collaboration table に保存された canonical row だけを返します。`TeamIssueEventsTable` の旧 `commented` event は activity/audit 用途として保持します。marker がない workspace では、backfill が完走するまで旧 event を read-only の一時 fallback として返し、Collaboration cursor と区別した `legacy.` cursor で続きの page を取得します。旧 event から返した comment の mutation capability はすべて無効です。
+Collaboration comment の正本は Collaboration table の persisted root/reply row です。移行完了 marker がある workspace では canonical row だけを返し、旧 `TeamIssueEventsTable` の `commented` event は activity/audit 用途として保持します。marker がない workspace では backfill が完走するまで旧 event を read-only の一時 fallback として返し、Collaboration cursor と区別した `legacy.` cursor で続きの page を取得します。旧 event から返した comment の mutation capability はすべて無効です。
 
-## Legacy comment backfill
+旧 `commented` event は、workspace 単位の完了 marker が書かれるまで削除・非表示にしません。backfill は source event ID を canonical comment ID として使い、comment と root discussion row を条件付きで保存するため、checkpoint を使った中断・再実行に耐えます。Work Item が存在しない、row の scope が partition key と一致しない、既存 canonical row の内容が異なる場合は fail-closed で停止します。コメントごとの通知・activity audit は backfill から生成しませんが、完了した実行については実行者、検証済み AWS account、scope、件数を suppressed な運用 audit として記録します。
 
-旧 `commented` event は、workspace 単位の完了 marker が書かれるまで削除・非表示にしません。backfill は source event ID を canonical comment ID として使い、comment と root discussion row を条件付きで保存するため、checkpoint を使った中断・再実行に耐えます。Work Item が存在しない、row の scope が partition key と一致しない、既存 canonical row の内容が異なる場合は fail-closed で停止します。コメントごとの通知・activity audit は backfill から生成しませんが、完了した実行については実行者、scope、件数を suppressed な運用 audit として記録します。
-
-まず dry-run で source row を検証し、その後 checkpoint を指定して実行します。source table の全 scan が完了した後にだけ、検出した各 workspace の marker が保存されます。
+まず dry-run で source row を検証し、その後 checkpoint を指定して実行します。source table の全 scan が完了した後にだけ、検出した各 workspace の marker が保存されます。AWS の marker、repair row、checkpoint は writer-fence invocation の内側で扱います。
 
 ```sh
 AWS_ENDPOINT_URL=http://localhost:4566 \
@@ -102,5 +100,17 @@ bun run team-issue-comments:backfill -- \
   --checkpoint /tmp/mukuroji-team-issue-comments-v1.json
 ```
 
-AWS では `AWS_ACCOUNT_ID`、`MUKUROJI_BACKFILL_OPERATOR_ID`、`TEAM_ISSUE_EVENTS_TABLE_NAME`、`COLLABORATION_TABLE_NAME`、`TEAM_ISSUES_TABLE_NAME`、`AUDIT_EVENTS_TABLE_NAME` を明示してください。checkpoint には DynamoDB の continuation key が含まれるため owner-only で保存され、移行完了後に削除します。source/target/audit table、account、region、workspace filter が異なる checkpoint は拒否されます。完了 audit は設定に束縛した idempotency key を使うため、同じ checkpoint の再実行で重複しません。
-特定 workspace だけを先に処理する場合は `--workspace-id <id>` を繰り返し指定できます。その場合も指定 workspace の source scan が末尾まで到達した後にだけ marker が保存されます。
+AWS では `MUKUROJI_BACKFILL_OPERATOR_ID`、`TEAM_ISSUE_EVENTS_TABLE_NAME`、`COLLABORATION_TABLE_NAME`、`TEAM_ISSUES_TABLE_NAME`、`AUDIT_EVENTS_TABLE_NAME` を明示してください。実行時に STS `GetCallerIdentity` で account を検証し、`AWS_ACCOUNT_ID` を設定した場合は期待値として検証済み account と一致することを要求します。checkpoint には DynamoDB の continuation key が含まれるため owner-only で保存され、移行完了後に削除します。source/target/audit table、account、region、workspace filter が異なる checkpoint は拒否されます。特定 workspace だけを先に処理する場合は `--workspace-id <id>` を繰り返し指定できます。
+
+本番へ canonical-only reader を適用する前に、旧 Automation worker を停止または drain し、in-flight execution と queue が完了してから backfill を実行します。全 partition の `commented` event を検証し、`legacy_commented_event_count=0` を確認した後に marker を完了させ、reader と旧 cursor 拒否を含むリリースをデプロイします。互換期間中は writer が V2 discussion index と旧 reader 用 index を同じ transaction で dual-write する状態を維持します。
+
+```sh
+TEAM_ISSUES_TABLE_NAME=<team-issues-table> \
+TEAM_ISSUE_EVENTS_TABLE_NAME=<team-issue-events-table> \
+MUKUROJI_WORKSPACE_DIRECTORY_ID=<workspace-directory-id> \
+TEAM_ID=<team-id> \
+PROJECT_ID=<project-id> \
+ISSUE_ID=<issue-id> \
+AWS_REGION=<region> \
+bash scripts/check-team-issues-dynamodb.sh
+```

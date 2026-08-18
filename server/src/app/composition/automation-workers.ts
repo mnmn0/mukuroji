@@ -21,11 +21,11 @@ import {
   resolveAutomationScheduleProcessingTime,
 } from '../../modules/automation'
 import { createCognitoClient } from '../../modules/authentication'
+import { DynamoDbCollaborationClient } from '../../modules/collaboration/collaboration'
 import { DynamoDbProjectDirectoryClient } from '../../modules/directory'
 import {
   DynamoDbDocumentAuthorizationRevisionMutationAdapter,
 } from '../../modules/documents/adapter-out/dynamodb/document-authorization'
-import { DynamoDbCollaborationClient } from '../../modules/collaboration/collaboration'
 import { createDefaultFileProofingClient } from '../../modules/files/file-proofing'
 import { DynamoDbTeamIssuesClient } from '../../modules/work-items'
 import { DynamoDbWorkspaceAccessClient } from '../../modules/workspace-access/workspace-access'

@@ -765,24 +765,17 @@ type PublicWorkItemPageCursor = {
 }
 
 /**
- * チーム Issue コメントレスポンスです。
+ * Team Issue detail and legacy-compatible comment creation responses use this
+ * stable comment shape while the underlying row is stored canonically.
  */
 export type TeamIssueCommentResponseItem = {
-  /**
-   * コメント ID です。
-   */
+  /** Comment identifier. */
   id: string
-  /**
-   * コメントした actor user key です。
-   */
+  /** Workspace member key of the comment author. */
   actorUserId: string
-  /**
-   * コメント本文です。
-   */
+  /** Markdown comment body. */
   body: string
-  /**
-   * 作成日時の ISO 8601 timestamp です。
-   */
+  /** ISO 8601 creation timestamp. */
   createdAt: string
 }
 
@@ -849,9 +842,10 @@ export type TeamIssueDetailResponse = {
    */
   issue: TeamIssueResponseItem
   /**
-   * Issue コメント一覧です。
+   * Canonical Collaboration comments projected into the stable detail shape,
+   * or legacy comments loaded for a marker-gated migration fallback.
    */
-  comments: TeamIssueCommentResponseItem[]
+  comments?: TeamIssueCommentResponseItem[]
   /**
    * Issue 活動履歴一覧です。
    */
@@ -1090,6 +1084,10 @@ export type CreateTeamIssueCommentRequestBody = {
    */
   bodyMarkdown?: unknown
   /**
+   * 旧クライアントが送信するコメント本文です。保存時は canonical bodyMarkdown へ変換します。
+   */
+  body?: unknown
+  /**
    * reply 先の comment ID です。
    */
   parentCommentId?: unknown
@@ -1230,6 +1228,25 @@ export type TeamIssuesClient = {
     issueId: string,
     options?: TeamIssueDetailReadOptions,
   ): Promise<TeamIssueDetailResponse>
+  /**
+   * Reads a pre-cutover Automation comment by its deterministic legacy action identity.
+   *
+   * @param directoryId - Workspace directory identifier.
+   * @param teamId - Owning Team identifier.
+   * @param issueId - Team-local Work Item identifier.
+   * @param eventId - Deterministic comment action event identifier.
+   * @param actorUserId - Expected Automation actor identifier.
+   * @param body - Expected comment body.
+   * @returns Whether a matching pre-cutover comment event already exists.
+   */
+  getAutomationCommentReplay?(
+    directoryId: string,
+    teamId: string,
+    issueId: string,
+    eventId: string,
+    actorUserId: string,
+    body: string,
+  ): Promise<boolean>
   /**
    * DynamoDB に team issue を作成します。
    */
@@ -1900,6 +1917,67 @@ export class DynamoDbTeamIssuesClient {
         throw error
       }
 
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * Reads one pre-cutover Automation comment event for response-loss replay.
+   *
+   * @param directoryId - Workspace directory identifier.
+   * @param teamId - Owning Team identifier.
+   * @param issueId - Team-local Work Item identifier.
+   * @param eventId - Deterministic comment action event identifier.
+   * @param actorUserId - Expected Automation actor identifier.
+   * @param body - Expected comment body.
+   * @returns Whether the matching event is already durable.
+   */
+  async getAutomationCommentReplay(
+    directoryId: string,
+    teamId: string,
+    issueId: string,
+    eventId: string,
+    actorUserId: string,
+    body: string,
+  ) {
+    await this.ensureLocalTables()
+    const normalizedEventId = readIdempotencyResourceId(eventId)
+    if (!normalizedEventId) {
+      throw new ProjectDataError(
+        400,
+        'InvalidProjectWrite',
+        'Automation comment replay event ID is invalid.',
+      )
+    }
+    try {
+      const response = await this.documentClient.send(new GetCommand({
+        TableName: this.eventTableName,
+        Key: {
+          directoryTeamIssueId: createDirectoryTeamIssueId(directoryId, teamId, issueId),
+          eventId: normalizedEventId,
+        },
+        ConsistentRead: true,
+      }))
+      if (response.Item === undefined) return false
+
+      if (!isTeamIssueEventItem(response.Item) || response.Item.eventType !== 'commented') {
+        throw new ProjectDataError(
+          503,
+          'AutomationCommentReplayUnavailable',
+          'The pre-cutover comment replay record is invalid.',
+        )
+      }
+      if (response.Item.actorUserId !== actorUserId || response.Item.body !== body) {
+        throw new ProjectDataError(
+          409,
+          'AutomationCommentIdempotencyConflict',
+          'The Automation comment action was reused with different input.',
+        )
+      }
+
+      return true
+    } catch (error) {
+      if (error instanceof ProjectDataError) throw error
       throw toProjectDataError(error)
     }
   }
@@ -3057,6 +3135,23 @@ export class DynamoDbTeamIssuesClient {
     }
   }
 
+  private async hasTeamIssueItem(directoryId: string, teamId: string, issueId: string) {
+    try {
+      await this.getRequiredTeamIssueItem(directoryId, teamId, issueId, true)
+
+      return true
+    } catch (error) {
+      if (error instanceof ProjectDataError && error.code === 'TeamIssueNotFound') {
+        return false
+      }
+
+      if (error instanceof ProjectDataError) {
+        throw error
+      }
+
+      throw toProjectDataError(error)
+    }
+  }
   private async getRequiredTeamIssueItem(
     directoryId: string,
     teamId: string,
@@ -3830,21 +3925,22 @@ export function toTeamIssueResponseItem(value: unknown): TeamIssueResponseItem {
   return issue
 }
 
-function toTeamIssueCommentResponseItem(value: TeamIssueEventItem): TeamIssueCommentResponseItem {
-  return {
-    id: value.eventId,
-    actorUserId: value.actorUserId,
-    body: value.body ?? '',
-    createdAt: value.createdAt,
-  }
-}
-
 function toTeamIssueActivityResponseItem(value: TeamIssueEventItem): TeamIssueActivityResponseItem {
   return {
     id: value.eventId,
     type: value.eventType,
     actorUserId: value.actorUserId,
     summary: value.summary,
+    createdAt: value.createdAt,
+  }
+}
+
+/** Projects a legacy commented event into the stable Work Item detail comment shape. */
+function toTeamIssueCommentResponseItem(value: TeamIssueEventItem): TeamIssueCommentResponseItem {
+  return {
+    id: value.eventId,
+    actorUserId: value.actorUserId,
+    body: value.body ?? '',
     createdAt: value.createdAt,
   }
 }
@@ -4641,7 +4737,6 @@ function isTeamIssueEventCursor(value: unknown): value is TeamIssueEventCursor {
     typeof value.eventId === 'string' &&
     value.eventId.length > 0
 }
-
 /**
  * Team-local Issue ID を Workspace 内で一意な audit Work Item ID に変換します。
  */

@@ -4,14 +4,15 @@ import {
 const {
   app,
   configureFakeProjectClients,
-  createCollaborationStub,
   createBulkOperationAutomationFake,
   createBulkRecoveryIssue,
+  createCollaborationStub,
   createFakeWorkItemConfigurationClient,
   createFileProofingStub,
   createInboundWebhookEndpointRecord,
   createInboundWebhookProvisioning,
   createTestWorkItemConfiguration,
+  getTestAppDependencies,
   originalBulkRecoveryTitle,
   resetTestApp,
   runWithTestAppDependencies,
@@ -33,13 +34,15 @@ import {
 import type {
   FileProofingActor,
 } from '../../../files/file-proofing'
+import type {
+  CollaborationClient,
+} from '../../../collaboration/collaboration'
 import {
   DEFAULT_WORK_ITEM_CONFIGURATION,
 } from '../../../work-items/work-item-configuration'
 import {
   createWorkItemAuthorizationChangedError,
 } from '../../../work-items'
-import type { CollaborationClient } from '../../../collaboration/collaboration'
 import { InMemoryPlanningClient } from '../../../planning/planning'
 import type {
   AutomationActionExecutionContext,
@@ -2021,20 +2024,20 @@ test('fails closed before an automation comment targets a removed Team', async (
   })
 })
 
-test('writes an Automation comment through canonical Collaboration persistence', async () => {
+test('writes automation comments to the canonical Collaboration store', async () => {
   configureFakeProjectClients(true)
-  const collaborationWrites: Parameters<CollaborationClient['createComment']>[0][] = []
+  const writes: Parameters<CollaborationClient['createComment']>[0][] = []
   setTestAppDependencies({
     collaboration: createCollaborationStub({
       async createComment(input) {
-        collaborationWrites.push(input)
+        writes.push(input)
         return {
-          id: 'canonical-comment-1',
-          rootCommentId: 'canonical-comment-1',
+          id: 'automation-comment',
+          rootCommentId: 'automation-comment',
           authorMemberKey: input.actorMemberKey,
           bodyMarkdown: input.bodyMarkdown,
           version: 1,
-          mentionMemberKeys: [],
+          mentionMemberKeys: input.mentionMemberKeys ?? [],
           createdAt: '2026-07-16T00:00:00.000Z',
           updatedAt: '2026-07-16T00:00:00.000Z',
           acceptedResolutions: [],
@@ -2069,20 +2072,180 @@ test('writes an Automation comment through canonical Collaboration persistence',
     idempotencyKey: 'automation-comment-canonical:action:0000',
   } satisfies AutomationActionExecutionContext
 
+  await runWithTestAppDependencies(() =>
+    createAutomationActionExecutor().execute({
+      type: 'comment',
+      body: 'Automated canonical comment',
+    }, context)
+  )
+
+  expect(writes).toHaveLength(1)
+  expect(writes[0]).toMatchObject({
+    workspaceId: 'workspace-1',
+    teamId: 'core-team',
+    issueId: 'onboarding-friction',
+    entityKey: 'workspace-1#work-item#team/core-team/issue/onboarding-friction',
+    projectId: 'refero',
+    projectEntityKey: 'workspace-1#project#refero',
+    assigneeMemberKey: 'sato@example.com',
+    actorMemberKey: 'automation:rule-1',
+    bodyMarkdown: 'Automated canonical comment',
+    deepLink: expect.stringContaining('/teams/core-team/issues?'),
+    authorizationConditionChecks: expect.arrayContaining([
+      expect.objectContaining({
+        ConditionCheck: expect.objectContaining({
+          TableName: 'DirectoryTable',
+          Key: { directoryId: 'workspace-1', entryKey: 'TEAM#core-team' },
+        }),
+      }),
+      expect.objectContaining({
+        ConditionCheck: expect.objectContaining({
+          TableName: 'DirectoryTable',
+          Key: { directoryId: 'workspace-1', entryKey: 'PROJECT#refero' },
+        }),
+      }),
+    ]),
+    auditContext: {
+      correlationId: 'automation-comment-canonical',
+      idempotencyKeyHash: expect.any(String),
+      requestFingerprint: expect.any(String),
+    },
+  })
+})
+
+/** Verifies that a pre-cutover comment replay prevents a duplicate canonical write. */
+test('replays a pre-cutover automation comment before creating a canonical duplicate', async () => {
+  configureFakeProjectClients(true)
+  let legacyReplayLookups = 0
+  let createCalls = 0
+  const existingTeamIssues = getTestAppDependencies().workItems.teamIssues
+  setTestAppDependencies({
+    teamIssues: {
+      ...existingTeamIssues,
+      /** Returns a matching durable pre-cutover comment action. */
+      async getAutomationCommentReplay(directoryId, teamId, issueId, eventId, actorUserId, body) {
+        legacyReplayLookups += 1
+        expect({ directoryId, teamId, issueId, eventId, actorUserId, body }).toEqual({
+          directoryId: 'workspace-1',
+          teamId: 'core-team',
+          issueId: 'onboarding-friction',
+          eventId: 'automation-comment-legacy-replay_comment_0',
+          actorUserId: 'automation:rule-1',
+          body: 'Pre-cutover comment',
+        })
+        return true
+      },
+    },
+    collaboration: createCollaborationStub({
+      async createComment() {
+        createCalls += 1
+        throw new Error('A pre-cutover replay must not create a canonical duplicate.')
+      },
+    }),
+  })
+  const context = {
+    execution: {
+      schemaVersion: AUTOMATION_SCHEMA_VERSION,
+      id: 'automation-comment-legacy-replay',
+      workspaceId: 'workspace-1',
+      ruleId: 'rule-1',
+      ruleVersion: 1,
+      triggerEventId: 'event-1',
+      status: 'running',
+      attempts: 2,
+      actions: [],
+      startedAt: '2026-07-16T00:00:00.000Z',
+      retryable: false,
+    },
+    event: {
+      eventId: 'event-1',
+      eventType: 'work-item.updated',
+      workspaceId: 'workspace-1',
+      occurredAt: '2026-07-16T00:00:00.000Z',
+      changes: [],
+      metadata: { teamId: 'core-team', issueId: 'onboarding-friction' },
+    },
+    actionIndex: 0,
+    idempotencyKey: 'automation-comment-legacy-replay:action:0000',
+  } satisfies AutomationActionExecutionContext
+
   await expect(runWithTestAppDependencies(() =>
     createAutomationActionExecutor().execute({
       type: 'comment',
-      body: 'A canonical automation comment.',
+      body: 'Pre-cutover comment',
     }, context)
   )).resolves.toBeUndefined()
 
-  expect(collaborationWrites).toHaveLength(1)
-  expect(collaborationWrites[0]).toMatchObject({
-    actorMemberKey: 'automation:rule-1',
-    bodyMarkdown: 'A canonical automation comment.',
-    commentId: 'automation-comment-canonical_comment_0',
-    entityKey: 'workspace-1#work-item#team/core-team/issue/onboarding-friction',
+  expect(legacyReplayLookups).toBe(1)
+  expect(createCalls).toBe(0)
+})
+
+test('replays an automation comment before checking a changed project assignment', async () => {
+  const calls = configureFakeProjectClients(true, { teamProjects: [] })
+  let replayLookups = 0
+  let createCalls = 0
+  setTestAppDependencies({
+    collaboration: createCollaborationStub({
+      async getCommentMutationReplay(input) {
+        replayLookups += 1
+        expect(input.entityKey).toBe(
+          'workspace-1#work-item#team/core-team/issue/onboarding-friction',
+        )
+        return {
+          id: 'replayed-automation-comment',
+          rootCommentId: 'replayed-automation-comment',
+          authorMemberKey: 'automation:rule-1',
+          bodyMarkdown: 'Already committed before the project was archived.',
+          version: 1,
+          mentionMemberKeys: [],
+          createdAt: '2026-07-16T00:00:00.000Z',
+          updatedAt: '2026-07-16T00:00:00.000Z',
+          acceptedResolutions: [],
+          reactions: [],
+        }
+      },
+      async createComment() {
+        createCalls += 1
+        throw new Error('A durable replay must not create a second comment.')
+      },
+    }),
   })
+  const context = {
+    execution: {
+      schemaVersion: AUTOMATION_SCHEMA_VERSION,
+      id: 'automation-comment-replay',
+      workspaceId: 'workspace-1',
+      ruleId: 'rule-1',
+      ruleVersion: 1,
+      triggerEventId: 'event-1',
+      status: 'running',
+      attempts: 2,
+      actions: [],
+      startedAt: '2026-07-16T00:00:00.000Z',
+      retryable: false,
+    },
+    event: {
+      eventId: 'event-1',
+      eventType: 'work-item.updated',
+      workspaceId: 'workspace-1',
+      occurredAt: '2026-07-16T00:00:00.000Z',
+      changes: [],
+      metadata: { teamId: 'core-team', issueId: 'onboarding-friction' },
+    },
+    actionIndex: 0,
+    idempotencyKey: 'automation-comment-replay:action:0000',
+  } satisfies AutomationActionExecutionContext
+
+  await expect(runWithTestAppDependencies(() =>
+    createAutomationActionExecutor().execute({
+      type: 'comment',
+      body: 'Already committed before the project was archived.',
+    }, context)
+  )).resolves.toBeUndefined()
+
+  expect(replayLookups).toBe(1)
+  expect(createCalls).toBe(0)
+  expect(calls.issueDetails).toHaveLength(0)
 })
 
 test('rejects removed recurring-work Teams on create and update before saving a definition', async () => {

@@ -141,7 +141,7 @@ export function IssueCollaborationPanel({
    * @param comment - Permission-filtered comment selected by the viewer.
    */
   function promoteCommentSource(comment: TeamIssueComment) {
-    const actorKey = comment.authorMemberKey ?? 'unknown-member'
+    const actorKey = comment.authorMemberKey
     const actor = members.find(
       (member) =>
         member.memberKey === actorKey ||

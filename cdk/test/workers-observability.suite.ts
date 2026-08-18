@@ -2850,7 +2850,9 @@ test('automation workers consume the audit outbox and run recurring schedules wi
       Effect: 'Allow',
       Resource: expect.arrayContaining([
         { 'Fn::GetAtt': ['AutomationTableE3D67F0D', 'Arn'] },
+        { 'Fn::GetAtt': ['WorkItemCollaborationTableFDECF217', 'Arn'] },
         { 'Fn::GetAtt': ['FileProofingTable81DA272F', 'Arn'] },
+        { 'Fn::GetAtt': ['ProjectDirectoryTable9ED01C01', 'Arn'] },
         { 'Fn::GetAtt': ['WorkItemConfigurationTable35E94558', 'Arn'] },
         { 'Fn::GetAtt': ['TeamIssuesTable189D851D', 'Arn'] },
         { 'Fn::GetAtt': ['WorkspaceSearchTable2575AD6B', 'Arn'] },

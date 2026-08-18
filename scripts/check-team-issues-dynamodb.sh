@@ -65,6 +65,7 @@ aws dynamodb describe-table \
   --output text >/dev/null
 
 event_count="not-queried"
+legacy_commented_event_count="not-queried"
 if [[ -n "${ISSUE_ID:-}" ]]; then
   directory_team_issue_id="${DIRECTORY_TEAM_ID}#issue#${ISSUE_ID}"
   event_count="$(
@@ -77,6 +78,25 @@ if [[ -n "${ISSUE_ID:-}" ]]; then
       --query 'Count' \
       --output text
   )"
+  legacy_commented_event_count="$(
+    # This is intentionally a table-wide scan: ISSUE_ID enables the rollout
+    # validation mode, but a single partition cannot prove that legacy rows
+    # are absent from every Team Issue partition.
+    aws dynamodb scan \
+      "${common_args[@]}" \
+      --table-name "$TEAM_ISSUE_EVENTS_TABLE_NAME" \
+      --filter-expression "eventType = :eventType" \
+      --expression-attribute-values "{\":eventType\":{\"S\":\"commented\"}}" \
+      --consistent-read \
+      --select COUNT \
+      --query 'Count' \
+      --output text \
+      | awk '{ total += $1 } END { print total + 0 }'
+  )"
+  if [[ "$legacy_commented_event_count" != "0" ]]; then
+    echo "Legacy commented events remain in the events table; validation_issue=$ISSUE_ID count=$legacy_commented_event_count." >&2
+    exit 1
+  fi
 fi
 
-echo "DynamoDB team issue tables OK: team_table=$TEAM_ISSUES_TABLE_NAME events_table=$TEAM_ISSUE_EVENTS_TABLE_NAME team=$TEAM_ID team_issue_count=$team_issue_count project=$PROJECT_ID project_issue_count=$project_issue_count event_count=$event_count"
+echo "DynamoDB team issue tables OK: team_table=$TEAM_ISSUES_TABLE_NAME events_table=$TEAM_ISSUE_EVENTS_TABLE_NAME team=$TEAM_ID team_issue_count=$team_issue_count project=$PROJECT_ID project_issue_count=$project_issue_count event_count=$event_count legacy_commented_event_count=$legacy_commented_event_count"

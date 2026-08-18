@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { IssueCollaborationPanel } from '../src/issues/ui/IssueCollaborationPanel'
 import { IssueActivityTab } from '../src/issues/ui/IssueActivityTab'
 import { mergeIssueComments } from '../src/issues/mutations/useIssueCollaboration'
+import type { TeamIssueComment } from '../src/issues/api'
 import {
   acceptedResolutionHistoryFixtures,
   collaborationWorkspaceMemberFixtures,
@@ -135,6 +136,29 @@ describe('IssueCollaborationPanel', () => {
     expect(html).toContain('Attach file')
     expect(html).toContain('Allow guest access')
     expect(html).toContain('data-testid="comment-file-input-comment-1"')
+  })
+
+  test('keeps legacy comments read-only for attachments and context promotion', () => {
+    const html = renderToStaticMarkup(
+      <IssueCollaborationPanel
+        artifacts={fileArtifactsControllerFixture}
+        controller={{
+          ...issueCollaborationControllerFixture,
+          comments: issueCollaborationControllerFixture.comments.map((comment) => {
+            const legacyComment: TeamIssueComment = { ...comment, source: 'legacy' }
+            return legacyComment
+          }),
+        }}
+        currentMemberKey="demo@example.com"
+        locale="en"
+        members={collaborationWorkspaceMemberFixtures}
+      />,
+    )
+
+    expect(html).not.toContain('Attach file')
+    expect(html).not.toContain('data-testid="comment-file-input-comment-1"')
+    expect(html).not.toContain('>Reply</button>')
+    expect(html).not.toContain('>Promote</button>')
   })
 
   test('hides the comment guest-sharing option without manager capability', () => {

@@ -339,7 +339,7 @@ export type TaskScreenProps = {
   defaultCreateTaskOpen?: boolean
   /** Work Item ID selected by the route when the screen first renders. */
   initialSelectedTaskId?: string
-  /** Detail, relations, comments, and activity for the selected Work Item. */
+  /** Detail, relations, and activity for the selected Work Item. */
   selectedIssueDetail?: TeamIssueDetail
   /** Single-Team Work Item configuration used by list and create controls. */
   resolvedConfiguration?: ResolvedWorkItemConfiguration

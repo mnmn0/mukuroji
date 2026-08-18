@@ -15,7 +15,6 @@ import {
   readWorkItemScheduleChangePreviewForEndpoint,
 } from '../../work-items/api/contractValidation'
 import type { TeamIssueActivity } from './activity'
-import type { TeamIssueComment } from './comments'
 import { TeamIssuesApiError } from './errors'
 import {
   defaultIssuesApiErrorMessage,
@@ -30,6 +29,20 @@ import {
 export type TeamIssue = CanonicalWorkItem
 
 /**
+ * Comment included in the legacy-compatible Work Item detail response.
+ */
+export type TeamIssueDetailComment = {
+  /** Stable comment identifier. */
+  id: string
+  /** Workspace member key of the comment author. */
+  actorUserId: string
+  /** Markdown comment body. */
+  body: string
+  /** ISO 8601 creation timestamp. */
+  createdAt: string
+}
+
+/**
  * チーム所有 Issue の詳細レスポンスです。
  */
 export type TeamIssueDetail = {
@@ -38,9 +51,9 @@ export type TeamIssueDetail = {
    */
   issue: TeamIssue
   /**
-   * Issue コメント一覧です。
+   * Canonical Collaboration comments projected into the stable detail shape.
    */
-  comments: TeamIssueComment[]
+  comments: TeamIssueDetailComment[]
   /**
    * Issue 活動履歴一覧です。
    */

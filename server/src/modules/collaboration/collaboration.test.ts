@@ -8,9 +8,7 @@ import {
   CollaborationError,
   createPlanningUpdateCollaborationEntityKey,
   createProjectCollaborationEntityKey,
-  createTeamIssueCommentBackfillMarkerEntityKey,
   createWorkItemCollaborationEntityKey,
-  TEAM_ISSUE_COMMENT_BACKFILL_MARKER_RECORD_KEY,
   DynamoDbCollaborationClient,
 } from './collaboration'
 
@@ -27,14 +25,12 @@ function readCommandInput(command: unknown) {
  * @param send - Document-client command implementation used by the test.
  * @param auditTableName - Optional audit table included in mutation transactions.
  * @param useConfiguredParentIssueTable - Whether the constructor should resolve its parent table from the environment.
- * @param teamIssueEventsTableName - Legacy event table name bound to migration markers.
  * @returns An isolated collaboration client.
  */
 function createClient(
   send: (command: unknown) => Promise<Record<string, unknown>>,
   auditTableName?: string,
   useConfiguredParentIssueTable = false,
-  teamIssueEventsTableName = 'events-table',
 ) {
   const documentClient = { send } as unknown as DynamoDBDocumentClient
   const lowLevelClient = { send } as unknown as DynamoDBClient
@@ -45,7 +41,6 @@ function createClient(
     documentClient,
     lowLevelClient,
     false,
-    teamIssueEventsTableName,
   )
 }
 
@@ -102,19 +97,6 @@ function createCollaborationMemory(
         typeof input.Key.entityKey === 'string' &&
         typeof input.Key.recordKey === 'string') {
       return { Item: rows.get(storageKey(input.Key.entityKey, input.Key.recordKey)) }
-    }
-
-    if (input.TableName === 'collaboration-table' && isTestRecord(input.Item) &&
-        typeof input.Item.entityKey === 'string' && typeof input.Item.recordKey === 'string') {
-      const current = rows.get(storageKey(input.Item.entityKey, input.Item.recordKey))
-      if (current && typeof input.ConditionExpression === 'string' &&
-          input.ConditionExpression.includes('attribute_not_exists')) {
-        throw Object.assign(new Error('conditional put failed'), {
-          name: 'ConditionalCheckFailedException',
-        })
-      }
-      rows.set(storageKey(input.Item.entityKey, input.Item.recordKey), input.Item)
-      return {}
     }
 
     if (typeof input.KeyConditionExpression === 'string' &&
@@ -299,74 +281,97 @@ test('creates stable collaboration keys for Work Item, project, and Planning upd
   )).toBe('workspace#one#planning-update#project/team-a/project-a')
 })
 
-test('backfills legacy comments idempotently and gates canonical-only reads with a marker', async () => {
+test('writes the comment backfill completion marker through a transaction', async () => {
   const memory = createCollaborationMemory()
-  const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
+
+  await memory.client.markTeamIssueCommentBackfillComplete(
+    'workspace#one',
+    '2026-08-18T00:00:00.000Z',
+  )
+
+  expect(memory.transactions).toHaveLength(1)
+  expect(memory.transactions[0]?.TransactItems).toEqual([
+    expect.objectContaining({
+      Put: expect.objectContaining({
+        TableName: 'collaboration-table',
+        ConditionExpression: 'attribute_not_exists(entityKey) AND attribute_not_exists(recordKey)',
+      }),
+    }),
+  ])
+  await expect(
+    memory.client.isTeamIssueCommentBackfillComplete('workspace#one'),
+  ).resolves.toBe(true)
+})
+
+test('rejects a mismatched discussion projection during an idempotent backfill repair', async () => {
+  const memory = createCollaborationMemory()
   const input = {
     workspaceId: 'workspace#one',
     teamId: 'team-a',
     issueId: 'issue-1',
-    entityKey,
-    commentId: 'legacy-event-1',
+    entityKey: createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1'),
+    commentId: 'legacy-comment-1',
     actorMemberKey: 'author@example.com',
-    bodyMarkdown: 'Legacy comment',
-    occurredAt: '2026-07-12T00:00:00.000Z',
+    bodyMarkdown: 'Historical comment',
+    occurredAt: '2026-08-18T00:00:00.000Z',
   }
 
-  const first = await memory.client.backfillTeamIssueComment(input)
-  const second = await memory.client.backfillTeamIssueComment(input)
-
-  expect(first).toEqual(second)
-  expect(memory.rows.get(`${entityKey}\0COMMENT#legacy-event-1`)).toMatchObject({
-    id: 'legacy-event-1',
-    bodyMarkdown: 'Legacy comment',
-  })
-  expect(memory.rows.get(`${entityKey}\0DISCUSSION#ROOT#2026-07-12T00:00:00.000Z#legacy-event-1`))
-    .toMatchObject({ commentId: 'legacy-event-1' })
-  expect(await memory.client.isTeamIssueCommentBackfillComplete('workspace#one')).toBe(false)
-
-  await memory.client.markTeamIssueCommentBackfillComplete(
-    'workspace#one',
-    '2026-07-12T00:01:00.000Z',
+  await memory.client.backfillTeamIssueComment(input)
+  memory.rows.set(
+    `${input.entityKey}\0DISCUSSION#ROOT#${input.occurredAt}#${input.commentId}`,
+    {
+      entityKey: input.entityKey,
+      recordKey: `DISCUSSION#ROOT#${input.occurredAt}#${input.commentId}`,
+      entryType: 'discussion',
+      commentId: 'different-comment',
+      rootCommentId: input.commentId,
+      createdAt: input.occurredAt,
+    },
   )
 
-  expect(await memory.client.isTeamIssueCommentBackfillComplete('workspace#one')).toBe(true)
-  expect(memory.rows.get(
-    `${createTeamIssueCommentBackfillMarkerEntityKey('workspace#one')}\0${TEAM_ISSUE_COMMENT_BACKFILL_MARKER_RECORD_KEY}`,
-  )).toMatchObject({ state: 'complete', sourceTableName: 'events-table' })
+  await expect(memory.client.backfillTeamIssueComment(input)).rejects.toMatchObject({
+    status: 409,
+    code: 'CollaborationBackfillConflict',
+  })
 })
 
-test('reconciles a canonical Automation comment created before its legacy row is backfilled', async () => {
-  const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
-  const memory = createCollaborationMemory([{
-    entityKey,
-    recordKey: 'COMMENT#automation-execution_comment_0',
-    entryType: 'comment',
-    id: 'automation-execution_comment_0',
-    rootCommentId: 'automation-execution_comment_0',
-    authorMemberKey: 'automation:rule-1',
-    bodyMarkdown: 'Automation comment',
-    version: 1,
-    mentionMemberKeys: [],
-    createdAt: '2026-07-12T00:01:00.000Z',
-    updatedAt: '2026-07-12T00:01:00.000Z',
-  }])
-
-  const comment = await memory.client.backfillTeamIssueComment({
+test('rejects an existing backfill comment whose timestamps do not match the source', async () => {
+  const memory = createCollaborationMemory()
+  const input = {
     workspaceId: 'workspace#one',
     teamId: 'team-a',
     issueId: 'issue-1',
-    entityKey,
-    commentId: 'automation-execution_comment_0',
-    actorMemberKey: 'automation:rule-1',
-    bodyMarkdown: 'Automation comment',
-    occurredAt: '2026-07-12T00:00:00.000Z',
-  })
+    entityKey: createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1'),
+    commentId: 'legacy-comment-1',
+    actorMemberKey: 'author@example.com',
+    bodyMarkdown: 'Historical comment',
+    occurredAt: '2026-08-18T00:00:00.000Z',
+  }
 
-  expect(comment.createdAt).toBe('2026-07-12T00:01:00.000Z')
-  expect(memory.rows.get(
-    `${entityKey}\0DISCUSSION#ROOT#2026-07-12T00:01:00.000Z#automation-execution_comment_0`,
-  )).toMatchObject({ commentId: 'automation-execution_comment_0' })
+  await memory.client.backfillTeamIssueComment(input)
+  memory.rows.set(
+    `${input.entityKey}\0COMMENT#${input.commentId}`,
+    {
+      entityKey: input.entityKey,
+      recordKey: `COMMENT#${input.commentId}`,
+      entryType: 'comment',
+      id: input.commentId,
+      rootCommentId: input.commentId,
+      authorMemberKey: input.actorMemberKey,
+      bodyMarkdown: input.bodyMarkdown,
+      version: 1,
+      mentionMemberKeys: [],
+      createdAt: '2026-08-18T00:01:00.000Z',
+      updatedAt: '2026-08-18T00:01:00.000Z',
+      acceptedResolutions: [],
+      reactions: [],
+    },
+  )
+
+  await expect(memory.client.backfillTeamIssueComment(input)).rejects.toMatchObject({
+    status: 409,
+    code: 'CollaborationBackfillConflict',
+  })
 })
 
 test('rejects curated context rows whose owner disagrees with the entity key', async () => {
@@ -565,7 +570,9 @@ test('pages root comments newest-first and binds cursors to their entity scope',
   const discussionQueries: Array<Record<string, unknown>> = []
   const client = createClient(async (command) => {
     const input = readCommandInput(command)
-    const values = input.ExpressionAttributeValues as Record<string, unknown> | undefined
+    const values = isTestRecord(input.ExpressionAttributeValues)
+      ? input.ExpressionAttributeValues
+      : undefined
     if (values?.[':prefix'] === 'DISCUSSION#ROOT#') {
       discussionQueries.push(input)
       return {
@@ -593,6 +600,214 @@ test('pages root comments newest-first and binds cursors to their entity scope',
     status: 400,
     code: 'InvalidCollaborationCursor',
   })
+})
+
+/** Verifies that rolling compatibility callers receive cursors readable by the old reader. */
+test('emits a version-one discussion cursor for rolling compatibility callers', async () => {
+  const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
+  const legacyRecordKey = 'DISCUSSION#ROOT#2026-07-12T00:00:00.000Z#comment-1'
+  const discussionQueries: Array<Record<string, unknown>> = []
+  const client = createClient(async (command) => {
+    const input = readCommandInput(command)
+    if (isTestRecord(input.Key) && input.Key.recordKey === 'COMMENT#comment-1') {
+      return {
+        Item: {
+          entityKey,
+          recordKey: 'COMMENT#comment-1',
+          entryType: 'comment',
+          id: 'comment-1',
+          rootCommentId: 'comment-1',
+          authorMemberKey: 'author@example.com',
+          bodyMarkdown: 'Compatibility comment',
+          version: 1,
+          mentionMemberKeys: [],
+          createdAt: '2026-07-12T00:00:00.000Z',
+          updatedAt: '2026-07-12T00:00:00.000Z',
+        },
+      }
+    }
+    const values = isTestRecord(input.ExpressionAttributeValues)
+      ? input.ExpressionAttributeValues
+      : undefined
+    if (values?.[':prefix'] === 'DISCUSSION#ROOT#') {
+      discussionQueries.push(input)
+      return {
+        Items: [{ entityKey, recordKey: legacyRecordKey, commentId: 'comment-1' }],
+        LastEvaluatedKey: { entityKey, recordKey: legacyRecordKey },
+      }
+    }
+    return { Items: [] }
+  })
+
+  const page = await client.getThread({
+    entityKey,
+    viewerMemberKey: 'member@example.com',
+    legacyCursorCompatible: true,
+    limit: 1,
+  })
+
+  expect(page.comments).toHaveLength(1)
+  expect(page.comments[0]).toMatchObject({ id: 'comment-1' })
+  expect(discussionQueries).toHaveLength(1)
+  expect(discussionQueries[0]?.FilterExpression).toBeUndefined()
+  expect(page.nextCursor).toBeString()
+  const nextCursor = page.nextCursor
+  if (!nextCursor) throw new Error('Expected a compatibility cursor.')
+  const cursorPayload: unknown = JSON.parse(
+    Buffer.from(nextCursor, 'base64url').toString('utf8'),
+  )
+  expect(cursorPayload).toMatchObject({
+    version: 1,
+    entityKey,
+    prefix: 'DISCUSSION#ROOT#',
+    recordKey: legacyRecordKey,
+  })
+})
+
+/** Verifies that detail reads can page roots and replies through one bounded stream. */
+test('pages roots and replies through one bounded discussion prefix when requested', async () => {
+  const discussionQueries: Array<Record<string, unknown>> = []
+  const client = createClient(async (command) => {
+    const input = readCommandInput(command)
+    const values = input.ExpressionAttributeValues as Record<string, unknown> | undefined
+    if (
+      values?.[':prefix'] === 'DISCUSSION#V2#' ||
+      input.KeyConditionExpression ===
+        'entityKey = :entityKey AND recordKey BETWEEN :legacyLowerBound AND :legacyUpperBound'
+    ) {
+      discussionQueries.push(input)
+      return { Items: [] }
+    }
+    return { Items: [] }
+  })
+
+  await client.getThread({
+    entityKey: createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1'),
+    viewerMemberKey: 'member@example.com',
+    includeReplies: true,
+  })
+
+  expect(discussionQueries).toHaveLength(2)
+  expect(discussionQueries[0]).toMatchObject({
+    KeyConditionExpression: 'entityKey = :entityKey AND begins_with(recordKey, :prefix)',
+    ExpressionAttributeValues: {
+      ':prefix': 'DISCUSSION#V2#',
+    },
+    ScanIndexForward: false,
+  })
+  expect(discussionQueries[1]).toMatchObject({
+    KeyConditionExpression: 'entityKey = :entityKey AND recordKey BETWEEN :legacyLowerBound AND :legacyUpperBound',
+    ExpressionAttributeValues: {
+      ':legacyLowerBound': 'DISCUSSION#',
+      ':legacyUpperBound': 'DISCUSSION#V2#',
+    },
+    FilterExpression: 'attribute_not_exists(discussionIndexVersion)',
+    ScanIndexForward: false,
+  })
+})
+
+/** Verifies that newly written discussion indexes sort timestamps before comment kind. */
+test('writes timestamp-first discussion indexes for roots and replies', async () => {
+  const transactions: Array<Record<string, unknown>> = []
+  let rootCommentId: string | undefined
+  const client = createClient(async (command) => {
+    const input = readCommandInput(command)
+    if ('TransactItems' in input) {
+      transactions.push(input)
+    } else if (
+      rootCommentId &&
+      isTestRecord(input.Key) &&
+      input.Key.recordKey === `COMMENT#${rootCommentId}`
+    ) {
+      return {
+        Item: {
+          entityKey,
+          recordKey: `COMMENT#${rootCommentId}`,
+          entryType: 'comment',
+          id: rootCommentId,
+          rootCommentId,
+          authorMemberKey: 'author@example.com',
+          bodyMarkdown: 'New comment',
+          version: 1,
+          mentionMemberKeys: [],
+          createdAt: '2026-07-12T03:00:00.000Z',
+          updatedAt: '2026-07-12T03:00:00.000Z',
+          reactions: [],
+          acceptedResolutions: [],
+        },
+      }
+    }
+    return {}
+  })
+  const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
+  const created = await client.createComment({
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'issue-1',
+    entityKey,
+    actorMemberKey: 'author@example.com',
+    bodyMarkdown: 'New comment',
+    auditContext: createTestAuditContext(
+      'timeline-index',
+      '2026-07-12T03:00:00.000Z',
+      { bodyMarkdown: 'New comment' },
+    ),
+  })
+  rootCommentId = created.id
+  const reply = await client.createComment({
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'issue-1',
+    entityKey,
+    actorMemberKey: 'reply@example.com',
+    bodyMarkdown: 'Reply',
+    parentCommentId: created.id,
+    auditContext: createTestAuditContext(
+      'timeline-index-reply',
+      '2026-07-12T04:00:00.000Z',
+      { bodyMarkdown: 'Reply' },
+    ),
+  })
+
+  const discussionKeys = transactions.flatMap((transaction) => {
+    if (!Array.isArray(transaction.TransactItems)) {
+      throw new Error('Expected a comment transaction.')
+    }
+    return transaction.TransactItems.flatMap((item) => {
+      if (!isTestRecord(item) || !isTestRecord(item.Put) || !isTestRecord(item.Put.Item)) {
+        return []
+      }
+      return item.Put.Item.entryType === 'discussion' && typeof item.Put.Item.recordKey === 'string'
+        ? [item.Put.Item.recordKey]
+        : []
+    })
+  })
+
+  expect(discussionKeys).toEqual([
+    `DISCUSSION#V2#2026-07-12T03:00:00.000Z#ROOT#${created.id}`,
+    `DISCUSSION#V2S#ROOT#2026-07-12T03:00:00.000Z#${created.id}`,
+    `DISCUSSION#ROOT#2026-07-12T03:00:00.000Z#${created.id}`,
+    `DISCUSSION#V2#2026-07-12T04:00:00.000Z#THREAD#${created.id}#${reply.id}`,
+    `DISCUSSION#V2S#THREAD#${created.id}#2026-07-12T04:00:00.000Z#${reply.id}`,
+    `DISCUSSION#THREAD#${created.id}#2026-07-12T04:00:00.000Z#${reply.id}`,
+  ])
+  const legacyDiscussionItems = transactions.flatMap((transaction) => {
+    if (!Array.isArray(transaction.TransactItems)) return []
+    return transaction.TransactItems.flatMap((item) => {
+      if (!isTestRecord(item) || !isTestRecord(item.Put) || !isTestRecord(item.Put.Item)) {
+        return []
+      }
+      const putItem = item.Put.Item
+      return putItem.entryType === 'discussion' &&
+          typeof putItem.recordKey === 'string' &&
+          putItem.recordKey.startsWith('DISCUSSION#') &&
+          !putItem.recordKey.startsWith('DISCUSSION#V2')
+        ? [putItem]
+        : []
+    })
+  })
+  expect(legacyDiscussionItems).toHaveLength(2)
+  expect(legacyDiscussionItems.every((item) => item.discussionIndexVersion === 2)).toBeTrue()
 })
 
 test('stores a project watcher in the project scope', async () => {
@@ -1074,7 +1289,8 @@ test('seeds deduplicated automatic watchers when a comment is created', async ()
   expect(mentionedValues[':reasons']).toEqual(new Set(['mention']))
 })
 
-test('does not subscribe a service actor when an Automation comment is created', async () => {
+/** Verifies automatic watcher creation is fenced by the captured Work Item assignee. */
+test('binds automatic watcher creation to the captured Work Item assignee', async () => {
   let transaction: Record<string, unknown> | undefined
   const client = createClient(async (command) => {
     const input = readCommandInput(command)
@@ -1084,46 +1300,164 @@ test('does not subscribe a service actor when an Automation comment is created',
     }
     return { Items: [] }
   })
-  const auditContext = createMutationAuditContext({
-    workspaceId: 'workspace#one',
-    actor: {
-      id: 'automation:rule-1',
-      kind: 'service',
-      displayName: 'Automation',
-    },
-    idempotencyKey: 'automation-comment-1',
-    occurredAt: '2026-07-12T00:00:00.000Z',
-    request: { method: 'AUTOMATION', path: '/automation/comment' },
-    source: { kind: 'system' },
-  })
 
   await client.createComment({
     workspaceId: 'workspace#one',
     teamId: 'team-a',
     issueId: 'issue-1',
     entityKey: createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1'),
-    actorMemberKey: 'automation:rule-1',
-    bodyMarkdown: 'Automation comment',
+    assigneeMemberKey: 'assignee@example.com',
+    actorMemberKey: 'author@example.com',
+    bodyMarkdown: 'Please review this.',
     automaticWatcherCandidates: [
-      { memberKey: 'automation:rule-1', reason: 'creator' },
-      { memberKey: 'human@example.com', reason: 'creator' },
+      { memberKey: 'assignee@example.com', reason: 'assignee' },
     ],
+  })
+
+  if (!transaction) {
+    throw new Error('Expected an automatic watcher transaction.')
+  }
+  const parentCheck = (transaction.TransactItems as Array<Record<string, unknown>>)[0]
+    ?.ConditionCheck as Record<string, unknown>
+  expect(parentCheck.ConditionExpression).toContain('assigneeUserId = :assigneeMemberKey')
+  expect(parentCheck.ExpressionAttributeValues).toEqual({
+    ':assigneeMemberKey': 'assignee@example.com',
+  })
+})
+
+/** Ensures comment writes carry caller authorization conditions in the same transaction. */
+test('includes caller authorization guards in comment transactions', async () => {
+  let transaction: Record<string, unknown> | undefined
+  const client = createClient(async (command) => {
+    const input = readCommandInput(command)
+    if ('TransactItems' in input) transaction = input
+    return {}
+  })
+  const authorizationCheck: CollaborationAuthorizationConditionCheck = {
+    ConditionCheck: {
+      TableName: 'workspace-access-table',
+      Key: {
+        workspaceId: 'workspace#one',
+        recordKey: 'MEMBER#member@example.com',
+      },
+      ConditionExpression: '#version = :expectedVersion',
+      ExpressionAttributeNames: { '#version': 'version' },
+      ExpressionAttributeValues: { ':expectedVersion': 4 },
+    },
+  }
+
+  await client.createComment({
+    authorizationConditionChecks: [authorizationCheck],
+    entityKey: createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1'),
+    issueId: 'issue-1',
+    teamId: 'team-a',
+    workspaceId: 'workspace#one',
+    actorMemberKey: 'member@example.com',
+    bodyMarkdown: 'Guarded comment',
+  })
+
+  expect(transaction?.TransactItems).toEqual(expect.arrayContaining([
+    authorizationCheck,
+    expect.objectContaining({
+      ConditionCheck: expect.objectContaining({ TableName: 'issue-table' }),
+    }),
+  ]))
+})
+
+test('finds a committed comment by its deterministic mutation identity', async () => {
+  const memory = createCollaborationMemory()
+  const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
+  const auditContext = createTestAuditContext(
+    'automation-comment-replay',
+    '2026-07-12T00:00:00.000Z',
+    { bodyMarkdown: 'Replay this comment.' },
+  )
+  const created = await memory.client.createComment({
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'issue-1',
+    entityKey,
+    actorMemberKey: 'author@example.com',
+    bodyMarkdown: 'Replay this comment.',
     auditContext,
   })
 
-  const transactionItems = isTestRecord(transaction) && Array.isArray(transaction.TransactItems)
-    ? transaction.TransactItems.filter(isTestRecord)
-    : []
-  const watcherRecordKeys = transactionItems.flatMap((item) => {
-    if (!isTestRecord(item.Update) || !isTestRecord(item.Update.Key)) {
-      return []
+  await expect(memory.client.getCommentMutationReplay({ entityKey, auditContext })).resolves.toMatchObject({
+    id: created.id,
+    bodyMarkdown: 'Replay this comment.',
+  })
+  await expect(memory.client.getCommentMutationReplay({
+    entityKey,
+    auditContext: createTestAuditContext(
+      'different-comment-replay',
+      '2026-07-12T00:00:00.000Z',
+      { bodyMarkdown: 'Replay this comment.' },
+    ),
+  })).resolves.toBeUndefined()
+})
+
+test('does not subscribe service actors as automatic watchers', async () => {
+  let transaction: Record<string, unknown> | undefined
+  const client = createClient(async (command) => {
+    const input = readCommandInput(command)
+    if ('TransactItems' in input) {
+      transaction = input
+      return {}
     }
-    return typeof item.Update.Key.recordKey === 'string' &&
-        item.Update.Key.recordKey.startsWith('WATCHER#')
-      ? [item.Update.Key.recordKey]
+    return { Items: [] }
+  })
+  const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
+
+  await client.createComment({
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'issue-1',
+    entityKey,
+    actorMemberKey: 'automation:rule-1',
+    bodyMarkdown: 'An automation comment.',
+    automaticWatcherCandidates: [
+      { memberKey: 'creator@example.com', reason: 'creator' },
+      { memberKey: 'assignee@example.com', reason: 'assignee' },
+      { memberKey: 'automation:rule-1', reason: 'creator' },
+    ],
+    auditContext: createMutationAuditContext({
+      workspaceId: 'workspace#one',
+      actor: { id: 'automation:rule-1', kind: 'service' },
+      idempotencyKey: 'service-comment',
+      occurredAt: '2026-07-12T00:00:00.000Z',
+      request: {
+        method: 'AUTOMATION',
+        path: '/automation/comments',
+        body: { bodyMarkdown: 'An automation comment.' },
+      },
+      source: { kind: 'system', requestId: 'service-comment' },
+    }),
+  })
+
+  const rawItems = transaction?.TransactItems
+  if (!Array.isArray(rawItems)) {
+    throw new Error('Expected the comment transaction items.')
+  }
+  const items: Array<Record<string, unknown>> = []
+  for (const item of rawItems) {
+    if (!isTestRecord(item)) {
+      throw new Error('Expected every comment transaction item to be a record.')
+    }
+    items.push(item)
+  }
+  const watcherKeys = items.flatMap((item) => {
+    const update = isTestRecord(item.Update) ? item.Update : undefined
+    const key = update && isTestRecord(update.Key) ? update.Key : undefined
+    return update !== undefined && typeof key?.recordKey === 'string' &&
+        key.recordKey.startsWith('WATCHER#')
+      ? [key.recordKey]
       : []
   })
-  expect(watcherRecordKeys).toEqual(['WATCHER#human@example.com'])
+  expect(watcherKeys.sort()).toEqual([
+    'WATCHER#assignee@example.com',
+    'WATCHER#creator@example.com',
+  ])
+  expect(watcherKeys).not.toContain('WATCHER#automation:rule-1')
 })
 
 test('binds comment, reaction, and Work Item watch transactions to the loaded project assignment', async () => {
@@ -1329,56 +1663,6 @@ test('derives the same comment ID when an idempotent create request is retried',
 
   expect(commentIds).toHaveLength(2)
   expect(commentIds[0]).toBe(commentIds[1])
-})
-
-test('accepts an explicit comment ID only for trusted service writers', async () => {
-  const client = createClient(async () => ({ Items: [] }))
-  const input = {
-    workspaceId: 'workspace#one',
-    teamId: 'team-a',
-    issueId: 'issue-1',
-    entityKey: createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1'),
-    actorMemberKey: 'member@example.com',
-    bodyMarkdown: 'Stable identifier',
-    commentId: 'automation-execution_comment_0',
-  }
-
-  await expect(client.createComment(input)).rejects.toMatchObject({
-    status: 400,
-    code: 'InvalidCommentIdentifier',
-  })
-
-  const auditContext = createMutationAuditContext({
-    workspaceId: 'workspace#one',
-    actor: { id: 'automation:rule-1', kind: 'service' },
-    idempotencyKey: 'automation-comment-identifier',
-    request: { method: 'AUTOMATION', path: '/automation/comment' },
-    source: { kind: 'system' },
-  })
-  const commentIds: string[] = []
-  const serviceClient = createClient(async (command) => {
-    const commandInput = readCommandInput(command)
-    const items = Array.isArray(commandInput.TransactItems)
-      ? commandInput.TransactItems.filter(isTestRecord)
-      : []
-    const commentPut = items.find((item) =>
-      isTestRecord(item.Put) &&
-      isTestRecord(item.Put.Item) &&
-      item.Put.Item.entryType === 'comment'
-    )
-    if (
-      commentPut &&
-      isTestRecord(commentPut.Put) &&
-      isTestRecord(commentPut.Put.Item) &&
-      typeof commentPut.Put.Item.id === 'string'
-    ) {
-      commentIds.push(commentPut.Put.Item.id)
-    }
-    return { Items: [] }
-  })
-
-  await serviceClient.createComment({ ...input, actorMemberKey: 'automation:rule-1', auditContext })
-  expect(commentIds).toEqual(['automation-execution_comment_0'])
 })
 
 test('rejects replies to a resolved root before writing', async () => {
@@ -2773,6 +3057,7 @@ async function createAcceptedResolutionHistoryState() {
   expect(first.acceptedResolutions).toHaveLength(1)
   expect(first.acceptedResolutions[0]).toMatchObject({
     sourceCommentId: 'reply-1',
+    capturedCommentAuthorMemberKey: 'reply-1@example.com',
     capturedCommentRevision: 1,
     capturedCommentBody: 'First answer',
     state: 'accepted',

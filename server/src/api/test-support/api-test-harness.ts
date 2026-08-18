@@ -584,6 +584,9 @@ function createCollaborationStub(
     getThread: unsupported,
     hasAttachableComment: unsupported,
     getCommentSnapshot: unsupported,
+    async getCommentMutationReplay() {
+      return undefined
+    },
     getCuratedContext: unsupported,
     async getCuratedContextMutationReplay() {
       return undefined
@@ -718,6 +721,7 @@ function createTeamIssuesFake(
     getPublicWorkItemPage: unsupported,
     getProjectIssues: unsupported,
     getTeamIssueDetail: unsupported,
+    getAutomationCommentReplay: async () => false,
     createTeamIssue: unsupported,
     updateTeamIssue: unsupported,
     updateTeamIssueSchedules: unsupported,

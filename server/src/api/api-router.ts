@@ -323,9 +323,12 @@ import {
   createProjectCollaborationEntityKey,
   createWorkItemCollaborationEntityKey,
   type CollaborationAutomaticWatcherCandidate,
+  type CollaborationAuthorizationConditionCheck,
+  type CollaborationClient,
   type CollaborationComment,
   type CuratedContextActivitySourceAuthorizationSnapshot,
   type CuratedContextDocumentSourceAuthorizationSnapshot,
+  type GetCollaborationThreadInput,
 } from '../modules/collaboration/collaboration'
 import {
   FILE_APPROVAL_MAX_REVIEWERS,
@@ -1030,6 +1033,10 @@ const ANALYTICS_SNAPSHOT_ACL_INSPECTION_LIMIT = 1_000
 const ANALYTICS_SNAPSHOT_REPOSITORY_PAGE_LIMIT = 10
 /** Relation target の強整合 detail read を同時実行する最大数です。 */
 const WORK_ITEM_RELATION_TARGET_READ_CONCURRENCY = 8
+/** Issue detail の canonical comment read に許容する合計 page 数です。 */
+const TEAM_ISSUE_DETAIL_COMMENT_READ_MAX_PAGES = 50
+/** Maximum UTF-8 bytes allowed for the compatibility comments projection in an issue detail. */
+const TEAM_ISSUE_DETAIL_COMMENT_MAX_BYTES = 4_000_000
 /** One task-view request may strongly inspect at most one full 20-Team relation filter. */
 const TASK_VIEW_RELATION_TARGET_READ_LIMIT = WORK_ITEMS_TEAM_READ_LIMIT * 100
 /** One task-view request may resolve at most one full legacy relation filter through Search. */
@@ -8870,18 +8877,28 @@ routeApp.get('/api/teams/:teamId/issues/:issueId', async (c) => {
     const projectEntityKey = detail.issue.assignedProjectId
       ? createProjectCollaborationEntityKey(principal.directoryId, detail.issue.assignedProjectId)
       : undefined
-    const [collaborationPreview, resolvedConfiguration, relationPage, commentBackfillComplete] = await Promise.all([
-      workItemDependencies.collaboration.getThread({
+    const collaborationReadBudget: CollaborationThreadReadBudget = {
+      maxPages: TEAM_ISSUE_DETAIL_COMMENT_READ_MAX_PAGES,
+      maxBytes: TEAM_ISSUE_DETAIL_COMMENT_MAX_BYTES,
+      bytesRead: 2,
+      pagesRead: 0,
+    }
+    const [collaborationComments, resolvedConfiguration, relationPage, commentBackfillComplete] = await Promise.all([
+      readAllCollaborationThreadComments(workItemDependencies.collaboration, {
         entityKey,
         viewerMemberKey: principal.userKey,
         projectEntityKey,
-        limit: 50,
+        limit: 100,
+        includeReplies: true,
         includeScopeState: false,
-      }),
+      }, collaborationReadBudget),
       workItemDependencies.workItemConfigurations.getTeamConfiguration(principal.directoryId, teamId),
       workItemDependencies.workItemConfigurations.listRelations(principal.directoryId, teamId, issueId),
       workItemDependencies.collaboration.isTeamIssueCommentBackfillComplete(principal.directoryId),
     ])
+    const allCollaborationComments = collaborationComments.sort(
+      (left, right) => left.createdAt.localeCompare(right.createdAt),
+    )
     const visibleRelations = await filterVisibleWorkItemRelations(
       principal,
       context,
@@ -8889,19 +8906,12 @@ routeApp.get('/api/teams/:teamId/issues/:issueId', async (c) => {
       relationPage.relations,
     )
 
-    const canonicalComments = collaborationPreview.comments.map((comment) =>
-      toCollaborationCommentResponse(
-        comment,
-        principal,
-        context,
-        detail.issue,
-      ),
-    )
+    const canonicalComments = allCollaborationComments
+      .filter((comment) => !comment.deletedAt)
+      .map(toTeamIssueDetailCommentResponse)
     const legacyComments = commentBackfillComplete
       ? []
-      : detail.comments.map((comment) =>
-          toLegacyCollaborationCommentResponse(comment),
-        )
+      : detail.comments ?? []
     const hydratedDetail = await hydrateTeamIssueDetailResponse(
       {
         ...detail,
@@ -8915,7 +8925,7 @@ routeApp.get('/api/teams/:teamId/issues/:issueId', async (c) => {
 
     return c.json({
       ...hydratedDetail,
-      comments: mergeLegacyCollaborationComments(legacyComments, canonicalComments),
+      comments: mergeLegacyTeamIssueDetailComments(legacyComments, canonicalComments),
     })
   } catch (error) {
     return toWorkItemConfigurationErrorResponse(c, error)
@@ -9251,6 +9261,7 @@ routeApp.get('/api/teams/:teamId/issues/:issueId/collaboration', async (c) => {
         projectEntityKey,
         rootCommentId: readOptionalCommentId(requestedRootCommentId, 'Root comment ID'),
         cursor: requestedCursor,
+        legacyCursorCompatible: true,
         limit: limit === undefined ? 20 : Math.min(limit, 20),
       })
       return c.json({
@@ -9280,20 +9291,22 @@ routeApp.get('/api/teams/:teamId/issues/:issueId/collaboration', async (c) => {
       entityKey,
       viewerMemberKey: principal.userKey,
       projectEntityKey,
-      cursor: isLegacyPage ? undefined : requestedCursor,
-      limit: isLegacyPage ? 1 : limit === undefined ? 10 : Math.min(limit, 20),
+      cursor: requestedCursor,
+      legacyCursorCompatible: true,
+      limit: limit === undefined ? 10 : Math.min(limit, 20),
     })
     const replyPages = await Promise.all(
-      (isLegacyPage ? [] : roots.comments).map((root) => workItemDependencies.collaboration.getThread({
+      roots.comments.map((root) => workItemDependencies.collaboration.getThread({
         entityKey,
         viewerMemberKey: principal.userKey,
         projectEntityKey,
         rootCommentId: root.id,
+        legacyCursorCompatible: true,
         limit: 5,
         includeScopeState: false,
       })),
     )
-    const comments = (isLegacyPage ? [] : roots.comments).flatMap((root, index) => [
+    const comments = roots.comments.flatMap((root, index) => [
       root,
       ...[...(replyPages[index]?.comments ?? [])].reverse(),
     ])
@@ -9910,6 +9923,13 @@ routeApp.post('/api/teams/:teamId/issues/:issueId/comments', async (c) => {
       ? createProjectCollaborationEntityKey(principal.directoryId, detail.issue.assignedProjectId)
       : undefined
     const automaticWatcherCandidates = createTeamIssueAutomaticWatcherCandidates(detail.issue)
+    const authorizationConditionChecks =
+      await createCollaborationCommentAuthorizationConditionChecks(
+        principal,
+        context,
+        teamId,
+        detail.issue.assignedProjectId,
+      )
     const comment = await workItemDependencies.collaboration.createComment({
       workspaceId: principal.directoryId,
       teamId,
@@ -9918,12 +9938,14 @@ routeApp.post('/api/teams/:teamId/issues/:issueId/comments', async (c) => {
       entityKey,
       projectId: detail.issue.assignedProjectId,
       projectEntityKey,
+      assigneeMemberKey: detail.issue.assigneeUserId,
       actorMemberKey: principal.userKey,
       bodyMarkdown: readRequiredCommentBody(body.bodyMarkdown),
       parentCommentId: readOptionalCommentId(body.parentCommentId, 'Parent comment ID'),
       mentionMemberKeys,
       automaticWatcherCandidates,
       deepLink: createTeamIssueDeepLink(teamId, issueId),
+      authorizationConditionChecks,
       auditContext: createApiMutationContext(c, principal, { teamId, issueId, ...body }),
     })
     const activity = {
@@ -13813,6 +13835,31 @@ async function executeAutomationComment(
   dependencies: AutomationActionExecutorDependencies,
 ) {
   const target = readAutomationWorkItemTarget(context.event)
+  const entityKey = createWorkItemCollaborationEntityKey(
+    context.execution.workspaceId,
+    target.teamId,
+    target.workItemId,
+  )
+  const auditContext = createAutomationMutationContext(context, { body })
+  const replay = await dependencies.collaboration.getCommentMutationReplay({
+    entityKey,
+    auditContext,
+  })
+  if (replay) return
+  if (
+    dependencies.teamIssues.getAutomationCommentReplay &&
+    await dependencies.teamIssues.getAutomationCommentReplay(
+      context.execution.workspaceId,
+      target.teamId,
+      target.workItemId,
+      createAutomationCommentEventId(context),
+      `automation:${context.execution.ruleId}`,
+      body,
+    )
+  ) {
+    return
+  }
+
   const team = await requireAutomationTeam(
     context.execution.workspaceId,
     target.teamId,
@@ -13834,11 +13881,36 @@ async function executeAutomationComment(
       'The comment Work Item project is not active in its owner Team.',
     )
   }
-  const entityKey = createWorkItemCollaborationEntityKey(
-    context.execution.workspaceId,
-    target.teamId,
-    target.workItemId,
-  )
+  const createActiveReferenceConditionChecks = dependencies.projectDirectory
+    .createActiveReferenceConditionChecks
+  if (!createActiveReferenceConditionChecks) {
+    throw new AutomationError(
+      'unavailable',
+      'AutomationCommentAuthorizationUnavailable',
+      'Comment authorization fencing is unavailable.',
+      true,
+    )
+  }
+  let authorizationConditionChecks: CollaborationAuthorizationConditionCheck[]
+  try {
+    authorizationConditionChecks = readCollaborationAuthorizationConditionChecks(
+      await createActiveReferenceConditionChecks.call(
+        dependencies.projectDirectory,
+        context.execution.workspaceId,
+        target.teamId,
+        detail.issue.assignedProjectId,
+      ),
+    )
+  } catch (error) {
+    if (error instanceof ProjectDataError) {
+      throw new AutomationError(
+        'conflict',
+        'AutomationCommentTargetUnavailable',
+        'The comment Work Item Team or Project is no longer active.',
+      )
+    }
+    throw error
+  }
   const projectEntityKey = detail.issue.assignedProjectId
     ? createProjectCollaborationEntityKey(
         context.execution.workspaceId,
@@ -13853,12 +13925,14 @@ async function executeAutomationComment(
     entityKey,
     projectId: detail.issue.assignedProjectId,
     projectEntityKey,
+    assigneeMemberKey: detail.issue.assigneeUserId,
     actorMemberKey: `automation:${context.execution.ruleId}`,
     bodyMarkdown: body,
     commentId: createAutomationCommentId(context.execution.id, context.actionIndex),
     automaticWatcherCandidates: createTeamIssueAutomaticWatcherCandidates(detail.issue),
     deepLink: createTeamIssueDeepLink(target.teamId, target.workItemId),
-    auditContext: createAutomationMutationContext(context, { body }),
+    authorizationConditionChecks,
+    auditContext,
   })
 }
 
@@ -13954,6 +14028,11 @@ function createAutomationMutationContext(
       route: `automation-lineage:${createAutomationRuleLineage(context).join(',')}`,
     },
   })
+}
+
+/** Creates the deterministic pre-cutover Automation comment event identity. */
+function createAutomationCommentEventId(context: AutomationActionExecutionContext) {
+  return `${context.execution.id}_comment_${context.actionIndex}`
 }
 
 function createAutomationRuleLineage(context: AutomationActionExecutionContext) {
@@ -19347,6 +19426,9 @@ function toTenantAdministrationErrorResponse(c: Context, error: unknown) {
 function toWorkItemConfigurationErrorResponse(c: Context, error: unknown) {
   if (error instanceof CognitoServiceError) {
     return toCognitoDirectoryErrorResponse(c, error)
+  }
+  if (error instanceof CollaborationError) {
+    return toCollaborationErrorResponse(c, error)
   }
   if (
     error instanceof WorkspaceAccessError ||
@@ -25219,6 +25301,7 @@ function toCollaborationErrorResponse(c: Context, error: unknown) {
     error.status === 403 ||
     error.status === 404 ||
     error.status === 409 ||
+    error.status === 413 ||
     error.status === 503
     ? error.status
     : 502
@@ -28014,6 +28097,253 @@ function createTeamIssueAutomaticWatcherCandidates(
   ]
 }
 
+/** Builds commit-time authorization fences for a direct Work Item comment mutation.
+ *
+ * @param principal - Authenticated Workspace principal making the comment request.
+ * @param context - Team and Project authorization snapshot used to authorize the request.
+ * @param teamId - Team owning the Work Item.
+ * @param projectId - Project currently assigned to the Work Item, when present.
+ * @returns Condition checks that must pass in the same transaction as the comment write.
+ */
+async function createCollaborationCommentAuthorizationConditionChecks(
+  principal: WorkspacePrincipal,
+  context: TeamPermissionContext,
+  teamId: string,
+  projectId: string | undefined,
+): Promise<CollaborationAuthorizationConditionCheck[]> {
+  const createActiveReferenceConditionChecks =
+    workspaceDependencies.projectDirectory.createActiveReferenceConditionChecks
+  if (!createActiveReferenceConditionChecks) {
+    throw new CollaborationError(
+      503,
+      'CollaborationAuthorizationUnavailable',
+      'Comment authorization fencing is unavailable. Retry the request.',
+    )
+  }
+  const checks = readCollaborationAuthorizationConditionChecks(
+    await createActiveReferenceConditionChecks.call(
+      workspaceDependencies.projectDirectory,
+      principal.directoryId,
+      teamId,
+      projectId,
+    ),
+  )
+
+  if (principal.isSystemAdmin) return checks
+
+  const createActiveMemberConditionCheck =
+    workspaceDependencies.workspaceAccess.createActiveMemberConditionCheck
+  if (!createActiveMemberConditionCheck) {
+    throw new CollaborationError(
+      503,
+      'CollaborationAuthorizationUnavailable',
+      'Comment authorization fencing is unavailable. Retry the request.',
+    )
+  }
+  const actorMembershipCheck = await createActiveMemberConditionCheck.call(
+    workspaceDependencies.workspaceAccess,
+    principal.directoryId,
+    normalizeProjectMemberKey(principal.userKey),
+    { allowedRoles: ['owner', 'admin', 'member'] },
+  )
+  if (!actorMembershipCheck) {
+    throw new CollaborationError(
+      409,
+      'CollaborationActorMembershipChanged',
+      'Workspace membership changed while the comment was being prepared.',
+    )
+  }
+  checks.push(...readCollaborationAuthorizationConditionChecks([actorMembershipCheck]))
+
+  if (!projectId) return checks
+
+  const enterpriseProjectAccess = principal.enterpriseProjectAccesses?.some((access) =>
+    access.projectId === projectId && projectAccessAllows(access, 'member')
+  ) === true
+  const enterpriseTeamAccess = principal.enterpriseTeamAccesses?.some((access) =>
+    access.teamId === teamId && access.permissions.includes('teams.write')
+  ) === true
+  const enterpriseRouteAccess = principal.enterpriseRouteAuthorizedAtResource === true &&
+    (
+      principal.enterpriseAuthorizationResource?.kind === 'workspace' ||
+      principal.enterpriseAuthorizationResource?.kind === 'team' &&
+        principal.enterpriseAuthorizationResource.targetId === teamId
+    ) && principal.enterprisePermissions?.includes('teams.write') === true
+
+  if (enterpriseProjectAccess || enterpriseTeamAccess || enterpriseRouteAccess) {
+    const enterpriseControlCheck = createEnterpriseControlAuthorizationConditionCheck(principal)
+    if (enterpriseControlCheck) {
+      checks.push(...readCollaborationAuthorizationConditionChecks([enterpriseControlCheck]))
+    }
+    return checks
+  }
+
+  const projectAccess = context.projectAccesses?.find((access) => access.projectId === projectId)
+  if (!projectAccess || !projectAccessAllows(projectAccess, 'member')) {
+    throw new CollaborationError(
+      403,
+      'CollaborationProjectAccessDenied',
+      'The caller no longer has access to the assigned Project.',
+    )
+  }
+  const createProjectAccessConditionCheck =
+    workspaceDependencies.projectDirectory.createProjectAccessConditionCheck
+  if (!createProjectAccessConditionCheck) {
+    throw new CollaborationError(
+      503,
+      'CollaborationAuthorizationUnavailable',
+      'Comment authorization fencing is unavailable. Retry the request.',
+    )
+  }
+  const projectAccessCheck = await createProjectAccessConditionCheck.call(
+    workspaceDependencies.projectDirectory,
+    principal.directoryId,
+    projectId,
+    normalizeProjectMemberKey(principal.userKey),
+    'member',
+  )
+  if (!projectAccessCheck) {
+    throw new CollaborationError(
+      409,
+      'CollaborationProjectAccessChanged',
+      'Project authorization changed while the comment was being prepared.',
+    )
+  }
+  checks.push(...readCollaborationAuthorizationConditionChecks([projectAccessCheck]))
+  return checks
+}
+
+/**
+ * Narrows directory transaction contributions to read-only condition checks.
+ *
+ * @param items - Directory transaction contributions returned by the authoritative reader.
+ * @returns Condition checks safe to append to a Collaboration comment transaction.
+ */
+function readCollaborationAuthorizationConditionChecks(
+  items: NonNullable<TransactWriteCommandInput['TransactItems']>,
+): CollaborationAuthorizationConditionCheck[] {
+  const checks: CollaborationAuthorizationConditionCheck[] = []
+  for (const item of items) {
+    if (
+      item.ConditionCheck === undefined ||
+      item.Delete !== undefined ||
+      item.Put !== undefined ||
+      item.Update !== undefined
+    ) {
+      throw new CollaborationError(
+        503,
+        'CollaborationAuthorizationUnavailable',
+        'Comment authorization fencing is unavailable. Retry the request.',
+      )
+    }
+    checks.push({ ConditionCheck: item.ConditionCheck })
+  }
+  if (checks.length === 0) {
+    throw new CollaborationError(
+      503,
+      'CollaborationAuthorizationUnavailable',
+      'Comment authorization fencing is unavailable. Retry the request.',
+    )
+  }
+  return checks
+}
+
+/** Tracks the finite page budget shared by one aggregate Collaboration read. */
+type CollaborationThreadReadBudget = {
+  /** Maximum number of Collaboration pages allowed for one aggregate read. */
+  maxPages: number
+  /** Maximum serialized UTF-8 bytes allowed for the compatibility comments projection. */
+  maxBytes: number
+  /** Serialized UTF-8 bytes reserved by comments already collected. */
+  bytesRead: number
+  /** Number of Collaboration pages already reserved by the aggregate read. */
+  pagesRead: number
+}
+
+/**
+ * Reads every page in one Collaboration comment scope.
+ *
+ * @param collaboration - Canonical Collaboration client to query.
+ * @param input - Thread scope and page settings without a cursor.
+ * @param budget - Shared page budget for the aggregate detail read.
+ * @returns All comments returned by the thread pages in store order.
+ */
+async function readAllCollaborationThreadComments(
+  collaboration: CollaborationClient,
+  input: Omit<GetCollaborationThreadInput, 'cursor'>,
+  budget: CollaborationThreadReadBudget = {
+    maxPages: TEAM_ISSUE_DETAIL_COMMENT_READ_MAX_PAGES,
+    maxBytes: TEAM_ISSUE_DETAIL_COMMENT_MAX_BYTES,
+    bytesRead: 2,
+    pagesRead: 0,
+  },
+): Promise<CollaborationComment[]> {
+  const comments: CollaborationComment[] = []
+  const seenCursors = new Set<string>()
+  let cursor: string | undefined
+
+  while (true) {
+    if (budget.pagesRead >= budget.maxPages) {
+      throw new CollaborationError(
+        413,
+        'CollaborationThreadReadLimitExceeded',
+        'Collaboration thread exceeds the supported read window.',
+      )
+    }
+    budget.pagesRead += 1
+    const page = await collaboration.getThread({
+      ...input,
+      ...(cursor === undefined ? {} : { cursor }),
+    })
+    for (const comment of page.comments) {
+      const commentBytes = Buffer.byteLength(
+        JSON.stringify(toTeamIssueDetailCommentResponse(comment)),
+        'utf8',
+      ) + 1
+      if (budget.bytesRead + commentBytes > budget.maxBytes) {
+        throw new CollaborationError(
+          413,
+          'CollaborationThreadPayloadTooLarge',
+          'Collaboration comments exceed the supported response size.',
+        )
+      }
+      budget.bytesRead += commentBytes
+      comments.push(comment)
+    }
+
+    if (page.nextCursor === undefined) {
+      return comments
+    }
+    if (seenCursors.has(page.nextCursor)) {
+      throw new CollaborationError(
+        503,
+        'CollaborationThreadPaginationStalled',
+        'Collaboration thread pagination did not advance.',
+      )
+    }
+    seenCursors.add(page.nextCursor)
+    cursor = page.nextCursor
+  }
+}
+
+/**
+ * Projects a canonical Collaboration comment into the stable Work Item detail
+ * response shape retained for older clients.
+ *
+ * @param comment - Canonical comment loaded from the Collaboration store.
+ * @returns The compatibility response representation.
+ */
+function toTeamIssueDetailCommentResponse(
+  comment: CollaborationComment,
+): TeamIssueCommentResponseItem {
+  return {
+    id: comment.id,
+    actorUserId: comment.authorMemberKey,
+    body: comment.bodyMarkdown,
+    createdAt: comment.createdAt,
+  }
+}
+
 function toCollaborationCommentResponse(
   comment: CollaborationComment,
   principal: WorkspacePrincipal,
@@ -28063,7 +28393,10 @@ function toCollaborationCommentResponse(
 }
 
 /** HTTP response shape shared by canonical and transitional comment projections. */
-type CollaborationCommentResponse = ReturnType<typeof toCollaborationCommentResponse>
+type CollaborationCommentResponse = ReturnType<typeof toCollaborationCommentResponse> & {
+  /** Identifies the canonical store or the temporary read-only legacy projection. */
+  source?: 'collaboration' | 'legacy'
+}
 
 /**
  * Projects a legacy event into the read-only collaboration shape used during migration.
@@ -28077,6 +28410,7 @@ function toLegacyCollaborationCommentResponse(
   return {
     id: comment.id,
     rootCommentId: comment.id,
+    source: 'legacy',
     authorMemberKey: comment.actorUserId,
     bodyMarkdown: comment.body,
     version: 1,
@@ -28098,15 +28432,15 @@ function toLegacyCollaborationCommentResponse(
 }
 
 /**
- * Merges temporary legacy comments with canonical comments by stable comment ID.
+ * Merges legacy detail comments with canonical comments during the marker-gated cutover.
  *
- * @param legacyComments - Read-only comments from the legacy event table.
- * @param canonicalComments - Current Collaboration comments.
- * @returns De-duplicated comments ordered by their original creation timestamp.
+ * @param legacyComments - Comments read from the legacy Work Item detail projection.
+ * @param canonicalComments - Comments read from the Collaboration store.
+ * @returns De-duplicated detail comments ordered by creation time and identifier.
  */
-function mergeLegacyCollaborationComments(
-  legacyComments: CollaborationCommentResponse[],
-  canonicalComments: CollaborationCommentResponse[],
+function mergeLegacyTeamIssueDetailComments(
+  legacyComments: TeamIssueCommentResponseItem[],
+  canonicalComments: TeamIssueCommentResponseItem[],
 ) {
   const commentsById = new Map(legacyComments.map((comment) => [comment.id, comment]))
   for (const comment of canonicalComments) {

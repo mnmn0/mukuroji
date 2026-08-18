@@ -718,7 +718,7 @@ function readTransactItems(
 }
 
 /**
- * comment integration test 用の有効な Team Issue item を作成します。
+ * Creates a valid Team Issue item for canonical Work Item integration tests.
  */
 function createTeamIssueItem(issueId: string) {
   return {

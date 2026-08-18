@@ -2,6 +2,10 @@ import { createHash, randomUUID } from 'node:crypto'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import {
+  GetCallerIdentityCommand,
+  STSClient,
+} from '@aws-sdk/client-sts'
+import {
   createDynamoDbClient,
   createDynamoDbDocumentClient,
 } from '../../src/infrastructure/aws/dynamodb-client'
@@ -17,6 +21,9 @@ import {
   createWorkItemCollaborationEntityKey,
 } from '../../src/modules/collaboration'
 import { DynamoDbCollaborationClient } from '../../src/modules/collaboration/collaboration'
+import {
+  runWithWorkspaceSearchWriterFenceInvocation,
+} from '../../src/infrastructure/runtime/workspace-search-writer-fence-invocation'
 import {
   ScanCommand,
   type DynamoDBDocumentClient,
@@ -96,6 +103,8 @@ type TableNames = {
 type BackfillRunContext = {
   /** Stable operator identity recorded in private audit metadata. */
   operatorId: string
+  /** AWS account returned by the authenticated STS caller identity. */
+  accountId: string
   /** Process-generated correlation identifier shared by completion receipts. */
   correlationId: string
   /** Digest that binds the checkpoint and audit receipt to one environment. */
@@ -121,7 +130,7 @@ async function main() {
     readEnvironment('AWS_ENDPOINT_URL')
   const region = readEnvironment('AWS_REGION') ?? readEnvironment('AWS_DEFAULT_REGION') ?? 'us-east-1'
   const tables = resolveTableNames(endpoint)
-  const account = resolveAccountId(endpoint)
+  const account = await resolveAccountId(endpoint, region)
   const operatorId = resolveOperatorId(endpoint)
   const configurationHash = createDigest(JSON.stringify({
     endpoint: endpoint ?? 'aws-default',
@@ -153,6 +162,7 @@ async function main() {
   )
   const runContext: BackfillRunContext = {
     operatorId,
+    accountId: account,
     correlationId: randomUUID(),
     configurationHash,
   }
@@ -162,7 +172,7 @@ async function main() {
       `dryRun=${options.dryRun} limit=${options.limit ?? 'unlimited'} ` +
       `checkpoint=${options.checkpointPath}`,
   )
-  await runBackfill(
+  await runWithWorkspaceSearchWriterFenceInvocation(() => runBackfill(
     sourceClient,
     collaboration,
     auditEvents,
@@ -170,7 +180,7 @@ async function main() {
     checkpoint,
     options,
     runContext,
-  )
+  ))
   printSummary(checkpoint, options)
 }
 
@@ -264,9 +274,13 @@ Options:
   --help, -h               Show this help.
 
 Required in AWS environments:
-  AWS_ACCOUNT_ID, MUKUROJI_BACKFILL_OPERATOR_ID,
+  MUKUROJI_BACKFILL_OPERATOR_ID,
   TEAM_ISSUE_EVENTS_TABLE_NAME, COLLABORATION_TABLE_NAME, TEAM_ISSUES_TABLE_NAME,
   AUDIT_EVENTS_TABLE_NAME
+
+AWS_ACCOUNT_ID is optional and, when supplied, is checked against the account
+returned by STS GetCallerIdentity. The checkpoint and audit principal use the
+verified account rather than this optional expectation.
 
 The marker is written only after the source Scan reaches its end. A repeated run
 is safe because comment and discussion rows use the legacy event ID and conditional writes.`)
@@ -305,16 +319,37 @@ function resolveTableNames(endpoint: string | undefined): TableNames {
   }
 }
 
-/** Resolves the account binding used to reject a checkpoint from another AWS account.
+/** Resolves the authenticated account binding used to reject a checkpoint from another AWS account.
  *
  * @param endpoint - Configured DynamoDB endpoint, if any.
- * @returns The explicit AWS account or a local-only sentinel.
+ * @param region - AWS region used for the STS identity lookup.
+ * @returns The authenticated AWS account or a local-only sentinel.
  */
-function resolveAccountId(endpoint: string | undefined) {
+export async function resolveAccountId(endpoint: string | undefined, region: string) {
   const configured = readEnvironment('AWS_ACCOUNT_ID')
-  if (configured) return requireText(configured, 'AWS_ACCOUNT_ID')
-  if (endpoint !== undefined && isLocalEndpoint(endpoint)) return 'local-account'
-  throw new Error('AWS_ACCOUNT_ID is required when DynamoDB is not a loopback endpoint.')
+  if (endpoint !== undefined && isLocalEndpoint(endpoint)) {
+    return configured ? requireAwsAccountId(configured) : 'local-account'
+  }
+
+  const sts = new STSClient({ region })
+  try {
+    const identity = await sts.send(new GetCallerIdentityCommand({}))
+    const authenticated = requireAwsAccountId(identity.Account)
+    if (configured && requireAwsAccountId(configured) !== authenticated) {
+      throw new Error('AWS_ACCOUNT_ID does not match the authenticated AWS account.')
+    }
+    return authenticated
+  } finally {
+    sts.destroy()
+  }
+}
+
+/** Validates an AWS account identifier obtained from configuration or STS. */
+function requireAwsAccountId(value: string | undefined) {
+  if (value === undefined || !/^\d{12}$/.test(value)) {
+    throw new Error('AWS account identity must be a 12-digit account ID.')
+  }
+  return value
 }
 
 /** Resolves the authenticated operator identity stored with the completion audit.
@@ -499,7 +534,7 @@ async function writeBackfillAuditEvents(
     const context = createMutationAuditContext({
       workspaceId,
       actor: {
-        id: 'system:backfill',
+        id: `system:backfill:${runContext.accountId}`,
         kind: 'system',
         displayName: 'system:backfill',
       },
@@ -512,6 +547,7 @@ async function writeBackfillAuditEvents(
         query: { workspaceId, scope },
         body: {
           version: 1,
+          accountId: runContext.accountId,
           configurationHash: runContext.configurationHash,
           requestedWorkspaceIds,
         },
@@ -543,6 +579,7 @@ async function writeBackfillAuditEvents(
       metadata: {
         migration: 'team-issue-comments-v1',
         operatorId: runContext.operatorId,
+        accountId: runContext.accountId,
         scope,
         requestedWorkspaceIds,
         configurationHash: runContext.configurationHash,
