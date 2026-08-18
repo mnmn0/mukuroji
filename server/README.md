@@ -376,8 +376,7 @@ bun run team-issue-comments:backfill -- \
   --checkpoint /tmp/mukuroji-team-issue-comments-v1.json
 ```
 
-AWS runs require `MUKUROJI_BACKFILL_OPERATOR_ID`,
-`TEAM_ISSUE_EVENTS_TABLE_NAME`, `COLLABORATION_TABLE_NAME`,
+AWS runs require `TEAM_ISSUE_EVENTS_TABLE_NAME`, `COLLABORATION_TABLE_NAME`,
 `TEAM_ISSUES_TABLE_NAME`, and `AUDIT_EVENTS_TABLE_NAME`. The checkpoint is
 owner-only because its continuation key can contain source identifiers. Reusing
 a checkpoint against different tables, region, account, or workspace filters is
@@ -385,8 +384,10 @@ rejected. The write run is idempotent; malformed scope, missing Work Items, or
 conflicting canonical rows stop the migration without publishing a completion
 marker. The runner obtains the account from STS `GetCallerIdentity`; an optional
 `AWS_ACCOUNT_ID` is treated only as an expected value and must match the
-authenticated account. Canonical repairs and marker publication run inside the
-workspace-search writer-fence invocation.
+authenticated account. An optional `MUKUROJI_BACKFILL_OPERATOR_ID` is retained as
+an operator label, while AWS audit records use the authenticated STS caller ARN;
+local runs use the `local:backfill` sentinel. Canonical repairs and marker
+publication run inside the workspace-search writer-fence invocation.
 Use repeated `--workspace-id <id>` options to scan and mark a selected set of
 workspaces before processing the rest of the environment.
 

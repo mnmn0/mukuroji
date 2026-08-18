@@ -101,8 +101,10 @@ type TableNames = {
 
 /** Operator and correlation context for one backfill invocation. */
 type BackfillRunContext = {
-  /** Stable operator identity recorded in private audit metadata. */
+  /** Authenticated STS caller ARN, or the local-only sentinel, recorded in audit metadata. */
   operatorId: string
+  /** Optional operator label supplied by the invocation environment. */
+  operatorLabel?: string
   /** AWS account returned by the authenticated STS caller identity. */
   accountId: string
   /** Process-generated correlation identifier shared by completion receipts. */
@@ -115,6 +117,16 @@ type BackfillRunContext = {
 type NamedError = {
   /** Node error code. */
   code?: string
+}
+
+/** Authenticated identity used to bind one backfill run to its AWS caller. */
+export type BackfillIdentity = {
+  /** AWS account returned by STS GetCallerIdentity. */
+  accountId: string
+  /** Authenticated STS caller ARN, or the local-only sentinel. */
+  operatorId: string
+  /** Optional operator label supplied by the invocation environment. */
+  operatorLabel?: string
 }
 
 /** Runs the CLI entrypoint for the resumable legacy comment migration. */
@@ -130,13 +142,12 @@ async function main() {
     readEnvironment('AWS_ENDPOINT_URL')
   const region = readEnvironment('AWS_REGION') ?? readEnvironment('AWS_DEFAULT_REGION') ?? 'us-east-1'
   const tables = resolveTableNames(endpoint)
-  const account = await resolveAccountId(endpoint, region)
-  const operatorId = resolveOperatorId(endpoint)
+  const identity = await resolveBackfillIdentity(endpoint, region)
   const configurationHash = createDigest(JSON.stringify({
     endpoint: endpoint ?? 'aws-default',
     region,
     profile: readEnvironment('AWS_PROFILE') ?? 'default-provider-chain',
-    account,
+    account: identity.accountId,
     tables,
     requestedWorkspaceIds: options.workspaceIds,
     migration: 'team-issue-comments-v1',
@@ -161,8 +172,9 @@ async function main() {
     tables.source,
   )
   const runContext: BackfillRunContext = {
-    operatorId,
-    accountId: account,
+    operatorId: identity.operatorId,
+    ...(identity.operatorLabel ? { operatorLabel: identity.operatorLabel } : {}),
+    accountId: identity.accountId,
     correlationId: randomUUID(),
     configurationHash,
   }
@@ -274,9 +286,12 @@ Options:
   --help, -h               Show this help.
 
 Required in AWS environments:
-  MUKUROJI_BACKFILL_OPERATOR_ID,
   TEAM_ISSUE_EVENTS_TABLE_NAME, COLLABORATION_TABLE_NAME, TEAM_ISSUES_TABLE_NAME,
   AUDIT_EVENTS_TABLE_NAME
+
+MUKUROJI_BACKFILL_OPERATOR_ID is an optional operator label. In AWS, the audit
+operator identity is always taken from the authenticated STS caller ARN. Local
+runs use the local:backfill audit sentinel.
 
 AWS_ACCOUNT_ID is optional and, when supplied, is checked against the account
 returned by STS GetCallerIdentity. The checkpoint and audit principal use the
@@ -319,29 +334,56 @@ function resolveTableNames(endpoint: string | undefined): TableNames {
   }
 }
 
-/** Resolves the authenticated account binding used to reject a checkpoint from another AWS account.
+/** Resolves the authenticated account and operator identity for one backfill run.
+ *
+ * @param endpoint - Configured DynamoDB endpoint, if any.
+ * @param region - AWS region used for the STS identity lookup.
+ * @returns The authenticated account, caller ARN or local sentinel, and optional operator label.
+ */
+export async function resolveBackfillIdentity(
+  endpoint: string | undefined,
+  region: string,
+): Promise<BackfillIdentity> {
+  const configured = readEnvironment('AWS_ACCOUNT_ID')
+  const operatorLabel = readEnvironment('MUKUROJI_BACKFILL_OPERATOR_ID')
+  if (endpoint !== undefined && isLocalEndpoint(endpoint)) {
+    return {
+      accountId: configured ? requireAwsAccountId(configured) : 'local-account',
+      operatorId: 'local:backfill',
+      ...(operatorLabel
+        ? { operatorLabel: requireText(operatorLabel, 'MUKUROJI_BACKFILL_OPERATOR_ID') }
+        : {}),
+    }
+  }
+
+  const sts = new STSClient({ region })
+  try {
+    const identity = await sts.send(new GetCallerIdentityCommand({}))
+    const accountId = requireAwsAccountId(identity.Account)
+    if (configured && requireAwsAccountId(configured) !== accountId) {
+      throw new Error('AWS_ACCOUNT_ID does not match the authenticated AWS account.')
+    }
+    const operatorId = requireText(identity.Arn ?? '', 'STS caller ARN')
+    return {
+      accountId,
+      operatorId,
+      ...(operatorLabel
+        ? { operatorLabel: requireText(operatorLabel, 'MUKUROJI_BACKFILL_OPERATOR_ID') }
+        : {}),
+    }
+  } finally {
+    sts.destroy()
+  }
+}
+
+/** Resolves only the authenticated account for callers that need the account binding.
  *
  * @param endpoint - Configured DynamoDB endpoint, if any.
  * @param region - AWS region used for the STS identity lookup.
  * @returns The authenticated AWS account or a local-only sentinel.
  */
 export async function resolveAccountId(endpoint: string | undefined, region: string) {
-  const configured = readEnvironment('AWS_ACCOUNT_ID')
-  if (endpoint !== undefined && isLocalEndpoint(endpoint)) {
-    return configured ? requireAwsAccountId(configured) : 'local-account'
-  }
-
-  const sts = new STSClient({ region })
-  try {
-    const identity = await sts.send(new GetCallerIdentityCommand({}))
-    const authenticated = requireAwsAccountId(identity.Account)
-    if (configured && requireAwsAccountId(configured) !== authenticated) {
-      throw new Error('AWS_ACCOUNT_ID does not match the authenticated AWS account.')
-    }
-    return authenticated
-  } finally {
-    sts.destroy()
-  }
+  return (await resolveBackfillIdentity(endpoint, region)).accountId
 }
 
 /** Validates an AWS account identifier obtained from configuration or STS. */
@@ -350,18 +392,6 @@ function requireAwsAccountId(value: string | undefined) {
     throw new Error('AWS account identity must be a 12-digit account ID.')
   }
   return value
-}
-
-/** Resolves the authenticated operator identity stored with the completion audit.
- *
- * @param endpoint - Configured DynamoDB endpoint, if any.
- * @returns The explicit operator identity or a local-only sentinel.
- */
-function resolveOperatorId(endpoint: string | undefined) {
-  const configured = readEnvironment('MUKUROJI_BACKFILL_OPERATOR_ID')
-  if (configured) return requireText(configured, 'MUKUROJI_BACKFILL_OPERATOR_ID')
-  if (endpoint !== undefined && isLocalEndpoint(endpoint)) return 'local:backfill'
-  throw new Error('MUKUROJI_BACKFILL_OPERATOR_ID is required in AWS environments.')
 }
 
 /** Resolves one table name while allowing defaults only for local DynamoDB.
@@ -562,7 +592,7 @@ async function writeBackfillAuditEvents(
     const context = createMutationAuditContext({
       workspaceId,
       actor: {
-        id: `system:backfill:${runContext.accountId}`,
+        id: `system:backfill:${runContext.operatorId}`,
         kind: 'system',
         displayName: 'system:backfill',
       },
@@ -607,6 +637,7 @@ async function writeBackfillAuditEvents(
       metadata: {
         migration: 'team-issue-comments-v1',
         operatorId: runContext.operatorId,
+        ...(runContext.operatorLabel ? { operatorLabel: runContext.operatorLabel } : {}),
         accountId: runContext.accountId,
         scope,
         requestedWorkspaceIds,

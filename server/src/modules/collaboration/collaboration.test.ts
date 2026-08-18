@@ -1,7 +1,11 @@
 import { expect, test } from 'bun:test'
 import type { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
-import type { CuratedContextSource } from '@mukuroji/contracts'
+import {
+  WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+  WORK_ITEM_SCHEMA_VERSION,
+  type CuratedContextSource,
+} from '@mukuroji/contracts'
 import { createMutationAuditContext } from '../audit/audit'
 import {
   type CollaborationAuthorizationConditionCheck,
@@ -54,6 +58,47 @@ function isTestRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+/** Creates a canonical parent Work Item row for backfill transport tests. */
+function createTestCanonicalParentWorkItem(directoryTeamId: string, issueId: string) {
+  const teamSeparator = directoryTeamId.indexOf('#team#')
+  if (teamSeparator < 1) {
+    throw new Error(`Invalid test directory/team key: ${directoryTeamId}`)
+  }
+  const directoryId = directoryTeamId.slice(0, teamSeparator)
+  const teamId = directoryTeamId.slice(teamSeparator + '#team#'.length)
+  const dueDate = '2026-08-18'
+  return {
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+    revision: 1,
+    workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+    directoryId,
+    directoryTeamId,
+    teamId,
+    issueId,
+    sortOrder: 0,
+    title: 'Backfill parent Work Item',
+    assigneeUserId: 'author@example.com',
+    creatorMemberKey: 'author@example.com',
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate,
+    schedule: {
+      mode: 'due-date',
+      dueDate,
+      calendarPolicy: {
+        timeZone: 'UTC',
+        workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+        holidays: [],
+      },
+    },
+    priority: 'medium',
+    createdAt: '2026-08-01T00:00:00.000Z',
+    updatedAt: '2026-08-01T00:00:00.000Z',
+  }
+}
+
 /**
  * Creates a DynamoDB transaction cancellation used by optimistic-lock tests.
  *
@@ -97,6 +142,13 @@ function createCollaborationMemory(
 
   const client = createClient(async (command) => {
     const input = readCommandInput(command)
+    if (isTestRecord(input.Key) &&
+        typeof input.Key.directoryTeamId === 'string' &&
+        typeof input.Key.issueId === 'string') {
+      return {
+        Item: createTestCanonicalParentWorkItem(input.Key.directoryTeamId, input.Key.issueId),
+      }
+    }
     if (isTestRecord(input.Key) &&
         typeof input.Key.entityKey === 'string' &&
         typeof input.Key.recordKey === 'string') {
@@ -311,6 +363,84 @@ test('writes the comment backfill completion marker through a transaction', asyn
   await expect(
     memory.client.isTeamIssueCommentBackfillComplete('workspace#one'),
   ).resolves.toBe(true)
+})
+
+test('rejects backfill validation when the parent Work Item is malformed', async () => {
+  const directoryTeamId = 'workspace#one#team#team-a'
+  const client = createClient(async (command) => {
+    const input = readCommandInput(command)
+    if (isTestRecord(input.Key) && input.Key.directoryTeamId === directoryTeamId) {
+      return {
+        Item: {
+          directoryTeamId,
+          issueId: 'issue-1',
+          title: 'Malformed parent',
+        },
+      }
+    }
+    return {}
+  })
+
+  await expect(client.validateBackfillTeamIssueComment({
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'issue-1',
+    entityKey: createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1'),
+    commentId: 'legacy-comment-1',
+    actorMemberKey: 'author@example.com',
+    bodyMarkdown: 'Historical comment',
+    occurredAt: '2026-08-18T00:00:00.000Z',
+  })).rejects.toMatchObject({
+    status: 409,
+    code: 'CollaborationBackfillConflict',
+  })
+})
+
+test('validates and fences the canonical parent Work Item during backfill', async () => {
+  const commands: Array<Record<string, unknown>> = []
+  const directoryTeamId = 'workspace#one#team#team-a'
+  const client = createClient(async (command) => {
+    const input = readCommandInput(command)
+    commands.push(input)
+    if (isTestRecord(input.Key) && input.Key.directoryTeamId === directoryTeamId) {
+      return {
+        Item: createTestCanonicalParentWorkItem(directoryTeamId, 'issue-1'),
+      }
+    }
+    return {}
+  })
+
+  await client.backfillTeamIssueComment({
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'issue-1',
+    entityKey: createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1'),
+    commentId: 'legacy-comment-1',
+    actorMemberKey: 'author@example.com',
+    bodyMarkdown: 'Historical comment',
+    occurredAt: '2026-08-18T00:00:00.000Z',
+  })
+
+  const transaction = commands.find((command) => Array.isArray(command.TransactItems))
+  if (!transaction || !Array.isArray(transaction.TransactItems)) {
+    throw new Error('Backfill transaction was not captured.')
+  }
+  expect(transaction.TransactItems[0]).toMatchObject({
+    ConditionCheck: {
+      TableName: 'issue-table',
+      Key: { directoryTeamId, issueId: 'issue-1' },
+      ConditionExpression: expect.stringContaining('attribute_exists(schedule)'),
+      ExpressionAttributeValues: {
+        ':schemaVersion': WORK_ITEM_SCHEMA_VERSION,
+        ':revision': 1,
+        ':workflowSchemaVersion': WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+        ':directoryId': 'workspace#one',
+        ':directoryTeamId': directoryTeamId,
+        ':teamId': 'team-a',
+        ':issueId': 'issue-1',
+      },
+    },
+  })
 })
 
 test('rejects a mismatched discussion projection during an idempotent backfill repair', async () => {

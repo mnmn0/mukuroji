@@ -14,6 +14,8 @@ import {
 } from '@aws-sdk/lib-dynamodb'
 import {
   COLLABORATION_CONTEXT_SCHEMA_VERSION,
+  WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+  WORK_ITEM_SCHEMA_VERSION,
   type AcceptedResolution,
   type AcceptedResolutionPage,
   type CreateCuratedContextItemRequest,
@@ -45,6 +47,10 @@ import {
   getConfiguredAuditTableName,
   type MutationAuditContext,
 } from '../audit'
+import {
+  isCanonicalWorkItemRecord,
+  type CanonicalWorkItemRecord,
+} from '../work-items'
 
 /** Comment 本文に保存できる文字数です。 */
 export const COLLABORATION_COMMENT_MAX_LENGTH = 20_000
@@ -2817,21 +2823,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
   ): Promise<void> {
     await this.ensureLocalTable()
     const normalizedInput = normalizeBackfillCollaborationCommentInput(input)
-    const response = await this.documentClient.send(new GetCommand({
-      TableName: this.parentIssueTableName,
-      Key: {
-        directoryTeamId: `${normalizedInput.workspaceId}#team#${normalizedInput.teamId}`,
-        issueId: normalizedInput.issueId,
-      },
-      ConsistentRead: true,
-    }))
-    if (response.Item === undefined) {
-      throw new CollaborationError(
-        409,
-        'CollaborationBackfillConflict',
-        'The parent Work Item does not exist.',
-      )
-    }
+    await this.assertCanonicalBackfillParent(normalizedInput)
   }
 
   /**
@@ -2845,6 +2837,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
   ): Promise<CollaborationComment> {
     await this.ensureLocalTable()
     const normalizedInput = normalizeBackfillCollaborationCommentInput(input)
+    const parent = await this.assertCanonicalBackfillParent(normalizedInput)
     const commentId = normalizedInput.commentId
     const actorMemberKey = normalizedInput.actorMemberKey
     const bodyMarkdown = normalizedInput.bodyMarkdown
@@ -2890,7 +2883,11 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
     try {
       await this.documentClient.send(new TransactWriteCommand({
         TransactItems: [
-          parentIssueExistsCondition(this.parentIssueTableName, normalizedInput),
+          parentIssueBackfillCondition(
+            this.parentIssueTableName,
+            normalizedInput,
+            parent.revision,
+          ),
           {
             Put: {
               TableName: this.tableName,
@@ -2952,6 +2949,28 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
         { cause: error },
       )
     }
+  }
+
+  /** Reads and validates the canonical parent before a backfill is planned or written. */
+  private async assertCanonicalBackfillParent(
+    input: BackfillCollaborationCommentInput,
+  ): Promise<CanonicalWorkItemRecord> {
+    const response = await this.documentClient.send(new GetCommand({
+      TableName: this.parentIssueTableName,
+      Key: {
+        directoryTeamId: `${input.workspaceId}#team#${input.teamId}`,
+        issueId: input.issueId,
+      },
+      ConsistentRead: true,
+    }))
+    if (!isCanonicalBackfillParent(response.Item, input)) {
+      throw new CollaborationError(
+        409,
+        'CollaborationBackfillConflict',
+        'The parent Work Item is missing or invalid.',
+      )
+    }
+    return response.Item
   }
 
   /** Repairs the discussion projection when a backfill comment already exists. */
@@ -5846,30 +5865,85 @@ function parentIssueCondition(tableName: string, input: WorkItemCollaborationSco
 }
 
 /**
- * Builds the weaker parent condition used while copying a legacy comment.
+ * Builds the canonical parent condition used while copying a legacy comment.
  *
  * Legacy events do not retain the assigned-project snapshot required by a live
- * collaboration mutation, so migration only fences the existence of the owner
- * Work Item and never invents an assignment value.
+ * collaboration mutation, so migration fences the immutable Work Item identity
+ * and schema plus the observed revision while leaving mutable assignment values
+ * unconstrained.
  *
  * @param tableName - Canonical Work Item table name.
  * @param input - Legacy comment scope.
+ * @param parentRevision - Revision observed by the preceding canonical read.
  * @returns A DynamoDB condition check for the parent Work Item.
  */
-function parentIssueExistsCondition(
+function parentIssueBackfillCondition(
   tableName: string,
   input: WorkItemCollaborationScope,
+  parentRevision: number,
 ) {
+  const directoryTeamId = `${input.workspaceId}#team#${input.teamId}`
+  const requiredAttributes = [
+    'schemaVersion',
+    'revision',
+    'workflowSchemaVersion',
+    'directoryId',
+    'directoryTeamId',
+    'teamId',
+    'issueId',
+    'sortOrder',
+    'title',
+    'assigneeUserId',
+    'creatorMemberKey',
+    'workflowStatusId',
+    'statusCategory',
+    'customFieldValues',
+    'relationIds',
+    'dueDate',
+    'schedule',
+    'priority',
+    'createdAt',
+    'updatedAt',
+  ]
   return {
     ConditionCheck: {
       TableName: tableName,
       Key: {
-        directoryTeamId: `${input.workspaceId}#team#${input.teamId}`,
+        directoryTeamId,
         issueId: input.issueId,
       },
-      ConditionExpression: 'attribute_exists(directoryTeamId) AND attribute_exists(issueId)',
+      ConditionExpression: [
+        ...requiredAttributes.map((attribute) => `attribute_exists(${attribute})`),
+        'schemaVersion = :schemaVersion',
+        'revision = :revision',
+        'workflowSchemaVersion = :workflowSchemaVersion',
+        'directoryId = :directoryId',
+        'directoryTeamId = :directoryTeamId',
+        'teamId = :teamId',
+        'issueId = :issueId',
+      ].join(' AND '),
+      ExpressionAttributeValues: {
+        ':schemaVersion': WORK_ITEM_SCHEMA_VERSION,
+        ':revision': parentRevision,
+        ':workflowSchemaVersion': WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+        ':directoryId': input.workspaceId,
+        ':directoryTeamId': directoryTeamId,
+        ':teamId': input.teamId,
+        ':issueId': input.issueId,
+      },
     },
   }
+}
+
+/** Checks that a parent row is the canonical Work Item for the requested scope. */
+function isCanonicalBackfillParent(
+  value: unknown,
+  input: Pick<WorkItemCollaborationScope, 'workspaceId' | 'teamId' | 'issueId'>,
+): value is CanonicalWorkItemRecord {
+  return isCanonicalWorkItemRecord(value) &&
+    value.directoryId === input.workspaceId &&
+    value.teamId === input.teamId &&
+    value.issueId === input.issueId
 }
 
 /** Validates the immutable timestamp copied from a legacy event. */
