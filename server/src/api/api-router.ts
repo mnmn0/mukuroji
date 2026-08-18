@@ -8883,7 +8883,10 @@ routeApp.get('/api/teams/:teamId/issues/:issueId', async (c) => {
       bytesRead: 2,
       pagesRead: 0,
     }
-    const [collaborationComments, resolvedConfiguration, relationPage, commentBackfillComplete] = await Promise.all([
+    const commentBackfillComplete = await workItemDependencies.collaboration.isTeamIssueCommentBackfillComplete(
+      principal.directoryId,
+    )
+    const [collaborationComments, resolvedConfiguration, relationPage] = await Promise.all([
       readAllCollaborationThreadComments(workItemDependencies.collaboration, {
         entityKey,
         viewerMemberKey: principal.userKey,
@@ -8894,7 +8897,6 @@ routeApp.get('/api/teams/:teamId/issues/:issueId', async (c) => {
       }, collaborationReadBudget),
       workItemDependencies.workItemConfigurations.getTeamConfiguration(principal.directoryId, teamId),
       workItemDependencies.workItemConfigurations.listRelations(principal.directoryId, teamId, issueId),
-      workItemDependencies.collaboration.isTeamIssueCommentBackfillComplete(principal.directoryId),
     ])
     const allCollaborationComments = collaborationComments.sort(
       (left, right) => left.createdAt.localeCompare(right.createdAt),
@@ -8906,12 +8908,13 @@ routeApp.get('/api/teams/:teamId/issues/:issueId', async (c) => {
       relationPage.relations,
     )
 
+    const canonicalCommentIds = new Set(allCollaborationComments.map((comment) => comment.id))
     const canonicalComments = allCollaborationComments
       .filter((comment) => !comment.deletedAt)
       .map(toTeamIssueDetailCommentResponse)
     const legacyComments = commentBackfillComplete
       ? []
-      : detail.comments ?? []
+      : (detail.comments ?? []).filter((comment) => !canonicalCommentIds.has(comment.id))
     const hydratedDetail = await hydrateTeamIssueDetailResponse(
       {
         ...detail,

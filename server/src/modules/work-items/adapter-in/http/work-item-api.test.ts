@@ -943,10 +943,16 @@ test('loads team issue detail and creates comments after team access is confirme
   const calls = configureFakeProjectClients(true)
   const collaborationCreates: Parameters<CollaborationClient['createComment']>[0][] = []
   const collaborationComments: Awaited<ReturnType<CollaborationClient['createComment']>>[] = []
+  const collaborationReadOrder: string[] = []
   setTestAppDependencies({
     collaboration: createCollaborationStub({
+      async isTeamIssueCommentBackfillComplete() {
+        collaborationReadOrder.push('marker')
+        return true
+      },
       /** Returns canonical root comments and no reply preview for this detail test. */
       async getThread(input) {
+        collaborationReadOrder.push('comments')
         return {
           comments: input.rootCommentId ? [] : collaborationComments,
           watch: {
@@ -987,6 +993,7 @@ test('loads team issue detail and creates comments after team access is confirme
   })
 
   expect(detailResponse.status).toBe(200)
+  expect(collaborationReadOrder.slice(0, 2)).toEqual(['marker', 'comments'])
   expect(await detailResponse.json()).toMatchObject({
     issue: {
       id: 'onboarding-friction',
@@ -1105,6 +1112,71 @@ test('loads team issue detail and creates comments after team access is confirme
       { id: 'comment-2', bodyMarkdown: '追加コメント' },
     ],
   })
+})
+
+test('does not rehydrate a deleted canonical comment from the legacy detail fallback', async () => {
+  configureFakeProjectClients(true)
+  const defaultTeamIssues = getTestAppDependencies().workItems.teamIssues
+  setTestAppDependencies({
+    collaboration: createCollaborationStub({
+      async isTeamIssueCommentBackfillComplete() {
+        return false
+      },
+      async getThread() {
+        return {
+          comments: [{
+            id: 'deleted-comment',
+            rootCommentId: 'deleted-comment',
+            authorMemberKey: 'author@example.com',
+            bodyMarkdown: '',
+            version: 2,
+            mentionMemberKeys: [],
+            createdAt: '2026-07-12T00:00:00.000Z',
+            updatedAt: '2026-07-12T01:00:00.000Z',
+            deletedAt: '2026-07-12T01:00:00.000Z',
+            acceptedResolutions: [],
+            reactions: [],
+          }],
+          watch: {
+            subscribed: false,
+            explicit: false,
+            automatic: false,
+            reasons: [],
+            watcherCount: 0,
+          },
+          presence: [],
+        }
+      },
+    }),
+    teamIssues: {
+      ...defaultTeamIssues,
+      async getTeamIssueDetail(directoryId, teamId, issueId, options) {
+        const detail = await defaultTeamIssues.getTeamIssueDetail(
+          directoryId,
+          teamId,
+          issueId,
+          options,
+        )
+        return {
+          ...detail,
+          comments: [{
+            id: 'deleted-comment',
+            actorUserId: 'author@example.com',
+            body: 'Legacy body must stay hidden.',
+            createdAt: '2026-07-12T00:00:00.000Z',
+          }],
+        }
+      },
+    },
+  })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+
+  expect(response.status).toBe(200)
+  expect((await response.json()).comments).toEqual([])
 })
 
 /** Verifies that team issue detail loads every canonical root and reply page. */

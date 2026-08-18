@@ -392,6 +392,27 @@ test('backfills V2 discussion projections and upgrades an old legacy projection'
   expect(memory.rows.get(`${entityKey}\0${legacyRecordKey}`)?.discussionIndexVersion).toBe(2)
 })
 
+test('preserves legacy comment bodies longer than the current composer limit', async () => {
+  const memory = createCollaborationMemory()
+  const bodyMarkdown = 'Historical comment. '.repeat(1_100).trim()
+  expect(bodyMarkdown.length).toBeGreaterThan(20_000)
+
+  await memory.client.backfillTeamIssueComment({
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'issue-1',
+    entityKey: createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1'),
+    commentId: 'long-legacy-comment',
+    actorMemberKey: 'author@example.com',
+    bodyMarkdown,
+    occurredAt: '2026-08-18T00:00:00.000Z',
+  })
+
+  expect(memory.rows.get(
+    'workspace#one#work-item#team/team-a/issue/issue-1\0COMMENT#long-legacy-comment',
+  )?.bodyMarkdown).toBe(bodyMarkdown)
+})
+
 test('rejects an existing backfill comment whose timestamps do not match the source', async () => {
   const memory = createCollaborationMemory()
   const input = {

@@ -5896,7 +5896,7 @@ function normalizeBackfillCollaborationCommentInput(
     ...input,
     commentId: requireIdentifier(input.commentId, 'Comment ID'),
     actorMemberKey: normalizeMemberKey(input.actorMemberKey),
-    bodyMarkdown: normalizeCommentBody(input.bodyMarkdown),
+    bodyMarkdown: normalizeBackfillCommentBody(input.bodyMarkdown),
     occurredAt: normalizeBackfillTimestamp(input.occurredAt),
   }
 }
@@ -6598,7 +6598,14 @@ function dedupeNotificationCandidates(
   )
 }
 
-function normalizeCommentBody(value: string) {
+/**
+ * Normalizes a comment body for a user-facing Collaboration mutation.
+ *
+ * @param value - Untrusted comment body.
+ * @param maxLength - Maximum normalized body length, or null for migration input.
+ * @returns A trimmed, newline-normalized comment body.
+ */
+function normalizeCommentBody(value: string, maxLength: number | null = COLLABORATION_COMMENT_MAX_LENGTH) {
   if (typeof value !== 'string') {
     throw new CollaborationError(400, 'InvalidCommentBody', 'Comment body must be text.')
   }
@@ -6608,7 +6615,7 @@ function normalizeCommentBody(value: string) {
     throw new CollaborationError(400, 'InvalidCommentBody', 'Comment body is required.')
   }
 
-  if (normalized.length > COLLABORATION_COMMENT_MAX_LENGTH) {
+  if (maxLength !== null && normalized.length > maxLength) {
     throw new CollaborationError(400, 'InvalidCommentBody', 'Comment body is too long.')
   }
 
@@ -6617,6 +6624,16 @@ function normalizeCommentBody(value: string) {
   }
 
   return normalized
+}
+
+/**
+ * Normalizes a historical comment body without applying the current composer limit.
+ *
+ * @param value - Legacy comment body copied during migration.
+ * @returns A trimmed, newline-normalized body that preserves historically accepted length.
+ */
+function normalizeBackfillCommentBody(value: string) {
+  return normalizeCommentBody(value, null)
 }
 
 /**
