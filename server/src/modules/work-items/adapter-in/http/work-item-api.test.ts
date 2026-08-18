@@ -1823,6 +1823,92 @@ test('marks legacy collaboration fallback comments as read-only legacy responses
   })
 })
 
+test('keeps legacy event cursors out of the canonical collaboration reader', async () => {
+  configureFakeProjectClients(true)
+  const defaultTeamIssues = getTestAppDependencies().workItems.teamIssues
+  const threadInputs: Parameters<CollaborationClient['getThread']>[0][] = []
+  const detailInputs: Array<Record<string, unknown>> = []
+  setTestAppDependencies({
+    collaboration: createCollaborationStub({
+      async isTeamIssueCommentBackfillComplete() {
+        return false
+      },
+      async getThread(input) {
+        threadInputs.push(input)
+        return {
+          comments: [{
+            id: 'canonical-already-seen',
+            rootCommentId: 'canonical-already-seen',
+            authorMemberKey: 'author@example.com',
+            bodyMarkdown: 'Canonical comment from the previous page.',
+            version: 1,
+            mentionMemberKeys: [],
+            createdAt: '2026-07-11T00:00:00.000Z',
+            updatedAt: '2026-07-11T00:00:00.000Z',
+            acceptedResolutions: [],
+            reactions: [],
+          }],
+          watch: {
+            subscribed: false,
+            explicit: false,
+            automatic: false,
+            reasons: [],
+            watcherCount: 0,
+          },
+          presence: [],
+        }
+      },
+      async getCommentSnapshot() {
+        return undefined
+      },
+    }),
+    teamIssues: {
+      ...defaultTeamIssues,
+      async getTeamIssueDetail(directoryId, teamId, issueId, options) {
+        detailInputs.push(options ?? {})
+        const detail = await defaultTeamIssues.getTeamIssueDetail(
+          directoryId,
+          teamId,
+          issueId,
+          options,
+        )
+        return {
+          ...detail,
+          comments: [{
+            id: 'legacy-next-page-comment',
+            actorUserId: 'departed@example.com',
+            body: 'Legacy next page comment',
+            createdAt: '2026-07-12T00:00:00.000Z',
+          }],
+        }
+      },
+    },
+  })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction/collaboration?cursor=legacy.older-event',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+
+  expect(response.status).toBe(200)
+  const responseBody = await response.json()
+  expect(responseBody).toMatchObject({
+    comments: [{ id: 'legacy-next-page-comment', source: 'legacy' }],
+  })
+  expect(responseBody.comments).toHaveLength(1)
+  expect(threadInputs[0]?.cursor).toBeUndefined()
+  expect(detailInputs).toEqual([
+    { consistentIssueRead: true, eventLimit: 0 },
+    {
+      consistentIssueRead: true,
+      eventLimit: 50,
+      newestEventsFirst: true,
+      eventType: 'commented',
+      eventCursor: 'older-event',
+    },
+  ])
+})
+
 test('serves one requested reply page without refetching reply roots', async () => {
   configureFakeProjectClients(true)
   const threadInputs: Parameters<CollaborationClient['getThread']>[0][] = []

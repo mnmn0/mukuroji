@@ -9291,26 +9291,37 @@ routeApp.get('/api/teams/:teamId/issues/:issueId/collaboration', async (c) => {
       entityKey,
       viewerMemberKey: principal.userKey,
       projectEntityKey,
-      cursor: requestedCursor,
+      // The legacy.<event-cursor> namespace belongs to the Team Issue event
+      // fallback below, not to the Collaboration discussion reader.
+      cursor: isLegacyPage ? undefined : requestedCursor,
       legacyCursorCompatible: true,
       limit: limit === undefined ? 10 : Math.min(limit, 20),
     })
-    const replyPages = await Promise.all(
-      roots.comments.map((root) => workItemDependencies.collaboration.getThread({
-        entityKey,
-        viewerMemberKey: principal.userKey,
-        projectEntityKey,
-        rootCommentId: root.id,
-        legacyCursorCompatible: true,
-        limit: 5,
-        includeScopeState: false,
-      })),
-    )
-    const comments = roots.comments.flatMap((root, index) => [
-      root,
-      ...[...(replyPages[index]?.comments ?? [])].reverse(),
+    const replyPages = isLegacyPage
+      ? []
+      : await Promise.all(
+          roots.comments.map((root) => workItemDependencies.collaboration.getThread({
+            entityKey,
+            viewerMemberKey: principal.userKey,
+            projectEntityKey,
+            rootCommentId: root.id,
+            legacyCursorCompatible: true,
+            limit: 5,
+            includeScopeState: false,
+          })),
+        )
+    const comments = isLegacyPage
+      ? []
+      : roots.comments.flatMap((root, index) => [
+          root,
+          ...[...(replyPages[index]?.comments ?? [])].reverse(),
+        ])
+    // Keep canonical IDs from the probe page for legacy deduplication even
+    // though that page has already been consumed before the legacy cursor.
+    const storedCommentIds = new Set([
+      ...roots.comments.map((comment) => comment.id),
+      ...comments.map((comment) => comment.id),
     ])
-    const storedCommentIds = new Set(comments.map((comment) => comment.id))
     const legacyDetail = !commentBackfillComplete && (isLegacyPage || !roots.nextCursor)
       ? await workItemDependencies.teamIssues.getTeamIssueDetail(
           principal.directoryId,
