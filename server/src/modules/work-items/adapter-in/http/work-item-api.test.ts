@@ -1042,7 +1042,10 @@ test('loads team issue detail and creates comments after team access is confirme
       directoryId: 'user#demo@example.com',
       teamId: 'core-team',
       issueId: 'onboarding-friction',
-      readOptions: { consistentIssueRead: true },
+      readOptions: {
+        consistentIssueRead: true,
+        eventLimit: 50,
+      },
     },
     {
       directoryId: 'user#demo@example.com',
@@ -1665,7 +1668,7 @@ test('omits relations whose target Project is outside the viewer access scope', 
       directoryId: 'user#demo@example.com',
       teamId: 'core-team',
       issueId: 'work-item-1',
-      readOptions: { consistentIssueRead: true },
+      readOptions: { consistentIssueRead: true, eventLimit: 50 },
     },
     {
       directoryId: 'user#demo@example.com',
@@ -1762,7 +1765,7 @@ test('fails closed when a persisted relation target Work Item is missing', async
   expect(calls.issueDetails.map(({ issueId, readOptions }) => ({ issueId, readOptions }))).toEqual([
     {
       issueId: 'work-item-1',
-      readOptions: { consistentIssueRead: true },
+      readOptions: { consistentIssueRead: true, eventLimit: 50 },
     },
     {
       issueId: 'missing-target',
@@ -1934,6 +1937,79 @@ test('marks legacy collaboration fallback comments as read-only legacy responses
       },
     }],
   })
+})
+
+test('does not overfill a canonical page with legacy comments', async () => {
+  configureFakeProjectClients(true)
+  const defaultTeamIssues = getTestAppDependencies().workItems.teamIssues
+  const detailInputs: Array<Record<string, unknown>> = []
+  setTestAppDependencies({
+    collaboration: createCollaborationStub({
+      async isTeamIssueCommentBackfillComplete() {
+        return false
+      },
+      async getThread(input) {
+        return {
+          comments: input.rootCommentId
+            ? []
+            : [{
+                id: 'canonical-root',
+                rootCommentId: 'canonical-root',
+                authorMemberKey: 'author@example.com',
+                bodyMarkdown: 'Canonical root',
+                version: 1,
+                mentionMemberKeys: [],
+                createdAt: '2026-07-12T00:00:00.000Z',
+                updatedAt: '2026-07-12T00:00:00.000Z',
+                acceptedResolutions: [],
+                reactions: [],
+              }],
+          watch: {
+            subscribed: false,
+            explicit: false,
+            automatic: false,
+            reasons: [],
+            watcherCount: 0,
+          },
+          presence: [],
+        }
+      },
+    }),
+    teamIssues: {
+      ...defaultTeamIssues,
+      async getTeamIssueDetail(directoryId, teamId, issueId, options) {
+        detailInputs.push(options ?? {})
+        const detail = await defaultTeamIssues.getTeamIssueDetail(
+          directoryId,
+          teamId,
+          issueId,
+          options,
+        )
+        return options?.eventLimit === 0
+          ? detail
+          : {
+              ...detail,
+              comments: [{
+                id: 'legacy-comment',
+                actorUserId: 'departed@example.com',
+                body: 'Legacy comment',
+                createdAt: '2026-07-12T00:01:00.000Z',
+              }],
+            }
+      },
+    },
+  })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction/collaboration?limit=1',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+
+  expect(response.status).toBe(200)
+  expect((await response.json()).comments).toEqual([
+    expect.objectContaining({ id: 'canonical-root' }),
+  ])
+  expect(detailInputs).toEqual([{ consistentIssueRead: true, eventLimit: 0 }])
 })
 
 test('keeps legacy event cursors out of the canonical collaboration reader', async () => {

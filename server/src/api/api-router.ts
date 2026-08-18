@@ -8870,7 +8870,10 @@ routeApp.get('/api/teams/:teamId/issues/:issueId', async (c) => {
       principal.directoryId,
       teamId,
       issueId,
-      { consistentIssueRead: true },
+      {
+        consistentIssueRead: true,
+        eventLimit: LEGACY_COLLABORATION_EVENT_PREVIEW_LIMIT,
+      },
     )
     requireAssignedProjectPermission(principal, context, detail.issue.assignedProjectId, 'viewer')
     const entityKey = createWorkItemCollaborationEntityKey(principal.directoryId, teamId, issueId)
@@ -9325,16 +9328,22 @@ routeApp.get('/api/teams/:teamId/issues/:issueId/collaboration', async (c) => {
       ...roots.comments.map((comment) => comment.id),
       ...comments.map((comment) => comment.id),
     ])
-    const legacyDetail = !commentBackfillComplete && (isLegacyPage || !roots.nextCursor)
+    const legacyEventLimit = limit === undefined
+      ? LEGACY_COLLABORATION_EVENT_PREVIEW_LIMIT
+      : Math.min(
+          Math.max(limit - (isLegacyPage ? 0 : roots.comments.length), 0),
+          LEGACY_COLLABORATION_EVENT_PREVIEW_LIMIT,
+        )
+    const legacyDetail = !commentBackfillComplete &&
+      legacyEventLimit > 0 &&
+      (isLegacyPage || !roots.nextCursor)
       ? await workItemDependencies.teamIssues.getTeamIssueDetail(
           principal.directoryId,
           teamId,
           issueId,
           {
             consistentIssueRead: true,
-            eventLimit: limit === undefined
-              ? LEGACY_COLLABORATION_EVENT_PREVIEW_LIMIT
-              : Math.min(Math.max(limit, 1), LEGACY_COLLABORATION_EVENT_PREVIEW_LIMIT),
+            eventLimit: legacyEventLimit,
             newestEventsFirst: true,
             eventType: 'commented',
             eventCursor: legacyEventCursor,

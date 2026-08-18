@@ -619,6 +619,69 @@ test('DynamoDB Team Work Item client reads a matching pre-cutover Automation com
   }])
 })
 
+test('DynamoDB Team Work Item detail rejects a commented event without a body', async () => {
+  const canonicalWorkItem = {
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+    revision: 1,
+    directoryId: 'workspace-1',
+    directoryTeamId: 'workspace-1#team#core-team',
+    directoryProjectId: 'workspace-1#project#refero',
+    teamId: 'core-team',
+    assignedProjectId: 'refero',
+    issueId: 'onboarding-friction',
+    sortOrder: 10,
+    title: 'Work Item',
+    assigneeUserId: 'sato@example.com',
+    creatorMemberKey: 'demo@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026-06-03',
+    schedule: createDueDateSchedule('2026-06-03'),
+    priority: 'high',
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+  }
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      if (command.input.TableName === 'WorkItemsTable') {
+        return { Item: canonicalWorkItem }
+      }
+      return {
+        Items: [{
+          directoryId: 'workspace-1',
+          directoryTeamIssueId: 'workspace-1#team#core-team#issue#onboarding-friction',
+          teamId: 'core-team',
+          issueId: 'onboarding-friction',
+          eventId: 'malformed-comment',
+          eventType: 'commented',
+          actorUserId: 'sato@example.com',
+          summary: 'Malformed comment',
+          createdAt: '2026-07-12T01:00:00.000Z',
+        }],
+      }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  await expect(client.getTeamIssueDetail(
+    'workspace-1',
+    'core-team',
+    'onboarding-friction',
+  )).rejects.toMatchObject({
+    status: 503,
+    code: 'InvalidTeamIssue',
+  })
+})
+
 /** Verifies that pre-cutover replay transport failures use the Work Item error contract. */
 test('DynamoDB Team Work Item client classifies pre-cutover replay transport failures', async () => {
   const documentClient = {

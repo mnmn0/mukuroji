@@ -1,6 +1,7 @@
 import { GetCallerIdentityCommand, STSClient } from '@aws-sdk/client-sts'
 import { afterEach, expect, test } from 'bun:test'
 import {
+  parseArguments,
   resolveAccountId,
   resolveBackfillIdentity,
 } from './backfill-team-issue-comments'
@@ -40,6 +41,13 @@ test('recognizes all supported local DynamoDB endpoint hosts', () => {
   expect(isLocalDynamoDbEndpoint('http://floci:4566/path')).toBe(false)
   expect(isLocalDynamoDbEndpoint('http://floci:4566?service=dynamodb')).toBe(false)
   expect(isLocalDynamoDbEndpoint(undefined)).toBe(false)
+})
+
+test('rejects the environment-wide marker as an explicit workspace filter', () => {
+  expect(() => parseArguments([
+    '--workspace-id',
+    '__all-workspaces__',
+  ])).toThrow('reserved all-workspaces marker')
 })
 
 test('keeps the local audit sentinel separate from the optional operator label', async () => {

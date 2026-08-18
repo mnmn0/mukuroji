@@ -1906,7 +1906,7 @@ export class DynamoDbTeamIssuesClient {
       return {
         issue: toTeamIssueResponseItem(issue),
         comments: events
-          .filter((event) => event.eventType === 'commented' && event.body)
+          .filter((event) => event.eventType === 'commented')
           .map(toTeamIssueCommentResponseItem),
         activity: events.map(toTeamIssueActivityResponseItem),
         ...(triageContextSnapshots.length > 0 ? { triageContextSnapshots } : {}),
@@ -4026,7 +4026,8 @@ function isTeamIssueEventItem(value: unknown): value is TeamIssueEventItem {
     typeof value.eventId === 'string' &&
     isTeamIssueActivityType(value.eventType) &&
     typeof value.actorUserId === 'string' &&
-    (value.body === undefined || typeof value.body === 'string') &&
+    (value.eventType !== 'commented' ||
+      (typeof value.body === 'string' && value.body.trim().length > 0)) &&
     hasCanonicalTriageContextSnapshot(value.eventType, value.triageContextSnapshot) &&
     typeof value.summary === 'string' &&
     typeof value.createdAt === 'string'

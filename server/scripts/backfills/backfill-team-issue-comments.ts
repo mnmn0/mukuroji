@@ -213,7 +213,7 @@ async function main() {
  * @param args - Arguments excluding the Bun executable and script path.
  * @returns Validated migration options.
  */
-function parseArguments(args: string[]): BackfillOptions {
+export function parseArguments(args: string[]): BackfillOptions {
   const options: BackfillOptions = {
     dryRun: false,
     help: false,
@@ -245,7 +245,11 @@ function parseArguments(args: string[]): BackfillOptions {
     }
     if (argument === '--workspace-id' || argument.startsWith('--workspace-id=')) {
       const value = readOptionValue(argument, args[index + 1], '--workspace-id')
-      options.workspaceIds.push(requireText(value, '--workspace-id'))
+      const workspaceId = requireText(value, '--workspace-id')
+      if (workspaceId === TEAM_ISSUE_COMMENT_BACKFILL_ALL_WORKSPACES) {
+        throw new Error('--workspace-id cannot use the reserved all-workspaces marker.')
+      }
+      options.workspaceIds.push(workspaceId)
       index += argument === '--workspace-id' ? 1 : 0
       continue
     }
@@ -621,9 +625,17 @@ async function writeBackfillAuditEvents(
   const retentionDays = getConfiguredAuditRetentionDays()
   const scope = options.workspaceIds.length > 0 ? 'explicit-workspaces' : 'all-workspaces'
   const requestedWorkspaceIds = options.workspaceIds.length > 0 ? options.workspaceIds : ['*']
+  const affectedWorkspaceIds = [...workspaceIds].sort()
+  const auditWorkspaceIds = new Set(workspaceIds)
+  if (options.workspaceIds.length === 0) {
+    auditWorkspaceIds.add(TEAM_ISSUE_COMMENT_BACKFILL_ALL_WORKSPACES)
+  }
 
-  for (const workspaceId of [...workspaceIds].sort()) {
-    const counts = workspaceCounts.get(workspaceId) ?? { scanned: 0, backfilled: 0 }
+  for (const workspaceId of [...auditWorkspaceIds].sort()) {
+    const environmentScope = workspaceId === TEAM_ISSUE_COMMENT_BACKFILL_ALL_WORKSPACES
+    const counts = environmentScope
+      ? { scanned: checkpoint.scanned, backfilled: checkpoint.backfilled }
+      : workspaceCounts.get(workspaceId) ?? { scanned: 0, backfilled: 0 }
     const context = createMutationAuditContext({
       workspaceId,
       actor: {
@@ -631,18 +643,27 @@ async function writeBackfillAuditEvents(
         kind: 'system',
         displayName: 'system:backfill',
       },
-      idempotencyKey: `team-issue-comment-backfill-v1:${createDigest(
+      // The v2 audit key separates the expanded environment-scope payload from
+      // receipts written by the earlier workspace-only audit contract.
+      idempotencyKey: `team-issue-comment-backfill-v2:${createDigest(
         `${runContext.configurationHash}\0${workspaceId}`,
       )}`,
       request: {
         method: 'BACKFILL',
         path: '/backfills/team-issue-comments/v1',
-        query: { workspaceId, scope },
+        query: {
+          workspaceId: environmentScope ? '*' : workspaceId,
+          scope,
+          ...(environmentScope ? { environmentScope: 'all-workspaces' } : {}),
+        },
         body: {
           version: 1,
           accountId: runContext.accountId,
           configurationHash: runContext.configurationHash,
           requestedWorkspaceIds,
+          affectedWorkspaceIds,
+          sourceRowsScanned: counts.scanned,
+          canonicalRowsBackfilled: counts.backfilled,
         },
       },
       source: {
@@ -676,7 +697,11 @@ async function writeBackfillAuditEvents(
         accountId: runContext.accountId,
         scope,
         requestedWorkspaceIds,
+        affectedWorkspaceIds,
+        sourceRowsScanned: counts.scanned,
+        canonicalRowsBackfilled: counts.backfilled,
         configurationHash: runContext.configurationHash,
+        ...(environmentScope ? { environmentScope: 'all-workspaces' } : {}),
       },
       expiresAt: calculateAuditExpiresAt(occurredAt, retentionDays),
       outboxStatus: 'suppressed',
