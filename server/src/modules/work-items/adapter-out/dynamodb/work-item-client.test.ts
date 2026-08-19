@@ -619,6 +619,481 @@ test('DynamoDB Team Work Item client reads a matching pre-cutover Automation com
   }])
 })
 
+test('DynamoDB Team Work Item detail rejects a commented event without a body', async () => {
+  const canonicalWorkItem = {
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+    revision: 1,
+    directoryId: 'workspace-1',
+    directoryTeamId: 'workspace-1#team#core-team',
+    directoryProjectId: 'workspace-1#project#refero',
+    teamId: 'core-team',
+    assignedProjectId: 'refero',
+    issueId: 'onboarding-friction',
+    sortOrder: 10,
+    title: 'Work Item',
+    assigneeUserId: 'sato@example.com',
+    creatorMemberKey: 'demo@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026-06-03',
+    schedule: createDueDateSchedule('2026-06-03'),
+    priority: 'high',
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+  }
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      if (command.input.TableName === 'WorkItemsTable') {
+        return { Item: canonicalWorkItem }
+      }
+      return {
+        Items: [{
+          directoryId: 'workspace-1',
+          directoryTeamIssueId: 'workspace-1#team#core-team#issue#onboarding-friction',
+          teamId: 'core-team',
+          issueId: 'onboarding-friction',
+          eventId: 'malformed-comment',
+          eventType: 'commented',
+          actorUserId: 'sato@example.com',
+          summary: 'Malformed comment',
+          createdAt: '2026-07-12T01:00:00.000Z',
+        }],
+      }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  await expect(client.getTeamIssueDetail(
+    'workspace-1',
+    'core-team',
+    'onboarding-friction',
+  )).rejects.toMatchObject({
+    status: 503,
+    code: 'InvalidTeamIssue',
+  })
+})
+
+test('DynamoDB Team Work Item detail rejects a malformed body on non-comment events', async () => {
+  const canonicalWorkItem = {
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+    revision: 1,
+    directoryId: 'workspace-1',
+    directoryTeamId: 'workspace-1#team#core-team',
+    directoryProjectId: 'workspace-1#project#refero',
+    teamId: 'core-team',
+    assignedProjectId: 'refero',
+    issueId: 'onboarding-friction',
+    sortOrder: 10,
+    title: 'Work Item',
+    assigneeUserId: 'sato@example.com',
+    creatorMemberKey: 'demo@example.com',
+    workflowSchemaVersion: 1,
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026-06-03',
+    schedule: createDueDateSchedule('2026-06-03'),
+    priority: 'high',
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+  }
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      if (command.input.TableName === 'WorkItemsTable') {
+        return { Item: canonicalWorkItem }
+      }
+      return {
+        Items: [{
+          directoryId: 'workspace-1',
+          directoryTeamIssueId: 'workspace-1#team#core-team#issue#onboarding-friction',
+          teamId: 'core-team',
+          issueId: 'onboarding-friction',
+          eventId: 'malformed-created-event',
+          eventType: 'created',
+          actorUserId: 'sato@example.com',
+          body: { unexpected: 'object' },
+          summary: 'Malformed created event',
+          createdAt: '2026-07-12T01:00:00.000Z',
+        }],
+      }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  await expect(client.getTeamIssueDetail(
+    'workspace-1',
+    'core-team',
+    'onboarding-friction',
+  )).rejects.toMatchObject({
+    status: 503,
+    code: 'InvalidTeamIssue',
+  })
+})
+
+test('DynamoDB Team Work Item detail falls back when the comment index is stale', async () => {
+  const partitionKey = 'workspace-1#team#core#issue#canonical-work-item'
+  const queryInputs: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      if (command.constructor.name === 'GetCommand') {
+        return { Item: createScheduleCascadeIssue('core', 'canonical-work-item') }
+      }
+      if (command.constructor.name !== 'QueryCommand') {
+        return {}
+      }
+
+      queryInputs.push(command.input)
+      if (command.input.IndexName === 'TeamIssueCommentCreatedAtIndex') {
+        return { Items: [] }
+      }
+      if (command.input.IndexName === 'TeamIssueEventCreatedAtIndex') {
+        return {
+          Items: [],
+        }
+      }
+
+      if (command.input.ProjectionExpression !== undefined) {
+        return {
+          Items: [{
+            eventId: 'comment-event',
+            eventType: 'commented',
+            createdAt: '2026-07-12T00:00:00.000Z',
+          }],
+        }
+      }
+
+      return {
+        Items: [{
+          directoryId: 'workspace-1',
+          directoryTeamIssueId: partitionKey,
+          teamId: 'core',
+          issueId: 'canonical-work-item',
+          eventId: 'comment-event',
+          eventType: 'commented',
+          actorUserId: 'sato@example.com',
+          body: 'Older comment',
+          summary: 'Commented',
+          createdAt: '2026-07-12T00:00:00.000Z',
+        }],
+      }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  await expect(client.getTeamIssueDetail(
+    'workspace-1',
+    'core',
+    'canonical-work-item',
+    {
+      eventLimit: 1,
+      eventType: 'commented',
+      newestEventsFirst: true,
+    },
+  )).resolves.toMatchObject({
+    comments: [{ id: 'comment-event', body: 'Older comment' }],
+  })
+  expect(queryInputs).toHaveLength(4)
+  expect(queryInputs.some((input) =>
+    input.IndexName === 'TeamIssueEventCreatedAtIndex' && input.Limit === undefined,
+  )).toBe(true)
+  expect(queryInputs.some((input) =>
+    input.IndexName === undefined &&
+    input.ProjectionExpression !== undefined &&
+    input.ConsistentRead === true,
+  )).toBe(true)
+  expect(queryInputs.some((input) =>
+    input.IndexName === undefined &&
+    input.ConsistentRead === true &&
+    input.ProjectionExpression === undefined,
+  )).toBe(true)
+})
+
+test('DynamoDB Team Work Item comment preview orders offset timestamps by instant', async () => {
+  const partitionKey = 'workspace-1#team#core#issue#canonical-work-item'
+  const queryInputs: Array<Record<string, unknown>> = []
+  const comments = [
+    {
+      directoryId: 'workspace-1',
+      directoryTeamIssueId: partitionKey,
+      teamId: 'core',
+      issueId: 'canonical-work-item',
+      eventId: 'older-comment',
+      eventType: 'commented',
+      actorUserId: 'sato@example.com',
+      body: 'Older comment',
+      summary: 'Commented',
+      createdAt: '2026-07-16T09:00:00+09:00',
+      commentCreatedAtOrder: '2026-07-16T00:00:00.000Z#older-comment',
+    },
+    {
+      directoryId: 'workspace-1',
+      directoryTeamIssueId: partitionKey,
+      teamId: 'core',
+      issueId: 'canonical-work-item',
+      eventId: 'newer-comment',
+      eventType: 'commented',
+      actorUserId: 'sato@example.com',
+      body: 'Newer comment',
+      summary: 'Commented',
+      createdAt: '2026-07-16T01:00:00.000Z',
+      commentCreatedAtOrder: '2026-07-16T01:00:00.000Z#newer-comment',
+    },
+  ]
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      if (command.constructor.name === 'GetCommand') {
+        return { Item: createScheduleCascadeIssue('core', 'canonical-work-item') }
+      }
+      queryInputs.push(command.input)
+      if (command.input.IndexName === 'TeamIssueCommentCreatedAtIndex') {
+        return { Items: [comments[1], comments[0]] }
+      }
+      if (command.input.IndexName === 'TeamIssueEventCreatedAtIndex') {
+        return { Items: comments }
+      }
+      return {
+        Items: comments.map(({ eventId, eventType, createdAt }) => ({
+          eventId,
+          eventType,
+          createdAt,
+        })),
+      }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  await expect(client.getTeamIssueDetail(
+    'workspace-1',
+    'core',
+    'canonical-work-item',
+    {
+      eventLimit: 1,
+      eventType: 'commented',
+      newestEventsFirst: true,
+    },
+  )).resolves.toMatchObject({
+    comments: [{ id: 'newer-comment', body: 'Newer comment' }],
+  })
+  expect(queryInputs.some((input) =>
+    input.IndexName === 'TeamIssueCommentCreatedAtIndex' &&
+    input.ScanIndexForward === false &&
+    input.Limit === 1,
+  )).toBe(true)
+})
+
+test('DynamoDB Team Work Item comment preview falls back while the comment index is deploying', async () => {
+  const partitionKey = 'workspace-1#team#core#issue#canonical-work-item'
+  const queryInputs: Array<Record<string, unknown>> = []
+  const comments = [
+    {
+      directoryId: 'workspace-1',
+      directoryTeamIssueId: partitionKey,
+      teamId: 'core',
+      issueId: 'canonical-work-item',
+      eventId: 'older-comment',
+      eventType: 'commented',
+      actorUserId: 'sato@example.com',
+      body: 'Older comment',
+      summary: 'Commented',
+      createdAt: '2026-07-16T09:00:00+09:00',
+      commentCreatedAtOrder: '2026-07-16T00:00:00.000Z#older-comment',
+    },
+    {
+      directoryId: 'workspace-1',
+      directoryTeamIssueId: partitionKey,
+      teamId: 'core',
+      issueId: 'canonical-work-item',
+      eventId: 'newer-comment',
+      eventType: 'commented',
+      actorUserId: 'sato@example.com',
+      body: 'Newer comment',
+      summary: 'Commented',
+      createdAt: '2026-07-16T01:00:00.000Z',
+      commentCreatedAtOrder: '2026-07-16T01:00:00.000Z#newer-comment',
+    },
+  ]
+  const commentCoverage = comments.map(({ eventId, eventType, createdAt }) => ({
+    eventId,
+    eventType,
+    createdAt,
+  }))
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      if (command.constructor.name === 'GetCommand') {
+        return { Item: createScheduleCascadeIssue('core', 'canonical-work-item') }
+      }
+      queryInputs.push(command.input)
+      if (command.input.IndexName === 'TeamIssueCommentCreatedAtIndex') {
+        throw Object.assign(new Error('Comment index is not active yet.'), {
+          name: 'ResourceNotFoundException',
+        })
+      }
+      if (command.input.IndexName === 'TeamIssueEventCreatedAtIndex') {
+        return { Items: comments }
+      }
+      if (command.input.ProjectionExpression !== undefined) {
+        return { Items: commentCoverage }
+      }
+      return { Items: comments }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  await expect(client.getTeamIssueDetail(
+    'workspace-1',
+    'core',
+    'canonical-work-item',
+    {
+      eventLimit: 1,
+      eventType: 'commented',
+      newestEventsFirst: true,
+    },
+  )).resolves.toMatchObject({
+    comments: [{ id: 'newer-comment', body: 'Newer comment' }],
+  })
+  expect(queryInputs).toEqual(expect.arrayContaining([
+    expect.objectContaining({
+      IndexName: 'TeamIssueCommentCreatedAtIndex',
+    }),
+    expect.objectContaining({
+      IndexName: 'TeamIssueEventCreatedAtIndex',
+      ScanIndexForward: false,
+    }),
+    expect.objectContaining({
+      ProjectionExpression: expect.any(String),
+      ConsistentRead: true,
+    }),
+  ]))
+  expect(queryInputs.some((input) =>
+    input.IndexName === 'TeamIssueEventCreatedAtIndex' && !('Limit' in input),
+  )).toBe(true)
+})
+
+test('DynamoDB Team Work Item bounded legacy comments fail closed on invalid coverage rows', async () => {
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      if (command.constructor.name === 'GetCommand') {
+        return { Item: createScheduleCascadeIssue('core', 'canonical-work-item') }
+      }
+      if (command.input.IndexName === 'TeamIssueCommentCreatedAtIndex') {
+        throw Object.assign(new Error('Comment index is not active yet.'), {
+          name: 'ResourceNotFoundException',
+        })
+      }
+      if (command.input.IndexName === 'TeamIssueEventCreatedAtIndex') {
+        return {
+          Items: [{
+            eventId: 'valid-comment',
+            eventType: 'commented',
+            createdAt: '2026-07-12T00:00:00.000Z',
+          }],
+        }
+      }
+      return {
+        Items: [{
+          eventId: 'malformed-comment',
+          eventType: 'commented',
+          createdAt: 'not-a-timestamp',
+        }],
+      }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  await expect(client.getTeamIssueDetail(
+    'workspace-1',
+    'core',
+    'canonical-work-item',
+    {
+      eventLimit: 1,
+      eventType: 'commented',
+      newestEventsFirst: true,
+    },
+  )).rejects.toMatchObject({
+    status: 503,
+    code: 'InvalidTeamIssue',
+  })
+})
+
+test('DynamoDB Team Work Item detail rejects a comment omitted from the sparse index', async () => {
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      if (command.constructor.name === 'GetCommand') {
+        return { Item: createScheduleCascadeIssue('core', 'canonical-work-item') }
+      }
+      if (command.input.IndexName === 'TeamIssueCommentCreatedAtIndex') {
+        return { Items: [] }
+      }
+      if (command.input.IndexName === 'TeamIssueEventCreatedAtIndex') {
+        return { Items: [] }
+      }
+      return {
+        Items: [{
+          eventId: 'malformed-comment',
+          eventType: 'commented',
+        }],
+      }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  await expect(client.getTeamIssueDetail(
+    'workspace-1',
+    'core',
+    'canonical-work-item',
+    { eventType: 'commented' },
+  )).rejects.toMatchObject({
+    status: 503,
+    code: 'InvalidTeamIssue',
+  })
+})
+
 /** Verifies that pre-cutover replay transport failures use the Work Item error contract. */
 test('DynamoDB Team Work Item client classifies pre-cutover replay transport failures', async () => {
   const documentClient = {

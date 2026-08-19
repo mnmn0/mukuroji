@@ -1,13 +1,18 @@
 import { expect, test } from 'bun:test'
 import type { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb'
-import type { CuratedContextSource } from '@mukuroji/contracts'
+import {
+  WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+  WORK_ITEM_SCHEMA_VERSION,
+  type CuratedContextSource,
+} from '@mukuroji/contracts'
 import { createMutationAuditContext } from '../audit/audit'
 import {
   type CollaborationAuthorizationConditionCheck,
   CollaborationError,
   createPlanningUpdateCollaborationEntityKey,
   createProjectCollaborationEntityKey,
+  TEAM_ISSUE_COMMENT_BACKFILL_ALL_WORKSPACES,
   createWorkItemCollaborationEntityKey,
   DynamoDbCollaborationClient,
 } from './collaboration'
@@ -54,15 +59,60 @@ function isTestRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+/** Creates a canonical parent Work Item row for backfill transport tests. */
+function createTestCanonicalParentWorkItem(directoryTeamId: string, issueId: string) {
+  const teamSeparator = directoryTeamId.indexOf('#team#')
+  if (teamSeparator < 1) {
+    throw new Error(`Invalid test directory/team key: ${directoryTeamId}`)
+  }
+  const directoryId = directoryTeamId.slice(0, teamSeparator)
+  const teamId = directoryTeamId.slice(teamSeparator + '#team#'.length)
+  const dueDate = '2026-08-18'
+  return {
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+    revision: 1,
+    workflowSchemaVersion: WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+    directoryId,
+    directoryTeamId,
+    teamId,
+    issueId,
+    sortOrder: 0,
+    title: 'Backfill parent Work Item',
+    assigneeUserId: 'author@example.com',
+    creatorMemberKey: 'author@example.com',
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate,
+    schedule: {
+      mode: 'due-date',
+      dueDate,
+      calendarPolicy: {
+        timeZone: 'UTC',
+        workingWeekdays: ['monday', 'tuesday', 'wednesday', 'thursday', 'friday'],
+        holidays: [],
+      },
+    },
+    priority: 'medium',
+    createdAt: '2026-08-01T00:00:00.000Z',
+    updatedAt: '2026-08-01T00:00:00.000Z',
+  }
+}
+
 /**
  * Creates a DynamoDB transaction cancellation used by optimistic-lock tests.
  *
+ * @param itemCount - Number of transaction items represented by the error.
+ * @param failedIndex - Transaction item whose condition failed.
  * @returns An AWS-shaped conditional transaction error.
  */
-function createConditionalTransactionError() {
+function createConditionalTransactionError(itemCount = 1, failedIndex = 0) {
   return Object.assign(new Error('conditional transaction failed'), {
     name: 'TransactionCanceledException',
-    CancellationReasons: [{ Code: 'ConditionalCheckFailed' }],
+    CancellationReasons: Array.from({ length: itemCount }, (_, index) => ({
+      Code: index === failedIndex ? 'ConditionalCheckFailed' : 'None',
+    })),
   })
 }
 
@@ -93,6 +143,13 @@ function createCollaborationMemory(
 
   const client = createClient(async (command) => {
     const input = readCommandInput(command)
+    if (isTestRecord(input.Key) &&
+        typeof input.Key.directoryTeamId === 'string' &&
+        typeof input.Key.issueId === 'string') {
+      return {
+        Item: createTestCanonicalParentWorkItem(input.Key.directoryTeamId, input.Key.issueId),
+      }
+    }
     if (isTestRecord(input.Key) &&
         typeof input.Key.entityKey === 'string' &&
         typeof input.Key.recordKey === 'string') {
@@ -147,7 +204,7 @@ function createCollaborationMemory(
       commentToMutateBeforeNextTransaction = undefined
     }
 
-    for (const transactionItem of input.TransactItems) {
+    for (const [transactionIndex, transactionItem] of input.TransactItems.entries()) {
       if (!isTestRecord(transactionItem)) continue
       const condition = isTestRecord(transactionItem.ConditionCheck)
         ? transactionItem.ConditionCheck
@@ -166,7 +223,7 @@ function createCollaborationMemory(
             (expression.includes('attribute_not_exists(deletedAt)') && current?.deletedAt) ||
             (typeof values[':capturedVersion'] === 'number' &&
               current?.version !== values[':capturedVersion'])) {
-          throw createConditionalTransactionError()
+          throw createConditionalTransactionError(input.TransactItems.length, transactionIndex)
         }
       }
 
@@ -181,11 +238,17 @@ function createCollaborationMemory(
         ? put.ExpressionAttributeValues
         : {}
       if ((expression.includes('attribute_not_exists(entityKey)') && current) ||
+          (expression.includes('attribute_not_exists(discussionIndexVersion)') &&
+            current?.discussionIndexVersion !== undefined) ||
+          (typeof values[':entryType'] === 'string' && current?.entryType !== values[':entryType']) ||
+          (typeof values[':commentId'] === 'string' && current?.commentId !== values[':commentId']) ||
+          (typeof values[':rootCommentId'] === 'string' && current?.rootCommentId !== values[':rootCommentId']) ||
+          (typeof values[':createdAt'] === 'string' && current?.createdAt !== values[':createdAt']) ||
           (typeof values[':expectedRevision'] === 'number' &&
             current?.revision !== values[':expectedRevision']) ||
           (typeof values[':expectedVersion'] === 'number' &&
             current?.version !== values[':expectedVersion'])) {
-        throw createConditionalTransactionError()
+        throw createConditionalTransactionError(input.TransactItems.length, transactionIndex)
       }
     }
 
@@ -218,7 +281,7 @@ function createCollaborationMemory(
     }
     if (reportCommittedTransactionAsConditionalFailure) {
       reportCommittedTransactionAsConditionalFailure = false
-      throw createConditionalTransactionError()
+      throw createConditionalTransactionError(input.TransactItems.length, 0)
     }
     return {}
   }, auditTableName)
@@ -279,6 +342,566 @@ test('creates stable collaboration keys for Work Item, project, and Planning upd
     'workspace#one',
     'project/team-a/project-a',
   )).toBe('workspace#one#planning-update#project/team-a/project-a')
+})
+
+test('writes the comment backfill completion marker through a transaction', async () => {
+  const memory = createCollaborationMemory()
+
+  await memory.client.markTeamIssueCommentBackfillComplete(
+    'workspace#one',
+    '2026-08-18T00:00:00.000Z',
+  )
+
+  expect(memory.transactions).toHaveLength(1)
+  expect(memory.transactions[0]?.TransactItems).toEqual([
+    expect.objectContaining({
+      Put: expect.objectContaining({
+        TableName: 'collaboration-table',
+        ConditionExpression: 'attribute_not_exists(entityKey) AND attribute_not_exists(recordKey)',
+      }),
+    }),
+  ])
+  await expect(
+    memory.client.isTeamIssueCommentBackfillComplete('workspace#one'),
+  ).resolves.toBe(true)
+})
+
+test('uses the environment marker for workspaces with no legacy comments', async () => {
+  const memory = createCollaborationMemory()
+
+  await memory.client.markTeamIssueCommentBackfillComplete(
+    TEAM_ISSUE_COMMENT_BACKFILL_ALL_WORKSPACES,
+    '2026-08-18T00:00:00.000Z',
+  )
+
+  await expect(
+    memory.client.isTeamIssueCommentBackfillComplete('workspace#without-comments'),
+  ).resolves.toBe(true)
+})
+
+test('preserves retryable marker store failures instead of reporting a conflict', async () => {
+  const client = createClient(async (command) => {
+    const input = readCommandInput(command)
+    if (Array.isArray(input.TransactItems)) {
+      throw Object.assign(new Error('DynamoDB throttled the marker transaction.'), {
+        name: 'ProvisionedThroughputExceededException',
+      })
+    }
+    return {}
+  })
+
+  await expect(client.markTeamIssueCommentBackfillComplete('workspace#one')).rejects.toMatchObject({
+    status: 503,
+    code: 'CollaborationUnavailable',
+  })
+})
+
+test('rejects backfill validation when the parent Work Item is malformed', async () => {
+  const directoryTeamId = 'workspace#one#team#team-a'
+  const client = createClient(async (command) => {
+    const input = readCommandInput(command)
+    if (isTestRecord(input.Key) && input.Key.directoryTeamId === directoryTeamId) {
+      return {
+        Item: {
+          directoryTeamId,
+          issueId: 'issue-1',
+          title: 'Malformed parent',
+        },
+      }
+    }
+    return {}
+  })
+
+  await expect(client.validateBackfillTeamIssueComment({
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'issue-1',
+    entityKey: createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1'),
+    commentId: 'legacy-comment-1',
+    actorMemberKey: 'author@example.com',
+    bodyMarkdown: 'Historical comment',
+    occurredAt: '2026-08-18T00:00:00.000Z',
+  })).rejects.toMatchObject({
+    status: 409,
+    code: 'CollaborationBackfillConflict',
+  })
+})
+
+test('distinguishes a deleted backfill parent from malformed parent data', async () => {
+  const directoryTeamId = 'workspace#one#team#team-a'
+  const input = {
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'deleted-issue',
+    entityKey: createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'deleted-issue'),
+    commentId: 'legacy-comment-deleted-parent',
+    actorMemberKey: 'author@example.com',
+    bodyMarkdown: 'Historical comment',
+    occurredAt: '2026-08-18T00:00:00.000Z',
+  }
+  const client = createClient(async (command) => {
+    const commandInput = readCommandInput(command)
+    if (isTestRecord(commandInput.Key) && commandInput.Key.directoryTeamId === directoryTeamId) {
+      return {}
+    }
+    return {}
+  })
+
+  await expect(client.validateBackfillTeamIssueComment(input)).resolves.toBe('parent-deleted')
+  await expect(client.backfillTeamIssueComment(input)).rejects.toMatchObject({
+    status: 409,
+    code: 'CollaborationBackfillParentDeleted',
+  })
+})
+
+test('writes and replays an idempotent deleted-parent reconciliation receipt', async () => {
+  const directoryTeamId = 'workspace#one#team#team-a'
+  const entityKey = createWorkItemCollaborationEntityKey(
+    'workspace#one',
+    'team-a',
+    'deleted-issue',
+  )
+  const input = {
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'deleted-issue',
+    entityKey,
+    commentId: 'legacy-comment-deleted-parent',
+    actorMemberKey: 'author@example.com',
+    bodyMarkdown: 'Historical comment',
+    occurredAt: '2026-08-18T00:00:00.000Z',
+  }
+  const transactions: Array<Record<string, unknown>> = []
+  let persistedReceipt: Record<string, unknown> | undefined
+  const client = createClient(async (command) => {
+    const commandInput = readCommandInput(command)
+    if (Array.isArray(commandInput.TransactItems)) {
+      transactions.push(commandInput)
+      if (persistedReceipt) {
+        throw createConditionalTransactionError(commandInput.TransactItems.length, 1)
+      }
+      const putItem = commandInput.TransactItems[1]
+      if (!isTestRecord(putItem) || !isTestRecord(putItem.Put) ||
+          !isTestRecord(putItem.Put.Item)) {
+        throw new Error('Reconciliation receipt transaction was malformed.')
+      }
+      persistedReceipt = putItem.Put.Item
+      return {}
+    }
+    if (isTestRecord(commandInput.Key) && commandInput.Key.directoryTeamId === directoryTeamId) {
+      return {}
+    }
+    if (isTestRecord(commandInput.Key) && commandInput.Key.entityKey === entityKey) {
+      return { Item: persistedReceipt }
+    }
+    return {}
+  })
+
+  await client.reconcileDeletedBackfillTeamIssueComment(input)
+  await client.reconcileDeletedBackfillTeamIssueComment(input)
+
+  expect(transactions).toHaveLength(2)
+  expect(transactions[0]?.TransactItems).toEqual(expect.arrayContaining([
+    expect.objectContaining({
+      ConditionCheck: expect.objectContaining({
+        TableName: 'issue-table',
+        Key: { directoryTeamId, issueId: 'deleted-issue' },
+        ConditionExpression:
+          'attribute_not_exists(directoryTeamId) AND attribute_not_exists(issueId)',
+      }),
+    }),
+    expect.objectContaining({
+      Put: expect.objectContaining({
+        TableName: 'collaboration-table',
+        Item: expect.objectContaining({
+          entryType: 'team-issue-comment-backfill-reconciliation',
+          reason: 'parent-deleted',
+          commentId: input.commentId,
+        }),
+      }),
+    }),
+  ]))
+})
+
+test('validates and fences the canonical parent Work Item during backfill', async () => {
+  const commands: Array<Record<string, unknown>> = []
+  const directoryTeamId = 'workspace#one#team#team-a'
+  const client = createClient(async (command) => {
+    const input = readCommandInput(command)
+    commands.push(input)
+    if (isTestRecord(input.Key) && input.Key.directoryTeamId === directoryTeamId) {
+      return {
+        Item: createTestCanonicalParentWorkItem(directoryTeamId, 'issue-1'),
+      }
+    }
+    return {}
+  })
+
+  await client.backfillTeamIssueComment({
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'issue-1',
+    entityKey: createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1'),
+    commentId: 'legacy-comment-1',
+    actorMemberKey: 'author@example.com',
+    bodyMarkdown: 'Historical comment',
+    occurredAt: '2026-08-18T00:00:00.000Z',
+  })
+
+  const transaction = commands.find((command) => Array.isArray(command.TransactItems))
+  if (!transaction || !Array.isArray(transaction.TransactItems)) {
+    throw new Error('Backfill transaction was not captured.')
+  }
+  expect(transaction.TransactItems[0]).toMatchObject({
+    ConditionCheck: {
+      TableName: 'issue-table',
+      Key: { directoryTeamId, issueId: 'issue-1' },
+      ConditionExpression: expect.stringContaining('attribute_exists(schedule)'),
+      ExpressionAttributeValues: {
+        ':schemaVersion': WORK_ITEM_SCHEMA_VERSION,
+        ':revision': 1,
+        ':workflowSchemaVersion': WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
+        ':directoryId': 'workspace#one',
+        ':directoryTeamId': directoryTeamId,
+        ':teamId': 'team-a',
+        ':issueId': 'issue-1',
+      },
+    },
+  })
+})
+
+test('reclassifies a parent deletion after the initial backfill read', async () => {
+  const directoryTeamId = 'workspace#one#team#team-a'
+  let parentReads = 0
+  const client = createClient(async (command) => {
+    const input = readCommandInput(command)
+    if (isTestRecord(input.Key) && input.Key.directoryTeamId === directoryTeamId) {
+      parentReads += 1
+      return parentReads === 1
+        ? { Item: createTestCanonicalParentWorkItem(directoryTeamId, 'issue-1') }
+        : {}
+    }
+    if (Array.isArray(input.TransactItems)) {
+      throw createConditionalTransactionError(input.TransactItems.length, 0)
+    }
+    return {}
+  })
+
+  await expect(client.backfillTeamIssueComment({
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'issue-1',
+    entityKey: createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1'),
+    commentId: 'legacy-comment-parent-race',
+    actorMemberKey: 'author@example.com',
+    bodyMarkdown: 'Historical comment',
+    occurredAt: '2026-08-18T00:00:00.000Z',
+  })).rejects.toMatchObject({
+    status: 409,
+    code: 'CollaborationBackfillParentDeleted',
+  })
+  expect(parentReads).toBe(2)
+})
+
+test('rejects a mismatched discussion projection during an idempotent backfill repair', async () => {
+  const memory = createCollaborationMemory()
+  const input = {
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'issue-1',
+    entityKey: createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1'),
+    commentId: 'legacy-comment-1',
+    actorMemberKey: 'author@example.com',
+    bodyMarkdown: 'Historical comment',
+    occurredAt: '2026-08-18T00:00:00.000Z',
+  }
+
+  await memory.client.backfillTeamIssueComment(input)
+  memory.rows.set(
+    `${input.entityKey}\0DISCUSSION#ROOT#${input.occurredAt}#${input.commentId}`,
+    {
+      entityKey: input.entityKey,
+      recordKey: `DISCUSSION#ROOT#${input.occurredAt}#${input.commentId}`,
+      entryType: 'discussion',
+      commentId: 'different-comment',
+      rootCommentId: input.commentId,
+      createdAt: input.occurredAt,
+    },
+  )
+
+  await expect(memory.client.backfillTeamIssueComment(input)).rejects.toMatchObject({
+    status: 409,
+    code: 'CollaborationBackfillConflict',
+  })
+})
+
+test('dry-run detects mismatched canonical backfill targets without writing', async () => {
+  const createInput = () => ({
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'issue-1',
+    entityKey: createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1'),
+    commentId: 'legacy-comment-1',
+    actorMemberKey: 'author@example.com',
+    bodyMarkdown: 'Historical comment',
+    occurredAt: '2026-08-18T00:00:00.000Z',
+  })
+
+  const canonicalMemory = createCollaborationMemory()
+  const canonicalInput = createInput()
+  await canonicalMemory.client.backfillTeamIssueComment(canonicalInput)
+  const commentKey = `${canonicalInput.entityKey}\0COMMENT#${canonicalInput.commentId}`
+  const canonicalComment = canonicalMemory.rows.get(commentKey)
+  if (!canonicalComment) throw new Error('Expected the backfilled comment to be persisted.')
+  canonicalMemory.rows.set(commentKey, {
+    ...canonicalComment,
+    authorMemberKey: 'different@example.com',
+  })
+  const transactionCount = canonicalMemory.transactions.length
+  await expect(canonicalMemory.client.validateBackfillTeamIssueComment(canonicalInput)).rejects.toMatchObject({
+    status: 409,
+    code: 'CollaborationBackfillConflict',
+  })
+  expect(canonicalMemory.transactions).toHaveLength(transactionCount)
+
+  const receiptMemory = createCollaborationMemory()
+  const receiptInput = createInput()
+  await receiptMemory.client.backfillTeamIssueComment(receiptInput)
+  const receiptKey = `${receiptInput.entityKey}\0BACKFILL#${receiptInput.commentId}`
+  const receipt = receiptMemory.rows.get(receiptKey)
+  if (!receipt) throw new Error('Expected the backfill receipt to be persisted.')
+  receiptMemory.rows.set(receiptKey, { ...receipt, sourceBodyFingerprint: 'different' })
+  await expect(receiptMemory.client.validateBackfillTeamIssueComment(receiptInput)).rejects.toMatchObject({
+    status: 409,
+    code: 'CollaborationBackfillConflict',
+  })
+
+  const discussionMemory = createCollaborationMemory()
+  const discussionInput = createInput()
+  await discussionMemory.client.backfillTeamIssueComment(discussionInput)
+  const discussionKey =
+    `${discussionInput.entityKey}\0DISCUSSION#V2#${discussionInput.occurredAt}#ROOT#${discussionInput.commentId}`
+  const discussion = discussionMemory.rows.get(discussionKey)
+  if (!discussion) throw new Error('Expected the discussion projection to be persisted.')
+  discussionMemory.rows.set(discussionKey, { ...discussion, commentId: 'different-comment' })
+  await expect(discussionMemory.client.validateBackfillTeamIssueComment(discussionInput)).rejects.toMatchObject({
+    status: 409,
+    code: 'CollaborationBackfillConflict',
+  })
+})
+
+test('backfills V2 discussion projections and upgrades an old legacy projection', async () => {
+  const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
+  const occurredAt = '2026-08-18T00:00:00.000Z'
+  const commentId = 'legacy-comment-1'
+  const legacyRecordKey = `DISCUSSION#ROOT#${occurredAt}#${commentId}`
+  const memory = createCollaborationMemory([
+    {
+      entityKey,
+      recordKey: `COMMENT#${commentId}`,
+      entryType: 'comment',
+      id: commentId,
+      rootCommentId: commentId,
+      authorMemberKey: 'author@example.com',
+      bodyMarkdown: 'Historical comment',
+      version: 1,
+      mentionMemberKeys: [],
+      createdAt: occurredAt,
+      updatedAt: occurredAt,
+      acceptedResolutions: [],
+      reactions: [],
+    },
+    {
+      entityKey,
+      recordKey: legacyRecordKey,
+      entryType: 'discussion',
+      commentId,
+      rootCommentId: commentId,
+      createdAt: occurredAt,
+    },
+  ])
+
+  await memory.client.backfillTeamIssueComment({
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'issue-1',
+    entityKey,
+    commentId,
+    actorMemberKey: 'Author@Example.com',
+    bodyMarkdown: 'Historical comment',
+    occurredAt: '2026-08-18T09:00:00+09:00',
+  })
+
+  expect(memory.rows.get(`${entityKey}\0DISCUSSION#V2#${occurredAt}#ROOT#${commentId}`)).toBeDefined()
+  expect(memory.rows.get(`${entityKey}\0DISCUSSION#V2S#ROOT#${occurredAt}#${commentId}`)).toBeDefined()
+  expect(memory.rows.get(`${entityKey}\0${legacyRecordKey}`)?.discussionIndexVersion).toBe(2)
+})
+
+test('recognizes a completed backfill after a later comment mutation', async () => {
+  const memory = createCollaborationMemory()
+  const input = {
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'issue-1',
+    entityKey: createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1'),
+    commentId: 'legacy-comment-1',
+    actorMemberKey: 'author@example.com',
+    bodyMarkdown: 'Historical comment',
+    occurredAt: '2026-08-18T00:00:00.000Z',
+  }
+
+  await memory.client.backfillTeamIssueComment(input)
+  const commentKey = `${input.entityKey}\0COMMENT#${input.commentId}`
+  const existing = memory.rows.get(commentKey)
+  if (!existing) {
+    throw new Error('Expected the backfilled comment to be persisted.')
+  }
+  memory.rows.set(commentKey, {
+    ...existing,
+    bodyMarkdown: 'Edited after migration',
+    version: 2,
+    updatedAt: '2026-08-18T01:00:00.000Z',
+    editedAt: '2026-08-18T01:00:00.000Z',
+  })
+
+  await expect(memory.client.backfillTeamIssueComment(input)).resolves.toMatchObject({
+    id: input.commentId,
+    bodyMarkdown: 'Edited after migration',
+    version: 2,
+  })
+})
+
+test('reports idempotent backfill replays without double-counting the write', async () => {
+  const memory = createCollaborationMemory()
+  const input = {
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'issue-1',
+    entityKey: createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1'),
+    commentId: 'replayed-legacy-comment',
+    actorMemberKey: 'author@example.com',
+    bodyMarkdown: 'Historical comment',
+    occurredAt: '2026-08-18T00:00:00.000Z',
+  }
+
+  await expect(memory.client.backfillTeamIssueCommentWithResult(input)).resolves.toMatchObject({
+    created: true,
+    comment: { id: input.commentId },
+  })
+  await expect(memory.client.backfillTeamIssueCommentWithResult(input)).resolves.toMatchObject({
+    created: false,
+    comment: { id: input.commentId },
+  })
+})
+
+test('preserves legacy comment bodies longer than the current composer limit', async () => {
+  const memory = createCollaborationMemory()
+  const bodyMarkdown = 'Historical comment. '.repeat(1_100).trim()
+  expect(bodyMarkdown.length).toBeGreaterThan(20_000)
+
+  await memory.client.backfillTeamIssueComment({
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'issue-1',
+    entityKey: createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1'),
+    commentId: 'long-legacy-comment',
+    actorMemberKey: 'author@example.com',
+    bodyMarkdown,
+    occurredAt: '2026-08-18T00:00:00.000Z',
+  })
+
+  expect(memory.rows.get(
+    'workspace#one#work-item#team/team-a/issue/issue-1\0COMMENT#long-legacy-comment',
+  )?.bodyMarkdown).toBe(bodyMarkdown)
+})
+
+test('preserves historically accepted control characters in backfilled bodies', async () => {
+  const memory = createCollaborationMemory()
+  const bodyMarkdown = 'Historical\u0001comment'
+
+  await memory.client.backfillTeamIssueComment({
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'issue-1',
+    entityKey: createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1'),
+    commentId: 'legacy-control-character',
+    actorMemberKey: 'author@example.com',
+    bodyMarkdown,
+    occurredAt: '2026-08-18T00:00:00.000Z',
+  })
+
+  expect(memory.rows.get(
+    'workspace#one#work-item#team/team-a/issue/issue-1\0COMMENT#legacy-control-character',
+  )?.bodyMarkdown).toBe(bodyMarkdown)
+})
+
+test('rejects an existing backfill comment whose timestamps do not match the source', async () => {
+  const memory = createCollaborationMemory()
+  const input = {
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'issue-1',
+    entityKey: createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1'),
+    commentId: 'legacy-comment-1',
+    actorMemberKey: 'author@example.com',
+    bodyMarkdown: 'Historical comment',
+    occurredAt: '2026-08-18T00:00:00.000Z',
+  }
+
+  await memory.client.backfillTeamIssueComment(input)
+  memory.rows.set(
+    `${input.entityKey}\0COMMENT#${input.commentId}`,
+    {
+      entityKey: input.entityKey,
+      recordKey: `COMMENT#${input.commentId}`,
+      entryType: 'comment',
+      id: input.commentId,
+      rootCommentId: input.commentId,
+      authorMemberKey: input.actorMemberKey,
+      bodyMarkdown: input.bodyMarkdown,
+      version: 1,
+      mentionMemberKeys: [],
+      createdAt: '2026-08-18T00:01:00.000Z',
+      updatedAt: '2026-08-18T00:01:00.000Z',
+      acceptedResolutions: [],
+      reactions: [],
+    },
+  )
+
+  await expect(memory.client.backfillTeamIssueComment(input)).rejects.toMatchObject({
+    status: 409,
+    code: 'CollaborationBackfillConflict',
+  })
+})
+
+test('preserves retryable backfill store failures instead of reporting a conflict', async () => {
+  const directoryTeamId = 'workspace#one#team#team-a'
+  const client = createClient(async (command) => {
+    const input = readCommandInput(command)
+    if (isTestRecord(input.Key) && input.Key.directoryTeamId === directoryTeamId) {
+      return { Item: createTestCanonicalParentWorkItem(directoryTeamId, 'issue-1') }
+    }
+    if (Array.isArray(input.TransactItems)) {
+      throw Object.assign(new Error('DynamoDB throttled the migration transaction.'), {
+        name: 'ProvisionedThroughputExceededException',
+      })
+    }
+    return {}
+  })
+
+  await expect(client.backfillTeamIssueComment({
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'issue-1',
+    entityKey: createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1'),
+    commentId: 'legacy-comment-1',
+    actorMemberKey: 'author@example.com',
+    bodyMarkdown: 'Historical comment',
+    occurredAt: '2026-08-18T00:00:00.000Z',
+  })).rejects.toMatchObject({
+    status: 503,
+    code: 'CollaborationUnavailable',
+  })
 })
 
 test('rejects curated context rows whose owner disagrees with the entity key', async () => {
@@ -1301,6 +1924,61 @@ test('finds a committed comment by its deterministic mutation identity', async (
       { bodyMarkdown: 'Replay this comment.' },
     ),
   })).resolves.toBeUndefined()
+})
+
+test('finds an explicit automation comment replay even after soft deletion', async () => {
+  const memory = createCollaborationMemory()
+  const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
+  const auditContext = createMutationAuditContext({
+    workspaceId: 'workspace#one',
+    actor: {
+      id: 'automation:rule-1',
+      kind: 'service',
+      displayName: 'Automation',
+    },
+    idempotencyKey: 'automation-explicit-comment',
+    occurredAt: '2026-07-12T00:00:00.000Z',
+    request: { method: 'AUTOMATION', path: '/automation/comment', body: { body: 'Comment' } },
+    source: { kind: 'system' },
+  })
+  const comment = await memory.client.createComment({
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'issue-1',
+    entityKey,
+    actorMemberKey: 'automation:rule-1',
+    bodyMarkdown: 'Comment',
+    commentId: 'automation-execution_comment_0',
+    auditContext,
+  })
+  await memory.client.deleteComment({
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'issue-1',
+    entityKey,
+    actorMemberKey: 'automation:rule-1',
+    commentId: comment.id,
+    expectedVersion: comment.version,
+    canModerate: true,
+    auditContext: createMutationAuditContext({
+      workspaceId: 'workspace#one',
+      actor: {
+        id: 'automation:rule-1',
+        kind: 'service',
+        displayName: 'Automation',
+      },
+      idempotencyKey: 'automation-explicit-comment-delete',
+      occurredAt: '2026-07-12T00:01:00.000Z',
+      request: { method: 'AUTOMATION', path: '/automation/comment/delete' },
+      source: { kind: 'system' },
+    }),
+  })
+
+  await expect(memory.client.getCommentMutationReplay({
+    entityKey,
+    auditContext,
+    commentId: comment.id,
+  })).resolves.toMatchObject({ id: comment.id, deletedAt: expect.any(String) })
 })
 
 test('does not subscribe service actors as automatic watchers', async () => {

@@ -53,6 +53,20 @@ export function createAutomationActionId(executionId: string, actionIndex: numbe
   return `${requireText(executionId, 'Execution ID')}:action:${String(actionIndex).padStart(4, '0')}`
 }
 
+/**
+ * Creates the stable comment identifier used by an Automation comment action.
+ *
+ * @param executionId - Parent execution identifier.
+ * @param actionIndex - Zero-based action index.
+ * @returns A comment identifier compatible with legacy Team Issue comment events.
+ */
+export function createAutomationCommentId(executionId: string, actionIndex: number): string {
+  if (!Number.isSafeInteger(actionIndex) || actionIndex < 0) {
+    throw invalidInput('Action index must be a non-negative integer.')
+  }
+  return `${requireText(executionId, 'Execution ID')}_comment_${actionIndex}`
+}
+
 /** Normalizes a valid timestamp to ISO UTC representation. */
 function normalizeTimestamp(value: string): string {
   const timestamp = new Date(value)

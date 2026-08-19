@@ -257,6 +257,7 @@ import {
 } from '../modules/audit/audit'
 import {
   createTeamIssueAuditEntityId,
+  createTeamIssueCommentEventCursor,
   createTeamIssueDeepLink,
   confirmWorkItemScheduleChange,
   collectWorkItemScheduleEvaluationEndpoints,
@@ -286,9 +287,9 @@ import {
   type ProjectTaskResponseItem,
   type ProjectTasksResponse,
   type PublicUpdateTeamIssueRequestBody,
-  type TeamIssueCommentResponseItem,
   type TeamIssueDetailReadOptions,
   type TeamIssueDetailResponse,
+  type TeamIssueCommentResponseItem,
   type TeamIssueResponseItem,
   type TeamIssuesResponse,
   type TriageDuplicateContextTransactionContribution,
@@ -326,6 +327,7 @@ import {
   type CollaborationAuthorizationConditionCheck,
   type CollaborationClient,
   type CollaborationComment,
+  type CollaborationThreadPage,
   type CuratedContextActivitySourceAuthorizationSnapshot,
   type CuratedContextDocumentSourceAuthorizationSnapshot,
   type GetCollaborationThreadInput,
@@ -477,6 +479,7 @@ import {
   AutomationError,
   applyBulkOperation,
   deliverAutomationWebhook,
+  createAutomationCommentId,
   isAutomationInboundWebhookJsonContentType,
   isAutomationValue,
   normalizeAutomationActionFailure,
@@ -8869,7 +8872,10 @@ routeApp.get('/api/teams/:teamId/issues/:issueId', async (c) => {
       principal.directoryId,
       teamId,
       issueId,
-      { consistentIssueRead: true },
+      {
+        consistentIssueRead: true,
+        includeComments: false,
+      },
     )
     requireAssignedProjectPermission(principal, context, detail.issue.assignedProjectId, 'viewer')
     const entityKey = createWorkItemCollaborationEntityKey(principal.directoryId, teamId, issueId)
@@ -8881,6 +8887,38 @@ routeApp.get('/api/teams/:teamId/issues/:issueId', async (c) => {
       maxBytes: TEAM_ISSUE_DETAIL_COMMENT_MAX_BYTES,
       bytesRead: 2,
       pagesRead: 0,
+    }
+    const commentBackfillComplete = await workItemDependencies.collaboration.isTeamIssueCommentBackfillComplete(
+      principal.directoryId,
+    )
+    const legacyCommentDetail = commentBackfillComplete
+      ? undefined
+      : await workItemDependencies.teamIssues.getTeamIssueDetail(
+          principal.directoryId,
+          teamId,
+          issueId,
+          {
+            consistentIssueRead: true,
+            eventLimit: LEGACY_COLLABORATION_EVENT_PREVIEW_LIMIT,
+            newestEventsFirst: true,
+            eventType: 'commented',
+            legacyCommentIndexOnly: true,
+          },
+        )
+    if (legacyCommentDetail) {
+      requireAssignedProjectPermission(
+        principal,
+        context,
+        legacyCommentDetail.issue.assignedProjectId,
+        'viewer',
+      )
+      if (legacyCommentDetail.issue.assignedProjectId !== detail.issue.assignedProjectId) {
+        throw new ProjectDataError(
+          409,
+          'WorkItemAuthorizationChanged',
+          'Work Item assignment changed while comments were loading.',
+        )
+      }
     }
     const [collaborationComments, resolvedConfiguration, relationPage] = await Promise.all([
       readAllCollaborationThreadComments(workItemDependencies.collaboration, {
@@ -8895,7 +8933,7 @@ routeApp.get('/api/teams/:teamId/issues/:issueId', async (c) => {
       workItemDependencies.workItemConfigurations.listRelations(principal.directoryId, teamId, issueId),
     ])
     const allCollaborationComments = collaborationComments.sort(
-      (left, right) => left.createdAt.localeCompare(right.createdAt),
+      compareMigrationAwareComments,
     )
     const visibleRelations = await filterVisibleWorkItemRelations(
       principal,
@@ -8904,20 +8942,30 @@ routeApp.get('/api/teams/:teamId/issues/:issueId', async (c) => {
       relationPage.relations,
     )
 
-    return c.json(
-      await hydrateTeamIssueDetailResponse(
-        {
-          ...detail,
-          comments: allCollaborationComments
-            .filter((comment) => !comment.deletedAt)
-            .map(toTeamIssueDetailCommentResponse),
-          resolvedConfiguration,
-          relations: visibleRelations,
-          relationGraphRevision: relationPage.graphRevision,
-        },
-        principal.directoryId,
-      ),
+    const canonicalCommentIds = new Set(allCollaborationComments.map((comment) => comment.id))
+    const canonicalComments = allCollaborationComments
+      .filter((comment) => !comment.deletedAt)
+      .map(toTeamIssueDetailCommentResponse)
+    const legacyComments = commentBackfillComplete
+      ? []
+      : (legacyCommentDetail?.comments ?? []).filter((comment) => !canonicalCommentIds.has(comment.id))
+    const responseComments = mergeLegacyTeamIssueDetailComments(legacyComments, canonicalComments)
+    enforceTeamIssueDetailCommentResponseBudget(responseComments)
+    const hydratedDetail = await hydrateTeamIssueDetailResponse(
+      {
+        ...detail,
+        comments: [],
+        resolvedConfiguration,
+        relations: visibleRelations,
+        relationGraphRevision: relationPage.graphRevision,
+      },
+      principal.directoryId,
     )
+
+    return c.json({
+      ...hydratedDetail,
+      comments: responseComments,
+    })
   } catch (error) {
     return toWorkItemConfigurationErrorResponse(c, error)
   }
@@ -9197,6 +9245,50 @@ routeApp.patch('/api/teams/:teamId/issues/:issueId', async (c) => {
   }
 })
 
+/** Maximum legacy event rows evaluated in one request before migration completes. */
+const LEGACY_COLLABORATION_EVENT_PREVIEW_LIMIT = 50
+/** Prefix that keeps legacy event cursors distinct from canonical cursors. */
+const LEGACY_COLLABORATION_CURSOR_PREFIX = 'legacy.'
+/** Sentinel cursor that starts the legacy stream after a full canonical page. */
+const LEGACY_COLLABORATION_INITIAL_CURSOR = 'initial'
+/** Prefix for a cursor that merges canonical and legacy root-comment streams. */
+const MIGRATION_AWARE_COLLABORATION_CURSOR_PREFIX = 'mixed.'
+
+/**
+ * Parses the collaboration endpoint page limit before selecting a migration reader.
+ *
+ * @param value - Raw query-string page limit.
+ * @returns A finite numeric page limit, or undefined when omitted.
+ */
+function readCollaborationPageLimit(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined
+  const limit = Number(value)
+  if (!Number.isFinite(limit)) {
+    throw new CollaborationError(400, 'InvalidCollaborationCursor', 'Page limit is invalid.')
+  }
+  return limit
+}
+
+/** Cursor state used to merge canonical and legacy root-comment streams. */
+type MigrationAwareCollaborationCursor = {
+  /** Cursor schema version. */
+  version: 1
+  /** Workspace directory bound to the cursor. */
+  directoryId: string
+  /** Team bound to the cursor. */
+  teamId: string
+  /** Issue bound to the cursor. */
+  issueId: string
+  /** Canonical Collaboration cursor before the next unread root, when applicable. */
+  canonicalCursor?: string
+  /** Legacy Team Issue event cursor before the next unread root, when applicable. */
+  legacyEventCursor?: string
+  /** Whether the canonical stream has been exhausted. */
+  canonicalExhausted: boolean
+  /** Whether the legacy stream has been exhausted. */
+  legacyExhausted: boolean
+}
+
 /**
  * Team-owned Work Item の root comments、replies、watch、presence を page 取得します。
  */
@@ -9221,15 +9313,38 @@ routeApp.get('/api/teams/:teamId/issues/:issueId/collaboration', async (c) => {
       ? createProjectCollaborationEntityKey(principal.directoryId, detail.issue.assignedProjectId)
       : undefined
     const limitValue = c.req.query('limit')
-    const limit = limitValue === undefined ? undefined : Number(limitValue)
+    const limit = readCollaborationPageLimit(limitValue)
     const requestedRootCommentId = c.req.query('rootCommentId')
     const requestedCursor = c.req.query('cursor')
-    if (requestedCursor?.startsWith('legacy.') === true) {
-      throw new CollaborationError(
-        400,
-        'InvalidCollaborationCursor',
-        'Collaboration cursor is invalid.',
-      )
+    const commentBackfillComplete = await workItemDependencies.collaboration.isTeamIssueCommentBackfillComplete(
+      principal.directoryId,
+    )
+    const migrationCursor = decodeMigrationAwareCollaborationCursor(
+      requestedCursor,
+      principal.directoryId,
+      teamId,
+      issueId,
+    )
+    const isLegacyPage = !requestedRootCommentId &&
+      requestedCursor?.startsWith(LEGACY_COLLABORATION_CURSOR_PREFIX) === true
+    const legacyEventCursorToken = isLegacyPage
+      ? requestedCursor.slice(LEGACY_COLLABORATION_CURSOR_PREFIX.length)
+      : undefined
+    const legacyEventCursor = legacyEventCursorToken === LEGACY_COLLABORATION_INITIAL_CURSOR
+      ? undefined
+      : legacyEventCursorToken
+    if (isLegacyPage && commentBackfillComplete) {
+      throw new CollaborationError(400, 'InvalidCollaborationCursor', 'Collaboration cursor is invalid.')
+    }
+    if (migrationCursor && requestedRootCommentId !== undefined) {
+      throw new CollaborationError(400, 'InvalidCollaborationCursor', 'Collaboration cursor is invalid.')
+    }
+    if (
+      isLegacyPage &&
+      legacyEventCursorToken !== LEGACY_COLLABORATION_INITIAL_CURSOR &&
+      !legacyEventCursor
+    ) {
+      throw new CollaborationError(400, 'InvalidCollaborationCursor', 'Legacy comment cursor is invalid.')
     }
     const canWrite = canWriteTeamIssue(principal, context, detail.issue.assignedProjectId)
 
@@ -9243,17 +9358,19 @@ routeApp.get('/api/teams/:teamId/issues/:issueId/collaboration', async (c) => {
         legacyCursorCompatible: true,
         limit: limit === undefined ? 20 : Math.min(limit, 20),
       })
+      const responseComments = [...replies.comments].reverse().map((comment) =>
+        toCollaborationCommentResponse(
+          comment,
+          principal,
+          context,
+          detail.issue,
+          replies.threadResolved === true,
+        )
+      )
+      enforceCollaborationCommentResponseBudget(responseComments)
       return c.json({
         // Store は最新順で page し、thread 内は古い順に描画できるよう反転して返す。
-        comments: [...replies.comments].reverse().map((comment) =>
-          toCollaborationCommentResponse(
-            comment,
-            principal,
-            context,
-            detail.issue,
-            replies.threadResolved === true,
-          )
-        ),
+        comments: responseComments,
         ...(replies.nextCursor ? { nextCursor: replies.nextCursor } : {}),
         replyRootCommentId: requestedRootCommentId,
         watch: replies.watch,
@@ -9266,51 +9383,222 @@ routeApp.get('/api/teams/:teamId/issues/:issueId/collaboration', async (c) => {
       })
     }
 
-    const roots = await workItemDependencies.collaboration.getThread({
-      entityKey,
-      viewerMemberKey: principal.userKey,
-      projectEntityKey,
-      cursor: requestedCursor,
-      legacyCursorCompatible: true,
-      limit: limit === undefined ? 10 : Math.min(limit, 20),
-    })
-    const replyPages = await Promise.all(
-      roots.comments.map((root) => workItemDependencies.collaboration.getThread({
-        entityKey,
-        viewerMemberKey: principal.userKey,
-        projectEntityKey,
-        rootCommentId: root.id,
-        legacyCursorCompatible: true,
-        limit: 5,
-        includeScopeState: false,
-      })),
+    const rootLimit = limit === undefined ? 10 : Math.min(Math.max(limit, 1), 20)
+    const migrationPage = (!commentBackfillComplete || migrationCursor !== undefined) && !isLegacyPage
+      ? await readMigrationAwareRootPage({
+          collaboration: workItemDependencies.collaboration,
+          teamIssues: workItemDependencies.teamIssues,
+          directoryId: principal.directoryId,
+          teamId,
+          issueId,
+          entityKey,
+          viewerMemberKey: principal.userKey,
+          projectEntityKey,
+          limit: rootLimit,
+          cursor: migrationCursor ?? (requestedCursor === undefined
+            ? undefined
+            : {
+                version: 1,
+                directoryId: principal.directoryId,
+                teamId,
+                issueId,
+                canonicalCursor: requestedCursor,
+                canonicalExhausted: false,
+                legacyExhausted: false,
+              }),
+          validateLegacyDetail: (legacyDetail) => {
+            requireAssignedProjectPermission(
+              principal,
+              context,
+              legacyDetail.issue.assignedProjectId,
+              'viewer',
+            )
+            if (legacyDetail.issue.assignedProjectId !== detail.issue.assignedProjectId) {
+              throw new CollaborationError(
+                409,
+                'CollaborationConflict',
+                'Work Item assignment changed while comments were loading.',
+              )
+            }
+          },
+        })
+      : undefined
+    const roots = migrationPage
+      ? {
+          comments: migrationPage.canonicalComments,
+          ...(migrationPage.nextCursor ? { nextCursor: migrationPage.nextCursor } : {}),
+          watch: migrationPage.watch,
+          presence: migrationPage.presence,
+        }
+      : await workItemDependencies.collaboration.getThread({
+          entityKey,
+          viewerMemberKey: principal.userKey,
+          projectEntityKey,
+          // The legacy.<event-cursor> namespace belongs to the Team Issue event
+          // fallback below, not to the Collaboration discussion reader.
+          cursor: isLegacyPage ? undefined : migrationCursor?.canonicalCursor ?? requestedCursor,
+          legacyCursorCompatible: true,
+          limit: rootLimit,
+        })
+    const replyPages = isLegacyPage
+      ? []
+      : await Promise.all(
+          roots.comments.map((root) => workItemDependencies.collaboration.getThread({
+            entityKey,
+            viewerMemberKey: principal.userKey,
+            projectEntityKey,
+            rootCommentId: root.id,
+            legacyCursorCompatible: true,
+            limit: 5,
+            includeScopeState: false,
+          })),
+        )
+    const comments = isLegacyPage
+      ? []
+      : roots.comments.flatMap((root, index) => [
+          root,
+          ...[...(replyPages[index]?.comments ?? [])].reverse(),
+        ])
+    const replyPagesByRootId = new Map(
+      roots.comments.map((root, index) => [root.id, replyPages[index]] as const),
     )
-    const comments = roots.comments.flatMap((root, index) => [
-      root,
-      ...[...(replyPages[index]?.comments ?? [])].reverse(),
+    // Keep canonical IDs from the probe page for legacy deduplication even
+    // though that page has already been consumed before the legacy cursor.
+    const storedCommentIds = new Set([
+      ...roots.comments.map((comment) => comment.id),
+      ...comments.map((comment) => comment.id),
     ])
-    const collaborationComments = comments.map((comment) =>
-      toCollaborationCommentResponse(
-        comment,
+    const legacyEventLimit = limit === undefined
+      ? LEGACY_COLLABORATION_EVENT_PREVIEW_LIMIT
+      : Math.min(
+          Math.max(limit - (isLegacyPage ? 0 : roots.comments.length), 0),
+          LEGACY_COLLABORATION_EVENT_PREVIEW_LIMIT,
+        )
+    const legacyDetail = !migrationPage && !commentBackfillComplete &&
+      legacyEventLimit > 0 &&
+      (isLegacyPage || !roots.nextCursor)
+      ? await workItemDependencies.teamIssues.getTeamIssueDetail(
+          principal.directoryId,
+          teamId,
+          issueId,
+          {
+            consistentIssueRead: true,
+            eventLimit: legacyEventLimit,
+            newestEventsFirst: true,
+            eventType: 'commented',
+            eventCursor: legacyEventCursor,
+            legacyCommentIndexOnly: true,
+          },
+        )
+      : undefined
+    if (legacyDetail) {
+      requireAssignedProjectPermission(
         principal,
         context,
-        detail.issue,
-        replyPages.some((page, index) =>
-          roots.comments[index]?.id === comment.rootCommentId && page.threadResolved === true
-        ),
-      ),
-    )
+        legacyDetail.issue.assignedProjectId,
+        'viewer',
+      )
+      if (legacyDetail.issue.assignedProjectId !== detail.issue.assignedProjectId) {
+        throw new CollaborationError(
+          409,
+          'CollaborationConflict',
+          'Work Item assignment changed while comments were loading.',
+        )
+      }
+    }
+    const retainMixedCursorLegacyComments = migrationCursor?.legacyEventCursor !== undefined
+    const legacyComments = migrationPage
+      ? (await Promise.all(
+          migrationPage.legacyComments.map(async (comment) => {
+            const storedComment = await workItemDependencies.collaboration.getCommentSnapshot({
+              entityKey,
+              commentId: comment.id,
+            })
+            return storedComment?.deletedAt || (storedComment && !retainMixedCursorLegacyComments)
+              ? undefined
+              : toLegacyCollaborationCommentResponse(comment)
+          }),
+        )).flatMap((comment) => comment ? [comment] : [])
+      : (await Promise.all(
+          (legacyDetail?.comments ?? [])
+            .filter((comment) => !storedCommentIds.has(comment.id))
+            .map(async (comment) => {
+              const storedComment = await workItemDependencies.collaboration.getCommentSnapshot({
+                entityKey,
+                commentId: comment.id,
+              })
+              return storedComment
+                ? undefined
+                : toLegacyCollaborationCommentResponse(comment)
+            }),
+        )).flatMap((comment) => comment ? [comment] : [])
+    const collaborationComments = migrationPage
+      ? migrationPage.orderedComments.flatMap((root) => {
+          if (root.source === 'legacy') {
+            const legacyComment = legacyComments.find((comment) => comment.id === root.comment.id)
+            return legacyComment ? [legacyComment] : []
+          }
+          const replyPage = replyPagesByRootId.get(root.comment.id)
+          return [
+            toCollaborationCommentResponse(
+              root.comment,
+              principal,
+              context,
+              detail.issue,
+              replyPage?.threadResolved === true,
+            ),
+            ...(replyPage?.comments ?? []).reverse().map((comment) =>
+              toCollaborationCommentResponse(
+                comment,
+                principal,
+                context,
+                detail.issue,
+                replyPage?.threadResolved === true,
+              ),
+            ),
+          ]
+        })
+      : comments.map((comment) =>
+          toCollaborationCommentResponse(
+            comment,
+            principal,
+            context,
+            detail.issue,
+            replyPages.some((page, index) =>
+              roots.comments[index]?.id === comment.rootCommentId && page.threadResolved === true
+            ),
+          ),
+        )
+    if (!migrationPage) {
+      collaborationComments.push(...legacyComments)
+    }
+    enforceCollaborationCommentResponseBudget(collaborationComments)
     const replyNextCursors = Object.fromEntries(
       roots.comments.flatMap((root, index) => {
         const cursor = replyPages[index]?.nextCursor
         return cursor ? [[root.id, cursor] as const] : []
       }),
     )
-    const nextCursor = roots.nextCursor
+    const legacyInitialCursor = !migrationPage && !isLegacyPage &&
+      !commentBackfillComplete &&
+      !roots.nextCursor &&
+      legacyEventLimit === 0
+      ? `${LEGACY_COLLABORATION_CURSOR_PREFIX}${LEGACY_COLLABORATION_INITIAL_CURSOR}`
+      : undefined
 
     return c.json({
       comments: collaborationComments,
-      ...(nextCursor ? { nextCursor } : {}),
+      ...(isLegacyPage
+        ? legacyDetail?.nextEventCursor
+          ? { nextCursor: `${LEGACY_COLLABORATION_CURSOR_PREFIX}${legacyDetail.nextEventCursor}` }
+          : {}
+        : roots.nextCursor
+          ? { nextCursor: roots.nextCursor }
+          : legacyDetail?.nextEventCursor
+            ? { nextCursor: `${LEGACY_COLLABORATION_CURSOR_PREFIX}${legacyDetail.nextEventCursor}` }
+            : legacyInitialCursor
+              ? { nextCursor: legacyInitialCursor }
+              : {}),
       ...(Object.keys(replyNextCursors).length > 0 ? { replyNextCursors } : {}),
       watch: roots.watch,
       presence: roots.presence,
@@ -9869,7 +10157,7 @@ routeApp.post('/api/teams/:teamId/issues/:issueId/comments', async (c) => {
       projectEntityKey,
       assigneeMemberKey: detail.issue.assigneeUserId,
       actorMemberKey: principal.userKey,
-      bodyMarkdown: readRequiredCommentBody(modernContract ? body.bodyMarkdown : body.body),
+      bodyMarkdown: readRequiredCommentBody(body.bodyMarkdown ?? body.body),
       parentCommentId: readOptionalCommentId(body.parentCommentId, 'Parent comment ID'),
       mentionMemberKeys,
       automaticWatcherCandidates,
@@ -13780,11 +14068,26 @@ async function executeAutomationComment(
     target.workItemId,
   )
   const auditContext = createAutomationMutationContext(context, { body })
+  const commentId = createAutomationCommentEventId(context)
   const replay = await dependencies.collaboration.getCommentMutationReplay({
     entityKey,
     auditContext,
+    commentId,
   })
-  if (replay) return
+  if (replay) {
+    const expectedActorMemberKey = `automation:${context.execution.ruleId}`.toLowerCase()
+    if (
+      replay.authorMemberKey !== expectedActorMemberKey ||
+      replay.bodyMarkdown !== body
+    ) {
+      throw new AutomationError(
+        'conflict',
+        'AutomationCommentIdempotencyConflict',
+        'The Automation comment action was reused with different input.',
+      )
+    }
+    return
+  }
   if (
     dependencies.teamIssues.getAutomationCommentReplay &&
     await dependencies.teamIssues.getAutomationCommentReplay(
@@ -13867,6 +14170,7 @@ async function executeAutomationComment(
     assigneeMemberKey: detail.issue.assigneeUserId,
     actorMemberKey: `automation:${context.execution.ruleId}`,
     bodyMarkdown: body,
+    commentId,
     automaticWatcherCandidates: createTeamIssueAutomaticWatcherCandidates(detail.issue),
     deepLink: createTeamIssueDeepLink(target.teamId, target.workItemId),
     authorizationConditionChecks,
@@ -13970,7 +14274,7 @@ function createAutomationMutationContext(
 
 /** Creates the deterministic pre-cutover Automation comment event identity. */
 function createAutomationCommentEventId(context: AutomationActionExecutionContext) {
-  return `${context.execution.id}_comment_${context.actionIndex}`
+  return createAutomationCommentId(context.execution.id, context.actionIndex)
 }
 
 function createAutomationRuleLineage(context: AutomationActionExecutionContext) {
@@ -28324,8 +28628,491 @@ function toCollaborationCommentResponse(
       canResolve,
       canReply: canWrite && !comment.deletedAt && !comment.resolvedAt && !threadResolved,
       canReact: canWrite && !comment.deletedAt,
+      canAttach: canWrite && !comment.deletedAt,
+      canPromote: canWrite && !comment.deletedAt,
     },
   }
+}
+
+/** HTTP response shape shared by canonical and transitional comment projections. */
+type CollaborationCommentResponse = ReturnType<typeof toCollaborationCommentResponse> & {
+  /** Identifies the canonical store or the temporary read-only legacy projection. */
+  source?: 'collaboration' | 'legacy'
+}
+
+/**
+ * Enforces the serialized comment budget shared by collaboration page responses.
+ *
+ * @param comments - Projected comments that would be returned by the endpoint.
+ */
+function enforceCollaborationCommentResponseBudget(
+  comments: readonly CollaborationCommentResponse[],
+): void {
+  let bytesRead = 2
+  for (const comment of comments) {
+    const commentBytes = Buffer.byteLength(JSON.stringify(comment), 'utf8') + 1
+    if (bytesRead + commentBytes > TEAM_ISSUE_DETAIL_COMMENT_MAX_BYTES) {
+      throw new CollaborationError(
+        413,
+        'CollaborationThreadPayloadTooLarge',
+        'Collaboration comments exceed the supported response size.',
+      )
+    }
+    bytesRead += commentBytes
+  }
+}
+
+/**
+ * Enforces the serialized comment budget for the legacy-compatible detail response.
+ *
+ * @param comments - Comments that would be returned by the detail endpoint.
+ */
+function enforceTeamIssueDetailCommentResponseBudget(
+  comments: readonly TeamIssueCommentResponseItem[],
+): void {
+  let bytesRead = 2
+  for (const comment of comments) {
+    const commentBytes = Buffer.byteLength(JSON.stringify(comment), 'utf8') + 1
+    if (bytesRead + commentBytes > TEAM_ISSUE_DETAIL_COMMENT_MAX_BYTES) {
+      throw new CollaborationError(
+        413,
+        'CollaborationThreadPayloadTooLarge',
+        'Collaboration comments exceed the supported response size.',
+      )
+    }
+    bytesRead += commentBytes
+  }
+}
+
+/**
+ * Projects a legacy event into the read-only collaboration shape used during migration.
+ *
+ * @param comment - Legacy Team Issue event comment.
+ * @returns A read-only comment response with every mutation capability disabled.
+ */
+function toLegacyCollaborationCommentResponse(
+  comment: TeamIssueCommentResponseItem,
+): CollaborationCommentResponse {
+  return {
+    id: comment.id,
+    rootCommentId: comment.id,
+    source: 'legacy',
+    authorMemberKey: comment.actorUserId,
+    bodyMarkdown: comment.body,
+    version: 1,
+    mentionMemberKeys: [],
+    createdAt: comment.createdAt,
+    updatedAt: comment.createdAt,
+    acceptedResolutions: [],
+    reactions: [],
+    capabilities: {
+      canEdit: false,
+      canDelete: false,
+      canResolve: false,
+      canReply: false,
+      canReact: false,
+      canAttach: false,
+      canPromote: false,
+    },
+  }
+}
+
+/** One root-comment candidate read from either migration source. */
+type MigrationAwareRootCandidate =
+  | {
+      /** Identifies a canonical Collaboration candidate. */
+      source: 'canonical'
+      /** Canonical comment payload. */
+      comment: CollaborationComment
+      /** Cursor after this candidate, when another canonical page exists. */
+      nextCursor?: string
+    }
+  | {
+      /** Identifies a legacy Team Issue candidate. */
+      source: 'legacy'
+      /** Legacy comment payload. */
+      comment: TeamIssueCommentResponseItem
+      /** Cursor after this candidate, when another legacy page exists. */
+      nextCursor?: string
+    }
+
+/** Root comment selected from the merged migration-aware page. */
+type MigrationAwareRootComment =
+  | {
+      /** Identifies a canonical Collaboration root. */
+      source: 'canonical'
+      /** Canonical root comment payload. */
+      comment: CollaborationComment
+    }
+  | {
+      /** Identifies a legacy Team Issue root. */
+      source: 'legacy'
+      /** Legacy root comment payload. */
+      comment: TeamIssueCommentResponseItem
+    }
+
+/** Mutable state for one source in the migration-aware root merge. */
+type MigrationAwareRootStreamState = {
+  /** Cursor before the next unread candidate. */
+  cursor?: string
+  /** Whether this source has no more candidates. */
+  exhausted: boolean
+  /** Candidate fetched but not yet emitted. */
+  candidate?: MigrationAwareRootCandidate
+  /** Additional candidates already fetched from the current legacy page. */
+  queuedCandidates?: MigrationAwareRootCandidate[]
+}
+
+/** Result of one migration-aware root-comment page. */
+type MigrationAwareRootPage = {
+  /** Canonical root comments selected for this page. */
+  canonicalComments: CollaborationComment[]
+  /** Legacy root comments selected for this page. */
+  legacyComments: TeamIssueCommentResponseItem[]
+  /** All selected root comments in their merged newest-first order. */
+  orderedComments: MigrationAwareRootComment[]
+  /** Cursor for the next merged page, when either source has remaining rows. */
+  nextCursor?: string
+  /** Watcher state returned by the canonical reader. */
+  watch: CollaborationThreadPage['watch']
+  /** Presence rows returned by the canonical reader. */
+  presence: CollaborationThreadPage['presence']
+}
+
+/** Inputs required to read and merge one migration-aware root-comment page. */
+type MigrationAwareRootPageInput = {
+  /** Canonical Collaboration reader. */
+  collaboration: Pick<CollaborationClient, 'getThread'>
+  /** Legacy Team Issue reader. */
+  teamIssues: WorkItemDependencies['teamIssues']
+  /** Workspace directory that owns the Team Issue. */
+  directoryId: string
+  /** Team that owns the Team Issue. */
+  teamId: string
+  /** Issue that owns the Team Issue. */
+  issueId: string
+  /** Collaboration entity key for canonical root comments. */
+  entityKey: string
+  /** Viewer member key used by the canonical reader. */
+  viewerMemberKey: string
+  /** Assigned Project collaboration scope, when present. */
+  projectEntityKey?: string
+  /** Maximum number of merged root comments to return. */
+  limit: number
+  /** Cursor state from a previous merged page. */
+  cursor?: MigrationAwareCollaborationCursor
+  /** Assignment and authorization validation for every legacy detail read. */
+  validateLegacyDetail: (detail: TeamIssueDetailResponse) => void
+}
+
+/**
+ * Encodes one scope-bound cursor for the merged root-comment streams.
+ *
+ * @param cursor - Validated canonical and legacy stream positions.
+ * @returns Opaque cursor sent to the collaboration API client.
+ */
+function encodeMigrationAwareCollaborationCursor(
+  cursor: MigrationAwareCollaborationCursor,
+): string {
+  return `${MIGRATION_AWARE_COLLABORATION_CURSOR_PREFIX}${Buffer.from(
+    JSON.stringify(cursor),
+    'utf8',
+  ).toString('base64url')}`
+}
+
+/**
+ * Decodes a merged root-comment cursor and binds it to the current Team Issue.
+ *
+ * @param value - Untrusted request cursor.
+ * @param directoryId - Expected Workspace directory scope.
+ * @param teamId - Expected Team scope.
+ * @param issueId - Expected Issue scope.
+ * @returns A validated cursor, or undefined for a non-merged cursor namespace.
+ */
+function decodeMigrationAwareCollaborationCursor(
+  value: string | undefined,
+  directoryId: string,
+  teamId: string,
+  issueId: string,
+): MigrationAwareCollaborationCursor | undefined {
+  if (value === undefined || !value.startsWith(MIGRATION_AWARE_COLLABORATION_CURSOR_PREFIX)) {
+    return undefined
+  }
+
+  try {
+    const encoded = value.slice(MIGRATION_AWARE_COLLABORATION_CURSOR_PREFIX.length)
+    const parsed: unknown = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8'))
+    if (!isRecord(parsed) ||
+      parsed.version !== 1 ||
+      parsed.directoryId !== directoryId ||
+      parsed.teamId !== teamId ||
+      parsed.issueId !== issueId ||
+      typeof parsed.canonicalExhausted !== 'boolean' ||
+      typeof parsed.legacyExhausted !== 'boolean' ||
+      (parsed.canonicalCursor !== undefined &&
+        (typeof parsed.canonicalCursor !== 'string' || parsed.canonicalCursor.length === 0)) ||
+      (parsed.legacyEventCursor !== undefined &&
+        (typeof parsed.legacyEventCursor !== 'string' || parsed.legacyEventCursor.length === 0))) {
+      throw new TypeError('Invalid merged collaboration cursor payload.')
+    }
+    return {
+      version: 1,
+      directoryId,
+      teamId,
+      issueId,
+      ...(typeof parsed.canonicalCursor === 'string'
+        ? { canonicalCursor: parsed.canonicalCursor }
+        : {}),
+      ...(typeof parsed.legacyEventCursor === 'string'
+        ? { legacyEventCursor: parsed.legacyEventCursor }
+        : {}),
+      canonicalExhausted: parsed.canonicalExhausted,
+      legacyExhausted: parsed.legacyExhausted,
+    }
+  } catch {
+    throw new CollaborationError(400, 'InvalidCollaborationCursor', 'Collaboration cursor is invalid.')
+  }
+}
+
+/**
+ * Returns whether the first comment is newer than the second comment.
+ *
+ * @param left - First comment candidate.
+ * @param right - Second comment candidate.
+ * @returns Whether the first candidate sorts before the second candidate.
+ */
+function isMigrationAwareCommentNewer(
+  left: { id: string; createdAt: string },
+  right: { id: string; createdAt: string },
+): boolean {
+  return compareMigrationAwareComments(left, right) > 0
+}
+
+/** Compares two comments by their actual instant and stable identifier. */
+function compareMigrationAwareComments(
+  left: { id: string; createdAt: string },
+  right: { id: string; createdAt: string },
+): number {
+  const leftTime = Date.parse(left.createdAt)
+  const rightTime = Date.parse(right.createdAt)
+  if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) {
+    return leftTime - rightTime
+  }
+  return left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id)
+}
+
+/**
+ * Advances one stream after its current candidate has been emitted.
+ *
+ * @param state - Mutable stream state to advance.
+ */
+function consumeMigrationAwareCandidate(state: MigrationAwareRootStreamState): void {
+  const candidate = state.candidate
+  if (candidate === undefined) return
+  state.candidate = undefined
+  if (candidate.nextCursor !== undefined) {
+    state.cursor = candidate.nextCursor
+  }
+  const queuedCandidate = state.queuedCandidates?.shift()
+  if (queuedCandidate !== undefined) {
+    state.candidate = queuedCandidate
+    return
+  }
+  state.queuedCandidates = undefined
+  if (candidate.nextCursor === undefined) {
+    state.exhausted = true
+  }
+}
+
+/**
+ * Reads and merges canonical and legacy root comments in newest-first order.
+ *
+ * @param input - Readers, scope, and cursor state for the merged page.
+ * @returns Merged roots, stream continuation, and canonical scope state.
+ */
+async function readMigrationAwareRootPage(
+  input: MigrationAwareRootPageInput,
+): Promise<MigrationAwareRootPage> {
+  const canonicalState: MigrationAwareRootStreamState = {
+    ...(input.cursor?.canonicalCursor ? { cursor: input.cursor.canonicalCursor } : {}),
+    exhausted: input.cursor?.canonicalExhausted === true,
+  }
+  const legacyState: MigrationAwareRootStreamState = {
+    ...(input.cursor?.legacyEventCursor ? { cursor: input.cursor.legacyEventCursor } : {}),
+    exhausted: input.cursor?.legacyExhausted === true,
+  }
+  let scopeState: Pick<CollaborationThreadPage, 'watch' | 'presence'> | undefined
+
+  /** Loads the next unread canonical root comment candidate. */
+  const readCanonicalCandidate = async () => {
+    while (!canonicalState.exhausted && canonicalState.candidate === undefined) {
+      const page = await input.collaboration.getThread({
+        entityKey: input.entityKey,
+        viewerMemberKey: input.viewerMemberKey,
+        ...(input.projectEntityKey ? { projectEntityKey: input.projectEntityKey } : {}),
+        ...(canonicalState.cursor ? { cursor: canonicalState.cursor } : {}),
+        legacyCursorCompatible: true,
+        limit: 1,
+      })
+      scopeState = { watch: page.watch, presence: page.presence }
+      const comment = page.comments[0]
+      if (comment !== undefined) {
+        canonicalState.candidate = {
+          source: 'canonical',
+          comment,
+          ...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
+        }
+        return
+      }
+      if (page.nextCursor === undefined) {
+        canonicalState.exhausted = true
+      } else {
+        canonicalState.cursor = page.nextCursor
+      }
+    }
+  }
+
+  /** Loads the next unread legacy root comment candidate. */
+  const readLegacyCandidate = async () => {
+    while (!legacyState.exhausted && legacyState.candidate === undefined) {
+      const detail = await input.teamIssues.getTeamIssueDetail(
+        input.directoryId,
+        input.teamId,
+        input.issueId,
+        {
+          consistentIssueRead: true,
+          eventLimit: input.limit,
+          newestEventsFirst: true,
+          eventType: 'commented',
+          legacyCommentIndexOnly: true,
+          ...(legacyState.cursor ? { eventCursor: legacyState.cursor } : {}),
+        },
+      )
+      input.validateLegacyDetail(detail)
+      const comments = detail.comments ?? []
+      const candidates = comments.map((comment, index) => {
+        const nextComment = comments[index + 1]
+        const nextCursor = nextComment
+          ? createTeamIssueCommentEventCursor(
+              input.directoryId,
+              input.teamId,
+              input.issueId,
+              comment.id,
+              comment.createdAt,
+            )
+          : detail.nextEventCursor
+        return {
+          source: 'legacy' as const,
+          comment,
+          ...(nextCursor ? { nextCursor } : {}),
+        }
+      })
+      const [candidate, ...queuedCandidates] = candidates
+      if (candidate !== undefined) {
+        legacyState.candidate = candidate
+        legacyState.queuedCandidates = queuedCandidates
+        return
+      }
+      if (detail.nextEventCursor === undefined) {
+        legacyState.exhausted = true
+      } else {
+        legacyState.cursor = detail.nextEventCursor
+      }
+    }
+  }
+
+  if (canonicalState.exhausted) {
+    const page = await input.collaboration.getThread({
+      entityKey: input.entityKey,
+      viewerMemberKey: input.viewerMemberKey,
+      ...(input.projectEntityKey ? { projectEntityKey: input.projectEntityKey } : {}),
+      legacyCursorCompatible: true,
+      limit: 1,
+    })
+    scopeState = { watch: page.watch, presence: page.presence }
+  }
+
+  const canonicalComments: CollaborationComment[] = []
+  const legacyComments: TeamIssueCommentResponseItem[] = []
+  const orderedComments: MigrationAwareRootComment[] = []
+  while (canonicalComments.length + legacyComments.length < input.limit) {
+    await Promise.all([readCanonicalCandidate(), readLegacyCandidate()])
+    const canonicalCandidate = canonicalState.candidate
+    const legacyCandidate = legacyState.candidate
+    if (canonicalCandidate === undefined && legacyCandidate === undefined) break
+
+    if (canonicalCandidate?.source === 'canonical' && legacyCandidate?.source === 'legacy' &&
+      canonicalCandidate.comment.id === legacyCandidate.comment.id) {
+      canonicalComments.push(canonicalCandidate.comment)
+      orderedComments.push({ source: 'canonical', comment: canonicalCandidate.comment })
+      consumeMigrationAwareCandidate(canonicalState)
+      consumeMigrationAwareCandidate(legacyState)
+    } else if (canonicalCandidate?.source === 'canonical' &&
+      (legacyCandidate === undefined ||
+        isMigrationAwareCommentNewer(canonicalCandidate.comment, legacyCandidate.comment))) {
+      canonicalComments.push(canonicalCandidate.comment)
+      orderedComments.push({ source: 'canonical', comment: canonicalCandidate.comment })
+      consumeMigrationAwareCandidate(canonicalState)
+    } else if (legacyCandidate?.source === 'legacy') {
+      legacyComments.push(legacyCandidate.comment)
+      orderedComments.push({ source: 'legacy', comment: legacyCandidate.comment })
+      consumeMigrationAwareCandidate(legacyState)
+    } else {
+      throw new CollaborationError(503, 'CollaborationThreadReadFailed', 'Comment streams are invalid.')
+    }
+  }
+
+  const hasRemaining = !canonicalState.exhausted || canonicalState.candidate !== undefined ||
+    !legacyState.exhausted || legacyState.candidate !== undefined
+  const defaultScopeState: Pick<CollaborationThreadPage, 'watch' | 'presence'> = scopeState ?? {
+    watch: {
+      subscribed: false,
+      explicit: false,
+      automatic: false,
+      reasons: [],
+      watcherCount: 0,
+    },
+    presence: [],
+  }
+  return {
+    canonicalComments,
+    legacyComments,
+    orderedComments,
+    ...(hasRemaining
+      ? {
+          nextCursor: encodeMigrationAwareCollaborationCursor({
+            version: 1,
+            directoryId: input.directoryId,
+            teamId: input.teamId,
+            issueId: input.issueId,
+            ...(canonicalState.cursor ? { canonicalCursor: canonicalState.cursor } : {}),
+            ...(legacyState.cursor ? { legacyEventCursor: legacyState.cursor } : {}),
+            canonicalExhausted: canonicalState.exhausted,
+            legacyExhausted: legacyState.exhausted,
+          }),
+        }
+      : {}),
+    watch: defaultScopeState.watch,
+    presence: defaultScopeState.presence,
+  }
+}
+
+/**
+ * Merges legacy detail comments with canonical comments during the marker-gated cutover.
+ *
+ * @param legacyComments - Comments read from the legacy Work Item detail projection.
+ * @param canonicalComments - Comments read from the Collaboration store.
+ * @returns De-duplicated detail comments ordered by creation time and identifier.
+ */
+function mergeLegacyTeamIssueDetailComments(
+  legacyComments: TeamIssueCommentResponseItem[],
+  canonicalComments: TeamIssueCommentResponseItem[],
+) {
+  const commentsById = new Map(legacyComments.map((comment) => [comment.id, comment]))
+  for (const comment of canonicalComments) {
+    commentsById.set(comment.id, comment)
+  }
+  return [...commentsById.values()].sort(compareMigrationAwareComments)
 }
 
 async function requireValidCommentMentions(
@@ -28670,6 +29457,7 @@ function createCommentSearchDocument(
     creatorUserId: comment.authorMemberKey,
     createdAt: comment.createdAt,
     updatedAt: comment.updatedAt,
+    sourceRevision: comment.version,
   })
 }
 

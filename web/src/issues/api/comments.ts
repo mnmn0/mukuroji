@@ -125,6 +125,14 @@ export type TeamIssueCommentCapabilities = {
    * このコメントの reaction を変更できるかどうかです。
    */
   canReact?: boolean
+  /**
+   * このコメントに file を添付できるかどうかです。
+   */
+  canAttach?: boolean
+  /**
+   * このコメントを context item の source 候補にできるかどうかです。
+   */
+  canPromote?: boolean
 }
 
 /**

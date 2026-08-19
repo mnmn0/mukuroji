@@ -72,6 +72,7 @@ import {
   deriveWorkItemScheduleDueDate,
   isWorkItemSchedule,
   type CreateTeamIssueRequestBody,
+  type TeamIssueDetailReadOptions,
   type TeamIssuesClient,
   type UpdateTeamIssueRequestBody,
   type WorkItemAuthorizationSnapshot,
@@ -578,6 +579,10 @@ function createCollaborationStub(
     throw new Error('Unexpected collaboration client call.')
   }
   return {
+    async isTeamIssueCommentBackfillComplete() {
+      return true
+    },
+    validateBackfillTeamIssueComment: unsupported,
     getThread: unsupported,
     hasAttachableComment: unsupported,
     getCommentSnapshot: unsupported,
@@ -1482,10 +1487,7 @@ function configureFakeProjectClients(
       directoryId: string
       issueId: string
       teamId: string
-      readOptions?: {
-        consistentIssueRead?: boolean
-        eventLimit?: number
-      }
+      readOptions?: TeamIssueDetailReadOptions
     }>,
     issueReads: [] as Array<{ directoryId: string; limit?: number; teamId: string }>,
     publicIssuePageReads: [] as Array<{
@@ -2518,6 +2520,7 @@ function configureFakeProjectClients(
               '2026-06-08T00:00:00.000Z',
             source: 'dynamodb',
           },
+          comments: [],
           activity: [
             {
               id: 'activity-1',

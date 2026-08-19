@@ -97,6 +97,8 @@ export {
 } from './work-item-transfer'
 export {
   createTeamIssueAuditEntityId,
+  createTeamIssueCommentEventOrder,
+  createTeamIssueCommentEventCursor,
   createTeamIssueDeepLink,
   createWorkItemRevisionConditionCheck,
   createWorkItemAuthorizationChangedError,

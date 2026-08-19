@@ -82,24 +82,27 @@ Presence と typing は短い TTL を持つ lease です。WebSocket 接続が�
 
 Comment edit/resolve/delete は `expectedVersion` を要求します。読み込み後に別 user が変更した場合は `409 CommentVersionConflict` を返し、client は最新内容を再取得します。push/polling は表示の鮮度を上げる仕組みであり、整合性の最終防衛線は version 条件です。
 
-## Canonical comment source
+## Canonical comment source and legacy backfill
 
-Collaboration comment の正本は Collaboration table の persisted root/reply row だけです。旧 `TeamIssueEventsTable` の `commented` row は comment response へ読み込まず、`legacy.` で始まる旧 cursor も `InvalidCollaborationCursor` として拒否します。旧 row の存在確認と必要な backfill は runtime の fallback とは分離した検証・運用手順で扱います。
+Collaboration comment の正本は Collaboration table の persisted root/reply row です。移行完了 marker がある workspace では canonical row だけを返し、旧 `TeamIssueEventsTable` の `commented` event は activity/audit 用途として保持します。marker がない workspace では backfill が完走するまで canonical row と旧 event を creation time の降順で merge して返し、両方の stream の位置を束縛した `mixed.` cursor で続きの page を取得します。既存 client の移行途中リクエストに対応する `legacy.` cursor も一時的に受け付けます。旧 event から返した comment の mutation capability はすべて無効です。
 
-### Legacy comment cutover order
+旧 `commented` event は、workspace 単位の完了 marker が書かれるまで削除・非表示にしません。backfill は source event ID を canonical comment ID として使い、comment と root discussion row を条件付きで保存するため、checkpoint を使った中断・再実行に耐えます。Work Item が存在しない、row の scope が partition key と一致しない、既存 canonical row の内容が異なる場合は fail-closed で停止します。コメントごとの通知・activity audit は backfill から生成しませんが、完了した実行については実行者、検証済み AWS account、scope、件数を suppressed な運用 audit として記録します。backfill write は canonical comment の current snapshot を強整合で読み直して Workspace Search の comment document も同じ workflow で upsert します。編集済み本文を legacy event で巻き戻さず、削除済み comment や削除済み parent の document は削除します。Search 投影の件数も checkpoint、summary、完了 audit に保存するため、別の Workspace Search backfill を開始しなくても移行結果を検証できます。
 
-この canonical-only reader を本番へ適用する前に、次の順序で段階的に切り替えます。writer の切り替えと reader の削除を同じデプロイで開始してはいけません。
+まず dry-run で source row を検証し、その後 checkpoint を指定して実行します。source table の全 scan が完了した後にだけ、検出した各 workspace の marker が保存されます。workspace filter を指定しない実行では、legacy comment が一件もない workspace も canonical-only に切り替えられる環境全体 marker を追加で保存します。AWS の marker、provenance receipt、repair row、checkpoint は writer-fence invocation の内側で扱います。
 
-1. canonical Collaboration writer と従来 reader を同居させた互換リリースを先にデプロイします。この期間の writer は新しい V2 discussion index と旧 reader 用の discussion index を同じ transaction で dual-write し、新 reader は互換用の重複 row を fallback read から除外します。公開 root/reply page は旧 reader が解釈できる version-one discussion cursor を先に発行し、内部の bounded aggregate read だけが V2 cursor を使います。Automation worker、schedule worker、API の旧プロセスが残っている間はこの状態を維持します。
-2. 旧 Automation worker の実行を停止または drain し、in-flight execution と queue が完了してから、旧 `commented` writer が新しい row を追加しないことを確認します。
-3. 必要な既存 comment を Collaboration table へ backfill し、対象環境の全 `TeamIssueEventsTable` partition に対して下記の検証コマンドを実行します。`legacy_commented_event_count=0` にならない場合は次へ進みません。
-4. 検証後にこの canonical-only reader と旧 cursor 拒否を含むリリースをデプロイし、Automation worker を再開します。再開後も旧 writer、DLQ、canonical comment count を監視します。
+```sh
+AWS_ENDPOINT_URL=http://localhost:4566 \
+MUKUROJI_LOCAL_AWS_RUNTIME=floci \
+bun run team-issue-comments:backfill -- --dry-run --limit 100
+AWS_ENDPOINT_URL=http://localhost:4566 \
+MUKUROJI_LOCAL_AWS_RUNTIME=floci \
+bun run team-issue-comments:backfill -- \
+  --checkpoint /tmp/mukuroji-team-issue-comments-v2.json
+```
 
-互換期間中に旧 worker が comment row を永続化した後、response を失って canonical writer へ retry が到達する可能性があります。Automation writer は canonical write の前に、旧 writer と同じ決定的な `${execution.id}_comment_${actionIndex}` event ID を `ConsistentRead` で照合します。actor と本文が一致する旧 `commented` row は完了済みとして扱い、異なる入力や不正な row は fail closed します。この参照は response-loss retry の橋渡しだけに使い、canonical comment response の旧 table fallback には使いません。旧 worker の drain、backfill、全 partition scan は引き続き必要です。
+AWS では `TEAM_ISSUE_EVENTS_TABLE_NAME`、`COLLABORATION_TABLE_NAME`、`TEAM_ISSUES_TABLE_NAME`、`AUDIT_EVENTS_TABLE_NAME`、`WORKSPACE_SEARCH_TABLE_NAME` を明示してください。`MUKUROJI_BACKFILL_OPERATOR_ID` は任意の運用ラベルとして指定できますが、AWSの監査上の operator identity は STS `GetCallerIdentity` の caller ARN から取得します。local実行では `local:backfill` sentinel を使います。実行時に STS で account を検証し、`AWS_ACCOUNT_ID` を設定した場合は期待値として検証済み account と一致することを要求します。checkpoint には DynamoDB の continuation key が含まれるため owner-only で保存され、移行完了後に削除します。source/target/audit/search table、account、region、workspace filter が異なる checkpoint は拒否されます。特定 workspace だけを先に処理する場合は `--workspace-id <id>` を繰り返し指定できます。
 
-検証と reader 切り替えの間に旧 worker を稼働させないことが重要です。旧 worker が残る環境で検証結果が 0 でも、reader 削除後に新しい legacy row が発生するため、デプロイを中止して drain 状態を復旧してください。
-
-開発／検証環境で旧 row が残っていないことを確認する場合は、scope を明示した `ISSUE_ID` を指定して検証モードを実行します。このモードは対象 Issue の event 件数を読み取るだけでなく、`TeamIssueEventsTable` 全体を scan して、ページごとの `commented` 件数を合計します。`legacy_commented_event_count=0` 以外の場合は non-zero で終了します。
+本番へ canonical-only reader を適用する前に、旧 Automation worker を停止または drain し、in-flight execution と queue が完了してから backfill を実行します。全 partition の `commented` event を検証し、checkpoint の `completed=true`、対象 workspace の completion marker、suppressed completion audit、canonical 側の reconciliation が揃ったことを確認してから reader と旧 cursor 拒否を含むリリースをデプロイします。source event は activity/audit 用途として保持するため、`legacy_commented_event_count` は残存行数を示す情報値であり、0 を要求する完了条件ではありません。互換期間中は writer が V2 discussion index と旧 reader 用 index を同じ transaction で dual-write する状態を維持します。
 
 ```sh
 TEAM_ISSUES_TABLE_NAME=<team-issues-table> \

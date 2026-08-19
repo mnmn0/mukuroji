@@ -149,12 +149,12 @@ function isTeamIssueComment(value: unknown): value is TeamIssueComment {
   return (
     typeof value.id === 'string' &&
     typeof value.rootCommentId === 'string' &&
+    typeof value.createdAt === 'string' &&
     typeof value.authorMemberKey === 'string' &&
     typeof value.bodyMarkdown === 'string' &&
     typeof value.version === 'number' &&
     Number.isSafeInteger(value.version) &&
     value.version > 0 &&
-    typeof value.createdAt === 'string' &&
     typeof value.updatedAt === 'string' &&
     Array.isArray(value.mentionMemberKeys) &&
     value.mentionMemberKeys.every((memberKey) => typeof memberKey === 'string') &&
@@ -163,6 +163,10 @@ function isTeamIssueComment(value: unknown): value is TeamIssueComment {
     typeof capabilities.canEdit === 'boolean' &&
     typeof capabilities.canDelete === 'boolean' &&
     typeof capabilities.canResolve === 'boolean' &&
+    (capabilities.canReply === undefined || typeof capabilities.canReply === 'boolean') &&
+    (capabilities.canReact === undefined || typeof capabilities.canReact === 'boolean') &&
+    (capabilities.canAttach === undefined || typeof capabilities.canAttach === 'boolean') &&
+    (capabilities.canPromote === undefined || typeof capabilities.canPromote === 'boolean') &&
     (source === undefined || source === 'collaboration' || source === 'legacy')
   )
 }

@@ -5,6 +5,10 @@ import { configureAlarmRouting } from './aspects/alarm-routing';
 import { buildLambdaBuildPaths } from './config/lambda-build-paths';
 import { buildStackParameters } from './config/stack-parameters';
 import {
+  resolveTeamIssueCommentIndexDeploymentStage,
+  type TeamIssueCommentIndexDeploymentStage,
+} from './config/team-issue-comment-index-deployment';
+import {
   resolveTriageIndexDeploymentStage,
   triageIndexDeploymentIncludes,
   type TriageIndexDeploymentStage,
@@ -47,10 +51,12 @@ import { buildTriageScheduleWorker } from './subsystems/workers/triage';
 import { buildWebhookDeliveryWorkers } from './subsystems/workers/webhook-delivery';
 import { buildWorkItemImportWorker } from './subsystems/workers/work-item-import';
 
-/** Stack configuration plus reviewed migration and Triage rollout selections. */
+/** Stack configuration plus reviewed migration and stateful-index rollout selections. */
 export interface CdkStackProps extends cdk.StackProps {
   /** Reviewed one-index-at-a-time rollout stage for Triage GSIs. */
   readonly triageIndexDeploymentStage?: TriageIndexDeploymentStage;
+  /** Reviewed one-index-at-a-time rollout stage for Team Issue event GSIs. */
+  readonly teamIssueCommentIndexDeploymentStage?: TeamIssueCommentIndexDeploymentStage;
   /** Source-controlled target identifier; free-form target definitions are never accepted. */
   readonly workspaceSearchMigrationDeploymentTargetId?: string;
 }
@@ -69,11 +75,15 @@ export class CdkStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: CdkStackProps) {
     const {
       triageIndexDeploymentStage: configuredTriageIndexDeploymentStage,
+      teamIssueCommentIndexDeploymentStage: configuredTeamIssueCommentIndexDeploymentStage,
       workspaceSearchMigrationDeploymentTargetId,
       ...baseStackProps
     } = props ?? {};
     const triageIndexDeploymentStage = resolveTriageIndexDeploymentStage(
       configuredTriageIndexDeploymentStage,
+    );
+    const teamIssueCommentIndexDeploymentStage = resolveTeamIssueCommentIndexDeploymentStage(
+      configuredTeamIssueCommentIndexDeploymentStage,
     );
     const deploymentTarget =
       resolveWorkspaceSearchMigrationDeploymentTarget(
@@ -141,12 +151,16 @@ export class CdkStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'TriageIndexDeploymentStage', {
       value: triageIndexDeploymentStage,
     });
+    new cdk.CfnOutput(this, 'TeamIssueCommentIndexDeploymentStage', {
+      value: teamIssueCommentIndexDeploymentStage,
+    });
 
     const lambdaBuildPaths = buildLambdaBuildPaths();
     const parameters = buildStackParameters(this);
     const runtimeControls = buildRuntimeControls(this, { lambdaBuildPaths });
     const dataStores = buildDataStores(this, {
       connectorRuntimeConfiguration: parameters.connectorRuntimeConfiguration,
+      teamIssueCommentIndexDeploymentStage,
       triageIndexDeploymentStage,
     });
     const migrationStorage = buildMigrationStorage(this, {

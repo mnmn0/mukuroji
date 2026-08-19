@@ -4,6 +4,7 @@ node_modules/
 # Build outputs
 dist/
 audit-event-backfill.checkpoint.json
+team-issue-comment-backfill-v2.checkpoint.json
 build/
 coverage/
 
