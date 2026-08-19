@@ -155,6 +155,35 @@ describe('team issue collaboration API', () => {
     })
   })
 
+  test('rejects non-boolean per-comment capabilities at the API boundary', async () => {
+    installFetchRecorder({
+      comments: [{
+        id: 'comment-1',
+        rootCommentId: 'comment-1',
+        authorMemberKey: 'demo@example.com',
+        bodyMarkdown: 'Comment',
+        version: 1,
+        createdAt: '2026-08-09T00:00:00.000Z',
+        updatedAt: '2026-08-09T00:00:00.000Z',
+        mentionMemberKeys: [],
+        reactions: [],
+        capabilities: {
+          canEdit: true,
+          canDelete: true,
+          canResolve: false,
+          canAttach: 'yes',
+        },
+      }],
+    })
+
+    await expect(
+      getTeamIssueCollaboration('core', 'issue-1', 'token'),
+    ).rejects.toMatchObject({
+      code: 'InvalidIssueCollaborationResponse',
+      status: 502,
+    })
+  })
+
   test('uses an independent context cursor and revision-fenced curated mutations', async () => {
     const requests = installFetchRecorder({
       schemaVersion: COLLABORATION_CONTEXT_SCHEMA_VERSION,

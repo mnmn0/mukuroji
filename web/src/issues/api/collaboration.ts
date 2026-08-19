@@ -163,6 +163,10 @@ function isTeamIssueComment(value: unknown): value is TeamIssueComment {
     typeof capabilities.canEdit === 'boolean' &&
     typeof capabilities.canDelete === 'boolean' &&
     typeof capabilities.canResolve === 'boolean' &&
+    (capabilities.canReply === undefined || typeof capabilities.canReply === 'boolean') &&
+    (capabilities.canReact === undefined || typeof capabilities.canReact === 'boolean') &&
+    (capabilities.canAttach === undefined || typeof capabilities.canAttach === 'boolean') &&
+    (capabilities.canPromote === undefined || typeof capabilities.canPromote === 'boolean') &&
     (source === undefined || source === 'collaboration' || source === 'legacy')
   )
 }
