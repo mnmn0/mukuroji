@@ -85,6 +85,8 @@ type CheckpointState = {
   scanned: number
   /** Number of source rows copied or replayed idempotently. */
   backfilled: number
+  /** Number of rows reconciled because their canonical parent was deleted. */
+  reconciledDeletedParents?: number
   /** Workspaces observed in the source rows. */
   workspaceIds: string[]
   /** Cumulative source and canonical counts per workspace. */
@@ -97,6 +99,8 @@ type WorkspaceBackfillCounts = {
   scanned: number
   /** Number of canonical rows written or replayed for the workspace. */
   backfilled: number
+  /** Number of rows reconciled because their canonical parent was deleted. */
+  reconciledDeletedParents?: number
 }
 
 /** Resolved table names for one migration environment. */
@@ -451,6 +455,7 @@ async function readCheckpoint(path: string, configurationHash: string): Promise<
         completed: false,
         scanned: 0,
         backfilled: 0,
+        reconciledDeletedParents: 0,
         workspaceIds: [],
         workspaceCounts: {},
       }
@@ -487,7 +492,11 @@ async function runBackfill(
   )
   for (const workspaceId of options.workspaceIds) {
     if (!workspaceCounts.has(workspaceId)) {
-      workspaceCounts.set(workspaceId, { scanned: 0, backfilled: 0 })
+      workspaceCounts.set(workspaceId, {
+        scanned: 0,
+        backfilled: 0,
+        reconciledDeletedParents: 0,
+      })
     }
   }
 
@@ -523,11 +532,22 @@ async function runBackfill(
       const input = createBackfillInput(legacy)
       try {
         if (options.dryRun) {
-          await collaboration.validateBackfillTeamIssueComment(input)
+          const validation = await collaboration.validateBackfillTeamIssueComment(input)
+          if (validation === 'parent-deleted') {
+            counts.reconciledDeletedParents = (counts.reconciledDeletedParents ?? 0) + 1
+          }
         } else {
-          await collaboration.backfillTeamIssueComment(input)
-          checkpoint.backfilled += 1
-          counts.backfilled += 1
+          try {
+            await collaboration.backfillTeamIssueComment(input)
+            checkpoint.backfilled += 1
+            counts.backfilled += 1
+          } catch (error) {
+            if (!isDeletedParentBackfillError(error)) throw error
+            await collaboration.reconcileDeletedBackfillTeamIssueComment(input)
+            checkpoint.reconciledDeletedParents =
+              (checkpoint.reconciledDeletedParents ?? 0) + 1
+            counts.reconciledDeletedParents = (counts.reconciledDeletedParents ?? 0) + 1
+          }
         }
       } catch (error) {
         if (!options.dryRun) throw error
@@ -624,8 +644,13 @@ async function writeBackfillAuditEvents(
   const occurredAt = new Date().toISOString()
   const retentionDays = getConfiguredAuditRetentionDays()
   const scope = options.workspaceIds.length > 0 ? 'explicit-workspaces' : 'all-workspaces'
-  const requestedWorkspaceIds = options.workspaceIds.length > 0 ? options.workspaceIds : ['*']
   const affectedWorkspaceIds = [...workspaceIds].sort()
+  const requestedWorkspaceCount = options.workspaceIds.length
+  const requestedWorkspaceDigest = createDigest(
+    (options.workspaceIds.length > 0 ? options.workspaceIds : ['*']).join('\0'),
+  )
+  const affectedWorkspaceCount = affectedWorkspaceIds.length
+  const affectedWorkspaceDigest = createDigest(affectedWorkspaceIds.join('\0'))
   const auditWorkspaceIds = new Set(workspaceIds)
   if (options.workspaceIds.length === 0) {
     auditWorkspaceIds.add(TEAM_ISSUE_COMMENT_BACKFILL_ALL_WORKSPACES)
@@ -634,8 +659,21 @@ async function writeBackfillAuditEvents(
   for (const workspaceId of [...auditWorkspaceIds].sort()) {
     const environmentScope = workspaceId === TEAM_ISSUE_COMMENT_BACKFILL_ALL_WORKSPACES
     const counts = environmentScope
-      ? { scanned: checkpoint.scanned, backfilled: checkpoint.backfilled }
-      : workspaceCounts.get(workspaceId) ?? { scanned: 0, backfilled: 0 }
+      ? {
+          scanned: checkpoint.scanned,
+          backfilled: checkpoint.backfilled,
+          reconciledDeletedParents: checkpoint.reconciledDeletedParents ?? 0,
+        }
+      : workspaceCounts.get(workspaceId) ?? {
+          scanned: 0,
+          backfilled: 0,
+          reconciledDeletedParents: 0,
+        }
+    const receiptAffectedWorkspaceCount = environmentScope ? affectedWorkspaceCount : 1
+    const receiptAffectedWorkspaceDigest = environmentScope
+      ? affectedWorkspaceDigest
+      : createDigest(workspaceId)
+    const reconciledDeletedParents = counts.reconciledDeletedParents ?? 0
     const context = createMutationAuditContext({
       workspaceId,
       actor: {
@@ -660,10 +698,13 @@ async function writeBackfillAuditEvents(
           version: 1,
           accountId: runContext.accountId,
           configurationHash: runContext.configurationHash,
-          requestedWorkspaceIds,
-          affectedWorkspaceIds,
+          requestedWorkspaceCount,
+          requestedWorkspaceDigest,
+          affectedWorkspaceCount: receiptAffectedWorkspaceCount,
+          affectedWorkspaceDigest: receiptAffectedWorkspaceDigest,
           sourceRowsScanned: counts.scanned,
           canonicalRowsBackfilled: counts.backfilled,
+          reconciledDeletedParents,
         },
       },
       source: {
@@ -685,9 +726,15 @@ async function writeBackfillAuditEvents(
         {
           sourceRowsScanned: counts.scanned,
           canonicalRowsBackfilled: counts.backfilled,
+          reconciledDeletedParents,
           completed: checkpoint.completed,
         },
-        ['sourceRowsScanned', 'canonicalRowsBackfilled', 'completed'],
+        [
+          'sourceRowsScanned',
+          'canonicalRowsBackfilled',
+          'reconciledDeletedParents',
+          'completed',
+        ],
       ),
       summary: 'Completed Team Issue comment canonical backfill.',
       metadata: {
@@ -696,10 +743,13 @@ async function writeBackfillAuditEvents(
         ...(runContext.operatorLabel ? { operatorLabel: runContext.operatorLabel } : {}),
         accountId: runContext.accountId,
         scope,
-        requestedWorkspaceIds,
-        affectedWorkspaceIds,
+        requestedWorkspaceCount,
+        requestedWorkspaceDigest,
+        affectedWorkspaceCount: receiptAffectedWorkspaceCount,
+        affectedWorkspaceDigest: receiptAffectedWorkspaceDigest,
         sourceRowsScanned: counts.scanned,
         canonicalRowsBackfilled: counts.backfilled,
+        reconciledDeletedParents,
         configurationHash: runContext.configurationHash,
         ...(environmentScope ? { environmentScope: 'all-workspaces' } : {}),
       },
@@ -765,6 +815,11 @@ function readErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : 'Unknown validation failure.'
 }
 
+/** Detects the explicit parent-deleted result that is safe to reconcile. */
+function isDeletedParentBackfillError(error: unknown): boolean {
+  return isRecord(error) && error.code === 'CollaborationBackfillParentDeleted'
+}
+
 /** Requires a non-empty CLI or environment string.
  *
  * @param value - Candidate string.
@@ -802,6 +857,7 @@ function printSummary(checkpoint: CheckpointState, options: BackfillOptions) {
   console.info(
     `Team Issue comment backfill ${checkpoint.completed ? 'complete' : 'paused'}: ` +
       `scanned=${checkpoint.scanned} backfilled=${checkpoint.backfilled} ` +
+      `reconciledDeletedParents=${checkpoint.reconciledDeletedParents ?? 0} ` +
       `workspaces=${checkpoint.workspaceIds.length} dryRun=${options.dryRun}`,
   )
 }
@@ -833,6 +889,12 @@ function isCheckpointState(value: unknown): value is CheckpointState {
     typeof value.backfilled === 'number' &&
     Number.isSafeInteger(value.backfilled) &&
     value.backfilled >= 0 &&
+    (value.reconciledDeletedParents === undefined || (
+      typeof value.reconciledDeletedParents === 'number' &&
+      Number.isSafeInteger(value.reconciledDeletedParents) &&
+      value.reconciledDeletedParents >= 0 &&
+      value.reconciledDeletedParents <= value.scanned
+    )) &&
     Array.isArray(value.workspaceIds) &&
     value.workspaceIds.every((workspaceId): workspaceId is string =>
       typeof workspaceId === 'string' && workspaceId.length > 0,
@@ -852,7 +914,13 @@ function isWorkspaceBackfillCounts(value: unknown): value is WorkspaceBackfillCo
     typeof value.backfilled === 'number' &&
     Number.isSafeInteger(value.backfilled) &&
     value.backfilled >= 0 &&
-    value.backfilled <= value.scanned
+    value.backfilled <= value.scanned &&
+    (value.reconciledDeletedParents === undefined || (
+      typeof value.reconciledDeletedParents === 'number' &&
+      Number.isSafeInteger(value.reconciledDeletedParents) &&
+      value.reconciledDeletedParents >= 0 &&
+      value.reconciledDeletedParents <= value.scanned
+    ))
 }
 
 /** Validates the scalar-only key shape accepted by the DocumentClient.

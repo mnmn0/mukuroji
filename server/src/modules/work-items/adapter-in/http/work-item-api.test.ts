@@ -1044,7 +1044,7 @@ test('loads team issue detail and creates comments after team access is confirme
       issueId: 'onboarding-friction',
       readOptions: {
         consistentIssueRead: true,
-        eventLimit: 50,
+        includeComments: false,
       },
     },
     {
@@ -1115,6 +1115,84 @@ test('loads team issue detail and creates comments after team access is confirme
       { id: 'comment-2', bodyMarkdown: '追加コメント' },
     ],
   })
+})
+
+test('keeps complete Team Issue activity while reading legacy comments separately', async () => {
+  const calls = configureFakeProjectClients(true)
+  const defaultTeamIssues = getTestAppDependencies().workItems.teamIssues
+  const completeActivity = Array.from({ length: 60 }, (_, index) => ({
+    id: `activity-${index}`,
+    type: 'created' as const,
+    actorUserId: 'demo@example.com',
+    summary: `Activity ${index}`,
+    createdAt: `2026-06-08T00:${String(index).padStart(2, '0')}:00.000Z`,
+  }))
+  setTestAppDependencies({
+    collaboration: createCollaborationStub({
+      async isTeamIssueCommentBackfillComplete() {
+        return false
+      },
+      async getThread() {
+        return {
+          comments: [],
+          watch: {
+            subscribed: false,
+            explicit: false,
+            automatic: false,
+            reasons: [],
+            watcherCount: 0,
+          },
+          presence: [],
+        }
+      },
+    }),
+    teamIssues: {
+      ...defaultTeamIssues,
+      async getTeamIssueDetail(directoryId, teamId, issueId, options) {
+        const detail = await defaultTeamIssues.getTeamIssueDetail(
+          directoryId,
+          teamId,
+          issueId,
+          options,
+        )
+        return options?.includeComments === false
+          ? { ...detail, activity: completeActivity, comments: [] }
+          : {
+              ...detail,
+              comments: [{
+                id: 'legacy-comment',
+                actorUserId: 'departed@example.com',
+                body: 'Legacy comment',
+                createdAt: '2026-06-08T00:00:00.000Z',
+              }],
+            }
+      },
+    },
+  })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+
+  expect(response.status).toBe(200)
+  const responseBody = await response.json()
+  expect(responseBody.activity).toHaveLength(60)
+  expect(responseBody.comments).toEqual([{
+    id: 'legacy-comment',
+    actorUserId: 'departed@example.com',
+    body: 'Legacy comment',
+    createdAt: '2026-06-08T00:00:00.000Z',
+  }])
+  expect(calls.issueDetails.map(({ readOptions }) => readOptions)).toEqual([
+    { consistentIssueRead: true, includeComments: false },
+    {
+      consistentIssueRead: true,
+      eventLimit: 50,
+      newestEventsFirst: true,
+      eventType: 'commented',
+    },
+  ])
 })
 
 test('does not rehydrate a deleted canonical comment from the legacy detail fallback', async () => {
@@ -1668,7 +1746,7 @@ test('omits relations whose target Project is outside the viewer access scope', 
       directoryId: 'user#demo@example.com',
       teamId: 'core-team',
       issueId: 'work-item-1',
-      readOptions: { consistentIssueRead: true, eventLimit: 50 },
+      readOptions: { consistentIssueRead: true, includeComments: false },
     },
     {
       directoryId: 'user#demo@example.com',
@@ -1765,7 +1843,7 @@ test('fails closed when a persisted relation target Work Item is missing', async
   expect(calls.issueDetails.map(({ issueId, readOptions }) => ({ issueId, readOptions }))).toEqual([
     {
       issueId: 'work-item-1',
-      readOptions: { consistentIssueRead: true, eventLimit: 50 },
+      readOptions: { consistentIssueRead: true, includeComments: false },
     },
     {
       issueId: 'missing-target',
@@ -1867,6 +1945,51 @@ test('returns persisted collaboration comments and reply cursors', async () => {
       eventLimit: 0,
     },
   }])
+})
+
+test('rejects a collaboration page whose canonical comments exceed the byte budget', async () => {
+  configureFakeProjectClients(true)
+  const bodyMarkdown = 'x'.repeat(20_000)
+  const oversizedComments = Array.from({ length: 220 }, (_, index) => ({
+    id: `collaboration-payload-comment-${index}`,
+    rootCommentId: `collaboration-payload-comment-${index}`,
+    authorMemberKey: 'author@example.com',
+    bodyMarkdown,
+    version: 1,
+    mentionMemberKeys: [],
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+    acceptedResolutions: [],
+    reactions: [],
+  }))
+  setTestAppDependencies({
+    collaboration: createCollaborationStub({
+      async getThread(input) {
+        return {
+          comments: input.rootCommentId ? [] : oversizedComments,
+          watch: {
+            subscribed: false,
+            explicit: false,
+            automatic: false,
+            reasons: [],
+            watcherCount: 0,
+          },
+          presence: [],
+        }
+      },
+    }),
+  })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction/collaboration',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+
+  expect(response.status).toBe(413)
+  expect(await response.json()).toEqual({
+    code: 'CollaborationThreadPayloadTooLarge',
+    message: 'Collaboration comments exceed the supported response size.',
+  })
 })
 
 test('marks legacy collaboration fallback comments as read-only legacy responses', async () => {

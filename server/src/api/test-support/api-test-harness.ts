@@ -72,6 +72,7 @@ import {
   deriveWorkItemScheduleDueDate,
   isWorkItemSchedule,
   type CreateTeamIssueRequestBody,
+  type TeamIssueDetailReadOptions,
   type TeamIssuesClient,
   type UpdateTeamIssueRequestBody,
   type WorkItemAuthorizationSnapshot,
@@ -1486,10 +1487,7 @@ function configureFakeProjectClients(
       directoryId: string
       issueId: string
       teamId: string
-      readOptions?: {
-        consistentIssueRead?: boolean
-        eventLimit?: number
-      }
+      readOptions?: TeamIssueDetailReadOptions
     }>,
     issueReads: [] as Array<{ directoryId: string; limit?: number; teamId: string }>,
     publicIssuePageReads: [] as Array<{

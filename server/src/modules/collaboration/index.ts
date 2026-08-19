@@ -25,6 +25,7 @@ export {
   type CollaborationWatcherReason,
   type CollaborationWatcherState,
   type BackfillCollaborationCommentInput,
+  type BackfillTeamIssueCommentValidation,
   type PlanningUpdateTargetKeyInput,
   type CreateCuratedContextItemInput,
   type CreateCollaborationCommentInput,

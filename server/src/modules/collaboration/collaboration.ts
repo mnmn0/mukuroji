@@ -300,6 +300,9 @@ export type BackfillCollaborationCommentInput = WorkItemCollaborationScope & {
   occurredAt: string
 }
 
+/** Result of validating one legacy comment's canonical parent during backfill. */
+export type BackfillTeamIssueCommentValidation = 'canonical' | 'parent-deleted'
+
 /** Read-only authorization row guard appended to a watcher mutation transaction. */
 export type CollaborationAuthorizationConditionCheck = {
   /** Condition check against one current authorization source-of-truth row. */
@@ -615,7 +618,9 @@ export interface CollaborationClient {
   /** Returns whether the environment marker allows canonical-only Team Issue comment reads. */
   isTeamIssueCommentBackfillComplete(workspaceId: string): Promise<boolean>
   /** Validates one legacy Team Issue comment without writing migration state. */
-  validateBackfillTeamIssueComment(input: BackfillCollaborationCommentInput): Promise<void>
+  validateBackfillTeamIssueComment(
+    input: BackfillCollaborationCommentInput,
+  ): Promise<BackfillTeamIssueCommentValidation>
   /** Root comments または replies を page 取得します。 */
   getThread(input: GetCollaborationThreadInput): Promise<CollaborationThreadPage>
   /** File 添付先として保存済み・未削除の comment が存在するか確認します。 */
@@ -2399,6 +2404,32 @@ type StoredBackfillReceipt = {
   sourceBodyFingerprint: string
 }
 
+/** Durable reconciliation receipt for a comment whose parent Work Item was deleted. */
+type StoredDeletedBackfillReconciliation = {
+  /** DynamoDB partition key shared with the Work Item collaboration scope. */
+  entityKey: string
+  /** DynamoDB sort key for the immutable reconciliation receipt. */
+  recordKey: string
+  /** Row discriminator. */
+  entryType: 'team-issue-comment-backfill-reconciliation'
+  /** Stable legacy event identifier. */
+  commentId: string
+  /** Workspace that owned the deleted parent. */
+  workspaceId: string
+  /** Team that owned the deleted parent. */
+  teamId: string
+  /** Work Item identifier whose parent row is absent. */
+  issueId: string
+  /** Auditable reason for skipping canonical comment creation. */
+  reason: 'parent-deleted'
+  /** Normalized actor from the legacy event. */
+  sourceActorMemberKey: string
+  /** Normalized timestamp from the legacy event. */
+  sourceOccurredAt: string
+  /** Digest of the source identity and body without retaining the body again. */
+  sourceBodyFingerprint: string
+}
+
 /** Accepted resolution history の append-only row です。 */
 type StoredAcceptedResolution = {
   /** DynamoDB partition key です。 */
@@ -2861,10 +2892,11 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
    */
   async validateBackfillTeamIssueComment(
     input: BackfillCollaborationCommentInput,
-  ): Promise<void> {
+  ): Promise<BackfillTeamIssueCommentValidation> {
     await this.ensureLocalTable()
     const normalizedInput = normalizeBackfillCollaborationCommentInput(input)
-    await this.assertCanonicalBackfillParent(normalizedInput)
+    const parent = await this.readCanonicalBackfillParent(normalizedInput)
+    return parent ? 'canonical' : 'parent-deleted'
   }
 
   /**
@@ -2984,10 +3016,81 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
     }
   }
 
+  /**
+   * Records an idempotent reconciliation when a legacy comment's parent was deleted.
+   *
+   * The transaction proves that the canonical parent is still absent while writing
+   * a scoped receipt. A concurrent recreation therefore becomes a conflict instead
+   * of silently classifying a live Work Item as deleted.
+   *
+   * @param input - Legacy comment and deleted Work Item scope.
+   */
+  async reconcileDeletedBackfillTeamIssueComment(
+    input: BackfillCollaborationCommentInput,
+  ): Promise<void> {
+    await this.ensureLocalTable()
+    const normalizedInput = normalizeBackfillCollaborationCommentInput(input)
+    const expected = createDeletedBackfillReconciliationRecord(normalizedInput)
+    try {
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [
+          deletedParentBackfillCondition(this.parentIssueTableName, normalizedInput),
+          {
+            Put: {
+              TableName: this.tableName,
+              Item: expected,
+              ConditionExpression: 'attribute_not_exists(entityKey) AND attribute_not_exists(recordKey)',
+            },
+          },
+        ],
+      }))
+    } catch (error) {
+      if (!isBackfillConditionalFailure(error)) {
+        throw toCollaborationStoreError(error)
+      }
+      if (isTransactionConditionalFailureAt(error, 0)) {
+        throw new CollaborationError(
+          409,
+          'CollaborationBackfillConflict',
+          'The deleted Work Item parent was recreated while reconciliation was running.',
+          { cause: error },
+        )
+      }
+      const existing = await this.getDeletedBackfillReconciliation(
+        normalizedInput.entityKey,
+        normalizedInput.commentId,
+      )
+      if (existing && isSameDeletedBackfillReconciliation(existing, normalizedInput)) {
+        return
+      }
+      throw new CollaborationError(
+        409,
+        'CollaborationBackfillConflict',
+        'The deleted comment reconciliation receipt already exists with different data.',
+        { cause: error },
+      )
+    }
+  }
+
   /** Reads and validates the canonical parent before a backfill is planned or written. */
   private async assertCanonicalBackfillParent(
     input: BackfillCollaborationCommentInput,
   ): Promise<CanonicalWorkItemRecord> {
+    const parent = await this.readCanonicalBackfillParent(input)
+    if (!parent) {
+      throw new CollaborationError(
+        409,
+        'CollaborationBackfillParentDeleted',
+        'The parent Work Item was deleted before the legacy comment was migrated.',
+      )
+    }
+    return parent
+  }
+
+  /** Reads one canonical parent and distinguishes deletion from malformed data. */
+  private async readCanonicalBackfillParent(
+    input: BackfillCollaborationCommentInput,
+  ): Promise<CanonicalWorkItemRecord | undefined> {
     const response = await this.documentClient.send(new GetCommand({
       TableName: this.parentIssueTableName,
       Key: {
@@ -2996,14 +3099,33 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       },
       ConsistentRead: true,
     }))
+    if (response.Item === undefined) {
+      return undefined
+    }
     if (!isCanonicalBackfillParent(response.Item, input)) {
       throw new CollaborationError(
         409,
         'CollaborationBackfillConflict',
-        'The parent Work Item is missing or invalid.',
+        'The parent Work Item is invalid for the legacy comment scope.',
       )
     }
     return response.Item
+  }
+
+  /** Reads one immutable deleted-parent reconciliation receipt with strong consistency. */
+  private async getDeletedBackfillReconciliation(
+    entityKey: string,
+    commentId: string,
+  ) {
+    const recordKey = deletedBackfillReconciliationRecordKey(commentId)
+    const response = await this.documentClient.send(new GetCommand({
+      TableName: this.tableName,
+      Key: { entityKey, recordKey },
+      ConsistentRead: true,
+    }))
+    return response.Item
+      ? toStoredDeletedBackfillReconciliation(response.Item, entityKey, recordKey)
+      : undefined
   }
 
   /** Reads one immutable backfill provenance receipt with strong consistency. */
@@ -3211,10 +3333,10 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
         }],
       }))
     } catch (error) {
-      if (
-        isTransactionConditionalFailureAt(error, 0) &&
-        await this.isTeamIssueCommentBackfillComplete(workspaceId)
-      ) {
+      if (!isTransactionConditionalFailureAt(error, 0)) {
+        throw toCollaborationStoreError(error)
+      }
+      if (await this.isTeamIssueCommentBackfillComplete(workspaceId)) {
         return
       }
       throw new CollaborationError(
@@ -6049,6 +6171,23 @@ function parentIssueBackfillCondition(
   }
 }
 
+/** Builds the parent-absence guard used by deleted-parent reconciliation. */
+function deletedParentBackfillCondition(
+  tableName: string,
+  input: Pick<WorkItemCollaborationScope, 'workspaceId' | 'teamId' | 'issueId'>,
+) {
+  return {
+    ConditionCheck: {
+      TableName: tableName,
+      Key: {
+        directoryTeamId: `${input.workspaceId}#team#${input.teamId}`,
+        issueId: input.issueId,
+      },
+      ConditionExpression: 'attribute_not_exists(directoryTeamId) AND attribute_not_exists(issueId)',
+    },
+  }
+}
+
 /** Checks that a parent row is the canonical Work Item for the requested scope. */
 function isCanonicalBackfillParent(
   value: unknown,
@@ -6094,6 +6233,11 @@ function backfillReceiptRecordKey(commentId: string) {
   return `BACKFILL#${requireIdentifier(commentId, 'Comment ID')}`
 }
 
+/** Creates the stable record key for one deleted-parent reconciliation receipt. */
+function deletedBackfillReconciliationRecordKey(commentId: string) {
+  return `BACKFILL_RECONCILIATION#${requireIdentifier(commentId, 'Comment ID')}`
+}
+
 /** Creates a digest that binds a receipt to the original legacy comment payload. */
 function createBackfillSourceBodyFingerprint(input: BackfillCollaborationCommentInput) {
   return createHash('sha256')
@@ -6110,6 +6254,25 @@ function createBackfillReceiptRecord(
     recordKey: backfillReceiptRecordKey(input.commentId),
     entryType: 'team-issue-comment-backfill-receipt',
     commentId: input.commentId,
+    sourceActorMemberKey: input.actorMemberKey,
+    sourceOccurredAt: input.occurredAt,
+    sourceBodyFingerprint: createBackfillSourceBodyFingerprint(input),
+  }
+}
+
+/** Creates an auditable receipt for a legacy comment whose parent was deleted. */
+function createDeletedBackfillReconciliationRecord(
+  input: BackfillCollaborationCommentInput,
+): StoredDeletedBackfillReconciliation {
+  return {
+    entityKey: input.entityKey,
+    recordKey: deletedBackfillReconciliationRecordKey(input.commentId),
+    entryType: 'team-issue-comment-backfill-reconciliation',
+    commentId: input.commentId,
+    workspaceId: input.workspaceId,
+    teamId: input.teamId,
+    issueId: input.issueId,
+    reason: 'parent-deleted',
     sourceActorMemberKey: input.actorMemberKey,
     sourceOccurredAt: input.occurredAt,
     sourceBodyFingerprint: createBackfillSourceBodyFingerprint(input),
@@ -6148,6 +6311,46 @@ function toStoredBackfillReceipt(
   }
 }
 
+/** Validates one immutable deleted-parent reconciliation receipt read from DynamoDB. */
+function toStoredDeletedBackfillReconciliation(
+  value: Record<string, unknown>,
+  entityKey: string,
+  recordKey: string,
+): StoredDeletedBackfillReconciliation {
+  if (
+    value.entryType !== 'team-issue-comment-backfill-reconciliation' ||
+    value.entityKey !== entityKey ||
+    value.recordKey !== recordKey ||
+    typeof value.commentId !== 'string' ||
+    typeof value.workspaceId !== 'string' ||
+    typeof value.teamId !== 'string' ||
+    typeof value.issueId !== 'string' ||
+    value.reason !== 'parent-deleted' ||
+    typeof value.sourceActorMemberKey !== 'string' ||
+    typeof value.sourceOccurredAt !== 'string' ||
+    typeof value.sourceBodyFingerprint !== 'string'
+  ) {
+    throw new CollaborationError(
+      503,
+      'InvalidCollaborationRecord',
+      'Deleted-parent backfill reconciliation is invalid.',
+    )
+  }
+  return {
+    entityKey,
+    recordKey,
+    entryType: 'team-issue-comment-backfill-reconciliation',
+    commentId: requireIdentifier(value.commentId, 'Reconciliation comment ID'),
+    workspaceId: requireText(value.workspaceId, 'Reconciliation workspace ID'),
+    teamId: requireIdentifier(value.teamId, 'Reconciliation team ID'),
+    issueId: requireIdentifier(value.issueId, 'Reconciliation issue ID'),
+    reason: 'parent-deleted',
+    sourceActorMemberKey: normalizeMemberKey(value.sourceActorMemberKey),
+    sourceOccurredAt: normalizeBackfillTimestamp(value.sourceOccurredAt),
+    sourceBodyFingerprint: value.sourceBodyFingerprint,
+  }
+}
+
 /** Checks whether a receipt belongs to the currently scanned legacy comment. */
 function isSameBackfillReceipt(
   receipt: StoredBackfillReceipt,
@@ -6159,6 +6362,23 @@ function isSameBackfillReceipt(
     receipt.sourceActorMemberKey === input.actorMemberKey &&
     receipt.sourceOccurredAt === input.occurredAt &&
     receipt.sourceBodyFingerprint === createBackfillSourceBodyFingerprint(input)
+}
+
+/** Checks whether a deleted-parent reconciliation matches the current source event. */
+function isSameDeletedBackfillReconciliation(
+  reconciliation: StoredDeletedBackfillReconciliation,
+  input: BackfillCollaborationCommentInput,
+) {
+  return reconciliation.entityKey === input.entityKey &&
+    reconciliation.recordKey === deletedBackfillReconciliationRecordKey(input.commentId) &&
+    reconciliation.commentId === input.commentId &&
+    reconciliation.workspaceId === input.workspaceId &&
+    reconciliation.teamId === input.teamId &&
+    reconciliation.issueId === input.issueId &&
+    reconciliation.reason === 'parent-deleted' &&
+    reconciliation.sourceActorMemberKey === input.actorMemberKey &&
+    reconciliation.sourceOccurredAt === input.occurredAt &&
+    reconciliation.sourceBodyFingerprint === createBackfillSourceBodyFingerprint(input)
 }
 
 /** Checks immutable comment identity while allowing later body and lifecycle mutations. */
@@ -6901,10 +7121,10 @@ function normalizeCommentBody(value: string, maxLength: number | null = COLLABOR
  * Normalizes a historical comment body without applying the current composer limit.
  *
  * @param value - Legacy comment body copied during migration.
- * @returns A trimmed, newline-normalized body that preserves historically accepted length.
+ * @returns A trimmed body that preserves historically accepted length and characters.
  */
 function normalizeBackfillCommentBody(value: string) {
-  return normalizeCommentBody(value, null)
+  return requireText(value, 'Backfill comment body')
 }
 
 /**

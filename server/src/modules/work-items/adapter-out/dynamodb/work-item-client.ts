@@ -1305,6 +1305,8 @@ export type TeamIssuesClient = {
 export type TeamIssueDetailReadOptions = {
   /** Issue 本体を strongly consistent read で認可へ使う場合は true です。 */
   consistentIssueRead?: boolean
+  /** Whether to materialize comment events in addition to the complete activity page. */
+  includeComments?: boolean
   /** 読み込む event の最大件数です。0 の場合は event partition を読みません。 */
   eventLimit?: number
   /** 移行未完了の環境で新しい event から読み込む場合は true です。 */
@@ -1905,9 +1907,11 @@ export class DynamoDbTeamIssuesClient {
 
       return {
         issue: toTeamIssueResponseItem(issue),
-        comments: events
-          .filter((event) => event.eventType === 'commented')
-          .map(toTeamIssueCommentResponseItem),
+        comments: options.includeComments === false
+          ? []
+          : events
+              .filter((event) => event.eventType === 'commented')
+              .map(toTeamIssueCommentResponseItem),
         activity: events.map(toTeamIssueActivityResponseItem),
         ...(triageContextSnapshots.length > 0 ? { triageContextSnapshots } : {}),
         ...(eventPage.nextCursor ? { nextEventCursor: eventPage.nextCursor } : {}),
@@ -4026,6 +4030,7 @@ function isTeamIssueEventItem(value: unknown): value is TeamIssueEventItem {
     typeof value.eventId === 'string' &&
     isTeamIssueActivityType(value.eventType) &&
     typeof value.actorUserId === 'string' &&
+    (value.body === undefined || typeof value.body === 'string') &&
     (value.eventType !== 'commented' ||
       (typeof value.body === 'string' && value.body.trim().length > 0)) &&
     hasCanonicalTriageContextSnapshot(value.eventType, value.triageContextSnapshot) &&

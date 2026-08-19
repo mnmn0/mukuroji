@@ -8872,7 +8872,7 @@ routeApp.get('/api/teams/:teamId/issues/:issueId', async (c) => {
       issueId,
       {
         consistentIssueRead: true,
-        eventLimit: LEGACY_COLLABORATION_EVENT_PREVIEW_LIMIT,
+        includeComments: false,
       },
     )
     requireAssignedProjectPermission(principal, context, detail.issue.assignedProjectId, 'viewer')
@@ -8889,6 +8889,19 @@ routeApp.get('/api/teams/:teamId/issues/:issueId', async (c) => {
     const commentBackfillComplete = await workItemDependencies.collaboration.isTeamIssueCommentBackfillComplete(
       principal.directoryId,
     )
+    const legacyCommentDetail = commentBackfillComplete
+      ? undefined
+      : await workItemDependencies.teamIssues.getTeamIssueDetail(
+          principal.directoryId,
+          teamId,
+          issueId,
+          {
+            consistentIssueRead: true,
+            eventLimit: LEGACY_COLLABORATION_EVENT_PREVIEW_LIMIT,
+            newestEventsFirst: true,
+            eventType: 'commented',
+          },
+        )
     const [collaborationComments, resolvedConfiguration, relationPage] = await Promise.all([
       readAllCollaborationThreadComments(workItemDependencies.collaboration, {
         entityKey,
@@ -8917,7 +8930,7 @@ routeApp.get('/api/teams/:teamId/issues/:issueId', async (c) => {
       .map(toTeamIssueDetailCommentResponse)
     const legacyComments = commentBackfillComplete
       ? []
-      : (detail.comments ?? []).filter((comment) => !canonicalCommentIds.has(comment.id))
+      : (legacyCommentDetail?.comments ?? []).filter((comment) => !canonicalCommentIds.has(comment.id))
     const hydratedDetail = await hydrateTeamIssueDetailResponse(
       {
         ...detail,
@@ -9270,17 +9283,19 @@ routeApp.get('/api/teams/:teamId/issues/:issueId/collaboration', async (c) => {
         legacyCursorCompatible: true,
         limit: limit === undefined ? 20 : Math.min(limit, 20),
       })
+      const responseComments = [...replies.comments].reverse().map((comment) =>
+        toCollaborationCommentResponse(
+          comment,
+          principal,
+          context,
+          detail.issue,
+          replies.threadResolved === true,
+        )
+      )
+      enforceCollaborationCommentResponseBudget(responseComments)
       return c.json({
         // Store は最新順で page し、thread 内は古い順に描画できるよう反転して返す。
-        comments: [...replies.comments].reverse().map((comment) =>
-          toCollaborationCommentResponse(
-            comment,
-            principal,
-            context,
-            detail.issue,
-            replies.threadResolved === true,
-          )
-        ),
+        comments: responseComments,
         ...(replies.nextCursor ? { nextCursor: replies.nextCursor } : {}),
         replyRootCommentId: requestedRootCommentId,
         watch: replies.watch,
@@ -9390,6 +9405,7 @@ routeApp.get('/api/teams/:teamId/issues/:issueId/collaboration', async (c) => {
       ),
     )
     collaborationComments.push(...legacyComments)
+    enforceCollaborationCommentResponseBudget(collaborationComments)
     const replyNextCursors = Object.fromEntries(
       roots.comments.flatMap((root, index) => {
         const cursor = replyPages[index]?.nextCursor
@@ -28434,6 +28450,28 @@ function toCollaborationCommentResponse(
 type CollaborationCommentResponse = ReturnType<typeof toCollaborationCommentResponse> & {
   /** Identifies the canonical store or the temporary read-only legacy projection. */
   source?: 'collaboration' | 'legacy'
+}
+
+/**
+ * Enforces the serialized comment budget shared by collaboration page responses.
+ *
+ * @param comments - Projected comments that would be returned by the endpoint.
+ */
+function enforceCollaborationCommentResponseBudget(
+  comments: readonly CollaborationCommentResponse[],
+): void {
+  let bytesRead = 2
+  for (const comment of comments) {
+    const commentBytes = Buffer.byteLength(JSON.stringify(comment), 'utf8') + 1
+    if (bytesRead + commentBytes > TEAM_ISSUE_DETAIL_COMMENT_MAX_BYTES) {
+      throw new CollaborationError(
+        413,
+        'CollaborationThreadPayloadTooLarge',
+        'Collaboration comments exceed the supported response size.',
+      )
+    }
+    bytesRead += commentBytes
+  }
 }
 
 /**
