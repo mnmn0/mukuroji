@@ -1337,7 +1337,7 @@ type TeamIssueEventCursor =
       directoryTeamIssueId: string
       /** DynamoDB base-table event sort key です。 */
       eventId: string
-      /** DynamoDB createdAt index sort key です。 */
+      /** Canonical event instant used for chronologically ordered cursors. */
       createdAt: string
     }
 
@@ -3301,13 +3301,18 @@ export class DynamoDbTeamIssuesClient {
         'Team Issue event cursor is invalid for this event query.',
       )
     }
-    const useCreatedAtIndex = options.eventType === 'commented' &&
-      (eventCursor === undefined || eventCursor.version === 2)
+    if (options.eventType === 'commented' &&
+        (eventCursor === undefined || eventCursor.version === 2)) {
+      return this.queryCommentEventsWithNormalizedOrdering(
+        directoryTeamIssueId,
+        options,
+        eventCursor,
+      )
+    }
     let exclusiveStartKey: Record<string, unknown> | undefined = eventCursor
       ? {
           directoryTeamIssueId: eventCursor.directoryTeamIssueId,
           eventId: eventCursor.eventId,
-          ...(eventCursor.version === 2 ? { createdAt: eventCursor.createdAt } : {}),
         }
       : undefined
 
@@ -3316,9 +3321,6 @@ export class DynamoDbTeamIssuesClient {
       const response = await this.documentClient.send(
         new QueryCommand({
           TableName: this.eventTableName,
-          ...(useCreatedAtIndex
-            ? { IndexName: 'TeamIssueEventCreatedAtIndex' }
-            : {}),
           KeyConditionExpression: 'directoryTeamIssueId = :directoryTeamIssueId',
           ExpressionAttributeValues: {
             ':directoryTeamIssueId': directoryTeamIssueId,
@@ -3345,20 +3347,157 @@ export class DynamoDbTeamIssuesClient {
             nextCursor: encodeTeamIssueEventCursor(
               directoryTeamIssueId,
               exclusiveStartKey,
-              useCreatedAtIndex,
+              false,
             ),
           }
         : {}),
     }
   }
 
+  /**
+   * Reads all indexed comment candidates, validates the sparse-index coverage,
+   * and orders results by the parsed instant rather than the raw timestamp text.
+   *
+   * @param directoryTeamIssueId - Work Item event partition key.
+   * @param options - Comment event page options.
+   * @param eventCursor - Previously emitted comment cursor.
+   * @returns A chronologically ordered comment page.
+   */
+  private async queryCommentEventsWithNormalizedOrdering(
+    directoryTeamIssueId: string,
+    options: TeamIssueDetailReadOptions,
+    eventCursor: Extract<TeamIssueEventCursor, { version: 2 }> | undefined,
+  ) {
+    const [indexedItems, baseCommentIds] = await Promise.all([
+      this.queryIndexedCommentEvents(directoryTeamIssueId),
+      this.readCommentEventIndexCoverage(directoryTeamIssueId),
+    ])
+    const indexedCommentIds = new Set(indexedItems.map((item) => item.eventId))
+    const items = setsEqual(indexedCommentIds, baseCommentIds)
+      ? indexedItems
+      : await this.queryBaseCommentEvents(directoryTeamIssueId)
+    const orderedItems = [...items].sort((left, right) =>
+      compareTeamIssueEvents(left, right, options.newestEventsFirst === true)
+    )
+    const startIndex = findTeamIssueEventCursorStartIndex(
+      orderedItems,
+      eventCursor,
+      options.newestEventsFirst === true,
+    )
+    const eventLimit = options.eventLimit === undefined
+      ? undefined
+      : Math.max(1, Math.floor(options.eventLimit))
+    const pageItems = eventLimit === undefined
+      ? orderedItems.slice(startIndex)
+      : orderedItems.slice(startIndex, startIndex + eventLimit)
+    const lastItem = pageItems.at(-1)
+    const hasMore = lastItem !== undefined && startIndex + pageItems.length < orderedItems.length
+    return {
+      items: pageItems,
+      ...(hasMore && lastItem
+        ? {
+            nextCursor: encodeTeamIssueEventCursor(
+              directoryTeamIssueId,
+              {
+                eventId: lastItem.eventId,
+                createdAt: lastItem.createdAt,
+              },
+              true,
+            ),
+          }
+        : {}),
+    }
+  }
+
+  /** Reads every comment candidate from the sparse createdAt index. */
+  private async queryIndexedCommentEvents(directoryTeamIssueId: string) {
+    const items: TeamIssueEventItem[] = []
+    let exclusiveStartKey: Record<string, unknown> | undefined
+    do {
+      const response = await this.documentClient.send(new QueryCommand({
+        TableName: this.eventTableName,
+        IndexName: 'TeamIssueEventCreatedAtIndex',
+        KeyConditionExpression: 'directoryTeamIssueId = :directoryTeamIssueId',
+        ExpressionAttributeValues: {
+          ':directoryTeamIssueId': directoryTeamIssueId,
+          ':eventType': 'commented',
+        },
+        FilterExpression: 'eventType = :eventType',
+        ExclusiveStartKey: exclusiveStartKey,
+        ScanIndexForward: false,
+      }))
+      items.push(...(response.Items ?? []).map(toTeamIssueEventItem))
+      exclusiveStartKey = response.LastEvaluatedKey
+    } while (exclusiveStartKey)
+    return items.filter((item) => item.eventType === 'commented')
+  }
+
+  /**
+   * Validates all comment rows that the sparse createdAt index should contain.
+   *
+   * @param directoryTeamIssueId - Work Item event partition key.
+   * @returns Event IDs present in the strongly consistent base-table query.
+   */
+  private async readCommentEventIndexCoverage(directoryTeamIssueId: string) {
+    const eventIds = new Set<string>()
+    let exclusiveStartKey: Record<string, unknown> | undefined
+    do {
+      const response = await this.documentClient.send(new QueryCommand({
+        TableName: this.eventTableName,
+        KeyConditionExpression: 'directoryTeamIssueId = :directoryTeamIssueId',
+        ExpressionAttributeNames: {
+          '#createdAt': 'createdAt',
+          '#eventId': 'eventId',
+          '#eventType': 'eventType',
+        },
+        ExpressionAttributeValues: {
+          ':directoryTeamIssueId': directoryTeamIssueId,
+          ':eventType': 'commented',
+        },
+        FilterExpression: '#eventType = :eventType',
+        ProjectionExpression: '#createdAt, #eventId, #eventType',
+        ExclusiveStartKey: exclusiveStartKey,
+        ConsistentRead: true,
+      }))
+      for (const item of response.Items ?? []) {
+        eventIds.add(readCommentEventIndexCoverageId(item))
+      }
+      exclusiveStartKey = response.LastEvaluatedKey
+    } while (exclusiveStartKey)
+    return eventIds
+  }
+
+  /** Reads and fully validates comment rows from the base table after index drift. */
+  private async queryBaseCommentEvents(directoryTeamIssueId: string) {
+    const items: TeamIssueEventItem[] = []
+    let exclusiveStartKey: Record<string, unknown> | undefined
+    do {
+      const response = await this.documentClient.send(new QueryCommand({
+        TableName: this.eventTableName,
+        KeyConditionExpression: 'directoryTeamIssueId = :directoryTeamIssueId',
+        ExpressionAttributeValues: {
+          ':directoryTeamIssueId': directoryTeamIssueId,
+          ':eventType': 'commented',
+        },
+        FilterExpression: 'eventType = :eventType',
+        ExclusiveStartKey: exclusiveStartKey,
+        ConsistentRead: true,
+      }))
+      items.push(...(response.Items ?? []).map(toTeamIssueEventItem))
+      exclusiveStartKey = response.LastEvaluatedKey
+    } while (exclusiveStartKey)
+    return items.filter((item) => item.eventType === 'commented')
+  }
+
   private createIssueEventItem(
     input: Omit<TeamIssueEventItem, 'directoryTeamIssueId' | 'eventId'> & { eventId?: string },
   ) {
+    const createdAt = normalizeTeamIssueEventTimestamp(input.createdAt)
     return {
       ...input,
       directoryTeamIssueId: createDirectoryTeamIssueId(input.directoryId, input.teamId, input.issueId),
-      eventId: input.eventId ?? createTeamIssueEventId(input.createdAt, input.eventType),
+      eventId: input.eventId ?? createTeamIssueEventId(createdAt, input.eventType),
+      createdAt,
     } satisfies TeamIssueEventItem
   }
 
@@ -4137,8 +4276,89 @@ function isTeamIssueEventItem(value: unknown): value is TeamIssueEventItem {
       (typeof value.body === 'string' && value.body.trim().length > 0)) &&
     hasCanonicalTriageContextSnapshot(value.eventType, value.triageContextSnapshot) &&
     typeof value.summary === 'string' &&
-    typeof value.createdAt === 'string'
+    typeof value.createdAt === 'string' &&
+    Number.isFinite(Date.parse(value.createdAt))
   )
+}
+
+/** Normalizes one newly stored Team Issue event timestamp for indexed ordering. */
+function normalizeTeamIssueEventTimestamp(value: string): string {
+  const parsed = Date.parse(value)
+  if (!Number.isFinite(parsed)) {
+    throw new ProjectDataError(
+      500,
+      'InvalidTeamIssue',
+      'Team Issue event timestamp is invalid.',
+    )
+  }
+  return new Date(parsed).toISOString()
+}
+
+/** Validates one strongly read row that should be present in the sparse comment index. */
+function readCommentEventIndexCoverageId(value: unknown): string {
+  if (!isRecord(value) ||
+      value.eventType !== 'commented' ||
+      typeof value.eventId !== 'string' ||
+      value.eventId.length === 0 ||
+      typeof value.createdAt !== 'string' ||
+      !Number.isFinite(Date.parse(value.createdAt))) {
+    throw new ProjectDataError(
+      503,
+      'InvalidTeamIssue',
+      'Team Issue comment event item is missing or invalid.',
+    )
+  }
+  return value.eventId
+}
+
+/** Compares two validated events by their actual timestamp and stable ID. */
+function compareTeamIssueEvents(
+  left: TeamIssueEventItem,
+  right: TeamIssueEventItem,
+  newestFirst: boolean,
+): number {
+  const leftTime = Date.parse(left.createdAt)
+  const rightTime = Date.parse(right.createdAt)
+  if (leftTime !== rightTime) {
+    return newestFirst ? rightTime - leftTime : leftTime - rightTime
+  }
+  return newestFirst
+    ? right.eventId.localeCompare(left.eventId)
+    : left.eventId.localeCompare(right.eventId)
+}
+
+/** Compares two event ID sets without depending on their insertion order. */
+function setsEqual(left: Set<string>, right: Set<string>): boolean {
+  if (left.size !== right.size) return false
+  for (const value of left) {
+    if (!right.has(value)) return false
+  }
+  return true
+}
+
+/** Finds the first item after a canonical-time event cursor. */
+function findTeamIssueEventCursorStartIndex(
+  items: TeamIssueEventItem[],
+  cursor: Extract<TeamIssueEventCursor, { version: 2 }> | undefined,
+  newestFirst: boolean,
+): number {
+  if (!cursor) return 0
+  const exactIndex = items.findIndex((item) => item.eventId === cursor.eventId)
+  if (exactIndex >= 0) return exactIndex + 1
+
+  const cursorTime = Date.parse(cursor.createdAt)
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index]
+    if (!item) continue
+    const itemTime = Date.parse(item.createdAt)
+    const isAfterCursor = newestFirst
+      ? itemTime < cursorTime ||
+        (itemTime === cursorTime && item.eventId < cursor.eventId)
+      : itemTime > cursorTime ||
+        (itemTime === cursorTime && item.eventId > cursor.eventId)
+    if (isAfterCursor) return index
+  }
+  return items.length
 }
 
 /**
@@ -4803,7 +5023,9 @@ function encodeTeamIssueEventCursor(
     )
   }
 
-  const createdAt = typeof key.createdAt === 'string' ? key.createdAt : undefined
+  const createdAt = typeof key.createdAt === 'string'
+    ? normalizeTeamIssueEventTimestamp(key.createdAt)
+    : undefined
   let cursor: TeamIssueEventCursor
   if (useCreatedAtIndex) {
     if (createdAt === undefined) {
