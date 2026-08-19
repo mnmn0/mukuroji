@@ -660,8 +660,10 @@ async function runBackfill(
           counts.reconciledDeletedParents = (counts.reconciledDeletedParents ?? 0) + 1
         }
       } else {
-        checkpoint.backfilled += 1
-        counts.backfilled += 1
+        if (outcome !== 'deleted-parent') {
+          checkpoint.backfilled += 1
+          counts.backfilled += 1
+        }
         if (outcome === 'projected' || outcome === 'unchanged') {
           checkpoint.searchProjected = (checkpoint.searchProjected ?? 0) + 1
           counts.searchProjected = (counts.searchProjected ?? 0) + 1
