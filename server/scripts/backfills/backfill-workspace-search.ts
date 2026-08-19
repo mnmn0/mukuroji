@@ -27,6 +27,7 @@ import { isCanonicalWorkItemRecord } from '../../src/modules/work-items'
 import { validateDocumentPayload } from '../../src/modules/documents'
 import {
   createCommentWorkspaceSearchDocument,
+  createCommentWorkspaceSearchEntityId,
   createDocumentWorkspaceSearchDocument,
   createProjectWorkspaceSearchDocument,
   createTeamWorkspaceSearchDocument,
@@ -761,7 +762,7 @@ export function mapCollaborationItem(
     return undefined
   }
 
-  const entityId = createCommentEntityId(scope.teamId, scope.issueId, commentId)
+  const entityId = createCommentWorkspaceSearchEntityId(scope.teamId, scope.issueId, commentId)
 
   if (readOptionalString(item.deletedAt)) {
     return createDeleteOperation(scope.workspaceId, 'comment', entityId)
@@ -774,6 +775,7 @@ export function mapCollaborationItem(
   }
 
   const authorMemberKey = readOptionalString(item.authorMemberKey)
+  const sourceRevision = readPositiveInteger(item.version)
 
   return {
     action: 'put',
@@ -786,6 +788,7 @@ export function mapCollaborationItem(
       creatorUserId: authorMemberKey,
       createdAt: readOptionalString(item.createdAt),
       updatedAt: readOptionalString(item.updatedAt) ?? readOptionalString(item.createdAt),
+      ...(sourceRevision === undefined ? {} : { sourceRevision }),
     }),
   }
 }
@@ -913,10 +916,6 @@ function createTeamEntityId(teamId: string) {
 
 function createWorkItemEntityId(teamId: string, issueId: string) {
   return `team/${teamId}/issue/${issueId}`
-}
-
-function createCommentEntityId(teamId: string, issueId: string, commentId: string) {
-  return `${createWorkItemEntityId(teamId, issueId)}/comment/${commentId}`
 }
 
 function readLocalizedTitle(item: Record<string, unknown>) {

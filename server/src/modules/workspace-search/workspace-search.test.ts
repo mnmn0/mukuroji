@@ -289,6 +289,14 @@ test('normalizes realtime and backfill Work Item and comment projection fields c
     body: 'Approved for release.\nProceed with rollout.',
     creatorUserId: 'owner@example.com',
     rootCommentId: 'root-comment',
+    sourceRevision: 3,
+  })
+  const longComment = createCommentWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    teamId: 'core',
+    issueId: 'issue-1',
+    commentId: 'long-comment',
+    body: 'x'.repeat(20_001),
   })
 
   expect(workItem).toMatchObject({
@@ -301,7 +309,9 @@ test('normalizes realtime and backfill Work Item and comment projection fields c
     subtitle: 'owner@example.com',
     parentId: 'team/core/issue/issue-1',
     url: '/teams/core/issues?issueId=issue-1&commentId=comment-1&rootCommentId=root-comment',
+    sourceRevision: 3,
   })
+  expect(longComment.body).toHaveLength(20_000)
 })
 
 test('projects curated context with a stable Work Item deep link and source revision', () => {

@@ -3300,7 +3300,7 @@ export class DynamoDbTeamIssuesClient {
 
       items.push(...(response.Items ?? []))
       exclusiveStartKey = response.LastEvaluatedKey
-      if (eventLimit !== undefined) {
+      if (eventLimit !== undefined && items.length >= eventLimit) {
         break
       }
     } while (exclusiveStartKey)

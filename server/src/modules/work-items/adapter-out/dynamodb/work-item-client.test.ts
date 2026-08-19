@@ -746,6 +746,73 @@ test('DynamoDB Team Work Item detail rejects a malformed body on non-comment eve
   })
 })
 
+test('DynamoDB Team Work Item detail continues filtered event pages until the comment limit is met', async () => {
+  const partitionKey = 'workspace-1#team#core#issue#canonical-work-item'
+  const queryInputs: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      if (command.constructor.name === 'GetCommand') {
+        return { Item: createScheduleCascadeIssue('core', 'canonical-work-item') }
+      }
+      if (command.constructor.name !== 'QueryCommand') {
+        return {}
+      }
+
+      queryInputs.push(command.input)
+      if (queryInputs.length === 1) {
+        return {
+          Items: [],
+          LastEvaluatedKey: {
+            directoryTeamIssueId: partitionKey,
+            eventId: 'updated-event',
+          },
+        }
+      }
+
+      return {
+        Items: [{
+          directoryId: 'workspace-1',
+          directoryTeamIssueId: partitionKey,
+          teamId: 'core',
+          issueId: 'canonical-work-item',
+          eventId: 'comment-event',
+          eventType: 'commented',
+          actorUserId: 'sato@example.com',
+          body: 'Older comment',
+          summary: 'Commented',
+          createdAt: '2026-07-12T00:00:00.000Z',
+        }],
+      }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  await expect(client.getTeamIssueDetail(
+    'workspace-1',
+    'core',
+    'canonical-work-item',
+    {
+      eventLimit: 1,
+      eventType: 'commented',
+      newestEventsFirst: true,
+    },
+  )).resolves.toMatchObject({
+    comments: [{ id: 'comment-event', body: 'Older comment' }],
+  })
+  expect(queryInputs).toHaveLength(2)
+  expect(queryInputs[0]?.Limit).toBe(1)
+  expect(queryInputs[1]?.ExclusiveStartKey).toEqual({
+    directoryTeamIssueId: partitionKey,
+    eventId: 'updated-event',
+  })
+})
+
 /** Verifies that pre-cutover replay transport failures use the Work Item error contract. */
 test('DynamoDB Team Work Item client classifies pre-cutover replay transport failures', async () => {
   const documentClient = {

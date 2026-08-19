@@ -23,6 +23,13 @@ import {
 } from '../../src/modules/collaboration'
 import { DynamoDbCollaborationClient } from '../../src/modules/collaboration/collaboration'
 import {
+  createCommentWorkspaceSearchDocument,
+  createCommentWorkspaceSearchEntityId,
+  ensureLocalWorkspaceSearchTable,
+  type WorkspaceSearchClient,
+} from '../../src/modules/workspace-search'
+import { DynamoDbWorkspaceSearchClient } from '../../src/modules/workspace-search/workspace-search'
+import {
   runWithWorkspaceSearchWriterFenceInvocation,
 } from '../../src/infrastructure/runtime/workspace-search-writer-fence-invocation'
 import {
@@ -87,6 +94,10 @@ type CheckpointState = {
   backfilled: number
   /** Number of rows reconciled because their canonical parent was deleted. */
   reconciledDeletedParents?: number
+  /** Number of current canonical comments projected into Workspace Search. */
+  searchProjected?: number
+  /** Number of stale or deleted comment Search documents removed. */
+  searchDeleted?: number
   /** Workspaces observed in the source rows. */
   workspaceIds: string[]
   /** Cumulative source and canonical counts per workspace. */
@@ -101,6 +112,10 @@ type WorkspaceBackfillCounts = {
   backfilled: number
   /** Number of rows reconciled because their canonical parent was deleted. */
   reconciledDeletedParents?: number
+  /** Number of current canonical comments projected into Workspace Search. */
+  searchProjected?: number
+  /** Number of stale or deleted comment Search documents removed. */
+  searchDeleted?: number
 }
 
 /** Resolved table names for one migration environment. */
@@ -113,7 +128,15 @@ type TableNames = {
   workItems: string
   /** Audit table used for the operational backfill receipt. */
   auditEvents: string
+  /** Workspace Search table used for canonical comment projections. */
+  workspaceSearch: string
 }
+
+/** Minimal canonical snapshot reader used to build a current Search projection. */
+type BackfillCommentSnapshotReader = Pick<DynamoDbCollaborationClient, 'getCommentSnapshot'>
+
+/** Minimal Search writer used by the resumable comment migration. */
+type BackfillSearchProjectionClient = Pick<WorkspaceSearchClient, 'upsertDocument' | 'deleteDocument'>
 
 /** Operator and correlation context for one backfill invocation. */
 type BackfillRunContext = {
@@ -171,12 +194,16 @@ async function main() {
   const checkpoint = await readCheckpoint(options.checkpointPath, configurationHash)
   const dynamoDbClient = createDynamoDbClient()
   const sourceClient = createDynamoDbDocumentClient(dynamoDbClient)
+  const localDynamoDb = endpoint !== undefined && isLocalDynamoDbEndpoint(endpoint)
+  if (!options.dryRun && localDynamoDb) {
+    await ensureLocalWorkspaceSearchTable(tables.workspaceSearch, dynamoDbClient)
+  }
   const auditEvents = new DynamoDbAuditEventsClient(
     sourceClient,
     tables.auditEvents,
     undefined,
     dynamoDbClient,
-    endpoint !== undefined && isLocalDynamoDbEndpoint(endpoint),
+    localDynamoDb,
   )
   const collaboration = new DynamoDbCollaborationClient(
     tables.target,
@@ -187,6 +214,14 @@ async function main() {
     undefined,
     tables.source,
   )
+  const workspaceSearch = options.dryRun
+    ? undefined
+    : new DynamoDbWorkspaceSearchClient(
+        tables.workspaceSearch,
+        undefined,
+        dynamoDbClient,
+        false,
+      )
   const runContext: BackfillRunContext = {
     operatorId: identity.operatorId,
     ...(identity.operatorLabel ? { operatorLabel: identity.operatorLabel } : {}),
@@ -203,6 +238,7 @@ async function main() {
   await runWithWorkspaceSearchWriterFenceInvocation(() => runBackfill(
     sourceClient,
     collaboration,
+    workspaceSearch,
     auditEvents,
     tables.source,
     checkpoint,
@@ -307,7 +343,7 @@ Options:
 
 Required in AWS environments:
   TEAM_ISSUE_EVENTS_TABLE_NAME, COLLABORATION_TABLE_NAME, TEAM_ISSUES_TABLE_NAME,
-  AUDIT_EVENTS_TABLE_NAME
+  AUDIT_EVENTS_TABLE_NAME, WORKSPACE_SEARCH_TABLE_NAME
 
 MUKUROJI_BACKFILL_OPERATOR_ID is an optional operator label. In AWS, the audit
 operator identity is always taken from the authenticated STS caller ARN. Local
@@ -353,6 +389,12 @@ function resolveTableNames(endpoint: string | undefined): TableNames {
       readEnvironment('MUKUROJI_AUDIT_EVENTS_TABLE') ?? readEnvironment('AUDIT_EVENTS_TABLE_NAME'),
       'AUDIT_EVENTS_TABLE_NAME',
       allowLocalDefaults ? 'mukuroji-audit-events' : undefined,
+    ),
+    workspaceSearch: resolveTableName(
+      readEnvironment('MUKUROJI_WORKSPACE_SEARCH_TABLE') ??
+        readEnvironment('WORKSPACE_SEARCH_TABLE_NAME'),
+      'WORKSPACE_SEARCH_TABLE_NAME',
+      allowLocalDefaults ? 'mukuroji-workspace-search-local' : undefined,
     ),
   }
 }
@@ -456,6 +498,8 @@ async function readCheckpoint(path: string, configurationHash: string): Promise<
         scanned: 0,
         backfilled: 0,
         reconciledDeletedParents: 0,
+        searchProjected: 0,
+        searchDeleted: 0,
         workspaceIds: [],
         workspaceCounts: {},
       }
@@ -468,6 +512,8 @@ async function readCheckpoint(path: string, configurationHash: string): Promise<
  *
  * @param sourceClient - Document client used to read the legacy event table.
  * @param collaboration - Canonical Collaboration writer.
+ * @param workspaceSearch - Canonical Workspace Search projection writer.
+ * @param auditEvents - Operational audit event writer.
  * @param sourceTableName - Legacy event table name.
  * @param checkpoint - Mutable resumable scan state.
  * @param options - Validated run options.
@@ -475,6 +521,7 @@ async function readCheckpoint(path: string, configurationHash: string): Promise<
 async function runBackfill(
   sourceClient: DynamoDBDocumentClient,
   collaboration: DynamoDbCollaborationClient,
+  workspaceSearch: BackfillSearchProjectionClient | undefined,
   auditEvents: DynamoDbAuditEventsClient,
   sourceTableName: string,
   checkpoint: CheckpointState,
@@ -496,6 +543,8 @@ async function runBackfill(
         scanned: 0,
         backfilled: 0,
         reconciledDeletedParents: 0,
+        searchProjected: 0,
+        searchDeleted: 0,
       })
     }
   }
@@ -526,7 +575,12 @@ async function runBackfill(
       processedThisRun += 1
       checkpoint.scanned += 1
       workspaceIds.add(legacy.workspaceId)
-      const counts = workspaceCounts.get(legacy.workspaceId) ?? { scanned: 0, backfilled: 0 }
+      const counts = workspaceCounts.get(legacy.workspaceId) ?? {
+        scanned: 0,
+        backfilled: 0,
+        searchProjected: 0,
+        searchDeleted: 0,
+      }
       counts.scanned += 1
       workspaceCounts.set(legacy.workspaceId, counts)
       const input = createBackfillInput(legacy)
@@ -537,16 +591,38 @@ async function runBackfill(
             counts.reconciledDeletedParents = (counts.reconciledDeletedParents ?? 0) + 1
           }
         } else {
+          if (!workspaceSearch) {
+            throw new Error('Workspace Search projection is unavailable for a write run.')
+          }
           try {
             await collaboration.backfillTeamIssueComment(input)
+            const projection = await projectBackfilledComment(
+              workspaceSearch,
+              collaboration,
+              legacy,
+            )
             checkpoint.backfilled += 1
             counts.backfilled += 1
+            if (projection === 'projected') {
+              checkpoint.searchProjected = (checkpoint.searchProjected ?? 0) + 1
+              counts.searchProjected = (counts.searchProjected ?? 0) + 1
+            } else {
+              checkpoint.searchDeleted = (checkpoint.searchDeleted ?? 0) + 1
+              counts.searchDeleted = (counts.searchDeleted ?? 0) + 1
+            }
           } catch (error) {
             if (!isDeletedParentBackfillError(error)) throw error
             await collaboration.reconcileDeletedBackfillTeamIssueComment(input)
+            await workspaceSearch.deleteDocument(
+              legacy.workspaceId,
+              'comment',
+              createCommentWorkspaceSearchEntityId(legacy.teamId, legacy.issueId, legacy.eventId),
+            )
             checkpoint.reconciledDeletedParents =
               (checkpoint.reconciledDeletedParents ?? 0) + 1
             counts.reconciledDeletedParents = (counts.reconciledDeletedParents ?? 0) + 1
+            checkpoint.searchDeleted = (checkpoint.searchDeleted ?? 0) + 1
+            counts.searchDeleted = (counts.searchDeleted ?? 0) + 1
           }
         }
       } catch (error) {
@@ -599,6 +675,45 @@ async function runBackfill(
       `Dry-run found ${validationFailures.length} invalid legacy comment row(s).\n${preview}`,
     )
   }
+}
+
+/** Projects the current canonical comment snapshot without reusing stale legacy text. */
+async function projectBackfilledComment(
+  workspaceSearch: BackfillSearchProjectionClient,
+  collaboration: BackfillCommentSnapshotReader,
+  legacy: LegacyCommentEvent,
+): Promise<'projected' | 'deleted'> {
+  const comment = await collaboration.getCommentSnapshot({
+    entityKey: createWorkItemCollaborationEntityKey(
+      legacy.workspaceId,
+      legacy.teamId,
+      legacy.issueId,
+    ),
+    commentId: legacy.eventId,
+  })
+  const entityId = createCommentWorkspaceSearchEntityId(
+    legacy.teamId,
+    legacy.issueId,
+    legacy.eventId,
+  )
+  if (!comment || comment.deletedAt) {
+    await workspaceSearch.deleteDocument(legacy.workspaceId, 'comment', entityId)
+    return 'deleted'
+  }
+
+  await workspaceSearch.upsertDocument(createCommentWorkspaceSearchDocument({
+    workspaceId: legacy.workspaceId,
+    teamId: legacy.teamId,
+    issueId: legacy.issueId,
+    commentId: comment.id,
+    rootCommentId: comment.rootCommentId,
+    body: comment.bodyMarkdown,
+    creatorUserId: comment.authorMemberKey,
+    createdAt: comment.createdAt,
+    updatedAt: comment.updatedAt,
+    sourceRevision: comment.version,
+  }), { sourceRevision: comment.version })
+  return 'projected'
 }
 
 /**
@@ -663,17 +778,23 @@ async function writeBackfillAuditEvents(
           scanned: checkpoint.scanned,
           backfilled: checkpoint.backfilled,
           reconciledDeletedParents: checkpoint.reconciledDeletedParents ?? 0,
+          searchProjected: checkpoint.searchProjected ?? 0,
+          searchDeleted: checkpoint.searchDeleted ?? 0,
         }
       : workspaceCounts.get(workspaceId) ?? {
           scanned: 0,
           backfilled: 0,
           reconciledDeletedParents: 0,
+          searchProjected: 0,
+          searchDeleted: 0,
         }
     const receiptAffectedWorkspaceCount = environmentScope ? affectedWorkspaceCount : 1
     const receiptAffectedWorkspaceDigest = environmentScope
       ? affectedWorkspaceDigest
       : createDigest(workspaceId)
     const reconciledDeletedParents = counts.reconciledDeletedParents ?? 0
+    const searchProjected = counts.searchProjected ?? 0
+    const searchDeleted = counts.searchDeleted ?? 0
     const context = createMutationAuditContext({
       workspaceId,
       actor: {
@@ -705,6 +826,8 @@ async function writeBackfillAuditEvents(
           sourceRowsScanned: counts.scanned,
           canonicalRowsBackfilled: counts.backfilled,
           reconciledDeletedParents,
+          searchDocumentsProjected: searchProjected,
+          searchDocumentsDeleted: searchDeleted,
         },
       },
       source: {
@@ -727,12 +850,16 @@ async function writeBackfillAuditEvents(
           sourceRowsScanned: counts.scanned,
           canonicalRowsBackfilled: counts.backfilled,
           reconciledDeletedParents,
+          searchDocumentsProjected: searchProjected,
+          searchDocumentsDeleted: searchDeleted,
           completed: checkpoint.completed,
         },
         [
           'sourceRowsScanned',
           'canonicalRowsBackfilled',
           'reconciledDeletedParents',
+          'searchDocumentsProjected',
+          'searchDocumentsDeleted',
           'completed',
         ],
       ),
@@ -750,6 +877,8 @@ async function writeBackfillAuditEvents(
         sourceRowsScanned: counts.scanned,
         canonicalRowsBackfilled: counts.backfilled,
         reconciledDeletedParents,
+        searchDocumentsProjected: searchProjected,
+        searchDocumentsDeleted: searchDeleted,
         configurationHash: runContext.configurationHash,
         ...(environmentScope ? { environmentScope: 'all-workspaces' } : {}),
       },
@@ -858,6 +987,8 @@ function printSummary(checkpoint: CheckpointState, options: BackfillOptions) {
     `Team Issue comment backfill ${checkpoint.completed ? 'complete' : 'paused'}: ` +
       `scanned=${checkpoint.scanned} backfilled=${checkpoint.backfilled} ` +
       `reconciledDeletedParents=${checkpoint.reconciledDeletedParents ?? 0} ` +
+      `searchProjected=${checkpoint.searchProjected ?? 0} ` +
+      `searchDeleted=${checkpoint.searchDeleted ?? 0} ` +
       `workspaces=${checkpoint.workspaceIds.length} dryRun=${options.dryRun}`,
   )
 }
@@ -896,6 +1027,18 @@ function isCheckpointState(value: unknown): value is CheckpointState {
       value.reconciledDeletedParents >= 0 &&
       value.reconciledDeletedParents <= value.scanned
     )) &&
+    (value.searchProjected === undefined || (
+      typeof value.searchProjected === 'number' &&
+      Number.isSafeInteger(value.searchProjected) &&
+      value.searchProjected >= 0 &&
+      value.searchProjected <= value.scanned
+    )) &&
+    (value.searchDeleted === undefined || (
+      typeof value.searchDeleted === 'number' &&
+      Number.isSafeInteger(value.searchDeleted) &&
+      value.searchDeleted >= 0 &&
+      value.searchDeleted <= value.scanned
+    )) &&
     Array.isArray(value.workspaceIds) &&
     value.workspaceIds.every((workspaceId): workspaceId is string =>
       typeof workspaceId === 'string' && workspaceId.length > 0,
@@ -921,6 +1064,18 @@ function isWorkspaceBackfillCounts(value: unknown): value is WorkspaceBackfillCo
       Number.isSafeInteger(value.reconciledDeletedParents) &&
       value.reconciledDeletedParents >= 0 &&
       value.reconciledDeletedParents <= value.scanned
+    )) &&
+    (value.searchProjected === undefined || (
+      typeof value.searchProjected === 'number' &&
+      Number.isSafeInteger(value.searchProjected) &&
+      value.searchProjected >= 0 &&
+      value.searchProjected <= value.scanned
+    )) &&
+    (value.searchDeleted === undefined || (
+      typeof value.searchDeleted === 'number' &&
+      Number.isSafeInteger(value.searchDeleted) &&
+      value.searchDeleted >= 0 &&
+      value.searchDeleted <= value.scanned
     ))
 }
 

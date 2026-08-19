@@ -931,6 +931,22 @@ export function createWorkspaceSearchDocumentRecordKey(
   return `${WORKSPACE_SEARCH_DOCUMENT_PREFIX}${requireSearchEntityType(entityType)}#${encodeKeyPart(requireText(entityId, 'Search entity ID'))}`
 }
 
+/**
+ * Creates the stable Workspace Search entity ID for a Team Issue comment.
+ *
+ * @param teamId - Owning Team identifier.
+ * @param issueId - Team-local Work Item identifier.
+ * @param commentId - Canonical Collaboration comment identifier.
+ * @returns The entity ID shared by comment upsert and delete projections.
+ */
+export function createCommentWorkspaceSearchEntityId(
+  teamId: string,
+  issueId: string,
+  commentId: string,
+) {
+  return `team/${teamId}/issue/${issueId}/comment/${commentId}`
+}
+
 /** Saved view ID から definition record key を作成します。 */
 export function createSavedWorkspaceViewRecordKey(viewId: string) {
   return `${WORKSPACE_SAVED_VIEW_PREFIX}${requireIdentifier(viewId, 'Saved view ID')}`
@@ -1364,8 +1380,11 @@ export function createCommentWorkspaceSearchDocument(input: {
   createdAt?: string
   /** Comment の最終更新日時です。 */
   updatedAt?: string
+  /** Canonical comment version used to order asynchronous projections. */
+  sourceRevision?: number
 }) {
   const parentId = `team/${input.teamId}/issue/${input.issueId}`
+  const body = input.body.slice(0, WORKSPACE_SEARCH_STORED_BODY_MAX_LENGTH)
   const query = new URLSearchParams({
     issueId: input.issueId,
     commentId: input.commentId,
@@ -1374,16 +1393,17 @@ export function createCommentWorkspaceSearchDocument(input: {
   return createWorkspaceSearchDocument({
     workspaceId: input.workspaceId,
     entityType: 'comment',
-    entityId: `${parentId}/comment/${input.commentId}`,
-    title: createCommentSearchTitle(input.body),
+    entityId: createCommentWorkspaceSearchEntityId(input.teamId, input.issueId, input.commentId),
+    title: createCommentSearchTitle(body),
     ...(input.creatorUserId ? { subtitle: input.creatorUserId } : {}),
-    body: input.body,
+    body,
     url: `/teams/${encodeURIComponent(input.teamId)}/issues?${query.toString()}`,
     teamId: input.teamId,
     parentId,
     ...(input.creatorUserId ? { creatorUserId: input.creatorUserId } : {}),
     ...(input.createdAt ? { createdAt: input.createdAt } : {}),
     ...(input.updatedAt ? { updatedAt: input.updatedAt } : {}),
+    ...(input.sourceRevision !== undefined ? { sourceRevision: input.sourceRevision } : {}),
   })
 }
 

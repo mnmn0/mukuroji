@@ -28938,6 +28938,7 @@ function createCommentSearchDocument(
     creatorUserId: comment.authorMemberKey,
     createdAt: comment.createdAt,
     updatedAt: comment.updatedAt,
+    sourceRevision: comment.version,
   })
 }
 
