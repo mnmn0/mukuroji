@@ -9246,6 +9246,8 @@ routeApp.patch('/api/teams/:teamId/issues/:issueId', async (c) => {
 const LEGACY_COLLABORATION_EVENT_PREVIEW_LIMIT = 50
 /** Prefix that keeps legacy event cursors distinct from canonical cursors. */
 const LEGACY_COLLABORATION_CURSOR_PREFIX = 'legacy.'
+/** Sentinel cursor that starts the legacy stream after a full canonical page. */
+const LEGACY_COLLABORATION_INITIAL_CURSOR = 'initial'
 
 /**
  * Team-owned Work Item の root comments、replies、watch、presence を page 取得します。
@@ -9279,13 +9281,20 @@ routeApp.get('/api/teams/:teamId/issues/:issueId/collaboration', async (c) => {
     )
     const isLegacyPage = !requestedRootCommentId &&
       requestedCursor?.startsWith(LEGACY_COLLABORATION_CURSOR_PREFIX) === true
-    const legacyEventCursor = isLegacyPage
+    const legacyEventCursorToken = isLegacyPage
       ? requestedCursor.slice(LEGACY_COLLABORATION_CURSOR_PREFIX.length)
       : undefined
+    const legacyEventCursor = legacyEventCursorToken === LEGACY_COLLABORATION_INITIAL_CURSOR
+      ? undefined
+      : legacyEventCursorToken
     if (isLegacyPage && commentBackfillComplete) {
       throw new CollaborationError(400, 'InvalidCollaborationCursor', 'Collaboration cursor is invalid.')
     }
-    if (isLegacyPage && !legacyEventCursor) {
+    if (
+      isLegacyPage &&
+      legacyEventCursorToken !== LEGACY_COLLABORATION_INITIAL_CURSOR &&
+      !legacyEventCursor
+    ) {
       throw new CollaborationError(400, 'InvalidCollaborationCursor', 'Legacy comment cursor is invalid.')
     }
     const canWrite = canWriteTeamIssue(principal, context, detail.issue.assignedProjectId)
@@ -9429,6 +9438,12 @@ routeApp.get('/api/teams/:teamId/issues/:issueId/collaboration', async (c) => {
         return cursor ? [[root.id, cursor] as const] : []
       }),
     )
+    const legacyInitialCursor = !isLegacyPage &&
+      !commentBackfillComplete &&
+      !roots.nextCursor &&
+      legacyEventLimit === 0
+      ? `${LEGACY_COLLABORATION_CURSOR_PREFIX}${LEGACY_COLLABORATION_INITIAL_CURSOR}`
+      : undefined
 
     return c.json({
       comments: collaborationComments,
@@ -9440,7 +9455,9 @@ routeApp.get('/api/teams/:teamId/issues/:issueId/collaboration', async (c) => {
           ? { nextCursor: roots.nextCursor }
           : legacyDetail?.nextEventCursor
             ? { nextCursor: `${LEGACY_COLLABORATION_CURSOR_PREFIX}${legacyDetail.nextEventCursor}` }
-            : {}),
+            : legacyInitialCursor
+              ? { nextCursor: legacyInitialCursor }
+              : {}),
       ...(Object.keys(replyNextCursors).length > 0 ? { replyNextCursors } : {}),
       watch: roots.watch,
       presence: roots.presence,

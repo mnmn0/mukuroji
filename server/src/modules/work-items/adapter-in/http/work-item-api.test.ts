@@ -2133,6 +2133,9 @@ test('does not overfill a canonical page with legacy comments', async () => {
       async isTeamIssueCommentBackfillComplete() {
         return false
       },
+      async getCommentSnapshot() {
+        return undefined
+      },
       async getThread(input) {
         return {
           comments: input.rootCommentId
@@ -2191,10 +2194,33 @@ test('does not overfill a canonical page with legacy comments', async () => {
   )
 
   expect(response.status).toBe(200)
-  expect((await response.json()).comments).toEqual([
+  const responseBody = await response.json()
+  expect(responseBody.comments).toEqual([
     expect.objectContaining({ id: 'canonical-root' }),
   ])
+  expect(responseBody.nextCursor).toBe('legacy.initial')
   expect(detailInputs).toEqual([{ consistentIssueRead: true, eventLimit: 0 }])
+
+  const legacyResponse = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction/collaboration?limit=1&cursor=legacy.initial',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+
+  expect(legacyResponse.status).toBe(200)
+  expect((await legacyResponse.json()).comments).toEqual([
+    expect.objectContaining({ id: 'legacy-comment', source: 'legacy' }),
+  ])
+  expect(detailInputs).toEqual([
+    { consistentIssueRead: true, eventLimit: 0 },
+    { consistentIssueRead: true, eventLimit: 0 },
+    {
+      consistentIssueRead: true,
+      eventLimit: 1,
+      newestEventsFirst: true,
+      eventType: 'commented',
+      eventCursor: undefined,
+    },
+  ])
 })
 
 test('keeps legacy event cursors out of the canonical collaboration reader', async () => {
