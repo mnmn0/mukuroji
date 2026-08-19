@@ -257,6 +257,7 @@ import {
 } from '../modules/audit/audit'
 import {
   createTeamIssueAuditEntityId,
+  createTeamIssueCommentEventCursor,
   createTeamIssueDeepLink,
   confirmWorkItemScheduleChange,
   collectWorkItemScheduleEvaluationEndpoints,
@@ -8901,6 +8902,7 @@ routeApp.get('/api/teams/:teamId/issues/:issueId', async (c) => {
             eventLimit: LEGACY_COLLABORATION_EVENT_PREVIEW_LIMIT,
             newestEventsFirst: true,
             eventType: 'commented',
+            legacyCommentIndexOnly: true,
           },
         )
     if (legacyCommentDetail) {
@@ -8931,7 +8933,7 @@ routeApp.get('/api/teams/:teamId/issues/:issueId', async (c) => {
       workItemDependencies.workItemConfigurations.listRelations(principal.directoryId, teamId, issueId),
     ])
     const allCollaborationComments = collaborationComments.sort(
-      (left, right) => left.createdAt.localeCompare(right.createdAt),
+      compareMigrationAwareComments,
     )
     const visibleRelations = await filterVisibleWorkItemRelations(
       principal,
@@ -9319,7 +9321,7 @@ routeApp.get('/api/teams/:teamId/issues/:issueId/collaboration', async (c) => {
     if (isLegacyPage && commentBackfillComplete) {
       throw new CollaborationError(400, 'InvalidCollaborationCursor', 'Collaboration cursor is invalid.')
     }
-    if (migrationCursor && (commentBackfillComplete || requestedRootCommentId !== undefined)) {
+    if (migrationCursor && requestedRootCommentId !== undefined) {
       throw new CollaborationError(400, 'InvalidCollaborationCursor', 'Collaboration cursor is invalid.')
     }
     if (
@@ -9367,7 +9369,7 @@ routeApp.get('/api/teams/:teamId/issues/:issueId/collaboration', async (c) => {
     }
 
     const rootLimit = limit === undefined ? 10 : Math.min(Math.max(limit, 1), 20)
-    const migrationPage = !commentBackfillComplete && !isLegacyPage
+    const migrationPage = (!commentBackfillComplete || migrationCursor !== undefined) && !isLegacyPage
       ? await readMigrationAwareRootPage({
           collaboration: workItemDependencies.collaboration,
           teamIssues: workItemDependencies.teamIssues,
@@ -9470,6 +9472,7 @@ routeApp.get('/api/teams/:teamId/issues/:issueId/collaboration', async (c) => {
             newestEventsFirst: true,
             eventType: 'commented',
             eventCursor: legacyEventCursor,
+            legacyCommentIndexOnly: true,
           },
         )
       : undefined
@@ -9488,6 +9491,7 @@ routeApp.get('/api/teams/:teamId/issues/:issueId/collaboration', async (c) => {
         )
       }
     }
+    const retainMixedCursorLegacyComments = migrationCursor?.legacyEventCursor !== undefined
     const legacyComments = migrationPage
       ? (await Promise.all(
           migrationPage.legacyComments.map(async (comment) => {
@@ -9495,7 +9499,7 @@ routeApp.get('/api/teams/:teamId/issues/:issueId/collaboration', async (c) => {
               entityKey,
               commentId: comment.id,
             })
-            return storedComment
+            return storedComment && !retainMixedCursorLegacyComments
               ? undefined
               : toLegacyCollaborationCommentResponse(comment)
           }),
@@ -28740,6 +28744,8 @@ type MigrationAwareRootStreamState = {
   exhausted: boolean
   /** Candidate fetched but not yet emitted. */
   candidate?: MigrationAwareRootCandidate
+  /** Additional candidates already fetched from the current legacy page. */
+  queuedCandidates?: MigrationAwareRootCandidate[]
 }
 
 /** Result of one migration-aware root-comment page. */
@@ -28864,13 +28870,20 @@ function isMigrationAwareCommentNewer(
   left: { id: string; createdAt: string },
   right: { id: string; createdAt: string },
 ): boolean {
+  return compareMigrationAwareComments(left, right) > 0
+}
+
+/** Compares two comments by their actual instant and stable identifier. */
+function compareMigrationAwareComments(
+  left: { id: string; createdAt: string },
+  right: { id: string; createdAt: string },
+): number {
   const leftTime = Date.parse(left.createdAt)
   const rightTime = Date.parse(right.createdAt)
   if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) {
-    return leftTime > rightTime
+    return leftTime - rightTime
   }
-  return left.createdAt.localeCompare(right.createdAt) > 0 ||
-    (left.createdAt === right.createdAt && left.id.localeCompare(right.id) > 0)
+  return left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id)
 }
 
 /**
@@ -28882,10 +28895,17 @@ function consumeMigrationAwareCandidate(state: MigrationAwareRootStreamState): v
   const candidate = state.candidate
   if (candidate === undefined) return
   state.candidate = undefined
+  if (candidate.nextCursor !== undefined) {
+    state.cursor = candidate.nextCursor
+  }
+  const queuedCandidate = state.queuedCandidates?.shift()
+  if (queuedCandidate !== undefined) {
+    state.candidate = queuedCandidate
+    return
+  }
+  state.queuedCandidates = undefined
   if (candidate.nextCursor === undefined) {
     state.exhausted = true
-  } else {
-    state.cursor = candidate.nextCursor
   }
 }
 
@@ -28946,20 +28966,36 @@ async function readMigrationAwareRootPage(
         input.issueId,
         {
           consistentIssueRead: true,
-          eventLimit: 1,
+          eventLimit: input.limit,
           newestEventsFirst: true,
           eventType: 'commented',
+          legacyCommentIndexOnly: true,
           ...(legacyState.cursor ? { eventCursor: legacyState.cursor } : {}),
         },
       )
       input.validateLegacyDetail(detail)
-      const comment = (detail.comments ?? [])[0]
-      if (comment !== undefined) {
-        legacyState.candidate = {
-          source: 'legacy',
+      const comments = detail.comments ?? []
+      const candidates = comments.map((comment, index) => {
+        const nextComment = comments[index + 1]
+        const nextCursor = nextComment
+          ? createTeamIssueCommentEventCursor(
+              input.directoryId,
+              input.teamId,
+              input.issueId,
+              comment.id,
+              comment.createdAt,
+            )
+          : detail.nextEventCursor
+        return {
+          source: 'legacy' as const,
           comment,
-          ...(detail.nextEventCursor ? { nextCursor: detail.nextEventCursor } : {}),
+          ...(nextCursor ? { nextCursor } : {}),
         }
+      })
+      const [candidate, ...queuedCandidates] = candidates
+      if (candidate !== undefined) {
+        legacyState.candidate = candidate
+        legacyState.queuedCandidates = queuedCandidates
         return
       }
       if (detail.nextEventCursor === undefined) {
@@ -29061,9 +29097,7 @@ function mergeLegacyTeamIssueDetailComments(
   for (const comment of canonicalComments) {
     commentsById.set(comment.id, comment)
   }
-  return [...commentsById.values()].sort((left, right) =>
-    left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id)
-  )
+  return [...commentsById.values()].sort(compareMigrationAwareComments)
 }
 
 async function requireValidCommentMentions(

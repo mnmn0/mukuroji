@@ -27,6 +27,7 @@ import {
   createWorkItemCollaborationEntityKey,
 } from '../../src/modules/collaboration'
 import { DynamoDbCollaborationClient } from '../../src/modules/collaboration/collaboration'
+import { createTeamIssueCommentEventOrder } from '../../src/modules/work-items'
 import {
   createCommentWorkspaceSearchDocument,
   createCommentWorkspaceSearchEntityId,
@@ -39,6 +40,7 @@ import {
 } from '../../src/infrastructure/runtime/workspace-search-writer-fence-invocation'
 import {
   ScanCommand,
+  UpdateCommand,
   type DynamoDBDocumentClient,
 } from '@aws-sdk/lib-dynamodb'
 import { isLocalDynamoDbEndpoint } from './backfill-endpoint'
@@ -144,7 +146,10 @@ type BackfillCommentSnapshotReader = Pick<DynamoDbCollaborationClient, 'getComme
 type BackfillSearchProjectionClient = Pick<
   WorkspaceSearchClient,
   'upsertDocument' | 'deleteDocument'
-> & Pick<DynamoDbWorkspaceSearchClient, 'upsertDocumentWithCommentSourceFence'>
+> & Pick<
+  DynamoDbWorkspaceSearchClient,
+  'upsertDocumentWithCommentSourceFence' | 'deleteDocumentWithResult'
+>
 
 /** Operator and correlation context for one backfill invocation. */
 type BackfillRunContext = {
@@ -604,7 +609,43 @@ async function runBackfill(
       if (options.workspaceIds.length > 0 && !options.workspaceIds.includes(legacy.workspaceId)) {
         continue
       }
-      checkpoint.scanned += 1
+      const input = createBackfillInput(legacy)
+      let outcome: 'validated' | 'projected' | 'unchanged' | 'deleted' | 'deleted-parent' | undefined
+      try {
+        if (options.dryRun) {
+          const validation = await collaboration.validateBackfillTeamIssueComment(input)
+          outcome = validation === 'parent-deleted' ? 'deleted-parent' : 'validated'
+        } else {
+          if (!workspaceSearch) {
+            throw new Error('Workspace Search projection is unavailable for a write run.')
+          }
+          await normalizeLegacyCommentIndex(sourceClient, sourceTableName, legacy)
+          try {
+            await collaboration.backfillTeamIssueCommentWithResult(input)
+            const projection = await projectBackfilledComment(
+              workspaceSearch,
+              collaboration,
+              legacy,
+              targetTableName,
+            )
+            outcome = projection
+          } catch (error) {
+            if (!isDeletedParentBackfillError(error)) throw error
+            await collaboration.reconcileDeletedBackfillTeamIssueComment(input)
+            await workspaceSearch.deleteDocumentWithResult(
+              legacy.workspaceId,
+              'comment',
+              createCommentWorkspaceSearchEntityId(legacy.teamId, legacy.issueId, legacy.eventId),
+            )
+            outcome = 'deleted-parent'
+          }
+        }
+      } catch (error) {
+        if (!options.dryRun) throw error
+        validationFailures.push(`event ${legacy.eventId}: ${readErrorMessage(error)}`)
+      }
+      if (outcome === undefined) continue
+
       workspaceIds.add(legacy.workspaceId)
       const counts = workspaceCounts.get(legacy.workspaceId) ?? {
         scanned: 0,
@@ -612,54 +653,37 @@ async function runBackfill(
         searchProjected: 0,
         searchDeleted: 0,
       }
+      checkpoint.scanned += 1
       counts.scanned += 1
-      workspaceCounts.set(legacy.workspaceId, counts)
-      const input = createBackfillInput(legacy)
-      try {
-        if (options.dryRun) {
-          const validation = await collaboration.validateBackfillTeamIssueComment(input)
-          if (validation === 'parent-deleted') {
-            counts.reconciledDeletedParents = (counts.reconciledDeletedParents ?? 0) + 1
-          }
-        } else {
-          if (!workspaceSearch) {
-            throw new Error('Workspace Search projection is unavailable for a write run.')
-          }
-          try {
-            await collaboration.backfillTeamIssueComment(input)
-            const projection = await projectBackfilledComment(
-              workspaceSearch,
-              collaboration,
-              legacy,
-              targetTableName,
-            )
-            checkpoint.backfilled += 1
-            counts.backfilled += 1
-            if (projection === 'projected') {
-              checkpoint.searchProjected = (checkpoint.searchProjected ?? 0) + 1
-              counts.searchProjected = (counts.searchProjected ?? 0) + 1
-            } else {
-              checkpoint.searchDeleted = (checkpoint.searchDeleted ?? 0) + 1
-              counts.searchDeleted = (counts.searchDeleted ?? 0) + 1
-            }
-          } catch (error) {
-            if (!isDeletedParentBackfillError(error)) throw error
-            await collaboration.reconcileDeletedBackfillTeamIssueComment(input)
-            await workspaceSearch.deleteDocument(
-              legacy.workspaceId,
-              'comment',
-              createCommentWorkspaceSearchEntityId(legacy.teamId, legacy.issueId, legacy.eventId),
-            )
+      if (options.dryRun) {
+        if (outcome === 'deleted-parent') {
+          counts.reconciledDeletedParents = (counts.reconciledDeletedParents ?? 0) + 1
+        }
+      } else {
+        checkpoint.backfilled += 1
+        counts.backfilled += 1
+        if (outcome === 'projected' || outcome === 'unchanged') {
+          checkpoint.searchProjected = (checkpoint.searchProjected ?? 0) + 1
+          counts.searchProjected = (counts.searchProjected ?? 0) + 1
+        } else if (outcome === 'deleted' || outcome === 'deleted-parent') {
+          checkpoint.searchDeleted = (checkpoint.searchDeleted ?? 0) + 1
+          counts.searchDeleted = (counts.searchDeleted ?? 0) + 1
+          if (outcome === 'deleted-parent') {
             checkpoint.reconciledDeletedParents =
               (checkpoint.reconciledDeletedParents ?? 0) + 1
             counts.reconciledDeletedParents = (counts.reconciledDeletedParents ?? 0) + 1
-            checkpoint.searchDeleted = (checkpoint.searchDeleted ?? 0) + 1
-            counts.searchDeleted = (counts.searchDeleted ?? 0) + 1
           }
         }
-      } catch (error) {
-        if (!options.dryRun) throw error
-        validationFailures.push(`event ${legacy.eventId}: ${readErrorMessage(error)}`)
+      }
+      workspaceCounts.set(legacy.workspaceId, counts)
+      if (!options.dryRun) {
+        checkpoint.lastEvaluatedKey = createLegacyCommentSourceKey(legacy)
+        checkpoint.workspaceIds = [...workspaceIds].sort()
+        checkpoint.updatedAt = new Date().toISOString()
+        checkpoint.workspaceCounts = Object.fromEntries(
+          [...workspaceCounts.entries()].sort(([left], [right]) => left.localeCompare(right)),
+        )
+        await writeCheckpoint(options.checkpointPath, checkpoint)
       }
     }
 
@@ -723,7 +747,7 @@ async function projectBackfilledComment(
   collaboration: BackfillCommentSnapshotReader,
   legacy: LegacyCommentEvent,
   sourceTableName: string,
-): Promise<'projected' | 'deleted'> {
+): Promise<'projected' | 'unchanged' | 'deleted'> {
   const entityKey = createWorkItemCollaborationEntityKey(
     legacy.workspaceId,
     legacy.teamId,
@@ -740,7 +764,7 @@ async function projectBackfilledComment(
       commentId: legacy.eventId,
     })
     if (!comment || comment.deletedAt) {
-      await workspaceSearch.deleteDocument(
+      await workspaceSearch.deleteDocumentWithResult(
         legacy.workspaceId,
         'comment',
         entityId,
@@ -771,6 +795,7 @@ async function projectBackfilledComment(
       },
     )
     if (projection === 'projected') return 'projected'
+    if (projection === 'unchanged') return 'unchanged'
   }
 
   throw new Error('Canonical comment changed repeatedly while projecting Workspace Search.')
@@ -797,6 +822,48 @@ function createBackfillInput(legacy: LegacyCommentEvent) {
     bodyMarkdown: legacy.body,
     occurredAt: legacy.createdAt,
   }
+}
+
+/** Creates the source-table key used to make one successful row checkpoint durable.
+ *
+ * @param legacy - Validated legacy comment source row.
+ * @returns Source table primary key for the row.
+ */
+function createLegacyCommentSourceKey(legacy: LegacyCommentEvent): DynamoKey {
+  return {
+    directoryTeamIssueId: `${legacy.workspaceId}#team#${legacy.teamId}#issue#${legacy.issueId}`,
+    eventId: legacy.eventId,
+  }
+}
+
+/** Adds the canonical chronological index key to one immutable legacy comment row.
+ *
+ * @param sourceClient - Document client for the legacy event table.
+ * @param sourceTableName - Legacy event table name.
+ * @param legacy - Validated legacy comment source row.
+ * @returns Resolves after the source row has been conditionally normalized.
+ */
+async function normalizeLegacyCommentIndex(
+  sourceClient: DynamoDBDocumentClient,
+  sourceTableName: string,
+  legacy: LegacyCommentEvent,
+): Promise<void> {
+  await sourceClient.send(new UpdateCommand({
+    TableName: sourceTableName,
+    Key: {
+      directoryTeamIssueId: `${legacy.workspaceId}#team#${legacy.teamId}#issue#${legacy.issueId}`,
+      eventId: legacy.eventId,
+    },
+    UpdateExpression: 'SET commentCreatedAtOrder = :commentCreatedAtOrder',
+    ConditionExpression:
+      'attribute_exists(directoryTeamIssueId) AND attribute_exists(eventId) ' +
+      'AND eventType = :eventType AND createdAt = :createdAt',
+    ExpressionAttributeValues: {
+      ':commentCreatedAtOrder': createTeamIssueCommentEventOrder(legacy.createdAt, legacy.eventId),
+      ':eventType': 'commented',
+      ':createdAt': legacy.createdAt,
+    },
+  }))
 }
 
 /** Writes one suppressed operational audit receipt per affected workspace.

@@ -771,6 +771,29 @@ test('recognizes a completed backfill after a later comment mutation', async () 
   })
 })
 
+test('reports idempotent backfill replays without double-counting the write', async () => {
+  const memory = createCollaborationMemory()
+  const input = {
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'issue-1',
+    entityKey: createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1'),
+    commentId: 'replayed-legacy-comment',
+    actorMemberKey: 'author@example.com',
+    bodyMarkdown: 'Historical comment',
+    occurredAt: '2026-08-18T00:00:00.000Z',
+  }
+
+  await expect(memory.client.backfillTeamIssueCommentWithResult(input)).resolves.toMatchObject({
+    created: true,
+    comment: { id: input.commentId },
+  })
+  await expect(memory.client.backfillTeamIssueCommentWithResult(input)).resolves.toMatchObject({
+    created: false,
+    comment: { id: input.commentId },
+  })
+})
+
 test('preserves legacy comment bodies longer than the current composer limit', async () => {
   const memory = createCollaborationMemory()
   const bodyMarkdown = 'Historical comment. '.repeat(1_100).trim()

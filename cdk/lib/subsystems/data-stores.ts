@@ -346,6 +346,12 @@ export function buildDataStores(
     sortKey: { name: 'createdAt', type: dynamodb.AttributeType.STRING },
     projectionType: dynamodb.ProjectionType.ALL,
   });
+  teamIssueEventsTable.addGlobalSecondaryIndex({
+    indexName: 'TeamIssueCommentCreatedAtIndex',
+    partitionKey: { name: 'directoryTeamIssueId', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'commentCreatedAtOrder', type: dynamodb.AttributeType.STRING },
+    projectionType: dynamodb.ProjectionType.ALL,
+  });
 
   const projectDirectoryTable = new dynamodb.Table(stack, 'ProjectDirectoryTable', {
     partitionKey: { name: 'directoryId', type: dynamodb.AttributeType.STRING },

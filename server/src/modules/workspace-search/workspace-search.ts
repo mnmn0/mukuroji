@@ -489,7 +489,7 @@ export type WorkspaceSearchClient = {
     entityType: SearchEntityType,
     entityId: string,
     options?: WorkspaceSearchProjectionWriteOptions,
-  ): Promise<void>
+  ): Promise<boolean>
   /** Composite filter と current RBAC を適用して検索します。 */
   search(input: WorkspaceSearchQueryInput): Promise<WorkspaceSearchResponse>
   /** Current viewer が参照できる saved views を page 取得します。 */
@@ -1528,12 +1528,12 @@ export class DynamoDbWorkspaceSearchClient {
    *
    * @param input - Search document to persist.
    * @param fence - Canonical Collaboration row and version observed by the caller.
-   * @returns Whether the source was still current, or an existing newer projection was retained.
+   * @returns Whether the projection was written, source changed, or an existing projection was retained.
    */
   async upsertDocumentWithCommentSourceFence(
     input: Parameters<typeof createWorkspaceSearchDocument>[0] | WorkspaceSearchDocument,
     fence: WorkspaceSearchCommentProjectionFence,
-  ): Promise<'projected' | 'source-changed'> {
+  ): Promise<'projected' | 'source-changed' | 'unchanged'> {
     await this.ensureLocalTable()
     const document = createWorkspaceSearchDocument(input)
     const sourceRevision = normalizeProjectionSourceRevision(fence.sourceRevision)
@@ -1543,6 +1543,20 @@ export class DynamoDbWorkspaceSearchClient {
         'InvalidSearchProjectionRevision',
         'Search comment projection revision does not match its source fence.',
       )
+    }
+
+    const existingResponse = await this.documentClient.send(new GetCommand({
+      TableName: this.tableName,
+      Key: {
+        workspaceId: requireText(document.workspaceId, 'Search Workspace ID'),
+        recordKey: document.recordKey,
+      },
+      ConsistentRead: true,
+    }))
+    if (isRecordValue(existingResponse.Item) &&
+        existingResponse.Item.sourceRevision === sourceRevision &&
+        existingResponse.Item.projectionDigest === document.projectionDigest) {
+      return 'unchanged'
     }
 
     try {
@@ -1584,10 +1598,45 @@ export class DynamoDbWorkspaceSearchClient {
         return 'source-changed'
       }
       if (isTransactionConditionalCheckFailedAt(error, 1)) {
-        return 'projected'
+        return 'unchanged'
       }
       throw error
     }
+  }
+
+  /**
+   * Deletes a comment projection and reports whether a stored row was removed.
+   *
+   * @param workspaceId - Workspace owning the projection.
+   * @param entityType - Search entity discriminator.
+   * @param entityId - Stable search entity identifier.
+   * @param options - Optional source revision fence.
+   * @returns Whether this invocation deleted an existing projection.
+   */
+  async deleteDocumentWithResult(
+    workspaceId: string,
+    entityType: SearchEntityType,
+    entityId: string,
+    options?: WorkspaceSearchProjectionWriteOptions,
+  ): Promise<boolean> {
+    await this.ensureLocalTable()
+    const sourceRevision = normalizeProjectionSourceRevision(options?.sourceRevision)
+    const response = await this.documentClient.send(new GetCommand({
+      TableName: this.tableName,
+      Key: {
+        workspaceId: requireText(workspaceId, 'Search Workspace ID'),
+        recordKey: createWorkspaceSearchDocumentRecordKey(entityType, entityId),
+      },
+      ConsistentRead: true,
+    }))
+    if (!response.Item) return false
+    if (sourceRevision !== undefined &&
+        isRecordValue(response.Item) &&
+        typeof response.Item.sourceRevision === 'number' &&
+        response.Item.sourceRevision > sourceRevision) {
+      return false
+    }
+    return this.deleteDocument(workspaceId, entityType, entityId, options)
   }
 
   /** Search document を entity key で削除します。 */
@@ -1596,7 +1645,7 @@ export class DynamoDbWorkspaceSearchClient {
     entityType: SearchEntityType,
     entityId: string,
     options?: WorkspaceSearchProjectionWriteOptions,
-  ) {
+  ): Promise<boolean> {
     await this.ensureLocalTable()
     const sourceRevision = normalizeProjectionSourceRevision(options?.sourceRevision)
     try {
@@ -1626,7 +1675,9 @@ export class DynamoDbWorkspaceSearchClient {
       if (sourceRevision === undefined || !isTransactionConditionalCheckFailed(error)) {
         throw error
       }
+      return false
     }
+    return true
   }
 
   /** Composite filter、current RBAC、cursor pagination を適用して検索します。 */

@@ -164,6 +164,7 @@ test('fences a comment Search projection to its current canonical version', asyn
   const documentClient = {
     async send(command: { input: Record<string, unknown> }) {
       commands.push(command.input)
+      if (command.input.Key !== undefined) return {}
       const error = Object.assign(new Error('canonical comment changed'), {
         name: 'TransactionCanceledException',
         CancellationReasons: [
@@ -195,7 +196,7 @@ test('fences a comment Search projection to its current canonical version', asyn
     sourceCommentId: 'comment-1',
     sourceRevision: 1,
   })).resolves.toBe('source-changed')
-  expect(commands[0]?.TransactItems).toEqual([
+  expect(commands[1]?.TransactItems).toEqual([
     expect.objectContaining({
       ConditionCheck: expect.objectContaining({
         TableName: 'collaboration-table',
@@ -210,6 +211,73 @@ test('fences a comment Search projection to its current canonical version', asyn
       Put: expect.objectContaining({ TableName: 'search-table' }),
     }),
   ])
+})
+
+test('does not count a replayed Search projection as a new write', async () => {
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      if (command.input.Key !== undefined) return {}
+      const error = Object.assign(new Error('projection already won'), {
+        name: 'TransactionCanceledException',
+        CancellationReasons: [
+          { Code: 'None' },
+          { Code: 'ConditionalCheckFailed' },
+        ],
+      })
+      throw error
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+  const document = createCommentWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    teamId: 'core',
+    issueId: 'issue-1',
+    commentId: 'comment-1',
+    body: 'Historical comment',
+    sourceRevision: 1,
+  })
+
+  await expect(client.upsertDocumentWithCommentSourceFence(document, {
+    sourceTableName: 'collaboration-table',
+    sourceEntityKey: 'workspace-1#work-item#team/core/issue/issue-1',
+    sourceCommentId: 'comment-1',
+    sourceRevision: 1,
+  })).resolves.toBe('unchanged')
+})
+
+test('reports whether an idempotent Search deletion removed a document', async () => {
+  const document = createCommentWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    teamId: 'core',
+    issueId: 'issue-1',
+    commentId: 'comment-1',
+    body: 'Historical comment',
+    sourceRevision: 1,
+  })
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    createMemoryDocumentClient([document]),
+    {} as DynamoDBClient,
+    false,
+  )
+
+  await expect(client.deleteDocumentWithResult(
+    'workspace-1',
+    'comment',
+    document.entityId,
+    { sourceRevision: 1 },
+  )).resolves.toBe(true)
+  await expect(client.deleteDocumentWithResult(
+    'workspace-1',
+    'comment',
+    document.entityId,
+    { sourceRevision: 1 },
+  )).resolves.toBe(false)
 })
 
 test('requires canonical ISO dates for Work Item search projections', () => {

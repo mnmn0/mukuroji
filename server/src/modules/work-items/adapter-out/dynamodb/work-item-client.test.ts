@@ -759,6 +759,9 @@ test('DynamoDB Team Work Item detail falls back when the comment index is stale'
       }
 
       queryInputs.push(command.input)
+      if (command.input.IndexName === 'TeamIssueCommentCreatedAtIndex') {
+        return { Items: [] }
+      }
       if (command.input.IndexName === 'TeamIssueEventCreatedAtIndex') {
         return {
           Items: [],
@@ -813,12 +816,12 @@ test('DynamoDB Team Work Item detail falls back when the comment index is stale'
   })
   expect(queryInputs).toHaveLength(3)
   expect(queryInputs.some((input) =>
-    input.IndexName === 'TeamIssueEventCreatedAtIndex' &&
-    input.ScanIndexForward === false,
+    input.IndexName === 'TeamIssueEventCreatedAtIndex' && input.Limit === 1,
   )).toBe(true)
   expect(queryInputs.some((input) =>
-    input.ProjectionExpression === '#createdAt, #eventId, #eventType' &&
-    input.ConsistentRead === true,
+    input.IndexName === 'TeamIssueEventCreatedAtIndex' &&
+    input.ScanIndexForward === true &&
+    input.Limit === 1,
   )).toBe(true)
   expect(queryInputs.some((input) =>
     input.IndexName === undefined &&
@@ -842,6 +845,7 @@ test('DynamoDB Team Work Item comment preview orders offset timestamps by instan
       body: 'Older comment',
       summary: 'Commented',
       createdAt: '2026-07-16T09:00:00+09:00',
+      commentCreatedAtOrder: '2026-07-16T00:00:00.000Z#older-comment',
     },
     {
       directoryId: 'workspace-1',
@@ -854,6 +858,7 @@ test('DynamoDB Team Work Item comment preview orders offset timestamps by instan
       body: 'Newer comment',
       summary: 'Commented',
       createdAt: '2026-07-16T01:00:00.000Z',
+      commentCreatedAtOrder: '2026-07-16T01:00:00.000Z#newer-comment',
     },
   ]
   const documentClient = {
@@ -862,6 +867,9 @@ test('DynamoDB Team Work Item comment preview orders offset timestamps by instan
         return { Item: createScheduleCascadeIssue('core', 'canonical-work-item') }
       }
       queryInputs.push(command.input)
+      if (command.input.IndexName === 'TeamIssueCommentCreatedAtIndex') {
+        return { Items: [comments[1], comments[0]] }
+      }
       if (command.input.IndexName === 'TeamIssueEventCreatedAtIndex') {
         return { Items: comments }
       }
@@ -895,12 +903,9 @@ test('DynamoDB Team Work Item comment preview orders offset timestamps by instan
     comments: [{ id: 'newer-comment', body: 'Newer comment' }],
   })
   expect(queryInputs.some((input) =>
-    input.IndexName === 'TeamIssueEventCreatedAtIndex' &&
-    input.ScanIndexForward === false,
-  )).toBe(true)
-  expect(queryInputs.some((input) =>
-    input.ProjectionExpression === '#createdAt, #eventId, #eventType' &&
-    input.ConsistentRead === true,
+    input.IndexName === 'TeamIssueCommentCreatedAtIndex' &&
+    input.ScanIndexForward === false &&
+    input.Limit === 1,
   )).toBe(true)
 })
 
@@ -909,6 +914,9 @@ test('DynamoDB Team Work Item detail rejects a comment omitted from the sparse i
     async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
       if (command.constructor.name === 'GetCommand') {
         return { Item: createScheduleCascadeIssue('core', 'canonical-work-item') }
+      }
+      if (command.input.IndexName === 'TeamIssueCommentCreatedAtIndex') {
+        return { Items: [] }
       }
       if (command.input.IndexName === 'TeamIssueEventCreatedAtIndex') {
         return { Items: [] }

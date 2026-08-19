@@ -701,6 +701,8 @@ type TeamIssueEventItem = {
    * 作成日時の ISO 8601 timestamp です。
    */
   createdAt: string
+  /** Canonical UTC timestamp plus event ID used by the bounded comment index. */
+  commentCreatedAtOrder?: string
 }
 
 /**
@@ -1316,6 +1318,8 @@ export type TeamIssueDetailReadOptions = {
   eventType?: TeamIssueActivityType
   /** 移行未完了の環境で前 page が返した event cursor です。 */
   eventCursor?: string
+  /** Reads the pre-migration comment index without relying on the staged canonical index. */
+  legacyCommentIndexOnly?: boolean
 }
 
 /** Team Issue event page cursor の署名対象 payload です。 */
@@ -1337,8 +1341,20 @@ type TeamIssueEventCursor =
       directoryTeamIssueId: string
       /** DynamoDB base-table event sort key です。 */
       eventId: string
-      /** Canonical event instant used for chronologically ordered cursors. */
+      /** Event timestamp retained as the raw sparse-index continuation key. */
       createdAt: string
+    }
+  | {
+      /** Cursor schema version. */
+      version: 3
+      /** Cursor が使用する DynamoDB index です。 */
+      index: 'commentCreatedAt'
+      /** Cursor を別 Issue へ流用できないよう束縛する partition key です。 */
+      directoryTeamIssueId: string
+      /** DynamoDB event sort key です。 */
+      eventId: string
+      /** Canonical timestamp-and-ID index sort key. */
+      commentCreatedAtOrder: string
     }
 
 function createRequestConversionTransactionItems(
@@ -3294,7 +3310,8 @@ export class DynamoDbTeamIssuesClient {
       options.eventCursor,
       directoryTeamIssueId,
     )
-    if (eventCursor?.version === 2 && options.eventType !== 'commented') {
+    if ((eventCursor?.version === 2 || eventCursor?.version === 3) &&
+        options.eventType !== 'commented') {
       throw new ProjectDataError(
         400,
         'InvalidTeamIssueCursor',
@@ -3302,7 +3319,7 @@ export class DynamoDbTeamIssuesClient {
       )
     }
     if (options.eventType === 'commented' &&
-        (eventCursor === undefined || eventCursor.version === 2)) {
+        (eventCursor === undefined || eventCursor.version === 2 || eventCursor.version === 3)) {
       return this.queryCommentEventsWithNormalizedOrdering(
         directoryTeamIssueId,
         options,
@@ -3355,8 +3372,8 @@ export class DynamoDbTeamIssuesClient {
   }
 
   /**
-   * Reads all indexed comment candidates, validates the sparse-index coverage,
-   * and orders results by the parsed instant rather than the raw timestamp text.
+   * Reads bounded comment pages from the canonical time index and keeps the
+   * full sparse-index validation path for unbounded transitional reads.
    *
    * @param directoryTeamIssueId - Work Item event partition key.
    * @param options - Comment event page options.
@@ -3366,16 +3383,113 @@ export class DynamoDbTeamIssuesClient {
   private async queryCommentEventsWithNormalizedOrdering(
     directoryTeamIssueId: string,
     options: TeamIssueDetailReadOptions,
-    eventCursor: Extract<TeamIssueEventCursor, { version: 2 }> | undefined,
+    eventCursor: Extract<TeamIssueEventCursor, { version: 2 | 3 }> | undefined,
   ) {
+    const eventLimit = options.eventLimit === undefined
+      ? undefined
+      : Math.max(1, Math.floor(options.eventLimit))
+    if (eventCursor?.version === 3) {
+      const chronologicalPage = await this.queryChronologicalCommentEvents(
+        directoryTeamIssueId,
+        eventCursor,
+        eventLimit,
+        options.newestEventsFirst === true,
+      )
+      const chronologicalItems = eventLimit === undefined
+        ? chronologicalPage.items
+        : chronologicalPage.items.slice(0, eventLimit)
+      const lastItem = chronologicalItems.at(-1)
+      const lastCommentCreatedAtOrder = lastItem === undefined
+        ? undefined
+        : requireCommentCreatedAtOrder(lastItem)
+      return {
+        items: chronologicalItems,
+        ...(chronologicalPage.lastEvaluatedKey !== undefined && lastItem && lastCommentCreatedAtOrder
+          ? {
+              nextCursor: encodeTeamIssueCommentCursor(
+                directoryTeamIssueId,
+                {
+                  eventId: lastItem.eventId,
+                  commentCreatedAtOrder: lastCommentCreatedAtOrder,
+                },
+              ),
+            }
+          : {}),
+      }
+    }
+    if (eventLimit !== undefined) {
+      if (eventCursor === undefined && options.legacyCommentIndexOnly !== true) {
+        const chronologicalPage = await this.queryChronologicalCommentEvents(
+          directoryTeamIssueId,
+          eventCursor,
+          eventLimit,
+          options.newestEventsFirst === true,
+        )
+        const chronologicalItems = chronologicalPage.items.slice(0, eventLimit)
+        if (chronologicalItems.length > 0) {
+          const lastItem = chronologicalItems.at(-1)
+          const lastCommentCreatedAtOrder = lastItem === undefined
+            ? undefined
+            : requireCommentCreatedAtOrder(lastItem)
+          return {
+            items: chronologicalItems,
+            ...(chronologicalPage.lastEvaluatedKey !== undefined && lastItem && lastCommentCreatedAtOrder
+              ? {
+                  nextCursor: encodeTeamIssueCommentCursor(
+                    directoryTeamIssueId,
+                    {
+                      eventId: lastItem.eventId,
+                      commentCreatedAtOrder: lastCommentCreatedAtOrder,
+                    },
+                  ),
+                }
+              : {}),
+          }
+        }
+      }
+      const indexedPage = await this.queryIndexedCommentEvents(directoryTeamIssueId, {
+        eventCursor,
+        eventLimit,
+        newestEventsFirst: options.newestEventsFirst === true,
+      })
+      let orderedPageItems = [...indexedPage.items].sort((left, right) =>
+        compareTeamIssueEvents(left, right, options.newestEventsFirst === true)
+      )
+      let hasMore = indexedPage.lastEvaluatedKey !== undefined
+      if (orderedPageItems.length === 0) {
+        const basePage = await this.queryBaseCommentEvents(directoryTeamIssueId, { eventLimit })
+        orderedPageItems = [...basePage.items].sort((left, right) =>
+          compareTeamIssueEvents(left, right, options.newestEventsFirst === true)
+        )
+        hasMore = basePage.lastEvaluatedKey !== undefined
+      }
+      orderedPageItems = orderedPageItems.slice(0, eventLimit)
+      const lastItem = orderedPageItems.at(-1)
+      return {
+        items: orderedPageItems,
+        ...(hasMore && lastItem
+          ? {
+              nextCursor: encodeTeamIssueEventCursor(
+                directoryTeamIssueId,
+                {
+                  eventId: lastItem.eventId,
+                  createdAt: lastItem.createdAt,
+                },
+                true,
+              ),
+            }
+          : {}),
+      }
+    }
+
     const [indexedItems, baseCommentIds] = await Promise.all([
       this.queryIndexedCommentEvents(directoryTeamIssueId),
       this.readCommentEventIndexCoverage(directoryTeamIssueId),
     ])
-    const indexedCommentIds = new Set(indexedItems.map((item) => item.eventId))
+    const indexedCommentIds = new Set(indexedItems.items.map((item) => item.eventId))
     const items = setsEqual(indexedCommentIds, baseCommentIds)
-      ? indexedItems
-      : await this.queryBaseCommentEvents(directoryTeamIssueId)
+      ? indexedItems.items
+      : (await this.queryBaseCommentEvents(directoryTeamIssueId)).items
     const orderedItems = [...items].sort((left, right) =>
       compareTeamIssueEvents(left, right, options.newestEventsFirst === true)
     )
@@ -3384,9 +3498,6 @@ export class DynamoDbTeamIssuesClient {
       eventCursor,
       options.newestEventsFirst === true,
     )
-    const eventLimit = options.eventLimit === undefined
-      ? undefined
-      : Math.max(1, Math.floor(options.eventLimit))
     const pageItems = eventLimit === undefined
       ? orderedItems.slice(startIndex)
       : orderedItems.slice(startIndex, startIndex + eventLimit)
@@ -3409,10 +3520,68 @@ export class DynamoDbTeamIssuesClient {
     }
   }
 
-  /** Reads every comment candidate from the sparse createdAt index. */
-  private async queryIndexedCommentEvents(directoryTeamIssueId: string) {
+  /** Reads a bounded page from the canonical comment-time index. */
+  private async queryChronologicalCommentEvents(
+    directoryTeamIssueId: string,
+    eventCursor: Extract<TeamIssueEventCursor, { version: 3 }> | undefined,
+    eventLimit: number | undefined,
+    newestEventsFirst: boolean,
+  ) {
     const items: TeamIssueEventItem[] = []
-    let exclusiveStartKey: Record<string, unknown> | undefined
+    let exclusiveStartKey: Record<string, unknown> | undefined = eventCursor
+      ? {
+          directoryTeamIssueId: eventCursor.directoryTeamIssueId,
+          eventId: eventCursor.eventId,
+          commentCreatedAtOrder: eventCursor.commentCreatedAtOrder,
+        }
+      : undefined
+    do {
+      const response = await this.documentClient.send(new QueryCommand({
+        TableName: this.eventTableName,
+        IndexName: 'TeamIssueCommentCreatedAtIndex',
+        KeyConditionExpression: 'directoryTeamIssueId = :directoryTeamIssueId',
+        ExpressionAttributeValues: {
+          ':directoryTeamIssueId': directoryTeamIssueId,
+        },
+        ExclusiveStartKey: exclusiveStartKey,
+        ScanIndexForward: !newestEventsFirst,
+        ...(eventLimit === undefined ? {} : { Limit: eventLimit - items.length }),
+      }))
+      const pageItems = (response.Items ?? []).map(toTeamIssueEventItem)
+      for (const item of pageItems) {
+        if (item.eventType !== 'commented') {
+          throw new ProjectDataError(
+            503,
+            'InvalidTeamIssue',
+            'Team Issue comment index contains a non-comment event.',
+          )
+        }
+        requireCommentCreatedAtOrder(item)
+      }
+      items.push(...pageItems)
+      exclusiveStartKey = response.LastEvaluatedKey
+      if (eventLimit !== undefined && items.length >= eventLimit) break
+    } while (exclusiveStartKey)
+    return { items, lastEvaluatedKey: exclusiveStartKey }
+  }
+
+  /** Reads comment candidates from the sparse createdAt index. */
+  private async queryIndexedCommentEvents(
+    directoryTeamIssueId: string,
+    options: {
+      eventCursor?: Extract<TeamIssueEventCursor, { version: 2 }>
+      eventLimit?: number
+      newestEventsFirst?: boolean
+    } = {},
+  ) {
+    const items: TeamIssueEventItem[] = []
+    let exclusiveStartKey: Record<string, unknown> | undefined = options.eventCursor
+      ? {
+          directoryTeamIssueId: options.eventCursor.directoryTeamIssueId,
+          eventId: options.eventCursor.eventId,
+          createdAt: options.eventCursor.createdAt,
+        }
+      : undefined
     do {
       const response = await this.documentClient.send(new QueryCommand({
         TableName: this.eventTableName,
@@ -3424,12 +3593,23 @@ export class DynamoDbTeamIssuesClient {
         },
         FilterExpression: 'eventType = :eventType',
         ExclusiveStartKey: exclusiveStartKey,
-        ScanIndexForward: false,
+        ScanIndexForward: options.eventLimit === undefined
+          ? false
+          : options.newestEventsFirst !== false,
+        ...(options.eventLimit === undefined
+          ? {}
+          : { Limit: Math.max(1, options.eventLimit - items.length) }),
       }))
       items.push(...(response.Items ?? []).map(toTeamIssueEventItem))
       exclusiveStartKey = response.LastEvaluatedKey
+      if (options.eventLimit !== undefined && items.length >= options.eventLimit) {
+        break
+      }
     } while (exclusiveStartKey)
-    return items.filter((item) => item.eventType === 'commented')
+    return {
+      items: items.filter((item) => item.eventType === 'commented'),
+      lastEvaluatedKey: exclusiveStartKey,
+    }
   }
 
   /**
@@ -3468,7 +3648,10 @@ export class DynamoDbTeamIssuesClient {
   }
 
   /** Reads and fully validates comment rows from the base table after index drift. */
-  private async queryBaseCommentEvents(directoryTeamIssueId: string) {
+  private async queryBaseCommentEvents(
+    directoryTeamIssueId: string,
+    options: { eventLimit?: number } = {},
+  ) {
     const items: TeamIssueEventItem[] = []
     let exclusiveStartKey: Record<string, unknown> | undefined
     do {
@@ -3482,22 +3665,35 @@ export class DynamoDbTeamIssuesClient {
         FilterExpression: 'eventType = :eventType',
         ExclusiveStartKey: exclusiveStartKey,
         ConsistentRead: true,
+        ...(options.eventLimit === undefined
+          ? {}
+          : { Limit: Math.max(1, options.eventLimit - items.length) }),
       }))
       items.push(...(response.Items ?? []).map(toTeamIssueEventItem))
       exclusiveStartKey = response.LastEvaluatedKey
+      if (options.eventLimit !== undefined && items.length >= options.eventLimit) {
+        break
+      }
     } while (exclusiveStartKey)
-    return items.filter((item) => item.eventType === 'commented')
+    return {
+      items: items.filter((item) => item.eventType === 'commented'),
+      lastEvaluatedKey: exclusiveStartKey,
+    }
   }
 
   private createIssueEventItem(
     input: Omit<TeamIssueEventItem, 'directoryTeamIssueId' | 'eventId'> & { eventId?: string },
   ) {
     const createdAt = normalizeTeamIssueEventTimestamp(input.createdAt)
+    const eventId = input.eventId ?? createTeamIssueEventId(createdAt, input.eventType)
     return {
       ...input,
       directoryTeamIssueId: createDirectoryTeamIssueId(input.directoryId, input.teamId, input.issueId),
-      eventId: input.eventId ?? createTeamIssueEventId(createdAt, input.eventType),
+      eventId,
       createdAt,
+      ...(input.eventType === 'commented'
+        ? { commentCreatedAtOrder: createTeamIssueCommentEventOrder(createdAt, eventId) }
+        : {}),
     } satisfies TeamIssueEventItem
   }
 
@@ -3597,6 +3793,7 @@ async function ensureLocalTeamIssueEventsTable(
           { AttributeName: 'directoryTeamIssueId', AttributeType: 'S' },
           { AttributeName: 'eventId', AttributeType: 'S' },
           { AttributeName: 'createdAt', AttributeType: 'S' },
+          { AttributeName: 'commentCreatedAtOrder', AttributeType: 'S' },
         ],
         KeySchema: [
           { AttributeName: 'directoryTeamIssueId', KeyType: 'HASH' },
@@ -3611,6 +3808,14 @@ async function ensureLocalTeamIssueEventsTable(
             ],
             Projection: { ProjectionType: 'ALL' },
           },
+          {
+            IndexName: 'TeamIssueCommentCreatedAtIndex',
+            KeySchema: [
+              { AttributeName: 'directoryTeamIssueId', KeyType: 'HASH' },
+              { AttributeName: 'commentCreatedAtOrder', KeyType: 'RANGE' },
+            ],
+            Projection: { ProjectionType: 'ALL' },
+          },
         ],
         BillingMode: 'PAY_PER_REQUEST',
       }),
@@ -3622,22 +3827,45 @@ async function ensureLocalTeamIssueEventsTable(
       ])) {
         throw new Error(`Local DynamoDB table "${tableName}" does not match the expected schema.`)
       }
-      if (table?.GlobalSecondaryIndexes?.some((index) =>
-        index.IndexName === 'TeamIssueEventCreatedAtIndex')) {
+      const hasCreatedAtIndex = table?.GlobalSecondaryIndexes?.some((index) =>
+        index.IndexName === 'TeamIssueEventCreatedAtIndex') ?? false
+      const hasCommentCreatedAtIndex = table?.GlobalSecondaryIndexes?.some((index) =>
+        index.IndexName === 'TeamIssueCommentCreatedAtIndex') ?? false
+      if (hasCreatedAtIndex && hasCommentCreatedAtIndex) {
+        return
+      }
+      if (!hasCreatedAtIndex) {
+        await dynamoDbClient.send(new UpdateTableCommand({
+          TableName: tableName,
+          AttributeDefinitions: [
+            { AttributeName: 'directoryTeamIssueId', AttributeType: 'S' },
+            { AttributeName: 'createdAt', AttributeType: 'S' },
+          ],
+          GlobalSecondaryIndexUpdates: [{
+            Create: {
+              IndexName: 'TeamIssueEventCreatedAtIndex',
+              KeySchema: [
+                { AttributeName: 'directoryTeamIssueId', KeyType: 'HASH' },
+                { AttributeName: 'createdAt', KeyType: 'RANGE' },
+              ],
+              Projection: { ProjectionType: 'ALL' },
+            },
+          }],
+        }))
         return
       }
       await dynamoDbClient.send(new UpdateTableCommand({
         TableName: tableName,
         AttributeDefinitions: [
           { AttributeName: 'directoryTeamIssueId', AttributeType: 'S' },
-          { AttributeName: 'createdAt', AttributeType: 'S' },
+          { AttributeName: 'commentCreatedAtOrder', AttributeType: 'S' },
         ],
         GlobalSecondaryIndexUpdates: [{
           Create: {
-            IndexName: 'TeamIssueEventCreatedAtIndex',
+            IndexName: 'TeamIssueCommentCreatedAtIndex',
             KeySchema: [
               { AttributeName: 'directoryTeamIssueId', KeyType: 'HASH' },
-              { AttributeName: 'createdAt', KeyType: 'RANGE' },
+              { AttributeName: 'commentCreatedAtOrder', KeyType: 'RANGE' },
             ],
             Projection: { ProjectionType: 'ALL' },
           },
@@ -3833,6 +4061,14 @@ function isTeamIssueEventsTableDescription(table: TableDescription | undefined) 
       hasKeySchema(index, [
         ['directoryTeamIssueId', 'HASH'],
         ['createdAt', 'RANGE'],
+      ]),
+    ),
+  ) && Boolean(
+    table?.GlobalSecondaryIndexes?.some((index) =>
+      index.IndexName === 'TeamIssueCommentCreatedAtIndex' &&
+      hasKeySchema(index, [
+        ['directoryTeamIssueId', 'HASH'],
+        ['commentCreatedAtOrder', 'RANGE'],
       ]),
     ),
   )
@@ -4277,7 +4513,9 @@ function isTeamIssueEventItem(value: unknown): value is TeamIssueEventItem {
     hasCanonicalTriageContextSnapshot(value.eventType, value.triageContextSnapshot) &&
     typeof value.summary === 'string' &&
     typeof value.createdAt === 'string' &&
-    Number.isFinite(Date.parse(value.createdAt))
+    Number.isFinite(Date.parse(value.createdAt)) &&
+    (value.commentCreatedAtOrder === undefined ||
+      value.commentCreatedAtOrder === createTeamIssueCommentEventOrder(value.createdAt, value.eventId))
   )
 }
 
@@ -4292,6 +4530,30 @@ function normalizeTeamIssueEventTimestamp(value: string): string {
     )
   }
   return new Date(parsed).toISOString()
+}
+
+/** Validates a persisted event timestamp without changing its index key representation. */
+function validateTeamIssueEventTimestamp(value: string): string {
+  if (!Number.isFinite(Date.parse(value))) {
+    throw new ProjectDataError(
+      503,
+      'InvalidTeamIssue',
+      'Team Issue event timestamp is invalid.',
+    )
+  }
+  return value
+}
+
+/** Requires the canonical sort key projected by the bounded comment index. */
+function requireCommentCreatedAtOrder(value: TeamIssueEventItem): string {
+  if (typeof value.commentCreatedAtOrder !== 'string' || value.commentCreatedAtOrder.length === 0) {
+    throw new ProjectDataError(
+      503,
+      'InvalidTeamIssue',
+      'Team Issue comment event item is missing its canonical index key.',
+    )
+  }
+  return value.commentCreatedAtOrder
 }
 
 /** Validates one strongly read row that should be present in the sparse comment index. */
@@ -5024,7 +5286,7 @@ function encodeTeamIssueEventCursor(
   }
 
   const createdAt = typeof key.createdAt === 'string'
-    ? normalizeTeamIssueEventTimestamp(key.createdAt)
+    ? validateTeamIssueEventTimestamp(key.createdAt)
     : undefined
   let cursor: TeamIssueEventCursor
   if (useCreatedAtIndex) {
@@ -5048,6 +5310,28 @@ function encodeTeamIssueEventCursor(
       directoryTeamIssueId,
       eventId,
     }
+  }
+  return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url')
+}
+
+/** Encodes a scope-bound cursor for the canonical comment-time index. */
+function encodeTeamIssueCommentCursor(
+  directoryTeamIssueId: string,
+  key: { eventId: string; commentCreatedAtOrder: string },
+) {
+  if (!key.eventId || !key.commentCreatedAtOrder) {
+    throw new ProjectDataError(
+      503,
+      'InvalidTeamIssue',
+      'Team Issue comment index page did not include a valid continuation key.',
+    )
+  }
+  const cursor: Extract<TeamIssueEventCursor, { version: 3 }> = {
+    version: 3,
+    index: 'commentCreatedAt',
+    directoryTeamIssueId,
+    eventId: key.eventId,
+    commentCreatedAtOrder: key.commentCreatedAtOrder,
   }
   return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url')
 }
@@ -5087,10 +5371,15 @@ function isTeamIssueEventCursor(value: unknown): value is TeamIssueEventCursor {
   if (value.version === 1) {
     return true
   }
-  return value.version === 2 &&
-    value.index === 'createdAt' &&
-    typeof value.createdAt === 'string' &&
-    Number.isFinite(Date.parse(value.createdAt))
+  if (value.version === 2) {
+    return value.index === 'createdAt' &&
+      typeof value.createdAt === 'string' &&
+      Number.isFinite(Date.parse(value.createdAt))
+  }
+  return value.version === 3 &&
+    value.index === 'commentCreatedAt' &&
+    typeof value.commentCreatedAtOrder === 'string' &&
+    value.commentCreatedAtOrder.length > 0
 }
 /**
  * Team-local Issue ID を Workspace 内で一意な audit Work Item ID に変換します。
@@ -5159,6 +5448,41 @@ function createWorkItemNotificationSummary(before: TeamIssueItem, after: TeamIss
 
 function createTeamIssueEventId(createdAt: string, eventType: TeamIssueActivityType) {
   return `${createdAt}#${eventType}#${Math.random().toString(36).slice(2, 10)}`
+}
+
+/**
+ * Creates the canonical chronological sort key for one legacy or new comment event.
+ *
+ * @param createdAt - Event timestamp accepted by the Work Item event schema.
+ * @param eventId - Stable event identifier used to break timestamp ties.
+ * @returns UTC timestamp and event ID in lexicographically chronological order.
+ */
+export function createTeamIssueCommentEventOrder(createdAt: string, eventId: string): string {
+  return `${normalizeTeamIssueEventTimestamp(createdAt)}#${eventId}`
+}
+
+/**
+ * Creates a v2 cursor after one legacy comment event.
+ *
+ * @param directoryId - Workspace directory identifier.
+ * @param teamId - Owning Team identifier.
+ * @param issueId - Team-local Work Item identifier.
+ * @param eventId - Stable legacy event identifier.
+ * @param createdAt - Event timestamp used for chronological continuation.
+ * @returns Scope-bound opaque comment cursor.
+ */
+export function createTeamIssueCommentEventCursor(
+  directoryId: string,
+  teamId: string,
+  issueId: string,
+  eventId: string,
+  createdAt: string,
+) {
+  return encodeTeamIssueEventCursor(
+    createDirectoryTeamIssueId(directoryId, teamId, issueId),
+    { eventId, createdAt },
+    true,
+  )
 }
 
 function getDynamoDbEndpoint() {

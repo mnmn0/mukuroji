@@ -1191,6 +1191,7 @@ test('keeps complete Team Issue activity while reading legacy comments separatel
       eventLimit: 50,
       newestEventsFirst: true,
       eventType: 'commented',
+      legacyCommentIndexOnly: true,
     },
   ])
 })
@@ -2128,10 +2129,11 @@ test('merges canonical and legacy root pages by creation time during backfill', 
   configureFakeProjectClients(true)
   const defaultTeamIssues = getTestAppDependencies().workItems.teamIssues
   const detailInputs: Array<Record<string, unknown>> = []
+  let commentBackfillComplete = false
   setTestAppDependencies({
     collaboration: createCollaborationStub({
       async isTeamIssueCommentBackfillComplete() {
-        return false
+        return commentBackfillComplete
       },
       async getCommentSnapshot() {
         return undefined
@@ -2199,6 +2201,7 @@ test('merges canonical and legacy root pages by creation time during backfill', 
     expect.objectContaining({ id: 'legacy-comment', source: 'legacy' }),
   ])
   expect(responseBody.nextCursor).toMatch(/^mixed\./)
+  commentBackfillComplete = true
 
   const legacyResponse = await app.request(
     `/api/teams/core-team/issues/onboarding-friction/collaboration?limit=1&cursor=${responseBody.nextCursor}`,
@@ -2216,6 +2219,7 @@ test('merges canonical and legacy root pages by creation time during backfill', 
       eventLimit: 1,
       newestEventsFirst: true,
       eventType: 'commented',
+      legacyCommentIndexOnly: true,
     },
     { consistentIssueRead: true, eventLimit: 0 },
   ])
@@ -2231,8 +2235,8 @@ test('preserves merged root ordering when canonical and legacy comments share a 
     bodyMarkdown: 'Canonical root',
     version: 1,
     mentionMemberKeys: [],
-    createdAt: '2026-07-12T00:00:00.000Z',
-    updatedAt: '2026-07-12T00:00:00.000Z',
+    createdAt: '2026-07-12T01:00:00.000Z',
+    updatedAt: '2026-07-12T01:00:00.000Z',
     acceptedResolutions: [],
     reactions: [],
   }
@@ -2270,14 +2274,14 @@ test('preserves merged root ordering when canonical and legacy comments share a 
           issueId,
           options,
         )
-        return options?.eventLimit === 1
+        return options?.eventLimit === 2
           ? {
               ...detail,
               comments: [{
                 id: 'legacy-root',
                 actorUserId: 'departed@example.com',
                 body: 'Legacy root',
-                createdAt: '2026-07-12T00:01:00.000Z',
+                createdAt: '2026-07-12T09:30:00+09:00',
               }],
             }
           : detail
@@ -2293,8 +2297,8 @@ test('preserves merged root ordering when canonical and legacy comments share a 
   expect(response.status).toBe(200)
   const responseBody = await response.json()
   expect(responseBody.comments.map((comment: { id: string }) => comment.id)).toEqual([
-    'legacy-root',
     'canonical-root',
+    'legacy-root',
   ])
 })
 
@@ -2380,6 +2384,7 @@ test('keeps legacy event cursors out of the canonical collaboration reader', asy
       newestEventsFirst: true,
       eventType: 'commented',
       eventCursor: 'older-event',
+      legacyCommentIndexOnly: true,
     },
   ])
 })

@@ -303,6 +303,14 @@ export type BackfillCollaborationCommentInput = WorkItemCollaborationScope & {
 /** Result of validating one legacy comment's canonical parent during backfill. */
 export type BackfillTeamIssueCommentValidation = 'canonical' | 'parent-deleted'
 
+/** Result of one idempotent legacy-comment write. */
+export type BackfillTeamIssueCommentWriteResult = {
+  /** Canonical comment snapshot after the write or idempotent replay. */
+  comment: CollaborationComment
+  /** Whether this invocation created the canonical comment transaction. */
+  created: boolean
+}
+
 /** Read-only authorization row guard appended to a watcher mutation transaction. */
 export type CollaborationAuthorizationConditionCheck = {
   /** Condition check against one current authorization source-of-truth row. */
@@ -3018,6 +3026,18 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
   async backfillTeamIssueComment(
     input: BackfillCollaborationCommentInput,
   ): Promise<CollaborationComment> {
+    return (await this.backfillTeamIssueCommentWithResult(input)).comment
+  }
+
+  /**
+   * Copies one legacy comment and reports whether this invocation created it.
+   *
+   * @param input - Validated legacy comment and Work Item scope.
+   * @returns The canonical comment and transaction creation status.
+   */
+  async backfillTeamIssueCommentWithResult(
+    input: BackfillCollaborationCommentInput,
+  ): Promise<BackfillTeamIssueCommentWriteResult> {
     await this.ensureLocalTable()
     const normalizedInput = normalizeBackfillCollaborationCommentInput(input)
     const parent = await this.assertCanonicalBackfillParent(normalizedInput)
@@ -3094,7 +3114,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
           },
         ],
       }))
-      return comment
+      return { comment, created: true }
     } catch (error) {
       if (!isBackfillConditionalFailure(error)) {
         throw toCollaborationStoreError(error)
@@ -3125,14 +3145,14 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
         isBackfilledCommentIdentity(existing, normalizedInput)
       ) {
         await this.repairBackfilledDiscussion(normalizedInput, existing)
-        return existing
+        return { comment: existing, created: false }
       }
       if (isTransactionConditionalFailureAt(error, 1) &&
           existing &&
           isSameBackfilledComment(existing, comment)) {
         await this.ensureBackfillReceipt(normalizedInput)
         await this.repairBackfilledDiscussion(normalizedInput, existing)
-        return existing
+        return { comment: existing, created: false }
       }
       throw new CollaborationError(
         409,
@@ -3151,10 +3171,11 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
    * of silently classifying a live Work Item as deleted.
    *
    * @param input - Legacy comment and deleted Work Item scope.
+   * @returns Whether this invocation created the reconciliation receipt.
    */
   async reconcileDeletedBackfillTeamIssueComment(
     input: BackfillCollaborationCommentInput,
-  ): Promise<void> {
+  ): Promise<boolean> {
     await this.ensureLocalTable()
     const normalizedInput = normalizeBackfillCollaborationCommentInput(input)
     const expected = createDeletedBackfillReconciliationRecord(normalizedInput)
@@ -3171,6 +3192,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
           },
         ],
       }))
+      return true
     } catch (error) {
       if (!isBackfillConditionalFailure(error)) {
         throw toCollaborationStoreError(error)
@@ -3188,7 +3210,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
         normalizedInput.commentId,
       )
       if (existing && isSameDeletedBackfillReconciliation(existing, normalizedInput)) {
-        return
+        return false
       }
       throw new CollaborationError(
         409,

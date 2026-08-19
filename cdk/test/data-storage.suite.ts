@@ -76,6 +76,7 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
         { AttributeName: 'directoryTeamIssueId', AttributeType: 'S' },
         { AttributeName: 'eventId', AttributeType: 'S' },
         { AttributeName: 'createdAt', AttributeType: 'S' },
+        { AttributeName: 'commentCreatedAtOrder', AttributeType: 'S' },
       ]),
       GlobalSecondaryIndexes: expect.arrayContaining([
         expect.objectContaining({
@@ -83,6 +84,14 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
           KeySchema: [
             { AttributeName: 'directoryTeamIssueId', KeyType: 'HASH' },
             { AttributeName: 'createdAt', KeyType: 'RANGE' },
+          ],
+          Projection: { ProjectionType: 'ALL' },
+        }),
+        expect.objectContaining({
+          IndexName: 'TeamIssueCommentCreatedAtIndex',
+          KeySchema: [
+            { AttributeName: 'directoryTeamIssueId', KeyType: 'HASH' },
+            { AttributeName: 'commentCreatedAtOrder', KeyType: 'RANGE' },
           ],
           Projection: { ProjectionType: 'ALL' },
         }),
