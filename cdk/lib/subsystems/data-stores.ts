@@ -340,6 +340,12 @@ export function buildDataStores(
     pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
     removalPolicy: cdk.RemovalPolicy.RETAIN,
   });
+  teamIssueEventsTable.addGlobalSecondaryIndex({
+    indexName: 'TeamIssueEventCreatedAtIndex',
+    partitionKey: { name: 'directoryTeamIssueId', type: dynamodb.AttributeType.STRING },
+    sortKey: { name: 'createdAt', type: dynamodb.AttributeType.STRING },
+    projectionType: dynamodb.ProjectionType.ALL,
+  });
 
   const projectDirectoryTable = new dynamodb.Table(stack, 'ProjectDirectoryTable', {
     partitionKey: { name: 'directoryId', type: dynamodb.AttributeType.STRING },

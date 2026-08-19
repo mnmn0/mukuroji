@@ -150,6 +150,16 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
     ],
   ],
   [
+    'AwsSolutions-IAM5[Resource::<TeamIssueEventsTableDD2B0F96.Arn>/index/*]',
+    [
+      'ListProjectTasksFunction/ServiceRole/DefaultPolicy/Resource',
+      'WorkItemImportFunction/ServiceRole/DefaultPolicy/Resource',
+      'AutomationEventFunction/ServiceRole/DefaultPolicy/Resource',
+      'AutomationScheduleFunction/ServiceRole/DefaultPolicy/Resource',
+      'ConnectorSyncFunction/ServiceRole/DefaultPolicy/Resource',
+    ],
+  ],
+  [
     'AwsSolutions-IAM5[Resource::<RealtimeSessionsTable607096EB.Arn>/index/*]',
     [
       'ListProjectTasksFunction/ServiceRole/DefaultPolicy/Resource',
@@ -420,6 +430,7 @@ const acknowledgedFindings = [
     'AwsSolutions-IAM5[Resource::<NotificationsTable76DCFC6C.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::<ProjectDirectoryTable9ED01C01.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::<TeamIssuesTable189D851D.Arn>/index/*]',
+    'AwsSolutions-IAM5[Resource::<TeamIssueEventsTableDD2B0F96.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::<RealtimeSessionsTable607096EB.Arn>/index/*]',
     'AwsSolutions-IAM5[Resource::<WorkItemImportBucket14068778.Arn>/work-item-imports/*]',
     'AwsSolutions-IAM5[Resource::<WorkspaceSearchMigrationJournalBucket4E515934.Arn>/workspace-search/v1/*]',

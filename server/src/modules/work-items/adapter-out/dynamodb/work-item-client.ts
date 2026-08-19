@@ -52,6 +52,7 @@ import {
   CreateTableCommand,
   DescribeTableCommand,
   DynamoDBClient,
+  UpdateTableCommand,
 } from '@aws-sdk/client-dynamodb'
 import type {
   TableDescription,
@@ -1318,14 +1319,27 @@ export type TeamIssueDetailReadOptions = {
 }
 
 /** Team Issue event page cursor の署名対象 payload です。 */
-type TeamIssueEventCursor = {
-  /** Cursor schema version です。 */
-  version: 1
-  /** Cursor を別 Issue へ流用できないよう束縛する partition key です。 */
-  directoryTeamIssueId: string
-  /** DynamoDB event sort key です。 */
-  eventId: string
-}
+type TeamIssueEventCursor =
+  | {
+      /** Cursor schema version です。 */
+      version: 1
+      /** Cursor を別 Issue へ流用できないよう束縛する partition key です。 */
+      directoryTeamIssueId: string
+      /** DynamoDB event sort key です。 */
+      eventId: string
+    }
+  | {
+      /** Cursor schema version です。 */
+      version: 2
+      /** Cursor が使用する DynamoDB index です。 */
+      index: 'createdAt'
+      /** Cursor を別 Issue へ流用できないよう束縛する partition key です。 */
+      directoryTeamIssueId: string
+      /** DynamoDB base-table event sort key です。 */
+      eventId: string
+      /** DynamoDB createdAt index sort key です。 */
+      createdAt: string
+    }
 
 function createRequestConversionTransactionItems(
   input: RequestConversionTransactionInput,
@@ -3276,16 +3290,35 @@ export class DynamoDbTeamIssuesClient {
       ? undefined
       : Math.max(1, Math.floor(options.eventLimit))
     const directoryTeamIssueId = createDirectoryTeamIssueId(directoryId, teamId, issueId)
-    let exclusiveStartKey: Record<string, unknown> | undefined = decodeTeamIssueEventCursor(
+    const eventCursor = decodeTeamIssueEventCursor(
       options.eventCursor,
       directoryTeamIssueId,
     )
+    if (eventCursor?.version === 2 && options.eventType !== 'commented') {
+      throw new ProjectDataError(
+        400,
+        'InvalidTeamIssueCursor',
+        'Team Issue event cursor is invalid for this event query.',
+      )
+    }
+    const useCreatedAtIndex = options.eventType === 'commented' &&
+      (eventCursor === undefined || eventCursor.version === 2)
+    let exclusiveStartKey: Record<string, unknown> | undefined = eventCursor
+      ? {
+          directoryTeamIssueId: eventCursor.directoryTeamIssueId,
+          eventId: eventCursor.eventId,
+          ...(eventCursor.version === 2 ? { createdAt: eventCursor.createdAt } : {}),
+        }
+      : undefined
 
     do {
       const remaining = eventLimit === undefined ? undefined : eventLimit - items.length
       const response = await this.documentClient.send(
         new QueryCommand({
           TableName: this.eventTableName,
+          ...(useCreatedAtIndex
+            ? { IndexName: 'TeamIssueEventCreatedAtIndex' }
+            : {}),
           KeyConditionExpression: 'directoryTeamIssueId = :directoryTeamIssueId',
           ExpressionAttributeValues: {
             ':directoryTeamIssueId': directoryTeamIssueId,
@@ -3308,7 +3341,13 @@ export class DynamoDbTeamIssuesClient {
     return {
       items: items.map(toTeamIssueEventItem),
       ...(exclusiveStartKey
-        ? { nextCursor: encodeTeamIssueEventCursor(directoryTeamIssueId, exclusiveStartKey) }
+        ? {
+            nextCursor: encodeTeamIssueEventCursor(
+              directoryTeamIssueId,
+              exclusiveStartKey,
+              useCreatedAtIndex,
+            ),
+          }
         : {}),
     }
   }
@@ -3418,14 +3457,54 @@ async function ensureLocalTeamIssueEventsTable(
         AttributeDefinitions: [
           { AttributeName: 'directoryTeamIssueId', AttributeType: 'S' },
           { AttributeName: 'eventId', AttributeType: 'S' },
+          { AttributeName: 'createdAt', AttributeType: 'S' },
         ],
         KeySchema: [
           { AttributeName: 'directoryTeamIssueId', KeyType: 'HASH' },
           { AttributeName: 'eventId', KeyType: 'RANGE' },
         ],
+        GlobalSecondaryIndexes: [
+          {
+            IndexName: 'TeamIssueEventCreatedAtIndex',
+            KeySchema: [
+              { AttributeName: 'directoryTeamIssueId', KeyType: 'HASH' },
+              { AttributeName: 'createdAt', KeyType: 'RANGE' },
+            ],
+            Projection: { ProjectionType: 'ALL' },
+          },
+        ],
         BillingMode: 'PAY_PER_REQUEST',
       }),
     isTeamIssueEventsTableDescription,
+    async (table) => {
+      if (!hasKeySchema(table, [
+        ['directoryTeamIssueId', 'HASH'],
+        ['eventId', 'RANGE'],
+      ])) {
+        throw new Error(`Local DynamoDB table "${tableName}" does not match the expected schema.`)
+      }
+      if (table?.GlobalSecondaryIndexes?.some((index) =>
+        index.IndexName === 'TeamIssueEventCreatedAtIndex')) {
+        return
+      }
+      await dynamoDbClient.send(new UpdateTableCommand({
+        TableName: tableName,
+        AttributeDefinitions: [
+          { AttributeName: 'directoryTeamIssueId', AttributeType: 'S' },
+          { AttributeName: 'createdAt', AttributeType: 'S' },
+        ],
+        GlobalSecondaryIndexUpdates: [{
+          Create: {
+            IndexName: 'TeamIssueEventCreatedAtIndex',
+            KeySchema: [
+              { AttributeName: 'directoryTeamIssueId', KeyType: 'HASH' },
+              { AttributeName: 'createdAt', KeyType: 'RANGE' },
+            ],
+            Projection: { ProjectionType: 'ALL' },
+          },
+        }],
+      }))
+    },
   )
 }
 
@@ -3469,6 +3548,7 @@ async function ensureLocalDynamoDbTable(
   dynamoDbClient: DynamoDBClient,
   createCommand: () => CreateTableCommand,
   validateTable: (table: TableDescription | undefined) => boolean,
+  migrateTable?: (table: TableDescription | undefined) => Promise<void>,
 ) {
   if (!shouldBootstrapLocalDynamoDb()) {
     return false
@@ -3482,7 +3562,13 @@ async function ensureLocalDynamoDbTable(
     return true
   }
 
-  const initializer = createLocalDynamoDbTable(tableName, dynamoDbClient, createCommand, validateTable)
+  const initializer = createLocalDynamoDbTable(
+    tableName,
+    dynamoDbClient,
+    createCommand,
+    validateTable,
+    migrateTable,
+  )
     .finally(() => {
       localDynamoDbTableInitializers.delete(initializerKey)
     })
@@ -3498,6 +3584,7 @@ async function createLocalDynamoDbTable(
   dynamoDbClient: DynamoDBClient,
   createCommand: () => CreateTableCommand,
   validateTable: (table: TableDescription | undefined) => boolean,
+  migrateTable?: (table: TableDescription | undefined) => Promise<void>,
 ) {
   try {
     await dynamoDbClient.send(createCommand())
@@ -3507,14 +3594,16 @@ async function createLocalDynamoDbTable(
     }
   }
 
-  await waitForLocalDynamoDbTable(tableName, dynamoDbClient, validateTable)
+  await waitForLocalDynamoDbTable(tableName, dynamoDbClient, validateTable, migrateTable)
 }
 
 async function waitForLocalDynamoDbTable(
   tableName: string,
   dynamoDbClient: DynamoDBClient,
   validateTable: (table: TableDescription | undefined) => boolean,
+  migrateTable?: (table: TableDescription | undefined) => Promise<void>,
 ) {
+  let migrationStarted = false
   for (let attempt = 0; attempt < 20; attempt += 1) {
     const response = await dynamoDbClient.send(
       new DescribeTableCommand({
@@ -3527,6 +3616,11 @@ async function waitForLocalDynamoDbTable(
     }
 
     if (response.Table?.TableStatus === 'ACTIVE') {
+      if (migrateTable && !migrationStarted) {
+        migrationStarted = true
+        await migrateTable(response.Table)
+        continue
+      }
       throw new Error(`Local DynamoDB table "${tableName}" does not match the expected schema.`)
     }
 
@@ -3594,7 +3688,15 @@ function isTeamIssueEventsTableDescription(table: TableDescription | undefined) 
   return hasKeySchema(table, [
     ['directoryTeamIssueId', 'HASH'],
     ['eventId', 'RANGE'],
-  ])
+  ]) && Boolean(
+    table?.GlobalSecondaryIndexes?.some((index) =>
+      index.IndexName === 'TeamIssueEventCreatedAtIndex' &&
+      hasKeySchema(index, [
+        ['directoryTeamIssueId', 'HASH'],
+        ['createdAt', 'RANGE'],
+      ]),
+    ),
+  )
 }
 
 function hasKeySchema(
@@ -4690,6 +4792,7 @@ function decodePublicWorkItemPageCursor(
 function encodeTeamIssueEventCursor(
   directoryTeamIssueId: string,
   key: Record<string, unknown>,
+  useCreatedAtIndex: boolean,
 ) {
   const eventId = typeof key.eventId === 'string' ? key.eventId : undefined
   if (!eventId) {
@@ -4700,10 +4803,29 @@ function encodeTeamIssueEventCursor(
     )
   }
 
-  const cursor: TeamIssueEventCursor = {
-    version: 1,
-    directoryTeamIssueId,
-    eventId,
+  const createdAt = typeof key.createdAt === 'string' ? key.createdAt : undefined
+  let cursor: TeamIssueEventCursor
+  if (useCreatedAtIndex) {
+    if (createdAt === undefined) {
+      throw new ProjectDataError(
+        503,
+        'InvalidTeamIssue',
+        'Team Issue event createdAt index page did not include a valid continuation key.',
+      )
+    }
+    cursor = {
+      version: 2,
+      index: 'createdAt',
+      directoryTeamIssueId,
+      eventId,
+      createdAt,
+    }
+  } else {
+    cursor = {
+      version: 1,
+      directoryTeamIssueId,
+      eventId,
+    }
   }
   return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url')
 }
@@ -4722,10 +4844,7 @@ function decodeTeamIssueEventCursor(
     if (!isTeamIssueEventCursor(parsed) || parsed.directoryTeamIssueId !== directoryTeamIssueId) {
       throw new TypeError('Invalid cursor payload.')
     }
-    return {
-      directoryTeamIssueId,
-      eventId: parsed.eventId,
-    }
+    return parsed
   } catch {
     throw new ProjectDataError(
       400,
@@ -4737,11 +4856,19 @@ function decodeTeamIssueEventCursor(
 
 /** Validates the untrusted payload embedded in a Team Issue event cursor. */
 function isTeamIssueEventCursor(value: unknown): value is TeamIssueEventCursor {
-  return isRecord(value) &&
-    value.version === 1 &&
-    typeof value.directoryTeamIssueId === 'string' &&
-    typeof value.eventId === 'string' &&
-    value.eventId.length > 0
+  if (!isRecord(value) ||
+    typeof value.directoryTeamIssueId !== 'string' ||
+    typeof value.eventId !== 'string' ||
+    value.eventId.length === 0) {
+    return false
+  }
+  if (value.version === 1) {
+    return true
+  }
+  return value.version === 2 &&
+    value.index === 'createdAt' &&
+    typeof value.createdAt === 'string' &&
+    Number.isFinite(Date.parse(value.createdAt))
 }
 /**
  * Team-local Issue ID を Workspace 内で一意な audit Work Item ID に変換します。

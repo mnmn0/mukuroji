@@ -2124,7 +2124,7 @@ test('marks legacy collaboration fallback comments as read-only legacy responses
   })
 })
 
-test('does not overfill a canonical page with legacy comments', async () => {
+test('merges canonical and legacy root pages by creation time during backfill', async () => {
   configureFakeProjectClients(true)
   const defaultTeamIssues = getTestAppDependencies().workItems.teamIssues
   const detailInputs: Array<Record<string, unknown>> = []
@@ -2196,30 +2196,105 @@ test('does not overfill a canonical page with legacy comments', async () => {
   expect(response.status).toBe(200)
   const responseBody = await response.json()
   expect(responseBody.comments).toEqual([
-    expect.objectContaining({ id: 'canonical-root' }),
+    expect.objectContaining({ id: 'legacy-comment', source: 'legacy' }),
   ])
-  expect(responseBody.nextCursor).toBe('legacy.initial')
-  expect(detailInputs).toEqual([{ consistentIssueRead: true, eventLimit: 0 }])
+  expect(responseBody.nextCursor).toMatch(/^mixed\./)
 
   const legacyResponse = await app.request(
-    '/api/teams/core-team/issues/onboarding-friction/collaboration?limit=1&cursor=legacy.initial',
+    `/api/teams/core-team/issues/onboarding-friction/collaboration?limit=1&cursor=${responseBody.nextCursor}`,
     { headers: { Authorization: 'Bearer test-token' } },
   )
 
   expect(legacyResponse.status).toBe(200)
   expect((await legacyResponse.json()).comments).toEqual([
-    expect.objectContaining({ id: 'legacy-comment', source: 'legacy' }),
+    expect.objectContaining({ id: 'canonical-root' }),
   ])
   expect(detailInputs).toEqual([
-    { consistentIssueRead: true, eventLimit: 0 },
     { consistentIssueRead: true, eventLimit: 0 },
     {
       consistentIssueRead: true,
       eventLimit: 1,
       newestEventsFirst: true,
       eventType: 'commented',
-      eventCursor: undefined,
     },
+    { consistentIssueRead: true, eventLimit: 0 },
+  ])
+})
+
+test('preserves merged root ordering when canonical and legacy comments share a page', async () => {
+  configureFakeProjectClients(true)
+  const defaultTeamIssues = getTestAppDependencies().workItems.teamIssues
+  const canonicalRoot = {
+    id: 'canonical-root',
+    rootCommentId: 'canonical-root',
+    authorMemberKey: 'author@example.com',
+    bodyMarkdown: 'Canonical root',
+    version: 1,
+    mentionMemberKeys: [],
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+    acceptedResolutions: [],
+    reactions: [],
+  }
+  const threadState = {
+    comments: [],
+    watch: {
+      subscribed: false,
+      explicit: false,
+      automatic: false,
+      reasons: [],
+      watcherCount: 0,
+    },
+    presence: [],
+  }
+  setTestAppDependencies({
+    collaboration: createCollaborationStub({
+      async isTeamIssueCommentBackfillComplete() {
+        return false
+      },
+      async getCommentSnapshot() {
+        return undefined
+      },
+      async getThread(input) {
+        return input.rootCommentId
+          ? threadState
+          : { ...threadState, comments: [canonicalRoot] }
+      },
+    }),
+    teamIssues: {
+      ...defaultTeamIssues,
+      async getTeamIssueDetail(directoryId, teamId, issueId, options) {
+        const detail = await defaultTeamIssues.getTeamIssueDetail(
+          directoryId,
+          teamId,
+          issueId,
+          options,
+        )
+        return options?.eventLimit === 1
+          ? {
+              ...detail,
+              comments: [{
+                id: 'legacy-root',
+                actorUserId: 'departed@example.com',
+                body: 'Legacy root',
+                createdAt: '2026-07-12T00:01:00.000Z',
+              }],
+            }
+          : detail
+      },
+    },
+  })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction/collaboration?limit=2',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+
+  expect(response.status).toBe(200)
+  const responseBody = await response.json()
+  expect(responseBody.comments.map((comment: { id: string }) => comment.id)).toEqual([
+    'legacy-root',
+    'canonical-root',
   ])
 })
 

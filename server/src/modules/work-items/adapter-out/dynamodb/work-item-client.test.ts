@@ -765,6 +765,7 @@ test('DynamoDB Team Work Item detail continues filtered event pages until the co
           LastEvaluatedKey: {
             directoryTeamIssueId: partitionKey,
             eventId: 'updated-event',
+            createdAt: '2026-07-12T01:00:00.000Z',
           },
         }
       }
@@ -806,10 +807,64 @@ test('DynamoDB Team Work Item detail continues filtered event pages until the co
     comments: [{ id: 'comment-event', body: 'Older comment' }],
   })
   expect(queryInputs).toHaveLength(2)
+  expect(queryInputs[0]?.IndexName).toBe('TeamIssueEventCreatedAtIndex')
+  expect(queryInputs[0]?.ScanIndexForward).toBe(false)
   expect(queryInputs[0]?.Limit).toBe(1)
   expect(queryInputs[1]?.ExclusiveStartKey).toEqual({
     directoryTeamIssueId: partitionKey,
     eventId: 'updated-event',
+    createdAt: '2026-07-12T01:00:00.000Z',
+  })
+})
+
+test('DynamoDB Team Work Item comment preview orders automation events by createdAt', async () => {
+  const partitionKey = 'workspace-1#team#core#issue#canonical-work-item'
+  let queryInput: Record<string, unknown> | undefined
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      if (command.constructor.name === 'GetCommand') {
+        return { Item: createScheduleCascadeIssue('core', 'canonical-work-item') }
+      }
+      queryInput = command.input
+      return {
+        Items: [{
+          directoryId: 'workspace-1',
+          directoryTeamIssueId: partitionKey,
+          teamId: 'core',
+          issueId: 'canonical-work-item',
+          eventId: 'automation-execution-1_comment_0',
+          eventType: 'commented',
+          actorUserId: 'automation:rule-1',
+          body: 'Newest comment',
+          summary: 'Commented',
+          createdAt: '2026-07-16T00:00:00.000Z',
+        }],
+      }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  await expect(client.getTeamIssueDetail(
+    'workspace-1',
+    'core',
+    'canonical-work-item',
+    {
+      eventLimit: 1,
+      eventType: 'commented',
+      newestEventsFirst: true,
+    },
+  )).resolves.toMatchObject({
+    comments: [{ id: 'automation-execution-1_comment_0', body: 'Newest comment' }],
+  })
+  expect(queryInput).toMatchObject({
+    IndexName: 'TeamIssueEventCreatedAtIndex',
+    ScanIndexForward: false,
   })
 })
 

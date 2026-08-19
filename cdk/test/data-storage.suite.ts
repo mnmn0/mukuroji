@@ -70,6 +70,24 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
         }),
       ]),
     }));
+  expect(resources.TeamIssueEventsTableDD2B0F96.Properties)
+    .toEqual(expect.objectContaining({
+      AttributeDefinitions: expect.arrayContaining([
+        { AttributeName: 'directoryTeamIssueId', AttributeType: 'S' },
+        { AttributeName: 'eventId', AttributeType: 'S' },
+        { AttributeName: 'createdAt', AttributeType: 'S' },
+      ]),
+      GlobalSecondaryIndexes: expect.arrayContaining([
+        expect.objectContaining({
+          IndexName: 'TeamIssueEventCreatedAtIndex',
+          KeySchema: [
+            { AttributeName: 'directoryTeamIssueId', KeyType: 'HASH' },
+            { AttributeName: 'createdAt', KeyType: 'RANGE' },
+          ],
+          Projection: { ProjectionType: 'ALL' },
+        }),
+      ]),
+    }));
   expect(resources.TenantAdministrationTable621D59EB.Properties)
     .toEqual(expect.objectContaining({
       TimeToLiveSpecification: {

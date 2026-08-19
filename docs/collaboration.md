@@ -84,7 +84,7 @@ Comment edit/resolve/delete は `expectedVersion` を要求します。読み込
 
 ## Canonical comment source and legacy backfill
 
-Collaboration comment の正本は Collaboration table の persisted root/reply row です。移行完了 marker がある workspace では canonical row だけを返し、旧 `TeamIssueEventsTable` の `commented` event は activity/audit 用途として保持します。marker がない workspace では backfill が完走するまで旧 event を read-only の一時 fallback として返し、Collaboration cursor と区別した `legacy.` cursor で続きの page を取得します。旧 event から返した comment の mutation capability はすべて無効です。
+Collaboration comment の正本は Collaboration table の persisted root/reply row です。移行完了 marker がある workspace では canonical row だけを返し、旧 `TeamIssueEventsTable` の `commented` event は activity/audit 用途として保持します。marker がない workspace では backfill が完走するまで canonical row と旧 event を creation time の降順で merge して返し、両方の stream の位置を束縛した `mixed.` cursor で続きの page を取得します。既存 client の移行途中リクエストに対応する `legacy.` cursor も一時的に受け付けます。旧 event から返した comment の mutation capability はすべて無効です。
 
 旧 `commented` event は、workspace 単位の完了 marker が書かれるまで削除・非表示にしません。backfill は source event ID を canonical comment ID として使い、comment と root discussion row を条件付きで保存するため、checkpoint を使った中断・再実行に耐えます。Work Item が存在しない、row の scope が partition key と一致しない、既存 canonical row の内容が異なる場合は fail-closed で停止します。コメントごとの通知・activity audit は backfill から生成しませんが、完了した実行については実行者、検証済み AWS account、scope、件数を suppressed な運用 audit として記録します。backfill write は canonical comment の current snapshot を強整合で読み直して Workspace Search の comment document も同じ workflow で upsert します。編集済み本文を legacy event で巻き戻さず、削除済み comment や削除済み parent の document は削除します。Search 投影の件数も checkpoint、summary、完了 audit に保存するため、別の Workspace Search backfill を開始しなくても移行結果を検証できます。
 

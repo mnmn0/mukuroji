@@ -561,6 +561,9 @@ async function runBackfill(
     }))
     const items = response.Items ?? []
     for (const item of items) {
+      // Count every filtered source row before validation so malformed rows
+      // cannot make a bounded dry-run scan past its requested limit.
+      processedThisRun += 1
       let legacy: LegacyCommentEvent
       try {
         legacy = readLegacyCommentEvent(item)
@@ -572,7 +575,6 @@ async function runBackfill(
       if (options.workspaceIds.length > 0 && !options.workspaceIds.includes(legacy.workspaceId)) {
         continue
       }
-      processedThisRun += 1
       checkpoint.scanned += 1
       workspaceIds.add(legacy.workspaceId)
       const counts = workspaceCounts.get(legacy.workspaceId) ?? {
