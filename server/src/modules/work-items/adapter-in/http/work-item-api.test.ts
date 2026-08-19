@@ -1524,6 +1524,68 @@ test('rejects team issue detail when canonical comments exceed the payload budge
   expect(pageReads).toBe(1)
 })
 
+/** Verifies that the transitional legacy detail projection shares the response payload bound. */
+test('rejects team issue detail when legacy comments exceed the payload budget', async () => {
+  configureFakeProjectClients(true)
+  const body = 'x'.repeat(20_000)
+  const oversizedComments = Array.from({ length: 220 }, (_, index) => ({
+    id: `legacy-payload-comment-${index}`,
+    actorUserId: 'departed@example.com',
+    body,
+    createdAt: `2026-06-08T01:${String(index % 60).padStart(2, '0')}:00.000Z`,
+  }))
+  const defaultTeamIssues = getTestAppDependencies().workItems.teamIssues
+  let pageReads = 0
+
+  setTestAppDependencies({
+    collaboration: createCollaborationStub({
+      async isTeamIssueCommentBackfillComplete() {
+        return false
+      },
+      async getThread() {
+        pageReads += 1
+        return {
+          comments: [],
+          watch: {
+            subscribed: false,
+            explicit: false,
+            automatic: false,
+            reasons: [],
+            watcherCount: 0,
+          },
+          presence: [],
+        }
+      },
+    }),
+    teamIssues: {
+      ...defaultTeamIssues,
+      async getTeamIssueDetail(directoryId, teamId, issueId, options) {
+        const detail = await defaultTeamIssues.getTeamIssueDetail(
+          directoryId,
+          teamId,
+          issueId,
+          options,
+        )
+        return options?.includeComments === false
+          ? { ...detail, comments: [] }
+          : { ...detail, comments: oversizedComments }
+      },
+    },
+  })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+
+  expect(response.status).toBe(413)
+  expect(await response.json()).toEqual({
+    code: 'CollaborationThreadPayloadTooLarge',
+    message: 'Collaboration comments exceed the supported response size.',
+  })
+  expect(pageReads).toBe(1)
+})
+
 /** Verifies that a stalled canonical cursor is reported as an unavailable read. */
 test('rejects team issue detail when canonical comment pagination stalls', async () => {
   configureFakeProjectClients(true)

@@ -8902,6 +8902,21 @@ routeApp.get('/api/teams/:teamId/issues/:issueId', async (c) => {
             eventType: 'commented',
           },
         )
+    if (legacyCommentDetail) {
+      requireAssignedProjectPermission(
+        principal,
+        context,
+        legacyCommentDetail.issue.assignedProjectId,
+        'viewer',
+      )
+      if (legacyCommentDetail.issue.assignedProjectId !== detail.issue.assignedProjectId) {
+        throw new ProjectDataError(
+          409,
+          'WorkItemAuthorizationChanged',
+          'Work Item assignment changed while comments were loading.',
+        )
+      }
+    }
     const [collaborationComments, resolvedConfiguration, relationPage] = await Promise.all([
       readAllCollaborationThreadComments(workItemDependencies.collaboration, {
         entityKey,
@@ -8931,6 +8946,8 @@ routeApp.get('/api/teams/:teamId/issues/:issueId', async (c) => {
     const legacyComments = commentBackfillComplete
       ? []
       : (legacyCommentDetail?.comments ?? []).filter((comment) => !canonicalCommentIds.has(comment.id))
+    const responseComments = mergeLegacyTeamIssueDetailComments(legacyComments, canonicalComments)
+    enforceTeamIssueDetailCommentResponseBudget(responseComments)
     const hydratedDetail = await hydrateTeamIssueDetailResponse(
       {
         ...detail,
@@ -8944,7 +8961,7 @@ routeApp.get('/api/teams/:teamId/issues/:issueId', async (c) => {
 
     return c.json({
       ...hydratedDetail,
-      comments: mergeLegacyTeamIssueDetailComments(legacyComments, canonicalComments),
+      comments: responseComments,
     })
   } catch (error) {
     return toWorkItemConfigurationErrorResponse(c, error)
@@ -13899,7 +13916,20 @@ async function executeAutomationComment(
     auditContext,
     commentId,
   })
-  if (replay) return
+  if (replay) {
+    const expectedActorMemberKey = `automation:${context.execution.ruleId}`.toLowerCase()
+    if (
+      replay.authorMemberKey !== expectedActorMemberKey ||
+      replay.bodyMarkdown !== body
+    ) {
+      throw new AutomationError(
+        'conflict',
+        'AutomationCommentIdempotencyConflict',
+        'The Automation comment action was reused with different input.',
+      )
+    }
+    return
+  }
   if (
     dependencies.teamIssues.getAutomationCommentReplay &&
     await dependencies.teamIssues.getAutomationCommentReplay(
@@ -28459,6 +28489,28 @@ type CollaborationCommentResponse = ReturnType<typeof toCollaborationCommentResp
  */
 function enforceCollaborationCommentResponseBudget(
   comments: readonly CollaborationCommentResponse[],
+): void {
+  let bytesRead = 2
+  for (const comment of comments) {
+    const commentBytes = Buffer.byteLength(JSON.stringify(comment), 'utf8') + 1
+    if (bytesRead + commentBytes > TEAM_ISSUE_DETAIL_COMMENT_MAX_BYTES) {
+      throw new CollaborationError(
+        413,
+        'CollaborationThreadPayloadTooLarge',
+        'Collaboration comments exceed the supported response size.',
+      )
+    }
+    bytesRead += commentBytes
+  }
+}
+
+/**
+ * Enforces the serialized comment budget for the legacy-compatible detail response.
+ *
+ * @param comments - Comments that would be returned by the detail endpoint.
+ */
+function enforceTeamIssueDetailCommentResponseBudget(
+  comments: readonly TeamIssueCommentResponseItem[],
 ): void {
   let bytesRead = 2
   for (const comment of comments) {

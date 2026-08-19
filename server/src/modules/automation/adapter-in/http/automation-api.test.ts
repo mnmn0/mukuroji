@@ -2249,6 +2249,70 @@ test('replays an automation comment before checking a changed project assignment
   expect(calls.issueDetails).toHaveLength(0)
 })
 
+test('rejects a canonical automation comment replay with different input', async () => {
+  configureFakeProjectClients(true)
+  let createCalls = 0
+  setTestAppDependencies({
+    collaboration: createCollaborationStub({
+      async getCommentMutationReplay() {
+        return {
+          id: 'replayed-automation-comment',
+          rootCommentId: 'replayed-automation-comment',
+          authorMemberKey: 'automation:another-rule',
+          bodyMarkdown: 'Different comment body',
+          version: 1,
+          mentionMemberKeys: [],
+          createdAt: '2026-07-16T00:00:00.000Z',
+          updatedAt: '2026-07-16T00:00:00.000Z',
+          acceptedResolutions: [],
+          reactions: [],
+        }
+      },
+      async createComment() {
+        createCalls += 1
+        throw new Error('A conflicting replay must not create a comment.')
+      },
+    }),
+  })
+  const context = {
+    execution: {
+      schemaVersion: AUTOMATION_SCHEMA_VERSION,
+      id: 'automation-comment-replay-conflict',
+      workspaceId: 'workspace-1',
+      ruleId: 'rule-1',
+      ruleVersion: 1,
+      triggerEventId: 'event-1',
+      status: 'running',
+      attempts: 2,
+      actions: [],
+      startedAt: '2026-07-16T00:00:00.000Z',
+      retryable: false,
+    },
+    event: {
+      eventId: 'event-1',
+      eventType: 'work-item.updated',
+      workspaceId: 'workspace-1',
+      occurredAt: '2026-07-16T00:00:00.000Z',
+      changes: [],
+      metadata: { teamId: 'core-team', issueId: 'onboarding-friction' },
+    },
+    actionIndex: 0,
+    idempotencyKey: 'automation-comment-replay-conflict:action:0000',
+  } satisfies AutomationActionExecutionContext
+
+  await expect(runWithTestAppDependencies(() =>
+    createAutomationActionExecutor().execute({
+      type: 'comment',
+      body: 'Requested comment body',
+    }, context)
+  )).rejects.toMatchObject({
+    code: 'AutomationCommentIdempotencyConflict',
+    status: 409,
+  })
+
+  expect(createCalls).toBe(0)
+})
+
 test('rejects removed recurring-work Teams on create and update before saving a definition', async () => {
   configureFakeProjectClients(true)
   let updateCalls = 0

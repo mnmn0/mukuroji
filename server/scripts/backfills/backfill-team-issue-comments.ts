@@ -889,6 +889,7 @@ function isCheckpointState(value: unknown): value is CheckpointState {
     typeof value.backfilled === 'number' &&
     Number.isSafeInteger(value.backfilled) &&
     value.backfilled >= 0 &&
+    value.backfilled <= value.scanned &&
     (value.reconciledDeletedParents === undefined || (
       typeof value.reconciledDeletedParents === 'number' &&
       Number.isSafeInteger(value.reconciledDeletedParents) &&

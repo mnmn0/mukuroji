@@ -3233,7 +3233,9 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
         }],
       }))
     } catch (error) {
-      if (!isTransactionConditionalFailureAt(error, 0)) throw error
+      if (!isTransactionConditionalFailureAt(error, 0)) {
+        throw toCollaborationStoreError(error)
+      }
       const existing = await this.documentClient.send(new GetCommand({
         TableName: this.tableName,
         Key: { entityKey, recordKey },
@@ -3272,7 +3274,9 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
           }))
           return
         } catch (upgradeError) {
-          if (!isTransactionConditionalFailureAt(upgradeError, 0)) throw upgradeError
+          if (!isTransactionConditionalFailureAt(upgradeError, 0)) {
+            throw toCollaborationStoreError(upgradeError)
+          }
           const upgraded = await this.documentClient.send(new GetCommand({
             TableName: this.tableName,
             Key: { entityKey, recordKey },
