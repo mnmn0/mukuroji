@@ -159,6 +159,59 @@ test('does not let an older source projection replace or remove a newer document
   expect(response.results[0]?.title).toBe('Current context')
 })
 
+test('fences a comment Search projection to its current canonical version', async () => {
+  const commands: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { input: Record<string, unknown> }) {
+      commands.push(command.input)
+      const error = Object.assign(new Error('canonical comment changed'), {
+        name: 'TransactionCanceledException',
+        CancellationReasons: [
+          { Code: 'ConditionalCheckFailed' },
+          { Code: 'None' },
+        ],
+      })
+      throw error
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbWorkspaceSearchClient(
+    'search-table',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+  const document = createCommentWorkspaceSearchDocument({
+    workspaceId: 'workspace-1',
+    teamId: 'core',
+    issueId: 'issue-1',
+    commentId: 'comment-1',
+    body: 'Historical comment',
+    sourceRevision: 1,
+  })
+
+  await expect(client.upsertDocumentWithCommentSourceFence(document, {
+    sourceTableName: 'collaboration-table',
+    sourceEntityKey: 'workspace-1#work-item#team/core/issue/issue-1',
+    sourceCommentId: 'comment-1',
+    sourceRevision: 1,
+  })).resolves.toBe('source-changed')
+  expect(commands[0]?.TransactItems).toEqual([
+    expect.objectContaining({
+      ConditionCheck: expect.objectContaining({
+        TableName: 'collaboration-table',
+        Key: {
+          entityKey: 'workspace-1#work-item#team/core/issue/issue-1',
+          recordKey: 'COMMENT#comment-1',
+        },
+        ConditionExpression: expect.stringContaining('attribute_not_exists(deletedAt)'),
+      }),
+    }),
+    expect.objectContaining({
+      Put: expect.objectContaining({ TableName: 'search-table' }),
+    }),
+  ])
+})
+
 test('requires canonical ISO dates for Work Item search projections', () => {
   const input = {
     workspaceId: 'workspace-1',

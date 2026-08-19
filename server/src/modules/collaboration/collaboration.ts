@@ -2896,7 +2896,117 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
     await this.ensureLocalTable()
     const normalizedInput = normalizeBackfillCollaborationCommentInput(input)
     const parent = await this.readCanonicalBackfillParent(normalizedInput)
-    return parent ? 'canonical' : 'parent-deleted'
+    if (!parent) return 'parent-deleted'
+    await this.validateBackfillTarget(normalizedInput)
+    return 'canonical'
+  }
+
+  /**
+   * Checks existing canonical backfill rows without changing any target state.
+   *
+   * @param input - Normalized legacy comment and Work Item scope.
+   */
+  private async validateBackfillTarget(
+    input: BackfillCollaborationCommentInput,
+  ): Promise<void> {
+    const existingComment = await this.getStoredComment(input.entityKey, input.commentId)
+    const existingReceipt = await this.getBackfillReceipt(input.entityKey, input.commentId)
+
+    if (existingComment && !isBackfilledCommentIdentity(existingComment, input)) {
+      throw new CollaborationError(
+        409,
+        'CollaborationBackfillConflict',
+        'The canonical comment target already contains a different comment.',
+      )
+    }
+    if (
+      existingComment &&
+      !existingReceipt &&
+      (existingComment.bodyMarkdown !== input.bodyMarkdown ||
+        existingComment.version !== 1 ||
+        existingComment.updatedAt !== input.occurredAt)
+    ) {
+      throw new CollaborationError(
+        409,
+        'CollaborationBackfillConflict',
+        'The canonical comment target has no matching backfill receipt for its current state.',
+      )
+    }
+    if (existingReceipt && !isSameBackfillReceipt(existingReceipt, input)) {
+      throw new CollaborationError(
+        409,
+        'CollaborationBackfillConflict',
+        'The legacy comment provenance receipt conflicts with the source event.',
+      )
+    }
+    if (existingReceipt && !existingComment) {
+      throw new CollaborationError(
+        409,
+        'CollaborationBackfillConflict',
+        'The legacy comment provenance receipt exists without its canonical comment.',
+      )
+    }
+
+    const discussionRecords = [
+      createBackfillDiscussionRecord(
+        input.entityKey,
+        discussionTimelineRecordKey(input.occurredAt, input.commentId, undefined),
+        input.commentId,
+        input.occurredAt,
+      ),
+      createBackfillDiscussionRecord(
+        input.entityKey,
+        discussionScopedRecordKey(input.occurredAt, input.commentId, undefined),
+        input.commentId,
+        input.occurredAt,
+      ),
+      createBackfillDiscussionRecord(
+        input.entityKey,
+        discussionLegacyRecordKey(input.occurredAt, input.commentId, undefined),
+        input.commentId,
+        input.occurredAt,
+        discussionLegacyIndexVersion,
+      ),
+    ]
+    for (const expected of discussionRecords) {
+      const response = await this.documentClient.send(new GetCommand({
+        TableName: this.tableName,
+        Key: { entityKey: input.entityKey, recordKey: expected.recordKey },
+        ConsistentRead: true,
+      }))
+      if (!response.Item) continue
+
+      const exact = isSameBackfilledDiscussion(
+        response.Item,
+        input.entityKey,
+        expected.recordKey,
+        input.commentId,
+        input.occurredAt,
+        expected.discussionIndexVersion,
+      )
+      const legacyCompatible = expected.discussionIndexVersion === discussionLegacyIndexVersion &&
+        isSameBackfilledDiscussion(
+          response.Item,
+          input.entityKey,
+          expected.recordKey,
+          input.commentId,
+          input.occurredAt,
+        )
+      if (!exact && !legacyCompatible) {
+        throw new CollaborationError(
+          409,
+          'CollaborationBackfillConflict',
+          'A discussion projection target already contains different data.',
+        )
+      }
+      if (!existingComment) {
+        throw new CollaborationError(
+          409,
+          'CollaborationBackfillConflict',
+          'A discussion projection exists without its canonical comment.',
+        )
+      }
+    }
   }
 
   /**

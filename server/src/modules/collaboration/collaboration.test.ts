@@ -635,6 +635,61 @@ test('rejects a mismatched discussion projection during an idempotent backfill r
   })
 })
 
+test('dry-run detects mismatched canonical backfill targets without writing', async () => {
+  const createInput = () => ({
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'issue-1',
+    entityKey: createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1'),
+    commentId: 'legacy-comment-1',
+    actorMemberKey: 'author@example.com',
+    bodyMarkdown: 'Historical comment',
+    occurredAt: '2026-08-18T00:00:00.000Z',
+  })
+
+  const canonicalMemory = createCollaborationMemory()
+  const canonicalInput = createInput()
+  await canonicalMemory.client.backfillTeamIssueComment(canonicalInput)
+  const commentKey = `${canonicalInput.entityKey}\0COMMENT#${canonicalInput.commentId}`
+  const canonicalComment = canonicalMemory.rows.get(commentKey)
+  if (!canonicalComment) throw new Error('Expected the backfilled comment to be persisted.')
+  canonicalMemory.rows.set(commentKey, {
+    ...canonicalComment,
+    authorMemberKey: 'different@example.com',
+  })
+  const transactionCount = canonicalMemory.transactions.length
+  await expect(canonicalMemory.client.validateBackfillTeamIssueComment(canonicalInput)).rejects.toMatchObject({
+    status: 409,
+    code: 'CollaborationBackfillConflict',
+  })
+  expect(canonicalMemory.transactions).toHaveLength(transactionCount)
+
+  const receiptMemory = createCollaborationMemory()
+  const receiptInput = createInput()
+  await receiptMemory.client.backfillTeamIssueComment(receiptInput)
+  const receiptKey = `${receiptInput.entityKey}\0BACKFILL#${receiptInput.commentId}`
+  const receipt = receiptMemory.rows.get(receiptKey)
+  if (!receipt) throw new Error('Expected the backfill receipt to be persisted.')
+  receiptMemory.rows.set(receiptKey, { ...receipt, sourceBodyFingerprint: 'different' })
+  await expect(receiptMemory.client.validateBackfillTeamIssueComment(receiptInput)).rejects.toMatchObject({
+    status: 409,
+    code: 'CollaborationBackfillConflict',
+  })
+
+  const discussionMemory = createCollaborationMemory()
+  const discussionInput = createInput()
+  await discussionMemory.client.backfillTeamIssueComment(discussionInput)
+  const discussionKey =
+    `${discussionInput.entityKey}\0DISCUSSION#V2#${discussionInput.occurredAt}#ROOT#${discussionInput.commentId}`
+  const discussion = discussionMemory.rows.get(discussionKey)
+  if (!discussion) throw new Error('Expected the discussion projection to be persisted.')
+  discussionMemory.rows.set(discussionKey, { ...discussion, commentId: 'different-comment' })
+  await expect(discussionMemory.client.validateBackfillTeamIssueComment(discussionInput)).rejects.toMatchObject({
+    status: 409,
+    code: 'CollaborationBackfillConflict',
+  })
+})
+
 test('backfills V2 discussion projections and upgrades an old legacy projection', async () => {
   const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
   const occurredAt = '2026-08-18T00:00:00.000Z'

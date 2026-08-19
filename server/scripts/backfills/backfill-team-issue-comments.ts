@@ -8,7 +8,12 @@ import {
 import {
   createDynamoDbClient,
   createDynamoDbDocumentClient,
+  createWorkspaceSearchWriterDynamoDbDocumentClient,
 } from '../../src/infrastructure/aws/dynamodb-client'
+import {
+  loadServerConfig,
+  readServerEnvironment,
+} from '../../src/infrastructure/config/server-config'
 import {
   calculateAuditExpiresAt,
   createAuditEvent,
@@ -136,7 +141,10 @@ type TableNames = {
 type BackfillCommentSnapshotReader = Pick<DynamoDbCollaborationClient, 'getCommentSnapshot'>
 
 /** Minimal Search writer used by the resumable comment migration. */
-type BackfillSearchProjectionClient = Pick<WorkspaceSearchClient, 'upsertDocument' | 'deleteDocument'>
+type BackfillSearchProjectionClient = Pick<
+  WorkspaceSearchClient,
+  'upsertDocument' | 'deleteDocument'
+> & Pick<DynamoDbWorkspaceSearchClient, 'upsertDocumentWithCommentSourceFence'>
 
 /** Operator and correlation context for one backfill invocation. */
 type BackfillRunContext = {
@@ -192,8 +200,20 @@ async function main() {
     migration: 'team-issue-comments-v1',
   }))
   const checkpoint = await readCheckpoint(options.checkpointPath, configurationHash)
-  const dynamoDbClient = createDynamoDbClient()
+  const serverConfig = loadServerConfig({
+    ...readServerEnvironment(),
+    AWS_REGION: region,
+    AWS_DEFAULT_REGION: region,
+    DYNAMODB_ENDPOINT: endpoint,
+    AWS_ENDPOINT_URL_DYNAMODB: undefined,
+    AWS_ENDPOINT_URL: undefined,
+  }, { localBun: false })
+  const dynamoDbClient = createDynamoDbClient(serverConfig)
   const sourceClient = createDynamoDbDocumentClient(dynamoDbClient)
+  const writerDocumentClient = createWorkspaceSearchWriterDynamoDbDocumentClient(
+    dynamoDbClient,
+    serverConfig,
+  )
   const localDynamoDb = endpoint !== undefined && isLocalDynamoDbEndpoint(endpoint)
   if (!options.dryRun && localDynamoDb) {
     await ensureLocalWorkspaceSearchTable(tables.workspaceSearch, dynamoDbClient)
@@ -209,7 +229,7 @@ async function main() {
     tables.target,
     tables.workItems,
     undefined,
-    undefined,
+    writerDocumentClient,
     dynamoDbClient,
     undefined,
     tables.source,
@@ -218,7 +238,7 @@ async function main() {
     ? undefined
     : new DynamoDbWorkspaceSearchClient(
         tables.workspaceSearch,
-        undefined,
+        writerDocumentClient,
         dynamoDbClient,
         false,
       )
@@ -241,6 +261,7 @@ async function main() {
     workspaceSearch,
     auditEvents,
     tables.source,
+    tables.target,
     checkpoint,
     options,
     runContext,
@@ -515,6 +536,7 @@ async function readCheckpoint(path: string, configurationHash: string): Promise<
  * @param workspaceSearch - Canonical Workspace Search projection writer.
  * @param auditEvents - Operational audit event writer.
  * @param sourceTableName - Legacy event table name.
+ * @param targetTableName - Collaboration table containing canonical comments.
  * @param checkpoint - Mutable resumable scan state.
  * @param options - Validated run options.
  */
@@ -524,6 +546,7 @@ async function runBackfill(
   workspaceSearch: BackfillSearchProjectionClient | undefined,
   auditEvents: DynamoDbAuditEventsClient,
   sourceTableName: string,
+  targetTableName: string,
   checkpoint: CheckpointState,
   options: BackfillOptions,
   runContext: BackfillRunContext,
@@ -564,6 +587,12 @@ async function runBackfill(
       // Count every filtered source row before validation so malformed rows
       // cannot make a bounded dry-run scan past its requested limit.
       processedThisRun += 1
+      if (options.workspaceIds.length > 0) {
+        const rawWorkspaceId = readLegacyWorkspaceId(item)
+        if (rawWorkspaceId !== undefined && !options.workspaceIds.includes(rawWorkspaceId)) {
+          continue
+        }
+      }
       let legacy: LegacyCommentEvent
       try {
         legacy = readLegacyCommentEvent(item)
@@ -602,6 +631,7 @@ async function runBackfill(
               workspaceSearch,
               collaboration,
               legacy,
+              targetTableName,
             )
             checkpoint.backfilled += 1
             counts.backfilled += 1
@@ -679,43 +709,71 @@ async function runBackfill(
   }
 }
 
-/** Projects the current canonical comment snapshot without reusing stale legacy text. */
+/**
+ * Projects a current canonical comment snapshot behind a version fence.
+ *
+ * @param workspaceSearch - Search projection writer with canonical source fencing.
+ * @param collaboration - Strong canonical comment snapshot reader.
+ * @param legacy - Validated legacy event identifying the comment.
+ * @param sourceTableName - Collaboration table containing the canonical comment.
+ * @returns Whether the projection represents a live or deleted comment.
+ */
 async function projectBackfilledComment(
   workspaceSearch: BackfillSearchProjectionClient,
   collaboration: BackfillCommentSnapshotReader,
   legacy: LegacyCommentEvent,
+  sourceTableName: string,
 ): Promise<'projected' | 'deleted'> {
-  const comment = await collaboration.getCommentSnapshot({
-    entityKey: createWorkItemCollaborationEntityKey(
-      legacy.workspaceId,
-      legacy.teamId,
-      legacy.issueId,
-    ),
-    commentId: legacy.eventId,
-  })
+  const entityKey = createWorkItemCollaborationEntityKey(
+    legacy.workspaceId,
+    legacy.teamId,
+    legacy.issueId,
+  )
   const entityId = createCommentWorkspaceSearchEntityId(
     legacy.teamId,
     legacy.issueId,
     legacy.eventId,
   )
-  if (!comment || comment.deletedAt) {
-    await workspaceSearch.deleteDocument(legacy.workspaceId, 'comment', entityId)
-    return 'deleted'
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const comment = await collaboration.getCommentSnapshot({
+      entityKey,
+      commentId: legacy.eventId,
+    })
+    if (!comment || comment.deletedAt) {
+      await workspaceSearch.deleteDocument(
+        legacy.workspaceId,
+        'comment',
+        entityId,
+        comment?.version === undefined ? undefined : { sourceRevision: comment.version },
+      )
+      return 'deleted'
+    }
+
+    const document = createCommentWorkspaceSearchDocument({
+      workspaceId: legacy.workspaceId,
+      teamId: legacy.teamId,
+      issueId: legacy.issueId,
+      commentId: comment.id,
+      rootCommentId: comment.rootCommentId,
+      body: comment.bodyMarkdown,
+      creatorUserId: comment.authorMemberKey,
+      createdAt: comment.createdAt,
+      updatedAt: comment.updatedAt,
+      sourceRevision: comment.version,
+    })
+    const projection = await workspaceSearch.upsertDocumentWithCommentSourceFence(
+      document,
+      {
+        sourceTableName,
+        sourceEntityKey: entityKey,
+        sourceCommentId: comment.id,
+        sourceRevision: comment.version,
+      },
+    )
+    if (projection === 'projected') return 'projected'
   }
 
-  await workspaceSearch.upsertDocument(createCommentWorkspaceSearchDocument({
-    workspaceId: legacy.workspaceId,
-    teamId: legacy.teamId,
-    issueId: legacy.issueId,
-    commentId: comment.id,
-    rootCommentId: comment.rootCommentId,
-    body: comment.bodyMarkdown,
-    creatorUserId: comment.authorMemberKey,
-    createdAt: comment.createdAt,
-    updatedAt: comment.updatedAt,
-    sourceRevision: comment.version,
-  }), { sourceRevision: comment.version })
-  return 'projected'
+  throw new Error('Canonical comment changed repeatedly while projecting Workspace Search.')
 }
 
 /**
@@ -889,6 +947,28 @@ async function writeBackfillAuditEvents(
     })
     await auditEvents.putEvent(event)
   }
+}
+
+/**
+ * Reads the raw workspace scope needed for an early filtered-scan decision.
+ *
+ * The partition-key prefix is checked with the redundant directory ID so a
+ * malformed scope still falls through to the fail-closed full validator.
+ *
+ * @param value - Untrusted DynamoDB source item.
+ * @returns Established workspace ID, or undefined when scope cannot be trusted.
+ */
+function readLegacyWorkspaceId(value: unknown): string | undefined {
+  if (!isRecord(value) || typeof value.directoryId !== 'string' ||
+      typeof value.directoryTeamIssueId !== 'string') {
+    return undefined
+  }
+  const workspaceId = value.directoryId.trim()
+  const directoryTeamIssueId = value.directoryTeamIssueId.trim()
+  if (!workspaceId || !directoryTeamIssueId.startsWith(`${workspaceId}#team#`)) {
+    return undefined
+  }
+  return workspaceId
 }
 
 /** Validates and projects one raw legacy comment event.
