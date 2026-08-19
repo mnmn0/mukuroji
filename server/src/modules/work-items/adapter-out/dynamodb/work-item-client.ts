@@ -3453,26 +3453,25 @@ export class DynamoDbTeamIssuesClient {
           }
         }
       }
-      const indexedPage = await this.queryIndexedCommentEvents(directoryTeamIssueId, {
-        eventCursor,
-        eventLimit,
-        newestEventsFirst: options.newestEventsFirst === true,
-      })
-      let orderedPageItems = [...indexedPage.items].sort((left, right) =>
+      const indexedPage = await this.queryIndexedCommentEvents(directoryTeamIssueId)
+      const baseCommentIds = await this.readCommentEventIndexCoverage(directoryTeamIssueId)
+      const indexedCommentIds = new Set(indexedPage.items.map((item) => item.eventId))
+      const items = setsEqual(indexedCommentIds, baseCommentIds)
+        ? indexedPage.items
+        : (await this.queryBaseCommentEvents(directoryTeamIssueId)).items
+      const orderedItems = [...items].sort((left, right) =>
         compareTeamIssueEvents(left, right, options.newestEventsFirst === true)
       )
-      let hasMore = indexedPage.lastEvaluatedKey !== undefined
-      if (orderedPageItems.length === 0) {
-        const basePage = await this.queryBaseCommentEvents(directoryTeamIssueId, { eventLimit })
-        orderedPageItems = [...basePage.items].sort((left, right) =>
-          compareTeamIssueEvents(left, right, options.newestEventsFirst === true)
-        )
-        hasMore = basePage.lastEvaluatedKey !== undefined
-      }
-      orderedPageItems = orderedPageItems.slice(0, eventLimit)
-      const lastItem = orderedPageItems.at(-1)
+      const startIndex = findTeamIssueEventCursorStartIndex(
+        orderedItems,
+        eventCursor,
+        options.newestEventsFirst === true,
+      )
+      const pageItems = orderedItems.slice(startIndex, startIndex + eventLimit)
+      const hasMore = startIndex + pageItems.length < orderedItems.length
+      const lastItem = pageItems.at(-1)
       return {
-        items: orderedPageItems,
+        items: pageItems,
         ...(hasMore && lastItem
           ? {
               nextCursor: encodeTeamIssueEventCursor(
@@ -3571,23 +3570,10 @@ export class DynamoDbTeamIssuesClient {
     return { items, lastEvaluatedKey: exclusiveStartKey }
   }
 
-  /** Reads comment candidates from the sparse createdAt index. */
-  private async queryIndexedCommentEvents(
-    directoryTeamIssueId: string,
-    options: {
-      eventCursor?: Extract<TeamIssueEventCursor, { version: 2 }>
-      eventLimit?: number
-      newestEventsFirst?: boolean
-    } = {},
-  ) {
+  /** Reads and validates every comment candidate from the sparse createdAt index. */
+  private async queryIndexedCommentEvents(directoryTeamIssueId: string) {
     const items: TeamIssueEventItem[] = []
-    let exclusiveStartKey: Record<string, unknown> | undefined = options.eventCursor
-      ? {
-          directoryTeamIssueId: options.eventCursor.directoryTeamIssueId,
-          eventId: options.eventCursor.eventId,
-          createdAt: options.eventCursor.createdAt,
-        }
-      : undefined
+    let exclusiveStartKey: Record<string, unknown> | undefined
     do {
       const response = await this.documentClient.send(new QueryCommand({
         TableName: this.eventTableName,
@@ -3599,18 +3585,10 @@ export class DynamoDbTeamIssuesClient {
         },
         FilterExpression: 'eventType = :eventType',
         ExclusiveStartKey: exclusiveStartKey,
-        ScanIndexForward: options.eventLimit === undefined
-          ? false
-          : options.newestEventsFirst !== true,
-        ...(options.eventLimit === undefined
-          ? {}
-          : { Limit: Math.max(1, options.eventLimit - items.length) }),
+        ScanIndexForward: false,
       }))
       items.push(...(response.Items ?? []).map(toTeamIssueEventItem))
       exclusiveStartKey = response.LastEvaluatedKey
-      if (options.eventLimit !== undefined && items.length >= options.eventLimit) {
-        break
-      }
     } while (exclusiveStartKey)
     return {
       items: items.filter((item) => item.eventType === 'commented'),
