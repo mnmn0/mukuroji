@@ -909,6 +909,71 @@ test('DynamoDB Team Work Item comment preview orders offset timestamps by instan
   )).toBe(true)
 })
 
+test('DynamoDB Team Work Item comment preview falls back while the comment index is deploying', async () => {
+  const partitionKey = 'workspace-1#team#core#issue#canonical-work-item'
+  const queryInputs: Array<Record<string, unknown>> = []
+  const comment = {
+    directoryId: 'workspace-1',
+    directoryTeamIssueId: partitionKey,
+    teamId: 'core',
+    issueId: 'canonical-work-item',
+    eventId: 'comment-event',
+    eventType: 'commented',
+    actorUserId: 'sato@example.com',
+    body: 'Comment while the index is deploying',
+    summary: 'Commented',
+    createdAt: '2026-07-12T00:00:00.000Z',
+    commentCreatedAtOrder: '2026-07-12T00:00:00.000Z#comment-event',
+  }
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      if (command.constructor.name === 'GetCommand') {
+        return { Item: createScheduleCascadeIssue('core', 'canonical-work-item') }
+      }
+      queryInputs.push(command.input)
+      if (command.input.IndexName === 'TeamIssueCommentCreatedAtIndex') {
+        throw Object.assign(new Error('Comment index is not active yet.'), {
+          name: 'ResourceNotFoundException',
+        })
+      }
+      if (command.input.IndexName === 'TeamIssueEventCreatedAtIndex') {
+        return { Items: [comment] }
+      }
+      return { Items: [] }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  await expect(client.getTeamIssueDetail(
+    'workspace-1',
+    'core',
+    'canonical-work-item',
+    {
+      eventLimit: 1,
+      eventType: 'commented',
+      newestEventsFirst: true,
+    },
+  )).resolves.toMatchObject({
+    comments: [{ id: 'comment-event', body: 'Comment while the index is deploying' }],
+  })
+  expect(queryInputs).toEqual(expect.arrayContaining([
+    expect.objectContaining({
+      IndexName: 'TeamIssueCommentCreatedAtIndex',
+    }),
+    expect.objectContaining({
+      IndexName: 'TeamIssueEventCreatedAtIndex',
+      ScanIndexForward: false,
+      Limit: 1,
+    }),
+  ]))
+})
+
 test('DynamoDB Team Work Item detail rejects a comment omitted from the sparse index', async () => {
   const documentClient = {
     async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {

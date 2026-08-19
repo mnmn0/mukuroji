@@ -3419,31 +3419,37 @@ export class DynamoDbTeamIssuesClient {
     }
     if (eventLimit !== undefined) {
       if (eventCursor === undefined && options.legacyCommentIndexOnly !== true) {
-        const chronologicalPage = await this.queryChronologicalCommentEvents(
-          directoryTeamIssueId,
-          eventCursor,
-          eventLimit,
-          options.newestEventsFirst === true,
-        )
-        const chronologicalItems = chronologicalPage.items.slice(0, eventLimit)
-        if (chronologicalItems.length > 0) {
-          const lastItem = chronologicalItems.at(-1)
-          const lastCommentCreatedAtOrder = lastItem === undefined
-            ? undefined
-            : requireCommentCreatedAtOrder(lastItem)
-          return {
-            items: chronologicalItems,
-            ...(chronologicalPage.lastEvaluatedKey !== undefined && lastItem && lastCommentCreatedAtOrder
-              ? {
-                  nextCursor: encodeTeamIssueCommentCursor(
-                    directoryTeamIssueId,
-                    {
-                      eventId: lastItem.eventId,
-                      commentCreatedAtOrder: lastCommentCreatedAtOrder,
-                    },
-                  ),
-                }
-              : {}),
+        try {
+          const chronologicalPage = await this.queryChronologicalCommentEvents(
+            directoryTeamIssueId,
+            eventCursor,
+            eventLimit,
+            options.newestEventsFirst === true,
+          )
+          const chronologicalItems = chronologicalPage.items.slice(0, eventLimit)
+          if (chronologicalItems.length > 0) {
+            const lastItem = chronologicalItems.at(-1)
+            const lastCommentCreatedAtOrder = lastItem === undefined
+              ? undefined
+              : requireCommentCreatedAtOrder(lastItem)
+            return {
+              items: chronologicalItems,
+              ...(chronologicalPage.lastEvaluatedKey !== undefined && lastItem && lastCommentCreatedAtOrder
+                ? {
+                    nextCursor: encodeTeamIssueCommentCursor(
+                      directoryTeamIssueId,
+                      {
+                        eventId: lastItem.eventId,
+                        commentCreatedAtOrder: lastCommentCreatedAtOrder,
+                      },
+                    ),
+                  }
+                : {}),
+            }
+          }
+        } catch (error) {
+          if (!isResourceNotFoundError(error)) {
+            throw error
           }
         }
       }
