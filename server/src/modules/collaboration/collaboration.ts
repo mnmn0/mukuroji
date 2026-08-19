@@ -2989,6 +2989,23 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       if (!isBackfillConditionalFailure(error)) {
         throw toCollaborationStoreError(error)
       }
+      if (isTransactionConditionalFailureAt(error, 0)) {
+        let currentParent: CanonicalWorkItemRecord | undefined
+        try {
+          currentParent = await this.readCanonicalBackfillParent(normalizedInput)
+        } catch (readError) {
+          if (readError instanceof CollaborationError) throw readError
+          throw toCollaborationStoreError(readError)
+        }
+        if (!currentParent) {
+          throw new CollaborationError(
+            409,
+            'CollaborationBackfillParentDeleted',
+            'The parent Work Item was deleted while the legacy comment was being migrated.',
+            { cause: error },
+          )
+        }
+      }
       const existing = await this.getStoredComment(normalizedInput.entityKey, commentId)
       const receipt = await this.getBackfillReceipt(normalizedInput.entityKey, commentId)
       if (

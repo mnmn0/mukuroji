@@ -570,6 +570,39 @@ test('validates and fences the canonical parent Work Item during backfill', asyn
   })
 })
 
+test('reclassifies a parent deletion after the initial backfill read', async () => {
+  const directoryTeamId = 'workspace#one#team#team-a'
+  let parentReads = 0
+  const client = createClient(async (command) => {
+    const input = readCommandInput(command)
+    if (isTestRecord(input.Key) && input.Key.directoryTeamId === directoryTeamId) {
+      parentReads += 1
+      return parentReads === 1
+        ? { Item: createTestCanonicalParentWorkItem(directoryTeamId, 'issue-1') }
+        : {}
+    }
+    if (Array.isArray(input.TransactItems)) {
+      throw createConditionalTransactionError(input.TransactItems.length, 0)
+    }
+    return {}
+  })
+
+  await expect(client.backfillTeamIssueComment({
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'issue-1',
+    entityKey: createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1'),
+    commentId: 'legacy-comment-parent-race',
+    actorMemberKey: 'author@example.com',
+    bodyMarkdown: 'Historical comment',
+    occurredAt: '2026-08-18T00:00:00.000Z',
+  })).rejects.toMatchObject({
+    status: 409,
+    code: 'CollaborationBackfillParentDeleted',
+  })
+  expect(parentReads).toBe(2)
+})
+
 test('rejects a mismatched discussion projection during an idempotent backfill repair', async () => {
   const memory = createCollaborationMemory()
   const input = {
