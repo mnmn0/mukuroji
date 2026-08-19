@@ -3595,7 +3595,7 @@ export class DynamoDbTeamIssuesClient {
         ExclusiveStartKey: exclusiveStartKey,
         ScanIndexForward: options.eventLimit === undefined
           ? false
-          : options.newestEventsFirst !== false,
+          : options.newestEventsFirst !== true,
         ...(options.eventLimit === undefined
           ? {}
           : { Limit: Math.max(1, options.eventLimit - items.length) }),

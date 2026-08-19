@@ -13,4 +13,5 @@ import './workers-observability.suite';
 import './bootstrap.suite';
 import './runtime-controls.suite';
 import './triage-index-deployment.suite';
+import './team-issue-comment-index-deployment.suite';
 import './workspace-search-writer-fence.suite';

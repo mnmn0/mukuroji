@@ -9254,6 +9254,21 @@ const LEGACY_COLLABORATION_INITIAL_CURSOR = 'initial'
 /** Prefix for a cursor that merges canonical and legacy root-comment streams. */
 const MIGRATION_AWARE_COLLABORATION_CURSOR_PREFIX = 'mixed.'
 
+/**
+ * Parses the collaboration endpoint page limit before selecting a migration reader.
+ *
+ * @param value - Raw query-string page limit.
+ * @returns A finite numeric page limit, or undefined when omitted.
+ */
+function readCollaborationPageLimit(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined
+  const limit = Number(value)
+  if (!Number.isFinite(limit)) {
+    throw new CollaborationError(400, 'InvalidCollaborationCursor', 'Page limit is invalid.')
+  }
+  return limit
+}
+
 /** Cursor state used to merge canonical and legacy root-comment streams. */
 type MigrationAwareCollaborationCursor = {
   /** Cursor schema version. */
@@ -9298,7 +9313,7 @@ routeApp.get('/api/teams/:teamId/issues/:issueId/collaboration', async (c) => {
       ? createProjectCollaborationEntityKey(principal.directoryId, detail.issue.assignedProjectId)
       : undefined
     const limitValue = c.req.query('limit')
-    const limit = limitValue === undefined ? undefined : Number(limitValue)
+    const limit = readCollaborationPageLimit(limitValue)
     const requestedRootCommentId = c.req.query('rootCommentId')
     const requestedCursor = c.req.query('cursor')
     const commentBackfillComplete = await workItemDependencies.collaboration.isTeamIssueCommentBackfillComplete(

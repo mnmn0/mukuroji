@@ -820,7 +820,7 @@ test('DynamoDB Team Work Item detail falls back when the comment index is stale'
   )).toBe(true)
   expect(queryInputs.some((input) =>
     input.IndexName === 'TeamIssueEventCreatedAtIndex' &&
-    input.ScanIndexForward === true &&
+    input.ScanIndexForward === false &&
     input.Limit === 1,
   )).toBe(true)
   expect(queryInputs.some((input) =>
