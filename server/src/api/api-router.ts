@@ -9499,7 +9499,7 @@ routeApp.get('/api/teams/:teamId/issues/:issueId/collaboration', async (c) => {
               entityKey,
               commentId: comment.id,
             })
-            return storedComment && !retainMixedCursorLegacyComments
+            return storedComment?.deletedAt || (storedComment && !retainMixedCursorLegacyComments)
               ? undefined
               : toLegacyCollaborationCommentResponse(comment)
           }),
