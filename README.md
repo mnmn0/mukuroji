@@ -338,10 +338,54 @@ bun run cdk:build
 bun run cdk:test
 bun run cdk:synth
 # 初回の Team Issue event table GSI rollout は2段階です。
-# まず teamIssueCommentIndexDeploymentStage=event で deploy/diff し、
+# まず event stage の diff と deploy を実行し、
 # TeamIssueEventCreatedAtIndex が ACTIVE になったことを確認してから、
 # 下記の最終 comment stage を実行します。
 # 既存環境で event stage が完了済みの場合は、下記だけを実行します。
+bun --filter cdk cdk diff \
+  -c triageIndexDeploymentStage=wake \
+  -c teamIssueCommentIndexDeploymentStage=event \
+  --parameters CognitoUserPoolId="$COGNITO_USER_POOL_ID" \
+  --parameters CognitoUserPoolClientId="$COGNITO_USER_POOL_CLIENT_ID" \
+  --parameters CognitoSsoUserPoolClientId="$COGNITO_SSO_USER_POOL_CLIENT_ID" \
+  --parameters CognitoHostedUiDomain="$COGNITO_HOSTED_UI_DOMAIN" \
+  --parameters CognitoSsoRedirectUri="$COGNITO_SSO_REDIRECT_URI" \
+  --parameters CognitoEnterpriseIdpName="$COGNITO_ENTERPRISE_IDP_NAME" \
+  --parameters WorkspaceDirectoryId="$MUKUROJI_WORKSPACE_DIRECTORY_ID" \
+  --parameters WorkspaceAuditPseudonymKey="$MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY" \
+  --parameters EnterpriseIdentityTokenHashSecret="$ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET" \
+  --parameters EnterpriseSsoStateSecret="$ENTERPRISE_SSO_STATE_SECRET" \
+  --parameters InitialOwnerEmail="$MUKUROJI_INITIAL_OWNER_EMAIL" \
+  --parameters InitialOwnerUsername="$MUKUROJI_INITIAL_OWNER_USERNAME" \
+  --parameters RequestEmailWebhookSecret="$MUKUROJI_REQUEST_EMAIL_WEBHOOK_SECRET" \
+  --parameters RequestTokenHashSecret="$MUKUROJI_REQUEST_TOKEN_HASH_SECRET" \
+  --parameters AlarmPrimaryTopicName="$MUKUROJI_ALARM_PRIMARY_TOPIC_NAME" \
+  --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
+  --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
+  --parameters WorkspaceSearchWriterFenceMode="$MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE"
+
+bun --filter cdk cdk deploy \
+  -c triageIndexDeploymentStage=wake \
+  -c teamIssueCommentIndexDeploymentStage=event \
+  --parameters CognitoUserPoolId="$COGNITO_USER_POOL_ID" \
+  --parameters CognitoUserPoolClientId="$COGNITO_USER_POOL_CLIENT_ID" \
+  --parameters CognitoSsoUserPoolClientId="$COGNITO_SSO_USER_POOL_CLIENT_ID" \
+  --parameters CognitoHostedUiDomain="$COGNITO_HOSTED_UI_DOMAIN" \
+  --parameters CognitoSsoRedirectUri="$COGNITO_SSO_REDIRECT_URI" \
+  --parameters CognitoEnterpriseIdpName="$COGNITO_ENTERPRISE_IDP_NAME" \
+  --parameters WorkspaceDirectoryId="$MUKUROJI_WORKSPACE_DIRECTORY_ID" \
+  --parameters WorkspaceAuditPseudonymKey="$MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY" \
+  --parameters EnterpriseIdentityTokenHashSecret="$ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET" \
+  --parameters EnterpriseSsoStateSecret="$ENTERPRISE_SSO_STATE_SECRET" \
+  --parameters InitialOwnerEmail="$MUKUROJI_INITIAL_OWNER_EMAIL" \
+  --parameters InitialOwnerUsername="$MUKUROJI_INITIAL_OWNER_USERNAME" \
+  --parameters RequestEmailWebhookSecret="$MUKUROJI_REQUEST_EMAIL_WEBHOOK_SECRET" \
+  --parameters RequestTokenHashSecret="$MUKUROJI_REQUEST_TOKEN_HASH_SECRET" \
+  --parameters AlarmPrimaryTopicName="$MUKUROJI_ALARM_PRIMARY_TOPIC_NAME" \
+  --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
+  --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
+  --parameters WorkspaceSearchWriterFenceMode="$MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE"
+
 bun --filter cdk cdk diff \
   -c triageIndexDeploymentStage=wake \
   -c teamIssueCommentIndexDeploymentStage=comment \

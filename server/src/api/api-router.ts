@@ -9250,6 +9250,10 @@ type MigrationAwareCollaborationCursor = {
   canonicalExhausted: boolean
   /** Whether the legacy stream has been exhausted. */
   legacyExhausted: boolean
+  /** Creation timestamp of the last root emitted by the merged page. */
+  lastEmittedCreatedAt?: string
+  /** Stable ID of the last root emitted by the merged page. */
+  lastEmittedCommentId?: string
 }
 
 /**
@@ -28800,7 +28804,13 @@ function decodeMigrationAwareCollaborationCursor(
       (parsed.canonicalCursor !== undefined &&
         (typeof parsed.canonicalCursor !== 'string' || parsed.canonicalCursor.length === 0)) ||
       (parsed.legacyEventCursor !== undefined &&
-        (typeof parsed.legacyEventCursor !== 'string' || parsed.legacyEventCursor.length === 0))) {
+        (typeof parsed.legacyEventCursor !== 'string' || parsed.legacyEventCursor.length === 0)) ||
+      (parsed.lastEmittedCreatedAt === undefined) !== (parsed.lastEmittedCommentId === undefined) ||
+      (parsed.lastEmittedCreatedAt !== undefined &&
+        (typeof parsed.lastEmittedCreatedAt !== 'string' ||
+          !Number.isFinite(Date.parse(parsed.lastEmittedCreatedAt)))) ||
+      (parsed.lastEmittedCommentId !== undefined &&
+        (typeof parsed.lastEmittedCommentId !== 'string' || parsed.lastEmittedCommentId.length === 0))) {
       throw new TypeError('Invalid merged collaboration cursor payload.')
     }
     return {
@@ -28813,6 +28823,12 @@ function decodeMigrationAwareCollaborationCursor(
         : {}),
       ...(typeof parsed.legacyEventCursor === 'string'
         ? { legacyEventCursor: parsed.legacyEventCursor }
+        : {}),
+      ...(typeof parsed.lastEmittedCreatedAt === 'string'
+        ? { lastEmittedCreatedAt: parsed.lastEmittedCreatedAt }
+        : {}),
+      ...(typeof parsed.lastEmittedCommentId === 'string'
+        ? { lastEmittedCommentId: parsed.lastEmittedCommentId }
         : {}),
       canonicalExhausted: parsed.canonicalExhausted,
       legacyExhausted: parsed.legacyExhausted,
@@ -28889,6 +28905,12 @@ async function readMigrationAwareRootPage(
     ...(input.cursor?.legacyEventCursor ? { cursor: input.cursor.legacyEventCursor } : {}),
     exhausted: input.cursor?.legacyExhausted === true,
   }
+  const lastEmittedComment = input.cursor?.lastEmittedCreatedAt && input.cursor.lastEmittedCommentId
+    ? {
+        createdAt: input.cursor.lastEmittedCreatedAt,
+        id: input.cursor.lastEmittedCommentId,
+      }
+    : undefined
   let scopeState: Pick<CollaborationThreadPage, 'watch' | 'presence'> | undefined
 
   /** Loads the next unread canonical root comment candidate. */
@@ -28904,6 +28926,15 @@ async function readMigrationAwareRootPage(
       })
       scopeState = { watch: page.watch, presence: page.presence }
       const comment = page.comments[0]
+      if (comment !== undefined && lastEmittedComment !== undefined &&
+        compareMigrationAwareComments(comment, lastEmittedComment) >= 0) {
+        if (page.nextCursor === undefined) {
+          canonicalState.exhausted = true
+        } else {
+          canonicalState.cursor = page.nextCursor
+        }
+        continue
+      }
       if (comment !== undefined) {
         canonicalState.candidate = {
           source: 'canonical',
@@ -28940,6 +28971,10 @@ async function readMigrationAwareRootPage(
       const comments = detail.comments ?? []
       const candidates = (await Promise.all(comments.map(async (comment, index) => {
         if (!(await input.shouldIncludeLegacyComment(comment))) {
+          return undefined
+        }
+        if (lastEmittedComment !== undefined &&
+          compareMigrationAwareComments(comment, lastEmittedComment) >= 0) {
           return undefined
         }
         const nextComment = comments[index + 1]
@@ -29025,6 +29060,7 @@ async function readMigrationAwareRootPage(
     },
     presence: [],
   }
+  const lastComment = orderedComments.at(-1)?.comment
   return {
     canonicalComments,
     legacyComments,
@@ -29040,6 +29076,12 @@ async function readMigrationAwareRootPage(
             ...(legacyState.cursor ? { legacyEventCursor: legacyState.cursor } : {}),
             canonicalExhausted: canonicalState.exhausted,
             legacyExhausted: legacyState.exhausted,
+            ...(lastComment
+              ? {
+                  lastEmittedCreatedAt: lastComment.createdAt,
+                  lastEmittedCommentId: lastComment.id,
+                }
+              : {}),
           }),
         }
       : {}),

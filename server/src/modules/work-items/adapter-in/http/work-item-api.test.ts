@@ -2160,6 +2160,119 @@ test('merges canonical and legacy root pages by creation time during backfill', 
   ])
 })
 
+test('does not duplicate a legacy root when backfill inserts it into the canonical stream', async () => {
+  configureFakeProjectClients(true)
+  const defaultTeamIssues = getTestAppDependencies().workItems.teamIssues
+  const canonicalOlder = {
+    id: 'canonical-older',
+    rootCommentId: 'canonical-older',
+    authorMemberKey: 'author@example.com',
+    bodyMarkdown: 'Canonical older root',
+    version: 1,
+    mentionMemberKeys: [],
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+    acceptedResolutions: [],
+    reactions: [],
+  }
+  const backfilledLegacy = {
+    id: 'legacy-newer',
+    rootCommentId: 'legacy-newer',
+    authorMemberKey: 'author@example.com',
+    bodyMarkdown: 'Backfilled legacy root',
+    version: 1,
+    mentionMemberKeys: [],
+    createdAt: '2026-07-12T01:00:00.000Z',
+    updatedAt: '2026-07-12T01:00:00.000Z',
+    acceptedResolutions: [],
+    reactions: [],
+  }
+  const threadState = {
+    comments: [],
+    watch: {
+      subscribed: false,
+      explicit: false,
+      automatic: false,
+      reasons: [],
+      watcherCount: 0,
+    },
+    presence: [],
+  }
+  let canonicalReadCount = 0
+  setTestAppDependencies({
+    collaboration: createCollaborationStub({
+      async isTeamIssueCommentBackfillComplete() {
+        return false
+      },
+      async getCommentSnapshot() {
+        return undefined
+      },
+      async getThread(input) {
+        if (input.rootCommentId) return threadState
+        canonicalReadCount += 1
+        if (input.cursor === 'canonical-after-backfill') {
+          return { ...threadState, comments: [canonicalOlder] }
+        }
+        return canonicalReadCount === 1
+          ? { ...threadState, comments: [canonicalOlder] }
+          : {
+              ...threadState,
+              comments: [backfilledLegacy],
+              nextCursor: 'canonical-after-backfill',
+            }
+      },
+    }),
+    teamIssues: {
+      ...defaultTeamIssues,
+      async getTeamIssueDetail(directoryId, teamId, issueId, options) {
+        const detail = await defaultTeamIssues.getTeamIssueDetail(
+          directoryId,
+          teamId,
+          issueId,
+          options,
+        )
+        return options?.eventType === 'commented'
+          ? {
+              ...detail,
+              comments: [{
+                id: 'legacy-newer',
+                actorUserId: 'departed@example.com',
+                body: 'Backfilled legacy root',
+                createdAt: '2026-07-12T01:00:00.000Z',
+              }],
+            }
+          : detail
+      },
+    },
+  })
+
+  const firstResponse = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction/collaboration?limit=1',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+
+  expect(firstResponse.status).toBe(200)
+  const firstBody = await firstResponse.json()
+  expect(firstBody.comments).toEqual([
+    expect.objectContaining({ id: 'legacy-newer', source: 'legacy' }),
+  ])
+  expect(firstBody.nextCursor).toBeString()
+
+  const secondResponse = await app.request(
+    `/api/teams/core-team/issues/onboarding-friction/collaboration?limit=1&cursor=${encodeURIComponent(firstBody.nextCursor)}`,
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+
+  expect(secondResponse.status).toBe(200)
+  const secondBody = await secondResponse.json()
+  expect(secondBody.comments.map((comment: { id: string }) => comment.id)).toEqual([
+    'canonical-older',
+  ])
+  expect(secondBody.comments).not.toContainEqual(
+    expect.objectContaining({ id: 'legacy-newer' }),
+  )
+})
+
 test('does not let canonicalized legacy roots consume migration page capacity', async () => {
   configureFakeProjectClients(true)
   const defaultTeamIssues = getTestAppDependencies().workItems.teamIssues

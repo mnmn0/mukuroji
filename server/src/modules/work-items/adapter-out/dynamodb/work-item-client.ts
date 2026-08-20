@@ -1337,6 +1337,14 @@ function normalizePublicWorkItemPageLimit(value: number) {
  */
 const MAX_LEGACY_COMMENT_FALLBACK_READ_ITEMS = 500
 
+/** Shared read budget for every query required by one legacy comment fallback. */
+type LegacyCommentFallbackReadBudget = {
+  /** Maximum event rows that may be evaluated across the complete fallback. */
+  maxReadItems: number
+  /** Event rows evaluated by all fallback queries issued so far. */
+  evaluatedItems: number
+}
+
 /**
  * DynamoDB の team issue item と event item を読み書きする client です。
  */
@@ -3194,20 +3202,16 @@ export class DynamoDbTeamIssuesClient {
           }
         }
       }
-      const indexedPage = await this.queryIndexedCommentEvents(
-        directoryTeamIssueId,
-        MAX_LEGACY_COMMENT_FALLBACK_READ_ITEMS,
-      )
-      const baseCommentIds = await this.readCommentEventIndexCoverage(
-        directoryTeamIssueId,
-        MAX_LEGACY_COMMENT_FALLBACK_READ_ITEMS,
-      )
+      const readBudget: LegacyCommentFallbackReadBudget = {
+        maxReadItems: MAX_LEGACY_COMMENT_FALLBACK_READ_ITEMS,
+        evaluatedItems: 0,
+      }
+      const indexedPage = await this.queryIndexedCommentEvents(directoryTeamIssueId, readBudget)
+      const baseCommentIds = await this.readCommentEventIndexCoverage(directoryTeamIssueId, readBudget)
       const indexedCommentIds = new Set(indexedPage.items.map((item) => item.eventId))
       const items = setsEqual(indexedCommentIds, baseCommentIds)
         ? indexedPage.items
-        : (await this.queryBaseCommentEvents(directoryTeamIssueId, {
-            maxReadItems: MAX_LEGACY_COMMENT_FALLBACK_READ_ITEMS,
-          })).items
+        : (await this.queryBaseCommentEvents(directoryTeamIssueId, { readBudget })).items
       const orderedItems = [...items].sort((left, right) =>
         compareTeamIssueEvents(left, right, options.newestEventsFirst === true)
       )
@@ -3319,15 +3323,18 @@ export class DynamoDbTeamIssuesClient {
     return { items, lastEvaluatedKey: exclusiveStartKey }
   }
 
-  /** Reads comment candidates from the sparse createdAt index within an optional budget. */
+  /** Reads comment candidates from the sparse createdAt index within an optional shared budget. */
   private async queryIndexedCommentEvents(
     directoryTeamIssueId: string,
-    maxReadItems?: number,
+    readBudget?: LegacyCommentFallbackReadBudget,
   ) {
     const items: TeamIssueEventItem[] = []
     let exclusiveStartKey: Record<string, unknown> | undefined
     let evaluatedItems = 0
     do {
+      if (readBudget !== undefined) {
+        ensureLegacyCommentFallbackReadBudgetAvailable(readBudget)
+      }
       const response = await this.documentClient.send(new QueryCommand({
         TableName: this.eventTableName,
         IndexName: 'TeamIssueEventCreatedAtIndex',
@@ -3339,17 +3346,20 @@ export class DynamoDbTeamIssuesClient {
         FilterExpression: 'eventType = :eventType',
         ExclusiveStartKey: exclusiveStartKey,
         ScanIndexForward: false,
-        ...(maxReadItems === undefined
+        ...(readBudget === undefined
           ? {}
-          : { Limit: Math.max(1, maxReadItems - evaluatedItems) }),
+          : { Limit: readBudget.maxReadItems - readBudget.evaluatedItems }),
       }))
       const pageItems = (response.Items ?? []).map(toTeamIssueEventItem)
       items.push(...pageItems)
-      evaluatedItems += response.ScannedCount ?? pageItems.length
+      const scannedItems = response.ScannedCount ?? pageItems.length
+      const totalEvaluatedItems = readBudget === undefined
+        ? (evaluatedItems += scannedItems)
+        : (readBudget.evaluatedItems += scannedItems)
       exclusiveStartKey = response.LastEvaluatedKey
       throwIfLegacyCommentFallbackReadBudgetExceeded(
-        maxReadItems,
-        evaluatedItems,
+        readBudget?.maxReadItems,
+        totalEvaluatedItems,
         exclusiveStartKey,
       )
     } while (exclusiveStartKey)
@@ -3363,16 +3373,20 @@ export class DynamoDbTeamIssuesClient {
    * Validates all comment rows that the sparse createdAt index should contain.
    *
    * @param directoryTeamIssueId - Work Item event partition key.
+   * @param readBudget - Shared budget for all queries in one fallback, when bounded.
    * @returns Event IDs present in the strongly consistent base-table query.
    */
   private async readCommentEventIndexCoverage(
     directoryTeamIssueId: string,
-    maxReadItems?: number,
+    readBudget?: LegacyCommentFallbackReadBudget,
   ) {
     const eventIds = new Set<string>()
     let exclusiveStartKey: Record<string, unknown> | undefined
     let evaluatedItems = 0
     do {
+      if (readBudget !== undefined) {
+        ensureLegacyCommentFallbackReadBudgetAvailable(readBudget)
+      }
       const response = await this.documentClient.send(new QueryCommand({
         TableName: this.eventTableName,
         KeyConditionExpression: 'directoryTeamIssueId = :directoryTeamIssueId',
@@ -3389,18 +3403,21 @@ export class DynamoDbTeamIssuesClient {
         ProjectionExpression: '#createdAt, #eventId, #eventType',
         ExclusiveStartKey: exclusiveStartKey,
         ConsistentRead: true,
-        ...(maxReadItems === undefined
+        ...(readBudget === undefined
           ? {}
-          : { Limit: Math.max(1, maxReadItems - evaluatedItems) }),
+          : { Limit: readBudget.maxReadItems - readBudget.evaluatedItems }),
       }))
       for (const item of response.Items ?? []) {
         eventIds.add(readCommentEventIndexCoverageId(item))
       }
-      evaluatedItems += response.ScannedCount ?? response.Items?.length ?? 0
+      const scannedItems = response.ScannedCount ?? response.Items?.length ?? 0
+      const totalEvaluatedItems = readBudget === undefined
+        ? (evaluatedItems += scannedItems)
+        : (readBudget.evaluatedItems += scannedItems)
       exclusiveStartKey = response.LastEvaluatedKey
       throwIfLegacyCommentFallbackReadBudgetExceeded(
-        maxReadItems,
-        evaluatedItems,
+        readBudget?.maxReadItems,
+        totalEvaluatedItems,
         exclusiveStartKey,
       )
     } while (exclusiveStartKey)
@@ -3410,18 +3427,23 @@ export class DynamoDbTeamIssuesClient {
   /** Reads and fully validates comment rows from the base table after index drift. */
   private async queryBaseCommentEvents(
     directoryTeamIssueId: string,
-    options: { eventLimit?: number; maxReadItems?: number } = {},
+    options: { eventLimit?: number; maxReadItems?: number; readBudget?: LegacyCommentFallbackReadBudget } = {},
   ) {
     const items: TeamIssueEventItem[] = []
     let exclusiveStartKey: Record<string, unknown> | undefined
     let evaluatedItems = 0
     do {
+      if (options.readBudget !== undefined) {
+        ensureLegacyCommentFallbackReadBudgetAvailable(options.readBudget)
+      }
       const remainingEventItems = options.eventLimit === undefined
         ? undefined
         : Math.max(1, options.eventLimit - items.length)
-      const remainingReadItems = options.maxReadItems === undefined
+      const maxReadItems = options.readBudget?.maxReadItems ?? options.maxReadItems
+      const currentEvaluatedItems = options.readBudget?.evaluatedItems ?? evaluatedItems
+      const remainingReadItems = maxReadItems === undefined
         ? undefined
-        : Math.max(1, options.maxReadItems - evaluatedItems)
+        : Math.max(1, maxReadItems - currentEvaluatedItems)
       const queryLimit = remainingEventItems === undefined
         ? remainingReadItems
         : remainingReadItems === undefined
@@ -3441,11 +3463,14 @@ export class DynamoDbTeamIssuesClient {
       }))
       const pageItems = (response.Items ?? []).map(toTeamIssueEventItem)
       items.push(...pageItems)
-      evaluatedItems += response.ScannedCount ?? pageItems.length
+      const scannedItems = response.ScannedCount ?? pageItems.length
+      const totalEvaluatedItems = options.readBudget === undefined
+        ? (evaluatedItems += scannedItems)
+        : (options.readBudget.evaluatedItems += scannedItems)
       exclusiveStartKey = response.LastEvaluatedKey
       throwIfLegacyCommentFallbackReadBudgetExceeded(
-        options.maxReadItems,
-        evaluatedItems,
+        maxReadItems,
+        totalEvaluatedItems,
         exclusiveStartKey,
       )
       if (options.eventLimit !== undefined && items.length >= options.eventLimit) {
@@ -4264,13 +4289,29 @@ function readCommentEventIndexCoverageId(value: unknown): string {
   return value.eventId
 }
 
+/** Fails closed before a shared legacy comment budget can issue another query. */
+function ensureLegacyCommentFallbackReadBudgetAvailable(
+  readBudget: LegacyCommentFallbackReadBudget,
+): void {
+  if (readBudget.evaluatedItems >= readBudget.maxReadItems) {
+    throw new ProjectDataError(
+      503,
+      'InvalidTeamIssue',
+      'Team Issue comment history requires migration before it can be read.',
+    )
+  }
+}
+
 /** Fails closed when a transitional comment fallback would exceed its read budget. */
 function throwIfLegacyCommentFallbackReadBudgetExceeded(
   maxReadItems: number | undefined,
   evaluatedItems: number,
   lastEvaluatedKey: Record<string, unknown> | undefined,
 ): void {
-  if (maxReadItems !== undefined && evaluatedItems >= maxReadItems && lastEvaluatedKey !== undefined) {
+  if (maxReadItems !== undefined && (
+    evaluatedItems > maxReadItems ||
+    (evaluatedItems >= maxReadItems && lastEvaluatedKey !== undefined)
+  )) {
     throw new ProjectDataError(
       503,
       'InvalidTeamIssue',
