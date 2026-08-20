@@ -254,7 +254,7 @@ Analytics の権限、snapshot、schedule、forecast の契約は
 
 Inbound webhook の管理 API は Workspace 管理者専用です。`/api/automation/inbound-webhooks` 以下で作成、pause/resume、rotate、revoke を行い、public sender は発行された `/api/automation/inbound-webhooks/{opaqueEndpointId}` へ署名済み JSON を POST します。Signing secret は create/rotate response で一度だけ返し、応答消失時の同一 key による recovery も 24 時間で失効します。Delivery idempotency receipt は、365 日保持する audit outbox の deterministic event ID 衝突期間を覆うため 400 日保持します。`provisioning` が完了しない場合は管理者が revoke して abort できますが、rotate 途中の abort も endpoint を終端失効させるため、Rule と sender を新しい endpoint へ再設定する必要があります。Revoke は durable cleanup intent を残し、即時削除後も schedule Lambda が inbound-only `DeleteSecret` 権限で 5 分間隔に recovery window 24 時間とその後の 5 分間の grace が終わるまで secret 削除を再試行し、期限直前に開始済みの late provisioning write も回収します。
 
-Task / Issue の strict canonical schema、dynamic workflow、optimistic concurrency、Issue #20 の legacy read-only adapter は
+Task / Issue の strict canonical schema、dynamic workflow、optimistic concurrency は
 [`docs/work-items.md`](docs/work-items.md) を参照してください。
 
 append-only event schema、activity/audit API、retention/redaction、consumer dedupe、backfill の契約は
