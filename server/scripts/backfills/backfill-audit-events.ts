@@ -25,10 +25,9 @@ import {
 import { isCanonicalWorkItemRecord } from '../../src/modules/work-items'
 import { isLocalDynamoDbEndpoint } from './backfill-endpoint'
 
-const checkpointVersion = 2
+const checkpointVersion = 3
 const scanPageSize = 100
 const sourceNames = [
-  'team-issue-events',
   'team-issues',
   'project-directory',
   'workspace-access',
@@ -51,15 +50,11 @@ type AuditEventInput = {
   /**
    * Source table の種類です。
    */
-  legacySource: SourceName
+  sourceName: SourceName
   /**
    * Source item の一意 key です。
    */
-  legacyKey: string
-  /**
-   * 保存 metadata では legacy key を digest に置き換えるかどうかです。
-   */
-  redactLegacyKey?: boolean
+  sourceKey: string
   /**
    * Domain event type です。
    */
@@ -109,7 +104,7 @@ type AuditEventInput = {
    */
   source: 'migration' | 'backfill'
   /**
-   * Adapter scope や legacy source の診断情報です。
+   * Adapter scope や source の診断情報です。
    */
   metadata?: Readonly<Record<string, unknown>>
 }
@@ -191,7 +186,7 @@ type CheckpointState = {
   /**
    * Checkpoint schema version です。
    */
-  version: 2
+  version: 3
   /**
    * Table 組み合わせの誤用を防ぐ hash です。
    */
@@ -210,8 +205,6 @@ type CheckpointState = {
  * DynamoDB table names used by the audit-event backfill.
  */
 type TableNames = {
-  /** Legacy Team Issue event table name. */
-  teamIssueEvents: string
   /** Current Team Issue table name. */
   teamIssues: string
   /** Team, project, and member directory table name. */
@@ -238,16 +231,6 @@ type SourceDefinition = {
    * Source item を汎用 audit event に変換します。
    */
   mapItem: (item: Record<string, unknown>) => AuditEventV1 | null | undefined
-}
-
-/**
- * Actor ID の正規化結果です。
- */
-type ActorIdentity = {
-  /**
-   * User または system actor の ID です。
-   */
-  actorUserId: string
 }
 
 /**
@@ -310,7 +293,7 @@ function parseArguments(args: string[]): BackfillOptions {
   const options: BackfillOptions = {
     dryRun: false,
     help: false,
-    checkpointPath: resolve(process.cwd(), 'audit-event-backfill-v2.checkpoint.json'),
+    checkpointPath: resolve(process.cwd(), 'audit-event-backfill-v3.checkpoint.json'),
   }
 
   for (let index = 0; index < args.length; index += 1) {
@@ -385,15 +368,14 @@ function printHelp() {
 
 Options:
   --dry-run                 Scan and map items without writing events/checkpoint.
-  --checkpoint <path>      Checkpoint JSON path (default: ./audit-event-backfill-v2.checkpoint.json).
+  --checkpoint <path>      Checkpoint JSON path (default: ./audit-event-backfill-v3.checkpoint.json).
   --limit <count>          Maximum source items scanned in this run.
-  --source <name>          Run only team-issue-events, team-issues, project-directory,
-                           or workspace-access.
+  --source <name>          Run only team-issues, project-directory, or workspace-access.
   --help, -h               Show this help.
 
 Required production environment:
-  TEAM_ISSUE_EVENTS_TABLE_NAME, TEAM_ISSUES_TABLE_NAME,
-  PROJECT_DIRECTORY_TABLE_NAME, WORKSPACE_ACCESS_TABLE_NAME, AUDIT_EVENTS_TABLE_NAME,
+  TEAM_ISSUES_TABLE_NAME, PROJECT_DIRECTORY_TABLE_NAME, WORKSPACE_ACCESS_TABLE_NAME,
+  AUDIT_EVENTS_TABLE_NAME,
   MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY (exactly 64 lowercase hexadecimal characters)
 
 For a local endpoint, repository-local default table names are used when omitted.
@@ -411,11 +393,6 @@ function resolveTableNames(endpoint: string | undefined): TableNames {
   const allowLocalDefaults = endpoint !== undefined && isLocalDynamoDbEndpoint(endpoint)
 
   return {
-    teamIssueEvents: resolveTableName(
-      ['MUKUROJI_TEAM_ISSUE_EVENTS_TABLE', 'TEAM_ISSUE_EVENTS_TABLE_NAME'],
-      'mukuroji-team-issue-events-local',
-      allowLocalDefaults,
-    ),
     teamIssues: resolveTableName(
       ['MUKUROJI_TEAM_ISSUES_TABLE', 'TEAM_ISSUES_TABLE_NAME'],
       'mukuroji-team-issues-local',
@@ -501,11 +478,6 @@ function createSourceDefinitions(
   workspaceAuditPseudonymKey: string,
 ): SourceDefinition[] {
   return [
-    {
-      name: 'team-issue-events',
-      tableName: tables.teamIssueEvents,
-      mapItem: mapLegacyTeamIssueEvent,
-    },
     {
       name: 'team-issues',
       tableName: tables.teamIssues,
@@ -629,56 +601,6 @@ async function putAuditEvent(
   }
 }
 
-function mapLegacyTeamIssueEvent(item: Record<string, unknown>) {
-  const directoryId = readRequiredString(item, 'directoryId')
-  const teamId = readRequiredString(item, 'teamId')
-  const issueId = readRequiredString(item, 'issueId')
-  const legacyEventId = readRequiredString(item, 'eventId')
-  const legacyPartition = readRequiredString(item, 'directoryTeamIssueId')
-  const legacyEventType = readRequiredString(item, 'eventType')
-
-  if (!directoryId || !teamId || !issueId || !legacyEventId || !legacyPartition || !legacyEventType) {
-    return undefined
-  }
-
-  const eventType = mapLegacyEventType(legacyEventType)
-
-  if (!eventType) {
-    return undefined
-  }
-
-  const actor = readActor(item.actorUserId)
-  const isComment = legacyEventType === 'commented'
-  const body = readOptionalString(item, 'body')
-  const workItemId = createTeamIssueWorkItemId(teamId, issueId)
-  const changes = isComment && body
-    ? createAuditFieldChanges(undefined, { body }, ['body'])
-    : []
-
-  return createAuditEvent({
-    legacySource: 'team-issue-events',
-    legacyKey: `${legacyPartition}#${legacyEventId}`,
-    eventType,
-    directoryId,
-    occurredAt: normalizeTimestamp(item.createdAt ?? legacyEventId.slice(0, 24)),
-    ...actor,
-    entityType: 'work-item',
-    entityId: workItemId,
-    targetType: isComment ? 'comment' : 'work-item',
-    targetId: isComment ? createTeamIssueCommentId(workItemId, legacyEventId) : workItemId,
-    action: mapLegacyAction(legacyEventType),
-    changes,
-    reason: readOptionalString(item, 'summary'),
-    source: 'backfill',
-    metadata: {
-      adapter: 'team-issue',
-      diffUnavailable: legacyEventType === 'updated',
-      legacyEventType,
-      teamId,
-    },
-  })
-}
-
 /** Strict canonical Work Item row を audit backfill event へ変換します。 */
 export function mapCurrentTeamIssue(item: Record<string, unknown>) {
   if (!isCanonicalWorkItemRecord(item)) {
@@ -694,8 +616,8 @@ export function mapCurrentTeamIssue(item: Record<string, unknown>) {
   const workItemId = createTeamIssueWorkItemId(teamId, issueId)
 
   return createAuditEvent({
-    legacySource: 'team-issues',
-    legacyKey: `${directoryTeamId}#${issueId}`,
+    sourceName: 'team-issues',
+    sourceKey: `${directoryTeamId}#${issueId}`,
     eventType: 'work-item.backfilled',
     directoryId,
     occurredAt: normalizeTimestamp(item.updatedAt ?? item.createdAt),
@@ -725,7 +647,7 @@ export function mapCurrentTeamIssue(item: Record<string, unknown>) {
     reason: 'Current team-owned Work Item snapshot backfilled.',
     source: 'backfill',
     metadata: {
-      adapter: 'team-issue',
+      adapter: 'canonical-work-item',
       teamId,
     },
   })
@@ -748,8 +670,8 @@ function mapProjectDirectoryItem(item: Record<string, unknown>) {
     }
 
     return createAuditEvent({
-      legacySource: 'project-directory',
-      legacyKey: entryKey,
+      sourceName: 'project-directory',
+      sourceKey: entryKey,
       eventType: 'project.backfilled',
       directoryId,
       occurredAt: normalizeTimestamp(item.archivedAt),
@@ -784,8 +706,8 @@ function mapProjectDirectoryItem(item: Record<string, unknown>) {
     }
 
     return createAuditEvent({
-      legacySource: 'project-directory',
-      legacyKey: entryKey,
+      sourceName: 'project-directory',
+      sourceKey: entryKey,
       eventType: 'project.backfilled',
       directoryId,
       occurredAt: normalizeTimestamp(item.archivedAt),
@@ -824,8 +746,8 @@ function mapProjectDirectoryItem(item: Record<string, unknown>) {
     const targetId = `${projectId}/${memberKey}`
 
     return createAuditEvent({
-      legacySource: 'project-directory',
-      legacyKey: entryKey,
+      sourceName: 'project-directory',
+      sourceKey: entryKey,
       eventType: 'member.backfilled',
       directoryId,
       occurredAt: normalizeTimestamp(item.updatedAt ?? item.createdAt),
@@ -938,9 +860,8 @@ function mapWorkspaceMemberItem(
   )
 
   return createAuditEvent({
-    legacySource: 'workspace-access',
-    legacyKey: `${workspaceId}#${recordKey}`,
-    redactLegacyKey: true,
+    sourceName: 'workspace-access',
+    sourceKey: `${workspaceId}#${recordKey}`,
     eventType: 'member.backfilled',
     directoryId: workspaceId,
     occurredAt: updatedAt,
@@ -1054,9 +975,8 @@ function mapWorkspaceInvitationItem(
   )
 
   return createAuditEvent({
-    legacySource: 'workspace-access',
-    legacyKey: `${workspaceId}#${recordKey}`,
-    redactLegacyKey: true,
+    sourceName: 'workspace-access',
+    sourceKey: `${workspaceId}#${recordKey}`,
     eventType: 'invitation.backfilled',
     directoryId: workspaceId,
     occurredAt: updatedAt,
@@ -1178,7 +1098,7 @@ function assertWorkspaceAccessRow(condition: unknown, message: string): asserts 
 }
 
 function createAuditEvent(input: AuditEventInput): AuditEventV1 {
-  const sourceKeyDigest = createDigest(`${input.legacySource}\0${input.legacyKey}`)
+  const sourceKeyDigest = createDigest(`${input.sourceName}\0${input.sourceKey}`)
   const context = createMutationAuditContext({
     workspaceId: input.directoryId,
     actor: {
@@ -1189,16 +1109,16 @@ function createAuditEvent(input: AuditEventInput): AuditEventV1 {
     idempotencyKey: `backfill:${sourceKeyDigest}`,
     request: {
       method: 'BACKFILL',
-      path: `/audit/backfill/${input.legacySource}`,
+      path: `/audit/backfill/${input.sourceName}`,
       body: {
-        legacyKey: input.legacyKey,
+        sourceKey: input.sourceKey,
       },
     },
     source: {
       kind: input.source,
       method: 'BACKFILL',
       requestId: `backfill:${sourceKeyDigest.slice(0, 32)}`,
-      route: `/audit/backfill/${input.legacySource}`,
+      route: `/audit/backfill/${input.sourceName}`,
     },
     occurredAt: input.occurredAt,
   })
@@ -1224,10 +1144,6 @@ function createAuditEvent(input: AuditEventInput): AuditEventV1 {
     metadata: {
       ...input.metadata,
       backfilled: true,
-      legacyKey: input.redactLegacyKey
-        ? `sha256:${createDigest(input.legacyKey)}`
-        : input.legacyKey,
-      legacySource: input.legacySource,
     },
     outboxStatus: 'suppressed',
   })
@@ -1245,52 +1161,8 @@ function createSnapshotChanges(
   return createAuditFieldChanges(undefined, item, includedFields, redactedFields)
 }
 
-function mapLegacyEventType(value: string) {
-  if (value === 'created') {
-    return 'work-item.created'
-  }
-
-  if (value === 'updated') {
-    return 'work-item.updated'
-  }
-
-  if (value === 'commented') {
-    return 'comment.created'
-  }
-
-  return undefined
-}
-
-function mapLegacyAction(value: string) {
-  if (value === 'created') {
-    return 'created'
-  }
-
-  if (value === 'updated') {
-    return 'updated'
-  }
-
-  return 'commented'
-}
-
 function createTeamIssueWorkItemId(teamId: string, issueId: string) {
   return limitBackfillText(`team/${teamId}/issue/${issueId}`)
-}
-
-function createTeamIssueCommentId(workItemId: string, legacyEventId: string) {
-  return limitBackfillText(`${workItemId}/comment/${legacyEventId}`)
-}
-
-function readActor(value: unknown): ActorIdentity {
-  if (typeof value === 'string' && value.trim()) {
-    return {
-      actorUserId: limitBackfillText(value.trim().toLowerCase()),
-    }
-  }
-
-  return {
-    actorUserId: 'system:migration',
-  }
 }
 
 function normalizeTimestamp(value: unknown) {
@@ -1343,19 +1215,13 @@ async function readCheckpoint(path: string, configurationHash: string): Promise<
   try {
     const parsed: unknown = JSON.parse(await readFile(path, 'utf8'))
 
-    if (isRecord(parsed) && parsed.version === 1) {
-      throw new Error(
-        `Checkpoint v1 cannot be resumed after adding workspace-access: ${path}. Choose a separate path for the new v2 checkpoint.`,
-      )
-    }
-
     if (!isCheckpointState(parsed)) {
       throw new Error(`Checkpoint file is invalid: ${path}`)
     }
 
     if (parsed.configurationHash !== configurationHash) {
       throw new Error(
-        `Checkpoint table configuration does not match this run; checkpoints created before project-tasks removal require a new v2 checkpoint path: ${path}`,
+        `Checkpoint table configuration does not match this run; checkpoints created before canonical-only audit backfill require a new v3 checkpoint path: ${path}`,
       )
     }
 
@@ -1375,7 +1241,6 @@ function createEmptyCheckpoint(configurationHash: string): CheckpointState {
     configurationHash,
     updatedAt: new Date().toISOString(),
     sources: {
-      'team-issue-events': createEmptySourceCheckpoint(),
       'team-issues': createEmptySourceCheckpoint(),
       'project-directory': createEmptySourceCheckpoint(),
       'workspace-access': createEmptySourceCheckpoint(),

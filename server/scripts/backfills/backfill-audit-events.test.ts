@@ -120,8 +120,6 @@ describe('audit backfill Workspace access mapping', () => {
       metadata: {
         backfilled: true,
         kind: 'workspace-member',
-        legacyKey: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
-        legacySource: 'workspace-access',
       },
     })
     expect(event?.changes).toEqual(expect.arrayContaining([
@@ -189,9 +187,8 @@ describe('audit backfill Workspace access mapping', () => {
       source: 'backfill',
       outboxStatus: 'suppressed',
       metadata: {
+        backfilled: true,
         kind: 'workspace-invitation',
-        legacyKey: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
-        legacySource: 'workspace-access',
       },
     })
     expect(event?.changes).toEqual(expect.arrayContaining([

@@ -21,7 +21,7 @@ import {
 import {
   getConfiguredAuditTableName,
   toAuditEventView,
-  upcastAuditEvent,
+  normalizeAuditEvent,
   type AuditEventV1,
 } from '../../../audit'
 import type {
@@ -417,7 +417,7 @@ async function projectAuditRecord(
   if (record.eventName !== 'INSERT' || !record.dynamodb?.NewImage) return
   const stored = unmarshalDynamoMap(record.dynamodb.NewImage)
   if (stored.outboxStatus !== 'pending') return
-  const event = upcastAuditEvent(stored)
+  const event = normalizeAuditEvent(stored)
   if (event.outboxStatus !== 'pending') return
   const cleanupScope = readWebhookGrantCleanupScope(event)
   if (cleanupScope) {
@@ -845,7 +845,7 @@ implements WebhookAuditEventReader {
       ConsistentRead: true,
     }))
     if (!response.Item) return undefined
-    const event = upcastAuditEvent(response.Item)
+    const event = normalizeAuditEvent(response.Item)
     return event.workspaceId === workspaceId && event.eventId === eventId
       ? event
       : undefined

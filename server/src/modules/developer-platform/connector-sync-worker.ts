@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { SendMessageCommand, type SQSClient } from '@aws-sdk/client-sqs'
-import { upcastAuditEvent, type AuditEventV1 } from '../audit'
+import { normalizeAuditEvent, type AuditEventV1 } from '../audit'
 import type { ConnectorPort, ExternalLinkPort } from './application/ports'
 import type {
   ConnectorSyncEngine,
@@ -560,7 +560,7 @@ async function projectAuditRecord(
   if (record.eventName !== 'INSERT' || !record.dynamodb?.NewImage) return
   const stored = unmarshalDynamoMap(record.dynamodb.NewImage)
   if (stored.outboxStatus !== 'pending') return
-  const event = upcastAuditEvent(stored)
+  const event = normalizeAuditEvent(stored)
   if (event.outboxStatus !== 'pending') return
   if (event.eventType === 'connector.status.updated') {
     const disconnect = readAuditConnectorDisconnectIdentity(event)

@@ -37,7 +37,7 @@ const ANALYTICS_AUDIT_PAGE_QUERY_LIMIT = 500
 const ANALYTICS_AUDIT_EVENT_LIMIT =
   ANALYTICS_AUDIT_PAGE_SIZE * ANALYTICS_AUDIT_MAX_PAGES
 const ANALYTICS_AUDIT_QUERY_CONCURRENCY = 4
-const ANALYTICS_AUDIT_IDENTITY_QUERY_LIMIT = 500
+const ANALYTICS_AUDIT_ENTITY_QUERY_LIMIT = 500
 
 /** EventBridge schedule event のうち Analytics worker が利用する最小表現です。 */
 export type AnalyticsScheduleEvent = {
@@ -824,9 +824,6 @@ function assertAnalyticsScheduleAuditCoverage(
       workItem.teamId,
       workItem.id,
     )
-    const authorizedRawIdByCanonicalEntityId = new Map([
-      [canonicalEntityId, workItem.id],
-    ])
     const covered = events.some((event) =>
       Date.parse(event.occurredAt) === updatedAt &&
       isAnalyticsScheduleLatestWorkItemUpdate(
@@ -834,14 +831,7 @@ function assertAnalyticsScheduleAuditCoverage(
         workItem,
         canonicalEntityId,
       ) &&
-      (
-        isCanonicalAnalyticsScheduleEvent(event, canonicalEntityId) ||
-        isAuthorizedLegacyAnalyticsScheduleEvent(
-          event,
-          workItem.id,
-          authorizedRawIdByCanonicalEntityId,
-        )
-      )
+      isCanonicalAnalyticsScheduleEvent(event, canonicalEntityId)
     )
     if (!covered) {
       throw createAnalyticsScheduleReadBarrierError(
@@ -863,10 +853,7 @@ function isAnalyticsScheduleLatestWorkItemUpdate(
     event.targetType !== 'work-item' ||
     event.target.type !== 'work-item' ||
     event.targetId !== event.target.id ||
-    (
-      event.targetId !== canonicalEntityId &&
-      event.targetId !== workItem.id
-    )
+    event.targetId !== canonicalEntityId
   ) {
     return false
   }
@@ -877,18 +864,10 @@ function isAnalyticsScheduleLatestWorkItemUpdate(
   const metadataIssueId = readAnalyticsScheduleMetadataText(
     event.metadata?.issueId,
   )
-  const metadataWorkItemId = readAnalyticsScheduleMetadataText(
-    event.metadata?.workItemId,
-  )
   return event.metadata?.adapter === 'canonical-work-item' &&
     event.metadata.afterRevision === workItem.revision &&
     metadataTeamId === workItem.teamId &&
-    (metadataIssueId ?? metadataWorkItemId) === workItem.id &&
-    (
-      metadataIssueId === undefined ||
-      metadataWorkItemId === undefined ||
-      metadataIssueId === metadataWorkItemId
-    )
+    metadataIssueId === workItem.id
 }
 
 /** Canonical Work Item 集合の順序非依存 fingerprint を返します。 */
@@ -1020,11 +999,7 @@ function assertAnalyticsSchedulePartitionSize(
 }
 
 /**
- * Current Work Item identity ごとの entity timeline から immutable events を返します。
- *
- * @remarks
- * Legacy raw ID timeline は metadata または canonical target が current authorized Work Item
- * に一致する場合だけ採用し、Team を跨ぐ同名 ID の event を fail-closed に除外します。
+ * Current canonical Work Item entity ごとの timeline から immutable events を返します。
  */
 async function readRecipientAuditEvents(
   workspaceId: string,
@@ -1032,44 +1007,31 @@ async function readRecipientAuditEvents(
   workItems: readonly CanonicalWorkItem[],
   client: AnalyticsScheduleAuditClient,
 ) {
-  const authorizedRawIdByCanonicalEntityId = new Map(workItems.map((workItem) => [
-    createAnalyticsWorkItemEntityId(workItem.teamId, workItem.id),
-    workItem.id,
-  ]))
-  const authorizedCanonicalEntityIds = new Set(
-    authorizedRawIdByCanonicalEntityId.keys(),
-  )
-  const identities = [
-    ...[...authorizedCanonicalEntityIds].sort().map((entityId) => ({
-      entityId,
-      legacyRawId: false,
-    })),
-    ...[...new Set(workItems.map((workItem) => workItem.id))]
-      .sort()
-      .map((entityId) => ({ entityId, legacyRawId: true })),
-  ]
-  if (identities.length > ANALYTICS_AUDIT_IDENTITY_QUERY_LIMIT) {
+  const entityIds = [...new Set(workItems.map((workItem) =>
+    createAnalyticsWorkItemEntityId(workItem.teamId, workItem.id)
+  ))].sort()
+  if (entityIds.length > ANALYTICS_AUDIT_ENTITY_QUERY_LIMIT) {
     throw new AnalyticsError(
       413,
       'AnalyticsHistoryLimitExceeded',
-      `Analytics history requires more than ${ANALYTICS_AUDIT_IDENTITY_QUERY_LIMIT} entity timeline queries. Narrow the report scope.`,
+      `Analytics history requires more than ${ANALYTICS_AUDIT_ENTITY_QUERY_LIMIT} entity timeline queries. Narrow the report scope.`,
     )
   }
   const events: AuditEventV1[] = []
-  let nextIdentityIndex = 0
+  let nextEntityIndex = 0
   let pageQueryCount = 0
   let readEventCount = 0
   let failure: unknown
   const workerCount = Math.min(
     ANALYTICS_AUDIT_QUERY_CONCURRENCY,
-    identities.length,
+    entityIds.length,
   )
-  const readNextIdentity = async () => {
+  const readNextEntity = async () => {
     while (failure === undefined) {
-      const identityIndex = nextIdentityIndex
-      nextIdentityIndex += 1
-      const identity = identities[identityIndex]
-      if (!identity) return
+      const entityIndex = nextEntityIndex
+      nextEntityIndex += 1
+      const entityId = entityIds[entityIndex]
+      if (!entityId) return
 
       try {
         let cursor: string | undefined
@@ -1085,7 +1047,7 @@ async function readRecipientAuditEvents(
           const page = await client.query({
             workspaceId,
             entityType: 'work-item',
-            entityId: identity.entityId,
+            entityId,
             to: historyReadAt,
             limit: ANALYTICS_AUDIT_PAGE_SIZE,
             cursor,
@@ -1097,14 +1059,7 @@ async function readRecipientAuditEvents(
             throw createAnalyticsScheduleHistoryLimitError()
           }
           for (const event of page.events) {
-            const authorized = identity.legacyRawId
-              ? isAuthorizedLegacyAnalyticsScheduleEvent(
-                  event,
-                  identity.entityId,
-                  authorizedRawIdByCanonicalEntityId,
-                )
-              : isCanonicalAnalyticsScheduleEvent(event, identity.entityId)
-            if (!authorized) continue
+            if (!isCanonicalAnalyticsScheduleEvent(event, entityId)) continue
 
             events.push(event)
             if (events.length > ANALYTICS_AUDIT_EVENT_LIMIT) {
@@ -1118,7 +1073,7 @@ async function readRecipientAuditEvents(
       }
     }
   }
-  await Promise.all(Array.from({ length: workerCount }, readNextIdentity))
+  await Promise.all(Array.from({ length: workerCount }, readNextEntity))
   if (failure !== undefined) throw failure
   return events
 }
@@ -1132,89 +1087,6 @@ function isCanonicalAnalyticsScheduleEvent(
     event.entity.type === 'work-item' &&
     event.entityId === canonicalEntityId &&
     event.entity.id === canonicalEntityId
-}
-
-/** Legacy raw-ID event が current authorized Work Item へ安全に解決できるかを判定します。 */
-function isAuthorizedLegacyAnalyticsScheduleEvent(
-  event: AuditEventV1,
-  rawWorkItemId: string,
-  authorizedRawIdByCanonicalEntityId: ReadonlyMap<string, string>,
-) {
-  if (
-    event.entityType !== 'work-item' ||
-    event.entity.type !== 'work-item'
-  ) {
-    return false
-  }
-  if (
-    event.entityId !== rawWorkItemId ||
-    event.entity.id !== rawWorkItemId
-  ) {
-    return false
-  }
-  if (
-    event.targetType !== 'work-item' ||
-    event.target.type !== 'work-item' ||
-    event.targetId !== event.target.id
-  ) {
-    return false
-  }
-
-  const metadataTeamValue = event.metadata?.teamId
-  const metadataIssueValue = event.metadata?.issueId
-  const metadataWorkItemValue = event.metadata?.workItemId
-  const metadataTeamId = readAnalyticsScheduleMetadataText(metadataTeamValue)
-  const metadataIssueId = readAnalyticsScheduleMetadataText(metadataIssueValue)
-  const metadataWorkItemId = readAnalyticsScheduleMetadataText(
-    metadataWorkItemValue,
-  )
-  if (
-    (metadataTeamValue !== undefined && metadataTeamId === undefined) ||
-    (metadataIssueValue !== undefined && metadataIssueId === undefined) ||
-    (
-      metadataWorkItemValue !== undefined &&
-      metadataWorkItemId === undefined
-    )
-  ) {
-    return false
-  }
-  if (
-    metadataIssueId !== undefined &&
-    metadataWorkItemId !== undefined &&
-    metadataIssueId !== metadataWorkItemId
-  ) {
-    return false
-  }
-  const metadataRawId = metadataIssueId ?? metadataWorkItemId
-  if (metadataRawId !== undefined && metadataRawId !== rawWorkItemId) {
-    return false
-  }
-
-  const resolvedCanonicalEntityIds = new Set<string>()
-  if (metadataTeamId !== undefined) {
-    const canonicalEntityId = createAnalyticsWorkItemEntityId(
-      metadataTeamId,
-      metadataRawId ?? rawWorkItemId,
-    )
-    if (
-      authorizedRawIdByCanonicalEntityId.get(canonicalEntityId) !==
-        rawWorkItemId
-    ) {
-      return false
-    }
-    resolvedCanonicalEntityIds.add(canonicalEntityId)
-  }
-
-  if (event.targetId !== rawWorkItemId) {
-    if (
-      authorizedRawIdByCanonicalEntityId.get(event.targetId) !==
-        rawWorkItemId
-    ) {
-      return false
-    }
-    resolvedCanonicalEntityIds.add(event.targetId)
-  }
-  return resolvedCanonicalEntityIds.size === 1
 }
 
 /** Analytics audit metadata の non-empty string だけを返します。 */

@@ -517,26 +517,14 @@ describe('Analytics metric engine', () => {
       query,
     })).toThrow(AnalyticsError)
 
-    const other = createWorkItem('other', { teamId: 'other-team' })
-    const identityConflict = {
-      ...completion,
-      metadata: { teamId: other.teamId, issueId: other.id },
-    }
-    expect(() => createTestAnalyticsSnapshot({
-      workItems: [item, other],
-      events: [identityConflict],
-      query,
-    })).toThrow(AnalyticsError)
-
-    const legacyRawIdForInaccessibleItem = {
+    const nonCanonicalEntity = {
       ...completion,
       entityId: item.id,
       entity: { type: 'work-item', id: item.id },
-      metadata: { teamId: 'inaccessible-team', issueId: item.id },
     }
     expect(createTestAnalyticsSnapshot({
       workItems: [item],
-      events: [legacyRawIdForInaccessibleItem],
+      events: [nonCanonicalEntity],
       query,
     }).widgets[0]?.value).toBe(0)
 
