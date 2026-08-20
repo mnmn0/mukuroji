@@ -415,7 +415,7 @@ Workspace partition は `WorkspaceDirectoryId`、初期 owner の小文字メー
 Workspace member と Cognito identity は分離して管理します。Cognito 認証に成功しても、
 Workspace access table の member が `active` でなければ、Lambda はすべての業務 API を
 `403` で拒否します。`deactivated` member や、`pending` / `revoked` invitation だけが残る
-user は project、task、Issue API を利用できません。
+user は Project、Work Item、Issue API を利用できません。
 
 招待 API は以下です。Lambda Function URL では `/api` prefix の有無をどちらも受け付けます。
 

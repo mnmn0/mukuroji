@@ -9226,7 +9226,7 @@ const MIGRATION_AWARE_COLLABORATION_CURSOR_PREFIX = 'mixed.'
 function readCollaborationPageLimit(value: string | undefined): number | undefined {
   if (value === undefined) return undefined
   const limit = Number(value)
-  if (!Number.isSafeInteger(limit)) {
+  if (!Number.isSafeInteger(limit) || limit < 1) {
     throw new CollaborationError(400, 'InvalidCollaborationCursor', 'Page limit is invalid.')
   }
   return limit

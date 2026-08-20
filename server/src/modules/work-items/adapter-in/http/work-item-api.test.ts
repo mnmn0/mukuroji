@@ -2270,6 +2270,23 @@ test('rejects a fractional collaboration page limit before migration pagination'
   })
 })
 
+test('rejects non-positive collaboration page limits before migration pagination', async () => {
+  configureFakeProjectClients(true)
+
+  for (const limit of ['0', '-1']) {
+    const response = await app.request(
+      `/api/teams/core-team/issues/onboarding-friction/collaboration?limit=${limit}`,
+      { headers: { Authorization: 'Bearer test-token' } },
+    )
+
+    expect(response.status).toBe(400)
+    expect(await response.json()).toEqual({
+      code: 'InvalidCollaborationCursor',
+      message: 'Page limit is invalid.',
+    })
+  }
+})
+
 test('preserves merged root ordering when canonical and legacy comments share a page', async () => {
   configureFakeProjectClients(true)
   const defaultTeamIssues = getTestAppDependencies().workItems.teamIssues

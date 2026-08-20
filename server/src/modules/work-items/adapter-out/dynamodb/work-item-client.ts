@@ -1328,7 +1328,13 @@ function normalizePublicWorkItemPageLimit(value: number) {
   return value
 }
 
-/** Maximum rows the legacy comment fallback may inspect before requiring migration. */
+/**
+ * Maximum Team Issue event rows the legacy comment fallback may evaluate before requiring migration.
+ *
+ * The budget counts DynamoDB Query `ScannedCount` rows evaluated before `FilterExpression` removes
+ * non-comment events, rather than only the comment rows returned to the application. Keep this
+ * conservative cap aligned with observed per-Work-Item event counts before increasing it.
+ */
 const MAX_LEGACY_COMMENT_FALLBACK_READ_ITEMS = 500
 
 /**
