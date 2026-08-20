@@ -239,6 +239,7 @@ test('canonical Work Item seed writes complete schema data and preserves demo da
   expect(canonicalWorkItemSeedPolicyEntry).toBeDefined();
   expect(projectDirectorySeed).toBeDefined();
   expect(JSON.stringify(canonicalWorkItemSeed)).not.toContain('ProjectTasksTableE21F6637');
+  expect(JSON.stringify(canonicalWorkItemSeedPolicyEntry)).not.toContain('ProjectTasksTableE21F6637');
   expect(JSON.stringify(transactWriteResources)).not.toContain('ProjectTasksTableE21F6637');
   expect(Object.keys(customResources).join(',')).not.toContain('SeedCanonicalWorkItems');
 

@@ -96,6 +96,7 @@ export function buildDataStores(
     partitionKey: { name: 'directoryProjectId', type: dynamodb.AttributeType.STRING },
     sortKey: { name: 'taskId', type: dynamodb.AttributeType.STRING },
     billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+    encryption: dynamodb.TableEncryption.AWS_MANAGED,
     pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
     removalPolicy: cdk.RemovalPolicy.RETAIN,
   });

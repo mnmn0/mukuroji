@@ -59,6 +59,9 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
       { AttributeName: 'directoryProjectId', KeyType: 'HASH' },
       { AttributeName: 'taskId', KeyType: 'RANGE' },
     ],
+    SSESpecification: {
+      SSEEnabled: true,
+    },
   }));
   expect(resources.ProjectTasksTableE21F6637.Properties.GlobalSecondaryIndexes).toBeUndefined();
 
