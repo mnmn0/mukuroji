@@ -596,7 +596,7 @@ to the `comment` stage commands.
 # 初回writer-fence bootstrap前だけ rollout-pending。bootstrap後は required。
 export MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION=2026-07-28-01
 export MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE=rollout-pending
-export MUKUROJI_RESTORE_DRILL_CLEANUP_APPROVER_ROLE_ARN=arn:aws:iam::<account-id>:role/<data-owner-role>
+export MUKUROJI_RESTORE_DRILL_CLEANUP_APPROVER_ROLE_ARN='arn:aws:iam::account-id:role/data-owner-role'
 export MUKUROJI_TASK_API_ALLOWED_ORIGINS=https://app.example.com
 
 bun --filter cdk cdk diff CdkStack \
@@ -652,7 +652,7 @@ bun --filter cdk cdk deploy CdkStack \
 # 初回writer-fence bootstrap前だけ rollout-pending。bootstrap後は required。
 export MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION=2026-07-28-01
 export MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE=rollout-pending
-export MUKUROJI_RESTORE_DRILL_CLEANUP_APPROVER_ROLE_ARN=arn:aws:iam::<account-id>:role/<data-owner-role>
+export MUKUROJI_RESTORE_DRILL_CLEANUP_APPROVER_ROLE_ARN='arn:aws:iam::account-id:role/data-owner-role'
 export MUKUROJI_TASK_API_ALLOWED_ORIGINS=https://app.example.com
 
 bun --filter cdk cdk diff CdkStack \

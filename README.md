@@ -332,7 +332,7 @@ export MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION=2026-07-28-01
 # 初回 writer-fence bootstrap 時のみ rollout-pending。
 # 既存環境の再 deploy では required を指定します（required からの巻き戻しは禁止）。
 export MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE=rollout-pending
-export MUKUROJI_RESTORE_DRILL_CLEANUP_APPROVER_ROLE_ARN=arn:aws:iam::<account-id>:role/<data-owner-role>
+export MUKUROJI_RESTORE_DRILL_CLEANUP_APPROVER_ROLE_ARN='arn:aws:iam::account-id:role/data-owner-role'
 export MUKUROJI_TASK_API_ALLOWED_ORIGINS=https://app.example.com
 
 bash scripts/prepare-workspace-cognito.sh
