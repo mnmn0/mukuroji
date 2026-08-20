@@ -337,6 +337,11 @@ bash scripts/prepare-workspace-cognito.sh
 bun run cdk:build
 bun run cdk:test
 bun run cdk:synth
+# 初回の Team Issue event table GSI rollout は2段階です。
+# まず teamIssueCommentIndexDeploymentStage=event で deploy/diff し、
+# TeamIssueEventCreatedAtIndex が ACTIVE になったことを確認してから、
+# 下記の最終 comment stage を実行します。
+# 既存環境で event stage が完了済みの場合は、下記だけを実行します。
 bun --filter cdk cdk diff \
   -c triageIndexDeploymentStage=wake \
   -c teamIssueCommentIndexDeploymentStage=comment \

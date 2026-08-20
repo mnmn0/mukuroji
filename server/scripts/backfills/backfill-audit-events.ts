@@ -1355,7 +1355,7 @@ async function readCheckpoint(path: string, configurationHash: string): Promise<
 
     if (parsed.configurationHash !== configurationHash) {
       throw new Error(
-        `Checkpoint table configuration does not match this run: ${path}`,
+        `Checkpoint table configuration does not match this run; checkpoints created before project-tasks removal require a new v2 checkpoint path: ${path}`,
       )
     }
 

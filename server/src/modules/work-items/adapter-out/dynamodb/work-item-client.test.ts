@@ -250,6 +250,115 @@ test('DynamoDB Work Item list clients stop pagination at the requested read limi
   expect(sentInputs.map((input) => input.Limit)).toEqual([1, 1])
 })
 
+test('DynamoDB local bootstrap adds missing Team Issue event indexes in stages', async () => {
+  await withTestEnvironment({ DYNAMODB_ENDPOINT: 'http://localhost:8000' }, async () => {
+    const eventIndexes = new Set<string>()
+    let updateCalls = 0
+    const dynamoDbClient = {
+      async send(command: { constructor: { name: string }; input: Record<string, unknown> }) {
+        if (command.constructor.name === 'CreateTableCommand') {
+          throw Object.assign(new Error('Table already exists.'), {
+            name: 'ResourceInUseException',
+          })
+        }
+        if (command.constructor.name === 'UpdateTableCommand') {
+          updateCalls += 1
+          eventIndexes.add(
+            updateCalls === 1
+              ? 'TeamIssueEventCreatedAtIndex'
+              : 'TeamIssueCommentCreatedAtIndex',
+          )
+          return {}
+        }
+        if (command.constructor.name !== 'DescribeTableCommand') {
+          throw new Error(`Unexpected DynamoDB command: ${command.constructor.name}`)
+        }
+
+        if (command.input.TableName === 'WorkItemsTable') {
+          return {
+            Table: {
+              TableStatus: 'ACTIVE',
+              KeySchema: [
+                { AttributeName: 'directoryTeamId', KeyType: 'HASH' },
+                { AttributeName: 'issueId', KeyType: 'RANGE' },
+              ],
+              GlobalSecondaryIndexes: [
+                {
+                  IndexName: 'TeamIssueSortOrderIndex',
+                  KeySchema: [
+                    { AttributeName: 'directoryTeamId', KeyType: 'HASH' },
+                    { AttributeName: 'sortOrder', KeyType: 'RANGE' },
+                  ],
+                },
+                {
+                  IndexName: 'AssignedProjectIssueIndex',
+                  KeySchema: [
+                    { AttributeName: 'directoryProjectId', KeyType: 'HASH' },
+                    { AttributeName: 'sortOrder', KeyType: 'RANGE' },
+                  ],
+                },
+                {
+                  IndexName: 'TeamIssueUpdatedAtIndex',
+                  KeySchema: [
+                    { AttributeName: 'directoryTeamId', KeyType: 'HASH' },
+                    { AttributeName: 'updatedAt', KeyType: 'RANGE' },
+                  ],
+                },
+              ],
+            },
+          }
+        }
+
+        return {
+          Table: {
+            TableStatus: 'ACTIVE',
+            KeySchema: [
+              { AttributeName: 'directoryTeamIssueId', KeyType: 'HASH' },
+              { AttributeName: 'eventId', KeyType: 'RANGE' },
+            ],
+            GlobalSecondaryIndexes: [...eventIndexes].map((indexName) => ({
+              IndexName: indexName,
+              KeySchema: [
+                { AttributeName: 'directoryTeamIssueId', KeyType: 'HASH' },
+                {
+                  AttributeName: indexName === 'TeamIssueEventCreatedAtIndex'
+                    ? 'createdAt'
+                    : 'commentCreatedAtOrder',
+                  KeyType: 'RANGE',
+                },
+              ],
+            })),
+          },
+        }
+      },
+    } as unknown as DynamoDBClient
+    const documentClient = {
+      async send(command: { constructor: { name: string } }) {
+        if (command.constructor.name === 'GetCommand') {
+          return { Item: createScheduleCascadeIssue('core', 'canonical-work-item') }
+        }
+        return { Items: [] }
+      },
+    } as unknown as DynamoDBDocumentClient
+    const client = new DynamoDbTeamIssuesClient(
+      'WorkItemsTable',
+      'IssueEventsTable',
+      documentClient,
+      dynamoDbClient,
+      true,
+      '',
+    )
+
+    await expect(client.getTeamIssueDetail(
+      'workspace-1',
+      'core',
+      'canonical-work-item',
+      { eventLimit: 0 },
+    )).resolves.toMatchObject({ comments: [] })
+    expect(updateCalls).toBe(2)
+  })
+})
+
 test('DynamoDB Work Item list clients skip DynamoDB reads when limit is zero', async () => {
   const sentInputs: Array<Record<string, unknown>> = []
   const documentClient = {
@@ -552,7 +661,7 @@ test('DynamoDB Team Work Item detail falls back when the comment index is stale'
   })
   expect(queryInputs).toHaveLength(4)
   expect(queryInputs.some((input) =>
-    input.IndexName === 'TeamIssueEventCreatedAtIndex' && input.Limit === undefined,
+    input.IndexName === 'TeamIssueEventCreatedAtIndex' && input.Limit === 500,
   )).toBe(true)
   expect(queryInputs.some((input) =>
     input.IndexName === undefined &&
@@ -564,6 +673,68 @@ test('DynamoDB Team Work Item detail falls back when the comment index is stale'
     input.ConsistentRead === true &&
     input.ProjectionExpression === undefined,
   )).toBe(true)
+})
+
+test('DynamoDB Team Work Item legacy comment fallback stops at its read budget', async () => {
+  const queryInputs: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      if (command.constructor.name === 'GetCommand') {
+        return { Item: createScheduleCascadeIssue('core', 'canonical-work-item') }
+      }
+      queryInputs.push(command.input)
+      if (command.input.IndexName === 'TeamIssueCommentCreatedAtIndex') {
+        throw Object.assign(new Error('Comment index is not active yet.'), {
+          name: 'ResourceNotFoundException',
+        })
+      }
+      return {
+        Items: [{
+          directoryId: 'workspace-1',
+          directoryTeamIssueId: 'workspace-1#team#core#issue#canonical-work-item',
+          teamId: 'core',
+          issueId: 'canonical-work-item',
+          eventId: 'comment-event',
+          eventType: 'commented',
+          actorUserId: 'sato@example.com',
+          body: 'Older comment',
+          summary: 'Commented',
+          createdAt: '2026-07-12T00:00:00.000Z',
+          commentCreatedAtOrder: '2026-07-12T00:00:00.000Z#comment-event',
+        }],
+        LastEvaluatedKey: { more: true },
+        ScannedCount: 500,
+      }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  await expect(client.getTeamIssueDetail(
+    'workspace-1',
+    'core',
+    'canonical-work-item',
+    {
+      eventLimit: 1,
+      eventType: 'commented',
+      newestEventsFirst: true,
+    },
+  )).rejects.toMatchObject({
+    status: 503,
+    code: 'InvalidTeamIssue',
+  })
+  expect(queryInputs).toEqual([
+    expect.objectContaining({ IndexName: 'TeamIssueCommentCreatedAtIndex' }),
+    expect.objectContaining({
+      IndexName: 'TeamIssueEventCreatedAtIndex',
+      Limit: 500,
+    }),
+  ])
 })
 
 test('DynamoDB Team Work Item comment preview orders offset timestamps by instant', async () => {
@@ -735,7 +906,7 @@ test('DynamoDB Team Work Item comment preview falls back while the comment index
     }),
   ]))
   expect(queryInputs.some((input) =>
-    input.IndexName === 'TeamIssueEventCreatedAtIndex' && !('Limit' in input),
+    input.IndexName === 'TeamIssueEventCreatedAtIndex' && input.Limit === 500,
   )).toBe(true)
 })
 

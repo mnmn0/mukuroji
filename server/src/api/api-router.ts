@@ -9212,7 +9212,7 @@ routeApp.patch('/api/teams/:teamId/issues/:issueId', async (c) => {
 const LEGACY_COLLABORATION_EVENT_PREVIEW_LIMIT = 50
 /** Prefix that keeps legacy event cursors distinct from canonical cursors. */
 const LEGACY_COLLABORATION_CURSOR_PREFIX = 'legacy.'
-/** Sentinel cursor that starts the legacy stream after a full canonical page. */
+/** Legacy cursor token accepted for already-issued transitional cursors. */
 const LEGACY_COLLABORATION_INITIAL_CURSOR = 'initial'
 /** Prefix for a cursor that merges canonical and legacy root-comment streams. */
 const MIGRATION_AWARE_COLLABORATION_CURSOR_PREFIX = 'mixed.'
@@ -9221,12 +9221,12 @@ const MIGRATION_AWARE_COLLABORATION_CURSOR_PREFIX = 'mixed.'
  * Parses the collaboration endpoint page limit before selecting a migration reader.
  *
  * @param value - Raw query-string page limit.
- * @returns A finite numeric page limit, or undefined when omitted.
+ * @returns A safe integer page limit, or undefined when omitted.
  */
 function readCollaborationPageLimit(value: string | undefined): number | undefined {
   if (value === undefined) return undefined
   const limit = Number(value)
-  if (!Number.isFinite(limit)) {
+  if (!Number.isSafeInteger(limit)) {
     throw new CollaborationError(400, 'InvalidCollaborationCursor', 'Page limit is invalid.')
   }
   return limit
@@ -9347,6 +9347,7 @@ routeApp.get('/api/teams/:teamId/issues/:issueId/collaboration', async (c) => {
     }
 
     const rootLimit = limit === undefined ? 10 : Math.min(Math.max(limit, 1), 20)
+    const retainMixedCursorLegacyComments = migrationCursor?.legacyEventCursor !== undefined
     const migrationPage = (!commentBackfillComplete || migrationCursor !== undefined) && !isLegacyPage
       ? await readMigrationAwareRootPage({
           collaboration: workItemDependencies.collaboration,
@@ -9383,6 +9384,13 @@ routeApp.get('/api/teams/:teamId/issues/:issueId/collaboration', async (c) => {
                 'Work Item assignment changed while comments were loading.',
               )
             }
+          },
+          shouldIncludeLegacyComment: async (comment) => {
+            const storedComment = await workItemDependencies.collaboration.getCommentSnapshot({
+              entityKey,
+              commentId: comment.id,
+            })
+            return !storedComment?.deletedAt && (!storedComment || retainMixedCursorLegacyComments)
           },
         })
       : undefined
@@ -9469,19 +9477,8 @@ routeApp.get('/api/teams/:teamId/issues/:issueId/collaboration', async (c) => {
         )
       }
     }
-    const retainMixedCursorLegacyComments = migrationCursor?.legacyEventCursor !== undefined
     const legacyComments = migrationPage
-      ? (await Promise.all(
-          migrationPage.legacyComments.map(async (comment) => {
-            const storedComment = await workItemDependencies.collaboration.getCommentSnapshot({
-              entityKey,
-              commentId: comment.id,
-            })
-            return storedComment?.deletedAt || (storedComment && !retainMixedCursorLegacyComments)
-              ? undefined
-              : toLegacyCollaborationCommentResponse(comment)
-          }),
-        )).flatMap((comment) => comment ? [comment] : [])
+      ? migrationPage.legacyComments.map(toLegacyCollaborationCommentResponse)
       : (await Promise.all(
           (legacyDetail?.comments ?? [])
             .filter((comment) => !storedCommentIds.has(comment.id))
@@ -9542,13 +9539,6 @@ routeApp.get('/api/teams/:teamId/issues/:issueId/collaboration', async (c) => {
         return cursor ? [[root.id, cursor] as const] : []
       }),
     )
-    const legacyInitialCursor = !migrationPage && !isLegacyPage &&
-      !commentBackfillComplete &&
-      !roots.nextCursor &&
-      legacyEventLimit === 0
-      ? `${LEGACY_COLLABORATION_CURSOR_PREFIX}${LEGACY_COLLABORATION_INITIAL_CURSOR}`
-      : undefined
-
     return c.json({
       comments: collaborationComments,
       ...(isLegacyPage
@@ -9559,9 +9549,7 @@ routeApp.get('/api/teams/:teamId/issues/:issueId/collaboration', async (c) => {
           ? { nextCursor: roots.nextCursor }
           : legacyDetail?.nextEventCursor
             ? { nextCursor: `${LEGACY_COLLABORATION_CURSOR_PREFIX}${legacyDetail.nextEventCursor}` }
-            : legacyInitialCursor
-              ? { nextCursor: legacyInitialCursor }
-              : {}),
+            : {}),
       ...(Object.keys(replyNextCursors).length > 0 ? { replyNextCursors } : {}),
       watch: roots.watch,
       presence: roots.presence,
@@ -28761,6 +28749,8 @@ type MigrationAwareRootPageInput = {
   cursor?: MigrationAwareCollaborationCursor
   /** Assignment and authorization validation for every legacy detail read. */
   validateLegacyDetail: (detail: TeamIssueDetailResponse) => void
+  /** Determines whether a legacy candidate still belongs in the merged page. */
+  shouldIncludeLegacyComment: (comment: TeamIssueCommentResponseItem) => Promise<boolean>
 }
 
 /**
@@ -28948,7 +28938,10 @@ async function readMigrationAwareRootPage(
       )
       input.validateLegacyDetail(detail)
       const comments = detail.comments ?? []
-      const candidates = comments.map((comment, index) => {
+      const candidates = (await Promise.all(comments.map(async (comment, index) => {
+        if (!(await input.shouldIncludeLegacyComment(comment))) {
+          return undefined
+        }
         const nextComment = comments[index + 1]
         const nextCursor = nextComment
           ? createTeamIssueCommentEventCursor(
@@ -28964,7 +28957,7 @@ async function readMigrationAwareRootPage(
           comment,
           ...(nextCursor ? { nextCursor } : {}),
         }
-      })
+      }))).filter(isDefined)
       const [candidate, ...queuedCandidates] = candidates
       if (candidate !== undefined) {
         legacyState.candidate = candidate

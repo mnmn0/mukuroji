@@ -2160,11 +2160,106 @@ test('merges canonical and legacy root pages by creation time during backfill', 
   ])
 })
 
+test('does not let canonicalized legacy roots consume migration page capacity', async () => {
+  configureFakeProjectClients(true)
+  const defaultTeamIssues = getTestAppDependencies().workItems.teamIssues
+  setTestAppDependencies({
+    collaboration: createCollaborationStub({
+      async isTeamIssueCommentBackfillComplete() {
+        return false
+      },
+      async getThread(input) {
+        return {
+          comments: input.rootCommentId ? [] : [],
+          watch: {
+            subscribed: false,
+            explicit: false,
+            automatic: false,
+            reasons: [],
+            watcherCount: 0,
+          },
+          presence: [],
+        }
+      },
+      async getCommentSnapshot(input) {
+        if (input.commentId !== 'canonicalized-legacy') return undefined
+        return {
+          id: input.commentId,
+          rootCommentId: input.commentId,
+          authorMemberKey: 'author@example.com',
+          bodyMarkdown: 'Canonical copy',
+          version: 1,
+          mentionMemberKeys: [],
+          createdAt: '2026-07-12T00:00:00.000Z',
+          updatedAt: '2026-07-12T00:00:00.000Z',
+          acceptedResolutions: [],
+          reactions: [],
+        }
+      },
+    }),
+    teamIssues: {
+      ...defaultTeamIssues,
+      async getTeamIssueDetail(directoryId, teamId, issueId, options) {
+        const detail = await defaultTeamIssues.getTeamIssueDetail(
+          directoryId,
+          teamId,
+          issueId,
+          options,
+        )
+        return options?.eventLimit === 0
+          ? detail
+          : {
+              ...detail,
+              comments: [
+                {
+                  id: 'canonicalized-legacy',
+                  actorUserId: 'departed@example.com',
+                  body: 'Canonicalized legacy comment',
+                  createdAt: '2026-07-12T00:01:00.000Z',
+                },
+                {
+                  id: 'legacy-visible',
+                  actorUserId: 'departed@example.com',
+                  body: 'Still legacy comment',
+                  createdAt: '2026-07-12T00:00:00.000Z',
+                },
+              ],
+            }
+      },
+    },
+  })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction/collaboration?limit=1',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+
+  expect(response.status).toBe(200)
+  expect((await response.json()).comments).toEqual([
+    expect.objectContaining({ id: 'legacy-visible', source: 'legacy' }),
+  ])
+})
+
 test('rejects a non-finite collaboration page limit before migration pagination', async () => {
   configureFakeProjectClients(true)
 
   const response = await app.request(
     '/api/teams/core-team/issues/onboarding-friction/collaboration?limit=abc',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+
+  expect(response.status).toBe(400)
+  expect(await response.json()).toEqual({
+    code: 'InvalidCollaborationCursor',
+    message: 'Page limit is invalid.',
+  })
+})
+
+test('rejects a fractional collaboration page limit before migration pagination', async () => {
+  configureFakeProjectClients(true)
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction/collaboration?limit=2.5',
     { headers: { Authorization: 'Bearer test-token' } },
   )
 

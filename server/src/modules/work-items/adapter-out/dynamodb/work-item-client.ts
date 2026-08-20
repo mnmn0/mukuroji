@@ -1328,6 +1328,9 @@ function normalizePublicWorkItemPageLimit(value: number) {
   return value
 }
 
+/** Maximum rows the legacy comment fallback may inspect before requiring migration. */
+const MAX_LEGACY_COMMENT_FALLBACK_READ_ITEMS = 500
+
 /**
  * DynamoDB の team issue item と event item を読み書きする client です。
  */
@@ -3018,6 +3021,15 @@ export class DynamoDbTeamIssuesClient {
     return items
   }
 
+  /**
+   * Reads Team Issue events with cursor-aware filtering and bounded pagination.
+   *
+   * @param directoryId - Workspace directory that owns the Team Issue.
+   * @param teamId - Team that owns the Team Issue.
+   * @param issueId - Team-local Work Item identifier.
+   * @param options - Event type, ordering, limit, and cursor options.
+   * @returns Persisted Team Issue events and the next event cursor, when present.
+   */
   private async queryTeamIssueEventItems(
     directoryId: string,
     teamId: string,
@@ -3176,12 +3188,20 @@ export class DynamoDbTeamIssuesClient {
           }
         }
       }
-      const indexedPage = await this.queryIndexedCommentEvents(directoryTeamIssueId)
-      const baseCommentIds = await this.readCommentEventIndexCoverage(directoryTeamIssueId)
+      const indexedPage = await this.queryIndexedCommentEvents(
+        directoryTeamIssueId,
+        MAX_LEGACY_COMMENT_FALLBACK_READ_ITEMS,
+      )
+      const baseCommentIds = await this.readCommentEventIndexCoverage(
+        directoryTeamIssueId,
+        MAX_LEGACY_COMMENT_FALLBACK_READ_ITEMS,
+      )
       const indexedCommentIds = new Set(indexedPage.items.map((item) => item.eventId))
       const items = setsEqual(indexedCommentIds, baseCommentIds)
         ? indexedPage.items
-        : (await this.queryBaseCommentEvents(directoryTeamIssueId)).items
+        : (await this.queryBaseCommentEvents(directoryTeamIssueId, {
+            maxReadItems: MAX_LEGACY_COMMENT_FALLBACK_READ_ITEMS,
+          })).items
       const orderedItems = [...items].sort((left, right) =>
         compareTeamIssueEvents(left, right, options.newestEventsFirst === true)
       )
@@ -3293,10 +3313,14 @@ export class DynamoDbTeamIssuesClient {
     return { items, lastEvaluatedKey: exclusiveStartKey }
   }
 
-  /** Reads and validates every comment candidate from the sparse createdAt index. */
-  private async queryIndexedCommentEvents(directoryTeamIssueId: string) {
+  /** Reads comment candidates from the sparse createdAt index within an optional budget. */
+  private async queryIndexedCommentEvents(
+    directoryTeamIssueId: string,
+    maxReadItems?: number,
+  ) {
     const items: TeamIssueEventItem[] = []
     let exclusiveStartKey: Record<string, unknown> | undefined
+    let evaluatedItems = 0
     do {
       const response = await this.documentClient.send(new QueryCommand({
         TableName: this.eventTableName,
@@ -3309,9 +3333,19 @@ export class DynamoDbTeamIssuesClient {
         FilterExpression: 'eventType = :eventType',
         ExclusiveStartKey: exclusiveStartKey,
         ScanIndexForward: false,
+        ...(maxReadItems === undefined
+          ? {}
+          : { Limit: Math.max(1, maxReadItems - evaluatedItems) }),
       }))
-      items.push(...(response.Items ?? []).map(toTeamIssueEventItem))
+      const pageItems = (response.Items ?? []).map(toTeamIssueEventItem)
+      items.push(...pageItems)
+      evaluatedItems += response.ScannedCount ?? pageItems.length
       exclusiveStartKey = response.LastEvaluatedKey
+      throwIfLegacyCommentFallbackReadBudgetExceeded(
+        maxReadItems,
+        evaluatedItems,
+        exclusiveStartKey,
+      )
     } while (exclusiveStartKey)
     return {
       items: items.filter((item) => item.eventType === 'commented'),
@@ -3325,9 +3359,13 @@ export class DynamoDbTeamIssuesClient {
    * @param directoryTeamIssueId - Work Item event partition key.
    * @returns Event IDs present in the strongly consistent base-table query.
    */
-  private async readCommentEventIndexCoverage(directoryTeamIssueId: string) {
+  private async readCommentEventIndexCoverage(
+    directoryTeamIssueId: string,
+    maxReadItems?: number,
+  ) {
     const eventIds = new Set<string>()
     let exclusiveStartKey: Record<string, unknown> | undefined
+    let evaluatedItems = 0
     do {
       const response = await this.documentClient.send(new QueryCommand({
         TableName: this.eventTableName,
@@ -3345,11 +3383,20 @@ export class DynamoDbTeamIssuesClient {
         ProjectionExpression: '#createdAt, #eventId, #eventType',
         ExclusiveStartKey: exclusiveStartKey,
         ConsistentRead: true,
+        ...(maxReadItems === undefined
+          ? {}
+          : { Limit: Math.max(1, maxReadItems - evaluatedItems) }),
       }))
       for (const item of response.Items ?? []) {
         eventIds.add(readCommentEventIndexCoverageId(item))
       }
+      evaluatedItems += response.ScannedCount ?? response.Items?.length ?? 0
       exclusiveStartKey = response.LastEvaluatedKey
+      throwIfLegacyCommentFallbackReadBudgetExceeded(
+        maxReadItems,
+        evaluatedItems,
+        exclusiveStartKey,
+      )
     } while (exclusiveStartKey)
     return eventIds
   }
@@ -3357,11 +3404,23 @@ export class DynamoDbTeamIssuesClient {
   /** Reads and fully validates comment rows from the base table after index drift. */
   private async queryBaseCommentEvents(
     directoryTeamIssueId: string,
-    options: { eventLimit?: number } = {},
+    options: { eventLimit?: number; maxReadItems?: number } = {},
   ) {
     const items: TeamIssueEventItem[] = []
     let exclusiveStartKey: Record<string, unknown> | undefined
+    let evaluatedItems = 0
     do {
+      const remainingEventItems = options.eventLimit === undefined
+        ? undefined
+        : Math.max(1, options.eventLimit - items.length)
+      const remainingReadItems = options.maxReadItems === undefined
+        ? undefined
+        : Math.max(1, options.maxReadItems - evaluatedItems)
+      const queryLimit = remainingEventItems === undefined
+        ? remainingReadItems
+        : remainingReadItems === undefined
+          ? remainingEventItems
+          : Math.min(remainingEventItems, remainingReadItems)
       const response = await this.documentClient.send(new QueryCommand({
         TableName: this.eventTableName,
         KeyConditionExpression: 'directoryTeamIssueId = :directoryTeamIssueId',
@@ -3372,12 +3431,17 @@ export class DynamoDbTeamIssuesClient {
         FilterExpression: 'eventType = :eventType',
         ExclusiveStartKey: exclusiveStartKey,
         ConsistentRead: true,
-        ...(options.eventLimit === undefined
-          ? {}
-          : { Limit: Math.max(1, options.eventLimit - items.length) }),
+        ...(queryLimit === undefined ? {} : { Limit: queryLimit }),
       }))
-      items.push(...(response.Items ?? []).map(toTeamIssueEventItem))
+      const pageItems = (response.Items ?? []).map(toTeamIssueEventItem)
+      items.push(...pageItems)
+      evaluatedItems += response.ScannedCount ?? pageItems.length
       exclusiveStartKey = response.LastEvaluatedKey
+      throwIfLegacyCommentFallbackReadBudgetExceeded(
+        options.maxReadItems,
+        evaluatedItems,
+        exclusiveStartKey,
+      )
       if (options.eventLimit !== undefined && items.length >= options.eventLimit) {
         break
       }
@@ -3388,6 +3452,12 @@ export class DynamoDbTeamIssuesClient {
     }
   }
 
+  /**
+   * Builds the canonical DynamoDB representation of one Team Issue event.
+   *
+   * @param input - Event fields before physical partition and index keys are added.
+   * @returns Event row with normalized timestamp and deterministic storage keys.
+   */
   private createIssueEventItem(
     input: Omit<TeamIssueEventItem, 'directoryTeamIssueId' | 'eventId'> & { eventId?: string },
   ) {
@@ -3642,7 +3712,7 @@ async function waitForLocalDynamoDbTable(
   validateTable: (table: TableDescription | undefined) => boolean,
   migrateTable?: (table: TableDescription | undefined) => Promise<void>,
 ) {
-  let migrationStarted = false
+  let migrationAttempts = 0
   for (let attempt = 0; attempt < 20; attempt += 1) {
     const response = await dynamoDbClient.send(
       new DescribeTableCommand({
@@ -3655,8 +3725,8 @@ async function waitForLocalDynamoDbTable(
     }
 
     if (response.Table?.TableStatus === 'ACTIVE') {
-      if (migrateTable && !migrationStarted) {
-        migrationStarted = true
+      if (migrateTable && migrationAttempts < 2) {
+        migrationAttempts += 1
         await migrateTable(response.Table)
         continue
       }
@@ -4186,6 +4256,21 @@ function readCommentEventIndexCoverageId(value: unknown): string {
     )
   }
   return value.eventId
+}
+
+/** Fails closed when a transitional comment fallback would exceed its read budget. */
+function throwIfLegacyCommentFallbackReadBudgetExceeded(
+  maxReadItems: number | undefined,
+  evaluatedItems: number,
+  lastEvaluatedKey: Record<string, unknown> | undefined,
+): void {
+  if (maxReadItems !== undefined && evaluatedItems >= maxReadItems && lastEvaluatedKey !== undefined) {
+    throw new ProjectDataError(
+      503,
+      'InvalidTeamIssue',
+      'Team Issue comment history requires migration before it can be read.',
+    )
+  }
 }
 
 /** Compares two validated events by their actual timestamp and stable ID. */

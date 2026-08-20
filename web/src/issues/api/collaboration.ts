@@ -164,6 +164,8 @@ function isTeamIssueComment(value: unknown): value is TeamIssueComment {
         isRecord(reaction) &&
         typeof reaction.emoji === 'string' &&
         typeof reaction.count === 'number' &&
+        Number.isSafeInteger(reaction.count) &&
+        reaction.count >= 0 &&
         typeof reaction.reactedByMe === 'boolean',
     ) &&
     isRecord(capabilities) &&
