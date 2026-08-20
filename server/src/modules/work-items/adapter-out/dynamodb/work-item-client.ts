@@ -59,7 +59,6 @@ import type {
 import {
   DynamoDBDocumentClient,
   GetCommand,
-  PutCommand,
   QueryCommand,
   TransactWriteCommand,
 } from '@aws-sdk/lib-dynamodb'
@@ -631,24 +630,17 @@ type PublicWorkItemPageCursor = {
 }
 
 /**
- * チーム Issue コメントレスポンスです。
+ * Team Issue detail and legacy-compatible comment creation responses use this
+ * stable comment shape while the underlying row is stored canonically.
  */
 export type TeamIssueCommentResponseItem = {
-  /**
-   * コメント ID です。
-   */
+  /** Comment identifier. */
   id: string
-  /**
-   * コメントした actor user key です。
-   */
+  /** Workspace member key of the comment author. */
   actorUserId: string
-  /**
-   * コメント本文です。
-   */
+  /** Markdown comment body. */
   body: string
-  /**
-   * 作成日時の ISO 8601 timestamp です。
-   */
+  /** ISO 8601 creation timestamp. */
   createdAt: string
 }
 
@@ -715,17 +707,16 @@ export type TeamIssueDetailResponse = {
    */
   issue: TeamIssueResponseItem
   /**
-   * Issue コメント一覧です。
+   * Canonical Collaboration comments projected into the stable detail shape.
+   * The adapter does not load this field from the legacy event table.
    */
-  comments: TeamIssueCommentResponseItem[]
+  comments?: TeamIssueCommentResponseItem[]
   /**
    * Issue 活動履歴一覧です。
    */
   activity: TeamIssueActivityResponseItem[]
   /** De-identified duplicate-source context committed with this canonical Work Item. */
   triageContextSnapshots?: WorkItemTriageContextSnapshot[]
-  /** Bounded event 読み込みの次 page を指す opaque cursor です。 */
-  nextEventCursor?: string
   /** Work Item に適用される解決済み workflow/custom field 定義です。 */
   resolvedConfiguration?: ResolvedWorkItemConfiguration
   /** Work Item から見た reciprocal relation 一覧です。 */
@@ -951,16 +942,14 @@ export type UpdateTeamIssueRequestBody = PublicUpdateTeamIssueRequestBody & {
  * チーム Issue コメント作成 API が受け取る request body です。
  */
 export type CreateTeamIssueCommentRequestBody = {
-  /** Internal automation comment action が再配送間で固定する event ID です。 */
-  idempotencyEventId?: unknown
-  /**
-   * 旧 client が送信する plain text コメント本文です。
-   */
-  body?: unknown
   /**
    * Markdown source として保存するコメント本文です。
    */
   bodyMarkdown?: unknown
+  /**
+   * 旧クライアントが送信するコメント本文です。保存時は canonical bodyMarkdown へ変換します。
+   */
+  body?: unknown
   /**
    * reply 先の comment ID です。
    */
@@ -1031,7 +1020,7 @@ export type CreateTeamIssueCommentResponse = {
   comment: TeamIssueCommentResponseItem
   /**
    * コメント追加に対応する活動履歴です。
-   */
+  */
   activity: TeamIssueActivityResponseItem
 }
 
@@ -1103,6 +1092,25 @@ export type TeamIssuesClient = {
     options?: TeamIssueDetailReadOptions,
   ): Promise<TeamIssueDetailResponse>
   /**
+   * Reads a pre-cutover Automation comment by its deterministic legacy action identity.
+   *
+   * @param directoryId - Workspace directory identifier.
+   * @param teamId - Owning Team identifier.
+   * @param issueId - Team-local Work Item identifier.
+   * @param eventId - Deterministic comment action event identifier.
+   * @param actorUserId - Expected Automation actor identifier.
+   * @param body - Expected comment body.
+   * @returns Whether a matching pre-cutover comment event already exists.
+   */
+  getAutomationCommentReplay?(
+    directoryId: string,
+    teamId: string,
+    issueId: string,
+    eventId: string,
+    actorUserId: string,
+    body: string,
+  ): Promise<boolean>
+  /**
    * DynamoDB に team issue を作成します。
    */
   createTeamIssue(
@@ -1154,17 +1162,6 @@ export type TeamIssuesClient = {
     authorizationConditionChecks?: NonNullable<TransactWriteCommandInput['TransactItems']>,
     authorizationSnapshot?: WorkItemAuthorizationSnapshot,
   ): Promise<{ issue: TeamIssueResponseItem }>
-  /**
-   * DynamoDB に team issue コメントを追加します。
-   */
-  createTeamIssueComment(
-    directoryId: string,
-    teamId: string,
-    issueId: string,
-    input: CreateTeamIssueCommentRequestBody,
-    actorUserId: string,
-    auditContext?: MutationAuditContext,
-  ): Promise<CreateTeamIssueCommentResponse>
 }
 
 /** Team Issue detail の event 読み込み量と順序を制御します。 */
@@ -1173,22 +1170,6 @@ export type TeamIssueDetailReadOptions = {
   consistentIssueRead?: boolean
   /** 読み込む event の最大件数です。0 の場合は event partition を読みません。 */
   eventLimit?: number
-  /** 新しい event から読み込む場合は true です。 */
-  newestEventsFirst?: boolean
-  /** 指定 event 種別だけを返す DynamoDB filter です。 */
-  eventType?: TeamIssueActivityType
-  /** 前 page が返した event cursor です。 */
-  eventCursor?: string
-}
-
-/** Team Issue event page cursor の署名対象 payload です。 */
-type TeamIssueEventCursor = {
-  /** Cursor schema version です。 */
-  version: 1
-  /** Cursor を別 Issue へ流用できないよう束縛する partition key です。 */
-  directoryTeamIssueId: string
-  /** DynamoDB event sort key です。 */
-  eventId: string
 }
 
 function createRequestConversionTransactionItems(
@@ -1643,18 +1624,75 @@ export class DynamoDbTeamIssuesClient {
 
       return {
         issue: toTeamIssueResponseItem(issue),
-        comments: events
-          .filter((event) => event.eventType === 'commented' && event.body)
-          .map(toTeamIssueCommentResponseItem),
         activity: events.map(toTeamIssueActivityResponseItem),
         ...(triageContextSnapshots.length > 0 ? { triageContextSnapshots } : {}),
-        ...(eventPage.nextCursor ? { nextEventCursor: eventPage.nextCursor } : {}),
       } satisfies TeamIssueDetailResponse
     } catch (error) {
       if (error instanceof ProjectDataError) {
         throw error
       }
 
+      throw toProjectDataError(error)
+    }
+  }
+
+  /**
+   * Reads one pre-cutover Automation comment event for response-loss replay.
+   *
+   * @param directoryId - Workspace directory identifier.
+   * @param teamId - Owning Team identifier.
+   * @param issueId - Team-local Work Item identifier.
+   * @param eventId - Deterministic comment action event identifier.
+   * @param actorUserId - Expected Automation actor identifier.
+   * @param body - Expected comment body.
+   * @returns Whether the matching event is already durable.
+   */
+  async getAutomationCommentReplay(
+    directoryId: string,
+    teamId: string,
+    issueId: string,
+    eventId: string,
+    actorUserId: string,
+    body: string,
+  ) {
+    await this.ensureLocalTables()
+    const normalizedEventId = readIdempotencyResourceId(eventId)
+    if (!normalizedEventId) {
+      throw new ProjectDataError(
+        400,
+        'InvalidProjectWrite',
+        'Automation comment replay event ID is invalid.',
+      )
+    }
+    try {
+      const response = await this.documentClient.send(new GetCommand({
+        TableName: this.eventTableName,
+        Key: {
+          directoryTeamIssueId: createDirectoryTeamIssueId(directoryId, teamId, issueId),
+          eventId: normalizedEventId,
+        },
+        ConsistentRead: true,
+      }))
+      if (response.Item === undefined) return false
+
+      if (!isTeamIssueEventItem(response.Item) || response.Item.eventType !== 'commented') {
+        throw new ProjectDataError(
+          503,
+          'AutomationCommentReplayUnavailable',
+          'The pre-cutover comment replay record is invalid.',
+        )
+      }
+      if (response.Item.actorUserId !== actorUserId || response.Item.body !== body) {
+        throw new ProjectDataError(
+          409,
+          'AutomationCommentIdempotencyConflict',
+          'The Automation comment action was reused with different input.',
+        )
+      }
+
+      return true
+    } catch (error) {
+      if (error instanceof ProjectDataError) throw error
       throw toProjectDataError(error)
     }
   }
@@ -2812,133 +2850,6 @@ export class DynamoDbTeamIssuesClient {
     }
   }
 
-  /**
-   * DynamoDB に team issue コメントを追加します。
-   */
-  async createTeamIssueComment(
-    directoryId: string,
-    teamId: string,
-    issueId: string,
-    input: CreateTeamIssueCommentRequestBody,
-    actorUserId: string,
-    auditContext?: MutationAuditContext,
-  ) {
-    await this.ensureLocalTables()
-    await this.getRequiredTeamIssueItem(directoryId, teamId, issueId)
-
-    const createdAt = new Date().toISOString()
-    const body = readRequiredCommentBody(input.body)
-    const idempotencyEventId = readIdempotencyResourceId(input.idempotencyEventId)
-    const item = this.createIssueEventItem({
-      directoryId,
-      teamId,
-      issueId,
-      eventType: 'commented',
-      actorUserId,
-      body,
-      summary: 'Comment was added.',
-      createdAt,
-      ...(idempotencyEventId ? { eventId: idempotencyEventId } : {}),
-    })
-    const auditPut = createMutationAuditEventPut(this.auditTableName, auditContext, {
-      directoryId,
-      eventType: 'comment.created',
-      entityType: 'work-item',
-      entityId: createTeamIssueAuditEntityId(teamId, issueId),
-      target: {
-        type: 'comment',
-        id: createTeamIssueAuditCommentId(teamId, issueId, item.eventId),
-      },
-      action: 'commented',
-      occurredAt: createdAt,
-      changes: createAuditFieldChanges(undefined, { body }, ['body'], ['body']),
-      metadata: { adapter: 'team-issue', teamId, issueId, commentId: item.eventId },
-    })
-
-    try {
-      if (auditPut) {
-        await this.documentClient.send(
-          new TransactWriteCommand({
-            TransactItems: [
-              {
-                ConditionCheck: {
-                  TableName: this.issueTableName,
-                  Key: {
-                    directoryTeamId: createDirectoryTeamId(directoryId, teamId),
-                    issueId,
-                  },
-                  ConditionExpression: 'attribute_exists(directoryTeamId) AND attribute_exists(issueId)',
-                },
-              },
-              {
-                Put: {
-                  TableName: this.eventTableName,
-                  Item: item,
-                  ConditionExpression:
-                    'attribute_not_exists(directoryTeamIssueId) AND attribute_not_exists(eventId)',
-                },
-              },
-              auditPut,
-            ],
-          }),
-        )
-      } else {
-        await this.documentClient.send(
-          new PutCommand({
-            TableName: this.eventTableName,
-            Item: item,
-            ConditionExpression:
-              'attribute_not_exists(directoryTeamIssueId) AND attribute_not_exists(eventId)',
-          }),
-        )
-      }
-    } catch (error) {
-      if (
-        idempotencyEventId &&
-        (
-          isAwsNamedError(error, 'ConditionalCheckFailedException') ||
-          hasTransactionConditionalFailure(error)
-        )
-      ) {
-        const existing = await this.documentClient.send(new GetCommand({
-          TableName: this.eventTableName,
-          Key: {
-            directoryTeamIssueId: createDirectoryTeamIssueId(directoryId, teamId, issueId),
-            eventId: idempotencyEventId,
-          },
-          ConsistentRead: true,
-        }))
-        if (
-          isTeamIssueEventItem(existing.Item) &&
-          existing.Item.eventType === 'commented' &&
-          existing.Item.actorUserId === actorUserId &&
-          existing.Item.body === body
-        ) {
-          return toCreateTeamIssueCommentResponse(existing.Item)
-        }
-      }
-      if (isTransactionConditionalFailureAt(error, 0)) {
-        if (!await this.hasTeamIssueItem(directoryId, teamId, issueId)) {
-          throw new ProjectDataError(404, 'TeamIssueNotFound', 'Issue was not found.')
-        }
-
-        throw createProjectDataConflictError()
-      }
-
-      if (hasTransactionConditionalFailure(error)) {
-        throw createProjectDataConflictError()
-      }
-
-      if (error instanceof ProjectDataError) {
-        throw error
-      }
-
-      throw toProjectDataError(error)
-    }
-
-    return toCreateTeamIssueCommentResponse(item)
-  }
-
   private async hasTeamIssueItem(directoryId: string, teamId: string, issueId: string) {
     try {
       await this.getRequiredTeamIssueItem(directoryId, teamId, issueId, true)
@@ -3077,10 +2988,7 @@ export class DynamoDbTeamIssuesClient {
       ? undefined
       : Math.max(1, Math.floor(options.eventLimit))
     const directoryTeamIssueId = createDirectoryTeamIssueId(directoryId, teamId, issueId)
-    let exclusiveStartKey: Record<string, unknown> | undefined = decodeTeamIssueEventCursor(
-      options.eventCursor,
-      directoryTeamIssueId,
-    )
+    let exclusiveStartKey: Record<string, unknown> | undefined
 
     do {
       const remaining = eventLimit === undefined ? undefined : eventLimit - items.length
@@ -3090,11 +2998,9 @@ export class DynamoDbTeamIssuesClient {
           KeyConditionExpression: 'directoryTeamIssueId = :directoryTeamIssueId',
           ExpressionAttributeValues: {
             ':directoryTeamIssueId': directoryTeamIssueId,
-            ...(options.eventType ? { ':eventType': options.eventType } : {}),
           },
-          ...(options.eventType ? { FilterExpression: 'eventType = :eventType' } : {}),
           ExclusiveStartKey: exclusiveStartKey,
-          ScanIndexForward: options.newestEventsFirst !== true,
+          ScanIndexForward: true,
           ...(remaining === undefined ? {} : { Limit: remaining }),
         }),
       )
@@ -3108,9 +3014,6 @@ export class DynamoDbTeamIssuesClient {
 
     return {
       items: items.map(toTeamIssueEventItem),
-      ...(exclusiveStartKey
-        ? { nextCursor: encodeTeamIssueEventCursor(directoryTeamIssueId, exclusiveStartKey) }
-        : {}),
     }
   }
 
@@ -3673,15 +3576,6 @@ export function toTeamIssueResponseItem(value: unknown): TeamIssueResponseItem {
   return issue
 }
 
-function toTeamIssueCommentResponseItem(value: TeamIssueEventItem): TeamIssueCommentResponseItem {
-  return {
-    id: value.eventId,
-    actorUserId: value.actorUserId,
-    body: value.body ?? '',
-    createdAt: value.createdAt,
-  }
-}
-
 function toTeamIssueActivityResponseItem(value: TeamIssueEventItem): TeamIssueActivityResponseItem {
   return {
     id: value.eventId,
@@ -3689,15 +3583,6 @@ function toTeamIssueActivityResponseItem(value: TeamIssueEventItem): TeamIssueAc
     actorUserId: value.actorUserId,
     summary: value.summary,
     createdAt: value.createdAt,
-  }
-}
-
-function toCreateTeamIssueCommentResponse(
-  value: TeamIssueEventItem,
-): CreateTeamIssueCommentResponse {
-  return {
-    comment: toTeamIssueCommentResponseItem(value),
-    activity: toTeamIssueActivityResponseItem(value),
   }
 }
 
@@ -4371,62 +4256,6 @@ function decodePublicWorkItemPageCursor(
   }
 }
 
-/** Team Issue event の DynamoDB key を scope-bound opaque cursor に変換します。 */
-function encodeTeamIssueEventCursor(
-  directoryTeamIssueId: string,
-  key: Record<string, unknown>,
-) {
-  const eventId = typeof key.eventId === 'string' ? key.eventId : undefined
-  if (!eventId) {
-    throw new ProjectDataError(
-      503,
-      'InvalidTeamIssue',
-      'Team Issue event page did not include a valid continuation key.',
-    )
-  }
-
-  const cursor: TeamIssueEventCursor = {
-    version: 1,
-    directoryTeamIssueId,
-    eventId,
-  }
-  return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url')
-}
-
-/** Team Issue event cursor を検証し DynamoDB key に戻します。 */
-function decodeTeamIssueEventCursor(
-  value: string | undefined,
-  directoryTeamIssueId: string,
-) {
-  if (!value) {
-    return undefined
-  }
-
-  try {
-    const cursor = JSON.parse(
-      Buffer.from(value, 'base64url').toString('utf8'),
-    ) as Partial<TeamIssueEventCursor>
-    if (
-      cursor.version !== 1 ||
-      cursor.directoryTeamIssueId !== directoryTeamIssueId ||
-      typeof cursor.eventId !== 'string' ||
-      !cursor.eventId
-    ) {
-      throw new TypeError('Invalid cursor payload.')
-    }
-    return {
-      directoryTeamIssueId,
-      eventId: cursor.eventId,
-    }
-  } catch {
-    throw new ProjectDataError(
-      400,
-      'InvalidTeamIssueCursor',
-      'Team Issue event cursor is invalid.',
-    )
-  }
-}
-
 /**
  * Team-local Issue ID を Workspace 内で一意な audit Work Item ID に変換します。
  */
@@ -4490,13 +4319,6 @@ function createWorkItemNotificationSummary(before: TeamIssueItem, after: TeamIss
   }
 
   return 'Work Item was updated.'
-}
-
-/**
- * Team Issue comment を Workspace 内で一意な audit target ID に変換します。
- */
-function createTeamIssueAuditCommentId(teamId: string, issueId: string, commentId: string) {
-  return `${createTeamIssueAuditEntityId(teamId, issueId)}/comment/${commentId}`
 }
 
 function createTeamIssueEventId(createdAt: string, eventType: TeamIssueActivityType) {

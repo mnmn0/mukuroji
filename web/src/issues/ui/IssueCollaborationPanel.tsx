@@ -141,17 +141,14 @@ export function IssueCollaborationPanel({
    * @param comment - Permission-filtered comment selected by the viewer.
    */
   function promoteCommentSource(comment: TeamIssueComment) {
-    const actorKey =
-      comment.authorMemberKey ??
-      comment.actorUserId ??
-      'unknown-member'
+    const actorKey = comment.authorMemberKey
     const actor = members.find(
       (member) =>
         member.memberKey === actorKey ||
         member.id === actorKey ||
         member.email === actorKey,
     )
-    const originalBody = comment.bodyMarkdown ?? comment.body ?? ''
+    const originalBody = comment.bodyMarkdown
     promoteSource({
       actor: {
         displayName: actor?.name?.trim() || actor?.email || actorKey,
@@ -161,7 +158,7 @@ export function IssueCollaborationPanel({
       availabilityReason: comment.deletedAt
         ? t('collaboration.sources.commentDeletedReason')
         : undefined,
-      capturedRevision: comment.version ?? 1,
+      capturedRevision: comment.version,
       containerId:
         comment.rootCommentId ?? comment.parentCommentId ?? comment.id,
       kind: 'comment',

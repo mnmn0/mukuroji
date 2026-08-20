@@ -880,9 +880,10 @@ test('loads team issue detail and creates comments after team access is confirme
   const collaborationComments: Awaited<ReturnType<CollaborationClient['createComment']>>[] = []
   setTestAppDependencies({
     collaboration: createCollaborationStub({
-      async getThread() {
+      /** Returns canonical root comments and no reply preview for this detail test. */
+      async getThread(input) {
         return {
-          comments: collaborationComments,
+          comments: input.rootCommentId ? [] : collaborationComments,
           watch: {
             subscribed: false,
             explicit: false,
@@ -893,6 +894,7 @@ test('loads team issue detail and creates comments after team access is confirme
           presence: [],
         }
       },
+      /** Persists the test comment in the in-memory canonical comment collection. */
       async createComment(input) {
         collaborationCreates.push(input)
         const comment = {
@@ -925,12 +927,6 @@ test('loads team issue detail and creates comments after team access is confirme
       id: 'onboarding-friction',
       assigneeEmail: 'sato@example.com',
     },
-    comments: [
-      {
-        id: 'comment-1',
-        body: '背景を確認します。',
-      },
-    ],
     activity: [
       {
         id: 'activity-1',
@@ -951,7 +947,8 @@ test('loads team issue detail and creates comments after team access is confirme
   })
 
   expect(commentResponse.status).toBe(201)
-  expect(await commentResponse.json()).toEqual({
+  const commentResponseBody = await commentResponse.json()
+  expect(commentResponseBody).toEqual({
     comment: {
       id: 'comment-2',
       actorUserId: 'demo@example.com',
@@ -966,6 +963,7 @@ test('loads team issue detail and creates comments after team access is confirme
       createdAt: '2026-06-08T02:00:00.000Z',
     },
   })
+  expect(commentResponseBody.comment).not.toHaveProperty('authorMemberKey')
   expect(calls.issueDetails).toEqual([
     {
       directoryId: 'user#demo@example.com',
@@ -980,12 +978,41 @@ test('loads team issue detail and creates comments after team access is confirme
       readOptions: { consistentIssueRead: true, eventLimit: 0 },
     },
   ])
-  expect(calls.issueComments).toEqual([])
   expect(collaborationCreates).toHaveLength(1)
   expect(collaborationCreates[0]).toMatchObject({
     actorMemberKey: 'demo@example.com',
     bodyMarkdown: '追加コメント',
     entityKey: 'user#demo@example.com#work-item#team/core-team/issue/onboarding-friction',
+    assigneeMemberKey: 'sato@example.com',
+    authorizationConditionChecks: expect.arrayContaining([
+      expect.objectContaining({
+        ConditionCheck: expect.objectContaining({
+          TableName: 'DirectoryTable',
+          Key: { directoryId: 'user#demo@example.com', entryKey: 'TEAM#core-team' },
+        }),
+      }),
+      expect.objectContaining({
+        ConditionCheck: expect.objectContaining({
+          TableName: 'DirectoryTable',
+          Key: { directoryId: 'user#demo@example.com', entryKey: 'PROJECT#refero' },
+        }),
+      }),
+      expect.objectContaining({
+        ConditionCheck: expect.objectContaining({
+          TableName: 'WorkspaceAccessTable',
+          Key: { workspaceId: 'user#demo@example.com', recordKey: 'MEMBER#demo@example.com' },
+        }),
+      }),
+      expect.objectContaining({
+        ConditionCheck: expect.objectContaining({
+          TableName: 'DirectoryTable',
+          Key: {
+            directoryId: 'user#demo@example.com',
+            entryKey: 'PROJECT_MEMBER#refero#demo@example.com',
+          },
+        }),
+      }),
+    ]),
   })
 
   const refreshedDetailResponse = await app.request(
@@ -994,11 +1021,428 @@ test('loads team issue detail and creates comments after team access is confirme
   )
   expect(refreshedDetailResponse.status).toBe(200)
   expect(await refreshedDetailResponse.json()).toMatchObject({
+    comments: [{
+      id: 'comment-2',
+      actorUserId: 'demo@example.com',
+      body: '追加コメント',
+      createdAt: '2026-06-08T02:00:00.000Z',
+    }],
+  })
+
+  const collaborationResponse = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction/collaboration',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+  expect(collaborationResponse.status).toBe(200)
+  expect(await collaborationResponse.json()).toMatchObject({
     comments: [
-      { id: 'comment-1', body: '背景を確認します。' },
-      { id: 'comment-2', body: '追加コメント' },
+      { id: 'comment-2', bodyMarkdown: '追加コメント' },
     ],
   })
+})
+
+/** Verifies that team issue detail loads every canonical root and reply page. */
+test('loads every canonical comment page for team issue detail', async () => {
+  configureFakeProjectClients(true)
+  const rootComment = {
+    id: 'root-comment',
+    rootCommentId: 'root-comment',
+    authorMemberKey: 'author@example.com',
+    bodyMarkdown: 'Root comment',
+    version: 1,
+    mentionMemberKeys: [],
+    createdAt: '2026-06-08T01:00:00.000Z',
+    updatedAt: '2026-06-08T01:00:00.000Z',
+    acceptedResolutions: [],
+    reactions: [],
+  } satisfies Awaited<ReturnType<CollaborationClient['createComment']>>
+  const replyComment = {
+    id: 'reply-comment',
+    rootCommentId: 'root-comment',
+    parentCommentId: 'root-comment',
+    authorMemberKey: 'reply-author@example.com',
+    bodyMarkdown: 'Reply comment',
+    version: 1,
+    mentionMemberKeys: [],
+    createdAt: '2026-06-08T02:00:00.000Z',
+    updatedAt: '2026-06-08T02:00:00.000Z',
+    acceptedResolutions: [],
+    reactions: [],
+  } satisfies Awaited<ReturnType<CollaborationClient['createComment']>>
+  const secondReplyComment = {
+    id: 'second-reply-comment',
+    rootCommentId: 'root-comment',
+    parentCommentId: 'root-comment',
+    authorMemberKey: 'second-reply-author@example.com',
+    bodyMarkdown: 'Second reply comment',
+    version: 1,
+    mentionMemberKeys: [],
+    createdAt: '2026-06-08T03:00:00.000Z',
+    updatedAt: '2026-06-08T03:00:00.000Z',
+    acceptedResolutions: [],
+    reactions: [],
+  } satisfies Awaited<ReturnType<CollaborationClient['createComment']>>
+  const secondRootComment = {
+    id: 'second-root-comment',
+    rootCommentId: 'second-root-comment',
+    authorMemberKey: 'second-author@example.com',
+    bodyMarkdown: 'Second root comment',
+    version: 1,
+    mentionMemberKeys: [],
+    createdAt: '2026-06-08T04:00:00.000Z',
+    updatedAt: '2026-06-08T04:00:00.000Z',
+    acceptedResolutions: [],
+    reactions: [],
+  } satisfies Awaited<ReturnType<CollaborationClient['createComment']>>
+  const threadState = {
+    watch: {
+      subscribed: false,
+      explicit: false,
+      automatic: false,
+      reasons: [],
+      watcherCount: 0,
+    },
+    presence: [],
+  }
+
+  setTestAppDependencies({
+    collaboration: createCollaborationStub({
+      /** Returns deterministic canonical pages containing roots and replies in one stream. */
+      async getThread(input) {
+        if (input.includeReplies && input.cursor === undefined) {
+          return {
+            ...threadState,
+            comments: [rootComment, replyComment],
+            nextCursor: 'comments-page-2',
+          }
+        }
+        if (input.includeReplies && input.cursor === 'comments-page-2') {
+          return { ...threadState, comments: [secondReplyComment, secondRootComment] }
+        }
+        throw new Error(`Unexpected collaboration cursor: ${input.cursor ?? 'none'}`)
+      },
+    }),
+  })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+
+  expect(response.status).toBe(200)
+  const body = await response.json()
+  expect(body.comments.map((comment: { id: string }) => comment.id)).toEqual([
+    'root-comment',
+    'reply-comment',
+    'second-reply-comment',
+    'second-root-comment',
+  ])
+})
+
+/** Verifies that a large root page does not trigger one empty reply probe per root. */
+test('loads a large canonical comment stream without per-root reply probes', async () => {
+  configureFakeProjectClients(true)
+  const rootComments = Array.from({ length: 50 }, (_, index) => ({
+    id: `root-comment-${index}`,
+    rootCommentId: `root-comment-${index}`,
+    authorMemberKey: 'demo@example.com',
+    bodyMarkdown: `Root comment ${index}`,
+    version: 1,
+    mentionMemberKeys: [],
+    createdAt: `2026-06-08T00:${String(index).padStart(2, '0')}:00.000Z`,
+    updatedAt: `2026-06-08T00:${String(index).padStart(2, '0')}:00.000Z`,
+    acceptedResolutions: [],
+    reactions: [],
+  }))
+  let pageReads = 0
+  const threadState = {
+    watch: {
+      subscribed: false,
+      explicit: false,
+      automatic: false,
+      reasons: [],
+      watcherCount: 0,
+    },
+    presence: [],
+  }
+
+  setTestAppDependencies({
+    collaboration: createCollaborationStub({
+      /** Returns the single bounded root-and-reply page for the detail request. */
+      async getThread(input) {
+        pageReads += 1
+        expect(input.includeReplies).toBe(true)
+        expect(input.rootCommentId).toBeUndefined()
+        return { ...threadState, comments: rootComments }
+      },
+    }),
+  })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+
+  expect(response.status).toBe(200)
+  expect((await response.json()).comments).toHaveLength(50)
+  expect(pageReads).toBe(1)
+})
+
+/** Verifies that an oversized aggregate comment read fails closed after its page budget. */
+test('rejects team issue detail when canonical comment pages exceed the aggregate read budget', async () => {
+  configureFakeProjectClients(true)
+  const rootComment = {
+    id: 'budget-root-comment',
+    rootCommentId: 'budget-root-comment',
+    authorMemberKey: 'author@example.com',
+    bodyMarkdown: 'Budget root comment',
+    version: 1,
+    mentionMemberKeys: [],
+    createdAt: '2026-06-08T01:00:00.000Z',
+    updatedAt: '2026-06-08T01:00:00.000Z',
+    acceptedResolutions: [],
+    reactions: [],
+  } satisfies Awaited<ReturnType<CollaborationClient['createComment']>>
+  let pageReads = 0
+  const threadState = {
+    watch: {
+      subscribed: false,
+      explicit: false,
+      automatic: false,
+      reasons: [],
+      watcherCount: 0,
+    },
+    presence: [],
+  }
+
+  setTestAppDependencies({
+    collaboration: createCollaborationStub({
+      /** Returns all-comment pages until the aggregate read budget is exhausted. */
+      async getThread(input) {
+        pageReads += 1
+        if (input.includeReplies && input.cursor === undefined) {
+          return {
+            ...threadState,
+            comments: [rootComment],
+            nextCursor: 'comments-page-2',
+          }
+        }
+        if (input.includeReplies) {
+          return {
+            ...threadState,
+            comments: [],
+            nextCursor: `comments-page-${pageReads + 1}`,
+          }
+        }
+        throw new Error(`Unexpected collaboration cursor: ${input.cursor ?? 'none'}`)
+      },
+    }),
+  })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+
+  expect(response.status).toBe(413)
+  expect(await response.json()).toEqual({
+    code: 'CollaborationThreadReadLimitExceeded',
+    message: 'Collaboration thread exceeds the supported read window.',
+  })
+  expect(pageReads).toBe(50)
+})
+
+/** Verifies that a large canonical comments projection fails before transport serialization. */
+test('rejects team issue detail when canonical comments exceed the payload budget', async () => {
+  configureFakeProjectClients(true)
+  const bodyMarkdown = 'x'.repeat(20_000)
+  const oversizedComments = Array.from({ length: 220 }, (_, index) => ({
+    id: `payload-comment-${index}`,
+    rootCommentId: `payload-comment-${index}`,
+    authorMemberKey: 'author@example.com',
+    bodyMarkdown,
+    version: 1,
+    mentionMemberKeys: [],
+    createdAt: `2026-06-08T01:${String(index % 60).padStart(2, '0')}:00.000Z`,
+    updatedAt: `2026-06-08T01:${String(index % 60).padStart(2, '0')}:00.000Z`,
+    acceptedResolutions: [],
+    reactions: [],
+  })) satisfies Awaited<ReturnType<CollaborationClient['createComment']>>[]
+  const threadState = {
+    watch: {
+      subscribed: false,
+      explicit: false,
+      automatic: false,
+      reasons: [],
+      watcherCount: 0,
+    },
+    presence: [],
+  }
+  let pageReads = 0
+
+  setTestAppDependencies({
+    collaboration: createCollaborationStub({
+      /** Returns one oversized canonical page to exercise the serialized projection bound. */
+      async getThread(input) {
+        pageReads += 1
+        expect(input.includeReplies).toBe(true)
+        expect(input.cursor).toBeUndefined()
+        return { ...threadState, comments: oversizedComments }
+      },
+    }),
+  })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+
+  expect(response.status).toBe(413)
+  expect(await response.json()).toEqual({
+    code: 'CollaborationThreadPayloadTooLarge',
+    message: 'Collaboration comments exceed the supported response size.',
+  })
+  expect(pageReads).toBe(1)
+})
+
+/** Verifies that a stalled canonical cursor is reported as an unavailable read. */
+test('rejects team issue detail when canonical comment pagination stalls', async () => {
+  configureFakeProjectClients(true)
+  const rootComment = {
+    id: 'stalled-root-comment',
+    rootCommentId: 'stalled-root-comment',
+    authorMemberKey: 'author@example.com',
+    bodyMarkdown: 'Stalled root comment',
+    version: 1,
+    mentionMemberKeys: [],
+    createdAt: '2026-06-08T01:00:00.000Z',
+    updatedAt: '2026-06-08T01:00:00.000Z',
+    acceptedResolutions: [],
+    reactions: [],
+  } satisfies Awaited<ReturnType<CollaborationClient['createComment']>>
+  let pageReads = 0
+  const threadState = {
+    watch: {
+      subscribed: false,
+      explicit: false,
+      automatic: false,
+      reasons: [],
+      watcherCount: 0,
+    },
+    presence: [],
+  }
+
+  setTestAppDependencies({
+    collaboration: createCollaborationStub({
+      /** Returns the same cursor in the aggregate stream to simulate non-advancing pagination. */
+      async getThread(input) {
+        pageReads += 1
+        if (input.includeReplies && input.cursor === undefined) {
+          return {
+            ...threadState,
+            comments: [rootComment],
+            nextCursor: 'stalled-cursor',
+          }
+        }
+        if (input.includeReplies) {
+          return {
+            ...threadState,
+            comments: [],
+            nextCursor: 'stalled-cursor',
+          }
+        }
+        throw new Error(`Unexpected collaboration cursor: ${input.cursor ?? 'none'}`)
+      },
+    }),
+  })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+
+  expect(response.status).toBe(503)
+  expect(await response.json()).toEqual({
+    code: 'CollaborationThreadPaginationStalled',
+    message: 'Collaboration thread pagination did not advance.',
+  })
+  expect(pageReads).toBe(2)
+})
+
+test('returns the canonical comment response for bodyMarkdown requests', async () => {
+  configureFakeProjectClients(true)
+  setTestAppDependencies({
+    collaboration: createCollaborationStub({
+      async createComment(input) {
+        return {
+          id: 'canonical-comment',
+          rootCommentId: 'canonical-comment',
+          authorMemberKey: input.actorMemberKey,
+          bodyMarkdown: input.bodyMarkdown,
+          version: 1,
+          mentionMemberKeys: [],
+          createdAt: '2026-06-08T03:00:00.000Z',
+          updatedAt: '2026-06-08T03:00:00.000Z',
+          acceptedResolutions: [],
+          reactions: [],
+        }
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/issues/onboarding-friction/comments', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ bodyMarkdown: 'Canonical comment' }),
+  })
+
+  expect(response.status).toBe(201)
+  const responseBody = await response.json()
+  expect(responseBody).toMatchObject({
+    comment: {
+      id: 'canonical-comment',
+      authorMemberKey: 'demo@example.com',
+      bodyMarkdown: 'Canonical comment',
+      version: 1,
+    },
+  })
+  expect(responseBody.comment).not.toHaveProperty('actorUserId')
+  expect(responseBody.comment).not.toHaveProperty('body')
+})
+
+/** Verifies that comment creation fails closed when authorization fencing is empty. */
+test('rejects comment creation without authorization condition checks', async () => {
+  configureFakeProjectClients(true)
+  const projectDirectory = getTestAppDependencies().workspace.projectDirectory
+  projectDirectory.createActiveReferenceConditionChecks = async () => []
+  let writes = 0
+  setTestAppDependencies({
+    collaboration: createCollaborationStub({
+      async createComment() {
+        writes += 1
+        throw new Error('Collaboration comment must not be written.')
+      },
+    }),
+  })
+
+  const response = await app.request('/api/teams/core-team/issues/onboarding-friction/comments', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ bodyMarkdown: 'Unfenced comment' }),
+  })
+
+  expect(response.status).toBe(503)
+  expect(await response.json()).toEqual({
+    code: 'CollaborationAuthorizationUnavailable',
+    message: 'Comment authorization fencing is unavailable. Retry the request.',
+  })
+  expect(writes).toBe(0)
 })
 
 test('omits relations whose target Project is outside the viewer access scope', async () => {
@@ -1148,7 +1592,7 @@ test('fails closed when a persisted relation target Work Item is missing', async
   ])
 })
 
-test('returns persisted collaboration comments together with inert legacy comments and reply cursors', async () => {
+test('returns persisted collaboration comments and reply cursors', async () => {
   const calls = configureFakeProjectClients(true)
   const threadInputs: Parameters<CollaborationClient['getThread']>[0][] = []
   setTestAppDependencies({
@@ -1209,37 +1653,105 @@ test('returns persisted collaboration comments together with inert legacy commen
   })
 
   expect(response.status).toBe(200)
-  expect(await response.json()).toMatchObject({
+  const responseBody = await response.json()
+  expect(responseBody).toMatchObject({
     comments: [
-      { id: 'stored-root', source: 'collaboration' },
-      { id: 'stored-reply', source: 'collaboration' },
-      {
-        id: 'comment-1',
-        source: 'legacy',
-        capabilities: { canReply: false, canReact: false },
-      },
+      { id: 'stored-root' },
+      { id: 'stored-reply' },
     ],
     replyNextCursors: { 'stored-root': 'older-replies' },
   })
+  expect(responseBody.comments).toEqual(
+    expect.not.arrayContaining([
+      expect.objectContaining({ source: expect.anything() }),
+    ]),
+  )
   expect(threadInputs).toHaveLength(2)
   expect(threadInputs[0]?.rootCommentId).toBeUndefined()
   expect(threadInputs[0]?.limit).toBe(10)
+  expect(threadInputs[0]?.legacyCursorCompatible).toBe(true)
   expect(threadInputs[1]).toMatchObject({
     rootCommentId: 'stored-root',
     limit: 5,
     includeScopeState: false,
+    legacyCursorCompatible: true,
   })
-  expect(calls.issueDetails).toContainEqual({
+  expect(calls.issueDetails).toEqual([{
     directoryId: 'user#demo@example.com',
     teamId: 'core-team',
     issueId: 'onboarding-friction',
     readOptions: {
       consistentIssueRead: true,
-      eventLimit: 50,
-      newestEventsFirst: true,
-      eventType: 'commented',
+      eventLimit: 0,
     },
+  }])
+})
+
+test('serves one requested reply page without refetching reply roots', async () => {
+  configureFakeProjectClients(true)
+  const threadInputs: Parameters<CollaborationClient['getThread']>[0][] = []
+  setTestAppDependencies({
+    collaboration: createCollaborationStub({
+      async getThread(input) {
+        threadInputs.push(input)
+        return {
+          comments: [{
+            id: 'stored-reply-page',
+            rootCommentId: input.rootCommentId ?? 'stored-root',
+            parentCommentId: input.rootCommentId ?? 'stored-root',
+            authorMemberKey: 'sato@example.com',
+            bodyMarkdown: 'Persisted reply page',
+            version: 1,
+            mentionMemberKeys: [],
+            createdAt: '2026-07-12T00:01:00.000Z',
+            updatedAt: '2026-07-12T00:01:00.000Z',
+            acceptedResolutions: [],
+            reactions: [],
+          }],
+          nextCursor: 'older-replies',
+          watch: {
+            subscribed: true,
+            explicit: true,
+            automatic: false,
+            reasons: ['manual'],
+            watcherCount: 2,
+          },
+          presence: [],
+        }
+      },
+    }),
   })
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction/collaboration?rootCommentId=stored-root&cursor=reply-cursor',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+
+  expect(response.status).toBe(200)
+  expect(await response.json()).toMatchObject({
+    comments: [{ id: 'stored-reply-page' }],
+    nextCursor: 'older-replies',
+    replyRootCommentId: 'stored-root',
+  })
+  expect(threadInputs).toHaveLength(1)
+  expect(threadInputs[0]).toMatchObject({
+    rootCommentId: 'stored-root',
+    cursor: 'reply-cursor',
+    limit: 20,
+    legacyCursorCompatible: true,
+  })
+})
+
+test('rejects a legacy collaboration cursor instead of reading it as a current page', async () => {
+  configureFakeProjectClients(true)
+
+  const response = await app.request(
+    '/api/teams/core-team/issues/onboarding-friction/collaboration?cursor=legacy.old',
+    { headers: { Authorization: 'Bearer test-token' } },
+  )
+
+  expect(response.status).toBe(400)
+  expect(await response.json()).toMatchObject({ code: 'InvalidCollaborationCursor' })
 })
 
 test('keeps a departed author in history while blocking deactivated member mutations', async () => {

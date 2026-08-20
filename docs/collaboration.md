@@ -82,6 +82,32 @@ Presence と typing は短い TTL を持つ lease です。WebSocket 接続が�
 
 Comment edit/resolve/delete は `expectedVersion` を要求します。読み込み後に別 user が変更した場合は `409 CommentVersionConflict` を返し、client は最新内容を再取得します。push/polling は表示の鮮度を上げる仕組みであり、整合性の最終防衛線は version 条件です。
 
-## Legacy migration
+## Canonical comment source
 
-既存の `TeamIssueEventsTable` にある `commented` row は、同じ comment ID と作成日時を使って collaboration comment へ backfill できます。Backfill は notification を生成せず、audit event では `outboxStatus=suppressed` とします。移行期間中は persisted root page を読み終えた後、legacy event を新しい順に最大 50 件ずつ評価し、`commented` row を read-only comment として統合します。opaque cursor で event partition の末尾まで継続できるため、全件一括読込と無制限な response 拡大を避けながら過去 comment へ到達できます。backfill 済み ID と legacy row が別 page に現れた場合も Web は persisted comment を優先します。migration marker の確認後に fallback を削除します。
+Collaboration comment の正本は Collaboration table の persisted root/reply row だけです。旧 `TeamIssueEventsTable` の `commented` row は comment response へ読み込まず、`legacy.` で始まる旧 cursor も `InvalidCollaborationCursor` として拒否します。旧 row の存在確認と必要な backfill は runtime の fallback とは分離した検証・運用手順で扱います。
+
+### Legacy comment cutover order
+
+この canonical-only reader を本番へ適用する前に、次の順序で段階的に切り替えます。writer の切り替えと reader の削除を同じデプロイで開始してはいけません。
+
+1. canonical Collaboration writer と従来 reader を同居させた互換リリースを先にデプロイします。この期間の writer は新しい V2 discussion index と旧 reader 用の discussion index を同じ transaction で dual-write し、新 reader は互換用の重複 row を fallback read から除外します。公開 root/reply page は旧 reader が解釈できる version-one discussion cursor を先に発行し、内部の bounded aggregate read だけが V2 cursor を使います。Automation worker、schedule worker、API の旧プロセスが残っている間はこの状態を維持します。
+2. 旧 Automation worker の実行を停止または drain し、in-flight execution と queue が完了してから、旧 `commented` writer が新しい row を追加しないことを確認します。
+3. 必要な既存 comment を Collaboration table へ backfill し、対象環境の全 `TeamIssueEventsTable` partition に対して下記の検証コマンドを実行します。`legacy_commented_event_count=0` にならない場合は次へ進みません。
+4. 検証後にこの canonical-only reader と旧 cursor 拒否を含むリリースをデプロイし、Automation worker を再開します。再開後も旧 writer、DLQ、canonical comment count を監視します。
+
+互換期間中に旧 worker が comment row を永続化した後、response を失って canonical writer へ retry が到達する可能性があります。Automation writer は canonical write の前に、旧 writer と同じ決定的な `${execution.id}_comment_${actionIndex}` event ID を `ConsistentRead` で照合します。actor と本文が一致する旧 `commented` row は完了済みとして扱い、異なる入力や不正な row は fail closed します。この参照は response-loss retry の橋渡しだけに使い、canonical comment response の旧 table fallback には使いません。旧 worker の drain、backfill、全 partition scan は引き続き必要です。
+
+検証と reader 切り替えの間に旧 worker を稼働させないことが重要です。旧 worker が残る環境で検証結果が 0 でも、reader 削除後に新しい legacy row が発生するため、デプロイを中止して drain 状態を復旧してください。
+
+開発／検証環境で旧 row が残っていないことを確認する場合は、scope を明示した `ISSUE_ID` を指定して検証モードを実行します。このモードは対象 Issue の event 件数を読み取るだけでなく、`TeamIssueEventsTable` 全体を scan して、ページごとの `commented` 件数を合計します。`legacy_commented_event_count=0` 以外の場合は non-zero で終了します。
+
+```sh
+TEAM_ISSUES_TABLE_NAME=<team-issues-table> \
+TEAM_ISSUE_EVENTS_TABLE_NAME=<team-issue-events-table> \
+MUKUROJI_WORKSPACE_DIRECTORY_ID=<workspace-directory-id> \
+TEAM_ID=<team-id> \
+PROJECT_ID=<project-id> \
+ISSUE_ID=<issue-id> \
+AWS_REGION=<region> \
+bash scripts/check-team-issues-dynamodb.sh
+```

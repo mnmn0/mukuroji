@@ -10,63 +10,55 @@ import {
 } from './http'
 
 /**
- * チーム所有 Issue のコメントです。
+ * Canonical comment persisted in the Collaboration store for a team-owned Issue.
  */
 export type TeamIssueComment = {
   /**
-   * コメント ID です。
+   * Stable comment identifier.
    */
   id: string
   /**
-   * thread のルートコメント ID です。
+   * Root comment identifier for the thread.
    */
-  rootCommentId?: string
+  rootCommentId: string
   /**
-   * 返信先コメント ID です。root comment では未設定です。
+   * Identifier of the comment being replied to; unset for a root comment.
    */
   parentCommentId?: string
   /**
-   * コメント作成者の Workspace member key です。
+   * Workspace member key of the comment author.
    */
-  authorMemberKey?: string
+  authorMemberKey: string
   /**
-   * 旧 comment API が返す actor user ID です。
+   * Markdown source stored for the comment.
    */
-  actorUserId?: string
+  bodyMarkdown: string
   /**
-   * Markdown で保存されたコメント本文です。
+   * Comment revision used for optimistic concurrency.
    */
-  bodyMarkdown?: string
+  version: number
   /**
-   * 移行期間の旧 comment API が返す plain text 本文です。
-   */
-  body?: string
-  /**
-   * optimistic concurrency に使う comment revision です。
-   */
-  version?: number
-  /**
-   * 作成日時の ISO 8601 timestamp です。
+   * ISO 8601 creation timestamp.
    */
   createdAt: string
   /**
-   * 最終更新日時の ISO 8601 timestamp です。
+   * ISO 8601 last-updated timestamp.
    */
-  updatedAt?: string
+  updatedAt: string
   /**
-   * コメントが編集された日時です。
+   * Timestamp when the comment was edited.
    */
   editedAt?: string
   /**
-   * コメントが soft delete された日時です。
+   * Timestamp when the comment was soft-deleted.
    */
   deletedAt?: string
   /**
-   * thread が解決された日時です。
+   * Timestamp when the thread was resolved.
    */
   resolvedAt?: string
   /**
-   * thread を解決した Workspace member key です。
+   * Workspace member key that resolved the thread.
    */
   resolvedByMemberKey?: string
   /**
@@ -74,19 +66,19 @@ export type TeamIssueComment = {
    */
   acceptedResolutions?: AcceptedResolution[]
   /**
-   * 本文中で mention された Workspace member key の重複除外済み一覧です。
+   * Deduplicated Workspace member keys mentioned in the body.
    */
-  mentionMemberKeys?: string[]
+  mentionMemberKeys: string[]
   /**
-   * コメントに付いた reaction 集計です。
+   * Aggregated emoji reactions attached to the comment.
    */
-  reactions?: TeamIssueCommentReaction[]
+  reactions: TeamIssueCommentReaction[]
   /**
-   * 現在のユーザーがコメントに行える操作です。
+   * Operations available to the current user for this comment.
    */
-  capabilities?: TeamIssueCommentCapabilities
+  capabilities: TeamIssueCommentCapabilities
   /**
-   * collaboration store または移行前データのどちらから取得したかを表します。
+   * Optional source discriminator retained while older readers are drained.
    */
   source?: 'collaboration' | 'legacy'
 }

@@ -139,10 +139,31 @@ function isTeamIssueCollaborationPage(
 
 /** Validates the stable fields required by one collaboration comment. */
 function isTeamIssueComment(value: unknown): value is TeamIssueComment {
+  if (!isRecord(value)) {
+    return false
+  }
+
+  const capabilities = value.capabilities
+  const source = value.source
+
   return (
-    isRecord(value) &&
     typeof value.id === 'string' &&
-    typeof value.createdAt === 'string'
+    typeof value.rootCommentId === 'string' &&
+    typeof value.authorMemberKey === 'string' &&
+    typeof value.bodyMarkdown === 'string' &&
+    typeof value.version === 'number' &&
+    Number.isSafeInteger(value.version) &&
+    value.version > 0 &&
+    typeof value.createdAt === 'string' &&
+    typeof value.updatedAt === 'string' &&
+    Array.isArray(value.mentionMemberKeys) &&
+    value.mentionMemberKeys.every((memberKey) => typeof memberKey === 'string') &&
+    Array.isArray(value.reactions) &&
+    isRecord(capabilities) &&
+    typeof capabilities.canEdit === 'boolean' &&
+    typeof capabilities.canDelete === 'boolean' &&
+    typeof capabilities.canResolve === 'boolean' &&
+    (source === undefined || source === 'collaboration' || source === 'legacy')
   )
 }
 
@@ -209,6 +230,8 @@ export function isAcceptedResolution(
     typeof value.capturedCommentRevision === 'number' &&
     'capturedCommentBody' in value &&
     typeof value.capturedCommentBody === 'string' &&
+    (!('capturedCommentAuthorMemberKey' in value) ||
+      typeof value.capturedCommentAuthorMemberKey === 'string') &&
     'summary' in value &&
     typeof value.summary === 'string' &&
     'acceptedAt' in value &&

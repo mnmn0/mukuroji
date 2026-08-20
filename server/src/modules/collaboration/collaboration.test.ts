@@ -477,7 +477,9 @@ test('pages root comments newest-first and binds cursors to their entity scope',
   const discussionQueries: Array<Record<string, unknown>> = []
   const client = createClient(async (command) => {
     const input = readCommandInput(command)
-    const values = input.ExpressionAttributeValues as Record<string, unknown> | undefined
+    const values = isTestRecord(input.ExpressionAttributeValues)
+      ? input.ExpressionAttributeValues
+      : undefined
     if (values?.[':prefix'] === 'DISCUSSION#ROOT#') {
       discussionQueries.push(input)
       return {
@@ -505,6 +507,214 @@ test('pages root comments newest-first and binds cursors to their entity scope',
     status: 400,
     code: 'InvalidCollaborationCursor',
   })
+})
+
+/** Verifies that rolling compatibility callers receive cursors readable by the old reader. */
+test('emits a version-one discussion cursor for rolling compatibility callers', async () => {
+  const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
+  const legacyRecordKey = 'DISCUSSION#ROOT#2026-07-12T00:00:00.000Z#comment-1'
+  const discussionQueries: Array<Record<string, unknown>> = []
+  const client = createClient(async (command) => {
+    const input = readCommandInput(command)
+    if (isTestRecord(input.Key) && input.Key.recordKey === 'COMMENT#comment-1') {
+      return {
+        Item: {
+          entityKey,
+          recordKey: 'COMMENT#comment-1',
+          entryType: 'comment',
+          id: 'comment-1',
+          rootCommentId: 'comment-1',
+          authorMemberKey: 'author@example.com',
+          bodyMarkdown: 'Compatibility comment',
+          version: 1,
+          mentionMemberKeys: [],
+          createdAt: '2026-07-12T00:00:00.000Z',
+          updatedAt: '2026-07-12T00:00:00.000Z',
+        },
+      }
+    }
+    const values = isTestRecord(input.ExpressionAttributeValues)
+      ? input.ExpressionAttributeValues
+      : undefined
+    if (values?.[':prefix'] === 'DISCUSSION#ROOT#') {
+      discussionQueries.push(input)
+      return {
+        Items: [{ entityKey, recordKey: legacyRecordKey, commentId: 'comment-1' }],
+        LastEvaluatedKey: { entityKey, recordKey: legacyRecordKey },
+      }
+    }
+    return { Items: [] }
+  })
+
+  const page = await client.getThread({
+    entityKey,
+    viewerMemberKey: 'member@example.com',
+    legacyCursorCompatible: true,
+    limit: 1,
+  })
+
+  expect(page.comments).toHaveLength(1)
+  expect(page.comments[0]).toMatchObject({ id: 'comment-1' })
+  expect(discussionQueries).toHaveLength(1)
+  expect(discussionQueries[0]?.FilterExpression).toBeUndefined()
+  expect(page.nextCursor).toBeString()
+  const nextCursor = page.nextCursor
+  if (!nextCursor) throw new Error('Expected a compatibility cursor.')
+  const cursorPayload: unknown = JSON.parse(
+    Buffer.from(nextCursor, 'base64url').toString('utf8'),
+  )
+  expect(cursorPayload).toMatchObject({
+    version: 1,
+    entityKey,
+    prefix: 'DISCUSSION#ROOT#',
+    recordKey: legacyRecordKey,
+  })
+})
+
+/** Verifies that detail reads can page roots and replies through one bounded stream. */
+test('pages roots and replies through one bounded discussion prefix when requested', async () => {
+  const discussionQueries: Array<Record<string, unknown>> = []
+  const client = createClient(async (command) => {
+    const input = readCommandInput(command)
+    const values = input.ExpressionAttributeValues as Record<string, unknown> | undefined
+    if (
+      values?.[':prefix'] === 'DISCUSSION#V2#' ||
+      input.KeyConditionExpression ===
+        'entityKey = :entityKey AND recordKey BETWEEN :legacyLowerBound AND :legacyUpperBound'
+    ) {
+      discussionQueries.push(input)
+      return { Items: [] }
+    }
+    return { Items: [] }
+  })
+
+  await client.getThread({
+    entityKey: createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1'),
+    viewerMemberKey: 'member@example.com',
+    includeReplies: true,
+  })
+
+  expect(discussionQueries).toHaveLength(2)
+  expect(discussionQueries[0]).toMatchObject({
+    KeyConditionExpression: 'entityKey = :entityKey AND begins_with(recordKey, :prefix)',
+    ExpressionAttributeValues: {
+      ':prefix': 'DISCUSSION#V2#',
+    },
+    ScanIndexForward: false,
+  })
+  expect(discussionQueries[1]).toMatchObject({
+    KeyConditionExpression: 'entityKey = :entityKey AND recordKey BETWEEN :legacyLowerBound AND :legacyUpperBound',
+    ExpressionAttributeValues: {
+      ':legacyLowerBound': 'DISCUSSION#',
+      ':legacyUpperBound': 'DISCUSSION#V2#',
+    },
+    FilterExpression: 'attribute_not_exists(discussionIndexVersion)',
+    ScanIndexForward: false,
+  })
+})
+
+/** Verifies that newly written discussion indexes sort timestamps before comment kind. */
+test('writes timestamp-first discussion indexes for roots and replies', async () => {
+  const transactions: Array<Record<string, unknown>> = []
+  let rootCommentId: string | undefined
+  const client = createClient(async (command) => {
+    const input = readCommandInput(command)
+    if ('TransactItems' in input) {
+      transactions.push(input)
+    } else if (
+      rootCommentId &&
+      isTestRecord(input.Key) &&
+      input.Key.recordKey === `COMMENT#${rootCommentId}`
+    ) {
+      return {
+        Item: {
+          entityKey,
+          recordKey: `COMMENT#${rootCommentId}`,
+          entryType: 'comment',
+          id: rootCommentId,
+          rootCommentId,
+          authorMemberKey: 'author@example.com',
+          bodyMarkdown: 'New comment',
+          version: 1,
+          mentionMemberKeys: [],
+          createdAt: '2026-07-12T03:00:00.000Z',
+          updatedAt: '2026-07-12T03:00:00.000Z',
+          reactions: [],
+          acceptedResolutions: [],
+        },
+      }
+    }
+    return {}
+  })
+  const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
+  const created = await client.createComment({
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'issue-1',
+    entityKey,
+    actorMemberKey: 'author@example.com',
+    bodyMarkdown: 'New comment',
+    auditContext: createTestAuditContext(
+      'timeline-index',
+      '2026-07-12T03:00:00.000Z',
+      { bodyMarkdown: 'New comment' },
+    ),
+  })
+  rootCommentId = created.id
+  const reply = await client.createComment({
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'issue-1',
+    entityKey,
+    actorMemberKey: 'reply@example.com',
+    bodyMarkdown: 'Reply',
+    parentCommentId: created.id,
+    auditContext: createTestAuditContext(
+      'timeline-index-reply',
+      '2026-07-12T04:00:00.000Z',
+      { bodyMarkdown: 'Reply' },
+    ),
+  })
+
+  const discussionKeys = transactions.flatMap((transaction) => {
+    if (!Array.isArray(transaction.TransactItems)) {
+      throw new Error('Expected a comment transaction.')
+    }
+    return transaction.TransactItems.flatMap((item) => {
+      if (!isTestRecord(item) || !isTestRecord(item.Put) || !isTestRecord(item.Put.Item)) {
+        return []
+      }
+      return item.Put.Item.entryType === 'discussion' && typeof item.Put.Item.recordKey === 'string'
+        ? [item.Put.Item.recordKey]
+        : []
+    })
+  })
+
+  expect(discussionKeys).toEqual([
+    `DISCUSSION#V2#2026-07-12T03:00:00.000Z#ROOT#${created.id}`,
+    `DISCUSSION#V2S#ROOT#2026-07-12T03:00:00.000Z#${created.id}`,
+    `DISCUSSION#ROOT#2026-07-12T03:00:00.000Z#${created.id}`,
+    `DISCUSSION#V2#2026-07-12T04:00:00.000Z#THREAD#${created.id}#${reply.id}`,
+    `DISCUSSION#V2S#THREAD#${created.id}#2026-07-12T04:00:00.000Z#${reply.id}`,
+    `DISCUSSION#THREAD#${created.id}#2026-07-12T04:00:00.000Z#${reply.id}`,
+  ])
+  const legacyDiscussionItems = transactions.flatMap((transaction) => {
+    if (!Array.isArray(transaction.TransactItems)) return []
+    return transaction.TransactItems.flatMap((item) => {
+      if (!isTestRecord(item) || !isTestRecord(item.Put) || !isTestRecord(item.Put.Item)) {
+        return []
+      }
+      const putItem = item.Put.Item
+      return putItem.entryType === 'discussion' &&
+          typeof putItem.recordKey === 'string' &&
+          putItem.recordKey.startsWith('DISCUSSION#') &&
+          !putItem.recordKey.startsWith('DISCUSSION#V2')
+        ? [putItem]
+        : []
+    })
+  })
+  expect(legacyDiscussionItems).toHaveLength(2)
+  expect(legacyDiscussionItems.every((item) => item.discussionIndexVersion === 2)).toBeTrue()
 })
 
 test('stores a project watcher in the project scope', async () => {
@@ -984,6 +1194,177 @@ test('seeds deduplicated automatic watchers when a comment is created', async ()
   )
   const mentionedValues = mentionedUpdate?.ExpressionAttributeValues as Record<string, unknown>
   expect(mentionedValues[':reasons']).toEqual(new Set(['mention']))
+})
+
+/** Verifies automatic watcher creation is fenced by the captured Work Item assignee. */
+test('binds automatic watcher creation to the captured Work Item assignee', async () => {
+  let transaction: Record<string, unknown> | undefined
+  const client = createClient(async (command) => {
+    const input = readCommandInput(command)
+    if ('TransactItems' in input) {
+      transaction = input
+      return {}
+    }
+    return { Items: [] }
+  })
+
+  await client.createComment({
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'issue-1',
+    entityKey: createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1'),
+    assigneeMemberKey: 'assignee@example.com',
+    actorMemberKey: 'author@example.com',
+    bodyMarkdown: 'Please review this.',
+    automaticWatcherCandidates: [
+      { memberKey: 'assignee@example.com', reason: 'assignee' },
+    ],
+  })
+
+  if (!transaction) {
+    throw new Error('Expected an automatic watcher transaction.')
+  }
+  const parentCheck = (transaction.TransactItems as Array<Record<string, unknown>>)[0]
+    ?.ConditionCheck as Record<string, unknown>
+  expect(parentCheck.ConditionExpression).toContain('assigneeUserId = :assigneeMemberKey')
+  expect(parentCheck.ExpressionAttributeValues).toEqual({
+    ':assigneeMemberKey': 'assignee@example.com',
+  })
+})
+
+/** Ensures comment writes carry caller authorization conditions in the same transaction. */
+test('includes caller authorization guards in comment transactions', async () => {
+  let transaction: Record<string, unknown> | undefined
+  const client = createClient(async (command) => {
+    const input = readCommandInput(command)
+    if ('TransactItems' in input) transaction = input
+    return {}
+  })
+  const authorizationCheck: CollaborationAuthorizationConditionCheck = {
+    ConditionCheck: {
+      TableName: 'workspace-access-table',
+      Key: {
+        workspaceId: 'workspace#one',
+        recordKey: 'MEMBER#member@example.com',
+      },
+      ConditionExpression: '#version = :expectedVersion',
+      ExpressionAttributeNames: { '#version': 'version' },
+      ExpressionAttributeValues: { ':expectedVersion': 4 },
+    },
+  }
+
+  await client.createComment({
+    authorizationConditionChecks: [authorizationCheck],
+    entityKey: createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1'),
+    issueId: 'issue-1',
+    teamId: 'team-a',
+    workspaceId: 'workspace#one',
+    actorMemberKey: 'member@example.com',
+    bodyMarkdown: 'Guarded comment',
+  })
+
+  expect(transaction?.TransactItems).toEqual(expect.arrayContaining([
+    authorizationCheck,
+    expect.objectContaining({
+      ConditionCheck: expect.objectContaining({ TableName: 'issue-table' }),
+    }),
+  ]))
+})
+
+test('finds a committed comment by its deterministic mutation identity', async () => {
+  const memory = createCollaborationMemory()
+  const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
+  const auditContext = createTestAuditContext(
+    'automation-comment-replay',
+    '2026-07-12T00:00:00.000Z',
+    { bodyMarkdown: 'Replay this comment.' },
+  )
+  const created = await memory.client.createComment({
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'issue-1',
+    entityKey,
+    actorMemberKey: 'author@example.com',
+    bodyMarkdown: 'Replay this comment.',
+    auditContext,
+  })
+
+  await expect(memory.client.getCommentMutationReplay({ entityKey, auditContext })).resolves.toMatchObject({
+    id: created.id,
+    bodyMarkdown: 'Replay this comment.',
+  })
+  await expect(memory.client.getCommentMutationReplay({
+    entityKey,
+    auditContext: createTestAuditContext(
+      'different-comment-replay',
+      '2026-07-12T00:00:00.000Z',
+      { bodyMarkdown: 'Replay this comment.' },
+    ),
+  })).resolves.toBeUndefined()
+})
+
+test('does not subscribe service actors as automatic watchers', async () => {
+  let transaction: Record<string, unknown> | undefined
+  const client = createClient(async (command) => {
+    const input = readCommandInput(command)
+    if ('TransactItems' in input) {
+      transaction = input
+      return {}
+    }
+    return { Items: [] }
+  })
+  const entityKey = createWorkItemCollaborationEntityKey('workspace#one', 'team-a', 'issue-1')
+
+  await client.createComment({
+    workspaceId: 'workspace#one',
+    teamId: 'team-a',
+    issueId: 'issue-1',
+    entityKey,
+    actorMemberKey: 'automation:rule-1',
+    bodyMarkdown: 'An automation comment.',
+    automaticWatcherCandidates: [
+      { memberKey: 'creator@example.com', reason: 'creator' },
+      { memberKey: 'assignee@example.com', reason: 'assignee' },
+      { memberKey: 'automation:rule-1', reason: 'creator' },
+    ],
+    auditContext: createMutationAuditContext({
+      workspaceId: 'workspace#one',
+      actor: { id: 'automation:rule-1', kind: 'service' },
+      idempotencyKey: 'service-comment',
+      occurredAt: '2026-07-12T00:00:00.000Z',
+      request: {
+        method: 'AUTOMATION',
+        path: '/automation/comments',
+        body: { bodyMarkdown: 'An automation comment.' },
+      },
+      source: { kind: 'system', requestId: 'service-comment' },
+    }),
+  })
+
+  const rawItems = transaction?.TransactItems
+  if (!Array.isArray(rawItems)) {
+    throw new Error('Expected the comment transaction items.')
+  }
+  const items: Array<Record<string, unknown>> = []
+  for (const item of rawItems) {
+    if (!isTestRecord(item)) {
+      throw new Error('Expected every comment transaction item to be a record.')
+    }
+    items.push(item)
+  }
+  const watcherKeys = items.flatMap((item) => {
+    const update = isTestRecord(item.Update) ? item.Update : undefined
+    const key = update && isTestRecord(update.Key) ? update.Key : undefined
+    return update !== undefined && typeof key?.recordKey === 'string' &&
+        key.recordKey.startsWith('WATCHER#')
+      ? [key.recordKey]
+      : []
+  })
+  expect(watcherKeys.sort()).toEqual([
+    'WATCHER#assignee@example.com',
+    'WATCHER#creator@example.com',
+  ])
+  expect(watcherKeys).not.toContain('WATCHER#automation:rule-1')
 })
 
 test('binds comment, reaction, and Work Item watch transactions to the loaded project assignment', async () => {
@@ -2583,6 +2964,7 @@ async function createAcceptedResolutionHistoryState() {
   expect(first.acceptedResolutions).toHaveLength(1)
   expect(first.acceptedResolutions[0]).toMatchObject({
     sourceCommentId: 'reply-1',
+    capturedCommentAuthorMemberKey: 'reply-1@example.com',
     capturedCommentRevision: 1,
     capturedCommentBody: 'First answer',
     state: 'accepted',
