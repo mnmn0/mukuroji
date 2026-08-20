@@ -7,6 +7,9 @@ import {
   requireTriageIndexDeploymentStage,
 } from '../lib/config/triage-index-deployment';
 import {
+  requireTeamIssueCommentIndexDeploymentStage,
+} from '../lib/config/team-issue-comment-index-deployment';
+import {
   DEFAULT_WORKSPACE_SEARCH_MIGRATION_DEPLOYMENT_TARGET_ID,
 } from '../lib/config/workspace-search-migration-deployment-targets';
 
@@ -32,6 +35,12 @@ const triageIndexDeploymentStageContext = app.node.tryGetContext(
 const triageIndexDeploymentStage = requireTriageIndexDeploymentStage(
   triageIndexDeploymentStageContext,
 );
+const teamIssueCommentIndexDeploymentStageContext = app.node.tryGetContext(
+  'teamIssueCommentIndexDeploymentStage',
+);
+const teamIssueCommentIndexDeploymentStage = requireTeamIssueCommentIndexDeploymentStage(
+  teamIssueCommentIndexDeploymentStageContext,
+);
 // oxlint-disable-next-line awscdk/no-construct-stack-suffix -- Existing stack ID is part of the deployed resource identity.
 const stack = new CdkStack(app, 'CdkStack', {
   /* If you don't specify 'env', this stack will be environment-agnostic.
@@ -48,6 +57,7 @@ const stack = new CdkStack(app, 'CdkStack', {
 
   /* For more information, see https://docs.aws.amazon.com/cdk/latest/guide/environments.html */
   triageIndexDeploymentStage,
+  teamIssueCommentIndexDeploymentStage,
   workspaceSearchMigrationDeploymentTargetId,
 });
 acknowledgeKnownNagFindings(stack);

@@ -63,6 +63,7 @@ export {
 } from './domain/management-validation'
 export {
   createAutomationActionId,
+  createAutomationCommentId,
   createAutomationExecutionId,
   createRecurringExecutionId,
 } from './application/execution-identifiers'

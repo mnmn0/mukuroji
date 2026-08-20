@@ -581,6 +581,12 @@ bun run cdk:build
 bun run cdk:test
 bun run cdk:synth
 
+Team Issue event-table GSIs must be deployed in two separate stack updates:
+first use `-c teamIssueCommentIndexDeploymentStage=event` and wait for
+`TeamIssueEventCreatedAtIndex` to become `ACTIVE`; only then use
+`-c teamIssueCommentIndexDeploymentStage=comment` for the second index.
+The diff/deploy examples below show the final `comment` stage.
+
 # 初回writer-fence bootstrap前だけ rollout-pending。bootstrap後は required。
 export MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION=2026-07-28-01
 export MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE=rollout-pending
@@ -588,6 +594,7 @@ export MUKUROJI_RESTORE_DRILL_CLEANUP_APPROVER_ROLE_ARN=arn:aws:iam::<account-id
 
 bun --filter cdk cdk diff CdkStack \
   -c triageIndexDeploymentStage=wake \
+  -c teamIssueCommentIndexDeploymentStage=comment \
   --parameters CognitoUserPoolId="$COGNITO_USER_POOL_ID" \
   --parameters CognitoUserPoolClientId="$COGNITO_USER_POOL_CLIENT_ID" \
   --parameters CognitoSsoUserPoolClientId="$COGNITO_SSO_USER_POOL_CLIENT_ID" \
@@ -611,6 +618,7 @@ bun --filter cdk cdk diff CdkStack \
 
 bun --filter cdk cdk deploy CdkStack \
   -c triageIndexDeploymentStage=wake \
+  -c teamIssueCommentIndexDeploymentStage=comment \
   --parameters CognitoUserPoolId="$COGNITO_USER_POOL_ID" \
   --parameters CognitoUserPoolClientId="$COGNITO_USER_POOL_CLIENT_ID" \
   --parameters CognitoSsoUserPoolClientId="$COGNITO_SSO_USER_POOL_CLIENT_ID" \
@@ -993,5 +1001,7 @@ Cleanup workflowには明示的なphysical nameを与え、approval policyの`St
 bun run cdk:build
 bun run cdk:test
 bun run cdk:synth
-bun --filter cdk cdk diff CdkStack -c triageIndexDeploymentStage=wake
+bun --filter cdk cdk diff CdkStack \
+  -c triageIndexDeploymentStage=wake \
+  -c teamIssueCommentIndexDeploymentStage=comment
 ```

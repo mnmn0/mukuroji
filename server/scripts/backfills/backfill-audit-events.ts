@@ -23,6 +23,7 @@ import {
   type AuditFieldChange,
 } from '../../src/modules/audit'
 import { isCanonicalWorkItemRecord } from '../../src/modules/work-items'
+import { isLocalDynamoDbEndpoint } from './backfill-endpoint'
 
 const checkpointVersion = 2
 const scanPageSize = 100
@@ -292,7 +293,7 @@ async function main() {
   const definitions = createSourceDefinitions(tables, workspaceAuditPseudonymKey)
     .filter((definition) => options.source === undefined || definition.name === options.source)
 
-  if (!options.dryRun && endpoint && isLocalEndpoint(endpoint)) {
+  if (!options.dryRun && endpoint && isLocalDynamoDbEndpoint(endpoint)) {
     await ensureLocalAuditEventsTable(tables.auditEvents, dynamoDbClient)
   }
 
@@ -407,7 +408,7 @@ Write runs bootstrap mukuroji-audit-events with the shared schema when it is mis
  * @throws When a required table name is missing outside a local DynamoDB endpoint.
  */
 function resolveTableNames(endpoint: string | undefined): TableNames {
-  const allowLocalDefaults = endpoint !== undefined && isLocalEndpoint(endpoint)
+  const allowLocalDefaults = endpoint !== undefined && isLocalDynamoDbEndpoint(endpoint)
 
   return {
     teamIssueEvents: resolveTableName(
@@ -1455,16 +1456,6 @@ function printSummary(checkpoint: CheckpointState, definitions: SourceDefinition
 
 function isSourceName(value: string): value is SourceName {
   return sourceNames.some((sourceName) => sourceName === value)
-}
-
-function isLocalEndpoint(endpoint: string) {
-  try {
-    const host = new URL(endpoint).hostname
-
-    return ['localhost', '127.0.0.1', '0.0.0.0', '::1', 'floci'].includes(host)
-  } catch {
-    return false
-  }
 }
 
 function readEnvironment(name: string) {

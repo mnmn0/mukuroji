@@ -37,6 +37,7 @@ function synthesizeRequestIntakeIndexNames(
   );
   const stores = buildDataStores(stack, {
     connectorRuntimeConfiguration,
+    teamIssueCommentIndexDeploymentStage: 'comment',
     triageIndexDeploymentStage: stage,
   });
   const requestTableResource = stores.requestIntakeTable.node.defaultChild;

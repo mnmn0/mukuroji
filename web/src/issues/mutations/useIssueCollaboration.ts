@@ -833,6 +833,11 @@ function deduplicateIssueComments(comments: TeamIssueComment[]) {
   return Array.from(commentsById.values())
 }
 
+/** Merges paginated canonical comments by their stable identifier. */
+export function mergeIssueComments(comments: TeamIssueComment[]) {
+  return deduplicateIssueComments(comments)
+}
+
 function mergeActivity(events: TeamIssueActivityEvent[]) {
   const eventsById = new Map<string, TeamIssueActivityEvent>()
 

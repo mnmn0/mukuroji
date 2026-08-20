@@ -12,6 +12,7 @@ const app = new cdk.App({
 });
 cdk.Validations.of(app).addPlugins(new AwsSolutionsChecks(app));
 const stack = new CdkStack(app, 'NagCheck', {
+  teamIssueCommentIndexDeploymentStage: 'comment',
   triageIndexDeploymentStage: 'wake',
 });
 acknowledgeKnownNagFindings(stack);

@@ -337,7 +337,9 @@ bash scripts/prepare-workspace-cognito.sh
 bun run cdk:build
 bun run cdk:test
 bun run cdk:synth
-bun --filter cdk cdk diff -c triageIndexDeploymentStage=wake \
+bun --filter cdk cdk diff \
+  -c triageIndexDeploymentStage=wake \
+  -c teamIssueCommentIndexDeploymentStage=comment \
   --parameters CognitoUserPoolId="$COGNITO_USER_POOL_ID" \
   --parameters CognitoUserPoolClientId="$COGNITO_USER_POOL_CLIENT_ID" \
   --parameters CognitoSsoUserPoolClientId="$COGNITO_SSO_USER_POOL_CLIENT_ID" \

@@ -459,6 +459,18 @@ export type WorkspaceSearchProjectionWriteOptions = {
   sourceRevision?: number
 }
 
+/** Canonical comment row used to fence one asynchronous Search projection. */
+export type WorkspaceSearchCommentProjectionFence = {
+  /** Collaboration table containing the canonical comment row. */
+  sourceTableName: string
+  /** Collaboration entity partition key containing the comment. */
+  sourceEntityKey: string
+  /** Canonical comment identifier used to derive the source sort key. */
+  sourceCommentId: string
+  /** Canonical comment version observed before the projection transaction. */
+  sourceRevision: number
+}
+
 /** Marks persisted projection content that disagrees with its server-owned digest. */
 class WorkspaceSearchProjectionDigestMismatchError extends WorkspaceSearchError {}
 
@@ -477,7 +489,7 @@ export type WorkspaceSearchClient = {
     entityType: SearchEntityType,
     entityId: string,
     options?: WorkspaceSearchProjectionWriteOptions,
-  ): Promise<void>
+  ): Promise<boolean>
   /** Composite filter と current RBAC を適用して検索します。 */
   search(input: WorkspaceSearchQueryInput): Promise<WorkspaceSearchResponse>
   /** Current viewer が参照できる saved views を page 取得します。 */
@@ -931,6 +943,22 @@ export function createWorkspaceSearchDocumentRecordKey(
   return `${WORKSPACE_SEARCH_DOCUMENT_PREFIX}${requireSearchEntityType(entityType)}#${encodeKeyPart(requireText(entityId, 'Search entity ID'))}`
 }
 
+/**
+ * Creates the stable Workspace Search entity ID for a Team Issue comment.
+ *
+ * @param teamId - Owning Team identifier.
+ * @param issueId - Team-local Work Item identifier.
+ * @param commentId - Canonical Collaboration comment identifier.
+ * @returns The entity ID shared by comment upsert and delete projections.
+ */
+export function createCommentWorkspaceSearchEntityId(
+  teamId: string,
+  issueId: string,
+  commentId: string,
+) {
+  return `team/${teamId}/issue/${issueId}/comment/${commentId}`
+}
+
 /** Saved view ID から definition record key を作成します。 */
 export function createSavedWorkspaceViewRecordKey(viewId: string) {
   return `${WORKSPACE_SAVED_VIEW_PREFIX}${requireIdentifier(viewId, 'Saved view ID')}`
@@ -1364,8 +1392,11 @@ export function createCommentWorkspaceSearchDocument(input: {
   createdAt?: string
   /** Comment の最終更新日時です。 */
   updatedAt?: string
+  /** Canonical comment version used to order asynchronous projections. */
+  sourceRevision?: number
 }) {
   const parentId = `team/${input.teamId}/issue/${input.issueId}`
+  const body = input.body.slice(0, WORKSPACE_SEARCH_STORED_BODY_MAX_LENGTH)
   const query = new URLSearchParams({
     issueId: input.issueId,
     commentId: input.commentId,
@@ -1374,16 +1405,17 @@ export function createCommentWorkspaceSearchDocument(input: {
   return createWorkspaceSearchDocument({
     workspaceId: input.workspaceId,
     entityType: 'comment',
-    entityId: `${parentId}/comment/${input.commentId}`,
-    title: createCommentSearchTitle(input.body),
+    entityId: createCommentWorkspaceSearchEntityId(input.teamId, input.issueId, input.commentId),
+    title: createCommentSearchTitle(body),
     ...(input.creatorUserId ? { subtitle: input.creatorUserId } : {}),
-    body: input.body,
+    body,
     url: `/teams/${encodeURIComponent(input.teamId)}/issues?${query.toString()}`,
     teamId: input.teamId,
     parentId,
     ...(input.creatorUserId ? { creatorUserId: input.creatorUserId } : {}),
     ...(input.createdAt ? { createdAt: input.createdAt } : {}),
     ...(input.updatedAt ? { updatedAt: input.updatedAt } : {}),
+    ...(input.sourceRevision !== undefined ? { sourceRevision: input.sourceRevision } : {}),
   })
 }
 
@@ -1490,13 +1522,130 @@ export class DynamoDbWorkspaceSearchClient {
     return document
   }
 
+  /**
+   * Upserts a comment projection while atomically fencing it to the current
+   * non-deleted canonical comment version.
+   *
+   * @param input - Search document to persist.
+   * @param fence - Canonical Collaboration row and version observed by the caller.
+   * @returns Whether the projection was written, source changed, or an existing projection was retained.
+   */
+  async upsertDocumentWithCommentSourceFence(
+    input: Parameters<typeof createWorkspaceSearchDocument>[0] | WorkspaceSearchDocument,
+    fence: WorkspaceSearchCommentProjectionFence,
+  ): Promise<'projected' | 'source-changed' | 'unchanged'> {
+    await this.ensureLocalTable()
+    const document = createWorkspaceSearchDocument(input)
+    const sourceRevision = normalizeProjectionSourceRevision(fence.sourceRevision)
+    if (document.sourceRevision !== sourceRevision) {
+      throw new WorkspaceSearchError(
+        409,
+        'InvalidSearchProjectionRevision',
+        'Search comment projection revision does not match its source fence.',
+      )
+    }
+
+    const existingResponse = await this.documentClient.send(new GetCommand({
+      TableName: this.tableName,
+      Key: {
+        workspaceId: requireText(document.workspaceId, 'Search Workspace ID'),
+        recordKey: document.recordKey,
+      },
+      ConsistentRead: true,
+    }))
+    if (isRecordValue(existingResponse.Item) &&
+        existingResponse.Item.sourceRevision === sourceRevision &&
+        existingResponse.Item.projectionDigest === document.projectionDigest) {
+      return 'unchanged'
+    }
+
+    try {
+      await this.documentClient.send(new TransactWriteCommand({
+        TransactItems: [
+          {
+            ConditionCheck: {
+              TableName: requireText(fence.sourceTableName, 'Search projection source table name'),
+              Key: {
+                entityKey: requireText(fence.sourceEntityKey, 'Search projection source entity key'),
+                recordKey: `COMMENT#${requireText(fence.sourceCommentId, 'Search projection source comment ID')}`,
+              },
+              ConditionExpression:
+                'attribute_exists(entityKey) AND attribute_exists(recordKey) AND ' +
+                'attribute_not_exists(deletedAt) AND #version = :sourceRevision',
+              ExpressionAttributeNames: { '#version': 'version' },
+              ExpressionAttributeValues: { ':sourceRevision': sourceRevision },
+            },
+          },
+          {
+            Put: {
+              TableName: this.tableName,
+              Item: document,
+              ConditionExpression:
+                'attribute_not_exists(#recordKey) OR attribute_not_exists(#sourceRevision) OR ' +
+                '#sourceRevision <= :sourceRevision',
+              ExpressionAttributeNames: {
+                '#recordKey': 'recordKey',
+                '#sourceRevision': 'sourceRevision',
+              },
+              ExpressionAttributeValues: { ':sourceRevision': sourceRevision },
+            },
+          },
+        ],
+      }))
+      return 'projected'
+    } catch (error) {
+      if (isTransactionConditionalCheckFailedAt(error, 0)) {
+        return 'source-changed'
+      }
+      if (isTransactionConditionalCheckFailedAt(error, 1)) {
+        return 'unchanged'
+      }
+      throw error
+    }
+  }
+
+  /**
+   * Deletes a comment projection and reports whether a stored row was removed.
+   *
+   * @param workspaceId - Workspace owning the projection.
+   * @param entityType - Search entity discriminator.
+   * @param entityId - Stable search entity identifier.
+   * @param options - Optional source revision fence.
+   * @returns Whether this invocation deleted an existing projection.
+   */
+  async deleteDocumentWithResult(
+    workspaceId: string,
+    entityType: SearchEntityType,
+    entityId: string,
+    options?: WorkspaceSearchProjectionWriteOptions,
+  ): Promise<boolean> {
+    await this.ensureLocalTable()
+    const sourceRevision = normalizeProjectionSourceRevision(options?.sourceRevision)
+    const response = await this.documentClient.send(new GetCommand({
+      TableName: this.tableName,
+      Key: {
+        workspaceId: requireText(workspaceId, 'Search Workspace ID'),
+        recordKey: createWorkspaceSearchDocumentRecordKey(entityType, entityId),
+      },
+      ConsistentRead: true,
+    }))
+    if (!response.Item) return false
+    if (sourceRevision !== undefined &&
+        isRecordValue(response.Item) &&
+        typeof response.Item.sourceRevision === 'number' &&
+        response.Item.sourceRevision > sourceRevision) {
+      return false
+    }
+    return this.deleteDocument(workspaceId, entityType, entityId, options)
+  }
+
   /** Search document を entity key で削除します。 */
   async deleteDocument(
     workspaceId: string,
     entityType: SearchEntityType,
     entityId: string,
     options?: WorkspaceSearchProjectionWriteOptions,
-  ) {
+  ): Promise<boolean> {
     await this.ensureLocalTable()
     const sourceRevision = normalizeProjectionSourceRevision(options?.sourceRevision)
     try {
@@ -1526,7 +1675,9 @@ export class DynamoDbWorkspaceSearchClient {
       if (sourceRevision === undefined || !isTransactionConditionalCheckFailed(error)) {
         throw error
       }
+      return false
     }
+    return true
   }
 
   /** Composite filter、current RBAC、cursor pagination を適用して検索します。 */
@@ -6453,6 +6604,18 @@ function isTransactionConditionalCheckFailed(error: unknown) {
   }).CancellationReasons
   return reasons?.some((reason) => reason.Code === 'ConditionalCheckFailed') ??
     error.message.includes('ConditionalCheckFailed')
+}
+
+/** Returns whether one transaction item failed its conditional guard. */
+function isTransactionConditionalCheckFailedAt(error: unknown, index: number) {
+  if (!(error instanceof Error) || error.name !== 'TransactionCanceledException') {
+    return false
+  }
+  if (!isRecordValue(error)) return false
+  const reasons = error.CancellationReasons
+  if (!Array.isArray(reasons)) return false
+  const reason = reasons[index]
+  return isRecordValue(reason) && reason.Code === 'ConditionalCheckFailed'
 }
 
 function isResourceNotFound(error: unknown) {

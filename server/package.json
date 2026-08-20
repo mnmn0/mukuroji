@@ -6,6 +6,7 @@
     "build:connector-lambda": "bun build src/handlers/connector-handler.ts --target node --format esm --outfile dist/lambda/connector-handler.mjs",
     "test": "bun test --max-concurrency 1 src scripts",
     "audit:backfill": "bun run scripts/backfills/backfill-audit-events.ts",
+    "team-issue-comments:backfill": "bun run scripts/backfills/backfill-team-issue-comments.ts",
     "search:backfill": "bun run scripts/backfills/backfill-workspace-search.ts",
     "search:migration:control": "bun run scripts/migrations/workspace-search-v1/migration-control-cli.ts",
     "search:migration:rehearsal:root": "bun run scripts/migrations/workspace-search-v1/migration-rehearsal-root-cli.ts",

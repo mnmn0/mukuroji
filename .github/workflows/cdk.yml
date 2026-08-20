@@ -42,4 +42,7 @@ jobs:
         run: bun run cdk:nag
 
       - name: Synthesize CloudFormation
-        run: bun --filter cdk cdk synth --quiet -c triageIndexDeploymentStage=wake
+        run: >-
+          bun --filter cdk cdk synth --quiet
+          -c triageIndexDeploymentStage=wake
+          -c teamIssueCommentIndexDeploymentStage=comment

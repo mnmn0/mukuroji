@@ -354,6 +354,78 @@ test('rejects legacy-only display fields on canonical rows', async () => {
   }
 })
 
+test('keeps legacy commented events in activity and exposes transitional comments', async () => {
+  const issueItem = {
+    schemaVersion: WORK_ITEM_SCHEMA_VERSION,
+    revision: 1,
+    workflowSchemaVersion: 1,
+    directoryId: 'workspace-1',
+    directoryTeamId: 'workspace-1#team#core-team',
+    teamId: 'core-team',
+    issueId: 'issue-1',
+    sortOrder: 1,
+    title: 'Canonical Work Item',
+    assigneeUserId: 'member@example.com',
+    creatorMemberKey: 'member@example.com',
+    workflowStatusId: 'todo',
+    statusCategory: 'unstarted',
+    customFieldValues: {},
+    relationIds: [],
+    dueDate: '2026-07-12',
+    schedule: createDueDateSchedule('2026-07-12'),
+    priority: 'medium',
+    createdAt: '2026-07-12T00:00:00.000Z',
+    updatedAt: '2026-07-12T00:00:00.000Z',
+  }
+  const commentedEvent = {
+    directoryId: 'workspace-1',
+    teamId: 'core-team',
+    issueId: 'issue-1',
+    directoryTeamIssueId: 'workspace-1#team#core-team#issue#issue-1',
+    eventId: '2026-07-12T00:02:00.000Z#commented',
+    eventType: 'commented',
+    actorUserId: 'member@example.com',
+    body: 'Historical comment',
+    summary: 'Comment was added.',
+    createdAt: '2026-07-12T00:02:00.000Z',
+  }
+  const documentClient = {
+    async send(command: { constructor: { name: string } }) {
+      if (command.constructor.name === 'GetCommand') {
+        return { Item: issueItem }
+      }
+      return { Items: [commentedEvent] }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'issues-table',
+    'events-table',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  const detail = await client.getTeamIssueDetail('workspace-1', 'core-team', 'issue-1')
+
+  expect(detail.comments).toEqual([
+    {
+      id: '2026-07-12T00:02:00.000Z#commented',
+      actorUserId: 'member@example.com',
+      body: 'Historical comment',
+      createdAt: '2026-07-12T00:02:00.000Z',
+    },
+  ])
+  expect(detail.activity).toEqual([
+    {
+      id: '2026-07-12T00:02:00.000Z#commented',
+      type: 'commented',
+      actorUserId: 'member@example.com',
+      summary: 'Comment was added.',
+      createdAt: '2026-07-12T00:02:00.000Z',
+    },
+  ])
+})
+
 test('serves the same authenticated API contract from Function URL root and /api paths', async () => {
   await withTestEnvironment(
     {

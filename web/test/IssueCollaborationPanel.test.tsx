@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { IssueCollaborationPanel } from '../src/issues/ui/IssueCollaborationPanel'
 import { IssueActivityTab } from '../src/issues/ui/IssueActivityTab'
+import { mergeIssueComments } from '../src/issues/mutations/useIssueCollaboration'
 import type { TeamIssueComment } from '../src/issues/api'
 import {
   acceptedResolutionHistoryFixtures,
@@ -41,7 +42,55 @@ describe('IssueCollaborationPanel', () => {
     expect(html).toContain('Demo User が解決策を採用しました。')
   })
 
-  test('orders roots by newest timestamp across collaboration pages', () => {
+  test('keeps the latest canonical comment when pages overlap', () => {
+    const persisted = issueCollaborationControllerFixture.comments[0]
+    const updated = {
+      ...persisted,
+      bodyMarkdown: 'Updated canonical comment',
+      version: persisted.version + 1,
+    }
+    const merged = mergeIssueComments([
+      persisted,
+      updated,
+    ])
+
+    expect(merged).toHaveLength(1)
+    expect(merged[0]).toEqual(updated)
+  })
+
+  test('renders canonical comments with reply and reaction actions', () => {
+    const canonicalComment = {
+      ...issueCollaborationControllerFixture.comments[0],
+      acceptedResolutions: [],
+      capabilities: {
+        canDelete: true,
+        canEdit: true,
+        canReact: true,
+        canReply: true,
+        canResolve: true,
+      },
+      resolvedAt: undefined,
+      resolvedByMemberKey: undefined,
+    }
+    const html = renderToStaticMarkup(
+      <IssueCollaborationPanel
+        controller={{
+          ...issueCollaborationControllerFixture,
+          comments: [canonicalComment],
+          hasMore: false,
+          replyPagination: {},
+        }}
+        currentMemberKey="demo@example.com"
+        locale="en"
+        members={collaborationWorkspaceMemberFixtures}
+      />,
+    )
+
+    expect(html).toContain('>Reply<')
+    expect(html).toContain('aria-label="Add reaction"')
+  })
+
+  test('orders roots by newest timestamp across canonical pages', () => {
     const rootComment = issueCollaborationControllerFixture.comments[0]
     const html = renderToStaticMarkup(
       <IssueCollaborationPanel
