@@ -159,6 +159,13 @@ function isTeamIssueComment(value: unknown): value is TeamIssueComment {
     Array.isArray(value.mentionMemberKeys) &&
     value.mentionMemberKeys.every((memberKey) => typeof memberKey === 'string') &&
     Array.isArray(value.reactions) &&
+    value.reactions.every(
+      (reaction) =>
+        isRecord(reaction) &&
+        typeof reaction.emoji === 'string' &&
+        typeof reaction.count === 'number' &&
+        typeof reaction.reactedByMe === 'boolean',
+    ) &&
     isRecord(capabilities) &&
     typeof capabilities.canEdit === 'boolean' &&
     typeof capabilities.canDelete === 'boolean' &&

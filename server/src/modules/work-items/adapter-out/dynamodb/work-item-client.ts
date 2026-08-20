@@ -78,6 +78,7 @@ import type {
   ResolvedWorkItemConfiguration,
   TriageEntry,
   TriageEntryEvent,
+  TeamIssueCommentResponseItem,
   WorkflowStatusCategory,
   WorkItemPriority,
   WorkItemRelation,
@@ -630,21 +631,6 @@ type PublicWorkItemPageCursor = {
 }
 
 /**
- * Team Issue detail and legacy-compatible comment creation responses use this
- * stable comment shape while the underlying row is stored canonically.
- */
-export type TeamIssueCommentResponseItem = {
-  /** Comment identifier. */
-  id: string
-  /** Workspace member key of the comment author. */
-  actorUserId: string
-  /** Markdown comment body. */
-  body: string
-  /** ISO 8601 creation timestamp. */
-  createdAt: string
-}
-
-/**
  * チーム Issue 活動履歴レスポンスです。
  */
 type TeamIssueActivityResponseItem = {
@@ -1020,7 +1006,7 @@ export type CreateTeamIssueCommentResponse = {
   comment: TeamIssueCommentResponseItem
   /**
    * コメント追加に対応する活動履歴です。
-  */
+   */
   activity: TeamIssueActivityResponseItem
 }
 

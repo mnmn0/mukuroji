@@ -120,7 +120,6 @@ export {
   type PublicWorkItemPageReadOptions,
   type RequestConversionTransactionInput,
   type TeamIssueDetailReadOptions,
-  type TeamIssueCommentResponseItem,
   type TeamIssueDetailResponse,
   type TeamIssueResponseItem,
   type TeamIssuesClient,
@@ -136,3 +135,4 @@ export {
   type WorkItemListReadOptions,
   type WorkItemAuthorizationSnapshot,
 } from './adapter-out/dynamodb/work-item-client'
+export type { TeamIssueCommentResponseItem } from '@mukuroji/contracts'
