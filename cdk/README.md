@@ -597,6 +597,7 @@ to the `comment` stage commands.
 export MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION=2026-07-28-01
 export MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE=rollout-pending
 export MUKUROJI_RESTORE_DRILL_CLEANUP_APPROVER_ROLE_ARN=arn:aws:iam::<account-id>:role/<data-owner-role>
+export MUKUROJI_TASK_API_ALLOWED_ORIGINS=https://app.example.com
 
 bun --filter cdk cdk diff CdkStack \
   -c triageIndexDeploymentStage=wake \
@@ -620,7 +621,7 @@ bun --filter cdk cdk diff CdkStack \
   --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
   --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
   --parameters WorkspaceSearchWriterFenceMode="$MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE" \
-  --parameters TaskApiAllowedOrigins=https://app.example.com
+  --parameters TaskApiAllowedOrigins="$MUKUROJI_TASK_API_ALLOWED_ORIGINS"
 
 bun --filter cdk cdk deploy CdkStack \
   -c triageIndexDeploymentStage=wake \
@@ -644,7 +645,7 @@ bun --filter cdk cdk deploy CdkStack \
   --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
   --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
   --parameters WorkspaceSearchWriterFenceMode="$MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE" \
-  --parameters TaskApiAllowedOrigins=https://app.example.com
+  --parameters TaskApiAllowedOrigins="$MUKUROJI_TASK_API_ALLOWED_ORIGINS"
 ```
 
 ```sh
@@ -652,6 +653,7 @@ bun --filter cdk cdk deploy CdkStack \
 export MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION=2026-07-28-01
 export MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE=rollout-pending
 export MUKUROJI_RESTORE_DRILL_CLEANUP_APPROVER_ROLE_ARN=arn:aws:iam::<account-id>:role/<data-owner-role>
+export MUKUROJI_TASK_API_ALLOWED_ORIGINS=https://app.example.com
 
 bun --filter cdk cdk diff CdkStack \
   -c triageIndexDeploymentStage=wake \
@@ -675,7 +677,7 @@ bun --filter cdk cdk diff CdkStack \
   --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
   --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
   --parameters WorkspaceSearchWriterFenceMode="$MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE" \
-  --parameters TaskApiAllowedOrigins=https://app.example.com
+  --parameters TaskApiAllowedOrigins="$MUKUROJI_TASK_API_ALLOWED_ORIGINS"
 
 bun --filter cdk cdk deploy CdkStack \
   -c triageIndexDeploymentStage=wake \
@@ -699,7 +701,7 @@ bun --filter cdk cdk deploy CdkStack \
   --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
   --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
   --parameters WorkspaceSearchWriterFenceMode="$MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE" \
-  --parameters TaskApiAllowedOrigins=https://app.example.com \
+  --parameters TaskApiAllowedOrigins="$MUKUROJI_TASK_API_ALLOWED_ORIGINS" \
   --outputs-file /tmp/mukuroji-cdk-outputs.json
 ```
 

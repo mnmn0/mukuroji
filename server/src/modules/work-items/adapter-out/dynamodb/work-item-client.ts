@@ -412,7 +412,7 @@ type TeamIssueActivityType =
   | 'triage-context-merged'
 
 /**
- * DynamoDB に保存する team issue item です。
+ * Team Issue item persisted in DynamoDB.
  */
 type TeamIssueItem = {
   /**
@@ -499,9 +499,7 @@ type TeamIssueItem = {
   dueDate: string
   /** Canonical schedule shared by every Work Item planning surface. */
   schedule: WorkItemSchedule
-  /**
-   * 優先度です。
-   */
+  /** Priority of the Work Item. */
   priority: WorkItemPriority
   /** Priority value の直近変更時刻です。 */
   priorityUpdatedAt?: string
@@ -4614,7 +4612,13 @@ export function readWorkItemExpectedRevision(value: unknown) {
   return value
 }
 
-/** Reads and validates the optional canonical Work Item priority input. */
+/**
+ * Reads and validates the optional canonical Work Item priority input.
+ *
+ * @param value - Untrusted priority input; `undefined` uses the `medium` default.
+ * @returns The validated Work Item priority, defaulting to `medium` when omitted.
+ * @throws {ProjectDataError} If the input is not a supported Work Item priority.
+ */
 function readWorkItemPriority(value: unknown): WorkItemPriority {
   if (value === undefined) {
     return 'medium'
