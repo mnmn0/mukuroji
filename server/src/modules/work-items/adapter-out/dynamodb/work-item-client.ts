@@ -3743,6 +3743,11 @@ function shouldBootstrapLocalDynamoDb() {
   return shouldBootstrapConfiguredLocalDynamoDb()
 }
 
+/** Returns whether an unknown AWS error indicates a missing resource. */
+function isResourceNotFoundError(error: unknown) {
+  return isAwsNamedError(error, 'ResourceNotFoundException')
+}
+
 function isResourceInUseError(error: unknown) {
   return isAwsNamedError(error, 'ResourceInUseException')
 }
