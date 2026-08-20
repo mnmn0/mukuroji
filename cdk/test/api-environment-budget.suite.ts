@@ -235,7 +235,6 @@ const expectedDataConfiguration = {
   ENTERPRISE_IDENTITY_TABLE_NAME: base64(
     ref('EnterpriseIdentityTable7491FB7A'),
   ),
-  MUKUROJI_PROJECT_TASKS_TABLE: base64(ref('ProjectTasksTableE21F6637')),
   MUKUROJI_TEAM_ISSUE_EVENTS_TABLE: base64(
     ref('TeamIssueEventsTableDD2B0F96'),
   ),

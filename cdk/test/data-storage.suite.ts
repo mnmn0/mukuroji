@@ -50,6 +50,21 @@ test('upgrade keeps stateful resource logical IDs and enables retain with PITR',
     }));
   }
 
+  expect(resources.ProjectTasksTableE21F6637.Properties).toEqual(expect.objectContaining({
+    AttributeDefinitions: [
+      { AttributeName: 'directoryProjectId', AttributeType: 'S' },
+      { AttributeName: 'taskId', AttributeType: 'S' },
+    ],
+    KeySchema: [
+      { AttributeName: 'directoryProjectId', KeyType: 'HASH' },
+      { AttributeName: 'taskId', KeyType: 'RANGE' },
+    ],
+    SSESpecification: {
+      SSEEnabled: true,
+    },
+  }));
+  expect(resources.ProjectTasksTableE21F6637.Properties.GlobalSecondaryIndexes).toBeUndefined();
+
   expect(resources.CapacityPlanningTable0EECD517.Properties)
     .toEqual(expect.objectContaining({
       SSESpecification: {

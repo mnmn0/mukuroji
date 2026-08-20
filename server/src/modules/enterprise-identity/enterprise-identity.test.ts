@@ -377,7 +377,7 @@ test('resolves route permissions with parameters and wildcard rules and denies u
     },
   ] satisfies EnterpriseRoutePermissionRule[]
 
-  expect(resolveRoutePermission('GET', '/api/projects/project-1/tasks', rules))
+  expect(resolveRoutePermission('GET', '/api/projects/project-1/issues', rules))
     .toBe('projects.read')
   expect(resolveRoutePermission('POST', '/api/enterprise/security/roles', rules))
     .toBe('security.manage')

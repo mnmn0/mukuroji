@@ -246,7 +246,7 @@ function readTenantOperationResourceOwnerConfig(): TenantOperationResourceOwnerC
     fileBucketName: requireEnvironment('FILE_BUCKET_NAME'),
     workItemImportBucketName: requireEnvironment('WORK_ITEM_IMPORT_BUCKET_NAME'),
     cognitoUserPoolId: requireEnvironment('COGNITO_USER_POOL_ID'),
-    legacyTasksTableName: requireEnvironment('MUKUROJI_PROJECT_TASKS_TABLE'),
+    legacyTasksTableName: requireEnvironment('LEGACY_PROJECT_TASKS_TABLE_NAME'),
     workItemsTableName: requireEnvironment('WORK_ITEMS_TABLE_NAME'),
     workItemEventsTableName: requireEnvironment('MUKUROJI_TEAM_ISSUE_EVENTS_TABLE'),
     workItemConfigurationTableName: requireEnvironment('WORK_ITEM_CONFIGURATION_TABLE_NAME'),

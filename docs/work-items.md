@@ -96,16 +96,13 @@ Work Item update は `expectedRevision` を必須にする。State update、acti
 
 Web は list/detail response の revision を mutation body に含める。`WorkItemRevisionConflict` では optimistic state を戻して再取得し、新しい revision で明示的に再試行する。
 
-## Read model と legacy adapter
+## Read model
 
 - Team list/detail と project list は同じ canonical store を読む。
 - `GET /api/work-items` は現在ユーザーが閲覧できる active Team の canonical Work Item を集約し、project 未割当も返す。
 - board、calendar、gantt、Workspace Home、My Tasks、Inbox、reports は canonical response と解決済み configuration を共有する。
 - `/api/teams/{teamId}/issues` と `/api/projects/{projectId}/issues` は canonical store を参照する API alias である。
-- `/api/projects/{projectId}/tasks` は Issue #20 の `source=legacy` read-only adapter である。Legacy response だけが固定 `status` と表示用 key を持ち、workflow field は持たない。
-- `ProjectTasksTable` への `Put`、`Update`、`TransactWriteItems` は API Lambda IAM でも許可しない。
-
-`source=legacy` は canonical schema へ変換して保存せず、canonical mutation API でも更新しない。新規 Workspace と demo seed は最初から strict canonical schema だけを作成する。
+- 新規 Workspace と demo seed は最初から strict canonical schema の Work Item だけを作成する。
 
 ## 運用
 

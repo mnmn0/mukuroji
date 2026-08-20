@@ -54,6 +54,7 @@ test('shared server handler is bundled as a Lambda asset with production environ
   ]);
   expect(variables)
     .not.toHaveProperty('MUKUROJI_WORK_ITEM_CONFIGURATION_TABLE');
+  expect(variables).not.toHaveProperty('TASKS_TABLE_NAME');
   for (const removedAlias of [
     'MUKUROJI_DOCUMENTS_TABLE',
     'MUKUROJI_PROJECT_DIRECTORY_ID',
@@ -61,7 +62,6 @@ test('shared server handler is bundled as a Lambda asset with production environ
     'MUKUROJI_WORK_ITEMS_TABLE',
     'MUKUROJI_TEAM_ISSUES_TABLE',
     'SYSTEM_ADMIN_GROUPS',
-    'TASKS_TABLE_NAME',
     'TEAM_ISSUES_TABLE_NAME',
     'TEAM_ISSUE_EVENTS_TABLE_NAME',
   ]) {
@@ -256,18 +256,12 @@ test('Function URL and API Gateway invoke the same live Lambda alias', () => {
     Principal: 'apigateway.amazonaws.com',
     SourceArn: Match.anyValue(),
   });
-  template.hasOutput('ProjectTasksFunctionUrl', {});
-  template.hasOutput('ProjectTasksApiGatewayUrl', {});
+  template.hasOutput('ApiFunctionUrl', {});
+  template.hasOutput('ApiGatewayUrl', {});
   template.hasOutput('WorkspaceDirectoryId', {
     Value: {
       Ref: 'WorkspaceDirectoryId',
     },
-  });
-  template.hasOutput('ProjectTasksApiUrl', {
-    Description: 'Backward-compatible alias for the Lambda Function URL.',
-  });
-  template.hasOutput('ProjectTasksTableName', {
-    Value: { Ref: 'ProjectTasksTableE21F6637' },
   });
   template.hasOutput('TeamIssuesTableName', {
     Value: { Ref: 'TeamIssuesTable189D851D' },
@@ -859,6 +853,10 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
   expect(JSON.stringify(transactionConditionCheckStatement)).not.toContain(
     developerPlatformTableId,
   );
+  expect(JSON.stringify(transactionConditionCheckStatement)).not.toContain(
+    'ProjectTasksTableE21F6637',
+  );
+  expect(serializedApiPolicies).not.toContain('ProjectTasksTableE21F6637');
   expect(serializedApiPolicies).toContain('DocumentsTable7E808EE5');
   expect(serializedApiPolicies).toContain('WorkspaceSearchTable2575AD6B');
   expect(serializedApiPolicies).toContain('kms:Decrypt');
@@ -869,8 +867,6 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
   expect(serializedApiPolicies).toContain('secretsmanager:GetSecretValue');
   expect(serializedApiPolicies).toContain(':secret:');
   expect(serializedApiPolicies).toContain('mukuroji/automation-webhooks/');
-  expect(JSON.stringify(transactionConditionCheckStatement))
-    .not.toContain('ProjectTasksTableE21F6637');
   expect(JSON.stringify(transactionConditionCheckStatement)).toContain('FileProofingTable');
   expect(serializedApiPolicies).not.toContain('dynamodb:TransactWriteItems');
   expect(auditTransactionStatements).toEqual(expect.arrayContaining([
@@ -1097,29 +1093,6 @@ test('API IAM is limited to the data tables and configured Cognito user pool', (
     'dynamodb:UpdateItem',
   ]));
 
-  const legacyTaskStatements = statements.filter((statement) =>
-    JSON.stringify(statement.Resource).includes('ProjectTasksTableE21F6637')
-  );
-  const legacyTaskActions = legacyTaskStatements.flatMap((statement) =>
-    Array.isArray(statement.Action) ? statement.Action : [statement.Action]
-  );
-
-  expect(legacyTaskStatements).not.toHaveLength(0);
-  expect(legacyTaskActions).toEqual(expect.arrayContaining([
-    'dynamodb:BatchGetItem',
-    'dynamodb:GetItem',
-    'dynamodb:Query',
-    'dynamodb:Scan',
-  ]));
-  for (const writeAction of [
-    'dynamodb:BatchWriteItem',
-    'dynamodb:DeleteItem',
-    'dynamodb:PutItem',
-    'dynamodb:TransactWriteItems',
-    'dynamodb:UpdateItem',
-  ]) {
-    expect(legacyTaskActions).not.toContain(writeAction);
-  }
   expect(JSON.stringify(cognitoStatement)).toContain('cognito-idp:ListUsers');
   expect(JSON.stringify(cognitoStatement)).toContain('cognito-idp:DescribeIdentityProvider');
   expect(JSON.stringify(cognitoStatement)).toContain('cognito-idp:DescribeUserPoolClient');

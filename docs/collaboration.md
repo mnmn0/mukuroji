@@ -10,7 +10,7 @@ Mukuroji のコメント、返信、watch、reaction、mention 通知、presence
 team/<teamId>/issue/<issueId>
 ```
 
-Collaboration table の partition key は workspace ID、entity type、上記 entity ID から構成します。Project watch は `project/<projectId>` を別 scope として保存します。legacy project task は read-only のため、新しい comment mutation の対象にはしません。
+Collaboration table の partition key は workspace ID、entity type、上記 entity ID から構成します。Project watch は `project/<projectId>` を別 scope として保存します。
 
 ## 保存モデル
 

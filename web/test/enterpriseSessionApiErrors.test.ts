@@ -3,7 +3,6 @@ import {
   getProjectDirectory,
   ProjectDirectoryApiError,
 } from '../src/projects/api'
-import { getProjectTasks, ProjectTasksApiError } from '../src/tasks/api'
 
 const originalFetch = globalThis.fetch
 
@@ -25,18 +24,6 @@ describe('enterprise session API error propagation', () => {
     })
   })
 
-  test('preserves a structured session code from the legacy project tasks API', async () => {
-    installErrorResponse(403, 'EnterpriseSessionReauthenticationRequired')
-
-    const error = await getProjectTasks('project-1', 'access-token')
-      .catch((reason: unknown) => reason)
-
-    expect(error).toBeInstanceOf(ProjectTasksApiError)
-    expect(error).toMatchObject({
-      code: 'EnterpriseSessionReauthenticationRequired',
-      status: 403,
-    })
-  })
 })
 
 function installErrorResponse(status: number, code: string) {

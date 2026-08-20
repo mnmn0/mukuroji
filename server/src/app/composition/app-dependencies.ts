@@ -49,10 +49,7 @@ import type { CapacityPlanningService } from '../../modules/capacity-planning'
 import type { RealtimeTicketsClient } from '../../modules/realtime/realtime-ticket'
 import type { RequestIntakeClient } from '../../modules/request-intake/request-intake'
 import type { TriageClient } from '../../modules/triage'
-import type {
-  ProjectTasksClient,
-  TeamIssuesClient,
-} from '../../modules/work-items'
+import type { TeamIssuesClient } from '../../modules/work-items'
 import type { WorkItemConfigurationClient } from '../../modules/work-items/work-item-configuration'
 import type {
   WorkItemImportExecutionStore,
@@ -157,8 +154,6 @@ export interface TriageCompositionClient extends TriageClient {
 
 /** Dependencies required by Work Item and collaboration routes. */
 export interface WorkItemDependencies {
-  /** Provides Project task persistence. */
-  projectTasks: ProjectTasksClient
   /** Provides Team Work Item persistence. */
   teamIssues: TeamIssuesClient
   /** Provides realtime ticket persistence. */

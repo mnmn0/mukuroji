@@ -34,7 +34,7 @@ describe('Focus cache revalidation', () => {
       'team-a',
       'WI-1',
     ], scope)).toBe(true)
-    expect(isFocusAffectedCacheKey(['project-tasks', 'token', 'project-a'], scope)).toBe(true)
+    expect(isFocusAffectedCacheKey(['project-issues', 'token', 'project-a'], scope)).toBe(true)
 
     expect(isFocusAffectedCacheKey(['team-issues', 'token', 'team-b'], scope)).toBe(false)
     expect(isFocusAffectedCacheKey([
@@ -43,7 +43,7 @@ describe('Focus cache revalidation', () => {
       'team-a',
       'WI-2',
     ], scope)).toBe(false)
-    expect(isFocusAffectedCacheKey(['project-tasks', 'token', 'project-b'], scope)).toBe(false)
+    expect(isFocusAffectedCacheKey(['project-issues', 'token', 'project-b'], scope)).toBe(false)
     expect(isFocusAffectedCacheKey(['planning-snapshot', 'token'], scope)).toBe(false)
     expect(isFocusAffectedCacheKey('workspace-work-items', scope)).toBe(false)
     expect(isFocusAffectedCacheKey(() => ['workspace-work-items'], scope)).toBe(false)
@@ -67,7 +67,7 @@ describe('Focus cache revalidation', () => {
       'team-b',
       'WI-2',
     ], scope)).toBe(true)
-    expect(isFocusAffectedCacheKey(['project-tasks', 'token', 'project-b'], scope)).toBe(true)
+    expect(isFocusAffectedCacheKey(['project-issues', 'token', 'project-b'], scope)).toBe(true)
   })
 
   test('immediately revalidates either Focus or Work Item conflicts only', async () => {

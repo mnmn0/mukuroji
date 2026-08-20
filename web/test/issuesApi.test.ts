@@ -155,6 +155,92 @@ describe('team issue collaboration API', () => {
     })
   })
 
+  test('rejects collaboration comments with malformed reactions at the API boundary', async () => {
+    installFetchRecorder({
+      comments: [
+        {
+          authorMemberKey: 'member-1',
+          bodyMarkdown: 'Comment body',
+          capabilities: {
+            canDelete: false,
+            canEdit: false,
+            canResolve: false,
+          },
+          createdAt: '2026-08-09T00:00:00.000Z',
+          id: 'comment-1',
+          mentionMemberKeys: [],
+          reactions: [{ count: '1', emoji: '👍', reactedByMe: false }],
+          rootCommentId: 'comment-1',
+          updatedAt: '2026-08-09T00:00:00.000Z',
+          version: 1,
+        },
+      ],
+    })
+
+    await expect(
+      getTeamIssueCollaboration('core', 'issue-1', 'token'),
+    ).rejects.toMatchObject({
+      code: 'InvalidIssueCollaborationResponse',
+      status: 502,
+    })
+  })
+
+  test('rejects collaboration comments with non-integral reaction counts', async () => {
+    installFetchRecorder({
+      comments: [{
+        authorMemberKey: 'member-1',
+        bodyMarkdown: 'Comment body',
+        capabilities: {
+          canDelete: false,
+          canEdit: false,
+          canResolve: false,
+        },
+        createdAt: '2026-08-09T00:00:00.000Z',
+        id: 'comment-1',
+        mentionMemberKeys: [],
+        reactions: [{ count: 1.5, emoji: '👍', reactedByMe: false }],
+        rootCommentId: 'comment-1',
+        updatedAt: '2026-08-09T00:00:00.000Z',
+        version: 1,
+      }],
+    })
+
+    await expect(
+      getTeamIssueCollaboration('core', 'issue-1', 'token'),
+    ).rejects.toMatchObject({
+      code: 'InvalidIssueCollaborationResponse',
+      status: 502,
+    })
+  })
+
+  test('rejects collaboration comments with negative reaction counts', async () => {
+    installFetchRecorder({
+      comments: [{
+        authorMemberKey: 'member-1',
+        bodyMarkdown: 'Comment body',
+        capabilities: {
+          canDelete: false,
+          canEdit: false,
+          canResolve: false,
+        },
+        createdAt: '2026-08-09T00:00:00.000Z',
+        id: 'comment-1',
+        mentionMemberKeys: [],
+        reactions: [{ count: -1, emoji: '👍', reactedByMe: false }],
+        rootCommentId: 'comment-1',
+        updatedAt: '2026-08-09T00:00:00.000Z',
+        version: 1,
+      }],
+    })
+
+    await expect(
+      getTeamIssueCollaboration('core', 'issue-1', 'token'),
+    ).rejects.toMatchObject({
+      code: 'InvalidIssueCollaborationResponse',
+      status: 502,
+    })
+  })
+
   test('rejects non-boolean per-comment capabilities at the API boundary', async () => {
     installFetchRecorder({
       comments: [{

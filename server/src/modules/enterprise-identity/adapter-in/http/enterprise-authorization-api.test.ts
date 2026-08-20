@@ -520,10 +520,10 @@ test('applies a directory-mapped custom role to only its assigned Project APIs',
     token_use: 'access',
   })}`
 
-  const allowed = await app.request('/api/projects/refero/tasks', {
+  const allowed = await app.request('/api/projects/refero/issues', {
     headers: { Authorization: authorization },
   })
-  const denied = await app.request('/api/projects/private-project/tasks', {
+  const denied = await app.request('/api/projects/private-project/issues', {
     headers: { Authorization: authorization },
   })
   const documentsPermissionDenied = await app.request(
@@ -950,7 +950,7 @@ test('applies a directory-mapped custom role to only its assigned Project APIs',
     },
   })
   setTestAppDependencies({ enterpriseIdentity: identity })
-  const drifted = await app.request('/api/projects/refero/tasks', {
+  const drifted = await app.request('/api/projects/refero/issues', {
     headers: { Authorization: authorization },
   })
   expect(drifted.status).toBe(403)
@@ -1003,7 +1003,7 @@ test('denies an ambiguous Project URL even when a qualified assignment matches o
       token_use: 'access',
     })}`
 
-    const response = await app.request('/api/projects/shared-launch/tasks', {
+    const response = await app.request('/api/projects/shared-launch/issues', {
       headers: { Authorization: authorization },
     })
 
@@ -1937,7 +1937,7 @@ test('enforces service-account Project scope before recording successful use', a
     })
     const headers = { Authorization: `Bearer ${issued.token}` }
 
-    const denied = await app.request('/api/projects/private-project/tasks', { headers })
+    const denied = await app.request('/api/projects/private-project/issues', { headers })
     expect(denied.status).toBe(403)
     expect(
       (await identity.getSnapshot('workspace-service-account'))
@@ -1995,7 +1995,7 @@ test('enforces service-account Project scope before recording successful use', a
       ),
     ).toBeFalse()
 
-    const allowed = await app.request('/api/projects/refero/tasks', { headers })
+    const allowed = await app.request('/api/projects/refero/issues', { headers })
     expect(allowed.status).toBe(200)
     expect(
       (await identity.getSnapshot('workspace-service-account'))
@@ -2008,7 +2008,7 @@ test('enforces service-account Project scope before recording successful use', a
       },
       source: {
         kind: 'api',
-        route: '/api/projects/refero/tasks',
+        route: '/api/projects/refero/issues',
       },
     })
     const quickAccessResponse = await app.request(

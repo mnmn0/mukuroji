@@ -5,10 +5,7 @@ const {
   resetTestApp,
   withTestEnvironment,
 } = createApiTestHarness()
-import {
-  DynamoDbProjectTasksClient,
-  DynamoDbTeamIssuesClient,
-} from './work-item-client'
+import { DynamoDbTeamIssuesClient } from './work-item-client'
 import {
   createMutationAuditContext,
 } from '../../../audit/audit'
@@ -203,253 +200,8 @@ function readTransactionUpdateValues(
   return undefined
 }
 
-test('DynamoDB task client initializes a missing local table before reading tasks', async () => {
-  const rawInputs: Array<Record<string, unknown>> = []
-  let queryAttempts = 0
-  const documentClient = {
-    async send(command: { input: Record<string, unknown> }) {
-      if ('KeyConditionExpression' in command.input) {
-        queryAttempts += 1
-
-        if (queryAttempts === 1) {
-          const error = new Error('missing table')
-          error.name = 'ResourceNotFoundException'
-          throw error
-        }
-
-        return { Items: [] }
-      }
-
-      return {}
-    },
-  } as unknown as DynamoDBDocumentClient
-  const dynamoDbClient = {
-    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
-      rawInputs.push({
-        ...command.input,
-        commandName: command.constructor.name,
-      })
-
-      if (command.constructor.name === 'DescribeTableCommand') {
-        return {
-          Table: {
-            GlobalSecondaryIndexes: [
-              {
-                IndexName: 'ProjectSortOrderIndex',
-                KeySchema: [
-                  { AttributeName: 'directoryProjectId', KeyType: 'HASH' },
-                  { AttributeName: 'sortOrder', KeyType: 'RANGE' },
-                ],
-              },
-            ],
-            KeySchema: [
-              { AttributeName: 'directoryProjectId', KeyType: 'HASH' },
-              { AttributeName: 'taskId', KeyType: 'RANGE' },
-            ],
-            TableStatus: 'ACTIVE',
-          },
-        }
-      }
-
-      return {}
-    },
-  } as unknown as DynamoDBClient
-  const client = new DynamoDbProjectTasksClient(
-    'MissingTasksTable',
-    documentClient,
-    dynamoDbClient,
-    true,
-  )
-
-  await expect(client.getProjectTasks('user#demo@example.com', 'new-project')).resolves.toEqual({
-    projectId: 'new-project',
-    tasks: [],
-  })
-  expect(rawInputs).toEqual([
-    expect.objectContaining({
-      commandName: 'CreateTableCommand',
-      TableName: 'MissingTasksTable',
-      KeySchema: [
-        { AttributeName: 'directoryProjectId', KeyType: 'HASH' },
-        { AttributeName: 'taskId', KeyType: 'RANGE' },
-      ],
-      GlobalSecondaryIndexes: [
-        expect.objectContaining({
-          IndexName: 'ProjectSortOrderIndex',
-        }),
-      ],
-    }),
-    expect.objectContaining({
-      commandName: 'DescribeTableCommand',
-      TableName: 'MissingTasksTable',
-    }),
-  ])
-})
-
-test('DynamoDB task client fails fast when a local table exists with the wrong schema', async () => {
-  let queryAttempts = 0
-  const documentClient = {
-    async send(command: { input: Record<string, unknown> }) {
-      if ('KeyConditionExpression' in command.input) {
-        queryAttempts += 1
-        const error = new Error('missing index')
-        error.name = 'ResourceNotFoundException'
-        throw error
-      }
-
-      return {}
-    },
-  } as unknown as DynamoDBDocumentClient
-  const dynamoDbClient = {
-    async send(command: { constructor: { name: string } }) {
-      if (command.constructor.name === 'CreateTableCommand') {
-        const error = new Error('table exists')
-        error.name = 'ResourceInUseException'
-        throw error
-      }
-
-      if (command.constructor.name === 'DescribeTableCommand') {
-        return {
-          Table: {
-            KeySchema: [
-              { AttributeName: 'directoryProjectId', KeyType: 'HASH' },
-              { AttributeName: 'taskId', KeyType: 'RANGE' },
-            ],
-            TableStatus: 'ACTIVE',
-          },
-        }
-      }
-
-      return {}
-    },
-  } as unknown as DynamoDBClient
-  const client = new DynamoDbProjectTasksClient(
-    'BrokenTasksTable',
-    documentClient,
-    dynamoDbClient,
-    true,
-  )
-
-  await expect(
-    client.getProjectTasks('user#demo@example.com', 'broken-project'),
-  ).rejects.toThrow('does not match the expected schema')
-  expect(queryAttempts).toBe(1)
-})
-
-test('DynamoDB task client queries the scoped project partition across pages', async () => {
+test('DynamoDB Work Item list clients stop pagination at the requested read limit', async () => {
   const sentInputs: Array<Record<string, unknown>> = []
-  const documentClient = {
-    async send(command: { input: Record<string, unknown> }) {
-      sentInputs.push(command.input)
-
-      if (sentInputs.length === 1) {
-        return {
-          Items: [
-            {
-              directoryId: 'user#demo@example.com',
-              directoryProjectId: 'user#demo@example.com#project#refero',
-              projectId: 'refero',
-              taskId: 'wireframe',
-              sortOrder: 10,
-              titleKey: 'tasks.item.wireframe',
-              assigneeKey: 'tasks.assignee.sato',
-              status: 'in-progress',
-              dueDate: '2026/06/03',
-              priority: 'high',
-            },
-          ],
-          LastEvaluatedKey: {
-            directoryProjectId: 'user#demo@example.com#project#refero',
-            taskId: 'wireframe',
-          },
-        }
-      }
-
-      return {
-        Items: [
-          {
-            directoryId: 'user#demo@example.com',
-            directoryProjectId: 'user#demo@example.com#project#refero',
-            projectId: 'refero',
-            taskId: 'brand-guideline',
-            sortOrder: 20,
-            titleKey: 'tasks.item.brandGuideline',
-            assigneeKey: 'tasks.assignee.suzuki',
-            status: 'review',
-            dueDate: '2026/06/05',
-            priority: 'medium',
-          },
-        ],
-      }
-    },
-  } as unknown as DynamoDBDocumentClient
-  const client = new DynamoDbProjectTasksClient('TasksTable', documentClient)
-
-  await expect(client.getProjectTasks('user#demo@example.com', 'refero')).resolves.toEqual({
-    projectId: 'refero',
-    tasks: [
-      {
-        source: 'legacy',
-        id: 'wireframe',
-        titleKey: 'tasks.item.wireframe',
-        assigneeKey: 'tasks.assignee.sato',
-        status: 'in-progress',
-        dueDate: '2026/06/03',
-        priority: 'high',
-      },
-      {
-        source: 'legacy',
-        id: 'brand-guideline',
-        titleKey: 'tasks.item.brandGuideline',
-        assigneeKey: 'tasks.assignee.suzuki',
-        status: 'review',
-        dueDate: '2026/06/05',
-        priority: 'medium',
-      },
-    ],
-  })
-  expect(sentInputs).toEqual([
-    {
-      TableName: 'TasksTable',
-      IndexName: 'ProjectSortOrderIndex',
-      KeyConditionExpression: 'directoryProjectId = :directoryProjectId',
-      ExpressionAttributeValues: {
-        ':directoryProjectId': 'user#demo@example.com#project#refero',
-      },
-      ExclusiveStartKey: undefined,
-      ScanIndexForward: true,
-    },
-    {
-      TableName: 'TasksTable',
-      IndexName: 'ProjectSortOrderIndex',
-      KeyConditionExpression: 'directoryProjectId = :directoryProjectId',
-      ExpressionAttributeValues: {
-        ':directoryProjectId': 'user#demo@example.com#project#refero',
-      },
-      ExclusiveStartKey: {
-        directoryProjectId: 'user#demo@example.com#project#refero',
-        taskId: 'wireframe',
-      },
-      ScanIndexForward: true,
-    },
-  ])
-})
-
-test('DynamoDB task and Work Item list clients stop pagination at the requested read limit', async () => {
-  const sentInputs: Array<Record<string, unknown>> = []
-  const legacyTask = {
-    directoryId: 'user#demo@example.com',
-    directoryProjectId: 'user#demo@example.com#project#refero',
-    projectId: 'refero',
-    taskId: 'wireframe',
-    sortOrder: 10,
-    title: 'Wireframe',
-    assigneeUserId: 'sato@example.com',
-    creatorMemberKey: 'demo@example.com',
-    status: 'todo',
-    dueDate: '2026/06/03',
-    priority: 'high',
-  }
   const canonicalWorkItem = {
     schemaVersion: WORK_ITEM_SCHEMA_VERSION,
     revision: 1,
@@ -478,17 +230,11 @@ test('DynamoDB task and Work Item list clients stop pagination at the requested 
     async send(command: { input: Record<string, unknown> }) {
       sentInputs.push(command.input)
       return {
-        Items: [command.input.TableName === 'LegacyTasksTable' ? legacyTask : canonicalWorkItem],
+        Items: [canonicalWorkItem],
         LastEvaluatedKey: { more: true },
       }
     },
   } as unknown as DynamoDBDocumentClient
-  const projectTasksClient = new DynamoDbProjectTasksClient(
-    'LegacyTasksTable',
-    documentClient,
-    {} as DynamoDBClient,
-    false,
-  )
   const workItemsClient = new DynamoDbTeamIssuesClient(
     'WorkItemsTable',
     'IssueEventsTable',
@@ -497,15 +243,123 @@ test('DynamoDB task and Work Item list clients stop pagination at the requested 
     false,
   )
 
-  await projectTasksClient.getProjectTasks('user#demo@example.com', 'refero', { limit: 1 })
   await workItemsClient.getTeamIssues('user#demo@example.com', 'core-team', { limit: 1 })
   await workItemsClient.getProjectIssues('user#demo@example.com', 'refero', { limit: 1 })
 
-  expect(sentInputs).toHaveLength(3)
-  expect(sentInputs.map((input) => input.Limit)).toEqual([1, 1, 1])
+  expect(sentInputs).toHaveLength(2)
+  expect(sentInputs.map((input) => input.Limit)).toEqual([1, 1])
 })
 
-test('DynamoDB task and Work Item list clients skip DynamoDB reads when limit is zero', async () => {
+test('DynamoDB local bootstrap adds missing Team Issue event indexes in stages', async () => {
+  await withTestEnvironment({ DYNAMODB_ENDPOINT: 'http://localhost:8000' }, async () => {
+    const eventIndexes = new Set<string>()
+    let updateCalls = 0
+    const dynamoDbClient = {
+      async send(command: { constructor: { name: string }; input: Record<string, unknown> }) {
+        if (command.constructor.name === 'CreateTableCommand') {
+          throw Object.assign(new Error('Table already exists.'), {
+            name: 'ResourceInUseException',
+          })
+        }
+        if (command.constructor.name === 'UpdateTableCommand') {
+          updateCalls += 1
+          eventIndexes.add(
+            updateCalls === 1
+              ? 'TeamIssueEventCreatedAtIndex'
+              : 'TeamIssueCommentCreatedAtIndex',
+          )
+          return {}
+        }
+        if (command.constructor.name !== 'DescribeTableCommand') {
+          throw new Error(`Unexpected DynamoDB command: ${command.constructor.name}`)
+        }
+
+        if (command.input.TableName === 'WorkItemsTable') {
+          return {
+            Table: {
+              TableStatus: 'ACTIVE',
+              KeySchema: [
+                { AttributeName: 'directoryTeamId', KeyType: 'HASH' },
+                { AttributeName: 'issueId', KeyType: 'RANGE' },
+              ],
+              GlobalSecondaryIndexes: [
+                {
+                  IndexName: 'TeamIssueSortOrderIndex',
+                  KeySchema: [
+                    { AttributeName: 'directoryTeamId', KeyType: 'HASH' },
+                    { AttributeName: 'sortOrder', KeyType: 'RANGE' },
+                  ],
+                },
+                {
+                  IndexName: 'AssignedProjectIssueIndex',
+                  KeySchema: [
+                    { AttributeName: 'directoryProjectId', KeyType: 'HASH' },
+                    { AttributeName: 'sortOrder', KeyType: 'RANGE' },
+                  ],
+                },
+                {
+                  IndexName: 'TeamIssueUpdatedAtIndex',
+                  KeySchema: [
+                    { AttributeName: 'directoryTeamId', KeyType: 'HASH' },
+                    { AttributeName: 'updatedAt', KeyType: 'RANGE' },
+                  ],
+                },
+              ],
+            },
+          }
+        }
+
+        return {
+          Table: {
+            TableStatus: 'ACTIVE',
+            KeySchema: [
+              { AttributeName: 'directoryTeamIssueId', KeyType: 'HASH' },
+              { AttributeName: 'eventId', KeyType: 'RANGE' },
+            ],
+            GlobalSecondaryIndexes: [...eventIndexes].map((indexName) => ({
+              IndexName: indexName,
+              KeySchema: [
+                { AttributeName: 'directoryTeamIssueId', KeyType: 'HASH' },
+                {
+                  AttributeName: indexName === 'TeamIssueEventCreatedAtIndex'
+                    ? 'createdAt'
+                    : 'commentCreatedAtOrder',
+                  KeyType: 'RANGE',
+                },
+              ],
+            })),
+          },
+        }
+      },
+    } as unknown as DynamoDBClient
+    const documentClient = {
+      async send(command: { constructor: { name: string } }) {
+        if (command.constructor.name === 'GetCommand') {
+          return { Item: createScheduleCascadeIssue('core', 'canonical-work-item') }
+        }
+        return { Items: [] }
+      },
+    } as unknown as DynamoDBDocumentClient
+    const client = new DynamoDbTeamIssuesClient(
+      'WorkItemsTable',
+      'IssueEventsTable',
+      documentClient,
+      dynamoDbClient,
+      true,
+      '',
+    )
+
+    await expect(client.getTeamIssueDetail(
+      'workspace-1',
+      'core',
+      'canonical-work-item',
+      { eventLimit: 0 },
+    )).resolves.toMatchObject({ comments: [] })
+    expect(updateCalls).toBe(2)
+  })
+})
+
+test('DynamoDB Work Item list clients skip DynamoDB reads when limit is zero', async () => {
   const sentInputs: Array<Record<string, unknown>> = []
   const documentClient = {
     async send(command: { input: Record<string, unknown> }) {
@@ -513,12 +367,6 @@ test('DynamoDB task and Work Item list clients skip DynamoDB reads when limit is
       return {}
     },
   } as unknown as DynamoDBDocumentClient
-  const projectTasksClient = new DynamoDbProjectTasksClient(
-    'LegacyTasksTable',
-    documentClient,
-    {} as DynamoDBClient,
-    false,
-  )
   const workItemsClient = new DynamoDbTeamIssuesClient(
     'WorkItemsTable',
     'IssueEventsTable',
@@ -527,9 +375,6 @@ test('DynamoDB task and Work Item list clients skip DynamoDB reads when limit is
     false,
   )
 
-  await expect(
-    projectTasksClient.getProjectTasks('user#demo@example.com', 'refero', { limit: 0 }),
-  ).resolves.toMatchObject({ tasks: [] })
   await expect(
     workItemsClient.getTeamIssues('user#demo@example.com', 'core-team', { limit: 0 }),
   ).resolves.toMatchObject({ issues: [] })
@@ -816,7 +661,7 @@ test('DynamoDB Team Work Item detail falls back when the comment index is stale'
   })
   expect(queryInputs).toHaveLength(4)
   expect(queryInputs.some((input) =>
-    input.IndexName === 'TeamIssueEventCreatedAtIndex' && input.Limit === undefined,
+    input.IndexName === 'TeamIssueEventCreatedAtIndex' && input.Limit === 500,
   )).toBe(true)
   expect(queryInputs.some((input) =>
     input.IndexName === undefined &&
@@ -828,6 +673,170 @@ test('DynamoDB Team Work Item detail falls back when the comment index is stale'
     input.ConsistentRead === true &&
     input.ProjectionExpression === undefined,
   )).toBe(true)
+})
+
+test('DynamoDB Team Work Item legacy comment fallback stops at its read budget', async () => {
+  const queryInputs: Array<Record<string, unknown>> = []
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      if (command.constructor.name === 'GetCommand') {
+        return { Item: createScheduleCascadeIssue('core', 'canonical-work-item') }
+      }
+      queryInputs.push(command.input)
+      if (command.input.IndexName === 'TeamIssueCommentCreatedAtIndex') {
+        throw Object.assign(new Error('Comment index is not active yet.'), {
+          name: 'ResourceNotFoundException',
+        })
+      }
+      return {
+        Items: [{
+          directoryId: 'workspace-1',
+          directoryTeamIssueId: 'workspace-1#team#core#issue#canonical-work-item',
+          teamId: 'core',
+          issueId: 'canonical-work-item',
+          eventId: 'comment-event',
+          eventType: 'commented',
+          actorUserId: 'sato@example.com',
+          body: 'Older comment',
+          summary: 'Commented',
+          createdAt: '2026-07-12T00:00:00.000Z',
+          commentCreatedAtOrder: '2026-07-12T00:00:00.000Z#comment-event',
+        }],
+        LastEvaluatedKey: { more: true },
+        ScannedCount: 500,
+      }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  await expect(client.getTeamIssueDetail(
+    'workspace-1',
+    'core',
+    'canonical-work-item',
+    {
+      eventLimit: 1,
+      eventType: 'commented',
+      newestEventsFirst: true,
+    },
+  )).rejects.toMatchObject({
+    status: 503,
+    code: 'InvalidTeamIssue',
+  })
+  expect(queryInputs).toEqual([
+    expect.objectContaining({ IndexName: 'TeamIssueCommentCreatedAtIndex' }),
+    expect.objectContaining({
+      IndexName: 'TeamIssueEventCreatedAtIndex',
+      Limit: 500,
+    }),
+  ])
+})
+
+test('DynamoDB Team Work Item legacy comment fallback shares one read budget across validation stages', async () => {
+  const queryInputs: Array<Record<string, unknown>> = []
+  let scannedRows = 0
+  const documentClient = {
+    async send(command: { input: Record<string, unknown>; constructor: { name: string } }) {
+      if (command.constructor.name === 'GetCommand') {
+        return { Item: createScheduleCascadeIssue('core', 'canonical-work-item') }
+      }
+      queryInputs.push(command.input)
+      if (command.input.IndexName === 'TeamIssueCommentCreatedAtIndex') {
+        throw Object.assign(new Error('Comment index is not active yet.'), {
+          name: 'ResourceNotFoundException',
+        })
+      }
+      if (command.input.IndexName === 'TeamIssueEventCreatedAtIndex') {
+        scannedRows += 250
+        return {
+          Items: [{
+            directoryId: 'workspace-1',
+            directoryTeamIssueId: 'workspace-1#team#core#issue#canonical-work-item',
+            teamId: 'core',
+            issueId: 'canonical-work-item',
+            eventId: 'indexed-comment-event',
+            eventType: 'commented',
+            actorUserId: 'sato@example.com',
+            body: 'Indexed comment',
+            summary: 'Commented',
+            createdAt: '2026-07-12T00:00:00.000Z',
+            commentCreatedAtOrder: '2026-07-12T00:00:00.000Z#indexed-comment-event',
+          }],
+          ScannedCount: 250,
+        }
+      }
+      if (command.input.ProjectionExpression !== undefined) {
+        scannedRows += 249
+        return {
+          Items: [{
+            createdAt: '2026-07-12T00:00:00.000Z',
+            eventId: 'coverage-comment-event',
+            eventType: 'commented',
+          }],
+          ScannedCount: 249,
+        }
+      }
+      scannedRows += 1
+      return {
+        Items: [{
+          directoryId: 'workspace-1',
+          directoryTeamIssueId: 'workspace-1#team#core#issue#canonical-work-item',
+          teamId: 'core',
+          issueId: 'canonical-work-item',
+          eventId: 'base-comment-event',
+          eventType: 'commented',
+          actorUserId: 'sato@example.com',
+          body: 'Base comment',
+          summary: 'Commented',
+          createdAt: '2026-07-12T00:00:00.000Z',
+          commentCreatedAtOrder: '2026-07-12T00:00:00.000Z#base-comment-event',
+        }],
+        ScannedCount: 1,
+        LastEvaluatedKey: { more: true },
+      }
+    },
+  } as unknown as DynamoDBDocumentClient
+  const client = new DynamoDbTeamIssuesClient(
+    'WorkItemsTable',
+    'IssueEventsTable',
+    documentClient,
+    {} as DynamoDBClient,
+    false,
+  )
+
+  await expect(client.getTeamIssueDetail(
+    'workspace-1',
+    'core',
+    'canonical-work-item',
+    {
+      eventLimit: 1,
+      eventType: 'commented',
+      newestEventsFirst: true,
+    },
+  )).rejects.toMatchObject({
+    status: 503,
+    code: 'InvalidTeamIssue',
+  })
+  expect(scannedRows).toBe(500)
+  expect(queryInputs).toHaveLength(4)
+  expect(queryInputs[0]?.IndexName).toBe('TeamIssueCommentCreatedAtIndex')
+  expect(queryInputs[1]).toMatchObject({
+    IndexName: 'TeamIssueEventCreatedAtIndex',
+    Limit: 500,
+  })
+  expect(queryInputs[2]).toMatchObject({
+    Limit: 250,
+    ProjectionExpression: expect.any(String),
+  })
+  expect(queryInputs[2]?.IndexName).toBeUndefined()
+  expect(queryInputs[3]).toMatchObject({ Limit: 1 })
+  expect(queryInputs[3]?.IndexName).toBeUndefined()
+  expect(queryInputs[3]?.ProjectionExpression).toBeUndefined()
 })
 
 test('DynamoDB Team Work Item comment preview orders offset timestamps by instant', async () => {
@@ -999,7 +1008,7 @@ test('DynamoDB Team Work Item comment preview falls back while the comment index
     }),
   ]))
   expect(queryInputs.some((input) =>
-    input.IndexName === 'TeamIssueEventCreatedAtIndex' && !('Limit' in input),
+    input.IndexName === 'TeamIssueEventCreatedAtIndex' && input.Limit === 500,
   )).toBe(true)
 })
 

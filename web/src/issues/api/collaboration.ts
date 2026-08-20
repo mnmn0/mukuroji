@@ -77,7 +77,7 @@ export type GetTeamIssueCollaborationOptions = {
 }
 
 const issuesApiBaseUrl = trimTrailingSlash(
-  import.meta.env.VITE_TASKS_API_BASE_URL ?? import.meta.env.VITE_API_BASE_URL ?? '/api',
+  import.meta.env.VITE_API_BASE_URL ?? '/api',
 )
 
 /**
@@ -159,6 +159,15 @@ function isTeamIssueComment(value: unknown): value is TeamIssueComment {
     Array.isArray(value.mentionMemberKeys) &&
     value.mentionMemberKeys.every((memberKey) => typeof memberKey === 'string') &&
     Array.isArray(value.reactions) &&
+    value.reactions.every(
+      (reaction) =>
+        isRecord(reaction) &&
+        typeof reaction.emoji === 'string' &&
+        typeof reaction.count === 'number' &&
+        Number.isSafeInteger(reaction.count) &&
+        reaction.count >= 0 &&
+        typeof reaction.reactedByMe === 'boolean',
+    ) &&
     isRecord(capabilities) &&
     typeof capabilities.canEdit === 'boolean' &&
     typeof capabilities.canDelete === 'boolean' &&

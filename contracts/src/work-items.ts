@@ -441,6 +441,18 @@ type WorkItemBase = {
   approvalSummary?: ApprovalSummary
 }
 
+/** Stable comment projection embedded in Work Item detail and comment responses. */
+export type TeamIssueCommentResponseItem = {
+  /** Stable comment identifier. */
+  id: string
+  /** Workspace member key of the comment author. */
+  actorUserId: string
+  /** Markdown comment body. */
+  body: string
+  /** ISO 8601 creation timestamp. */
+  createdAt: string
+}
+
 /** DynamoDB に保存された canonical Work Item の API contract です。 */
 export type CanonicalWorkItem = WorkItemBase & {
   /** API から取得した literal のタイトルです。 */

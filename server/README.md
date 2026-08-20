@@ -228,7 +228,7 @@ Bun server は canonical path を直接公開するため `http://localhost:3000
 - `POST /api/teams`, `GET /api/teams/projects`
 - `/api/teams/{teamId}/issues`
 - `/api/teams/{teamId}/issues/{issueId}/collaboration`, `/comments`, `/watch`, `/presence`
-- `/api/projects/{projectId}/tasks`, `/issues`, `/members`, `/users`, `/watch`
+- `/api/projects/{projectId}/issues`, `/members`, `/users`, `/watch`
 - `/api/notifications`, `/api/notifications/unread-count`, `/api/notification-preferences`
 - `/api/request-forms`, `/api/request-queue`, `/api/request-submissions/{submissionId}`
 - `/api/request-intake/{token}`, `GET /api/request-threads/{threadToken}`, `/api/request-threads/{threadToken}/replies`
@@ -243,7 +243,6 @@ The local API reads DynamoDB through `DYNAMODB_ENDPOINT`, `AWS_ENDPOINT_URL_DYNA
 Default local table names are:
 
 - `MUKUROJI_DASHBOARD_TABLE=mukuroji-dashboard-local`
-- `MUKUROJI_PROJECT_TASKS_TABLE=mukuroji-project-tasks-v2-local`
 - `MUKUROJI_PROJECT_DIRECTORY_TABLE=mukuroji-project-directory-local`
 - `MUKUROJI_COLLABORATION_TABLE=mukuroji-collaboration-local`
 - `MUKUROJI_DOCUMENTS_TABLE` / `DOCUMENTS_TABLE_NAME`（未指定時は `mukuroji-documents-local`）
@@ -280,7 +279,7 @@ Default local table names are:
 
 Project directory rows are scoped by the authenticated Cognito user's Workspace claims.
 The local Floci seed writes `workspace#mukuroji-local` to both `custom:directory_id` and
-`custom:workspace_id`. Project task rows are queried by
+`custom:workspace_id`. Canonical Work Items assigned to a Project are queried by
 `workspace#mukuroji-local#project#<projectId>`.
 
 API の access-token validator は `client_id` が `COGNITO_CLIENT_ID` または

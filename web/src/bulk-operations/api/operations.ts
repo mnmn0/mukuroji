@@ -3,7 +3,7 @@ import { createMutationHeaders, type MutationRequestContext } from '../../shared
 import { BulkOperationsApiError } from './errors'
 
 const bulkOperationsApiBaseUrl = trimTrailingSlash(
-  import.meta.env.VITE_TASKS_API_BASE_URL ?? import.meta.env.VITE_API_BASE_URL ?? '/api',
+  import.meta.env.VITE_API_BASE_URL ?? '/api',
 )
 
 /** Preview token と確定対象 request をまとめた apply payload です。 */

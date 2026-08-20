@@ -107,7 +107,6 @@ import {
   type WorkItemConfigurationClient,
 } from '../../modules/work-items/work-item-configuration'
 import {
-  DynamoDbProjectTasksClient,
   DynamoDbTeamIssuesClient,
   createWorkItemRevisionConditionCheck,
   type TeamIssuesClient,
@@ -511,7 +510,6 @@ export function createProductionWorkItemDependencies(): WorkItemDependencies {
     createTriageActionReferenceValidator(projectDirectory, workspaceAccess),
   )
   return {
-    projectTasks: new DynamoDbProjectTasksClient(),
     teamIssues,
     realtimeTickets: new DynamoDbRealtimeTicketsClient(),
     collaboration: new DynamoDbCollaborationClient(),
@@ -1288,7 +1286,6 @@ export function overrideAppDependencies(
     },
     workItems: {
       ...dependencies.workItems,
-      ...(overrides.projectTasks ? { projectTasks: overrides.projectTasks } : {}),
       ...(overrides.teamIssues ? { teamIssues: overrides.teamIssues } : {}),
       ...(overrides.realtimeTickets
         ? { realtimeTickets: overrides.realtimeTickets }

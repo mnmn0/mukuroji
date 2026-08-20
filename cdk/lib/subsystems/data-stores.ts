@@ -27,7 +27,7 @@ export interface DataStoreBuilderInput {
  * Stateful resources shared by API, worker, storage, bootstrap, and output subsystems.
  */
 export type DataStoreResources = {
-  /** Legacy project task table retained for compatibility reads. */
+  /** Legacy Project Task table retained only for tenant decommission cleanup. */
   readonly legacyTasksTable: dynamodb.Table;
   /** Canonical team-owned Work Item table. */
   readonly workItemsTable: dynamodb.Table;
@@ -102,15 +102,9 @@ export function buildDataStores(
     partitionKey: { name: 'directoryProjectId', type: dynamodb.AttributeType.STRING },
     sortKey: { name: 'taskId', type: dynamodb.AttributeType.STRING },
     billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+    encryption: dynamodb.TableEncryption.AWS_MANAGED,
     pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
     removalPolicy: cdk.RemovalPolicy.RETAIN,
-  });
-
-  legacyTasksTable.addGlobalSecondaryIndex({
-    indexName: 'ProjectSortOrderIndex',
-    partitionKey: { name: 'directoryProjectId', type: dynamodb.AttributeType.STRING },
-    sortKey: { name: 'sortOrder', type: dynamodb.AttributeType.NUMBER },
-    projectionType: dynamodb.ProjectionType.ALL,
   });
 
   const workItemsTable = new dynamodb.Table(stack, 'TeamIssuesTable', {

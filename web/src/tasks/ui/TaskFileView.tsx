@@ -102,7 +102,7 @@ export function TaskFileView({
 }
 
 /**
- * Renders the legacy task metadata table used when no project-file controller is available.
+ * Renders the task metadata table used when no project-file controller is available.
  *
  * @param props - Tasks, workflow configurations, and localization inputs.
  * @returns The fallback task file list.

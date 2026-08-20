@@ -119,10 +119,8 @@ real metricによる`OK → ALARM → OK`と両receiptの手順は
 
 ## Outputs
 
-- `ProjectTasksFunctionUrl`: Lambda Function URL
-- `ProjectTasksApiGatewayUrl`: API Gateway HTTP API URL
-- `ProjectTasksApiUrl`: Function URL の後方互換 output
-- `ProjectTasksTableName`（legacy read-only compatibility）
+- `ApiFunctionUrl`: Lambda Function URL
+- `ApiGatewayUrl`: API Gateway HTTP API URL
 - `WorkItemsTableName`（既存 `TeamIssuesTable` を昇格した canonical store）
 - `TeamIssuesTableName`（`WorkItemsTableName` と同じ table を指す互換 output）
 - `WorkItemConfigurationTableName`（workflow、custom field、relation graph の scope store）
@@ -173,9 +171,8 @@ Document public-share secretを含む5つのnested secretはAPI roleだけが読
 identity/revision、全canonical key、nested secretを検証し終えてから環境へ原子的に反映します。
 
 この仕組みを初めてdeployすると、既存の自動命名Lambdaから明示名末尾`-api-v2`のLambdaへ一度だけ
-置換されます。したがって`ProjectTasksFunctionUrl`と、その後方互換output
-`ProjectTasksApiUrl`は変わるため、Function URL consumerは新しいoutputへ計画的に切り替えてください。
-`ProjectTasksApiGatewayUrl`は同じHTTP API endpointを維持し、default routeだけを`live` Aliasへ
+置換されます。Function URL consumerは`ApiFunctionUrl`へ、API Gateway consumerは
+`ApiGatewayUrl`へ切り替えてください。いずれも同じHTTP API endpointを維持し、default routeだけを`live` Aliasへ
 切り替えます。以後は、新しいconfiguration secretとLambda Versionの準備完了後にAliasが新Versionへ
 切り替わるため、HTTP API trafficはcode/configurationが揃ったversion単位で切り替わります。
 
@@ -583,6 +580,7 @@ aws cognito-idp admin-add-user-to-group \
 bun run cdk:build
 bun run cdk:test
 bun run cdk:synth
+```
 
 Team Issue event-table GSIs must be deployed in two separate stack updates:
 first use `-c teamIssueCommentIndexDeploymentStage=event` and wait for
@@ -590,10 +588,72 @@ first use `-c teamIssueCommentIndexDeploymentStage=event` and wait for
 `-c teamIssueCommentIndexDeploymentStage=comment` for the second index.
 The diff/deploy examples below show the final `comment` stage.
 
+For the first rollout, run both commands below with the `event` stage, then
+wait for `TeamIssueEventCreatedAtIndex` to report `ACTIVE` before continuing
+to the `comment` stage commands.
+
+```sh
 # 初回writer-fence bootstrap前だけ rollout-pending。bootstrap後は required。
 export MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION=2026-07-28-01
 export MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE=rollout-pending
-export MUKUROJI_RESTORE_DRILL_CLEANUP_APPROVER_ROLE_ARN=arn:aws:iam::<account-id>:role/<data-owner-role>
+export MUKUROJI_RESTORE_DRILL_CLEANUP_APPROVER_ROLE_ARN='arn:aws:iam::account-id:role/data-owner-role'
+export MUKUROJI_TASK_API_ALLOWED_ORIGINS=https://app.example.com
+
+bun --filter cdk cdk diff CdkStack \
+  -c triageIndexDeploymentStage=wake \
+  -c teamIssueCommentIndexDeploymentStage=event \
+  --parameters CognitoUserPoolId="$COGNITO_USER_POOL_ID" \
+  --parameters CognitoUserPoolClientId="$COGNITO_USER_POOL_CLIENT_ID" \
+  --parameters CognitoSsoUserPoolClientId="$COGNITO_SSO_USER_POOL_CLIENT_ID" \
+  --parameters CognitoHostedUiDomain="$COGNITO_HOSTED_UI_DOMAIN" \
+  --parameters CognitoSsoRedirectUri="$COGNITO_SSO_REDIRECT_URI" \
+  --parameters CognitoEnterpriseIdpName="$COGNITO_ENTERPRISE_IDP_NAME" \
+  --parameters WorkspaceDirectoryId="$MUKUROJI_WORKSPACE_DIRECTORY_ID" \
+  --parameters WorkspaceAuditPseudonymKey="$MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY" \
+  --parameters RestoreDrillCleanupApproverRoleArn="$MUKUROJI_RESTORE_DRILL_CLEANUP_APPROVER_ROLE_ARN" \
+  --parameters EnterpriseIdentityTokenHashSecret="$ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET" \
+  --parameters EnterpriseSsoStateSecret="$ENTERPRISE_SSO_STATE_SECRET" \
+  --parameters InitialOwnerEmail="$MUKUROJI_INITIAL_OWNER_EMAIL" \
+  --parameters InitialOwnerUsername="$MUKUROJI_INITIAL_OWNER_USERNAME" \
+  --parameters RequestEmailWebhookSecret="$MUKUROJI_REQUEST_EMAIL_WEBHOOK_SECRET" \
+  --parameters RequestTokenHashSecret="$MUKUROJI_REQUEST_TOKEN_HASH_SECRET" \
+  --parameters AlarmPrimaryTopicName="$MUKUROJI_ALARM_PRIMARY_TOPIC_NAME" \
+  --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
+  --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
+  --parameters WorkspaceSearchWriterFenceMode="$MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE" \
+  --parameters TaskApiAllowedOrigins="$MUKUROJI_TASK_API_ALLOWED_ORIGINS"
+
+bun --filter cdk cdk deploy CdkStack \
+  -c triageIndexDeploymentStage=wake \
+  -c teamIssueCommentIndexDeploymentStage=event \
+  --parameters CognitoUserPoolId="$COGNITO_USER_POOL_ID" \
+  --parameters CognitoUserPoolClientId="$COGNITO_USER_POOL_CLIENT_ID" \
+  --parameters CognitoSsoUserPoolClientId="$COGNITO_SSO_USER_POOL_CLIENT_ID" \
+  --parameters CognitoHostedUiDomain="$COGNITO_HOSTED_UI_DOMAIN" \
+  --parameters CognitoSsoRedirectUri="$COGNITO_SSO_REDIRECT_URI" \
+  --parameters CognitoEnterpriseIdpName="$COGNITO_ENTERPRISE_IDP_NAME" \
+  --parameters WorkspaceDirectoryId="$MUKUROJI_WORKSPACE_DIRECTORY_ID" \
+  --parameters WorkspaceAuditPseudonymKey="$MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY" \
+  --parameters RestoreDrillCleanupApproverRoleArn="$MUKUROJI_RESTORE_DRILL_CLEANUP_APPROVER_ROLE_ARN" \
+  --parameters EnterpriseIdentityTokenHashSecret="$ENTERPRISE_IDENTITY_TOKEN_HASH_SECRET" \
+  --parameters EnterpriseSsoStateSecret="$ENTERPRISE_SSO_STATE_SECRET" \
+  --parameters InitialOwnerEmail="$MUKUROJI_INITIAL_OWNER_EMAIL" \
+  --parameters InitialOwnerUsername="$MUKUROJI_INITIAL_OWNER_USERNAME" \
+  --parameters RequestEmailWebhookSecret="$MUKUROJI_REQUEST_EMAIL_WEBHOOK_SECRET" \
+  --parameters RequestTokenHashSecret="$MUKUROJI_REQUEST_TOKEN_HASH_SECRET" \
+  --parameters AlarmPrimaryTopicName="$MUKUROJI_ALARM_PRIMARY_TOPIC_NAME" \
+  --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
+  --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
+  --parameters WorkspaceSearchWriterFenceMode="$MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE" \
+  --parameters TaskApiAllowedOrigins="$MUKUROJI_TASK_API_ALLOWED_ORIGINS"
+```
+
+```sh
+# 初回writer-fence bootstrap前だけ rollout-pending。bootstrap後は required。
+export MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION=2026-07-28-01
+export MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE=rollout-pending
+export MUKUROJI_RESTORE_DRILL_CLEANUP_APPROVER_ROLE_ARN='arn:aws:iam::account-id:role/data-owner-role'
+export MUKUROJI_TASK_API_ALLOWED_ORIGINS=https://app.example.com
 
 bun --filter cdk cdk diff CdkStack \
   -c triageIndexDeploymentStage=wake \
@@ -617,7 +677,7 @@ bun --filter cdk cdk diff CdkStack \
   --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
   --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
   --parameters WorkspaceSearchWriterFenceMode="$MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE" \
-  --parameters TaskApiAllowedOrigins=https://app.example.com
+  --parameters TaskApiAllowedOrigins="$MUKUROJI_TASK_API_ALLOWED_ORIGINS"
 
 bun --filter cdk cdk deploy CdkStack \
   -c triageIndexDeploymentStage=wake \
@@ -641,7 +701,7 @@ bun --filter cdk cdk deploy CdkStack \
   --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
   --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
   --parameters WorkspaceSearchWriterFenceMode="$MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE" \
-  --parameters TaskApiAllowedOrigins=https://app.example.com \
+  --parameters TaskApiAllowedOrigins="$MUKUROJI_TASK_API_ALLOWED_ORIGINS" \
   --outputs-file /tmp/mukuroji-cdk-outputs.json
 ```
 
@@ -702,12 +762,12 @@ Workspace metadata/owner/alias、全 seed project の manager row を consistent
 export FUNCTION_URL="$(aws cloudformation describe-stacks \
   --region "$AWS_REGION" \
   --stack-name CdkStack \
-  --query "Stacks[0].Outputs[?OutputKey=='ProjectTasksFunctionUrl'].OutputValue | [0]" \
+  --query "Stacks[0].Outputs[?OutputKey=='ApiFunctionUrl'].OutputValue | [0]" \
   --output text)"
 export API_GATEWAY_URL="$(aws cloudformation describe-stacks \
   --region "$AWS_REGION" \
   --stack-name CdkStack \
-  --query "Stacks[0].Outputs[?OutputKey=='ProjectTasksApiGatewayUrl'].OutputValue | [0]" \
+  --query "Stacks[0].Outputs[?OutputKey=='ApiGatewayUrl'].OutputValue | [0]" \
   --output text)"
 export ACCESS_TOKEN=<fresh-owner-access-token>
 
@@ -769,8 +829,7 @@ projectionを全件復元してから旧 Lambda への依存逆順rollbackを許
 
 1. maintenance window を設定し、write を停止する。
 2. source table 名、旧/new Workspace ID、item count、最新 timestamp を記録し、PITR / on-demand backup を確認する。
-3. 同じ table 内の新 partition へ conditional put で copy する。task / issue / event は全 row の payload `directoryId` を new Workspace ID に更新し、最低限、次の derived key を再構築する。
-   - tasks: `directoryId=<workspace>`、`directoryProjectId=<workspace>#project#<projectId>`
+3. 同じ table 内の新 partition へ conditional put で copy する。Work Item / issue / event は全 row の payload `directoryId` を new Workspace ID に更新し、最低限、次の derived key を再構築する。
    - directory: team / project / project-member row の `directoryId=<workspace>`。通常の `entryKey` は維持する。
    - team issues: `directoryId=<workspace>`、`directoryTeamId=<workspace>#team#<teamId>`、存在する `directoryProjectId=<workspace>#project#<projectId>`
    - issue events: `directoryId=<workspace>`、`directoryTeamIssueId=<workspace>#team#<teamId>#issue#<issueId>`
@@ -784,11 +843,11 @@ projectionを全件復元してから旧 Lambda への依存逆順rollbackを許
 
 ## Canonical Work Item deploy
 
-CDK は既存 `TeamIssuesTable` construct と key schema を維持し、`WorkItemsTableName` という canonical alias を公開します。`ProjectTasksTable` は Issue #20 の read-only adapter 用に Retain/PITR のまま残しますが、API Lambda には read permission だけを付与します。
+CDK は既存 `TeamIssuesTable` construct と key schema を維持し、`WorkItemsTableName` という canonical alias を公開します。旧 Project Task table は既存 logical ID のまま `RETAIN` の decommission resource として保持し、tenant lifecycle の export、delete、verify capability だけが参照します。旧 adapter、route、GSI は削除し、API Lambda には canonical Work Item / Issue resources の権限だけを付与します。
 
 Demo seed の custom resource は canonical `WorkItemsTable` だけに `creatorMemberKey`、`workflowSchemaVersion`、`workflowStatusId`、`statusCategory`、`customFieldValues`、空の `relationIds` を含む strict row を作成します。既存 row の upcast や legacy task からの copy は行いません。
 
-Deploy 時は `cdk diff` で table replacement/deletion がなく、legacy task table の write IAM が付与されていないことを確認します。Deploy 後は Team/project/Workspace list、任意の workflow status への detail update、stale revision の `409 WorkItemRevisionConflict` を Function URL と API Gateway の両方で確認します。Strict schema を満たさない開発用 row は削除し、現行 seed または API から作り直します。
+Deploy 時は `cdk diff` で canonical table の意図しない replacement/deletion がなく、旧 Project Task table が `RETAIN` と base-table key schema を維持し、旧 GSI、API、route への互換 IAM が残っていないことを確認します。Deploy 後は Team/project/Workspace list、任意の workflow status への detail update、stale revision の `409 WorkItemRevisionConflict` を Function URL と API Gateway の両方で確認します。Strict schema を満たさない開発用 row は削除し、現行 seed または API から作り直します。旧 table の残存行は tenant lifecycle の export/delete/verify で drain します。
 
 ## Work Item configuration
 

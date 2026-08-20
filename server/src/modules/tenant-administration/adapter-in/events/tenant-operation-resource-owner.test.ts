@@ -35,9 +35,9 @@ describe('tenant operation resource-owner SQS adapter', () => {
     }))).toEqual(createJob())
   })
 
-  test('rejects malformed identifiers, protocol versions, and unbounded cursors', () => {
+  test('rejects malformed identifiers, unsupported protocol versions, and unbounded cursors', () => {
     for (const value of [
-      { ...createJob(), version: 2 },
+      { ...createJob(), version: 3 },
       { ...createJob(), workspaceId: 'workspace with spaces' },
       {
         ...createJob(),
@@ -55,6 +55,29 @@ describe('tenant operation resource-owner SQS adapter', () => {
       expect(() => readTenantOperationExecutionJob(JSON.stringify(value)))
         .toThrow(/job is invalid/u)
     }
+  })
+
+  test('keeps a version-one export snapshot continuation cursor stable', () => {
+    expect(readTenantOperationExecutionJob(JSON.stringify({
+      ...createJob(),
+      version: 1,
+      step: 'export',
+      cursor: {
+        targetIndex: 1,
+        position: 'canonical-target-position',
+        processedCount: 40,
+        phase: 'snapshot',
+      },
+    }))).toEqual({
+      ...createJob(),
+      step: 'export',
+      cursor: {
+        targetIndex: 1,
+        position: 'canonical-target-position',
+        processedCount: 40,
+        phase: 'snapshot',
+      },
+    })
   })
 
   test('returns only failed message identifiers for bounded SQS retry', async () => {

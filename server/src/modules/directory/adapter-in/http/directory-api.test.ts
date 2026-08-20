@@ -73,52 +73,6 @@ async function createDirectoryDependencyPlanning() {
   return planningClient
 }
 
-test('denies project tasks when the project is outside the user directory', async () => {
-  const calls = configureFakeProjectClients(false)
-
-  const response = await app.request('/api/projects/secret/tasks', {
-    headers: {
-      Authorization: 'Bearer test-token',
-    },
-  })
-
-  expect(response.status).toBe(403)
-  expect(await response.json()).toEqual({ message: 'Project access is denied.' })
-  expect(calls.accessChecks).toEqual([
-    { directoryId: 'user#demo@example.com', projectId: 'secret' },
-  ])
-  expect(calls.taskReads).toEqual([])
-})
-
-test('loads only legacy project tasks after project access is confirmed', async () => {
-  const calls = configureFakeProjectClients(true)
-
-  const response = await app.request('/api/projects/refero/tasks', {
-    headers: {
-      Authorization: 'Bearer test-token',
-    },
-  })
-
-  expect(response.status).toBe(200)
-  const body = await response.json()
-  expect(body.projectId).toBe('refero')
-  expect(body.tasks.map((task: { id: string }) => task.id)).toEqual(['wireframe'])
-  expect(body.tasks[0]).toMatchObject({
-    source: 'legacy',
-    titleKey: 'tasks.item.wireframe',
-    status: 'in-progress',
-  })
-  expect(body.tasks[0]).not.toHaveProperty('workflowStatusId')
-  expect(body.tasks[0]).not.toHaveProperty('statusCategory')
-  expect(calls.accessChecks).toEqual([
-    { directoryId: 'user#demo@example.com', projectId: 'refero' },
-  ])
-  expect(calls.taskReads).toEqual([
-    { directoryId: 'user#demo@example.com', projectId: 'refero' },
-  ])
-  expect(calls.projectIssueReads).toEqual([])
-})
-
 test('lists Cognito users for project member assignment when the current user is project manager', async () => {
   const calls = configureFakeProjectClients(true, {
     cognitoUsersNextToken: 'following-page-token',
@@ -220,29 +174,6 @@ test('keeps project members available when Cognito profile hydration fails', asy
     ],
   })
   expect(calls.userProfiles).toEqual(['demo@example.com'])
-})
-
-test('keeps project tasks available when Cognito assignee hydration fails', async () => {
-  const calls = configureFakeProjectClients(true, {
-    profileError: new Error('Cognito profile hydration failed.'),
-    taskAssigneeUserId: 'sato@example.com',
-  })
-
-  const response = await app.request('/api/projects/refero/tasks', {
-    headers: {
-      Authorization: 'Bearer test-token',
-    },
-  })
-
-  expect(response.status).toBe(200)
-  const body = await response.json()
-  expect(body.tasks.map((task: { id: string }) => task.id)).toEqual(['wireframe'])
-  expect(body.tasks[0]).toMatchObject({
-    id: 'wireframe',
-    assigneeUserId: 'sato@example.com',
-    source: 'legacy',
-  })
-  expect(calls.userProfiles).toEqual(['sato@example.com'])
 })
 
 test('creates a team in the authenticated user scoped directory', async () => {

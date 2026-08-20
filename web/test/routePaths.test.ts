@@ -192,7 +192,7 @@ describe('Planning paths', () => {
     ]
 
     expect(resolvePlanningProjectNavigationPath(teams, 'unique/project')).toBe(
-      '/projects/unique%2Fproject/tasks?teamId=core%2Fteam',
+      '/projects/unique%2Fproject/issues?teamId=core%2Fteam',
     )
     expect(resolvePlanningProjectNavigationPath(teams, 'shared project')).toBe(
       '/search?q=shared+project&type=project',

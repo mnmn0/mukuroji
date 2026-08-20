@@ -79,11 +79,11 @@ import type {
   ResolvedWorkItemConfiguration,
   TriageEntry,
   TriageEntryEvent,
+  TeamIssueCommentResponseItem,
   WorkflowStatusCategory,
   WorkItemPriority,
   WorkItemRelation,
   WorkItemSchedule,
-  WorkItemStatus,
   WorkItemTriageContextEventSnapshot,
   WorkItemTriageContextSnapshot,
 } from '@mukuroji/contracts'
@@ -137,16 +137,6 @@ function createPlanningRevisionIncrementTransactionItem(
     },
   }
 }
-
-/**
- * タスクの進捗状態を表す API code です。
- */
-type ProjectTaskStatus = WorkItemStatus
-
-/**
- * タスクの優先度を表す API code です。
- */
-type ProjectTaskPriority = WorkItemPriority
 
 /** Authorization generations observed before a canonical Work Item mutation. */
 export type WorkItemAuthorizationSnapshot = {
@@ -413,130 +403,6 @@ function throwAuthorizationConditionFailureIfPresent(
 }
 
 /**
- * DynamoDB に保存する project task item です。
- */
-type ProjectTaskItem = {
-  /**
-   * ユーザーごとの directory partition key です。
-   */
-  directoryId: string
-  /**
-   * タスク一覧 query に使う directory/project 複合 partition key です。
-   */
-  directoryProjectId: string
-  /**
-   * プロジェクト ID です。
-   */
-  projectId: string
-  /**
-   * タスク ID です。
-   */
-  taskId: string
-  /**
-   * プロジェクト内の表示順です。
-   */
-  sortOrder: number
-  /**
-   * タスク名を解決する i18n key です。seed 由来のタスクで利用します。
-   */
-  titleKey?: string
-  /**
-   * 登録画面から入力されたタスク名です。
-   */
-  title?: string
-  /**
-   * 担当者名を解決する i18n key です。seed 由来のタスクで利用します。
-   */
-  assigneeKey?: string
-  /**
-   * Cognito user を参照する担当者 ID です。
-   */
-  assigneeUserId?: string
-  /**
-   * 登録画面から入力された担当者名です。旧データ互換で利用します。
-   */
-  assignee?: string
-  /**
-   * タスク状態です。
-   */
-  status: ProjectTaskStatus
-  /**
-   * 期限日として表示する文字列です。
-   */
-  dueDate: string
-  /**
-   * 優先度です。
-   */
-  priority: ProjectTaskPriority
-}
-
-/**
- * プロジェクト画面のテーブルへ表示するタスク行です。
- */
-export type ProjectTaskResponseItem = {
-  /** 旧 Project task table を保存元とすることを表します。 */
-  source: 'legacy'
-  /**
-   * React の key として使う task ID です。
-   */
-  id: string
-  /**
-   * タスク名を解決する i18n key です。
-   */
-  titleKey?: string
-  /**
-   * API から返す literal のタスク名です。
-   */
-  title?: string
-  /**
-   * 担当者名を解決する i18n key です。
-   */
-  assigneeKey?: string
-  /**
-   * Cognito user を参照する担当者 ID です。
-   */
-  assigneeUserId?: string
-  /**
-   * Cognito から解決した担当者メールアドレスです。
-   */
-  assigneeEmail?: string
-  /**
-   * Cognito から解決した担当者表示名です。
-   */
-  assigneeName?: string
-  /**
-   * API から返す literal の担当者名です。旧データ互換で利用します。
-   */
-  assignee?: string
-  /**
-   * タスク状態です。
-   */
-  status: ProjectTaskStatus
-  /**
-   * 期限日として表示する文字列です。
-   */
-  dueDate: string
-  /**
-   * 優先度です。
-   */
-  priority: ProjectTaskPriority
-}
-
-/**
- * プロジェクトタスク一覧 API が返す response body です。
- */
-export type ProjectTasksResponse = {
-  /**
-   * 取得対象の project ID です。
-   */
-  projectId: string
-  /**
-   * DynamoDB から取得したタスク一覧です。
-   */
-  tasks: ProjectTaskResponseItem[]
-}
-
-/**
  * チーム所有 Issue の活動種別です。
  */
 type TeamIssueActivityType =
@@ -546,7 +412,7 @@ type TeamIssueActivityType =
   | 'triage-context-merged'
 
 /**
- * DynamoDB に保存する team issue item です。
+ * Team Issue item persisted in DynamoDB.
  */
 type TeamIssueItem = {
   /**
@@ -633,10 +499,8 @@ type TeamIssueItem = {
   dueDate: string
   /** Canonical schedule shared by every Work Item planning surface. */
   schedule: WorkItemSchedule
-  /**
-   * 優先度です。
-   */
-  priority: ProjectTaskPriority
+  /** Priority of the Work Item. */
+  priority: WorkItemPriority
   /** Priority value の直近変更時刻です。 */
   priorityUpdatedAt?: string
   /** Derived due date の直近変更時刻です。 */
@@ -765,21 +629,6 @@ type PublicWorkItemPageCursor = {
   updatedAt: string
   /** Base table sort key の Work Item ID です。 */
   issueId: string
-}
-
-/**
- * Team Issue detail and legacy-compatible comment creation responses use this
- * stable comment shape while the underlying row is stored canonically.
- */
-export type TeamIssueCommentResponseItem = {
-  /** Comment identifier. */
-  id: string
-  /** Workspace member key of the comment author. */
-  actorUserId: string
-  /** Markdown comment body. */
-  body: string
-  /** ISO 8601 creation timestamp. */
-  createdAt: string
 }
 
 /**
@@ -1151,17 +1000,17 @@ export type WorkItemScheduleCascadeResponse = {
 }
 
 /**
- * API handler から利用するプロジェクトタスク client の最小 interface です。
+ * チーム Issue コメント作成 API が返す response body です。
  */
-export type ProjectTasksClient = {
+export type CreateTeamIssueCommentResponse = {
   /**
-   * DynamoDB から指定 project ID のタスク一覧を取得します。
+   * 作成したコメントです。
    */
-  getProjectTasks(
-    directoryId: string,
-    projectId: string,
-    options?: WorkItemListReadOptions,
-  ): Promise<ProjectTasksResponse>
+  comment: TeamIssueCommentResponseItem
+  /**
+   * コメント追加に対応する活動履歴です。
+   */
+  activity: TeamIssueActivityResponseItem
 }
 
 /** Work Item domain write と public response receipt を同じ transaction に追加する境界です。 */
@@ -1478,131 +1327,20 @@ function normalizePublicWorkItemPageLimit(value: number) {
 }
 
 /**
- * DynamoDB の project task item を読み取る client です。
+ * Maximum Team Issue event rows the legacy comment fallback may evaluate before requiring migration.
+ *
+ * The budget counts DynamoDB Query `ScannedCount` rows evaluated before `FilterExpression` removes
+ * non-comment events, rather than only the comment rows returned to the application. Keep this
+ * conservative cap aligned with observed per-Work-Item event counts before increasing it.
  */
-export class DynamoDbProjectTasksClient {
-  /**
-   * project task item を保存する DynamoDB table 名です。
-   */
-  private readonly tableName: string
-  /**
-   * DynamoDB DocumentClient です。
-   */
-  private readonly documentClient: DynamoDBDocumentClient
-  /**
-   * table 初期化に使う低レベル DynamoDB client です。
-   */
-  private readonly dynamoDbClient: DynamoDBClient
-  /**
-   * ローカル DynamoDB の table 欠落を自動復旧するかどうかです。
-   */
-  private readonly bootstrapLocalTables: boolean
-  /**
-   * immutable audit event を保存する DynamoDB table 名です。
-   */
-  private readonly auditTableName?: string
+const MAX_LEGACY_COMMENT_FALLBACK_READ_ITEMS = 500
 
-  constructor(
-    tableName =
-      getEnv('MUKUROJI_PROJECT_TASKS_TABLE') ??
-      getEnv('TASKS_TABLE_NAME') ??
-      'mukuroji-project-tasks-v2-local',
-    documentClient = createDynamoDbDocumentClient(),
-    dynamoDbClient?: DynamoDBClient,
-    bootstrapLocalTables = dynamoDbClient === undefined && shouldBootstrapLocalDynamoDb(),
-    auditTableName = getConfiguredAuditTableName(),
-  ) {
-    this.tableName = tableName
-    this.documentClient = documentClient
-    this.dynamoDbClient = dynamoDbClient ?? createDynamoDbClient()
-    this.bootstrapLocalTables = bootstrapLocalTables
-    this.auditTableName = auditTableName
-  }
-
-  /**
-   * DynamoDB からプロジェクト別タスク一覧を取得します。
-   */
-  async getProjectTasks(
-    directoryId: string,
-    projectId: string,
-    options: WorkItemListReadOptions = {},
-  ) {
-    try {
-      const items = await this.queryProjectTaskItems(directoryId, projectId, options)
-      const tasks = items.map(toProjectTaskResponseItem)
-
-      return {
-        projectId,
-        tasks,
-      } satisfies ProjectTasksResponse
-    } catch (error) {
-      if (error instanceof ProjectDataError) {
-        throw error
-      }
-
-      throw toProjectDataError(error)
-    }
-  }
-
-  /**
-   * DynamoDB から project partition の task item を全件または指定上限まで取得します。
-   */
-  private async queryProjectTaskItems(
-    directoryId: string,
-    projectId: string,
-    options: WorkItemListReadOptions = {},
-    canBootstrapLocalTable = true,
-  ): Promise<unknown[]> {
-    try {
-      const items: unknown[] = []
-      const limit = normalizeWorkItemListReadLimit(options.limit)
-      let exclusiveStartKey: Record<string, unknown> | undefined
-
-      if (limit === 0) {
-        return items
-      }
-
-      do {
-        const remaining = limit === undefined ? undefined : limit - items.length
-        const response = await this.documentClient.send(
-          new QueryCommand({
-            TableName: this.tableName,
-            IndexName: 'ProjectSortOrderIndex',
-            KeyConditionExpression: 'directoryProjectId = :directoryProjectId',
-            ExpressionAttributeValues: {
-              ':directoryProjectId': createDirectoryProjectId(directoryId, projectId),
-            },
-            ExclusiveStartKey: exclusiveStartKey,
-            ScanIndexForward: true,
-            ...(remaining === undefined ? {} : { Limit: remaining }),
-          }),
-        )
-
-        items.push(...(
-          remaining === undefined
-            ? response.Items ?? []
-            : (response.Items ?? []).slice(0, remaining)
-        ))
-        if (limit !== undefined && items.length >= limit) {
-          break
-        }
-        exclusiveStartKey = response.LastEvaluatedKey
-      } while (exclusiveStartKey)
-
-      return items
-    } catch (error) {
-      if (
-        canBootstrapLocalTable &&
-        this.bootstrapLocalTables &&
-        isResourceNotFoundError(error) &&
-        await ensureLocalProjectTasksTable(this.tableName, this.dynamoDbClient)
-      ) {
-        return this.queryProjectTaskItems(directoryId, projectId, options, false)
-      }
-
-      throw error
-    }
-  }
+/** Shared read budget for every query required by one legacy comment fallback. */
+type LegacyCommentFallbackReadBudget = {
+  /** Maximum event rows that may be evaluated across the complete fallback. */
+  maxReadItems: number
+  /** Event rows evaluated by all fallback queries issued so far. */
+  evaluatedItems: number
 }
 
 /**
@@ -2036,7 +1774,7 @@ export class DynamoDbTeamIssuesClient {
     const assigneeUserId = readTeamIssueAssigneeUserId(input)
     const schedule = readWorkItemScheduleInput(input.schedule)
     const dueDate = deriveWorkItemScheduleDueDate(schedule)
-    const priority = readTaskPriority(input.priority)
+    const priority = readWorkItemPriority(input.priority)
     const assignedProjectId = readAssignedProjectId(input.assignedProjectId)
     const workflowSchemaVersion = readWorkflowSchemaVersion(input.workflowSchemaVersion)
     const workflowStatusId = readWorkflowStatusId(input.workflowStatusId)
@@ -2769,7 +2507,7 @@ export class DynamoDbTeamIssuesClient {
 
     if ('priority' in input) {
       expressionAttributeNames['#priority'] = 'priority'
-      expressionAttributeValues[':priority'] = readTaskPriority(input.priority)
+      expressionAttributeValues[':priority'] = readWorkItemPriority(input.priority)
       setExpressions.push('#priority = :priority')
     }
 
@@ -3295,6 +3033,15 @@ export class DynamoDbTeamIssuesClient {
     return items
   }
 
+  /**
+   * Reads Team Issue events with cursor-aware filtering and bounded pagination.
+   *
+   * @param directoryId - Workspace directory that owns the Team Issue.
+   * @param teamId - Team that owns the Team Issue.
+   * @param issueId - Team-local Work Item identifier.
+   * @param options - Event type, ordering, limit, and cursor options.
+   * @returns Persisted Team Issue events and the next event cursor, when present.
+   */
   private async queryTeamIssueEventItems(
     directoryId: string,
     teamId: string,
@@ -3453,12 +3200,16 @@ export class DynamoDbTeamIssuesClient {
           }
         }
       }
-      const indexedPage = await this.queryIndexedCommentEvents(directoryTeamIssueId)
-      const baseCommentIds = await this.readCommentEventIndexCoverage(directoryTeamIssueId)
+      const readBudget: LegacyCommentFallbackReadBudget = {
+        maxReadItems: MAX_LEGACY_COMMENT_FALLBACK_READ_ITEMS,
+        evaluatedItems: 0,
+      }
+      const indexedPage = await this.queryIndexedCommentEvents(directoryTeamIssueId, readBudget)
+      const baseCommentIds = await this.readCommentEventIndexCoverage(directoryTeamIssueId, readBudget)
       const indexedCommentIds = new Set(indexedPage.items.map((item) => item.eventId))
       const items = setsEqual(indexedCommentIds, baseCommentIds)
         ? indexedPage.items
-        : (await this.queryBaseCommentEvents(directoryTeamIssueId)).items
+        : (await this.queryBaseCommentEvents(directoryTeamIssueId, { readBudget })).items
       const orderedItems = [...items].sort((left, right) =>
         compareTeamIssueEvents(left, right, options.newestEventsFirst === true)
       )
@@ -3570,11 +3321,18 @@ export class DynamoDbTeamIssuesClient {
     return { items, lastEvaluatedKey: exclusiveStartKey }
   }
 
-  /** Reads and validates every comment candidate from the sparse createdAt index. */
-  private async queryIndexedCommentEvents(directoryTeamIssueId: string) {
+  /** Reads comment candidates from the sparse createdAt index within an optional shared budget. */
+  private async queryIndexedCommentEvents(
+    directoryTeamIssueId: string,
+    readBudget?: LegacyCommentFallbackReadBudget,
+  ) {
     const items: TeamIssueEventItem[] = []
     let exclusiveStartKey: Record<string, unknown> | undefined
+    let evaluatedItems = 0
     do {
+      if (readBudget !== undefined) {
+        ensureLegacyCommentFallbackReadBudgetAvailable(readBudget)
+      }
       const response = await this.documentClient.send(new QueryCommand({
         TableName: this.eventTableName,
         IndexName: 'TeamIssueEventCreatedAtIndex',
@@ -3586,9 +3344,22 @@ export class DynamoDbTeamIssuesClient {
         FilterExpression: 'eventType = :eventType',
         ExclusiveStartKey: exclusiveStartKey,
         ScanIndexForward: false,
+        ...(readBudget === undefined
+          ? {}
+          : { Limit: readBudget.maxReadItems - readBudget.evaluatedItems }),
       }))
-      items.push(...(response.Items ?? []).map(toTeamIssueEventItem))
+      const pageItems = (response.Items ?? []).map(toTeamIssueEventItem)
+      items.push(...pageItems)
+      const scannedItems = response.ScannedCount ?? pageItems.length
+      const totalEvaluatedItems = readBudget === undefined
+        ? (evaluatedItems += scannedItems)
+        : (readBudget.evaluatedItems += scannedItems)
       exclusiveStartKey = response.LastEvaluatedKey
+      throwIfLegacyCommentFallbackReadBudgetExceeded(
+        readBudget?.maxReadItems,
+        totalEvaluatedItems,
+        exclusiveStartKey,
+      )
     } while (exclusiveStartKey)
     return {
       items: items.filter((item) => item.eventType === 'commented'),
@@ -3600,12 +3371,20 @@ export class DynamoDbTeamIssuesClient {
    * Validates all comment rows that the sparse createdAt index should contain.
    *
    * @param directoryTeamIssueId - Work Item event partition key.
+   * @param readBudget - Shared budget for all queries in one fallback, when bounded.
    * @returns Event IDs present in the strongly consistent base-table query.
    */
-  private async readCommentEventIndexCoverage(directoryTeamIssueId: string) {
+  private async readCommentEventIndexCoverage(
+    directoryTeamIssueId: string,
+    readBudget?: LegacyCommentFallbackReadBudget,
+  ) {
     const eventIds = new Set<string>()
     let exclusiveStartKey: Record<string, unknown> | undefined
+    let evaluatedItems = 0
     do {
+      if (readBudget !== undefined) {
+        ensureLegacyCommentFallbackReadBudgetAvailable(readBudget)
+      }
       const response = await this.documentClient.send(new QueryCommand({
         TableName: this.eventTableName,
         KeyConditionExpression: 'directoryTeamIssueId = :directoryTeamIssueId',
@@ -3622,11 +3401,23 @@ export class DynamoDbTeamIssuesClient {
         ProjectionExpression: '#createdAt, #eventId, #eventType',
         ExclusiveStartKey: exclusiveStartKey,
         ConsistentRead: true,
+        ...(readBudget === undefined
+          ? {}
+          : { Limit: readBudget.maxReadItems - readBudget.evaluatedItems }),
       }))
       for (const item of response.Items ?? []) {
         eventIds.add(readCommentEventIndexCoverageId(item))
       }
+      const scannedItems = response.ScannedCount ?? response.Items?.length ?? 0
+      const totalEvaluatedItems = readBudget === undefined
+        ? (evaluatedItems += scannedItems)
+        : (readBudget.evaluatedItems += scannedItems)
       exclusiveStartKey = response.LastEvaluatedKey
+      throwIfLegacyCommentFallbackReadBudgetExceeded(
+        readBudget?.maxReadItems,
+        totalEvaluatedItems,
+        exclusiveStartKey,
+      )
     } while (exclusiveStartKey)
     return eventIds
   }
@@ -3634,11 +3425,28 @@ export class DynamoDbTeamIssuesClient {
   /** Reads and fully validates comment rows from the base table after index drift. */
   private async queryBaseCommentEvents(
     directoryTeamIssueId: string,
-    options: { eventLimit?: number } = {},
+    options: { eventLimit?: number; maxReadItems?: number; readBudget?: LegacyCommentFallbackReadBudget } = {},
   ) {
     const items: TeamIssueEventItem[] = []
     let exclusiveStartKey: Record<string, unknown> | undefined
+    let evaluatedItems = 0
     do {
+      if (options.readBudget !== undefined) {
+        ensureLegacyCommentFallbackReadBudgetAvailable(options.readBudget)
+      }
+      const remainingEventItems = options.eventLimit === undefined
+        ? undefined
+        : Math.max(1, options.eventLimit - items.length)
+      const maxReadItems = options.readBudget?.maxReadItems ?? options.maxReadItems
+      const currentEvaluatedItems = options.readBudget?.evaluatedItems ?? evaluatedItems
+      const remainingReadItems = maxReadItems === undefined
+        ? undefined
+        : Math.max(1, maxReadItems - currentEvaluatedItems)
+      const queryLimit = remainingEventItems === undefined
+        ? remainingReadItems
+        : remainingReadItems === undefined
+          ? remainingEventItems
+          : Math.min(remainingEventItems, remainingReadItems)
       const response = await this.documentClient.send(new QueryCommand({
         TableName: this.eventTableName,
         KeyConditionExpression: 'directoryTeamIssueId = :directoryTeamIssueId',
@@ -3649,12 +3457,20 @@ export class DynamoDbTeamIssuesClient {
         FilterExpression: 'eventType = :eventType',
         ExclusiveStartKey: exclusiveStartKey,
         ConsistentRead: true,
-        ...(options.eventLimit === undefined
-          ? {}
-          : { Limit: Math.max(1, options.eventLimit - items.length) }),
+        ...(queryLimit === undefined ? {} : { Limit: queryLimit }),
       }))
-      items.push(...(response.Items ?? []).map(toTeamIssueEventItem))
+      const pageItems = (response.Items ?? []).map(toTeamIssueEventItem)
+      items.push(...pageItems)
+      const scannedItems = response.ScannedCount ?? pageItems.length
+      const totalEvaluatedItems = options.readBudget === undefined
+        ? (evaluatedItems += scannedItems)
+        : (options.readBudget.evaluatedItems += scannedItems)
       exclusiveStartKey = response.LastEvaluatedKey
+      throwIfLegacyCommentFallbackReadBudgetExceeded(
+        maxReadItems,
+        totalEvaluatedItems,
+        exclusiveStartKey,
+      )
       if (options.eventLimit !== undefined && items.length >= options.eventLimit) {
         break
       }
@@ -3665,6 +3481,12 @@ export class DynamoDbTeamIssuesClient {
     }
   }
 
+  /**
+   * Builds the canonical DynamoDB representation of one Team Issue event.
+   *
+   * @param input - Event fields before physical partition and index keys are added.
+   * @returns Event row with normalized timestamp and deterministic storage keys.
+   */
   private createIssueEventItem(
     input: Omit<TeamIssueEventItem, 'directoryTeamIssueId' | 'eventId'> & { eventId?: string },
   ) {
@@ -3859,41 +3681,6 @@ async function ensureLocalTeamIssueEventsTable(
   )
 }
 
-async function ensureLocalProjectTasksTable(
-  tableName: string,
-  dynamoDbClient: DynamoDBClient,
-) {
-  return ensureLocalDynamoDbTable(
-    tableName,
-    dynamoDbClient,
-    () =>
-      new CreateTableCommand({
-        TableName: tableName,
-        AttributeDefinitions: [
-          { AttributeName: 'directoryProjectId', AttributeType: 'S' },
-          { AttributeName: 'taskId', AttributeType: 'S' },
-          { AttributeName: 'sortOrder', AttributeType: 'N' },
-        ],
-        KeySchema: [
-          { AttributeName: 'directoryProjectId', KeyType: 'HASH' },
-          { AttributeName: 'taskId', KeyType: 'RANGE' },
-        ],
-        GlobalSecondaryIndexes: [
-          {
-            IndexName: 'ProjectSortOrderIndex',
-            KeySchema: [
-              { AttributeName: 'directoryProjectId', KeyType: 'HASH' },
-              { AttributeName: 'sortOrder', KeyType: 'RANGE' },
-            ],
-            Projection: { ProjectionType: 'ALL' },
-          },
-        ],
-        BillingMode: 'PAY_PER_REQUEST',
-      }),
-    isProjectTasksTableDescription,
-  )
-}
-
 async function ensureLocalDynamoDbTable(
   tableName: string,
   dynamoDbClient: DynamoDBClient,
@@ -3954,7 +3741,7 @@ async function waitForLocalDynamoDbTable(
   validateTable: (table: TableDescription | undefined) => boolean,
   migrateTable?: (table: TableDescription | undefined) => Promise<void>,
 ) {
-  let migrationStarted = false
+  let migrationAttempts = 0
   for (let attempt = 0; attempt < 20; attempt += 1) {
     const response = await dynamoDbClient.send(
       new DescribeTableCommand({
@@ -3967,8 +3754,8 @@ async function waitForLocalDynamoDbTable(
     }
 
     if (response.Table?.TableStatus === 'ACTIVE') {
-      if (migrateTable && !migrationStarted) {
-        migrationStarted = true
+      if (migrateTable && migrationAttempts < 2) {
+        migrationAttempts += 1
         await migrateTable(response.Table)
         continue
       }
@@ -3979,24 +3766,6 @@ async function waitForLocalDynamoDbTable(
   }
 
   throw new Error(`Local DynamoDB table "${tableName}" did not become active.`)
-}
-
-function isProjectTasksTableDescription(table: TableDescription | undefined) {
-  return (
-    hasKeySchema(table, [
-      ['directoryProjectId', 'HASH'],
-      ['taskId', 'RANGE'],
-    ]) &&
-    Boolean(
-      table?.GlobalSecondaryIndexes?.some((index) =>
-        index.IndexName === 'ProjectSortOrderIndex' &&
-        hasKeySchema(index, [
-          ['directoryProjectId', 'HASH'],
-          ['sortOrder', 'RANGE'],
-        ]),
-      ),
-    )
-  )
 }
 
 function isTeamIssuesTableDescription(table: TableDescription | undefined) {
@@ -4073,6 +3842,7 @@ function shouldBootstrapLocalDynamoDb() {
   return shouldBootstrapConfiguredLocalDynamoDb()
 }
 
+/** Returns whether an unknown AWS error indicates a missing resource. */
 function isResourceNotFoundError(error: unknown) {
   return isAwsNamedError(error, 'ResourceNotFoundException')
 }
@@ -4434,46 +4204,6 @@ function toTeamIssueEventItem(value: unknown): TeamIssueEventItem {
   return value
 }
 
-function toProjectTaskResponseItem(value: unknown): ProjectTaskResponseItem {
-  if (!isProjectTaskItem(value)) {
-    throw new ProjectDataError(
-      503,
-      'InvalidProjectTask',
-      'Project task item is missing or invalid.',
-    )
-  }
-
-  const task: ProjectTaskResponseItem = {
-    source: 'legacy',
-    id: value.taskId,
-    status: value.status,
-    dueDate: value.dueDate,
-    priority: value.priority,
-  }
-
-  if (value.titleKey) {
-    task.titleKey = value.titleKey
-  }
-
-  if (value.title) {
-    task.title = value.title
-  }
-
-  if (value.assigneeKey) {
-    task.assigneeKey = value.assigneeKey
-  }
-
-  if (value.assigneeUserId) {
-    task.assigneeUserId = value.assigneeUserId
-  }
-
-  if (value.assignee) {
-    task.assignee = value.assignee
-  }
-
-  return task
-}
-
 function isTeamIssueEventItem(value: unknown): value is TeamIssueEventItem {
   if (!isRecord(value)) {
     return false
@@ -4555,6 +4285,37 @@ function readCommentEventIndexCoverageId(value: unknown): string {
     )
   }
   return value.eventId
+}
+
+/** Fails closed before a shared legacy comment budget can issue another query. */
+function ensureLegacyCommentFallbackReadBudgetAvailable(
+  readBudget: LegacyCommentFallbackReadBudget,
+): void {
+  if (readBudget.evaluatedItems >= readBudget.maxReadItems) {
+    throw new ProjectDataError(
+      503,
+      'InvalidTeamIssue',
+      'Team Issue comment history requires migration before it can be read.',
+    )
+  }
+}
+
+/** Fails closed when a transitional comment fallback would exceed its read budget. */
+function throwIfLegacyCommentFallbackReadBudgetExceeded(
+  maxReadItems: number | undefined,
+  evaluatedItems: number,
+  lastEvaluatedKey: Record<string, unknown> | undefined,
+): void {
+  if (maxReadItems !== undefined && (
+    evaluatedItems > maxReadItems ||
+    (evaluatedItems >= maxReadItems && lastEvaluatedKey !== undefined)
+  )) {
+    throw new ProjectDataError(
+      503,
+      'InvalidTeamIssue',
+      'Team Issue comment history requires migration before it can be read.',
+    )
+  }
 }
 
 /** Compares two validated events by their actual timestamp and stable ID. */
@@ -4764,33 +4525,6 @@ function isNonnegativeSafeInteger(value: unknown): boolean {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
 }
 
-function isProjectTaskItem(value: unknown): value is ProjectTaskItem {
-  if (!isRecord(value)) {
-    return false
-  }
-
-  return (
-    typeof value.projectId === 'string' &&
-    typeof value.directoryId === 'string' &&
-    value.directoryProjectId === createDirectoryProjectId(value.directoryId, value.projectId) &&
-    typeof value.taskId === 'string' &&
-    typeof value.sortOrder === 'number' &&
-    (typeof value.titleKey === 'string' || typeof value.title === 'string') &&
-    (
-      typeof value.assigneeUserId === 'string' ||
-      typeof value.assigneeKey === 'string' ||
-      typeof value.assignee === 'string'
-    ) &&
-    isProjectTaskStatus(value.status) &&
-    typeof value.dueDate === 'string' &&
-    isProjectTaskPriority(value.priority)
-  )
-}
-
-function isProjectTaskStatus(value: unknown): value is ProjectTaskStatus {
-  return value === 'in-progress' || value === 'review' || value === 'todo' || value === 'done'
-}
-
 function isWorkflowStatusCategory(value: unknown): value is WorkflowStatusCategory {
   return value === 'backlog' ||
     value === 'unstarted' ||
@@ -4811,7 +4545,8 @@ function isCustomFieldValueRecord(value: unknown): value is Record<string, Custo
   )
 }
 
-function isProjectTaskPriority(value: unknown): value is ProjectTaskPriority {
+/** Returns whether an unknown value is a supported canonical Work Item priority. */
+function isWorkItemPriority(value: unknown): value is WorkItemPriority {
   return value === 'high' || value === 'medium' || value === 'low'
 }
 
@@ -4877,13 +4612,20 @@ export function readWorkItemExpectedRevision(value: unknown) {
   return value
 }
 
-function readTaskPriority(value: unknown): ProjectTaskPriority {
+/**
+ * Reads and validates the optional canonical Work Item priority input.
+ *
+ * @param value - Untrusted priority input; `undefined` uses the `medium` default.
+ * @returns The validated Work Item priority, defaulting to `medium` when omitted.
+ * @throws {ProjectDataError} If the input is not a supported Work Item priority.
+ */
+function readWorkItemPriority(value: unknown): WorkItemPriority {
   if (value === undefined) {
     return 'medium'
   }
 
-  if (!isProjectTaskPriority(value)) {
-    throw new ProjectDataError(400, 'InvalidProjectWrite', 'Task priority is invalid.')
+  if (!isWorkItemPriority(value)) {
+    throw new ProjectDataError(400, 'InvalidProjectWrite', 'Work Item priority is invalid.')
   }
 
   return value
@@ -5086,7 +4828,7 @@ function isMatchingIdempotentWorkItemCreate(
     description: string | undefined
     dueDate: string
     schedule: WorkItemSchedule
-    priority: ProjectTaskPriority
+    priority: WorkItemPriority
     statusCategory: WorkflowStatusCategory
     title: string
     workflowSchemaVersion: typeof WORK_ITEM_CONFIGURATION_SCHEMA_VERSION

@@ -103,7 +103,6 @@ export {
   createWorkItemRevisionConditionCheck,
   createWorkItemAuthorizationChangedError,
   customFieldValueRecordsEqual,
-  DynamoDbProjectTasksClient,
   DynamoDbTeamIssuesClient,
   isTeamIssueNotFoundError,
   readAssignedProjectId,
@@ -119,14 +118,10 @@ export {
   type CreateTriageDuplicateContextTransactionItemsInput,
   type NamedWorkItemDeletionFence,
   type ProjectIssuesResponse,
-  type ProjectTaskResponseItem,
-  type ProjectTasksClient,
-  type ProjectTasksResponse,
   type PublicUpdateTeamIssueRequestBody,
   type PublicWorkItemPageReadOptions,
   type RequestConversionTransactionInput,
   type TeamIssueDetailReadOptions,
-  type TeamIssueCommentResponseItem,
   type TeamIssueDetailResponse,
   type TeamIssueResponseItem,
   type TeamIssuesClient,
@@ -142,3 +137,4 @@ export {
   type WorkItemListReadOptions,
   type WorkItemAuthorizationSnapshot,
 } from './adapter-out/dynamodb/work-item-client'
+export type { TeamIssueCommentResponseItem } from '@mukuroji/contracts'

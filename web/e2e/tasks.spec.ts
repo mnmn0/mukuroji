@@ -107,18 +107,12 @@ const reciprocalWorkItemRelationTypes = {
   duplicate: 'duplicate',
 } as const satisfies Record<WorkItemRelationType, WorkItemRelationType>
 
-/**
- * API stub が受けた request 数です。
- */
+/** Counts requests received by the API stub. */
 type MockRequestCounts = {
-  /**
-   * チーム/プロジェクト一覧 API の request 数です。
-   */
+  /** Number of team and project directory API requests. */
   projectDirectory: number
-  /**
-   * プロジェクト別タスク API の request 数です。
-   */
-  projectTasks: Record<string, number>
+  /** Number of Issue API requests grouped by project. */
+  projectIssues: Record<string, number>
   /**
    * Workspace 全体の Work Item 一覧 API request 数です。
    */
@@ -372,7 +366,7 @@ async function mockAuthenticatedTaskPage(
 ) {
   const requestCounts: MockRequestCounts = {
     projectDirectory: 0,
-    projectTasks: {},
+    projectIssues: {},
     workspaceWorkItems: 0,
     focusReads: 0,
     focusSnoozeUpdates: 0,
@@ -932,24 +926,10 @@ async function mockAuthenticatedTaskPage(
     })
   })
 
-  await page.route('**/api/projects/refero/tasks', async (route) => {
-    recordProjectTaskRequest(requestCounts, 'refero')
-
-    expect(route.request().headers().authorization).toBe('Bearer test-access-token')
-    expect(route.request().method()).toBe('GET')
-
-    await route.fulfill({
-      json: {
-        projectId: 'refero',
-        tasks: [],
-      },
-    })
-  })
-
   await page.route(/.*\/api\/projects\/[^/]+\/issues(?:\?.*)?$/, async (route) => {
     const pathSegments = new URL(route.request().url()).pathname.split('/')
     const projectId = decodeURIComponent(pathSegments[3] ?? '')
-    recordProjectTaskRequest(requestCounts, projectId)
+    recordProjectIssueRequest(requestCounts, projectId)
 
     expect(route.request().headers().authorization).toBe('Bearer test-access-token')
 
@@ -2054,58 +2034,6 @@ async function mockAuthenticatedTaskPage(
     await route.fallback()
   })
 
-  await page.route('**/api/projects/product-roadmap/tasks', async (route) => {
-    recordProjectTaskRequest(requestCounts, 'product-roadmap')
-
-    expect(route.request().headers().authorization).toBe('Bearer test-access-token')
-
-    await route.fulfill({
-      json: {
-        projectId: 'product-roadmap',
-        tasks: [],
-      },
-    })
-  })
-
-  await page.route('**/api/projects/brand-refresh/tasks', async (route) => {
-    recordProjectTaskRequest(requestCounts, 'brand-refresh')
-
-    expect(route.request().headers().authorization).toBe('Bearer test-access-token')
-
-    await route.fulfill({
-      json: {
-        projectId: 'brand-refresh',
-        tasks: [],
-      },
-    })
-  })
-
-  await page.route('**/api/projects/shared-launch/tasks', async (route) => {
-    recordProjectTaskRequest(requestCounts, 'shared-launch')
-
-    expect(route.request().headers().authorization).toBe('Bearer test-access-token')
-
-    await route.fulfill({
-      json: {
-        projectId: 'shared-launch',
-        tasks: [],
-      },
-    })
-  })
-
-  await page.route('**/api/projects/new-project/tasks', async (route) => {
-    recordProjectTaskRequest(requestCounts, 'new-project')
-
-    expect(route.request().headers().authorization).toBe('Bearer test-access-token')
-
-    await route.fulfill({
-      json: {
-        projectId: 'new-project',
-        tasks: [],
-      },
-    })
-  })
-
 }
 
 /**
@@ -2556,8 +2484,9 @@ async function openSidebarCreatePanel(
   )).toBeVisible()
 }
 
-function recordProjectTaskRequest(requestCounts: MockRequestCounts, projectId: string) {
-  requestCounts.projectTasks[projectId] = (requestCounts.projectTasks[projectId] ?? 0) + 1
+/** Records a canonical Project Issue list request for the selected project. */
+function recordProjectIssueRequest(requestCounts: MockRequestCounts, projectId: string) {
+  requestCounts.projectIssues[projectId] = (requestCounts.projectIssues[projectId] ?? 0) + 1
 }
 
 async function expectDesktopAppShellScrollsInsideMain(page: Page) {
@@ -3865,7 +3794,7 @@ test.describe('authenticated task page', () => {
   })
 
   test('主要タスクビューの読み上げ構造とキーボードタブ操作を維持する', async ({ page }) => {
-    await page.goto('/projects/refero/tasks')
+    await page.goto('/projects/refero/issues')
 
     const tablist = page.getByRole('tablist', { name: 'タスクビュー' })
     await expect(tablist).toMatchAriaSnapshot(`
@@ -3915,7 +3844,7 @@ test.describe('authenticated task page', () => {
       planningFailureCount: 1,
       workItemScheduleDependencies: [dependency],
     })
-    await page.goto('/projects/refero/tasks')
+    await page.goto('/projects/refero/issues')
 
     await expect(page.getByTestId('task-row-wireframe')).toBeVisible()
     const planningError = page.getByTestId('project-planning-error')
@@ -3970,7 +3899,7 @@ test.describe('authenticated task page', () => {
     await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
       workItemScheduleDependencies: [dependency],
     })
-    await page.goto('/projects/refero/tasks')
+    await page.goto('/projects/refero/issues')
 
     await page.getByRole('searchbox', { name: '検索...' }).fill('ワイヤーフレーム')
     await page.getByRole('tab', { name: '期限順', exact: true }).click()
@@ -3996,7 +3925,7 @@ test.describe('authenticated task page', () => {
     await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
       workItemScheduleDependencies: [dependency],
     })
-    await page.goto('/projects/refero/tasks')
+    await page.goto('/projects/refero/issues')
     const requestCounts = getMockRequestCounts(page)
 
     await page.getByRole('tab', { name: '期限順', exact: true }).click()
@@ -4049,7 +3978,7 @@ test.describe('authenticated task page', () => {
       postConfirmProjectIssueFailureCount: 1,
       workItemScheduleDependencies: [dependency],
     })
-    await page.goto('/projects/refero/tasks')
+    await page.goto('/projects/refero/issues')
     const requestCounts = getMockRequestCounts(page)
 
     await page.getByRole('tab', { name: '期限順', exact: true }).click()
@@ -4062,7 +3991,7 @@ test.describe('authenticated task page', () => {
 
     await preview.getByRole('button', { name: '適用', exact: true }).click()
     await expect.poll(() => requestCounts.scheduleConfirms).toBe(1)
-    await expect.poll(() => requestCounts.projectTasks.refero ?? 0).toBe(3)
+    await expect.poll(() => requestCounts.projectIssues.refero ?? 0).toBe(3)
 
     const wireframeRow = page.locator('article').filter({
       has: page.getByTestId('task-gantt-bar-wireframe'),
@@ -4100,7 +4029,7 @@ test.describe('authenticated task page', () => {
       workItemScheduleDependencies: [dependency],
       workItemScheduleDependencyConflicts: [conflict],
     })
-    await page.goto('/projects/refero/tasks')
+    await page.goto('/projects/refero/issues')
     const requestCounts = getMockRequestCounts(page)
 
     await page.getByRole('tab', { name: '期限順', exact: true }).click()
@@ -4178,7 +4107,7 @@ test.describe('authenticated task page', () => {
       teamIssuesByTeam: { 'core-team': [externalIssue] },
       workItemScheduleDependencies: [dependency],
     })
-    await page.goto('/projects/refero/tasks')
+    await page.goto('/projects/refero/issues')
 
     await page.getByRole('tab', { name: '期限順', exact: true }).click()
     const dependencySummary = page.getByTestId(`task-gantt-dependency-${dependency.id}`)
@@ -4236,7 +4165,7 @@ test.describe('authenticated task page', () => {
   })
 
   test('Issue #188: Table の期限編集も共通 preview を確認してから保存する', async ({ page }) => {
-    await page.goto('/projects/refero/tasks')
+    await page.goto('/projects/refero/issues')
     const requestCounts = getMockRequestCounts(page)
     const dueDateField = page.getByTestId('task-inline-due-date-seo-research')
 
@@ -4266,7 +4195,7 @@ test.describe('authenticated task page', () => {
   })
 
   test('Issue #188: Gantt はキーボード移動を事前確認し undo・redo・resize できる', async ({ page }) => {
-    await page.goto('/projects/refero/tasks')
+    await page.goto('/projects/refero/issues')
     const requestCounts = getMockRequestCounts(page)
 
     await page.getByRole('tab', { name: '期限順', exact: true }).click()
@@ -4349,7 +4278,7 @@ test.describe('authenticated task page', () => {
   })
 
   test('Issue #188: Gantt は既存 bar と重なる日へ pointer drag で移動・短縮できる', async ({ page }) => {
-    await page.goto('/projects/refero/tasks')
+    await page.goto('/projects/refero/issues')
     const requestCounts = getMockRequestCounts(page)
 
     await page.getByRole('tab', { name: '期限順', exact: true }).click()
@@ -4391,7 +4320,7 @@ test.describe('authenticated task page', () => {
   })
 
   test('Issue #188: Gantt は未計画 row の明示日付から bar を作成し再読込後も保持する', async ({ page }) => {
-    await page.goto('/projects/refero/tasks')
+    await page.goto('/projects/refero/issues')
     const requestCounts = getMockRequestCounts(page)
 
     await page.getByRole('tab', { name: '期限順', exact: true }).click()
@@ -4427,7 +4356,7 @@ test.describe('authenticated task page', () => {
   })
 
   test('Issue #188: Calendar は日付と未計画 bucket の間を drag and drop できる', async ({ page }) => {
-    await page.goto('/projects/refero/tasks')
+    await page.goto('/projects/refero/issues')
     const requestCounts = getMockRequestCounts(page)
 
     await page.getByRole('tab', { name: '期限カレンダー', exact: true }).click()
@@ -4481,7 +4410,7 @@ test.describe('authenticated task page', () => {
   })
 
   test('Issue #188: Calendar は2日を選んだ期間 task を作成し再読込後も保持する', async ({ page }) => {
-    await page.goto('/projects/refero/tasks')
+    await page.goto('/projects/refero/issues')
     const requestCounts = getMockRequestCounts(page)
 
     await page.getByRole('tab', { name: '期限カレンダー', exact: true }).click()
@@ -4522,7 +4451,7 @@ test.describe('authenticated task page', () => {
         createIssueCollaborationKey('core-team', 'wireframe'),
       ],
     })
-    await page.goto('/projects/refero/tasks')
+    await page.goto('/projects/refero/issues')
     const requestCounts = getMockRequestCounts(page)
 
     await page.getByRole('tab', { name: '期限順', exact: true }).click()
@@ -4544,7 +4473,7 @@ test.describe('authenticated task page', () => {
     await mockAuthenticatedTaskPage(page, referoTaskFixtures, undefined, {
       revisionConflictIssueKeys: [createIssueCollaborationKey('core-team', 'wireframe')],
     })
-    await page.goto('/projects/refero/tasks')
+    await page.goto('/projects/refero/issues')
     const requestCounts = getMockRequestCounts(page)
 
     await page.getByRole('tab', { name: '期限順', exact: true }).click()
@@ -4595,7 +4524,7 @@ test.describe('authenticated task page', () => {
     })
 
     try {
-      await page.goto('/projects/refero/tasks')
+      await page.goto('/projects/refero/issues')
       await taskRequestStarted
 
       const taskMain = page.locator('main.workbench-shell > section.workbench-main')
@@ -4626,7 +4555,7 @@ test.describe('authenticated task page', () => {
       await expect(page.getByRole('status')).toHaveCount(0)
       await expect(taskMain).toHaveAttribute('aria-busy', 'false')
       expect(interceptedTaskRequestCount).toBe(1)
-      expect(requestCounts.projectTasks.refero).toBe(1)
+      expect(requestCounts.projectIssues.refero).toBe(1)
     } finally {
       releaseTaskResponse()
     }
@@ -4669,7 +4598,7 @@ test.describe('authenticated task page', () => {
   })
 
   test('タスク画面で検索、ステータス絞り込み、行選択が動作する', async ({ page }) => {
-    await page.goto('/projects/refero/tasks')
+    await page.goto('/projects/refero/issues')
 
     await expect(page.getByTestId('tasks-heading')).toBeVisible()
     await expect(page.getByTestId('task-row-wireframe')).toBeVisible()
@@ -5002,7 +4931,7 @@ test.describe('authenticated task page', () => {
     await detailPane.getByRole('button', { name: '変更を保存' }).click()
 
     await expect.poll(() => requestCounts.issueUpdates).toBe(1)
-    await expect.poll(() => requestCounts.projectTasks.refero).toBeGreaterThanOrEqual(2)
+    await expect.poll(() => requestCounts.projectIssues.refero).toBeGreaterThanOrEqual(2)
     await expect(detailPane.locator('select[name="workflowStatusId"]')).toHaveValue('review')
     await expect(detailPane.locator('textarea[name="description"]')).toHaveValue(
       '別のメンバーが更新した最新内容です。',
@@ -5154,7 +5083,7 @@ test.describe('authenticated task page', () => {
   })
 
   test('タブ切り替えとサイドバーの折りたたみが動作する', async ({ page }) => {
-    await page.goto('/projects/refero/tasks')
+    await page.goto('/projects/refero/issues')
 
     await page.getByRole('tab', { name: 'ボード' }).click()
 
@@ -5184,7 +5113,7 @@ test.describe('authenticated task page', () => {
 
     await expectDesktopAppShellScrollsInsideMain(page)
 
-    await page.goto('/projects/refero/tasks')
+    await page.goto('/projects/refero/issues')
     await expect(page.getByTestId('tasks-heading')).toBeVisible()
 
     await expectDesktopAppShellScrollsInsideMain(page)
@@ -5282,7 +5211,7 @@ test.describe('authenticated task page', () => {
     await expect(sidebar.getByRole('button', { name: '共通ローンチ', exact: true })).toHaveCount(2)
     expect(requestCounts.projectDirectory).toBe(1)
     await expect.poll(() => requestCounts.workspaceWorkItems).toBe(1)
-    expect(requestCounts.projectTasks).toEqual({})
+    expect(requestCounts.projectIssues).toEqual({})
 
     await sidebar.getByRole('button', { name: 'ブランド刷新', exact: true }).click()
 
@@ -6090,7 +6019,7 @@ test.describe('authenticated task page', () => {
         },
       })
     })
-    await page.goto('/projects/refero/tasks?teamId=core-team')
+    await page.goto('/projects/refero/issues?teamId=core-team')
     const requestCounts = getMockRequestCounts(page)
 
     await expect(page.getByRole('button', { name: '権限管理', exact: true })).toHaveCount(0)
@@ -7721,7 +7650,7 @@ test.describe('authenticated task page', () => {
   })
 
   test('タスク画面から新規タスクを登録できる', async ({ page }) => {
-    await page.goto('/projects/refero/tasks')
+    await page.goto('/projects/refero/issues')
     const requestCounts = getMockRequestCounts(page)
 
     await page.getByRole('button', { name: '新規タスク' }).click()
@@ -7739,7 +7668,7 @@ test.describe('authenticated task page', () => {
 
   test('タスク本文をスクロール後に新規タスクを開いても作成パネルを表示する', async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 520 })
-    await page.goto('/projects/refero/tasks')
+    await page.goto('/projects/refero/issues')
 
     const mainScroll = page.getByTestId('task-main-scroll')
 
@@ -7755,7 +7684,7 @@ test.describe('authenticated task page', () => {
   })
 
   test('担当者を選択しない新規タスク登録は送信しない', async ({ page }) => {
-    await page.goto('/projects/refero/tasks')
+    await page.goto('/projects/refero/issues')
     const requestCounts = getMockRequestCounts(page)
 
     await page.getByRole('button', { name: '新規タスク' }).click()
@@ -7780,7 +7709,7 @@ test.describe('authenticated task page', () => {
       })
     })
 
-    await page.goto('/projects/refero/tasks')
+    await page.goto('/projects/refero/issues')
     await page.getByRole('button', { name: '新規タスク' }).click()
 
     await expect(page.getByText('担当者候補を取得できませんでした')).toBeVisible()
@@ -7789,7 +7718,7 @@ test.describe('authenticated task page', () => {
   })
 
   test('利用停止中の Workspace member を project と担当者の追加候補から除外する', async ({ page }) => {
-    await page.goto('/projects/refero/tasks?teamId=core-team')
+    await page.goto('/projects/refero/issues?teamId=core-team')
     await page.getByRole('button', { name: '新規タスク' }).click()
 
     const assigneeSelect = page.getByTestId('create-task-form').locator('select[name="assigneeUserId"]')
@@ -7812,7 +7741,7 @@ test.describe('authenticated task page', () => {
       })
     })
 
-    await page.goto('/projects/refero/tasks')
+    await page.goto('/projects/refero/issues')
 
     await expect(page.getByTestId('tasks-error')).toHaveText(
       'タスク一覧を取得できませんでした: Lambda returned 500.',
@@ -7829,7 +7758,7 @@ test.describe('authenticated task page', () => {
       })
     })
 
-    await page.goto('/projects/refero/tasks')
+    await page.goto('/projects/refero/issues')
 
     await expect(page.getByTestId('tasks-empty')).toBeVisible()
     await expect(page.getByTestId('tasks-count')).toContainText('0')
@@ -7959,7 +7888,7 @@ test('マイタスクでは同一 Issue の移動中に追加移動を開始で�
   expect(getMockRequestCounts(page).issueUpdates).toBe(1)
   expect(getMockRequestCounts(page).taskStatusUpdates).toBe(0)
   expect(getMockRequestCounts(page).workspaceWorkItems).toBe(1)
-  expect(getMockRequestCounts(page).projectTasks).toEqual({})
+  expect(getMockRequestCounts(page).projectIssues).toEqual({})
 })
 
 test('未認証の場合はログイン画面へ戻す', async ({ page }) => {
@@ -7967,7 +7896,7 @@ test('未認証の場合はログイン画面へ戻す', async ({ page }) => {
     window.localStorage.setItem('mukuroji.locale', 'ja')
   })
 
-  await page.goto('/projects/refero/tasks')
+  await page.goto('/projects/refero/issues')
 
   await expect(page).toHaveURL('/')
   await expect(page.getByRole('heading', { name: 'ログイン' })).toBeVisible()

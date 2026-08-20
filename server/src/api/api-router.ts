@@ -284,8 +284,6 @@ import {
   type CreateTeamIssueResponse,
   type ConfirmWorkItemScheduleChangeCommand,
   type ProjectIssuesResponse,
-  type ProjectTaskResponseItem,
-  type ProjectTasksResponse,
   type PublicUpdateTeamIssueRequestBody,
   type TeamIssueDetailReadOptions,
   type TeamIssueDetailResponse,
@@ -302,7 +300,6 @@ import {
 } from '../modules/work-items'
 
 export {
-  DynamoDbProjectTasksClient,
   DynamoDbTeamIssuesClient,
 } from '../modules/work-items'
 import {
@@ -1186,9 +1183,6 @@ const workspaceDependencies: WorkspaceDependencies = {
   },
 }
 const workItemDependencies: WorkItemDependencies = {
-  get projectTasks() {
-    return requireAppDependencies().workItems.projectTasks
-  },
   get teamIssues() {
     return requireAppDependencies().workItems.teamIssues
   },
@@ -1760,8 +1754,6 @@ const enterpriseRoutePermissionRules = [
     pathPattern: '/api/teams/:teamId/issues*',
     permission: 'work-items.write',
   },
-  { method: 'GET', pathPattern: '/api/projects/:projectId/tasks*', permission: 'work-items.read' },
-  { method: '*', pathPattern: '/api/projects/:projectId/tasks*', permission: 'work-items.write' },
   { method: 'GET', pathPattern: '/api/projects/:projectId/issues*', permission: 'work-items.read' },
   { method: '*', pathPattern: '/api/projects/:projectId/issues*', permission: 'work-items.write' },
   {
@@ -8472,35 +8464,6 @@ routeApp.delete('/api/task-views/:viewId', async (c) => {
   }
 })
 
-/** Issue #20 の legacy project task を read-only で返します。 */
-routeApp.get('/api/projects/:projectId/tasks', async (c) => {
-  const accessToken = readBearerAccessToken(c)
-  const projectId = c.req.param('projectId')
-
-  if (!accessToken) {
-    return c.json({ message: 'Bearer token is required.' }, 401)
-  }
-
-  if (!projectId) {
-    return c.json({ message: 'Project ID is required.' }, 400)
-  }
-
-  try {
-    const principal = await authenticateWorkspacePrincipal(accessToken, undefined, c)
-    await requireProjectPermission(principal, projectId, 'viewer')
-
-    return c.json(await hydrateProjectTasksResponse(
-      await workItemDependencies.projectTasks.getProjectTasks(principal.directoryId, projectId),
-    ))
-  } catch (error) {
-    if (error instanceof CognitoServiceError) {
-      return toCognitoDirectoryErrorResponse(c, error)
-    }
-
-    return toProjectDataErrorResponse(c, error)
-  }
-})
-
 /**
  * Cognito user pool からプロジェクト権限付与候補 user を検索する endpoint です。
  */
@@ -9249,7 +9212,7 @@ routeApp.patch('/api/teams/:teamId/issues/:issueId', async (c) => {
 const LEGACY_COLLABORATION_EVENT_PREVIEW_LIMIT = 50
 /** Prefix that keeps legacy event cursors distinct from canonical cursors. */
 const LEGACY_COLLABORATION_CURSOR_PREFIX = 'legacy.'
-/** Sentinel cursor that starts the legacy stream after a full canonical page. */
+/** Legacy cursor token accepted for already-issued transitional cursors. */
 const LEGACY_COLLABORATION_INITIAL_CURSOR = 'initial'
 /** Prefix for a cursor that merges canonical and legacy root-comment streams. */
 const MIGRATION_AWARE_COLLABORATION_CURSOR_PREFIX = 'mixed.'
@@ -9258,12 +9221,12 @@ const MIGRATION_AWARE_COLLABORATION_CURSOR_PREFIX = 'mixed.'
  * Parses the collaboration endpoint page limit before selecting a migration reader.
  *
  * @param value - Raw query-string page limit.
- * @returns A finite numeric page limit, or undefined when omitted.
+ * @returns A safe integer page limit, or undefined when omitted.
  */
 function readCollaborationPageLimit(value: string | undefined): number | undefined {
   if (value === undefined) return undefined
   const limit = Number(value)
-  if (!Number.isFinite(limit)) {
+  if (!Number.isSafeInteger(limit) || limit < 1) {
     throw new CollaborationError(400, 'InvalidCollaborationCursor', 'Page limit is invalid.')
   }
   return limit
@@ -9287,6 +9250,10 @@ type MigrationAwareCollaborationCursor = {
   canonicalExhausted: boolean
   /** Whether the legacy stream has been exhausted. */
   legacyExhausted: boolean
+  /** Creation timestamp of the last root emitted by the merged page. */
+  lastEmittedCreatedAt?: string
+  /** Stable ID of the last root emitted by the merged page. */
+  lastEmittedCommentId?: string
 }
 
 /**
@@ -9384,6 +9351,7 @@ routeApp.get('/api/teams/:teamId/issues/:issueId/collaboration', async (c) => {
     }
 
     const rootLimit = limit === undefined ? 10 : Math.min(Math.max(limit, 1), 20)
+    const retainMixedCursorLegacyComments = migrationCursor?.legacyEventCursor !== undefined
     const migrationPage = (!commentBackfillComplete || migrationCursor !== undefined) && !isLegacyPage
       ? await readMigrationAwareRootPage({
           collaboration: workItemDependencies.collaboration,
@@ -9420,6 +9388,13 @@ routeApp.get('/api/teams/:teamId/issues/:issueId/collaboration', async (c) => {
                 'Work Item assignment changed while comments were loading.',
               )
             }
+          },
+          shouldIncludeLegacyComment: async (comment) => {
+            const storedComment = await workItemDependencies.collaboration.getCommentSnapshot({
+              entityKey,
+              commentId: comment.id,
+            })
+            return !storedComment?.deletedAt && (!storedComment || retainMixedCursorLegacyComments)
           },
         })
       : undefined
@@ -9506,19 +9481,8 @@ routeApp.get('/api/teams/:teamId/issues/:issueId/collaboration', async (c) => {
         )
       }
     }
-    const retainMixedCursorLegacyComments = migrationCursor?.legacyEventCursor !== undefined
     const legacyComments = migrationPage
-      ? (await Promise.all(
-          migrationPage.legacyComments.map(async (comment) => {
-            const storedComment = await workItemDependencies.collaboration.getCommentSnapshot({
-              entityKey,
-              commentId: comment.id,
-            })
-            return storedComment?.deletedAt || (storedComment && !retainMixedCursorLegacyComments)
-              ? undefined
-              : toLegacyCollaborationCommentResponse(comment)
-          }),
-        )).flatMap((comment) => comment ? [comment] : [])
+      ? migrationPage.legacyComments.map(toLegacyCollaborationCommentResponse)
       : (await Promise.all(
           (legacyDetail?.comments ?? [])
             .filter((comment) => !storedCommentIds.has(comment.id))
@@ -9579,13 +9543,6 @@ routeApp.get('/api/teams/:teamId/issues/:issueId/collaboration', async (c) => {
         return cursor ? [[root.id, cursor] as const] : []
       }),
     )
-    const legacyInitialCursor = !migrationPage && !isLegacyPage &&
-      !commentBackfillComplete &&
-      !roots.nextCursor &&
-      legacyEventLimit === 0
-      ? `${LEGACY_COLLABORATION_CURSOR_PREFIX}${LEGACY_COLLABORATION_INITIAL_CURSOR}`
-      : undefined
-
     return c.json({
       comments: collaborationComments,
       ...(isLegacyPage
@@ -9596,9 +9553,7 @@ routeApp.get('/api/teams/:teamId/issues/:issueId/collaboration', async (c) => {
           ? { nextCursor: roots.nextCursor }
           : legacyDetail?.nextEventCursor
             ? { nextCursor: `${LEGACY_COLLABORATION_CURSOR_PREFIX}${legacyDetail.nextEventCursor}` }
-            : legacyInitialCursor
-              ? { nextCursor: legacyInitialCursor }
-              : {}),
+            : {}),
       ...(Object.keys(replyNextCursors).length > 0 ? { replyNextCursors } : {}),
       watch: roots.watch,
       presence: roots.presence,
@@ -26390,10 +26345,6 @@ function toProjectDataErrorResponse(c: Context, error: unknown) {
     return c.json({ message: 'Project was not found.' }, 404)
   }
 
-  if (error.code === 'ProjectTaskNotFound') {
-    return c.json({ message: 'Task was not found.' }, 404)
-  }
-
   if (error.code === 'ProjectMemberNotFound') {
     return c.json({ message: 'Project member was not found.' }, 404)
   }
@@ -26471,7 +26422,6 @@ function toProjectDataErrorResponse(c: Context, error: unknown) {
   }
 
   if (
-    error.code === 'InvalidProjectTask' ||
     error.code === 'InvalidProjectDirectory' ||
     error.code === 'InvalidProjectQuickAccess' ||
     error.code === 'InvalidTeamIssue'
@@ -28803,6 +28753,8 @@ type MigrationAwareRootPageInput = {
   cursor?: MigrationAwareCollaborationCursor
   /** Assignment and authorization validation for every legacy detail read. */
   validateLegacyDetail: (detail: TeamIssueDetailResponse) => void
+  /** Determines whether a legacy candidate still belongs in the merged page. */
+  shouldIncludeLegacyComment: (comment: TeamIssueCommentResponseItem) => Promise<boolean>
 }
 
 /**
@@ -28852,7 +28804,13 @@ function decodeMigrationAwareCollaborationCursor(
       (parsed.canonicalCursor !== undefined &&
         (typeof parsed.canonicalCursor !== 'string' || parsed.canonicalCursor.length === 0)) ||
       (parsed.legacyEventCursor !== undefined &&
-        (typeof parsed.legacyEventCursor !== 'string' || parsed.legacyEventCursor.length === 0))) {
+        (typeof parsed.legacyEventCursor !== 'string' || parsed.legacyEventCursor.length === 0)) ||
+      (parsed.lastEmittedCreatedAt === undefined) !== (parsed.lastEmittedCommentId === undefined) ||
+      (parsed.lastEmittedCreatedAt !== undefined &&
+        (typeof parsed.lastEmittedCreatedAt !== 'string' ||
+          !Number.isFinite(Date.parse(parsed.lastEmittedCreatedAt)))) ||
+      (parsed.lastEmittedCommentId !== undefined &&
+        (typeof parsed.lastEmittedCommentId !== 'string' || parsed.lastEmittedCommentId.length === 0))) {
       throw new TypeError('Invalid merged collaboration cursor payload.')
     }
     return {
@@ -28865,6 +28823,12 @@ function decodeMigrationAwareCollaborationCursor(
         : {}),
       ...(typeof parsed.legacyEventCursor === 'string'
         ? { legacyEventCursor: parsed.legacyEventCursor }
+        : {}),
+      ...(typeof parsed.lastEmittedCreatedAt === 'string'
+        ? { lastEmittedCreatedAt: parsed.lastEmittedCreatedAt }
+        : {}),
+      ...(typeof parsed.lastEmittedCommentId === 'string'
+        ? { lastEmittedCommentId: parsed.lastEmittedCommentId }
         : {}),
       canonicalExhausted: parsed.canonicalExhausted,
       legacyExhausted: parsed.legacyExhausted,
@@ -28941,6 +28905,12 @@ async function readMigrationAwareRootPage(
     ...(input.cursor?.legacyEventCursor ? { cursor: input.cursor.legacyEventCursor } : {}),
     exhausted: input.cursor?.legacyExhausted === true,
   }
+  const lastEmittedComment = input.cursor?.lastEmittedCreatedAt && input.cursor.lastEmittedCommentId
+    ? {
+        createdAt: input.cursor.lastEmittedCreatedAt,
+        id: input.cursor.lastEmittedCommentId,
+      }
+    : undefined
   let scopeState: Pick<CollaborationThreadPage, 'watch' | 'presence'> | undefined
 
   /** Loads the next unread canonical root comment candidate. */
@@ -28956,6 +28926,15 @@ async function readMigrationAwareRootPage(
       })
       scopeState = { watch: page.watch, presence: page.presence }
       const comment = page.comments[0]
+      if (comment !== undefined && lastEmittedComment !== undefined &&
+        compareMigrationAwareComments(comment, lastEmittedComment) >= 0) {
+        if (page.nextCursor === undefined) {
+          canonicalState.exhausted = true
+        } else {
+          canonicalState.cursor = page.nextCursor
+        }
+        continue
+      }
       if (comment !== undefined) {
         canonicalState.candidate = {
           source: 'canonical',
@@ -28990,7 +28969,14 @@ async function readMigrationAwareRootPage(
       )
       input.validateLegacyDetail(detail)
       const comments = detail.comments ?? []
-      const candidates = comments.map((comment, index) => {
+      const candidates = (await Promise.all(comments.map(async (comment, index) => {
+        if (!(await input.shouldIncludeLegacyComment(comment))) {
+          return undefined
+        }
+        if (lastEmittedComment !== undefined &&
+          compareMigrationAwareComments(comment, lastEmittedComment) >= 0) {
+          return undefined
+        }
         const nextComment = comments[index + 1]
         const nextCursor = nextComment
           ? createTeamIssueCommentEventCursor(
@@ -29006,7 +28992,7 @@ async function readMigrationAwareRootPage(
           comment,
           ...(nextCursor ? { nextCursor } : {}),
         }
-      })
+      }))).filter(isDefined)
       const [candidate, ...queuedCandidates] = candidates
       if (candidate !== undefined) {
         legacyState.candidate = candidate
@@ -29074,6 +29060,7 @@ async function readMigrationAwareRootPage(
     },
     presence: [],
   }
+  const lastComment = orderedComments.at(-1)?.comment
   return {
     canonicalComments,
     legacyComments,
@@ -29089,6 +29076,12 @@ async function readMigrationAwareRootPage(
             ...(legacyState.cursor ? { legacyEventCursor: legacyState.cursor } : {}),
             canonicalExhausted: canonicalState.exhausted,
             legacyExhausted: legacyState.exhausted,
+            ...(lastComment
+              ? {
+                  lastEmittedCreatedAt: lastComment.createdAt,
+                  lastEmittedCommentId: lastComment.id,
+                }
+              : {}),
           }),
         }
       : {}),
@@ -29359,15 +29352,6 @@ async function createTriageAcceptanceReferenceConditionChecks(
     )
   }
   return [...referenceChecks, memberCheck]
-}
-
-async function hydrateProjectTasksResponse(response: ProjectTasksResponse) {
-  const profiles = await readTaskAssigneeProfiles(response.tasks)
-
-  return {
-    ...response,
-    tasks: response.tasks.map((task) => hydrateProjectTask(task, profiles)),
-  } satisfies ProjectTasksResponse
 }
 
 async function hydrateTeamIssuesResponse(response: TeamIssuesResponse) {
@@ -35057,46 +35041,6 @@ function hydrateTeamIssue(
     assigneeEmail: profile.email,
     assigneeName: profile.name,
   } satisfies TeamIssueResponseItem
-}
-
-async function readTaskAssigneeProfiles(tasks: ProjectTaskResponseItem[]) {
-  const profiles = new Map<string, CognitoUserProfile>()
-  const userIds = new Set(tasks.map((task) => task.assigneeUserId).filter(isDefined))
-
-  await Promise.all(
-    Array.from(userIds).map(async (userId) => {
-      try {
-        profiles.set(userId, await authenticationDependencies.cognito.getUserProfile(userId))
-      } catch (error) {
-        if (!isCognitoUserNotFoundError(error)) {
-          console.warn('Failed to hydrate task assignee from Cognito:', error)
-        }
-      }
-    }),
-  )
-
-  return profiles
-}
-
-function hydrateProjectTask(
-  task: ProjectTaskResponseItem,
-  profiles: Map<string, CognitoUserProfile>,
-) {
-  if (!task.assigneeUserId) {
-    return task
-  }
-
-  const profile = profiles.get(task.assigneeUserId)
-
-  if (!profile) {
-    return task
-  }
-
-  return {
-    ...task,
-    assigneeEmail: profile.email,
-    assigneeName: profile.name,
-  } satisfies ProjectTaskResponseItem
 }
 
 function toCognitoDirectoryErrorResponse(c: Context, error: unknown) {

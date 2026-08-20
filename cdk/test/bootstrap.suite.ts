@@ -238,7 +238,9 @@ test('canonical Work Item seed writes complete schema data and preserves demo da
   expect(canonicalWorkItemSeed).toBeDefined();
   expect(canonicalWorkItemSeedPolicyEntry).toBeDefined();
   expect(projectDirectorySeed).toBeDefined();
-  expect(JSON.stringify(customResources)).not.toContain('refero-project-tasks-seed-v3');
+  expect(JSON.stringify(canonicalWorkItemSeed)).not.toContain('ProjectTasksTableE21F6637');
+  expect(JSON.stringify(canonicalWorkItemSeedPolicyEntry)).not.toContain('ProjectTasksTableE21F6637');
+  expect(JSON.stringify(transactWriteResources)).not.toContain('ProjectTasksTableE21F6637');
   expect(Object.keys(customResources).join(',')).not.toContain('SeedCanonicalWorkItems');
 
   const workItemPayload = serializeAwsSdkCall(canonicalWorkItemSeed?.Properties.Create);
@@ -246,7 +248,6 @@ test('canonical Work Item seed writes complete schema data and preserves demo da
 
   expect(workItemPayload).toContain('WorkspaceDirectoryId');
   expect(workItemPayload).toContain('TeamIssuesTable189D851D');
-  expect(workItemPayload).not.toContain('ProjectTasksTableE21F6637');
   expect(workItemPayload).toContain('attribute_not_exists(directoryTeamId)');
   expect(workItemPayload).toContain('attribute_not_exists(issueId)');
   expect(workItemPayload).toContain('core-team');
@@ -297,7 +298,6 @@ test('canonical Work Item seed writes complete schema data and preserves demo da
   );
   expect(JSON.stringify(canonicalWorkItemSeedPolicy))
     .not.toContain('dynamodb:TransactWriteItems');
-  expect(JSON.stringify(canonicalWorkItemSeedPolicy)).not.toContain('ProjectTasksTableE21F6637');
   expect(directoryPayload).toContain('WorkspaceDirectoryId');
   expect(directoryPayload.match(/"teamSourceEntryKey"/g)).toHaveLength(2);
   expect(directoryPayload.match(/"projectSourceEntryKey"/g)).toHaveLength(2);

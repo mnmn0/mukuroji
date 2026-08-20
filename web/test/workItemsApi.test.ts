@@ -14,7 +14,6 @@ import {
   TeamIssuesApiError,
   updateTeamIssue,
 } from '../src/issues/api'
-import { getProjectTasks, ProjectTasksApiError } from '../src/tasks/api'
 import { isCanonicalWorkItem } from '../src/work-items/api/contractValidation'
 
 const originalFetch = globalThis.fetch
@@ -382,33 +381,6 @@ describe('canonical Work Item API', () => {
       message: 'Unable to complete the Work Item request.',
       status: 500,
     })
-  })
-})
-
-describe('read-only legacy Project task adapter', () => {
-  test('accepts the exact legacy response shape without canonical fields', async () => {
-    const task = {
-      assignee: 'Demo User',
-      dueDate: '2026/07/18',
-      id: 'legacy-task-1',
-      priority: 'medium',
-      source: 'legacy',
-      status: 'review',
-      title: 'Legacy task',
-    }
-    const requests = installFetchRecorder({ projectId: 'legacy-project', tasks: [task] })
-
-    await expect(getProjectTasks('legacy-project', 'access-token')).resolves.toEqual([task])
-    expect(requests[0]?.url).toBe('/api/projects/legacy-project/tasks')
-  })
-
-  test('rejects a legacy response missing required adapter fields', async () => {
-    installFetchRecorder({
-      projectId: 'legacy-project',
-      tasks: [{ id: 'legacy-task-1', source: 'legacy' }],
-    })
-
-    await expect(getProjectTasks('legacy-project')).rejects.toBeInstanceOf(ProjectTasksApiError)
   })
 })
 

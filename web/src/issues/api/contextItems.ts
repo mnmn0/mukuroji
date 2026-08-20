@@ -50,8 +50,7 @@ export type GetTeamIssueHistoryOptions = {
 }
 
 const issuesApiBaseUrl = trimTrailingSlash(
-  import.meta.env.VITE_TASKS_API_BASE_URL ??
-    import.meta.env.VITE_API_BASE_URL ??
+  import.meta.env.VITE_API_BASE_URL ??
     '/api',
 )
 

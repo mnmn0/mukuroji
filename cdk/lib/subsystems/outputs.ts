@@ -15,8 +15,6 @@ import type { FileBucketIncarnationMarker } from './file-storage';
  * Resources whose deployment attributes are published as stack outputs.
  */
 export type StackOutputResources = {
-  /** Legacy project task table retained for backward compatibility. */
-  readonly legacyTasksTable: dynamodb.ITable;
   /** Project directory table. */
   readonly projectDirectoryTable: dynamodb.ITable;
   /** Canonical Work Item table, also exposed through the legacy team issue output. */
@@ -157,9 +155,9 @@ export type StackOutputResources = {
   readonly tenantVerificationCapabilityFunction: lambda.IFunction;
   /** Dead-letter queue for tenant lifecycle and retention stream failures. */
   readonly tenantOperationDlq: sqs.IQueue;
-  /** Lambda Function URL for the project task API. */
+  /** Lambda Function URL for the shared API. */
   readonly functionUrl: lambda.FunctionUrl;
-  /** HTTP API Gateway endpoint for the project task API. */
+  /** HTTP API Gateway endpoint for the shared API. */
   readonly httpApi: apigatewayv2.HttpApi;
   /** AWS AppConfig application identifier for runtime controls. */
   readonly applicationId: string;
@@ -182,9 +180,6 @@ export function buildStackOutputs(
   scope: cdk.Stack,
   resources: StackOutputResources,
 ): void {
-  new cdk.CfnOutput(scope, 'ProjectTasksTableName', {
-    value: resources.legacyTasksTable.tableName,
-  });
   new cdk.CfnOutput(scope, 'ProjectDirectoryTableName', {
     value: resources.projectDirectoryTable.tableName,
   });
@@ -429,14 +424,10 @@ export function buildStackOutputs(
   new cdk.CfnOutput(scope, 'TenantOperationDlqUrl', {
     value: resources.tenantOperationDlq.queueUrl,
   });
-  new cdk.CfnOutput(scope, 'ProjectTasksApiUrl', {
-    value: resources.functionUrl.url,
-    description: 'Backward-compatible alias for the Lambda Function URL.',
-  });
-  new cdk.CfnOutput(scope, 'ProjectTasksFunctionUrl', {
+  new cdk.CfnOutput(scope, 'ApiFunctionUrl', {
     value: resources.functionUrl.url,
   });
-  new cdk.CfnOutput(scope, 'ProjectTasksApiGatewayUrl', {
+  new cdk.CfnOutput(scope, 'ApiGatewayUrl', {
     value: resources.httpApi.apiEndpoint,
   });
   new cdk.CfnOutput(scope, 'RuntimeControlApplicationId', {

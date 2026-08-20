@@ -65,7 +65,7 @@ export type TenantOperationResourceOwnerConfig = {
   workItemImportBucketName: string
   /** Cognito user pool whose tenant sessions are revoked. */
   cognitoUserPoolId: string
-  /** Legacy project-task table. */
+  /** Retained legacy Project Task table drained by tenant decommission cleanup. */
   legacyTasksTableName: string
   /** Canonical Work Item table. */
   workItemsTableName: string

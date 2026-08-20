@@ -4,6 +4,7 @@ import type {
   CreateWorkItemInput,
   PreviewWorkItemScheduleInput,
   ResolvedWorkItemConfiguration,
+  TeamIssueCommentResponseItem,
   UpdateWorkItemInput,
   WorkItemPatch,
   WorkItemRelation,
@@ -29,20 +30,6 @@ import {
 export type TeamIssue = CanonicalWorkItem
 
 /**
- * Comment included in the legacy-compatible Work Item detail response.
- */
-export type TeamIssueDetailComment = {
-  /** Stable comment identifier. */
-  id: string
-  /** Workspace member key of the comment author. */
-  actorUserId: string
-  /** Markdown comment body. */
-  body: string
-  /** ISO 8601 creation timestamp. */
-  createdAt: string
-}
-
-/**
  * チーム所有 Issue の詳細レスポンスです。
  */
 export type TeamIssueDetail = {
@@ -53,7 +40,7 @@ export type TeamIssueDetail = {
   /**
    * Canonical Collaboration comments projected into the stable detail shape.
    */
-  comments: TeamIssueDetailComment[]
+  comments: TeamIssueCommentResponseItem[]
   /**
    * Issue 活動履歴一覧です。
    */
@@ -148,7 +135,7 @@ type UpdateTeamIssueResponse = {
 }
 
 const issuesApiBaseUrl = trimTrailingSlash(
-  import.meta.env.VITE_TASKS_API_BASE_URL ?? import.meta.env.VITE_API_BASE_URL ?? '/api',
+  import.meta.env.VITE_API_BASE_URL ?? '/api',
 )
 
 /**

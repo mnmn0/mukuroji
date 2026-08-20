@@ -42,7 +42,6 @@
     "restore-drill:approve-cleanup": "bun --filter server restore-drill:approve-cleanup",
     "floci:deploy-backend": "bun --env-file=.env run sh floci/deploy-backend.sh",
     "work-items:seed-dynamodb": "bash scripts/seed-work-items-dynamodb.sh",
-    "tasks:check-dynamodb": "bash scripts/check-project-tasks-dynamodb.sh",
     "issues:check-dynamodb": "bash scripts/check-team-issues-dynamodb.sh",
     "audit:backfill": "bun --env-file=.env --filter server audit:backfill",
     "team-issue-comments:backfill": "bun --env-file=.env --filter server team-issue-comments:backfill",

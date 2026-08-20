@@ -263,13 +263,6 @@ export function createGoalDocumentsPath(goalId: string) {
 }
 
 /**
- * プロジェクトのタスク画面 URL を生成します。
- */
-export function createProjectTasksPath(projectId: string, teamId: string) {
-  return `/projects/${encodeURIComponent(projectId)}/tasks?teamId=${encodeURIComponent(teamId)}`
-}
-
-/**
  * プロジェクトの Issue 遂行画面 URL を生成します。
  *
  * @param projectId - Work Item が割り当てられた Project ID です。
