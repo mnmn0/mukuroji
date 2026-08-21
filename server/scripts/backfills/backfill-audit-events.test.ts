@@ -1,10 +1,24 @@
 import { createHash } from 'node:crypto'
 import { describe, expect, test } from 'bun:test'
 import {
+  GetCommand,
+  PutCommand,
+  type DynamoDBDocumentClient,
+} from '@aws-sdk/lib-dynamodb'
+import {
   WORK_ITEM_SCHEMA_VERSION,
   createDefaultDueDateWorkItemSchedule,
 } from '@mukuroji/contracts'
-import { mapCurrentTeamIssue, mapWorkspaceAccessItem } from './backfill-audit-events'
+import {
+  createAuditEventId,
+  createMutationAuditContext,
+} from '../../src/modules/audit'
+import {
+  createLegacyBackfillEventId,
+  mapCurrentTeamIssue,
+  mapWorkspaceAccessItem,
+  putAuditEvent,
+} from './backfill-audit-events'
 
 const workspaceAuditPseudonymKey =
   '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
@@ -153,6 +167,79 @@ describe('audit backfill Workspace access mapping', () => {
       /^workspace\/wsp_v2_[a-f0-9]{48}\/member\/mbr_v2_[a-f0-9]{48}$/,
     )
     expect(otherWorkspaceEvent?.entityId).not.toBe(event?.entityId)
+  })
+
+  test('detects a pre-v3 event before writing a new HMAC-backed identity', async () => {
+    const item = {
+      workspaceId: 'workspace-1',
+      recordKey: 'MEMBER#sato@example.com',
+      entryType: 'workspace-member',
+      id: 'sato@example.com',
+      memberKey: 'sato@example.com',
+      email: 'sato@example.com',
+      role: 'member',
+      status: 'active',
+      version: 3,
+      createdAt: '2026-07-11T00:00:00.000Z',
+      updatedAt: '2026-07-16T01:02:03.000Z',
+    }
+    const event = mapWorkspaceAccess(item)
+    if (!event) throw new Error('Expected a Workspace member event.')
+
+    const legacyEventId = createLegacyBackfillEventId(
+      event,
+      'workspace-access',
+      'workspace-1#MEMBER#sato@example.com',
+    )
+    const legacySourceKeyDigest = createHash('sha256')
+      .update('workspace-access\0workspace-1#MEMBER#sato@example.com')
+      .digest('hex')
+    const expectedLegacyEventId = createAuditEventId(
+      createMutationAuditContext({
+        workspaceId: 'workspace-1',
+        actor: event.actor,
+        idempotencyKey: `backfill:${legacySourceKeyDigest}`,
+        request: {
+          method: 'BACKFILL',
+          path: '/audit/backfill/workspace-access',
+        },
+        source: {
+          kind: 'backfill',
+          method: 'BACKFILL',
+          requestId: `backfill:${legacySourceKeyDigest.slice(0, 32)}`,
+          route: '/audit/backfill/workspace-access',
+        },
+        occurredAt: event.occurredAt,
+      }),
+      event.eventType,
+      event.entity,
+    )
+    expect(legacyEventId).toBe(expectedLegacyEventId)
+    const commands: Array<GetCommand | PutCommand> = []
+    const client = {
+      async send(command: GetCommand | PutCommand) {
+        commands.push(command)
+        if (command instanceof GetCommand) {
+          expect(command.input).toMatchObject({
+            TableName: 'AuditEventsTable',
+            Key: { directoryId: 'workspace-1', eventId: legacyEventId },
+            ConsistentRead: true,
+          })
+          return {
+            Item: {
+              directoryId: 'workspace-1',
+              eventId: legacyEventId,
+            },
+          }
+        }
+
+        throw new Error('A pre-v3 duplicate must not issue a PutCommand.')
+      },
+    } as unknown as DynamoDBDocumentClient
+
+    await expect(putAuditEvent(client, 'AuditEventsTable', event, legacyEventId))
+      .resolves.toBe('duplicate')
+    expect(commands).toHaveLength(1)
   })
 
   test('maps a Workspace invitation snapshot without internal Cognito identity fields', () => {
