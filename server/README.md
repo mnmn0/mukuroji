@@ -302,19 +302,18 @@ Analytics report、immutable snapshot、scheduled delivery receipt は
 `ANALYTICS_SCHEDULE_INDEX_NAME` の `scheduleShard` / `nextDeliveryAtRecordKey` で取得します。
 API は Team partition の canonical Work Item を archived row も含めて読み、current ACL を
 確定してから、同じ Team/Work Item entity ID の audit event を `EntityOccurredAtIndex` から
-request 読み取り時点まで取得します。Legacy raw ID は metadata またはcanonical targetで
-current authorized Work Itemへ一意に解決し、存在するidentity sourceがすべて一致するeventだけを
-採用します。
+request 読み取り時点まで取得します。Audit reader は current schema v1 の row だけを受理し、
+event の flat/nested entity type と ID が query した canonical Work Item identity に完全一致する
+場合だけ採用します。旧 raw Work Item ID の query、reconciliation、authorization は行いません。
 Analytics engine は `asOf` より後の project/archive/status event を巻き戻して historical state を
 復元します。`asOf`時点のProjectがcurrent active/readable Project集合の外なら、現在は別の
 参照可能Projectに移動済みでも集計しません。現在削除済み、またはcallerのcurrent ACL外になった
 itemも集計しません。
 Work Item は Team partition 100件、1 partition/合計10,000件、対象Work Itemのaudit eventは
-返却合計10,000件、canonical/legacy rawを合わせたidentity timeline 500件、全timeline合計
-500 page query、1 identityあたり100 pageを上限とします。raw ID eventが認可・identity
-整合性チェックで除外される場合もpage queryと返却eventの上限を消費します。超過時は部分結果を
-返さず`413`でfail-closedにします。raw IDが重複しない通常構成では1 Work Itemあたり2 timelineを
-確認するため、250件を超える場合はaudit read前にfail-fastします。
+返却合計10,000件、canonical entity timeline 500件、全timeline合計500 page query、1 entity
+あたり100 pageを上限とします。canonical identity と一致しない event は採用せず、query 数と
+返却event数の上限は消費します。超過時は部分結果を返さず`413`でfail-closedにします。
+501件以上の Work Item は audit read 前に fail-fast します。
 無関係なWorkspace historyはevent合計上限を消費しません。
 Metric定義、timezone、archive、snapshot、scheduleの詳細は
 [`docs/analytics.md`](../docs/analytics.md) を参照してください。
@@ -329,7 +328,7 @@ AWS_ENDPOINT_URL=http://localhost:4566 bun run audit:backfill -- --dry-run --lim
 AWS_ENDPOINT_URL=http://localhost:4566 bun run audit:backfill -- \
   --source workspace-access --dry-run --limit 100
 AWS_ENDPOINT_URL=http://localhost:4566 bun run audit:backfill -- \
-  --checkpoint /tmp/mukuroji-audit-backfill-v2.json
+  --checkpoint /tmp/mukuroji-audit-backfill-v3.json
 ```
 
 `MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY` はgenerated fileではなくowner-onlyのroot
@@ -344,15 +343,15 @@ lifecycle rows stop the run. Workspace timestamps must use canonical UTC ISO
 format. Dry-run logs omit entity and target IDs.
 
 AWS runs require `WORKSPACE_ACCESS_TABLE_NAME` in addition to the existing source
-table variables and `AUDIT_EVENTS_TABLE_NAME`. Audit backfill checkpoint v2 adds
-the Workspace access source and is not compatible with a v1 checkpoint. Use a new
-checkpoint path; rescanning older sources is safe because event writes are
-deterministic and conditional. The default v2 checkpoint is
-`./audit-event-backfill-v2.checkpoint.json`; it is created with owner-only
+table variables and `AUDIT_EVENTS_TABLE_NAME`. Audit backfill checkpoint v3 contains
+the three current sources and is not compatible with v1/v2 checkpoints. Use a new
+checkpoint path; rescanning sources is safe because event writes are deterministic
+and conditional. The default v3 checkpoint is
+`./audit-event-backfill-v3.checkpoint.json`; it is created with owner-only
 permissions because its `LastEvaluatedKey` can contain source identifiers. Delete
-it after the migration is complete. Checkpoints created with the pre-hex-decoding
-Workspace access ID contract are rejected by the configuration hash. Unknown-timestamp snapshot events omit TTL so
-they are not immediately deleted.
+it after the migration is complete. Checkpoints created with a different table,
+key, or current-schema configuration are rejected by the configuration hash.
+Unknown-timestamp snapshot events omit TTL so they are not immediately deleted.
 
 ## Team Issue comment backfill
 
