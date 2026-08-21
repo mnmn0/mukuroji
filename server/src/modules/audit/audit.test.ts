@@ -22,7 +22,7 @@ import {
   getConfiguredDynamoDbEndpoint,
   readWorkspaceAuditPseudonymKey,
   toAuditEventView,
-  upcastAuditEvent,
+  normalizeAuditEvent,
 } from './audit'
 
 const auditExpiresAt = 2_000_000_000
@@ -160,7 +160,7 @@ test('preserves a session-bound break-glass actor kind in immutable events', () 
     expiresAt: auditExpiresAt,
   })
 
-  expect(upcastAuditEvent(event).actor).toEqual({
+  expect(normalizeAuditEvent(event).actor).toEqual({
     id: 'recovery-admin',
     kind: 'break-glass',
   })
@@ -458,7 +458,7 @@ test('sanitizes direct changes and metadata before persistence', () => {
     ...event,
     metadata: {
       adapter: 'team-issue',
-      legacyKey: 'workspace-1#internal-partition',
+      internalSourceKey: 'workspace-1#internal-partition',
     },
   })
 
@@ -648,59 +648,59 @@ test('gets a deterministic audit event with a strongly consistent read', async (
   }])
 })
 
-test('upcasts legacy issue activity without inventing an unavailable diff', () => {
-  const event = upcastAuditEvent({
-    directoryTeamIssueId: 'workspace-1#team#team-1#issue#issue-1',
-    eventId: '2026-07-11T12:00:00.000Z#updated#legacy',
-    directoryId: 'workspace-1',
-    teamId: 'team-1',
-    issueId: 'issue-1',
-    eventType: 'updated',
-    actorUserId: 'actor-1',
-    summary: 'Issue was updated.',
-    createdAt: '2026-07-11T12:00:00.000Z',
+test('accepts only current-schema audit events', () => {
+  const context = createMutationAuditContext({
+    workspaceId: 'workspace-1',
+    actor: { id: 'actor-1', kind: 'user' },
+    idempotencyKey: 'current-schema-event',
+    occurredAt: '2026-07-11T12:00:00.000Z',
+    request: { method: 'PATCH', path: '/api/work-items/item-1' },
+    source: { kind: 'api' },
+  })
+  const event = createAuditEvent({
+    context,
+    eventType: 'work-item.updated',
+    entity: { type: 'work-item', id: 'team/team-1/issue/item-1' },
+    action: 'updated',
+    expiresAt: auditExpiresAt,
   })
 
-  expect(event).toMatchObject({
-    schemaVersion: 1,
-    directoryId: 'workspace-1',
-    eventType: 'work-item.updated',
-    entityType: 'work-item',
-    entityId: 'team/team-1/issue/issue-1',
-    targetType: 'work-item',
-    targetId: 'team/team-1/issue/issue-1',
-    changes: [],
-    source: 'backfill',
-    outboxStatus: 'suppressed',
-    metadata: {
-      backfilled: true,
-      diffUnavailable: true,
-    },
-  })
+  expect(normalizeAuditEvent(event)).toEqual(event)
+  expect(() => normalizeAuditEvent({ ...event, schemaVersion: 0 })).toThrow(
+    'Unsupported audit schema version: 0',
+  )
+  expect(() => normalizeAuditEvent({ ...event, schemaVersion: undefined })).toThrow(
+    'Unsupported audit schema version: undefined',
+  )
 })
 
-test('exports schema-normalized events as newline-delimited JSON', async () => {
+test('exports current-schema events as newline-delimited JSON', async () => {
+  const context = createMutationAuditContext({
+    workspaceId: 'workspace-1',
+    actor: { id: 'actor-1', kind: 'user' },
+    idempotencyKey: 'current-schema-ndjson',
+    occurredAt: '2026-07-11T12:00:00.000Z',
+    request: { method: 'PATCH', path: '/api/work-items/item-1' },
+    source: { kind: 'api' },
+  })
+  const event = createAuditEvent({
+    context,
+    eventType: 'work-item.updated',
+    entity: { type: 'work-item', id: 'team/team-1/issue/item-1' },
+    action: 'updated',
+    expiresAt: auditExpiresAt,
+  })
   const output = await auditEventsToNdjson([
-    {
-      directoryTeamIssueId: 'workspace-1#team#team-1#issue#issue-1',
-      eventId: 'legacy-comment',
-      directoryId: 'workspace-1',
-      teamId: 'team-1',
-      issueId: 'issue-1',
-      eventType: 'commented',
-      actorUserId: 'actor-1',
-      body: 'Hello',
-      createdAt: '2026-07-11T12:00:00.000Z',
-    },
+    event,
   ])
   const lines = output.trimEnd().split('\n')
 
   expect(lines).toHaveLength(1)
   expect(JSON.parse(lines[0] ?? '{}')).toMatchObject({
-    eventType: 'comment.created',
+    eventType: 'work-item.updated',
     target: {
-      type: 'comment',
-      id: 'team/team-1/issue/issue-1/comment/legacy-comment',
+      type: 'work-item',
+      id: 'team/team-1/issue/item-1',
     },
   })
   expect(JSON.parse(lines[0] ?? '{}')).not.toHaveProperty('schemaVersion')

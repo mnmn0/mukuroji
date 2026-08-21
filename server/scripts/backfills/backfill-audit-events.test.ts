@@ -1,9 +1,20 @@
+import { createHash } from 'node:crypto'
 import { describe, expect, test } from 'bun:test'
+import {
+  GetCommand,
+  PutCommand,
+  type DynamoDBDocumentClient,
+} from '@aws-sdk/lib-dynamodb'
 import {
   WORK_ITEM_SCHEMA_VERSION,
   createDefaultDueDateWorkItemSchedule,
 } from '@mukuroji/contracts'
-import { mapCurrentTeamIssue, mapWorkspaceAccessItem } from './backfill-audit-events'
+import {
+  createLegacyBackfillEventId,
+  mapCurrentTeamIssue,
+  mapWorkspaceAccessItem,
+  putAuditEvent,
+} from './backfill-audit-events'
 
 const workspaceAuditPseudonymKey =
   '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
@@ -41,7 +52,10 @@ function createCanonicalWorkItem(overrides: Record<string, unknown> = {}) {
 
 describe('audit backfill canonical Work Item mapping', () => {
   test('includes the required creator as a redacted snapshot change', () => {
-    const event = mapCurrentTeamIssue(createCanonicalWorkItem())
+    const event = mapCurrentTeamIssue(
+      createCanonicalWorkItem(),
+      workspaceAuditPseudonymKey,
+    )
 
     expect(event).toBeDefined()
     expect(event?.changes).toEqual(expect.arrayContaining([
@@ -71,7 +85,7 @@ describe('audit backfill canonical Work Item mapping', () => {
       createCanonicalWorkItem({ relationIds: undefined }),
       createCanonicalWorkItem({ status: 'review' }),
     ]) {
-      expect(() => mapCurrentTeamIssue(item)).toThrow(
+      expect(() => mapCurrentTeamIssue(item, workspaceAuditPseudonymKey)).toThrow(
         'Audit backfill encountered a non-canonical Work Item row.',
       )
     }
@@ -120,8 +134,6 @@ describe('audit backfill Workspace access mapping', () => {
       metadata: {
         backfilled: true,
         kind: 'workspace-member',
-        legacyKey: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
-        legacySource: 'workspace-access',
       },
     })
     expect(event?.changes).toEqual(expect.arrayContaining([
@@ -137,12 +149,71 @@ describe('audit backfill Workspace access mapping', () => {
     expect(event?.entityId).not.toContain('workspace-1')
     expect(event?.targetId).toBe(event?.entityId)
 
+    const serializedEvent = JSON.stringify(event)
+    const candidateDigest = createHash('sha256')
+      .update('workspace-access\0workspace-1#MEMBER#sato@example.com')
+      .digest('hex')
+    expect(serializedEvent).not.toContain('sato@example.com')
+    expect(serializedEvent).not.toContain('workspace-1#MEMBER#sato@example.com')
+    expect(serializedEvent).not.toContain(candidateDigest)
+
     const otherWorkspaceEvent = mapWorkspaceAccess({ ...item, workspaceId: 'workspace-2' })
     expect(otherWorkspaceEvent?.eventId).not.toBe(event?.eventId)
     expect(otherWorkspaceEvent?.entityId).toMatch(
       /^workspace\/wsp_v2_[a-f0-9]{48}\/member\/mbr_v2_[a-f0-9]{48}$/,
     )
     expect(otherWorkspaceEvent?.entityId).not.toBe(event?.entityId)
+  })
+
+  test('detects a pre-v3 event before writing a new HMAC-backed identity', async () => {
+    const item = {
+      workspaceId: 'workspace-1',
+      recordKey: 'MEMBER#sato@example.com',
+      entryType: 'workspace-member',
+      id: 'sato@example.com',
+      memberKey: 'sato@example.com',
+      email: 'sato@example.com',
+      role: 'member',
+      status: 'active',
+      version: 3,
+      createdAt: '2026-07-11T00:00:00.000Z',
+      updatedAt: '2026-07-16T01:02:03.000Z',
+    }
+    const event = mapWorkspaceAccess(item)
+    if (!event) throw new Error('Expected a Workspace member event.')
+
+    const legacyEventId = createLegacyBackfillEventId(
+      event,
+      'workspace-access',
+      'workspace-1#MEMBER#sato@example.com',
+    )
+    // The v2 event identity is a fixed migration contract.
+    expect(legacyEventId).toBe('evt_eeb615d4f41d5e449d3c64a937fe6f5f50f2ba65173f3429')
+    const commands: Array<GetCommand | PutCommand> = []
+    const client = {
+      async send(command: GetCommand | PutCommand) {
+        commands.push(command)
+        if (command instanceof GetCommand) {
+          expect(command.input).toMatchObject({
+            TableName: 'AuditEventsTable',
+            Key: { directoryId: 'workspace-1', eventId: legacyEventId },
+            ConsistentRead: true,
+          })
+          return {
+            Item: {
+              directoryId: 'workspace-1',
+              eventId: legacyEventId,
+            },
+          }
+        }
+
+        throw new Error('A pre-v3 duplicate must not issue a PutCommand.')
+      },
+    } as unknown as DynamoDBDocumentClient
+
+    await expect(putAuditEvent(client, 'AuditEventsTable', event, legacyEventId))
+      .resolves.toBe('duplicate')
+    expect(commands).toHaveLength(1)
   })
 
   test('maps a Workspace invitation snapshot without internal Cognito identity fields', () => {
@@ -189,9 +260,8 @@ describe('audit backfill Workspace access mapping', () => {
       source: 'backfill',
       outboxStatus: 'suppressed',
       metadata: {
+        backfilled: true,
         kind: 'workspace-invitation',
-        legacyKey: expect.stringMatching(/^sha256:[a-f0-9]{64}$/),
-        legacySource: 'workspace-access',
       },
     })
     expect(event?.changes).toEqual(expect.arrayContaining([
@@ -211,6 +281,14 @@ describe('audit backfill Workspace access mapping', () => {
     expect(event?.entityId).not.toContain('invitee@example.com')
     expect(event?.entityId).not.toContain('workspace-1')
     expect(event?.targetId).toBe(event?.entityId)
+
+    const serializedEvent = JSON.stringify(event)
+    const candidateDigest = createHash('sha256')
+      .update('workspace-access\0workspace-1#INVITATION#invitee@example.com')
+      .digest('hex')
+    expect(serializedEvent).not.toContain('invitee@example.com')
+    expect(serializedEvent).not.toContain('workspace-1#INVITATION#invitee@example.com')
+    expect(serializedEvent).not.toContain(candidateDigest)
   })
 
   test('ignores only Workspace metadata and fails closed for unrecognized rows', () => {

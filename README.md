@@ -296,7 +296,7 @@ set -a
 set +a
 AWS_ENDPOINT_URL=http://localhost:4566 bun run audit:backfill -- --dry-run --limit 100
 AWS_ENDPOINT_URL=http://localhost:4566 bun run audit:backfill -- \
-  --checkpoint /tmp/mukuroji-audit-backfill-v2.json
+  --checkpoint /tmp/mukuroji-audit-backfill-v3.json
 ```
 
 `MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY` は generated file へ複製せず、API writer と

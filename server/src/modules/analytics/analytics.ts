@@ -1447,56 +1447,35 @@ function normalizeDateRange(value: unknown, label: string): AnalyticsDateRange {
   return { from, to }
 }
 
+/**
+ * Indexes canonical audit events by the authorized Work Item key.
+ *
+ * @param workItems Canonical Work Items authorized for the Analytics query.
+ * @param events Audit events read for the query.
+ * @returns A mutable event list for every authorized Work Item key.
+ * @throws When duplicate event IDs have conflicting payloads.
+ */
 function indexAuthorizedEvents(
   workItems: readonly CanonicalWorkItem[],
   events: readonly AuditEventV1[],
 ) {
   const byCanonicalEntityId = new Map<string, string>()
-  const byRawId = new Map<string, string[]>()
   const result = new Map<string, AuditEventV1[]>()
   for (const item of workItems) {
     const key = workItemKey(item.teamId, item.id)
     const entityId = `team/${item.teamId}/issue/${item.id}`
     byCanonicalEntityId.set(entityId, key)
-    const keys = byRawId.get(item.id) ?? []
-    keys.push(key)
-    byRawId.set(item.id, keys)
     result.set(key, [])
   }
 
   for (const event of events) {
-    if (event.entityType !== 'work-item' || event.entity.type !== 'work-item') continue
-    const canonicalCandidates = new Set<string>()
-    const rawCandidates = new Set<string>()
-    for (const eventEntityId of [event.entityId, event.entity.id]) {
-      const canonical = byCanonicalEntityId.get(eventEntityId)
-      if (canonical) canonicalCandidates.add(canonical)
-      const raw = byRawId.get(eventEntityId)
-      if (raw?.length === 1) rawCandidates.add(raw[0]!)
-    }
-    const metadataTeamId = readOptionalAuditString(event.metadata?.teamId)
-    const metadataIssueId = readOptionalAuditString(
-      event.metadata?.issueId ?? event.metadata?.workItemId,
-    )
-    const candidates = new Set(canonicalCandidates)
-    if (metadataTeamId && metadataIssueId) {
-      const metadataKey = workItemKey(metadataTeamId, metadataIssueId)
-      if (result.has(metadataKey)) candidates.add(metadataKey)
-      for (const rawCandidate of rawCandidates) {
-        if (rawCandidate === metadataKey) candidates.add(rawCandidate)
-      }
-    } else {
-      for (const rawCandidate of rawCandidates) candidates.add(rawCandidate)
-    }
-    if (candidates.size > 1) {
-      throw invalid(
-        'AnalyticsEventConflict',
-        'Analytics event identity resolves to conflicting authorized Work Items.',
-      )
-    }
-    for (const key of candidates) {
-      result.get(key)?.push(event)
-    }
+    if (
+      event.entityType !== 'work-item' ||
+      event.entity.type !== 'work-item' ||
+      event.entityId !== event.entity.id
+    ) continue
+    const key = byCanonicalEntityId.get(event.entityId)
+    if (key) result.get(key)?.push(event)
   }
 
   for (const itemEvents of result.values()) {
@@ -4465,10 +4444,6 @@ function validateVisibilityTeam(
 function requireExpectedRevision(expected: unknown, current: number) {
   const revision = readPositiveInteger(expected, 'Expected Analytics report revision')
   if (revision !== current) throw revisionConflict()
-}
-
-function readOptionalAuditString(value: AuditValue | undefined) {
-  return typeof value === 'string' && value.length > 0 ? value : undefined
 }
 
 function readCustomFieldValues(value: AuditValue | undefined) {

@@ -342,56 +342,6 @@ export type AuditEventV1 = {
 }
 
 /**
- * 旧 TeamIssueEventsTable で使われていた schema v0 です。
- */
-export type AuditEventV0 = {
-  /**
-   * 旧 event に明示される場合の schema version です。
-   */
-  schemaVersion?: 0
-  /**
-   * issue partition と event を結ぶ旧 partition key です。
-   */
-  directoryTeamIssueId?: string
-  /**
-   * 旧 event ID です。
-   */
-  eventId: string
-  /**
-   * canonical workspace 移行前の directory ID です。
-   */
-  directoryId: string
-  /**
-   * issue 所属 team ID です。
-   */
-  teamId?: string
-  /**
-   * 旧 event の issue ID です。
-   */
-  issueId: string
-  /**
-   * `created`、`updated`、`commented` の旧 event 種別です。
-   */
-  eventType: string
-  /**
-   * 旧 event に保存された actor user ID です。
-   */
-  actorUserId: string
-  /**
-   * 旧 activity summary です。
-   */
-  summary?: string
-  /**
-   * 旧 comment event に保存された本文です。
-   */
-  body?: string
-  /**
-   * 旧 event の作成 timestamp です。
-   */
-  createdAt: string
-}
-
-/**
  * request fingerprint の入力です。
  */
 export type AuditRequestFingerprintInput = {
@@ -1251,7 +1201,7 @@ export class DynamoDbAuditEventsClient {
       ConsistentRead: true,
     }))
     if (!response.Item) return undefined
-    const event = upcastAuditEvent(response.Item)
+    const event = normalizeAuditEvent(response.Item)
     return event.workspaceId === normalizedWorkspaceId && event.eventId === normalizedEventId
       ? event
       : undefined
@@ -1323,7 +1273,7 @@ export class DynamoDbAuditEventsClient {
     }
     const response = await this.documentClient.send(new QueryCommand(commandInput))
     const events = (response.Items ?? [])
-      .map((item) => upcastAuditEvent(item))
+      .map((item) => normalizeAuditEvent(item))
       .filter((event) => event.workspaceId === normalizedInput.workspaceId)
 
     return {
@@ -1456,20 +1406,20 @@ export function getConfiguredAuditTableName(
 }
 
 /**
- * schema v0 / v1 の保存値を schema v1 event に正規化します。
+ * Validates and normalizes a stored current-schema Audit Event.
+ *
+ * @param value The value read from the audit-events table.
+ * @returns The normalized schema v1 Audit Event.
+ * @throws When the value is not a schema v1 Audit Event.
  */
-export function upcastAuditEvent(value: unknown): AuditEventV1 {
+export function normalizeAuditEvent(value: unknown): AuditEventV1 {
   const record = requireRecord(value, 'Audit event')
 
-  if (record.schemaVersion === AUDIT_SCHEMA_VERSION) {
-    return normalizeV1Event(record)
-  }
-
-  if (record.schemaVersion !== undefined && record.schemaVersion !== 0) {
+  if (record.schemaVersion !== AUDIT_SCHEMA_VERSION) {
     throw new TypeError(`Unsupported audit schema version: ${String(record.schemaVersion)}`)
   }
 
-  return upcastV0Event(record)
+  return normalizeV1Event(record)
 }
 
 /**
@@ -1480,7 +1430,7 @@ export function upcastAuditEvent(value: unknown): AuditEventV1 {
  * 含む source details は公開しません。
  */
 export function toAuditEventView(value: unknown) {
-  const event = upcastAuditEvent(value)
+  const event = normalizeAuditEvent(value)
   const metadata = createAuditMetadataView(event.metadata)
 
   return {
@@ -1505,11 +1455,7 @@ const publicAuditMetadataFields = new Set([
   'acceptedCommentId',
   'commentId',
   'contextItemId',
-  'diffUnavailable',
   'kind',
-  'legacyEventId',
-  'legacyEventType',
-  'legacySource',
   'memberKey',
   'projectId',
   'rootCommentId',
@@ -1921,81 +1867,6 @@ function decodeAuditCursor(
   }
 
   return payload.lastEvaluatedKey as NonNullable<QueryCommandInput['ExclusiveStartKey']>
-}
-
-function upcastV0Event(record: Record<string, unknown>): AuditEventV1 {
-  const legacyEventId = requireTextValue(record.eventId, 'Legacy audit event ID')
-  const workspaceId = requireTextValue(record.directoryId, 'Legacy audit directory ID')
-  const issueId = requireTextValue(record.issueId, 'Legacy audit issue ID')
-  const legacyEventType = requireTextValue(record.eventType, 'Legacy audit event type')
-  const actorUserId = requireTextValue(record.actorUserId, 'Legacy audit actor ID')
-  const teamId = typeof record.teamId === 'string' && record.teamId.trim()
-    ? record.teamId.trim()
-    : undefined
-  const occurredAt = normalizeTimestamp(
-    requireTextValue(record.createdAt, 'Legacy audit createdAt'),
-    'Legacy audit createdAt',
-  )
-  const eventType = mapLegacyEventType(legacyEventType)
-  const eventId = `evt_${hashCanonical({
-    directoryTeamIssueId: record.directoryTeamIssueId,
-    legacyEventId,
-    workspaceId,
-  }).slice(0, 48)}`
-  const entity = {
-    type: 'work-item',
-    id: teamId ? `team/${teamId}/issue/${issueId}` : issueId,
-  }
-  const target = legacyEventType === 'commented'
-    ? { type: 'comment', id: `${entity.id}/comment/${legacyEventId}` }
-    : entity
-  const occurredAtEventId = `${occurredAt}#${eventId}`
-  const actor = { kind: 'user' as const, id: actorUserId }
-  const body = typeof record.body === 'string' ? record.body : undefined
-
-  return {
-    schemaVersion: AUDIT_SCHEMA_VERSION,
-    eventId,
-    directoryId: workspaceId,
-    workspaceId,
-    workspaceKey: workspaceId,
-    eventType,
-    occurredAt,
-    occurredAtEventId,
-    workspaceEventKey: occurredAtEventId,
-    actor,
-    actorUserId: actor.id,
-    actorKey: createAuditActorKey(workspaceId, actor.id),
-    actorEventKey: occurredAtEventId,
-    entity,
-    entityType: entity.type,
-    entityId: entity.id,
-    entityKey: createAuditEntityKey(workspaceId, entity),
-    entityEventKey: occurredAtEventId,
-    target,
-    targetType: target.type,
-    targetId: target.id,
-    targetKey: createAuditEntityKey(workspaceId, target),
-    targetEventKey: occurredAtEventId,
-    changes: readChanges(body === undefined ? [] : [{ field: 'body', after: body }]),
-    action: legacyEventType,
-    correlationId: `corr_${hashText(`legacy\0${workspaceId}\0${legacyEventId}`).slice(0, 32)}`,
-    idempotencyKeyHash: hashText(`legacy\0${workspaceId}\0${legacyEventId}`),
-    requestFingerprint: hashCanonical(record),
-    source: 'backfill',
-    sourceDetails: { kind: 'backfill' },
-    ...(typeof record.summary === 'string' && record.summary.trim()
-      ? { summary: record.summary.trim() }
-      : {}),
-    metadata: {
-      backfilled: true,
-      diffUnavailable: legacyEventType === 'updated',
-      legacyEventId,
-      legacyEventType,
-      ...(teamId ? { teamId } : {}),
-    },
-    outboxStatus: 'suppressed',
-  }
 }
 
 function normalizeV1Event(record: Record<string, unknown>): AuditEventV1 {
@@ -2590,22 +2461,6 @@ function normalizeSourceKind(value: unknown): AuditSourceKind {
   }
 
   return 'system'
-}
-
-function mapLegacyEventType(eventType: string) {
-  if (eventType === 'created') {
-    return 'work-item.created'
-  }
-
-  if (eventType === 'updated') {
-    return 'work-item.updated'
-  }
-
-  if (eventType === 'commented') {
-    return 'comment.created'
-  }
-
-  return `legacy.${eventType}`
 }
 
 function normalizeTimestamp(value: string, label: string) {

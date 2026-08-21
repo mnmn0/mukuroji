@@ -33,10 +33,9 @@ Analytics 用の canonical reader は Team partition を archived row も含め�
 Team/Project ACL を適用します。Project filter がある場合も、その Project が属する Team
 partition から読みます。現在状態が `asOf` より後に project 移動、archive、status 変更されていても
 過去状態を復元できるよう、Audit event は request の読み取り時点まで古い順に読みます。
-Workspace 全履歴をscanせず、現在参照可能な `team/{teamId}/issue/{workItemId}` ごとに
-`EntityOccurredAtIndex` をqueryします。Legacy raw Work Item ID は、event metadata の
-Team/Issueまたはcanonical Work Item targetでcurrent authorized Work Itemへ一意に解決し、
-存在するentity、metadata、targetのtype/Team/Issue identityがすべて一致する場合だけ採用します。
+Workspace 全履歴をscanせず、現在参照可能な canonical `team/{teamId}/issue/{workItemId}` ごとに
+`EntityOccurredAtIndex` をqueryします。event の flat/nested entity type と ID は query した
+canonical Work Item identity に完全一致する場合だけ採用します。
 Engine は canonical row から `asOf` より後の event を巻き戻してから filter と metric を評価します。
 巻き戻した `asOf` state の Project がcallerのcurrent readable Project集合に含まれない場合は、
 現在のcanonical rowが別の参照可能なProjectへ移動済みでも、そのfactとevidenceを除外します。
@@ -48,11 +47,10 @@ Canonical row と entity index の audit history は同時には更新されな�
 再試行し、揃わない場合は部分的なsnapshotを返さず`503`でfail-closedにします。
 
 1 query の上限は Team partition 100件、1 partition 10,000 Work Item、現在参照可能な Work Item
-合計10,000件、canonicalとlegacy raw IDを合わせたentity timeline 500件、全timelineを通じた
-Audit page query 500回、返却されたAudit event合計10,000件、1 identityあたり100 pageです。
-raw ID eventが認可・identity整合性チェックで除外される場合も、page queryと返却eventの上限を
-消費します。raw IDが重複しない通常構成では1 Work Itemにつきcanonicalとraw IDの2 timelineを
-確認するため、250件を超える場合はhistory read前に`413`でfail-fastします。
+合計10,000件、canonical entity timeline 500件、全timelineを通じた Audit page query 500回、
+返却されたAudit event合計10,000件、1 entityあたり100 pageです。
+canonical identity と一致しない event は採用せず、query 数と返却event数の上限は消費します。
+501件以上の Work Item は history read 前に `413` で fail-fast します。
 上限に達した場合は部分集計を成功扱いせず
 `413` で fail-closed に終了します。Partition数と合計Work Item上限は、Team/Project filterで
 読み取るTeam partition数を減らして回避できます。1つのTeam自体が10,000件を超える場合は、

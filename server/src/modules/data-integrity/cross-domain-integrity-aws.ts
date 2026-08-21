@@ -14,7 +14,7 @@ import {
   createAuditActorKey,
   createAuditEntityKey,
   createWorkspaceMemberAuditEntityIdFromKeyBytes,
-  upcastAuditEvent,
+  normalizeAuditEvent,
   type AuditEventV1,
 } from '../audit'
 import {
@@ -1187,12 +1187,12 @@ function indexWorkspaceMemberAuditIdentities(
   }
 }
 
-/** Strictly upcasts an Audit Event and retains joinable resource candidates. */
+/** Strictly normalizes a current-schema Audit Event and retains joinable resource candidates. */
 function normalizeAuditRow(
   row: Record<string, unknown>,
   workspaceMembersByAuditEntityId: ReadonlyMap<string, WorkspaceMemberAuditIdentity>,
 ): PendingAuditReference[] {
-  const event = runNormalizationBoundary(() => upcastAuditEvent(row))
+  const event = runNormalizationBoundary(() => normalizeAuditEvent(row))
   const tenantConsistent = auditTenantBoundaryIsCanonical(row, event)
   const referencedWorkspaceId = tenantConsistent
     ? event.workspaceId

@@ -66,13 +66,13 @@ test('keeps Analytics queries independent from the 200-item aggregate list limit
     limit: 10_001,
     teamId: 'core-team',
   })
-  expect(auditQueries).toHaveLength(500)
+  expect(auditQueries).toHaveLength(250)
   expect(auditQueries.every((query) =>
     query.direction === 'ascending' &&
     query.entityType === 'work-item' &&
     typeof query.entityId === 'string'
   )).toBe(true)
-  expect(new Set(auditQueries.map((query) => query.entityId)).size).toBe(500)
+  expect(new Set(auditQueries.map((query) => query.entityId)).size).toBe(250)
 })
 
 test('uses the canonical Analytics filter for query and evidence ACL reads', async () => {
@@ -105,8 +105,8 @@ test('uses the canonical Analytics filter for query and evidence ACL reads', asy
   expect(calls.issueReads.every(({ teamId }) => teamId === 'core-team')).toBe(true)
 })
 
-test('fails before audit reads when Analytics identity fan-out exceeds the API cap', async () => {
-  configureFakeProjectClients(true, { teamIssueCount: 251 })
+test('fails before audit reads when canonical entity fan-out exceeds the API cap', async () => {
+  configureFakeProjectClients(true, { teamIssueCount: 501 })
   let auditReads = 0
   setTestAppDependencies({
     analytics: new InMemoryAnalyticsRepository(),
@@ -136,7 +136,7 @@ test('fails before audit reads when Analytics identity fan-out exceeds the API c
   expect(auditReads).toBe(0)
 })
 
-test('bounds shared Analytics page reads even when paginated raw events are rejected', async () => {
+test('bounds shared Analytics page reads for paginated canonical events', async () => {
   configureFakeProjectClients(true, { teamIssueCount: 6 })
   let auditReads = 0
   setTestAppDependencies({
@@ -147,9 +147,6 @@ test('bounds shared Analytics page reads even when paginated raw events are reje
       },
       async query(input) {
         auditReads += 1
-        if (input.entityId?.startsWith('team/')) {
-          return { events: [] }
-        }
         const event = createAnalyticsAuditEvent(
           'work-item',
           input.entityId ?? 'missing-entity',
@@ -160,7 +157,7 @@ test('bounds shared Analytics page reads even when paginated raw events are reje
             ...event,
             entity: {
               type: 'work-item',
-              id: 'conflicting-raw-entity',
+              id: 'non-canonical-entity',
             },
           }],
           nextCursor: `page-${auditReads}`,
@@ -182,57 +179,6 @@ test('bounds shared Analytics page reads even when paginated raw events are reje
     code: 'AnalyticsHistoryLimitExceeded',
   })
   expect(auditReads).toBe(500)
-})
-
-test('counts rejected raw events toward the shared Analytics read budget', async () => {
-  configureFakeProjectClients(true, { teamIssueCount: 2 })
-  let rawAuditReads = 0
-  setTestAppDependencies({
-    analytics: new InMemoryAnalyticsRepository(),
-    auditEvents: {
-      async getEvent() {
-        return undefined
-      },
-      async query(input) {
-        if (input.entityId?.startsWith('team/')) {
-          return { events: [] }
-        }
-        rawAuditReads += 1
-        const event = createAnalyticsAuditEvent(
-          'work-item',
-          input.entityId ?? 'missing-entity',
-          '2026-07-17T12:00:00.000Z',
-        )
-        const rejectedEvent = {
-          ...event,
-          entity: {
-            type: 'work-item',
-            id: 'conflicting-raw-entity',
-          },
-        }
-        return {
-          events: Array<ReturnType<typeof createAnalyticsAuditEvent>>(100)
-            .fill(rejectedEvent),
-          nextCursor: `raw-page-${rawAuditReads}`,
-        }
-      },
-    },
-  })
-
-  const response = await analyticsApiRequest('/api/analytics/query', {
-    ...createAnalyticsQueryInput(),
-    filter: {
-      ...createAnalyticsQueryInput().filter,
-      teamIds: ['core-team'],
-    },
-  })
-
-  expect(response.status).toBe(413)
-  expect(await response.json()).toMatchObject({
-    code: 'AnalyticsHistoryLimitExceeded',
-  })
-  expect(rawAuditReads).toBeGreaterThanOrEqual(101)
-  expect(rawAuditReads).toBeLessThanOrEqual(102)
 })
 
 test('requires authentication and enforces Team report viewer/manager ACLs', async () => {
@@ -402,13 +348,10 @@ test('filters inaccessible Work Items and unrelated audit pages before Analytics
     snapshot: { widgets: Array<{ sampleSize: number; value: number | null }> }
   }
   expect(body.snapshot.widgets[0]).toMatchObject({ sampleSize: 1, value: 1 })
-  expect(auditQueries).toHaveLength(3)
+  expect(auditQueries).toHaveLength(2)
   expect(auditQueries.every((query) =>
     query.entityType === 'work-item' &&
-    (
-      query.entityId === 'team/core-team/issue/work-item-1' ||
-      query.entityId === 'work-item-1'
-    )
+    query.entityId === 'team/core-team/issue/work-item-1'
   )).toBe(true)
 })
 
@@ -552,190 +495,10 @@ test('rewinds post-asOf status, project, and archive changes from current author
   }
   expect(body.snapshot.widgets[0]).toMatchObject({ sampleSize: 1, value: 1 })
   expect(includeArchivedReads).toEqual([true, true])
-  expect(auditUpperBounds).toHaveLength(2)
+  expect(auditUpperBounds).toHaveLength(1)
   expect(auditUpperBounds.every((upperBound) =>
     Date.parse(upperBound) > Date.parse(futureEvent.occurredAt)
   )).toBe(true)
-})
-
-test('reads resolvable legacy raw Work Item audit identities through entity scope', async () => {
-  const current = createHistoricalAnalyticsWorkItem()
-  const futureEvent = createHistoricalAnalyticsWorkItemEvent(current)
-  const rawEntityId = current.id
-  const legacyEvent = {
-    ...futureEvent,
-    entity: { type: 'work-item' as const, id: rawEntityId },
-    entityId: rawEntityId,
-    entityKey: `user#demo@example.com#work-item#${rawEntityId}`,
-    target: { type: 'work-item' as const, id: rawEntityId },
-    targetId: rawEntityId,
-    targetKey: `user#demo@example.com#work-item#${rawEntityId}`,
-    metadata: {
-      ...futureEvent.metadata,
-      teamId: current.teamId,
-      issueId: current.id,
-    },
-  }
-  const auditQueries: Array<Record<string, unknown>> = []
-  configureFakeProjectClients(true, {
-    projectAccesses: [
-      { projectId: 'project-before', role: 'viewer' },
-      { projectId: 'project-after', role: 'viewer' },
-    ],
-    teamProjects: [
-      { id: 'project-before', name: 'Before', tone: 'blue' },
-      { id: 'project-after', name: 'After', tone: 'green' },
-    ],
-  })
-  setTestAppDependencies({
-    analytics: new InMemoryAnalyticsRepository(),
-    teamIssues: {
-      ...createTeamIssuesFake(),
-      async getTeamIssues(_workspaceId, teamId) {
-        return { teamId, issues: [current] }
-      },
-    },
-    auditEvents: {
-      async getEvent() {
-        return undefined
-      },
-      async query(input) {
-        auditQueries.push(input)
-        return input.entityId === rawEntityId
-          ? { events: [legacyEvent] }
-          : { events: [] }
-      },
-    },
-  })
-  const query = createAnalyticsQueryInput()
-  query.asOf = '2026-07-16T12:00:00.000Z'
-  query.filter.projectIds = ['project-before']
-
-  const response = await analyticsApiRequest('/api/analytics/query', query)
-
-  expect(response.status).toBe(200)
-  expect(await response.json()).toMatchObject({
-    snapshot: {
-      widgets: [{
-        metric: 'wip',
-        sampleSize: 1,
-        value: 1,
-      }],
-    },
-  })
-  expect(auditQueries.map((input) => input.entityId).sort()).toEqual([
-    rawEntityId,
-    `team/${current.teamId}/issue/${current.id}`,
-  ].sort())
-})
-
-test('rejects legacy raw Work Item events whose identity sources disagree', async () => {
-  const current = createHistoricalAnalyticsWorkItem()
-  const futureEvent = createHistoricalAnalyticsWorkItemEvent(current)
-  const rawEntityId = current.id
-  const rawIdentityFields = {
-    entity: { type: 'work-item' as const, id: rawEntityId },
-    entityId: rawEntityId,
-    entityKey: `user#demo@example.com#work-item#${rawEntityId}`,
-    target: { type: 'work-item' as const, id: rawEntityId },
-    targetId: rawEntityId,
-    targetKey: `user#demo@example.com#work-item#${rawEntityId}`,
-    metadata: {
-      ...futureEvent.metadata,
-      teamId: current.teamId,
-      issueId: current.id,
-    },
-  }
-  const conflictingTarget = {
-    ...futureEvent,
-    ...rawIdentityFields,
-    eventId: `${futureEvent.eventId}-target-conflict`,
-    target: {
-      type: 'work-item' as const,
-      id: `team/inaccessible-team/issue/${rawEntityId}`,
-    },
-    targetId: `team/inaccessible-team/issue/${rawEntityId}`,
-  }
-  const conflictingMetadata = {
-    ...futureEvent,
-    ...rawIdentityFields,
-    eventId: `${futureEvent.eventId}-metadata-conflict`,
-    metadata: {
-      ...rawIdentityFields.metadata,
-      workItemId: 'different-item',
-    },
-  }
-  const conflictingEntity = {
-    ...futureEvent,
-    ...rawIdentityFields,
-    eventId: `${futureEvent.eventId}-entity-conflict`,
-    entity: { type: 'work-item' as const, id: 'different-item' },
-  }
-  const nonWorkItemTarget = {
-    ...futureEvent,
-    ...rawIdentityFields,
-    eventId: `${futureEvent.eventId}-target-type-conflict`,
-    target: { type: 'project' as const, id: rawEntityId },
-    targetType: 'project' as const,
-    targetId: rawEntityId,
-  }
-  configureFakeProjectClients(true, {
-    projectAccesses: [
-      { projectId: 'project-before', role: 'viewer' },
-      { projectId: 'project-after', role: 'viewer' },
-    ],
-    teamProjects: [
-      { id: 'project-before', name: 'Before', tone: 'blue' },
-      { id: 'project-after', name: 'After', tone: 'green' },
-    ],
-  })
-  setTestAppDependencies({
-    analytics: new InMemoryAnalyticsRepository(),
-    teamIssues: {
-      ...createTeamIssuesFake(),
-      async getTeamIssues(_workspaceId, teamId) {
-        return { teamId, issues: [current] }
-      },
-    },
-    auditEvents: {
-      async getEvent() {
-        return undefined
-      },
-      async query(input) {
-        return input.entityId === rawEntityId
-          ? {
-              events: [
-                conflictingTarget,
-                conflictingMetadata,
-                conflictingEntity,
-                nonWorkItemTarget,
-              ],
-            }
-          : {
-              events: [{
-                ...futureEvent,
-                changes: [],
-              }],
-            }
-      },
-    },
-  })
-  const query = createAnalyticsQueryInput()
-  query.asOf = '2026-07-16T12:00:00.000Z'
-  query.filter.projectIds = ['project-before']
-
-  const response = await analyticsApiRequest('/api/analytics/query', query)
-
-  expect(response.status).toBe(200)
-  expect(await response.json()).toMatchObject({
-    snapshot: {
-      widgets: [{
-        metric: 'wip',
-        sampleSize: 0,
-        value: 0,
-      }],
-    },
-  })
 })
 
 test('excludes historical Project state outside current ACL and invalidates its snapshots', async () => {

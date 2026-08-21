@@ -9,7 +9,7 @@
 - 通知・Inbox・自動化・分析 consumer の outbox
 - 障害調査と migration の追跡
 
-現在の `TeamIssueEventsTable` は Team Issue のコメントと短い summary に限定され、field change、correlation、idempotency、schema version を保持しない。新しい汎用 event は `AuditEventsTable` に保存し、既存 table は migration source としてのみ扱う。
+新しい汎用 event は `AuditEventsTable` に保存する。Audit reader は current schema v1 の row だけを受理し、旧 Team Issue event row の read-time 変換や再利用は行わない。
 
 ## 境界と用語
 
@@ -38,7 +38,7 @@
 | `entity` / `entityType` / `entityId` | yes | activity query の親 resource。nested object と query 互換の flat field を同じ値で保存する。 |
 | `target` / `targetType` / `targetId` | yes | 直接変更した resource。nested object と query 互換の flat field を同じ値で保存する。 |
 | `action` | yes | `created`、`updated`、`deleted`、`commented`、`backfilled` などの操作。 |
-| `changes` | yes | field 名と `before` / `after` の配列。変更が復元不能な legacy event では空配列を許す。 |
+| `changes` | yes | field 名と `before` / `after` の配列。変更を含まない event では空配列を許す。 |
 | `correlationId` | yes | 1 request と、その request から派生した event を関連付ける ID。 |
 | `idempotencyKeyHash` | yes | client key の SHA-256 hash。元の header 値は保存しない。 |
 | `requestFingerprint` | yes | method、path、query、body から作る request fingerprint。 |
@@ -47,7 +47,7 @@
 | `beforeRevision` / `afterRevision` | no | versioned aggregate の optimistic concurrency 情報。 |
 | `expiresAt` | no | 通常は `AUDIT_RETENTION_DAYS` から計算する DynamoDB TTL epoch 秒。時刻不明の backfill event だけ省略する。 |
 | `outboxStatus` | yes | 通常 mutation は `pending`、backfill は `suppressed`。Stream consumer の配送判定に使う。 |
-| `metadata` | no | adapter、scope、legacy source など schema の必須項目に含めない診断情報。 |
+| `metadata` | no | adapter、scope、source の診断情報など schema の必須項目に含めない付加情報。 |
 
 `changes` の例:
 
@@ -154,7 +154,7 @@ system admin を要求する。target filter がある場合は `TargetOccurredA
 
 ### Public response projection
 
-activity、audit、export は保存 row をそのまま返さず、`eventId`、`eventType`、`occurredAt`、nested actor/entity/target、action、redact 済み changes、`correlationId`、source kind、`summary`、allowlist 済み metadata だけを DTO へ projection する。`schemaVersion`、`workspaceId` / `directoryId`、`actorUserId`、flat な entity/target field、`workspaceKey` / `*EventKey` / `actorKey` / `entityKey` / `targetKey` 等の DynamoDB key、backfill の `legacyKey`、`requestFingerprint`、`idempotencyKeyHash`、`sourceDetails` の IP/User-Agent、`outboxStatus` は public response と export に含めない。
+activity、audit、export は保存 row をそのまま返さず、`eventId`、`eventType`、`occurredAt`、nested actor/entity/target、action、redact 済み changes、`correlationId`、source kind、`summary`、allowlist 済み metadata だけを DTO へ projection する。`schemaVersion`、`workspaceId` / `directoryId`、`actorUserId`、flat な entity/target field、`workspaceKey` / `*EventKey` / `actorKey` / `entityKey` / `targetKey` 等の DynamoDB key、backfill の source key、`requestFingerprint`、`idempotencyKeyHash`、`sourceDetails` の IP/User-Agent、`outboxStatus` は public response と export に含めない。
 
 ### Cursor
 
@@ -183,16 +183,15 @@ consumer の DynamoDB projection と checkpoint は同じ transaction で更新�
 
 ## Schema migration と backfill
 
-reader は `schemaVersion` ごとの decoder/upcaster を持ち、未知 version は黙って読み飛ばさず quarantine/error にする。schema を変更するときは古い event を in-place update せず、read-time upcast または新しい migration event を使う。
+reader は `schemaVersion === 1` の current event だけを正規化し、旧 version や version 欠落 row は明示的に error/quarantine とする。schema を変更するときは古い event を in-place update せず、canonical な migration event または別 version の reader を用意する。
 
-初期 migration は [backfill-audit-events.ts](../server/scripts/backfills/backfill-audit-events.ts) を使用する。対象は次の 4 source である。
+初期 migration は [backfill-audit-events.ts](../server/scripts/backfills/backfill-audit-events.ts) を使用する。対象は次の 3 source である。
 
-- 既存 Team Issue event: `created` / `updated` / `commented` を汎用 event に変換する。
 - current Team Issue: `work-item.backfilled` snapshot を作る。
 - project directory: team、project、project-member の `*.backfilled` snapshot を作る。
 - Workspace access: Workspace member と invitation の current row から、それぞれ `member.backfilled` と `invitation.backfilled` snapshot を作る。Workspace metadata row は対象外とする。
 
-source item の key から logical idempotency key を決定的に作り、通常 mutation と同じ schema v1 builder で event ID、nested/flat actor/entity/target、4つの GSI key、`idempotencyKeyHash`、`sourceDetails` を生成する。legacy source/key、adapter、scope は `metadata` に保存するが、Workspace access の legacy key は email を含むため digest だけを保存する。`AuditEventsTable` の `directoryId/eventId` へ conditional Put し、同じ script を何度実行しても event は増えない。一般 source の current snapshot 時刻は有効な `updatedAt`、有効な `createdAt` の順で採用し、どちらも有効でない row だけ `1970-01-01T00:00:00.000Z` を「unknown historical time」の sentinel として使う。Workspace access row は canonical state contract として `createdAt` / `updatedAt` と必要な lifecycle timestamp を canonical UTC ISO 形式で必須検証し、不正値を sentinel へ緩和しない。通常は event の `occurredAt` から `AUDIT_RETENTION_DAYS` 後に TTL を設定する。unknown sentinel event は即時削除対象になることを避けるため TTL を付けず、運用者が保持期間を確認して別途削除する。snapshot field の sensitive flag は `[REDACTED]` に変換し、通常 mutation と同じく保存するすべての文字列 payload を最大4,096文字に制限する。
+source item の key から logical idempotency key を決定的に作り、通常 mutation と同じ schema v1 builder で event ID、nested/flat actor/entity/target、4つの GSI key、`idempotencyKeyHash`、`sourceDetails` を生成する。adapter、scope など現在の source 診断情報だけを `metadata` に保存し、source key 自体は保存しない。v3 backfill は新しい HMAC-based event ID を作る前に、v2 の SHA-256 source-key identity に対応する event ID を強整合 read で検出し、既存 event があれば duplicate として新しい row を書かない。`AuditEventsTable` の `directoryId/eventId` へ conditional Put も行うため、同じ script の再実行と v2 から v3 への切り替えで event は増えない。一般 source の current snapshot 時刻は有効な `updatedAt`、有効な `createdAt` の順で採用し、どちらも有効でない row だけ `1970-01-01T00:00:00.000Z` を「unknown historical time」の sentinel として使う。Workspace access row は canonical state contract として `createdAt` / `updatedAt` と必要な lifecycle timestamp を canonical UTC ISO 形式で必須検証し、不正値を sentinel へ緩和しない。通常は event の `occurredAt` から `AUDIT_RETENTION_DAYS` 後に TTL を設定する。unknown sentinel event は即時削除対象になることを避けるため TTL を付けず、運用者が保持期間を確認して別途削除する。snapshot field の sensitive flag は `[REDACTED]` に変換し、通常 mutation と同じく保存するすべての文字列 payload を最大4,096文字に制限する。
 
 ```sh
 # まず読み取りだけを最大100件確認する
@@ -203,22 +202,21 @@ bun server/scripts/backfills/backfill-audit-events.ts --dry-run --limit 100
 
 # checkpoint を使って本実行する
 AWS_ENDPOINT_URL=http://localhost:4566 \
-TEAM_ISSUE_EVENTS_TABLE_NAME=mukuroji-team-issue-events-local \
 TEAM_ISSUES_TABLE_NAME=mukuroji-team-issues-local \
 PROJECT_DIRECTORY_TABLE_NAME=mukuroji-project-directory-local \
 WORKSPACE_ACCESS_TABLE_NAME=mukuroji-workspace-access-local \
 AUDIT_EVENTS_TABLE_NAME=mukuroji-audit-events \
 MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY=<same-64-character-lowercase-hex-key-as-api-writer> \
 bun server/scripts/backfills/backfill-audit-events.ts \
-  --checkpoint /tmp/mukuroji-audit-backfill-v2.json \
+  --checkpoint /tmp/mukuroji-audit-backfill-v3.json \
   --limit 1000
 ```
 
-`--limit` は 1 run で scan する source item 数の上限であり、event 数ではない。source は consistent read で scan する。checkpoint v2 は DynamoDB `LastEvaluatedKey` と累積 counter を 4 source のそれぞれに保持し、endpoint、region、profile、account hint、table 名、pseudonym key fingerprint、ID contract version の configuration hash が異なる環境では再利用を拒否する。hex decode前のWorkspace access ID contract v1で作成したcheckpoint v2も、ID contract v2のconfiguration hashとは一致せずfail-closedで拒否する。既定 path は `./audit-event-backfill-v2.checkpoint.json` で、file は owner のみが読める mode で作成する。`LastEvaluatedKey` には source identifier が含まれ得るため、checkpoint は機密情報として保管し、完了後に削除する。Workspace access source 追加前の checkpoint v1 は互換ではないため、新しい checkpoint path で再実行する。既存の 4 source を再走査しても conditional Put により event は重複しない。page 処理中に停止した場合は同じ page を再処理するが、同じ duplicate guard により安全である。`--dry-run` は table、event、checkpoint のいずれも書き込まず、log に entity/target ID を出力しない。local endpoint の本実行は共通 bootstrap を呼び、`mukuroji-audit-events` が未作成なら本番と同じ key/GSI/Stream を持つ table を作成してから書き込む。
+`--limit` は 1 run で scan する source item 数の上限であり、event 数ではない。source は consistent read で scan する。checkpoint v3 は DynamoDB `LastEvaluatedKey` と累積 counter を 3 source のそれぞれに保持し、endpoint、region、profile、account hint、table 名、pseudonym key fingerprint、ID contract version の configuration hash が異なる環境では再利用を拒否する。既存の v1/v2 checkpoint は互換ではないため、新しい checkpoint path で再実行する。既定 path は `./audit-event-backfill-v3.checkpoint.json` で、file は owner のみが読める mode で作成する。`LastEvaluatedKey` には source identifier が含まれ得るため、checkpoint は機密情報として保管し、完了後に削除する。既存の 3 source を再走査しても conditional Put により event は重複しない。page 処理中に停止した場合は同じ page を再処理するが、同じ duplicate guard により安全である。`--dry-run` は table、event、checkpoint のいずれも書き込まず、log に entity/target ID を出力しない。local endpoint の本実行は共通 bootstrap を呼び、`mukuroji-audit-events` が未作成なら本番と同じ key/GSI/Stream を持つ table を作成してから書き込む。
 
 WorkspaceAccess row は `recordKey=WORKSPACE` / `entryType=workspace-meta` だけを `ignored` とし、member/invitation の record key と identifier の一致、role/status/delivery/ownership enum、version、必須 field、canonical timestamp を検証する。公開 entity/target ID は API writer と同じ固定 HMAC key から導出し、raw Workspace ID や email を保存しない。未知 row または認識できる破損 row は skip せず migration を停止する。backfill は現在値だけを復元するため、過去の招待再送、取消、受諾、role/status 変更の順序や actor は復元せず、`system:backfill` actor の snapshot event として記録する。changes 内の email、member key、表示名、failure message は write-time に redact し、Cognito identity ID/username は snapshot payload に含めない。
 
-Workspace access の rollout は同じ pseudonym key を設定した state/event atomic writer を先に deploy し、その後 `--source workspace-access --dry-run` の member/invitation/ignored 件数と sample projection を保存してから v2 checkpoint で apply する。key は ID contract の一部なので apply 後に rotation しない。apply 後は checkpoint、source 件数、`TargetOccurredAtIndex` の sample、`outboxStatus=suppressed`、audit export の redaction を照合する。backfill event を過去の lifecycle transition として扱ってはならない。
+Workspace access の rollout は同じ pseudonym key を設定した state/event atomic writer を先に deploy し、その後 `--source workspace-access --dry-run` の member/invitation/ignored 件数と sample projection を保存してから v3 checkpoint で apply する。key は ID contract の一部なので apply 後に rotation しない。apply 後は checkpoint、source 件数、`TargetOccurredAtIndex` の sample、`outboxStatus=suppressed`、audit export の redaction を照合する。backfill event を過去の lifecycle transition として扱ってはならない。
 
 backfill の Put も DynamoDB Stream record を生成するため、`outboxStatus=suppressed` を必ず付ける。consumer はこれを通常通知・自動化へ流さない。過去 event を配送する場合は、対象 event type と期間を明示した別 replay job を用意する。
 
