@@ -149,7 +149,7 @@ type SourceDefinition = {
   tableName: string
   /** Converts a source item into a generic audit event. */
   mapItem: (item: Record<string, unknown>) => AuditEventV1 | null | undefined
-  /** Reads the source key used by the pre-v3 deterministic event identity. */
+  /** Reads the source key used to reconstruct the pre-v3 deterministic event identity. */
   legacySourceKey: (item: Record<string, unknown>) => string
 }
 
@@ -432,7 +432,7 @@ function createSourceDefinitions(
       name: 'team-issues',
       tableName: tables.teamIssues,
       mapItem: (item) => mapCurrentTeamIssue(item, workspaceAuditPseudonymKey),
-      legacySourceKey: readTeamIssueLegacySourceKey,
+      legacySourceKey: readTeamIssueSourceKey,
     },
     {
       name: 'project-directory',
@@ -505,16 +505,26 @@ async function runBackfill(
           continue
         }
 
-        if (options.dryRun) {
-          console.info(`[dry-run] ${event.eventType} eventId=${event.eventId}`)
-          continue
-        }
-
         const legacyEventId = createLegacyBackfillEventId(
           event,
           definition.name,
           definition.legacySourceKey(item),
         )
+
+        if (options.dryRun) {
+          const legacyEventPresent = await readLegacyEventPresenceForDryRun(
+            client,
+            auditEventsTableName,
+            event,
+            legacyEventId,
+          )
+          console.info(
+            `[dry-run] ${event.eventType} eventId=${event.eventId} ` +
+            `legacyEventPresent=${legacyEventPresent === undefined ? 'unknown' : legacyEventPresent}`,
+          )
+          continue
+        }
+
         const result = await putAuditEvent(
           client,
           auditEventsTableName,
@@ -617,6 +627,32 @@ async function auditEventExists(
 }
 
 /**
+ * Reads the pre-v3 event presence for a dry-run without requiring a local destination table.
+ *
+ * @param client DynamoDB DocumentClient.
+ * @param tableName Destination audit-events table name.
+ * @param event Current HMAC-backed v3 event.
+ * @param legacyEventId Pre-v3 event ID to inspect.
+ * @returns True or false when the destination table exists, otherwise undefined.
+ * @throws For destination read errors other than a missing table.
+ */
+async function readLegacyEventPresenceForDryRun(
+  client: DynamoDBDocumentClient,
+  tableName: string,
+  event: AuditEventV1,
+  legacyEventId: string,
+): Promise<boolean | undefined> {
+  if (legacyEventId === event.eventId) return false
+
+  try {
+    return await auditEventExists(client, tableName, event.workspaceId, legacyEventId)
+  } catch (error) {
+    if (isNamedError(error, 'ResourceNotFoundException')) return undefined
+    throw error
+  }
+}
+
+/**
  * Reconstructs the pre-v3 event ID without persisting its source-key digest.
  *
  * @param event Current HMAC-backed v3 event.
@@ -676,7 +712,7 @@ export function mapCurrentTeamIssue(
 
   return createAuditEvent({
     sourceName: 'team-issues',
-    sourceKey: readTeamIssueLegacySourceKey(item),
+    sourceKey: readTeamIssueSourceKey(item),
     sourcePseudonymKey,
     eventType: 'work-item.backfilled',
     directoryId,
@@ -713,8 +749,11 @@ export function mapCurrentTeamIssue(
   })
 }
 
-/** Reads the exact source key used by the pre-v3 Team Issue backfill identity. */
-function readTeamIssueLegacySourceKey(item: Record<string, unknown>) {
+/**
+ * Reads the Team Issue source key used by both the current HMAC identity and
+ * pre-v3 identity migration detection.
+ */
+function readTeamIssueSourceKey(item: Record<string, unknown>) {
   if (!isCanonicalWorkItemRecord(item)) {
     throw new TypeError(
       'Audit backfill encountered a non-canonical Work Item row.',

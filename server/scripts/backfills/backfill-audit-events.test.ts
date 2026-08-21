@@ -10,10 +10,6 @@ import {
   createDefaultDueDateWorkItemSchedule,
 } from '@mukuroji/contracts'
 import {
-  createAuditEventId,
-  createMutationAuditContext,
-} from '../../src/modules/audit'
-import {
   createLegacyBackfillEventId,
   mapCurrentTeamIssue,
   mapWorkspaceAccessItem,
@@ -191,30 +187,8 @@ describe('audit backfill Workspace access mapping', () => {
       'workspace-access',
       'workspace-1#MEMBER#sato@example.com',
     )
-    const legacySourceKeyDigest = createHash('sha256')
-      .update('workspace-access\0workspace-1#MEMBER#sato@example.com')
-      .digest('hex')
-    const expectedLegacyEventId = createAuditEventId(
-      createMutationAuditContext({
-        workspaceId: 'workspace-1',
-        actor: event.actor,
-        idempotencyKey: `backfill:${legacySourceKeyDigest}`,
-        request: {
-          method: 'BACKFILL',
-          path: '/audit/backfill/workspace-access',
-        },
-        source: {
-          kind: 'backfill',
-          method: 'BACKFILL',
-          requestId: `backfill:${legacySourceKeyDigest.slice(0, 32)}`,
-          route: '/audit/backfill/workspace-access',
-        },
-        occurredAt: event.occurredAt,
-      }),
-      event.eventType,
-      event.entity,
-    )
-    expect(legacyEventId).toBe(expectedLegacyEventId)
+    // The v2 event identity is a fixed migration contract.
+    expect(legacyEventId).toBe('evt_eeb615d4f41d5e449d3c64a937fe6f5f50f2ba65173f3429')
     const commands: Array<GetCommand | PutCommand> = []
     const client = {
       async send(command: GetCommand | PutCommand) {
