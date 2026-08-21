@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { describe, expect, test } from 'bun:test'
 import {
   WORK_ITEM_SCHEMA_VERSION,
@@ -41,7 +42,10 @@ function createCanonicalWorkItem(overrides: Record<string, unknown> = {}) {
 
 describe('audit backfill canonical Work Item mapping', () => {
   test('includes the required creator as a redacted snapshot change', () => {
-    const event = mapCurrentTeamIssue(createCanonicalWorkItem())
+    const event = mapCurrentTeamIssue(
+      createCanonicalWorkItem(),
+      workspaceAuditPseudonymKey,
+    )
 
     expect(event).toBeDefined()
     expect(event?.changes).toEqual(expect.arrayContaining([
@@ -71,7 +75,7 @@ describe('audit backfill canonical Work Item mapping', () => {
       createCanonicalWorkItem({ relationIds: undefined }),
       createCanonicalWorkItem({ status: 'review' }),
     ]) {
-      expect(() => mapCurrentTeamIssue(item)).toThrow(
+      expect(() => mapCurrentTeamIssue(item, workspaceAuditPseudonymKey)).toThrow(
         'Audit backfill encountered a non-canonical Work Item row.',
       )
     }
@@ -134,6 +138,14 @@ describe('audit backfill Workspace access mapping', () => {
     expect(event?.entityId).not.toContain('sato@example.com')
     expect(event?.entityId).not.toContain('workspace-1')
     expect(event?.targetId).toBe(event?.entityId)
+
+    const serializedEvent = JSON.stringify(event)
+    const candidateDigest = createHash('sha256')
+      .update('workspace-access\0workspace-1#MEMBER#sato@example.com')
+      .digest('hex')
+    expect(serializedEvent).not.toContain('sato@example.com')
+    expect(serializedEvent).not.toContain('workspace-1#MEMBER#sato@example.com')
+    expect(serializedEvent).not.toContain(candidateDigest)
 
     const otherWorkspaceEvent = mapWorkspaceAccess({ ...item, workspaceId: 'workspace-2' })
     expect(otherWorkspaceEvent?.eventId).not.toBe(event?.eventId)
@@ -208,6 +220,14 @@ describe('audit backfill Workspace access mapping', () => {
     expect(event?.entityId).not.toContain('invitee@example.com')
     expect(event?.entityId).not.toContain('workspace-1')
     expect(event?.targetId).toBe(event?.entityId)
+
+    const serializedEvent = JSON.stringify(event)
+    const candidateDigest = createHash('sha256')
+      .update('workspace-access\0workspace-1#INVITATION#invitee@example.com')
+      .digest('hex')
+    expect(serializedEvent).not.toContain('invitee@example.com')
+    expect(serializedEvent).not.toContain('workspace-1#INVITATION#invitee@example.com')
+    expect(serializedEvent).not.toContain(candidateDigest)
   })
 
   test('ignores only Workspace metadata and fails closed for unrecognized rows', () => {

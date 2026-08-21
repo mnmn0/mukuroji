@@ -410,6 +410,13 @@ export function createQueueWebhookDeliveryMessage(queue: WebhookDeliveryQueue) {
   }
 }
 
+/**
+ * Projects a pending schema-versioned audit stream record into the Webhook queue.
+ *
+ * @param record DynamoDB stream record to inspect.
+ * @param dependencies Queue, feature-availability, and projection dependencies.
+ * @returns A promise that resolves after any required queue message is enqueued.
+ */
 async function projectAuditRecord(
   record: WebhookDynamoStreamRecord,
   dependencies: WebhookProjectionDependencies,
@@ -835,7 +842,13 @@ implements WebhookAuditEventReader {
     this.tableName = readIdentifier(tableName, 'Audit event table name')
   }
 
-  /** Workspace-bound deterministic ID で Audit event を強整合読みします。 */
+  /**
+   * Reads an audit event with a workspace-bound key and strong consistency.
+   *
+   * @param workspaceIdValue Workspace ID supplied by the caller.
+   * @param eventIdValue Audit event ID supplied by the caller.
+   * @returns The matching event, or undefined when it is missing or crosses workspace boundaries.
+   */
   async getEvent(workspaceIdValue: string, eventIdValue: string) {
     const workspaceId = readIdentifier(workspaceIdValue, 'Workspace ID')
     const eventId = readIdentifier(eventIdValue, 'Audit event ID')

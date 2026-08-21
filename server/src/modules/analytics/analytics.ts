@@ -1447,6 +1447,14 @@ function normalizeDateRange(value: unknown, label: string): AnalyticsDateRange {
   return { from, to }
 }
 
+/**
+ * Indexes canonical audit events by the authorized Work Item key.
+ *
+ * @param workItems Canonical Work Items authorized for the Analytics query.
+ * @param events Audit events read for the query.
+ * @returns A mutable event list for every authorized Work Item key.
+ * @throws When duplicate event IDs have conflicting payloads.
+ */
 function indexAuthorizedEvents(
   workItems: readonly CanonicalWorkItem[],
   events: readonly AuditEventV1[],

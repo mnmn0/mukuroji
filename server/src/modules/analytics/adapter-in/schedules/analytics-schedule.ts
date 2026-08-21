@@ -811,7 +811,11 @@ function assertAnalyticsScheduleWorkItemsAtCutoff(
 }
 
 /**
- * 更新済みcanonical stateのlatest audit eventがentity GSIに到達済みか検証します。
+ * Verifies that each updated canonical state has reached its latest audit event in the entity GSI.
+ *
+ * @param workItems Current canonical Work Items.
+ * @param events Canonical audit events read for the schedule.
+ * @throws When an updated Work Item has no matching latest canonical event.
  */
 function assertAnalyticsScheduleAuditCoverage(
   workItems: readonly CanonicalWorkItem[],
@@ -841,7 +845,14 @@ function assertAnalyticsScheduleAuditCoverage(
   }
 }
 
-/** Event が latest canonical Work Item revision を生成したupdateかを検証します。 */
+/**
+ * Checks whether an event generated the latest canonical Work Item revision.
+ *
+ * @param event Candidate audit event.
+ * @param workItem Current canonical Work Item.
+ * @param canonicalEntityId Expected canonical entity ID.
+ * @returns True when the event identity and canonical revision metadata match.
+ */
 function isAnalyticsScheduleLatestWorkItemUpdate(
   event: AuditEventV1,
   workItem: CanonicalWorkItem,
@@ -999,7 +1010,14 @@ function assertAnalyticsSchedulePartitionSize(
 }
 
 /**
- * Current canonical Work Item entity ごとの timeline から immutable events を返します。
+ * Reads immutable events from each current canonical Work Item entity timeline.
+ *
+ * @param workspaceId Workspace whose audit history is being read.
+ * @param historyReadAt Exclusive upper bound for the history query.
+ * @param workItems Canonical Work Items authorized for the recipient.
+ * @param client Audit history query client.
+ * @returns Canonical events from the authorized entity timelines.
+ * @throws When the schedule query or event limits are exceeded, or a query fails.
  */
 async function readRecipientAuditEvents(
   workspaceId: string,
@@ -1078,7 +1096,13 @@ async function readRecipientAuditEvents(
   return events
 }
 
-/** Canonical entity timeline のeventがquery identityと一致するかを検証します。 */
+/**
+ * Checks that a canonical entity timeline event matches its query identity.
+ *
+ * @param event Candidate audit event.
+ * @param canonicalEntityId Entity ID used by the query.
+ * @returns True when both persisted entity IDs exactly match the query identity.
+ */
 function isCanonicalAnalyticsScheduleEvent(
   event: AuditEventV1,
   canonicalEntityId: string,
@@ -1089,7 +1113,7 @@ function isCanonicalAnalyticsScheduleEvent(
     event.entity.id === canonicalEntityId
 }
 
-/** Analytics audit metadata の non-empty string だけを返します。 */
+/** Returns a trimmed non-empty Analytics schedule audit metadata string. */
 function readAnalyticsScheduleMetadataText(value: unknown) {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined
 }

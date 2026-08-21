@@ -553,6 +553,13 @@ export function parseConnectorSyncQueueMessage(
   return normalizeQueueMessage(value)
 }
 
+/**
+ * Projects a pending audit stream record into connector-sync work messages.
+ *
+ * @param record DynamoDB stream record to inspect.
+ * @param dependencies Queue and connector-sync projection dependencies.
+ * @returns A promise that resolves after any required work message is enqueued.
+ */
 async function projectAuditRecord(
   record: ConnectorSyncDynamoStreamRecord,
   dependencies: ConnectorSyncAuditProjectionDependencies,

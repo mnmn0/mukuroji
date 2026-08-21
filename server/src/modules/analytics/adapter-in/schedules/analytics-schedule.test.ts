@@ -11,6 +11,7 @@ import {
   createAuditEvent,
   createMutationAuditContext,
   type AuditEventQuery,
+  type AuditEventV1,
 } from '../../../audit/audit'
 import {
   AnalyticsError,
@@ -768,20 +769,18 @@ test('bounds shared schedule page reads across paginated canonical entities', as
   const workItems = Array.from({ length: 6 }, (_, index) =>
     createWorkItem(`paginated-item-${index}`, 'open-project')
   )
-  const rejectedEvents = new Map(workItems.map((workItem) => {
+  const rejectedEvents = new Map<string, AuditEventV1>()
+  for (const workItem of workItems) {
     const event = createWorkItemEvent(workItem, workItem.updatedAt, 'started')
     const canonicalEntityId = `team/${workItem.teamId}/issue/${workItem.id}`
-    return [
-      canonicalEntityId,
-      {
-        ...event,
-        entity: {
-          type: 'work-item' as const,
-          id: 'non-canonical-entity',
-        },
+    rejectedEvents.set(canonicalEntityId, {
+      ...event,
+      entity: {
+        type: 'work-item',
+        id: 'non-canonical-entity',
       },
-    ]
-  }))
+    })
+  }
   const entityReads = new Map<string, number>()
   let auditReads = 0
   const renderer = createAnalyticsScheduleRenderer({

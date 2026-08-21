@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, createHmac } from 'node:crypto'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { dirname, resolve } from 'node:path'
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb'
@@ -33,171 +33,95 @@ const sourceNames = [
   'workspace-access',
 ] as const
 
-/**
- * Backfill で読み取れる source 名です。
- */
+/** Source table names supported by the audit-event backfill. */
 type SourceName = typeof sourceNames[number]
 
-/**
- * DynamoDB DocumentClient が返す key です。
- */
+/** A DynamoDB key returned by the DocumentClient. */
 type DynamoKey = Record<string, unknown>
 
-/**
- * 汎用 audit event を組み立てる入力です。
- */
+/** Input used to construct a schema-versioned audit event. */
 type AuditEventInput = {
-  /**
-   * Source table の種類です。
-   */
+  /** Source table name. */
   sourceName: SourceName
-  /**
-   * Source item の一意 key です。
-   */
+  /** Source item key used only while constructing the event. */
   sourceKey: string
-  /**
-   * Domain event type です。
-   */
+  /** Domain event type. */
   eventType: string
-  /**
-   * Workspace directory ID です。
-   */
+  /** Canonical workspace directory ID. */
   directoryId: string
-  /**
-   * Event timestamp です。
-   */
+  /** Event timestamp. */
   occurredAt: string
-  /**
-   * User または system actor ID です。
-   */
+  /** User or system actor ID. */
   actorUserId: string
-  /**
-   * Activity entity type です。
-   */
+  /** Activity entity type. */
   entityType: string
-  /**
-   * Activity entity ID です。
-   */
+  /** Activity entity ID. */
   entityId: string
-  /**
-   * 直接変更された resource type です。
-   */
+  /** Directly changed resource type. */
   targetType: string
-  /**
-   * 直接変更された resource ID です。
-   */
+  /** Directly changed resource ID. */
   targetId: string
-  /**
-   * Mutation action です。
-   */
+  /** Mutation action. */
   action: string
-  /**
-   * 復元済み field changes です。
-   */
+  /** Reconstructed field changes. */
   changes: AuditFieldChange[]
-  /**
-   * Event 生成理由です。
-   */
+  /** Human-readable reason for generating the event. */
   reason?: string
-  /**
-   * Migration event か current snapshot backfill かを示します。
-   */
+  /** Whether the event is a migration or current-snapshot backfill. */
   source: 'migration' | 'backfill'
-  /**
-   * Adapter scope や source の診断情報です。
-   */
+  /** Adapter scope or source diagnostics that are safe to persist. */
   metadata?: Readonly<Record<string, unknown>>
+  /** Dedicated key used to pseudonymize the source key before persistence. */
+  sourcePseudonymKey: string
 }
 
-/**
- * CLI から受け取る実行 option です。
- */
+/** Command-line options for one backfill run. */
 type BackfillOptions = {
-  /**
-   * DynamoDB と checkpoint を変更しない preview mode です。
-   */
+  /** Whether to scan and map without writing DynamoDB or checkpoints. */
   dryRun: boolean
-  /**
-   * Help を表示するかどうかです。
-   */
+  /** Whether to print help and exit. */
   help: boolean
-  /**
-   * Checkpoint JSON の保存先です。
-   */
+  /** Path for the checkpoint JSON file. */
   checkpointPath: string
-  /**
-   * 1 run で scan する source item 数の上限です。
-   */
+  /** Maximum number of source items to scan in one run. */
   limit?: number
-  /**
-   * 1 source だけ実行する場合の source 名です。
-   */
+  /** Optional source name to run exclusively. */
   source?: SourceName
 }
 
-/**
- * Source ごとの累積 counter です。
- */
+/** Cumulative counters for one source. */
 type BackfillCounters = {
-  /**
-   * Scan した source item 数です。
-   */
+  /** Number of source items scanned. */
   scanned: number
-  /**
-   * 新規作成した event 数です。
-   */
+  /** Number of newly written events. */
   written: number
-  /**
-   * Conditional check により既存と判定した event 数です。
-   */
+  /** Number of events found to already exist by a conditional write. */
   duplicates: number
-  /**
-   * 明示的に allowlist した非 domain metadata item 数です。
-   */
+  /** Number of explicitly allowlisted non-domain metadata items. */
   ignored: number
-  /**
-   * 既存 source mapper が必須 field 不足などで変換できず skip した item 数です。
-   */
+  /** Number of source items skipped by a mapper because they are unsupported or incomplete. */
   skipped: number
 }
 
-/**
- * 1 source の scan checkpoint です。
- */
+/** Scan checkpoint for one source. */
 type SourceCheckpoint = {
-  /**
-   * Source table の scan が完了したかどうかです。
-   */
+  /** Whether scanning the source table has completed. */
   completed: boolean
-  /**
-   * 次 page の DynamoDB ExclusiveStartKey です。
-   */
+  /** DynamoDB ExclusiveStartKey for the next page. */
   lastEvaluatedKey?: DynamoKey
-  /**
-   * Source の累積 counter です。
-   */
+  /** Cumulative counters for the source. */
   counters: BackfillCounters
 }
 
-/**
- * Backfill 全体の checkpoint file です。
- */
+/** Checkpoint file for the complete backfill. */
 type CheckpointState = {
-  /**
-   * Checkpoint schema version です。
-   */
+  /** Checkpoint schema version. */
   version: 3
-  /**
-   * Table 組み合わせの誤用を防ぐ hash です。
-   */
+  /** Hash that prevents resuming with a different table configuration. */
   configurationHash: string
-  /**
-   * Checkpoint の最終更新時刻です。
-   */
+  /** Time at which the checkpoint was last updated. */
   updatedAt: string
-  /**
-   * Source ごとの checkpoint です。
-   */
+  /** Checkpoint for each source. */
   sources: Record<SourceName, SourceCheckpoint>
 }
 
@@ -215,38 +139,25 @@ type TableNames = {
   auditEvents: string
 }
 
-/**
- * 1 source table の scan と mapping 定義です。
- */
+/** Scan and mapping definition for one source table. */
 type SourceDefinition = {
-  /**
-   * CLI/checkpoint で使う source 名です。
-   */
+  /** Source name used by the CLI and checkpoint. */
   name: SourceName
-  /**
-   * Scan する DynamoDB table 名です。
-   */
+  /** DynamoDB table to scan. */
   tableName: string
-  /**
-   * Source item を汎用 audit event に変換します。
-   */
+  /** Converts a source item into a generic audit event. */
   mapItem: (item: Record<string, unknown>) => AuditEventV1 | null | undefined
 }
 
-/**
- * Error object の最小形です。
- */
+/** Minimal shape used to identify Node and AWS SDK errors. */
 type NamedError = {
-  /**
-   * Node/AWS SDK error name です。
-   */
+  /** Node or AWS SDK error name. */
   name?: string
-  /**
-   * Node filesystem error code です。
-   */
+  /** Node filesystem error code. */
   code?: string
 }
 
+/** Runs the audit-event backfill CLI. */
 async function main() {
   const options = parseArguments(process.argv.slice(2))
 
@@ -289,6 +200,13 @@ async function main() {
   printSummary(checkpoint, definitions)
 }
 
+/**
+ * Parses command-line arguments for a backfill run.
+ *
+ * @param args Arguments excluding the Bun executable and script path.
+ * @returns Validated backfill options.
+ * @throws When an option is unknown or has an invalid value.
+ */
 function parseArguments(args: string[]): BackfillOptions {
   const options: BackfillOptions = {
     dryRun: false,
@@ -341,6 +259,15 @@ function parseArguments(args: string[]): BackfillOptions {
   return options
 }
 
+/**
+ * Reads an option value supplied either after an option or after an equals sign.
+ *
+ * @param argument Current command-line argument.
+ * @param following Following command-line argument, when present.
+ * @param optionName Name used in validation errors.
+ * @returns The non-empty option value.
+ * @throws When the option has no value or the value looks like another option.
+ */
 function readOptionValue(argument: string, following: string | undefined, optionName: string) {
   const equalsIndex = argument.indexOf('=')
   const value = equalsIndex >= 0 ? argument.slice(equalsIndex + 1) : following
@@ -352,6 +279,14 @@ function readOptionValue(argument: string, following: string | undefined, option
   return value
 }
 
+/**
+ * Parses a positive safe integer command-line option.
+ *
+ * @param value Raw option value.
+ * @param optionName Name used in validation errors.
+ * @returns The parsed positive integer.
+ * @throws When the value is not a positive safe integer.
+ */
 function parsePositiveInteger(value: string, optionName: string) {
   const parsed = Number(value)
 
@@ -421,6 +356,15 @@ function resolveTableNames(endpoint: string | undefined): TableNames {
   }
 }
 
+/**
+ * Resolves a table name from environment aliases and an optional local default.
+ *
+ * @param environmentNames Environment variable aliases in priority order.
+ * @param localDefault Default used for local DynamoDB only.
+ * @param allowLocalDefault Whether local defaults are permitted.
+ * @returns The resolved table name.
+ * @throws When no configured name exists and local defaults are not allowed.
+ */
 function resolveTableName(
   environmentNames: string[],
   localDefault: string,
@@ -443,6 +387,7 @@ function resolveTableName(
   )
 }
 
+/** Creates the DynamoDB client used by the backfill. */
 function createDynamoDbClient(endpoint: string | undefined, region: string) {
   return new DynamoDBClient({
     region,
@@ -458,6 +403,7 @@ function createDynamoDbClient(endpoint: string | undefined, region: string) {
   })
 }
 
+/** Creates a DocumentClient configured to omit undefined attribute values. */
 function createDocumentClient(baseClient: DynamoDBClient) {
   return DynamoDBDocumentClient.from(baseClient, {
     marshallOptions: {
@@ -481,12 +427,12 @@ function createSourceDefinitions(
     {
       name: 'team-issues',
       tableName: tables.teamIssues,
-      mapItem: mapCurrentTeamIssue,
+      mapItem: (item) => mapCurrentTeamIssue(item, workspaceAuditPseudonymKey),
     },
     {
       name: 'project-directory',
       tableName: tables.projectDirectory,
-      mapItem: mapProjectDirectoryItem,
+      mapItem: (item) => mapProjectDirectoryItem(item, workspaceAuditPseudonymKey),
     },
     {
       name: 'workspace-access',
@@ -496,6 +442,16 @@ function createSourceDefinitions(
   ]
 }
 
+/**
+ * Runs source scans, maps rows, and conditionally writes audit events.
+ *
+ * @param client DynamoDB DocumentClient.
+ * @param definitions Ordered source mapping definitions.
+ * @param auditEventsTableName Destination audit-events table name.
+ * @param checkpoint Mutable checkpoint state.
+ * @param options Backfill execution options.
+ * @returns A promise that resolves after the selected sources are processed.
+ */
 async function runBackfill(
   client: DynamoDBDocumentClient,
   definitions: SourceDefinition[],
@@ -576,6 +532,15 @@ async function runBackfill(
   }
 }
 
+/**
+ * Writes an audit event unless the same workspace/event key already exists.
+ *
+ * @param client DynamoDB DocumentClient.
+ * @param tableName Destination audit-events table name.
+ * @param event Event to write.
+ * @returns Whether the event was newly written or already existed.
+ * @throws For DynamoDB errors other than a conditional-write conflict.
+ */
 async function putAuditEvent(
   client: DynamoDBDocumentClient,
   tableName: string,
@@ -601,8 +566,19 @@ async function putAuditEvent(
   }
 }
 
-/** Strict canonical Work Item row を audit backfill event へ変換します。 */
-export function mapCurrentTeamIssue(item: Record<string, unknown>) {
+/**
+ * Converts a strict canonical Work Item row into a current-snapshot audit event.
+ *
+ * @param item Source row to validate and map.
+ * @param sourcePseudonymKey Dedicated key used to pseudonymize the source key.
+ * @returns A deterministic audit event for the canonical Work Item.
+ * @throws When the row is not a canonical Work Item. Non-canonical rows are rejected
+ *   instead of being represented as partial backfill data.
+ */
+export function mapCurrentTeamIssue(
+  item: Record<string, unknown>,
+  sourcePseudonymKey: string,
+) {
   if (!isCanonicalWorkItemRecord(item)) {
     throw new TypeError(
       'Audit backfill encountered a non-canonical Work Item row.',
@@ -618,6 +594,7 @@ export function mapCurrentTeamIssue(item: Record<string, unknown>) {
   return createAuditEvent({
     sourceName: 'team-issues',
     sourceKey: `${directoryTeamId}#${issueId}`,
+    sourcePseudonymKey,
     eventType: 'work-item.backfilled',
     directoryId,
     occurredAt: normalizeTimestamp(item.updatedAt ?? item.createdAt),
@@ -653,7 +630,17 @@ export function mapCurrentTeamIssue(item: Record<string, unknown>) {
   })
 }
 
-function mapProjectDirectoryItem(item: Record<string, unknown>) {
+/**
+ * Converts a project-directory row into a safe current-snapshot audit event.
+ *
+ * @param item Source row to validate and map.
+ * @param sourcePseudonymKey Dedicated key used to pseudonymize the source key.
+ * @returns A mapped event, or undefined when the row is incomplete or unsupported.
+ */
+function mapProjectDirectoryItem(
+  item: Record<string, unknown>,
+  sourcePseudonymKey: string,
+) {
   const directoryId = readRequiredString(item, 'directoryId')
   const entryKey = readRequiredString(item, 'entryKey')
   const entryType = readRequiredString(item, 'entryType')
@@ -672,6 +659,7 @@ function mapProjectDirectoryItem(item: Record<string, unknown>) {
     return createAuditEvent({
       sourceName: 'project-directory',
       sourceKey: entryKey,
+      sourcePseudonymKey,
       eventType: 'project.backfilled',
       directoryId,
       occurredAt: normalizeTimestamp(item.archivedAt),
@@ -708,6 +696,7 @@ function mapProjectDirectoryItem(item: Record<string, unknown>) {
     return createAuditEvent({
       sourceName: 'project-directory',
       sourceKey: entryKey,
+      sourcePseudonymKey,
       eventType: 'project.backfilled',
       directoryId,
       occurredAt: normalizeTimestamp(item.archivedAt),
@@ -748,6 +737,7 @@ function mapProjectDirectoryItem(item: Record<string, unknown>) {
     return createAuditEvent({
       sourceName: 'project-directory',
       sourceKey: entryKey,
+      sourcePseudonymKey,
       eventType: 'member.backfilled',
       directoryId,
       occurredAt: normalizeTimestamp(item.updatedAt ?? item.createdAt),
@@ -779,11 +769,15 @@ function mapProjectDirectoryItem(item: Record<string, unknown>) {
 }
 
 /**
- * WorkspaceAccessTable の canonical member / invitation row を snapshot event へ変換します。
+ * Converts a canonical workspace member or invitation row into a snapshot event.
  *
- * @remarks
- * `WORKSPACE` metadata row は event を作らず無視します。一方、member / invitation row の破損や
- * 未知の row は、欠落を ignored / skipped として隠さないよう fail-closed で例外にします。
+ * @param item Source row to validate and map.
+ * @param workspaceAuditPseudonymKey Dedicated key used for workspace-bound identifiers.
+ * @returns null for the valid workspace metadata row, or a mapped member/invitation event.
+ * @throws When a member or invitation row is malformed or has an unknown discriminator.
+ *
+ * Workspace metadata rows are ignored, while malformed domain rows fail closed so that
+ * missing data cannot be hidden as an ordinary skipped item.
  */
 export function mapWorkspaceAccessItem(
   item: Record<string, unknown>,
@@ -812,6 +806,14 @@ export function mapWorkspaceAccessItem(
   throw new Error('Invalid workspace-access source row: Unrecognized row discriminator.')
 }
 
+/**
+ * Converts a validated workspace member row into a pseudonymized snapshot event.
+ *
+ * @param item Source row to validate and map.
+ * @param workspaceAuditPseudonymKey Dedicated key used for workspace-bound identifiers.
+ * @returns A pseudonymized workspace member audit event.
+ * @throws When a required field or workspace member invariant is invalid.
+ */
 function mapWorkspaceMemberItem(
   item: Record<string, unknown>,
   workspaceAuditPseudonymKey: string,
@@ -862,6 +864,7 @@ function mapWorkspaceMemberItem(
   return createAuditEvent({
     sourceName: 'workspace-access',
     sourceKey: `${workspaceId}#${recordKey}`,
+    sourcePseudonymKey: workspaceAuditPseudonymKey,
     eventType: 'member.backfilled',
     directoryId: workspaceId,
     occurredAt: updatedAt,
@@ -889,6 +892,14 @@ function mapWorkspaceMemberItem(
   })
 }
 
+/**
+ * Converts a validated workspace invitation row into a pseudonymized snapshot event.
+ *
+ * @param item Source row to validate and map.
+ * @param workspaceAuditPseudonymKey Dedicated key used for workspace-bound identifiers.
+ * @returns A pseudonymized workspace invitation audit event.
+ * @throws When a required field or workspace invitation invariant is invalid.
+ */
 function mapWorkspaceInvitationItem(
   item: Record<string, unknown>,
   workspaceAuditPseudonymKey: string,
@@ -977,6 +988,7 @@ function mapWorkspaceInvitationItem(
   return createAuditEvent({
     sourceName: 'workspace-access',
     sourceKey: `${workspaceId}#${recordKey}`,
+    sourcePseudonymKey: workspaceAuditPseudonymKey,
     eventType: 'invitation.backfilled',
     directoryId: workspaceId,
     occurredAt: updatedAt,
@@ -1013,6 +1025,7 @@ function mapWorkspaceInvitationItem(
   })
 }
 
+/** Reads a required non-empty workspace-access string field. */
 function requireWorkspaceAccessString(
   item: Record<string, unknown>,
   fieldName: string,
@@ -1024,6 +1037,7 @@ function requireWorkspaceAccessString(
   return value
 }
 
+/** Reads a required and valid workspace-access timestamp field. */
 function requireWorkspaceAccessTimestamp(
   item: Record<string, unknown>,
   fieldName: string,
@@ -1040,6 +1054,7 @@ function requireWorkspaceAccessTimestamp(
   return value
 }
 
+/** Validates an optional workspace-access timestamp when it is present. */
 function validateOptionalWorkspaceAccessTimestamp(
   item: Record<string, unknown>,
   fieldName: string,
@@ -1049,6 +1064,7 @@ function validateOptionalWorkspaceAccessTimestamp(
   requireWorkspaceAccessTimestamp(item, fieldName, rowLabel)
 }
 
+/** Validates an optional workspace-access string when it is present. */
 function validateOptionalWorkspaceAccessString(
   item: Record<string, unknown>,
   fieldName: string,
@@ -1058,6 +1074,7 @@ function validateOptionalWorkspaceAccessString(
   requireWorkspaceAccessString(item, fieldName, rowLabel)
 }
 
+/** Validates optional identity ownership state on a workspace-access row. */
 function validateOptionalWorkspaceAccessIdentityOwnership(
   item: Record<string, unknown>,
   rowLabel: string,
@@ -1071,6 +1088,7 @@ function validateOptionalWorkspaceAccessIdentityOwnership(
   )
 }
 
+/** Validates and returns the required positive version of a workspace-access row. */
 function requireWorkspaceAccessVersion(item: Record<string, unknown>, rowLabel: string) {
   const value = item.version
 
@@ -1081,6 +1099,7 @@ function requireWorkspaceAccessVersion(item: Record<string, unknown>, rowLabel: 
   return value
 }
 
+/** Normalizes and validates a workspace-access email or email-like identifier. */
 function normalizeWorkspaceAccessEmail(value: string, fieldLabel: string) {
   const normalized = value.trim().toLowerCase()
 
@@ -1091,14 +1110,25 @@ function normalizeWorkspaceAccessEmail(value: string, fieldLabel: string) {
   return normalized
 }
 
+/** Throws when a workspace-access row invariant is false. */
 function assertWorkspaceAccessRow(condition: unknown, message: string): asserts condition {
   if (!condition) {
     throw new Error(`Invalid workspace-access source row: ${message}`)
   }
 }
 
+/**
+ * Creates a schema-versioned backfill event without persisting the source key.
+ *
+ * @param input Event fields and the dedicated pseudonymization key.
+ * @returns A deterministic audit event with a suppressed outbox status.
+ */
 function createAuditEvent(input: AuditEventInput): AuditEventV1 {
-  const sourceKeyDigest = createDigest(`${input.sourceName}\0${input.sourceKey}`)
+  const sourceKeyPseudonym = createSourceKeyPseudonym(
+    input.sourcePseudonymKey,
+    input.sourceName,
+    input.sourceKey,
+  )
   const context = createMutationAuditContext({
     workspaceId: input.directoryId,
     actor: {
@@ -1106,18 +1136,15 @@ function createAuditEvent(input: AuditEventInput): AuditEventV1 {
       kind: input.actorUserId.startsWith('system:') ? 'system' : 'user',
       displayName: input.actorUserId,
     },
-    idempotencyKey: `backfill:${sourceKeyDigest}`,
+    idempotencyKey: `backfill:${sourceKeyPseudonym}`,
     request: {
       method: 'BACKFILL',
       path: `/audit/backfill/${input.sourceName}`,
-      body: {
-        sourceKey: input.sourceKey,
-      },
     },
     source: {
       kind: input.source,
       method: 'BACKFILL',
-      requestId: `backfill:${sourceKeyDigest.slice(0, 32)}`,
+      requestId: `backfill:${sourceKeyPseudonym.slice(0, 32)}`,
       route: `/audit/backfill/${input.sourceName}`,
     },
     occurredAt: input.occurredAt,
@@ -1149,6 +1176,31 @@ function createAuditEvent(input: AuditEventInput): AuditEventV1 {
   })
 }
 
+/**
+ * Creates a deterministic pseudonym for a source key using the dedicated audit key.
+ *
+ * @param key Dedicated workspace audit pseudonymization key.
+ * @param sourceName Source table name used for domain separation.
+ * @param sourceKey Source item key held only in memory during mapping.
+ * @returns A hexadecimal HMAC-SHA-256 pseudonym that cannot be dictionary-matched without the key.
+ */
+function createSourceKeyPseudonym(
+  key: string,
+  sourceName: SourceName,
+  sourceKey: string,
+) {
+  return createHmac('sha256', key)
+    .update(`audit-backfill-source\0${sourceName}\0${sourceKey}`)
+    .digest('hex')
+}
+
+/**
+ * Builds redacted and non-redacted snapshot field changes from a source row.
+ *
+ * @param item Source row containing the snapshot values.
+ * @param fields Field names paired with their redaction setting.
+ * @returns Audit field changes for the selected fields.
+ */
 function createSnapshotChanges(
   item: Record<string, unknown>,
   fields: Array<readonly [fieldName: string, sensitive: boolean]>,
@@ -1161,10 +1213,23 @@ function createSnapshotChanges(
   return createAuditFieldChanges(undefined, item, includedFields, redactedFields)
 }
 
+/**
+ * Builds the canonical Work Item entity ID used by audit consumers.
+ *
+ * @param teamId Owning team ID.
+ * @param issueId Work Item ID.
+ * @returns A length-limited canonical Work Item entity ID.
+ */
 function createTeamIssueWorkItemId(teamId: string, issueId: string) {
   return limitBackfillText(`team/${teamId}/issue/${issueId}`)
 }
 
+/**
+ * Normalizes a source timestamp or returns the audit unknown-time sentinel.
+ *
+ * @param value Candidate timestamp.
+ * @returns An ISO timestamp or the unknown-time sentinel.
+ */
 function normalizeTimestamp(value: unknown) {
   if (typeof value !== 'string' || !value.trim()) {
     return AUDIT_UNKNOWN_OCCURRED_AT
@@ -1175,6 +1240,13 @@ function normalizeTimestamp(value: unknown) {
   return Number.isNaN(timestamp) ? AUDIT_UNKNOWN_OCCURRED_AT : new Date(timestamp).toISOString()
 }
 
+/**
+ * Reads and length-limits a required string field.
+ *
+ * @param item Source row.
+ * @param fieldName Field to read.
+ * @returns A trimmed value, or undefined when the field is absent or not a string.
+ */
 function readRequiredString(item: Record<string, unknown>, fieldName: string) {
   const value = item[fieldName]
 
@@ -1183,6 +1255,13 @@ function readRequiredString(item: Record<string, unknown>, fieldName: string) {
     : undefined
 }
 
+/**
+ * Reads and length-limits an optional string field.
+ *
+ * @param item Source row.
+ * @param fieldName Field to read.
+ * @returns A trimmed value, or undefined when the field is absent or not a string.
+ */
 function readOptionalString(item: Record<string, unknown>, fieldName: string) {
   const value = item[fieldName]
 
@@ -1191,16 +1270,19 @@ function readOptionalString(item: Record<string, unknown>, fieldName: string) {
     : undefined
 }
 
+/** Limits persisted backfill text to the audit schema maximum. */
 function limitBackfillText(value: string) {
   return value.length <= AUDIT_MAX_TEXT_LENGTH
     ? value
     : `${value.slice(0, AUDIT_MAX_TEXT_LENGTH - 1)}…`
 }
 
+/** Creates a hexadecimal SHA-256 digest for non-sensitive configuration values. */
 function createDigest(value: string) {
   return createHash('sha256').update(value).digest('hex')
 }
 
+/** Reads and normalizes the configured audit retention period in days. */
 function readAuditRetentionDays() {
   const configured = Number(
     readEnvironment('MUKUROJI_AUDIT_RETENTION_DAYS') ??
@@ -1211,6 +1293,14 @@ function readAuditRetentionDays() {
   return Number.isFinite(configured) ? Math.max(1, Math.floor(configured)) : 2555
 }
 
+/**
+ * Reads a checkpoint and verifies that it matches the current configuration.
+ *
+ * @param path Checkpoint file path.
+ * @param configurationHash Expected configuration hash.
+ * @returns The existing checkpoint or a new empty checkpoint when the file is absent.
+ * @throws When the file is invalid or belongs to a different configuration.
+ */
 async function readCheckpoint(path: string, configurationHash: string): Promise<CheckpointState> {
   try {
     const parsed: unknown = JSON.parse(await readFile(path, 'utf8'))
@@ -1235,6 +1325,7 @@ async function readCheckpoint(path: string, configurationHash: string): Promise<
   }
 }
 
+/** Creates an empty checkpoint for the current source set and configuration. */
 function createEmptyCheckpoint(configurationHash: string): CheckpointState {
   return {
     version: checkpointVersion,
@@ -1248,6 +1339,7 @@ function createEmptyCheckpoint(configurationHash: string): CheckpointState {
   }
 }
 
+/** Creates zeroed counters for a new source checkpoint. */
 function createEmptySourceCheckpoint(): SourceCheckpoint {
   return {
     completed: false,
@@ -1261,6 +1353,7 @@ function createEmptySourceCheckpoint(): SourceCheckpoint {
   }
 }
 
+/** Atomically writes a checkpoint file with restrictive file permissions. */
 async function writeCheckpoint(path: string, checkpoint: CheckpointState) {
   await mkdir(dirname(path), { recursive: true })
   const temporaryPath = `${path}.${process.pid}.tmp`
@@ -1272,6 +1365,7 @@ async function writeCheckpoint(path: string, checkpoint: CheckpointState) {
   await rename(temporaryPath, path)
 }
 
+/** Narrows unknown checkpoint data to the current checkpoint schema. */
 function isCheckpointState(value: unknown): value is CheckpointState {
   if (!isRecord(value) || value.version !== checkpointVersion) {
     return false
@@ -1290,6 +1384,7 @@ function isCheckpointState(value: unknown): value is CheckpointState {
   return sourceNames.every((sourceName) => isSourceCheckpoint(sources[sourceName]))
 }
 
+/** Narrows unknown source checkpoint data to the expected source schema. */
 function isSourceCheckpoint(value: unknown): value is SourceCheckpoint {
   if (!isRecord(value) || typeof value.completed !== 'boolean' || !isRecord(value.counters)) {
     return false
@@ -1307,6 +1402,7 @@ function isSourceCheckpoint(value: unknown): value is SourceCheckpoint {
   )
 }
 
+/** Prints counters for each source included in the current run. */
 function printSummary(checkpoint: CheckpointState, definitions: SourceDefinition[]) {
   for (const definition of definitions) {
     const source = checkpoint.sources[definition.name]
@@ -1319,16 +1415,19 @@ function printSummary(checkpoint: CheckpointState, definitions: SourceDefinition
   }
 }
 
+/** Narrows a string to one of the supported backfill source names. */
 function isSourceName(value: string): value is SourceName {
   return sourceNames.some((sourceName) => sourceName === value)
 }
 
+/** Reads a trimmed environment variable, treating empty values as absent. */
 function readEnvironment(name: string) {
   const value = process.env[name]
 
   return value?.trim() || undefined
 }
 
+/** Checks whether an unknown error has the requested name or filesystem code. */
 function isNamedError(error: unknown, nameOrCode: string) {
   if (!isRecord(error)) {
     return false
@@ -1339,6 +1438,7 @@ function isNamedError(error: unknown, nameOrCode: string) {
   return namedError.name === nameOrCode || namedError.code === nameOrCode
 }
 
+/** Narrows an unknown value to a non-array object record. */
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }

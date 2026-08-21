@@ -11761,7 +11761,13 @@ function stableAnalyticsApiStringify(value: unknown): string {
     .join(',')}}`
 }
 
-/** Current canonical revision の latest update event がすべて読めたかを返します。 */
+/**
+ * Checks that every current canonical revision requiring history coverage has a matching event.
+ *
+ * @param workItems Current canonical Work Items selected for the request.
+ * @param events Canonical audit events read for those Work Items.
+ * @returns True when every relevant Work Item has its latest revision covered.
+ */
 function hasAnalyticsLatestAuditCoverage(
   workItems: readonly CanonicalWorkItem[],
   events: readonly AuditEventV1[],
@@ -11781,7 +11787,14 @@ function hasAnalyticsLatestAuditCoverage(
   })
 }
 
-/** Event が canonical Work Item の latest revision を生成した update かを返します。 */
+/**
+ * Checks whether an event represents the latest canonical Work Item revision.
+ *
+ * @param event Candidate audit event.
+ * @param workItem Current canonical Work Item.
+ * @param canonicalEntityId Expected canonical entity ID.
+ * @returns True when event identity, metadata, revision, and action all match.
+ */
 function isAnalyticsLatestWorkItemUpdate(
   event: AuditEventV1,
   workItem: CanonicalWorkItem,
@@ -11805,7 +11818,7 @@ function isAnalyticsLatestWorkItemUpdate(
     metadataIssueId === workItem.id
 }
 
-/** Bounded retry 後も整合しない canonical/audit read を retryable error にします。 */
+/** Creates the retryable error returned when bounded canonical/audit reads do not converge. */
 function createAnalyticsReadBarrierError() {
   return new AnalyticsError(
     503,
@@ -11815,7 +11828,13 @@ function createAnalyticsReadBarrierError() {
 }
 
 /**
- * Current ACL で選ばれた canonical Work Item entity だけを entity GSI から読みます。
+ * Reads only canonical Work Item entities selected by the current ACL from the entity GSI.
+ *
+ * @param workspaceId Workspace whose audit history is being read.
+ * @param workItems ACL-filtered canonical Work Items.
+ * @param historyReadAt Exclusive upper bound for the history query.
+ * @returns Canonical audit events read from the authorized entity timelines.
+ * @throws When the query or event limits are exceeded, or an audit query fails.
  */
 async function readAuthorizedAnalyticsAuditEvents(
   workspaceId: string,
@@ -11839,7 +11858,8 @@ async function readAuthorizedAnalyticsAuditEvents(
   let failure: unknown
   const workerCount = Math.min(ANALYTICS_AUDIT_QUERY_CONCURRENCY, entityIds.length)
 
-  const readNextIdentity = async () => {
+  /** Reads the next assigned canonical entity timeline and accumulates its events. */
+  const readNextEntity = async () => {
     while (failure === undefined) {
       const entityIndex = nextEntityIndex
       nextEntityIndex += 1
@@ -11887,12 +11907,18 @@ async function readAuthorizedAnalyticsAuditEvents(
     }
   }
 
-  await Promise.all(Array.from({ length: workerCount }, readNextIdentity))
+  await Promise.all(Array.from({ length: workerCount }, readNextEntity))
   if (failure !== undefined) throw failure
   return events
 }
 
-/** Canonical entity query の結果が要求した Work Item identity と完全一致するかを判定します。 */
+/**
+ * Checks that an entity-scoped query result matches the requested canonical Work Item entity.
+ *
+ * @param event Candidate audit event.
+ * @param canonicalEntityId Entity ID used by the query.
+ * @returns True when both persisted entity IDs exactly match the query identity.
+ */
 function isCanonicalAnalyticsAuditEvent(
   event: AuditEventV1,
   canonicalEntityId: string,
@@ -11903,7 +11929,7 @@ function isCanonicalAnalyticsAuditEvent(
     event.entity.id === canonicalEntityId
 }
 
-/** Analytics audit metadata の non-empty string だけを返します。 */
+/** Returns a trimmed non-empty Analytics audit metadata string. */
 function readAnalyticsAuditMetadataText(value: unknown) {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined
 }
