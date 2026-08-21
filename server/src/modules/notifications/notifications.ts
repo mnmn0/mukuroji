@@ -265,9 +265,6 @@ export class NotificationError extends Error {
 /** NotificationsTable 内で preference を識別する sort key です。 */
 export const NOTIFICATION_PREFERENCES_KEY = '!PREFERENCES'
 
-/** 旧 notification row の state index 移行完了を識別する sort key です。 */
-export const NOTIFICATION_STATUS_MIGRATION_KEY = '!MIGRATION#STATUS-V1'
-
 /** 未保存ユーザーへ返す notification preference です。 */
 export const DEFAULT_NOTIFICATION_PREFERENCES: NotificationPreferences = Object.freeze({
   version: 0,
@@ -366,7 +363,6 @@ export class DynamoDbNotificationsClient implements NotificationClient {
     const eventType = normalizeOptionalText(input.eventType)
     const limit = normalizeLimit(input.limit)
     const now = normalizeDate(input.now ?? new Date(), 'Notification list time')
-    await this.ensureLegacyRowsMigrated(recipientKey, now)
     await this.wakeExpiredSnoozes(recipientKey, now)
     let exclusiveStartKey = input.cursor
       ? decodeNotificationCursor(input.cursor, recipientKey, filter, eventType)
@@ -426,7 +422,6 @@ export class DynamoDbNotificationsClient implements NotificationClient {
     await this.ensureTable()
     const recipientKey = createNotificationRecipientKey(input.workspaceId, input.memberKey)
     const now = normalizeDate(input.now ?? new Date(), 'Notification count time')
-    await this.ensureLegacyRowsMigrated(recipientKey, now)
     await this.wakeExpiredSnoozes(recipientKey, now)
     let exclusiveStartKey: Record<string, unknown> | undefined
     let count = 0
@@ -461,12 +456,11 @@ export class DynamoDbNotificationsClient implements NotificationClient {
     await this.ensureTable()
     const recipientKey = createNotificationRecipientKey(input.workspaceId, input.memberKey)
     const now = normalizeDate(input.now ?? new Date(), 'Notification update time')
-    await this.ensureLegacyRowsMigrated(recipientKey, now)
-    return this.updateAfterMigration(input, recipientKey, now)
+    return this.updateNotification(input, recipientKey, now)
   }
 
-  /** Migration 済み recipient の notification state を version 条件付きで更新します。 */
-  private async updateAfterMigration(
+  /** Notification state を保存済み version の CAS で更新します。 */
+  private async updateNotification(
     input: UpdateNotificationInput,
     recipientKey: string,
     now: Date,
@@ -492,8 +486,11 @@ export class DynamoDbNotificationsClient implements NotificationClient {
     } else if (current.teamId && current.issueId) {
       delete currentRow.projectId
     }
-    const nextRow = applyNotificationAction(currentRow, input, recipientKey, now)
-    const currentVersion = readPositiveInteger(response.Item.version) ?? 1
+    const currentVersion = readPositiveInteger(response.Item.version)
+    if (currentVersion === undefined) {
+      throw new NotificationError(404, 'NotificationNotFound', 'Notification was not found.')
+    }
+    const nextRow = applyNotificationAction(currentRow, input, recipientKey, now, currentVersion)
 
     try {
       await this.documentClient.send(new PutCommand({
@@ -501,11 +498,10 @@ export class DynamoDbNotificationsClient implements NotificationClient {
         Item: nextRow,
         ConditionExpression:
           'attribute_exists(recipientKey) AND attribute_exists(notificationKey) AND ' +
-          '(#version = :version OR (attribute_not_exists(#version) AND :version = :legacyVersion))',
+          '#version = :version',
         ExpressionAttributeNames: { '#version': 'version' },
         ExpressionAttributeValues: {
           ':version': currentVersion,
-          ':legacyVersion': 1,
         },
       }))
     } catch (error) {
@@ -534,7 +530,6 @@ export class DynamoDbNotificationsClient implements NotificationClient {
     await this.ensureTable()
     const recipientKey = createNotificationRecipientKey(input.workspaceId, input.memberKey)
     const now = normalizeDate(input.now ?? new Date(), 'Notification mark-all-read time')
-    await this.ensureLegacyRowsMigrated(recipientKey, now)
     await this.wakeExpiredSnoozes(recipientKey, now)
     let exclusiveStartKey: Record<string, unknown> | undefined
     const notificationIds: string[] = []
@@ -564,7 +559,7 @@ export class DynamoDbNotificationsClient implements NotificationClient {
     let updatedCount = 0
     for (const notificationId of notificationIds) {
       try {
-        await this.updateAfterMigration({
+        await this.updateNotification({
           ...input,
           notificationId,
           action: 'mark-read',
@@ -654,95 +649,6 @@ export class DynamoDbNotificationsClient implements NotificationClient {
     return next
   }
 
-  private async ensureLegacyRowsMigrated(recipientKey: string, now: Date) {
-    const marker = await this.documentClient.send(new GetCommand({
-      TableName: this.tableName,
-      Key: {
-        recipientKey,
-        notificationKey: NOTIFICATION_STATUS_MIGRATION_KEY,
-      },
-      ConsistentRead: true,
-    }))
-    if (marker.Item) {
-      return
-    }
-
-    let exclusiveStartKey: Record<string, unknown> | undefined
-    let pages = 0
-
-    do {
-      pages += 1
-      if (pages > maximumQueryPages) {
-        throw new NotificationError(
-          503,
-          'NotificationMigrationLimitExceeded',
-          'Notification state migration exceeded its bounded page limit.',
-        )
-      }
-      const response = await this.documentClient.send(new QueryCommand({
-        TableName: this.tableName,
-        KeyConditionExpression: 'recipientKey = :recipientKey',
-        ExpressionAttributeValues: { ':recipientKey': recipientKey },
-        ConsistentRead: true,
-        ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
-      }))
-
-      for (const row of response.Items ?? []) {
-        if (readText(row.recipientStatusKey)) {
-          continue
-        }
-        const notification = toNotificationItem(row, recipientKey, now)
-        if (!notification) {
-          continue
-        }
-        const legacyScope = readLegacyWorkItemScope(row)
-        const next: Record<string, unknown> = {
-          ...row,
-          ...(legacyScope.teamId ? { teamId: legacyScope.teamId } : {}),
-          ...(legacyScope.issueId ? { issueId: legacyScope.issueId } : {}),
-          itemType: 'notification',
-          inboxState: notification.state,
-          recipientStatusKey: createRecipientStatusKey(recipientKey, notification.state),
-          version: readPositiveInteger(row.version) ?? 1,
-          updatedAt: readTimestamp(row.updatedAt) ?? now.toISOString(),
-        }
-        if (
-          readTimestamp(next.snoozedUntil) &&
-          Date.parse(String(next.snoozedUntil)) <= now.getTime()
-        ) {
-          delete next.snoozedUntil
-        }
-
-        try {
-          await this.documentClient.send(new PutCommand({
-            TableName: this.tableName,
-            Item: next,
-            ConditionExpression:
-              'attribute_exists(recipientKey) AND attribute_exists(notificationKey) AND ' +
-              'attribute_not_exists(recipientStatusKey)',
-          }))
-        } catch (error) {
-          if (!isAwsNamedError(error, 'ConditionalCheckFailedException')) {
-            throw error
-          }
-        }
-      }
-
-      exclusiveStartKey = response.LastEvaluatedKey
-    } while (exclusiveStartKey)
-
-    await this.documentClient.send(new PutCommand({
-      TableName: this.tableName,
-      Item: {
-        recipientKey,
-        notificationKey: NOTIFICATION_STATUS_MIGRATION_KEY,
-        itemType: 'migration',
-        migratedAt: now.toISOString(),
-        version: 1,
-      },
-    }))
-  }
-
   private async wakeExpiredSnoozes(recipientKey: string, now: Date) {
     let exclusiveStartKey: Record<string, unknown> | undefined
     let pagesRead = 0
@@ -768,8 +674,15 @@ export class DynamoDbNotificationsClient implements NotificationClient {
       const rows = (response.Items ?? []).slice(0, remainingRows)
       rowsRead += rows.length
       for (const row of rows) {
+        const notification = toNotificationItem(row, recipientKey, now)
+        const currentVersion = readPositiveInteger(row.version)
         const snoozedUntil = readTimestamp(row.snoozedUntil)
-        if (!snoozedUntil || Date.parse(snoozedUntil) > now.getTime()) {
+        if (
+          !notification ||
+          currentVersion === undefined ||
+          !snoozedUntil ||
+          Date.parse(snoozedUntil) > now.getTime()
+        ) {
           continue
         }
         const next = { ...row }
@@ -777,7 +690,7 @@ export class DynamoDbNotificationsClient implements NotificationClient {
         const state: NotificationState = readTimestamp(next.readAt) ? 'read' : 'unread'
         next.inboxState = state
         next.recipientStatusKey = createRecipientStatusKey(recipientKey, state)
-        next.version = (readPositiveInteger(row.version) ?? 1) + 1
+        next.version = currentVersion + 1
         next.updatedAt = now.toISOString()
         try {
           await this.documentClient.send(new PutCommand({
@@ -785,7 +698,7 @@ export class DynamoDbNotificationsClient implements NotificationClient {
             Item: next,
             ConditionExpression: '#version = :version',
             ExpressionAttributeNames: { '#version': 'version' },
-            ExpressionAttributeValues: { ':version': readPositiveInteger(row.version) ?? 1 },
+            ExpressionAttributeValues: { ':version': currentVersion },
           }))
         } catch (error) {
           if (!isAwsNamedError(error, 'ConditionalCheckFailedException')) {
@@ -949,6 +862,7 @@ function applyNotificationAction(
   input: UpdateNotificationInput,
   recipientKey: string,
   now: Date,
+  currentVersion: number,
 ) {
   const next = { ...row }
   const timestamp = now.toISOString()
@@ -985,7 +899,7 @@ function applyNotificationAction(
   next.itemType = 'notification'
   next.inboxState = state
   next.recipientStatusKey = createRecipientStatusKey(recipientKey, state)
-  next.version = (readPositiveInteger(row.version) ?? 1) + 1
+  next.version = currentVersion + 1
   next.updatedAt = timestamp
   return next
 }
@@ -1000,6 +914,13 @@ function toNotificationItem(
     value.recipientKey !== recipientKey ||
     value.itemType === 'preferences' ||
     value.inAppVisible === false
+  ) {
+    return undefined
+  }
+  if (
+    value.itemType !== 'notification' ||
+    !readText(value.recipientStatusKey) ||
+    readPositiveInteger(value.version) === undefined
   ) {
     return undefined
   }
@@ -1316,43 +1237,6 @@ function readPlanningNotificationKind(
   return value === 'reminder' || value === 'overdue' || value === 'escalation'
     ? value
     : undefined
-}
-
-function readLegacyWorkItemScope(value: Record<string, unknown>) {
-  const storedTeamId = readText(value.teamId)
-  const storedIssueId = readText(value.issueId)
-  if (storedTeamId && storedIssueId) {
-    return { teamId: storedTeamId, issueId: storedIssueId }
-  }
-
-  const match = readText(value.entityId)?.match(/^team\/([^/]+)\/issue\/([^/]+)$/)
-  if (!match?.[1] || !match[2]) {
-    return {
-      ...(storedTeamId ? { teamId: storedTeamId } : {}),
-      ...(storedIssueId ? { issueId: storedIssueId } : {}),
-    }
-  }
-  const entityTeamId = decodePathSegment(match[1])
-  const entityIssueId = decodePathSegment(match[2])
-  if (!entityTeamId || !entityIssueId || (storedTeamId && storedTeamId !== entityTeamId)) {
-    return {
-      ...(storedTeamId ? { teamId: storedTeamId } : {}),
-      ...(storedIssueId ? { issueId: storedIssueId } : {}),
-    }
-  }
-
-  return {
-    teamId: storedTeamId ?? entityTeamId,
-    issueId: storedIssueId ?? entityIssueId,
-  }
-}
-
-function decodePathSegment(value: string) {
-  try {
-    return readText(decodeURIComponent(value))
-  } catch {
-    return undefined
-  }
 }
 
 function readTimestamp(value: unknown) {
