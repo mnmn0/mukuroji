@@ -161,6 +161,8 @@ describe('notification store', () => {
         issueId: undefined,
         triageEntryId: 'triage-without-team',
       }),
+      createNotificationRow({ reasons: 'assignee' }),
+      createNotificationRow({ reasons: ['assignee', 42] }),
       createNotificationRow({ inAppVisible: 'false' }),
     ]
 

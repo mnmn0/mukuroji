@@ -949,6 +949,7 @@ function toNotificationItem(
     isInvalidStoredScopeText(value.triageEntryId) ||
     isInvalidStoredScopeText(value.planningTargetId) ||
     isInvalidStoredScopeText(value.planningTargetRecordKey) ||
+    isInvalidStoredReasons(value.reasons) ||
     (value.planningTargetType !== undefined &&
       readPlanningTargetType(value.planningTargetType) === undefined) ||
     (value.planningNotificationKind !== undefined &&
@@ -1392,6 +1393,22 @@ function isInvalidStoredScopeText(value: unknown) {
     typeof value !== 'string' ||
     !value.trim() ||
     value !== value.trim()
+  )
+}
+
+/**
+ * Returns whether an optional persisted notification reason list is malformed.
+ *
+ * @param value - Persisted reason list to validate.
+ */
+function isInvalidStoredReasons(value: unknown) {
+  return value !== undefined && (
+    !Array.isArray(value) ||
+    value.some((reason) =>
+      typeof reason !== 'string' ||
+      !reason.trim() ||
+      reason !== reason.trim()
+    )
   )
 }
 
