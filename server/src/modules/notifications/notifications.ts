@@ -879,7 +879,7 @@ function applyNotificationAction(
     delete next.archivedAt
     delete next.snoozedUntil
   } else {
-    const snoozedUntil = readTimestamp(input.snoozedUntil)
+    const snoozedUntil = readNotificationInputTimestamp(input.snoozedUntil)
     if (!snoozedUntil) {
       throw new NotificationError(400, 'InvalidNotificationSnooze', 'A valid snooze time is required.')
     }
@@ -1316,19 +1316,47 @@ function readPlanningNotificationKind(
     : undefined
 }
 
-/** Reads an ISO-compatible timestamp while rejecting normalized date or time components. */
+/**
+ * Reads an ISO-compatible persisted timestamp while rejecting normalized date or time components.
+ *
+ * @param value - Persisted timestamp value to validate.
+ * @returns The canonical UTC timestamp, or undefined for invalid values.
+ */
 function readTimestamp(value: unknown) {
   const text = readText(value)
   return text &&
-    hasValidTimestampComponents(text) &&
+    hasValidTimestampComponents(text, true) &&
     Number.isFinite(Date.parse(text))
     ? new Date(text).toISOString()
     : undefined
 }
 
-/** Returns whether a timestamp has valid ISO calendar and clock components. */
-function hasValidTimestampComponents(value: string) {
-  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/u.exec(value)
+/**
+ * Reads a client-provided ISO timestamp and normalizes it before persistence.
+ *
+ * @param value - Client-provided timestamp value to validate.
+ * @returns The canonical UTC timestamp, or undefined for invalid values.
+ */
+function readNotificationInputTimestamp(value: unknown) {
+  const text = readText(value)
+  return text &&
+    hasValidTimestampComponents(text, false) &&
+    Number.isFinite(Date.parse(text))
+    ? new Date(text).toISOString()
+    : undefined
+}
+
+/**
+ * Returns whether a timestamp has valid ISO calendar and clock components.
+ *
+ * @param value - Timestamp value to validate.
+ * @param requireSeconds - Whether the timestamp must include seconds.
+ */
+function hasValidTimestampComponents(value: string, requireSeconds: boolean) {
+  const match = (requireSeconds
+    ? /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/u
+    : /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/u
+  ).exec(value)
   if (!match) {
     return false
   }
@@ -1338,7 +1366,7 @@ function hasValidTimestampComponents(value: string) {
     parsed.getUTCDate() === Number(match[3]) &&
     Number(match[4]) <= 23 &&
     Number(match[5]) <= 59 &&
-    Number(match[6]) <= 59
+    Number(match[6] ?? 0) <= 59
 }
 
 function readPositiveInteger(value: unknown) {

@@ -340,7 +340,7 @@ describe('notification store', () => {
       memberKey: 'member@example.com',
       notificationId: listed.notifications[0]?.id ?? '',
       action: 'snooze',
-      snoozedUntil: '2026-07-13T09:00:00.000Z',
+      snoozedUntil: '2026-08-23T12:00Z',
       now: new Date('2026-07-12T13:00:00.000Z'),
       isVisible: (notification) => {
         notification.projectId = 'current-project'
@@ -350,7 +350,7 @@ describe('notification store', () => {
 
     expect(updated).toMatchObject({
       state: 'snoozed',
-      snoozedUntil: '2026-07-13T09:00:00.000Z',
+      snoozedUntil: '2026-08-23T12:00:00.000Z',
     })
     expect(savedRow).toMatchObject({
       inboxState: 'snoozed',
