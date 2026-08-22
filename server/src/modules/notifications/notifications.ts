@@ -915,7 +915,7 @@ function toNotificationItem(
   if (value.recipientKey !== recipientKey) {
     throw invalidNotificationData()
   }
-  if (value.itemType === 'preferences') {
+  if (value.itemType === 'preferences' || value.itemType === 'migration') {
     return undefined
   }
   if (

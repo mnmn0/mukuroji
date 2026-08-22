@@ -141,6 +141,38 @@ describe('notification store', () => {
     }
   })
 
+  test('ignores retired notification migration marker rows', async () => {
+    const recording = createClient(({ constructor, input }) => {
+      if (constructor.name !== 'QueryCommand') {
+        return {}
+      }
+      if (input.IndexName) {
+        return { Items: [] }
+      }
+      return {
+        Items: [
+          createNotificationRow({
+            notificationKey: '!MIGRATION#STATUS-V1',
+            itemType: 'migration',
+            recipientStatusKey: undefined,
+            version: undefined,
+          }),
+          createNotificationRow(),
+        ],
+      }
+    })
+
+    const page = await recording.client.list({
+      workspaceId: 'workspace-1',
+      memberKey: 'member@example.com',
+      limit: 10,
+      now: new Date('2026-07-12T13:00:00.000Z'),
+    })
+
+    expect(page.notifications).toHaveLength(1)
+    expect(page.notifications[0]?.eventId).toBe('evt-1')
+  })
+
   test('lists only currently visible active notifications and binds cursors to filters', async () => {
     let queryCount = 0
     const recording = createClient(({ constructor }) => {
