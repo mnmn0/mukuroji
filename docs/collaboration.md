@@ -100,12 +100,12 @@ bun run team-issue-comments:backfill -- \
   --checkpoint /tmp/mukuroji-team-issue-comments-v2.json
 ```
 
-AWS では `TEAM_ISSUE_EVENTS_TABLE_NAME`、`COLLABORATION_TABLE_NAME`、`TEAM_ISSUES_TABLE_NAME`、`AUDIT_EVENTS_TABLE_NAME`、`WORKSPACE_SEARCH_TABLE_NAME` を明示してください。`MUKUROJI_BACKFILL_OPERATOR_ID` は任意の運用ラベルとして指定できますが、AWSの監査上の operator identity は STS `GetCallerIdentity` の caller ARN から取得します。local実行では `local:backfill` sentinel を使います。実行時に STS で account を検証し、`AWS_ACCOUNT_ID` を設定した場合は期待値として検証済み account と一致することを要求します。checkpoint には DynamoDB の continuation key が含まれるため owner-only で保存され、移行完了後に削除します。source/target/audit/search table、account、region、workspace filter が異なる checkpoint は拒否されます。特定 workspace だけを先に処理する場合は `--workspace-id <id>` を繰り返し指定できます。
+AWS では `TEAM_ISSUE_EVENTS_TABLE_NAME`、`COLLABORATION_TABLE_NAME`、`WORK_ITEMS_TABLE_NAME`、`AUDIT_EVENTS_TABLE_NAME`、`WORKSPACE_SEARCH_TABLE_NAME` を明示してください。`MUKUROJI_BACKFILL_OPERATOR_ID` は任意の運用ラベルとして指定できますが、AWSの監査上の operator identity は STS `GetCallerIdentity` の caller ARN から取得します。local実行では `local:backfill` sentinel を使います。実行時に STS で account を検証し、`AWS_ACCOUNT_ID` を設定した場合は期待値として検証済み account と一致することを要求します。checkpoint には DynamoDB の continuation key が含まれるため owner-only で保存され、移行完了後に削除します。source/target/audit/search table、account、region、workspace filter が異なる checkpoint は拒否されます。特定 workspace だけを先に処理する場合は `--workspace-id <id>` を繰り返し指定できます。
 
 本番へ canonical-only reader を適用する前に、旧 Automation worker を停止または drain し、in-flight execution と queue が完了してから backfill を実行します。全 partition の `commented` event を検証し、checkpoint の `completed=true`、対象 workspace の completion marker、suppressed completion audit、canonical 側の reconciliation が揃ったことを確認してから reader と旧 cursor 拒否を含むリリースをデプロイします。source event は activity/audit 用途として保持するため、`legacy_commented_event_count` は残存行数を示す情報値であり、0 を要求する完了条件ではありません。互換期間中は writer が V2 discussion index と旧 reader 用 index を同じ transaction で dual-write する状態を維持します。
 
 ```sh
-TEAM_ISSUES_TABLE_NAME=<team-issues-table> \
+WORK_ITEMS_TABLE_NAME=<team-issues-table> \
 TEAM_ISSUE_EVENTS_TABLE_NAME=<team-issue-events-table> \
 MUKUROJI_WORKSPACE_DIRECTORY_ID=<workspace-directory-id> \
 TEAM_ID=<team-id> \

@@ -49,12 +49,11 @@ const personLabels = {
 }
 
 describe('independent task views', () => {
-  test('shows legacy affected Project IDs without inventing Team-qualified links', () => {
+  test('shows Team-qualified affected Project links', () => {
     const schedule = createDefaultDueDateTaskSchedule('2026-08-08')
     const preview = {
       affectedMilestoneIds: [],
-      affectedProjectIds: ['shared-project'],
-      affectedProjects: [],
+      affectedProjects: [{ projectId: 'shared-project', teamId: 'core-team' }],
       conflicts: [],
       evaluatedRevisions: [{
         expectedRevision: 4,
@@ -79,8 +78,7 @@ describe('independent task views', () => {
 
     const html = renderToStaticMarkup(<TaskSchedulePreviewMetadata preview={preview} t={t} />)
 
-    expect(html).toContain('shared-project')
-    expect(html).not.toContain('core-team / shared-project')
+    expect(html).toContain('core-team / shared-project')
   })
 
   test('preserves table row, selection, count, empty, and error contracts', () => {

@@ -622,7 +622,7 @@ async function processRecord(
 
   const parentCondition = currentScope.checked && authorizationEvent.teamId && authorizationEvent.issueId
     ? createCuratedContextSearchParentCondition(
-        requireEnv('TEAM_ISSUES_TABLE_NAME'),
+        requireEnv('WORK_ITEMS_TABLE_NAME'),
         authorizationEvent,
         currentScope,
       )
@@ -1047,7 +1047,7 @@ async function markProjectionProcessed(
   const parentCondition = parentFence === undefined
     ? undefined
     : createCuratedContextSearchParentCondition(
-        requireEnv('TEAM_ISSUES_TABLE_NAME'),
+        requireEnv('WORK_ITEMS_TABLE_NAME'),
         parentFence.event,
         parentFence.scope,
       )
@@ -1909,7 +1909,7 @@ async function readCurrentWorkItemScope(
 
   const directoryTeamId = `${event.workspaceId}#team#${event.teamId}`
   const result = await documentClient.send(new GetCommand({
-    TableName: requireEnv('TEAM_ISSUES_TABLE_NAME'),
+    TableName: requireEnv('WORK_ITEMS_TABLE_NAME'),
     Key: { directoryTeamId, issueId: event.issueId },
     ConsistentRead: true,
   }))

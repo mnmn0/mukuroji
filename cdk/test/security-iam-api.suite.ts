@@ -59,10 +59,8 @@ test('shared server handler is bundled as a Lambda asset with production environ
     'MUKUROJI_DOCUMENTS_TABLE',
     'MUKUROJI_PROJECT_DIRECTORY_ID',
     'MUKUROJI_PROJECT_DIRECTORY_TABLE',
-    'MUKUROJI_WORK_ITEMS_TABLE',
-    'MUKUROJI_TEAM_ISSUES_TABLE',
+    'WORK_ITEMS_TABLE_NAME',
     'SYSTEM_ADMIN_GROUPS',
-    'TEAM_ISSUES_TABLE_NAME',
     'TEAM_ISSUE_EVENTS_TABLE_NAME',
   ]) {
     expect(variables).not.toHaveProperty(removedAlias);
@@ -582,12 +580,6 @@ test('realtime WebSocket routes use the dedicated ticket-consuming Lambda', () =
         REALTIME_SESSION_TTL_SECONDS: '3600',
         SYSTEM_ADMIN_GROUPS: {
           Ref: 'SystemAdminGroups',
-        },
-        MUKUROJI_WORK_ITEMS_TABLE: {
-          Ref: 'TeamIssuesTable189D851D',
-        },
-        TEAM_ISSUES_TABLE_NAME: {
-          Ref: 'TeamIssuesTable189D851D',
         },
         WORK_ITEMS_TABLE_NAME: {
           Ref: 'TeamIssuesTable189D851D',

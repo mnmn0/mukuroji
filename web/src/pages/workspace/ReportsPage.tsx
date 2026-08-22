@@ -148,18 +148,23 @@ export function ReportsPage() {
     [selectedReport?.widgets, widgetDraft, widgetSourceKey],
   )
   const routeState = useMemo(
-    () => parseAnalyticsRouteState(
-      new URLSearchParams(searchParamString),
-      selectedReport?.filter ?? initialFilter,
-      selectedReport?.timeZone ?? initialTimeZone,
-      selectedReport?.forecastBaseline,
-    ),
+    () => searchParamString.length === 0
+      ? {
+          builder: false,
+          filter: selectedReport?.filter ?? initialFilter,
+          forecastBaseline: selectedReport?.forecastBaseline,
+          reportId: selectedReport?.id,
+          snapshotId: undefined,
+          timezone: selectedReport?.timeZone ?? initialTimeZone,
+        }
+      : parseAnalyticsRouteState(new URLSearchParams(searchParamString)),
     [
       initialFilter,
       initialTimeZone,
       searchParamString,
       selectedReport?.filter,
       selectedReport?.forecastBaseline,
+      selectedReport?.id,
       selectedReport?.timeZone,
     ],
   )
@@ -336,6 +341,35 @@ export function ReportsPage() {
     isReportsLoading,
     reports,
     requestedReportId,
+  ])
+
+  useEffect(() => {
+    if (
+      searchParamString ||
+      isReportsLoading ||
+      reports.length > 0 ||
+      hasStartedAdHoc
+    ) {
+      return
+    }
+
+    commitRouteState({
+      asOf: undefined,
+      builder: false,
+      filter: initialFilter,
+      forecastBaseline: undefined,
+      reportId: undefined,
+      snapshotId: undefined,
+      timezone: initialTimeZone,
+    })
+  }, [
+    commitRouteState,
+    hasStartedAdHoc,
+    initialFilter,
+    initialTimeZone,
+    isReportsLoading,
+    reports.length,
+    searchParamString,
   ])
 
   const resetFeedback = () => {

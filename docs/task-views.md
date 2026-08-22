@@ -71,6 +71,5 @@ reconstructing Enterprise or Team permissions from a legacy role.
 
 Definitions are sanitized on every create, read, update, duplicate, and replay path.
 Relation filters are checked against current target authority with bounded,
-request-local caching. Unknown legacy relation forms use the permission-filtered
-search fallback; infrastructure failures fail closed instead of silently broadening
-the saved result.
+request-local caching. Unknown relation forms are rejected; only canonical Team-local,
+qualified Work Item, Team-qualified Project, and active Planning goal relations can be retained.

@@ -6,7 +6,7 @@ import {
   type PlanningSnapshot,
 } from '@mukuroji/contracts'
 import type { TeamIssueDetail } from '../../issues/api'
-import type { ProjectTask } from '../api/tasks'
+import type { CanonicalWorkItem } from '../api/tasks'
 import type { ProjectMember, ProjectUser } from '../../projects/api'
 import type { FileArtifactsController } from '../../files/mutations/useFileArtifacts'
 import { fileArtifactsControllerFixture } from '../../files/fixtures'
@@ -43,7 +43,7 @@ export const taskViewStorySelectedTask = {
   createdAt: '2026-06-01T00:00:00.000Z',
   updatedAt: '2026-06-01T00:00:00.000Z',
   source: 'dynamodb',
-} satisfies ProjectTask
+} satisfies CanonicalWorkItem
 
 /** Project tasks shared by the independent task-view stories. */
 export const taskViewStoryTasks = [
@@ -111,7 +111,7 @@ export const taskViewStoryTasks = [
     updatedAt: '2026-06-01T00:00:00.000Z',
     source: 'dynamodb',
   },
-] satisfies ProjectTask[]
+] satisfies CanonicalWorkItem[]
 
 /** Planning graph aligned with task-view stories for dependency chips and Gantt lines. */
 export const taskViewStoryPlanningSnapshot = {
@@ -146,7 +146,6 @@ export const taskViewStoryPlanningSnapshot = {
   criticalPath: { entityIds: [], slackByEntityId: {}, totalDurationDays: 0 },
   workItemDependencySummary: {
     affectedMilestoneIds: [],
-    affectedProjectIds: ['refero'],
     affectedProjects: [{ projectId: 'refero', teamId: 'core-team' }],
     conflicts: [],
     criticalPath: {

@@ -265,12 +265,8 @@ function resolveCriticalTables(
   return [
     {
       name: 'work-items',
-      tableName: firstNonBlank(
-        environment.MUKUROJI_WORK_ITEMS_TABLE,
-        environment.WORK_ITEMS_TABLE_NAME,
-        environment.MUKUROJI_TEAM_ISSUES_TABLE,
-        environment.TEAM_ISSUES_TABLE_NAME,
-      ) ?? (production ? undefined : 'mukuroji-team-issues-local'),
+      tableName: environment.WORK_ITEMS_TABLE_NAME?.trim() ||
+        (production ? undefined : 'mukuroji-team-issues-local'),
     },
     {
       name: 'workspace-access',

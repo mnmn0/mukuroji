@@ -1182,8 +1182,6 @@ export function buildApiTransportsAndRealtime(
         REALTIME_SESSIONS_TABLE_NAME: realtimeSessionsTable.tableName,
         REALTIME_SESSION_TTL_SECONDS: '3600',
         SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
-        MUKUROJI_WORK_ITEMS_TABLE: workItemsTable.tableName,
-        TEAM_ISSUES_TABLE_NAME: workItemsTable.tableName,
         WORK_ITEMS_TABLE_NAME: workItemsTable.tableName,
         WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
       },

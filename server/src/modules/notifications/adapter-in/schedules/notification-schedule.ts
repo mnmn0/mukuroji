@@ -214,12 +214,7 @@ export function createNotificationScheduleHandler(
   ): Promise<NotificationScheduleResult> =>
     runNotificationSchedule({
       documentClient,
-      workItemsTableName: requireEnvironment(
-        'WORK_ITEMS_TABLE_NAME',
-        'MUKUROJI_WORK_ITEMS_TABLE',
-        'TEAM_ISSUES_TABLE_NAME',
-        'MUKUROJI_TEAM_ISSUES_TABLE',
-      ),
+      workItemsTableName: requireEnvironment('WORK_ITEMS_TABLE_NAME'),
       planningTableName: requireEnvironment('PLANNING_TABLE_NAME'),
       planningUpdateScheduleIndexName: requireEnvironment(
         'PLANNING_UPDATE_SCHEDULE_INDEX_NAME',

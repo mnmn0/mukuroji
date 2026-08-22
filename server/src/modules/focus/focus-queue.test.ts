@@ -1035,7 +1035,6 @@ function createPlanningSnapshot(
       conflicts: [],
       unresolvedBlockerCount,
       affectedProjects: [],
-      affectedProjectIds: [],
       affectedMilestoneIds: [],
     },
     updatedAt: '2026-08-09T09:00:00.000Z',

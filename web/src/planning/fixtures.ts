@@ -363,7 +363,6 @@ export const planningSnapshotFixture = {
     conflicts: [],
     unresolvedBlockerCount: 1,
     affectedProjects: [{ projectId: 'refero', teamId: 'core-team' }],
-    affectedProjectIds: ['refero'],
     affectedMilestoneIds: ['milestone-beta'],
   },
 } satisfies PlanningSnapshot
@@ -485,7 +484,6 @@ export const emptyPlanningSnapshotFixture = {
     conflicts: [],
     unresolvedBlockerCount: 0,
     affectedProjects: [],
-    affectedProjectIds: [],
     affectedMilestoneIds: [],
   },
 } satisfies PlanningSnapshot

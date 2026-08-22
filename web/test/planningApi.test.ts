@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import {
-  LEGACY_PLANNING_SCHEMA_VERSION,
   type PlanningUpdate,
   type PlanningUpdateTarget,
   type PlanningUpdateTargetSummary,
@@ -69,7 +68,7 @@ describe('Planning API', () => {
     expect(requests[0]?.init.headers).toMatchObject({ Authorization: 'Bearer access-token' })
   })
 
-  test('defaults update targets during a rolling v2 deployment', async () => {
+  test('rejects a current snapshot missing canonical update targets', async () => {
     const rollingSnapshot = {
       criticalPath: planningSnapshotFixture.criticalPath,
       dependencies: planningSnapshotFixture.dependencies,
@@ -84,103 +83,28 @@ describe('Planning API', () => {
     }
     installFetchRecorder(rollingSnapshot)
 
-    await expect(getPlanningSnapshot('access-token')).resolves.toMatchObject({
-      schemaVersion: 2,
-      updateTargets: [],
+    await expect(getPlanningSnapshot('access-token')).rejects.toMatchObject({
+      code: 'InvalidPlanningSnapshot',
+      status: 200,
     })
   })
 
-  test('upgrades a dependency-free v1 snapshot during a rolling deployment', async () => {
+  test('rejects a dependency-free v1 snapshot', async () => {
     const legacySnapshot = {
       criticalPath: planningSnapshotFixture.criticalPath,
       dependencies: planningSnapshotFixture.dependencies,
       entities: planningSnapshotFixture.entities,
       revision: planningSnapshotFixture.revision,
-      schemaVersion: LEGACY_PLANNING_SCHEMA_VERSION,
+      schemaVersion: 1,
       updatedAt: planningSnapshotFixture.updatedAt,
       workItemLinks: planningSnapshotFixture.workItemLinks,
       workItems: planningSnapshotFixture.workItems,
     }
     installFetchRecorder(legacySnapshot)
 
-    await expect(getPlanningSnapshot('access-token')).resolves.toMatchObject({
-      schemaVersion: 2,
-      workItemDependencies: [],
-      workItemDependencySummary: {
-        affectedMilestoneIds: [],
-        affectedProjectIds: [],
-        affectedProjects: [],
-        conflicts: [],
-        unresolvedBlockerCount: 0,
-      },
-    })
-  })
-
-  test('adds Team-qualified Projects to a v1 dependency summary', async () => {
-    const legacySnapshot = {
-      ...planningSnapshotFixture,
-      schemaVersion: LEGACY_PLANNING_SCHEMA_VERSION,
-      workItemDependencySummary: {
-        affectedMilestoneIds:
-          planningSnapshotFixture.workItemDependencySummary.affectedMilestoneIds,
-        affectedProjectIds:
-          planningSnapshotFixture.workItemDependencySummary.affectedProjectIds,
-        conflicts: planningSnapshotFixture.workItemDependencySummary.conflicts,
-        criticalPath: planningSnapshotFixture.workItemDependencySummary.criticalPath,
-        unresolvedBlockerCount:
-          planningSnapshotFixture.workItemDependencySummary.unresolvedBlockerCount,
-      },
-    }
-    installFetchRecorder(legacySnapshot)
-
-    await expect(getPlanningSnapshot('access-token')).resolves.toMatchObject({
-      schemaVersion: 2,
-      workItemDependencySummary: {
-        affectedProjects: [{ projectId: 'refero', teamId: 'core-team' }],
-      },
-    })
-  })
-
-  test('keeps ambiguous v1 Project IDs out of Team-qualified navigation', async () => {
-    const coreWorkItem = planningSnapshotFixture.workItems[0]
-    const ambiguousWorkItem = {
-      ...coreWorkItem,
-      id: 'design-refero-item',
-      teamId: 'design-team',
-    }
-    const uniqueWorkItem = {
-      ...coreWorkItem,
-      id: 'operations-release-item',
-      projectId: 'operations-release',
-      teamId: 'operations-team',
-    }
-    const affectedProjectIds = ['refero', 'operations-release', 'not-visible']
-    const legacySnapshot = {
-      ...planningSnapshotFixture,
-      schemaVersion: LEGACY_PLANNING_SCHEMA_VERSION,
-      workItemDependencySummary: {
-        affectedMilestoneIds:
-          planningSnapshotFixture.workItemDependencySummary.affectedMilestoneIds,
-        affectedProjectIds,
-        conflicts: planningSnapshotFixture.workItemDependencySummary.conflicts,
-        criticalPath: planningSnapshotFixture.workItemDependencySummary.criticalPath,
-        unresolvedBlockerCount:
-          planningSnapshotFixture.workItemDependencySummary.unresolvedBlockerCount,
-      },
-      workItems: [
-        ...planningSnapshotFixture.workItems,
-        ambiguousWorkItem,
-        uniqueWorkItem,
-      ],
-    }
-    installFetchRecorder(legacySnapshot)
-
-    await expect(getPlanningSnapshot('access-token')).resolves.toMatchObject({
-      schemaVersion: 2,
-      workItemDependencySummary: {
-        affectedProjectIds,
-        affectedProjects: [{ projectId: 'operations-release', teamId: 'operations-team' }],
-      },
+    await expect(getPlanningSnapshot('access-token')).rejects.toMatchObject({
+      code: 'InvalidPlanningSnapshot',
+      status: 200,
     })
   })
 

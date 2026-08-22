@@ -281,7 +281,6 @@ describe('canonical Work Item API', () => {
     const after = createDefaultTestSchedule('2026-08-03')
     installFetchRecorder({
       affectedMilestoneIds: [],
-      affectedProjectIds: [],
       affectedProjects: [],
       conflicts: [],
       evaluatedRevisions: [{
@@ -313,7 +312,7 @@ describe('canonical Work Item API', () => {
     )).rejects.toMatchObject({ code: 'InvalidWorkItemSchedulePreview', status: 502 })
   })
 
-  test('upgrades legacy schedule preview Project IDs without inventing a Team owner', async () => {
+  test('rejects a schedule preview with legacy unqualified Project IDs', async () => {
     const before = createDefaultTestSchedule('2026-08-02')
     const after = createDefaultTestSchedule('2026-08-03')
     const legacyPreview = {
@@ -347,10 +346,7 @@ describe('canonical Work Item API', () => {
       'issue-1',
       'access-token',
       { expectedRevision: 3, operation: { targetDate: '2026-08-03', type: 'move' } },
-    )).resolves.toEqual({
-      ...legacyPreview,
-      affectedProjects: [],
-    })
+    )).rejects.toMatchObject({ code: 'InvalidWorkItemSchedulePreview', status: 502 })
   })
 
   test('uses readable fallback text for a non-JSON error response', async () => {

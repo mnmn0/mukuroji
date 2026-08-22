@@ -72,7 +72,6 @@ const preview: WorkItemScheduleChangePreview = {
   planningRevision: 8,
   conflicts: [],
   affectedProjects: [],
-  affectedProjectIds: [],
   affectedMilestoneIds: [],
   requiresConfirmation: true,
   warnings: [],

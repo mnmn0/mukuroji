@@ -2120,10 +2120,7 @@ export class DynamoDbPlanningClient extends BasePlanningClient {
     dynamoDbClient = createDynamoDbClient(),
     bootstrapLocalTable = Boolean(getDynamoDbEndpoint()),
     now: () => Date = () => new Date(),
-    workItemsTableName = process.env.MUKUROJI_WORK_ITEMS_TABLE ??
-      process.env.WORK_ITEMS_TABLE_NAME ??
-      process.env.MUKUROJI_TEAM_ISSUES_TABLE ??
-      process.env.TEAM_ISSUES_TABLE_NAME ??
+    workItemsTableName = process.env.WORK_ITEMS_TABLE_NAME ??
       'mukuroji-team-issues-local',
   ) {
     super(now)
@@ -4524,8 +4521,6 @@ export function createPlanningWorkItemDependencySummary(
     affectedProjects: [...affectedProjects.values()].sort((first, second) =>
       compareText(first.teamId, second.teamId) || compareText(first.projectId, second.projectId)
     ),
-    affectedProjectIds: [...new Set([...affectedProjects.values()].map(({ projectId }) => projectId))]
-      .sort(compareText),
     affectedMilestoneIds: [...affectedMilestoneIds].sort(compareText),
   }
 }

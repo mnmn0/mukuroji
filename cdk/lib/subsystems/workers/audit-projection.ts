@@ -129,8 +129,6 @@ export function buildAuditProjectionWorker(
         TENANT_ADMINISTRATION_TABLE_NAME:
           tenantAdministrationTable.tableName,
         MUKUROJI_RUNTIME_ROLE: 'audit-projection',
-        MUKUROJI_WORK_ITEMS_TABLE: workItemsTable.tableName,
-        TEAM_ISSUES_TABLE_NAME: workItemsTable.tableName,
         WORK_ITEMS_TABLE_NAME: workItemsTable.tableName,
         WEBSOCKET_CALLBACK_ENDPOINT: realtimeWebSocketStage.callbackUrl,
         WEBHOOK_DELIVERY_QUEUE_URL: webhookDeliveryQueue.queueUrl,

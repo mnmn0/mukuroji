@@ -74,9 +74,6 @@ const completeTableEnvironment: Readonly<
   DEVELOPER_PLATFORM_TABLE_NAME: 'DeveloperPlatform',
   PROJECT_DIRECTORY_TABLE_NAME: 'ProjectDirectory',
   WORK_ITEMS_TABLE_NAME: 'WorkItems',
-  MUKUROJI_WORK_ITEMS_TABLE: undefined,
-  MUKUROJI_TEAM_ISSUES_TABLE: undefined,
-  TEAM_ISSUES_TABLE_NAME: undefined,
   COLLABORATION_TABLE_NAME: 'Collaboration',
   DOCUMENTS_TABLE_NAME: 'Documents',
   WORKSPACE_SEARCH_TABLE_NAME: 'WorkspaceSearch',
@@ -211,54 +208,6 @@ test('accepts a complete exact six-table configuration in required mode', async 
     )
     documentClient.destroy()
   })
-})
-
-test('accepts Work Items compatibility names only when they match the fence', async () => {
-  await withServerEnvironment({
-    ...runtimeEnvironment,
-    ...completeTableEnvironment,
-    NODE_ENV: 'production',
-    MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE: 'required',
-    MUKUROJI_WORK_ITEMS_TABLE: 'WorkItems',
-    MUKUROJI_TEAM_ISSUES_TABLE: 'WorkItems',
-    TEAM_ISSUES_TABLE_NAME: 'WorkItems',
-  }, () => {
-    const lowLevelClient = createDynamoDbClient()
-    const documentClient =
-      createWorkspaceSearchWriterDynamoDbDocumentClient(lowLevelClient)
-
-    expect(documentClient.middlewareStack.identify()).toContain(
-      'mukurojiWorkspaceSearchWriterFence - initialize',
-    )
-    documentClient.destroy()
-  })
-})
-
-test('rejects every mismatched Work Items compatibility name', async () => {
-  for (const aliasName of [
-    'MUKUROJI_WORK_ITEMS_TABLE',
-    'MUKUROJI_TEAM_ISSUES_TABLE',
-    'TEAM_ISSUES_TABLE_NAME',
-  ]) {
-    await withServerEnvironment({
-      ...runtimeEnvironment,
-      ...completeTableEnvironment,
-      NODE_ENV: 'production',
-      MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE: 'required',
-      [aliasName]: 'DifferentWorkItems',
-    }, () => {
-      const lowLevelClient = createOfflineDynamoDbClient()
-      try {
-        expect(() =>
-          createWorkspaceSearchWriterDynamoDbDocumentClient(lowLevelClient)
-        ).toThrow(
-          `${aliasName} must match WORK_ITEMS_TABLE_NAME for the Workspace Search writer fence.`,
-        )
-      } finally {
-        lowLevelClient.destroy()
-      }
-    })
-  }
 })
 
 test('rejects a local bypass for an unbound injected transport', async () => {

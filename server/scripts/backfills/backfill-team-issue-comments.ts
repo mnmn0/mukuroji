@@ -368,7 +368,7 @@ Options:
   --help, -h               Show this help.
 
 Required in AWS environments:
-  TEAM_ISSUE_EVENTS_TABLE_NAME, COLLABORATION_TABLE_NAME, TEAM_ISSUES_TABLE_NAME,
+  TEAM_ISSUE_EVENTS_TABLE_NAME, COLLABORATION_TABLE_NAME, WORK_ITEMS_TABLE_NAME,
   AUDIT_EVENTS_TABLE_NAME, WORKSPACE_SEARCH_TABLE_NAME
 
 MUKUROJI_BACKFILL_OPERATOR_ID is an optional operator label. In AWS, the audit
@@ -405,10 +405,8 @@ function resolveTableNames(endpoint: string | undefined): TableNames {
       allowLocalDefaults ? 'mukuroji-collaboration-local' : undefined,
     ),
     workItems: resolveTableName(
-      readEnvironment('MUKUROJI_WORK_ITEMS_TABLE') ??
-        readEnvironment('WORK_ITEMS_TABLE_NAME') ??
-        readEnvironment('TEAM_ISSUES_TABLE_NAME'),
-      'TEAM_ISSUES_TABLE_NAME',
+      readEnvironment('WORK_ITEMS_TABLE_NAME'),
+      'WORK_ITEMS_TABLE_NAME',
       allowLocalDefaults ? 'mukuroji-team-issues-local' : undefined,
     ),
     auditEvents: resolveTableName(

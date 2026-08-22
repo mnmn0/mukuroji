@@ -313,7 +313,7 @@ Options:
   --help, -h               Show this help.
 
 Required production environment:
-  TEAM_ISSUES_TABLE_NAME, PROJECT_DIRECTORY_TABLE_NAME, WORKSPACE_ACCESS_TABLE_NAME,
+  WORK_ITEMS_TABLE_NAME, PROJECT_DIRECTORY_TABLE_NAME, WORKSPACE_ACCESS_TABLE_NAME,
   AUDIT_EVENTS_TABLE_NAME,
   MUKUROJI_WORKSPACE_AUDIT_PSEUDONYM_KEY (exactly 64 lowercase hexadecimal characters)
 
@@ -333,7 +333,7 @@ function resolveTableNames(endpoint: string | undefined): TableNames {
 
   return {
     teamIssues: resolveTableName(
-      ['MUKUROJI_TEAM_ISSUES_TABLE', 'TEAM_ISSUES_TABLE_NAME'],
+      ['WORK_ITEMS_TABLE_NAME'],
       'mukuroji-team-issues-local',
       allowLocalDefaults,
     ),

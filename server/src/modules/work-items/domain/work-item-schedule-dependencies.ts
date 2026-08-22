@@ -244,7 +244,6 @@ export function previewWorkItemDependencyScheduleChange(
       ? []
       : [{ teamId: state.endpoint.teamId, projectId: state.projectId }]
   }))
-  const affectedProjectIds = uniqueSorted(affectedProjects.map(({ projectId }) => projectId))
   const affectedMilestoneIds = uniqueSorted([...impactedKeys].flatMap((key) =>
     states.get(key)?.milestoneIds ?? []
   ))
@@ -266,7 +265,6 @@ export function previewWorkItemDependencyScheduleChange(
       : { relationGraphRevision: input.relationGraphRevision }),
     conflicts: normalizedConflicts,
     affectedProjects,
-    affectedProjectIds,
     affectedMilestoneIds,
     requiresConfirmation: impacts.length > 1,
     warnings,

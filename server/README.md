@@ -376,7 +376,7 @@ bun run team-issue-comments:backfill -- \
 ```
 
 AWS runs require `TEAM_ISSUE_EVENTS_TABLE_NAME`, `COLLABORATION_TABLE_NAME`,
-`TEAM_ISSUES_TABLE_NAME`, `AUDIT_EVENTS_TABLE_NAME`, and
+`WORK_ITEMS_TABLE_NAME`, `AUDIT_EVENTS_TABLE_NAME`, and
 `WORKSPACE_SEARCH_TABLE_NAME`. The write run projects each current canonical
 comment into Workspace Search and records projected/deleted document counts in
 the checkpoint and completion audit. The checkpoint is owner-only because its continuation key can contain source identifiers. Reusing

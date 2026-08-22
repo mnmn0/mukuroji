@@ -35,7 +35,7 @@ describe('notification deep links', () => {
     )
   })
 
-  test('normalizes the legacy projected REST-looking team path', () => {
+  test('rejects the removed path-parameter Team Issue deep link', () => {
     expect(resolveNotificationPath({
       commentId: 'comment-1',
       deepLink: '/teams/core-team/issues/issue-1',
@@ -44,7 +44,7 @@ describe('notification deep links', () => {
       occurredAt: '2026-07-12T00:00:00.000Z',
       reasons: ['watcher'],
       state: 'unread',
-    })).toBe('/teams/core-team/issues?issueId=issue-1&commentId=comment-1')
+    })).toBeUndefined()
   })
 
   test('rejects external and protocol-relative deep links', () => {

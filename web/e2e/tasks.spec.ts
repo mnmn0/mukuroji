@@ -46,7 +46,7 @@ import type { InboxNotification, NotificationPreferences } from '../src/notifica
 import { planningSnapshotFixture } from '../src/planning/fixtures'
 import type { ProjectDirectoryTeam, ProjectMember, ProjectMemberRole, ProjectUser } from '../src/projects/api'
 import { projectDirectoryFixtures } from '../src/projects/fixtures'
-import type { ProjectTask } from '../src/tasks/api'
+import type { CanonicalWorkItem } from '../src/tasks/api'
 import { referoTaskFixtures } from '../src/tasks/fixtures'
 import {
   teamWorkItemConfigurationFixture,
@@ -424,7 +424,7 @@ async function mockAuthenticatedTaskPage(
       name: projectNames[project.id] ?? project.name,
     }))
   }
-  const taskResponsesByProject: Record<string, ProjectTask[]> = {
+  const taskResponsesByProject: Record<string, CanonicalWorkItem[]> = {
     refero: taskResponse.map((task) => ({ ...task })),
     'product-roadmap': [],
     'brand-refresh': [],
@@ -2643,11 +2643,11 @@ function findTeamIssue(
  * @returns Matching canonical Work Item when the mock contains one.
  */
 function findStoredWorkItem(
-  taskResponsesByProject: Record<string, ProjectTask[]>,
+  taskResponsesByProject: Record<string, CanonicalWorkItem[]>,
   teamIssuesByTeam: Record<string, TeamIssue[]>,
   teamId: string,
   issueId: string,
-): TeamIssue | ProjectTask | undefined {
+): TeamIssue | CanonicalWorkItem | undefined {
   return findTeamIssue(teamIssuesByTeam, teamId, issueId)
     ?? Object.values(taskResponsesByProject)
       .flat()
@@ -2662,10 +2662,10 @@ function findStoredWorkItem(
  * @returns Stable insertion-ordered canonical Work Items keyed by Team and ID.
  */
 function listStoredWorkItems(
-  taskResponsesByProject: Record<string, ProjectTask[]>,
+  taskResponsesByProject: Record<string, CanonicalWorkItem[]>,
   teamIssuesByTeam: Record<string, TeamIssue[]>,
-): Array<TeamIssue | ProjectTask> {
-  const workItemsByKey = new Map<string, TeamIssue | ProjectTask>()
+): Array<TeamIssue | CanonicalWorkItem> {
+  const workItemsByKey = new Map<string, TeamIssue | CanonicalWorkItem>()
 
   for (const workItem of [
     ...Object.values(taskResponsesByProject).flat(),
@@ -2687,7 +2687,7 @@ function listStoredWorkItems(
  * @returns Contract-valid Planning snapshot projected from current mock state.
  */
 function createMockPlanningSnapshot(
-  taskResponsesByProject: Record<string, ProjectTask[]>,
+  taskResponsesByProject: Record<string, CanonicalWorkItem[]>,
   teamIssuesByTeam: Record<string, TeamIssue[]>,
   dependencies: readonly WorkItemScheduleDependency[],
   conflicts: readonly WorkItemScheduleDependencyConflict[],
@@ -2706,12 +2706,6 @@ function createMockPlanningSnapshot(
       candidate.teamId === endpoint.teamId && candidate.workItemId === endpoint.workItemId
     ) === index
   )
-  const affectedProjectIds = criticalWorkItems.flatMap((endpoint) => {
-    const workItem = workItemByKey.get(
-      createIssueCollaborationKey(endpoint.teamId, endpoint.workItemId),
-    )
-    return workItem?.assignedProjectId ? [workItem.assignedProjectId] : []
-  }).filter((projectId, index, projectIds) => projectIds.indexOf(projectId) === index)
   const affectedProjects = criticalWorkItems.flatMap((endpoint) => {
     const workItem = workItemByKey.get(
       createIssueCollaborationKey(endpoint.teamId, endpoint.workItemId),
@@ -2747,7 +2741,6 @@ function createMockPlanningSnapshot(
     },
     workItemDependencySummary: {
       affectedMilestoneIds: [],
-      affectedProjectIds,
       affectedProjects,
       conflicts: structuredClone([...conflicts]),
       criticalPath: {
@@ -2785,7 +2778,7 @@ function createMockPlanningSnapshot(
  * @returns Contract-valid preview used by both preview and confirm E2E routes.
  */
 function createMockScheduleChangePreview(
-  taskResponsesByProject: Record<string, ProjectTask[]>,
+  taskResponsesByProject: Record<string, CanonicalWorkItem[]>,
   teamIssuesByTeam: Record<string, TeamIssue[]>,
   dependencies: readonly WorkItemScheduleDependency[],
   conflicts: readonly WorkItemScheduleDependencyConflict[],
@@ -2882,12 +2875,8 @@ function createMockScheduleChangePreview(
   }).filter((project, index, projects) => projects.findIndex((candidate) =>
     candidate.projectId === project.projectId && candidate.teamId === project.teamId
   ) === index)
-  const affectedProjectIds = affectedProjects.map((project) => project.projectId)
-    .filter((projectId, index, projectIds) => projectIds.indexOf(projectId) === index)
-
   return {
     affectedMilestoneIds: [],
-    affectedProjectIds,
     affectedProjects,
     conflicts: structuredClone([...conflicts]),
     evaluatedRevisions: impacts.map((impact) => ({
@@ -3298,7 +3287,7 @@ async function expectWireframeScheduleAcrossTaskViews(
  * @param issue - 保存する最新 Work Item です。
  */
 function replaceStoredWorkItem(
-  taskResponsesByProject: Record<string, ProjectTask[]>,
+  taskResponsesByProject: Record<string, CanonicalWorkItem[]>,
   teamIssuesByTeam: Record<string, TeamIssue[]>,
   teamId: string,
   issue: TeamIssue,
@@ -3860,7 +3849,6 @@ test.describe('authenticated task page', () => {
       ...structuredClone(planningSnapshotFixture),
       workItemDependencySummary: {
         ...structuredClone(planningSnapshotFixture.workItemDependencySummary),
-        affectedProjectIds: ['refero', 'shared-launch'],
         affectedProjects: [
           { projectId: 'refero', teamId: 'core-team' },
           { projectId: 'shared-launch', teamId: 'design-team' },

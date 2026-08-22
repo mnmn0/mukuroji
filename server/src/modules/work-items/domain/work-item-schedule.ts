@@ -382,7 +382,6 @@ export function previewWorkItemScheduleChange(
     }],
     conflicts: [],
     affectedProjects: [],
-    affectedProjectIds: [],
     affectedMilestoneIds: [],
     requiresConfirmation: false,
     warnings: [],

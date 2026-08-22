@@ -246,7 +246,6 @@ export function isWorkItemScheduleChangePreview(
     value.conflicts.every(isWorkItemScheduleDependencyConflict) &&
     Array.isArray(value.affectedProjects) &&
     value.affectedProjects.every(isAffectedProject) &&
-    isStringArray(value.affectedProjectIds) &&
     isStringArray(value.affectedMilestoneIds) &&
     typeof value.requiresConfirmation === 'boolean' &&
     isStringArray(value.warnings)
@@ -273,11 +272,7 @@ export function isWorkItemScheduleChangePreviewForEndpoint(
 }
 
 /**
- * Decodes an endpoint-bound schedule preview and upgrades its legacy affected Project shape.
- *
- * Legacy Project IDs cannot be safely qualified with a Team from this response alone. They stay
- * in `affectedProjectIds` for fallback display or search while the current qualified collection
- * is initialized empty.
+ * Decodes a canonical endpoint-bound schedule preview.
  *
  * @param value - Unknown schedule preview response candidate.
  * @param teamId - Team from the preview request path.
@@ -289,11 +284,8 @@ export function readWorkItemScheduleChangePreviewForEndpoint(
   teamId: string,
   workItemId: string,
 ): WorkItemScheduleChangePreview | undefined {
-  const normalized = isRecord(value) && value.affectedProjects === undefined
-    ? { ...value, affectedProjects: [] }
-    : value
-  return isWorkItemScheduleChangePreviewForEndpoint(normalized, teamId, workItemId)
-    ? normalized
+  return isWorkItemScheduleChangePreviewForEndpoint(value, teamId, workItemId)
+    ? value
     : undefined
 }
 

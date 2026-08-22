@@ -2522,8 +2522,7 @@ export function createDefaultFileProofingClient(): FileProofingClient {
     {
       auditTableName: getConfiguredAuditTableName(),
       retentionDays: readPositiveIntegerEnvironment('FILE_RETENTION_DAYS', 30),
-      workItemsTableName: readEnvironment('WORK_ITEMS_TABLE_NAME') ??
-        readEnvironment('TEAM_ISSUES_TABLE_NAME'),
+      workItemsTableName: readEnvironment('WORK_ITEMS_TABLE_NAME'),
       planningTableName: readEnvironment('PLANNING_TABLE_NAME'),
       dynamoDbClient,
       bootstrapLocalTable: shouldBootstrapLocalDynamoDb(),

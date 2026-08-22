@@ -5,6 +5,13 @@ import type {
   WorkItemStatus,
 } from '@mukuroji/contracts'
 
+export type {
+  CanonicalWorkItem,
+  CreateWorkItemInput,
+  WorkItemPriority,
+  WorkItemStatus,
+}
+
 /** Canonical Work Item status consumed by the Task UI. */
 export type TaskStatus = WorkItemStatus
 

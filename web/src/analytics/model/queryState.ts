@@ -49,52 +49,31 @@ const analyticsRouteVersion = '1'
  * Analytics URL query を canonical route state に変換します。
  *
  * @param searchParams - `/reports` の URLSearchParams です。
- * @param fallbackFilter - Saved report または初期値の filter です。
- * @param fallbackTimezone - Saved report または browser の timezone です。
- * @param fallbackForecastBaseline - Saved report の任意 forecast baseline です。
  * @returns URL override を適用した analytics state です。
  */
 export function parseAnalyticsRouteState(
   searchParams: URLSearchParams,
-  fallbackFilter: AnalyticsFilter,
-  fallbackTimezone: string,
-  fallbackForecastBaseline?: AnalyticsDateRange,
 ): AnalyticsRouteState {
-  const usesLegacyFallback = !searchParams.has('v')
-  const fallback = usesLegacyFallback
-    ? asRecord(fallbackFilter)
-    : {}
-  const fallbackPeriod = asRecord(fallback.period)
-  const from = readValue(searchParams, 'from') ??
-    readString(fallbackPeriod.from) ??
-    ''
-  const to = readValue(searchParams, 'to') ??
-    readString(fallbackPeriod.to) ??
-    ''
+  if (searchParams.getAll('v').length !== 1 || searchParams.get('v') !== analyticsRouteVersion) {
+    throw new TypeError('Analytics URL must use the canonical v=1 schema.')
+  }
+
   const filter = omitUndefinedValues({
-    ...fallback,
-    period: { from, to },
-    teamIds: readRepeatedOrFallback(searchParams, 'team', fallback.teamIds),
-    projectIds: readRepeatedOrFallback(searchParams, 'project', fallback.projectIds),
-    assigneeUserIds: readRepeatedOrFallback(
-      searchParams,
-      'assignee',
-      fallback.assigneeUserIds,
-    ),
-    statusCategories: readRepeatedOrFallback(
-      searchParams,
-      'status',
-      fallback.statusCategories,
-    ),
-    customFields: readCustomFields(searchParams, fallback.customFields),
+    period: {
+      from: readValue(searchParams, 'from') ?? '',
+      to: readValue(searchParams, 'to') ?? '',
+    },
+    teamIds: readOptionalRepeated(searchParams, 'team'),
+    projectIds: readOptionalRepeated(searchParams, 'project'),
+    assigneeUserIds: readOptionalRepeated(searchParams, 'assignee'),
+    statusCategories: readOptionalRepeated(searchParams, 'status'),
+    customFields: readCustomFields(searchParams),
     includeArchived: searchParams.has('archived')
       ? searchParams.get('archived') === '1'
-      : fallback.includeArchived === true,
+      : false,
   }) as unknown as AnalyticsFilter
-  const baselineFrom = readValue(searchParams, 'baselineFrom') ??
-    (usesLegacyFallback ? fallbackForecastBaseline?.from : undefined)
-  const baselineTo = readValue(searchParams, 'baselineTo') ??
-    (usesLegacyFallback ? fallbackForecastBaseline?.to : undefined)
+  const baselineFrom = readValue(searchParams, 'baselineFrom')
+  const baselineTo = readValue(searchParams, 'baselineTo')
   const forecastBaseline = searchParams.get('baseline') === 'none'
     ? undefined
     : baselineFrom && baselineTo
@@ -108,8 +87,7 @@ export function parseAnalyticsRouteState(
     forecastBaseline,
     reportId: readValue(searchParams, 'report'),
     snapshotId: readValue(searchParams, 'snapshot'),
-    timezone: readValue(searchParams, 'timezone') ??
-      (usesLegacyFallback ? fallbackTimezone : 'UTC'),
+    timezone: readValue(searchParams, 'timezone') ?? 'UTC',
   }
 }
 
@@ -232,20 +210,23 @@ export function updateAnalyticsRouteState(
   }
 }
 
-function readRepeatedOrFallback(
+/**
+ * Reads an optional repeated URL parameter without applying a fallback value.
+ *
+ * @param searchParams - URL query parameters to inspect.
+ * @param key - Repeated parameter name.
+ * @returns Normalized values when the key is present, otherwise undefined.
+ */
+function readOptionalRepeated(
   searchParams: URLSearchParams,
   key: string,
-  fallback: unknown,
 ) {
   if (searchParams.has(key)) return readRepeated(searchParams, key)
-  return Array.isArray(fallback) ? readStringArray(fallback) : undefined
+  return undefined
 }
 
-function readCustomFields(searchParams: URLSearchParams, fallback: unknown) {
-  if (!searchParams.has('customField')) {
-    const values = readUnknownArray(fallback)
-    return values.length > 0 ? values : undefined
-  }
+function readCustomFields(searchParams: URLSearchParams) {
+  if (!searchParams.has('customField')) return undefined
 
   const values = searchParams.getAll('customField').flatMap((value) => {
     try {
@@ -282,6 +263,10 @@ function readRepeated(searchParams: URLSearchParams, key: string) {
   return [...new Set(
     searchParams.getAll(key).map((value) => value.trim()).filter(Boolean),
   )]
+}
+
+function readString(value: unknown) {
+  return typeof value === 'string' ? value : undefined
 }
 
 function setValue(
@@ -322,10 +307,6 @@ function asRecord(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null
     ? value as Record<string, unknown>
     : {}
-}
-
-function readString(value: unknown) {
-  return typeof value === 'string' ? value : undefined
 }
 
 function readStringArray(value: unknown) {

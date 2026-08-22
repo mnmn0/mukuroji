@@ -40,11 +40,7 @@ export function resolveNotificationPath(notification: InboxNotification) {
     return undefined
   }
 
-  const normalizedLegacyPath = normalizeLegacyTeamIssuePath(deepLink, notification.commentId)
-
-  if (normalizedLegacyPath) {
-    return normalizedLegacyPath
-  }
+  if (isLegacyTeamIssuePath(deepLink)) return undefined
 
   if (!notification.commentId) {
     return deepLink
@@ -64,20 +60,7 @@ export function resolveNotificationPath(notification: InboxNotification) {
   return `${path}?${searchParams.toString()}${hash ? `#${hash}` : ''}`
 }
 
-function normalizeLegacyTeamIssuePath(value: string, commentId?: string) {
-  const match = /^\/teams\/([^/?#]+)\/issues\/([^/?#]+)(?:[?#].*)?$/.exec(value)
-
-  if (!match?.[1] || !match[2]) {
-    return undefined
-  }
-
-  try {
-    return createTeamIssuesPath(
-      decodeURIComponent(match[1]),
-      decodeURIComponent(match[2]),
-      commentId,
-    )
-  } catch {
-    return undefined
-  }
+/** Returns whether a notification contains the removed path-parameter Team Issue URL. */
+function isLegacyTeamIssuePath(value: string): boolean {
+  return /^\/teams\/[^/?#]+\/issues\/[^/?#]+(?:[?#].*)?$/u.test(value)
 }

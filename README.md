@@ -203,8 +203,7 @@ Web は Vite の proxy 経由で `/api` を `http://localhost:3000` に転送し
 - `MUKUROJI_DASHBOARD_TABLE`: ダッシュボード集計値を保存する DynamoDB table 名。未指定時は `mukuroji-dashboard-local`
 - `MUKUROJI_PROJECT_DIRECTORY_TABLE`: サイドバー用チーム/プロジェクト階層を保存する DynamoDB table 名。未指定時は `mukuroji-project-directory-local`
 - `MUKUROJI_WORKSPACE_ACCESS_TABLE`: Workspace metadata、member、invitation lifecycle を保存する DynamoDB table 名。未指定時は `mukuroji-workspace-access-local`
-- `MUKUROJI_TEAM_ISSUES_TABLE`: チーム所有 Issue を保存する DynamoDB table 名。未指定時は `mukuroji-team-issues-local`
-- `MUKUROJI_WORK_ITEMS_TABLE` / `WORK_ITEMS_TABLE_NAME`: canonical Work Item store。移行期間は `MUKUROJI_TEAM_ISSUES_TABLE` / `TEAM_ISSUES_TABLE_NAME` と同じ既存 table を指します。
+- `WORK_ITEMS_TABLE_NAME`: Work Item を保存する DynamoDB table 名。未指定時は `mukuroji-team-issues-local`
 - `MUKUROJI_TEAM_ISSUE_EVENTS_TABLE`: チーム Issue のコメント/活動履歴を保存する DynamoDB table 名。未指定時は `mukuroji-team-issue-events-local`
 - `MUKUROJI_COLLABORATION_TABLE` / `COLLABORATION_TABLE_NAME`: comment thread、reaction、watcher、presence を保存する DynamoDB table 名。未指定時は `mukuroji-collaboration-local`
 - `MUKUROJI_DOCUMENTS_TABLE` / `DOCUMENTS_TABLE_NAME`: Document tree、version、comment、presence、share、backlink を保存する DynamoDB table 名。未指定時は `mukuroji-documents-local`
@@ -508,11 +507,11 @@ fresh deploy、既存 stack upgrade、bootstrap 検証、rollback、PITR recover
 `ISSUE_ID` を指定すると、その Issue のコメント/活動履歴 table も query します。
 
 ```sh
-TEAM_ISSUES_TABLE_NAME=<TeamIssuesTableName> \
+WORK_ITEMS_TABLE_NAME=<TeamIssuesTableName> \
 TEAM_ISSUE_EVENTS_TABLE_NAME=<TeamIssueEventsTableName> \
 bun run issues:check-dynamodb
 
-TEAM_ISSUES_TABLE_NAME=<TeamIssuesTableName> \
+WORK_ITEMS_TABLE_NAME=<TeamIssuesTableName> \
 TEAM_ISSUE_EVENTS_TABLE_NAME=<TeamIssueEventsTableName> \
 ISSUE_ID=<IssueId> \
 bun run issues:check-dynamodb
