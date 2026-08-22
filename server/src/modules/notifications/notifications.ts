@@ -939,7 +939,9 @@ function toNotificationItem(
   if (
     isInvalidStoredTimestamp(value.archivedAt) ||
     isInvalidStoredTimestamp(value.readAt) ||
-    isInvalidStoredTimestamp(value.snoozedUntil)
+    isInvalidStoredTimestamp(value.snoozedUntil) ||
+    isInvalidStoredTimestamp(value.planningNextDueAt) ||
+    isInvalidStoredTimestamp(value.updatedAt)
   ) {
     throw invalidNotificationData()
   }
@@ -971,6 +973,7 @@ function toNotificationItem(
     !storedOccurredAt ||
     value.occurredAt !== storedOccurredAt ||
     !occurredAt ||
+    occurredAt !== storedOccurredAt ||
     notificationKey !== `${storedOccurredAt}#${eventId}`
   ) {
     throw invalidNotificationData()
@@ -1040,10 +1043,12 @@ function incrementNotificationVersion(currentVersion: number) {
 
 /** Returns whether a persisted optional notification timestamp is present but invalid. */
 function isInvalidStoredTimestamp(value: unknown) {
+  const normalized = readTimestamp(value)
   return value !== undefined && (
     typeof value !== 'string' ||
     value !== value.trim() ||
-    !readTimestamp(value)
+    normalized === undefined ||
+    normalized !== value
   )
 }
 

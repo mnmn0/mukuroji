@@ -150,6 +150,10 @@ describe('notification store', () => {
         notificationKey: '2026-01-01T24:00:00.000Z#evt-1',
         occurredAt: '2026-01-01T24:00:00.000Z',
       }),
+      createNotificationRow({
+        notificationKey: '2026-01-01T01:00:00.000+01:00#evt-1',
+        occurredAt: '2026-01-01T01:00:00.000+01:00',
+      }),
       createNotificationRow({ inAppVisible: 'false' }),
     ]
 
