@@ -956,6 +956,12 @@ function toNotificationItem(
   ) {
     throw invalidNotificationData()
   }
+  const teamId = readText(value.teamId)
+  const issueId = readText(value.issueId)
+  const triageEntryId = readText(value.triageEntryId)
+  if ((issueId || triageEntryId) && !teamId) {
+    throw invalidNotificationData()
+  }
   const state = resolveNotificationState(value, now)
   const snoozedUntil = readTimestamp(value.snoozedUntil)
   const isExpiredSnoozePendingWake =

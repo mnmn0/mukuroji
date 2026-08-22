@@ -155,6 +155,12 @@ describe('notification store', () => {
         occurredAt: '2026-01-01T01:00:00.000+01:00',
       }),
       createNotificationRow({ teamId: 42, projectId: undefined }),
+      createNotificationRow({ teamId: undefined, issueId: 'issue-without-team' }),
+      createNotificationRow({
+        teamId: undefined,
+        issueId: undefined,
+        triageEntryId: 'triage-without-team',
+      }),
       createNotificationRow({ inAppVisible: 'false' }),
     ]
 
