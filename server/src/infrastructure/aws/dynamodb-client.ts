@@ -28,13 +28,6 @@ const rolloutPendingWriterFenceMode = 'rollout-pending'
 const localFlociWriterFenceBypassMode = 'local-floci-bypass'
 /** Explicit marker used by the repository's Floci deployment. */
 const localFlociRuntimeMarker = 'floci'
-/** Compatibility names that some Work Item writers still resolve directly. */
-const workItemsTableCompatibilityEnvironmentNames = [
-  'MUKUROJI_WORK_ITEMS_TABLE',
-  'MUKUROJI_TEAM_ISSUES_TABLE',
-  'TEAM_ISSUES_TABLE_NAME',
-] as const
-
 /**
  * Exact endpoint used to construct each shared configured low-level client.
  */
@@ -389,11 +382,7 @@ function readWorkspaceSearchWriterFenceTableNames(
 }
 
 /**
- * Binds every supported Work Items compatibility name to the canonical table.
- *
- * Existing writers resolve these aliases in different orders. Rejecting any
- * defined mismatch prevents one writer from addressing a table outside the
- * canonical writer-fence table set.
+ * Resolves the canonical Work Items table used by the writer fence.
  *
  * @param environment - Current server environment.
  * @returns Exact canonical Work Items table name.
@@ -405,14 +394,6 @@ function readWriterFenceWorkItemsTableName(
     environment,
     'WORK_ITEMS_TABLE_NAME',
   )
-  for (const aliasName of workItemsTableCompatibilityEnvironmentNames) {
-    const aliasValue = environment[aliasName]
-    if (aliasValue !== undefined && aliasValue !== canonicalName) {
-      throw new TypeError(
-        `${aliasName} must match WORK_ITEMS_TABLE_NAME for the Workspace Search writer fence.`,
-      )
-    }
-  }
   return canonicalName
 }
 

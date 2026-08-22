@@ -32,15 +32,14 @@ test('fails closed when any critical table configuration is missing', async () =
   expect(describedTables.sort()).toEqual(['work-items', 'workspace-access'])
 })
 
-test('uses adapter-compatible names and stable local table defaults', async () => {
+test('uses canonical Work Items names and stable local table defaults', async () => {
   const compatibilityTables: string[] = []
   const compatibilityProbe = createDynamoDbReadinessProbe({
     environment: {
       AUDIT_EVENTS_TABLE_NAME: 'ignored-audit-events',
       MUKUROJI_AUDIT_EVENTS_TABLE: 'audit-events',
-      MUKUROJI_TEAM_ISSUES_TABLE: 'work-items',
+      WORK_ITEMS_TABLE_NAME: 'work-items',
       MUKUROJI_WORKSPACE_ACCESS_TABLE: 'workspace-access',
-      TEAM_ISSUES_TABLE_NAME: 'ignored-work-items',
       WORKSPACE_ACCESS_TABLE_NAME: 'ignored-workspace-access',
     },
     describeTable: async (tableName) => {
@@ -84,7 +83,7 @@ test('checks configured dependencies with a bounded timeout and caches the resul
     cacheMilliseconds: 100,
     environment: {
       AUDIT_EVENTS_TABLE_NAME: 'audit-events',
-      MUKUROJI_WORK_ITEMS_TABLE: 'work-items',
+      WORK_ITEMS_TABLE_NAME: 'work-items',
       WORKSPACE_ACCESS_TABLE_NAME: 'workspace-access',
     },
     now: () => now,

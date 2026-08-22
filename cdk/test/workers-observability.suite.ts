@@ -353,7 +353,7 @@ test('analytics scheduled delivery reauthorizes source data without consuming th
         COGNITO_CLIENT_ID: { Ref: 'CognitoUserPoolClientId' },
         COGNITO_USER_POOL_ID: { Ref: 'CognitoUserPoolId' },
         MUKUROJI_PROJECT_DIRECTORY_TABLE: { Ref: projectDirectoryTableLogicalId },
-        MUKUROJI_WORK_ITEMS_TABLE: { Ref: workItemsTableLogicalId },
+        WORK_ITEMS_TABLE_NAME: { Ref: workItemsTableLogicalId },
         SYSTEM_ADMIN_GROUPS: { Ref: 'SystemAdminGroups' },
         TENANT_ADMINISTRATION_TABLE_NAME: { Ref: tenantAdministrationTableLogicalId },
         WORKSPACE_ACCESS_TABLE_NAME: { Ref: workspaceAccessTableLogicalId },
@@ -918,12 +918,6 @@ test('audit stream isolates downstream delivery and retention consumers', () => 
           Ref: 'TenantAdministrationTable621D59EB',
         },
         MUKUROJI_RUNTIME_ROLE: 'audit-projection',
-        MUKUROJI_WORK_ITEMS_TABLE: {
-          Ref: 'TeamIssuesTable189D851D',
-        },
-        TEAM_ISSUES_TABLE_NAME: {
-          Ref: 'TeamIssuesTable189D851D',
-        },
         WORK_ITEMS_TABLE_NAME: {
           Ref: 'TeamIssuesTable189D851D',
         },

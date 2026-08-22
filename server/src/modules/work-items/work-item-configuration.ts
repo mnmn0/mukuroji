@@ -563,8 +563,6 @@ export class DynamoDbWorkItemConfigurationClient implements WorkItemConfiguratio
       'mukuroji-work-item-configuration-local',
     workItemsTableName =
       process.env.WORK_ITEMS_TABLE_NAME ??
-      process.env.MUKUROJI_WORK_ITEMS_TABLE ??
-      process.env.TEAM_ISSUES_TABLE_NAME ??
       'mukuroji-team-issues-local',
     documentClient?: DynamoDBDocumentClient,
     dynamoDbClient = createConfiguredDynamoDbClient(),

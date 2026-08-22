@@ -202,7 +202,7 @@ bun server/scripts/backfills/backfill-audit-events.ts --dry-run --limit 100
 
 # checkpoint を使って本実行する
 AWS_ENDPOINT_URL=http://localhost:4566 \
-TEAM_ISSUES_TABLE_NAME=mukuroji-team-issues-local \
+WORK_ITEMS_TABLE_NAME=mukuroji-team-issues-local \
 PROJECT_DIRECTORY_TABLE_NAME=mukuroji-project-directory-local \
 WORKSPACE_ACCESS_TABLE_NAME=mukuroji-workspace-access-local \
 AUDIT_EVENTS_TABLE_NAME=mukuroji-audit-events \

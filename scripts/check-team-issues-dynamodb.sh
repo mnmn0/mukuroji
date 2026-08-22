@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ -z "${TEAM_ISSUES_TABLE_NAME:-}" ]]; then
-  echo "TEAM_ISSUES_TABLE_NAME is required. Use the CDK TeamIssuesTableName output." >&2
+if [[ -z "${WORK_ITEMS_TABLE_NAME:-}" ]]; then
+  echo "WORK_ITEMS_TABLE_NAME is required. Use the CDK TeamIssuesTableName output." >&2
   exit 2
 fi
 
@@ -37,7 +37,7 @@ common_args=(
 team_issue_count="$(
   aws dynamodb query \
     "${common_args[@]}" \
-    --table-name "$TEAM_ISSUES_TABLE_NAME" \
+    --table-name "$WORK_ITEMS_TABLE_NAME" \
     --index-name TeamIssueSortOrderIndex \
     --key-condition-expression "directoryTeamId = :directoryTeamId" \
     --expression-attribute-values "{\":directoryTeamId\":{\"S\":\"$DIRECTORY_TEAM_ID\"}}" \
@@ -49,7 +49,7 @@ team_issue_count="$(
 project_issue_count="$(
   aws dynamodb query \
     "${common_args[@]}" \
-    --table-name "$TEAM_ISSUES_TABLE_NAME" \
+    --table-name "$WORK_ITEMS_TABLE_NAME" \
     --index-name AssignedProjectIssueIndex \
     --key-condition-expression "directoryProjectId = :directoryProjectId" \
     --expression-attribute-values "{\":directoryProjectId\":{\"S\":\"$DIRECTORY_PROJECT_ID\"}}" \
@@ -98,4 +98,4 @@ if [[ -n "${ISSUE_ID:-}" ]]; then
   fi
 fi
 
-echo "DynamoDB team issue tables OK: team_table=$TEAM_ISSUES_TABLE_NAME events_table=$TEAM_ISSUE_EVENTS_TABLE_NAME team=$TEAM_ID team_issue_count=$team_issue_count project=$PROJECT_ID project_issue_count=$project_issue_count event_count=$event_count legacy_commented_event_count=$legacy_commented_event_count"
+echo "DynamoDB team issue tables OK: team_table=$WORK_ITEMS_TABLE_NAME events_table=$TEAM_ISSUE_EVENTS_TABLE_NAME team=$TEAM_ID team_issue_count=$team_issue_count project=$PROJECT_ID project_issue_count=$project_issue_count event_count=$event_count legacy_commented_event_count=$legacy_commented_event_count"

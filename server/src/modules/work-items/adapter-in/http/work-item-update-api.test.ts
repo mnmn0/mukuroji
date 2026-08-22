@@ -1199,7 +1199,6 @@ test('previews moving a due-date Work Item without mutating it', async () => {
     planningRevision: 0,
     conflicts: [],
     affectedProjects: [{ teamId: 'core-team', projectId: 'refero' }],
-    affectedProjectIds: ['refero'],
     affectedMilestoneIds: [],
     requiresConfirmation: false,
     warnings: [],

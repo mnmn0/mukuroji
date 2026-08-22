@@ -945,9 +945,7 @@ test('rejects curated context rows whose owner disagrees with the entity key', a
 
 test('prefers the canonical Work Items environment for parent mutation guards', async () => {
   const originalWorkItemsTableName = Bun.env.WORK_ITEMS_TABLE_NAME
-  const originalLegacyTeamIssuesTableName = Bun.env.MUKUROJI_TEAM_ISSUES_TABLE
   Bun.env.WORK_ITEMS_TABLE_NAME = 'canonical-work-items-table'
-  Bun.env.MUKUROJI_TEAM_ISSUES_TABLE = 'legacy-team-issues-table'
   const transactions: Array<Record<string, unknown>> = []
 
   try {
@@ -980,12 +978,6 @@ test('prefers the canonical Work Items environment for parent mutation guards', 
       delete Bun.env.WORK_ITEMS_TABLE_NAME
     } else {
       Bun.env.WORK_ITEMS_TABLE_NAME = originalWorkItemsTableName
-    }
-    if (originalLegacyTeamIssuesTableName === undefined) {
-      delete Bun.env.MUKUROJI_TEAM_ISSUES_TABLE
-    } else {
-      Bun.env.MUKUROJI_TEAM_ISSUES_TABLE =
-        originalLegacyTeamIssuesTableName
     }
   }
 })

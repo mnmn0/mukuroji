@@ -1217,7 +1217,7 @@ async function isRealtimeSessionAuthorized(
   }
 
   const workItemResult = await documentClient.send(new GetCommand({
-    TableName: requireEnv('TEAM_ISSUES_TABLE_NAME'),
+    TableName: requireEnv('WORK_ITEMS_TABLE_NAME'),
     Key: {
       directoryTeamId: `${session.workspaceId}#team#${session.teamId}`,
       issueId: session.issueId,

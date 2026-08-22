@@ -19,9 +19,7 @@ export function TaskSchedulePreviewMetadata({
   preview,
   t,
 }: TaskSchedulePreviewMetadataProps) {
-  const affectedProjectCount = preview.affectedProjects.length > 0
-    ? preview.affectedProjects.length
-    : preview.affectedProjectIds.length
+  const affectedProjectCount = preview.affectedProjects.length
 
   return (
     <div className="mt-4 grid gap-3" data-testid="task-schedule-preview-metadata">
@@ -62,18 +60,6 @@ export function TaskSchedulePreviewMetadata({
             <li className="workbench-badge" key={`${project.teamId}:${project.projectId}`}>
               {project.teamId} / {project.projectId}
             </li>
-          ))}
-        </ul>
-      ) : preview.affectedProjectIds.length > 0 ? (
-        <ul
-          aria-label={t('workItems.dependencies.affectedProjects').replace(
-            '{count}',
-            String(affectedProjectCount),
-          )}
-          className="flex flex-wrap gap-1 font-mono text-[11px] text-[#475467]"
-        >
-          {preview.affectedProjectIds.map((projectId) => (
-            <li className="workbench-badge" key={projectId}>{projectId}</li>
           ))}
         </ul>
       ) : null}

@@ -367,10 +367,7 @@ function resolveTableNames(
     workItems: resolveTableName(
       environment,
       [
-        'MUKUROJI_WORK_ITEMS_TABLE',
         'WORK_ITEMS_TABLE_NAME',
-        'MUKUROJI_TEAM_ISSUES_TABLE',
-        'TEAM_ISSUES_TABLE_NAME',
       ],
       'mukuroji-team-issues-local',
       allowLocalDefaults,

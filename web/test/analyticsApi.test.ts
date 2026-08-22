@@ -77,19 +77,10 @@ describe('Analytics API', () => {
     const requests = installFetchRecorder(() => ({
       snapshot: analyticsSnapshotFixture,
     }))
-    const fallback = {
-      ...analyticsFilterFixture,
-      assigneeUserIds: ['owner@example.com'],
-      projectIds: ['refero'],
-      statusCategories: ['started'],
-      teamIds: ['core-team'],
-    }
     const routeState = parseAnalyticsRouteState(
       new URLSearchParams(
         'v=1&from=2026-07-01T00%3A00%3A00.000Z&to=2026-07-31T23%3A59%3A59.999Z&timezone=UTC',
       ),
-      fallback,
-      'Asia/Tokyo',
     )
 
     await queryAnalytics(
@@ -147,8 +138,6 @@ describe('Analytics API', () => {
     })
     const routeState = parseAnalyticsRouteState(
       searchParams,
-      analyticsFilterFixture,
-      'Asia/Tokyo',
     )
 
     await queryAnalytics(

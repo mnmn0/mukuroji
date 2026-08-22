@@ -2831,9 +2831,6 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
       readEnvironment('COLLABORATION_TABLE_NAME') ??
       'mukuroji-collaboration-local',
     parentIssueTableName = readEnvironment('WORK_ITEMS_TABLE_NAME') ??
-      readEnvironment('MUKUROJI_WORK_ITEMS_TABLE') ??
-      readEnvironment('MUKUROJI_TEAM_ISSUES_TABLE') ??
-      readEnvironment('TEAM_ISSUES_TABLE_NAME') ??
       'mukuroji-team-issues-local',
     auditTableName = getConfiguredAuditTableName(),
     documentClient?: DynamoDBDocumentClient,

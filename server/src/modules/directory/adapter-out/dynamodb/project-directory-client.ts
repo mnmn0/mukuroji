@@ -831,10 +831,7 @@ export class DynamoDbProjectDirectoryClient {
       'mukuroji-workspace-access-local',
     planningTableName = getEnv('PLANNING_TABLE_NAME') ?? 'mukuroji-planning-local',
     workItemsTableName =
-      getEnv('MUKUROJI_WORK_ITEMS_TABLE') ??
       getEnv('WORK_ITEMS_TABLE_NAME') ??
-      getEnv('MUKUROJI_TEAM_ISSUES_TABLE') ??
-      getEnv('TEAM_ISSUES_TABLE_NAME') ??
       'mukuroji-team-issues-local',
   ) {
     this.tableName = tableName

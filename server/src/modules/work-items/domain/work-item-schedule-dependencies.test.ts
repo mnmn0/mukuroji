@@ -190,7 +190,6 @@ describe('Work Item schedule dependency preview', () => {
         { teamId: 'team-a', projectId: 'team-a-project' },
         { teamId: 'team-b', projectId: 'team-b-project' },
       ],
-      affectedProjectIds: ['team-a-project', 'team-b-project'],
       affectedMilestoneIds: ['team-a-milestone', 'team-b-milestone'],
       requiresConfirmation: true,
       warnings: [

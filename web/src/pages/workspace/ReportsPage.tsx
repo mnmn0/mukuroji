@@ -14,7 +14,7 @@ import {
   useRef,
   useState,
 } from 'react'
-import { useNavigate, useSearchParams } from 'react-router'
+import { Navigate, useNavigate, useSearchParams } from 'react-router'
 import {
   createMutationRequestRunner,
   type MutationRequestContext,
@@ -136,7 +136,15 @@ export function ReportsPage() {
   } = useAnalyticsReports(accessToken, Boolean(user && !currentUserError))
   const reports = reportResponse?.reports ?? emptyReports
   const searchParamString = searchParams.toString()
-  const requestedReportId = searchParams.get('report')?.trim() || undefined
+  const parsedRouteState = useMemo<AnalyticsRouteState | null | undefined>(() => {
+    if (searchParamString.length === 0) return undefined
+    try {
+      return parseAnalyticsRouteState(new URLSearchParams(searchParamString))
+    } catch {
+      return null
+    }
+  }, [searchParamString])
+  const requestedReportId = parsedRouteState?.reportId
   const selectedReport = reports.find((report) => report.id === requestedReportId)
   const widgetSourceKey = selectedReport
     ? `report:${selectedReport.id}:${selectedReport.revision}`
@@ -147,19 +155,22 @@ export function ReportsPage() {
       : selectedReport?.widgets ?? [],
     [selectedReport?.widgets, widgetDraft, widgetSourceKey],
   )
-  const routeState = useMemo(
-    () => parseAnalyticsRouteState(
-      new URLSearchParams(searchParamString),
-      selectedReport?.filter ?? initialFilter,
-      selectedReport?.timeZone ?? initialTimeZone,
-      selectedReport?.forecastBaseline,
-    ),
+  const routeState = useMemo<AnalyticsRouteState>(
+    () => parsedRouteState ?? {
+      builder: false,
+      filter: selectedReport?.filter ?? initialFilter,
+      forecastBaseline: selectedReport?.forecastBaseline,
+      reportId: selectedReport?.id,
+      snapshotId: undefined,
+      timezone: selectedReport?.timeZone ?? initialTimeZone,
+    },
     [
       initialFilter,
       initialTimeZone,
-      searchParamString,
+      parsedRouteState,
       selectedReport?.filter,
       selectedReport?.forecastBaseline,
+      selectedReport?.id,
       selectedReport?.timeZone,
     ],
   )
@@ -311,6 +322,7 @@ export function ReportsPage() {
 
   useEffect(() => {
     if (
+      parsedRouteState === null ||
       requestedReportId ||
       reports.length === 0 ||
       isReportsLoading ||
@@ -334,8 +346,38 @@ export function ReportsPage() {
     commitRouteState,
     hasStartedAdHoc,
     isReportsLoading,
+    parsedRouteState,
     reports,
     requestedReportId,
+  ])
+
+  useEffect(() => {
+    if (
+      searchParamString ||
+      isReportsLoading ||
+      reports.length > 0 ||
+      hasStartedAdHoc
+    ) {
+      return
+    }
+
+    commitRouteState({
+      asOf: undefined,
+      builder: false,
+      filter: initialFilter,
+      forecastBaseline: undefined,
+      reportId: undefined,
+      snapshotId: undefined,
+      timezone: initialTimeZone,
+    })
+  }, [
+    commitRouteState,
+    hasStartedAdHoc,
+    initialFilter,
+    initialTimeZone,
+    isReportsLoading,
+    reports.length,
+    searchParamString,
   ])
 
   const resetFeedback = () => {
@@ -663,6 +705,10 @@ export function ReportsPage() {
     } catch (error) {
       setMutationErrorMessage(resolveAnalyticsErrorMessage(error, t, 'export'))
     }
+  }
+
+  if (parsedRouteState === null) {
+    return <Navigate replace to="/reports" />
   }
 
   return (

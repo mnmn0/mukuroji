@@ -401,7 +401,6 @@ test('derives deadline projections and builds a self-only preview', () => {
     }],
     conflicts: [],
     affectedProjects: [],
-    affectedProjectIds: [],
     affectedMilestoneIds: [],
     requiresConfirmation: false,
     warnings: [],

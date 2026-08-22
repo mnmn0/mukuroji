@@ -62,7 +62,6 @@ function createPreview(): WorkItemScheduleChangePreview {
   const after = createDefaultDueDateTaskSchedule('2026-06-05')
   return {
     affectedMilestoneIds: [],
-    affectedProjectIds: ['refero'],
     affectedProjects: [{ projectId: 'refero', teamId: 'core-team' }],
     conflicts: [],
     evaluatedRevisions: [createTarget()],

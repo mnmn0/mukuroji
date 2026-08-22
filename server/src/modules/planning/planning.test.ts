@@ -777,7 +777,6 @@ describe('planning domain', () => {
         { teamId: 'team-a', projectId: 'shared-project' },
         { teamId: 'team-b', projectId: 'shared-project' },
       ],
-      affectedProjectIds: ['shared-project'],
       affectedMilestoneIds: [],
     })
 
@@ -801,7 +800,6 @@ describe('planning domain', () => {
       conflicts: [],
       unresolvedBlockerCount: 0,
       affectedProjects: [],
-      affectedProjectIds: [],
       affectedMilestoneIds: [],
     })
 

@@ -110,7 +110,7 @@ export function buildScheduleWorkers(
         COGNITO_CLIENT_ID: cognitoUserPoolClientId.valueAsString,
         COGNITO_USER_POOL_ID: cognitoUserPoolId.valueAsString,
         MUKUROJI_PROJECT_DIRECTORY_TABLE: projectDirectoryTable.tableName,
-        MUKUROJI_WORK_ITEMS_TABLE: workItemsTable.tableName,
+        WORK_ITEMS_TABLE_NAME: workItemsTable.tableName,
         SYSTEM_ADMIN_GROUPS: systemAdminGroups.valueAsString,
         TENANT_ADMINISTRATION_TABLE_NAME: tenantAdministrationTable.tableName,
         WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,

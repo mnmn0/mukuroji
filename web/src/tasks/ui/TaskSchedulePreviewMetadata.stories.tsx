@@ -10,7 +10,6 @@ const afterSchedule = createPreviewSchedule('2026-06-05')
 
 const basePreview = {
   affectedMilestoneIds: ['milestone-beta'],
-  affectedProjectIds: ['refero', 'brand-refresh'],
   affectedProjects: [
     { projectId: 'refero', teamId: 'core-team' },
     { projectId: 'brand-refresh', teamId: 'design-team' },

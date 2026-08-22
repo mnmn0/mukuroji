@@ -29,7 +29,7 @@ import {
 } from '../../issues/fixtures'
 import { projectDirectoryFixtures } from '../../projects/fixtures'
 import type { ProjectMember, ProjectUser } from '../../projects/api'
-import type { ProjectTask } from '../api/tasks'
+import type { CanonicalWorkItem } from '../api/tasks'
 import { referoTaskFixtures } from '../fixtures'
 import { fileArtifactsControllerFixture } from '../../files/fixtures'
 import type { FileArtifactsController } from '../../files/mutations/useFileArtifacts'
@@ -167,26 +167,25 @@ const onProjectQuickAccessToggle = fn()
 const onRetryPlanning = fn()
 const onContextMenuSelectedIssueChange = fn()
 const onReadOnlySelectedIssueChange = fn()
-const onDirectPatchMutation = fn(async (task: ProjectTask, input: UpdateTeamIssueInput) => {
+const onDirectPatchMutation = fn(async (task: CanonicalWorkItem, input: UpdateTeamIssueInput) => {
   void input
   return createStoryUpdatedTask(task)
 })
-const onDeniedDirectPatchMutation = fn(async (task: ProjectTask, input: UpdateTeamIssueInput) => {
+const onDeniedDirectPatchMutation = fn(async (task: CanonicalWorkItem, input: UpdateTeamIssueInput) => {
   void input
   return createStoryUpdatedTask(task)
 })
-const onTimelinePreview = fn(async (task: ProjectTask) => createTimelinePreview(task))
-const onTimelineConfirm = fn(async (task: ProjectTask) => createStoryUpdatedTask(task))
-const onCancelledTimelinePreview = fn(async (task: ProjectTask) => createTimelinePreview(task))
-const onCancelledTimelineConfirm = fn(async (task: ProjectTask) => createStoryUpdatedTask(task))
-const onDeniedTimelinePreview = fn(async (task: ProjectTask) => createTimelinePreview(task))
-const onDeniedTimelineConfirm = fn(async (task: ProjectTask) => createStoryUpdatedTask(task))
+const onTimelinePreview = fn(async (task: CanonicalWorkItem) => createTimelinePreview(task))
+const onTimelineConfirm = fn(async (task: CanonicalWorkItem) => createStoryUpdatedTask(task))
+const onCancelledTimelinePreview = fn(async (task: CanonicalWorkItem) => createTimelinePreview(task))
+const onCancelledTimelineConfirm = fn(async (task: CanonicalWorkItem) => createStoryUpdatedTask(task))
+const onDeniedTimelinePreview = fn(async (task: CanonicalWorkItem) => createTimelinePreview(task))
+const onDeniedTimelineConfirm = fn(async (task: CanonicalWorkItem) => createStoryUpdatedTask(task))
 
 /** Returns the direct-impact preview used by Project timeline interaction stories. */
-function createTimelinePreview(task: ProjectTask): WorkItemScheduleChangePreview {
+function createTimelinePreview(task: CanonicalWorkItem): WorkItemScheduleChangePreview {
   return {
     affectedMilestoneIds: [],
-    affectedProjectIds: ['refero'],
     affectedProjects: [{ projectId: 'refero', teamId: task.teamId }],
     conflicts: [],
     evaluatedRevisions: [{
@@ -212,7 +211,7 @@ function createTimelinePreview(task: ProjectTask): WorkItemScheduleChangePreview
 }
 
 /** Returns an updated immutable task snapshot for direct mutation stories. */
-function createStoryUpdatedTask(task: ProjectTask): ProjectTask {
+function createStoryUpdatedTask(task: CanonicalWorkItem): CanonicalWorkItem {
   return {
     ...task,
     revision: task.revision + 1,
@@ -240,7 +239,7 @@ function LateTimelinePreviewHarness({ remountOnTabSwitch }: LateTimelinePreviewH
   const resolvePreviewRef = useRef<((preview: WorkItemScheduleChangePreview) => void) | undefined>(undefined)
 
   /** Starts a deliberately unresolved preview until the story asks it to settle. */
-  const onPreviewScheduleChange = (task: ProjectTask, operation: WorkItemScheduleOperation) => {
+  const onPreviewScheduleChange = (task: CanonicalWorkItem, operation: WorkItemScheduleOperation) => {
     void task
     void operation
     setPreviewCallCount((count) => count + 1)

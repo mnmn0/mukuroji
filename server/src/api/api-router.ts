@@ -1038,8 +1038,6 @@ const TEAM_ISSUE_DETAIL_COMMENT_READ_MAX_PAGES = 50
 const TEAM_ISSUE_DETAIL_COMMENT_MAX_BYTES = 4_000_000
 /** One task-view request may strongly inspect at most one full 20-Team relation filter. */
 const TASK_VIEW_RELATION_TARGET_READ_LIMIT = WORK_ITEMS_TEAM_READ_LIMIT * 100
-/** One task-view request may resolve at most one full legacy relation filter through Search. */
-const TASK_VIEW_LEGACY_RELATION_SEARCH_LIMIT = 100
 
 
 
@@ -23362,12 +23360,6 @@ async function createTaskViewAccessScope(
     string,
     Promise<TeamIssueDetailResponse | undefined>
   >()
-  const relationSearchCache = new Map<string, Promise<boolean>>()
-  const relationSearchScopeCache = new Map<
-    string,
-    Promise<TeamIssueDetailResponse | undefined>
-  >()
-  const relationDocumentSearchReadContext = createDocumentSearchAccessReadContext()
   let planningAuthorizationStatePromise:
     ReturnType<typeof workItemDependencies.planning.getAuthorizationState> | undefined
 
@@ -23395,9 +23387,6 @@ async function createTaskViewAccessScope(
       context,
       input,
       relationTargetReadCache,
-      relationSearchCache,
-      relationSearchScopeCache,
-      relationDocumentSearchReadContext,
       () => {
         planningAuthorizationStatePromise ??=
           workItemDependencies.planning.getAuthorizationState(principal.directoryId)
@@ -23424,9 +23413,6 @@ const taskViewWorkItemRelationPrefixes: ReadonlySet<string> = new Set([
  * @param context - Current directory and search authorization snapshot.
  * @param input - Candidate references and the task-view context that qualifies local IDs.
  * @param targetReadCache - Request-local strongly consistent Work Item target cache.
- * @param searchCache - Request-local legacy reference search cache.
- * @param searchScopeCache - Request-local Work Item scope cache used by current-source search.
- * @param documentSearchReadContext - Compact Document ACL read context shared by fallback searches.
  * @param readPlanningAuthorizationState - Lazy current Planning authorization-state reader.
  * @returns Relation IDs that may be disclosed without changing valid empty-result filters.
  */
@@ -23435,9 +23421,6 @@ async function resolveReadableTaskViewRelationIds(
   context: WorkspaceSearchContext,
   input: ResolveTaskViewRelationIdsInput,
   targetReadCache: Map<string, Promise<TeamIssueDetailResponse | undefined>>,
-  searchCache: Map<string, Promise<boolean>>,
-  searchScopeCache: Map<string, Promise<TeamIssueDetailResponse | undefined>>,
-  documentSearchReadContext: ReturnType<typeof createDocumentSearchAccessReadContext>,
   readPlanningAuthorizationState: () => ReturnType<
     typeof workItemDependencies.planning.getAuthorizationState
   >,
@@ -23523,18 +23506,6 @@ async function resolveReadableTaskViewRelationIds(
       continue
     }
 
-    checks.push(async () => {
-      if (await searchCurrentReadableTaskViewRelationId(
-        principal.directoryId,
-        relationId,
-        context,
-        searchCache,
-        searchScopeCache,
-        documentSearchReadContext,
-      )) {
-        readableIds.add(relationId)
-      }
-    })
   }
 
   for (
@@ -23723,52 +23694,6 @@ function canReadTaskViewGoalRelationTarget(
     ) || Boolean(principal.enterpriseAuthorizedTeamIds?.includes(projectTeam.id))
   }
   return Boolean(target.teamId && context.taskViewAccess.teamIds.has(target.teamId))
-}
-
-/**
- * Uses current-source Workspace Search only for legacy relation IDs without an authoritative prefix.
- *
- * @param workspaceId - Current Workspace partition.
- * @param relationId - Unknown legacy relation identifier.
- * @param context - Current search and source authorization context.
- * @param cache - Request-local candidate search result cache.
- * @param scopeCache - Request-local Work Item source cache.
- * @param documentSearchReadContext - Compact Document ACL read context.
- * @returns Whether one current accessible source still contains the legacy relation ID.
- */
-async function searchCurrentReadableTaskViewRelationId(
-  workspaceId: string,
-  relationId: string,
-  context: WorkspaceSearchContext,
-  cache: Map<string, Promise<boolean>>,
-  scopeCache: Map<string, Promise<TeamIssueDetailResponse | undefined>>,
-  documentSearchReadContext: ReturnType<typeof createDocumentSearchAccessReadContext>,
-): Promise<boolean> {
-  let pending = cache.get(relationId)
-  if (!pending) {
-    if (cache.size >= TASK_VIEW_LEGACY_RELATION_SEARCH_LIMIT) {
-      throw new WorkspaceSearchError(
-        413,
-        'TaskViewRelationResolutionLimitExceeded',
-        'Task view relation resolution exceeds the legacy search limit.',
-      )
-    }
-    pending = workItemDependencies.workspaceSearch.search({
-      workspaceId,
-      filters: { relationIds: [relationId] },
-      limit: 1,
-      access: context.searchAccess,
-      resolveCurrentScope: (document) => resolveCurrentWorkspaceSearchScope(
-        workspaceId,
-        document,
-        context,
-        scopeCache,
-        documentSearchReadContext,
-      ),
-    }).then((response) => response.results.length > 0)
-    cache.set(relationId, pending)
-  }
-  return pending
 }
 
 async function resolveCurrentWorkspaceSearchScope(
@@ -29196,8 +29121,7 @@ async function requireActiveWorkspaceAssignee(
 
 /** Returns the configured canonical Work Item table used by transaction fences. */
 function getTeamIssuesTableName(): string {
-  return getEnv('MUKUROJI_TEAM_ISSUES_TABLE') ??
-    getEnv('TEAM_ISSUES_TABLE_NAME') ??
+  return getEnv('WORK_ITEMS_TABLE_NAME') ??
     'mukuroji-team-issues-local'
 }
 

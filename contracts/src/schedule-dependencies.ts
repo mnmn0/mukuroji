@@ -85,12 +85,6 @@ export type PlanningWorkItemDependencySummary = {
   unresolvedBlockerCount: number
   /** Team-qualified Projects reached by at least one visible dependency endpoint. */
   affectedProjects: WorkItemAffectedProject[]
-  /**
-   * Legacy unqualified Project identifiers retained during the Planning v2 rollout.
-   *
-   * Consumers that navigate to a Project must use {@link affectedProjects}.
-   */
-  affectedProjectIds: string[]
   /** Milestones linked to at least one visible dependency endpoint. */
   affectedMilestoneIds: string[]
 }

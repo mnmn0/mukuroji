@@ -194,10 +194,7 @@ export function createWorkItemConfigurationClient(): WorkItemConfigurationClient
   const config = loadServerConfig()
   const dynamoDbClient = createDynamoDbClient()
   const workItemTableName =
-    config.environment.MUKUROJI_WORK_ITEMS_TABLE ??
     config.environment.WORK_ITEMS_TABLE_NAME ??
-    config.environment.MUKUROJI_TEAM_ISSUES_TABLE ??
-    config.environment.TEAM_ISSUES_TABLE_NAME ??
     'mukuroji-team-issues-local'
 
   return new DynamoDbWorkItemConfigurationClient(
@@ -250,10 +247,7 @@ export function createPlanningClient(): DynamoDbPlanningClient {
   const config = loadServerConfig()
   const dynamoDbClient = createDynamoDbClient()
   const workItemTableName =
-    config.environment.MUKUROJI_WORK_ITEMS_TABLE ??
     config.environment.WORK_ITEMS_TABLE_NAME ??
-    config.environment.MUKUROJI_TEAM_ISSUES_TABLE ??
-    config.environment.TEAM_ISSUES_TABLE_NAME ??
     'mukuroji-team-issues-local'
 
   return new DynamoDbPlanningClient(
@@ -590,8 +584,7 @@ function createTriageClient(
         })
       }
       const environment = loadServerConfig().environment
-      const workItemTableName = environment.MUKUROJI_TEAM_ISSUES_TABLE ??
-        environment.TEAM_ISSUES_TABLE_NAME ??
+      const workItemTableName = environment.WORK_ITEMS_TABLE_NAME ??
         'mukuroji-team-issues-local'
       return {
         canonicalWorkItem: {

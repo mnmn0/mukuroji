@@ -81,7 +81,7 @@ Planning entity の critical path は dependency に参加する archive され�
 
 Work Item の意味上の relation と日程を動かす dependency は別の正本を持つ。`parent` / `child`、`duplicate`、`related`、`blocks` / `blockedBy` は WorkItemConfigurationTable の Team-scoped Relation Graph が所有し、意味 relation だけでは schedule を変更しない。日程 dependency は PlanningTable が Workspace scope で所有し、両端を `{teamId, workItemId}` で識別するため、権限のある Team / Project をまたいで作成できる。
 
-Planning snapshot は参照可能な両 endpoint が揃う edge だけを返し、同じ `workItemDependencies` と派生 summary を Table、Board、詳細 pane、Gantt、management surface が利用する。派生 summary には Work Item critical path、constraint conflict、未解決 blocker 件数、影響する Project / Milestone を含める。影響Projectの正規表現は Team-qualified な `affectedProjects: {teamId, projectId}[]` とし、移行期間だけ unqualified な `affectedProjectIds` も返す。片側だけを参照できる user へ相手 endpoint、edge、件数を漏らさない。
+Planning snapshot は参照可能な両 endpoint が揃う edge だけを返し、同じ `workItemDependencies` と派生 summary を Table、Board、詳細 pane、Gantt、management surface が利用する。派生 summary には Work Item critical path、constraint conflict、未解決 blocker 件数、影響する Project / Milestone を含める。影響 Project は Team-qualified な `affectedProjects: {teamId, projectId}[]` だけを返し、片側だけを参照できる user へ相手 endpoint、edge、件数を漏らさない。
 
 Dependency の作成・更新・削除は両 endpoint の manager 権限と Planning global revision を検証する。Qualified endpoint の self edge、同じ向きの重複 edge、transitive cycle、不正な lead / lag、実在しない Work Item、矛盾する constraint は commit 前に stable error code で拒否する。Work Item を削除する場合は先に incoming / outgoing dependency を解除し、dangling edge を残さない。
 

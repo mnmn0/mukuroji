@@ -1375,10 +1375,7 @@ export class DynamoDbTeamIssuesClient {
   private readonly planningTableName?: string
   constructor(
     issueTableName =
-      getEnv('MUKUROJI_WORK_ITEMS_TABLE') ??
       getEnv('WORK_ITEMS_TABLE_NAME') ??
-      getEnv('MUKUROJI_TEAM_ISSUES_TABLE') ??
-      getEnv('TEAM_ISSUES_TABLE_NAME') ??
       'mukuroji-team-issues-local',
     eventTableName =
       getEnv('MUKUROJI_TEAM_ISSUE_EVENTS_TABLE') ??

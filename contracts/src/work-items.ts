@@ -267,12 +267,6 @@ export type WorkItemScheduleChangePreview = {
   conflicts: WorkItemScheduleDependencyConflict[]
   /** Team-qualified Projects reached by the direct or propagated impacts. */
   affectedProjects: WorkItemAffectedProject[]
-  /**
-   * Legacy unqualified Project identifiers retained during the Planning v2 rollout.
-   *
-   * Consumers that navigate to a Project must use {@link affectedProjects}.
-   */
-  affectedProjectIds: string[]
   /** Milestones reached through Planning Work Item links. */
   affectedMilestoneIds: string[]
   /** Whether applying this preview requires an explicit confirmation request. */

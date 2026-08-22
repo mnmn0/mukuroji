@@ -1681,7 +1681,6 @@ test('task view relation resolution strongly authorizes targets with bounded req
     releaseParallelReads = resolve
   })
   const directReadCount = new Map<string, number>()
-  const legacySearchIds: string[] = []
   const resolutionResults: string[][] = []
   setTestAppDependencies({
     teamIssues: {
@@ -1723,22 +1722,6 @@ test('task view relation resolution strongly authorizes targets with bounded req
       },
     },
     workspaceSearch: createTaskViewWorkspaceSearchFake({
-      async search(input) {
-        const relationId = input.filters?.relationIds?.[0]
-        if (relationId) legacySearchIds.push(relationId)
-        return {
-          schemaVersion: 1,
-          results: relationId === 'legacy-visible'
-            ? [{
-                id: 'legacy-source',
-                entityType: 'work-item',
-                title: 'Legacy source',
-                url: '/teams/core-team/issues?issueId=legacy-source',
-                highlights: [],
-              }]
-            : [],
-        }
-      },
       async createTaskView(input) {
         const resolver = input.access.resolveReadableRelationIds
         if (!resolver) throw new Error('Expected a current-source relation resolver.')
@@ -1816,17 +1799,16 @@ test('task view relation resolution strongly authorizes targets with bounded req
   expect(maximumActiveTargetReads).toBe(8)
   expect(directReadCount.get('core-team\0valid-target')).toBe(1)
   expect(directReadCount.get('other-team\0other-only-target')).toBeUndefined()
-  expect(legacySearchIds).toEqual(['legacy-visible', 'legacy-hidden'])
   expect(resolutionResults).toHaveLength(2)
   expect(resolutionResults[0]).toEqual(resolutionResults[1])
   expect(resolutionResults[0]).toContain('blocks:valid-target')
   expect(resolutionResults[0]).toContain('related:valid-target')
   expect(resolutionResults[0]).toContain('work-item:team/core-team/issue/valid-target')
   expect(resolutionResults[0]).toContain('project:refero')
-  expect(resolutionResults[0]).toContain('legacy-visible')
   expect(resolutionResults[0]).not.toContain('blocks:deleted-target')
   expect(resolutionResults[0]).not.toContain('blocks:private-target')
   expect(resolutionResults[0]).not.toContain('blocks:other-only-target')
+  expect(resolutionResults[0]).not.toContain('legacy-visible')
   expect(resolutionResults[0]).not.toContain('legacy-hidden')
   expect(observedCalls.issueDetails).toHaveLength(11)
 })
