@@ -98,7 +98,7 @@ import {
 import {
   createTeamIssuesPath,
 } from '../../shared/routing/paths'
-import type { TaskPriority } from '../../tasks/api'
+import type { WorkItemPriority } from '../../tasks/api'
 import {
   createDefaultDueDateTaskSchedule,
   createDefaultUnscheduledTaskSchedule,
@@ -152,7 +152,6 @@ import {
   readSelectedRelationGraphRevision,
   refreshRelationDetailAfterConflict,
   resolveCreateWorkflowStatuses,
-  resolveDisplayWorkflowStatuses,
   resolveEditableWorkflowStatuses,
   resolveWorkItemAssignee,
   resolveWorkItemPersonOptions,
@@ -244,7 +243,7 @@ import {
 } from '../../task-views/ui/taskViewToolbarAdapter'
 import { WorkItemAssigneeAvatar } from '../../work-items/ui/WorkItemAssigneeAvatar'
 
-const issuePriorities = ['high', 'medium', 'low'] as const satisfies readonly TaskPriority[]
+const issuePriorities = ['high', 'medium', 'low'] as const satisfies readonly WorkItemPriority[]
 const emptyTeams: ProjectDirectoryTeam[] = []
 const emptyIssues: TeamIssue[] = []
 const emptyMembers: ProjectMember[] = []
@@ -1264,7 +1263,7 @@ export function TeamIssueScreen({
 
   const configuration = resolvedConfiguration?.configuration
   const workflowStatuses = useMemo(
-    () => resolveDisplayWorkflowStatuses(configuration),
+    () => resolveCreateWorkflowStatuses(configuration),
     [configuration],
   )
   const effectiveStatusFilter = statusFilter === 'all' ||
@@ -4025,9 +4024,9 @@ function resolveAssignedProjectName(
   return team?.projects.find((project) => project.id === issue.assignedProjectId)?.name ?? issue.assignedProjectId
 }
 
-function resolveIssuePriority(value: FormDataEntryValue | null): TaskPriority {
-  return typeof value === 'string' && issuePriorities.includes(value as TaskPriority)
-    ? value as TaskPriority
+function resolveIssuePriority(value: FormDataEntryValue | null): WorkItemPriority {
+  return typeof value === 'string' && issuePriorities.includes(value as WorkItemPriority)
+    ? value as WorkItemPriority
     : 'medium'
 }
 
@@ -4103,8 +4102,8 @@ function IssueCustomFieldSummary({
   )
 }
 
-function IssuePriorityBadge({ priority, t }: { priority: TaskPriority; t: (key: MessageKey) => string }) {
-  const classes: Record<TaskPriority, string> = {
+function IssuePriorityBadge({ priority, t }: { priority: WorkItemPriority; t: (key: MessageKey) => string }) {
+  const classes: Record<WorkItemPriority, string> = {
     high: 'workbench-badge-danger',
     low: 'workbench-badge-success',
     medium: 'workbench-badge-warning',

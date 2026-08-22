@@ -6,7 +6,7 @@ import type { ProjectDirectoryProject } from '../../projects/api'
 import { useWorkspaceProjectMembers } from '../../projects/queries/useProjectMembers'
 import { TeamMembersView } from '../../projects/ui/TeamMembersView'
 import { createTranslator } from '../../shared/i18n/i18n'
-import type { ProjectTask } from '../../tasks/api'
+import type { CanonicalWorkItem } from '../../tasks/api'
 import { getUniqueWorkspaceProjectIds } from '../../work-items/model/workspaceWorkItems'
 import { WorkspaceTaskLoadNotice } from '../../workspace/ui/WorkspaceDataNotices'
 import { WorkspaceRouteContent } from '../../workspace/ui/WorkspaceRoute'
@@ -20,7 +20,7 @@ import {
 import { TeamWorkloadView } from '../../workload/ui/TeamWorkloadView'
 
 const emptyTeamProjects: ProjectDirectoryProject[] = []
-const emptyWorkspaceTasks: ProjectTask[] = []
+const emptyWorkspaceTasks: CanonicalWorkItem[] = []
 
 /**
  * Renders the URL-specific Team member directory route.

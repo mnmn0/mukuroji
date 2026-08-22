@@ -4,7 +4,7 @@ import type {
   WorkItemScheduleChangePreview,
   WorkItemScheduleOperation,
 } from '@mukuroji/contracts'
-import type { ProjectTask } from '../api/tasks'
+import type { CanonicalWorkItem } from '../api/tasks'
 import { TeamIssuesApiError } from '../../issues/api'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import { useModalFocus } from '../../shared/ui/useModalFocus'
@@ -45,7 +45,7 @@ type CalendarTaskCreateContext = TaskCreateContext & {
 /** One task paired with its resolved canonical schedule. */
 type CalendarTaskEntry = {
   /** Task placed on the calendar. */
-  task: ProjectTask
+  task: CanonicalWorkItem
   /** Canonical schedule rendered for the task. */
   schedule: WorkItemSchedule
 }
@@ -69,7 +69,7 @@ type CanonicalCalendarModel = {
 /** A Calendar preview waiting for confirmation. */
 type PendingCalendarScheduleChange = {
   /** Task whose operation created the preview. */
-  task: ProjectTask
+  task: CanonicalWorkItem
   /** Exact canonical invocation controlling preview confirmation and cancellation. */
   controller: ProjectTaskDirectScheduleController
 }
@@ -79,16 +79,16 @@ export type TaskCalendarViewProps = {
   /** Project receiving contextual Calendar creates. */
   projectId?: string
   /** Filtered and sorted tasks displayed by canonical primary date. */
-  tasks: ProjectTask[]
+  tasks: CanonicalWorkItem[]
   /** Translator used for calendar labels. */
   t: TaskCalendarTranslator
   /** Opens the create panel with a date or date-range context. */
   onCreateTaskOpen?: (context?: CalendarTaskCreateContext) => void
   /** Selects a task in the shared detail pane. */
-  onSelectTask?: (task: ProjectTask) => void
+  onSelectTask?: (task: CanonicalWorkItem) => void
   /** Starts a canonical Schedule action and returns its exact preview controller. */
   onRequestScheduleChange?: (
-    task: ProjectTask,
+    task: CanonicalWorkItem,
     operation: WorkItemScheduleOperation,
   ) => ProjectTaskDirectScheduleHandle
 }
@@ -163,7 +163,7 @@ export function TaskCalendarView({
 
   /** Requests the server-owned before/after schedule preview. */
   const previewScheduleChange = async (
-    task: ProjectTask,
+    task: CanonicalWorkItem,
     operation: WorkItemScheduleOperation,
   ) => {
     if (!onRequestScheduleChange) {
@@ -504,7 +504,7 @@ type CalendarTaskCardProps = {
   /** Requests a keyboard move to a new primary date. */
   onMove: (date: string) => void
   /** Selects the task in the shared detail pane. */
-  onSelectTask?: (task: ProjectTask) => void
+  onSelectTask?: (task: CanonicalWorkItem) => void
   /** Moves a scheduled task to the explicit unscheduled state. */
   onUnschedule?: () => void
   /** Translator used by schedule labels. */
@@ -692,7 +692,7 @@ function CalendarSchedulePreview({
  * @param tasks - Work Items displayed by Calendar.
  * @returns A deterministic date grid and explicit unscheduled entries.
  */
-function createCanonicalCalendarModel(tasks: readonly ProjectTask[]): CanonicalCalendarModel {
+function createCanonicalCalendarModel(tasks: readonly CanonicalWorkItem[]): CanonicalCalendarModel {
   const entries = tasks.map((task) => ({ schedule: resolveTaskSchedule(task), task }))
   const scheduledEntries = entries.filter(hasCalendarPrimaryDate)
   const today = new Date().toISOString().slice(0, 10)
@@ -855,7 +855,7 @@ function describeCalendarSchedule(
  */
 function findCalendarDirectPreviewSchedule(
   preview: WorkItemScheduleChangePreview,
-  task: ProjectTask,
+  task: CanonicalWorkItem,
 ): WorkItemSchedule | undefined {
   return preview.impacts.find((impact) =>
     impact.kind === 'direct' &&

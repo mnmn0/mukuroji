@@ -4,7 +4,7 @@ import type {
   WorkItemPatch,
 } from '@mukuroji/contracts'
 import { Fragment, useState, type DragEvent } from 'react'
-import type { ProjectTask } from '../api/tasks'
+import type { CanonicalWorkItem } from '../api/tasks'
 import type { ProjectMember } from '../../projects/api'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import { MoreHorizontalIcon } from '../../shared/ui/icons'
@@ -67,7 +67,7 @@ export type TaskBoardViewProps = {
   /** Team identifiers whose configurations could not be loaded. */
   configurationFailedTeamIds: string[]
   /** Checks exact Team-qualified Project write scope for one concrete Work Item. */
-  canMutateTask?: (task: ProjectTask) => boolean
+  canMutateTask?: (task: CanonicalWorkItem) => boolean
   /** Team-scoped resolved configurations used by columns and cards. */
   configurationsByTeam: Record<string, ResolvedWorkItemConfiguration>
   /** Locale used to format custom-field values. */
@@ -87,17 +87,17 @@ export type TaskBoardViewProps = {
   /** Team-scoped workflow columns displayed by the board. */
   statusColumns: ProjectTaskStatusColumn[]
   /** Filtered tasks displayed by the board. */
-  tasks: ProjectTask[]
+  tasks: CanonicalWorkItem[]
   /** Translator used for board labels. */
   t: TaskBoardTranslator
   /** Selects a task for the detail pane. */
-  onSelectTask: (task: ProjectTask) => void
+  onSelectTask: (task: CanonicalWorkItem) => void
   /** Opens the canonical action menu for one rendered card. */
   onTaskActionMenuOpen?: ProjectTaskActionMenuOpenHandler
   /** Opens the create panel with Board-column context. */
   onCreateTaskOpen?: (context?: TaskCreateContext) => void
   /** Updates or moves a task through the shared Work Item action. */
-  onUpdateTask?: (task: ProjectTask, input: WorkItemPatch) => Promise<ProjectTask>
+  onUpdateTask?: (task: CanonicalWorkItem, input: WorkItemPatch) => Promise<CanonicalWorkItem>
 }
 
 /**
@@ -154,11 +154,11 @@ export function TaskBoardView({
   const showAssigneeAvatars = presentation?.display.showAssigneeAvatars ?? false
   const showEmptyGroups = presentation?.display.showEmptyGroups ?? true
   /** Returns whether one card may expose inline Work Item mutation controls. */
-  const canEditTask = (task: ProjectTask) => Boolean(
+  const canEditTask = (task: CanonicalWorkItem) => Boolean(
     onUpdateTask && (canMutateTask?.(task) ?? true),
   )
   /** Sends one card edit only when its exact Work Item scope is writable. */
-  const updateTask = async (task: ProjectTask, input: WorkItemPatch): Promise<ProjectTask> => {
+  const updateTask = async (task: CanonicalWorkItem, input: WorkItemPatch): Promise<CanonicalWorkItem> => {
     if (!canEditTask(task) || !onUpdateTask) return task
     return onUpdateTask(task, input)
   }
@@ -168,7 +168,7 @@ export function TaskBoardView({
         tasks.some((task) => isTaskInProjectStatusColumn(task, column))
       )
   /** Validates and sends a status transition for one project task. */
-  const moveTaskToStatus = async (task: ProjectTask, workflowStatusId: string) => {
+  const moveTaskToStatus = async (task: CanonicalWorkItem, workflowStatusId: string) => {
     if (!canEditTask(task) || task.workflowStatusId === workflowStatusId) {
       return
     }
@@ -196,7 +196,7 @@ export function TaskBoardView({
   }
 
   /** Starts a native drag interaction carrying the task's composite key. */
-  const handleDragStart = (event: DragEvent<HTMLElement>, task: ProjectTask) => {
+  const handleDragStart = (event: DragEvent<HTMLElement>, task: CanonicalWorkItem) => {
     if (!canEditTask(task)) {
       return
     }
@@ -654,7 +654,7 @@ export function TaskBoardView({
 
 /** Resolves a stable key and visible label for one project board subgroup field. */
 function resolveProjectBoardGroupValue(
-  task: ProjectTask,
+  task: CanonicalWorkItem,
   field: string,
   configuration: WorkItemConfiguration | undefined,
   t: TaskBoardTranslator,

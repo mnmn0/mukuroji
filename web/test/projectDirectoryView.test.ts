@@ -10,7 +10,7 @@ import {
   parseProjectDirectoryPage,
 } from '../src/projects/model/projectDirectoryView'
 import { projectDirectoryFixtures } from '../src/projects/fixtures'
-import type { ProjectTask } from '../src/tasks/api/tasks'
+import type { CanonicalWorkItem } from '../src/tasks/api/tasks'
 import { referoTaskFixtures } from '../src/tasks/fixtures'
 
 const baseTask = referoTaskFixtures.find((task) => task.id === 'wireframe')
@@ -25,7 +25,7 @@ if (!baseTask) {
  * @param overrides - Fields that differ from the shared base fixture.
  * @returns A complete canonical Project Work Item.
  */
-function createTask(overrides: Partial<ProjectTask>): ProjectTask {
+function createTask(overrides: Partial<CanonicalWorkItem>): CanonicalWorkItem {
   return {
     ...baseTask,
     ...overrides,

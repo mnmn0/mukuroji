@@ -5,7 +5,7 @@ import type {
   WorkItemActionTarget,
 } from '@mukuroji/contracts'
 import { TeamIssuesApiError } from '../../issues/api'
-import type { ProjectTask } from '../../tasks/api'
+import type { CanonicalWorkItem } from '../../tasks/api'
 import { resolveEditableWorkflowStatuses } from '../../work-items/model/workItemDisplay'
 import {
   clearTaskStatusMoveRequest,
@@ -25,9 +25,9 @@ import {
  * @returns Persisted Work Item snapshot, or undefined when persistence was not applied.
  */
 export type MyTaskDirectStatusMoveMutation = (
-  task: ProjectTask,
+  task: CanonicalWorkItem,
   workflowStatusId: string,
-) => Promise<ProjectTask | undefined>
+) => Promise<CanonicalWorkItem | undefined>
 
 /** Localized safe failure messages returned by a direct My Tasks Move action. */
 export type MyTaskDirectStatusMoveMessages = {
@@ -59,7 +59,7 @@ export type MyTaskDirectStatusMoveMessages = {
 export function executeMyTaskDirectStatusMove(
   context: WorkItemActionContext,
   requestSlot: TaskStatusMoveRequestSlot,
-  tasks: readonly ProjectTask[],
+  tasks: readonly CanonicalWorkItem[],
   configurationsByTeam: Readonly<Record<string, ResolvedWorkItemConfiguration>>,
   moveTaskStatus: MyTaskDirectStatusMoveMutation | undefined,
   messages: MyTaskDirectStatusMoveMessages,

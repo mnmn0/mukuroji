@@ -13,7 +13,7 @@ import {
   type CSSProperties,
   type KeyboardEvent,
 } from 'react'
-import type { ProjectTask, TaskPriority } from '../api/tasks'
+import type { CanonicalWorkItem, WorkItemPriority } from '../api/tasks'
 import type { ProjectMember } from '../../projects/api'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import { MoreHorizontalIcon } from '../../shared/ui/icons'
@@ -91,7 +91,7 @@ export type TaskTableViewProps = {
   /** Fallback configuration used for a single-team project view. */
   configuration?: WorkItemConfiguration
   /** Checks exact Team-qualified Project write scope for one concrete Work Item. */
-  canMutateTask?: (task: ProjectTask) => boolean
+  canMutateTask?: (task: CanonicalWorkItem) => boolean
   /** Team-scoped resolved configurations used by individual rows. */
   configurationsByTeam: Record<string, ResolvedWorkItemConfiguration>
   /** Locale used to format custom-field values. */
@@ -115,7 +115,7 @@ export type TaskTableViewProps = {
   /** Localized task-list loading error. */
   taskErrorMessage?: string
   /** Filtered and sorted tasks displayed by the table. */
-  tasks: ProjectTask[]
+  tasks: CanonicalWorkItem[]
   /** Translator used for table labels. */
   t: TaskTableTranslator
   /** Bulk-operation snapshots corresponding to currently visible rows. */
@@ -153,9 +153,9 @@ export type TaskTableViewProps = {
   /** Opens the create-task form when task creation is available. */
   onCreateTaskOpen?: (context?: TaskCreateContext) => void
   /** Updates a row through the common Work Item action. */
-  onUpdateTask?: (task: ProjectTask, input: WorkItemPatch) => Promise<ProjectTask>
+  onUpdateTask?: (task: CanonicalWorkItem, input: WorkItemPatch) => Promise<CanonicalWorkItem>
   /** Selects a task for the detail pane. */
-  onSelectTask: (task: ProjectTask) => void
+  onSelectTask: (task: CanonicalWorkItem) => void
   /** Opens the canonical action menu for one rendered row. */
   onTaskActionMenuOpen?: ProjectTaskActionMenuOpenHandler
   /** Updates one row's bulk-selection state. */
@@ -171,7 +171,7 @@ type TaskTableRowProps = {
   /** Configuration used to render workflow and custom-field values. */
   configuration?: WorkItemConfiguration
   /** Checks exact Team-qualified Project write scope for one concrete Work Item. */
-  canMutateTask?: (task: ProjectTask) => boolean
+  canMutateTask?: (task: CanonicalWorkItem) => boolean
   /** Locale used to format custom-field values. */
   locale: Locale
   /** Canonical dependency state for this row. */
@@ -193,17 +193,17 @@ type TaskTableRowProps = {
   /** Whether bulk selection is unavailable. */
   selectionReadOnly: boolean
   /** Selects the row's task for the detail pane. */
-  onSelectTask: (task: ProjectTask) => void
+  onSelectTask: (task: CanonicalWorkItem) => void
   /** Opens the canonical action menu for this row. */
   onTaskActionMenuOpen?: ProjectTaskActionMenuOpenHandler
   /** Opens the create panel with the row's Work Item context. */
   onCreateTaskOpen?: (context?: TaskCreateContext) => void
   /** Updates the row through the common Work Item action. */
-  onUpdateTask?: (task: ProjectTask, input: WorkItemPatch) => Promise<ProjectTask>
+  onUpdateTask?: (task: CanonicalWorkItem, input: WorkItemPatch) => Promise<CanonicalWorkItem>
   /** Updates the row's bulk-selection state. */
   onTaskSelectionChange: (taskKey: string, selected: boolean) => void
   /** Work item rendered by the row. */
-  task: ProjectTask
+  task: CanonicalWorkItem
   /** Translator used for row labels. */
   t: TaskTableTranslator
   /** Ordered visible columns rendered by this row. */
@@ -297,7 +297,7 @@ export function TaskTableView({
 
   /** Runs pasted or fill-down updates through the same Work Item mutation callback as inline edits. */
   const runBatchTaskUpdates = async (
-    updates: readonly { task: ProjectTask; patch: WorkItemPatch }[],
+    updates: readonly { task: CanonicalWorkItem; patch: WorkItemPatch }[],
     successMessage: string,
     invalidCount = 0,
   ) => {
@@ -361,7 +361,7 @@ export function TaskTableView({
     const targetTasks = selectedTasks.length > 0
       ? selectedTasks
       : tasks.slice(focusedRowIndex ?? 0)
-    const updates: Array<{ task: ProjectTask; patch: WorkItemPatch }> = []
+    const updates: Array<{ task: CanonicalWorkItem; patch: WorkItemPatch }> = []
     let invalidCount = Math.max(0, rows.length - targetTasks.length)
 
     rows.forEach((cells, index) => {
@@ -424,7 +424,7 @@ export function TaskTableView({
   }
 
   /** Renders one configured row while preserving its index in the complete result set. */
-  const renderTaskRow = (task: ProjectTask) => (
+  const renderTaskRow = (task: CanonicalWorkItem) => (
     <TaskTableRow
       assigneeOptions={assigneeOptions}
       configuration={resolveProjectTaskConfiguration(
@@ -696,7 +696,7 @@ function TaskTableRow({
   t,
   visibleColumns,
 }: TaskTableRowProps) {
-  const priorityClasses: Record<TaskPriority, string> = {
+  const priorityClasses: Record<WorkItemPriority, string> = {
     high: 'workbench-badge-danger',
     medium: 'workbench-badge-warning',
     low: 'workbench-badge-success',
@@ -739,7 +739,7 @@ function TaskTableRow({
       ]
   const canEditTask = Boolean(onUpdateTask && (canMutateTask?.(task) ?? true))
   /** Sends one row edit only when its exact Work Item scope is writable. */
-  const updateTask = async (candidate: ProjectTask, input: WorkItemPatch): Promise<ProjectTask> => {
+  const updateTask = async (candidate: CanonicalWorkItem, input: WorkItemPatch): Promise<CanonicalWorkItem> => {
     if (!canEditTask || !onUpdateTask) return candidate
     return onUpdateTask(candidate, input)
   }
@@ -1135,7 +1135,7 @@ function resolveTaskViewColumnCellStyle(
  */
 function createTaskPatchFromPastedCells(
   cells: readonly string[],
-  task: ProjectTask,
+  task: CanonicalWorkItem,
   configuration: WorkItemConfiguration | undefined,
   assigneeOptions: readonly ProjectMember[],
 ): WorkItemPatch | undefined {
@@ -1236,8 +1236,8 @@ function isInlineEditorTarget(target: EventTarget | null) {
 
 /** Creates the common mutation patch used by table fill-down for one field. */
 function createTaskFillPatch(
-  sourceTask: ProjectTask,
-  targetTask: ProjectTask,
+  sourceTask: CanonicalWorkItem,
+  targetTask: CanonicalWorkItem,
   fieldKey: string,
 ): WorkItemPatch | undefined {
   if (fieldKey.startsWith('customField:')) {

@@ -4,7 +4,7 @@ import type {
   WorkItemConfiguration,
   WorkItemPatch,
 } from '@mukuroji/contracts'
-import type { ProjectTask } from '../api/tasks'
+import type { CanonicalWorkItem } from '../api/tasks'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import type { WorkItemPersonOption } from '../../work-items/ui/WorkItemFieldsEditor'
 import {
@@ -27,9 +27,9 @@ export type TaskInlineCustomFieldsProps = {
   /** Translator used for typed value labels. */
   t: (key: MessageKey) => string
   /** Work Item whose custom fields are being edited. */
-  task: ProjectTask
+  task: CanonicalWorkItem
   /** Shared optimistic mutation callback. */
-  onUpdateTask: (task: ProjectTask, input: WorkItemPatch) => Promise<ProjectTask>
+  onUpdateTask: (task: CanonicalWorkItem, input: WorkItemPatch) => Promise<CanonicalWorkItem>
 }
 
 /**

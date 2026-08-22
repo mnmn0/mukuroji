@@ -7,7 +7,7 @@ import type {
   TaskViewSurface,
   TaskViewUrlOverride,
 } from '@mukuroji/contracts'
-import type { ProjectTask } from '../../tasks/api'
+import type { CanonicalWorkItem } from '../../tasks/api'
 import {
   matchesTaskDueDateFilter,
   type TaskScreenViewState,
@@ -37,7 +37,7 @@ type ProjectTaskLayoutMode = 'table' | 'board' | 'gantt' | 'calendar'
 
 /** Surface-specific matcher that supplements canonical raw Work Item keyword fields. */
 export type TaskViewKeywordMatcher = (
-  task: ProjectTask,
+  task: CanonicalWorkItem,
   normalizedKeyword: string,
 ) => boolean
 
@@ -511,10 +511,10 @@ export function createTaskViewUrlOverride(
  * @returns Tasks retained by shared filters and display options.
  */
 export function filterMyTasksByTaskViewDefinition(
-  tasks: readonly ProjectTask[],
+  tasks: readonly CanonicalWorkItem[],
   definition: TaskViewDefinition,
   context: TaskViewEvaluationContext = {},
-): ProjectTask[] {
+): CanonicalWorkItem[] {
   return filterTasksByTaskViewDefinition(tasks, definition, context)
 }
 
@@ -527,10 +527,10 @@ export function filterMyTasksByTaskViewDefinition(
  * @returns Work Items retained by every canonical filter and display option.
  */
 export function filterTasksByTaskViewDefinition(
-  tasks: readonly ProjectTask[],
+  tasks: readonly CanonicalWorkItem[],
   definition: TaskViewDefinition,
   context: TaskViewEvaluationContext = {},
-): ProjectTask[] {
+): CanonicalWorkItem[] {
   const keywordTerms = splitTaskViewKeyword(definition.filters.keyword)
   const now = context.now ?? new Date()
   const showCompleted = definition.layout.displayOptions.showCompleted ?? true
@@ -606,9 +606,9 @@ export function filterTasksByTaskViewDefinition(
  * @returns A stable sorted copy of the input Work Items.
  */
 export function sortTasksByTaskViewDefinition(
-  tasks: readonly ProjectTask[],
+  tasks: readonly CanonicalWorkItem[],
   definition: TaskViewDefinition,
-): ProjectTask[] {
+): CanonicalWorkItem[] {
   const indexedTasks = tasks.map((task, index) => ({ index, task }))
   indexedTasks.sort((left, right) => {
     for (const sort of definition.layout.sort) {
@@ -632,10 +632,10 @@ export function sortTasksByTaskViewDefinition(
  * @returns Reproducible Work Item results ready for rendering.
  */
 export function applyTaskViewDefinitionToTasks(
-  tasks: readonly ProjectTask[],
+  tasks: readonly CanonicalWorkItem[],
   definition: TaskViewDefinition,
   context: TaskViewEvaluationContext = {},
-): ProjectTask[] {
+): CanonicalWorkItem[] {
   return sortTasksByTaskViewDefinition(
     filterTasksByTaskViewDefinition(tasks, definition, context),
     definition,
@@ -650,7 +650,7 @@ export function applyTaskViewDefinitionToTasks(
  * @returns Whether a canonical raw field contains the keyword.
  */
 function matchesCanonicalTaskViewKeyword(
-  task: ProjectTask,
+  task: CanonicalWorkItem,
   normalizedKeyword: string,
 ): boolean {
   return [
@@ -675,13 +675,13 @@ function splitTaskViewKeyword(value: string | undefined): string[] {
 }
 
 /** Returns whether a Work Item is a child of another Work Item. */
-function hasTaskViewParentRelation(task: ProjectTask): boolean {
+function hasTaskViewParentRelation(task: CanonicalWorkItem): boolean {
   return task.relationIds.some((relationId) => relationId.startsWith('parent:'))
 }
 
 /** Returns whether a Work Item falls inside one persisted inclusive date range. */
 function matchesTaskDateRange(
-  task: ProjectTask,
+  task: CanonicalWorkItem,
   filter: NonNullable<TaskViewDefinition['filters']['date']>,
 ): boolean {
   const value = filter.field === 'createdAt'
@@ -698,7 +698,7 @@ function matchesTaskDateRange(
 
 /** Resolves one built-in or custom task-view field to a sortable primitive. */
 function resolveTaskViewFieldValue(
-  task: ProjectTask,
+  task: CanonicalWorkItem,
   field: string,
 ): string | number | boolean | readonly string[] | null | undefined {
   if (field.startsWith('custom:')) return task.customFieldValues[field.slice('custom:'.length)]

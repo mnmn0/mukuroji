@@ -1,5 +1,5 @@
 import { deriveWorkItemScheduleDueDate } from '@mukuroji/contracts'
-import type { ProjectTask } from '../../tasks/api'
+import type { CanonicalWorkItem } from '../../tasks/api'
 import {
   createWorkspaceActionQueue,
   filterTasksByTeamProjectIds,
@@ -48,7 +48,7 @@ export type TeamProjectSummary = {
   /** Number of members with the manager role. */
   managerCount: number
   /** Next Work Item to open. */
-  nextTask?: ProjectTask
+  nextTask?: CanonicalWorkItem
 }
 
 /**
@@ -108,7 +108,7 @@ export type TeamMemberRow = {
  */
 export function createTeamProjectSummaries(
   projects: readonly ProjectDirectoryProject[],
-  tasks: readonly ProjectTask[],
+  tasks: readonly CanonicalWorkItem[],
   teamProjectMembers: readonly TeamProjectMemberAccess[],
   referenceDate: Date,
   teamId?: string,
@@ -176,7 +176,7 @@ export function countUniqueTeamMembers(
  */
 export function createTeamMemberRows(
   projects: readonly ProjectDirectoryProject[],
-  tasks: readonly ProjectTask[],
+  tasks: readonly CanonicalWorkItem[],
   teamProjectMembers: readonly TeamProjectMemberAccess[],
   referenceDate: Date,
   teamId?: string,
@@ -211,7 +211,7 @@ export function createTeamMemberRows(
   }
 
   const memberAliases = createTeamMemberAliasMap(rowsByMemberId)
-  const tasksByMemberId = new Map<string, ProjectTask[]>()
+  const tasksByMemberId = new Map<string, CanonicalWorkItem[]>()
 
   for (const task of filterTasksByTeamProjectIds(tasks, projectIds, teamId)) {
     const memberId = resolveTaskMemberId(task, memberAliases)
@@ -326,7 +326,7 @@ function createTeamMemberAliasMap(rowsByMemberId: Map<string, TeamMemberRow>) {
  * @returns The matching member ID, or undefined when no alias matches.
  */
 function resolveTaskMemberId(
-  task: ProjectTask,
+  task: CanonicalWorkItem,
   memberAliases: ReadonlyMap<string, string>,
 ) {
   const taskAliases = [

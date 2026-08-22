@@ -18,7 +18,7 @@ import { enterpriseSecuritySnapshotFixture } from '../../security/fixtures'
 import { createWorkspaceSecurityScopeOptions } from '../../security/model/workspaceSecurityScopes'
 import { EnterpriseSecurityPanel } from '../../security/ui/EnterpriseSecurityPanel'
 import { createTranslator } from '../../shared/i18n/i18n'
-import type { ProjectTask } from '../../tasks/api'
+import type { CanonicalWorkItem } from '../../tasks/api'
 import { referoTaskFixtures } from '../../tasks/fixtures'
 import { inheritedWorkItemConfigurationFixture } from '../../work-items/fixtures'
 import { createTaskViewItemKey } from '../../task-views/model/taskViewSelection'
@@ -37,7 +37,7 @@ import { WorkspaceSettingsView } from '../../workspace/ui/WorkspaceSettingsView'
 const t = createTranslator('ja')
 const englishTranslator = createTranslator('en')
 const coreTeam = projectDirectoryFixtures[0]
-const storyTasks: ProjectTask[] = referoTaskFixtures.map((task) => ({
+const storyTasks: CanonicalWorkItem[] = referoTaskFixtures.map((task) => ({
   ...task,
   workflowStatusId: task.workflowStatusId === 'todo'
     ? 'ready'

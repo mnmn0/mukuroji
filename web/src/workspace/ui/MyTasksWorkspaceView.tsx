@@ -3,7 +3,7 @@ import { Fragment, useMemo, useState, type DragEvent, type ReactNode } from 'rea
 import type { ProjectDirectoryTeam } from '../../projects/api'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import { SectionHeader } from '../../shared/ui/WorkbenchPrimitives'
-import type { ProjectTask } from '../../tasks/api'
+import type { CanonicalWorkItem } from '../../tasks/api'
 import {
   groupTaskViewItems,
   type TaskViewGroupValue,
@@ -34,7 +34,7 @@ import {
  */
 export type MyTasksWorkspaceViewProps = {
   /** Checks whether one permission-pruned Work Item exposes status mutation controls. */
-  canMoveTaskStatus?: (task: ProjectTask) => boolean
+  canMoveTaskStatus?: (task: CanonicalWorkItem) => boolean
   /** Team IDs whose Work Item configurations could not be loaded. */
   configurationFailedTeamIds: readonly string[]
   /** Resolved Work Item configurations indexed by Team ID. */
@@ -44,19 +44,19 @@ export type MyTasksWorkspaceViewProps = {
   /** Team-qualified key that currently owns keyboard focus. */
   focusedTaskKey?: string
   /** Optional callback that requests a Work Item workflow status change. */
-  onMoveTaskStatus?: (task: ProjectTask, workflowStatusId: string) => Promise<void>
+  onMoveTaskStatus?: (task: CanonicalWorkItem, workflowStatusId: string) => Promise<void>
   /** Optional callback that opens a selected Work Item. */
-  onOpenTask?: (task: ProjectTask) => void
+  onOpenTask?: (task: CanonicalWorkItem) => void
   /** Opens the canonical action menu for one personal Work Item card. */
   onTaskActionMenuOpen?: (
-    task: ProjectTask,
+    task: CanonicalWorkItem,
     anchorPoint: TaskActionContextMenuAnchorPoint,
     returnFocusElement: HTMLElement,
   ) => void
   /** Clears a status-action entrance after its selector commits a change. */
-  onStatusActionConsumed?: (task: ProjectTask) => void
+  onStatusActionConsumed?: (task: CanonicalWorkItem) => void
   /** Cancels a revealed status action when its selector is dismissed unchanged. */
-  onStatusActionCancelled?: (task: ProjectTask) => void
+  onStatusActionCancelled?: (task: CanonicalWorkItem) => void
   /** Visible card fields, density, wrapping, and grouping selected by the effective view. */
   presentation?: TaskViewPresentationSettings
   /** Team-qualified key whose status selector was revealed by the canonical Move action. */
@@ -72,7 +72,7 @@ export type MyTasksWorkspaceViewProps = {
   /** Team-qualified keys selected through the shared task-view reducer. */
   selectedTaskKeys?: readonly string[]
   /** Work Items assigned to the current user. */
-  tasks: readonly ProjectTask[]
+  tasks: readonly CanonicalWorkItem[]
   /** Workspace directory used to label Team-scoped workflow columns. */
   teams: readonly ProjectDirectoryTeam[]
 }
@@ -108,7 +108,7 @@ export function MyTasksWorkspaceView({
   const [dropTargetColumnKey, setDropTargetColumnKey] = useState<string | undefined>()
   const [movingTaskKeys, setMovingTaskKeys] = useState<ReadonlySet<string>>(() => new Set())
   /** Checks both the route handler and the exact server-authoritative Work Item scope. */
-  const canMoveTask = (task: ProjectTask) => Boolean(
+  const canMoveTask = (task: CanonicalWorkItem) => Boolean(
     onMoveTaskStatus && (canMoveTaskStatus?.(task) ?? true),
   )
   const statusColumns = useMemo(
@@ -137,7 +137,7 @@ export function MyTasksWorkspaceView({
    * @param workflowStatusId - Destination workflow status ID.
    * @returns Nothing.
    */
-  const moveTaskToStatus = (task: ProjectTask, workflowStatusId: string) => {
+  const moveTaskToStatus = (task: CanonicalWorkItem, workflowStatusId: string) => {
     if (!onMoveTaskStatus || !canMoveTask(task) || task.workflowStatusId === workflowStatusId) {
       return
     }
@@ -173,7 +173,7 @@ export function MyTasksWorkspaceView({
    * @param task - Work Item being dragged.
    * @returns Nothing.
    */
-  const handleDragStart = (event: DragEvent<HTMLElement>, task: ProjectTask) => {
+  const handleDragStart = (event: DragEvent<HTMLElement>, task: CanonicalWorkItem) => {
     if (!canMoveTask(task)) {
       return
     }
@@ -303,7 +303,7 @@ export function MyTasksWorkspaceView({
                   : presentation?.groupDirection,
               )
             : []
-          const orderedColumnTasks: ProjectTask[] = []
+          const orderedColumnTasks: CanonicalWorkItem[] = []
           const primaryHeadingByTaskKey = new Map<string, (typeof primaryCardGroups)[number]>()
           const secondaryHeadingByTaskKey = new Map<string, string>()
           for (const primaryGroup of primaryCardGroups) {
@@ -497,7 +497,7 @@ export function MyTasksWorkspaceView({
 
 /** Resolves a Project display name for one Workspace Work Item. */
 function resolveMyTaskProjectLabel(
-  task: ProjectTask,
+  task: CanonicalWorkItem,
   teams: readonly ProjectDirectoryTeam[],
 ): string | undefined {
   if (!task.assignedProjectId) return undefined
@@ -508,7 +508,7 @@ function resolveMyTaskProjectLabel(
 
 /** Resolves a stable key and visible label for one My Tasks grouping field. */
 function resolveMyTaskGroupValue(
-  task: ProjectTask,
+  task: CanonicalWorkItem,
   field: string,
   configurationsByTeam: Readonly<Record<string, ResolvedWorkItemConfiguration>>,
   teams: readonly ProjectDirectoryTeam[],

@@ -13,7 +13,7 @@ import {
   ProgressBar,
   SectionHeader,
 } from '../../shared/ui/WorkbenchPrimitives'
-import type { ProjectTask } from '../../tasks/api'
+import type { CanonicalWorkItem } from '../../tasks/api'
 import {
   calculateWorkspaceProgress,
   createWorkspacePortfolioProjects,
@@ -33,13 +33,13 @@ export type DashboardWorkspaceViewProps = {
   /** Whether Focus metrics and previews are unavailable rather than empty. */
   isFocusUnavailable?: boolean
   /** Optional callback that opens a selected Work Item. */
-  onOpenTask?: (task: ProjectTask) => void
+  onOpenTask?: (task: CanonicalWorkItem) => void
   /** Summary metrics displayed at the top of the dashboard. */
   summary: WorkspaceSummary
   /** Translator used for dashboard labels. */
   t: (key: MessageKey) => string
   /** Workspace Work Items used for progress and decision queues. */
-  tasks: readonly ProjectTask[]
+  tasks: readonly CanonicalWorkItem[]
   /** Workspace directory used to build portfolio rows. */
   teams: readonly ProjectDirectoryTeam[]
   /** Resolved Work Item configurations indexed by Team ID. */

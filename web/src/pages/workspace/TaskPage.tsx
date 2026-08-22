@@ -78,13 +78,12 @@ import {
 } from '../../shared/routing/paths'
 import { useReportWorkspaceSidebarRouteState } from '../../shared/ui/sidebar'
 import {
-  type CreateProjectTaskInput,
-  type ProjectTask,
+  type CreateWorkItemInput,
+  type CanonicalWorkItem,
 } from '../../tasks/api'
 import {
   createProjectUsersPageKey,
   mergeProjectUsers,
-  normalizeProjectIssueError,
   resolveCurrentUserProjectKey,
   resolveProjectTaskRouteContext,
 } from '../../tasks/model/taskRoute'
@@ -268,7 +267,6 @@ export function TaskPage() {
     accessToken,
     projectId,
     Boolean(user && !currentUserError),
-    normalizeProjectIssueError,
     true,
   )
   const {
@@ -656,7 +654,9 @@ export function TaskPage() {
 
     const message = taskError instanceof Error ? taskError.message : 'tasks.error.loading'
 
-    return message === 'tasks.error.loading' ? t('tasks.error.loading') : message
+    return message === 'tasks.error.loading' || message === 'issues.error.loading'
+      ? t('tasks.error.loading')
+      : message
   }, [
     currentUserErrorAction?.kind,
     taskError,
@@ -772,7 +772,7 @@ export function TaskPage() {
 
   /** Checks one concrete Work Item against the Team-qualified task-view write scopes. */
   const canMutateProjectTaskTarget = (
-    target: Pick<ProjectTask, 'assignedProjectId' | 'teamId'>,
+    target: Pick<CanonicalWorkItem, 'assignedProjectId' | 'teamId'>,
   ) => canWriteTaskViewWorkItem(taskViewWriteCapabilities, target)
 
   /** Creates the stable forbidden error shared by every guarded Project task action. */
@@ -786,7 +786,7 @@ export function TaskPage() {
 
   /** Rejects a Work Item mutation before any request is sent when its exact scope is read-only. */
   const requireProjectTaskWriteScope = (
-    target: Pick<ProjectTask, 'assignedProjectId' | 'teamId'>,
+    target: Pick<CanonicalWorkItem, 'assignedProjectId' | 'teamId'>,
   ) => {
     if (canMutateProjectTaskTarget(target)) return
     denyProjectTaskMutation()
@@ -837,7 +837,7 @@ export function TaskPage() {
   }
 
   const handleCreateTask = async (
-    input: CreateProjectTaskInput,
+    input: CreateWorkItemInput,
     context?: TaskCreateContext,
   ) => {
     if (!accessToken) {
@@ -929,7 +929,7 @@ export function TaskPage() {
     })
   }
 
-  const handleSelectedIssueChange = (task: ProjectTask) => {
+  const handleSelectedIssueChange = (task: CanonicalWorkItem) => {
     const nextTeamId = task.teamId ?? activeTeam?.id
 
     if (!nextTeamId) {
@@ -961,9 +961,9 @@ export function TaskPage() {
 
   /** Updates a visible Work Item with optimistic cache projection and conflict rollback. */
   const handleUpdateTask = async (
-    task: ProjectTask,
+    task: CanonicalWorkItem,
     input: UpdateTeamIssueInput,
-  ): Promise<ProjectTask> => {
+  ): Promise<CanonicalWorkItem> => {
     if (!accessToken) {
       throw new Error(t('tasks.action.updateError'))
     }
@@ -1004,7 +1004,7 @@ export function TaskPage() {
       selectedIssueDetail?.resolvedConfiguration?.configuration
     const optimisticTask = applyTaskPatchOptimistically(currentTask, input, configuration)
     /** Returns whether a candidate is the same Team-local Work Item. */
-    const matchesTask = (candidate: ProjectTask) =>
+    const matchesTask = (candidate: CanonicalWorkItem) =>
       candidate.id === currentTask.id && candidate.teamId === currentTask.teamId
 
     await mutateProjectTasks(
@@ -1284,7 +1284,7 @@ export function TaskPage() {
 
   /** Guards one direct schedule preview against the current Work Item ownership scope. */
   const handlePreviewScheduleChange = (
-    task: ProjectTask,
+    task: CanonicalWorkItem,
     operation: Parameters<typeof scheduleMutations.previewScheduleChange>[1],
   ) => {
     requireProjectTaskWriteScope(task)
@@ -1293,7 +1293,7 @@ export function TaskPage() {
 
   /** Guards one confirmed schedule mutation against the current Work Item ownership scope. */
   const handleConfirmScheduleChange = (
-    task: ProjectTask,
+    task: CanonicalWorkItem,
     operation: Parameters<typeof scheduleMutations.confirmScheduleChange>[1],
     preview: Parameters<typeof scheduleMutations.confirmScheduleChange>[2],
   ) => {

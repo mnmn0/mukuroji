@@ -1,5 +1,5 @@
 import type { TaskActionContextMenuAnchorPoint } from '../../task-views/model/taskActionContextMenu'
-import type { ProjectTask } from '../api/tasks'
+import type { CanonicalWorkItem } from '../api/tasks'
 
 /**
  * Opens the canonical Project task action menu for one row or card.
@@ -10,7 +10,7 @@ import type { ProjectTask } from '../api/tasks'
  * @returns Nothing.
  */
 export type ProjectTaskActionMenuOpenHandler = (
-  task: ProjectTask,
+  task: CanonicalWorkItem,
   anchorPoint: TaskActionContextMenuAnchorPoint,
   returnFocusElement: HTMLElement,
 ) => void

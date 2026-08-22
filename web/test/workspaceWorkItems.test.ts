@@ -3,7 +3,7 @@ import {
   createDefaultDueDateWorkItemSchedule,
   deriveWorkItemScheduleDueDate,
 } from '@mukuroji/contracts'
-import type { ProjectTask } from '../src/tasks/api'
+import type { CanonicalWorkItem } from '../src/tasks/api'
 import { referoTaskFixtures } from '../src/tasks/fixtures'
 import { projectDirectoryFixtures } from '../src/projects/fixtures'
 import {
@@ -29,9 +29,9 @@ if (!baseTask) {
  * Creates a canonical Work Item fixture with focused field overrides.
  *
  * @param overrides - Fields that differ from the shared base fixture.
- * @returns A complete ProjectTask fixture.
+ * @returns A complete CanonicalWorkItem fixture.
  */
-function createTask(overrides: Omit<Partial<ProjectTask>, 'dueDate'>): ProjectTask {
+function createTask(overrides: Omit<Partial<CanonicalWorkItem>, 'dueDate'>): CanonicalWorkItem {
   const schedule = overrides.schedule ?? baseTask.schedule
   return {
     ...baseTask,

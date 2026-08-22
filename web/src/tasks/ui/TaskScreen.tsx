@@ -126,7 +126,7 @@ import type {
   BulkOperationTaskActionInterruption,
   BulkOperationTaskActionRequest,
 } from '../../bulk-operations/ui/BulkOperationToolbar'
-import type { CreateProjectTaskInput, ProjectTask } from '../api/tasks'
+import type { CreateWorkItemInput, CanonicalWorkItem } from '../api/tasks'
 import {
   createBulkOperationSelection,
   createBulkProjectOptions,
@@ -182,7 +182,7 @@ type TaskBulkSelectionState = {
 /** Last successful inline update retained for a reversible task action. */
 type TaskUndoState = {
   /** Task snapshot returned by the successful update. */
-  task: ProjectTask
+  task: CanonicalWorkItem
   /** Patch that restores every field touched by the update. */
   inversePatch: UpdateTeamIssueInput
   /** Patch that reapplies the successful update after an undo. */
@@ -194,7 +194,7 @@ type TaskUndoState = {
 /** Most recently undone task update retained for redo. */
 type TaskRedoState = {
   /** Task snapshot returned by the successful undo. */
-  task: ProjectTask
+  task: CanonicalWorkItem
   /** Patch that reapplies the original update. */
   forwardPatch: UpdateTeamIssueInput
 }
@@ -222,13 +222,13 @@ type TaskUpdateResult = {
   /** Whether persistence ran after the user confirmed the preview. */
   applied: boolean
   /** Updated task, or the original snapshot when the preview was cancelled. */
-  task: ProjectTask
+  task: CanonicalWorkItem
 }
 
 /** Persisted Project Create outcome returned by the route-level mutation. */
 type CreatedProjectTaskMutation = {
   /** Canonical Work Item created by persistence. */
-  task: ProjectTask
+  task: CanonicalWorkItem
   /** Application-relative route opened after creation, including retained view state. */
   navigationPath: string
 }
@@ -250,7 +250,7 @@ type PendingTaskScheduleUpdate = {
   /** Monotonic request order used when table batch previews finish out of order. */
   sequence: number
   /** Revision snapshot against which the preview was calculated. */
-  task: ProjectTask
+  task: CanonicalWorkItem
 }
 
 /** Props accepted by the task management screen. */
@@ -292,7 +292,7 @@ export type TaskScreenProps = {
   /** Whether the task route is still loading its required data. */
   isLoading?: boolean
   /** Project tasks loaded from the API. */
-  tasks?: ProjectTask[]
+  tasks?: CanonicalWorkItem[]
   /** Project members available as task assignees. */
   assigneeOptions?: ProjectMember[]
   /** Whether assignee candidates are being loaded. */
@@ -316,7 +316,7 @@ export type TaskScreenProps = {
   /** Whether the current user may manage Project member roles. */
   canManageProjectMembers?: boolean
   /** Checks exact Team-qualified Project write scope for one concrete Work Item. */
-  canMutateTask?: (task: ProjectTask) => boolean
+  canMutateTask?: (task: CanonicalWorkItem) => boolean
   /** Whether the current Workspace member may read Team Triage source links. */
   canAccessTriage?: boolean
   /** Error shown when Project permissions could not be loaded or changed. */
@@ -378,7 +378,7 @@ export type TaskScreenProps = {
   /** Error shown when selected Work Item detail could not be loaded or updated. */
   detailErrorMessage?: string
   /** Changes the Work Item selected by the detail pane. */
-  onSelectedIssueChange?: (task: ProjectTask) => void
+  onSelectedIssueChange?: (task: CanonicalWorkItem) => void
   /** Adds or removes the displayed Project from quick access. */
   onProjectQuickAccessToggle?: () => void
   /** Updates editable fields on the selected Work Item. */
@@ -386,23 +386,23 @@ export type TaskScreenProps = {
     teamId: string,
     issueId: string,
     input: UpdateTeamIssueInput,
-  ) => Promise<ProjectTask | void>
+  ) => Promise<CanonicalWorkItem | void>
   /** Updates any visible Work Item through the shared optimistic action. */
   onUpdateTask?: (
-    task: ProjectTask,
+    task: CanonicalWorkItem,
     input: UpdateTeamIssueInput,
-  ) => Promise<ProjectTask>
+  ) => Promise<CanonicalWorkItem>
   /** Previews one schedule operation against the current server revision. */
   onPreviewScheduleChange?: (
-    task: ProjectTask,
+    task: CanonicalWorkItem,
     operation: WorkItemScheduleOperation,
   ) => Promise<WorkItemScheduleChangePreview>
   /** Atomically confirms the original schedule operation and every dependency ripple. */
   onConfirmScheduleChange?: (
-    task: ProjectTask,
+    task: CanonicalWorkItem,
     operation: WorkItemScheduleOperation,
     preview: WorkItemScheduleChangePreview,
-  ) => Promise<ProjectTask>
+  ) => Promise<CanonicalWorkItem>
   /** Creates a canonical Work Item schedule dependency. */
   onCreateScheduleDependency?: (input: WorkItemDependencyCreateDraft) => void | Promise<void>
   /** Deletes a canonical Work Item schedule dependency. */
@@ -418,7 +418,7 @@ export type TaskScreenProps = {
   onDeleteRelation?: (issueId: string, relation: WorkItemRelation) => Promise<void>
   /** Creates a Project task from a view-aware inline form. */
   onCreateTask?: (
-    input: CreateProjectTaskInput,
+    input: CreateWorkItemInput,
     context?: TaskCreateContext,
   ) => Promise<CreatedProjectTaskMutation | void>
   /** Loads the next page of Project user candidates. */
@@ -586,7 +586,7 @@ export function TaskScreen({
   })
   const directTaskActionsInFlightRef = useRef<ProjectTaskDirectActionInFlight>(new Map())
   const directTaskActionResultsRef = useRef(
-    new WeakMap<ProjectTaskDirectActionRequest, ProjectTask>(),
+    new WeakMap<ProjectTaskDirectActionRequest, CanonicalWorkItem>(),
   )
   const directTaskActionErrorsRef = useRef(
     new WeakMap<ProjectTaskDirectActionRequest, unknown>(),
@@ -601,7 +601,7 @@ export function TaskScreen({
   const onUpdateTaskRef = useRef(onUpdateTask)
   const tasksRef = useRef(tasks)
   const performTaskUpdateRef = useRef<(
-    task: ProjectTask,
+    task: CanonicalWorkItem,
     input: UpdateTeamIssueInput,
     actionContext?: WorkItemActionContext,
     directRequest?: ProjectTaskDirectActionRequest,
@@ -958,7 +958,7 @@ export function TaskScreen({
    * @param preservePendingAction - Whether an accepted action already owns this exact selection.
    */
   const handleSelectDetailTask = useCallback((
-    task: ProjectTask,
+    task: CanonicalWorkItem,
     preservePendingAction = false,
   ) => {
     if (!preservePendingAction) taskActionCompletion.cancel()
@@ -1035,7 +1035,7 @@ export function TaskScreen({
 
   /** Persists an already-confirmed task patch and retains an inverse for undo. */
   const persistTaskUpdate = useCallback(async (
-    task: ProjectTask,
+    task: CanonicalWorkItem,
     input: UpdateTeamIssueInput,
   ) => {
     if (!onUpdateTask) {
@@ -1085,7 +1085,7 @@ export function TaskScreen({
    * @returns Whether persistence ran and the resulting or unchanged task snapshot.
    */
   const performTaskUpdate = useCallback(async (
-    task: ProjectTask,
+    task: CanonicalWorkItem,
     input: UpdateTeamIssueInput,
     actionContext?: WorkItemActionContext,
     directRequest?: ProjectTaskDirectActionRequest,
@@ -1348,7 +1348,7 @@ export function TaskScreen({
             : undefined
 
         try {
-          let updatedTask: ProjectTask | undefined
+          let updatedTask: CanonicalWorkItem | undefined
           if (input.schedule && onUpdateTask) {
             const result = await performTaskUpdate(detailTask, input, pendingContext)
             if (!result.applied) {
@@ -2062,9 +2062,9 @@ export function TaskScreen({
    * @returns Persisted task, or the original snapshot after an explicit preview cancellation.
    */
   const handleUpdateTask = useCallback(async (
-    task: ProjectTask,
+    task: CanonicalWorkItem,
     input: UpdateTeamIssueInput,
-  ): Promise<ProjectTask> => {
+  ): Promise<CanonicalWorkItem> => {
     const target = {
       expectedRevision: task.revision,
       teamId: task.teamId,
@@ -2108,7 +2108,7 @@ export function TaskScreen({
    * @returns Synchronous invocation handle owned before the preview network request settles.
    */
   const handleRequestTimelineScheduleChange = useCallback((
-    task: ProjectTask,
+    task: CanonicalWorkItem,
     operation: WorkItemScheduleOperation,
   ): ProjectTaskDirectScheduleHandle => {
     const target = {
@@ -2254,7 +2254,7 @@ export function TaskScreen({
   ])
 
   /** Executes a normal row or card open through the same canonical action pipeline. */
-  const handleOpenTask = useCallback((task: ProjectTask) => {
+  const handleOpenTask = useCallback((task: CanonicalWorkItem) => {
     void projectTaskActions.execute(
       'open',
       'click',
@@ -2799,7 +2799,7 @@ export function TaskScreen({
  * @param task - Persisted Work Item snapshot retained by the existing undo feedback state.
  * @returns Team-qualified revision token consumed only by this screen's undo entrance.
  */
-function createTaskUpdateUndoToken(task: ProjectTask): string {
+function createTaskUpdateUndoToken(task: CanonicalWorkItem): string {
   return `task-update:${task.teamId}:${task.id}:${task.revision}`
 }
 
@@ -2810,7 +2810,7 @@ function createTaskUpdateUndoToken(task: ProjectTask): string {
  * @param task - Persisted task snapshot about to be restored.
  * @returns Whether the existing undo state may consume the token.
  */
-function isTaskUpdateUndoTokenForTask(undoToken: string, task: ProjectTask): boolean {
+function isTaskUpdateUndoTokenForTask(undoToken: string, task: CanonicalWorkItem): boolean {
   return undoToken === createTaskUpdateUndoToken(task)
 }
 
@@ -2963,7 +2963,7 @@ function TaskScheduleUpdatePreview({
  */
 function findDirectScheduleImpact(
   preview: WorkItemScheduleChangePreview,
-  task: ProjectTask,
+  task: CanonicalWorkItem,
 ): WorkItemSchedule | undefined {
   return preview.impacts.find((impact) =>
     impact.kind === 'direct' &&

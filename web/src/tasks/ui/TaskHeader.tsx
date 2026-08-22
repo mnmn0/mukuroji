@@ -2,7 +2,7 @@ import type { KeyboardEvent, ReactNode } from 'react'
 import { ChevronIcon } from '../../shared/ui/icons'
 import { MobileSidebarButton } from '../../shared/ui/sidebar'
 import type { MessageKey } from '../../shared/i18n/i18n'
-import type { ProjectTask } from '../api/tasks'
+import type { CanonicalWorkItem } from '../api/tasks'
 import {
   createTaskSummary,
   taskTabs,
@@ -34,7 +34,7 @@ export type TaskHeaderProps = {
   /** Resolves localized task labels. */
   t: (key: MessageKey) => string
   /** Complete task collection used by the header counters. */
-  tasks: ProjectTask[]
+  tasks: CanonicalWorkItem[]
   /** Team name shown in the breadcrumb. */
   teamName: string
   /** Initial shown in the current-user avatar. */

@@ -4,7 +4,7 @@ import type { ProjectMember } from '../../projects/api'
 import { collaborationWorkspaceMemberFixtures } from '../../issues/fixtures'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { teamWorkItemConfigurationFixture } from '../../work-items/fixtures'
-import type { CreateProjectTaskInput } from '../api/tasks'
+import type { CreateWorkItemInput } from '../api/tasks'
 import { createDefaultUnscheduledTaskSchedule } from '../model/taskSchedule'
 import type { TaskCreateContext } from '../model/taskView'
 import { CreateTaskPanel } from './CreateTaskPanel'
@@ -78,7 +78,7 @@ const meta = {
     isSubmitting: false,
     locale: 'ja',
     onCancel: fn(),
-    onSubmit: fn(async (input: CreateProjectTaskInput) => {
+    onSubmit: fn(async (input: CreateWorkItemInput) => {
       void input
     }),
     projectId: 'refero',
@@ -95,7 +95,7 @@ type Story = StoryObj<typeof meta>
 /** Submits a valid task and all default custom-field values. */
 export const SuccessfulSubmit: Story = {
   args: {
-    onSubmit: fn(async (input: CreateProjectTaskInput) => {
+    onSubmit: fn(async (input: CreateWorkItemInput) => {
       void input
     }),
   },
@@ -144,7 +144,7 @@ export const QuickCapture: Story = {
   args: {
     context: quickCaptureContext,
     initialMode: 'quick',
-    onSubmit: fn(async (input: CreateProjectTaskInput) => {
+    onSubmit: fn(async (input: CreateWorkItemInput) => {
       void input
     }),
   },
@@ -192,7 +192,7 @@ export const DetailedWhenQuickCaptureUnavailable: Story = {
 /** Rejects a custom multi-select value that exceeds its configured item limit. */
 export const CustomFieldValidation: Story = {
   args: {
-    onSubmit: fn(async (input: CreateProjectTaskInput) => {
+    onSubmit: fn(async (input: CreateWorkItemInput) => {
       void input
     }),
   },

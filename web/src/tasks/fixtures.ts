@@ -2,7 +2,7 @@ import {
   WORK_ITEM_CONFIGURATION_SCHEMA_VERSION,
   WORK_ITEM_SCHEMA_VERSION,
 } from '@mukuroji/contracts'
-import type { ProjectTask } from './api'
+import type { CanonicalWorkItem } from './api'
 import {
   createDefaultDateRangeTaskSchedule,
   createDefaultDueDateTaskSchedule,
@@ -106,4 +106,4 @@ export const referoTaskFixtures = [
     updatedAt: '2026-06-01T00:00:00.000Z',
     source: 'dynamodb',
   },
-] satisfies ProjectTask[]
+] satisfies CanonicalWorkItem[]

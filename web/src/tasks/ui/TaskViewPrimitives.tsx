@@ -1,5 +1,5 @@
 import type { WorkItemConfiguration, WorkflowStatusDefinition } from '@mukuroji/contracts'
-import type { ProjectTask, TaskPriority } from '../api/tasks'
+import type { CanonicalWorkItem, WorkItemPriority } from '../api/tasks'
 import {
   resolveWorkItemWorkflowStatusLabel,
   resolveWorkflowCategoryToneClassName,
@@ -62,7 +62,7 @@ export type TaskStatusBadgeProps = {
   /** Explicit status definition used by a board column. */
   status?: WorkflowStatusDefinition
   /** Work item whose status should be displayed. */
-  task?: ProjectTask
+  task?: CanonicalWorkItem
 }
 
 /**
@@ -100,7 +100,7 @@ export function TaskStatusBadge({
 /** Props for a task-priority badge. */
 export type TaskPriorityBadgeProps = {
   /** Priority represented by the badge. */
-  priority: TaskPriority
+  priority: WorkItemPriority
   /** Translator used for the priority label. */
   t: TaskTranslator
 }
@@ -115,7 +115,7 @@ export function TaskPriorityBadge({
   priority,
   t,
 }: TaskPriorityBadgeProps) {
-  const priorityClasses: Record<TaskPriority, string> = {
+  const priorityClasses: Record<WorkItemPriority, string> = {
     high: 'workbench-badge-danger',
     medium: 'workbench-badge-warning',
     low: 'workbench-badge-success',
@@ -139,7 +139,7 @@ export type TaskCustomFieldSummaryProps = {
   /** Translator reused for custom-field value labels. */
   t: TaskTranslator
   /** Work item whose custom fields should be summarized. */
-  task: ProjectTask
+  task: CanonicalWorkItem
 }
 
 /**

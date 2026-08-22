@@ -47,7 +47,7 @@ import {
   groupTaskViewItems,
   type TaskViewPresentationSettings,
 } from '../../task-views/model/taskViewPresentation'
-import type { ProjectTask } from '../api/tasks'
+import type { CanonicalWorkItem } from '../api/tasks'
 import {
   createAssigneeFilterOptions,
   resolveDueDateFilterLabelKey,
@@ -80,7 +80,7 @@ export type TaskWorkspaceProps = {
   /** Currently active task view. */
   activeTab: TaskTab
   /** Unfiltered tasks used to derive complete filter options. */
-  allTasks: ProjectTask[]
+  allTasks: CanonicalWorkItem[]
   /** Projects available to bulk move operations. */
   bulkProjectOptions: BulkOperationProjectOption[]
   /** Workspace id required by bulk operations. */
@@ -96,7 +96,7 @@ export type TaskWorkspaceProps = {
   /** Whether the current user may manage project members. */
   canManageProjectMembers: boolean
   /** Checks exact Team-qualified Project write scope for one concrete Work Item. */
-  canMutateTask?: (task: ProjectTask) => boolean
+  canMutateTask?: (task: CanonicalWorkItem) => boolean
   /** Determines whether the current user may manage one canonical dependency endpoint. */
   canManageScheduleDependencyEndpoint?: (endpoint: WorkItemDependencyEndpoint) => boolean
   /** Single-Team fallback Work Item configuration. */
@@ -202,7 +202,7 @@ export type TaskWorkspaceProps = {
   /** Changes the task search query. */
   onSearchQueryChange: (query: string) => void
   /** Selects a task for the detail pane. */
-  onSelectTask: (task: ProjectTask) => void
+  onSelectTask: (task: CanonicalWorkItem) => void
   /** Opens the canonical action menu for one rendered task row or card. */
   onTaskActionMenuOpen?: ProjectTaskActionMenuOpenHandler
   /** Changes the selected task sort order. */
@@ -214,10 +214,10 @@ export type TaskWorkspaceProps = {
   /** Changes the bulk selection state of visible tasks. */
   onVisibleTaskSelectionChange: (selectionKeys: string[], selected: boolean) => void
   /** Updates a task through the shared Work Item mutation. */
-  onUpdateTask?: (task: ProjectTask, input: WorkItemPatch) => Promise<ProjectTask>
+  onUpdateTask?: (task: CanonicalWorkItem, input: WorkItemPatch) => Promise<CanonicalWorkItem>
   /** Starts a canonical schedule action and returns its exact preview controller. */
   onRequestScheduleChange?: (
-    task: ProjectTask,
+    task: CanonicalWorkItem,
     operation: WorkItemScheduleOperation,
   ) => ProjectTaskDirectScheduleHandle
   /** Adds or updates a project member role. */
@@ -248,7 +248,7 @@ export type TaskWorkspaceProps = {
   /** Columns, grouping, density, and text wrapping applied by task layouts. */
   taskViewPresentation?: TaskViewPresentationSettings
   /** Filtered and sorted tasks rendered by the active view. */
-  tasks: ProjectTask[]
+  tasks: CanonicalWorkItem[]
   /** Bulk operation snapshots for currently visible tasks. */
   visibleBulkItems: BulkOperationSelection[]
   /** Current Workspace member key used by file approvals. */
@@ -373,7 +373,7 @@ export function TaskWorkspace({
     : undefined
 
   /** Renders one complete workflow board for an optional primary group. */
-  const renderBoard = (boardTasks: ProjectTask[]) => (
+  const renderBoard = (boardTasks: CanonicalWorkItem[]) => (
     <TaskBoardView
       assigneeOptions={assigneeOptions}
       configuration={configuration}

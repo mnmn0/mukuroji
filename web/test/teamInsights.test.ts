@@ -12,7 +12,7 @@ import {
   createTeamProjectSummaries,
   type TeamProjectMemberAccess,
 } from '../src/projects/model/teamInsights'
-import type { ProjectTask } from '../src/tasks/api'
+import type { CanonicalWorkItem } from '../src/tasks/api'
 import { referoTaskFixtures } from '../src/tasks/fixtures'
 
 const baseTask = referoTaskFixtures.find((task) => task.id === 'wireframe')
@@ -26,9 +26,9 @@ if (!baseTask || !coreTeam) {
  * Creates a canonical Team Work Item fixture with focused overrides.
  *
  * @param overrides - Fields that differ from the shared base fixture.
- * @returns A complete ProjectTask fixture.
+ * @returns A complete CanonicalWorkItem fixture.
  */
-function createTask(overrides: Omit<Partial<ProjectTask>, 'dueDate'>): ProjectTask {
+function createTask(overrides: Omit<Partial<CanonicalWorkItem>, 'dueDate'>): CanonicalWorkItem {
   const schedule = overrides.schedule ?? baseTask.schedule
   return {
     ...baseTask,
