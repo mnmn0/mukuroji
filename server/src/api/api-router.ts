@@ -13364,8 +13364,8 @@ export interface AutomationActionExecutorDependencies {
   workspaceSearch: WorkItemDependencies['workspaceSearch']
   /** Enables synchronous Workspace search projection updates. */
   workspaceSearchProjectionEnabled: boolean
-  /** Provides Automation template persistence. */
-  automation: AutomationRuleTemplatePort
+  /** Provides the template-version read required by Automation actions. */
+  automation: Pick<AutomationRuleTemplatePort, 'getTemplateVersion'>
 }
 
 const ambientAutomationActionExecutorDependencies: AutomationActionExecutorDependencies = {

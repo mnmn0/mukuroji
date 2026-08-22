@@ -5,8 +5,8 @@ import {
 } from '@mukuroji/contracts'
 import {
   validateCreateAutomationRuleInput,
-  type AutomationActionExecutionContext,
-} from './automation'
+} from './domain/rule-validation'
+import type { AutomationActionExecutionContext } from './application/ports'
 import {
   AUTOMATION_WEBHOOK_SECRET_PREFIX,
   createAutomationWebhookSecretId,

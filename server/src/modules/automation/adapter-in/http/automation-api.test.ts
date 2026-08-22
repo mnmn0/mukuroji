@@ -46,11 +46,9 @@ import {
 import { InMemoryPlanningClient } from '../../../planning/planning'
 import type {
   AutomationActionExecutionContext,
-} from '../../automation'
-import {
-  AutomationError,
-  toAutomationInboundWebhookEndpoint,
-} from '../../automation'
+} from '../../application/ports'
+import { AutomationError } from '../../domain/automation-error'
+import { toAutomationInboundWebhookEndpoint } from '../../application/inbound-webhook-view'
 import type {
   AutomationInboundWebhookSecretStore,
 } from '../../automation-inbound-webhook'
