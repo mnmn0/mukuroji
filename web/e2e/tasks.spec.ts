@@ -2734,6 +2734,7 @@ function createMockPlanningSnapshot(
       teamId: workItem.teamId,
       title: workItem.title,
     })),
+    updateTargets: [],
     criticalPath: {
       entityIds: [],
       slackByEntityId: {},
@@ -7405,6 +7406,15 @@ test.describe('authenticated task page', () => {
     await expect.poll(() => analyticsState.queryInputs.at(-1)?.widgets.map(
       (widget) => widget.id,
     )).toEqual(analyticsReportFixtures[0].widgets.map((widget) => widget.id))
+  })
+
+  test('Analyticsの非canonical queryは現行URLへ戻して表示を継続する', async ({ page }) => {
+    await mockAnalyticsReportsPage(page)
+
+    await page.goto('/reports?tracking=legacy')
+
+    await expect(page.getByRole('heading', { name: 'Delivery health' })).toBeVisible()
+    await expect.poll(() => new URL(page.url()).searchParams.get('v')).toBe('1')
   })
 
   test('Analyticsレポートはchart groupとtable evidenceを表示する', async ({ page }) => {
