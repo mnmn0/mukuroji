@@ -26,9 +26,9 @@
 ### PR bot レビュー
 
 - レビューレディー PR を push したら、GitHub PR の `chatgpt-codex-connector[bot]` のレビューコメントとリアクションを確認する。`👀` はレビュー中、`👍` は指摘なしだが、期待するbot actorが最新push後に付けたリアクションである場合だけ有効とする。bot review commentがある場合は `Reviewed commit: <current full head SHA>` を照合し、no-findingでリアクションだけの場合はcurrent headに新しいpushや未完了レビューがないことも確認する。P1 などのレビューコメントは未完了として扱う。
-- 同じPRの GitHub Actions Checks で、対象commitの全workflowが `completed` / `success` になることを確認する。`in_progress`、`queued`、`failure`、`cancelled`、`timed_out` は完了扱いにしない。
-- CodeRabbit のレビューは PR の Conversation に `@coderabbitai review` とコメントして開始し、CodeRabbit の `Review finished` コメントと `CodeRabbit` status/check の `success` を開始後およそ20分を目安に確認する。rate limit、skip、triggered、pending はレビュー完了扱いにしない。
-- `chatgpt-codex-connector[bot]` の `👍`、CodeRabbit の actionable commentなしの `Review finished`、対象commitの全CI成功がそろうまでPRを完了扱いにしない。どちらかのBotに指摘がある場合、またはCIが失敗した場合は、原因を修正して必要な検証を再実行し、commit と push 後に両方のBotとCIを再確認する。修正後にBotが自動開始されない場合は、各Botのレビュー開始コメントを再投稿してから完了状態を確認する。
+- 同じPRの GitHub Actions Checks で、workflow の event / `paths` と対象commitの変更ファイルから適用対象を判定し、適用対象のworkflowだけが `completed` / `success` になることを確認する。path-filtered workflow が対象外で未実行または意図的に `skipped` の場合は、workflow path、event、対象commitのfull SHA、変更ファイル、`paths` 判定、GitHub上の未実行 / `skipped` 結果をrelease evidenceとして記録する。適用対象の `in_progress`、`queued`、`skipped`、`failure`、`cancelled`、`timed_out` は完了扱いにしない。
+- CodeRabbit のレビューは PR の Conversation に `@coderabbitai review` とコメントして開始し、開始コメントのURL/ID、対象commitのfull SHA、開始時刻を記録する。CodeRabbit の `Review finished` コメントと `CodeRabbit` status/check の `success` を開始後およそ20分を目安に確認する。rate limit、skip、triggered、pending はレビュー完了扱いにしない。rate limit の場合は、rate-limit応答、対象SHA、開始コメント、確認時刻をrelease evidenceとして記録し、サービスが示す待機時間（示されない場合は約20分）後、または利用可能になった時点で同じ対象SHAに対して再試行する。新しいcommitをpushした場合は開始コメントと待機時間をリセットする。rate limitが続く場合は指摘なしとはみなさず、PR完了を保留して外部blockerとして報告する。
+- `chatgpt-codex-connector[bot]` の `👍`、CodeRabbit の actionable commentなしの `Review finished`、適用対象workflowの全CI成功、対象外path-filtered workflowのrelease evidenceがそろうまでPRを完了扱いにしない。どちらかのBotに指摘がある場合、またはCIが失敗した場合は、原因を修正して必要な検証を再実行し、commit と push 後に両方のBotとCIを再確認する。修正後にBotが自動開始されない場合は、各Botのレビュー開始コメントを再投稿してから完了状態を確認する。
 
 ## ディレクトリ
 

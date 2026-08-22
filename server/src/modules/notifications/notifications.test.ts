@@ -356,6 +356,42 @@ describe('notification store', () => {
     expect(put?.input.ExpressionAttributeValues).toEqual({ ':version': 1 })
   })
 
+  test('rejects a notification version that cannot be incremented safely', async () => {
+    const row = createNotificationRow({ version: Number.MAX_SAFE_INTEGER })
+    let putCount = 0
+    const recording = createClient(({ constructor }) => {
+      if (constructor.name === 'QueryCommand') {
+        return { Items: [row] }
+      }
+      if (constructor.name === 'GetCommand') {
+        return { Item: row }
+      }
+      if (constructor.name === 'PutCommand') {
+        putCount += 1
+      }
+      return {}
+    })
+    const page = await recording.client.list({
+      workspaceId: 'workspace-1',
+      memberKey: 'member@example.com',
+      limit: 1,
+      now: new Date('2026-07-12T13:00:00.000Z'),
+    })
+    const notification = page.notifications[0]
+    if (!notification) {
+      throw new Error('Expected a notification with the maximum safe version.')
+    }
+
+    await expect(recording.client.update({
+      workspaceId: 'workspace-1',
+      memberKey: 'member@example.com',
+      notificationId: notification.id,
+      action: 'mark-read',
+      now: new Date('2026-07-12T13:00:00.000Z'),
+    })).rejects.toMatchObject({ code: 'InvalidNotificationData', status: 503 })
+    expect(putCount).toBe(0)
+  })
+
   test('reapplies the current visibility projection to an updated notification response', async () => {
     const row = createNotificationRow({
       issueId: undefined,
@@ -544,6 +580,33 @@ describe('notification store', () => {
       Limit: 250,
       IndexName: 'RecipientStatusIndex',
     })
+  })
+
+  test('fails closed when an expired snooze version cannot be incremented safely', async () => {
+    const row = createNotificationRow({
+      version: Number.MAX_SAFE_INTEGER,
+      inboxState: 'snoozed',
+      recipientStatusKey: 'workspace-1#member@example.com#snoozed',
+      snoozedUntil: '2026-07-12T12:00:00.000Z',
+    })
+    let putCount = 0
+    const recording = createClient(({ constructor, input }) => {
+      if (constructor.name === 'QueryCommand' && input.IndexName) {
+        return { Items: [row] }
+      }
+      if (constructor.name === 'PutCommand') {
+        putCount += 1
+      }
+      return {}
+    })
+
+    await expect(recording.client.list({
+      workspaceId: 'workspace-1',
+      memberKey: 'member@example.com',
+      limit: 1,
+      now: new Date('2026-07-12T13:00:00.000Z'),
+    })).rejects.toMatchObject({ code: 'InvalidNotificationData', status: 503 })
+    expect(putCount).toBe(0)
   })
 
   test('fails closed when expired-snooze maintenance reaches its page cap', async () => {
@@ -808,11 +871,15 @@ describe('notification store', () => {
       memberKey: 'member@example.com',
       limit: 1,
     })
+    const notification = page.notifications[0]
+    if (!notification) {
+      throw new Error('Expected a notification for the other recipient.')
+    }
 
     await expect(recording.client.update({
       workspaceId: 'workspace-1',
       memberKey: 'other@example.com',
-      notificationId: page.notifications[0]?.id ?? '',
+      notificationId: notification.id,
       action: 'mark-read',
     })).rejects.toMatchObject({ code: 'InvalidNotificationId', status: 400 })
   })

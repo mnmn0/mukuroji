@@ -690,7 +690,7 @@ export class DynamoDbNotificationsClient implements NotificationClient {
         const state: NotificationState = readTimestamp(next.readAt) ? 'read' : 'unread'
         next.inboxState = state
         next.recipientStatusKey = createRecipientStatusKey(recipientKey, state)
-        next.version = currentVersion + 1
+        next.version = incrementNotificationVersion(currentVersion)
         next.updatedAt = now.toISOString()
         try {
           await this.documentClient.send(new PutCommand({
@@ -899,7 +899,7 @@ function applyNotificationAction(
   next.itemType = 'notification'
   next.inboxState = state
   next.recipientStatusKey = createRecipientStatusKey(recipientKey, state)
-  next.version = currentVersion + 1
+  next.version = incrementNotificationVersion(currentVersion)
   next.updatedAt = timestamp
   return next
 }
@@ -1025,6 +1025,14 @@ function toNotificationItem(
 /** Creates the stable error for malformed persisted notification data. */
 function invalidNotificationData() {
   return new NotificationError(503, 'InvalidNotificationData', 'Stored notification data is invalid.')
+}
+
+/** Returns the next notification version while rejecting unsafe integer overflow. */
+function incrementNotificationVersion(currentVersion: number) {
+  if (currentVersion >= Number.MAX_SAFE_INTEGER) {
+    throw invalidNotificationData()
+  }
+  return currentVersion + 1
 }
 
 /** Returns whether a persisted optional notification timestamp is present but invalid. */
