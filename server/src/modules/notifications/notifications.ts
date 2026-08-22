@@ -1366,7 +1366,7 @@ function readNotificationInputTimestamp(value: unknown) {
 function hasValidTimestampComponents(value: string, requireSeconds: boolean) {
   const match = (requireSeconds
     ? /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/u
-    : /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/u
+    : /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})$/u
   ).exec(value)
   if (!match) {
     return false

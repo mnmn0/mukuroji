@@ -390,11 +390,11 @@ describe('notification store', () => {
       memberKey: 'member@example.com',
       notificationId: listed.notifications[0]?.id ?? '',
       action: 'snooze',
-      snoozedUntil: '2026-08-23T12:00:00.1234Z',
+      snoozedUntil: '2026-08-23T12:00:00.1234+0100',
       now: new Date('2026-07-12T13:00:00.000Z'),
     })
 
-    expect(updated.snoozedUntil).toBe('2026-08-23T12:00:00.123Z')
+    expect(updated.snoozedUntil).toBe('2026-08-23T11:00:00.123Z')
   })
 
   test('rejects a notification version that cannot be incremented safely', async () => {
