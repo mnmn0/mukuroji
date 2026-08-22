@@ -123,6 +123,7 @@ describe('notification store', () => {
       }),
       createNotificationRow({ itemType: 'preferences', notificationKey: 'not-preferences' }),
       createNotificationRow({ recipientStatusKey: 'workspace-1#member@example.com#read' }),
+      createNotificationRow({ recipientStatusKey: 'workspace-1#member@example.com#unread ' }),
       createNotificationRow({
         inAppVisible: false,
         eventId: undefined,
@@ -133,6 +134,18 @@ describe('notification store', () => {
       createNotificationRow({ snoozedUntil: 'not-a-timestamp' }),
       createNotificationRow({ occurredAt: undefined }),
       createNotificationRow({ notificationKey: 'not-a-date#evt-1' }),
+      createNotificationRow({
+        notificationKey: '2026-02-30T12:00:00.000Z#evt-1',
+        occurredAt: '2026-02-30T12:00:00.000Z',
+      }),
+      createNotificationRow({
+        notificationKey: '2026-02-30 12:00:00#evt-1',
+        occurredAt: '2026-02-30 12:00:00',
+      }),
+      createNotificationRow({
+        notificationKey: '+002026-02-30T12:00:00.000Z#evt-1',
+        occurredAt: '+002026-02-30T12:00:00.000Z',
+      }),
     ]
 
     for (const row of invalidRows) {

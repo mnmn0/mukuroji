@@ -459,7 +459,7 @@ export class DynamoDbNotificationsClient implements NotificationClient {
     return this.updateNotification(input, recipientKey, now)
   }
 
-  /** Notification state を保存済み version の CAS で更新します。 */
+  /** Updates a notification state with a compare-and-set on the stored version. */
   private async updateNotification(
     input: UpdateNotificationInput,
     recipientKey: string,
@@ -931,6 +931,7 @@ function toNotificationItem(
   if (
     value.itemType !== 'notification' ||
     !recipientStatusKey ||
+    value.recipientStatusKey !== recipientStatusKey ||
     readPositiveInteger(value.version) === undefined
   ) {
     throw invalidNotificationData()
@@ -962,9 +963,13 @@ function toNotificationItem(
   const occurredAt = readTimestamp(storedOccurredAt)
   if (
     !notificationKey ||
+    value.notificationKey !== notificationKey ||
     !eventId ||
+    value.eventId !== eventId ||
     !eventType ||
+    value.eventType !== eventType ||
     !storedOccurredAt ||
+    value.occurredAt !== storedOccurredAt ||
     !occurredAt ||
     notificationKey !== `${storedOccurredAt}#${eventId}`
   ) {
@@ -1024,7 +1029,11 @@ function invalidNotificationData() {
 
 /** Returns whether a persisted optional notification timestamp is present but invalid. */
 function isInvalidStoredTimestamp(value: unknown) {
-  return value !== undefined && !readTimestamp(value)
+  return value !== undefined && (
+    typeof value !== 'string' ||
+    value !== value.trim() ||
+    !readTimestamp(value)
+  )
 }
 
 function matchesNotificationFilter(
@@ -1291,9 +1300,26 @@ function readPlanningNotificationKind(
     : undefined
 }
 
+/** Reads an ISO-compatible timestamp while rejecting calendar-overflow dates. */
 function readTimestamp(value: unknown) {
   const text = readText(value)
-  return text && Number.isFinite(Date.parse(text)) ? new Date(text).toISOString() : undefined
+  return text &&
+    hasValidTimestampCalendarDate(text) &&
+    Number.isFinite(Date.parse(text))
+    ? new Date(text).toISOString()
+    : undefined
+}
+
+/** Returns whether the calendar date prefix of a timestamp is a real date. */
+function hasValidTimestampCalendarDate(value: string) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(value)
+  if (!match) {
+    return false
+  }
+  const parsed = new Date(`${match[1]}-${match[2]}-${match[3]}T00:00:00.000Z`)
+  return parsed.getUTCFullYear() === Number(match[1]) &&
+    parsed.getUTCMonth() + 1 === Number(match[2]) &&
+    parsed.getUTCDate() === Number(match[3])
 }
 
 function readPositiveInteger(value: unknown) {
