@@ -123,6 +123,11 @@ describe('notification store', () => {
       }),
       createNotificationRow({ itemType: 'preferences', notificationKey: 'not-preferences' }),
       createNotificationRow({ recipientStatusKey: 'workspace-1#member@example.com#read' }),
+      createNotificationRow({
+        inAppVisible: false,
+        eventId: undefined,
+        notificationId: undefined,
+      }),
     ]
 
     for (const row of invalidRows) {

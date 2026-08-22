@@ -948,15 +948,15 @@ function toNotificationItem(
   ) {
     throw invalidNotificationData()
   }
-  if (value.inAppVisible === false) {
-    return undefined
-  }
   const notificationKey = readText(value.notificationKey)
   const eventId = readText(value.eventId) ?? readText(value.notificationId)
   const eventType = readText(value.eventType)
   const occurredAt = readTimestamp(value.occurredAt) ?? notificationKey?.split('#')[0]
   if (!notificationKey || !eventId || !eventType || !occurredAt) {
     throw invalidNotificationData()
+  }
+  if (value.inAppVisible === false) {
+    return undefined
   }
   const deepLink = readText(value.deepLink)
   return {
