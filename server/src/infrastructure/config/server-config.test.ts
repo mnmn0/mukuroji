@@ -22,6 +22,20 @@ test('loads stable local server defaults without mutating the environment', () =
   expect(environment).toEqual({ NODE_ENV: 'test' })
 })
 
+for (const legacyName of [
+  'MUKUROJI_WORK_ITEMS_TABLE',
+  'MUKUROJI_TEAM_ISSUES_TABLE',
+  'TEAM_ISSUES_TABLE_NAME',
+]) {
+  test(`rejects the removed Work Items environment alias: ${legacyName}`, () => {
+    expect(() => loadServerConfig({
+      [legacyName]: 'legacy-work-items-table',
+    }, { localBun: true })).toThrow(
+      `${legacyName} is no longer supported. Use WORK_ITEMS_TABLE_NAME.`,
+    )
+  })
+}
+
 test('normalizes explicit endpoints, origins, and production cursor validation', () => {
   const config = loadServerConfig({
     ALLOWED_ORIGINS: ' https://app.example.com,https://admin.example.com ',
