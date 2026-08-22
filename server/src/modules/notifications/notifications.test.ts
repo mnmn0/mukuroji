@@ -115,6 +115,13 @@ describe('notification store', () => {
       createNotificationRow({ itemType: undefined }),
       createNotificationRow({ recipientStatusKey: undefined }),
       createNotificationRow({ version: undefined }),
+      createNotificationRow({
+        itemType: 'migration',
+        notificationKey: 'not-a-retired-marker',
+        recipientStatusKey: undefined,
+        version: undefined,
+      }),
+      createNotificationRow({ recipientStatusKey: 'workspace-1#member@example.com#read' }),
     ]
 
     for (const row of invalidRows) {
@@ -370,7 +377,10 @@ describe('notification store', () => {
       },
       {
         action: 'mark-unread' as const,
-        row: createNotificationRow({ readAt: '2026-07-12T12:30:00.000Z' }),
+        row: createNotificationRow({
+          readAt: '2026-07-12T12:30:00.000Z',
+          recipientStatusKey: 'workspace-1#member@example.com#read',
+        }),
         expectedState: 'unread',
       },
       {

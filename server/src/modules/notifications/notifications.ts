@@ -915,13 +915,33 @@ function toNotificationItem(
   if (value.recipientKey !== recipientKey) {
     throw invalidNotificationData()
   }
-  if (value.itemType === 'preferences' || value.itemType === 'migration') {
+  if (value.itemType === 'preferences') {
     return undefined
   }
+  if (value.itemType === 'migration') {
+    if (value.notificationKey === '!MIGRATION#STATUS-V1') {
+      return undefined
+    }
+    throw invalidNotificationData()
+  }
+  const recipientStatusKey = readText(value.recipientStatusKey)
   if (
     value.itemType !== 'notification' ||
-    !readText(value.recipientStatusKey) ||
+    !recipientStatusKey ||
     readPositiveInteger(value.version) === undefined
+  ) {
+    throw invalidNotificationData()
+  }
+  const state = resolveNotificationState(value, now)
+  const snoozedUntil = readTimestamp(value.snoozedUntil)
+  const isExpiredSnoozePendingWake =
+    (state === 'read' || state === 'unread') &&
+    snoozedUntil !== undefined &&
+    Date.parse(snoozedUntil) <= now.getTime() &&
+    recipientStatusKey === createRecipientStatusKey(recipientKey, 'snoozed')
+  if (
+    recipientStatusKey !== createRecipientStatusKey(recipientKey, state) &&
+    !isExpiredSnoozePendingWake
   ) {
     throw invalidNotificationData()
   }
@@ -972,10 +992,10 @@ function toNotificationItem(
       ? { planningNotificationKind: readPlanningNotificationKind(value.planningNotificationKind) }
       : {}),
     occurredAt,
-    state: resolveNotificationState(value, now),
+    state,
     ...(readTimestamp(value.readAt) ? { readAt: readTimestamp(value.readAt) } : {}),
     ...(readTimestamp(value.archivedAt) ? { archivedAt: readTimestamp(value.archivedAt) } : {}),
-    ...(readTimestamp(value.snoozedUntil) ? { snoozedUntil: readTimestamp(value.snoozedUntil) } : {}),
+    ...(snoozedUntil ? { snoozedUntil } : {}),
   }
 }
 
