@@ -5,12 +5,10 @@ import {
   DEFAULT_NOTIFICATION_PREFERENCES,
   DynamoDbNotificationsClient,
   NOTIFICATION_PREFERENCES_KEY,
-  NOTIFICATION_STATUS_MIGRATION_KEY,
   NotificationError,
   createNotificationDeliveryPlan,
   createNotificationRecipientKey,
   parseStoredNotificationPreferences,
-  type NotificationItem,
   type NotificationAction,
   type NotificationState,
 } from './notifications'
@@ -48,26 +46,11 @@ function createClient(
     constructor: { name: string }
     input: Record<string, unknown>
   }) => unknown | Promise<unknown>,
-  options: { migrationComplete?: boolean } = {},
 ) {
   const commands: Array<{ name: string; input: Record<string, unknown> }> = []
   const documentClient = {
     async send(command: { constructor: { name: string }; input: Record<string, unknown> }) {
       commands.push({ name: command.constructor.name, input: command.input })
-      const key = command.input.Key as Record<string, unknown> | undefined
-      if (
-        command.constructor.name === 'GetCommand' &&
-        key?.notificationKey === NOTIFICATION_STATUS_MIGRATION_KEY &&
-        options.migrationComplete !== false
-      ) {
-        return {
-          Item: {
-            recipientKey: key.recipientKey,
-            notificationKey: NOTIFICATION_STATUS_MIGRATION_KEY,
-            itemType: 'migration',
-          },
-        }
-      }
       return await send(command)
     },
   } as unknown as DynamoDBDocumentClient
@@ -127,60 +110,120 @@ describe('notification store', () => {
     })
   })
 
-  test('backfills pre-index notification rows once before filtered reads', async () => {
-    let baseQueryCount = 0
-    let migratedRow: Record<string, unknown> | undefined
-    const recording = createClient(({ constructor, input }) => {
-      if (constructor.name === 'GetCommand') {
-        return {}
-      }
-      if (constructor.name === 'QueryCommand') {
+  test('fails closed when notification rows do not have the current row schema', async () => {
+    const invalidRows: Array<Record<string, unknown>> = [
+      createNotificationRow({ itemType: undefined }),
+      createNotificationRow({ recipientStatusKey: undefined }),
+      createNotificationRow({ version: undefined }),
+      createNotificationRow({
+        itemType: 'migration',
+        notificationKey: 'not-a-retired-marker',
+        recipientStatusKey: undefined,
+        version: undefined,
+      }),
+      createNotificationRow({ itemType: 'preferences', notificationKey: 'not-preferences' }),
+      createNotificationRow({ recipientStatusKey: 'workspace-1#member@example.com#read' }),
+      createNotificationRow({ recipientStatusKey: 'workspace-1#member@example.com#unread ' }),
+      createNotificationRow({
+        inAppVisible: false,
+        eventId: undefined,
+        notificationId: 'evt-1',
+      }),
+      createNotificationRow({ archivedAt: 'not-a-timestamp' }),
+      createNotificationRow({ readAt: 'not-a-timestamp' }),
+      createNotificationRow({ snoozedUntil: 'not-a-timestamp' }),
+      createNotificationRow({ occurredAt: undefined }),
+      createNotificationRow({ notificationKey: 'not-a-date#evt-1' }),
+      createNotificationRow({
+        notificationKey: '2026-02-30T12:00:00.000Z#evt-1',
+        occurredAt: '2026-02-30T12:00:00.000Z',
+      }),
+      createNotificationRow({
+        notificationKey: '2026-02-30 12:00:00#evt-1',
+        occurredAt: '2026-02-30 12:00:00',
+      }),
+      createNotificationRow({
+        notificationKey: '+002026-02-30T12:00:00.000Z#evt-1',
+        occurredAt: '+002026-02-30T12:00:00.000Z',
+      }),
+      createNotificationRow({
+        notificationKey: '2026-01-01T24:00:00.000Z#evt-1',
+        occurredAt: '2026-01-01T24:00:00.000Z',
+      }),
+      createNotificationRow({
+        notificationKey: '2026-01-01T01:00:00.000+01:00#evt-1',
+        occurredAt: '2026-01-01T01:00:00.000+01:00',
+      }),
+      createNotificationRow({ teamId: 42, projectId: undefined }),
+      createNotificationRow({ teamId: undefined, issueId: 'issue-without-team' }),
+      createNotificationRow({
+        teamId: undefined,
+        issueId: undefined,
+        triageEntryId: 'triage-without-team',
+      }),
+      createNotificationRow({ reasons: 'assignee' }),
+      createNotificationRow({ reasons: ['assignee', 42] }),
+      createNotificationRow({ inAppVisible: 'false' }),
+    ]
+
+    for (const row of invalidRows) {
+      const recording = createClient(({ constructor, input }) => {
+        if (constructor.name !== 'QueryCommand') {
+          return {}
+        }
         if (input.IndexName) {
           return { Items: [] }
         }
-        baseQueryCount += 1
-        return {
-          Items: baseQueryCount === 1
-            ? [createNotificationRow({
-                entityId: 'team/core/issue/notification-foundations',
-                inboxState: undefined,
-                issueId: undefined,
-                itemType: undefined,
-                recipientStatusKey: undefined,
-                version: undefined,
-              })]
-            : migratedRow ? [migratedRow] : [],
-        }
+        return { Items: [row] }
+      })
+
+      await expect(recording.client.list({
+        workspaceId: 'workspace-1',
+        memberKey: 'member@example.com',
+        limit: 10,
+        now: new Date('2026-07-12T13:00:00.000Z'),
+      })).rejects.toMatchObject({
+        code: 'InvalidNotificationData',
+        status: 503,
+      })
+    }
+  })
+
+  test('ignores retired notification migration marker rows', async () => {
+    const recording = createClient(({ constructor, input }) => {
+      if (constructor.name !== 'QueryCommand') {
+        return {}
       }
-      if (constructor.name === 'PutCommand') {
-        const item = input.Item as Record<string, unknown>
-        if (item.notificationKey !== NOTIFICATION_STATUS_MIGRATION_KEY) {
-          migratedRow = item
-        }
+      if (input.IndexName) {
+        return { Items: [] }
       }
-      return {}
-    }, { migrationComplete: false })
+      return {
+        Items: [
+          createNotificationRow({
+            notificationKey: '!MIGRATION#STATUS-V1',
+            itemType: 'migration',
+            recipientStatusKey: undefined,
+            version: undefined,
+          }),
+          createNotificationRow({
+            notificationKey: NOTIFICATION_PREFERENCES_KEY,
+            itemType: 'preferences',
+            recipientStatusKey: undefined,
+          }),
+          createNotificationRow(),
+        ],
+      }
+    })
 
     const page = await recording.client.list({
       workspaceId: 'workspace-1',
       memberKey: 'member@example.com',
-      limit: 1,
+      limit: 10,
       now: new Date('2026-07-12T13:00:00.000Z'),
     })
 
     expect(page.notifications).toHaveLength(1)
-    expect(migratedRow).toMatchObject({
-      inboxState: 'unread',
-      issueId: 'notification-foundations',
-      itemType: 'notification',
-      recipientStatusKey: 'workspace-1#member@example.com#unread',
-      version: 1,
-    })
-    expect(recording.commands.filter((command) =>
-      command.name === 'PutCommand' &&
-      (command.input.Item as Record<string, unknown>)?.notificationKey ===
-        NOTIFICATION_STATUS_MIGRATION_KEY
-    )).toHaveLength(1)
+    expect(page.notifications[0]?.eventId).toBe('evt-1')
   })
 
   test('lists only currently visible active notifications and binds cursors to filters', async () => {
@@ -202,12 +245,14 @@ describe('notification store', () => {
             }),
             createNotificationRow({
               notificationKey: '2026-07-12T11:30:00.000Z#evt-in-app-disabled',
+              occurredAt: '2026-07-12T11:30:00.000Z',
               eventId: 'evt-in-app-disabled',
               notificationId: 'evt-in-app-disabled',
               inAppVisible: false,
             }),
             createNotificationRow({
               notificationKey: '2026-07-12T11:00:00.000Z#evt-hidden',
+              occurredAt: '2026-07-12T11:00:00.000Z',
               eventId: 'evt-hidden',
               notificationId: 'evt-hidden',
               projectId: 'hidden',
@@ -304,7 +349,7 @@ describe('notification store', () => {
       memberKey: 'member@example.com',
       notificationId: listed.notifications[0]?.id ?? '',
       action: 'snooze',
-      snoozedUntil: '2026-07-13T09:00:00.000Z',
+      snoozedUntil: '2026-08-23T12:00Z',
       now: new Date('2026-07-12T13:00:00.000Z'),
       isVisible: (notification) => {
         notification.projectId = 'current-project'
@@ -314,7 +359,7 @@ describe('notification store', () => {
 
     expect(updated).toMatchObject({
       state: 'snoozed',
-      snoozedUntil: '2026-07-13T09:00:00.000Z',
+      snoozedUntil: '2026-08-23T12:00:00.000Z',
     })
     expect(savedRow).toMatchObject({
       inboxState: 'snoozed',
@@ -323,7 +368,77 @@ describe('notification store', () => {
       version: 2,
     })
     const put = recording.commands.find((command) => command.name === 'PutCommand')
-    expect(put?.input.ConditionExpression).toContain('#version = :version')
+    expect(put?.input.ConditionExpression).toBe(
+      'attribute_exists(recipientKey) AND attribute_exists(notificationKey) AND #version = :version',
+    )
+    expect(put?.input.ExpressionAttributeValues).toEqual({ ':version': 1 })
+  })
+
+  test('normalizes snooze timestamps with high fractional precision', async () => {
+    let queryCount = 0
+    const recording = createClient(({ constructor }) => {
+      if (constructor.name === 'QueryCommand') {
+        queryCount += 1
+        return queryCount === 1 ? { Items: [] } : { Items: [createNotificationRow()] }
+      }
+      if (constructor.name === 'GetCommand') {
+        return { Item: createNotificationRow() }
+      }
+      return {}
+    })
+    const listed = await recording.client.list({
+      workspaceId: 'workspace-1',
+      memberKey: 'member@example.com',
+      limit: 1,
+      now: new Date('2026-07-12T13:00:00.000Z'),
+    })
+
+    const updated = await recording.client.update({
+      workspaceId: 'workspace-1',
+      memberKey: 'member@example.com',
+      notificationId: listed.notifications[0]?.id ?? '',
+      action: 'snooze',
+      snoozedUntil: '2026-08-23T12:00:00.1234+0100',
+      now: new Date('2026-07-12T13:00:00.000Z'),
+    })
+
+    expect(updated.snoozedUntil).toBe('2026-08-23T11:00:00.123Z')
+  })
+
+  test('rejects a notification version that cannot be incremented safely', async () => {
+    const row = createNotificationRow({ version: Number.MAX_SAFE_INTEGER })
+    let putCount = 0
+    const recording = createClient(({ constructor }) => {
+      if (constructor.name === 'QueryCommand') {
+        return { Items: [row] }
+      }
+      if (constructor.name === 'GetCommand') {
+        return { Item: row }
+      }
+      if (constructor.name === 'PutCommand') {
+        putCount += 1
+      }
+      return {}
+    })
+    const page = await recording.client.list({
+      workspaceId: 'workspace-1',
+      memberKey: 'member@example.com',
+      limit: 1,
+      now: new Date('2026-07-12T13:00:00.000Z'),
+    })
+    const notification = page.notifications[0]
+    if (!notification) {
+      throw new Error('Expected a notification with the maximum safe version.')
+    }
+
+    await expect(recording.client.update({
+      workspaceId: 'workspace-1',
+      memberKey: 'member@example.com',
+      notificationId: notification.id,
+      action: 'mark-read',
+      now: new Date('2026-07-12T13:00:00.000Z'),
+    })).rejects.toMatchObject({ code: 'InvalidNotificationData', status: 503 })
+    expect(putCount).toBe(0)
   })
 
   test('reapplies the current visibility projection to an updated notification response', async () => {
@@ -378,7 +493,10 @@ describe('notification store', () => {
       },
       {
         action: 'mark-unread' as const,
-        row: createNotificationRow({ readAt: '2026-07-12T12:30:00.000Z' }),
+        row: createNotificationRow({
+          readAt: '2026-07-12T12:30:00.000Z',
+          recipientStatusKey: 'workspace-1#member@example.com#read',
+        }),
         expectedState: 'unread',
       },
       {
@@ -464,11 +582,10 @@ describe('notification store', () => {
       inboxState: 'read',
       recipientStatusKey: 'workspace-1#member@example.com#read',
     })
-    expect(recording.commands.filter(({ input, name }) =>
+    expect(recording.commands.some(({ input, name }) =>
       name === 'GetCommand' &&
-      (input.Key as Record<string, unknown> | undefined)?.notificationKey ===
-        NOTIFICATION_STATUS_MIGRATION_KEY
-    )).toHaveLength(1)
+      isRecord(input.Key) && input.Key.notificationKey === '!MIGRATION#STATUS-V1'
+    )).toBeFalse()
   })
 
   test('wakes an expired snooze back into the unread timeline', async () => {
@@ -514,6 +631,33 @@ describe('notification store', () => {
     })
   })
 
+  test('fails closed when an expired snooze version cannot be incremented safely', async () => {
+    const row = createNotificationRow({
+      version: Number.MAX_SAFE_INTEGER,
+      inboxState: 'snoozed',
+      recipientStatusKey: 'workspace-1#member@example.com#snoozed',
+      snoozedUntil: '2026-07-12T12:00:00.000Z',
+    })
+    let putCount = 0
+    const recording = createClient(({ constructor, input }) => {
+      if (constructor.name === 'QueryCommand' && input.IndexName) {
+        return { Items: [row] }
+      }
+      if (constructor.name === 'PutCommand') {
+        putCount += 1
+      }
+      return {}
+    })
+
+    await expect(recording.client.list({
+      workspaceId: 'workspace-1',
+      memberKey: 'member@example.com',
+      limit: 1,
+      now: new Date('2026-07-12T13:00:00.000Z'),
+    })).rejects.toMatchObject({ code: 'InvalidNotificationData', status: 503 })
+    expect(putCount).toBe(0)
+  })
+
   test('fails closed when expired-snooze maintenance reaches its page cap', async () => {
     let wakeQueries = 0
     const recording = createClient(({ constructor, input }) => {
@@ -525,9 +669,12 @@ describe('notification store', () => {
       }
       wakeQueries += 1
       return {
-        Items: Array.from({ length: 250 }, (_, index) => ({
-          notificationKey: `future-snooze-${wakeQueries}-${index}`,
+        Items: Array.from({ length: 250 }, (_, index) => createNotificationRow({
+          notificationKey: `2026-07-12T12:00:00.000Z#future-snooze-${wakeQueries}-${index}`,
+          eventId: `future-snooze-${wakeQueries}-${index}`,
           snoozedUntil: '2099-07-12T13:00:00.000Z',
+          inboxState: 'snoozed',
+          recipientStatusKey: 'workspace-1#member@example.com#snoozed',
         })),
         LastEvaluatedKey: {
           recipientStatusKey: statusKey,
@@ -594,11 +741,13 @@ describe('notification store', () => {
               createNotificationRow(),
               createNotificationRow({
                 notificationKey: '2026-07-12T11:30:00.000Z#in-app-disabled',
+                occurredAt: '2026-07-12T11:30:00.000Z',
                 eventId: 'in-app-disabled',
                 inAppVisible: false,
               }),
               createNotificationRow({
                 notificationKey: '2026-07-12T11:00:00.000Z#hidden',
+                occurredAt: '2026-07-12T11:00:00.000Z',
                 eventId: 'hidden',
                 projectId: 'hidden',
               }),
@@ -771,12 +920,21 @@ describe('notification store', () => {
       memberKey: 'member@example.com',
       limit: 1,
     })
+    const notification = page.notifications[0]
+    if (!notification) {
+      throw new Error('Expected a notification for the other recipient.')
+    }
 
     await expect(recording.client.update({
       workspaceId: 'workspace-1',
       memberKey: 'other@example.com',
-      notificationId: (page.notifications[0] as NotificationItem).id,
+      notificationId: notification.id,
       action: 'mark-read',
     })).rejects.toMatchObject({ code: 'InvalidNotificationId', status: 400 })
   })
 })
+
+/** Narrows an unknown command input value to a plain record. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
