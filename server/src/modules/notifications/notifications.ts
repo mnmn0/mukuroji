@@ -909,12 +909,13 @@ function toNotificationItem(
   recipientKey: string,
   now: Date,
 ): NotificationItem | undefined {
-  if (
-    !value ||
-    value.recipientKey !== recipientKey ||
-    value.itemType === 'preferences' ||
-    value.inAppVisible === false
-  ) {
+  if (!value) {
+    return undefined
+  }
+  if (value.recipientKey !== recipientKey) {
+    throw invalidNotificationData()
+  }
+  if (value.itemType === 'preferences') {
     return undefined
   }
   if (
@@ -922,6 +923,9 @@ function toNotificationItem(
     !readText(value.recipientStatusKey) ||
     readPositiveInteger(value.version) === undefined
   ) {
+    throw invalidNotificationData()
+  }
+  if (value.inAppVisible === false) {
     return undefined
   }
   const notificationKey = readText(value.notificationKey)
@@ -929,7 +933,7 @@ function toNotificationItem(
   const eventType = readText(value.eventType)
   const occurredAt = readTimestamp(value.occurredAt) ?? notificationKey?.split('#')[0]
   if (!notificationKey || !eventId || !eventType || !occurredAt) {
-    return undefined
+    throw invalidNotificationData()
   }
   const deepLink = readText(value.deepLink)
   return {
@@ -973,6 +977,11 @@ function toNotificationItem(
     ...(readTimestamp(value.archivedAt) ? { archivedAt: readTimestamp(value.archivedAt) } : {}),
     ...(readTimestamp(value.snoozedUntil) ? { snoozedUntil: readTimestamp(value.snoozedUntil) } : {}),
   }
+}
+
+/** Creates the stable error for malformed persisted notification data. */
+function invalidNotificationData() {
+  return new NotificationError(503, 'InvalidNotificationData', 'Stored notification data is invalid.')
 }
 
 function matchesNotificationFilter(

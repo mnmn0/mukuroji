@@ -31,7 +31,7 @@ recipientStatusKey    = <recipientKey>#<unread|read|archived|snoozed>
 
 `RecipientStatusIndex` は `recipientStatusKey` と `notificationKey` で status ごとの timeline と実 unread 件数を query します。opaque notification ID と cursor は recipient、filter、last evaluated key に束縛し、別ユーザーや別 filter へ流用できません。
 
-Notification row は `recipientStatusKey`、`itemType: notification`、正の `version` を必須とする current schema で保存します。current schema でない row は request path で補完せず、timeline・unread count・mutation の対象から除外します。
+Notification row は `recipientStatusKey`、`itemType: notification`、正の `version` を必須とする current schema で保存します。current schema でない row は request path で補完せず、`InvalidNotificationData`（503）の fail-closed エラーとして扱います。
 
 read、archive、snooze は notification row に version 付きで保存します。snooze 期限を過ぎた row は次の Inbox/count read で read/unread state に戻ります。この解除処理は250件 × 4 page（最大1,000行）で正常に打ち切り、残りは次回の read へ持ち越します。cursor が進まない場合だけ `503` で fail closed します。`mark-all-read` は active unread row のみを更新し、archive や有効な snooze は解除しません。
 

@@ -111,33 +111,34 @@ describe('notification store', () => {
     })
   })
 
-  test('ignores notification rows that do not have the current row schema', async () => {
-    const recording = createClient(({ constructor, input }) => {
-      if (constructor.name !== 'QueryCommand') {
-        return {}
-      }
-      if (input.IndexName) {
-        return { Items: [] }
-      }
-      return {
-        Items: [
-          createNotificationRow({ itemType: undefined }),
-          createNotificationRow({ notificationKey: 'missing-status#evt-2', recipientStatusKey: undefined }),
-          createNotificationRow({ notificationKey: 'missing-version#evt-3', version: undefined }),
-          createNotificationRow(),
-        ],
-      }
-    })
+  test('fails closed when notification rows do not have the current row schema', async () => {
+    const invalidRows: Array<Record<string, unknown>> = [
+      createNotificationRow({ itemType: undefined }),
+      createNotificationRow({ recipientStatusKey: undefined }),
+      createNotificationRow({ version: undefined }),
+    ]
 
-    const page = await recording.client.list({
-      workspaceId: 'workspace-1',
-      memberKey: 'member@example.com',
-      limit: 10,
-      now: new Date('2026-07-12T13:00:00.000Z'),
-    })
+    for (const row of invalidRows) {
+      const recording = createClient(({ constructor, input }) => {
+        if (constructor.name !== 'QueryCommand') {
+          return {}
+        }
+        if (input.IndexName) {
+          return { Items: [] }
+        }
+        return { Items: [row] }
+      })
 
-    expect(page.notifications).toHaveLength(1)
-    expect(page.notifications[0]?.eventId).toBe('evt-1')
+      await expect(recording.client.list({
+        workspaceId: 'workspace-1',
+        memberKey: 'member@example.com',
+        limit: 10,
+        now: new Date('2026-07-12T13:00:00.000Z'),
+      })).rejects.toMatchObject({
+        code: 'InvalidNotificationData',
+        status: 503,
+      })
+    }
   })
 
   test('lists only currently visible active notifications and binds cursors to filters', async () => {
@@ -484,9 +485,11 @@ describe('notification store', () => {
       }
       wakeQueries += 1
       return {
-        Items: Array.from({ length: 250 }, (_, index) => ({
+        Items: Array.from({ length: 250 }, (_, index) => createNotificationRow({
           notificationKey: `future-snooze-${wakeQueries}-${index}`,
           snoozedUntil: '2099-07-12T13:00:00.000Z',
+          inboxState: 'snoozed',
+          recipientStatusKey: 'workspace-1#member@example.com#snoozed',
         })),
         LastEvaluatedKey: {
           recipientStatusKey: statusKey,
