@@ -916,7 +916,10 @@ function toNotificationItem(
     throw invalidNotificationData()
   }
   if (value.itemType === 'preferences') {
-    return undefined
+    if (value.notificationKey === NOTIFICATION_PREFERENCES_KEY) {
+      return undefined
+    }
+    throw invalidNotificationData()
   }
   if (value.itemType === 'migration') {
     if (value.notificationKey === '!MIGRATION#STATUS-V1') {

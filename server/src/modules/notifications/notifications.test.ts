@@ -121,6 +121,7 @@ describe('notification store', () => {
         recipientStatusKey: undefined,
         version: undefined,
       }),
+      createNotificationRow({ itemType: 'preferences', notificationKey: 'not-preferences' }),
       createNotificationRow({ recipientStatusKey: 'workspace-1#member@example.com#read' }),
     ]
 
@@ -162,6 +163,11 @@ describe('notification store', () => {
             itemType: 'migration',
             recipientStatusKey: undefined,
             version: undefined,
+          }),
+          createNotificationRow({
+            notificationKey: NOTIFICATION_PREFERENCES_KEY,
+            itemType: 'preferences',
+            recipientStatusKey: undefined,
           }),
           createNotificationRow(),
         ],
