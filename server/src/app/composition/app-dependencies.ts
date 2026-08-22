@@ -14,7 +14,6 @@ import type {
   AutomationInboundWebhookPort,
   AutomationInboundWebhookSecretStore,
   AutomationRecurringSchedulePort,
-  AutomationRepository,
   AutomationRuleTemplatePort,
 } from '../../modules/automation'
 import type { CollaborationClient } from '../../modules/collaboration/collaboration'
@@ -322,11 +321,6 @@ export type AppDependencyOverrides = Partial<
   DeveloperPlatformDependencies &
   OperationalDependencies
 > & {
-  /** Backward-compatible all-capability Automation adapter override for tests. */
-  automation?: AutomationRepository<
-    AutomationCompositionTransactionItem,
-    AutomationCompositionTransactionItem
-  >
   /** Test-only aggregate client converted to capability-scoped ports at composition. */
   enterpriseIdentity?: EnterpriseIdentityClient
 }

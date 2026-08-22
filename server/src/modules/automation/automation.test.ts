@@ -13,34 +13,48 @@ import {
   type RecurringWork,
 } from '@mukuroji/contracts'
 import {
+  type AutomationErrorCategory,
   AutomationError,
-  DynamoDbAutomationClient,
+} from './domain/automation-error'
+import {
   applyBulkOperation,
-  createAutomationActionId,
-  createAutomationExecutionId,
-  createPendingAutomationExecution,
-  createRecurringExecutionId,
-  ensureLocalAutomationTable,
-  evaluateAutomationCondition,
-  getRecurringOccurrences,
-  matchesAutomationTrigger,
-  normalizeAutomationActionFailure,
   previewBulkOperation,
   retryBulkOperation,
-  selectCatchUpOccurrences,
   undoBulkOperation,
-  validateCreateAutomationRuleInput,
-  validateCreateAutomationTemplateInput,
-  type AutomationErrorCategory,
+} from './application/bulk-operation-service'
+import {
+  createAutomationActionId,
+  createAutomationExecutionId,
+  createRecurringExecutionId,
+} from './application/execution-identifiers'
+import { createPendingAutomationExecution } from './application/pending-execution'
+import {
+  AutomationEngine,
+} from './application/execution-service'
+import {
+  DynamoDbAutomationRepository,
+  ensureLocalAutomationTable,
+} from './adapter-out/dynamodb/automation-repository'
+import {
+  evaluateAutomationCondition,
+  matchesAutomationTrigger,
   type AutomationEvent,
-  type AutomationExecutionClaimToken,
-  type BulkOperationAdapter,
-} from './automation'
+} from './domain/rule-evaluation'
+import {
+  getRecurringOccurrences,
+  selectCatchUpOccurrences,
+} from './domain/recurring-schedule'
+import { normalizeAutomationActionFailure } from './application/action-failure'
+import {
+  validateCreateAutomationTemplateInput,
+} from './domain/management-validation'
+import { validateCreateAutomationRuleInput } from './domain/rule-validation'
 import type {
   AutomationBulkOperationPort,
+  BulkOperationAdapter,
+  AutomationExecutionClaimToken,
   AutomationExecutionServicePort,
 } from './application/ports'
-import { AutomationEngine } from './application/execution-service'
 
 function createRule(overrides: Partial<AutomationRule> = {}): AutomationRule {
   return {
@@ -354,14 +368,14 @@ function createIdempotencyDocumentClient() {
       }
       return {}
     },
-  } as unknown as ConstructorParameters<typeof DynamoDbAutomationClient>[1]
+  } as unknown as ConstructorParameters<typeof DynamoDbAutomationRepository>[1]
   return { documentClient, items }
 }
 
 describe('automation management create idempotency', () => {
   test('returns the original rule for a normalized replay and rejects payload reuse', async () => {
     const { documentClient, items } = createIdempotencyDocumentClient()
-    const client = new DynamoDbAutomationClient('AutomationTable', documentClient)
+    const client = new DynamoDbAutomationRepository('AutomationTable', documentClient)
     const input = {
       name: 'Notify completed work',
       enabled: true,
@@ -393,7 +407,7 @@ describe('automation management create idempotency', () => {
 
   test('scopes template and recurring keys by resource kind and validates their fingerprints', async () => {
     const { documentClient } = createIdempotencyDocumentClient()
-    const client = new DynamoDbAutomationClient('AutomationTable', documentClient)
+    const client = new DynamoDbAutomationRepository('AutomationTable', documentClient)
     const templateInput = {
       kind: 'work-item' as const,
       name: 'Weekly review',
@@ -448,7 +462,7 @@ describe('automation management create idempotency', () => {
 
   test('pins server-resolved immutable template versions for rules and recurring work', async () => {
     const { documentClient } = createIdempotencyDocumentClient()
-    const client = new DynamoDbAutomationClient('AutomationTable', documentClient)
+    const client = new DynamoDbAutomationRepository('AutomationTable', documentClient)
     const templateV1 = await client.createTemplate('workspace-1', {
       kind: 'work-item',
       name: 'Pinned template',
@@ -578,7 +592,7 @@ describe('automation management create idempotency', () => {
 
   test('replays a pinned template application receipt after the current template is paused', async () => {
     const { documentClient } = createIdempotencyDocumentClient()
-    const client = new DynamoDbAutomationClient('AutomationTable', documentClient)
+    const client = new DynamoDbAutomationRepository('AutomationTable', documentClient)
     const template = await client.createTemplate('workspace-1', {
       kind: 'project',
       name: 'Incident project',
@@ -810,7 +824,7 @@ describe('automation management create idempotency', () => {
     })).toThrow('unsupported fields')
 
     const { documentClient } = createIdempotencyDocumentClient()
-    const client = new DynamoDbAutomationClient('AutomationTable', documentClient)
+    const client = new DynamoDbAutomationRepository('AutomationTable', documentClient)
     const template = await client.createTemplate('workspace-1', {
       kind: 'project',
       name: 'Immutable kind',
@@ -839,8 +853,8 @@ test('fails closed when current-list pagination repeats the same cursor', async 
       queryCalls += 1
       return { Items: [], LastEvaluatedKey: cursor }
     },
-  } as unknown as ConstructorParameters<typeof DynamoDbAutomationClient>[1]
-  const client = new DynamoDbAutomationClient('AutomationTable', documentClient)
+  } as unknown as ConstructorParameters<typeof DynamoDbAutomationRepository>[1]
+  const client = new DynamoDbAutomationRepository('AutomationTable', documentClient)
 
   await expect(client.listRules('workspace-1')).rejects.toMatchObject({
     code: 'AutomationPaginationCursorLoop',
@@ -887,8 +901,8 @@ test('claims only one template application runner and binds atomic completion to
       }
       return { Attributes: structuredClone(stored) }
     },
-  } as unknown as ConstructorParameters<typeof DynamoDbAutomationClient>[1]
-  const client = new DynamoDbAutomationClient('AutomationTable', documentClient)
+  } as unknown as ConstructorParameters<typeof DynamoDbAutomationRepository>[1]
+  const client = new DynamoDbAutomationRepository('AutomationTable', documentClient)
   const pending = {
     ...stored,
     target: { kind: 'project' as const, teamId: 'core' },
@@ -1220,8 +1234,8 @@ describe('automation execution safety', () => {
         commands.push(command)
         return commands.length === 1 ? { Items: [], LastEvaluatedKey: lastEvaluatedKey } : { Items: [] }
       },
-    } as unknown as ConstructorParameters<typeof DynamoDbAutomationClient>[1]
-    const client = new DynamoDbAutomationClient('AutomationTable', documentClient)
+    } as unknown as ConstructorParameters<typeof DynamoDbAutomationRepository>[1]
+    const client = new DynamoDbAutomationRepository('AutomationTable', documentClient)
 
     const firstPage = await client.listExecutions({ workspaceId: 'workspace-1', limit: 25 })
     await client.listExecutions({
@@ -1296,8 +1310,8 @@ describe('automation execution safety', () => {
           Items: [storageItem('succeeded-3', '2026-07-16T00:00:00.000Z')],
         }
       },
-    } as unknown as ConstructorParameters<typeof DynamoDbAutomationClient>[1]
-    const client = new DynamoDbAutomationClient('AutomationTable', documentClient)
+    } as unknown as ConstructorParameters<typeof DynamoDbAutomationRepository>[1]
+    const client = new DynamoDbAutomationRepository('AutomationTable', documentClient)
 
     const firstPage = await client.listExecutions({
       workspaceId: 'workspace-1',
@@ -1351,8 +1365,8 @@ describe('automation execution safety', () => {
           },
         }
       },
-    } as unknown as ConstructorParameters<typeof DynamoDbAutomationClient>[1]
-    const client = new DynamoDbAutomationClient('AutomationTable', documentClient)
+    } as unknown as ConstructorParameters<typeof DynamoDbAutomationRepository>[1]
+    const client = new DynamoDbAutomationRepository('AutomationTable', documentClient)
 
     const page = await client.listExecutions({
       workspaceId: 'workspace-1',
@@ -1449,8 +1463,8 @@ describe('automation execution safety', () => {
         }
         return {}
       },
-    } as unknown as ConstructorParameters<typeof DynamoDbAutomationClient>[1]
-    const client = new DynamoDbAutomationClient('AutomationTable', documentClient)
+    } as unknown as ConstructorParameters<typeof DynamoDbAutomationRepository>[1]
+    const client = new DynamoDbAutomationRepository('AutomationTable', documentClient)
     const failed = createExecution()
     const claimToken = {
       attempt: failed.attempts,
@@ -1513,8 +1527,8 @@ describe('automation execution safety', () => {
         commands.push(command)
         return {}
       },
-    } as unknown as ConstructorParameters<typeof DynamoDbAutomationClient>[1]
-    const client = new DynamoDbAutomationClient('AutomationTable', documentClient)
+    } as unknown as ConstructorParameters<typeof DynamoDbAutomationRepository>[1]
+    const client = new DynamoDbAutomationRepository('AutomationTable', documentClient)
     const pending = createExecution({
       status: 'pending',
       attempts: 0,
@@ -1554,8 +1568,8 @@ describe('automation execution safety', () => {
         commands.push(command)
         return {}
       },
-    } as unknown as ConstructorParameters<typeof DynamoDbAutomationClient>[1]
-    const client = new DynamoDbAutomationClient('AutomationTable', documentClient)
+    } as unknown as ConstructorParameters<typeof DynamoDbAutomationRepository>[1]
+    const client = new DynamoDbAutomationRepository('AutomationTable', documentClient)
     const pending = createExecution({
       ruleId: 'recurring:recurring-1',
       status: 'pending',
@@ -1666,8 +1680,8 @@ describe('automation execution safety', () => {
         }
         return { Item: structuredClone(stored) }
       },
-    } as unknown as ConstructorParameters<typeof DynamoDbAutomationClient>[1]
-    const client = new DynamoDbAutomationClient('AutomationTable', documentClient)
+    } as unknown as ConstructorParameters<typeof DynamoDbAutomationRepository>[1]
+    const client = new DynamoDbAutomationRepository('AutomationTable', documentClient)
     const firstLeaseExpiresAt = '2026-07-16T00:05:00.000Z'
     const secondLeaseExpiresAt = '2026-07-16T00:10:00.000Z'
 
@@ -1745,8 +1759,8 @@ describe('automation execution safety', () => {
           }],
         }
       },
-    } as unknown as ConstructorParameters<typeof DynamoDbAutomationClient>[1]
-    const client = new DynamoDbAutomationClient('AutomationTable', documentClient)
+    } as unknown as ConstructorParameters<typeof DynamoDbAutomationRepository>[1]
+    const client = new DynamoDbAutomationRepository('AutomationTable', documentClient)
 
     const results = await client.listDueExecutions(
       'schedule-03',
@@ -1773,8 +1787,8 @@ describe('automation execution safety', () => {
         commands.push(command)
         return {}
       },
-    } as unknown as ConstructorParameters<typeof DynamoDbAutomationClient>[1]
-    const client = new DynamoDbAutomationClient('AutomationTable', documentClient)
+    } as unknown as ConstructorParameters<typeof DynamoDbAutomationRepository>[1]
+    const client = new DynamoDbAutomationRepository('AutomationTable', documentClient)
     const rule = createRule({ rateLimit: { maxExecutions: 2, windowSeconds: 60 } })
     const event = createEvent()
     const now = new Date('2026-07-16T00:00:30.000Z')
@@ -1817,6 +1831,30 @@ describe('automation execution safety', () => {
     })
   })
 
+  test('rejects an execution with an invalid start time before reservation', async () => {
+    const documentClient = {
+      async send() {
+        throw new Error('Invalid executions must not reach persistence.')
+      },
+    } as unknown as ConstructorParameters<typeof DynamoDbAutomationRepository>[1]
+    const client = new DynamoDbAutomationRepository('AutomationTable', documentClient)
+    const rule = createRule({ rateLimit: { maxExecutions: 2, windowSeconds: 60 } })
+    const event = createEvent()
+    const execution = {
+      ...createPendingAutomationExecution(
+        rule,
+        event,
+        new Date('2026-07-16T00:00:30.000Z'),
+      ),
+      startedAt: 'not-a-timestamp',
+    }
+
+    await expect(client.reserveExecution(execution, event, rule)).rejects.toMatchObject({
+      category: 'invalid-input',
+      code: 'InvalidAutomationInput',
+    })
+  })
+
   test('creates a recurring execution with an exact enabled definition guard', async () => {
     const commands: Array<{ input: Record<string, unknown> }> = []
     const documentClient = {
@@ -1824,8 +1862,8 @@ describe('automation execution safety', () => {
         commands.push(command)
         return {}
       },
-    } as unknown as ConstructorParameters<typeof DynamoDbAutomationClient>[1]
-    const client = new DynamoDbAutomationClient('AutomationTable', documentClient)
+    } as unknown as ConstructorParameters<typeof DynamoDbAutomationRepository>[1]
+    const client = new DynamoDbAutomationRepository('AutomationTable', documentClient)
     const execution = createExecution({
       ruleId: 'recurring:recurring-1',
       ruleVersion: 3,
@@ -1891,8 +1929,8 @@ describe('automation execution safety', () => {
         }
         throw new Error(`Unexpected command: ${command.constructor.name}`)
       },
-    } as unknown as ConstructorParameters<typeof DynamoDbAutomationClient>[1]
-    const client = new DynamoDbAutomationClient('AutomationTable', documentClient)
+    } as unknown as ConstructorParameters<typeof DynamoDbAutomationRepository>[1]
+    const client = new DynamoDbAutomationRepository('AutomationTable', documentClient)
     const event = createEvent()
     const now = new Date('2026-07-16T00:00:30.000Z')
 
@@ -2290,8 +2328,8 @@ test('advances recurring operational state with a revision guard and due index u
         ? { Item: { scopeKey: 'workspace-1#automation', recordKey: 'RECURRING#recurring-1', entryType: 'recurring', ...recurring } }
         : {}
     },
-  } as unknown as ConstructorParameters<typeof DynamoDbAutomationClient>[1]
-  const client = new DynamoDbAutomationClient('AutomationTable', documentClient)
+  } as unknown as ConstructorParameters<typeof DynamoDbAutomationRepository>[1]
+  const client = new DynamoDbAutomationRepository('AutomationTable', documentClient)
 
   const advanced = await client.completeRecurringWork(
     recurring.workspaceId,
@@ -2326,8 +2364,8 @@ test('indexes enabled schedule-trigger rules and advances their operational slot
       transactionCommands.push(command)
       return {}
     },
-  } as unknown as ConstructorParameters<typeof DynamoDbAutomationClient>[1]
-  const createClient = new DynamoDbAutomationClient('AutomationTable', createDocumentClient)
+  } as unknown as ConstructorParameters<typeof DynamoDbAutomationRepository>[1]
+  const createClient = new DynamoDbAutomationRepository('AutomationTable', createDocumentClient)
   const created = await createClient.createRule('workspace-1', {
     name: 'Daily schedule',
     enabled: true,
@@ -2369,8 +2407,8 @@ test('indexes enabled schedule-trigger rules and advances their operational slot
           } }
         : {}
     },
-  } as unknown as ConstructorParameters<typeof DynamoDbAutomationClient>[1]
-  const completeClient = new DynamoDbAutomationClient('AutomationTable', completeDocumentClient)
+  } as unknown as ConstructorParameters<typeof DynamoDbAutomationRepository>[1]
+  const completeClient = new DynamoDbAutomationRepository('AutomationTable', completeDocumentClient)
   const completedAt = created.nextRunAt!
   const nextRunAt = new Date(new Date(completedAt).getTime() + 86_400_000).toISOString()
   const completed = await completeClient.completeScheduledRule(
@@ -2402,8 +2440,8 @@ test('creates bulk operations once and checkpoints them with revision CAS', asyn
       commands.push(command)
       return {}
     },
-  } as unknown as ConstructorParameters<typeof DynamoDbAutomationClient>[1]
-  const client = new DynamoDbAutomationClient('AutomationTable', documentClient)
+  } as unknown as ConstructorParameters<typeof DynamoDbAutomationRepository>[1]
+  const client = new DynamoDbAutomationRepository('AutomationTable', documentClient)
   const operation = createBulkOperationFixture({ revision: 1 })
 
   expect(await client.createBulkOperation(operation)).toBe(true)
@@ -2428,8 +2466,8 @@ test('creates bulk operations once and checkpoints them with revision CAS', asyn
     async send() {
       throw conflict
     },
-  } as unknown as ConstructorParameters<typeof DynamoDbAutomationClient>[1]
-  const conflictingClient = new DynamoDbAutomationClient(
+  } as unknown as ConstructorParameters<typeof DynamoDbAutomationRepository>[1]
+  const conflictingClient = new DynamoDbAutomationRepository(
     'AutomationTable',
     conflictingDocumentClient,
   )

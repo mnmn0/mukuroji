@@ -1,8 +1,6 @@
 /** Automation module public application and domain surface. */
 export {
-  DynamoDbAutomationClient,
   DynamoDbAutomationRepository,
-  type AutomationClient,
 } from './adapter-out/dynamodb/automation-repository'
 export { normalizeAutomationActionFailure } from './application/action-failure'
 export { AutomationEngine } from './application/execution-service'

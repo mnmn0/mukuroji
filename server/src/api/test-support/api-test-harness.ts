@@ -60,7 +60,7 @@ import {
 } from '../../modules/workspace-access'
 import {
   AutomationError,
-  type AutomationClient,
+  type AutomationBulkOperationPort,
   type AutomationInboundWebhookEndpointRecord,
   type AutomationInboundWebhookProvisioning,
 } from '../../modules/automation'
@@ -201,30 +201,29 @@ function resolveApiTestWorkItemSchedule(
 
 function createBulkOperationAutomationFake(initialOperation?: BulkOperation) {
   let storedOperation = initialOperation ? structuredClone(initialOperation) : undefined
-  return {
-    client: {
-      async getBulkOperation(_workspaceId: string, operationId: string) {
-        return storedOperation?.id === operationId
-          ? structuredClone(storedOperation)
-          : undefined
-      },
-      async createBulkOperation(operation: BulkOperation) {
-        if (storedOperation) return false
-        storedOperation = structuredClone(operation)
-        return true
-      },
-      async saveBulkOperation(operation: BulkOperation, expectedRevision: number) {
-        if (!storedOperation || storedOperation.revision !== expectedRevision) {
-          throw new AutomationError(
-            'conflict',
-            'BulkOperationRevisionConflict',
-            'Bulk operation was modified concurrently.',
-          )
-        }
-        storedOperation = structuredClone(operation)
-      },
-    } as unknown as AutomationClient,
+  const client: AutomationBulkOperationPort = {
+    async getBulkOperation(workspaceId: string, operationId: string) {
+      return storedOperation?.workspaceId === workspaceId && storedOperation.id === operationId
+        ? structuredClone(storedOperation)
+        : undefined
+    },
+    async createBulkOperation(operation: BulkOperation) {
+      if (storedOperation) return false
+      storedOperation = structuredClone(operation)
+      return true
+    },
+    async saveBulkOperation(operation: BulkOperation, expectedRevision: number) {
+      if (!storedOperation || storedOperation.revision !== expectedRevision) {
+        throw new AutomationError(
+          'conflict',
+          'BulkOperationRevisionConflict',
+          'Bulk operation was modified concurrently.',
+        )
+      }
+      storedOperation = structuredClone(operation)
+    },
   }
+  return { client }
 }
 
 function createInboundWebhookEndpointRecord(

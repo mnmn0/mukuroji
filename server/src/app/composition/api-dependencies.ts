@@ -212,7 +212,7 @@ export function createWorkItemConfigurationClient(): WorkItemConfigurationClient
  *
  * @returns A DynamoDB-backed Automation repository.
  */
-export function createAutomationClient(): DynamoDbAutomationRepository {
+export function createAutomationRepository(): DynamoDbAutomationRepository {
   const config = loadServerConfig()
   const dynamoDbClient = createDynamoDbClient()
 
@@ -982,13 +982,13 @@ export function createTriageActionReferenceValidator(
  * @returns Automation dependencies backed by configured production adapters.
  */
 export function createProductionAutomationDependencies(): AutomationDependencies {
-  const automation = createAutomationClient()
+  const automationRepository = createAutomationRepository()
   return {
-    ruleTemplates: automation,
-    inboundWebhooks: automation,
-    recurringSchedules: automation,
-    executions: automation,
-    bulkOperations: automation,
+    ruleTemplates: automationRepository,
+    inboundWebhooks: automationRepository,
+    recurringSchedules: automationRepository,
+    executions: automationRepository,
+    bulkOperations: automationRepository,
     automationInboundWebhookSecrets: createAutomationInboundWebhookSecretStore(),
   }
 }
@@ -1307,15 +1307,6 @@ export function overrideAppDependencies(
     },
     automation: {
       ...dependencies.automation,
-      ...(overrides.automation
-        ? {
-            ruleTemplates: overrides.automation,
-            inboundWebhooks: overrides.automation,
-            recurringSchedules: overrides.automation,
-            executions: overrides.automation,
-            bulkOperations: overrides.automation,
-          }
-        : {}),
       ...(overrides.ruleTemplates ? { ruleTemplates: overrides.ruleTemplates } : {}),
       ...(overrides.inboundWebhooks ? { inboundWebhooks: overrides.inboundWebhooks } : {}),
       ...(overrides.recurringSchedules

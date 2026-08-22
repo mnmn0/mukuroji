@@ -6,9 +6,9 @@ import {
 } from '@mukuroji/contracts'
 import {
   AutomationError,
-  DynamoDbAutomationClient,
-  type AutomationEvent,
-} from '../../automation'
+} from '../../domain/automation-error'
+import { DynamoDbAutomationRepository } from '../../adapter-out/dynamodb/automation-repository'
+import type { AutomationEvent } from '../../domain/rule-evaluation'
 import {
   createAutomationEventProcessor,
   parseAutomationStreamRecord,
@@ -40,8 +40,8 @@ describe('automation event handler', () => {
           ? { Items: [toRuleStorage(secondRule)] }
           : { Items: [toRuleStorage(firstRule)], LastEvaluatedKey: cursor }
       },
-    } as unknown as ConstructorParameters<typeof DynamoDbAutomationClient>[1]
-    const client = new DynamoDbAutomationClient('AutomationTable', documentClient)
+    } as unknown as ConstructorParameters<typeof DynamoDbAutomationRepository>[1]
+    const client = new DynamoDbAutomationRepository('AutomationTable', documentClient)
     const handled: string[] = []
     const processor = createAutomationEventProcessor(client, enabledAutomationEntitlement, {
       async handleEvent(rule) {

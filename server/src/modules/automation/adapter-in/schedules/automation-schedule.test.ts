@@ -7,9 +7,11 @@ import {
 } from '@mukuroji/contracts'
 import {
   AutomationError,
-  type AutomationInboundWebhookSecretCleanup,
-} from '../../automation'
-import type { AutomationFeatureEntitlementPort } from '../../application/ports'
+} from '../../domain/automation-error'
+import type {
+  AutomationFeatureEntitlementPort,
+  AutomationInboundWebhookSecretCleanup,
+} from '../../application/ports'
 import {
   processAutomationSchedule,
   processDueAutomationExecution,

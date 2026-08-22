@@ -6,7 +6,7 @@ import {
 import {
   createAuditEventsClient,
   createAutomationInboundWebhookSecretStore,
-  createAutomationClient,
+  createAutomationRepository,
   createPlanningClient,
   createWorkItemConfigurationClient,
 } from './api-dependencies'
@@ -15,7 +15,7 @@ import {
   processAutomationEventBatch,
   type AutomationScheduleEvent,
   AutomationEngine,
-  DynamoDbAutomationRepository,
+  type AutomationRuleTemplatePort,
   type DynamoStreamEvent,
   processAutomationSchedule,
   resolveAutomationScheduleProcessingTime,
@@ -35,12 +35,12 @@ import { createProductionTenantFeatureGate } from './tenant-administration'
 /**
  * Creates only the production ports used by Automation actions.
  *
- * @param automation - Automation persistence shared with the engine.
+ * @param automation - Focused template-version read used by Automation actions.
  * @param teamIssues - Canonical Work Item persistence shared with event processing.
  * @returns Explicit action dependencies without API-only or import-worker adapters.
  */
 function createAutomationActionDependencies(
-  automation: DynamoDbAutomationRepository,
+  automation: Pick<AutomationRuleTemplatePort, 'getTemplateVersion'>,
   teamIssues: DynamoDbTeamIssuesClient,
 ): AutomationActionExecutorDependencies {
   return {
@@ -68,18 +68,18 @@ function createAutomationActionDependencies(
  * @returns A handler for Automation DynamoDB stream batches.
  */
 export function createProductionAutomationEventHandler() {
-  const automationClient = createAutomationClient()
+  const automationRepository = createAutomationRepository()
   const teamIssues = new DynamoDbTeamIssuesClient()
   const actionExecutor = createAutomationActionExecutor(
-    createAutomationActionDependencies(automationClient, teamIssues),
+    createAutomationActionDependencies(automationRepository, teamIssues),
   )
   const tenantFeatureGate = createProductionTenantFeatureGate('automation')
   const processor = createAutomationEventProcessor(
-    automationClient,
+    automationRepository,
     {
       isAutomationEnabled: (workspaceId) => tenantFeatureGate.isEnabled(workspaceId),
     },
-    new AutomationEngine(automationClient, actionExecutor),
+    new AutomationEngine(automationRepository, actionExecutor),
     teamIssues,
   )
 
@@ -92,11 +92,11 @@ export function createProductionAutomationEventHandler() {
  * @returns A handler for due Automation work.
  */
 export function createProductionAutomationScheduleHandler() {
-  const automationClient = createAutomationClient()
+  const automationRepository = createAutomationRepository()
   const inboundWebhookSecrets = createAutomationInboundWebhookSecretStore()
   const actionExecutor = createAutomationActionExecutor(
     createAutomationActionDependencies(
-      automationClient,
+      automationRepository,
       new DynamoDbTeamIssuesClient(),
     ),
   )
@@ -106,7 +106,7 @@ export function createProductionAutomationScheduleHandler() {
     processAutomationSchedule(
       resolveAutomationScheduleProcessingTime(event),
       {
-        client: automationClient,
+        client: automationRepository,
         entitlement: {
           isAutomationEnabled: (workspaceId) => tenantFeatureGate.isEnabled(workspaceId),
         },
