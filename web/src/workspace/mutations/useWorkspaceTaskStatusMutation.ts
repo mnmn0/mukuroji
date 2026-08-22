@@ -7,7 +7,7 @@ import { TeamIssuesApiError } from '../../issues/api'
 import { updateWorkspaceTaskRemote } from '../../issues/mutations/updateWorkspaceTask'
 import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
 import type { MessageKey } from '../../shared/i18n/i18n'
-import type { ProjectTask } from '../../tasks/api'
+import type { CanonicalWorkItem } from '../../tasks/api'
 import {
   createWorkspaceTaskKey,
   replaceWorkspaceTask,
@@ -27,11 +27,11 @@ export type UseWorkspaceTaskStatusMutationOptions = {
   /** Wrapper that applies Enterprise session policy to authenticated requests. */
   guardAuthenticatedRequest: <Result>(request: Promise<Result>) => Promise<Result>
   /** SWR mutator for the canonical Workspace Work Item cache. */
-  mutateWorkItems: KeyedMutator<ProjectTask[]>
+  mutateWorkItems: KeyedMutator<CanonicalWorkItem[]>
   /** Localized message resolver. */
   t: (key: MessageKey) => string
   /** Current canonical Workspace Work Item projection. */
-  tasks: readonly ProjectTask[]
+  tasks: readonly CanonicalWorkItem[]
 }
 
 /**
@@ -42,9 +42,9 @@ export type WorkspaceTaskStatusMutationController = {
   errorMessage?: string
   /** Moves a Work Item to a validated workflow status and returns its persisted snapshot. */
   moveTaskStatus?: (
-    task: ProjectTask,
+    task: CanonicalWorkItem,
     workflowStatusId: string,
-  ) => Promise<ProjectTask | undefined>
+  ) => Promise<CanonicalWorkItem | undefined>
 }
 
 /**
@@ -67,7 +67,7 @@ export function useWorkspaceTaskStatusMutation({
   const [errorMessage, setErrorMessage] = useState<string>()
 
   const moveTaskStatus = useCallback(async (
-    task: ProjectTask,
+    task: CanonicalWorkItem,
     workflowStatusId: string,
   ) => {
     const canonicalTask = tasks.find(

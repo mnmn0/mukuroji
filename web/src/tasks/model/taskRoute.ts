@@ -1,5 +1,5 @@
 import type { CurrentUser } from '../../auth/api'
-import { TeamIssuesApiError, type TeamIssue } from '../../issues/api'
+import type { TeamIssue } from '../../issues/api'
 import type {
   ProjectDirectoryProject,
   ProjectDirectoryTeam,
@@ -97,20 +97,6 @@ export function mergeProjectUsers(
   }
 
   return Array.from(usersById.values())
-}
-
-/**
- * Adapts the canonical Project issue load error to the Task UI copy contract.
- *
- * @param error - The error raised by the Project issue query.
- * @returns A canonical API error with Task UI copy, otherwise the input error.
- */
-export function normalizeProjectIssueError(error: unknown) {
-  if (error instanceof TeamIssuesApiError && error.message === 'issues.error.loading') {
-    return new TeamIssuesApiError(error.status, 'tasks.error.loading', error.code)
-  }
-
-  return error
 }
 
 /**

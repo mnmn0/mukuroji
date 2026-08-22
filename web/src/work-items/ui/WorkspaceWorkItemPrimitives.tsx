@@ -8,7 +8,7 @@ import { useRef, type DragEvent } from 'react'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import { MoreHorizontalIcon } from '../../shared/ui/icons'
 import type { ViewportAnchorPoint } from '../../shared/lib/viewportAnchor'
-import type { ProjectTask, TaskPriority } from '../../tasks/api'
+import type { CanonicalWorkItem, WorkItemPriority } from '../../tasks/api'
 import {
   formatCustomFieldValue,
   isCustomFieldApplicable,
@@ -32,11 +32,11 @@ export type TaskListRowProps = {
   /** Resolved Work Item configuration used to label the current status. */
   configuration?: WorkItemConfiguration
   /** Optional callback that opens the selected Work Item. */
-  onOpenTask?: (task: ProjectTask) => void
+  onOpenTask?: (task: CanonicalWorkItem) => void
   /** Translator used for Workspace labels. */
   t: (key: MessageKey) => string
   /** Work Item displayed by the row. */
-  task: ProjectTask
+  task: CanonicalWorkItem
 }
 
 /**
@@ -103,7 +103,7 @@ export type CompactTaskCardProps = {
     returnFocusElement: HTMLElement,
   ) => void
   /** Optional callback that opens the selected Work Item. */
-  onOpenTask?: (task: ProjectTask) => void
+  onOpenTask?: (task: CanonicalWorkItem) => void
   /** Optional callback that requests a workflow status change. */
   onStatusChange?: (workflowStatusId: string) => void
   /** Cancels a revealed canonical status action when its selector loses focus unchanged. */
@@ -111,7 +111,7 @@ export type CompactTaskCardProps = {
   /** Translator used for Workspace and priority labels. */
   t: (key: MessageKey) => string
   /** Work Item displayed by the card. */
-  task: ProjectTask
+  task: CanonicalWorkItem
   /** Team-qualified key used to resolve this card from a canonical action target. */
   taskViewItemKey?: string
   /** Optional test identifier for the card and its interactive controls. */
@@ -374,7 +374,7 @@ export type StatusPillProps = {
   /** Resolved Work Item configuration used to label the current status. */
   configuration?: WorkItemConfiguration
   /** Work Item whose workflow status is displayed. */
-  task: ProjectTask
+  task: CanonicalWorkItem
 }
 
 /**
@@ -396,7 +396,7 @@ export function StatusPill({ configuration, task }: StatusPillProps) {
  */
 export type PriorityPillProps = {
   /** Work Item priority represented by the pill. */
-  priority: TaskPriority
+  priority: WorkItemPriority
   /** Translator used for the priority label. */
   t: (key: MessageKey) => string
 }
@@ -408,7 +408,7 @@ export type PriorityPillProps = {
  * @returns A priority pill.
  */
 export function PriorityPill({ priority, t }: PriorityPillProps) {
-  const priorityClasses: Record<TaskPriority, string> = {
+  const priorityClasses: Record<WorkItemPriority, string> = {
     high: 'workbench-badge-danger',
     medium: 'workbench-badge-warning',
     low: 'workbench-badge-success',
@@ -437,6 +437,6 @@ export function createWorkspaceTaskTestToken(value: string) {
  * @param task - Work Item whose test ID segment is required.
  * @returns A normalized Project and Work Item identifier.
  */
-export function createWorkspaceTaskTestId(task: ProjectTask) {
+export function createWorkspaceTaskTestId(task: CanonicalWorkItem) {
   return createWorkspaceTaskTestToken(`${task.assignedProjectId ?? 'unassigned'}:${task.id}`)
 }

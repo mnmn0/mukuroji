@@ -14,7 +14,7 @@ import {
   resolveWorkItemPersonOptions,
 } from '../../work-items/model/workItemDisplay'
 import { WorkItemFieldsEditor } from '../../work-items/ui/WorkItemFieldsEditor'
-import type { CreateProjectTaskInput } from '../api/tasks'
+import type { CreateWorkItemInput } from '../api/tasks'
 import {
   resolveTaskPriority,
   taskPriorities,
@@ -56,7 +56,7 @@ export type CreateTaskPanelProps = {
   /** Closes the creation panel without submitting. */
   onCancel: () => void
   /** Submits a validated project task creation request. */
-  onSubmit: (input: CreateProjectTaskInput) => Promise<void>
+  onSubmit: (input: CreateWorkItemInput) => Promise<void>
   /** Project used to resolve project-scoped custom fields. */
   projectId: string
   /** Resolves localized labels. */

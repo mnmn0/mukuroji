@@ -75,7 +75,7 @@ import {
   workspaceNavPaths,
 } from '../../shared/routing/paths'
 import type { SidebarNavId, SidebarTeamViewId } from '../../shared/ui/sidebar'
-import type { ProjectTask } from '../../tasks/api'
+import type { CanonicalWorkItem } from '../../tasks/api'
 import {
   type AuthenticatedApiErrorReports,
   listAuthenticatedApiErrors,
@@ -173,7 +173,7 @@ export type WorkspaceRouteContextValue = {
   /** Dismisses the current quick-access feedback surface. */
   onDismissProjectQuickAccessFeedback: () => void
   /** Navigates to the issue route represented by a workspace task. */
-  onOpenTask: (task: ProjectTask) => void
+  onOpenTask: (task: CanonicalWorkItem) => void
   /** Navigates to the supported workspace destination represented by a notification. */
   onOpenNotification: (notification: InboxNotification) => void
   /** Creates a team when the current user may manage workspace structure. */
@@ -660,7 +660,7 @@ export function WorkspaceRouteProvider() {
   }, [navigate])
 
   /** Navigates to the assigned project or owning team route represented by a task. */
-  const handleOpenTask = useCallback((task: ProjectTask) => {
+  const handleOpenTask = useCallback((task: CanonicalWorkItem) => {
     if (!task.teamId) {
       return
     }

@@ -2,7 +2,7 @@ import type {
   ResolvedWorkItemConfiguration,
   WorkItemConfiguration,
 } from '@mukuroji/contracts'
-import type { ProjectTask } from '../api/tasks'
+import type { CanonicalWorkItem } from '../api/tasks'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import type { WorkspaceMember } from '../../workspace/api'
 import type { FileArtifactsController } from '../../files/mutations/useFileArtifacts'
@@ -37,7 +37,7 @@ export type TaskFileViewProps = {
   /** Project file state and mutation controller. */
   projectFiles?: FileArtifactsController
   /** Filtered tasks used by the compatibility fallback list. */
-  tasks: ProjectTask[]
+  tasks: CanonicalWorkItem[]
   /** Translator used for file-view labels. */
   t: TaskFileTranslator
   /** Workspace members used for file actor labels and permissions. */
@@ -51,7 +51,7 @@ type TaskFileFallbackListProps = {
   /** Team-scoped resolved configurations used by each row. */
   configurationsByTeam: Record<string, ResolvedWorkItemConfiguration>
   /** Tasks represented by fallback rows. */
-  tasks: ProjectTask[]
+  tasks: CanonicalWorkItem[]
   /** Translator used for fallback-list labels. */
   t: TaskFileTranslator
 }

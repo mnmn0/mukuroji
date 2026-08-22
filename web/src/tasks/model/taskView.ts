@@ -27,7 +27,7 @@ import {
   resolveWorkflowStatusCategory,
   sortWorkflowStatuses,
 } from '../../work-items/model/workItemDisplay'
-import type { ProjectTask, TaskPriority } from '../api/tasks'
+import type { CanonicalWorkItem, WorkItemPriority } from '../api/tasks'
 import {
   deriveTaskScheduleDueDate,
   resolveTaskSchedule,
@@ -73,7 +73,7 @@ export type StatusFilter = string | 'all'
 export type AssigneeFilter = string | 'all'
 
 /** Task priority filter value or the all-priority sentinel. */
-export type PriorityFilter = TaskPriority | 'all'
+export type PriorityFilter = WorkItemPriority | 'all'
 
 /** Due-date bucket selected in the task list. */
 export type DueDateFilter = (typeof taskDueDateFilters)[number]
@@ -156,7 +156,7 @@ export type TaskCalendarDay = {
   /** Stored due-date value represented by the group. */
   date: string
   /** Tasks whose due date exactly matches the group date. */
-  items: ProjectTask[]
+  items: CanonicalWorkItem[]
 }
 
 /** Calendar grouping for scheduled and unscheduled tasks. */
@@ -164,7 +164,7 @@ export type TaskCalendarModel = {
   /** Chronologically sorted groups of non-empty due-date values. */
   days: TaskCalendarDay[]
   /** Tasks whose due date is empty after trimming whitespace. */
-  unscheduledTasks: ProjectTask[]
+  unscheduledTasks: CanonicalWorkItem[]
 }
 
 /** Aggregate task counts displayed in the task header and summary card. */
@@ -190,7 +190,7 @@ export type TaskSummary = {
  * @returns A task projection with the patch applied locally.
  */
 export function applyTaskPatchOptimistically(
-  task: ProjectTask,
+  task: CanonicalWorkItem,
   patch: WorkItemPatch,
   configuration?: WorkItemConfiguration,
 ) {
@@ -240,7 +240,7 @@ export function applyTaskPatchOptimistically(
  * @returns A patch that restores every field touched by the original patch.
  */
 export function createTaskInversePatch(
-  task: ProjectTask,
+  task: CanonicalWorkItem,
   patch: WorkItemPatch,
 ): WorkItemPatch {
   const inverseCustomFieldValues = patch.customFieldValues === undefined
@@ -319,7 +319,7 @@ type TaskTranslator = (key: MessageKey) => string
  * @param task - Task whose Project, Team, and local ID form the identity.
  * @returns A composite key that distinguishes equal local IDs across Teams and Projects.
  */
-export function createTaskKey(task: ProjectTask) {
+export function createTaskKey(task: CanonicalWorkItem) {
   return task.assignedProjectId || task.teamId
     ? `${task.assignedProjectId ?? ''}:${task.teamId ?? ''}:${task.id}`
     : task.id
@@ -334,7 +334,7 @@ export function createTaskKey(task: ProjectTask) {
  * @returns The first matching task, or undefined when no selection resolves.
  */
 export function findTaskBySelection(
-  tasks: readonly ProjectTask[],
+  tasks: readonly CanonicalWorkItem[],
   selectedTaskId?: string,
   selectedTeamId?: string,
 ) {
@@ -358,9 +358,9 @@ export function findTaskBySelection(
  * @returns The matching snapshot with the greatest observed revision.
  */
 export function resolveLatestTaskSnapshot(
-  listTask: ProjectTask | undefined,
-  detailTask: ProjectTask | undefined,
-): ProjectTask | undefined {
+  listTask: CanonicalWorkItem | undefined,
+  detailTask: CanonicalWorkItem | undefined,
+): CanonicalWorkItem | undefined {
   if (!listTask) {
     return undefined
   }
@@ -380,7 +380,7 @@ export function resolveLatestTaskSnapshot(
  * @returns Bulk operation identity, label, and expected revision.
  */
 export function createBulkOperationSelection(
-  task: ProjectTask,
+  task: CanonicalWorkItem,
   t: TaskTranslator,
 ): BulkOperationSelection {
   void t
@@ -447,7 +447,7 @@ export function parseTaskDueDate(value: string) {
  * @param now - Reference time; defaults to the current time for existing UI behavior.
  * @returns True only for a parsed past date on a non-completed task.
  */
-export function isTaskOverdue(task: ProjectTask, now: Date = new Date()) {
+export function isTaskOverdue(task: CanonicalWorkItem, now: Date = new Date()) {
   const dueDate = deriveTaskScheduleDueDate(task.schedule)
 
   if (resolveWorkflowStatusCategory(task) === 'completed' || !parseTaskDueDate(dueDate)) {
@@ -467,7 +467,7 @@ export function isTaskOverdue(task: ProjectTask, now: Date = new Date()) {
  * @returns True when the task belongs to the requested bucket.
  */
 export function matchesTaskDueDateFilter(
-  task: ProjectTask,
+  task: CanonicalWorkItem,
   filter: DueDateFilter,
   now: Date = new Date(),
 ) {
@@ -510,7 +510,7 @@ export function matchesTaskDueDateFilter(
  * @returns A new sorted task array.
  */
 export function sortTasksByDueDate(
-  tasks: readonly ProjectTask[],
+  tasks: readonly CanonicalWorkItem[],
   sortOrder: TaskSortOrder,
 ) {
   return [...tasks].sort((firstTask, secondTask) => {
@@ -569,7 +569,7 @@ export function resolveTaskSortOrderLabelKey(sortOrder: TaskSortOrder): MessageK
  * @returns The all-assignee option followed by unique assignee options.
  */
 export function createAssigneeFilterOptions(
-  tasks: readonly ProjectTask[],
+  tasks: readonly CanonicalWorkItem[],
   t: TaskTranslator,
 ): AssigneeFilterOption[] {
   const assigneeOptionsByValue = new Map<string, AssigneeFilterOption>()
@@ -606,7 +606,7 @@ export function createAssigneeFilterOptions(
  * @returns User ID, email, display label, or localized unassigned fallback in that order.
  */
 export function resolveTaskAssigneeFilterValue(
-  task: ProjectTask,
+  task: CanonicalWorkItem,
   t: TaskTranslator,
 ) {
   return task.assigneeUserId ??
@@ -624,7 +624,7 @@ export function resolveTaskAssigneeFilterValue(
  * @returns Applicable Work Item configuration, or undefined when unavailable.
  */
 export function resolveProjectTaskConfiguration(
-  task: ProjectTask,
+  task: CanonicalWorkItem,
   configurationsByTeam: Readonly<Record<string, ResolvedWorkItemConfiguration>>,
   fallbackConfiguration?: WorkItemConfiguration,
 ) {
@@ -650,7 +650,7 @@ export function resolveProjectTaskConfiguration(
  * @returns Stable grouping key and human-readable label.
  */
 export function resolveProjectTaskGroupValue(
-  task: ProjectTask,
+  task: CanonicalWorkItem,
   field: string,
   configurationsByTeam: Readonly<Record<string, ResolvedWorkItemConfiguration>>,
   fallbackConfiguration: WorkItemConfiguration | undefined,
@@ -695,7 +695,7 @@ export function resolveProjectTaskGroupValue(
  * @returns Workflow columns ordered by Team ID and configured status order.
  */
 export function createProjectTaskStatusColumns(
-  tasks: readonly ProjectTask[],
+  tasks: readonly CanonicalWorkItem[],
   configurationsByTeam: Readonly<Record<string, ResolvedWorkItemConfiguration>>,
   teams: readonly ProjectDirectoryTeam[],
   fallbackTeamId?: string,
@@ -737,7 +737,7 @@ export function createProjectTaskStatusColumns(
  * @returns True when both Team ID and workflow status ID match.
  */
 export function isTaskInProjectStatusColumn(
-  task: ProjectTask,
+  task: CanonicalWorkItem,
   column: ProjectTaskStatusColumn,
 ) {
   return column.teamId === task.teamId && column.status.id === task.workflowStatusId
@@ -764,7 +764,7 @@ export function createProjectStatusTestToken(value: string) {
  * @returns Applicable and populated fields in configured display order.
  */
 export function resolveTaskCustomFieldEntries(
-  task: ProjectTask,
+  task: CanonicalWorkItem,
   configuration: WorkItemConfiguration | undefined,
   locale: Locale,
   personLabels: Readonly<Record<string, string>>,
@@ -809,7 +809,7 @@ export function resolveTaskCustomFieldEntries(
  * @returns Alternating definition names and formatted values.
  */
 export function resolveTaskCustomFieldSearchValues(
-  task: ProjectTask,
+  task: CanonicalWorkItem,
   configuration: WorkItemConfiguration | undefined,
   locale: Locale,
   personLabels: Readonly<Record<string, string>>,
@@ -832,7 +832,7 @@ export function resolveTaskCustomFieldSearchValues(
  * @returns Sorted date groups and the tasks without a trimmed due date.
  */
 export function createTaskCalendarModel(
-  tasks: readonly ProjectTask[],
+  tasks: readonly CanonicalWorkItem[],
 ): TaskCalendarModel {
   const dates = Array.from(new Set(tasks.map((task) =>
     resolveTaskSchedulePrimaryDate(resolveTaskSchedule(task)),
@@ -898,7 +898,7 @@ export function createBulkProjectOptions(
  * @returns A new array containing only matching tasks in the selected due-date order.
  */
 export function filterAndSortProjectTasks(
-  tasks: readonly ProjectTask[],
+  tasks: readonly CanonicalWorkItem[],
   options: FilterAndSortProjectTasksOptions,
 ) {
   const effectiveStatusFilter = resolveEffectiveStatusFilter(
@@ -969,7 +969,7 @@ export function filterAndSortProjectTasks(
  * @returns Whether any Project-visible display value contains the keyword.
  */
 export function matchesProjectTaskKeyword(
-  task: ProjectTask,
+  task: CanonicalWorkItem,
   normalizedKeyword: string,
   fallbackConfiguration: WorkItemConfiguration | undefined,
   configurationsByTeam: Readonly<Record<string, ResolvedWorkItemConfiguration>>,
@@ -1041,7 +1041,7 @@ export function resolveEffectiveDefinitionFilter(
  * @param tasks - Tasks included in the Project summary.
  * @returns Total, open, started, completed, and completion-rate values.
  */
-export function createTaskSummary(tasks: readonly ProjectTask[]): TaskSummary {
+export function createTaskSummary(tasks: readonly CanonicalWorkItem[]): TaskSummary {
   const totalCount = tasks.length
   const openCount = tasks.filter((task) => {
     const category = resolveWorkflowStatusCategory(task)
@@ -1069,7 +1069,7 @@ export function createTaskSummary(tasks: readonly ProjectTask[]): TaskSummary {
  * @param value - Value read from a form or another untrusted input boundary.
  * @returns A supported priority, defaulting to medium for invalid input.
  */
-export function resolveTaskPriority(value: unknown): TaskPriority {
+export function resolveTaskPriority(value: unknown): WorkItemPriority {
   if (value === 'high' || value === 'medium' || value === 'low') {
     return value
   }
@@ -1083,6 +1083,6 @@ export function resolveTaskPriority(value: unknown): TaskPriority {
  * @param task - Task whose assignee label is required.
  * @returns Name, email, or user ID in canonical fallback order.
  */
-function resolveTaskAssignee(task: ProjectTask) {
+function resolveTaskAssignee(task: CanonicalWorkItem) {
   return task.assigneeName ?? task.assigneeEmail ?? task.assigneeUserId
 }

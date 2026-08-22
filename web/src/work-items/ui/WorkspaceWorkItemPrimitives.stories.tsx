@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
-import type { ProjectTask } from '../../tasks/api'
+import type { CanonicalWorkItem } from '../../tasks/api'
 import { referoTaskFixtures } from '../../tasks/fixtures'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { teamWorkItemConfigurationFixture } from '../fixtures'
@@ -14,7 +14,7 @@ const t = createTranslator('ja')
 const storyTask = {
   ...referoTaskFixtures[0],
   workflowStatusId: 'active',
-} satisfies ProjectTask
+} satisfies CanonicalWorkItem
 
 const workflowStatuses = teamWorkItemConfigurationFixture.workflow.statuses
 

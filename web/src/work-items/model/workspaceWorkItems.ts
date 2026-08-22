@@ -4,7 +4,7 @@ import {
   type WorkflowStatusDefinition,
 } from '@mukuroji/contracts'
 import type { ProjectDirectoryTeam } from '../../projects/api'
-import type { ProjectTask } from '../../tasks/api'
+import type { CanonicalWorkItem } from '../../tasks/api'
 import { taskScheduleInstantToLocalDate } from '../../tasks/model/taskSchedule'
 import {
   isCompletedWorkItem,
@@ -64,7 +64,7 @@ export type WorkspacePortfolioProject = {
  * @param task - Work Item for which to create a key.
  * @returns A key composed from the Team, Project, and Work Item IDs.
  */
-export function createWorkspaceTaskKey(task: ProjectTask) {
+export function createWorkspaceTaskKey(task: CanonicalWorkItem) {
   return `${task.teamId}:${task.assignedProjectId ?? ''}:${task.id}`
 }
 
@@ -76,7 +76,7 @@ export function createWorkspaceTaskKey(task: ProjectTask) {
  * @returns The Work Item's Team configuration, or undefined when unavailable.
  */
 export function resolveWorkspaceTaskConfiguration(
-  task: ProjectTask,
+  task: CanonicalWorkItem,
   configurationsByTeam: Readonly<Record<string, ResolvedWorkItemConfiguration>>,
 ) {
   return configurationsByTeam[task.teamId]?.configuration
@@ -89,7 +89,7 @@ export function resolveWorkspaceTaskConfiguration(
  * @param taskKey - Key created by {@link createWorkspaceTaskKey}.
  * @returns The matching Work Item, or undefined when no match exists.
  */
-export function findWorkspaceTaskByKey(tasks: readonly ProjectTask[], taskKey: string) {
+export function findWorkspaceTaskByKey(tasks: readonly CanonicalWorkItem[], taskKey: string) {
   return tasks.find((task) => createWorkspaceTaskKey(task) === taskKey)
 }
 
@@ -103,14 +103,14 @@ export function findWorkspaceTaskByKey(tasks: readonly ProjectTask[], taskKey: s
  * @returns A new array with the target Work Item's status updated.
  */
 export function updateWorkspaceTaskStatus(
-  tasks: readonly ProjectTask[],
-  targetTask: ProjectTask,
+  tasks: readonly CanonicalWorkItem[],
+  targetTask: CanonicalWorkItem,
   status: WorkflowStatusDefinition,
   expectedCurrentStatusId?: string,
 ) {
   const targetTaskKey = createWorkspaceTaskKey(targetTask)
 
-  return tasks.map((task): ProjectTask =>
+  return tasks.map((task): CanonicalWorkItem =>
     createWorkspaceTaskKey(task) === targetTaskKey &&
     (expectedCurrentStatusId === undefined || task.workflowStatusId === expectedCurrentStatusId)
       ? {
@@ -129,9 +129,9 @@ export function updateWorkspaceTaskStatus(
  * @param updatedTask - Updated Work Item returned by the API.
  * @returns A new array with the target Work Item replaced.
  */
-export function replaceWorkspaceTask<TTask extends ProjectTask>(
+export function replaceWorkspaceTask<TTask extends CanonicalWorkItem>(
   tasks: readonly TTask[],
-  updatedTask: ProjectTask,
+  updatedTask: CanonicalWorkItem,
 ) {
   const updatedTaskKey = createWorkspaceTaskKey(updatedTask)
 
@@ -154,7 +154,7 @@ export function replaceWorkspaceTask<TTask extends ProjectTask>(
  * @returns Columns grouped by Team and workflow status.
  */
 export function createWorkspaceTaskStatusColumns(
-  tasks: readonly ProjectTask[],
+  tasks: readonly CanonicalWorkItem[],
   configurationsByTeam: Readonly<Record<string, ResolvedWorkItemConfiguration>>,
   teams: readonly ProjectDirectoryTeam[],
 ): WorkspaceTaskStatusColumn[] {
@@ -191,7 +191,7 @@ export function createWorkspaceTaskStatusColumns(
  * @returns True when both the Team and status match.
  */
 export function isTaskInWorkspaceStatusColumn(
-  task: ProjectTask,
+  task: CanonicalWorkItem,
   column: WorkspaceTaskStatusColumn,
 ) {
   return column.teamId === task.teamId && column.status.id === task.workflowStatusId
@@ -205,7 +205,7 @@ export function isTaskInWorkspaceStatusColumn(
  * @returns Work Items assigned to the specified Projects.
  */
 export function filterTasksByProjectIds(
-  tasks: readonly ProjectTask[],
+  tasks: readonly CanonicalWorkItem[],
   projectIds: readonly string[],
 ) {
   const projectIdSet = new Set(projectIds)
@@ -228,7 +228,7 @@ export function filterTasksByProjectIds(
  * @returns Work Items that match the Team and Project scopes.
  */
 export function filterTasksByTeamProjectIds(
-  tasks: readonly ProjectTask[],
+  tasks: readonly CanonicalWorkItem[],
   projectIds: readonly string[],
   teamId?: string,
 ) {
@@ -247,7 +247,7 @@ export function filterTasksByTeamProjectIds(
  */
 export function createWorkspaceSummary(
   teams: readonly ProjectDirectoryTeam[],
-  tasks: readonly ProjectTask[],
+  tasks: readonly CanonicalWorkItem[],
   blockedCount: number,
 ): WorkspaceSummary {
   return {
@@ -289,7 +289,7 @@ export function getUniqueWorkspaceProjectIds(
  * @returns A new Work Item array ordered by action priority.
  */
 export function createWorkspaceActionQueue(
-  tasks: readonly ProjectTask[],
+  tasks: readonly CanonicalWorkItem[],
   referenceDate: Date,
 ) {
   return [...tasks]
@@ -312,7 +312,7 @@ export function createWorkspaceActionQueue(
  * @param task - Work Item to evaluate.
  * @returns True when the workflow status ID is review.
  */
-export function isWorkspaceTaskInReview(task: ProjectTask) {
+export function isWorkspaceTaskInReview(task: CanonicalWorkItem) {
   return resolveWorkItemWorkflowStatusId(task) === 'review'
 }
 
@@ -324,7 +324,7 @@ export function isWorkspaceTaskInReview(task: ProjectTask) {
  * @returns True when a normalized assignee value matches an identity.
  */
 export function isWorkspaceTaskAssignedToUser(
-  task: ProjectTask,
+  task: CanonicalWorkItem,
   userIdentityAliases: readonly string[],
 ) {
   const normalizedUserAliases = new Set(
@@ -345,7 +345,7 @@ export function isWorkspaceTaskAssignedToUser(
  * @returns The Project name, preferring a match within the Team scope.
  */
 export function resolveWorkspaceProjectName(
-  task: ProjectTask,
+  task: CanonicalWorkItem,
   teams: readonly ProjectDirectoryTeam[],
 ) {
   const scopedTeam = task.teamId
@@ -373,7 +373,7 @@ export function resolveWorkspaceProjectName(
  * @param referenceDate - Reference date used to determine overdue status.
  * @returns A score weighted by due date, approval, priority, and review status.
  */
-export function calculateWorkspaceActionScore(task: ProjectTask, referenceDate: Date) {
+export function calculateWorkspaceActionScore(task: CanonicalWorkItem, referenceDate: Date) {
   return (isWorkspaceTaskOverdue(task, referenceDate) ? 8 : 0) +
     ((task.approvalSummary?.overdueCount ?? 0) > 0 ? 8 : 0) +
     (hasApprovalAttention(task) ? 4 : 0) +
@@ -387,7 +387,7 @@ export function calculateWorkspaceActionScore(task: ProjectTask, referenceDate: 
  * @param task - Work Item to evaluate.
  * @returns True when the Team ID required by the route is available.
  */
-export function isOpenableWorkspaceTask(task: ProjectTask) {
+export function isOpenableWorkspaceTask(task: CanonicalWorkItem) {
   return Boolean(task.teamId)
 }
 
@@ -397,7 +397,7 @@ export function isOpenableWorkspaceTask(task: ProjectTask) {
  * @param task - Work Item to evaluate.
  * @returns True when the approval summary requires attention.
  */
-export function hasApprovalAttention(task: ProjectTask) {
+export function hasApprovalAttention(task: CanonicalWorkItem) {
   const summary = task.approvalSummary
 
   return Boolean(summary && (
@@ -413,7 +413,7 @@ export function hasApprovalAttention(task: ProjectTask) {
  * @param referenceDate - Reference date used to determine overdue status.
  * @returns True when the Work Item is incomplete and overdue.
  */
-export function isWorkspaceTaskOverdue(task: ProjectTask, referenceDate: Date) {
+export function isWorkspaceTaskOverdue(task: CanonicalWorkItem, referenceDate: Date) {
   const dueDate = deriveWorkItemScheduleDueDate(task.schedule)
 
   if (!isOpenWorkItem(task) || !parseWorkspaceTaskDueDate(dueDate)) {
@@ -466,7 +466,7 @@ export function parseWorkspaceTaskDueDate(value: string) {
  * @param tasks - Work Items to aggregate.
  * @returns An integer from 0 through 100.
  */
-export function calculateWorkspaceProgress(tasks: readonly ProjectTask[]) {
+export function calculateWorkspaceProgress(tasks: readonly CanonicalWorkItem[]) {
   if (tasks.length === 0) {
     return 0
   }
@@ -483,7 +483,7 @@ export function calculateWorkspaceProgress(tasks: readonly ProjectTask[]) {
  * @returns The risk level representing high-priority open work, full completion, or neither.
  */
 export function resolveWorkspacePortfolioRisk(
-  tasks: readonly ProjectTask[],
+  tasks: readonly CanonicalWorkItem[],
 ): WorkspacePortfolioProject['risk'] {
   if (tasks.some((task) => task.priority === 'high' && isOpenWorkItem(task))) {
     return 'watch'
@@ -505,7 +505,7 @@ export function resolveWorkspacePortfolioRisk(
  */
 export function createWorkspacePortfolioProjects(
   teams: readonly ProjectDirectoryTeam[],
-  tasks: readonly ProjectTask[],
+  tasks: readonly CanonicalWorkItem[],
 ): WorkspacePortfolioProject[] {
   return teams.flatMap((team) =>
     team.projects.map((project) => {
@@ -531,7 +531,7 @@ export function createWorkspacePortfolioProjects(
  * @param referenceDate - Reference date used to determine overdue status.
  * @returns True when the Work Item is incomplete and either high priority or overdue.
  */
-export function isAttentionWorkspaceTask(task: ProjectTask, referenceDate: Date) {
+export function isAttentionWorkspaceTask(task: CanonicalWorkItem, referenceDate: Date) {
   return isOpenWorkItem(task) && (
     task.priority === 'high' || isWorkspaceTaskOverdue(task, referenceDate)
   )
@@ -553,7 +553,7 @@ function normalizeWorkspaceSearchText(value?: string) {
  * @param task - Work Item whose due time to resolve.
  * @returns The due date in milliseconds, or the maximum safe integer when invalid.
  */
-function getWorkspaceDueTime(task: ProjectTask) {
+function getWorkspaceDueTime(task: CanonicalWorkItem) {
   return parseWorkspaceTaskDueDate(
     deriveWorkItemScheduleDueDate(task.schedule),
   )?.getTime() ?? Number.MAX_SAFE_INTEGER

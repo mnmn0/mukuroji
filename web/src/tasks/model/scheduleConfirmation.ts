@@ -2,7 +2,7 @@ import type {
   ConfirmedWorkItemSchedule,
   PlanningSnapshot,
 } from '@mukuroji/contracts'
-import type { ProjectTask } from '../api'
+import type { CanonicalWorkItem } from '../api'
 
 /**
  * Applies compact schedule confirmation results to every matching cached task.
@@ -15,9 +15,9 @@ import type { ProjectTask } from '../api'
  * @returns Cached tasks with every matching non-newer schedule projection replaced.
  */
 export function applyConfirmedSchedulesToTasks(
-  tasks: readonly ProjectTask[],
+  tasks: readonly CanonicalWorkItem[],
   confirmedSchedules: readonly ConfirmedWorkItemSchedule[],
-): ProjectTask[] {
+): CanonicalWorkItem[] {
   const confirmedSchedulesByKey = new Map(
     confirmedSchedules.map((confirmedSchedule) => [
       createWorkItemScheduleKey(confirmedSchedule.teamId, confirmedSchedule.id),

@@ -13,7 +13,7 @@ import { WorkspaceInboxView } from '../src/notifications/ui/WorkspaceInboxView'
 import { projectDirectoryFixtures } from '../src/projects/fixtures'
 import { TeamOverviewView } from '../src/projects/ui/TeamOverviewView'
 import { createTranslator } from '../src/shared/i18n/i18n'
-import type { ProjectTask } from '../src/tasks/api'
+import type { CanonicalWorkItem } from '../src/tasks/api'
 import { createDefaultDueDateTaskSchedule } from '../src/tasks/model/taskSchedule'
 import { DashboardWorkspaceView } from '../src/workspace/ui/DashboardWorkspaceView'
 import { HomeWorkspaceView } from '../src/workspace/ui/HomeWorkspaceView'
@@ -31,7 +31,7 @@ if (!coreTeam) {
 
 describe('Workspace approval Inbox', () => {
   test('uses Team configuration names for status labels on every Workspace summary surface', () => {
-    const task: ProjectTask = {
+    const task: CanonicalWorkItem = {
       assignedProjectId: 'refero',
       assigneeUserId: 'demo@example.com',
       creatorMemberKey: 'demo@example.com',
@@ -267,7 +267,7 @@ describe('Workspace approval Inbox', () => {
   })
 
   test('keeps canonical My Tasks visible when its Team configuration is unavailable', () => {
-    const task: ProjectTask = {
+    const task: CanonicalWorkItem = {
       assignedProjectId: 'refero',
       assigneeUserId: 'demo@example.com',
       creatorMemberKey: 'demo@example.com',

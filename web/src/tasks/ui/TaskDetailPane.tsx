@@ -46,7 +46,7 @@ import {
   WorkItemRelationsEditor,
   type WorkItemRelationEditorInput,
 } from '../../work-items/ui/WorkItemRelationsEditor'
-import type { ProjectTask } from '../api/tasks'
+import type { CanonicalWorkItem } from '../api/tasks'
 import { resolveTaskPriority, taskPriorities } from '../model/taskView'
 import {
   areTaskSchedulesEqual,
@@ -128,7 +128,7 @@ export type TaskDetailPaneProps = {
   /** Resolves localized labels. */
   t: (key: MessageKey) => string
   /** Task selected by the list, board, or route. */
-  task?: ProjectTask
+  task?: CanonicalWorkItem
   /** Workspace members used by custom fields and collaboration panels. */
   workspaceMembers: WorkspaceMember[]
 }

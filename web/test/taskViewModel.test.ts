@@ -9,7 +9,7 @@ import {
 import type { ProjectDirectoryTeam } from '../src/projects/api/directory'
 import type { MessageKey } from '../src/shared/i18n/i18n'
 import type { WorkspaceMember } from '../src/workspace/api/access'
-import type { ProjectTask } from '../src/tasks/api/tasks'
+import type { CanonicalWorkItem } from '../src/tasks/api/tasks'
 import {
   createDefaultDueDateTaskSchedule,
   createDefaultUnscheduledTaskSchedule,
@@ -663,8 +663,8 @@ describe('task calendar and summary models', () => {
  * @returns A canonical Project task.
  */
 function createTask(
-  overrides: Omit<Partial<ProjectTask>, 'dueDate'> = {},
-): ProjectTask {
+  overrides: Omit<Partial<CanonicalWorkItem>, 'dueDate'> = {},
+): CanonicalWorkItem {
   const schedule = overrides.schedule ?? createDefaultDueDateTaskSchedule('2026-07-23')
 
   return {

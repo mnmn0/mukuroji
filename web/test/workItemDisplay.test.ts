@@ -6,10 +6,6 @@ import {
 } from '@mukuroji/contracts'
 import type { MessageKey } from '../src/shared/i18n/i18n'
 import {
-  resolveWorkItemAssignee as resolveIssueWorkItemAssignee,
-  resolveWorkItemTitle as resolveIssueWorkItemTitle,
-} from '../src/issues/model/workItemDisplay'
-import {
   createCustomFieldErrorMessages,
   filterWorkItemsByTeam,
   readSelectedRelationGraphRevision,
@@ -38,15 +34,6 @@ describe('Work Item display helpers', () => {
       assigneeName: undefined,
       assigneeUserId: 'member-id',
     }))).toBe('member-id')
-  })
-
-  test('keeps the Issues display helper exports compatible', () => {
-    const workItem = createCanonicalWorkItem({
-      assigneeName: 'Member Name',
-    })
-
-    expect(resolveIssueWorkItemTitle(workItem)).toBe(resolveWorkItemTitle(workItem))
-    expect(resolveIssueWorkItemAssignee(workItem)).toBe(resolveWorkItemAssignee(workItem))
   })
 
   test('filters project Work Items by the explicitly selected Team', () => {

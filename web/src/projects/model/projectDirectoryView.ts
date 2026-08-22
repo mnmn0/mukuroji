@@ -1,6 +1,6 @@
 import type { ProjectQuickAccessItem } from '@mukuroji/contracts'
 import type { ProjectDirectoryTeam } from '../api/directory'
-import type { ProjectTask } from '../../tasks/api/tasks'
+import type { CanonicalWorkItem } from '../../tasks/api/tasks'
 import {
   isOpenWorkItem,
   resolveWorkItemAssignee,
@@ -111,10 +111,10 @@ export function createProjectDirectoryRowKey(teamId: string, projectId: string) 
  */
 export function createProjectDirectoryRows(
   teams: readonly ProjectDirectoryTeam[],
-  tasks: readonly ProjectTask[],
+  tasks: readonly CanonicalWorkItem[],
   isProjectQuickAccess: (item: ProjectQuickAccessItem) => boolean = () => false,
 ): ProjectDirectoryRow[] {
-  const tasksByProject = new Map<string, ProjectTask[]>()
+  const tasksByProject = new Map<string, CanonicalWorkItem[]>()
 
   for (const task of tasks) {
     if (!task.assignedProjectId) {
@@ -170,7 +170,7 @@ export function createProjectDirectoryRows(
  * @returns Attention, active, completed, or not-started state.
  */
 export function resolveProjectDirectoryStatus(
-  tasks: readonly ProjectTask[],
+  tasks: readonly CanonicalWorkItem[],
 ): ProjectDirectoryStatus {
   if (tasks.length === 0) {
     return 'not-started'
@@ -339,7 +339,7 @@ export function parseProjectDirectoryStatusFilter(
  * @returns Unique person references suitable for display and filtering.
  */
 function createProjectAssignees(
-  tasks: readonly ProjectTask[],
+  tasks: readonly CanonicalWorkItem[],
 ): ProjectDirectoryAssignee[] {
   const assigneesById = new Map<string, ProjectDirectoryAssignee>()
 

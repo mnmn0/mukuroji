@@ -270,18 +270,6 @@ export function resolveWorkItemWorkflowStatusLabel(
 }
 
 /**
- * Configuration status を返します。
- *
- * @param configuration - Team または Workspace の configuration です。
- * @returns Configuration の表示一覧です。
- */
-export function resolveDisplayWorkflowStatuses(
-  configuration: WorkItemConfigurationLike,
-) {
-  return resolveCreateWorkflowStatuses(configuration)
-}
-
-/**
  * Work Item 作成 form で選択できる workflow status を返します。
  *
  * @param configuration - Team または Workspace の configuration です。

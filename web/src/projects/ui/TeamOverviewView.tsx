@@ -5,7 +5,7 @@ import {
   ProgressBar,
   SectionHeader,
 } from '../../shared/ui/WorkbenchPrimitives'
-import type { ProjectTask } from '../../tasks/api'
+import type { CanonicalWorkItem } from '../../tasks/api'
 import {
   isOpenWorkItem,
   resolveWorkItemTitle,
@@ -32,7 +32,7 @@ export type TeamOverviewViewProps = {
   /** Whether Project member data is still loading. */
   isTeamProjectMembersLoading: boolean
   /** Opens a Work Item selected as the next Project action. */
-  onOpenTask?: (task: ProjectTask) => void
+  onOpenTask?: (task: CanonicalWorkItem) => void
   /** Opens a Project selected from the Team overview. */
   onSelectProject?: (projectId: string, teamId: string) => void
   /** The Team represented by this overview, when it exists. */
@@ -44,7 +44,7 @@ export type TeamOverviewViewProps = {
   /** Resolves localized Workspace labels. */
   t: (key: MessageKey) => string
   /** Workspace Work Items used by Team summaries. */
-  tasks: readonly ProjectTask[]
+  tasks: readonly CanonicalWorkItem[]
   /** Resolved Work Item configurations keyed by Team ID. */
   workItemConfigurationsByTeam: Readonly<
     Record<string, ResolvedWorkItemConfiguration>

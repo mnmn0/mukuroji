@@ -5,7 +5,7 @@ import {
   ProgressBar,
   SectionHeader,
 } from '../../shared/ui/WorkbenchPrimitives'
-import type { ProjectTask } from '../../tasks/api'
+import type { CanonicalWorkItem } from '../../tasks/api'
 import { createWorkspaceTaskTestToken } from '../../work-items/ui/WorkspaceWorkItemPrimitives'
 import type { ProjectDirectoryTeam } from '../api/directory'
 import {
@@ -33,7 +33,7 @@ export type TeamMembersViewProps = {
   /** Resolves localized Workspace labels. */
   t: (key: MessageKey) => string
   /** Workspace Work Items used to calculate member workload. */
-  tasks: readonly ProjectTask[]
+  tasks: readonly CanonicalWorkItem[]
 }
 
 /**

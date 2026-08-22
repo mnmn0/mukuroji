@@ -2,12 +2,12 @@ import type { ResolvedWorkItemConfiguration } from '@mukuroji/contracts'
 import { useMemo } from 'react'
 import { useWorkspaceWorkItems } from '../../issues/queries/useWorkItems'
 import type { ProjectDirectoryTeam } from '../../projects/api'
-import type { ProjectTask } from '../../tasks/api'
+import type { CanonicalWorkItem } from '../../tasks/api'
 import { getUniqueWorkspaceProjectIds } from '../../work-items/model/workspaceWorkItems'
 import { useTeamWorkItemConfigurations } from '../../work-items/queries/useWorkItemConfigurations'
 import type { TeamWorkItemConfigurationLoadResult } from '../../work-items/queries/teamWorkItemConfigurations'
 
-const emptyWorkspaceTasks: ProjectTask[] = []
+const emptyWorkspaceTasks: CanonicalWorkItem[] = []
 const emptyConfigurationsByTeam: Record<string, ResolvedWorkItemConfiguration> = {}
 const emptyConfigurationLoadResult: TeamWorkItemConfigurationLoadResult = {
   configurationsByTeam: emptyConfigurationsByTeam,

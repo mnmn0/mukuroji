@@ -8,7 +8,7 @@ import {
   SectionHeader,
 } from '../../shared/ui/WorkbenchPrimitives'
 import type { ProjectDirectoryTeam } from '../../projects/api'
-import type { ProjectTask } from '../../tasks/api'
+import type { CanonicalWorkItem } from '../../tasks/api'
 import { getFocusQueueItems } from '../../features/focus-queue/model/focusQueue'
 import {
   isOpenableWorkspaceTask,
@@ -31,7 +31,7 @@ export type HomeWorkspaceViewProps = {
   /** Whether Focus metrics and previews are unavailable rather than empty. */
   isFocusUnavailable?: boolean
   /** Optional callback that opens a selected Work Item. */
-  onOpenTask?: (task: ProjectTask) => void
+  onOpenTask?: (task: CanonicalWorkItem) => void
   /** Summary metrics displayed at the top of the view. */
   summary: WorkspaceSummary
   /** Translator used for Workspace labels. */

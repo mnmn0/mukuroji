@@ -48,7 +48,6 @@ export function useTeamIssues(
  * @param accessToken - Work Item API の access token です。
  * @param projectId - 取得対象の Project ID です。
  * @param enabled - Query を実行するかどうかです。
- * @param normalizeError - Optional function that adapts the canonical API error for the Task UI.
  * @param includeArchived - Whether the Project query includes archived Work Items.
  * @returns Project Work Item 一覧の SWR state です。
  */
@@ -56,7 +55,6 @@ export function useProjectIssues(
   accessToken: string | undefined,
   projectId: string | undefined,
   enabled = true,
-  normalizeError: (error: unknown) => unknown = (error) => error,
   includeArchived = false,
 ) {
   const key = accessToken && projectId && enabled
@@ -65,13 +63,8 @@ export function useProjectIssues(
 
   const query = useSWR(
     key,
-    async ([, token, currentProjectId, shouldIncludeArchived]) => {
-      try {
-        return await getProjectIssues(currentProjectId, token, shouldIncludeArchived)
-      } catch (error) {
-        throw normalizeError(error)
-      }
-    },
+    ([, token, currentProjectId, shouldIncludeArchived]) =>
+      getProjectIssues(currentProjectId, token, shouldIncludeArchived),
     workItemQueryConfig,
   )
 

@@ -4,7 +4,7 @@ import type {
   PlanningSnapshot,
 } from '@mukuroji/contracts'
 import { planningSnapshotFixture } from '../src/planning/fixtures'
-import type { ProjectTask } from '../src/tasks/api'
+import type { CanonicalWorkItem } from '../src/tasks/api'
 import { referoTaskFixtures } from '../src/tasks/fixtures'
 import {
   applyConfirmedSchedulesToPlanningSnapshot,
@@ -41,7 +41,7 @@ describe('schedule confirmation cache projection', () => {
       ...referoTaskFixtures[0],
       assignedProjectId: 'brand-refresh',
       teamId: 'design-team',
-    } satisfies ProjectTask
+    } satisfies CanonicalWorkItem
     const tasks = applyConfirmedSchedulesToTasks(
       [...referoTaskFixtures, duplicateTeamTask],
       confirmedSchedules,
@@ -88,7 +88,7 @@ describe('schedule confirmation cache projection', () => {
       dueDate: '2026-06-10',
       revision: 3,
       schedule: createDefaultDueDateTaskSchedule('2026-06-10'),
-    } satisfies ProjectTask
+    } satisfies CanonicalWorkItem
     const olderConfirmation = [{
       assignedProjectId: 'refero',
       dueDate: '2026-06-04',

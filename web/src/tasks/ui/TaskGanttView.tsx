@@ -10,7 +10,7 @@ import type {
   WorkItemScheduleDependency,
   WorkItemScheduleDependencyPatch,
 } from '@mukuroji/contracts'
-import type { ProjectTask } from '../api/tasks'
+import type { CanonicalWorkItem } from '../api/tasks'
 import { TeamIssuesApiError } from '../../issues/api'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import { useModalFocus } from '../../shared/ui/useModalFocus'
@@ -84,7 +84,7 @@ type TaskScheduleCreateContext = TaskCreateContext & {
 /** A task paired with the canonical schedule rendered in its Gantt row. */
 type GanttTaskRow = {
   /** Work Item rendered in the row. */
-  task: ProjectTask
+  task: CanonicalWorkItem
   /** Canonical schedule rendered for the task. */
   schedule: WorkItemSchedule
 }
@@ -102,7 +102,7 @@ type GanttTimelineColumn = {
 /** A preview waiting for the user to confirm or cancel it. */
 type PendingGanttScheduleChange = {
   /** Task whose schedule operation was previewed. */
-  task: ProjectTask
+  task: CanonicalWorkItem
   /** Exact canonical invocation controlling preview confirmation and cancellation. */
   controller: ProjectTaskDirectScheduleController
 }
@@ -152,7 +152,7 @@ type GanttDependencyLayout = {
 /** Props for the independent project task Gantt view. */
 export type TaskGanttViewProps = {
   /** Unfiltered tasks used to distinguish Project membership from the rendered filter result. */
-  allProjectTasks?: ProjectTask[]
+  allProjectTasks?: CanonicalWorkItem[]
   /** Determines whether the current user may manage one canonical dependency endpoint. */
   canManageScheduleDependencyEndpoint?: (endpoint: WorkItemDependencyEndpoint) => boolean
   /** Project receiving contextual Gantt creates. */
@@ -162,7 +162,7 @@ export type TaskGanttViewProps = {
   /** Team-scoped resolved configurations used by task statuses. */
   configurationsByTeam: Readonly<Record<string, ResolvedWorkItemConfiguration>>
   /** Tasks displayed in schedule order. */
-  tasks: ProjectTask[]
+  tasks: CanonicalWorkItem[]
   /** Authoritative dependency graph used for lines and row indicators. */
   planningSnapshot?: PlanningSnapshot
   /** Translator used for Gantt-view labels. */
@@ -174,10 +174,10 @@ export type TaskGanttViewProps = {
   /** Deletes a canonical Work Item schedule dependency. */
   onDeleteScheduleDependency?: (dependency: WorkItemScheduleDependency) => void | Promise<void>
   /** Selects a task in the shared detail pane. */
-  onSelectTask?: (task: ProjectTask) => void
+  onSelectTask?: (task: CanonicalWorkItem) => void
   /** Starts a canonical Schedule action and returns its exact preview controller. */
   onRequestScheduleChange?: (
-    task: ProjectTask,
+    task: CanonicalWorkItem,
     operation: WorkItemScheduleOperation,
   ) => ProjectTaskDirectScheduleHandle
   /** Updates a canonical Work Item schedule dependency rule. */
@@ -293,7 +293,7 @@ export function TaskGanttView({
 
   /** Requests the server-owned before/after schedule preview. */
   const previewScheduleChange = async (
-    task: ProjectTask,
+    task: CanonicalWorkItem,
     operation: WorkItemScheduleOperation,
   ) => {
     if (!onRequestScheduleChange) {
@@ -1080,7 +1080,7 @@ function GanttSchedulePreview({
  * @param tasks - Work Items shown in the Gantt view.
  * @returns Rows ordered by primary schedule date and stable task identity.
  */
-function createGanttRows(tasks: readonly ProjectTask[]): GanttTaskRow[] {
+function createGanttRows(tasks: readonly CanonicalWorkItem[]): GanttTaskRow[] {
   return tasks
     .map((task) => ({ schedule: resolveTaskSchedule(task), task }))
     .toSorted((left, right) => {
@@ -1595,7 +1595,7 @@ function describeSchedule(schedule: WorkItemSchedule, t: TaskGanttTranslator): s
  */
 function findDirectPreviewSchedule(
   preview: WorkItemScheduleChangePreview,
-  task: ProjectTask,
+  task: CanonicalWorkItem,
 ): WorkItemSchedule | undefined {
   return preview.impacts.find((impact) =>
     impact.kind === 'direct' &&

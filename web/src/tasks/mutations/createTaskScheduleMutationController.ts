@@ -22,7 +22,7 @@ import { createWorkItemDependencyMutationController } from '../../planning/mutat
 import type { MutationRequestRunner } from '../../shared/api/mutationHeaders'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import type { WorkItemDependencyCreateDraft } from '../../work-items/model/workItemDependencies'
-import type { ProjectTask } from '../api'
+import type { CanonicalWorkItem } from '../api'
 import { applyConfirmedSchedulesToTasks } from '../model/scheduleConfirmation'
 import {
   refreshScheduleConfirmationCache,
@@ -42,7 +42,7 @@ export type TaskScheduleMutationControllerOptions = {
   /** Revalidates or updates the authoritative Planning snapshot cache. */
   mutatePlanning: KeyedMutator<PlanningSnapshot>
   /** Revalidates or updates the current Project Work Item cache. */
-  mutateProjectTasks: KeyedMutator<ProjectTask[]>
+  mutateProjectTasks: KeyedMutator<CanonicalWorkItem[]>
   /** Revalidates or updates the selected Work Item detail cache. */
   mutateSelectedIssueDetail: KeyedMutator<TeamIssueDetail>
   /** Observes background refresh errors for enterprise-session redirects. */
@@ -61,17 +61,17 @@ export type TaskScheduleMutationControllerOptions = {
 export type TaskScheduleMutationController = {
   /** Confirms a revision-bound schedule preview and publishes every cascade result. */
   confirmScheduleChange: (
-    task: ProjectTask,
+    task: CanonicalWorkItem,
     operation: WorkItemScheduleOperation,
     preview: WorkItemScheduleChangePreview,
-  ) => Promise<ProjectTask>
+  ) => Promise<CanonicalWorkItem>
   /** Creates one canonical Work Item schedule dependency. */
   createScheduleDependency: (input: WorkItemDependencyCreateDraft) => Promise<void>
   /** Deletes one canonical Work Item schedule dependency. */
   deleteScheduleDependency: (dependency: WorkItemScheduleDependency) => Promise<void>
   /** Requests a server-authoritative preview for one schedule operation. */
   previewScheduleChange: (
-    task: ProjectTask,
+    task: CanonicalWorkItem,
     operation: WorkItemScheduleOperation,
   ) => Promise<WorkItemScheduleChangePreview>
   /** Updates one canonical Work Item schedule dependency rule. */
@@ -119,7 +119,7 @@ export function createTaskScheduleMutationController({
 
   /** Validates one interactive schedule operation against its observed revision. */
   const previewScheduleChange = async (
-    task: ProjectTask,
+    task: CanonicalWorkItem,
     operation: WorkItemScheduleOperation,
   ): Promise<WorkItemScheduleChangePreview> => {
     const token = requireAccessToken()
@@ -140,10 +140,10 @@ export function createTaskScheduleMutationController({
 
   /** Confirms the original operation against both Planning and relation graph revisions. */
   const confirmScheduleChange = async (
-    task: ProjectTask,
+    task: CanonicalWorkItem,
     operation: WorkItemScheduleOperation,
     preview: WorkItemScheduleChangePreview,
-  ): Promise<ProjectTask> => {
+  ): Promise<CanonicalWorkItem> => {
     const token = requireAccessToken()
     if (
       preview.planningRevision === undefined ||
@@ -198,7 +198,7 @@ export function createTaskScheduleMutationController({
     )
     if (!confirmedTask) throw new Error(t('tasks.action.updateError'))
 
-    const updatedTask: ProjectTask = {
+    const updatedTask: CanonicalWorkItem = {
       ...task,
       assignedProjectId: confirmedTask.assignedProjectId,
       dueDate: confirmedTask.dueDate,
