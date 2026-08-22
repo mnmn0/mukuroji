@@ -975,6 +975,9 @@ function toNotificationItem(
   ) {
     throw invalidNotificationData()
   }
+  if (value.inAppVisible !== undefined && typeof value.inAppVisible !== 'boolean') {
+    throw invalidNotificationData()
+  }
   if (value.inAppVisible === false) {
     return undefined
   }
@@ -1308,26 +1311,29 @@ function readPlanningNotificationKind(
     : undefined
 }
 
-/** Reads an ISO-compatible timestamp while rejecting calendar-overflow dates. */
+/** Reads an ISO-compatible timestamp while rejecting normalized date or time components. */
 function readTimestamp(value: unknown) {
   const text = readText(value)
   return text &&
-    hasValidTimestampCalendarDate(text) &&
+    hasValidTimestampComponents(text) &&
     Number.isFinite(Date.parse(text))
     ? new Date(text).toISOString()
     : undefined
 }
 
-/** Returns whether the calendar date prefix of a timestamp is a real date. */
-function hasValidTimestampCalendarDate(value: string) {
-  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(value)
+/** Returns whether a timestamp has valid ISO calendar and clock components. */
+function hasValidTimestampComponents(value: string) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/u.exec(value)
   if (!match) {
     return false
   }
   const parsed = new Date(`${match[1]}-${match[2]}-${match[3]}T00:00:00.000Z`)
   return parsed.getUTCFullYear() === Number(match[1]) &&
     parsed.getUTCMonth() + 1 === Number(match[2]) &&
-    parsed.getUTCDate() === Number(match[3])
+    parsed.getUTCDate() === Number(match[3]) &&
+    Number(match[4]) <= 23 &&
+    Number(match[5]) <= 59 &&
+    Number(match[6]) <= 59
 }
 
 function readPositiveInteger(value: unknown) {
