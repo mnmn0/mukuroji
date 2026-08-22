@@ -1336,7 +1336,7 @@ function readPlanningNotificationKind(
 function readTimestamp(value: unknown) {
   const text = readText(value)
   return text &&
-    hasValidTimestampComponents(text, true) &&
+    hasValidTimestampComponents(text) &&
     Number.isFinite(Date.parse(text))
     ? new Date(text).toISOString()
     : undefined
@@ -1350,24 +1350,16 @@ function readTimestamp(value: unknown) {
  */
 function readNotificationInputTimestamp(value: unknown) {
   const text = readText(value)
-  return text &&
-    hasValidTimestampComponents(text, false) &&
-    Number.isFinite(Date.parse(text))
-    ? new Date(text).toISOString()
-    : undefined
+  return text && Number.isFinite(Date.parse(text)) ? new Date(text).toISOString() : undefined
 }
 
 /**
  * Returns whether a timestamp has valid ISO calendar and clock components.
  *
  * @param value - Timestamp value to validate.
- * @param requireSeconds - Whether the timestamp must include seconds.
  */
-function hasValidTimestampComponents(value: string, requireSeconds: boolean) {
-  const match = (requireSeconds
-    ? /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/u
-    : /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})$/u
-  ).exec(value)
+function hasValidTimestampComponents(value: string) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/u.exec(value)
   if (!match) {
     return false
   }
