@@ -941,7 +941,18 @@ function toNotificationItem(
     isInvalidStoredTimestamp(value.readAt) ||
     isInvalidStoredTimestamp(value.snoozedUntil) ||
     isInvalidStoredTimestamp(value.planningNextDueAt) ||
-    isInvalidStoredTimestamp(value.updatedAt)
+    isInvalidStoredTimestamp(value.updatedAt) ||
+    isInvalidStoredScopeText(value.entityId) ||
+    isInvalidStoredScopeText(value.teamId) ||
+    isInvalidStoredScopeText(value.projectId) ||
+    isInvalidStoredScopeText(value.issueId) ||
+    isInvalidStoredScopeText(value.triageEntryId) ||
+    isInvalidStoredScopeText(value.planningTargetId) ||
+    isInvalidStoredScopeText(value.planningTargetRecordKey) ||
+    (value.planningTargetType !== undefined &&
+      readPlanningTargetType(value.planningTargetType) === undefined) ||
+    (value.planningNotificationKind !== undefined &&
+      readPlanningNotificationKind(value.planningNotificationKind) === undefined)
   ) {
     throw invalidNotificationData()
   }
@@ -1355,7 +1366,7 @@ function readNotificationInputTimestamp(value: unknown) {
 function hasValidTimestampComponents(value: string, requireSeconds: boolean) {
   const match = (requireSeconds
     ? /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/u
-    : /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/u
+    : /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/u
   ).exec(value)
   if (!match) {
     return false
@@ -1371,6 +1382,19 @@ function hasValidTimestampComponents(value: string, requireSeconds: boolean) {
 
 function readPositiveInteger(value: unknown) {
   return Number.isSafeInteger(value) && Number(value) > 0 ? Number(value) : undefined
+}
+
+/**
+ * Returns whether an optional persisted authorization scope value is malformed.
+ *
+ * @param value - Persisted scope value to validate.
+ */
+function isInvalidStoredScopeText(value: unknown) {
+  return value !== undefined && (
+    typeof value !== 'string' ||
+    !value.trim() ||
+    value !== value.trim()
+  )
 }
 
 function readNonNegativeInteger(value: unknown) {

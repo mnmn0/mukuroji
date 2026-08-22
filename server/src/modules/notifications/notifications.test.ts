@@ -154,6 +154,7 @@ describe('notification store', () => {
         notificationKey: '2026-01-01T01:00:00.000+01:00#evt-1',
         occurredAt: '2026-01-01T01:00:00.000+01:00',
       }),
+      createNotificationRow({ teamId: 42, projectId: undefined }),
       createNotificationRow({ inAppVisible: 'false' }),
     ]
 
@@ -363,6 +364,37 @@ describe('notification store', () => {
       'attribute_exists(recipientKey) AND attribute_exists(notificationKey) AND #version = :version',
     )
     expect(put?.input.ExpressionAttributeValues).toEqual({ ':version': 1 })
+  })
+
+  test('normalizes snooze timestamps with high fractional precision', async () => {
+    let queryCount = 0
+    const recording = createClient(({ constructor }) => {
+      if (constructor.name === 'QueryCommand') {
+        queryCount += 1
+        return queryCount === 1 ? { Items: [] } : { Items: [createNotificationRow()] }
+      }
+      if (constructor.name === 'GetCommand') {
+        return { Item: createNotificationRow() }
+      }
+      return {}
+    })
+    const listed = await recording.client.list({
+      workspaceId: 'workspace-1',
+      memberKey: 'member@example.com',
+      limit: 1,
+      now: new Date('2026-07-12T13:00:00.000Z'),
+    })
+
+    const updated = await recording.client.update({
+      workspaceId: 'workspace-1',
+      memberKey: 'member@example.com',
+      notificationId: listed.notifications[0]?.id ?? '',
+      action: 'snooze',
+      snoozedUntil: '2026-08-23T12:00:00.1234Z',
+      now: new Date('2026-07-12T13:00:00.000Z'),
+    })
+
+    expect(updated.snoozedUntil).toBe('2026-08-23T12:00:00.123Z')
   })
 
   test('rejects a notification version that cannot be incremented safely', async () => {
