@@ -935,6 +935,13 @@ function toNotificationItem(
   ) {
     throw invalidNotificationData()
   }
+  if (
+    isInvalidStoredTimestamp(value.archivedAt) ||
+    isInvalidStoredTimestamp(value.readAt) ||
+    isInvalidStoredTimestamp(value.snoozedUntil)
+  ) {
+    throw invalidNotificationData()
+  }
   const state = resolveNotificationState(value, now)
   const snoozedUntil = readTimestamp(value.snoozedUntil)
   const isExpiredSnoozePendingWake =
@@ -949,10 +956,18 @@ function toNotificationItem(
     throw invalidNotificationData()
   }
   const notificationKey = readText(value.notificationKey)
-  const eventId = readText(value.eventId) ?? readText(value.notificationId)
+  const eventId = readText(value.eventId)
   const eventType = readText(value.eventType)
-  const occurredAt = readTimestamp(value.occurredAt) ?? notificationKey?.split('#')[0]
-  if (!notificationKey || !eventId || !eventType || !occurredAt) {
+  const storedOccurredAt = readText(value.occurredAt)
+  const occurredAt = readTimestamp(storedOccurredAt)
+  if (
+    !notificationKey ||
+    !eventId ||
+    !eventType ||
+    !storedOccurredAt ||
+    !occurredAt ||
+    notificationKey !== `${storedOccurredAt}#${eventId}`
+  ) {
     throw invalidNotificationData()
   }
   if (value.inAppVisible === false) {
@@ -1005,6 +1020,11 @@ function toNotificationItem(
 /** Creates the stable error for malformed persisted notification data. */
 function invalidNotificationData() {
   return new NotificationError(503, 'InvalidNotificationData', 'Stored notification data is invalid.')
+}
+
+/** Returns whether a persisted optional notification timestamp is present but invalid. */
+function isInvalidStoredTimestamp(value: unknown) {
+  return value !== undefined && !readTimestamp(value)
 }
 
 function matchesNotificationFilter(

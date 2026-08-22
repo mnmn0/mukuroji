@@ -126,8 +126,13 @@ describe('notification store', () => {
       createNotificationRow({
         inAppVisible: false,
         eventId: undefined,
-        notificationId: undefined,
+        notificationId: 'evt-1',
       }),
+      createNotificationRow({ archivedAt: 'not-a-timestamp' }),
+      createNotificationRow({ readAt: 'not-a-timestamp' }),
+      createNotificationRow({ snoozedUntil: 'not-a-timestamp' }),
+      createNotificationRow({ occurredAt: undefined }),
+      createNotificationRow({ notificationKey: 'not-a-date#evt-1' }),
     ]
 
     for (const row of invalidRows) {
@@ -209,12 +214,14 @@ describe('notification store', () => {
             }),
             createNotificationRow({
               notificationKey: '2026-07-12T11:30:00.000Z#evt-in-app-disabled',
+              occurredAt: '2026-07-12T11:30:00.000Z',
               eventId: 'evt-in-app-disabled',
               notificationId: 'evt-in-app-disabled',
               inAppVisible: false,
             }),
             createNotificationRow({
               notificationKey: '2026-07-12T11:00:00.000Z#evt-hidden',
+              occurredAt: '2026-07-12T11:00:00.000Z',
               eventId: 'evt-hidden',
               notificationId: 'evt-hidden',
               projectId: 'hidden',
@@ -538,7 +545,8 @@ describe('notification store', () => {
       wakeQueries += 1
       return {
         Items: Array.from({ length: 250 }, (_, index) => createNotificationRow({
-          notificationKey: `future-snooze-${wakeQueries}-${index}`,
+          notificationKey: `2026-07-12T12:00:00.000Z#future-snooze-${wakeQueries}-${index}`,
+          eventId: `future-snooze-${wakeQueries}-${index}`,
           snoozedUntil: '2099-07-12T13:00:00.000Z',
           inboxState: 'snoozed',
           recipientStatusKey: 'workspace-1#member@example.com#snoozed',
@@ -608,11 +616,13 @@ describe('notification store', () => {
               createNotificationRow(),
               createNotificationRow({
                 notificationKey: '2026-07-12T11:30:00.000Z#in-app-disabled',
+                occurredAt: '2026-07-12T11:30:00.000Z',
                 eventId: 'in-app-disabled',
                 inAppVisible: false,
               }),
               createNotificationRow({
                 notificationKey: '2026-07-12T11:00:00.000Z#hidden',
+                occurredAt: '2026-07-12T11:00:00.000Z',
                 eventId: 'hidden',
                 projectId: 'hidden',
               }),
