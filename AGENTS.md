@@ -25,9 +25,10 @@
 
 ### PR bot レビュー
 
-- レビューレディー PR を push したら、自動レビュー Bot の状態を確認する。PR 本文に `👀` が表示されている間はレビュー中、`👍` が表示されたら指摘なしとして扱う。
-- CodeRabbit のレビューは PR の Conversation に `@coderabbitai review` とコメントして開始し、開始後およそ20分を目安にレビュー結果を確認する。
-- どちらかの Bot に指摘がある場合、または CI が失敗した場合は、原因を修正して必要な検証を再実行し、commit と push 後に両方の Bot と CI が OK になるまで確認を繰り返す。
+- レビューレディー PR を push したら、GitHub PR の `chatgpt-codex-connector[bot]` のレビューコメントとリアクションを確認する。`👀` はレビュー中、`👍` は指摘なし、P1 などのレビューコメントは未完了として扱う。
+- 同じPRの GitHub Actions Checks で、対象commitの全workflowが `completed` / `success` になることを確認する。`in_progress`、`queued`、`failure`、`cancelled`、`timed_out` は完了扱いにしない。
+- CodeRabbit のレビューは PR の Conversation に `@coderabbitai review` とコメントして開始し、CodeRabbit の `Review finished` コメントと `CodeRabbit` status/check の `success` を開始後およそ20分を目安に確認する。rate limit、skip、triggered、pending はレビュー完了扱いにしない。
+- `chatgpt-codex-connector[bot]` の `👍`、CodeRabbit の actionable commentなしの `Review finished`、対象commitの全CI成功がそろうまでPRを完了扱いにしない。どちらかのBotに指摘がある場合、またはCIが失敗した場合は、原因を修正して必要な検証を再実行し、commit と push 後に両方のBotとCIを再確認する。修正後にBotが自動開始されない場合は、各Botのレビュー開始コメントを再投稿してから完了状態を確認する。
 
 ## ディレクトリ
 

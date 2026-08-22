@@ -9,7 +9,6 @@ import {
   createNotificationDeliveryPlan,
   createNotificationRecipientKey,
   parseStoredNotificationPreferences,
-  type NotificationItem,
   type NotificationAction,
   type NotificationState,
 } from './notifications'
@@ -459,7 +458,7 @@ describe('notification store', () => {
     })
     expect(recording.commands.some(({ input, name }) =>
       name === 'GetCommand' &&
-      (input.Key as Record<string, unknown> | undefined)?.notificationKey === '!MIGRATION#STATUS-V1'
+      isRecord(input.Key) && input.Key.notificationKey === '!MIGRATION#STATUS-V1'
     )).toBeFalse()
   })
 
@@ -769,8 +768,13 @@ describe('notification store', () => {
     await expect(recording.client.update({
       workspaceId: 'workspace-1',
       memberKey: 'other@example.com',
-      notificationId: (page.notifications[0] as NotificationItem).id,
+      notificationId: page.notifications[0]?.id ?? '',
       action: 'mark-read',
     })).rejects.toMatchObject({ code: 'InvalidNotificationId', status: 400 })
   })
 })
+
+/** Narrows an unknown command input value to a plain record. */
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
