@@ -50,11 +50,6 @@ const directlyConfiguredFunctionScopes = new Map(
   ),
 );
 
-const migrationFunctionIds = new Set([
-  'WebhookAuthorizationBackfillFunction5ABBA705',
-  'WebhookAuthorizationBackfillProgressFunction1FF04FD2',
-]);
-
 const runtimeControlPlaneFunctionIds = new Set([
   'RuntimeControlAlarmReadinessOnEventFunctionA25C5A0C',
   'RuntimeControlAlarmReadinessPollFunctionCD017060',
@@ -623,7 +618,6 @@ test('binds exact runtime-control settings through API config and twenty-one dir
     .map(([logicalId]) => logicalId);
   const classifiedFunctionIds = [
     ...controlledFunctionScopes.keys(),
-    ...migrationFunctionIds,
     ...infrastructureFunctionIds,
   ];
 

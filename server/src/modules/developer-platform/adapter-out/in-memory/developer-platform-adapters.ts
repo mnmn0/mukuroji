@@ -5,7 +5,6 @@ import { ApiKeyAdapter, OAuthCredentialAdapter } from '../shared/credential-adap
 import {
   InMemoryDeveloperPlatformStorage,
   LocalAesGcmSecretProtector,
-  type WebhookActiveLocatorMigrationState,
 } from '../shared/developer-platform-store'
 import { ImportAdapter } from '../shared/import-adapter'
 import {
@@ -30,8 +29,6 @@ export type InMemoryDeveloperPlatformAdapterOptions = {
   secretProtector?: SecretProtector
   /** Injectable clock used by deterministic tests. */
   clock?: () => Date
-  /** Active Webhook locator migration state simulated by the adapter. */
-  webhookActiveLocatorMigrationState?: WebhookActiveLocatorMigrationState
 }
 
 /**
@@ -46,7 +43,6 @@ export function createInMemoryDeveloperPlatformAdapters(
   const source = new InMemoryDeveloperPlatformStorage(
     options.secretProtector ?? new LocalAesGcmSecretProtector(),
     options.clock,
-    options.webhookActiveLocatorMigrationState,
   )
   return {
     apiKeys: new ApiKeyAdapter(source),

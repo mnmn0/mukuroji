@@ -292,7 +292,7 @@ test('keeps pending migration rollback behind the durable guard', async () => {
     ...completeTableEnvironment,
     NODE_ENV: 'production',
     AWS_LAMBDA_FUNCTION_NAME:
-      'mukuroji-production-webhook-authorization-backfill',
+      'mukuroji-production-workspace-search-migration',
     AWS_EXECUTION_ENV: 'AWS_Lambda_nodejs22.x',
     MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE: 'rollout-pending',
   }, () => {

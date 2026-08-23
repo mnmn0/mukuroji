@@ -54,7 +54,7 @@ domain-separated SHA-256を計算してCDKのdigest tagと照合します。
 
 ## API observability
 
-Application Lambda 25個は X-Ray active tracing を有効にし、各 execution role には X-Ray が要求する
+Application Lambda 23個は X-Ray active tracing を有効にし、各 execution role には X-Ray が要求する
 trace/telemetry write action だけを追加します。API Lambda は readiness probe 用に
 `AuditEventsTable`、`WorkItemsTable`、`WorkspaceAccessTable` への `dynamodb:DescribeTable` だけを
 持つ独立 policy を使います。
@@ -712,16 +712,22 @@ outputにはSecret ARNなどのresource metadataが含まれるため、access t
 照合後のローカルファイルは削除します。
 
 初回配線を`rollout-pending`でdeployすると、AppConfigの初期baselineは`disabled`でall-at-once
-deployされ、controlled Lambdaはその完了に依存します。Webhook authorization backfill custom
-resourceも両handler Lambdaの更新完了に依存し、event propertyとLambda環境のmodeが一致しない場合は
-I/O前に停止します。pending中のCreate/Updateはtable access前に短絡します。Deleteはv3 markerと
-checkpointを強整合readし、stateが空ならwriteなしで完了し、既存stateがあればpending barrierを
-bypassせずdurable open-row guard付きtransactionでrollbackを完了するまで削除を成功させません。全writerの
-drainを確認してfresh authorityに束縛したopen rowをbootstrapし、続けて値を`required`へ変更します。
+deployされ、controlled Lambdaはその完了に依存します。全writerのdrainを確認してfresh authorityに
+束縛したopen rowをbootstrapし、続けて値を`required`へ変更します。
 Application clientもpending中はfenced mutationをnetwork I/O前に拒否し、AppConfig admissionの
 誤再開だけではunguarded writeへ戻りません。
-Guarded backfillの完了とwriter clientを構築する全12 Lambdaへの反映を確認した後、新しい
-AppConfig `enabled` revisionをdeployしてwriterを再開します。CloudFormation更新中の
+writer clientを構築する全10 Lambdaへの反映を確認した後、新しいAppConfig `enabled` revisionを
+deployしてwriterを再開します。Target templateと新規環境はWebhook authorization backfill custom
+resourceを作成しません。既存stackにはdeploy前まで旧resourceが存在し得ますが、このdeployのchange setで
+削除します。その存在自体はpre-deploy gateの失敗条件にせず、旧resourceを再実行せずにretired dataと
+canonical authorization dataを全件検査します。このrolloutはlegacy locatorや不足したauthorization
+projectionを変換しません。deploy前に
+`docs/operational-readiness.md`のpre-deploy gateを満たし、retired locator/stateまたはcurrent
+authorization projection/grantの不足がある環境ではrolloutを停止します。旧workerを停止する前に
+`CollaborationProjectionFunction`のDynamoDB stream event-source mappingだけをchange-controlledに停止し、
+現行`WebhookDeliveryFunction` consumerを動かしたまま`WebhookDeliveryQueueUrl`をdrainして、main queue/DLQと
+Developer Platformのprojection stateにv1 primary/legacy cursorが残らないことも確認します。このdeployは
+durable cursorを変換しません。CloudFormation更新中の
 pending/required混在を許容してwriterを再開したり、通常rollbackとして`required`から
 `rollout-pending`へ戻したりしないでください。
 
@@ -805,17 +811,12 @@ SNS resourceの新設がないことを確認し、そのtopic名を以後の通
 
 bootstrap update は同じ key・同じ owner なら再実行できます。既存の異なる種類の row と key が衝突した場合は上書きせず stack update を失敗させるため、row を調査してから再実行します。
 
-Webhook ACL v2 upgrade は新しい transaction writer の更新後に開始し、checkpoint に記録した30秒の drain window が終わるまで retained row の scan を開始しません。これにより、更新前に開始した API invocation が cleanup locator なしの grant を backfill cursor 通過後に書き込むことを防ぎます。
-
-Webhook active locator v3 upgrade は API、projection、delivery の
-dual-read / dual-write 対応を先に更新します。Custom resource は60秒 drain後に
-primary locator を全件整合し、primary-only 境界を永続 marker で確定します。
-さらに compatibility writer を60秒 drainしてから legacy GSI projection を
-全件除去します。Stack update が rollback する場合は、Custom resource の
-Delete が marker を rollback 状態へfenceし、active subscription のlegacy
-projectionを全件復元してから旧 Lambda への依存逆順rollbackを許可します。
-この逆移行に失敗した stack で custom resource をskipして
-`continue-update-rollback`しないでください。
+Webhook authorizationは新規環境でcurrent transaction writerとprimary subscription locatorを最初から
+使用し、target templateはlocator migrationやauthorization projection backfillのcustom resourceを
+作成しません。既存stackにはdeploy前まで旧resourceが存在し得ますが、change setでの削除対象として
+inventory化し、その存在だけを異常扱いしません。既存dataを持つ環境では
+`docs/operational-readiness.md`のpre-deploy gateでprojection、grant、cleanup locator、retired locator/state、
+queue payloadとdurable projection receiptのv1 cursorを全件検査し、不一致があればdeployを停止します。
 
 通知 upgrade では `NotificationsTable` に `RecipientStatusIndex` が追加されます。deploy 前に GSI backfill の所要時間と table throttling を確認し、deploy 後は `CollaborationProjectionDlqUrl` と `NotificationScheduleDlqUrl` の滞留、Inbox の unread count を監視してください。期限 schedule は1時間ごとに走査し、各 Work Item の canonical `schedule.calendarPolicy.timeZone` で due/overdue を評価して、同じ Work Item / due date / reason の event を決定的に重複排除します。走査が `NOTIFICATION_SCHEDULE_MAX_PAGES` の上限に達した場合も例外として非同期 retry され、最終失敗は schedule DLQ に保存されます。DLQ の visible message が1件以上になると CloudWatch alarm が `ALARM` 状態になるため、alarm と DLQ message を調査し、再実行または due-date GSI への移行を判断してください。
 

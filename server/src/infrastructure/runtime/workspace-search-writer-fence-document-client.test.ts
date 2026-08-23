@@ -317,7 +317,7 @@ test('guards transactions that only mutate an additional rollback table', async 
     Update: {
       TableName: 'DeveloperPlatform',
       Key: {
-        workspaceId: 'WEBHOOK_ACTIVE_LOCATOR_MIGRATION#v3',
+        workspaceId: 'WORKSPACE_SEARCH_MIGRATION_ROLLBACK',
         recordKey: 'STATE',
       },
       UpdateExpression: 'SET #value.#state = :rollback',
