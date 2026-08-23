@@ -2409,7 +2409,7 @@ describe('webhook subscription and delivery', () => {
     })
   })
 
-  test('rejects retired active locator cursor phases', async () => {
+  test('rejects retired v1 active locator cursor phases', async () => {
     const { client } = createClient()
     const created = await client.createWebhookSubscription({
       workspaceId: 'workspace-canonical-webhook',
@@ -2429,20 +2429,32 @@ describe('webhook subscription and delivery', () => {
       workspaceId: 'workspace-canonical-webhook',
       limit: 50,
     })).resolves.toEqual({ subscriptions: [created.subscription] })
-    const retiredCursor = Buffer.from(JSON.stringify({
-      version: 1,
-      phase: 'legacy',
-      workspaceId: 'workspace-canonical-webhook',
-      lookupKey: 'WEBHOOK#ACTIVE#workspace-canonical-webhook',
-    }), 'utf8').toString('base64url')
-    await expect(client.listActiveWebhookSubscriptionsPage({
-      workspaceId: 'workspace-canonical-webhook',
-      limit: 50,
-      cursor: retiredCursor,
-    })).rejects.toMatchObject({
-      status: 400,
-      code: 'DeveloperCursorInvalid',
-    })
+    const retiredCursors = [
+      {
+        version: 1,
+        phase: 'primary',
+        workspaceId: 'workspace-canonical-webhook',
+        recordKey: 'WEBHOOKACTIVE#2026-07-01T00:00:00.000Z#webhook-retired',
+      },
+      {
+        version: 1,
+        phase: 'legacy',
+        workspaceId: 'workspace-canonical-webhook',
+        lookupKey: 'WEBHOOK#ACTIVE#workspace-canonical-webhook',
+      },
+    ].map((cursor) =>
+      Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url')
+    )
+    for (const retiredCursor of retiredCursors) {
+      await expect(client.listActiveWebhookSubscriptionsPage({
+        workspaceId: 'workspace-canonical-webhook',
+        limit: 50,
+        cursor: retiredCursor,
+      })).rejects.toMatchObject({
+        status: 400,
+        code: 'DeveloperCursorInvalid',
+      })
+    }
   })
 
   test('enqueues deterministically, prepares signed payload, records retries, and replays', async () => {

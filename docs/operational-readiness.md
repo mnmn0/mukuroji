@@ -1820,6 +1820,17 @@ migration の代用にはせず、実行前 PITR と reviewed forward-fix/repair
 7. 直前の成功code/configurationを新しい`ApiRuntimeConfigurationRevision`でforward deployする
    rollback commandと、Function URL consumerの切替手順をreviewする。
 8. Webhook locator bridgeを削除するdeployでは、対象account/region/table identityを固定して
+   旧workerが動作している間に`CollaborationProjectionFunction`のDynamoDB stream event-source mapping
+   UUIDをchange recordへ固定して、そのmappingだけをdisabledにする。AppConfigでproducerとconsumerを同時に
+   止めず、現行`WebhookDeliveryFunction`のSQS mappingはenabledのままproducer invocationの完了を待ち、
+   `WebhookDeliveryQueueUrl`をdrainする。Main queueと`WebhookDeliveryDlqUrl`のvisible、in-flight、delayed
+   messageがすべて0で、oldest ageも解消したことを連続確認する。Developer Platformの全
+   `webhook-projection-state` rowも検査し、`nextCursor`をcanonical Base64url JSONとして復号した値が
+   v1 `primary` / `legacy` phaseであるrowが1件でも残る場合はrolloutを停止する。新workerはv1 cursorを
+   `DeveloperCursorInvalid`として拒否し、後続subscription pageを配信できない。このdeployはqueue messageや
+   projection receiptを変換しないため、残存時は別のreview済みdrain/repairまたは環境再作成後に再検査する。
+   Deployとcurrent cursor smokeの成功後に同じproducer mappingをDynamoDB Streams retention内で再開し、
+   iterator age、projection DLQ、Webhook queue/DLQが通常値へ戻ることを確認する。
    Developer Platformの全`webhook-subscription` rowを検査し、retiredな`lookupKey` / `lookupSortKey`、
    `WEBHOOK_ACTIVE_LOCATOR_MIGRATION#v3` / `STATE`、またはWebhook active-locator rollback
    checkpointが1件でも残る場合はrolloutを停止する。Project Directoryの全active `team` / `project` /

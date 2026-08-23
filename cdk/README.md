@@ -720,7 +720,11 @@ writer clientを構築する全10 Lambdaへの反映を確認した後、新し�
 deployしてwriterを再開します。Webhook authorization backfill custom resourceは存在せず、このrolloutは
 legacy locatorや不足したauthorization projectionを変換しません。deploy前に
 `docs/operational-readiness.md`のpre-deploy gateを満たし、retired locator/stateまたはcurrent
-authorization projection/grantの不足がある環境ではrolloutを停止します。CloudFormation更新中の
+authorization projection/grantの不足がある環境ではrolloutを停止します。旧workerを停止する前に
+`CollaborationProjectionFunction`のDynamoDB stream event-source mappingだけをchange-controlledに停止し、
+現行`WebhookDeliveryFunction` consumerを動かしたまま`WebhookDeliveryQueueUrl`をdrainして、main queue/DLQと
+Developer Platformのprojection stateにv1 primary/legacy cursorが残らないことも確認します。このdeployは
+durable cursorを変換しません。CloudFormation更新中の
 pending/required混在を許容してwriterを再開したり、通常rollbackとして`required`から
 `rollout-pending`へ戻したりしないでください。
 
@@ -807,7 +811,7 @@ bootstrap update は同じ key・同じ owner なら再実行できます。既�
 Webhook authorizationは新規環境でcurrent transaction writerとprimary subscription locatorを最初から
 使用し、locator migrationやauthorization projection backfillのcustom resourceを作成しません。既存dataを
 持つ環境では`docs/operational-readiness.md`のpre-deploy gateでprojection、grant、cleanup locator、
-retired locator/stateを全件検査し、不一致があればdeployを停止します。
+retired locator/state、queue/receiptのv1 cursorを全件検査し、不一致があればdeployを停止します。
 
 通知 upgrade では `NotificationsTable` に `RecipientStatusIndex` が追加されます。deploy 前に GSI backfill の所要時間と table throttling を確認し、deploy 後は `CollaborationProjectionDlqUrl` と `NotificationScheduleDlqUrl` の滞留、Inbox の unread count を監視してください。期限 schedule は1時間ごとに走査し、各 Work Item の canonical `schedule.calendarPolicy.timeZone` で due/overdue を評価して、同じ Work Item / due date / reason の event を決定的に重複排除します。走査が `NOTIFICATION_SCHEDULE_MAX_PAGES` の上限に達した場合も例外として非同期 retry され、最終失敗は schedule DLQ に保存されます。DLQ の visible message が1件以上になると CloudWatch alarm が `ALARM` 状態になるため、alarm と DLQ message を調査し、再実行または due-date GSI への移行を判断してください。
 

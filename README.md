@@ -441,7 +441,11 @@ AppConfigが誤って`enabled`へ戻ってもunguarded writeを通しません�
 revisionでwriterを再開してください。Webhook authorization backfill custom resourceは存在せず、この
 rolloutはlegacy locatorや不足したauthorization projectionを変換しません。deploy前に
 `docs/operational-readiness.md`のpre-deploy gateを満たし、retired locator/stateまたはcurrent
-authorization projection/grantの不足がある環境ではrolloutを停止してください。通常deployで
+authorization projection/grantの不足がある環境ではrolloutを停止してください。旧workerを停止する前に
+`CollaborationProjectionFunction`のDynamoDB stream event-source mappingだけをchange-controlledに停止し、
+現行`WebhookDeliveryFunction` consumerを動かしたまま`WebhookDeliveryQueueUrl`をdrainして、main queue/DLQと
+Developer Platformのprojection stateにv1 primary/legacy cursorが残らないことも確認します。このdeployは
+durable cursorを変換しません。通常deployで
 `required`から`rollout-pending`へ戻してはいけません。
 
 SSO client は password client とは別に作成し、client secret なし、
