@@ -785,8 +785,11 @@ openにするにはdata/application ownerの明示的なrecovery判断を必要�
 Deployは(1)明示的`rollout-pending`で配線/IAMと`disabled` AppConfig baselineを先行し、
 (2)全entrypointの反映とdrainを確認し、(3)fresh authorityで`bootstrapOpen`し、
 (4)parameterを`required`へ更新して10個のstrict compositionすべての反映を確認し、
-(5)新しい`enabled` revisionで再開する二段階とします。Webhook authorization backfill custom
-resourceは存在せず、このrolloutはlegacy locatorや不足したauthorization projectionを変換しません。
+(5)新しい`enabled` revisionで再開する二段階とします。Target templateと新規環境はWebhook authorization
+backfill custom resourceを作成しません。既存stackにはdeploy前まで旧resourceが存在し得ますが、この
+deployのchange setで削除します。Pre-deploy gateではその存在自体を異常扱いせず、logical/physical IDと
+削除差分をinventory化し、旧resourceを再実行しません。このrolloutはlegacy locatorや不足した
+authorization projectionを変換しません。
 CloudFormation更新中はpending/required Lambdaが混在し得るため、
 Step 2からStep 5までwriterを再開しません。`required`から`rollout-pending`へのdowngradeは通常rollback
 として扱わず、state-table recoveryを含むowner承認の新しいmaintenance changeを必要とします。
@@ -1823,12 +1826,17 @@ migration の代用にはせず、実行前 PITR と reviewed forward-fix/repair
    旧workerが動作している間に`CollaborationProjectionFunction`のDynamoDB stream event-source mapping
    UUIDをchange recordへ固定して、そのmappingだけをdisabledにする。AppConfigでproducerとconsumerを同時に
    止めず、現行`WebhookDeliveryFunction`のSQS mappingはenabledのままproducer invocationの完了を待ち、
-   `WebhookDeliveryQueueUrl`をdrainする。Main queueと`WebhookDeliveryDlqUrl`のvisible、in-flight、delayed
-   messageがすべて0で、oldest ageも解消したことを連続確認する。Developer Platformの全
-   `webhook-projection-state` rowも検査し、`nextCursor`をcanonical Base64url JSONとして復号した値が
-   v1 `primary` / `legacy` phaseであるrowが1件でも残る場合はrolloutを停止する。新workerはv1 cursorを
-   `DeveloperCursorInvalid`として拒否し、後続subscription pageを配信できない。このdeployはqueue messageや
-   projection receiptを変換しないため、残存時は別のreview済みdrain/repairまたは環境再作成後に再検査する。
+   `WebhookDeliveryQueueUrl`をdrainする。Main queueと`WebhookDeliveryDlqUrl`の全message payloadを対象に
+   cursor version/phaseを検査し、v1 `primary` / `legacy` cursorを含むmessageを1件でも検出した場合は
+   rolloutを停止する。Consumerのdrain完了後はvisible、in-flight、delayed messageがすべて0で、oldest ageも
+   解消したことを連続確認し、queue/DLQごとの検査件数、v1検出件数、0-stateの時刻とmetricをchange recordへ
+   保存する。Raw payloadやcursor自体はevidenceへ複製せず、検出itemはrestricted locatorとkeyed digestで
+   追跡する。Developer Platformのdurable projection receiptである全`webhook-projection-state` rowも検査し、
+   `nextCursor`をcanonical Base64url JSONとして復号した値がv1 `primary` / `legacy` phaseであるrowが1件でも
+   残る場合はrolloutを停止する。Receiptの検査件数、v1検出件数、table identity、完了時刻を同じchange
+   recordへ保存する。新workerはv1 cursorを`DeveloperCursorInvalid`として拒否し、後続subscription pageを
+   配信できない。このdeployはqueue messageやprojection receiptを変換しないため、残存時は別のreview済み
+   drain/repairまたは環境再作成後に再検査する。
    Deployとcurrent cursor smokeの成功後に同じproducer mappingをDynamoDB Streams retention内で再開し、
    iterator age、projection DLQ、Webhook queue/DLQが通常値へ戻ることを確認する。
    Developer Platformの全`webhook-subscription` rowを検査し、retiredな`lookupKey` / `lookupSortKey`、
@@ -2091,8 +2099,13 @@ failure destination error、security regression のいずれかは自動継続�
 1. Incident を宣言し、新しい deploy/migration/write を停止する。
 2. 直前 commit、stack event、alarm、request/event locator、data evidence を固定する。
 3. Data migration がある場合は、その migration contract に従って writer を止めたまま
-   rollback する。Webhook locator bridge削除にはcustom resourceによる逆移行がないため、dataを変更せず、
-   上記pre-deploy gateを再検証したうえでreview済みのcode forward-fixを行う。
+   rollback する。Webhook locator bridge削除にはcustom resourceによる逆移行がない。残存v1 cursor、
+   retired locator/state、不足authorization projection/grant/cleanup locatorなどのdata residueを検出した
+   場合はone-time cleanupやcode-only forward-fixを行わず、producer/writeを停止したまま別のreview済み
+   repairまたは環境再作成後にpre-deploy gateを再実行する。Retired locator/stateでは503 fail-closed、
+   不足authorization dataではdelivery suppressionがrepair完了まで継続する。Pre-deploy gateが成功し、
+   canonical dataにresidueがないことを固定済みのcode/infrastructure failureだけを、dataを変更しない
+   review済みcode forward-fixの対象とする。
 4. Schema-compatible な code/infrastructure は直前の成功code/configurationを、新しい
    `ApiRuntimeConfigurationRevision`とその他の同じ必須parameterでforward deployする。
    Retained secretの物理名を再作成するために旧revisionを再利用せず、retained resourceを
