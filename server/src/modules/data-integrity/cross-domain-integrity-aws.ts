@@ -91,8 +91,6 @@ const knownProjectDirectoryAuxiliaryEntryTypes = new Set([
   'planning-meta',
   'project-member',
   'project-quick-access',
-  'webhook-active-locator-rollback-checkpoint',
-  'webhook-authorization-backfill-checkpoint',
   'webhook-team-grant',
   'webhook-team-grant-cleanup',
   'workspace-member',

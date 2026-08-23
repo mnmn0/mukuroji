@@ -1095,20 +1095,10 @@ describe('cross-domain integrity AWS composition bridge', () => {
     }
   })
 
-  test('recognizes existing Project Directory migration and Webhook rows as auxiliary', async () => {
+  test('recognizes current Project Directory Webhook rows as auxiliary', async () => {
     const rows = createHealthyNativeRows()
     rows['project-directory'] = [
       ...rows['project-directory'],
-      {
-        directoryId: 'WEBHOOK_AUTHORIZATION_BACKFILL',
-        entryKey: 'CHECKPOINT',
-        entryType: 'webhook-authorization-backfill-checkpoint',
-      },
-      {
-        directoryId: 'WEBHOOK_ACTIVE_LOCATOR_ROLLBACK',
-        entryKey: 'CHECKPOINT',
-        entryType: 'webhook-active-locator-rollback-checkpoint',
-      },
       {
         directoryId: `WEBHOOK_TEAM_GRANT#${WORKSPACE_ID}#${MEMBER_KEY}`,
         entryKey: `TEAM#${TEAM_ID}#PROJECT#${PROJECT_ID}`,

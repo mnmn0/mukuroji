@@ -135,16 +135,12 @@ test('guards every deployed worker and realtime entrypoint with its exact surfac
   }
 })
 
-test('leaves recovery backfills and the inner Connector projection unguarded', async () => {
-  const backfillSource = await Bun.file(
-    `${import.meta.dir}/webhook-authorization-backfill-handler.ts`,
-  ).text()
+test('leaves the inner Connector projection unguarded', async () => {
   const connectorSource = await Bun.file(
     `${import.meta.dir}/connector-handler.ts`,
   ).text()
   const compactConnectorSource = connectorSource.replace(/\s+/gu, ' ')
 
-  expect(backfillSource).not.toContain('createRuntimeControlGuardedHandler')
   expect(compactConnectorSource).toContain(
     'export const auditProjectionHandler = (...args:',
   )

@@ -24,8 +24,6 @@ const projectDirectoryIgnoredEntryTypes = new Set<string>([
   'email-alias',
   'planning-meta',
   'project-member',
-  'webhook-active-locator-rollback-checkpoint',
-  'webhook-authorization-backfill-checkpoint',
   'webhook-team-grant',
   'webhook-team-grant-cleanup',
   'workspace-member',

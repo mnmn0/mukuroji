@@ -27,8 +27,6 @@ const lambdaPaths = [
   'AutomationScheduleFunction/Resource',
   'RuntimeControlAlarmReadinessOnEventFunction/Resource',
   'RuntimeControlAlarmReadinessPollFunction/Resource',
-  'WebhookAuthorizationBackfillFunction/Resource',
-  'WebhookAuthorizationBackfillProgressFunction/Resource',
   'WebhookDeliveryFunction/Resource',
   'ConnectorSyncFunction/Resource',
   'ConnectorPollFunction/Resource',
@@ -51,11 +49,6 @@ const managedPolicyRolePaths = [
   'RuntimeControlAlarmReadinessProvider/framework-onEvent/ServiceRole/Resource',
   'RuntimeControlAlarmReadinessProvider/framework-isComplete/ServiceRole/Resource',
   'RuntimeControlAlarmReadinessProvider/framework-onTimeout/ServiceRole/Resource',
-  'WebhookAuthorizationBackfillFunction/ServiceRole/Resource',
-  'WebhookAuthorizationBackfillProgressFunction/ServiceRole/Resource',
-  'WebhookAuthorizationBackfillProvider/framework-onEvent/ServiceRole/Resource',
-  'WebhookAuthorizationBackfillProvider/framework-isComplete/ServiceRole/Resource',
-  'WebhookAuthorizationBackfillProvider/framework-onTimeout/ServiceRole/Resource',
   'WebhookDeliveryFunction/ServiceRole/Resource',
   'ConnectorSyncFunction/ServiceRole/Resource',
   'ConnectorPollFunction/ServiceRole/Resource',
@@ -76,7 +69,6 @@ const apiStagePaths = [
 ] as const;
 const waiterStateMachinePath = [
   'RuntimeControlAlarmReadinessProvider/waiter-state-machine/Resource',
-  'WebhookAuthorizationBackfillProvider/waiter-state-machine/Resource',
 ] as const;
 const iam5FindingScopePaths = new Map<string, readonly string[]>([
   [
@@ -127,8 +119,6 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
       'CollaborationProjectionFunction/ServiceRole/DefaultPolicy/Resource',
       'AutomationEventFunction/ServiceRole/DefaultPolicy/Resource',
       'AutomationScheduleFunction/ServiceRole/DefaultPolicy/Resource',
-      'WebhookAuthorizationBackfillFunction/ServiceRole/DefaultPolicy/Resource',
-      'WebhookAuthorizationBackfillProgressFunction/ServiceRole/DefaultPolicy/Resource',
       'ConnectorSyncFunction/ServiceRole/DefaultPolicy/Resource',
     ],
   ],
@@ -213,8 +203,6 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
     'AwsSolutions-IAM5[Resource::<DeveloperPlatformTable772E085C.Arn>/index/*]',
     [
       'WorkItemImportFunction/ServiceRole/DefaultPolicy/Resource',
-      'WebhookAuthorizationBackfillFunction/ServiceRole/DefaultPolicy/Resource',
-      'WebhookAuthorizationBackfillProgressFunction/ServiceRole/DefaultPolicy/Resource',
       'ConnectorSyncFunction/ServiceRole/DefaultPolicy/Resource',
     ],
   ],
@@ -280,30 +268,6 @@ const iam5FindingScopePaths = new Map<string, readonly string[]>([
   [
     'AwsSolutions-IAM5[Resource::<RuntimeControlAlarmReadinessProviderframeworkonTimeout38DF830E.Arn>:*]',
     ['RuntimeControlAlarmReadinessProvider/waiter-state-machine/Role/DefaultPolicy/Resource'],
-  ],
-  [
-    'AwsSolutions-IAM5[Resource::<WebhookAuthorizationBackfillFunction5ABBA705.Arn>:*]',
-    [
-      'WebhookAuthorizationBackfillProvider/framework-onEvent/ServiceRole/DefaultPolicy/Resource',
-      'WebhookAuthorizationBackfillProvider/framework-isComplete/ServiceRole/DefaultPolicy/Resource',
-      'WebhookAuthorizationBackfillProvider/framework-onTimeout/ServiceRole/DefaultPolicy/Resource',
-    ],
-  ],
-  [
-    'AwsSolutions-IAM5[Resource::<WebhookAuthorizationBackfillProgressFunction1FF04FD2.Arn>:*]',
-    [
-      'WebhookAuthorizationBackfillProvider/framework-onEvent/ServiceRole/DefaultPolicy/Resource',
-      'WebhookAuthorizationBackfillProvider/framework-isComplete/ServiceRole/DefaultPolicy/Resource',
-      'WebhookAuthorizationBackfillProvider/framework-onTimeout/ServiceRole/DefaultPolicy/Resource',
-    ],
-  ],
-  [
-    'AwsSolutions-IAM5[Resource::<WebhookAuthorizationBackfillProviderframeworkisComplete0B745C37.Arn>:*]',
-    ['WebhookAuthorizationBackfillProvider/waiter-state-machine/Role/DefaultPolicy/Resource'],
-  ],
-  [
-    'AwsSolutions-IAM5[Resource::<WebhookAuthorizationBackfillProviderframeworkonTimeoutB47F77F4.Arn>:*]',
-    ['WebhookAuthorizationBackfillProvider/waiter-state-machine/Role/DefaultPolicy/Resource'],
   ],
   ...[
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<AuditEventsTable0723963E>/export/*]',
@@ -444,10 +408,6 @@ const acknowledgedFindings = [
     'AwsSolutions-IAM5[Resource::<RuntimeControlAlarmReadinessPollFunctionCD017060.Arn>:*]',
     'AwsSolutions-IAM5[Resource::<RuntimeControlAlarmReadinessProviderframeworkisComplete30325ABD.Arn>:*]',
     'AwsSolutions-IAM5[Resource::<RuntimeControlAlarmReadinessProviderframeworkonTimeout38DF830E.Arn>:*]',
-    'AwsSolutions-IAM5[Resource::<WebhookAuthorizationBackfillFunction5ABBA705.Arn>:*]',
-    'AwsSolutions-IAM5[Resource::<WebhookAuthorizationBackfillProgressFunction1FF04FD2.Arn>:*]',
-    'AwsSolutions-IAM5[Resource::<WebhookAuthorizationBackfillProviderframeworkisComplete0B745C37.Arn>:*]',
-    'AwsSolutions-IAM5[Resource::<WebhookAuthorizationBackfillProviderframeworkonTimeoutB47F77F4.Arn>:*]',
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<AuditEventsTable0723963E>/export/*]',
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<FileProofingTable81DA272F>/export/*]',
     'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:dynamodb:<AWS::Region>:<AWS::AccountId>:table/<ProjectDirectoryTable9ED01C01>/export/*]',
