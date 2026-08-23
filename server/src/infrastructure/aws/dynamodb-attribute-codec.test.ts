@@ -14,7 +14,7 @@ import {
   serializeCanonicalAttributeMap,
   validateDynamoDbItemSize,
 } from './dynamodb-attribute-codec'
-import { hasCanonicalDenseArrayShape } from './migration-value-guards'
+import { hasCanonicalDenseArrayShape } from '../runtime/value-guards'
 
 /**
  * Creates an item containing every DynamoDB AttributeValue variant.
