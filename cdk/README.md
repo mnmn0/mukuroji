@@ -39,18 +39,13 @@
 
 ### Workspace Search migration deployment target
 
-Migration rehearsalのaccount、Region、environmentはCloudFormation parameterでは指定しません。
+Workspace Search migrationのaccount、Region、environmentはCloudFormation parameterでは指定しません。
 CDK contextの`workspaceSearchMigrationDeploymentTarget`は、
 [`lib/config/workspace-search-migration-deployment-targets.ts`](lib/config/workspace-search-migration-deployment-targets.ts)
 にreview済みcodeとして固定したtarget IDを選ぶだけです。未知のID、不完全なtarget、stackの
-account/Regionとの不一致はsynth時に失敗します。現在のmapはrehearsal resourceを作成しない
-`production-disabled`だけを含みます。
-
-実non-production targetの追加は、具体的で互いに異なるdeployment accountとproduction-account digest、
-固定Region、`rehearsalEnabled=true`を同じsource mapへ追加する独立したreview対象です。追加時はcloud assemblyと
-`cdk diff`をreviewし、stack environmentとCloudFormation assertionがexact account/Regionへ固定されることを
-確認します。Production account IDそのものはsource、template、tag、outputへ保存せず、private permit入力から
-domain-separated SHA-256を計算してCDKのdigest tagと照合します。
+account/Regionとの不一致はsynth時に失敗します。現在のmapはnon-production account/Region bindingと
+rehearsal target identity ruleを有効にしない`production-disabled`だけを含みます。Migration state
+table、journal、operator policy、6 alarmはtargetに依存しない共通resourceとして引き続きsynthされます。
 
 ## API observability
 
@@ -109,13 +104,7 @@ templateとdeployed configurationの両方で照合します。
 すべて5分`Sum >= 1`、evaluation/datapoints 1/1、`TreatMissingData=notBreaching`です。
 Run ID、table、tenant、operation、phase、outcome、correlationはdimensionにしません。既存のalarm routing
 aspectがprimary/secondaryの両SNS actionを付与します。Stackは追加topicやmigration用
-`PutMetricData`権限を作成しません。review済みtargetが`environment=non-production`かつ
-`rehearsalEnabled=true`のときだけ、
-6 alarmの`ALARM`通知を受けるprimary/secondary別のfilter済みSQS subscriptionと、未接続collector policyを
-作成します。CLIのterminal EMFと即時live-stall EMFをmetric化する実行surfaceは、
-そのstdout/stderrの両方をCloudWatch Logsへingestする必要があります。Alarm response、secret-free correlation、非本番の
-real metricによる`OK → ALARM → OK`と両receiptの手順は
-[`docs/operational-readiness.md`](../docs/operational-readiness.md)を参照してください。
+`PutMetricData`権限を作成しません。
 
 ## Outputs
 
@@ -143,12 +132,8 @@ real metricによる`OK → ALARM → OK`と両receiptの手順は
 - `WorkspaceSearchTableName`（検索文書、saved/task view、ユーザー別 view preference、24 時間保持の task view mutation receipt。receipt のみ `expiresAt` TTL で失効）
 - `WorkspaceSearchMigrationStateTableName`（lease、checkpoint、operation receipt 用の retained/PITR store）
 - `WorkspaceSearchMigrationDeploymentTargetId`, `WorkspaceSearchMigrationDeploymentTrustVersion`, `WorkspaceSearchMigrationDeploymentEnvironment`, `WorkspaceSearchMigrationDeploymentAccount`, `WorkspaceSearchMigrationDeploymentRegion`, `WorkspaceSearchMigrationProductionAccountDigest`, `WorkspaceSearchMigrationDeploymentTrustRootDigest`（review済みsource mapから決まるcanonical deployment trust root。raw production account IDは含めない）
-- `WorkspaceSearchMigrationJournalBucketName`, `WorkspaceSearchMigrationJournalKeyArn`（通常artifactは30–31日、`workspace-search/v1/rehearsal/evidence-*`だけ365–366日の Object Lock COMPLIANCE 付きlossless migration artifact store。Preimage journal segment は2 MiB以下、planning raw source/target artifact segment は16 MiB以下の単一 `PutObject` に限定し、multipart upload は許可しません。専用 access log bucket は current/noncurrent version を90日保持）
+- `WorkspaceSearchMigrationJournalBucketName`, `WorkspaceSearchMigrationJournalKeyArn`（30–31日の Object Lock COMPLIANCE 付きlossless migration artifact store。Preimage journal segment は2 MiB以下、planning raw source/target artifact segment は16 MiB以下の単一 `PutObject` に限定し、multipart upload は許可しません。専用 access log bucket は current/noncurrent version を90日保持）
 - `WorkspaceSearchMigrationOperatorPolicyArn`（承認済み operator principal へ明示的に attach する未接続 policy。通常journalの30–31日保持権限だけを持つ）
-- `WorkspaceSearchMigrationRehearsalEvidencePolicyArn`（`non-production`だけに出力する未接続policy。Issue 167のimmutable evidenceを365–366日へ延長する実行時だけoperator policyと同じ短命roleへ追加する）
-- `WorkspaceSearchMigrationAlarmEvidenceAlarmArns`, `WorkspaceSearchMigrationAlarmEvidencePrimaryQueueUrl`, `WorkspaceSearchMigrationAlarmEvidenceSecondaryQueueUrl`, `WorkspaceSearchMigrationAlarmEvidenceCollectorPolicyArn`（`non-production`だけに出力する6 alarmのcanonical vector、route別receipt queue、未接続collector policy）
-- `WorkspaceSearchMigrationAlarmEvidenceSignalLogGroupName`, `WorkspaceSearchMigrationAlarmEvidenceSignalLogStreamName`, `WorkspaceSearchMigrationAlarmEvidenceSignalLogStreamArn`, `WorkspaceSearchMigrationAlarmEvidenceIngestionPolicyArn`（`non-production`だけに作成するretained 365日LogGroup、固定/precreated `alarm-signals-v1` stream、そのstreamへの`logs:PutLogEvents`だけを許す未接続ingestion policy。production operator policyには接続しない）
-- `WorkspaceSearchMigrationAlarmEvidenceDeploymentTrustRootDigest`, `WorkspaceSearchMigrationAlarmEvidenceDeploymentTargetId`（条件付きalarm evidence sinkを同じdeployment trust rootへ束縛する値）
 - `RestoreDrillStateMachineArn`, `RestoreDrillCleanupStateMachineArn`
 - `RestoreDrillEvidenceBucketName`, `RestoreDrillScratchBucketName`, `RestoreDrillStateTableName`
 - `RestoreDrillCleanupApprovalPolicyArn`, `RestoreDrillScheduleDlqUrl`

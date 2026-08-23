@@ -4,7 +4,6 @@ import './migration-deployment-targets.suite';
 import './data-storage.suite';
 import './migration-storage.suite';
 import './migration-observability.suite';
-import './migration-alarm-evidence.suite';
 import './cross-domain-integrity.suite';
 import './restore-drill.suite';
 import './security-iam-api.suite';

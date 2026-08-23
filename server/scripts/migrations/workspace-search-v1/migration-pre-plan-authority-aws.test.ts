@@ -19,8 +19,6 @@ import {
 import {
   createAwsWorkspaceSearchMigrationPrePlanAuthorityPort,
   createWorkspaceSearchMigrationPrePlanAuthorityCommitConditionChecks,
-  type WorkspaceSearchMigrationDurableLeaseAcquisitionObservation,
-  type WorkspaceSearchMigrationDurableLeaseAcquisitionObserver,
   type WorkspaceSearchMigrationPrePlanAuthority,
   type WorkspaceSearchMigrationPrePlanAuthorityAwsPort,
   type WorkspaceSearchMigrationPrePlanAuthorityAwsTransport,
@@ -451,204 +449,6 @@ describe('AWS Workspace Search pre-plan authority adapter', () => {
     expect(new Set(leaseKeys).size).toBe(1)
     expect(leaseKeys[0]).not.toContain(configurationA)
     expect(leaseKeys[0]).not.toContain(configurationB)
-  })
-
-  test('observes exact acquisition and matching-active lease intervals', async () => {
-    const observations:
-      WorkspaceSearchMigrationDurableLeaseAcquisitionObservation[] = []
-    const observer:
-      WorkspaceSearchMigrationDurableLeaseAcquisitionObserver = {
-        /** Records each synchronously confirmed acquisition projection. */
-        observe: (observation): void => {
-          observations.push(observation)
-        },
-      }
-    const context = createAuthorityContext(observer)
-
-    const initial = await context.port.acquireLease({
-      runId: 'run-observed-initial',
-      ownerId: 'owner-observed-initial',
-    })
-    expect(observations).toEqual([{
-      kind: 'acquired',
-      predecessorLeaseIdentityDigest: null,
-      predecessorLeaseExpiresAt: null,
-      acquiredAt: initialTime,
-      successorLeaseIdentityDigest: expect.any(String),
-      successorLeaseExpiresAt: initial.expiresAt,
-    }])
-    expect(Object.keys(observations[0] ?? {}).sort()).toEqual([
-      'acquiredAt',
-      'kind',
-      'predecessorLeaseExpiresAt',
-      'predecessorLeaseIdentityDigest',
-      'successorLeaseExpiresAt',
-      'successorLeaseIdentityDigest',
-    ])
-    expect(Object.isFrozen(observations[0])).toBe(true)
-
-    context.clock.set('2026-07-25T04:00:01.000Z')
-    await expect(context.port.acquireLease({
-      runId: initial.runId,
-      ownerId: initial.ownerId,
-    })).resolves.toEqual(initial)
-    expect(observations).toEqual([{
-      kind: 'acquired',
-      predecessorLeaseIdentityDigest: null,
-      predecessorLeaseExpiresAt: null,
-      acquiredAt: initialTime,
-      successorLeaseIdentityDigest: expect.any(String),
-      successorLeaseExpiresAt: initial.expiresAt,
-    }, {
-      kind: 'reused-active',
-      currentLeaseIdentityDigest: expect.any(String),
-      evaluatedAt: '2026-07-25T04:00:01.000Z',
-      currentLeaseExpiresAt: initial.expiresAt,
-    }])
-
-    context.clock.set(initial.expiresAt)
-    const takeover = await context.port.acquireLease({
-      runId: 'run-observed-takeover',
-      ownerId: 'owner-observed-takeover',
-    })
-    expect(observations).toEqual([{
-      kind: 'acquired',
-      predecessorLeaseIdentityDigest: null,
-      predecessorLeaseExpiresAt: null,
-      acquiredAt: initialTime,
-      successorLeaseIdentityDigest: expect.any(String),
-      successorLeaseExpiresAt: initial.expiresAt,
-    }, {
-      kind: 'reused-active',
-      currentLeaseIdentityDigest: expect.any(String),
-      evaluatedAt: '2026-07-25T04:00:01.000Z',
-      currentLeaseExpiresAt: initial.expiresAt,
-    }, {
-      kind: 'acquired',
-      predecessorLeaseIdentityDigest: expect.any(String),
-      predecessorLeaseExpiresAt: initial.expiresAt,
-      acquiredAt: initial.expiresAt,
-      successorLeaseIdentityDigest: expect.any(String),
-      successorLeaseExpiresAt: takeover.expiresAt,
-    }])
-    const initialObservation = observations[0]
-    const reusedObservation = observations[1]
-    const takeoverObservation = observations[2]
-    if (
-      initialObservation?.kind !== 'acquired' ||
-      reusedObservation?.kind !== 'reused-active' ||
-      takeoverObservation?.kind !== 'acquired'
-    ) throw new Error('Expected exact durable lease observation kinds.')
-    expect(reusedObservation.currentLeaseIdentityDigest).toBe(
-      initialObservation.successorLeaseIdentityDigest,
-    )
-    expect(takeoverObservation.predecessorLeaseIdentityDigest).toBe(
-      initialObservation.successorLeaseIdentityDigest,
-    )
-    expect(takeoverObservation.successorLeaseIdentityDigest).not.toBe(
-      initialObservation.successorLeaseIdentityDigest,
-    )
-  })
-
-  test('observes response-loss recovery but not a competing failed CAS', async () => {
-    const recoveredObservations:
-      WorkspaceSearchMigrationDurableLeaseAcquisitionObservation[] = []
-    const recoveredObserver:
-      WorkspaceSearchMigrationDurableLeaseAcquisitionObserver = {
-        /** Records an acquisition proven by the reconciliation reread. */
-        observe: (observation): void => {
-          recoveredObservations.push(observation)
-        },
-      }
-    const recoveredContext = createAuthorityContext(recoveredObserver)
-    recoveredContext.transport.failNextTransaction({
-      timing: 'after-commit',
-      error: createTimeoutError('ACQUISITION-OBSERVATION-RESPONSE-LOSS'),
-    })
-
-    const recovered = await recoveredContext.port.acquireLease({
-      runId: 'run-observed-response-loss',
-      ownerId: 'owner-observed-response-loss',
-    })
-    expect(recoveredObservations).toEqual([{
-      kind: 'acquired',
-      predecessorLeaseIdentityDigest: null,
-      predecessorLeaseExpiresAt: null,
-      acquiredAt: initialTime,
-      successorLeaseIdentityDigest: expect.any(String),
-      successorLeaseExpiresAt: recovered.expiresAt,
-    }])
-
-    const losingObservations:
-      WorkspaceSearchMigrationDurableLeaseAcquisitionObservation[] = []
-    const winningObservations:
-      WorkspaceSearchMigrationDurableLeaseAcquisitionObservation[] = []
-    const losingContext = createAuthorityContext({
-      /** Records only if the losing transaction is incorrectly accepted. */
-      observe: (observation): void => {
-        losingObservations.push(observation)
-      },
-    })
-    const winningPort = createAuthorityPort(
-      losingContext.stateTable,
-      losingContext.configurationHash,
-      losingContext.transport,
-      losingContext.clock,
-      {
-        /** Records the transaction that wins the shared absent-row CAS. */
-        observe: (observation): void => {
-          winningObservations.push(observation)
-        },
-      },
-    )
-    losingContext.transport.beforeNextTransaction(async () => {
-      await winningPort.acquireLease({
-        runId: 'run-observed-winner',
-        ownerId: 'owner-observed-winner',
-      })
-    })
-
-    const losingFailure = await captureMigrationFailure(
-      () => losingContext.port.acquireLease({
-        runId: 'run-observed-loser',
-        ownerId: 'owner-observed-loser',
-      }),
-    )
-    expectMigrationFailure(losingFailure, 'LEASE_CONFLICT')
-    expect(losingObservations).toEqual([])
-    expect(winningObservations).toHaveLength(1)
-
-    const duplicateObservations:
-      WorkspaceSearchMigrationDurableLeaseAcquisitionObservation[] = []
-    const duplicateContext = createAuthorityContext({
-      /** Records only if an identical losing CAS is misobserved as its own. */
-      observe: (observation): void => {
-        duplicateObservations.push(observation)
-      },
-    })
-    const duplicateWinner = createAuthorityPort(
-      duplicateContext.stateTable,
-      duplicateContext.configurationHash,
-      duplicateContext.transport,
-      duplicateContext.clock,
-    )
-    let duplicateWinningLease: WorkspaceSearchMigrationLease | undefined
-    duplicateContext.transport.beforeNextTransaction(async () => {
-      duplicateWinningLease = await duplicateWinner.acquireLease({
-        runId: 'run-observed-duplicate',
-        ownerId: 'owner-observed-duplicate',
-      })
-    })
-
-    const duplicateRecovered = await duplicateContext.port.acquireLease({
-      runId: 'run-observed-duplicate',
-      ownerId: 'owner-observed-duplicate',
-    })
-    if (duplicateWinningLease === undefined) {
-      throw new Error('Expected the identical competing acquisition winner.')
-    }
-    expect(duplicateRecovered).toEqual(duplicateWinningLease)
-    expect(duplicateObservations).toEqual([])
   })
 
   test('returns an active durable lease for an identical acquisition retry', async () => {
@@ -2278,7 +2078,6 @@ function createStateTableIdentity(): MigrationTableIdentity {
  * @param configurationHash - Reviewed configuration digest.
  * @param transport - Shared condition-aware transport.
  * @param clock - Shared mutable adapter clock.
- * @param leaseAcquisitionObserver - Optional synchronous acquisition sink.
  * @returns Configured authority port.
  */
 function createAuthorityPort(
@@ -2286,30 +2085,21 @@ function createAuthorityPort(
   configurationHash: string,
   transport: InMemoryPrePlanAuthorityAwsTransport,
   clock: MutableAuthorityClock,
-  leaseAcquisitionObserver?:
-    WorkspaceSearchMigrationDurableLeaseAcquisitionObserver,
 ): WorkspaceSearchMigrationPrePlanAuthorityAwsPort {
   return createAwsWorkspaceSearchMigrationPrePlanAuthorityPort({
     stateTable,
     configurationHash,
     transport,
     clock: () => clock.read(),
-    ...(leaseAcquisitionObserver === undefined
-      ? {}
-      : { leaseAcquisitionObserver }),
   })
 }
 
 /**
  * Creates isolated default dependencies for one adapter test.
  *
- * @param leaseAcquisitionObserver - Optional synchronous acquisition sink.
  * @returns State table, binding, fake transport, clock, and authority port.
  */
-function createAuthorityContext(
-  leaseAcquisitionObserver?:
-    WorkspaceSearchMigrationDurableLeaseAcquisitionObserver,
-) {
+function createAuthorityContext() {
   const stateTable = createStateTableIdentity()
   const configurationHash =
     createMigrationDigest('default-configuration')
@@ -2326,7 +2116,6 @@ function createAuthorityContext(
       configurationHash,
       transport,
       clock,
-      leaseAcquisitionObserver,
     ),
   }
 }

@@ -4,7 +4,6 @@ import {
   createWorkspaceSearchMigrationDescribeTableScopeBindingDigest,
 } from './migration-describe-table-binding'
 import {
-  createWorkspaceSearchMigrationDescribeTableRehearsalThrottleAwsTransport,
   createWorkspaceSearchMigrationDescribeTableRateRegistry,
   createWorkspaceSearchMigrationDescribeTableSingleAttemptAwsTransport,
   type WorkspaceSearchMigrationDescribeTableAwsSdkConfiguration,
@@ -19,9 +18,6 @@ import {
   type WorkspaceSearchMigrationDescribeTableRatePolicy,
   type WorkspaceSearchMigrationDescribeTableRateRecorder,
   type WorkspaceSearchMigrationDescribeTableRateRegistry,
-  WorkspaceSearchMigrationDescribeTableRateError,
-  type WorkspaceSearchMigrationDescribeTableRehearsalThrottleAwsTransport,
-  type WorkspaceSearchMigrationDescribeTableSingleAttempt,
   type WorkspaceSearchMigrationDescribeTableSingleAttemptAwsTransport,
   WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_PAGE_BASELINE_ATTEMPTS,
 } from './migration-describe-table-rate-budget'
@@ -73,7 +69,7 @@ export type CreateWorkspaceSearchMigrationManagedDescribeTableRateInput = {
   readonly region: string
   /** Exact six migration table names used only by cleanup recovery. */
   readonly recoveryTableNames: readonly string[]
-  /** Complete exact-six or exact-ten physical DescribeTable allowlist. */
+  /** Complete exact-six physical DescribeTable allowlist. */
   readonly allowedTableNames: readonly string[]
   /** Explicit reviewed rate policy; no service-quota default is accepted. */
   readonly policy: WorkspaceSearchMigrationDescribeTableRatePolicy
@@ -95,50 +91,10 @@ export type CreateWorkspaceSearchMigrationManagedDescribeTableRateInput = {
   readonly signal?: AbortSignal
 }
 
-/** Construction input for the isolated non-production throttle exercise. */
-export type CreateWorkspaceSearchMigrationRehearsalManagedDescribeTableRateInput =
-  CreateWorkspaceSearchMigrationManagedDescribeTableRateInput & {
-    /** Construction-fixed allowlisted table used by the one-shot exercise. */
-    readonly exerciseTableName: string
-  }
 
-/** Secret-free exact delta produced by one successful throttle exercise. */
-export type WorkspaceSearchMigrationRehearsalDescribeTableRateExerciseReceipt = {
-  /** Fixed receipt contract version. */
-  readonly version: 1
-  /** Proves one genuine AWS request returned before fault replacement. */
-  readonly awsSuccessfulAttemptCount: 1
-  /** Exact deterministic throttle classification added by the exercise. */
-  readonly rehearsalInjectedThrottleCount: 1
-  /** Exact deterministic budget stop added by the same throttle handling. */
-  readonly rehearsalInjectedBudgetStopCount: 1
-}
 
-/** Opaque one-shot capability absent from the production rate projection. */
-export interface WorkspaceSearchMigrationRehearsalDescribeTableRateExercise {
-  /**
-   * Runs the construction-fixed read-only exercise exactly once.
-   *
-   * @returns Secret-free exact source-specific accounting delta.
-   */
-  run(): Promise<WorkspaceSearchMigrationRehearsalDescribeTableRateExerciseReceipt>
-}
 
-/** Separate standard projection and non-production one-shot capability. */
-export type WorkspaceSearchMigrationRehearsalManagedDescribeTableRateBundle = {
-  /** Frozen production-compatible rate surface without the exercise method. */
-  readonly rate: WorkspaceSearchMigrationManagedDescribeTableRate
-  /** Opaque one-shot post-success throttle exercise. */
-  readonly exercise:
-    WorkspaceSearchMigrationRehearsalDescribeTableRateExercise
-}
 
-/** Module-owned registrar receiving the hidden rehearsal dispatcher. */
-type RegisterWorkspaceSearchMigrationRehearsalDescribeTableRateExercise = (
-  dispatch: (
-    attempt: WorkspaceSearchMigrationDescribeTableSingleAttempt<never>,
-  ) => Promise<WorkspaceSearchMigrationRehearsalDescribeTableRateExerciseReceipt>,
-) => void
 
 /** Detached construction snapshot read once before the first async boundary. */
 type ManagedDescribeTableRateConstructionSnapshot = {
@@ -148,7 +104,7 @@ type ManagedDescribeTableRateConstructionSnapshot = {
   readonly region: string
   /** Exact six distinct migration table names used by cleanup recovery. */
   readonly recoveryTableNames: readonly string[]
-  /** Complete detached exact-six or exact-ten DescribeTable allowlist. */
+  /** Complete detached exact-six DescribeTable allowlist. */
   readonly allowedTableNames: readonly string[]
   /** Detached reviewed rate policy. */
   readonly policy: WorkspaceSearchMigrationDescribeTableRatePolicy
@@ -351,7 +307,6 @@ class ManagedDescribeTableRate
    * @param rateFenceToken - Durable initial fence.
    * @param registry - Exact process-local registry that issued the lifecycle.
    * @param transport - Already validated dedicated one-attempt transport.
-   * @param registerRehearsalExercise - Optional module-owned hidden registrar.
    */
   constructor(
     snapshot: ManagedDescribeTableRateConstructionSnapshot,
@@ -359,8 +314,6 @@ class ManagedDescribeTableRate
     rateFenceToken: number,
     registry: WorkspaceSearchMigrationDescribeTableRateRegistry,
     transport: WorkspaceSearchMigrationDescribeTableSingleAttemptAwsTransport,
-    registerRehearsalExercise?:
-      RegisterWorkspaceSearchMigrationRehearsalDescribeTableRateExercise,
   ) {
     this.#account = snapshot.account
     this.#region = snapshot.region
@@ -370,9 +323,6 @@ class ManagedDescribeTableRate
     this.#transport = transport
     this.#lifecycle = lifecycle
     this.#rateFenceToken = rateFenceToken
-    registerRehearsalExercise?.(
-      (attempt) => this.#runRehearsalExercise(attempt),
-    )
   }
 
   /** Runs one attempt through the inherited page, cleanup, or lifecycle. */
@@ -648,52 +598,6 @@ class ManagedDescribeTableRate
     }
   }
 
-  /**
-   * Executes one real attempt whose successful response becomes a fault.
-   *
-   * @param attempt - Construction-fixed post-success throttle attempt.
-   * @returns Exact source-specific counter delta after expected stop handling.
-   */
-  async #runRehearsalExercise(
-    attempt: WorkspaceSearchMigrationDescribeTableSingleAttempt<never>,
-  ): Promise<WorkspaceSearchMigrationRehearsalDescribeTableRateExerciseReceipt> {
-    const before = this.readEvidence()
-    try {
-      await this.#runExclusive(
-        async () => await this.#lifecycle.runDescribeTableAttempt(
-          { phase: 'measurement' },
-          attempt,
-        ),
-      )
-      return failManagedRate()
-    } catch (error: unknown) {
-      if (
-        !(error instanceof WorkspaceSearchMigrationDescribeTableRateError) ||
-        error.reason !== 'throttled'
-      ) return failManagedRate()
-    }
-    const after = this.readEvidence()
-    if (
-      after.attemptCount !== before.attemptCount + 1 ||
-      after.throttleCount !== before.throttleCount + 1 ||
-      after.awsServiceThrottleCount !== before.awsServiceThrottleCount ||
-      after.rehearsalInjectedThrottleCount !==
-        before.rehearsalInjectedThrottleCount + 1 ||
-      after.budgetStopCount !== before.budgetStopCount + 1 ||
-      after.operationalBudgetStopCount !==
-        before.operationalBudgetStopCount ||
-      after.awsServiceThrottleBudgetStopCount !==
-        before.awsServiceThrottleBudgetStopCount ||
-      after.rehearsalInjectedBudgetStopCount !==
-        before.rehearsalInjectedBudgetStopCount + 1
-    ) return failManagedRate()
-    return Object.freeze({
-      version: 1,
-      awsSuccessfulAttemptCount: 1,
-      rehearsalInjectedThrottleCount: 1,
-      rehearsalInjectedBudgetStopCount: 1,
-    })
-  }
 
   /**
    * Runs one operation after atomically joining the FIFO ownership gate.
@@ -819,13 +723,10 @@ export async function createWorkspaceSearchMigrationManagedDescribeTableRate(
  * Creates one managed controller from an already detached construction input.
  *
  * @param snapshot - Detached standard construction input.
- * @param registerRehearsalExercise - Optional non-production dispatcher sink.
  * @returns Exact hidden controller after claim and authorized recovery.
  */
 async function createManagedDescribeTableRateFromSnapshot(
   snapshot: ManagedDescribeTableRateConstructionSnapshot,
-  registerRehearsalExercise?:
-    RegisterWorkspaceSearchMigrationRehearsalDescribeTableRateExercise,
 ): Promise<ManagedDescribeTableRate> {
   const signal = snapshot.signal
   requireManagedRateSignalActive(signal)
@@ -893,7 +794,6 @@ async function createManagedDescribeTableRateFromSnapshot(
     fenceToken,
     registry,
     transport,
-    registerRehearsalExercise,
   )
   /** Stops the newly constructed controller if cancellation races recovery. */
   const interrupt = (): void => controller.interrupt()
@@ -919,171 +819,9 @@ async function createManagedDescribeTableRateFromSnapshot(
   return controller
 }
 
-/**
- * Creates a separately projected non-production post-success fault bundle.
- *
- * The standard rate object contains only production methods. The construction-
- * fixed table name and separate transport remain captured by an opaque one-shot
- * capability, so neither can be selected or reflected at execution time.
- *
- * @param input - Standard rate construction plus one allowlisted fixed table.
- * @returns Frozen standard projection and isolated exactly-once capability.
- */
-export async function createWorkspaceSearchMigrationRehearsalManagedDescribeTableRate(
-  input:
-    CreateWorkspaceSearchMigrationRehearsalManagedDescribeTableRateInput,
-): Promise<WorkspaceSearchMigrationRehearsalManagedDescribeTableRateBundle> {
-  const snapshot = detachManagedRateConstructionInput(input)
-  const exerciseTableName = detachExerciseTableName(
-    readExerciseTableNameCandidate(input),
-    snapshot.allowedTableNames,
-  )
-  const dispatchHolder: {
-    dispatch?: (
-      attempt: WorkspaceSearchMigrationDescribeTableSingleAttempt<never>,
-    ) => Promise<WorkspaceSearchMigrationRehearsalDescribeTableRateExerciseReceipt>
-  } = {}
-  const controller = await createManagedDescribeTableRateFromSnapshot(
-    snapshot,
-    (dispatch) => {
-      dispatchHolder.dispatch = dispatch
-    },
-  )
-  const dispatchExercise = dispatchHolder.dispatch
-  if (dispatchExercise === undefined) {
-    await controller.close()
-    return failManagedRate()
-  }
-  let exerciseTransport:
-    WorkspaceSearchMigrationDescribeTableRehearsalThrottleAwsTransport
-  try {
-    exerciseTransport =
-      createWorkspaceSearchMigrationDescribeTableRehearsalThrottleAwsTransport({
-        account: snapshot.account,
-        region: snapshot.region,
-        credentials: snapshot.credentials,
-      })
-  } catch (error: unknown) {
-    await controller.close()
-    throw error
-  }
-  const rate = createRehearsalStandardRateProjection(
-    controller,
-    exerciseTransport,
-  )
-  let exercised = false
-  const exercise:
-    WorkspaceSearchMigrationRehearsalDescribeTableRateExercise =
-      Object.freeze({
-        run: async () => {
-          if (exercised) return failManagedRate()
-          exercised = true
-          const attempt =
-            exerciseTransport.createAfterSuccessThrottleAttempt(
-              exerciseTableName,
-            )
-          return await dispatchExercise(attempt)
-        },
-      })
-  return Object.freeze({ rate, exercise })
-}
 
-/**
- * Reads the exercise table only from one own data property.
- *
- * @param input - Candidate rehearsal construction record.
- * @returns Untrusted own data value without invoking an accessor.
- */
-function readExerciseTableNameCandidate(
-  input: CreateWorkspaceSearchMigrationRehearsalManagedDescribeTableRateInput,
-): unknown {
-  const descriptor = Object.getOwnPropertyDescriptor(
-    input,
-    'exerciseTableName',
-  )
-  if (descriptor === undefined || !Object.hasOwn(descriptor, 'value')) {
-    return failManagedRate()
-  }
-  return descriptor.value
-}
 
-/**
- * Projects the controller without exposing its constructor or exercise state.
- *
- * @param controller - Hidden production-compatible controller.
- * @param exerciseTransport - Separately owned rehearsal-only transport.
- * @returns Frozen standard rate surface that closes both owned transports.
- */
-function createRehearsalStandardRateProjection(
-  controller: ManagedDescribeTableRate,
-  exerciseTransport:
-    WorkspaceSearchMigrationDescribeTableRehearsalThrottleAwsTransport,
-): WorkspaceSearchMigrationManagedDescribeTableRate {
-  let exerciseTransportClosed = false
-  /** Closes the separate rehearsal transport exactly once. */
-  const closeExerciseTransport = (): void => {
-    if (exerciseTransportClosed) return
-    exerciseTransportClosed = true
-    exerciseTransport.close()
-  }
-  return Object.freeze({
-    describeTable: async (
-      tableName: string,
-      phase: WorkspaceSearchMigrationDescribeTablePhase,
-      signal?: AbortSignal,
-    ) => await controller.describeTable(tableName, phase, signal),
-    runCheckpointPage: async <Result>(
-      input: RunWorkspaceSearchMigrationManagedDescribeTablePageInput,
-      task: () => Promise<Result>,
-    ) => await controller.runCheckpointPage(input, task),
-    runMandatoryCleanup: async <Result>(task: () => Promise<Result>) =>
-      await controller.runMandatoryCleanup(task),
-    runNonPageOperation: async <Result>(task: () => Promise<Result>) =>
-      await controller.runNonPageOperation(task),
-    runWithMutationAdmissionGuard: async <Result>(
-      guard: () => void,
-      task: () => Promise<Result>,
-    ) => await controller.runWithMutationAdmissionGuard(guard, task),
-    assertNewDataIoAllowed: (): void =>
-      controller.assertNewDataIoAllowed(),
-    claimAfterLease: async (fenceToken: number): Promise<void> =>
-      await controller.claimAfterLease(fenceToken),
-    interrupt: (): void => controller.interrupt(),
-    quarantine: (): void => controller.quarantine(),
-    readEvidence: () => controller.readEvidence(),
-    closeAndReadEvidence: async () => {
-      try {
-        return await controller.closeAndReadEvidence()
-      } finally {
-        closeExerciseTransport()
-      }
-    },
-    close: async (): Promise<void> => {
-      try {
-        await controller.close()
-      } finally {
-        closeExerciseTransport()
-      }
-    },
-  })
-}
 
-/**
- * Validates the construction-fixed exercise table against the allowlist.
- *
- * @param value - Candidate table name read before capability construction.
- * @param allowedTableNames - Detached standard controller allowlist.
- * @returns Exact fixed table name retained only by the one-shot closure.
- */
-function detachExerciseTableName(
-  value: unknown,
-  allowedTableNames: readonly string[],
-): string {
-  if (!isManagedRateTableName(value) || !allowedTableNames.includes(value)) {
-    return failManagedRate()
-  }
-  return value
-}
 
 /** Reads every construction field once before any asynchronous boundary. */
 function detachManagedRateConstructionInput(
@@ -1281,12 +1019,12 @@ function detachRecoveryTableNames(value: readonly string[]): readonly string[] {
 }
 
 /**
- * Detaches the complete exact-six or exact-ten physical table allowlist.
+ * Detaches the complete exact-six physical table allowlist.
  *
  * Every recovery table must remain present. Additional semantic role and
  * shared-name validation belongs to the higher-level identity composition.
  *
- * @param value - Candidate full migration-only or rehearsal union allowlist.
+ * @param value - Candidate full migration table allowlist.
  * @param recoveryTableNames - Validated exact six recovery table names.
  * @returns Frozen detached table-name vector used by every attempt surface.
  */
@@ -1302,7 +1040,7 @@ function detachAllowedTableNames(
   }
   const tableNameSet = new Set(tableNames)
   if (
-    (tableNames.length !== 6 && tableNames.length !== 10) ||
+    tableNames.length !== 6 ||
     tableNameSet.size !== tableNames.length ||
     tableNames.some((tableName) => !isManagedRateTableName(tableName)) ||
     recoveryTableNames.some((tableName) => !tableNameSet.has(tableName))
