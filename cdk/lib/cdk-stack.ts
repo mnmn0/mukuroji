@@ -284,9 +284,6 @@ export class CdkStack extends cdk.Stack {
       workspaceSearchWriterFence,
     });
     buildWebhookDeliveryWorkers(this, {
-      apiLiveAlias: apiTransports.apiLiveAlias,
-      apiRuntime,
-      auditProjection,
       dataStores,
       lambdaBuildPaths,
       parameters,

@@ -349,8 +349,6 @@ describe('Workspace Search production migration mapper', () => {
       'email-alias',
       'planning-meta',
       'project-member',
-      'webhook-active-locator-rollback-checkpoint',
-      'webhook-authorization-backfill-checkpoint',
       'webhook-team-grant',
       'webhook-team-grant-cleanup',
       'workspace-member',

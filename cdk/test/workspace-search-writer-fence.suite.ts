@@ -34,14 +34,6 @@ const writerFunctions: ReadonlyArray<readonly [string, string]> = [
     'AutomationScheduleFunctionServiceRole',
   ],
   [
-    'WebhookAuthorizationBackfillFunction5ABBA705',
-    'WebhookAuthorizationBackfillFunctionServiceRole',
-  ],
-  [
-    'WebhookAuthorizationBackfillProgressFunction1FF04FD2',
-    'WebhookAuthorizationBackfillProgressFunctionServiceRole',
-  ],
-  [
     'WebhookDeliveryFunctionEA305509',
     'WebhookDeliveryFunctionServiceRole',
   ],
@@ -297,22 +289,6 @@ test('strict writer-client compositions receive canonical tables and the explici
       Ref: dataConfigurationSecretId,
     },
   }));
-
-  expect(
-    resources.WebhookAuthorizationBackfill.Properties,
-  ).toEqual(expect.objectContaining({
-    MigrationVersion: 'v3',
-    WorkspaceSearchWriterFenceMode: {
-      Ref: 'WorkspaceSearchWriterFenceMode',
-    },
-  }));
-  expect(resources.WebhookAuthorizationBackfill.DependsOn).toEqual(
-    expect.arrayContaining([
-      'ApiLiveAlias3A796568',
-      'WebhookAuthorizationBackfillFunction5ABBA705',
-      'WebhookAuthorizationBackfillProgressFunction1FF04FD2',
-    ]),
-  );
 });
 
 test('writer-fence grants describe source and migration tables and read or condition-check migration state', () => {

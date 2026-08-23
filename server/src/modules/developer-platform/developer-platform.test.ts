@@ -716,19 +716,8 @@ describe('developer credential lifecycle', () => {
 })
 
 describe('DynamoDB developer platform persistence', () => {
-  test('uses the durable locator migration boundary to disable the legacy GSI path', async () => {
+  test('uses only canonical active locator rows', async () => {
     const memory = createMemoryDocumentClient()
-    memory.items.set('WEBHOOK_ACTIVE_LOCATOR_MIGRATION#v3\0STATE', {
-      workspaceId: 'WEBHOOK_ACTIVE_LOCATOR_MIGRATION#v3',
-      recordKey: 'STATE',
-      entryType: 'webhook-active-locator-migration',
-      value: {
-        migrationVersion: 'v3',
-        state: 'complete',
-        writerDrainUntil: '2026-07-18T00:01:00.000Z',
-      },
-      version: 2,
-    })
     const client = new DynamoDbDeveloperPlatformClient(
       'DeveloperPlatformTable',
       memory.documentClient,
@@ -759,6 +748,47 @@ describe('DynamoDB developer platform persistence', () => {
       name === 'QueryCommand' &&
       input.IndexName === 'LookupKeyIndex'
     )).toBe(false)
+  })
+
+  test('rejects a retired active locator projection on the subscription row', async () => {
+    const memory = createMemoryDocumentClient()
+    memory.items.set('workspace-legacy-locator\0WEBHOOK#webhook-legacy', {
+      workspaceId: 'workspace-legacy-locator',
+      recordKey: 'WEBHOOK#webhook-legacy',
+      entryType: 'webhook-subscription',
+      value: {
+        id: 'webhook-legacy',
+        name: 'Legacy locator',
+        url: 'https://hooks.example.test/legacy-locator',
+        createdByUserId: 'user-legacy',
+        teamIds: ['team-1'],
+        eventTypes: ['work-item.updated'],
+        scopes: ['work-items:read'],
+        status: 'active',
+        createdAt: START.toISOString(),
+        updatedAt: START.toISOString(),
+        failureCount: 0,
+      },
+      lookupKey: 'WEBHOOK#ACTIVE#workspace-legacy-locator',
+      lookupSortKey: `${START.toISOString()}#webhook-legacy`,
+      secretCiphertext: 'legacy-ciphertext',
+      version: 1,
+    })
+    const client = new DynamoDbDeveloperPlatformClient(
+      'DeveloperPlatformTable',
+      memory.documentClient,
+      new LocalAesGcmSecretProtector(new Uint8Array(32).fill(30)),
+      () => START,
+      'LookupKeyIndex',
+    )
+
+    await expect(client.rotateWebhookSecret({
+      workspaceId: 'workspace-legacy-locator',
+      subscriptionId: 'webhook-legacy',
+    })).rejects.toMatchObject({
+      status: 503,
+      code: 'DeveloperPlatformDataInvalid',
+    })
   })
 
   test('uses strongly consistent credential auth rows, ciphertext, and no raw secret', async () => {
@@ -2379,125 +2409,40 @@ describe('webhook subscription and delivery', () => {
     })
   })
 
-  test('dual-writes legacy lookup until active locator migration completes', async () => {
-    const pendingClient = new InMemoryDeveloperPlatformClient(
-      new LocalAesGcmSecretProtector(new Uint8Array(32).fill(27)),
-      () => START,
-      'pending',
-    )
-    const pending = await pendingClient.createWebhookSubscription({
-      workspaceId: 'workspace-pending-webhook-migration',
+  test('rejects retired active locator cursor phases', async () => {
+    const { client } = createClient()
+    const created = await client.createWebhookSubscription({
+      workspaceId: 'workspace-canonical-webhook',
       createdByUserId: 'user-1',
       input: {
-        name: 'Pending migration',
-        url: 'https://hooks.example.test/pending-migration',
+        name: 'Canonical subscription',
+        url: 'https://hooks.example.test/canonical',
         teamIds: ['team-1'],
         eventTypes: ['work-item.updated'],
         scopes: ['work-items:read'],
       },
     })
-    expect(readStoredRows(pendingClient).find((row) =>
-      row.recordKey === `WEBHOOK#${pending.subscription.id}`
-    )).toMatchObject({
-      lookupKey:
-        'WEBHOOK#ACTIVE#workspace-pending-webhook-migration',
-      lookupSortKey:
-        `${pending.subscription.createdAt}#${pending.subscription.id}`,
-    })
-    expect(readStoredRows(pendingClient).some((row) =>
-      row.entryType === 'webhook-active-subscription'
-    )).toBe(true)
-
-    const completeClient = new LaggingLookupDeveloperPlatformClient(
-      new LocalAesGcmSecretProtector(new Uint8Array(32).fill(28)),
-      () => START,
-      'complete',
-    )
-    const complete = await completeClient.createWebhookSubscription({
-      workspaceId: 'workspace-complete-webhook-migration',
-      createdByUserId: 'user-1',
-      input: {
-        name: 'Completed migration',
-        url: 'https://hooks.example.test/completed-migration',
-        teamIds: ['team-1'],
-        eventTypes: ['work-item.updated'],
-        scopes: ['work-items:read'],
-      },
-    })
-    expect(readStoredRows(completeClient).find((row) =>
-      row.recordKey === `WEBHOOK#${complete.subscription.id}`
+    expect(readStoredRows(client).find((row) =>
+      row.recordKey === `WEBHOOK#${created.subscription.id}`
     )).not.toHaveProperty('lookupKey')
-    await expect(completeClient.listActiveWebhookSubscriptionsPage({
-      workspaceId: 'workspace-complete-webhook-migration',
+    await expect(client.listActiveWebhookSubscriptionsPage({
+      workspaceId: 'workspace-canonical-webhook',
       limit: 50,
-    })).resolves.toEqual({ subscriptions: [complete.subscription] })
-  })
-
-  test('reads retained legacy active subscriptions after primary locators without duplicates', async () => {
-    const client = new InMemoryDeveloperPlatformClient(
-      new LocalAesGcmSecretProtector(new Uint8Array(32).fill(7)),
-      () => START,
-      'cutover',
-    )
-    const retained = await client.createWebhookSubscription({
-      workspaceId: 'workspace-legacy-webhook',
-      createdByUserId: 'user-1',
-      input: {
-        name: 'Retained subscription',
-        url: 'https://hooks.example.test/retained',
-        teamIds: ['team-1'],
-        eventTypes: ['work-item.updated'],
-        scopes: ['work-items:read'],
-      },
-    })
-    const storage = client as unknown as {
-      records: Map<string, Record<string, unknown>>
-    }
-    const subscriptionKey =
-      `workspace-legacy-webhook\0WEBHOOK#${retained.subscription.id}`
-    expect(storage.records.get(subscriptionKey)).toMatchObject({
-      lookupKey: 'WEBHOOK#ACTIVE#workspace-legacy-webhook',
-      lookupSortKey:
-        `${retained.subscription.createdAt}#${retained.subscription.id}`,
-    })
-    const activeLocatorKey = [...storage.records.keys()].find((key) =>
-      key.startsWith('workspace-legacy-webhook\0WEBHOOKACTIVE#')
-    )
-    if (!activeLocatorKey) throw new Error('Active locator was not created.')
-    storage.records.delete(activeLocatorKey)
-    Object.assign(storage.records.get(subscriptionKey)!, {
-      lookupKey: 'WEBHOOK#ACTIVE#workspace-legacy-webhook',
-      lookupSortKey:
-        `${retained.subscription.createdAt}#${retained.subscription.id}`,
-    })
-
-    const primary = await client.listActiveWebhookSubscriptionsPage({
-      workspaceId: 'workspace-legacy-webhook',
-      limit: 50,
-    })
-    expect(primary.subscriptions).toEqual([retained.subscription])
-    expect(primary.nextCursor).toBeDefined()
-    const migratedPrimary = await client.listActiveWebhookSubscriptionsPage({
-      workspaceId: 'workspace-legacy-webhook',
-      limit: 50,
-      cursor: primary.nextCursor,
-    })
-    expect(migratedPrimary).toEqual({ subscriptions: [] })
-
-    const restoredLocator = {
-      workspaceId: 'workspace-legacy-webhook',
-      recordKey: activeLocatorKey.split('\0')[1],
-      entryType: 'webhook-active-subscription',
-      value: { targetRecordKey: `WEBHOOK#${retained.subscription.id}` },
+    })).resolves.toEqual({ subscriptions: [created.subscription] })
+    const retiredCursor = Buffer.from(JSON.stringify({
       version: 1,
-    }
-    storage.records.set(activeLocatorKey, restoredLocator)
-    const current = await client.listActiveWebhookSubscriptionsPage({
-      workspaceId: 'workspace-legacy-webhook',
+      phase: 'legacy',
+      workspaceId: 'workspace-canonical-webhook',
+      lookupKey: 'WEBHOOK#ACTIVE#workspace-canonical-webhook',
+    }), 'utf8').toString('base64url')
+    await expect(client.listActiveWebhookSubscriptionsPage({
+      workspaceId: 'workspace-canonical-webhook',
       limit: 50,
+      cursor: retiredCursor,
+    })).rejects.toMatchObject({
+      status: 400,
+      code: 'DeveloperCursorInvalid',
     })
-    expect(current.subscriptions).toEqual([retained.subscription])
-    expect(current.nextCursor).toBeUndefined()
   })
 
   test('enqueues deterministically, prepares signed payload, records retries, and replays', async () => {

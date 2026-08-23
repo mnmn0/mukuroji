@@ -1744,11 +1744,6 @@ Audit backfill v2 も durable source cursor、configuration hash、deterministic
 により resume と重複防止を行いますが、preimage rollback journal を持ちません。したがって reversible
 migration の代用にはせず、実行前 PITR と reviewed forward-fix/repair plan を必須にします。
 
-Webhook authorization locator v3 は CloudFormation custom resource が compatibility writer の
-drain、checkpointed page、cutover marker、legacy projection removal を行います。Stack rollback 時は
-custom resource Delete が legacy projection を復元します。逆移行が失敗した stack で custom
-resource を skip して `continue-update-rollback` しません。
-
 ### Migration evidence
 
 - Migration ID/version/configuration hash、実測した account/table identity、journal の secret-free locator
@@ -1892,9 +1887,7 @@ event/schedule、Connector sync/poll、Enterprise SCIM group/identity maintenanc
 Analytics/Notification schedule、Request Intake email、Webhook delivery、Work Item import の
 entrypoint で domain operation / side effect より前に評価します。Audit fan-out の composition
 自体も outer guard の後まで遅延し、内部の Connector projection は同じ判断を重複させません。
-`webhook-authorization-backfill-handler.ts` の `handler` と `isCompleteHandler` は
-CloudFormation rollback/recovery の deadlock を避けるため対象外です。これら migration
-function、runtime-control alarm readinessの2 function、CDK/CloudFormation Provider function、
+Runtime-control alarm readinessの2 function、CDK/CloudFormation Provider function、
 repository の operator script は、`disabled` でも停止しません。
 
 `/api/health` と CORS preflight は control-plane 障害時にも liveness/transport を観測できるよう

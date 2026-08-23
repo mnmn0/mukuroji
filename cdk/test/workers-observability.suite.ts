@@ -778,22 +778,12 @@ test('durable Work Item imports use retained versioned sources and an isolated r
   expect(outputs.WorkItemImportDlqUrl.Value).toEqual({ Ref: importDlqId });
 });
 
-test('public API workers and the migration provider use retained 90-day log groups', () => {
+test('public API workers use retained 90-day log groups', () => {
   const resources = synthesizedTemplate.toJSON().Resources;
   const functionExpectations = [
     {
       description: 'Processes durable Work Item imports with resumable row receipts.',
       handler: 'index.workItemImportHandler',
-    },
-    {
-      description:
-        'Starts the API, projection, and delivery drain before Webhook backfill.',
-      handler: 'index.handler',
-    },
-    {
-      description:
-        'Drains old Webhook runtimes and processes checkpointed migration pages.',
-      handler: 'index.isCompleteHandler',
     },
     {
       description: 'Delivers signed Webhooks from the durable SQS queue.',
@@ -846,23 +836,6 @@ test('public API workers and the migration provider use retained 90-day log grou
       functionEntry?.Properties?.LoggingConfig?.LogGroup?.Ref,
     );
   }
-
-  const providerFunctions = Object.values(resources).filter((resource) => {
-    const properties = (
-      resource as { Type?: string; Properties?: { Description?: string } }
-    ).Properties;
-    return (resource as { Type?: string }).Type === 'AWS::Lambda::Function' &&
-      properties?.Description?.startsWith('AWS CDK resource provider framework -') &&
-      properties.Description.includes('WebhookAuthorizationBackfillProvider');
-  }) as Array<{
-    Properties?: { LoggingConfig?: { LogGroup?: { Ref?: string } } };
-  }>;
-  expect(providerFunctions).toHaveLength(3);
-  const providerLogGroupIds = new Set(providerFunctions.map((resource) =>
-    resource.Properties?.LoggingConfig?.LogGroup?.Ref
-  ));
-  expect(providerLogGroupIds.size).toBe(1);
-  assertRetainedLogGroup([...providerLogGroupIds][0]);
 });
 
 test('audit stream isolates downstream delivery and retention consumers', () => {
@@ -1083,6 +1056,9 @@ test('audit stream isolates downstream delivery and retention consumers', () => 
 test('audit Webhook projection and SQS delivery are durable encrypted and observable', () => {
   const template = synthesizedTemplate;
   const resources = template.toJSON().Resources;
+  expect(Object.keys(resources).some((logicalId) =>
+    logicalId.startsWith('WebhookAuthorizationBackfill')
+  )).toBe(false);
   const auditEventsTableId =
     template.toJSON().Outputs.AuditEventsTableName?.Value?.Ref;
   const developerPlatformTableId =
@@ -1153,107 +1129,6 @@ test('audit Webhook projection and SQS delivery are durable encrypted and observ
     Timeout: 30,
     Environment: deliveryEnvironment,
   });
-  template.hasResourceProperties('AWS::Lambda::Function', {
-    Description:
-      'Starts the API, projection, and delivery drain before Webhook backfill.',
-    Environment: {
-      Variables: {
-        DEVELOPER_PLATFORM_TABLE_NAME: {
-          Ref: 'DeveloperPlatformTable772E085C',
-        },
-        PROJECT_DIRECTORY_TABLE_NAME: {
-          Ref: 'ProjectDirectoryTable9ED01C01',
-        },
-        PROJECT_DIRECTORY_WEBHOOK_AUTHORIZATION_INDEX_NAME:
-          'WebhookAuthorizationIndex',
-      },
-    },
-    Handler: 'index.handler',
-    MemorySize: 512,
-    Runtime: 'nodejs22.x',
-    Timeout: 30,
-  });
-  template.hasResourceProperties('AWS::Lambda::Function', {
-    Description:
-      'Drains old Webhook runtimes and processes checkpointed migration pages.',
-    Environment: {
-      Variables: {
-        DEVELOPER_PLATFORM_TABLE_NAME: {
-          Ref: 'DeveloperPlatformTable772E085C',
-        },
-        PROJECT_DIRECTORY_TABLE_NAME: {
-          Ref: 'ProjectDirectoryTable9ED01C01',
-        },
-        PROJECT_DIRECTORY_WEBHOOK_AUTHORIZATION_INDEX_NAME:
-          'WebhookAuthorizationIndex',
-      },
-    },
-    Handler: 'index.isCompleteHandler',
-    MemorySize: 1024,
-    Runtime: 'nodejs22.x',
-    Timeout: 300,
-  });
-  const backfillEntry = Object.entries(resources).find(([, resource]) =>
-    (resource as { Properties?: { MigrationVersion?: string } })
-      .Properties?.MigrationVersion === 'v3'
-  );
-  expect(backfillEntry?.[0]).toBe('WebhookAuthorizationBackfill');
-  expect(backfillEntry?.[1]).toEqual(expect.objectContaining({
-    Type: 'AWS::CloudFormation::CustomResource',
-    DependsOn: expect.arrayContaining([
-      'ApiLiveAlias3A796568',
-      'CollaborationProjectionFunction1AAC5764',
-      'ListProjectTasksFunction2134AF4A',
-      'WebhookDeliveryFunctionEA305509',
-    ]),
-  }));
-  expect(
-    resources.WebhookDeliveryFunctionEA305509.DependsOn ?? [],
-  ).not.toContain('WebhookAuthorizationBackfill');
-  for (const rolePrefix of [
-    'WebhookAuthorizationBackfillFunctionServiceRole',
-    'WebhookAuthorizationBackfillProgressFunctionServiceRole',
-  ]) {
-    const roleId = Object.entries(resources).find(([logicalId, resource]) =>
-      logicalId.startsWith(rolePrefix) &&
-      (resource as { Type?: string }).Type === 'AWS::IAM::Role'
-    )?.[0];
-    const policies = Object.values(resources).filter((resource) => {
-      if (!roleId || (resource as { Type?: string }).Type !== 'AWS::IAM::Policy') {
-        return false;
-      }
-      const roles =
-        (resource as { Properties?: { Roles?: Array<{ Ref?: string }> } })
-          .Properties?.Roles ?? [];
-      return roles.some((role) => role.Ref === roleId);
-    });
-    const statements = policies.flatMap((policy) =>
-      (policy as {
-        Properties?: {
-          PolicyDocument?: { Statement?: Array<Record<string, unknown>> };
-        };
-      }).Properties?.PolicyDocument?.Statement ?? []
-    );
-    expect(statements).toContainEqual(expect.objectContaining({
-      Action: expect.arrayContaining([
-        'dynamodb:ConditionCheckItem',
-        'dynamodb:DeleteItem',
-        'dynamodb:GetItem',
-        'dynamodb:PutItem',
-        'dynamodb:UpdateItem',
-      ]),
-      Effect: 'Allow',
-      Resource: expect.arrayContaining([
-        {
-          'Fn::GetAtt': ['DeveloperPlatformTable772E085C', 'Arn'],
-        },
-        {
-          'Fn::GetAtt': ['ProjectDirectoryTable9ED01C01', 'Arn'],
-        },
-      ]),
-    }));
-    expect(JSON.stringify(statements)).not.toContain('dynamodb:TransactWriteItems');
-  }
   template.hasResourceProperties('AWS::Lambda::EventSourceMapping', {
     BatchSize: 10,
     EventSourceArn: {
@@ -2075,7 +1950,7 @@ test('application Lambdas emit active X-Ray traces and critical DLQs survive rep
 
   template.resourcePropertiesCountIs('AWS::Lambda::Function', {
     TracingConfig: { Mode: 'Active' },
-  }, 29);
+  }, 27);
 
   for (const logicalIdPrefix of [
     'CollaborationProjectionDlq',
