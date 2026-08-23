@@ -25,6 +25,7 @@ import {
 import {
   verifyWorkspaceSearchMigrationRehearsalAlarmDeliveryArtifact,
   verifyWorkspaceSearchMigrationRehearsalAlarmReceiptArtifact,
+  WORKSPACE_SEARCH_MIGRATION_REHEARSAL_ALARMS,
   type WorkspaceSearchMigrationRehearsalAlarmDeleteInput,
   type WorkspaceSearchMigrationRehearsalAlarmHistoryPage,
   type WorkspaceSearchMigrationRehearsalAlarmHistoryPageInput,
@@ -41,7 +42,6 @@ import {
   type WorkspaceSearchMigrationRehearsalAlarmIngestionArtifact,
   type WorkspaceSearchMigrationRehearsalAlarmLogIngestionPort,
 } from './migration-rehearsal-alarm-ingestion'
-import { WORKSPACE_SEARCH_MIGRATION_REHEARSAL_ALARMS } from './migration-rehearsal-evidence'
 import {
   createWorkspaceSearchMigrationTelemetryRecorder,
 } from './migration-telemetry'

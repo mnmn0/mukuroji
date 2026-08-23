@@ -16,11 +16,6 @@ import {
   type WorkspaceSearchMigrationRehearsalAlarmIngestionArtifact,
 } from './migration-rehearsal-alarm-ingestion'
 import {
-  WORKSPACE_SEARCH_MIGRATION_REHEARSAL_ALARMS,
-  type WorkspaceSearchMigrationRehearsalAlarmEvidence,
-  type WorkspaceSearchMigrationRehearsalAlarmName,
-} from './migration-rehearsal-evidence'
-import {
   WorkspaceSearchMigrationStrictRecordGuards,
 } from './migration-strict-record-guards'
 import { hasOnlyPairedSurrogates } from './migration-value-guards'
@@ -31,6 +26,56 @@ import {
   type WorkspaceSearchMigrationTelemetryRehearsalSignalBinding,
   type WorkspaceSearchMigrationTelemetryRehearsalSignalReceiptArtifact,
 } from './migration-telemetry-rehearsal'
+
+/** Exact migration alarm labels required by the non-production rehearsal. */
+export type WorkspaceSearchMigrationRehearsalAlarmName =
+  | 'throttle'
+  | 'budget-stop'
+  | 'budget-exhaustion'
+  | 'checkpoint-stall'
+  | 'quarantine'
+  | 'terminal-failure'
+
+/** Canonical complete alarm set required by the delivery rehearsal. */
+export const WORKSPACE_SEARCH_MIGRATION_REHEARSAL_ALARMS:
+  readonly WorkspaceSearchMigrationRehearsalAlarmName[] = Object.freeze([
+    'throttle',
+    'budget-stop',
+    'budget-exhaustion',
+    'checkpoint-stall',
+    'quarantine',
+    'terminal-failure',
+  ])
+
+/** One real CloudWatch alarm transition and dual-route delivery result. */
+export type WorkspaceSearchMigrationRehearsalAlarmEvidence = {
+  /** Canonical alarm label. */
+  readonly name: WorkspaceSearchMigrationRehearsalAlarmName
+  /** Mandatory successful delivery rehearsal outcome. */
+  readonly status: 'pass'
+  /** State observed before the controlled EMF signal. */
+  readonly initialState: 'OK'
+  /** State observed after the alarm evaluation. */
+  readonly alarmState: 'ALARM'
+  /** State observed after the later recovery evaluation window. */
+  readonly recoveredState: 'OK'
+  /** Canonical UTC time of the OK-to-ALARM history event. */
+  readonly alarmObservedAt: string
+  /** Canonical UTC time of the later ALARM-to-OK history event. */
+  readonly recoveredAt: string
+  /** Digest of the identifier-free EMF signal record. */
+  readonly signalDigest: string
+  /** Digest of the normalized OK-to-ALARM-to-OK history. */
+  readonly historyDigest: string
+  /** Digest of the normalized primary subscription receipt. */
+  readonly primaryReceiptDigest: string
+  /** Canonical UTC time at which the primary subscriber received ALARM. */
+  readonly primaryReceivedAt: string
+  /** Digest of the normalized secondary subscription receipt. */
+  readonly secondaryReceiptDigest: string
+  /** Canonical UTC time at which the secondary subscriber received ALARM. */
+  readonly secondaryReceivedAt: string
+}
 
 /** Stable discriminator for a digest-only alarm delivery receipt artifact. */
 export const WORKSPACE_SEARCH_MIGRATION_REHEARSAL_ALARM_RECEIPTS_KIND =

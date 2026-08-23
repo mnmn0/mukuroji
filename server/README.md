@@ -436,38 +436,15 @@ Source の更新と projection が競合すると古い scan 結果を一時的�
 書き込みを止めた maintenance window で実行し、API の live projection を有効化した後に
 もう一度 backfill を完走してから書き込みを再開してください。
 
-このlegacy backfillは、production-safe migrationのlease、lossless journal、checkpoint、rollback、
-writer-fence lifecycleを代替しません。Workspace Search migration v1のresource measurement、
-writer-fence status、初回guarded rolloutのopen-row bootstrapには、explicit named profileとCDK outputを
-受け取るcontrol CLIを使用します。完全なflagと安全境界は
-`bun run --silent search:migration:control -- help`および
-[`docs/operational-readiness.md`](../docs/operational-readiness.md)の
-「Migration control CLI foundation」を参照してください。このCLIは明示的なapproval、review済み
-configuration hash、run/owner、fresh maintenance evidence、durable `DescribeTable` rate policyを要求し、
-writer-fence close/replan、apply、verify、2種類のrollback、terminal releaseを互いに自動連鎖しない
-commandとして提供します。Control result/errorと同じ1行には`Mukuroji/WorkspaceSearchMigration`の
-Service-only terminal EMFを含め、operation/phase/outcome、configuration binding/hash、policy version、
-process生成のcorrelation/evidence locator、checkpoint progress、DescribeTable
-attempt/throttle/wait/budget stop/exhaustion、quarantine、terminal failureをsecret-freeに集約します。
-5分のlive checkpoint stallだけはhung中にもalarmを発火できる独立EMF行を即時出力し、terminal recordと
-metricを二重計上しません。初回`measure`がidentity確定前に失敗した場合は`unbound`を明示してhashを
-省略します。Non-`measure`の`bound`はreview済みexpected hashへのcorrelation bindingであり、fresh
-measurement成功やruntime configuration一致の証明ではありません。Run/owner ID、resource名/ARN、
-account/profile、cursor、tenant、raw error/message/stackは
-出力しません。CLIを実行するsurfaceがstdout/stderrの両方をCloudWatch LogsへingestしなければEMFは
-metric化されません。
+このlegacy backfillは、production-safe migrationのlease、lossless journal、checkpoint、verify、rollback、
+writer-fence lifecycleを代替しません。AWS migration execution routeはretiredで、repository内に残る
+internal port/artifactをcontrol/apply/verify/rollback/releaseの承認済みcommandとして使用しません。
 
-CDKはthrottle、budget stop、budget exhaustion、5分checkpoint stall、quarantine、terminal failureに対する6 alarmを
-5分`Sum >= 1`、missing data=`notBreaching`で作成し、既存primary/secondary SNS topicへ通知します。
-Rate observation v2はAWS throttleとfinal-publicationのpost-success injectionを有限なprovenanceで分離し、
-budget stopも`operational` / `aws-service-throttle` / injectionへ分離します。Durable checkpointとaggregateは
-totalがsource別countの和に一致する場合だけ受理します。Telemetryはsource/reasonの組合せをstrictに検査しますが、
-既存のlow-cardinality EMF metricをsource別dimensionへ増やさず、raw AWS errorやresource identityを保存しません。
-Alarm responseとnon-productionのreal metricによる`OK → ALARM → OK`/両subscription receiptは
-[`docs/operational-readiness.md`](../docs/operational-readiness.md)を参照してください。Non-production
-execution/alarm delivery rehearsalとrestore/DR evidenceが揃うまではproduction migration gateを
-閉じたままにします。
-
+Retained root/permitと6つのalarm deliveryはalarm-onlyです。実metricによる
+`OK → ALARM → OK`とprimary/secondary subscription receiptを検証しますが、migration executionまたは
+Production migration gateの有効化を承認しません。将来のreplacement routeは
+[`docs/operational-readiness.md`](../docs/operational-readiness.md)のacceptance gateを満たし、そのroute
+自身からreview済みnon-production execution evidenceを取得する必要があります。
 
 現時点では file の保存元は未導入のため、file は backfill 対象になりません。
 Work Item は canonical row の `creatorMemberKey`、`workflowStatusId`、`customFieldValues`、

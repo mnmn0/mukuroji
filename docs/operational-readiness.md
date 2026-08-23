@@ -17,7 +17,7 @@ repository に固定せず、各実行の evidence record に残します。
 | Release | PR/push workflow が Server test を含む全 source/build config の strict typecheck、static analysis、unit/integration、Web E2E、CDK test/nag/synth を実行し、main ruleset が6つの必須 check を強制する | Path-filtered local runtime と外部 reviewer は常時 required にせず、対象変更ごとの release evidence で結果または rate limit を確認すること |
 | Web journey quality | Required Playwright gate が主要 Work Item 画面の keyboard/focus、390px viewport、screen-reader-facing ARIA tree、低速 API 中の status と復帰を検証する | Chromium と mock API による回帰 proxy であり、実 screen reader、visual regression、performance budget は未実装 |
 | Runtime control / rollout | AWS AppConfig の schema 検証済み `enabled` / `disabled` document を API、WebSocket、worker の entrypoint で fail-closed に評価し、operator 用 canary strategy と configuration failure alarm を定義する。Shared API は revision-bound な Lambda Version と `live` Alias で code/configuration を揃えて切り替える | `read-only` mode、route/effect registry、weighted alias routing、CodeDeploy による code canary は未実装。AppConfig の停止制御を code/schema rollout の互換性検証や writer fence の代用にしないこと |
-| Migration | Production-safe migration contract と entry/verification/rollback evidence を定義する。Workspace Search migration 専用の retained/PITR state table、Object Lock COMPLIANCE の segmented journal、transaction 限定 operator policy、物理 table/PITR/journal identity と maintenance drain evidence の strict validator、sealed plan/lease/fence/OCC/checkpoint/apply/verify/部分 apply からの reverse rollback を検証する永続 state-machine kernel を持つ。同じ measured AWS session に identity-bound な source Scan 1 page と exact digest/checkpoint reducer を持ち、複数 page の row evidence と累積 checkpoint を conditional transaction で保存して、commit 後の response loss から再開できる。Migration-state table には全 run/configuration で競合する global lease/heartbeat と、fresh maintenance evidence の immutable receipt/current pointer を永続化する。Source-evidence schema は S3 を使わない `dry-run` v1、read-only legacy planning v2、lossless artifact reference を必須にする planning v3 を分離する。Planning v3 は同じ measured AWS session の concrete S3 adapter で全 raw item を strict/lossless な DynamoDB AttributeValue segment（最大16 MiB）として Object Lock COMPLIANCE bucket へ保存し、順序付きの exact `{objectKey, versionId, contentDigest}` を lease/fence/current receipt と固定5 item transaction に結合する。Target raw page にも lossless codec と measured configuration-bound S3 adapter があり、exact object version を再読検証できる。Concrete managed AWS session は planning-only target evidence v1 を composition し、1 page ごとに raw target Scan を1回だけ行って lossless target artifact を upload する。Commit 前には target、続いて migration-state table の incarnation を再検証する。Exact-version artifact replay を可能にする順序付き reference、累積 checkpoint、authority の3 condition check、immutable page、predecessor-CAS head を固定5 item transaction に結合し、response loss を strict に照合できる。Pure planning join は planning v3 の4 source と target evidence v1 の raw page material を exact replayし、per-chain terminal identity/bounds、同一 run で実現可能な単調 authority 履歴と canonical provenance digest、target preimage、expected/observed/orphan set、candidate、target projected/deleted を決定的に構築する。Managed composition は同じ measured generation で state/source/target incarnation を前後検証し、5 head を強整合で固定して remaining budget 内の exact-version material を順次取得し、pure join 後に5 head を再確認する。同じ session は planning-artifact gateway も同一の pinned S3 client、measured configuration、generation 上へ composition し、caller は `runId` だけを指定する。Manifest-aware sealed authority v2 は、plan seal、plan/provenance manifest head、compact authority provenance、全6 TableId、5 terminal head、fresh current authority を結合し、authority 3条件、source 4 head、target head、未作成rootを固定9 item transactionで原子的に公開する。応答消失時は同一canonical rootの強整合再読だけを成功として回収する。Complete-plan apply sealはterminal 5 checkpoint、execution admission/state digest chain、journal/marker aggregate、全6 TableIdをexact-version Object Lock artifactとimmutable applied rootへ束縛し、rollback-start sentinelのabsenceを含む固定10 item transactionと強整合reconciliationで`applied` phaseを公開する。Application writer-fence v1 は全6 TableId と migration-state incarnation に束縛した strict canonical row、単調 epoch/revision、強整合 read、exact predecessor CAS、current authority 3条件付きinitial bootstrap、response-loss reconciliation、measured session quarantine を持つ。Execution-boundary AWS portはwriter-fence closeとrevision 1 boundary、post-close planning admissionとrevision 2 boundaryを、current authorityと未作成planning headへ束縛した固定10 item transactionとしてcommitする。Production API、worker、connector、backfill の fenced-table mutation は invocation-stable な open-row ConditionCheck 付き transaction へ統合し、TTL-managed support row と mapped migration row の disjointness を fail-closed に検証する。Terminal-outcome releaseはv1 closed row、revision 2 boundary、sealed authority、execution admission、verifiedまたは完全rolled-back rootを固定5 item transactionでexact CASし、全6 TableIdとterminal digestを保持するversion 2 open epoch/revisionへ進める。Resource measurement、writer-fence status、初回open-row bootstrapを行うcontrol CLIとsingle-flight heartbeat supervisorを持つ。Close、15分以上のpost-close drain、同一runでの4 source＋target再取得、plan/provenance保存、fresh authority付きsealed root publicationをdurable headから再開するplanning supervisorを持つ。Explicit coordinatorはclose/replan、apply、verify、partial/complete rollback、terminal releaseを別commandとして接続し、各stageでreview済みhash、run/owner、fresh evidence、exact approvalを再要求する。Production compositionはaccount/region単位のdurable `DescribeTable` rate ledgerと182-attempt page reservationを適用し、Service-only EMF、checkpoint/rate/quarantine/terminal telemetry、6 migration alarmを持つ | Restore/failover/DR drill、承認済みnon-production実行・alarm delivery evidenceは未完了。Legacy planning v2 は digest-only のまま append/promote できない。これらのenvironment evidenceをreviewするまでProduction migration gateは閉じたままにすること |
+| Migration | Production-safe migration contract と entry/verification/rollback evidence を定義する。Workspace Search migration 専用の retained/PITR state table、Object Lock COMPLIANCE の segmented journal、transaction 限定 operator policy、物理 table/PITR/journal identity と maintenance drain evidence の strict validator、sealed plan/lease/fence/OCC/checkpoint/apply/verify/部分 apply からの reverse rollback を検証する永続 state-machine kernel を持つ。同じ measured AWS session に identity-bound な source Scan 1 page と exact digest/checkpoint reducer を持ち、複数 page の row evidence と累積 checkpoint を conditional transaction で保存して、commit 後の response loss から再開できる。Migration-state table には全 run/configuration で競合する global lease/heartbeat と、fresh maintenance evidence の immutable receipt/current pointer を永続化する。Source-evidence schema は S3 を使わない `dry-run` v1、read-only legacy planning v2、lossless artifact reference を必須にする planning v3 を分離する。Planning v3 は同じ measured AWS session の concrete S3 adapter で全 raw item を strict/lossless な DynamoDB AttributeValue segment（最大16 MiB）として Object Lock COMPLIANCE bucket へ保存し、順序付きの exact `{objectKey, versionId, contentDigest}` を lease/fence/current receipt と固定5 item transaction に結合する。Target raw page にも lossless codec と measured configuration-bound S3 adapter があり、exact object version を再読検証できる。Concrete managed AWS session は planning-only target evidence v1 を composition し、1 page ごとに raw target Scan を1回だけ行って lossless target artifact を upload する。Commit 前には target、続いて migration-state table の incarnation を再検証する。Exact-version artifact replay を可能にする順序付き reference、累積 checkpoint、authority の3 condition check、immutable page、predecessor-CAS head を固定5 item transaction に結合し、response loss を strict に照合できる。Pure planning join は planning v3 の4 source と target evidence v1 の raw page material を exact replayし、per-chain terminal identity/bounds、同一 run で実現可能な単調 authority 履歴と canonical provenance digest、target preimage、expected/observed/orphan set、candidate、target projected/deleted を決定的に構築する。Managed composition は同じ measured generation で state/source/target incarnation を前後検証し、5 head を強整合で固定して remaining budget 内の exact-version material を順次取得し、pure join 後に5 head を再確認する。同じ session は planning-artifact gateway も同一の pinned S3 client、measured configuration、generation 上へ composition し、caller は `runId` だけを指定する。Manifest-aware sealed authority v2 は、plan seal、plan/provenance manifest head、compact authority provenance、全6 TableId、5 terminal head、fresh current authority を結合し、authority 3条件、source 4 head、target head、未作成rootを固定9 item transactionで原子的に公開する。応答消失時は同一canonical rootの強整合再読だけを成功として回収する。Complete-plan apply sealはterminal 5 checkpoint、execution admission/state digest chain、journal/marker aggregate、全6 TableIdをexact-version Object Lock artifactとimmutable applied rootへ束縛し、rollback-start sentinelのabsenceを含む固定10 item transactionと強整合reconciliationで`applied` phaseを公開する。Application writer-fence v1 は全6 TableId と migration-state incarnation に束縛した strict canonical row、単調 epoch/revision、強整合 read、exact predecessor CAS、current authority 3条件付きinitial bootstrap、response-loss reconciliation、measured session quarantine を持つ。Execution-boundary AWS portはwriter-fence closeとrevision 1 boundary、post-close planning admissionとrevision 2 boundaryを、current authorityと未作成planning headへ束縛した固定10 item transactionとしてcommitする。Production API、worker、connector、backfill の fenced-table mutation は invocation-stable な open-row ConditionCheck 付き transaction へ統合し、TTL-managed support row と mapped migration row の disjointness を fail-closed に検証する。Terminal-outcome releaseはv1 closed row、revision 2 boundary、sealed authority、execution admission、verifiedまたは完全rolled-back rootを固定5 item transactionでexact CASし、全6 TableIdとterminal digestを保持するversion 2 open epoch/revisionへ進める。Resource measurement、writer-fence status、初回open-row bootstrapを行うcontrol CLIとsingle-flight heartbeat supervisorを持つ。Close、15分以上のpost-close drain、同一runでの4 source＋target再取得、plan/provenance保存、fresh authority付きsealed root publicationをdurable headから再開するplanning supervisorを持つ。Explicit coordinatorはclose/replan、apply、verify、partial/complete rollback、terminal releaseを別commandとして接続し、各stageでreview済みhash、run/owner、fresh evidence、exact approvalを再要求する。Production compositionはaccount/region単位のdurable `DescribeTable` rate ledgerと182-attempt page reservationを適用し、Service-only EMF、checkpoint/rate/quarantine/terminal telemetry、6 migration alarmを持つ | Workspace Search migration execution routeはretiredでAWS mutationは未承認。retained root/permit/alarm deliveryはalarm-only。replacement acceptance contractと、そのroute自身から取得したreview済みnon-production execution evidenceが揃うまでProduction migration gateを閉じたままにすること |
 | Data durability | Stateful DynamoDB table は `Retain` + PITR、file bucket は `Retain` + versioning を使う。6表の同一時点PITR restore、同時点exportとのexact aggregate比較、exact S3 version copy、RPO/RTO測定、90日cadence、immutable evidence、承認付きcleanupを隔離workflowで自動化する | Regional replication/failover と AWS Backup plan は未実装。成功したsame-Region drillをregional DR完了扱いにしないこと |
 
 Migration 行の「同一canonical root」には、同じtransaction attemptのbyte-identicalなrootに加え、
@@ -265,12 +265,12 @@ Alarm 名は CloudFormation の physical name ではなく CDK construct ID で�
 | `ApiAvailabilityFastBurnAlarm` | 5分・1時間componentが同時に`ALARM` | SEV1 | 両componentのstate history、eligible bad/total、直前deploy/migration |
 | `ApiGatewayServerErrorAlarm` | HTTP API `5xx Sum >= 1` / 5分 | SEV2 | Stage/integration、UTC window。Lambda 到達時は API log、到達前 failure は correlation が unknown |
 | `RuntimeControlConfigurationFailureAlarm` | target固有`ControlId`の`ConfigurationFailureCount Sum >= 1` / 5分 | SEV2 | `runtime-control.evaluated` の ControlId、surface、status、revision、deployment number。Configuration 本文は記録しない |
-| `WorkspaceSearchMigrationDescribeTableThrottleAlarm` | `Mukuroji/WorkspaceSearchMigration` `DescribeTableThrottleCount Sum >= 1` / 5分 | SEV2 | Alarm UTC window、secret-free telemetryの`correlationId`/`evidenceLocator`/configuration binding/hash/policy version、read-only execution statusまたはunbound再測定 |
-| `WorkspaceSearchMigrationDescribeTableBudgetStopAlarm` | `DescribeTableBudgetStopCount Sum >= 1` / 5分 | SEV2 | Rate phase、fixed budget-stop reason、identifier-free rate aggregate、review済みpolicy、configuration binding |
-| `WorkspaceSearchMigrationRateBudgetExhaustionAlarm` | `DescribeTableBudgetExhaustionCount Sum >= 1` / 5分 | SEV2 | Rate phase、fixed budget-stop reason、identifier-free rate aggregate、review済みpolicy、configuration binding |
-| `WorkspaceSearchMigrationCheckpointStallAlarm` | `CheckpointStallCount Sum >= 1` / 5分 | SEV2 | 5分watchdogのphase、last progress、correlation/evidence locator、heartbeat/lease status |
-| `WorkspaceSearchMigrationQuarantineAlarm` | `QuarantineCount Sum >= 1` / 5分 | SEV1 | Fixed quarantine reason、直前のpre/post-send guard、durable execution status。自動retryしない |
-| `WorkspaceSearchMigrationTerminalFailureAlarm` | `TerminalFailureCount Sum >= 1` / 5分 | SEV1 | Fixed terminal reason、operation/phase/outcome、durable terminal/status root、verify/rollback decision |
+| `WorkspaceSearchMigrationDescribeTableThrottleAlarm` | `Mukuroji/WorkspaceSearchMigration` `DescribeTableThrottleCount Sum >= 1` / 5分 | SEV2 | Review済みalarm plan/root/main permit/alarm permit binding、throttle `signalArtifact`/`ingestionArtifact` digest、対応するhistoryとprimary/secondary receipt |
+| `WorkspaceSearchMigrationDescribeTableBudgetStopAlarm` | `DescribeTableBudgetStopCount Sum >= 1` / 5分 | SEV2 | Review済みalarm plan/root/permit binding、budget signal/ingestion digest、budget-stop alarm historyとprimary/secondary receipt |
+| `WorkspaceSearchMigrationRateBudgetExhaustionAlarm` | `DescribeTableBudgetExhaustionCount Sum >= 1` / 5分 | SEV2 | Review済みalarm plan/root/permit binding、同じbudget signal/ingestion digest、budget-exhaustion alarm historyとprimary/secondary receipt |
+| `WorkspaceSearchMigrationCheckpointStallAlarm` | `CheckpointStallCount Sum >= 1` / 5分 | SEV2 | Review済みalarm plan/root/permit binding、checkpoint-stall signal/ingestion digest、alarm historyとprimary/secondary receipt |
+| `WorkspaceSearchMigrationQuarantineAlarm` | `QuarantineCount Sum >= 1` / 5分 | SEV1 | Review済みalarm plan/root/permit binding、quarantine signal/ingestion digest、alarm historyとprimary/secondary receipt |
+| `WorkspaceSearchMigrationTerminalFailureAlarm` | `TerminalFailureCount Sum >= 1` / 5分 | SEV1 | Review済みalarm plan/root/permit binding、terminal-failure signal/ingestion digest、alarm historyとprimary/secondary receipt |
 | `CollaborationProjectionDlqAlarm` | DLQ visible message `>= 1` / 5分 | SEV2 | Audit stream record の directory/event ID、correlation、actor/entity/target |
 | `AutomationEventDlqAlarm` | DLQ visible message `>= 1` / 5分 | SEV2 | Audit outbox stream record の directory/event ID と automation rule/execution locator |
 | `AutomationScheduleDlqAlarm` | DLQ visible message `>= 1` / 5分 | SEV2 | Async destination envelope の invocation time、recurring definition/execution locator |
@@ -322,37 +322,84 @@ Migration metricは`Mukuroji/WorkspaceSearchMigration` namespaceと
 `outcome`、configuration hash、policy version、process生成の`correlationId`、digest由来の
 `evidenceLocator`はsecret-free log属性でありdimensionではありません。Run/owner ID、table名/ARN、
 account、profile、tenant、cursor、evidence path/bytes、raw AWS error、message、stackは出力しません。
-Recorder failureやlog sink failureはmigration結果を変更しません。Control CLIはterminal result/errorの
-EMFを同じ1行へ結合し、live checkpoint stallだけはoperationがhungしたままでも検知できるよう
-`event=workspace-search-migration.checkpoint-stall`の独立したsecret-free EMF行を即時出力します。
-stdout/stderrの両方をCloudWatch Logsへingestしない端末で実行した場合、JSONLにEMFがあっても
-CloudWatch metricにはなりません。
+Alarm-only rehearsalはHMAC認証済み`signalArtifact`を作り、そのexact secret-free EMFを専用LogStreamへ
+1回だけingestして`ingestionArtifact`を発行します。Collectorは実CloudWatch historyと両SNS routeの
+receiptを取得し、`transitionArtifact`と12件の`receiptArtifact`をcombined immutable
+alarm-delivery artifactへ結合します。Signal生成、ingestion、collector、publicationのどこかが失敗した
+場合はdelivery evidenceとして受理せず、migration execution stateを作成または変更しません。
 
 Alarmを受信したら、次の順で調査します。
 
 1. Alarm construct/physical name、`StateUpdatedTimestamp`、5分periodを含むUTC window、metric名、
-   primary/secondary receiptをincident recordへ固定し、migrationの新規stageを停止する。
-2. Log-ingested execution surfaceで同じUTC windowと`Service`を使い、
-   `event=workspace-search-migration.finalized`または
-   `event=workspace-search-migration.checkpoint-stall`を検索する。Alarm metricの値が1以上のrecordから
-   `correlationId`、`evidenceLocator`、operation/phase/outcome、configuration binding/hash、policy
-   version、fixed reasonだけを保存する。Live stallではoperation終了前のためfinalized recordがないことを
-   正常とし、即時stall recordを相関の起点にする。
-3. Access-controlled change recordで`evidenceLocator`を承認済みaccount/region/commitと実行artifactへ
-   結合する。初回`measure`がidentity確定前に失敗したrecordは`configurationBinding=unbound`であり、
-   configuration hashを捏造しない。Policy version、correlation、unbound evidence locator、明示した
-   private resource inventoryを使って再測定へescalateする。Restrictedなrun IDやresource identityを
-   汎用logへ逆コピーしない。
-4. Non-`measure` recordの`configurationBinding=bound`は、I/O前にreview済みexpected hashへcorrelationと
-   evidence locatorを束縛したことを表し、fresh measurement成功やruntime configuration一致の証明ではない。
-   Bound recordでは同じ明示resource、review済みconfiguration hash、rate policyを使ってread-only
-   `execution-status`を再実行し、durable phase/next action、writer fence、rate aggregateを照合する。
-   Alarm単独をmigration stateの正本にしない。
-5. Throttle/budget exhaustionはpolicyとcharged attemptをreviewし、checkpoint stallは
-   `WORKSPACE_SEARCH_MIGRATION_CHECKPOINT_STALL_THRESHOLD_MILLISECONDS=300000`のlive-operation
-   watchdog、heartbeat、最後のdurable progressを確認する。意図的な15分drainではwatchdogをarmしない。
-   Quarantine/terminal failureは自動retry、takeover、rollback、releaseを行わず、data ownerがexact
-   durable stateから明示commandを承認する。
+   primary/secondary receiptをincident recordへ固定し、Production migration gateを閉じたまま全migration
+   AWS mutationを禁止する。
+2. Combined immutable alarm-delivery artifactの`signalArtifact`、`ingestionArtifact`、
+   `transitionArtifact`、12件のdual-route receiptを含む`receiptArtifact`をstrictに検証し、
+   5 positive signal＋1 authenticated recovery signal、6 alarm各1件の`OK → ALARM → OK` history、
+   6件のingestion receipt、各primary/secondary receiptのdigestが同じ`authorization`とreview済み
+   root/main permit/alarm permit bindingへ結合されることを確認する。
+3. Access-controlled change recordでartifactのrequested-resource/shared-session bindingを承認済み
+   non-production account/region/commit、alarm planのUTC windowへ相関する。Raw account、ARN、resource名、
+   profile、permit/key/evidence path、run/owner IDを汎用logへ逆コピーしない。
+4. 承認済みalarm-delivery planとcombined artifactで説明できないsignalは、retired execution routeの
+   unexpected residual producerとしてread-only incident調査へescalateする。Alarm、telemetry record、
+   internal durable stateのいずれもmigration execution authorityとして扱わない。
+5. `execution-status`、retry、takeover、rollback、releaseその他のinternal execution commandを案内または
+   承認しない。Incidentを隔離し、将来のreplacement routeとそのreview済みrecovery手順が受理されるまで
+   Production migration gateを開かない。
+
+### Non-production migration alarm-delivery root and permit
+
+Alarm delivery rehearsalで使うmain permitは、retained root CLIとpermit CLIの独立した経路で発行します。
+この経路はroot/rate bindingとalarm deliveryだけを認証し、control、apply、verify、rollback、
+releaseその他のmigration executionやProduction gateの解除を承認しません。
+Permitを発行する前にowner-onlyなcanonical root planをreviewし、source-controlled deployment target
+ID、exact STS assumed-role ARN、固定account/Region、40文字commit OID、期待configuration binding、
+migration用resourceとintegrity-check用resource、root処理の有限時間上限を固定します。Root CLIは
+plan、rate policy、key、output pathをAWS I/Oより前にstrictに検査し、STS identityとjournal
+deployment tagを照合してからconfiguration measurementとintegrity root measurementを同じordinal 0
+rate segmentへ記録します。
+
+Root plan、rate policy、rehearsal master key、integrity digest keyはcurrent UID所有、link count exact 1、
+permission exact `0600`のregular fileとし、読取り中のinodeとmetadataが変わらないことを要求します。
+2つのkeyは互いに異なるexact 32-byte fileにします。すべてのinput/outputはabsolute pathで指定し、
+private outputのparent directoryはcurrent UID所有、permission exact `0700`とし、outputは未作成pathを
+使います。CLIはresource attestationを先にfsyncし、最後にintegrity rootをpublishします。
+
+```sh
+bun run --silent search:migration:rehearsal:root -- \
+  --root-plan-file "$REVIEWED_REHEARSAL_ROOT_PLAN_FILE" \
+  --rate-policy-file "$REVIEWED_RATE_POLICY_FILE" \
+  --rehearsal-authentication-key-file "$RESTRICTED_REHEARSAL_MASTER_KEY_FILE" \
+  --integrity-digest-key-file "$RESTRICTED_INTEGRITY_DIGEST_KEY_FILE" \
+  --root-rate-segment-file "$NEW_REHEARSAL_ROOT_RATE_SEGMENT_FILE" \
+  --resource-attestation-output-file "$NEW_RESOURCE_ATTESTATION_FILE" \
+  --integrity-root-output-file "$NEW_INTEGRITY_ATTESTATION_ROOT_FILE" \
+  --approval bootstrap-reviewed-non-production-migration-rehearsal-root
+```
+
+Root出力のaccount/Region、caller ARN、commit、deployment target/trust root、requested-resource binding、
+configuration binding、rate policy、integrity resource identity、startedAt/completedAtを含むintegrity root
+projectionをreview済みcanonical claimsへそのまま固定し、claimsのissuedAtがroot完了以後であることも
+確認します。Root plan、rate policy、key、resource、commitのいずれかを差し替えた場合は、rootとclaimsを
+同じreview単位で作り直します。
+
+Permit claimsはproduction accountとの分離、発行/失効UTC、purpose-separated evidence/publication key
+digestも固定します。Signing keyとintegrity keyには上記の別fileを使い、permit outputは既存pathを置換せず
+新しいowner-only fileとして発行します。Canonical claimsをreviewした後、次のexact commandで
+`$NEW_REHEARSAL_PERMIT_FILE`を一度だけ作成します。
+
+```sh
+bun run --silent search:migration:rehearsal:permit -- \
+  --claims-file "$REVIEWED_REHEARSAL_CLAIMS_FILE" \
+  --signing-key-file "$RESTRICTED_REHEARSAL_MASTER_KEY_FILE" \
+  --integrity-key-file "$RESTRICTED_INTEGRITY_DIGEST_KEY_FILE" \
+  --integrity-resource-attestation-file "$NEW_RESOURCE_ATTESTATION_FILE" \
+  --integrity-attestation-root-file "$NEW_INTEGRITY_ATTESTATION_ROOT_FILE" \
+  --integrity-root-rate-segment-file "$NEW_REHEARSAL_ROOT_RATE_SEGMENT_FILE" \
+  --output-file "$NEW_REHEARSAL_PERMIT_FILE" \
+  --approval issue-reviewed-non-production-migration-rehearsal-permit
+```
 
 ### Non-production migration alarm delivery rehearsal
 
@@ -448,8 +495,8 @@ ingestion chainを1対1で照合できなければ作成しません。
 4. 次の5分periodに同contractのauthenticated recovery record（全6 alarm metricを明示0）をingestし、
    `ALARM → OK`のhistoryを保存する。Recovery receiptのobservedAtは全positiveより後、各recoveredAtより
    前でなければならない。OK通知はstack契約に含まれないため、natural recoveryはalarm historyで証明する。
-5. 6 alarmすべてについてmetric datapoint、secret-free log、read-only status、両ALARM receipt、
-   authenticated signal receipt、`OK → ALARM → OK` historyを一つのimmutable evidence indexへ結合する。
+5. 6 alarmすべてについてmetric datapoint、secret-free log、両ALARM receipt、authenticated signal/
+   ingestion receipt、`OK → ALARM → OK` historyをcombined immutable alarm-delivery artifactへ結合する。
    Exact signal timeは対応evaluated datapointの5分window内かつalarmObservedAt以前でなければならない。Budget signalは
    `DescribeTableBudgetStopCount`と`DescribeTableBudgetExhaustionCount`の2 metric/alarmを覆うが、
    evidenceでは両alarmを個別に照合する。Unit testや
@@ -459,6 +506,11 @@ ingestion chainを1対1で照合できなければ作成しません。
 
 Production migration は、migration ID/version、configuration hash、durable checkpoint、
 idempotent apply、verify、rollback/forward-fix のすべてを持つ必要があります。
+
+この節以降のWorkspace Search migration implementation inventoryは、retired execution routeの設計記録です。
+`operator`、`deploy`、approval、commandという表現を現行runbookまたは実行承認として扱わず、内部port、
+state、artifactを直接AWS mutationへ使用しません。上記alarm-only手順とroot/permitもexecutionを承認せず、
+Replacement migration execution acceptance gateを満たす新routeが受理されるまで全AWS mutationを禁止します。
 
 現行の Workspace Search backfill は、この production migration contract を満たしません。
 専用 migration v1 には credential から実測する account/table identity、lossless preimage journal、
@@ -774,25 +826,15 @@ sealed authority、execution admission、verified rootまたは完全rolled-back
 transactionで条件付け、全6 TableIdとterminal digestを持つversion 2のepoch/revision 3 open rowへ
 exact CASします。並行呼出し、response loss、restartは同じpredecessorとlogical releaseだけを強整合
 再読で回収します。Managed portは全6 tableの送信前後guardとgeneration quarantineを適用しますが、
-operator CLIはterminal graphをfresh measurementと同一generationの強整合再読で確認し、明示的な
-`release` approvalがある場合だけこのrelease primitiveを呼びます。自動releaseは実装せず、statusから
-破壊的分岐を選択しません。
+internal composition contractはterminal graphをfresh measurementと同一generationの強整合再読で固定し、
+exact release authorization materialがある場合だけrelease primitiveを受理します。これはretired routeの
+設計記録であり、現行operator routeから呼び出さず、自動releaseやstatusからの破壊的分岐も承認しません。
 
-`bootstrapOpen`は初回guarded-code rollout専用であり、AppConfig `disabled`とfresh drain evidenceを
-確認した状態でだけ実行します。State-table restore/replacementも同じmissing rowに見えるため、
-current authorityがあることだけでrestore recoveryを自動承認してはいけません。新しいstate incarnationを
-openにするにはdata/application ownerの明示的なrecovery判断を必要とし、supervisor実装までは手動gateです。
-Deployは(1)明示的`rollout-pending`で配線/IAMと`disabled` AppConfig baselineを先行し、
-(2)全entrypointの反映とdrainを確認し、(3)fresh authorityで`bootstrapOpen`し、
-(4)parameterを`required`へ更新して10個のstrict compositionすべての反映を確認し、
-(5)新しい`enabled` revisionで再開する二段階とします。Target templateと新規環境はWebhook authorization
+Target templateと新規環境はWebhook authorization
 backfill custom resourceを作成しません。既存stackにはdeploy前まで旧resourceが存在し得ますが、この
 deployのchange setで削除します。Pre-deploy gateではその存在自体を異常扱いせず、logical/physical IDと
-削除差分をinventory化し、旧resourceを再実行しません。このrolloutはlegacy locatorや不足した
+削除差分をinventory化し、旧resourceを再実行しません。このchangeはlegacy locatorや不足した
 authorization projectionを変換しません。
-CloudFormation更新中はpending/required Lambdaが混在し得るため、
-Step 2からStep 5までwriterを再開しません。`required`から`rollout-pending`へのdowngradeは通常rollback
-として扱わず、state-table recoveryを含むowner承認の新しいmaintenance changeを必要とします。
 
 CDKのProject Directory/Work Items初期seed custom resourceはstack作成時だけ実行するpre-fence bootstrap
 boundaryです。Stack updateでは再実行せず、既存Workspaceのmaintenance writerとして使用しません。Runtimeで
@@ -989,13 +1031,10 @@ private cursor witnessからのprovenance保存、plan保存、fresh current aut
 `admittedAt`とreviewed dry-runの`completedAt`の遅い方から決定し、同じdurable inputでは再起動後も固定し
 つつ、fence後に再作成したdry-runを受け付けます。sealed root publicationと同じmanaged clockより未来の
 dry-run完了時刻はread-only root recoveryの後、lease取得とcloseより前に拒否します。
-Crash時はsame-fence maintenance pointerとrevision 1/2、5 head、sealed rootから再開し、
-signal、heartbeat failure、回収不能なresponse loss、session quarantine後に次のtop-level operationを
-開始しません。Control CLI/coordinatorはこのplanning supervisorとapply/seal/verification/rollback
-execution supervisor、terminal releaseを明示stageごとに接続します。自動rollback/releaseは行いません。
-Migration専用のsecret-free telemetryと6 alarmは実装済みです。Restore/failover/DR drill、
-承認済みnon-production実行およびalarm delivery evidenceは未完了のため、Production migration gateは
-閉じたままです。
+Crash時はsame-fence maintenance pointerとrevision 1/2、5 head、sealed rootから再開する内部contractを
+保持しますが、migration executionの運用routeはretiredです。既存のcontrol/apply/verify/rollback/release
+実装をAWS mutationの承認済みentrypointとして使用しません。Migration専用のsecret-free telemetryと6 alarm、
+およびalarm-delivery用root/permitは、alarm deliveryの検証だけに限定して保持します。
 
 現行のmanaged compositionでは、成功する非終端checkpoint 1ページにつき論理上182回の
 `DescribeTable`を実行します。Managed `DescribeTable` rate-policy registryはaccount＋regionをscopeとし、
@@ -1081,11 +1120,9 @@ interruptionをdeferして完了し、session closeはadmitted ownerをdrainし�
 Resume、lease takeover、replacement measurementでも同じscopeの消費を初期化せず、session quarantine後は
 新しい予約を拒否します。同一transition内でもstrong read、Scan、transactionの前後という時点保証をまたぐ
 incarnation結果はcacheまたは再利用せず、all-six replacement detectionとpost-send quarantineを維持します。
-今回、実AWS accountでrateを実測したevidenceは取得していません。Telemetryは#158の
-attempt/throttle/cadence wait/budget stopをconfiguration hash、policy version、UTC window、
-correlation/evidence locatorへ集約し、6 alarmがthrottle、budget stop、budget exhaustion、checkpoint stall、
-quarantine、terminal failureを検知します。承認済みnon-production rehearsalと両SNS delivery receiptは
-Issue 167へ引き継ぎます。これらのreview済みevidenceが揃うまでProduction migration gateを閉じたままにします。
+Retained root/permitとalarm-delivery手順は、実AWS accountのrate bindingと6 alarmの
+`OK → ALARM → OK`、両SNS delivery receiptだけを取得します。Execution interruption、resume、verify、
+rollbackのevidence producerはretiredで、これらのalarm evidenceをmigration execution承認へ流用しません。
 
 Pure execution-boundary contractは、exact closed fence digest/authorityと全6 TableIdを持つ`closed` revision 1、
 fresh current authority、exact raw maintenance evidence、close後15分以上のdrainを持つ
@@ -1100,175 +1137,41 @@ portと、lease/pointer/receipt、closed fence、revision 2 boundary、sealed ro
 managed-session capability gateに束縛しています。Apply portはこれらのexact condition
 factoryとrollback-start sentinelのabsenceをoperationの12/13 item、checkpointの10 item、
 complete sealの10 item transactionへ再利用し、managed
-resource-identity compositionにも接続済みです。Post-close planning supervisorとexecution supervisorは
-operator CLIの互いに独立した明示stageへ接続済みです。CLIはstatusから次stageを自動選択せず、rollback
-またはreleaseを明示approvalなしで開始しません。
+resource-identity compositionにも接続済みです。ただしこれらの内部port/supervisorは承認済みの
+operator entrypointではなく、AWS migration mutationに使用しません。
 
 Sealed planning authority v2 の原子的publication、durable writer-fence row、application writer guardに加え、
 planning supervisorがhistorical receipt、current authority freshness、revision 2、5 terminal head、
 provenance/plan storageを同じrun/configuration/全6 TableIdへ固定します。Terminal-bound release
 primitiveも、exact boundary、sealed authority、execution admission、verifiedまたは完全rolled-back
-rootを同じclosed predecessorへ原子的に固定します。Mutating coordinatorはcomplete
-apply/verify/rollback/release supervisorを別stageとして接続します。
+rootを同じclosed predecessorへ原子的に固定します。既存のmutating coordinatorと
+apply/verify/rollback/release supervisorはretiredで、運用routeとして使用しません。
 Digest-only な dry-run v1 と legacy planning v2 は process を越えた planning input、target join、
-rollback preimage を再構成しません。これらの未実装項目を完了し、non-production で
-artifact upload orphan、version substitution、cursor 境界の中断再開、verify/rollback evidence を
-取得するまで production migration gate は閉じたままとし、既存 backfill は dry-run と
-maintenance-window 内の再生成用途に限定します。残る未完了項目にはrestore/failover/DR drill、
-承認済みnon-production実行・alarm delivery evidence が含まれます。
+rollback preimage を再構成しません。既存 backfill は dry-run とmaintenance-window内の
+canonical projection再生成用途に限定し、production migrationを代替しません。
 
-### Migration control CLI foundation
+### Retired migration execution route
 
-CLIは環境変数やAWS resourceの自動探索を使いません。Account、region、named profile、review済み40文字
-commit OID、6 table、journal bucket、journal KMS key ARNを毎回明示し、既存のmeasured AWS sessionで
-STS、table incarnation、PITR、TTL、journal/KMS設定を再測定します。CDK outputの
-`WorkspaceSearchMigrationStateTableName`、`WorkspaceSearchMigrationJournalBucketName`、
-`WorkspaceSearchMigrationJournalKeyArn`と各domain table outputを使用します。Operator policyは
-`WorkspaceSearchMigrationOperatorPolicyArn`として出力されますが、自動attachされないため、承認済みの
-operator roleへchange recordに従って明示的にattachします。
+Workspace Search migration の control/apply/verify/rollback/release execution route と、
+non-production execution rehearsal producer は retired です。Repository 内に残る internal code、
+state、journal、plan artifact、help/flags を承認済みの AWS mutation command として扱いません。
+retained root/permit と alarm delivery 手順は alarm-only で、execution または Production migration gate の
+有効化を承認しません。Production gate は閉じたままです。将来の replacement route は、AWS mutation
+surface を有効化する前に明示的な acceptance contract、独立 review、その route 自身から取得した
+review 済み non-production execution evidence を満たす必要があります。
 
-利用可能なcommandと完全なflag名は、raw argumentをechoしないmachine-readable helpで確認します。
+### Replacement migration execution acceptance gate
 
-```sh
-bun run --silent search:migration:control -- help
-```
-
-同じreview済みresource selectionをshell arrayへ固定し、まずread-only measurementを実行します。
-
-```sh
-MIGRATION_RESOURCE_FLAGS=(
-  --account "$MIGRATION_ACCOUNT"
-  --region "$MIGRATION_REGION"
-  --profile "$MIGRATION_PROFILE"
-  --commit "$REVIEWED_COMMIT_OID"
-  --project-directory-table "$PROJECT_DIRECTORY_TABLE_NAME"
-  --work-items-table "$WORK_ITEMS_TABLE_NAME"
-  --collaboration-table "$COLLABORATION_TABLE_NAME"
-  --documents-table "$DOCUMENTS_TABLE_NAME"
-  --workspace-search-table "$WORKSPACE_SEARCH_TABLE_NAME"
-  --migration-state-table "$WORKSPACE_SEARCH_MIGRATION_STATE_TABLE_NAME"
-  --journal-bucket "$WORKSPACE_SEARCH_MIGRATION_JOURNAL_BUCKET_NAME"
-  --journal-key-arn "$WORKSPACE_SEARCH_MIGRATION_JOURNAL_KEY_ARN"
-  --rate-policy-file "$REVIEWED_DESCRIBE_TABLE_RATE_POLICY_FILE"
-)
-
-bun run --silent search:migration:control -- \
-  measure "${MIGRATION_RESOURCE_FLAGS[@]}" \
-  --rate-bootstrap true
-```
-
-`--rate-policy-file`はcanonicalなreview済みpolicyを全commandで必須とします。上の
-`--rate-bootstrap true`はaccount/region ledgerが存在しない最初の1回だけ、別途のowner承認後に指定し、
-既存ledgerには指定しません。Crash evidenceが`mandatoryCleanupRequired`または`attemptInFlight`を保持する
-場合だけ、それぞれ`--rate-recover-interrupted-cleanup true`、
-`--rate-recover-interrupted-attempt true`を明示します。2つのrecoveryは同時指定できますが、bootstrapとは
-同時指定できません。`measure`、`status`、`execution-status`はmigration mutation capabilityを持ちませんが、
-全`DescribeTable` attemptのdurable rate accountingは更新します。
-
-`measure`が返した`configurationHash`をresource identity、PITR、change recordと独立にreviewしてから、
-同じhashをread-only `status`へ渡します。Hashが変わった場合はlease取得やmutationより前に停止します。
-
-```sh
-bun run --silent search:migration:control -- \
-  status "${MIGRATION_RESOURCE_FLAGS[@]}" \
-  --expected-configuration-hash "$REVIEWED_CONFIGURATION_HASH"
-
-bun run --silent search:migration:control -- \
-  execution-status "${MIGRATION_RESOURCE_FLAGS[@]}" \
-  --expected-configuration-hash "$REVIEWED_CONFIGURATION_HASH" \
-  --run-id "$MIGRATION_RUN_ID"
-```
-
-`bootstrap-open`は初回guarded-code rollout専用です。AppConfig `disabled`、全surfaceの15分以上の
-zero-mutation drain、fresh maintenance evidence、data/application ownerによるexact incarnationの承認が
-揃った場合だけ実行します。State-table restore/replacement後のmissing row、reopen、terminal recoveryへ
-流用しません。
-
-```sh
-bun run --silent search:migration:control -- \
-  bootstrap-open "${MIGRATION_RESOURCE_FLAGS[@]}" \
-  --expected-configuration-hash "$REVIEWED_CONFIGURATION_HASH" \
-  --run-id "$MIGRATION_RUN_ID" \
-  --owner-id "$PROCESS_UNIQUE_OWNER_ID" \
-  --maintenance-evidence-file "$MAINTENANCE_EVIDENCE_FILE" \
-  --approval initial-writer-fence-bootstrap
-```
-
-Cutoverは共通のhash/run/owner/evidenceを毎回再指定し、各processをfresh sessionとして起動します。
-`PROCESS_UNIQUE_OWNER_ID`はinvocationごとに新しくしてこのarrayを組み直し、前processのleaseが自然失効して
-旧operationが停止したことを確認してから次invocationのtakeoverを開始します。
-
-```sh
-MIGRATION_MUTATION_FLAGS=(
-  "${MIGRATION_RESOURCE_FLAGS[@]}"
-  --expected-configuration-hash "$REVIEWED_CONFIGURATION_HASH"
-  --run-id "$MIGRATION_RUN_ID"
-  --owner-id "$PROCESS_UNIQUE_OWNER_ID"
-  --maintenance-evidence-file "$MAINTENANCE_EVIDENCE_FILE"
-)
-
-bun run --silent search:migration:control -- \
-  close-replan "${MIGRATION_MUTATION_FLAGS[@]}" \
-  --reviewed-dry-run-file "$REVIEWED_DRY_RUN_FILE" \
-  --retain-until "$REVIEWED_RETAIN_UNTIL" \
-  --max-total-rows "$REVIEWED_MAX_TOTAL_ROWS" \
-  --max-total-canonical-item-bytes "$REVIEWED_MAX_TOTAL_BYTES" \
-  --max-plan-operations "$REVIEWED_MAX_PLAN_OPERATIONS" \
-  --approval close-writers-and-replan
-
-bun run --silent search:migration:control -- \
-  apply "${MIGRATION_MUTATION_FLAGS[@]}" \
-  --approval apply-sealed-migration-plan
-
-bun run --silent search:migration:control -- \
-  verify "${MIGRATION_MUTATION_FLAGS[@]}" \
-  --approval verify-complete-applied-root
-
-bun run --silent search:migration:control -- \
-  release "${MIGRATION_MUTATION_FLAGS[@]}" \
-  --approval release-application-writers
-```
-
-Apply中断後に明示的にcommitted prefixを戻す場合は`rollback-partial`と
-`rollback-committed-apply-prefix`、complete applied rootを戻す場合は`rollback-complete`と
-`rollback-complete-applied-root`を使います。`execution-status`でexact durable phaseをreviewしてから
-該当する片方だけを実行し、terminal rollback rootを確認した別 invocationで`release`します。Coordinatorは
-指定したstage境界だけを進め、次stage、自動rollback、自動releaseを選択しません。
-
-Bootstrapはlease取得後、task開始前に一度heartbeatして60秒windowを回復し、その後durable
-`heartbeatAt`を基準に最大20秒間隔のone-shot heartbeatを実行します。前のheartbeatが完了するまで次を
-開始せず、同じrun/owner/fenceだけを維持します。Heartbeatはmaintenance receiptの5分freshnessを延長
-しません。Heartbeat failure、`SIGINT`、`SIGTERM`では新しいoperationを開始せず、進行中transactionの
-response-loss reconciliationと開始済みheartbeatを待ってからsessionを一度だけcloseします。Leaseを削除、
-自動takeover、自動rollback、writer reopenは行わず、自然失効させます。CLIのoperation result/error
-JSONLはschema/operation/status、stable code、configuration binding/hash、policy version、secret-freeな
-writer-fence/execution/coordinator status、identifier-free rate aggregateに加え、terminal result/errorと
-同じ1行のtop-level EMFとして`OperationCount`、checkpoint progress、DescribeTable
-attempt/throttle/wait/budget stop/exhaustion、quarantine、terminal failureの固定metricを出します。
-5分のlive checkpoint stallは、完了待ちでalarmを遅延させない独立EMF行を即時出力し、final recordでは
-同じstallをmetricとして二重計上しません。初回`measure`がconfiguration hash取得前に失敗した場合だけ、
-`configurationBinding=unbound`、hashなし、policyとprocess correlation由来のopaque evidence locatorで
-rate/terminal failureを出します。Helpは固定commandと
-resource flag名だけを出します。いずれもraw AWS error、ARN/name、profile、evidence path/bytes、
-run/owner ID、cursor、tenant dataを出しません。
-Process exit statusは、成功を`0`、migration failureまたは`OPERATION_FAILED`を`1`、
-`INVALID_USAGE`/`INPUT_FILE_INVALID`/`INPUT_FILE_UNREADABLE`を`2`、`SIGINT`による
-`INTERRUPTED`を`130`、`SIGTERM`による`INTERRUPTED`を`143`として固定します。
-
-Versioned release primitiveはterminal `verified`または完全な`rolled-back` outcomeへ束縛したmanaged
-capabilityです。CLIの`release`はfresh evidence、同じgenerationのterminal reread、exact approvalを再要求し、
-同じlogical releaseのresponse lossだけを回収します。
-
-
-### Entry gate
+将来AWS migration mutation routeを再導入する場合は、実装と独立reviewを完了し、次のacceptance contractを
+すべて満たすまで有効化しません。現在のinternal port、artifact、retained root/permit、alarm delivery
+evidenceは、このreplacement routeの実装または承認を示しません。
 
 1. STS と `DescribeTable` から実測した source/target account、region、table ARN/ID、作成時刻、
    対象 scope、migration version、実行 commit を固定し、configuration hash を保存する。
    承認済みnon-production accountで、実行commit、rate-policy version、UTC window、page phaseごとの
    attempt/throttle/cadence wait/budget stop、最大同時in-flight数、observed rateを同じconfiguration hashへ
-   結合して記録する。Telemetry/alarm contractは実装済みですが、この記録は今回まだ取得しておらず、
-   Issue 167のrehearsalで取得・reviewする。Contractにより取得可能であることを取得済みの
-   evidenceとして扱わず、review完了までProduction migration gateを開かない。
+   結合して記録する。Replacement route自身から取得したexecution evidenceをreviewし、
+   contractやalarm-only手順が存在することを取得済みevidenceとして扱わない。
 2. PITR/backup、earliest/latest restorable time、source 件数、代表 key/checksum を保存する。
 3. Dry-run の scanned/projected/deleted/skipped/invalid 件数を review する。Dry-run evidence は
    lease/fenceを持たないため、planning source evidenceとして再利用しない。
@@ -1981,12 +1884,13 @@ DR を要件とする場合、secondary region、replication、secret/key、Cogn
 - [ ] External liveness/readiness probe と rollout stop の test
 - [ ] Correlation ID を request → log → event → actor/tenant へ追える sample
 - [ ] Required CI checks と repository ruleset / branch protection の確認
-- [ ] Migration interruption/resume/verify/rollback の non-production evidence
-- [ ] `DescribeTable` account/region budget、single-flight、bounded cadence、throttle stopの承認済み
-  non-production rehearsal evidence（commit/policy version、UTC window、page phase、attempt/throttle/wait/
-  stop、max in-flight、observed rate）
+- [ ] Replacement migration execution routeの実装・独立reviewと、そのroute自身から取得した
+  interruption/resume/verify/rollbackのnon-production evidence
+- [ ] そのreplacement route自身から取得した`DescribeTable` account/region budget、single-flight、
+  bounded cadence、throttle stopの承認済みnon-production execution evidence（commit/policy version、
+  UTC window、page phase、attempt/throttle/wait/stop、max in-flight、observed rate）
 - [ ] Migration 6 alarmそれぞれのreal metricによる`OK → ALARM → OK` history、secret-free
-  correlation/evidence locator、primary/secondary ALARM receipt、read-only execution status
+  correlation/evidence locator、primary/secondary ALARM receipt、combined immutable alarm-delivery artifact
 - [ ] Deploy/rollback rehearsal と previous artifact/parameter inventory
 - [ ] Runtime control の canary/emergency disable、fail-closed、re-enable、DLQ redrive の drill
 - [ ] 90日以内の PITR restore drill、RPO/RTO、integrity evidence

@@ -18,6 +18,7 @@ import {
   finalizeWorkspaceSearchMigrationRehearsalAlarmEvidence,
   verifyWorkspaceSearchMigrationRehearsalAlarmDeliveryArtifact,
   verifyWorkspaceSearchMigrationRehearsalAlarmReceiptCollection,
+  WORKSPACE_SEARCH_MIGRATION_REHEARSAL_ALARMS,
   WorkspaceSearchMigrationRehearsalAlarmCloudWatchHistoryPort,
   WorkspaceSearchMigrationRehearsalAlarmEvidenceError,
   WorkspaceSearchMigrationRehearsalAlarmSqsQueuePort,
@@ -39,9 +40,6 @@ import {
   type WorkspaceSearchMigrationRehearsalRawAlarmMessage,
   type WorkspaceSearchMigrationRehearsalRawAlarmHistoryItem,
 } from './migration-rehearsal-alarm-evidence'
-import {
-  WORKSPACE_SEARCH_MIGRATION_REHEARSAL_ALARMS,
-} from './migration-rehearsal-evidence'
 import {
   ingestWorkspaceSearchMigrationRehearsalAlarmSignal,
   type WorkspaceSearchMigrationRehearsalAlarmIngestionArtifact,

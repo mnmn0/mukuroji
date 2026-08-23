@@ -22,6 +22,7 @@ import {
   serializeWorkspaceSearchMigrationRehearsalAlarmReceiptArtifact,
   verifyWorkspaceSearchMigrationRehearsalAuthorizedStaleTransitions,
   verifyWorkspaceSearchMigrationRehearsalAlarmReceiptCollection,
+  WORKSPACE_SEARCH_MIGRATION_REHEARSAL_ALARMS,
   WORKSPACE_SEARCH_MIGRATION_REHEARSAL_ALARM_ACKNOWLEDGEMENT_ATTEMPTS,
   WorkspaceSearchMigrationRehearsalAlarmCloudWatchHistoryPort,
   WorkspaceSearchMigrationRehearsalAlarmEvidenceError,
@@ -39,9 +40,6 @@ import {
   verifyWorkspaceSearchMigrationRehearsalAlarmIngestionBinding,
   type WorkspaceSearchMigrationRehearsalAlarmIngestionArtifact,
 } from './migration-rehearsal-alarm-ingestion'
-import {
-  WORKSPACE_SEARCH_MIGRATION_REHEARSAL_ALARMS,
-} from './migration-rehearsal-evidence'
 import {
   readWorkspaceSearchMigrationRehearsalPermitSigningKey,
   writeWorkspaceSearchMigrationRehearsalPermitFileExclusive,

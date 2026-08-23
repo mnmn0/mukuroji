@@ -1,23 +1,7 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { createHash, timingSafeEqual } from 'node:crypto'
 import { performance } from 'node:perf_hooks'
 import { types as nodeUtilTypes } from 'node:util'
 import {
-  calculateCrossDomainIntegrityResourceIdentityDigest,
-  calculateCrossDomainIntegrityImmutableResourceIdentity,
-  createCrossDomainIntegrityImmutableResourceIdentities,
-  CROSS_DOMAIN_INTEGRITY_CONTRACT_VERSION,
-  CROSS_DOMAIN_INTEGRITY_IMMUTABLE_RESOURCE_IDENTITY_SCHEME,
-  CROSS_DOMAIN_INTEGRITY_MAX_DURATION_MILLISECONDS,
-  CROSS_DOMAIN_INTEGRITY_RESOURCE_ATTESTATION_MAX_BYTES,
-  parseCrossDomainIntegrityResourceAttestation,
-  serializeCrossDomainIntegrityResourceAttestation,
-  validateCrossDomainIntegrityLimits,
-  type CrossDomainIntegrityResourceAttestation,
-  type CrossDomainIntegrityResourceIdentity,
-} from '../../data-integrity/cross-domain-integrity'
-import {
-  type AttributeValue,
   DescribeContinuousBackupsCommand,
   type DescribeContinuousBackupsCommandOutput,
   DescribeTableCommand,
@@ -27,8 +11,6 @@ import {
   DynamoDBClient,
   GetItemCommand,
   type GetItemCommandOutput,
-  QueryCommand,
-  type QueryCommandOutput,
   ResourceNotFoundException,
   ScanCommand,
   type ScanCommandOutput,
@@ -77,10 +59,8 @@ import {
   STSClient,
 } from '@aws-sdk/client-sts'
 import {
-  createMigrationDigest,
   createWorkspaceSearchConfigurationHash,
   isCanonicalTimestamp,
-  isHexDigest,
   isWorkspaceSearchMigrationFailureCode,
   requireMigrationIdentifier,
   type DynamoAttributeMap,
@@ -89,7 +69,6 @@ import {
   type WorkspaceSearchMigrationFailureCode,
   type WorkspaceSearchMigrationLease,
   type WorkspaceSearchMigrationConfiguration,
-  type WorkspaceSearchMigrationRunState,
   type WorkspaceSearchMigrationSourceName,
   type WorkspaceSearchPlanSeal,
   WorkspaceSearchMigrationFailure,
@@ -121,16 +100,9 @@ import type {
   WorkspaceSearchMigrationDescribeTableRateRecorder,
 } from './migration-describe-table-rate-budget'
 import {
-  WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_CLEANUP_RECOVERY_ATTEMPTS,
-  WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_PAGE_BASELINE_ATTEMPTS,
-} from './migration-describe-table-rate-budget'
-import {
   createWorkspaceSearchMigrationManagedDescribeTableRate,
-  createWorkspaceSearchMigrationRehearsalManagedDescribeTableRate,
   WorkspaceSearchMigrationManagedDescribeTableRateError,
   type WorkspaceSearchMigrationManagedDescribeTableRate,
-  type WorkspaceSearchMigrationRehearsalDescribeTableRateExercise,
-  type WorkspaceSearchMigrationRehearsalDescribeTableRateExerciseReceipt,
 } from './migration-describe-table-rate-managed-session'
 import {
   WORKSPACE_SEARCH_MIGRATION_TELEMETRY_VERSION,
@@ -143,22 +115,12 @@ import {
 import {
   AwsCrossDomainIntegrityReader,
   type CrossDomainIntegrityAwsTransport,
-  type CrossDomainIntegrityBucketNames,
-  type CrossDomainIntegrityTableNames,
 } from '../../data-integrity/verify-cross-domain-integrity'
 import {
-  resolveWorkspaceSearchMigrationRehearsalDeploymentTarget,
-} from './migration-deployment-targets'
-import {
-  createWorkspaceSearchMigrationRehearsalProductionAccountDigest,
-  createWorkspaceSearchMigrationRehearsalResourceAttestationDigest,
-  verifyWorkspaceSearchMigrationRehearsalPermit,
   WORKSPACE_SEARCH_MIGRATION_REHEARSAL_DEPLOYMENT_TRUST_ROOT_TAG_KEY,
   WORKSPACE_SEARCH_MIGRATION_REHEARSAL_ENVIRONMENT_TAG_KEY,
   WORKSPACE_SEARCH_MIGRATION_REHEARSAL_PRODUCTION_ACCOUNT_DIGEST_TAG_KEY,
   WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE,
-  WorkspaceSearchMigrationRehearsalPermitError,
-  type WorkspaceSearchMigrationRehearsalPermitClaims,
 } from './migration-rehearsal-permit'
 import {
   parseWorkspaceSearchMigrationRehearsalRootPlan,
@@ -169,20 +131,6 @@ import {
   type WorkspaceSearchMigrationRehearsalIntegrityRateAdapter,
 } from './migration-rehearsal-integrity-rate-adapter'
 import {
-  disposeWorkspaceSearchMigrationRehearsalIntegrityLiveSession,
-  finalizeWorkspaceSearchMigrationRehearsalIntegrityLiveSession,
-  runWorkspaceSearchMigrationRehearsalIntegrityLiveSession,
-  WorkspaceSearchMigrationRehearsalIntegrityLiveSessionError,
-  type WorkspaceSearchMigrationRehearsalIntegrityLiveReadTransport,
-  type WorkspaceSearchMigrationRehearsalIntegrityLiveSessionPending,
-} from './migration-rehearsal-integrity-live-session'
-import type {
-  WorkspaceSearchMigrationRehearsalRateBoundIntegrityResult,
-} from './migration-rehearsal-integrity-rate-evidence'
-import {
-  WORKSPACE_SEARCH_MIGRATION_REHEARSAL_RATE_MAX_SEGMENT_BYTES,
-} from './migration-rehearsal-rate-evidence'
-import {
   createWorkspaceSearchMigrationRehearsalPrePermitRootSession,
   createWorkspaceSearchMigrationRehearsalRootTimeline,
   WorkspaceSearchMigrationRehearsalPrePermitRootSessionError,
@@ -191,29 +139,6 @@ import {
   type WorkspaceSearchMigrationRehearsalRootAttestationOperationResult,
   type WorkspaceSearchMigrationRehearsalRootTimeline,
 } from './migration-rehearsal-pre-permit-root-session'
-import {
-  createWorkspaceSearchMigrationRehearsalFaultController,
-  type CreateWorkspaceSearchMigrationRehearsalFaultControllerInput,
-  type WorkspaceSearchMigrationRehearsalApplyCheckpointTarget,
-  type WorkspaceSearchMigrationRehearsalApplyOperationTarget,
-  type WorkspaceSearchMigrationRehearsalFaultController,
-  type WorkspaceSearchMigrationRehearsalPlanningPageFailpoint,
-  type WorkspaceSearchMigrationRehearsalPlanningPageTarget,
-} from './migration-rehearsal-faults'
-import type {
-  WorkspaceSearchMigrationRehearsalFaultObservation,
-} from './migration-rehearsal-fault-observation'
-import {
-  createWorkspaceSearchMigrationRehearsalEvidenceAwsPublisher,
-  type CreateWorkspaceSearchMigrationRehearsalEvidenceAwsPublisherInput,
-  type PublishWorkspaceSearchMigrationRehearsalEvidenceInput,
-  type WorkspaceSearchMigrationRehearsalEvidenceAwsPublisher,
-} from './migration-rehearsal-evidence-aws'
-import {
-  createWorkspaceSearchMigrationRehearsalArtifactAwsPublisher,
-  type CreateWorkspaceSearchMigrationRehearsalArtifactAwsPublisherInput,
-  type WorkspaceSearchMigrationRehearsalArtifactAwsPublisher,
-} from './migration-rehearsal-artifact-aws'
 import {
   WorkspaceSearchMigrationStrictRecordGuards,
 } from './migration-strict-record-guards'
@@ -228,9 +153,6 @@ import {
 import {
   createAwsWorkspaceSearchMigrationApplyOperationPort,
   createAwsWorkspaceSearchMigrationApplyRunStateReader,
-  parseWorkspaceSearchMigrationApplyAuthorityAuditRecord,
-  parseWorkspaceSearchMigrationApplyMarkerAuditRecord,
-  type WorkspaceSearchMigrationApplyAuditBindingInput,
   type WorkspaceSearchMigrationApplyCheckpointScanner,
   type WorkspaceSearchMigrationApplyOperationAuthorityPort,
   type WorkspaceSearchMigrationApplyOperationAwsPort,
@@ -277,13 +199,10 @@ import {
 import {
   reduceWorkspaceSearchMigrationFullVerificationSourcePage,
   reduceWorkspaceSearchMigrationFullVerificationTargetPage,
-  type WorkspaceSearchMigrationFullVerificationResult,
 } from './migration-full-verification'
 import {
   createAwsWorkspaceSearchMigrationPrePlanAuthorityPort,
   type RenewWorkspaceSearchMigrationPrePlanMaintenanceEvidenceInput,
-  type WorkspaceSearchMigrationDurableLeaseAcquisitionObservation,
-  type WorkspaceSearchMigrationDurableLeaseAcquisitionObserver,
   type WorkspaceSearchMigrationHistoricalMaintenanceEvidenceBinding,
   type WorkspaceSearchMigrationPrePlanAuthority,
   type WorkspaceSearchMigrationPrePlanAuthorityAwsPort,
@@ -309,9 +228,6 @@ import {
   type WorkspaceSearchMigrationPlanningSourceArtifactPage,
   WORKSPACE_SEARCH_MIGRATION_SOURCE_ARTIFACT_VERSION,
 } from './migration-source-artifact'
-import type {
-  WorkspaceSearchMigrationPlanArtifactReplayResult,
-} from './migration-plan-artifact'
 import {
   createWorkspaceSearchMigrationSourceEvidenceProgressDigest,
   serializeWorkspaceSearchMigrationSourceEvidencePage,
@@ -431,41 +347,6 @@ import {
   createAwsWorkspaceSearchMigrationVerificationResultGateway,
   type WorkspaceSearchMigrationVerificationResultAwsGateway,
 } from './migration-verification-result-aws'
-import type {
-  WorkspaceSearchMigrationRehearsalScenarioName,
-} from './migration-rehearsal-evidence'
-import {
-  readWorkspaceSearchMigrationRehearsalIntegrityLiveResultProjection,
-  type WorkspaceSearchMigrationRehearsalIntegrityLiveResultProjection,
-} from './migration-rehearsal-integrity-evidence'
-import {
-  type WorkspaceSearchMigrationRehearsalReconciliationCollectorResult,
-  type WorkspaceSearchMigrationRehearsalReconciliationCoreContext,
-  type WorkspaceSearchMigrationRehearsalReconciliationIntegrityCollectorResult,
-  type WorkspaceSearchMigrationRehearsalReconciliationSourceTargetCollectorResult,
-  type WorkspaceSearchMigrationRehearsalReconciliationTargetAuditPair,
-} from './migration-rehearsal-reconciliation-audit'
-import {
-  collectWorkspaceSearchMigrationRehearsalReconciliationAws,
-  WORKSPACE_SEARCH_MIGRATION_REHEARSAL_AUTHORITY_ADOPTION_KEY_PREFIX,
-  WORKSPACE_SEARCH_MIGRATION_REHEARSAL_RECONCILIATION_MAX_DURATION_MILLISECONDS,
-  WORKSPACE_SEARCH_MIGRATION_REHEARSAL_RECONCILIATION_MAX_QUERY_BYTES,
-  WORKSPACE_SEARCH_MIGRATION_REHEARSAL_RECONCILIATION_MAX_QUERY_ITEMS,
-  WORKSPACE_SEARCH_MIGRATION_REHEARSAL_RECONCILIATION_MAX_QUERY_PAGES,
-  WORKSPACE_SEARCH_MIGRATION_REHEARSAL_RECONCILIATION_MAX_REQUEST_TIMEOUT_MILLISECONDS,
-  type WorkspaceSearchMigrationRehearsalExpectedAuthority,
-  type WorkspaceSearchMigrationRehearsalExpectedMarker,
-  type WorkspaceSearchMigrationRehearsalReconciliationAwsLimits,
-  type WorkspaceSearchMigrationRehearsalReconciliationAwsTransport,
-  type WorkspaceSearchMigrationRehearsalReconciliationTerminalBinding,
-} from './migration-rehearsal-reconciliation-aws'
-import {
-  authenticateWorkspaceSearchMigrationRehearsalTargetAuditArtifact,
-  WORKSPACE_SEARCH_MIGRATION_REHEARSAL_TARGET_AUDIT_MAX_BYTES,
-  type WorkspaceSearchMigrationRehearsalTargetAuditArtifactBinding,
-  type WorkspaceSearchMigrationRehearsalTargetAuditContext,
-  type WorkspaceSearchMigrationRehearsalTargetAuditTerminalBinding,
-} from './migration-rehearsal-target-audit'
 import type {
   WorkspaceSearchWriterFenceClosedRecord,
 } from '../../../src/infrastructure/runtime/workspace-search-writer-fence'
@@ -1413,13 +1294,6 @@ export interface WorkspaceSearchMigrationRateManagedAwsSession
     WorkspaceSearchMigrationDescribeTableRateEvidence
 }
 
-/** Authenticated time interval retained by non-production rehearsal permits. */
-export type WorkspaceSearchMigrationRehearsalPermitValidity = {
-  /** Canonical inclusive permit issuance boundary. */
-  readonly issuedAt: string
-  /** Canonical exclusive permit expiry boundary. */
-  readonly expiresAt: string
-}
 
 /** Input for the production durably rate-managed AWS composition root. */
 export type CreateAwsWorkspaceSearchMigrationRateManagedSessionInput = {
@@ -1518,32 +1392,6 @@ type RehearsalPrePermitRootRateConstruction = {
   readonly recoverInterruptedCleanup: false
   /** Mandatory refusal to recover one uncertain physical attempt. */
   readonly recoverInterruptedAttempt: false
-}
-
-/** Validated non-production guard retained only through composition preflight. */
-type NonProductionRehearsalConstructionGuard = {
-  /** Authenticated exact account, role, Region, commit, and resource claims. */
-  readonly permit: Readonly<WorkspaceSearchMigrationRehearsalPermitClaims>
-  /** Digest of the complete authenticated permit including its MAC. */
-  readonly permitDigest: string
-  /** Trusted clock rechecked after remote identity and tag reads. */
-  readonly clock: () => Date
-  /** Optional one-shot semantic fault controller retained by the session. */
-  readonly faultController?:
-    WorkspaceSearchMigrationRehearsalFaultController
-}
-
-/** Shared untrusted fields accepted by non-production identity preflight. */
-type NonProductionRehearsalGuardConstructionInput = {
-  /** Candidate authenticated permit. */
-  readonly permit: unknown
-  /** Candidate exact-length permit verification key. */
-  readonly permitVerificationKey: Uint8Array
-  /** Optional trusted permit clock. */
-  readonly permitClock?: () => Date
-  /** Optional rehearsal-only semantic fault construction. */
-  readonly fault?:
-    CreateWorkspaceSearchMigrationRehearsalFaultControllerInput
 }
 
 /** Additional S3 read available only during rehearsal environment preflight. */
@@ -1656,7 +1504,6 @@ export interface WorkspaceSearchMigrationManagedAwsTransport
     WorkspaceSearchMigrationIdentityAwsTransport,
     WorkspaceSearchMigrationImmutableArtifactAwsTransport,
     WorkspaceSearchMigrationPrePlanAuthorityAwsTransport,
-    WorkspaceSearchMigrationRehearsalReconciliationAwsTransport,
     WorkspaceSearchMigrationSourceArtifactAwsTransport,
     WorkspaceSearchMigrationSourceScanAwsTransport,
     WorkspaceSearchMigrationSourceEvidenceAwsTransport,
@@ -1797,22 +1644,6 @@ class AwsSdkWorkspaceSearchMigrationIdentityTransport
     return this.dynamodbClient.send(command)
   }
 
-  /**
-   * Sends one collector-owned strongly consistent state-table Query page.
-   *
-   * This method remains behind the measured non-production session and is not
-   * exposed as a generic public Query capability.
-   *
-   * @param command - Exact base-table prefix Query built by the collector.
-   * @param signal - Collector-owned finite request cancellation signal.
-   * @returns Raw low-level Query page for strict collector normalization.
-   */
-  queryStatePage(
-    command: QueryCommand,
-    signal: AbortSignal,
-  ): Promise<QueryCommandOutput> {
-    return this.dynamodbClient.send(command, { abortSignal: signal })
-  }
 
   /**
    * Sends one bounded source base-table Scan.
@@ -2351,51 +2182,17 @@ class AwsWorkspaceSearchMigrationIdentityPort
   private readonly rateManagedMeasurementSessionFactory:
     (() => Promise<WorkspaceSearchMigrationManagedIdentityPort>) | undefined
 
-  /** Optional one-shot semantic fault available only to a rehearsal session. */
-  private readonly rehearsalFaultController:
-    WorkspaceSearchMigrationRehearsalFaultController | undefined
 
-  /** Authenticated non-production guard retained for evidence publication. */
-  private readonly rehearsalGuard:
-    NonProductionRehearsalConstructionGuard | undefined
 
-  /** Newly durable acquisition projections not yet read by the rehearsal. */
-  private readonly pendingRehearsalLeaseAcquisitionObservations:
-    WorkspaceSearchMigrationDurableLeaseAcquisitionObservation[] = []
 
-  /** Digests suppressing duplicate success for one deterministic acquisition. */
-  private readonly observedRehearsalLeaseAcquisitionDigests =
-    new Set<string>()
 
-  /** Strict authority-adoption receipts not yet consumed by stage material. */
-  private readonly pendingRehearsalAuthorityAdoptionObservations:
-    WorkspaceSearchMigrationRehearsalExpectedAuthority[] = []
 
-  /** Renewal position retained for every already observed receipt digest. */
-  private readonly observedRehearsalAuthorityAdoptionDigests =
-    new Map<string, number>()
 
-  /** Receipt digest retained for every already observed renewal position. */
-  private readonly observedRehearsalAuthorityAdoptionRenewals =
-    new Map<number, string>()
 
-  /** Highest unseen-or-consumed renewal position observed this generation. */
-  private highestRehearsalAuthorityAdoptionRenewalCount:
-    number | undefined
 
-  /** Adapter-proven runtime fault observations not yet read by the rehearsal. */
-  private readonly pendingRehearsalFaultObservations:
-    WorkspaceSearchMigrationRehearsalFaultObservation[] = []
 
-  /** Digests suppressing duplicate adapter-proven runtime fault observations. */
-  private readonly observedRehearsalFaultObservationDigests =
-    new Set<string>()
 
-  /** Stable current rehearsal lease identity proven by the latest observation. */
-  private rehearsalLeaseIdentityDigest: string | undefined
 
-  /** Closed writer-fence record digest proven in this managed session. */
-  private rehearsalClosedWriterFenceRecordDigest: string | undefined
 
   /** Adapter-owned trusted clock for pre-plan authority transitions. */
   private readonly prePlanAuthorityClock:
@@ -2461,7 +2258,6 @@ class AwsWorkspaceSearchMigrationIdentityPort
    * @param describeTableRate - Optional durable DescribeTable controller.
    * @param ownsDescribeTableRate - Whether close drains the shared controller.
    * @param measurementSessionFactory - Optional shared-controller child factory.
-   * @param rehearsalGuard - Optional authenticated non-production boundary.
    */
   constructor(
     requested: WorkspaceSearchMigrationRequestedResourcesSnapshot,
@@ -2473,7 +2269,6 @@ class AwsWorkspaceSearchMigrationIdentityPort
     ownsDescribeTableRate = false,
     measurementSessionFactory?:
       () => Promise<WorkspaceSearchMigrationManagedIdentityPort>,
-    rehearsalGuard?: NonProductionRehearsalConstructionGuard,
   ) {
     this.requested = requested
     this.requestedResourcesBinding =
@@ -2488,8 +2283,6 @@ class AwsWorkspaceSearchMigrationIdentityPort
     this.describeTableRate = describeTableRate
     this.ownsDescribeTableRate = ownsDescribeTableRate
     this.rateManagedMeasurementSessionFactory = measurementSessionFactory
-    this.rehearsalGuard = rehearsalGuard
-    this.rehearsalFaultController = rehearsalGuard?.faultController
   }
 
   /**
@@ -2512,16 +2305,6 @@ class AwsWorkspaceSearchMigrationIdentityPort
     this.invalidateManagedPlanningArtifactPort()
     this.measuredMigrationStateTable = undefined
     this.measuredExecutionControlQuarantined = false
-    this.pendingRehearsalLeaseAcquisitionObservations.splice(0)
-    this.observedRehearsalLeaseAcquisitionDigests.clear()
-    this.pendingRehearsalAuthorityAdoptionObservations.splice(0)
-    this.observedRehearsalAuthorityAdoptionDigests.clear()
-    this.observedRehearsalAuthorityAdoptionRenewals.clear()
-    this.highestRehearsalAuthorityAdoptionRenewalCount = undefined
-    this.pendingRehearsalFaultObservations.splice(0)
-    this.observedRehearsalFaultObservationDigests.clear()
-    this.rehearsalLeaseIdentityDigest = undefined
-    this.rehearsalClosedWriterFenceRecordDigest = undefined
     /** Closes the sole transport retained by this managed session. */
     const closeTransport = (): void => this.transport.close()
     if (!ownsDescribeTableRate) {
@@ -2547,19 +2330,6 @@ class AwsWorkspaceSearchMigrationIdentityPort
     )
     this.closeCompletion = completion
     return completion
-  }
-
-  /** Seals rate admission while retaining publication-only AWS transport. */
-  sealAndReadDescribeTableRateEvidence():
-    Promise<WorkspaceSearchMigrationDescribeTableRateEvidence> {
-    if (
-      this.rehearsalGuard === undefined ||
-      this.describeTableRate === undefined ||
-      !this.ownsDescribeTableRate
-    ) {
-      return Promise.reject(invalidIdentityLookup())
-    }
-    return this.beginOwnedDescribeTableRateSeal()
   }
 
   /**
@@ -2632,500 +2402,19 @@ class AwsWorkspaceSearchMigrationIdentityPort
     return rate.readEvidence()
   }
 
-  /**
-   * Takes the oldest unread secret-free durable lease projection.
-   *
-   * @returns Frozen exact acquisition/reuse projection, or undefined when empty.
-   */
-  takeRehearsalLeaseAcquisitionObservation():
-    WorkspaceSearchMigrationDurableLeaseAcquisitionObservation | undefined {
-    this.requireOpen()
-    const guard = this.rehearsalGuard
-    if (guard === undefined) {
-      throw new WorkspaceSearchMigrationRehearsalPermitError()
-    }
-    requireNonProductionRehearsalPermitActive(guard)
-    const observation =
-      this.pendingRehearsalLeaseAcquisitionObservations.shift()
-    return observation === undefined
-      ? undefined
-      : cloneDurableLeaseObservation(observation)
-  }
 
-  /**
-   * Takes the oldest unread strict authority-adoption projection.
-   *
-   * @returns Frozen renewal position and receipt digest, or undefined.
-   */
-  takeRehearsalAuthorityAdoptionObservation():
-    WorkspaceSearchMigrationRehearsalExpectedAuthority | undefined {
-    this.requireOpen()
-    const guard = this.rehearsalGuard
-    if (guard === undefined) {
-      throw new WorkspaceSearchMigrationRehearsalPermitError()
-    }
-    requireNonProductionRehearsalPermitActive(guard)
-    const observation =
-      this.pendingRehearsalAuthorityAdoptionObservations.shift()
-    return observation === undefined
-      ? undefined
-      : cloneRehearsalAuthorityAdoptionObservation(observation)
-  }
 
-  /**
-   * Takes the oldest unread cursor-free runtime fault observation.
-   *
-   * @returns Frozen exact observation, or undefined when empty.
-   */
-  takeRehearsalFaultObservation():
-    WorkspaceSearchMigrationRehearsalFaultObservation | undefined {
-    this.requireOpen()
-    const guard = this.rehearsalGuard
-    if (guard === undefined) {
-      throw new WorkspaceSearchMigrationRehearsalPermitError()
-    }
-    requireNonProductionRehearsalPermitActive(guard)
-    const observation = this.pendingRehearsalFaultObservations.shift()
-    return observation === undefined
-      ? undefined
-      : cloneRehearsalFaultObservation(observation)
-  }
 
-  /**
-   * Records one adapter-proven lease observation and suppresses duplicates.
-   *
-   * @param observation - Frozen secret-free acquisition/reuse projection.
-   * @param generation - Measurement generation owning the acquisition.
-   * @returns Whether this session queued a previously unseen acquisition.
-   */
-  private recordRehearsalLeaseAcquisitionObservation(
-    observation:
-      WorkspaceSearchMigrationDurableLeaseAcquisitionObservation,
-    generation: number,
-  ): boolean {
-    this.requireGeneration(generation)
-    const detached = cloneDurableLeaseObservation(observation)
-    this.rehearsalLeaseIdentityDigest = detached.kind === 'acquired'
-      ? detached.successorLeaseIdentityDigest
-      : detached.currentLeaseIdentityDigest
-    const digest = createMigrationDigest({
-      kind: 'workspace-search-rehearsal-durable-lease-observation',
-      generation,
-      observation: detached,
-    })
-    if (this.observedRehearsalLeaseAcquisitionDigests.has(digest)) {
-      return false
-    }
-    this.observedRehearsalLeaseAcquisitionDigests.add(digest)
-    this.pendingRehearsalLeaseAcquisitionObservations.push(detached)
-    return true
-  }
 
-  /**
-   * Records one writer-codec-proven authority-adoption receipt exactly once.
-   *
-   * Exact idempotent rereads are suppressed. A digest reused at another
-   * renewal position, a position reused by another digest, or a newly observed
-   * non-consecutive successor fails closed before stage material can consume
-   * the projection.
-   *
-   * @param observation - Strict renewal position and immutable receipt digest.
-   * @param authority - Measured generation owning the admitted execution.
-   */
-  private recordRehearsalAuthorityAdoptionObservation(
-    observation: WorkspaceSearchMigrationRehearsalExpectedAuthority,
-    authority: ManagedApplyOperationAuthority,
-  ): void {
-    if (this.rehearsalGuard === undefined) return
-    this.requireManagedApplyOperationAuthority(authority)
-    const detached = cloneRehearsalAuthorityAdoptionObservation(observation)
-    const count = detached.maintenanceEvidenceRenewalCount
-    const digest = detached.receiptDigest
-    const existingCount =
-      this.observedRehearsalAuthorityAdoptionDigests.get(digest)
-    if (existingCount !== undefined) {
-      if (existingCount !== count) return failManagedApplyOperation()
-      return
-    }
-    const existingDigest =
-      this.observedRehearsalAuthorityAdoptionRenewals.get(count)
-    if (existingDigest !== undefined) return failManagedApplyOperation()
-    const highest = this.highestRehearsalAuthorityAdoptionRenewalCount
-    if (highest !== undefined && count !== highest + 1) {
-      return failManagedApplyOperation()
-    }
-    this.requireManagedApplyOperationAuthority(authority)
-    this.observedRehearsalAuthorityAdoptionDigests.set(digest, count)
-    this.observedRehearsalAuthorityAdoptionRenewals.set(count, digest)
-    this.highestRehearsalAuthorityAdoptionRenewalCount = count
-    this.pendingRehearsalAuthorityAdoptionObservations.push(detached)
-  }
 
-  /**
-   * Parses one candidate row with the writer-owned strict adoption codec.
-   *
-   * @param binding - Exact measured admitted-run audit binding.
-   * @param item - Candidate low-level authority-adoption row.
-   * @param authority - Measured generation owning the row read or write.
-   */
-  private recordRehearsalAuthorityAdoptionItem(
-    binding: WorkspaceSearchMigrationApplyAuditBindingInput,
-    item: Readonly<Record<string, AttributeValue>>,
-    authority: ManagedApplyOperationAuthority,
-  ): void {
-    if (this.rehearsalGuard === undefined) return
-    const parsed = parseWorkspaceSearchMigrationApplyAuthorityAuditRecord(
-      binding,
-      item,
-    )
-    if (parsed === undefined) return failManagedApplyOperation()
-    this.recordRehearsalAuthorityAdoptionObservation({
-      maintenanceEvidenceRenewalCount:
-        parsed.receipt.maintenanceEvidenceRenewalCount,
-      receiptDigest: parsed.receipt.receiptDigest,
-    }, authority)
-  }
 
-  /**
-   * Observes an exact adoption-key GetItem response after all-six guarding.
-   *
-   * @param command - Adapter-owned exact strongly consistent point read.
-   * @param output - Guarded low-level response returned to the writer adapter.
-   * @param binding - Exact measured admitted-run audit binding.
-   * @param authority - Measured generation owning the read.
-   */
-  private recordRehearsalAuthorityAdoptionRead(
-    command: GetItemCommand,
-    output: GetItemCommandOutput,
-    binding: WorkspaceSearchMigrationApplyAuditBindingInput,
-    authority: ManagedApplyOperationAuthority,
-  ): void {
-    if (this.rehearsalGuard === undefined) return
-    const recordKey = command.input.Key?.recordKey?.S
-    if (
-      typeof recordKey !== 'string' ||
-      !recordKey.startsWith(
-        WORKSPACE_SEARCH_MIGRATION_REHEARSAL_AUTHORITY_ADOPTION_KEY_PREFIX,
-      )
-    ) return
-    if (output.Item === undefined) return
-    this.recordRehearsalAuthorityAdoptionItem(
-      binding,
-      output.Item,
-      authority,
-    )
-  }
 
-  /**
-   * Observes the sole strict adoption Put after a guarded transaction succeeds.
-   *
-   * @param command - Adapter-owned fixed-shape apply transaction.
-   * @param binding - Exact measured admitted-run audit binding.
-   * @param authority - Measured generation owning the write.
-   */
-  private recordRehearsalAuthorityAdoptionWrite(
-    command: TransactWriteItemsCommand,
-    binding: WorkspaceSearchMigrationApplyAuditBindingInput,
-    authority: ManagedApplyOperationAuthority,
-  ): void {
-    if (this.rehearsalGuard === undefined) return
-    let candidate: Readonly<Record<string, AttributeValue>> | undefined
-    for (const item of command.input.TransactItems ?? []) {
-      const put = item.Put?.Item
-      const recordKey = put?.recordKey?.S
-      if (
-        put === undefined ||
-        typeof recordKey !== 'string' ||
-        !recordKey.startsWith(
-          WORKSPACE_SEARCH_MIGRATION_REHEARSAL_AUTHORITY_ADOPTION_KEY_PREFIX,
-        )
-      ) continue
-      if (candidate !== undefined) return failManagedApplyOperation()
-      candidate = put
-    }
-    if (candidate === undefined) return
-    this.recordRehearsalAuthorityAdoptionItem(
-      binding,
-      candidate,
-      authority,
-    )
-  }
 
-  /**
-   * Records one selected adapter-proven runtime fault observation.
-   *
-   * @param observation - Cursor-free strong-read evidence for the fault.
-   * @param generation - Measurement generation owning the observation.
-   * @param configurationHash - Current measured configuration authority.
-   */
-  private recordRehearsalFaultObservation(
-    observation: WorkspaceSearchMigrationRehearsalFaultObservation,
-    generation: number,
-    configurationHash: string,
-  ): void {
-    this.requireMeasurementGeneration(generation, configurationHash)
-    const detached = cloneRehearsalFaultObservation(observation)
-    if (
-      detached.leaseIdentityDigest !==
-        this.rehearsalLeaseIdentityDigest ||
-      (detached.closedWriterFenceRecordDigest !== null &&
-        detached.closedWriterFenceRecordDigest !==
-          this.rehearsalClosedWriterFenceRecordDigest)
-    ) {
-      return failSourceScanAws('INVALID_STATE')
-    }
-    const digest = createMigrationDigest({
-      kind: 'workspace-search-rehearsal-fault-observation',
-      generation,
-      configurationHash,
-      observation: detached,
-    })
-    this.requireMeasurementGeneration(generation, configurationHash)
-    if (this.observedRehearsalFaultObservationDigests.has(digest)) {
-      return
-    }
-    this.observedRehearsalFaultObservationDigests.add(digest)
-    this.pendingRehearsalFaultObservations.push(detached)
-  }
 
-  /**
-   * Retains the one closed writer-fence digest authorized by this generation.
-   *
-   * @param digest - Adapter-validated closed writer-fence record digest.
-   * @param generation - Measurement generation owning the record.
-   * @param configurationHash - Current measured configuration authority.
-   */
-  private recordRehearsalClosedWriterFenceRecordDigest(
-    digest: string,
-    generation: number,
-    configurationHash: string,
-  ): void {
-    if (
-      this.rehearsalGuard === undefined &&
-      this.rehearsalFaultController === undefined
-    ) return
-    this.requireMeasurementGeneration(generation, configurationHash)
-    if (!isHexDigest(digest)) return failSourceScanAws('INVALID_STATE')
-    const existing = this.rehearsalClosedWriterFenceRecordDigest
-    if (existing !== undefined && existing !== digest) {
-      return failSourceScanAws('INVALID_STATE')
-    }
-    this.rehearsalClosedWriterFenceRecordDigest = digest
-    this.requireMeasurementGeneration(generation, configurationHash)
-  }
 
-  /**
-   * Creates an immutable child-artifact publisher from this rehearsal session.
-   *
-   * Every new publication is admitted against the current permit and optional
-   * claimed-stage reservation, while HEAD reconciliation belonging to an
-   * already admitted Put may drain after expiry. Bucket, owner, Region, and
-   * KMS identity remain fixed by the measured session.
-   *
-   * @param input - Trusted clock and finite S3 request deadline.
-   * @returns Digest-only publisher bound to this non-production journal.
-   */
-  createRehearsalArtifactPublisher(
-    input: Pick<
-      CreateWorkspaceSearchMigrationRehearsalArtifactAwsPublisherInput,
-      'clock' | 'requestTimeoutMilliseconds'
-    >,
-  ): WorkspaceSearchMigrationRehearsalArtifactAwsPublisher {
-    this.requireOpen()
-    const guard = this.rehearsalGuard
-    if (
-      guard === undefined ||
-      this.measuredConfigurationHash === undefined ||
-      this.measuredConfiguration === undefined
-    ) {
-      throw new WorkspaceSearchMigrationRehearsalPermitError()
-    }
-    this.requireRehearsalAdmissionActive()
-    let clock:
-      CreateWorkspaceSearchMigrationRehearsalArtifactAwsPublisherInput[
-        'clock'
-      ]
-    let requestTimeoutMilliseconds: number
-    try {
-      clock = input.clock
-      requestTimeoutMilliseconds = input.requestTimeoutMilliseconds
-    } catch {
-      throw new WorkspaceSearchMigrationRehearsalPermitError()
-    }
-    const transport = this.transport
-    /** Rejects borrowed artifact-publication I/O after the owner closes. */
-    const requireOwningSessionOpen = (): void => this.requireOpen()
-    return createWorkspaceSearchMigrationRehearsalArtifactAwsPublisher({
-      account: this.account,
-      bucketName: this.journalBucket,
-      clock,
-      kmsKeyArn: this.journalKeyArn,
-      region: this.requested.region,
-      requestTimeoutMilliseconds,
-      sessionBinding: this.readRehearsalEvidenceSessionBinding(),
-      transport: {
-        admitNewArtifactPublication: (): void => {
-          requireOwningSessionOpen()
-          this.requireRehearsalAdmissionActive()
-        },
-        putArtifact: async (command, abortSignal) => {
-          requireOwningSessionOpen()
-          const result = await transport.putImmutableArtifact(
-            command,
-            abortSignal,
-          )
-          requireOwningSessionOpen()
-          return result
-        },
-        headArtifact: async (command, abortSignal) => {
-          requireOwningSessionOpen()
-          const result = await transport.headImmutableArtifact(
-            command,
-            abortSignal,
-          )
-          requireOwningSessionOpen()
-          return result
-        },
-        close: (): void => undefined,
-      },
-    })
-  }
 
-  /**
-   * Creates an immutable evidence publisher from the authenticated rehearsal.
-   *
-   * The publisher borrows this session's pinned S3 client and cannot select a
-   * different account, bucket, Region, or KMS key. Callers must close the
-   * publisher before closing the owning session. Every new publication is
-   * admitted while the permit and optional claimed-stage reservation are
-   * active; exact HEAD reconciliation belonging to an admitted Put may drain
-   * after expiry.
-   *
-   * @param input - Trusted clock and finite S3 request deadline.
-   * @returns Publisher bound to the measured non-production journal identity.
-   */
-  createRehearsalEvidencePublisher(
-    input: Pick<
-      CreateWorkspaceSearchMigrationRehearsalEvidenceAwsPublisherInput,
-      'clock' | 'requestTimeoutMilliseconds'
-    >,
-  ): WorkspaceSearchMigrationRehearsalEvidenceAwsPublisher {
-    this.requireOpen()
-    const guard = this.rehearsalGuard
-    if (
-      guard === undefined ||
-      this.measuredConfigurationHash === undefined ||
-      this.measuredConfiguration === undefined
-    ) {
-      throw new WorkspaceSearchMigrationRehearsalPermitError()
-    }
-    this.requireRehearsalAdmissionActive()
-    let clock:
-      CreateWorkspaceSearchMigrationRehearsalEvidenceAwsPublisherInput[
-        'clock'
-      ]
-    let requestTimeoutMilliseconds: number
-    try {
-      clock = input.clock
-      requestTimeoutMilliseconds = input.requestTimeoutMilliseconds
-    } catch {
-      throw new WorkspaceSearchMigrationRehearsalPermitError()
-    }
-    const transport = this.transport
-    /** Rejects borrowed evidence-publication I/O after the owner closes. */
-    const requireOwningSessionOpen = (): void => {
-      this.requireOpen()
-    }
-    const publisher =
-      createWorkspaceSearchMigrationRehearsalEvidenceAwsPublisher({
-        account: this.account,
-        bucketName: this.journalBucket,
-        clock,
-        kmsKeyArn: this.journalKeyArn,
-        region: this.requested.region,
-        requestTimeoutMilliseconds,
-        sessionBinding: this.readRehearsalEvidenceSessionBinding(),
-        transport: {
-          putEvidence: async (command, abortSignal) => {
-            requireOwningSessionOpen()
-            const result = await transport.putImmutableArtifact(
-              command,
-              abortSignal,
-            )
-            requireOwningSessionOpen()
-            return result
-          },
-          headEvidence: async (command, abortSignal) => {
-            requireOwningSessionOpen()
-            const result = await transport.headImmutableArtifact(
-              command,
-              abortSignal,
-            )
-            requireOwningSessionOpen()
-            return result
-          },
-          close: (): void => undefined,
-        },
-      })
-    return Object.freeze({
-      publishEvidence: async (
-        evidenceInput:
-          PublishWorkspaceSearchMigrationRehearsalEvidenceInput,
-      ) => {
-        this.requireOpen()
-        this.requireRehearsalAdmissionActive()
-        return await publisher.publishEvidence(evidenceInput)
-      },
-      close: (): void => publisher.close(),
-    })
-  }
 
-  /**
-   * Reads the digest-only evidence binding owned by this measured rehearsal.
-   *
-   * @returns Frozen permit, caller, resource, commit, and configuration facts.
-   */
-  readRehearsalEvidenceSessionBinding():
-    CreateWorkspaceSearchMigrationRehearsalEvidenceAwsPublisherInput[
-      'sessionBinding'
-    ] {
-    this.requireOpen()
-    const guard = this.rehearsalGuard
-    const configurationHash = this.measuredConfigurationHash
-    if (guard === undefined || configurationHash === undefined) {
-      throw new WorkspaceSearchMigrationRehearsalPermitError()
-    }
-    requireNonProductionRehearsalPermitActive(guard)
-    return createNonProductionRehearsalEvidenceSessionBinding(
-      guard,
-      this.requested.commit,
-      this.requestedResourcesBinding,
-      configurationHash,
-    )
-  }
 
-  /**
-   * Reads the authenticated interval containing the complete rehearsal suite.
-   *
-   * The permit is revalidated at this admission boundary. The detached result
-   * is used only by the final publication orchestrator and is not added to the
-   * externally published digest-only evidence index.
-   *
-   * @returns Frozen exact inclusive issue and exclusive expiry timestamps.
-   */
-  readRehearsalPermitValidity():
-    WorkspaceSearchMigrationRehearsalPermitValidity {
-    this.requireOpen()
-    const guard = this.rehearsalGuard
-    if (guard === undefined) {
-      throw new WorkspaceSearchMigrationRehearsalPermitError()
-    }
-    requireNonProductionRehearsalPermitActive(guard)
-    return Object.freeze({
-      issuedAt: guard.permit.issuedAt,
-      expiresAt: guard.permit.expiresAt,
-    })
-  }
 
   /**
    * Measures identity against the same snapshot that configured every client
@@ -3155,16 +2444,6 @@ class AwsWorkspaceSearchMigrationIdentityPort
     this.invalidateManagedPlanningArtifactPort()
     this.measuredMigrationStateTable = undefined
     this.measuredExecutionControlQuarantined = false
-    this.pendingRehearsalLeaseAcquisitionObservations.splice(0)
-    this.observedRehearsalLeaseAcquisitionDigests.clear()
-    this.pendingRehearsalAuthorityAdoptionObservations.splice(0)
-    this.observedRehearsalAuthorityAdoptionDigests.clear()
-    this.observedRehearsalAuthorityAdoptionRenewals.clear()
-    this.highestRehearsalAuthorityAdoptionRenewalCount = undefined
-    this.pendingRehearsalFaultObservations.splice(0)
-    this.observedRehearsalFaultObservationDigests.clear()
-    this.rehearsalLeaseIdentityDigest = undefined
-    this.rehearsalClosedWriterFenceRecordDigest = undefined
     const configuration = await measureWorkspaceSearchMigrationConfiguration({
       requested: this.requested,
       port: this,
@@ -3463,30 +2742,16 @@ class AwsWorkspaceSearchMigrationIdentityPort
           authority,
           () => delegate.read(runId),
         ),
-      close: async (currentAuthority) => {
-        const result = await this.runManagedExecutionBoundaryOperation(
+      close: (currentAuthority) =>
+        this.runManagedExecutionBoundaryOperation(
           authority,
           () => delegate.close(currentAuthority),
-        )
-        this.recordRehearsalClosedWriterFenceRecordDigest(
-          result.closedWriterFenceRecordDigest,
-          authority.generation,
-          authority.configurationHash,
-        )
-        return result
-      },
-      admitPlanning: async (input) => {
-        const result = await this.runManagedExecutionBoundaryOperation(
+        ),
+      admitPlanning: (input) =>
+        this.runManagedExecutionBoundaryOperation(
           authority,
           () => delegate.admitPlanning(input),
-        )
-        this.recordRehearsalClosedWriterFenceRecordDigest(
-          result.closedWriterFenceRecordDigest,
-          authority.generation,
-          authority.configurationHash,
-        )
-        return result
-      },
+        ),
     }
   }
 
@@ -3573,14 +2838,6 @@ class AwsWorkspaceSearchMigrationIdentityPort
     executionRun: WorkspaceSearchMigrationExecutionRun,
   ): WorkspaceSearchMigrationApplyOperationAwsPort {
     const authority = this.captureManagedApplyOperationAuthority()
-    this.recordRehearsalClosedWriterFenceRecordDigest(
-      closedWriterFenceRecord.recordDigest,
-      authority.generation,
-      authority.configurationHash,
-    )
-    let rehearsalApplyCheckpointTarget:
-      WorkspaceSearchMigrationRehearsalApplyCheckpointTarget | undefined
-    let delegate: WorkspaceSearchMigrationApplyOperationAwsPort | undefined
     let detachedExecutionRun: WorkspaceSearchMigrationExecutionRun
     try {
       detachedExecutionRun =
@@ -3589,14 +2846,6 @@ class AwsWorkspaceSearchMigrationIdentityPort
         )
     } catch {
       return failManagedApplyOperation()
-    }
-    const auditBinding: WorkspaceSearchMigrationApplyAuditBindingInput = {
-      configuration: authority.configuration,
-      configurationHash: authority.configurationHash,
-      executionBoundary,
-      sealedPlanningAuthority,
-      closedWriterFenceRecord,
-      executionRun: detachedExecutionRun,
     }
     const immutableArtifactPort =
       this.createManagedApplyImmutableArtifactPort(authority)
@@ -3664,82 +2913,26 @@ class AwsWorkspaceSearchMigrationIdentityPort
               ).checkpoint
             },
           )
-          if (checkpoint.cursor !== undefined) {
-            rehearsalApplyCheckpointTarget = {
-              kind: 'apply-checkpoint',
-              location,
-              pageSequence: checkpoint.aggregate.pageCount,
-              cursorState: 'present',
-            }
-            await this.reachRehearsalApplyCheckpointFault(
-              'apply-checkpoint-cursor-captured-before-commit',
-              rehearsalApplyCheckpointTarget,
-              authority,
-              async () => {
-                const reader = delegate
-                if (reader === undefined) {
-                  return failManagedApplyOperation()
-                }
-                return await reader.readRunState()
-              },
-            )
-          }
           return checkpoint
         },
     }
     const transport:
       WorkspaceSearchMigrationApplyOperationAwsTransport = {
-        getApplyItem: async (command) => {
-          const output = await this.runManagedApplyOperationRead(
+        getApplyItem: (command) =>
+          this.runManagedApplyOperationRead(
             authority,
             () => this.transport.getPrePlanAuthority(command),
-          )
-          this.recordRehearsalAuthorityAdoptionRead(
-            command,
-            output,
-            auditBinding,
-            authority,
-          )
-          return output
-        },
+          ),
         prepareApplyWrite: async () => {
           await this.requireCurrentApplyOperationTableIncarnations(
             authority,
           )
         },
-        transactWriteApply: async (command) => {
-          const output = await this.runManagedPreparedApplyOperationWrite(
+        transactWriteApply: (command) =>
+          this.runManagedPreparedApplyOperationWrite(
             authority,
-            async () => {
-              const result =
-                await this.transport.transactWritePrePlanAuthority(
-                  command,
-                )
-              const target = rehearsalApplyCheckpointTarget
-              if (target !== undefined) {
-                await this.reachRehearsalApplyCheckpointFault(
-                  'apply-checkpoint-cursor-committed-before-return',
-                  target,
-                  authority,
-                  async () => {
-                    const reader = delegate
-                    if (reader === undefined) {
-                      return failManagedApplyOperation()
-                    }
-                    return await reader.readRunState()
-                  },
-                )
-              }
-              return result
-            },
-          )
-          this.recordRehearsalAuthorityAdoptionWrite(
-            command,
-            auditBinding,
-            authority,
-          )
-          return output
-        },
+            () => this.transport.transactWritePrePlanAuthority(command),
+          ),
       }
     const operationDelegate =
       createAwsWorkspaceSearchMigrationApplyOperationPort({
@@ -3756,7 +2949,6 @@ class AwsWorkspaceSearchMigrationIdentityPort
         transport,
         clock: this.prePlanAuthorityClock,
       })
-    delegate = operationDelegate
     return {
       readRunState: () =>
         this.runManagedApplyOperation(
@@ -3783,44 +2975,22 @@ class AwsWorkspaceSearchMigrationIdentityPort
           authority,
           () => operationDelegate.adoptExecutionAuthority(input),
         ),
-      commitApplyOperation: async (input) => {
-        const result = await this.runManagedApplyOperation(
+      commitApplyOperation: (input) =>
+        this.runManagedApplyOperation(
           authority,
           () => operationDelegate.commitApplyOperation(input),
-        )
-        if (
-          result.status === 'applying' &&
-          result.appliedOperationCount > 0 &&
-          result.appliedOperationCount < result.planOperationCount
-        ) {
-          await this.reachRehearsalApplyOperationFault({
-            kind: 'apply-operation',
-            planSequence: result.appliedOperationCount,
-            remainingOperations: 'present',
-          }, result, authority, async () => {
-            const reader = delegate
-            if (reader === undefined) return failManagedApplyOperation()
-            return await reader.readRunState()
-          })
-        }
-        return result
-      },
+        ),
       saveApplyCheckpoint: async (input) => {
         const snapshot = snapshotManagedRateGateInput(
           input,
           () => createManagedApplyOperationFailure('INVALID_ARGUMENT'),
         )
-        rehearsalApplyCheckpointTarget = undefined
-        try {
-          return await this.runManagedDescribeTableCheckpointPage(
-            () => this.runManagedApplyOperation(
-              authority,
-              () => operationDelegate.saveApplyCheckpoint(snapshot),
-            ),
-          )
-        } finally {
-          rehearsalApplyCheckpointTarget = undefined
-        }
+        return await this.runManagedDescribeTableCheckpointPage(
+          () => this.runManagedApplyOperation(
+            authority,
+            () => operationDelegate.saveApplyCheckpoint(snapshot),
+          ),
+        )
       },
       sealApply: (input) =>
         this.runManagedApplyOperation(
@@ -4924,354 +4094,28 @@ class AwsWorkspaceSearchMigrationIdentityPort
       runId: snapshot.runId,
       ownerId: snapshot.ownerId,
     }
-    const acquisitionGeneration = this.generation
-    const acquisitionConfigurationHash = this.measuredConfigurationHash
-    if (
-      this.rehearsalFaultController !== undefined &&
-      acquisitionConfigurationHash === undefined
-    ) throw invalidIdentityLookup()
-    let newlyObservedAcquisition = false
-    const leaseAcquisitionObserver:
-      WorkspaceSearchMigrationDurableLeaseAcquisitionObserver | undefined =
-        this.rehearsalGuard === undefined &&
-        this.rehearsalFaultController === undefined
-          ? undefined
-          : {
-              observe: (observation): void => {
-                const newlyQueued =
-                  this.recordRehearsalLeaseAcquisitionObservation(
-                    observation,
-                    acquisitionGeneration,
-                  )
-                if (newlyQueued && observation.kind === 'acquired') {
-                  newlyObservedAcquisition = true
-                }
-              },
-            }
     /** Acquires one lease through the measured authority boundary. */
     const operation = async (): Promise<WorkspaceSearchMigrationLease> =>
       await runManagedPrePlanAuthorityAwsBoundary(async () => {
         return this.runPrePlanAuthorityOperation(
           (adapter) => adapter.acquireLease(request),
-          leaseAcquisitionObserver,
         )
       })
     const rate = this.describeTableRate
     if (rate === undefined) {
-      const lease = await operation()
-      if (newlyObservedAcquisition) {
-        if (acquisitionConfigurationHash === undefined) {
-          throw invalidIdentityLookup()
-        }
-        await this.reachRehearsalLeaseFault(
-          acquisitionGeneration,
-          acquisitionConfigurationHash,
-        )
-      }
-      return lease
+      return await operation()
     }
     return await rate.runNonPageOperation(async () => {
       const lease = await operation()
       await rate.claimAfterLease(lease.fenceToken)
-      if (newlyObservedAcquisition) {
-        if (acquisitionConfigurationHash === undefined) {
-          throw invalidIdentityLookup()
-        }
-        await this.reachRehearsalLeaseFault(
-          acquisitionGeneration,
-          acquisitionConfigurationHash,
-        )
-      }
       return lease
     })
   }
 
-  /**
-   * Reaches the rehearsal-only post-acquire lease barrier when configured.
-   */
-  private async reachRehearsalLeaseFault(
-    generation: number,
-    configurationHash: string,
-  ): Promise<void> {
-    const controller = this.rehearsalFaultController
-    if (controller === undefined) return
-    await controller.reach({
-      failpoint: 'lease-acquired-before-first-heartbeat',
-      target: { kind: 'planning-lease' },
-      reachedAt: this.readRehearsalFaultReachedAt(),
-    }, async () => {
-      this.requireMeasurementGeneration(generation, configurationHash)
-      const leaseIdentityDigest = this.rehearsalLeaseIdentityDigest
-      if (leaseIdentityDigest === undefined) {
-        return failSourceScanAws('INVALID_STATE')
-      }
-      this.recordRehearsalFaultObservation(
-        Object.freeze({
-          observationVersion: 1,
-          kind: 'lease',
-          failpoint: 'lease-acquired-before-first-heartbeat',
-          leaseIdentityDigest,
-          closedWriterFenceRecordDigest: null,
-          durableAppliedOperationCount: 0,
-          sealedPlanOperationCount: null,
-        }),
-        generation,
-        configurationHash,
-      )
-    })
-  }
 
-  /**
-   * Reaches one rehearsal-only non-terminal planning-page boundary.
-   *
-   * @param failpoint - Exact semantic boundary reached by the runtime.
-   * @param target - Exact source or target successor page with a cursor.
-   */
-  private async reachRehearsalPlanningPageFault(
-    failpoint: WorkspaceSearchMigrationRehearsalPlanningPageFailpoint,
-    target: WorkspaceSearchMigrationRehearsalPlanningPageTarget,
-    authority: ManagedMigrationStateAuthority,
-    readProgress: () => Promise<
-      | WorkspaceSearchMigrationSourceEvidenceProgress
-      | WorkspaceSearchMigrationTargetEvidenceProgress
-    >,
-  ): Promise<void> {
-    const controller = this.rehearsalFaultController
-    if (controller === undefined) return
-    await controller.reach({
-      failpoint,
-      target,
-      reachedAt: this.readRehearsalFaultReachedAt(),
-    }, async () => {
-      this.requireMeasurementGeneration(
-        authority.generation,
-        authority.configurationHash,
-      )
-      const progress = await readProgress()
-      this.requireMeasurementGeneration(
-        authority.generation,
-        authority.configurationHash,
-      )
-      const leaseIdentityDigest = this.rehearsalLeaseIdentityDigest
-      const closedWriterFenceRecordDigest =
-        this.rehearsalClosedWriterFenceRecordDigest
-      if (
-        leaseIdentityDigest === undefined ||
-        closedWriterFenceRecordDigest === undefined
-      ) return failSourceScanAws('INVALID_STATE')
-      const durableHeadProgressDigest = target.kind === 'source'
-        ? 'source' in progress && progress.source === target.source
-          ? createWorkspaceSearchMigrationSourceEvidenceProgressDigest(
-              progress,
-            )
-          : failSourceScanAws('INVALID_STATE')
-        : 'source' in progress
-          ? failSourceScanAws('INVALID_STATE')
-          : createWorkspaceSearchMigrationTargetEvidenceProgressDigest(
-              progress,
-            )
-      const observation:
-        WorkspaceSearchMigrationRehearsalFaultObservation =
-          Object.freeze({
-            observationVersion: 1,
-            kind: 'planning-page',
-            failpoint,
-            leaseIdentityDigest,
-            closedWriterFenceRecordDigest,
-            durableAppliedOperationCount: 0,
-            sealedPlanOperationCount: null,
-            durableHeadPosition: failpoint ===
-                'planning-page-artifact-uploaded-before-checkpoint-commit'
-              ? 'predecessor'
-              : 'committed-successor',
-            durableHeadPageSequence: progress.pageSequence,
-            durableHeadEvidenceDigest: progress.evidenceDigest,
-            durableHeadCheckpointDigest:
-              createMigrationDigest(progress.checkpoint),
-            durableHeadProgressDigest,
-            durableHeadCursorState:
-              progress.checkpoint.cursor === undefined
-                ? 'absent'
-                : 'present',
-            durableHeadCompleted: progress.checkpoint.completed,
-            planningTarget: target.kind === 'source'
-              ? Object.freeze({
-                  kind: target.kind,
-                  source: target.source,
-                  pageSequence: target.pageSequence,
-                  cursorState: target.cursorState,
-                })
-              : Object.freeze({
-                  kind: target.kind,
-                  pageSequence: target.pageSequence,
-                  cursorState: target.cursorState,
-                }),
-          })
-      this.recordRehearsalFaultObservation(
-        observation,
-        authority.generation,
-        authority.configurationHash,
-      )
-    })
-  }
 
-  /**
-   * Reaches one rehearsal-only apply checkpoint cursor boundary.
-   *
-   * @param failpoint - Exact pre- or post-commit cursor boundary.
-   * @param target - Exact non-terminal apply checkpoint selector.
-   */
-  private async reachRehearsalApplyCheckpointFault(
-    failpoint:
-      | 'apply-checkpoint-cursor-captured-before-commit'
-      | 'apply-checkpoint-cursor-committed-before-return',
-    target: WorkspaceSearchMigrationRehearsalApplyCheckpointTarget,
-    authority: ManagedApplyOperationAuthority,
-    readRunState: () => Promise<WorkspaceSearchMigrationRunState>,
-  ): Promise<void> {
-    const controller = this.rehearsalFaultController
-    if (controller === undefined) return
-    await controller.reach({
-      failpoint,
-      target,
-      reachedAt: this.readRehearsalFaultReachedAt(),
-    }, async () => {
-      this.requireMeasurementGeneration(
-        authority.generation,
-        authority.configurationHash,
-      )
-      const state = await readRunState()
-      this.requireMeasurementGeneration(
-        authority.generation,
-        authority.configurationHash,
-      )
-      const leaseIdentityDigest = this.rehearsalLeaseIdentityDigest
-      const closedWriterFenceRecordDigest =
-        this.rehearsalClosedWriterFenceRecordDigest
-      if (
-        leaseIdentityDigest === undefined ||
-        closedWriterFenceRecordDigest === undefined ||
-        state.status !== 'applying'
-      ) return failManagedApplyOperation()
-      const checkpoint = target.location === 'target'
-        ? state.apply.target
-        : state.apply.sources[target.location]
-      const observation:
-        WorkspaceSearchMigrationRehearsalFaultObservation =
-          Object.freeze({
-            observationVersion: 1,
-            kind: 'apply-checkpoint',
-            failpoint,
-            leaseIdentityDigest,
-            closedWriterFenceRecordDigest,
-            durableAppliedOperationCount: state.appliedOperationCount,
-            sealedPlanOperationCount: state.planOperationCount,
-            checkpointLocation: target.location,
-            durableStatePosition: failpoint ===
-                'apply-checkpoint-cursor-captured-before-commit'
-              ? 'predecessor'
-              : 'committed-successor',
-            durableStateRevision: state.revision,
-            durableStateStatus: state.status,
-            durableRunStateDigest: createMigrationDigest(state),
-            durableCheckpointDigest: createMigrationDigest(checkpoint),
-            durableCheckpointPageSequence:
-              checkpoint.aggregate.pageCount,
-            durableCheckpointCursorState:
-              checkpoint.cursor === undefined ? 'absent' : 'present',
-            durableCheckpointCompleted: checkpoint.completed,
-          })
-      this.recordRehearsalFaultObservation(
-        observation,
-        authority.generation,
-        authority.configurationHash,
-      )
-    })
-  }
 
-  /**
-   * Reaches the rehearsal-only strict partial apply prefix barrier.
-   *
-   * @param target - Exact committed operation with later work remaining.
-   */
-  private async reachRehearsalApplyOperationFault(
-    target: WorkspaceSearchMigrationRehearsalApplyOperationTarget,
-    returnedState: WorkspaceSearchMigrationRunState,
-    authority: ManagedApplyOperationAuthority,
-    readRunState: () => Promise<WorkspaceSearchMigrationRunState>,
-  ): Promise<void> {
-    const controller = this.rehearsalFaultController
-    if (controller === undefined) return
-    await controller.reach({
-      failpoint: 'apply-operation-committed-before-return',
-      target,
-      reachedAt: this.readRehearsalFaultReachedAt(),
-    }, async () => {
-      this.requireMeasurementGeneration(
-        authority.generation,
-        authority.configurationHash,
-      )
-      const durableState = await readRunState()
-      this.requireMeasurementGeneration(
-        authority.generation,
-        authority.configurationHash,
-      )
-      const leaseIdentityDigest = this.rehearsalLeaseIdentityDigest
-      const closedWriterFenceRecordDigest =
-        this.rehearsalClosedWriterFenceRecordDigest
-      const returnedRunStateDigest = createMigrationDigest(returnedState)
-      const durableRunStateDigest = createMigrationDigest(durableState)
-      if (
-        leaseIdentityDigest === undefined ||
-        closedWriterFenceRecordDigest === undefined ||
-        returnedState.status !== 'applying' ||
-        durableState.status !== 'applying' ||
-        returnedState.revision !== durableState.revision ||
-        returnedState.appliedOperationCount !==
-          durableState.appliedOperationCount ||
-        returnedState.planOperationCount !==
-          durableState.planOperationCount ||
-        returnedRunStateDigest !== durableRunStateDigest
-      ) return failManagedApplyOperation()
-      const observation:
-        WorkspaceSearchMigrationRehearsalFaultObservation =
-          Object.freeze({
-            observationVersion: 1,
-            kind: 'apply-operation',
-            failpoint: 'apply-operation-committed-before-return',
-            leaseIdentityDigest,
-            closedWriterFenceRecordDigest,
-            durableAppliedOperationCount:
-              durableState.appliedOperationCount,
-            sealedPlanOperationCount: durableState.planOperationCount,
-            returnedStateRevision: returnedState.revision,
-            returnedRunStateDigest,
-            returnedAppliedOperationCount:
-              returnedState.appliedOperationCount,
-            returnedSealedPlanOperationCount:
-              returnedState.planOperationCount,
-            durableStateRevision: durableState.revision,
-            durableStateStatus: durableState.status,
-            durableRunStateDigest,
-          })
-      this.recordRehearsalFaultObservation(
-        observation,
-        authority.generation,
-        authority.configurationHash,
-      )
-    })
-  }
 
-  /**
-   * Samples one canonical secret-free timestamp for a semantic fault receipt.
-   *
-   * @returns Canonical timestamp from the session's trusted authority clock.
-   */
-  private readRehearsalFaultReachedAt(): string {
-    return readNonProductionRehearsalClock(
-      this.prePlanAuthorityClock,
-    ).toISOString()
-  }
 
   /**
    * Extends one exact measured global pre-plan lease.
@@ -5470,23 +4314,17 @@ class AwsWorkspaceSearchMigrationIdentityPort
    * because the first state-incarnation check performs asynchronous I/O.
    *
    * @param operation - Exact operation over an ephemeral measured adapter.
-   * @param leaseAcquisitionObserver - Optional rehearsal-only commit observer.
    * @returns Detached authority result while measurement remains current.
    */
   private async runPrePlanAuthorityOperation<Result>(
     operation: (
       adapter: WorkspaceSearchMigrationPrePlanAuthorityAwsPort,
     ) => Promise<Result>,
-    leaseAcquisitionObserver?:
-      WorkspaceSearchMigrationDurableLeaseAcquisitionObserver,
   ): Promise<Result> {
     return await this.runManagedAwsMutationDrainOperation(async () => {
       const authority = this.captureManagedMigrationStateAuthority()
       await this.requireCurrentMigrationStateTableIncarnation(authority)
-      const adapter = this.createManagedPrePlanAuthorityAdapter(
-        authority,
-        leaseAcquisitionObserver,
-      )
+      const adapter = this.createManagedPrePlanAuthorityAdapter(authority)
       let result: Result
       try {
         result = await operation(adapter)
@@ -5515,13 +4353,10 @@ class AwsWorkspaceSearchMigrationIdentityPort
    * Creates an ephemeral authority adapter on the measured DynamoDB client.
    *
    * @param authority - Current generation, configuration, and state identity.
-   * @param leaseAcquisitionObserver - Optional rehearsal-only commit observer.
    * @returns Pre-plan authority adapter guarded around every state operation.
    */
   private createManagedPrePlanAuthorityAdapter(
     authority: ManagedMigrationStateAuthority,
-    leaseAcquisitionObserver?:
-      WorkspaceSearchMigrationDurableLeaseAcquisitionObserver,
   ): WorkspaceSearchMigrationPrePlanAuthorityAwsPort {
     let writePrepared = false
     const transport: WorkspaceSearchMigrationPrePlanAuthorityAwsTransport = {
@@ -5549,9 +4384,6 @@ class AwsWorkspaceSearchMigrationIdentityPort
       configurationHash: authority.configurationHash,
       transport,
       clock: this.prePlanAuthorityClock,
-      ...(leaseAcquisitionObserver === undefined
-        ? {}
-        : { leaseAcquisitionObserver }),
     })
   }
 
@@ -5730,9 +4562,6 @@ class AwsWorkspaceSearchMigrationIdentityPort
     postSendGuard: ManagedPlanningEvidencePostSendGuardState,
   ): WorkspaceSearchMigrationSourceEvidenceAwsPort {
     let writePrepared = false
-    let delegate: WorkspaceSearchMigrationSourceEvidenceAwsPort | undefined
-    let rehearsalPlanningPageTarget:
-      WorkspaceSearchMigrationRehearsalPlanningPageTarget | undefined
     const sourceArtifactTransport:
       WorkspaceSearchMigrationSourceArtifactAwsTransport = {
         putSourceArtifact: (command) =>
@@ -5825,33 +4654,6 @@ class AwsWorkspaceSearchMigrationIdentityPort
             await sourceArtifactPort.writePlanningSourceArtifactPage({
               expectedPage,
             })
-          if (captured.pageResult.checkpoint.cursor !== undefined) {
-            rehearsalPlanningPageTarget = {
-              kind: 'source',
-              source: input.source,
-              pageSequence: input.pageSequence,
-              cursorState: 'present',
-            }
-            await this.reachRehearsalPlanningPageFault(
-              'planning-page-artifact-uploaded-before-checkpoint-commit',
-              rehearsalPlanningPageTarget,
-              authority,
-              async () => {
-                const reader = delegate
-                if (reader === undefined) {
-                  return failSourceScanAws('INVALID_STATE')
-                }
-                return await reader.readProgress({
-                  runId: authority.request.runId,
-                  purpose: authority.request.purpose,
-                  configuration: authority.request.configuration,
-                  configurationHash:
-                    authority.request.configurationHash,
-                  source: authority.request.source,
-                })
-              },
-            )
-          }
           return {
             pageResult: captured.pageResult,
             sourceArtifacts,
@@ -5959,44 +4761,17 @@ class AwsWorkspaceSearchMigrationIdentityPort
         return this.runManagedPreparedSourceEvidenceWrite(
           authority,
           postSendGuard,
-          async () => {
-            const result =
-              await this.transport.transactWriteSourceEvidence(command)
-            const target = rehearsalPlanningPageTarget
-            if (target !== undefined) {
-              await this.reachRehearsalPlanningPageFault(
-                'planning-page-transaction-response-lost',
-                target,
-                authority,
-                async () => {
-                  const reader = delegate
-                  if (reader === undefined) {
-                    return failSourceScanAws('INVALID_STATE')
-                  }
-                  return await reader.readProgress({
-                    runId: authority.request.runId,
-                    purpose: authority.request.purpose,
-                    configuration: authority.request.configuration,
-                    configurationHash:
-                      authority.request.configurationHash,
-                    source: authority.request.source,
-                  })
-                },
-              )
-            }
-            return result
-          },
+          () => this.transport.transactWriteSourceEvidence(command),
         )
       },
     }
-    delegate = createAwsWorkspaceSearchMigrationSourceEvidencePort({
+    return createAwsWorkspaceSearchMigrationSourceEvidencePort({
       stateTable: authority.stateTable,
       scanner,
       planningArtifactGateway,
       transport,
       clock: this.prePlanAuthorityClock,
     })
-    return delegate
   }
 
   /**
@@ -6152,9 +4927,6 @@ class AwsWorkspaceSearchMigrationIdentityPort
     postSendGuard: ManagedPlanningEvidencePostSendGuardState,
   ): WorkspaceSearchMigrationTargetEvidenceAwsPort {
     let writePrepared = false
-    let delegate: WorkspaceSearchMigrationTargetEvidenceAwsPort | undefined
-    let rehearsalPlanningPageTarget:
-      WorkspaceSearchMigrationRehearsalPlanningPageTarget | undefined
     const targetArtifactTransport:
       WorkspaceSearchMigrationTargetArtifactAwsTransport = {
         putTargetArtifact: (command) =>
@@ -6248,31 +5020,6 @@ class AwsWorkspaceSearchMigrationIdentityPort
                   expectedPage,
                 }),
             )
-          if (captured.pageResult.checkpoint.cursor !== undefined) {
-            rehearsalPlanningPageTarget = {
-              kind: 'target',
-              pageSequence: input.pageSequence,
-              cursorState: 'present',
-            }
-            await this.reachRehearsalPlanningPageFault(
-              'planning-page-artifact-uploaded-before-checkpoint-commit',
-              rehearsalPlanningPageTarget,
-              authority,
-              async () => {
-                const reader = delegate
-                if (reader === undefined) {
-                  throw createManagedTargetEvidenceFailure('INVALID_STATE')
-                }
-                return await reader.readProgress({
-                  runId: authority.request.runId,
-                  purpose: authority.request.purpose,
-                  configuration: authority.request.configuration,
-                  configurationHash:
-                    authority.request.configurationHash,
-                })
-              },
-            )
-          }
           return {
             pageResult: captured.pageResult,
             targetArtifacts,
@@ -6378,42 +5125,16 @@ class AwsWorkspaceSearchMigrationIdentityPort
         return this.runManagedPreparedTargetEvidenceWrite(
           authority,
           postSendGuard,
-          async () => {
-            const result =
-              await this.transport.transactWriteTargetEvidence(command)
-            const target = rehearsalPlanningPageTarget
-            if (target !== undefined) {
-              await this.reachRehearsalPlanningPageFault(
-                'planning-page-transaction-response-lost',
-                target,
-                authority,
-                async () => {
-                  const reader = delegate
-                  if (reader === undefined) {
-                    throw createManagedTargetEvidenceFailure('INVALID_STATE')
-                  }
-                  return await reader.readProgress({
-                    runId: authority.request.runId,
-                    purpose: authority.request.purpose,
-                    configuration: authority.request.configuration,
-                    configurationHash:
-                      authority.request.configurationHash,
-                  })
-                },
-              )
-            }
-            return result
-          },
+          () => this.transport.transactWriteTargetEvidence(command),
         )
       },
     }
-    delegate = createAwsWorkspaceSearchMigrationTargetEvidencePort({
+    return createAwsWorkspaceSearchMigrationTargetEvidencePort({
       stateTable: authority.stateTable,
       planningArtifactGateway,
       transport,
       clock: this.prePlanAuthorityClock,
     })
-    return delegate
   }
 
   /**
@@ -9893,16 +8614,10 @@ class AwsWorkspaceSearchMigrationIdentityPort
     if (this.closed) throw inactiveManagedIdentityPort()
   }
 
-  /**
-   * Requires one new AWS admission to remain inside its time capabilities.
-   *
-   * Permit expiry stops new measurements, reads, and writes. It does not
-   * disable `close` or post-send guards needed to drain an admitted operation.
-   */
+  /** Requires one new AWS admission while the managed session is active. */
   protected requireNewAwsAdmission(): void {
     this.requireOpen()
     if (this.rateSealed) throw inactiveManagedIdentityPort()
-    this.requireRehearsalAdmissionActive()
   }
 
   /**
@@ -9914,17 +8629,6 @@ class AwsWorkspaceSearchMigrationIdentityPort
     return this.operationalAbortController.signal
   }
 
-  /**
-   * Requires the current rehearsal permit.
-   *
-   * Already-admitted transport reconciliation deliberately does not re-enter
-   * this guard.
-   */
-  private requireRehearsalAdmissionActive(): void {
-    const guard = this.rehearsalGuard
-    if (guard === undefined) return
-    requireNonProductionRehearsalPermitActive(guard)
-  }
 
   /**
    * Requires an asynchronous measurement to remain the current generation.
@@ -10545,7 +9249,7 @@ async function createRateManagedAwsSessionFromSnapshot(
     requirePreMeasurementCallerIdentity(caller, resources.account)
     await credentialsProvider()
     requireRateManagedSessionSignalActive(signal)
-  } catch (error: unknown) {
+  } catch {
     transport.close()
     requireRateManagedSessionSignalActive(signal)
     throw preMeasurementCallerIdentityFailure()
@@ -10832,442 +9536,6 @@ function detachRateManagedAwsSessionConstructionInput(
       createWorkspaceSearchMigrationPrePlanAuthoritySystemTime,
     ...(signal === undefined ? {} : { signal }),
   })
-}
-
-/**
- * Authenticates and detaches the shared non-production identity preflight.
- *
- * @param input - Permit, key, clock, and optional fault construction.
- * @param resources - Validated exact requested resources.
- * @returns Authenticated permit, trusted clock, and optional fault controller.
- */
-function detachNonProductionRehearsalGuard(
-  input: NonProductionRehearsalGuardConstructionInput,
-  resources: WorkspaceSearchMigrationRequestedResourcesSnapshot,
-): NonProductionRehearsalConstructionGuard {
-  let permit: unknown
-  let permitVerificationKey: unknown
-  let permitClock: (() => Date) | undefined
-  let fault:
-    CreateWorkspaceSearchMigrationRehearsalFaultControllerInput | undefined
-  try {
-    permit = input.permit
-    permitVerificationKey = input.permitVerificationKey
-    permitClock = input.permitClock
-    fault = input.fault
-  } catch {
-    throw new WorkspaceSearchMigrationRehearsalPermitError()
-  }
-  const clock = permitClock ??
-    createWorkspaceSearchMigrationPrePlanAuthoritySystemTime
-  if (typeof clock !== 'function' || nodeUtilTypes.isProxy(clock)) {
-    throw new WorkspaceSearchMigrationRehearsalPermitError()
-  }
-  const currentTime = readNonProductionRehearsalClock(clock)
-  const authenticatedPermit =
-    verifyWorkspaceSearchMigrationRehearsalPermit({
-      permit,
-      verificationKey: requireRehearsalVerificationKey(
-        permitVerificationKey,
-      ),
-      account: resources.account,
-      region: resources.region,
-      commit: resources.commit,
-      requestedResourcesBinding:
-        createWorkspaceSearchMigrationRequestedResourcesBinding(resources),
-      currentTime,
-    })
-  const permitDigest = createAuthenticatedRehearsalPermitDigest(
-    permit,
-    authenticatedPermit,
-  )
-  const faultController = fault === undefined
-    ? undefined
-    : createWorkspaceSearchMigrationRehearsalFaultController(fault)
-  return Object.freeze({
-    permit: authenticatedPermit,
-    permitDigest,
-    clock,
-    ...(faultController === undefined ? {} : { faultController }),
-  })
-}
-
-/**
- * Reconstructs the complete authenticated permit from detached claims and MAC.
- *
- * @param value - Exact permit record already accepted by the verifier.
- * @param claims - Detached authenticated claims returned by the verifier.
- * @returns Digest of the complete permit including its authenticated MAC.
- */
-function createAuthenticatedRehearsalPermitDigest(
-  value: unknown,
-  claims: Readonly<WorkspaceSearchMigrationRehearsalPermitClaims>,
-): string {
-  if (
-    typeof value !== 'object' ||
-    value === null ||
-    nodeUtilTypes.isProxy(value)
-  ) {
-    throw new WorkspaceSearchMigrationRehearsalPermitError()
-  }
-  const descriptor = Object.getOwnPropertyDescriptor(value, 'permitMac')
-  if (
-    descriptor === undefined ||
-    !descriptor.enumerable ||
-    !Object.hasOwn(descriptor, 'value') ||
-    !isHexDigest(descriptor.value)
-  ) {
-    throw new WorkspaceSearchMigrationRehearsalPermitError()
-  }
-  return createMigrationDigest({
-    ...claims,
-    permitMac: descriptor.value,
-  })
-}
-
-/** Requires one non-proxy exact-length permit key before authentication. */
-function requireRehearsalVerificationKey(value: unknown): Uint8Array {
-  if (
-    !(value instanceof Uint8Array) ||
-    nodeUtilTypes.isProxy(value) ||
-    rehearsalPrePermitRootConstructionGuards
-      .readIntrinsicByteLength(value) !== 32
-  ) {
-    throw new WorkspaceSearchMigrationRehearsalPermitError()
-  }
-  return value
-}
-
-/** Reads one detached valid Date from the captured rehearsal clock. */
-function readNonProductionRehearsalClock(clock: () => Date): Date {
-  let value: unknown
-  let timestamp: unknown
-  try {
-    value = Reflect.apply(clock, undefined, [])
-    timestamp = Date.prototype.getTime.call(value)
-  } catch {
-    throw new WorkspaceSearchMigrationRehearsalPermitError()
-  }
-  if (typeof timestamp !== 'number' || !Number.isFinite(timestamp)) {
-    throw new WorkspaceSearchMigrationRehearsalPermitError()
-  }
-  return new Date(timestamp)
-}
-
-/** Requires the STS caller to match the exact permit-authorized role session. */
-function requireNonProductionRehearsalCaller(
-  caller: GetCallerIdentityCommandOutput,
-  guard: NonProductionRehearsalConstructionGuard,
-): void {
-  if (
-    caller.Account !== guard.permit.account ||
-    caller.Arn !== guard.permit.callerArn ||
-    guard.permit.stage !== WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE
-  ) {
-    throw new WorkspaceSearchMigrationRehearsalPermitError()
-  }
-}
-
-/** Requires the authenticated permit to remain active after remote reads. */
-function requireNonProductionRehearsalPermitActive(
-  guard: NonProductionRehearsalConstructionGuard,
-): void {
-  requireNonProductionRehearsalPermitActiveAt(
-    guard,
-    readNonProductionRehearsalClock(guard.clock),
-  )
-}
-
-/**
- * Requires the permit to contain one already sampled trusted instant.
- *
- * @param guard - Authenticated permit and trusted clock binding.
- * @param currentTime - Detached trusted instant sampled for an AWS boundary.
- */
-function requireNonProductionRehearsalPermitActiveAt(
-  guard: NonProductionRehearsalConstructionGuard,
-  currentTime: Date,
-): void {
-  const currentTimestamp = Date.prototype.getTime.call(currentTime)
-  if (
-    currentTimestamp < Date.parse(guard.permit.issuedAt) ||
-    currentTimestamp >= Date.parse(guard.permit.expiresAt)
-  ) {
-    throw new WorkspaceSearchMigrationRehearsalPermitError()
-  }
-}
-
-/**
- * Detaches one adapter-proven durable lease observation.
- *
- * The discriminated branches preserve only adapter-derived stable identity and
- * chronology. A reused-active observation cannot acquire predecessor fields.
- *
- * @param observation - Trusted adapter observation to detach.
- * @returns Frozen scalar-only acquisition or matching-active projection.
- */
-function cloneDurableLeaseObservation(
-  observation: WorkspaceSearchMigrationDurableLeaseAcquisitionObservation,
-): WorkspaceSearchMigrationDurableLeaseAcquisitionObservation {
-  if (observation.kind === 'acquired') {
-    return Object.freeze({
-      kind: observation.kind,
-      predecessorLeaseIdentityDigest:
-        observation.predecessorLeaseIdentityDigest,
-      predecessorLeaseExpiresAt:
-        observation.predecessorLeaseExpiresAt,
-      acquiredAt: observation.acquiredAt,
-      successorLeaseIdentityDigest:
-        observation.successorLeaseIdentityDigest,
-      successorLeaseExpiresAt: observation.successorLeaseExpiresAt,
-    })
-  }
-  return Object.freeze({
-    kind: observation.kind,
-    currentLeaseIdentityDigest:
-      observation.currentLeaseIdentityDigest,
-    evaluatedAt: observation.evaluatedAt,
-    currentLeaseExpiresAt: observation.currentLeaseExpiresAt,
-  })
-}
-
-/**
- * Detaches one writer-codec-proven authority-adoption projection.
- *
- * @param observation - Strict renewal position and immutable receipt digest.
- * @returns Frozen scalar-only projection safe for stage child material.
- */
-function cloneRehearsalAuthorityAdoptionObservation(
-  observation: WorkspaceSearchMigrationRehearsalExpectedAuthority,
-): WorkspaceSearchMigrationRehearsalExpectedAuthority {
-  if (
-    !Number.isSafeInteger(
-      observation.maintenanceEvidenceRenewalCount,
-    ) ||
-    observation.maintenanceEvidenceRenewalCount <= 0 ||
-    !isHexDigest(observation.receiptDigest)
-  ) return failManagedApplyOperation()
-  return Object.freeze({
-    maintenanceEvidenceRenewalCount:
-      observation.maintenanceEvidenceRenewalCount,
-    receiptDigest: observation.receiptDigest,
-  })
-}
-
-/**
- * Detaches one adapter-proven cursor-free runtime fault observation.
- *
- * @param observation - Trusted selected-fault observation to detach.
- * @returns Frozen scalar-only observation with a detached safe target.
- */
-function cloneRehearsalFaultObservation(
-  observation: WorkspaceSearchMigrationRehearsalFaultObservation,
-): WorkspaceSearchMigrationRehearsalFaultObservation {
-  if (observation.kind === 'planning-page') {
-    const planningTarget = observation.planningTarget.kind === 'source'
-      ? Object.freeze({
-          kind: observation.planningTarget.kind,
-          source: observation.planningTarget.source,
-          pageSequence: observation.planningTarget.pageSequence,
-          cursorState: observation.planningTarget.cursorState,
-        })
-      : Object.freeze({
-          kind: observation.planningTarget.kind,
-          pageSequence: observation.planningTarget.pageSequence,
-          cursorState: observation.planningTarget.cursorState,
-        })
-    return Object.freeze({
-      observationVersion: observation.observationVersion,
-      kind: observation.kind,
-      failpoint: observation.failpoint,
-      leaseIdentityDigest: observation.leaseIdentityDigest,
-      closedWriterFenceRecordDigest:
-        observation.closedWriterFenceRecordDigest,
-      durableAppliedOperationCount:
-        observation.durableAppliedOperationCount,
-      sealedPlanOperationCount: observation.sealedPlanOperationCount,
-      durableHeadPosition: observation.durableHeadPosition,
-      durableHeadPageSequence: observation.durableHeadPageSequence,
-      durableHeadEvidenceDigest: observation.durableHeadEvidenceDigest,
-      durableHeadCheckpointDigest:
-        observation.durableHeadCheckpointDigest,
-      durableHeadProgressDigest: observation.durableHeadProgressDigest,
-      durableHeadCursorState: observation.durableHeadCursorState,
-      durableHeadCompleted: observation.durableHeadCompleted,
-      planningTarget,
-    })
-  }
-  if (observation.kind === 'apply-checkpoint') {
-    return Object.freeze({
-      observationVersion: observation.observationVersion,
-      kind: observation.kind,
-      failpoint: observation.failpoint,
-      leaseIdentityDigest: observation.leaseIdentityDigest,
-      closedWriterFenceRecordDigest:
-        observation.closedWriterFenceRecordDigest,
-      durableAppliedOperationCount:
-        observation.durableAppliedOperationCount,
-      sealedPlanOperationCount: observation.sealedPlanOperationCount,
-      checkpointLocation: observation.checkpointLocation,
-      durableStatePosition: observation.durableStatePosition,
-      durableStateRevision: observation.durableStateRevision,
-      durableStateStatus: observation.durableStateStatus,
-      durableRunStateDigest: observation.durableRunStateDigest,
-      durableCheckpointDigest: observation.durableCheckpointDigest,
-      durableCheckpointPageSequence:
-        observation.durableCheckpointPageSequence,
-      durableCheckpointCursorState:
-        observation.durableCheckpointCursorState,
-      durableCheckpointCompleted: observation.durableCheckpointCompleted,
-    })
-  }
-  if (observation.kind === 'apply-operation') {
-    return Object.freeze({
-      observationVersion: observation.observationVersion,
-      kind: observation.kind,
-      failpoint: observation.failpoint,
-      leaseIdentityDigest: observation.leaseIdentityDigest,
-      closedWriterFenceRecordDigest:
-        observation.closedWriterFenceRecordDigest,
-      durableAppliedOperationCount:
-        observation.durableAppliedOperationCount,
-      sealedPlanOperationCount: observation.sealedPlanOperationCount,
-      returnedStateRevision: observation.returnedStateRevision,
-      returnedRunStateDigest: observation.returnedRunStateDigest,
-      returnedAppliedOperationCount:
-        observation.returnedAppliedOperationCount,
-      returnedSealedPlanOperationCount:
-        observation.returnedSealedPlanOperationCount,
-      durableStateRevision: observation.durableStateRevision,
-      durableStateStatus: observation.durableStateStatus,
-      durableRunStateDigest: observation.durableRunStateDigest,
-    })
-  }
-  return Object.freeze({
-    observationVersion: observation.observationVersion,
-    kind: observation.kind,
-    failpoint: observation.failpoint,
-    leaseIdentityDigest: observation.leaseIdentityDigest,
-    closedWriterFenceRecordDigest:
-      observation.closedWriterFenceRecordDigest,
-    durableAppliedOperationCount: observation.durableAppliedOperationCount,
-    sealedPlanOperationCount: observation.sealedPlanOperationCount,
-  })
-}
-
-/**
- * Derives the only external evidence attestations accepted by this session.
- *
- * Raw account, role, and resource selections remain inside domain-separated
- * canonical digests. The resource statement includes the exact journal tags
- * already verified during preflight, while the isolation statement records
- * the mandatory account separation enforced by the permit.
- *
- * @param guard - Authenticated permit and trusted non-production clock.
- * @param commit - Reviewed commit fixed by the requested resource snapshot.
- * @param requestedResourcesBinding - Digest of the exact selected resources.
- * @param configurationHash - Measured six-table configuration digest.
- * @returns Frozen session binding required by the immutable publisher.
- */
-function createNonProductionRehearsalEvidenceSessionBinding(
-  guard: NonProductionRehearsalConstructionGuard,
-  commit: string,
-  requestedResourcesBinding: string,
-  configurationHash: string,
-): CreateWorkspaceSearchMigrationRehearsalEvidenceAwsPublisherInput[
-  'sessionBinding'
-] {
-  const permit = guard.permit
-  if (
-    permit.account === permit.productionAccount ||
-    permit.commit !== commit ||
-    permit.requestedResourcesBinding !== requestedResourcesBinding
-  ) {
-    throw new WorkspaceSearchMigrationRehearsalPermitError()
-  }
-  return Object.freeze({
-    commit,
-    configurationHash,
-    evidenceKeyDigest: permit.evidenceKeyDigest,
-    publicationKeyDigest: permit.publicationKeyDigest,
-    attestation: Object.freeze({
-      stage: WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE,
-      permitDigest: guard.permitDigest,
-      callerAttestationDigest: createMigrationDigest({
-        account: permit.account,
-        callerArn: permit.callerArn,
-        stage: permit.stage,
-      }),
-      resourceAttestationDigest:
-        createWorkspaceSearchMigrationRehearsalResourceAttestationDigest({
-          configurationHash,
-          deploymentTrustRootDigest:
-            permit.deploymentTrustRootDigest,
-          productionAccount: permit.productionAccount,
-          requestedResourcesBinding,
-        }),
-      productionIsolationDigest: createMigrationDigest({
-        accountsSeparated: true,
-        productionAccount: permit.productionAccount,
-        rehearsalAccount: permit.account,
-        stage: permit.stage,
-      }),
-    }),
-  })
-}
-
-/** Requires the journal's non-production and production-account bindings. */
-function requireNonProductionRehearsalJournalTags(
-  output: GetBucketTaggingOutput,
-  guard: NonProductionRehearsalConstructionGuard,
-): void {
-  const tags = output.TagSet
-  if (!Array.isArray(tags)) {
-    throw new WorkspaceSearchMigrationRehearsalPermitError()
-  }
-  let environmentTagCount = 0
-  let deploymentTrustRootTagCount = 0
-  let productionAccountDigestTagCount = 0
-  for (const tag of tags) {
-    if (tag.Key === WORKSPACE_SEARCH_MIGRATION_REHEARSAL_ENVIRONMENT_TAG_KEY) {
-      environmentTagCount += 1
-      if (tag.Value !== WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE) {
-        throw new WorkspaceSearchMigrationRehearsalPermitError()
-      }
-      continue
-    }
-    if (
-      tag.Key ===
-        WORKSPACE_SEARCH_MIGRATION_REHEARSAL_DEPLOYMENT_TRUST_ROOT_TAG_KEY
-    ) {
-      deploymentTrustRootTagCount += 1
-      if (tag.Value !== guard.permit.deploymentTrustRootDigest) {
-        throw new WorkspaceSearchMigrationRehearsalPermitError()
-      }
-      continue
-    }
-    if (
-      tag.Key ===
-        WORKSPACE_SEARCH_MIGRATION_REHEARSAL_PRODUCTION_ACCOUNT_DIGEST_TAG_KEY
-    ) {
-      productionAccountDigestTagCount += 1
-      if (
-        tag.Value !==
-          createWorkspaceSearchMigrationRehearsalProductionAccountDigest(
-            guard.permit.productionAccount,
-          )
-      ) {
-        throw new WorkspaceSearchMigrationRehearsalPermitError()
-      }
-    }
-  }
-  if (
-    environmentTagCount !== 1 ||
-    deploymentTrustRootTagCount !== 1 ||
-    productionAccountDigestTagCount !== 1
-  ) {
-    throw new WorkspaceSearchMigrationRehearsalPermitError()
-  }
 }
 
 /**
