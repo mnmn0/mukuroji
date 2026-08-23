@@ -33,7 +33,6 @@ import {
   buildFileStorage,
   configureFileStorageApiBoundary,
 } from './subsystems/file-storage';
-import { buildMigrationAlarmEvidenceSink } from './subsystems/migration-alarm-evidence';
 import { buildMigrationObservability } from './subsystems/migration-observability';
 import { buildMigrationStorage } from './subsystems/migration-storage';
 import { buildStackOutputs } from './subsystems/outputs';
@@ -171,12 +170,7 @@ export class CdkStack extends cdk.Stack {
       workItemsTable: dataStores.workItemsTable,
       workspaceSearchTable: dataStores.workspaceSearchTable,
     });
-    const migrationObservability = buildMigrationObservability(this);
-    buildMigrationAlarmEvidenceSink(this, {
-      alarms: migrationObservability.alarms,
-      deploymentTrustRoot: deploymentTarget,
-      notificationTopicArns: parameters.alarmNotificationTopicArns,
-    });
+    buildMigrationObservability(this);
     const workspaceSearchWriterFence:
       WorkspaceSearchWriterFenceResources = {
         collaborationTable: dataStores.collaborationTable,

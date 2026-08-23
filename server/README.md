@@ -391,7 +391,7 @@ the account from STS `GetCallerIdentity`; an optional
 authenticated account. An optional `MUKUROJI_BACKFILL_OPERATOR_ID` is retained as
 an operator label, while AWS audit records use the authenticated STS caller ARN;
 local runs use the `local:backfill` sentinel. Canonical repairs and marker
-publication run inside the workspace-search writer-fence invocation.
+publication use the deployment's configured DynamoDB document client.
 Use repeated `--workspace-id <id>` options to scan and mark a selected set of
 workspaces before processing the rest of the environment. An unfiltered run
 marks the environment-wide scope after the complete source scan, including
@@ -431,20 +431,15 @@ Soft delete 済み comment と archived Team/Project は、再実行時に対応
 同じ `issueId` が複数 Team に存在しても、Work Item と comment の entity ID は Team scope を
 含むため混在しません。
 
-Backfill は checkpoint を保存せず、再実行時は選択した source の先頭から読み直します。
-Source の更新と projection が競合すると古い scan 結果を一時的に再投影し得るため、本番では
-書き込みを止めた maintenance window で実行し、API の live projection を有効化した後に
-もう一度 backfill を完走してから書き込みを再開してください。
+`search:backfill` は production migration / cutover の代替ではありません。lease、durable
+checkpoint、lossless preimage journal、独立した verify、rollback を持たないため、新しい schema や
+data migration には使用しません。
 
-このlegacy backfillは、production-safe migrationのlease、lossless journal、checkpoint、verify、rollback、
-writer-fence lifecycleを代替しません。AWS migration execution routeはretiredで、repository内に残る
-internal port/artifactをcontrol/apply/verify/rollback/releaseの承認済みcommandとして使用しません。
-
-Retained root/permitと6つのalarm deliveryはalarm-onlyです。実metricによる
-`OK → ALARM → OK`とprimary/secondary subscription receiptを検証しますが、migration executionまたは
-Production migration gateの有効化を承認しません。将来のreplacement routeは
-[`docs/operational-readiness.md`](../docs/operational-readiness.md)のacceptance gateを満たし、そのroute
-自身からreview済みnon-production execution evidenceを取得する必要があります。
+既存 canonical projection の repair として本番実行する場合に限り、事前に PITR と
+forward-repair plan を承認し、dry-run の件数を保存したうえで maintenance window 全体を通して
+source writer を停止します。途中で失敗した場合は writer を停止したまま選択した source の先頭から
+再実行し、完走後に source/target 件数と read smoke を確認してから writer を再開します。Source の
+更新と projection が競合すると、古い scan 結果を一時的に再投影し得ます。
 
 現時点では file の保存元は未導入のため、file は backfill 対象になりません。
 Work Item は canonical row の `creatorMemberKey`、`workflowStatusId`、`customFieldValues`、

@@ -7,29 +7,6 @@ const migrationMetricNamespace = 'Mukuroji/WorkspaceSearchMigration';
 /** Sole low-cardinality identity used by migration metric series. */
 const migrationMetricService = 'mukuroji-workspace-search-migration';
 
-/** Stable identifier used to bind one migration alarm to rehearsal evidence. */
-export type MigrationAlarmEvidenceName =
-  | 'throttle'
-  | 'budget-stop'
-  | 'budget-exhaustion'
-  | 'checkpoint-stall'
-  | 'quarantine'
-  | 'terminal-failure';
-
-/** One migration alarm and its identifier-free rehearsal evidence label. */
-export type MigrationAlarmEvidenceResource = {
-  /** Stable identifier-free label shared with the rehearsal evidence contract. */
-  readonly name: MigrationAlarmEvidenceName;
-  /** Concrete CloudWatch alarm whose real notifications must be observed. */
-  readonly alarm: cloudwatch.Alarm;
-};
-
-/** Complete migration alarm set consumed by the non-production evidence sink. */
-export type MigrationObservabilityResources = {
-  /** Six migration alarms in canonical rehearsal evidence order. */
-  readonly alarms: readonly MigrationAlarmEvidenceResource[];
-};
-
 /**
  * Creates one low-cardinality Workspace Search migration metric.
  *
@@ -57,12 +34,12 @@ function workspaceSearchMigrationMetric(
  * and therefore does not breach these event-count alarms.
  *
  * @param scope Stack that owns the migration alarms.
- * @returns The complete alarm set for optional non-production evidence wiring.
+ * @returns Nothing.
  */
 export function buildMigrationObservability(
   scope: cdk.Stack,
-): MigrationObservabilityResources {
-  const throttleAlarm = new cloudwatch.Alarm(
+): void {
+  new cloudwatch.Alarm(
     scope,
     'WorkspaceSearchMigrationDescribeTableThrottleAlarm',
     {
@@ -77,7 +54,7 @@ export function buildMigrationObservability(
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     },
   );
-  const budgetStopAlarm = new cloudwatch.Alarm(
+  new cloudwatch.Alarm(
     scope,
     'WorkspaceSearchMigrationDescribeTableBudgetStopAlarm',
     {
@@ -92,7 +69,7 @@ export function buildMigrationObservability(
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     },
   );
-  const budgetExhaustionAlarm = new cloudwatch.Alarm(
+  new cloudwatch.Alarm(
     scope,
     'WorkspaceSearchMigrationRateBudgetExhaustionAlarm',
     {
@@ -109,7 +86,7 @@ export function buildMigrationObservability(
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     },
   );
-  const checkpointStallAlarm = new cloudwatch.Alarm(
+  new cloudwatch.Alarm(
     scope,
     'WorkspaceSearchMigrationCheckpointStallAlarm',
     {
@@ -124,7 +101,7 @@ export function buildMigrationObservability(
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     },
   );
-  const quarantineAlarm = new cloudwatch.Alarm(
+  new cloudwatch.Alarm(
     scope,
     'WorkspaceSearchMigrationQuarantineAlarm',
     {
@@ -139,7 +116,7 @@ export function buildMigrationObservability(
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     },
   );
-  const terminalFailureAlarm = new cloudwatch.Alarm(
+  new cloudwatch.Alarm(
     scope,
     'WorkspaceSearchMigrationTerminalFailureAlarm',
     {
@@ -154,15 +131,4 @@ export function buildMigrationObservability(
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     },
   );
-
-  return {
-    alarms: [
-      { name: 'throttle', alarm: throttleAlarm },
-      { name: 'budget-stop', alarm: budgetStopAlarm },
-      { name: 'budget-exhaustion', alarm: budgetExhaustionAlarm },
-      { name: 'checkpoint-stall', alarm: checkpointStallAlarm },
-      { name: 'quarantine', alarm: quarantineAlarm },
-      { name: 'terminal-failure', alarm: terminalFailureAlarm },
-    ],
-  };
 }

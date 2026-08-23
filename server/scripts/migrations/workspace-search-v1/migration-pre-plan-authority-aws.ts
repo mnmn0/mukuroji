@@ -89,53 +89,6 @@ export interface WorkspaceSearchMigrationPrePlanAuthorityAwsTransport {
 export type WorkspaceSearchMigrationPrePlanAuthorityClock = () => Date
 
 /**
- * Secret-free projection of an adapter-proven durable lease observation.
- *
- * Run, owner, fence, configuration, and physical-resource identities remain
- * private to the authority adapter. Stable identity digests deliberately omit
- * mutable expiry so one logical attempt remains identifiable across heartbeats
- * and matching active acquisition retries in later stage processes.
- */
-export type WorkspaceSearchMigrationDurableLeaseAcquisitionObservation =
-  | {
-      /** Discriminates a newly committed lease acquisition. */
-      readonly kind: 'acquired'
-      /** Stable predecessor lease identity consumed by CAS, or null initially. */
-      readonly predecessorLeaseIdentityDigest: string | null
-      /** Exact predecessor expiry consumed by CAS, or null for initial bootstrap. */
-      readonly predecessorLeaseExpiresAt: string | null
-      /** Exact trusted commit time stored as the successor acquisition time. */
-      readonly acquiredAt: string
-      /** Stable newly durable successor lease identity excluding mutable expiry. */
-      readonly successorLeaseIdentityDigest: string
-      /** Exact expiry stored in the newly durable successor lease. */
-      readonly successorLeaseExpiresAt: string
-    }
-  | {
-      /** Discriminates a verified reuse of the matching active lease. */
-      readonly kind: 'reused-active'
-      /** Stable identity of the matching active lease returned to the caller. */
-      readonly currentLeaseIdentityDigest: string
-      /** Adapter-owned trusted time at which the active lease was evaluated. */
-      readonly evaluatedAt: string
-      /** Exact current expiry proven to remain later than evaluation time. */
-      readonly currentLeaseExpiresAt: string
-    }
-
-/** Synchronous sink for one secret-free durable lease projection. */
-export interface WorkspaceSearchMigrationDurableLeaseAcquisitionObserver {
-  /**
-   * Records one newly acquired or verified matching-active lease.
-   *
-   * @param observation - Frozen adapter-proven durable lease projection.
-   */
-  observe(
-    observation:
-      WorkspaceSearchMigrationDurableLeaseAcquisitionObservation,
-  ): void
-}
-
-/**
  * Dependencies for one measured pre-plan authority adapter.
  */
 export type CreateWorkspaceSearchMigrationPrePlanAuthorityAwsPortInput = {
@@ -147,9 +100,6 @@ export type CreateWorkspaceSearchMigrationPrePlanAuthorityAwsPortInput = {
   readonly transport: WorkspaceSearchMigrationPrePlanAuthorityAwsTransport
   /** Adapter-owned trusted clock. */
   readonly clock: WorkspaceSearchMigrationPrePlanAuthorityClock
-  /** Optional synchronous rehearsal-only durable acquisition observer. */
-  readonly leaseAcquisitionObserver?:
-    WorkspaceSearchMigrationDurableLeaseAcquisitionObserver
 }
 
 /**
@@ -459,32 +409,21 @@ class AwsWorkspaceSearchMigrationPrePlanAuthorityPort
   /** Adapter-owned trusted clock. */
   private readonly clock: WorkspaceSearchMigrationPrePlanAuthorityClock
 
-  /** Optional synchronous sink for newly committed acquisitions. */
-  private readonly leaseAcquisitionObserver:
-    WorkspaceSearchMigrationDurableLeaseAcquisitionObserver | undefined
-
-  /** Acquisition projections already emitted by this adapter instance. */
-  private readonly observedLeaseAcquisitionKeys = new Set<string>()
-
   /**
    * Creates one adapter from already validated construction input.
    *
    * @param binding - Exact measured state/configuration binding.
    * @param transport - Narrow migration-state transport.
    * @param clock - Adapter-owned trusted clock.
-   * @param leaseAcquisitionObserver - Optional synchronous rehearsal sink.
    */
   constructor(
     binding: PrePlanAuthorityBinding,
     transport: WorkspaceSearchMigrationPrePlanAuthorityAwsTransport,
     clock: WorkspaceSearchMigrationPrePlanAuthorityClock,
-    leaseAcquisitionObserver?:
-      WorkspaceSearchMigrationDurableLeaseAcquisitionObserver,
   ) {
     this.binding = binding
     this.transport = transport
     this.clock = clock
-    this.leaseAcquisitionObserver = leaseAcquisitionObserver
   }
 
   /**
@@ -515,10 +454,6 @@ class AwsWorkspaceSearchMigrationPrePlanAuthorityPort
             observedClock,
           )
         ) {
-          this.observeDurableActiveLeaseReuse(
-            predecessor,
-            observedClock,
-          )
           return cloneLease(predecessor.lease)
         }
         return failPrePlanAuthorityAws('LEASE_CONFLICT')
@@ -566,7 +501,6 @@ class AwsWorkspaceSearchMigrationPrePlanAuthorityPort
           error,
         )
       }
-      this.observeDurableLeaseAcquisition(predecessor, successor)
       return cloneLease(successor.lease)
     })
   }
@@ -1072,12 +1006,6 @@ class AwsWorkspaceSearchMigrationPrePlanAuthorityPort
       Date.parse(durable.lease.heartbeatAt) >=
         Date.parse(successor.lease.heartbeatAt)
     ) {
-      if (
-        operation === 'acquire' &&
-        leaseTransactionFailureCouldHideCommit(transactionError)
-      ) {
-        this.observeDurableLeaseAcquisition(predecessor, successor)
-      }
       return cloneLease(durable.lease)
     }
     if (
@@ -1095,85 +1023,6 @@ class AwsWorkspaceSearchMigrationPrePlanAuthorityPort
     return failPrePlanAuthorityAws(
       operation === 'acquire' ? 'LEASE_CONFLICT' : 'LEASE_LOST',
     )
-  }
-
-  /**
-   * Emits one exact secret-free acquisition projection synchronously.
-   *
-   * The projection key suppresses idempotent duplicate success responses for
-   * the same deterministic transaction without retaining run, owner, or fence
-   * identity. Observer failure remains fail-closed after the durable write.
-   *
-   * @param predecessor - Exact absent or expired predecessor consumed by CAS.
-   * @param successor - Exact successor proven durable by response or reread.
-   */
-  private observeDurableLeaseAcquisition(
-    predecessor: DurablePrePlanLease | undefined,
-    successor: DurablePrePlanLease,
-  ): void {
-    const observer = this.leaseAcquisitionObserver
-    if (observer === undefined) return
-    const observation:
-      WorkspaceSearchMigrationDurableLeaseAcquisitionObservation =
-      Object.freeze({
-      kind: 'acquired',
-      predecessorLeaseIdentityDigest: predecessor === undefined
-        ? null
-        : createDurableLeaseIdentityDigest(predecessor),
-      predecessorLeaseExpiresAt:
-        predecessor?.lease.expiresAt ?? null,
-      acquiredAt: successor.lease.heartbeatAt,
-      successorLeaseIdentityDigest:
-        createDurableLeaseIdentityDigest(successor),
-      successorLeaseExpiresAt: successor.lease.expiresAt,
-    })
-    const observationKey = [
-      observation.kind,
-      observation.predecessorLeaseIdentityDigest ?? 'null',
-      observation.predecessorLeaseExpiresAt ?? 'null',
-      observation.acquiredAt,
-      observation.successorLeaseIdentityDigest,
-      observation.successorLeaseExpiresAt,
-    ].join('|')
-    if (this.observedLeaseAcquisitionKeys.has(observationKey)) return
-    observer.observe(observation)
-    this.observedLeaseAcquisitionKeys.add(observationKey)
-  }
-
-  /**
-   * Emits one verified matching-active lease projection synchronously.
-   *
-   * This path deliberately exposes no predecessor facts because no acquisition
-   * CAS occurred. The stable current identity is derived only after the active
-   * lease has passed the complete binding, run, owner, and expiry check.
-   *
-   * @param current - Exact matching active durable lease returned to the caller.
-   * @param evaluatedClock - Adapter-owned trusted evaluation time.
-   */
-  private observeDurableActiveLeaseReuse(
-    current: DurablePrePlanLease,
-    evaluatedClock: PrePlanAuthorityClockSnapshot,
-  ): void {
-    const observer = this.leaseAcquisitionObserver
-    if (observer === undefined) return
-    const observation:
-      WorkspaceSearchMigrationDurableLeaseAcquisitionObservation =
-      Object.freeze({
-      kind: 'reused-active',
-      currentLeaseIdentityDigest:
-        createDurableLeaseIdentityDigest(current),
-      evaluatedAt: evaluatedClock.at,
-      currentLeaseExpiresAt: current.lease.expiresAt,
-    })
-    const observationKey = [
-      observation.kind,
-      observation.currentLeaseIdentityDigest,
-      observation.evaluatedAt,
-      observation.currentLeaseExpiresAt,
-    ].join('|')
-    if (this.observedLeaseAcquisitionKeys.has(observationKey)) return
-    observer.observe(observation)
-    this.observedLeaseAcquisitionKeys.add(observationKey)
   }
 
   /**
@@ -1305,18 +1154,11 @@ export function createAwsWorkspaceSearchMigrationPrePlanAuthorityPort(
     if (typeof input.clock !== 'function') {
       return failPrePlanAuthorityAws('INVALID_ARGUMENT')
     }
-    if (
-      input.leaseAcquisitionObserver !== undefined &&
-      typeof input.leaseAcquisitionObserver.observe !== 'function'
-    ) {
-      return failPrePlanAuthorityAws('INVALID_ARGUMENT')
-    }
     requirePrePlanAuthorityTransport(input.transport)
     return new AwsWorkspaceSearchMigrationPrePlanAuthorityPort(
       binding,
       input.transport,
       input.clock,
-      input.leaseAcquisitionObserver,
     )
   } catch (error: unknown) {
     throw createPrePlanAuthorityBoundaryFailure(
@@ -2651,30 +2493,6 @@ function cloneAuthority(
     ),
     evaluatedAt: authority.evaluatedAt,
   }
-}
-
-/**
- * Creates the stable identity digest for one lease generation.
- *
- * Heartbeat and expiry timestamps are intentionally excluded so every renewal
- * of the same run, owner, fence, and measured binding retains one identity.
- *
- * @param durableLease - Complete measured lease envelope.
- * @returns Lowercase SHA-256 identity digest without raw identifiers.
- */
-function createDurableLeaseIdentityDigest(
-  durableLease: DurablePrePlanLease,
-): string {
-  return createMigrationDigest({
-    kind: 'workspace-search-rehearsal-lease-identity',
-    version: 1,
-    stateIncarnationDigest: durableLease.stateIncarnationDigest,
-    stateTableId: durableLease.stateTableId,
-    configurationHash: durableLease.configurationHash,
-    runId: durableLease.lease.runId,
-    ownerId: durableLease.lease.ownerId,
-    fenceToken: durableLease.lease.fenceToken,
-  })
 }
 
 /**
@@ -4150,36 +3968,6 @@ function classifyLeaseTransactionError(
       : 'INVALID_STATE'
   } catch {
     return 'INVALID_STATE'
-  }
-}
-
-/**
- * Determines whether a failed transaction response can conceal a commit.
- *
- * Explicit cancellation, conflict, missing-resource, and throttling responses
- * prove that this attempt did not install the matching durable row. Other
- * transport failures remain ambiguous, so a matching strong reread proves the
- * deterministic transaction's successor was committed.
- *
- * @param error - Raw transaction failure followed by a matching durable read.
- * @returns Whether the matching successor represents an ambiguous commit.
- */
-function leaseTransactionFailureCouldHideCommit(error: unknown): boolean {
-  try {
-    if (
-      error instanceof ResourceNotFoundException ||
-      error instanceof TransactionCanceledException ||
-      error instanceof TransactionConflictException ||
-      isTransactionConflictErrorName(error)
-    ) {
-      return false
-    }
-    if (!(error instanceof Error)) return true
-    return !isThrottlingError(
-      createPrePlanAuthorityAwsErrorClassificationInput(error),
-    )
-  } catch {
-    return false
   }
 }
 

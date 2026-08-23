@@ -9,8 +9,6 @@ import type {
 
 const minimumJournalRetentionDays = 30;
 const maximumJournalRetentionDays = 31;
-const minimumRehearsalEvidenceRetentionDays = 365;
-const maximumRehearsalEvidenceRetentionDays = 366;
 
 /** Stable tag key carrying the Workspace Search migration environment attestation. */
 export const WORKSPACE_SEARCH_MIGRATION_ENVIRONMENT_TAG_KEY =
@@ -69,10 +67,6 @@ export type MigrationStorageResources = {
   readonly workspaceSearchMigrationJournalKey: kms.Key;
   /** Least-privilege permissions attached explicitly to an approved operator principal. */
   readonly workspaceSearchMigrationOperatorPolicy: iam.ManagedPolicy;
-  /** Non-production-only retention extension attached alongside the operator policy. */
-  readonly workspaceSearchMigrationRehearsalEvidencePolicy: iam.ManagedPolicy;
-  /** Deployment condition guarding the rehearsal-only evidence policy and output. */
-  readonly workspaceSearchMigrationRehearsalEvidenceCondition: cdk.CfnCondition;
   /** Durable checkpoint, lease, operation-marker, and verification state table. */
   readonly workspaceSearchMigrationStateTable: dynamodb.Table;
 };
@@ -186,11 +180,6 @@ export function buildMigrationStorage(
     workspaceSearchMigrationJournalBucket.arnForObjects(
       'workspace-search/v1/*',
     );
-  const rehearsalEvidenceObjectArn =
-    workspaceSearchMigrationJournalBucket.arnForObjects(
-      'workspace-search/v1/rehearsal/evidence-*',
-    );
-
   workspaceSearchMigrationJournalBucket.addToResourcePolicy(
     new iam.PolicyStatement({
       sid: 'DenyJournalObjectDeletion',
@@ -290,38 +279,8 @@ export function buildMigrationStorage(
         },
       },
       effect: iam.Effect.DENY,
-      notResources: [rehearsalEvidenceObjectArn],
       principals: [new iam.AnyPrincipal()],
-    }),
-  );
-  workspaceSearchMigrationJournalBucket.addToResourcePolicy(
-    new iam.PolicyStatement({
-      sid: 'DenyShortRehearsalEvidenceRetention',
-      actions: ['s3:PutObjectRetention'],
-      conditions: {
-        NumericLessThan: {
-          's3:object-lock-remaining-retention-days':
-            minimumRehearsalEvidenceRetentionDays,
-        },
-      },
-      effect: iam.Effect.DENY,
-      principals: [new iam.AnyPrincipal()],
-      resources: [rehearsalEvidenceObjectArn],
-    }),
-  );
-  workspaceSearchMigrationJournalBucket.addToResourcePolicy(
-    new iam.PolicyStatement({
-      sid: 'DenyLongRehearsalEvidenceRetention',
-      actions: ['s3:PutObjectRetention'],
-      conditions: {
-        NumericGreaterThan: {
-          's3:object-lock-remaining-retention-days':
-            maximumRehearsalEvidenceRetentionDays,
-        },
-      },
-      effect: iam.Effect.DENY,
-      principals: [new iam.AnyPrincipal()],
-      resources: [rehearsalEvidenceObjectArn],
+      resources: [journalObjectArn],
     }),
   );
 
@@ -488,71 +447,10 @@ export function buildMigrationStorage(
     },
   );
 
-  const workspaceSearchMigrationRehearsalEvidenceCondition =
-    new cdk.CfnCondition(
-      scope,
-      'WorkspaceSearchMigrationRehearsalEvidenceNonProduction',
-      {
-        expression: cdk.Fn.conditionEquals(
-          input.deploymentTrustRoot.rehearsalEnabled
-            ? input.deploymentTrustRoot.environment
-            : 'production-disabled',
-          'non-production',
-        ),
-      },
-    );
-  const workspaceSearchMigrationRehearsalEvidencePolicy =
-    new iam.ManagedPolicy(
-      scope,
-      'WorkspaceSearchMigrationRehearsalEvidencePolicy',
-      {
-        description:
-          'Unattached non-production-only permission to extend immutable rehearsal evidence retention.',
-        statements: [
-          new iam.PolicyStatement({
-            actions: ['s3:GetBucketTagging'],
-            resources: [workspaceSearchMigrationJournalBucket.bucketArn],
-          }),
-          new iam.PolicyStatement({
-            actions: ['s3:PutObjectRetention'],
-            conditions: {
-              NumericGreaterThanEquals: {
-                's3:object-lock-remaining-retention-days':
-                  minimumRehearsalEvidenceRetentionDays,
-              },
-              NumericLessThanEquals: {
-                's3:object-lock-remaining-retention-days':
-                  maximumRehearsalEvidenceRetentionDays,
-              },
-              StringEquals: {
-                's3:object-lock-mode': 'COMPLIANCE',
-              },
-            },
-            resources: [rehearsalEvidenceObjectArn],
-          }),
-        ],
-      },
-    );
-  const rehearsalEvidencePolicyResource =
-    workspaceSearchMigrationRehearsalEvidencePolicy.node.defaultChild;
-  if (!(rehearsalEvidencePolicyResource instanceof iam.CfnManagedPolicy)) {
-    throw new Error(
-      'Migration rehearsal evidence policy has no CloudFormation resource.',
-    );
-  }
-  rehearsalEvidencePolicyResource.cfnOptions.condition =
-    workspaceSearchMigrationRehearsalEvidenceCondition;
-  applyMigrationDeploymentTrustTags(
-    workspaceSearchMigrationRehearsalEvidencePolicy,
-    input.deploymentTrustRoot,
-  );
-
   return {
     workspaceSearchMigrationJournalBucket,
     workspaceSearchMigrationJournalKey,
     workspaceSearchMigrationOperatorPolicy,
-    workspaceSearchMigrationRehearsalEvidenceCondition,
-    workspaceSearchMigrationRehearsalEvidencePolicy,
     workspaceSearchMigrationStateTable,
   };
 }

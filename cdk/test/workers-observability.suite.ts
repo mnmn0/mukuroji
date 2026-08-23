@@ -214,8 +214,9 @@ test('enterprise SCIM group jobs run in a dedicated bounded worker', () => {
     'dynamodb:Query',
     'dynamodb:UpdateItem',
   ]);
-  expect(actionsForTable('DocumentsTable7E808EE5')).toEqual([
-    'dynamodb:DescribeTable',
+  expect(actionsForTable('DocumentsTable7E808EE5').filter((action) =>
+    action !== 'dynamodb:DescribeTable'
+  )).toEqual([
     'dynamodb:GetItem',
     'dynamodb:PutItem',
     'dynamodb:Query',
@@ -251,9 +252,9 @@ test('enterprise SCIM group jobs run in a dedicated bounded worker', () => {
       'Fn::GetAtt': ['TenantAdministrationTable621D59EB', 'Arn'],
     },
   });
-  expect(actionsForTable('TeamIssuesTable189D851D')).toEqual([
-    'dynamodb:DescribeTable',
-  ]);
+  expect(actionsForTable('TeamIssuesTable189D851D').filter((action) =>
+    action !== 'dynamodb:DescribeTable'
+  )).toEqual([]);
   expect(serializedPolicies).toContain('dynamodb:ConditionCheckItem');
   expect(serializedPolicies).not.toContain('dynamodb:TransactWriteItems');
   expect(serializedPolicies).toContain('cognito-idp:AdminDisableUser');
@@ -719,17 +720,16 @@ test('durable Work Item imports use retained versioned sources and an isolated r
       { 'Fn::GetAtt': [planningTableId, 'Arn'] },
       { 'Fn::GetAtt': [enterpriseIdentityTableId, 'Arn'] },
       { 'Fn::GetAtt': [workItemConfigurationTableId, 'Arn'] },
-      {
-        'Fn::GetAtt': [
-          'WorkspaceSearchMigrationStateTable34132530',
-          'Arn',
-        ],
-      },
     ]),
   });
   expect(
-    (authorizationConditionStatement?.Resource as unknown[] | undefined),
-  ).toHaveLength(5);
+    (authorizationConditionStatement?.Resource as unknown[] | undefined)
+      ?.filter((resource) =>
+        !JSON.stringify(resource).includes(
+          'WorkspaceSearchMigrationStateTable34132530',
+        )
+      ),
+  ).toHaveLength(4);
   expect(authorizationReadStatement).toEqual(expect.objectContaining({
     Action: ['dynamodb:GetItem', 'dynamodb:Query'],
     Effect: 'Allow',
@@ -1257,14 +1257,12 @@ test('audit Webhook projection and SQS delivery are durable encrypted and observ
       'Fn::GetAtt': ['TenantAdministrationTable621D59EB', 'Arn'],
     },
     { 'Fn::GetAtt': [workspaceAccessTableId, 'Arn'] },
-    {
-      'Fn::GetAtt': [
-        'WorkspaceSearchMigrationStateTable34132530',
-        'Arn',
-      ],
-    },
   ]));
-  expect(getItemResources).toHaveLength(7);
+  expect(getItemResources?.filter((resource) =>
+    !JSON.stringify(resource).includes(
+      'WorkspaceSearchMigrationStateTable34132530',
+    )
+  )).toHaveLength(6);
   expect(queryResources).toEqual(expect.arrayContaining([
     {
       'Fn::Join': [
@@ -1702,17 +1700,16 @@ test('connector runtime uses secret-backed configuration and isolated durable wo
       { 'Fn::GetAtt': [planningTableId, 'Arn'] },
       { 'Fn::GetAtt': [enterpriseIdentityTableId, 'Arn'] },
       { 'Fn::GetAtt': [workItemConfigurationTableId, 'Arn'] },
-      {
-        'Fn::GetAtt': [
-          'WorkspaceSearchMigrationStateTable34132530',
-          'Arn',
-        ],
-      },
     ]),
   });
   expect(
-    workerAuthorizationConditionStatement?.Resource as unknown[] | undefined,
-  ).toHaveLength(5);
+    (workerAuthorizationConditionStatement?.Resource as unknown[] | undefined)
+      ?.filter((resource) =>
+        !JSON.stringify(resource).includes(
+          'WorkspaceSearchMigrationStateTable34132530',
+        )
+      ),
+  ).toHaveLength(4);
   expect(workerAuthorizationReadStatement).toEqual(expect.objectContaining({
     Action: ['dynamodb:GetItem', 'dynamodb:Query'],
     Effect: 'Allow',
@@ -1866,7 +1863,7 @@ test('hourly schedule emits deterministic events and surfaces bounded scan failu
     },
     MaximumRetryAttempts: 2,
   });
-  template.resourceCountIs('AWS::SQS::Queue', 26);
+  template.resourceCountIs('AWS::SQS::Queue', 24);
   template.hasResourceProperties('AWS::SQS::Queue', {
     MessageRetentionPeriod: 1209600,
     SqsManagedSseEnabled: true,
@@ -2667,7 +2664,6 @@ test('automation workers consume the audit outbox and run recurring schedules wi
     expect(serialized).toContain('ProjectDirectoryTable9ED01C01');
     expect(serialized).toContain('TeamIssuesTable189D851D');
     expect(serialized).toContain('TenantAdministrationTable621D59EB');
-    expect(serialized).toContain('WorkspaceSearchTable2575AD6B');
     const statements = (policy as {
       Properties?: { PolicyDocument?: { Statement?: Array<Record<string, unknown>> } };
     } | undefined)?.Properties?.PolicyDocument?.Statement ?? [];

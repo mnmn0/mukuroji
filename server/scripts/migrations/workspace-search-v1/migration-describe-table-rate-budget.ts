@@ -74,39 +74,16 @@ export const WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_RATE_OBSERVATION_VERSION 
 export const WORKSPACE_SEARCH_MIGRATION_DESCRIBE_TABLE_RATE_CHECKPOINT_VERSION =
   2
 
-/** Provenance assigned to one controller-classified throttle. */
+/** Provenance assigned to one throttle, including the legacy checkpoint value. */
 export type WorkspaceSearchMigrationDescribeTableThrottleProvenance =
   | 'aws-service'
   | 'rehearsal-after-success-injection'
 
-/** Provenance assigned to one fail-closed admission stop. */
+/** Provenance assigned to one stop, including the legacy checkpoint value. */
 export type WorkspaceSearchMigrationDescribeTableBudgetStopProvenance =
   | 'operational'
   | 'aws-service-throttle'
   | 'rehearsal-after-success-injection'
-
-/** Module-private identity for deterministic post-success throttle faults. */
-const rehearsalAfterSuccessThrottleErrors = new WeakSet<object>()
-
-/** Creates one raw-value-free error that callers cannot structurally forge. */
-function createRehearsalAfterSuccessThrottleError(): Error {
-  const error = new Error('Rehearsal DescribeTable throttle injection.')
-  error.name = 'WorkspaceSearchMigrationRehearsalAfterSuccessThrottleError'
-  rehearsalAfterSuccessThrottleErrors.add(error)
-  return error
-}
-
-/**
- * Checks whether the exact module-private post-success fault was observed.
- *
- * @param error - Candidate transport failure.
- * @returns Whether this module minted the candidate after an AWS success.
- */
-function isRehearsalAfterSuccessThrottleError(error: unknown): boolean {
-  return typeof error === 'object' &&
-    error !== null &&
-    rehearsalAfterSuccessThrottleErrors.has(error)
-}
 
 /**
  * Static AWS credentials pinned to the measured migration account.
@@ -338,22 +315,6 @@ export interface WorkspaceSearchMigrationDescribeTableSingleAttemptAwsTransport 
 }
 
 /**
- * Rehearsal-only transport capability kept outside the production projection.
- */
-export interface WorkspaceSearchMigrationDescribeTableRehearsalThrottleAwsTransport
-  extends WorkspaceSearchMigrationDescribeTableSingleAttemptAwsTransport {
-  /**
-   * Creates one real read-only attempt that injects only after AWS succeeds.
-   *
-   * @param tableName - Construction-fixed allowlisted DynamoDB table name.
-   * @returns Nominal attempt consumed only by the genuine rate controller.
-   */
-  createAfterSuccessThrottleAttempt(
-    tableName: string,
-  ): WorkspaceSearchMigrationDescribeTableSingleAttempt<never>
-}
-
-/**
  * AWS SDK implementation owning one dedicated DynamoDB client.
  */
 class AwsSdkWorkspaceSearchMigrationDescribeTableSingleAttemptTransport
@@ -415,35 +376,10 @@ class AwsSdkWorkspaceSearchMigrationDescribeTableSingleAttemptTransport
     )
   }
 
-  /**
-   * Runs a genuine AWS read and replaces only its successful response.
-   *
-   * AWS throttles and all other failures pass through untouched, so they can
-   * never be misclassified as the deterministic rehearsal injection.
-   *
-   * @param tableName - Validated rehearsal table name.
-   * @returns Controller-only attempt that never returns a response.
-   */
-  createAfterSuccessThrottleAttempt(
-    tableName: string,
-  ): WorkspaceSearchMigrationDescribeTableSingleAttempt<never> {
-    const command = new DescribeTableCommand({
-      TableName: detachAndValidateDescribeTableName(tableName),
-    })
-    return new WorkspaceSearchMigrationDescribeTableSingleAttempt(
-      singleAttemptConstructionKey,
-      this.#scopeBindingDigest,
-      this.#transportBindingDigest,
-      async (signal): Promise<never> => {
-        await this.#client.describeTable(command, signal)
-        throw createRehearsalAfterSuccessThrottleError()
-      },
-    )
-  }
 }
 
 /**
- * Production-only projection that hides rehearsal transport capabilities.
+ * Production projection exposing only the narrow transport capability.
  */
 class ProjectedWorkspaceSearchMigrationDescribeTableSingleAttemptTransport
   implements WorkspaceSearchMigrationDescribeTableSingleAttemptAwsTransport {
@@ -455,7 +391,7 @@ class ProjectedWorkspaceSearchMigrationDescribeTableSingleAttemptTransport
    * Retains one genuine transport behind the production-only surface.
    *
    * @param constructionKey - Module-private capability construction key.
-   * @param transport - Hidden concrete transport with rehearsal extensions.
+   * @param transport - Hidden concrete DescribeTable transport.
    */
   constructor(
     constructionKey: symbol,
@@ -562,26 +498,6 @@ export function createWorkspaceSearchMigrationDescribeTableSingleAttemptAwsTrans
   configuration: WorkspaceSearchMigrationDescribeTableAwsSdkConfiguration,
 ): WorkspaceSearchMigrationDescribeTableSingleAttemptAwsTransport {
   return createDescribeTableTransport(configuration)
-}
-
-/**
- * Creates the separate non-production post-success throttle transport surface.
- *
- * The standard production factory never returns this additional method.
- *
- * @param configuration - Explicit pinned AWS scope and credentials.
- * @returns Closeable standard transport plus one rehearsal-only attempt factory.
- */
-export function createWorkspaceSearchMigrationDescribeTableRehearsalThrottleAwsTransport(
-  configuration: WorkspaceSearchMigrationDescribeTableAwsSdkConfiguration,
-): WorkspaceSearchMigrationDescribeTableRehearsalThrottleAwsTransport {
-  const transport = createConcreteDescribeTableTransport(configuration)
-  return Object.freeze({
-    close: (): void => transport.close(),
-    createAttempt: (tableName: string) => transport.createAttempt(tableName),
-    createAfterSuccessThrottleAttempt: (tableName: string) =>
-      transport.createAfterSuccessThrottleAttempt(tableName),
-  })
 }
 
 /**
@@ -1197,7 +1113,7 @@ export type RunWorkspaceSearchMigrationDescribeTableAttemptInput = {
 }
 
 /**
- * Secret-free aggregate suitable for non-production rehearsal evidence.
+ * Secret-free aggregate for production telemetry and durable recovery.
  *
  * Attempt observations, rather than conservative charged counters, establish
  * actual physical start times and observed request rate.
@@ -1216,7 +1132,7 @@ export type WorkspaceSearchMigrationDescribeTableRateEvidence = {
   readonly throttleCount: number
   /** Throttles classified from genuine AWS service failures. */
   readonly awsServiceThrottleCount: number
-  /** Deterministic throttles injected only after an AWS success response. */
+  /** Retired rehearsal throttles retained as a zero-valued compatibility field. */
   readonly rehearsalInjectedThrottleCount: number
   /** Count of distinct fail-closed admission stops. */
   readonly budgetStopCount: number
@@ -1224,7 +1140,7 @@ export type WorkspaceSearchMigrationDescribeTableRateEvidence = {
   readonly operationalBudgetStopCount: number
   /** Admission stops caused by an AWS-service throttle classification. */
   readonly awsServiceThrottleBudgetStopCount: number
-  /** Admission stops caused by the post-success rehearsal injection. */
+  /** Retired rehearsal stops retained as a zero-valued compatibility field. */
   readonly rehearsalInjectedBudgetStopCount: number
   /** Count of waits performed before external I/O. */
   readonly cadenceWaitCount: number
@@ -1280,7 +1196,7 @@ export type WorkspaceSearchMigrationDescribeTableRateCheckpoint = {
   readonly throttleCount: number
   /** Throttles classified from genuine AWS service failures. */
   readonly awsServiceThrottleCount: number
-  /** Deterministic throttles injected only after an AWS success response. */
+  /** Retired rehearsal throttles retained for checkpoint compatibility. */
   readonly rehearsalInjectedThrottleCount: number
   /** Count of distinct fail-closed admission stops. */
   readonly budgetStopCount: number
@@ -1288,7 +1204,7 @@ export type WorkspaceSearchMigrationDescribeTableRateCheckpoint = {
   readonly operationalBudgetStopCount: number
   /** Admission stops caused by an AWS-service throttle classification. */
   readonly awsServiceThrottleBudgetStopCount: number
-  /** Admission stops caused by the post-success rehearsal injection. */
+  /** Retired rehearsal stops retained for checkpoint compatibility. */
   readonly rehearsalInjectedBudgetStopCount: number
   /** Count of cadence-delay requests started. */
   readonly cadenceWaitCount: number
@@ -1549,7 +1465,7 @@ type RateEvidenceState = {
   throttleCount: number
   /** Genuine AWS-service throttle classifications. */
   awsServiceThrottleCount: number
-  /** Rehearsal post-success throttle classifications. */
+  /** Retired rehearsal throttle count retained for checkpoint compatibility. */
   rehearsalInjectedThrottleCount: number
   /** Distinct fail-closed stops. */
   budgetStopCount: number
@@ -1557,7 +1473,7 @@ type RateEvidenceState = {
   operationalBudgetStopCount: number
   /** Stops emitted from AWS-service throttle handling. */
   awsServiceThrottleBudgetStopCount: number
-  /** Stops emitted from post-success rehearsal injection handling. */
+  /** Retired rehearsal stop count retained for checkpoint compatibility. */
   rehearsalInjectedBudgetStopCount: number
   /** Admission delay requests started. */
   cadenceWaitCount: number
@@ -2881,11 +2797,7 @@ class DescribeTableRateLifecycle
           this.#requireCurrentOperationGeneration()
           const throttleProvenance:
             WorkspaceSearchMigrationDescribeTableThrottleProvenance | undefined =
-              isRehearsalAfterSuccessThrottleError(error)
-                ? 'rehearsal-after-success-injection'
-                : isSafeThrottlingError(error)
-                  ? 'aws-service'
-                  : undefined
+              isSafeThrottlingError(error) ? 'aws-service' : undefined
           if (throttleProvenance !== undefined) {
             this.#scope.evidence.throttleCount += 1
             if (throttleProvenance === 'aws-service') {

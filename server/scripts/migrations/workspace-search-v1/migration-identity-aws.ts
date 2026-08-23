@@ -1,5 +1,4 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
-import { performance } from 'node:perf_hooks'
 import { types as nodeUtilTypes } from 'node:util'
 import {
   DescribeContinuousBackupsCommand,
@@ -23,13 +22,6 @@ import {
   KMSClient,
 } from '@aws-sdk/client-kms'
 import {
-  GetBucketTaggingCommand,
-  type GetBucketTaggingOutput,
-  type GetBucketVersioningCommandOutput,
-  GetObjectAttributesCommand,
-  type GetObjectAttributesCommandOutput,
-  GetObjectTaggingCommand,
-  type GetObjectTaggingCommandOutput,
   GetObjectCommand,
   type GetObjectCommandOutput,
   GetBucketEncryptionCommand,
@@ -112,36 +104,6 @@ import {
   type WorkspaceSearchMigrationSharedProfiles,
   loadWorkspaceSearchMigrationSharedProfiles,
 } from './migration-shared-profile-loader'
-import {
-  AwsCrossDomainIntegrityReader,
-  type CrossDomainIntegrityAwsTransport,
-} from '../../data-integrity/verify-cross-domain-integrity'
-import {
-  WORKSPACE_SEARCH_MIGRATION_REHEARSAL_DEPLOYMENT_TRUST_ROOT_TAG_KEY,
-  WORKSPACE_SEARCH_MIGRATION_REHEARSAL_ENVIRONMENT_TAG_KEY,
-  WORKSPACE_SEARCH_MIGRATION_REHEARSAL_PRODUCTION_ACCOUNT_DIGEST_TAG_KEY,
-  WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE,
-} from './migration-rehearsal-permit'
-import {
-  parseWorkspaceSearchMigrationRehearsalRootPlan,
-  type WorkspaceSearchMigrationRehearsalRootPlan,
-} from './migration-rehearsal-root-plan'
-import {
-  createWorkspaceSearchMigrationRehearsalIntegrityRateAdapter,
-  type WorkspaceSearchMigrationRehearsalIntegrityRateAdapter,
-} from './migration-rehearsal-integrity-rate-adapter'
-import {
-  createWorkspaceSearchMigrationRehearsalPrePermitRootSession,
-  createWorkspaceSearchMigrationRehearsalRootTimeline,
-  WorkspaceSearchMigrationRehearsalPrePermitRootSessionError,
-  type WorkspaceSearchMigrationRehearsalPrePermitRootSession,
-  type WorkspaceSearchMigrationRehearsalRootAttestationOperation,
-  type WorkspaceSearchMigrationRehearsalRootAttestationOperationResult,
-  type WorkspaceSearchMigrationRehearsalRootTimeline,
-} from './migration-rehearsal-pre-permit-root-session'
-import {
-  WorkspaceSearchMigrationStrictRecordGuards,
-} from './migration-strict-record-guards'
 import {
   MAINTENANCE_EVIDENCE_MAX_BYTES,
 } from './maintenance-evidence'
@@ -1318,21 +1280,6 @@ export type CreateAwsWorkspaceSearchMigrationRateManagedSessionInput = {
   readonly signal?: AbortSignal
 }
 
-/** Input for the dedicated owner-only pre-permit non-production root. */
-export type CreateAwsWorkspaceSearchMigrationRehearsalPrePermitRootSessionInput = {
-  /** Strict source-controlled root-plan document validated before clients. */
-  readonly rootPlan: unknown
-  /** Exact reviewed DescribeTable policy bound by later root evidence. */
-  readonly ratePolicy: WorkspaceSearchMigrationDescribeTableRatePolicy
-  /** Optional best-effort secret-free rate observation sink. */
-  readonly rateRecorder?: WorkspaceSearchMigrationDescribeTableRateRecorder
-  /** Optional caller cancellation combined with the non-resettable root bound. */
-  readonly signal?: AbortSignal
-  /** Optional trusted process-monotonic clock used by the complete root. */
-  readonly monotonicClock?: () => number
-  /** Optional trusted wall clock used for root chronology. */
-  readonly wallClock?: () => Date
-}
 
 /** Quarantine-only observer captured before production composition awaits. */
 type WorkspaceSearchMigrationQuarantineTelemetryRecorder = {
@@ -1363,50 +1310,6 @@ type RateManagedAwsSessionConstructionSnapshot = {
   /** Optional captured composition cancellation. */
   readonly signal?: AbortSignal
 }
-
-/** Synchronously detached construction for the dedicated pre-permit root. */
-type RehearsalPrePermitRootConstructionSnapshot = {
-  /** Strict plan re-resolved from the repository-owned target map. */
-  readonly plan: WorkspaceSearchMigrationRehearsalRootPlan
-  /** Detached reviewed DescribeTable rate policy. */
-  readonly ratePolicy: WorkspaceSearchMigrationDescribeTableRatePolicy
-  /** Optional captured secret-free rate observation sink. */
-  readonly rateRecorder?: WorkspaceSearchMigrationDescribeTableRateRecorder
-  /** Optional caller cancellation combined with the root deadline. */
-  readonly signal?: AbortSignal
-  /** Trusted process-monotonic root clock. */
-  readonly monotonicClock: () => number
-  /** Trusted canonical root wall clock. */
-  readonly wallClock: () => Date
-}
-
-/** Fixed rate construction authority derived from one strict root plan. */
-type RehearsalPrePermitRootRateConstruction = {
-  /** Exact six migration tables allowed only for interrupted cleanup logic. */
-  readonly recoveryTableNames: readonly string[]
-  /** Exact canonical ten-name migration/integrity union. */
-  readonly allowedTableNames: readonly string[]
-  /** Root-only authority to create the first absent checkpoint. */
-  readonly bootstrap: true
-  /** Mandatory refusal to recover a retained cleanup marker. */
-  readonly recoverInterruptedCleanup: false
-  /** Mandatory refusal to recover one uncertain physical attempt. */
-  readonly recoverInterruptedAttempt: false
-}
-
-/** Additional S3 read available only during rehearsal environment preflight. */
-type WorkspaceSearchMigrationRehearsalGuardAwsTransport = {
-  /**
-   * Reads the selected journal bucket's deployment-environment tags.
-   *
-   * @param command - Exact owner-bound bucket tag request.
-   * @returns Raw S3 bucket tag response used only by the guard.
-   */
-  getBucketTagging(
-    command: GetBucketTaggingCommand,
-  ): Promise<GetBucketTaggingOutput>
-}
-
 /** Narrow transport containing only managed identity reads. */
 export interface WorkspaceSearchMigrationIdentityAwsTransport {
   /**
@@ -1525,8 +1428,7 @@ export type WorkspaceSearchMigrationIdentityAwsTransportConstructor = (
 class AwsSdkWorkspaceSearchMigrationIdentityTransport
   implements
     WorkspaceSearchMigrationManagedAwsTransport,
-    WorkspaceSearchMigrationDescribeTableRateCheckpointAwsTransport,
-    WorkspaceSearchMigrationRehearsalGuardAwsTransport {
+    WorkspaceSearchMigrationDescribeTableRateCheckpointAwsTransport {
   /** DynamoDB client bound to the explicit profile and region. */
   private readonly dynamodbClient: DynamoDBClient
 
@@ -1972,22 +1874,6 @@ class AwsSdkWorkspaceSearchMigrationIdentityTransport
     return this.s3Client.send(command)
   }
 
-  /**
-   * Reads the selected journal bucket's deployment-environment tags.
-   *
-   * @param command - Exact owner-bound GetBucketTagging command.
-   * @param signal - Optional root-owned complete-lifecycle cancellation.
-   * @returns Raw S3 bucket tag response used only during rehearsal preflight.
-   */
-  getBucketTagging(
-    command: GetBucketTaggingCommand,
-    signal?: AbortSignal,
-  ): Promise<GetBucketTaggingOutput> {
-    return this.s3Client.send(
-      command,
-      signal === undefined ? {} : { abortSignal: signal },
-    )
-  }
 
   /**
    * Sends one bucket-logging read.
@@ -2043,97 +1929,6 @@ class AwsSdkWorkspaceSearchMigrationIdentityTransport
   }
 }
 
-/**
- * Dedicated read-only S3 transport for a root or guarded live attestation.
- *
- * DescribeTable is deliberately an unreachable fallback because the managed
- * integrity adapter owns every table read. STS, Scan, object-tag, and HEAD
- * operations also fail locally for the root operation. The same constructor
- * can be reused behind a permit-backed live outer gate without weakening its
- * fallback rule.
- */
-class AwsSdkWorkspaceSearchMigrationRehearsalIntegrityTransport
-  implements CrossDomainIntegrityAwsTransport {
-  /** S3 client sharing the exact pinned profile and official endpoint. */
-  private readonly s3Client: S3Client
-
-  /** Whether the sole owned SDK client was already destroyed. */
-  private closed = false
-
-  /**
-   * Creates the exact S3 client needed by immutable resource attestation.
-   *
-   * @param configuration - Existing hardened migration S3 configuration.
-   */
-  constructor(
-    configuration: WorkspaceSearchMigrationIdentityS3SdkClientConfiguration,
-  ) {
-    this.s3Client = new S3Client(configuration)
-  }
-
-  /** Releases the sole owned S3 client exactly once. */
-  close(): void {
-    if (this.closed) return
-    this.closed = true
-    this.s3Client.destroy()
-  }
-
-  /** Rejects any attempt to bypass the managed DescribeTable adapter. */
-  describeTable(
-    _command: DescribeTableCommand,
-    _signal: AbortSignal,
-  ): Promise<DescribeTableCommandOutput> {
-    return rejectPrePermitRootOperation()
-  }
-
-  /** Reads only the exact owner-bound File bucket versioning state. */
-  getBucketVersioning(
-    command: GetBucketVersioningCommand,
-    signal: AbortSignal,
-  ): Promise<GetBucketVersioningCommandOutput> {
-    return this.s3Client.send(command, { abortSignal: signal })
-  }
-
-  /** Reads only the exact immutable File marker object's attributes. */
-  getObjectAttributes(
-    command: GetObjectAttributesCommand,
-    signal: AbortSignal,
-  ): Promise<GetObjectAttributesCommandOutput> {
-    return this.s3Client.send(command, { abortSignal: signal })
-  }
-
-  /** Rejects object-tag reads because root attestation does not need them. */
-  getObjectTagging(
-    _command: GetObjectTaggingCommand,
-    _signal: AbortSignal,
-  ): Promise<GetObjectTaggingCommandOutput> {
-    return rejectPrePermitRootOperation()
-  }
-
-  /** Rejects object HEAD reads because root attestation does not need them. */
-  headObject(
-    _command: HeadObjectCommand,
-    _signal: AbortSignal,
-  ): Promise<HeadObjectCommandOutput> {
-    return rejectPrePermitRootOperation()
-  }
-
-  /** Rejects a second caller-identity path after exact outer STS preflight. */
-  readCallerIdentity(
-    _command: GetCallerIdentityCommand,
-    _signal: AbortSignal,
-  ): Promise<GetCallerIdentityCommandOutput> {
-    return rejectPrePermitRootOperation()
-  }
-
-  /** Rejects every data-plane Scan from the attestation-only transport. */
-  scan(
-    _command: ScanCommand,
-    _signal: AbortSignal,
-  ): Promise<ScanCommandOutput> {
-    return rejectPrePermitRootOperation()
-  }
-}
 
 /** Exact actual-send state inherited by one managed immutable write. */
 type ManagedImmutableArtifactWriteSendState = {
@@ -8755,470 +8550,16 @@ function rejectProductionStageReservationCapabilities(
   }
 }
 
-/**
- * Creates the dedicated owner-only pre-permit non-production root session.
- *
- * The strict source-controlled root plan is parsed before clocks, credentials,
- * or clients are constructed. The complete timeline begins before the first
- * possible profile-assumption or GetCallerIdentity service read. Exact STS
- * identity and journal deployment tags are verified before rate-checkpoint
- * I/O. Bootstrap is fixed on while both recovery authorities are fixed off.
- *
- * @param input - Strict root plan, reviewed policy, clocks, and cancellation.
- * @returns Capability-narrow measurement, attestation, seal, and close session.
- */
-export async function createAwsWorkspaceSearchMigrationRehearsalPrePermitRootSession(
-  input:
-    CreateAwsWorkspaceSearchMigrationRehearsalPrePermitRootSessionInput,
-): Promise<WorkspaceSearchMigrationRehearsalPrePermitRootSession> {
-  const construction = detachRehearsalPrePermitRootConstruction(input)
-  const plan = construction.plan
-  const timeline = createWorkspaceSearchMigrationRehearsalRootTimeline({
-    maximumDurationMilliseconds:
-      plan.document.maximumDurationMilliseconds,
-    monotonicClock: construction.monotonicClock,
-    wallClock: construction.wallClock,
-    ...(construction.signal === undefined
-      ? {}
-      : { signal: construction.signal }),
-  })
-  return await createRehearsalPrePermitRootSessionFromSnapshot(
-    construction,
-    timeline,
-  )
-}
 
-/** Exact allowed fields of the pre-permit root construction input. */
-const rehearsalPrePermitRootConstructionKeys = new Set([
-  'monotonicClock',
-  'ratePolicy',
-  'rateRecorder',
-  'rootPlan',
-  'signal',
-  'wallClock',
-])
 
-/** Stable strict guards for the owner-only pre-permit construction. */
-const rehearsalPrePermitRootConstructionGuards =
-  new WorkspaceSearchMigrationStrictRecordGuards(
-    failRehearsalPrePermitRootOperation,
-  )
 
-/**
- * Detaches the complete pre-permit construction before its first clock sample.
- *
- * The root plan is parsed first and therefore re-resolves the enabled target
- * from the repository-owned deployment map before any client can exist.
- * Recovery and bootstrap properties are not accepted on this public input.
- *
- * @param input - Candidate owner-only pre-permit construction.
- * @returns Strict plan, policy, clocks, recorder, and cancellation snapshot.
- */
-function detachRehearsalPrePermitRootConstruction(
-  input:
-    CreateAwsWorkspaceSearchMigrationRehearsalPrePermitRootSessionInput,
-): RehearsalPrePermitRootConstructionSnapshot {
-  const record = rehearsalPrePermitRootConstructionGuards.requireRecord(input)
-  const prototype = Object.getPrototypeOf(record)
-  if (
-    (prototype !== Object.prototype && prototype !== null) ||
-    (prototype !== null && nodeUtilTypes.isProxy(prototype))
-  ) return failRehearsalPrePermitRootOperation()
-  const keys = Reflect.ownKeys(record)
-  for (const key of keys) {
-    if (
-      typeof key !== 'string' ||
-      !rehearsalPrePermitRootConstructionKeys.has(key)
-    ) return failRehearsalPrePermitRootOperation()
-    const descriptor = Object.getOwnPropertyDescriptor(record, key)
-    if (
-      descriptor === undefined ||
-      !Object.hasOwn(descriptor, 'value')
-    ) return failRehearsalPrePermitRootOperation()
-  }
-  if (
-    !Object.hasOwn(record, 'rootPlan') ||
-    !Object.hasOwn(record, 'ratePolicy')
-  ) return failRehearsalPrePermitRootOperation()
-  const plan = parseWorkspaceSearchMigrationRehearsalRootPlan(
-    rehearsalPrePermitRootConstructionGuards.readOwn(record, 'rootPlan'),
-  )
-  let ratePolicy: WorkspaceSearchMigrationDescribeTableRatePolicy
-  let rateRecorder:
-    WorkspaceSearchMigrationDescribeTableRateRecorder | undefined
-  let signal: AbortSignal | undefined
-  let monotonicClock: (() => number) | undefined
-  let wallClock: (() => Date) | undefined
-  try {
-    ratePolicy = structuredClone(input.ratePolicy)
-    rateRecorder = Object.hasOwn(record, 'rateRecorder')
-      ? input.rateRecorder
-      : undefined
-    signal = Object.hasOwn(record, 'signal')
-      ? input.signal
-      : undefined
-    monotonicClock = Object.hasOwn(record, 'monotonicClock')
-      ? input.monotonicClock
-      : undefined
-    wallClock = Object.hasOwn(record, 'wallClock')
-      ? input.wallClock
-      : undefined
-  } catch {
-    return failRehearsalPrePermitRootOperation()
-  }
-  if (
-    (signal !== undefined &&
-      (!(signal instanceof AbortSignal) || nodeUtilTypes.isProxy(signal))) ||
-    (monotonicClock !== undefined &&
-      (typeof monotonicClock !== 'function' ||
-        nodeUtilTypes.isProxy(monotonicClock))) ||
-    (wallClock !== undefined &&
-      (typeof wallClock !== 'function' || nodeUtilTypes.isProxy(wallClock)))
-  ) return failRehearsalPrePermitRootOperation()
-  return Object.freeze({
-    plan,
-    ratePolicy: Object.freeze(ratePolicy),
-    ...(rateRecorder === undefined ? {} : { rateRecorder }),
-    ...(signal === undefined ? {} : { signal }),
-    monotonicClock: monotonicClock ?? readRehearsalRootSystemMonotonicClock,
-    wallClock: wallClock ?? readRehearsalRootSystemWallClock,
-  })
-}
 
-/**
- * Composes one authenticated pre-permit root after the timeline has begun.
- *
- * @param construction - Strict detached source-controlled construction.
- * @param timeline - Complete non-resettable root timeline begun before clients.
- * @returns Capability-narrow root session after fixed rate bootstrap.
- */
-async function createRehearsalPrePermitRootSessionFromSnapshot(
-  construction: RehearsalPrePermitRootConstructionSnapshot,
-  timeline: WorkspaceSearchMigrationRehearsalRootTimeline,
-): Promise<WorkspaceSearchMigrationRehearsalPrePermitRootSession> {
-  const plan = construction.plan
-  const resources = plan.document.requestedResources
-  const credentialsProvider = createPinnedProfileCredentials(
-    resources,
-    timeline.signal,
-  )
-  const configurations = createIdentityAwsSdkConfigurations(
-    resources,
-    credentialsProvider,
-  )
-  const transport =
-    new AwsSdkWorkspaceSearchMigrationIdentityTransport(configurations)
-  let rate: WorkspaceSearchMigrationManagedDescribeTableRate | undefined
-  let measurementPort: AwsWorkspaceSearchMigrationIdentityPort | undefined
-  let attestationOperation:
-    WorkspaceSearchMigrationRehearsalRootAttestationOperation | undefined
-  try {
-    const caller = await timeline.run(
-      async (signal) => await transport.getCallerIdentity(
-        new GetCallerIdentityCommand({}),
-        signal,
-      ),
-    )
-    requirePreMeasurementCallerIdentity(caller, resources.account)
-    if (caller.Arn !== plan.document.expectedCallerArn) {
-      return failRehearsalPrePermitRootOperation()
-    }
-    await timeline.run(async () => await credentialsProvider())
-    const tags = await timeline.run(
-      async (signal) => await transport.getBucketTagging(
-        new GetBucketTaggingCommand({
-          Bucket: resources.journalBucket,
-          ExpectedBucketOwner: resources.account,
-        }),
-        signal,
-      ),
-    )
-    requireRehearsalPrePermitRootJournalTags(tags, plan)
 
-    const checkpointStore =
-      createWorkspaceSearchMigrationDescribeTableRateCheckpointAwsStore({
-        binding: {
-          account: resources.account,
-          region: resources.region,
-          tableName: resources.tables['migration-state'],
-        },
-        transport,
-      })
-    const rateConstruction =
-      createRehearsalIntegrityRateConstruction(plan)
-    rate = await timeline.run(
-      async (signal) =>
-        await createWorkspaceSearchMigrationManagedDescribeTableRate({
-          account: resources.account,
-          region: resources.region,
-          recoveryTableNames: rateConstruction.recoveryTableNames,
-          allowedTableNames: rateConstruction.allowedTableNames,
-          policy: construction.ratePolicy,
-          checkpointStore,
-          credentials: createPinnedDescribeTableCredentialsProvider(
-            credentialsProvider,
-            resources.account,
-          ),
-          bootstrap: rateConstruction.bootstrap,
-          recoverInterruptedCleanup:
-            rateConstruction.recoverInterruptedCleanup,
-          recoverInterruptedAttempt:
-            rateConstruction.recoverInterruptedAttempt,
-          ...(construction.rateRecorder === undefined
-            ? {}
-            : { recorder: construction.rateRecorder }),
-          signal,
-        }),
-    )
-    measurementPort = new AwsWorkspaceSearchMigrationIdentityPort(
-      resources,
-      transport,
-      construction.wallClock,
-      undefined,
-      rate,
-      false,
-    )
-    attestationOperation =
-      createRateManagedRehearsalRootAttestationOperation({
-        configurations,
-        plan,
-        rate,
-      })
-    const ownedMeasurementPort = measurementPort
-    const rootMeasurementPort = Object.freeze({
-      measureConfiguration: async () =>
-        await ownedMeasurementPort.measureConfiguration(),
-      readDescribeTableRateEvidence: () =>
-        ownedMeasurementPort.readDescribeTableRateEvidence(),
-    })
-    return createWorkspaceSearchMigrationRehearsalPrePermitRootSession({
-      measurementPort: rootMeasurementPort,
-      closeMeasurementPort: async () => {
-        await ownedMeasurementPort.close()
-      },
-      rate,
-      attestationOperation,
-      expectedConfigurationBindingDigest:
-        plan.configurationBindingDigest,
-      expectedPolicyVersion: construction.ratePolicy.policyVersion,
-      timeline,
-    })
-  } catch {
-    timeline.interrupt()
-    rate?.interrupt()
-    try {
-      await rate?.close()
-    } catch {
-      // Continue closing both AWS transports before raising the stable failure.
-    }
-    try {
-      await measurementPort?.close()
-    } catch {
-      // Continue closing the attestation transport after measurement failure.
-    }
-    if (measurementPort === undefined) {
-      try {
-        transport.close()
-      } catch {
-        // The stable root failure hides transport-specific close details.
-      }
-    }
-    try {
-      attestationOperation?.close()
-    } catch {
-      // Every best-effort close is attempted before the stable root failure.
-    }
-    return failRehearsalPrePermitRootOperation()
-  }
-}
 
-/** Input for the reusable rate-managed integrity reader composition. */
-type CreateRateManagedRehearsalRootAttestationOperationInput = {
-  /** Existing hardened official-endpoint client configuration set. */
-  readonly configurations:
-    WorkspaceSearchMigrationIdentityAwsSdkConfigurations
-  /** Strict source-controlled root plan and exact integrity resources. */
-  readonly plan: WorkspaceSearchMigrationRehearsalRootPlan
-  /** Existing exact-ten managed DescribeTable owner. */
-  readonly rate: WorkspaceSearchMigrationManagedDescribeTableRate
-}
 
-/**
- * Creates a one-shot adapter/reader pair with no DescribeTable fallback.
- *
- * This helper deliberately keeps the adapter and reader private. A future
- * permit-backed live composition can reuse the same outer construction while
- * supplying its separately guarded non-DescribeTable transport and pass count.
- *
- * @param input - Pinned clients, strict resources, and shared rate owner.
- * @returns One-shot root attestation operation with exact close ownership.
- */
-function createRateManagedRehearsalRootAttestationOperation(
-  input: CreateRateManagedRehearsalRootAttestationOperationInput,
-): WorkspaceSearchMigrationRehearsalRootAttestationOperation {
-  const plan = input.plan
-  const resources = plan.document.integrityResources
-  const baseTransport =
-    new AwsSdkWorkspaceSearchMigrationRehearsalIntegrityTransport(
-      input.configurations.s3,
-    )
-  let adapter: WorkspaceSearchMigrationRehearsalIntegrityRateAdapter
-  let reader: AwsCrossDomainIntegrityReader
-  try {
-    adapter = createWorkspaceSearchMigrationRehearsalIntegrityRateAdapter({
-      tableNames: resources.tables,
-      tablePassCount: 1,
-      baseTransport,
-      rate: input.rate,
-    })
-    reader = new AwsCrossDomainIntegrityReader({
-      buckets: { file: resources.fileBucket },
-      expectedAccount: plan.document.requestedResources.account,
-      maxPages: 1,
-      pageSize: 1,
-      profile: plan.document.requestedResources.profile,
-      region: plan.document.requestedResources.region,
-      tables: resources.tables,
-    }, () => adapter)
-  } catch {
-    baseTransport.close()
-    return failRehearsalPrePermitRootOperation()
-  }
-  let used = false
-  let closed = false
-  return Object.freeze({
-    run: async (
-      signal: AbortSignal,
-    ): Promise<WorkspaceSearchMigrationRehearsalRootAttestationOperationResult> => {
-      if (
-        used ||
-        closed ||
-        !(signal instanceof AbortSignal) ||
-        nodeUtilTypes.isProxy(signal)
-      ) return failRehearsalPrePermitRootOperation()
-      used = true
-      const resourceAttestation = await adapter.run(
-        async () => await reader.measureResourceAttestation(
-          resources.marker,
-          signal,
-        ),
-      )
-      const sequence = adapter.takeCompletedSequence(resourceAttestation)
-      return Object.freeze({ resourceAttestation, sequence })
-    },
-    close: (): void => {
-      if (closed) return
-      closed = true
-      reader.close()
-    },
-  })
-}
 
-/**
- * Creates the exact-ten allowlist and fixed root recovery/bootstrap authority.
- *
- * @param plan - Strict source-controlled root plan.
- * @returns Canonical migration six, union ten, and non-caller-controlled flags.
- */
-function createRehearsalIntegrityRateConstruction(
-  plan: WorkspaceSearchMigrationRehearsalRootPlan,
-): RehearsalPrePermitRootRateConstruction {
-  const tables = plan.document.requestedResources.tables
-  const recoveryTableNames = Object.freeze([
-    tables['project-directory'],
-    tables['work-items'],
-    tables.collaboration,
-    tables.documents,
-    tables['workspace-search'],
-    tables['migration-state'],
-  ])
-  const allowedTableNames = Object.freeze([
-    ...plan.allowedDescribeTableNames,
-  ])
-  if (
-    recoveryTableNames.length !== 6 ||
-    new Set(recoveryTableNames).size !== 6 ||
-    allowedTableNames.length !== 10 ||
-    new Set(allowedTableNames).size !== 10 ||
-    recoveryTableNames.some(
-      (tableName) => !allowedTableNames.includes(tableName),
-    )
-  ) return failRehearsalPrePermitRootOperation()
-  return Object.freeze({
-    recoveryTableNames,
-    allowedTableNames,
-    bootstrap: true,
-    recoverInterruptedCleanup: false,
-    recoverInterruptedAttempt: false,
-  })
-}
 
-/** Requires all three source-controlled journal deployment tags exactly once. */
-function requireRehearsalPrePermitRootJournalTags(
-  output: GetBucketTaggingOutput,
-  plan: WorkspaceSearchMigrationRehearsalRootPlan,
-): void {
-  const tags = output.TagSet
-  if (!Array.isArray(tags)) return failRehearsalPrePermitRootOperation()
-  let environmentCount = 0
-  let trustRootCount = 0
-  let productionDigestCount = 0
-  for (const tag of tags) {
-    if (tag.Key === WORKSPACE_SEARCH_MIGRATION_REHEARSAL_ENVIRONMENT_TAG_KEY) {
-      environmentCount += 1
-      if (tag.Value !== WORKSPACE_SEARCH_MIGRATION_REHEARSAL_STAGE) {
-        return failRehearsalPrePermitRootOperation()
-      }
-      continue
-    }
-    if (
-      tag.Key ===
-        WORKSPACE_SEARCH_MIGRATION_REHEARSAL_DEPLOYMENT_TRUST_ROOT_TAG_KEY
-    ) {
-      trustRootCount += 1
-      if (tag.Value !== plan.deploymentTrustRootDigest) {
-        return failRehearsalPrePermitRootOperation()
-      }
-      continue
-    }
-    if (
-      tag.Key ===
-        WORKSPACE_SEARCH_MIGRATION_REHEARSAL_PRODUCTION_ACCOUNT_DIGEST_TAG_KEY
-    ) {
-      productionDigestCount += 1
-      if (tag.Value !== plan.productionAccountDigest) {
-        return failRehearsalPrePermitRootOperation()
-      }
-    }
-  }
-  if (
-    environmentCount !== 1 ||
-    trustRootCount !== 1 ||
-    productionDigestCount !== 1
-  ) return failRehearsalPrePermitRootOperation()
-}
 
-/** Reads the default trusted process-monotonic root clock. */
-function readRehearsalRootSystemMonotonicClock(): number {
-  return Math.floor(performance.now())
-}
-
-/** Reads the default trusted root wall clock. */
-function readRehearsalRootSystemWallClock(): Date {
-  return new Date()
-}
-
-/** Creates one locally rejected Promise for a forbidden root transport call. */
-function rejectPrePermitRootOperation<Result>(): Promise<Result> {
-  return Promise.reject(
-    new WorkspaceSearchMigrationRehearsalPrePermitRootSessionError(),
-  )
-}
-
-/** Raises the stable raw-value-free pre-permit root failure. */
-function failRehearsalPrePermitRootOperation(): never {
-  throw new WorkspaceSearchMigrationRehearsalPrePermitRootSessionError()
-}
 /**
  * Composes one production rate-managed session from detached construction.
  *
@@ -10150,8 +9491,7 @@ function readAssumedCredentials(
 function createDefaultAwsTransport(
   configurations: WorkspaceSearchMigrationIdentityAwsSdkConfigurations,
 ): WorkspaceSearchMigrationManagedAwsTransport &
-  WorkspaceSearchMigrationDescribeTableRateCheckpointAwsTransport &
-  WorkspaceSearchMigrationRehearsalGuardAwsTransport {
+  WorkspaceSearchMigrationDescribeTableRateCheckpointAwsTransport {
   return new AwsSdkWorkspaceSearchMigrationIdentityTransport(configurations)
 }
 

@@ -47,12 +47,6 @@
     "team-issue-comments:backfill": "bun --env-file=.env --filter server team-issue-comments:backfill",
     "search:backfill": "bun --filter server search:backfill",
     "search:migration:control": "bun server/scripts/migrations/workspace-search-v1/migration-control-cli.ts",
-    "search:migration:rehearsal:root": "bun --filter server search:migration:rehearsal:root",
-    "search:migration:rehearsal:permit": "bun --filter server search:migration:rehearsal:permit",
-    "search:migration:rehearsal:alarm-permit": "bun --filter server search:migration:rehearsal:alarm-permit",
-    "search:migration:rehearsal:alarms": "bun --filter server search:migration:rehearsal:alarms",
-    "search:migration:rehearsal:ingest-alarm-signal": "bun --filter server search:migration:rehearsal:ingest-alarm-signal",
-    "search:migration:telemetry-rehearsal": "bun server/scripts/migrations/workspace-search-v1/migration-telemetry-rehearsal.ts",
     "cdk:build": "bun --filter cdk build",
     "cdk:test": "bun --filter cdk test",
     "cdk:synth": "bun --filter cdk cdk synth -c triageIndexDeploymentStage=wake -c teamIssueCommentIndexDeploymentStage=comment"

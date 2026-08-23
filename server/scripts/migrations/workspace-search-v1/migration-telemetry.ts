@@ -54,7 +54,6 @@ export type WorkspaceSearchMigrationTelemetryOperation =
   | 'rollback-complete'
   | 'rollback-partial'
   | 'status'
-  | 'telemetry-rehearsal'
   | 'verify'
 
 /**
@@ -590,7 +589,6 @@ const telemetryOperations = new Set<string>([
   'rollback-complete',
   'rollback-partial',
   'status',
-  'telemetry-rehearsal',
   'verify',
 ])
 

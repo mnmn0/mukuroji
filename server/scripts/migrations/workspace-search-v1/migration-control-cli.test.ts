@@ -4,7 +4,6 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import {
-  createMigrationDigest,
   serializeCanonicalJson,
   WorkspaceSearchMigrationFailure,
   type WorkspaceSearchMigrationLease,
@@ -26,7 +25,6 @@ import {
   type WorkspaceSearchMigrationControlCliDependencies,
   type WorkspaceSearchMigrationControlCliExitCode,
   type WorkspaceSearchMigrationControlCliMutationSession,
-  type WorkspaceSearchMigrationControlCliMutationResultObservation,
   type WorkspaceSearchMigrationControlCliRateManagedSessionConstructor,
   type WorkspaceSearchMigrationControlCliReadSession,
   type WorkspaceSearchMigrationWriterFenceSummary,
@@ -1322,74 +1320,6 @@ describe('Workspace Search migration control CLI capabilities', () => {
 })
 
 describe('Workspace Search migration control CLI output and lifecycle', () => {
-  test('observes the exact trusted mutation and merged stdout line', async () => {
-    const harness = createDependencies({ telemetry: true })
-    const observations:
-      WorkspaceSearchMigrationControlCliMutationResultObservation[] = []
-    const result = await captureCliRun(
-      createMutationArguments('apply', 'apply-sealed-migration-plan'),
-      {
-        ...harness.dependencies,
-        observeMutationResult: (observation) => {
-          observations.push(observation)
-        },
-      },
-    )
-
-    expect(result.exitCode).toBe(0)
-    expect(result.stderr).toEqual([])
-    expect(result.stdout).toHaveLength(1)
-    expect(observations).toHaveLength(1)
-    const observation = observations[0]
-    const serializedOutputLine = result.stdout[0]
-    expect(observation).toBeDefined()
-    expect(serializedOutputLine).toBeDefined()
-    if (observation === undefined || serializedOutputLine === undefined) {
-      throw new Error('Expected one trusted mutation observation.')
-    }
-    expect(Object.isFrozen(observation)).toBe(true)
-    expect(observation.serializedOutputLine).toBe(serializedOutputLine)
-    expect(observation.serializedOutputLineDigest).toBe(
-      createMigrationDigest(serializedOutputLine),
-    )
-    expect(observation.result).toMatchObject({
-      operation: 'apply',
-      status: 'pass',
-      configurationHash: expectedConfigurationHash,
-      policyVersion,
-      coordinator: {
-        mode: 'apply',
-      },
-    })
-    expect(JSON.parse(serializedOutputLine)).toMatchObject({
-      _aws: {
-        Timestamp: 1_800_000_000_000,
-      },
-      operation: 'apply',
-      status: 'pass',
-    })
-  })
-
-  test('fails closed before stdout when mutation observation fails', async () => {
-    const harness = createDependencies({ telemetry: true })
-    const result = await captureCliRun(
-      createMutationArguments('apply', 'apply-sealed-migration-plan'),
-      {
-        ...harness.dependencies,
-        observeMutationResult: async () => {
-          throw new Error('private-observer-failure-canary')
-        },
-      },
-    )
-
-    expect(result.exitCode).toBe(1)
-    expect(result.stdout).toEqual([])
-    expect(result.stderr).toHaveLength(1)
-    expect(result.stderr[0]).toContain('OPERATION_FAILED')
-    expect(result.stderr[0]).not.toContain('private-observer-failure-canary')
-    expect(harness.events.filter((event) => event === 'close')).toHaveLength(1)
-  })
-
   test('merges deferred-bound rate telemetry into the single measure line', async () => {
     const harness = createDependencies({
       telemetry: true,

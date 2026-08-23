@@ -12,7 +12,6 @@ import {
   type WorkspaceSearchMigrationControlCoordinatorSummary,
 } from './migration-control-coordinator'
 import {
-  createMigrationDigest,
   createWorkspaceSearchConfigurationHash,
   isCanonicalTimestamp,
   WorkspaceSearchMigrationFailure,
@@ -440,20 +439,10 @@ export type WorkspaceSearchMigrationControlCliCoordinatorMutationResult = {
   readonly rateAggregate: WorkspaceSearchMigrationDescribeTableRateEvidence
 }
 
-/** Every successful mutating control result available before stdout. */
-export type WorkspaceSearchMigrationControlCliMutationResult =
+/** Every successful mutating control result returned by the CLI boundary. */
+type WorkspaceSearchMigrationControlCliMutationResult =
   | WorkspaceSearchMigrationControlCliBootstrapMutationResult
   | WorkspaceSearchMigrationControlCliCoordinatorMutationResult
-
-/** Trusted pre-stdout mutation observation for rehearsal composition. */
-export type WorkspaceSearchMigrationControlCliMutationResultObservation = {
-  /** Trusted in-memory mutation result, never recovered from child stdout. */
-  readonly result: WorkspaceSearchMigrationControlCliMutationResult
-  /** Exact merged control and EMF line later written unchanged to stdout. */
-  readonly serializedOutputLine: string
-  /** Digest of the exact trusted serialized output line. */
-  readonly serializedOutputLineDigest: string
-}
 
 /** Capability-minimized read-only session used by three status commands. */
 export interface WorkspaceSearchMigrationControlCliReadSession {
@@ -656,17 +645,10 @@ export type WorkspaceSearchMigrationControlCliDependencies = {
     context: WorkspaceSearchMigrationTelemetryContext,
     sink: WorkspaceSearchMigrationTelemetrySink,
   ) => WorkspaceSearchMigrationTelemetryRecorder
-  /** Observes one trusted mutation result and exact line before stdout. */
-  readonly observeMutationResult?: (
-    observation: WorkspaceSearchMigrationControlCliMutationResultObservation,
-  ) => Promise<void> | void
 }
 
 /**
  * Constructor for one production-equivalent rate-managed AWS session.
- *
- * The non-production rehearsal composition implements this exact boundary so
- * the control CLI can retain its existing capability projection and output.
  *
  * @param input - Existing production session-construction input.
  * @returns Fresh complete managed session for private projection.
@@ -693,7 +675,6 @@ type WorkspaceSearchMigrationControlCliMutationDependencies = Pick<
   WorkspaceSearchMigrationControlCliDependencies,
   | 'createMutationSession'
   | 'createTelemetryRecorder'
-  | 'observeMutationResult'
   | 'readInputFile'
 >
 
@@ -955,12 +936,6 @@ export async function runWorkspaceSearchMigrationControlCli(
   let operation: WorkspaceSearchMigrationControlCliOperation = 'unknown'
   let telemetry:
     WorkspaceSearchMigrationControlCliTelemetryInvocation | undefined
-  let mutationResult:
-    WorkspaceSearchMigrationControlCliMutationResult | undefined
-  let observeMutationResult:
-    WorkspaceSearchMigrationControlCliDependencies[
-      'observeMutationResult'
-    ]
   try {
     const argumentsSnapshot = snapshotControlCliArguments(arguments_)
     operation = identifyOperation(argumentsSnapshot[0])
@@ -999,7 +974,6 @@ export async function runWorkspaceSearchMigrationControlCli(
     } else {
       const capturedDependencies =
         snapshotControlCliMutationDependencies(dependencies)
-      observeMutationResult = capturedDependencies.observeMutationResult
       const ratePolicy = await readControlCliRatePolicy(
         configuration.ratePolicyFile,
         capturedDependencies,
@@ -1014,14 +988,13 @@ export async function runWorkspaceSearchMigrationControlCli(
         configuration,
         telemetry?.recorder,
       )
-      mutationResult = await runMutatingCommand(
+      result = await runMutatingCommand(
         configuration,
         ratePolicy,
         capturedDependencies,
         telemetry?.recorder,
         signal,
       )
-      result = mutationResult
     }
     finalizeControlCliTelemetry(
       telemetry?.recorder,
@@ -1032,14 +1005,6 @@ export async function runWorkspaceSearchMigrationControlCli(
       result,
       telemetry?.readSerializedRecord(),
     )
-    if (mutationResult !== undefined && observeMutationResult !== undefined) {
-      await observeMutationResult(Object.freeze({
-        result: mutationResult,
-        serializedOutputLine,
-        serializedOutputLineDigest:
-          createMigrationDigest(serializedOutputLine),
-      }))
-    }
     console.log(serializedOutputLine)
     return 0
   } catch (error: unknown) {
@@ -1176,15 +1141,10 @@ function snapshotControlCliMutationDependencies(
     ]
   let readInputFile:
     WorkspaceSearchMigrationControlCliDependencies['readInputFile']
-  let observeMutationResult:
-    WorkspaceSearchMigrationControlCliDependencies[
-      'observeMutationResult'
-    ]
   try {
     createMutationSession = dependencies.createMutationSession
     createTelemetryRecorder = dependencies.createTelemetryRecorder
     readInputFile = dependencies.readInputFile
-    observeMutationResult = dependencies.observeMutationResult
   } catch {
     throw operationFailed()
   }
@@ -1194,9 +1154,6 @@ function snapshotControlCliMutationDependencies(
       createTelemetryRecorder !== undefined &&
       typeof createTelemetryRecorder !== 'function'
     ) ||
-    (observeMutationResult !== undefined &&
-      (typeof observeMutationResult !== 'function' ||
-        nodeUtilTypes.isProxy(observeMutationResult))) ||
     typeof readInputFile !== 'function'
   ) {
     throw operationFailed()
@@ -1217,16 +1174,6 @@ function snapshotControlCliMutationDependencies(
     /** Invokes the captured file reader without retaining its owner. */
     readInputFile: (path, maximumBytes) =>
       readInputFile(path, maximumBytes),
-    ...(observeMutationResult === undefined
-      ? {}
-      : {
-          /** Invokes the captured trusted pre-stdout observer. */
-          observeMutationResult: (
-            observation:
-              WorkspaceSearchMigrationControlCliMutationResultObservation,
-          ) =>
-            observeMutationResult(observation),
-        }),
   })
 }
 
