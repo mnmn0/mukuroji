@@ -397,11 +397,12 @@ workspaces before processing the rest of the environment. An unfiltered run
 marks the environment-wide scope after the complete source scan, including
 workspaces with no matching legacy comments.
 
-## Workspace search backfill
+## Workspace search canonical projection bootstrap
 
 Workspace search は `WorkspaceSearchTable` の `workspaceId` / `recordKey` に、検索文書、
-saved view、ユーザーごとの view preference を保存します。既存データを検索文書へ投影する前に、
-まず dry-run で Team、Project、canonical Work Item、comment の mapping と skip 件数を確認します。
+saved view、ユーザーごとの view preference を保存します。初期データは migration planner を介さず、
+current Team、Project、canonical Work Item、comment、Document から canonical projection を直接作成します。
+まず dry-run で mapping と skip 件数を確認します。
 
 ```sh
 AWS_ENDPOINT_URL=http://localhost:4566 bun run search:backfill -- --dry-run
@@ -409,8 +410,10 @@ AWS_ENDPOINT_URL=http://localhost:4566 bun run search:backfill
 ```
 
 一つの source だけを調査する場合は `--source project-directory`、
-`--source work-items`、`--source collaboration` を指定できます。`--limit 100` は
-dry-run や小さな検証 run で scan 件数を制限します。
+`--source work-items`、`--source collaboration`、`--source documents` を指定できます。
+Floci の既定 seed は `project-directory` と `work-items` をそれぞれ `--limit 100` で実行すれば
+有限 run で初期 projection を作成できます。`--limit` は dry-run や小さな検証 run の scan 件数も
+制限します。
 
 AWS 環境では次の table 名を明示します。
 
@@ -430,6 +433,10 @@ bun run search:backfill
 Soft delete 済み comment と archived Team/Project は、再実行時に対応する検索文書を削除します。
 同じ `issueId` が複数 Team に存在しても、Work Item と comment の entity ID は Team scope を
 含むため混在しません。
+
+この bootstrap/backfill は source/target scan evidence、planning artifact、sealed authority を
+生成または参照しません。初期作成後は current application event の通常経路が同じ canonical key を
+更新します。
 
 `search:backfill` は production migration / cutover の代替ではありません。lease、durable
 checkpoint、lossless preimage journal、独立した verify、rollback を持たないため、新しい schema や

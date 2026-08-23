@@ -134,6 +134,25 @@ active member、`viewer@example.com` を active guest として初回だけ seed
 ready hook の再実行は既存 role/status を上書きしないため、利用停止した member が
 Floci 再起動で自動的に再有効化されることはありません。
 
+ready hook は canonical source row と current schema の Workspace Search table を作ります。初期の Team、
+Project、Work Item を current search projection へ投入するときは、generated environment を読み込み、
+bounded で再実行可能な canonical backfill を source ごとに実行します。migration plan、scan evidence、
+target snapshot は作成しません。
+
+```sh
+set -a
+. .floci/generated/cognito.env
+set +a
+
+AWS_ENDPOINT_URL=http://localhost:4566 bun run search:backfill -- \
+  --source project-directory --limit 100
+AWS_ENDPOINT_URL=http://localhost:4566 bun run search:backfill -- \
+  --source work-items --limit 100
+```
+
+各 projection は canonical entity key へ idempotent に保存されるため、bootstrap が中断しても同じ
+command を安全に再実行できます。その後の作成・更新は通常の application event projection が追随します。
+
 Floci 上の Lambda + API Gateway に backend をデプロイする場合:
 
 ```sh

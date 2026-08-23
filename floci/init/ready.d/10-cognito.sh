@@ -1225,4 +1225,5 @@ echo "mukuroji DynamoDB ready: table=$WORKSPACE_ACCESS_TABLE workspace=$WORKSPAC
 echo "mukuroji DynamoDB ready: table=$ENTERPRISE_IDENTITY_TABLE enterpriseIdentity=ready"
 echo "mukuroji DynamoDB ready: table=$REALTIME_SESSIONS_TABLE scopeIndex=ScopeConnectionsIndex"
 echo "mukuroji DynamoDB ready: table=$WORKSPACE_SEARCH_TABLE searchAndSavedViews=ready"
+echo "mukuroji Workspace Search projection bootstrap: run canonical search:backfill for project-directory and work-items with --limit 100; no migration planning artifact is required"
 echo "mukuroji DynamoDB ready: table=$ANALYTICS_TABLE scheduleIndex=$ANALYTICS_SCHEDULE_INDEX"
