@@ -34,9 +34,6 @@ import {
   readRuntimeControlObservedAt,
   recordRuntimeControlObservationSafely,
 } from './runtime-control-safety'
-import {
-  runWithWorkspaceSearchWriterFenceInvocation,
-} from '../../infrastructure/runtime/workspace-search-writer-fence-invocation'
 
 /**
  * Runtime-control surfaces backed by distinct deployed AppConfig scopes.
@@ -226,9 +223,7 @@ export function createRuntimeControlGuardedHandler<
       },
     )
     if (!allowed) throw new RuntimeControlBlockedError(snapshot)
-    return await runWithWorkspaceSearchWriterFenceInvocation(
-      async () => await handler(...arguments_),
-    )
+    return await handler(...arguments_)
   }
 }
 

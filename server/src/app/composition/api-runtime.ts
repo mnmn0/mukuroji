@@ -5,9 +5,6 @@ import {
 } from 'hono'
 import type { LambdaContext, LambdaEvent } from 'hono/aws-lambda'
 import { loadServerConfig } from '../../infrastructure/config/server-config'
-import {
-  runWithWorkspaceSearchWriterFenceInvocation,
-} from '../../infrastructure/runtime/workspace-search-writer-fence-invocation'
 import { createApiHandler, createApp } from '../createApp'
 import { createProductionAppDependencies } from './api-dependencies'
 import { hydrateApiRuntimeEnvironment } from './api-runtime-environment'
@@ -89,16 +86,14 @@ export function validateApiServerConfig(): void {
  */
 export const app = new Hono()
 
-app.all('*', async (context) =>
-  await runWithWorkspaceSearchWriterFenceInvocation(async () => {
-    const runtime = await getProductionRuntime()
-    return await runtime.application.fetch(
-      context.req.raw,
-      context.env,
-      readOptionalExecutionContext(context),
-    )
-  })
-)
+app.all('*', async (context) => {
+  const runtime = await getProductionRuntime()
+  return await runtime.application.fetch(
+    context.req.raw,
+    context.env,
+    readOptionalExecutionContext(context),
+  )
+})
 
 /**
  * Reads the outer Hono execution context when the facade runtime supplies one.
@@ -126,23 +121,21 @@ function readOptionalExecutionContext(
  * @param lambdaContext - Optional Lambda invocation context.
  * @returns The Hono Lambda response.
  */
-export const handler = (
+export const handler = async (
   event: LambdaEvent,
   lambdaContext?: LambdaContext,
-) =>
-  runWithWorkspaceSearchWriterFenceInvocation(async () => {
-    const runtime = await getProductionRuntime()
-    return await runtime.apiHandler(event, lambdaContext)
-  })
+) => {
+  const runtime = await getProductionRuntime()
+  return await runtime.apiHandler(event, lambdaContext)
+}
 
 /** Bun development-server entrypoint. */
 const bunServer = {
   port: loadServerConfig().port,
-  fetch: (...args: Parameters<Hono['fetch']>) =>
-    runWithWorkspaceSearchWriterFenceInvocation(async () => {
-      const runtime = await getProductionRuntime()
-      return await runtime.application.fetch(...args)
-    }),
+  fetch: async (...args: Parameters<Hono['fetch']>) => {
+    const runtime = await getProductionRuntime()
+    return await runtime.application.fetch(...args)
+  },
 }
 
 export default bunServer

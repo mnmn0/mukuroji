@@ -81,10 +81,9 @@ Version one does not:
 The [isolated restore drill](./restore-drill.md) supplies those resources and
 combines this result with its restore-point, point-in-time export baseline,
 RPO/RTO, descriptor, S3-copy, and cleanup evidence.
-Migration rehearsal must supply its own writer-fence and checkpoint provenance.
-Neither caller may convert an incomplete or failed checker result into a
-successful terminal receipt. Wiring the contract into migration or deployment
-workflows remains caller-owned.
+The restore drill may not convert an incomplete or failed checker result into a
+successful terminal receipt. Wiring the contract into the restore workflow
+remains caller-owned.
 
 ## Bounded execution and evidence
 

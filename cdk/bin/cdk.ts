@@ -9,26 +9,9 @@ import {
 import {
   requireTeamIssueCommentIndexDeploymentStage,
 } from '../lib/config/team-issue-comment-index-deployment';
-import {
-  DEFAULT_WORKSPACE_SEARCH_MIGRATION_DEPLOYMENT_TARGET_ID,
-} from '../lib/config/workspace-search-migration-deployment-targets';
 
 const app = new cdk.App();
 cdk.Validations.of(app).addPlugins(new AwsSolutionsChecks(app));
-const deploymentTargetContext: unknown = app.node.tryGetContext(
-  'workspaceSearchMigrationDeploymentTarget',
-);
-if (
-  deploymentTargetContext !== undefined &&
-  typeof deploymentTargetContext !== 'string'
-) {
-  throw new Error(
-    'workspaceSearchMigrationDeploymentTarget must name a reviewed target.',
-  );
-}
-const workspaceSearchMigrationDeploymentTargetId =
-  deploymentTargetContext ??
-    DEFAULT_WORKSPACE_SEARCH_MIGRATION_DEPLOYMENT_TARGET_ID;
 const triageIndexDeploymentStageContext = app.node.tryGetContext(
   'triageIndexDeploymentStage',
 );
@@ -58,6 +41,5 @@ const stack = new CdkStack(app, 'CdkStack', {
   /* For more information, see https://docs.aws.amazon.com/cdk/latest/guide/environments.html */
   triageIndexDeploymentStage,
   teamIssueCommentIndexDeploymentStage,
-  workspaceSearchMigrationDeploymentTargetId,
 });
 acknowledgeKnownNagFindings(stack);

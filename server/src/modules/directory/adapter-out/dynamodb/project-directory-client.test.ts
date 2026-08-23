@@ -1643,8 +1643,8 @@ test('rejects a Project archive whose dependency guards exceed transaction capac
     },
   } as unknown as DynamoDBDocumentClient
   const client = new DynamoDbProjectDirectoryClient('DirectoryTable', documentClient)
-  // DynamoDB's 100-item transaction limit leaves 98 slots after the two directory writes.
-  const guards = Array.from({ length: 98 }, (_, index) => ({
+  // The two directory writes plus 99 guards exceed DynamoDB's 100-item limit.
+  const guards = Array.from({ length: 99 }, (_, index) => ({
     teamId: 'core-team',
     workItemId: `work-item-${index}`,
     expectedRevision: 1,
