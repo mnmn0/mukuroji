@@ -81,19 +81,18 @@ import {
   WORKSPACE_SEARCH_MIGRATION_TELEMETRY_VERSION,
 } from './migration-telemetry'
 import {
-  completeWorkspaceSearchMigrationRehearsalReconciliation,
   createAwsWorkspaceSearchMigrationIdentityPort,
   type JoinWorkspaceSearchMigrationCommittedPlanningEvidenceInput,
   type WorkspaceSearchMigrationIdentityAwsSdkConfigurations,
   type WorkspaceSearchMigrationManagedAwsTransport,
   type WorkspaceSearchMigrationManagedAwsSession,
   type WorkspaceSearchMigrationManagedPartialRollbackAwsPort,
-  WorkspaceSearchMigrationRehearsalCollectedReconciliationBase,
   WORKSPACE_SEARCH_MIGRATION_MANAGED_ARTIFACT_REQUEST_TIMEOUT_MILLISECONDS,
   WORKSPACE_SEARCH_MIGRATION_MANAGED_PLANNING_MAX_CANONICAL_BYTES,
   WORKSPACE_SEARCH_MIGRATION_MANAGED_PLANNING_MAX_OPERATIONS,
   WORKSPACE_SEARCH_MIGRATION_MANAGED_PLANNING_MAX_TOTAL_ROWS,
 } from './migration-identity-aws'
+import * as migrationIdentityAws from './migration-identity-aws'
 import {
   createWorkspaceSearchMigrationRequestedResourcesBinding,
   type WorkspaceSearchMigrationJournalLookup,
@@ -554,13 +553,6 @@ class RecordingIdentityAwsTransport
   readonly transactWritePrePlanAuthorityCommands:
     TransactWriteItemsCommand[] = []
 
-  /** Recorded strongly consistent rehearsal stage-reservation reads. */
-  readonly getRehearsalStageReservationCommands: GetItemCommand[] = []
-
-  /** Recorded rehearsal stage-reservation CAS transactions. */
-  readonly transactWriteRehearsalStageReservationCommands:
-    TransactWriteItemsCommand[] = []
-
   /** Number of low-level authority write preparations. */
   preparePrePlanAuthorityWriteCount = 0
 
@@ -580,10 +572,6 @@ class RecordingIdentityAwsTransport
 
   /** Durable fake pre-plan authority items keyed by recordKey. */
   private readonly prePlanAuthorityItems =
-    new Map<string, Readonly<Record<string, AttributeValue>>>()
-
-  /** Durable fake rehearsal stage-head items keyed by recordKey. */
-  private readonly rehearsalStageReservationItems =
     new Map<string, Readonly<Record<string, AttributeValue>>>()
 
   /** Optional synchronous effect after recording an evidence point read. */
@@ -1209,67 +1197,6 @@ class RecordingIdentityAwsTransport
       this.prePlanAuthorityItems.set(entry.recordKey, entry.item)
     }
     this.transactWritePrePlanAuthorityPostCommitEffect?.()
-    return { $metadata: {} }
-  }
-
-  /**
-   * Records and serves one exact rehearsal stage-reservation point read.
-   *
-   * @param command - Exact adapter-owned GetItem command.
-   * @returns Detached durable stage-head item when one exists.
-   */
-  async getRehearsalStageReservation(
-    command: GetItemCommand,
-  ): Promise<GetItemCommandOutput> {
-    this.getRehearsalStageReservationCommands.push(command)
-    const recordKey = command.input.Key?.recordKey?.S
-    if (recordKey === undefined) {
-      throw new Error('Expected exact rehearsal stage-head record key.')
-    }
-    const item = this.rehearsalStageReservationItems.get(recordKey)
-    return {
-      $metadata: {},
-      ...(item === undefined ? {} : { Item: structuredClone(item) }),
-    }
-  }
-
-  /**
-   * Records and installs every rehearsal stage-reservation Put item.
-   *
-   * The reservation adapter tests own exact conditional semantics. This
-   * managed-session fake proves capability routing and durable item exposure.
-   *
-   * @param command - Exact adapter-owned transaction command.
-   * @returns Empty successful transaction response.
-   */
-  async transactWriteRehearsalStageReservation(
-    command: TransactWriteItemsCommand,
-  ): Promise<TransactWriteItemsCommandOutput> {
-    this.transactWriteRehearsalStageReservationCommands.push(command)
-    const pending: {
-      /** Exact deterministic rehearsal stage-head record key. */
-      readonly recordKey: string
-      /** Detached low-level rehearsal stage-head item. */
-      readonly item: Readonly<Record<string, AttributeValue>>
-    }[] = []
-    for (const entry of command.input.TransactItems ?? []) {
-      if (entry.Put === undefined) continue
-      const item = entry.Put.Item
-      const recordKey = item?.recordKey?.S
-      if (item === undefined || recordKey === undefined) {
-        throw new Error('Expected one exact rehearsal stage-head Put item.')
-      }
-      pending.push({
-        recordKey,
-        item: structuredClone(item),
-      })
-    }
-    if (pending.length === 0) {
-      throw new Error('Expected at least one rehearsal stage-head Put item.')
-    }
-    for (const entry of pending) {
-      this.rehearsalStageReservationItems.set(entry.recordKey, entry.item)
-    }
     return { $metadata: {} }
   }
 
@@ -2289,7 +2216,7 @@ describe('Workspace Search migration AWS identity adapter', () => {
   })
 
   test(
-    'drains admitted writes after claimed reservation expiry and rejects fresh I/O',
+    'drains admitted writes after permit expiry and rejects fresh I/O',
     async () => {
       for (const responseLost of [false, true]) {
         const requested = createRequestedResources()
@@ -2297,7 +2224,7 @@ describe('Workspace Search migration AWS identity adapter', () => {
         seedValidMeasurementOutputs(transport, requested)
         const permitIssuedAt = '2026-07-28T03:19:00.000Z'
         const reservationExpiresAt = '2026-07-28T03:21:00.000Z'
-        const permitExpiresAt = '2026-07-28T03:22:00.000Z'
+        const permitExpiresAt = reservationExpiresAt
         let permitClockAt = '2026-07-28T03:20:00.000Z'
         let expiredDescribeTableCount = 0
         let expiredAuthorityReadCount = 0
@@ -2329,59 +2256,6 @@ describe('Workspace Search migration AWS identity adapter', () => {
           clock: () => new Date(permitClockAt),
         })) {
           throw new Error('Expected test-only rehearsal guard installation.')
-        }
-        const claimedStageHead = Object.freeze({
-          manifestDigest: 'a'.repeat(64),
-          completedStageOrdinal: 0,
-          headReceiptDigest: null,
-          activeReservationDigest: 'b'.repeat(64),
-          activeStageOrdinal: 1,
-          activeExpiresAt: reservationExpiresAt,
-          abandonmentCount: 0,
-          abandonmentRootDigest: 'c'.repeat(64),
-          revision: 1,
-        })
-        const malformedClaimedStageHeads = [
-          Object.freeze({
-            ...claimedStageHead,
-            activeReservationDigest: null,
-          }),
-          Object.freeze({
-            ...claimedStageHead,
-            activeStageOrdinal: null,
-          }),
-          Object.freeze({
-            ...claimedStageHead,
-            activeExpiresAt: null,
-          }),
-          Object.freeze({
-            ...claimedStageHead,
-            activeStageOrdinal: 2,
-          }),
-        ]
-        const preMalformedDescribeCount =
-          transport.describeTableCommands.length
-        for (const malformedHead of malformedClaimedStageHeads) {
-          expect(Reflect.set(
-            port,
-            'claimedRehearsalStageHead',
-            malformedHead,
-          )).toBe(true)
-          await expect(port.describeTable(
-            requested.tables['migration-state'],
-          )).rejects.toMatchObject({
-            code: 'NON_PRODUCTION_REHEARSAL_GUARD_FAILED',
-          })
-        }
-        expect(transport.describeTableCommands).toHaveLength(
-          preMalformedDescribeCount,
-        )
-        if (!Reflect.set(
-          port,
-          'claimedRehearsalStageHead',
-          claimedStageHead,
-        )) {
-          throw new Error('Expected test-only claimed stage installation.')
         }
         let parallelDescribe: Promise<DescribeTableCommandOutput> | undefined
         let escapedDescribe: Promise<DescribeTableCommandOutput> | undefined
@@ -13995,56 +13869,26 @@ describe('Workspace Search migration AWS identity adapter', () => {
     port.close()
   })
 
-  test('rejects reconciliation on production before Query I/O', async () => {
+  test('does not expose rehearsal reconciliation on production', () => {
     const transport = new RecordingIdentityAwsTransport()
     const port = createAwsWorkspaceSearchMigrationIdentityPort(
       createRequestedResources(),
       () => transport,
     )
-    const collect: unknown = Reflect.get(
-      port,
-      'collectRehearsalReconciliation',
-    )
-    if (typeof collect !== 'function') {
-      throw new Error('Expected internal reconciliation capability.')
-    }
-    await expect(Reflect.apply(collect, port, [{
-      runId: 'production-reconciliation-rejected',
-      runLocatorDigest: createMigrationDigest('restricted-run-locator'),
-      scenario: 'happy-path-verified',
-      expectedAuthorities: [{
-        maintenanceEvidenceRenewalCount: 1,
-        receiptDigest: createMigrationDigest('authority-receipt'),
-      }],
-      limits: {
-        maximumPages: 2,
-        maximumItems: 10,
-        maximumBytes: 1_024,
-        requestTimeoutMilliseconds: 1_000,
-        maximumDurationMilliseconds: 5_000,
-      },
-      clock: () => new Date('2026-07-28T09:01:00.000Z'),
-    }])).rejects.toMatchObject({
-      code: 'NON_PRODUCTION_REHEARSAL_GUARD_FAILED',
-    })
+    expect(Reflect.has(port, 'collectRehearsalReconciliation')).toBe(false)
     expect(transport.queryStatePageCommands).toHaveLength(0)
     port.close()
   })
 
-  test('rejects forged collected reconciliation completion capabilities', () => {
-    expect(() =>
-      new WorkspaceSearchMigrationRehearsalCollectedReconciliationBase(
-        Symbol('forged-collected-base'),
-      )
-    ).toThrow('Workspace Search migration rehearsal reconciliation failed.')
-    expect(() => Reflect.apply(
-      completeWorkspaceSearchMigrationRehearsalReconciliation,
-      undefined,
-      [{
-        collectedBase: Object.freeze({}),
-        verifiedIntegrity: null,
-      }],
-    )).toThrow('Workspace Search migration rehearsal reconciliation failed.')
+  test('does not export retired reconciliation capability constructors', () => {
+    expect(Reflect.has(
+      migrationIdentityAws,
+      'WorkspaceSearchMigrationRehearsalCollectedReconciliationBase',
+    )).toBe(false)
+    expect(Reflect.has(
+      migrationIdentityAws,
+      'completeWorkspaceSearchMigrationRehearsalReconciliation',
+    )).toBe(false)
   })
 })
 
