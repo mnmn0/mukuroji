@@ -1823,6 +1823,13 @@ migration の代用にはせず、実行前 PITR と reviewed forward-fix/repair
    していることを確認する。
 7. 直前の成功code/configurationを新しい`ApiRuntimeConfigurationRevision`でforward deployする
    rollback commandと、Function URL consumerの切替手順をreviewする。
+8. Webhook locator bridgeを削除するdeployでは、対象account/region/table identityを固定して
+   Developer Platformの全`webhook-subscription` rowを検査し、retiredな`lookupKey` / `lookupSortKey`、
+   `WEBHOOK_ACTIVE_LOCATOR_MIGRATION#v3` / `STATE`、またはWebhook active-locator rollback
+   checkpointが1件でも残る場合はrolloutを停止する。
+   残存rowがあるとsubscription更新、secret rotation、active subscription取得が
+   `DeveloperPlatformDataInvalid` (503) でfail-closedになる。このbridge削除deployはone-time cleanupを
+   実行しないため、残存dataは別のreview済みcleanup計画で解消してから再検査する。
 
 `main quality gates` ruleset は上記6 context を strict mode で required にします。Workflow の
 job/context 名を変更する場合は ruleset も同じ release で更新し、対象 branch の effective rules
