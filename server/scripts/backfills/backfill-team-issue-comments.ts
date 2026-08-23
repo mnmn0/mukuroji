@@ -8,7 +8,6 @@ import {
 import {
   createDynamoDbClient,
   createDynamoDbDocumentClient,
-  createWorkspaceSearchWriterDynamoDbDocumentClient,
 } from '../../src/infrastructure/aws/dynamodb-client'
 import {
   loadServerConfig,
@@ -35,9 +34,6 @@ import {
   type WorkspaceSearchClient,
 } from '../../src/modules/workspace-search'
 import { DynamoDbWorkspaceSearchClient } from '../../src/modules/workspace-search/workspace-search'
-import {
-  runWithWorkspaceSearchWriterFenceInvocation,
-} from '../../src/infrastructure/runtime/workspace-search-writer-fence-invocation'
 import {
   ScanCommand,
   UpdateCommand,
@@ -215,10 +211,7 @@ async function main() {
   }, { localBun: false })
   const dynamoDbClient = createDynamoDbClient(serverConfig)
   const sourceClient = createDynamoDbDocumentClient(dynamoDbClient)
-  const writerDocumentClient = createWorkspaceSearchWriterDynamoDbDocumentClient(
-    dynamoDbClient,
-    serverConfig,
-  )
+  const writerDocumentClient = createDynamoDbDocumentClient(dynamoDbClient)
   const localDynamoDb = endpoint !== undefined && isLocalDynamoDbEndpoint(endpoint)
   if (!options.dryRun && localDynamoDb) {
     await ensureLocalWorkspaceSearchTable(tables.workspaceSearch, dynamoDbClient)
@@ -260,7 +253,7 @@ async function main() {
       `dryRun=${options.dryRun} limit=${options.limit ?? 'unlimited'} ` +
       `checkpoint=${options.checkpointPath}`,
   )
-  await runWithWorkspaceSearchWriterFenceInvocation(() => runBackfill(
+  await runBackfill(
     sourceClient,
     collaboration,
     workspaceSearch,
@@ -270,7 +263,7 @@ async function main() {
     checkpoint,
     options,
     runContext,
-  ))
+  )
   printSummary(checkpoint, options)
 }
 

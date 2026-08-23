@@ -13,11 +13,6 @@ import {
   type LambdaBuildPaths,
 } from '../../config/lambda-build-paths';
 import type { StackParameters } from '../../config/stack-parameters';
-import {
-  bindWorkspaceSearchWriterFence,
-  configureWorkspaceSearchWriterFence,
-  type WorkspaceSearchWriterFenceResources,
-} from '../../policies/workspace-search-writer-fence';
 import { grantPlanningRevisionFenceAccess } from '../../policies/planning-revision-fence';
 import type { DataStoreResources } from '../data-stores';
 import {
@@ -40,8 +35,6 @@ export interface ConnectorWorkerInput {
   readonly runtimeControls: RuntimeControlResources;
   /** Connector queues and dead-letter queues. */
   readonly workerChannels: WorkerChannels;
-  /** Exact source, target, and state tables protected by the writer fence. */
-  readonly workspaceSearchWriterFence: WorkspaceSearchWriterFenceResources;
 }
 
 /**
@@ -174,10 +167,6 @@ export function buildConnectorWorkers(
       },
     },
   );
-  bindWorkspaceSearchWriterFence(
-    input.workspaceSearchWriterFence,
-    connectorSyncFunction,
-  );
   bindRuntimeControls(
     input.runtimeControls,
     connectorSyncFunction,
@@ -288,10 +277,6 @@ export function buildConnectorWorkers(
           tenantAdministrationTable.tableName,
       },
     },
-  );
-  configureWorkspaceSearchWriterFence(
-    input.workspaceSearchWriterFence,
-    connectorPollFunction,
   );
   bindRuntimeControls(
     input.runtimeControls,

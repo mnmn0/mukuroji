@@ -75,8 +75,6 @@ export interface StackParameters {
   readonly restoreDrillCleanupApproverRoleArn: cdk.CfnParameter;
   /** Operator-incremented immutable API configuration revision. */
   readonly apiRuntimeConfigurationRevision: cdk.CfnParameter;
-  /** Explicit two-phase production writer-fence rollout mode. */
-  readonly workspaceSearchWriterFenceMode: cdk.CfnParameter;
   /** Anonymous request submission limit per capability and hour. */
   readonly requestRateLimitPerHour: cdk.CfnParameter;
   /** Secret authenticating request intake email Webhooks. */
@@ -267,16 +265,6 @@ export function buildStackParameters(stack: cdk.Stack): StackParameters {
         'Operator-incremented revision that replaces immutable API configuration secrets and publishes a matching Lambda version.',
     },
   );
-  const workspaceSearchWriterFenceMode = new cdk.CfnParameter(
-    stack,
-    'WorkspaceSearchWriterFenceMode',
-    {
-      type: 'String',
-      allowedValues: ['rollout-pending', 'required'],
-      description:
-        'Explicit writer-fence rollout phase. Use rollout-pending only while AppConfig is disabled and writers are drained before the first open-row bootstrap; use required after bootstrap.',
-    },
-  );
   const requestRateLimitPerHour = new cdk.CfnParameter(stack, 'RequestRateLimitPerHour', {
     type: 'Number',
     default: 10,
@@ -444,7 +432,6 @@ export function buildStackParameters(stack: cdk.Stack): StackParameters {
     workspaceAuditPseudonymKey,
     restoreDrillCleanupApproverRoleArn,
     apiRuntimeConfigurationRevision,
-    workspaceSearchWriterFenceMode,
     requestRateLimitPerHour,
     requestEmailWebhookSecret,
     requestTokenHashSecret,

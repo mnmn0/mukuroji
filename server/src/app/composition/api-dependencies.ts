@@ -25,7 +25,6 @@ import {
   createDynamoDbClient,
   createDynamoDbDocumentClient,
   createPlanningRevisionFenceWriterDynamoDbDocumentClient,
-  createWorkspaceSearchWriterDynamoDbDocumentClient,
   shouldBootstrapLocalDynamoDb,
 } from '../../infrastructure/aws/dynamodb-client'
 import { createSecretsManagerClient } from '../../infrastructure/aws/secrets-manager-client'
@@ -177,7 +176,7 @@ export function createAuditEventsClient(): DynamoDbAuditEventsClient {
   const dynamoDbClient = createDynamoDbClient()
 
   return new DynamoDbAuditEventsClient(
-    createWorkspaceSearchWriterDynamoDbDocumentClient(dynamoDbClient),
+    createDynamoDbDocumentClient(dynamoDbClient),
     getConfiguredAuditTableName() ?? 'mukuroji-audit-events',
     {},
     dynamoDbClient,
@@ -201,7 +200,7 @@ export function createWorkItemConfigurationClient(): WorkItemConfigurationClient
     config.environment.WORK_ITEM_CONFIGURATION_TABLE_NAME ??
       'mukuroji-work-item-configuration-local',
     workItemTableName,
-    createWorkspaceSearchWriterDynamoDbDocumentClient(dynamoDbClient),
+    createDynamoDbDocumentClient(dynamoDbClient),
     dynamoDbClient,
     shouldBootstrapLocalDynamoDb(),
   )

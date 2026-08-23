@@ -8,7 +8,6 @@
     "audit:backfill": "bun run scripts/backfills/backfill-audit-events.ts",
     "team-issue-comments:backfill": "bun run scripts/backfills/backfill-team-issue-comments.ts",
     "search:backfill": "bun run scripts/backfills/backfill-workspace-search.ts",
-    "search:migration:control": "bun run scripts/migrations/workspace-search-v1/migration-control-cli.ts",
     "work-items:integrity": "bun run scripts/data-integrity/verify-work-items-integrity.ts",
     "cross-domain:integrity": "bun run scripts/data-integrity/verify-cross-domain-integrity.ts",
     "restore-drill:approve-cleanup": "bun run scripts/restore-drill/create-cleanup-approval.ts"
