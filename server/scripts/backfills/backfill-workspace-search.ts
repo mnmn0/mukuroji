@@ -1,4 +1,3 @@
-import type { DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import {
   DynamoDBDocumentClient,
   ScanCommand,
@@ -6,7 +5,7 @@ import {
 } from '@aws-sdk/lib-dynamodb'
 import {
   createDynamoDbClient as createConfiguredDynamoDbClient,
-  createWorkspaceSearchWriterDynamoDbDocumentClient,
+  createDynamoDbDocumentClient,
   shouldBootstrapLocalDynamoDb,
 } from '../../src/infrastructure/aws/dynamodb-client'
 import {
@@ -15,9 +14,6 @@ import {
   type ServerConfig,
   type ServerEnvironment,
 } from '../../src/infrastructure/config/server-config'
-import {
-  runWithWorkspaceSearchWriterFenceInvocation,
-} from '../../src/infrastructure/runtime/workspace-search-writer-fence-invocation'
 import {
   type DocumentDetail,
   type SearchCustomFieldValue,
@@ -203,11 +199,7 @@ async function main() {
     bootstrapLocalDynamoDb,
   )
   const dynamoDbClient = createConfiguredDynamoDbClient(config)
-  const documentClient = createDocumentClient(
-    dynamoDbClient,
-    !options.dryRun,
-    config,
-  )
+  const documentClient = createDynamoDbDocumentClient(dynamoDbClient)
   const definitions = createSourceDefinitions(tables)
     .filter((definition) => options.source === undefined || definition.name === options.source)
 
@@ -220,13 +212,11 @@ async function main() {
     `dryRun=${options.dryRun} limit=${options.limit ?? 'unlimited'}`,
   )
 
-  const counters = await runWithWorkspaceSearchWriterFenceInvocation(
-    async () => await runBackfill(
-      documentClient,
-      definitions,
-      tables.workspaceSearch,
-      options,
-    ),
+  const counters = await runBackfill(
+    documentClient,
+    definitions,
+    tables.workspaceSearch,
+    options,
   )
 
   for (const definition of definitions) {
@@ -294,9 +284,7 @@ Options:
 
 Required production environment:
   PROJECT_DIRECTORY_TABLE_NAME, WORK_ITEMS_TABLE_NAME, COLLABORATION_TABLE_NAME,
-  DOCUMENTS_TABLE_NAME, WORKSPACE_SEARCH_TABLE_NAME,
-  WORKSPACE_SEARCH_MIGRATION_STATE_TABLE_NAME,
-  MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE=required
+  DOCUMENTS_TABLE_NAME, WORKSPACE_SEARCH_TABLE_NAME
 
 For a local endpoint, repository-local default table names are used when omitted.
 Write runs create the local Workspace search table when it is missing. Re-running
@@ -414,24 +402,6 @@ function resolveTableName(
   throw new Error(
     `${environmentNames.join(' or ')} is required when a local DynamoDB endpoint is not configured.`,
   )
-}
-
-function createDocumentClient(
-  baseClient: DynamoDBClient,
-  guardWrites: boolean,
-  config: ServerConfig,
-) {
-  if (guardWrites) {
-    return createWorkspaceSearchWriterDynamoDbDocumentClient(
-      baseClient,
-      config,
-    )
-  }
-  return DynamoDBDocumentClient.from(baseClient, {
-    marshallOptions: {
-      removeUndefinedValues: true,
-    },
-  })
 }
 
 function createSourceDefinitions(tables: TableNames): SourceDefinition[] {

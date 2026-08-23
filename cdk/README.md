@@ -20,7 +20,6 @@
 | `WorkspaceAuditPseudonymKey` | yes | Workspace/member/invitation の公開 audit ID を HMAC 化する、32-byte random値を表す64桁の小文字hex固定 key。`openssl rand -hex 32` などで生成し、`NoEcho` で Lambda に渡してbackfillにも同じ値を設定します。 |
 | `RestoreDrillCleanupApproverRoleArn` | yes | Cleanup approval policyを一時attachできる唯一の既存data-owner IAM role ARN。別roleへpolicyをattachしてもapproval APIは許可されず、receipt内のSTS assumed-role sessionもこのroleへ帰属する必要があります。 |
 | `ApiRuntimeConfigurationRevision` | yes | 1〜32文字のoperator管理revision。先頭はASCII英数字、以降はASCII英数字と `.` `_` `-` だけを使えます（例: `2026-07-28-01`）。API code、または4分割runtime configuration secretへ入るparameter/resource値を変更するdeployごとに増分し、同じrevisionを異なる内容へ再利用しません。 |
-| `WorkspaceSearchWriterFenceMode` | yes | 初回bootstrap前の明示的な二段階rolloutでは`rollout-pending`、open row作成後の定常状態では`required`。既定値はなく、通常deployで`required`から戻しません。 |
 | `InitialOwnerEmail` | yes | lowercase の初期 owner email。Workspace/member/alias key に使います。 |
 | `InitialOwnerUsername` | yes | `AdminUpdateUserAttributes` に渡す Cognito username。email と異なる username も指定できます。 |
 | `TaskApiAllowedOrigins` | production では必須 | 空白なしの comma-separated CORS origin。既定値は local development 用です。 |
@@ -39,18 +38,13 @@
 
 ### Workspace Search migration deployment target
 
-Migration rehearsalのaccount、Region、environmentはCloudFormation parameterでは指定しません。
+Workspace Search migrationのaccount、Region、environmentはCloudFormation parameterでは指定しません。
 CDK contextの`workspaceSearchMigrationDeploymentTarget`は、
 [`lib/config/workspace-search-migration-deployment-targets.ts`](lib/config/workspace-search-migration-deployment-targets.ts)
 にreview済みcodeとして固定したtarget IDを選ぶだけです。未知のID、不完全なtarget、stackの
-account/Regionとの不一致はsynth時に失敗します。現在のmapはrehearsal resourceを作成しない
-`production-disabled`だけを含みます。
-
-実non-production targetの追加は、具体的で互いに異なるdeployment accountとproduction-account digest、
-固定Region、`rehearsalEnabled=true`を同じsource mapへ追加する独立したreview対象です。追加時はcloud assemblyと
-`cdk diff`をreviewし、stack environmentとCloudFormation assertionがexact account/Regionへ固定されることを
-確認します。Production account IDそのものはsource、template、tag、outputへ保存せず、private permit入力から
-domain-separated SHA-256を計算してCDKのdigest tagと照合します。
+account/Regionとの不一致はsynth時に失敗します。現在のmapはnon-production account/Region bindingと
+rehearsal target identity ruleを有効にしない`production-disabled`だけを含みます。Migration state
+table、journal、operator policyはtargetに依存しない共通resourceとして引き続きsynthされます。
 
 ## API observability
 
@@ -60,8 +54,7 @@ trace/telemetry write action だけを追加します。API Lambda は readiness
 持つ独立 policy を使います。
 
 Stack は API Lambda の `Errors`、`Throttles`、p95 `Duration`（12秒）、HTTP API の 5xx、
-application EMF の `ServerErrorCount` を CloudWatch alarm として作成します。Workspace Search
-migration専用の6 alarmを含む45 metric alarmと
+application EMF の `ServerErrorCount` を CloudWatch alarm として作成します。41 metric alarmと
 1 composite alarmの
 `AlarmActions` は、必須parameterで指定した既存のprimary/secondary SNS topicへ接続します。
 Stackはtopic、subscription、Incident Manager escalation planを作成・変更しません。Topic ownerは
@@ -90,32 +83,9 @@ environment evidenceへ保存します。
 
 Operator自身の`sns:Publish`だけではCloudWatch principalとKMS経路を検証できません。Deploy後は
 同じ両topic actionを持つcontrolled test alarmを実際に`OK → ALARM`へ遷移させ、CloudWatch alarm
-history、両subscriptionの受信時刻/message ID、`ALARM → OK`への復帰を保存します。全46 alarmの
+history、両subscriptionの受信時刻/message ID、`ALARM → OK`への復帰を保存します。全42 alarmの
 `AlarmActions`がprimary/secondaryの2 ARNを含み、inventory済みの既存actionも保持していることを
 templateとdeployed configurationの両方で照合します。
-
-### Workspace Search migration alarms
-
-`Mukuroji/WorkspaceSearchMigration` namespaceには、
-`Service=mukuroji-workspace-search-migration`だけをdimensionとする次の6 alarmがあります。
-
-- `WorkspaceSearchMigrationDescribeTableThrottleAlarm`
-- `WorkspaceSearchMigrationDescribeTableBudgetStopAlarm`
-- `WorkspaceSearchMigrationRateBudgetExhaustionAlarm`
-- `WorkspaceSearchMigrationCheckpointStallAlarm`
-- `WorkspaceSearchMigrationQuarantineAlarm`
-- `WorkspaceSearchMigrationTerminalFailureAlarm`
-
-すべて5分`Sum >= 1`、evaluation/datapoints 1/1、`TreatMissingData=notBreaching`です。
-Run ID、table、tenant、operation、phase、outcome、correlationはdimensionにしません。既存のalarm routing
-aspectがprimary/secondaryの両SNS actionを付与します。Stackは追加topicやmigration用
-`PutMetricData`権限を作成しません。review済みtargetが`environment=non-production`かつ
-`rehearsalEnabled=true`のときだけ、
-6 alarmの`ALARM`通知を受けるprimary/secondary別のfilter済みSQS subscriptionと、未接続collector policyを
-作成します。CLIのterminal EMFと即時live-stall EMFをmetric化する実行surfaceは、
-そのstdout/stderrの両方をCloudWatch Logsへingestする必要があります。Alarm response、secret-free correlation、非本番の
-real metricによる`OK → ALARM → OK`と両receiptの手順は
-[`docs/operational-readiness.md`](../docs/operational-readiness.md)を参照してください。
 
 ## Outputs
 
@@ -143,12 +113,8 @@ real metricによる`OK → ALARM → OK`と両receiptの手順は
 - `WorkspaceSearchTableName`（検索文書、saved/task view、ユーザー別 view preference、24 時間保持の task view mutation receipt。receipt のみ `expiresAt` TTL で失効）
 - `WorkspaceSearchMigrationStateTableName`（lease、checkpoint、operation receipt 用の retained/PITR store）
 - `WorkspaceSearchMigrationDeploymentTargetId`, `WorkspaceSearchMigrationDeploymentTrustVersion`, `WorkspaceSearchMigrationDeploymentEnvironment`, `WorkspaceSearchMigrationDeploymentAccount`, `WorkspaceSearchMigrationDeploymentRegion`, `WorkspaceSearchMigrationProductionAccountDigest`, `WorkspaceSearchMigrationDeploymentTrustRootDigest`（review済みsource mapから決まるcanonical deployment trust root。raw production account IDは含めない）
-- `WorkspaceSearchMigrationJournalBucketName`, `WorkspaceSearchMigrationJournalKeyArn`（通常artifactは30–31日、`workspace-search/v1/rehearsal/evidence-*`だけ365–366日の Object Lock COMPLIANCE 付きlossless migration artifact store。Preimage journal segment は2 MiB以下、planning raw source/target artifact segment は16 MiB以下の単一 `PutObject` に限定し、multipart upload は許可しません。専用 access log bucket は current/noncurrent version を90日保持）
+- `WorkspaceSearchMigrationJournalBucketName`, `WorkspaceSearchMigrationJournalKeyArn`（30–31日の Object Lock COMPLIANCE 付きlossless migration artifact store。Preimage journal segment は2 MiB以下、planning raw source/target artifact segment は16 MiB以下の単一 `PutObject` に限定し、multipart upload は許可しません。専用 access log bucket は current/noncurrent version を90日保持）
 - `WorkspaceSearchMigrationOperatorPolicyArn`（承認済み operator principal へ明示的に attach する未接続 policy。通常journalの30–31日保持権限だけを持つ）
-- `WorkspaceSearchMigrationRehearsalEvidencePolicyArn`（`non-production`だけに出力する未接続policy。Issue 167のimmutable evidenceを365–366日へ延長する実行時だけoperator policyと同じ短命roleへ追加する）
-- `WorkspaceSearchMigrationAlarmEvidenceAlarmArns`, `WorkspaceSearchMigrationAlarmEvidencePrimaryQueueUrl`, `WorkspaceSearchMigrationAlarmEvidenceSecondaryQueueUrl`, `WorkspaceSearchMigrationAlarmEvidenceCollectorPolicyArn`（`non-production`だけに出力する6 alarmのcanonical vector、route別receipt queue、未接続collector policy）
-- `WorkspaceSearchMigrationAlarmEvidenceSignalLogGroupName`, `WorkspaceSearchMigrationAlarmEvidenceSignalLogStreamName`, `WorkspaceSearchMigrationAlarmEvidenceSignalLogStreamArn`, `WorkspaceSearchMigrationAlarmEvidenceIngestionPolicyArn`（`non-production`だけに作成するretained 365日LogGroup、固定/precreated `alarm-signals-v1` stream、そのstreamへの`logs:PutLogEvents`だけを許す未接続ingestion policy。production operator policyには接続しない）
-- `WorkspaceSearchMigrationAlarmEvidenceDeploymentTrustRootDigest`, `WorkspaceSearchMigrationAlarmEvidenceDeploymentTargetId`（条件付きalarm evidence sinkを同じdeployment trust rootへ束縛する値）
 - `RestoreDrillStateMachineArn`, `RestoreDrillCleanupStateMachineArn`
 - `RestoreDrillEvidenceBucketName`, `RestoreDrillScratchBucketName`, `RestoreDrillStateTableName`
 - `RestoreDrillCleanupApprovalPolicyArn`, `RestoreDrillScheduleDlqUrl`
@@ -593,9 +559,7 @@ wait for `TeamIssueEventCreatedAtIndex` to report `ACTIVE` before continuing
 to the `comment` stage commands.
 
 ```sh
-# 初回writer-fence bootstrap前だけ rollout-pending。bootstrap後は required。
 export MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION=2026-07-28-01
-export MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE=rollout-pending
 export MUKUROJI_RESTORE_DRILL_CLEANUP_APPROVER_ROLE_ARN='arn:aws:iam::account-id:role/data-owner-role'
 export MUKUROJI_TASK_API_ALLOWED_ORIGINS=https://app.example.com
 
@@ -620,7 +584,6 @@ bun --filter cdk cdk diff CdkStack \
   --parameters AlarmPrimaryTopicName="$MUKUROJI_ALARM_PRIMARY_TOPIC_NAME" \
   --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
   --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
-  --parameters WorkspaceSearchWriterFenceMode="$MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE" \
   --parameters TaskApiAllowedOrigins="$MUKUROJI_TASK_API_ALLOWED_ORIGINS"
 
 bun --filter cdk cdk deploy CdkStack \
@@ -644,14 +607,11 @@ bun --filter cdk cdk deploy CdkStack \
   --parameters AlarmPrimaryTopicName="$MUKUROJI_ALARM_PRIMARY_TOPIC_NAME" \
   --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
   --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
-  --parameters WorkspaceSearchWriterFenceMode="$MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE" \
   --parameters TaskApiAllowedOrigins="$MUKUROJI_TASK_API_ALLOWED_ORIGINS"
 ```
 
 ```sh
-# 初回writer-fence bootstrap前だけ rollout-pending。bootstrap後は required。
 export MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION=2026-07-28-01
-export MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE=rollout-pending
 export MUKUROJI_RESTORE_DRILL_CLEANUP_APPROVER_ROLE_ARN='arn:aws:iam::account-id:role/data-owner-role'
 export MUKUROJI_TASK_API_ALLOWED_ORIGINS=https://app.example.com
 
@@ -676,7 +636,6 @@ bun --filter cdk cdk diff CdkStack \
   --parameters AlarmPrimaryTopicName="$MUKUROJI_ALARM_PRIMARY_TOPIC_NAME" \
   --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
   --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
-  --parameters WorkspaceSearchWriterFenceMode="$MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE" \
   --parameters TaskApiAllowedOrigins="$MUKUROJI_TASK_API_ALLOWED_ORIGINS"
 
 bun --filter cdk cdk deploy CdkStack \
@@ -700,24 +659,17 @@ bun --filter cdk cdk deploy CdkStack \
   --parameters AlarmPrimaryTopicName="$MUKUROJI_ALARM_PRIMARY_TOPIC_NAME" \
   --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
   --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
-  --parameters WorkspaceSearchWriterFenceMode="$MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE" \
   --parameters TaskApiAllowedOrigins="$MUKUROJI_TASK_API_ALLOWED_ORIGINS" \
   --outputs-file /tmp/mukuroji-cdk-outputs.json
 ```
 
 `--outputs-file`はdeploy直後のoutput照合用スナップショットです。`/tmp`のファイルだけを
 永続的な変更証跡とはせず、stack ID、deploy時刻、change set、API runtime revision、
-writer-fence mode、outputファイルのSHA-256をアクセス制御されたchange recordへ保存します。
+outputファイルのSHA-256をアクセス制御されたchange recordへ保存します。
 outputにはSecret ARNなどのresource metadataが含まれるため、access tokenやsecret値を追記せず、
 照合後のローカルファイルは削除します。
 
-初回配線を`rollout-pending`でdeployすると、AppConfigの初期baselineは`disabled`でall-at-once
-deployされ、controlled Lambdaはその完了に依存します。全writerのdrainを確認してfresh authorityに
-束縛したopen rowをbootstrapし、続けて値を`required`へ変更します。
-Application clientもpending中はfenced mutationをnetwork I/O前に拒否し、AppConfig admissionの
-誤再開だけではunguarded writeへ戻りません。
-writer clientを構築する全10 Lambdaへの反映を確認した後、新しいAppConfig `enabled` revisionを
-deployしてwriterを再開します。Target templateと新規環境はWebhook authorization backfill custom
+Target templateと新規環境はWebhook authorization backfill custom
 resourceを作成しません。既存stackにはdeploy前まで旧resourceが存在し得ますが、このdeployのchange setで
 削除します。その存在自体はpre-deploy gateの失敗条件にせず、旧resourceを再実行せずにretired dataと
 canonical authorization dataを全件検査します。このrolloutはlegacy locatorや不足したauthorization
@@ -727,9 +679,7 @@ authorization projection/grantの不足がある環境ではrolloutを停止し�
 `CollaborationProjectionFunction`のDynamoDB stream event-source mappingだけをchange-controlledに停止し、
 現行`WebhookDeliveryFunction` consumerを動かしたまま`WebhookDeliveryQueueUrl`をdrainして、main queue/DLQと
 Developer Platformのprojection stateにv1 primary/legacy cursorが残らないことも確認します。このdeployは
-durable cursorを変換しません。CloudFormation更新中の
-pending/required混在を許容してwriterを再開したり、通常rollbackとして`required`から
-`rollout-pending`へ戻したりしないでください。
+durable cursorを変換しません。
 
 `MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION`はAPIのcode、またはruntime configuration secretへ
 入るparameter/resource値が変わるdeployごとに新しい値へ進め、`cdk diff`とdeployへ同じ値を渡します。
@@ -803,7 +753,7 @@ VITE_API_BASE_URL="$FUNCTION_URL" bun run web:dev
 
 Alarm routingを初めて追加するupgradeでは、同一account/regionに異なる2つのstandard SNS topicを
 先に作成し、上記policy、KMS、subscription、controlled alarm testの契約を満たします。既存環境で
-monitoring stack、custom resource、または手動操作が`AlarmActions`を管理している場合は、全46 alarmの
+monitoring stack、custom resource、または手動操作が`AlarmActions`を管理している場合は、全42 alarmの
 現行actionとownerをinventory化し、必要なdestinationを新topic側へ移行してから旧reconcilerを停止します。
 複数ownerが同じalarm propertyを更新する状態でdeployしません。`cdk diff`では
 2つの必須parameter、相異rule、既存alarmの`AlarmActions`以外にalarm resourceの置換や

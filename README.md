@@ -134,6 +134,25 @@ active member、`viewer@example.com` を active guest として初回だけ seed
 ready hook の再実行は既存 role/status を上書きしないため、利用停止した member が
 Floci 再起動で自動的に再有効化されることはありません。
 
+ready hook は canonical source row と current schema の Workspace Search table を作ります。初期の Team、
+Project、Work Item を current search projection へ投入するときは、generated environment を読み込み、
+bounded で再実行可能な canonical backfill を source ごとに実行します。migration plan、scan evidence、
+target snapshot は作成しません。
+
+```sh
+set -a
+. .floci/generated/cognito.env
+set +a
+
+AWS_ENDPOINT_URL=http://localhost:4566 bun run search:backfill -- \
+  --source project-directory --limit 100
+AWS_ENDPOINT_URL=http://localhost:4566 bun run search:backfill -- \
+  --source work-items --limit 100
+```
+
+各 projection は canonical entity key へ idempotent に保存されるため、bootstrap が中断しても同じ
+command を安全に再実行できます。その後の作成・更新は通常の application event projection が追随します。
+
 Floci 上の Lambda + API Gateway に backend をデプロイする場合:
 
 ```sh
@@ -208,8 +227,6 @@ Web は Vite の proxy 経由で `/api` を `http://localhost:3000` に転送し
 - `MUKUROJI_COLLABORATION_TABLE` / `COLLABORATION_TABLE_NAME`: comment thread、reaction、watcher、presence を保存する DynamoDB table 名。未指定時は `mukuroji-collaboration-local`
 - `MUKUROJI_DOCUMENTS_TABLE` / `DOCUMENTS_TABLE_NAME`: Document tree、version、comment、presence、share、backlink を保存する DynamoDB table 名。未指定時は `mukuroji-documents-local`
 - `MUKUROJI_WORKSPACE_SEARCH_TABLE` / `WORKSPACE_SEARCH_TABLE_NAME`: Workspace search document、saved view、ユーザー別 view preference を保存する DynamoDB table 名。未指定時は `mukuroji-workspace-search-local`
-- `WORKSPACE_SEARCH_MIGRATION_STATE_TABLE_NAME`: Workspace Search migration の durable state、authority、application writer-fence row を保存する DynamoDB table 名。本番 writer runtime では必須です。
-- `MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE`: 本番CDKはCloudFormation parameter `WorkspaceSearchWriterFenceMode` で `rollout-pending` / `required` の明示選択を要求します。`rollout-pending` は初回open row bootstrap前にAppConfigを`disabled`としてwriter drainを実測した期間だけ使う一時的なproduction bridgeで、このmode自体も対象tableへのmutationをSDK middlewareで拒否します。通常運用やmigration実行には使いません。Bootstrap後は全Lambdaの`required`反映を確認してから再開します。Floci deployだけが、local HTTP DynamoDB/Secrets Manager endpointと`MUKUROJI_LOCAL_AWS_RUNTIME=floci`を併用して`local-floci-bypass`を設定します。
 - `ANALYTICS_TABLE_NAME`: 保存済みレポート、immutable snapshot、定期配信 receipt を保存する DynamoDB table 名。未指定時は `mukuroji-analytics-local`
 - `ANALYTICS_SCHEDULE_INDEX_NAME`: 定期配信対象の取得に使う `scheduleShard` / `nextDeliveryAtRecordKey` GSI 名。未指定時は `ScheduleDueIndex`
 - `MUKUROJI_NOTIFICATIONS_TABLE` / `NOTIFICATIONS_TABLE_NAME`: ユーザー別の durable notification timeline と配信設定を保存する DynamoDB table 名。未指定時は `mukuroji-notifications-local`
@@ -328,9 +345,6 @@ export MUKUROJI_REQUEST_TOKEN_HASH_SECRET=<different-at-least-32-random-characte
 export MUKUROJI_ALARM_PRIMARY_TOPIC_NAME=<primary-standard-sns-topic-name>
 export MUKUROJI_ALARM_SECONDARY_TOPIC_NAME=<secondary-standard-sns-topic-name>
 export MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION=2026-07-28-01
-# 初回 writer-fence bootstrap 時のみ rollout-pending。
-# 既存環境の再 deploy では required を指定します（required からの巻き戻しは禁止）。
-export MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE=rollout-pending
 export MUKUROJI_RESTORE_DRILL_CLEANUP_APPROVER_ROLE_ARN='arn:aws:iam::account-id:role/data-owner-role'
 export MUKUROJI_TASK_API_ALLOWED_ORIGINS=https://app.example.com
 
@@ -364,7 +378,6 @@ bun --filter cdk cdk diff CdkStack \
   --parameters AlarmPrimaryTopicName="$MUKUROJI_ALARM_PRIMARY_TOPIC_NAME" \
   --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
   --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
-  --parameters WorkspaceSearchWriterFenceMode="$MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE" \
   --parameters TaskApiAllowedOrigins="$MUKUROJI_TASK_API_ALLOWED_ORIGINS"
 
 bun --filter cdk cdk deploy CdkStack \
@@ -388,7 +401,6 @@ bun --filter cdk cdk deploy CdkStack \
   --parameters AlarmPrimaryTopicName="$MUKUROJI_ALARM_PRIMARY_TOPIC_NAME" \
   --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
   --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
-  --parameters WorkspaceSearchWriterFenceMode="$MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE" \
   --parameters TaskApiAllowedOrigins="$MUKUROJI_TASK_API_ALLOWED_ORIGINS"
 
 bun --filter cdk cdk diff CdkStack \
@@ -412,7 +424,6 @@ bun --filter cdk cdk diff CdkStack \
   --parameters AlarmPrimaryTopicName="$MUKUROJI_ALARM_PRIMARY_TOPIC_NAME" \
   --parameters AlarmSecondaryTopicName="$MUKUROJI_ALARM_SECONDARY_TOPIC_NAME" \
   --parameters ApiRuntimeConfigurationRevision="$MUKUROJI_API_RUNTIME_CONFIGURATION_REVISION" \
-  --parameters WorkspaceSearchWriterFenceMode="$MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE" \
   --parameters TaskApiAllowedOrigins="$MUKUROJI_TASK_API_ALLOWED_ORIGINS"
 ```
 
@@ -432,13 +443,7 @@ canonical Base64として保存します。NoEchoの4値はrevision-boundな個�
 Document public-share secretとともにenvelopeにはARNだけを入れます。APIは4 group、同一revision、
 全canonical key、nested secret ARN/valueをすべて検証してから環境へ原子的に反映します。
 
-`MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE=rollout-pending` は初回writer-fence
-bootstrap前の一時値です。このdeployはAppConfigの初期baselineを`disabled`にし、controlled
-Lambdaはその反映完了後に更新されます。Application clientはpending中の通常のfenced mutationを
-network I/O前に拒否するため、
-AppConfigが誤って`enabled`へ戻ってもunguarded writeを通しません。反映とwriter drainを確認した状態でopen rowをbootstrapし、全Lambdaを
-`required`へ更新して10個のstrict writer-client compositionへの反映を確認してから、新しい`enabled`
-revisionでwriterを再開してください。Target templateと新規環境はWebhook authorization backfill
+Target templateと新規環境はWebhook authorization backfill
 custom resourceを作成しません。既存stackにはdeploy前まで旧resourceが存在し得ますが、このdeployの
 change setで削除します。その存在自体はpre-deploy gateの失敗条件にせず、旧resourceを再実行せずに
 retired dataとcanonical authorization dataを全件検査します。このrolloutはlegacy locatorや不足した
@@ -448,8 +453,7 @@ authorization projection/grantの不足がある環境ではrolloutを停止し�
 `CollaborationProjectionFunction`のDynamoDB stream event-source mappingだけをchange-controlledに停止し、
 現行`WebhookDeliveryFunction` consumerを動かしたまま`WebhookDeliveryQueueUrl`をdrainして、main queue/DLQと
 Developer Platformのprojection stateにv1 primary/legacy cursorが残らないことも確認します。このdeployは
-durable cursorを変換しません。通常deployで
-`required`から`rollout-pending`へ戻してはいけません。
+durable cursorを変換しません。
 
 SSO client は password client とは別に作成し、client secret なし、
 `ExplicitAuthFlows=ALLOW_REFRESH_TOKEN_AUTH` のみ、OAuth server 有効、flow は `code` のみ、

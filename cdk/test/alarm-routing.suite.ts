@@ -44,10 +44,12 @@ test('routes every CloudWatch alarm to distinct primary and secondary SNS topics
     ],
   };
 
-  expect(Object.keys(alarms)).toHaveLength(47);
+  expect(Object.keys(alarms)).toHaveLength(41);
   expect(Object.keys(compositeAlarms)).toHaveLength(1);
   synthesizedTemplate.resourceCountIs('AWS::SNS::Topic', 0);
-  synthesizedTemplate.resourceCountIs('AWS::SNS::Subscription', 2);
+  synthesizedTemplate.resourceCountIs('AWS::SNS::Subscription', 0);
+  expect(JSON.stringify(synthesizedTemplate.toJSON()))
+    .not.toContain('WorkspaceSearchMigrationAlarmEvidence');
   for (
     const [logicalId, alarm]
     of Object.entries({ ...alarms, ...compositeAlarms })

@@ -28,11 +28,8 @@ import {
 } from '@mukuroji/contracts'
 import {
   createDynamoDbClient as createConfiguredDynamoDbClient,
-  createWorkspaceSearchWriterDynamoDbDocumentClient,
+  createDynamoDbDocumentClient,
 } from '../../infrastructure/aws/dynamodb-client'
-import {
-  throwIfWorkspaceSearchWriterFenceTerminalError,
-} from '../../infrastructure/runtime/workspace-search-writer-fence-document-client'
 import {
   validateWorkflowDefinition as validateDomainWorkflowDefinition,
   WorkflowDefinitionValidationError,
@@ -1998,9 +1995,7 @@ function isConfigurationTableDescription(table: TableDescription | undefined) {
 }
 
 function createDocumentClient(dynamoDbClient: DynamoDBClient) {
-  return createWorkspaceSearchWriterDynamoDbDocumentClient(
-    dynamoDbClient,
-  )
+  return createDynamoDbDocumentClient(dynamoDbClient)
 }
 
 function cloneCustomFieldValue(value: CustomFieldValue): CustomFieldValue {
@@ -2227,7 +2222,6 @@ function storedRelationInvalid() {
 }
 
 function toPersistenceError(error: unknown) {
-  throwIfWorkspaceSearchWriterFenceTerminalError(error)
   if (error instanceof WorkItemConfigurationError) {
     return error
   }

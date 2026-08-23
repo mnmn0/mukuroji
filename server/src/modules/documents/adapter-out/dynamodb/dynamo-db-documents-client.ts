@@ -44,11 +44,8 @@ import {
 import { PLANNING_STORAGE_SCHEMA_VERSION } from '../../../planning'
 import {
   createDynamoDbClient as createConfiguredDynamoDbClient,
-  createWorkspaceSearchWriterDynamoDbDocumentClient,
+  createDynamoDbDocumentClient,
 } from '../../../../infrastructure/aws/dynamodb-client'
-import {
-  throwIfWorkspaceSearchWriterFenceTerminalError,
-} from '../../../../infrastructure/runtime/workspace-search-writer-fence-document-client'
 import type {
   ApplyDocumentOperationsRequest,
   ChangeDocumentArchiveStateRequest,
@@ -801,7 +798,7 @@ export class DynamoDbDocumentsClient implements DocumentApplicationClient {
     )
     this.client =
       options.documentClient ??
-      createWorkspaceSearchWriterDynamoDbDocumentClient(
+      createDynamoDbDocumentClient(
         this.dynamoClient ?? createConfiguredDynamoDbClient(),
       )
     this.autoCreateLocal =
@@ -8132,7 +8129,6 @@ function isResourceInUse(error: unknown): boolean {
 }
 
 function normalizeDynamoError(error: unknown): Error {
-  throwIfWorkspaceSearchWriterFenceTerminalError(error)
   if (error instanceof DocumentError) return error
   return new DocumentError(
     503,

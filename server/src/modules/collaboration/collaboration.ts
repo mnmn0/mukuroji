@@ -35,12 +35,9 @@ import {
 } from '@mukuroji/contracts'
 import {
   createDynamoDbClient as createConfiguredDynamoDbClient,
-  createWorkspaceSearchWriterDynamoDbDocumentClient,
+  createDynamoDbDocumentClient,
   shouldBootstrapLocalDynamoDb as shouldBootstrapConfiguredLocalDynamoDb,
 } from '../../infrastructure/aws/dynamodb-client'
-import {
-  throwIfWorkspaceSearchWriterFenceTerminalError,
-} from '../../infrastructure/runtime/workspace-search-writer-fence-document-client'
 import {
   createAuditFieldChanges,
   createMutationAuditEventPut,
@@ -2845,7 +2842,7 @@ export class DynamoDbCollaborationClient implements CollaborationClient {
     this.auditTableName = auditTableName
     this.dynamoDbClient = dynamoDbClient
     this.documentClient = documentClient ??
-      createWorkspaceSearchWriterDynamoDbDocumentClient(dynamoDbClient)
+      createDynamoDbDocumentClient(dynamoDbClient)
     this.bootstrapLocalTable = bootstrapLocalTable
     this.teamIssueEventsTableName = requireText(
       teamIssueEventsTableName,
@@ -8012,7 +8009,6 @@ function isAuthorizationConditionFailure(
 }
 
 function toCollaborationStoreError(error: unknown) {
-  throwIfWorkspaceSearchWriterFenceTerminalError(error)
   if (error instanceof CollaborationError) {
     return error
   }

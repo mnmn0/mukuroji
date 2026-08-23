@@ -61,10 +61,6 @@ export type StackOutputResources = {
   readonly workspaceSearchMigrationJournalKey: kms.IKey;
   /** Least-privilege policy attached explicitly to an approved migration operator. */
   readonly workspaceSearchMigrationOperatorPolicy: iam.IManagedPolicy;
-  /** Non-production-only retention extension attached alongside the migration operator policy. */
-  readonly workspaceSearchMigrationRehearsalEvidencePolicy: iam.IManagedPolicy;
-  /** Deployment condition guarding rehearsal-only evidence resources. */
-  readonly workspaceSearchMigrationRehearsalEvidenceCondition: cdk.CfnCondition;
   /** Read-only policy attached explicitly to an approved integrity-check operator. */
   readonly crossDomainIntegrityOperatorPolicy: iam.IManagedPolicy;
   /** Standard state machine that performs an isolated restore drill. */
@@ -263,17 +259,6 @@ export function buildStackOutputs(
   new cdk.CfnOutput(scope, 'WorkspaceSearchMigrationOperatorPolicyArn', {
     value: resources.workspaceSearchMigrationOperatorPolicy.managedPolicyArn,
   });
-  const rehearsalEvidencePolicyOutput = new cdk.CfnOutput(
-    scope,
-    'WorkspaceSearchMigrationRehearsalEvidencePolicyArn',
-    {
-      value:
-        resources.workspaceSearchMigrationRehearsalEvidencePolicy
-          .managedPolicyArn,
-    },
-  );
-  rehearsalEvidencePolicyOutput.condition =
-    resources.workspaceSearchMigrationRehearsalEvidenceCondition;
   new cdk.CfnOutput(scope, 'CrossDomainIntegrityOperatorPolicyArn', {
     value: resources.crossDomainIntegrityOperatorPolicy.managedPolicyArn,
   });
