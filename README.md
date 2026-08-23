@@ -434,13 +434,15 @@ Document public-share secretとともにenvelopeにはARNだけを入れます�
 
 `MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE=rollout-pending` は初回writer-fence
 bootstrap前の一時値です。このdeployはAppConfigの初期baselineを`disabled`にし、controlled
-Lambdaはその反映完了後に更新されます。Webhook authorization backfillのCreate/Updateはpending中に
-tableへ触れません。Deleteはread-onlyでv3 migration stateが空であることを確認して短絡し、既存stateが
-あればdurable open-row guard付きtransactionでrollbackを完了するまで削除を成功させません。
-Application clientもpending中は通常のfenced mutationをnetwork I/O前に拒否するため、
+Lambdaはその反映完了後に更新されます。Application clientはpending中の通常のfenced mutationを
+network I/O前に拒否するため、
 AppConfigが誤って`enabled`へ戻ってもunguarded writeを通しません。反映とwriter drainを確認した状態でopen rowをbootstrapし、全Lambdaを
-`required`へ更新してguarded backfillを完了させてから、新しい`enabled` revisionでwriterを
-再開してください。通常deployで`required`から`rollout-pending`へ戻してはいけません。
+`required`へ更新して10個のstrict writer-client compositionへの反映を確認してから、新しい`enabled`
+revisionでwriterを再開してください。Webhook authorization backfill custom resourceは存在せず、この
+rolloutはlegacy locatorや不足したauthorization projectionを変換しません。deploy前に
+`docs/operational-readiness.md`のpre-deploy gateを満たし、retired locator/stateまたはcurrent
+authorization projection/grantの不足がある環境ではrolloutを停止してください。通常deployで
+`required`から`rollout-pending`へ戻してはいけません。
 
 SSO client は password client とは別に作成し、client secret なし、
 `ExplicitAuthFlows=ALLOW_REFRESH_TOKEN_AUTH` のみ、OAuth server 有効、flow は `code` のみ、

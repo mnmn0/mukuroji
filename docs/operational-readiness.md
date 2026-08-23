@@ -732,8 +732,8 @@ Production Lambdaにはcanonicalなsource 4 table、Workspace Search target、mi
 `DescribeTable`、state rowの`GetItem`、`TransactWriteItems`内のstate row `ConditionCheckItem`を持ち、
 state rowのwrite権限は持ちません。Combined adapterを構築するread-only Lambdaにも同じstrict configurationを
 渡しますがstate IAMは付与せず、将来誤ってfenced mutationへ到達した場合はguard取得前にfail-closedにします。
-API、runtime-control worker、connector sync、SCIM group、webhook delivery/
-authorization backfill、Work Item importはruntime admission後にinvocation scopeを開始し、Project Directory、
+API、runtime-control worker、connector sync、SCIM group、webhook delivery、Work Item importはruntime
+admission後にinvocation scopeを開始し、Project Directory、
 Work Items、Collaboration、Documents、Workspace SearchへのPut/Update/Deleteを含む全transactionへguardを
 先頭追加します。単独mutationはtransactionへ変換し、application側の上限を99 itemに固定します。
 
@@ -784,13 +784,9 @@ current authorityがあることだけでrestore recoveryを自動承認して�
 openにするにはdata/application ownerの明示的なrecovery判断を必要とし、supervisor実装までは手動gateです。
 Deployは(1)明示的`rollout-pending`で配線/IAMと`disabled` AppConfig baselineを先行し、
 (2)全entrypointの反映とdrainを確認し、(3)fresh authorityで`bootstrapOpen`し、
-(4)parameterを`required`へ更新してguarded backfillと12個のstrict compositionすべての反映を確認し、
+(4)parameterを`required`へ更新して10個のstrict compositionすべての反映を確認し、
 (5)新しい`enabled` revisionで再開する二段階とします。Webhook authorization backfill custom
-resourceは両handler Lambdaへ明示依存し、event propertyとLambda環境のmode不一致をI/O前に拒否します。
-Pending中のCreate/Updateはtable access前に短絡し、requiredへのproperty更新で初めてguarded
-migrationを開始します。Deleteはv3 markerと両checkpointを強整合readし、stateが空ならwriteなしで
-完了します。既存stateがあればdedicated rollback clientも通常のdurable open-row guardを要求し、
-marker遷移、checkpoint、locator復元をguard付きtransactionで完了するまでresource削除を成功させません。
+resourceは存在せず、このrolloutはlegacy locatorや不足したauthorization projectionを変換しません。
 CloudFormation更新中はpending/required Lambdaが混在し得るため、
 Step 2からStep 5までwriterを再開しません。`required`から`rollout-pending`へのdowngradeは通常rollback
 として扱わず、state-table recoveryを含むowner承認の新しいmaintenance changeを必要とします。
@@ -1826,10 +1822,15 @@ migration の代用にはせず、実行前 PITR と reviewed forward-fix/repair
 8. Webhook locator bridgeを削除するdeployでは、対象account/region/table identityを固定して
    Developer Platformの全`webhook-subscription` rowを検査し、retiredな`lookupKey` / `lookupSortKey`、
    `WEBHOOK_ACTIVE_LOCATOR_MIGRATION#v3` / `STATE`、またはWebhook active-locator rollback
-   checkpointが1件でも残る場合はrolloutを停止する。
+   checkpointが1件でも残る場合はrolloutを停止する。Project Directoryの全active `team` / `project` /
+   `project-member` source rowも検査し、expectedな`webhookAuthorizationKey` /
+   `webhookAuthorizationSortKey`、またはactive Team/Project/member関係に対応するcanonical
+   `webhook-team-grant` rowと`webhook-team-grant-cleanup` locatorが1件でも不足する場合はrolloutを停止する。
    残存rowがあるとsubscription更新、secret rotation、active subscription取得が
-   `DeveloperPlatformDataInvalid` (503) でfail-closedになる。このbridge削除deployはone-time cleanupを
-   実行しないため、残存dataは別のreview済みcleanup計画で解消してから再検査する。
+   `DeveloperPlatformDataInvalid` (503) でfail-closedになる。不足したauthorization projection/grantは
+   authorizationをdenyし、該当resourceのWebhook deliveryを抑止する。このbridge削除deployはone-time
+   cleanupを実行せず、Project Directory authorization backfillも実行しないため、残存dataや不足projectionは
+   別のreview済みcleanup計画で解消してから再検査する。
 
 `main quality gates` ruleset は上記6 context を strict mode で required にします。Workflow の
 job/context 名を変更する場合は ruleset も同じ release で更新し、対象 branch の effective rules
@@ -2079,7 +2080,8 @@ failure destination error、security regression のいずれかは自動継続�
 1. Incident を宣言し、新しい deploy/migration/write を停止する。
 2. 直前 commit、stack event、alarm、request/event locator、data evidence を固定する。
 3. Data migration がある場合は、その migration contract に従って writer を止めたまま
-   rollback する。Webhook locator は custom resource の逆移行を完了させる。
+   rollback する。Webhook locator bridge削除にはcustom resourceによる逆移行がないため、dataを変更せず、
+   上記pre-deploy gateを再検証したうえでreview済みのcode forward-fixを行う。
 4. Schema-compatible な code/infrastructure は直前の成功code/configurationを、新しい
    `ApiRuntimeConfigurationRevision`とその他の同じ必須parameterでforward deployする。
    Retained secretの物理名を再作成するために旧revisionを再利用せず、retained resourceを
