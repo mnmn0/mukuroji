@@ -16,7 +16,7 @@ import type {
 } from '@mukuroji/contracts'
 import {
   createDynamoDbClient as createConfiguredDynamoDbClient,
-  createWorkspaceSearchWriterDynamoDbDocumentClient,
+  createDynamoDbDocumentClient,
 } from '../../../../infrastructure/aws/dynamodb-client'
 import {
   getConfiguredAuditTableName,
@@ -1327,7 +1327,7 @@ function createSqsClient() {
 
 function createWebhookDocumentClient() {
   const client = createConfiguredDynamoDbClient()
-  return createWorkspaceSearchWriterDynamoDbDocumentClient(client)
+  return createDynamoDbDocumentClient(client)
 }
 
 function readWebhookAuditTableName() {

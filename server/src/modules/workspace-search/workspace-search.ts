@@ -56,7 +56,7 @@ import {
 } from '@mukuroji/contracts'
 import {
   createDynamoDbClient as createConfiguredDynamoDbClient,
-  createWorkspaceSearchWriterDynamoDbDocumentClient,
+  createDynamoDbDocumentClient,
   shouldBootstrapLocalDynamoDb as shouldBootstrapConfiguredLocalDynamoDb,
 } from '../../infrastructure/aws/dynamodb-client'
 
@@ -1481,7 +1481,7 @@ export class DynamoDbWorkspaceSearchClient {
     this.tableName = requireText(tableName, 'Workspace search table name')
     this.dynamoDbClient = dynamoDbClient
     this.documentClient = documentClient ??
-      createWorkspaceSearchWriterDynamoDbDocumentClient(dynamoDbClient)
+      createDynamoDbDocumentClient(dynamoDbClient)
     this.bootstrapLocalTable = bootstrapLocalTable
   }
 

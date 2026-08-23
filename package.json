@@ -46,7 +46,6 @@
     "audit:backfill": "bun --env-file=.env --filter server audit:backfill",
     "team-issue-comments:backfill": "bun --env-file=.env --filter server team-issue-comments:backfill",
     "search:backfill": "bun --filter server search:backfill",
-    "search:migration:control": "bun server/scripts/migrations/workspace-search-v1/migration-control-cli.ts",
     "cdk:build": "bun --filter cdk build",
     "cdk:test": "bun --filter cdk test",
     "cdk:synth": "bun --filter cdk cdk synth -c triageIndexDeploymentStage=wake -c teamIssueCommentIndexDeploymentStage=comment"

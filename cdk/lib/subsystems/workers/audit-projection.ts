@@ -9,11 +9,6 @@ import * as lambdaNodejs from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import type { LambdaBuildPaths } from '../../config/lambda-build-paths';
 import type { StackParameters } from '../../config/stack-parameters';
-import {
-  bindWorkspaceSearchWriterFence,
-  grantWorkspaceSearchProjectionAccess,
-  type WorkspaceSearchWriterFenceResources,
-} from '../../policies/workspace-search-writer-fence';
 import type { DataStoreResources } from '../data-stores';
 import type { FileStorageResources } from '../file-storage';
 import {
@@ -40,8 +35,6 @@ export type AuditProjectionWorkerInput = {
   readonly realtimeWebSocketStage: apigatewayv2.WebSocketStage;
   /** Delivery queues targeted by audit projections. */
   readonly workerChannels: WorkerChannels;
-  /** Exact writer-client table configuration without writer state permissions. */
-  readonly workspaceSearchWriterFence: WorkspaceSearchWriterFenceResources;
 };
 
 /**
@@ -77,6 +70,7 @@ export function buildAuditProjectionWorker(
     tenantAdministrationTable,
     workItemsTable,
     workspaceAccessTable,
+    workspaceSearchTable,
   } = input.dataStores;
   const { fileBucket, fileProofingTable } = input.fileStorage;
   const { cognitoUserPoolArn, cognitoUserPoolId, systemAdminGroups } = input.parameters;
@@ -133,17 +127,19 @@ export function buildAuditProjectionWorker(
         WEBSOCKET_CALLBACK_ENDPOINT: realtimeWebSocketStage.callbackUrl,
         WEBHOOK_DELIVERY_QUEUE_URL: webhookDeliveryQueue.queueUrl,
         WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
+        WORKSPACE_SEARCH_TABLE_NAME: workspaceSearchTable.tableName,
       },
     },
   );
-  bindWorkspaceSearchWriterFence(
-    input.workspaceSearchWriterFence,
-    collaborationProjectionFunction,
-  );
-  grantWorkspaceSearchProjectionAccess(
-    input.workspaceSearchWriterFence,
-    collaborationProjectionFunction,
-  );
+  collaborationProjectionFunction.addToRolePolicy(new iam.PolicyStatement({
+    actions: ['dynamodb:PutItem', 'dynamodb:DeleteItem'],
+    conditions: {
+      'ForAnyValue:StringEquals': {
+        'dynamodb:EnclosingOperation': ['TransactWriteItems'],
+      },
+    },
+    resources: [workspaceSearchTable.tableArn],
+  }));
   bindRuntimeControls(
     input.runtimeControls,
     collaborationProjectionFunction,

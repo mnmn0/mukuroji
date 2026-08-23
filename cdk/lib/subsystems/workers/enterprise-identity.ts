@@ -9,10 +9,6 @@ import * as sqs from 'aws-cdk-lib/aws-sqs';
 import type { LambdaBuildPaths } from '../../config/lambda-build-paths';
 import type { StackParameters } from '../../config/stack-parameters';
 import {
-  bindWorkspaceSearchWriterFence,
-  type WorkspaceSearchWriterFenceResources,
-} from '../../policies/workspace-search-writer-fence';
-import {
   grantPlanningRevisionFenceAccess,
 } from '../../policies/planning-revision-fence';
 import type { DataStoreResources } from '../data-stores';
@@ -33,8 +29,6 @@ export interface EnterpriseIdentityWorkerInput {
   readonly parameters: StackParameters;
   /** Dynamic operational controls shared by application runtimes. */
   readonly runtimeControls: RuntimeControlResources;
-  /** Exact source, target, and state tables protected by the writer fence. */
-  readonly workspaceSearchWriterFence: WorkspaceSearchWriterFenceResources;
 }
 
 /**
@@ -129,10 +123,6 @@ export function buildEnterpriseIdentityWorkers(
         WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
       },
     },
-  );
-  bindWorkspaceSearchWriterFence(
-    input.workspaceSearchWriterFence,
-    enterpriseScimGroupJobFunction,
   );
   bindRuntimeControls(
     input.runtimeControls,

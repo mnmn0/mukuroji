@@ -11,10 +11,6 @@ import {
   type LambdaBuildPaths,
 } from '../config/lambda-build-paths';
 import type { StackParameters } from '../config/stack-parameters';
-import {
-  grantWorkspaceSearchWriterFenceAccess,
-  type WorkspaceSearchWriterFenceResources,
-} from '../policies/workspace-search-writer-fence';
 import type { DataStoreResources } from './data-stores';
 import type { FileStorageResources } from './file-storage';
 import {
@@ -41,8 +37,6 @@ export interface ApiRuntimeInput {
   readonly runtimeControls: RuntimeControlResources;
   /** Durable queues targeted by API mutations. */
   readonly workerChannels: WorkerChannels;
-  /** Exact source, target, and state tables protected by the writer fence. */
-  readonly workspaceSearchWriterFence: WorkspaceSearchWriterFenceResources;
 }
 
 /**
@@ -71,8 +65,6 @@ export interface ApiTransportsAndRealtimeInput {
   readonly runtimeControls: RuntimeControlResources;
   /** Durable queues exposed through API configuration. */
   readonly workerChannels: WorkerChannels;
-  /** Exact tables and rollout mode protected by the writer fence. */
-  readonly workspaceSearchWriterFence: WorkspaceSearchWriterFenceResources;
 }
 
 /**
@@ -269,7 +261,7 @@ function createApiRuntimeConfigurationSecret(
  * and grants the API execution role read access to each bounded group.
  *
  * @param scope - Stack that owns the configuration secrets.
- * @param input - API resources, parameters, controls, and writer-fence values.
+ * @param input - API resources, parameters, and runtime controls.
  * @param apiFunction - Replacement API function receiving only secret ARNs.
  * @param httpApi - HTTP API whose stable endpoint is exposed to automation.
  * @param realtimeWebSocketStage - WebSocket stage exposed to the API.
@@ -399,8 +391,6 @@ function bindApiRuntimeConfiguration(
       MUKUROJI_RUNTIME_CONTROL_MIN_POLL_INTERVAL_SECONDS:
         String(RUNTIME_CONTROL_MINIMUM_POLL_INTERVAL_SECONDS),
       MUKUROJI_RUNTIME_CONTROL_SCOPE: 'api',
-      MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE:
-        input.workspaceSearchWriterFence.runtimeMode,
       REALTIME_WEBSOCKET_URL: realtimeWebSocketStage.url,
     },
   );
@@ -456,8 +446,6 @@ function bindApiRuntimeConfiguration(
       MUKUROJI_TEAM_ISSUE_EVENTS_TABLE: teamIssueEventsTable.tableName,
       PROJECT_DIRECTORY_TABLE_NAME: projectDirectoryTable.tableName,
       WORKSPACE_ACCESS_TABLE_NAME: workspaceAccessTable.tableName,
-      WORKSPACE_SEARCH_MIGRATION_STATE_TABLE_NAME:
-        input.workspaceSearchWriterFence.migrationStateTable.tableName,
       WORKSPACE_SEARCH_TABLE_NAME: workspaceSearchTable.tableName,
       WORK_ITEMS_TABLE_NAME: workItemsTable.tableName,
     },
@@ -620,10 +608,6 @@ export function buildApiRuntime(
         target: 'node22',
       },
     },
-  );
-  grantWorkspaceSearchWriterFenceAccess(
-    input.workspaceSearchWriterFence,
-    apiFunction,
   );
   bindRuntimeControls(input.runtimeControls, apiFunction, 'api', false);
 
