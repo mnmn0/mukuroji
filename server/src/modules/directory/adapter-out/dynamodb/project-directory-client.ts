@@ -7,9 +7,6 @@ import {
   shouldBootstrapLocalDynamoDb as shouldBootstrapConfiguredLocalDynamoDb,
 } from '../../../../infrastructure/aws/dynamodb-client'
 import {
-  throwIfWorkspaceSearchWriterFenceTerminalError,
-} from '../../../../infrastructure/runtime/workspace-search-writer-fence-document-client'
-import {
   createAuditFieldChanges,
   createMutationAuditEventPut,
   ensureLocalAuditEventsTable,
@@ -756,8 +753,8 @@ export const projectRoleWeights = {
   manager: 3,
 } as const satisfies Record<ProjectRole, number>
 
-/** Writer-fence ConditionCheck を除く application action 数の上限です。 */
-const DYNAMODB_TRANSACTION_MAX_ACTIONS = 99
+/** DynamoDB TransactWriteItems に含められる action 数の上限です。 */
+const DYNAMODB_TRANSACTION_MAX_ACTIONS = 100
 
 function createOptionalAuditTransactItems(
   tableName: string | undefined,
@@ -1085,8 +1082,6 @@ export class DynamoDbProjectDirectoryClient {
       }))
       return toProjectQuickAccessPreferences(nextItem)
     } catch (error) {
-      throwIfWorkspaceSearchWriterFenceTerminalError(error)
-
       if (hasTransactionConditionalFailure(error)) {
         const current = await this.getProjectQuickAccess(directoryId, memberKey, true)
 
@@ -3040,7 +3035,6 @@ async function sleep(ms: number) {
 }
 
 function toProjectDataError(error: unknown) {
-  throwIfWorkspaceSearchWriterFenceTerminalError(error)
   const awsError = error as {
     $metadata?: {
       httpStatusCode?: number

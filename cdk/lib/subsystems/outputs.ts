@@ -3,7 +3,6 @@ import * as apigatewayv2 from 'aws-cdk-lib/aws-apigatewayv2';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as guardduty from 'aws-cdk-lib/aws-guardduty';
 import * as iam from 'aws-cdk-lib/aws-iam';
-import * as kms from 'aws-cdk-lib/aws-kms';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
@@ -53,14 +52,6 @@ export type StackOutputResources = {
   readonly collaborationTable: dynamodb.ITable;
   /** Workspace search index table. */
   readonly workspaceSearchTable: dynamodb.ITable;
-  /** Durable Workspace Search migration checkpoint and operation state table. */
-  readonly workspaceSearchMigrationStateTable: dynamodb.ITable;
-  /** Write-once Workspace Search migration preimage journal bucket. */
-  readonly workspaceSearchMigrationJournalBucket: s3.IBucket;
-  /** Customer-managed encryption key for the migration journal. */
-  readonly workspaceSearchMigrationJournalKey: kms.IKey;
-  /** Least-privilege policy attached explicitly to an approved migration operator. */
-  readonly workspaceSearchMigrationOperatorPolicy: iam.IManagedPolicy;
   /** Read-only policy attached explicitly to an approved integrity-check operator. */
   readonly crossDomainIntegrityOperatorPolicy: iam.IManagedPolicy;
   /** Standard state machine that performs an isolated restore drill. */
@@ -246,18 +237,6 @@ export function buildStackOutputs(
   });
   new cdk.CfnOutput(scope, 'WorkspaceSearchTableName', {
     value: resources.workspaceSearchTable.tableName,
-  });
-  new cdk.CfnOutput(scope, 'WorkspaceSearchMigrationStateTableName', {
-    value: resources.workspaceSearchMigrationStateTable.tableName,
-  });
-  new cdk.CfnOutput(scope, 'WorkspaceSearchMigrationJournalBucketName', {
-    value: resources.workspaceSearchMigrationJournalBucket.bucketName,
-  });
-  new cdk.CfnOutput(scope, 'WorkspaceSearchMigrationJournalKeyArn', {
-    value: resources.workspaceSearchMigrationJournalKey.keyArn,
-  });
-  new cdk.CfnOutput(scope, 'WorkspaceSearchMigrationOperatorPolicyArn', {
-    value: resources.workspaceSearchMigrationOperatorPolicy.managedPolicyArn,
   });
   new cdk.CfnOutput(scope, 'CrossDomainIntegrityOperatorPolicyArn', {
     value: resources.crossDomainIntegrityOperatorPolicy.managedPolicyArn,

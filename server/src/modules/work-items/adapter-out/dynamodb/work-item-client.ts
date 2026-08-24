@@ -7,9 +7,6 @@ import {
   shouldBootstrapLocalDynamoDb as shouldBootstrapConfiguredLocalDynamoDb,
 } from '../../../../infrastructure/aws/dynamodb-client'
 import {
-  throwIfWorkspaceSearchWriterFenceTerminalError,
-} from '../../../../infrastructure/runtime/workspace-search-writer-fence-document-client'
-import {
   createAuditFieldChanges,
   createMutationAuditEventPut,
   ensureLocalAuditEventsTable,
@@ -3956,7 +3953,6 @@ async function sleep(ms: number) {
 }
 
 function toProjectDataError(error: unknown) {
-  throwIfWorkspaceSearchWriterFenceTerminalError(error)
   const awsError = error as {
     $metadata?: {
       httpStatusCode?: number

@@ -6,8 +6,5 @@ module.exports = {
   transform: {
     '^.+\\.tsx?$': 'ts-jest'
   },
-  moduleNameMapper: {
-    '^@mukuroji/contracts/(.*)$': '<rootDir>/../contracts/src/$1.ts'
-  },
   setupFilesAfterEnv: ['aws-cdk-lib/testhelpers/jest-autoclean'],
 };

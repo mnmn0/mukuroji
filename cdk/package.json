@@ -22,7 +22,6 @@
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1057.0",
-    "@mukuroji/contracts": "workspace:*",
     "aws-cdk-lib": "2.261.0",
     "constructs": "^10.5.0"
   }

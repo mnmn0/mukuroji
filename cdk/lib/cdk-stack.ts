@@ -14,11 +14,6 @@ import {
   type TriageIndexDeploymentStage,
 } from './config/triage-index-deployment';
 import {
-  DEFAULT_WORKSPACE_SEARCH_MIGRATION_DEPLOYMENT_TARGET_ID,
-  bindWorkspaceSearchMigrationStackEnvironment,
-  resolveWorkspaceSearchMigrationDeploymentTarget,
-} from './config/workspace-search-migration-deployment-targets';
-import {
   buildApiRuntime,
   buildApiTransportsAndRealtime,
 } from './subsystems/api-realtime';
@@ -32,7 +27,6 @@ import {
   buildFileStorage,
   configureFileStorageApiBoundary,
 } from './subsystems/file-storage';
-import { buildMigrationStorage } from './subsystems/migration-storage';
 import { buildStackOutputs } from './subsystems/outputs';
 import { buildRestoreDrill } from './subsystems/restore-drill';
 import { buildRuntimeControls } from './subsystems/runtime-controls';
@@ -48,14 +42,12 @@ import { buildTriageScheduleWorker } from './subsystems/workers/triage';
 import { buildWebhookDeliveryWorkers } from './subsystems/workers/webhook-delivery';
 import { buildWorkItemImportWorker } from './subsystems/workers/work-item-import';
 
-/** Stack configuration plus reviewed migration and stateful-index rollout selections. */
+/** Stack configuration plus reviewed stateful-index rollout selections. */
 export interface CdkStackProps extends cdk.StackProps {
   /** Reviewed one-index-at-a-time rollout stage for Triage GSIs. */
   readonly triageIndexDeploymentStage?: TriageIndexDeploymentStage;
   /** Reviewed one-index-at-a-time rollout stage for Team Issue event GSIs. */
   readonly teamIssueCommentIndexDeploymentStage?: TeamIssueCommentIndexDeploymentStage;
-  /** Source-controlled target identifier; free-form target definitions are never accepted. */
-  readonly workspaceSearchMigrationDeploymentTargetId?: string;
 }
 
 /**
@@ -67,13 +59,12 @@ export class CdkStack extends cdk.Stack {
    *
    * @param scope Parent construct that owns the stack.
    * @param id Stable stack construct identifier.
-   * @param props Optional CDK stack and reviewed migration-target configuration.
+   * @param props Optional CDK stack and reviewed index-rollout configuration.
    */
   constructor(scope: Construct, id: string, props?: CdkStackProps) {
     const {
       triageIndexDeploymentStage: configuredTriageIndexDeploymentStage,
       teamIssueCommentIndexDeploymentStage: configuredTeamIssueCommentIndexDeploymentStage,
-      workspaceSearchMigrationDeploymentTargetId,
       ...baseStackProps
     } = props ?? {};
     const triageIndexDeploymentStage = resolveTriageIndexDeploymentStage(
@@ -82,69 +73,7 @@ export class CdkStack extends cdk.Stack {
     const teamIssueCommentIndexDeploymentStage = resolveTeamIssueCommentIndexDeploymentStage(
       configuredTeamIssueCommentIndexDeploymentStage,
     );
-    const deploymentTarget =
-      resolveWorkspaceSearchMigrationDeploymentTarget(
-        workspaceSearchMigrationDeploymentTargetId ??
-          DEFAULT_WORKSPACE_SEARCH_MIGRATION_DEPLOYMENT_TARGET_ID,
-      );
-    const deploymentEnvironment =
-      bindWorkspaceSearchMigrationStackEnvironment(
-        deploymentTarget,
-        baseStackProps.env,
-      );
-    const resolvedStackProps: cdk.StackProps = deploymentTarget.rehearsalEnabled
-      ? {
-        ...baseStackProps,
-        env: deploymentEnvironment,
-      }
-      : baseStackProps;
-    super(scope, id, resolvedStackProps);
-
-    if (deploymentTarget.rehearsalEnabled) {
-      new cdk.CfnRule(this, 'WorkspaceSearchMigrationDeploymentTargetIdentity', {
-        assertions: [{
-          assert: cdk.Fn.conditionAnd(
-            cdk.Fn.conditionEquals(
-              cdk.Aws.ACCOUNT_ID,
-              deploymentTarget.deploymentAccount,
-            ),
-            cdk.Fn.conditionEquals(
-              cdk.Aws.REGION,
-              deploymentTarget.region,
-            ),
-          ),
-          assertDescription:
-            'AWS::AccountId and AWS::Region must match the reviewed Workspace Search migration deployment target.',
-        }],
-      });
-    }
-    new cdk.CfnOutput(this, 'WorkspaceSearchMigrationDeploymentTargetId', {
-      value: deploymentTarget.targetId,
-    });
-    new cdk.CfnOutput(this, 'WorkspaceSearchMigrationDeploymentTrustVersion', {
-      value: String(deploymentTarget.version),
-    });
-    new cdk.CfnOutput(this, 'WorkspaceSearchMigrationDeploymentEnvironment', {
-      value: deploymentTarget.environment,
-    });
-    new cdk.CfnOutput(this, 'WorkspaceSearchMigrationDeploymentAccount', {
-      value: deploymentTarget.rehearsalEnabled
-        ? deploymentTarget.deploymentAccount
-        : cdk.Aws.ACCOUNT_ID,
-    });
-    new cdk.CfnOutput(this, 'WorkspaceSearchMigrationDeploymentRegion', {
-      value: deploymentTarget.rehearsalEnabled
-        ? deploymentTarget.region
-        : cdk.Aws.REGION,
-    });
-    new cdk.CfnOutput(
-      this,
-      'WorkspaceSearchMigrationProductionAccountDigest',
-      { value: deploymentTarget.productionAccountDigest },
-    );
-    new cdk.CfnOutput(this, 'WorkspaceSearchMigrationDeploymentTrustRootDigest', {
-      value: deploymentTarget.digest,
-    });
+    super(scope, id, baseStackProps);
     new cdk.CfnOutput(this, 'TriageIndexDeploymentStage', {
       value: triageIndexDeploymentStage,
     });
@@ -159,14 +88,6 @@ export class CdkStack extends cdk.Stack {
       connectorRuntimeConfiguration: parameters.connectorRuntimeConfiguration,
       teamIssueCommentIndexDeploymentStage,
       triageIndexDeploymentStage,
-    });
-    const migrationStorage = buildMigrationStorage(this, {
-      collaborationTable: dataStores.collaborationTable,
-      documentsTable: dataStores.documentsTable,
-      deploymentTrustRoot: deploymentTarget,
-      projectDirectoryTable: dataStores.projectDirectoryTable,
-      workItemsTable: dataStores.workItemsTable,
-      workspaceSearchTable: dataStores.workspaceSearchTable,
     });
     const fileStorage = buildFileStorage(this, {
       allowedOrigins: parameters.taskApiAllowedOriginList,
@@ -333,7 +254,6 @@ export class CdkStack extends cdk.Stack {
       ...dataStores,
       ...fileStorage,
       ...crossDomainIntegrity,
-      ...migrationStorage,
       ...restoreDrill,
       ...workerChannels,
       ...apiTransports,

@@ -18,9 +18,6 @@ import {
   createPlanningRevisionFenceWriterDynamoDbDocumentClient,
 } from '../../infrastructure/aws/dynamodb-client'
 import {
-  throwIfWorkspaceSearchWriterFenceTerminalError,
-} from '../../infrastructure/runtime/workspace-search-writer-fence-document-client'
-import {
   createAuditFieldChanges,
   createMutationAuditEventPut,
   createWorkspaceInvitationAuditEntityId,
@@ -3339,7 +3336,6 @@ function isConditionalTransactionCancellation(error: unknown) {
 }
 
 function toWorkspaceAccessError(error: unknown) {
-  throwIfWorkspaceSearchWriterFenceTerminalError(error)
   if (error instanceof WorkspaceAccessError) {
     return error
   }

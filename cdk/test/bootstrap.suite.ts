@@ -71,7 +71,7 @@ test('workspace metadata owner alias and project manager rows are idempotently b
   expect(bootstrap.Properties.Update).toBeUndefined();
 });
 
-test('fenced table bootstrap resources keep stable IDs and a create-only pre-fence boundary', () => {
+test('table bootstrap resources keep stable IDs and a create-only lifecycle', () => {
   const resources = synthesizedTemplate.findResources('Custom::AWS');
   const createOnlySeeds = [
     [

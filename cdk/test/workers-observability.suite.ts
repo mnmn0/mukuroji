@@ -214,9 +214,7 @@ test('enterprise SCIM group jobs run in a dedicated bounded worker', () => {
     'dynamodb:Query',
     'dynamodb:UpdateItem',
   ]);
-  expect(actionsForTable('DocumentsTable7E808EE5').filter((action) =>
-    action !== 'dynamodb:DescribeTable'
-  )).toEqual([
+  expect(actionsForTable('DocumentsTable7E808EE5')).toEqual([
     'dynamodb:GetItem',
     'dynamodb:PutItem',
     'dynamodb:Query',
@@ -252,9 +250,7 @@ test('enterprise SCIM group jobs run in a dedicated bounded worker', () => {
       'Fn::GetAtt': ['TenantAdministrationTable621D59EB', 'Arn'],
     },
   });
-  expect(actionsForTable('TeamIssuesTable189D851D').filter((action) =>
-    action !== 'dynamodb:DescribeTable'
-  )).toEqual([]);
+  expect(actionsForTable('TeamIssuesTable189D851D')).toEqual([]);
   expect(serializedPolicies).toContain('dynamodb:ConditionCheckItem');
   expect(serializedPolicies).not.toContain('dynamodb:TransactWriteItems');
   expect(serializedPolicies).toContain('cognito-idp:AdminDisableUser');
@@ -723,12 +719,7 @@ test('durable Work Item imports use retained versioned sources and an isolated r
     ]),
   });
   expect(
-    (authorizationConditionStatement?.Resource as unknown[] | undefined)
-      ?.filter((resource) =>
-        !JSON.stringify(resource).includes(
-          'WorkspaceSearchMigrationStateTable34132530',
-        )
-      ),
+    (authorizationConditionStatement?.Resource as unknown[] | undefined),
   ).toHaveLength(4);
   expect(authorizationReadStatement).toEqual(expect.objectContaining({
     Action: ['dynamodb:GetItem', 'dynamodb:Query'],
@@ -1258,11 +1249,7 @@ test('audit Webhook projection and SQS delivery are durable encrypted and observ
     },
     { 'Fn::GetAtt': [workspaceAccessTableId, 'Arn'] },
   ]));
-  expect(getItemResources?.filter((resource) =>
-    !JSON.stringify(resource).includes(
-      'WorkspaceSearchMigrationStateTable34132530',
-    )
-  )).toHaveLength(6);
+  expect(getItemResources).toHaveLength(6);
   expect(queryResources).toEqual(expect.arrayContaining([
     {
       'Fn::Join': [
@@ -1703,12 +1690,7 @@ test('connector runtime uses secret-backed configuration and isolated durable wo
     ]),
   });
   expect(
-    (workerAuthorizationConditionStatement?.Resource as unknown[] | undefined)
-      ?.filter((resource) =>
-        !JSON.stringify(resource).includes(
-          'WorkspaceSearchMigrationStateTable34132530',
-        )
-      ),
+    workerAuthorizationConditionStatement?.Resource as unknown[] | undefined,
   ).toHaveLength(4);
   expect(workerAuthorizationReadStatement).toEqual(expect.objectContaining({
     Action: ['dynamodb:GetItem', 'dynamodb:Query'],

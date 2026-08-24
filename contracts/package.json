@@ -5,7 +5,6 @@
   "type": "module",
   "types": "./src/index.ts",
   "exports": {
-    ".": "./src/index.ts",
-    "./workspace-search-migration-deployment-target": "./src/workspace-search-migration-deployment-target.ts"
+    ".": "./src/index.ts"
   }
 }

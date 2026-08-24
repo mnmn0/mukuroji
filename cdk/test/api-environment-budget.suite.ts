@@ -29,10 +29,6 @@ const API_CONFIGURATION_ENVELOPE_HEADER =
 const API_CONFIGURATION_SECRET_LIMIT_BYTES = 65_536;
 const LAMBDA_ENVIRONMENT_LIMIT_BYTES = 4_096;
 const CLOUDFORMATION_PARAMETER_LIMIT_BYTES = 4_096;
-const hasWorkspaceSearchWriterFence = Object.hasOwn(
-  synthesizedTemplate.toJSON().Parameters,
-  'WorkspaceSearchWriterFenceMode',
-);
 
 /**
  * Reads the shared API runtime-name declaration without importing another
@@ -179,13 +175,6 @@ const expectedCoreConfiguration = {
   MUKUROJI_RUNTIME_CONTROL_MAX_STALE_SECONDS: base64('60'),
   MUKUROJI_RUNTIME_CONTROL_MIN_POLL_INTERVAL_SECONDS: base64('15'),
   MUKUROJI_RUNTIME_CONTROL_SCOPE: base64('api'),
-  ...(hasWorkspaceSearchWriterFence
-    ? {
-        MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE: base64(
-          ref('WorkspaceSearchWriterFenceMode'),
-        ),
-      }
-    : {}),
   REALTIME_WEBSOCKET_URL: base64(join('', [
     'wss://',
     ref('RealtimeWebSocketApiC99C6240'),
@@ -253,13 +242,6 @@ const expectedDataConfiguration = {
     ref('TenantAdministrationTable621D59EB'),
   ),
   WORKSPACE_ACCESS_TABLE_NAME: base64(ref('WorkspaceAccessTableD7C8D2C7')),
-  ...(hasWorkspaceSearchWriterFence
-    ? {
-        WORKSPACE_SEARCH_MIGRATION_STATE_TABLE_NAME: base64(
-          ref('WorkspaceSearchMigrationStateTable34132530'),
-        ),
-      }
-    : {}),
   WORKSPACE_SEARCH_TABLE_NAME: base64(
     ref('WorkspaceSearchTable2575AD6B'),
   ),

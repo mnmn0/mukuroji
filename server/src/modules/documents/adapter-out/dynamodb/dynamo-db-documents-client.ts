@@ -7454,12 +7454,12 @@ function assertDocumentSearchBodyItemSize(
 function assertTransactionSize(
   actions: NonNullable<TransactWriteCommandInput['TransactItems']>,
 ): void {
-  if (actions.length > 99) {
+  if (actions.length > 100) {
     throw new DocumentError(
       413,
       'DocumentTransactionTooLarge',
       'The document mutation creates too many transactional writes.',
-      { actionCount: actions.length, maxActionCount: 99 },
+      { actionCount: actions.length, maxActionCount: 100 },
     )
   }
 }

@@ -88,7 +88,7 @@ Collaboration comment の正本は Collaboration table の persisted root/reply 
 
 旧 `commented` event は、workspace 単位の完了 marker が書かれるまで削除・非表示にしません。backfill は source event ID を canonical comment ID として使い、comment と root discussion row を条件付きで保存するため、checkpoint を使った中断・再実行に耐えます。Work Item が存在しない、row の scope が partition key と一致しない、既存 canonical row の内容が異なる場合は fail-closed で停止します。コメントごとの通知・activity audit は backfill から生成しませんが、完了した実行については実行者、検証済み AWS account、scope、件数を suppressed な運用 audit として記録します。backfill write は canonical comment の current snapshot を強整合で読み直して Workspace Search の comment document も同じ workflow で upsert します。編集済み本文を legacy event で巻き戻さず、削除済み comment や削除済み parent の document は削除します。Search 投影の件数も checkpoint、summary、完了 audit に保存するため、別の Workspace Search backfill を開始しなくても移行結果を検証できます。
 
-まず dry-run で source row を検証し、その後 checkpoint を指定して実行します。source table の全 scan が完了した後にだけ、検出した各 workspace の marker が保存されます。workspace filter を指定しない実行では、legacy comment が一件もない workspace も canonical-only に切り替えられる環境全体 marker を追加で保存します。AWS の marker、provenance receipt、repair row、checkpoint は writer-fence invocation の内側で扱います。
+まず dry-run で source row を検証し、その後 checkpoint を指定して実行します。source table の全 scan が完了した後にだけ、検出した各 workspace の marker が保存されます。workspace filter を指定しない実行では、legacy comment が一件もない workspace も canonical-only に切り替えられる環境全体 marker を追加で保存します。checkpoint は成功行と scan page ごとに owner-only file へ原子的に更新し、scan 完了後は suppressed な operational audit receipt を先に永続化してから completion marker を発行します。
 
 ```sh
 AWS_ENDPOINT_URL=http://localhost:4566 \

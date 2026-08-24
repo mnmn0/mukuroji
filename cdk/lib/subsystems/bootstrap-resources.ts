@@ -4,7 +4,7 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import {
   createCanonicalWorkItemTransactItems,
   createIdempotentAwsCustomResourceProps,
-  createPreFenceBootstrapAwsCustomResourceProps,
+  createCreateOnlyBootstrapAwsCustomResourceProps,
   createProjectDirectoryTransactItems,
   createWorkspaceAccessTransactItems,
   createWorkspaceBootstrapTransactItems,
@@ -24,7 +24,7 @@ export interface BootstrapResourcesInput {
 }
 
 /**
- * Builds Cognito validation, create-only pre-fence table seeds, and idempotent
+ * Builds Cognito validation, create-only table seeds, and idempotent
  * workspace-access seed custom resources.
  *
  * @param scope Stack scope used directly to preserve existing construct paths.
@@ -115,7 +115,7 @@ export function buildBootstrapResources(
   const seedCanonicalWorkItems = new customResources.AwsCustomResource(
     scope,
     'SeedProjectTasks',
-    createPreFenceBootstrapAwsCustomResourceProps(
+    createCreateOnlyBootstrapAwsCustomResourceProps(
       seedCanonicalWorkItemsCall,
       customResources.AwsCustomResourcePolicy.fromStatements([
         new iam.PolicyStatement({
@@ -147,7 +147,7 @@ export function buildBootstrapResources(
   const seedProjectDirectory = new customResources.AwsCustomResource(
     scope,
     'SeedProjectDirectory',
-    createPreFenceBootstrapAwsCustomResourceProps(
+    createCreateOnlyBootstrapAwsCustomResourceProps(
       seedProjectDirectoryCall,
       customResources.AwsCustomResourcePolicy.fromStatements([
         new iam.PolicyStatement({
@@ -214,7 +214,7 @@ export function buildBootstrapResources(
   const bootstrapWorkspace = new customResources.AwsCustomResource(
     scope,
     'BootstrapWorkspace',
-    createPreFenceBootstrapAwsCustomResourceProps(
+    createCreateOnlyBootstrapAwsCustomResourceProps(
       bootstrapWorkspaceCall,
       customResources.AwsCustomResourcePolicy.fromStatements([
         new iam.PolicyStatement({

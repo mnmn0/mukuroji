@@ -7,11 +7,9 @@ test('imports the production collaboration projection without unrelated API secr
     AWS_REGION: 'ap-northeast-1',
     COLLABORATION_TABLE_NAME: 'CollaborationTable',
     DOCUMENTS_TABLE_NAME: 'DocumentsTable',
-    MUKUROJI_WORKSPACE_SEARCH_WRITER_FENCE_MODE: 'required',
     NODE_ENV: 'production',
     PROJECT_DIRECTORY_TABLE_NAME: 'ProjectDirectoryTable',
     WORK_ITEMS_TABLE_NAME: 'WorkItemsTable',
-    WORKSPACE_SEARCH_MIGRATION_STATE_TABLE_NAME: 'WorkspaceSearchMigrationStateTable',
     WORKSPACE_SEARCH_TABLE_NAME: 'WorkspaceSearchTable',
   }
   Reflect.deleteProperty(environment, 'ANALYTICS_TABLE_NAME')

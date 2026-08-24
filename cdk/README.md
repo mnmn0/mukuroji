@@ -36,15 +36,11 @@
 
 `WorkspaceDirectoryId`、`WorkspaceAuditPseudonymKey`、owner email / username は data key と認可境界に使います。環境ごとに固定し、通常の application deploy で変更しないでください。pseudonym key を変更すると既存 resource の audit timeline が分裂するため、通常の rotation 対象にはしません。
 
-### Workspace Search migration deployment target
+### Retired Workspace Search migration resources
 
-Workspace Search migrationのaccount、Region、environmentはCloudFormation parameterでは指定しません。
-CDK contextの`workspaceSearchMigrationDeploymentTarget`は、
-[`lib/config/workspace-search-migration-deployment-targets.ts`](lib/config/workspace-search-migration-deployment-targets.ts)
-にreview済みcodeとして固定したtarget IDを選ぶだけです。未知のID、不完全なtarget、stackの
-account/Regionとの不一致はsynth時に失敗します。現在のmapはnon-production account/Region bindingと
-rehearsal target identity ruleを有効にしない`production-disabled`だけを含みます。Migration state
-table、journal、operator policyはtargetに依存しない共通resourceとして引き続きsynthされます。
+Fresh deploy は Workspace Search migration state table、journal bucket、access-log bucket、KMS key、operator policy を作成しません。既存 stack では state table、両 bucket、KMS key が `RemovalPolicy.RETAIN` で作成されているため、この更新で物理 resource や保存済み data は削除されず、CloudFormation の管理外に残ります。#39 由来の migration resource が存在する環境では、deploy 前後に logical ID、physical name / ARN、data、Object Lock retention、KMS grant を inventory し、明示的な cleanup は別途 review・承認した手順で実施してください。
+
+`WorkspaceSearchMigrationOperatorPolicy` は retain 対象ではないため、stack update 前に既存 `WorkspaceSearchMigrationOperatorPolicyArn` output と `aws iam list-entities-for-policy --policy-arn <arn>` の全 user / group / role attachment を inventory します。各 principal から policy を detach した後に同じ query を再実行し、`PolicyGroups`、`PolicyUsers`、`PolicyRoles` がすべて空であることを必須条件としてから change set を実行してください。事前・事後 inventory、detach 結果、zero-attachment 検証、change set、stack event を deployment evidence に保存します。Attached policy を CloudFormation が自動削除できるとはみなさず、zero-attachment を確認できない場合は更新を開始しません。
 
 ## API observability
 
@@ -111,10 +107,6 @@ templateとdeployed configurationの両方で照合します。
 - `EnterpriseIdentityTableName`（Workspace generation/`CONTROL` checkpoint、global domain claim、SSO/policy/role、SCIM projection、provisioning run の store。Enterprise Identity 専用 GSI は持ちません）
 - `WorkItemCollaborationTableName`, `RealtimeSessionsTableName`, `RealtimeWebSocketUrl`
 - `WorkspaceSearchTableName`（検索文書、saved/task view、ユーザー別 view preference、24 時間保持の task view mutation receipt。receipt のみ `expiresAt` TTL で失効）
-- `WorkspaceSearchMigrationStateTableName`（lease、checkpoint、operation receipt 用の retained/PITR store）
-- `WorkspaceSearchMigrationDeploymentTargetId`, `WorkspaceSearchMigrationDeploymentTrustVersion`, `WorkspaceSearchMigrationDeploymentEnvironment`, `WorkspaceSearchMigrationDeploymentAccount`, `WorkspaceSearchMigrationDeploymentRegion`, `WorkspaceSearchMigrationProductionAccountDigest`, `WorkspaceSearchMigrationDeploymentTrustRootDigest`（review済みsource mapから決まるcanonical deployment trust root。raw production account IDは含めない）
-- `WorkspaceSearchMigrationJournalBucketName`, `WorkspaceSearchMigrationJournalKeyArn`（30–31日の Object Lock COMPLIANCE 付きlossless migration artifact store。Preimage journal segment は2 MiB以下、planning raw source/target artifact segment は16 MiB以下の単一 `PutObject` に限定し、multipart upload は許可しません。専用 access log bucket は current/noncurrent version を90日保持）
-- `WorkspaceSearchMigrationOperatorPolicyArn`（承認済み operator principal へ明示的に attach する未接続 policy。通常journalの30–31日保持権限だけを持つ）
 - `RestoreDrillStateMachineArn`, `RestoreDrillCleanupStateMachineArn`
 - `RestoreDrillEvidenceBucketName`, `RestoreDrillScratchBucketName`, `RestoreDrillStateTableName`
 - `RestoreDrillCleanupApprovalPolicyArn`, `RestoreDrillScheduleDlqUrl`
