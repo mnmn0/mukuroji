@@ -72,6 +72,7 @@ export const aiAssistanceMessages = {
   'ai.search.report.loadedCount': '{count} currently loaded results',
   'ai.search.report.partialNotice': 'More matches are available. This count includes only the results loaded in this view.',
   'ai.search.report.notSet': 'Not set',
+  'ai.search.validation.customFieldValue': 'Enter a value for every custom-field comparison before applying filters.',
   'ai.search.apply': 'Apply filters',
   'ai.search.removeFilter': 'Remove {label}',
   'ai.search.listHint': 'Separate multiple values with commas.',

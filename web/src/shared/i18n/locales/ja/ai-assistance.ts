@@ -72,6 +72,7 @@ export const aiAssistanceMessages = {
   'ai.search.report.loadedCount': '現在読み込み済みの結果は {count} 件です',
   'ai.search.report.partialNotice': '一致する結果がほかにもあります。この件数は現在の view に読み込んだ結果だけを集計しています。',
   'ai.search.report.notSet': '未設定',
+  'ai.search.validation.customFieldValue': '空欄以外の custom field 演算子には値を入力してからフィルターを適用してください。',
   'ai.search.apply': 'Filter を適用',
   'ai.search.removeFilter': '{label} を削除',
   'ai.search.listHint': '複数の値はカンマで区切ります。',

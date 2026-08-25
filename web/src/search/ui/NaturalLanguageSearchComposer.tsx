@@ -21,6 +21,7 @@ import {
   createEditableAiSearchFilters,
   formatAiSearchCustomFieldValue,
   formatAiSearchList,
+  hasReviewableAiSearchCustomFields,
   normalizeAiSearchFilters,
   parseAiSearchCustomFieldValue,
   parseAiSearchList,
@@ -246,6 +247,7 @@ function SearchDraftReview({
   const draft = getAvailableSearchDraft(generation)
   const [filters, setFilters] = useState<WorkspaceSearchFilters>(() =>
     createEditableAiSearchFilters(draft?.filters ?? {}))
+  const hasInvalidCustomField = !hasReviewableAiSearchCustomFields(filters)
 
   if (!draft) return null
 
@@ -269,7 +271,7 @@ function SearchDraftReview({
       isDecisionPending={isDecisionPending}
       isFeedbackPending={isFeedbackPending}
       locale={locale}
-      onAdopt={adoptFilters}
+      onAdopt={hasInvalidCustomField ? undefined : adoptFilters}
       onFeedback={onFeedback}
       onReject={() => {
         void onDecide('rejected')
@@ -459,6 +461,11 @@ export function AiSearchDraftEditor({
               />
             ))}
           </fieldset>
+        ) : null}
+        {!hasReviewableAiSearchCustomFields(filters) ? (
+          <p className="border-l-2 border-[var(--workbench-danger)] bg-red-50 px-3 py-2 text-app-caption font-semibold text-[var(--workbench-danger)]" role="alert">
+            {t('ai.search.validation.customFieldValue')}
+          </p>
         ) : null}
       </fieldset>
 

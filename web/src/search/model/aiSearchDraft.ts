@@ -91,6 +91,25 @@ export function normalizeAiSearchFilters(
 }
 
 /**
+ * Returns whether every reviewed custom-field comparison has an explicit value.
+ *
+ * Empty and not-empty operators intentionally omit a value; all other operators
+ * must keep one so an incomplete row cannot broaden the applied Search query.
+ *
+ * @param filters - Locally edited Search filters.
+ * @returns Whether the custom-field rows are safe to apply.
+ */
+export function hasReviewableAiSearchCustomFields(
+  filters: WorkspaceSearchFilters,
+): boolean {
+  return (filters.customFields ?? []).every((filter) => {
+    if (filter.operator === 'is-empty' || filter.operator === 'is-not-empty') return true
+    if (filter.value === undefined) return false
+    return typeof filter.value !== 'string' || filter.value.trim().length > 0
+  })
+}
+
+/**
  * Parses a comma-separated form value into stable unique identifiers.
  *
  * @param value - Editable comma-separated input.

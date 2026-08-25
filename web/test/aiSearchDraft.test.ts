@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import {
   createEditableAiSearchFilters,
+  hasReviewableAiSearchCustomFields,
   normalizeAiSearchFilters,
   parseAiSearchCustomFieldValue,
   parseAiSearchList,
@@ -35,6 +36,18 @@ describe('AI Search draft model', () => {
     expect(filters.statuses).toEqual(['todo', 'review'])
     expect(filters.teamIds).toBeUndefined()
     expect(filters.date).toEqual({ field: 'updatedAt', from: undefined, to: '2026-08-31' })
+  })
+
+  test('requires values for non-empty custom-field operators before applying', () => {
+    expect(hasReviewableAiSearchCustomFields({
+      customFields: [{ fieldId: 'risk', operator: 'equals' }],
+    })).toBe(false)
+    expect(hasReviewableAiSearchCustomFields({
+      customFields: [{ fieldId: 'risk', operator: 'equals', value: 'high' }],
+    })).toBe(true)
+    expect(hasReviewableAiSearchCustomFields({
+      customFields: [{ fieldId: 'risk', operator: 'is-empty' }],
+    })).toBe(true)
   })
 
   test('parses repeated identifiers and supported custom values without widening the contract', () => {
