@@ -142,6 +142,7 @@ function createHarness(configuration: HarnessConfiguration = {}) {
   let finalizeAttemptCallCount = 0
   let gatewayError: unknown
   let generationPersistenceError: unknown
+  let policyPutCalls = 0
   let outputCitationId = 'S1'
   let outputItemId = 'overview-1'
   let outputText = 'Safe summary.'
@@ -248,6 +249,7 @@ function createHarness(configuration: HarnessConfiguration = {}) {
       return { ...createPolicy(), retentionDays: policyRetentionDays }
     },
     async putPolicy(_workspaceId, policy) {
+      policyPutCalls += 1
       return policy
     },
     async getPreference() {
@@ -398,6 +400,7 @@ function createHarness(configuration: HarnessConfiguration = {}) {
     gatewayInputs,
     budgetReservationCount: () => budgetReservationCount,
     lastBudget: () => lastBudget,
+    policyPutCalls: () => policyPutCalls,
     resolveContextCount: () => resolveContextCount,
     service,
     startedAttempts,
@@ -1003,7 +1006,7 @@ describe('createAiAssistanceService', () => {
     })])
   })
 
-  test('discards output when authorization changes during inference', async () => {
+  test('rechecks source authorization before invoking the provider', async () => {
     const harness = createHarness()
     harness.setAuthorizationState({ current: false, reason: 'permission-changed' })
 
@@ -1014,6 +1017,13 @@ describe('createAiAssistanceService', () => {
       'request-1',
     )).rejects.toMatchObject({ code: 'AiAssistanceAuthorizationChanged' })
     expect(harness.storedGeneration()).toBeUndefined()
+    expect(harness.gatewayInputs).toHaveLength(0)
+    expect(harness.startedAttempts).toHaveLength(1)
+    expect(harness.finalizedAttempts).toEqual([expect.objectContaining({
+      outcome: 'failed',
+      failureCategory: 'conflict',
+      failureCode: 'AiAssistanceAuthorizationChanged',
+    })])
   })
 
   test('withholds an existing generation after source access changes', async () => {
@@ -1097,7 +1107,12 @@ describe('createAiAssistanceService', () => {
       'request-1',
     )).rejects.toMatchObject({ code: 'AiAssistanceProviderTimeout' })
     expect(harness.gatewayInputs).toHaveLength(0)
-    expect(harness.failedReservations).toHaveLength(1)
+    expect(harness.failedReservations).toHaveLength(0)
+    expect(harness.finalizedAttempts).toEqual([expect.objectContaining({
+      outcome: 'failed',
+      failureCategory: 'timeout',
+      failureCode: 'AiAssistanceProviderTimeout',
+    })])
   })
 
   test('rejects a deployment-disallowed requested model before source retrieval', async () => {
@@ -1382,7 +1397,28 @@ describe('createAiAssistanceService', () => {
       enabledTasks: ['summary', 'summary'],
       retentionDays: 30,
       expectedRevision: 0,
+    }, {
+      isCurrent: async () => true,
     })).rejects.toMatchObject({ code: 'InvalidAiAssistanceRequest' })
+  })
+
+  test('rechecks management authorization immediately before a policy write', async () => {
+    const harness = createHarness()
+
+    await expect(harness.service.updatePolicy(createActor(), {
+      enabled: true,
+      allowedModelIds: ['model-1'],
+      defaultModelId: 'model-1',
+      enabledTasks: ['summary'],
+      retentionDays: 30,
+      expectedRevision: 0,
+    }, {
+      isCurrent: async () => false,
+    })).rejects.toMatchObject({
+      category: 'authorization',
+      code: 'AiAssistanceAuthorizationChanged',
+    })
+    expect(harness.policyPutCalls()).toBe(0)
   })
 
   test('treats the same decision outcome as replay despite a stale expected revision', async () => {

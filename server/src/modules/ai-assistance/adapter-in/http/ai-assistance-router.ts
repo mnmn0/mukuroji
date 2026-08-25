@@ -5,6 +5,7 @@ import type {
   AiAssistanceAuthorizationCallbacks,
   AiAssistanceAuthorizationState,
   AiAssistanceService,
+  AiAssistancePolicyAuthorization,
   CheckAiAssistanceAuthorizationInput,
   ResolveAiAssistanceContextInput,
   ResolvedAiAssistanceContext,
@@ -71,11 +72,15 @@ export function createAiAssistanceRouter<Principal>(
 
   router.put('/api/ai-assistance/policy', async (context) => {
     try {
-      const { actor } = await authenticateRequest(context, dependencies)
+      const { actor, policyAuthorization } = await authenticateRequest(context, dependencies)
       const request = parseUpdateAiAssistancePolicyRequest(
         await dependencies.readJson(context.req),
       )
-      return context.json(await dependencies.service.updatePolicy(actor, request))
+      return context.json(await dependencies.service.updatePolicy(
+        actor,
+        request,
+        policyAuthorization,
+      ))
     } catch (error) {
       return mapRouterError(context, error, dependencies.mapError)
     }
@@ -194,6 +199,8 @@ type AuthenticatedAiAssistanceRequest<Principal> = {
   actor: AiAssistanceActor
   /** Callbacks bound to the same current principal. */
   authorization: AiAssistanceAuthorizationCallbacks
+  /** Rechecks current Workspace management permission before policy persistence. */
+  policyAuthorization: AiAssistancePolicyAuthorization
 }
 
 /** Resolves bearer authentication and binds principal-scoped source callbacks. */
@@ -214,6 +221,26 @@ async function authenticateRequest<Principal>(
   return {
     principal,
     actor,
+    policyAuthorization: {
+      isCurrent: async () => {
+        const currentAccessToken = dependencies.readBearerAccessToken(context)
+        if (currentAccessToken === undefined || currentAccessToken !== accessToken) {
+          return false
+        }
+        try {
+          const currentPrincipal = await dependencies.authenticate(
+            currentAccessToken,
+            context,
+          )
+          const currentActor = await dependencies.toActor(currentPrincipal, context)
+          return currentActor.workspaceId === actor.workspaceId &&
+            currentActor.memberId === actor.memberId &&
+            currentActor.canManagePolicy
+        } catch {
+          return false
+        }
+      },
+    },
     authorization: {
       resolveContext: (input) => dependencies.resolveContext(principal, input, context),
       isAuthorizationCurrent: async (input) => {

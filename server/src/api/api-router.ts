@@ -430,6 +430,7 @@ import {
   type AiAssistanceActor,
   type AiAssistanceAllowedValues,
   type AiAssistanceAuthorizationState,
+  type AiAssistancePolicyAuthorization,
   type AiAssistanceService,
   type AiAssistanceTextAlias,
   type CheckAiAssistanceAuthorizationInput,
@@ -1173,8 +1174,12 @@ const authenticationDependencies: AuthenticationDependencies = {
 const aiAssistanceService: AiAssistanceService = {
   getPolicy: (actor) =>
     requireAppDependencies().aiAssistance.aiAssistanceService.getPolicy(actor),
-  updatePolicy: (actor, request) =>
-    requireAppDependencies().aiAssistance.aiAssistanceService.updatePolicy(actor, request),
+  updatePolicy: (actor, request, authorization: AiAssistancePolicyAuthorization) =>
+    requireAppDependencies().aiAssistance.aiAssistanceService.updatePolicy(
+      actor,
+      request,
+      authorization,
+    ),
   getPreference: (actor) =>
     requireAppDependencies().aiAssistance.aiAssistanceService.getPreference(actor),
   updatePreference: (actor, request) =>

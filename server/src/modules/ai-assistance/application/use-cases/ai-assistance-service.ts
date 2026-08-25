@@ -42,6 +42,7 @@ import type {
   AiAssistanceAllowedValues,
   AiAssistanceAuthorizationCallbacks,
   AiAssistanceGenerationBudgetReservation,
+  AiAssistancePolicyAuthorization,
   AiAssistancePrivateMemberIdentifiers,
   AiModelGenerationResult,
   AiAssistanceService,
@@ -157,10 +158,18 @@ export function createAiAssistanceService(
     return await options.store.getPolicy(actor.workspaceId) ?? options.defaultPolicy
   }
 
-  /** Persists a manager-authorized Workspace policy update. */
+  /**
+   * Persists a manager-authorized Workspace policy update.
+   *
+   * @param actor - Operator snapshot used for Workspace and member identity binding.
+   * @param input - Revision-fenced policy update request.
+   * @param authorization - Fresh management authorization checked immediately before persistence.
+   * @returns The policy accepted by the revision-fenced store.
+   */
   async function updatePolicy(
     actor: AiAssistanceActor,
     input: UpdateAiAssistancePolicyRequest,
+    authorization: AiAssistancePolicyAuthorization,
   ): Promise<AiAssistancePolicy> {
     if (!actor.canManagePolicy) {
       throw new AiAssistanceError(
@@ -181,6 +190,13 @@ export function createAiAssistanceService(
       updatedAt: now().toISOString(),
     }
     validateEffectivePolicy(policy, deploymentAllowedModelIds)
+    if (!await authorization.isCurrent()) {
+      throw new AiAssistanceError(
+        'authorization',
+        'AiAssistanceAuthorizationChanged',
+        'AI assistance policy authorization changed. Reload and try again.',
+      )
+    }
     return await options.store.putPolicy(actor.workspaceId, policy, request.expectedRevision)
   }
 
@@ -360,6 +376,32 @@ export function createAiAssistanceService(
         authorizationToken: context.authorizationToken,
         auditedInput: context.promptContext,
       }, maxOutputTokens)
+      const attemptStartedAtValue = now()
+      await options.store.startGenerationAttempt({
+        ...completion,
+        task: request.task,
+        modelId,
+        promptVersion: options.promptVersion,
+        traceId: actor.traceId,
+        startedAt: attemptStartedAtValue.toISOString(),
+        audit: {
+          request: providerRequest,
+          auditedInput: context.promptContext,
+          citations: [...context.citations],
+        },
+      })
+      attemptStartedAt = attemptStartedAtValue
+      // Re-resolve every source after the durable attempt starts and immediately
+      // before the paid call. This fences document bodies and comment windows
+      // that can change without a policy or Workspace ACL revision update.
+      const preProviderAuthorizationState = await authorization.isAuthorizationCurrent({
+        actor,
+        request: providerRequest,
+        authorizationToken: context.authorizationToken,
+      })
+      if (!preProviderAuthorizationState.current) {
+        throw authorizationChangedError(preProviderAuthorizationState.reason)
+      }
       const providerStartedAt = now()
       const elapsedBeforeProviderMs = Math.max(
         0,
@@ -376,20 +418,6 @@ export function createAiAssistanceService(
           'The AI assistance request exceeded its end-to-end deadline before Bedrock started.',
         )
       }
-      await options.store.startGenerationAttempt({
-        ...completion,
-        task: request.task,
-        modelId,
-        promptVersion: options.promptVersion,
-        traceId: actor.traceId,
-        startedAt: providerStartedAt.toISOString(),
-        audit: {
-          request: providerRequest,
-          auditedInput: context.promptContext,
-          citations: [...context.citations],
-        },
-      })
-      attemptStartedAt = providerStartedAt
       modelResult = await options.gateway.generate({
         modelId,
         task: request.task,

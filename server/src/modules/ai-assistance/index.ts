@@ -45,6 +45,7 @@ export type {
   AiAssistanceAuthorizationState,
   AiAssistanceGenerationReservation,
   AiAssistanceGenerationBudgetReservation,
+  AiAssistancePolicyAuthorization,
   AiAssistancePrivateMemberIdentifiers,
   AiAssistanceService,
   AiAssistanceServiceOptions,

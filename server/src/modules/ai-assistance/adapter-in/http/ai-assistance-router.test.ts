@@ -179,6 +179,45 @@ function createHarness(
 }
 
 describe('createAiAssistanceRouter', () => {
+  test('passes a fresh management authorization callback to policy writes', async () => {
+    let currentAuthorization: boolean | undefined
+    const harness = createHarness(false, {
+      ...createService(),
+      async updatePolicy(_actor, request, authorization) {
+        currentAuthorization = await authorization.isCurrent()
+        return {
+          schemaVersion: AI_ASSISTANCE_SCHEMA_VERSION,
+          enabled: request.enabled,
+          allowedModelIds: request.allowedModelIds,
+          defaultModelId: request.defaultModelId,
+          enabledTasks: request.enabledTasks,
+          retentionDays: request.retentionDays,
+          revision: request.expectedRevision + 1,
+          updatedAt: '2026-08-25T00:00:00.000Z',
+        }
+      },
+    })
+    const response = await harness.router.request('/api/ai-assistance/policy', {
+      method: 'PUT',
+      headers: {
+        Authorization: 'Bearer token-1',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        enabled: true,
+        allowedModelIds: ['model-1'],
+        defaultModelId: 'model-1',
+        enabledTasks: ['search'],
+        retentionDays: 30,
+        expectedRevision: 0,
+      }),
+    })
+
+    expect(response.status).toBe(200)
+    expect(currentAuthorization).toBeFalse()
+    expect(harness.authenticateCount()).toBe(2)
+  })
+
   test('reauthenticates before exposing a generated response', async () => {
     const harness = createHarness()
     const response = await harness.router.request('/api/ai-assistance/generations', {

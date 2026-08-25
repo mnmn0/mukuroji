@@ -86,7 +86,17 @@ export type AiAssistanceAuthorizationState =
       current: false
       /** Safe reason used to withhold generated content. */
       reason: 'permission-changed' | 'source-changed'
-    }
+  }
+
+/** Rechecks current Workspace management authorization at the policy write boundary. */
+export type AiAssistancePolicyAuthorization = {
+  /**
+   * Reads current membership and management permission without relying on the initial actor snapshot.
+   *
+   * @returns Whether the actor may still update the Workspace AI policy.
+   */
+  isCurrent(): Promise<boolean>
+}
 
 /** Input supplied to the server-owned source authorization resolver. */
 export type ResolveAiAssistanceContextInput = {
@@ -451,6 +461,7 @@ export interface AiAssistanceService {
   updatePolicy(
     actor: AiAssistanceActor,
     request: UpdateAiAssistancePolicyRequest,
+    authorization: AiAssistancePolicyAuthorization,
   ): Promise<AiAssistancePolicy>
   /** Reads the effective current-member preference. */
   getPreference(actor: AiAssistanceActor): Promise<AiAssistancePreference>

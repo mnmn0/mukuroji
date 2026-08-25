@@ -576,7 +576,8 @@ function createLazyAiAssistanceService(
 
   return {
     getPolicy: (actor) => resolveService().getPolicy(actor),
-    updatePolicy: (actor, request) => resolveService().updatePolicy(actor, request),
+    updatePolicy: (actor, request, authorization) =>
+      resolveService().updatePolicy(actor, request, authorization),
     getPreference: (actor) => resolveService().getPreference(actor),
     updatePreference: (actor, request) =>
       resolveService().updatePreference(actor, request),
