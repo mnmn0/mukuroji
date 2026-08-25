@@ -1,5 +1,6 @@
 import './alarm-routing.suite';
 import './parameters-config.suite';
+import './bedrock-ai.suite';
 import './data-storage.suite';
 import './migration-observability.suite';
 import './cross-domain-integrity.suite';

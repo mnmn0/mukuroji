@@ -946,6 +946,29 @@ fi
 
 aws_local dynamodb wait table-exists --table-name "$WORKSPACE_SEARCH_TABLE"
 
+WORKSPACE_SEARCH_TTL_STATUS="$(aws_local dynamodb describe-time-to-live \
+  --table-name "$WORKSPACE_SEARCH_TABLE" \
+  --query TimeToLiveDescription.TimeToLiveStatus \
+  --output text 2>/dev/null || true)"
+case "$WORKSPACE_SEARCH_TTL_STATUS" in
+  ENABLED | ENABLING) ;;
+  *)
+    aws_local dynamodb update-time-to-live \
+      --table-name "$WORKSPACE_SEARCH_TABLE" \
+      --time-to-live-specification AttributeName=expiresAt,Enabled=true \
+      >/dev/null
+    ;;
+esac
+
+WORKSPACE_SEARCH_TTL_ATTRIBUTE="$(aws_local dynamodb describe-time-to-live \
+  --table-name "$WORKSPACE_SEARCH_TABLE" \
+  --query TimeToLiveDescription.AttributeName \
+  --output text)"
+if [ "$WORKSPACE_SEARCH_TTL_ATTRIBUTE" != "expiresAt" ]; then
+  echo "Existing Workspace Search table TTL does not match the local API contract: table=$WORKSPACE_SEARCH_TABLE ttl=$WORKSPACE_SEARCH_TTL_ATTRIBUTE" >&2
+  exit 1
+fi
+
 if ! aws_local dynamodb describe-table --table-name "$ANALYTICS_TABLE" >/dev/null 2>&1; then
   aws_local dynamodb create-table \
     --table-name "$ANALYTICS_TABLE" \

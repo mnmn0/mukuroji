@@ -511,27 +511,39 @@ function resolveMaximumSecretName(
 }
 
 /**
- * Resolves an API environment Ref to a conservative value for the size budget.
+ * Resolves an API environment literal or Ref to a conservative size-budget value.
  *
  * @param value - Lambda environment value.
  * @param parameters - Synthesized CloudFormation parameters.
  * @param resources - Synthesized CloudFormation resources.
- * @returns A conservative Secrets Manager ARN.
+ * @returns A literal value or conservative referenced-resource value.
  */
 function resolveApiEnvironmentValue(
   value: unknown,
   parameters: Readonly<Record<string, unknown>>,
   resources: Readonly<Record<string, unknown>>,
 ): string {
+  if (typeof value === 'string') return value;
   const expression = requireRecord(value, 'API environment value');
   if (typeof expression.Ref !== 'string') {
     throw new Error('Every API environment value must Ref a deployment resource.');
   }
+  if (expression.Ref === 'AWS::Region' ||
+      parameters[expression.Ref] !== undefined) {
+    return resolveMaximumString(value, parameters, resources);
+  }
   if (expression.Ref === TENANT_EXPORT_BUCKET_LOGICAL_ID) {
     return 'tenant-export-bucket';
   }
-  const secret = requireRecord(
+  const referencedResource = requireRecord(
     resources[expression.Ref],
+    `API environment resource ${expression.Ref}`,
+  );
+  if (referencedResource.Type === 'AWS::DynamoDB::Table') {
+    return resolveMaximumString(value, parameters, resources);
+  }
+  const secret = requireRecord(
+    referencedResource,
     `API configuration secret ${expression.Ref}`,
   );
   if (secret.Type !== 'AWS::SecretsManager::Secret') {
@@ -748,6 +760,19 @@ describe('API runtime configuration externalization', () => {
     const environment = requireRecordProperty(functionProperties, 'Environment');
     const variables = requireRecordProperty(environment, 'Variables');
     expect(variables).toEqual({
+      AI_ASSISTANCE_ALLOWED_MODEL_IDS: ref('AiBedrockModelId'),
+      AI_ASSISTANCE_BEDROCK_REGION: ref('AWS::Region'),
+      AI_ASSISTANCE_BEDROCK_INPUT_PRICE_PER_MILLION_TOKENS_USD:
+        ref('AiBedrockInputPricePerMillionTokensUsd'),
+      AI_ASSISTANCE_BEDROCK_OUTPUT_PRICE_PER_MILLION_TOKENS_USD:
+        ref('AiBedrockOutputPricePerMillionTokensUsd'),
+      AI_ASSISTANCE_DEFAULT_MODEL_ID: ref('AiBedrockModelId'),
+      AI_ASSISTANCE_MEMBER_GENERATIONS_PER_MINUTE: '4',
+      AI_ASSISTANCE_MEMBER_TOKENS_PER_MINUTE: '4000000',
+      AI_ASSISTANCE_TABLE_NAME: ref('WorkspaceSearchTable2575AD6B'),
+      AI_ASSISTANCE_WORKSPACE_GENERATIONS_PER_MINUTE: '32',
+      AI_ASSISTANCE_WORKSPACE_TOKENS_PER_MINUTE: '32000000',
+      AI_ASSISTANCE_WORST_CASE_TOKENS_PER_GENERATION: '1000000',
       MUKUROJI_API_CORE_CONFIG_SECRET_ARN:
         ref(API_CORE_RUNTIME_CONFIGURATION_SECRET_LOGICAL_ID),
       MUKUROJI_API_DATA_CONFIG_SECRET_ARN:

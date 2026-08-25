@@ -266,7 +266,7 @@ test('enterprise SCIM group jobs run in a dedicated bounded worker', () => {
   expect(serializedPolicies).not.toContain('secretsmanager:');
 
   const apiFunction = resources.ListProjectTasksFunction2134AF4A;
-  expect(apiFunction.Properties.Timeout).toBe(15);
+  expect(apiFunction.Properties.Timeout).toBe(20);
   const apiFunctionRoleLogicalId = (
     (apiFunction as {
       Properties?: { Role?: { 'Fn::GetAtt'?: string[] } }

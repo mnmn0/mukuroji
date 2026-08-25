@@ -8,6 +8,7 @@ import type {
   AuditEventV1,
 } from '../../modules/audit/audit'
 import type { CognitoClient } from '../../modules/authentication'
+import type { AiAssistanceService } from '../../modules/ai-assistance'
 import type {
   AutomationBulkOperationPort,
   AutomationExecutionServicePort,
@@ -245,6 +246,12 @@ export interface CapacityPlanningDependencies {
   capacityPlanningService: CapacityPlanningService
 }
 
+/** Dependencies required by permission-fenced AI assistance routes. */
+export interface AiAssistanceDependencies {
+  /** Provides policy, generation, review, and feedback application use cases. */
+  aiAssistanceService: AiAssistanceService
+}
+
 /** Operational dependencies required by system routes. */
 export interface OperationalDependencies {
   /** Records bounded runtime-control decisions and metrics. */
@@ -283,6 +290,8 @@ export interface AppDependencies {
   timeTracking: Readonly<TimeTrackingDependencies>
   /** Capacity planning route dependencies. */
   capacityPlanning: Readonly<CapacityPlanningDependencies>
+  /** AI assistance route dependencies. */
+  aiAssistance: Readonly<AiAssistanceDependencies>
   /** Developer Platform route and worker dependencies. */
   developerPlatform: Readonly<DeveloperPlatformDependencies>
 }
@@ -306,6 +315,7 @@ export function freezeAppDependencies(
     automation: Object.freeze({ ...dependencies.automation }),
     timeTracking: Object.freeze({ ...dependencies.timeTracking }),
     capacityPlanning: Object.freeze({ ...dependencies.capacityPlanning }),
+    aiAssistance: Object.freeze({ ...dependencies.aiAssistance }),
     developerPlatform: Object.freeze({ ...dependencies.developerPlatform }),
   })
 }
@@ -318,6 +328,7 @@ export type AppDependencyOverrides = Partial<
   AutomationDependencies &
   TimeTrackingDependencies &
   CapacityPlanningDependencies &
+  AiAssistanceDependencies &
   DeveloperPlatformDependencies &
   OperationalDependencies
 > & {

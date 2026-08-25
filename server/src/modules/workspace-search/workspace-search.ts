@@ -2,7 +2,9 @@ import { createHash, randomUUID } from 'node:crypto'
 import {
   CreateTableCommand,
   DescribeTableCommand,
+  DescribeTimeToLiveCommand,
   DynamoDBClient,
+  UpdateTimeToLiveCommand,
   type TableDescription,
 } from '@aws-sdk/client-dynamodb'
 import {
@@ -3933,8 +3935,12 @@ export async function ensureLocalWorkspaceSearchTable(
     if (!isWorkspaceSearchTableDescription(described.Table)) {
       throw new Error(`Local DynamoDB table "${normalizedTableName}" does not match the expected schema.`)
     }
-    if (described.Table?.TableStatus === 'ACTIVE') return
+    if (described.Table?.TableStatus === 'ACTIVE') {
+      await ensureWorkspaceSearchTimeToLive(normalizedTableName, dynamoDbClient)
+      return
+    }
     await waitForWorkspaceSearchTable(normalizedTableName, dynamoDbClient)
+    await ensureWorkspaceSearchTimeToLive(normalizedTableName, dynamoDbClient)
     return
   } catch (error) {
     if (!isResourceNotFound(error)) {
@@ -3960,6 +3966,44 @@ export async function ensureLocalWorkspaceSearchTable(
     }
   }
   await waitForWorkspaceSearchTable(normalizedTableName, dynamoDbClient)
+  await ensureWorkspaceSearchTimeToLive(normalizedTableName, dynamoDbClient)
+}
+
+/** Ensures local retention-bearing search rows use the production `expiresAt` TTL contract. */
+async function ensureWorkspaceSearchTimeToLive(
+  tableName: string,
+  dynamoDbClient: DynamoDBClient,
+): Promise<void> {
+  const described = await dynamoDbClient.send(new DescribeTimeToLiveCommand({
+    TableName: tableName,
+  }))
+  const status = described.TimeToLiveDescription?.TimeToLiveStatus
+  const attributeName = described.TimeToLiveDescription?.AttributeName
+  if (status === 'ENABLED' || status === 'ENABLING') {
+    if (attributeName === 'expiresAt') return
+    throw new Error(
+      `Local DynamoDB table "${tableName}" TTL does not use the expected expiresAt attribute.`,
+    )
+  }
+  await dynamoDbClient.send(new UpdateTimeToLiveCommand({
+    TableName: tableName,
+    TimeToLiveSpecification: {
+      AttributeName: 'expiresAt',
+      Enabled: true,
+    },
+  }))
+  const verified = await dynamoDbClient.send(new DescribeTimeToLiveCommand({
+    TableName: tableName,
+  }))
+  const verifiedStatus = verified.TimeToLiveDescription?.TimeToLiveStatus
+  if (
+    verified.TimeToLiveDescription?.AttributeName !== 'expiresAt' ||
+    (verifiedStatus !== 'ENABLED' && verifiedStatus !== 'ENABLING')
+  ) {
+    throw new Error(
+      `Local DynamoDB table "${tableName}" TTL did not adopt the expected expiresAt contract.`,
+    )
+  }
 }
 
 async function waitForWorkspaceSearchTable(

@@ -1,0 +1,209 @@
+import { describe, expect, test } from 'bun:test'
+import type { AiModelGenerationInput } from '../../application/ports/ai-assistance-ports'
+import type { AiAssistanceModelOutput } from '../../application/validation/ai-assistance-schema'
+import {
+  AI_ASSISTANCE_SYSTEM_INSTRUCTIONS,
+  createAiAssistanceGenerationPrompt,
+  createMastraBedrockAiModelGateway,
+} from './mastra-bedrock-ai-model-gateway'
+
+/** Creates one complete gateway input without sensitive member identifiers. */
+function createInput(): AiModelGenerationInput {
+  return {
+    modelId: 'model-1',
+    task: 'search',
+    locale: 'ja',
+    promptVersion: 'ai-assistance-v1',
+    request: { task: 'search', locale: 'ja', query: '未完了の項目' },
+    promptContext: 'Visible search catalog.',
+    citations: [],
+    allowedValues: {
+      assigneeUserIds: ['U1'],
+      creatorUserIds: ['C1'],
+      teamIds: ['team-1'],
+      projectIds: ['project-1'],
+      customFieldIds: [],
+      relationIds: [],
+      statuses: ['todo'],
+      workItemEndpoints: [],
+    },
+    traceId: 'trace-1',
+    maxOutputTokens: 1_000,
+    timeoutMs: 100,
+  }
+}
+
+/** Creates one strict search draft returned by an injected Mastra runner. */
+function createOutput(): AiAssistanceModelOutput {
+  return {
+    draft: {
+      kind: 'search',
+      interpretation: '未完了の項目です。',
+      filters: { statuses: ['todo'] },
+      caveats: [],
+    },
+    uncertainty: { level: 'low', reason: '明確です。' },
+  }
+}
+
+describe('createMastraBedrockAiModelGateway', () => {
+  test('builds one delimited prompt and records provider usage and estimated cost', async () => {
+    let capturedPrompt = ''
+    let capturedSystemInstructions = ''
+    let clock = 1_000
+    const gateway = createMastraBedrockAiModelGateway({
+      runStructuredGeneration: async (input) => {
+        capturedPrompt = input.prompt
+        capturedSystemInstructions = input.systemInstructions
+        clock = 1_025
+        return {
+          object: createOutput(),
+          inputTokens: 10,
+          outputTokens: 20,
+          traceId: 'provider-trace-1',
+        }
+      },
+      pricingByModelId: {
+        'model-1': {
+          inputPerMillionTokensUsd: 2,
+          outputPerMillionTokensUsd: 4,
+        },
+      },
+      nowMilliseconds: () => clock,
+    })
+
+    const result = await gateway.generate(createInput())
+
+    expect(capturedSystemInstructions).toBe(AI_ASSISTANCE_SYSTEM_INSTRUCTIONS)
+    expect(capturedPrompt).toBe(createAiAssistanceGenerationPrompt(createInput()))
+    expect(capturedPrompt).toContain('REQUEST_JSON_BEGIN')
+    expect(capturedPrompt).toContain('AUTHORIZED_CONTEXT_BEGIN')
+    expect(capturedPrompt).toContain('ALLOWED_VALUES_JSON_BEGIN')
+    expect(capturedPrompt).toContain('"assigneeUserIds":["U1"]')
+    expect(result.providerTraceId).toBe('provider-trace-1')
+    expect(result.usage).toEqual({
+      inputTokens: 10,
+      outputTokens: 20,
+      latencyMs: 25,
+      costUsd: 0.0001,
+    })
+  })
+
+  test('rejects model output containing unknown fields under the strict schema', async () => {
+    const gateway = createMastraBedrockAiModelGateway({
+      runStructuredGeneration: async () => ({
+        object: { ...createOutput(), unauthorized: 'field' },
+      }),
+    })
+
+    await expect(gateway.generate(createInput())).rejects.toMatchObject({
+      code: 'InvalidAiAssistanceOutput',
+    })
+  })
+
+  test('accepts provider row identifiers that the application replaces after parsing', async () => {
+    const duplicateSubtask = {
+      id: 'subtask-1',
+      title: 'Review the launch checklist',
+      priority: 'high',
+      reason: 'The checklist remains incomplete.',
+      confidence: 'high',
+      citationIds: ['source-1'],
+    }
+    const gateway = createMastraBedrockAiModelGateway({
+      runStructuredGeneration: async () => ({
+        object: {
+          draft: {
+            kind: 'planning',
+            subtasks: [duplicateSubtask, duplicateSubtask],
+            dependencies: [],
+          },
+          uncertainty: { level: 'low', reason: 'The source is incomplete.' },
+        },
+      }),
+    })
+
+    const result = await gateway.generate(createInput())
+
+    expect(result.draft).toMatchObject({
+      kind: 'planning',
+      subtasks: [{ id: 'subtask-1' }, { id: 'subtask-1' }],
+    })
+  })
+
+  test('accepts only real fixed-width calendar dates in Search output', async () => {
+    for (const invalidDate of [
+      'victim@example.com',
+      '2026-2-01',
+      '2026-02-29',
+      '2026-02-30',
+      '2026-13-01',
+      '2026-08-25T00:00:00Z',
+    ]) {
+      const gateway = createMastraBedrockAiModelGateway({
+        runStructuredGeneration: async () => ({
+          object: {
+            draft: {
+              kind: 'search',
+              interpretation: 'Date filter.',
+              filters: {
+                date: { field: 'createdAt', from: invalidDate },
+              },
+              caveats: [],
+            },
+            uncertainty: { level: 'low', reason: 'Clear.' },
+          },
+        }),
+      })
+
+      await expect(gateway.generate(createInput())).rejects.toMatchObject({
+        code: 'InvalidAiAssistanceOutput',
+      })
+    }
+
+    const gateway = createMastraBedrockAiModelGateway({
+      runStructuredGeneration: async () => ({
+        object: {
+          draft: {
+            kind: 'search',
+            interpretation: 'Leap-day filter.',
+            filters: {
+              date: {
+                field: 'createdAt',
+                from: '2000-02-29',
+                to: '2028-02-29',
+              },
+            },
+            caveats: [],
+          },
+          uncertainty: { level: 'low', reason: 'Clear.' },
+        },
+      }),
+    })
+
+    await expect(gateway.generate(createInput())).resolves.toMatchObject({
+      draft: {
+        filters: {
+          date: {
+            field: 'createdAt',
+            from: '2000-02-29',
+            to: '2028-02-29',
+          },
+        },
+      },
+    })
+  })
+
+  test('classifies an aborted provider run as a stable timeout', async () => {
+    const gateway = createMastraBedrockAiModelGateway({
+      runStructuredGeneration: (input) => new Promise((_resolve, reject) => {
+        input.abortSignal.addEventListener('abort', () => {
+          reject(new Error('aborted'))
+        }, { once: true })
+      }),
+    })
+
+    await expect(gateway.generate({ ...createInput(), timeoutMs: 1 }))
+      .rejects.toMatchObject({ code: 'AiAssistanceProviderTimeout' })
+  })
+})
