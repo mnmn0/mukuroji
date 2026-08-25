@@ -35,6 +35,7 @@ export function SettingsPage() {
               <AiAssistanceSettingsPanelContainer
                 accessToken={workspace.accessToken}
                 canManagePolicy={workspace.canManageAiAssistance}
+                guardRequest={workspace.guardEnterpriseSession}
                 locale={workspace.locale}
               />
               <WorkspaceAccessPanelContainer

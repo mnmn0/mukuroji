@@ -24,6 +24,8 @@ export type AiAssistanceSettingsPanelContainerProps = {
   canManagePolicy: boolean
   /** Locale used for settings labels. */
   locale: Locale
+  /** Wraps authenticated settings requests so the Workspace session guard sees expiry. */
+  guardRequest?: <Result>(request: Promise<Result>) => Promise<Result>
 }
 
 /** Editable server value pinned to the revision from which it was derived. */
@@ -43,13 +45,15 @@ type RevisionedAiSettingsDraft<Value> = {
 export function AiAssistanceSettingsPanelContainer({
   accessToken,
   canManagePolicy,
+  guardRequest,
   locale,
 }: AiAssistanceSettingsPanelContainerProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
-  const preferenceQuery = useAiAssistancePreference(accessToken)
-  const policyQuery = useAiAssistancePolicy(accessToken, canManagePolicy)
+  const preferenceQuery = useAiAssistancePreference(accessToken, true, guardRequest)
+  const policyQuery = useAiAssistancePolicy(accessToken, canManagePolicy, guardRequest)
   const mutations = useAiAssistanceSettingsMutations({
     accessToken,
+    guardRequest,
     mutatePolicy: policyQuery.mutate,
     mutatePreference: preferenceQuery.mutate,
   })

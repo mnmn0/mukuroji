@@ -112,7 +112,8 @@ function isAiAssistanceDraft(value: unknown): value is AiAssistanceDraft {
         isOptionalSuggested(value.teamId, isString) &&
         isOptionalSuggested(value.projectId, isString) &&
         Array.isArray(value.customFields) &&
-        value.customFields.every(isSuggestedCustomField)
+        value.customFields.every(isSuggestedCustomField) &&
+        hasUniqueSuggestedCustomFieldIds(value.customFields)
     case 'summary':
       if (
         !isBriefItem(value.overview) ||
@@ -266,6 +267,18 @@ function isSuggestedCustomField(value: unknown): boolean {
     isSuggestedValue(value, isCustomFieldValue)
 }
 
+/** Rejects duplicate triage custom-field suggestions before keyed review rendering. */
+function hasUniqueSuggestedCustomFieldIds(items: readonly unknown[]): boolean {
+  const fieldIds = new Set<string>()
+  for (const item of items) {
+    if (!isRecord(item) || !isNonEmptyString(item.fieldId) || fieldIds.has(item.fieldId)) {
+      return false
+    }
+    fieldIds.add(item.fieldId)
+  }
+  return true
+}
+
 /** Validates one grounded brief item. */
 function isBriefItem(value: unknown): boolean {
   return isRecord(value) &&
@@ -339,13 +352,20 @@ function isCalendarDate(value: unknown): value is string {
 
 /** Validates an optional array of custom-field filters. */
 function isOptionalCustomFieldArray(value: unknown): boolean {
-  return value === undefined || (
-    Array.isArray(value) && value.every((filter) =>
-      isRecord(filter) &&
-      isNonEmptyString(filter.fieldId) &&
-      isOneOf(filter.operator, customFieldOperatorValues) &&
-      (filter.value === undefined || isCustomFieldValue(filter.value)))
-  )
+  if (value === undefined) return true
+  if (!Array.isArray(value)) return false
+  for (const filter of value) {
+    if (
+      !isRecord(filter) ||
+      !isNonEmptyString(filter.fieldId) ||
+      !isOneOf(filter.operator, customFieldOperatorValues) ||
+      (filter.value === undefined &&
+        filter.operator !== 'is-empty' &&
+        filter.operator !== 'is-not-empty') ||
+      (filter.value !== undefined && !isCustomFieldValue(filter.value))
+    ) return false
+  }
+  return true
 }
 
 /** Validates the optional count report preview. */

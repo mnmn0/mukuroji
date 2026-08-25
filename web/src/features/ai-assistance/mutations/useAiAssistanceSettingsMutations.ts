@@ -27,6 +27,8 @@ export type UseAiAssistanceSettingsMutationsOptions = {
   mutatePolicy: KeyedMutator<AiAssistancePolicy>
   /** Replaces or revalidates the active member's preference cache. */
   mutatePreference: KeyedMutator<AiAssistancePreference>
+  /** Wraps authenticated saves so the owning route can handle session expiry. */
+  guardRequest?: <Result>(request: Promise<Result>) => Promise<Result>
 }
 
 /** Explicit revision-fenced save actions and scoped feedback for AI settings. */
@@ -57,6 +59,7 @@ export type AiAssistanceSettingsMutations = {
  */
 export function useAiAssistanceSettingsMutations({
   accessToken,
+  guardRequest,
   mutatePolicy,
   mutatePreference,
 }: UseAiAssistanceSettingsMutationsOptions): AiAssistanceSettingsMutations {
@@ -84,7 +87,7 @@ export function useAiAssistanceSettingsMutations({
         accessToken,
         JSON.stringify(input),
       )
-      const preference = await mutationRunner.run(
+      const request = mutationRunner.run(
         'ai-assistance:preference',
         fingerprint,
         (mutationContext) => updateAiAssistancePreference(
@@ -93,6 +96,7 @@ export function useAiAssistanceSettingsMutations({
           mutationContext,
         ),
       )
+      const preference = await (guardRequest ? guardRequest(request) : request)
       await mutatePreference(preference, { revalidate: false })
       setPreferenceFeedback('saved')
       return true
@@ -108,7 +112,7 @@ export function useAiAssistanceSettingsMutations({
       preferenceSavingRef.current = false
       setIsPreferenceSaving(false)
     }
-  }, [accessToken, mutatePreference, mutationRunner])
+  }, [accessToken, guardRequest, mutatePreference, mutationRunner])
 
   const savePolicy = useCallback(async (
     input: UpdateAiAssistancePolicyRequest,
@@ -122,7 +126,7 @@ export function useAiAssistanceSettingsMutations({
         accessToken,
         JSON.stringify(input),
       )
-      const policy = await mutationRunner.run(
+      const request = mutationRunner.run(
         'ai-assistance:policy',
         fingerprint,
         (mutationContext) => updateAiAssistancePolicy(
@@ -131,6 +135,7 @@ export function useAiAssistanceSettingsMutations({
           mutationContext,
         ),
       )
+      const policy = await (guardRequest ? guardRequest(request) : request)
       await mutatePolicy(policy, { revalidate: false })
       setPolicyFeedback('saved')
       return true
@@ -146,7 +151,7 @@ export function useAiAssistanceSettingsMutations({
       policySavingRef.current = false
       setIsPolicySaving(false)
     }
-  }, [accessToken, mutatePolicy, mutationRunner])
+  }, [accessToken, guardRequest, mutatePolicy, mutationRunner])
 
   return {
     clearPolicyFeedback: () => setPolicyFeedback(undefined),

@@ -13,6 +13,7 @@ import {
   aiPlanningGenerationFixture,
   aiSearchGenerationFixture,
   aiSummaryGenerationFixture,
+  aiTriageGenerationFixture,
 } from '../src/features/ai-assistance/fixtures'
 
 const originalFetch = globalThis.fetch
@@ -208,6 +209,35 @@ describe('AI assistance API', () => {
     }
   })
 
+  test('rejects value-less Search custom-field comparisons before review', async () => {
+    const content = aiSearchGenerationFixture.content
+    if (content.availability !== 'available' || content.draft.kind !== 'search') {
+      throw new Error('Search fixture must stay available.')
+    }
+
+    installFetchRecorder([{
+      ...aiSearchGenerationFixture,
+      content: {
+        ...content,
+        draft: {
+          ...content.draft,
+          filters: {
+            ...content.draft.filters,
+            customFields: [{ fieldId: 'risk', operator: 'equals' }],
+          },
+        },
+      },
+    }])
+
+    const error = await generateAiAssistance({
+      accessToken: 'access-token',
+      input: { locale: 'en', query: 'risk', task: 'search' },
+      mutationContext,
+    }).catch((caught: unknown) => caught)
+
+    expect(error).toMatchObject({ code: 'InvalidAiAssistanceResponse', status: 502 })
+  })
+
   test('rejects duplicate planning row identifiers at the browser API boundary', async () => {
     const content = aiPlanningGenerationFixture.content
     installFetchRecorder([{
@@ -233,6 +263,47 @@ describe('AI assistance API', () => {
         },
         task: 'planning',
       },
+      mutationContext,
+    }).catch((caught: unknown) => caught)
+
+    expect(error).toMatchObject({ code: 'InvalidAiAssistanceResponse', status: 502 })
+  })
+
+  test('rejects duplicate triage custom-field suggestions at the browser API boundary', async () => {
+    const content = aiTriageGenerationFixture.content
+    if (content.availability !== 'available' || content.draft.kind !== 'triage') {
+      throw new Error('Triage fixture must stay available.')
+    }
+
+    installFetchRecorder([{
+      ...aiTriageGenerationFixture,
+      content: {
+        ...content,
+        draft: {
+          ...content.draft,
+          customFields: [
+            {
+              fieldId: 'risk',
+              value: 'high',
+              reason: 'First suggestion',
+              confidence: 'high',
+              citationIds: ['citation-triage-1'],
+            },
+            {
+              fieldId: 'risk',
+              value: 'medium',
+              reason: 'Duplicate suggestion',
+              confidence: 'low',
+              citationIds: ['citation-triage-1'],
+            },
+          ],
+        },
+      },
+    }])
+
+    const error = await generateAiAssistance({
+      accessToken: 'access-token',
+      input: { locale: 'en', query: 'triage', task: 'triage' },
       mutationContext,
     }).catch((caught: unknown) => caught)
 

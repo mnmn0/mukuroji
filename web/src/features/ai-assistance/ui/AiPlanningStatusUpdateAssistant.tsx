@@ -142,10 +142,12 @@ export function AiPlanningStatusUpdateAssistantView({
   requireAdoptionConfirmation = false,
   t,
 }: AiPlanningStatusUpdateAssistantViewProps) {
-  const [isAdoptionConfirmationVisible, setIsAdoptionConfirmationVisible] = useState(false)
+  const [confirmationGenerationId, setConfirmationGenerationId] = useState<string>()
   const availableDraft = getAvailableAiPlanningDraft(generation)
   const hasInvalidAvailableDraft = generation?.content.availability === 'available' && !availableDraft
   const isOperationPending = isGenerating || isDecisionPending || isFeedbackPending
+  const isAdoptionConfirmationVisible = confirmationGenerationId !== undefined &&
+    confirmationGenerationId === generation?.id
 
   /** Approves the current draft only after any manual-replacement confirmation. */
   const approveAndAdopt = async (replacementConfirmed = false) => {
@@ -155,14 +157,14 @@ export function AiPlanningStatusUpdateAssistantView({
       onAdopt,
       replacementConfirmed,
     )
-    if (adopted) setIsAdoptionConfirmationVisible(false)
+    if (adopted) setConfirmationGenerationId(undefined)
   }
 
   /** Opens replacement confirmation before recording an approval decision. */
   const adoptDraft = () => {
     if (isOperationPending) return
-    if (requireAdoptionConfirmation) {
-      setIsAdoptionConfirmationVisible(true)
+    if (requireAdoptionConfirmation && generation?.id !== undefined) {
+      setConfirmationGenerationId(generation.id)
       return
     }
     void approveAndAdopt()
@@ -248,7 +250,7 @@ export function AiPlanningStatusUpdateAssistantView({
           <div className="mt-3 flex flex-wrap gap-2">
             <button
               className="workbench-button-secondary min-h-[44px] px-4"
-              onClick={() => setIsAdoptionConfirmationVisible(false)}
+              onClick={() => setConfirmationGenerationId(undefined)}
               type="button"
             >
               {t('ai.planning.keepManualDraft')}
