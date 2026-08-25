@@ -707,6 +707,7 @@ export function PlanningStatusUpdateComposer({
   const [formError, setFormError] = useState<string | undefined>()
   const [isPublishing, setIsPublishing] = useState(false)
   const isFormDirtyRef = useRef(false)
+  const [isFormDirty, setIsFormDirty] = useState(false)
   const [pendingAiDraft, setPendingAiDraft] =
     useState<PendingAiPlanningDraft>()
   const [formSeed, setFormSeed] = useState<PlanningStatusUpdateFormSeed>({
@@ -732,6 +733,7 @@ export function PlanningStatusUpdateComposer({
     setEvidenceType(initialEvidenceType)
     setFormError(undefined)
     isFormDirtyRef.current = false
+    setIsFormDirty(false)
     setPendingAiDraft(undefined)
     setFormSeed((current) => ({
       draft,
@@ -748,8 +750,13 @@ export function PlanningStatusUpdateComposer({
   function adoptAiDraft(
     draft: AiPlanningStatusUpdateDraft,
     sessionKey: string,
+    replacementConfirmed = false,
   ) {
     if (activeAiAssistantSessionKeyRef.current !== sessionKey) return
+    if (replacementConfirmed) {
+      applyAiDraft(draft)
+      return
+    }
     routeAiPlanningDraftAdoption(draft, isFormDirtyRef.current, {
       apply: applyAiDraft,
       confirm: (nextDraft) => setPendingAiDraft({
@@ -773,7 +780,12 @@ export function PlanningStatusUpdateComposer({
             accessToken={aiAssistance.accessToken}
             key={aiAssistantSessionKey}
             locale={aiAssistance.locale}
-            onAdopt={(draft) => adoptAiDraft(draft, aiAssistantSessionKey)}
+            onAdopt={(draft, replacementConfirmed) => adoptAiDraft(
+              draft,
+              aiAssistantSessionKey,
+              replacementConfirmed,
+            )}
+            requireAdoptionConfirmation={isFormDirty}
             source={aiAssistance.source}
             t={aiT}
           />
@@ -819,6 +831,7 @@ export function PlanningStatusUpdateComposer({
         noValidate
         onChange={() => {
           isFormDirtyRef.current = true
+          setIsFormDirty(true)
         }}
         onSubmit={(event) => {
           event.preventDefault()

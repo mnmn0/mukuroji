@@ -7137,6 +7137,7 @@ test.describe('authenticated task page', () => {
     await page.goto('/projects/refero/issues?teamId=core-team&issueId=wireframe')
     const panel = page.getByTestId('issue-collaboration-panel')
     const conversationTab = panel.getByRole('tab', { name: /会話/ })
+    const briefTab = panel.getByRole('tab', { name: /Brief/ })
     const decisionsTab = panel.getByRole('tab', { name: /判断/ })
     const sourcesTab = panel.getByRole('tab', { name: /情報源/ })
     const collaborationTablist = panel.getByRole('tablist', {
@@ -7162,6 +7163,10 @@ test.describe('authenticated task page', () => {
     )
     await conversationTab.focus()
     await page.keyboard.press('ArrowRight')
+    if (await briefTab.count()) {
+      await expect(briefTab).toBeFocused()
+      await page.keyboard.press('ArrowRight')
+    }
     await expect(decisionsTab).toBeFocused()
     await expect(decisionsTab).toHaveAttribute('aria-selected', 'true')
     await expect(panel.getByText('モバイルでは操作を固定フッターへ置く')).toBeVisible()

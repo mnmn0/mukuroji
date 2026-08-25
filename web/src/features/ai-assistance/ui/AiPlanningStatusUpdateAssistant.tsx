@@ -5,7 +5,7 @@ import type {
   AiPlanningTargetSource,
   CreateAiAssistanceFeedbackRequest,
 } from '@mukuroji/contracts'
-import type { FormEvent } from 'react'
+import { useState, type FormEvent } from 'react'
 import type { Locale, MessageKey } from '../../../shared/i18n/i18n'
 import { isReviewableAiAssistanceGeneration } from '../model/aiGenerationValidation'
 import {
@@ -24,7 +24,12 @@ export type AiPlanningStatusUpdateAssistantProps = {
   /** Locale sent to Bedrock and used for generation metadata. */
   locale: Locale
   /** Copies an approved status update into the existing manual composer only. */
-  onAdopt: (draft: AiPlanningStatusUpdateDraft) => void | Promise<void>
+  onAdopt: (
+    draft: AiPlanningStatusUpdateDraft,
+    replacementConfirmed?: boolean,
+  ) => void | Promise<void>
+  /** Whether adopting the draft would replace manual form edits. */
+  requireAdoptionConfirmation?: boolean
   /** Planning target reference resolved and re-authorized by the server. */
   source: AiPlanningTargetSource
   /** Localized message resolver. */
@@ -42,6 +47,7 @@ export function AiPlanningStatusUpdateAssistant({
   guidance,
   locale,
   onAdopt,
+  requireAdoptionConfirmation,
   source,
   t,
 }: AiPlanningStatusUpdateAssistantProps) {
@@ -67,6 +73,7 @@ export function AiPlanningStatusUpdateAssistant({
         source,
         task: 'planning',
       })}
+      requireAdoptionConfirmation={requireAdoptionConfirmation}
       t={t}
     />
   )
@@ -91,7 +98,10 @@ export type AiPlanningStatusUpdateAssistantViewProps = {
   /** Locale used for generation metadata and planning values. */
   locale: Locale
   /** Copies an approved status update into the existing manual composer only. */
-  onAdopt: (draft: AiPlanningStatusUpdateDraft) => void | Promise<void>
+  onAdopt: (
+    draft: AiPlanningStatusUpdateDraft,
+    replacementConfirmed?: boolean,
+  ) => void | Promise<void>
   /** Cancels the active explicit generation request. */
   onCancelGeneration?: () => void
   /** Records approval or rejection without publishing a status update. */
@@ -100,6 +110,8 @@ export type AiPlanningStatusUpdateAssistantViewProps = {
   onFeedback?: (rating: CreateAiAssistanceFeedbackRequest['rating']) => void | Promise<void>
   /** Runs a generation only after explicit form submission. */
   onGenerate: () => void | Promise<unknown>
+  /** Whether adoption must confirm replacement of manual form edits first. */
+  requireAdoptionConfirmation?: boolean
   /** Localized message resolver. */
   t: (key: MessageKey) => string
 }
@@ -124,11 +136,34 @@ export function AiPlanningStatusUpdateAssistantView({
   onDecide,
   onFeedback,
   onGenerate,
+  requireAdoptionConfirmation = false,
   t,
 }: AiPlanningStatusUpdateAssistantViewProps) {
+  const [isAdoptionConfirmationVisible, setIsAdoptionConfirmationVisible] = useState(false)
   const availableDraft = getAvailableAiPlanningDraft(generation)
   const hasInvalidAvailableDraft = generation?.content.availability === 'available' && !availableDraft
   const isOperationPending = isGenerating || isDecisionPending || isFeedbackPending
+
+  /** Approves the current draft only after any manual-replacement confirmation. */
+  const approveAndAdopt = async (replacementConfirmed = false) => {
+    if (isOperationPending) return
+    const adopted = await approveAiPlanningStatusUpdate(
+      onDecide,
+      onAdopt,
+      replacementConfirmed,
+    )
+    if (adopted) setIsAdoptionConfirmationVisible(false)
+  }
+
+  /** Opens replacement confirmation before recording an approval decision. */
+  const adoptDraft = () => {
+    if (isOperationPending) return
+    if (requireAdoptionConfirmation) {
+      setIsAdoptionConfirmationVisible(true)
+      return
+    }
+    void approveAndAdopt()
+  }
 
   /** Generates only in response to an explicit form submission. */
   const handleGenerate = (event: FormEvent<HTMLFormElement>) => {
@@ -175,11 +210,7 @@ export function AiPlanningStatusUpdateAssistantView({
           isDecisionPending={isDecisionPending}
           isFeedbackPending={isFeedbackPending}
           locale={locale}
-          onAdopt={availableDraft?.statusUpdate
-            ? async () => {
-                await approveAiPlanningStatusUpdate(onDecide, onAdopt)
-              }
-            : undefined}
+          onAdopt={availableDraft?.statusUpdate ? adoptDraft : undefined}
           onFeedback={onFeedback}
           onReject={availableDraft
             ? async () => {
@@ -201,6 +232,34 @@ export function AiPlanningStatusUpdateAssistantView({
           t={t}
         />
       )}
+
+      {isAdoptionConfirmationVisible ? (
+        <div
+          className="border-l-2 border-amber-500 bg-amber-50 px-4 py-3 text-amber-950 outline-none focus-visible:ring-2 focus-visible:ring-amber-600"
+          role="alert"
+        >
+          <p className="text-sm font-semibold">{t('ai.planning.replaceDraftTitle')}</p>
+          <p className="mt-1 text-xs font-medium leading-5">
+            {t('ai.planning.replaceDraftDescription')}
+          </p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button
+              className="workbench-button-secondary min-h-[44px] px-4"
+              onClick={() => setIsAdoptionConfirmationVisible(false)}
+              type="button"
+            >
+              {t('ai.planning.keepManualDraft')}
+            </button>
+            <button
+              className="workbench-button-primary min-h-[44px] px-4"
+              onClick={() => void approveAndAdopt(true)}
+              type="button"
+            >
+              {t('ai.planning.replaceManualDraft')}
+            </button>
+          </div>
+        </div>
+      ) : null}
     </div>
   )
 }
@@ -210,16 +269,18 @@ export function AiPlanningStatusUpdateAssistantView({
  *
  * @param onDecide - Revision-fenced approval action.
  * @param onAdopt - Local composer callback that does not publish a status update.
+ * @param replacementConfirmed - Whether the operator confirmed replacing manual edits.
  * @returns Whether an approved, currently available status update was adopted.
  */
 async function approveAiPlanningStatusUpdate(
   onDecide: AiPlanningStatusUpdateAssistantViewProps['onDecide'],
   onAdopt: AiPlanningStatusUpdateAssistantViewProps['onAdopt'],
+  replacementConfirmed: boolean,
 ): Promise<boolean> {
   const reviewedGeneration = await onDecide('approved')
   const draft = getAvailableAiPlanningDraft(reviewedGeneration)?.statusUpdate
   if (reviewedGeneration?.decision?.outcome !== 'approved' || !draft) return false
-  await onAdopt(draft)
+  await onAdopt(draft, replacementConfirmed)
   return true
 }
 

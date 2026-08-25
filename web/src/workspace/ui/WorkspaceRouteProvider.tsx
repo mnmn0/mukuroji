@@ -117,6 +117,8 @@ export type WorkspaceRouteContextValue = {
   inboxCount: number
   /** Whether the current user may create or archive workspace structure. */
   canManageWorkspaceConfiguration: boolean
+  /** Whether the current user may manage Workspace AI assistance policy. */
+  canManageAiAssistance: boolean
   /** Whether the current user may perform team-scoped content mutations. */
   canMutateTeamConfiguration: boolean
   /** Whether route-specific workspace queries may load authenticated data. */
@@ -266,6 +268,7 @@ export function WorkspaceRouteProvider() {
   const userInitial = userLabel.trim().charAt(0).toUpperCase() || 'M'
   const canLoadWorkspaceData = Boolean(user && !currentUserError)
   const canManageWorkspaceConfiguration = canManageWorkspaceStructure(user)
+  const canManageAiAssistance = user?.canManageAiAssistance ?? canManageWorkspaceConfiguration
   const canMutateTeamConfiguration = canMutateWorkspaceContent(user)
   const hasQuickAccessLoadError = Boolean(quickAccessError)
   const quickAccessProjects = useMemo(
@@ -684,6 +687,7 @@ export function WorkspaceRouteProvider() {
   const contextValue = useMemo<WorkspaceRouteContextValue>(() => ({
     accessToken,
     canLoadWorkspaceData,
+    canManageAiAssistance,
     canManageWorkspaceConfiguration,
     canMutateTeamConfiguration,
     commonErrorKey,
@@ -737,6 +741,7 @@ export function WorkspaceRouteProvider() {
   }), [
     accessToken,
     canLoadWorkspaceData,
+    canManageAiAssistance,
     canManageWorkspaceConfiguration,
     canMutateTeamConfiguration,
     commonErrorKey,

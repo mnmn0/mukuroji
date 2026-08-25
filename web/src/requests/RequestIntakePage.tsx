@@ -98,6 +98,7 @@ export function RequestIntakePage() {
     locale,
   })
   const canManageForms = canManageWorkspaceStructure(user)
+  const canUseAiAssistance = user?.canManageAiAssistance ?? canManageForms
   const activeView: RequestsView = requestedView === 'forms' && canManageForms
     ? 'forms'
     : 'queue'
@@ -301,7 +302,7 @@ export function RequestIntakePage() {
             {activeView === 'queue' ? (
               <RequestQueue
                 accessToken={accessToken}
-                canUseAiAssistance={canManageForms}
+                canUseAiAssistance={canUseAiAssistance}
                 errorMessage={actionErrorMessage ?? (queueError instanceof Error ? queueError.message : detailError instanceof Error ? detailError.message : undefined)}
                 isLoading={isQueueLoading}
                 hasMore={Boolean(nextQueueCursor)}
