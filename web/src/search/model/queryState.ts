@@ -27,6 +27,10 @@ export type SearchRouteState = {
    */
   savedViewId?: string
   /**
+   * Approved bounded result summary rendered from the currently loaded Search results.
+   */
+  reportMetric?: 'count'
+  /**
    * URL schema を移行したときに利用者へ知らせる警告です。
    */
   migrationWarnings: string[]
@@ -113,6 +117,7 @@ export function parseSearchRouteState(searchParams: URLSearchParams): SearchRout
     filters,
     layout,
     migrationWarnings,
+    reportMetric: readEnumValue(searchParams.get('report'), ['count'] as const),
     savedViewId: readOptionalValue(searchParams, 'view'),
   }
 }
@@ -171,6 +176,7 @@ export function serializeSearchRouteState(state: SearchRouteState) {
     searchParams.set('columns', columns.join(','))
   }
   setOptionalValue(searchParams, 'view', state.savedViewId)
+  setOptionalValue(searchParams, 'report', state.reportMetric)
 
   searchParams.sort()
   return searchParams
@@ -194,11 +200,16 @@ export function updateSearchRouteState(
      * 置き換える saved view ID です。
      */
     savedViewId?: string
+    /**
+     * Replaces the approved bounded result summary mode.
+     */
+    reportMetric?: 'count'
   },
 ): SearchRouteState {
   return {
     ...state,
     ...next,
+    reportMetric: Object.hasOwn(next, 'reportMetric') ? next.reportMetric : state.reportMetric,
     savedViewId: Object.hasOwn(next, 'savedViewId') ? next.savedViewId : state.savedViewId,
   }
 }

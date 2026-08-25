@@ -1,4 +1,5 @@
 import { useRef } from 'react'
+import type { AiAssistanceController } from '../../features/ai-assistance/mutations/useAiAssistanceController'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import { ShieldIcon } from '../../shared/ui/icons'
 import type {
@@ -21,6 +22,12 @@ import { TriageSettingsPanel } from './TriageSettingsPanel'
 
 /** Props accepted by the complete Team triage workbench. */
 export type TriageWorkbenchProps = {
+  /** Active Workspace member bearer token used only for explicit AI generation. */
+  readonly accessToken?: string
+  /** Optional AI controller override for isolated interaction stories. */
+  readonly aiAssistanceController?: AiAssistanceController
+  /** Team route identifier used for permission-scoped generation references. */
+  readonly teamId: string
   /** Permission-safe bulk operation kinds enabled for the Team queue. */
   readonly allowedBulkActions: readonly TriageBulkOperation['action'][]
   /** Team display name shown in the surface label. */
@@ -119,7 +126,9 @@ export type TriageWorkbenchProps = {
  * @returns Team triage workbench inside the shared Workspace shell.
  */
 export function TriageWorkbench({
+  accessToken,
   allowedBulkActions,
+  aiAssistanceController,
   bulkResults = [],
   canManageConfiguration,
   configuration,
@@ -159,6 +168,7 @@ export function TriageWorkbench({
   selectedEntry,
   selectedEntryIds,
   t,
+  teamId,
   teamName,
 }: TriageWorkbenchProps) {
   const queueRegion = useRef<HTMLDivElement>(null)
@@ -258,6 +268,8 @@ export function TriageWorkbench({
               </div>
               <div className={explicitEntryId ? '' : 'max-[860px]:hidden'}>
                 <TriageEntryDetail
+                  accessToken={accessToken}
+                  aiAssistanceController={aiAssistanceController}
                   errorMessage={detailErrorMessage}
                   isLoading={isDetailLoading}
                   isPending={pendingEntryId === selectedEntry?.entry.id}
@@ -268,6 +280,7 @@ export function TriageWorkbench({
                   onBack={onBackToQueue}
                   onRetry={onRetryDetail}
                   t={t}
+                  teamId={teamId}
                   view={selectedEntry}
                 />
               </div>

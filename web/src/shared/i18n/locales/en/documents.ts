@@ -180,6 +180,7 @@ export const documentsMessages = {
   'documents.context.backlinks': 'Related',
   'documents.context.versions': 'History',
   'documents.context.activity': 'Activity',
+  'documents.context.brief': 'Brief',
   'documents.comments.anchor': 'Target',
   'documents.comments.pageAnchor': 'Whole page',
   'documents.comments.body': 'Comment',

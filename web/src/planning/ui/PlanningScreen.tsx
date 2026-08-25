@@ -19,7 +19,7 @@ import type {
 } from '@mukuroji/contracts'
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import type { ProjectDirectoryTeam } from '../../projects/api'
-import type { MessageKey } from '../../shared/i18n/i18n'
+import type { Locale, MessageKey } from '../../shared/i18n/i18n'
 import type { WorkItemDependencyCreateDraft } from '../../work-items/model/workItemDependencies'
 import { WorkItemDependencyPanel } from '../../work-items/ui/WorkItemDependencyPanel'
 import {
@@ -57,6 +57,7 @@ import {
   PlanningUpdateDetailPane,
   PlanningUpdateFreshnessBadge,
   type PlanningUpdateLabels,
+  type PlanningStatusUpdateAiAssistance,
 } from './PlanningUpdatePrimitives'
 
 /**
@@ -257,6 +258,8 @@ export type PlanningLabels = PlanningUpdateLabels & {
  * PlanningScreen の入力です。
  */
 export type PlanningScreenProps = {
+  /** Optional AI generation access; target identity and revision are derived from the visible snapshot. */
+  aiAssistance?: PlanningScreenAiAssistance
   /** 現在表示している Planning view です。 */
   activeView: PlanningViewId
   /** 画面で使う locale 済み文言です。 */
@@ -392,6 +395,14 @@ export type PlanningScreenProps = {
   onOpenMilestone?: (milestoneId: string) => void
 }
 
+/** Authentication and locale used to derive a selected target's AI source. */
+export type PlanningScreenAiAssistance = {
+  /** Active Workspace member bearer token. */
+  accessToken: string
+  /** Locale sent to Bedrock and used for draft presentation. */
+  locale: Locale
+}
+
 const timelineEntityTypes = new Set<PlanningEntityType>([
   'cycle',
   'milestone',
@@ -406,6 +417,7 @@ const planningViews: readonly PlanningViewId[] = ['timeline', 'roadmap', 'portfo
 export function PlanningScreen({
   accessErrorMessage,
   activeView,
+  aiAssistance,
   canCreateInScope,
   canLinkEntity,
   canManageUpdateCadence,
@@ -486,6 +498,21 @@ export function PlanningScreen({
   const selectedUpdateEvidenceCandidates = snapshot && resolvedSelectedUpdateTarget
     ? createPlanningUpdateEvidenceCandidates(snapshot, resolvedSelectedUpdateTarget)
     : undefined
+  const canPublishSelectedUpdate = resolvedSelectedUpdateTarget
+    ? canPublishUpdate?.(resolvedSelectedUpdateTarget) ?? true
+    : false
+  const selectedAiAssistance: PlanningStatusUpdateAiAssistance | undefined =
+    aiAssistance && snapshot && resolvedSelectedUpdateTarget && onPublishUpdate && canPublishSelectedUpdate
+      ? {
+          accessToken: aiAssistance.accessToken,
+          locale: aiAssistance.locale,
+          source: {
+            expectedRevision: snapshot.revision,
+            target: resolvedSelectedUpdateTarget,
+            type: 'planning-target',
+          },
+        }
+      : undefined
 
   /** Selects a planning row and forwards its Project or Initiative update target. */
   const handleSelectEntity = (entityId: string) => {
@@ -662,6 +689,7 @@ export function PlanningScreen({
             </div>
             {selectedUpdateSummary && selectedUpdateView && resolvedSelectedUpdateTarget ? (
               <PlanningUpdateDetailPane
+                aiAssistance={selectedAiAssistance}
                 evidenceCandidates={selectedUpdateEvidenceCandidates}
                 key={createPlanningUpdateTargetKey(resolvedSelectedUpdateTarget)}
                 labels={labels}
@@ -673,7 +701,7 @@ export function PlanningScreen({
                 isHistoryLoading={isUpdateHistoryLoading}
                 isLoadingMoreHistory={isLoadingMoreUpdateHistory}
                 onLoadMoreHistory={onLoadMoreUpdateHistory}
-                onPublish={onPublishUpdate && (canPublishUpdate?.(resolvedSelectedUpdateTarget) ?? true)
+                onPublish={onPublishUpdate && canPublishSelectedUpdate
                   ? (draft) => onPublishUpdate(resolvedSelectedUpdateTarget, draft)
                   : undefined}
                 onSaveCadence={onSaveUpdateCadence && (canManageUpdateCadence?.(resolvedSelectedUpdateTarget) ?? true)

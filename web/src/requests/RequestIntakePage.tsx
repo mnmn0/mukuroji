@@ -300,6 +300,8 @@ export function RequestIntakePage() {
 
             {activeView === 'queue' ? (
               <RequestQueue
+                accessToken={accessToken}
+                canUseAiAssistance={canManageForms}
                 errorMessage={actionErrorMessage ?? (queueError instanceof Error ? queueError.message : detailError instanceof Error ? detailError.message : undefined)}
                 isLoading={isQueueLoading}
                 hasMore={Boolean(nextQueueCursor)}

@@ -1,4 +1,5 @@
 import type {
+  AiPlanningDraft,
   PlanningSnapshot,
   WorkItemDependencyEndpoint,
   WorkItemConfiguration,
@@ -10,6 +11,8 @@ import type {
 } from '@mukuroji/contracts'
 import { useId, useState } from 'react'
 import { RelatedDocuments } from '../../documents/ui/RelatedDocuments'
+import type { AiAssistanceController } from '../../features/ai-assistance/mutations/useAiAssistanceController'
+import { AiWorkItemPlanningAssistant } from '../../features/ai-assistance/ui/AiWorkItemPlanningAssistant'
 import type { FileArtifactsController } from '../../files/mutations/useFileArtifacts'
 import { IssueArtifactsPanel } from '../../files/ui/IssueArtifactsPanel'
 import type {
@@ -62,6 +65,8 @@ import { TaskPriorityBadge } from './TaskViewPrimitives'
 
 /** Props accepted by the selected task detail pane. */
 export type TaskDetailPaneProps = {
+  /** Optional AI controller override used by isolated stories and interaction tests. */
+  aiAssistanceController?: AiAssistanceController
   /** Determines whether the current user may manage one canonical dependency endpoint. */
   canManageScheduleDependencyEndpoint?: (endpoint: WorkItemDependencyEndpoint) => boolean
   /** Whether the current Workspace member may read Team Triage source links. */
@@ -133,6 +138,24 @@ export type TaskDetailPaneProps = {
   workspaceMembers: WorkspaceMember[]
 }
 
+/** Local Work Item editor defaults copied from one approved Planning draft. */
+type WorkItemAiFormSeed = {
+  /** Approved draft used only as uncontrolled form defaults. */
+  draft?: AiPlanningDraft
+  /** Exact Work Item identity and source revision represented by this seed. */
+  identity: string
+  /** Monotonic key used to remount the supported editor fields. */
+  revision: number
+}
+
+/** Dirty state scoped to one exact Work Item editor revision. */
+type WorkItemEditorDirtyState = {
+  /** Whether an operator changed a local editable field. */
+  dirty: boolean
+  /** Exact Work Item identity and source revision represented by the dirty flag. */
+  identity: string
+}
+
 /**
  * Renders the selected Work Item form, files, relations, documents, and collaboration.
  *
@@ -141,6 +164,7 @@ export type TaskDetailPaneProps = {
  */
 export function TaskDetailPane({
   accessToken,
+  aiAssistanceController,
   assigneeOptions,
   canAccessTriage = false,
   artifacts,
@@ -173,6 +197,14 @@ export function TaskDetailPane({
   workspaceMembers,
 }: TaskDetailPaneProps) {
   const [fieldErrors, setFieldErrors] = useState<Readonly<Record<string, string | undefined>>>({})
+  const [aiFormSeed, setAiFormSeed] = useState<WorkItemAiFormSeed>({
+    identity: '',
+    revision: 0,
+  })
+  const [editorDirtyState, setEditorDirtyState] = useState<WorkItemEditorDirtyState>({
+    dirty: false,
+    identity: '',
+  })
   const documentContextPromotion = useDocumentContextPromotion(
     Boolean(collaboration?.context.capabilities.canCreate),
     `${task?.teamId ?? ''}:${task?.id ?? ''}`,
@@ -270,6 +302,31 @@ export function TaskDetailPane({
   const reverseTriageSources = triageSourcesPages
     ?.flatMap((page) => page.entries)
     .filter((entry) => entry.id !== sourceTriageEntryId) ?? []
+  const editorIdentity = `${task.teamId}:${task.id}:${issue?.revision ?? task.revision}`
+  const activeAiFormSeed = aiFormSeed.identity === editorIdentity ? aiFormSeed : undefined
+  const activeAiDraft = activeAiFormSeed?.draft
+  const seededTitle = activeAiDraft?.title?.value ?? title
+  const seededDescription = activeAiDraft?.description?.value ?? issue?.description ?? ''
+  const seededPriority = activeAiDraft?.priority?.value ?? issue?.priority ?? task.priority
+  const seededWorkflowStatusId = activeAiDraft?.status && workflowStatuses.some(
+    (status) => status.id === activeAiDraft.status?.value,
+  )
+    ? activeAiDraft.status.value
+    : currentWorkflowStatusId
+  const hasApplicableAiWorkflowStatus = Boolean(
+    activeAiDraft?.status && seededWorkflowStatusId === activeAiDraft.status.value,
+  )
+  const isEditorDirty = editorDirtyState.identity === editorIdentity && editorDirtyState.dirty
+
+  /** Copies supported approved fields into a fresh local form seed without saving them. */
+  function applyAiPlanningDraft(draft: AiPlanningDraft) {
+    setEditorDirtyState({ dirty: true, identity: editorIdentity })
+    setAiFormSeed((current) => ({
+      draft,
+      identity: editorIdentity,
+      revision: current.revision + 1,
+    }))
+  }
 
   return (
     <aside
@@ -279,6 +336,7 @@ export function TaskDetailPane({
       <form
         className="grid min-w-0 gap-4 border-b border-[var(--workbench-border)] bg-white px-5 py-4"
         key={`${task.teamId}:${task.id}:${issue?.revision ?? 'loading'}`}
+        onChange={() => setEditorDirtyState({ dirty: true, identity: editorIdentity })}
         onSubmit={(event) => {
           event.preventDefault()
 
@@ -433,12 +491,38 @@ export function TaskDetailPane({
             ) : null}
           </div>
         </div>
-        <fieldset className="contents" disabled={isReadOnly}>
+        {(accessToken || aiAssistanceController) && task.teamId ? (
+          <AiWorkItemPlanningAssistant
+            accessToken={accessToken}
+            controller={aiAssistanceController}
+            key={editorIdentity}
+            locale={locale}
+            onAdopt={isReadOnly ? undefined : applyAiPlanningDraft}
+            resolveStatusLabel={(statusId) =>
+              workflowStatuses.find((status) => status.id === statusId)?.name ?? statusId}
+            resolveWorkItemLabel={(endpoint) => planningSnapshot?.workItems.find(
+              (workItem) => workItem.teamId === endpoint.teamId && workItem.id === endpoint.workItemId,
+            )?.title ?? `${endpoint.teamId} / ${endpoint.workItemId}`}
+            source={{
+              expectedRevision: issue?.revision ?? task.revision,
+              teamId: task.teamId,
+              type: 'work-item',
+              workItemId: task.id,
+            }}
+            requireAdoptionConfirmation={isEditorDirty}
+            t={t}
+          />
+        ) : null}
+        <fieldset
+          className="contents"
+          disabled={isReadOnly}
+        >
           <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
             {t('issues.column.title')}
             <input
               className="workbench-input w-full min-w-0 px-3 py-2 text-base font-semibold disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
-              defaultValue={title}
+              defaultValue={seededTitle}
+              key={`title:${editorIdentity}:${activeAiDraft?.title ? activeAiFormSeed?.revision ?? 0 : 0}`}
               name="title"
               required
             />
@@ -447,7 +531,8 @@ export function TaskDetailPane({
             {t('tasks.detail.description')}
             <textarea
               className="workbench-input min-h-24 w-full min-w-0 px-3 py-2 leading-6 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
-              defaultValue={issue?.description ?? ''}
+              defaultValue={seededDescription}
+              key={`description:${editorIdentity}:${activeAiDraft?.description ? activeAiFormSeed?.revision ?? 0 : 0}`}
               name="description"
             />
           </label>
@@ -488,7 +573,8 @@ export function TaskDetailPane({
               {t('tasks.column.status')}
               <select
                 className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
-                defaultValue={currentWorkflowStatusId}
+                defaultValue={seededWorkflowStatusId}
+                key={`status:${editorIdentity}:${hasApplicableAiWorkflowStatus ? activeAiFormSeed?.revision ?? 0 : 0}`}
                 name="workflowStatusId"
               >
                 {workflowStatuses.map((status) => (
@@ -500,7 +586,8 @@ export function TaskDetailPane({
               {t('tasks.column.priority')}
               <select
                 className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
-                defaultValue={issue?.priority ?? task.priority}
+                defaultValue={seededPriority}
+                key={`priority:${editorIdentity}:${activeAiDraft?.priority ? activeAiFormSeed?.revision ?? 0 : 0}`}
                 name="priority"
               >
                 {taskPriorities.map((priority) => (
@@ -581,7 +668,7 @@ export function TaskDetailPane({
               </p>
             ) : null}
             <button
-              className="workbench-button-secondary h-9 px-3 disabled:border-slate-300 disabled:bg-slate-300"
+              className="workbench-button-secondary min-h-[44px] px-3 disabled:border-slate-300 disabled:bg-slate-300"
               disabled={isReadOnly}
               form={scheduleFormId}
               type="submit"
@@ -603,7 +690,7 @@ export function TaskDetailPane({
           ) : null}
         </fieldset>
         <button
-          className="workbench-button-primary h-10 px-4 disabled:border-slate-300 disabled:bg-slate-300"
+          className="workbench-button-primary min-h-[44px] px-4 disabled:border-slate-300 disabled:bg-slate-300"
           disabled={isReadOnly}
           type="submit"
         >
@@ -694,6 +781,17 @@ export function TaskDetailPane({
       />
       {collaboration ? (
         <IssueCollaborationPanel
+          aiAssistance={accessToken && task.teamId
+            ? {
+                accessToken,
+                source: {
+                  expectedRevision: issue?.revision ?? task.revision,
+                  teamId: task.teamId,
+                  type: 'work-item',
+                  workItemId: task.id,
+                },
+              }
+            : undefined}
           route={collaborationRoute}
           artifacts={artifacts}
           contextDraft={documentContextPromotion.documentContextDraft}

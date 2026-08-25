@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { planningSnapshotFixture } from '../src/planning/fixtures'
+import { aiPlanningGenerationFixture } from '../src/features/ai-assistance/fixtures'
 import {
   isValidPlanningDateTime,
   readNonNegativeNumber,
@@ -18,6 +19,31 @@ import { createPlanningLabels } from '../src/planning/ui/labels'
 const labels = createPlanningLabels('en')
 
 describe('Planning update evidence composer', () => {
+  test('prefills an adopted AI status update without publishing it', () => {
+    const content = aiPlanningGenerationFixture.content
+    if (content.availability !== 'available' || content.draft.kind !== 'planning') {
+      throw new Error('Planning fixture must stay available.')
+    }
+    const statusUpdate = content.draft.statusUpdate
+    if (!statusUpdate) throw new Error('Planning fixture must include a status update.')
+    let publishCount = 0
+    const html = renderToStaticMarkup(
+      <PlanningStatusUpdateComposer
+        health="on-track"
+        initialDraft={statusUpdate}
+        labels={labels}
+        onPublish={() => { publishCount += 1 }}
+        progress={40}
+      />,
+    )
+
+    expect(html).toContain('value="at-risk" selected=""')
+    expect(html).toContain('value="medium" selected=""')
+    expect(html).toContain(statusUpdate.summary)
+    expect(html).toContain(statusUpdate.nextAction)
+    expect(publishCount).toBe(0)
+  })
+
   test('requires an explicit timezone offset for cadence deadlines', () => {
     expect(isValidPlanningDateTime('2026-03-01T15:00:00')).toBe(false)
     expect(isValidPlanningDateTime('2026-03-01T15:00:00.000Z')).toBe(true)

@@ -1,5 +1,18 @@
-import { useId, useMemo, useState, type KeyboardEvent } from 'react'
-import type { CuratedContextSource } from '@mukuroji/contracts'
+import {
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+} from 'react'
+import type {
+  AiSummaryDraft,
+  AiWorkItemSource,
+  CuratedContextSource,
+} from '@mukuroji/contracts'
+import { createAiAssistantSessionKey } from '../../features/ai-assistance/model/assistantSessionKey'
+import { AiSummaryAssistant } from '../../features/ai-assistance/ui/AiSummaryAssistant'
 import type { FileArtifactsController } from '../../files/mutations/useFileArtifacts'
 import { createTranslator, type Locale, type MessageKey } from '../../shared/i18n/i18n'
 import { WatchIcon } from '../../shared/ui/icons'
@@ -26,10 +39,20 @@ import { IssueConversationTab } from './IssueConversationTab'
 import { IssueDecisionsTab } from './IssueDecisionsTab'
 import { IssueSourcesTab } from './IssueSourcesTab'
 
+/** Authentication and revision-fenced source for an optional Work Item brief. */
+export type IssueSummaryAiAssistance = {
+  /** Active Workspace member bearer token. */
+  accessToken: string
+  /** Work Item reference resolved and re-authorized by the server. */
+  source: AiWorkItemSource
+}
+
 /**
  * Props for the Work Item collaboration panel.
  */
 export type IssueCollaborationPanelProps = {
+  /** Optional AI summary access; omission removes the Brief tab and its source from markup. */
+  aiAssistance?: IssueSummaryAiAssistance
   /** Locale used for all collaboration messages. */
   locale: Locale
   /** Workspace members used for mentions, actors, and presence. */
@@ -65,6 +88,7 @@ export type IssueCollaborationPanelProps = {
  * @returns The collaboration panel.
  */
 export function IssueCollaborationPanel({
+  aiAssistance,
   artifacts,
   className = '',
   contextDraft: externalContextDraft,
@@ -87,9 +111,19 @@ export function IssueCollaborationPanel({
   const [hasOverriddenDraftTab, setHasOverriddenDraftTab] = useState(false)
   const contextDraft = externalContextDraft ?? promotedContextDraft
   const panelIdPrefix = useId()
-  const selectedTab = contextDraft && !hasOverriddenDraftTab
+  const aiAssistantSessionKey = aiAssistance
+    ? createAiAssistantSessionKey(aiAssistance.source)
+    : undefined
+  const activeAiAssistantSessionKeyRef = useRef(aiAssistantSessionKey)
+  const visibleTabs = aiAssistance
+    ? [...issueCollaborationTabs]
+    : issueCollaborationTabs.filter((tab) => tab !== 'brief')
+  const requestedTab = contextDraft && !hasOverriddenDraftTab
     ? 'decisions'
     : route?.collaborationTab ?? uncontrolledTab
+  const selectedTab = requestedTab === 'brief' && !aiAssistance
+    ? 'conversation'
+    : requestedTab
   const uniquePresence = useMemo(
     () =>
       Array.from(
@@ -107,6 +141,7 @@ export function IssueCollaborationPanel({
   ).length
   const tabCounts: Record<IssueCollaborationTab, number> = {
     activity: controller.activity.length,
+    brief: 0,
     conversation: threadCount,
     decisions: controller.context.items.length,
     sources: createIssueSourceEntries(controller.context.items).length,
@@ -119,6 +154,10 @@ export function IssueCollaborationPanel({
     },
     route?.onCollaborationSourceChange ? undefined : selectedSource,
   )
+
+  useEffect(() => {
+    activeAiAssistantSessionKeyRef.current = aiAssistantSessionKey
+  }, [aiAssistantSessionKey])
 
   /**
    * Opens a human-curated editor backed by immutable source provenance.
@@ -201,6 +240,21 @@ export function IssueCollaborationPanel({
     )
   }
 
+  /** Opens an approved AI summary in the existing human-owned context editor. */
+  function openAiSummaryDraft(draft: AiSummaryDraft) {
+    setPromotedContextDraft({
+      body: formatAiSummaryContextBody(draft, t),
+      kind: 'context',
+      title: t('ai.summary.contextDraftTitle'),
+    })
+    setHasOverriddenDraftTab(false)
+    if (route?.collaborationTab === undefined) {
+      setUncontrolledTab('decisions')
+    } else {
+      route.onCollaborationTabChange?.('decisions')
+    }
+  }
+
   /**
    * Selects a tab in controlled or uncontrolled mode.
    *
@@ -225,7 +279,7 @@ export function IssueCollaborationPanel({
     const target = resolveIssueCollaborationTabTarget(
       tab,
       event.key,
-      issueCollaborationTabs,
+      visibleTabs,
     )
     if (!target) return
 
@@ -320,7 +374,7 @@ export function IssueCollaborationPanel({
           className="flex min-w-0 gap-0 overflow-x-auto"
           role="tablist"
         >
-          {issueCollaborationTabs.map((tab) => (
+          {visibleTabs.map((tab) => (
             <button
               aria-controls={createCollaborationPanelId(panelIdPrefix)}
               aria-selected={selectedTab === tab}
@@ -338,9 +392,11 @@ export function IssueCollaborationPanel({
               type="button"
             >
               {t(`collaboration.tabs.${tab}`)}
-              <span className="text-[0.65rem] text-[var(--workbench-muted-soft)]">
-                {tabCounts[tab]}
-              </span>
+              {tab === 'brief' ? null : (
+                <span className="text-[0.65rem] text-[var(--workbench-muted-soft)]">
+                  {tabCounts[tab]}
+                </span>
+              )}
               {selectedTab === tab ? (
                 <span
                   aria-hidden="true"
@@ -420,6 +476,27 @@ export function IssueCollaborationPanel({
             }
           />
         ) : null}
+        {selectedTab === 'brief' && aiAssistance && aiAssistantSessionKey ? (
+          <div className="px-5 py-5">
+            <AiSummaryAssistant
+              accessToken={aiAssistance.accessToken}
+              adoptLabel={t('ai.summary.adoptContext')}
+              key={aiAssistantSessionKey}
+              locale={locale}
+              onAdopt={controller.context.capabilities.canCreate && !contextDraft
+                ? (draft) => {
+                    if (
+                      activeAiAssistantSessionKeyRef.current !==
+                      aiAssistantSessionKey
+                    ) return
+                    openAiSummaryDraft(draft)
+                  }
+                : undefined}
+              sources={[aiAssistance.source]}
+              t={t}
+            />
+          </div>
+        ) : null}
         {selectedTab === 'decisions' ? (
           <IssueDecisionsTab
             controller={controller.context}
@@ -462,6 +539,30 @@ export function IssueCollaborationPanel({
       </div>
     </section>
   )
+}
+
+/**
+ * Formats an approved summary as an editable context draft without persisting it.
+ *
+ * @param draft - Currently authorized summary returned after approval.
+ * @param t - Localized label resolver.
+ * @returns Markdown-like plain text for the existing human-owned editor.
+ */
+function formatAiSummaryContextBody(
+  draft: AiSummaryDraft,
+  t: (key: MessageKey) => string,
+): string {
+  const sections = [
+    [t('ai.summary.decisions'), draft.decisions],
+    [t('ai.summary.actions'), draft.actions],
+    [t('ai.summary.risks'), draft.risks],
+  ] as const
+  const lines = [draft.overview.text]
+  for (const [title, items] of sections) {
+    if (items.length === 0) continue
+    lines.push('', `## ${title}`, ...items.map((item) => `- ${item.text}`))
+  }
+  return lines.join('\n')
 }
 
 /**

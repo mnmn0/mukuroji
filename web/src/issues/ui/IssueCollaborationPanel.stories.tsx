@@ -89,6 +89,22 @@ export const Default: Story = {
   },
 }
 
+/** Explicit, revision-fenced Work Item Brief generation entry point. */
+export const AiBrief: Story = {
+  args: {
+    aiAssistance: {
+      accessToken: 'storybook-access-token',
+      source: {
+        expectedRevision: 7,
+        teamId: 'core-team',
+        type: 'work-item',
+        workItemId: 'launch-review',
+      },
+    },
+    defaultTab: 'brief',
+  },
+}
+
 /**
  * resolve された thread の状態です。
  */

@@ -2,6 +2,7 @@ import { useMemo } from 'react'
 import { useSearchParams } from 'react-router'
 import { AutomationManagementPanelContainer } from '../../automation/ui/AutomationManagementPanelContainer'
 import { DeveloperPlatformSettingsPanelContainer } from '../../developer-platform/ui/DeveloperPlatformSettingsPanelContainer'
+import { AiAssistanceSettingsPanelContainer } from '../../features/ai-assistance/ui'
 import { NotificationSettingsPanelContainer } from '../../notifications/ui/NotificationSettingsPanelContainer'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { WorkItemConfigurationPanelContainer } from '../../work-items/ui/WorkItemConfigurationPanelContainer'
@@ -31,6 +32,11 @@ export function SettingsPage() {
         <WorkspaceSettingsView
           configurationSections={workspace.accessToken ? (
             <>
+              <AiAssistanceSettingsPanelContainer
+                accessToken={workspace.accessToken}
+                canManagePolicy={workspace.canManageWorkspaceConfiguration}
+                locale={workspace.locale}
+              />
               <WorkspaceAccessPanelContainer
                 accessToken={workspace.accessToken}
                 locale={workspace.locale}

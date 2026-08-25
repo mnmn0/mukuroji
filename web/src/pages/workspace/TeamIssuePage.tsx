@@ -3962,6 +3962,17 @@ function IssueDetailContent({
       />
       {collaboration ? (
         <IssueCollaborationPanel
+          aiAssistance={accessToken
+            ? {
+                accessToken,
+                source: {
+                  expectedRevision: issue.revision,
+                  teamId: issue.teamId,
+                  type: 'work-item',
+                  workItemId: issue.id,
+                },
+              }
+            : undefined}
           route={collaborationRoute}
           artifacts={artifacts}
           contextDraft={documentContextPromotion.documentContextDraft}

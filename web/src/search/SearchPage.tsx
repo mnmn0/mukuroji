@@ -60,7 +60,13 @@ import {
   updateSearchRouteState,
   type SearchRouteState,
 } from './model/queryState'
+import { applyApprovedAiSearchToRouteState } from './model/aiSearchApplication'
 import { SearchResultCollection } from './ui/SearchResultCollection'
+import {
+  NaturalLanguageSearchComposer,
+  type NaturalLanguageSearchComposerProps,
+} from './ui/NaturalLanguageSearchComposer'
+import { SearchCountReport } from './ui/SearchCountReport'
 import { createSearchStatusOptions, type SearchStatusOption } from './model/statusOptions'
 
 /**
@@ -114,6 +120,7 @@ export function SearchPage() {
   const [session] = useState(() => getAuthSession())
   const [locale] = useState<Locale>(() => getInitialLocale())
   const [results, setResults] = useState<WorkspaceSearchResult[]>([])
+  const [completedRouteSignature, setCompletedRouteSignature] = useState<string | undefined>()
   const [nextCursor, setNextCursor] = useState<string | undefined>()
   const [isSearchLoading, setIsSearchLoading] = useState(false)
   const [nextPageLoadingSignature, setNextPageLoadingSignature] = useState<string | undefined>()
@@ -258,12 +265,14 @@ export function SearchPage() {
         .then((response) => {
           setResults(response.results)
           setNextCursor(response.nextCursor)
+          setCompletedRouteSignature(routeSignature)
         })
         .catch((error: unknown) => {
           if (!abortController.signal.aborted) {
             setAuthenticatedApiError(() => error)
             setResults([])
             setNextCursor(undefined)
+            setCompletedRouteSignature(undefined)
             setSearchErrorMessage(error instanceof Error ? error.message : t('search.error'))
           }
         })
@@ -539,11 +548,16 @@ export function SearchPage() {
 
               <div className="grid min-w-0 content-start gap-4">
                 <SearchToolbar
+                  accessToken={accessToken}
                   key={getSearchDateField(routeState.filters)}
+                  locale={locale}
                   routeState={routeState}
                   selectedSavedView={selectedSavedView}
                   statusOptions={statusOptions}
                   t={t}
+                  onAiFiltersApply={(application) => commitRouteState(
+                    applyApprovedAiSearchToRouteState(routeState, application),
+                  )}
                   onFiltersChange={updateFilters}
                   onLayoutChange={updateLayout}
                   onUpdateSelectedView={selectedSavedView?.canEdit
@@ -574,6 +588,17 @@ export function SearchPage() {
                       ? visibleSearchErrorMessage
                       : `${t('search.error')} ${visibleSearchErrorMessage}`}
                   </p>
+                ) : null}
+                {routeState.reportMetric === 'count' &&
+                completedRouteSignature === routeSignature &&
+                !isSearchLoading &&
+                !visibleSearchErrorMessage ? (
+                  <SearchCountReport
+                    groupBy={getSearchGroup(routeState.layout) || undefined}
+                    hasMore={Boolean(nextCursor)}
+                    results={results}
+                    t={t}
+                  />
                 ) : null}
                 {isSearchLoading ? (
                   <SearchLoadingState t={t} />
@@ -610,6 +635,9 @@ export function SearchPage() {
 }
 
 function SearchToolbar({
+  accessToken,
+  locale,
+  onAiFiltersApply,
   onFiltersChange,
   onLayoutChange,
   onUpdateSelectedView,
@@ -618,6 +646,9 @@ function SearchToolbar({
   statusOptions,
   t,
 }: {
+  accessToken?: string
+  locale: Locale
+  onAiFiltersApply: NaturalLanguageSearchComposerProps['onApply']
   onFiltersChange: (patch: Record<string, unknown>) => void
   onLayoutChange: (patch: Record<string, unknown>) => void
   onUpdateSelectedView?: () => void
@@ -631,9 +662,50 @@ function SearchToolbar({
   const columns = getSearchColumns(routeState.layout)
   const routeDateField = getSearchDateField(routeState.filters)
   const [dateField, setDateField] = useState(routeDateField)
+  const [inputMode, setInputMode] = useState<'keyword' | 'plain-language'>('keyword')
 
   return (
     <section className="workbench-toolbar grid gap-4 p-4" data-testid="search-toolbar">
+      <div
+        aria-label={t('ai.search.mode')}
+        className="flex w-fit max-w-full gap-1 rounded-lg border border-[var(--workbench-border-strong)] bg-white p-1"
+        role="group"
+      >
+        <button
+          aria-pressed={inputMode === 'keyword'}
+          className={`min-h-[44px] rounded-md px-4 text-app-caption font-semibold transition ${
+            inputMode === 'keyword'
+              ? 'bg-[var(--workbench-primary)] text-white'
+              : 'text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)]'
+          }`}
+          onClick={() => setInputMode('keyword')}
+          type="button"
+        >
+          {t('ai.search.mode.keyword')}
+        </button>
+        <button
+          aria-pressed={inputMode === 'plain-language'}
+          className={`min-h-[44px] rounded-md px-4 text-app-caption font-semibold transition ${
+            inputMode === 'plain-language'
+              ? 'bg-[var(--workbench-primary)] text-white'
+              : 'text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)]'
+          }`}
+          onClick={() => setInputMode('plain-language')}
+          type="button"
+        >
+          {t('ai.search.mode.plainLanguage')}
+        </button>
+      </div>
+
+      {inputMode === 'plain-language' ? (
+        <NaturalLanguageSearchComposer
+          accessToken={accessToken}
+          locale={locale}
+          onApply={onAiFiltersApply}
+          t={t}
+        />
+      ) : (
+        <>
       <div className="flex min-w-0 flex-wrap items-center gap-3">
         <label className="relative min-w-[260px] flex-1">
           <span className="sr-only">{t('search.input.label')}</span>
@@ -791,6 +863,8 @@ function SearchToolbar({
           />
         ))}
       </div>
+        </>
+      )}
     </section>
   )
 }

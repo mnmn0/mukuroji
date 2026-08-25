@@ -1,6 +1,8 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import { expect, fn, userEvent, within } from 'storybook/test'
 import type { TeamIssueDetail, UpdateTeamIssueInput } from '../../issues/api'
+import { aiPlanningGenerationFixture } from '../../features/ai-assistance/fixtures'
+import type { AiAssistanceController } from '../../features/ai-assistance/mutations/useAiAssistanceController'
 import { collaborationWorkspaceMemberFixtures } from '../../issues/fixtures'
 import type { ProjectDirectoryTeam } from '../../projects/api'
 import { createTranslator } from '../../shared/i18n/i18n'
@@ -45,6 +47,28 @@ function createUpdateIssueSpy() {
     void issueId
     void input
   })
+}
+
+/** Creates a ready reviewed Planning controller without issuing network requests. */
+function createPlanningController(): AiAssistanceController {
+  return {
+    cancelGeneration: () => undefined,
+    decide: fn(async (outcome) => ({
+      ...aiPlanningGenerationFixture,
+      decision: {
+        decidedAt: '2026-08-25T03:00:00.000Z',
+        outcome,
+      },
+      revision: aiPlanningGenerationFixture.revision + 1,
+    })),
+    generate: async () => aiPlanningGenerationFixture,
+    generation: aiPlanningGenerationFixture,
+    isDecisionPending: false,
+    isFeedbackPending: false,
+    isGenerating: false,
+    reset: () => undefined,
+    sendFeedback: async () => undefined,
+  }
 }
 
 /** Storybook metadata for the independent selected-task detail pane. */
@@ -122,6 +146,83 @@ export const Default: Story = {
         workflowStatusId: 'review',
       }),
     )
+  },
+}
+
+/** Evidence-first Work Item plan with fields, effort, child work, and dependencies. */
+export const AiWorkPlan: Story = {
+  args: {
+    aiAssistanceController: createPlanningController(),
+    onUpdateIssue: createUpdateIssueSpy(),
+  },
+  play: async ({ args, canvasElement }) => {
+    const canvas = within(canvasElement)
+
+    await userEvent.click(canvas.getByRole('button', {
+      name: '対応する項目をフォームで使用',
+    }))
+
+    await expect(canvas.getByRole('textbox', { name: 'Issue' }))
+      .toHaveValue('Complete launch accessibility review')
+    await expect(canvas.getByRole('combobox', { name: '優先度' }))
+      .toHaveValue('high')
+    await expect(canvas.getByRole('combobox', { name: 'ステータス' }))
+      .toHaveValue('review')
+    await expect(args.onUpdateIssue).not.toHaveBeenCalled()
+    await expect(args.aiAssistanceController?.decide).toHaveBeenCalledTimes(1)
+
+    const customerImpactInput = canvas.getByRole('textbox', {
+      name: 'Customer impact',
+    })
+    await userEvent.clear(customerImpactInput)
+    await userEvent.type(customerImpactInput, 'AccessibilityReviewReady')
+    await userEvent.click(canvas.getByRole('button', { name: '変更を保存' }))
+    await expect(args.onUpdateIssue).toHaveBeenCalledTimes(1)
+    await expect(args.onUpdateIssue).toHaveBeenCalledWith(
+      'core-team',
+      'wireframe',
+      expect.objectContaining({
+        priority: 'high',
+        title: 'Complete launch accessibility review',
+        workflowStatusId: 'review',
+      }),
+    )
+  },
+}
+
+/** Manual supported-field edits are confirmed before the audited approval decision. */
+export const AiWorkPlanWithManualEdits: Story = {
+  args: {
+    aiAssistanceController: createPlanningController(),
+    onUpdateIssue: createUpdateIssueSpy(),
+  },
+  play: async ({ args, canvasElement }) => {
+    const canvas = within(canvasElement)
+    const titleInput = canvas.getByRole('textbox', { name: 'Issue' })
+
+    await userEvent.clear(titleInput)
+    await userEvent.type(titleInput, 'Keep this manual title')
+    await userEvent.click(canvas.getByRole('button', {
+      name: '対応する項目をフォームで使用',
+    }))
+
+    await expect(canvas.getByText('手動の編集を保持しますか？')).toBeVisible()
+    await expect(args.aiAssistanceController?.decide).not.toHaveBeenCalled()
+    await expect(args.onUpdateIssue).not.toHaveBeenCalled()
+
+    await userEvent.click(canvas.getByRole('button', { name: '手動の編集を保持' }))
+    await expect(titleInput).toHaveValue('Keep this manual title')
+    await expect(args.aiAssistanceController?.decide).not.toHaveBeenCalled()
+
+    await userEvent.click(canvas.getByRole('button', {
+      name: '対応する項目をフォームで使用',
+    }))
+    await userEvent.click(canvas.getByRole('button', { name: 'AI draft で置き換え' }))
+
+    await expect(args.aiAssistanceController?.decide).toHaveBeenCalledTimes(1)
+    await expect(canvas.getByRole('textbox', { name: 'Issue' }))
+      .toHaveValue('Complete launch accessibility review')
+    await expect(args.onUpdateIssue).not.toHaveBeenCalled()
   },
 }
 

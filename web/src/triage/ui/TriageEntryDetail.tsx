@@ -1,3 +1,4 @@
+import type { AiTriageDraft } from '@mukuroji/contracts'
 import {
   useRef,
   useState,
@@ -5,6 +6,8 @@ import {
   type KeyboardEvent,
   type ReactNode,
 } from 'react'
+import type { AiAssistanceController } from '../../features/ai-assistance/mutations/useAiAssistanceController'
+import { AiTriageDraftComposer } from '../../features/ai-assistance/ui/AiTriageDraftComposer'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import { createTeamIssuesPath } from '../../shared/routing/paths'
 import { ShieldIcon } from '../../shared/ui/icons'
@@ -22,6 +25,12 @@ import { TriageSourceIcon } from './TriageSourceIcon'
 
 /** Props accepted by the permission-aware triage entry detail pane. */
 export type TriageEntryDetailProps = {
+  /** Active Workspace member bearer token used only for explicit AI generation. */
+  readonly accessToken?: string
+  /** Optional AI controller override for isolated interaction stories. */
+  readonly aiAssistanceController?: AiAssistanceController
+  /** Team route identifier used to scope the AI source reference. */
+  readonly teamId: string
   /** Selected permission-safe entry view. */
   readonly view?: TriageEntryView
   /** Current locale used for dates. */
@@ -65,6 +74,8 @@ const stateLabelKeys: Record<TriageEntryState, MessageKey> = {
  * @returns Responsive entry detail pane.
  */
 export function TriageEntryDetail({
+  accessToken,
+  aiAssistanceController,
   errorMessage,
   isLoading = false,
   isPending = false,
@@ -74,12 +85,17 @@ export function TriageEntryDetail({
   onBack,
   onRetry,
   t,
+  teamId,
   view,
 }: TriageEntryDetailProps) {
   const [actionMode, setActionMode] = useState<TriageActionMode>()
   const [acceptMode, setAcceptMode] = useState<'create' | 'link'>('create')
   const [actionError, setActionError] = useState(false)
   const [actionAnnouncement, setActionAnnouncement] = useState('')
+  const [ownerUserId, setOwnerUserId] = useState(view?.entry.ownerUserId ?? '')
+  const [projectId, setProjectId] = useState(
+    view?.entry.projectId ?? view?.routingCandidate?.projectId ?? '',
+  )
   const actionTrigger = useRef<HTMLButtonElement | null>(null)
 
   const closeAction = () => {
@@ -94,6 +110,8 @@ export function TriageEntryDetail({
     actionTrigger.current = trigger ?? null
     setActionError(false)
     setActionAnnouncement('')
+    setOwnerUserId(view?.entry.ownerUserId ?? '')
+    setProjectId(view?.entry.projectId ?? view?.routingCandidate?.projectId ?? '')
     setActionMode(mode)
   }
   const handleKeyDown = (event: KeyboardEvent<HTMLElement>) => {
@@ -155,6 +173,26 @@ export function TriageEntryDetail({
         entry.canonicalWorkItem.workItemId,
       )
     : undefined
+
+  /** Copies only owner and Project fields supported by the existing triage action contracts. */
+  const adoptTriageDraft = (draft: AiTriageDraft) => {
+    setActionError(false)
+    setActionAnnouncement('')
+    setOwnerUserId(draft.assigneeUserId?.value ?? entry.ownerUserId ?? '')
+    setProjectId(
+      draft.projectId?.value ?? entry.projectId ?? view.routingCandidate?.projectId ?? '',
+    )
+    if (draft.assigneeUserId && entry.capabilities.canAssign) {
+      setActionMode('assign')
+      return
+    }
+    if (entry.capabilities.canAcceptCreate) {
+      setAcceptMode('create')
+      setActionMode('accept')
+      return
+    }
+    if (entry.capabilities.canAssign) setActionMode('assign')
+  }
 
   const submitAction = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -224,20 +262,40 @@ export function TriageEntryDetail({
         <PermissionNotice entry={entry} locale={locale} t={t} />
 
         {entry.permission.visibility === 'full' ? (
-          <DetailSection title={t('triage.detail.sourcePreview')}>
-            <p className="whitespace-pre-wrap break-words text-sm font-medium leading-6 text-[var(--workbench-text)]">
-              {view.body || t('triage.detail.sourceBodyEmpty')}
-            </p>
-            {entry.sourcePreview.sanitized || entry.sourcePreview.truncated ? (
-              <p className="mt-3 text-xs font-semibold text-amber-700">
-                {entry.sourcePreview.sanitized && entry.sourcePreview.truncated
-                  ? t('triage.detail.sanitizedAndTruncated')
-                  : entry.sourcePreview.sanitized
-                    ? t('triage.detail.sanitized')
-                    : t('triage.detail.truncated')}
+          <>
+            <DetailSection title={t('triage.detail.sourcePreview')}>
+              <p className="whitespace-pre-wrap break-words text-sm font-medium leading-6 text-[var(--workbench-text)]">
+                {view.body || t('triage.detail.sourceBodyEmpty')}
               </p>
+              {entry.sourcePreview.sanitized || entry.sourcePreview.truncated ? (
+                <p className="mt-3 text-xs font-semibold text-amber-700">
+                  {entry.sourcePreview.sanitized && entry.sourcePreview.truncated
+                    ? t('triage.detail.sanitizedAndTruncated')
+                    : entry.sourcePreview.sanitized
+                      ? t('triage.detail.sanitized')
+                      : t('triage.detail.truncated')}
+                </p>
+              ) : null}
+            </DetailSection>
+            {(accessToken || aiAssistanceController) && (
+              entry.capabilities.canAcceptCreate || entry.capabilities.canAssign
+            ) ? (
+              <AiTriageDraftComposer
+                accessToken={accessToken}
+                adoptLabel={t('ai.triage.adoptTeam')}
+                controller={aiAssistanceController}
+                locale={locale}
+                onAdoptDraft={adoptTriageDraft}
+                source={{
+                  expectedRevision: entry.revision,
+                  teamId,
+                  triageEntryId: entry.id,
+                  type: 'triage-entry',
+                }}
+                t={t}
+              />
             ) : null}
-          </DetailSection>
+          </>
         ) : null}
 
         <DetailSection title={t('triage.detail.trace')}>
@@ -390,18 +448,20 @@ export function TriageEntryDetail({
                   <input
                     autoFocus
                     className="workbench-input min-h-10 px-3"
-                    defaultValue={entry.ownerUserId ?? ''}
                     name="ownerUserId"
+                    onChange={(event) => setOwnerUserId(event.target.value)}
                     placeholder={t('triage.action.ownerOptional')}
+                    value={ownerUserId}
                   />
                 </label>
                 <label className="grid gap-1 text-sm font-semibold text-[var(--workbench-text)]">
                   {t('triage.action.projectId')}
                   <input
                     className="workbench-input min-h-10 px-3"
-                    defaultValue={entry.projectId ?? view.routingCandidate?.projectId ?? ''}
                     name="projectId"
+                    onChange={(event) => setProjectId(event.target.value)}
                     placeholder={t('triage.action.projectOptional')}
+                    value={projectId}
                   />
                 </label>
               </>
@@ -435,9 +495,10 @@ export function TriageEntryDetail({
                     <input
                       autoFocus
                       className="workbench-input min-h-10 px-3"
-                      defaultValue={entry.projectId ?? view.routingCandidate?.projectId ?? ''}
                       name="projectId"
+                      onChange={(event) => setProjectId(event.target.value)}
                       placeholder={t('triage.action.projectOptional')}
+                      value={projectId}
                     />
                   </label>
                 ) : (

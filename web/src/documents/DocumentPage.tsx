@@ -365,6 +365,8 @@ export type DocumentScreenActions = {
  * Storybook 兼用 DocumentScreen の props です。
  */
 export type DocumentScreenProps = {
+  /** Active Workspace member token used only for explicit AI Brief requests. */
+  aiAssistanceAccessToken?: string
   /**
    * 表示 locale です。
    */
@@ -1326,6 +1328,7 @@ export function DocumentPage() {
 
   return (
     <DocumentScreen
+      aiAssistanceAccessToken={accessToken}
       key={contextInstanceKey}
       actions={{
         applyOperations: handleApplyOperations,
@@ -1413,6 +1416,7 @@ export function DocumentPage() {
  */
 export function DocumentScreen({
   actions,
+  aiAssistanceAccessToken,
   data,
   errorMessage,
   initialContextTab,
@@ -1842,6 +1846,7 @@ export function DocumentScreen({
               <div className="fixed inset-y-0 right-0 z-50 max-w-[calc(100vw-24px)] shadow-2xl min-[1280px]:static min-[1280px]:z-auto min-[1280px]:shadow-none">
                 <DocumentContextPanel
                   activeTab={contextTab}
+                  aiAssistanceAccessToken={aiAssistanceAccessToken}
                   backlinks={data.backlinks}
                   comments={data.comments}
                   defaultAnchorId={defaultCommentAnchorId}
@@ -1853,6 +1858,7 @@ export function DocumentScreen({
                   hasMoreComments={data.hasMoreComments}
                   hasMoreVersions={data.hasMoreVersions}
                   isLoading={isContextLoading}
+                  locale={locale}
                   modal={isContextModal}
                   t={t}
                   versions={data.versions}

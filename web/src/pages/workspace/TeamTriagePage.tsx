@@ -117,6 +117,7 @@ export function TeamTriagePage() {
       ]}
     >
       <TriageWorkbench
+        accessToken={workspace.accessToken}
         allowedBulkActions={allowedBulkActions}
         bulkResults={mutation.bulkResults}
         canManageConfiguration={canManageConfiguration}
@@ -143,6 +144,7 @@ export function TeamTriagePage() {
         selectedEntry={selectedEntry}
         selectedEntryIds={selectedEntryIds}
         t={t}
+        teamId={teamId ?? ''}
         teamName={activeTeam?.name ?? t('workspace.team.missing')}
         onAction={mutation.applyAction}
         onBackToQueue={() => replaceRouteState('queue', null)}

@@ -532,6 +532,7 @@ export function PlanningPage() {
         <PlanningScreen
           accessErrorMessage={accessErrorMessage || undefined}
           activeView={activeView}
+          aiAssistance={accessToken ? { accessToken, locale } : undefined}
           errorMessage={mutationErrorMessage ?? loadErrorMessage}
           initialSelectedEntityId={selectedEntityId}
           initialSelectedUpdateTarget={selectedUpdateTarget}

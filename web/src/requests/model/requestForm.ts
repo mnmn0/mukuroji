@@ -249,6 +249,8 @@ export type RequestWorkItemPointer = {
 export type RequestSubmissionModel = {
   /** Submission ID です。 */
   id: string
+  /** Submission を所有する Request Form ID です。 */
+  formId: string
   /** Optimistic concurrency に使う revision です。 */
   revision: number
   /** Triage lifecycle status です。 */
@@ -668,6 +670,7 @@ export function normalizeRequestSubmission(submission: RequestSubmission): Reque
     consentText: submission.consent?.label,
     duplicateCandidateIds: [...submission.duplicateCandidateIds],
     events: submission.events.map((event) => ({ ...event })),
+    formId: submission.formId,
     formName: definition.title[locale] ?? definition.title[definition.defaultLocale] ?? submission.formId,
     formDefaultLocale: definition.defaultLocale,
     formVersionLabel: `v${submission.formVersion}`,

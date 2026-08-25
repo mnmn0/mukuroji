@@ -1,10 +1,16 @@
 import type {
+  AiPlanningStatusUpdateDraft,
+  AiPlanningTargetSource,
   PlanningCadence,
   PlanningHealth,
   PlanningRisk,
   PlanningUpdateEvidence,
 } from '@mukuroji/contracts'
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { createAiAssistantSessionKey } from '../../features/ai-assistance/model/assistantSessionKey'
+import { AiPlanningStatusUpdateAssistant } from '../../features/ai-assistance/ui/AiPlanningStatusUpdateAssistant'
+import { createTranslator, type Locale } from '../../shared/i18n/i18n'
+import { routeAiPlanningDraftAdoption } from '../model/aiDraftAdoption'
 import { isValidPlanningDateTime, readNonNegativeNumber } from '../model/cadenceForm'
 import {
   readPlanningUpdateEvidence,
@@ -251,6 +257,8 @@ export function PlanningLatestUpdateSummary({
 
 /** Props for the Project-or-Initiative update detail pane. */
 export type PlanningUpdateDetailPaneProps = {
+  /** Optional explicit AI generation access for the selected revision-fenced target. */
+  aiAssistance?: PlanningStatusUpdateAiAssistance
   /** Selected Project or Initiative display metadata. */
   summary: PlanningUpdateTargetSummaryView
   /** Cadence, delivery state, and immutable history for the selected target. */
@@ -286,6 +294,7 @@ export type PlanningUpdateDetailPaneProps = {
  * @returns A responsive detail pane with schedule, composer, and immutable ledger.
  */
 export function PlanningUpdateDetailPane({
+  aiAssistance,
   collaboration,
   evidenceCandidates,
   hasMoreHistory = false,
@@ -387,6 +396,7 @@ export function PlanningUpdateDetailPane({
           updateView={updateView}
         />
         <PlanningStatusUpdateComposer
+          aiAssistance={aiAssistance}
           evidenceCandidates={evidenceCandidates}
           health={summary.health}
           labels={labels}
@@ -631,6 +641,8 @@ export function PlanningUpdateCadenceEditor({
 
 /** Props for the structured manual update composer. */
 export type PlanningStatusUpdateComposerProps = {
+  /** Optional explicit AI generation access for the selected Planning target. */
+  aiAssistance?: PlanningStatusUpdateAiAssistance
   /** Current progress captured by the server when the update is published. */
   progress: number
   /** Current health used as the select default. */
@@ -641,8 +653,36 @@ export type PlanningStatusUpdateComposerProps = {
   evidenceCandidates?: PlanningUpdateEvidenceCandidates
   /** Evidence type shown initially by focused stories and form tests. */
   initialEvidenceType?: PlanningUpdateEvidence['type'] | 'none'
+  /** Optional initial local draft used by focused stories and prefilled workflows. */
+  initialDraft?: AiPlanningStatusUpdateDraft
   /** Publishes a manual canonical update when the viewer has permission. */
   onPublish?: (draft: PlanningStatusUpdateDraft) => void | Promise<void>
+}
+
+/** Authentication and revision-fenced source for a Planning status update draft. */
+export type PlanningStatusUpdateAiAssistance = {
+  /** Active Workspace member bearer token. */
+  accessToken: string
+  /** Locale sent to Bedrock and used for draft presentation. */
+  locale: Locale
+  /** Planning target resolved and re-authorized by the server. */
+  source: AiPlanningTargetSource
+}
+
+/** Local form seed replaced only after an approved AI draft adoption. */
+type PlanningStatusUpdateFormSeed = {
+  /** Status update copied into uncontrolled form defaults. */
+  draft?: AiPlanningStatusUpdateDraft
+  /** Monotonic key that remounts the form even when consecutive drafts are equal. */
+  revision: number
+}
+
+/** An approved draft staged for one exact source session. */
+type PendingAiPlanningDraft = {
+  /** Approved status update awaiting explicit replacement confirmation. */
+  draft: AiPlanningStatusUpdateDraft
+  /** Source identity and revision that produced the approved draft. */
+  sessionKey: string
 }
 
 /**
@@ -652,8 +692,10 @@ export type PlanningStatusUpdateComposerProps = {
  * @returns A permission-aware structured composer.
  */
 export function PlanningStatusUpdateComposer({
+  aiAssistance,
   evidenceCandidates = { planningEntities: [], workItems: [] },
   health,
+  initialDraft,
   initialEvidenceType = 'none',
   labels,
   onPublish,
@@ -664,6 +706,58 @@ export function PlanningStatusUpdateComposer({
   )
   const [formError, setFormError] = useState<string | undefined>()
   const [isPublishing, setIsPublishing] = useState(false)
+  const isFormDirtyRef = useRef(false)
+  const [pendingAiDraft, setPendingAiDraft] =
+    useState<PendingAiPlanningDraft>()
+  const [formSeed, setFormSeed] = useState<PlanningStatusUpdateFormSeed>({
+    draft: initialDraft,
+    revision: 0,
+  })
+  const aiT = aiAssistance ? createTranslator(aiAssistance.locale) : undefined
+  const aiAssistantSessionKey = aiAssistance
+    ? createAiAssistantSessionKey(aiAssistance.source)
+    : undefined
+  const activeAiAssistantSessionKeyRef = useRef(aiAssistantSessionKey)
+
+  useEffect(() => {
+    activeAiAssistantSessionKeyRef.current = aiAssistantSessionKey
+  }, [aiAssistantSessionKey])
+
+  /**
+   * Replaces the local form only after adoption is safe or explicitly confirmed.
+   *
+   * @param draft - Approved, currently authorized AI status update draft.
+   */
+  function applyAiDraft(draft: AiPlanningStatusUpdateDraft) {
+    setEvidenceType(initialEvidenceType)
+    setFormError(undefined)
+    isFormDirtyRef.current = false
+    setPendingAiDraft(undefined)
+    setFormSeed((current) => ({
+      draft,
+      revision: current.revision + 1,
+    }))
+  }
+
+  /**
+   * Applies a clean-form adoption or stages it behind manual-edit confirmation.
+   *
+   * @param draft - Approved, currently authorized AI status update draft.
+   * @param sessionKey - Source identity and revision captured by the mounted assistant.
+   */
+  function adoptAiDraft(
+    draft: AiPlanningStatusUpdateDraft,
+    sessionKey: string,
+  ) {
+    if (activeAiAssistantSessionKeyRef.current !== sessionKey) return
+    routeAiPlanningDraftAdoption(draft, isFormDirtyRef.current, {
+      apply: applyAiDraft,
+      confirm: (nextDraft) => setPendingAiDraft({
+        draft: nextDraft,
+        sessionKey,
+      }),
+    })
+  }
 
   return (
     <section className="workbench-panel p-5" data-testid="planning-update-composer">
@@ -673,12 +767,59 @@ export function PlanningStatusUpdateComposer({
       <p className="mt-1 text-sm font-medium text-[var(--workbench-muted)]">
         {labels.composerDescription}
       </p>
+      {aiAssistance && aiT && aiAssistantSessionKey ? (
+        <div className="mt-4">
+          <AiPlanningStatusUpdateAssistant
+            accessToken={aiAssistance.accessToken}
+            key={aiAssistantSessionKey}
+            locale={aiAssistance.locale}
+            onAdopt={(draft) => adoptAiDraft(draft, aiAssistantSessionKey)}
+            source={aiAssistance.source}
+            t={aiT}
+          />
+        </div>
+      ) : null}
+      {pendingAiDraft &&
+      pendingAiDraft.sessionKey === aiAssistantSessionKey &&
+      aiT ? (
+        <div
+          className="mt-4 border-l-2 border-amber-500 bg-amber-50 px-4 py-3 text-amber-950"
+          role="alert"
+        >
+          <p className="text-sm font-semibold">
+            {aiT('ai.planning.replaceDraftTitle')}
+          </p>
+          <p className="mt-1 text-xs font-medium leading-5">
+            {aiT('ai.planning.replaceDraftDescription')}
+          </p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button
+              className="workbench-button-secondary min-h-[44px] px-4"
+              onClick={() => setPendingAiDraft(undefined)}
+              type="button"
+            >
+              {aiT('ai.planning.keepManualDraft')}
+            </button>
+            <button
+              className="workbench-button-primary min-h-[44px] px-4"
+              onClick={() => applyAiDraft(pendingAiDraft.draft)}
+              type="button"
+            >
+              {aiT('ai.planning.replaceManualDraft')}
+            </button>
+          </div>
+        </div>
+      ) : null}
       <p className="mt-3 text-xs font-semibold text-[var(--workbench-muted)]">
         {labels.composerRequiredHint}
       </p>
       <form
         className="mt-4 grid gap-3"
+        key={`planning-status-update-form-${formSeed.revision}`}
         noValidate
+        onChange={() => {
+          isFormDirtyRef.current = true
+        }}
         onSubmit={(event) => {
           event.preventDefault()
           setFormError(undefined)
@@ -726,7 +867,7 @@ export function PlanningStatusUpdateComposer({
             {labels.health}
             <select
               className="workbench-input h-10 px-3"
-              defaultValue={health}
+              defaultValue={formSeed.draft?.health ?? health}
               disabled={!onPublish}
               aria-describedby={formError ? 'planning-update-composer-error' : undefined}
               aria-invalid={Boolean(formError)}
@@ -741,7 +882,7 @@ export function PlanningStatusUpdateComposer({
             {labels.risk}
             <select
               className="workbench-input h-10 px-3"
-              defaultValue="none"
+              defaultValue={formSeed.draft?.risk ?? 'none'}
               disabled={!onPublish}
               aria-describedby={formError ? 'planning-update-composer-error' : undefined}
               aria-invalid={Boolean(formError)}
@@ -765,6 +906,7 @@ export function PlanningStatusUpdateComposer({
           {labels.summary}
           <textarea
             className="workbench-input min-h-24 p-3"
+            defaultValue={formSeed.draft?.summary}
             disabled={!onPublish}
             aria-describedby={formError ? 'planning-update-composer-error' : undefined}
             aria-invalid={Boolean(formError)}
@@ -775,15 +917,15 @@ export function PlanningStatusUpdateComposer({
         <div className="grid grid-cols-2 gap-3 max-[620px]:grid-cols-1">
           <label className="grid gap-2 text-sm font-semibold text-[var(--workbench-text)]">
             {labels.riskSummary}
-            <textarea className="workbench-input min-h-20 p-3" disabled={!onPublish} name="riskSummary" />
+            <textarea className="workbench-input min-h-20 p-3" defaultValue={formSeed.draft?.riskSummary} disabled={!onPublish} name="riskSummary" />
           </label>
           <label className="grid gap-2 text-sm font-semibold text-[var(--workbench-text)]">
             {labels.decisionSummary}
-            <textarea className="workbench-input min-h-20 p-3" disabled={!onPublish} name="decisionSummary" />
+            <textarea className="workbench-input min-h-20 p-3" defaultValue={formSeed.draft?.decisionSummary} disabled={!onPublish} name="decisionSummary" />
           </label>
           <label className="grid gap-2 text-sm font-semibold text-[var(--workbench-text)]">
             {labels.helpNeeded}
-            <textarea className="workbench-input min-h-20 p-3" disabled={!onPublish} name="helpNeeded" />
+            <textarea className="workbench-input min-h-20 p-3" defaultValue={formSeed.draft?.helpNeeded} disabled={!onPublish} name="helpNeeded" />
           </label>
           <label className="grid gap-2 text-sm font-semibold text-[var(--workbench-text)]">
             {labels.nextAction}
@@ -791,6 +933,7 @@ export function PlanningStatusUpdateComposer({
             aria-describedby={formError ? 'planning-update-composer-error' : undefined}
             aria-invalid={Boolean(formError)}
             className="workbench-input min-h-20 p-3"
+            defaultValue={formSeed.draft?.nextAction}
             disabled={!onPublish}
             name="nextAction"
             required
@@ -901,7 +1044,7 @@ export function PlanningStatusUpdateComposer({
           </p>
         ) : null}
         <button
-          className="workbench-button-primary min-h-10 px-4 disabled:opacity-50"
+          className="workbench-button-primary min-h-[44px] px-4 disabled:opacity-50"
           disabled={!onPublish || isPublishing}
           aria-busy={isPublishing}
           type="submit"

@@ -137,6 +137,14 @@ export const CommentThread: Story = {
   },
 }
 
+/** Explicit Document Brief generation entry point with no automatic request. */
+export const AiBrief: Story = {
+  args: {
+    aiAssistanceAccessToken: 'storybook-access-token',
+    initialContextTab: 'brief',
+  },
+}
+
 /**
  * Permission、member grant、expiring public link を管理する dialog です。
  */

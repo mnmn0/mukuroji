@@ -13,6 +13,51 @@ import {
 import { fileArtifactsControllerFixture, imageFileFixture } from '../src/files/fixtures'
 
 describe('IssueCollaborationPanel', () => {
+  test('omits the Brief tab when no authenticated AI source is supplied', () => {
+    const html = renderToStaticMarkup(
+      <IssueCollaborationPanel
+        controller={issueCollaborationControllerFixture}
+        locale="en"
+        members={collaborationWorkspaceMemberFixtures}
+      />,
+    )
+
+    expect(html).not.toContain('>Brief<')
+    expect(html).not.toContain('Generate brief')
+  })
+
+  test('shows only an explicit Generate action before an authorized Work Item brief exists', () => {
+    const protectedBody = 'DENIED_SOURCE_BODY_MUST_NOT_ENTER_BRIEF_MARKUP'
+    const html = renderToStaticMarkup(
+      <IssueCollaborationPanel
+        aiAssistance={{
+          accessToken: 'test-access-token',
+          source: {
+            expectedRevision: 7,
+            teamId: 'core-team',
+            type: 'work-item',
+            workItemId: 'launch-review',
+          },
+        }}
+        controller={{
+          ...issueCollaborationControllerFixture,
+          comments: issueCollaborationControllerFixture.comments.map((comment) => ({
+            ...comment,
+            bodyMarkdown: protectedBody,
+          })),
+        }}
+        defaultTab="brief"
+        locale="en"
+        members={collaborationWorkspaceMemberFixtures}
+      />,
+    )
+
+    expect(html).toContain('>Brief<')
+    expect(html).toContain('Generate brief')
+    expect(html).not.toContain(protectedBody)
+    expect(html).not.toContain('AI draft')
+  })
+
   test('localizes curated context activity event families', () => {
     const html = renderToStaticMarkup(
       <IssueActivityTab

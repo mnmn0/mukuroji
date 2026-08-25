@@ -14,6 +14,7 @@ describe('issue collaboration tabs', () => {
   test('keeps the stable panel order', () => {
     expect(issueCollaborationTabs).toEqual([
       'conversation',
+      'brief',
       'decisions',
       'activity',
       'sources',
@@ -22,6 +23,7 @@ describe('issue collaboration tabs', () => {
 
   test('accepts supported URL state and falls back to conversation', () => {
     expect(readIssueCollaborationTab('decisions')).toBe('decisions')
+    expect(readIssueCollaborationTab('brief')).toBe('brief')
     expect(readIssueCollaborationTab('activity')).toBe('activity')
     expect(readIssueCollaborationTab('sources')).toBe('sources')
     expect(readIssueCollaborationTab('unknown')).toBe('conversation')

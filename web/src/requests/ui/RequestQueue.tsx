@@ -1,5 +1,10 @@
-import type { RequestSubmissionActionInput } from '@mukuroji/contracts'
+import type {
+  AiTriageDraft,
+  RequestSubmissionActionInput,
+} from '@mukuroji/contracts'
 import { useMemo, useState, type FormEvent, type ReactNode } from 'react'
+import type { AiAssistanceController } from '../../features/ai-assistance/mutations/useAiAssistanceController'
+import { AiTriageDraftComposer } from '../../features/ai-assistance/ui/AiTriageDraftComposer'
 import { createTranslator, type Locale } from '../../shared/i18n/i18n'
 import { createProjectIssuesPath, createTeamIssuesPath } from '../../shared/routing/paths'
 import {
@@ -11,6 +16,12 @@ import { resolveRequestLocalizedText } from '../model/requestFormLogic'
  * RequestQueue の入力です。
  */
 export type RequestQueueProps = {
+  /** Active Workspace member bearer token used only for explicit AI generation. */
+  accessToken?: string
+  /** Optional AI controller override for isolated interaction stories. */
+  aiAssistanceController?: AiAssistanceController
+  /** Whether the current principal may send administrator-only intake content to AI. */
+  canUseAiAssistance?: boolean
   /**
    * 表示 locale です。
    */
@@ -70,6 +81,9 @@ type ActionMode = RequestSubmissionActionInput['action'] | undefined
  * Intake queue の一覧、historical response、thread、明示的 action を描画します。
  */
 export function RequestQueue({
+  accessToken,
+  aiAssistanceController,
+  canUseAiAssistance,
   errorMessage,
   hasMore = false,
   isLoading = false,
@@ -164,6 +178,9 @@ export function RequestQueue({
       </section>
 
       <RequestSubmissionDetail
+        accessToken={accessToken}
+        aiAssistanceController={aiAssistanceController}
+        canUseAiAssistance={canUseAiAssistance ?? Boolean(aiAssistanceController)}
         key={selectedSubmission?.id ?? 'empty'}
         locale={locale}
         submission={selectedSubmission}
@@ -175,11 +192,17 @@ export function RequestQueue({
 }
 
 function RequestSubmissionDetail({
+  accessToken,
+  aiAssistanceController,
+  canUseAiAssistance,
   locale,
   onAction,
   onOpenAttachment,
   submission,
 }: {
+  accessToken?: string
+  aiAssistanceController?: AiAssistanceController
+  canUseAiAssistance: boolean
   locale: Locale
   onAction?: RequestQueueProps['onAction']
   onOpenAttachment?: RequestQueueProps['onOpenAttachment']
@@ -201,6 +224,13 @@ function RequestSubmissionDetail({
     setActionValue(value)
     setDescriptionOverride('')
     setTitleOverride('')
+  }
+
+  /** Copies only fields supported by the existing revision-fenced conversion form. */
+  const adoptTriageDraft = (draft: AiTriageDraft) => {
+    activateAction('convert')
+    setTitleOverride(draft.title?.value ?? '')
+    setDescriptionOverride(draft.description?.value ?? '')
   }
 
   if (!submission) {
@@ -369,6 +399,25 @@ function RequestSubmissionDetail({
           <a className="workbench-button-primary inline-flex min-h-10 items-center justify-center px-4 no-underline" href={workItemPath}>
             {t('requests.detail.workItem')}
           </a>
+        ) : null}
+
+        {submission.capabilities.canConvert &&
+        canUseAiAssistance &&
+        (accessToken || aiAssistanceController) ? (
+          <AiTriageDraftComposer
+            accessToken={accessToken}
+            adoptLabel={t('ai.triage.adoptRequest')}
+            controller={aiAssistanceController}
+            locale={locale}
+            onAdoptDraft={adoptTriageDraft}
+            source={{
+              expectedRevision: submission.revision,
+              formId: submission.formId,
+              submissionId: submission.id,
+              type: 'request-submission',
+            }}
+            t={t}
+          />
         ) : null}
 
         <div className="flex flex-wrap gap-2 border-t border-[var(--workbench-border)] pt-4">

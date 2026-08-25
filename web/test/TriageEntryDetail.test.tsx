@@ -1,9 +1,23 @@
 import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
+import type { AiAssistanceController } from '../src/features/ai-assistance/mutations/useAiAssistanceController'
+import { aiTriageGenerationFixture } from '../src/features/ai-assistance/fixtures'
 import { createTranslator } from '../src/shared/i18n/i18n'
 import { triageEntryFixtures } from '../src/triage/fixtures'
 import { createTriageEntryView } from '../src/triage/model/triageView'
 import { TriageEntryDetail } from '../src/triage/ui/TriageEntryDetail'
+
+const aiController: AiAssistanceController = {
+  cancelGeneration: () => undefined,
+  decide: async () => undefined,
+  generate: async () => aiTriageGenerationFixture,
+  generation: aiTriageGenerationFixture,
+  isDecisionPending: false,
+  isFeedbackPending: false,
+  isGenerating: false,
+  reset: () => undefined,
+  sendFeedback: async () => undefined,
+}
 
 describe('TriageEntryDetail', () => {
   test('renders source trace and safe action forms for full visibility', () => {
@@ -11,8 +25,11 @@ describe('TriageEntryDetail', () => {
     if (!entry) throw new Error('Expected a triage fixture.')
     const html = renderToStaticMarkup(
       <TriageEntryDetail
+        accessToken="access-token"
+        aiAssistanceController={aiController}
         locale="en"
         t={createTranslator('en')}
+        teamId="core-team"
         view={createTriageEntryView(entry)}
         onBack={() => undefined}
       />,
@@ -24,6 +41,9 @@ describe('TriageEntryDetail', () => {
     expect(html).toContain('Accept')
     expect(html).toContain('Change routing')
     expect(html).toContain('Request information')
+    expect(html).toContain('data-testid="ai-triage-composer"')
+    expect(html).toContain('Unblock customer Workspace provisioning')
+    expect(html).toContain('Provisioning intake source')
   })
 
   test('does not render source body, email, routing, or reply action for metadata-only access', () => {
@@ -31,8 +51,11 @@ describe('TriageEntryDetail', () => {
     if (!entry) throw new Error('Expected a triage fixture.')
     const html = renderToStaticMarkup(
       <TriageEntryDetail
+        accessToken="access-token"
+        aiAssistanceController={aiController}
         locale="en"
         t={createTranslator('en')}
+        teamId="core-team"
         view={createTriageEntryView(entry)}
         onBack={() => undefined}
       />,
@@ -41,6 +64,9 @@ describe('TriageEntryDetail', () => {
     expect(html).not.toContain('This body must not be rendered')
     expect(html).not.toContain('Billing mailbox default route')
     expect(html).not.toContain('Request information')
+    expect(html).not.toContain('data-testid="ai-triage-composer"')
+    expect(html).not.toContain('Unblock customer Workspace provisioning')
+    expect(html).not.toContain('Provisioning intake source')
     expect(html).toContain('Metadata only')
   })
 
@@ -49,8 +75,11 @@ describe('TriageEntryDetail', () => {
     if (!entry) throw new Error('Expected a triage fixture.')
     const html = renderToStaticMarkup(
       <TriageEntryDetail
+        accessToken="access-token"
+        aiAssistanceController={aiController}
         locale="en"
         t={createTranslator('en')}
+        teamId="core-team"
         view={createTriageEntryView(entry)}
         onBack={() => undefined}
       />,
@@ -58,6 +87,9 @@ describe('TriageEntryDetail', () => {
 
     expect(html).not.toContain('This denied title must never render')
     expect(html).not.toContain('This denied body must never render')
+    expect(html).not.toContain('data-testid="ai-triage-composer"')
+    expect(html).not.toContain('Unblock customer Workspace provisioning')
+    expect(html).not.toContain('Provisioning intake source')
     expect(html).toContain('Source unavailable')
     expect(html).toContain('No actions are available')
   })
@@ -69,6 +101,7 @@ describe('TriageEntryDetail', () => {
         locale="en"
         onBack={() => undefined}
         t={createTranslator('en')}
+        teamId="core-team"
         view={undefined}
       />,
     )

@@ -180,6 +180,7 @@ export const documentsMessages = {
   'documents.context.backlinks': '関連',
   'documents.context.versions': '履歴',
   'documents.context.activity': 'アクティビティ',
+  'documents.context.brief': 'Brief',
   'documents.comments.anchor': '対象',
   'documents.comments.pageAnchor': 'ページ全体',
   'documents.comments.body': 'コメント',
