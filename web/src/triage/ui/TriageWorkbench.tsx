@@ -26,6 +26,8 @@ export type TriageWorkbenchProps = {
   readonly accessToken?: string
   /** Optional AI controller override for isolated interaction stories. */
   readonly aiAssistanceController?: AiAssistanceController
+  /** Reports authenticated AI failures to the owning Team route session guard. */
+  readonly onAuthenticatedApiError?: (error: unknown) => void
   /** Team route identifier used for permission-scoped generation references. */
   readonly teamId: string
   /** Permission-safe bulk operation kinds enabled for the Team queue. */
@@ -148,6 +150,7 @@ export function TriageWorkbench({
   isQueuePermissionDenied = false,
   isSavingConfiguration = false,
   locale,
+  onAuthenticatedApiError,
   onAction,
   onBackToQueue,
   onBulkAction,
@@ -270,6 +273,7 @@ export function TriageWorkbench({
                 <TriageEntryDetail
                   accessToken={accessToken}
                   aiAssistanceController={aiAssistanceController}
+                  onAuthenticatedApiError={onAuthenticatedApiError}
                   errorMessage={detailErrorMessage}
                   isLoading={isDetailLoading}
                   isPending={pendingEntryId === selectedEntry?.entry.id}

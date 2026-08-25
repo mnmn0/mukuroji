@@ -29,6 +29,8 @@ export type TriageEntryDetailProps = {
   readonly accessToken?: string
   /** Optional AI controller override for isolated interaction stories. */
   readonly aiAssistanceController?: AiAssistanceController
+  /** Reports authenticated AI failures to the owning Team route session guard. */
+  readonly onAuthenticatedApiError?: (error: unknown) => void
   /** Team route identifier used to scope the AI source reference. */
   readonly teamId: string
   /** Selected permission-safe entry view. */
@@ -80,6 +82,7 @@ export function TriageEntryDetail({
   isLoading = false,
   isPending = false,
   locale,
+  onAuthenticatedApiError,
   onAction,
   onActionComplete,
   onBack,
@@ -285,6 +288,7 @@ export function TriageEntryDetail({
                 adoptLabel={t('ai.triage.adoptTeam')}
                 controller={aiAssistanceController}
                 locale={locale}
+                onAuthenticatedApiError={onAuthenticatedApiError}
                 onAdoptDraft={adoptTriageDraft}
                 source={{
                   expectedRevision: entry.revision,

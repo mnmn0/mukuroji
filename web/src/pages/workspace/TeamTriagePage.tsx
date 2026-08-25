@@ -138,6 +138,10 @@ export function TeamTriagePage() {
         isQueuePermissionDenied={queue.error instanceof TriageApiError && queue.error.status === 403}
         isSavingConfiguration={mutation.isSavingSettings}
         locale={workspace.locale}
+        onAuthenticatedApiError={(error) => {
+          const action = workspace.resolveSessionErrors([error])
+          if (action) workspace.onSessionErrorAction(action)
+        }}
         pendingEntryId={mutation.pendingEntryId}
         queueErrorMessage={queueErrorMessage}
         routeView={routeState.view}
