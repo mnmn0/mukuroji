@@ -144,6 +144,7 @@ export function IssueConversationTab({
   const [isResolutionSaving, setIsResolutionSaving] = useState(false)
   const focusLoadRequestRef = useRef<string | undefined>(undefined)
   const focusedCommentTargetRef = useRef<string | undefined>(undefined)
+  const focusedCommentElementRef = useRef<HTMLElement | undefined>(undefined)
   const rootDeepLinkTraversalRef = useRef<DeepLinkTraversalState>({
     requestedPages: 0,
   })
@@ -221,23 +222,39 @@ export function IssueConversationTab({
     if (!focusedCommentTargetId) {
       focusLoadRequestRef.current = undefined
       focusedCommentTargetRef.current = undefined
+      focusedCommentElementRef.current = undefined
       rootDeepLinkTraversalRef.current = { requestedPages: 0 }
       replyDeepLinkTraversalRef.current = { requestedPages: 0 }
       queueMicrotask(() => setDeepLinkExhausted(false))
       return
     }
 
+    const target = document.getElementById(
+      createCommentAnchorId(focusedCommentTargetId),
+    )
+
+    // A collaboration refresh can replace the focused comment node without
+    // changing its ID. Remember the node itself so the route focus is restored
+    // for the replacement, while leaving focus alone when the viewer moved to
+    // another control intentionally (for example, the watch button).
+    const previousTarget = focusedCommentElementRef.current
+    const activeElement = document.activeElement
+    const viewerMovedFocus =
+      focusedCommentTargetRef.current === focusedCommentTargetId &&
+      previousTarget !== undefined &&
+      previousTarget !== target &&
+      activeElement !== previousTarget &&
+      activeElement !== document.body &&
+      activeElement !== document.documentElement
     if (
-      focusedCommentTargetRef.current === focusedCommentTargetId ||
+      (focusedCommentTargetRef.current === focusedCommentTargetId &&
+        previousTarget === target) ||
+      viewerMovedFocus ||
       focusIsLoading ||
       focusHasLoadError
     ) {
       return
     }
-
-    const target = document.getElementById(
-      createCommentAnchorId(focusedCommentTargetId),
-    )
 
     if (!target) {
       const rootLoaded = focusedRootTargetId
@@ -294,9 +311,11 @@ export function IssueConversationTab({
     focusLoadRequestRef.current = undefined
     queueMicrotask(() => setDeepLinkExhausted(false))
     const frameId = window.requestAnimationFrame(() => {
+      if (!target.isConnected) return
       target.scrollIntoView({ behavior: 'auto', block: 'center' })
       target.focus({ preventScroll: true })
       focusedCommentTargetRef.current = focusedCommentTargetId
+      focusedCommentElementRef.current = target
     })
 
     return () => window.cancelAnimationFrame(frameId)

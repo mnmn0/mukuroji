@@ -111,4 +111,18 @@ describe('AI workflow integration surfaces', () => {
     expect(adoptCount).toBe(0)
     expect(generateCount).toBe(0)
   })
+
+  test('does not focus or render a replacement prompt before a Work Item draft exists', () => {
+    const html = renderToStaticMarkup(
+      <AiWorkItemPlanningAssistantView
+        locale="en"
+        onDecide={async () => undefined}
+        onGenerate={() => undefined}
+        t={t}
+      />,
+    )
+
+    expect(html).not.toContain('Keep or replace your manual edits?')
+    expect(html).not.toContain('Replace with AI draft')
+  })
 })

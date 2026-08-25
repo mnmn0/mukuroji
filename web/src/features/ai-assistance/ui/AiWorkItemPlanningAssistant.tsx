@@ -153,7 +153,8 @@ export function AiWorkItemPlanningAssistantView({
   const hasInvalidAvailableDraft = generation?.content.availability === 'available' &&
     !availableDraft
   const isOperationPending = isGenerating || isDecisionPending || isFeedbackPending
-  const isAdoptionConfirmationVisible = confirmationGenerationId === generation?.id
+  const isAdoptionConfirmationVisible = confirmationGenerationId !== undefined &&
+    confirmationGenerationId === generation?.id
 
   useEffect(() => {
     if (isAdoptionConfirmationVisible) confirmationRef.current?.focus()
