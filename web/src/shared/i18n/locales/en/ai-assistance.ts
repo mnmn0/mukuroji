@@ -23,6 +23,7 @@ export const aiAssistanceMessages = {
   'ai.review.cost': 'Cost',
   'ai.review.costUnavailable': 'Cost unavailable',
   'ai.review.adopt': 'Adopt draft',
+  'ai.review.approve': 'Approve draft',
   'ai.review.reject': 'Reject draft',
   'ai.review.approved': 'Recorded as reviewed.',
   'ai.review.rejected': 'Recorded as rejected.',

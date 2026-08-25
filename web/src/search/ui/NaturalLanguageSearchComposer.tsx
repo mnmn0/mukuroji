@@ -448,7 +448,7 @@ export function AiSearchDraftEditor({
             {customFields.map((filter, index) => (
               <CustomFieldDraftRow
                 filter={filter}
-                key={`${filter.fieldId}-${index}`}
+                key={index}
                 onChange={(patch) => onChange({
                   ...filters,
                   customFields: updateAiSearchCustomField(customFields, index, patch),
@@ -563,7 +563,15 @@ function CustomFieldDraftRow({ filter, onChange, onRemove, t }: CustomFieldDraft
         {t('search.filters.operator')}
         <select
           className="workbench-input min-h-[44px] px-3"
-          onChange={(event) => onChange({ operator: readAiSearchCustomFieldOperator(event.target.value) })}
+          onChange={(event) => {
+            const operator = readAiSearchCustomFieldOperator(event.target.value)
+            onChange({
+              operator,
+              ...(operator === 'is-empty' || operator === 'is-not-empty'
+                ? { value: undefined }
+                : {}),
+            })
+          }}
           value={filter.operator}
         >
           {aiSearchCustomFieldOperators.map((operator) => (

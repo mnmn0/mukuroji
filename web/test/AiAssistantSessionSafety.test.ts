@@ -90,7 +90,6 @@ describe('Planning AI draft adoption safety', () => {
     if (!draft) throw new Error('Planning fixture must include a status update.')
 
     let appliedCount = 0
-    const publishCount = 0
     const result = routeAiPlanningDraftAdoption(draft, false, {
       apply: () => { appliedCount += 1 },
       confirm: () => undefined,
@@ -98,7 +97,6 @@ describe('Planning AI draft adoption safety', () => {
 
     expect(result).toBe('applied')
     expect(appliedCount).toBe(1)
-    expect(publishCount).toBe(0)
   })
 
   test('uses the same confirmation boundary for a complete Work Item plan', () => {
@@ -107,16 +105,16 @@ describe('Planning AI draft adoption safety', () => {
       throw new Error('Planning fixture must stay available.')
     }
 
-    let stagedDraft = content.draft
+    let stagedDraft: typeof content.draft | undefined
     const result = routeAiPlanningDraftAdoption(content.draft, true, {
       apply: () => undefined,
       confirm: (draft) => { stagedDraft = draft },
     })
 
     expect(result).toBe('confirmation-required')
-    expect(stagedDraft.subtasks).toHaveLength(1)
-    expect(stagedDraft.dependencies).toHaveLength(1)
-    expect(stagedDraft.plannedEffortMinutes?.value).toBe(240)
+    expect(stagedDraft?.subtasks).toHaveLength(1)
+    expect(stagedDraft?.dependencies).toHaveLength(1)
+    expect(stagedDraft?.plannedEffortMinutes?.value).toBe(240)
   })
 })
 

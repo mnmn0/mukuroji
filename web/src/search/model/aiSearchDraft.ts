@@ -140,7 +140,7 @@ export function parseAiSearchCustomFieldValue(value: string): SearchCustomFieldV
   if (normalized === 'true') return true
   if (normalized === 'false') return false
   if (normalized === 'null') return null
-  if (normalized && Number.isFinite(Number(normalized))) return Number(normalized)
+  if (isCanonicalNumberLiteral(normalized)) return Number(normalized)
   if (normalized.startsWith('[')) {
     try {
       const parsed: unknown = JSON.parse(normalized)
@@ -153,6 +153,11 @@ export function parseAiSearchCustomFieldValue(value: string): SearchCustomFieldV
   }
 
   return value
+}
+
+/** Returns whether text is a canonical base-ten integer accepted by Search. */
+function isCanonicalNumberLiteral(value: string): boolean {
+  return value !== '-0' && /^-?(?:0|[1-9]\d*)$/u.test(value)
 }
 
 /**

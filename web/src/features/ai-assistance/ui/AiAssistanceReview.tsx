@@ -1,6 +1,5 @@
 import type {
   AiAssistanceCitation,
-  AiAssistanceConfidence,
   AiAssistanceDraft,
   AiAssistanceGeneration,
   CreateAiAssistanceFeedbackRequest,
@@ -15,6 +14,7 @@ import {
   ShieldIcon,
 } from '../../../shared/ui/icons'
 import type { AiAssistanceErrorKind } from '../mutations/useAiAssistanceController'
+import { ConfidenceBadge } from './ConfidenceBadge'
 
 /** Permission-safe content passed to a workflow-specific draft renderer. */
 export type AiAssistanceAvailableReview = {
@@ -123,7 +123,7 @@ export function AiAssistanceReview({
         ) : null}
       </header>
 
-      <div aria-live="polite" className="mt-4 grid gap-4">
+      <div className="mt-4 grid gap-4">
         {isGenerating ? (
           <div className="grid gap-3" role="status">
             <span className="text-app-body font-semibold text-[var(--workbench-text)]">
@@ -254,7 +254,7 @@ function AiCitationList({ citations, t, titleId }: AiCitationListProps) {
         <ol className="divide-y divide-[var(--workbench-border)] border-y border-[var(--workbench-border)]">
           {citations.map((citation) => (
             <li className="grid gap-1 py-3" key={citation.id}>
-              <a className="inline-flex min-h-[44px] items-center gap-2 font-semibold text-[var(--workbench-primary)] underline-offset-2 hover:underline" href={citation.href}>
+              <a className="inline-flex min-h-[44px] items-center gap-2 font-semibold text-[var(--workbench-primary)] underline-offset-2 hover:underline" href={citation.href} rel="noreferrer" target="_blank">
                 <span>{citation.label}</span>
                 <ExternalLinkIcon className="h-4 w-4 fill-none stroke-current stroke-2" />
               </a>
@@ -269,29 +269,6 @@ function AiCitationList({ citations, t, titleId }: AiCitationListProps) {
         </ol>
       )}
     </section>
-  )
-}
-
-/** Props for a confidence label that never relies on color alone. */
-type ConfidenceBadgeProps = {
-  /** Confidence category returned by the server. */
-  confidence: AiAssistanceConfidence
-  /** Localized message resolver. */
-  t: (key: MessageKey) => string
-}
-
-/** Renders an explicit confidence label with a semantic color accent. */
-function ConfidenceBadge({ confidence, t }: ConfidenceBadgeProps) {
-  const className = confidence === 'high'
-    ? 'border-green-200 bg-green-50 text-green-800'
-    : confidence === 'medium'
-      ? 'border-amber-200 bg-amber-50 text-amber-800'
-      : 'border-red-200 bg-red-50 text-red-800'
-
-  return (
-    <span className={`rounded-md border px-2 py-1 text-app-caption font-semibold ${className}`}>
-      {t(`ai.review.confidence.${confidence}`)}
-    </span>
   )
 }
 

@@ -41,6 +41,7 @@ import {
 import type { ProjectDirectoryTeam } from '../projects/api'
 import { useProjectDirectory } from '../projects/queries/useProjectDirectory'
 import { createDocumentPath } from '../shared/routing/paths'
+import { useWorkspaceRouteContext } from '../workspace/ui/WorkspaceRouteProvider'
 import {
   applyDocumentOperations,
   applyDocumentOperationsWithConflictAwareness,
@@ -367,6 +368,8 @@ export type DocumentScreenActions = {
 export type DocumentScreenProps = {
   /** Active Workspace member token used only for explicit AI Brief requests. */
   aiAssistanceAccessToken?: string
+  /** Reports authenticated AI failures to the owning document route session guard. */
+  onAuthenticatedApiError?: (error: unknown) => void
   /**
    * 表示 locale です。
    */
@@ -423,6 +426,7 @@ export type DocumentScreenProps = {
  * 認証・SWR・Documents API を presentation screen へ接続する route page です。
  */
 export function DocumentPage() {
+  const workspace = useWorkspaceRouteContext()
   const navigate = useNavigate()
   const { closeMobileSidebar } = useWorkspaceSidebarController()
   const params = useParams()
@@ -1329,6 +1333,10 @@ export function DocumentPage() {
   return (
     <DocumentScreen
       aiAssistanceAccessToken={accessToken}
+      onAuthenticatedApiError={(error) => {
+        const action = workspace.resolveSessionErrors([error])
+        if (action) workspace.onSessionErrorAction(action)
+      }}
       key={contextInstanceKey}
       actions={{
         applyOperations: handleApplyOperations,
@@ -1424,6 +1432,7 @@ export function DocumentScreen({
   isContextLoading = false,
   isLoading = false,
   locale,
+  onAuthenticatedApiError,
   onContextTabChange,
   onNavigationGuardChange,
   userInitial,
@@ -1860,6 +1869,7 @@ export function DocumentScreen({
                   isLoading={isContextLoading}
                   locale={locale}
                   modal={isContextModal}
+                  onAuthenticatedApiError={onAuthenticatedApiError}
                   t={t}
                   versions={data.versions}
                   onClose={() => changeContextTab(undefined)}

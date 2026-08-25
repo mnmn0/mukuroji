@@ -23,6 +23,7 @@ export const aiAssistanceMessages = {
   'ai.review.cost': 'Cost',
   'ai.review.costUnavailable': 'Cost 未取得',
   'ai.review.adopt': 'Draft を採用',
+  'ai.review.approve': 'Draft を承認',
   'ai.review.reject': 'Draft を却下',
   'ai.review.approved': '確認済みとして記録しました。',
   'ai.review.rejected': '却下として記録しました。',

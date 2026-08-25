@@ -7,6 +7,7 @@ import {
   type KeyboardEvent,
 } from 'react'
 import type {
+  AiAssistanceCitation,
   AiSummaryDraft,
   AiWorkItemSource,
   CuratedContextSource,
@@ -244,9 +245,12 @@ export function IssueCollaborationPanel({
   }
 
   /** Opens an approved AI summary in the existing human-owned context editor. */
-  function openAiSummaryDraft(draft: AiSummaryDraft) {
+  function openAiSummaryDraft(
+    draft: AiSummaryDraft,
+    citations: readonly AiAssistanceCitation[],
+  ) {
     setPromotedContextDraft({
-      body: formatAiSummaryContextBody(draft, t),
+      body: formatAiSummaryContextBody(draft, citations, t),
       kind: 'context',
       title: t('ai.summary.contextDraftTitle'),
     })
@@ -488,12 +492,12 @@ export function IssueCollaborationPanel({
               locale={locale}
               onAuthenticatedApiError={onAuthenticatedApiError}
               onAdopt={controller.context.capabilities.canCreate && !contextDraft
-                ? (draft) => {
+                ? (draft, citations) => {
                     if (
                       activeAiAssistantSessionKeyRef.current !==
                       aiAssistantSessionKey
                     ) return
-                    openAiSummaryDraft(draft)
+                    openAiSummaryDraft(draft, citations)
                   }
                 : undefined}
               sources={[aiAssistance.source]}
@@ -549,22 +553,37 @@ export function IssueCollaborationPanel({
  * Formats an approved summary as an editable context draft without persisting it.
  *
  * @param draft - Currently authorized summary returned after approval.
+ * @param citations - Permission-safe citations returned with the approved draft.
  * @param t - Localized label resolver.
  * @returns Markdown-like plain text for the existing human-owned editor.
  */
 function formatAiSummaryContextBody(
   draft: AiSummaryDraft,
+  citations: readonly AiAssistanceCitation[],
   t: (key: MessageKey) => string,
 ): string {
+  const citationById = new Map(citations.map((citation) => [citation.id, citation]))
+  const formatItem = (item: AiSummaryDraft['overview']): string[] => {
+    const lines = [`- ${item.text}`]
+    const evidence = item.citationIds
+      .map((citationId) => citationById.get(citationId))
+      .filter((citation): citation is AiAssistanceCitation => citation !== undefined)
+      .map((citation) => {
+        const label = citation.label.replace(/[\\[\]]/gu, '\\$&')
+        return `[${label}](${citation.href})`
+      })
+    if (evidence.length > 0) lines.push(`  Evidence: ${evidence.join(', ')}`)
+    return lines
+  }
   const sections = [
     [t('ai.summary.decisions'), draft.decisions],
     [t('ai.summary.actions'), draft.actions],
     [t('ai.summary.risks'), draft.risks],
   ] as const
-  const lines = [draft.overview.text]
+  const lines = [draft.overview.text, ...formatItem(draft.overview).slice(1)]
   for (const [title, items] of sections) {
     if (items.length === 0) continue
-    lines.push('', `## ${title}`, ...items.map((item) => `- ${item.text}`))
+    lines.push('', `## ${title}`, ...items.flatMap(formatItem))
   }
   return lines.join('\n')
 }

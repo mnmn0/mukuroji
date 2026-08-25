@@ -97,6 +97,8 @@ export type DocumentContextPanelProps = {
   modal?: boolean
   /** Locale sent to Bedrock and used for AI generation metadata. */
   locale?: Locale
+  /** Reports authenticated AI failures to the owning document session guard. */
+  onAuthenticatedApiError?: (error: unknown) => void
   /**
    * 表示文言を解決する翻訳関数です。
    */
@@ -172,6 +174,7 @@ export function DocumentContextPanel({
   onClose,
   onCreateComment,
   onDeleteRelation,
+  onAuthenticatedApiError,
   onNavigate,
   onLoadMoreBacklinks,
   onLoadMoreComments,
@@ -364,6 +367,7 @@ export function DocumentContextPanel({
                 type: 'document',
               })}
               locale={locale}
+              onAuthenticatedApiError={onAuthenticatedApiError}
               sources={[{
                 documentId: document.id,
                 expectedRevision: document.revision,

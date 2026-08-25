@@ -2,8 +2,12 @@ import type {
   AiAssistanceCitation,
   AiAssistanceDraft,
   AiAssistanceGeneration,
+  AiAssistanceSource,
   AiAssistanceTask,
   AiBriefItem,
+  SearchCustomFieldOperator,
+  SearchEntityType,
+  WorkspaceSearchDateField,
 } from '@mukuroji/contracts'
 import { isSafeApplicationPath } from '../../../shared/routing/applicationPath'
 
@@ -14,7 +18,7 @@ const sourceTypeValues = [
   'work-item',
   'document',
   'planning-target',
-] as const
+] as const satisfies readonly AiAssistanceSource['type'][]
 const entityTypeValues = [
   'work-item',
   'project',
@@ -23,7 +27,7 @@ const entityTypeValues = [
   'context-item',
   'file',
   'document',
-] as const
+] as const satisfies readonly SearchEntityType[]
 const customFieldOperatorValues = [
   'equals',
   'not-equals',
@@ -34,7 +38,18 @@ const customFieldOperatorValues = [
   'less-than-or-equal',
   'is-empty',
   'is-not-empty',
-] as const
+] as const satisfies readonly SearchCustomFieldOperator[]
+const aiAssistanceTaskValues = [
+  'triage',
+  'summary',
+  'search',
+  'planning',
+] as const satisfies readonly AiAssistanceTask[]
+const searchDateFieldValues = [
+  'createdAt',
+  'updatedAt',
+  'dueDate',
+] as const satisfies readonly WorkspaceSearchDateField[]
 
 /**
  * Returns whether an unknown value is a fully grounded available generation for one workflow.
@@ -263,7 +278,7 @@ function isSuggestedValue(
 /** Validates a custom-field suggestion and its supported value. */
 function isSuggestedCustomField(value: unknown): boolean {
   return isRecord(value) &&
-    isNonEmptyString(value.fieldId) &&
+    isBoundedString(value.fieldId, 256) &&
     isSuggestedValue(value, isCustomFieldValue)
 }
 
@@ -271,7 +286,7 @@ function isSuggestedCustomField(value: unknown): boolean {
 function hasUniqueSuggestedCustomFieldIds(items: readonly unknown[]): boolean {
   const fieldIds = new Set<string>()
   for (const item of items) {
-    if (!isRecord(item) || !isNonEmptyString(item.fieldId) || fieldIds.has(item.fieldId)) {
+    if (!isRecord(item) || !isBoundedString(item.fieldId, 256) || fieldIds.has(item.fieldId)) {
       return false
     }
     fieldIds.add(item.fieldId)
@@ -297,26 +312,27 @@ function isBriefItemArray(value: unknown): value is AiBriefItem[] {
 function isWorkspaceSearchFilters(value: unknown): boolean {
   if (!isRecord(value)) return false
 
-  return isOptionalString(value.keyword) &&
-    isOptionalEnumArray(value.entityTypes, entityTypeValues) &&
-    isOptionalStringArray(value.assigneeUserIds) &&
-    isOptionalStringArray(value.creatorUserIds) &&
-    isOptionalStringArray(value.statuses) &&
+  return isOptionalBoundedString(value.keyword, 256) &&
+    isOptionalEnumArray(value.entityTypes, entityTypeValues, entityTypeValues.length) &&
+    isOptionalStringArray(value.assigneeUserIds, 100, 512) &&
+    isOptionalStringArray(value.creatorUserIds, 100, 512) &&
+    isOptionalStringArray(value.statuses, 100, 512) &&
     isOptionalCustomFieldArray(value.customFields) &&
-    isOptionalStringArray(value.relationIds) &&
+    isOptionalStringArray(value.relationIds, 100, 512) &&
     (value.date === undefined || isSearchDate(value.date)) &&
-    isOptionalStringArray(value.projectIds) &&
-    isOptionalStringArray(value.teamIds)
+    isOptionalStringArray(value.projectIds, 100, 512) &&
+    isOptionalStringArray(value.teamIds, 100, 512)
 }
 
 /** Validates a Workspace search date boundary. */
 function isSearchDate(value: unknown): boolean {
   if (
     !isRecord(value) ||
-    !isOneOf(value.field, ['createdAt', 'updatedAt', 'dueDate']) ||
+    !isOneOf(value.field, searchDateFieldValues) ||
     !isOptionalCalendarDate(value.from) ||
     !isOptionalCalendarDate(value.to)
   ) return false
+  if (value.from === undefined && value.to === undefined) return false
   if (value.from === undefined || value.to === undefined) return true
   return value.from <= value.to
 }
@@ -353,11 +369,11 @@ function isCalendarDate(value: unknown): value is string {
 /** Validates an optional array of custom-field filters. */
 function isOptionalCustomFieldArray(value: unknown): boolean {
   if (value === undefined) return true
-  if (!Array.isArray(value)) return false
+  if (!Array.isArray(value) || value.length > 50) return false
   for (const filter of value) {
     if (
       !isRecord(filter) ||
-      !isNonEmptyString(filter.fieldId) ||
+      !isBoundedString(filter.fieldId, 256) ||
       !isOneOf(filter.operator, customFieldOperatorValues) ||
       (filter.value === undefined &&
         filter.operator !== 'is-empty' &&
@@ -485,10 +501,12 @@ function isDecision(value: unknown): boolean {
 /** Validates a supported custom-field value. */
 function isCustomFieldValue(value: unknown): boolean {
   return value === null ||
-    isString(value) ||
+    (isString(value) && value.length <= 20_000) ||
     isFiniteNumber(value) ||
     typeof value === 'boolean' ||
-    (Array.isArray(value) && value.every(isString))
+    (Array.isArray(value) &&
+      value.length <= 100 &&
+      value.every((item) => isBoundedString(item, 512)))
 }
 
 /** Validates a built-in Work Item priority. */
@@ -498,7 +516,7 @@ function isPriority(value: unknown): boolean {
 
 /** Validates one supported AI assistance workflow discriminator. */
 function isAiAssistanceTask(value: unknown): value is AiAssistanceTask {
-  return isOneOf(value, ['triage', 'summary', 'search', 'planning'])
+  return isOneOf(value, aiAssistanceTaskValues)
 }
 
 /** Validates an AI confidence label. */
@@ -512,17 +530,28 @@ function isOptionalString(value: unknown): boolean {
 }
 
 /** Validates an optional string array. */
-function isOptionalStringArray(value: unknown): boolean {
-  return value === undefined || isStringArray(value)
+function isOptionalStringArray(
+  value: unknown,
+  maximumItems = Number.POSITIVE_INFINITY,
+  maximumLength = Number.POSITIVE_INFINITY,
+): boolean {
+  return value === undefined || (
+    Array.isArray(value) &&
+    value.length <= maximumItems &&
+    value.every((item) => isBoundedString(item, maximumLength))
+  )
 }
 
 /** Validates an optional array whose members belong to a fixed string set. */
 function isOptionalEnumArray(
   value: unknown,
   allowed: readonly string[],
+  maximumItems = Number.POSITIVE_INFINITY,
 ): boolean {
   return value === undefined || (
-    Array.isArray(value) && value.every((item) => isOneOf(item, allowed))
+    Array.isArray(value) &&
+    value.length <= maximumItems &&
+    value.every((item) => isOneOf(item, allowed))
   )
 }
 
@@ -551,6 +580,22 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0
 }
 
+/** Validates a non-empty trimmed string within a protocol length bound. */
+function isBoundedString(value: unknown, maximumLength: number): value is string {
+  return typeof value === 'string' &&
+    value.length > 0 &&
+    value.length <= maximumLength &&
+    value === value.trim()
+}
+
+/** Validates an optional bounded string without changing its representation. */
+function isOptionalBoundedString(value: unknown, maximumLength: number): value is string | undefined {
+  return value === undefined || (
+    typeof value === 'string' &&
+    value.length <= maximumLength
+  )
+}
+
 /** Validates a finite number. */
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value)
@@ -576,9 +621,33 @@ function isBoundedLagDays(value: unknown): value is number {
 
 /** Validates an ISO 8601 instant with an explicit UTC designator or numeric offset. */
 function isIsoInstant(value: unknown): value is string {
-  return typeof value === 'string' &&
-    /(?:Z|[+-]\d{2}:\d{2})$/u.test(value) &&
-    Number.isFinite(Date.parse(value))
+  if (typeof value !== 'string') return false
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,3})?(Z|[+-](?:0\d|1\d|2[0-3]):[0-5]\d)$/u.exec(value)
+  if (!match) return false
+  const year = Number(match[1])
+  const month = Number(match[2])
+  const day = Number(match[3])
+  const hour = Number(match[4])
+  const minute = Number(match[5])
+  const second = Number(match[6])
+  const leapYear = year % 400 === 0 || (year % 4 === 0 && year % 100 !== 0)
+  const daysInMonth = [
+    31,
+    leapYear ? 29 : 28,
+    31,
+    30,
+    31,
+    30,
+    31,
+    31,
+    30,
+    31,
+    30,
+    31,
+  ][month - 1] ?? 0
+  return month >= 1 && month <= 12 && day >= 1 && day <= daysInMonth &&
+    hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59 &&
+    second >= 0 && second <= 59 && Number.isFinite(Date.parse(value))
 }
 
 /** Validates a non-negative integer. */

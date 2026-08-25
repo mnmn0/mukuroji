@@ -28,12 +28,17 @@ export function applyApprovedAiSearchToRouteState(
   application: ApprovedAiSearchApplication,
 ): SearchRouteState {
   const groupBy = application.report?.groupBy
-  const layout: SearchViewLayout = groupBy
-    ? {
-        ...state.layout,
-        groupBy,
-        mode: 'board',
-      }
+  const layout: SearchViewLayout = application.report
+    ? groupBy
+      ? {
+          ...state.layout,
+          groupBy,
+          mode: 'board',
+        }
+      : {
+          ...state.layout,
+          groupBy: undefined,
+        }
     : state.layout
 
   return updateSearchRouteState(state, {

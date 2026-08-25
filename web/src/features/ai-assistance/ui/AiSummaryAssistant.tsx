@@ -1,4 +1,5 @@
 import type {
+  AiAssistanceCitation,
   AiAssistanceGeneration,
   AiAssistanceSource,
   AiSummaryDraft,
@@ -27,7 +28,10 @@ export type AiSummaryAssistantProps = {
   /** Locale sent to Bedrock and used for generation metadata. */
   locale: Locale
   /** Opens the approved summary in an existing human-owned draft workflow. */
-  onAdopt?: (draft: AiSummaryDraft) => void | Promise<void>
+  onAdopt?: (
+    draft: AiSummaryDraft,
+    citations: readonly AiAssistanceCitation[],
+  ) => void | Promise<void>
   /** Permission-safe source references resolved again by the server. */
   sources: AiAssistanceSource[]
   /** Localized message resolver. */
@@ -99,7 +103,10 @@ export type AiSummaryAssistantViewProps = {
   /** Locale used for generation metadata. */
   locale: Locale
   /** Opens an approved summary in a human-owned draft workflow. */
-  onAdopt?: (draft: AiSummaryDraft) => void | Promise<void>
+  onAdopt?: (
+    draft: AiSummaryDraft,
+    citations: readonly AiAssistanceCitation[],
+  ) => void | Promise<void>
   /** Cancels the active explicit generation request. */
   onCancelGeneration?: () => void
   /** Records approval or rejection without mutating a domain resource. */
@@ -177,14 +184,14 @@ export function AiSummaryAssistantView({
         />
       ) : generation && (availableDraft || generation.content.availability === 'withheld') ? (
         <AiAssistanceReview
-          adoptLabel={adoptLabel}
           errorKind={error?.kind}
           feedbackRating={feedbackRating}
           generation={generation}
           isDecisionPending={isDecisionPending}
           isFeedbackPending={isFeedbackPending}
           locale={locale}
-          onAdopt={availableDraft && onAdopt
+          adoptLabel={adoptLabel ?? (!onAdopt ? t('ai.review.approve') : undefined)}
+          onAdopt={availableDraft
             ? async () => {
                 await approveAiSummaryDraft(onDecide, onAdopt)
               }
@@ -223,12 +230,16 @@ export function AiSummaryAssistantView({
  */
 async function approveAiSummaryDraft(
   onDecide: AiSummaryAssistantViewProps['onDecide'],
-  onAdopt: NonNullable<AiSummaryAssistantViewProps['onAdopt']>,
+  onAdopt: AiSummaryAssistantViewProps['onAdopt'],
 ): Promise<boolean> {
   const reviewedGeneration = await onDecide('approved')
-  const draft = getAvailableAiSummaryDraft(reviewedGeneration)
-  if (reviewedGeneration?.decision?.outcome !== 'approved' || !draft) return false
-  await onAdopt(draft)
+  const content = reviewedGeneration?.content
+  if (
+    reviewedGeneration?.decision?.outcome !== 'approved' ||
+    content?.availability !== 'available' ||
+    content.draft.kind !== 'summary'
+  ) return false
+  if (onAdopt) await onAdopt(content.draft, content.citations)
   return true
 }
 

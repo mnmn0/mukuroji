@@ -26,6 +26,8 @@ export type AiAssistanceSettingsPanelContainerProps = {
   locale: Locale
   /** Wraps authenticated settings requests so the Workspace session guard sees expiry. */
   guardRequest?: <Result>(request: Promise<Result>) => Promise<Result>
+  /** Stable member scope for SWR cache keys; this must not contain the bearer token. */
+  cacheScope?: string
 }
 
 /** Editable server value pinned to the revision from which it was derived. */
@@ -45,12 +47,13 @@ type RevisionedAiSettingsDraft<Value> = {
 export function AiAssistanceSettingsPanelContainer({
   accessToken,
   canManagePolicy,
+  cacheScope,
   guardRequest,
   locale,
 }: AiAssistanceSettingsPanelContainerProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
-  const preferenceQuery = useAiAssistancePreference(accessToken, true, guardRequest)
-  const policyQuery = useAiAssistancePolicy(accessToken, canManagePolicy, guardRequest)
+  const preferenceQuery = useAiAssistancePreference(accessToken, true, guardRequest, cacheScope)
+  const policyQuery = useAiAssistancePolicy(accessToken, canManagePolicy, guardRequest, cacheScope)
   const mutations = useAiAssistanceSettingsMutations({
     accessToken,
     guardRequest,
@@ -88,11 +91,11 @@ export function AiAssistanceSettingsPanelContainer({
       isPolicyDirty={isPolicyDirty}
       isPreferenceSaving={mutations.isPreferenceSaving}
       isPreferenceDirty={isPreferenceDirty}
-      isPreferenceLoading={preferenceQuery.isLoading && !preference}
+      isPreferenceLoading={(preferenceQuery.isLoading || !cacheScope) && !preference}
       policy={visiblePolicy}
       policyEditorVersion={policyEditorVersion}
       policyFeedback={hasPolicyRevisionConflict ? 'conflict' : mutations.policyFeedback}
-      isPolicyLoading={Boolean(canManagePolicy && policyQuery.isLoading)}
+      isPolicyLoading={Boolean(canManagePolicy && (policyQuery.isLoading || !cacheScope))}
       policyLoadError={Boolean(canManagePolicy && policyQuery.error)}
       preference={preference && preferenceEnabled !== undefined
         ? { ...preference, enabled: preferenceEnabled }
@@ -396,7 +399,11 @@ export function AiAssistanceSettingsPanel({
                 <label className="grid gap-2 text-app-caption font-semibold text-[var(--workbench-muted)]">
                   {t('ai.settings.policy.allowedModels')}
                   <AllowedModelsInput
+                    describedBy={policyValidation?.modelsValid
+                      ? 'ai-settings-model-hint'
+                      : 'ai-settings-model-hint ai-settings-model-error'}
                     key={`allowed-models-${policy.revision}-${policyEditorVersion}`}
+                    invalid={!policyValidation?.modelsValid}
                     onChange={(allowedModelIds) => onPolicyChange?.({
                       ...policy,
                       allowedModelIds,
@@ -412,6 +419,10 @@ export function AiAssistanceSettingsPanel({
                   <label className="grid gap-2 text-app-caption font-semibold text-[var(--workbench-muted)]">
                     {t('ai.settings.policy.defaultModel')}
                     <select
+                      aria-describedby={!policyValidation?.modelsValid
+                        ? 'ai-settings-model-error'
+                        : undefined}
+                      aria-invalid={!policyValidation?.modelsValid || undefined}
                       className="workbench-input min-h-[44px] px-3 font-normal text-[var(--workbench-text)]"
                       onChange={(event) => onPolicyChange?.({ ...policy, defaultModelId: event.target.value })}
                       value={policy.defaultModelId}
@@ -427,6 +438,10 @@ export function AiAssistanceSettingsPanel({
                   <label className="grid gap-2 text-app-caption font-semibold text-[var(--workbench-muted)]">
                     {t('ai.settings.policy.retentionDays')}
                     <input
+                      aria-describedby={!policyValidation?.retentionValid
+                        ? 'ai-settings-retention-error'
+                        : undefined}
+                      aria-invalid={!policyValidation?.retentionValid || undefined}
                       className="workbench-input min-h-[44px] px-3 font-normal text-[var(--workbench-text)]"
                       max="365"
                       min="1"
@@ -441,12 +456,12 @@ export function AiAssistanceSettingsPanel({
                   </label>
                 </div>
                 {!policyValidation?.modelsValid ? (
-                  <p className="text-app-caption font-semibold text-[var(--workbench-danger)]" role="alert">
+                  <p className="text-app-caption font-semibold text-[var(--workbench-danger)]" id="ai-settings-model-error" role="alert">
                     {t('ai.settings.validation.models')}
                   </p>
                 ) : null}
                 {!policyValidation?.retentionValid ? (
-                  <p className="text-app-caption font-semibold text-[var(--workbench-danger)]" role="alert">
+                  <p className="text-app-caption font-semibold text-[var(--workbench-danger)]" id="ai-settings-retention-error" role="alert">
                     {t('ai.settings.validation.retention')}
                   </p>
                 ) : null}
@@ -492,15 +507,25 @@ type AllowedModelsInputProps = {
   onChange: (modelIds: string[]) => void
   /** Latest revision-scoped model allowlist. */
   value: readonly string[]
+  /** Optional hint/error element IDs associated with the text control. */
+  describedBy?: string
+  /** Whether the current raw value fails the policy validator. */
+  invalid?: boolean
 }
 
 /** Keeps trailing newlines visible while emitting a normalized model allowlist. */
-function AllowedModelsInput({ onChange, value }: AllowedModelsInputProps) {
+function AllowedModelsInput({
+  describedBy,
+  invalid = false,
+  onChange,
+  value,
+}: AllowedModelsInputProps) {
   const [rawValue, setRawValue] = useState(() => value.join('\n'))
 
   return (
     <textarea
-      aria-describedby="ai-settings-model-hint"
+      aria-describedby={describedBy}
+      aria-invalid={invalid || undefined}
       className="workbench-input min-h-28 resize-y px-3 py-2 font-mono text-app-caption font-normal text-[var(--workbench-text)]"
       onChange={(event) => {
         const nextValue = event.target.value
@@ -543,9 +568,10 @@ function togglePolicyTask(
   tasks: readonly AiAssistanceTask[],
   task: AiAssistanceTask,
 ): AiAssistanceTask[] {
-  return tasks.includes(task)
-    ? tasks.filter((candidate) => candidate !== task)
-    : [...tasks, task]
+  const next = new Set(tasks)
+  if (next.has(task)) next.delete(task)
+  else next.add(task)
+  return policyTasks.filter((candidate) => next.has(candidate))
 }
 
 /** Parses unique non-empty Bedrock model IDs from a line-delimited control. */
@@ -597,5 +623,6 @@ function arePoliciesEqual(
 
 /** Returns whether two ordered string arrays contain the same values. */
 function areStringArraysEqual(left: readonly string[], right: readonly string[]): boolean {
-  return left.length === right.length && left.every((value, index) => value === right[index])
+  return left.length === right.length &&
+    left.every((value) => right.includes(value))
 }

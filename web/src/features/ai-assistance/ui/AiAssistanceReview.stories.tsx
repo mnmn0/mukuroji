@@ -49,7 +49,7 @@ export const Desktop: Story = {}
 
 /** Narrow review that stacks the decision actions into full-width touch targets. */
 export const Mobile: Story = {
-  parameters: { viewport: { defaultViewport: 'mobile1' } },
+  globals: { viewport: { isRotated: false, value: 'mobile1' } },
 }
 
 /** Permission loss removes the draft and every citation from the rendered surface. */

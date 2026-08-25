@@ -5,7 +5,7 @@ import type {
   AiPlanningTargetSource,
   CreateAiAssistanceFeedbackRequest,
 } from '@mukuroji/contracts'
-import { useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
 import type { Locale, MessageKey } from '../../../shared/i18n/i18n'
 import { isReviewableAiAssistanceGeneration } from '../model/aiGenerationValidation'
 import {
@@ -143,11 +143,17 @@ export function AiPlanningStatusUpdateAssistantView({
   t,
 }: AiPlanningStatusUpdateAssistantViewProps) {
   const [confirmationGenerationId, setConfirmationGenerationId] = useState<string>()
+  const confirmationRef = useRef<HTMLDivElement>(null)
   const availableDraft = getAvailableAiPlanningDraft(generation)
   const hasInvalidAvailableDraft = generation?.content.availability === 'available' && !availableDraft
   const isOperationPending = isGenerating || isDecisionPending || isFeedbackPending
   const isAdoptionConfirmationVisible = confirmationGenerationId !== undefined &&
     confirmationGenerationId === generation?.id
+
+  useEffect(() => {
+    if (!isAdoptionConfirmationVisible) return
+    confirmationRef.current?.focus()
+  }, [isAdoptionConfirmationVisible])
 
   /** Approves the current draft only after any manual-replacement confirmation. */
   const approveAndAdopt = async (replacementConfirmed = false) => {
@@ -241,7 +247,9 @@ export function AiPlanningStatusUpdateAssistantView({
       {isAdoptionConfirmationVisible ? (
         <div
           className="border-l-2 border-amber-500 bg-amber-50 px-4 py-3 text-amber-950 outline-none focus-visible:ring-2 focus-visible:ring-amber-600"
+          ref={confirmationRef}
           role="alert"
+          tabIndex={-1}
         >
           <p className="text-sm font-semibold">{t('ai.planning.replaceDraftTitle')}</p>
           <p className="mt-1 text-xs font-medium leading-5">

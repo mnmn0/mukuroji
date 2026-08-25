@@ -13,7 +13,7 @@ describe('AI Search draft model', () => {
       entityTypes: ['work-item'],
       statuses: ['todo'],
       customFields: [{ fieldId: 'risk', operator: 'equals', value: ['high'] }],
-    } as const
+    }
     const draft = createEditableAiSearchFilters(source)
 
     draft.statuses?.push('review')

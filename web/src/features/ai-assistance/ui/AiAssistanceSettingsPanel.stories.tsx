@@ -62,6 +62,9 @@ export const AdministratorPolicy: Story = {
 export const RevisionConflict: Story = {
   args: {
     canManagePolicy: true,
+    hasPolicyRevisionConflict: true,
+    isPolicyDirty: true,
+    onPolicyUseLatest: fn(),
     policy: aiAssistancePolicyFixture,
     policyFeedback: 'conflict',
   },
@@ -85,5 +88,5 @@ export const PolicyLoading: Story = {
 
 /** Narrow member settings retain a full-width, accessible explicit-save action. */
 export const MobileMemberPreference: Story = {
-  parameters: { viewport: { defaultViewport: 'mobile1' } },
+  globals: { viewport: { isRotated: false, value: 'mobile1' } },
 }
