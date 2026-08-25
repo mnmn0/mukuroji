@@ -952,6 +952,26 @@ WORKSPACE_SEARCH_TTL_STATUS="$(aws_local dynamodb describe-time-to-live \
   --output text 2>/dev/null || true)"
 case "$WORKSPACE_SEARCH_TTL_STATUS" in
   ENABLED | ENABLING) ;;
+  DISABLING)
+    for _ in $(seq 1 30); do
+      sleep 1
+      WORKSPACE_SEARCH_TTL_STATUS="$(aws_local dynamodb describe-time-to-live \
+        --table-name "$WORKSPACE_SEARCH_TABLE" \
+        --query TimeToLiveDescription.TimeToLiveStatus \
+        --output text 2>/dev/null || true)"
+      [ "$WORKSPACE_SEARCH_TTL_STATUS" != "DISABLING" ] && break
+    done
+    if [ "$WORKSPACE_SEARCH_TTL_STATUS" = "DISABLING" ]; then
+      echo "Workspace Search table TTL is still disabling; retry local initialization later." >&2
+      exit 1
+    fi
+    if [ "$WORKSPACE_SEARCH_TTL_STATUS" != "ENABLED" ] && [ "$WORKSPACE_SEARCH_TTL_STATUS" != "ENABLING" ]; then
+      aws_local dynamodb update-time-to-live \
+        --table-name "$WORKSPACE_SEARCH_TABLE" \
+        --time-to-live-specification AttributeName=expiresAt,Enabled=true \
+        >/dev/null
+    fi
+    ;;
   *)
     aws_local dynamodb update-time-to-live \
       --table-name "$WORKSPACE_SEARCH_TABLE" \

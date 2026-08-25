@@ -1023,17 +1023,33 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
   }
 }
 
-/** Creates the physical preference key without trusting a client-supplied key. */
+/**
+ * Creates the physical preference key without trusting a client-supplied key.
+ *
+ * @param memberId - Canonical member identifier used for the preference row.
+ * @returns The Workspace Search table record key for the member preference.
+ */
 export function createAiAssistancePreferenceRecordKey(memberId: string): string {
   return createPreferenceRecordKey(memberId)
 }
 
-/** Creates the physical generation key without trusting a client-supplied key. */
+/**
+ * Creates the physical generation key without trusting a client-supplied key.
+ *
+ * @param generationId - Canonical generation identifier.
+ * @returns The Workspace Search table record key for the generation row.
+ */
 export function createAiAssistanceGenerationRecordKey(generationId: string): string {
   return createGenerationRecordKey(generationId)
 }
 
-/** Creates the physical generation receipt key while hashing the untrusted client key. */
+/**
+ * Creates the physical generation receipt key while hashing the untrusted client key.
+ *
+ * @param memberId - Canonical member identifier that owns the receipt.
+ * @param idempotencyKey - Client-supplied idempotency key to hash into the row key.
+ * @returns The Workspace Search table record key for the idempotency receipt.
+ */
 export function createAiAssistanceIdempotencyRecordKey(
   memberId: string,
   idempotencyKey: string,

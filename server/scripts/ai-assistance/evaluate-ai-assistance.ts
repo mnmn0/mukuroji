@@ -29,6 +29,7 @@ import type {
   AiAssistanceOfflineRecordedOutput,
 } from './offline-evaluation-types'
 
+/** Re-exports the versioned offline evaluation contract types. */
 export type {
   AiAssistanceOfflineBaseline,
   AiAssistanceOfflineEvalBudgets,

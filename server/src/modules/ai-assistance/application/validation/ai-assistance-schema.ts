@@ -178,7 +178,19 @@ const customFieldFilterSchema = z.object({
     'is-not-empty',
   ]),
   value: customFieldValueSchema.optional(),
-}).strict()
+}).strict().superRefine((filter, context) => {
+  if (
+    filter.value === undefined &&
+    filter.operator !== 'is-empty' &&
+    filter.operator !== 'is-not-empty'
+  ) {
+    context.addIssue({
+      code: 'custom',
+      path: ['value'],
+      message: 'A value is required for this custom field operator.',
+    })
+  }
+})
 
 const workspaceSearchFiltersSchema = z.object({
   keyword: z.string().trim().min(1).max(2_000).optional(),
@@ -200,7 +212,13 @@ const workspaceSearchFiltersSchema = z.object({
     field: z.enum(['createdAt', 'updatedAt', 'dueDate']),
     from: calendarDateSchema.optional(),
     to: calendarDateSchema.optional(),
-  }).strict().optional(),
+  }).strict().refine(
+    (date) => date.from !== undefined || date.to !== undefined,
+    { message: 'At least one date bound is required.' },
+  ).refine(
+    (date) => date.from === undefined || date.to === undefined || date.from <= date.to,
+    { message: 'The date range must not be reversed.' },
+  ).optional(),
   projectIds: z.array(identifierSchema).max(100).optional(),
   teamIds: z.array(identifierSchema).max(100).optional(),
 }).strict()
@@ -488,43 +506,78 @@ export function parseAiAssistanceUsage(value: unknown): AiAssistanceUsage {
   return parseOrThrow(usageSchema, value, 'Invalid AI assistance usage.', true)
 }
 
-/** Parses an untrusted persisted generation. */
+/**
+ * Parses an untrusted persisted generation.
+ *
+ * @param value - Unknown persisted generation record.
+ * @returns Strictly validated generation record.
+ */
 export function parseAiAssistanceGeneration(value: unknown): AiAssistanceGeneration {
   return parseRecordOrThrow(generationSchema, value)
 }
 
-/** Parses an untrusted persisted Workspace policy. */
+/**
+ * Parses an untrusted persisted Workspace policy.
+ *
+ * @param value - Unknown persisted policy record.
+ * @returns Strictly validated Workspace policy.
+ */
 export function parseAiAssistancePolicy(value: unknown): AiAssistancePolicy {
   return parseRecordOrThrow(policySchema, value)
 }
 
-/** Parses an untrusted persisted member preference. */
+/**
+ * Parses an untrusted persisted member preference.
+ *
+ * @param value - Unknown persisted preference record.
+ * @returns Strictly validated member preference.
+ */
 export function parseAiAssistancePreference(value: unknown): AiAssistancePreference {
   return parseRecordOrThrow(preferenceSchema, value)
 }
 
-/** Parses an untrusted Workspace policy update. */
+/**
+ * Parses an untrusted Workspace policy update.
+ *
+ * @param value - Unknown policy update request.
+ * @returns Strictly validated policy update request.
+ */
 export function parseUpdateAiAssistancePolicyRequest(
   value: unknown,
 ): UpdateAiAssistancePolicyRequest {
   return parseOrThrow(updatePolicySchema, value, 'Invalid AI assistance policy update.')
 }
 
-/** Parses an untrusted member preference update. */
+/**
+ * Parses an untrusted member preference update.
+ *
+ * @param value - Unknown preference update request.
+ * @returns Strictly validated preference update request.
+ */
 export function parseUpdateAiAssistancePreferenceRequest(
   value: unknown,
 ): UpdateAiAssistancePreferenceRequest {
   return parseOrThrow(updatePreferenceSchema, value, 'Invalid AI assistance preference update.')
 }
 
-/** Parses an untrusted human decision request. */
+/**
+ * Parses an untrusted human decision request.
+ *
+ * @param value - Unknown decision request.
+ * @returns Strictly validated generation decision request.
+ */
 export function parseDecideAiAssistanceGenerationRequest(
   value: unknown,
 ): DecideAiAssistanceGenerationRequest {
   return parseOrThrow(decisionSchema, value, 'Invalid AI assistance decision.')
 }
 
-/** Parses untrusted generation feedback. */
+/**
+ * Parses untrusted generation feedback.
+ *
+ * @param value - Unknown feedback request.
+ * @returns Strictly validated feedback request.
+ */
 export function parseCreateAiAssistanceFeedbackRequest(
   value: unknown,
 ): CreateAiAssistanceFeedbackRequest {
@@ -549,7 +602,7 @@ function parseOrThrow<Output>(
   const parsed = schema.safeParse(value)
   if (parsed.success) return parsed.data
   throw new AiAssistanceError(
-    'validation',
+    output ? 'upstream' : 'validation',
     output ? 'InvalidAiAssistanceOutput' : 'InvalidAiAssistanceRequest',
     message,
   )

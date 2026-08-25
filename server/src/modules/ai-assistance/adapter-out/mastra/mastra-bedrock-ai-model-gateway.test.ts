@@ -212,6 +212,34 @@ describe('createMastraBedrockAiModelGateway', () => {
         },
       },
     })
+
+    const invalidRanges: Array<{
+      field: 'createdAt' | 'updatedAt' | 'dueDate'
+      from?: string
+      to?: string
+    }> = [
+      { field: 'updatedAt' },
+      { field: 'createdAt', from: '2026-09-01', to: '2026-08-31' },
+    ]
+    for (const date of invalidRanges) {
+      const invalidRangeGateway = createMastraBedrockAiModelGateway({
+        runStructuredGeneration: async () => ({
+          object: {
+            draft: {
+              kind: 'search',
+              interpretation: 'Invalid date range.',
+              filters: { date },
+              caveats: [],
+            },
+            uncertainty: { level: 'low', reason: 'Invalid.' },
+          },
+        }),
+      })
+
+      await expect(invalidRangeGateway.generate(createInput())).rejects.toMatchObject({
+        code: 'InvalidAiAssistanceOutput',
+      })
+    }
   })
 
   test('classifies an aborted provider run as a stable timeout', async () => {

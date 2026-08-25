@@ -402,6 +402,18 @@ export function createAiAssistanceService(
       if (!preProviderAuthorizationState.current) {
         throw authorizationChangedError(preProviderAuthorizationState.reason)
       }
+      const [currentPolicy, currentPreference] = await Promise.all([
+        getPolicy(actor),
+        getPreference(actor),
+      ])
+      if (!isGenerationConfigurationCurrent(
+        policy,
+        currentPolicy,
+        preference,
+        currentPreference,
+      )) {
+        throw authorizationChangedError('permission-changed')
+      }
       const providerStartedAt = now()
       const elapsedBeforeProviderMs = Math.max(
         0,
@@ -558,7 +570,11 @@ export function createAiAssistanceService(
     authorization: AiAssistanceAuthorizationCallbacks,
   ): Promise<AiAssistanceGeneration> {
     const [record, policy] = await Promise.all([
-      requireOwnedGeneration(actor, generationId, options.store.getGeneration),
+      requireOwnedGeneration(
+        actor,
+        generationId,
+        (workspaceId, id) => options.store.getGeneration(workspaceId, id),
+      ),
       getPolicy(actor),
     ])
     return await projectStoredGeneration(actor, record, policy, authorization, now)
@@ -573,7 +589,11 @@ export function createAiAssistanceService(
   ): Promise<AiAssistanceGeneration> {
     const request = parseDecideAiAssistanceGenerationRequest(input)
     const [record, policy] = await Promise.all([
-      requireOwnedGeneration(actor, generationId, options.store.getGeneration),
+      requireOwnedGeneration(
+        actor,
+        generationId,
+        (workspaceId, id) => options.store.getGeneration(workspaceId, id),
+      ),
       getPolicy(actor),
     ])
     const effectiveGeneration = applyEffectiveRetention(record.generation, policy)
@@ -629,7 +649,11 @@ export function createAiAssistanceService(
       idempotencyKey,
     )
     const [record, policy] = await Promise.all([
-      requireOwnedGeneration(actor, generationId, options.store.getGeneration),
+      requireOwnedGeneration(
+        actor,
+        generationId,
+        (workspaceId, id) => options.store.getGeneration(workspaceId, id),
+      ),
       getPolicy(actor),
     ])
     const effectiveGeneration = applyEffectiveRetention(record.generation, policy)
@@ -779,6 +803,35 @@ function requireGenerationEnabled(
       'The requested AI assistance task is disabled.',
     )
   }
+}
+
+/**
+ * Compares the initial generation configuration with a fresh pre-provider read.
+ *
+ * @param initialPolicy - Policy used to reserve and scope the generation.
+ * @param currentPolicy - Strongly reread policy immediately before inference.
+ * @param initialPreference - Member preference used before source resolution.
+ * @param currentPreference - Strongly reread member preference immediately before inference.
+ * @returns Whether effective policy and preference are unchanged.
+ */
+function isGenerationConfigurationCurrent(
+  initialPolicy: AiAssistancePolicy,
+  currentPolicy: AiAssistancePolicy,
+  initialPreference: AiAssistancePreference,
+  currentPreference: AiAssistancePreference,
+): boolean {
+  return initialPolicy.revision === currentPolicy.revision &&
+    initialPolicy.enabled === currentPolicy.enabled &&
+    initialPolicy.defaultModelId === currentPolicy.defaultModelId &&
+    initialPolicy.retentionDays === currentPolicy.retentionDays &&
+    initialPolicy.allowedModelIds.length === currentPolicy.allowedModelIds.length &&
+    initialPolicy.allowedModelIds.every((value, index) =>
+      value === currentPolicy.allowedModelIds[index]) &&
+    initialPolicy.enabledTasks.length === currentPolicy.enabledTasks.length &&
+    initialPolicy.enabledTasks.every((value, index) =>
+      value === currentPolicy.enabledTasks[index]) &&
+    initialPreference.revision === currentPreference.revision &&
+    initialPreference.enabled === currentPreference.enabled
 }
 
 /** Selects a model present in both deployment and Workspace allowlists. */

@@ -103,6 +103,8 @@ type HarnessConfiguration = {
   providerTimeoutMs?: number
   /** Milliseconds advanced after context resolution and before provider admission. */
   advanceBeforeProviderMs?: number
+  /** Changes the policy revision while source context is being resolved. */
+  changePolicyBeforeProvider?: boolean
 }
 
 /** Creates a service harness with deterministic fake ports. */
@@ -110,6 +112,7 @@ function createHarness(configuration: HarnessConfiguration = {}) {
   let storedGeneration: StoredAiAssistanceGeneration | undefined
   let preferenceEnabled = true
   let policyRetentionDays = 30
+  let policyRevision = 0
   let currentTime = NOW
   let resolveContextCount = 0
   let gatewayBarrier: Promise<void> | undefined
@@ -246,7 +249,11 @@ function createHarness(configuration: HarnessConfiguration = {}) {
       reservationFailureCode = input.failureCode
     },
     async getPolicy() {
-      return { ...createPolicy(), retentionDays: policyRetentionDays }
+      return {
+        ...createPolicy(),
+        retentionDays: policyRetentionDays,
+        revision: policyRevision,
+      }
     },
     async putPolicy(_workspaceId, policy) {
       policyPutCalls += 1
@@ -350,6 +357,7 @@ function createHarness(configuration: HarnessConfiguration = {}) {
           Date.parse(currentTime) + configuration.advanceBeforeProviderMs,
         ).toISOString()
       }
+      if (configuration.changePolicyBeforeProvider) policyRevision = 1
       return {
         promptContext: configuration.promptContext ??
           'Authorized source for assignee@example.com and owner@example.com token=secret-value.',
@@ -437,6 +445,9 @@ function createHarness(configuration: HarnessConfiguration = {}) {
     },
     setPolicyRetentionDays(value: number) {
       policyRetentionDays = value
+    },
+    setPolicyRevision(value: number) {
+      policyRevision = value
     },
     setNow(value: string) {
       currentTime = value
@@ -992,7 +1003,7 @@ describe('createAiAssistanceService', () => {
       harness.authorization,
       'request-invalid-output',
     )).rejects.toMatchObject({
-      category: 'validation',
+      category: 'upstream',
       code: 'InvalidAiAssistanceOutput',
     })
 
@@ -1001,7 +1012,7 @@ describe('createAiAssistanceService', () => {
     expect(harness.finalizedAttempts).toEqual([expect.objectContaining({
       outcome: 'failed',
       usage: expect.objectContaining({ inputTokens: 10, outputTokens: 20 }),
-      failureCategory: 'validation',
+      failureCategory: 'upstream',
       failureCode: 'InvalidAiAssistanceOutput',
     })])
   })
@@ -1126,6 +1137,26 @@ describe('createAiAssistanceService', () => {
       'request-1',
     )).rejects.toMatchObject({ code: 'AiAssistanceModelNotAllowed' })
     expect(harness.gatewayInputs).toHaveLength(0)
+  })
+
+  test('rechecks policy and member preference before invoking the provider', async () => {
+    const harness = createHarness({ changePolicyBeforeProvider: true })
+
+    await expect(harness.service.generate(
+      createActor(),
+      createSummaryRequest(),
+      harness.authorization,
+      'request-policy-changed',
+    )).rejects.toMatchObject({
+      category: 'conflict',
+      code: 'AiAssistanceAuthorizationChanged',
+    })
+    expect(harness.gatewayInputs).toHaveLength(0)
+    expect(harness.finalizedAttempts).toEqual([expect.objectContaining({
+      outcome: 'failed',
+      failureCategory: 'conflict',
+      failureCode: 'AiAssistanceAuthorizationChanged',
+    })])
   })
 
   test('rejects generated identifiers outside current allowlists', async () => {

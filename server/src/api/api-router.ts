@@ -19909,6 +19909,41 @@ type AiAssistanceResolverState = {
 }
 
 /**
+ * Loads visible Team configurations in deterministic bounded batches.
+ *
+ * @param workspaceId - Workspace whose Team configurations are being resolved.
+ * @param visibleTeams - Teams already filtered by the current search authorization scope.
+ * @returns Team configuration snapshots in the same order as the input Teams.
+ */
+async function resolveAiAssistanceTeamConfigurations(
+  workspaceId: string,
+  visibleTeams: readonly ProjectDirectoryTeamResponse[],
+): Promise<Array<{ team: ProjectDirectoryTeamResponse; resolved: ResolvedWorkItemConfiguration }>> {
+  const configurations: Array<{
+    team: ProjectDirectoryTeamResponse
+    resolved: ResolvedWorkItemConfiguration
+  }> = []
+  for (
+    let offset = 0;
+    offset < visibleTeams.length;
+    offset += AI_ASSISTANCE_SOURCE_RESOLUTION_CONCURRENCY
+  ) {
+    const batch = visibleTeams.slice(
+      offset,
+      offset + AI_ASSISTANCE_SOURCE_RESOLUTION_CONCURRENCY,
+    )
+    configurations.push(...await Promise.all(batch.map(async (team) => ({
+      team,
+      resolved: await workItemDependencies.workItemConfigurations.getTeamConfiguration(
+        workspaceId,
+        team.id,
+      ),
+    }))))
+  }
+  return configurations
+}
+
+/**
  * Projects a fresh Workspace principal into the AI application actor.
  *
  * @param principal - Current server-authenticated Workspace principal.
@@ -20110,13 +20145,7 @@ async function createAiAssistanceResolverState(
     .sort((left, right) => left.id.localeCompare(right.id))
   const [activeMembers, configurations] = await Promise.all([
     workspaceDependencies.workspaceAccess.listActiveMembers(principal.directoryId),
-    Promise.all(visibleTeams.map(async (team) => ({
-      team,
-      resolved: await workItemDependencies.workItemConfigurations.getTeamConfiguration(
-        principal.directoryId,
-        team.id,
-      ),
-    }))),
+    resolveAiAssistanceTeamConfigurations(principal.directoryId, visibleTeams),
   ])
   const teamIds = uniqueAiAllowedValues(
     visibleTeams.map((team) => team.id),
@@ -20138,9 +20167,9 @@ async function createAiAssistanceResolverState(
     .sort((left, right) => left.id.localeCompare(right.id))
   if (currentMembers.length > AI_ASSISTANCE_PRIVATE_MEMBER_IDENTIFIER_LIMIT) {
     throw new AiAssistanceError(
-      'validation',
+      'upstream',
       'InvalidAiAssistanceRequest',
-      'The active member directory exceeds the safe AI privacy-alias bound.',
+      `The active member directory exceeds the safe AI privacy-alias bound of ${AI_ASSISTANCE_PRIVATE_MEMBER_IDENTIFIER_LIMIT}.`,
     )
   }
   const visibleMembers = (canReadAiAssistanceMemberDirectory(principal)

@@ -3588,6 +3588,51 @@ test('enables and verifies expiresAt TTL on an existing local search table', asy
   ])
 })
 
+test('waits for a disabling local TTL operation before enabling expiresAt', async () => {
+  const commands: string[] = []
+  let ttlDescribeCount = 0
+  const dynamoDbClient = {
+    async send(
+      command: DescribeTableCommand | DescribeTimeToLiveCommand | UpdateTimeToLiveCommand,
+    ) {
+      commands.push(command.constructor.name)
+      if (command instanceof DescribeTableCommand) {
+        return {
+          Table: {
+            TableStatus: 'ACTIVE',
+            KeySchema: [
+              { AttributeName: 'workspaceId', KeyType: 'HASH' },
+              { AttributeName: 'recordKey', KeyType: 'RANGE' },
+            ],
+          },
+        }
+      }
+      if (command instanceof UpdateTimeToLiveCommand) return {}
+      ttlDescribeCount += 1
+      return ttlDescribeCount === 1
+        ? { TimeToLiveDescription: { TimeToLiveStatus: 'DISABLING' } }
+        : ttlDescribeCount === 2
+          ? { TimeToLiveDescription: { TimeToLiveStatus: 'DISABLED' } }
+          : {
+              TimeToLiveDescription: {
+                AttributeName: 'expiresAt',
+                TimeToLiveStatus: 'ENABLING',
+              },
+            }
+    },
+  } as unknown as DynamoDBClient
+
+  await ensureLocalWorkspaceSearchTable('search-table', dynamoDbClient)
+
+  expect(commands).toEqual([
+    'DescribeTableCommand',
+    'DescribeTimeToLiveCommand',
+    'DescribeTimeToLiveCommand',
+    'UpdateTimeToLiveCommand',
+    'DescribeTimeToLiveCommand',
+  ])
+})
+
 function createMemoryDocumentClient(
   initialItems: Array<Record<string, unknown>>,
   control: {

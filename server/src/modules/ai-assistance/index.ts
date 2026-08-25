@@ -61,6 +61,7 @@ export type {
   StoredAiAssistanceFeedback,
   StoredAiAssistanceGeneration,
 } from './application/ports/ai-assistance-ports'
+/** Creates the application service used by the HTTP adapter and offline evaluator. */
 export { createAiAssistanceService } from './application/use-cases/ai-assistance-service'
 
 /** HTTP adapter with injected current-principal authorization callbacks. */

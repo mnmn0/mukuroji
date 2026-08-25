@@ -3974,10 +3974,24 @@ async function ensureWorkspaceSearchTimeToLive(
   tableName: string,
   dynamoDbClient: DynamoDBClient,
 ): Promise<void> {
-  const described = await dynamoDbClient.send(new DescribeTimeToLiveCommand({
+  let described = await dynamoDbClient.send(new DescribeTimeToLiveCommand({
     TableName: tableName,
   }))
-  const status = described.TimeToLiveDescription?.TimeToLiveStatus
+  let status = described.TimeToLiveDescription?.TimeToLiveStatus
+  if (status === 'DISABLING') {
+    for (let attempt = 0; attempt < 20 && status === 'DISABLING'; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      described = await dynamoDbClient.send(new DescribeTimeToLiveCommand({
+        TableName: tableName,
+      }))
+      status = described.TimeToLiveDescription?.TimeToLiveStatus
+    }
+    if (status === 'DISABLING') {
+      throw new Error(
+        `Local DynamoDB table "${tableName}" TTL is still disabling; retry initialization later.`,
+      )
+    }
+  }
   const attributeName = described.TimeToLiveDescription?.AttributeName
   if (status === 'ENABLED' || status === 'ENABLING') {
     if (attributeName === 'expiresAt') return
