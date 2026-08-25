@@ -2822,6 +2822,7 @@ routeApp.get('/api/auth/me', async (c) => {
       isSystemAdmin: principal.isSystemAdmin,
       workspaceRole: principal.workspaceRole,
       workspaceMemberStatus: principal.workspaceMemberStatus,
+      canManageAiAssistance: canManageAiAssistanceWorkspace(principal),
     })
   } catch (error) {
     if (error instanceof WorkspaceAccessError) {
@@ -19821,6 +19822,22 @@ function canManageAiAssistanceWorkspace(principal: WorkspacePrincipal): boolean 
   return principal.workspaceRole === 'owner' || principal.workspaceRole === 'admin'
 }
 
+/**
+ * Determines whether the current Enterprise principal may enumerate Workspace members.
+ *
+ * AI generation is intentionally authorized by the weaker `workspace.read` route
+ * permission, so member candidates must not inherit that route permission. Legacy
+ * Workspace authorization retains its existing member-directory behavior.
+ *
+ * @param principal - Current authenticated Workspace principal.
+ * @returns Whether active member identifiers may be exposed as model candidates.
+ */
+function canReadAiAssistanceMemberDirectory(principal: WorkspacePrincipal): boolean {
+  if (principal.isSystemAdmin || principal.enterprisePermissions === undefined) return true
+  return hasEnterpriseWorkspacePermission(principal, 'members.read') ||
+    hasEnterpriseWorkspacePermission(principal, 'members.manage')
+}
+
 /** Maximum serialized characters retained for one source prompt fragment. */
 const AI_ASSISTANCE_SOURCE_PROMPT_CHARACTER_LIMIT = 3_500
 
@@ -20113,7 +20130,10 @@ async function createAiAssistanceResolverState(
       'The active member directory exceeds the safe AI privacy-alias bound.',
     )
   }
-  const visibleMembers = currentMembers.slice(0, AI_ASSISTANCE_ALLOWED_VALUE_LIMIT)
+  const visibleMembers = (canReadAiAssistanceMemberDirectory(principal)
+    ? currentMembers
+    : currentMembers.filter((member) => member.id === principal.userKey))
+    .slice(0, AI_ASSISTANCE_ALLOWED_VALUE_LIMIT)
   const privateMemberIdentifiers = currentMembers.map((member) => ({
     memberId: member.id,
     providerAlias: createAiAssistanceProviderAlias(),
@@ -20909,7 +20929,8 @@ async function resolveAiDocumentSource(
   requireAiAssistanceSourceRevision(document.revision, source.expectedRevision)
   const body = createDocumentWorkspaceSearchBody(document)
   const promptComments = commentPage.comments
-    .slice(-AI_ASSISTANCE_SOURCE_TIMELINE_LIMIT)
+    .slice(0, AI_ASSISTANCE_SOURCE_TIMELINE_LIMIT)
+    .reverse()
   return {
     prompt: boundAiPromptPart({
       sourceType: source.type,

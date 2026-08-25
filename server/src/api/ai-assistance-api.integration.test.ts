@@ -1000,6 +1000,71 @@ describe('AI assistance API composition', () => {
     expect(authorizationToken).not.toContain('未完了')
   })
 
+  test('does not expose member candidates outside an Enterprise reader scope', async () => {
+    await withTestEnvironment({
+      COGNITO_CLIENT_ID: 'mukuroji-main-client',
+    }, async () => {
+      configureFakeProjectClients(true, {
+        projectAccesses: [{ projectId: 'refero', role: 'viewer' }],
+        role: 'viewer',
+        workspaceRole: 'member',
+      })
+      const existingWorkspaceAccess = getTestAppDependencies().workspace.workspaceAccess
+      let observedAssigneeUserIds: readonly string[] = []
+      let observedPromptContext = ''
+      setTestAppDependencies({
+        enterpriseIdentity: await createWorkspaceReadOnlyEnterpriseIdentity(),
+        workspaceAccess: {
+          ...existingWorkspaceAccess,
+          async listActiveMembers(workspaceId) {
+            const existing = await existingWorkspaceAccess.listActiveMembers(workspaceId)
+            const template = existing[0]
+            if (template === undefined) throw new Error('Expected an active member fixture.')
+            return [
+              ...existing,
+              createAiDirectoryMember(
+                template,
+                'outside-scope@example.test',
+                'Outside Scope Person',
+              ),
+            ]
+          },
+        },
+        aiAssistanceService: createAiService({
+          async generate(actor, request, authorization) {
+            const resolved = await authorization.resolveContext({ actor, request })
+            observedAssigneeUserIds = resolved.allowedValues.assigneeUserIds
+            observedPromptContext = resolved.promptContext
+            return createSearchGeneration()
+          },
+        }),
+      })
+      const accessToken = createAccessToken([], {
+        client_id: 'mukuroji-main-client',
+        token_use: 'access',
+      })
+
+      const response = await app.request('/api/ai-assistance/generations', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+          'Idempotency-Key': 'ai-request-member-scope',
+        },
+        body: JSON.stringify({
+          task: 'search',
+          locale: 'en',
+          query: 'Show assignments visible to me.',
+        }),
+      })
+
+      expect(response.status).toBe(201)
+      expect(observedAssigneeUserIds).toEqual(['demo@example.com'])
+      expect(observedPromptContext).not.toContain('outside-scope@example.test')
+      expect(observedPromptContext).not.toContain('Outside Scope Person')
+    })
+  })
+
   test('aliases the complete active-member set while capping model candidates at 100', async () => {
     configureFakeProjectClients(true, {
       projectAccesses: [{ projectId: 'refero', role: 'viewer' }],
