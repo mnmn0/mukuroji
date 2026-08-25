@@ -1400,6 +1400,9 @@ export function TaskPage() {
       workspaceId={workspaceId}
       configurationErrorMessage={configurationErrorMessage}
       accessToken={accessToken}
+      onAuthenticatedApiError={(error) => {
+        redirectEnterpriseSessionError(error)
+      }}
       activeTaskViewId={taskViewController.activeSavedView?.id}
       isLoading={isLoading}
       isProjectQuickAccess={interactionTeamId

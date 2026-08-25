@@ -551,6 +551,7 @@ export function SearchPage() {
                   accessToken={accessToken}
                   key={getSearchDateField(routeState.filters)}
                   locale={locale}
+                  onAuthenticatedApiError={setAuthenticatedApiError}
                   routeState={routeState}
                   selectedSavedView={selectedSavedView}
                   statusOptions={statusOptions}
@@ -637,6 +638,7 @@ export function SearchPage() {
 function SearchToolbar({
   accessToken,
   locale,
+  onAuthenticatedApiError,
   onAiFiltersApply,
   onFiltersChange,
   onLayoutChange,
@@ -647,6 +649,7 @@ function SearchToolbar({
   t,
 }: {
   accessToken?: string
+  onAuthenticatedApiError?: (error: unknown) => void
   locale: Locale
   onAiFiltersApply: NaturalLanguageSearchComposerProps['onApply']
   onFiltersChange: (patch: Record<string, unknown>) => void
@@ -701,6 +704,7 @@ function SearchToolbar({
         <NaturalLanguageSearchComposer
           accessToken={accessToken}
           locale={locale}
+          onAuthenticatedApiError={onAuthenticatedApiError}
           onApply={onAiFiltersApply}
           t={t}
         />

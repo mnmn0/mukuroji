@@ -53,6 +53,8 @@ export type IssueSummaryAiAssistance = {
 export type IssueCollaborationPanelProps = {
   /** Optional AI summary access; omission removes the Brief tab and its source from markup. */
   aiAssistance?: IssueSummaryAiAssistance
+  /** Reports authenticated AI failures to the owning route session guard. */
+  onAuthenticatedApiError?: (error: unknown) => void
   /** Locale used for all collaboration messages. */
   locale: Locale
   /** Workspace members used for mentions, actors, and presence. */
@@ -99,6 +101,7 @@ export function IssueCollaborationPanel({
   focusedRootCommentId,
   locale,
   members,
+  onAuthenticatedApiError,
   onContextDraftConsumed,
   readOnlyMessage,
   route,
@@ -483,6 +486,7 @@ export function IssueCollaborationPanel({
               adoptLabel={t('ai.summary.adoptContext')}
               key={aiAssistantSessionKey}
               locale={locale}
+              onAuthenticatedApiError={onAuthenticatedApiError}
               onAdopt={controller.context.capabilities.canCreate && !contextDraft
                 ? (draft) => {
                     if (

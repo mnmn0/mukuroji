@@ -399,6 +399,8 @@ export type PlanningScreenProps = {
 export type PlanningScreenAiAssistance = {
   /** Active Workspace member bearer token. */
   accessToken: string
+  /** Reports authenticated AI failures to the owning Planning route session guard. */
+  onAuthenticatedApiError?: (error: unknown) => void
   /** Locale sent to Bedrock and used for draft presentation. */
   locale: Locale
 }
@@ -505,6 +507,7 @@ export function PlanningScreen({
     aiAssistance && snapshot && resolvedSelectedUpdateTarget && onPublishUpdate && canPublishSelectedUpdate
       ? {
           accessToken: aiAssistance.accessToken,
+          onAuthenticatedApiError: aiAssistance.onAuthenticatedApiError,
           locale: aiAssistance.locale,
           source: {
             expectedRevision: snapshot.revision,

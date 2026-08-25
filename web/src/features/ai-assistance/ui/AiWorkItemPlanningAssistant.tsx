@@ -20,6 +20,8 @@ import { AiPlanningDraftReview } from './AiPlanningDraftReview'
 export type AiWorkItemPlanningAssistantProps = {
   /** Active Workspace member bearer token. */
   accessToken?: string
+  /** Reports authenticated AI failures to the owning Work Item route session guard. */
+  onAuthenticatedApiError?: (error: unknown) => void
   /** Optional controller override used by isolated stories and interaction tests. */
   controller?: AiAssistanceController
   /** Locale sent to Bedrock and used for draft presentation. */
@@ -48,6 +50,7 @@ export function AiWorkItemPlanningAssistant({
   accessToken,
   controller,
   locale,
+  onAuthenticatedApiError,
   onAdopt,
   resolveStatusLabel,
   resolveWorkItemLabel,
@@ -55,7 +58,7 @@ export function AiWorkItemPlanningAssistant({
   source,
   t,
 }: AiWorkItemPlanningAssistantProps) {
-  const liveController = useAiAssistanceController({ accessToken })
+  const liveController = useAiAssistanceController({ accessToken, onAuthenticatedApiError })
   const activeController = controller ?? liveController
 
   return (

@@ -75,21 +75,6 @@ export function AiAssistanceSettingsPanelContainer({
   const isPreferenceDirty = preferenceEnabled !== undefined && preferenceEnabled !== preference?.enabled
   const isPolicyDirty = Boolean(policy && visiblePolicy && !arePoliciesEqual(policy, visiblePolicy))
 
-  if (preferenceQuery.isLoading) {
-    return (
-      <AiAssistanceSettingsLoading t={t} />
-    )
-  }
-
-  if (preferenceQuery.error || !preference || preferenceEnabled === undefined) {
-    return (
-      <AiAssistanceSettingsLoadError
-        onRetry={() => void preferenceQuery.mutate()}
-        t={t}
-      />
-    )
-  }
-
   return (
     <AiAssistanceSettingsPanel
       canManagePolicy={canManagePolicy}
@@ -99,12 +84,16 @@ export function AiAssistanceSettingsPanelContainer({
       isPolicyDirty={isPolicyDirty}
       isPreferenceSaving={mutations.isPreferenceSaving}
       isPreferenceDirty={isPreferenceDirty}
+      isPreferenceLoading={preferenceQuery.isLoading && !preference}
       policy={visiblePolicy}
       policyEditorVersion={policyEditorVersion}
       policyFeedback={hasPolicyRevisionConflict ? 'conflict' : mutations.policyFeedback}
       isPolicyLoading={Boolean(canManagePolicy && policyQuery.isLoading)}
       policyLoadError={Boolean(canManagePolicy && policyQuery.error)}
-      preference={{ ...preference, enabled: preferenceEnabled }}
+      preference={preference && preferenceEnabled !== undefined
+        ? { ...preference, enabled: preferenceEnabled }
+        : undefined}
+      preferenceLoadError={Boolean(preferenceQuery.error)}
       preferenceFeedback={hasPreferenceRevisionConflict ? 'conflict' : mutations.preferenceFeedback}
       t={t}
       onPolicyChange={(value) => {
@@ -135,6 +124,7 @@ export function AiAssistanceSettingsPanelContainer({
         })
       }}
       onPreferenceChange={(enabled) => {
+        if (!preference) return
         mutations.clearPreferenceFeedback()
         setPreferenceDraft({ baseRevision: preference.revision, value: enabled })
       }}
@@ -143,7 +133,7 @@ export function AiAssistanceSettingsPanelContainer({
         setPreferenceDraft(undefined)
       }}
       onPreferenceSave={() => {
-        if (hasPreferenceRevisionConflict) return
+        if (!preference || preferenceEnabled === undefined || hasPreferenceRevisionConflict) return
         void mutations.savePreference({
           enabled: preferenceEnabled,
           expectedRevision: preference.revision,
@@ -151,6 +141,7 @@ export function AiAssistanceSettingsPanelContainer({
           if (saved) setPreferenceDraft(undefined)
         })
       }}
+      onPreferenceRetry={() => void preferenceQuery.mutate()}
     />
   )
 }
@@ -173,6 +164,10 @@ export type AiAssistanceSettingsPanelProps = {
   hasPreferenceRevisionConflict?: boolean
   /** Whether a personal preference save is in flight. */
   isPreferenceSaving?: boolean
+  /** Whether the personal preference is being loaded for the first time. */
+  isPreferenceLoading?: boolean
+  /** Whether the personal preference could not be loaded. */
+  preferenceLoadError?: boolean
   /** Current editable manager-only Workspace policy. */
   policy?: AiAssistancePolicy
   /** Revision-independent reset version for raw policy text controls. */
@@ -182,7 +177,7 @@ export type AiAssistanceSettingsPanelProps = {
   /** Whether the manager-only policy could not be loaded. */
   policyLoadError?: boolean
   /** Current editable personal preference. */
-  preference: AiAssistancePreference
+  preference?: AiAssistancePreference
   /** Latest personal preference save result. */
   preferenceFeedback?: AiAssistanceSettingsMutationFeedback
   /** Localized message resolver. */
@@ -199,6 +194,8 @@ export type AiAssistanceSettingsPanelProps = {
   onPreferenceChange: (enabled: boolean) => void
   /** Explicitly discards the stale preference draft and shows the latest server value. */
   onPreferenceUseLatest?: () => void
+  /** Retries loading the personal preference without affecting manager policy data. */
+  onPreferenceRetry?: () => void
   /** Explicitly saves the revision-fenced personal preference. */
   onPreferenceSave: () => void
 }
@@ -213,6 +210,7 @@ export function AiAssistanceSettingsPanel({
   canManagePolicy,
   hasPolicyRevisionConflict = false,
   hasPreferenceRevisionConflict = false,
+  isPreferenceLoading = false,
   isPolicyDirty = false,
   isPolicyLoading = false,
   isPolicySaving = false,
@@ -223,6 +221,7 @@ export function AiAssistanceSettingsPanel({
   onPolicySave,
   onPolicyUseLatest,
   onPreferenceChange,
+  onPreferenceRetry,
   onPreferenceSave,
   onPreferenceUseLatest,
   policy,
@@ -230,6 +229,7 @@ export function AiAssistanceSettingsPanel({
   policyFeedback,
   policyLoadError = false,
   preference,
+  preferenceLoadError = false,
   preferenceFeedback,
   t,
 }: AiAssistanceSettingsPanelProps) {
@@ -248,49 +248,71 @@ export function AiAssistanceSettingsPanel({
       </div>
 
       <div className="border-t border-[var(--workbench-border)] px-5 py-6 sm:px-7">
-        <div className="flex flex-wrap items-start justify-between gap-4">
-          <div className="max-w-2xl">
-            <h3 className="text-app-body font-semibold text-[var(--workbench-text)]">
-              {t('ai.settings.preference.title')}
-            </h3>
-            <p className="mt-1 text-app-caption leading-5 text-[var(--workbench-muted)]">
-              {t('ai.settings.preference.description')}
+        {isPreferenceLoading && !preference ? (
+          <div className="grid gap-3" role="status">
+            <p className="text-app-body font-semibold text-[var(--workbench-text)]">
+              {t('workspace.loading')}
             </p>
+            <span className="h-3 w-3/5 animate-pulse rounded bg-[var(--workbench-border)] motion-reduce:animate-none" />
           </div>
-          <span className="workbench-badge">
-            {t('ai.settings.revision').replace('{revision}', String(preference.revision))}
-          </span>
-        </div>
-        <label className="mt-5 flex min-h-[44px] items-center gap-3 text-app-body font-semibold text-[var(--workbench-text)]">
-          <input
-            checked={preference.enabled}
-            className="h-5 w-5 accent-[var(--workbench-primary)]"
-            disabled={isPreferenceSaving}
-            onChange={(event) => onPreferenceChange(event.target.checked)}
-            type="checkbox"
-          />
-          {t('ai.settings.preference.enabled')}
-        </label>
-        <div className="mt-5 flex flex-wrap items-center gap-3">
-          <button
-            className="workbench-button-primary min-h-[44px] px-4 disabled:cursor-not-allowed disabled:opacity-50"
-            disabled={!isPreferenceDirty || isPreferenceSaving || hasPreferenceRevisionConflict}
-            onClick={onPreferenceSave}
-            type="button"
-          >
-            {isPreferenceSaving ? t('ai.settings.saving') : t('ai.settings.preference.save')}
-          </button>
-          <SettingsFeedback feedback={preferenceFeedback} t={t} />
-          {hasPreferenceRevisionConflict && onPreferenceUseLatest ? (
-            <button
-              className="workbench-button-secondary min-h-[44px] px-4"
-              onClick={onPreferenceUseLatest}
-              type="button"
-            >
-              {t('ai.settings.useLatest')}
-            </button>
-          ) : null}
-        </div>
+        ) : preferenceLoadError || !preference ? (
+          <div className="grid gap-3">
+            <p className="text-app-body font-semibold text-[var(--workbench-danger)]" role="alert">
+              {t('ai.settings.loadError')}
+            </p>
+            {onPreferenceRetry ? (
+              <button className="workbench-button-secondary min-h-[44px] justify-self-start px-4" onClick={onPreferenceRetry} type="button">
+                {t('ai.settings.retry')}
+              </button>
+            ) : null}
+          </div>
+        ) : (
+          <>
+            <div className="flex flex-wrap items-start justify-between gap-4">
+              <div className="max-w-2xl">
+                <h3 className="text-app-body font-semibold text-[var(--workbench-text)]">
+                  {t('ai.settings.preference.title')}
+                </h3>
+                <p className="mt-1 text-app-caption leading-5 text-[var(--workbench-muted)]">
+                  {t('ai.settings.preference.description')}
+                </p>
+              </div>
+              <span className="workbench-badge">
+                {t('ai.settings.revision').replace('{revision}', String(preference.revision))}
+              </span>
+            </div>
+            <label className="mt-5 flex min-h-[44px] items-center gap-3 text-app-body font-semibold text-[var(--workbench-text)]">
+              <input
+                checked={preference.enabled}
+                className="h-5 w-5 accent-[var(--workbench-primary)]"
+                disabled={isPreferenceSaving}
+                onChange={(event) => onPreferenceChange(event.target.checked)}
+                type="checkbox"
+              />
+              {t('ai.settings.preference.enabled')}
+            </label>
+            <div className="mt-5 flex flex-wrap items-center gap-3">
+              <button
+                className="workbench-button-primary min-h-[44px] px-4 disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={!isPreferenceDirty || isPreferenceSaving || hasPreferenceRevisionConflict}
+                onClick={onPreferenceSave}
+                type="button"
+              >
+                {isPreferenceSaving ? t('ai.settings.saving') : t('ai.settings.preference.save')}
+              </button>
+              <SettingsFeedback feedback={preferenceFeedback} t={t} />
+              {hasPreferenceRevisionConflict && onPreferenceUseLatest ? (
+                <button
+                  className="workbench-button-secondary min-h-[44px] px-4"
+                  onClick={onPreferenceUseLatest}
+                  type="button"
+                >
+                  {t('ai.settings.useLatest')}
+                </button>
+              ) : null}
+            </div>
+          </>
+        )}
       </div>
 
       {canManagePolicy ? (
@@ -509,43 +531,6 @@ function SettingsFeedback({ feedback, t }: SettingsFeedbackProps) {
     >
       {t(messageKey)}
     </p>
-  )
-}
-
-/** Props for the focused loading surface. */
-type AiAssistanceSettingsLoadingProps = {
-  /** Localized message resolver. */
-  t: (key: MessageKey) => string
-}
-
-/** Renders a reduced-motion-safe settings loading state. */
-function AiAssistanceSettingsLoading({ t }: AiAssistanceSettingsLoadingProps) {
-  return (
-    <section aria-label={t('ai.settings.title')} className="workbench-panel grid gap-3 p-5" role="status">
-      <span className="h-4 w-40 animate-pulse rounded bg-[var(--workbench-border)] motion-reduce:animate-none" />
-      <span className="h-3 w-3/5 animate-pulse rounded bg-[var(--workbench-border)] motion-reduce:animate-none" />
-      <span className="sr-only">{t('workspace.loading')}</span>
-    </section>
-  )
-}
-
-/** Props for the personal-preference load failure surface. */
-type AiAssistanceSettingsLoadErrorProps = {
-  /** Retries the personal preference query. */
-  onRetry: () => void
-  /** Localized message resolver. */
-  t: (key: MessageKey) => string
-}
-
-/** Renders a retryable settings load failure. */
-function AiAssistanceSettingsLoadError({ onRetry, t }: AiAssistanceSettingsLoadErrorProps) {
-  return (
-    <section className="workbench-panel border-[#f1c4b8] p-5">
-      <SectionHeader title={t('ai.settings.title')} meta={t('ai.settings.loadError')} />
-      <button className="workbench-button-secondary mt-4 min-h-[44px] px-4" onClick={onRetry} type="button">
-        {t('ai.settings.retry')}
-      </button>
-    </section>
   )
 }
 

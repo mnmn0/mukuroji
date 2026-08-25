@@ -1,4 +1,5 @@
 import type {
+  AiAssistanceCitation,
   AiRequestSubmissionSource,
   AiTriageDraft,
   AiTriageEntrySource,
@@ -12,11 +13,14 @@ import {
   type AiAssistanceController,
 } from '../mutations/useAiAssistanceController'
 import { AiAssistanceReview } from './AiAssistanceReview'
+import { AiDraftEvidenceMeta } from './AiDraftEvidence'
 
 /** Props for an explicit evidence-first triage draft workflow. */
 export type AiTriageDraftComposerProps = {
   /** Bearer token for the active Workspace member. */
   readonly accessToken?: string
+  /** Reports authenticated API failures to the owning route session guard. */
+  readonly onAuthenticatedApiError?: (error: unknown) => void
   /** Workflow-specific label for copying the reviewed proposal into a form. */
   readonly adoptLabel: string
   /** Optional controller override used by isolated stories and interaction tests. */
@@ -42,11 +46,12 @@ export function AiTriageDraftComposer({
   adoptLabel,
   controller,
   locale,
+  onAuthenticatedApiError,
   onAdoptDraft,
   source,
   t,
 }: AiTriageDraftComposerProps) {
-  const liveController = useAiAssistanceController({ accessToken })
+  const liveController = useAiAssistanceController({ accessToken, onAuthenticatedApiError })
   const activeController = controller ?? liveController
   const [generatedForRevision, setGeneratedForRevision] = useState<number>()
   const [isStale, setIsStale] = useState(false)
@@ -127,8 +132,8 @@ export function AiTriageDraftComposer({
           onReject={availableDraft && !isSourceStale ? async () => {
             await activeController.decide('rejected')
           } : undefined}
-          renderDraft={({ draft }) => draft.kind === 'triage'
-            ? <AiTriageDraftFields draft={draft} t={t} />
+          renderDraft={({ citations, draft }) => draft.kind === 'triage'
+            ? <AiTriageDraftFields citations={citations} draft={draft} t={t} />
             : null}
           t={t}
         />
@@ -139,6 +144,8 @@ export function AiTriageDraftComposer({
 
 /** Props for the permission-safe triage proposal field list. */
 export type AiTriageDraftFieldsProps = {
+  /** Permission-safe citations supplied by the shared review boundary. */
+  readonly citations: readonly AiAssistanceCitation[]
   /** Structured triage proposal returned from the authorized server workflow. */
   readonly draft: AiTriageDraft
   /** Localized message resolver. */
@@ -151,7 +158,7 @@ export type AiTriageDraftFieldsProps = {
  * @param props - Validated triage draft and localized labels.
  * @returns A flat definition list suitable for Request and Team triage surfaces.
  */
-export function AiTriageDraftFields({ draft, t }: AiTriageDraftFieldsProps) {
+export function AiTriageDraftFields({ citations, draft, t }: AiTriageDraftFieldsProps) {
   const fields = [
     draft.title ? { key: 'title', label: t('ai.triage.field.title'), suggestion: draft.title } : undefined,
     draft.description ? { key: 'description', label: t('ai.triage.field.description'), suggestion: draft.description } : undefined,
@@ -182,10 +189,13 @@ export function AiTriageDraftFields({ draft, t }: AiTriageDraftFieldsProps) {
           </dd>
           <dd className="flex flex-wrap items-start justify-between gap-2 text-xs font-medium text-[var(--workbench-muted)]">
             <span className="min-w-0 flex-1">{field.suggestion.reason}</span>
-            <span className="rounded-md border border-[var(--workbench-border)] bg-white px-2 py-1 font-semibold">
-              {t(`ai.review.confidence.${field.suggestion.confidence}`)}
-            </span>
           </dd>
+          <AiDraftEvidenceMeta
+            citations={citations}
+            citationIds={field.suggestion.citationIds}
+            confidence={field.suggestion.confidence}
+            t={t}
+          />
         </div>
       ))}
     </dl>

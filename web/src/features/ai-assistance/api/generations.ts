@@ -8,11 +8,11 @@ import {
   createMutationHeaders,
   type MutationRequestContext,
 } from '../../../shared/api/mutationHeaders'
-import { parseAiAssistanceGeneration } from '../model/aiGenerationValidation'
 import {
   AiAssistanceApiError,
   resolveAiAssistanceApiBaseUrl,
 } from './errors'
+import { parseAiAssistanceGenerationResponse } from './generationResponse'
 
 const aiAssistanceApiBaseUrl = `${resolveAiAssistanceApiBaseUrl(import.meta.env)}/ai-assistance`
 const defaultErrorMessage = 'Unable to complete the AI assistance request.'
@@ -76,7 +76,7 @@ export async function generateAiAssistance(
     },
   )
 
-  return parseGenerationResponse(value)
+  return parseAiAssistanceGenerationResponse(value)
 }
 
 /**
@@ -101,7 +101,7 @@ export async function decideAiAssistanceGeneration(
     },
   )
 
-  return parseGenerationResponse(value)
+  return parseAiAssistanceGenerationResponse(value)
 }
 
 /**
@@ -126,19 +126,6 @@ export async function createAiAssistanceFeedback(
     },
     true,
   )
-}
-
-/** Converts a validated JSON value into a generation-specific transport result. */
-function parseGenerationResponse(value: unknown): AiAssistanceGeneration {
-  try {
-    return parseAiAssistanceGeneration(value)
-  } catch {
-    throw new AiAssistanceApiError(
-      502,
-      'AI assistance API returned an invalid response.',
-      'InvalidAiAssistanceResponse',
-    )
-  }
 }
 
 /** Performs one authenticated JSON request and converts stable API failures. */

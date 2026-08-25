@@ -3,6 +3,7 @@ import type {
   AiAssistanceDraft,
   AiAssistanceGeneration,
   AiAssistanceTask,
+  AiBriefItem,
 } from '@mukuroji/contracts'
 import { isSafeApplicationPath } from '../../../shared/routing/applicationPath'
 
@@ -36,21 +37,6 @@ const customFieldOperatorValues = [
 ] as const
 
 /**
- * Parses an untrusted AI generation response after validating its complete public shape.
- *
- * @param value - JSON value returned by the AI assistance API.
- * @returns A validated AI generation.
- * @throws When the response is not a supported AI generation.
- */
-export function parseAiAssistanceGeneration(value: unknown): AiAssistanceGeneration {
-  if (!isAiAssistanceGeneration(value)) {
-    throw new Error('AI assistance API returned an invalid generation response.')
-  }
-
-  return value
-}
-
-/**
  * Returns whether an unknown value is a fully grounded available generation for one workflow.
  *
  * @param value - Generation value received before a review or adoption action.
@@ -66,8 +52,13 @@ export function isReviewableAiAssistanceGeneration(
     value.content.availability === 'available'
 }
 
-/** Validates the complete generation envelope and its permission-aware content. */
-function isAiAssistanceGeneration(value: unknown): value is AiAssistanceGeneration {
+/**
+ * Validates the complete generation envelope and its permission-aware content.
+ *
+ * @param value - Unknown value received from an API boundary or a Storybook fixture.
+ * @returns Whether the value satisfies the complete generation contract.
+ */
+export function isAiAssistanceGeneration(value: unknown): value is AiAssistanceGeneration {
   if (!isRecord(value)) return false
   const task = value.task
 
@@ -123,10 +114,18 @@ function isAiAssistanceDraft(value: unknown): value is AiAssistanceDraft {
         Array.isArray(value.customFields) &&
         value.customFields.every(isSuggestedCustomField)
     case 'summary':
-      return isBriefItem(value.overview) &&
-        isBriefItemArray(value.decisions) &&
-        isBriefItemArray(value.actions) &&
-        isBriefItemArray(value.risks)
+      if (
+        !isBriefItem(value.overview) ||
+        !isBriefItemArray(value.decisions) ||
+        !isBriefItemArray(value.actions) ||
+        !isBriefItemArray(value.risks)
+      ) return false
+      return hasUniqueBriefItemIds([
+        value.overview,
+        ...value.decisions,
+        ...value.actions,
+        ...value.risks,
+      ])
     case 'search':
       return isString(value.interpretation) &&
         isWorkspaceSearchFilters(value.filters) &&
@@ -152,6 +151,18 @@ function isAiAssistanceDraft(value: unknown): value is AiAssistanceDraft {
 
 /** Rejects duplicate model-generated row identifiers before React renders keyed lists. */
 function hasUniquePlanningRowIds(items: readonly unknown[]): boolean {
+  const identifiers = new Set<string>()
+  for (const item of items) {
+    if (!isRecord(item) || !isNonEmptyString(item.id) || identifiers.has(item.id)) {
+      return false
+    }
+    identifiers.add(item.id)
+  }
+  return true
+}
+
+/** Rejects duplicate summary identifiers before a keyed review list is rendered. */
+function hasUniqueBriefItemIds(items: readonly unknown[]): boolean {
   const identifiers = new Set<string>()
   for (const item of items) {
     if (!isRecord(item) || !isNonEmptyString(item.id) || identifiers.has(item.id)) {
@@ -265,7 +276,7 @@ function isBriefItem(value: unknown): boolean {
 }
 
 /** Validates an array of grounded brief items. */
-function isBriefItemArray(value: unknown): boolean {
+function isBriefItemArray(value: unknown): value is AiBriefItem[] {
   return Array.isArray(value) && value.every(isBriefItem)
 }
 
@@ -287,10 +298,43 @@ function isWorkspaceSearchFilters(value: unknown): boolean {
 
 /** Validates a Workspace search date boundary. */
 function isSearchDate(value: unknown): boolean {
-  return isRecord(value) &&
-    isOneOf(value.field, ['createdAt', 'updatedAt', 'dueDate']) &&
-    isOptionalString(value.from) &&
-    isOptionalString(value.to)
+  if (
+    !isRecord(value) ||
+    !isOneOf(value.field, ['createdAt', 'updatedAt', 'dueDate']) ||
+    !isOptionalCalendarDate(value.from) ||
+    !isOptionalCalendarDate(value.to)
+  ) return false
+  if (value.from === undefined || value.to === undefined) return true
+  return value.from <= value.to
+}
+
+/** Validates an optional fixed-width Gregorian calendar date. */
+function isOptionalCalendarDate(value: unknown): value is string | undefined {
+  return value === undefined || isCalendarDate(value)
+}
+
+/** Validates a fixed-width Gregorian calendar date without timezone coercion. */
+function isCalendarDate(value: unknown): value is string {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/u.test(value)) return false
+  const year = Number(value.slice(0, 4))
+  const month = Number(value.slice(5, 7))
+  const day = Number(value.slice(8, 10))
+  const leapYear = year % 400 === 0 || (year % 4 === 0 && year % 100 !== 0)
+  const daysByMonth = [
+    31,
+    leapYear ? 29 : 28,
+    31,
+    30,
+    31,
+    30,
+    31,
+    31,
+    30,
+    31,
+    30,
+    31,
+  ]
+  return month >= 1 && month <= 12 && day >= 1 && day <= (daysByMonth[month - 1] ?? 0)
 }
 
 /** Validates an optional array of custom-field filters. */

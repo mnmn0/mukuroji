@@ -412,6 +412,8 @@ type TeamIssueScreenProps = {
   focusedRootCommentId?: string
   /** Route-owned collaboration section and deep-link state. */
   collaborationRoute?: IssueCollaborationRoute
+  /** Reports an authenticated AI API failure to the route-level session guard. */
+  onAuthenticatedApiError?: (error: unknown) => void
   /**
    * タスク担当者として選択できる project member 一覧です。
    */
@@ -1071,6 +1073,7 @@ export function TeamIssuePage() {
         onCollaborationTabChange: handleCollaborationTabChange,
         onCollaborationSourceChange: handleCollaborationSourceChange,
       }}
+      onAuthenticatedApiError={setAuthenticatedApiError}
       canManageExternalLinks={canManageStructure}
       configurationErrorMessage={configurationErrorMessage}
       currentWorkspaceMemberKey={workspaceAccess?.currentMember.memberKey}
@@ -1156,6 +1159,7 @@ export function TeamIssueScreen({
   canManageExternalLinks = false,
   collaboration,
   collaborationRoute,
+  onAuthenticatedApiError,
   configurationErrorMessage,
   currentWorkspaceMemberKey,
   defaultCreateIssueOpen = false,
@@ -2287,6 +2291,7 @@ export function TeamIssueScreen({
                 issue={selectedIssue}
                 isRelationsLoading={isRelationsLoading}
                 locale={locale}
+                onAuthenticatedApiError={onAuthenticatedApiError}
                 onAddRelation={canMutateSelectedIssue && onAddRelation
                   ? (issueId, input) => handleTeamIssueActionRelation(
                       issueId,
@@ -3536,6 +3541,7 @@ function IssueDetailPane({
   isRelationsLoading,
   locale,
   onAddRelation,
+  onAuthenticatedApiError,
   onCreateScheduleDependency,
   onDeleteRelation,
   onDeleteScheduleDependency,
@@ -3568,6 +3574,8 @@ function IssueDetailPane({
   isRelationsLoading: boolean
   locale: Locale
   onAddRelation?: (issueId: string, input: WorkItemRelationEditorInput) => Promise<void>
+  /** Reports an authenticated AI API failure to the route-level session guard. */
+  onAuthenticatedApiError?: (error: unknown) => void
   /** Creates a canonical schedule dependency. */
   onCreateScheduleDependency?: TeamIssueScreenProps['onCreateScheduleDependency']
   onDeleteRelation?: (issueId: string, relation: WorkItemRelation) => Promise<void>
@@ -3613,6 +3621,7 @@ function IssueDetailPane({
       key={issue.id}
       locale={locale}
       onAddRelation={onAddRelation}
+      onAuthenticatedApiError={onAuthenticatedApiError}
       onCreateScheduleDependency={onCreateScheduleDependency}
       onDeleteRelation={onDeleteRelation}
       onDeleteScheduleDependency={onDeleteScheduleDependency}
@@ -3647,6 +3656,7 @@ function IssueDetailContent({
   isRelationsLoading,
   locale,
   onAddRelation,
+  onAuthenticatedApiError,
   onCreateScheduleDependency,
   onDeleteRelation,
   onDeleteScheduleDependency,
@@ -3695,6 +3705,8 @@ function IssueDetailContent({
   locale: Locale
   /** Relation 追加 callback です。 */
   onAddRelation?: (issueId: string, input: WorkItemRelationEditorInput) => Promise<void>
+  /** Reports an authenticated AI API failure to the route-level session guard. */
+  onAuthenticatedApiError?: (error: unknown) => void
   /** Creates a canonical schedule dependency. */
   onCreateScheduleDependency?: TeamIssueScreenProps['onCreateScheduleDependency']
   /** Relation 解除 callback です。 */
@@ -3983,6 +3995,7 @@ function IssueDetailContent({
           focusedRootCommentId={focusedRootCommentId}
           locale={locale}
           members={workspaceMembers}
+          onAuthenticatedApiError={onAuthenticatedApiError}
           onContextDraftConsumed={documentContextPromotion.onContextDraftConsumed}
         />
       ) : null}

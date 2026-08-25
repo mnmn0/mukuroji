@@ -663,6 +663,8 @@ export type PlanningStatusUpdateComposerProps = {
 export type PlanningStatusUpdateAiAssistance = {
   /** Active Workspace member bearer token. */
   accessToken: string
+  /** Reports authenticated AI failures to the owning Planning route session guard. */
+  onAuthenticatedApiError?: (error: unknown) => void
   /** Locale sent to Bedrock and used for draft presentation. */
   locale: Locale
   /** Planning target resolved and re-authorized by the server. */
@@ -780,6 +782,7 @@ export function PlanningStatusUpdateComposer({
             accessToken={aiAssistance.accessToken}
             key={aiAssistantSessionKey}
             locale={aiAssistance.locale}
+            onAuthenticatedApiError={aiAssistance.onAuthenticatedApiError}
             onAdopt={(draft, replacementConfirmed) => adoptAiDraft(
               draft,
               aiAssistantSessionKey,

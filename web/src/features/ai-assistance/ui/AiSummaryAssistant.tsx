@@ -18,6 +18,8 @@ import { AiSummaryBrief } from './AiSummaryBrief'
 export type AiSummaryAssistantProps = {
   /** Active Workspace member bearer token. */
   accessToken?: string
+  /** Reports authenticated AI failures to the owning collaboration session guard. */
+  onAuthenticatedApiError?: (error: unknown) => void
   /** Label for the optional workflow-specific draft adoption action. */
   adoptLabel?: string
   /** Optional operator focus sent with the audited generation request. */
@@ -43,11 +45,12 @@ export function AiSummaryAssistant({
   adoptLabel,
   focus,
   locale,
+  onAuthenticatedApiError,
   onAdopt,
   sources,
   t,
 }: AiSummaryAssistantProps) {
-  const controller = useAiAssistanceController({ accessToken })
+  const controller = useAiAssistanceController({ accessToken, onAuthenticatedApiError })
 
   return (
     <AiSummaryAssistantView

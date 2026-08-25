@@ -98,7 +98,9 @@ export function RequestIntakePage() {
     locale,
   })
   const canManageForms = canManageWorkspaceStructure(user)
-  const canUseAiAssistance = user?.canManageAiAssistance ?? canManageForms
+  // Request-level conversion capability is the source-of-truth gate for this assistant.
+  // Policy-management permission must not hide it from operators who can convert a request.
+  const canUseAiAssistance = Boolean(accessToken && user && !currentUserError)
   const activeView: RequestsView = requestedView === 'forms' && canManageForms
     ? 'forms'
     : 'queue'
@@ -308,6 +310,7 @@ export function RequestIntakePage() {
                 hasMore={Boolean(nextQueueCursor)}
                 isLoadingMore={isLoadingMore}
                 locale={locale}
+                onAuthenticatedApiError={handleAuthenticatedApiError}
                 selectedSubmission={selectedSubmission
                   ? normalizeRequestSubmission(selectedSubmission)
                   : submissions.find((submission) => submission.id === selectedSubmissionId)}

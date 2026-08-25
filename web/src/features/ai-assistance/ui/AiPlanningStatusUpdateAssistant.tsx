@@ -19,6 +19,8 @@ import { AiPlanningDraftReview } from './AiPlanningDraftReview'
 export type AiPlanningStatusUpdateAssistantProps = {
   /** Active Workspace member bearer token. */
   accessToken?: string
+  /** Reports authenticated AI failures to the owning Planning route session guard. */
+  onAuthenticatedApiError?: (error: unknown) => void
   /** Optional operator guidance sent with the audited generation request. */
   guidance?: string
   /** Locale sent to Bedrock and used for generation metadata. */
@@ -46,12 +48,13 @@ export function AiPlanningStatusUpdateAssistant({
   accessToken,
   guidance,
   locale,
+  onAuthenticatedApiError,
   onAdopt,
   requireAdoptionConfirmation,
   source,
   t,
 }: AiPlanningStatusUpdateAssistantProps) {
-  const controller = useAiAssistanceController({ accessToken })
+  const controller = useAiAssistanceController({ accessToken, onAuthenticatedApiError })
 
   return (
     <AiPlanningStatusUpdateAssistantView

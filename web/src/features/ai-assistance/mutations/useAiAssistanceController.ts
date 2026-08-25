@@ -35,6 +35,8 @@ export type AiAssistanceControllerError = {
 export type UseAiAssistanceControllerOptions = {
   /** Bearer token for the active Workspace member. */
   accessToken?: string
+  /** Reports authenticated transport failures to the owning route session guard. */
+  onAuthenticatedApiError?: (error: unknown) => void
 }
 
 /** Explicit AI generation, review-decision, and feedback actions consumed by a view. */
@@ -73,6 +75,7 @@ export type AiAssistanceController = {
  */
 export function useAiAssistanceController({
   accessToken,
+  onAuthenticatedApiError,
 }: UseAiAssistanceControllerOptions): AiAssistanceController {
   const mutationRunnerRef = useRef<ReturnType<typeof createMutationRequestRunner> | null>(null)
   if (mutationRunnerRef.current === null) {
@@ -184,6 +187,7 @@ export function useAiAssistanceController({
       setGeneration(nextGeneration)
       return nextGeneration
     } catch (requestError) {
+      if (!isAbortError(requestError)) onAuthenticatedApiError?.(requestError)
       if (
         !isAbortError(requestError) &&
         generationAbortRef.current === abortController &&
@@ -199,7 +203,7 @@ export function useAiAssistanceController({
         setIsGenerating(false)
       }
     }
-  }, [accessToken, mutationRunner])
+  }, [accessToken, mutationRunner, onAuthenticatedApiError])
 
   const decide = useCallback(async (
     outcome: 'approved' | 'rejected',
@@ -237,6 +241,13 @@ export function useAiAssistanceController({
           mutationContext,
         }),
       )
+      if (nextGeneration.id !== generationId) {
+        throw new AiAssistanceApiError(
+          502,
+          'AI assistance decision returned a different generation.',
+          'InvalidAiAssistanceResponse',
+        )
+      }
       if (
         operationEpochRef.current !== operationEpoch ||
         visibleGenerationIdRef.current !== generationId
@@ -245,6 +256,7 @@ export function useAiAssistanceController({
       setGeneration(nextGeneration)
       return nextGeneration
     } catch (requestError) {
+      onAuthenticatedApiError?.(requestError)
       if (
         operationEpochRef.current === operationEpoch &&
         visibleGenerationIdRef.current === generationId
@@ -256,7 +268,7 @@ export function useAiAssistanceController({
       decisionPendingRef.current = false
       setIsDecisionPending(false)
     }
-  }, [accessToken, generation, mutationRunner])
+  }, [accessToken, generation, mutationRunner, onAuthenticatedApiError])
 
   const sendFeedback = useCallback(async (
     rating: CreateAiAssistanceFeedbackRequest['rating'],
@@ -297,6 +309,7 @@ export function useAiAssistanceController({
       ) return
       setFeedbackRating(rating)
     } catch (requestError) {
+      onAuthenticatedApiError?.(requestError)
       if (
         operationEpochRef.current === operationEpoch &&
         visibleGenerationIdRef.current === generationId
@@ -307,7 +320,7 @@ export function useAiAssistanceController({
       feedbackPendingRef.current = false
       setIsFeedbackPending(false)
     }
-  }, [accessToken, feedbackRating, generation, mutationRunner])
+  }, [accessToken, feedbackRating, generation, mutationRunner, onAuthenticatedApiError])
 
   const isAccessTokenCurrent = sessionAccessToken === accessToken
 
@@ -334,6 +347,7 @@ export function useAiAssistanceController({
  */
 export function classifyAiAssistanceError(error: unknown): AiAssistanceControllerError {
   if (!(error instanceof AiAssistanceApiError)) return { kind: 'generic' }
+  if (error.status === 401) return { code: error.code, kind: 'permission' }
   if (error.status === 403) return { code: error.code, kind: 'permission' }
   if (error.status === 409) return { code: error.code, kind: 'conflict' }
   if (error.status === 400 || error.status === 422 || error.code === 'InvalidAiAssistanceResponse') {

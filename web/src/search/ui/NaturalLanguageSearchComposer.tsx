@@ -35,6 +35,8 @@ import type { ApprovedAiSearchApplication } from '../model/aiSearchApplication'
 export type NaturalLanguageSearchComposerProps = {
   /** Active Workspace member bearer token. */
   accessToken?: string
+  /** Reports authenticated AI failures to the Search route session guard. */
+  onAuthenticatedApiError?: (error: unknown) => void
   /** Applies reviewed filters and an optional report intent to existing Search route state. */
   onApply: (application: ApprovedAiSearchApplication) => void
   /** Locale sent to the generation request and used for presentation. */
@@ -52,10 +54,11 @@ export type NaturalLanguageSearchComposerProps = {
 export function NaturalLanguageSearchComposer({
   accessToken,
   locale,
+  onAuthenticatedApiError,
   onApply,
   t,
 }: NaturalLanguageSearchComposerProps) {
-  const controller = useAiAssistanceController({ accessToken })
+  const controller = useAiAssistanceController({ accessToken, onAuthenticatedApiError })
 
   return (
     <NaturalLanguageSearchComposerView

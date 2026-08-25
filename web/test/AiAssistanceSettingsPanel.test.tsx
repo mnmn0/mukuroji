@@ -128,4 +128,25 @@ describe('AiAssistanceSettingsPanel', () => {
     expect(html).toContain('Loading Workspace policy')
     expect(html).not.toContain('AI assistance settings could not be loaded')
   })
+
+  test('keeps manager policy controls visible when the personal preference fails', () => {
+    const html = renderToStaticMarkup(
+      <AiAssistanceSettingsPanel
+        canManagePolicy
+        onPolicyChange={() => undefined}
+        onPolicyRetry={() => undefined}
+        onPolicySave={() => undefined}
+        onPreferenceChange={() => undefined}
+        onPreferenceRetry={() => undefined}
+        onPreferenceSave={() => undefined}
+        policy={aiAssistancePolicyFixture}
+        preferenceLoadError
+        t={t}
+      />,
+    )
+
+    expect(html).toContain('AI assistance settings could not be loaded')
+    expect(html).toContain('Workspace policy')
+    expect(html).toContain('Allowed Bedrock model IDs')
+  })
 })

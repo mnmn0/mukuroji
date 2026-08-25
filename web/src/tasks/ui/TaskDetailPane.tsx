@@ -67,6 +67,8 @@ import { TaskPriorityBadge } from './TaskViewPrimitives'
 export type TaskDetailPaneProps = {
   /** Optional AI controller override used by isolated stories and interaction tests. */
   aiAssistanceController?: AiAssistanceController
+  /** Reports authenticated AI failures to the owning task route session guard. */
+  onAuthenticatedApiError?: (error: unknown) => void
   /** Determines whether the current user may manage one canonical dependency endpoint. */
   canManageScheduleDependencyEndpoint?: (endpoint: WorkItemDependencyEndpoint) => boolean
   /** Whether the current Workspace member may read Team Triage source links. */
@@ -182,6 +184,7 @@ export function TaskDetailPane({
   locale,
   planningSnapshot,
   onAddRelation,
+  onAuthenticatedApiError,
   onCreateScheduleDependency,
   onClose,
   onDeleteRelation,
@@ -497,6 +500,7 @@ export function TaskDetailPane({
             controller={aiAssistanceController}
             key={editorIdentity}
             locale={locale}
+            onAuthenticatedApiError={onAuthenticatedApiError}
             onAdopt={isReadOnly ? undefined : applyAiPlanningDraft}
             resolveStatusLabel={(statusId) =>
               workflowStatuses.find((status) => status.id === statusId)?.name ?? statusId}
@@ -793,6 +797,7 @@ export function TaskDetailPane({
               }
             : undefined}
           route={collaborationRoute}
+          onAuthenticatedApiError={onAuthenticatedApiError}
           artifacts={artifacts}
           contextDraft={documentContextPromotion.documentContextDraft}
           key={`${task.teamId ?? ''}:${task.id}`}

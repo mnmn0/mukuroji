@@ -271,6 +271,8 @@ export type TaskScreenProps = {
   workspaceId?: string
   /** Access token used to load related documents. */
   accessToken?: string
+  /** Reports authenticated AI failures to the owning task route session guard. */
+  onAuthenticatedApiError?: (error: unknown) => void
   /** Locale used for labels, dates, and form validation. */
   locale: Locale
   /** Project currently displayed by the screen. */
@@ -456,6 +458,7 @@ export function TaskScreen({
   activeTaskViewId,
   workspaceId = '',
   accessToken,
+  onAuthenticatedApiError,
   locale,
   projectId,
   isProjectQuickAccess = false,
@@ -2709,6 +2712,7 @@ export function TaskScreen({
                 <TaskDetailPane
                   accessToken={accessToken}
                   assigneeOptions={assigneeOptions}
+                  onAuthenticatedApiError={onAuthenticatedApiError}
                   artifacts={artifacts}
                   canAccessTriage={canAccessTriage}
                   canManageScheduleDependencyEndpoint={canManageScheduleDependencyEndpoint}

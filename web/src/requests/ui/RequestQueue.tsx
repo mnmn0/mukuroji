@@ -20,6 +20,8 @@ export type RequestQueueProps = {
   accessToken?: string
   /** Optional AI controller override for isolated interaction stories. */
   aiAssistanceController?: AiAssistanceController
+  /** Reports authenticated AI failures to the Request Intake session guard. */
+  onAuthenticatedApiError?: (error: unknown) => void
   /** Whether the current principal may send administrator-only intake content to AI. */
   canUseAiAssistance?: boolean
   /**
@@ -89,6 +91,7 @@ export function RequestQueue({
   isLoading = false,
   isLoadingMore = false,
   locale,
+  onAuthenticatedApiError,
   onAction,
   onLoadMore,
   onOpenAttachment,
@@ -185,6 +188,7 @@ export function RequestQueue({
         locale={locale}
         submission={selectedSubmission}
         onAction={onAction}
+        onAuthenticatedApiError={onAuthenticatedApiError}
         onOpenAttachment={onOpenAttachment}
       />
     </div>
@@ -196,6 +200,7 @@ function RequestSubmissionDetail({
   aiAssistanceController,
   canUseAiAssistance,
   locale,
+  onAuthenticatedApiError,
   onAction,
   onOpenAttachment,
   submission,
@@ -203,6 +208,7 @@ function RequestSubmissionDetail({
   accessToken?: string
   aiAssistanceController?: AiAssistanceController
   canUseAiAssistance: boolean
+  onAuthenticatedApiError?: (error: unknown) => void
   locale: Locale
   onAction?: RequestQueueProps['onAction']
   onOpenAttachment?: RequestQueueProps['onOpenAttachment']
@@ -409,6 +415,7 @@ function RequestSubmissionDetail({
             adoptLabel={t('ai.triage.adoptRequest')}
             controller={aiAssistanceController}
             locale={locale}
+            onAuthenticatedApiError={onAuthenticatedApiError}
             onAdoptDraft={adoptTriageDraft}
             source={{
               expectedRevision: submission.revision,

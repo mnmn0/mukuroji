@@ -532,7 +532,23 @@ export function PlanningPage() {
         <PlanningScreen
           accessErrorMessage={accessErrorMessage || undefined}
           activeView={activeView}
-          aiAssistance={accessToken ? { accessToken, locale } : undefined}
+          aiAssistance={accessToken
+            ? {
+                accessToken,
+                locale,
+                onAuthenticatedApiError: (error) => {
+                  const sessionErrorAction = resolveEnterpriseSessionErrorsAction(
+                    undefined,
+                    [error],
+                    currentPath,
+                  )
+                  if (sessionErrorAction?.redirectTo) {
+                    if (sessionErrorAction.clearSession) clearAuthSession()
+                    navigate(sessionErrorAction.redirectTo, { replace: true })
+                  }
+                },
+              }
+            : undefined}
           errorMessage={mutationErrorMessage ?? loadErrorMessage}
           initialSelectedEntityId={selectedEntityId}
           initialSelectedUpdateTarget={selectedUpdateTarget}

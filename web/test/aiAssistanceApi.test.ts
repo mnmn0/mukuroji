@@ -141,6 +141,21 @@ describe('AI assistance API', () => {
               ...aiSummaryGenerationFixture.content,
               draft: {
                 ...aiSummaryGenerationFixture.content.draft,
+                actions: [
+                  aiSummaryGenerationFixture.content.draft.actions[0],
+                  aiSummaryGenerationFixture.content.draft.actions[0],
+                ],
+              },
+            }
+          : aiSummaryGenerationFixture.content,
+      },
+      {
+        ...aiSummaryGenerationFixture,
+        content: aiSummaryGenerationFixture.content.availability === 'available'
+          ? {
+              ...aiSummaryGenerationFixture.content,
+              draft: {
+                ...aiSummaryGenerationFixture.content.draft,
                 overview: {
                   ...aiSummaryGenerationFixture.content.draft.overview,
                   citationIds: ['missing-citation'],
@@ -159,6 +174,36 @@ describe('AI assistance API', () => {
         mutationContext,
       }).catch((caught: unknown) => caught)
 
+      expect(error).toMatchObject({ code: 'InvalidAiAssistanceResponse', status: 502 })
+    }
+  })
+
+  test('rejects malformed Search dates before they reach the review surface', async () => {
+    const content = aiSearchGenerationFixture.content
+    if (content.availability !== 'available' || content.draft.kind !== 'search') {
+      throw new Error('Search fixture must stay available.')
+    }
+
+    for (const date of [
+      { field: 'createdAt', from: 'tomorrow' },
+      { field: 'createdAt', from: '2026-02-30' },
+      { field: 'createdAt', from: '2026-09-01', to: '2026-08-01' },
+    ]) {
+      installFetchRecorder([{
+        ...aiSearchGenerationFixture,
+        content: {
+          ...content,
+          draft: {
+            ...content.draft,
+            filters: { ...content.draft.filters, date },
+          },
+        },
+      }])
+      const error = await generateAiAssistance({
+        accessToken: 'access-token',
+        input: { locale: 'en', query: 'date', task: 'search' },
+        mutationContext,
+      }).catch((caught: unknown) => caught)
       expect(error).toMatchObject({ code: 'InvalidAiAssistanceResponse', status: 502 })
     }
   })
