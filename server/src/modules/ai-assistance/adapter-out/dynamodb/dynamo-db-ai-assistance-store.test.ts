@@ -271,6 +271,23 @@ function createGenerationRecord(auditedInput: string): StoredAiAssistanceGenerat
   }
 }
 
+/** Creates the DynamoDB-shaped generation item used by reconciliation tests. */
+function createPersistedGenerationItem(
+  record: StoredAiAssistanceGeneration,
+): Record<string, unknown> {
+  return {
+    workspaceId: record.workspaceId,
+    recordKey: `AI_GENERATION#${record.generation.id}`,
+    recordType: 'ai-assistance-generation',
+    memberId: record.memberId,
+    generation: record.generation,
+    request: record.request,
+    authorizationToken: record.authorizationToken,
+    auditedInput: record.auditedInput,
+    expiresAt: Math.floor(Date.parse(record.generation.expiresAt) / 1_000),
+  }
+}
+
 describe('DynamoDbAiAssistanceStore', () => {
   test('rejects an oversized UTF-8 generation row before sending a DynamoDB command', async () => {
     const harness = createHarness([])
@@ -315,6 +332,23 @@ describe('DynamoDbAiAssistanceStore', () => {
         code: 'AiAssistancePersistenceError',
       })
       expect(harness.commands.map((command) => command.name)).toEqual(['GetCommand'])
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('reconciles an ambiguous generation write before reporting persistence failure', async () => {
+    const record = createGenerationRecord('Permission-filtered source context.')
+    const harness = createHarness([
+      new Error('connection closed after PutItem committed'),
+      { Item: createPersistedGenerationItem(record) },
+    ])
+    try {
+      await expect(harness.store.createGeneration(record)).resolves.toEqual(record)
+      expect(harness.commands.map((command) => command.name)).toEqual([
+        'PutCommand',
+        'GetCommand',
+      ])
     } finally {
       harness.restore()
     }
@@ -533,6 +567,37 @@ describe('DynamoDbAiAssistanceStore', () => {
         createAttemptAudit({ auditedInput: 'Different permission-filtered context.' }),
       ))).rejects.toMatchObject({ code: 'AiAssistanceIdempotencyConflict' })
       expect(harness.commands.map((command) => command.name)).toEqual(['GetCommand'])
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('reconciles a non-conditional attempt-start transport error', async () => {
+    const startedReceipt = {
+      ...createPendingReceipt('generation-2', 1_777_161_690_000),
+      attempt: {
+        task: 'summary',
+        modelId: 'model-1',
+        promptVersion: 'ai-assistance-v1',
+        traceId: 'trace-1',
+        startedAt: '2026-08-25T00:01:01.000Z',
+        audit: createAttemptAudit(),
+        status: 'started',
+      },
+    }
+    const harness = createHarness([
+      { Item: createPendingReceipt('generation-2', 1_777_161_690_000) },
+      new Error('connection closed after UpdateItem committed'),
+      { Item: startedReceipt },
+    ])
+    try {
+      await expect(harness.store.startGenerationAttempt(createAttemptStart()))
+        .resolves.toBeUndefined()
+      expect(harness.commands.map((command) => command.name)).toEqual([
+        'GetCommand',
+        'UpdateCommand',
+        'GetCommand',
+      ])
     } finally {
       harness.restore()
     }
@@ -788,6 +853,41 @@ describe('DynamoDbAiAssistanceStore', () => {
         .rejects.toMatchObject({ code: 'AiAssistanceIdempotencyConflict' })
     } finally {
       conflictHarness.restore()
+    }
+  })
+
+  test('replays an identical decision after a concurrent conditional write', async () => {
+    const current = createGenerationRecord('Permission-filtered source context.')
+    const decided: StoredAiAssistanceGeneration = {
+      ...current,
+      generation: {
+        ...current.generation,
+        revision: 2,
+        decision: {
+          outcome: 'approved',
+          decidedAt: '2026-08-25T00:02:00.000Z',
+        },
+      },
+    }
+    const harness = createHarness([
+      { Item: createPersistedGenerationItem(current) },
+      conditionalFailure(),
+      { Item: createPersistedGenerationItem(decided) },
+    ])
+    try {
+      await expect(harness.store.decideGeneration(
+        'workspace-1',
+        'generation-1',
+        { outcome: 'approved', expectedRevision: 1 },
+        '2026-08-25T00:02:00.000Z',
+      )).resolves.toEqual(decided)
+      expect(harness.commands.map((command) => command.name)).toEqual([
+        'GetCommand',
+        'PutCommand',
+        'GetCommand',
+      ])
+    } finally {
+      harness.restore()
     }
   })
 

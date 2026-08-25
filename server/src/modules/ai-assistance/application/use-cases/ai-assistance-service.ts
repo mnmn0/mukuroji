@@ -30,6 +30,7 @@ import {
 } from '../../domain/ai-assistance-redaction'
 import {
   parseAiAssistanceModelOutput,
+  parseAiAssistanceUsage,
   parseCreateAiAssistanceFeedbackRequest,
   parseDecideAiAssistanceGenerationRequest,
   parseGenerateAiAssistanceRequest,
@@ -52,6 +53,8 @@ import type {
 const DEFAULT_MAX_PROMPT_CONTEXT_CHARACTERS = 100_000
 const DEFAULT_MAX_OUTPUT_TOKENS = 4_096
 const DEFAULT_PROVIDER_TIMEOUT_MS = 12_000
+const DEFAULT_GENERATION_DEADLINE_MS = 19_000
+const GENERATION_DEADLINE_HEADROOM_MS = 1_000
 const DEFAULT_RESERVATION_LEASE_MS = 30_000
 const GENERATION_BUDGET_WINDOW_MS = 60_000
 const DEFAULT_WORKSPACE_GENERATION_LIMIT_PER_MINUTE = 32
@@ -101,6 +104,7 @@ export function createAiAssistanceService(
     DEFAULT_MAX_PROMPT_CONTEXT_CHARACTERS
   const maxOutputTokens = options.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS
   const providerTimeoutMs = options.providerTimeoutMs ?? DEFAULT_PROVIDER_TIMEOUT_MS
+  const generationDeadlineMs = options.generationDeadlineMs ?? DEFAULT_GENERATION_DEADLINE_MS
   const reservationLeaseMs = options.reservationLeaseMs ?? Math.max(
     DEFAULT_RESERVATION_LEASE_MS,
     providerTimeoutMs + 5_000,
@@ -125,6 +129,16 @@ export function createAiAssistanceService(
       'validation',
       'InvalidAiAssistanceRequest',
       'The AI assistance reservation lease must exceed the provider timeout.',
+    )
+  }
+  if (
+    !Number.isSafeInteger(generationDeadlineMs) ||
+    generationDeadlineMs <= providerTimeoutMs + GENERATION_DEADLINE_HEADROOM_MS
+  ) {
+    throw new AiAssistanceError(
+      'validation',
+      'InvalidAiAssistanceRequest',
+      'The AI assistance generation deadline must leave provider and persistence headroom.',
     )
   }
   validateGenerationBudgetConfiguration({
@@ -347,6 +361,21 @@ export function createAiAssistanceService(
         auditedInput: context.promptContext,
       }, maxOutputTokens)
       const providerStartedAt = now()
+      const elapsedBeforeProviderMs = Math.max(
+        0,
+        providerStartedAt.getTime() - createdAt.getTime(),
+      )
+      const remainingProviderTimeoutMs = Math.min(
+        providerTimeoutMs,
+        generationDeadlineMs - elapsedBeforeProviderMs - GENERATION_DEADLINE_HEADROOM_MS,
+      )
+      if (remainingProviderTimeoutMs <= 0) {
+        throw new AiAssistanceError(
+          'timeout',
+          'AiAssistanceProviderTimeout',
+          'The AI assistance request exceeded its end-to-end deadline before Bedrock started.',
+        )
+      }
       await options.store.startGenerationAttempt({
         ...completion,
         task: request.task,
@@ -372,8 +401,12 @@ export function createAiAssistanceService(
         allowedValues: privateIdentifierAliases.modelAllowedValues,
         traceId: actor.traceId,
         maxOutputTokens,
-        timeoutMs: providerTimeoutMs,
+        timeoutMs: remainingProviderTimeoutMs,
       })
+      modelResult = {
+        ...modelResult,
+        usage: parseAiAssistanceUsage(modelResult.usage),
+      }
       const output = parseAiAssistanceModelOutput({
         draft: modelResult.draft,
         uncertainty: modelResult.uncertainty,
@@ -567,7 +600,18 @@ export function createAiAssistanceService(
       feedback,
       idempotencyKey,
     )
-    const record = await requireOwnedGeneration(actor, generationId, options.store.getGeneration)
+    const [record, policy] = await Promise.all([
+      requireOwnedGeneration(actor, generationId, options.store.getGeneration),
+      getPolicy(actor),
+    ])
+    const effectiveGeneration = applyEffectiveRetention(record.generation, policy)
+    if (Date.parse(effectiveGeneration.expiresAt) <= now().getTime()) {
+      throw new AiAssistanceError(
+        'not-found',
+        'AiAssistanceGenerationNotFound',
+        'The AI assistance generation is no longer available for feedback.',
+      )
+    }
     await options.store.putFeedback({
       workspaceId: actor.workspaceId,
       feedbackId: feedbackIdentity.feedbackId,
@@ -576,7 +620,7 @@ export function createAiAssistanceService(
       feedback,
       inputFingerprint: feedbackIdentity.inputFingerprint,
       createdAt: now().toISOString(),
-      expiresAt: record.generation.expiresAt,
+      expiresAt: effectiveGeneration.expiresAt,
     })
   }
 

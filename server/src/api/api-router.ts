@@ -20028,6 +20028,14 @@ async function resolveAiAssistanceContext(
       candidateAllowedValues.workItemEndpoints,
     ),
   }
+  if (!await isWorkspaceSearchAuthorizationCurrent(
+    principal.directoryId,
+    state.searchContext.planningRevision,
+    state.searchContext.documentAuthorizationRevision,
+    state.searchContext.documentAccess,
+  )) {
+    throw aiAssistanceAuthorizationChangedError()
+  }
   return {
     promptContext,
     citations: resolvedSources.map((source) => source.citation),

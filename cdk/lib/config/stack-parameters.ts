@@ -407,6 +407,44 @@ export function buildStackParameters(stack: cdk.Stack): StackParameters {
         assertDescription:
           'The default JP Claude Sonnet 4.6 profile requires exact Tokyo and Osaka destination foundation-model ARNs.',
       },
+      {
+        assert: cdk.Fn.conditionEquals(
+          aiBedrockModelArn.valueAsString,
+          cdk.Fn.sub(
+            `arn:\${AWS::Partition}:bedrock:\${AWS::Region}::inference-profile/${defaultAiBedrockModelId}`,
+          ),
+        ),
+        assertDescription:
+          'The default JP Claude Sonnet 4.6 model ARN must be the regional inference-profile ARN.',
+      },
+      {
+        assert: cdk.Fn.conditionOr(
+          cdk.Fn.conditionEquals(
+            aiBedrockDestinationModelArns.valueAsString,
+            cdk.Fn.join(',', [
+              cdk.Fn.sub(
+                'arn:${AWS::Partition}:bedrock:ap-northeast-1::foundation-model/anthropic.claude-sonnet-4-6',
+              ),
+              cdk.Fn.sub(
+                'arn:${AWS::Partition}:bedrock:ap-northeast-3::foundation-model/anthropic.claude-sonnet-4-6',
+              ),
+            ]),
+          ),
+          cdk.Fn.conditionEquals(
+            aiBedrockDestinationModelArns.valueAsString,
+            cdk.Fn.join(',', [
+              cdk.Fn.sub(
+                'arn:${AWS::Partition}:bedrock:ap-northeast-3::foundation-model/anthropic.claude-sonnet-4-6',
+              ),
+              cdk.Fn.sub(
+                'arn:${AWS::Partition}:bedrock:ap-northeast-1::foundation-model/anthropic.claude-sonnet-4-6',
+              ),
+            ]),
+          ),
+        ),
+        assertDescription:
+          'The default JP Claude Sonnet 4.6 profile must include exactly the Tokyo and Osaka foundation-model destinations.',
+      },
     ],
   });
   const requestRateLimitPerHour = new cdk.CfnParameter(stack, 'RequestRateLimitPerHour', {

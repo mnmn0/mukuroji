@@ -423,6 +423,8 @@ export type AiAssistanceServiceOptions = {
   maxOutputTokens?: number
   /** Maximum provider call duration. */
   providerTimeoutMs?: number
+  /** End-to-end generation deadline, including source resolution and persistence headroom. */
+  generationDeadlineMs?: number
   /** Duration of one in-flight generation reservation before crash recovery takeover. */
   reservationLeaseMs?: number
   /** Maximum unique generation keys accepted per Workspace in each UTC minute. */

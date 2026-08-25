@@ -145,6 +145,67 @@ test('AI assistance parameters pin one exact model and validate the JP default',
         AssertDescription:
           'The default JP Claude Sonnet 4.6 profile requires exact Tokyo and Osaka destination foundation-model ARNs.',
       },
+      {
+        Assert: {
+          'Fn::Equals': [
+            { Ref: 'AiBedrockModelArn' },
+            {
+              'Fn::Sub':
+                'arn:${AWS::Partition}:bedrock:${AWS::Region}::inference-profile/jp.anthropic.claude-sonnet-4-6',
+            },
+          ],
+        },
+        AssertDescription:
+          'The default JP Claude Sonnet 4.6 model ARN must be the regional inference-profile ARN.',
+      },
+      {
+        Assert: {
+          'Fn::Or': [
+            {
+              'Fn::Equals': [
+                { Ref: 'AiBedrockDestinationModelArns' },
+                {
+                  'Fn::Join': [
+                    ',',
+                    [
+                      {
+                        'Fn::Sub':
+                          'arn:${AWS::Partition}:bedrock:ap-northeast-1::foundation-model/anthropic.claude-sonnet-4-6',
+                      },
+                      {
+                        'Fn::Sub':
+                          'arn:${AWS::Partition}:bedrock:ap-northeast-3::foundation-model/anthropic.claude-sonnet-4-6',
+                      },
+                    ],
+                  ],
+                },
+              ],
+            },
+            {
+              'Fn::Equals': [
+                { Ref: 'AiBedrockDestinationModelArns' },
+                {
+                  'Fn::Join': [
+                    ',',
+                    [
+                      {
+                        'Fn::Sub':
+                          'arn:${AWS::Partition}:bedrock:ap-northeast-3::foundation-model/anthropic.claude-sonnet-4-6',
+                      },
+                      {
+                        'Fn::Sub':
+                          'arn:${AWS::Partition}:bedrock:ap-northeast-1::foundation-model/anthropic.claude-sonnet-4-6',
+                      },
+                    ],
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+        AssertDescription:
+          'The default JP Claude Sonnet 4.6 profile must include exactly the Tokyo and Osaka foundation-model destinations.',
+      },
     ],
     RuleCondition: {
       'Fn::Equals': [

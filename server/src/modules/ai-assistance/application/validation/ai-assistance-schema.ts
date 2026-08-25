@@ -3,6 +3,7 @@ import type {
   AiAssistanceGeneration,
   AiAssistancePolicy,
   AiAssistancePreference,
+  AiAssistanceUsage,
   AiAssistanceUncertainty,
   CreateAiAssistanceFeedbackRequest,
   DecideAiAssistanceGenerationRequest,
@@ -359,9 +360,9 @@ const citationSchema = z.object({
 }).strict()
 
 const usageSchema = z.object({
-  inputTokens: z.number().int().min(0).optional(),
-  outputTokens: z.number().int().min(0).optional(),
-  latencyMs: z.number().int().min(0),
+  inputTokens: z.number().finite().int().min(0).optional(),
+  outputTokens: z.number().finite().int().min(0).optional(),
+  latencyMs: z.number().finite().int().min(0),
   costUsd: z.number().min(0).finite().optional(),
   costUnavailableReason: z.enum([
     'provider-not-reported',
@@ -475,6 +476,16 @@ export function parseAiAssistanceModelOutput(
   value: unknown,
 ): AiAssistanceModelOutput {
   return parseOrThrow(aiAssistanceModelOutputSchema, value, 'Invalid AI assistance output.', true)
+}
+
+/**
+ * Parses provider usage metadata before it crosses the application boundary.
+ *
+ * @param value - Untrusted usage reported by a model adapter.
+ * @returns Finite, non-negative usage values accepted by the public contract.
+ */
+export function parseAiAssistanceUsage(value: unknown): AiAssistanceUsage {
+  return parseOrThrow(usageSchema, value, 'Invalid AI assistance usage.', true)
 }
 
 /** Parses an untrusted persisted generation. */

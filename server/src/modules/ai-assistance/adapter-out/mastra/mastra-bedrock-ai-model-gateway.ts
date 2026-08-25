@@ -4,6 +4,7 @@ import type { AiAssistanceUsage } from '@mukuroji/contracts'
 import {
   aiAssistanceModelOutputSchema,
   parseAiAssistanceModelOutput,
+  parseAiAssistanceUsage,
 } from '../../application/validation/ai-assistance-schema'
 import { AiAssistanceError } from '../../errors'
 import type {
@@ -242,7 +243,7 @@ function createUsage(
         outputTokens * pricing.outputPerMillionTokensUsd
       ) / 1_000_000
     : undefined
-  return {
+  return parseAiAssistanceUsage({
     ...(inputTokens === undefined ? {} : { inputTokens }),
     ...(outputTokens === undefined ? {} : { outputTokens }),
     latencyMs,
@@ -253,5 +254,5 @@ function createUsage(
             : 'pricing-not-configured',
         }
       : { costUsd }),
-  }
+  })
 }

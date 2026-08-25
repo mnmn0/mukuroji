@@ -548,12 +548,16 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
         },
       }))
     } catch (error) {
-      if (!isConditionalCheckFailed(error)) throw mapDynamoWriteError(error)
-      const response = await this.#documentClient.send(new GetCommand({
-        TableName: this.#tableName,
-        Key: { workspaceId: input.workspaceId, recordKey },
-        ConsistentRead: true,
-      }))
+      let response: GetCommandOutput
+      try {
+        response = await this.#documentClient.send(new GetCommand({
+          TableName: this.#tableName,
+          Key: { workspaceId: input.workspaceId, recordKey },
+          ConsistentRead: true,
+        }))
+      } catch {
+        throw mapDynamoWriteError(error)
+      }
       const parsed = idempotencyItemSchema.safeParse(response.Item)
       if (
         parsed.success &&
@@ -561,6 +565,7 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
         parsed.data.status === 'pending' &&
         generationAttemptStartMatches(parsed.data.attempt, attempt)
       ) return
+      if (!isConditionalCheckFailed(error)) throw mapDynamoWriteError(error)
       throw idempotencyConflictError()
     }
   }
@@ -828,7 +833,17 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
       }))
       return record
     } catch (error) {
-      throw mapDynamoWriteError(error)
+      const mappedError = mapDynamoWriteError(error)
+      try {
+        const existing = await this.getGeneration(
+          record.workspaceId,
+          record.generation.id,
+        )
+        if (existing && isGenerationReplay(existing, record)) return existing
+      } catch {
+        // Preserve the original write error when the reconciliation read fails.
+      }
+      throw mappedError
     }
   }
 
@@ -921,6 +936,13 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
       }))
       return next
     } catch (error) {
+      if (!isConditionalCheckFailed(error)) throw mapDynamoWriteError(error)
+      try {
+        const current = await this.getGeneration(workspaceId, generationId)
+        if (current?.generation.decision?.outcome === request.outcome) return current
+      } catch {
+        // Preserve the original conditional conflict when reconciliation fails.
+      }
       throw mapDynamoWriteError(error)
     }
   }
@@ -1246,6 +1268,14 @@ function generationAttemptStartMatches(
 /** Returns whether two JSON-compatible values contain the same fields and values. */
 function equalJsonValues(left: unknown, right: unknown): boolean {
   return isDeepStrictEqual(left, right)
+}
+
+/** Returns whether a strongly read generation exactly matches an ambiguous write. */
+function isGenerationReplay(
+  current: StoredAiAssistanceGeneration,
+  expected: StoredAiAssistanceGeneration,
+): boolean {
+  return equalJsonValues(current, expected)
 }
 
 /** Returns whether a citation target is an application-relative path without backslashes. */

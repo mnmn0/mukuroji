@@ -97,6 +97,12 @@ type HarnessConfiguration = {
   privateMemberIdentifiers?: readonly AiAssistancePrivateMemberIdentifiers[]
   /** Optional strict model draft used to exercise task-specific output validation. */
   outputDraft?: AiAssistanceDraft
+  /** Optional end-to-end deadline used to exercise remaining-time enforcement. */
+  generationDeadlineMs?: number
+  /** Optional provider timeout used with the end-to-end deadline. */
+  providerTimeoutMs?: number
+  /** Milliseconds advanced after context resolution and before provider admission. */
+  advanceBeforeProviderMs?: number
 }
 
 /** Creates a service harness with deterministic fake ports. */
@@ -325,12 +331,23 @@ function createHarness(configuration: HarnessConfiguration = {}) {
     defaultPolicy: createPolicy(),
     deploymentAllowedModelIds: ['model-1'],
     promptVersion: 'ai-assistance-v1',
+    ...(configuration.generationDeadlineMs === undefined
+      ? {}
+      : { generationDeadlineMs: configuration.generationDeadlineMs }),
+    ...(configuration.providerTimeoutMs === undefined
+      ? {}
+      : { providerTimeoutMs: configuration.providerTimeoutMs }),
     now: () => new Date(currentTime),
     createId: () => 'generation-1',
   })
   const authorization = {
     async resolveContext() {
       resolveContextCount += 1
+      if (configuration.advanceBeforeProviderMs !== undefined) {
+        currentTime = new Date(
+          Date.parse(currentTime) + configuration.advanceBeforeProviderMs,
+        ).toISOString()
+      }
       return {
         promptContext: configuration.promptContext ??
           'Authorized source for assignee@example.com and owner@example.com token=secret-value.',
@@ -1044,6 +1061,43 @@ describe('createAiAssistanceService', () => {
     })
     expect(JSON.stringify(generation)).not.toContain('Safe summary.')
     expect(JSON.stringify(generation)).not.toContain('/teams/team-1/work-items/work-item-1')
+  })
+
+  test('rejects feedback after the effective retention deadline', async () => {
+    const harness = createHarness()
+    await harness.service.generate(
+      createActor(),
+      createSummaryRequest(),
+      harness.authorization,
+      'request-1',
+    )
+    harness.setPolicyRetentionDays(1)
+    harness.setNow('2026-08-27T00:00:00.000Z')
+
+    await expect(harness.service.createFeedback(
+      createActor(),
+      'generation-1',
+      { rating: 'helpful' },
+      'feedback-1',
+    )).rejects.toMatchObject({ code: 'AiAssistanceGenerationNotFound' })
+    expect(harness.feedbackRecords).toHaveLength(0)
+  })
+
+  test('does not start Bedrock when source resolution exhausts the end-to-end deadline', async () => {
+    const harness = createHarness({
+      generationDeadlineMs: 2_000,
+      providerTimeoutMs: 500,
+      advanceBeforeProviderMs: 1_500,
+    })
+
+    await expect(harness.service.generate(
+      createActor(),
+      createSummaryRequest(),
+      harness.authorization,
+      'request-1',
+    )).rejects.toMatchObject({ code: 'AiAssistanceProviderTimeout' })
+    expect(harness.gatewayInputs).toHaveLength(0)
+    expect(harness.failedReservations).toHaveLength(1)
   })
 
   test('rejects a deployment-disallowed requested model before source retrieval', async () => {

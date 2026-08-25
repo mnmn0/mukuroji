@@ -101,6 +101,26 @@ describe('createMastraBedrockAiModelGateway', () => {
     })
   })
 
+  test('rejects non-finite or fractional provider usage before returning a draft', async () => {
+    for (const usage of [
+      { inputTokens: -1, outputTokens: 1 },
+      { inputTokens: 1.5, outputTokens: 1 },
+      { inputTokens: Number.NaN, outputTokens: 1 },
+      { inputTokens: 1, outputTokens: Number.POSITIVE_INFINITY },
+    ]) {
+      const gateway = createMastraBedrockAiModelGateway({
+        runStructuredGeneration: async () => ({
+          object: createOutput(),
+          ...usage,
+        }),
+      })
+
+      await expect(gateway.generate(createInput())).rejects.toMatchObject({
+        code: 'InvalidAiAssistanceOutput',
+      })
+    }
+  })
+
   test('accepts provider row identifiers that the application replaces after parsing', async () => {
     const duplicateSubtask = {
       id: 'subtask-1',
