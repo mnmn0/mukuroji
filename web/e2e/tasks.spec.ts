@@ -6133,7 +6133,12 @@ test.describe('authenticated task page', () => {
   }) => {
     await page.goto('/dashboard')
 
-    const sharedLaunchButtons = page.getByRole('button', { name: '共通ローンチ', exact: true })
+    // The dashboard portfolio now exposes the same project labels as links to
+    // Planning updates. Scope this assertion to the sidebar shortcuts so the
+    // test continues to exercise the team-qualified navigation target.
+    const sharedLaunchButtons = page
+      .locator('aside[aria-label="メインサイドバー"]')
+      .getByRole('button', { name: '共通ローンチ', exact: true })
 
     await expect(sharedLaunchButtons).toHaveCount(2)
     await sharedLaunchButtons.nth(1).click()
