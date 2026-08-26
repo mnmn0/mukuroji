@@ -4989,6 +4989,9 @@ test.describe('authenticated task page', () => {
 
     await page.getByRole('button', { exact: true, name: '優先度' }).click()
     await page.getByRole('menuitemradio', { name: 'すべての優先度' }).click()
+    // Wait for the URL-owned task-view override to round-trip before applying
+    // the next filter; otherwise the next click can race the previous update.
+    await expect(page.getByTestId('task-row-seo-research')).toBeVisible()
     await page.getByRole('button', { name: '期限', exact: true }).click()
     await page.getByRole('menuitemradio', { name: '期限切れ' }).click()
 
