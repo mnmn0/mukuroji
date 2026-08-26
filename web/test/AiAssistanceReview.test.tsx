@@ -110,6 +110,7 @@ describe('AiAssistanceReview', () => {
     expect(html).toContain('safe to review could not be generated')
   })
 
+  /** Verifies the review uses the label belonging to the active workflow. */
   test('uses the active workflow label while generating', () => {
     const html = renderToStaticMarkup(
       <AiAssistanceReview

@@ -16,6 +16,7 @@ import type { AiSummaryDraft } from '@mukuroji/contracts'
 import { formatAiSummaryContextBody } from '../src/issues/model/aiSummaryContextBody'
 
 describe('IssueCollaborationPanel', () => {
+  /** Verifies generated summary prose is escaped before entering a Markdown draft. */
   test('escapes generated summary prose before opening a Markdown context draft', () => {
     const content = aiSummaryGenerationFixture.content
     if (content.availability !== 'available' || content.draft.kind !== 'summary') {
@@ -35,6 +36,7 @@ describe('IssueCollaborationPanel', () => {
     expect(body).not.toContain('[trusted label](https://attacker.example)')
   })
 
+  /** Verifies the Brief tab stays hidden when no authenticated AI source is available. */
   test('omits the Brief tab when no authenticated AI source is supplied', () => {
     const html = renderToStaticMarkup(
       <IssueCollaborationPanel
@@ -48,6 +50,7 @@ describe('IssueCollaborationPanel', () => {
     expect(html).not.toContain('Generate brief')
   })
 
+  /** Verifies an unauthorized brief renders only the explicit Generate action. */
   test('shows only an explicit Generate action before an authorized Work Item brief exists', () => {
     const protectedBody = 'DENIED_SOURCE_BODY_MUST_NOT_ENTER_BRIEF_MARKUP'
     const html = renderToStaticMarkup(
