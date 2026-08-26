@@ -79,7 +79,18 @@ export async function updateAiAssistancePreference(
   }))
 }
 
-/** Validates an untrusted Workspace AI policy response. */
+/**
+ * Validates and narrows an untrusted Workspace AI policy response.
+ *
+ * The response must use schema version 1, contain a unique allowlist of one to
+ * twenty model IDs with the default included, select at least one supported
+ * workflow, use a one-to-365-day retention period, and carry a non-negative
+ * revision with a calendar-valid UTC timestamp.
+ *
+ * @param value - Unknown JSON returned by the settings endpoint.
+ * @returns The validated policy when every field satisfies the client contract.
+ * @throws {AiAssistanceApiError} If the response is missing, malformed, or out of bounds.
+ */
 function parseAiAssistancePolicy(value: unknown): AiAssistancePolicy {
   if (!isRecord(value) ||
     value.schemaVersion !== 1 ||
@@ -164,7 +175,16 @@ async function requestJson(
   return value
 }
 
-/** Reads one required JSON settings response. */
+/**
+ * Reads and parses one required JSON settings response.
+ *
+ * Empty bodies, body-read failures, and malformed JSON are converted to the
+ * same stable invalid-response error so callers never handle transport details.
+ *
+ * @param response - Fetch response whose body must contain JSON.
+ * @returns The untrusted parsed JSON value for a subsequent schema validator.
+ * @throws {AiAssistanceApiError} If the body cannot be read, is empty, or is not valid JSON.
+ */
 async function readJson(response: Response): Promise<unknown> {
   let text: string
   try {
@@ -231,7 +251,15 @@ function hasDuplicates(values: readonly unknown[]): boolean {
   return new Set(values).size !== values.length
 }
 
-/** Validates the UTC ISO 8601 timestamp shape emitted by the server. */
+/**
+ * Validates the server's UTC ISO 8601 timestamp representation.
+ *
+ * Only a `Z` designator is accepted; the date and clock fields are checked for
+ * real Gregorian calendar values, with at most three fractional-second digits.
+ *
+ * @param value - Unknown timestamp value from an API response.
+ * @returns Whether the value is a calendar-valid UTC timestamp in the contract format.
+ */
 function isIsoTimestamp(value: unknown): value is string {
   if (typeof value !== 'string') return false
   const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,3})?Z$/u.exec(value)

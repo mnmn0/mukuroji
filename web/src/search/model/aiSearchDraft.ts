@@ -140,7 +140,10 @@ export function parseAiSearchCustomFieldValue(value: string): SearchCustomFieldV
   if (normalized === 'true') return true
   if (normalized === 'false') return false
   if (normalized === 'null') return null
-  if (isCanonicalNumberLiteral(normalized)) return Number(normalized)
+  if (isCanonicalNumberLiteral(normalized)) {
+    const numericValue = Number(normalized)
+    return Number.isSafeInteger(numericValue) ? numericValue : normalized
+  }
   if (normalized.startsWith('[')) {
     try {
       const parsed: unknown = JSON.parse(normalized)

@@ -58,7 +58,12 @@ export const AdministratorPolicy: Story = {
   },
 }
 
-/** A stale policy save surfaces the refreshed-value review requirement beside its own action. */
+/**
+ * A stale policy save surfaces the refreshed-value review requirement beside its own action.
+ *
+ * @remarks This story keeps the save disabled until the operator chooses the
+ * latest server revision.
+ */
 export const RevisionConflict: Story = {
   args: {
     canManagePolicy: true,
@@ -86,7 +91,12 @@ export const PolicyLoading: Story = {
   },
 }
 
-/** Narrow member settings retain a full-width, accessible explicit-save action. */
+/**
+ * Narrow member settings retain a full-width, accessible explicit-save action.
+ *
+ * @remarks The mobile viewport verifies that the personal setting remains
+ * keyboard and touch reachable without horizontal overflow.
+ */
 export const MobileMemberPreference: Story = {
   globals: { viewport: { isRotated: false, value: 'mobile1' } },
 }

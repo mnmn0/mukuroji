@@ -16,7 +16,12 @@ import {
 import type { AiAssistanceErrorKind } from '../mutations/useAiAssistanceController'
 import { ConfidenceBadge } from './ConfidenceBadge'
 
-/** Permission-safe content passed to a workflow-specific draft renderer. */
+/**
+ * Permission-safe content passed to a workflow-specific draft renderer.
+ *
+ * The controller supplies this value only after the generation remains
+ * authorized and all citations have passed the application-path guard.
+ */
 export type AiAssistanceAvailableReview = {
   /** Current citations that remain authorized for the viewer. */
   citations: readonly AiAssistanceCitation[]
@@ -24,7 +29,12 @@ export type AiAssistanceAvailableReview = {
   draft: AiAssistanceDraft
 }
 
-/** Props for the reusable evidence-first AI draft review surface. */
+/**
+ * Props for the reusable evidence-first AI draft review surface.
+ *
+ * Workflow integrations provide callbacks for review decisions and adoption;
+ * this component never mutates a domain resource itself.
+ */
 export type AiAssistanceReviewProps = {
   /** Label for the workflow-specific adopt action. */
   adoptLabel?: string
@@ -58,6 +68,9 @@ export type AiAssistanceReviewProps = {
 
 /**
  * Renders an evidence-first AI draft review with authorization, uncertainty, and audit details.
+ *
+ * @remarks Generation, decision, and feedback callbacks are always explicit;
+ * rendering an available draft does not apply it to a domain form.
  *
  * @param props - Permission-aware generation state and explicit review actions.
  * @returns A flat proposal rail, or null while idle.
@@ -231,7 +244,12 @@ export function AiAssistanceReview({
   )
 }
 
-/** Props for the permission-safe citation list. */
+/**
+ * Props for the permission-safe citation list.
+ *
+ * @remarks The list accepts only citations already filtered by the caller's
+ * application-path policy.
+ */
 type AiCitationListProps = {
   /** Citations already filtered to safe application paths. */
   citations: readonly AiAssistanceCitation[]
@@ -241,7 +259,12 @@ type AiCitationListProps = {
   titleId: string
 }
 
-/** Renders bounded citations without constructing links from invalid paths. */
+/**
+ * Renders bounded citations without constructing links from invalid paths.
+ *
+ * @param props - Safe citations, localized labels, and an instance heading ID.
+ * @returns A citation list with links to authorized application routes.
+ */
 function AiCitationList({ citations, t, titleId }: AiCitationListProps) {
   return (
     <section aria-labelledby={titleId} className="grid gap-2">
@@ -272,7 +295,11 @@ function AiCitationList({ citations, t, titleId }: AiCitationListProps) {
   )
 }
 
-/** Props for one compact feedback action. */
+/**
+ * Props for one compact feedback action.
+ *
+ * @remarks A feedback button exposes its selected state through `aria-pressed`.
+ */
 type FeedbackButtonProps = {
   /** Whether this rating has already been selected. */
   active: boolean
@@ -284,7 +311,12 @@ type FeedbackButtonProps = {
   onClick: () => void
 }
 
-/** Renders a compact accessible feedback choice. */
+/**
+ * Renders a compact accessible feedback choice.
+ *
+ * @param props - Selection, disabled state, label, and submit callback.
+ * @returns A single localized feedback button.
+ */
 function FeedbackButton({ active, disabled, label, onClick }: FeedbackButtonProps) {
   return (
     <button
@@ -303,7 +335,12 @@ function FeedbackButton({ active, disabled, label, onClick }: FeedbackButtonProp
   )
 }
 
-/** Props for the opt-in technical generation details disclosure. */
+/**
+ * Props for the opt-in technical generation details disclosure.
+ *
+ * @remarks Provider and cost metadata remain behind a disclosure so the main
+ * review flow stays focused on human verification.
+ */
 type GenerationDetailsProps = {
   /** Audited generation whose technical details are displayed. */
   generation: AiAssistanceGeneration
@@ -313,7 +350,12 @@ type GenerationDetailsProps = {
   t: (key: MessageKey) => string
 }
 
-/** Renders provider metadata in a secondary disclosure instead of the primary task flow. */
+/**
+ * Renders provider metadata in a secondary disclosure instead of the primary task flow.
+ *
+ * @param props - Audited generation, locale, and localized labels.
+ * @returns A disclosure containing bounded technical metadata.
+ */
 function GenerationDetails({ generation, locale, t }: GenerationDetailsProps) {
   const { details } = generation
   const usage = details.usage
@@ -343,7 +385,12 @@ function GenerationDetails({ generation, locale, t }: GenerationDetailsProps) {
   )
 }
 
-/** Props for one generation-detail definition row. */
+/**
+ * Props for one generation-detail definition row.
+ *
+ * @remarks The row is intentionally presentation-only and does not expose raw
+ * provider response payloads.
+ */
 type DetailRowProps = {
   /** Definition term. */
   label: string
@@ -351,7 +398,12 @@ type DetailRowProps = {
   value: string
 }
 
-/** Renders one compact definition-list row. */
+/**
+ * Renders one compact definition-list row.
+ *
+ * @param props - Definition term and safe display value.
+ * @returns A `dt`/`dd` pair for the generation metadata list.
+ */
 function DetailRow({ label, value }: DetailRowProps) {
   return (
     <>
@@ -361,12 +413,23 @@ function DetailRow({ label, value }: DetailRowProps) {
   )
 }
 
-/** Selects a localized safe error message key for a controller category. */
+/**
+ * Selects a localized safe error message key for a controller category.
+ *
+ * @param kind - Stable controller error category.
+ * @returns The matching localized message key.
+ */
 function getErrorMessageKey(kind: AiAssistanceErrorKind): MessageKey {
   return `ai.error.${kind}`
 }
 
-/** Formats one generation timestamp for the visible locale. */
+/**
+ * Formats one generation timestamp for the visible locale.
+ *
+ * @param value - ISO timestamp from the validated generation response.
+ * @param locale - Locale used by the browser formatter.
+ * @returns A localized date-time string, or the original value if invalid.
+ */
 function formatDateTime(value: string, locale: 'ja' | 'en'): string {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return value

@@ -15,7 +15,12 @@ import {
 import { AiAssistanceReview } from './AiAssistanceReview'
 import { AiSummaryBrief } from './AiSummaryBrief'
 
-/** Props for a source-scoped grounded summary assistant. */
+/**
+ * Props for a source-scoped grounded summary assistant.
+ *
+ * Sources are permission-safe references resolved by the server; the assistant
+ * can open a human-owned draft but cannot mutate the source directly.
+ */
 export type AiSummaryAssistantProps = {
   /** Active Workspace member bearer token. */
   accessToken?: string
@@ -40,6 +45,9 @@ export type AiSummaryAssistantProps = {
 
 /**
  * Connects an explicit summary request to the shared permission-aware controller.
+ *
+ * @remarks The controller is inert during render and starts generation only
+ * after the operator submits the explicit Generate action.
  *
  * @param props - Authentication, sources, locale, and optional draft adoption callback.
  * @returns A source-scoped summary assistant that never mutates a domain resource directly.
@@ -82,7 +90,12 @@ export function AiSummaryAssistant({
   )
 }
 
-/** Props for the pure grounded summary assistant view. */
+/**
+ * Props for the pure grounded summary assistant view.
+ *
+ * This presentation layer keeps the generation reviewable and delegates every
+ * side effect to callbacks supplied by its container.
+ */
 export type AiSummaryAssistantViewProps = {
   /** Label for the optional workflow-specific draft adoption action. */
   adoptLabel?: string
@@ -121,6 +134,9 @@ export type AiSummaryAssistantViewProps = {
 
 /**
  * Renders an explicit Generate action and a fail-closed grounded summary review.
+ *
+ * @remarks Adoption is exposed as a local draft callback only after an approved
+ * generation has passed the shared review validator.
  *
  * @param props - Pure generation state and event handlers.
  * @returns A flat evidence-first summary workflow.

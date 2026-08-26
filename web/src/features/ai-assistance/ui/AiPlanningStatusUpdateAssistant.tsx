@@ -15,7 +15,12 @@ import {
 import { AiAssistanceReview } from './AiAssistanceReview'
 import { AiPlanningDraftReview } from './AiPlanningDraftReview'
 
-/** Props for a Planning-target status update assistant. */
+/**
+ * Props for a Planning-target status update assistant.
+ *
+ * The assistant requests a reviewable proposal and delegates adoption to the
+ * existing Planning composer; it never publishes a status update directly.
+ */
 export type AiPlanningStatusUpdateAssistantProps = {
   /** Active Workspace member bearer token. */
   accessToken?: string
@@ -40,6 +45,9 @@ export type AiPlanningStatusUpdateAssistantProps = {
 
 /**
  * Connects an explicit Planning request to the shared permission-aware controller.
+ *
+ * @remarks Generation is started only from the view's explicit form action and
+ * adoption remains a local draft operation.
  *
  * @param props - Authentication, source, locale, and local form adoption callback.
  * @returns A planning assistant that never publishes a status update itself.
@@ -82,7 +90,12 @@ export function AiPlanningStatusUpdateAssistant({
   )
 }
 
-/** Props for the pure Planning-target assistant view. */
+/**
+ * Props for the pure Planning-target assistant view.
+ *
+ * The view receives all state and side-effect callbacks from its container so
+ * it can be rendered independently in tests and Storybook.
+ */
 export type AiPlanningStatusUpdateAssistantViewProps = {
   /** Whether the active session can issue a generation request. */
   canGenerate?: boolean
@@ -121,6 +134,9 @@ export type AiPlanningStatusUpdateAssistantViewProps = {
 
 /**
  * Renders an explicit Generate action and a fail-closed Planning draft review.
+ *
+ * @remarks An approved draft is copied into the caller's form only after the
+ * configured manual-replacement confirmation has been satisfied.
  *
  * @param props - Pure generation state and event handlers.
  * @returns A flat evidence-first planning workflow.

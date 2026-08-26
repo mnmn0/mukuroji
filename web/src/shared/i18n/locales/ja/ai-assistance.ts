@@ -87,6 +87,7 @@ export const aiAssistanceMessages = {
   'ai.summary.decisions': '決定事項',
   'ai.summary.actions': 'フォローアップ',
   'ai.summary.risks': 'リスク・ブロッカー',
+  'ai.summary.evidence': '根拠',
   'ai.summary.empty': '参照できる根拠からは見つかりませんでした。',
   'ai.planning.fields': '提案するフィールド',
   'ai.planning.field.title': 'タイトル',

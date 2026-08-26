@@ -6,7 +6,12 @@ import type { MessageKey } from '../../../shared/i18n/i18n'
 import { ExternalLinkIcon } from '../../../shared/ui/icons'
 import { ConfidenceBadge } from './ConfidenceBadge'
 
-/** Props for evidence and confidence displayed beside one generated claim. */
+/**
+ * Props for evidence and confidence displayed beside one generated claim.
+ *
+ * Citations are expected to have already passed the permission and safe-route
+ * checks performed by the generation review surface.
+ */
 export type AiDraftEvidenceMetaProps = {
   /** Permission-safe citations available to the current reviewer. */
   citations: readonly AiAssistanceCitation[]
@@ -20,6 +25,9 @@ export type AiDraftEvidenceMetaProps = {
 
 /**
  * Renders confidence and direct evidence links adjacent to one generated claim.
+ *
+ * @remarks Only citation IDs that resolve to the supplied permission-safe list
+ * are rendered, and generation-local IDs never appear in link text.
  *
  * @param props - Validated evidence references, confidence, and localized labels.
  * @returns A compact evidence row that does not expose generation-local identifiers.

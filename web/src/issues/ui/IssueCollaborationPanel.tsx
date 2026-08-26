@@ -40,7 +40,12 @@ import { IssueConversationTab } from './IssueConversationTab'
 import { IssueDecisionsTab } from './IssueDecisionsTab'
 import { IssueSourcesTab } from './IssueSourcesTab'
 
-/** Authentication and revision-fenced source for an optional Work Item brief. */
+/**
+ * Authentication and revision-fenced source for an optional Work Item brief.
+ *
+ * The source is rendered only when the parent route has already resolved the
+ * current viewer's permission-safe context.
+ */
 export type IssueSummaryAiAssistance = {
   /** Active Workspace member bearer token. */
   accessToken: string
@@ -50,6 +55,9 @@ export type IssueSummaryAiAssistance = {
 
 /**
  * Props for the Work Item collaboration panel.
+ *
+ * The panel owns presentation and local draft promotion while existing
+ * collaboration controllers remain the only mutation boundary.
  */
 export type IssueCollaborationPanelProps = {
   /** Optional AI summary access; omission removes the Brief tab and its source from markup. */
@@ -86,6 +94,9 @@ export type IssueCollaborationPanelProps = {
 
 /**
  * Renders one detail-pane collaboration workspace with accessible section tabs.
+ *
+ * @remarks The optional Brief tab is permission-gated and its Add as draft
+ * action opens the existing Decisions editor without writing a ledger entry.
  *
  * @param props - Collaboration data, locale, deep-link targets, and actions.
  * @returns The collaboration panel.
@@ -572,7 +583,7 @@ function formatAiSummaryContextBody(
         const label = citation.label.replace(/[\\[\]]/gu, '\\$&')
         return `[${label}](${citation.href})`
       })
-    if (evidence.length > 0) lines.push(`  Evidence: ${evidence.join(', ')}`)
+    if (evidence.length > 0) lines.push(`  ${t('ai.summary.evidence')}: ${evidence.join(', ')}`)
     return lines
   }
   const sections = [

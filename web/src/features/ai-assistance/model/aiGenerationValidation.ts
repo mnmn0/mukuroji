@@ -275,7 +275,15 @@ function isSuggestedValue(
     isStringArray(value.citationIds)
 }
 
-/** Validates a custom-field suggestion and its supported value. */
+/**
+ * Validates one custom-field suggestion at the model-output boundary.
+ *
+ * A suggestion requires a trimmed field ID up to 256 characters plus the
+ * shared value, rationale, confidence, and citation-ID fields.
+ *
+ * @param value - Unknown model output to validate.
+ * @returns Whether the value is a supported evidence-backed custom-field suggestion.
+ */
 function isSuggestedCustomField(value: unknown): boolean {
   return isRecord(value) &&
     isBoundedString(value.fieldId, 256) &&
@@ -308,7 +316,16 @@ function isBriefItemArray(value: unknown): value is AiBriefItem[] {
   return Array.isArray(value) && value.every(isBriefItem)
 }
 
-/** Validates the complete safe Workspace search filter contract. */
+/**
+ * Validates the complete permission-safe Workspace search filter contract.
+ *
+ * Optional identifiers are bounded arrays, dates are calendar-valid and
+ * ordered, and custom-field rows must satisfy the bounded operator/value
+ * contract before a draft can reach the Search route.
+ *
+ * @param value - Unknown model output representing proposed filters.
+ * @returns Whether every supplied filter is safe to expose for review.
+ */
 function isWorkspaceSearchFilters(value: unknown): boolean {
   if (!isRecord(value)) return false
 
@@ -366,7 +383,15 @@ function isCalendarDate(value: unknown): value is string {
   return month >= 1 && month <= 12 && day >= 1 && day <= (daysByMonth[month - 1] ?? 0)
 }
 
-/** Validates an optional array of custom-field filters. */
+/**
+ * Validates an optional bounded array of custom-field filters.
+ *
+ * Up to fifty rows are allowed; each row needs a trimmed field ID and supported
+ * operator. Value-less rows are valid only for `is-empty` and `is-not-empty`.
+ *
+ * @param value - Unknown custom-field filter array from model output.
+ * @returns Whether the optional array satisfies the Search filter contract.
+ */
 function isOptionalCustomFieldArray(value: unknown): boolean {
   if (value === undefined) return true
   if (!Array.isArray(value) || value.length > 50) return false
@@ -498,7 +523,16 @@ function isDecision(value: unknown): boolean {
     isIsoInstant(value.decidedAt)
 }
 
-/** Validates a supported custom-field value. */
+/**
+ * Validates a supported custom-field value.
+ *
+ * Allowed values are null, strings up to 20,000 characters, finite numbers,
+ * booleans, or arrays of at most 100 strings with each item at most 512
+ * characters; other JSON shapes are rejected.
+ *
+ * @param value - Unknown value supplied by a model-generated custom-field row.
+ * @returns Whether the value is one of the bounded Search primitives.
+ */
 function isCustomFieldValue(value: unknown): boolean {
   return value === null ||
     (isString(value) && value.length <= 20_000) ||
@@ -514,7 +548,15 @@ function isPriority(value: unknown): boolean {
   return isOneOf(value, ['high', 'medium', 'low'])
 }
 
-/** Validates one supported AI assistance workflow discriminator. */
+/**
+ * Validates one supported AI assistance workflow discriminator.
+ *
+ * The allowlist is intentionally limited to triage, summary, search, and
+ * planning so a model cannot select an unimplemented workflow.
+ *
+ * @param value - Unknown task discriminator from model output.
+ * @returns Whether the value belongs to the supported task allowlist.
+ */
 function isAiAssistanceTask(value: unknown): value is AiAssistanceTask {
   return isOneOf(value, aiAssistanceTaskValues)
 }
@@ -619,7 +661,16 @@ function isBoundedLagDays(value: unknown): value is number {
     value <= 36_600
 }
 
-/** Validates an ISO 8601 instant with an explicit UTC designator or numeric offset. */
+/**
+ * Validates an ISO 8601 instant with an explicit UTC designator or numeric offset.
+ *
+ * The timestamp must contain a real Gregorian date, a 24-hour clock, optional
+ * millisecond precision, and either `Z` or an offset from `+00:00` through
+ * `+23:59` / `-23:59`.
+ *
+ * @param value - Unknown timestamp from a generation or decision response.
+ * @returns Whether the value is an offset-qualified instant accepted by the contract.
+ */
 function isIsoInstant(value: unknown): value is string {
   if (typeof value !== 'string') return false
   const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,3})?(Z|[+-](?:0\d|1\d|2[0-3]):[0-5]\d)$/u.exec(value)

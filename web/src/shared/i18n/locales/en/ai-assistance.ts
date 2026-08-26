@@ -87,6 +87,7 @@ export const aiAssistanceMessages = {
   'ai.summary.decisions': 'Decisions',
   'ai.summary.actions': 'Follow-up actions',
   'ai.summary.risks': 'Risks and blockers',
+  'ai.summary.evidence': 'Evidence',
   'ai.summary.empty': 'None identified in the authorized sources.',
   'ai.planning.fields': 'Suggested fields',
   'ai.planning.field.title': 'Title',

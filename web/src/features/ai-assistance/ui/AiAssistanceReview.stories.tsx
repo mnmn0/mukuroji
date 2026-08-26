@@ -47,7 +47,12 @@ type Story = StoryObj<typeof meta>
 /** Desktop review with evidence, uncertainty, human decisions, feedback, and audit details. */
 export const Desktop: Story = {}
 
-/** Narrow review that stacks the decision actions into full-width touch targets. */
+/**
+ * Narrow review that stacks the decision actions into full-width touch targets.
+ *
+ * @remarks The mobile viewport verifies keyboard reachability and the 44px
+ * minimum touch target without introducing horizontal overflow.
+ */
 export const Mobile: Story = {
   globals: { viewport: { isRotated: false, value: 'mobile1' } },
 }

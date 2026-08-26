@@ -30,7 +30,14 @@ export type AiAssistanceSettingsPanelContainerProps = {
   cacheScope?: string
 }
 
-/** Editable server value pinned to the revision from which it was derived. */
+/**
+ * Editable server value pinned to the revision from which it was derived.
+ *
+ * The base revision lets the container detect a concurrent update and disable
+ * an unsafe save until the operator reviews the latest server value.
+ *
+ * @typeParam Value - The editable policy or preference value.
+ */
 type RevisionedAiSettingsDraft<Value> = {
   /** Server revision used to initialize the local draft. */
   baseRevision: number
@@ -40,6 +47,9 @@ type RevisionedAiSettingsDraft<Value> = {
 
 /**
  * Connects personal AI preference and manager-only policy resources to Settings.
+ *
+ * @remarks Query keys are scoped to the member/workspace cache scope rather
+ * than the bearer token, and saves remain revision-fenced explicit mutations.
  *
  * @param props - Authentication, management capability, and locale.
  * @returns A revision-aware AI settings panel.
@@ -153,7 +163,12 @@ export function AiAssistanceSettingsPanelContainer({
   )
 }
 
-/** Props for the pure AI assistance settings panel. */
+/**
+ * Props for the pure AI assistance settings panel.
+ *
+ * The view renders policy and personal preference state only; all persistence
+ * remains behind explicit callbacks supplied by the authenticated container.
+ */
 export type AiAssistanceSettingsPanelProps = {
   /** Whether the Workspace policy section may be rendered. */
   canManagePolicy: boolean
@@ -209,6 +224,9 @@ export type AiAssistanceSettingsPanelProps = {
 
 /**
  * Renders separate personal opt-out and administrator Workspace policy save surfaces.
+ *
+ * @remarks The view intentionally keeps validation feedback next to each input
+ * and never persists a draft without an explicit save callback.
  *
  * @param props - Revisioned settings data, pending state, feedback, and explicit actions.
  * @returns A flat settings panel with no automatic saves.
@@ -501,7 +519,12 @@ export function AiAssistanceSettingsPanel({
   )
 }
 
-/** Props for the line-preserving Bedrock model allowlist editor. */
+/**
+ * Props for the line-preserving Bedrock model allowlist editor.
+ *
+ * The control keeps raw line breaks local while emitting a normalized model-ID
+ * list and exposes the validation relationship to assistive technology.
+ */
 type AllowedModelsInputProps = {
   /** Replaces the parsed model allowlist while raw typing remains visible. */
   onChange: (modelIds: string[]) => void
@@ -513,7 +536,12 @@ type AllowedModelsInputProps = {
   invalid?: boolean
 }
 
-/** Keeps trailing newlines visible while emitting a normalized model allowlist. */
+/**
+ * Keeps trailing newlines visible while emitting a normalized model allowlist.
+ *
+ * @param props - Raw-value accessibility state and normalized list callbacks.
+ * @returns A controlled textarea for the model allowlist.
+ */
 function AllowedModelsInput({
   describedBy,
   invalid = false,
@@ -537,7 +565,12 @@ function AllowedModelsInput({
   )
 }
 
-/** Props for a compact mutation result beside one save action. */
+/**
+ * Props for a compact mutation result beside one save action.
+ *
+ * @remarks Feedback is scoped to the adjacent resource so a policy result
+ * cannot be mistaken for the member preference result.
+ */
 type SettingsFeedbackProps = {
   /** Latest scoped save result. */
   feedback?: AiAssistanceSettingsMutationFeedback
@@ -545,7 +578,12 @@ type SettingsFeedbackProps = {
   t: (key: MessageKey) => string
 }
 
-/** Renders explicit saved, conflict, or failure feedback without raw API content. */
+/**
+ * Renders explicit saved, conflict, or failure feedback without raw API content.
+ *
+ * @param props - Stable mutation status and localized message resolver.
+ * @returns A status or alert paragraph, or null when no result exists.
+ */
 function SettingsFeedback({ feedback, t }: SettingsFeedbackProps) {
   if (!feedback) return null
   const messageKey = feedback === 'saved'
@@ -563,7 +601,13 @@ function SettingsFeedback({ feedback, t }: SettingsFeedbackProps) {
   )
 }
 
-/** Toggles one Workspace-enabled AI workflow without mutating policy state. */
+/**
+ * Toggles one Workspace-enabled AI workflow without mutating policy state.
+ *
+ * @param tasks - Current enabled workflow allowlist.
+ * @param task - Workflow to add or remove.
+ * @returns A new allowlist ordered by the product's stable task order.
+ */
 function togglePolicyTask(
   tasks: readonly AiAssistanceTask[],
   task: AiAssistanceTask,
@@ -574,12 +618,22 @@ function togglePolicyTask(
   return policyTasks.filter((candidate) => next.has(candidate))
 }
 
-/** Parses unique non-empty Bedrock model IDs from a line-delimited control. */
+/**
+ * Parses unique non-empty Bedrock model IDs from a line-delimited control.
+ *
+ * @param value - Raw textarea value containing one model ID per line.
+ * @returns Trimmed IDs in first-seen order.
+ */
 function parseModelIds(value: string): string[] {
   return [...new Set(value.split('\n').map((modelId) => modelId.trim()).filter(Boolean))]
 }
 
-/** Validation result for one editable Workspace policy. */
+/**
+ * Validation result for one editable Workspace policy.
+ *
+ * Each flag is exposed separately so the view can associate an error with the
+ * exact input while `valid` controls the final explicit-save action.
+ */
 type PolicyValidation = {
   /** Whether the default model belongs to a non-empty allowlist. */
   modelsValid: boolean
@@ -591,7 +645,12 @@ type PolicyValidation = {
   valid: boolean
 }
 
-/** Validates the complete editable policy before enabling explicit Save. */
+/**
+ * Validates the complete editable policy before enabling explicit Save.
+ *
+ * @param policy - Local policy draft to validate.
+ * @returns Field-level validation flags and their combined save decision.
+ */
 function validatePolicy(policy: AiAssistancePolicy): PolicyValidation {
   const modelsValid = policy.allowedModelIds.length > 0 &&
     policy.allowedModelIds.length <= 20 &&
@@ -609,7 +668,13 @@ function validatePolicy(policy: AiAssistancePolicy): PolicyValidation {
   }
 }
 
-/** Returns whether two revision-adjacent policies have identical editable fields. */
+/**
+ * Returns whether two revision-adjacent policies have identical editable fields.
+ *
+ * @param base - Latest server policy.
+ * @param draft - Local policy with the server revision fields replaced.
+ * @returns Whether all user-editable policy fields match.
+ */
 function arePoliciesEqual(
   base: AiAssistancePolicy,
   draft: AiAssistancePolicy,
@@ -621,7 +686,13 @@ function arePoliciesEqual(
     areStringArraysEqual(base.enabledTasks, draft.enabledTasks)
 }
 
-/** Returns whether two ordered string arrays contain the same values. */
+/**
+ * Returns whether two ordered string arrays contain the same values.
+ *
+ * @param left - First array to compare.
+ * @param right - Second array to compare.
+ * @returns Whether both arrays contain the same members and length.
+ */
 function areStringArraysEqual(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length &&
     left.every((value) => right.includes(value))
