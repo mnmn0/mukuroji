@@ -1,19 +1,18 @@
 import {
-  useEffect,
+  useCallback,
   useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
   type KeyboardEvent,
+  type ReactNode,
 } from 'react'
 import type {
   AiAssistanceCitation,
   AiSummaryDraft,
-  AiWorkItemSource,
   CuratedContextSource,
 } from '@mukuroji/contracts'
-import { createAiAssistantSessionKey } from '../../features/ai-assistance/model/assistantSessionKey'
-import { AiSummaryAssistant } from '../../features/ai-assistance/ui/AiSummaryAssistant'
 import type { FileArtifactsController } from '../../files/mutations/useFileArtifacts'
 import { createTranslator, type Locale, type MessageKey } from '../../shared/i18n/i18n'
 import { WatchIcon } from '../../shared/ui/icons'
@@ -28,6 +27,7 @@ import {
 } from '../model/collaborationTabs'
 import {
   createActivityContextSource,
+  isAiSummaryAdoptionCurrent,
   type IssueContextDraft,
 } from '../model/contextDrafts'
 import {
@@ -42,16 +42,22 @@ import { IssueDecisionsTab } from './IssueDecisionsTab'
 import { IssueSourcesTab } from './IssueSourcesTab'
 
 /**
- * Authentication and revision-fenced source for an optional Work Item brief.
+ * Feature-owned Brief slot for an optional Work Item collaboration tab.
  *
- * The source is rendered only when the parent route has already resolved the
- * current viewer's permission-safe context.
+ * The slot is supplied only after the parent route has resolved the current
+ * viewer's permission-safe context and keeps feature composition outside this
+ * domain panel.
  */
 export type IssueSummaryAiAssistance = {
-  /** Active Workspace member bearer token. */
-  accessToken: string
-  /** Work Item reference resolved and re-authorized by the server. */
-  source: AiWorkItemSource
+  /** Stable source-and-revision key owned by the feature composition boundary. */
+  sessionKey: string
+  /**
+   * Renders the feature-owned Brief assistant and receives a local draft callback.
+   * Passing an undefined callback hides adoption when the existing editor cannot create.
+   */
+  renderBrief: (
+    onAdopt: ((draft: AiSummaryDraft, citations: readonly AiAssistanceCitation[]) => void) | undefined,
+  ) => ReactNode
 }
 
 /**
@@ -63,8 +69,6 @@ export type IssueSummaryAiAssistance = {
 export type IssueCollaborationPanelProps = {
   /** Optional AI summary access; omission removes the Brief tab and its source from markup. */
   aiAssistance?: IssueSummaryAiAssistance
-  /** Reports authenticated AI failures to the owning route session guard. */
-  onAuthenticatedApiError?: (error: unknown) => void
   /** Locale used for all collaboration messages. */
   locale: Locale
   /** Workspace members used for mentions, actors, and presence. */
@@ -114,7 +118,6 @@ export function IssueCollaborationPanel({
   focusedRootCommentId,
   locale,
   members,
-  onAuthenticatedApiError,
   onContextDraftConsumed,
   readOnlyMessage,
   route,
@@ -127,11 +130,7 @@ export function IssueCollaborationPanel({
   const [hasOverriddenDraftTab, setHasOverriddenDraftTab] = useState(false)
   const contextDraft = externalContextDraft ?? promotedContextDraft
   const panelIdPrefix = useId()
-  const aiAssistantSessionKey = aiAssistance
-    ? createAiAssistantSessionKey(aiAssistance.source)
-    : undefined
-  const activeAiAssistantSessionKeyRef = useRef(aiAssistantSessionKey)
-  const contextDraftRef = useRef<IssueContextDraft | undefined>(contextDraft)
+  const aiAssistantSessionKey = aiAssistance?.sessionKey
   const visibleTabs = aiAssistance
     ? [...issueCollaborationTabs]
     : issueCollaborationTabs.filter((tab) => tab !== 'brief')
@@ -141,6 +140,12 @@ export function IssueCollaborationPanel({
   const selectedTab = requestedTab === 'brief' && !aiAssistance
     ? 'conversation'
     : requestedTab
+
+  const handleAiSummaryAdopt = useAiSummaryAdoptionHandler(
+    aiAssistantSessionKey,
+    contextDraft,
+    openAiSummaryDraft,
+  )
   const uniquePresence = useMemo(
     () =>
       Array.from(
@@ -172,14 +177,6 @@ export function IssueCollaborationPanel({
     route?.onCollaborationSourceChange ? undefined : selectedSource,
   )
 
-  useEffect(() => {
-    activeAiAssistantSessionKeyRef.current = aiAssistantSessionKey
-  }, [aiAssistantSessionKey])
-
-  useEffect(() => {
-    contextDraftRef.current = contextDraft
-  }, [contextDraft])
-
   /**
    * Opens a human-curated editor backed by immutable source provenance.
    *
@@ -187,7 +184,6 @@ export function IssueCollaborationPanel({
    */
   function promoteSource(source: CuratedContextSource) {
     const nextDraft = { body: '', kind: 'context', source, title: '' } satisfies IssueContextDraft
-    contextDraftRef.current = externalContextDraft ?? nextDraft
     setPromotedContextDraft(nextDraft)
     setHasOverriddenDraftTab(false)
     if (route?.collaborationTab === undefined) {
@@ -273,7 +269,6 @@ export function IssueCollaborationPanel({
       kind: 'context',
       title: t('ai.summary.contextDraftTitle'),
     } satisfies IssueContextDraft
-    contextDraftRef.current = nextDraft
     setPromotedContextDraft(nextDraft)
     setHasOverriddenDraftTab(false)
     if (route?.collaborationTab === undefined) {
@@ -506,25 +501,9 @@ export function IssueCollaborationPanel({
         ) : null}
         {selectedTab === 'brief' && aiAssistance && aiAssistantSessionKey ? (
           <div className="px-5 py-5">
-            <AiSummaryAssistant
-              accessToken={aiAssistance.accessToken}
-              adoptLabel={t('ai.summary.adoptContext')}
-              key={aiAssistantSessionKey}
-              locale={locale}
-              onAuthenticatedApiError={onAuthenticatedApiError}
-              onAdopt={controller.context.capabilities.canCreate && !contextDraft
-                ? (draft, citations) => {
-                    if (
-                      activeAiAssistantSessionKeyRef.current !==
-                      aiAssistantSessionKey
-                    ) return
-                    if (contextDraftRef.current) return
-                    openAiSummaryDraft(draft, citations)
-                  }
-                : undefined}
-              sources={[aiAssistance.source]}
-              t={t}
-            />
+            {aiAssistance.renderBrief(controller.context.capabilities.canCreate && !contextDraft
+              ? handleAiSummaryAdopt
+              : undefined)}
           </div>
         ) : null}
         {selectedTab === 'decisions' ? (
@@ -537,7 +516,6 @@ export function IssueCollaborationPanel({
             members={members}
             onDraftConsumed={() => {
               setPromotedContextDraft(undefined)
-              contextDraftRef.current = externalContextDraft
               onContextDraftConsumed?.()
             }}
             onOpenSource={(item, source) => {
@@ -570,6 +548,37 @@ export function IssueCollaborationPanel({
       </div>
     </section>
   )
+}
+
+/**
+ * Keeps a Brief adoption callback current across source and editor transitions.
+ *
+ * @param expectedSessionKey - Session key captured by the rendered Brief assistant.
+ * @param currentDraft - Human-owned draft currently open in the panel.
+ * @param openDraft - Domain-owned callback for opening the existing editor.
+ * @returns A guarded local adoption callback for the feature-owned Brief slot.
+ */
+function useAiSummaryAdoptionHandler(
+  expectedSessionKey: string | undefined,
+  currentDraft: IssueContextDraft | undefined,
+  openDraft: (draft: AiSummaryDraft, citations: readonly AiAssistanceCitation[]) => void,
+): (draft: AiSummaryDraft, citations: readonly AiAssistanceCitation[]) => void {
+  const sessionRef = useRef(expectedSessionKey)
+  const contextDraftRef = useRef(currentDraft)
+  useLayoutEffect(() => {
+    sessionRef.current = expectedSessionKey
+  }, [expectedSessionKey])
+  useLayoutEffect(() => {
+    contextDraftRef.current = currentDraft
+  }, [currentDraft])
+  return useCallback((draft, citations) => {
+    if (!isAiSummaryAdoptionCurrent(
+      sessionRef.current,
+      expectedSessionKey,
+      contextDraftRef.current,
+    )) return
+    openDraft(draft, citations)
+  }, [expectedSessionKey, openDraft])
 }
 
 /**

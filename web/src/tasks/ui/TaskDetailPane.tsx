@@ -1,4 +1,5 @@
 import type {
+  AiWorkItemSource,
   AiPlanningDraft,
   PlanningSnapshot,
   WorkItemDependencyEndpoint,
@@ -12,6 +13,8 @@ import type {
 import { useId, useState } from 'react'
 import { RelatedDocuments } from '../../documents/ui/RelatedDocuments'
 import type { AiAssistanceController } from '../../features/ai-assistance/mutations/useAiAssistanceController'
+import { createAiAssistantSessionKey } from '../../features/ai-assistance/model/assistantSessionKey'
+import { AiSummaryAssistant } from '../../features/ai-assistance/ui/AiSummaryAssistant'
 import { AiWorkItemPlanningAssistant } from '../../features/ai-assistance/ui/AiWorkItemPlanningAssistant'
 import type { FileArtifactsController } from '../../files/mutations/useFileArtifacts'
 import { IssueArtifactsPanel } from '../../files/ui/IssueArtifactsPanel'
@@ -24,7 +27,10 @@ import {
   resolveWorkItemAssignee,
   resolveWorkItemTitle,
 } from '../../work-items/model/workItemDisplay'
-import { IssueCollaborationPanel } from '../../issues/ui/IssueCollaborationPanel'
+import {
+  IssueCollaborationPanel,
+  type IssueSummaryAiAssistance,
+} from '../../issues/ui/IssueCollaborationPanel'
 import type { IssueCollaborationRoute } from '../../issues/model/collaborationTabs'
 import type { ProjectDirectoryTeam, ProjectMember } from '../../projects/api'
 import type { Locale, MessageKey } from '../../shared/i18n/i18n'
@@ -327,6 +333,29 @@ export function TaskDetailPane({
     activeAiDraft?.status && seededWorkflowStatusId === activeAiDraft.status.value,
   )
   const isEditorDirty = editorDirtyState.identity === editorIdentity && editorDirtyState.dirty
+  const aiSummarySource = {
+    expectedRevision: issue?.revision ?? task.revision,
+    teamId: task.teamId,
+    type: 'work-item',
+    workItemId: task.id,
+  } satisfies AiWorkItemSource
+  const collaborationAiAssistance = aiAssistanceEnabled && accessToken && task.teamId
+    ? {
+        renderBrief: (onAdopt: Parameters<IssueSummaryAiAssistance['renderBrief']>[0]) => (
+          <AiSummaryAssistant
+            accessToken={accessToken}
+            adoptLabel={t('ai.summary.adoptContext')}
+            key={createAiAssistantSessionKey(aiSummarySource)}
+            locale={locale}
+            onAdopt={onAdopt}
+            onAuthenticatedApiError={onAuthenticatedApiError}
+            sources={[aiSummarySource]}
+            t={t}
+          />
+        ),
+        sessionKey: createAiAssistantSessionKey(aiSummarySource),
+      }
+    : undefined
 
   /** Copies supported approved fields into a fresh local form seed without saving them. */
   function applyAiPlanningDraft(draft: AiPlanningDraft) {
@@ -793,19 +822,8 @@ export function TaskDetailPane({
       />
       {collaboration ? (
         <IssueCollaborationPanel
-          aiAssistance={aiAssistanceEnabled && accessToken && task.teamId
-            ? {
-                accessToken,
-                source: {
-                  expectedRevision: issue?.revision ?? task.revision,
-                  teamId: task.teamId,
-                  type: 'work-item',
-                  workItemId: task.id,
-                },
-              }
-            : undefined}
+          aiAssistance={collaborationAiAssistance}
           route={collaborationRoute}
-          onAuthenticatedApiError={onAuthenticatedApiError}
           artifacts={artifacts}
           contextDraft={documentContextPromotion.documentContextDraft}
           key={`${task.teamId ?? ''}:${task.id}`}

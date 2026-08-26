@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test'
+import type { AiAssistanceGeneration } from '@mukuroji/contracts'
 import {
   AiAssistanceApiError,
   createAiAssistanceFeedback,
@@ -63,7 +64,7 @@ describe('AI assistance API', () => {
         outcome: 'approved',
         decidedAt: '2026-08-25T02:05:00.000Z',
       },
-    } as const
+    } satisfies AiAssistanceGeneration
     const requests = installFetchRecorder([approvedGeneration, undefined])
 
     await decideAiAssistanceGeneration({
@@ -92,6 +93,7 @@ describe('AI assistance API', () => {
     expect(JSON.parse(String(requests[1]?.init.body))).toEqual({ rating: 'helpful' })
   })
 
+  /** Verifies decision responses remain bound to the requested task and outcome. */
   test('rejects a decision response for a different task or requested outcome', async () => {
     const generationWithRejectedDecision = {
       ...aiSearchGenerationFixture,
@@ -99,14 +101,14 @@ describe('AI assistance API', () => {
         outcome: 'rejected',
         decidedAt: '2026-08-25T02:05:00.000Z',
       },
-    } as const
+    } satisfies AiAssistanceGeneration
     const generationWithDifferentTask = {
       ...aiSummaryGenerationFixture,
       decision: {
         outcome: 'approved',
         decidedAt: '2026-08-25T02:05:00.000Z',
       },
-    } as const
+    } satisfies AiAssistanceGeneration
 
     for (const response of [generationWithRejectedDecision, generationWithDifferentTask]) {
       installFetchRecorder([response])
@@ -344,6 +346,7 @@ describe('AI assistance API', () => {
     expect(error).toMatchObject({ code: 'InvalidAiAssistanceResponse', status: 502 })
   })
 
+  /** Verifies model output cannot introduce a self-referential planning dependency. */
   test('rejects a planning dependency that points to the same Work Item', async () => {
     const content = aiPlanningGenerationFixture.content
     if (content.availability !== 'available' || content.draft.kind !== 'planning') {

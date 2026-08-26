@@ -54,6 +54,8 @@ export type AiAssistanceReviewProps = {
   generatingLabel?: string
   /** Locale used for dates and numeric metadata. */
   locale: 'ja' | 'en'
+  /** Localized cancellation action for the active workflow. */
+  cancelLabel?: string
   /** Cancels the active generation request. */
   onCancelGeneration?: () => void
   /** Adopts the reviewed draft through a workflow-specific handler. */
@@ -87,6 +89,7 @@ export function AiAssistanceReview({
   isFeedbackPending = false,
   isGenerating = false,
   locale,
+  cancelLabel,
   onAdopt,
   onCancelGeneration,
   onFeedback,
@@ -155,7 +158,7 @@ export function AiAssistanceReview({
                 onClick={onCancelGeneration}
                 type="button"
               >
-                {t('ai.search.cancel')}
+                {cancelLabel ?? t('ai.search.cancel')}
               </button>
             ) : null}
           </div>

@@ -71,6 +71,7 @@ export function AiWorkItemPlanningAssistant({
       isFeedbackPending={activeController.isFeedbackPending}
       isGenerating={activeController.isGenerating}
       locale={locale}
+      cancelLabel={t('ai.planning.workItem.cancel')}
       onAdopt={onAdopt}
       onCancelGeneration={activeController.cancelGeneration}
       onDecide={activeController.decide}
@@ -102,6 +103,8 @@ export type AiWorkItemPlanningAssistantViewProps = {
   isGenerating?: boolean
   /** Locale used for generation metadata and planning values. */
   locale: Locale
+  /** Localized cancellation action for the Work Item planning workflow. */
+  cancelLabel?: string
   /** Copies an approved draft into supported local Work Item fields only. */
   onAdopt?: (draft: AiPlanningDraft) => void | Promise<void>
   /** Cancels the active explicit generation request. */
@@ -137,6 +140,7 @@ export function AiWorkItemPlanningAssistantView({
   isFeedbackPending = false,
   isGenerating = false,
   locale,
+  cancelLabel,
   onAdopt,
   onCancelGeneration,
   onDecide,
@@ -254,6 +258,7 @@ export function AiWorkItemPlanningAssistantView({
           generatingLabel={t('ai.planning.workItem.generating')}
           isGenerating={isGenerating}
           locale={locale}
+          cancelLabel={cancelLabel}
           onCancelGeneration={onCancelGeneration}
           renderDraft={() => null}
           t={t}

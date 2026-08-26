@@ -1,10 +1,13 @@
 import type { Meta, StoryObj } from '@storybook/react-vite'
 import type {
+  AiWorkItemSource,
   CreateCuratedContextItemRequest,
   CuratedContextItem,
   UpdateCuratedContextItemRequest,
 } from '@mukuroji/contracts'
 import { expect, fn, userEvent, within } from 'storybook/test'
+import { createAiAssistantSessionKey } from '../../features/ai-assistance/model/assistantSessionKey'
+import { AiSummaryAssistant } from '../../features/ai-assistance/ui/AiSummaryAssistant'
 import {
   acceptedResolutionHistoryFixtures,
   collaborationWorkspaceMemberFixtures,
@@ -13,6 +16,14 @@ import {
 } from '../fixtures'
 import { IssueCollaborationPanel } from './IssueCollaborationPanel'
 import { fileArtifactsControllerFixture, imageFileFixture } from '../../files/fixtures'
+import { createTranslator } from '../../shared/i18n/i18n'
+
+const aiBriefSource = {
+  expectedRevision: 7,
+  teamId: 'core-team',
+  type: 'work-item',
+  workItemId: 'launch-review',
+} satisfies AiWorkItemSource
 
 const meta = {
   title: 'Application/Issues/Collaboration Panel',
@@ -93,13 +104,18 @@ export const Default: Story = {
 export const AiBrief: Story = {
   args: {
     aiAssistance: {
-      accessToken: 'storybook-access-token',
-      source: {
-        expectedRevision: 7,
-        teamId: 'core-team',
-        type: 'work-item',
-        workItemId: 'launch-review',
-      },
+      renderBrief: (onAdopt) => (
+        <AiSummaryAssistant
+          accessToken="storybook-access-token"
+          adoptLabel="Draft として追加"
+          key={createAiAssistantSessionKey(aiBriefSource)}
+          locale="ja"
+          onAdopt={onAdopt}
+          sources={[aiBriefSource]}
+          t={createTranslator('ja')}
+        />
+      ),
+      sessionKey: createAiAssistantSessionKey(aiBriefSource),
     },
     defaultTab: 'brief',
   },

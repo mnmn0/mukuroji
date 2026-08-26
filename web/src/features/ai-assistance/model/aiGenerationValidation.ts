@@ -484,7 +484,12 @@ function isPlanningDependency(value: unknown): boolean {
     isStringArray(value.citationIds)
 }
 
-/** Validates a Team-qualified Work Item dependency endpoint. */
+/**
+ * Validates a Team-qualified Work Item dependency endpoint.
+ *
+ * @param value - Unknown model-controlled endpoint value.
+ * @returns Whether the value contains non-empty Team and Work Item identifiers.
+ */
 function isDependencyEndpoint(
   value: unknown,
 ): value is { teamId: string; workItemId: string } {

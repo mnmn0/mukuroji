@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
+import type { SearchCustomFieldFilter } from '@mukuroji/contracts'
 import {
   aiSearchGenerationFixture,
   aiWithheldGenerationFixture,
@@ -27,6 +28,43 @@ describe('NaturalLanguageSearchComposerView', () => {
     expect(html).toContain('Apply filters')
     expect(html).toContain('“Incomplete” was mapped')
     expect(html).toContain('Group by Team ID')
+  })
+
+  /** Verifies equivalent custom-field filters remain adoptable despite response key order. */
+  test('does not treat custom-field property order as an edited filter', () => {
+    const content = aiSearchGenerationFixture.content
+    if (content.availability !== 'available' || content.draft.kind !== 'search') {
+      throw new Error('Search fixture must stay available.')
+    }
+    const customField: SearchCustomFieldFilter = {
+      value: 'enterprise',
+      operator: 'equals',
+      fieldId: 'customer-segment',
+    }
+    const generation = {
+      ...aiSearchGenerationFixture,
+      content: {
+        ...content,
+        draft: {
+          ...content.draft,
+          filters: { ...content.draft.filters, customFields: [customField] },
+        },
+      },
+    }
+
+    const html = renderToStaticMarkup(
+      <NaturalLanguageSearchComposerView
+        generation={generation}
+        locale="en"
+        onApply={() => undefined}
+        onDecide={async () => undefined}
+        onGenerate={() => undefined}
+        t={createTranslator('en')}
+      />,
+    )
+
+    expect(html).toContain('Apply filters')
+    expect(html).not.toContain('Filters changed after generation')
   })
 
   test('renders permission errors without a generated draft surface', () => {

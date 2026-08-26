@@ -1,4 +1,5 @@
 import type {
+  AiWorkItemSource,
   PlanningSnapshot,
   ResolvedWorkItemConfiguration,
   TaskViewDefinition,
@@ -37,6 +38,8 @@ import { useCurrentUser } from '../../auth/queries/useCurrentUser'
 import { resolveEnterpriseSessionErrorsAction } from '../../auth/enterpriseSessionErrors'
 import { clearAuthSession, getAuthSession } from '../../auth/session'
 import { aiAssistanceUiEnabled } from '../../features/ai-assistance/model/aiAssistanceRollout'
+import { createAiAssistantSessionKey } from '../../features/ai-assistance/model/assistantSessionKey'
+import { AiSummaryAssistant } from '../../features/ai-assistance/ui/AiSummaryAssistant'
 import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
 import { IssueArtifactsPanel } from '../../files/ui/IssueArtifactsPanel'
 import {
@@ -66,7 +69,10 @@ import {
   useTeamIssueDetail,
   useTeamIssues,
 } from '../../issues/queries/useWorkItems'
-import { IssueCollaborationPanel } from '../../issues/ui/IssueCollaborationPanel'
+import {
+  IssueCollaborationPanel,
+  type IssueSummaryAiAssistance,
+} from '../../issues/ui/IssueCollaborationPanel'
 import {
   type IssueCollaborationController,
   useIssueCollaboration,
@@ -3731,6 +3737,29 @@ function IssueDetailContent({
   /** Person field と discussion で使う Workspace member 一覧です。 */
   workspaceMembers: WorkspaceMember[]
 }) {
+  const aiSummarySource = {
+    expectedRevision: issue.revision,
+    teamId: issue.teamId,
+    type: 'work-item',
+    workItemId: issue.id,
+  } satisfies AiWorkItemSource
+  const collaborationAiAssistance = aiAssistanceUiEnabled && accessToken
+    ? {
+        renderBrief: (onAdopt: Parameters<IssueSummaryAiAssistance['renderBrief']>[0]) => (
+          <AiSummaryAssistant
+            accessToken={accessToken}
+            adoptLabel={t('ai.summary.adoptContext')}
+            key={createAiAssistantSessionKey(aiSummarySource)}
+            locale={locale}
+            onAdopt={onAdopt}
+            onAuthenticatedApiError={onAuthenticatedApiError}
+            sources={[aiSummarySource]}
+            t={t}
+          />
+        ),
+        sessionKey: createAiAssistantSessionKey(aiSummarySource),
+      }
+    : undefined
   const [selectedProject, setSelectedProject] = useState({
     revision: issue.revision,
     value: issue.assignedProjectId ?? '',
@@ -3975,17 +4004,7 @@ function IssueDetailContent({
       />
       {collaboration ? (
         <IssueCollaborationPanel
-          aiAssistance={aiAssistanceUiEnabled && accessToken
-            ? {
-                accessToken,
-                source: {
-                  expectedRevision: issue.revision,
-                  teamId: issue.teamId,
-                  type: 'work-item',
-                  workItemId: issue.id,
-                },
-              }
-            : undefined}
+          aiAssistance={collaborationAiAssistance}
           route={collaborationRoute}
           artifacts={artifacts}
           contextDraft={documentContextPromotion.documentContextDraft}
@@ -3996,7 +4015,6 @@ function IssueDetailContent({
           focusedRootCommentId={focusedRootCommentId}
           locale={locale}
           members={workspaceMembers}
-          onAuthenticatedApiError={onAuthenticatedApiError}
           onContextDraftConsumed={documentContextPromotion.onContextDraftConsumed}
         />
       ) : null}

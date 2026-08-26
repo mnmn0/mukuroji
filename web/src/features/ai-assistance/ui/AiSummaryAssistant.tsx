@@ -75,6 +75,7 @@ export function AiSummaryAssistant({
       isFeedbackPending={controller.isFeedbackPending}
       isGenerating={controller.isGenerating}
       locale={locale}
+      cancelLabel={t('ai.summary.cancel')}
       onAdopt={onAdopt}
       onCancelGeneration={controller.cancelGeneration}
       onDecide={controller.decide}
@@ -115,6 +116,8 @@ export type AiSummaryAssistantViewProps = {
   isGenerating?: boolean
   /** Locale used for generation metadata. */
   locale: Locale
+  /** Localized cancellation action for the Summary workflow. */
+  cancelLabel?: string
   /** Opens an approved summary in a human-owned draft workflow. */
   onAdopt?: (
     draft: AiSummaryDraft,
@@ -151,6 +154,7 @@ export function AiSummaryAssistantView({
   isFeedbackPending = false,
   isGenerating = false,
   locale,
+  cancelLabel,
   onAdopt,
   onCancelGeneration,
   onDecide,
@@ -230,6 +234,7 @@ export function AiSummaryAssistantView({
           generatingLabel={t('ai.summary.generating')}
           isGenerating={isGenerating}
           locale={locale}
+          cancelLabel={cancelLabel}
           onCancelGeneration={onCancelGeneration}
           renderDraft={() => null}
           t={t}

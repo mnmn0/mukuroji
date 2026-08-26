@@ -30,7 +30,16 @@ export type GenerateAiAssistanceOptions = {
   signal?: AbortSignal
 }
 
-/** Options for recording a human review decision. */
+/**
+ * Options for recording a human review decision.
+ *
+ * @property accessToken - Bearer access token for the active Workspace member.
+ * @property generationId - Generation whose review outcome is being recorded.
+ * @property expectedTask - Workflow task originally reviewed by the operator.
+ * @property expectedOutcome - Review outcome requested by the operator.
+ * @property input - Revision-fenced human review outcome.
+ * @property mutationContext - Idempotency and correlation headers for the mutation.
+ */
 export type DecideAiAssistanceOptions = {
   /** Bearer access token for the active Workspace member. */
   accessToken: string

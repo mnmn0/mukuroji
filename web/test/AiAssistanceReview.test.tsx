@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
+import type { AiAssistanceGeneration } from '@mukuroji/contracts'
 import {
   aiSummaryGenerationFixture,
   aiWithheldGenerationFixture,
@@ -134,7 +135,7 @@ describe('AiAssistanceReview', () => {
         outcome: 'rejected',
         decidedAt: '2026-08-25T02:05:00.000Z',
       },
-    } as const
+    } satisfies AiAssistanceGeneration
     const html = renderToStaticMarkup(
       <AiAssistanceReview
         generation={rejectedGeneration}

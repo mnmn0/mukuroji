@@ -197,6 +197,7 @@ export function NaturalLanguageSearchComposerView({
         />
       ) : (
         <AiAssistanceReview
+          cancelLabel={t('ai.search.cancel')}
           errorKind={error?.kind}
           generation={generation}
           generatingLabel={t('ai.search.generating')}
@@ -237,7 +238,14 @@ type SearchDraftReviewProps = {
 
 /** Serializes canonical Search filters so an approval is bound to exact criteria. */
 function serializeSearchFilters(filters: WorkspaceSearchFilters): string {
-  return JSON.stringify(filters)
+  return JSON.stringify({
+    ...filters,
+    customFields: filters.customFields?.map(({ fieldId, operator, value }) => ({
+      fieldId,
+      operator,
+      value,
+    })),
+  })
 }
 
 /** Keeps reviewed filter edits local until the explicit Apply action succeeds. */
@@ -256,6 +264,7 @@ function SearchDraftReview({
   const draft = getAvailableSearchDraft(generation)
   const [filters, setFilters] = useState<WorkspaceSearchFilters>(() =>
     createEditableAiSearchFilters(draft?.filters ?? {}))
+  const [editorRevision, setEditorRevision] = useState(0)
   const hasInvalidFilterSet = !hasReviewableAiSearchFilters(filters)
 
   if (!draft) return null
@@ -297,10 +306,11 @@ function SearchDraftReview({
         }}
         renderDraft={({ draft: renderedDraft }) => renderedDraft.kind === 'search' ? (
           <AiSearchDraftEditor
-            draft={renderedDraft}
-            filters={filters}
-            disabled={isDecisionPending || isFeedbackPending}
-            onChange={setFilters}
+              draft={renderedDraft}
+              filters={filters}
+              disabled={isDecisionPending || isFeedbackPending}
+              key={editorRevision}
+              onChange={setFilters}
             t={t}
           />
         ) : null}
@@ -313,7 +323,10 @@ function SearchDraftReview({
           </p>
           <button
             className="workbench-button-secondary min-h-[44px] justify-self-start px-3"
-            onClick={() => setFilters(createEditableAiSearchFilters(draft.filters))}
+            onClick={() => {
+              setFilters(createEditableAiSearchFilters(draft.filters))
+              setEditorRevision((revision) => revision + 1)
+            }}
             type="button"
           >
             {t('ai.search.validation.restore')}

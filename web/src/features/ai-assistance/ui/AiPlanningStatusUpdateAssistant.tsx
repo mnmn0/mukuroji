@@ -84,6 +84,7 @@ export function AiPlanningStatusUpdateAssistant({
       isFeedbackPending={controller.isFeedbackPending}
       isGenerating={controller.isGenerating}
       locale={locale}
+      cancelLabel={t('ai.planning.assistant.cancel')}
       onAdopt={onAdopt}
       onCancelGeneration={controller.cancelGeneration}
       onDecide={controller.decide}
@@ -123,6 +124,8 @@ export type AiPlanningStatusUpdateAssistantViewProps = {
   isGenerating?: boolean
   /** Locale used for generation metadata and planning values. */
   locale: Locale
+  /** Localized cancellation action for the Planning status workflow. */
+  cancelLabel?: string
   /** Copies an approved status update into the existing manual composer only. */
   onAdopt: (
     draft: AiPlanningStatusUpdateDraft,
@@ -161,6 +164,7 @@ export function AiPlanningStatusUpdateAssistantView({
   isFeedbackPending = false,
   isGenerating = false,
   locale,
+  cancelLabel,
   onAdopt,
   onCancelGeneration,
   onDecide,
@@ -267,6 +271,7 @@ export function AiPlanningStatusUpdateAssistantView({
           generatingLabel={t('ai.planning.assistant.generating')}
           isGenerating={isGenerating}
           locale={locale}
+          cancelLabel={cancelLabel}
           onCancelGeneration={onCancelGeneration}
           renderDraft={() => null}
           t={t}

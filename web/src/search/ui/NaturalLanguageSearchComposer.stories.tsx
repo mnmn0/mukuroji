@@ -61,6 +61,7 @@ export const ReviewAndApply: Story = {
     await expect(applyFilters).not.toHaveBeenCalled()
     await expect(canvas.getByText('Filters changed after generation. Restore the generated filters or generate again before applying.')).toBeVisible()
     await userEvent.click(canvas.getByRole('button', { name: 'Restore generated filters' }))
+    await expect(canvas.getByLabelText('Search workspace')).toHaveValue('')
     await userEvent.click(canvas.getByRole('button', { name: 'Apply filters' }))
     await expect(decideGeneration).toHaveBeenCalledWith('approved')
     await expect(applyFilters).toHaveBeenCalledWith({

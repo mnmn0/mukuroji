@@ -159,6 +159,7 @@ export function AiTriageDraftComposer({
           isGenerating={activeController.isGenerating}
           generatingLabel={t('ai.triage.generating')}
           locale={locale}
+          cancelLabel={t('ai.triage.cancel')}
           onAdopt={availableDraft && !isSourceStale ? adoptDraft : undefined}
           onCancelGeneration={activeController.cancelGeneration}
           onFeedback={(rating: CreateAiAssistanceFeedbackRequest['rating']) =>
