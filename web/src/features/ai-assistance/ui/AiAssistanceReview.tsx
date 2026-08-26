@@ -190,8 +190,19 @@ export function AiAssistanceReview({
             <AiCitationList citations={safeCitations} t={t} titleId={citationsTitleId} />
 
             {decision ? (
-              <p className="inline-flex items-center gap-2 text-app-body font-semibold text-[var(--workbench-success)]" role="status">
-                <CheckCircleIcon className="h-5 w-5 fill-none stroke-current stroke-2" />
+              <p
+                className={decision.outcome === 'approved'
+                  ? 'inline-flex items-center gap-2 text-app-body font-semibold text-[var(--workbench-success)]'
+                  : 'inline-flex items-center gap-2 border-l-2 border-[var(--workbench-danger)] bg-red-50 px-2 py-1 text-app-body font-semibold text-[var(--workbench-danger)]'}
+                role="status"
+              >
+                {decision.outcome === 'approved' ? (
+                  <CheckCircleIcon className="h-5 w-5 fill-none stroke-current stroke-2" />
+                ) : (
+                  <span aria-hidden="true" className="inline-flex h-5 w-5 items-center justify-center rounded-full border-2 border-current text-xs leading-none">
+                    !
+                  </span>
+                )}
                 {t(decision.outcome === 'approved' ? 'ai.review.approved' : 'ai.review.rejected')}
               </p>
             ) : onAdopt || onReject ? (

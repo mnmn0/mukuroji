@@ -465,10 +465,13 @@ function isPlanningSubtask(value: unknown): boolean {
 
 /** Validates one proposed planning dependency. */
 function isPlanningDependency(value: unknown): boolean {
-  return isRecord(value) &&
-    isNonEmptyString(value.id) &&
-    isDependencyEndpoint(value.predecessor) &&
-    isDependencyEndpoint(value.successor) &&
+  if (!isRecord(value) ||
+    !isNonEmptyString(value.id) ||
+    !isDependencyEndpoint(value.predecessor) ||
+    !isDependencyEndpoint(value.successor)) return false
+
+  return (value.predecessor.teamId !== value.successor.teamId ||
+    value.predecessor.workItemId !== value.successor.workItemId) &&
     isOneOf(value.type, [
       'finish-to-start',
       'start-to-start',
@@ -482,7 +485,9 @@ function isPlanningDependency(value: unknown): boolean {
 }
 
 /** Validates a Team-qualified Work Item dependency endpoint. */
-function isDependencyEndpoint(value: unknown): boolean {
+function isDependencyEndpoint(
+  value: unknown,
+): value is { teamId: string; workItemId: string } {
   return isRecord(value) &&
     isNonEmptyString(value.teamId) &&
     isNonEmptyString(value.workItemId)

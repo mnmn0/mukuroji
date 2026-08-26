@@ -80,6 +80,8 @@ export const aiAssistanceMessages = {
   'ai.search.validation.customFieldValue': '空欄以外の custom field 演算子には値を入力してからフィルターを適用してください。',
   'ai.search.validation.bounds': 'Keyword や filter の値を短くし、各リストの件数制限内に収めてから適用してください。',
   'ai.search.validation.dateRange': '有効な日付を入力し、開始日が終了日以前になるようにしてください。',
+  'ai.search.validation.edited': '生成後に filter が変更されています。生成時の filter に戻すか、もう一度生成してから適用してください。',
+  'ai.search.validation.restore': '生成時の filter に戻す',
   'ai.search.apply': 'Filter を適用',
   'ai.search.removeFilter': '{label} を削除',
   'ai.search.listHint': '複数の値はカンマで区切ります。',

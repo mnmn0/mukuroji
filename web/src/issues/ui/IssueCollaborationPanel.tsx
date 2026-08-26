@@ -131,6 +131,7 @@ export function IssueCollaborationPanel({
     ? createAiAssistantSessionKey(aiAssistance.source)
     : undefined
   const activeAiAssistantSessionKeyRef = useRef(aiAssistantSessionKey)
+  const contextDraftRef = useRef<IssueContextDraft | undefined>(contextDraft)
   const visibleTabs = aiAssistance
     ? [...issueCollaborationTabs]
     : issueCollaborationTabs.filter((tab) => tab !== 'brief')
@@ -175,13 +176,19 @@ export function IssueCollaborationPanel({
     activeAiAssistantSessionKeyRef.current = aiAssistantSessionKey
   }, [aiAssistantSessionKey])
 
+  useEffect(() => {
+    contextDraftRef.current = contextDraft
+  }, [contextDraft])
+
   /**
    * Opens a human-curated editor backed by immutable source provenance.
    *
    * @param source - Comment or activity evidence captured by the caller.
    */
   function promoteSource(source: CuratedContextSource) {
-    setPromotedContextDraft({ body: '', kind: 'context', source, title: '' })
+    const nextDraft = { body: '', kind: 'context', source, title: '' } satisfies IssueContextDraft
+    contextDraftRef.current = externalContextDraft ?? nextDraft
+    setPromotedContextDraft(nextDraft)
     setHasOverriddenDraftTab(false)
     if (route?.collaborationTab === undefined) {
       setUncontrolledTab('decisions')
@@ -261,11 +268,13 @@ export function IssueCollaborationPanel({
     draft: AiSummaryDraft,
     citations: readonly AiAssistanceCitation[],
   ) {
-    setPromotedContextDraft({
+    const nextDraft = {
       body: formatAiSummaryContextBody(draft, citations, t),
       kind: 'context',
       title: t('ai.summary.contextDraftTitle'),
-    })
+    } satisfies IssueContextDraft
+    contextDraftRef.current = nextDraft
+    setPromotedContextDraft(nextDraft)
     setHasOverriddenDraftTab(false)
     if (route?.collaborationTab === undefined) {
       setUncontrolledTab('decisions')
@@ -509,6 +518,7 @@ export function IssueCollaborationPanel({
                       activeAiAssistantSessionKeyRef.current !==
                       aiAssistantSessionKey
                     ) return
+                    if (contextDraftRef.current) return
                     openAiSummaryDraft(draft, citations)
                   }
                 : undefined}
@@ -527,6 +537,7 @@ export function IssueCollaborationPanel({
             members={members}
             onDraftConsumed={() => {
               setPromotedContextDraft(undefined)
+              contextDraftRef.current = externalContextDraft
               onContextDraftConsumed?.()
             }}
             onOpenSource={(item, source) => {

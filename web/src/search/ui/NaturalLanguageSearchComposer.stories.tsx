@@ -59,10 +59,12 @@ export const ReviewAndApply: Story = {
     await userEvent.clear(canvas.getByLabelText('Search workspace'))
     await userEvent.type(canvas.getByLabelText('Search workspace'), 'launch')
     await expect(applyFilters).not.toHaveBeenCalled()
+    await expect(canvas.getByText('Filters changed after generation. Restore the generated filters or generate again before applying.')).toBeVisible()
+    await userEvent.click(canvas.getByRole('button', { name: 'Restore generated filters' }))
     await userEvent.click(canvas.getByRole('button', { name: 'Apply filters' }))
     await expect(decideGeneration).toHaveBeenCalledWith('approved')
     await expect(applyFilters).toHaveBeenCalledWith({
-      filters: expect.objectContaining({ keyword: 'launch' }),
+      filters: expect.objectContaining({ statuses: ['todo', 'in-progress'] }),
       report: { groupBy: 'team', metric: 'count' },
     })
   },

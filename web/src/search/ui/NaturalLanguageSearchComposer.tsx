@@ -235,6 +235,11 @@ type SearchDraftReviewProps = {
   t: (key: MessageKey) => string
 }
 
+/** Serializes canonical Search filters so an approval is bound to exact criteria. */
+function serializeSearchFilters(filters: WorkspaceSearchFilters): string {
+  return JSON.stringify(filters)
+}
+
 /** Keeps reviewed filter edits local until the explicit Apply action succeeds. */
 function SearchDraftReview({
   error,
@@ -255,43 +260,67 @@ function SearchDraftReview({
 
   if (!draft) return null
 
+  const reviewedFilters = normalizeAiSearchFilters(filters)
+  const generatedFilters = normalizeAiSearchFilters(draft.filters)
+  const hasUnapprovedFilterEdits = serializeSearchFilters(reviewedFilters) !==
+    serializeSearchFilters(generatedFilters)
+  const canAdopt = !hasInvalidFilterSet && !hasUnapprovedFilterEdits
+
   /** Records approval first, then applies the exact reviewed local filters. */
   const adoptFilters = async () => {
-    if (!hasReviewableAiSearchFilters(filters)) return
+    if (!canAdopt) return
+    const approvedFilters = reviewedFilters
     const reviewedGeneration = await onDecide('approved')
     const approvedDraft = getAvailableSearchDraft(reviewedGeneration)
     if (reviewedGeneration?.decision?.outcome !== 'approved' || !approvedDraft) return
+    if (serializeSearchFilters(approvedFilters) !== serializeSearchFilters(approvedDraft.filters)) return
     onApply({
-      filters: normalizeAiSearchFilters(filters),
+      filters: approvedFilters,
       report: approvedDraft.report,
     })
   }
 
   return (
-    <AiAssistanceReview
-      adoptLabel={t('ai.search.apply')}
-      errorKind={error?.kind}
-      feedbackRating={feedbackRating}
-      generation={generation}
-      isDecisionPending={isDecisionPending}
-      isFeedbackPending={isFeedbackPending}
-      locale={locale}
-      onAdopt={hasInvalidFilterSet ? undefined : adoptFilters}
-      onFeedback={onFeedback}
-      onReject={() => {
-        void onDecide('rejected')
-      }}
-      renderDraft={({ draft: renderedDraft }) => renderedDraft.kind === 'search' ? (
-        <AiSearchDraftEditor
-          draft={renderedDraft}
-          filters={filters}
-          disabled={isDecisionPending || isFeedbackPending}
-          onChange={setFilters}
-          t={t}
-        />
+    <div className="grid gap-3">
+      <AiAssistanceReview
+        adoptLabel={t('ai.search.apply')}
+        errorKind={error?.kind}
+        feedbackRating={feedbackRating}
+        generation={generation}
+        isDecisionPending={isDecisionPending}
+        isFeedbackPending={isFeedbackPending}
+        locale={locale}
+        onAdopt={canAdopt ? adoptFilters : undefined}
+        onFeedback={onFeedback}
+        onReject={() => {
+          void onDecide('rejected')
+        }}
+        renderDraft={({ draft: renderedDraft }) => renderedDraft.kind === 'search' ? (
+          <AiSearchDraftEditor
+            draft={renderedDraft}
+            filters={filters}
+            disabled={isDecisionPending || isFeedbackPending}
+            onChange={setFilters}
+            t={t}
+          />
+        ) : null}
+        t={t}
+      />
+      {hasUnapprovedFilterEdits ? (
+        <div className="grid gap-2 border-l-2 border-[var(--workbench-warning)] bg-[var(--workbench-surface-muted)] px-3 py-3">
+          <p className="text-app-caption font-medium text-[var(--workbench-text)]">
+            {t('ai.search.validation.edited')}
+          </p>
+          <button
+            className="workbench-button-secondary min-h-[44px] justify-self-start px-3"
+            onClick={() => setFilters(createEditableAiSearchFilters(draft.filters))}
+            type="button"
+          >
+            {t('ai.search.validation.restore')}
+          </button>
+        </div>
       ) : null}
-      t={t}
-    />
+    </div>
   )
 }
 

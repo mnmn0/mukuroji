@@ -125,4 +125,29 @@ describe('AiAssistanceReview', () => {
     expect(html).toContain('Generating brief')
     expect(html).not.toContain('Generating filters')
   })
+
+  /** Verifies rejected decisions are visually distinct from accepted decisions. */
+  test('renders a rejected decision with the danger treatment', () => {
+    const rejectedGeneration = {
+      ...aiSummaryGenerationFixture,
+      decision: {
+        outcome: 'rejected',
+        decidedAt: '2026-08-25T02:05:00.000Z',
+      },
+    } as const
+    const html = renderToStaticMarkup(
+      <AiAssistanceReview
+        generation={rejectedGeneration}
+        locale="en"
+        renderDraft={({ draft }) => draft.kind === 'summary' ? draft.overview.text : null}
+        t={t}
+      />,
+    )
+
+    expect(html).toContain('text-[var(--workbench-danger)]')
+    expect(html).toContain('Recorded as rejected.')
+    expect(html).toContain('aria-hidden="true" class="inline-flex')
+    expect(html).toContain('>!</span>')
+    expect(html).not.toContain('text-[var(--workbench-success)]')
+  })
 })

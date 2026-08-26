@@ -344,6 +344,46 @@ describe('AI assistance API', () => {
     expect(error).toMatchObject({ code: 'InvalidAiAssistanceResponse', status: 502 })
   })
 
+  test('rejects a planning dependency that points to the same Work Item', async () => {
+    const content = aiPlanningGenerationFixture.content
+    if (content.availability !== 'available' || content.draft.kind !== 'planning') {
+      throw new Error('Planning fixture must stay available.')
+    }
+    const dependency = content.draft.dependencies[0]
+    if (!dependency) throw new Error('Planning fixture must include a dependency.')
+
+    installFetchRecorder([{
+      ...aiPlanningGenerationFixture,
+      content: {
+        ...content,
+        draft: {
+          ...content.draft,
+          dependencies: [{
+            ...dependency,
+            successor: { ...dependency.predecessor },
+          }],
+        },
+      },
+    }])
+
+    const error = await generateAiAssistance({
+      accessToken: 'access-token',
+      input: {
+        locale: 'en',
+        source: {
+          expectedRevision: 1,
+          teamId: 'core-team',
+          type: 'work-item',
+          workItemId: 'launch-review',
+        },
+        task: 'planning',
+      },
+      mutationContext,
+    }).catch((caught: unknown) => caught)
+
+    expect(error).toMatchObject({ code: 'InvalidAiAssistanceResponse', status: 502 })
+  })
+
   /** Rejects whitespace-only workflow status identifiers before they reach review. */
   test('rejects whitespace-only planning statuses at the browser API boundary', async () => {
     const content = aiPlanningGenerationFixture.content

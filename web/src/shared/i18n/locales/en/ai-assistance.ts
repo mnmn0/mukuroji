@@ -80,6 +80,8 @@ export const aiAssistanceMessages = {
   'ai.search.validation.customFieldValue': 'Enter a value for every custom-field comparison before applying filters.',
   'ai.search.validation.bounds': 'Shorten the keyword or filter values and keep each list within the allowed limit before applying filters.',
   'ai.search.validation.dateRange': 'Use valid calendar dates with the start date on or before the end date.',
+  'ai.search.validation.edited': 'Filters changed after generation. Restore the generated filters or generate again before applying.',
+  'ai.search.validation.restore': 'Restore generated filters',
   'ai.search.apply': 'Apply filters',
   'ai.search.removeFilter': 'Remove {label}',
   'ai.search.listHint': 'Separate multiple values with commas.',
