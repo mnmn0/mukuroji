@@ -26,6 +26,7 @@ describe('NaturalLanguageSearchComposerView', () => {
     expect(html).toContain('2026-08-01')
     expect(html).toContain('Apply filters')
     expect(html).toContain('“Incomplete” was mapped')
+    expect(html).toContain('Group by Team ID')
   })
 
   test('renders permission errors without a generated draft surface', () => {

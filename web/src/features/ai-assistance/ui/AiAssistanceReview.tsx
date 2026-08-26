@@ -50,6 +50,8 @@ export type AiAssistanceReviewProps = {
   isFeedbackPending?: boolean
   /** Whether a user-initiated generation is in flight. */
   isGenerating?: boolean
+  /** Localized status message shown while this workflow is generating. */
+  generatingLabel?: string
   /** Locale used for dates and numeric metadata. */
   locale: 'ja' | 'en'
   /** Cancels the active generation request. */
@@ -80,6 +82,7 @@ export function AiAssistanceReview({
   errorKind,
   feedbackRating,
   generation,
+  generatingLabel,
   isDecisionPending = false,
   isFeedbackPending = false,
   isGenerating = false,
@@ -140,7 +143,7 @@ export function AiAssistanceReview({
         {isGenerating ? (
           <div className="grid gap-3" role="status">
             <span className="text-app-body font-semibold text-[var(--workbench-text)]">
-              {t('ai.search.generating')}
+              {generatingLabel ?? t('ai.search.generating')}
             </span>
             <div aria-hidden="true" className="grid gap-2">
               <span className="h-3 w-4/5 animate-pulse rounded bg-[var(--workbench-border)] motion-reduce:animate-none" />

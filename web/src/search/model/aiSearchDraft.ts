@@ -110,6 +110,27 @@ export function hasReviewableAiSearchCustomFields(
 }
 
 /**
+ * Returns whether all locally edited AI Search filters can be applied safely.
+ *
+ * Empty date boundaries are treated as an intentionally cleared date filter;
+ * supplied boundaries must be real Gregorian dates in ascending order.
+ *
+ * @param filters - Locally edited Search filters.
+ * @returns Whether custom-field and date constraints are safe to apply.
+ */
+export function hasReviewableAiSearchFilters(
+  filters: WorkspaceSearchFilters,
+): boolean {
+  if (!hasReviewableAiSearchCustomFields(filters)) return false
+  const date = filters.date
+  if (!date || (!date.from && !date.to)) return true
+  if (!isAiSearchDateField(date.field)) return false
+  if (date.from !== undefined && !isCalendarDate(date.from)) return false
+  if (date.to !== undefined && !isCalendarDate(date.to)) return false
+  return date.from === undefined || date.to === undefined || date.from <= date.to
+}
+
+/**
  * Parses a comma-separated form value into stable unique identifiers.
  *
  * @param value - Editable comma-separated input.
@@ -142,7 +163,10 @@ export function parseAiSearchCustomFieldValue(value: string): SearchCustomFieldV
   if (normalized === 'null') return null
   if (isCanonicalNumberLiteral(normalized)) {
     const numericValue = Number(normalized)
-    return Number.isSafeInteger(numericValue) ? numericValue : normalized
+    return Number.isFinite(numericValue) &&
+      (!Number.isInteger(numericValue) || Number.isSafeInteger(numericValue))
+      ? numericValue
+      : normalized
   }
   if (normalized.startsWith('[')) {
     try {
@@ -158,9 +182,40 @@ export function parseAiSearchCustomFieldValue(value: string): SearchCustomFieldV
   return value
 }
 
-/** Returns whether text is a canonical base-ten integer accepted by Search. */
+/** Returns whether text is a canonical base-ten integer or decimal accepted by Search. */
 function isCanonicalNumberLiteral(value: string): boolean {
-  return value !== '-0' && /^-?(?:0|[1-9]\d*)$/u.test(value)
+  if (value === '-0') return false
+  return /^-?(?:0|[1-9]\d*)$/u.test(value) ||
+    /^-?(?:0|[1-9]\d*)\.\d*[1-9]$/u.test(value)
+}
+
+/** Validates a supported Search date field identifier. */
+function isAiSearchDateField(value: string): value is WorkspaceSearchDateField {
+  return value === 'createdAt' || value === 'updatedAt' || value === 'dueDate'
+}
+
+/** Validates a fixed-width Gregorian calendar date without timezone coercion. */
+function isCalendarDate(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/u.test(value)) return false
+  const year = Number(value.slice(0, 4))
+  const month = Number(value.slice(5, 7))
+  const day = Number(value.slice(8, 10))
+  const leapYear = year % 400 === 0 || (year % 4 === 0 && year % 100 !== 0)
+  const daysByMonth = [
+    31,
+    leapYear ? 29 : 28,
+    31,
+    30,
+    31,
+    30,
+    31,
+    31,
+    30,
+    31,
+    30,
+    31,
+  ]
+  return month >= 1 && month <= 12 && day >= 1 && day <= (daysByMonth[month - 1] ?? 0)
 }
 
 /**

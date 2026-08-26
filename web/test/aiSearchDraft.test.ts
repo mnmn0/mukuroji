@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   createEditableAiSearchFilters,
   hasReviewableAiSearchCustomFields,
+  hasReviewableAiSearchFilters,
   normalizeAiSearchFilters,
   parseAiSearchCustomFieldValue,
   parseAiSearchList,
@@ -50,11 +51,27 @@ describe('AI Search draft model', () => {
     })).toBe(true)
   })
 
+  test('rejects reversed or invalid edited date ranges before approval', () => {
+    expect(hasReviewableAiSearchFilters({
+      date: { field: 'updatedAt', from: '2026-08-31', to: '2026-08-01' },
+    })).toBe(false)
+    expect(hasReviewableAiSearchFilters({
+      date: { field: 'updatedAt', from: '2026-02-29' },
+    })).toBe(false)
+    expect(hasReviewableAiSearchFilters({
+      date: { field: 'updatedAt', from: '2028-02-29', to: '2028-03-01' },
+    })).toBe(true)
+    expect(hasReviewableAiSearchFilters({
+      date: { field: 'updatedAt' },
+    })).toBe(true)
+  })
+
   test('parses repeated identifiers and supported custom values without widening the contract', () => {
     expect(parseAiSearchList('core, design, core')).toEqual(['core', 'design'])
     expect(parseAiSearchCustomFieldValue('["web","mobile"]')).toEqual(['web', 'mobile'])
     expect(parseAiSearchCustomFieldValue('true')).toBe(true)
     expect(parseAiSearchCustomFieldValue('12')).toBe(12)
+    expect(parseAiSearchCustomFieldValue('1.5')).toBe(1.5)
     expect(parseAiSearchCustomFieldValue('01')).toBe('01')
     expect(parseAiSearchCustomFieldValue('1.0')).toBe('1.0')
     expect(parseAiSearchCustomFieldValue('-0')).toBe('-0')

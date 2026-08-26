@@ -109,4 +109,19 @@ describe('AiAssistanceReview', () => {
     expect(html).not.toContain('PROTECTED SOURCE EXCERPT')
     expect(html).toContain('safe to review could not be generated')
   })
+
+  test('uses the active workflow label while generating', () => {
+    const html = renderToStaticMarkup(
+      <AiAssistanceReview
+        generatingLabel="Generating brief"
+        isGenerating
+        locale="en"
+        renderDraft={() => null}
+        t={t}
+      />,
+    )
+
+    expect(html).toContain('Generating brief')
+    expect(html).not.toContain('Generating filters')
+  })
 })

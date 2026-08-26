@@ -74,6 +74,7 @@ export const aiAssistanceMessages = {
   'ai.search.report.partialNotice': '一致する結果がほかにもあります。この件数は現在の view に読み込んだ結果だけを集計しています。',
   'ai.search.report.notSet': '未設定',
   'ai.search.validation.customFieldValue': '空欄以外の custom field 演算子には値を入力してからフィルターを適用してください。',
+  'ai.search.validation.dateRange': '有効な日付を入力し、開始日が終了日以前になるようにしてください。',
   'ai.search.apply': 'Filter を適用',
   'ai.search.removeFilter': '{label} を削除',
   'ai.search.listHint': '複数の値はカンマで区切ります。',

@@ -227,6 +227,7 @@ export function AiWorkItemPlanningAssistantView({
           generation={generation}
           isDecisionPending={isDecisionPending}
           isFeedbackPending={isFeedbackPending}
+          generatingLabel={t('ai.planning.workItem.generating')}
           locale={locale}
           onAdopt={availableDraft && onAdopt ? adoptDraft : undefined}
           onFeedback={onFeedback}
@@ -250,6 +251,7 @@ export function AiWorkItemPlanningAssistantView({
       ) : (
         <AiAssistanceReview
           errorKind={error?.kind}
+          generatingLabel={t('ai.planning.workItem.generating')}
           isGenerating={isGenerating}
           locale={locale}
           onCancelGeneration={onCancelGeneration}

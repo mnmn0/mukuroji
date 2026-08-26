@@ -74,6 +74,7 @@ export const aiAssistanceMessages = {
   'ai.search.report.partialNotice': 'More matches are available. This count includes only the results loaded in this view.',
   'ai.search.report.notSet': 'Not set',
   'ai.search.validation.customFieldValue': 'Enter a value for every custom-field comparison before applying filters.',
+  'ai.search.validation.dateRange': 'Use valid calendar dates with the start date on or before the end date.',
   'ai.search.apply': 'Apply filters',
   'ai.search.removeFilter': 'Remove {label}',
   'ai.search.listHint': 'Separate multiple values with commas.',

@@ -581,7 +581,7 @@ function formatAiSummaryContextBody(
       .filter((citation): citation is AiAssistanceCitation => citation !== undefined)
       .map((citation) => {
         const label = citation.label.replace(/[\\[\]]/gu, '\\$&')
-        return `[${label}](${citation.href})`
+        return `[${label}](<${escapeMarkdownLinkDestination(citation.href)}>)`
       })
     if (evidence.length > 0) lines.push(`  ${t('ai.summary.evidence')}: ${evidence.join(', ')}`)
     return lines
@@ -597,6 +597,16 @@ function formatAiSummaryContextBody(
     lines.push('', `## ${title}`, ...items.flatMap(formatItem))
   }
   return lines.join('\n')
+}
+
+/**
+ * Encodes Markdown destination delimiters while preserving application routing.
+ *
+ * @param href - Permission-safe application path used as the link destination.
+ * @returns A destination that cannot terminate or reshape the Markdown link.
+ */
+function escapeMarkdownLinkDestination(href: string): string {
+  return href.replace(/[()<>\\\s]/gu, (character) => encodeURIComponent(character))
 }
 
 /**

@@ -148,7 +148,7 @@ function isAiAssistanceDraft(value: unknown): value is AiAssistanceDraft {
         (value.report === undefined || isSearchReport(value.report)) &&
         isStringArray(value.caveats)
     case 'planning':
-      return isOptionalSuggested(value.title, isString) &&
+      return isOptionalSuggested(value.title, isNonEmptyTrimmedString) &&
         isOptionalSuggested(value.description, isString) &&
         isOptionalSuggested(value.priority, isPriority) &&
         isOptionalSuggested(value.status, isNonEmptyString) &&
@@ -466,11 +466,11 @@ function isPlanningStatusUpdate(value: unknown): boolean {
   return isRecord(value) &&
     isOneOf(value.health, ['unknown', 'on-track', 'at-risk', 'off-track']) &&
     isOneOf(value.risk, ['none', 'low', 'medium', 'high', 'critical']) &&
-    isString(value.summary) &&
+    isNonEmptyTrimmedString(value.summary) &&
     isString(value.riskSummary) &&
     isString(value.decisionSummary) &&
     isString(value.helpNeeded) &&
-    isString(value.nextAction) &&
+    isNonEmptyTrimmedString(value.nextAction) &&
     isConfidence(value.confidence) &&
     isStringArray(value.citationIds)
 }
@@ -620,6 +620,11 @@ function isString(value: unknown): value is string {
 /** Validates a non-empty string identifier. */
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0
+}
+
+/** Validates a non-empty string whose trimmed representation is also non-empty. */
+function isNonEmptyTrimmedString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0
 }
 
 /** Validates a non-empty trimmed string within a protocol length bound. */

@@ -41,7 +41,7 @@ export function SearchCountReport({ groupBy, hasMore, results, t }: SearchCountR
         </div>
         {groupBy ? (
           <span className="workbench-badge-primary">
-            {t('ai.search.report.groupBy').replace('{field}', groupBy)}
+            {t('ai.search.report.groupBy').replace('{field}', formatSearchReportGroupBy(groupBy, t))}
           </span>
         ) : null}
       </div>
@@ -66,4 +66,20 @@ export function SearchCountReport({ groupBy, hasMore, results, t }: SearchCountR
       ) : null}
     </section>
   )
+}
+
+/** Resolves a Search result grouping identifier to its localized label. */
+function formatSearchReportGroupBy(
+  groupBy: string,
+  t: (key: MessageKey) => string,
+): string {
+  switch (groupBy) {
+    case 'entityType': return t('search.filters.types')
+    case 'assignee': return t('search.filters.assignee')
+    case 'creator': return t('search.filters.creator')
+    case 'status': return t('search.filters.status')
+    case 'project': return t('search.filters.project')
+    case 'team': return t('search.filters.team')
+    default: return groupBy
+  }
 }

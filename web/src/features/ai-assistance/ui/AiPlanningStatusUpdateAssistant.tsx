@@ -236,6 +236,7 @@ export function AiPlanningStatusUpdateAssistantView({
           generation={generation}
           isDecisionPending={isDecisionPending}
           isFeedbackPending={isFeedbackPending}
+          generatingLabel={t('ai.planning.assistant.generating')}
           locale={locale}
           onAdopt={availableDraft?.statusUpdate ? adoptDraft : undefined}
           onFeedback={onFeedback}
@@ -252,6 +253,7 @@ export function AiPlanningStatusUpdateAssistantView({
       ) : (
         <AiAssistanceReview
           errorKind={error?.kind}
+          generatingLabel={t('ai.planning.assistant.generating')}
           isGenerating={isGenerating}
           locale={locale}
           onCancelGeneration={onCancelGeneration}

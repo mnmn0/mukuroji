@@ -22,6 +22,7 @@ import {
   formatAiSearchCustomFieldValue,
   formatAiSearchList,
   hasReviewableAiSearchCustomFields,
+  hasReviewableAiSearchFilters,
   normalizeAiSearchFilters,
   parseAiSearchCustomFieldValue,
   parseAiSearchList,
@@ -196,6 +197,7 @@ export function NaturalLanguageSearchComposerView({
         <AiAssistanceReview
           errorKind={error?.kind}
           generation={generation}
+          generatingLabel={t('ai.search.generating')}
           isGenerating={isGenerating}
           locale={locale}
           onCancelGeneration={onCancelGeneration}
@@ -247,12 +249,13 @@ function SearchDraftReview({
   const draft = getAvailableSearchDraft(generation)
   const [filters, setFilters] = useState<WorkspaceSearchFilters>(() =>
     createEditableAiSearchFilters(draft?.filters ?? {}))
-  const hasInvalidCustomField = !hasReviewableAiSearchCustomFields(filters)
+  const hasInvalidFilterSet = !hasReviewableAiSearchFilters(filters)
 
   if (!draft) return null
 
   /** Records approval first, then applies the exact reviewed local filters. */
   const adoptFilters = async () => {
+    if (!hasReviewableAiSearchFilters(filters)) return
     const reviewedGeneration = await onDecide('approved')
     const approvedDraft = getAvailableSearchDraft(reviewedGeneration)
     if (reviewedGeneration?.decision?.outcome !== 'approved' || !approvedDraft) return
@@ -271,7 +274,7 @@ function SearchDraftReview({
       isDecisionPending={isDecisionPending}
       isFeedbackPending={isFeedbackPending}
       locale={locale}
-      onAdopt={hasInvalidCustomField ? undefined : adoptFilters}
+      onAdopt={hasInvalidFilterSet ? undefined : adoptFilters}
       onFeedback={onFeedback}
       onReject={() => {
         void onDecide('rejected')
@@ -326,6 +329,8 @@ export function AiSearchDraftEditor({
   t,
 }: AiSearchDraftEditorProps) {
   const customFields = filters.customFields ?? []
+  const hasInvalidCustomField = !hasReviewableAiSearchCustomFields(filters)
+  const hasInvalidFilterSet = !hasReviewableAiSearchFilters(filters)
 
   return (
     <div className="grid gap-5">
@@ -467,6 +472,11 @@ export function AiSearchDraftEditor({
             {t('ai.search.validation.customFieldValue')}
           </p>
         ) : null}
+        {hasInvalidFilterSet && !hasInvalidCustomField ? (
+          <p className="border-l-2 border-[var(--workbench-danger)] bg-red-50 px-3 py-2 text-app-caption font-semibold text-[var(--workbench-danger)]" role="alert">
+            {t('ai.search.validation.dateRange')}
+          </p>
+        ) : null}
       </fieldset>
 
       {draft.report ? (
@@ -477,13 +487,34 @@ export function AiSearchDraftEditor({
           <p className="mt-1 text-app-body text-[var(--workbench-text)]">
             {t('ai.search.report.count')}
             {draft.report.groupBy
-              ? ` · ${t('ai.search.report.groupBy').replace('{field}', draft.report.groupBy)}`
+              ? ` · ${t('ai.search.report.groupBy').replace('{field}', formatAiSearchReportGroupBy(draft.report.groupBy, t))}`
               : ''}
           </p>
         </section>
       ) : null}
     </div>
   )
+}
+
+/**
+ * Resolves an AI Search report grouping identifier to the existing Search label.
+ *
+ * @param groupBy - Server-validated report grouping identifier.
+ * @param t - Localized message resolver.
+ * @returns The localized grouping label shown in the review.
+ */
+function formatAiSearchReportGroupBy(
+  groupBy: NonNullable<NonNullable<AiSearchDraft['report']>['groupBy']>,
+  t: (key: MessageKey) => string,
+): string {
+  switch (groupBy) {
+    case 'entityType': return t('search.filters.types')
+    case 'assignee': return t('search.filters.assignee')
+    case 'creator': return t('search.filters.creator')
+    case 'status': return t('search.filters.status')
+    case 'project': return t('search.filters.project')
+    case 'team': return t('search.filters.team')
+  }
 }
 
 /** Props for a raw-text Search list editor. */

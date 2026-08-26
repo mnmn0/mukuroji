@@ -205,6 +205,7 @@ export function AiSummaryAssistantView({
           generation={generation}
           isDecisionPending={isDecisionPending}
           isFeedbackPending={isFeedbackPending}
+          generatingLabel={t('ai.summary.generating')}
           locale={locale}
           adoptLabel={adoptLabel ?? (!onAdopt ? t('ai.review.approve') : undefined)}
           onAdopt={availableDraft
@@ -226,6 +227,7 @@ export function AiSummaryAssistantView({
       ) : (
         <AiAssistanceReview
           errorKind={error?.kind}
+          generatingLabel={t('ai.summary.generating')}
           isGenerating={isGenerating}
           locale={locale}
           onCancelGeneration={onCancelGeneration}
