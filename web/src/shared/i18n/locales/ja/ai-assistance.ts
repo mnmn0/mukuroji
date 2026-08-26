@@ -142,6 +142,7 @@ export const aiAssistanceMessages = {
   'ai.planning.status.helpNeeded': '必要な支援',
   'ai.planning.status.nextAction': '次のアクション',
   'ai.planning.evidenceRetained': '承認した AI 生成の根拠を evidence として保持しています。公開前に確認してください。',
+  'ai.planning.evidenceRequired': 'この AI 支援の更新を公開する前に、根拠を選択または追加してください。',
   'ai.planning.health.unknown': '不明',
   'ai.planning.health.on-track': '順調',
   'ai.planning.health.at-risk': '注意',

@@ -502,18 +502,27 @@ describe('AI assistance API', () => {
   })
 })
 
-/** Installs a deterministic JSON fetch recorder for the AI transport boundary. */
+/**
+ * Installs a deterministic JSON fetch mock and records every request it receives.
+ *
+ * @param responses - JSON response values returned in request order.
+ * @returns Mutable request records captured by the installed fetch mock.
+ */
 function installFetchRecorder(responses: readonly unknown[]) {
   const requests: Array<{ url: string; init: RequestInit }> = []
   let responseIndex = 0
-  globalThis.fetch = (async (input: string | URL | Request, init: RequestInit = {}) => {
-    requests.push({ url: String(input), init })
+  const fetchRecorder: typeof fetch = async (
+    input: RequestInfo | URL,
+    init?: RequestInit,
+  ) => {
+    requests.push({ url: String(input), init: init ?? {} })
     const value = responses[responseIndex]
     responseIndex += 1
     return value === undefined
       ? new Response(null, { status: 204 })
       : Response.json(value, { status: responseIndex === 1 ? 201 : 200 })
-  }) as typeof fetch
+  }
+  globalThis.fetch = fetchRecorder
 
   return requests
 }

@@ -796,7 +796,6 @@ export function PlanningStatusUpdateComposer({
     setAiEvidenceSeed(shouldSeedEvidence ? evidenceSeed : undefined)
     setAiGenerationReference(context?.generationId)
     if (shouldSeedEvidence) setEvidenceType('link')
-    else if (evidenceType === 'none') setEvidenceType(initialEvidenceType)
     setFormError(undefined)
     isFormDirtyRef.current = false
     setIsFormDirty(false)
@@ -919,8 +918,12 @@ export function PlanningStatusUpdateComposer({
           }
 
           const evidence = readPlanningUpdateEvidence(data, evidenceCandidates)
-          if (!evidence || (aiGenerationReference !== undefined && evidence.length === 0)) {
+          if (!evidence) {
             setFormError(labels.formInvalid)
+            return
+          }
+          if (aiGenerationReference !== undefined && evidence.length === 0) {
+            setFormError(aiT?.('ai.planning.evidenceRequired') ?? labels.formInvalid)
             return
           }
           const draft = {
@@ -1029,8 +1032,9 @@ export function PlanningStatusUpdateComposer({
           </legend>
           {aiGenerationReference && aiT ? (
             <p className="border-l-2 border-teal-500 bg-teal-50 px-3 py-2 text-xs font-semibold text-teal-950">
-              {aiT('ai.planning.evidenceRetained')}
-              {aiEvidenceSeed ? ` (${aiGenerationReference})` : ''}
+              {aiEvidenceSeed
+                ? `${aiT('ai.planning.evidenceRetained')} (${aiGenerationReference})`
+                : aiT('ai.planning.evidenceRequired')}
             </p>
           ) : null}
           <label className="grid gap-2 text-sm font-semibold text-[var(--workbench-text)]">

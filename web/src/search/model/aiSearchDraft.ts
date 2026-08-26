@@ -110,15 +110,10 @@ export function normalizeAiSearchFilters(
 export function hasReviewableAiSearchCustomFields(
   filters: WorkspaceSearchFilters,
 ): boolean {
-  return (filters.customFields ?? []).every((filter) => {
-    if (!aiSearchCustomFieldOperators.includes(filter.operator)) return false
-    if (filter.operator === 'is-empty' || filter.operator === 'is-not-empty') {
-      return filter.value === undefined
-    }
-    if (filter.value === undefined) return false
-    if (!isReviewableCustomFieldValue(filter.operator, filter.value)) return false
-    return typeof filter.value !== 'string' || filter.value.trim().length > 0
-  })
+  return (filters.customFields ?? []).every((filter) => (
+    isReviewableCustomFieldRow(filter) &&
+    (typeof filter.value !== 'string' || filter.value.trim().length > 0)
+  ))
 }
 
 /**
@@ -299,10 +294,16 @@ function isBoundedCustomFieldFilter(filter: SearchCustomFieldFilter): boolean {
     filter.fieldId.length > 0 &&
     filter.fieldId.length <= AI_SEARCH_MAX_CUSTOM_FIELD_ID_LENGTH &&
     filter.fieldId === filter.fieldId.trim() &&
-    aiSearchCustomFieldOperators.includes(filter.operator) &&
-    (filter.operator === 'is-empty' || filter.operator === 'is-not-empty'
-      ? filter.value === undefined
-      : filter.value !== undefined && isReviewableCustomFieldValue(filter.operator, filter.value))
+    isReviewableCustomFieldRow(filter)
+}
+
+/** Validates one custom-field row's operator and value semantics. */
+function isReviewableCustomFieldRow(filter: SearchCustomFieldFilter): boolean {
+  if (!aiSearchCustomFieldOperators.includes(filter.operator)) return false
+  if (filter.operator === 'is-empty' || filter.operator === 'is-not-empty') {
+    return filter.value === undefined
+  }
+  return filter.value !== undefined && isReviewableCustomFieldValue(filter.operator, filter.value)
 }
 
 /** Validates a custom-field value using the operator-specific Search contract. */

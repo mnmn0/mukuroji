@@ -142,6 +142,7 @@ export const aiAssistanceMessages = {
   'ai.planning.status.helpNeeded': 'Help needed',
   'ai.planning.status.nextAction': 'Next action',
   'ai.planning.evidenceRetained': 'A citation from the approved AI generation is retained as evidence. Review it before publishing.',
+  'ai.planning.evidenceRequired': 'Select or add evidence before publishing this AI-assisted update.',
   'ai.planning.health.unknown': 'Unknown',
   'ai.planning.health.on-track': 'On track',
   'ai.planning.health.at-risk': 'At risk',

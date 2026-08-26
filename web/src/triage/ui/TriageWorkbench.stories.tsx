@@ -222,6 +222,7 @@ export const AiDraftRoutingReplacementConfirmation: Story = {
 
     await expect(canvas.getByRole('alert')).toHaveTextContent('Keep or replace your manual edits?')
     await userEvent.click(canvas.getByRole('button', { name: 'Keep manual edits' }))
+    await expect(canvas.getByRole('textbox', { name: 'Owner user ID' })).toHaveValue('member-manual')
     await expect(canvas.getByRole('button', { name: 'Use in Accept / Assign form' })).toBeVisible()
 
     await userEvent.click(canvas.getByRole('button', { name: 'Use in Accept / Assign form' }))
@@ -248,7 +249,12 @@ export const AiDraftMobileDetail: Story = {
   },
 }
 
-/** Supplies a deterministic controller without issuing Bedrock requests in Storybook. */
+/**
+ * Supplies a stateful deterministic AI controller for Storybook without issuing Bedrock requests.
+ *
+ * @param props - Triage workbench story props passed to the rendered surface.
+ * @returns A triage workbench wired to the in-memory generation controller.
+ */
 function AiTriageWorkbenchStory(props: TriageWorkbenchProps) {
   const [generation, setGeneration] = useState<AiAssistanceGeneration>()
   const controller: AiAssistanceController = {

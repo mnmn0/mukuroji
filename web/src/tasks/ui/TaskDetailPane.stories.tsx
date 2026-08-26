@@ -169,7 +169,7 @@ export const AiWorkPlan: Story = {
     await expect(canvas.getByRole('combobox', { name: 'ステータス' }))
       .toHaveValue('review')
     await expect(canvas.getByRole('spinbutton', { name: '予定工数（分）' }))
-      .toHaveValue('')
+      .toHaveValue(null)
     await expect(canvas.getByText('予定工数 · レビュー専用')).toBeVisible()
     await expect(args.onUpdateIssue).not.toHaveBeenCalled()
     await expect(args.aiAssistanceController?.decide).toHaveBeenCalledTimes(1)
