@@ -69,6 +69,14 @@ const stateLabelKeys: Record<TriageEntryState, MessageKey> = {
   snoozed: 'triage.state.snoozed',
 }
 
+/** Tracks routing fields that an operator edited in the active triage action form. */
+type TriageRoutingDirtyState = {
+  /** Whether the owner field contains a local edit. */
+  owner: boolean
+  /** Whether the Project field contains a local edit. */
+  project: boolean
+}
+
 /**
  * Renders source context, traceability, routing, activity, and safe action forms.
  *
@@ -102,6 +110,10 @@ export function TriageEntryDetail({
   const [projectId, setProjectId] = useState(
     view?.entry.projectId ?? view?.routingCandidate?.projectId ?? '',
   )
+  const [routingDirty, setRoutingDirty] = useState<TriageRoutingDirtyState>({
+    owner: false,
+    project: false,
+  })
   const actionTrigger = useRef<HTMLButtonElement | null>(null)
 
   const closeAction = () => {
@@ -118,6 +130,7 @@ export function TriageEntryDetail({
     setActionAnnouncement('')
     setOwnerUserId(view?.entry.ownerUserId ?? '')
     setProjectId(view?.entry.projectId ?? view?.routingCandidate?.projectId ?? '')
+    setRoutingDirty({ owner: false, project: false })
     setActionMode(mode)
   }
   const handleKeyDown = (event: KeyboardEvent<HTMLElement>) => {
@@ -180,14 +193,25 @@ export function TriageEntryDetail({
       )
     : undefined
 
+  /** Returns whether this AI draft would replace a locally edited routing field. */
+  const shouldConfirmTriageAdoption = (draft: AiTriageDraft) => (
+    (draft.assigneeUserId !== undefined && routingDirty.owner) ||
+    (draft.projectId !== undefined && routingDirty.project)
+  )
+
   /** Copies only owner and Project fields supported by the existing triage action contracts. */
-  const adoptTriageDraft = (draft: AiTriageDraft) => {
+  const adoptTriageDraft = (draft: AiTriageDraft, replacementConfirmed = false) => {
+    if (shouldConfirmTriageAdoption(draft) && !replacementConfirmed) return
     setActionError(false)
     setActionAnnouncement('')
-    setOwnerUserId(draft.assigneeUserId?.value ?? entry.ownerUserId ?? '')
-    setProjectId(
-      draft.projectId?.value ?? entry.projectId ?? view.routingCandidate?.projectId ?? '',
-    )
+    if (draft.assigneeUserId !== undefined) {
+      setOwnerUserId(draft.assigneeUserId.value)
+      setRoutingDirty((current) => ({ ...current, owner: false }))
+    }
+    if (draft.projectId !== undefined) {
+      setProjectId(draft.projectId.value)
+      setRoutingDirty((current) => ({ ...current, project: false }))
+    }
     if (draft.assigneeUserId && entry.capabilities.canAssign) {
       setActionMode('assign')
       return
@@ -293,6 +317,7 @@ export function TriageEntryDetail({
                 locale={locale}
                 onAuthenticatedApiError={onAuthenticatedApiError}
                 onAdoptDraft={adoptTriageDraft}
+                shouldConfirmAdoption={shouldConfirmTriageAdoption}
                 source={{
                   expectedRevision: entry.revision,
                   teamId,
@@ -456,7 +481,10 @@ export function TriageEntryDetail({
                     autoFocus
                     className="workbench-input min-h-10 px-3"
                     name="ownerUserId"
-                    onChange={(event) => setOwnerUserId(event.target.value)}
+                    onChange={(event) => {
+                      setOwnerUserId(event.target.value)
+                      setRoutingDirty((current) => ({ ...current, owner: true }))
+                    }}
                     placeholder={t('triage.action.ownerOptional')}
                     value={ownerUserId}
                   />
@@ -466,7 +494,10 @@ export function TriageEntryDetail({
                   <input
                     className="workbench-input min-h-10 px-3"
                     name="projectId"
-                    onChange={(event) => setProjectId(event.target.value)}
+                    onChange={(event) => {
+                      setProjectId(event.target.value)
+                      setRoutingDirty((current) => ({ ...current, project: true }))
+                    }}
                     placeholder={t('triage.action.projectOptional')}
                     value={projectId}
                   />
@@ -503,7 +534,10 @@ export function TriageEntryDetail({
                       autoFocus
                       className="workbench-input min-h-10 px-3"
                       name="projectId"
-                      onChange={(event) => setProjectId(event.target.value)}
+                      onChange={(event) => {
+                        setProjectId(event.target.value)
+                        setRoutingDirty((current) => ({ ...current, project: true }))
+                      }}
                       placeholder={t('triage.action.projectOptional')}
                       value={projectId}
                     />

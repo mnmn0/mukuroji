@@ -31,6 +31,14 @@ export const aiSearchCustomFieldOperators = [
   'is-not-empty',
 ] as const satisfies readonly SearchCustomFieldOperator[]
 
+const AI_SEARCH_MAX_LIST_ITEMS = 100
+const AI_SEARCH_MAX_IDENTIFIER_LENGTH = 512
+const AI_SEARCH_MAX_KEYWORD_LENGTH = 256
+const AI_SEARCH_MAX_CUSTOM_FIELDS = 50
+const AI_SEARCH_MAX_CUSTOM_FIELD_ID_LENGTH = 256
+const AI_SEARCH_MAX_CUSTOM_FIELD_VALUE_LENGTH = 20_000
+const AI_SEARCH_MAX_CUSTOM_FIELD_ARRAY_ITEMS = 100
+
 /**
  * Copies a server-validated filter set into local editable form state.
  *
@@ -103,10 +111,67 @@ export function hasReviewableAiSearchCustomFields(
   filters: WorkspaceSearchFilters,
 ): boolean {
   return (filters.customFields ?? []).every((filter) => {
-    if (filter.operator === 'is-empty' || filter.operator === 'is-not-empty') return true
+    if (!aiSearchCustomFieldOperators.includes(filter.operator)) return false
+    if (filter.operator === 'is-empty' || filter.operator === 'is-not-empty') {
+      return filter.value === undefined
+    }
     if (filter.value === undefined) return false
+    if (!isReviewableCustomFieldValue(filter.operator, filter.value)) return false
     return typeof filter.value !== 'string' || filter.value.trim().length > 0
   })
+}
+
+/**
+ * Returns whether non-date Search filters remain within the server's bounds.
+ *
+ * This guard runs again after local editing and before approval so a large
+ * keyword, identifier list, or custom-field payload cannot be approved only to
+ * fail later when the canonical Search endpoint validates it.
+ *
+ * @param filters - Locally edited Search filters.
+ * @returns Whether every non-date filter satisfies the server size contract.
+ */
+export function hasReviewableAiSearchFilterBounds(
+  filters: WorkspaceSearchFilters,
+): boolean {
+  if (filters.keyword !== undefined && (
+    typeof filters.keyword !== 'string' ||
+    filters.keyword.length > AI_SEARCH_MAX_KEYWORD_LENGTH
+  )) return false
+  if (!hasBoundedStringList(filters.assigneeUserIds)) return false
+  if (!hasBoundedStringList(filters.creatorUserIds)) return false
+  if (!hasBoundedStringList(filters.statuses)) return false
+  if (!hasBoundedStringList(filters.relationIds)) return false
+  if (!hasBoundedStringList(filters.projectIds)) return false
+  if (!hasBoundedStringList(filters.teamIds)) return false
+  if (filters.entityTypes !== undefined && (
+    !Array.isArray(filters.entityTypes) ||
+    filters.entityTypes.length > aiSearchEntityTypes.length ||
+    !filters.entityTypes.every((value) => aiSearchEntityTypes.includes(value))
+  )) return false
+  if (filters.customFields !== undefined && (
+    !Array.isArray(filters.customFields) ||
+    filters.customFields.length > AI_SEARCH_MAX_CUSTOM_FIELDS ||
+    !filters.customFields.every(isBoundedCustomFieldFilter)
+  )) return false
+  return true
+}
+
+/**
+ * Returns whether the optional date filter is valid independently of other fields.
+ *
+ * @param filters - Locally edited Search filters.
+ * @returns Whether the date field and boundaries are calendar-valid and ordered.
+ */
+export function hasReviewableAiSearchDate(
+  filters: WorkspaceSearchFilters,
+): boolean {
+  const date = filters.date
+  if (!date || (!date.from && !date.to)) return true
+  if (!isAiSearchDateField(date.field)) return false
+  if (date.from !== undefined && !isCalendarDate(date.from)) return false
+  if (date.to !== undefined && !isCalendarDate(date.to)) return false
+  return date.from === undefined || date.to === undefined || date.from <= date.to
 }
 
 /**
@@ -121,13 +186,9 @@ export function hasReviewableAiSearchCustomFields(
 export function hasReviewableAiSearchFilters(
   filters: WorkspaceSearchFilters,
 ): boolean {
-  if (!hasReviewableAiSearchCustomFields(filters)) return false
-  const date = filters.date
-  if (!date || (!date.from && !date.to)) return true
-  if (!isAiSearchDateField(date.field)) return false
-  if (date.from !== undefined && !isCalendarDate(date.from)) return false
-  if (date.to !== undefined && !isCalendarDate(date.to)) return false
-  return date.from === undefined || date.to === undefined || date.from <= date.to
+  return hasReviewableAiSearchFilterBounds(filters) &&
+    hasReviewableAiSearchCustomFields(filters) &&
+    hasReviewableAiSearchDate(filters)
 }
 
 /**
@@ -216,6 +277,54 @@ function isCalendarDate(value: string): boolean {
     31,
   ]
   return month >= 1 && month <= 12 && day >= 1 && day <= (daysByMonth[month - 1] ?? 0)
+}
+
+/** Validates one list against the bounded Search identifier contract. */
+function hasBoundedStringList(values: readonly string[] | undefined): boolean {
+  return values === undefined || (
+    Array.isArray(values) &&
+    values.length <= AI_SEARCH_MAX_LIST_ITEMS &&
+    values.every((value) => (
+      typeof value === 'string' &&
+      value.length > 0 &&
+      value.length <= AI_SEARCH_MAX_IDENTIFIER_LENGTH &&
+      value === value.trim()
+    ))
+  )
+}
+
+/** Validates one custom-field row against Search bounds and operator semantics. */
+function isBoundedCustomFieldFilter(filter: SearchCustomFieldFilter): boolean {
+  return typeof filter.fieldId === 'string' &&
+    filter.fieldId.length > 0 &&
+    filter.fieldId.length <= AI_SEARCH_MAX_CUSTOM_FIELD_ID_LENGTH &&
+    filter.fieldId === filter.fieldId.trim() &&
+    aiSearchCustomFieldOperators.includes(filter.operator) &&
+    (filter.operator === 'is-empty' || filter.operator === 'is-not-empty'
+      ? filter.value === undefined
+      : filter.value !== undefined && isReviewableCustomFieldValue(filter.operator, filter.value))
+}
+
+/** Validates a custom-field value using the operator-specific Search contract. */
+function isReviewableCustomFieldValue(
+  operator: SearchCustomFieldOperator,
+  value: SearchCustomFieldValue,
+): boolean {
+  if (operator === 'greater-than' || operator === 'greater-than-or-equal' ||
+    operator === 'less-than' || operator === 'less-than-or-equal') {
+    return typeof value === 'number' && Number.isFinite(value)
+  }
+  if (operator === 'contains') {
+    return typeof value === 'string'
+      ? value.length <= AI_SEARCH_MAX_CUSTOM_FIELD_VALUE_LENGTH
+      : Array.isArray(value) && value.length <= AI_SEARCH_MAX_CUSTOM_FIELD_ARRAY_ITEMS &&
+        value.every((item) => item.length <= AI_SEARCH_MAX_IDENTIFIER_LENGTH)
+  }
+  if (value === null || typeof value === 'boolean') return true
+  if (typeof value === 'number') return Number.isFinite(value)
+  if (typeof value === 'string') return value.length <= AI_SEARCH_MAX_CUSTOM_FIELD_VALUE_LENGTH
+  return value.length <= AI_SEARCH_MAX_CUSTOM_FIELD_ARRAY_ITEMS &&
+    value.every((item) => item.length <= AI_SEARCH_MAX_IDENTIFIER_LENGTH)
 }
 
 /**

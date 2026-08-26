@@ -251,6 +251,35 @@ describe('AI assistance API', () => {
     expect(error).toMatchObject({ code: 'InvalidAiAssistanceResponse', status: 502 })
   })
 
+  test('rejects operator-incompatible Search custom-field values before review', async () => {
+    const content = aiSearchGenerationFixture.content
+    if (content.availability !== 'available' || content.draft.kind !== 'search') {
+      throw new Error('Search fixture must stay available.')
+    }
+
+    for (const customField of [
+      { fieldId: 'risk', operator: 'greater-than', value: 'high' },
+      { fieldId: 'risk', operator: 'contains', value: 3 },
+    ]) {
+      installFetchRecorder([{
+        ...aiSearchGenerationFixture,
+        content: {
+          ...content,
+          draft: {
+            ...content.draft,
+            filters: { ...content.draft.filters, customFields: [customField] },
+          },
+        },
+      }])
+      const error = await generateAiAssistance({
+        accessToken: 'access-token',
+        input: { locale: 'en', query: 'risk', task: 'search' },
+        mutationContext,
+      }).catch((caught: unknown) => caught)
+      expect(error).toMatchObject({ code: 'InvalidAiAssistanceResponse', status: 502 })
+    }
+  })
+
   test('rejects duplicate planning row identifiers at the browser API boundary', async () => {
     const content = aiPlanningGenerationFixture.content
     installFetchRecorder([{

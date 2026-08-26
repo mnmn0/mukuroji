@@ -396,17 +396,44 @@ function isOptionalCustomFieldArray(value: unknown): boolean {
   if (value === undefined) return true
   if (!Array.isArray(value) || value.length > 50) return false
   for (const filter of value) {
+    if (!isRecord(filter)) return false
+    if (!isCustomFieldOperator(filter.operator)) return false
+    const operator = filter.operator
     if (
-      !isRecord(filter) ||
       !isBoundedString(filter.fieldId, 256) ||
-      !isOneOf(filter.operator, customFieldOperatorValues) ||
       (filter.value === undefined &&
-        filter.operator !== 'is-empty' &&
-        filter.operator !== 'is-not-empty') ||
-      (filter.value !== undefined && !isCustomFieldValue(filter.value))
+        operator !== 'is-empty' &&
+        operator !== 'is-not-empty') ||
+      (filter.value !== undefined && !isCustomFieldFilterValue(operator, filter.value)) ||
+      ((operator === 'is-empty' || operator === 'is-not-empty') &&
+        filter.value !== undefined)
     ) return false
   }
   return true
+}
+
+/** Narrows an unknown value to one supported custom-field operator. */
+function isCustomFieldOperator(value: unknown): value is SearchCustomFieldOperator {
+  return isOneOf(value, customFieldOperatorValues)
+}
+
+/** Validates a custom-field value against the operator-specific Search semantics. */
+function isCustomFieldFilterValue(
+  operator: SearchCustomFieldOperator,
+  value: unknown,
+): boolean {
+  if (operator === 'greater-than' || operator === 'greater-than-or-equal' ||
+    operator === 'less-than' || operator === 'less-than-or-equal') {
+    return isFiniteNumber(value)
+  }
+  if (operator === 'contains') {
+    return (isString(value) && value.length <= 20_000) || (
+      Array.isArray(value) &&
+      value.length <= 100 &&
+      value.every((item) => isBoundedString(item, 512))
+    )
+  }
+  return isCustomFieldValue(value)
 }
 
 /** Validates the optional count report preview. */

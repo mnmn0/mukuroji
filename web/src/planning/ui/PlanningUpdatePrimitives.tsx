@@ -8,8 +8,12 @@ import type {
 } from '@mukuroji/contracts'
 import { useEffect, useRef, useState } from 'react'
 import { createAiAssistantSessionKey } from '../../features/ai-assistance/model/assistantSessionKey'
-import { AiPlanningStatusUpdateAssistant } from '../../features/ai-assistance/ui/AiPlanningStatusUpdateAssistant'
+import {
+  AiPlanningStatusUpdateAssistant,
+  type AiPlanningStatusUpdateAdoptionContext,
+} from '../../features/ai-assistance/ui/AiPlanningStatusUpdateAssistant'
 import { createTranslator, type Locale } from '../../shared/i18n/i18n'
+import { isSafeApplicationPath } from '../../shared/routing/applicationPath'
 import { routeAiPlanningDraftAdoption } from '../model/aiDraftAdoption'
 import { isValidPlanningDateTime, readNonNegativeNumber } from '../model/cadenceForm'
 import {
@@ -679,12 +683,62 @@ type PlanningStatusUpdateFormSeed = {
   revision: number
 }
 
+/** A same-origin HTTPS citation seeded into the typed evidence control after AI adoption. */
+type AiPlanningEvidenceSeed = {
+  /** Generation identifier retained for the visible audit note. */
+  generationId: string
+  /** Citation label copied into the evidence form. */
+  label: string
+  /** Credential-free HTTPS citation destination. */
+  url: string
+}
+
 /** An approved draft staged for one exact source session. */
 type PendingAiPlanningDraft = {
   /** Approved status update awaiting explicit replacement confirmation. */
   draft: AiPlanningStatusUpdateDraft
   /** Source identity and revision that produced the approved draft. */
   sessionKey: string
+  /** Permission-safe generation context used to preserve evidence on replacement. */
+  context?: AiPlanningStatusUpdateAdoptionContext
+}
+
+/**
+ * Converts the first safe, same-origin AI citation into typed Planning evidence.
+ *
+ * Application-relative citations with query strings are intentionally skipped:
+ * the existing Planning evidence contract accepts only credential-free HTTPS
+ * permalinks, so an operator must choose a canonical evidence candidate when no
+ * citation can be represented without changing its destination.
+ *
+ * @param context - Approved generation context returned by the AI assistant.
+ * @returns A bounded evidence seed or undefined when no safe HTTPS citation exists.
+ */
+function createAiPlanningEvidenceSeed(
+  context: AiPlanningStatusUpdateAdoptionContext,
+): AiPlanningEvidenceSeed | undefined {
+  if (typeof window === 'undefined' || window.location.protocol !== 'https:') return undefined
+  for (const citation of context.citations) {
+    if (!isSafeApplicationPath(citation.href)) continue
+    try {
+      const parsed = new URL(citation.href, window.location.origin)
+      if (
+        parsed.protocol !== 'https:' ||
+        parsed.username ||
+        parsed.password ||
+        parsed.search ||
+        !parsed.pathname.startsWith('/')
+      ) continue
+      return {
+        generationId: context.generationId,
+        label: citation.label,
+        url: parsed.toString(),
+      }
+    } catch {
+      // The shared AI boundary already rejects unsafe paths; skip defensively.
+    }
+  }
+  return undefined
 }
 
 /**
@@ -712,6 +766,8 @@ export function PlanningStatusUpdateComposer({
   const [isFormDirty, setIsFormDirty] = useState(false)
   const [pendingAiDraft, setPendingAiDraft] =
     useState<PendingAiPlanningDraft>()
+  const [aiEvidenceSeed, setAiEvidenceSeed] = useState<AiPlanningEvidenceSeed>()
+  const [aiGenerationReference, setAiGenerationReference] = useState<string>()
   const [formSeed, setFormSeed] = useState<PlanningStatusUpdateFormSeed>({
     draft: initialDraft,
     revision: 0,
@@ -731,8 +787,16 @@ export function PlanningStatusUpdateComposer({
    *
    * @param draft - Approved, currently authorized AI status update draft.
    */
-  function applyAiDraft(draft: AiPlanningStatusUpdateDraft) {
-    setEvidenceType(initialEvidenceType)
+  function applyAiDraft(
+    draft: AiPlanningStatusUpdateDraft,
+    context?: AiPlanningStatusUpdateAdoptionContext,
+  ) {
+    const evidenceSeed = context ? createAiPlanningEvidenceSeed(context) : undefined
+    const shouldSeedEvidence = evidenceType === 'none' && evidenceSeed !== undefined
+    setAiEvidenceSeed(shouldSeedEvidence ? evidenceSeed : undefined)
+    setAiGenerationReference(context?.generationId)
+    if (shouldSeedEvidence) setEvidenceType('link')
+    else if (evidenceType === 'none') setEvidenceType(initialEvidenceType)
     setFormError(undefined)
     isFormDirtyRef.current = false
     setIsFormDirty(false)
@@ -753,17 +817,19 @@ export function PlanningStatusUpdateComposer({
     draft: AiPlanningStatusUpdateDraft,
     sessionKey: string,
     replacementConfirmed = false,
+    context?: AiPlanningStatusUpdateAdoptionContext,
   ) {
     if (activeAiAssistantSessionKeyRef.current !== sessionKey) return
     if (replacementConfirmed) {
-      applyAiDraft(draft)
+      applyAiDraft(draft, context)
       return
     }
     routeAiPlanningDraftAdoption(draft, isFormDirtyRef.current, {
-      apply: applyAiDraft,
+      apply: (nextDraft) => applyAiDraft(nextDraft, context),
       confirm: (nextDraft) => setPendingAiDraft({
         draft: nextDraft,
         sessionKey,
+        context,
       }),
     })
   }
@@ -783,10 +849,11 @@ export function PlanningStatusUpdateComposer({
             key={aiAssistantSessionKey}
             locale={aiAssistance.locale}
             onAuthenticatedApiError={aiAssistance.onAuthenticatedApiError}
-            onAdopt={(draft, replacementConfirmed) => adoptAiDraft(
+            onAdopt={(draft, replacementConfirmed, context) => adoptAiDraft(
               draft,
               aiAssistantSessionKey,
               replacementConfirmed,
+              context,
             )}
             requireAdoptionConfirmation={isFormDirty}
             source={aiAssistance.source}
@@ -817,7 +884,7 @@ export function PlanningStatusUpdateComposer({
             </button>
             <button
               className="workbench-button-primary min-h-[44px] px-4"
-              onClick={() => applyAiDraft(pendingAiDraft.draft)}
+              onClick={() => applyAiDraft(pendingAiDraft.draft, pendingAiDraft.context)}
               type="button"
             >
               {aiT('ai.planning.replaceManualDraft')}
@@ -852,7 +919,7 @@ export function PlanningStatusUpdateComposer({
           }
 
           const evidence = readPlanningUpdateEvidence(data, evidenceCandidates)
-          if (!evidence) {
+          if (!evidence || (aiGenerationReference !== undefined && evidence.length === 0)) {
             setFormError(labels.formInvalid)
             return
           }
@@ -960,6 +1027,12 @@ export function PlanningStatusUpdateComposer({
           <legend className="text-sm font-semibold text-[var(--workbench-text)]">
             {labels.evidence}
           </legend>
+          {aiGenerationReference && aiT ? (
+            <p className="border-l-2 border-teal-500 bg-teal-50 px-3 py-2 text-xs font-semibold text-teal-950">
+              {aiT('ai.planning.evidenceRetained')}
+              {aiEvidenceSeed ? ` (${aiGenerationReference})` : ''}
+            </p>
+          ) : null}
           <label className="grid gap-2 text-sm font-semibold text-[var(--workbench-text)]">
             {labels.evidenceType}
             <select
@@ -1037,6 +1110,7 @@ export function PlanningStatusUpdateComposer({
               <input
                 aria-label={labels.evidenceLabelPlaceholder}
                 className="workbench-input h-10 px-3"
+                defaultValue={aiEvidenceSeed?.label}
                 disabled={!onPublish}
                 name="evidenceLabel"
                 placeholder={labels.evidenceLabelPlaceholder}
@@ -1046,6 +1120,7 @@ export function PlanningStatusUpdateComposer({
                 labels={labels}
                 name="evidenceUrl"
                 onPublish={onPublish}
+                defaultValue={aiEvidenceSeed?.url}
               />
             </div>
           ) : null}
@@ -1079,11 +1154,13 @@ export function PlanningStatusUpdateComposer({
  * @returns A URL input constrained to credential-free HTTPS permalinks.
  */
 function PlanningEvidenceUrlInput({
+  defaultValue,
   hasError = false,
   labels,
   name,
   onPublish,
 }: {
+  defaultValue?: string
   hasError?: boolean
   labels: Pick<PlanningUpdateLabels, 'evidenceUrlPlaceholder'>
   name: string
@@ -1093,6 +1170,7 @@ function PlanningEvidenceUrlInput({
     <input
       aria-label={labels.evidenceUrlPlaceholder}
       className="workbench-input h-10 px-3"
+      defaultValue={defaultValue}
       disabled={!onPublish}
       aria-describedby={hasError ? 'planning-update-composer-error' : undefined}
       aria-invalid={hasError}

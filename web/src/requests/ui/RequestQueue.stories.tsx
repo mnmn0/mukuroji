@@ -134,6 +134,36 @@ export const AiDraftAdoptionPreservesManualFields: Story = {
   },
 }
 
+/** Confirms a dirty conversion field before recording the AI approval decision. */
+export const AiDraftReplacementConfirmation: Story = {
+  args: {
+    locale: 'en',
+    onAction: onAiConversionAction,
+  },
+  render: (args) => <AiRequestQueueStory {...args} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+
+    await userEvent.click(canvas.getByRole('button', { name: 'Convert to Work Item' }))
+    await userEvent.type(
+      canvas.getByRole('textbox', { name: 'Work Item title override' }),
+      'Keep this title unless I confirm replacement',
+    )
+    await userEvent.click(canvas.getByRole('button', { name: 'Generate draft' }))
+    await userEvent.click(canvas.getByRole('button', { name: 'Use in conversion form' }))
+
+    await expect(canvas.getByRole('alert')).toHaveTextContent('Keep or replace your manual conversion edits?')
+    await expect(canvas.getByRole('button', { name: 'Keep manual edits' })).toBeVisible()
+    await userEvent.click(canvas.getByRole('button', { name: 'Keep manual edits' }))
+    await expect(canvas.getByRole('button', { name: 'Use in conversion form' })).toBeVisible()
+
+    await userEvent.click(canvas.getByRole('button', { name: 'Use in conversion form' }))
+    await userEvent.click(canvas.getByRole('button', { name: 'Replace with AI draft' }))
+    await expect(canvas.getByRole('textbox', { name: 'Work Item title override' }))
+      .toHaveValue('Unblock customer Workspace provisioning')
+  },
+}
+
 /** Phone-width evidence review with full-width 44px actions and stacked panes. */
 export const AiDraftMobile: Story = {
   args: {

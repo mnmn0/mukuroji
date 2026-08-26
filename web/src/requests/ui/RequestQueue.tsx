@@ -87,14 +87,6 @@ type ConversionOverrideDirtyState = {
   description: boolean
 }
 
-/** An approved triage draft waiting for explicit replacement confirmation. */
-type PendingAiTriageDraft = {
-  /** Approved triage proposal to copy into the conversion form. */
-  draft: AiTriageDraft
-  /** Submission revision that authorized the proposal. */
-  revision: number
-}
-
 /**
  * Intake queue の一覧、historical response、thread、明示的 action を描画します。
  */
@@ -237,7 +229,6 @@ function RequestSubmissionDetail({
   const [descriptionOverride, setDescriptionOverride] = useState('')
   const [conversionOverrideDirty, setConversionOverrideDirty] =
     useState<ConversionOverrideDirtyState>({ title: false, description: false })
-  const [pendingAiDraft, setPendingAiDraft] = useState<PendingAiTriageDraft>()
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [actionError, setActionError] = useState(false)
   const [openingAttachmentId, setOpeningAttachmentId] = useState<string>()
@@ -251,7 +242,6 @@ function RequestSubmissionDetail({
     setDescriptionOverride('')
     setTitleOverride('')
     setConversionOverrideDirty({ title: false, description: false })
-    setPendingAiDraft(undefined)
   }
 
   /** Opens the conversion action while preserving any locally edited overrides. */
@@ -270,19 +260,18 @@ function RequestSubmissionDetail({
       title: draft.title === undefined ? current.title : false,
       description: draft.description === undefined ? current.description : false,
     }))
-    setPendingAiDraft(undefined)
   }
 
-  /** Requests replacement confirmation before an approved draft can overwrite local edits. */
-  const adoptTriageDraft = (draft: AiTriageDraft) => {
+  /** Returns whether this AI draft would replace a locally edited conversion field. */
+  const shouldConfirmTriageAdoption = (draft: AiTriageDraft) => (
+    (draft.title !== undefined && conversionOverrideDirty.title) ||
+    (draft.description !== undefined && conversionOverrideDirty.description)
+  )
+
+  /** Copies an AI draft only after the composer has confirmed any replacement. */
+  const adoptTriageDraft = (draft: AiTriageDraft, replacementConfirmed = false) => {
     if (!submission) return
-    const replacesDirtyField = (draft.title !== undefined && conversionOverrideDirty.title) ||
-      (draft.description !== undefined && conversionOverrideDirty.description)
-    if (replacesDirtyField) {
-      openConversionAction()
-      setPendingAiDraft({ draft, revision: submission.revision })
-      return
-    }
+    if (shouldConfirmTriageAdoption(draft) && !replacementConfirmed) return
     applyTriageDraft(draft)
   }
 
@@ -293,10 +282,6 @@ function RequestSubmissionDetail({
       </aside>
     )
   }
-
-  const activePendingAiDraft = pendingAiDraft?.revision === submission.revision
-    ? pendingAiDraft
-    : undefined
 
   const submitAction = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
@@ -327,7 +312,6 @@ function RequestSubmissionDetail({
       setDescriptionOverride('')
       setTitleOverride('')
       setConversionOverrideDirty({ title: false, description: false })
-      setPendingAiDraft(undefined)
     } catch {
       setActionError(true)
     } finally {
@@ -470,6 +454,7 @@ function RequestSubmissionDetail({
             locale={locale}
             onAuthenticatedApiError={onAuthenticatedApiError}
             onAdoptDraft={adoptTriageDraft}
+            shouldConfirmAdoption={shouldConfirmTriageAdoption}
             source={{
               expectedRevision: submission.revision,
               formId: submission.formId,
@@ -478,34 +463,6 @@ function RequestSubmissionDetail({
             }}
             t={t}
           />
-        ) : null}
-
-        {activePendingAiDraft ? (
-          <div
-            className="border-l-2 border-amber-500 bg-amber-50 px-4 py-3 text-amber-950"
-            role="alert"
-          >
-            <p className="text-sm font-semibold">{t('ai.triage.replaceDraftTitle')}</p>
-            <p className="mt-1 text-xs font-medium leading-5">
-              {t('ai.triage.replaceDraftDescription')}
-            </p>
-            <div className="mt-3 flex flex-wrap gap-2">
-              <button
-                className="workbench-button-secondary min-h-[44px] px-4"
-                onClick={() => setPendingAiDraft(undefined)}
-                type="button"
-              >
-                {t('ai.triage.keepManualDraft')}
-              </button>
-              <button
-                className="workbench-button-primary min-h-[44px] px-4"
-                onClick={() => applyTriageDraft(activePendingAiDraft.draft)}
-                type="button"
-              >
-                {t('ai.triage.replaceManualDraft')}
-              </button>
-            </div>
-          </div>
         ) : null}
 
         <div className="flex flex-wrap gap-2 border-t border-[var(--workbench-border)] pt-4">

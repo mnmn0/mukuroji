@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   createEditableAiSearchFilters,
   hasReviewableAiSearchCustomFields,
+  hasReviewableAiSearchFilterBounds,
   hasReviewableAiSearchFilters,
   normalizeAiSearchFilters,
   parseAiSearchCustomFieldValue,
@@ -63,6 +64,18 @@ describe('AI Search draft model', () => {
     })).toBe(true)
     expect(hasReviewableAiSearchFilters({
       date: { field: 'updatedAt' },
+    })).toBe(true)
+  })
+
+  test('keeps locally edited filters within the server contract before approval', () => {
+    expect(hasReviewableAiSearchFilterBounds({ keyword: 'x'.repeat(257) })).toBe(false)
+    expect(hasReviewableAiSearchFilterBounds({ statuses: Array.from({ length: 101 }, (_, index) => `status-${index}`) })).toBe(false)
+    expect(hasReviewableAiSearchFilterBounds({ teamIds: [' team-with-padding '] })).toBe(false)
+    expect(hasReviewableAiSearchFilterBounds({
+      customFields: [{ fieldId: 'risk', operator: 'greater-than', value: 'high' }],
+    })).toBe(false)
+    expect(hasReviewableAiSearchFilters({
+      customFields: [{ fieldId: 'risk', operator: 'greater-than', value: 3 }],
     })).toBe(true)
   })
 

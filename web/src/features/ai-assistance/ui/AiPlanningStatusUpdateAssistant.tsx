@@ -1,4 +1,5 @@
 import type {
+  AiAssistanceCitation,
   AiAssistanceGeneration,
   AiPlanningDraft,
   AiPlanningStatusUpdateDraft,
@@ -14,6 +15,14 @@ import {
 } from '../mutations/useAiAssistanceController'
 import { AiAssistanceReview } from './AiAssistanceReview'
 import { AiPlanningDraftReview } from './AiPlanningDraftReview'
+
+/** Auditable generation context passed with an adopted Planning status update. */
+export type AiPlanningStatusUpdateAdoptionContext = {
+  /** Generation identifier retained for local evidence labeling. */
+  generationId: string
+  /** Permission-safe citations returned with the approved generation. */
+  citations: readonly AiAssistanceCitation[]
+}
 
 /**
  * Props for a Planning-target status update assistant.
@@ -34,6 +43,7 @@ export type AiPlanningStatusUpdateAssistantProps = {
   onAdopt: (
     draft: AiPlanningStatusUpdateDraft,
     replacementConfirmed?: boolean,
+    context?: AiPlanningStatusUpdateAdoptionContext,
   ) => void | Promise<void>
   /** Whether adopting the draft would replace manual form edits. */
   requireAdoptionConfirmation?: boolean
@@ -117,6 +127,7 @@ export type AiPlanningStatusUpdateAssistantViewProps = {
   onAdopt: (
     draft: AiPlanningStatusUpdateDraft,
     replacementConfirmed?: boolean,
+    context?: AiPlanningStatusUpdateAdoptionContext,
   ) => void | Promise<void>
   /** Cancels the active explicit generation request. */
   onCancelGeneration?: () => void
@@ -309,9 +320,16 @@ async function approveAiPlanningStatusUpdate(
   replacementConfirmed: boolean,
 ): Promise<boolean> {
   const reviewedGeneration = await onDecide('approved')
-  const draft = getAvailableAiPlanningDraft(reviewedGeneration)?.statusUpdate
+  const reviewedDraft = getAvailableAiPlanningDraft(reviewedGeneration)
+  const draft = reviewedDraft?.statusUpdate
   if (reviewedGeneration?.decision?.outcome !== 'approved' || !draft) return false
-  await onAdopt(draft, replacementConfirmed)
+  const citations = reviewedGeneration.content.availability === 'available'
+    ? reviewedGeneration.content.citations.filter((citation) => draft.citationIds.includes(citation.id))
+    : []
+  await onAdopt(draft, replacementConfirmed, {
+    citations,
+    generationId: reviewedGeneration.id,
+  })
   return true
 }
 

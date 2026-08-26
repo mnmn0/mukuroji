@@ -28,7 +28,9 @@ export type AiTriageDraftComposerProps = {
   /** Locale sent to Bedrock and used for visible generation metadata. */
   readonly locale: Locale
   /** Copies a reviewed draft into local form state without mutating a domain resource. */
-  readonly onAdoptDraft: (draft: AiTriageDraft) => void | Promise<void>
+  readonly onAdoptDraft: (draft: AiTriageDraft, replacementConfirmed?: boolean) => void | Promise<void>
+  /** Returns whether this draft would replace a local manual edit. */
+  readonly shouldConfirmAdoption?: (draft: AiTriageDraft) => boolean
   /** Permission-scoped source reference and optimistic revision. */
   readonly source: AiTriageEntrySource | AiRequestSubmissionSource
   /** Localized message resolver. */
@@ -48,6 +50,7 @@ export function AiTriageDraftComposer({
   locale,
   onAuthenticatedApiError,
   onAdoptDraft,
+  shouldConfirmAdoption,
   source,
   t,
 }: AiTriageDraftComposerProps) {
@@ -55,6 +58,8 @@ export function AiTriageDraftComposer({
   const activeController = controller ?? liveController
   const [generatedForRevision, setGeneratedForRevision] = useState<number>()
   const [isStale, setIsStale] = useState(false)
+  const [confirmationGenerationId, setConfirmationGenerationId] = useState<string>()
+  const confirmationRef = useRef<HTMLDivElement>(null)
   const sourceRef = useRef(source)
   useEffect(() => {
     sourceRef.current = source
@@ -69,6 +74,9 @@ export function AiTriageDraftComposer({
   const isOperationPending = activeController.isGenerating ||
     activeController.isDecisionPending ||
     activeController.isFeedbackPending
+  const isAdoptionConfirmationVisible = confirmationGenerationId !== undefined &&
+    confirmationGenerationId === activeController.generation?.id &&
+    !isSourceStale
 
   /** Generates only after the operator activates the explicit button. */
   const generateDraft = async () => {
@@ -79,9 +87,14 @@ export function AiTriageDraftComposer({
     if (generation) setGeneratedForRevision(requestedRevision)
   }
 
+  useEffect(() => {
+    if (isAdoptionConfirmationVisible) confirmationRef.current?.focus()
+  }, [isAdoptionConfirmationVisible])
+
   /** Records approval before copying the currently authorized draft into local form state. */
-  const adoptDraft = async () => {
+  const approveAndAdopt = async (replacementConfirmed = false) => {
     const requestedSource = source
+    if (isOperationPending) return
     if (generatedForRevision !== requestedSource.expectedRevision) {
       setIsStale(true)
       return
@@ -93,7 +106,18 @@ export function AiTriageDraftComposer({
     }
     const reviewedDraft = getAvailableTriageDraft(reviewedGeneration)
     if (reviewedGeneration?.decision?.outcome !== 'approved' || !reviewedDraft) return
-    await onAdoptDraft(reviewedDraft)
+    setConfirmationGenerationId(undefined)
+    await onAdoptDraft(reviewedDraft, replacementConfirmed)
+  }
+
+  /** Opens replacement confirmation before recording an approval decision. */
+  const adoptDraft = () => {
+    if (isOperationPending || !availableDraft) return
+    if (shouldConfirmAdoption?.(availableDraft) && activeController.generation?.id !== undefined) {
+      setConfirmationGenerationId(activeController.generation.id)
+      return
+    }
+    void approveAndAdopt()
   }
 
   return (
@@ -148,6 +172,35 @@ export function AiTriageDraftComposer({
           t={t}
         />
       )}
+      {isAdoptionConfirmationVisible ? (
+        <div
+          className="border-l-2 border-amber-500 bg-amber-50 px-4 py-3 text-amber-950 outline-none focus-visible:ring-2 focus-visible:ring-amber-600"
+          ref={confirmationRef}
+          role="alert"
+          tabIndex={-1}
+        >
+          <p className="text-sm font-semibold">{t('ai.triage.replaceDraftTitle')}</p>
+          <p className="mt-1 text-xs font-medium leading-5">
+            {t('ai.triage.replaceDraftDescription')}
+          </p>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button
+              className="workbench-button-secondary min-h-[44px] px-4"
+              onClick={() => setConfirmationGenerationId(undefined)}
+              type="button"
+            >
+              {t('ai.triage.keepManualDraft')}
+            </button>
+            <button
+              className="workbench-button-primary min-h-[44px] px-4"
+              onClick={() => void approveAndAdopt(true)}
+              type="button"
+            >
+              {t('ai.triage.replaceManualDraft')}
+            </button>
+          </div>
+        </div>
+      ) : null}
     </section>
   )
 }

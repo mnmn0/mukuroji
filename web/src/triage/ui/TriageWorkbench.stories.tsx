@@ -204,6 +204,32 @@ export const AiDraftAdoption: Story = {
   },
 }
 
+/** Confirms a dirty routing field before recording the AI approval decision. */
+export const AiDraftRoutingReplacementConfirmation: Story = {
+  args: {
+    accessToken: 'storybook-access-token',
+    onAction: onAiTriageAction,
+  },
+  render: (args) => <AiTriageWorkbenchStory {...args} />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+
+    await userEvent.click(canvas.getByRole('button', { name: 'Change routing' }))
+    await userEvent.clear(canvas.getByRole('textbox', { name: 'Owner user ID' }))
+    await userEvent.type(canvas.getByRole('textbox', { name: 'Owner user ID' }), 'member-manual')
+    await userEvent.click(canvas.getByRole('button', { name: 'Generate draft' }))
+    await userEvent.click(canvas.getByRole('button', { name: 'Use in Accept / Assign form' }))
+
+    await expect(canvas.getByRole('alert')).toHaveTextContent('Keep or replace your manual edits?')
+    await userEvent.click(canvas.getByRole('button', { name: 'Keep manual edits' }))
+    await expect(canvas.getByRole('button', { name: 'Use in Accept / Assign form' })).toBeVisible()
+
+    await userEvent.click(canvas.getByRole('button', { name: 'Use in Accept / Assign form' }))
+    await userEvent.click(canvas.getByRole('button', { name: 'Replace with AI draft' }))
+    await expect(canvas.getByRole('textbox', { name: 'Owner user ID' })).toHaveValue('member-ada')
+  },
+}
+
 /** Phone-width full-visibility detail with the flat AI evidence rail. */
 export const AiDraftMobileDetail: Story = {
   args: {

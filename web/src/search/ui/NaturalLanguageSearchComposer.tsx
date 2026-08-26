@@ -22,6 +22,8 @@ import {
   formatAiSearchCustomFieldValue,
   formatAiSearchList,
   hasReviewableAiSearchCustomFields,
+  hasReviewableAiSearchDate,
+  hasReviewableAiSearchFilterBounds,
   hasReviewableAiSearchFilters,
   normalizeAiSearchFilters,
   parseAiSearchCustomFieldValue,
@@ -283,6 +285,7 @@ function SearchDraftReview({
         <AiSearchDraftEditor
           draft={renderedDraft}
           filters={filters}
+          disabled={isDecisionPending || isFeedbackPending}
           onChange={setFilters}
           t={t}
         />
@@ -298,6 +301,8 @@ export type AiSearchDraftEditorProps = {
   draft: AiSearchDraft
   /** Locally reviewed filter values. */
   filters: WorkspaceSearchFilters
+  /** Prevents edits while the approval request is in flight. */
+  disabled?: boolean
   /** Replaces the local draft without changing the URL. */
   onChange: (filters: WorkspaceSearchFilters) => void
   /** Localized message resolver. */
@@ -323,6 +328,7 @@ const listFilterFields = [
  * @returns A flat review editor that does not touch route state.
  */
 export function AiSearchDraftEditor({
+  disabled = false,
   draft,
   filters,
   onChange,
@@ -330,7 +336,8 @@ export function AiSearchDraftEditor({
 }: AiSearchDraftEditorProps) {
   const customFields = filters.customFields ?? []
   const hasInvalidCustomField = !hasReviewableAiSearchCustomFields(filters)
-  const hasInvalidFilterSet = !hasReviewableAiSearchFilters(filters)
+  const hasInvalidBounds = !hasReviewableAiSearchFilterBounds(filters)
+  const hasInvalidDate = !hasReviewableAiSearchDate(filters)
 
   return (
     <div className="grid gap-5">
@@ -350,7 +357,7 @@ export function AiSearchDraftEditor({
         </section>
       ) : null}
 
-      <fieldset className="grid gap-4">
+      <fieldset className="grid gap-4" disabled={disabled}>
         <legend className="mb-1 text-app-caption font-semibold uppercase tracking-[0.08em] text-[var(--workbench-muted)]">
           {t('ai.search.filters')}
         </legend>
@@ -472,7 +479,12 @@ export function AiSearchDraftEditor({
             {t('ai.search.validation.customFieldValue')}
           </p>
         ) : null}
-        {hasInvalidFilterSet && !hasInvalidCustomField ? (
+        {hasInvalidBounds && !hasInvalidCustomField ? (
+          <p className="border-l-2 border-[var(--workbench-danger)] bg-red-50 px-3 py-2 text-app-caption font-semibold text-[var(--workbench-danger)]" role="alert">
+            {t('ai.search.validation.bounds')}
+          </p>
+        ) : null}
+        {hasInvalidDate && !hasInvalidCustomField && !hasInvalidBounds ? (
           <p className="border-l-2 border-[var(--workbench-danger)] bg-red-50 px-3 py-2 text-app-caption font-semibold text-[var(--workbench-danger)]" role="alert">
             {t('ai.search.validation.dateRange')}
           </p>
