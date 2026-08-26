@@ -11,8 +11,30 @@ import {
   issueCollaborationControllerFixture,
 } from '../src/issues/fixtures'
 import { fileArtifactsControllerFixture, imageFileFixture } from '../src/files/fixtures'
+import { aiSummaryGenerationFixture } from '../src/features/ai-assistance/fixtures'
+import type { AiSummaryDraft } from '@mukuroji/contracts'
+import { formatAiSummaryContextBody } from '../src/issues/model/aiSummaryContextBody'
 
 describe('IssueCollaborationPanel', () => {
+  test('escapes generated summary prose before opening a Markdown context draft', () => {
+    const content = aiSummaryGenerationFixture.content
+    if (content.availability !== 'available' || content.draft.kind !== 'summary') {
+      throw new Error('Summary fixture must stay available.')
+    }
+    const draft: AiSummaryDraft = {
+      ...content.draft,
+      overview: {
+        ...content.draft.overview,
+        text: '[trusted label](https://attacker.example) #heading',
+      },
+    }
+
+    const body = formatAiSummaryContextBody(draft, content.citations, (key) => key)
+
+    expect(body).toContain('\\[trusted label\\]\\(https://attacker\\.example\\) \\#heading')
+    expect(body).not.toContain('[trusted label](https://attacker.example)')
+  })
+
   test('omits the Brief tab when no authenticated AI source is supplied', () => {
     const html = renderToStaticMarkup(
       <IssueCollaborationPanel

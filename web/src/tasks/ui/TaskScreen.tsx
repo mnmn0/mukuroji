@@ -255,6 +255,8 @@ type PendingTaskScheduleUpdate = {
 
 /** Props accepted by the task management screen. */
 export type TaskScreenProps = {
+  /** Whether the dependent AI API deployment has enabled the route-level controls. */
+  aiAssistanceEnabled?: boolean
   /** Saved task view active when canonical actions are invoked. */
   activeTaskViewId?: string
   /** Shared saved-view lifecycle and display controls rendered above task filters. */
@@ -458,6 +460,7 @@ export function TaskScreen({
   activeTaskViewId,
   workspaceId = '',
   accessToken,
+  aiAssistanceEnabled = true,
   onAuthenticatedApiError,
   locale,
   projectId,
@@ -2711,6 +2714,7 @@ export function TaskScreen({
               {activeTab === 'permissions' || activeTab === 'file' ? null : (
                 <TaskDetailPane
                   accessToken={accessToken}
+                  aiAssistanceEnabled={aiAssistanceEnabled}
                   assigneeOptions={assigneeOptions}
                   onAuthenticatedApiError={onAuthenticatedApiError}
                   artifacts={artifacts}

@@ -1,5 +1,6 @@
 import { useMemo } from 'react'
 import { useSearchParams } from 'react-router'
+import { aiAssistanceUiEnabled } from '../../features/ai-assistance/model/aiAssistanceRollout'
 import { AutomationManagementPanelContainer } from '../../automation/ui/AutomationManagementPanelContainer'
 import { DeveloperPlatformSettingsPanelContainer } from '../../developer-platform/ui/DeveloperPlatformSettingsPanelContainer'
 import { AiAssistanceSettingsPanelContainer } from '../../features/ai-assistance/ui'
@@ -32,13 +33,15 @@ export function SettingsPage() {
         <WorkspaceSettingsView
           configurationSections={workspace.accessToken ? (
             <>
-              <AiAssistanceSettingsPanelContainer
-                accessToken={workspace.accessToken}
-                canManagePolicy={workspace.canManageAiAssistance}
-                cacheScope={workspace.userKey ?? workspace.userIdentityAliases.at(-1)}
-                guardRequest={workspace.guardEnterpriseSession}
-                locale={workspace.locale}
-              />
+              {aiAssistanceUiEnabled ? (
+                <AiAssistanceSettingsPanelContainer
+                  accessToken={workspace.accessToken}
+                  canManagePolicy={workspace.canManageAiAssistance}
+                  cacheScope={workspace.userKey ?? workspace.userIdentityAliases.at(-1)}
+                  guardRequest={workspace.guardEnterpriseSession}
+                  locale={workspace.locale}
+                />
+              ) : null}
               <WorkspaceAccessPanelContainer
                 accessToken={workspace.accessToken}
                 locale={workspace.locale}

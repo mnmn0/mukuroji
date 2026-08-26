@@ -83,6 +83,7 @@ import {
   createPlanningAccessSnapshot,
   filterManageablePlanningScopeTeams,
 } from '../../planning/model/permissions'
+import { aiAssistanceUiEnabled } from '../../features/ai-assistance/model/aiAssistanceRollout'
 import {
   PlanningScreen,
 } from '../../planning/ui/PlanningScreen'
@@ -532,7 +533,7 @@ export function PlanningPage() {
         <PlanningScreen
           accessErrorMessage={accessErrorMessage || undefined}
           activeView={activeView}
-          aiAssistance={accessToken
+          aiAssistance={aiAssistanceUiEnabled && accessToken
             ? {
                 accessToken,
                 locale,

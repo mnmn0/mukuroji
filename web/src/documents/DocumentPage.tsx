@@ -42,6 +42,7 @@ import type { ProjectDirectoryTeam } from '../projects/api'
 import { useProjectDirectory } from '../projects/queries/useProjectDirectory'
 import { createDocumentPath } from '../shared/routing/paths'
 import { useWorkspaceRouteContext } from '../workspace/ui/WorkspaceRouteProvider'
+import { aiAssistanceUiEnabled } from '../features/ai-assistance/model/aiAssistanceRollout'
 import {
   applyDocumentOperations,
   applyDocumentOperationsWithConflictAwareness,
@@ -368,6 +369,8 @@ export type DocumentScreenActions = {
 export type DocumentScreenProps = {
   /** Active Workspace member token used only for explicit AI Brief requests. */
   aiAssistanceAccessToken?: string
+  /** Whether the dependent AI API deployment has enabled the route-level controls. */
+  aiAssistanceEnabled?: boolean
   /** Reports authenticated AI failures to the owning document route session guard. */
   onAuthenticatedApiError?: (error: unknown) => void
   /**
@@ -1332,7 +1335,7 @@ export function DocumentPage() {
 
   return (
     <DocumentScreen
-      aiAssistanceAccessToken={accessToken}
+      aiAssistanceAccessToken={aiAssistanceUiEnabled ? accessToken : undefined}
       onAuthenticatedApiError={(error) => {
         const action = workspace.resolveSessionErrors([error])
         if (action) workspace.onSessionErrorAction(action)
@@ -1425,6 +1428,7 @@ export function DocumentPage() {
 export function DocumentScreen({
   actions,
   aiAssistanceAccessToken,
+  aiAssistanceEnabled = true,
   data,
   errorMessage,
   initialContextTab,
@@ -1438,6 +1442,9 @@ export function DocumentScreen({
   userInitial,
   userLabel,
 }: DocumentScreenProps) {
+  const resolvedAiAssistanceAccessToken = aiAssistanceEnabled
+    ? aiAssistanceAccessToken
+    : undefined
   const t = useMemo(() => createTranslator(locale), [locale])
   const { openMobileSidebar } = useWorkspaceSidebarController()
   const [isTreeDrawerOpen, setIsTreeDrawerOpen] = useState(false)
@@ -1855,7 +1862,7 @@ export function DocumentScreen({
               <div className="fixed inset-y-0 right-0 z-50 max-w-[calc(100vw-24px)] shadow-2xl min-[1280px]:static min-[1280px]:z-auto min-[1280px]:shadow-none">
                 <DocumentContextPanel
                   activeTab={contextTab}
-                  aiAssistanceAccessToken={aiAssistanceAccessToken}
+                  aiAssistanceAccessToken={resolvedAiAssistanceAccessToken}
                   backlinks={data.backlinks}
                   comments={data.comments}
                   defaultAnchorId={defaultCommentAnchorId}

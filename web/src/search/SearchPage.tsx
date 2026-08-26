@@ -14,6 +14,7 @@ import {
 } from '@mukuroji/contracts'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate, useSearchParams } from 'react-router'
+import { aiAssistanceUiEnabled } from '../features/ai-assistance/model/aiAssistanceRollout'
 import { createMutationRequestRunner } from '../shared/api/mutationHeaders'
 import { useCurrentUser } from '../auth/queries/useCurrentUser'
 import { resolveEnterpriseSessionErrorsAction } from '../auth/enterpriseSessionErrors'
@@ -549,6 +550,7 @@ export function SearchPage() {
               <div className="grid min-w-0 content-start gap-4">
                 <SearchToolbar
                   accessToken={accessToken}
+                  aiAssistanceEnabled={aiAssistanceUiEnabled}
                   key={getSearchDateField(routeState.filters)}
                   locale={locale}
                   onAuthenticatedApiError={setAuthenticatedApiError}
@@ -636,6 +638,7 @@ export function SearchPage() {
 }
 
 function SearchToolbar({
+  aiAssistanceEnabled = true,
   accessToken,
   locale,
   onAuthenticatedApiError,
@@ -648,6 +651,7 @@ function SearchToolbar({
   statusOptions,
   t,
 }: {
+  aiAssistanceEnabled?: boolean
   accessToken?: string
   onAuthenticatedApiError?: (error: unknown) => void
   locale: Locale
@@ -669,7 +673,7 @@ function SearchToolbar({
 
   return (
     <section className="workbench-toolbar grid gap-4 p-4" data-testid="search-toolbar">
-      <div
+      {aiAssistanceEnabled ? <div
         aria-label={t('ai.search.mode')}
         className="flex w-fit max-w-full gap-1 rounded-lg border border-[var(--workbench-border-strong)] bg-white p-1"
         role="group"
@@ -698,9 +702,9 @@ function SearchToolbar({
         >
           {t('ai.search.mode.plainLanguage')}
         </button>
-      </div>
+      </div> : null}
 
-      {inputMode === 'plain-language' ? (
+      {aiAssistanceEnabled && inputMode === 'plain-language' ? (
         <NaturalLanguageSearchComposer
           accessToken={accessToken}
           locale={locale}

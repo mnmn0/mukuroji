@@ -24,6 +24,8 @@ import { TriageSettingsPanel } from './TriageSettingsPanel'
 export type TriageWorkbenchProps = {
   /** Active Workspace member bearer token used only for explicit AI generation. */
   readonly accessToken?: string
+  /** Whether the dependent AI API deployment has enabled the route-level controls. */
+  readonly aiAssistanceEnabled?: boolean
   /** Optional AI controller override for isolated interaction stories. */
   readonly aiAssistanceController?: AiAssistanceController
   /** Reports authenticated AI failures to the owning Team route session guard. */
@@ -129,6 +131,7 @@ export type TriageWorkbenchProps = {
  */
 export function TriageWorkbench({
   accessToken,
+  aiAssistanceEnabled = true,
   allowedBulkActions,
   aiAssistanceController,
   bulkResults = [],
@@ -273,6 +276,7 @@ export function TriageWorkbench({
                 <TriageEntryDetail
                   accessToken={accessToken}
                   aiAssistanceController={aiAssistanceController}
+                  aiAssistanceEnabled={aiAssistanceEnabled}
                   onAuthenticatedApiError={onAuthenticatedApiError}
                   errorMessage={detailErrorMessage}
                   isLoading={isDetailLoading}

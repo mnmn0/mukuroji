@@ -122,6 +122,7 @@ import {
 import type { WorkItemRelationEditorInput } from '../../work-items/ui/WorkItemRelationsEditor'
 import type { WorkItemDependencyCreateDraft } from '../../work-items/model/workItemDependencies'
 import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
+import { aiAssistanceUiEnabled } from '../../features/ai-assistance/model/aiAssistanceRollout'
 
 /** Aggregated resolved configuration result for every Team represented by a Project. */
 type ProjectWorkItemConfigurationLoadResult = {
@@ -1397,6 +1398,7 @@ export function TaskPage() {
   return (
     <TaskScreen
       key={projectId}
+      aiAssistanceEnabled={aiAssistanceUiEnabled}
       workspaceId={workspaceId}
       configurationErrorMessage={configurationErrorMessage}
       accessToken={accessToken}

@@ -36,6 +36,7 @@ import {
 import { useCurrentUser } from '../../auth/queries/useCurrentUser'
 import { resolveEnterpriseSessionErrorsAction } from '../../auth/enterpriseSessionErrors'
 import { clearAuthSession, getAuthSession } from '../../auth/session'
+import { aiAssistanceUiEnabled } from '../../features/ai-assistance/model/aiAssistanceRollout'
 import { createMutationRequestRunner } from '../../shared/api/mutationHeaders'
 import { IssueArtifactsPanel } from '../../files/ui/IssueArtifactsPanel'
 import {
@@ -3974,7 +3975,7 @@ function IssueDetailContent({
       />
       {collaboration ? (
         <IssueCollaborationPanel
-          aiAssistance={accessToken
+          aiAssistance={aiAssistanceUiEnabled && accessToken
             ? {
                 accessToken,
                 source: {

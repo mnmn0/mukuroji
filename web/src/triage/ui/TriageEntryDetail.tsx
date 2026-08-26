@@ -27,6 +27,8 @@ import { TriageSourceIcon } from './TriageSourceIcon'
 export type TriageEntryDetailProps = {
   /** Active Workspace member bearer token used only for explicit AI generation. */
   readonly accessToken?: string
+  /** Whether the dependent AI API deployment has enabled the route-level controls. */
+  readonly aiAssistanceEnabled?: boolean
   /** Optional AI controller override for isolated interaction stories. */
   readonly aiAssistanceController?: AiAssistanceController
   /** Reports authenticated AI failures to the owning Team route session guard. */
@@ -77,6 +79,7 @@ const stateLabelKeys: Record<TriageEntryState, MessageKey> = {
  */
 export function TriageEntryDetail({
   accessToken,
+  aiAssistanceEnabled = true,
   aiAssistanceController,
   errorMessage,
   isLoading = false,
@@ -280,7 +283,7 @@ export function TriageEntryDetail({
                 </p>
               ) : null}
             </DetailSection>
-            {(accessToken || aiAssistanceController) && (
+            {aiAssistanceEnabled && (accessToken || aiAssistanceController) && (
               entry.capabilities.canAcceptCreate || entry.capabilities.canAssign
             ) ? (
               <AiTriageDraftComposer

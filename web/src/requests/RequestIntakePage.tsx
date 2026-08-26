@@ -4,6 +4,7 @@ import type {
 } from '@mukuroji/contracts'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate, useSearchParams } from 'react-router'
+import { aiAssistanceUiEnabled } from '../features/ai-assistance/model/aiAssistanceRollout'
 import { createMutationRequestRunner } from '../shared/api/mutationHeaders'
 import {
   canManageWorkspaceStructure,
@@ -100,7 +101,9 @@ export function RequestIntakePage() {
   const canManageForms = canManageWorkspaceStructure(user)
   // Request-level conversion capability is the source-of-truth gate for this assistant.
   // Policy-management permission must not hide it from operators who can convert a request.
-  const canUseAiAssistance = Boolean(accessToken && user && !currentUserError)
+  const canUseAiAssistance = Boolean(
+    aiAssistanceUiEnabled && accessToken && user && !currentUserError,
+  )
   const activeView: RequestsView = requestedView === 'forms' && canManageForms
     ? 'forms'
     : 'queue'

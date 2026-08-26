@@ -310,6 +310,37 @@ describe('AI assistance API', () => {
     expect(error).toMatchObject({ code: 'InvalidAiAssistanceResponse', status: 502 })
   })
 
+  test('rejects whitespace-only triage routing identifiers before review', async () => {
+    const content = aiTriageGenerationFixture.content
+    if (content.availability !== 'available' || content.draft.kind !== 'triage') {
+      throw new Error('Triage fixture must stay available.')
+    }
+
+    for (const field of ['assigneeUserId', 'teamId', 'projectId'] as const) {
+      installFetchRecorder([{
+        ...aiTriageGenerationFixture,
+        content: {
+          ...content,
+          draft: {
+            ...content.draft,
+            [field]: {
+              ...content.draft[field],
+              value: '   ',
+            },
+          },
+        },
+      }])
+
+      const error = await generateAiAssistance({
+        accessToken: 'access-token',
+        input: { locale: 'en', query: 'triage', task: 'triage' },
+        mutationContext,
+      }).catch((caught: unknown) => caught)
+
+      expect(error).toMatchObject({ code: 'InvalidAiAssistanceResponse', status: 502 })
+    }
+  })
+
   test('replaces preference and policy only through explicit revision-fenced PUT requests', async () => {
     const requests = installFetchRecorder([
       { ...aiAssistancePreferenceFixture, enabled: false, revision: 3 },

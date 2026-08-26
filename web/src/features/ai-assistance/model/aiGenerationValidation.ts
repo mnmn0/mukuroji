@@ -123,9 +123,9 @@ function isAiAssistanceDraft(value: unknown): value is AiAssistanceDraft {
       return isOptionalSuggested(value.title, isString) &&
         isOptionalSuggested(value.description, isString) &&
         isOptionalSuggested(value.priority, isPriority) &&
-        isOptionalSuggested(value.assigneeUserId, isString) &&
-        isOptionalSuggested(value.teamId, isString) &&
-        isOptionalSuggested(value.projectId, isString) &&
+        isOptionalSuggested(value.assigneeUserId, (candidate) => isBoundedString(candidate, 256)) &&
+        isOptionalSuggested(value.teamId, (candidate) => isBoundedString(candidate, 256)) &&
+        isOptionalSuggested(value.projectId, (candidate) => isBoundedString(candidate, 256)) &&
         Array.isArray(value.customFields) &&
         value.customFields.every(isSuggestedCustomField) &&
         hasUniqueSuggestedCustomFieldIds(value.customFields)

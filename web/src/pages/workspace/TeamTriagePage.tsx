@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
 import { useParams, useSearchParams } from 'react-router'
+import { aiAssistanceUiEnabled } from '../../features/ai-assistance/model/aiAssistanceRollout'
 import { createTranslator } from '../../shared/i18n/i18n'
 import { TriageApiError } from '../../triage/api'
 import { useTriageMutations } from '../../triage/mutations/useTriageMutations'
@@ -121,6 +122,7 @@ export function TeamTriagePage() {
         allowedBulkActions={allowedBulkActions}
         bulkResults={mutation.bulkResults}
         canManageConfiguration={canManageConfiguration}
+        aiAssistanceEnabled={aiAssistanceUiEnabled}
         configuration={settings.data}
         configurationErrorMessage={configurationErrorMessage}
         counts={countTriageEntryViews(entryViews)}

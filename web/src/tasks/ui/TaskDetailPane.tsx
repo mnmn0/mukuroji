@@ -67,6 +67,8 @@ import { TaskPriorityBadge } from './TaskViewPrimitives'
 export type TaskDetailPaneProps = {
   /** Optional AI controller override used by isolated stories and interaction tests. */
   aiAssistanceController?: AiAssistanceController
+  /** Whether the dependent AI API deployment has enabled the route-level controls. */
+  aiAssistanceEnabled?: boolean
   /** Reports authenticated AI failures to the owning task route session guard. */
   onAuthenticatedApiError?: (error: unknown) => void
   /** Determines whether the current user may manage one canonical dependency endpoint. */
@@ -167,6 +169,7 @@ type WorkItemEditorDirtyState = {
 export function TaskDetailPane({
   accessToken,
   aiAssistanceController,
+  aiAssistanceEnabled = true,
   assigneeOptions,
   canAccessTriage = false,
   artifacts,
@@ -494,7 +497,7 @@ export function TaskDetailPane({
             ) : null}
           </div>
         </div>
-        {(accessToken || aiAssistanceController) && task.teamId ? (
+        {aiAssistanceEnabled && (accessToken || aiAssistanceController) && task.teamId ? (
           <AiWorkItemPlanningAssistant
             accessToken={accessToken}
             controller={aiAssistanceController}
@@ -785,7 +788,7 @@ export function TaskDetailPane({
       />
       {collaboration ? (
         <IssueCollaborationPanel
-          aiAssistance={accessToken && task.teamId
+          aiAssistance={aiAssistanceEnabled && accessToken && task.teamId
             ? {
                 accessToken,
                 source: {
