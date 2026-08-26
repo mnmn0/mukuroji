@@ -120,7 +120,7 @@ function isAiAssistanceDraft(value: unknown): value is AiAssistanceDraft {
 
   switch (value.kind) {
     case 'triage':
-      return isOptionalSuggested(value.title, isString) &&
+      return isOptionalSuggested(value.title, (candidate) => isBoundedNonEmptyTrimmedString(candidate, 256)) &&
         isOptionalSuggested(value.description, isString) &&
         isOptionalSuggested(value.priority, isPriority) &&
         isOptionalSuggested(value.assigneeUserId, (candidate) => isBoundedString(candidate, 256)) &&
@@ -306,7 +306,7 @@ function hasUniqueSuggestedCustomFieldIds(items: readonly unknown[]): boolean {
 function isBriefItem(value: unknown): boolean {
   return isRecord(value) &&
     isNonEmptyString(value.id) &&
-    isString(value.text) &&
+    isBoundedNonEmptyTrimmedString(value.text, 20_000) &&
     isConfidence(value.confidence) &&
     isStringArray(value.citationIds)
 }
@@ -670,6 +670,16 @@ function isBoundedString(value: unknown, maximumLength: number): value is string
     value.length > 0 &&
     value.length <= maximumLength &&
     value === value.trim()
+}
+
+/** Validates a bounded prose value whose trimmed representation is non-empty. */
+function isBoundedNonEmptyTrimmedString(
+  value: unknown,
+  maximumLength: number,
+): value is string {
+  return typeof value === 'string' &&
+    value.length <= maximumLength &&
+    value.trim().length > 0
 }
 
 /** Validates an optional bounded string without changing its representation. */

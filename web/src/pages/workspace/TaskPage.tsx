@@ -196,6 +196,7 @@ export function TaskPage() {
   const params = useParams()
   const {
     hasQuickAccessLoadError,
+    isAiAssistanceTaskEnabled,
     isProjectQuickAccess,
     isQuickAccessLoading,
     isQuickAccessSaving,
@@ -1398,7 +1399,7 @@ export function TaskPage() {
   return (
     <TaskScreen
       key={projectId}
-      aiAssistanceEnabled={aiAssistanceUiEnabled}
+      aiAssistanceEnabled={isAiAssistanceTaskEnabled?.('planning') ?? aiAssistanceUiEnabled}
       workspaceId={workspaceId}
       configurationErrorMessage={configurationErrorMessage}
       accessToken={accessToken}

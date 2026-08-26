@@ -69,6 +69,7 @@ import {
 } from './ui/NaturalLanguageSearchComposer'
 import { SearchCountReport } from './ui/SearchCountReport'
 import { createSearchStatusOptions, type SearchStatusOption } from './model/statusOptions'
+import { useOptionalWorkspaceRouteContext } from '../workspace/ui/WorkspaceRouteProvider'
 
 /**
  * Saved view作成フォームの入力stateです。
@@ -114,6 +115,7 @@ const emptyResolvedWorkItemConfigurations: Record<string, ResolvedWorkItemConfig
  * Permission-aware Workspace search、saved view、cursor paginationを提供する画面です。
  */
 export function SearchPage() {
+  const workspaceContext = useOptionalWorkspaceRouteContext()
   const location = useLocation()
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
@@ -550,7 +552,7 @@ export function SearchPage() {
               <div className="grid min-w-0 content-start gap-4">
                 <SearchToolbar
                   accessToken={accessToken}
-                  aiAssistanceEnabled={aiAssistanceUiEnabled}
+                  aiAssistanceEnabled={workspaceContext?.isAiAssistanceTaskEnabled?.('search') ?? aiAssistanceUiEnabled}
                   key={getSearchDateField(routeState.filters)}
                   locale={locale}
                   onAuthenticatedApiError={setAuthenticatedApiError}

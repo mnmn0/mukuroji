@@ -56,6 +56,7 @@ import {
   type RequestFormDraftModel,
 } from './model/requestForm'
 import { RequestQueue } from './ui/RequestQueue'
+import { useOptionalWorkspaceRouteContext } from '../workspace/ui/WorkspaceRouteProvider'
 
 const emptyTeams: ProjectDirectoryTeam[] = []
 const emptyForms: RequestForm[] = []
@@ -68,6 +69,7 @@ const apiSWRConfig = {
  * Request intake queue と form builder を認証済み Workspace shell 内に描画します。
  */
 export function RequestIntakePage() {
+  const workspaceContext = useOptionalWorkspaceRouteContext()
   const location = useLocation()
   const navigate = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
@@ -102,7 +104,8 @@ export function RequestIntakePage() {
   // Request-level conversion capability is the source-of-truth gate for this assistant.
   // Policy-management permission must not hide it from operators who can convert a request.
   const canUseAiAssistance = Boolean(
-    aiAssistanceUiEnabled && accessToken && user && !currentUserError,
+    (workspaceContext?.isAiAssistanceTaskEnabled?.('triage') ?? aiAssistanceUiEnabled) &&
+      accessToken && user && !currentUserError,
   )
   const activeView: RequestsView = requestedView === 'forms' && canManageForms
     ? 'forms'

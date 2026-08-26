@@ -1335,7 +1335,9 @@ export function DocumentPage() {
 
   return (
     <DocumentScreen
-      aiAssistanceAccessToken={aiAssistanceUiEnabled ? accessToken : undefined}
+      aiAssistanceAccessToken={(
+        workspace.isAiAssistanceTaskEnabled?.('summary') ?? aiAssistanceUiEnabled
+      ) ? accessToken : undefined}
       onAuthenticatedApiError={(error) => {
         const action = workspace.resolveSessionErrors([error])
         if (action) workspace.onSessionErrorAction(action)

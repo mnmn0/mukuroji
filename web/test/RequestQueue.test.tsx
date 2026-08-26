@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
+import type { AiAssistanceGeneration } from '@mukuroji/contracts'
 import type { AiAssistanceController } from '../src/features/ai-assistance/mutations/useAiAssistanceController'
 import { aiTriageGenerationFixture } from '../src/features/ai-assistance/fixtures'
 import { requestSubmissionFixture } from '../src/requests/fixtures'
@@ -94,6 +95,38 @@ describe('RequestQueue', () => {
     expect(html).toContain('Unblock customer Workspace provisioning')
     expect(html).toContain('Provisioning intake source')
     expect(html).toContain('Use in conversion form')
+  })
+
+  test('does not offer adoption when a triage draft has no conversion fields', () => {
+    const submission = normalizeRequestSubmission(requestSubmissionFixture)
+    const content = aiTriageGenerationFixture.content
+    if (content.availability !== 'available' || content.draft.kind !== 'triage') {
+      throw new Error('Triage fixture must stay available.')
+    }
+    const emptyTriageGeneration = {
+      ...aiTriageGenerationFixture,
+      content: {
+        ...content,
+        draft: {
+          kind: 'triage' as const,
+          customFields: [],
+        },
+      },
+    } satisfies AiAssistanceGeneration
+    const html = renderToStaticMarkup(
+      <RequestQueue
+        accessToken="access-token"
+        aiAssistanceController={{ ...aiController, generation: emptyTriageGeneration }}
+        locale="en"
+        selectedSubmission={submission}
+        submissions={[submission]}
+        onSelectSubmission={() => undefined}
+      />,
+    )
+
+    expect(html).toContain('data-testid="ai-triage-composer"')
+    expect(html).toContain('No applicable field suggestions were returned.')
+    expect(html).not.toContain('Use in conversion form')
   })
 
   test('does not render AI draft markup when conversion capability is absent', () => {

@@ -102,6 +102,7 @@ import {
   type PlanningViewId,
 } from '../../shared/routing/paths'
 import { useWorkspaceSidebarController } from '../../shared/ui/sidebar'
+import { useWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
 
 const emptyTeams: ProjectDirectoryTeam[] = []
 const emptyProjectRoles: Readonly<Record<string, ProjectMemberRole>> = {}
@@ -113,6 +114,7 @@ export function PlanningPage() {
   const location = useLocation()
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
+  const { isAiAssistanceTaskEnabled } = useWorkspaceRouteContext()
   const mutationRequestRunner = useRef(createMutationRequestRunner()).current
   const [session] = useState<AuthSession | null>(() => getAuthSession())
   const [locale] = useState<Locale>(() => getInitialLocale())
@@ -533,7 +535,7 @@ export function PlanningPage() {
         <PlanningScreen
           accessErrorMessage={accessErrorMessage || undefined}
           activeView={activeView}
-          aiAssistance={aiAssistanceUiEnabled && accessToken
+          aiAssistance={(isAiAssistanceTaskEnabled?.('planning') ?? aiAssistanceUiEnabled) && accessToken
             ? {
                 accessToken,
                 locale,

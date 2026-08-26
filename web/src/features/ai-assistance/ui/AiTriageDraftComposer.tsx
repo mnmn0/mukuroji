@@ -66,6 +66,8 @@ export function AiTriageDraftComposer({
   }, [source])
   const canGenerate = Boolean(accessToken || controller)
   const availableDraft = getAvailableTriageDraft(activeController.generation)
+  const canAdoptDraft = availableDraft !== undefined &&
+    hasSupportedTriageAdoption(availableDraft, source.type)
   const isSourceStale = generatedForRevision !== undefined &&
     generatedForRevision !== source.expectedRevision
   const hasInvalidDraft = !isSourceStale &&
@@ -112,7 +114,7 @@ export function AiTriageDraftComposer({
 
   /** Opens replacement confirmation before recording an approval decision. */
   const adoptDraft = () => {
-    if (isOperationPending || !availableDraft) return
+    if (isOperationPending || !availableDraft || !canAdoptDraft) return
     if (shouldConfirmAdoption?.(availableDraft) && activeController.generation?.id !== undefined) {
       setConfirmationGenerationId(activeController.generation.id)
       return
@@ -160,7 +162,7 @@ export function AiTriageDraftComposer({
           generatingLabel={t('ai.triage.generating')}
           locale={locale}
           cancelLabel={t('ai.triage.cancel')}
-          onAdopt={availableDraft && !isSourceStale ? adoptDraft : undefined}
+          onAdopt={canAdoptDraft && !isSourceStale ? adoptDraft : undefined}
           onCancelGeneration={activeController.cancelGeneration}
           onFeedback={(rating: CreateAiAssistanceFeedbackRequest['rating']) =>
             activeController.sendFeedback(rating)}
@@ -300,6 +302,28 @@ function getAvailableTriageDraft(
     generation.content.draft.kind !== 'triage'
   ) return undefined
   return generation.content.draft
+}
+
+/**
+ * Returns whether a triage draft contains a field supported by the current
+ * local adoption target.
+ *
+ * Request conversion accepts title and description, while Team triage action
+ * forms accept only owner and Project routing fields. Unsupported-only drafts
+ * remain reviewable but cannot open an unrelated form.
+ *
+ * @param draft - Validated triage draft under review.
+ * @param sourceType - Local adoption target represented by the source.
+ * @returns Whether at least one value can be copied into that target.
+ */
+function hasSupportedTriageAdoption(
+  draft: AiTriageDraft,
+  sourceType: AiTriageDraftComposerProps['source']['type'],
+): boolean {
+  if (sourceType === 'request-submission') {
+    return draft.title !== undefined || draft.description !== undefined
+  }
+  return draft.assigneeUserId !== undefined || draft.projectId !== undefined
 }
 
 /** Formats a supported custom-field or scalar suggestion without rendering unsafe markup. */

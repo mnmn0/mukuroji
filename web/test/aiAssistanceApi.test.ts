@@ -214,6 +214,62 @@ describe('AI assistance API', () => {
     }
   })
 
+  /** Rejects empty model prose before a summary or triage draft becomes reviewable. */
+  test('rejects blank summary claims and triage titles at the browser API boundary', async () => {
+    const summaryContent = aiSummaryGenerationFixture.content
+    const triageContent = aiTriageGenerationFixture.content
+    if (
+      summaryContent.availability !== 'available' ||
+      summaryContent.draft.kind !== 'summary' ||
+      triageContent.availability !== 'available' ||
+      triageContent.draft.kind !== 'triage'
+    ) {
+      throw new Error('AI fixtures must stay available.')
+    }
+
+    const malformedGenerations = [
+      {
+        generation: {
+          ...aiSummaryGenerationFixture,
+          content: {
+            ...summaryContent,
+            draft: {
+              ...summaryContent.draft,
+              overview: { ...summaryContent.draft.overview, text: '   ' },
+            },
+          },
+        },
+        input: { locale: 'en', query: 'summarize', task: 'summary' as const },
+      },
+      {
+        generation: {
+          ...aiTriageGenerationFixture,
+          content: {
+            ...triageContent,
+            draft: {
+              ...triageContent.draft,
+              title: {
+                ...triageContent.draft.title,
+                value: '   ',
+              },
+            },
+          },
+        },
+        input: { locale: 'en', query: 'triage', task: 'triage' as const },
+      },
+    ]
+
+    for (const { generation, input } of malformedGenerations) {
+      installFetchRecorder([generation])
+      const error = await generateAiAssistance({
+        accessToken: 'access-token',
+        input,
+        mutationContext,
+      }).catch((caught: unknown) => caught)
+      expect(error).toMatchObject({ code: 'InvalidAiAssistanceResponse', status: 502 })
+    }
+  })
+
   /** Rejects a valid generation whose workflow differs from the requested task. */
   test('rejects a valid generation for a different requested task', async () => {
     installFetchRecorder([aiSummaryGenerationFixture])

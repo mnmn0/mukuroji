@@ -114,6 +114,7 @@ import {
 } from '../../tasks/model/taskSchedule'
 import type { WorkspaceMember } from '../../workspace/api'
 import { useWorkspaceAccess } from '../../workspace/queries/useWorkspaceAccess'
+import { useOptionalWorkspaceRouteContext } from '../../workspace/ui/WorkspaceRouteProvider'
 import { useWorkspaceSidebarController } from '../../shared/ui/sidebar'
 import {
   createWorkItemRelation,
@@ -316,6 +317,8 @@ type CreatedTeamIssueMutation = {
  * チーム所有 Issue 画面を描画する props です。
  */
 type TeamIssueScreenProps = {
+  /** Whether the saved Workspace AI policy permits the Summary workflow. */
+  aiAssistanceEnabled?: boolean
   /** Saved task view active when canonical Team actions are invoked. */
   activeTaskViewId?: string
   /** Shared saved-view lifecycle and display controls. */
@@ -490,6 +493,7 @@ type TeamIssueScreenProps = {
  * Cognito 認証後に表示するチーム所有 Issue ページです。
  */
 export function TeamIssuePage() {
+  const workspaceRouteContext = useOptionalWorkspaceRouteContext()
   const location = useLocation()
   const navigate = useNavigate()
   const params = useParams()
@@ -1063,6 +1067,7 @@ export function TeamIssuePage() {
 
   return (
     <TeamIssueScreen
+      aiAssistanceEnabled={workspaceRouteContext?.isAiAssistanceTaskEnabled?.('summary') ?? aiAssistanceUiEnabled}
       activeTaskViewId={taskViewController.activeSavedView?.id}
       accessToken={accessToken}
       assigneeOptions={assigneeOptions}
@@ -1157,6 +1162,7 @@ export function TeamIssuePage() {
  */
 export function TeamIssueScreen({
   activeTaskViewId,
+  aiAssistanceEnabled = true,
   accessToken,
   assigneeOptions = [],
   artifacts,
@@ -2282,6 +2288,7 @@ export function TeamIssueScreen({
                 </div>
               </section>
               <IssueDetailPane
+                aiAssistanceEnabled={aiAssistanceEnabled}
                 accessToken={accessToken}
                 assigneeOptions={assigneeOptions}
                 artifacts={artifacts}
@@ -3530,6 +3537,7 @@ function IssueBoard({
 }
 
 function IssueDetailPane({
+  aiAssistanceEnabled = true,
   accessToken,
   assigneeOptions,
   artifacts,
@@ -3561,6 +3569,8 @@ function IssueDetailPane({
   t,
   workspaceMembers,
 }: {
+  /** Whether the saved Workspace AI policy permits the Summary workflow. */
+  aiAssistanceEnabled?: boolean
   accessToken?: string
   assigneeOptions: ProjectMember[]
   artifacts?: FileArtifactsController
@@ -3609,6 +3619,7 @@ function IssueDetailPane({
 
   return (
     <IssueDetailContent
+      aiAssistanceEnabled={aiAssistanceEnabled}
       accessToken={accessToken}
       assigneeOptions={assigneeOptions}
       artifacts={artifacts}
@@ -3645,6 +3656,7 @@ function IssueDetailPane({
 }
 
 function IssueDetailContent({
+  aiAssistanceEnabled = true,
   accessToken,
   assigneeOptions,
   artifacts,
@@ -3676,6 +3688,8 @@ function IssueDetailContent({
   t,
   workspaceMembers,
 }: {
+  /** Whether the saved Workspace AI policy permits the Summary workflow. */
+  aiAssistanceEnabled?: boolean
   /** Related Documents を取得する access token です。 */
   accessToken?: string
   /** 担当者 selector の候補です。 */
@@ -3743,7 +3757,7 @@ function IssueDetailContent({
     type: 'work-item',
     workItemId: issue.id,
   } satisfies AiWorkItemSource
-  const collaborationAiAssistance = aiAssistanceUiEnabled && accessToken
+  const collaborationAiAssistance = aiAssistanceEnabled && accessToken
     ? {
         renderBrief: (onAdopt: Parameters<IssueSummaryAiAssistance['renderBrief']>[0]) => (
           <AiSummaryAssistant

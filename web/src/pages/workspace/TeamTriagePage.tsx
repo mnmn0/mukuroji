@@ -122,7 +122,7 @@ export function TeamTriagePage() {
         allowedBulkActions={allowedBulkActions}
         bulkResults={mutation.bulkResults}
         canManageConfiguration={canManageConfiguration}
-        aiAssistanceEnabled={aiAssistanceUiEnabled}
+        aiAssistanceEnabled={workspace.isAiAssistanceTaskEnabled?.('triage') ?? aiAssistanceUiEnabled}
         configuration={settings.data}
         configurationErrorMessage={configurationErrorMessage}
         counts={countTriageEntryViews(entryViews)}
