@@ -1,5 +1,6 @@
 import type {
   AiAssistanceGeneration,
+  AiAssistanceTask,
   CreateAiAssistanceFeedbackRequest,
   DecideAiAssistanceGenerationRequest,
   GenerateAiAssistanceRequest,
@@ -35,6 +36,10 @@ export type DecideAiAssistanceOptions = {
   accessToken: string
   /** Generation whose review outcome is being recorded. */
   generationId: string
+  /** Workflow task originally reviewed by the operator. */
+  expectedTask: AiAssistanceTask
+  /** Review outcome requested by the operator. */
+  expectedOutcome: DecideAiAssistanceGenerationRequest['outcome']
   /** Revision-fenced human review outcome. */
   input: DecideAiAssistanceGenerationRequest
   /** Idempotency and correlation headers for the logical mutation. */
@@ -101,7 +106,15 @@ export async function decideAiAssistanceGeneration(
     },
   )
 
-  return parseAiAssistanceGenerationResponse(value)
+  const generation = parseAiAssistanceGenerationResponse(value, options.expectedTask)
+  if (generation.decision?.outcome !== options.expectedOutcome) {
+    throw new AiAssistanceApiError(
+      502,
+      'AI assistance decision returned an unexpected outcome.',
+      'InvalidAiAssistanceResponse',
+    )
+  }
+  return generation
 }
 
 /**

@@ -69,6 +69,8 @@ describe('AI assistance API', () => {
     await decideAiAssistanceGeneration({
       accessToken: 'access-token',
       generationId: 'generation/1',
+      expectedTask: 'search',
+      expectedOutcome: 'approved',
       input: { expectedRevision: 3, outcome: 'approved' },
       mutationContext,
     })
@@ -88,6 +90,37 @@ describe('AI assistance API', () => {
       outcome: 'approved',
     })
     expect(JSON.parse(String(requests[1]?.init.body))).toEqual({ rating: 'helpful' })
+  })
+
+  test('rejects a decision response for a different task or requested outcome', async () => {
+    const generationWithRejectedDecision = {
+      ...aiSearchGenerationFixture,
+      decision: {
+        outcome: 'rejected',
+        decidedAt: '2026-08-25T02:05:00.000Z',
+      },
+    } as const
+    const generationWithDifferentTask = {
+      ...aiSummaryGenerationFixture,
+      decision: {
+        outcome: 'approved',
+        decidedAt: '2026-08-25T02:05:00.000Z',
+      },
+    } as const
+
+    for (const response of [generationWithRejectedDecision, generationWithDifferentTask]) {
+      installFetchRecorder([response])
+      const error = await decideAiAssistanceGeneration({
+        accessToken: 'access-token',
+        generationId: 'generation/1',
+        expectedTask: 'search',
+        expectedOutcome: 'approved',
+        input: { expectedRevision: 3, outcome: 'approved' },
+        mutationContext,
+      }).catch((caught: unknown) => caught)
+
+      expect(error).toMatchObject({ code: 'InvalidAiAssistanceResponse', status: 502 })
+    }
   })
 
   test('rejects a generation containing a non-application citation path', async () => {
