@@ -314,6 +314,8 @@ export function TaskDetailPane({
   const seededTitle = activeAiDraft?.title?.value ?? title
   const seededDescription = activeAiDraft?.description?.value ?? issue?.description ?? ''
   const seededPriority = activeAiDraft?.priority?.value ?? issue?.priority ?? task.priority
+  const seededPlannedEffortMinutes = activeAiDraft?.plannedEffortMinutes?.value ??
+    schedule.plannedEffortMinutes
   const seededWorkflowStatusId = activeAiDraft?.status && workflowStatuses.some(
     (status) => status.id === activeAiDraft.status?.value,
   )
@@ -656,8 +658,9 @@ export function TaskDetailPane({
               {t('tasks.schedule.effortMinutes')}
               <input
                 className="workbench-input h-9 w-full min-w-0 px-3 disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]"
-                defaultValue={schedule.plannedEffortMinutes}
+                defaultValue={seededPlannedEffortMinutes}
                 form={scheduleFormId}
+                key={`effort:${editorIdentity}:${activeAiDraft?.plannedEffortMinutes ? activeAiFormSeed?.revision ?? 0 : 0}`}
                 min="0"
                 name="scheduleEffortMinutes"
                 type="number"

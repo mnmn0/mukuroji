@@ -76,7 +76,7 @@ export async function generateAiAssistance(
     },
   )
 
-  return parseAiAssistanceGenerationResponse(value)
+  return parseAiAssistanceGenerationResponse(value, options.input.task)
 }
 
 /**

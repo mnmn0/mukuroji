@@ -179,6 +179,19 @@ describe('AI assistance API', () => {
     }
   })
 
+  /** Rejects a valid generation whose workflow differs from the requested task. */
+  test('rejects a valid generation for a different requested task', async () => {
+    installFetchRecorder([aiSummaryGenerationFixture])
+
+    const error = await generateAiAssistance({
+      accessToken: 'access-token',
+      input: { locale: 'en', query: 'find open work items', task: 'search' },
+      mutationContext,
+    }).catch((caught: unknown) => caught)
+
+    expect(error).toMatchObject({ code: 'InvalidAiAssistanceResponse', status: 502 })
+  })
+
   test('rejects malformed Search dates before they reach the review surface', async () => {
     const content = aiSearchGenerationFixture.content
     if (content.availability !== 'available' || content.draft.kind !== 'search') {

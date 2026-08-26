@@ -104,6 +104,36 @@ export const AiDraftAdoption: Story = {
   },
 }
 
+/** Keeps a manual conversion field when an approved draft omits that field. */
+export const AiDraftAdoptionPreservesManualFields: Story = {
+  args: {
+    locale: 'en',
+    onAction: onAiConversionAction,
+  },
+  render: (args) => (
+    <AiRequestQueueStory
+      {...args}
+      generationFactory={() => createTitleOnlyTriageGeneration()}
+    />
+  ),
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement)
+
+    await userEvent.click(canvas.getByRole('button', { name: 'Convert to Work Item' }))
+    const descriptionInput = canvas.getByRole('textbox', {
+      name: 'Work Item description override',
+    })
+    await userEvent.type(descriptionInput, 'Keep this manual description')
+
+    await userEvent.click(canvas.getByRole('button', { name: 'Generate draft' }))
+    await userEvent.click(canvas.getByRole('button', { name: 'Use in conversion form' }))
+
+    await expect(canvas.getByRole('textbox', { name: 'Work Item title override' }))
+      .toHaveValue('Unblock customer Workspace provisioning')
+    await expect(descriptionInput).toHaveValue('Keep this manual description')
+  },
+}
+
 /** Phone-width evidence review with full-width 44px actions and stacked panes. */
 export const AiDraftMobile: Story = {
   args: {
@@ -150,10 +180,18 @@ export const StaleAiDraft: Story = {
 }
 
 /** Props used by the stateful AI adoption story harness. */
-type AiRequestQueueStoryProps = RequestQueueProps
+type AiRequestQueueStoryProps = RequestQueueProps & {
+  /** Produces the safe generation returned by this isolated Storybook controller. */
+  generationFactory?: (
+    input: GenerateAiAssistanceRequest,
+  ) => Promise<AiAssistanceGeneration> | AiAssistanceGeneration
+}
 
 /** Supplies a deterministic AI controller without issuing network requests in Storybook. */
-function AiRequestQueueStory(props: AiRequestQueueStoryProps) {
+function AiRequestQueueStory({
+  generationFactory = onRequestAiGenerate,
+  ...props
+}: AiRequestQueueStoryProps) {
   const [generation, setGeneration] = useState<AiAssistanceGeneration>()
   const controller: AiAssistanceController = {
     cancelGeneration: () => undefined,
@@ -169,7 +207,7 @@ function AiRequestQueueStory(props: AiRequestQueueStoryProps) {
     },
     feedbackRating: undefined,
     generate: async (input) => {
-      const generated = await onRequestAiGenerate(input)
+      const generated = await generationFactory(input)
       setGeneration(generated)
       return generated
     },
@@ -182,6 +220,24 @@ function AiRequestQueueStory(props: AiRequestQueueStoryProps) {
   }
 
   return <RequestQueue {...props} aiAssistanceController={controller} />
+}
+
+/** Returns a valid triage generation that proposes a title but omits description. */
+function createTitleOnlyTriageGeneration(): AiAssistanceGeneration {
+  const content = aiTriageGenerationFixture.content
+  if (content.availability !== 'available' || content.draft.kind !== 'triage') {
+    throw new Error('Triage fixture must stay available.')
+  }
+  return {
+    ...aiTriageGenerationFixture,
+    content: {
+      ...content,
+      draft: {
+        ...content.draft,
+        description: undefined,
+      },
+    },
+  }
 }
 
 /** Keeps a generation mounted while the selected source revision advances. */
