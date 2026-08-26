@@ -936,10 +936,23 @@ export function PlanningStatusUpdateComposer({
             riskSummary: readOptionalText(data.get('riskSummary')) ?? '',
             summary,
           }
+          const wasAiSeeded = aiGenerationReference !== undefined
           setIsPublishing(true)
           void (async () => {
             try {
               await onPublish(draft)
+              isFormDirtyRef.current = false
+              setIsFormDirty(false)
+              setAiEvidenceSeed(undefined)
+              setAiGenerationReference(undefined)
+              setPendingAiDraft(undefined)
+              if (wasAiSeeded) {
+                setEvidenceType('none')
+                setFormSeed((current) => ({
+                  draft: undefined,
+                  revision: current.revision + 1,
+                }))
+              }
             } catch {
               // The page-level mutation handler owns the user-visible error state.
             } finally {

@@ -97,6 +97,7 @@ describe('RequestQueue', () => {
     expect(html).toContain('Use in conversion form')
   })
 
+  /** Verifies adoption is not offered when a triage draft has no conversion fields. */
   test('does not offer adoption when a triage draft has no conversion fields', () => {
     const submission = normalizeRequestSubmission(requestSubmissionFixture)
     const content = aiTriageGenerationFixture.content
@@ -108,7 +109,7 @@ describe('RequestQueue', () => {
       content: {
         ...content,
         draft: {
-          kind: 'triage' as const,
+          kind: 'triage',
           customFields: [],
         },
       },

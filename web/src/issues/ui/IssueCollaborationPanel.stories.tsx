@@ -24,6 +24,7 @@ const aiBriefSource = {
   type: 'work-item',
   workItemId: 'launch-review',
 } satisfies AiWorkItemSource
+const aiBriefT = createTranslator('ja')
 
 const meta = {
   title: 'Application/Issues/Collaboration Panel',
@@ -107,12 +108,12 @@ export const AiBrief: Story = {
       renderBrief: (onAdopt) => (
         <AiSummaryAssistant
           accessToken="storybook-access-token"
-          adoptLabel="Draft として追加"
+          adoptLabel={aiBriefT('ai.summary.adoptContext')}
           key={createAiAssistantSessionKey(aiBriefSource)}
           locale="ja"
           onAdopt={onAdopt}
           sources={[aiBriefSource]}
-          t={createTranslator('ja')}
+          t={aiBriefT}
         />
       ),
       sessionKey: createAiAssistantSessionKey(aiBriefSource),

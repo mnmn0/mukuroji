@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, test } from 'bun:test'
-import type { AiAssistanceGeneration } from '@mukuroji/contracts'
+import type {
+  AiAssistanceGeneration,
+  GenerateAiAssistanceRequest,
+} from '@mukuroji/contracts'
 import {
   AiAssistanceApiError,
   createAiAssistanceFeedback,
@@ -227,7 +230,10 @@ describe('AI assistance API', () => {
       throw new Error('AI fixtures must stay available.')
     }
 
-    const malformedGenerations = [
+    const malformedGenerations: Array<{
+      generation: AiAssistanceGeneration
+      input: GenerateAiAssistanceRequest
+    }> = [
       {
         generation: {
           ...aiSummaryGenerationFixture,
@@ -239,7 +245,7 @@ describe('AI assistance API', () => {
             },
           },
         },
-        input: { locale: 'en', query: 'summarize', task: 'summary' as const },
+        input: { locale: 'en', sources: [], task: 'summary' },
       },
       {
         generation: {
@@ -255,7 +261,16 @@ describe('AI assistance API', () => {
             },
           },
         },
-        input: { locale: 'en', query: 'triage', task: 'triage' as const },
+        input: {
+          locale: 'en',
+          source: {
+            expectedRevision: 1,
+            teamId: 'core-team',
+            triageEntryId: 'triage-1',
+            type: 'triage-entry',
+          },
+          task: 'triage',
+        },
       },
     ]
 

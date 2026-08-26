@@ -282,7 +282,8 @@ function SearchDraftReview({
     const reviewedGeneration = await onDecide('approved')
     const approvedDraft = getAvailableSearchDraft(reviewedGeneration)
     if (reviewedGeneration?.decision?.outcome !== 'approved' || !approvedDraft) return
-    if (serializeSearchFilters(approvedFilters) !== serializeSearchFilters(approvedDraft.filters)) return
+    const normalizedApprovedDraftFilters = normalizeAiSearchFilters(approvedDraft.filters)
+    if (serializeSearchFilters(approvedFilters) !== serializeSearchFilters(normalizedApprovedDraftFilters)) return
     onApply({
       filters: approvedFilters,
       report: approvedDraft.report,
