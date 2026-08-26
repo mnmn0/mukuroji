@@ -267,8 +267,8 @@ function RequestSubmissionDetail({
     setTitleOverride((current) => draft.title?.value ?? current)
     setDescriptionOverride((current) => draft.description?.value ?? current)
     setConversionOverrideDirty((current) => ({
-      title: current.title || draft.title !== undefined,
-      description: current.description || draft.description !== undefined,
+      title: draft.title === undefined ? current.title : false,
+      description: draft.description === undefined ? current.description : false,
     }))
     setPendingAiDraft(undefined)
   }
