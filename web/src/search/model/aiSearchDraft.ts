@@ -99,13 +99,14 @@ export function normalizeAiSearchFilters(
 }
 
 /**
- * Returns whether every reviewed custom-field comparison has an explicit value.
+ * Returns whether every reviewed custom-field comparison is safe to apply.
  *
  * Empty and not-empty operators intentionally omit a value; all other operators
- * must keep one so an incomplete row cannot broaden the applied Search query.
+ * must keep one, and string values must not be blank, so an incomplete row
+ * cannot broaden the applied Search query.
  *
- * @param filters - Locally edited Search filters.
- * @returns Whether the custom-field rows are safe to apply.
+ * @param filters - Workspace Search filters containing locally edited custom-field rows.
+ * @returns `true` when every custom-field row satisfies the review constraints.
  */
 export function hasReviewableAiSearchCustomFields(
   filters: WorkspaceSearchFilters,
