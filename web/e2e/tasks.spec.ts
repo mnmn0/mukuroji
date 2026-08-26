@@ -6097,7 +6097,8 @@ test.describe('authenticated task page', () => {
     await page.goto('/dashboard')
     const requestCounts = getMockRequestCounts(page)
 
-    await expect(page.getByRole('button', { name: '共通ローンチ', exact: true })).toHaveCount(2)
+    const sidebar = page.locator('aside[aria-label="メインサイドバー"]')
+    await expect(sidebar.getByRole('button', { name: '共通ローンチ', exact: true })).toHaveCount(2)
 
     await page.getByRole('button', { name: 'コアチーム', exact: true }).click()
     await page.getByRole('button', { name: 'デザインチーム', exact: true }).click()
