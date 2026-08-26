@@ -151,7 +151,7 @@ function isAiAssistanceDraft(value: unknown): value is AiAssistanceDraft {
       return isOptionalSuggested(value.title, isNonEmptyTrimmedString) &&
         isOptionalSuggested(value.description, isString) &&
         isOptionalSuggested(value.priority, isPriority) &&
-        isOptionalSuggested(value.status, isNonEmptyString) &&
+        isOptionalSuggested(value.status, (candidate) => isBoundedString(candidate, 256)) &&
         isOptionalSuggested(value.plannedEffortMinutes, isBoundedEffortMinutes) &&
         Array.isArray(value.subtasks) &&
         value.subtasks.every(isPlanningSubtask) &&
