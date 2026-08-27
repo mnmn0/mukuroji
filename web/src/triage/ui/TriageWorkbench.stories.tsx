@@ -60,6 +60,7 @@ const meta = {
     t: createTranslator('en'),
     teamId: 'core-team',
     teamName: 'Core team',
+    visibleProjectIds: ['launch-readiness', 'launch-support'],
   },
 } satisfies Meta<typeof TriageWorkbench>
 

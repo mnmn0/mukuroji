@@ -39,6 +39,8 @@ export type TriageEntryDetailProps = {
   readonly isAiOperationPending?: boolean
   /** Team route identifier used to scope the AI source reference. */
   readonly teamId: string
+  /** Project IDs currently visible to the viewer in this Team directory. */
+  readonly visibleProjectIds?: readonly string[]
   /** Selected permission-safe entry view. */
   readonly view?: TriageEntryView
   /** Current locale used for dates. */
@@ -106,6 +108,7 @@ export function TriageEntryDetail({
   onRetry,
   t,
   teamId,
+  visibleProjectIds = [],
   view,
 }: TriageEntryDetailProps) {
   const [actionMode, setActionMode] = useState<TriageActionMode>()
@@ -346,14 +349,19 @@ export function TriageEntryDetail({
                 onAdoptDraft={adoptTriageDraft}
                 onOperationPendingChange={onOperationPendingChange}
                 canAdoptDraft={(draft) => {
+                  const hasInvalidProject = draft.projectId !== undefined &&
+                    !visibleProjectIds.includes(draft.projectId.value)
                   const hasUnsupportedAssignee =
                     draft.assigneeUserId !== undefined && !entry.capabilities.canAssign
                   const hasSupportedAssignee =
                     draft.assigneeUserId !== undefined && entry.capabilities.canAssign
                   const hasSupportedProject =
                     draft.projectId !== undefined &&
+                    !hasInvalidProject &&
                     (entry.capabilities.canAssign || entry.capabilities.canAcceptCreate)
-                  return !hasUnsupportedAssignee && (hasSupportedAssignee || hasSupportedProject)
+                  return !hasInvalidProject &&
+                    !hasUnsupportedAssignee &&
+                    (hasSupportedAssignee || hasSupportedProject)
                 }}
                 // AI requests must be allowed to start; only domain mutations
                 // disable the composer itself. The combined action state still

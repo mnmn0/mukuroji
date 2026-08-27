@@ -155,6 +155,46 @@ describe('TriageEntryDetail', () => {
     expect(html).not.toContain('Use in Accept / Assign form')
   })
 
+  test('does not offer adoption when the proposed project is not visible', () => {
+    const entry = triageEntryFixtures[0]
+    if (!entry) throw new Error('Expected a triage fixture.')
+    const content = aiTriageGenerationFixture.content
+    if (content.availability !== 'available' || content.draft.kind !== 'triage' || !content.draft.projectId) {
+      throw new Error('Triage fixture must include a project proposal.')
+    }
+    const invisibleProjectGeneration: AiAssistanceGeneration = {
+      ...aiTriageGenerationFixture,
+      content: {
+        ...content,
+        draft: {
+          ...content.draft,
+          projectId: {
+            ...content.draft.projectId,
+            value: 'invisible-project',
+          },
+        },
+      },
+    }
+    const html = renderToStaticMarkup(
+      <TriageEntryDetail
+        accessToken="access-token"
+        aiAssistanceController={{
+          ...aiController,
+          generation: invisibleProjectGeneration,
+        }}
+        locale="en"
+        t={createTranslator('en')}
+        teamId="core-team"
+        view={createTriageEntryView(entry)}
+        visibleProjectIds={['launch-readiness']}
+        onBack={() => undefined}
+      />,
+    )
+
+    expect(html).toContain('invisible-project')
+    expect(html).not.toContain('Use in Accept / Assign form')
+  })
+
   test('keeps the AI composer startable while a parent operation fence is active', () => {
     const entry = triageEntryFixtures[0]
     if (!entry) throw new Error('Expected a triage fixture.')

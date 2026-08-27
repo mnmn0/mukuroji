@@ -152,6 +152,7 @@ export function TeamTriagePage() {
         t={t}
         teamId={teamId ?? ''}
         teamName={activeTeam?.name ?? t('workspace.team.missing')}
+        visibleProjectIds={activeTeam?.projects.map((project) => project.id)}
         onAction={mutation.applyAction}
         onBackToQueue={() => replaceRouteState('queue', null)}
         onBulkAction={mutation.applyBulkAction}

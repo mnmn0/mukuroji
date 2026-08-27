@@ -36,6 +36,8 @@ export type TriageWorkbenchProps = {
   readonly allowedBulkActions: readonly TriageBulkOperation['action'][]
   /** Team display name shown in the surface label. */
   readonly teamName: string
+  /** Project IDs currently visible to the viewer in this Team directory. */
+  readonly visibleProjectIds?: readonly string[]
   /** Active queue or settings surface. */
   readonly routeView: TriageRouteView
   /** Visible permission-safe queue entries. */
@@ -176,6 +178,7 @@ export function TriageWorkbench({
   t,
   teamId,
   teamName,
+  visibleProjectIds,
 }: TriageWorkbenchProps) {
   const queueRegion = useRef<HTMLDivElement>(null)
   const [isAiOperationPending, setIsAiOperationPending] = useState(false)
@@ -319,6 +322,7 @@ export function TriageWorkbench({
                   onRetry={onRetryDetail}
                   t={t}
                   teamId={teamId}
+                  visibleProjectIds={visibleProjectIds}
                   view={selectedEntry}
                 />
               </div>
