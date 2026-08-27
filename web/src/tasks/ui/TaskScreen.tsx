@@ -2767,7 +2767,7 @@ export function TaskScreen({
                   focusedRootCommentId={focusedRootCommentId}
                   isLoading={isSelectedIssueDetailLoading}
                   isRelationCandidatesLoading={isRelationCandidatesLoading}
-                  key={`${detailTask?.teamId ?? ''}:${detailTask?.id ?? ''}:${detailTask?.revision ?? ''}`}
+                  key={`${detailTask?.teamId ?? ''}:${detailTask?.id ?? ''}`}
                   locale={locale}
                   onCreateScheduleDependency={canMutateDetailTask
                     ? onCreateScheduleDependency
