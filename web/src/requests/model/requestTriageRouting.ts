@@ -29,6 +29,7 @@ function isProjectInEffectiveTeam(
  * @param submission - Current immutable Request submission and routing target.
  * @param draft - Validated AI triage draft under review.
  * @param currentOverride - Existing local conversion routing overrides.
+ * @param projectDirectory - Team-scoped Project IDs used to validate proposed routing.
  * @returns Safe partial routing target for the conversion action.
  */
 export function createSafeTriageRoutingOverride(
@@ -76,6 +77,7 @@ export function createSafeTriageRoutingOverride(
  * @param submission - Current immutable Request submission and routing target.
  * @param draft - Validated AI triage draft under review.
  * @param currentOverride - Existing local conversion routing overrides.
+ * @param projectDirectory - Team-scoped Project IDs used to validate proposed routing.
  * @returns Whether adopting the draft would change at least one supported form field.
  */
 export function canAdoptRequestTriageDraft(
