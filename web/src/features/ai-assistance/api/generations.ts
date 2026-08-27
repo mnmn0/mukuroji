@@ -214,7 +214,16 @@ async function requestJson(
 
 /** Reads JSON while accepting the feedback endpoint's empty success response. */
 async function readJson(response: Response, allowEmptyResponse: boolean): Promise<unknown> {
-  const text = await response.text()
+  let text: string
+  try {
+    text = await response.text()
+  } catch {
+    throw new AiAssistanceApiError(
+      0,
+      defaultErrorMessage,
+      'AiAssistanceNetworkError',
+    )
+  }
   if (!text) {
     if (allowEmptyResponse && response.ok) return undefined
     throw new AiAssistanceApiError(

@@ -60,6 +60,27 @@ describe('AI assistance API', () => {
     expect(headers.get('X-Correlation-Id')).toBe('ai-correlation-1')
   })
 
+  /** Converts a response-body transport failure into the stable network error category. */
+  test('classifies generation response body read failures as network errors', async () => {
+    const response = new Response(null, { status: 200 })
+    Object.defineProperty(response, 'text', {
+      configurable: true,
+      value: async () => { throw new TypeError('body stream closed') },
+    })
+    globalThis.fetch = (async () => response) as typeof fetch
+
+    const error = await generateAiAssistance({
+      accessToken: 'access-token',
+      input: { locale: 'en', query: 'body failure', task: 'search' },
+      mutationContext,
+    }).catch((caught: unknown) => caught)
+
+    expect(error).toMatchObject({
+      code: 'AiAssistanceNetworkError',
+      status: 0,
+    })
+  })
+
   test('records a revision-fenced decision and accepts an empty feedback response', async () => {
     const approvedGeneration = {
       ...aiSearchGenerationFixture,

@@ -521,18 +521,38 @@ export function AiSearchDraftEditor({
           </label>
           <DateDraftInput
             label={t('search.filters.dateFrom')}
-            onChange={(value) => onChange({
-              ...filters,
-              date: { field: filters.date?.field ?? 'updatedAt', ...filters.date, from: value || undefined },
-            })}
+            onChange={(value) => {
+              const from = value || undefined
+              const to = filters.date?.to
+              onChange({
+                ...filters,
+                date: from || to
+                  ? {
+                      field: filters.date?.field ?? 'updatedAt',
+                      ...filters.date,
+                      from,
+                    }
+                  : undefined,
+              })
+            }}
             value={filters.date?.from ?? ''}
           />
           <DateDraftInput
             label={t('search.filters.dateTo')}
-            onChange={(value) => onChange({
-              ...filters,
-              date: { field: filters.date?.field ?? 'updatedAt', ...filters.date, to: value || undefined },
-            })}
+            onChange={(value) => {
+              const from = filters.date?.from
+              const to = value || undefined
+              onChange({
+                ...filters,
+                date: from || to
+                  ? {
+                      field: filters.date?.field ?? 'updatedAt',
+                      ...filters.date,
+                      to,
+                    }
+                  : undefined,
+              })
+            }}
             value={filters.date?.to ?? ''}
           />
         </div>

@@ -68,7 +68,8 @@ export function AiTriageDraftComposer({
   }, [sourceKey])
   const canGenerate = Boolean(accessToken || controller)
   const availableDraft = getAvailableTriageDraft(activeController.generation)
-  const canAdoptDraft = availableDraft !== undefined &&
+  const hasCurrentGeneration = generatedForSourceKey === sourceKey
+  const canAdoptDraft = hasCurrentGeneration && availableDraft !== undefined &&
     hasSupportedTriageAdoption(availableDraft, source.type)
   const isSourceStale = generatedForSourceKey !== undefined &&
     generatedForSourceKey !== sourceKey

@@ -94,7 +94,7 @@ describe('RequestQueue', () => {
     expect(html).toContain('data-testid="ai-triage-composer"')
     expect(html).toContain('Unblock customer Workspace provisioning')
     expect(html).toContain('Provisioning intake source')
-    expect(html).toContain('Use in conversion form')
+    expect(html).not.toContain('Use in conversion form')
   })
 
   /** Verifies adoption is not offered when a triage draft has no conversion fields. */
