@@ -281,7 +281,7 @@ export function TriageWorkbench({
                   errorMessage={detailErrorMessage}
                   isLoading={isDetailLoading}
                   isPending={pendingEntryId === selectedEntry?.entry.id}
-                  key={selectedEntry?.entry.id ?? 'triage-detail'}
+                  key={`${teamId}:${selectedEntry?.entry.id ?? 'triage-detail'}`}
                   locale={locale}
                   onAction={onAction}
                   onActionComplete={restoreQueueFocus}

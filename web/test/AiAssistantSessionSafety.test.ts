@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { resolveDocumentContextTabTarget } from '../src/documents/model/contextTabs'
 import { createAiAssistantSessionKey } from '../src/features/ai-assistance/model/assistantSessionKey'
+import { createTriageSourceKey } from '../src/features/ai-assistance/model/triageSourceKey'
 import { aiPlanningGenerationFixture } from '../src/features/ai-assistance/fixtures'
 import { routeAiPlanningDraftAdoption } from '../src/planning/model/aiDraftAdoption'
 
@@ -57,6 +58,28 @@ describe('AI assistant source sessions', () => {
       },
       type: 'planning-target',
     })).not.toBe(first)
+  })
+
+  test('changes the triage draft fence when source identity changes at the same revision', () => {
+    const original = createTriageSourceKey({
+      expectedRevision: 3,
+      teamId: 'core-team',
+      triageEntryId: 'triage-entry-1',
+      type: 'triage-entry',
+    })
+
+    expect(createTriageSourceKey({
+      expectedRevision: 3,
+      teamId: 'core-team',
+      triageEntryId: 'triage-entry-2',
+      type: 'triage-entry',
+    })).not.toBe(original)
+    expect(createTriageSourceKey({
+      expectedRevision: 3,
+      teamId: 'other-team',
+      triageEntryId: 'triage-entry-1',
+      type: 'triage-entry',
+    })).not.toBe(original)
   })
 })
 

@@ -12,6 +12,7 @@ import {
   useAiAssistanceController,
   type AiAssistanceController,
 } from '../mutations/useAiAssistanceController'
+import { createTriageSourceKey } from '../model/triageSourceKey'
 import { AiAssistanceReview } from './AiAssistanceReview'
 import { AiDraftEvidenceMeta } from './AiDraftEvidence'
 
@@ -56,11 +57,12 @@ export function AiTriageDraftComposer({
 }: AiTriageDraftComposerProps) {
   const liveController = useAiAssistanceController({ accessToken, onAuthenticatedApiError })
   const activeController = controller ?? liveController
-  const [generatedForRevision, setGeneratedForRevision] = useState<number>()
+  const [generatedForSourceKey, setGeneratedForSourceKey] = useState<string>()
   const [isStale, setIsStale] = useState(false)
   const [confirmationGenerationId, setConfirmationGenerationId] = useState<string>()
   const confirmationRef = useRef<HTMLDivElement>(null)
   const sourceRef = useRef(source)
+  const sourceKey = createTriageSourceKey(source)
   useEffect(() => {
     sourceRef.current = source
   }, [source])
@@ -68,8 +70,8 @@ export function AiTriageDraftComposer({
   const availableDraft = getAvailableTriageDraft(activeController.generation)
   const canAdoptDraft = availableDraft !== undefined &&
     hasSupportedTriageAdoption(availableDraft, source.type)
-  const isSourceStale = generatedForRevision !== undefined &&
-    generatedForRevision !== source.expectedRevision
+  const isSourceStale = generatedForSourceKey !== undefined &&
+    generatedForSourceKey !== sourceKey
   const hasInvalidDraft = !isSourceStale &&
     activeController.generation?.content.availability === 'available' &&
     !availableDraft
@@ -83,10 +85,12 @@ export function AiTriageDraftComposer({
   /** Generates only after the operator activates the explicit button. */
   const generateDraft = async () => {
     if (!canGenerate || isOperationPending) return
-    const requestedRevision = source.expectedRevision
+    const requestedSourceKey = sourceKey
     setIsStale(false)
     const generation = await activeController.generate({ locale, source, task: 'triage' })
-    if (generation) setGeneratedForRevision(requestedRevision)
+    if (generation) {
+      setGeneratedForSourceKey(requestedSourceKey)
+    }
   }
 
   useEffect(() => {
@@ -95,14 +99,14 @@ export function AiTriageDraftComposer({
 
   /** Records approval before copying the currently authorized draft into local form state. */
   const approveAndAdopt = async (replacementConfirmed = false) => {
-    const requestedSource = source
+    const requestedSourceKey = sourceKey
     if (isOperationPending) return
-    if (generatedForRevision !== requestedSource.expectedRevision) {
+    if (generatedForSourceKey !== requestedSourceKey) {
       setIsStale(true)
       return
     }
     const reviewedGeneration = await activeController.decide('approved')
-    if (createTriageSourceKey(sourceRef.current) !== createTriageSourceKey(requestedSource)) {
+    if (createTriageSourceKey(sourceRef.current) !== requestedSourceKey) {
       setIsStale(true)
       return
     }
@@ -206,30 +210,6 @@ export function AiTriageDraftComposer({
       ) : null}
     </section>
   )
-}
-
-/**
- * Serializes a triage source identity and revision for the post-decision fence.
- *
- * @param source - Source captured before the approval request.
- * @returns A stable source key that changes when its identity or revision changes.
- */
-function createTriageSourceKey(
-  source: AiTriageEntrySource | AiRequestSubmissionSource,
-): string {
-  return source.type === 'triage-entry'
-    ? JSON.stringify({
-        expectedRevision: source.expectedRevision,
-        teamId: source.teamId,
-        triageEntryId: source.triageEntryId,
-        type: source.type,
-      })
-    : JSON.stringify({
-        expectedRevision: source.expectedRevision,
-        formId: source.formId,
-        submissionId: source.submissionId,
-        type: source.type,
-      })
 }
 
 /** Props for the permission-safe triage proposal field list. */
