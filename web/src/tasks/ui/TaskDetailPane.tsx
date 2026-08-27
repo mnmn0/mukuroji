@@ -123,6 +123,8 @@ export type TaskDetailPaneProps = {
   onDeleteScheduleDependency?: (dependency: WorkItemScheduleDependency) => void | Promise<void>
   /** Closes the detail pane while keeping the list selection and scroll position. */
   onClose?: () => void
+  /** Reports combined Work Item AI operation state to the owning task screen. */
+  onAiOperationPendingChange?: (pending: boolean) => void
   /** Cancels an accepted Schedule action when explicit save detects no schedule change. */
   onScheduleNoChange?: (teamId: string, issueId: string) => void
   /** Saves editable fields on the selected Work Item. */
@@ -198,6 +200,7 @@ export function TaskDetailPane({
   onAddRelation,
   onAuthenticatedApiError,
   onCreateScheduleDependency,
+  onAiOperationPendingChange,
   onClose,
   onDeleteRelation,
   onDeleteScheduleDependency,
@@ -216,7 +219,11 @@ export function TaskDetailPane({
   const isIssueSavingRef = useRef(false)
   const [isAiPlanningOperationPending, setIsAiPlanningOperationPending] = useState(false)
   const isAiPlanningOperationPendingRef = useRef(false)
-  const isWorkItemMutationPending = isIssueSaving || isAiPlanningOperationPending
+  const [isAiSummaryOperationPending, setIsAiSummaryOperationPending] = useState(false)
+  const isAiSummaryOperationPendingRef = useRef(false)
+  const isWorkItemMutationPending = isIssueSaving ||
+    isAiPlanningOperationPending ||
+    isAiSummaryOperationPending
   const [aiFormSeed, setAiFormSeed] = useState<WorkItemAiFormSeed>({
     identity: '',
     revision: 0,
@@ -229,7 +236,6 @@ export function TaskDetailPane({
     dirty: false,
     identity: '',
   })
-  const [isAiSummaryOperationPending, setIsAiSummaryOperationPending] = useState(false)
   const documentContextPromotion = useDocumentContextPromotion(
     Boolean(collaboration?.context.capabilities.canCreate && !isAiSummaryOperationPending),
     `${task?.teamId ?? ''}:${task?.id ?? ''}`,
@@ -366,6 +372,7 @@ export function TaskDetailPane({
             onAdopt={onAdopt}
             onAuthenticatedApiError={onAuthenticatedApiError}
             onOperationPendingChange={(pending) => {
+              reportAiSummaryOperationPending(pending)
               onOperationPendingChange?.(createAiAssistantSessionKey(aiSummarySource), pending)
             }}
             sources={[aiSummarySource]}
@@ -378,7 +385,7 @@ export function TaskDetailPane({
 
   /** Copies supported approved fields into a fresh local form seed without saving them. */
   function applyAiPlanningDraft(draft: AiPlanningDraft) {
-    if (isIssueSavingRef.current) return
+    if (isIssueSavingRef.current || isAiSummaryOperationPendingRef.current) return
     const nextDirtyState = { dirty: true, identity: editorIdentity }
     editorDirtyStateRef.current = nextDirtyState
     setEditorDirtyState(nextDirtyState)
@@ -397,7 +404,8 @@ export function TaskDetailPane({
       !task.teamId ||
       !onUpdateIssue ||
       isIssueSavingRef.current ||
-      isAiPlanningOperationPendingRef.current
+      isAiPlanningOperationPendingRef.current ||
+      isAiSummaryOperationPendingRef.current
     ) return
     const currentTask = task
     isIssueSavingRef.current = true
@@ -416,6 +424,22 @@ export function TaskDetailPane({
   function reportAiPlanningOperationPending(pending: boolean) {
     isAiPlanningOperationPendingRef.current = pending
     setIsAiPlanningOperationPending(pending)
+    reportCombinedAiOperationPending()
+  }
+
+  /** Keeps the task route fenced while the Summary assistant is in flight. */
+  function reportAiSummaryOperationPending(pending: boolean) {
+    isAiSummaryOperationPendingRef.current = pending
+    setIsAiSummaryOperationPending(pending)
+    reportCombinedAiOperationPending()
+  }
+
+  /** Reports whether any assistant owned by this Work Item is still in flight. */
+  function reportCombinedAiOperationPending() {
+    onAiOperationPendingChange?.(
+      isAiPlanningOperationPendingRef.current ||
+        isAiSummaryOperationPendingRef.current,
+    )
   }
 
   /** Rechecks whether the current Work Item editor contains supported manual edits. */
@@ -444,7 +468,8 @@ export function TaskDetailPane({
             isReadOnly ||
             !task.teamId ||
             isIssueSavingRef.current ||
-            isAiPlanningOperationPendingRef.current
+            isAiPlanningOperationPendingRef.current ||
+            isAiSummaryOperationPendingRef.current
           ) {
             return
           }
@@ -588,6 +613,7 @@ export function TaskDetailPane({
                 aria-label={t('tasks.detail.close')}
                 className="rounded px-2 py-1 text-lg leading-none text-[var(--workbench-muted)] hover:bg-[var(--workbench-surface-muted)] hover:text-[var(--workbench-text)]"
                 data-testid="task-detail-close"
+                disabled={isWorkItemMutationPending}
                 onClick={onClose}
                 type="button"
               >
@@ -872,12 +898,14 @@ export function TaskDetailPane({
           isLoading={isRelationCandidatesLoading || (isLoading && !issue)}
           locale={locale}
           onAddRelation={onAddRelation
+            && !isWorkItemMutationPending
             ? (input) => onAddRelation(task.id, input)
             : undefined}
           onDeleteRelation={onDeleteRelation
+            && !isWorkItemMutationPending
             ? (relation) => onDeleteRelation(task.id, relation)
             : undefined}
-          readOnly={isReadOnly || (!onAddRelation && !onDeleteRelation)}
+          readOnly={isReadOnly || isWorkItemMutationPending || (!onAddRelation && !onDeleteRelation)}
           relations={relations}
         />
       </div>
@@ -885,9 +913,9 @@ export function TaskDetailPane({
         <WorkItemDependencyPanel
           canManageEndpoint={canManageScheduleDependencyEndpoint}
           currentEndpoint={{ teamId: task.teamId, workItemId: task.id }}
-          onCreate={onCreateScheduleDependency}
-          onDelete={onDeleteScheduleDependency}
-          onUpdate={onUpdateScheduleDependency}
+          onCreate={isWorkItemMutationPending ? undefined : onCreateScheduleDependency}
+          onDelete={isWorkItemMutationPending ? undefined : onDeleteScheduleDependency}
+          onUpdate={isWorkItemMutationPending ? undefined : onUpdateScheduleDependency}
           snapshot={planningSnapshot}
           t={t}
         />
@@ -912,7 +940,7 @@ export function TaskDetailPane({
           focusedRootCommentId={focusedRootCommentId}
           locale={locale}
           members={workspaceMembers}
-          onAiSummaryOperationPendingChange={setIsAiSummaryOperationPending}
+          onAiSummaryOperationPendingChange={reportAiSummaryOperationPending}
           onContextDraftConsumed={documentContextPromotion.onContextDraftConsumed}
         />
       ) : null}

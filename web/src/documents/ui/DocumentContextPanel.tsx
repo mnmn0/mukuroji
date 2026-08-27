@@ -102,6 +102,8 @@ export type DocumentContextPanelProps = {
   locale?: Locale
   /** Reports authenticated AI failures to the owning document session guard. */
   onAuthenticatedApiError?: (error: unknown) => void
+  /** Reports Brief generation, decision, and feedback operations to the document screen. */
+  onOperationPendingChange?: (pending: boolean) => void
   /**
    * 表示文言を解決する翻訳関数です。
    */
@@ -179,6 +181,7 @@ export function DocumentContextPanel({
   onCreateComment,
   onDeleteRelation,
   onAuthenticatedApiError,
+  onOperationPendingChange,
   onNavigate,
   onLoadMoreBacklinks,
   onLoadMoreComments,
@@ -376,6 +379,7 @@ export function DocumentContextPanel({
               })}
               locale={locale}
               onAuthenticatedApiError={onAuthenticatedApiError}
+              onOperationPendingChange={onOperationPendingChange}
               sources={[{
                 documentId: document.id,
                 expectedRevision: document.revision,

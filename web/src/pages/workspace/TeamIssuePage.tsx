@@ -3751,6 +3751,15 @@ function IssueDetailContent({
   /** Person field と discussion で使う Workspace member 一覧です。 */
   workspaceMembers: WorkspaceMember[]
 }) {
+  const [isAiSummaryOperationPending, setIsAiSummaryOperationPending] = useState(false)
+  const isAiSummaryOperationPendingRef = useRef(false)
+
+  /** Keeps the Team Issue editor fenced while its Brief assistant is in flight. */
+  function reportAiSummaryOperationPending(pending: boolean) {
+    isAiSummaryOperationPendingRef.current = pending
+    setIsAiSummaryOperationPending(pending)
+  }
+
   const aiSummarySource = {
     expectedRevision: issue.revision,
     teamId: issue.teamId,
@@ -3771,6 +3780,7 @@ function IssueDetailContent({
             onAdopt={onAdopt}
             onAuthenticatedApiError={onAuthenticatedApiError}
             onOperationPendingChange={(pending) => {
+              reportAiSummaryOperationPending(pending)
               onOperationPendingChange?.(createAiAssistantSessionKey(aiSummarySource), pending)
             }}
             sources={[aiSummarySource]}
@@ -3785,7 +3795,6 @@ function IssueDetailContent({
     value: issue.assignedProjectId ?? '',
   })
   const [fieldErrors, setFieldErrors] = useState<Readonly<Record<string, string | undefined>>>({})
-  const [isAiSummaryOperationPending, setIsAiSummaryOperationPending] = useState(false)
   const documentContextPromotion = useDocumentContextPromotion(
     Boolean(collaboration?.context.capabilities.canCreate && !isAiSummaryOperationPending),
     `${issue.teamId}:${issue.id}`,
@@ -3818,7 +3827,7 @@ function IssueDetailContent({
         onSubmit={(event) => {
           event.preventDefault()
 
-          if (!onUpdateIssue) {
+          if (!onUpdateIssue || isAiSummaryOperationPendingRef.current) {
             return
           }
 
@@ -3874,7 +3883,7 @@ function IssueDetailContent({
           </div>
           <IssuePriorityBadge priority={issue.priority} t={t} />
         </div>
-        <fieldset className="contents" disabled={isIssueReadOnly}>
+        <fieldset className="contents" disabled={isIssueReadOnly || isAiSummaryOperationPending}>
           <label className="grid min-w-0 gap-2 text-sm font-semibold text-[var(--workbench-text)]">
             {t('issues.column.title')}
             <input className="workbench-input w-full min-w-0 px-3 py-2 text-lg font-semibold disabled:bg-[var(--workbench-surface-muted)] disabled:text-[var(--workbench-muted)]" defaultValue={resolveIssueTitle(issue, t)} name="title" required />
@@ -3954,7 +3963,7 @@ function IssueDetailContent({
             </div>
           ) : null}
         </fieldset>
-        <button className="workbench-button-primary h-10 px-4 disabled:border-slate-300 disabled:bg-slate-300" disabled={isIssueReadOnly} type="submit">
+        <button className="workbench-button-primary h-10 px-4 disabled:border-slate-300 disabled:bg-slate-300" disabled={isIssueReadOnly || isAiSummaryOperationPending} type="submit">
           {t('issues.detail.save')}
         </button>
         {isIssueReadOnly ? (
@@ -3969,9 +3978,9 @@ function IssueDetailContent({
           <WorkItemDependencyPanel
             canManageEndpoint={canManageDependencyEndpoint}
             currentEndpoint={{ teamId: issue.teamId, workItemId: issue.id }}
-            onCreate={onCreateScheduleDependency}
-            onDelete={onDeleteScheduleDependency}
-            onUpdate={onUpdateScheduleDependency}
+            onCreate={isAiSummaryOperationPending ? undefined : onCreateScheduleDependency}
+            onDelete={isAiSummaryOperationPending ? undefined : onDeleteScheduleDependency}
+            onUpdate={isAiSummaryOperationPending ? undefined : onUpdateScheduleDependency}
             snapshot={planningSnapshot}
             t={t}
           />
@@ -3991,7 +4000,7 @@ function IssueDetailContent({
       {externalLinksAccessToken ? (
         <WorkItemExternalLinksPanelContainer
           accessToken={externalLinksAccessToken}
-          canManage={canManageExternalLinks}
+          canManage={canManageExternalLinks && !isAiSummaryOperationPending}
           locale={locale}
           teamId={issue.teamId}
           workItemId={issue.id}
@@ -4006,13 +4015,13 @@ function IssueDetailContent({
           currentWorkItemId={issue.id}
           isLoading={isRelationsLoading}
           locale={locale}
-          onAddRelation={onAddRelation
+          onAddRelation={onAddRelation && !isAiSummaryOperationPending
             ? (input) => onAddRelation(issue.id, input)
             : undefined}
-          onDeleteRelation={onDeleteRelation
+          onDeleteRelation={onDeleteRelation && !isAiSummaryOperationPending
             ? (relation) => onDeleteRelation(issue.id, relation)
             : undefined}
-          readOnly={!onAddRelation && !onDeleteRelation}
+          readOnly={isAiSummaryOperationPending || (!onAddRelation && !onDeleteRelation)}
           relations={relations}
         />
       </div>
@@ -4036,7 +4045,7 @@ function IssueDetailContent({
           focusedRootCommentId={focusedRootCommentId}
           locale={locale}
           members={workspaceMembers}
-          onAiSummaryOperationPendingChange={setIsAiSummaryOperationPending}
+          onAiSummaryOperationPendingChange={reportAiSummaryOperationPending}
           onContextDraftConsumed={documentContextPromotion.onContextDraftConsumed}
         />
       ) : null}

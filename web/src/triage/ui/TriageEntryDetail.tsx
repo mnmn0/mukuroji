@@ -355,7 +355,10 @@ export function TriageEntryDetail({
                     (entry.capabilities.canAssign || entry.capabilities.canAcceptCreate)
                   return !hasUnsupportedAssignee && (hasSupportedAssignee || hasSupportedProject)
                 }}
-                isMutationPending={actionIsPending}
+                // AI requests must be allowed to start; only domain mutations
+                // disable the composer itself. The combined action state still
+                // fences every external triage control above and below.
+                isMutationPending={isPending || isActionMutationPending}
                 shouldConfirmAdoption={shouldConfirmTriageAdoption}
                 source={{
                   expectedRevision: entry.revision,

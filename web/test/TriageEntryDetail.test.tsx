@@ -154,4 +154,29 @@ describe('TriageEntryDetail', () => {
     expect(html).toContain('member-ada')
     expect(html).not.toContain('Use in Accept / Assign form')
   })
+
+  test('keeps the AI composer startable while a parent operation fence is active', () => {
+    const entry = triageEntryFixtures[0]
+    if (!entry) throw new Error('Expected a triage fixture.')
+    const generateLabel = createTranslator('en')('ai.triage.generate')
+    const html = renderToStaticMarkup(
+      <TriageEntryDetail
+        accessToken="access-token"
+        aiAssistanceController={aiController}
+        isAiOperationPending
+        locale="en"
+        t={createTranslator('en')}
+        teamId="core-team"
+        view={createTriageEntryView(entry)}
+        onBack={() => undefined}
+      />,
+    )
+
+    const generateButton = html.match(
+      new RegExp(`<button[^>]*>${generateLabel}</button>`),
+    )?.[0]
+    expect(generateButton).toBeDefined()
+    expect(generateButton).not.toContain('disabled=""')
+    expect(html).toContain('disabled="" type="button">Change routing')
+  })
 })

@@ -1455,6 +1455,8 @@ export function DocumentScreen({
     useRef<HTMLElement | undefined>(undefined)
   const [contextTab, setContextTab] =
     useState<DocumentContextTab | undefined>(initialContextTab)
+  const [isAiOperationPending, setIsAiOperationPending] = useState(false)
+  const isAiOperationPendingRef = useRef(false)
   const [isShareDialogOpen, setIsShareDialogOpen] =
     useState(initialShareDialogOpen)
   const hasUnsavedChangesRef = useRef(false)
@@ -1467,7 +1469,27 @@ export function DocumentScreen({
     useState<string>()
   const [isExportMenuOpen, setIsExportMenuOpen] = useState(false)
   const selectedDocument = data.selectedDocument
+  const documentAiSessionKey = selectedDocument
+    ? `${selectedDocument.id}:${selectedDocument.revision}`
+    : ''
+  const documentAiSessionKeyRef = useRef(documentAiSessionKey)
   const isContextModal = useMediaQuery('(max-width: 1279px)')
+
+  /** Reports the mounted Document Brief operation state to mutation guards. */
+  const reportAiOperationPending = useCallback((pending: boolean) => {
+    isAiOperationPendingRef.current = pending
+    setIsAiOperationPending(pending)
+  }, [])
+
+  useEffect(() => {
+    if (documentAiSessionKeyRef.current !== documentAiSessionKey) {
+      documentAiSessionKeyRef.current = documentAiSessionKey
+      if (isAiOperationPendingRef.current) reportAiOperationPending(false)
+      return
+    }
+    if (selectedDocument || !isAiOperationPendingRef.current) return
+    reportAiOperationPending(false)
+  }, [documentAiSessionKey, reportAiOperationPending, selectedDocument])
 
   const ensureDraftSaved = useCallback(async () => {
     const guard = draftGuardRef.current
@@ -1493,6 +1515,9 @@ export function DocumentScreen({
   const runGuardedAction = useCallback(
     async (action: () => void | Promise<void>) => {
       setActionErrorMessage(undefined)
+      if (isAiOperationPendingRef.current) {
+        return false
+      }
       if (!(await ensureDraftSaved())) {
         return false
       }
@@ -1633,8 +1658,11 @@ export function DocumentScreen({
           onExportMenuOpenChange={setIsExportMenuOpen}
           onFavoriteChange={
             selectedDocument && actions.setFavorite
-              ? (favorite) =>
-                  actions.setFavorite!(selectedDocument, favorite)
+              ? async (favorite) => {
+                  await runGuardedAction(() =>
+                    actions.setFavorite!(selectedDocument, favorite),
+                  )
+                }
               : undefined
           }
           onLogout={
@@ -1697,7 +1725,7 @@ export function DocumentScreen({
             teams={data.teams}
             onCreateDocument={createDocumentAction}
             onMoveDocument={
-              actions.moveDocument
+              !isAiOperationPending && actions.moveDocument
                 ? async (document, parentId, scope) => {
                     await requireSavedDraft()
                     await actions.moveDocument?.(
@@ -1755,7 +1783,7 @@ export function DocumentScreen({
                 teams={data.teams}
                 onCreateDocument={createDocumentAction}
                 onMoveDocument={
-                  actions.moveDocument
+                  !isAiOperationPending && actions.moveDocument
                     ? async (document, parentId, scope) => {
                         await requireSavedDraft()
                         await actions.moveDocument?.(
@@ -1807,6 +1835,7 @@ export function DocumentScreen({
             ) : selectedDocument ? (
               <DocumentWorkspace
                 key={selectedDocument.id}
+                isAiOperationPending={isAiOperationPending}
                 selectedDocument={selectedDocument}
                 t={t}
                 onActiveAnchorChange={actions.setActiveAnchor}
@@ -1885,11 +1914,13 @@ export function DocumentScreen({
                   locale={locale}
                   modal={isContextModal}
                   onAuthenticatedApiError={onAuthenticatedApiError}
+                  onOperationPendingChange={reportAiOperationPending}
                   t={t}
                   versions={data.versions}
                   onClose={() => changeContextTab(undefined)}
                   onCreateComment={
                     selectedDocument.capabilities.canComment &&
+                    !isAiOperationPending &&
                     actions.createComment
                       ? async (
                           body,
@@ -1929,6 +1960,7 @@ export function DocumentScreen({
                   }
                   onDeleteRelation={
                     selectedDocument.capabilities.canEdit &&
+                    !isAiOperationPending &&
                     actions.applyOperations
                       ? async (relationId) => {
                           const flushedRevision =
@@ -1950,6 +1982,7 @@ export function DocumentScreen({
                   }
                   onResolveComment={
                     selectedDocument.capabilities.canComment &&
+                    !isAiOperationPending &&
                     actions.resolveComment
                       ? (commentId) =>
                           actions.resolveComment?.(
@@ -1960,6 +1993,7 @@ export function DocumentScreen({
                   }
                   onRestoreVersion={
                     selectedDocument.capabilities.canEdit &&
+                    !isAiOperationPending &&
                     actions.restoreVersion
                       ? async (versionId) => {
                           await requireSavedDraft()
@@ -1972,6 +2006,7 @@ export function DocumentScreen({
                   }
                   onUpsertRelation={
                     selectedDocument.capabilities.canEdit &&
+                    !isAiOperationPending &&
                     actions.applyOperations
                       ? async (relation: DocumentRelation) => {
                           const flushedRevision =
@@ -2006,19 +2041,19 @@ export function DocumentScreen({
           t={t}
           onClose={() => setIsShareDialogOpen(false)}
           onCreateShare={
-            actions.createShare
+            !isAiOperationPending && actions.createShare
               ? (input) =>
                   actions.createShare!(selectedDocument.id, input)
               : undefined
           }
           onDeleteShare={
-            actions.deleteShare
+            !isAiOperationPending && actions.deleteShare
               ? (input) =>
                   actions.deleteShare!(selectedDocument.id, input)
               : undefined
           }
           onPermissionChange={
-            actions.updateDocument
+            !isAiOperationPending && actions.updateDocument
               ? async (permission) => {
                   await actions.updateDocument?.(
                     selectedDocument.id,
@@ -2042,6 +2077,8 @@ type DocumentWorkspaceProps = {
    * API から取得した選択中 Document です。
    */
   selectedDocument: DocumentRecord
+  /** Whether the mounted AI Brief is performing a generation or decision. */
+  isAiOperationPending?: boolean
   /**
    * 表示文言を解決する翻訳関数です。
    */
@@ -2102,6 +2139,7 @@ type DocumentWorkspaceProps = {
 }
 
 function DocumentWorkspace({
+  isAiOperationPending = false,
   onActiveAnchorChange,
   onApplyOperations,
   onContextOpen,
@@ -2134,8 +2172,14 @@ function DocumentWorkspace({
   const flushRef = useRef<() => Promise<boolean>>(
     async () => true,
   )
+  const isAiOperationPendingRef = useRef(isAiOperationPending)
+  useEffect(() => {
+    isAiOperationPendingRef.current = isAiOperationPending
+  }, [isAiOperationPending])
   const editable =
-    localDocument.capabilities.canEdit && Boolean(onApplyOperations)
+    localDocument.capabilities.canEdit &&
+    Boolean(onApplyOperations) &&
+    !isAiOperationPending
   const hasUnsavedChanges =
     titleDirty ||
     pendingOperationsRef.current.length > 0 ||
@@ -2177,6 +2221,9 @@ function DocumentWorkspace({
   }, [saveStatus, selectedDocument, titleDirty])
 
   const flushOperations = useCallback(async () => {
+    if (isAiOperationPendingRef.current) {
+      return false
+    }
     if (!onApplyOperations) {
       return pendingOperationsRef.current.length === 0
     }
@@ -2302,6 +2349,7 @@ function DocumentWorkspace({
   )
 
   const queueOperation = (operation: DocumentOperation) => {
+    if (isAiOperationPendingRef.current) return
     onUnsavedStateChange?.(true)
     generationRef.current += 1
     pendingOperationsRef.current = coalesceDocumentOperations([
@@ -2326,6 +2374,9 @@ function DocumentWorkspace({
   }
 
   const performTitleCommit = useCallback(async () => {
+    if (isAiOperationPendingRef.current) {
+      return false
+    }
     const title = titleValueRef.current.trim()
     const savedTitleGeneration = titleGenerationRef.current
     if (
@@ -2530,7 +2581,7 @@ function DocumentWorkspace({
           <input
             aria-label={t('documents.editor.title')}
             className="mt-1 w-full border-0 bg-transparent p-0 text-xl font-semibold text-[var(--workbench-text)] outline-none placeholder:text-[var(--workbench-muted-soft)]"
-            disabled={!localDocument.capabilities.canEdit}
+            disabled={!editable}
             onBlur={() => void commitTitle()}
             onChange={(event) => {
               titleGenerationRef.current += 1
@@ -2554,6 +2605,7 @@ function DocumentWorkspace({
         {saveStatus === 'conflict' || saveStatus === 'error' ? (
           <button
             className="workbench-button-secondary mt-0.5 min-h-9 px-3 text-xs"
+            disabled={isAiOperationPending}
             onClick={() => void retryPendingChanges()}
             type="button"
           >

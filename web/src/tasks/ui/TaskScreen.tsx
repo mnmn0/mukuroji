@@ -570,6 +570,7 @@ export function TaskScreen({
   )
   const [localSelectedDetailTaskKey, setLocalSelectedDetailTaskKey] = useState<string>()
   const [isDetailOpen, setIsDetailOpen] = useState(true)
+  const [isAiOperationPending, setIsAiOperationPending] = useState(false)
   const [isCreateTaskOpen, setIsCreateTaskOpen] = useState(defaultCreateTaskOpen)
   const [createTaskContext, setCreateTaskContext] = useState<TaskCreateContext>()
   const [createTaskError, setCreateTaskError] = useState<string>()
@@ -602,6 +603,7 @@ export function TaskScreen({
   )
   const scheduleUpdateChainRef = useRef<Promise<void>>(Promise.resolve())
   const detailScrollTopRef = useRef(0)
+  const isAiOperationPendingRef = useRef(false)
   const taskContentRef = useRef<HTMLDivElement>(null)
   const pendingCreateTaskContextRef = useRef<TaskCreateContext | undefined>(undefined)
   const onSelectedIssueChangeRef = useRef(onSelectedIssueChange)
@@ -672,6 +674,7 @@ export function TaskScreen({
 
   /** Applies one complete view state locally and forwards it to the route controller. */
   const commitViewState = (nextViewState: TaskScreenViewState) => {
+    if (isAiOperationPendingRef.current) return
     setLocalActiveTab(nextViewState.activeTab)
     setLocalAssigneeFilter(nextViewState.assigneeFilter)
     setLocalDefinitionFilter(nextViewState.definitionFilter)
@@ -903,6 +906,26 @@ export function TaskScreen({
   const selectedDetailTaskKey = selectedDetailTask
     ? createTaskKey(selectedDetailTask)
     : undefined
+  const detailAiSessionKey = detailTask
+    ? `${detailTask.teamId}:${detailTask.id}:${detailTask.revision}`
+    : ''
+  const detailAiSessionKeyRef = useRef(detailAiSessionKey)
+
+  /** Reports the combined AI operation state owned by the selected Work Item. */
+  const reportAiOperationPending = useCallback((pending: boolean) => {
+    isAiOperationPendingRef.current = pending
+    setIsAiOperationPending(pending)
+  }, [])
+
+  useEffect(() => {
+    if (detailAiSessionKeyRef.current !== detailAiSessionKey) {
+      detailAiSessionKeyRef.current = detailAiSessionKey
+      if (isAiOperationPendingRef.current) reportAiOperationPending(false)
+      return
+    }
+    if (detailTask || !isAiOperationPendingRef.current) return
+    reportAiOperationPending(false)
+  }, [detailAiSessionKey, detailTask, reportAiOperationPending])
   const selectedDetailTeamProjects = detailTask
     ? teams.find((team) => team.id === detailTask.teamId)?.projects ?? activeTeamProjects
     : activeTeamProjects
@@ -970,6 +993,7 @@ export function TaskScreen({
     task: CanonicalWorkItem,
     preservePendingAction = false,
   ) => {
+    if (isAiOperationPendingRef.current) return
     if (!preservePendingAction) taskActionCompletion.cancel()
     setTaskViewSelection((currentSelection) => reduceTaskViewSelection(currentSelection, {
       key: createTaskViewItemKey(task.teamId, task.id),
@@ -1014,6 +1038,7 @@ export function TaskScreen({
 
   /** Closes the detail pane without losing the current list position. */
   const handleCloseDetail = () => {
+    if (isAiOperationPendingRef.current) return
     taskActionCompletion.cancel()
     detailScrollTopRef.current = taskContentRef.current?.scrollTop ?? 0
     setIsDetailOpen(false)
@@ -2264,6 +2289,7 @@ export function TaskScreen({
 
   /** Executes a normal row or card open through the same canonical action pipeline. */
   const handleOpenTask = useCallback((task: CanonicalWorkItem) => {
+    if (isAiOperationPendingRef.current) return
     void projectTaskActions.execute(
       'open',
       'click',
@@ -2286,6 +2312,7 @@ export function TaskScreen({
    */
   const handleTaskActionMenuOpen = useCallback<ProjectTaskActionMenuOpenHandler>(
     (task, anchorPoint, returnFocusElement) => {
+      if (isAiOperationPendingRef.current) return
       const taskKey = createTaskViewItemKey(task.teamId, task.id)
       setTaskViewSelection((currentSelection) => reduceTaskViewSelection(currentSelection, {
         key: taskKey,
@@ -2400,7 +2427,7 @@ export function TaskScreen({
   ])
 
   return (
-    <section aria-busy={isLoading} className="flex min-w-0 flex-1 flex-col overflow-hidden">
+    <section aria-busy={isLoading || isAiOperationPending} className="flex min-w-0 flex-1 flex-col overflow-hidden">
         <TaskHeader
           activeTab={activeTab}
           isProjectQuickAccess={isProjectQuickAccess}
@@ -2740,7 +2767,7 @@ export function TaskScreen({
                   focusedRootCommentId={focusedRootCommentId}
                   isLoading={isSelectedIssueDetailLoading}
                   isRelationCandidatesLoading={isRelationCandidatesLoading}
-                  key={`${detailTask?.teamId ?? ''}:${detailTask?.id ?? ''}`}
+                  key={`${detailTask?.teamId ?? ''}:${detailTask?.id ?? ''}:${detailTask?.revision ?? ''}`}
                   locale={locale}
                   onCreateScheduleDependency={canMutateDetailTask
                     ? onCreateScheduleDependency
@@ -2756,6 +2783,7 @@ export function TaskScreen({
                       )
                     : undefined}
                   onClose={handleCloseDetail}
+                  onAiOperationPendingChange={reportAiOperationPending}
                   onDeleteRelation={canMutateDetailTask && onDeleteRelation
                     ? (issueId, relation) => handleProjectTaskActionRelation(
                         issueId,
