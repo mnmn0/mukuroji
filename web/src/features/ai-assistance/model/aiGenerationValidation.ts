@@ -151,7 +151,8 @@ function isAiAssistanceDraft(value: unknown): value is AiAssistanceDraft {
   switch (value.kind) {
     case 'triage':
       return isOptionalSuggested(value.title, (candidate) => isBoundedNonEmptyTrimmedString(candidate, 256)) &&
-        isOptionalSuggested(value.description, isString) &&
+        isOptionalSuggested(value.description, (candidate) =>
+          isBoundedNonEmptyTrimmedString(candidate, 20_000)) &&
         isOptionalSuggested(value.priority, isPriority) &&
         isOptionalSuggested(value.assigneeUserId, (candidate) => isBoundedString(candidate, 256)) &&
         isOptionalSuggested(value.teamId, (candidate) => isBoundedString(candidate, 256)) &&

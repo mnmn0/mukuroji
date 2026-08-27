@@ -10,7 +10,11 @@ import {
 
 const aiAssistanceSettingsQueryConfig = {
   dedupingInterval: 10_000,
-  shouldRetryOnError: false,
+  // Settings failures are non-blocking for the Workspace shell, so SWR must
+  // retry transient preference/policy reads instead of silently disabling AI.
+  shouldRetryOnError: true,
+  errorRetryCount: 3,
+  errorRetryInterval: 5_000,
 } as const
 
 /** Wraps an authenticated request so the owning route can handle session expiry. */

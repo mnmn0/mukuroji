@@ -542,7 +542,7 @@ describe('AI assistance API', () => {
   })
 
   /** Rejects empty model prose before a summary or triage draft becomes reviewable. */
-  test('rejects blank summary claims and triage titles at the browser API boundary', async () => {
+  test('rejects blank summary claims and triage fields at the browser API boundary', async () => {
     const summaryContent = aiSummaryGenerationFixture.content
     const triageContent = aiTriageGenerationFixture.content
     if (
@@ -580,6 +580,31 @@ describe('AI assistance API', () => {
               ...triageContent.draft,
               title: {
                 ...triageContent.draft.title,
+                value: '   ',
+              },
+            },
+          },
+        },
+        input: {
+          locale: 'en',
+          source: {
+            expectedRevision: 1,
+            teamId: 'core-team',
+            triageEntryId: 'triage-1',
+            type: 'triage-entry',
+          },
+          task: 'triage',
+        },
+      },
+      {
+        generation: {
+          ...aiTriageGenerationFixture,
+          content: {
+            ...triageContent,
+            draft: {
+              ...triageContent.draft,
+              description: {
+                ...triageContent.draft.description,
                 value: '   ',
               },
             },
