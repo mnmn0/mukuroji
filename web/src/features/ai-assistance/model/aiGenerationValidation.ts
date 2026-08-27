@@ -69,6 +69,8 @@ const aiAssistanceCitationIdentifierMaximumLength = 256
 const aiAssistanceSummaryItemsMaximumCount = 100
 /** Maximum UTF-8 size of one Summary draft before the review UI renders it. */
 const aiAssistanceSummaryDraftMaximumBytes = 262_144
+/** Maximum UTF-8 size of one Triage draft before the review UI renders it. */
+const aiAssistanceTriageDraftMaximumBytes = 262_144
 /** Maximum number of triage custom-field suggestions. */
 const aiAssistanceTriageCustomFieldsMaximumCount = 50
 /** Maximum number of Search caveats shown before applying a draft. */
@@ -186,7 +188,8 @@ function isAiAssistanceDraft(value: unknown): value is AiAssistanceDraft {
         Array.isArray(value.customFields) &&
         value.customFields.length <= aiAssistanceTriageCustomFieldsMaximumCount &&
         value.customFields.every(isSuggestedCustomField) &&
-        hasUniqueSuggestedCustomFieldIds(value.customFields)
+        hasUniqueSuggestedCustomFieldIds(value.customFields) &&
+        isTriageDraftWithinBudget(value)
     case 'summary':
       if (
         !isBriefItem(value.overview) ||
@@ -411,6 +414,22 @@ function isSummaryDraftWithinBudget(value: Record<string, unknown>): boolean {
 }
 
 /**
+ * Rejects an aggregate Triage draft that would overwhelm the review surface.
+ *
+ * @param value - Record already narrowed to the Triage draft shape.
+ * @returns Whether the serialized draft stays within the bounded UTF-8 budget.
+ */
+function isTriageDraftWithinBudget(value: Record<string, unknown>): boolean {
+  try {
+    const serialized = JSON.stringify(value)
+    return serialized !== undefined &&
+      new TextEncoder().encode(serialized).byteLength <= aiAssistanceTriageDraftMaximumBytes
+  } catch {
+    return false
+  }
+}
+
+/**
  * Validates the complete permission-safe Workspace search filter contract.
  *
  * Optional identifiers are bounded arrays, dates are calendar-valid and
@@ -542,6 +561,7 @@ function isCustomFieldFilterValue(
   if (operator === 'contains') {
     return (isBoundedNonEmptyTrimmedString(value, 20_000)) || (
       Array.isArray(value) &&
+      value.length > 0 &&
       value.length <= 100 &&
       value.every((item) => isBoundedString(item, 512))
     )

@@ -337,7 +337,7 @@ function isReviewableCustomFieldValue(
   if (operator === 'contains') {
     return typeof value === 'string'
       ? value.trim().length > 0 && value.length <= AI_SEARCH_MAX_CUSTOM_FIELD_VALUE_LENGTH
-      : Array.isArray(value) && value.length <= AI_SEARCH_MAX_CUSTOM_FIELD_ARRAY_ITEMS &&
+      : Array.isArray(value) && value.length > 0 && value.length <= AI_SEARCH_MAX_CUSTOM_FIELD_ARRAY_ITEMS &&
         value.every((item) => item.trim().length > 0 && item.length <= AI_SEARCH_MAX_IDENTIFIER_LENGTH)
   }
   if (value === null || typeof value === 'boolean') return true

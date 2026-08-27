@@ -739,16 +739,26 @@ function SearchToolbar({
         </button>
       </div> : null}
 
-      {aiAssistanceEnabled && inputMode === 'plain-language' ? (
-        <NaturalLanguageSearchComposer
-          accessToken={accessToken}
-          locale={locale}
-          onAuthenticatedApiError={onAuthenticatedApiError}
-          onApply={onAiFiltersApply}
-          routeSignature={routeSignature}
-          t={t}
-        />
-      ) : (
+      {aiAssistanceEnabled ? (
+        <div
+          aria-hidden={inputMode !== 'plain-language'}
+          className={inputMode === 'plain-language' ? undefined : 'hidden'}
+        >
+          <NaturalLanguageSearchComposer
+            accessToken={accessToken}
+            locale={locale}
+            onAuthenticatedApiError={onAuthenticatedApiError}
+            onApply={onAiFiltersApply}
+            routeSignature={routeSignature}
+            t={t}
+          />
+        </div>
+      ) : null}
+
+      <div
+        aria-hidden={aiAssistanceEnabled && inputMode === 'plain-language'}
+        className={aiAssistanceEnabled && inputMode === 'plain-language' ? 'hidden' : undefined}
+      >
         <>
       <div className="flex min-w-0 flex-wrap items-center gap-3">
         <label className="relative min-w-[260px] flex-1">
@@ -908,7 +918,7 @@ function SearchToolbar({
         ))}
       </div>
         </>
-      )}
+      </div>
     </section>
   )
 }

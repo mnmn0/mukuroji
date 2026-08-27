@@ -131,7 +131,10 @@ export function AiAssistanceSettingsPanelContainer({
       onPolicyChange={(value) => {
         if (!policy) return
         mutations.clearPolicyFeedback()
-        setPolicyDraft({ baseRevision: policy.revision, value })
+        setPolicyDraft((currentDraft) => ({
+          baseRevision: currentDraft?.baseRevision ?? policy.revision,
+          value,
+        }))
       }}
       onPolicyRetry={() => void policyQuery.mutate()}
       onPolicyUseLatest={() => {
@@ -158,7 +161,10 @@ export function AiAssistanceSettingsPanelContainer({
       onPreferenceChange={(enabled) => {
         if (!preference) return
         mutations.clearPreferenceFeedback()
-        setPreferenceDraft({ baseRevision: preference.revision, value: enabled })
+        setPreferenceDraft((currentDraft) => ({
+          baseRevision: currentDraft?.baseRevision ?? preference.revision,
+          value: enabled,
+        }))
       }}
       onPreferenceUseLatest={() => {
         mutations.clearPreferenceFeedback()

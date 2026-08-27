@@ -57,6 +57,9 @@ describe('AI Search draft model', () => {
       customFields: [{ fieldId: 'risk', operator: 'contains', value: ['high', ' '] }],
     })).toBe(false)
     expect(hasReviewableAiSearchCustomFields({
+      customFields: [{ fieldId: 'risk', operator: 'contains', value: [] }],
+    })).toBe(false)
+    expect(hasReviewableAiSearchCustomFields({
       customFields: [{ fieldId: 'risk', operator: 'equals', value: '' }],
     })).toBe(false)
     expect(hasReviewableAiSearchCustomFields({

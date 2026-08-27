@@ -563,6 +563,34 @@ describe('AI assistance API', () => {
             ...triageContent,
             draft: {
               ...triageContent.draft,
+              customFields: Array.from({ length: 50 }, (_, index) => ({
+                fieldId: `large-field-${index}`,
+                value: Array.from({ length: 100 }, () => 'x'.repeat(512)),
+                reason: 'Visible request context supports this value.',
+                confidence: 'medium',
+                citationIds: ['citation-triage-1'],
+              })),
+            },
+          },
+        },
+        input: {
+          locale: 'en',
+          source: {
+            expectedRevision: 1,
+            teamId: 'core-team',
+            triageEntryId: 'triage-chat-1',
+            type: 'triage-entry',
+          },
+          task: 'triage',
+        },
+      },
+      {
+        generation: {
+          ...aiTriageGenerationFixture,
+          content: {
+            ...triageContent,
+            draft: {
+              ...triageContent.draft,
               title: {
                 ...triageContent.draft.title,
                 reason: 'R'.repeat(2_001),
@@ -973,6 +1001,34 @@ describe('AI assistance API', () => {
       }).catch((caught: unknown) => caught)
       expect(error).toMatchObject({ code: 'InvalidAiAssistanceResponse', status: 502 })
     }
+  })
+
+  /** Rejects empty array contains values before they can broaden every array-valued result. */
+  test('rejects empty Search custom-field contains arrays before review', async () => {
+    const content = aiSearchGenerationFixture.content
+    if (content.availability !== 'available' || content.draft.kind !== 'search') {
+      throw new Error('Search fixture must stay available.')
+    }
+
+    installFetchRecorder([{
+      ...aiSearchGenerationFixture,
+      content: {
+        ...content,
+        draft: {
+          ...content.draft,
+          filters: {
+            ...content.draft.filters,
+            customFields: [{ fieldId: 'risk', operator: 'contains', value: [] }],
+          },
+        },
+      },
+    }])
+    const error = await generateAiAssistance({
+      accessToken: 'access-token',
+      input: { locale: 'en', query: 'risk', task: 'search' },
+      mutationContext,
+    }).catch((caught: unknown) => caught)
+    expect(error).toMatchObject({ code: 'InvalidAiAssistanceResponse', status: 502 })
   })
 
   /** Rejects blank equality values before they can produce a non-reviewable route filter. */
