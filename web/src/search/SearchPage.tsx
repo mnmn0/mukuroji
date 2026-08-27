@@ -704,11 +704,11 @@ function SearchToolbar({
   const columns = getSearchColumns(routeState.layout)
   const routeDateField = getSearchDateField(routeState.filters)
   const [dateFieldOverride, setDateFieldOverride] = useState<{
-    routeField: WorkspaceSearchDateField
+    routeSignature: string
     value: WorkspaceSearchDateField
   }>()
   const [inputMode, setInputMode] = useState<'keyword' | 'plain-language'>('keyword')
-  const dateField = dateFieldOverride?.routeField === routeDateField
+  const dateField = dateFieldOverride?.routeSignature === routeSignature
     ? dateFieldOverride.value
     : routeDateField
 
@@ -833,7 +833,7 @@ function SearchToolbar({
                       ? 'dueDate'
                       : 'updatedAt'
                   const currentDate = asRecord(asRecord(routeState.filters).date)
-                  setDateFieldOverride({ routeField: routeDateField, value: nextDateField })
+                  setDateFieldOverride({ routeSignature, value: nextDateField })
                   if (currentDate.from || currentDate.to) {
                     onFiltersChange({ date: { ...currentDate, field: nextDateField } })
                   }

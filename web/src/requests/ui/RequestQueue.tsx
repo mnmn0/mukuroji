@@ -12,6 +12,7 @@ import {
   type RequestSubmissionModel,
 } from '../model/requestForm'
 import { resolveRequestLocalizedText } from '../model/requestFormLogic'
+import { createSafeTriageRoutingOverride } from '../model/requestTriageRouting'
 
 /**
  * RequestQueue の入力です。
@@ -263,16 +264,15 @@ function RequestSubmissionDetail({
 
   /** Copies proposed conversion fields while retaining fields omitted by the draft. */
   const applyTriageDraft = (draft: AiTriageDraft) => {
+    if (!submission) return
     openConversionAction()
     setTitleOverride((current) => draft.title?.value ?? current)
     setDescriptionOverride((current) => draft.description?.value ?? current)
-    setConversionTargetOverride((current) => ({
-      ...current,
-      ...(draft.teamId ? { teamId: draft.teamId.value } : {}),
-      ...(draft.projectId ? { projectId: draft.projectId.value } : {}),
-      ...(draft.assigneeUserId ? { assigneeUserId: draft.assigneeUserId.value } : {}),
-      ...(draft.priority ? { priority: draft.priority.value } : {}),
-    }))
+    setConversionTargetOverride((current) => createSafeTriageRoutingOverride(
+      submission,
+      draft,
+      current,
+    ))
     const currentDirtyState = conversionOverrideDirtyRef.current
     const nextDirtyState = {
       title: draft.title === undefined ? currentDirtyState.title : false,

@@ -6,6 +6,7 @@ import { aiTriageGenerationFixture } from '../src/features/ai-assistance/fixture
 import { requestSubmissionFixture } from '../src/requests/fixtures'
 import { normalizeRequestSubmission } from '../src/requests/model/requestForm'
 import { RequestQueue } from '../src/requests/ui/RequestQueue'
+import { createSafeTriageRoutingOverride } from '../src/requests/model/requestTriageRouting'
 
 const aiController: AiAssistanceController = {
   cancelGeneration: () => undefined,
@@ -170,5 +171,64 @@ describe('RequestQueue', () => {
     expect(html).toContain('Convert to Work Item')
     expect(html).not.toContain('data-testid="ai-triage-composer"')
     expect(html).not.toContain('Generate draft')
+  })
+
+  test('does not carry the old Team project or status into a changed Team adoption', () => {
+    const submission = {
+      ...normalizeRequestSubmission(requestSubmissionFixture),
+      routing: {
+        ...normalizeRequestSubmission(requestSubmissionFixture).routing,
+        projectId: 'original-team-project',
+        workflowStatusId: 'original-team-status',
+      },
+    }
+    const content = aiTriageGenerationFixture.content
+    if (content.availability !== 'available' || content.draft.kind !== 'triage') {
+      throw new Error('Triage fixture must stay available.')
+    }
+    const changedTeamDraft = {
+      ...content.draft,
+      projectId: undefined,
+      teamId: {
+        ...content.draft.teamId,
+        value: 'new-team',
+      },
+    }
+
+    const override = createSafeTriageRoutingOverride(submission, changedTeamDraft)
+
+    expect(override.teamId).toBeUndefined()
+    expect(override.projectId).toBeUndefined()
+    expect(override.workflowStatusId).toBeUndefined()
+    expect(override.priority).toBe('high')
+  })
+
+  test('applies a changed Team only when no old Team-dependent values are inherited', () => {
+    const baseSubmission = normalizeRequestSubmission(requestSubmissionFixture)
+    const submission = {
+      ...baseSubmission,
+      routing: {
+        ...baseSubmission.routing,
+        projectId: undefined,
+        workflowStatusId: undefined,
+      },
+    }
+    const content = aiTriageGenerationFixture.content
+    if (content.availability !== 'available' || content.draft.kind !== 'triage') {
+      throw new Error('Triage fixture must stay available.')
+    }
+    const changedTeamDraft = {
+      ...content.draft,
+      projectId: undefined,
+      teamId: {
+        ...content.draft.teamId,
+        value: 'new-team',
+      },
+    }
+
+    expect(createSafeTriageRoutingOverride(submission, changedTeamDraft)).toMatchObject({
+      priority: 'high',
+      teamId: 'new-team',
+    })
   })
 })
