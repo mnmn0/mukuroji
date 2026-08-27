@@ -502,6 +502,31 @@ describe('AI assistance API', () => {
           task: 'triage',
         },
       },
+      {
+        generation: {
+          ...aiTriageGenerationFixture,
+          content: {
+            ...triageContent,
+            draft: {
+              ...triageContent.draft,
+              title: {
+                ...triageContent.draft.title,
+                reason: 'R'.repeat(2_001),
+              },
+            },
+          },
+        },
+        input: {
+          locale: 'en',
+          source: {
+            expectedRevision: 1,
+            teamId: 'core-team',
+            triageEntryId: 'triage-chat-1',
+            type: 'triage-entry',
+          },
+          task: 'triage',
+        },
+      },
     ]
 
     for (const { generation, input } of malformedGenerations) {

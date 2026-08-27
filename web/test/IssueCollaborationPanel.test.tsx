@@ -76,6 +76,36 @@ describe('IssueCollaborationPanel', () => {
     expect(body).toContain('Launch readiness notes')
   })
 
+  /** Skips an evidence pair that cannot fit while retaining later summary claims. */
+  test('continues after an evidence line that exceeds the editor limit', () => {
+    const content = aiSummaryGenerationFixture.content
+    if (content.availability !== 'available' || content.draft.kind !== 'summary') {
+      throw new Error('Summary fixture must stay available.')
+    }
+    const longCitations = Array.from({ length: 20 }, (_, index) => ({
+      ...content.citations[0],
+      href: `/${'h'.repeat(2_000)}`,
+      id: `long-citation-${index}`,
+      label: 'L'.repeat(500),
+    }))
+    const oversizedDraft: AiSummaryDraft = {
+      ...content.draft,
+      overview: {
+        ...content.draft.overview,
+        citationIds: longCitations.map((citation) => citation.id),
+      },
+    }
+
+    const body = formatAiSummaryContextBody(
+      oversizedDraft,
+      [...longCitations, ...content.citations],
+      (key) => key,
+    )
+
+    expect(body.length).toBeGreaterThan(0)
+    expect(body).toContain('Confirm the keyboard review before Thursday\\.')
+  })
+
   /** Verifies the Brief tab stays hidden when no authenticated AI source is available. */
   test('omits the Brief tab when no authenticated AI source is supplied', () => {
     const html = renderToStaticMarkup(

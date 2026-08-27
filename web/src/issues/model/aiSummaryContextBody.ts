@@ -85,7 +85,10 @@ function boundContextBody(
           body += `${separator}${truncatedClaim}\n${evidenceLine}`
         }
       }
-      break
+      // Skip an oversized claim/evidence pair, then continue with later claims
+      // that may still fit within the editor boundary.
+      index += 1
+      continue
     }
 
     if (line.length <= remainingLength) {

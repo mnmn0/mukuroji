@@ -77,6 +77,8 @@ const aiAssistanceCitationLabelMaximumLength = 500
 const aiAssistanceCitationHrefMaximumLength = 2_000
 /** Maximum displayed citation excerpt length accepted by the server response contract. */
 const aiAssistanceCitationExcerptMaximumLength = 2_000
+/** Maximum rationale length accepted for one model-generated suggestion or uncertainty note. */
+const aiAssistanceRationaleMaximumLength = 2_000
 
 /**
  * Returns whether an unknown value is a fully grounded available generation for one workflow.
@@ -305,7 +307,7 @@ function isSuggestedValue(
 ): boolean {
   return isRecord(value) &&
     isValue(value.value) &&
-    isString(value.reason) &&
+    isBoundedString(value.reason, aiAssistanceRationaleMaximumLength) &&
     isConfidence(value.confidence) &&
     isCitationIdArray(value.citationIds)
 }
@@ -498,7 +500,7 @@ function isPlanningSubtask(value: unknown): boolean {
     isOptionalString(value.description) &&
     isPriority(value.priority) &&
     (value.plannedEffortMinutes === undefined || isBoundedEffortMinutes(value.plannedEffortMinutes)) &&
-    isString(value.reason) &&
+    isBoundedString(value.reason, aiAssistanceRationaleMaximumLength) &&
     isConfidence(value.confidence) &&
     isCitationIdArray(value.citationIds)
 }
@@ -519,7 +521,7 @@ function isPlanningDependency(value: unknown): boolean {
       'start-to-finish',
     ]) &&
     isBoundedLagDays(value.lagDays) &&
-    isString(value.reason) &&
+    isBoundedString(value.reason, aiAssistanceRationaleMaximumLength) &&
     isConfidence(value.confidence) &&
     isCitationIdArray(value.citationIds)
 }
@@ -595,7 +597,7 @@ function isCitationIdArray(value: unknown): value is string[] {
 function isUncertainty(value: unknown): boolean {
   return isRecord(value) &&
     isConfidence(value.level) &&
-    isString(value.reason)
+    isBoundedString(value.reason, aiAssistanceRationaleMaximumLength)
 }
 
 /** Validates technical generation details and provider usage. */

@@ -5,7 +5,7 @@ import type {
   AiTriageEntrySource,
   CreateAiAssistanceFeedbackRequest,
 } from '@mukuroji/contracts'
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { Locale, MessageKey } from '../../../shared/i18n/i18n'
 import { isReviewableAiAssistanceGeneration } from '../model/aiGenerationValidation'
 import {
@@ -61,11 +61,11 @@ export function AiTriageDraftComposer({
   const [isStale, setIsStale] = useState(false)
   const [confirmationGenerationId, setConfirmationGenerationId] = useState<string>()
   const confirmationRef = useRef<HTMLDivElement>(null)
-  const sourceRef = useRef(source)
   const sourceKey = createTriageSourceKey(source)
-  useEffect(() => {
-    sourceRef.current = source
-  }, [source])
+  const sourceKeyRef = useRef(sourceKey)
+  useLayoutEffect(() => {
+    sourceKeyRef.current = sourceKey
+  }, [sourceKey])
   const canGenerate = Boolean(accessToken || controller)
   const availableDraft = getAvailableTriageDraft(activeController.generation)
   const canAdoptDraft = availableDraft !== undefined &&
@@ -106,7 +106,7 @@ export function AiTriageDraftComposer({
       return
     }
     const reviewedGeneration = await activeController.decide('approved')
-    if (createTriageSourceKey(sourceRef.current) !== requestedSourceKey) {
+    if (sourceKeyRef.current !== requestedSourceKey) {
       setIsStale(true)
       return
     }
