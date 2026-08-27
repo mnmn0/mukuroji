@@ -130,6 +130,7 @@ describe('Workspace search URL state', () => {
     expect(restored.migrationWarnings).toEqual([])
   })
 
+  /** Ensures ordinary filter and layout edits invalidate an earlier approved report. */
   test('ordinary filter and layout edits clear an earlier approved report', () => {
     const state = parseSearchRouteState(new URLSearchParams('report=count&v=1'))
 
@@ -144,6 +145,7 @@ describe('Workspace search URL state', () => {
     expect(afterLayoutEdit.reportMetric).toBeUndefined()
   })
 
+  /** Ensures an explicitly reviewed report remains available for AI application. */
   test('explicitly supplied report state survives an approved AI application', () => {
     const state = parseSearchRouteState(new URLSearchParams('report=count&v=1'))
 
