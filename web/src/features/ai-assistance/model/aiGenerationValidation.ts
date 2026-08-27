@@ -100,6 +100,8 @@ const aiAssistancePromptVersionMaximumLength = 256
 const aiAssistanceTraceIdMaximumLength = 256
 /** Maximum length of a generation identifier used in decision and feedback URLs. */
 const aiAssistanceGenerationIdMaximumLength = 256
+/** Maximum length of a summary, subtask, or dependency row identifier. */
+const aiAssistanceGenerationRowIdentifierMaximumLength = 256
 
 /**
  * Returns whether an unknown value is a fully grounded available generation for one workflow.
@@ -233,7 +235,9 @@ function isAiAssistanceDraft(value: unknown): value is AiAssistanceDraft {
 function hasUniquePlanningRowIds(items: readonly unknown[]): boolean {
   const identifiers = new Set<string>()
   for (const item of items) {
-    if (!isRecord(item) || !isNonEmptyString(item.id) || identifiers.has(item.id)) {
+    if (!isRecord(item) ||
+      !isBoundedString(item.id, aiAssistanceGenerationRowIdentifierMaximumLength) ||
+      identifiers.has(item.id)) {
       return false
     }
     identifiers.add(item.id)
@@ -245,7 +249,9 @@ function hasUniquePlanningRowIds(items: readonly unknown[]): boolean {
 function hasUniqueBriefItemIds(items: readonly unknown[]): boolean {
   const identifiers = new Set<string>()
   for (const item of items) {
-    if (!isRecord(item) || !isNonEmptyString(item.id) || identifiers.has(item.id)) {
+    if (!isRecord(item) ||
+      !isBoundedString(item.id, aiAssistanceGenerationRowIdentifierMaximumLength) ||
+      identifiers.has(item.id)) {
       return false
     }
     identifiers.add(item.id)
@@ -369,7 +375,7 @@ function hasUniqueSuggestedCustomFieldIds(items: readonly unknown[]): boolean {
 /** Validates one grounded brief item. */
 function isBriefItem(value: unknown): boolean {
   return isRecord(value) &&
-    isNonEmptyString(value.id) &&
+    isBoundedString(value.id, aiAssistanceGenerationRowIdentifierMaximumLength) &&
     isBoundedNonEmptyTrimmedString(value.text, 20_000) &&
     isConfidence(value.confidence) &&
     isCitationIdArray(value.citationIds)
@@ -540,7 +546,7 @@ function isSearchReport(value: unknown): boolean {
 /** Validates one proposed planning subtask. */
 function isPlanningSubtask(value: unknown): boolean {
   return isRecord(value) &&
-    isNonEmptyString(value.id) &&
+    isBoundedString(value.id, aiAssistanceGenerationRowIdentifierMaximumLength) &&
     isBoundedNonEmptyTrimmedString(value.title, aiAssistancePlanningSubtaskTitleMaximumLength) &&
     (value.description === undefined ||
       isBoundedNonEmptyTrimmedString(value.description, aiAssistancePlanningSubtaskDescriptionMaximumLength)) &&
@@ -564,7 +570,7 @@ function isTriageUserId(value: unknown): value is string {
 /** Validates one proposed planning dependency. */
 function isPlanningDependency(value: unknown): boolean {
   if (!isRecord(value) ||
-    !isNonEmptyString(value.id) ||
+    !isBoundedString(value.id, aiAssistanceGenerationRowIdentifierMaximumLength) ||
     !isDependencyEndpoint(value.predecessor) ||
     !isDependencyEndpoint(value.successor)) return false
 
@@ -687,15 +693,18 @@ function isGenerationDetails(value: unknown): boolean {
 
 /** Validates token, latency, and optional cost usage metadata. */
 function isUsage(value: unknown): boolean {
-  return isRecord(value) &&
-    (value.inputTokens === undefined || isNonNegativeInteger(value.inputTokens)) &&
+  if (!isRecord(value)) return false
+  const hasCost = value.costUsd !== undefined
+  const hasCostUnavailableReason = value.costUnavailableReason !== undefined
+  return (value.inputTokens === undefined || isNonNegativeInteger(value.inputTokens)) &&
     (value.outputTokens === undefined || isNonNegativeInteger(value.outputTokens)) &&
     isNonNegativeInteger(value.latencyMs) &&
     (value.costUsd === undefined || isNonNegativeFiniteNumber(value.costUsd)) &&
     (value.costUnavailableReason === undefined || isOneOf(value.costUnavailableReason, [
       'provider-not-reported',
       'pricing-not-configured',
-    ]))
+    ])) &&
+    hasCost !== hasCostUnavailableReason
 }
 
 /** Validates a recorded human review decision. */
@@ -798,11 +807,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /** Validates a string without imposing product-specific length constraints. */
 function isString(value: unknown): value is string {
   return typeof value === 'string'
-}
-
-/** Validates a non-empty string identifier. */
-function isNonEmptyString(value: unknown): value is string {
-  return typeof value === 'string' && value.length > 0
 }
 
 /** Validates a non-empty trimmed string within a protocol length bound. */

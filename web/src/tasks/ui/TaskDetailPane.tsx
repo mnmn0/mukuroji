@@ -75,6 +75,8 @@ export type TaskDetailPaneProps = {
   aiAssistanceController?: AiAssistanceController
   /** Whether the dependent AI API deployment has enabled the route-level controls. */
   aiAssistanceEnabled?: boolean
+  /** Whether the Summary workflow is enabled for the current Workspace member. */
+  aiSummaryAssistanceEnabled?: boolean
   /** Reports authenticated AI failures to the owning task route session guard. */
   onAuthenticatedApiError?: (error: unknown) => void
   /** Determines whether the current user may manage one canonical dependency endpoint. */
@@ -176,6 +178,7 @@ export function TaskDetailPane({
   accessToken,
   aiAssistanceController,
   aiAssistanceEnabled = true,
+  aiSummaryAssistanceEnabled,
   assigneeOptions,
   canAccessTriage = false,
   artifacts,
@@ -343,7 +346,7 @@ export function TaskDetailPane({
     type: 'work-item',
     workItemId: task.id,
   } satisfies AiWorkItemSource
-  const collaborationAiAssistance = aiAssistanceEnabled && accessToken && task.teamId
+  const collaborationAiAssistance = (aiSummaryAssistanceEnabled ?? aiAssistanceEnabled) && accessToken && task.teamId
     ? {
         renderBrief: (onAdopt: Parameters<IssueSummaryAiAssistance['renderBrief']>[0]) => (
           <AiSummaryAssistant

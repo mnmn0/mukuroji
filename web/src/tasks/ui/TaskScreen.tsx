@@ -257,6 +257,8 @@ type PendingTaskScheduleUpdate = {
 export type TaskScreenProps = {
   /** Whether the dependent AI API deployment has enabled the route-level controls. */
   aiAssistanceEnabled?: boolean
+  /** Whether the Summary workflow is enabled for the current Workspace member. */
+  aiSummaryAssistanceEnabled?: boolean
   /** Saved task view active when canonical actions are invoked. */
   activeTaskViewId?: string
   /** Shared saved-view lifecycle and display controls rendered above task filters. */
@@ -461,6 +463,7 @@ export function TaskScreen({
   workspaceId = '',
   accessToken,
   aiAssistanceEnabled = true,
+  aiSummaryAssistanceEnabled,
   onAuthenticatedApiError,
   locale,
   projectId,
@@ -2715,6 +2718,7 @@ export function TaskScreen({
                 <TaskDetailPane
                   accessToken={accessToken}
                   aiAssistanceEnabled={aiAssistanceEnabled}
+                  aiSummaryAssistanceEnabled={aiSummaryAssistanceEnabled ?? aiAssistanceEnabled}
                   assigneeOptions={assigneeOptions}
                   onAuthenticatedApiError={onAuthenticatedApiError}
                   artifacts={artifacts}

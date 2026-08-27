@@ -1396,10 +1396,14 @@ export function TaskPage() {
     />
   )
 
+  const aiSummaryAssistanceEnabled = isAiAssistanceTaskEnabled?.('summary') ?? aiAssistanceUiEnabled
+  const aiPlanningAssistanceEnabled = isAiAssistanceTaskEnabled?.('planning') ?? aiAssistanceUiEnabled
+
   return (
     <TaskScreen
       key={projectId}
-      aiAssistanceEnabled={isAiAssistanceTaskEnabled?.('planning') ?? aiAssistanceUiEnabled}
+      aiAssistanceEnabled={aiPlanningAssistanceEnabled}
+      aiSummaryAssistanceEnabled={aiSummaryAssistanceEnabled}
       workspaceId={workspaceId}
       configurationErrorMessage={configurationErrorMessage}
       accessToken={accessToken}

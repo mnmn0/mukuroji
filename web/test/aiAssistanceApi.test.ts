@@ -591,6 +591,72 @@ describe('AI assistance API', () => {
       },
       {
         generation: {
+          ...aiSummaryGenerationFixture,
+          content: {
+            ...summaryContent,
+            draft: {
+              ...summaryContent.draft,
+              overview: {
+                ...summaryContent.draft.overview,
+                id: 'o'.repeat(257),
+              },
+            },
+          },
+        },
+        input: { locale: 'en', sources: [], task: 'summary' },
+      },
+      {
+        generation: {
+          ...aiPlanningGenerationFixture,
+          content: {
+            ...planningContent,
+            draft: {
+              ...planningContent.draft,
+              subtasks: [{
+                ...planningContent.draft.subtasks[0],
+                id: 's'.repeat(257),
+              }],
+            },
+          },
+        },
+        input: {
+          locale: 'en',
+          source: {
+            expectedRevision: 2,
+            teamId: 'core-team',
+            workItemId: 'accessibility-review',
+            type: 'work-item',
+          },
+          task: 'planning',
+        },
+      },
+      {
+        generation: {
+          ...aiPlanningGenerationFixture,
+          content: {
+            ...planningContent,
+            draft: {
+              ...planningContent.draft,
+              dependencies: [{
+                ...planningContent.draft.dependencies[0],
+                id: 'd'.repeat(257),
+              }],
+            },
+          },
+        },
+        input: {
+          locale: 'en',
+          source: {
+            expectedRevision: 2,
+            teamId: 'core-team',
+            workItemId: 'accessibility-review',
+            type: 'work-item',
+          },
+          task: 'planning',
+        },
+      },
+      {
+        generation: {
           ...aiPlanningGenerationFixture,
           content: {
             ...planningContent,
@@ -621,6 +687,46 @@ describe('AI assistance API', () => {
       const error = await generateAiAssistance({
         accessToken: 'access-token',
         input,
+        mutationContext,
+      }).catch((caught: unknown) => caught)
+
+      expect(error).toMatchObject({ code: 'InvalidAiAssistanceResponse', status: 502 })
+    }
+  })
+
+  /** Rejects responses that omit cost evidence or provide contradictory cost metadata. */
+  test('requires exactly one cost amount or unavailability reason', async () => {
+    const malformedGenerations = [
+      {
+        ...aiSummaryGenerationFixture,
+        details: {
+          ...aiSummaryGenerationFixture.details,
+          usage: {
+            ...aiSummaryGenerationFixture.details.usage,
+            costUnavailableReason: 'pricing-not-configured',
+          },
+        },
+      },
+      {
+        ...aiSearchGenerationFixture,
+        details: {
+          ...aiSearchGenerationFixture.details,
+          usage: {
+            ...aiSearchGenerationFixture.details.usage,
+            costUnavailableReason: undefined,
+            costUsd: undefined,
+          },
+        },
+      },
+    ]
+
+    for (const generation of malformedGenerations) {
+      installFetchRecorder([generation])
+      const error = await generateAiAssistance({
+        accessToken: 'access-token',
+        input: generation.task === 'summary'
+          ? { locale: 'en', sources: [], task: 'summary' }
+          : { locale: 'en', query: 'cost metadata', task: 'search' },
         mutationContext,
       }).catch((caught: unknown) => caught)
 
