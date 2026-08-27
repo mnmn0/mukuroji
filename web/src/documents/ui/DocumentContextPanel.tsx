@@ -39,6 +39,7 @@ import {
 import { createDocumentOperationId } from '../model/document'
 import { createCanonicalWorkItemId } from '../model/relations'
 
+/** A tab rendered by the Document context panel. */
 export type { DocumentContextTab } from '../model/contextTabs'
 
 /**

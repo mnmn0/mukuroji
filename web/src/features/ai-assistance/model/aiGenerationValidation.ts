@@ -98,6 +98,8 @@ const aiAssistanceModelIdMaximumLength = 256
 const aiAssistancePromptVersionMaximumLength = 256
 /** Maximum length of a displayed server trace identifier. */
 const aiAssistanceTraceIdMaximumLength = 256
+/** Maximum length of a generation identifier used in decision and feedback URLs. */
+const aiAssistanceGenerationIdMaximumLength = 256
 
 /**
  * Returns whether an unknown value is a fully grounded available generation for one workflow.
@@ -126,7 +128,7 @@ export function isAiAssistanceGeneration(value: unknown): value is AiAssistanceG
   const task = value.task
 
   return value.schemaVersion === 1 &&
-    isNonEmptyString(value.id) &&
+    isBoundedString(value.id, aiAssistanceGenerationIdMaximumLength) &&
     isAiAssistanceTask(task) &&
     isNonNegativeInteger(value.revision) &&
     isAiAssistanceContent(value.content, task) &&

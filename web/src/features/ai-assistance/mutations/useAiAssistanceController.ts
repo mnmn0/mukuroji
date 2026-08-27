@@ -43,7 +43,7 @@ export type UseAiAssistanceControllerOptions = {
 export type AiAssistanceController = {
   /** Cancels the active explicit generation request. */
   cancelGeneration: () => void
-  /** Records approval or rejection without mutating a domain resource. */
+  /** Records approval or rejection without mutating a domain resource; matching decisions are idempotent. */
   decide: (outcome: 'approved' | 'rejected') => Promise<AiAssistanceGeneration | undefined>
   /** Latest safe failure classification. */
   error?: AiAssistanceControllerError
@@ -213,11 +213,16 @@ export function useAiAssistanceController({
       !generation ||
       generationPendingRef.current ||
       decisionPendingRef.current ||
-      feedbackPendingRef.current ||
-      generation.decision
+      feedbackPendingRef.current
     ) {
       return undefined
     }
+
+    // A late-edit confirmation can arrive after the approval response has
+    // already been committed. Reuse the same reviewed generation instead of
+    // issuing a second decision request or losing the approved draft.
+    const existingDecision = resolveExistingAiAssistanceDecision(generation, outcome)
+    if (existingDecision) return existingDecision
 
     const generationId = generation.id
     const operationEpoch = operationEpochRef.current
@@ -364,6 +369,20 @@ export function classifyAiAssistanceError(error: unknown): AiAssistanceControlle
   }
 
   return { code: error.code, kind: 'generic' }
+}
+
+/**
+ * Reuses a generation when the requested decision was already recorded with the same outcome.
+ *
+ * @param generation - Current generation held by the controller.
+ * @param outcome - Decision outcome requested by the adopting workflow.
+ * @returns The generation for a matching decision, or undefined for a missing or conflicting decision.
+ */
+export function resolveExistingAiAssistanceDecision(
+  generation: AiAssistanceGeneration | undefined,
+  outcome: 'approved' | 'rejected',
+): AiAssistanceGeneration | undefined {
+  return generation?.decision?.outcome === outcome ? generation : undefined
 }
 
 /** Returns whether an unknown request failure represents an intentional cancellation. */

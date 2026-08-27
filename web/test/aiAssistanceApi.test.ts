@@ -337,6 +337,22 @@ describe('AI assistance API', () => {
     }
   })
 
+  /** Rejects oversized generation identifiers before they reach decision or feedback URLs. */
+  test('rejects oversized generation identifiers at the browser API boundary', async () => {
+    installFetchRecorder([{
+      ...aiSearchGenerationFixture,
+      id: 'g'.repeat(257),
+    }])
+
+    const error = await generateAiAssistance({
+      accessToken: 'access-token',
+      input: { locale: 'en', query: 'bounded id', task: 'search' },
+      mutationContext,
+    }).catch((caught: unknown) => caught)
+
+    expect(error).toMatchObject({ code: 'InvalidAiAssistanceResponse', status: 502 })
+  })
+
   /** Rejects oversized citation collections and fields before review components render them. */
   test('rejects oversized citation collections, references, and fields', async () => {
     const content = aiSummaryGenerationFixture.content

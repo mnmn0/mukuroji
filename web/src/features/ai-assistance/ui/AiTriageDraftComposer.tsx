@@ -263,7 +263,7 @@ export function AiTriageDraftFields({ citations, draft, t }: AiTriageDraftFields
             {field.label}
           </dt>
           <dd className="whitespace-pre-wrap break-words text-sm font-semibold text-[var(--workbench-text)]">
-            {formatSuggestedValue(field.suggestion.value)}
+            {formatSuggestedValue(field.suggestion.value, t('ai.triage.field.notSet'))}
           </dd>
           <dd className="flex flex-wrap items-start justify-between gap-2 text-xs font-medium text-[var(--workbench-muted)]">
             <span className="min-w-0 flex-1">{field.suggestion.reason}</span>
@@ -315,8 +315,11 @@ function hasSupportedTriageAdoption(
 }
 
 /** Formats a supported custom-field or scalar suggestion without rendering unsafe markup. */
-function formatSuggestedValue(value: string | number | boolean | readonly string[] | null): string {
-  if (value === null) return '—'
+function formatSuggestedValue(
+  value: string | number | boolean | readonly string[] | null,
+  emptyValueLabel: string,
+): string {
+  if (value === null) return emptyValueLabel
   if (Array.isArray(value)) return value.join(', ')
   return String(value)
 }

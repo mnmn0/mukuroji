@@ -57,6 +57,7 @@ export const aiAssistanceMessages = {
   'ai.triage.field.team': 'Team',
   'ai.triage.field.project': 'Project',
   'ai.triage.field.customField': 'Custom field · {fieldId}',
+  'ai.triage.field.notSet': 'Not set',
   'ai.triage.empty': 'No applicable field suggestions were returned.',
   'ai.search.mode': 'Search method',
   'ai.search.mode.keyword': 'Keyword',

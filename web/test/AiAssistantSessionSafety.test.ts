@@ -1,8 +1,10 @@
 import { describe, expect, test } from 'bun:test'
+import type { AiAssistanceGeneration } from '@mukuroji/contracts'
 import { resolveDocumentContextTabTarget } from '../src/documents/model/contextTabs'
 import { createAiAssistantSessionKey } from '../src/features/ai-assistance/model/assistantSessionKey'
 import { createTriageSourceKey } from '../src/features/ai-assistance/model/triageSourceKey'
 import { aiPlanningGenerationFixture } from '../src/features/ai-assistance/fixtures'
+import { resolveExistingAiAssistanceDecision } from '../src/features/ai-assistance/mutations/useAiAssistanceController'
 import { routeAiPlanningDraftAdoption } from '../src/planning/model/aiDraftAdoption'
 
 describe('AI assistant source sessions', () => {
@@ -84,6 +86,21 @@ describe('AI assistant source sessions', () => {
 })
 
 describe('Planning AI draft adoption safety', () => {
+  /** Reuses an already approved generation for a late replacement confirmation. */
+  test('returns only a generation whose recorded decision matches the requested outcome', () => {
+    const approvedGeneration = {
+      ...aiPlanningGenerationFixture,
+      decision: {
+        outcome: 'approved',
+        decidedAt: '2026-08-28T00:00:00.000Z',
+      },
+    } satisfies AiAssistanceGeneration
+
+    expect(resolveExistingAiAssistanceDecision(approvedGeneration, 'approved')).toBe(approvedGeneration)
+    expect(resolveExistingAiAssistanceDecision(approvedGeneration, 'rejected')).toBeUndefined()
+    expect(resolveExistingAiAssistanceDecision(aiPlanningGenerationFixture, 'approved')).toBeUndefined()
+  })
+
   test('stages a reviewed draft instead of replacing dirty manual fields', () => {
     const content = aiPlanningGenerationFixture.content
     if (content.availability !== 'available' || content.draft.kind !== 'planning') {
