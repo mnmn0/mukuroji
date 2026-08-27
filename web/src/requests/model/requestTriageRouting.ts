@@ -68,8 +68,9 @@ export function canAdoptRequestTriageDraft(
     draft.description !== undefined ||
     draft.priority !== undefined ||
     draft.assigneeUserId !== undefined
-  const hasSafeRoutingProposal = (draft.teamId !== undefined && safeRouting.teamId !== undefined) ||
-    (draft.projectId !== undefined && safeRouting.projectId !== undefined)
+  const hasSafeRoutingProposal =
+    (draft.teamId !== undefined && safeRouting.teamId === draft.teamId.value) ||
+    (draft.projectId !== undefined && safeRouting.projectId === draft.projectId.value)
 
   return hasNonRoutingProposal || hasSafeRoutingProposal
 }

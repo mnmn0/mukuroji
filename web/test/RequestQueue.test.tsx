@@ -247,4 +247,40 @@ describe('RequestQueue', () => {
     })
     expect(canAdoptRequestTriageDraft(submission, changedTeamDraft)).toBe(true)
   })
+
+  /** Blocks a new Team proposal when a prior local override would remain applied. */
+  test('does not adopt a Team proposal that conflicts with an existing local routing override', () => {
+    const submission = normalizeRequestSubmission(requestSubmissionFixture)
+    const content = aiTriageGenerationFixture.content
+    if (content.availability !== 'available' || content.draft.kind !== 'triage') {
+      throw new Error('Triage fixture must stay available.')
+    }
+    const changedTeamDraft = {
+      ...content.draft,
+      projectId: undefined,
+      teamId: {
+        ...content.draft.teamId,
+        value: 'team-c',
+      },
+      assigneeUserId: undefined,
+      description: undefined,
+      priority: undefined,
+      title: undefined,
+    }
+    const currentOverride = {
+      projectId: 'team-b-project',
+      teamId: 'team-b',
+    }
+
+    expect(createSafeTriageRoutingOverride(
+      submission,
+      changedTeamDraft,
+      currentOverride,
+    )).toMatchObject(currentOverride)
+    expect(canAdoptRequestTriageDraft(
+      submission,
+      changedTeamDraft,
+      currentOverride,
+    )).toBe(false)
+  })
 })
