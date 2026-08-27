@@ -6,6 +6,7 @@ import type {
   WorkspaceSearchDateField,
   WorkspaceSearchFilters,
 } from '@mukuroji/contracts'
+import { isSearchFilterTransportWithinGetBudget } from './searchFilterTransportBudget'
 
 /** Search entity types that can be edited in an AI filter draft. */
 export const aiSearchEntityTypes: readonly SearchEntityType[] = [
@@ -131,6 +132,7 @@ export function hasReviewableAiSearchCustomFields(
 export function hasReviewableAiSearchFilterBounds(
   filters: WorkspaceSearchFilters,
 ): boolean {
+  if (!isSearchFilterTransportWithinGetBudget(filters)) return false
   if (filters.keyword !== undefined && (
     typeof filters.keyword !== 'string' ||
     filters.keyword.length > AI_SEARCH_MAX_KEYWORD_LENGTH

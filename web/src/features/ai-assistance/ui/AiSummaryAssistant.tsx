@@ -26,6 +26,8 @@ export type AiSummaryAssistantProps = {
   accessToken?: string
   /** Reports authenticated AI failures to the owning collaboration session guard. */
   onAuthenticatedApiError?: (error: unknown) => void
+  /** Reports generation, decision, or feedback activity to adjacent promotion guards. */
+  onOperationPendingChange?: (pending: boolean) => void
   /** Label for the optional workflow-specific draft adoption action. */
   adoptLabel?: string
   /** Optional operator focus sent with the audited generation request. */
@@ -59,6 +61,7 @@ export function AiSummaryAssistant({
   locale,
   onAuthenticatedApiError,
   onAdopt,
+  onOperationPendingChange,
   sources,
   t,
 }: AiSummaryAssistantProps) {
@@ -80,6 +83,7 @@ export function AiSummaryAssistant({
       onCancelGeneration={controller.cancelGeneration}
       onDecide={controller.decide}
       onFeedback={controller.sendFeedback}
+      onOperationPendingChange={onOperationPendingChange}
       onGenerate={() => controller.generate({
         ...(focus?.trim() ? { focus: focus.trim() } : {}),
         locale,
@@ -129,6 +133,8 @@ export type AiSummaryAssistantViewProps = {
   onDecide: (outcome: 'approved' | 'rejected') => Promise<AiAssistanceGeneration | undefined>
   /** Records usefulness feedback for the audited generation. */
   onFeedback?: (rating: CreateAiAssistanceFeedbackRequest['rating']) => void | Promise<void>
+  /** Reports operation activity so adjacent source promotion can be disabled. */
+  onOperationPendingChange?: (pending: boolean) => void
   /** Runs a generation only after explicit form submission. */
   onGenerate: () => void | Promise<unknown>
   /** Localized message resolver. */
@@ -159,6 +165,7 @@ export function AiSummaryAssistantView({
   onCancelGeneration,
   onDecide,
   onFeedback,
+  onOperationPendingChange,
   onGenerate,
   t,
 }: AiSummaryAssistantViewProps) {
@@ -170,8 +177,38 @@ export function AiSummaryAssistantView({
   const handleGenerate = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (!canGenerate || isOperationPending) return
-    void onGenerate()
+    onOperationPendingChange?.(true)
+    void Promise.resolve()
+      .then(() => onGenerate())
+      .then(
+        () => onOperationPendingChange?.(false),
+        () => onOperationPendingChange?.(false),
+      )
   }
+
+  /** Keeps the parent promotion guard active while an approval decision is persisted. */
+  const handleDecide = async (
+    outcome: 'approved' | 'rejected',
+  ): Promise<AiAssistanceGeneration | undefined> => {
+    onOperationPendingChange?.(true)
+    try {
+      return await onDecide(outcome)
+    } finally {
+      onOperationPendingChange?.(false)
+    }
+  }
+
+  /** Keeps the parent promotion guard active while usefulness feedback is persisted. */
+  const handleFeedback = onFeedback
+    ? async (rating: CreateAiAssistanceFeedbackRequest['rating']) => {
+        onOperationPendingChange?.(true)
+        try {
+          await onFeedback(rating)
+        } finally {
+          onOperationPendingChange?.(false)
+        }
+      }
+    : undefined
 
   return (
     <div className="grid gap-4" data-testid="ai-summary-assistant">
@@ -214,13 +251,13 @@ export function AiSummaryAssistantView({
           adoptLabel={adoptLabel ?? (!onAdopt ? t('ai.review.approve') : undefined)}
           onAdopt={availableDraft
             ? async () => {
-                await approveAiSummaryDraft(onDecide, onAdopt)
+                await approveAiSummaryDraft(handleDecide, onAdopt)
               }
             : undefined}
-          onFeedback={onFeedback}
+          onFeedback={handleFeedback}
           onReject={availableDraft
             ? async () => {
-                await onDecide('rejected')
+                await handleDecide('rejected')
               }
             : undefined}
           renderDraft={({ citations, draft }) => draft.kind === 'summary' ? (

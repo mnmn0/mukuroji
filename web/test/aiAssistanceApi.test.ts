@@ -958,6 +958,67 @@ describe('AI assistance API', () => {
     }
   })
 
+  /** Rejects blank equality values before they can produce a non-reviewable route filter. */
+  test('rejects blank Search custom-field equality values before review', async () => {
+    const content = aiSearchGenerationFixture.content
+    if (content.availability !== 'available' || content.draft.kind !== 'search') {
+      throw new Error('Search fixture must stay available.')
+    }
+
+    for (const operator of ['equals', 'not-equals'] as const) {
+      for (const value of ['', '   ']) {
+        installFetchRecorder([{
+          ...aiSearchGenerationFixture,
+          content: {
+            ...content,
+            draft: {
+              ...content.draft,
+              filters: {
+                ...content.draft.filters,
+                customFields: [{ fieldId: 'risk', operator, value }],
+              },
+            },
+          },
+        }])
+        const error = await generateAiAssistance({
+          accessToken: 'access-token',
+          input: { locale: 'en', query: 'risk', task: 'search' },
+          mutationContext,
+        }).catch((caught: unknown) => caught)
+        expect(error).toMatchObject({ code: 'InvalidAiAssistanceResponse', status: 502 })
+      }
+    }
+  })
+
+  /** Rejects generated filters whose encoded GET payload exceeds the Search transport budget. */
+  test('rejects an oversized Search filter query before review', async () => {
+    const content = aiSearchGenerationFixture.content
+    if (content.availability !== 'available' || content.draft.kind !== 'search') {
+      throw new Error('Search fixture must stay available.')
+    }
+    installFetchRecorder([{
+      ...aiSearchGenerationFixture,
+      content: {
+        ...content,
+        draft: {
+          ...content.draft,
+          filters: {
+            ...content.draft.filters,
+            teamIds: Array.from({ length: 20 }, (_, index) => `team-${index}-${'x'.repeat(400)}`),
+          },
+        },
+      },
+    }])
+
+    const error = await generateAiAssistance({
+      accessToken: 'access-token',
+      input: { locale: 'en', query: 'large filter', task: 'search' },
+      mutationContext,
+    }).catch((caught: unknown) => caught)
+
+    expect(error).toMatchObject({ code: 'InvalidAiAssistanceResponse', status: 502 })
+  })
+
   test('rejects duplicate planning row identifiers at the browser API boundary', async () => {
     const content = aiPlanningGenerationFixture.content
     installFetchRecorder([{

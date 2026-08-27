@@ -10,6 +10,7 @@ import type {
   WorkspaceSearchDateField,
 } from '@mukuroji/contracts'
 import { isSafeApplicationPath } from '../../../shared/routing/applicationPath'
+import { isSearchFilterTransportWithinGetBudget } from '../../../search/model/searchFilterTransportBudget'
 
 const confidenceValues = ['high', 'medium', 'low'] as const
 const sourceTypeValues = [
@@ -413,7 +414,8 @@ function isWorkspaceSearchFilters(value: unknown): boolean {
     isOptionalStringArray(value.relationIds, 100, 512) &&
     (value.date === undefined || isSearchDate(value.date)) &&
     isOptionalStringArray(value.projectIds, 100, 512) &&
-    isOptionalStringArray(value.teamIds, 100, 512)
+    isOptionalStringArray(value.teamIds, 100, 512) &&
+    isSearchFilterTransportWithinGetBudget(value)
 }
 
 /** Validates a Workspace search date boundary. */
@@ -525,6 +527,11 @@ function isCustomFieldFilterValue(
       value.length <= 100 &&
       value.every((item) => isBoundedString(item, 512))
     )
+  }
+  if (operator === 'equals' || operator === 'not-equals') {
+    return typeof value === 'string'
+      ? isBoundedNonEmptyTrimmedString(value, 20_000)
+      : isCustomFieldValue(value)
   }
   return isCustomFieldValue(value)
 }

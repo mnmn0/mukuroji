@@ -3759,7 +3759,10 @@ function IssueDetailContent({
   } satisfies AiWorkItemSource
   const collaborationAiAssistance = aiAssistanceEnabled && accessToken
     ? {
-        renderBrief: (onAdopt: Parameters<IssueSummaryAiAssistance['renderBrief']>[0]) => (
+        renderBrief: (
+          onAdopt: Parameters<IssueSummaryAiAssistance['renderBrief']>[0],
+          onOperationPendingChange: Parameters<IssueSummaryAiAssistance['renderBrief']>[1],
+        ) => (
           <AiSummaryAssistant
             accessToken={accessToken}
             adoptLabel={t('ai.summary.adoptContext')}
@@ -3767,6 +3770,7 @@ function IssueDetailContent({
             locale={locale}
             onAdopt={onAdopt}
             onAuthenticatedApiError={onAuthenticatedApiError}
+            onOperationPendingChange={onOperationPendingChange}
             sources={[aiSummarySource]}
             t={t}
           />
@@ -3779,8 +3783,9 @@ function IssueDetailContent({
     value: issue.assignedProjectId ?? '',
   })
   const [fieldErrors, setFieldErrors] = useState<Readonly<Record<string, string | undefined>>>({})
+  const [isAiSummaryOperationPending, setIsAiSummaryOperationPending] = useState(false)
   const documentContextPromotion = useDocumentContextPromotion(
-    Boolean(collaboration?.context.capabilities.canCreate),
+    Boolean(collaboration?.context.capabilities.canCreate && !isAiSummaryOperationPending),
     `${issue.teamId}:${issue.id}`,
     collaborationRoute?.onCollaborationTabChange,
   )
@@ -4029,6 +4034,7 @@ function IssueDetailContent({
           focusedRootCommentId={focusedRootCommentId}
           locale={locale}
           members={workspaceMembers}
+          onAiSummaryOperationPendingChange={setIsAiSummaryOperationPending}
           onContextDraftConsumed={documentContextPromotion.onContextDraftConsumed}
         />
       ) : null}

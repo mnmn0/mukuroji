@@ -56,6 +56,12 @@ describe('AI Search draft model', () => {
     expect(hasReviewableAiSearchCustomFields({
       customFields: [{ fieldId: 'risk', operator: 'contains', value: ['high', ' '] }],
     })).toBe(false)
+    expect(hasReviewableAiSearchCustomFields({
+      customFields: [{ fieldId: 'risk', operator: 'equals', value: '' }],
+    })).toBe(false)
+    expect(hasReviewableAiSearchCustomFields({
+      customFields: [{ fieldId: 'risk', operator: 'not-equals', value: '   ' }],
+    })).toBe(false)
   })
 
   test('rejects reversed or invalid edited date ranges before approval', () => {
@@ -85,6 +91,9 @@ describe('AI Search draft model', () => {
     })).toBe(true)
     expect(hasReviewableAiSearchFilterBounds({ statuses: ['in progress'] })).toBe(false)
     expect(hasReviewableAiSearchFilterBounds({ statuses: ['x'.repeat(129)] })).toBe(false)
+    expect(hasReviewableAiSearchFilterBounds({
+      teamIds: Array.from({ length: 20 }, (_, index) => `team-${index}-${'x'.repeat(400)}`),
+    })).toBe(false)
   })
 
   test('parses repeated identifiers and supported custom values without widening the contract', () => {

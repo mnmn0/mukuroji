@@ -57,6 +57,7 @@ export type IssueSummaryAiAssistance = {
    */
   renderBrief: (
     onAdopt: ((draft: AiSummaryDraft, citations: readonly AiAssistanceCitation[]) => void) | undefined,
+    onOperationPendingChange: ((pending: boolean) => void) | undefined,
   ) => ReactNode
 }
 
@@ -93,6 +94,8 @@ export type IssueCollaborationPanelProps = {
   contextDraft?: IssueContextDraft
   /** Called after an externally supplied source draft is opened. */
   onContextDraftConsumed?: () => void
+  /** Receives whether the mounted Brief assistant is performing an AI operation. */
+  onAiSummaryOperationPendingChange?: (pending: boolean) => void
   /** Optional outer layout class name. */
   className?: string
 }
@@ -119,6 +122,7 @@ export function IssueCollaborationPanel({
   locale,
   members,
   onContextDraftConsumed,
+  onAiSummaryOperationPendingChange,
   readOnlyMessage,
   route,
 }: IssueCollaborationPanelProps) {
@@ -128,6 +132,7 @@ export function IssueCollaborationPanel({
     useState<IssueContextDraft>()
   const [selectedSource, setSelectedSource] = useState<IssueSourceTarget>()
   const [hasOverriddenDraftTab, setHasOverriddenDraftTab] = useState(false)
+  const [isAiSummaryOperationPending, setIsAiSummaryOperationPending] = useState(false)
   const contextDraft = externalContextDraft ?? promotedContextDraft
   const panelIdPrefix = useId()
   const aiAssistantSessionKey = aiAssistance?.sessionKey
@@ -140,6 +145,11 @@ export function IssueCollaborationPanel({
   const selectedTab = requestedTab === 'brief' && !aiAssistance
     ? 'conversation'
     : requestedTab
+
+  const handleAiSummaryOperationPendingChange = useCallback((pending: boolean) => {
+    setIsAiSummaryOperationPending(pending)
+    onAiSummaryOperationPendingChange?.(pending)
+  }, [onAiSummaryOperationPendingChange])
 
   const handleAiSummaryAdopt = useAiSummaryAdoptionHandler(
     aiAssistantSessionKey,
@@ -450,7 +460,7 @@ export function IssueCollaborationPanel({
             locale={locale}
             members={members}
             onPromoteComment={
-              controller.context.capabilities.canCreate
+              controller.context.capabilities.canCreate && !isAiSummaryOperationPending
                 ? promoteCommentSource
                 : undefined
             }
@@ -493,17 +503,20 @@ export function IssueCollaborationPanel({
             locale={locale}
             members={members}
             onPromoteActivity={
-              controller.context.capabilities.canCreate
+              controller.context.capabilities.canCreate && !isAiSummaryOperationPending
                 ? promoteActivitySource
                 : undefined
             }
           />
         ) : null}
-        {selectedTab === 'brief' && aiAssistance && aiAssistantSessionKey ? (
-          <div className="px-5 py-5">
+        {aiAssistance && aiAssistantSessionKey ? (
+          <div
+            aria-hidden={selectedTab !== 'brief'}
+            className={selectedTab === 'brief' ? 'px-5 py-5' : 'hidden'}
+          >
             {aiAssistance.renderBrief(controller.context.capabilities.canCreate && !contextDraft
               ? handleAiSummaryAdopt
-              : undefined)}
+              : undefined, handleAiSummaryOperationPendingChange)}
           </div>
         ) : null}
         {selectedTab === 'decisions' ? (

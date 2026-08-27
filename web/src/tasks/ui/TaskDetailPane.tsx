@@ -224,8 +224,9 @@ export function TaskDetailPane({
     dirty: false,
     identity: '',
   })
+  const [isAiSummaryOperationPending, setIsAiSummaryOperationPending] = useState(false)
   const documentContextPromotion = useDocumentContextPromotion(
-    Boolean(collaboration?.context.capabilities.canCreate),
+    Boolean(collaboration?.context.capabilities.canCreate && !isAiSummaryOperationPending),
     `${task?.teamId ?? ''}:${task?.id ?? ''}`,
     collaborationRoute?.onCollaborationTabChange,
   )
@@ -348,7 +349,10 @@ export function TaskDetailPane({
   } satisfies AiWorkItemSource
   const collaborationAiAssistance = (aiSummaryAssistanceEnabled ?? aiAssistanceEnabled) && accessToken && task.teamId
     ? {
-        renderBrief: (onAdopt: Parameters<IssueSummaryAiAssistance['renderBrief']>[0]) => (
+        renderBrief: (
+          onAdopt: Parameters<IssueSummaryAiAssistance['renderBrief']>[0],
+          onOperationPendingChange: Parameters<IssueSummaryAiAssistance['renderBrief']>[1],
+        ) => (
           <AiSummaryAssistant
             accessToken={accessToken}
             adoptLabel={t('ai.summary.adoptContext')}
@@ -356,6 +360,7 @@ export function TaskDetailPane({
             locale={locale}
             onAdopt={onAdopt}
             onAuthenticatedApiError={onAuthenticatedApiError}
+            onOperationPendingChange={onOperationPendingChange}
             sources={[aiSummarySource]}
             t={t}
           />
@@ -859,6 +864,7 @@ export function TaskDetailPane({
           focusedRootCommentId={focusedRootCommentId}
           locale={locale}
           members={workspaceMembers}
+          onAiSummaryOperationPendingChange={setIsAiSummaryOperationPending}
           onContextDraftConsumed={documentContextPromotion.onContextDraftConsumed}
         />
       ) : null}
