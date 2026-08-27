@@ -50,7 +50,7 @@ const searchDateFieldValues = [
   'updatedAt',
   'dueDate',
 ] as const satisfies readonly WorkspaceSearchDateField[]
-const workflowStatusIdPattern = /^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$/iu
+const workflowStatusIdPattern = /^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$/i
 
 /** Maximum UTF-8 size accepted by the Planning status update endpoint. */
 const planningStatusUpdateTextMaximumBytes = 8_000

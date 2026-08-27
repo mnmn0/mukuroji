@@ -300,7 +300,7 @@ function hasBoundedStatusIdList(values: readonly string[] | undefined): boolean 
       value.length > 0 &&
       value.length <= AI_SEARCH_MAX_STATUS_ID_LENGTH &&
       value === value.trim() &&
-      /^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$/iu.test(value)
+      /^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$/i.test(value)
     ))
   )
 }
