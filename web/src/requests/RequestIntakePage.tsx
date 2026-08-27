@@ -25,6 +25,7 @@ import {
   type ProjectDirectoryTeam,
 } from '../projects/api'
 import { useProjectDirectory } from '../projects/queries/useProjectDirectory'
+import { useWorkspaceAccess } from '../workspace/queries/useWorkspaceAccess'
 import {
   type RequestsView,
 } from '../shared/routing/paths'
@@ -55,7 +56,10 @@ import {
   updateRequestFormInput,
   type RequestFormDraftModel,
 } from './model/requestForm'
-import type { RequestRoutingProjectDirectory } from './model/requestTriageRouting'
+import type {
+  RequestRoutingAssigneeDirectory,
+  RequestRoutingProjectDirectory,
+} from './model/requestTriageRouting'
 import { RequestQueue } from './ui/RequestQueue'
 import { useOptionalWorkspaceRouteContext } from '../workspace/ui/WorkspaceRouteProvider'
 
@@ -115,6 +119,19 @@ export function RequestIntakePage() {
     (workspaceContext?.isAiAssistanceTaskEnabled?.('triage') ?? aiAssistanceUiEnabled) &&
       accessToken && user && !currentUserError,
   )
+  const {
+    data: workspaceAccess,
+    error: workspaceAccessError,
+  } = useWorkspaceAccess(accessToken, canUseAiAssistance)
+  const activeAssigneeDirectory = useMemo<RequestRoutingAssigneeDirectory | undefined>(() => {
+    if (!workspaceAccess) return undefined
+    return new Set(
+      workspaceAccess.members
+        .filter((member) => member.status === 'active' && member.role !== 'guest')
+        .map((member) => member.memberKey.trim().toLowerCase())
+        .filter((memberKey) => memberKey.length > 0),
+    )
+  }, [workspaceAccess])
   const activeView: RequestsView = requestedView === 'forms' && canManageForms
     ? 'forms'
     : 'queue'
@@ -179,6 +196,7 @@ export function RequestIntakePage() {
       projectDirectoryError,
       queueError,
       formsError,
+      workspaceAccessError,
       detailError,
       selectedFormError,
       authenticatedApiError,
@@ -333,6 +351,7 @@ export function RequestIntakePage() {
                 onLoadMore={() => void setQueuePageCount(queuePageCount + 1)}
                 onOpenAttachment={handleOpenAttachment}
                 onSelectSubmission={selectSubmission}
+                assigneeDirectory={activeAssigneeDirectory}
                 projectDirectory={projectDirectory}
               />
             ) : (

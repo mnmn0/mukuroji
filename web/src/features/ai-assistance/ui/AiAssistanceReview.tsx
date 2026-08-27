@@ -4,7 +4,7 @@ import type {
   AiAssistanceGeneration,
   CreateAiAssistanceFeedbackRequest,
 } from '@mukuroji/contracts'
-import { useId, type ReactNode } from 'react'
+import { useEffect, useId, useState, type ReactNode } from 'react'
 import type { MessageKey } from '../../../shared/i18n/i18n'
 import { isSafeApplicationPath } from '../../../shared/routing/applicationPath'
 import {
@@ -100,6 +100,20 @@ export function AiAssistanceReview({
 }: AiAssistanceReviewProps) {
   const reviewTitleId = useId()
   const citationsTitleId = useId()
+  const [, setExpiryTick] = useState(0)
+
+  /** Re-renders the review when the retained generation crosses its expiry boundary. */
+  useEffect(() => {
+    if (!generation?.expiresAt) return
+    const delay = Date.parse(generation.expiresAt) - Date.now()
+    if (!Number.isFinite(delay) || delay <= 0) return
+    // Browser timers clamp delays above a signed 32-bit integer; wake up again
+    // after the safe maximum when a retention window spans more than 24 days.
+    const timeoutId = setTimeout(() => {
+      setExpiryTick((tick) => tick + 1)
+    }, Math.min(delay, 2_147_000_000))
+    return () => clearTimeout(timeoutId)
+  }, [generation?.expiresAt, generation?.id])
 
   if (!generation && !isGenerating && !errorKind) return null
 

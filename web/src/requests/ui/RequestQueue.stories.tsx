@@ -46,6 +46,7 @@ const meta = {
     onLoadMore: () => undefined,
     onOpenAttachment: async () => undefined,
     onSelectSubmission: () => undefined,
+    assigneeDirectory: new Set(['member-ada']),
     projectDirectory,
     selectedSubmission: normalizedSubmission,
     submissions: [normalizedSubmission],

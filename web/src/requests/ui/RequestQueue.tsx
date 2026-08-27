@@ -15,6 +15,7 @@ import { resolveRequestLocalizedText } from '../model/requestFormLogic'
 import {
   canAdoptRequestTriageDraft,
   createSafeTriageRoutingOverride,
+  type RequestRoutingAssigneeDirectory,
   type RequestRoutingProjectDirectory,
 } from '../model/requestTriageRouting'
 
@@ -30,6 +31,8 @@ export type RequestQueueProps = {
   canUseAiAssistance?: boolean
   /** Team-scoped Project IDs used to validate AI routing proposals before adoption. */
   projectDirectory?: RequestRoutingProjectDirectory
+  /** Active non-guest Workspace member keys used to validate AI assignee proposals before adoption. */
+  assigneeDirectory?: RequestRoutingAssigneeDirectory
   /**
    * 表示 locale です。
    */
@@ -109,6 +112,7 @@ export function RequestQueue({
   onOpenAttachment,
   onSelectSubmission,
   projectDirectory,
+  assigneeDirectory,
   selectedSubmission,
   submissions,
 }: RequestQueueProps) {
@@ -220,6 +224,7 @@ export function RequestQueue({
         isAiOperationPending={isAiOperationPending}
         onOperationPendingChange={reportAiOperationPending}
         onOpenAttachment={onOpenAttachment}
+        assigneeDirectory={assigneeDirectory}
         projectDirectory={projectDirectory}
       />
     </div>
@@ -236,6 +241,7 @@ function RequestSubmissionDetail({
   onAction,
   onOpenAttachment,
   onOperationPendingChange,
+  assigneeDirectory,
   projectDirectory,
   submission,
 }: {
@@ -249,6 +255,7 @@ function RequestSubmissionDetail({
   onOperationPendingChange?: (pending: boolean) => void
   locale: Locale
   projectDirectory?: RequestRoutingProjectDirectory
+  assigneeDirectory?: RequestRoutingAssigneeDirectory
   onAction?: RequestQueueProps['onAction']
   onOpenAttachment?: RequestQueueProps['onOpenAttachment']
   submission?: RequestSubmissionModel
@@ -304,6 +311,7 @@ function RequestSubmissionDetail({
       draft,
       current,
       projectDirectory,
+      assigneeDirectory,
     ))
     const currentDirtyState = conversionOverrideDirtyRef.current
     const nextDirtyState = {
@@ -521,6 +529,7 @@ function RequestSubmissionDetail({
               draft,
               conversionTargetOverride,
               projectDirectory,
+              assigneeDirectory,
             )}
             isMutationPending={isSubmitting}
             shouldConfirmAdoption={shouldConfirmTriageAdoption}

@@ -7,6 +7,19 @@ import type { RequestSubmissionModel } from './requestForm'
 /** Team-scoped Project IDs available to the current Request conversion form. */
 export type RequestRoutingProjectDirectory = ReadonlyMap<string, ReadonlySet<string>>
 
+/** Active non-guest Workspace member keys that may be copied into a Request conversion form. */
+export type RequestRoutingAssigneeDirectory = ReadonlySet<string>
+
+/** Checks whether a proposed assignee is present in the current active-member directory. */
+function isActiveAssignee(
+  assigneeUserId: string,
+  assigneeDirectory: RequestRoutingAssigneeDirectory | undefined,
+): boolean {
+  if (!assigneeDirectory) return false
+  const normalizedAssignee = assigneeUserId.trim().toLowerCase()
+  return normalizedAssignee.length > 0 && assigneeDirectory.has(normalizedAssignee)
+}
+
 /** Checks whether a proposed Project belongs to the effective Team in the current directory. */
 function isProjectInEffectiveTeam(
   projectId: string,
@@ -30,6 +43,7 @@ function isProjectInEffectiveTeam(
  * @param draft - Validated AI triage draft under review.
  * @param currentOverride - Existing local conversion routing overrides.
  * @param projectDirectory - Team-scoped Project IDs used to validate proposed routing.
+ * @param assigneeDirectory - Active Workspace member keys used to validate proposed assignees.
  * @returns Safe partial routing target for the conversion action.
  */
 export function createSafeTriageRoutingOverride(
@@ -37,6 +51,7 @@ export function createSafeTriageRoutingOverride(
   draft: AiTriageDraft,
   currentOverride: Partial<RequestFormRoutingTarget> = {},
   projectDirectory?: RequestRoutingProjectDirectory,
+  assigneeDirectory?: RequestRoutingAssigneeDirectory,
 ): Partial<RequestFormRoutingTarget> {
   const proposedTeamId = draft.teamId?.value
   const currentTeamId = currentOverride.teamId ?? submission.routing.teamId
@@ -62,7 +77,9 @@ export function createSafeTriageRoutingOverride(
     ...(canApplyTeamChange && canApplyProject && draft.projectId
       ? { projectId: draft.projectId.value }
       : {}),
-    ...(draft.assigneeUserId ? { assigneeUserId: draft.assigneeUserId.value } : {}),
+    ...(draft.assigneeUserId && isActiveAssignee(draft.assigneeUserId.value, assigneeDirectory)
+      ? { assigneeUserId: draft.assigneeUserId.value }
+      : {}),
     ...(draft.priority ? { priority: draft.priority.value } : {}),
   }
 }
@@ -78,6 +95,7 @@ export function createSafeTriageRoutingOverride(
  * @param draft - Validated AI triage draft under review.
  * @param currentOverride - Existing local conversion routing overrides.
  * @param projectDirectory - Team-scoped Project IDs used to validate proposed routing.
+ * @param assigneeDirectory - Active Workspace member keys used to validate proposed assignees.
  * @returns Whether adopting the draft would change at least one supported form field.
  */
 export function canAdoptRequestTriageDraft(
@@ -85,12 +103,18 @@ export function canAdoptRequestTriageDraft(
   draft: AiTriageDraft,
   currentOverride: Partial<RequestFormRoutingTarget> = {},
   projectDirectory?: RequestRoutingProjectDirectory,
+  assigneeDirectory?: RequestRoutingAssigneeDirectory,
 ): boolean {
+  const hasInvalidAssignee = draft.assigneeUserId !== undefined &&
+    !isActiveAssignee(draft.assigneeUserId.value, assigneeDirectory)
+  if (hasInvalidAssignee) return false
+
   const safeRouting = createSafeTriageRoutingOverride(
     submission,
     draft,
     currentOverride,
     projectDirectory,
+    assigneeDirectory,
   )
   const currentTeamId = currentOverride.teamId ?? submission.routing.teamId
   const proposedTeamId = draft.teamId?.value

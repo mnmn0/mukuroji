@@ -529,7 +529,9 @@ export function TaskDetailPane({
               <a
                 className="mt-2 inline-flex text-sm font-semibold text-[var(--workbench-primary)] underline-offset-4 hover:underline"
                 data-testid="task-detail-triage-source"
-                href={createTeamTriagePath(task.teamId, sourceTriageEntryId)}
+                href={isWorkItemMutationPending ? undefined : createTeamTriagePath(task.teamId, sourceTriageEntryId)}
+                aria-disabled={isWorkItemMutationPending || undefined}
+                tabIndex={isWorkItemMutationPending ? -1 : undefined}
               >
                 {t('tasks.detail.openTriageSource')}
               </a>
@@ -547,7 +549,9 @@ export function TaskDetailPane({
                     <li key={entry.id}>
                       <a
                         className="text-xs font-semibold text-[var(--workbench-primary)] underline-offset-4 hover:underline"
-                        href={createTeamTriagePath(task.teamId, entry.id)}
+                        href={isWorkItemMutationPending ? undefined : createTeamTriagePath(task.teamId, entry.id)}
+                        aria-disabled={isWorkItemMutationPending || undefined}
+                        tabIndex={isWorkItemMutationPending ? -1 : undefined}
                       >
                         {entry.sourcePreview.title || t(resolveTriageSourceMessageKey(entry.source.kind))}
                       </a>
@@ -586,7 +590,9 @@ export function TaskDetailPane({
                     <li className="text-xs leading-5 text-[var(--workbench-muted)]" key={snapshot.triageEntryId}>
                       <a
                         className="font-semibold text-[var(--workbench-primary)] underline-offset-4 hover:underline"
-                        href={createTeamTriagePath(task.teamId, snapshot.triageEntryId)}
+                        href={isWorkItemMutationPending ? undefined : createTeamTriagePath(task.teamId, snapshot.triageEntryId)}
+                        aria-disabled={isWorkItemMutationPending || undefined}
+                        tabIndex={isWorkItemMutationPending ? -1 : undefined}
                       >
                         {t(resolveTriageSourceMessageKey(snapshot.sourceKind))}
                       </a>

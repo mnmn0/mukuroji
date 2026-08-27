@@ -134,6 +134,30 @@ describe('RequestQueue', () => {
     expect(html).not.toContain('Use in conversion form')
   })
 
+  /** Requires the current active-member directory before copying an AI assignee. */
+  test('keeps an assignee proposal review-only when the member is not active', () => {
+    const submission = normalizeRequestSubmission(requestSubmissionFixture)
+    const content = aiTriageGenerationFixture.content
+    if (content.availability !== 'available' || content.draft.kind !== 'triage') {
+      throw new Error('Triage fixture must stay available.')
+    }
+
+    expect(canAdoptRequestTriageDraft(
+      submission,
+      content.draft,
+      {},
+      new Map([['core-team', new Set(['launch-readiness'])]]),
+      new Set(['inactive-member']),
+    )).toBe(false)
+    expect(createSafeTriageRoutingOverride(
+      submission,
+      content.draft,
+      {},
+      new Map([['core-team', new Set(['launch-readiness'])]]),
+      new Set(['member-ada']),
+    )).toMatchObject({ assigneeUserId: 'member-ada' })
+  })
+
   test('does not render AI draft markup when conversion capability is absent', () => {
     const submission = normalizeRequestSubmission({
       ...requestSubmissionFixture,
@@ -245,7 +269,19 @@ describe('RequestQueue', () => {
       priority: 'high',
       teamId: 'new-team',
     })
-    expect(canAdoptRequestTriageDraft(submission, changedTeamDraft)).toBe(true)
+    expect(canAdoptRequestTriageDraft(
+      submission,
+      changedTeamDraft,
+      {},
+      undefined,
+    )).toBe(false)
+    expect(canAdoptRequestTriageDraft(
+      submission,
+      changedTeamDraft,
+      {},
+      undefined,
+      new Set(['member-ada']),
+    )).toBe(true)
   })
 
   /** Blocks a new Team proposal when a prior local override would remain applied. */
