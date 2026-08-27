@@ -334,9 +334,9 @@ function isReviewableCustomFieldValue(
   }
   if (operator === 'contains') {
     return typeof value === 'string'
-      ? value.length <= AI_SEARCH_MAX_CUSTOM_FIELD_VALUE_LENGTH
+      ? value.trim().length > 0 && value.length <= AI_SEARCH_MAX_CUSTOM_FIELD_VALUE_LENGTH
       : Array.isArray(value) && value.length <= AI_SEARCH_MAX_CUSTOM_FIELD_ARRAY_ITEMS &&
-        value.every((item) => item.length <= AI_SEARCH_MAX_IDENTIFIER_LENGTH)
+        value.every((item) => item.trim().length > 0 && item.length <= AI_SEARCH_MAX_IDENTIFIER_LENGTH)
   }
   if (value === null || typeof value === 'boolean') return true
   if (typeof value === 'number') return Number.isFinite(value)

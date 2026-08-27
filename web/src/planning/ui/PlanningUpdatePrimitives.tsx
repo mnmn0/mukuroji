@@ -762,6 +762,7 @@ export function PlanningStatusUpdateComposer({
   )
   const [formError, setFormError] = useState<string | undefined>()
   const [isPublishing, setIsPublishing] = useState(false)
+  const isPublishingRef = useRef(false)
   const isFormDirtyRef = useRef(false)
   const [isFormDirty, setIsFormDirty] = useState(false)
   const [pendingAiDraft, setPendingAiDraft] =
@@ -794,6 +795,7 @@ export function PlanningStatusUpdateComposer({
     draft: AiPlanningStatusUpdateDraft,
     context?: AiPlanningStatusUpdateAdoptionContext,
   ) {
+    if (isPublishing || isPublishingRef.current) return
     const evidenceSeed = context ? createAiPlanningEvidenceSeed(context) : undefined
     const shouldSeedEvidence = evidenceType === 'none' && evidenceSeed !== undefined
     setAiEvidenceSeed(shouldSeedEvidence ? evidenceSeed : undefined)
@@ -824,6 +826,7 @@ export function PlanningStatusUpdateComposer({
     replacementConfirmed = false,
     context?: AiPlanningStatusUpdateAdoptionContext,
   ) {
+    if (isPublishing || isPublishingRef.current) return
     if (activeAiAssistantSessionKeyRef.current !== sessionKey) return
     if (replacementConfirmed) {
       applyAiDraft(draft, context)
@@ -889,6 +892,7 @@ export function PlanningStatusUpdateComposer({
             </button>
             <button
               className="workbench-button-primary min-h-[44px] px-4"
+              disabled={isPublishing}
               onClick={() => applyAiDraft(pendingAiDraft.draft, pendingAiDraft.context)}
               type="button"
             >
@@ -911,7 +915,7 @@ export function PlanningStatusUpdateComposer({
         onSubmit={(event) => {
           event.preventDefault()
           setFormError(undefined)
-          if (!onPublish || isPublishing) return
+          if (!onPublish || isPublishing || isPublishingRef.current) return
           const data = new FormData(event.currentTarget)
           const selectedHealth = readHealth(data.get('health'))
           const selectedRisk = readRisk(data.get('risk'))
@@ -943,6 +947,7 @@ export function PlanningStatusUpdateComposer({
             summary,
           }
           const wasAiSeeded = aiGenerationReference !== undefined
+          isPublishingRef.current = true
           setIsPublishing(true)
           void (async () => {
             try {
@@ -962,6 +967,7 @@ export function PlanningStatusUpdateComposer({
             } catch {
               // The page-level mutation handler owns the user-visible error state.
             } finally {
+              isPublishingRef.current = false
               setIsPublishing(false)
             }
           })()

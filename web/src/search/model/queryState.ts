@@ -11,19 +11,19 @@ import {
 } from '@mukuroji/contracts'
 
 /**
- * Search URL から復元する filter と layout の組です。
+ * Filter and layout state restored from the canonical Search URL.
  */
 export type SearchRouteState = {
   /**
-   * API へ送信する Workspace search filter です。
+   * Workspace Search filters sent to the API.
    */
   filters: WorkspaceSearchFilters
   /**
-   * Search result の表示、sort、group、column 設定です。
+   * Search result display, sort, grouping, and column settings.
    */
   layout: SearchViewLayout
   /**
-   * URL から選択された saved view ID です。
+   * Saved view identifier selected in the URL.
    */
   savedViewId?: string
   /**
@@ -31,7 +31,7 @@ export type SearchRouteState = {
    */
   reportMetric?: 'count'
   /**
-   * URL schema を移行したときに利用者へ知らせる警告です。
+   * Warnings shown when the URL schema is migrated.
    */
   migrationWarnings: string[]
 }
@@ -62,9 +62,12 @@ const searchCustomFieldOperators = [
 const defaultColumns = ['title', 'type', 'status', 'assignee', 'project', 'updatedAt']
 
 /**
- * URLSearchParams を versioned Workspace search state へ変換します。
+ * Parses URLSearchParams into versioned Workspace Search state.
  *
- * 不明な値は無視し、未知の schema version は migration warning として返します。
+ * Unknown values are ignored and an unknown schema version is returned as a migration warning.
+ *
+ * @param searchParams - URL query parameters to parse.
+ * @returns Parsed Search state with any migration warnings.
  */
 export function parseSearchRouteState(searchParams: URLSearchParams): SearchRouteState {
   const migrationWarnings: string[] = []
@@ -123,7 +126,10 @@ export function parseSearchRouteState(searchParams: URLSearchParams): SearchRout
 }
 
 /**
- * Workspace search state を共有可能な canonical URL query へ直列化します。
+ * Serializes Workspace Search state into a shareable canonical URL query.
+ *
+ * @param state - Search state to serialize.
+ * @returns Canonical URL query parameters.
  */
 export function serializeSearchRouteState(state: SearchRouteState) {
   const searchParams = new URLSearchParams()
@@ -183,21 +189,25 @@ export function serializeSearchRouteState(state: SearchRouteState) {
 }
 
 /**
- * Search state の一部を更新し、既存の migration warning を維持します。
+ * Updates part of Search state while preserving existing migration warnings.
+ *
+ * @param state - Current Search route state.
+ * @param next - Fields to replace in the current state.
+ * @returns Updated Search route state.
  */
 export function updateSearchRouteState(
   state: SearchRouteState,
   next: {
     /**
-     * 置き換える filter です。
+     * Replacement Workspace Search filters.
      */
     filters?: WorkspaceSearchFilters
     /**
-     * 置き換える layout です。
+     * Replacement Search result layout.
      */
     layout?: SearchViewLayout
     /**
-     * 置き換える saved view ID です。
+     * Replacement saved view identifier.
      */
     savedViewId?: string
     /**

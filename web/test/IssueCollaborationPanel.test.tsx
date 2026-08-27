@@ -103,6 +103,7 @@ describe('IssueCollaborationPanel', () => {
     )
 
     expect(body.length).toBeGreaterThan(0)
+    expect(body).toContain('Launch readiness notes')
     expect(body).toContain('Confirm the keyboard review before Thursday\\.')
   })
 

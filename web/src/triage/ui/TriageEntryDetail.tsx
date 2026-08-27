@@ -212,11 +212,15 @@ export function TriageEntryDetail({
     setActionAnnouncement('')
     if (draft.assigneeUserId !== undefined) {
       setOwnerUserId(draft.assigneeUserId.value)
-      setRoutingDirty((current) => ({ ...current, owner: false }))
+      const nextDirtyState = { ...routingDirtyRef.current, owner: false }
+      routingDirtyRef.current = nextDirtyState
+      setRoutingDirty(nextDirtyState)
     }
     if (draft.projectId !== undefined) {
       setProjectId(draft.projectId.value)
-      setRoutingDirty((current) => ({ ...current, project: false }))
+      const nextDirtyState = { ...routingDirtyRef.current, project: false }
+      routingDirtyRef.current = nextDirtyState
+      setRoutingDirty(nextDirtyState)
     }
     if (draft.assigneeUserId && entry.capabilities.canAssign) {
       setActionMode('assign')

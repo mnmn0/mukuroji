@@ -113,6 +113,7 @@ describe('AI workflow integration surfaces', () => {
     expect(generateCount).toBe(0)
   })
 
+  /** Verifies review-only Planning values remain visible without an adoption callback. */
   test('does not offer Work Item adoption for review-only Planning values', () => {
     const content = aiPlanningGenerationFixture.content
     if (content.availability !== 'available' || content.draft.kind !== 'planning') {

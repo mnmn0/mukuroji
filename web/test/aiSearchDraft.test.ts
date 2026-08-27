@@ -50,6 +50,12 @@ describe('AI Search draft model', () => {
     expect(hasReviewableAiSearchCustomFields({
       customFields: [{ fieldId: 'risk', operator: 'is-empty' }],
     })).toBe(true)
+    expect(hasReviewableAiSearchCustomFields({
+      customFields: [{ fieldId: 'risk', operator: 'contains', value: '' }],
+    })).toBe(false)
+    expect(hasReviewableAiSearchCustomFields({
+      customFields: [{ fieldId: 'risk', operator: 'contains', value: ['high', ' '] }],
+    })).toBe(false)
   })
 
   test('rejects reversed or invalid edited date ranges before approval', () => {

@@ -3,6 +3,8 @@ import type { MessageKey } from '../../shared/i18n/i18n'
 
 /** Maximum UTF-16 length accepted by the curated context editor. */
 const collaborationContextBodyMaximumLength = 20_000
+/** Maximum length of one evidence line while preserving complete citation links. */
+const collaborationContextEvidenceLineMaximumLength = 12_000
 
 /**
  * Formats an approved summary as an editable context draft without persisting it.
@@ -31,8 +33,15 @@ export function formatAiSummaryContextBody(
         const label = citation.label.replace(/[\\[\]]/gu, '\\$&')
         return `[${label}](<${escapeMarkdownLinkDestination(citation.href)}>)`
       })
-    if (evidence.length > 0) {
-      lines.push(`  ${t('ai.summary.evidence')}: ${evidence.join(', ')}`)
+    const firstEvidence = evidence[0]
+    if (firstEvidence !== undefined) {
+      let evidenceLine = `  ${t('ai.summary.evidence')}: ${firstEvidence}`
+      for (const nextEvidence of evidence.slice(1)) {
+        const candidate = `${evidenceLine}, ${nextEvidence}`
+        if (candidate.length > collaborationContextEvidenceLineMaximumLength) break
+        evidenceLine = candidate
+      }
+      lines.push(evidenceLine)
       evidenceLineIndices.add(lines.length - 1)
     }
   }

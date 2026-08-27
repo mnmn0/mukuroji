@@ -51,6 +51,10 @@ const searchDateFieldValues = [
   'dueDate',
 ] as const satisfies readonly WorkspaceSearchDateField[]
 const workflowStatusIdPattern = /^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$/i
+/** Identifier grammar used by the existing Team triage action endpoints. */
+const triageIdentifierPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/u
+/** Member identifier grammar used by the existing Team triage action endpoints. */
+const triageUserIdPattern = /^[A-Za-z0-9][A-Za-z0-9._:@+-]*$/u
 
 /** Maximum UTF-8 size accepted by the Planning status update endpoint. */
 const planningStatusUpdateTextMaximumBytes = 8_000
@@ -72,6 +76,10 @@ const aiAssistanceSearchCaveatMaximumLength = 1_000
 const aiAssistanceSearchInterpretationMaximumLength = 4_000
 /** Maximum number of Planning child Work Items. */
 const aiAssistancePlanningSubtasksMaximumCount = 50
+/** Maximum title length for one proposed Planning child Work Item. */
+const aiAssistancePlanningSubtaskTitleMaximumLength = 256
+/** Maximum description length for one proposed Planning child Work Item. */
+const aiAssistancePlanningSubtaskDescriptionMaximumLength = 20_000
 /** Maximum number of Planning dependency suggestions. */
 const aiAssistancePlanningDependenciesMaximumCount = 100
 /** Maximum citation label length accepted by the server response contract. */
@@ -157,9 +165,9 @@ function isAiAssistanceDraft(value: unknown): value is AiAssistanceDraft {
         isOptionalSuggested(value.description, (candidate) =>
           isBoundedNonEmptyTrimmedString(candidate, 20_000)) &&
         isOptionalSuggested(value.priority, isPriority) &&
-        isOptionalSuggested(value.assigneeUserId, (candidate) => isBoundedString(candidate, 256)) &&
-        isOptionalSuggested(value.teamId, (candidate) => isBoundedString(candidate, 256)) &&
-        isOptionalSuggested(value.projectId, (candidate) => isBoundedString(candidate, 256)) &&
+        isOptionalSuggested(value.assigneeUserId, isTriageUserId) &&
+        isOptionalSuggested(value.teamId, isTriageIdentifier) &&
+        isOptionalSuggested(value.projectId, isTriageIdentifier) &&
         Array.isArray(value.customFields) &&
         value.customFields.length <= aiAssistanceTriageCustomFieldsMaximumCount &&
         value.customFields.every(isSuggestedCustomField) &&
@@ -496,7 +504,7 @@ function isCustomFieldFilterValue(
     return isFiniteNumber(value)
   }
   if (operator === 'contains') {
-    return (isString(value) && value.length <= 20_000) || (
+    return (isBoundedNonEmptyTrimmedString(value, 20_000)) || (
       Array.isArray(value) &&
       value.length <= 100 &&
       value.every((item) => isBoundedString(item, 512))
@@ -523,13 +531,24 @@ function isSearchReport(value: unknown): boolean {
 function isPlanningSubtask(value: unknown): boolean {
   return isRecord(value) &&
     isNonEmptyString(value.id) &&
-    isString(value.title) &&
-    isOptionalString(value.description) &&
+    isBoundedNonEmptyTrimmedString(value.title, aiAssistancePlanningSubtaskTitleMaximumLength) &&
+    (value.description === undefined ||
+      isBoundedNonEmptyTrimmedString(value.description, aiAssistancePlanningSubtaskDescriptionMaximumLength)) &&
     isPriority(value.priority) &&
     (value.plannedEffortMinutes === undefined || isBoundedEffortMinutes(value.plannedEffortMinutes)) &&
     isBoundedString(value.reason, aiAssistanceRationaleMaximumLength) &&
     isConfidence(value.confidence) &&
     isCitationIdArray(value.citationIds)
+}
+
+/** Validates a Team triage route identifier before an action form can adopt it. */
+function isTriageIdentifier(value: unknown): value is string {
+  return isBoundedString(value, 200) && triageIdentifierPattern.test(value)
+}
+
+/** Validates a Team triage member identifier before an action form can adopt it. */
+function isTriageUserId(value: unknown): value is string {
+  return isBoundedString(value, 320) && triageUserIdPattern.test(value)
 }
 
 /** Validates one proposed planning dependency. */
@@ -714,11 +733,6 @@ function isAiAssistanceTask(value: unknown): value is AiAssistanceTask {
 /** Validates an AI confidence label. */
 function isConfidence(value: unknown): boolean {
   return isOneOf(value, confidenceValues)
-}
-
-/** Validates an optional string. */
-function isOptionalString(value: unknown): boolean {
-  return value === undefined || isString(value)
 }
 
 /** Validates an optional string array. */

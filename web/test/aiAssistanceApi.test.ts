@@ -785,6 +785,36 @@ describe('AI assistance API', () => {
     }
   })
 
+  /** Rejects blank contains values and avoids applying an incomplete Search comparison. */
+  test('rejects blank Search custom-field contains values before review', async () => {
+    const content = aiSearchGenerationFixture.content
+    if (content.availability !== 'available' || content.draft.kind !== 'search') {
+      throw new Error('Search fixture must stay available.')
+    }
+
+    for (const value of ['', '   ']) {
+      installFetchRecorder([{
+        ...aiSearchGenerationFixture,
+        content: {
+          ...content,
+          draft: {
+            ...content.draft,
+            filters: {
+              ...content.draft.filters,
+              customFields: [{ fieldId: 'risk', operator: 'contains', value }],
+            },
+          },
+        },
+      }])
+      const error = await generateAiAssistance({
+        accessToken: 'access-token',
+        input: { locale: 'en', query: 'risk', task: 'search' },
+        mutationContext,
+      }).catch((caught: unknown) => caught)
+      expect(error).toMatchObject({ code: 'InvalidAiAssistanceResponse', status: 502 })
+    }
+  })
+
   test('rejects duplicate planning row identifiers at the browser API boundary', async () => {
     const content = aiPlanningGenerationFixture.content
     installFetchRecorder([{
@@ -1110,6 +1140,93 @@ describe('AI assistance API', () => {
         mutationContext,
       }).catch((caught: unknown) => caught)
 
+      expect(error).toMatchObject({ code: 'InvalidAiAssistanceResponse', status: 502 })
+    }
+  })
+
+  /** Rejects triage identifiers that the existing action endpoints would not accept. */
+  test('rejects triage identifiers outside the action endpoint grammar', async () => {
+    const content = aiTriageGenerationFixture.content
+    if (content.availability !== 'available' || content.draft.kind !== 'triage') {
+      throw new Error('Triage fixture must stay available.')
+    }
+
+    const invalidValues = [
+      { field: 'projectId' as const, value: 'project with spaces' },
+      { field: 'teamId' as const, value: 't'.repeat(201) },
+      { field: 'assigneeUserId' as const, value: 'member with spaces' },
+    ]
+    for (const { field, value } of invalidValues) {
+      installFetchRecorder([{
+        ...aiTriageGenerationFixture,
+        content: {
+          ...content,
+          draft: {
+            ...content.draft,
+            [field]: {
+              ...content.draft[field],
+              value,
+            },
+          },
+        },
+      }])
+
+      const error = await generateAiAssistance({
+        accessToken: 'access-token',
+        input: {
+          locale: 'en',
+          source: {
+            expectedRevision: 1,
+            teamId: 'core-team',
+            triageEntryId: 'triage-1',
+            type: 'triage-entry',
+          },
+          task: 'triage',
+        },
+        mutationContext,
+      }).catch((caught: unknown) => caught)
+
+      expect(error).toMatchObject({ code: 'InvalidAiAssistanceResponse', status: 502 })
+    }
+  })
+
+  /** Rejects blank or oversized Planning child Work Item fields before review. */
+  test('rejects invalid Planning subtask text before review', async () => {
+    const content = aiPlanningGenerationFixture.content
+    if (content.availability !== 'available' || content.draft.kind !== 'planning') {
+      throw new Error('Planning fixture must stay available.')
+    }
+    const subtask = content.draft.subtasks[0]
+    if (!subtask) throw new Error('Planning fixture must include a subtask.')
+
+    for (const invalidSubtask of [
+      { ...subtask, title: '   ' },
+      { ...subtask, description: 'd'.repeat(20_001) },
+    ]) {
+      installFetchRecorder([{
+        ...aiPlanningGenerationFixture,
+        content: {
+          ...content,
+          draft: {
+            ...content.draft,
+            subtasks: [invalidSubtask],
+          },
+        },
+      }])
+      const error = await generateAiAssistance({
+        accessToken: 'access-token',
+        input: {
+          locale: 'en',
+          source: {
+            expectedRevision: 1,
+            teamId: 'core-team',
+            type: 'work-item',
+            workItemId: 'launch-review',
+          },
+          task: 'planning',
+        },
+        mutationContext,
+      }).catch((caught: unknown) => caught)
       expect(error).toMatchObject({ code: 'InvalidAiAssistanceResponse', status: 502 })
     }
   })

@@ -2,11 +2,17 @@ import type {
   AiAssistancePolicy,
   AiAssistancePreference,
 } from '@mukuroji/contracts'
-import useSWR from 'swr'
+import useSWR, { type SWRConfiguration } from 'swr'
+import { AiAssistanceApiError } from '../api/errors'
 import {
   getAiAssistancePolicy,
   getAiAssistancePreference,
 } from '../api/settings'
+
+/** Returns whether a settings request failure is safe to retry. */
+export function isRetryableAiAssistanceSettingsError(error: unknown): boolean {
+  return !(error instanceof AiAssistanceApiError && error.status >= 400 && error.status < 500)
+}
 
 const aiAssistanceSettingsQueryConfig = {
   dedupingInterval: 10_000,
@@ -15,7 +21,11 @@ const aiAssistanceSettingsQueryConfig = {
   shouldRetryOnError: true,
   errorRetryCount: 3,
   errorRetryInterval: 5_000,
-} as const
+  onErrorRetry: (error, _key, config, revalidate, { retryCount }) => {
+    if (!isRetryableAiAssistanceSettingsError(error) || retryCount >= 3) return
+    setTimeout(() => { void revalidate({ dedupe: true }) }, config.errorRetryInterval)
+  },
+} satisfies SWRConfiguration
 
 /** Wraps an authenticated request so the owning route can handle session expiry. */
 type AuthenticatedRequestGuard = <Result>(request: Promise<Result>) => Promise<Result>
