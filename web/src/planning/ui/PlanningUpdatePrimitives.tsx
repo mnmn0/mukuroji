@@ -6,7 +6,7 @@ import type {
   PlanningRisk,
   PlanningUpdateEvidence,
 } from '@mukuroji/contracts'
-import { useEffect, useRef, useState } from 'react'
+import { useLayoutEffect, useRef, useState } from 'react'
 import { createAiAssistantSessionKey } from '../../features/ai-assistance/model/assistantSessionKey'
 import {
   AiPlanningStatusUpdateAssistant,
@@ -780,7 +780,7 @@ export function PlanningStatusUpdateComposer({
     : undefined
   const activeAiAssistantSessionKeyRef = useRef(aiAssistantSessionKey)
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     activeAiAssistantSessionKeyRef.current = aiAssistantSessionKey
   }, [aiAssistantSessionKey])
 

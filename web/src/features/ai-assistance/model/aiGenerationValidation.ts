@@ -82,6 +82,8 @@ const aiAssistancePlanningSubtaskTitleMaximumLength = 256
 const aiAssistancePlanningSubtaskDescriptionMaximumLength = 20_000
 /** Maximum number of Planning dependency suggestions. */
 const aiAssistancePlanningDependenciesMaximumCount = 100
+/** Maximum length of a Team or Work Item identifier rendered in a dependency row. */
+const aiAssistancePlanningDependencyIdentifierMaximumLength = 512
 /** Maximum citation label length accepted by the server response contract. */
 const aiAssistanceCitationLabelMaximumLength = 500
 /** Maximum citation destination length accepted by the server response contract. */
@@ -90,6 +92,12 @@ const aiAssistanceCitationHrefMaximumLength = 2_000
 const aiAssistanceCitationExcerptMaximumLength = 2_000
 /** Maximum rationale length accepted for one model-generated suggestion or uncertainty note. */
 const aiAssistanceRationaleMaximumLength = 2_000
+/** Maximum length of a displayed Bedrock model identifier. */
+const aiAssistanceModelIdMaximumLength = 256
+/** Maximum length of a displayed prompt version identifier. */
+const aiAssistancePromptVersionMaximumLength = 256
+/** Maximum length of a displayed server trace identifier. */
+const aiAssistanceTraceIdMaximumLength = 256
 
 /**
  * Returns whether an unknown value is a fully grounded available generation for one workflow.
@@ -576,14 +584,15 @@ function isPlanningDependency(value: unknown): boolean {
  * Validates a Team-qualified Work Item dependency endpoint.
  *
  * @param value - Unknown model-controlled endpoint value.
- * @returns Whether the value contains non-empty Team and Work Item identifiers.
+ * @returns Whether the value contains trimmed Team and Work Item identifiers,
+ * each bounded to the dependency display limit.
  */
 function isDependencyEndpoint(
   value: unknown,
 ): value is { teamId: string; workItemId: string } {
   return isRecord(value) &&
-    isNonEmptyString(value.teamId) &&
-    isNonEmptyString(value.workItemId)
+    isBoundedNonEmptyTrimmedString(value.teamId, aiAssistancePlanningDependencyIdentifierMaximumLength) &&
+    isBoundedNonEmptyTrimmedString(value.workItemId, aiAssistancePlanningDependencyIdentifierMaximumLength)
 }
 
 /** Validates a proposed structured Planning status update. */
@@ -666,9 +675,9 @@ function isUncertainty(value: unknown): boolean {
 function isGenerationDetails(value: unknown): boolean {
   return isRecord(value) &&
     value.provider === 'bedrock' &&
-    isNonEmptyString(value.modelId) &&
-    isNonEmptyString(value.promptVersion) &&
-    isNonEmptyString(value.traceId) &&
+    isBoundedNonEmptyTrimmedString(value.modelId, aiAssistanceModelIdMaximumLength) &&
+    isBoundedNonEmptyTrimmedString(value.promptVersion, aiAssistancePromptVersionMaximumLength) &&
+    isBoundedNonEmptyTrimmedString(value.traceId, aiAssistanceTraceIdMaximumLength) &&
     isUsage(value.usage)
 }
 

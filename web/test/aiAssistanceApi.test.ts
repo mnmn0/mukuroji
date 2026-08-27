@@ -887,6 +887,78 @@ describe('AI assistance API', () => {
     expect(error).toMatchObject({ code: 'InvalidAiAssistanceResponse', status: 502 })
   })
 
+  /** Rejects oversized dependency endpoint identifiers before Planning renders them. */
+  test('rejects oversized Planning dependency endpoint identifiers', async () => {
+    const content = aiPlanningGenerationFixture.content
+    if (content.availability !== 'available' || content.draft.kind !== 'planning') {
+      throw new Error('Planning fixture must stay available.')
+    }
+    const dependency = content.draft.dependencies[0]
+    if (!dependency) throw new Error('Planning fixture must include a dependency.')
+
+    installFetchRecorder([{
+      ...aiPlanningGenerationFixture,
+      content: {
+        ...content,
+        draft: {
+          ...content.draft,
+          dependencies: [{
+            ...dependency,
+            predecessor: {
+              ...dependency.predecessor,
+              workItemId: 'x'.repeat(513),
+            },
+          }],
+        },
+      },
+    }])
+
+    const error = await generateAiAssistance({
+      accessToken: 'access-token',
+      input: {
+        locale: 'en',
+        source: {
+          expectedRevision: 1,
+          teamId: 'core-team',
+          type: 'work-item',
+          workItemId: 'launch-review',
+        },
+        task: 'planning',
+      },
+      mutationContext,
+    }).catch((caught: unknown) => caught)
+
+    expect(error).toMatchObject({ code: 'InvalidAiAssistanceResponse', status: 502 })
+  })
+
+  /** Rejects generation metadata that could otherwise overwhelm the review disclosure. */
+  test('rejects oversized displayed generation metadata', async () => {
+    installFetchRecorder([{
+      ...aiPlanningGenerationFixture,
+      details: {
+        ...aiPlanningGenerationFixture.details,
+        traceId: 'trace-'.concat('x'.repeat(251)),
+      },
+    }])
+
+    const error = await generateAiAssistance({
+      accessToken: 'access-token',
+      input: {
+        locale: 'en',
+        source: {
+          expectedRevision: 1,
+          teamId: 'core-team',
+          type: 'work-item',
+          workItemId: 'launch-review',
+        },
+        task: 'planning',
+      },
+      mutationContext,
+    }).catch((caught: unknown) => caught)
+
+    expect(error).toMatchObject({ code: 'InvalidAiAssistanceResponse', status: 502 })
+  })
+
   /** Rejects whitespace-only workflow status identifiers before they reach review. */
   test('rejects whitespace-only planning statuses at the browser API boundary', async () => {
     const content = aiPlanningGenerationFixture.content
