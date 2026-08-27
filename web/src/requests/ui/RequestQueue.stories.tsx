@@ -98,6 +98,12 @@ export const AiDraftAdoption: Story = {
       expect.objectContaining({
         action: 'convert',
         expectedRevision: normalizedSubmission.revision,
+        target: {
+          assigneeUserId: 'member-ada',
+          priority: 'high',
+          projectId: 'launch-readiness',
+          teamId: 'core-team',
+        },
         title: 'Unblock customer Workspace provisioning',
       }),
     )

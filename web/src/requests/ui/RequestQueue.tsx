@@ -1,5 +1,6 @@
 import type {
   AiTriageDraft,
+  RequestFormRoutingTarget,
   RequestSubmissionActionInput,
 } from '@mukuroji/contracts'
 import { useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
@@ -227,6 +228,8 @@ function RequestSubmissionDetail({
   const [actionValue, setActionValue] = useState('')
   const [titleOverride, setTitleOverride] = useState('')
   const [descriptionOverride, setDescriptionOverride] = useState('')
+  const [conversionTargetOverride, setConversionTargetOverride] =
+    useState<Partial<RequestFormRoutingTarget>>({})
   const [, setConversionOverrideDirty] =
     useState<ConversionOverrideDirtyState>({ title: false, description: false })
   const conversionOverrideDirtyRef = useRef<ConversionOverrideDirtyState>({
@@ -245,6 +248,7 @@ function RequestSubmissionDetail({
     setActionValue(value)
     setDescriptionOverride('')
     setTitleOverride('')
+    setConversionTargetOverride({})
     const cleanState = { title: false, description: false }
     conversionOverrideDirtyRef.current = cleanState
     setConversionOverrideDirty(cleanState)
@@ -262,6 +266,13 @@ function RequestSubmissionDetail({
     openConversionAction()
     setTitleOverride((current) => draft.title?.value ?? current)
     setDescriptionOverride((current) => draft.description?.value ?? current)
+    setConversionTargetOverride((current) => ({
+      ...current,
+      ...(draft.teamId ? { teamId: draft.teamId.value } : {}),
+      ...(draft.projectId ? { projectId: draft.projectId.value } : {}),
+      ...(draft.assigneeUserId ? { assigneeUserId: draft.assigneeUserId.value } : {}),
+      ...(draft.priority ? { priority: draft.priority.value } : {}),
+    }))
     const currentDirtyState = conversionOverrideDirtyRef.current
     const nextDirtyState = {
       title: draft.title === undefined ? currentDirtyState.title : false,
@@ -309,6 +320,9 @@ function RequestSubmissionDetail({
                 action: 'convert',
                 ...common,
                 description: descriptionOverride.trim() || undefined,
+                ...(Object.keys(conversionTargetOverride).length > 0
+                  ? { target: conversionTargetOverride }
+                  : {}),
                 title: titleOverride.trim() || undefined,
               }
 
@@ -320,6 +334,7 @@ function RequestSubmissionDetail({
       setActionValue('')
       setDescriptionOverride('')
       setTitleOverride('')
+      setConversionTargetOverride({})
       const cleanState = { title: false, description: false }
       conversionOverrideDirtyRef.current = cleanState
       setConversionOverrideDirty(cleanState)
@@ -339,6 +354,7 @@ function RequestSubmissionDetail({
         )
       : createTeamIssuesPath(submission.workItem.teamId, submission.workItem.id)
     : undefined
+  const effectiveRouting = { ...submission.routing, ...conversionTargetOverride }
 
   return (
     <aside className="workbench-panel min-w-0 overflow-hidden" data-testid="request-submission-detail">
@@ -511,8 +527,8 @@ function RequestSubmissionDetail({
                   conversionOverrideDirtyRef.current = nextDirtyState
                   setConversionOverrideDirty(nextDirtyState)
                 }} />
-                <p className="text-xs font-medium text-[var(--workbench-muted)]">
-                  {submission.routing.teamId} · {submission.routing.projectId ?? t('requests.routing.teamBacklog')} · {submission.routing.workflowStatusId ?? t('requests.routing.initialStatus')}
+                <p className="break-words text-xs font-medium text-[var(--workbench-muted)]">
+                  {effectiveRouting.teamId} · {effectiveRouting.projectId ?? t('requests.routing.teamBacklog')} · {effectiveRouting.workflowStatusId ?? t('requests.routing.initialStatus')} · {effectiveRouting.assigneeUserId} · {t(`requests.priority.${effectiveRouting.priority}`)}
                 </p>
               </>
             ) : actionMode === 'assign' || actionMode === 'mark-duplicate' ? (

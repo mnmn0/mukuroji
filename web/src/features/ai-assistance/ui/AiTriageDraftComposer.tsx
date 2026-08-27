@@ -298,9 +298,9 @@ function getAvailableTriageDraft(
  * Returns whether a triage draft contains a field supported by the current
  * local adoption target.
  *
- * Request conversion accepts title and description, while Team triage action
- * forms accept only owner and Project routing fields. Unsupported-only drafts
- * remain reviewable but cannot open an unrelated form.
+ * Request conversion accepts title, description, and supported routing fields,
+ * while Team triage action forms accept only owner and Project routing fields.
+ * Unsupported-only drafts remain reviewable but cannot open an unrelated form.
  *
  * @param draft - Validated triage draft under review.
  * @param sourceType - Local adoption target represented by the source.
@@ -311,7 +311,12 @@ function hasSupportedTriageAdoption(
   sourceType: AiTriageDraftComposerProps['source']['type'],
 ): boolean {
   if (sourceType === 'request-submission') {
-    return draft.title !== undefined || draft.description !== undefined
+    return draft.title !== undefined ||
+      draft.description !== undefined ||
+      draft.priority !== undefined ||
+      draft.assigneeUserId !== undefined ||
+      draft.teamId !== undefined ||
+      draft.projectId !== undefined
   }
   return draft.assigneeUserId !== undefined || draft.projectId !== undefined
 }
