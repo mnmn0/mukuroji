@@ -867,7 +867,7 @@ export function PlanningStatusUpdateComposer({
         <div className="mt-4">
           <AiPlanningStatusUpdateAssistant
             accessToken={aiAssistance.accessToken}
-            disabled={isPublishing || aiAssistance.isAiOperationPending === true}
+            disabled={isPublishing}
             key={aiAssistantSessionKey}
             locale={aiAssistance.locale}
             onAuthenticatedApiError={aiAssistance.onAuthenticatedApiError}

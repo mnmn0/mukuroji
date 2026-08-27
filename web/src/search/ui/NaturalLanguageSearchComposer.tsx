@@ -5,7 +5,7 @@ import type {
   SearchCustomFieldFilter,
   WorkspaceSearchFilters,
 } from '@mukuroji/contracts'
-import { useState, type FormEvent } from 'react'
+import { useRef, useState, type FormEvent } from 'react'
 import {
   AiAssistanceReview,
 } from '../../features/ai-assistance/ui/AiAssistanceReview'
@@ -72,35 +72,39 @@ export function NaturalLanguageSearchComposer({
   t,
 }: NaturalLanguageSearchComposerProps) {
   const controller = useAiAssistanceController({ accessToken, onAuthenticatedApiError })
+  const pendingOperationCountRef = useRef(0)
+
+  /**
+   * Runs one AI operation while keeping Search route controls fenced until
+   * every overlapping operation has completed.
+   *
+   * @param operation - Asynchronous generation, decision, or feedback action.
+   * @returns The result produced by the operation.
+   */
+  const runWithOperationFence = async <Result,>(operation: () => Promise<Result>): Promise<Result> => {
+    if (pendingOperationCountRef.current === 0) onOperationPendingChange?.(true)
+    pendingOperationCountRef.current += 1
+    try {
+      return await operation()
+    } finally {
+      pendingOperationCountRef.current -= 1
+      if (pendingOperationCountRef.current === 0) onOperationPendingChange?.(false)
+    }
+  }
 
   /** Runs one explicit generation while fencing Search route controls. */
   const generate = async (query: string) => {
-    onOperationPendingChange?.(true)
-    try {
-      return await controller.generate({ locale, query, task: 'search' })
-    } finally {
-      onOperationPendingChange?.(false)
-    }
+    return runWithOperationFence(() => controller.generate({ locale, query, task: 'search' }))
   }
 
   /** Records a review decision while fencing Search route controls. */
   const decide = async (outcome: 'approved' | 'rejected') => {
-    onOperationPendingChange?.(true)
-    try {
-      return await controller.decide(outcome)
-    } finally {
-      onOperationPendingChange?.(false)
-    }
+    return runWithOperationFence(() => controller.decide(outcome))
   }
 
   /** Sends usefulness feedback while fencing Search route controls. */
   const sendFeedback = async (rating: CreateAiAssistanceFeedbackRequest['rating']) => {
-    onOperationPendingChange?.(true)
-    try {
-      await controller.sendFeedback(rating)
-    } finally {
-      onOperationPendingChange?.(false)
-    }
+    return runWithOperationFence(() => controller.sendFeedback(rating))
   }
 
   return (

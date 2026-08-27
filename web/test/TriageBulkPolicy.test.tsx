@@ -74,6 +74,8 @@ describe('Triage bulk policy projection', () => {
     expect(html).toMatch(/aria-label="Select visible"[^>]*disabled=""/)
     expect(html).toContain('type="search"')
     expect(html).toContain('disabled=""')
-    expect(html).toContain('>Load more</button>')
+    const loadMoreButton = html.match(/<button[^>]*>Load more<\/button>/)?.[0]
+    expect(loadMoreButton).toBeDefined()
+    expect(loadMoreButton).not.toContain('disabled=""')
   })
 })

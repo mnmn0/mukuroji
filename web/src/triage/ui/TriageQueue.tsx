@@ -385,7 +385,7 @@ export function TriageQueue({
         <div className="border-t border-[var(--workbench-border)] p-4 text-center">
           <button
             className="workbench-button-secondary min-h-10 px-5"
-            disabled={isLoadingMore || isAiOperationPending}
+            disabled={isLoadingMore}
             onClick={onLoadMore}
             type="button"
           >

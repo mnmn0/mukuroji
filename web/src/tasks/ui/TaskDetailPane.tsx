@@ -626,7 +626,7 @@ export function TaskDetailPane({
           <AiWorkItemPlanningAssistant
             accessToken={accessToken}
             controller={aiAssistanceController}
-            isMutationPending={isWorkItemMutationPending}
+            isMutationPending={isIssueSaving}
             key={editorIdentity}
             locale={locale}
             onAuthenticatedApiError={onAuthenticatedApiError}

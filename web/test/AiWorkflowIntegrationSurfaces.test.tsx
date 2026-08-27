@@ -153,6 +153,22 @@ describe('AI workflow integration surfaces', () => {
     expect(html).not.toContain('Was this draft helpful?')
   })
 
+  /** Keeps an in-flight Planning generation cancellable until publishing starts. */
+  test('keeps Planning cancellation available while AI generation is pending', () => {
+    const html = renderToStaticMarkup(
+      <AiPlanningStatusUpdateAssistantView
+        isGenerating
+        locale="en"
+        onCancelGeneration={() => undefined}
+        onDecide={async () => undefined}
+        onGenerate={() => undefined}
+        t={t}
+      />,
+    )
+
+    expect(html).toContain('Cancel generation')
+  })
+
   test('makes Work Item fields, estimate, child items, and dependencies reviewable', () => {
     let adoptCount = 0
     let generateCount = 0
@@ -197,6 +213,22 @@ describe('AI workflow integration surfaces', () => {
     expect(html).not.toContain('Use supported fields in form')
     expect(html).not.toContain('Reject draft')
     expect(html).not.toContain('Was this draft helpful?')
+  })
+
+  /** Keeps an in-flight Work Item generation cancellable while no domain save is running. */
+  test('keeps Work Item cancellation available while AI generation is pending', () => {
+    const html = renderToStaticMarkup(
+      <AiWorkItemPlanningAssistantView
+        isGenerating
+        locale="en"
+        onCancelGeneration={() => undefined}
+        onDecide={async () => undefined}
+        onGenerate={() => undefined}
+        t={t}
+      />,
+    )
+
+    expect(html).toContain('Cancel generation')
   })
 
   /** Verifies review-only Planning values remain visible without an adoption callback. */
