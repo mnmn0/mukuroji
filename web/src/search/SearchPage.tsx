@@ -556,14 +556,10 @@ export function SearchPage() {
                   key={getSearchDateField(routeState.filters)}
                   locale={locale}
                   onAuthenticatedApiError={setAuthenticatedApiError}
-                  routeState={routeState}
-                  selectedSavedView={selectedSavedView}
-                  statusOptions={statusOptions}
-                  t={t}
-                  onAiFiltersApply={(application) => {
+                  onAiFiltersApply={(application, expectedRouteSignature) => {
                     const nextRouteState = applyApprovedAiSearchToRouteStateIfCurrent(
                       routeState,
-                      routeSignature,
+                      expectedRouteSignature,
                       activeRouteSignatureRef.current,
                       application,
                     )
@@ -577,6 +573,11 @@ export function SearchPage() {
                         layout: routeState.layout,
                       })
                     : undefined}
+                  routeSignature={routeSignature}
+                  routeState={routeState}
+                  selectedSavedView={selectedSavedView}
+                  statusOptions={statusOptions}
+                  t={t}
                 />
                 {migrationWarnings.map((warning) => (
                   <p className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm font-semibold text-amber-800" key={warning} role="status">
@@ -645,6 +646,7 @@ export function SearchPage() {
   )
 }
 
+/** Renders the canonical Search controls and the optional AI-assisted mode. */
 function SearchToolbar({
   aiAssistanceEnabled = true,
   accessToken,
@@ -655,6 +657,7 @@ function SearchToolbar({
   onLayoutChange,
   onUpdateSelectedView,
   routeState,
+  routeSignature,
   selectedSavedView,
   statusOptions,
   t,
@@ -668,6 +671,7 @@ function SearchToolbar({
   onLayoutChange: (patch: Record<string, unknown>) => void
   onUpdateSelectedView?: () => void
   routeState: SearchRouteState
+  routeSignature: string
   selectedSavedView?: SavedWorkspaceView
   statusOptions: readonly SearchStatusOption[]
   t: (key: MessageKey) => string
@@ -718,6 +722,7 @@ function SearchToolbar({
           locale={locale}
           onAuthenticatedApiError={onAuthenticatedApiError}
           onApply={onAiFiltersApply}
+          routeSignature={routeSignature}
           t={t}
         />
       ) : (

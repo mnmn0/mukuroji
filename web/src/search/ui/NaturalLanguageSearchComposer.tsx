@@ -42,9 +42,11 @@ export type NaturalLanguageSearchComposerProps = {
   /** Reports authenticated AI failures to the Search route session guard. */
   onAuthenticatedApiError?: (error: unknown) => void
   /** Applies reviewed filters and an optional report intent to existing Search route state. */
-  onApply: (application: ApprovedAiSearchApplication) => void
+  onApply: (application: ApprovedAiSearchApplication, expectedRouteSignature: string) => void
   /** Locale sent to the generation request and used for presentation. */
   locale: Locale
+  /** Canonical Search route signature captured when generation starts. */
+  routeSignature?: string
   /** Localized message resolver. */
   t: (key: MessageKey) => string
 }
@@ -60,6 +62,7 @@ export function NaturalLanguageSearchComposer({
   locale,
   onAuthenticatedApiError,
   onApply,
+  routeSignature = '',
   t,
 }: NaturalLanguageSearchComposerProps) {
   const controller = useAiAssistanceController({ accessToken, onAuthenticatedApiError })
@@ -79,6 +82,7 @@ export function NaturalLanguageSearchComposer({
       onDecide={controller.decide}
       onFeedback={controller.sendFeedback}
       onGenerate={(query) => controller.generate({ locale, query, task: 'search' })}
+      routeSignature={routeSignature}
       t={t}
     />
   )
@@ -103,7 +107,7 @@ export type NaturalLanguageSearchComposerViewProps = {
   /** Locale used for visible metadata. */
   locale: Locale
   /** Applies reviewed filters and an optional report intent to Search route state. */
-  onApply: (application: ApprovedAiSearchApplication) => void
+  onApply: (application: ApprovedAiSearchApplication, expectedRouteSignature: string) => void
   /** Cancels the active generation request. */
   onCancelGeneration?: () => void
   /** Records a human decision without mutating Search URL state. */
@@ -112,6 +116,8 @@ export type NaturalLanguageSearchComposerViewProps = {
   onFeedback?: (rating: CreateAiAssistanceFeedbackRequest['rating']) => void | Promise<void>
   /** Runs a generation only after form submission. */
   onGenerate: (query: string) => void | Promise<unknown>
+  /** Canonical Search route signature captured when generation starts. */
+  routeSignature?: string
   /** Localized message resolver. */
   t: (key: MessageKey) => string
 }
@@ -136,9 +142,11 @@ export function NaturalLanguageSearchComposerView({
   onDecide,
   onFeedback,
   onGenerate,
+  routeSignature = '',
   t,
 }: NaturalLanguageSearchComposerViewProps) {
   const [query, setQuery] = useState('')
+  const [generationRouteSignature, setGenerationRouteSignature] = useState<string>()
   const isOperationPending = isGenerating || isDecisionPending || isFeedbackPending
 
   /** Submits only the operator's explicit Generate action. */
@@ -146,6 +154,7 @@ export function NaturalLanguageSearchComposerView({
     event.preventDefault()
     const normalizedQuery = query.trim()
     if (!canGenerate || !normalizedQuery || isOperationPending) return
+    setGenerationRouteSignature(routeSignature)
     void onGenerate(normalizedQuery)
   }
 
@@ -193,6 +202,7 @@ export function NaturalLanguageSearchComposerView({
           onApply={onApply}
           onDecide={onDecide}
           onFeedback={onFeedback}
+          reviewedRouteSignature={generationRouteSignature ?? routeSignature}
           t={t}
         />
       ) : (
@@ -227,11 +237,13 @@ type SearchDraftReviewProps = {
   /** Locale used for generation metadata. */
   locale: Locale
   /** Applies reviewed filters and an optional report intent to Search route state. */
-  onApply: (application: ApprovedAiSearchApplication) => void
+  onApply: (application: ApprovedAiSearchApplication, expectedRouteSignature: string) => void
   /** Records the review outcome before a Search URL change. */
   onDecide: (outcome: 'approved' | 'rejected') => Promise<AiAssistanceGeneration | undefined>
   /** Records usefulness feedback. */
   onFeedback?: (rating: CreateAiAssistanceFeedbackRequest['rating']) => void | Promise<void>
+  /** Canonical Search route signature captured before this generation began. */
+  reviewedRouteSignature: string
   /** Localized message resolver. */
   t: (key: MessageKey) => string
 }
@@ -259,6 +271,7 @@ function SearchDraftReview({
   onApply,
   onDecide,
   onFeedback,
+  reviewedRouteSignature,
   t,
 }: SearchDraftReviewProps) {
   const draft = getAvailableSearchDraft(generation)
@@ -287,7 +300,7 @@ function SearchDraftReview({
     onApply({
       filters: approvedFilters,
       report: approvedDraft.report,
-    })
+    }, reviewedRouteSignature)
   }
 
   return (
