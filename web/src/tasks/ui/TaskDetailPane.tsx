@@ -564,12 +564,15 @@ export function TaskDetailPane({
             locale={locale}
             onAuthenticatedApiError={onAuthenticatedApiError}
             onAdopt={isReadOnly ? undefined : applyAiPlanningDraft}
-            canAdoptDraft={(draft) => Boolean(
-              draft.title ||
-              draft.description ||
-              draft.priority ||
-              (draft.status && workflowStatuses.some((status) => status.id === draft.status?.value)),
-            )}
+            canAdoptDraft={(draft) => {
+              const hasSupportedField = Boolean(
+                draft.title || draft.description || draft.priority || draft.status,
+              )
+              const hasAvailableStatus = draft.status === undefined || workflowStatuses.some(
+                (status) => status.id === draft.status?.value,
+              )
+              return hasSupportedField && hasAvailableStatus
+            }}
             shouldConfirmAdoption={shouldConfirmAiPlanningAdoption}
             resolveStatusLabel={(statusId) =>
               workflowStatuses.find((status) => status.id === statusId)?.name ?? statusId}

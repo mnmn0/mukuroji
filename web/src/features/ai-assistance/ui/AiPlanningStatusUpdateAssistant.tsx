@@ -33,6 +33,8 @@ export type AiPlanningStatusUpdateAdoptionContext = {
 export type AiPlanningStatusUpdateAssistantProps = {
   /** Active Workspace member bearer token. */
   accessToken?: string
+  /** Temporarily disables AI actions while the owning status update is publishing. */
+  disabled?: boolean
   /** Reports authenticated AI failures to the owning Planning route session guard. */
   onAuthenticatedApiError?: (error: unknown) => void
   /** Optional operator guidance sent with the audited generation request. */
@@ -64,6 +66,7 @@ export type AiPlanningStatusUpdateAssistantProps = {
  */
 export function AiPlanningStatusUpdateAssistant({
   accessToken,
+  disabled = false,
   guidance,
   locale,
   onAuthenticatedApiError,
@@ -76,7 +79,8 @@ export function AiPlanningStatusUpdateAssistant({
 
   return (
     <AiPlanningStatusUpdateAssistantView
-      canGenerate={Boolean(accessToken)}
+      canGenerate={Boolean(accessToken) && !disabled}
+      disabled={disabled}
       error={controller.error}
       feedbackRating={controller.feedbackRating}
       generation={controller.generation}
@@ -110,6 +114,8 @@ export function AiPlanningStatusUpdateAssistant({
 export type AiPlanningStatusUpdateAssistantViewProps = {
   /** Whether the active session can issue a generation request. */
   canGenerate?: boolean
+  /** Temporarily disables every AI action while the owning status update is publishing. */
+  disabled?: boolean
   /** Safe controller failure classification. */
   error?: AiAssistanceControllerError
   /** Feedback already accepted for the visible generation. */
@@ -157,6 +163,7 @@ export type AiPlanningStatusUpdateAssistantViewProps = {
  */
 export function AiPlanningStatusUpdateAssistantView({
   canGenerate = true,
+  disabled = false,
   error,
   feedbackRating,
   generation,
@@ -177,7 +184,7 @@ export function AiPlanningStatusUpdateAssistantView({
   const confirmationRef = useRef<HTMLDivElement>(null)
   const availableDraft = getAvailableAiPlanningDraft(generation)
   const hasInvalidAvailableDraft = generation?.content.availability === 'available' && !availableDraft
-  const isOperationPending = isGenerating || isDecisionPending || isFeedbackPending
+  const isOperationPending = disabled || isGenerating || isDecisionPending || isFeedbackPending
   const isAdoptionConfirmationVisible = confirmationGenerationId !== undefined &&
     confirmationGenerationId === generation?.id
 
@@ -253,9 +260,9 @@ export function AiPlanningStatusUpdateAssistantView({
           isFeedbackPending={isFeedbackPending}
           generatingLabel={t('ai.planning.assistant.generating')}
           locale={locale}
-          onAdopt={availableDraft?.statusUpdate ? adoptDraft : undefined}
-          onFeedback={onFeedback}
-          onReject={availableDraft
+          onAdopt={availableDraft?.statusUpdate && !disabled ? adoptDraft : undefined}
+          onFeedback={disabled ? undefined : onFeedback}
+          onReject={availableDraft && !disabled
             ? async () => {
                 await onDecide('rejected')
               }
@@ -272,7 +279,7 @@ export function AiPlanningStatusUpdateAssistantView({
           isGenerating={isGenerating}
           locale={locale}
           cancelLabel={cancelLabel}
-          onCancelGeneration={onCancelGeneration}
+          onCancelGeneration={disabled ? undefined : onCancelGeneration}
           renderDraft={() => null}
           t={t}
         />

@@ -110,6 +110,26 @@ describe('AI workflow integration surfaces', () => {
     expect(generateCount).toBe(0)
   })
 
+  test('hides Planning approval actions while the status update is publishing', () => {
+    const html = renderToStaticMarkup(
+      <AiPlanningStatusUpdateAssistantView
+        disabled
+        generation={aiPlanningGenerationFixture}
+        locale="en"
+        onAdopt={() => undefined}
+        onDecide={async () => undefined}
+        onFeedback={() => undefined}
+        onGenerate={() => undefined}
+        t={t}
+      />,
+    )
+
+    expect(html).toContain('The launch remains staged while accessibility sign-off is completed.')
+    expect(html).not.toContain('Use status update in form')
+    expect(html).not.toContain('Reject draft')
+    expect(html).not.toContain('Was this draft helpful?')
+  })
+
   test('makes Work Item fields, estimate, child items, and dependencies reviewable', () => {
     let adoptCount = 0
     let generateCount = 0

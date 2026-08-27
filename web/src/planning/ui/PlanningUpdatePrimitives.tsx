@@ -767,6 +767,7 @@ export function PlanningStatusUpdateComposer({
   const [isFormDirty, setIsFormDirty] = useState(false)
   const [pendingAiDraft, setPendingAiDraft] =
     useState<PendingAiPlanningDraft>()
+  const stagedAiDraftDuringPublishRef = useRef(false)
   const [aiEvidenceSeed, setAiEvidenceSeed] = useState<AiPlanningEvidenceSeed>()
   const [aiGenerationReference, setAiGenerationReference] = useState<string>()
   const [formSeed, setFormSeed] = useState<PlanningStatusUpdateFormSeed>({
@@ -827,8 +828,12 @@ export function PlanningStatusUpdateComposer({
     replacementConfirmed = false,
     context?: AiPlanningStatusUpdateAdoptionContext,
   ) {
-    if (isPublishing || isPublishingRef.current) return
     if (activeAiAssistantSessionKeyRef.current !== sessionKey) return
+    if (isPublishing || isPublishingRef.current) {
+      stagedAiDraftDuringPublishRef.current = true
+      setPendingAiDraft({ draft, sessionKey, context })
+      return
+    }
     if (replacementConfirmed) {
       applyAiDraft(draft, context)
       return
@@ -855,6 +860,7 @@ export function PlanningStatusUpdateComposer({
         <div className="mt-4">
           <AiPlanningStatusUpdateAssistant
             accessToken={aiAssistance.accessToken}
+            disabled={isPublishing}
             key={aiAssistantSessionKey}
             locale={aiAssistance.locale}
             onAuthenticatedApiError={aiAssistance.onAuthenticatedApiError}
@@ -957,7 +963,7 @@ export function PlanningStatusUpdateComposer({
               setIsFormDirty(false)
               setAiEvidenceSeed(undefined)
               setAiGenerationReference(undefined)
-              setPendingAiDraft(undefined)
+              if (!stagedAiDraftDuringPublishRef.current) setPendingAiDraft(undefined)
               if (wasAiSeeded) {
                 setEvidenceType('none')
                 setFormSeed((current) => ({
@@ -968,6 +974,7 @@ export function PlanningStatusUpdateComposer({
             } catch {
               // The page-level mutation handler owns the user-visible error state.
             } finally {
+              stagedAiDraftDuringPublishRef.current = false
               isPublishingRef.current = false
               setIsPublishing(false)
             }
