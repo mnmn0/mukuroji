@@ -337,6 +337,16 @@ export function TriageEntryDetail({
                 locale={locale}
                 onAuthenticatedApiError={onAuthenticatedApiError}
                 onAdoptDraft={adoptTriageDraft}
+                canAdoptDraft={(draft) => {
+                  const hasUnsupportedAssignee =
+                    draft.assigneeUserId !== undefined && !entry.capabilities.canAssign
+                  const hasSupportedAssignee =
+                    draft.assigneeUserId !== undefined && entry.capabilities.canAssign
+                  const hasSupportedProject =
+                    draft.projectId !== undefined &&
+                    (entry.capabilities.canAssign || entry.capabilities.canAcceptCreate)
+                  return !hasUnsupportedAssignee && (hasSupportedAssignee || hasSupportedProject)
+                }}
                 isMutationPending={actionIsPending}
                 shouldConfirmAdoption={shouldConfirmTriageAdoption}
                 source={{

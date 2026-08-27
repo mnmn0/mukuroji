@@ -22,6 +22,8 @@ export type AiWorkItemPlanningAssistantProps = {
   accessToken?: string
   /** Reports authenticated AI failures to the owning Work Item route session guard. */
   onAuthenticatedApiError?: (error: unknown) => void
+  /** Reports generation, decision, or feedback activity to the Work Item save guard. */
+  onOperationPendingChange?: (pending: boolean) => void
   /** Optional controller override used by isolated stories and interaction tests. */
   controller?: AiAssistanceController
   /** Whether the owning Work Item mutation is in flight. */
@@ -60,6 +62,7 @@ export function AiWorkItemPlanningAssistant({
   onAuthenticatedApiError,
   onAdopt,
   canAdoptDraft,
+  onOperationPendingChange,
   shouldConfirmAdoption,
   resolveStatusLabel,
   resolveWorkItemLabel,
@@ -88,6 +91,7 @@ export function AiWorkItemPlanningAssistant({
       onCancelGeneration={activeController.cancelGeneration}
       onDecide={activeController.decide}
       onFeedback={activeController.sendFeedback}
+      onOperationPendingChange={onOperationPendingChange}
       onGenerate={() => activeController.generate({ locale, source, task: 'planning' })}
       resolveStatusLabel={resolveStatusLabel}
       resolveWorkItemLabel={resolveWorkItemLabel}
@@ -115,6 +119,8 @@ export type AiWorkItemPlanningAssistantViewProps = {
   isGenerating?: boolean
   /** Whether the owning Work Item mutation is in flight. */
   isMutationPending?: boolean
+  /** Reports generation, decision, or feedback activity to the Work Item save guard. */
+  onOperationPendingChange?: (pending: boolean) => void
   /** Locale used for generation metadata and planning values. */
   locale: Locale
   /** Localized cancellation action for the Work Item planning workflow. */
@@ -162,6 +168,7 @@ export function AiWorkItemPlanningAssistantView({
   cancelLabel,
   onAdopt,
   canAdoptDraft,
+  onOperationPendingChange,
   shouldConfirmAdoption,
   onCancelGeneration,
   onDecide,
@@ -188,16 +195,46 @@ export function AiWorkItemPlanningAssistantView({
     if (isAdoptionConfirmationVisible) confirmationRef.current?.focus()
   }, [isAdoptionConfirmationVisible])
 
-  /** Starts a new draft only from the explicit button. */
+  /** Starts a new draft only from the explicit button while fencing Work Item saves. */
   const generateDraft = () => {
     if (!canGenerate || isOperationPending) return
-    void onGenerate()
+    onOperationPendingChange?.(true)
+    void Promise.resolve()
+      .then(() => onGenerate())
+      .then(
+        () => onOperationPendingChange?.(false),
+        () => onOperationPendingChange?.(false),
+      )
   }
+
+  /** Keeps the Work Item save guard active while an approval decision is persisted. */
+  const handleDecide = async (
+    outcome: 'approved' | 'rejected',
+  ): Promise<AiAssistanceGeneration | undefined> => {
+    onOperationPendingChange?.(true)
+    try {
+      return await onDecide(outcome)
+    } finally {
+      onOperationPendingChange?.(false)
+    }
+  }
+
+  /** Keeps the Work Item save guard active while usefulness feedback is persisted. */
+  const handleFeedback = onFeedback
+    ? async (rating: CreateAiAssistanceFeedbackRequest['rating']) => {
+        onOperationPendingChange?.(true)
+        try {
+          await onFeedback(rating)
+        } finally {
+          onOperationPendingChange?.(false)
+        }
+      }
+    : undefined
 
   /** Records approval before copying any supported value into local editor state. */
   const approveAndAdoptDraft = async (replacementConfirmed = false) => {
     if (!onAdopt || !hasAdoptableDraft || isOperationPending) return
-    const reviewedGeneration = await onDecide('approved')
+    const reviewedGeneration = await handleDecide('approved')
     const reviewedDraft = getAvailableWorkItemPlanningDraft(reviewedGeneration)
     if (
       reviewedGeneration?.decision?.outcome !== 'approved' ||
@@ -268,10 +305,10 @@ export function AiWorkItemPlanningAssistantView({
           generatingLabel={t('ai.planning.workItem.generating')}
           locale={locale}
           onAdopt={hasAdoptableDraft && onAdopt && !isMutationPending ? adoptDraft : undefined}
-          onFeedback={isMutationPending ? undefined : onFeedback}
+          onFeedback={isMutationPending ? undefined : handleFeedback}
           onReject={availableDraft && !isMutationPending
             ? async () => {
-                await onDecide('rejected')
+                await handleDecide('rejected')
               }
             : undefined}
           renderDraft={({ citations, draft }) => draft.kind === 'planning' ? (

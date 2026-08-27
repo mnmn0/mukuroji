@@ -214,6 +214,9 @@ export function TaskDetailPane({
   const [fieldErrors, setFieldErrors] = useState<Readonly<Record<string, string | undefined>>>({})
   const [isIssueSaving, setIsIssueSaving] = useState(false)
   const isIssueSavingRef = useRef(false)
+  const [isAiPlanningOperationPending, setIsAiPlanningOperationPending] = useState(false)
+  const isAiPlanningOperationPendingRef = useRef(false)
+  const isWorkItemMutationPending = isIssueSaving || isAiPlanningOperationPending
   const [aiFormSeed, setAiFormSeed] = useState<WorkItemAiFormSeed>({
     identity: '',
     revision: 0,
@@ -388,7 +391,14 @@ export function TaskDetailPane({
 
   /** Persists one Work Item update while exposing its pending state to AI review controls. */
   async function submitIssueUpdate(input: UpdateTeamIssueInput) {
-    if (isReadOnly || !task || !task.teamId || !onUpdateIssue || isIssueSavingRef.current) return
+    if (
+      isReadOnly ||
+      !task ||
+      !task.teamId ||
+      !onUpdateIssue ||
+      isIssueSavingRef.current ||
+      isAiPlanningOperationPendingRef.current
+    ) return
     const currentTask = task
     isIssueSavingRef.current = true
     setIsIssueSaving(true)
@@ -400,6 +410,12 @@ export function TaskDetailPane({
       isIssueSavingRef.current = false
       setIsIssueSaving(false)
     }
+  }
+
+  /** Keeps canonical Work Item save controls disabled while AI planning is pending. */
+  function reportAiPlanningOperationPending(pending: boolean) {
+    isAiPlanningOperationPendingRef.current = pending
+    setIsAiPlanningOperationPending(pending)
   }
 
   /** Rechecks whether the current Work Item editor contains supported manual edits. */
@@ -424,7 +440,12 @@ export function TaskDetailPane({
         onSubmit={(event) => {
           event.preventDefault()
 
-          if (isReadOnly || !task.teamId) {
+          if (
+            isReadOnly ||
+            !task.teamId ||
+            isIssueSavingRef.current ||
+            isAiPlanningOperationPendingRef.current
+          ) {
             return
           }
 
@@ -579,11 +600,12 @@ export function TaskDetailPane({
           <AiWorkItemPlanningAssistant
             accessToken={accessToken}
             controller={aiAssistanceController}
-            isMutationPending={isIssueSaving}
+            isMutationPending={isWorkItemMutationPending}
             key={editorIdentity}
             locale={locale}
             onAuthenticatedApiError={onAuthenticatedApiError}
             onAdopt={isReadOnly ? undefined : applyAiPlanningDraft}
+            onOperationPendingChange={reportAiPlanningOperationPending}
             canAdoptDraft={(draft) => {
               const hasSupportedField = Boolean(
                 draft.title || draft.description || draft.priority || draft.status,
@@ -611,7 +633,7 @@ export function TaskDetailPane({
         ) : null}
         <fieldset
           className="contents"
-          disabled={isReadOnly || isIssueSaving}
+          disabled={isReadOnly || isWorkItemMutationPending}
         >
           <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
             {t('issues.column.title')}
@@ -766,7 +788,7 @@ export function TaskDetailPane({
             ) : null}
             <button
               className="workbench-button-secondary min-h-[44px] px-3 disabled:border-slate-300 disabled:bg-slate-300"
-              disabled={isReadOnly || isIssueSaving}
+              disabled={isReadOnly || isWorkItemMutationPending}
               form={scheduleFormId}
               type="submit"
             >
@@ -788,7 +810,7 @@ export function TaskDetailPane({
         </fieldset>
         <button
           className="workbench-button-primary min-h-[44px] px-4 disabled:border-slate-300 disabled:bg-slate-300"
-          disabled={isReadOnly || isIssueSaving}
+          disabled={isReadOnly || isWorkItemMutationPending}
           type="submit"
         >
           {t('issues.detail.save')}
@@ -806,7 +828,12 @@ export function TaskDetailPane({
         id={scheduleFormId}
         onSubmit={(event) => {
           event.preventDefault()
-          if (isReadOnly || !task.teamId || isIssueSavingRef.current) return
+          if (
+            isReadOnly ||
+            !task.teamId ||
+            isIssueSavingRef.current ||
+            isAiPlanningOperationPendingRef.current
+          ) return
           const nextSchedule = createDetailSchedule(new FormData(event.currentTarget), schedule)
           if (!nextSchedule) {
             setFieldErrors((current) => ({

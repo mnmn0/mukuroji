@@ -321,4 +321,39 @@ describe('RequestQueue', () => {
       projectDirectory,
     )).toBe(false)
   })
+
+  /** Keeps a same-Team draft with an invalid Project review-only. */
+  test('does not adopt a same-Team proposal containing an invalid Project', () => {
+    const submission = normalizeRequestSubmission(requestSubmissionFixture)
+    const content = aiTriageGenerationFixture.content
+    if (content.availability !== 'available' || content.draft.kind !== 'triage') {
+      throw new Error('Triage fixture must stay available.')
+    }
+    const sameTeamProjectDraft = {
+      ...content.draft,
+      assigneeUserId: undefined,
+      description: undefined,
+      priority: undefined,
+      teamId: {
+        ...content.draft.teamId,
+        value: submission.routing.teamId,
+      },
+      title: undefined,
+      projectId: {
+        ...content.draft.projectId,
+        value: 'project-from-another-team',
+      },
+    }
+    const projectDirectory = new Map([
+      [submission.routing.teamId, new Set(['project-in-current-team'])],
+      ['other-team', new Set(['project-from-another-team'])],
+    ])
+
+    expect(canAdoptRequestTriageDraft(
+      submission,
+      sameTeamProjectDraft,
+      {},
+      projectDirectory,
+    )).toBe(false)
+  })
 })

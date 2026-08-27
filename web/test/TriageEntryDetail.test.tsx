@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
+import type { AiAssistanceGeneration } from '@mukuroji/contracts'
 import type { AiAssistanceController } from '../src/features/ai-assistance/mutations/useAiAssistanceController'
 import { aiTriageGenerationFixture } from '../src/features/ai-assistance/fixtures'
 import { createTranslator } from '../src/shared/i18n/i18n'
@@ -108,5 +109,49 @@ describe('TriageEntryDetail', () => {
 
     expect(html).toContain('Entry unavailable')
     expect(html).toContain('Back to queue')
+  })
+
+  test('does not offer assignee-only adoption without Assign capability', () => {
+    const entry = triageEntryFixtures[0]
+    if (!entry) throw new Error('Expected a triage fixture.')
+    const content = aiTriageGenerationFixture.content
+    if (content.availability !== 'available' || content.draft.kind !== 'triage') {
+      throw new Error('Triage fixture must stay available.')
+    }
+    const assigneeOnlyGeneration: AiAssistanceGeneration = {
+      ...aiTriageGenerationFixture,
+      content: {
+        ...content,
+        draft: {
+          assigneeUserId: content.draft.assigneeUserId,
+          customFields: [],
+          kind: 'triage',
+        },
+      },
+    }
+    const html = renderToStaticMarkup(
+      <TriageEntryDetail
+        accessToken="access-token"
+        aiAssistanceController={{
+          ...aiController,
+          generation: assigneeOnlyGeneration,
+        }}
+        locale="en"
+        t={createTranslator('en')}
+        teamId="core-team"
+        view={createTriageEntryView({
+          ...entry,
+          capabilities: {
+            ...entry.capabilities,
+            canAcceptCreate: true,
+            canAssign: false,
+          },
+        })}
+        onBack={() => undefined}
+      />,
+    )
+
+    expect(html).toContain('member-ada')
+    expect(html).not.toContain('Use in Accept / Assign form')
   })
 })

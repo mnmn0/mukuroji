@@ -92,19 +92,25 @@ export function canAdoptRequestTriageDraft(
     currentOverride,
     projectDirectory,
   )
+  const currentTeamId = currentOverride.teamId ?? submission.routing.teamId
+  const proposedTeamId = draft.teamId?.value
+  const effectiveTeamId = proposedTeamId ?? currentTeamId
+  const teamChanged = proposedTeamId !== undefined && proposedTeamId !== currentTeamId
   const hasNonRoutingProposal = draft.title !== undefined ||
     draft.description !== undefined ||
     draft.priority !== undefined ||
     draft.assigneeUserId !== undefined
-  const hasSafeRoutingProposal =
-    (draft.teamId !== undefined && safeRouting.teamId === draft.teamId.value) ||
-    (draft.projectId !== undefined &&
-      safeRouting.projectId === draft.projectId.value &&
-      isProjectInEffectiveTeam(
-        draft.projectId.value,
-        draft.teamId?.value ?? currentOverride.teamId ?? submission.routing.teamId,
-        projectDirectory,
-      ))
+  const hasSafeProjectProposal = draft.projectId !== undefined &&
+    safeRouting.projectId === draft.projectId.value &&
+    isProjectInEffectiveTeam(
+      draft.projectId.value,
+      effectiveTeamId,
+      projectDirectory,
+    )
+  const hasSafeTeamProposal = draft.teamId !== undefined &&
+    teamChanged &&
+    safeRouting.teamId === draft.teamId.value &&
+    (draft.projectId === undefined || hasSafeProjectProposal)
 
-  return hasNonRoutingProposal || hasSafeRoutingProposal
+  return hasNonRoutingProposal || hasSafeTeamProposal || hasSafeProjectProposal
 }
