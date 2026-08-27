@@ -9,6 +9,7 @@ import {
   type SearchViewLayout,
   type SearchViewLayoutMode,
   type UpdateSavedWorkspaceViewInput,
+  type WorkspaceSearchDateField,
   type WorkspaceSearchFilters,
   type WorkspaceSearchResult,
 } from '@mukuroji/contracts'
@@ -555,7 +556,6 @@ export function SearchPage() {
                 <SearchToolbar
                   accessToken={accessToken}
                   aiAssistanceEnabled={workspaceContext?.isAiAssistanceTaskEnabled?.('search') ?? aiAssistanceUiEnabled}
-                  key={getSearchDateField(routeState.filters)}
                   locale={locale}
                   onAuthenticatedApiError={setAuthenticatedApiError}
                   onAiFiltersApply={(application, expectedRouteSignature) => {
@@ -703,8 +703,14 @@ function SearchToolbar({
   const statuses = getSearchStatuses(routeState.filters)
   const columns = getSearchColumns(routeState.layout)
   const routeDateField = getSearchDateField(routeState.filters)
-  const [dateField, setDateField] = useState(routeDateField)
+  const [dateFieldOverride, setDateFieldOverride] = useState<{
+    routeField: WorkspaceSearchDateField
+    value: WorkspaceSearchDateField
+  }>()
   const [inputMode, setInputMode] = useState<'keyword' | 'plain-language'>('keyword')
+  const dateField = dateFieldOverride?.routeField === routeDateField
+    ? dateFieldOverride.value
+    : routeDateField
 
   return (
     <section className="workbench-toolbar grid gap-4 p-4" data-testid="search-toolbar">
@@ -821,9 +827,13 @@ function SearchToolbar({
               <select
                 className="workbench-input min-h-10 px-3 normal-case tracking-normal"
                 onChange={(event) => {
-                  const nextDateField = event.target.value as typeof dateField
+                  const nextDateField: WorkspaceSearchDateField = event.target.value === 'createdAt'
+                    ? 'createdAt'
+                    : event.target.value === 'dueDate'
+                      ? 'dueDate'
+                      : 'updatedAt'
                   const currentDate = asRecord(asRecord(routeState.filters).date)
-                  setDateField(nextDateField)
+                  setDateFieldOverride({ routeField: routeDateField, value: nextDateField })
                   if (currentDate.from || currentDate.to) {
                     onFiltersChange({ date: { ...currentDate, field: nextDateField } })
                   }

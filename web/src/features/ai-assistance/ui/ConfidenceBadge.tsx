@@ -11,7 +11,12 @@ export type ConfidenceBadgeProps = {
   size?: 'default' | 'compact'
 }
 
-/** Renders an explicit confidence label with a semantic color accent. */
+/**
+ * Renders an explicit confidence label with a semantic color accent.
+ *
+ * @param props - Confidence category, localized label resolver, and display size.
+ * @returns A semantic confidence badge for the review surface.
+ */
 export function ConfidenceBadge({
   confidence,
   size = 'default',

@@ -9,7 +9,12 @@ import {
   getAiAssistancePreference,
 } from '../api/settings'
 
-/** Returns whether a settings request failure is safe to retry. */
+/**
+ * Returns whether a settings request failure is safe to retry.
+ *
+ * @param error - Unknown failure returned by the settings request.
+ * @returns Whether retrying the request is safe for the current error.
+ */
 export function isRetryableAiAssistanceSettingsError(error: unknown): boolean {
   return !(error instanceof AiAssistanceApiError && error.status >= 400 && error.status < 500)
 }
