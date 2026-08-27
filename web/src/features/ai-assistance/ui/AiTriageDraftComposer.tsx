@@ -316,7 +316,16 @@ function hasSupportedTriageAdoption(
   return draft.assigneeUserId !== undefined || draft.projectId !== undefined
 }
 
-/** Formats a supported custom-field or scalar suggestion without rendering unsafe markup. */
+/**
+ * Formats a supported custom-field or scalar suggestion for plain-text display.
+ *
+ * Arrays are joined with a comma separator, while null values use the supplied
+ * localized empty-value label; no markup is generated from the value.
+ *
+ * @param value - Validated scalar or string-array suggestion value.
+ * @param emptyValueLabel - Localized text used when the suggestion is null.
+ * @returns The normalized plain-text representation shown in the review UI.
+ */
 function formatSuggestedValue(
   value: string | number | boolean | readonly string[] | null,
   emptyValueLabel: string,
