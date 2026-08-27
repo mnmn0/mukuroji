@@ -73,7 +73,7 @@ describe('IssueCollaborationPanel', () => {
     const body = formatAiSummaryContextBody(oversizedDraft, content.citations, (key) => key)
 
     expect(body.length).toBeLessThanOrEqual(20_000)
-    expect(body).not.toContain('Launch readiness notes')
+    expect(body).toContain('Launch readiness notes')
   })
 
   /** Verifies the Brief tab stays hidden when no authenticated AI source is available. */

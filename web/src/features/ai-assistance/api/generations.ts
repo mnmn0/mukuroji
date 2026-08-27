@@ -35,6 +35,7 @@ export type GenerateAiAssistanceOptions = {
  *
  * @property accessToken - Bearer access token for the active Workspace member.
  * @property generationId - Generation whose review outcome is being recorded.
+ * @property expectedGeneration - Exact generation content reviewed before the decision.
  * @property expectedTask - Workflow task originally reviewed by the operator.
  * @property expectedOutcome - Review outcome requested by the operator.
  * @property input - Revision-fenced human review outcome.
@@ -45,6 +46,8 @@ export type DecideAiAssistanceOptions = {
   accessToken: string
   /** Generation whose review outcome is being recorded. */
   generationId: string
+  /** Exact generation content that the operator reviewed before deciding. */
+  expectedGeneration: AiAssistanceGeneration
   /** Workflow task originally reviewed by the operator. */
   expectedTask: AiAssistanceTask
   /** Review outcome requested by the operator. */
@@ -116,14 +119,32 @@ export async function decideAiAssistanceGeneration(
   )
 
   const generation = parseAiAssistanceGenerationResponse(value, options.expectedTask)
-  if (generation.decision?.outcome !== options.expectedOutcome) {
+  if (
+    generation.decision?.outcome !== options.expectedOutcome ||
+    stableSerialize(generation.content) !== stableSerialize(options.expectedGeneration.content)
+  ) {
     throw new AiAssistanceApiError(
       502,
-      'AI assistance decision returned an unexpected outcome.',
+      'AI assistance decision returned content different from the reviewed generation.',
       'InvalidAiAssistanceResponse',
     )
   }
   return generation
+}
+
+/**
+ * Serializes validated JSON values with deterministic object-key ordering.
+ *
+ * @param value - JSON-compatible value from a validated AI response.
+ * @returns A stable representation suitable for exact content comparison.
+ */
+function stableSerialize(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableSerialize).join(',')}]`
+  if (isRecord(value)) {
+    return `{${Object.keys(value).sort().map((key) =>
+      `${JSON.stringify(key)}:${stableSerialize(value[key])}`).join(',')}}`
+  }
+  return JSON.stringify(value) ?? 'undefined'
 }
 
 /**

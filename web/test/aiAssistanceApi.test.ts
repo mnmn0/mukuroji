@@ -74,6 +74,7 @@ describe('AI assistance API', () => {
     await decideAiAssistanceGeneration({
       accessToken: 'access-token',
       generationId: 'generation/1',
+      expectedGeneration: aiSearchGenerationFixture,
       expectedTask: 'search',
       expectedOutcome: 'approved',
       input: { expectedRevision: 3, outcome: 'approved' },
@@ -119,6 +120,7 @@ describe('AI assistance API', () => {
       const error = await decideAiAssistanceGeneration({
         accessToken: 'access-token',
         generationId: 'generation/1',
+        expectedGeneration: aiSearchGenerationFixture,
         expectedTask: 'search',
         expectedOutcome: 'approved',
         input: { expectedRevision: 3, outcome: 'approved' },
@@ -127,6 +129,74 @@ describe('AI assistance API', () => {
 
       expect(error).toMatchObject({ code: 'InvalidAiAssistanceResponse', status: 502 })
     }
+  })
+
+  /** Rejects a decision response that changes reviewed draft content or citations. */
+  test('rejects a decision response with content different from the reviewed generation', async () => {
+    const changedGeneration = {
+      ...aiSearchGenerationFixture,
+      content: aiSearchGenerationFixture.content.availability === 'available'
+        ? {
+            ...aiSearchGenerationFixture.content,
+            draft: {
+              ...aiSearchGenerationFixture.content.draft,
+              interpretation: 'Changed after the operator reviewed the draft.',
+            },
+          }
+        : aiSearchGenerationFixture.content,
+      decision: {
+        outcome: 'approved',
+        decidedAt: '2026-08-25T02:05:00.000Z',
+      },
+    } satisfies AiAssistanceGeneration
+    installFetchRecorder([changedGeneration])
+
+    const error = await decideAiAssistanceGeneration({
+      accessToken: 'access-token',
+      generationId: 'generation/1',
+      expectedGeneration: aiSearchGenerationFixture,
+      expectedTask: 'search',
+      expectedOutcome: 'approved',
+      input: { expectedRevision: 3, outcome: 'approved' },
+      mutationContext,
+    }).catch((caught: unknown) => caught)
+
+    expect(error).toMatchObject({ code: 'InvalidAiAssistanceResponse', status: 502 })
+  })
+
+  /** Rejects a decision response whose reviewed citation set is replaced. */
+  test('rejects a decision response with different reviewed citations', async () => {
+    const content = aiSummaryGenerationFixture.content
+    if (content.availability !== 'available' || content.draft.kind !== 'summary') {
+      throw new Error('Summary fixture must stay available.')
+    }
+    const changedCitationGeneration = {
+      ...aiSummaryGenerationFixture,
+      content: {
+        ...content,
+        citations: [{
+          ...content.citations[0],
+          label: 'A different source than the one reviewed.',
+        }],
+      },
+      decision: {
+        outcome: 'approved',
+        decidedAt: '2026-08-25T02:05:00.000Z',
+      },
+    } satisfies AiAssistanceGeneration
+    installFetchRecorder([changedCitationGeneration])
+
+    const error = await decideAiAssistanceGeneration({
+      accessToken: 'access-token',
+      generationId: 'generation/summary-1',
+      expectedGeneration: aiSummaryGenerationFixture,
+      expectedTask: 'summary',
+      expectedOutcome: 'approved',
+      input: { expectedRevision: 1, outcome: 'approved' },
+      mutationContext,
+    }).catch((caught: unknown) => caught)
+
+    expect(error).toMatchObject({ code: 'InvalidAiAssistanceResponse', status: 502 })
   })
 
   test('rejects a generation containing a non-application citation path', async () => {
@@ -211,6 +281,57 @@ describe('AI assistance API', () => {
       const error = await generateAiAssistance({
         accessToken: 'access-token',
         input: { locale: 'en', query: 'review this', task: 'summary' },
+        mutationContext,
+      }).catch((caught: unknown) => caught)
+
+      expect(error).toMatchObject({ code: 'InvalidAiAssistanceResponse', status: 502 })
+    }
+  })
+
+  /** Rejects oversized citation collections before they reach the review components. */
+  test('rejects oversized citation collections and per-claim references', async () => {
+    const content = aiSummaryGenerationFixture.content
+    if (content.availability !== 'available' || content.draft.kind !== 'summary') {
+      throw new Error('Summary fixture must stay available.')
+    }
+
+    const tooManyCitations = Array.from({ length: 101 }, (_, index) => ({
+      ...content.citations[0],
+      id: `citation-${index}`,
+    }))
+    const tooManyReferences = Array.from({ length: 21 }, (_, index) => ({
+      ...content.citations[0],
+      id: `reference-${index}`,
+    }))
+    const malformedGenerations = [
+      {
+        ...aiSummaryGenerationFixture,
+        content: {
+          ...content,
+          citations: tooManyCitations,
+        },
+      },
+      {
+        ...aiSummaryGenerationFixture,
+        content: {
+          ...content,
+          draft: {
+            ...content.draft,
+            overview: {
+              ...content.draft.overview,
+              citationIds: tooManyReferences.map((citation) => citation.id),
+            },
+          },
+          citations: tooManyReferences,
+        },
+      },
+    ]
+
+    for (const generation of malformedGenerations) {
+      installFetchRecorder([generation])
+      const error = await generateAiAssistance({
+        accessToken: 'access-token',
+        input: { locale: 'en', sources: [], task: 'summary' },
         mutationContext,
       }).catch((caught: unknown) => caught)
 

@@ -18,8 +18,12 @@ export function formatAiSummaryContextBody(
   t: (key: MessageKey) => string,
 ): string {
   const citationById = new Map(citations.map((citation) => [citation.id, citation]))
-  const formatItem = (item: AiSummaryDraft['overview']): string[] => {
-    const lines = [`- ${escapeMarkdownText(item.text)}`]
+  const lines: string[] = []
+  const evidenceLineIndices = new Set<number>()
+
+  /** Appends one claim and its complete evidence line to the formatted body. */
+  const appendItem = (item: AiSummaryDraft['overview'], marker: string): void => {
+    lines.push(`${marker}${escapeMarkdownText(item.text)}`)
     const evidence = item.citationIds
       .map((citationId) => citationById.get(citationId))
       .filter((citation): citation is AiAssistanceCitation => citation !== undefined)
@@ -27,29 +31,63 @@ export function formatAiSummaryContextBody(
         const label = citation.label.replace(/[\\[\]]/gu, '\\$&')
         return `[${label}](<${escapeMarkdownLinkDestination(citation.href)}>)`
       })
-    if (evidence.length > 0) lines.push(`  ${t('ai.summary.evidence')}: ${evidence.join(', ')}`)
-    return lines
+    if (evidence.length > 0) {
+      lines.push(`  ${t('ai.summary.evidence')}: ${evidence.join(', ')}`)
+      evidenceLineIndices.add(lines.length - 1)
+    }
   }
   const sections = [
     [t('ai.summary.decisions'), draft.decisions],
     [t('ai.summary.actions'), draft.actions],
     [t('ai.summary.risks'), draft.risks],
   ] as const
-  const lines = [escapeMarkdownText(draft.overview.text), ...formatItem(draft.overview).slice(1)]
+  appendItem(draft.overview, '')
   for (const [title, items] of sections) {
     if (items.length === 0) continue
-    lines.push('', `## ${title}`, ...items.flatMap(formatItem))
+    lines.push('', `## ${title}`)
+    for (const item of items) appendItem(item, '- ')
   }
-  return boundContextBody(lines)
+  return boundContextBody(lines, evidenceLineIndices)
 }
 
-/** Bounds the fully formatted body without cutting a later Markdown evidence line in half. */
-function boundContextBody(lines: readonly string[]): string {
+/**
+ * Bounds the fully formatted body while keeping each included claim's evidence line intact.
+ *
+ * @param lines - Formatted claim, evidence, heading, and separator lines.
+ * @param evidenceLineIndices - Line indices that contain complete citation links.
+ * @returns A body within the editor limit with no claim detached from its evidence.
+ */
+function boundContextBody(
+  lines: readonly string[],
+  evidenceLineIndices: ReadonlySet<number>,
+): string {
   let body = ''
-  for (const line of lines) {
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]
+    if (line === undefined) break
     const separator = body ? '\n' : ''
     const remainingLength = collaborationContextBodyMaximumLength - body.length - separator.length
     if (remainingLength <= 0) break
+
+    const evidenceLine = evidenceLineIndices.has(index + 1) ? lines[index + 1] : undefined
+    if (evidenceLine !== undefined) {
+      const pairLength = line.length + 1 + evidenceLine.length
+      if (pairLength <= remainingLength) {
+        body += `${separator}${line}\n${evidenceLine}`
+        index += 1
+        continue
+      }
+
+      const claimLength = remainingLength - 1 - evidenceLine.length
+      if (claimLength > 0) {
+        const truncatedClaim = truncateToUtf16Boundary(line, claimLength)
+        if (truncatedClaim.length > 0) {
+          body += `${separator}${truncatedClaim}\n${evidenceLine}`
+        }
+      }
+      break
+    }
+
     if (line.length <= remainingLength) {
       body += `${separator}${line}`
       continue

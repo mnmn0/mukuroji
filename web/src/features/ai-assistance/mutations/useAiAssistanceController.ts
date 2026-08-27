@@ -237,6 +237,7 @@ export function useAiAssistanceController({
         (mutationContext) => decideAiAssistanceGeneration({
           accessToken,
           generationId,
+          expectedGeneration: generation,
           expectedTask: generation.task,
           expectedOutcome: outcome,
           input: { expectedRevision: generation.revision, outcome },

@@ -53,6 +53,12 @@ const searchDateFieldValues = [
 
 /** Maximum UTF-8 size accepted by the Planning status update endpoint. */
 const planningStatusUpdateTextMaximumBytes = 8_000
+/** Maximum number of citations exposed from one AI generation response. */
+const aiAssistanceCitationMaximumCount = 100
+/** Maximum number of citation references attached to one generated claim. */
+const aiAssistanceCitationReferencesMaximumCount = 20
+/** Maximum length of one generation-local citation identifier. */
+const aiAssistanceCitationIdentifierMaximumLength = 256
 
 /**
  * Returns whether an unknown value is a fully grounded available generation for one workflow.
@@ -107,6 +113,7 @@ function isAiAssistanceContent(value: unknown, task: AiAssistanceTask): boolean 
     !isAiAssistanceDraft(value.draft) ||
     value.draft.kind !== task ||
     !Array.isArray(value.citations) ||
+    value.citations.length > aiAssistanceCitationMaximumCount ||
     !value.citations.every(isCitation) ||
     !hasUniqueCitations(value.citations) ||
     !isUncertainty(value.uncertainty)
@@ -275,7 +282,7 @@ function isSuggestedValue(
     isValue(value.value) &&
     isString(value.reason) &&
     isConfidence(value.confidence) &&
-    isStringArray(value.citationIds)
+    isCitationIdArray(value.citationIds)
 }
 
 /**
@@ -311,7 +318,7 @@ function isBriefItem(value: unknown): boolean {
     isNonEmptyString(value.id) &&
     isBoundedNonEmptyTrimmedString(value.text, 20_000) &&
     isConfidence(value.confidence) &&
-    isStringArray(value.citationIds)
+    isCitationIdArray(value.citationIds)
 }
 
 /** Validates an array of grounded brief items. */
@@ -463,7 +470,7 @@ function isPlanningSubtask(value: unknown): boolean {
     (value.plannedEffortMinutes === undefined || isBoundedEffortMinutes(value.plannedEffortMinutes)) &&
     isString(value.reason) &&
     isConfidence(value.confidence) &&
-    isStringArray(value.citationIds)
+    isCitationIdArray(value.citationIds)
 }
 
 /** Validates one proposed planning dependency. */
@@ -484,7 +491,7 @@ function isPlanningDependency(value: unknown): boolean {
     isBoundedLagDays(value.lagDays) &&
     isString(value.reason) &&
     isConfidence(value.confidence) &&
-    isStringArray(value.citationIds)
+    isCitationIdArray(value.citationIds)
 }
 
 /**
@@ -512,7 +519,7 @@ function isPlanningStatusUpdate(value: unknown): boolean {
     isBoundedPlanningStatusUpdateText(value.helpNeeded) &&
     isBoundedPlanningStatusUpdateText(value.nextAction, true) &&
     isConfidence(value.confidence) &&
-    isStringArray(value.citationIds)
+    isCitationIdArray(value.citationIds)
 }
 
 /** Validates one Planning status text field against the server's UTF-8 boundary. */
@@ -526,12 +533,19 @@ function isBoundedPlanningStatusUpdateText(value: unknown, required = false): va
 /** Validates one permission-safe evidence citation. */
 function isCitation(value: unknown): value is AiAssistanceCitation {
   return isRecord(value) &&
-    isNonEmptyString(value.id) &&
+    isBoundedString(value.id, aiAssistanceCitationIdentifierMaximumLength) &&
     isOneOf(value.sourceType, sourceTypeValues) &&
     isString(value.label) &&
     isSafeApplicationPath(value.href) &&
     isOptionalString(value.excerpt) &&
     isNonNegativeInteger(value.capturedRevision)
+}
+
+/** Validates a bounded list of generation-local citation identifiers. */
+function isCitationIdArray(value: unknown): value is string[] {
+  return Array.isArray(value) &&
+    value.length <= aiAssistanceCitationReferencesMaximumCount &&
+    value.every((item) => isBoundedString(item, aiAssistanceCitationIdentifierMaximumLength))
 }
 
 /** Validates the overall uncertainty disclosure. */
