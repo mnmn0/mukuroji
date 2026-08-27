@@ -30,6 +30,10 @@ export type AiTriageDraftComposerProps = {
   readonly locale: Locale
   /** Copies a reviewed draft into local form state without mutating a domain resource. */
   readonly onAdoptDraft: (draft: AiTriageDraft, replacementConfirmed?: boolean) => void | Promise<void>
+  /** Returns whether the owning domain can safely accept this particular draft. */
+  readonly canAdoptDraft?: (draft: AiTriageDraft) => boolean
+  /** Whether an owning domain mutation is in flight and all AI actions must be frozen. */
+  readonly isMutationPending?: boolean
   /** Returns whether this draft would replace a local manual edit. */
   readonly shouldConfirmAdoption?: (draft: AiTriageDraft) => boolean
   /** Permission-scoped source reference and optimistic revision. */
@@ -47,7 +51,9 @@ export type AiTriageDraftComposerProps = {
 export function AiTriageDraftComposer({
   accessToken,
   adoptLabel,
+  canAdoptDraft: isDraftAdoptable,
   controller,
+  isMutationPending = false,
   locale,
   onAuthenticatedApiError,
   onAdoptDraft,
@@ -63,14 +69,19 @@ export function AiTriageDraftComposer({
   const confirmationRef = useRef<HTMLDivElement>(null)
   const sourceKey = createTriageSourceKey(source)
   const sourceKeyRef = useRef(sourceKey)
+  const mutationPendingRef = useRef(isMutationPending)
   useLayoutEffect(() => {
     sourceKeyRef.current = sourceKey
   }, [sourceKey])
+  useLayoutEffect(() => {
+    mutationPendingRef.current = isMutationPending
+  }, [isMutationPending])
   const canGenerate = Boolean(accessToken || controller)
   const availableDraft = getAvailableTriageDraft(activeController.generation)
   const hasCurrentGeneration = generatedForSourceKey === sourceKey
   const canAdoptDraft = hasCurrentGeneration && availableDraft !== undefined &&
-    hasSupportedTriageAdoption(availableDraft, source.type)
+    hasSupportedTriageAdoption(availableDraft, source.type) &&
+    (isDraftAdoptable?.(availableDraft) ?? true)
   const isSourceStale = generatedForSourceKey !== undefined &&
     generatedForSourceKey !== sourceKey
   const hasInvalidDraft = !isSourceStale &&
@@ -78,7 +89,8 @@ export function AiTriageDraftComposer({
     !availableDraft
   const isOperationPending = activeController.isGenerating ||
     activeController.isDecisionPending ||
-    activeController.isFeedbackPending
+    activeController.isFeedbackPending ||
+    isMutationPending
   const isAdoptionConfirmationVisible = confirmationGenerationId !== undefined &&
     confirmationGenerationId === activeController.generation?.id &&
     !isSourceStale
@@ -89,7 +101,7 @@ export function AiTriageDraftComposer({
     const requestedSourceKey = sourceKey
     setIsStale(false)
     const generation = await activeController.generate({ locale, source, task: 'triage' })
-    if (generation) {
+    if (generation && !mutationPendingRef.current) {
       setGeneratedForSourceKey(requestedSourceKey)
     }
   }
@@ -101,7 +113,7 @@ export function AiTriageDraftComposer({
   /** Records approval before copying the currently authorized draft into local form state. */
   const approveAndAdopt = async (replacementConfirmed = false) => {
     const requestedSourceKey = sourceKey
-    if (isOperationPending) return
+    if (isOperationPending || mutationPendingRef.current) return
     if (generatedForSourceKey !== requestedSourceKey) {
       setIsStale(true)
       return
@@ -111,8 +123,13 @@ export function AiTriageDraftComposer({
       setIsStale(true)
       return
     }
+    if (mutationPendingRef.current) return
     const reviewedDraft = getAvailableTriageDraft(reviewedGeneration)
-    if (reviewedGeneration?.decision?.outcome !== 'approved' || !reviewedDraft) return
+    if (
+      reviewedGeneration?.decision?.outcome !== 'approved' ||
+      !reviewedDraft ||
+      !(isDraftAdoptable?.(reviewedDraft) ?? true)
+    ) return
     // The operator may edit the target form while the decision request is in
     // flight. Re-read the parent's dirty state before adopting so a late edit
     // cannot be overwritten by the continuation's stale callback closure.
@@ -174,11 +191,11 @@ export function AiTriageDraftComposer({
           generatingLabel={t('ai.triage.generating')}
           locale={locale}
           cancelLabel={t('ai.triage.cancel')}
-          onAdopt={canAdoptDraft && !isSourceStale ? adoptDraft : undefined}
-          onCancelGeneration={activeController.cancelGeneration}
-          onFeedback={(rating: CreateAiAssistanceFeedbackRequest['rating']) =>
+          onAdopt={canAdoptDraft && !isSourceStale && !isMutationPending ? adoptDraft : undefined}
+          onCancelGeneration={isMutationPending ? undefined : activeController.cancelGeneration}
+          onFeedback={isMutationPending ? undefined : (rating: CreateAiAssistanceFeedbackRequest['rating']) =>
             activeController.sendFeedback(rating)}
-          onReject={availableDraft && !isSourceStale ? async () => {
+          onReject={availableDraft && !isSourceStale && !isMutationPending ? async () => {
             await activeController.decide('rejected')
           } : undefined}
           renderDraft={({ citations, draft }) => draft.kind === 'triage'

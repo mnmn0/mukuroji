@@ -101,6 +101,7 @@ export const aiAssistanceMessages = {
   'ai.summary.risks': 'リスク・ブロッカー',
   'ai.summary.evidence': '根拠',
   'ai.summary.empty': '参照できる根拠からは見つかりませんでした。',
+  'ai.summary.contextTruncated': 'コンテキスト編集欄の上限に収めるため、一部の主張を省略しています。保存する前に AI Brief 全体を確認してください。',
   'ai.planning.fields': '提案するフィールド',
   'ai.planning.field.title': 'タイトル',
   'ai.planning.field.description': '説明',

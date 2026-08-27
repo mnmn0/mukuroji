@@ -12,7 +12,10 @@ import {
   type RequestSubmissionModel,
 } from '../model/requestForm'
 import { resolveRequestLocalizedText } from '../model/requestFormLogic'
-import { createSafeTriageRoutingOverride } from '../model/requestTriageRouting'
+import {
+  canAdoptRequestTriageDraft,
+  createSafeTriageRoutingOverride,
+} from '../model/requestTriageRouting'
 
 /**
  * RequestQueue の入力です。
@@ -238,6 +241,7 @@ function RequestSubmissionDetail({
     description: false,
   })
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const isSubmittingRef = useRef(false)
   const [actionError, setActionError] = useState(false)
   const [openingAttachmentId, setOpeningAttachmentId] = useState<string>()
   const [attachmentErrorId, setAttachmentErrorId] = useState<string>()
@@ -264,7 +268,7 @@ function RequestSubmissionDetail({
 
   /** Copies proposed conversion fields while retaining fields omitted by the draft. */
   const applyTriageDraft = (draft: AiTriageDraft) => {
-    if (!submission) return
+    if (!submission || isSubmittingRef.current) return
     openConversionAction()
     setTitleOverride((current) => draft.title?.value ?? current)
     setDescriptionOverride((current) => draft.description?.value ?? current)
@@ -305,7 +309,7 @@ function RequestSubmissionDetail({
 
   const submitAction = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    if (!actionMode || !onAction || isSubmitting) return
+    if (!actionMode || !onAction || isSubmitting || isSubmittingRef.current) return
 
     const common = { expectedRevision: submission.revision }
     const input: RequestSubmissionActionInput = actionMode === 'assign'
@@ -326,6 +330,7 @@ function RequestSubmissionDetail({
                 title: titleOverride.trim() || undefined,
               }
 
+    isSubmittingRef.current = true
     setIsSubmitting(true)
     setActionError(false)
     try {
@@ -341,6 +346,7 @@ function RequestSubmissionDetail({
     } catch {
       setActionError(true)
     } finally {
+      isSubmittingRef.current = false
       setIsSubmitting(false)
     }
   }
@@ -481,6 +487,12 @@ function RequestSubmissionDetail({
             locale={locale}
             onAuthenticatedApiError={onAuthenticatedApiError}
             onAdoptDraft={adoptTriageDraft}
+            canAdoptDraft={(draft) => canAdoptRequestTriageDraft(
+              submission,
+              draft,
+              conversionTargetOverride,
+            )}
+            isMutationPending={isSubmitting}
             shouldConfirmAdoption={shouldConfirmTriageAdoption}
             source={{
               expectedRevision: submission.revision,

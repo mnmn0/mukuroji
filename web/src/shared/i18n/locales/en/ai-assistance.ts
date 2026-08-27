@@ -101,6 +101,7 @@ export const aiAssistanceMessages = {
   'ai.summary.risks': 'Risks and blockers',
   'ai.summary.evidence': 'Evidence',
   'ai.summary.empty': 'None identified in the authorized sources.',
+  'ai.summary.contextTruncated': 'Some claims were omitted to fit the context editor limit. Review the full AI Brief before saving this draft.',
   'ai.planning.fields': 'Suggested fields',
   'ai.planning.field.title': 'Title',
   'ai.planning.field.description': 'Description',

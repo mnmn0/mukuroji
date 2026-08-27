@@ -6,7 +6,10 @@ import { aiTriageGenerationFixture } from '../src/features/ai-assistance/fixture
 import { requestSubmissionFixture } from '../src/requests/fixtures'
 import { normalizeRequestSubmission } from '../src/requests/model/requestForm'
 import { RequestQueue } from '../src/requests/ui/RequestQueue'
-import { createSafeTriageRoutingOverride } from '../src/requests/model/requestTriageRouting'
+import {
+  canAdoptRequestTriageDraft,
+  createSafeTriageRoutingOverride,
+} from '../src/requests/model/requestTriageRouting'
 
 const aiController: AiAssistanceController = {
   cancelGeneration: () => undefined,
@@ -173,6 +176,7 @@ describe('RequestQueue', () => {
     expect(html).not.toContain('Generate draft')
   })
 
+  /** Keeps inherited Project and workflow status out of an unsafe Team change. */
   test('does not carry the old Team project or status into a changed Team adoption', () => {
     const submission = {
       ...normalizeRequestSubmission(requestSubmissionFixture),
@@ -201,8 +205,19 @@ describe('RequestQueue', () => {
     expect(override.projectId).toBeUndefined()
     expect(override.workflowStatusId).toBeUndefined()
     expect(override.priority).toBe('high')
+
+    const teamOnlyDraft = {
+      ...changedTeamDraft,
+      assigneeUserId: undefined,
+      description: undefined,
+      priority: undefined,
+      projectId: undefined,
+      title: undefined,
+    }
+    expect(canAdoptRequestTriageDraft(submission, teamOnlyDraft)).toBe(false)
   })
 
+  /** Applies a changed Team only when no old Team-dependent values are inherited. */
   test('applies a changed Team only when no old Team-dependent values are inherited', () => {
     const baseSubmission = normalizeRequestSubmission(requestSubmissionFixture)
     const submission = {
@@ -230,5 +245,6 @@ describe('RequestQueue', () => {
       priority: 'high',
       teamId: 'new-team',
     })
+    expect(canAdoptRequestTriageDraft(submission, changedTeamDraft)).toBe(true)
   })
 })

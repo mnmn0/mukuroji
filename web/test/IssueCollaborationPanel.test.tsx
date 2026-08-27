@@ -70,10 +70,16 @@ describe('IssueCollaborationPanel', () => {
       },
     }
 
-    const body = formatAiSummaryContextBody(oversizedDraft, content.citations, (key) => key)
+    const body = formatAiSummaryContextBody(
+      oversizedDraft,
+      content.citations,
+      createTranslator('en'),
+    )
 
     expect(body.length).toBeLessThanOrEqual(20_000)
     expect(body).toContain('Launch readiness notes')
+    expect(body).toContain('Some claims were omitted')
+    expect(body).not.toContain('*'.repeat(1_000))
   })
 
   /** Skips an evidence pair that cannot fit while retaining later summary claims. */
@@ -99,12 +105,13 @@ describe('IssueCollaborationPanel', () => {
     const body = formatAiSummaryContextBody(
       oversizedDraft,
       [...longCitations, ...content.citations],
-      (key) => key,
+      createTranslator('en'),
     )
 
     expect(body.length).toBeGreaterThan(0)
     expect(body).toContain('Launch readiness notes')
     expect(body).toContain('Confirm the keyboard review before Thursday\\.')
+    expect(body).toContain('Some claims were omitted')
   })
 
   /** Verifies the Brief tab stays hidden when no authenticated AI source is available. */

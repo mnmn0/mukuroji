@@ -119,6 +119,9 @@ export function TriageEntryDetail({
     project: false,
   })
   const actionTrigger = useRef<HTMLButtonElement | null>(null)
+  const [isActionMutationPending, setIsActionMutationPending] = useState(false)
+  const isActionMutationPendingRef = useRef(false)
+  const actionIsPending = isPending || isActionMutationPending
 
   const closeAction = () => {
     setActionMode(undefined)
@@ -129,6 +132,7 @@ export function TriageEntryDetail({
     mode: TriageActionMode,
     trigger?: HTMLButtonElement,
   ) => {
+    if (actionIsPending) return
     actionTrigger.current = trigger ?? null
     setActionError(false)
     setActionAnnouncement('')
@@ -146,7 +150,7 @@ export function TriageEntryDetail({
       closeAction()
       return
     }
-    if (event.altKey || event.ctrlKey || event.metaKey) return
+    if (event.altKey || event.ctrlKey || event.metaKey || actionIsPending) return
     const shortcut = resolveTriageActionShortcut(
       event.key,
       event.target,
@@ -207,6 +211,7 @@ export function TriageEntryDetail({
 
   /** Copies only owner and Project fields supported by the existing triage action contracts. */
   const adoptTriageDraft = (draft: AiTriageDraft, replacementConfirmed = false) => {
+    if (actionIsPending || isActionMutationPendingRef.current) return
     if (shouldConfirmTriageAdoption(draft) && !replacementConfirmed) return
     setActionError(false)
     setActionAnnouncement('')
@@ -236,7 +241,7 @@ export function TriageEntryDetail({
 
   const submitAction = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    if (!actionMode || !onAction || isPending) return
+    if (!actionMode || !onAction || actionIsPending || isActionMutationPendingRef.current) return
     const formData = new FormData(event.currentTarget)
     const input = createActionInput(entry, actionMode, acceptMode, formData)
     if (!input) {
@@ -244,6 +249,8 @@ export function TriageEntryDetail({
       return
     }
     setActionError(false)
+    isActionMutationPendingRef.current = true
+    setIsActionMutationPending(true)
     try {
       await onAction(entry.id, input)
       setActionMode(undefined)
@@ -252,6 +259,9 @@ export function TriageEntryDetail({
       else actionTrigger.current?.focus()
     } catch {
       setActionError(true)
+    } finally {
+      isActionMutationPendingRef.current = false
+      setIsActionMutationPending(false)
     }
   }
 
@@ -327,6 +337,7 @@ export function TriageEntryDetail({
                 locale={locale}
                 onAuthenticatedApiError={onAuthenticatedApiError}
                 onAdoptDraft={adoptTriageDraft}
+                isMutationPending={actionIsPending}
                 shouldConfirmAdoption={shouldConfirmTriageAdoption}
                 source={{
                   expectedRevision: entry.revision,
@@ -590,11 +601,11 @@ export function TriageEntryDetail({
               </label>
             )}
             <div className="flex justify-end gap-2">
-              <button className="workbench-button-secondary min-h-10 px-4" disabled={isPending} onClick={closeAction} type="button">
+              <button className="workbench-button-secondary min-h-10 px-4" disabled={actionIsPending} onClick={closeAction} type="button">
                 {t('triage.action.cancel')}
               </button>
-              <button className="workbench-button-primary min-h-10 px-4" disabled={isPending} type="submit">
-                {isPending ? t('triage.action.pending') : t('triage.action.submit')}
+              <button className="workbench-button-primary min-h-10 px-4" disabled={actionIsPending} type="submit">
+                {actionIsPending ? t('triage.action.pending') : t('triage.action.submit')}
               </button>
             </div>
           </form>

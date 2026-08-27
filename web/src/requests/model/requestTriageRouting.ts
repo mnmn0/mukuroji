@@ -41,3 +41,35 @@ export function createSafeTriageRoutingOverride(
     ...(draft.priority ? { priority: draft.priority.value } : {}),
   }
 }
+
+/**
+ * Checks whether a Request conversion draft has at least one safely adoptable field.
+ *
+ * A changed Team cannot be copied when the current submission would carry a Project or
+ * workflow status from the old Team. In that case a Team-only proposal remains review-only
+ * instead of presenting an adoption action that would open an unchanged form.
+ *
+ * @param submission - Current immutable Request submission and routing target.
+ * @param draft - Validated AI triage draft under review.
+ * @param currentOverride - Existing local conversion routing overrides.
+ * @returns Whether adopting the draft would change at least one supported form field.
+ */
+export function canAdoptRequestTriageDraft(
+  submission: RequestSubmissionModel,
+  draft: AiTriageDraft,
+  currentOverride: Partial<RequestFormRoutingTarget> = {},
+): boolean {
+  const safeRouting = createSafeTriageRoutingOverride(
+    submission,
+    draft,
+    currentOverride,
+  )
+  const hasNonRoutingProposal = draft.title !== undefined ||
+    draft.description !== undefined ||
+    draft.priority !== undefined ||
+    draft.assigneeUserId !== undefined
+  const hasSafeRoutingProposal = (draft.teamId !== undefined && safeRouting.teamId !== undefined) ||
+    (draft.projectId !== undefined && safeRouting.projectId !== undefined)
+
+  return hasNonRoutingProposal || hasSafeRoutingProposal
+}

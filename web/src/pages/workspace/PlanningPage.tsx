@@ -285,12 +285,19 @@ export function PlanningPage() {
     navigate,
   ])
 
+  /** Controls whether a Planning mutation must reject after reporting its route error. */
+  type PlanningMutationOptions = {
+    /** Re-throws a handled failure so a local draft can remain available to the caller. */
+    rethrowOnFailure?: boolean
+  }
+
   /** Runs one Planning mutation and updates the authoritative bounded snapshot on success. */
   const runMutation = async (
     key: string,
     payload: unknown,
     request: (context: MutationRequestContext) => ReturnType<typeof archivePlanningEntity>,
     afterSuccess?: () => Promise<unknown>,
+    options?: PlanningMutationOptions,
   ) => {
     if (!accessToken) {
       return
@@ -318,6 +325,7 @@ export function PlanningPage() {
           clearAuthSession()
         }
         navigate(sessionErrorAction.redirectTo, { replace: true })
+        if (options?.rethrowOnFailure) throw error
         return
       }
 
@@ -326,6 +334,7 @@ export function PlanningPage() {
       if (messageKey === 'planning.conflict') {
         await mutatePlanning()
       }
+      if (options?.rethrowOnFailure) throw error
     }
   }
 
@@ -811,6 +820,7 @@ export function PlanningPage() {
                     context,
                   ).then((result) => result.planning),
                   () => updateHistory.mutate(),
+                  { rethrowOnFailure: true },
                 )
               }
             : undefined}

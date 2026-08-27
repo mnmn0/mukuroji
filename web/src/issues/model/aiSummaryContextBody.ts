@@ -22,6 +22,7 @@ export function formatAiSummaryContextBody(
   const citationById = new Map(citations.map((citation) => [citation.id, citation]))
   const lines: string[] = []
   const evidenceLineIndices = new Set<number>()
+  let omittedEvidence = false
 
   /** Appends one claim and its complete evidence line to the formatted body. */
   const appendItem = (item: AiSummaryDraft['overview'], marker: string): void => {
@@ -38,7 +39,10 @@ export function formatAiSummaryContextBody(
       let evidenceLine = `  ${t('ai.summary.evidence')}: ${firstEvidence}`
       for (const nextEvidence of evidence.slice(1)) {
         const candidate = `${evidenceLine}, ${nextEvidence}`
-        if (candidate.length > collaborationContextEvidenceLineMaximumLength) break
+        if (candidate.length > collaborationContextEvidenceLineMaximumLength) {
+          omittedEvidence = true
+          break
+        }
         evidenceLine = candidate
       }
       lines.push(evidenceLine)
@@ -56,58 +60,79 @@ export function formatAiSummaryContextBody(
     lines.push('', `## ${title}`)
     for (const item of items) appendItem(item, '- ')
   }
-  return boundContextBody(lines, evidenceLineIndices)
+  return boundContextBody(
+    lines,
+    evidenceLineIndices,
+    t('ai.summary.contextTruncated'),
+    omittedEvidence,
+  )
 }
 
 /**
- * Bounds the fully formatted body while keeping each included claim's evidence line intact.
+ * Bounds the fully formatted body while keeping each included claim and evidence pair intact.
+ *
+ * A claim is never cut in the middle of a sentence. When the complete body does not fit, whole
+ * claim/evidence units are omitted and a localized note is appended so the curator knows the
+ * editor contains an intentionally incomplete draft.
  *
  * @param lines - Formatted claim, evidence, heading, and separator lines.
  * @param evidenceLineIndices - Line indices that contain complete citation links.
+ * @param truncationNotice - Localized note shown when one or more complete lines are omitted.
+ * @param contentWasOmitted - Whether citation links were omitted before the body-size check.
  * @returns A body within the editor limit with no claim detached from its evidence.
  */
 function boundContextBody(
   lines: readonly string[],
   evidenceLineIndices: ReadonlySet<number>,
+  truncationNotice: string,
+  contentWasOmitted = false,
 ): string {
-  let body = ''
+  const units: string[][] = []
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index]
     if (line === undefined) break
-    const separator = body ? '\n' : ''
-    const remainingLength = collaborationContextBodyMaximumLength - body.length - separator.length
-    if (remainingLength <= 0) break
-
     const evidenceLine = evidenceLineIndices.has(index + 1) ? lines[index + 1] : undefined
     if (evidenceLine !== undefined) {
-      const pairLength = line.length + 1 + evidenceLine.length
-      if (pairLength <= remainingLength) {
-        body += `${separator}${line}\n${evidenceLine}`
-        index += 1
-        continue
-      }
-
-      const claimLength = remainingLength - 1 - evidenceLine.length
-      if (claimLength > 0) {
-        const truncatedClaim = truncateToUtf16Boundary(line, claimLength)
-        if (truncatedClaim.length > 0) {
-          body += `${separator}${truncatedClaim}\n${evidenceLine}`
-        }
-      }
-      // Skip an oversized claim/evidence pair, then continue with later claims
-      // that may still fit within the editor boundary.
+      units.push([line, evidenceLine])
       index += 1
       continue
     }
 
-    if (line.length <= remainingLength) {
-      body += `${separator}${line}`
-      continue
-    }
-    if (!body) return truncateToUtf16Boundary(line, remainingLength)
-    break
+    units.push([line])
   }
-  return body
+
+  const completeBody = units.map((unit) => unit.join('\n')).join('\n')
+  if (completeBody.length <= collaborationContextBodyMaximumLength && !contentWasOmitted) {
+    return completeBody
+  }
+
+  // Reserve space for the notice before selecting units so that the notice itself can never
+  // force a previously complete claim to be cut or detached from its evidence.
+  const notice = truncateToUtf16Boundary(
+    truncationNotice,
+    collaborationContextBodyMaximumLength,
+  )
+  const bodyMaximumLength = Math.max(
+    0,
+    collaborationContextBodyMaximumLength - notice.length - 2,
+  )
+  let body = ''
+  let omitted = contentWasOmitted
+  for (const unit of units) {
+    const chunk = unit.join('\n')
+    const separator = body ? '\n' : ''
+    if (body.length + separator.length + chunk.length <= bodyMaximumLength) {
+      body += `${separator}${chunk}`
+    } else {
+      omitted = true
+    }
+  }
+
+  if (!omitted) return body
+  const noticeSeparator = body ? '\n\n' : ''
+  const availableNoticeLength = collaborationContextBodyMaximumLength - body.length - noticeSeparator.length
+  const boundedNotice = truncateToUtf16Boundary(notice, Math.max(0, availableNoticeLength))
+  return `${body}${noticeSeparator}${boundedNotice}`
 }
 
 /**
