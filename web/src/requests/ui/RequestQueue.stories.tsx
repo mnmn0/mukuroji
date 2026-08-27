@@ -7,11 +7,23 @@ import type {
 } from '@mukuroji/contracts'
 import type { AiAssistanceController } from '../../features/ai-assistance/mutations/useAiAssistanceController'
 import { aiTriageGenerationFixture } from '../../features/ai-assistance/fixtures'
+import { projectDirectoryFixtures } from '../../projects/fixtures'
 import { requestSubmissionFixture } from '../fixtures'
 import { normalizeRequestSubmission } from '../model/requestForm'
 import { RequestQueue, type RequestQueueProps } from './RequestQueue'
 
 const normalizedSubmission = normalizeRequestSubmission(requestSubmissionFixture)
+
+/** Project directory used to validate the routing values in AI adoption stories. */
+const projectDirectory = new Map(
+  projectDirectoryFixtures.map((team) => [
+    team.id,
+    new Set([
+      ...team.projects.map((project) => project.id),
+      ...(team.id === 'core-team' ? ['launch-readiness'] : []),
+    ]),
+  ]),
+)
 
 /**
  * Request queue の Storybook metadata です。
@@ -34,6 +46,7 @@ const meta = {
     onLoadMore: () => undefined,
     onOpenAttachment: async () => undefined,
     onSelectSubmission: () => undefined,
+    projectDirectory,
     selectedSubmission: normalizedSubmission,
     submissions: [normalizedSubmission],
   },

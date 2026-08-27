@@ -55,6 +55,7 @@ import {
   updateRequestFormInput,
   type RequestFormDraftModel,
 } from './model/requestForm'
+import type { RequestRoutingProjectDirectory } from './model/requestTriageRouting'
 import { RequestQueue } from './ui/RequestQueue'
 import { useOptionalWorkspaceRouteContext } from '../workspace/ui/WorkspaceRouteProvider'
 
@@ -100,6 +101,13 @@ export function RequestIntakePage() {
     enabled: Boolean(user && !currentUserError),
     locale,
   })
+  const projectDirectory = useMemo<RequestRoutingProjectDirectory>(
+    () => new Map(teams.map((team) => [
+      team.id,
+      new Set(team.projects.map((project) => project.id)),
+    ])),
+    [teams],
+  )
   const canManageForms = canManageWorkspaceStructure(user)
   // Request-level conversion capability is the source-of-truth gate for this assistant.
   // Policy-management permission must not hide it from operators who can convert a request.
@@ -325,6 +333,7 @@ export function RequestIntakePage() {
                 onLoadMore={() => void setQueuePageCount(queuePageCount + 1)}
                 onOpenAttachment={handleOpenAttachment}
                 onSelectSubmission={selectSubmission}
+                projectDirectory={projectDirectory}
               />
             ) : (
               <div className="grid grid-cols-[280px_minmax(0,1fr)] gap-5 max-[920px]:grid-cols-1">

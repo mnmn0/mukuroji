@@ -15,6 +15,7 @@ import { resolveRequestLocalizedText } from '../model/requestFormLogic'
 import {
   canAdoptRequestTriageDraft,
   createSafeTriageRoutingOverride,
+  type RequestRoutingProjectDirectory,
 } from '../model/requestTriageRouting'
 
 /**
@@ -29,6 +30,8 @@ export type RequestQueueProps = {
   onAuthenticatedApiError?: (error: unknown) => void
   /** Whether the current principal may send administrator-only intake content to AI. */
   canUseAiAssistance?: boolean
+  /** Team-scoped Project IDs used to validate AI routing proposals before adoption. */
+  projectDirectory?: RequestRoutingProjectDirectory
   /**
    * 表示 locale です。
    */
@@ -109,6 +112,7 @@ export function RequestQueue({
   onLoadMore,
   onOpenAttachment,
   onSelectSubmission,
+  projectDirectory,
   selectedSubmission,
   submissions,
 }: RequestQueueProps) {
@@ -203,6 +207,7 @@ export function RequestQueue({
         onAction={onAction}
         onAuthenticatedApiError={onAuthenticatedApiError}
         onOpenAttachment={onOpenAttachment}
+        projectDirectory={projectDirectory}
       />
     </div>
   )
@@ -216,6 +221,7 @@ function RequestSubmissionDetail({
   onAuthenticatedApiError,
   onAction,
   onOpenAttachment,
+  projectDirectory,
   submission,
 }: {
   accessToken?: string
@@ -223,6 +229,7 @@ function RequestSubmissionDetail({
   canUseAiAssistance: boolean
   onAuthenticatedApiError?: (error: unknown) => void
   locale: Locale
+  projectDirectory?: RequestRoutingProjectDirectory
   onAction?: RequestQueueProps['onAction']
   onOpenAttachment?: RequestQueueProps['onOpenAttachment']
   submission?: RequestSubmissionModel
@@ -276,6 +283,7 @@ function RequestSubmissionDetail({
       submission,
       draft,
       current,
+      projectDirectory,
     ))
     const currentDirtyState = conversionOverrideDirtyRef.current
     const nextDirtyState = {
@@ -491,6 +499,7 @@ function RequestSubmissionDetail({
               submission,
               draft,
               conversionTargetOverride,
+              projectDirectory,
             )}
             isMutationPending={isSubmitting}
             shouldConfirmAdoption={shouldConfirmTriageAdoption}

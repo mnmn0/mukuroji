@@ -283,4 +283,42 @@ describe('RequestQueue', () => {
       currentOverride,
     )).toBe(false)
   })
+
+  /** Keeps a Project-only proposal review-only when it is outside the effective Team. */
+  test('does not adopt a Project-only proposal outside the effective Team', () => {
+    const submission = normalizeRequestSubmission(requestSubmissionFixture)
+    const content = aiTriageGenerationFixture.content
+    if (content.availability !== 'available' || content.draft.kind !== 'triage') {
+      throw new Error('Triage fixture must stay available.')
+    }
+    const projectOnlyDraft = {
+      ...content.draft,
+      assigneeUserId: undefined,
+      description: undefined,
+      priority: undefined,
+      teamId: undefined,
+      title: undefined,
+      projectId: {
+        ...content.draft.projectId,
+        value: 'design-project',
+      },
+    }
+    const projectDirectory = new Map([
+      ['core-team', new Set(['core-project'])],
+      ['design-team', new Set(['design-project'])],
+    ])
+
+    expect(createSafeTriageRoutingOverride(
+      submission,
+      projectOnlyDraft,
+      {},
+      projectDirectory,
+    )).toEqual({})
+    expect(canAdoptRequestTriageDraft(
+      submission,
+      projectOnlyDraft,
+      {},
+      projectDirectory,
+    )).toBe(false)
+  })
 })
