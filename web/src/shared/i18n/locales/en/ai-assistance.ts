@@ -73,7 +73,7 @@ export const aiAssistanceMessages = {
   'ai.search.report': 'Report preview',
   'ai.search.report.count': 'Count results',
   'ai.search.report.groupBy': 'Group by {field}',
-  'ai.search.report.approved': 'Approved Search report',
+  'ai.search.report.approved': 'Search count report',
   'ai.search.report.completeCount': '{count} matching results',
   'ai.search.report.loadedCount': '{count} currently loaded results',
   'ai.search.report.partialNotice': 'More matches are available. This count includes only the results loaded in this view.',

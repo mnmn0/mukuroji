@@ -73,7 +73,7 @@ export const aiAssistanceMessages = {
   'ai.search.report': 'Report preview',
   'ai.search.report.count': '件数を集計',
   'ai.search.report.groupBy': '{field} でグループ化',
-  'ai.search.report.approved': '承認済み Search report',
+  'ai.search.report.approved': 'Search 件数レポート',
   'ai.search.report.completeCount': '一致する結果は {count} 件です',
   'ai.search.report.loadedCount': '現在読み込み済みの結果は {count} 件です',
   'ai.search.report.partialNotice': '一致する結果がほかにもあります。この件数は現在の view に読み込んだ結果だけを集計しています。',

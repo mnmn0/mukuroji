@@ -33,7 +33,7 @@ describe('approved Search count report', () => {
       />,
     )
 
-    expect(html).toContain('Approved Search report')
+    expect(html).toContain('Search count report')
     expect(html).toContain('3 currently loaded results')
     expect(html).toContain('Group by Team ID')
     expect(html).toContain('includes only the results loaded in this view')
