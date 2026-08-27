@@ -20,6 +20,8 @@ const policyTasks = ['triage', 'summary', 'search', 'planning'] as const satisfi
 export type AiAssistanceSettingsPanelContainerProps = {
   /** Bearer token for the active Workspace member. */
   accessToken: string
+  /** Stable Workspace identity used to isolate settings query caches. */
+  workspaceId?: string
   /** Whether the active member may load and replace the Workspace AI policy. */
   canManagePolicy: boolean
   /** Locale used for settings labels. */
@@ -60,10 +62,23 @@ export function AiAssistanceSettingsPanelContainer({
   cacheScope,
   guardRequest,
   locale,
+  workspaceId,
 }: AiAssistanceSettingsPanelContainerProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
-  const preferenceQuery = useAiAssistancePreference(accessToken, true, guardRequest, cacheScope)
-  const policyQuery = useAiAssistancePolicy(accessToken, canManagePolicy, guardRequest, cacheScope)
+  const preferenceQuery = useAiAssistancePreference(
+    accessToken,
+    true,
+    guardRequest,
+    cacheScope,
+    workspaceId,
+  )
+  const policyQuery = useAiAssistancePolicy(
+    accessToken,
+    canManagePolicy,
+    guardRequest,
+    cacheScope,
+    workspaceId,
+  )
   const mutations = useAiAssistanceSettingsMutations({
     accessToken,
     guardRequest,
@@ -101,11 +116,11 @@ export function AiAssistanceSettingsPanelContainer({
       isPolicyDirty={isPolicyDirty}
       isPreferenceSaving={mutations.isPreferenceSaving}
       isPreferenceDirty={isPreferenceDirty}
-      isPreferenceLoading={(preferenceQuery.isLoading || !cacheScope) && !preference}
+      isPreferenceLoading={(preferenceQuery.isLoading || !cacheScope || !workspaceId) && !preference}
       policy={visiblePolicy}
       policyEditorVersion={policyEditorVersion}
       policyFeedback={hasPolicyRevisionConflict ? 'conflict' : mutations.policyFeedback}
-      isPolicyLoading={Boolean(canManagePolicy && (policyQuery.isLoading || !cacheScope))}
+      isPolicyLoading={Boolean(canManagePolicy && (policyQuery.isLoading || !cacheScope || !workspaceId))}
       policyLoadError={Boolean(canManagePolicy && policyQuery.error)}
       preference={preference && preferenceEnabled !== undefined
         ? { ...preference, enabled: preferenceEnabled }

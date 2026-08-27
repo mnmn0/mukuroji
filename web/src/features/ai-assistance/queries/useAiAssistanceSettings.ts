@@ -27,6 +27,7 @@ type AuthenticatedRequestGuard = <Result>(request: Promise<Result>) => Promise<R
  * @param enabled - Whether the settings route may load this resource.
  * @param guardRequest - Optional session guard for authenticated failures.
  * @param cacheScope - Stable member scope used for the client cache key; never use the bearer token.
+ * @param workspaceId - Stable Workspace scope used for the client cache key.
  * @returns SWR state and its owned cache key.
  */
 export function useAiAssistancePreference(
@@ -34,10 +35,11 @@ export function useAiAssistancePreference(
   enabled = true,
   guardRequest?: AuthenticatedRequestGuard,
   cacheScope?: string,
+  workspaceId?: string,
 ) {
   const token = accessToken ?? ''
-  const key = token && enabled && cacheScope
-    ? ['ai-assistance-preference', cacheScope] as const
+  const key = token && enabled && cacheScope && workspaceId
+    ? ['ai-assistance-preference', workspaceId, cacheScope] as const
     : null
   const query = useSWR<AiAssistancePreference>(
     key,
@@ -58,6 +60,7 @@ export function useAiAssistancePreference(
  * @param enabled - Whether management permission allows this resource to load.
  * @param guardRequest - Optional session guard for authenticated failures.
  * @param cacheScope - Stable member scope used for the client cache key; never use the bearer token.
+ * @param workspaceId - Stable Workspace scope used for the client cache key.
  * @returns SWR state and its owned cache key.
  */
 export function useAiAssistancePolicy(
@@ -65,10 +68,11 @@ export function useAiAssistancePolicy(
   enabled = true,
   guardRequest?: AuthenticatedRequestGuard,
   cacheScope?: string,
+  workspaceId?: string,
 ) {
   const token = accessToken ?? ''
-  const key = token && enabled && cacheScope
-    ? ['ai-assistance-policy', cacheScope] as const
+  const key = token && enabled && cacheScope && workspaceId
+    ? ['ai-assistance-policy', workspaceId, cacheScope] as const
     : null
   const query = useSWR<AiAssistancePolicy>(
     key,

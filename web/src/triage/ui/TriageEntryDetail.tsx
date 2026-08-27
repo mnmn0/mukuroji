@@ -110,7 +110,11 @@ export function TriageEntryDetail({
   const [projectId, setProjectId] = useState(
     view?.entry.projectId ?? view?.routingCandidate?.projectId ?? '',
   )
-  const [routingDirty, setRoutingDirty] = useState<TriageRoutingDirtyState>({
+  const [, setRoutingDirty] = useState<TriageRoutingDirtyState>({
+    owner: false,
+    project: false,
+  })
+  const routingDirtyRef = useRef<TriageRoutingDirtyState>({
     owner: false,
     project: false,
   })
@@ -130,7 +134,9 @@ export function TriageEntryDetail({
     setActionAnnouncement('')
     setOwnerUserId(view?.entry.ownerUserId ?? '')
     setProjectId(view?.entry.projectId ?? view?.routingCandidate?.projectId ?? '')
-    setRoutingDirty({ owner: false, project: false })
+    const cleanState = { owner: false, project: false }
+    routingDirtyRef.current = cleanState
+    setRoutingDirty(cleanState)
     setActionMode(mode)
   }
   const handleKeyDown = (event: KeyboardEvent<HTMLElement>) => {
@@ -195,8 +201,8 @@ export function TriageEntryDetail({
 
   /** Returns whether this AI draft would replace a locally edited routing field. */
   const shouldConfirmTriageAdoption = (draft: AiTriageDraft) => (
-    (draft.assigneeUserId !== undefined && routingDirty.owner) ||
-    (draft.projectId !== undefined && routingDirty.project)
+    (draft.assigneeUserId !== undefined && routingDirtyRef.current.owner) ||
+    (draft.projectId !== undefined && routingDirtyRef.current.project)
   )
 
   /** Copies only owner and Project fields supported by the existing triage action contracts. */
@@ -483,7 +489,9 @@ export function TriageEntryDetail({
                     name="ownerUserId"
                     onChange={(event) => {
                       setOwnerUserId(event.target.value)
-                      setRoutingDirty((current) => ({ ...current, owner: true }))
+                      const nextDirtyState = { ...routingDirtyRef.current, owner: true }
+                      routingDirtyRef.current = nextDirtyState
+                      setRoutingDirty(nextDirtyState)
                     }}
                     placeholder={t('triage.action.ownerOptional')}
                     value={ownerUserId}
@@ -496,7 +504,9 @@ export function TriageEntryDetail({
                     name="projectId"
                     onChange={(event) => {
                       setProjectId(event.target.value)
-                      setRoutingDirty((current) => ({ ...current, project: true }))
+                      const nextDirtyState = { ...routingDirtyRef.current, project: true }
+                      routingDirtyRef.current = nextDirtyState
+                      setRoutingDirty(nextDirtyState)
                     }}
                     placeholder={t('triage.action.projectOptional')}
                     value={projectId}
@@ -536,7 +546,9 @@ export function TriageEntryDetail({
                       name="projectId"
                       onChange={(event) => {
                         setProjectId(event.target.value)
-                        setRoutingDirty((current) => ({ ...current, project: true }))
+                        const nextDirtyState = { ...routingDirtyRef.current, project: true }
+                        routingDirtyRef.current = nextDirtyState
+                        setRoutingDirty(nextDirtyState)
                       }}
                       placeholder={t('triage.action.projectOptional')}
                       value={projectId}

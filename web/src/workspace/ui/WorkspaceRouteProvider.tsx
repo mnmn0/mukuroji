@@ -98,6 +98,8 @@ export type WorkspaceRouteContextValue = {
   accessToken?: string
   /** The locale selected for workspace content and controls. */
   locale: Locale
+  /** Stable Workspace identity from the authenticated Cognito membership. */
+  workspaceId?: string
   /** The selected application font-size preference. */
   fontSizePreference: FontSizePreference
   /** The best available display label for the current user. */
@@ -276,6 +278,7 @@ export function WorkspaceRouteProvider() {
     [user],
   )
   const userKey = (user?.attributes.email ?? user?.username)?.trim().toLowerCase() || undefined
+  const workspaceId = user?.attributes['custom:workspace_id']?.trim() || undefined
   const userInitial = userLabel.trim().charAt(0).toUpperCase() || 'M'
   const canLoadWorkspaceData = Boolean(user && !currentUserError)
   const canManageWorkspaceConfiguration = canManageWorkspaceStructure(user)
@@ -327,12 +330,14 @@ export function WorkspaceRouteProvider() {
     aiSettingsQueryEnabled,
     guardEnterpriseSession,
     userKey,
+    workspaceId,
   )
   const aiPolicyQuery = useAiAssistancePolicy(
     accessToken,
     aiSettingsQueryEnabled && canManageAiAssistance,
     guardEnterpriseSession,
     userKey,
+    workspaceId,
   )
   /** Resolves the effective client-side gate for one AI workflow. */
   const isAiAssistanceTaskEnabled = useCallback((task: AiAssistanceTask) => {
@@ -785,6 +790,7 @@ export function WorkspaceRouteProvider() {
     userInitial,
     userLabel,
     userKey,
+    workspaceId,
   }), [
     accessToken,
     canLoadWorkspaceData,
@@ -832,6 +838,7 @@ export function WorkspaceRouteProvider() {
     userInitial,
     userLabel,
     userKey,
+    workspaceId,
   ])
 
   if (!session) {

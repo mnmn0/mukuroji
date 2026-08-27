@@ -77,6 +77,8 @@ describe('AI Search draft model', () => {
     expect(hasReviewableAiSearchFilters({
       customFields: [{ fieldId: 'risk', operator: 'greater-than', value: 3 }],
     })).toBe(true)
+    expect(hasReviewableAiSearchFilterBounds({ statuses: ['in progress'] })).toBe(false)
+    expect(hasReviewableAiSearchFilterBounds({ statuses: ['x'.repeat(129)] })).toBe(false)
   })
 
   test('parses repeated identifiers and supported custom values without widening the contract', () => {

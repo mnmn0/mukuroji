@@ -2,7 +2,7 @@ import type {
   AiTriageDraft,
   RequestSubmissionActionInput,
 } from '@mukuroji/contracts'
-import { useMemo, useState, type FormEvent, type ReactNode } from 'react'
+import { useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import type { AiAssistanceController } from '../../features/ai-assistance/mutations/useAiAssistanceController'
 import { AiTriageDraftComposer } from '../../features/ai-assistance/ui/AiTriageDraftComposer'
 import { createTranslator, type Locale } from '../../shared/i18n/i18n'
@@ -227,8 +227,12 @@ function RequestSubmissionDetail({
   const [actionValue, setActionValue] = useState('')
   const [titleOverride, setTitleOverride] = useState('')
   const [descriptionOverride, setDescriptionOverride] = useState('')
-  const [conversionOverrideDirty, setConversionOverrideDirty] =
+  const [, setConversionOverrideDirty] =
     useState<ConversionOverrideDirtyState>({ title: false, description: false })
+  const conversionOverrideDirtyRef = useRef<ConversionOverrideDirtyState>({
+    title: false,
+    description: false,
+  })
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [actionError, setActionError] = useState(false)
   const [openingAttachmentId, setOpeningAttachmentId] = useState<string>()
@@ -241,7 +245,9 @@ function RequestSubmissionDetail({
     setActionValue(value)
     setDescriptionOverride('')
     setTitleOverride('')
-    setConversionOverrideDirty({ title: false, description: false })
+    const cleanState = { title: false, description: false }
+    conversionOverrideDirtyRef.current = cleanState
+    setConversionOverrideDirty(cleanState)
   }
 
   /** Opens the conversion action while preserving any locally edited overrides. */
@@ -256,16 +262,19 @@ function RequestSubmissionDetail({
     openConversionAction()
     setTitleOverride((current) => draft.title?.value ?? current)
     setDescriptionOverride((current) => draft.description?.value ?? current)
-    setConversionOverrideDirty((current) => ({
-      title: draft.title === undefined ? current.title : false,
-      description: draft.description === undefined ? current.description : false,
-    }))
+    const currentDirtyState = conversionOverrideDirtyRef.current
+    const nextDirtyState = {
+      title: draft.title === undefined ? currentDirtyState.title : false,
+      description: draft.description === undefined ? currentDirtyState.description : false,
+    }
+    conversionOverrideDirtyRef.current = nextDirtyState
+    setConversionOverrideDirty(nextDirtyState)
   }
 
   /** Returns whether this AI draft would replace a locally edited conversion field. */
   const shouldConfirmTriageAdoption = (draft: AiTriageDraft) => (
-    (draft.title !== undefined && conversionOverrideDirty.title) ||
-    (draft.description !== undefined && conversionOverrideDirty.description)
+    (draft.title !== undefined && conversionOverrideDirtyRef.current.title) ||
+    (draft.description !== undefined && conversionOverrideDirtyRef.current.description)
   )
 
   /** Copies an AI draft only after the composer has confirmed any replacement. */
@@ -311,7 +320,9 @@ function RequestSubmissionDetail({
       setActionValue('')
       setDescriptionOverride('')
       setTitleOverride('')
-      setConversionOverrideDirty({ title: false, description: false })
+      const cleanState = { title: false, description: false }
+      conversionOverrideDirtyRef.current = cleanState
+      setConversionOverrideDirty(cleanState)
     } catch {
       setActionError(true)
     } finally {
@@ -490,11 +501,15 @@ function RequestSubmissionDetail({
               <>
                 <input aria-label={t('requests.action.titleOverride')} className="workbench-input min-h-10 px-3" placeholder={t('requests.action.titleOverride')} value={titleOverride} onChange={(event) => {
                   setTitleOverride(event.target.value)
-                  setConversionOverrideDirty((current) => ({ ...current, title: true }))
+                  const nextDirtyState = { ...conversionOverrideDirtyRef.current, title: true }
+                  conversionOverrideDirtyRef.current = nextDirtyState
+                  setConversionOverrideDirty(nextDirtyState)
                 }} />
                 <textarea aria-label={t('requests.action.descriptionOverride')} className="workbench-input min-h-24 px-3 py-2" placeholder={t('requests.action.descriptionOverride')} value={descriptionOverride} onChange={(event) => {
                   setDescriptionOverride(event.target.value)
-                  setConversionOverrideDirty((current) => ({ ...current, description: true }))
+                  const nextDirtyState = { ...conversionOverrideDirtyRef.current, description: true }
+                  conversionOverrideDirtyRef.current = nextDirtyState
+                  setConversionOverrideDirty(nextDirtyState)
                 }} />
                 <p className="text-xs font-medium text-[var(--workbench-muted)]">
                   {submission.routing.teamId} · {submission.routing.projectId ?? t('requests.routing.teamBacklog')} · {submission.routing.workflowStatusId ?? t('requests.routing.initialStatus')}

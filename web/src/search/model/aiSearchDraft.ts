@@ -33,6 +33,7 @@ export const aiSearchCustomFieldOperators = [
 
 const AI_SEARCH_MAX_LIST_ITEMS = 100
 const AI_SEARCH_MAX_IDENTIFIER_LENGTH = 512
+const AI_SEARCH_MAX_STATUS_ID_LENGTH = 128
 const AI_SEARCH_MAX_KEYWORD_LENGTH = 256
 const AI_SEARCH_MAX_CUSTOM_FIELDS = 50
 const AI_SEARCH_MAX_CUSTOM_FIELD_ID_LENGTH = 256
@@ -136,7 +137,7 @@ export function hasReviewableAiSearchFilterBounds(
   )) return false
   if (!hasBoundedStringList(filters.assigneeUserIds)) return false
   if (!hasBoundedStringList(filters.creatorUserIds)) return false
-  if (!hasBoundedStringList(filters.statuses)) return false
+  if (!hasBoundedStatusIdList(filters.statuses)) return false
   if (!hasBoundedStringList(filters.relationIds)) return false
   if (!hasBoundedStringList(filters.projectIds)) return false
   if (!hasBoundedStringList(filters.teamIds)) return false
@@ -285,6 +286,21 @@ function hasBoundedStringList(values: readonly string[] | undefined): boolean {
       value.length > 0 &&
       value.length <= AI_SEARCH_MAX_IDENTIFIER_LENGTH &&
       value === value.trim()
+    ))
+  )
+}
+
+/** Validates workflow status IDs with the same grammar as Search URL serialization. */
+function hasBoundedStatusIdList(values: readonly string[] | undefined): boolean {
+  return values === undefined || (
+    Array.isArray(values) &&
+    values.length <= AI_SEARCH_MAX_LIST_ITEMS &&
+    values.every((value) => (
+      typeof value === 'string' &&
+      value.length > 0 &&
+      value.length <= AI_SEARCH_MAX_STATUS_ID_LENGTH &&
+      value === value.trim() &&
+      /^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$/iu.test(value)
     ))
   )
 }

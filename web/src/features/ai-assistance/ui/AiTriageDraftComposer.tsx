@@ -112,6 +112,13 @@ export function AiTriageDraftComposer({
     }
     const reviewedDraft = getAvailableTriageDraft(reviewedGeneration)
     if (reviewedGeneration?.decision?.outcome !== 'approved' || !reviewedDraft) return
+    // The operator may edit the target form while the decision request is in
+    // flight. Re-read the parent's dirty state before adopting so a late edit
+    // cannot be overwritten by the continuation's stale callback closure.
+    if (!replacementConfirmed && shouldConfirmAdoption?.(reviewedDraft)) {
+      setConfirmationGenerationId(reviewedGeneration.id)
+      return
+    }
     setConfirmationGenerationId(undefined)
     await onAdoptDraft(reviewedDraft, replacementConfirmed)
   }

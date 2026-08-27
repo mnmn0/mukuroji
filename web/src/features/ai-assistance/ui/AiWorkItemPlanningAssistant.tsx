@@ -30,6 +30,8 @@ export type AiWorkItemPlanningAssistantProps = {
   onAdopt?: (draft: AiPlanningDraft) => void | Promise<void>
   /** Determines whether the current draft contains a field supported by the caller's editor. */
   canAdoptDraft?: (draft: AiPlanningDraft) => boolean
+  /** Rechecks current local edits after the asynchronous approval request completes. */
+  shouldConfirmAdoption?: (draft: AiPlanningDraft) => boolean
   /** Resolves a configured workflow status identifier for review. */
   resolveStatusLabel?: (statusId: string) => string
   /** Resolves a visible Team-qualified Work Item endpoint for review. */
@@ -55,6 +57,7 @@ export function AiWorkItemPlanningAssistant({
   onAuthenticatedApiError,
   onAdopt,
   canAdoptDraft,
+  shouldConfirmAdoption,
   resolveStatusLabel,
   resolveWorkItemLabel,
   requireAdoptionConfirmation,
@@ -77,6 +80,7 @@ export function AiWorkItemPlanningAssistant({
       cancelLabel={t('ai.planning.workItem.cancel')}
       onAdopt={onAdopt}
       canAdoptDraft={canAdoptDraft}
+      shouldConfirmAdoption={shouldConfirmAdoption}
       onCancelGeneration={activeController.cancelGeneration}
       onDecide={activeController.decide}
       onFeedback={activeController.sendFeedback}
@@ -113,6 +117,8 @@ export type AiWorkItemPlanningAssistantViewProps = {
   onAdopt?: (draft: AiPlanningDraft) => void | Promise<void>
   /** Determines whether the current draft contains a field supported by the caller's editor. */
   canAdoptDraft?: (draft: AiPlanningDraft) => boolean
+  /** Rechecks current local edits after the asynchronous approval request completes. */
+  shouldConfirmAdoption?: (draft: AiPlanningDraft) => boolean
   /** Cancels the active explicit generation request. */
   onCancelGeneration?: () => void
   /** Records approval or rejection without mutating a Work Item. */
@@ -149,6 +155,7 @@ export function AiWorkItemPlanningAssistantView({
   cancelLabel,
   onAdopt,
   canAdoptDraft,
+  shouldConfirmAdoption,
   onCancelGeneration,
   onDecide,
   onFeedback,
@@ -181,7 +188,7 @@ export function AiWorkItemPlanningAssistantView({
   }
 
   /** Records approval before copying any supported value into local editor state. */
-  const approveAndAdoptDraft = async () => {
+  const approveAndAdoptDraft = async (replacementConfirmed = false) => {
     if (!onAdopt || !hasAdoptableDraft || isOperationPending) return
     const reviewedGeneration = await onDecide('approved')
     const reviewedDraft = getAvailableWorkItemPlanningDraft(reviewedGeneration)
@@ -190,6 +197,12 @@ export function AiWorkItemPlanningAssistantView({
       !reviewedDraft ||
       !(canAdoptDraft?.(reviewedDraft) ?? hasSupportedWorkItemPlanningFields(reviewedDraft))
     ) return
+    // A local editor can become dirty while the decision is pending. Re-read
+    // the caller's current state before remounting uncontrolled form fields.
+    if (!replacementConfirmed && shouldConfirmAdoption?.(reviewedDraft)) {
+      setConfirmationGenerationId(reviewedGeneration.id)
+      return
+    }
     setConfirmationGenerationId(undefined)
     await onAdopt(reviewedDraft)
   }
@@ -300,7 +313,7 @@ export function AiWorkItemPlanningAssistantView({
             </button>
             <button
               className="workbench-button-primary min-h-[44px] px-4"
-              onClick={() => void approveAndAdoptDraft()}
+              onClick={() => void approveAndAdoptDraft(true)}
               type="button"
             >
               {t('ai.planning.replaceManualDraft')}

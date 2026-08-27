@@ -50,6 +50,7 @@ const searchDateFieldValues = [
   'updatedAt',
   'dueDate',
 ] as const satisfies readonly WorkspaceSearchDateField[]
+const workflowStatusIdPattern = /^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$/iu
 
 /** Maximum UTF-8 size accepted by the Planning status update endpoint. */
 const planningStatusUpdateTextMaximumBytes = 8_000
@@ -67,6 +68,8 @@ const aiAssistanceTriageCustomFieldsMaximumCount = 50
 const aiAssistanceSearchCaveatsMaximumCount = 20
 /** Maximum length of one Search caveat. */
 const aiAssistanceSearchCaveatMaximumLength = 1_000
+/** Maximum length of the human-readable Search interpretation shown before apply. */
+const aiAssistanceSearchInterpretationMaximumLength = 4_000
 /** Maximum number of Planning child Work Items. */
 const aiAssistancePlanningSubtasksMaximumCount = 50
 /** Maximum number of Planning dependency suggestions. */
@@ -175,7 +178,10 @@ function isAiAssistanceDraft(value: unknown): value is AiAssistanceDraft {
         ...value.risks,
       ])
     case 'search':
-      return isString(value.interpretation) &&
+      return isBoundedNonEmptyTrimmedString(
+          value.interpretation,
+          aiAssistanceSearchInterpretationMaximumLength,
+        ) &&
         isWorkspaceSearchFilters(value.filters) &&
         (value.report === undefined || isSearchReport(value.report)) &&
         isStringArray(
@@ -378,7 +384,7 @@ function isWorkspaceSearchFilters(value: unknown): boolean {
     isOptionalEnumArray(value.entityTypes, entityTypeValues, entityTypeValues.length) &&
     isOptionalStringArray(value.assigneeUserIds, 100, 512) &&
     isOptionalStringArray(value.creatorUserIds, 100, 512) &&
-    isOptionalStringArray(value.statuses, 100, 512) &&
+    isOptionalSearchStatusIdArray(value.statuses) &&
     isOptionalCustomFieldArray(value.customFields) &&
     isOptionalStringArray(value.relationIds, 100, 512) &&
     (value.date === undefined || isSearchDate(value.date)) &&
@@ -402,6 +408,24 @@ function isSearchDate(value: unknown): boolean {
 /** Validates an optional fixed-width Gregorian calendar date. */
 function isOptionalCalendarDate(value: unknown): value is string | undefined {
   return value === undefined || isCalendarDate(value)
+}
+
+/** Validates optional Search status IDs with the same grammar as URL serialization. */
+function isOptionalSearchStatusIdArray(value: unknown): boolean {
+  return value === undefined || (
+    Array.isArray(value) &&
+    value.length <= 100 &&
+    value.every(isSearchStatusId)
+  )
+}
+
+/** Rejects status identifiers that Search URL serialization would silently drop. */
+function isSearchStatusId(value: unknown): value is string {
+  return typeof value === 'string' &&
+    value.length <= 128 &&
+    value.length > 0 &&
+    value === value.trim() &&
+    workflowStatusIdPattern.test(value)
 }
 
 /** Validates a fixed-width Gregorian calendar date without timezone coercion. */
@@ -566,9 +590,25 @@ function isPlanningStatusUpdate(value: unknown): boolean {
  */
 function isBoundedPlanningStatusUpdateText(value: unknown, required = false): value is string {
   if (typeof value !== 'string') return false
+  if (!isWellFormedUnicode(value)) return false
   const normalized = value.trim()
   return (!required || normalized.length > 0) &&
     new TextEncoder().encode(normalized).byteLength <= planningStatusUpdateTextMaximumBytes
+}
+
+/** Rejects lone UTF-16 surrogates before browser encoding can replace them. */
+function isWellFormedUnicode(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index)
+    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+      const nextCodeUnit = value.charCodeAt(index + 1)
+      if (index + 1 >= value.length || nextCodeUnit < 0xdc00 || nextCodeUnit > 0xdfff) return false
+      index += 1
+      continue
+    }
+    if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) return false
+  }
+  return true
 }
 
 /** Validates one permission-safe evidence citation. */

@@ -40,6 +40,7 @@ export function SettingsPage() {
                   cacheScope={workspace.userKey ?? workspace.userIdentityAliases.at(-1)}
                   guardRequest={workspace.guardEnterpriseSession}
                   locale={workspace.locale}
+                  workspaceId={workspace.workspaceId}
                 />
               ) : null}
               <WorkspaceAccessPanelContainer

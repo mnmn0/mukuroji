@@ -10,7 +10,7 @@ import type {
   WorkItemScheduleDependency,
   WorkItemScheduleDependencyPatch,
 } from '@mukuroji/contracts'
-import { useId, useState } from 'react'
+import { useId, useRef, useState } from 'react'
 import { RelatedDocuments } from '../../documents/ui/RelatedDocuments'
 import type { AiAssistanceController } from '../../features/ai-assistance/mutations/useAiAssistanceController'
 import { createAiAssistantSessionKey } from '../../features/ai-assistance/model/assistantSessionKey'
@@ -217,6 +217,10 @@ export function TaskDetailPane({
     dirty: false,
     identity: '',
   })
+  const editorDirtyStateRef = useRef<WorkItemEditorDirtyState>({
+    dirty: false,
+    identity: '',
+  })
   const documentContextPromotion = useDocumentContextPromotion(
     Boolean(collaboration?.context.capabilities.canCreate),
     `${task?.teamId ?? ''}:${task?.id ?? ''}`,
@@ -359,12 +363,20 @@ export function TaskDetailPane({
 
   /** Copies supported approved fields into a fresh local form seed without saving them. */
   function applyAiPlanningDraft(draft: AiPlanningDraft) {
-    setEditorDirtyState({ dirty: true, identity: editorIdentity })
+    const nextDirtyState = { dirty: true, identity: editorIdentity }
+    editorDirtyStateRef.current = nextDirtyState
+    setEditorDirtyState(nextDirtyState)
     setAiFormSeed((current) => ({
       draft,
       identity: editorIdentity,
       revision: current.revision + 1,
     }))
+  }
+
+  /** Rechecks whether the current Work Item editor contains supported manual edits. */
+  function shouldConfirmAiPlanningAdoption() {
+    return editorDirtyStateRef.current.identity === editorIdentity &&
+      editorDirtyStateRef.current.dirty
   }
 
   return (
@@ -375,7 +387,11 @@ export function TaskDetailPane({
       <form
         className="grid min-w-0 gap-4 border-b border-[var(--workbench-border)] bg-white px-5 py-4"
         key={`${task.teamId}:${task.id}:${issue?.revision ?? 'loading'}`}
-        onChange={() => setEditorDirtyState({ dirty: true, identity: editorIdentity })}
+        onChange={() => {
+          const nextDirtyState = { dirty: true, identity: editorIdentity }
+          editorDirtyStateRef.current = nextDirtyState
+          setEditorDirtyState(nextDirtyState)
+        }}
         onSubmit={(event) => {
           event.preventDefault()
 
@@ -544,6 +560,7 @@ export function TaskDetailPane({
               draft.priority ||
               (draft.status && workflowStatuses.some((status) => status.id === draft.status?.value)),
             )}
+            shouldConfirmAdoption={shouldConfirmAiPlanningAdoption}
             resolveStatusLabel={(statusId) =>
               workflowStatuses.find((status) => status.id === statusId)?.name ?? statusId}
             resolveWorkItemLabel={(endpoint) => planningSnapshot?.workItems.find(

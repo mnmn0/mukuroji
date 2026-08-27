@@ -939,6 +939,109 @@ describe('AI assistance API', () => {
     }
   })
 
+  /** Rejects lone UTF-16 surrogates that the Planning publish endpoint cannot accept. */
+  test('rejects malformed Unicode in Planning status text', async () => {
+    const content = aiPlanningGenerationFixture.content
+    if (content.availability !== 'available' || content.draft.kind !== 'planning' || !content.draft.statusUpdate) {
+      throw new Error('Planning fixture must stay available with a status update.')
+    }
+
+    installFetchRecorder([{
+      ...aiPlanningGenerationFixture,
+      content: {
+        ...content,
+        draft: {
+          ...content.draft,
+          statusUpdate: {
+            ...content.draft.statusUpdate,
+            summary: '\uD800',
+          },
+        },
+      },
+    }])
+    const error = await generateAiAssistance({
+      accessToken: 'access-token',
+      input: {
+        locale: 'en',
+        source: {
+          expectedRevision: 1,
+          teamId: 'core-team',
+          type: 'work-item',
+          workItemId: 'launch-review',
+        },
+        task: 'planning',
+      },
+      mutationContext,
+    }).catch((caught: unknown) => caught)
+
+    expect(error).toMatchObject({ code: 'InvalidAiAssistanceResponse', status: 502 })
+  })
+
+  /** Rejects an oversized Search interpretation before it reaches the review surface. */
+  test('rejects an oversized Search interpretation at the browser API boundary', async () => {
+    const content = aiSearchGenerationFixture.content
+    if (content.availability !== 'available' || content.draft.kind !== 'search') {
+      throw new Error('Search fixture must stay available.')
+    }
+    installFetchRecorder([{
+      ...aiSearchGenerationFixture,
+      content: {
+        ...content,
+        draft: {
+          ...content.draft,
+          interpretation: 'x'.repeat(4_001),
+        },
+      },
+    }])
+
+    const error = await generateAiAssistance({
+      accessToken: 'access-token',
+      input: {
+        locale: 'en',
+        query: 'Find incomplete Work Items',
+        task: 'search',
+      },
+      mutationContext,
+    }).catch((caught: unknown) => caught)
+
+    expect(error).toMatchObject({ code: 'InvalidAiAssistanceResponse', status: 502 })
+  })
+
+  /** Rejects Search statuses that URL serialization would silently remove. */
+  test('rejects Search statuses outside the canonical URL identifier grammar', async () => {
+    const content = aiSearchGenerationFixture.content
+    if (content.availability !== 'available' || content.draft.kind !== 'search') {
+      throw new Error('Search fixture must stay available.')
+    }
+
+    for (const invalidStatus of ['in progress', 'x'.repeat(129)]) {
+      installFetchRecorder([{
+        ...aiSearchGenerationFixture,
+        content: {
+          ...content,
+          draft: {
+            ...content.draft,
+            filters: {
+              ...content.draft.filters,
+              statuses: [invalidStatus],
+            },
+          },
+        },
+      }])
+      const error = await generateAiAssistance({
+        accessToken: 'access-token',
+        input: {
+          locale: 'en',
+          query: 'Find incomplete Work Items',
+          task: 'search',
+        },
+        mutationContext,
+      }).catch((caught: unknown) => caught)
+
+      expect(error).toMatchObject({ code: 'InvalidAiAssistanceResponse', status: 502 })
+    }
+  })
+
   test('rejects duplicate triage custom-field suggestions at the browser API boundary', async () => {
     const content = aiTriageGenerationFixture.content
     if (content.availability !== 'available' || content.draft.kind !== 'triage') {
