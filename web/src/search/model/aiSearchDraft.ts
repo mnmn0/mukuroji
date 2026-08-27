@@ -8,7 +8,7 @@ import type {
 } from '@mukuroji/contracts'
 
 /** Search entity types that can be edited in an AI filter draft. */
-export const aiSearchEntityTypes = [
+export const aiSearchEntityTypes: readonly SearchEntityType[] = [
   'work-item',
   'project',
   'team',
@@ -16,10 +16,10 @@ export const aiSearchEntityTypes = [
   'context-item',
   'file',
   'document',
-] as const satisfies readonly SearchEntityType[]
+]
 
 /** Custom-field operators accepted by the editable AI filter draft. */
-export const aiSearchCustomFieldOperators = [
+export const aiSearchCustomFieldOperators: readonly SearchCustomFieldOperator[] = [
   'equals',
   'not-equals',
   'contains',
@@ -29,7 +29,7 @@ export const aiSearchCustomFieldOperators = [
   'less-than-or-equal',
   'is-empty',
   'is-not-empty',
-] as const satisfies readonly SearchCustomFieldOperator[]
+]
 
 const AI_SEARCH_MAX_LIST_ITEMS = 100
 const AI_SEARCH_MAX_IDENTIFIER_LENGTH = 512

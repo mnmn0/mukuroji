@@ -27,6 +27,20 @@ const aiAssistanceSettingsQueryConfig = {
   },
 } satisfies SWRConfiguration
 
+/** Stable cache key for the active member's AI preference. */
+type AiAssistancePreferenceQueryKey = readonly [
+  'ai-assistance-preference',
+  string,
+  string,
+]
+
+/** Stable cache key for the Workspace AI policy. */
+type AiAssistancePolicyQueryKey = readonly [
+  'ai-assistance-policy',
+  string,
+  string,
+]
+
 /** Wraps an authenticated request so the owning route can handle session expiry. */
 type AuthenticatedRequestGuard = <Result>(request: Promise<Result>) => Promise<Result>
 
@@ -48,8 +62,8 @@ export function useAiAssistancePreference(
   workspaceId?: string,
 ) {
   const token = accessToken ?? ''
-  const key = token && enabled && cacheScope && workspaceId
-    ? ['ai-assistance-preference', workspaceId, cacheScope] as const
+  const key: AiAssistancePreferenceQueryKey | null = token && enabled && cacheScope && workspaceId
+    ? ['ai-assistance-preference', workspaceId, cacheScope]
     : null
   const query = useSWR<AiAssistancePreference>(
     key,
@@ -81,8 +95,8 @@ export function useAiAssistancePolicy(
   workspaceId?: string,
 ) {
   const token = accessToken ?? ''
-  const key = token && enabled && cacheScope && workspaceId
-    ? ['ai-assistance-policy', workspaceId, cacheScope] as const
+  const key: AiAssistancePolicyQueryKey | null = token && enabled && cacheScope && workspaceId
+    ? ['ai-assistance-policy', workspaceId, cacheScope]
     : null
   const query = useSWR<AiAssistancePolicy>(
     key,
