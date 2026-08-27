@@ -112,7 +112,9 @@ const emptyTeams: ProjectDirectoryTeam[] = []
 const emptyResolvedWorkItemConfigurations: Record<string, ResolvedWorkItemConfiguration> = {}
 
 /**
- * Permission-aware Workspace search、saved view、cursor paginationを提供する画面です。
+ * Renders permission-aware Workspace search, saved views, and cursor pagination.
+ *
+ * @returns The Search route surface with optional AI-assisted review controls.
  */
 export function SearchPage() {
   const workspaceContext = useOptionalWorkspaceRouteContext()
@@ -646,7 +648,42 @@ export function SearchPage() {
   )
 }
 
-/** Renders the canonical Search controls and the optional AI-assisted mode. */
+/** Props for the canonical Search controls and optional AI-assisted mode. */
+type SearchToolbarProps = {
+  /** Whether the deployment and Workspace policy expose AI Search. */
+  aiAssistanceEnabled?: boolean
+  /** Active Workspace member bearer token. */
+  accessToken?: string
+  /** Reports authenticated API failures to the route session guard. */
+  onAuthenticatedApiError?: (error: unknown) => void
+  /** Locale used for labels and generated metadata. */
+  locale: Locale
+  /** Applies an approved AI Search draft after route freshness validation. */
+  onAiFiltersApply: NaturalLanguageSearchComposerProps['onApply']
+  /** Applies a patch to the canonical Search filters. */
+  onFiltersChange: (patch: Record<string, unknown>) => void
+  /** Applies a patch to the canonical Search layout. */
+  onLayoutChange: (patch: Record<string, unknown>) => void
+  /** Refreshes the selected saved view after a successful edit. */
+  onUpdateSelectedView?: () => void
+  /** Current canonical Search route state. */
+  routeState: SearchRouteState
+  /** Stable signature used to fence an AI generation against route changes. */
+  routeSignature: string
+  /** Selected saved view, when one is active. */
+  selectedSavedView?: SavedWorkspaceView
+  /** Server-authorized workflow status options. */
+  statusOptions: readonly SearchStatusOption[]
+  /** Localized message resolver. */
+  t: (key: MessageKey) => string
+}
+
+/**
+ * Renders the canonical Search controls and the optional AI-assisted mode.
+ *
+ * @param props - Route state, permissions, callbacks, and localized labels.
+ * @returns Search toolbar controls with optional natural-language review.
+ */
 function SearchToolbar({
   aiAssistanceEnabled = true,
   accessToken,
@@ -661,21 +698,7 @@ function SearchToolbar({
   selectedSavedView,
   statusOptions,
   t,
-}: {
-  aiAssistanceEnabled?: boolean
-  accessToken?: string
-  onAuthenticatedApiError?: (error: unknown) => void
-  locale: Locale
-  onAiFiltersApply: NaturalLanguageSearchComposerProps['onApply']
-  onFiltersChange: (patch: Record<string, unknown>) => void
-  onLayoutChange: (patch: Record<string, unknown>) => void
-  onUpdateSelectedView?: () => void
-  routeState: SearchRouteState
-  routeSignature: string
-  selectedSavedView?: SavedWorkspaceView
-  statusOptions: readonly SearchStatusOption[]
-  t: (key: MessageKey) => string
-}) {
+}: SearchToolbarProps) {
   const entityTypes = getSearchEntityTypes(routeState.filters)
   const statuses = getSearchStatuses(routeState.filters)
   const columns = getSearchColumns(routeState.layout)

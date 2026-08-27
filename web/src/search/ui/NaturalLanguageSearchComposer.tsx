@@ -248,7 +248,12 @@ type SearchDraftReviewProps = {
   t: (key: MessageKey) => string
 }
 
-/** Serializes canonical Search filters so an approval is bound to exact criteria. */
+/**
+ * Serializes canonical Search filters so an approval is bound to exact criteria.
+ *
+ * @param filters - Canonical filter values currently shown in the editor.
+ * @returns A deterministic representation used for equality checks.
+ */
 function serializeSearchFilters(filters: WorkspaceSearchFilters): string {
   return JSON.stringify({
     ...filters,
@@ -260,7 +265,12 @@ function serializeSearchFilters(filters: WorkspaceSearchFilters): string {
   })
 }
 
-/** Keeps reviewed filter edits local until the explicit Apply action succeeds. */
+/**
+ * Keeps reviewed filter edits local until the explicit Apply action succeeds.
+ *
+ * @param props - Generation, local editor state, and review callbacks.
+ * @returns An editable Search review surface.
+ */
 function SearchDraftReview({
   error,
   feedbackRating,
@@ -593,7 +603,12 @@ type AiSearchListDraftInputProps = {
   value?: readonly string[]
 }
 
-/** Preserves commas and trailing spaces while emitting normalized filter values. */
+/**
+ * Preserves commas and trailing spaces while emitting normalized filter values.
+ *
+ * @param props - Current list and local change callback.
+ * @returns A controlled text input for a generated list filter.
+ */
 function AiSearchListDraftInput({ onChange, value }: AiSearchListDraftInputProps) {
   const [rawValue, setRawValue] = useState(() => formatAiSearchList(value))
 
@@ -621,7 +636,12 @@ type DateDraftInputProps = {
   value: string
 }
 
-/** Renders one accessible date boundary input. */
+/**
+ * Renders one accessible date boundary input.
+ *
+ * @param props - Date label, current value, and local change callback.
+ * @returns A labeled calendar-date input.
+ */
 function DateDraftInput({ label, onChange, value }: DateDraftInputProps) {
   return (
     <label className="grid gap-1 text-app-caption font-semibold text-[var(--workbench-muted)]">
@@ -648,7 +668,12 @@ type CustomFieldDraftRowProps = {
   t: (key: MessageKey) => string
 }
 
-/** Renders a generated custom-field filter as editable structured controls. */
+/**
+ * Renders a generated custom-field filter as editable structured controls.
+ *
+ * @param props - Generated filter and local row callbacks.
+ * @returns An editable custom-field filter row.
+ */
 function CustomFieldDraftRow({ filter, onChange, onRemove, t }: CustomFieldDraftRowProps) {
   const valueDisabled = filter.operator === 'is-empty' || filter.operator === 'is-not-empty'
 
@@ -699,7 +724,12 @@ function CustomFieldDraftRow({ filter, onChange, onRemove, t }: CustomFieldDraft
   )
 }
 
-/** Returns the Search draft only after the permission and task boundaries both pass. */
+/**
+ * Returns the Search draft only after the permission and task boundaries both pass.
+ *
+ * @param generation - Candidate generation returned by the controller.
+ * @returns A validated Search draft, or undefined for withheld/mismatched content.
+ */
 function getAvailableSearchDraft(generation?: AiAssistanceGeneration): AiSearchDraft | undefined {
   if (
     !isReviewableAiAssistanceGeneration(generation, 'search') ||

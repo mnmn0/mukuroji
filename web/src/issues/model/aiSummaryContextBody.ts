@@ -98,7 +98,13 @@ function boundContextBody(
   return body
 }
 
-/** Truncates one generated line without leaving a dangling UTF-16 high surrogate. */
+/**
+ * Truncates one generated line without leaving a dangling UTF-16 high surrogate.
+ *
+ * @param value - Generated line to bound.
+ * @param maximumLength - Maximum UTF-16 code-unit length.
+ * @returns The bounded line with a complete final code point.
+ */
 function truncateToUtf16Boundary(value: string, maximumLength: number): string {
   const truncated = value.slice(0, maximumLength)
   const lastCodeUnit = truncated.charCodeAt(truncated.length - 1)

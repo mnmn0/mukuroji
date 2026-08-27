@@ -786,6 +786,8 @@ export function PlanningStatusUpdateComposer({
    * Replaces the local form only after adoption is safe or explicitly confirmed.
    *
    * @param draft - Approved, currently authorized AI status update draft.
+   * @param context - Optional approved generation evidence retained for the form.
+   * @returns Nothing; updates local form seed and evidence state.
    */
   function applyAiDraft(
     draft: AiPlanningStatusUpdateDraft,
@@ -811,6 +813,9 @@ export function PlanningStatusUpdateComposer({
    *
    * @param draft - Approved, currently authorized AI status update draft.
    * @param sessionKey - Source identity and revision captured by the mounted assistant.
+   * @param replacementConfirmed - Whether manual edits may be replaced immediately.
+   * @param context - Optional approved generation evidence retained for the form.
+   * @returns Nothing; either applies the draft or stages it for confirmation.
    */
   function adoptAiDraft(
     draft: AiPlanningStatusUpdateDraft,
@@ -1164,6 +1169,20 @@ export function PlanningStatusUpdateComposer({
   )
 }
 
+/** Props for one required HTTPS permalink field used by the typed evidence form. */
+type PlanningEvidenceUrlInputProps = {
+  /** Optional safe URL copied from an approved generation citation. */
+  defaultValue?: string
+  /** Whether the current field value failed validation. */
+  hasError?: boolean
+  /** Localized placeholder shown to the operator. */
+  labels: Pick<PlanningUpdateLabels, 'evidenceUrlPlaceholder'>
+  /** Form field name submitted with the manual update. */
+  name: string
+  /** Publish callback whose presence determines editability. */
+  onPublish: PlanningStatusUpdateComposerProps['onPublish']
+}
+
 /**
  * Renders one required HTTPS permalink field for typed evidence.
  *
@@ -1176,13 +1195,7 @@ function PlanningEvidenceUrlInput({
   labels,
   name,
   onPublish,
-}: {
-  defaultValue?: string
-  hasError?: boolean
-  labels: Pick<PlanningUpdateLabels, 'evidenceUrlPlaceholder'>
-  name: string
-  onPublish: PlanningStatusUpdateComposerProps['onPublish']
-}) {
+}: PlanningEvidenceUrlInputProps) {
   return (
     <input
       aria-label={labels.evidenceUrlPlaceholder}

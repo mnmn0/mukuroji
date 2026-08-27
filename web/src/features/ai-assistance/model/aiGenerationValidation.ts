@@ -552,7 +552,13 @@ function isPlanningStatusUpdate(value: unknown): boolean {
     isCitationIdArray(value.citationIds)
 }
 
-/** Validates one Planning status text field against the server's UTF-8 boundary. */
+/**
+ * Validates one Planning status text field against the server's UTF-8 boundary.
+ *
+ * @param value - Unknown model-controlled status text.
+ * @param required - Whether an empty trimmed value should be rejected.
+ * @returns Whether the value is a bounded string suitable for the status form.
+ */
 function isBoundedPlanningStatusUpdateText(value: unknown, required = false): value is string {
   if (typeof value !== 'string') return false
   const normalized = value.trim()
