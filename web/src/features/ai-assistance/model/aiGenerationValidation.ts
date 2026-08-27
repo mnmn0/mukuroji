@@ -121,7 +121,7 @@ export function isReviewableAiAssistanceGeneration(
   value: unknown,
   task: AiAssistanceTask,
 ): value is AiAssistanceGeneration {
-  return isAiAssistanceGeneration(value) &&
+  return isCurrentAiAssistanceGeneration(value) &&
     value.task === task &&
     value.content.availability === 'available'
 }
@@ -145,6 +145,40 @@ export function isAiAssistanceGeneration(value: unknown): value is AiAssistanceG
     (value.decision === undefined || isDecision(value.decision)) &&
     isIsoInstant(value.createdAt) &&
     isIsoInstant(value.expiresAt)
+}
+
+/**
+ * Validates that a generation's retention window is coherent and has not expired.
+ *
+ * @param value - Unknown generation value received at a response or render boundary.
+ * @param now - Current epoch milliseconds, injectable for deterministic tests.
+ * @returns Whether the generation is structurally valid and its expiry is in the future.
+ */
+export function isCurrentAiAssistanceGeneration(
+  value: unknown,
+  now = Date.now(),
+): value is AiAssistanceGeneration {
+  return isAiAssistanceGeneration(value) && isAiAssistanceRetentionWindowCurrent(value, now)
+}
+
+/**
+ * Checks only the retention timestamps so other response safety errors can keep their own classification.
+ *
+ * @param value - Unknown generation-like value received at a response or render boundary.
+ * @param now - Current epoch milliseconds, injectable for deterministic tests.
+ * @returns Whether the timestamps are valid and the generation has not expired.
+ */
+export function isAiAssistanceRetentionWindowCurrent(
+  value: unknown,
+  now = Date.now(),
+): boolean {
+  if (!isRecord(value) || !isIsoInstant(value.createdAt) || !isIsoInstant(value.expiresAt)) return false
+  const createdAt = Date.parse(value.createdAt)
+  const expiresAt = Date.parse(value.expiresAt)
+  return Number.isFinite(createdAt) &&
+    Number.isFinite(expiresAt) &&
+    expiresAt > createdAt &&
+    expiresAt > now
 }
 
 /** Validates an available or withheld generation content boundary. */

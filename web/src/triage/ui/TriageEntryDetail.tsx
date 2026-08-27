@@ -35,6 +35,8 @@ export type TriageEntryDetailProps = {
   readonly onAuthenticatedApiError?: (error: unknown) => void
   /** Reports AI request state so the owning queue can fence source changes. */
   readonly onOperationPendingChange?: (pending: boolean) => void
+  /** Whether an AI generation, decision, or feedback request is in flight. */
+  readonly isAiOperationPending?: boolean
   /** Team route identifier used to scope the AI source reference. */
   readonly teamId: string
   /** Selected permission-safe entry view. */
@@ -92,6 +94,7 @@ export function TriageEntryDetail({
   aiAssistanceEnabled = true,
   aiAssistanceController,
   errorMessage,
+  isAiOperationPending = false,
   isLoading = false,
   isPending = false,
   locale,
@@ -124,7 +127,7 @@ export function TriageEntryDetail({
   const actionTrigger = useRef<HTMLButtonElement | null>(null)
   const [isActionMutationPending, setIsActionMutationPending] = useState(false)
   const isActionMutationPendingRef = useRef(false)
-  const actionIsPending = isPending || isActionMutationPending
+  const actionIsPending = isPending || isActionMutationPending || isAiOperationPending
 
   const closeAction = () => {
     setActionMode(undefined)
@@ -277,8 +280,9 @@ export function TriageEntryDetail({
     >
       <div className="sticky top-0 z-10 border-b border-[var(--workbench-border)] bg-white px-5 py-4 max-[860px]:px-4">
         <button
-          className="mb-3 hidden min-h-10 items-center gap-2 text-sm font-semibold text-[var(--workbench-primary)] max-[860px]:inline-flex"
+          className="mb-3 hidden min-h-10 items-center gap-2 text-sm font-semibold text-[var(--workbench-primary)] disabled:cursor-not-allowed disabled:opacity-50 max-[860px]:inline-flex"
           onClick={onBack}
+          disabled={actionIsPending}
           type="button"
         >
           ← {t('triage.detail.back')}
@@ -476,22 +480,22 @@ export function TriageEntryDetail({
         <div className="border-t border-[var(--workbench-border)] pt-5">
           <div className="flex flex-wrap gap-2" aria-label={t('triage.action.aria')}>
             {entry.capabilities.canAssign ? (
-              <ActionButton label={t('triage.action.assign')} onActivate={activateAction} mode="assign" />
+              <ActionButton disabled={actionIsPending} label={t('triage.action.assign')} onActivate={activateAction} mode="assign" />
             ) : null}
             {(entry.capabilities.canAcceptCreate || entry.capabilities.canAcceptLink) ? (
-              <ActionButton shortcut="A" label={t('triage.action.accept')} primary onActivate={activateAction} mode="accept" />
+              <ActionButton disabled={actionIsPending} shortcut="A" label={t('triage.action.accept')} primary onActivate={activateAction} mode="accept" />
             ) : null}
             {entry.capabilities.canMarkDuplicate ? (
-              <ActionButton shortcut="D" label={t('triage.action.duplicate')} onActivate={activateAction} mode="duplicate" />
+              <ActionButton disabled={actionIsPending} shortcut="D" label={t('triage.action.duplicate')} onActivate={activateAction} mode="duplicate" />
             ) : null}
             {entry.capabilities.canRequestInformation && entry.capabilities.canReply ? (
-              <ActionButton shortcut="I" label={t('triage.action.requestInformation')} onActivate={activateAction} mode="request-information" />
+              <ActionButton disabled={actionIsPending} shortcut="I" label={t('triage.action.requestInformation')} onActivate={activateAction} mode="request-information" />
             ) : null}
             {entry.capabilities.canSnooze ? (
-              <ActionButton shortcut="S" label={t('triage.action.snooze')} onActivate={activateAction} mode="snooze" />
+              <ActionButton disabled={actionIsPending} shortcut="S" label={t('triage.action.snooze')} onActivate={activateAction} mode="snooze" />
             ) : null}
             {entry.capabilities.canDecline ? (
-              <ActionButton shortcut="X" label={t('triage.action.decline')} onActivate={activateAction} mode="decline" />
+              <ActionButton disabled={actionIsPending} shortcut="X" label={t('triage.action.decline')} onActivate={activateAction} mode="decline" />
             ) : null}
           </div>
           {!hasAnyAction(entry) ? (
@@ -687,7 +691,8 @@ function ContextCount({ label, value }: { label: string; value: number }) {
 }
 
 /** Opens one explicit action form and shows its keyboard shortcut. */
-function ActionButton({ label, mode, onActivate, primary = false, shortcut }: {
+function ActionButton({ disabled = false, label, mode, onActivate, primary = false, shortcut }: {
+  disabled?: boolean
   label: string
   mode: TriageActionMode
   onActivate: (mode: TriageActionMode, trigger?: HTMLButtonElement) => void
@@ -696,7 +701,8 @@ function ActionButton({ label, mode, onActivate, primary = false, shortcut }: {
 }) {
   return (
     <button
-      className={`${primary ? 'workbench-button-primary' : 'workbench-button-secondary'} min-h-10 px-4`}
+      className={`${primary ? 'workbench-button-primary' : 'workbench-button-secondary'} min-h-10 px-4 disabled:cursor-not-allowed disabled:opacity-50`}
+      disabled={disabled}
       onClick={(event) => onActivate(mode, event.currentTarget)}
       type="button"
     >

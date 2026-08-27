@@ -17,7 +17,7 @@ import type {
   WorkspaceSearchFilters,
 } from '@mukuroji/contracts'
 import { AiAssistanceApiError } from './errors'
-import { isAiAssistanceGeneration } from '../model/aiGenerationValidation'
+import { isCurrentAiAssistanceGeneration } from '../model/aiGenerationValidation'
 
 /**
  * Converts an untrusted AI generation response into a validated transport value.
@@ -31,7 +31,7 @@ export function parseAiAssistanceGenerationResponse(
   value: unknown,
   expectedTask?: AiAssistanceTask,
 ): AiAssistanceGeneration {
-  if (isAiAssistanceGeneration(value) &&
+  if (isCurrentAiAssistanceGeneration(value) &&
     (expectedTask === undefined || value.task === expectedTask) &&
     hasKnownGenerationFields(value)) return value
   throw new AiAssistanceApiError(

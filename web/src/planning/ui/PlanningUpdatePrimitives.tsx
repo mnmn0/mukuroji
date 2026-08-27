@@ -669,6 +669,8 @@ export type PlanningStatusUpdateAiAssistance = {
   accessToken: string
   /** Reports authenticated AI failures to the owning Planning route session guard. */
   onAuthenticatedApiError?: (error: unknown) => void
+  /** Reports AI generation, decision, and feedback activity to the owning Planning route. */
+  onOperationPendingChange?: (pending: boolean) => void
   /** Locale sent to Bedrock and used for draft presentation. */
   locale: Locale
   /** Planning target resolved and re-authorized by the server. */
@@ -864,6 +866,7 @@ export function PlanningStatusUpdateComposer({
             key={aiAssistantSessionKey}
             locale={aiAssistance.locale}
             onAuthenticatedApiError={aiAssistance.onAuthenticatedApiError}
+            onOperationPendingChange={aiAssistance.onOperationPendingChange}
             onAdopt={(draft, replacementConfirmed, context) => adoptAiDraft(
               draft,
               aiAssistantSessionKey,

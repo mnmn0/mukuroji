@@ -18,9 +18,7 @@ import {
   type RequestRoutingProjectDirectory,
 } from '../model/requestTriageRouting'
 
-/**
- * RequestQueue の入力です。
- */
+/** Props for the Request Intake queue, detail pane, and explicit actions. */
 export type RequestQueueProps = {
   /** Active Workspace member bearer token used only for explicit AI generation. */
   accessToken?: string
@@ -95,9 +93,7 @@ type ConversionOverrideDirtyState = {
   description: boolean
 }
 
-/**
- * Intake queue の一覧、historical response、thread、明示的 action を描画します。
- */
+/** Renders the Request Intake queue, detail pane, and explicit action controls. */
 export function RequestQueue({
   accessToken,
   aiAssistanceController,
@@ -221,6 +217,7 @@ export function RequestQueue({
         submission={selectedSubmission}
         onAction={onAction}
         onAuthenticatedApiError={onAuthenticatedApiError}
+        isAiOperationPending={isAiOperationPending}
         onOperationPendingChange={reportAiOperationPending}
         onOpenAttachment={onOpenAttachment}
         projectDirectory={projectDirectory}
@@ -233,6 +230,7 @@ function RequestSubmissionDetail({
   accessToken,
   aiAssistanceController,
   canUseAiAssistance,
+  isAiOperationPending,
   locale,
   onAuthenticatedApiError,
   onAction,
@@ -244,6 +242,8 @@ function RequestSubmissionDetail({
   accessToken?: string
   aiAssistanceController?: AiAssistanceController
   canUseAiAssistance: boolean
+  /** Whether an AI generation, decision, or feedback request is in flight. */
+  isAiOperationPending: boolean
   onAuthenticatedApiError?: (error: unknown) => void
   /** Reports AI request state so the parent queue can fence source changes. */
   onOperationPendingChange?: (pending: boolean) => void
@@ -271,6 +271,7 @@ function RequestSubmissionDetail({
   const [actionError, setActionError] = useState(false)
   const [openingAttachmentId, setOpeningAttachmentId] = useState<string>()
   const [attachmentErrorId, setAttachmentErrorId] = useState<string>()
+  const actionIsPending = isSubmitting || isAiOperationPending
 
   /** Opens an explicit action and resets transient conversion overrides. */
   const activateAction = (mode: Exclude<ActionMode, undefined>, value = '') => {
@@ -336,7 +337,7 @@ function RequestSubmissionDetail({
 
   const submitAction = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
-    if (!actionMode || !onAction || isSubmitting || isSubmittingRef.current) return
+    if (!actionMode || !onAction || actionIsPending || isSubmittingRef.current) return
 
     const common = { expectedRevision: submission.revision }
     const input: RequestSubmissionActionInput = actionMode === 'assign'
@@ -431,7 +432,7 @@ function RequestSubmissionDetail({
                   <span className="flex flex-none items-center gap-2">
                     <span className="workbench-badge">{t(`requests.scanStatus.${attachment.scanStatus}`)}</span>
                     {attachment.scanStatus === 'available' && onOpenAttachment ? (
-                      <button className="workbench-button-secondary min-h-9 px-3" disabled={openingAttachmentId === attachment.id} onClick={() => {
+                      <button className="workbench-button-secondary min-h-9 px-3" disabled={openingAttachmentId === attachment.id || actionIsPending} onClick={() => {
                         setOpeningAttachmentId(attachment.id)
                         setAttachmentErrorId(undefined)
                         void onOpenAttachment(submission.id, attachment.id)
@@ -462,7 +463,7 @@ function RequestSubmissionDetail({
           <DetailSection title={t('requests.detail.duplicates')}>
             <div className="flex flex-wrap gap-2">
               {submission.duplicateCandidateIds.map((id) => (
-                <button className="workbench-button-secondary min-h-9 px-3" key={id} onClick={() => {
+                <button className="workbench-button-secondary min-h-9 px-3" disabled={actionIsPending} key={id} onClick={() => {
                   activateAction('mark-duplicate', id)
                 }} type="button">{id}</button>
               ))}
@@ -534,11 +535,11 @@ function RequestSubmissionDetail({
         ) : null}
 
         <div className="flex flex-wrap gap-2 border-t border-[var(--workbench-border)] pt-4">
-          {submission.capabilities.canAssign ? <ActionButton label={t('requests.action.assign')} onClick={() => activateAction('assign')} /> : null}
-          {submission.capabilities.canRequestMoreInfo ? <ActionButton label={t('requests.action.moreInfo')} onClick={() => activateAction('request-more-info')} /> : null}
-          {submission.capabilities.canReject ? <ActionButton label={t('requests.action.reject')} onClick={() => activateAction('reject')} /> : null}
-          {submission.capabilities.canMarkDuplicate ? <ActionButton label={t('requests.action.duplicate')} onClick={() => activateAction('mark-duplicate')} /> : null}
-          {submission.capabilities.canConvert ? <ActionButton label={t('requests.action.convert')} primary onClick={() => activateAction('convert')} /> : null}
+          {submission.capabilities.canAssign ? <ActionButton disabled={actionIsPending} label={t('requests.action.assign')} onClick={() => activateAction('assign')} /> : null}
+          {submission.capabilities.canRequestMoreInfo ? <ActionButton disabled={actionIsPending} label={t('requests.action.moreInfo')} onClick={() => activateAction('request-more-info')} /> : null}
+          {submission.capabilities.canReject ? <ActionButton disabled={actionIsPending} label={t('requests.action.reject')} onClick={() => activateAction('reject')} /> : null}
+          {submission.capabilities.canMarkDuplicate ? <ActionButton disabled={actionIsPending} label={t('requests.action.duplicate')} onClick={() => activateAction('mark-duplicate')} /> : null}
+          {submission.capabilities.canConvert ? <ActionButton disabled={actionIsPending} label={t('requests.action.convert')} primary onClick={() => activateAction('convert')} /> : null}
         </div>
 
         {actionMode ? (
@@ -556,13 +557,13 @@ function RequestSubmissionDetail({
             </h3>
             {actionMode === 'convert' ? (
               <>
-                <input aria-label={t('requests.action.titleOverride')} className="workbench-input min-h-10 px-3" placeholder={t('requests.action.titleOverride')} value={titleOverride} onChange={(event) => {
+                <input aria-label={t('requests.action.titleOverride')} className="workbench-input min-h-10 px-3" disabled={actionIsPending} placeholder={t('requests.action.titleOverride')} value={titleOverride} onChange={(event) => {
                   setTitleOverride(event.target.value)
                   const nextDirtyState = { ...conversionOverrideDirtyRef.current, title: true }
                   conversionOverrideDirtyRef.current = nextDirtyState
                   setConversionOverrideDirty(nextDirtyState)
                 }} />
-                <textarea aria-label={t('requests.action.descriptionOverride')} className="workbench-input min-h-24 px-3 py-2" placeholder={t('requests.action.descriptionOverride')} value={descriptionOverride} onChange={(event) => {
+                <textarea aria-label={t('requests.action.descriptionOverride')} className="workbench-input min-h-24 px-3 py-2" disabled={actionIsPending} placeholder={t('requests.action.descriptionOverride')} value={descriptionOverride} onChange={(event) => {
                   setDescriptionOverride(event.target.value)
                   const nextDirtyState = { ...conversionOverrideDirtyRef.current, description: true }
                   conversionOverrideDirtyRef.current = nextDirtyState
@@ -576,6 +577,7 @@ function RequestSubmissionDetail({
               <input
                 aria-label={actionMode === 'assign' ? t('requests.action.assignee') : t('requests.action.targetSubmission')}
                 className="workbench-input min-h-10 px-3"
+                disabled={actionIsPending}
                 required
                 value={actionValue}
                 onChange={(event) => setActionValue(event.target.value)}
@@ -584,6 +586,7 @@ function RequestSubmissionDetail({
               <textarea
                 aria-label={actionMode === 'reject' ? t('requests.action.reason') : t('requests.action.message')}
                 className="workbench-input min-h-24 px-3 py-2"
+                disabled={actionIsPending}
                 required
                 value={actionValue}
                 onChange={(event) => setActionValue(event.target.value)}
@@ -591,8 +594,8 @@ function RequestSubmissionDetail({
             )}
             {actionError ? <p className="text-sm font-semibold text-red-700" role="alert">{t('requests.action.error')}</p> : null}
             <div className="flex justify-end gap-2">
-              <button className="workbench-button-secondary min-h-10 px-4" disabled={isSubmitting} onClick={() => setActionMode(undefined)} type="button">{t('requests.action.cancel')}</button>
-              <button className="workbench-button-primary min-h-10 px-4" disabled={isSubmitting} type="submit">{isSubmitting ? t('requests.action.pending') : t('requests.action.submit')}</button>
+              <button className="workbench-button-secondary min-h-10 px-4" disabled={actionIsPending} onClick={() => setActionMode(undefined)} type="button">{t('requests.action.cancel')}</button>
+              <button className="workbench-button-primary min-h-10 px-4" disabled={actionIsPending} type="submit">{isSubmitting ? t('requests.action.pending') : t('requests.action.submit')}</button>
             </div>
           </form>
         ) : null}
@@ -610,8 +613,8 @@ function DetailSection({ children, title }: { children: ReactNode; title: string
   )
 }
 
-function ActionButton({ label, onClick, primary = false }: { label: string; onClick: () => void; primary?: boolean }) {
-  return <button className={`${primary ? 'workbench-button-primary' : 'workbench-button-secondary'} min-h-10 px-4`} onClick={onClick} type="button">{label}</button>
+function ActionButton({ disabled = false, label, onClick, primary = false }: { disabled?: boolean; label: string; onClick: () => void; primary?: boolean }) {
+  return <button className={`${primary ? 'workbench-button-primary' : 'workbench-button-secondary'} min-h-10 px-4 disabled:cursor-not-allowed disabled:opacity-50`} disabled={disabled} onClick={onClick} type="button">{label}</button>
 }
 
 function RequestStatusBadge({ status, t }: { status: RequestSubmissionModel['status']; t: ReturnType<typeof createTranslator> }) {

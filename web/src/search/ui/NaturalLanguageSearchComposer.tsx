@@ -46,6 +46,8 @@ export type NaturalLanguageSearchComposerProps = {
   onAuthenticatedApiError?: (error: unknown) => void
   /** Applies reviewed filters and an optional report intent to existing Search route state. */
   onApply: (application: ApprovedAiSearchApplication, expectedRouteSignature: string) => void
+  /** Reports AI generation, decision, and feedback activity to the owning Search route. */
+  onOperationPendingChange?: (pending: boolean) => void
   /** Locale sent to the generation request and used for presentation. */
   locale: Locale
   /** Canonical Search route signature captured when generation starts. */
@@ -65,10 +67,41 @@ export function NaturalLanguageSearchComposer({
   locale,
   onAuthenticatedApiError,
   onApply,
+  onOperationPendingChange,
   routeSignature = '',
   t,
 }: NaturalLanguageSearchComposerProps) {
   const controller = useAiAssistanceController({ accessToken, onAuthenticatedApiError })
+
+  /** Runs one explicit generation while fencing Search route controls. */
+  const generate = async (query: string) => {
+    onOperationPendingChange?.(true)
+    try {
+      return await controller.generate({ locale, query, task: 'search' })
+    } finally {
+      onOperationPendingChange?.(false)
+    }
+  }
+
+  /** Records a review decision while fencing Search route controls. */
+  const decide = async (outcome: 'approved' | 'rejected') => {
+    onOperationPendingChange?.(true)
+    try {
+      return await controller.decide(outcome)
+    } finally {
+      onOperationPendingChange?.(false)
+    }
+  }
+
+  /** Sends usefulness feedback while fencing Search route controls. */
+  const sendFeedback = async (rating: CreateAiAssistanceFeedbackRequest['rating']) => {
+    onOperationPendingChange?.(true)
+    try {
+      await controller.sendFeedback(rating)
+    } finally {
+      onOperationPendingChange?.(false)
+    }
+  }
 
   return (
     <NaturalLanguageSearchComposerView
@@ -82,9 +115,9 @@ export function NaturalLanguageSearchComposer({
       locale={locale}
       onApply={onApply}
       onCancelGeneration={controller.cancelGeneration}
-      onDecide={controller.decide}
-      onFeedback={controller.sendFeedback}
-      onGenerate={(query) => controller.generate({ locale, query, task: 'search' })}
+      onDecide={decide}
+      onFeedback={sendFeedback}
+      onGenerate={generate}
       routeSignature={routeSignature}
       t={t}
     />

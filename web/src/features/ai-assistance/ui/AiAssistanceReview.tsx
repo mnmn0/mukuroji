@@ -14,6 +14,7 @@ import {
   ShieldIcon,
 } from '../../../shared/ui/icons'
 import type { AiAssistanceErrorKind } from '../mutations/useAiAssistanceController'
+import { isAiAssistanceRetentionWindowCurrent } from '../model/aiGenerationValidation'
 import { ConfidenceBadge } from './ConfidenceBadge'
 
 /**
@@ -102,7 +103,10 @@ export function AiAssistanceReview({
 
   if (!generation && !isGenerating && !errorKind) return null
 
-  const content = generation?.content
+  const generationIsCurrent = generation === undefined || isAiAssistanceRetentionWindowCurrent(generation)
+  const content = generationIsCurrent
+    ? generation?.content
+    : { availability: 'withheld' as const, reasonCode: 'retention-expired' as const }
   const safeCitations = content?.availability === 'available'
     ? content.citations.filter((citation) => isSafeApplicationPath(citation.href))
     : []

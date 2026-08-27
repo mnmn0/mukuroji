@@ -37,6 +37,8 @@ export type AiPlanningStatusUpdateAssistantProps = {
   disabled?: boolean
   /** Reports authenticated AI failures to the owning Planning route session guard. */
   onAuthenticatedApiError?: (error: unknown) => void
+  /** Reports AI generation, decision, and feedback activity to the owning Planning route. */
+  onOperationPendingChange?: (pending: boolean) => void
   /** Optional operator guidance sent with the audited generation request. */
   guidance?: string
   /** Locale sent to Bedrock and used for generation metadata. */
@@ -71,11 +73,47 @@ export function AiPlanningStatusUpdateAssistant({
   locale,
   onAuthenticatedApiError,
   onAdopt,
+  onOperationPendingChange,
   requireAdoptionConfirmation,
   source,
   t,
 }: AiPlanningStatusUpdateAssistantProps) {
   const controller = useAiAssistanceController({ accessToken, onAuthenticatedApiError })
+
+  /** Runs one explicit generation while fencing Planning target selection. */
+  const generate = async () => {
+    onOperationPendingChange?.(true)
+    try {
+      return await controller.generate({
+        ...(guidance?.trim() ? { guidance: guidance.trim() } : {}),
+        locale,
+        source,
+        task: 'planning',
+      })
+    } finally {
+      onOperationPendingChange?.(false)
+    }
+  }
+
+  /** Records a review decision while fencing Planning target selection. */
+  const decide = async (outcome: 'approved' | 'rejected') => {
+    onOperationPendingChange?.(true)
+    try {
+      return await controller.decide(outcome)
+    } finally {
+      onOperationPendingChange?.(false)
+    }
+  }
+
+  /** Sends usefulness feedback while fencing Planning target selection. */
+  const sendFeedback = async (rating: CreateAiAssistanceFeedbackRequest['rating']) => {
+    onOperationPendingChange?.(true)
+    try {
+      await controller.sendFeedback(rating)
+    } finally {
+      onOperationPendingChange?.(false)
+    }
+  }
 
   return (
     <AiPlanningStatusUpdateAssistantView
@@ -91,14 +129,9 @@ export function AiPlanningStatusUpdateAssistant({
       cancelLabel={t('ai.planning.assistant.cancel')}
       onAdopt={onAdopt}
       onCancelGeneration={controller.cancelGeneration}
-      onDecide={controller.decide}
-      onFeedback={controller.sendFeedback}
-      onGenerate={() => controller.generate({
-        ...(guidance?.trim() ? { guidance: guidance.trim() } : {}),
-        locale,
-        source,
-        task: 'planning',
-      })}
+      onDecide={decide}
+      onFeedback={sendFeedback}
+      onGenerate={generate}
       requireAdoptionConfirmation={requireAdoptionConfirmation}
       t={t}
     />

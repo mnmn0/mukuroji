@@ -471,7 +471,15 @@ export function PlanningScreen({
   )
   const [selectedEntityId, setSelectedEntityId] = useState(initialSelectedEntityId)
   const [selectedUpdateTarget, setSelectedUpdateTarget] = useState(initialSelectedUpdateTarget)
+  const [isAiOperationPending, setIsAiOperationPending] = useState(false)
+  const isAiOperationPendingRef = useRef(false)
   const pendingViewFocus = useRef<PlanningViewId | undefined>(undefined)
+
+  /** Keeps Planning target controls fenced while an AI operation is pending. */
+  const reportAiOperationPending = (pending: boolean) => {
+    isAiOperationPendingRef.current = pending
+    setIsAiOperationPending(pending)
+  }
   const selectedEntity = activeEntities.find((entity) => entity.id === selectedEntityId) ??
     activeEntities.find((entity) => entity.type === 'goal') ?? activeEntities[0]
   const resolvedSelectedUpdateTarget = selectedUpdateTarget ??
@@ -508,6 +516,7 @@ export function PlanningScreen({
       ? {
           accessToken: aiAssistance.accessToken,
           onAuthenticatedApiError: aiAssistance.onAuthenticatedApiError,
+          onOperationPendingChange: reportAiOperationPending,
           locale: aiAssistance.locale,
           source: {
             expectedRevision: snapshot.revision,
@@ -519,6 +528,7 @@ export function PlanningScreen({
 
   /** Selects a planning row and forwards its Project or Initiative update target. */
   const handleSelectEntity = (entityId: string) => {
+    if (isAiOperationPendingRef.current) return
     const entity = activeEntities.find((candidate) => candidate.id === entityId)
     const target = entity ? resolvePlanningEntityUpdateTarget(entity) : undefined
     setSelectedEntityId(entityId)
@@ -637,6 +647,7 @@ export function PlanningScreen({
                   canManageEntity={canManageEntity}
                   canManageWorkItemDependencyEndpoint={canManageWorkItemDependencyEndpoint}
                   labels={labels}
+                  isAiOperationPending={isAiOperationPending}
                   selectedEntity={selectedEntity}
                   snapshot={snapshot}
                   updateTargetDetails={updateTargetDetails}
@@ -662,6 +673,7 @@ export function PlanningScreen({
                   canManageEntity={canManageEntity}
                   canUpdateWorkItemLink={canUpdateWorkItemLink}
                   labels={labels}
+                  isAiOperationPending={isAiOperationPending}
                   selectedEntity={selectedEntity}
                   snapshot={snapshot}
                   onArchiveEntity={onArchiveEntity}
@@ -676,6 +688,7 @@ export function PlanningScreen({
               {activeEntities.length > 0 && activeView === 'portfolio' ? (
                 <PortfolioView
                   labels={labels}
+                  isAiOperationPending={isAiOperationPending}
                   onSelectEntity={handleSelectEntity}
                   snapshot={snapshot}
                   updateTargetDetails={updateTargetDetails}
@@ -723,6 +736,7 @@ export function PlanningScreen({
 function TimelineView({
   canManageEntity,
   canManageWorkItemDependencyEndpoint,
+  isAiOperationPending = false,
   labels,
   onArchiveEntity,
   onChangeMilestoneDate,
@@ -744,6 +758,8 @@ function TimelineView({
 }: {
   canManageEntity?: PlanningScreenProps['canManageEntity']
   canManageWorkItemDependencyEndpoint?: PlanningScreenProps['canManageWorkItemDependencyEndpoint']
+  /** Whether AI review is pending and target selection must remain stable. */
+  isAiOperationPending?: boolean
   labels: PlanningLabels
   onArchiveEntity?: PlanningScreenProps['onArchiveEntity']
   onChangeMilestoneDate?: PlanningScreenProps['onChangeMilestoneDate']
@@ -809,7 +825,7 @@ function TimelineView({
                     key={entity.id}
                   >
                     <td className="w-full px-5 py-4">
-                      <button className="min-w-0 max-w-full text-left" type="button" onClick={() => onSelectEntity(entity.id)}>
+                      <button className="min-w-0 max-w-full text-left disabled:cursor-not-allowed disabled:opacity-50" disabled={isAiOperationPending} type="button" onClick={() => onSelectEntity(entity.id)}>
                         <span className="block truncate text-sm font-semibold text-[var(--workbench-text)]">{entity.title}</span>
                         <span className="mt-1 flex flex-wrap items-center gap-2 text-xs font-semibold text-[var(--workbench-muted)]">
                           {labels.entityTypes[entity.type]}
@@ -1132,6 +1148,7 @@ function RoadmapView({
   canLinkEntity,
   canManageEntity,
   canUpdateWorkItemLink,
+  isAiOperationPending = false,
   labels,
   onArchiveEntity,
   onDeleteWorkItemLink,
@@ -1146,6 +1163,8 @@ function RoadmapView({
   canLinkEntity?: PlanningScreenProps['canLinkEntity']
   canManageEntity?: PlanningScreenProps['canManageEntity']
   canUpdateWorkItemLink?: PlanningScreenProps['canUpdateWorkItemLink']
+  /** Whether AI review is pending and target selection must remain stable. */
+  isAiOperationPending?: boolean
   labels: PlanningLabels
   onArchiveEntity?: PlanningScreenProps['onArchiveEntity']
   onDeleteWorkItemLink?: PlanningScreenProps['onDeleteWorkItemLink']
@@ -1181,6 +1200,7 @@ function RoadmapView({
               key={entity.id}
               labels={labels}
               selectedEntityId={selectedEntity?.id}
+              isAiOperationPending={isAiOperationPending}
               onSelectEntity={onSelectEntity}
             />
           ))}
@@ -1195,6 +1215,7 @@ function RoadmapView({
               return (
                 <button
                   className="rounded-lg border border-[var(--workbench-border)] bg-white p-3 text-left hover:border-[var(--workbench-primary)]"
+                  disabled={isAiOperationPending}
                   key={`${workItem.teamId}:${workItem.id}`}
                   type="button"
                   onClick={() => onOpenWorkItem?.(workItem)}
@@ -1247,6 +1268,7 @@ function RoadmapNode({
   childrenByParent,
   depth,
   entity,
+  isAiOperationPending = false,
   labels,
   onSelectEntity,
   selectedEntityId,
@@ -1254,6 +1276,8 @@ function RoadmapNode({
   childrenByParent: Map<string, PlanningEntity[]>
   depth: number
   entity: PlanningEntity
+  /** Whether AI review is pending and target selection must remain stable. */
+  isAiOperationPending?: boolean
   labels: PlanningLabels
   onSelectEntity: (entityId: string) => void
   selectedEntityId?: string
@@ -1264,6 +1288,7 @@ function RoadmapNode({
         aria-current={selectedEntityId === entity.id ? 'true' : undefined}
         className={`grid w-full min-w-0 grid-cols-[minmax(0,1fr)_minmax(72px,auto)] items-center gap-2 rounded-lg border p-3 text-left min-[640px]:grid-cols-[minmax(0,1fr)_100px_110px] min-[640px]:gap-3 ${selectedEntityId === entity.id ? 'border-[#6fbfb4] bg-[#e5f7f4]' : 'border-[var(--workbench-border)] bg-white hover:border-[#99d7cf]'}`}
         data-testid={`roadmap-entity-${entity.id}`}
+        disabled={isAiOperationPending}
         style={{
           paddingLeft: `clamp(12px, calc(12px + ${depth * 2.5}vw), ${12 + depth * 20}px)`,
         }}
@@ -1297,6 +1322,7 @@ function RoadmapNode({
             entity={child}
             key={child.id}
             labels={labels}
+            isAiOperationPending={isAiOperationPending}
             selectedEntityId={selectedEntityId}
             onSelectEntity={onSelectEntity}
           />
@@ -1656,11 +1682,14 @@ function WorkItemLinkEditor({
 }
 
 function PortfolioView({
+  isAiOperationPending = false,
   labels,
   onSelectEntity,
   snapshot,
   updateTargetDetails,
 }: {
+  /** Whether AI review is pending and target selection must remain stable. */
+  isAiOperationPending?: boolean
   labels: PlanningLabels
   onSelectEntity: (entityId: string) => void
   snapshot: PlanningSnapshot
@@ -1693,7 +1722,7 @@ function PortfolioView({
               return (
                 <tr className="border-b border-[var(--workbench-border)] bg-white" data-testid={`portfolio-entity-${entity.id}`} key={entity.id}>
                   <td className="w-full px-5 py-4">
-                    <button className="min-w-0 max-w-full text-left" onClick={() => onSelectEntity(entity.id)} type="button">
+                    <button className="min-w-0 max-w-full text-left disabled:cursor-not-allowed disabled:opacity-50" disabled={isAiOperationPending} onClick={() => onSelectEntity(entity.id)} type="button">
                       <span className="block truncate text-sm font-semibold">{entity.title}</span>
                       <span className="mt-1 block text-xs text-[var(--workbench-muted)]">{labels.entityTypes[entity.type]}</span>
                     </button>

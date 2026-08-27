@@ -306,6 +306,7 @@ export function TriageWorkbench({
                   aiAssistanceController={aiAssistanceController}
                   aiAssistanceEnabled={aiAssistanceEnabled}
                   onAuthenticatedApiError={onAuthenticatedApiError}
+                  isAiOperationPending={isAiOperationPending}
                   onOperationPendingChange={reportAiOperationPending}
                   errorMessage={detailErrorMessage}
                   isLoading={isDetailLoading}
