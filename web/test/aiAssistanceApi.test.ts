@@ -527,6 +527,56 @@ describe('AI assistance API', () => {
           task: 'triage',
         },
       },
+      {
+        generation: {
+          ...aiPlanningGenerationFixture,
+          content: {
+            ...planningContent,
+            draft: {
+              ...planningContent.draft,
+              title: {
+                ...planningContent.draft.title,
+                value: 'T'.repeat(257),
+              },
+            },
+          },
+        },
+        input: {
+          locale: 'en',
+          source: {
+            expectedRevision: 2,
+            teamId: 'core-team',
+            workItemId: 'accessibility-review',
+            type: 'work-item',
+          },
+          task: 'planning',
+        },
+      },
+      {
+        generation: {
+          ...aiPlanningGenerationFixture,
+          content: {
+            ...planningContent,
+            draft: {
+              ...planningContent.draft,
+              description: {
+                ...planningContent.draft.description,
+                value: 'D'.repeat(20_001),
+              },
+            },
+          },
+        },
+        input: {
+          locale: 'en',
+          source: {
+            expectedRevision: 2,
+            teamId: 'core-team',
+            workItemId: 'accessibility-review',
+            type: 'work-item',
+          },
+          task: 'planning',
+        },
+      },
     ]
 
     for (const { generation, input } of malformedGenerations) {

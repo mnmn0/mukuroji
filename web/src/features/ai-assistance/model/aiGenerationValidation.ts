@@ -184,8 +184,10 @@ function isAiAssistanceDraft(value: unknown): value is AiAssistanceDraft {
           aiAssistanceSearchCaveatMaximumLength,
         )
     case 'planning':
-      return isOptionalSuggested(value.title, isNonEmptyTrimmedString) &&
-        isOptionalSuggested(value.description, isString) &&
+      return isOptionalSuggested(value.title, (candidate) =>
+          isBoundedNonEmptyTrimmedString(candidate, 256)) &&
+        isOptionalSuggested(value.description, (candidate) =>
+          isBoundedNonEmptyTrimmedString(candidate, 20_000)) &&
         isOptionalSuggested(value.priority, isPriority) &&
         isOptionalSuggested(value.status, (candidate) => isBoundedString(candidate, 256)) &&
         isOptionalSuggested(value.plannedEffortMinutes, isBoundedEffortMinutes) &&
@@ -734,11 +736,6 @@ function isString(value: unknown): value is string {
 /** Validates a non-empty string identifier. */
 function isNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0
-}
-
-/** Validates a non-empty string whose trimmed representation is also non-empty. */
-function isNonEmptyTrimmedString(value: unknown): value is string {
-  return typeof value === 'string' && value.trim().length > 0
 }
 
 /** Validates a non-empty trimmed string within a protocol length bound. */

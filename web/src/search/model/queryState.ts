@@ -209,7 +209,9 @@ export function updateSearchRouteState(
   return {
     ...state,
     ...next,
-    reportMetric: Object.hasOwn(next, 'reportMetric') ? next.reportMetric : state.reportMetric,
+    // Any ordinary filter/layout edit invalidates a previously approved report.
+    // AI applications pass `reportMetric` explicitly so only those reviewed values survive.
+    reportMetric: Object.hasOwn(next, 'reportMetric') ? next.reportMetric : undefined,
     savedViewId: Object.hasOwn(next, 'savedViewId') ? next.savedViewId : state.savedViewId,
   }
 }

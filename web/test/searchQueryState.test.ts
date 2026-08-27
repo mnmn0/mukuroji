@@ -14,6 +14,7 @@ import {
   getSearchStatuses,
   parseSearchRouteState,
   serializeSearchRouteState,
+  updateSearchRouteState,
 } from '../src/search/model/queryState'
 
 describe('Workspace search URL state', () => {
@@ -127,6 +128,31 @@ describe('Workspace search URL state', () => {
       { fieldId: 'risk', operator: 'is-empty' },
     ])
     expect(restored.migrationWarnings).toEqual([])
+  })
+
+  test('ordinary filter and layout edits clear an earlier approved report', () => {
+    const state = parseSearchRouteState(new URLSearchParams('report=count&v=1'))
+
+    const afterFilterEdit = updateSearchRouteState(state, {
+      filters: { ...state.filters, keyword: 'changed' },
+    })
+    const afterLayoutEdit = updateSearchRouteState(state, {
+      layout: { ...state.layout, mode: 'board' },
+    })
+
+    expect(afterFilterEdit.reportMetric).toBeUndefined()
+    expect(afterLayoutEdit.reportMetric).toBeUndefined()
+  })
+
+  test('explicitly supplied report state survives an approved AI application', () => {
+    const state = parseSearchRouteState(new URLSearchParams('report=count&v=1'))
+
+    const next = updateSearchRouteState(state, {
+      filters: { ...state.filters, keyword: 'approved' },
+      reportMetric: 'count',
+    })
+
+    expect(next.reportMetric).toBe('count')
   })
 })
 
