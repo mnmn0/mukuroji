@@ -119,8 +119,15 @@ export async function decideAiAssistanceGeneration(
   )
 
   const generation = parseAiAssistanceGenerationResponse(value, options.expectedTask)
+  if (generation.decision?.outcome !== options.expectedOutcome) {
+    throw new AiAssistanceApiError(
+      502,
+      'AI assistance decision returned an unexpected outcome.',
+      'InvalidAiAssistanceResponse',
+    )
+  }
   if (
-    generation.decision?.outcome !== options.expectedOutcome ||
+    generation.content.availability === 'available' &&
     stableSerialize(generation.content) !== stableSerialize(options.expectedGeneration.content)
   ) {
     throw new AiAssistanceApiError(

@@ -59,6 +59,24 @@ const aiAssistanceCitationMaximumCount = 100
 const aiAssistanceCitationReferencesMaximumCount = 20
 /** Maximum length of one generation-local citation identifier. */
 const aiAssistanceCitationIdentifierMaximumLength = 256
+/** Maximum number of summary items in one category. */
+const aiAssistanceSummaryItemsMaximumCount = 100
+/** Maximum number of triage custom-field suggestions. */
+const aiAssistanceTriageCustomFieldsMaximumCount = 50
+/** Maximum number of Search caveats shown before applying a draft. */
+const aiAssistanceSearchCaveatsMaximumCount = 20
+/** Maximum length of one Search caveat. */
+const aiAssistanceSearchCaveatMaximumLength = 1_000
+/** Maximum number of Planning child Work Items. */
+const aiAssistancePlanningSubtasksMaximumCount = 50
+/** Maximum number of Planning dependency suggestions. */
+const aiAssistancePlanningDependenciesMaximumCount = 100
+/** Maximum citation label length accepted by the server response contract. */
+const aiAssistanceCitationLabelMaximumLength = 500
+/** Maximum citation destination length accepted by the server response contract. */
+const aiAssistanceCitationHrefMaximumLength = 2_000
+/** Maximum displayed citation excerpt length accepted by the server response contract. */
+const aiAssistanceCitationExcerptMaximumLength = 2_000
 
 /**
  * Returns whether an unknown value is a fully grounded available generation for one workflow.
@@ -137,14 +155,15 @@ function isAiAssistanceDraft(value: unknown): value is AiAssistanceDraft {
         isOptionalSuggested(value.teamId, (candidate) => isBoundedString(candidate, 256)) &&
         isOptionalSuggested(value.projectId, (candidate) => isBoundedString(candidate, 256)) &&
         Array.isArray(value.customFields) &&
+        value.customFields.length <= aiAssistanceTriageCustomFieldsMaximumCount &&
         value.customFields.every(isSuggestedCustomField) &&
         hasUniqueSuggestedCustomFieldIds(value.customFields)
     case 'summary':
       if (
         !isBriefItem(value.overview) ||
-        !isBriefItemArray(value.decisions) ||
-        !isBriefItemArray(value.actions) ||
-        !isBriefItemArray(value.risks)
+        !isBriefItemArray(value.decisions, aiAssistanceSummaryItemsMaximumCount) ||
+        !isBriefItemArray(value.actions, aiAssistanceSummaryItemsMaximumCount) ||
+        !isBriefItemArray(value.risks, aiAssistanceSummaryItemsMaximumCount)
       ) return false
       return hasUniqueBriefItemIds([
         value.overview,
@@ -156,7 +175,11 @@ function isAiAssistanceDraft(value: unknown): value is AiAssistanceDraft {
       return isString(value.interpretation) &&
         isWorkspaceSearchFilters(value.filters) &&
         (value.report === undefined || isSearchReport(value.report)) &&
-        isStringArray(value.caveats)
+        isStringArray(
+          value.caveats,
+          aiAssistanceSearchCaveatsMaximumCount,
+          aiAssistanceSearchCaveatMaximumLength,
+        )
     case 'planning':
       return isOptionalSuggested(value.title, isNonEmptyTrimmedString) &&
         isOptionalSuggested(value.description, isString) &&
@@ -164,9 +187,11 @@ function isAiAssistanceDraft(value: unknown): value is AiAssistanceDraft {
         isOptionalSuggested(value.status, (candidate) => isBoundedString(candidate, 256)) &&
         isOptionalSuggested(value.plannedEffortMinutes, isBoundedEffortMinutes) &&
         Array.isArray(value.subtasks) &&
+        value.subtasks.length <= aiAssistancePlanningSubtasksMaximumCount &&
         value.subtasks.every(isPlanningSubtask) &&
         hasUniquePlanningRowIds(value.subtasks) &&
         Array.isArray(value.dependencies) &&
+        value.dependencies.length <= aiAssistancePlanningDependenciesMaximumCount &&
         value.dependencies.every(isPlanningDependency) &&
         hasUniquePlanningRowIds(value.dependencies) &&
         (value.statusUpdate === undefined || isPlanningStatusUpdate(value.statusUpdate))
@@ -321,9 +346,14 @@ function isBriefItem(value: unknown): boolean {
     isCitationIdArray(value.citationIds)
 }
 
-/** Validates an array of grounded brief items. */
-function isBriefItemArray(value: unknown): value is AiBriefItem[] {
-  return Array.isArray(value) && value.every(isBriefItem)
+/** Validates a bounded array of grounded brief items. */
+function isBriefItemArray(
+  value: unknown,
+  maximumItems: number,
+): value is AiBriefItem[] {
+  return Array.isArray(value) &&
+    value.length <= maximumItems &&
+    value.every(isBriefItem)
 }
 
 /**
@@ -535,10 +565,17 @@ function isCitation(value: unknown): value is AiAssistanceCitation {
   return isRecord(value) &&
     isBoundedString(value.id, aiAssistanceCitationIdentifierMaximumLength) &&
     isOneOf(value.sourceType, sourceTypeValues) &&
-    isString(value.label) &&
-    isSafeApplicationPath(value.href) &&
-    isOptionalString(value.excerpt) &&
+    isBoundedNonEmptyTrimmedString(value.label, aiAssistanceCitationLabelMaximumLength) &&
+    isBoundedSafeApplicationPath(value.href, aiAssistanceCitationHrefMaximumLength) &&
+    isOptionalBoundedString(value.excerpt, aiAssistanceCitationExcerptMaximumLength) &&
     isNonNegativeInteger(value.capturedRevision)
+}
+
+/** Validates a bounded application-relative citation destination. */
+function isBoundedSafeApplicationPath(value: unknown, maximumLength: number): value is string {
+  return typeof value === 'string' &&
+    value.length <= maximumLength &&
+    isSafeApplicationPath(value)
 }
 
 /** Validates a bounded list of generation-local citation identifiers. */
@@ -659,9 +696,15 @@ function isOptionalEnumArray(
   )
 }
 
-/** Validates a string array. */
-function isStringArray(value: unknown): boolean {
-  return Array.isArray(value) && value.every(isString)
+/** Validates a bounded string array. */
+function isStringArray(
+  value: unknown,
+  maximumItems = Number.POSITIVE_INFINITY,
+  maximumLength = Number.POSITIVE_INFINITY,
+): boolean {
+  return Array.isArray(value) &&
+    value.length <= maximumItems &&
+    value.every((item) => isBoundedString(item, maximumLength))
 }
 
 /** Validates membership in a fixed string set. */

@@ -199,6 +199,34 @@ describe('AI assistance API', () => {
     expect(error).toMatchObject({ code: 'InvalidAiAssistanceResponse', status: 502 })
   })
 
+  /** Accepts a server-authoritative withholding when access changes during review. */
+  test('accepts a withheld decision response after authorization changes', async () => {
+    const withheldGeneration = {
+      ...aiSearchGenerationFixture,
+      content: {
+        availability: 'withheld',
+        reasonCode: 'permission-changed',
+      },
+      decision: {
+        outcome: 'approved',
+        decidedAt: '2026-08-25T02:05:00.000Z',
+      },
+    } satisfies AiAssistanceGeneration
+    installFetchRecorder([withheldGeneration])
+
+    const generation = await decideAiAssistanceGeneration({
+      accessToken: 'access-token',
+      generationId: 'generation/search-1',
+      expectedGeneration: aiSearchGenerationFixture,
+      expectedTask: 'search',
+      expectedOutcome: 'approved',
+      input: { expectedRevision: 3, outcome: 'approved' },
+      mutationContext,
+    })
+
+    expect(generation.content).toEqual(withheldGeneration.content)
+  })
+
   test('rejects a generation containing a non-application citation path', async () => {
     installFetchRecorder([{
       ...aiSearchGenerationFixture,
@@ -288,8 +316,8 @@ describe('AI assistance API', () => {
     }
   })
 
-  /** Rejects oversized citation collections before they reach the review components. */
-  test('rejects oversized citation collections and per-claim references', async () => {
+  /** Rejects oversized citation collections and fields before review components render them. */
+  test('rejects oversized citation collections, references, and fields', async () => {
     const content = aiSummaryGenerationFixture.content
     if (content.availability !== 'available' || content.draft.kind !== 'summary') {
       throw new Error('Summary fixture must stay available.')
@@ -325,6 +353,36 @@ describe('AI assistance API', () => {
           citations: tooManyReferences,
         },
       },
+      {
+        ...aiSummaryGenerationFixture,
+        content: {
+          ...content,
+          citations: [{
+            ...content.citations[0],
+            label: 'L'.repeat(501),
+          }],
+        },
+      },
+      {
+        ...aiSummaryGenerationFixture,
+        content: {
+          ...content,
+          citations: [{
+            ...content.citations[0],
+            href: `/${'h'.repeat(2_000)}`,
+          }],
+        },
+      },
+      {
+        ...aiSummaryGenerationFixture,
+        content: {
+          ...content,
+          citations: [{
+            ...content.citations[0],
+            excerpt: 'E'.repeat(2_001),
+          }],
+        },
+      },
     ]
 
     for (const generation of malformedGenerations) {
@@ -332,6 +390,125 @@ describe('AI assistance API', () => {
       const error = await generateAiAssistance({
         accessToken: 'access-token',
         input: { locale: 'en', sources: [], task: 'summary' },
+        mutationContext,
+      }).catch((caught: unknown) => caught)
+
+      expect(error).toMatchObject({ code: 'InvalidAiAssistanceResponse', status: 502 })
+    }
+  })
+
+  /** Rejects oversized workflow collections before review components render them. */
+  test('rejects oversized model-generated draft collections', async () => {
+    const summaryContent = aiSummaryGenerationFixture.content
+    const searchContent = aiSearchGenerationFixture.content
+    const planningContent = aiPlanningGenerationFixture.content
+    const triageContent = aiTriageGenerationFixture.content
+    if (
+      summaryContent.availability !== 'available' ||
+      summaryContent.draft.kind !== 'summary' ||
+      searchContent.availability !== 'available' ||
+      searchContent.draft.kind !== 'search' ||
+      planningContent.availability !== 'available' ||
+      planningContent.draft.kind !== 'planning' ||
+      triageContent.availability !== 'available' ||
+      triageContent.draft.kind !== 'triage'
+    ) {
+      throw new Error('AI fixtures must stay available.')
+    }
+
+    const malformedGenerations: Array<{
+      generation: unknown
+      input: GenerateAiAssistanceRequest
+    }> = [
+      {
+        generation: {
+          ...aiSummaryGenerationFixture,
+          content: {
+            ...summaryContent,
+            draft: {
+              ...summaryContent.draft,
+              decisions: Array.from({ length: 101 }, (_, index) => ({
+                ...summaryContent.draft.decisions[0],
+                id: `decision-${index}`,
+              })),
+            },
+          },
+        },
+        input: { locale: 'en', sources: [], task: 'summary' },
+      },
+      {
+        generation: {
+          ...aiSearchGenerationFixture,
+          content: {
+            ...searchContent,
+            draft: {
+              ...searchContent.draft,
+              caveats: Array.from({ length: 21 }, () => 'A bounded caveat.'),
+            },
+          },
+        },
+        input: { locale: 'en', query: 'too many caveats', task: 'search' },
+      },
+      {
+        generation: {
+          ...aiPlanningGenerationFixture,
+          content: {
+            ...planningContent,
+            draft: {
+              ...planningContent.draft,
+              subtasks: Array.from({ length: 51 }, (_, index) => ({
+                ...planningContent.draft.subtasks[0],
+                id: `subtask-${index}`,
+              })),
+            },
+          },
+        },
+        input: {
+          locale: 'en',
+          source: {
+            expectedRevision: 2,
+            teamId: 'core-team',
+            workItemId: 'accessibility-review',
+            type: 'work-item',
+          },
+          task: 'planning',
+        },
+      },
+      {
+        generation: {
+          ...aiTriageGenerationFixture,
+          content: {
+            ...triageContent,
+            draft: {
+              ...triageContent.draft,
+              customFields: Array.from({ length: 51 }, (_, index) => ({
+                fieldId: `field-${index}`,
+                value: 'enterprise',
+                reason: 'Visible request context supports this value.',
+                confidence: 'medium',
+                citationIds: ['citation-triage-1'],
+              })),
+            },
+          },
+        },
+        input: {
+          locale: 'en',
+          source: {
+            expectedRevision: 1,
+            teamId: 'core-team',
+            triageEntryId: 'triage-chat-1',
+            type: 'triage-entry',
+          },
+          task: 'triage',
+        },
+      },
+    ]
+
+    for (const { generation, input } of malformedGenerations) {
+      installFetchRecorder([generation])
+      const error = await generateAiAssistance({
+        accessToken: 'access-token',
+        input,
         mutationContext,
       }).catch((caught: unknown) => caught)
 
