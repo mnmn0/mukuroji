@@ -475,6 +475,23 @@ describe('AI assistance API', () => {
       },
       {
         generation: {
+          ...aiSummaryGenerationFixture,
+          content: {
+            ...summaryContent,
+            draft: {
+              ...summaryContent.draft,
+              decisions: Array.from({ length: 14 }, (_, index) => ({
+                ...summaryContent.draft.decisions[0],
+                id: `large-decision-${index}`,
+                text: 'A'.repeat(20_000),
+              })),
+            },
+          },
+        },
+        input: { locale: 'en', sources: [], task: 'summary' },
+      },
+      {
+        generation: {
           ...aiSearchGenerationFixture,
           content: {
             ...searchContent,

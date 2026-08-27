@@ -67,6 +67,8 @@ const aiAssistanceCitationReferencesMaximumCount = 20
 const aiAssistanceCitationIdentifierMaximumLength = 256
 /** Maximum number of summary items in one category. */
 const aiAssistanceSummaryItemsMaximumCount = 100
+/** Maximum UTF-8 size of one Summary draft before the review UI renders it. */
+const aiAssistanceSummaryDraftMaximumBytes = 262_144
 /** Maximum number of triage custom-field suggestions. */
 const aiAssistanceTriageCustomFieldsMaximumCount = 50
 /** Maximum number of Search caveats shown before applying a draft. */
@@ -192,7 +194,7 @@ function isAiAssistanceDraft(value: unknown): value is AiAssistanceDraft {
         !isBriefItemArray(value.actions, aiAssistanceSummaryItemsMaximumCount) ||
         !isBriefItemArray(value.risks, aiAssistanceSummaryItemsMaximumCount)
       ) return false
-      return hasUniqueBriefItemIds([
+      return isSummaryDraftWithinBudget(value) && hasUniqueBriefItemIds([
         value.overview,
         ...value.decisions,
         ...value.actions,
@@ -390,6 +392,22 @@ function isBriefItemArray(
   return Array.isArray(value) &&
     value.length <= maximumItems &&
     value.every(isBriefItem)
+}
+
+/**
+ * Rejects an aggregate Summary draft that would overwhelm the review surface.
+ *
+ * @param value - Record already narrowed to the Summary draft shape.
+ * @returns Whether the serialized draft stays within the bounded UTF-8 budget.
+ */
+function isSummaryDraftWithinBudget(value: Record<string, unknown>): boolean {
+  try {
+    const serialized = JSON.stringify(value)
+    return serialized !== undefined &&
+      new TextEncoder().encode(serialized).byteLength <= aiAssistanceSummaryDraftMaximumBytes
+  } catch {
+    return false
+  }
 }
 
 /**

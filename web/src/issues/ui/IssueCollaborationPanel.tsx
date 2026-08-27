@@ -1,5 +1,6 @@
 import {
   useCallback,
+  useEffect,
   useId,
   useLayoutEffect,
   useMemo,
@@ -57,8 +58,30 @@ export type IssueSummaryAiAssistance = {
    */
   renderBrief: (
     onAdopt: ((draft: AiSummaryDraft, citations: readonly AiAssistanceCitation[]) => void) | undefined,
-    onOperationPendingChange: ((pending: boolean) => void) | undefined,
+    onOperationPendingChange: IssueSummaryAiOperationPendingChange | undefined,
   ) => ReactNode
+}
+
+/** Reports an AI operation state together with the Brief session that started it. */
+export type IssueSummaryAiOperationPendingChange = (
+  sessionKey: string,
+  pending: boolean,
+) => void
+
+/** Tracks one mounted Brief session's in-flight operation state. */
+type AiSummaryOperationPendingState = {
+  /** Brief source-and-revision key that owns the operation. */
+  sessionKey: string
+  /** Whether that session currently has a generation, decision, or feedback request. */
+  pending: boolean
+}
+
+/** Exposes the session-aware operation guard used by adjacent promotion flows. */
+type AiSummaryOperationPendingController = {
+  /** Whether the currently rendered Brief session has an active operation. */
+  isPending: boolean
+  /** Receives operation transitions from a keyed Brief assistant. */
+  report: IssueSummaryAiOperationPendingChange
 }
 
 /**
@@ -132,7 +155,6 @@ export function IssueCollaborationPanel({
     useState<IssueContextDraft>()
   const [selectedSource, setSelectedSource] = useState<IssueSourceTarget>()
   const [hasOverriddenDraftTab, setHasOverriddenDraftTab] = useState(false)
-  const [isAiSummaryOperationPending, setIsAiSummaryOperationPending] = useState(false)
   const contextDraft = externalContextDraft ?? promotedContextDraft
   const panelIdPrefix = useId()
   const aiAssistantSessionKey = aiAssistance?.sessionKey
@@ -146,10 +168,13 @@ export function IssueCollaborationPanel({
     ? 'conversation'
     : requestedTab
 
-  const handleAiSummaryOperationPendingChange = useCallback((pending: boolean) => {
-    setIsAiSummaryOperationPending(pending)
-    onAiSummaryOperationPendingChange?.(pending)
-  }, [onAiSummaryOperationPendingChange])
+  const {
+    isPending: isAiSummaryOperationPending,
+    report: handleAiSummaryOperationPendingChange,
+  } = useAiSummaryOperationPendingController(
+    aiAssistantSessionKey,
+    onAiSummaryOperationPendingChange,
+  )
 
   const handleAiSummaryAdopt = useAiSummaryAdoptionHandler(
     aiAssistantSessionKey,
@@ -514,9 +539,12 @@ export function IssueCollaborationPanel({
             aria-hidden={selectedTab !== 'brief'}
             className={selectedTab === 'brief' ? 'px-5 py-5' : 'hidden'}
           >
-            {aiAssistance.renderBrief(controller.context.capabilities.canCreate && !contextDraft
-              ? handleAiSummaryAdopt
-              : undefined, handleAiSummaryOperationPendingChange)}
+            {aiAssistance.renderBrief(
+              controller.context.capabilities.canCreate && !contextDraft
+                ? handleAiSummaryAdopt
+                : undefined,
+              handleAiSummaryOperationPendingChange,
+            )}
           </div>
         ) : null}
         {selectedTab === 'decisions' ? (
@@ -592,6 +620,36 @@ function useAiSummaryAdoptionHandler(
     )) return
     openDraft(draft, citations)
   }, [expectedSessionKey, openDraft])
+}
+
+/**
+ * Keeps the collaboration promotion guard scoped to the currently mounted Brief session.
+ *
+ * @param sessionKey - Current source-and-revision key, if AI Brief is available.
+ * @param onChange - Parent callback that gates adjacent context promotion.
+ * @returns A session-aware pending state and reporter.
+ */
+function useAiSummaryOperationPendingController(
+  sessionKey: string | undefined,
+  onChange: ((pending: boolean) => void) | undefined,
+): AiSummaryOperationPendingController {
+  const [pendingState, setPendingState] = useState<AiSummaryOperationPendingState>()
+  const sessionKeyRef = useRef(sessionKey)
+  useLayoutEffect(() => {
+    sessionKeyRef.current = sessionKey
+  }, [sessionKey])
+  const report = useCallback((reportedSessionKey: string, pending: boolean) => {
+    // A stale keyed assistant can settle after the source revision changes.
+    if (reportedSessionKey !== sessionKeyRef.current) return
+    setPendingState({ pending, sessionKey: reportedSessionKey })
+  }, [])
+  const isPending = pendingState !== undefined &&
+    pendingState.sessionKey === sessionKey &&
+    pendingState.pending
+  useEffect(() => {
+    onChange?.(isPending)
+  }, [isPending, onChange])
+  return { isPending, report }
 }
 
 /**

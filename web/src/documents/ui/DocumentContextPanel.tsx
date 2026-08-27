@@ -358,8 +358,11 @@ export function DocumentContextPanel({
             onResolveComment={onResolveComment}
           />
         ) : null}
-        {!isLoading && resolvedActiveTab === 'brief' && aiAssistanceAccessToken ? (
-          <div className="p-4">
+        {aiAssistanceAccessToken ? (
+          <div
+            aria-hidden={resolvedActiveTab !== 'brief'}
+            className={resolvedActiveTab === 'brief' && !isLoading ? 'p-4' : 'hidden'}
+          >
             <AiSummaryAssistant
               accessToken={aiAssistanceAccessToken}
               key={createAiAssistantSessionKey({

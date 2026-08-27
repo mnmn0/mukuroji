@@ -50,6 +50,27 @@ describe('AI workflow integration surfaces', () => {
       : 'UNREACHABLE_SUMMARY')
   })
 
+  test('keeps the Document Brief mounted while another context tab is active', () => {
+    const html = renderToStaticMarkup(
+      <DocumentContextPanel
+        activeTab="comments"
+        aiAssistanceAccessToken="test-access-token"
+        backlinks={[]}
+        comments={[]}
+        document={documentRecordFixture}
+        locale="en"
+        onClose={() => undefined}
+        onTabChange={() => undefined}
+        t={t}
+        versions={[]}
+      />,
+    )
+
+    expect(html).toContain('data-testid="ai-summary-assistant"')
+    expect(html).toContain('aria-hidden="true"')
+    expect(html).toContain('Generate brief')
+  })
+
   test('withholds a previously generated Brief without invoking domain adoption', () => {
     let adoptCount = 0
     const html = renderToStaticMarkup(

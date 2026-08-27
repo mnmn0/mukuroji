@@ -3770,7 +3770,9 @@ function IssueDetailContent({
             locale={locale}
             onAdopt={onAdopt}
             onAuthenticatedApiError={onAuthenticatedApiError}
-            onOperationPendingChange={onOperationPendingChange}
+            onOperationPendingChange={(pending) => {
+              onOperationPendingChange?.(createAiAssistantSessionKey(aiSummarySource), pending)
+            }}
             sources={[aiSummarySource]}
             t={t}
           />

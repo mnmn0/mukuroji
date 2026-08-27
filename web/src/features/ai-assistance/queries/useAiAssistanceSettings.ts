@@ -23,7 +23,9 @@ const aiAssistanceSettingsQueryConfig = {
   errorRetryInterval: 5_000,
   onErrorRetry: (error, _key, config, revalidate, { retryCount }) => {
     if (!isRetryableAiAssistanceSettingsError(error) || retryCount >= 3) return
-    setTimeout(() => { void revalidate({ dedupe: true }) }, config.errorRetryInterval)
+    setTimeout(() => {
+      void revalidate({ dedupe: true, retryCount })
+    }, config.errorRetryInterval)
   },
 } satisfies SWRConfiguration
 
