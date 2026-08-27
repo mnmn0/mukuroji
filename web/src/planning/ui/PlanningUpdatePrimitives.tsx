@@ -6,7 +6,7 @@ import type {
   PlanningRisk,
   PlanningUpdateEvidence,
 } from '@mukuroji/contracts'
-import { useRef, useState } from 'react'
+import { useLayoutEffect, useRef, useState } from 'react'
 import { createAiAssistantSessionKey } from '../../features/ai-assistance/model/assistantSessionKey'
 import {
   AiPlanningStatusUpdateAssistant,
@@ -778,6 +778,12 @@ export function PlanningStatusUpdateComposer({
   const aiAssistantSessionKey = aiAssistance
     ? createAiAssistantSessionKey(aiAssistance.source)
     : undefined
+  const activeAiAssistantSessionKeyRef = useRef(aiAssistantSessionKey)
+
+  // Keep the adoption fence current before passive effects can observe a new source.
+  useLayoutEffect(() => {
+    activeAiAssistantSessionKeyRef.current = aiAssistantSessionKey
+  }, [aiAssistantSessionKey])
 
   /**
    * Replaces the local form only after adoption is safe or explicitly confirmed.
@@ -822,7 +828,7 @@ export function PlanningStatusUpdateComposer({
     context?: AiPlanningStatusUpdateAdoptionContext,
   ) {
     if (isPublishing || isPublishingRef.current) return
-    if (aiAssistantSessionKey !== sessionKey) return
+    if (activeAiAssistantSessionKeyRef.current !== sessionKey) return
     if (replacementConfirmed) {
       applyAiDraft(draft, context)
       return

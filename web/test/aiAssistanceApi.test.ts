@@ -1078,6 +1078,45 @@ describe('AI assistance API', () => {
     }
   })
 
+  /** Rejects status text whose trimmed value is short but whose original representation is oversized. */
+  test('rejects Planning status text with oversized surrounding whitespace', async () => {
+    const content = aiPlanningGenerationFixture.content
+    if (content.availability !== 'available' || content.draft.kind !== 'planning' || !content.draft.statusUpdate) {
+      throw new Error('Planning fixture must stay available with a status update.')
+    }
+
+    installFetchRecorder([{
+      ...aiPlanningGenerationFixture,
+      content: {
+        ...content,
+        draft: {
+          ...content.draft,
+          statusUpdate: {
+            ...content.draft.statusUpdate,
+            summary: `${' '.repeat(8_000)}ready`,
+          },
+        },
+      },
+    }])
+
+    const error = await generateAiAssistance({
+      accessToken: 'access-token',
+      input: {
+        locale: 'en',
+        source: {
+          expectedRevision: 1,
+          teamId: 'core-team',
+          type: 'work-item',
+          workItemId: 'launch-review',
+        },
+        task: 'planning',
+      },
+      mutationContext,
+    }).catch((caught: unknown) => caught)
+
+    expect(error).toMatchObject({ code: 'InvalidAiAssistanceResponse', status: 502 })
+  })
+
   /** Rejects lone UTF-16 surrogates that the Planning publish endpoint cannot accept. */
   test('rejects malformed Unicode in Planning status text', async () => {
     const content = aiPlanningGenerationFixture.content

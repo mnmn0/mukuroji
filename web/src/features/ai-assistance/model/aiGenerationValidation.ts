@@ -621,8 +621,10 @@ function isPlanningStatusUpdate(value: unknown): boolean {
 function isBoundedPlanningStatusUpdateText(value: unknown, required = false): value is string {
   if (typeof value !== 'string') return false
   if (!isWellFormedUnicode(value)) return false
+  if (value.length > planningStatusUpdateTextMaximumBytes) return false
   const normalized = value.trim()
   return (!required || normalized.length > 0) &&
+    new TextEncoder().encode(value).byteLength <= planningStatusUpdateTextMaximumBytes &&
     new TextEncoder().encode(normalized).byteLength <= planningStatusUpdateTextMaximumBytes
 }
 

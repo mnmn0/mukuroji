@@ -291,14 +291,16 @@ export function AiPlanningStatusUpdateAssistantView({
           </p>
           <div className="mt-3 flex flex-wrap gap-2">
             <button
-              className="workbench-button-secondary min-h-[44px] px-4"
+              className="workbench-button-secondary min-h-[44px] px-4 disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={isOperationPending}
               onClick={() => setConfirmationGenerationId(undefined)}
               type="button"
             >
               {t('ai.planning.keepManualDraft')}
             </button>
             <button
-              className="workbench-button-primary min-h-[44px] px-4"
+              className="workbench-button-primary min-h-[44px] px-4 disabled:cursor-not-allowed disabled:opacity-50"
+              disabled={isOperationPending}
               onClick={() => void approveAndAdopt(true)}
               type="button"
             >
