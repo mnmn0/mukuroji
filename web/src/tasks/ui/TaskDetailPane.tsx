@@ -212,6 +212,8 @@ export function TaskDetailPane({
   workspaceMembers,
 }: TaskDetailPaneProps) {
   const [fieldErrors, setFieldErrors] = useState<Readonly<Record<string, string | undefined>>>({})
+  const [isIssueSaving, setIsIssueSaving] = useState(false)
+  const isIssueSavingRef = useRef(false)
   const [aiFormSeed, setAiFormSeed] = useState<WorkItemAiFormSeed>({
     identity: '',
     revision: 0,
@@ -373,6 +375,7 @@ export function TaskDetailPane({
 
   /** Copies supported approved fields into a fresh local form seed without saving them. */
   function applyAiPlanningDraft(draft: AiPlanningDraft) {
+    if (isIssueSavingRef.current) return
     const nextDirtyState = { dirty: true, identity: editorIdentity }
     editorDirtyStateRef.current = nextDirtyState
     setEditorDirtyState(nextDirtyState)
@@ -381,6 +384,22 @@ export function TaskDetailPane({
       identity: editorIdentity,
       revision: current.revision + 1,
     }))
+  }
+
+  /** Persists one Work Item update while exposing its pending state to AI review controls. */
+  async function submitIssueUpdate(input: UpdateTeamIssueInput) {
+    if (isReadOnly || !task || !task.teamId || !onUpdateIssue || isIssueSavingRef.current) return
+    const currentTask = task
+    isIssueSavingRef.current = true
+    setIsIssueSaving(true)
+    try {
+      await onUpdateIssue(currentTask.teamId, currentTask.id, input)
+    } catch {
+      // The owning route supplies the user-visible mutation error.
+    } finally {
+      isIssueSavingRef.current = false
+      setIsIssueSaving(false)
+    }
   }
 
   /** Rechecks whether the current Work Item editor contains supported manual edits. */
@@ -448,7 +467,7 @@ export function TaskDetailPane({
             nextIssueInput.assigneeUserId = selectedAssigneeUserId
           }
 
-          void onUpdateIssue?.(task.teamId, task.id, nextIssueInput).catch(() => undefined)
+          void submitIssueUpdate(nextIssueInput)
         }}
       >
         <div className="flex items-start justify-between gap-3">
@@ -560,6 +579,7 @@ export function TaskDetailPane({
           <AiWorkItemPlanningAssistant
             accessToken={accessToken}
             controller={aiAssistanceController}
+            isMutationPending={isIssueSaving}
             key={editorIdentity}
             locale={locale}
             onAuthenticatedApiError={onAuthenticatedApiError}
@@ -591,7 +611,7 @@ export function TaskDetailPane({
         ) : null}
         <fieldset
           className="contents"
-          disabled={isReadOnly}
+          disabled={isReadOnly || isIssueSaving}
         >
           <label className="grid min-w-0 gap-1.5 text-sm font-semibold text-[var(--workbench-text)]">
             {t('issues.column.title')}
@@ -746,7 +766,7 @@ export function TaskDetailPane({
             ) : null}
             <button
               className="workbench-button-secondary min-h-[44px] px-3 disabled:border-slate-300 disabled:bg-slate-300"
-              disabled={isReadOnly}
+              disabled={isReadOnly || isIssueSaving}
               form={scheduleFormId}
               type="submit"
             >
@@ -768,7 +788,7 @@ export function TaskDetailPane({
         </fieldset>
         <button
           className="workbench-button-primary min-h-[44px] px-4 disabled:border-slate-300 disabled:bg-slate-300"
-          disabled={isReadOnly}
+          disabled={isReadOnly || isIssueSaving}
           type="submit"
         >
           {t('issues.detail.save')}
@@ -786,7 +806,7 @@ export function TaskDetailPane({
         id={scheduleFormId}
         onSubmit={(event) => {
           event.preventDefault()
-          if (isReadOnly || !task.teamId) return
+          if (isReadOnly || !task.teamId || isIssueSavingRef.current) return
           const nextSchedule = createDetailSchedule(new FormData(event.currentTarget), schedule)
           if (!nextSchedule) {
             setFieldErrors((current) => ({
@@ -800,11 +820,7 @@ export function TaskDetailPane({
             onScheduleNoChange?.(task.teamId, task.id)
             return
           }
-          void onUpdateIssue?.(
-            task.teamId,
-            task.id,
-            { schedule: nextSchedule },
-          ).catch(() => undefined)
+          void submitIssueUpdate({ schedule: nextSchedule })
         }}
       />
       {artifacts ? (

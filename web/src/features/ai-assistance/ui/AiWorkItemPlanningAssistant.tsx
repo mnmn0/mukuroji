@@ -24,6 +24,8 @@ export type AiWorkItemPlanningAssistantProps = {
   onAuthenticatedApiError?: (error: unknown) => void
   /** Optional controller override used by isolated stories and interaction tests. */
   controller?: AiAssistanceController
+  /** Whether the owning Work Item mutation is in flight. */
+  isMutationPending?: boolean
   /** Locale sent to Bedrock and used for draft presentation. */
   locale: Locale
   /** Copies approved supported fields into the existing local editor without saving them. */
@@ -53,6 +55,7 @@ export type AiWorkItemPlanningAssistantProps = {
 export function AiWorkItemPlanningAssistant({
   accessToken,
   controller,
+  isMutationPending = false,
   locale,
   onAuthenticatedApiError,
   onAdopt,
@@ -76,6 +79,7 @@ export function AiWorkItemPlanningAssistant({
       isDecisionPending={activeController.isDecisionPending}
       isFeedbackPending={activeController.isFeedbackPending}
       isGenerating={activeController.isGenerating}
+      isMutationPending={isMutationPending}
       locale={locale}
       cancelLabel={t('ai.planning.workItem.cancel')}
       onAdopt={onAdopt}
@@ -109,6 +113,8 @@ export type AiWorkItemPlanningAssistantViewProps = {
   isFeedbackPending?: boolean
   /** Whether an explicit generation is in flight. */
   isGenerating?: boolean
+  /** Whether the owning Work Item mutation is in flight. */
+  isMutationPending?: boolean
   /** Locale used for generation metadata and planning values. */
   locale: Locale
   /** Localized cancellation action for the Work Item planning workflow. */
@@ -151,6 +157,7 @@ export function AiWorkItemPlanningAssistantView({
   isDecisionPending = false,
   isFeedbackPending = false,
   isGenerating = false,
+  isMutationPending = false,
   locale,
   cancelLabel,
   onAdopt,
@@ -172,7 +179,7 @@ export function AiWorkItemPlanningAssistantView({
     !availableDraft
   const hasAdoptableDraft = availableDraft !== undefined &&
     (canAdoptDraft?.(availableDraft) ?? hasSupportedWorkItemPlanningFields(availableDraft))
-  const isOperationPending = isGenerating || isDecisionPending || isFeedbackPending
+  const isOperationPending = isGenerating || isDecisionPending || isFeedbackPending || isMutationPending
   const isAdoptionConfirmationVisible = confirmationGenerationId !== undefined &&
     confirmationGenerationId === generation?.id &&
     hasAdoptableDraft
@@ -260,9 +267,9 @@ export function AiWorkItemPlanningAssistantView({
           isFeedbackPending={isFeedbackPending}
           generatingLabel={t('ai.planning.workItem.generating')}
           locale={locale}
-          onAdopt={hasAdoptableDraft && onAdopt ? adoptDraft : undefined}
-          onFeedback={onFeedback}
-          onReject={availableDraft
+          onAdopt={hasAdoptableDraft && onAdopt && !isMutationPending ? adoptDraft : undefined}
+          onFeedback={isMutationPending ? undefined : onFeedback}
+          onReject={availableDraft && !isMutationPending
             ? async () => {
                 await onDecide('rejected')
               }
@@ -286,7 +293,7 @@ export function AiWorkItemPlanningAssistantView({
           isGenerating={isGenerating}
           locale={locale}
           cancelLabel={cancelLabel}
-          onCancelGeneration={onCancelGeneration}
+          onCancelGeneration={isMutationPending ? undefined : onCancelGeneration}
           renderDraft={() => null}
           t={t}
         />

@@ -154,6 +154,28 @@ describe('AI workflow integration surfaces', () => {
     expect(generateCount).toBe(0)
   })
 
+  /** Keeps Work Item AI actions unavailable while the canonical save is pending. */
+  test('hides Work Item AI actions while the Work Item mutation is pending', () => {
+    const html = renderToStaticMarkup(
+      <AiWorkItemPlanningAssistantView
+        generation={aiPlanningGenerationFixture}
+        isMutationPending
+        locale="en"
+        onAdopt={() => undefined}
+        onDecide={async () => undefined}
+        onFeedback={() => undefined}
+        onGenerate={() => undefined}
+        t={t}
+      />,
+    )
+
+    expect(html).toContain('Complete launch accessibility review')
+    expect(html).toContain('disabled=""')
+    expect(html).not.toContain('Use supported fields in form')
+    expect(html).not.toContain('Reject draft')
+    expect(html).not.toContain('Was this draft helpful?')
+  })
+
   /** Verifies review-only Planning values remain visible without an adoption callback. */
   test('does not offer Work Item adoption for review-only Planning values', () => {
     const content = aiPlanningGenerationFixture.content

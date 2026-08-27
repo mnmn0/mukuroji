@@ -71,6 +71,8 @@ const aiAssistanceSummaryItemsMaximumCount = 100
 const aiAssistanceSummaryDraftMaximumBytes = 262_144
 /** Maximum UTF-8 size of one Triage draft before the review UI renders it. */
 const aiAssistanceTriageDraftMaximumBytes = 262_144
+/** Maximum UTF-8 size of one Planning draft before the review UI renders it. */
+const aiAssistancePlanningDraftMaximumBytes = 262_144
 /** Maximum number of triage custom-field suggestions. */
 const aiAssistanceTriageCustomFieldsMaximumCount = 50
 /** Maximum number of Search caveats shown before applying a draft. */
@@ -231,7 +233,8 @@ function isAiAssistanceDraft(value: unknown): value is AiAssistanceDraft {
         value.dependencies.length <= aiAssistancePlanningDependenciesMaximumCount &&
         value.dependencies.every(isPlanningDependency) &&
         hasUniquePlanningRowIds(value.dependencies) &&
-        (value.statusUpdate === undefined || isPlanningStatusUpdate(value.statusUpdate))
+        (value.statusUpdate === undefined || isPlanningStatusUpdate(value.statusUpdate)) &&
+        isPlanningDraftWithinBudget(value)
     default:
       return false
   }
@@ -424,6 +427,22 @@ function isTriageDraftWithinBudget(value: Record<string, unknown>): boolean {
     const serialized = JSON.stringify(value)
     return serialized !== undefined &&
       new TextEncoder().encode(serialized).byteLength <= aiAssistanceTriageDraftMaximumBytes
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Rejects an aggregate Planning draft that would overwhelm the review surface.
+ *
+ * @param value - Record already narrowed to the Planning draft shape.
+ * @returns Whether the serialized draft stays within the bounded UTF-8 budget.
+ */
+function isPlanningDraftWithinBudget(value: Record<string, unknown>): boolean {
+  try {
+    const serialized = JSON.stringify(value)
+    return serialized !== undefined &&
+      new TextEncoder().encode(serialized).byteLength <= aiAssistancePlanningDraftMaximumBytes
   } catch {
     return false
   }
