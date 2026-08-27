@@ -47,3 +47,22 @@ export function applyApprovedAiSearchToRouteState(
     reportMetric: application.report?.metric,
   })
 }
+
+/**
+ * Applies an approved AI Search result only when the route reviewed by the operator is still current.
+ *
+ * @param state - Route state captured when the approval interaction began.
+ * @param expectedRouteSignature - Canonical signature captured for that interaction.
+ * @param currentRouteSignature - Latest canonical signature at completion time.
+ * @param application - Values returned only after the human approval decision succeeds.
+ * @returns The next route state, or undefined when navigation made the review stale.
+ */
+export function applyApprovedAiSearchToRouteStateIfCurrent(
+  state: SearchRouteState,
+  expectedRouteSignature: string,
+  currentRouteSignature: string,
+  application: ApprovedAiSearchApplication,
+): SearchRouteState | undefined {
+  if (expectedRouteSignature !== currentRouteSignature) return undefined
+  return applyApprovedAiSearchToRouteState(state, application)
+}

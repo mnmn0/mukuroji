@@ -51,6 +51,9 @@ const searchDateFieldValues = [
   'dueDate',
 ] as const satisfies readonly WorkspaceSearchDateField[]
 
+/** Maximum UTF-8 size accepted by the Planning status update endpoint. */
+const planningStatusUpdateTextMaximumBytes = 8_000
+
 /**
  * Returns whether an unknown value is a fully grounded available generation for one workflow.
  *
@@ -503,13 +506,21 @@ function isPlanningStatusUpdate(value: unknown): boolean {
   return isRecord(value) &&
     isOneOf(value.health, ['unknown', 'on-track', 'at-risk', 'off-track']) &&
     isOneOf(value.risk, ['none', 'low', 'medium', 'high', 'critical']) &&
-    isNonEmptyTrimmedString(value.summary) &&
-    isString(value.riskSummary) &&
-    isString(value.decisionSummary) &&
-    isString(value.helpNeeded) &&
-    isNonEmptyTrimmedString(value.nextAction) &&
+    isBoundedPlanningStatusUpdateText(value.summary, true) &&
+    isBoundedPlanningStatusUpdateText(value.riskSummary) &&
+    isBoundedPlanningStatusUpdateText(value.decisionSummary) &&
+    isBoundedPlanningStatusUpdateText(value.helpNeeded) &&
+    isBoundedPlanningStatusUpdateText(value.nextAction, true) &&
     isConfidence(value.confidence) &&
     isStringArray(value.citationIds)
+}
+
+/** Validates one Planning status text field against the server's UTF-8 boundary. */
+function isBoundedPlanningStatusUpdateText(value: unknown, required = false): value is string {
+  if (typeof value !== 'string') return false
+  const normalized = value.trim()
+  return (!required || normalized.length > 0) &&
+    new TextEncoder().encode(normalized).byteLength <= planningStatusUpdateTextMaximumBytes
 }
 
 /** Validates one permission-safe evidence citation. */

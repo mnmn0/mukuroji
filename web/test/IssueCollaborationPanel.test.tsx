@@ -56,6 +56,26 @@ describe('IssueCollaborationPanel', () => {
     expect(body).not.toContain('[trusted label](https://attacker.example)')
   })
 
+  /** Keeps an escaped, citation-rich summary within the curated context editor limit. */
+  test('bounds the complete formatted summary before opening a context draft', () => {
+    const content = aiSummaryGenerationFixture.content
+    if (content.availability !== 'available' || content.draft.kind !== 'summary') {
+      throw new Error('Summary fixture must stay available.')
+    }
+    const oversizedDraft: AiSummaryDraft = {
+      ...content.draft,
+      overview: {
+        ...content.draft.overview,
+        text: '*'.repeat(19_999),
+      },
+    }
+
+    const body = formatAiSummaryContextBody(oversizedDraft, content.citations, (key) => key)
+
+    expect(body.length).toBeLessThanOrEqual(20_000)
+    expect(body).not.toContain('Launch readiness notes')
+  })
+
   /** Verifies the Brief tab stays hidden when no authenticated AI source is available. */
   test('omits the Brief tab when no authenticated AI source is supplied', () => {
     const html = renderToStaticMarkup(

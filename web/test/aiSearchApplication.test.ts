@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import {
   applyApprovedAiSearchToRouteState,
+  applyApprovedAiSearchToRouteStateIfCurrent,
 } from '../src/search/model/aiSearchApplication'
 import {
   getSearchGroup,
@@ -35,5 +36,35 @@ describe('approved AI Search application', () => {
 
     expect(nextState.reportMetric).toBeUndefined()
     expect(serializeSearchRouteState(nextState).has('report')).toBe(false)
+  })
+
+  /** Drops an approved AI application when navigation changes the reviewed route. */
+  test('rejects applying an approved draft to a stale Search route', () => {
+    const reviewedState = parseSearchRouteState(new URLSearchParams('q=old&v=1'))
+    const currentState = parseSearchRouteState(new URLSearchParams('q=new&v=1'))
+
+    const nextState = applyApprovedAiSearchToRouteStateIfCurrent(
+      reviewedState,
+      serializeSearchRouteState(reviewedState).toString(),
+      serializeSearchRouteState(currentState).toString(),
+      { filters: { keyword: 'approved' } },
+    )
+
+    expect(nextState).toBeUndefined()
+  })
+
+  /** Applies an approved AI application when the reviewed Search route remains current. */
+  test('applies an approved draft when the Search route is unchanged', () => {
+    const reviewedState = parseSearchRouteState(new URLSearchParams('q=old&v=1'))
+    const signature = serializeSearchRouteState(reviewedState).toString()
+
+    const nextState = applyApprovedAiSearchToRouteStateIfCurrent(
+      reviewedState,
+      signature,
+      signature,
+      { filters: { keyword: 'approved' } },
+    )
+
+    expect(nextState?.filters.keyword).toBe('approved')
   })
 })

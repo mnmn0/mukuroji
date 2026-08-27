@@ -12,7 +12,7 @@ import {
   type WorkspaceSearchFilters,
   type WorkspaceSearchResult,
 } from '@mukuroji/contracts'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useLocation, useNavigate, useSearchParams } from 'react-router'
 import { aiAssistanceUiEnabled } from '../features/ai-assistance/model/aiAssistanceRollout'
 import { createMutationRequestRunner } from '../shared/api/mutationHeaders'
@@ -61,7 +61,7 @@ import {
   updateSearchRouteState,
   type SearchRouteState,
 } from './model/queryState'
-import { applyApprovedAiSearchToRouteState } from './model/aiSearchApplication'
+import { applyApprovedAiSearchToRouteStateIfCurrent } from './model/aiSearchApplication'
 import { SearchResultCollection } from './ui/SearchResultCollection'
 import {
   NaturalLanguageSearchComposer,
@@ -217,7 +217,7 @@ export function SearchPage() {
     ? t('search.error')
     : searchErrorMessage
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     activeRouteSignatureRef.current = routeSignature
     nextPageAbortControllerRef.current?.abort()
     nextPageAbortControllerRef.current = undefined
@@ -560,9 +560,15 @@ export function SearchPage() {
                   selectedSavedView={selectedSavedView}
                   statusOptions={statusOptions}
                   t={t}
-                  onAiFiltersApply={(application) => commitRouteState(
-                    applyApprovedAiSearchToRouteState(routeState, application),
-                  )}
+                  onAiFiltersApply={(application) => {
+                    const nextRouteState = applyApprovedAiSearchToRouteStateIfCurrent(
+                      routeState,
+                      routeSignature,
+                      activeRouteSignatureRef.current,
+                      application,
+                    )
+                    if (nextRouteState) commitRouteState(nextRouteState)
+                  }}
                   onFiltersChange={updateFilters}
                   onLayoutChange={updateLayout}
                   onUpdateSelectedView={selectedSavedView?.canEdit

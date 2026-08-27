@@ -1,6 +1,9 @@
 import type { AiAssistanceCitation, AiSummaryDraft } from '@mukuroji/contracts'
 import type { MessageKey } from '../../shared/i18n/i18n'
 
+/** Maximum UTF-16 length accepted by the curated context editor. */
+const collaborationContextBodyMaximumLength = 20_000
+
 /**
  * Formats an approved summary as an editable context draft without persisting it.
  *
@@ -37,7 +40,33 @@ export function formatAiSummaryContextBody(
     if (items.length === 0) continue
     lines.push('', `## ${title}`, ...items.flatMap(formatItem))
   }
-  return lines.join('\n')
+  return boundContextBody(lines)
+}
+
+/** Bounds the fully formatted body without cutting a later Markdown evidence line in half. */
+function boundContextBody(lines: readonly string[]): string {
+  let body = ''
+  for (const line of lines) {
+    const separator = body ? '\n' : ''
+    const remainingLength = collaborationContextBodyMaximumLength - body.length - separator.length
+    if (remainingLength <= 0) break
+    if (line.length <= remainingLength) {
+      body += `${separator}${line}`
+      continue
+    }
+    if (!body) return truncateToUtf16Boundary(line, remainingLength)
+    break
+  }
+  return body
+}
+
+/** Truncates one generated line without leaving a dangling UTF-16 high surrogate. */
+function truncateToUtf16Boundary(value: string, maximumLength: number): string {
+  const truncated = value.slice(0, maximumLength)
+  const lastCodeUnit = truncated.charCodeAt(truncated.length - 1)
+  return lastCodeUnit >= 0xd800 && lastCodeUnit <= 0xdbff
+    ? truncated.slice(0, -1)
+    : truncated
 }
 
 /**

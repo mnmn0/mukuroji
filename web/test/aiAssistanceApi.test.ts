@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import type {
   AiAssistanceGeneration,
+  AiPlanningStatusUpdateDraft,
   GenerateAiAssistanceRequest,
 } from '@mukuroji/contracts'
 import {
@@ -492,6 +493,52 @@ describe('AI assistance API', () => {
     }).catch((caught: unknown) => caught)
 
     expect(error).toMatchObject({ code: 'InvalidAiAssistanceResponse', status: 502 })
+  })
+
+  /** Rejects Planning status text that the publish endpoint would reject by UTF-8 size. */
+  test('rejects Planning status text over the server UTF-8 byte limit', async () => {
+    const content = aiPlanningGenerationFixture.content
+    if (content.availability !== 'available' || content.draft.kind !== 'planning' || !content.draft.statusUpdate) {
+      throw new Error('Planning fixture must stay available with a status update.')
+    }
+    const statusUpdate = content.draft.statusUpdate
+    const oversizedText = 'あ'.repeat(2_667)
+    const textFields: readonly (keyof Pick<
+      AiPlanningStatusUpdateDraft,
+      'summary' | 'riskSummary' | 'decisionSummary' | 'helpNeeded' | 'nextAction'
+    >)[] = ['summary', 'riskSummary', 'decisionSummary', 'helpNeeded', 'nextAction']
+
+    for (const field of textFields) {
+      installFetchRecorder([{
+        ...aiPlanningGenerationFixture,
+        content: {
+          ...content,
+          draft: {
+            ...content.draft,
+            statusUpdate: {
+              ...statusUpdate,
+              [field]: oversizedText,
+            },
+          },
+        },
+      }])
+      const error = await generateAiAssistance({
+        accessToken: 'access-token',
+        input: {
+          locale: 'en',
+          source: {
+            expectedRevision: 1,
+            teamId: 'core-team',
+            type: 'work-item',
+            workItemId: 'launch-review',
+          },
+          task: 'planning',
+        },
+        mutationContext,
+      }).catch((caught: unknown) => caught)
+
+      expect(error).toMatchObject({ code: 'InvalidAiAssistanceResponse', status: 502 })
+    }
   })
 
   test('rejects duplicate triage custom-field suggestions at the browser API boundary', async () => {
