@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   applyApprovedAiSearchToRouteState,
   applyApprovedAiSearchToRouteStateIfCurrent,
+  isSearchRouteSignatureCurrent,
 } from '../src/search/model/aiSearchApplication'
 import {
   getSearchGroup,
@@ -11,6 +12,11 @@ import {
 } from '../src/search/model/queryState'
 
 describe('approved AI Search application', () => {
+  test('identifies a review as stale before approval when navigation changes the route', () => {
+    expect(isSearchRouteSignatureCurrent('q=old&v=1', 'q=new&v=1')).toBe(false)
+    expect(isSearchRouteSignatureCurrent('q=old&v=1', 'q=old&v=1')).toBe(true)
+  })
+
   test('copies an approved grouped count intent into canonical Search query and layout state', () => {
     const currentState = parseSearchRouteState(new URLSearchParams('q=old&v=1'))
     const nextState = applyApprovedAiSearchToRouteState(currentState, {

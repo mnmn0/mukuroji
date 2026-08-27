@@ -772,6 +772,7 @@ export function PlanningStatusUpdateComposer({
     draft: initialDraft,
     revision: 0,
   })
+  const formDisabled = !onPublish || isPublishing
   const aiT = aiAssistance ? createTranslator(aiAssistance.locale) : undefined
   const aiAssistantSessionKey = aiAssistance
     ? createAiAssistantSessionKey(aiAssistance.source)
@@ -972,7 +973,7 @@ export function PlanningStatusUpdateComposer({
             <select
               className="workbench-input h-10 px-3"
               defaultValue={formSeed.draft?.health ?? health}
-              disabled={!onPublish}
+              disabled={formDisabled}
               aria-describedby={formError ? 'planning-update-composer-error' : undefined}
               aria-invalid={Boolean(formError)}
               name="health"
@@ -987,7 +988,7 @@ export function PlanningStatusUpdateComposer({
             <select
               className="workbench-input h-10 px-3"
               defaultValue={formSeed.draft?.risk ?? 'none'}
-              disabled={!onPublish}
+              disabled={formDisabled}
               aria-describedby={formError ? 'planning-update-composer-error' : undefined}
               aria-invalid={Boolean(formError)}
               name="risk"
@@ -1011,7 +1012,7 @@ export function PlanningStatusUpdateComposer({
           <textarea
             className="workbench-input min-h-24 p-3"
             defaultValue={formSeed.draft?.summary}
-            disabled={!onPublish}
+            disabled={formDisabled}
             aria-describedby={formError ? 'planning-update-composer-error' : undefined}
             aria-invalid={Boolean(formError)}
             name="summary"
@@ -1021,15 +1022,15 @@ export function PlanningStatusUpdateComposer({
         <div className="grid grid-cols-2 gap-3 max-[620px]:grid-cols-1">
           <label className="grid gap-2 text-sm font-semibold text-[var(--workbench-text)]">
             {labels.riskSummary}
-            <textarea className="workbench-input min-h-20 p-3" defaultValue={formSeed.draft?.riskSummary} disabled={!onPublish} name="riskSummary" />
+            <textarea className="workbench-input min-h-20 p-3" defaultValue={formSeed.draft?.riskSummary} disabled={formDisabled} name="riskSummary" />
           </label>
           <label className="grid gap-2 text-sm font-semibold text-[var(--workbench-text)]">
             {labels.decisionSummary}
-            <textarea className="workbench-input min-h-20 p-3" defaultValue={formSeed.draft?.decisionSummary} disabled={!onPublish} name="decisionSummary" />
+            <textarea className="workbench-input min-h-20 p-3" defaultValue={formSeed.draft?.decisionSummary} disabled={formDisabled} name="decisionSummary" />
           </label>
           <label className="grid gap-2 text-sm font-semibold text-[var(--workbench-text)]">
             {labels.helpNeeded}
-            <textarea className="workbench-input min-h-20 p-3" defaultValue={formSeed.draft?.helpNeeded} disabled={!onPublish} name="helpNeeded" />
+            <textarea className="workbench-input min-h-20 p-3" defaultValue={formSeed.draft?.helpNeeded} disabled={formDisabled} name="helpNeeded" />
           </label>
           <label className="grid gap-2 text-sm font-semibold text-[var(--workbench-text)]">
             {labels.nextAction}
@@ -1038,7 +1039,7 @@ export function PlanningStatusUpdateComposer({
             aria-invalid={Boolean(formError)}
             className="workbench-input min-h-20 p-3"
             defaultValue={formSeed.draft?.nextAction}
-            disabled={!onPublish}
+            disabled={formDisabled}
             name="nextAction"
             required
           />
@@ -1059,7 +1060,7 @@ export function PlanningStatusUpdateComposer({
             {labels.evidenceType}
             <select
               className="workbench-input h-10 px-3"
-              disabled={!onPublish}
+              disabled={formDisabled}
               aria-describedby={formError ? 'planning-update-composer-error' : undefined}
               aria-invalid={Boolean(formError)}
               name="evidenceType"
@@ -1081,7 +1082,7 @@ export function PlanningStatusUpdateComposer({
             <select
               aria-label={labels.evidenceWorkItemPlaceholder}
               className="workbench-input h-10 px-3"
-              disabled={!onPublish}
+              disabled={formDisabled}
               name="evidenceWorkItem"
               aria-describedby={formError ? 'planning-update-composer-error' : undefined}
               aria-invalid={Boolean(formError)}
@@ -1097,7 +1098,7 @@ export function PlanningStatusUpdateComposer({
             <select
               aria-label={labels.evidencePlanningEntityPlaceholder}
               className="workbench-input h-10 px-3"
-              disabled={!onPublish}
+              disabled={formDisabled}
               name="evidencePlanningEntity"
               aria-describedby={formError ? 'planning-update-composer-error' : undefined}
               aria-invalid={Boolean(formError)}
@@ -1114,7 +1115,7 @@ export function PlanningStatusUpdateComposer({
               <input
                 aria-label={labels.evidenceFileIdPlaceholder}
                 className="workbench-input h-10 px-3"
-                disabled={!onPublish}
+                disabled={formDisabled}
                 name="evidenceFileId"
                 placeholder={labels.evidenceFileIdPlaceholder}
                 required
@@ -1124,6 +1125,7 @@ export function PlanningStatusUpdateComposer({
                 labels={labels}
                 name="evidenceFileUrl"
                 onPublish={onPublish}
+                disabled={isPublishing}
               />
             </div>
           ) : null}
@@ -1133,7 +1135,7 @@ export function PlanningStatusUpdateComposer({
                 aria-label={labels.evidenceLabelPlaceholder}
                 className="workbench-input h-10 px-3"
                 defaultValue={aiEvidenceSeed?.label}
-                disabled={!onPublish}
+                disabled={formDisabled}
                 name="evidenceLabel"
                 placeholder={labels.evidenceLabelPlaceholder}
               />
@@ -1142,6 +1144,7 @@ export function PlanningStatusUpdateComposer({
                 labels={labels}
                 name="evidenceUrl"
                 onPublish={onPublish}
+                disabled={isPublishing}
                 defaultValue={aiEvidenceSeed?.url}
               />
             </div>
@@ -1158,7 +1161,7 @@ export function PlanningStatusUpdateComposer({
         ) : null}
         <button
           className="workbench-button-primary min-h-[44px] px-4 disabled:opacity-50"
-          disabled={!onPublish || isPublishing}
+          disabled={formDisabled}
           aria-busy={isPublishing}
           type="submit"
         >
@@ -1173,6 +1176,8 @@ export function PlanningStatusUpdateComposer({
 type PlanningEvidenceUrlInputProps = {
   /** Optional safe URL copied from an approved generation citation. */
   defaultValue?: string
+  /** Whether the field is temporarily frozen while a publish is pending. */
+  disabled?: boolean
   /** Whether the current field value failed validation. */
   hasError?: boolean
   /** Localized placeholder shown to the operator. */
@@ -1191,6 +1196,7 @@ type PlanningEvidenceUrlInputProps = {
  */
 function PlanningEvidenceUrlInput({
   defaultValue,
+  disabled = false,
   hasError = false,
   labels,
   name,
@@ -1201,7 +1207,7 @@ function PlanningEvidenceUrlInput({
       aria-label={labels.evidenceUrlPlaceholder}
       className="workbench-input h-10 px-3"
       defaultValue={defaultValue}
-      disabled={!onPublish}
+      disabled={!onPublish || disabled}
       aria-describedby={hasError ? 'planning-update-composer-error' : undefined}
       aria-invalid={hasError}
       name={name}

@@ -33,7 +33,10 @@ import {
   toggleAiSearchEntityType,
   updateAiSearchCustomField,
 } from '../model/aiSearchDraft'
-import type { ApprovedAiSearchApplication } from '../model/aiSearchApplication'
+import {
+  isSearchRouteSignatureCurrent,
+  type ApprovedAiSearchApplication,
+} from '../model/aiSearchApplication'
 
 /** Props for the Search route's AI assistance container. */
 export type NaturalLanguageSearchComposerProps = {
@@ -202,6 +205,7 @@ export function NaturalLanguageSearchComposerView({
           onApply={onApply}
           onDecide={onDecide}
           onFeedback={onFeedback}
+          currentRouteSignature={routeSignature}
           reviewedRouteSignature={generationRouteSignature ?? routeSignature}
           t={t}
         />
@@ -242,6 +246,8 @@ type SearchDraftReviewProps = {
   onDecide: (outcome: 'approved' | 'rejected') => Promise<AiAssistanceGeneration | undefined>
   /** Records usefulness feedback. */
   onFeedback?: (rating: CreateAiAssistanceFeedbackRequest['rating']) => void | Promise<void>
+  /** Canonical Search route signature currently visible in the browser. */
+  currentRouteSignature: string
   /** Canonical Search route signature captured before this generation began. */
   reviewedRouteSignature: string
   /** Localized message resolver. */
@@ -281,6 +287,7 @@ function SearchDraftReview({
   onApply,
   onDecide,
   onFeedback,
+  currentRouteSignature,
   reviewedRouteSignature,
   t,
 }: SearchDraftReviewProps) {
@@ -296,7 +303,11 @@ function SearchDraftReview({
   const generatedFilters = normalizeAiSearchFilters(draft.filters)
   const hasUnapprovedFilterEdits = serializeSearchFilters(reviewedFilters) !==
     serializeSearchFilters(generatedFilters)
-  const canAdopt = !hasInvalidFilterSet && !hasUnapprovedFilterEdits
+  const isRouteCurrent = isSearchRouteSignatureCurrent(
+    reviewedRouteSignature,
+    currentRouteSignature,
+  )
+  const canAdopt = isRouteCurrent && !hasInvalidFilterSet && !hasUnapprovedFilterEdits
 
   /** Records approval first, then applies the exact reviewed local filters. */
   const adoptFilters = async () => {
@@ -340,6 +351,14 @@ function SearchDraftReview({
         ) : null}
         t={t}
       />
+      {!isRouteCurrent ? (
+        <p
+          className="border-l-2 border-[var(--workbench-warning)] bg-amber-50 px-3 py-2 text-app-caption font-medium text-amber-900"
+          role="status"
+        >
+          {t('ai.search.validation.routeChanged')}
+        </p>
+      ) : null}
       {hasUnapprovedFilterEdits ? (
         <div className="grid gap-2 border-l-2 border-[var(--workbench-warning)] bg-[var(--workbench-surface-muted)] px-3 py-3">
           <p className="text-app-caption font-medium text-[var(--workbench-text)]">

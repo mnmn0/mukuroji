@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { renderToStaticMarkup } from 'react-dom/server'
+import type { AiAssistanceGeneration, AiPlanningDraft } from '@mukuroji/contracts'
 import { DocumentContextPanel } from '../src/documents/ui/DocumentContextPanel'
 import {
   documentCommentFixtures,
@@ -110,6 +111,41 @@ describe('AI workflow integration surfaces', () => {
     expect(html).toContain('staged-launch')
     expect(adoptCount).toBe(0)
     expect(generateCount).toBe(0)
+  })
+
+  test('does not offer Work Item adoption for review-only Planning values', () => {
+    const content = aiPlanningGenerationFixture.content
+    if (content.availability !== 'available' || content.draft.kind !== 'planning') {
+      throw new Error('Planning fixture must stay available.')
+    }
+    const reviewOnlyDraft: AiPlanningDraft = {
+      dependencies: content.draft.dependencies,
+      kind: 'planning',
+      plannedEffortMinutes: content.draft.plannedEffortMinutes,
+      statusUpdate: content.draft.statusUpdate,
+      subtasks: content.draft.subtasks,
+    }
+    const reviewOnlyGeneration: AiAssistanceGeneration = {
+      ...aiPlanningGenerationFixture,
+      content: {
+        ...content,
+        draft: reviewOnlyDraft,
+      },
+    }
+
+    const html = renderToStaticMarkup(
+      <AiWorkItemPlanningAssistantView
+        generation={reviewOnlyGeneration}
+        locale="en"
+        onAdopt={() => undefined}
+        onDecide={async () => undefined}
+        onGenerate={() => undefined}
+        t={t}
+      />,
+    )
+
+    expect(html).toContain('4h')
+    expect(html).not.toContain('Use supported fields in form')
   })
 
   test('does not focus or render a replacement prompt before a Work Item draft exists', () => {

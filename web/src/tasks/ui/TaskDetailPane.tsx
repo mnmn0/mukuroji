@@ -538,6 +538,12 @@ export function TaskDetailPane({
             locale={locale}
             onAuthenticatedApiError={onAuthenticatedApiError}
             onAdopt={isReadOnly ? undefined : applyAiPlanningDraft}
+            canAdoptDraft={(draft) => Boolean(
+              draft.title ||
+              draft.description ||
+              draft.priority ||
+              (draft.status && workflowStatuses.some((status) => status.id === draft.status?.value)),
+            )}
             resolveStatusLabel={(statusId) =>
               workflowStatuses.find((status) => status.id === statusId)?.name ?? statusId}
             resolveWorkItemLabel={(endpoint) => planningSnapshot?.workItems.find(

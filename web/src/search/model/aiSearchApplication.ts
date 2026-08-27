@@ -14,6 +14,20 @@ export type ApprovedAiSearchApplication = {
 }
 
 /**
+ * Checks whether the Search route still matches the signature captured for a review.
+ *
+ * @param reviewedRouteSignature - Canonical route signature captured at generation time.
+ * @param currentRouteSignature - Canonical route signature currently visible in the browser.
+ * @returns `true` when the review is still attached to the current route.
+ */
+export function isSearchRouteSignatureCurrent(
+  reviewedRouteSignature: string,
+  currentRouteSignature: string,
+): boolean {
+  return reviewedRouteSignature === currentRouteSignature
+}
+
+/**
  * Applies approved AI filters and report presentation to the existing Search route state.
  *
  * A grouped report uses the existing board grouping so the loaded result buckets remain
@@ -63,6 +77,6 @@ export function applyApprovedAiSearchToRouteStateIfCurrent(
   currentRouteSignature: string,
   application: ApprovedAiSearchApplication,
 ): SearchRouteState | undefined {
-  if (expectedRouteSignature !== currentRouteSignature) return undefined
+  if (!isSearchRouteSignatureCurrent(expectedRouteSignature, currentRouteSignature)) return undefined
   return applyApprovedAiSearchToRouteState(state, application)
 }

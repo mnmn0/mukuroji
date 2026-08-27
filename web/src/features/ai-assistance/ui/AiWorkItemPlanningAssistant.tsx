@@ -28,6 +28,8 @@ export type AiWorkItemPlanningAssistantProps = {
   locale: Locale
   /** Copies approved supported fields into the existing local editor without saving them. */
   onAdopt?: (draft: AiPlanningDraft) => void | Promise<void>
+  /** Determines whether the current draft contains a field supported by the caller's editor. */
+  canAdoptDraft?: (draft: AiPlanningDraft) => boolean
   /** Resolves a configured workflow status identifier for review. */
   resolveStatusLabel?: (statusId: string) => string
   /** Resolves a visible Team-qualified Work Item endpoint for review. */
@@ -52,6 +54,7 @@ export function AiWorkItemPlanningAssistant({
   locale,
   onAuthenticatedApiError,
   onAdopt,
+  canAdoptDraft,
   resolveStatusLabel,
   resolveWorkItemLabel,
   requireAdoptionConfirmation,
@@ -73,6 +76,7 @@ export function AiWorkItemPlanningAssistant({
       locale={locale}
       cancelLabel={t('ai.planning.workItem.cancel')}
       onAdopt={onAdopt}
+      canAdoptDraft={canAdoptDraft}
       onCancelGeneration={activeController.cancelGeneration}
       onDecide={activeController.decide}
       onFeedback={activeController.sendFeedback}
@@ -107,6 +111,8 @@ export type AiWorkItemPlanningAssistantViewProps = {
   cancelLabel?: string
   /** Copies an approved draft into supported local Work Item fields only. */
   onAdopt?: (draft: AiPlanningDraft) => void | Promise<void>
+  /** Determines whether the current draft contains a field supported by the caller's editor. */
+  canAdoptDraft?: (draft: AiPlanningDraft) => boolean
   /** Cancels the active explicit generation request. */
   onCancelGeneration?: () => void
   /** Records approval or rejection without mutating a Work Item. */
@@ -142,6 +148,7 @@ export function AiWorkItemPlanningAssistantView({
   locale,
   cancelLabel,
   onAdopt,
+  canAdoptDraft,
   onCancelGeneration,
   onDecide,
   onFeedback,
@@ -156,9 +163,12 @@ export function AiWorkItemPlanningAssistantView({
   const availableDraft = getAvailableWorkItemPlanningDraft(generation)
   const hasInvalidAvailableDraft = generation?.content.availability === 'available' &&
     !availableDraft
+  const hasAdoptableDraft = availableDraft !== undefined &&
+    (canAdoptDraft?.(availableDraft) ?? hasSupportedWorkItemPlanningFields(availableDraft))
   const isOperationPending = isGenerating || isDecisionPending || isFeedbackPending
   const isAdoptionConfirmationVisible = confirmationGenerationId !== undefined &&
-    confirmationGenerationId === generation?.id
+    confirmationGenerationId === generation?.id &&
+    hasAdoptableDraft
 
   useEffect(() => {
     if (isAdoptionConfirmationVisible) confirmationRef.current?.focus()
@@ -172,17 +182,21 @@ export function AiWorkItemPlanningAssistantView({
 
   /** Records approval before copying any supported value into local editor state. */
   const approveAndAdoptDraft = async () => {
-    if (!onAdopt || isOperationPending) return
+    if (!onAdopt || !hasAdoptableDraft || isOperationPending) return
     const reviewedGeneration = await onDecide('approved')
     const reviewedDraft = getAvailableWorkItemPlanningDraft(reviewedGeneration)
-    if (reviewedGeneration?.decision?.outcome !== 'approved' || !reviewedDraft) return
+    if (
+      reviewedGeneration?.decision?.outcome !== 'approved' ||
+      !reviewedDraft ||
+      !(canAdoptDraft?.(reviewedDraft) ?? hasSupportedWorkItemPlanningFields(reviewedDraft))
+    ) return
     setConfirmationGenerationId(undefined)
     await onAdopt(reviewedDraft)
   }
 
   /** Opens replacement confirmation before approval when manual edits could be lost. */
   const adoptDraft = () => {
-    if (!onAdopt || isOperationPending) return
+    if (!onAdopt || !hasAdoptableDraft || isOperationPending) return
     if (requireAdoptionConfirmation) {
       setConfirmationGenerationId(generation?.id)
       return
@@ -233,7 +247,7 @@ export function AiWorkItemPlanningAssistantView({
           isFeedbackPending={isFeedbackPending}
           generatingLabel={t('ai.planning.workItem.generating')}
           locale={locale}
-          onAdopt={availableDraft && onAdopt ? adoptDraft : undefined}
+          onAdopt={hasAdoptableDraft && onAdopt ? adoptDraft : undefined}
           onFeedback={onFeedback}
           onReject={availableDraft
             ? async () => {
@@ -308,4 +322,20 @@ function getAvailableWorkItemPlanningDraft(
     generation.content.draft.kind !== 'planning'
   ) return undefined
   return generation.content.draft
+}
+
+/**
+ * Identifies the Work Item fields that this assistant can copy into the existing editor.
+ *
+ * Planning estimates, child items, dependencies, and target status updates remain
+ * review-only because they use separate mutation boundaries.
+ *
+ * @param draft - Authorized Work Item Planning draft.
+ * @returns Whether at least one supported Work Item field is proposed.
+ */
+function hasSupportedWorkItemPlanningFields(draft: AiPlanningDraft): boolean {
+  return draft.title !== undefined ||
+    draft.description !== undefined ||
+    draft.priority !== undefined ||
+    draft.status !== undefined
 }
