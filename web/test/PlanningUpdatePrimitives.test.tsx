@@ -44,6 +44,38 @@ describe('Planning update evidence composer', () => {
     expect(publishCount).toBe(0)
   })
 
+  /** Verifies an in-flight AI decision cannot race the canonical publish action. */
+  test('disables the manual publish form while an AI operation is pending', () => {
+    const html = renderToStaticMarkup(
+      <PlanningStatusUpdateComposer
+        aiAssistance={{
+          accessToken: 'test-access-token',
+          isAiOperationPending: true,
+          locale: 'en',
+          source: {
+            expectedRevision: planningSnapshotFixture.revision,
+            target: {
+              projectId: 'refero',
+              teamId: 'core-team',
+              type: 'project',
+            },
+            type: 'planning-target',
+          },
+        }}
+        health="on-track"
+        initialEvidenceType="link"
+        labels={labels}
+        onPublish={() => undefined}
+        progress={40}
+      />,
+    )
+
+    expect(html).toContain('name="summary" required=""')
+    expect(html).toMatch(/<textarea[^>]*disabled=""[^>]*name="summary"/)
+    expect(html).toContain('disabled="" aria-busy="false" type="submit"')
+    expect(html).toMatch(/<input(?=[^>]*name="evidenceUrl")(?=[^>]*disabled="")[^>]*>/)
+  })
+
   test('requires an explicit timezone offset for cadence deadlines', () => {
     expect(isValidPlanningDateTime('2026-03-01T15:00:00')).toBe(false)
     expect(isValidPlanningDateTime('2026-03-01T15:00:00.000Z')).toBe(true)

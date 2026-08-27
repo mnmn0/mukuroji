@@ -516,6 +516,7 @@ export function PlanningScreen({
       ? {
           accessToken: aiAssistance.accessToken,
           onAuthenticatedApiError: aiAssistance.onAuthenticatedApiError,
+          isAiOperationPending,
           onOperationPendingChange: reportAiOperationPending,
           locale: aiAssistance.locale,
           source: {

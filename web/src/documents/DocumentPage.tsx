@@ -1853,17 +1853,22 @@ export function DocumentScreen({
             )}
           </div>
 
-          {contextTab && selectedDocument ? (
+          {selectedDocument &&
+          (contextTab || resolvedAiAssistanceAccessToken) ? (
             <>
-              <button
-                aria-label={t('documents.context.close')}
-                className="fixed inset-0 z-40 bg-slate-950/35 min-[1280px]:hidden"
-                onClick={() => changeContextTab(undefined)}
-                type="button"
-              />
-              <div className="fixed inset-y-0 right-0 z-50 max-w-[calc(100vw-24px)] shadow-2xl min-[1280px]:static min-[1280px]:z-auto min-[1280px]:shadow-none">
+              {contextTab ? (
+                <button
+                  aria-label={t('documents.context.close')}
+                  className="fixed inset-0 z-40 bg-slate-950/35 min-[1280px]:hidden"
+                  onClick={() => changeContextTab(undefined)}
+                  type="button"
+                />
+              ) : null}
+              <div
+                className={`fixed inset-y-0 right-0 z-50 max-w-[calc(100vw-24px)] shadow-2xl min-[1280px]:static min-[1280px]:z-auto min-[1280px]:shadow-none ${contextTab ? '' : 'hidden'}`}
+              >
                 <DocumentContextPanel
-                  activeTab={contextTab}
+                  activeTab={contextTab ?? 'brief'}
                   aiAssistanceAccessToken={resolvedAiAssistanceAccessToken}
                   backlinks={data.backlinks}
                   comments={data.comments}
@@ -1876,6 +1881,7 @@ export function DocumentScreen({
                   hasMoreComments={data.hasMoreComments}
                   hasMoreVersions={data.hasMoreVersions}
                   isLoading={isContextLoading}
+                  isOpen={Boolean(contextTab)}
                   locale={locale}
                   modal={isContextModal}
                   onAuthenticatedApiError={onAuthenticatedApiError}

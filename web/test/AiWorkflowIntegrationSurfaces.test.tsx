@@ -71,6 +71,29 @@ describe('AI workflow integration surfaces', () => {
     expect(html).toContain('Generate brief')
   })
 
+  /** Verifies closing the drawer hides rather than unmounts the Brief session. */
+  test('keeps the Document Brief mounted while the drawer is closed', () => {
+    const html = renderToStaticMarkup(
+      <DocumentContextPanel
+        activeTab="brief"
+        aiAssistanceAccessToken="test-access-token"
+        backlinks={[]}
+        comments={[]}
+        document={documentRecordFixture}
+        isOpen={false}
+        locale="en"
+        onClose={() => undefined}
+        onTabChange={() => undefined}
+        t={t}
+        versions={[]}
+      />,
+    )
+
+    expect(html).toMatch(/<aside[^>]*hidden=""/)
+    expect(html).toContain('data-testid="ai-summary-assistant"')
+    expect(html).toContain('Generate brief')
+  })
+
   test('withholds a previously generated Brief without invoking domain adoption', () => {
     let adoptCount = 0
     const html = renderToStaticMarkup(

@@ -92,6 +92,8 @@ export type DocumentContextPanelProps = {
    * Panel data を読み込み中かどうかです。
    */
   isLoading?: boolean
+  /** Keeps the Brief assistant mounted while the drawer is temporarily closed. */
+  isOpen?: boolean
   /**
    * Mobile drawer として focus を閉じ込めるかどうかです。
    */
@@ -170,6 +172,7 @@ export function DocumentContextPanel({
   hasMoreComments = false,
   hasMoreVersions = false,
   isLoading = false,
+  isOpen = true,
   locale = 'en',
   modal = true,
   onClose,
@@ -199,7 +202,7 @@ export function DocumentContextPanel({
     : activeTab
 
   useEffect(() => {
-    if (!modal) {
+    if (!modal || !isOpen) {
       return
     }
     const previousFocusedElement =
@@ -208,7 +211,7 @@ export function DocumentContextPanel({
         : undefined
     focusFirstModalElement(panelRef.current)
     return () => previousFocusedElement?.focus()
-  }, [modal])
+  }, [isOpen, modal])
 
   useEffect(() => {
     if (
@@ -288,6 +291,7 @@ export function DocumentContextPanel({
       }}
       ref={panelRef}
       role="dialog"
+      hidden={!isOpen}
     >
       <div className="flex h-14 flex-none items-center justify-between gap-3 border-b border-[var(--workbench-border)] px-4">
         <strong className="text-sm text-[var(--workbench-text)]">

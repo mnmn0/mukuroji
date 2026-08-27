@@ -669,6 +669,8 @@ export type PlanningStatusUpdateAiAssistance = {
   accessToken: string
   /** Reports authenticated AI failures to the owning Planning route session guard. */
   onAuthenticatedApiError?: (error: unknown) => void
+  /** Disables canonical publishing while an AI operation is being persisted. */
+  isAiOperationPending?: boolean
   /** Reports AI generation, decision, and feedback activity to the owning Planning route. */
   onOperationPendingChange?: (pending: boolean) => void
   /** Locale sent to Bedrock and used for draft presentation. */
@@ -776,7 +778,10 @@ export function PlanningStatusUpdateComposer({
     draft: initialDraft,
     revision: 0,
   })
-  const formDisabled = !onPublish || isPublishing
+  const formDisabled =
+    !onPublish ||
+    isPublishing ||
+    aiAssistance?.isAiOperationPending === true
   const aiT = aiAssistance ? createTranslator(aiAssistance.locale) : undefined
   const aiAssistantSessionKey = aiAssistance
     ? createAiAssistantSessionKey(aiAssistance.source)
@@ -862,7 +867,7 @@ export function PlanningStatusUpdateComposer({
         <div className="mt-4">
           <AiPlanningStatusUpdateAssistant
             accessToken={aiAssistance.accessToken}
-            disabled={isPublishing}
+            disabled={isPublishing || aiAssistance.isAiOperationPending === true}
             key={aiAssistantSessionKey}
             locale={aiAssistance.locale}
             onAuthenticatedApiError={aiAssistance.onAuthenticatedApiError}
@@ -902,7 +907,7 @@ export function PlanningStatusUpdateComposer({
             </button>
             <button
               className="workbench-button-primary min-h-[44px] px-4"
-              disabled={isPublishing}
+              disabled={isPublishing || aiAssistance?.isAiOperationPending === true}
               onClick={() => applyAiDraft(pendingAiDraft.draft, pendingAiDraft.context)}
               type="button"
             >
@@ -1142,7 +1147,7 @@ export function PlanningStatusUpdateComposer({
                 labels={labels}
                 name="evidenceFileUrl"
                 onPublish={onPublish}
-                disabled={isPublishing}
+                disabled={formDisabled}
               />
             </div>
           ) : null}
@@ -1161,7 +1166,7 @@ export function PlanningStatusUpdateComposer({
                 labels={labels}
                 name="evidenceUrl"
                 onPublish={onPublish}
-                disabled={isPublishing}
+                disabled={formDisabled}
                 defaultValue={aiEvidenceSeed?.url}
               />
             </div>
