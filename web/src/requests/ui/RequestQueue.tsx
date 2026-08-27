@@ -117,6 +117,20 @@ export function RequestQueue({
   submissions,
 }: RequestQueueProps) {
   const t = useMemo(() => createTranslator(locale), [locale])
+  const [isAiOperationPending, setIsAiOperationPending] = useState(false)
+  const isAiOperationPendingRef = useRef(false)
+
+  /** Keeps the request source fence synchronized before React renders. */
+  const reportAiOperationPending = (pending: boolean) => {
+    isAiOperationPendingRef.current = pending
+    setIsAiOperationPending(pending)
+  }
+
+  /** Ignores source changes while an AI operation is awaiting its response. */
+  const selectSubmission = (submissionId: string) => {
+    if (isAiOperationPendingRef.current) return
+    onSelectSubmission(submissionId)
+  }
 
   return (
     <div className="grid grid-cols-[minmax(420px,0.9fr)_minmax(480px,1.1fr)] gap-5 max-[1120px]:grid-cols-1" data-testid="request-intake-queue">
@@ -165,7 +179,8 @@ export function RequestQueue({
                         aria-current={selectedSubmission?.id === submission.id ? 'true' : undefined}
                         aria-label={`${t('requests.queue.openSubmission')}: ${submission.formName} ${submission.formVersionLabel}`}
                         className="group block min-h-10 w-full rounded-md px-2 py-1 text-left outline-none hover:bg-white focus-visible:ring-2 focus-visible:ring-[var(--workbench-primary)] focus-visible:ring-offset-2"
-                        onClick={() => onSelectSubmission(submission.id)}
+                        disabled={isAiOperationPending}
+                        onClick={() => selectSubmission(submission.id)}
                         type="button"
                       >
                         <strong className="block truncate group-hover:text-[var(--workbench-primary)]">{submission.formName}</strong>
@@ -185,7 +200,7 @@ export function RequestQueue({
         )}
         {hasMore ? (
           <div className="border-t border-[var(--workbench-border)] p-4 text-center">
-            <button className="workbench-button-secondary min-h-10 px-5" disabled={isLoadingMore} onClick={onLoadMore} type="button">
+            <button className="workbench-button-secondary min-h-10 px-5" disabled={isLoadingMore || isAiOperationPending} onClick={onLoadMore} type="button">
               {isLoadingMore ? t('requests.queue.loadingMore') : t('requests.queue.loadMore')}
             </button>
           </div>
@@ -206,6 +221,7 @@ export function RequestQueue({
         submission={selectedSubmission}
         onAction={onAction}
         onAuthenticatedApiError={onAuthenticatedApiError}
+        onOperationPendingChange={reportAiOperationPending}
         onOpenAttachment={onOpenAttachment}
         projectDirectory={projectDirectory}
       />
@@ -221,6 +237,7 @@ function RequestSubmissionDetail({
   onAuthenticatedApiError,
   onAction,
   onOpenAttachment,
+  onOperationPendingChange,
   projectDirectory,
   submission,
 }: {
@@ -228,6 +245,8 @@ function RequestSubmissionDetail({
   aiAssistanceController?: AiAssistanceController
   canUseAiAssistance: boolean
   onAuthenticatedApiError?: (error: unknown) => void
+  /** Reports AI request state so the parent queue can fence source changes. */
+  onOperationPendingChange?: (pending: boolean) => void
   locale: Locale
   projectDirectory?: RequestRoutingProjectDirectory
   onAction?: RequestQueueProps['onAction']
@@ -495,6 +514,7 @@ function RequestSubmissionDetail({
             locale={locale}
             onAuthenticatedApiError={onAuthenticatedApiError}
             onAdoptDraft={adoptTriageDraft}
+            onOperationPendingChange={onOperationPendingChange}
             canAdoptDraft={(draft) => canAdoptRequestTriageDraft(
               submission,
               draft,

@@ -1,4 +1,4 @@
-import { useRef } from 'react'
+import { useRef, useState } from 'react'
 import type { AiAssistanceController } from '../../features/ai-assistance/mutations/useAiAssistanceController'
 import type { MessageKey } from '../../shared/i18n/i18n'
 import { ShieldIcon } from '../../shared/ui/icons'
@@ -178,13 +178,40 @@ export function TriageWorkbench({
   teamName,
 }: TriageWorkbenchProps) {
   const queueRegion = useRef<HTMLDivElement>(null)
+  const [isAiOperationPending, setIsAiOperationPending] = useState(false)
+  const isAiOperationPendingRef = useRef(false)
   const selectedIds = new Set(selectedEntryIds)
   const selectedBulkEntries = entries.filter((view) => selectedIds.has(view.entry.id))
+
+  /** Keeps the triage source fence synchronized before React renders. */
+  const reportAiOperationPending = (pending: boolean) => {
+    isAiOperationPendingRef.current = pending
+    setIsAiOperationPending(pending)
+  }
+
+  /** Ignores entry changes while an AI operation is awaiting its response. */
+  const selectEntry = (entryId: string) => {
+    if (isAiOperationPendingRef.current) return
+    onSelectEntry(entryId)
+  }
+
+  /** Keeps the active triage detail mounted while an AI operation is pending. */
+  const backToQueue = () => {
+    if (isAiOperationPendingRef.current) return
+    onBackToQueue()
+  }
+
+  /** Keeps the active triage source mounted while an AI operation is pending. */
+  const changeView = (view: TriageRouteView) => {
+    if (isAiOperationPendingRef.current) return
+    onViewChange(view)
+  }
+
   /** Returns keyboard navigation to the mutated row or the next visible row. */
   const restoreQueueFocus = (entryId: string) => {
     const isMobile = typeof window !== 'undefined' &&
       window.matchMedia?.('(max-width: 860px)').matches === true
-    if (isMobile) onBackToQueue()
+    if (isMobile) backToQueue()
     /** Focuses a visible queue row after route and cache updates render. */
     const focusEntry = () => {
       const region = queueRegion.current
@@ -210,8 +237,8 @@ export function TriageWorkbench({
           <p className="mt-1 text-sm font-medium text-[var(--workbench-muted)]">{t('triage.surface.description')}</p>
         </div>
         <div className="flex gap-1" role="tablist" aria-label={t('triage.tabs.aria')}>
-          <ViewTab active={routeView === 'queue'} label={t('triage.tab.queue')} onClick={() => onViewChange('queue')} />
-          <ViewTab active={routeView === 'settings'} label={t('triage.tab.settings')} onClick={() => onViewChange('settings')} />
+          <ViewTab active={routeView === 'queue'} disabled={isAiOperationPending} label={t('triage.tab.queue')} onClick={() => changeView('queue')} />
+          <ViewTab active={routeView === 'settings'} disabled={isAiOperationPending} label={t('triage.tab.settings')} onClick={() => changeView('settings')} />
         </div>
       </div>
 
@@ -258,6 +285,7 @@ export function TriageWorkbench({
                   errorMessage={queueErrorMessage}
                   filters={filters}
                   hasMore={hasMore}
+                  isAiOperationPending={isAiOperationPending}
                   isLoading={isQueueLoading}
                   isLoadingMore={isQueueLoadingMore}
                   locale={locale}
@@ -265,7 +293,7 @@ export function TriageWorkbench({
                   onFiltersChange={onFiltersChange}
                   onLoadMore={onLoadMore}
                   onRetry={onRetryQueue}
-                  onSelectEntry={onSelectEntry}
+                  onSelectEntry={selectEntry}
                   onVisibleSelectionChange={onVisibleSelectionChange}
                   selectedEntryId={selectedEntry?.entry.id}
                   selectedEntryIds={selectedEntryIds}
@@ -278,6 +306,7 @@ export function TriageWorkbench({
                   aiAssistanceController={aiAssistanceController}
                   aiAssistanceEnabled={aiAssistanceEnabled}
                   onAuthenticatedApiError={onAuthenticatedApiError}
+                  onOperationPendingChange={reportAiOperationPending}
                   errorMessage={detailErrorMessage}
                   isLoading={isDetailLoading}
                   isPending={pendingEntryId === selectedEntry?.entry.id}
@@ -285,7 +314,7 @@ export function TriageWorkbench({
                   locale={locale}
                   onAction={onAction}
                   onActionComplete={restoreQueueFocus}
-                  onBack={onBackToQueue}
+                  onBack={backToQueue}
                   onRetry={onRetryDetail}
                   t={t}
                   teamId={teamId}
@@ -301,8 +330,9 @@ export function TriageWorkbench({
 }
 
 /** Renders one accessible workbench surface tab. */
-function ViewTab({ active, label, onClick }: {
+function ViewTab({ active, disabled = false, label, onClick }: {
   active: boolean
+  disabled?: boolean
   label: string
   onClick: () => void
 }) {
@@ -311,7 +341,8 @@ function ViewTab({ active, label, onClick }: {
       aria-selected={active}
       className={`min-h-10 border-b-2 px-4 text-sm font-semibold ${active
         ? 'border-[var(--workbench-primary)] text-[var(--workbench-primary)]'
-        : 'border-transparent text-[var(--workbench-muted)] hover:text-[var(--workbench-text)]'}`}
+        : 'border-transparent text-[var(--workbench-muted)] hover:text-[var(--workbench-text)]'} disabled:cursor-not-allowed disabled:opacity-50`}
+      disabled={disabled}
       onClick={onClick}
       role="tab"
       type="button"

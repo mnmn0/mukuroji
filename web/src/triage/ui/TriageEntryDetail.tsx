@@ -33,6 +33,8 @@ export type TriageEntryDetailProps = {
   readonly aiAssistanceController?: AiAssistanceController
   /** Reports authenticated AI failures to the owning Team route session guard. */
   readonly onAuthenticatedApiError?: (error: unknown) => void
+  /** Reports AI request state so the owning queue can fence source changes. */
+  readonly onOperationPendingChange?: (pending: boolean) => void
   /** Team route identifier used to scope the AI source reference. */
   readonly teamId: string
   /** Selected permission-safe entry view. */
@@ -97,6 +99,7 @@ export function TriageEntryDetail({
   onAction,
   onActionComplete,
   onBack,
+  onOperationPendingChange,
   onRetry,
   t,
   teamId,
@@ -337,6 +340,7 @@ export function TriageEntryDetail({
                 locale={locale}
                 onAuthenticatedApiError={onAuthenticatedApiError}
                 onAdoptDraft={adoptTriageDraft}
+                onOperationPendingChange={onOperationPendingChange}
                 canAdoptDraft={(draft) => {
                   const hasUnsupportedAssignee =
                     draft.assigneeUserId !== undefined && !entry.capabilities.canAssign

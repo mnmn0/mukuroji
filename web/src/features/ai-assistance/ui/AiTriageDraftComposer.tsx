@@ -22,6 +22,8 @@ export type AiTriageDraftComposerProps = {
   readonly accessToken?: string
   /** Reports authenticated API failures to the owning route session guard. */
   readonly onAuthenticatedApiError?: (error: unknown) => void
+  /** Reports generation, decision, and feedback requests to the owning source surface. */
+  readonly onOperationPendingChange?: (pending: boolean) => void
   /** Workflow-specific label for copying the reviewed proposal into a form. */
   readonly adoptLabel: string
   /** Optional controller override used by isolated stories and interaction tests. */
@@ -57,6 +59,7 @@ export function AiTriageDraftComposer({
   locale,
   onAuthenticatedApiError,
   onAdoptDraft,
+  onOperationPendingChange,
   shouldConfirmAdoption,
   source,
   t,
@@ -100,9 +103,14 @@ export function AiTriageDraftComposer({
     if (!canGenerate || isOperationPending) return
     const requestedSourceKey = sourceKey
     setIsStale(false)
-    const generation = await activeController.generate({ locale, source, task: 'triage' })
-    if (generation && !mutationPendingRef.current) {
-      setGeneratedForSourceKey(requestedSourceKey)
+    onOperationPendingChange?.(true)
+    try {
+      const generation = await activeController.generate({ locale, source, task: 'triage' })
+      if (generation && !mutationPendingRef.current) {
+        setGeneratedForSourceKey(requestedSourceKey)
+      }
+    } finally {
+      onOperationPendingChange?.(false)
     }
   }
 
@@ -118,7 +126,7 @@ export function AiTriageDraftComposer({
       setIsStale(true)
       return
     }
-    const reviewedGeneration = await activeController.decide('approved')
+    const reviewedGeneration = await handleDecision('approved')
     if (sourceKeyRef.current !== requestedSourceKey) {
       setIsStale(true)
       return
@@ -139,6 +147,26 @@ export function AiTriageDraftComposer({
     }
     setConfirmationGenerationId(undefined)
     await onAdoptDraft(reviewedDraft, replacementConfirmed)
+  }
+
+  /** Records an AI decision while fencing source changes in the owning surface. */
+  const handleDecision = async (outcome: 'approved' | 'rejected') => {
+    onOperationPendingChange?.(true)
+    try {
+      return await activeController.decide(outcome)
+    } finally {
+      onOperationPendingChange?.(false)
+    }
+  }
+
+  /** Sends feedback while fencing source changes in the owning surface. */
+  const handleFeedback = async (rating: CreateAiAssistanceFeedbackRequest['rating']) => {
+    onOperationPendingChange?.(true)
+    try {
+      await activeController.sendFeedback(rating)
+    } finally {
+      onOperationPendingChange?.(false)
+    }
   }
 
   /** Opens replacement confirmation before recording an approval decision. */
@@ -194,9 +222,9 @@ export function AiTriageDraftComposer({
           onAdopt={canAdoptDraft && !isSourceStale && !isMutationPending ? adoptDraft : undefined}
           onCancelGeneration={isMutationPending ? undefined : activeController.cancelGeneration}
           onFeedback={isMutationPending ? undefined : (rating: CreateAiAssistanceFeedbackRequest['rating']) =>
-            activeController.sendFeedback(rating)}
+            handleFeedback(rating)}
           onReject={availableDraft && !isSourceStale && !isMutationPending ? async () => {
-            await activeController.decide('rejected')
+            await handleDecision('rejected')
           } : undefined}
           renderDraft={({ citations, draft }) => draft.kind === 'triage'
             ? <AiTriageDraftFields citations={citations} draft={draft} t={t} />
