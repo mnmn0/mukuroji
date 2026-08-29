@@ -21048,7 +21048,11 @@ async function resolveAiDocumentSource(
       commentPage.nextCursor,
     )
   ) {
-    throw aiAssistanceAuthorizationChangedError()
+    throw new AiAssistanceError(
+      'conflict',
+      'AiAssistanceSourceChanged',
+      'An AI assistance source changed. Reload before generating or reviewing the draft.',
+    )
   }
   const body = createDocumentWorkspaceSearchBody(document)
   const promptComments = commentPage.comments

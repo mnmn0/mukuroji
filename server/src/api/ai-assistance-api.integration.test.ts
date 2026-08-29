@@ -1647,7 +1647,7 @@ describe('AI assistance API composition', () => {
       }),
     })
 
-    expect(response.status).toBe(403)
+    expect(response.status).toBe(409)
     expect(commentReads).toBe(2)
     expect(providerCalls).toBe(0)
     const responseText = await response.text()

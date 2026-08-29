@@ -94,7 +94,10 @@ function createHarness(responses: unknown[], auditTableName?: string) {
   }
 }
 
-/** Creates a policy transition event suitable for the atomic policy-write test. */
+/** Creates a policy transition event suitable for the atomic policy-write test.
+ *
+ * @returns An immutable AI policy audit event.
+ */
 function createPolicyAuditEvent(): AuditEventV1 {
   const occurredAt = '2026-08-25T00:01:00.000Z'
   const context = createMutationAuditContext({
@@ -1050,6 +1053,32 @@ describe('DynamoDbAiAssistanceStore', () => {
       )).rejects.toMatchObject({
         category: 'authorization',
         code: 'AiAssistanceAuthorizationChanged',
+      })
+      expect(harness.commands).toHaveLength(1)
+    } finally {
+      harness.restore()
+    }
+  })
+
+  test('maps a transaction policy CAS failure to a revision conflict', async () => {
+    const desired = createPolicy('2026-08-25T00:00:02.000Z')
+    const harness = createHarness([
+      transactionCancellation(['ConditionalCheckFailed', undefined, undefined]),
+    ], 'AuditTable')
+    try {
+      await expect(harness.store.putPolicyWithAudit(
+        'workspace-1',
+        'member-1@example.com',
+        desired,
+        0,
+        {
+          workspaceMemberVersion: 4,
+          workspaceRole: 'admin',
+        },
+        createPolicyAuditEvent(),
+      )).rejects.toMatchObject({
+        category: 'conflict',
+        code: 'AiAssistanceRevisionConflict',
       })
       expect(harness.commands).toHaveLength(1)
     } finally {

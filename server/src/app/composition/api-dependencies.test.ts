@@ -13,8 +13,18 @@ import {
   createTriageAdmissionValidator,
   createTriageConfigurationReferenceValidator,
 } from './api-dependencies'
+import type { AuditEventsClient } from './app-dependencies'
 
 const NOW = '2026-08-09T00:00:00.000Z'
+
+const TEST_AUDIT_EVENTS = {
+  async getEvent() {
+    return undefined
+  },
+  async query() {
+    return { events: [] }
+  },
+} satisfies AuditEventsClient
 
 const ENTRY = {
   schemaVersion: TRIAGE_ENTRY_SCHEMA_VERSION,
@@ -89,7 +99,7 @@ test('lazily rejects Bedrock bearer-token authentication before creating a provi
   const originalBearerToken = Bun.env.AWS_BEARER_TOKEN_BEDROCK
   Bun.env.AWS_BEARER_TOKEN_BEDROCK = 'must-not-be-used'
   try {
-    const dependencies = createProductionAiAssistanceDependencies()
+    const dependencies = createProductionAiAssistanceDependencies(TEST_AUDIT_EVENTS)
     expect(() => dependencies.aiAssistanceService.getPolicy({
       workspaceId: 'workspace-1',
       memberId: 'member-1',
@@ -110,7 +120,7 @@ test('lazily rejects a non-positive AI generation budget setting', () => {
   const original = Bun.env[environmentName]
   Bun.env[environmentName] = '0'
   try {
-    const dependencies = createProductionAiAssistanceDependencies()
+    const dependencies = createProductionAiAssistanceDependencies(TEST_AUDIT_EVENTS)
     expect(() => dependencies.aiAssistanceService.getPolicy({
       workspaceId: 'workspace-1',
       memberId: 'member-1',
@@ -134,7 +144,7 @@ test('lazily rejects incomplete or invalid Bedrock pricing configuration', () =>
   try {
     Bun.env[inputName] = '3'
     delete Bun.env[outputName]
-    const incomplete = createProductionAiAssistanceDependencies()
+    const incomplete = createProductionAiAssistanceDependencies(TEST_AUDIT_EVENTS)
     expect(() => incomplete.aiAssistanceService.getPolicy({
       workspaceId: 'workspace-1',
       memberId: 'member-1',
@@ -144,7 +154,7 @@ test('lazily rejects incomplete or invalid Bedrock pricing configuration', () =>
 
     Bun.env[inputName] = 'not-a-price'
     Bun.env[outputName] = '15'
-    const invalid = createProductionAiAssistanceDependencies()
+    const invalid = createProductionAiAssistanceDependencies(TEST_AUDIT_EVENTS)
     expect(() => invalid.aiAssistanceService.getPolicy({
       workspaceId: 'workspace-1',
       memberId: 'member-1',

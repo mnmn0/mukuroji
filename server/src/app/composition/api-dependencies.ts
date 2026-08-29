@@ -683,6 +683,7 @@ function readAiAssistanceTokenPrice(
  * Creates the append-only audit writer used for AI policy transitions.
  *
  * @param auditEvents - Existing Workspace audit event persistence.
+ * @param store - DynamoDB store used for atomic policy and audit persistence.
  * @returns Application audit boundary that records redacted before/after policy state.
  */
 function createAiAssistancePolicyAudit(
@@ -767,12 +768,15 @@ function createAiAssistancePolicyAudit(
 /**
  * Creates the production AI service with SigV4 credentials and exact model allowlists.
  *
- * @param auditEvents - Optional existing Workspace audit persistence boundary.
+ * @param auditEvents - Existing Workspace audit persistence boundary.
  * @returns Mastra/Bedrock service backed by the existing Workspace Search table.
  */
 function createProductionAiAssistanceService(
-  auditEvents?: AuditEventsClient,
+  auditEvents: AuditEventsClient,
 ): AiAssistanceService {
+  if (!auditEvents) {
+    throw new TypeError('AI assistance audit events dependency is required.')
+  }
   const config = loadServerConfig()
   const environment = config.environment
   if (environment.AWS_BEARER_TOKEN_BEDROCK !== undefined) {
@@ -843,8 +847,15 @@ function createProductionAiAssistanceService(
       'MUKUROJI_AUDIT_EVENTS_TABLE or AUDIT_EVENTS_TABLE_NAME must be set for AI policy audit writes.',
     )
   }
-  const workspaceAccessTableName = environment.WORKSPACE_ACCESS_TABLE_NAME?.trim() ||
-    environment.MUKUROJI_WORKSPACE_ACCESS_TABLE?.trim() ||
+  const configuredWorkspaceAccessTableName =
+    environment.WORKSPACE_ACCESS_TABLE_NAME?.trim() ||
+    environment.MUKUROJI_WORKSPACE_ACCESS_TABLE?.trim()
+  if (config.production && !configuredWorkspaceAccessTableName) {
+    throw new TypeError(
+      'WORKSPACE_ACCESS_TABLE_NAME or MUKUROJI_WORKSPACE_ACCESS_TABLE must be set for production AI policy authorization.',
+    )
+  }
+  const workspaceAccessTableName = configuredWorkspaceAccessTableName ??
     'mukuroji-workspace-access-local'
   const enterpriseIdentityTableName = environment.ENTERPRISE_IDENTITY_TABLE_NAME?.trim()
   const defaultPolicy: AiAssistancePolicy = {
@@ -884,9 +895,7 @@ function createProductionAiAssistanceService(
     defaultPolicy,
     deploymentAllowedModelIds: allowedModelIds,
     promptVersion: AI_ASSISTANCE_PROMPT_VERSION,
-    ...(auditEvents === undefined
-      ? {}
-      : { policyAudit: createAiAssistancePolicyAudit(auditEvents, store) }),
+    policyAudit: createAiAssistancePolicyAudit(auditEvents, store),
     workspaceGenerationLimitPerMinute,
     memberGenerationLimitPerMinute,
     workspaceTokenLimitPerMinute,
@@ -898,11 +907,11 @@ function createProductionAiAssistanceService(
 /**
  * Creates the production AI assistance dependency bundle lazily.
  *
- * @param auditEvents - Optional audit event client used for policy-transition persistence.
+ * @param auditEvents - Existing audit event client used for policy-transition persistence.
  * @returns AI assistance dependencies that defer provider configuration until use.
  */
 export function createProductionAiAssistanceDependencies(
-  auditEvents?: AuditEventsClient,
+  auditEvents: AuditEventsClient,
 ): AiAssistanceDependencies {
   return {
     aiAssistanceService: createLazyAiAssistanceService(

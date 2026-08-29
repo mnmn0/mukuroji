@@ -938,6 +938,9 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
           'AI assistance policy authorization is no longer current.',
         )
       }
+      if (isTransactionConditionalFailureAt(error, 0)) {
+        throw revisionConflictError()
+      }
       const mappedError = mapDynamoWriteError(error)
       try {
         const current = await this.getPolicy(workspaceId)

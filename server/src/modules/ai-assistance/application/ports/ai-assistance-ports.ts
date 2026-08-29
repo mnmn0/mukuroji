@@ -525,7 +525,14 @@ export type AiAssistanceServiceOptions = {
 export interface AiAssistanceService {
   /** Reads the effective Workspace policy. */
   getPolicy(actor: AiAssistanceActor): Promise<AiAssistancePolicy>
-  /** Updates the Workspace policy after manager and deployment checks. */
+  /**
+   * Updates the Workspace policy after manager and deployment checks.
+   *
+   * @param actor - Authenticated Workspace actor requesting the policy change.
+   * @param request - Strictly validated policy update with the expected revision.
+   * @param authorization - Fresh management authorization fence for the commit.
+   * @returns The persisted effective Workspace policy.
+   */
   updatePolicy(
     actor: AiAssistanceActor,
     request: UpdateAiAssistancePolicyRequest,
