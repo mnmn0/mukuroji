@@ -19970,6 +19970,11 @@ function createAiAssistanceActor(
     workspaceId: principal.directoryId,
     memberId: principal.userKey,
     actorId: principal.actorId,
+    auditActorKind: principal.principalKind === 'service-account'
+      ? 'service'
+      : principal.principalKind === 'break-glass'
+        ? 'break-glass'
+        : 'user',
     traceId: randomUUID(),
     canManagePolicy: canManageAiAssistanceWorkspace(principal),
   }

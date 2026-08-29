@@ -24,6 +24,7 @@ import type {
   CompleteAiAssistanceGenerationReservationInput,
   FailAiAssistanceGenerationReservationInput,
   FinalizeAiAssistanceGenerationAttemptInput,
+  ReadAiAssistanceGenerationReservationInput,
   ReserveAiAssistanceGenerationInput,
   StartAiAssistanceGenerationAttemptInput,
   StoredAiAssistanceFeedback,
@@ -368,6 +369,57 @@ export class DynamoDbAiAssistanceStore implements AiAssistanceStore {
     this.#auditTableName = auditTableName?.trim()
     this.#workspaceAccessTableName = workspaceAccessTableName.trim()
     this.#enterpriseIdentityTableName = enterpriseIdentityTableName?.trim()
+  }
+
+  /**
+   * Reads a completed or failed receipt without charging a new generation budget.
+   *
+   * @param input - Workspace, member, idempotency, and fingerprint identity.
+   * @returns A replayable or terminal failure reservation, or undefined for a pending/missing receipt.
+   * @throws A stable persistence or idempotency error when the receipt is malformed or mismatched.
+   */
+  async readGenerationReservation(
+    input: ReadAiAssistanceGenerationReservationInput,
+  ): Promise<AiAssistanceGenerationReservation | undefined> {
+    const recordKey = createIdempotencyRecordKey(input.memberId, input.idempotencyKey)
+    let response: GetCommandOutput
+    try {
+      response = await this.#documentClient.send(new GetCommand({
+        TableName: this.#tableName,
+        Key: { workspaceId: input.workspaceId, recordKey },
+        ConsistentRead: true,
+      }))
+    } catch (error) {
+      throw mapDynamoWriteError(error)
+    }
+    if (!response.Item) return undefined
+    const parsed = idempotencyItemSchema.safeParse(response.Item)
+    if (
+      !parsed.success ||
+      parsed.data.workspaceId !== input.workspaceId ||
+      parsed.data.recordKey !== recordKey ||
+      parsed.data.memberId !== input.memberId
+    ) {
+      throw invalidRecordError()
+    }
+    if (parsed.data.inputFingerprint !== input.inputFingerprint) {
+      throw idempotencyConflictError()
+    }
+    if (parsed.data.status === 'completed') {
+      return { status: 'replay', generationId: parsed.data.generationId }
+    }
+    if (parsed.data.status === 'failed') {
+      if (parsed.data.failureCategory === undefined || parsed.data.failureCode === undefined) {
+        throw invalidRecordError()
+      }
+      return {
+        status: 'failed',
+        generationId: parsed.data.generationId,
+        failureCategory: parsed.data.failureCategory,
+        failureCode: parsed.data.failureCode,
+      }
+    }
+    return undefined
   }
 
   /** Atomically reserves a member and input-bound generation idempotency key. */

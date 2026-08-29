@@ -145,6 +145,7 @@ export function createAiAssistanceRouter<Principal>(
     try {
       const { actor, authorization } = await authenticateRequest(context, dependencies)
       const generationId = requireGenerationId(context.req.param('generationId'))
+      context.header('Cache-Control', 'private, no-store')
       return context.json(await dependencies.service.getGeneration(
         actor,
         generationId,

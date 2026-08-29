@@ -695,7 +695,7 @@ function createAiAssistancePolicyAudit(
     const occurredAt = new Date().toISOString()
     const context = createMutationAuditContext({
       workspaceId: input.workspaceId,
-      actor: { id: input.actorId, kind: 'user' },
+      actor: { id: input.actorId, kind: input.actorKind },
       idempotencyKey: `ai-assistance-policy:${input.workspaceId}:${input.nextPolicy.revision}`,
       request: {
         method: 'PUT',

@@ -431,6 +431,29 @@ describe('DynamoDbAiAssistanceStore', () => {
     }
   })
 
+  test('reads a completed receipt without charging a new generation budget', async () => {
+    const receipt = {
+      ...createPendingReceipt('generation-1', 1),
+      status: 'completed',
+      attempt: createSucceededAttempt(),
+    }
+    const harness = createHarness([{ Item: receipt }])
+    try {
+      await expect(harness.store.readGenerationReservation({
+        workspaceId: 'workspace-1',
+        memberId: 'member-1',
+        idempotencyKey: 'client-secret-key',
+        inputFingerprint: FINGERPRINT,
+      })).resolves.toEqual({
+        status: 'replay',
+        generationId: 'generation-1',
+      })
+      expect(harness.commands.map((command) => command.name)).toEqual(['GetCommand'])
+    } finally {
+      harness.restore()
+    }
+  })
+
   test('records and finalizes only safe provider attempt metadata on the receipt', async () => {
     const rawAudit = createAttemptAudit({
       request: {

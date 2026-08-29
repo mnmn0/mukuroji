@@ -49,6 +49,7 @@ function createActor(): AiAssistanceActor {
     workspaceId: 'workspace-1',
     memberId: 'operator-1',
     actorId: 'operator-actor-1',
+    auditActorKind: 'user',
     traceId: 'trace-1',
     canManagePolicy: true,
   }
@@ -199,6 +200,28 @@ function createHarness(configuration: HarnessConfiguration = {}) {
   let outputText = 'Safe summary.'
   let uncertaintyReason = 'Evidence is complete.'
   const store: AiAssistanceStore = {
+    async readGenerationReservation(input) {
+      if (
+        reservationKey !== input.idempotencyKey ||
+        reservationFingerprint !== input.inputFingerprint
+      ) return undefined
+      if (reservationStatus === 'completed') {
+        return { status: 'replay', generationId: reservationGenerationId ?? '' }
+      }
+      if (
+        reservationStatus === 'failed' &&
+        reservationFailureCategory !== undefined &&
+        reservationFailureCode !== undefined
+      ) {
+        return {
+          status: 'failed',
+          generationId: reservationGenerationId ?? '',
+          failureCategory: reservationFailureCategory,
+          failureCode: reservationFailureCode,
+        }
+      }
+      return undefined
+    },
     async reserveGeneration(input) {
       if (reservationKey === undefined) {
         if (budgetLimited) {
@@ -1735,6 +1758,28 @@ describe('createAiAssistanceService', () => {
     })
   })
 
+  test('replays a completed generation after the member opts out', async () => {
+    const harness = createHarness()
+    const first = await harness.service.generate(
+      createActor(),
+      createSummaryRequest(),
+      harness.authorization,
+      'request-opt-out-replay',
+    )
+    harness.setPreferenceEnabled(false)
+
+    const replay = await harness.service.generate(
+      createActor(),
+      createSummaryRequest(),
+      harness.authorization,
+      'request-opt-out-replay',
+    )
+
+    expect(replay).toEqual(first)
+    expect(harness.gatewayInputs).toHaveLength(1)
+    expect(harness.budgetReservationCount()).toBe(1)
+  })
+
   test('rejects one generation key reused with different redacted input', async () => {
     const harness = createHarness()
     await harness.service.generate(
@@ -1944,6 +1989,7 @@ describe('createAiAssistanceService', () => {
       workspaceId: 'workspace-1',
       memberId: 'operator-1',
       actorId: 'operator-actor-1',
+      actorKind: 'user',
       previousPolicy: expect.objectContaining({ revision: 0 }),
       nextPolicy: expect.objectContaining({
         revision: 1,
@@ -2099,6 +2145,7 @@ describe('createAiAssistanceService', () => {
 /** Creates a store that supports defaults and rejects unexpected persistence. */
 function neverStore(): AiAssistanceStore {
   return {
+    async readGenerationReservation() { return undefined },
     async reserveGeneration(input) {
       return { status: 'reserved', generationId: input.generationId }
     },

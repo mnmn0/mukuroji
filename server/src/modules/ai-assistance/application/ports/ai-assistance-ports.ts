@@ -28,6 +28,8 @@ export type AiAssistanceActor = {
   memberId: string
   /** Immutable authenticated principal identifier reserved for audit attribution. */
   actorId: string
+  /** Canonical audit classification of the authenticated principal. */
+  auditActorKind: 'user' | 'service' | 'break-glass'
   /** Safe request trace identifier. */
   traceId: string
   /** Whether the current operator may update Workspace AI policy. */
@@ -161,6 +163,8 @@ export type AiAssistancePolicyAuditInput = {
   memberId: string
   /** Immutable authenticated principal who performed the policy mutation. */
   actorId: string
+  /** Canonical audit classification of the principal who performed the mutation. */
+  actorKind: 'user' | 'service' | 'break-glass'
   /** Policy observed before the revision-fenced write. */
   previousPolicy: AiAssistancePolicy
   /** Policy accepted by the revision-fenced write. */
@@ -348,6 +352,18 @@ export type ReserveAiAssistanceGenerationInput = {
   budget: AiAssistanceGenerationBudgetReservation
 }
 
+/** Input used to classify an existing generation receipt without charging a new budget. */
+export type ReadAiAssistanceGenerationReservationInput = {
+  /** Workspace partition that owns the receipt. */
+  workspaceId: string
+  /** Member identity bound to the receipt. */
+  memberId: string
+  /** Original client idempotency key used to locate the receipt. */
+  idempotencyKey: string
+  /** Canonical operation/input fingerprint used to reject key reuse with different input. */
+  inputFingerprint: string
+}
+
 /** Result of an atomic generation idempotency reservation. */
 export type AiAssistanceGenerationReservation =
   | {
@@ -454,6 +470,10 @@ export type FailAiAssistanceGenerationReservationInput =
 
 /** DynamoDB-independent persistence port for AI policy, runs, and feedback. */
 export interface AiAssistanceStore {
+  /** Strongly reads a completed or failed receipt before policy gates for a new provider call. */
+  readGenerationReservation(
+    input: ReadAiAssistanceGenerationReservationInput,
+  ): Promise<AiAssistanceGenerationReservation | undefined>
   /** Reserves an operation/member/input-bound idempotency key before inference. */
   reserveGeneration(
     input: ReserveAiAssistanceGenerationInput,

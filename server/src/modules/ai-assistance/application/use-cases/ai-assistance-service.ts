@@ -44,6 +44,7 @@ import type {
   AiAssistanceCustomFieldDefinition,
   AiAssistanceAuthorizationCallbacks,
   AiAssistanceGenerationBudgetReservation,
+  AiAssistanceGenerationReservation,
   AiAssistancePolicyAuthorization,
   AiAssistancePolicyAuthorizationFence,
   AiAssistancePolicyAudit,
@@ -220,6 +221,7 @@ export function createAiAssistanceService(
       workspaceId: actor.workspaceId,
       memberId: actor.memberId,
       actorId: actor.actorId,
+      actorKind: actor.auditActorKind,
       previousPolicy,
       nextPolicy: policy,
     }
@@ -285,6 +287,49 @@ export function createAiAssistanceService(
     )
   }
 
+  /**
+   * Replays an exact durable generation before evaluating gates for new inference.
+   *
+   * @param actor - Authenticated actor bound to the receipt.
+   * @param reservation - Durable receipt classification returned by the store.
+   * @param policy - Current policy used for retention projection.
+   * @param authorization - Current source authorization used for disclosure.
+   * @returns The existing generation projected through current authorization.
+   * @throws A stable error when the receipt is failed, malformed, or no longer accessible.
+   */
+  async function replayGenerationReservation(
+    actor: AiAssistanceActor,
+    reservation: AiAssistanceGenerationReservation,
+    policy: AiAssistancePolicy,
+    authorization: AiAssistanceAuthorizationCallbacks,
+  ): Promise<AiAssistanceGeneration> {
+    if (reservation.status === 'failed') {
+      throw createSafeAttemptError(
+        reservation.failureCategory,
+        reservation.failureCode,
+      )
+    }
+    if (reservation.status !== 'replay') {
+      throw new AiAssistanceError(
+        'upstream',
+        'InvalidAiAssistanceRecord',
+        'The AI assistance idempotency receipt is not replayable.',
+      )
+    }
+    const existing = await options.store.getGeneration(
+      actor.workspaceId,
+      reservation.generationId,
+    )
+    if (!existing || existing.memberId !== actor.memberId) {
+      throw new AiAssistanceError(
+        'upstream',
+        'InvalidAiAssistanceRecord',
+        'The AI assistance idempotency receipt references an invalid generation.',
+      )
+    }
+    return await projectStoredGeneration(actor, existing, policy, authorization, now)
+  }
+
   /** Generates one permission-fenced structured draft. */
   async function generate(
     actor: AiAssistanceActor,
@@ -294,10 +339,32 @@ export function createAiAssistanceService(
     requestStartedAtMs?: number,
   ): Promise<AiAssistanceGeneration> {
     const request = parseGenerateAiAssistanceRequest(input)
+    const idempotencyKey = requireIdempotencyKey(idempotencyKeyValue)
     const [policy, preference] = await Promise.all([
       readPolicy(actor),
       getPreference(actor),
     ])
+    const modelIdForFingerprint = request.modelId ?? policy.defaultModelId
+    const inputFingerprint = createGenerationInputFingerprint(
+      actor,
+      request,
+      modelIdForFingerprint,
+      options.promptVersion,
+    )
+    const existingReservation = await options.store.readGenerationReservation({
+      workspaceId: actor.workspaceId,
+      memberId: actor.memberId,
+      idempotencyKey,
+      inputFingerprint,
+    })
+    if (existingReservation !== undefined) {
+      return await replayGenerationReservation(
+        actor,
+        existingReservation,
+        policy,
+        authorization,
+      )
+    }
     requireGenerationEnabled(policy, preference, request.task)
     const modelId = selectModelId(request.modelId, policy, deploymentAllowedModelIds)
     const createdAt = now()
@@ -310,13 +377,6 @@ export function createAiAssistanceService(
       createdAt.getTime() + policy.retentionDays * RETENTION_DAY_MS,
     )
     const leaseExpiresAt = new Date(createdAt.getTime() + reservationLeaseMs)
-    const idempotencyKey = requireIdempotencyKey(idempotencyKeyValue)
-    const inputFingerprint = createGenerationInputFingerprint(
-      actor,
-      request,
-      modelId,
-      options.promptVersion,
-    )
     const reservation = await options.store.reserveGeneration({
       workspaceId: actor.workspaceId,
       memberId: actor.memberId,

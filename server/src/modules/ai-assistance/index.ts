@@ -62,6 +62,7 @@ export type {
   CompleteAiAssistanceGenerationReservationInput,
   ResolveAiAssistanceContextInput,
   ResolvedAiAssistanceContext,
+  ReadAiAssistanceGenerationReservationInput,
   ReserveAiAssistanceGenerationInput,
   StoredAiAssistanceFeedback,
   StoredAiAssistanceGeneration,

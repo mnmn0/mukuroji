@@ -139,6 +139,7 @@ function createHarness(
         workspaceId: principal.workspaceId,
         memberId: principal.memberId,
         actorId: principal.memberId,
+        auditActorKind: 'user',
         traceId: 'trace-1',
         canManagePolicy: false,
       }
@@ -273,6 +274,17 @@ describe('createAiAssistanceRouter', () => {
     })
     expect(harness.authenticateCount()).toBe(2)
     expect(harness.currentCheckCount()).toBe(0)
+  })
+
+  test('prevents caching an authenticated generation response', async () => {
+    const harness = createHarness()
+    const response = await harness.router.request(
+      '/api/ai-assistance/generations/generation-1',
+      { headers: { Authorization: 'Bearer token-1' } },
+    )
+
+    expect(response.status).toBe(200)
+    expect(response.headers.get('Cache-Control')).toBe('private, no-store')
   })
 
   test('returns a stable 401 when bearer authentication is missing', async () => {
